@@ -1,0 +1,18 @@
+{
+  "name": "ryucad",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "remoteUser": "dev",
+  "updateRemoteUserUID": true,
+  "features": {
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "mounts": [
+    "source=ryucad-cargo-registry,target=/home/dev/.cargo/registry,type=volume",
+    "source=ryucad-cargo-git,target=/home/dev/.cargo/git,type=volume",
+    "source=ryucad-target,target=${containerWorkspaceFolder}/target,type=volume"
+  ],
+  "postCreateCommand": "sudo chown -R dev:dev /home/dev/.cargo/registry /home/dev/.cargo/git ${containerWorkspaceFolder}/target && cargo fetch"
+}
