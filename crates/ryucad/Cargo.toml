@@ -1,0 +1,9 @@
+[package]
+name = "ryucad"
+description = "Agent-driven CAD built on the ryukei kernel"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+ryukei = { path = "../ryukei" }
