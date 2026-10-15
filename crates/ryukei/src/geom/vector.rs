@@ -112,6 +112,12 @@ impl UnitVector3 {
     pub const Y: Self = Self(Vector3::new(0.0, 1.0, 0.0));
     pub const Z: Self = Self(Vector3::new(0.0, 0.0, 1.0));
 
+    /// For transforms that are known to preserve length (rotations).
+    pub(crate) fn new_unchecked(v: Vector3) -> Self {
+        debug_assert!((v.length() - 1.0).abs() < 1e-12, "not unit: {v:?}");
+        Self(v)
+    }
+
     pub fn get(self) -> Vector3 {
         self.0
     }
