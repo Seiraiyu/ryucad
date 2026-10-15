@@ -3,7 +3,10 @@
 //! with `UPDATE_GOLDEN=1 cargo test -p ryukei --test determinism` and review
 //! the diff like any other change.
 
-use ryukei::geom::{Affine, Box3, Point2, Point3, Rigid, Vector3};
+use ryukei::geom::{
+    Affine, Box3, Circle, Cone, Curve, Cylinder, Frame, Line, Plane, Point2, Point3, Rigid, Sphere,
+    Surface, Torus, Vector3,
+};
 use ryukei::interval::Interval;
 use ryukei::math;
 use ryukei::predicates::{self, Sign};
@@ -155,6 +158,53 @@ fn interval_section(golden: &mut Golden) {
     }
 }
 
+fn analytic_section(golden: &mut Golden) {
+    let mut s = golden.section("analytic");
+    let mut g = Lcg::new(0x616e_6c79);
+    for _ in 0..256 {
+        let mut c = || g.next_f64(-10.0, 10.0);
+        let (o, z, x) = (
+            Point3::new(c(), c(), c()),
+            Vector3::new(c(), c(), c()),
+            Vector3::new(c(), c(), c()),
+        );
+        let p = Point3::new(c(), c(), c());
+        let (u, v) = (c(), c() / 10.0);
+        let (r, k, a) = (
+            c().abs() + 0.5,
+            (c().abs() + 1.0) / 12.0,
+            (c().abs() + 1.0) / 8.0,
+        );
+        let f = Frame::new(o, z, x).unwrap();
+        let curves = [
+            Curve::Line(Line::new(o, z).unwrap()),
+            Curve::Circle(Circle::new(f, r).unwrap()),
+        ];
+        for cv in curves {
+            let q = cv.point(u);
+            let t = cv.tangent(u).get();
+            for x in [q.x, q.y, q.z, t.x, t.y, t.z, cv.distance(p), cv.param_of(p)] {
+                s.f64(x);
+            }
+        }
+        let surfaces = [
+            Surface::Plane(Plane::new(f)),
+            Surface::Cylinder(Cylinder::new(f, r).unwrap()),
+            Surface::Cone(Cone::new(f, r, a).unwrap()),
+            Surface::Sphere(Sphere::new(f, r).unwrap()),
+            Surface::Torus(Torus::new(f, r, r * k).unwrap()),
+        ];
+        for sf in surfaces {
+            let q = sf.point(u, v);
+            let n = sf.normal(u, v).get();
+            let (pu, pv) = sf.params_of(p);
+            for x in [q.x, q.y, q.z, n.x, n.y, n.z, sf.distance(p), pu, pv] {
+                s.f64(x);
+            }
+        }
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -165,5 +215,6 @@ fn determinism() {
     geom_section(&mut golden);
     predicates_section(&mut golden);
     interval_section(&mut golden);
+    analytic_section(&mut golden);
     golden.finish();
 }
