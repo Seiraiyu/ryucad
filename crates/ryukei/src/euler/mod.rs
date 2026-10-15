@@ -20,7 +20,7 @@ mod shell;
 pub use edge::{Jekv, Mev, Semv, jekv, kev, mev, semv};
 pub use face::{Kef, Mef, kef, mef};
 pub use ring::{Kemr, Kfmrh, Mekr, Mfkrh, kemr, kfmrh, mekr, mfkrh};
-pub use shell::{Mvfs, kvfs, mvfs};
+pub use shell::{Mvfs, Mvr, kvfs, kvr, mvfs, mvr};
 
 use crate::geom::Point3;
 use crate::name::{Name, OpKey, Role};

@@ -1,4 +1,5 @@
-//! MVFS and KVFS: start and end a body's skeleton.
+//! MVFS and KVFS: start and end a body's skeleton. MVR and KVR: a lone
+//! vertex in a face.
 
 use super::{check_point, finish, live, next_id};
 use crate::geom::Point3;
@@ -126,6 +127,69 @@ pub fn kvfs(body: &mut Body, shell: ShellId) -> Result<Journal, Error> {
     Ok(journal)
 }
 
+/// What [`mvr`] made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mvr {
+    pub loop_: LoopId,
+    pub vertex: VertexId,
+}
+
+/// Make vertex, ring: a new lone-vertex loop at `point` on `face`.
+///
+/// Names: the vertex is `(key, NewVertex, [face])`.
+pub fn mvr(
+    body: &mut Body,
+    key: OpKey,
+    face: FaceId,
+    point: Point3,
+) -> Result<(Mvr, Journal), Error> {
+    live(&body.faces, face)?;
+    let point = check_point(point)?;
+    let (loop_, vertex) = (next_id(&body.loops), next_id(&body.vertices));
+    let parent = body.faces[face].name;
+    let name = body.derive_name("mvr", key, Role::NewVertex, &[parent]);
+    body.loops.push(Loop {
+        face,
+        next: loop_,
+        prev: loop_,
+        first_fin: None,
+        vertex: Some(vertex),
+    });
+    body.vertices.push(Vertex {
+        point,
+        tolerance: Tolerance::RESOLUTION,
+        edge: None,
+        lone: Some(loop_),
+        name,
+    });
+    body.link_loop(face, loop_);
+    body.index_name(EntityId::Vertex(vertex));
+    let mut journal = Journal::new();
+    journal.push(Event::Created(name));
+    finish(body);
+    Ok((Mvr { loop_, vertex }, journal))
+}
+
+/// Kill vertex, ring: the inverse of [`mvr`]. Removes a lone-vertex loop
+/// and its vertex. It may be its face's last loop only when the face's
+/// surface closes up (a sphere or torus), which leaves a face with no
+/// loops.
+pub fn kvr(body: &mut Body, loop_: LoopId) -> Result<Journal, Error> {
+    let l = live(&body.loops, loop_)?;
+    let vertex = l.vertex.ok_or(TopologyError::NotLone)?;
+    let face = &body.faces[l.face];
+    if l.next == loop_ && body.surfaces[face.surface].closed_genus().is_none() {
+        return Err(TopologyError::NotRemovable.into());
+    }
+    let mut journal = Journal::new();
+    journal.push(Event::Deleted(body.vertices[vertex].name));
+    body.kill_vertex(vertex);
+    body.unlink_loop(loop_);
+    body.loops.kill(loop_);
+    finish(body);
+    Ok(journal)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +258,44 @@ mod tests {
         assert_eq!(kvfs(&mut b, dead), Err(TopologyError::DeadEntity.into()));
         assert_eq!(b.dump(), before);
         assert!(kvfs(&mut b, m.shell).is_ok());
+    }
+
+    #[test]
+    fn mvr_and_kvr() {
+        let (mut b, s) = plane_body();
+        let (m, _) = mvfs(&mut b, K, Point3::ORIGIN, s).unwrap();
+        let before = shape(&b);
+        let (r, j) = mvr(&mut b, OpKey(2), m.face, Point3::new(1.0, 0.0, 0.0)).unwrap();
+        let face = Name::derive(K, Role::NewFace, &[]);
+        let v = Name::derive(OpKey(2), Role::NewVertex, &[face]);
+        assert_eq!(j.events(), &[Event::Created(v)]);
+        assert_eq!(b.face_loops(m.face).collect::<Vec<_>>(), [m.loop_, r.loop_]);
+        assert_eq!(b.vertex(r.vertex).unwrap().lone, Some(r.loop_));
+        // Two lone vertices: no longer a skeleton.
+        let snapshot = b.dump();
+        assert_eq!(
+            kvfs(&mut b, m.shell),
+            Err(TopologyError::NotRemovable.into())
+        );
+        assert_eq!(b.dump(), snapshot);
+        kvr(&mut b, r.loop_).unwrap();
+        assert_eq!(shape(&b), before);
+        // The last loop of a plane face stays.
+        assert_eq!(
+            kvr(&mut b, m.loop_),
+            Err(TopologyError::NotRemovable.into())
+        );
+    }
+
+    #[test]
+    fn kvr_leaves_a_sphere_face_without_loops() {
+        let mut b = Body::new();
+        let sphere = crate::geom::Sphere::new(crate::geom::Frame::WORLD, 1.0).unwrap();
+        let s = b.add_surface(crate::geom::Surface::Sphere(sphere));
+        let (m, _) = mvfs(&mut b, K, Point3::new(1.0, 0.0, 0.0), s).unwrap();
+        kvr(&mut b, m.loop_).unwrap();
+        assert_eq!(b.face(m.face).unwrap().first_loop, None);
+        assert_eq!(b.counts().vertices, 0);
+        assert_eq!(crate::check::check_topology(&b), []);
     }
 }
