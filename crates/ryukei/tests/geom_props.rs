@@ -18,9 +18,13 @@ fn rigid() -> impl Strategy<Value = Rigid> {
     })
 }
 
-/// Error bound for a rigid round trip at the size-box scale: a few ulps of
-/// the largest coordinate involved (500 m translation + 500 m point).
-const ROUND_TRIP: f64 = 1e-12;
+/// Error bound for a rigid round trip at the size-box scale. Intermediate
+/// coordinates stay below 2048 m (a point up to 866 m from the origin plus
+/// a translation up to 866 m), where an ulp is 4.5e-13. Each way, a
+/// component takes up to six roundings of half an ulp: 1.4e-12, so 2.7e-12
+/// for the round trip and 4.7e-12 across three components. 1e-12 was
+/// exceeded (1.006e-12) by the case saved in `geom_props.proptest-regressions`.
+const ROUND_TRIP: f64 = 5e-12;
 
 proptest! {
     #[test]
