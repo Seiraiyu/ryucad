@@ -14,10 +14,12 @@
 
 mod edge;
 mod face;
+mod ring;
 mod shell;
 
 pub use edge::{Mev, kev, mev};
 pub use face::{Kef, Mef, kef, mef};
+pub use ring::{Kemr, Mekr, kemr, mekr};
 pub use shell::{Mvfs, kvfs, mvfs};
 
 use crate::geom::Point3;
