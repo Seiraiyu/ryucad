@@ -21,7 +21,7 @@
 mod bigint;
 pub(crate) mod expansion;
 
-use crate::geom::{Point2, Point3};
+use crate::geom::{Point2, Point3, Vector3};
 use bigint::{Fixed, expansion_safe};
 use expansion::Expansion;
 
@@ -276,6 +276,70 @@ fn insphere_with<E: Exact>(a: Point3, b: Point3, c: Point3, d: Point3, e: Point3
     Sign::of(det.signum())
 }
 
+/// `(x, y, z)` held exactly.
+fn exact3<E: Exact>(x: f64, y: f64, z: f64) -> [E; 3] {
+    [E::diff(x, 0.0), E::diff(y, 0.0), E::diff(z, 0.0)]
+}
+
+/// `r0 · (r1 × r2)`, exactly.
+fn det3<E: Exact>(r0: &[E; 3], r1: &[E; 3], r2: &[E; 3]) -> E {
+    r0[0]
+        .mul(&cross2(&r1[1], &r1[2], &r2[1], &r2[2]))
+        .add(&r0[1].mul(&cross2(&r1[2], &r1[0], &r2[2], &r2[0])))
+        .add(&r0[2].mul(&cross2(&r1[0], &r1[1], &r2[0], &r2[1])))
+}
+
+/// The exact sign of the sum of `a · (b × c)` over the triangles
+/// `[a, b, c]`: six times the volume a closed surface made of them
+/// encloses, positive when they wind counterclockwise seen from outside.
+pub fn volume_sign(triangles: &[[Point3; 3]]) -> Sign {
+    let coords: Vec<f64> = triangles
+        .iter()
+        .flatten()
+        .flat_map(|p| p.to_array())
+        .collect();
+    if expansion_safe(&coords) {
+        volume_with::<Expansion>(triangles)
+    } else {
+        volume_with::<Fixed>(triangles)
+    }
+}
+
+fn volume_with<E: Exact>(triangles: &[[Point3; 3]]) -> Sign {
+    let total = triangles.iter().fold(E::diff(0.0, 0.0), |acc, t| {
+        let [a, b, c] = t.map(|p| exact3::<E>(p.x, p.y, p.z));
+        acc.add(&det3(&a, &b, &c))
+    });
+    Sign::of(total.signum())
+}
+
+/// The exact sign of the sum of `((b - a) × (c - a)) · n` over the
+/// triangles `[a, b, c]`: positive when together they wind
+/// counterclockwise about `n`.
+pub fn winding_sign(triangles: &[[Point3; 3]], n: Vector3) -> Sign {
+    let mut coords: Vec<f64> = triangles
+        .iter()
+        .flatten()
+        .flat_map(|p| p.to_array())
+        .collect();
+    coords.extend(n.to_array());
+    if expansion_safe(&coords) {
+        winding_with::<Expansion>(triangles, n)
+    } else {
+        winding_with::<Fixed>(triangles, n)
+    }
+}
+
+fn winding_with<E: Exact>(triangles: &[[Point3; 3]], n: Vector3) -> Sign {
+    let n = exact3::<E>(n.x, n.y, n.z);
+    let total = triangles.iter().fold(E::diff(0.0, 0.0), |acc, &[a, b, c]| {
+        let u = [E::diff(b.x, a.x), E::diff(b.y, a.y), E::diff(b.z, a.z)];
+        let v = [E::diff(c.x, a.x), E::diff(c.y, a.y), E::diff(c.z, a.z)];
+        acc.add(&det3(&n, &u, &v))
+    });
+    Sign::of(total.signum())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,5 +476,62 @@ mod tests {
             incircle(a2, b2, c2, d2),
             incircle_with::<Fixed>(a2, b2, c2, d2)
         );
+    }
+
+    /// The unit right-angled tetrahedron's faces, counterclockwise seen
+    /// from outside.
+    fn tetrahedron(scale: f64) -> Vec<[Point3; 3]> {
+        let v = [
+            p3(0.0, 0.0, 0.0),
+            p3(scale, 0.0, 0.0),
+            p3(0.0, scale, 0.0),
+            p3(0.0, 0.0, scale),
+        ];
+        [[0, 2, 1], [0, 1, 3], [1, 2, 3], [0, 3, 2]]
+            .iter()
+            .map(|t| t.map(|i| v[i]))
+            .collect()
+    }
+
+    #[test]
+    fn volume_sign_of_closed_surfaces() {
+        assert_eq!(volume_sign(&tetrahedron(1.0)), Positive);
+        let inside_out: Vec<_> = tetrahedron(1.0)
+            .iter()
+            .map(|&[a, b, c]| [a, c, b])
+            .collect();
+        assert_eq!(volume_sign(&inside_out), Negative);
+        assert_eq!(volume_sign(&[]), Zero);
+        // Coordinates far below 2^-100 take the big-integer path.
+        assert_eq!(volume_sign(&tetrahedron(1e-200)), Positive);
+        // Away from the origin the volume is the same, so the sign is too.
+        let moved: Vec<_> = tetrahedron(1.0)
+            .iter()
+            .map(|t| t.map(|p| p3(p.x + 300.0, p.y - 250.0, p.z + 0.1)))
+            .collect();
+        assert_eq!(volume_sign(&moved), Positive);
+    }
+
+    #[test]
+    fn winding_sign_about_a_normal() {
+        let t = [[p3(0.0, 0.0, 5.0), p3(1.0, 0.0, 5.0), p3(0.0, 1.0, 5.0)]];
+        let up = Vector3::new(0.0, 0.0, 1.0);
+        assert_eq!(winding_sign(&t, up), Positive);
+        assert_eq!(winding_sign(&t, -up), Negative);
+        assert_eq!(winding_sign(&t, Vector3::new(1.0, 0.0, 0.0)), Zero);
+        // A square with a clockwise hole still winds counterclockwise.
+        let sq = [
+            [p3(0.0, 0.0, 0.0), p3(4.0, 0.0, 0.0), p3(4.0, 4.0, 0.0)],
+            [p3(0.0, 0.0, 0.0), p3(4.0, 4.0, 0.0), p3(0.0, 4.0, 0.0)],
+            [p3(1.0, 1.0, 0.0), p3(1.0, 3.0, 0.0), p3(3.0, 3.0, 0.0)],
+            [p3(1.0, 1.0, 0.0), p3(3.0, 3.0, 0.0), p3(3.0, 1.0, 0.0)],
+        ];
+        assert_eq!(winding_sign(&sq, up), Positive);
+        let tiny = [[
+            p3(0.0, 0.0, 0.0),
+            p3(1e-300, 0.0, 0.0),
+            p3(0.0, 1e-300, 0.0),
+        ]];
+        assert_eq!(winding_sign(&tiny, up), Positive);
     }
 }
