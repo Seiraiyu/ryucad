@@ -10,5 +10,6 @@ pub mod math;
 pub mod name;
 pub mod predicates;
 pub mod tol;
+pub mod topo;
 
 pub use error::Error;
