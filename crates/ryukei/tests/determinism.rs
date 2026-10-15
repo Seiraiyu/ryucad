@@ -9,7 +9,9 @@ use ryukei::geom::{
 };
 use ryukei::interval::Interval;
 use ryukei::math;
+use ryukei::name::{Event, OpKey};
 use ryukei::predicates::{self, Sign};
+use ryukei::primitive;
 use ryukei_testkit::{Golden, Lcg};
 
 fn math_section(golden: &mut Golden) {
@@ -205,6 +207,37 @@ fn analytic_section(golden: &mut Golden) {
     }
 }
 
+fn primitives_section(golden: &mut Golden) {
+    let mut s = golden.section("primitives");
+    let axis = Vector3::new(1.0, -2.0, 0.5).normalize().unwrap();
+    let placements = [
+        Rigid::IDENTITY,
+        Rigid::translation(Vector3::new(12.5, -3.25, 100.0))
+            .then_after(&Rigid::rotation(axis, 2.5)),
+    ];
+    for (i, at) in placements.iter().enumerate() {
+        let key = OpKey(0x7072_696d + i as u128);
+        let bodies = [
+            primitive::block(key, 1.5, 2.25, 0.75, at),
+            primitive::cylinder(key, 0.5, 3.0, at),
+            primitive::cone(key, 1.25, 2.0, at),
+            primitive::frustum(key, 2.0, 0.5, 1.0, at),
+            primitive::sphere(key, 4.0, at),
+            primitive::torus(key, 3.0, 0.75, at),
+        ];
+        for result in bodies {
+            let (body, journal) = result.unwrap();
+            s.str(&body.dump());
+            for e in journal.events() {
+                if let Event::Created(n) = e {
+                    s.u64(n.to_u128() as u64);
+                    s.u64((n.to_u128() >> 64) as u64);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -216,5 +249,6 @@ fn determinism() {
     predicates_section(&mut golden);
     interval_section(&mut golden);
     analytic_section(&mut golden);
+    primitives_section(&mut golden);
     golden.finish();
 }
