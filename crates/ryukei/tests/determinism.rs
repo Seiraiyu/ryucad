@@ -3,8 +3,9 @@
 //! with `UPDATE_GOLDEN=1 cargo test -p ryukei --test determinism` and review
 //! the diff like any other change.
 
-use ryukei::geom::{Affine, Box3, Point3, Rigid, Vector3};
+use ryukei::geom::{Affine, Box3, Point2, Point3, Rigid, Vector3};
 use ryukei::math;
+use ryukei::predicates::{self, Sign};
 use ryukei_testkit::{Golden, Lcg};
 
 fn math_section(golden: &mut Golden) {
@@ -95,6 +96,46 @@ fn geom_section(golden: &mut Golden) {
     }
 }
 
+fn sign_bits(s: Sign) -> u64 {
+    match s {
+        Sign::Negative => 0,
+        Sign::Zero => 1,
+        Sign::Positive => 2,
+    }
+}
+
+fn predicates_section(golden: &mut Golden) {
+    let mut s = golden.section("predicates");
+    let mut g = Lcg::new(0x7072_6564);
+    for _ in 0..1024 {
+        let mut c = || g.next_f64(-500.0, 500.0);
+        let (a, b, d) = (
+            Point3::new(c(), c(), c()),
+            Point3::new(c(), c(), c()),
+            Point3::new(c(), c(), c()),
+        );
+        let (t, u) = (c() / 250.0, c() / 250.0);
+        // Near-degenerate: on the plane/line through a, b, d up to rounding.
+        let on_plane = a + (b - a) * t + (d - a) * u;
+        let on_line = Point2::new(a.x, a.y).lerp(Point2::new(b.x, b.y), t);
+        let e = Point3::new(c(), c(), c());
+        for sign in [
+            predicates::orient2d(Point2::new(a.x, a.y), Point2::new(b.x, b.y), on_line),
+            predicates::orient3d(a, b, d, on_plane),
+            predicates::orient3d(a, b, d, e),
+            predicates::incircle(
+                Point2::new(a.x, a.y),
+                Point2::new(b.x, b.y),
+                Point2::new(d.x, d.y),
+                on_line,
+            ),
+            predicates::insphere(a, b, d, e, on_plane),
+        ] {
+            s.u64(sign_bits(sign));
+        }
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -103,5 +144,6 @@ fn determinism() {
     ));
     math_section(&mut golden);
     geom_section(&mut golden);
+    predicates_section(&mut golden);
     golden.finish();
 }
