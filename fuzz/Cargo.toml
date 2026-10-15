@@ -25,3 +25,10 @@ path = "fuzz_targets/interval.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "euler"
+path = "fuzz_targets/euler.rs"
+test = false
+doc = false
+bench = false
