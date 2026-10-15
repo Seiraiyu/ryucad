@@ -1,0 +1,27 @@
+[package]
+name = "ryukei-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ryukei = { path = "../crates/ryukei" }
+ryukei-testkit = { path = "../crates/ryukei-testkit" }
+
+[[bin]]
+name = "predicates"
+path = "fuzz_targets/predicates.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "interval"
+path = "fuzz_targets/interval.rs"
+test = false
+doc = false
+bench = false

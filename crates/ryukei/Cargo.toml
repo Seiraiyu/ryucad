@@ -6,3 +6,9 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+libm = "0.2"
+num-bigint = "0.4"
+
+[dev-dependencies]
+proptest = "1"
+ryukei-testkit = { path = "../ryukei-testkit" }

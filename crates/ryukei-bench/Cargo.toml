@@ -1,0 +1,22 @@
+[package]
+name = "ryukei-bench"
+description = "Benchmarks for ryukei, and (behind `occt`) comparisons against OCCT"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+# OCCT bindings arrive in roadmap phase 3. The feature exists now so the
+# default build is provably free of C++ from the start.
+occt = []
+
+[dependencies]
+ryukei = { path = "../ryukei" }
+
+[dev-dependencies]
+divan = "0.1"
+
+[[bench]]
+name = "foundations"
+harness = false

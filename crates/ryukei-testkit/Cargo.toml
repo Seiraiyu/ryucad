@@ -1,0 +1,12 @@
+[package]
+name = "ryukei-testkit"
+description = "Test-only helpers for ryukei: exact references, deterministic inputs, golden hashes"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+num-bigint = "0.4"
+num-rational = { version = "0.4", features = ["num-bigint"] }
+num-traits = "0.2"

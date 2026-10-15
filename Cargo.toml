@@ -1,8 +1,16 @@
 [workspace]
 resolver = "3"
-members = ["crates/ryukei", "crates/ryucad"]
+members = ["crates/ryukei", "crates/ryukei-bench", "crates/ryukei-testkit", "crates/ryucad"]
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 repository = "https://github.com/seiraiyu/ryucad"
+
+# Exact reference arithmetic dominates test time; optimize it even in dev.
+[profile.dev.package.num-bigint]
+opt-level = 3
+
+[profile.dev.package.num-rational]
+opt-level = 3
