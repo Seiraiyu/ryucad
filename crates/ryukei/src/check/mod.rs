@@ -4,13 +4,13 @@
 //! fins, shells, the Euler–Poincaré formula and names. It holds for every
 //! state an Euler operator leaves behind, including the half-built bodies
 //! inside a primitive, so the operators debug-assert it.
-//! [`check`] adds geometry and orientation (Tasks to come): it holds for
-//! finished bodies.
+//! [`check`] adds geometry and orientation: it holds for finished bodies.
 //!
 //! Neither panics or loops on a corrupted body: every lookup is checked and
 //! every walk is bounded. Faults come out in a fixed order: by check, then
 //! by entity in array order.
 
+mod geometry;
 mod topology;
 
 use crate::name::Name;
@@ -54,6 +54,49 @@ pub enum Fault {
     DuplicateName { name: Name },
     /// The name index disagrees with the entities' names.
     NameIndex { name: Name },
+    /// Geometry outside the size box: a vertex, a face's surface frame, or
+    /// an edge's curve frame or samples.
+    OutsideSizeBox { entity: EntityId },
+    /// An edge's interval does not fit its curve: a closed edge that is not
+    /// exactly one period, an open edge of a period or more.
+    BadInterval { edge: EdgeId },
+    /// An end of an edge's interval is farther from its vertex than the
+    /// larger of their tolerances.
+    VertexOffCurve {
+        vertex: VertexId,
+        edge: EdgeId,
+        distance: f64,
+    },
+    /// A vertex is farther than its tolerance from a surface it bounds.
+    VertexOffSurface {
+        vertex: VertexId,
+        face: FaceId,
+        distance: f64,
+    },
+    /// An edge strays farther than its tolerance from a surface on either
+    /// side (worst of a fixed set of samples).
+    EdgeOffSurface {
+        edge: EdgeId,
+        face: FaceId,
+        distance: f64,
+    },
+    /// A planar face with straight edges whose loops wind clockwise about
+    /// its normal.
+    FaceInsideOut { face: FaceId },
+    /// A solid whose faces are all planar with straight edges encloses no
+    /// positive volume: it is inside out or flat.
+    NotOutward { region: RegionId },
+}
+
+/// Every check: structure, then (for a structurally sound body) geometry
+/// and orientation.
+pub fn check(body: &Body) -> Vec<Fault> {
+    let mut out = check_topology(body);
+    if out.is_empty() {
+        geometry::geometry(body, &mut out);
+        geometry::orientation(body, &mut out);
+    }
+    out
 }
 
 /// The structural checks. Shell-level checks (connectivity, the
@@ -280,5 +323,112 @@ mod tests {
         let mut b = tetrahedron();
         b.names.remove(&n0);
         assert_eq!(faults(&b), [Fault::NameIndex { name: n0 }]);
+    }
+
+    fn contains(faults: &[Fault], pred: impl Fn(&Fault) -> bool) -> bool {
+        faults.iter().any(pred)
+    }
+
+    #[test]
+    fn a_tetrahedron_is_valid() {
+        assert_eq!(check(&tetrahedron()), []);
+    }
+
+    #[test]
+    fn vertices_off_their_geometry() {
+        let mut b = tetrahedron();
+        b.vertices[v(1)].point = Point3::new(1.0, 1e-6, 0.0);
+        let f = check(&b);
+        assert!(contains(
+            &f,
+            |x| matches!(x, Fault::VertexOffSurface { vertex, .. } if *vertex == v(1))
+        ));
+        assert!(contains(
+            &f,
+            |x| matches!(x, Fault::VertexOffCurve { vertex, .. } if *vertex == v(1))
+        ));
+        assert!(!contains(&f, |x| matches!(x, Fault::EdgeOffSurface { .. })));
+    }
+
+    #[test]
+    fn edges_off_their_faces() {
+        let mut b = tetrahedron();
+        let e = EdgeId::from_index(0);
+        let start = b.vertices[b.edges[e].start].point;
+        let end = b.vertices[b.edges[e].end].point;
+        let bent =
+            crate::geom::Line::through(start, end + crate::geom::Vector3::new(0.0, 0.0, 1e-3))
+                .unwrap();
+        let c = b.add_curve(crate::geom::Curve::Line(bent));
+        b.edges[e].curve = c;
+        let f = check(&b);
+        assert!(contains(
+            &f,
+            |x| matches!(x, Fault::EdgeOffSurface { edge, .. } if *edge == e)
+        ));
+        assert!(contains(
+            &f,
+            |x| matches!(x, Fault::VertexOffCurve { edge, .. } if *edge == e)
+        ));
+    }
+
+    #[test]
+    fn intervals_must_fit_the_curve() {
+        let mut b = tetrahedron();
+        let e = EdgeId::from_index(0);
+        b.edges[e].interval = [0.0, 0.5];
+        let f = check(&b);
+        assert!(contains(
+            &f,
+            |x| matches!(x, Fault::VertexOffCurve { edge, .. } if *edge == e)
+        ));
+        // A closed edge on a line can have no interval that fits.
+        let (mut b, s) = crate::euler::tests::plane_body();
+        let (m, _) = crate::euler::mvfs(&mut b, crate::name::OpKey(1), Point3::ORIGIN, s).unwrap();
+        let circle = crate::geom::Circle::new(Frame::WORLD.flipped(), 1.0).unwrap();
+        let c = b.add_curve(crate::geom::Curve::Circle(circle));
+        let lone = crate::euler::Corner::Lone(m.loop_);
+        crate::euler::set_point(&mut b, m.vertex, Point3::new(1.0, 0.0, 0.0)).unwrap();
+        let tau = core::f64::consts::TAU;
+        let (mef, _) =
+            crate::euler::mef(&mut b, crate::name::OpKey(2), lone, lone, c, [0.0, tau]).unwrap();
+        assert_eq!(check(&b), []);
+        b.edges[mef.edge].interval = [0.0, 3.0];
+        assert!(check(&b).contains(&Fault::BadInterval { edge: mef.edge }));
+    }
+
+    #[test]
+    fn size_box() {
+        let mut b = tetrahedron();
+        b.vertices[v(2)].point = Point3::new(0.0, 501.0, 0.0);
+        assert!(check(&b).contains(&Fault::OutsideSizeBox {
+            entity: EntityId::Vertex(v(2))
+        }));
+    }
+
+    #[test]
+    fn orientation() {
+        let mut b = tetrahedron();
+        let f0 = FaceId::from_index(0);
+        b.faces[f0].sense = Sense::Reversed;
+        assert_eq!(check(&b), [Fault::FaceInsideOut { face: f0 }]);
+        // Every face cycle reversed: each face winds the way its own plane
+        // faces, but the solid is inside out.
+        let p = |x, y, z| Point3::new(x, y, z);
+        let b = polyhedron(
+            &[
+                p(0.0, 0.0, 0.0),
+                p(1.0, 0.0, 0.0),
+                p(0.0, 1.0, 0.0),
+                p(0.0, 0.0, 1.0),
+            ],
+            &[&[0, 1, 2], &[0, 3, 1], &[1, 3, 2], &[0, 2, 3]],
+        );
+        assert_eq!(
+            check(&b),
+            [Fault::NotOutward {
+                region: RegionId::from_index(1)
+            }]
+        );
     }
 }
