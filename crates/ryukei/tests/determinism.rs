@@ -4,6 +4,7 @@
 //! the diff like any other change.
 
 use ryukei::geom::{Affine, Box3, Point2, Point3, Rigid, Vector3};
+use ryukei::interval::Interval;
 use ryukei::math;
 use ryukei::predicates::{self, Sign};
 use ryukei_testkit::{Golden, Lcg};
@@ -136,6 +137,24 @@ fn predicates_section(golden: &mut Golden) {
     }
 }
 
+fn interval_section(golden: &mut Golden) {
+    let mut s = golden.section("interval");
+    let mut g = Lcg::new(0x6976_6c73);
+    for _ in 0..1024 {
+        let mut iv = || {
+            let (a, b) = (g.next_f64(-1.0e3, 1.0e3), g.next_f64(-1.0e3, 1.0e3));
+            Interval::new(a.min(b), a.max(b)).unwrap()
+        };
+        let (a, b, c) = (iv(), iv(), iv());
+        let r = (a + b) * c - a;
+        let q = r.checked_div(b).unwrap_or(r);
+        let root = (a * a + b * b).sqrt().unwrap();
+        for x in [r.lo(), r.hi(), q.lo(), q.hi(), root.lo(), root.hi()] {
+            s.f64(x);
+        }
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -145,5 +164,6 @@ fn determinism() {
     math_section(&mut golden);
     geom_section(&mut golden);
     predicates_section(&mut golden);
+    interval_section(&mut golden);
     golden.finish();
 }
