@@ -1,10 +1,14 @@
-//! KEMR and MEKR: an edge that joins two loops of one face.
+//! KEMR and MEKR: an edge that joins two loops of one face. KFMRH and
+//! MFKRH: a face that becomes a loop of another (a handle).
 
 use super::{Corner, check_interval, finish, live, next_id};
 use crate::name::{Event, Journal, OpKey, Role};
 use crate::tol::Tolerance;
-use crate::topo::{Body, CurveId, Edge, EdgeId, EntityId, Fin, FinId, Id, Loop, LoopId, Sense};
+use crate::topo::{
+    Body, CurveId, Edge, EdgeId, EntityId, Face, FaceId, Fin, FinId, Id, Loop, LoopId, Sense,
+};
 use crate::{Error, TopologyError};
+use std::collections::BTreeSet;
 
 /// What [`kemr`] made: the new loop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,6 +174,136 @@ pub fn mekr(
     ))
 }
 
+/// What [`kfmrh`] moved: the killed face's loop, now on the kept face.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Kfmrh {
+    pub loop_: LoopId,
+}
+
+/// Kill face, make ring (hole): `kill`, which must have exactly one loop
+/// and share a shell with `keep`, dies and its loop becomes an extra loop
+/// of `keep`. The shell's genus goes up by one.
+///
+/// Names: both faces' names retire; `keep` is `(key, Merged, [a, b])` with
+/// the two names sorted.
+pub fn kfmrh(
+    body: &mut Body,
+    key: OpKey,
+    keep: FaceId,
+    kill: FaceId,
+) -> Result<(Kfmrh, Journal), Error> {
+    let shell = live(&body.faces, keep)?.shell;
+    let gone = live(&body.faces, kill)?;
+    if keep == kill {
+        return Err(TopologyError::WrongFace.into());
+    }
+    if gone.shell != shell {
+        return Err(TopologyError::WrongShell.into());
+    }
+    let lp = gone.first_loop.ok_or(TopologyError::NotRemovable)?;
+    if body.loops[lp].next != lp {
+        return Err(TopologyError::NotRemovable.into());
+    }
+    let names = [body.faces[keep].name, body.faces[kill].name];
+    let mut pair = names;
+    pair.sort();
+    let merged = body.derive_name("kfmrh", key, Role::Merged, &pair);
+    let mut journal = Journal::new();
+    journal.push(Event::merged(names[0], names[1], merged));
+    body.unlink_loop(lp);
+    body.link_loop(keep, lp);
+    body.kill_face(kill);
+    body.rename(EntityId::Face(keep), merged);
+    finish(body);
+    Ok((Kfmrh { loop_: lp }, journal))
+}
+
+/// What [`mfkrh`] made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mfkrh {
+    pub face: FaceId,
+}
+
+/// Make face, kill ring (hole): the inverse of [`kfmrh`]. Moves `loop_`,
+/// one of at least two loops of its face, to a new face on the same
+/// surface with the same sense. The shell's genus goes down by one.
+///
+/// Which way the new face should point depends on the geometry: a loop
+/// merged in by [`kfmrh`] keeps its old sense, while a true hole becomes a
+/// face pointing the other way. The caller decides, with
+/// [`set_surface`](super::set_surface).
+///
+/// Fails with `WouldDisconnect` when the new face would not be joined to
+/// the rest of the shell through edges: splitting a shell is not a phase 1
+/// operation.
+///
+/// Names: the face's name retires; it becomes `(key, Part(0), [face])`
+/// and the new face `(key, Part(1), [face])`.
+pub fn mfkrh(body: &mut Body, key: OpKey, loop_: LoopId) -> Result<(Mfkrh, Journal), Error> {
+    let face = live(&body.loops, loop_)?.face;
+    if body.loops[loop_].next == loop_ {
+        return Err(TopologyError::NotRemovable.into());
+    }
+    if !connected_after_move(body, face, loop_) {
+        return Err(TopologyError::WouldDisconnect.into());
+    }
+    let parent = body.faces[face].name;
+    let part0 = body.derive_name("mfkrh", key, Role::Part(0), &[parent]);
+    let part1 = body.derive_name("mfkrh", key, Role::Part(1), &[parent]);
+    let f = &body.faces[face];
+    let (shell, surface, sense) = (f.shell, f.surface, f.sense);
+    let new_face = next_id(&body.faces);
+    body.faces.push(Face {
+        shell,
+        next: new_face,
+        prev: new_face,
+        first_loop: None,
+        surface,
+        sense,
+        name: part1,
+    });
+    body.link_face(shell, new_face);
+    body.unlink_loop(loop_);
+    body.link_loop(new_face, loop_);
+    body.rename(EntityId::Face(face), part0);
+    body.index_name(EntityId::Face(new_face));
+    let mut journal = Journal::new();
+    journal.push(Event::Split {
+        parent,
+        children: [part0, part1],
+    });
+    finish(body);
+    Ok((Mfkrh { face: new_face }, journal))
+}
+
+/// Whether the shell stays connected when `lp` leaves `face` for a face of
+/// its own. Nodes are the shell's faces plus `None` for the moved loop.
+fn connected_after_move(b: &Body, face: FaceId, lp: LoopId) -> bool {
+    let shell = b.faces[face].shell;
+    let node = |l: LoopId| (l != lp).then(|| b.loops[l].face);
+    let loops_of = |n: Option<FaceId>| -> Vec<LoopId> {
+        match n {
+            None => vec![lp],
+            Some(f) => b.face_loops(f).filter(|&l| l != lp).collect(),
+        }
+    };
+    let mut seen: BTreeSet<Option<FaceId>> = BTreeSet::new();
+    let mut stack = vec![None];
+    while let Some(n) = stack.pop() {
+        if !seen.insert(n) {
+            continue;
+        }
+        for l in loops_of(n) {
+            for fin in b.loop_fins(l) {
+                for other in b.edge_fins(b.fins[fin].edge) {
+                    stack.push(node(b.fins[other].loop_));
+                }
+            }
+        }
+    }
+    seen.len() == b.shell_faces(shell).count() + 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,6 +430,83 @@ mod tests {
         assert_eq!(
             mekr(&mut b, K, a, other, c, t),
             Err(TopologyError::WrongFace.into())
+        );
+        assert_eq!(b.dump(), before);
+    }
+
+    #[test]
+    fn kfmrh_and_mfkrh_on_a_tetrahedron() {
+        let mut b = crate::topo::fixture::tetrahedron();
+        let [f0, f1] = [0, 1].map(<FaceId as Id>::from_index);
+        let before = b.counts();
+        let (k, j) = kfmrh(&mut b, OpKey(1), f0, f1).unwrap();
+        assert_eq!(j.events().len(), 1);
+        assert_eq!(b.counts().faces, 3);
+        assert_eq!(b.face_loops(f0).collect::<Vec<_>>().len(), 2);
+        assert_eq!(b.loop_(k.loop_).unwrap().face, f0);
+        let genus1 = shape(&b);
+        let (m, j) = mfkrh(&mut b, OpKey(2), k.loop_).unwrap();
+        assert!(matches!(j.events()[0], Event::Split { .. }));
+        assert_eq!(b.counts(), before);
+        assert_eq!(b.face(m.face).unwrap().sense, Sense::Forward);
+        assert_eq!(b.face_loops(m.face).collect::<Vec<_>>(), [k.loop_]);
+        // MFKRH then KFMRH restores the genus-1 body exactly.
+        kfmrh(&mut b, OpKey(3), f0, m.face).unwrap();
+        assert_eq!(shape(&b), genus1);
+    }
+
+    #[test]
+    fn mfkrh_refuses_to_split_a_shell() {
+        // The hole cut around the triangle in `kemr_cuts_out_a_hole`: as a
+        // face of its own it would join only the triangle.
+        let (mut b, _, st) = strut();
+        let pts = [p(1.0, 1.0), p(2.0, 1.0), p(1.0, 2.0)];
+        let mut at = Corner::Before(st.fins[1]);
+        let mut fins = Vec::new();
+        for i in 0..2 {
+            let (c, t) = line(&mut b, pts[i], pts[i + 1]);
+            let (e, _) = mev(&mut b, OpKey(20 + i as u128), at, pts[i + 1], c, t).unwrap();
+            at = Corner::Before(e.fins[1]);
+            fins.push(e.fins);
+        }
+        let (c, t) = line(&mut b, pts[2], pts[0]);
+        mef(&mut b, OpKey(30), at, Corner::Before(fins[0][0]), c, t).unwrap();
+        let (hole, _) = kemr(&mut b, st.edge).unwrap();
+        let before = b.dump();
+        assert_eq!(
+            mfkrh(&mut b, K, hole.loop_),
+            Err(TopologyError::WouldDisconnect.into())
+        );
+        assert_eq!(b.dump(), before);
+    }
+
+    #[test]
+    fn handle_preconditions() {
+        let (mut b, s) = plane_body();
+        let (x, _) = mvfs(&mut b, OpKey(1), p(0.0, 0.0), s).unwrap();
+        let (y, _) = mvfs(&mut b, OpKey(2), p(1.0, 0.0), s).unwrap();
+        let before = b.dump();
+        assert_eq!(
+            kfmrh(&mut b, K, x.face, y.face),
+            Err(TopologyError::WrongShell.into())
+        );
+        assert_eq!(
+            kfmrh(&mut b, K, x.face, x.face),
+            Err(TopologyError::WrongFace.into())
+        );
+        assert_eq!(
+            mfkrh(&mut b, K, x.loop_),
+            Err(TopologyError::NotRemovable.into())
+        );
+        assert_eq!(b.dump(), before);
+        // A face that dies must have exactly one loop; once the strut is
+        // cut the square's face has two.
+        let (mut b, sq, st) = strut();
+        kemr(&mut b, st.edge).unwrap();
+        let before = b.dump();
+        assert_eq!(
+            kfmrh(&mut b, K, sq.faces[1], sq.faces[0]),
+            Err(TopologyError::NotRemovable.into())
         );
         assert_eq!(b.dump(), before);
     }

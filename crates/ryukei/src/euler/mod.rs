@@ -19,7 +19,7 @@ mod shell;
 
 pub use edge::{Mev, kev, mev};
 pub use face::{Kef, Mef, kef, mef};
-pub use ring::{Kemr, Mekr, kemr, mekr};
+pub use ring::{Kemr, Kfmrh, Mekr, Mfkrh, kemr, kfmrh, mekr, mfkrh};
 pub use shell::{Mvfs, kvfs, mvfs};
 
 use crate::geom::Point3;
