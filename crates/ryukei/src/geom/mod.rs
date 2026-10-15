@@ -5,6 +5,7 @@ mod bbox;
 mod curve;
 mod frame;
 mod point;
+mod surface;
 mod transform;
 mod vector;
 
@@ -13,5 +14,6 @@ pub use curve::{Circle, Curve, Line};
 pub use frame::Frame;
 pub(crate) use frame::polar_angle;
 pub use point::{Point2, Point3};
+pub use surface::{Cone, Cylinder, Plane, Sphere, Surface, Torus};
 pub use transform::{Affine, Rigid};
 pub use vector::{UnitVector3, Vector2, Vector3};
