@@ -7,6 +7,7 @@ mod error;
 pub mod geom;
 pub mod interval;
 pub mod math;
+pub mod name;
 pub mod predicates;
 pub mod tol;
 
