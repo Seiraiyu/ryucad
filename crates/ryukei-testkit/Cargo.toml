@@ -1,0 +1,9 @@
+[package]
+name = "ryukei-testkit"
+description = "Test-only helpers for ryukei: exact references, deterministic inputs, golden hashes"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]

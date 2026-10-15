@@ -12,3 +12,7 @@ dependencies = [
 [[package]]
 name = "ryukei"
 version = "0.1.0"
+
+[[package]]
+name = "ryukei-testkit"
+version = "0.1.0"
