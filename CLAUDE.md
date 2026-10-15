@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ryucad is CAD built for AI agents to drive, not primarily for humans clicking in a GUI. FreeCAD was rejected because it performs poorly on large assemblies, and its kernel, OCCT, is a main reason. This project builds its own kernel, **ryukei**, and the long-term target is Parasolid-level capability.
 
-The project is in its early stages. Roadmap phase 0 (foundations) is done: deterministic math, the tolerance model, exact predicates, interval arithmetic and the test harness. Topology (phase 1) comes next; see `docs/roadmap.md`.
+The project is in its early stages. Roadmap phases 0 (foundations: deterministic math, the tolerance model, exact predicates, interval arithmetic, the test harness) and 1 (topology core: flat-array B-rep bodies, Euler operators, the validity checker, stable names, the five primitives) are done. Geometry (phase 2) comes next; see `docs/roadmap.md`.
 
 ## Commands
 
@@ -37,7 +37,7 @@ The product targets Windows, macOS, and Linux natively, not just WSL. CI (`.gith
 
 - `crates/ryukei`: the B-rep geometry kernel (library).
 - `crates/ryucad`: the application layer and binary.
-- `crates/ryukei-testkit`: test-only helpers (exact references, seeded inputs, golden hashes). Never a runtime dependency.
+- `crates/ryukei-testkit`: test-only helpers (exact references, seeded inputs, golden hashes, Euler operator sequences from bytes). Never a runtime dependency.
 - `crates/ryukei-bench`: divan benchmarks; OCCT comparisons go behind its `occt` feature.
 - `fuzz/`: cargo-fuzz targets, outside the workspace (nightly only).
 - `docs/`: design documents. `docs/roadmap.md` holds the phased ryukei plan.
@@ -65,10 +65,19 @@ The design is document 12 in the Coxswain planning project `ryucad-ryukei`.
 - **Precision policy.** Decisions that change topology or classification (side of a plane, inside a circle or sphere, ordering) use exact or certified predicates (`ryukei::predicates`, `ryukei::interval`), never a raw float sign. Geometric values (coordinates, parameters, distances, constructed points) are f64 compared through `tol`, never with `==`. Predicates take their f64 inputs as exact. An uncertain interval sign must be escalated or resolved by an explicit tolerance rule, never guessed.
 - **Determinism.** Kernel code gets transcendental functions only from `ryukei::math`; `clippy.toml` bans the `f64` versions and `mul_add`. `tests/golden/determinism.txt` holds the bit-exact hashes that every CI platform and CPU level must reproduce. When you change results on purpose, regenerate it and review the diff.
 
+## Topology (decided in phase 1)
+
+The design is document 15 in the Coxswain planning project `ryucad-ryukei`.
+
+- **Storage.** A `ryukei::topo::Body` holds flat arrays of regions, shells, faces, loops, fins, edges and vertices, plus its curves and surfaces, all referenced by typed `u32` IDs. Each edge has a ring of fins (Parasolid style), so sheets and non-manifold bodies fit later; phase 1 builds and accepts manifold solids only. Deleting leaves a tombstone; IDs are never reused until `Body::compact()`, which returns a `Remap`. Closed edges have exactly one vertex; periodic faces have no seam edges (a sphere or torus is one face with no loops).
+- **Editing.** Topology changes only through `ryukei::euler`: MVFS/KVFS, MEV/KEV, MEF/KEF, KEMR/MEKR, KFMRH/MFKRH, SEMV/JEKV, MVR/KVR, plus `set_point`/`set_curve`/`set_surface`. Operators check every precondition before writing (on `Err` the body is unchanged) and decide no geometry; the caller passes it.
+- **Geometry.** `geom::Curve` (line, circle) and `geom::Surface` (plane, cylinder, cone, sphere, torus) are `#[non_exhaustive]` enums of analytic types with closed-form distances. NURBS joins them as variants in phase 2.
+- **Names.** Faces, edges and vertices carry a 128-bit `name::Name`: SipHash-2-4 of the caller's `OpKey`, the entity's `Role` and its parents' names. A split retires the parent's name and names both children; every operation returns a `Journal` of the changes. The kernel never invents keys; resolving an agent's reference through the journal is ryucad's job.
+- **Validity.** `check::check_topology` holds after every Euler operator (debug builds assert it); `check::check` adds geometry and orientation and holds for finished bodies (primitives assert it). Self-intersection is not checked until booleans exist (phase 5).
+
 ## Open decisions
 
 Don't assume an answer to these. Ask the user, or record the decision here once it's made:
 
-- Concrete designs for the topology storage, the surface/curve representation, and stable naming (planned as a design pass). The precision strategy is decided; see Numerics above.
 - How agents talk to ryucad (CLI, library API, RPC, MCP, etc.) and how models are persisted.
 - License.

@@ -20,3 +20,7 @@ divan = "0.1"
 [[bench]]
 name = "foundations"
 harness = false
+
+[[bench]]
+name = "topology"
+harness = false

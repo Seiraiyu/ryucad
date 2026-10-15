@@ -24,7 +24,16 @@ impl Section<'_> {
     }
 
     pub fn u64(&mut self, x: u64) {
-        for byte in x.to_le_bytes() {
+        self.bytes(&x.to_le_bytes());
+    }
+
+    /// Text, such as a body's canonical dump, by its UTF-8 bytes.
+    pub fn str(&mut self, s: &str) {
+        self.bytes(s.as_bytes());
+    }
+
+    fn bytes(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
             *self.hash ^= u64::from(byte);
             *self.hash = self.hash.wrapping_mul(FNV_PRIME);
         }
@@ -94,5 +103,13 @@ mod tests {
         let mut g = Golden::new("unused");
         g.section("s").f64(1.0);
         assert_eq!(g.render(), "s aab1693229ba1db8\n");
+    }
+
+    #[test]
+    fn str_hashes_its_bytes() {
+        // FNV-1a 64 of "a" is af63dc4c8601ec8c.
+        let mut g = Golden::new("unused");
+        g.section("s").str("a");
+        assert_eq!(g.render(), "s af63dc4c8601ec8c\n");
     }
 }

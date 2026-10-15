@@ -3,10 +3,16 @@
 //! with `UPDATE_GOLDEN=1 cargo test -p ryukei --test determinism` and review
 //! the diff like any other change.
 
-use ryukei::geom::{Affine, Box3, Point2, Point3, Rigid, Vector3};
+use ryukei::geom::{
+    Affine, Box3, Circle, Cone, Curve, Cylinder, Frame, Line, Plane, Point2, Point3, Rigid, Sphere,
+    Surface, Torus, Vector3,
+};
 use ryukei::interval::Interval;
 use ryukei::math;
+use ryukei::name::{Event, OpKey};
 use ryukei::predicates::{self, Sign};
+use ryukei::primitive;
+use ryukei_testkit::euler_script::{Bytes, start, valid_step};
 use ryukei_testkit::{Golden, Lcg};
 
 fn math_section(golden: &mut Golden) {
@@ -155,6 +161,116 @@ fn interval_section(golden: &mut Golden) {
     }
 }
 
+fn analytic_section(golden: &mut Golden) {
+    let mut s = golden.section("analytic");
+    let mut g = Lcg::new(0x616e_6c79);
+    for _ in 0..256 {
+        let mut c = || g.next_f64(-10.0, 10.0);
+        let (o, z, x) = (
+            Point3::new(c(), c(), c()),
+            Vector3::new(c(), c(), c()),
+            Vector3::new(c(), c(), c()),
+        );
+        let p = Point3::new(c(), c(), c());
+        let (u, v) = (c(), c() / 10.0);
+        let (r, k, a) = (
+            c().abs() + 0.5,
+            (c().abs() + 1.0) / 12.0,
+            (c().abs() + 1.0) / 8.0,
+        );
+        let f = Frame::new(o, z, x).unwrap();
+        let curves = [
+            Curve::Line(Line::new(o, z).unwrap()),
+            Curve::Circle(Circle::new(f, r).unwrap()),
+        ];
+        for cv in curves {
+            let q = cv.point(u);
+            let t = cv.tangent(u).get();
+            for x in [q.x, q.y, q.z, t.x, t.y, t.z, cv.distance(p), cv.param_of(p)] {
+                s.f64(x);
+            }
+        }
+        let surfaces = [
+            Surface::Plane(Plane::new(f)),
+            Surface::Cylinder(Cylinder::new(f, r).unwrap()),
+            Surface::Cone(Cone::new(f, r, a).unwrap()),
+            Surface::Sphere(Sphere::new(f, r).unwrap()),
+            Surface::Torus(Torus::new(f, r, r * k).unwrap()),
+        ];
+        for sf in surfaces {
+            let q = sf.point(u, v);
+            let n = sf.normal(u, v).get();
+            let (pu, pv) = sf.params_of(p);
+            for x in [q.x, q.y, q.z, n.x, n.y, n.z, sf.distance(p), pu, pv] {
+                s.f64(x);
+            }
+        }
+    }
+}
+
+fn primitives_section(golden: &mut Golden) {
+    let mut s = golden.section("primitives");
+    let axis = Vector3::new(1.0, -2.0, 0.5).normalize().unwrap();
+    let placements = [
+        Rigid::IDENTITY,
+        Rigid::translation(Vector3::new(12.5, -3.25, 100.0))
+            .then_after(&Rigid::rotation(axis, 2.5)),
+    ];
+    for (i, at) in placements.iter().enumerate() {
+        let key = OpKey(0x7072_696d + i as u128);
+        let bodies = [
+            primitive::block(key, 1.5, 2.25, 0.75, at),
+            primitive::cylinder(key, 0.5, 3.0, at),
+            primitive::cone(key, 1.25, 2.0, at),
+            primitive::frustum(key, 2.0, 0.5, 1.0, at),
+            primitive::sphere(key, 4.0, at),
+            primitive::torus(key, 3.0, 0.75, at),
+        ];
+        for result in bodies {
+            let (body, journal) = result.unwrap();
+            s.str(&body.dump());
+            for e in journal.events() {
+                if let Event::Created(n) = e {
+                    s.u64(n.to_u128() as u64);
+                    s.u64((n.to_u128() >> 64) as u64);
+                }
+            }
+        }
+    }
+}
+
+fn euler_section(golden: &mut Golden) {
+    let mut s = golden.section("euler");
+    let mut g = Lcg::new(0x6575_6c72);
+    let data: Vec<u8> = (0..4000).map(|_| (g.next_u64() >> 56) as u8).collect();
+    let mut body = start();
+    let mut bytes = Bytes::new(&data);
+    let mut n = 0u128;
+    while !bytes.is_empty() {
+        n += 1;
+        if let Some(step) = valid_step(&mut body, OpKey(1000 + n), &mut bytes) {
+            s.str(step.op);
+            for e in step.journal.events() {
+                let (tag, names) = match *e {
+                    Event::Created(n) => (0, vec![n]),
+                    Event::Deleted(n) => (1, vec![n]),
+                    Event::Modified(n) => (2, vec![n]),
+                    Event::Split { parent, children } => {
+                        (3, vec![parent, children[0], children[1]])
+                    }
+                    Event::Merged { parents, child } => (4, vec![parents[0], parents[1], child]),
+                };
+                s.u64(tag);
+                for n in names {
+                    s.u64(n.to_u128() as u64);
+                    s.u64((n.to_u128() >> 64) as u64);
+                }
+            }
+        }
+    }
+    s.str(&body.dump());
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -165,5 +281,8 @@ fn determinism() {
     geom_section(&mut golden);
     predicates_section(&mut golden);
     interval_section(&mut golden);
+    analytic_section(&mut golden);
+    primitives_section(&mut golden);
+    euler_section(&mut golden);
     golden.finish();
 }

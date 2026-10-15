@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d660dbfcf000e14108432755e739db69c0a67ec77ae489c4f0208b027f3b020e # shrinks to r = Rigid { rot: [[0.24226917801318237, -0.9177951759044541, -0.3145753653281359], [-0.9081636006167538, -0.10043672807906745, -0.4063881619432158], [0.34138617414832595, 0.38414122239000126, -0.8578408951321244]], trans: Vector3 { x: 0.0, y: -29.213915832552175, z: 0.0 } }, p = Point3 { x: 378.8382947255429, y: -467.6506427653152, z: 5.943088751449414 }
