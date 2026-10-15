@@ -1,4 +1,5 @@
-//! MEV and KEV: an edge with a new vertex at its far end.
+//! MEV and KEV: an edge with a new vertex at its far end. SEMV and JEKV:
+//! a vertex that splits an edge in two.
 
 use super::{Corner, check_interval, check_point, finish, live, next_id};
 use crate::geom::Point3;
@@ -152,6 +153,178 @@ pub fn kev(body: &mut Body, edge: EdgeId, vertex: VertexId) -> Result<Journal, E
     Ok(journal)
 }
 
+/// What [`semv`] made: the edge on the end side, and the vertex.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Semv {
+    pub edge: EdgeId,
+    pub vertex: VertexId,
+}
+
+/// Split edge, make vertex: splits `edge` at parameter `t`, strictly inside
+/// its interval, with a new vertex at `point`. The edge keeps the start
+/// side; a new edge on the same curve takes the end side. Every fin of the
+/// edge gets a partner on the new edge beside it in its loop.
+///
+/// Names: the edge's name retires; the start side is
+/// `(key, Part(0), [edge])`, the end side `(key, Part(1), [edge])` and the
+/// vertex `(key, NewVertex, [edge])`.
+pub fn semv(
+    body: &mut Body,
+    key: OpKey,
+    edge: EdgeId,
+    t: f64,
+    point: Point3,
+) -> Result<(Semv, Journal), Error> {
+    let e = live(&body.edges, edge)?;
+    if !t.is_finite() {
+        return Err(Error::NonFinite);
+    }
+    let [t0, t1] = e.interval;
+    if !(t0 < t && t < t1) {
+        return Err(Error::Degenerate);
+    }
+    let point = check_point(point)?;
+    let (start, end, curve, tolerance) = (e.start, e.end, e.curve, e.tolerance);
+    let fins: Vec<FinId> = body.edge_fins(edge).collect();
+    let (rest, vertex) = (next_id(&body.edges), next_id(&body.vertices));
+    let first = next_id(&body.fins);
+    let partners: Vec<FinId> = (0..fins.len())
+        .map(|i| <FinId as Id>::from_index(first.index() + i))
+        .collect();
+    let parent = body.edges[edge].name;
+    let part0 = body.derive_name("semv", key, Role::Part(0), &[parent]);
+    let part1 = body.derive_name("semv", key, Role::Part(1), &[parent]);
+    let vertex_name = body.derive_name("semv", key, Role::NewVertex, &[parent]);
+    body.vertices.push(Vertex {
+        point,
+        tolerance: Tolerance::RESOLUTION,
+        edge: Some(edge),
+        lone: None,
+        name: vertex_name,
+    });
+    body.edges.push(Edge {
+        fin: first,
+        start: vertex,
+        end,
+        curve,
+        interval: [t, t1],
+        tolerance,
+        name: part1,
+    });
+    for (i, &f) in fins.iter().enumerate() {
+        let g = partners[i];
+        let fin = &body.fins[f];
+        let (loop_, sense) = (fin.loop_, fin.sense);
+        // Along the edge the partner follows the fin; against it, it comes
+        // first.
+        let (prev, next) = match sense {
+            Sense::Forward => (f, fin.next),
+            Sense::Reversed => (fin.prev, f),
+        };
+        body.fins.push(Fin {
+            loop_,
+            edge: rest,
+            sense,
+            next,
+            prev,
+            around: partners[(i + 1) % partners.len()],
+        });
+        body.fins[prev].next = g;
+        body.fins[next].prev = g;
+    }
+    body.edges[edge].end = vertex;
+    body.edges[edge].interval[1] = t;
+    if end != start && body.vertices[end].edge == Some(edge) {
+        body.vertices[end].edge = Some(rest);
+    }
+    body.rename(EntityId::Edge(edge), part0);
+    body.index_name(EntityId::Edge(rest));
+    body.index_name(EntityId::Vertex(vertex));
+    let mut journal = Journal::new();
+    journal.push(Event::Split {
+        parent,
+        children: [part0, part1],
+    });
+    journal.push(Event::Created(vertex_name));
+    finish(body);
+    Ok((Semv { edge: rest, vertex }, journal))
+}
+
+/// What [`jekv`] kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Jekv {
+    pub edge: EdgeId,
+}
+
+/// Join edges, kill vertex: the inverse of [`semv`]. `vertex` must have
+/// exactly two edges, one ending there and one starting there, on the same
+/// curve with touching intervals, each fin of the second beside a fin of
+/// the first. The edge ending at the vertex absorbs the other.
+///
+/// Names: both edges' names retire; the kept edge is `(key, Merged, [a, b])`
+/// with the two names sorted.
+pub fn jekv(body: &mut Body, key: OpKey, vertex: VertexId) -> Result<(Jekv, Journal), Error> {
+    live(&body.vertices, vertex)?;
+    let not_removable = || Error::Topology(TopologyError::NotRemovable);
+    let edges = body.vertex_edges(vertex);
+    let [a, b] = edges[..] else {
+        return Err(not_removable());
+    };
+    let (e1, e2) = if body.edges[a].end == vertex {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let (x, y) = (&body.edges[e1], &body.edges[e2]);
+    if x.end != vertex
+        || y.start != vertex
+        || x.start == vertex
+        || y.end == vertex
+        || x.curve != y.curve
+        || x.interval[1] != y.interval[0]
+    {
+        return Err(not_removable());
+    }
+    body.two_fins(e1)?;
+    let partners = body.two_fins(e2)?;
+    for g in partners {
+        let fin = &body.fins[g];
+        let beside = match fin.sense {
+            Sense::Forward => fin.prev,
+            Sense::Reversed => fin.next,
+        };
+        if body.fins[beside].edge != e1 || body.fins[beside].sense != fin.sense {
+            return Err(not_removable());
+        }
+    }
+    let names = [body.edges[e1].name, body.edges[e2].name];
+    let mut pair = names;
+    pair.sort();
+    let merged = body.derive_name("jekv", key, Role::Merged, &pair);
+    let mut journal = Journal::new();
+    journal.push(Event::merged(names[0], names[1], merged));
+    journal.push(Event::Deleted(body.vertices[vertex].name));
+    for g in partners {
+        let (lp, p, n) = (body.fins[g].loop_, body.fins[g].prev, body.fins[g].next);
+        body.fins[p].next = n;
+        body.fins[n].prev = p;
+        if body.loops[lp].first_fin == Some(g) {
+            body.loops[lp].first_fin = Some(n);
+        }
+    }
+    let (end, t1) = (body.edges[e2].end, body.edges[e2].interval[1]);
+    body.edges[e1].end = end;
+    body.edges[e1].interval[1] = t1;
+    if body.vertices[end].edge == Some(e2) {
+        body.vertices[end].edge = Some(e1);
+    }
+    body.kill_edge(e2, partners);
+    body.kill_vertex(vertex);
+    body.rename(EntityId::Edge(e1), merged);
+    finish(body);
+    Ok((Jekv { edge: e1 }, journal))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,6 +438,110 @@ mod tests {
         assert_eq!(
             mev(&mut b, K, at, p(2.0, 0.0), c, [0.0, f64::NAN]),
             Err(Error::NonFinite)
+        );
+        assert_eq!(b.dump(), before);
+    }
+
+    /// The path closed into a unit square.
+    fn square() -> (Body, crate::euler::Mef) {
+        let (mut b, _, a, z) = path();
+        let (c, i) = line(&mut b, p(1.0, 1.0), p(0.0, 1.0));
+        let (w, _) = mev(
+            &mut b,
+            OpKey(3),
+            Corner::Before(z.fins[1]),
+            p(0.0, 1.0),
+            c,
+            i,
+        )
+        .unwrap();
+        let (c, i) = line(&mut b, p(0.0, 1.0), p(0.0, 0.0));
+        let from = Corner::Before(w.fins[1]);
+        let to = Corner::Before(a.fins[0]);
+        let (sq, _) = crate::euler::mef(&mut b, OpKey(4), from, to, c, i).unwrap();
+        (b, sq)
+    }
+
+    #[test]
+    fn semv_splits_an_edge_between_two_faces() {
+        let (mut b, sq) = square();
+        let parent = b.name_of(EntityId::Edge(sq.edge)).unwrap();
+        let (s, j) = semv(&mut b, OpKey(5), sq.edge, 0.25, p(0.0, 0.75)).unwrap();
+        assert_eq!(b.counts(), counts(5, 5, 2, 2));
+        let part = |i| Name::derive(OpKey(5), Role::Part(i), &[parent]);
+        assert_eq!(
+            j.events()[0],
+            Event::Split {
+                parent,
+                children: [part(0), part(1)]
+            }
+        );
+        let e = b.edge(sq.edge).unwrap();
+        assert_eq!((e.end, e.interval), (s.vertex, [0.0, 0.25]));
+        let r = b.edge(s.edge).unwrap();
+        assert_eq!((r.start, r.interval), (s.vertex, [0.25, 1.0]));
+        for l in b.loops() {
+            let fins: Vec<_> = b.loop_fins(l).collect();
+            assert_eq!(fins.len(), 5);
+            for (k, &f) in fins.iter().enumerate() {
+                assert_eq!(b.fin_end(f), b.fin_start(fins[(k + 1) % 5]));
+            }
+        }
+    }
+
+    #[test]
+    fn jekv_undoes_semv() {
+        // Between two faces, on a strut, and on a closed circle.
+        let (mut b, sq) = square();
+        let before = shape(&b);
+        let (s, _) = semv(&mut b, OpKey(5), sq.edge, 0.25, p(0.0, 0.75)).unwrap();
+        let (k, j) = jekv(&mut b, OpKey(6), s.vertex).unwrap();
+        assert_eq!(k.edge, sq.edge);
+        assert_eq!(j.events().len(), 2);
+        assert_eq!(shape(&b), before);
+        let (mut b, _, _, z) = path();
+        let before = shape(&b);
+        let (s, _) = semv(&mut b, OpKey(5), z.edge, 0.5, p(1.0, 0.5)).unwrap();
+        assert_eq!(b.loop_fins(b.fin(z.fins[0]).unwrap().loop_).count(), 6);
+        jekv(&mut b, OpKey(6), s.vertex).unwrap();
+        assert_eq!(shape(&b), before);
+        let (mut b, s0) = plane_body();
+        let (m, _) = mvfs(&mut b, K, p(1.0, 0.0), s0).unwrap();
+        let circle = crate::geom::Circle::new(crate::geom::Frame::WORLD, 1.0).unwrap();
+        let c = b.add_curve(crate::geom::Curve::Circle(circle));
+        let lone = Corner::Lone(m.loop_);
+        let tau = core::f64::consts::TAU;
+        crate::euler::mef(&mut b, OpKey(2), lone, lone, c, [0.0, tau]).unwrap();
+        let before = shape(&b);
+        let e = b.edges().next().unwrap();
+        let (s, _) = semv(&mut b, OpKey(5), e, 3.0, p(-1.0, 0.0)).unwrap();
+        assert_eq!(b.vertex_edges(s.vertex).len(), 2);
+        assert_eq!(b.vertex_edges(m.vertex).len(), 2);
+        jekv(&mut b, OpKey(6), s.vertex).unwrap();
+        assert_eq!(shape(&b), before);
+    }
+
+    #[test]
+    fn split_and_join_preconditions() {
+        let (mut b, sq) = square();
+        let before = b.dump();
+        assert_eq!(
+            semv(&mut b, K, sq.edge, 0.0, p(0.0, 1.0)),
+            Err(Error::Degenerate)
+        );
+        assert_eq!(
+            semv(&mut b, K, sq.edge, 1.0, p(0.0, 0.0)),
+            Err(Error::Degenerate)
+        );
+        assert_eq!(
+            semv(&mut b, K, sq.edge, f64::NAN, p(0.0, 0.0)),
+            Err(Error::NonFinite)
+        );
+        // A corner of the square joins two edges on different lines.
+        let corner = b.edge(sq.edge).unwrap().end;
+        assert_eq!(
+            jekv(&mut b, K, corner),
+            Err(TopologyError::NotRemovable.into())
         );
         assert_eq!(b.dump(), before);
     }
