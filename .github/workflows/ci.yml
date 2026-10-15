@@ -23,6 +23,33 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - run: cargo bench --workspace --no-run
+
+  cpu-levels:
+    # Results must not depend on CPU-level codegen (vectorization, FMA-capable
+    # targets). Release builds at higher x86-64 levels must reproduce the
+    # committed golden hashes.
+    name: golden hashes at x86-64-v3/v4
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: baseline release
+        run: cargo test -p ryukei --release --test determinism
+      - name: x86-64-v3
+        run: cargo test -p ryukei --release --test determinism
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64-v3
+          CARGO_TARGET_DIR: target/v3
+      - name: x86-64-v4 (when the runner has AVX-512)
+        run: |
+          if grep -qw avx512f /proc/cpuinfo; then
+            RUSTFLAGS="-C target-cpu=x86-64-v4" CARGO_TARGET_DIR=target/v4 \
+              cargo test -p ryukei --release --test determinism
+          else
+            echo "::notice::runner has no AVX-512; x86-64-v4 skipped"
+          fi
 
   devcontainer:
     name: devcontainer
