@@ -145,7 +145,7 @@ pub(crate) mod tests {
             let curve = b.curve(e.curve).unwrap();
             let t = (e.interval[0] + e.interval[1]) / 2.0;
             let p = curve.point(t);
-            let dir = curve.tangent(t).get();
+            let dir = curve.tangent(t).unwrap().get();
             let dir = if f.sense == Sense::Forward { dir } else { -dir };
             let face = b.loop_(f.loop_).unwrap().face;
             let n = face_normal(b, face, p);

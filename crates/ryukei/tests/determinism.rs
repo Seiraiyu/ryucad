@@ -185,7 +185,7 @@ fn analytic_section(golden: &mut Golden) {
         ];
         for cv in curves {
             let q = cv.point(u);
-            let t = cv.tangent(u).get();
+            let t = cv.tangent(u).unwrap().get();
             for x in [q.x, q.y, q.z, t.x, t.y, t.z, cv.distance(p), cv.param_of(p)] {
                 s.f64(x);
             }

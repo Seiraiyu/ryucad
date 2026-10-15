@@ -1,4 +1,4 @@
-use super::{Frame, Point3, Rigid, UnitVector3, Vector3, polar_angle};
+use super::{CurveEval, Frame, Point3, Rigid, UnitVector3, Vector3, polar_angle};
 use crate::Error;
 use crate::math;
 use crate::tol::LINEAR_RESOLUTION;
@@ -93,14 +93,55 @@ impl Curve {
         }
     }
 
-    /// The unit tangent, in the direction of increasing `t`.
-    pub fn tangent(&self, t: f64) -> UnitVector3 {
+    /// The point and its first two derivatives with respect to `t`.
+    pub fn eval(&self, t: f64) -> CurveEval {
         match self {
-            Self::Line(l) => l.dir,
+            Self::Line(l) => CurveEval {
+                point: l.origin + l.dir.get() * t,
+                d1: l.dir.get(),
+                d2: Vector3::ZERO,
+            },
             Self::Circle(c) => {
                 let (s, co) = math::sin_cos(t);
-                UnitVector3::new_unchecked(c.frame.x().get() * -s + c.frame.y().get() * co)
+                let (x, y) = (c.frame.x().get(), c.frame.y().get());
+                let radial = x * co + y * s;
+                CurveEval {
+                    point: c.frame.origin() + radial * c.radius,
+                    d1: (x * -s + y * co) * c.radius,
+                    d2: radial * -c.radius,
+                }
             }
+        }
+    }
+
+    /// The unit tangent, in the direction of increasing `t`. See
+    /// [`CurveEval::tangent`] for where it is `None`; a line or circle
+    /// always has one.
+    pub fn tangent(&self, t: f64) -> Option<UnitVector3> {
+        match self {
+            Self::Line(l) => Some(l.dir),
+            Self::Circle(c) => {
+                let (s, co) = math::sin_cos(t);
+                Some(UnitVector3::new_unchecked(
+                    c.frame.x().get() * -s + c.frame.y().get() * co,
+                ))
+            }
+        }
+    }
+
+    /// The curvature at a parameter: 0 for a line, `1 / r` for a circle.
+    pub fn curvature(&self, _t: f64) -> Option<f64> {
+        match self {
+            Self::Line(_) => Some(0.0),
+            Self::Circle(c) => Some(1.0 / c.radius),
+        }
+    }
+
+    /// The parameter range: unbounded for a line, `[0, 2π]` for a circle.
+    pub fn domain(&self) -> [f64; 2] {
+        match self {
+            Self::Line(_) => [f64::NEG_INFINITY, f64::INFINITY],
+            Self::Circle(_) => [0.0, TAU],
         }
     }
 
@@ -178,7 +219,7 @@ mod tests {
     fn line_evaluates_by_arc_length() {
         let l = Curve::Line(Line::through(Point3::ORIGIN, Point3::new(3.0, 4.0, 0.0)).unwrap());
         assert!(near(l.point(5.0), Point3::new(3.0, 4.0, 0.0)));
-        assert_eq!(l.tangent(1.0).get(), Vector3::new(0.6, 0.8, 0.0));
+        assert_eq!(l.tangent(1.0).unwrap().get(), Vector3::new(0.6, 0.8, 0.0));
         assert_eq!(l.period(), None);
         assert_eq!(l.distance(Point3::new(0.0, 0.0, 2.0)), 2.0);
         assert_eq!(l.param_of(Point3::new(3.0, 4.0, 7.0)), 5.0);
@@ -189,8 +230,31 @@ mod tests {
         let c = circle();
         assert!(near(c.point(0.0), Point3::new(3.0, 2.0, 3.0)));
         assert!(near(c.point(FRAC_PI_2), Point3::new(1.0, 4.0, 3.0)));
-        assert!((c.tangent(0.0).get() - Vector3::new(0.0, 1.0, 0.0)).length() <= 1e-16);
+        assert!((c.tangent(0.0).unwrap().get() - Vector3::new(0.0, 1.0, 0.0)).length() <= 1e-16);
         assert_eq!(c.period(), Some(TAU));
+    }
+
+    #[test]
+    fn derivatives_in_closed_form() {
+        let c = circle();
+        let e = c.eval(FRAC_PI_2);
+        assert_eq!(e.point, c.point(FRAC_PI_2));
+        assert!((e.d1 - Vector3::new(-2.0, 0.0, 0.0)).length() <= 1e-15);
+        assert!((e.d2 - Vector3::new(0.0, -2.0, 0.0)).length() <= 1e-15);
+        assert_eq!(c.curvature(1.0), Some(0.5));
+        let l = Curve::Line(Line::through(Point3::ORIGIN, Point3::new(3.0, 4.0, 0.0)).unwrap());
+        let e = l.eval(5.0);
+        assert_eq!(e.point, l.point(5.0));
+        assert_eq!(e.d1, Vector3::new(0.6, 0.8, 0.0));
+        assert_eq!(e.d2, Vector3::ZERO);
+        assert_eq!(l.curvature(5.0), Some(0.0));
+    }
+
+    #[test]
+    fn domains() {
+        assert_eq!(circle().domain(), [0.0, TAU]);
+        let l = Curve::Line(Line::new(Point3::ORIGIN, Vector3::new(1.0, 0.0, 0.0)).unwrap());
+        assert_eq!(l.domain(), [f64::NEG_INFINITY, f64::INFINITY]);
     }
 
     #[test]
