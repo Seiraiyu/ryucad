@@ -5,6 +5,7 @@
 
 pub mod check;
 mod error;
+pub mod euler;
 pub mod geom;
 pub mod interval;
 pub mod math;

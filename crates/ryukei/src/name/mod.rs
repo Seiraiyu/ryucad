@@ -135,6 +135,16 @@ impl fmt::Display for Name {
     }
 }
 
+/// The readable recipe of a derived name, e.g. `box#2a/+Z` or
+/// `mef#31(box#2a/+Z)/part1`. For debugging only; names compare by hash.
+pub(crate) fn recipe(kind: &str, key: OpKey, role: Role, parents: &[&str]) -> String {
+    if parents.is_empty() {
+        format!("{kind}#{:x}/{role}", key.0)
+    } else {
+        format!("{kind}#{:x}({})/{role}", key.0, parents.join(","))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +212,17 @@ mod tests {
         codes.sort_unstable();
         codes.dedup();
         assert_eq!(codes.len(), roles.len());
+    }
+
+    #[test]
+    fn recipes_read_well() {
+        assert_eq!(
+            recipe("box", OpKey(0x2a), Role::Face(FaceRole::PlusZ), &[]),
+            "box#2a/+Z"
+        );
+        assert_eq!(
+            recipe("mef", OpKey(0x31), Role::Part(1), &["box#2a/+Z"]),
+            "mef#31(box#2a/+Z)/part1"
+        );
     }
 }
