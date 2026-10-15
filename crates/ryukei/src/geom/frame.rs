@@ -2,6 +2,7 @@ use super::{Point3, Rigid, UnitVector3, Vector3};
 use crate::Error;
 use crate::math;
 use crate::tol::ANGULAR_RESOLUTION;
+use core::f64::consts::TAU;
 
 /// A right-handed orthonormal frame: an origin, an axis `z` and a reference
 /// direction `x` perpendicular to it, with `y = z × x`.
@@ -121,10 +122,18 @@ fn perpendicular_unit(v: Vector3, axis: UnitVector3) -> Option<UnitVector3> {
     Some(UnitVector3::new_unchecked(p / p.length()))
 }
 
+/// The angle of `(x, y)` from the positive x axis, in `[0, 2π)`. The origin
+/// maps to 0.
+pub(crate) fn polar_angle(y: f64, x: f64) -> f64 {
+    let a = math::atan2(y, x);
+    let a = if a < 0.0 { a + TAU } else { a + 0.0 };
+    if a >= TAU { 0.0 } else { a }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::f64::consts::FRAC_PI_2;
+    use core::f64::consts::{FRAC_PI_2, PI};
 
     fn close(a: Vector3, b: Vector3) -> bool {
         (a - b).length() <= 1e-15
@@ -200,5 +209,17 @@ mod tests {
         let g = f.flipped();
         assert_eq!(g.z(), -f.z());
         assert!(close(g.y().get(), -f.y().get()));
+    }
+
+    #[test]
+    fn polar_angle_range() {
+        assert_eq!(polar_angle(0.0, 1.0), 0.0);
+        assert_eq!(polar_angle(-0.0, 1.0).to_bits(), 0.0f64.to_bits());
+        assert_eq!(polar_angle(0.0, 0.0), 0.0);
+        assert_eq!(polar_angle(1.0, 0.0), FRAC_PI_2);
+        assert_eq!(polar_angle(0.0, -1.0), PI);
+        assert_eq!(polar_angle(-1.0, 0.0), 3.0 * FRAC_PI_2);
+        // Tiny negative angles round up to 2π, which wraps to 0.
+        assert_eq!(polar_angle(-1e-300, 1.0), 0.0);
     }
 }
