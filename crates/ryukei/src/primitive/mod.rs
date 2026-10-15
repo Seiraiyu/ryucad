@@ -9,8 +9,10 @@
 //! on the placement or the dimensions.
 
 mod block;
+mod turned;
 
 pub use block::block;
+pub use turned::{cone, cylinder, frustum};
 
 use crate::Error;
 use crate::geom::{Point3, Rigid};
