@@ -6,6 +6,9 @@
 //! together: an operator that makes an edge takes its curve. Operators
 //! decide no geometry; the checker verifies it.
 //!
+//! [`set_point`], [`set_curve`] and [`set_surface`] change geometry without
+//! touching topology.
+//!
 //! Every operator checks all of its preconditions before writing
 //! anything, so on `Err` the body is unchanged. Operators that make or
 //! rename entities take the caller's [`OpKey`] and name what they make
@@ -14,11 +17,13 @@
 
 mod edge;
 mod face;
+mod geometry;
 mod ring;
 mod shell;
 
 pub use edge::{Jekv, Mev, Semv, jekv, kev, mev, semv};
 pub use face::{Kef, Mef, kef, mef};
+pub use geometry::{set_curve, set_point, set_surface};
 pub use ring::{Kemr, Kfmrh, Mekr, Mfkrh, kemr, kfmrh, mekr, mfkrh};
 pub use shell::{Mvfs, Mvr, kvfs, kvr, mvfs, mvr};
 
