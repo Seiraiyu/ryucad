@@ -1,0 +1,28 @@
+# Platform math can differ by OS and CPU. Kernel code uses ryukei::math instead.
+# See CLAUDE.md, "Identical results on every platform".
+disallowed-methods = [
+    { path = "f64::sin", reason = "use ryukei::math::sin" },
+    { path = "f64::cos", reason = "use ryukei::math::cos" },
+    { path = "f64::sin_cos", reason = "use ryukei::math::sin_cos" },
+    { path = "f64::tan", reason = "use ryukei::math::tan" },
+    { path = "f64::asin", reason = "use ryukei::math::asin" },
+    { path = "f64::acos", reason = "use ryukei::math::acos" },
+    { path = "f64::atan", reason = "use ryukei::math::atan2" },
+    { path = "f64::atan2", reason = "use ryukei::math::atan2" },
+    { path = "f64::sinh", reason = "not deterministic across platforms" },
+    { path = "f64::cosh", reason = "not deterministic across platforms" },
+    { path = "f64::tanh", reason = "not deterministic across platforms" },
+    { path = "f64::exp", reason = "use ryukei::math::exp" },
+    { path = "f64::exp2", reason = "use ryukei::math::exp" },
+    { path = "f64::exp_m1", reason = "not deterministic across platforms" },
+    { path = "f64::ln", reason = "use ryukei::math::ln" },
+    { path = "f64::ln_1p", reason = "not deterministic across platforms" },
+    { path = "f64::log", reason = "use ryukei::math::ln" },
+    { path = "f64::log2", reason = "use ryukei::math::ln" },
+    { path = "f64::log10", reason = "use ryukei::math::ln" },
+    { path = "f64::powf", reason = "use ryukei::math::pow" },
+    { path = "f64::powi", reason = "lowers differently per target; multiply explicitly or use ryukei::math::pow" },
+    { path = "f64::hypot", reason = "use ryukei::math::hypot" },
+    { path = "f64::cbrt", reason = "use ryukei::math::cbrt" },
+    { path = "f64::mul_add", reason = "use ryukei::math::fma, the only FMA" },
+]
