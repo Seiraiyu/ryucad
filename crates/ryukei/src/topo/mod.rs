@@ -8,12 +8,14 @@
 //! The read API assumes a valid body (see [`crate::check`]). Walking a
 //! corrupted ring could loop, so the checker never uses it.
 
+mod compact;
 mod id;
 mod store;
 
 #[cfg(test)]
 pub(crate) mod fixture;
 
+pub use compact::Remap;
 pub(crate) use id::Id;
 pub use id::{
     CurveId, EdgeId, EntityId, FaceId, FinId, LoopId, RegionId, ShellId, SurfaceId, VertexId,

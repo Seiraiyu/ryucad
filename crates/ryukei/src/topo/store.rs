@@ -39,6 +39,11 @@ impl<I: Id, T> Arena<I, T> {
         self.slots.get(id.index()).and_then(Option::as_ref)
     }
 
+    /// Leaves a tombstone; returns the dead entity.
+    pub(crate) fn kill(&mut self, id: I) -> Option<T> {
+        self.slots.get_mut(id.index()).and_then(Option::take)
+    }
+
     /// The number of slots, live or dead.
     pub(crate) fn slot_count(&self) -> usize {
         self.slots.len()
@@ -50,6 +55,28 @@ impl<I: Id, T> Arena<I, T> {
             .iter()
             .enumerate()
             .filter_map(|(i, s)| s.as_ref().map(|t| (I::from_index(i), t)))
+    }
+
+    /// Drops the tombstones, keeping live entities in order. Returns each
+    /// old slot's new ID, or `None` for the dropped ones.
+    pub(crate) fn compact(&mut self) -> Vec<Option<I>> {
+        let mut next = 0;
+        let map = self
+            .slots
+            .iter()
+            .map(|s| {
+                s.as_ref().map(|_| {
+                    next += 1;
+                    I::from_index(next - 1)
+                })
+            })
+            .collect();
+        self.slots.retain(Option::is_some);
+        map
+    }
+
+    pub(crate) fn values_mut(&mut self) -> impl Iterator<Item = &mut T> + '_ {
+        self.slots.iter_mut().flatten()
     }
 }
 
@@ -188,6 +215,23 @@ mod tests {
         assert_eq!(a.slot_count(), 2);
         a[x] = "w";
         assert_eq!(a.live().map(|(_, v)| *v).collect::<Vec<_>>(), ["w"]);
+    }
+
+    #[test]
+    fn compaction_keeps_order() {
+        let mut a: Arena<FaceId, &str> = Arena::default();
+        let x = a.push("x");
+        let y = a.push("y");
+        a.push("z");
+        assert_eq!(a.kill(y), Some("y"));
+        assert_eq!(a.kill(y), None);
+        assert_eq!(a.compact(), [Some(x), None, Some(y)]);
+        assert_eq!(a.slot_count(), 2);
+        assert_eq!(a[y], "z");
+        for v in a.values_mut() {
+            *v = "w";
+        }
+        assert_eq!(a.live().map(|(_, v)| *v).collect::<Vec<_>>(), ["w", "w"]);
     }
 
     #[test]
