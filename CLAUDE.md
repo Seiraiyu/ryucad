@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ryucad is CAD built for AI agents to drive, not primarily for humans clicking in a GUI. FreeCAD was rejected because it performs poorly on large assemblies, and its kernel, OCCT, is a main reason. This project builds its own kernel, **ryukei**, and the long-term target is Parasolid-level capability.
 
-The project is in its early stages. The workspace is scaffolded but has no implementation yet.
+The project is in its early stages. Roadmap phase 0 (foundations) is done: deterministic math, the tolerance model, exact predicates, interval arithmetic and the test harness. Topology (phase 1) comes next; see `docs/roadmap.md`.
 
 ## Commands
 
@@ -19,6 +19,9 @@ cargo test -p ryukei <test_name>     # single test in one crate
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cargo run -p ryucad
+UPDATE_GOLDEN=1 cargo test -p ryukei --test determinism   # after a deliberate change to results
+cargo bench -p ryukei-bench
+cd fuzz && cargo +nightly fuzz run predicates               # needs nightly + cargo-fuzz
 ```
 
 Development happens on a headless Linux VM using the devcontainer, driven by the `devcontainer` CLI rather than VS Code:
@@ -34,6 +37,9 @@ The product targets Windows, macOS, and Linux natively, not just WSL. CI (`.gith
 
 - `crates/ryukei`: the B-rep geometry kernel (library).
 - `crates/ryucad`: the application layer and binary.
+- `crates/ryukei-testkit`: test-only helpers (exact references, seeded inputs, golden hashes). Never a runtime dependency.
+- `crates/ryukei-bench`: divan benchmarks; OCCT comparisons go behind its `occt` feature.
+- `fuzz/`: cargo-fuzz targets, outside the workspace (nightly only).
 - `docs/`: design documents. `docs/roadmap.md` holds the phased ryukei plan.
 
 The boundary between the two crates is deliberate. ryukei works on single bodies (geometry, topology, booleans, blends, tessellation) and must not depend on documents, assemblies, or agents. Large-assembly performance (instancing, lazy loading, caching, incremental recompute) and the agent interface live in ryucad. Keep both in this repo until the kernel API settles.
@@ -51,10 +57,18 @@ The boundary between the two crates is deliberate. ryukei works on single bodies
 - **Keep OCCT out of the default build.** Put it behind a Cargo feature or in a separate bench crate, so the default build has no C++ dependency on any platform.
 - **Robustness through testing at scale.** Use a corpus of real models, randomly generated and mutated operations, checks that the topology stays valid after every operation, comparison of results against OCCT, and benchmarks against OCCT's numbers. OCCT may serve as a reference and benchmark baseline, and as a temporary fallback for operations ryukei can't do yet, but never as the long-term kernel.
 
+## Numerics (decided in phase 0)
+
+The design is document 12 in the Coxswain planning project `ryucad-ryukei`.
+
+- **Units and tolerances.** Model space is SI meters. `ryukei::tol` fixes `LINEAR_RESOLUTION` = 1e-8 m, `ANGULAR_RESOLUTION` = 1e-11 rad and a size box of ±500 m for every body. Per-entity `Tolerance` values are never below the resolution. Unit conversion and larger models are ryucad's job.
+- **Precision policy.** Decisions that change topology or classification (side of a plane, inside a circle or sphere, ordering) use exact or certified predicates (`ryukei::predicates`, `ryukei::interval`), never a raw float sign. Geometric values (coordinates, parameters, distances, constructed points) are f64 compared through `tol`, never with `==`. Predicates take their f64 inputs as exact. An uncertain interval sign must be escalated or resolved by an explicit tolerance rule, never guessed.
+- **Determinism.** Kernel code gets transcendental functions only from `ryukei::math`; `clippy.toml` bans the `f64` versions and `mul_add`. `tests/golden/determinism.txt` holds the bit-exact hashes that every CI platform and CPU level must reproduce. When you change results on purpose, regenerate it and review the diff.
+
 ## Open decisions
 
 Don't assume an answer to these. Ask the user, or record the decision here once it's made:
 
-- Concrete designs for the topology storage, the surface/curve representation, the precision strategy, and stable naming (planned as a design pass, written to `docs/`).
+- Concrete designs for the topology storage, the surface/curve representation, and stable naming (planned as a design pass). The precision strategy is decided; see Numerics above.
 - How agents talk to ryucad (CLI, library API, RPC, MCP, etc.) and how models are persisted.
 - License.
