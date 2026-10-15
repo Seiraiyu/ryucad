@@ -13,9 +13,11 @@
 //! operator asserts [`crate::check::check_topology`] afterwards.
 
 mod edge;
+mod face;
 mod shell;
 
 pub use edge::{Mev, kev, mev};
+pub use face::{Kef, Mef, kef, mef};
 pub use shell::{Mvfs, kvfs, mvfs};
 
 use crate::geom::Point3;
@@ -112,6 +114,21 @@ impl Body {
         self.names.insert(name, entity);
     }
 
+    /// Gives a live face, edge or vertex a new name; the old one retires.
+    pub(crate) fn rename(&mut self, entity: EntityId, name: Name) {
+        let slot = match entity {
+            EntityId::Face(f) => &mut self.faces[f].name,
+            EntityId::Edge(e) => &mut self.edges[e].name,
+            EntityId::Vertex(v) => &mut self.vertices[v].name,
+            _ => unreachable!("only faces, edges and vertices have names"),
+        };
+        let old = core::mem::replace(slot, name);
+        if self.names.get(&old) == Some(&entity) {
+            self.retire_name(old);
+        }
+        self.names.insert(name, entity);
+    }
+
     /// Drops a name from the index and its recipe.
     pub(crate) fn retire_name(&mut self, name: Name) {
         self.names.remove(&name);
@@ -142,6 +159,29 @@ impl Body {
             return Err(TopologyError::NotManifold.into());
         }
         Ok([first, second])
+    }
+
+    /// Makes `fins` the whole ring of loop `lp`, in order.
+    fn ring_fins(&mut self, lp: LoopId, fins: &[FinId]) {
+        let n = fins.len();
+        for (i, &f) in fins.iter().enumerate() {
+            let fin = &mut self.fins[f];
+            fin.loop_ = lp;
+            fin.next = fins[(i + 1) % n];
+            fin.prev = fins[(i + n - 1) % n];
+        }
+    }
+
+    /// The fins from `from` up to, not including, `to`, following `next`.
+    /// The whole ring when `from == to`.
+    fn fins_between(&self, from: FinId, to: FinId) -> Vec<FinId> {
+        let mut out = vec![from];
+        let mut f = self.fins[from].next;
+        while f != to {
+            out.push(f);
+            f = self.fins[f].next;
+        }
+        out
     }
 
     fn link_shell(&mut self, region: RegionId, s: ShellId) {
@@ -311,5 +351,18 @@ pub(crate) mod tests {
     pub(crate) fn line(b: &mut Body, p: Point3, q: Point3) -> (CurveId, [f64; 2]) {
         let c = b.add_curve(Curve::Line(Line::through(p, q).unwrap()));
         (c, [0.0, p.distance(q)])
+    }
+
+    #[test]
+    fn rename_retires_the_old_name() {
+        let (mut b, s) = plane_body();
+        let (m, _) = mvfs(&mut b, K, Point3::ORIGIN, s).unwrap();
+        let old = b.name_of(EntityId::Face(m.face)).unwrap();
+        let new = b.derive_name("test", OpKey(9), Role::NewFace, &[old]);
+        b.rename(EntityId::Face(m.face), new);
+        assert_eq!(b.by_name(old), None);
+        assert_eq!(b.recipe(old), None);
+        assert_eq!(b.by_name(new), Some(EntityId::Face(m.face)));
+        assert_eq!(b.recipe(new), Some("test#9(mvfs#10/new-face)/new-face"));
     }
 }
