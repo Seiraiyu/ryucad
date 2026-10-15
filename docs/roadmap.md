@@ -6,7 +6,7 @@ A high-level plan, not a commitment. Each phase produces something testable and 
 
 | # | Phase | Delivers |
 |---|---|---|
-| 0 | Foundations | Vector and transform math, a deterministic math layer, the tolerance model, robust geometric predicates, and the test/bench harness |
+| 0 | Foundations (done) | Vector and transform math, a deterministic math layer, the tolerance model, robust geometric predicates, and the test/bench harness |
 | 1 | Topology core | ID-based flat-array topology (body/shell/face/loop/edge/vertex), Euler operators, validity checker, stable face/edge IDs, primitives (box, cylinder, sphere, cone, torus) |
 | 2 | Geometry | General curve/surface representation with analytic fast paths, NURBS evaluation, point and derivative evaluation, closest-point projection |
 | 3 | Tessellation | Watertight, parallel, tolerance-driven meshing; first head-to-head benchmark against OCCT |
