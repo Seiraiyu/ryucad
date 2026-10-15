@@ -6,6 +6,7 @@
 mod error;
 pub mod geom;
 pub mod math;
+pub mod predicates;
 pub mod tol;
 
 pub use error::Error;
