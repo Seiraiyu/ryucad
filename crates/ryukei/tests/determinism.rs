@@ -12,6 +12,7 @@ use ryukei::math;
 use ryukei::name::{Event, OpKey};
 use ryukei::predicates::{self, Sign};
 use ryukei::primitive;
+use ryukei_testkit::euler_script::{Bytes, start, valid_step};
 use ryukei_testkit::{Golden, Lcg};
 
 fn math_section(golden: &mut Golden) {
@@ -238,6 +239,38 @@ fn primitives_section(golden: &mut Golden) {
     }
 }
 
+fn euler_section(golden: &mut Golden) {
+    let mut s = golden.section("euler");
+    let mut g = Lcg::new(0x6575_6c72);
+    let data: Vec<u8> = (0..4000).map(|_| (g.next_u64() >> 56) as u8).collect();
+    let mut body = start();
+    let mut bytes = Bytes::new(&data);
+    let mut n = 0u128;
+    while !bytes.is_empty() {
+        n += 1;
+        if let Some(step) = valid_step(&mut body, OpKey(1000 + n), &mut bytes) {
+            s.str(step.op);
+            for e in step.journal.events() {
+                let (tag, names) = match *e {
+                    Event::Created(n) => (0, vec![n]),
+                    Event::Deleted(n) => (1, vec![n]),
+                    Event::Modified(n) => (2, vec![n]),
+                    Event::Split { parent, children } => {
+                        (3, vec![parent, children[0], children[1]])
+                    }
+                    Event::Merged { parents, child } => (4, vec![parents[0], parents[1], child]),
+                };
+                s.u64(tag);
+                for n in names {
+                    s.u64(n.to_u128() as u64);
+                    s.u64((n.to_u128() >> 64) as u64);
+                }
+            }
+        }
+    }
+    s.str(&body.dump());
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -250,5 +283,6 @@ fn determinism() {
     interval_section(&mut golden);
     analytic_section(&mut golden);
     primitives_section(&mut golden);
+    euler_section(&mut golden);
     golden.finish();
 }

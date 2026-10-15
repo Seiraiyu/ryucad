@@ -1,4 +1,5 @@
 analytic 77486439ba83b83f
+euler 196231869e0579b0
 geom 90cad8ca80df54df
 interval ceed4e3c202ab503
 math 48b722fd5e6bf4a3
