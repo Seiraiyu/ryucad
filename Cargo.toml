@@ -6,3 +6,10 @@ members = ["crates/ryukei", "crates/ryukei-testkit", "crates/ryucad"]
 version = "0.1.0"
 edition = "2024"
 repository = "https://github.com/seiraiyu/ryucad"
+
+# Exact reference arithmetic dominates test time; optimize it even in dev.
+[profile.dev.package.num-bigint]
+opt-level = 3
+
+[profile.dev.package.num-rational]
+opt-level = 3
