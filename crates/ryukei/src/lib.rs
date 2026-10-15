@@ -12,4 +12,4 @@ pub mod predicates;
 pub mod tol;
 pub mod topo;
 
-pub use error::Error;
+pub use error::{Error, TopologyError};
