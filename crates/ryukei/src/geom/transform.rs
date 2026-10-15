@@ -1,5 +1,6 @@
 use super::{Point3, UnitVector3, Vector3};
 use crate::math;
+use crate::tol::ANGULAR_RESOLUTION;
 
 /// Row-major 3x3 matrix.
 type Mat3 = [[f64; 3]; 3];
@@ -140,6 +141,105 @@ impl Rigid {
     }
 }
 
+/// A general affine map `p -> M p + t`: scaling, mirroring, shear.
+///
+/// Directions are not preserved in length, so there is no `apply_unit`.
+/// A [`Rigid`] converts into an `Affine`, never the reverse.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Affine {
+    lin: Mat3,
+    trans: Vector3,
+}
+
+impl Affine {
+    pub const IDENTITY: Self = Self {
+        lin: IDENTITY3,
+        trans: Vector3::ZERO,
+    };
+
+    /// From a row-major 3x3 linear part and a translation.
+    pub fn new(linear: [[f64; 3]; 3], translation: Vector3) -> Self {
+        Self {
+            lin: linear,
+            trans: translation,
+        }
+    }
+
+    /// Scale by `s.x`, `s.y`, `s.z` about the origin. Negative factors mirror.
+    pub fn scale(s: Vector3) -> Self {
+        Self::new(
+            [[s.x, 0.0, 0.0], [0.0, s.y, 0.0], [0.0, 0.0, s.z]],
+            Vector3::ZERO,
+        )
+    }
+
+    pub fn linear(&self) -> [[f64; 3]; 3] {
+        self.lin
+    }
+
+    pub fn translation_part(&self) -> Vector3 {
+        self.trans
+    }
+
+    pub fn determinant(&self) -> f64 {
+        let m = &self.lin;
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    }
+
+    /// `self` applied after `first`.
+    pub fn then_after(&self, first: &Self) -> Self {
+        Self {
+            lin: mat_mul(&self.lin, &first.lin),
+            trans: mat_vec(&self.lin, first.trans) + self.trans,
+        }
+    }
+
+    /// `None` when the linear part is singular: its determinant is at most
+    /// [`ANGULAR_RESOLUTION`] times the product of its column lengths, i.e.
+    /// the columns are within angular resolution of being coplanar.
+    pub fn inverse(&self) -> Option<Self> {
+        let m = &self.lin;
+        let cols = transpose(m);
+        let scale = row(&cols, 0).length() * row(&cols, 1).length() * row(&cols, 2).length();
+        let det = self.determinant();
+        if det.abs() <= ANGULAR_RESOLUTION * scale {
+            return None;
+        }
+        let cof = |r0: usize, c0: usize, r1: usize, c1: usize| {
+            m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0]
+        };
+        let adj = [
+            [cof(1, 1, 2, 2), -cof(0, 1, 2, 2), cof(0, 1, 1, 2)],
+            [-cof(1, 0, 2, 2), cof(0, 0, 2, 2), -cof(0, 0, 1, 2)],
+            [cof(1, 0, 2, 1), -cof(0, 0, 2, 1), cof(0, 0, 1, 1)],
+        ];
+        let inv = adj.map(|r| r.map(|x| x / det));
+        Some(Self {
+            lin: inv,
+            trans: -mat_vec(&inv, self.trans),
+        })
+    }
+
+    pub fn apply_point(&self, p: Point3) -> Point3 {
+        Point3::ORIGIN + (mat_vec(&self.lin, p.to_vector()) + self.trans)
+    }
+
+    pub fn apply_vector(&self, v: Vector3) -> Vector3 {
+        mat_vec(&self.lin, v)
+    }
+}
+
+impl From<Rigid> for Affine {
+    fn from(r: Rigid) -> Self {
+        Self {
+            lin: r.rot,
+            trans: r.trans,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +303,46 @@ mod tests {
         let fixed = r.reorthonormalize();
         assert!(fixed.orthonormality_error() <= 4.0 * f64::EPSILON);
         assert!(fixed.orthonormality_error() <= r.orthonormality_error());
+    }
+
+    #[test]
+    fn affine_scale_and_inverse() {
+        let s = Affine::scale(Vector3::new(2.0, 3.0, -1.0));
+        assert_eq!(
+            s.apply_point(Point3::new(1.0, 1.0, 1.0)),
+            Point3::new(2.0, 3.0, -1.0)
+        );
+        assert_eq!(s.determinant(), -6.0);
+        let inv = s.inverse().unwrap();
+        assert_eq!(
+            inv.apply_point(Point3::new(2.0, 3.0, -1.0)),
+            Point3::new(1.0, 1.0, 1.0)
+        );
+    }
+
+    #[test]
+    fn affine_singular_has_no_inverse() {
+        assert!(
+            Affine::scale(Vector3::new(1.0, 1.0, 0.0))
+                .inverse()
+                .is_none()
+        );
+        // Third column within angular resolution of the plane of the first two.
+        let m = [[1.0, 0.0, 1.0], [0.0, 1.0, 1.0], [0.0, 0.0, 1e-12]];
+        assert!(Affine::new(m, Vector3::ZERO).inverse().is_none());
+    }
+
+    #[test]
+    fn affine_from_rigid_agrees() {
+        let r = Rigid::translation(Vector3::new(0.5, 0.0, 0.0))
+            .then_after(&Rigid::rotation(UnitVector3::Y, 1.0));
+        let a = Affine::from(r);
+        let p = Point3::new(1.0, 2.0, 3.0);
+        assert_eq!(a.apply_point(p), r.apply_point(p));
+        let ab = a.then_after(&Affine::scale(Vector3::new(2.0, 2.0, 2.0)));
+        assert!(near(
+            ab.apply_point(p),
+            r.apply_point(Point3::new(2.0, 4.0, 6.0))
+        ));
     }
 }
