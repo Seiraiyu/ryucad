@@ -9,9 +9,11 @@
 //! on the placement or the dimensions.
 
 mod block;
+mod closed;
 mod turned;
 
 pub use block::block;
+pub use closed::{sphere, torus};
 pub use turned::{cone, cylinder, frustum};
 
 use crate::Error;
