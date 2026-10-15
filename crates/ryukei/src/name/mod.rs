@@ -1,4 +1,5 @@
-//! Stable names for faces, edges and vertices.
+//! Stable names for faces, edges and vertices, and the journal that
+//! reports how they change.
 //!
 //! A [`Name`] is derived, never counted: it is the hash of the caller's
 //! [`OpKey`], the entity's [`Role`] in that operation and the names of its
@@ -6,6 +7,9 @@
 //! names, however the body's arrays happen to be laid out.
 
 mod hash;
+mod journal;
+
+pub use journal::{Event, Journal};
 
 use core::fmt;
 use hash::{NAME_KEY, siphash128};
