@@ -3,6 +3,7 @@
 //! Operates on single bodies only; knows nothing about documents,
 //! assemblies, or agents (those live in `ryucad`).
 
+pub mod check;
 mod error;
 pub mod geom;
 pub mod interval;
