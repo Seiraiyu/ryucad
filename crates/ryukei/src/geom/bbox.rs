@@ -1,4 +1,5 @@
 use super::{Affine, Point3, Rigid, Vector3};
+use crate::tol::Tolerance;
 
 /// An axis-aligned bounding box. Always non-empty: `min <= max` on each axis.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -50,6 +51,14 @@ impl Box3 {
             && other.min.y <= self.max.y
             && self.min.z <= other.max.z
             && other.min.z <= self.max.z
+    }
+
+    /// True when `p` is inside the box grown by `tol` (boundary included).
+    pub fn contains_with_tol(&self, p: Point3, tol: Tolerance) -> bool {
+        let g = self.grow(tol.get());
+        (g.min.x..=g.max.x).contains(&p.x)
+            && (g.min.y..=g.max.y).contains(&p.y)
+            && (g.min.z..=g.max.z).contains(&p.z)
     }
 
     /// Grown by `d` on every side.
@@ -120,6 +129,16 @@ mod tests {
         assert!(a.intersects(&touching));
         assert!(!a.intersects(&apart));
         assert!(a.grow(0.5).intersects(&apart));
+    }
+
+    #[test]
+    fn contains_with_tolerance() {
+        let b = Box3::new(Point3::ORIGIN, Point3::new(1.0, 1.0, 1.0));
+        let t = Tolerance::new(1e-6).unwrap();
+        assert!(b.contains_with_tol(Point3::new(0.5, 0.5, 0.5), t));
+        assert!(b.contains_with_tol(Point3::new(1.0 + 0.5e-6, 0.5, 0.5), t));
+        assert!(!b.contains_with_tol(Point3::new(1.0 + 2e-6, 0.5, 0.5), t));
+        assert!(!b.contains_with_tol(Point3::new(f64::NAN, 0.5, 0.5), t));
     }
 
     #[test]

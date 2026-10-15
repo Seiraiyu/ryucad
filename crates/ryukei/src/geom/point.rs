@@ -1,4 +1,6 @@
 use super::{Vector2, Vector3};
+use crate::Error;
+use crate::tol;
 use core::ops::{Add, AddAssign, Sub, SubAssign};
 
 /// A position in the plane. Point - Point is a [`Vector2`]; Point + Point
@@ -41,6 +43,20 @@ impl Point3 {
 
     pub const fn new(x: f64, y: f64, z: f64) -> Self {
         Self { x, y, z }
+    }
+
+    /// The checked constructor for coordinates from outside the kernel:
+    /// rejects NaN and infinity, and points outside the size box.
+    pub fn try_new(x: f64, y: f64, z: f64) -> Result<Self, Error> {
+        if !(x.is_finite() && y.is_finite() && z.is_finite()) {
+            return Err(Error::NonFinite);
+        }
+        let p = Self::new(x, y, z);
+        if tol::in_size_box(p) {
+            Ok(p)
+        } else {
+            Err(Error::OutsideSizeBox)
+        }
     }
 
     pub fn to_vector(self) -> Vector3 {
@@ -152,6 +168,23 @@ mod tests {
         assert_eq!(
             Point2::ORIGIN + Vector2::new(1.0, 2.0),
             Point2::new(1.0, 2.0)
+        );
+    }
+
+    #[test]
+    fn try_new_validates() {
+        assert_eq!(
+            Point3::try_new(1.0, 2.0, 3.0),
+            Ok(Point3::new(1.0, 2.0, 3.0))
+        );
+        assert_eq!(Point3::try_new(f64::NAN, 0.0, 0.0), Err(Error::NonFinite));
+        assert_eq!(
+            Point3::try_new(0.0, f64::INFINITY, 0.0),
+            Err(Error::NonFinite)
+        );
+        assert_eq!(
+            Point3::try_new(0.0, 0.0, -501.0),
+            Err(Error::OutsideSizeBox)
         );
     }
 

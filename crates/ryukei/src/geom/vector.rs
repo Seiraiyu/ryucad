@@ -1,3 +1,4 @@
+use crate::Error;
 use crate::math;
 use crate::tol::LINEAR_RESOLUTION;
 use core::ops::{Add, AddAssign, Div, Mul, Neg, Sub, SubAssign};
@@ -55,6 +56,15 @@ impl Vector3 {
 
     pub const fn new(x: f64, y: f64, z: f64) -> Self {
         Self { x, y, z }
+    }
+
+    /// The checked constructor for components from outside the kernel.
+    pub fn try_new(x: f64, y: f64, z: f64) -> Result<Self, Error> {
+        if x.is_finite() && y.is_finite() && z.is_finite() {
+            Ok(Self::new(x, y, z))
+        } else {
+            Err(Error::NonFinite)
+        }
     }
 
     pub fn to_array(self) -> [f64; 3] {
@@ -230,6 +240,19 @@ mod tests {
                 .is_some()
         );
         assert!(Vector3::ZERO.normalize().is_none());
+    }
+
+    #[test]
+    fn try_new_rejects_non_finite() {
+        assert_eq!(
+            Vector3::try_new(1.0, 0.0, 0.0),
+            Ok(Vector3::new(1.0, 0.0, 0.0))
+        );
+        assert_eq!(Vector3::try_new(0.0, f64::NAN, 0.0), Err(Error::NonFinite));
+        assert_eq!(
+            Vector3::try_new(0.0, 0.0, f64::NEG_INFINITY),
+            Err(Error::NonFinite)
+        );
     }
 
     #[test]

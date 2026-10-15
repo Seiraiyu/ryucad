@@ -1,4 +1,5 @@
 use super::{Point3, UnitVector3, Vector3};
+use crate::Error;
 use crate::math;
 use crate::tol::ANGULAR_RESOLUTION;
 
@@ -162,6 +163,16 @@ impl Affine {
         Self {
             lin: linear,
             trans: translation,
+        }
+    }
+
+    /// The checked constructor for matrices from outside the kernel.
+    pub fn try_new(linear: [[f64; 3]; 3], translation: Vector3) -> Result<Self, Error> {
+        let finite = linear.iter().flatten().all(|x| x.is_finite());
+        if finite && Vector3::try_new(translation.x, translation.y, translation.z).is_ok() {
+            Ok(Self::new(linear, translation))
+        } else {
+            Err(Error::NonFinite)
         }
     }
 
@@ -330,6 +341,16 @@ mod tests {
         // Third column within angular resolution of the plane of the first two.
         let m = [[1.0, 0.0, 1.0], [0.0, 1.0, 1.0], [0.0, 0.0, 1e-12]];
         assert!(Affine::new(m, Vector3::ZERO).inverse().is_none());
+    }
+
+    #[test]
+    fn affine_try_new_rejects_non_finite() {
+        let mut m = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        assert!(Affine::try_new(m, Vector3::ZERO).is_ok());
+        m[1][2] = f64::NAN;
+        assert_eq!(Affine::try_new(m, Vector3::ZERO), Err(Error::NonFinite));
+        let inf = Vector3::new(f64::INFINITY, 0.0, 0.0);
+        assert_eq!(Affine::try_new(IDENTITY3, inf), Err(Error::NonFinite));
     }
 
     #[test]
