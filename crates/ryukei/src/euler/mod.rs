@@ -12,13 +12,17 @@
 //! (see [`crate::name`]); each returns a [`Journal`]. In debug builds every
 //! operator asserts [`crate::check::check_topology`] afterwards.
 
+mod edge;
 mod shell;
 
+pub use edge::{Mev, kev, mev};
 pub use shell::{Mvfs, kvfs, mvfs};
 
 use crate::geom::Point3;
 use crate::name::{Name, OpKey, Role};
-use crate::topo::{Arena, Body, EntityId, FaceId, FinId, Id, LoopId, RegionId, ShellId, VertexId};
+use crate::topo::{
+    Arena, Body, EdgeId, EntityId, FaceId, FinId, Id, LoopId, RegionId, ShellId, VertexId,
+};
 use crate::{Error, TopologyError};
 
 /// The longest parent recipe inlined into a child's recipe.
@@ -50,6 +54,17 @@ fn next_id<I: Id, T>(arena: &Arena<I, T>) -> I {
 /// A point from outside the kernel: finite and inside the size box.
 fn check_point(p: Point3) -> Result<Point3, Error> {
     Point3::try_new(p.x, p.y, p.z)
+}
+
+/// A parameter interval from outside the kernel: finite and increasing.
+fn check_interval(i: [f64; 2]) -> Result<[f64; 2], Error> {
+    if !(i[0].is_finite() && i[1].is_finite()) {
+        Err(Error::NonFinite)
+    } else if i[0] >= i[1] {
+        Err(Error::Degenerate)
+    } else {
+        Ok(i)
+    }
 }
 
 /// Asserts the structural checks in debug builds.
@@ -103,6 +118,30 @@ impl Body {
         if let Some(r) = &mut self.recipes {
             r.remove(&name);
         }
+    }
+
+    /// The loop and vertex of a corner.
+    fn corner(&self, at: Corner) -> Result<(LoopId, VertexId), Error> {
+        match at {
+            Corner::Before(f) => {
+                live(&self.fins, f)?;
+                Ok((self.fins[f].loop_, self.start_of(f)))
+            }
+            Corner::Lone(l) => {
+                let vertex = live(&self.loops, l)?.vertex;
+                Ok((l, vertex.ok_or(TopologyError::NotLone)?))
+            }
+        }
+    }
+
+    /// The two fins of an edge, or `NotManifold`.
+    fn two_fins(&self, e: EdgeId) -> Result<[FinId; 2], Error> {
+        let first = live(&self.edges, e)?.fin;
+        let second = self.fins[first].around;
+        if second == first || self.fins[second].around != first {
+            return Err(TopologyError::NotManifold.into());
+        }
+        Ok([first, second])
     }
 
     fn link_shell(&mut self, region: RegionId, s: ShellId) {
@@ -199,6 +238,17 @@ impl Body {
         self.vertices.kill(v);
     }
 
+    /// Kills an edge, its fins and its name. Its loops must already be
+    /// spliced around the fins.
+    fn kill_edge(&mut self, e: EdgeId, fins: [FinId; 2]) {
+        let name = self.edges[e].name;
+        self.retire_name(name);
+        self.edges.kill(e);
+        for f in fins {
+            self.fins.kill(f);
+        }
+    }
+
     /// Unlinks and kills a face, retiring its name.
     fn kill_face(&mut self, f: FaceId) {
         let name = self.faces[f].name;
@@ -211,7 +261,8 @@ impl Body {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::geom::{Frame, Plane, Surface};
+    use crate::geom::{Curve, Frame, Line, Plane, Surface};
+    use crate::topo::{Counts, CurveId};
 
     pub(crate) const K: OpKey = OpKey(0x10);
 
@@ -242,5 +293,23 @@ pub(crate) mod tests {
         let mut b = b.clone();
         b.compact();
         b.dump_unnamed()
+    }
+
+    pub(crate) fn counts(v: usize, e: usize, f: usize, l: usize) -> Counts {
+        Counts {
+            regions: 2,
+            shells: 1,
+            faces: f,
+            loops: l,
+            fins: 2 * e,
+            edges: e,
+            vertices: v,
+        }
+    }
+
+    /// A line from `p` to `q` and its interval.
+    pub(crate) fn line(b: &mut Body, p: Point3, q: Point3) -> (CurveId, [f64; 2]) {
+        let c = b.add_curve(Curve::Line(Line::through(p, q).unwrap()));
+        (c, [0.0, p.distance(q)])
     }
 }
