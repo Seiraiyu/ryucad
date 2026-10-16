@@ -105,6 +105,15 @@ impl Frame {
         let (s, c) = math::sin_cos(angle);
         self.x.get() * c + self.y().get() * s
     }
+
+    /// The radial direction at an angle and its derivative with respect to
+    /// the angle, `-sin(angle) x + cos(angle) y`. The first is bit-equal to
+    /// [`Frame::radial`].
+    pub fn radial_and_turn(&self, angle: f64) -> (Vector3, Vector3) {
+        let (s, c) = math::sin_cos(angle);
+        let (x, y) = (self.x.get(), self.y().get());
+        (x * c + y * s, x * -s + y * c)
+    }
 }
 
 /// `v` made perpendicular to `axis` and normalized: two Gram-Schmidt passes,

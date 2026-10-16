@@ -140,8 +140,14 @@ pub(super) fn orientation(b: &Body, out: &mut Vec<Fault>) {
             continue;
         };
         let face = &b.faces[f];
-        let n = b.surfaces[face.surface].normal(0.0, 0.0).get();
-        let n = if face.sense == Sense::Forward { n } else { -n };
+        let Some(n) = b.surfaces[face.surface].normal(0.0, 0.0) else {
+            continue;
+        };
+        let n = if face.sense == Sense::Forward {
+            n.get()
+        } else {
+            -n.get()
+        };
         if winding_sign(&triangles, n) == Sign::Negative {
             out.push(Fault::FaceInsideOut { face: f });
         }

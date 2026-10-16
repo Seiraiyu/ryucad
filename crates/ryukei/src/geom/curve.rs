@@ -102,12 +102,10 @@ impl Curve {
                 d2: Vector3::ZERO,
             },
             Self::Circle(c) => {
-                let (s, co) = math::sin_cos(t);
-                let (x, y) = (c.frame.x().get(), c.frame.y().get());
-                let radial = x * co + y * s;
+                let (radial, turn) = c.frame.radial_and_turn(t);
                 CurveEval {
                     point: c.frame.origin() + radial * c.radius,
-                    d1: (x * -s + y * co) * c.radius,
+                    d1: turn * c.radius,
                     d2: radial * -c.radius,
                 }
             }

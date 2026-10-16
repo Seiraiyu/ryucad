@@ -70,7 +70,7 @@ mod tests {
             for j in 0..8 {
                 let (u, v) = (i as f64 * 0.8, j as f64 * 0.4 - 1.4);
                 let p = s.point(u, v);
-                assert!(s.normal(u, v).get().dot(p - inside(p)) > 0.0);
+                assert!(s.normal(u, v).unwrap().get().dot(p - inside(p)) > 0.0);
             }
         }
     }

@@ -1,5 +1,7 @@
 use super::curve::check_length;
-use super::{Frame, Point3, Rigid, UnitVector3, polar_angle};
+use super::{
+    Frame, Point3, PrincipalCurvatures, Rigid, SurfaceEval, UnitVector3, Vector3, polar_angle,
+};
 use crate::Error;
 use crate::math;
 use crate::tol::ANGULAR_RESOLUTION;
@@ -190,10 +192,78 @@ impl Surface {
         }
     }
 
-    /// The natural unit normal at `(u, v)`. At a cone's apex it is the
-    /// limit along the generator at angle `u`.
-    pub fn normal(&self, u: f64, v: f64) -> UnitVector3 {
+    /// The point and its first and second partial derivatives.
+    pub fn eval(&self, u: f64, v: f64) -> SurfaceEval {
+        let zero = Vector3::ZERO;
         match self {
+            Self::Plane(s) => SurfaceEval {
+                point: s.frame.to_world(u, v, 0.0),
+                du: s.frame.x().get(),
+                dv: s.frame.y().get(),
+                duu: zero,
+                duv: zero,
+                dvv: zero,
+            },
+            Self::Cylinder(s) => {
+                let (radial, along) = s.frame.radial_and_turn(u);
+                SurfaceEval {
+                    point: s.frame.origin() + radial * s.radius + s.frame.z().get() * v,
+                    du: along * s.radius,
+                    dv: s.frame.z().get(),
+                    duu: radial * -s.radius,
+                    duv: zero,
+                    dvv: zero,
+                }
+            }
+            Self::Cone(s) => {
+                let (radial, along) = s.frame.radial_and_turn(u);
+                let slope = s.sin / s.cos;
+                let r = s.radius + v * s.sin / s.cos;
+                SurfaceEval {
+                    point: s.frame.origin() + radial * r + s.frame.z().get() * v,
+                    du: along * r,
+                    dv: radial * slope + s.frame.z().get(),
+                    duu: radial * -r,
+                    duv: along * slope,
+                    dvv: zero,
+                }
+            }
+            Self::Sphere(s) => {
+                let (radial, along) = s.frame.radial_and_turn(u);
+                let z = s.frame.z().get();
+                let (sv, cv) = math::sin_cos(v);
+                let out = radial * cv + z * sv;
+                SurfaceEval {
+                    point: s.frame.origin() + out * s.radius,
+                    du: along * (s.radius * cv),
+                    dv: (z * cv - radial * sv) * s.radius,
+                    duu: radial * -(s.radius * cv),
+                    duv: along * -(s.radius * sv),
+                    dvv: out * -s.radius,
+                }
+            }
+            Self::Torus(s) => {
+                let (radial, along) = s.frame.radial_and_turn(u);
+                let z = s.frame.z().get();
+                let (sv, cv) = math::sin_cos(v);
+                let ring = s.major + s.minor * cv;
+                SurfaceEval {
+                    point: s.frame.origin() + radial * ring + z * (s.minor * sv),
+                    du: along * ring,
+                    dv: (z * cv - radial * sv) * s.minor,
+                    duu: radial * -ring,
+                    duv: along * -(s.minor * sv),
+                    dvv: (radial * cv + z * sv) * -s.minor,
+                }
+            }
+        }
+    }
+
+    /// The natural unit normal at `(u, v)`. Always `Some` for the analytic
+    /// surfaces: at a cone's apex it is the limit along the generator at
+    /// angle `u`, and at a sphere's poles it is the axis.
+    pub fn normal(&self, u: f64, v: f64) -> Option<UnitVector3> {
+        Some(match self {
             Self::Plane(s) => s.frame.z(),
             Self::Cylinder(s) => UnitVector3::new_unchecked(s.frame.radial(u)),
             Self::Cone(s) => {
@@ -203,6 +273,27 @@ impl Surface {
                 let (sv, cv) = math::sin_cos(v);
                 UnitVector3::new_unchecked(frame.radial(u) * cv + frame.z().get() * sv)
             }
+        })
+    }
+
+    /// The principal curvatures against the natural normal (see
+    /// [`SurfaceEval::principal_curvatures`]). `None` where `du × dv`
+    /// vanishes: a sphere's poles, a cone's apex.
+    pub fn principal_curvatures(&self, u: f64, v: f64) -> Option<PrincipalCurvatures> {
+        self.eval(u, v).principal_curvatures(self.normal(u, v)?)
+    }
+
+    /// The parameter ranges `[[u0, u1], [v0, v1]]`. Open directions are
+    /// unbounded; a cone's `v` starts at its apex.
+    pub fn domain(&self) -> [[f64; 2]; 2] {
+        let all = [f64::NEG_INFINITY, f64::INFINITY];
+        let turn = [0.0, TAU];
+        match self {
+            Self::Plane(_) => [all, all],
+            Self::Cylinder(_) => [turn, all],
+            Self::Cone(s) => [turn, [s.apex_v(), f64::INFINITY]],
+            Self::Sphere(_) => [turn, [-FRAC_PI_2, FRAC_PI_2]],
+            Self::Torus(_) => [turn, turn],
         }
     }
 
@@ -346,16 +437,80 @@ mod tests {
     #[test]
     fn natural_normals() {
         let [plane, cyl, cone, sphere, torus] = all();
-        let close = |n: UnitVector3, v: Vector3| (n.get() - v).length() <= 1e-15;
+        let close = |n: Option<UnitVector3>, v: Vector3| (n.unwrap().get() - v).length() <= 1e-15;
         assert!(close(plane.normal(5.0, 5.0), Vector3::new(0.0, 0.0, 1.0)));
         assert!(close(cyl.normal(PI, 7.0), Vector3::new(-1.0, 0.0, 0.0)));
         let h = core::f64::consts::FRAC_1_SQRT_2;
         assert!(close(cone.normal(0.0, 0.0), Vector3::new(h, 0.0, -h)));
+        // At the apex: the limit along the generator.
+        let apex = cone_apex_v(&cone);
+        assert!(close(cone.normal(0.0, apex), Vector3::new(h, 0.0, -h)));
         assert!(close(
             sphere.normal(0.0, -FRAC_PI_2),
             Vector3::new(0.0, 0.0, -1.0)
         ));
         assert!(close(torus.normal(0.0, PI), Vector3::new(-1.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn eval_agrees_with_point_and_normal() {
+        for s in all() {
+            for (u, v) in [(0.0, 0.0), (0.5, 0.3), (2.0, -0.7), (4.0, 1.2)] {
+                let e = s.eval(u, v);
+                assert_eq!(e.point, s.point(u, v), "{s:?}");
+                let n = e.normal().unwrap().get();
+                assert!((n - s.normal(u, v).unwrap().get()).length() <= 1e-15);
+            }
+        }
+    }
+
+    #[test]
+    fn cylinder_derivatives() {
+        let [_, cyl, ..] = all();
+        let e = cyl.eval(FRAC_PI_2, 3.0);
+        let close = |a: Vector3, b: Vector3| (a - b).length() <= 1e-15;
+        assert!(close(e.du, Vector3::new(-2.0, 0.0, 0.0)));
+        assert!(close(e.dv, Vector3::new(0.0, 0.0, 1.0)));
+        assert!(close(e.duu, Vector3::new(0.0, -2.0, 0.0)));
+        assert_eq!((e.duv, e.dvv), (Vector3::ZERO, Vector3::ZERO));
+    }
+
+    #[test]
+    fn principal_curvatures_in_closed_form() {
+        let [plane, cyl, cone, sphere, torus] = all();
+        let k = |s: &Surface, u, v| {
+            let k = s.principal_curvatures(u, v).unwrap();
+            (k.k1, k.k2)
+        };
+        let near = |(a, b): (f64, f64), (c, d): (f64, f64)| {
+            (a - c).abs() <= 1e-14 && (b - d).abs() <= 1e-14
+        };
+        assert_eq!(k(&plane, 1.0, 2.0), (0.0, 0.0));
+        // Outward normals: convex directions curve away, so they are
+        // negative.
+        assert!(near(k(&cyl, 1.0, 2.0), (0.0, -0.5)));
+        assert!(near(k(&sphere, 1.0, 0.5), (-0.5, -0.5)));
+        // A cone at radius 4 (v = 2): the circle direction curves by
+        // cos α / ρ.
+        assert!(near(k(&cone, 1.0, 2.0), (0.0, -math::cos(FRAC_PI_4) / 4.0)));
+        // The outer equator of the torus: tube 1/r, ring 1/(R + r).
+        assert!(near(k(&torus, 0.0, 0.0), (-0.25, -1.0)));
+        // The inner equator is saddle-shaped.
+        assert!(near(k(&torus, 0.0, PI), (0.5, -1.0)));
+        // No curvatures where du vanishes: a sphere's pole, a cone's apex.
+        assert_eq!(sphere.principal_curvatures(0.0, FRAC_PI_2), None);
+        assert_eq!(cone.principal_curvatures(0.0, cone_apex_v(&cone)), None);
+    }
+
+    #[test]
+    fn domains() {
+        let [plane, cyl, cone, sphere, torus] = all();
+        let inf = f64::INFINITY;
+        assert_eq!(plane.domain(), [[-inf, inf], [-inf, inf]]);
+        assert_eq!(cyl.domain(), [[0.0, TAU], [-inf, inf]]);
+        assert_eq!(cone.domain(), [[0.0, TAU], [cone_apex_v(&cone), inf]]);
+        assert_eq!(sphere.domain(), [[0.0, TAU], [-FRAC_PI_2, FRAC_PI_2]]);
+        assert_eq!(torus.domain(), [[0.0, TAU], [0.0, TAU]]);
     }
 
     #[test]

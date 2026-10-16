@@ -199,7 +199,7 @@ fn analytic_section(golden: &mut Golden) {
         ];
         for sf in surfaces {
             let q = sf.point(u, v);
-            let n = sf.normal(u, v).get();
+            let n = sf.normal(u, v).unwrap().get();
             let (pu, pv) = sf.params_of(p);
             for x in [q.x, q.y, q.z, n.x, n.y, n.z, sf.distance(p), pu, pv] {
                 s.f64(x);

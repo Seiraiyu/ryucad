@@ -127,7 +127,7 @@ pub(crate) mod tests {
         let face = b.face(f).unwrap();
         let s = b.surface(face.surface).unwrap();
         let (u, v) = s.params_of(p);
-        let n = s.normal(u, v).get();
+        let n = s.normal(u, v).unwrap().get();
         if face.sense == Sense::Forward { n } else { -n }
     }
 

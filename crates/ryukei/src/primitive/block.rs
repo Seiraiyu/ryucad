@@ -127,7 +127,12 @@ mod tests {
                 panic!("no {role:?} face");
             };
             let face = b.face(f).unwrap();
-            let n = b.surface(face.surface).unwrap().normal(0.0, 0.0).get();
+            let n = b
+                .surface(face.surface)
+                .unwrap()
+                .normal(0.0, 0.0)
+                .unwrap()
+                .get();
             assert_eq!(n, normal);
             assert_eq!(
                 b.recipe(name).map(|r| r.starts_with("block#2a/")),

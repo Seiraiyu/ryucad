@@ -101,7 +101,7 @@ proptest! {
 
     #[test]
     fn normals_are_unit_and_perpendicular_to_the_surface(s in surface(), u in 0.0f64..TAU, v in -1.0f64..1.0) {
-        let n = s.normal(u, v).get();
+        let n = s.normal(u, v).unwrap().get();
         prop_assert!((n.length() - 1.0).abs() <= 1e-15);
         // A small step along the surface stays perpendicular to the normal
         // to first order.
