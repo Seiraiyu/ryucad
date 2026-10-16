@@ -1,0 +1,12 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "params": {
+    "X": "10 mm",
+    "gin": [
+      "/ mm",
+      "0 mm",
+     1
+    ]},
+  "type": "box"
+}

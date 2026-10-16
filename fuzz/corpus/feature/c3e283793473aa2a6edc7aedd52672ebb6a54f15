@@ -1,0 +1,16 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "params": {
+    "radius": "2.5 m"
+  },
+  "placement": {
+    "iorign": [
+      "0 mm",
+  0,
+      0,
+      1
+    ]
+  },
+  "type": "sphere"
+}

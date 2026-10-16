@@ -1,0 +1,157 @@
+name: Release
+
+# A vX.Y.Z tag builds, tests, and publishes a release, then tests the
+# installers against it. Run by hand (workflow_dispatch) for a dry run that
+# builds and tests every target but publishes nothing.
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match workspace version $version"
+            exit 1
+          fi
+
+  build:
+    name: ${{ matrix.target }}
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+      NAME: ryucad-${{ needs.version.outputs.version }}-${{ matrix.target }}
+      # Static binaries: musl links statically, and Windows needs no
+      # VC++ redistributable with the static CRT.
+      CC_x86_64_unknown_linux_musl: musl-gcc
+      CC_aarch64_unknown_linux_musl: musl-gcc
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install && rustup target add "$TARGET"
+        shell: bash
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: golden hashes on the release target
+        run: cargo test --locked -p ryukei -p ryucad --release --target "$TARGET" --test determinism
+        shell: bash
+      - name: build
+        run: RYUCAD_COMMIT="${GITHUB_SHA::12}" cargo build --locked --release -p ryucad --target "$TARGET"
+        shell: bash
+      - name: smoke test
+        shell: bash
+        run: |
+          exe="target/$TARGET/release/ryucad"
+          [ "$RUNNER_OS" = Windows ] && exe="$exe.exe"
+          out=$("$exe" version)
+          echo "$out"
+          echo "$out" | grep -q "\"target\":\"$TARGET\""
+          echo "$out" | grep -q "\"ryucad\":\"${{ needs.version.outputs.version }}\""
+          sh scripts/smoke.sh "$exe"
+      - name: package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p "dist/$NAME"
+          cp "target/$TARGET/release/ryucad" README.md "dist/$NAME/"
+          tar -czf "dist/$NAME.tar.gz" -C dist "$NAME"
+      - name: package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "dist/$env:NAME" | Out-Null
+          Copy-Item "target/$env:TARGET/release/ryucad.exe", README.md "dist/$env:NAME/"
+          Compress-Archive -Path "dist/$env:NAME" -DestinationPath "dist/$env:NAME.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: dist/${{ env.NAME }}.*
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    if: github.ref_type == 'tag'
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        working-directory: dist
+        run: sha256sum -- *.tar.gz *.zip > SHA256SUMS && cat SHA256SUMS
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=""
+          case "$GITHUB_REF_NAME" in *-*) pre="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" --generate-notes $pre \
+            dist/*.tar.gz dist/*.zip dist/SHA256SUMS install.sh install.ps1
+
+  installers:
+    name: install on ${{ matrix.os }}
+    if: github.ref_type == 'tag'
+    needs: [version, publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RYUCAD_VERSION: ${{ github.ref_name }}
+      WANT: ${{ needs.version.outputs.version }}
+    steps:
+      # The documented private-repository form: fetch the script with gh.
+      - if: runner.os != 'Windows'
+        run: gh release download "$RYUCAD_VERSION" -R "$GITHUB_REPOSITORY" -p install.sh -O - | sh
+      - if: runner.os != 'Windows'
+        name: fresh shells find the installed version
+        run: |
+          bash -lc 'ryucad version' | grep -q "\"ryucad\":\"$WANT\""
+          if command -v zsh >/dev/null; then zsh -c 'ryucad version' | grep -q "\"ryucad\":\"$WANT\""; fi
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          gh release download $env:RYUCAD_VERSION -R $env:GITHUB_REPOSITORY -p install.ps1 -O install.ps1
+          Get-Content -Raw install.ps1 | Invoke-Expression
+      - if: runner.os == 'Windows'
+        name: a fresh shell finds the installed version
+        shell: pwsh
+        run: |
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          $out = powershell -NoProfile -Command "`$env:Path = '$userPath;' + `$env:Path; ryucad version"
+          $out
+          if ($out -notmatch "`"ryucad`":`"$env:WANT`"") { throw 'wrong version on PATH' }

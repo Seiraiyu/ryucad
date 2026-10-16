@@ -1,0 +1,20 @@
+{
+  "format": 1,
+  "kind": "ryucad.faeutre",
+  "kendms": {
+    "height": "10 mm",
+    "radius": "5 mm",
+    "top_radius": "2 mm"
+  },
+  "placement": {
+    "origin": [
+      "0 mm",
+      "0 mm",
+      "0 mm"
+    ],
+    "x": [
+      0,
+      1]
+  },
+  "type": "cone"
+}

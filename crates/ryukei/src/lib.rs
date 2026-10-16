@@ -17,3 +17,6 @@ pub mod tol;
 pub mod topo;
 
 pub use error::{Error, NurbsError, TopologyError};
+
+/// This kernel's version, for ryucad's `version` report and cache keys.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");

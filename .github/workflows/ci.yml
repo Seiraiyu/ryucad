@@ -36,9 +36,9 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: baseline release
-        run: cargo test -p ryukei --release --test determinism
+        run: cargo test -p ryukei -p ryucad --release --test determinism
       - name: x86-64-v3
-        run: cargo test -p ryukei --release --test determinism
+        run: cargo test -p ryukei -p ryucad --release --test determinism
         env:
           RUSTFLAGS: -C target-cpu=x86-64-v3
           CARGO_TARGET_DIR: target/v3
@@ -46,7 +46,7 @@ jobs:
         run: |
           if grep -qw avx512f /proc/cpuinfo; then
             RUSTFLAGS="-C target-cpu=x86-64-v4" CARGO_TARGET_DIR=target/v4 \
-              cargo test -p ryukei --release --test determinism
+              cargo test -p ryukei -p ryucad --release --test determinism
           else
             echo "::notice::runner has no AVX-512; x86-64-v4 skipped"
           fi
@@ -66,3 +66,42 @@ jobs:
             cargo test -p ryukei-bench --features occt,smlib --release --test kernels -- --nocapture
             cargo bench -p ryukei-bench --features occt,smlib --no-run
           push: never
+
+  installers:
+    name: installers on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release -p ryucad
+      - if: runner.os == 'Linux'
+        run: shellcheck install.sh scripts/test-install.sh scripts/smoke.sh
+      - name: smoke test
+        shell: bash
+        run: sh scripts/smoke.sh target/release/ryucad
+      - if: runner.os != 'Windows'
+        run: sh scripts/test-install.sh
+      - if: runner.os == 'Windows'
+        name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) {
+            Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          }
+          $findings = 'install.ps1', 'scripts/test-install.ps1' |
+            ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Severity Warning, Error }
+          $findings
+          if ($findings) { throw 'PSScriptAnalyzer findings' }
+      - if: runner.os == 'Windows'
+        name: Windows PowerShell 5.1
+        shell: pwsh
+        run: scripts/test-install.ps1 -Shell powershell
+      - if: runner.os == 'Windows'
+        name: PowerShell 7
+        shell: pwsh
+        run: scripts/test-install.ps1 -Shell pwsh

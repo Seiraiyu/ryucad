@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ryucad is CAD built for AI agents to drive, not primarily for humans clicking in a GUI. FreeCAD was rejected because it performs poorly on large assemblies, and its kernel, OCCT, is a main reason. This project builds its own kernel, **ryukei**, and the long-term target is Parasolid-level capability.
 
-The project is in its early stages. Roadmap phases 0 (foundations: deterministic math, the tolerance model, exact predicates, interval arithmetic, the test harness), 1 (topology core: flat-array B-rep bodies, Euler operators, the validity checker, stable names, the five primitives), 2 (geometry: rational NURBS, the ellipse, pcurves, derivatives, global projection) and 3 (tessellation: certified, watertight, parallel meshing, and the first OCCT comparison) are done. Sweeps (phase 4) come next; see design 14 (ryukei roadmap) in the Coxswain planning project `ryucad-ryukei`.
+The project is in its early stages. Roadmap phases 0 (foundations: deterministic math, the tolerance model, exact predicates, interval arithmetic, the test harness), 1 (topology core: flat-array B-rep bodies, Euler operators, the validity checker, stable names, the five primitives), 2 (geometry: rational NURBS, the ellipse, pcurves, derivatives, global projection) and 3 (tessellation: certified, watertight, parallel meshing, and the first OCCT comparison) are done. Sweeps (phase 4) come next; see design 14 (ryukei roadmap) in the Coxswain planning project `ryucad-ryukei`. On the application side, ryucad phase 0 (projects of feature files, deterministic rebuild of the primitives, the agent CLI, the session daemon, releases and installers) is done.
 
 Above the kernel sit ryucad, the application (feature files in Git, the agent CLI, a live viewer humans watch but don't model in, assemblies at scale), and ryupdm, product data management (revisions, releases, where-used, BOM, hosted review; PDM only, not PLM). ryupdm is the likely business; ryukei and ryucad may be open sourced. Their roadmaps are designs 20 (ryucad) and 21 (ryupdm), design 23 lines up all three, and design 22 is the business plan.
 
@@ -22,10 +22,16 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cargo run -p ryucad
 UPDATE_GOLDEN=1 cargo test -p ryukei --test determinism   # after a deliberate change to results
+UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism   # the same for ryucad's rebuild hashes
 cargo bench -p ryukei-bench
+cargo bench -p ryucad
 cargo test -p ryukei-bench --features occt,smlib --release --test kernels -- --nocapture   # head-to-head with OCCT and SMLib; devcontainer only
 cd fuzz && cargo +nightly fuzz run predicates               # needs nightly + cargo-fuzz
+sh scripts/test-install.sh target/release/ryucad          # install.sh against a fake release
+sh scripts/smoke.sh target/release/ryucad                 # a short agent session on a built binary
 ```
+
+Releases are cut by pushing a tag `vX.Y.Z` that matches `version` in the root `Cargo.toml`; `.github/workflows/release.yml` builds, tests and publishes, then tests the installers against the new release. Pushing a tag publishes: only the owner does it, or asks for it.
 
 Development happens on a headless Linux VM using the devcontainer, driven by the `devcontainer` CLI rather than VS Code:
 
@@ -43,6 +49,7 @@ The product targets Windows, macOS, and Linux natively, not just WSL. CI (`.gith
 - `crates/ryukei-testkit`: test-only helpers (exact references, seeded inputs, golden hashes, Euler operator sequences from bytes, random NURBS). Never a runtime dependency.
 - `crates/ryukei-bench`: divan benchmarks, and the comparisons behind its `occt` and `smlib` features: `cxx` shims over a system OCCT 7.8 and over `libsmlib`, the kernel of NVIDIA's USD BRep built from a pinned commit. The devcontainer installs both.
 - `fuzz/`: cargo-fuzz targets, outside the workspace (nightly only).
+- `install.sh`, `install.ps1`: the installers, also published with each release. `scripts/` holds their tests and the release smoke test.
 - Design documents, roadmaps and plans live only in the Coxswain planning project `ryucad-ryukei` (`cox doc list`), never as markdown in the repo, so there is one copy of each.
 
 ryupdm code will live in this monorepo too; the repo may be split later if parts are open sourced.
@@ -106,10 +113,21 @@ The design is document 19 in the Coxswain planning project `ryucad-ryukei`.
 
 A ryucad model is a folder of canonical text feature files in a Git repo, one per feature or object, rebuilt deterministically by ryukei. Git provides history, branches and merges; ryucad supplies CAD-aware diff and merge drivers, and features reference topology by stable name. Derived data (bodies, meshes, renders) is a cache, never committed. ryupdm builds on the same repos rather than a second store. This follows the freecad-spike (github.com/Seiraiyu/freecad-spike) GO verdict, without FreeCAD.
 
+## ryucad (decided in ryucad phase 0)
+
+The design is document 24 in the Coxswain planning project `ryucad-ryukei`.
+
+- **Projects.** A project is a folder: `ryucad.json` (format, default unit), then `parts/<part>/part.json` (the ordered feature list) and `parts/<part>/features/<feature>.json`. Every file is canonical JSON (`doc::canonical`): sorted keys, one value per line, shortest round-trip numbers, LF, a trailing newline, written atomically. `format` is versioned per file kind; newer is refused with `format_too_new`. Part and feature IDs are `^[a-z0-9][a-z0-9_-]{0,62}$`, not a Windows device name, and never change. Derived data never goes into the project.
+- **Units.** Quantities are strings with units (`"10 mm"`), kept as written; bare numbers take the project's default unit and are written explicitly. ryucad converts to meters only when it calls ryukei, by one f64 multiplication. Output reports `{"value", "m"}`.
+- **Rebuild.** Each phase 0 feature is one primitive with its own body. Its `OpKey` is `OpKey::from_bytes("ryucad.feature\0<part>\0<feature>")`, so editing parameters or placement never renames anything. Placement is `origin` plus `z` and `x` axes (`Rigid::from_frame`). Features rebuild in parallel, are collected in order, and every body passes `check::check`. `tests/golden/rebuild.txt` holds ryucad's bit-exact hashes.
+- **Agent interface.** The `ryucad` CLI prints one JSON document (`{"ok", "result" | "error", "warnings"}`) and exits 0, 1 (the agent can fix it), 2 (usage), 3 (no usable project) or 4 (not the agent's fault). Error codes (`error::Code`) are stable and never reused. A part's `revision` (a hash of the files that define it) guards writes through `--expect`.
+- **Daemon.** One per project (`ryucad daemon run`), started by the CLI on demand, serving newline-delimited JSON-RPC 2.0 (`proto`) on a Unix socket in a private runtime folder or an owner-only named pipe. It checks file freshness before every request (size and time, then content hash) and caches rebuilds by revision. A daemon of another version is replaced; a request that was never delivered runs in process with a warning; `--no-daemon` or `RYUCAD_NO_DAEMON=1` skips it. CLI tests run every scenario both ways.
+- **Persistence and releases.** Models are the feature files in Git. Releases are static binaries for x86_64/aarch64 Linux (musl, with mimalloc), aarch64 macOS and x86_64 Windows, with `SHA256SUMS`; the installers verify them and install to `~/.ryucad/bin`.
+
 ## Open decisions
 
 Don't assume an answer to these. Ask the user, or record the decision here once it's made:
 
-- How agents talk to ryucad. The lean is a CLI with JSON output backed by a per-project session daemon, with MCP as a thin adapter later; not final.
+- When the MCP adapter over `proto` arrives.
 - Which parts are open source and which are paid.
 - License. Apache-2.0 is the lean (design 22), and ported SMLib code (Apache-2.0) rules out GPLv2-only.

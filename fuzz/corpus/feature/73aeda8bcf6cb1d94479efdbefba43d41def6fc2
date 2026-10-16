@@ -1,0 +1,13 @@
+{
+  "forma": 1,
+  "kind": {
+    "major_radius": "10 mm",
+    "minor_radius": [
+      0,1,
+    
+      1,
+     21
+  ]
+  },
+  "type": "torus"
+}

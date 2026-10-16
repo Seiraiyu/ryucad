@@ -6,4 +6,39 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Rust only: no C or assembly to build on any platform.
+blake3 = { version = "1", features = ["pure"] }
+clap = { version = "4", features = ["derive"] }
+interprocess = "2"
+rayon = "1"
 ryukei = { path = "../ryukei" }
+serde = { version = "1", features = ["derive"] }
+# Correctly rounded float parsing: without it, a number read back can be
+# one ulp off what was written.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+divan = "0.1"
+num-bigint = "0.4"
+num-rational = { version = "0.4", features = ["num-bigint"] }
+num-traits = "0.2"
+proptest = "1"
+ryukei-testkit = { path = "../ryukei-testkit" }
+tempfile = "3"
+
+[[bench]]
+name = "session"
+harness = false
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+widestring = "1"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+
+# musl's allocator is slow under multithreaded allocation, and rebuild runs
+# features in parallel. Kernel results don't depend on the allocator.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = "0.1"

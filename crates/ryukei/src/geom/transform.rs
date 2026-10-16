@@ -1,4 +1,4 @@
-use super::{Point3, UnitVector3, Vector3};
+use super::{Frame, Point3, UnitVector3, Vector3};
 use crate::Error;
 use crate::math;
 use crate::tol::ANGULAR_RESOLUTION;
@@ -73,6 +73,17 @@ impl Rigid {
                 [z * x * k - y * s, z * y * k + x * s, c + z * z * k],
             ],
             trans: Vector3::ZERO,
+        }
+    }
+
+    /// The placement that carries the world frame to `frame`: its axes
+    /// become the rotation's columns and its origin the translation. The
+    /// inverse of [`Frame::from_rigid`]; exact for axis-aligned frames.
+    pub fn from_frame(frame: &Frame) -> Self {
+        let (x, y, z) = (frame.x().get(), frame.y().get(), frame.z().get());
+        Self {
+            rot: [[x.x, y.x, z.x], [x.y, y.y, z.y], [x.z, y.z, z.z]],
+            trans: frame.origin().to_vector(),
         }
     }
 
@@ -254,6 +265,47 @@ impl From<Rigid> for Affine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_frame_inverts_from_rigid() {
+        assert_eq!(Rigid::from_frame(&Frame::WORLD), Rigid::IDENTITY);
+        // Axis-aligned: exact. x' = world y, z' = world -x, so y' = world -z.
+        let f = Frame::new(
+            Point3::new(1.0, 2.0, 3.0),
+            Vector3::new(-1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        )
+        .unwrap();
+        let r = Rigid::from_frame(&f);
+        assert_eq!(r.apply_point(Point3::ORIGIN), Point3::new(1.0, 2.0, 3.0));
+        assert_eq!(
+            r.apply_vector(Vector3::new(1.0, 0.0, 0.0)),
+            Vector3::new(0.0, 1.0, 0.0)
+        );
+        assert_eq!(
+            r.apply_vector(Vector3::new(0.0, 1.0, 0.0)),
+            Vector3::new(0.0, 0.0, -1.0)
+        );
+        assert_eq!(
+            r.apply_vector(Vector3::new(0.0, 0.0, 1.0)),
+            Vector3::new(-1.0, 0.0, 0.0)
+        );
+        assert_eq!(Frame::from_rigid(&r).unwrap(), f);
+        // Oblique: within rounding.
+        let axis = Vector3::new(1.0, 2.0, 2.0).normalize().unwrap();
+        let r = Rigid::translation(Vector3::new(0.5, -1.0, 2.0))
+            .then_after(&Rigid::rotation(axis, 0.7));
+        let back = Rigid::from_frame(&Frame::from_rigid(&r).unwrap());
+        for (a, b) in back
+            .rotation_matrix()
+            .iter()
+            .flatten()
+            .zip(r.rotation_matrix().iter().flatten())
+        {
+            assert!((a - b).abs() < 4.0 * f64::EPSILON, "{a} {b}");
+        }
+        assert_eq!(back.translation_part(), r.translation_part());
+    }
     use core::f64::consts::FRAC_PI_2;
 
     fn near(a: Point3, b: Point3) -> bool {

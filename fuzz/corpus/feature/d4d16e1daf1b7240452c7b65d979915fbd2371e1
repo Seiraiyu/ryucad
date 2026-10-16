@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "params": {
+    "radius": "10 mm",
+    "radius": "5 mm"
+  }
+,  "placement7077": {
+    "o00000100rigin": [
+     1
+    ]
+  },
+  "type": "0.5 nder"
+}
