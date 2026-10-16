@@ -14,5 +14,5 @@ mod lcg;
 pub mod mesh;
 pub mod nurbs;
 
-pub use golden::Golden;
+pub use golden::{Golden, Section};
 pub use lcg::Lcg;
