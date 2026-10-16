@@ -1,5 +1,42 @@
-use super::{Affine, Point3, Rigid, Vector3};
+use super::{Affine, Point2, Point3, Rigid, Vector3};
 use crate::tol::Tolerance;
+
+/// An axis-aligned box in the plane. Always non-empty: `min <= max` on
+/// each axis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Box2 {
+    min: Point2,
+    max: Point2,
+}
+
+impl Box2 {
+    /// The box spanned by two opposite corners, in any order.
+    pub fn new(a: Point2, b: Point2) -> Self {
+        Self {
+            min: Point2::new(a.x.min(b.x), a.y.min(b.y)),
+            max: Point2::new(a.x.max(b.x), a.y.max(b.y)),
+        }
+    }
+
+    pub fn from_point(p: Point2) -> Self {
+        Self { min: p, max: p }
+    }
+
+    pub fn min(&self) -> Point2 {
+        self.min
+    }
+
+    pub fn max(&self) -> Point2 {
+        self.max
+    }
+
+    pub fn union(&self, other: &Self) -> Self {
+        Self::new(
+            Point2::new(self.min.x.min(other.min.x), self.min.y.min(other.min.y)),
+            Point2::new(self.max.x.max(other.max.x), self.max.y.max(other.max.y)),
+        )
+    }
+}
 
 /// An axis-aligned bounding box. Always non-empty: `min <= max` on each axis.
 #[derive(Clone, Copy, Debug, PartialEq)]

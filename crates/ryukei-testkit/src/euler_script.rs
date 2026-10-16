@@ -89,7 +89,7 @@ pub const OPERATORS: [&str; 13] = [
 
 fn plane_frame(b: &Body, f: FaceId) -> Option<Frame> {
     match b.surface(b.face(f)?.surface)? {
-        Surface::Plane(_) => Some(*b.surface(b.face(f)?.surface)?.frame()),
+        Surface::Plane(_) => b.surface(b.face(f)?.surface)?.frame().copied(),
         _ => None,
     }
 }

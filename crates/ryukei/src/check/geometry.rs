@@ -1,5 +1,5 @@
 use super::Fault;
-use crate::geom::{Curve, Point3, Surface};
+use crate::geom::{Box3, Curve, Point3, Surface};
 use crate::predicates::{Sign, volume_sign, winding_sign};
 use crate::tol::{ANGULAR_RESOLUTION, in_size_box};
 use crate::topo::{Body, EdgeId, EntityId, FaceId, RegionKind, Sense, VertexId};
@@ -19,7 +19,12 @@ pub(super) fn geometry(b: &Body, out: &mut Vec<Fault>) {
         }
     }
     for (f, face) in b.faces.live() {
-        if !in_size_box(b.surfaces[face.surface].frame().origin()) {
+        let surface = &b.surfaces[face.surface];
+        let inside = match surface.frame() {
+            Some(frame) => in_size_box(frame.origin()),
+            None => box_inside(&surface.bounds()),
+        };
+        if !inside {
             out.push(Fault::OutsideSizeBox {
                 entity: EntityId::Face(f),
             });
@@ -50,28 +55,42 @@ pub(super) fn geometry(b: &Body, out: &mut Vec<Fault>) {
     }
 }
 
+/// True when a box lies inside the size box.
+fn box_inside(b: &Box3) -> bool {
+    in_size_box(b.min()) && in_size_box(b.max())
+}
+
 fn edge(b: &Body, e: EdgeId, out: &mut Vec<Fault>) {
     let edge = &b.edges[e];
     let curve = &b.curves[edge.curve];
     let [t0, t1] = edge.interval;
     let closed = edge.start == edge.end;
+    let [d0, d1] = curve.domain();
     let bad_interval = match (closed, curve.period()) {
         (true, Some(p)) => (t1 - t0 - p).abs() > ANGULAR_RESOLUTION,
-        (true, None) => true,
+        // A clamped curve whose ends meet closes over its whole domain.
+        (true, None) => {
+            !curve.is_closed()
+                || (t0 - d0).abs() > ANGULAR_RESOLUTION
+                || (t1 - d1).abs() > ANGULAR_RESOLUTION
+        }
         (false, Some(p)) => t1 - t0 >= p - ANGULAR_RESOLUTION,
-        (false, None) => t0 >= t1,
+        (false, None) => t0 >= t1 || t0 < d0 || t1 > d1,
     };
     if bad_interval {
         out.push(Fault::BadInterval { edge: e });
     }
-    let origin = match curve {
-        Curve::Line(l) => l.origin(),
-        Curve::Circle(c) => c.frame().origin(),
-    };
     let samples: Vec<Point3> = (0..SAMPLES)
         .map(|i| curve.point(t0 + (t1 - t0) * i as f64 / (SAMPLES - 1) as f64))
         .collect();
-    if !in_size_box(origin) || !samples.iter().all(|&p| in_size_box(p)) {
+    let inside = match curve {
+        Curve::Line(l) => in_size_box(l.origin()),
+        Curve::Circle(c) => in_size_box(c.frame().origin()),
+        Curve::Ellipse(e) => in_size_box(e.frame().origin()),
+        // The hull of the pieces the edge uses holds all of it.
+        _ => box_inside(&curve.bounds(edge.interval)),
+    };
+    if !inside || !samples.iter().all(|&p| in_size_box(p)) {
         out.push(Fault::OutsideSizeBox {
             entity: EntityId::Edge(e),
         });
@@ -140,8 +159,14 @@ pub(super) fn orientation(b: &Body, out: &mut Vec<Fault>) {
             continue;
         };
         let face = &b.faces[f];
-        let n = b.surfaces[face.surface].normal(0.0, 0.0).get();
-        let n = if face.sense == Sense::Forward { n } else { -n };
+        let Some(n) = b.surfaces[face.surface].normal(0.0, 0.0) else {
+            continue;
+        };
+        let n = if face.sense == Sense::Forward {
+            n.get()
+        } else {
+            -n.get()
+        };
         if winding_sign(&triangles, n) == Sign::Negative {
             out.push(Fault::FaceInsideOut { face: f });
         }

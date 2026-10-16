@@ -36,6 +36,10 @@ impl Point2 {
     pub fn lerp(self, other: Self, t: f64) -> Self {
         self + (other - self) * t
     }
+
+    pub fn distance(self, other: Self) -> f64 {
+        (other - self).length()
+    }
 }
 
 impl Point3 {

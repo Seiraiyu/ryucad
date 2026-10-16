@@ -32,3 +32,10 @@ path = "fuzz_targets/euler.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "nurbs"
+path = "fuzz_targets/nurbs.rs"
+test = false
+doc = false
+bench = false

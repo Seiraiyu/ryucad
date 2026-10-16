@@ -16,6 +16,7 @@ ryukei = { path = "../ryukei" }
 
 [dev-dependencies]
 divan = "0.1"
+ryukei-testkit = { path = "../ryukei-testkit" }
 
 [[bench]]
 name = "foundations"
@@ -23,4 +24,8 @@ harness = false
 
 [[bench]]
 name = "topology"
+harness = false
+
+[[bench]]
+name = "geometry"
 harness = false

@@ -8,7 +8,7 @@ A high-level plan, not a commitment. Each phase produces something testable and 
 |---|---|---|
 | 0 | Foundations (done) | Vector and transform math, a deterministic math layer, the tolerance model, robust geometric predicates, and the test/bench harness |
 | 1 | Topology core (done) | ID-based flat-array topology (body/shell/face/loop/edge/vertex), Euler operators, validity checker, stable face/edge IDs, primitives (box, cylinder, sphere, cone, torus) |
-| 2 | Geometry | NURBS curves and surfaces alongside the analytic types from phase 1, derivative evaluation, general closest-point projection |
+| 2 | Geometry (done) | NURBS curves and surfaces alongside the analytic types from phase 1, derivative evaluation, general closest-point projection |
 | 3 | Tessellation | Watertight, parallel, tolerance-driven meshing; first head-to-head benchmark against OCCT |
 | 4 | Sweeps | Extrude and revolve from 2D profiles |
 | 5 | Booleans (analytic) | Exact analytic intersections, face splitting, inside/outside classification, merging; serious fuzzing starts |

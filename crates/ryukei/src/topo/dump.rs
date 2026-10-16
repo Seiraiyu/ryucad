@@ -1,5 +1,5 @@
 use super::{Body, Id, RegionKind, Sense};
-use crate::geom::{Curve, Frame, Point3, Surface};
+use crate::geom::{Curve, Frame, KnotVector, Point3, Surface};
 use core::fmt::Write;
 
 /// The exact bits of a float, so a dump is bit-exact.
@@ -23,6 +23,25 @@ fn frame(f: &Frame) -> String {
         bits(z.y),
         bits(z.z)
     )
+}
+
+/// Distinct knots and multiplicities as `knot:mult,...`.
+fn knots(k: &KnotVector) -> String {
+    let pairs: Vec<String> = k
+        .knots()
+        .iter()
+        .zip(k.mults())
+        .map(|(&x, m)| format!("{}:{m}", bits(x)))
+        .collect();
+    pairs.join(",")
+}
+
+fn points(ps: impl Iterator<Item = Point3>) -> String {
+    ps.map(point).collect::<Vec<_>>().join(";")
+}
+
+fn floats(xs: &[f64]) -> String {
+    xs.iter().map(|&x| bits(x)).collect::<Vec<_>>().join(",")
 }
 
 fn opt<I: Id>(id: Option<I>) -> String {
@@ -159,11 +178,25 @@ impl Body {
                     )
                 }
                 Curve::Circle(c) => format!("circle {} r={}", frame(c.frame()), bits(c.radius())),
+                Curve::Ellipse(e) => format!(
+                    "ellipse {} major={} minor={}",
+                    frame(e.frame()),
+                    bits(e.major()),
+                    bits(e.minor())
+                ),
+                Curve::Nurbs(n) => format!(
+                    "nurbs degree={} periodic={} knots={} points={} weights={}",
+                    n.degree(),
+                    u8::from(n.knots().is_periodic()),
+                    knots(n.knots()),
+                    points(n.control_points()),
+                    floats(n.weights())
+                ),
             };
             line(format_args!("curve {} {geom}", id.index()));
         }
         for (id, s) in self.surfaces.live() {
-            let f = frame(s.frame());
+            let f = s.frame().map(frame).unwrap_or_default();
             let geom = match s {
                 Surface::Plane(_) => format!("plane {f}"),
                 Surface::Cylinder(c) => format!("cylinder {f} r={}", bits(c.radius())),
@@ -178,6 +211,19 @@ impl Body {
                     bits(t.major()),
                     bits(t.minor())
                 ),
+                Surface::Nurbs(n) => {
+                    let ([p, q], [nu, nv]) = (n.degrees(), n.counts());
+                    let [ku, kv] = n.knots();
+                    format!(
+                        "nurbs degrees={p},{q} periodic={},{} counts={nu},{nv} uknots={} vknots={} points={} weights={}",
+                        u8::from(ku.is_periodic()),
+                        u8::from(kv.is_periodic()),
+                        knots(ku),
+                        knots(kv),
+                        points(n.control_points()),
+                        floats(n.weights())
+                    )
+                }
             };
             line(format_args!("surface {} {geom}", id.index()));
         }
@@ -187,7 +233,7 @@ impl Body {
 
 #[cfg(test)]
 mod tests {
-    use crate::geom::{Cone, Frame, Sphere, Surface, Torus};
+    use crate::geom::{Circle, Cone, Curve, Ellipse, Frame, Sphere, Surface, Torus};
     use crate::topo::fixture::tetrahedron;
 
     #[test]
@@ -227,6 +273,58 @@ mod tests {
         assert!(b.dump().contains(" name="));
         assert!(!b.dump_unnamed().contains("name="));
         assert_eq!(b.dump_unnamed().lines().count(), b.dump().lines().count());
+    }
+
+    #[test]
+    fn every_curve_kind_dumps() {
+        let mut b = tetrahedron();
+        let f = Frame::WORLD;
+        let before = b.dump().lines().filter(|l| l.starts_with("curve ")).count();
+        b.add_curve(Curve::Circle(Circle::new(f, 2.0).unwrap()));
+        b.add_curve(Curve::Ellipse(Ellipse::new(f, 3.0, 2.0).unwrap()));
+        let d = b.dump();
+        assert!(d.contains(&format!(
+            "curve {} circle origin=0000000000000000,0000000000000000,0000000000000000 \
+             x=3ff0000000000000,0000000000000000,0000000000000000 \
+             z=0000000000000000,0000000000000000,3ff0000000000000 r=4000000000000000",
+            before
+        )));
+        assert!(d.contains(&format!(
+            "curve {} ellipse origin=0000000000000000,0000000000000000,0000000000000000 \
+             x=3ff0000000000000,0000000000000000,0000000000000000 \
+             z=0000000000000000,0000000000000000,3ff0000000000000 \
+             major=4008000000000000 minor=4000000000000000",
+            before + 1
+        )));
+    }
+
+    #[test]
+    fn nurbs_dump_their_data() {
+        use crate::geom::Plane;
+        use std::sync::Arc;
+        let (n, _) = Circle::new(Frame::WORLD, 2.0).unwrap().to_nurbs().unwrap();
+        let plane = Surface::Plane(Plane::new(Frame::WORLD));
+        let (s, _) = plane.to_nurbs([[0.0, 1.0], [0.0, 2.0]]).unwrap();
+        let mut b = tetrahedron();
+        let shared = Arc::new(n.clone());
+        b.add_curve(Curve::Nurbs(shared.clone()));
+        b.add_curve(Curve::Nurbs(shared));
+        b.add_surface(Surface::Nurbs(Arc::new(s)));
+        let d = b.dump();
+        let lines: Vec<&str> = d.lines().filter(|l| l.contains(" nurbs ")).collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains(" nurbs degree=2 periodic=1 knots=0000000000000000:2,"));
+        assert!(lines[0].contains(" weights=3fe6a09e667f3bcd,3ff0000000000000,"));
+        assert!(lines[2].contains(" nurbs degrees=1,1 periodic=0,0 counts=2,2 "));
+        assert!(lines[2].contains(&format!("{:016x}", 2.0f64.to_bits())));
+        // A shared curve and an equal private copy dump alike.
+        let mut c = tetrahedron();
+        c.add_curve(Curve::Nurbs(Arc::new(n.clone())));
+        c.add_curve(Curve::Nurbs(Arc::new(n)));
+        let mut d2 = c.dump();
+        d2.push_str(lines[2]);
+        d2.push('\n');
+        assert_eq!(d, d2);
     }
 
     #[test]

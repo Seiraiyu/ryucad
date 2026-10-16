@@ -15,4 +15,4 @@ pub mod primitive;
 pub mod tol;
 pub mod topo;
 
-pub use error::{Error, TopologyError};
+pub use error::{Error, NurbsError, TopologyError};

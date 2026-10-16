@@ -13,6 +13,27 @@ pub enum Error {
     /// A topological operator's precondition does not hold. The body is
     /// unchanged.
     Topology(TopologyError),
+    /// A knot vector, control net or weight a NURBS cannot be built from.
+    InvalidNurbs(NurbsError),
+}
+
+/// Why a NURBS constructor refused its input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NurbsError {
+    /// A degree outside `1..=MAX_DEGREE`.
+    Degree,
+    /// Knots that do not strictly increase.
+    KnotOrder,
+    /// Multiplicities that don't fit the degree and kind (clamped ends at
+    /// `degree + 1`, everything else at most `degree`, periodic ends
+    /// equal), or a count that doesn't match the knots.
+    KnotMultiplicity,
+    /// The wrong number of control points or weights for the knots.
+    ControlCount,
+    /// A weight that is not positive.
+    Weight,
+    /// A domain shorter than [`crate::tol::LINEAR_RESOLUTION`].
+    ShortDomain,
 }
 
 /// Why a topological operator refused to run.
@@ -47,7 +68,27 @@ impl fmt::Display for Error {
             Self::Degenerate => f.write_str("degenerate geometry"),
             Self::NonFinite => f.write_str("non-finite coordinate"),
             Self::Topology(t) => write!(f, "topology: {t}"),
+            Self::InvalidNurbs(n) => write!(f, "invalid NURBS: {n}"),
         }
+    }
+}
+
+impl fmt::Display for NurbsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Degree => "degree outside 1 to 25",
+            Self::KnotOrder => "knots are not strictly increasing",
+            Self::KnotMultiplicity => "knot multiplicities do not fit the degree",
+            Self::ControlCount => "wrong number of control points or weights",
+            Self::Weight => "weights must be positive",
+            Self::ShortDomain => "domain shorter than resolution",
+        })
+    }
+}
+
+impl From<NurbsError> for Error {
+    fn from(n: NurbsError) -> Self {
+        Self::InvalidNurbs(n)
     }
 }
 
@@ -78,6 +119,14 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nurbs_errors_display() {
+        assert_eq!(
+            Error::from(NurbsError::KnotOrder).to_string(),
+            "invalid NURBS: knots are not strictly increasing"
+        );
+    }
 
     #[test]
     fn displays() {

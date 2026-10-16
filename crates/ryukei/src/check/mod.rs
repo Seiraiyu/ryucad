@@ -58,7 +58,9 @@ pub enum Fault {
     /// an edge's curve frame or samples.
     OutsideSizeBox { entity: EntityId },
     /// An edge's interval does not fit its curve: a closed edge that is not
-    /// exactly one period, an open edge of a period or more.
+    /// exactly one period (or, on a clamped curve whose ends meet, its whole
+    /// domain), an open edge of a period or more, or an interval reaching
+    /// outside a clamped curve's domain.
     BadInterval { edge: EdgeId },
     /// An end of an edge's interval is farther from its vertex than the
     /// larger of their tolerances.
@@ -370,6 +372,62 @@ mod tests {
             &f,
             |x| matches!(x, Fault::VertexOffCurve { edge, .. } if *edge == e)
         ));
+    }
+
+    #[test]
+    fn intervals_must_lie_in_a_nurbs_domain() {
+        use crate::geom::Curve;
+        use std::sync::Arc;
+        let mut b = tetrahedron();
+        let e = EdgeId::from_index(0);
+        let (start, end) = (
+            b.vertices[b.edges[e].start].point,
+            b.vertices[b.edges[e].end].point,
+        );
+        let len = start.distance(end);
+        let line = crate::geom::Line::through(start, end).unwrap();
+        let (n, _) = line.to_nurbs([0.0, len]).unwrap();
+        let c = b.add_curve(Curve::Nurbs(Arc::new(n)));
+        b.edges[e].curve = c;
+        assert_eq!(check(&b), []);
+        // Reaching past the start of the knot domain.
+        b.edges[e].interval = [-0.5, len];
+        assert!(check(&b).contains(&Fault::BadInterval { edge: e }));
+    }
+
+    #[test]
+    fn closed_edges_on_closed_clamped_nurbs() {
+        use crate::geom::Curve;
+        use std::sync::Arc;
+        let (mut b, s) = crate::euler::tests::plane_body();
+        let (m, _) = crate::euler::mvfs(&mut b, crate::name::OpKey(1), Point3::ORIGIN, s).unwrap();
+        let circle = crate::geom::Circle::new(Frame::WORLD.flipped(), 1.0).unwrap();
+        // A whole circle with clamped knots: closed, but not periodic.
+        let (n, _) = circle.to_nurbs().unwrap();
+        let c = b.add_curve(Curve::Nurbs(Arc::new(n.to_clamped())));
+        let lone = crate::euler::Corner::Lone(m.loop_);
+        crate::euler::set_point(&mut b, m.vertex, n.point(0.0)).unwrap();
+        let tau = core::f64::consts::TAU;
+        let (mef, _) =
+            crate::euler::mef(&mut b, crate::name::OpKey(2), lone, lone, c, [0.0, tau]).unwrap();
+        assert_eq!(check(&b), []);
+        b.edges[mef.edge].interval = [0.0, 3.0];
+        assert!(check(&b).contains(&Fault::BadInterval { edge: mef.edge }));
+    }
+
+    #[test]
+    fn loopless_nurbs_faces_are_faults() {
+        use crate::geom::{Rigid, Surface};
+        use std::sync::Arc;
+        let (mut b, _) =
+            crate::primitive::sphere(crate::name::OpKey(1), 1.0, &Rigid::IDENTITY).unwrap();
+        let f = b.faces().next().unwrap();
+        let (n, _) = b.surfaces[b.faces[f].surface]
+            .to_nurbs([[0.0; 2]; 2])
+            .unwrap();
+        let s = b.add_surface(Surface::Nurbs(Arc::new(n)));
+        b.faces[f].surface = s;
+        assert_eq!(check_topology(&b), [Fault::Loopless { face: f }]);
     }
 
     #[test]

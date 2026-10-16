@@ -1,24 +1,31 @@
-use super::curve::check_length;
-use super::{Frame, Point3, Rigid, UnitVector3, polar_angle};
+use super::curve::{check_length, ring_box};
+use super::{
+    Box3, Frame, Point3, PrincipalCurvatures, Projection, Rigid, SurfaceEval, UnitVector3, Vector3,
+    polar_angle,
+};
+use super::{Curve2, NurbsSurface};
 use crate::Error;
 use crate::math;
 use crate::tol::ANGULAR_RESOLUTION;
 use core::f64::consts::{FRAC_PI_2, TAU};
+use std::sync::Arc;
 
 /// A surface in model space, evaluated by parameters `(u, v)`.
 ///
-/// Phase 1 has only the analytic surfaces. NURBS will be another variant;
-/// the analytic ones stay as fast paths with closed-form distances. Each
-/// natural normal points away from the axis (or along `z` for a plane); a
-/// face says whether it uses that normal or its reverse.
+/// The analytic surfaces are fast paths with closed-form distances; a
+/// NURBS surface is shared behind an `Arc`, so cloning one is cheap. Each
+/// analytic natural normal points away from the axis (or along `z` for a
+/// plane), and a NURBS's is along `du × dv`; a face says whether it uses
+/// that normal or its reverse.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Surface {
     Plane(Plane),
     Cylinder(Cylinder),
     Cone(Cone),
     Sphere(Sphere),
     Torus(Torus),
+    Nurbs(Arc<NurbsSurface>),
 }
 
 /// The frame's xy plane: `origin + u x + v y`. The normal is `z`.
@@ -157,13 +164,15 @@ impl Torus {
 }
 
 impl Surface {
-    pub fn frame(&self) -> &Frame {
+    /// The frame an analytic surface sits in; a NURBS has none.
+    pub fn frame(&self) -> Option<&Frame> {
         match self {
-            Self::Plane(s) => &s.frame,
-            Self::Cylinder(s) => &s.frame,
-            Self::Cone(s) => &s.frame,
-            Self::Sphere(s) => &s.frame,
-            Self::Torus(s) => &s.frame,
+            Self::Plane(s) => Some(&s.frame),
+            Self::Cylinder(s) => Some(&s.frame),
+            Self::Cone(s) => Some(&s.frame),
+            Self::Sphere(s) => Some(&s.frame),
+            Self::Torus(s) => Some(&s.frame),
+            Self::Nurbs(_) => None,
         }
     }
 
@@ -187,13 +196,91 @@ impl Surface {
                     + s.frame.radial(u) * (s.major + s.minor * cv)
                     + s.frame.z().get() * (s.minor * sv)
             }
+            Self::Nurbs(n) => n.point(u, v),
         }
     }
 
-    /// The natural unit normal at `(u, v)`. At a cone's apex it is the
-    /// limit along the generator at angle `u`.
-    pub fn normal(&self, u: f64, v: f64) -> UnitVector3 {
+    /// The point and its first and second partial derivatives.
+    pub fn eval(&self, u: f64, v: f64) -> SurfaceEval {
+        let zero = Vector3::ZERO;
         match self {
+            Self::Plane(s) => SurfaceEval {
+                point: s.frame.to_world(u, v, 0.0),
+                du: s.frame.x().get(),
+                dv: s.frame.y().get(),
+                duu: zero,
+                duv: zero,
+                dvv: zero,
+            },
+            Self::Cylinder(s) => {
+                let (radial, along) = s.frame.radial_and_turn(u);
+                SurfaceEval {
+                    point: s.frame.origin() + radial * s.radius + s.frame.z().get() * v,
+                    du: along * s.radius,
+                    dv: s.frame.z().get(),
+                    duu: radial * -s.radius,
+                    duv: zero,
+                    dvv: zero,
+                }
+            }
+            Self::Cone(s) => {
+                let (radial, along) = s.frame.radial_and_turn(u);
+                let slope = s.sin / s.cos;
+                let r = s.radius + v * s.sin / s.cos;
+                SurfaceEval {
+                    point: s.frame.origin() + radial * r + s.frame.z().get() * v,
+                    du: along * r,
+                    dv: radial * slope + s.frame.z().get(),
+                    duu: radial * -r,
+                    duv: along * slope,
+                    dvv: zero,
+                }
+            }
+            Self::Sphere(s) => {
+                let (radial, along) = s.frame.radial_and_turn(u);
+                let z = s.frame.z().get();
+                let (sv, cv) = math::sin_cos(v);
+                let out = radial * cv + z * sv;
+                SurfaceEval {
+                    point: s.frame.origin() + out * s.radius,
+                    du: along * (s.radius * cv),
+                    dv: (z * cv - radial * sv) * s.radius,
+                    duu: radial * -(s.radius * cv),
+                    duv: along * -(s.radius * sv),
+                    dvv: out * -s.radius,
+                }
+            }
+            Self::Torus(s) => {
+                let (radial, along) = s.frame.radial_and_turn(u);
+                let z = s.frame.z().get();
+                let (sv, cv) = math::sin_cos(v);
+                let ring = s.major + s.minor * cv;
+                SurfaceEval {
+                    point: s.frame.origin() + radial * ring + z * (s.minor * sv),
+                    du: along * ring,
+                    dv: (z * cv - radial * sv) * s.minor,
+                    duu: radial * -ring,
+                    duv: along * -(s.minor * sv),
+                    dvv: (radial * cv + z * sv) * -s.minor,
+                }
+            }
+            Self::Nurbs(n) => n.eval(u, v),
+        }
+    }
+
+    /// The point of the surface at a pcurve's parameter `t`.
+    pub fn point_at(&self, c: &Curve2, t: f64) -> Point3 {
+        let q = c.point(t);
+        self.point(q.x, q.y)
+    }
+
+    /// The natural unit normal at `(u, v)`. Always `Some` for the analytic
+    /// surfaces: at a cone's apex it is the limit along the generator at
+    /// angle `u`, and at a sphere's poles it is the axis. For a NURBS see
+    /// [`NurbsSurface::normal`].
+    pub fn normal(&self, u: f64, v: f64) -> Option<UnitVector3> {
+        Some(match self {
+            Self::Nurbs(n) => return n.normal(u, v),
             Self::Plane(s) => s.frame.z(),
             Self::Cylinder(s) => UnitVector3::new_unchecked(s.frame.radial(u)),
             Self::Cone(s) => {
@@ -203,6 +290,32 @@ impl Surface {
                 let (sv, cv) = math::sin_cos(v);
                 UnitVector3::new_unchecked(frame.radial(u) * cv + frame.z().get() * sv)
             }
+        })
+    }
+
+    /// The principal curvatures against the natural normal (see
+    /// [`SurfaceEval::principal_curvatures`]). `None` where `du × dv`
+    /// vanishes: a sphere's poles, a cone's apex.
+    pub fn principal_curvatures(&self, u: f64, v: f64) -> Option<PrincipalCurvatures> {
+        match self {
+            Self::Nurbs(n) => n.principal_curvatures(u, v),
+            _ => self.eval(u, v).principal_curvatures(self.normal(u, v)?),
+        }
+    }
+
+    /// The parameter ranges `[[u0, u1], [v0, v1]]`. Open directions are
+    /// unbounded; a cone's `v` starts at its apex; a NURBS has its knot
+    /// domains.
+    pub fn domain(&self) -> [[f64; 2]; 2] {
+        let all = [f64::NEG_INFINITY, f64::INFINITY];
+        let turn = [0.0, TAU];
+        match self {
+            Self::Plane(_) => [all, all],
+            Self::Cylinder(_) => [turn, all],
+            Self::Cone(s) => [turn, [s.apex_v(), f64::INFINITY]],
+            Self::Sphere(_) => [turn, [-FRAC_PI_2, FRAC_PI_2]],
+            Self::Torus(_) => [turn, turn],
+            Self::Nurbs(n) => n.domain(),
         }
     }
 
@@ -212,23 +325,25 @@ impl Surface {
             Self::Plane(_) => (None, None),
             Self::Cylinder(_) | Self::Cone(_) | Self::Sphere(_) => (Some(TAU), None),
             Self::Torus(_) => (Some(TAU), Some(TAU)),
+            Self::Nurbs(n) => n.periods(),
         }
     }
 
     /// For a surface that closes up on itself, the genus of that closed
-    /// surface (sphere 0, torus 1). `None` for open surfaces. Only closed
-    /// surfaces may carry a face with no loops.
+    /// surface (sphere 0, torus 1). `None` for open surfaces, and for every
+    /// NURBS: its closed genus isn't worked out. Only closed surfaces may
+    /// carry a face with no loops.
     pub fn closed_genus(&self) -> Option<u32> {
         match self {
             Self::Sphere(_) => Some(0),
             Self::Torus(_) => Some(1),
-            Self::Plane(_) | Self::Cylinder(_) | Self::Cone(_) => None,
+            Self::Plane(_) | Self::Cylinder(_) | Self::Cone(_) | Self::Nurbs(_) => None,
         }
     }
 
     /// The distance from `p` to the nearest point of the surface.
     pub fn distance(&self, p: Point3) -> f64 {
-        let q = self.frame().to_local(p);
+        let q = self.frame().unwrap_or(&Frame::WORLD).to_local(p);
         let rho = math::sqrt(q.x * q.x + q.y * q.y);
         match self {
             Self::Plane(_) => q.z.abs(),
@@ -249,14 +364,42 @@ impl Surface {
                 let w = rho - s.major;
                 (math::sqrt(w * w + q.z * q.z) - s.minor).abs()
             }
+            Self::Nurbs(n) => n.distance(p),
         }
     }
 
-    /// The parameters of the nearest point of the surface to `p`. Angles
-    /// are in `[0, 2π)`; where the nearest point is not unique (on an axis,
-    /// at a centre), angle 0 is chosen.
-    pub fn params_of(&self, p: Point3) -> (f64, f64) {
-        let q = self.frame().to_local(p);
+    /// The nearest point of the surface to `p`, in closed form. Angles are
+    /// in `[0, 2π)`; where the nearest point is not unique (on an axis, at a
+    /// centre), angle 0 is chosen. For a NURBS see [`NurbsSurface::project`].
+    pub fn project(&self, p: Point3) -> Projection<(f64, f64), Point3> {
+        if let Self::Nurbs(n) = self {
+            return n.project(p);
+        }
+        let (u, v) = self.params_of(p);
+        Projection {
+            param: (u, v),
+            point: self.point(u, v),
+            distance: self.distance(p),
+        }
+    }
+
+    /// A box holding the surface. The open surfaces (plane, cylinder,
+    /// cone) are unbounded and give the size box; a NURBS gives its hull
+    /// bounds.
+    pub fn bounds(&self) -> Box3 {
+        match self {
+            Self::Plane(_) | Self::Cylinder(_) | Self::Cone(_) => crate::tol::size_box(),
+            Self::Sphere(s) => {
+                let r = Vector3::new(s.radius, s.radius, s.radius);
+                Box3::new(s.frame.origin() - r, s.frame.origin() + r)
+            }
+            Self::Torus(s) => ring_box(&s.frame, s.major, s.minor),
+            Self::Nurbs(n) => n.bounds(),
+        }
+    }
+
+    fn params_of(&self, p: Point3) -> (f64, f64) {
+        let q = self.frame().unwrap_or(&Frame::WORLD).to_local(p);
         let rho = math::sqrt(q.x * q.x + q.y * q.y);
         let u = polar_angle(q.y, q.x);
         match self {
@@ -268,18 +411,20 @@ impl Surface {
             }
             Self::Sphere(_) => (u, math::atan2(q.z, rho)),
             Self::Torus(s) => (u, polar_angle(q.z, rho - s.major)),
+            Self::Nurbs(n) => n.project(p).param,
         }
     }
 
     /// The surface moved by a rigid transform. Parameters are unchanged.
     pub fn transformed(&self, r: &Rigid) -> Self {
-        let mut out = *self;
+        let mut out = self.clone();
         let frame = match &mut out {
             Self::Plane(s) => &mut s.frame,
             Self::Cylinder(s) => &mut s.frame,
             Self::Cone(s) => &mut s.frame,
             Self::Sphere(s) => &mut s.frame,
             Self::Torus(s) => &mut s.frame,
+            Self::Nurbs(n) => return Self::Nurbs(Arc::new(n.transformed(r))),
         };
         *frame = frame.transformed(r);
         out
@@ -346,16 +491,122 @@ mod tests {
     #[test]
     fn natural_normals() {
         let [plane, cyl, cone, sphere, torus] = all();
-        let close = |n: UnitVector3, v: Vector3| (n.get() - v).length() <= 1e-15;
+        let close = |n: Option<UnitVector3>, v: Vector3| (n.unwrap().get() - v).length() <= 1e-15;
         assert!(close(plane.normal(5.0, 5.0), Vector3::new(0.0, 0.0, 1.0)));
         assert!(close(cyl.normal(PI, 7.0), Vector3::new(-1.0, 0.0, 0.0)));
         let h = core::f64::consts::FRAC_1_SQRT_2;
         assert!(close(cone.normal(0.0, 0.0), Vector3::new(h, 0.0, -h)));
+        // At the apex: the limit along the generator.
+        let apex = cone_apex_v(&cone);
+        assert!(close(cone.normal(0.0, apex), Vector3::new(h, 0.0, -h)));
         assert!(close(
             sphere.normal(0.0, -FRAC_PI_2),
             Vector3::new(0.0, 0.0, -1.0)
         ));
         assert!(close(torus.normal(0.0, PI), Vector3::new(-1.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn eval_agrees_with_point_and_normal() {
+        for s in all() {
+            for (u, v) in [(0.0, 0.0), (0.5, 0.3), (2.0, -0.7), (4.0, 1.2)] {
+                let e = s.eval(u, v);
+                assert_eq!(e.point, s.point(u, v), "{s:?}");
+                let n = e.normal().unwrap().get();
+                assert!((n - s.normal(u, v).unwrap().get()).length() <= 1e-15);
+            }
+        }
+    }
+
+    #[test]
+    fn cylinder_derivatives() {
+        let [_, cyl, ..] = all();
+        let e = cyl.eval(FRAC_PI_2, 3.0);
+        let close = |a: Vector3, b: Vector3| (a - b).length() <= 1e-15;
+        assert!(close(e.du, Vector3::new(-2.0, 0.0, 0.0)));
+        assert!(close(e.dv, Vector3::new(0.0, 0.0, 1.0)));
+        assert!(close(e.duu, Vector3::new(0.0, -2.0, 0.0)));
+        assert_eq!((e.duv, e.dvv), (Vector3::ZERO, Vector3::ZERO));
+    }
+
+    #[test]
+    fn principal_curvatures_in_closed_form() {
+        let [plane, cyl, cone, sphere, torus] = all();
+        let k = |s: &Surface, u, v| {
+            let k = s.principal_curvatures(u, v).unwrap();
+            (k.k1, k.k2)
+        };
+        let near = |(a, b): (f64, f64), (c, d): (f64, f64)| {
+            (a - c).abs() <= 1e-14 && (b - d).abs() <= 1e-14
+        };
+        assert_eq!(k(&plane, 1.0, 2.0), (0.0, 0.0));
+        // Outward normals: convex directions curve away, so they are
+        // negative.
+        assert!(near(k(&cyl, 1.0, 2.0), (0.0, -0.5)));
+        assert!(near(k(&sphere, 1.0, 0.5), (-0.5, -0.5)));
+        // A cone at radius 4 (v = 2): the circle direction curves by
+        // cos α / ρ.
+        assert!(near(k(&cone, 1.0, 2.0), (0.0, -math::cos(FRAC_PI_4) / 4.0)));
+        // The outer equator of the torus: tube 1/r, ring 1/(R + r).
+        assert!(near(k(&torus, 0.0, 0.0), (-0.25, -1.0)));
+        // The inner equator is saddle-shaped.
+        assert!(near(k(&torus, 0.0, PI), (0.5, -1.0)));
+        // No curvatures where du vanishes: a sphere's pole, a cone's apex.
+        assert_eq!(sphere.principal_curvatures(0.0, FRAC_PI_2), None);
+        assert_eq!(cone.principal_curvatures(0.0, cone_apex_v(&cone)), None);
+    }
+
+    #[test]
+    fn points_along_a_pcurve() {
+        use crate::geom::{Curve2, Line2, Point2, Vector2};
+        let [_, cyl, ..] = all();
+        let along =
+            Curve2::Line2(Line2::new(Point2::new(0.0, 1.0), Vector2::new(1.0, 0.0)).unwrap());
+        for t in [0.0, 1.0, 4.0] {
+            assert_eq!(cyl.point_at(&along, t), cyl.point(t, 1.0));
+        }
+    }
+
+    #[test]
+    fn the_nurbs_variant() {
+        let [_, _, _, sphere, _] = all();
+        let (n, _) = sphere.to_nurbs([[0.0; 2]; 2]).unwrap();
+        let s = Surface::Nurbs(std::sync::Arc::new(n.clone()));
+        assert_eq!(s.frame(), None);
+        assert_eq!(sphere.frame(), Some(&frame()));
+        assert_eq!(s.point(0.3, 0.2), n.point(0.3, 0.2));
+        assert_eq!(s.eval(0.3, 0.2), n.eval(0.3, 0.2));
+        assert_eq!(s.normal(0.3, 0.2), n.normal(0.3, 0.2));
+        assert_eq!(
+            s.principal_curvatures(0.3, 0.2),
+            n.principal_curvatures(0.3, 0.2)
+        );
+        assert_eq!(s.domain(), n.domain());
+        assert_eq!(s.periods(), n.periods());
+        assert_eq!(s.closed_genus(), None);
+        let p = Point3::new(5.0, 1.0, -2.0);
+        assert_eq!(s.project(p), n.project(p));
+        assert_eq!(s.distance(p), n.distance(p));
+        assert_eq!(s.bounds(), n.bounds());
+        let r = Rigid::translation(Vector3::new(0.0, 0.0, 1.0));
+        assert!(near(
+            s.transformed(&r).point(0.3, 0.2),
+            s.point(0.3, 0.2) + Vector3::new(0.0, 0.0, 1.0)
+        ));
+        let (same, rp) = s.to_nurbs([[0.0; 2]; 2]).unwrap();
+        assert_eq!(same, n);
+        assert_eq!(rp, [crate::geom::Reparam::Identity; 2]);
+    }
+
+    #[test]
+    fn domains() {
+        let [plane, cyl, cone, sphere, torus] = all();
+        let inf = f64::INFINITY;
+        assert_eq!(plane.domain(), [[-inf, inf], [-inf, inf]]);
+        assert_eq!(cyl.domain(), [[0.0, TAU], [-inf, inf]]);
+        assert_eq!(cone.domain(), [[0.0, TAU], [cone_apex_v(&cone), inf]]);
+        assert_eq!(sphere.domain(), [[0.0, TAU], [-FRAC_PI_2, FRAC_PI_2]]);
+        assert_eq!(torus.domain(), [[0.0, TAU], [0.0, TAU]]);
     }
 
     #[test]
@@ -385,25 +636,42 @@ mod tests {
             for (u, v) in [(0.0, 0.0), (0.5, 0.3), (2.0, -0.7), (4.0, 1.2), (6.0, 0.9)] {
                 let p = s.point(u, v);
                 assert!(s.distance(p) <= 1e-14, "{s:?} at {u}, {v}");
-                let (pu, pv) = s.params_of(p);
+                let foot = s.project(p);
+                let (pu, pv) = foot.param;
                 assert!(near(s.point(pu, pv), p), "{s:?} at {u}, {v}");
+                assert_eq!(foot.point, s.point(pu, pv));
+                assert_eq!(foot.distance, s.distance(p));
             }
         }
     }
 
     #[test]
-    fn params_of_off_surface_points_land_on_the_nearest_point() {
+    fn projections_of_off_surface_points_land_on_the_nearest_point() {
         let [_, cyl, cone, sphere, torus] = all();
         let p = Point3::new(1.0, 7.0, 4.0);
-        let (u, v) = cyl.params_of(p);
+        let (u, v) = cyl.project(p).param;
         assert_eq!((u, v), (FRAC_PI_2, 1.0));
-        let (u, v) = sphere.params_of(Point3::new(1.0, 2.0, 9.0));
+        let (u, v) = sphere.project(Point3::new(1.0, 2.0, 9.0)).param;
         assert_eq!((u, v), (0.0, FRAC_PI_2));
-        let (_, v) = torus.params_of(Point3::new(3.5, 2.0, 3.0));
+        let (_, v) = torus.project(Point3::new(3.5, 2.0, 3.0)).param;
         assert_eq!(v, PI);
         // Below the apex the nearest point is the apex.
-        let (_, v) = cone.params_of(Point3::new(1.0, 2.0, -5.0));
+        let (_, v) = cone.project(Point3::new(1.0, 2.0, -5.0)).param;
         assert_eq!(v, cone_apex_v(&cone));
+    }
+
+    #[test]
+    fn bounds() {
+        let [plane, cyl, cone, sphere, torus] = all();
+        for open in [plane, cyl, cone] {
+            assert_eq!(open.bounds(), crate::tol::size_box());
+        }
+        let b = sphere.bounds();
+        assert_eq!(b.min(), Point3::new(-1.0, 0.0, 1.0));
+        assert_eq!(b.max(), Point3::new(3.0, 4.0, 5.0));
+        let b = torus.bounds();
+        assert_eq!(b.min(), Point3::new(-3.0, -2.0, 2.0));
+        assert_eq!(b.max(), Point3::new(5.0, 6.0, 4.0));
     }
 
     #[test]

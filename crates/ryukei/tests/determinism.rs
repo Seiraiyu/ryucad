@@ -4,8 +4,8 @@
 //! the diff like any other change.
 
 use ryukei::geom::{
-    Affine, Box3, Circle, Cone, Curve, Cylinder, Frame, Line, Plane, Point2, Point3, Rigid, Sphere,
-    Surface, Torus, Vector3,
+    Affine, Box3, Circle, Circle2, Cone, Curve, Curve2, Cylinder, Ellipse, Ellipse2, Frame, Frame2,
+    Line, Line2, Plane, Point2, Point3, Rigid, Sphere, Surface, Torus, Vector2, Vector3,
 };
 use ryukei::interval::Interval;
 use ryukei::math;
@@ -13,7 +13,7 @@ use ryukei::name::{Event, OpKey};
 use ryukei::predicates::{self, Sign};
 use ryukei::primitive;
 use ryukei_testkit::euler_script::{Bytes, start, valid_step};
-use ryukei_testkit::{Golden, Lcg};
+use ryukei_testkit::{Golden, Lcg, nurbs};
 
 fn math_section(golden: &mut Golden) {
     let mut s = golden.section("math");
@@ -185,8 +185,17 @@ fn analytic_section(golden: &mut Golden) {
         ];
         for cv in curves {
             let q = cv.point(u);
-            let t = cv.tangent(u).get();
-            for x in [q.x, q.y, q.z, t.x, t.y, t.z, cv.distance(p), cv.param_of(p)] {
+            let t = cv.tangent(u).unwrap().get();
+            for x in [
+                q.x,
+                q.y,
+                q.z,
+                t.x,
+                t.y,
+                t.z,
+                cv.distance(p),
+                cv.project(p).param,
+            ] {
                 s.f64(x);
             }
         }
@@ -199,12 +208,278 @@ fn analytic_section(golden: &mut Golden) {
         ];
         for sf in surfaces {
             let q = sf.point(u, v);
-            let n = sf.normal(u, v).get();
-            let (pu, pv) = sf.params_of(p);
+            let n = sf.normal(u, v).unwrap().get();
+            let (pu, pv) = sf.project(p).param;
             for x in [q.x, q.y, q.z, n.x, n.y, n.z, sf.distance(p), pu, pv] {
                 s.f64(x);
             }
         }
+    }
+}
+
+fn derivatives_section(golden: &mut Golden) {
+    let mut s = golden.section("derivatives");
+    let mut g = Lcg::new(0x6465_7276);
+    for _ in 0..256 {
+        let mut c = || g.next_f64(-10.0, 10.0);
+        let (o, z, x) = (
+            Point3::new(c(), c(), c()),
+            Vector3::new(c(), c(), c()),
+            Vector3::new(c(), c(), c()),
+        );
+        let (u, v) = (c(), c() / 10.0);
+        let (r, k, a) = (
+            c().abs() + 0.5,
+            (c().abs() + 1.0) / 12.0,
+            (c().abs() + 1.0) / 8.0,
+        );
+        let f = Frame::new(o, z, x).unwrap();
+        let curves = [
+            Curve::Line(Line::new(o, z).unwrap()),
+            Curve::Circle(Circle::new(f, r).unwrap()),
+        ];
+        for cv in curves {
+            let e = cv.eval(u);
+            let b = cv.bounds([u, u + r]);
+            for p in [e.point, b.min(), b.max()] {
+                s.f64(p.x);
+                s.f64(p.y);
+                s.f64(p.z);
+            }
+            for w in [e.d1, e.d2] {
+                s.f64(w.x);
+                s.f64(w.y);
+                s.f64(w.z);
+            }
+            s.f64(cv.curvature(u).unwrap());
+        }
+        let surfaces = [
+            Surface::Plane(Plane::new(f)),
+            Surface::Cylinder(Cylinder::new(f, r).unwrap()),
+            Surface::Cone(Cone::new(f, r, a).unwrap()),
+            Surface::Sphere(Sphere::new(f, r).unwrap()),
+            Surface::Torus(Torus::new(f, r, r * k).unwrap()),
+        ];
+        for sf in surfaces {
+            let e = sf.eval(u, v);
+            let b = sf.bounds();
+            for p in [e.point, b.min(), b.max()] {
+                s.f64(p.x);
+                s.f64(p.y);
+                s.f64(p.z);
+            }
+            for w in [e.du, e.dv, e.duu, e.duv, e.dvv] {
+                s.f64(w.x);
+                s.f64(w.y);
+                s.f64(w.z);
+            }
+            match sf.principal_curvatures(u, v) {
+                Some(k) => {
+                    s.f64(k.k1);
+                    s.f64(k.k2);
+                    for w in [k.dir1.get(), k.dir2.get()] {
+                        s.f64(w.x);
+                        s.f64(w.y);
+                        s.f64(w.z);
+                    }
+                }
+                None => s.u64(0),
+            }
+        }
+    }
+}
+
+fn ellipse_section(golden: &mut Golden) {
+    let mut s = golden.section("ellipse");
+    let mut g = Lcg::new(0x656c_6c70);
+    for _ in 0..512 {
+        let mut c = || g.next_f64(-10.0, 10.0);
+        let (o, z, x) = (
+            Point3::new(c(), c(), c()),
+            Vector3::new(c(), c(), c()),
+            Vector3::new(c(), c(), c()),
+        );
+        let a = c().abs() + 0.5;
+        let k = (c().abs() + 0.1) / 10.1;
+        let e = Curve::Ellipse(Ellipse::new(Frame::new(o, z, x).unwrap(), a, a * k).unwrap());
+        // Query points near the centre, where the solver works hardest.
+        let p = o + Vector3::new(c(), c(), c()) * (a / 10.0);
+        let t = c();
+        let ev = e.eval(t);
+        let foot = e.project(p);
+        let b = e.bounds([0.0, 1.0]);
+        for q in [ev.point, foot.point, b.min(), b.max()] {
+            s.f64(q.x);
+            s.f64(q.y);
+            s.f64(q.z);
+        }
+        for w in [ev.d1, ev.d2] {
+            s.f64(w.x);
+            s.f64(w.y);
+            s.f64(w.z);
+        }
+        s.f64(foot.param);
+        s.f64(foot.distance);
+        s.f64(e.curvature(t).unwrap());
+    }
+}
+
+fn conversion_section(golden: &mut Golden) {
+    let mut s = golden.section("conversion");
+    let mut g = Lcg::new(0x636f_6e76);
+    for _ in 0..64 {
+        let mut c = || g.next_f64(-10.0, 10.0);
+        let (o, z, x) = (
+            Point3::new(c(), c(), c()),
+            Vector3::new(c(), c(), c()),
+            Vector3::new(c(), c(), c()),
+        );
+        let (r, k, a) = (
+            c().abs() + 0.5,
+            (c().abs() + 1.0) / 12.0,
+            (c().abs() + 1.0) / 8.0,
+        );
+        let (t, h) = (c(), c().abs() + 0.1);
+        let f = Frame::new(o, z, x).unwrap();
+        let curves = [
+            Curve::Line(Line::new(o, z).unwrap()),
+            Curve::Circle(Circle::new(f, r).unwrap()),
+            Curve::Ellipse(Ellipse::new(f, r, r * k).unwrap()),
+        ];
+        for cv in curves {
+            let (n, rp) = cv.to_nurbs([t, t + h]).unwrap();
+            for p in n.control_points() {
+                s.f64(p.x);
+                s.f64(p.y);
+                s.f64(p.z);
+            }
+            for &w in n.weights() {
+                s.f64(w);
+            }
+            s.f64(rp.to_nurbs(t));
+            s.f64(rp.from_nurbs(t));
+        }
+        let cone = Cone::new(f, r, a).unwrap();
+        let surfaces = [
+            Surface::Plane(Plane::new(f)),
+            Surface::Cylinder(Cylinder::new(f, r).unwrap()),
+            Surface::Cone(cone),
+            Surface::Sphere(Sphere::new(f, r).unwrap()),
+            Surface::Torus(Torus::new(f, r, r * k).unwrap()),
+        ];
+        let v0 = cone.apex_v().max(t);
+        for sf in surfaces {
+            let (n, _) = sf.to_nurbs([[t, t + h], [v0, v0 + h]]).unwrap();
+            for p in n.control_points() {
+                s.f64(p.x);
+                s.f64(p.y);
+                s.f64(p.z);
+            }
+            for &w in n.weights() {
+                s.f64(w);
+            }
+        }
+    }
+}
+
+fn projection_section(golden: &mut Golden) {
+    let mut s = golden.section("projection");
+    let mut g = Lcg::new(0x7072_6f6a);
+    let point = |g: &mut Lcg| {
+        Point3::new(
+            g.next_f64(-8.0, 8.0),
+            g.next_f64(-8.0, 8.0),
+            g.next_f64(-8.0, 8.0),
+        )
+    };
+    for _ in 0..64 {
+        let c = nurbs::any_curve(&mut g);
+        for _ in 0..4 {
+            let p = point(&mut g);
+            let foot = c.project(p);
+            for x in [
+                foot.param,
+                foot.point.x,
+                foot.point.y,
+                foot.point.z,
+                foot.distance,
+            ] {
+                s.f64(x);
+            }
+            s.u64(c.local_minima(p).len() as u64);
+        }
+    }
+    for _ in 0..16 {
+        let sf = nurbs::any_surface(&mut g);
+        for _ in 0..2 {
+            let p = point(&mut g);
+            let foot = sf.project(p);
+            let (u, v) = foot.param;
+            for x in [
+                u,
+                v,
+                foot.point.x,
+                foot.point.y,
+                foot.point.z,
+                foot.distance,
+            ] {
+                s.f64(x);
+            }
+        }
+    }
+}
+
+fn pcurves_section(golden: &mut Golden) {
+    let mut s = golden.section("pcurves");
+    let mut g = Lcg::new(0x7063_7276);
+    for _ in 0..128 {
+        let mut c = || g.next_f64(-10.0, 10.0);
+        let (o, x) = (Point2::new(c(), c()), Vector2::new(c(), c()));
+        let (r, k, t) = (c().abs() + 0.5, (c().abs() + 1.0) / 12.0, c());
+        let p = Point2::new(c(), c());
+        let f = Frame2::new(o, x, t > 0.0).unwrap();
+        let curves = [
+            Curve2::Line2(Line2::new(o, x).unwrap()),
+            Curve2::Circle2(Circle2::new(f, r).unwrap()),
+            Curve2::Ellipse2(Ellipse2::new(f, r, r * k).unwrap()),
+        ];
+        for cv in curves {
+            let e = cv.eval(t);
+            let foot = cv.project(p);
+            for v in [e.point.x, e.point.y, e.d1.x, e.d1.y, e.d2.x, e.d2.y] {
+                s.f64(v);
+            }
+            for v in [foot.param, foot.point.x, foot.point.y, foot.distance] {
+                s.f64(v);
+            }
+        }
+    }
+    for _ in 0..64 {
+        let n = nurbs::any_curve2(&mut g);
+        let p = Point2::new(g.next_f64(-8.0, 8.0), g.next_f64(-8.0, 8.0));
+        let foot = n.project(p);
+        for v in [foot.param, foot.point.x, foot.point.y, foot.distance] {
+            s.f64(v);
+        }
+    }
+}
+
+fn nurbs_bodies_section(golden: &mut Golden) {
+    let mut s = golden.section("nurbs_bodies");
+    let axis = Vector3::new(1.0, -2.0, 0.5).normalize().unwrap();
+    let at = Rigid::translation(Vector3::new(12.5, -3.25, 100.0))
+        .then_after(&Rigid::rotation(axis, 2.5));
+    let key = OpKey(0x6e75_7262);
+    let bodies = [
+        primitive::block(key, 1.5, 2.25, 0.75, &at),
+        primitive::cylinder(key, 0.5, 3.0, &at),
+        primitive::cone(key, 1.25, 2.0, &at),
+        primitive::frustum(key, 2.0, 0.5, 1.0, &at),
+    ];
+    for result in bodies {
+        let (mut body, _) = result.unwrap();
+        nurbs::convert_body(&mut body).unwrap();
+        s.str(&body.dump());
     }
 }
 
@@ -282,6 +557,12 @@ fn determinism() {
     predicates_section(&mut golden);
     interval_section(&mut golden);
     analytic_section(&mut golden);
+    derivatives_section(&mut golden);
+    ellipse_section(&mut golden);
+    conversion_section(&mut golden);
+    projection_section(&mut golden);
+    pcurves_section(&mut golden);
+    nurbs_bodies_section(&mut golden);
     primitives_section(&mut golden);
     euler_section(&mut golden);
     golden.finish();

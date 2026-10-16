@@ -59,7 +59,7 @@ fn zigzag(n: usize) -> (Body, Vec<(EdgeId, VertexId)>) {
                 let l = b.fin(f).unwrap().loop_;
                 let face = b.loop_(l).unwrap().face;
                 let s = b.surface(b.face(face).unwrap().surface).unwrap();
-                s.normal(0.0, 0.0) == UnitVector3::Z
+                s.normal(0.0, 0.0) == Some(UnitVector3::Z)
             }
         })
         .map(Corner::Before)
