@@ -2,6 +2,7 @@
 
 use assert_cmd::cargo::cargo_bin;
 use interprocess::local_socket::{Stream, prelude::*};
+use ryucad::doc::project::find_root;
 use ryucad::endpoint::{Endpoint, RUNTIME_DIR_VAR};
 use ryucad::proto::{Request, parse_rpc_response, rpc_request};
 use serde_json::Value;
@@ -19,21 +20,17 @@ struct Fixture {
 
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
-    let root = dir
-        .path()
-        .join("project")
-        .canonicalize()
-        .unwrap_or_else(|_| {
-            std::fs::create_dir_all(dir.path().join("project")).unwrap();
-            dir.path().join("project").canonicalize().unwrap()
-        });
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
     let run = dir.path().join("run");
     let st = Command::new(cargo_bin("ryucad"))
         .arg("init")
-        .current_dir(&root)
+        .current_dir(&project)
         .output()
         .unwrap();
     assert!(st.status.success());
+    // The root exactly as the daemon finds it, so both name the same endpoint.
+    let root = find_root(&project).unwrap();
     Fixture {
         _dir: dir,
         root,

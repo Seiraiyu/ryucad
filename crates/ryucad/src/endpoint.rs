@@ -83,12 +83,14 @@ fn short_hash(s: &str) -> String {
 }
 
 /// The pipe prefix that marks this user's daemons on Windows, where pipe
-/// names are machine-wide.
+/// names are machine-wide. It covers the runtime folder too, so a folder's
+/// daemons are its own, as the sockets in it are on Unix.
 #[cfg(windows)]
-pub fn user_prefix() -> String {
+pub fn user_prefix(dir: &Path) -> String {
     let user = std::env::var("USERNAME").unwrap_or_default();
     let domain = std::env::var("USERDOMAIN").unwrap_or_default();
-    format!("ryucad-{}-", short_hash(&format!("{domain}\\{user}")))
+    let key = format!("{domain}\\{user}\0{}", dir.to_string_lossy());
+    format!("ryucad-{}-", short_hash(&key))
 }
 
 impl Endpoint {
@@ -102,7 +104,7 @@ impl Endpoint {
             .to_string_lossy()
             .into_owned();
         #[cfg(windows)]
-        let address = format!("{}{hash}", user_prefix());
+        let address = format!("{}{hash}", user_prefix(&dir));
         Ok(Endpoint {
             address,
             log: dir.join(format!("{hash}.log")),
@@ -123,7 +125,7 @@ impl Endpoint {
             #[cfg(unix)]
             let hash = name.strip_suffix(".sock").map(str::to_owned);
             #[cfg(windows)]
-            let hash = name.strip_prefix(&user_prefix()).map(str::to_owned);
+            let hash = name.strip_prefix(&user_prefix(&dir)).map(str::to_owned);
             if let Some(hash) = hash {
                 #[cfg(unix)]
                 let address = entry.path().to_string_lossy().into_owned();
