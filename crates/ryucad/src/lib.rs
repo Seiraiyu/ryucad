@@ -5,5 +5,6 @@ pub mod doc;
 pub mod error;
 pub mod proto;
 pub mod rebuild;
+pub mod server;
 pub mod session;
 pub mod units;
