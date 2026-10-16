@@ -432,9 +432,11 @@ impl NurbsSurface {
     /// Newton's method for a stationary point from `(u, v)`, kept inside
     /// `bounds`, halving any step that doesn't bring the point closer. A
     /// step falls back to steepest descent where the Hessian isn't positive
-    /// definite. Converged (`true`) when a step moves the point by less
-    /// than a sixteenth of [`LINEAR_RESOLUTION`] or no step brings it
-    /// closer; not when the steps run out.
+    /// definite. Converged (`true`) when a step, and the full step it was
+    /// cut from, both move the point by less than a sixteenth of
+    /// [`LINEAR_RESOLUTION`], or when no step brings it closer; not when
+    /// the steps run out. A step the line search cut short from a long one
+    /// proves nothing, however little it moved the point.
     fn descend(
         &self,
         p: Vector3,
@@ -458,9 +460,13 @@ impl NurbsSurface {
             };
             let mut t = 1.0;
             let mut next = None;
+            let mut full = 0.0;
             for _ in 0..30 {
                 let (nu, nv) = (clamp(u + t * su, 0), clamp(v + t * sv, 1));
                 let ne = self.eval(nu, nv);
+                if t == 1.0 {
+                    full = (ne.point - e.point).length();
+                }
                 let nr = ne.point.to_vector() - p;
                 if nr.dot(nr) <= r.dot(r) {
                     next = Some((nu, nv, ne, nr));
@@ -473,7 +479,7 @@ impl NurbsSurface {
             };
             let moved = (ne.point - e.point).length();
             (u, v, e, r) = (nu, nv, ne, nr);
-            if moved < LINEAR_RESOLUTION / 16.0 {
+            if moved < LINEAR_RESOLUTION / 16.0 && full < LINEAR_RESOLUTION / 16.0 {
                 return (u, v, e, true);
             }
         }
@@ -959,6 +965,37 @@ mod tests {
         let p = Point3::new(6.0, 1.9058823529411768, -6.0);
         let foot = s.project(p);
         assert!(foot.distance <= sampled(&s, p, 300) + 1e-12, "{foot:?}");
+    }
+
+    #[test]
+    fn a_point_on_a_corner() {
+        // p is the corner (u1, v1). Newton from the parts beside it wants
+        // a step out of the part, and the line search cuts it so short
+        // that the point barely moves. That isn't convergence: the
+        // shortened steps left a chain of false minima creeping towards
+        // the corner, and the corner, within resolution of the last of
+        // them, was dropped as its duplicate. Found by fuzzing.
+        let ku = KnotVector::clamped(1, &[1.0, 2.333333333333333], &[2, 2]).unwrap();
+        let kv =
+            KnotVector::clamped(1, &[-2.764705882352941, -2.6862745098039214], &[2, 2]).unwrap();
+        let c = -5.529411764705882;
+        let p = Point3::new(c, c, c);
+        let points = vec![
+            Point3::new(c, -5.670588235294118, c),
+            Point3::new(c, c, 6.0),
+            Point3::new(c, c, -5.623529411764705),
+            p,
+        ];
+        let w = vec![
+            5.0,
+            0.24411764705882355,
+            0.20529411764705885,
+            0.24411764705882355,
+        ];
+        let s = NurbsSurface::new([ku, kv], points, Some(w)).unwrap();
+        let foot = s.project(p);
+        assert_eq!(foot.distance, 0.0, "{foot:?}");
+        assert_eq!(foot.param, (2.333333333333333, -2.6862745098039214));
     }
 
     #[test]

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 83f244436c4b1b472f756c2cf64589d54febf257e9e17938247cc6a107b7e90d # shrinks to s = Sphere(Sphere { frame: Frame { origin: Point3 { x: -6.782640994536798, y: 3.2475151381202005, z: 0.13023145245000603 }, x: UnitVector3(Vector3 { x: 0.6246586412808097, y: -0.2731827709155881, z: 0.7315550256461192 }), z: UnitVector3(Vector3 { x: 0.7466407004292245, y: 0.48336827135919425, z: -0.4570369555143012 }) }, radius: 4.6361730643684185 }), p = Point3 { x: 4.594103653538985, y: 9.178166119492465, z: 0.6667453355114392 }
