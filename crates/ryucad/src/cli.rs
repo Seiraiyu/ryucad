@@ -1,9 +1,14 @@
 //! The agent CLI: arguments in, one JSON document out on stdout, and a
 //! meaningful exit code.
 
-use clap::{Parser, Subcommand};
-use ryucad::proto::VersionInfo;
-use serde_json::{Value, json};
+use clap::{Args, Parser, Subcommand};
+use ryucad::doc::project::find_root;
+use ryucad::error::{Code, Error, Result};
+use ryucad::proto::{PlacementArg, Position, Request, VersionInfo};
+use ryucad::server;
+use ryucad::units::Unit;
+use serde_json::{Map, Value, json};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser)]
@@ -13,6 +18,9 @@ use std::process::ExitCode;
     disable_version_flag = true
 )]
 struct Cli {
+    /// Run as if started in this folder.
+    #[arg(short = 'C', global = true, value_name = "DIR")]
+    dir: Option<PathBuf>,
     /// Indent the JSON output.
     #[arg(long, global = true)]
     pretty: bool,
@@ -20,29 +28,338 @@ struct Cli {
     command: Command,
 }
 
+// Parsed once per run; the size difference costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Command {
+    /// Create a project in this folder.
+    Init {
+        /// The unit for bare numbers.
+        #[arg(long, value_parser = unit)]
+        unit: Option<Unit>,
+    },
+    /// Create, delete or list parts.
+    #[command(subcommand)]
+    Part(PartCmd),
+    /// Add, edit, delete, move, list or show features.
+    #[command(subcommand)]
+    Feature(FeatureCmd),
+    /// Rebuild one part, or all of them.
+    Rebuild { part: Option<String> },
+    /// List a part's bodies, faces, edges and vertices by stable name.
+    Inspect {
+        part: String,
+        feature: Option<String>,
+        /// Only the entity with this name.
+        #[arg(long)]
+        entity: Option<String>,
+    },
+    /// Report files that aren't canonical, broken, unlisted or unknown.
+    CheckFormat,
     /// Print the ryucad, ryukei and protocol versions.
     Version,
 }
 
-pub fn main() -> ExitCode {
-    let cli = Cli::parse();
-    let result = match cli.command {
-        Command::Version => json!(VersionInfo::current()),
-    };
-    print(
-        &json!({"ok": true, "result": result, "warnings": []}),
-        cli.pretty,
-    );
-    ExitCode::SUCCESS
+#[derive(Subcommand)]
+enum PartCmd {
+    Create {
+        part: String,
+    },
+    Delete {
+        part: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    List,
 }
 
-fn print(v: &Value, pretty: bool) {
+#[derive(Subcommand)]
+enum FeatureCmd {
+    /// Add a feature: box (x, y, z), cylinder (radius, height), cone
+    /// (radius, height, top_radius), sphere (radius) or torus
+    /// (major_radius, minor_radius).
+    Add {
+        part: String,
+        #[arg(value_name = "TYPE")]
+        ty: String,
+        /// The feature's ID; generated as <type>-<n> when left out.
+        #[arg(long)]
+        id: Option<String>,
+        #[command(flatten)]
+        position: PositionArgs,
+        #[command(flatten)]
+        params: ParamArgs,
+        #[command(flatten)]
+        placement: PlacementArgs,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Change some of a feature's parameters or placement.
+    Edit {
+        part: String,
+        id: String,
+        #[command(flatten)]
+        params: ParamArgs,
+        /// Remove an optional parameter.
+        #[arg(long, value_name = "NAME")]
+        unset: Vec<String>,
+        #[command(flatten)]
+        placement: PlacementArgs,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Delete {
+        part: String,
+        id: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Move a feature after another, or to the front.
+    Move {
+        part: String,
+        id: String,
+        #[command(flatten)]
+        position: PositionArgs,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    List {
+        part: String,
+    },
+    Show {
+        part: String,
+        id: String,
+    },
+}
+
+#[derive(Args)]
+struct Expect {
+    /// Fail with `conflict` unless the part is still at this revision.
+    #[arg(long = "expect", value_name = "REVISION")]
+    revision: Option<String>,
+}
+
+#[derive(Args)]
+struct PositionArgs {
+    /// Put the feature after this one.
+    #[arg(long, value_name = "ID", conflicts_with = "first")]
+    after: Option<String>,
+    /// Put the feature first.
+    #[arg(long)]
+    first: bool,
+}
+
+#[derive(Args)]
+struct ParamArgs {
+    /// A parameter, such as radius=12.5 or "height=2 in".
+    #[arg(long = "param", value_name = "NAME=QUANTITY", value_parser = param)]
+    params: Vec<(String, String)>,
+}
+
+#[derive(Args)]
+struct PlacementArgs {
+    /// The local origin, three quantities: 0,0,10mm.
+    #[arg(long, value_name = "X,Y,Z", value_parser = triple)]
+    origin: Option<[String; 3]>,
+    /// The local z axis: 0,0,1.
+    #[arg(long, value_name = "X,Y,Z", value_parser = vector)]
+    z: Option<[f64; 3]>,
+    /// The local x direction: 1,0,0.
+    #[arg(long, value_name = "X,Y,Z", value_parser = vector)]
+    x: Option<[f64; 3]>,
+}
+
+fn unit(s: &str) -> core::result::Result<Unit, String> {
+    Unit::parse(s).ok_or_else(|| "use m, cm, mm, um, in or ft".to_owned())
+}
+
+fn param(s: &str) -> core::result::Result<(String, String), String> {
+    s.split_once('=')
+        .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
+        .ok_or_else(|| "expected NAME=QUANTITY".to_owned())
+}
+
+fn triple(s: &str) -> core::result::Result<[String; 3], String> {
+    let parts: Vec<String> = s.split(',').map(|p| p.trim().to_owned()).collect();
+    parts
+        .try_into()
+        .map_err(|_| "expected three values: X,Y,Z".to_owned())
+}
+
+fn vector(s: &str) -> core::result::Result<[f64; 3], String> {
+    let t = triple(s)?;
+    let n = |x: &str| {
+        x.parse::<f64>()
+            .map_err(|_| format!("{x:?} is not a number"))
+    };
+    Ok([n(&t[0])?, n(&t[1])?, n(&t[2])?])
+}
+
+impl ParamArgs {
+    fn to_map(&self) -> Map<String, Value> {
+        self.params
+            .iter()
+            .map(|(k, v)| (k.clone(), json!(v)))
+            .collect()
+    }
+}
+
+impl PlacementArgs {
+    fn to_arg(&self) -> Option<PlacementArg> {
+        let arg = PlacementArg {
+            origin: self.origin.clone().map(|o| o.map(Value::String)),
+            z: self.z,
+            x: self.x,
+        };
+        (arg != PlacementArg::default()).then_some(arg)
+    }
+}
+
+impl PositionArgs {
+    fn to_position(&self) -> Position {
+        Position {
+            after: self.after.clone(),
+            first: self.first,
+        }
+    }
+}
+
+/// The session request for a command; `None` for commands that need no
+/// project.
+fn request(cmd: &Command) -> Option<Request> {
+    Some(match cmd {
+        Command::Init { .. } | Command::Version => return None,
+        Command::Part(PartCmd::Create { part }) => Request::PartCreate { part: part.clone() },
+        Command::Part(PartCmd::Delete { part, expect }) => Request::PartDelete {
+            part: part.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Part(PartCmd::List) => Request::PartList {},
+        Command::Feature(FeatureCmd::Add {
+            part,
+            ty,
+            id,
+            position,
+            params,
+            placement,
+            expect,
+        }) => Request::FeatureAdd {
+            part: part.clone(),
+            ty: ty.clone(),
+            params: params.to_map(),
+            placement: placement.to_arg(),
+            id: id.clone(),
+            position: position.to_position(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Feature(FeatureCmd::Edit {
+            part,
+            id,
+            params,
+            unset,
+            placement,
+            expect,
+        }) => {
+            let mut params = params.to_map();
+            params.extend(unset.iter().map(|k| (k.clone(), Value::Null)));
+            Request::FeatureEdit {
+                part: part.clone(),
+                id: id.clone(),
+                params,
+                placement: placement.to_arg(),
+                expected_revision: expect.revision.clone(),
+            }
+        }
+        Command::Feature(FeatureCmd::Delete { part, id, expect }) => Request::FeatureDelete {
+            part: part.clone(),
+            id: id.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Feature(FeatureCmd::Move {
+            part,
+            id,
+            position,
+            expect,
+        }) => Request::FeatureMove {
+            part: part.clone(),
+            id: id.clone(),
+            position: position.to_position(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Feature(FeatureCmd::List { part }) => Request::FeatureList { part: part.clone() },
+        Command::Feature(FeatureCmd::Show { part, id }) => Request::FeatureShow {
+            part: part.clone(),
+            id: id.clone(),
+        },
+        Command::Rebuild { part } => Request::Rebuild { part: part.clone() },
+        Command::Inspect {
+            part,
+            feature,
+            entity,
+        } => Request::Inspect {
+            part: part.clone(),
+            feature: feature.clone(),
+            entity: entity.clone(),
+        },
+        Command::CheckFormat => Request::CheckFormat {},
+    })
+}
+
+fn run(cli: &Cli) -> Result<Value> {
+    let here = match &cli.dir {
+        Some(d) => d.clone(),
+        None => std::env::current_dir().map_err(|e| Error::io(std::path::Path::new("."), &e))?,
+    };
+    match &cli.command {
+        Command::Version => Ok(json!(VersionInfo::current())),
+        Command::Init { unit } => server::init(&here, *unit),
+        cmd => {
+            let req = request(cmd).expect("every other command is a request");
+            let root = find_root(&here)?;
+            server::handle_safely(&mut None, &root, req)
+        }
+    }
+}
+
+pub fn main() -> ExitCode {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            use clap::error::ErrorKind;
+            if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion)
+                || e.kind() == ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            {
+                // Help is for people; print it as clap does.
+                let _ = e.print();
+                return ExitCode::SUCCESS;
+            }
+            let err = Error::new(Code::Usage, e.render().to_string().trim().to_owned());
+            return finish(
+                Err(err),
+                Vec::new(),
+                std::env::args().any(|a| a == "--pretty"),
+            );
+        }
+    };
+    finish(run(&cli), Vec::new(), cli.pretty)
+}
+
+fn finish(outcome: Result<Value>, warnings: Vec<String>, pretty: bool) -> ExitCode {
+    let (doc, code) = match outcome {
+        Ok(result) => (
+            json!({"ok": true, "result": result, "warnings": warnings}),
+            0,
+        ),
+        Err(e) => {
+            let code = e.code.exit_code();
+            (json!({"ok": false, "error": e, "warnings": warnings}), code)
+        }
+    };
     let s = if pretty {
-        serde_json::to_string_pretty(v)
+        serde_json::to_string_pretty(&doc)
     } else {
-        serde_json::to_string(v)
+        serde_json::to_string(&doc)
     };
     println!("{}", s.expect("JSON values always serialize"));
+    ExitCode::from(code)
 }
