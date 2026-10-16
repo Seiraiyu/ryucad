@@ -1,3 +1,4 @@
+use super::Curve2;
 use super::curve::{check_length, ring_box};
 use super::{
     Box3, Frame, Point3, PrincipalCurvatures, Projection, Rigid, SurfaceEval, UnitVector3, Vector3,
@@ -258,6 +259,12 @@ impl Surface {
                 }
             }
         }
+    }
+
+    /// The point of the surface at a pcurve's parameter `t`.
+    pub fn point_at(&self, c: &Curve2, t: f64) -> Point3 {
+        let q = c.point(t);
+        self.point(q.x, q.y)
     }
 
     /// The natural unit normal at `(u, v)`. Always `Some` for the analytic
@@ -523,6 +530,17 @@ mod tests {
         // No curvatures where du vanishes: a sphere's pole, a cone's apex.
         assert_eq!(sphere.principal_curvatures(0.0, FRAC_PI_2), None);
         assert_eq!(cone.principal_curvatures(0.0, cone_apex_v(&cone)), None);
+    }
+
+    #[test]
+    fn points_along_a_pcurve() {
+        use crate::geom::{Curve2, Line2, Point2, Vector2};
+        let [_, cyl, ..] = all();
+        let along =
+            Curve2::Line2(Line2::new(Point2::new(0.0, 1.0), Vector2::new(1.0, 0.0)).unwrap());
+        for t in [0.0, 1.0, 4.0] {
+            assert_eq!(cyl.point_at(&along, t), cyl.point(t, 1.0));
+        }
     }
 
     #[test]

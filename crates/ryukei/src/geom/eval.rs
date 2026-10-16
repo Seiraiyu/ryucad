@@ -1,7 +1,7 @@
 //! Evaluation results: a point together with its derivatives, and the
 //! differential geometry derived from them.
 
-use super::{Point3, UnitVector3, Vector3};
+use super::{Point2, Point3, UnitVector3, Vector2, Vector3};
 use crate::tol::{ANGULAR_RESOLUTION, LINEAR_RESOLUTION};
 
 /// A curve's point and its first two derivatives at one parameter.
@@ -33,6 +33,40 @@ impl CurveEval {
     /// `d2` times `s²`. Tangent and curvature don't change, but the
     /// vanishing tests then measure what moving across a parameter range
     /// of length `s` does, rather than depending on the parameter's units.
+    pub fn scaled(&self, s: f64) -> Self {
+        Self {
+            point: self.point,
+            d1: self.d1 * s,
+            d2: self.d2 * (s * s),
+        }
+    }
+}
+
+/// A plane curve's point and its first two derivatives at one parameter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CurveEval2 {
+    pub point: Point2,
+    pub d1: Vector2,
+    pub d2: Vector2,
+}
+
+impl CurveEval2 {
+    /// The unit tangent, as for [`CurveEval::tangent`].
+    pub fn tangent(&self) -> Option<Vector2> {
+        let unit = |v: Vector2| {
+            let len = v.length();
+            (len > LINEAR_RESOLUTION).then(|| v / len)
+        };
+        unit(self.d1).or_else(|| unit(self.d2))
+    }
+
+    /// `|d1 × d2| / |d1|³`; `None` where the first derivative vanishes.
+    pub fn curvature(&self) -> Option<f64> {
+        let speed = self.d1.length();
+        (speed > LINEAR_RESOLUTION).then(|| self.d1.cross(self.d2).abs() / (speed * speed * speed))
+    }
+
+    /// See [`CurveEval::scaled`].
     pub fn scaled(&self, s: f64) -> Self {
         Self {
             point: self.point,
