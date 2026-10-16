@@ -121,12 +121,13 @@ impl Ellipse {
 impl Curve {
     /// The exact NURBS form of an analytic curve and how its parameter
     /// relates. `range` bounds an unbounded curve (a line); closed curves
-    /// convert whole and ignore it.
+    /// convert whole and ignore it; a NURBS is returned as it is.
     pub fn to_nurbs(&self, range: [f64; 2]) -> Result<(NurbsCurve, Reparam), Error> {
         match self {
             Self::Line(l) => l.to_nurbs(range),
             Self::Circle(c) => c.to_nurbs(),
             Self::Ellipse(e) => e.to_nurbs(),
+            Self::Nurbs(n) => Ok(((**n).clone(), Reparam::Identity)),
         }
     }
 }
@@ -191,13 +192,13 @@ impl Surface {
     /// The exact NURBS form of an analytic surface and how each parameter
     /// relates. `ranges` bounds the unbounded directions (both for a plane,
     /// `v` for a cylinder or cone); closed directions and a sphere's `v`
-    /// convert whole and ignore their range. A cone's `v` range must not go
-    /// below its apex (`Degenerate`). Otherwise fails like
+    /// convert whole and ignore their range; a NURBS is returned as it is.
+    /// A cone's `v` range must not go below its apex (`Degenerate`). Otherwise fails like
     /// [`Line::to_nurbs`].
     pub fn to_nurbs(&self, ranges: [[f64; 2]; 2]) -> Result<(NurbsSurface, [Reparam; 2]), Error> {
         let [[u0, u1], [v0, v1]] = ranges;
         let line = |a: f64, b: f64| KnotVector::clamped(1, &[a, b], &[2, 2]);
-        let f = self.frame();
+        let f = self.frame().unwrap_or(&Frame::WORLD);
         let swept = [Reparam::Angle, Reparam::Identity];
         let round = [Reparam::Angle, Reparam::Angle];
         match self {
@@ -243,6 +244,7 @@ impl Surface {
                     .collect();
                 Ok((revolve(f, turn_knots()?, &profile)?, round))
             }
+            Self::Nurbs(n) => Ok(((**n).clone(), [Reparam::Identity; 2])),
         }
     }
 }

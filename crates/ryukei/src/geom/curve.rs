@@ -1,21 +1,24 @@
 use super::{
-    Box3, CurveEval, Ellipse, Frame, Point3, Projection, Rigid, UnitVector3, Vector3, polar_angle,
+    Box3, CurveEval, Ellipse, Frame, NurbsCurve, Point3, Projection, Rigid, UnitVector3, Vector3,
+    polar_angle,
 };
 use crate::Error;
 use crate::math;
 use crate::tol::LINEAR_RESOLUTION;
 use core::f64::consts::TAU;
+use std::sync::Arc;
 
 /// A curve in model space, evaluated by a parameter `t`.
 ///
-/// Only analytic curves so far. NURBS will be another variant; the
-/// analytic ones stay as fast paths with closed-form distances.
+/// The analytic curves are fast paths with closed-form distances; a NURBS
+/// curve is shared behind an `Arc`, so cloning one is cheap.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Curve {
     Line(Line),
     Circle(Circle),
     Ellipse(Ellipse),
+    Nurbs(Arc<NurbsCurve>),
 }
 
 /// An infinite straight line `origin + t dir`; `t` is arc length.
@@ -105,6 +108,7 @@ impl Curve {
             Self::Line(l) => l.origin + l.dir.get() * t,
             Self::Circle(c) => c.frame.origin() + c.frame.radial(t) * c.radius,
             Self::Ellipse(e) => e.point(t),
+            Self::Nurbs(n) => n.point(t),
         }
     }
 
@@ -125,6 +129,7 @@ impl Curve {
                 }
             }
             Self::Ellipse(e) => e.eval(t),
+            Self::Nurbs(n) => n.eval(t),
         }
     }
 
@@ -141,25 +146,42 @@ impl Curve {
                 ))
             }
             Self::Ellipse(e) => e.eval(t).tangent(),
+            Self::Nurbs(n) => n.tangent(t),
         }
     }
 
-    /// The curvature at `t`, in closed form: 0 for a line, `1 / r` for a
-    /// circle.
+    /// The curvature at `t`, in closed form for the analytic curves: 0 for
+    /// a line, `1 / r` for a circle.
     pub fn curvature(&self, t: f64) -> Option<f64> {
         match self {
             Self::Line(_) => Some(0.0),
             Self::Circle(c) => Some(1.0 / c.radius),
             Self::Ellipse(e) => Some(e.curvature(t)),
+            Self::Nurbs(n) => n.curvature(t),
         }
     }
 
     /// The parameter range: unbounded for a line, `[0, 2π]` for a circle or
-    /// an ellipse.
+    /// an ellipse, the knot domain for a NURBS.
     pub fn domain(&self) -> [f64; 2] {
         match self {
             Self::Line(_) => [f64::NEG_INFINITY, f64::INFINITY],
             Self::Circle(_) | Self::Ellipse(_) => [0.0, TAU],
+            Self::Nurbs(n) => n.domain(),
+        }
+    }
+
+    /// True for a curve that closes up on itself: a circle, an ellipse, a
+    /// periodic NURBS, or a clamped one whose ends meet within
+    /// [`LINEAR_RESOLUTION`].
+    pub fn is_closed(&self) -> bool {
+        match self {
+            Self::Line(_) => false,
+            Self::Circle(_) | Self::Ellipse(_) => true,
+            Self::Nurbs(n) => {
+                let [a, b] = n.domain();
+                n.period().is_some() || n.point(a).distance(n.point(b)) <= LINEAR_RESOLUTION
+            }
         }
     }
 
@@ -169,6 +191,7 @@ impl Curve {
         match self {
             Self::Line(_) => None,
             Self::Circle(_) | Self::Ellipse(_) => Some(TAU),
+            Self::Nurbs(n) => n.period(),
         }
     }
 
@@ -186,6 +209,7 @@ impl Curve {
                 math::sqrt(dr * dr + q.z * q.z)
             }
             Self::Ellipse(e) => e.point(e.nearest_param(p)).distance(p),
+            Self::Nurbs(n) => n.distance(p),
         }
     }
 
@@ -196,6 +220,7 @@ impl Curve {
     /// parameter wins.
     pub fn project(&self, p: Point3) -> Projection<f64, Point3> {
         let param = match self {
+            Self::Nurbs(n) => return n.project(p),
             Self::Line(l) => (p - l.origin).dot(l.dir.get()),
             Self::Circle(c) => {
                 let q = c.frame.to_local(p);
@@ -221,6 +246,7 @@ impl Curve {
             Self::Line(_) => Box3::new(self.point(range[0]), self.point(range[1])),
             Self::Circle(c) => ring_box(&c.frame, c.radius, 0.0),
             Self::Ellipse(e) => e.bounds(),
+            Self::Nurbs(n) => n.bounds(range),
         }
     }
 
@@ -236,6 +262,7 @@ impl Curve {
                 radius: c.radius,
             }),
             Self::Ellipse(e) => Self::Ellipse(e.transformed(r)),
+            Self::Nurbs(n) => Self::Nurbs(Arc::new(n.transformed(r))),
         }
     }
 }
@@ -342,6 +369,62 @@ mod tests {
         let close = |a: Point3, b: Point3| a.distance(b) <= 1e-15;
         assert!(close(b.min(), Point3::new(-1.0, 2.0 - h, 3.0 - h)));
         assert!(close(b.max(), Point3::new(3.0, 2.0 + h, 3.0 + h)));
+    }
+
+    /// The quarter of the unit circle from +x to +y as a NURBS curve.
+    fn quarter() -> Curve {
+        use crate::geom::{KnotVector, NurbsCurve};
+        let k = KnotVector::clamped(2, &[0.0, 1.0], &[3, 3]).unwrap();
+        let p = vec![
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ];
+        let w = Some(vec![1.0, core::f64::consts::FRAC_1_SQRT_2, 1.0]);
+        Curve::Nurbs(std::sync::Arc::new(NurbsCurve::new(k, p, w).unwrap()))
+    }
+
+    #[test]
+    fn the_nurbs_variant() {
+        let c = quarter();
+        let Curve::Nurbs(n) = &c else { unreachable!() };
+        assert_eq!(c.point(0.3), n.point(0.3));
+        assert_eq!(c.eval(0.3), n.eval(0.3));
+        assert_eq!(c.tangent(0.3), n.tangent(0.3));
+        assert_eq!(c.curvature(0.3), n.curvature(0.3));
+        assert_eq!((c.domain(), c.period()), ([0.0, 1.0], None));
+        let p = Point3::new(2.0, 2.0, 0.0);
+        assert_eq!(c.project(p), n.project(p));
+        assert_eq!(c.distance(p), n.distance(p));
+        assert_eq!(c.bounds([0.0, 1.0]), n.bounds([0.0, 1.0]));
+        let r = Rigid::translation(Vector3::new(0.0, 0.0, 1.0));
+        assert!(near(
+            c.transformed(&r).point(0.3),
+            c.point(0.3) + Vector3::new(0.0, 0.0, 1.0)
+        ));
+        let (same, rp) = c.to_nurbs([0.0, 0.0]).unwrap();
+        assert_eq!(
+            (Curve::Nurbs(std::sync::Arc::new(same)), rp),
+            (c, crate::geom::Reparam::Identity)
+        );
+    }
+
+    #[test]
+    fn closed_curves() {
+        assert!(circle().is_closed());
+        let l = Curve::Line(Line::new(Point3::ORIGIN, Vector3::new(1.0, 0.0, 0.0)).unwrap());
+        assert!(!l.is_closed());
+        assert!(!quarter().is_closed());
+        let (whole, _) = circle().to_nurbs([0.0, 0.0]).unwrap();
+        let whole = Curve::Nurbs(std::sync::Arc::new(whole));
+        assert!(whole.is_closed());
+        let Curve::Nurbs(n) = &whole else {
+            unreachable!()
+        };
+        // Clamped, but its ends meet: closed without being periodic.
+        let clamped = Curve::Nurbs(std::sync::Arc::new(n.to_clamped()));
+        assert_eq!(clamped.period(), None);
+        assert!(clamped.is_closed());
     }
 
     #[test]

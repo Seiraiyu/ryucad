@@ -1,5 +1,5 @@
 use super::Fault;
-use crate::geom::{Curve, Point3, Surface};
+use crate::geom::{Box3, Curve, Point3, Surface};
 use crate::predicates::{Sign, volume_sign, winding_sign};
 use crate::tol::{ANGULAR_RESOLUTION, in_size_box};
 use crate::topo::{Body, EdgeId, EntityId, FaceId, RegionKind, Sense, VertexId};
@@ -19,7 +19,12 @@ pub(super) fn geometry(b: &Body, out: &mut Vec<Fault>) {
         }
     }
     for (f, face) in b.faces.live() {
-        if !in_size_box(b.surfaces[face.surface].frame().origin()) {
+        let surface = &b.surfaces[face.surface];
+        let inside = match surface.frame() {
+            Some(frame) => in_size_box(frame.origin()),
+            None => box_inside(&surface.bounds()),
+        };
+        if !inside {
             out.push(Fault::OutsideSizeBox {
                 entity: EntityId::Face(f),
             });
@@ -50,6 +55,11 @@ pub(super) fn geometry(b: &Body, out: &mut Vec<Fault>) {
     }
 }
 
+/// True when a box lies inside the size box.
+fn box_inside(b: &Box3) -> bool {
+    in_size_box(b.min()) && in_size_box(b.max())
+}
+
 fn edge(b: &Body, e: EdgeId, out: &mut Vec<Fault>) {
     let edge = &b.edges[e];
     let curve = &b.curves[edge.curve];
@@ -64,15 +74,17 @@ fn edge(b: &Body, e: EdgeId, out: &mut Vec<Fault>) {
     if bad_interval {
         out.push(Fault::BadInterval { edge: e });
     }
-    let origin = match curve {
-        Curve::Line(l) => l.origin(),
-        Curve::Circle(c) => c.frame().origin(),
-        Curve::Ellipse(e) => e.frame().origin(),
-    };
     let samples: Vec<Point3> = (0..SAMPLES)
         .map(|i| curve.point(t0 + (t1 - t0) * i as f64 / (SAMPLES - 1) as f64))
         .collect();
-    if !in_size_box(origin) || !samples.iter().all(|&p| in_size_box(p)) {
+    let inside = match curve {
+        Curve::Line(l) => in_size_box(l.origin()),
+        Curve::Circle(c) => in_size_box(c.frame().origin()),
+        Curve::Ellipse(e) => in_size_box(e.frame().origin()),
+        // The hull of the pieces the edge uses holds all of it.
+        _ => box_inside(&curve.bounds(edge.interval)),
+    };
+    if !inside || !samples.iter().all(|&p| in_size_box(p)) {
         out.push(Fault::OutsideSizeBox {
             entity: EntityId::Edge(e),
         });
