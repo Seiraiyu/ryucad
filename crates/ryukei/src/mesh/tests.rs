@@ -145,3 +145,36 @@ fn the_same_body_gives_the_same_mesh() {
     let p = MeshParams::new(1e-3, 0.3);
     assert_eq!(tessellate(&b, &p), tessellate(&b, &p));
 }
+
+#[test]
+fn one_thread_or_many_gives_the_same_mesh() {
+    let bodies = [
+        primitive::torus(OpKey(1), 2.0, 0.5, &tilted()).unwrap().0,
+        primitive::cylinder(OpKey(1), 1.0, 2.0, &tilted())
+            .unwrap()
+            .0,
+    ];
+    let p = MeshParams::new(1e-3, 0.3);
+    for b in &bodies {
+        let on = |n: usize| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .build()
+                .unwrap()
+                .install(|| tessellate(b, &p).unwrap())
+        };
+        assert_eq!(on(1), on(8));
+    }
+}
+
+#[test]
+fn runaway_requests_are_refused_before_meshing() {
+    // A 1 m sphere at 1e-7 m would need about 10^8 triangles.
+    let b = primitive::sphere(OpKey(1), 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let start = std::time::Instant::now();
+    let r = tessellate(&b, &MeshParams::new(1e-7, 1.5));
+    assert!(matches!(r, Err(Error::MeshTooLarge { triangles }) if triangles > 50_000_000));
+    assert!(start.elapsed().as_secs() < 10);
+}

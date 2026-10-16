@@ -12,6 +12,12 @@
 //!
 //! A face that can't be meshed within the guarantees is left out and
 //! reported as a [`FaceFault`]; every other face is still meshed.
+//!
+//! Edges, and then faces, are meshed in parallel on the current rayon
+//! pool (a caller picks the threads with `ThreadPool::install`). Each is a
+//! pure function of the body, the parameters and the edges' samples, and
+//! the results are collected in ID order, so the mesh is the same bits on
+//! one thread or many.
 
 mod assemble;
 mod bound;
@@ -33,6 +39,7 @@ use bound::Targets;
 use core::ops::Range;
 use domain::{Anchor, Domain, gather};
 use edge::{EdgeSamples, discretize};
+use rayon::prelude::*;
 use refine::{Stop, refine};
 use uv::FaceGeom;
 
@@ -138,21 +145,44 @@ struct FaceWork {
 pub fn tessellate(body: &Body, params: &MeshParams) -> Result<BodyMesh, Error> {
     let targets = params.targets()?;
     debug_assert!(crate::check::check_topology(body).is_empty());
+    let faces: Vec<FaceId> = body.faces().collect();
     let mut geoms: Vec<Option<FaceGeom>> = vec![None; body.faces.slot_count()];
-    for f in body.faces() {
-        geoms[f.index()] = Some(FaceGeom::new(body, f));
+    for (f, g) in faces
+        .par_iter()
+        .map(|&f| (f, FaceGeom::new(body, f)))
+        .collect::<Vec<_>>()
+    {
+        geoms[f.index()] = Some(g);
     }
+    let edges: Vec<EdgeId> = body.edges().collect();
     let mut samples: Vec<Option<EdgeSamples>> = vec![None; body.edges.slot_count()];
-    for e in body.edges() {
-        samples[e.index()] = Some(discretize(body, e, &geoms, &targets, &[]));
+    for (e, s) in edges
+        .par_iter()
+        .map(|&e| (e, discretize(body, e, &geoms, &targets, &[])))
+        .collect::<Vec<_>>()
+    {
+        samples[e.index()] = Some(s);
+    }
+    let triangles = estimate(body, &geoms, &samples, params);
+    if triangles > params.max_triangles {
+        return Err(Error::MeshTooLarge { triangles });
     }
     let mut extras: Vec<Vec<f64>> = vec![Vec::new(); body.edges.slot_count()];
     let mut work: Vec<Option<FaceWork>> = (0..body.faces.slot_count()).map(|_| None).collect();
-    let mut todo: Vec<FaceId> = body.faces().collect();
+    let mut todo: Vec<FaceId> = faces;
     for round in 0..=ROUNDS {
-        for &f in &todo {
-            let g = geoms[f.index()].as_ref().expect("live face");
-            work[f.index()] = Some(mesh_face(body, g, &samples, &targets, params.max_triangles));
+        let done: Vec<(FaceId, FaceWork)> = todo
+            .par_iter()
+            .map(|&f| {
+                let g = geoms[f.index()].as_ref().expect("live face");
+                (
+                    f,
+                    mesh_face(body, g, &samples, &targets, params.max_triangles),
+                )
+            })
+            .collect();
+        for (f, w) in done {
+            work[f.index()] = Some(w);
         }
         let mut requests: Vec<(EdgeId, f64)> = todo
             .iter()
@@ -169,8 +199,11 @@ pub fn tessellate(body: &Body, params: &MeshParams) -> Result<BodyMesh, Error> {
         }
         let mut split: Vec<EdgeId> = requests.iter().map(|r| r.0).collect();
         split.dedup();
-        for &e in &split {
-            let s = discretize(body, e, &geoms, &targets, &extras[e.index()]);
+        let resampled: Vec<(EdgeId, EdgeSamples)> = split
+            .par_iter()
+            .map(|&e| (e, discretize(body, e, &geoms, &targets, &extras[e.index()])))
+            .collect();
+        for (e, s) in resampled {
             redo.extend(s.faces.iter().map(|(f, _)| *f));
             samples[e.index()] = Some(s);
         }
@@ -194,6 +227,73 @@ pub fn tessellate(body: &Body, params: &MeshParams) -> Result<BodyMesh, Error> {
         return Err(Error::MeshTooLarge { triangles: total });
     }
     Ok(assemble::assemble(body, &geoms, &samples, &work))
+}
+
+/// A rough count of the triangles a body's mesh will have, from each
+/// face's parameter box (its edges' samples, or its domain when it has
+/// none) and the bounds over it: equilateral triangles at the size the
+/// chord allows (`M R² / 2 = chord`, area `1.3 R²`), the turn the angle
+/// allows, and the edge limit, plus two per boundary sample. It looks at
+/// the whole box, so for curved faces it errs high; it is there to refuse
+/// a runaway request before meshing, not to predict exactly.
+fn estimate(
+    b: &Body,
+    geoms: &[Option<FaceGeom>],
+    samples: &[Option<EdgeSamples>],
+    params: &MeshParams,
+) -> u64 {
+    let mut total: f64 = 0.0;
+    for f in b.faces() {
+        let g = geoms[f.index()].as_ref().expect("live face");
+        let mut lo = [f64::INFINITY; 2];
+        let mut hi = [f64::NEG_INFINITY; 2];
+        let mut boundary = 0.0;
+        for s in samples.iter().flatten() {
+            if let Some(uv) = s.uv_on(f) {
+                boundary += uv.len() as f64;
+                for p in uv {
+                    for (k, x) in [p.x, p.y].into_iter().enumerate() {
+                        lo[k] = lo[k].min(x);
+                        hi[k] = hi[k].max(x);
+                    }
+                }
+            }
+        }
+        let range: [[f64; 2]; 2] = core::array::from_fn(|k| {
+            let [d0, d1] = g.domain[k];
+            if g.periods[k].is_some() || lo[k] > hi[k] {
+                [d0, d1]
+            } else {
+                [lo[k], hi[k]]
+            }
+        });
+        if range
+            .iter()
+            .any(|r| !(r[0].is_finite() && r[1].is_finite()))
+        {
+            continue;
+        }
+        let (su, sv) = (range[0][1] - range[0][0], range[1][1] - range[1][0]);
+        let area = su * g.metric.a * sv * g.metric.b;
+        let bound = g.surface.derivative_bound(range);
+        let m = bound::second_derivative(&bound, g.metric);
+        let chord = area * m / (2.6 * params.chord);
+        let turn = |rate: f64, span: f64| {
+            if rate.is_finite() {
+                (rate * span / params.angle).ceil()
+            } else {
+                1.0
+            }
+        };
+        let angle = 2.0 * turn(bound.turn_u, su) * turn(bound.turn_v, sv);
+        let edge = params.max_edge.map_or(0.0, |e| area / (0.43 * e * e));
+        total += chord.max(angle).max(edge) + 2.0 * boundary;
+    }
+    if total.is_finite() && total < u64::MAX as f64 {
+        total as u64
+    } else {
+        u64::MAX
+    }
 }
 
 /// Meshes one face from its edges' samples.
