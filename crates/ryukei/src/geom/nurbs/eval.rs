@@ -20,14 +20,30 @@ pub(crate) trait Coords:
     + Div<f64, Output = Self>
 {
     const ZERO: Self;
+    /// Componentwise least.
+    fn min(self, other: Self) -> Self;
+    /// Componentwise greatest.
+    fn max(self, other: Self) -> Self;
 }
 
 impl Coords for Vector2 {
     const ZERO: Self = Vector2::ZERO;
+    fn min(self, other: Self) -> Self {
+        Vector2::new(self.x.min(other.x), self.y.min(other.y))
+    }
+    fn max(self, other: Self) -> Self {
+        Vector2::new(self.x.max(other.x), self.y.max(other.y))
+    }
 }
 
 impl Coords for Vector3 {
     const ZERO: Self = Vector3::ZERO;
+    fn min(self, other: Self) -> Self {
+        Vector3::min(self, other)
+    }
+    fn max(self, other: Self) -> Self {
+        Vector3::max(self, other)
+    }
 }
 
 /// A validated rational B-spline curve: its knots, its distinct control

@@ -1,10 +1,12 @@
 //! NURBS surfaces.
 
 use super::KnotVector;
+use super::bezier::{BezierPatch, patches};
 use super::eval::check_weights;
 use super::refine::{Hom, check_split, clamp, refine_flat, split_at};
-use crate::geom::{Point3, PrincipalCurvatures, SurfaceEval, UnitVector3, Vector3};
+use crate::geom::{Box3, Point3, PrincipalCurvatures, SurfaceEval, UnitVector3, Vector3};
 use crate::{Error, NurbsError};
+use std::sync::OnceLock;
 
 /// One of a surface's two parameter directions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,11 +19,21 @@ pub enum Direction {
 /// vector. Control points are row-major: point `(i, j)` (the `i`-th along
 /// `u`, the `j`-th along `v`) is at index `i * counts[1] + j`. Immutable
 /// once built.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// Like [`super::NurbsCurve`], it builds and keeps its Bézier patches the
+/// first time they are needed; the cache takes no part in equality.
+#[derive(Clone, Debug)]
 pub struct NurbsSurface {
     knots: [KnotVector; 2],
     points: Box<[Vector3]>,
     weights: Box<[f64]>,
+    patches: OnceLock<Box<[BezierPatch]>>,
+}
+
+impl PartialEq for NurbsSurface {
+    fn eq(&self, other: &Self) -> bool {
+        (&self.knots, &self.points, &self.weights) == (&other.knots, &other.points, &other.weights)
+    }
 }
 
 impl NurbsSurface {
@@ -44,6 +56,7 @@ impl NurbsSurface {
             knots,
             points,
             weights,
+            patches: OnceLock::new(),
         })
     }
 
@@ -223,6 +236,7 @@ impl NurbsSurface {
             knots,
             points: hom.iter().map(|h| h.p).collect(),
             weights: hom.iter().map(|h| h.w).collect(),
+            patches: OnceLock::new(),
         }
     }
 
@@ -272,6 +286,29 @@ impl NurbsSurface {
             self.with_lines(dir, &halves[0][k].0, &lines)
         };
         Ok((half(0), half(1)))
+    }
+
+    /// The Bézier patches, row-major over the spans, built once.
+    pub(crate) fn patches(&self) -> &[BezierPatch] {
+        self.patches.get_or_init(|| {
+            let hom: Vec<_> = self
+                .points
+                .iter()
+                .zip(self.weights.iter())
+                .map(|(&p, &w)| Hom { p, w })
+                .collect();
+            patches(&self.knots, self.counts(), &hom).into()
+        })
+    }
+
+    /// A box holding the surface over its domain: the union of the
+    /// control-hull boxes of its Bézier patches.
+    pub fn bounds(&self) -> Box3 {
+        let patches = self.patches();
+        patches
+            .iter()
+            .map(BezierPatch::bounds)
+            .fold(patches[0].bounds(), |a, b| a.union(&b))
     }
 }
 

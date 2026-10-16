@@ -1,14 +1,27 @@
 //! NURBS curves in model space.
 
 use super::KnotVector;
+use super::bezier::BezierCurve;
 use super::eval::Spline;
 use crate::Error;
-use crate::geom::{CurveEval, Point3, UnitVector3, Vector3};
+use crate::geom::{Box3, CurveEval, Point3, UnitVector3, Vector3};
+use std::sync::OnceLock;
 
 /// A rational B-spline curve in model space. Immutable once built.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// Its Bézier pieces are built the first time something needs them
+/// (bounds, projection) and kept; building them is deterministic, so the
+/// cache never changes a result, and it takes no part in equality.
+#[derive(Clone, Debug)]
 pub struct NurbsCurve {
     spline: Spline<Vector3>,
+    pieces: OnceLock<Box<[BezierCurve<Vector3>]>>,
+}
+
+impl PartialEq for NurbsCurve {
+    fn eq(&self, other: &Self) -> bool {
+        self.spline == other.spline
+    }
 }
 
 impl NurbsCurve {
@@ -26,9 +39,14 @@ impl NurbsCurve {
             .iter()
             .map(|p| Point3::try_new(p.x, p.y, p.z).map(Point3::to_vector))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self {
-            spline: Spline::new(knots, points, weights)?,
-        })
+        Ok(Self::from_spline(Spline::new(knots, points, weights)?))
+    }
+
+    fn from_spline(spline: Spline<Vector3>) -> Self {
+        Self {
+            spline,
+            pieces: OnceLock::new(),
+        }
     }
 
     pub fn knots(&self) -> &KnotVector {
@@ -80,9 +98,7 @@ impl NurbsCurve {
     /// The same curve over one period with clamped knots; a clamped curve
     /// is returned unchanged.
     pub fn to_clamped(&self) -> Self {
-        Self {
-            spline: self.spline.clamped(),
-        }
+        Self::from_spline(self.spline.clamped())
     }
 
     /// The same curve with each of `knots` inserted once (The NURBS Book,
@@ -90,9 +106,7 @@ impl NurbsCurve {
     /// `KnotOrder` for a knot not strictly inside the domain,
     /// `KnotMultiplicity` for a knot that would exceed the degree.
     pub fn refine(&self, knots: &[f64]) -> Result<Self, Error> {
-        Ok(Self {
-            spline: self.spline.refine(knots)?,
-        })
+        Ok(Self::from_spline(self.spline.refine(knots)?))
     }
 
     /// The curve cut at `t` into two clamped curves covering `[t0, t]` and
@@ -101,7 +115,43 @@ impl NurbsCurve {
     /// long in parameter.
     pub fn split(&self, t: f64) -> Result<(Self, Self), Error> {
         let [a, b] = self.spline.split(t)?;
-        Ok((Self { spline: a }, Self { spline: b }))
+        Ok((Self::from_spline(a), Self::from_spline(b)))
+    }
+
+    /// The Bézier pieces, in parameter order, built once.
+    pub(crate) fn pieces(&self) -> &[BezierCurve<Vector3>] {
+        self.pieces.get_or_init(|| self.spline.pieces().into())
+    }
+
+    /// A box holding the curve over the parts of `[t0, t1]` inside the
+    /// domain (a periodic range wraps): the union of the control-hull boxes
+    /// of the Bézier pieces it overlaps.
+    pub fn bounds(&self, [t0, t1]: [f64; 2]) -> Box3 {
+        let ranges = match self.period() {
+            Some(period) if t1 - t0 < period => {
+                let a = self.spline.knots.wrap(t0);
+                let b = a + (t1 - t0);
+                vec![[a, b], [a - period, b - period]]
+            }
+            Some(_) => vec![self.domain()],
+            None => vec![[t0, t1]],
+        };
+        let pieces = self.pieces();
+        let hit = pieces
+            .iter()
+            .filter(|p| {
+                ranges
+                    .iter()
+                    .any(|&[a, b]| p.range[0] <= b && p.range[1] >= a)
+            })
+            .map(BezierCurve::bounds)
+            .reduce(|x, y| x.union(&y));
+        hit.unwrap_or_else(|| {
+            pieces
+                .iter()
+                .map(BezierCurve::bounds)
+                .fold(pieces[0].bounds(), |x, y| x.union(&y))
+        })
     }
 
     /// The unit tangent; see [`CurveEval::tangent`].

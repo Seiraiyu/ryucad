@@ -2,6 +2,7 @@
 //! surfaces.
 
 mod basis;
+mod bezier;
 mod curve;
 mod eval;
 mod knots;
