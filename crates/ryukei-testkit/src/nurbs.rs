@@ -2,7 +2,7 @@
 //! sections, fuzzing and benchmarks.
 
 use crate::Lcg;
-use ryukei::geom::{KnotVector, NurbsCurve, NurbsSurface, Point3};
+use ryukei::geom::{KnotVector, NurbsCurve, NurbsCurve2, NurbsSurface, Point2, Point3};
 
 /// A random knot vector of `degree` with `spans` spans of random length
 /// starting near 0. Interior multiplicities are 1 to `degree`. A periodic
@@ -46,6 +46,25 @@ pub fn curve(g: &mut Lcg, degree: usize, spans: usize, periodic: bool) -> NurbsC
     let points = (0..n).map(|_| point(g)).collect();
     let weights = (0..n).map(|_| g.next_f64(0.3, 3.0)).collect();
     NurbsCurve::new(k, points, Some(weights)).unwrap()
+}
+
+/// A random curve in the parameter plane, control points in `[-5, 5]²`.
+pub fn curve2(g: &mut Lcg, degree: usize, spans: usize, periodic: bool) -> NurbsCurve2 {
+    let k = knots(g, degree, spans, periodic);
+    let n = k.control_count();
+    let points = (0..n)
+        .map(|_| Point2::new(g.next_f64(-5.0, 5.0), g.next_f64(-5.0, 5.0)))
+        .collect();
+    let weights = (0..n).map(|_| g.next_f64(0.3, 3.0)).collect();
+    NurbsCurve2::new(k, points, Some(weights)).unwrap()
+}
+
+/// Like [`any_curve`], in the plane.
+pub fn any_curve2(g: &mut Lcg) -> NurbsCurve2 {
+    let degree = 1 + (g.next_u64() % 5) as usize;
+    let periodic = g.next_u64().is_multiple_of(4);
+    let spans = if periodic { degree + 1 } else { 1 } + (g.next_u64() % 4) as usize;
+    curve2(g, degree, spans, periodic)
 }
 
 /// A random surface, like [`curve`] in each direction.

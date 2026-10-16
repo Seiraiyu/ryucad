@@ -4,8 +4,8 @@
 //! the diff like any other change.
 
 use ryukei::geom::{
-    Affine, Box3, Circle, Cone, Curve, Cylinder, Ellipse, Frame, Line, Plane, Point2, Point3,
-    Rigid, Sphere, Surface, Torus, Vector3,
+    Affine, Box3, Circle, Circle2, Cone, Curve, Curve2, Cylinder, Ellipse, Ellipse2, Frame, Frame2,
+    Line, Line2, Plane, Point2, Point3, Rigid, Sphere, Surface, Torus, Vector2, Vector3,
 };
 use ryukei::interval::Interval;
 use ryukei::math;
@@ -429,6 +429,41 @@ fn projection_section(golden: &mut Golden) {
     }
 }
 
+fn pcurves_section(golden: &mut Golden) {
+    let mut s = golden.section("pcurves");
+    let mut g = Lcg::new(0x7063_7276);
+    for _ in 0..128 {
+        let mut c = || g.next_f64(-10.0, 10.0);
+        let (o, x) = (Point2::new(c(), c()), Vector2::new(c(), c()));
+        let (r, k, t) = (c().abs() + 0.5, (c().abs() + 1.0) / 12.0, c());
+        let p = Point2::new(c(), c());
+        let f = Frame2::new(o, x, t > 0.0).unwrap();
+        let curves = [
+            Curve2::Line2(Line2::new(o, x).unwrap()),
+            Curve2::Circle2(Circle2::new(f, r).unwrap()),
+            Curve2::Ellipse2(Ellipse2::new(f, r, r * k).unwrap()),
+        ];
+        for cv in curves {
+            let e = cv.eval(t);
+            let foot = cv.project(p);
+            for v in [e.point.x, e.point.y, e.d1.x, e.d1.y, e.d2.x, e.d2.y] {
+                s.f64(v);
+            }
+            for v in [foot.param, foot.point.x, foot.point.y, foot.distance] {
+                s.f64(v);
+            }
+        }
+    }
+    for _ in 0..64 {
+        let n = nurbs::any_curve2(&mut g);
+        let p = Point2::new(g.next_f64(-8.0, 8.0), g.next_f64(-8.0, 8.0));
+        let foot = n.project(p);
+        for v in [foot.param, foot.point.x, foot.point.y, foot.distance] {
+            s.f64(v);
+        }
+    }
+}
+
 fn primitives_section(golden: &mut Golden) {
     let mut s = golden.section("primitives");
     let axis = Vector3::new(1.0, -2.0, 0.5).normalize().unwrap();
@@ -507,6 +542,7 @@ fn determinism() {
     ellipse_section(&mut golden);
     conversion_section(&mut golden);
     projection_section(&mut golden);
+    pcurves_section(&mut golden);
     primitives_section(&mut golden);
     euler_section(&mut golden);
     golden.finish();
