@@ -34,7 +34,10 @@ function Install-Ryucad {
     $token = $env:GH_TOKEN
     if (-not $token) { $token = $env:GITHUB_TOKEN }
     if (-not $token -and (Get-Command gh -ErrorAction SilentlyContinue)) {
-        $token = (& gh auth token 2>$null)
+        # A gh that isn't logged in writes to stderr, which Windows
+        # PowerShell 5.1 turns into a terminating error under 'Stop'.
+        try { $t = (& gh auth token 2>$null) } catch { $t = $null }
+        if ($LASTEXITCODE -eq 0 -and $t) { $token = "$t".Trim() }
     }
     $headers = @{}
     if ($token) { $headers['Authorization'] = "Bearer $token" }

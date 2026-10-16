@@ -60,9 +60,25 @@ impl Part {
     }
 }
 
+/// On Windows `canonicalize` gives a verbatim path (`\\?\C:\…`). Agents see
+/// the ordinary `C:\…` form, which is what `init` reports too. UNC paths and
+/// paths too long for the ordinary form stay verbatim.
+fn plain(p: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(rest) = p.to_str().and_then(|s| s.strip_prefix(r"\\?\"))
+            && rest.as_bytes().get(1) == Some(&b':')
+            && rest.len() < 260
+        {
+            return PathBuf::from(rest);
+        }
+    }
+    p
+}
+
 /// The nearest folder at or above `start` that holds a `ryucad.json`.
 pub fn find_root(start: &Path) -> Result<PathBuf> {
-    let start = start.canonicalize().map_err(|e| Error::io(start, &e))?;
+    let start = plain(start.canonicalize().map_err(|e| Error::io(start, &e))?);
     start
         .ancestors()
         .find(|d| d.join(MANIFEST).is_file())

@@ -9,6 +9,21 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Replaces the project root with `<root>` in every string of `v`, trying
+/// the forms in order.
+fn replace_root(v: &mut Value, forms: &[&str]) {
+    match v {
+        Value::String(s) => {
+            for f in forms {
+                *s = s.replace(f, "<root>");
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(|x| replace_root(x, forms)),
+        Value::Object(o) => o.values_mut().for_each(|x| replace_root(x, forms)),
+        _ => {}
+    }
+}
+
 /// Two identical projects, one served in process and one by a daemon.
 struct Pair {
     _dir: tempfile::TempDir,
@@ -41,11 +56,15 @@ impl Pair {
             cmd.env("RYUCAD_NO_DAEMON", "1");
         }
         let out = cmd.output().unwrap();
-        let text = String::from_utf8(out.stdout)
-            .unwrap()
-            .replace(root.to_str().unwrap(), "<root>");
-        let json = serde_json::from_str(&text)
+        let text = String::from_utf8(out.stdout).unwrap();
+        let mut json = serde_json::from_str(&text)
             .unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {text}"));
+        // Replace inside the parsed strings: on Windows the raw text has
+        // escaped backslashes. The root may appear verbatim (`\\?\C:\…`) or
+        // in the ordinary form.
+        let root = root.to_str().unwrap();
+        let plain = root.strip_prefix(r"\\?\").unwrap_or(root);
+        replace_root(&mut json, &[root, plain]);
         (out.status.code().unwrap(), json)
     }
 
