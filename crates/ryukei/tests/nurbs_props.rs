@@ -17,10 +17,17 @@ fn near(a: Point3, b: Point3) -> bool {
     a.distance(b) <= 1e-12
 }
 
+/// `a` to `b` at `s` in `[0, 1]`, exactly `a` and `b` at the ends: `a + (b -
+/// a) * s` can land an ulp past `b`, where a periodic curve has wrapped to its
+/// start (equal to its end only up to rounding).
+fn lerp(a: f64, b: f64, s: f64) -> f64 {
+    (1.0 - s) * a + s * b
+}
+
 /// The curves agree at 41 samples of `[a, b]`.
 fn same_curve(c: &NurbsCurve, d: &NurbsCurve, [a, b]: [f64; 2]) -> bool {
     (0..=40).all(|i| {
-        let t = a + (b - a) * f64::from(i) / 40.0;
+        let t = lerp(a, b, f64::from(i) / 40.0);
         near(c.point(t), d.point(t))
     })
 }
@@ -29,8 +36,8 @@ fn same_curve(c: &NurbsCurve, d: &NurbsCurve, [a, b]: [f64; 2]) -> bool {
 fn same_surface(a: &NurbsSurface, b: &NurbsSurface, [[u0, u1], [v0, v1]]: [[f64; 2]; 2]) -> bool {
     (0..=10).all(|i| {
         (0..=10).all(|j| {
-            let u = u0 + (u1 - u0) * f64::from(i) / 10.0;
-            let v = v0 + (v1 - v0) * f64::from(j) / 10.0;
+            let u = lerp(u0, u1, f64::from(i) / 10.0);
+            let v = lerp(v0, v1, f64::from(j) / 10.0);
             near(a.point(u, v), b.point(u, v))
         })
     })
