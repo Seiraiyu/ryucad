@@ -111,6 +111,36 @@ pub fn handle(session: &mut Session, req: Request) -> Result<Value> {
     }
 }
 
+/// [`handle`] behind a panic boundary. `slot` holds the session between
+/// requests; it is opened on first use, and dropped after a panic so the
+/// next request starts again from the files.
+pub fn handle_safely(slot: &mut Option<Session>, root: &Path, req: Request) -> Result<Value> {
+    guarded(slot, root, |s| handle(s, req))
+}
+
+fn guarded(
+    slot: &mut Option<Session>,
+    root: &Path,
+    f: impl FnOnce(&mut Session) -> Result<Value>,
+) -> Result<Value> {
+    let session = match slot {
+        Some(s) => s,
+        None => slot.insert(Session::open(root)?),
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(session))) {
+        Ok(r) => r,
+        Err(panic) => {
+            *slot = None;
+            let msg = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_owned());
+            Err(Error::new(Code::Internal, format!("internal error: {msg}")).with("panic", msg))
+        }
+    }
+}
+
 fn project_info(session: &Session) -> Value {
     let p = session.project();
     json!({
@@ -983,6 +1013,25 @@ pub(crate) mod tests {
         );
         assert_eq!(r["errors"][0]["code"], "invalid_json");
         assert_eq!(r["unknown"], json!(["parts/p/stray.txt"]));
+    }
+
+    #[test]
+    fn a_panic_is_an_internal_error_and_drops_the_session() {
+        let (dir, _) = fresh();
+        let mut slot = None;
+        let r = handle_safely(&mut slot, dir.path(), Request::PartList {}).unwrap();
+        assert_eq!(r["parts"], json!([]));
+        assert!(slot.is_some());
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let e = guarded(&mut slot, dir.path(), |_| panic!("boom")).unwrap_err();
+        std::panic::set_hook(prev);
+        assert_eq!(
+            (e.code, e.details["panic"].as_str()),
+            (Code::Internal, Some("boom"))
+        );
+        assert!(slot.is_none());
+        assert!(handle_safely(&mut slot, dir.path(), Request::PartList {}).is_ok());
     }
 
     #[test]
