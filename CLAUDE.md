@@ -54,8 +54,9 @@ The boundary between the two crates is deliberate. ryukei works on single bodies
 - **Deliberate numerical precision.** Decide explicitly which calculations must be exact and which can use floating point with tolerances.
 - **Identical results on every platform.** The same model must produce the same result on every OS and CPU. Don't use the platform's own math functions (`f64::sin` and similar) where results must match; use a portable implementation such as the `libm` crate. Use fused multiply-add only explicitly, never fast-math, and only portable or runtime-selected SIMD. Otherwise booleans can succeed on one OS and fail on another, and saved test results won't match across machines.
 - **CPU-only.** The kernel needs 64-bit floats and branch-heavy code, which GPUs handle poorly, so performance comes from the memory layout and running on many cores. GPU work (viewer, rendering for agents, clash detection) belongs in ryucad. CI uses software renderers for it.
-- **Keep OCCT out of the default build.** Put it behind a Cargo feature or in a separate bench crate, so the default build has no C++ dependency on any platform.
-- **Robustness through testing at scale.** Use a corpus of real models, randomly generated and mutated operations, checks that the topology stays valid after every operation, comparison of results against OCCT, and benchmarks against OCCT's numbers. OCCT may serve as a reference and benchmark baseline, and as a temporary fallback for operations ryukei can't do yet, but never as the long-term kernel.
+- **Keep C++ kernels out of the default build.** Put OCCT and SMLib behind a Cargo feature or in a separate bench crate, so the default build has no C++ dependency on any platform.
+- **Robustness through testing at scale.** Use a corpus of real models, randomly generated and mutated operations, checks that the topology stays valid after every operation, comparison of results against OCCT and SMLib, and benchmarks against OCCT's numbers. OCCT and SMLib may serve as references and benchmark baselines, and as a temporary fallback (in ryucad, preferring SMLib) for operations ryukei can't do yet, but never as the long-term kernel. See "Reference kernels" in design 14 (ryukei roadmap).
+- **Port SMLib's algorithms, not its numerics.** SMLib (NVIDIA's USD BRep, Apache 2.0) may be ported into ryukei. Keep its NOTICE and credit it in the ported file. Topology decisions still go through `ryukei::predicates`, `ryukei::interval` and `tol`, never SMLib's float tests.
 
 ## Numerics (decided in phase 0)
 
@@ -90,4 +91,4 @@ The design is document 17 in the Coxswain planning project `ryucad-ryukei`.
 Don't assume an answer to these. Ask the user, or record the decision here once it's made:
 
 - How agents talk to ryucad (CLI, library API, RPC, MCP, etc.) and how models are persisted.
-- License.
+- License. Apache-2.0 is the lean (design 22), and ported SMLib code (Apache-2.0) rules out GPLv2-only.
