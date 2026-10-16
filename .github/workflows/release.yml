@@ -61,7 +61,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: golden hashes on the release target
-        run: cargo test --locked -p ryukei --release --target "$TARGET" --test determinism
+        run: cargo test --locked -p ryukei -p ryucad --release --target "$TARGET" --test determinism
         shell: bash
       - name: build
         run: RYUCAD_COMMIT="${GITHUB_SHA::12}" cargo build --locked --release -p ryucad --target "$TARGET"
