@@ -24,6 +24,15 @@ pub struct Name(u128);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OpKey(pub u128);
 
+impl OpKey {
+    /// The key for an operation identified by `bytes`: SipHash-2-4-128 of
+    /// them under an all-zero key. ryucad derives a feature's key this way
+    /// from its part and feature IDs, so the key never depends on order.
+    pub fn from_bytes(bytes: &[u8]) -> OpKey {
+        OpKey(siphash128(&[0; 16], bytes))
+    }
+}
+
 /// What an entity is to the operation that named it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Role {
@@ -148,6 +157,16 @@ pub(crate) fn recipe(kind: &str, key: OpKey, role: Role, parents: &[&str]) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn op_key_from_bytes_is_fixed() {
+        // Pins the encoding: changing it renames every feature's entities.
+        assert_eq!(
+            format!("{:032x}", OpKey::from_bytes(b"ryucad.feature\0p\0f").0),
+            "02a896e2b8aa1b02abfba56f8c8e1046"
+        );
+        assert_ne!(OpKey::from_bytes(b"a"), OpKey::from_bytes(b"b"));
+    }
 
     #[test]
     fn derive_is_fixed() {
