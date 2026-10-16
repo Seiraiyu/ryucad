@@ -77,6 +77,33 @@ impl NurbsCurve {
         self.eval(t).scaled(b - a)
     }
 
+    /// The same curve over one period with clamped knots; a clamped curve
+    /// is returned unchanged.
+    pub fn to_clamped(&self) -> Self {
+        Self {
+            spline: self.spline.clamped(),
+        }
+    }
+
+    /// The same curve with each of `knots` inserted once (The NURBS Book,
+    /// A5.1), in clamped form. Fails with `NonFinite`, or `InvalidNurbs`:
+    /// `KnotOrder` for a knot not strictly inside the domain,
+    /// `KnotMultiplicity` for a knot that would exceed the degree.
+    pub fn refine(&self, knots: &[f64]) -> Result<Self, Error> {
+        Ok(Self {
+            spline: self.spline.refine(knots)?,
+        })
+    }
+
+    /// The curve cut at `t` into two clamped curves covering `[t0, t]` and
+    /// `[t, t1]`. Fails with `NonFinite`, or `InvalidNurbs(ShortDomain)`
+    /// unless both pieces are at least [`crate::tol::LINEAR_RESOLUTION`]
+    /// long in parameter.
+    pub fn split(&self, t: f64) -> Result<(Self, Self), Error> {
+        let [a, b] = self.spline.split(t)?;
+        Ok((Self { spline: a }, Self { spline: b }))
+    }
+
     /// The unit tangent; see [`CurveEval::tangent`].
     pub fn tangent(&self, t: f64) -> Option<UnitVector3> {
         self.unit_eval(t).tangent()

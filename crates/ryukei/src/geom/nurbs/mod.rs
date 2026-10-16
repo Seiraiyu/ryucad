@@ -5,6 +5,7 @@ mod basis;
 mod curve;
 mod eval;
 mod knots;
+mod refine;
 mod surface;
 
 pub use basis::Basis;

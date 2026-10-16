@@ -112,6 +112,29 @@ impl KnotVector {
         })
     }
 
+    /// A clamped knot vector from a flat one the kernel built itself (by
+    /// knot insertion), already known to be valid.
+    pub(crate) fn clamped_flat(degree: usize, flat: &[f64]) -> Self {
+        let mut knots = Vec::new();
+        let mut mults: Vec<usize> = Vec::new();
+        for &u in flat {
+            if knots.last() == Some(&u) {
+                *mults.last_mut().unwrap_or(&mut 0) += 1;
+            } else {
+                knots.push(u);
+                mults.push(1);
+            }
+        }
+        debug_assert!(Self::clamped(degree, &knots, &mults).is_ok(), "{flat:?}");
+        Self {
+            degree,
+            knots: knots.into(),
+            mults: mults.into(),
+            periodic: false,
+            flat: flat.into(),
+        }
+    }
+
     pub fn degree(&self) -> usize {
         self.degree
     }
