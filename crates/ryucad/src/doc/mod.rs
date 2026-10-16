@@ -2,4 +2,5 @@
 //! and their features. Pure data; nothing here calls ryukei.
 
 pub mod canonical;
+pub mod files;
 pub mod id;
