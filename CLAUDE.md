@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ryucad is CAD built for AI agents to drive, not primarily for humans clicking in a GUI. FreeCAD was rejected because it performs poorly on large assemblies, and its kernel, OCCT, is a main reason. This project builds its own kernel, **ryukei**, and the long-term target is Parasolid-level capability.
 
-The project is in its early stages. Roadmap phases 0 (foundations: deterministic math, the tolerance model, exact predicates, interval arithmetic, the test harness), 1 (topology core: flat-array B-rep bodies, Euler operators, the validity checker, stable names, the five primitives) and 2 (geometry: rational NURBS, the ellipse, pcurves, derivatives, global projection) are done. Tessellation (phase 3) comes next; see `docs/roadmap.md`. On the application side, ryucad phase 0 (projects of feature files, deterministic rebuild of the primitives, the agent CLI, the session daemon, releases and installers) is done; its roadmap is design 20 in the Coxswain planning project.
+The project is in its early stages. Roadmap phases 0 (foundations: deterministic math, the tolerance model, exact predicates, interval arithmetic, the test harness), 1 (topology core: flat-array B-rep bodies, Euler operators, the validity checker, stable names, the five primitives), 2 (geometry: rational NURBS, the ellipse, pcurves, derivatives, global projection) and 3 (tessellation: certified, watertight, parallel meshing, and the first OCCT comparison) are done. Sweeps (phase 4) come next; see design 14 (ryukei roadmap) in the Coxswain planning project `ryucad-ryukei`. On the application side, ryucad phase 0 (projects of feature files, deterministic rebuild of the primitives, the agent CLI, the session daemon, releases and installers) is done.
+
+Above the kernel sit ryucad, the application (feature files in Git, the agent CLI, a live viewer humans watch but don't model in, assemblies at scale), and ryupdm, product data management (revisions, releases, where-used, BOM, hosted review; PDM only, not PLM). ryupdm is the likely business; ryukei and ryucad may be open sourced. Their roadmaps are designs 20 (ryucad) and 21 (ryupdm), design 23 lines up all three, and design 22 is the business plan.
 
 ## Commands
 
@@ -23,6 +25,7 @@ UPDATE_GOLDEN=1 cargo test -p ryukei --test determinism   # after a deliberate c
 UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism   # the same for ryucad's rebuild hashes
 cargo bench -p ryukei-bench
 cargo bench -p ryucad
+cargo test -p ryukei-bench --features occt --release --test occt -- --nocapture   # OCCT head-to-head; devcontainer only
 cd fuzz && cargo +nightly fuzz run predicates               # needs nightly + cargo-fuzz
 sh scripts/test-install.sh target/release/ryucad          # install.sh against a fake release
 sh scripts/smoke.sh target/release/ryucad                 # a short agent session on a built binary
@@ -44,10 +47,12 @@ The product targets Windows, macOS, and Linux natively, not just WSL. CI (`.gith
 - `crates/ryukei`: the B-rep geometry kernel (library).
 - `crates/ryucad`: the application layer and binary.
 - `crates/ryukei-testkit`: test-only helpers (exact references, seeded inputs, golden hashes, Euler operator sequences from bytes, random NURBS). Never a runtime dependency.
-- `crates/ryukei-bench`: divan benchmarks; OCCT comparisons go behind its `occt` feature.
+- `crates/ryukei-bench`: divan benchmarks; the OCCT comparison (a `cxx` shim over a system OCCT 7.8, which the devcontainer installs) is behind its `occt` feature.
 - `fuzz/`: cargo-fuzz targets, outside the workspace (nightly only).
 - `install.sh`, `install.ps1`: the installers, also published with each release. `scripts/` holds their tests and the release smoke test.
-- `docs/`: design documents. `docs/roadmap.md` holds the phased ryukei plan.
+- Design documents, roadmaps and plans live only in the Coxswain planning project `ryucad-ryukei` (`cox doc list`), never as markdown in the repo, so there is one copy of each.
+
+ryupdm code will live in this monorepo too; the repo may be split later if parts are open sourced.
 
 The boundary between the two crates is deliberate. ryukei works on single bodies (geometry, topology, booleans, blends, tessellation) and must not depend on documents, assemblies, or agents. Large-assembly performance (instancing, lazy loading, caching, incremental recompute) and the agent interface live in ryucad. Keep both in this repo until the kernel API settles.
 
@@ -61,8 +66,9 @@ The boundary between the two crates is deliberate. ryukei works on single bodies
 - **Deliberate numerical precision.** Decide explicitly which calculations must be exact and which can use floating point with tolerances.
 - **Identical results on every platform.** The same model must produce the same result on every OS and CPU. Don't use the platform's own math functions (`f64::sin` and similar) where results must match; use a portable implementation such as the `libm` crate. Use fused multiply-add only explicitly, never fast-math, and only portable or runtime-selected SIMD. Otherwise booleans can succeed on one OS and fail on another, and saved test results won't match across machines.
 - **CPU-only.** The kernel needs 64-bit floats and branch-heavy code, which GPUs handle poorly, so performance comes from the memory layout and running on many cores. GPU work (viewer, rendering for agents, clash detection) belongs in ryucad. CI uses software renderers for it.
-- **Keep OCCT out of the default build.** Put it behind a Cargo feature or in a separate bench crate, so the default build has no C++ dependency on any platform.
-- **Robustness through testing at scale.** Use a corpus of real models, randomly generated and mutated operations, checks that the topology stays valid after every operation, comparison of results against OCCT, and benchmarks against OCCT's numbers. OCCT may serve as a reference and benchmark baseline, and as a temporary fallback for operations ryukei can't do yet, but never as the long-term kernel.
+- **Keep C++ kernels out of the default build.** Put OCCT and SMLib behind a Cargo feature or in a separate bench crate, so the default build has no C++ dependency on any platform.
+- **Robustness through testing at scale.** Use a corpus of real models, randomly generated and mutated operations, checks that the topology stays valid after every operation, comparison of results against OCCT and SMLib, and benchmarks against OCCT's numbers. OCCT and SMLib may serve as references and benchmark baselines, and as a temporary fallback (in ryucad, preferring SMLib) for operations ryukei can't do yet, but never as the long-term kernel. See "Reference kernels" in design 14 (ryukei roadmap).
+- **Port SMLib's algorithms, not its numerics.** SMLib (NVIDIA's USD BRep, Apache 2.0) may be ported into ryukei. Keep its NOTICE and credit it in the ported file. Topology decisions still go through `ryukei::predicates`, `ryukei::interval` and `tol`, never SMLib's float tests.
 
 ## Numerics (decided in phase 0)
 
@@ -92,6 +98,21 @@ The design is document 17 in the Coxswain planning project `ryucad-ryukei`.
 - **Projection.** `project` returns a point within `LINEAR_RESOLUTION` of the true global minimum, and among minima that close, the lowest parameter. The search works on the Bernstein coefficients of `(S - p)·S'` per Bézier piece: one sign means no stationary point, one sign change means exactly one (curves); surfaces add an interval Newton step and a depth limit, then Newton's method. Domain boundaries, kinks and creases (knots of multiplicity `degree`) are searched as curves, and every candidate must be a genuine local minimum. Degenerate splines (folds, collapsed patches, poles) are where this breaks: the property tests and the `nurbs` fuzz target pin the cases found so far.
 - **Bodies.** Euler operators, the checker, `compact` and the dump accept every variant. The checker measures distances through `project`, bounds NURBS by their hulls, requires edge intervals inside a clamped curve's domain, and lets a closed edge lie on a clamped curve whose ends meet. A face with no loops is still only allowed on an analytic sphere or torus.
 
+## Tessellation (decided in phase 3)
+
+The design is document 19 in the Coxswain planning project `ryucad-ryukei`.
+
+- **API.** `mesh::tessellate(&Body, &MeshParams) -> Result<BodyMesh, Error>`. `MeshParams` has an absolute `chord` (at least `10 × LINEAR_RESOLUTION`), an `angle` in `(0, π/2]`, an optional `max_edge`, and a `max_triangles` budget (50M by default). Bad parameters are `InvalidMeshParams`; a runaway request is `MeshTooLarge`, refused from an estimate before faces are meshed, and again if the real count passes the budget.
+- **Guarantee.** Every face is within `chord` of its triangles both ways (two-sided Hausdorff), plus the local edge tolerance near tolerant edges. The bounds are certified, never sampled: `geom::{CurveBound, SurfaceBound}` bound second derivatives and turning rates over a parameter range (closed forms for analytic types, interval arithmetic on Bézier pieces for NURBS, differencing the whole piece before cutting it down), and a triangle passes when `M R² / 2 <= chord` (Waldron's bound, `R` the smallest enclosing circle in the face's scaled parameter plane). The normal turns at most `angle` across a triangle, except that the angle test is waived for pieces smaller than `chord` (features under the tolerance, and poles or apexes where the normal has no limit).
+- **Structure.** Edges are sampled once (bisection until the curve and every adjacent face are satisfied, with an exact sample at every seam crossing) and shared, so the mesh is watertight by index. Each face is a constrained Delaunay triangulation on exact `orient2d`/`incircle` in its parameter plane scaled by powers of two (so scaling is exact), cut at seams (the domain start of a periodic direction) into one period, with collapsed rows (poles, apexes) as sides whose points weld to one position. Refinement is longest-edge bisection; a face never splits a boundary segment itself but asks its edge for a sample, and is meshed again (up to three rounds). A vertex whose neighbours meet one welded position in two runs (a "pinch" at a pole or across a seam) is repaired by flips or splits before assembly.
+- **Output.** `BodyMesh`: welded `positions` (body vertices, then edge samples, then face points), per-face `corners` (position, unwrapped `(u, v)`, outward normal), triangles counterclockwise from outside, `FaceMesh` ranges by `FaceId`, `EdgePolyline`s by `EdgeId`, and `faults`. A face that can't meet the guarantees (`EdgeOffSurface`, `BadDomain`, `RefinementStalled`, `BoundaryNotResolved`) is left out and reported; `check_mesh` verifies indices, winding and that every welded edge has exactly two opposite uses.
+- **Parallelism and determinism.** `ryukei` depends on `rayon`: edges, then faces, run on the current pool; each is a pure function and results are gathered in ID order, so the mesh is the same bits on any number of threads. Golden hashes pin meshes across platforms.
+- **Limits.** Closed directions are periodic ones only (a clamped NURBS face whose ends meet is `BadDomain`); doubly periodic faces must be loopless. Meshes are not FEA-quality, and ryukei makes about 1.5 to 18 times OCCT's triangles at the same chord.
+
+## Persistence (decided 2026-10-16)
+
+A ryucad model is a folder of canonical text feature files in a Git repo, one per feature or object, rebuilt deterministically by ryukei. Git provides history, branches and merges; ryucad supplies CAD-aware diff and merge drivers, and features reference topology by stable name. Derived data (bodies, meshes, renders) is a cache, never committed. ryupdm builds on the same repos rather than a second store. This follows the freecad-spike (github.com/Seiraiyu/freecad-spike) GO verdict, without FreeCAD.
+
 ## ryucad (decided in ryucad phase 0)
 
 The design is document 24 in the Coxswain planning project `ryucad-ryukei`.
@@ -108,4 +129,5 @@ The design is document 24 in the Coxswain planning project `ryucad-ryukei`.
 Don't assume an answer to these. Ask the user, or record the decision here once it's made:
 
 - When the MCP adapter over `proto` arrives.
-- License.
+- Which parts are open source and which are paid.
+- License. Apache-2.0 is the lean (design 22), and ported SMLib code (Apache-2.0) rules out GPLv2-only.

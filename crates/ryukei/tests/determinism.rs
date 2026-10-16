@@ -9,11 +9,12 @@ use ryukei::geom::{
 };
 use ryukei::interval::Interval;
 use ryukei::math;
+use ryukei::mesh::{BodyMesh, MeshParams, tessellate};
 use ryukei::name::{Event, OpKey};
 use ryukei::predicates::{self, Sign};
 use ryukei::primitive;
 use ryukei_testkit::euler_script::{Bytes, start, valid_step};
-use ryukei_testkit::{Golden, Lcg, nurbs};
+use ryukei_testkit::{Golden, Lcg, mesh, nurbs};
 
 fn math_section(golden: &mut Golden) {
     let mut s = golden.section("math");
@@ -514,6 +515,92 @@ fn primitives_section(golden: &mut Golden) {
     }
 }
 
+/// Every field of a mesh, bit for bit.
+fn hash_mesh(s: &mut ryukei_testkit::Section<'_>, m: &BodyMesh) {
+    s.u64(m.positions.len() as u64);
+    for p in &m.positions {
+        for x in p.to_array() {
+            s.f64(x);
+        }
+    }
+    for c in &m.corners {
+        s.u64(u64::from(c.position));
+        s.f64(c.uv.x);
+        s.f64(c.uv.y);
+        for x in c.normal.get().to_array() {
+            s.f64(x);
+        }
+    }
+    for t in &m.triangles {
+        for &i in t {
+            s.u64(u64::from(i));
+        }
+    }
+    for f in &m.faces {
+        s.u64(f.face.index() as u64);
+        for x in [
+            f.corners.start,
+            f.corners.end,
+            f.triangles.start,
+            f.triangles.end,
+        ] {
+            s.u64(u64::from(x));
+        }
+    }
+    for e in &m.edges {
+        s.u64(e.edge.index() as u64);
+        for (&i, &t) in e.positions.iter().zip(&e.params) {
+            s.u64(u64::from(i));
+            s.f64(t);
+        }
+    }
+    s.u64(m.faults.len() as u64);
+}
+
+fn meshes_section(golden: &mut Golden) {
+    let mut s = golden.section("meshes");
+    let axis = Vector3::new(1.0, -2.0, 0.5).normalize().unwrap();
+    let at = Rigid::translation(Vector3::new(12.5, -3.25, 100.0))
+        .then_after(&Rigid::rotation(axis, 2.5));
+    let key = OpKey(0x6d65_7368);
+    for place in [Rigid::IDENTITY, at] {
+        let bodies = [
+            primitive::block(key, 1.5, 2.25, 0.75, &place),
+            primitive::cylinder(key, 0.5, 3.0, &place),
+            primitive::cone(key, 1.25, 2.0, &place),
+            primitive::frustum(key, 2.0, 0.5, 1.0, &place),
+            primitive::sphere(key, 4.0, &place),
+            primitive::torus(key, 3.0, 0.75, &place),
+        ];
+        for result in bodies {
+            let (body, _) = result.unwrap();
+            for p in [MeshParams::new(2e-3, 0.3), MeshParams::new(2e-2, 0.8)] {
+                hash_mesh(&mut s, &tessellate(&body, &p).unwrap());
+            }
+        }
+    }
+    let mut bodies: Vec<_> = [
+        primitive::block(key, 1.5, 2.25, 0.75, &at),
+        primitive::cylinder(key, 0.5, 3.0, &at),
+        primitive::cone(key, 1.25, 2.0, &at),
+        primitive::frustum(key, 2.0, 0.5, 1.0, &at),
+    ]
+    .into_iter()
+    .map(|r| {
+        let mut b = r.unwrap().0;
+        nurbs::convert_body(&mut b).unwrap();
+        b
+    })
+    .collect();
+    bodies.push(mesh::bump_block(key, [1.5, 2.25, 0.75], 0.5, &at).unwrap());
+    for body in &bodies {
+        hash_mesh(
+            &mut s,
+            &tessellate(body, &MeshParams::new(2e-2, 0.5)).unwrap(),
+        );
+    }
+}
+
 fn euler_section(golden: &mut Golden) {
     let mut s = golden.section("euler");
     let mut g = Lcg::new(0x6575_6c72);
@@ -565,5 +652,6 @@ fn determinism() {
     nurbs_bodies_section(&mut golden);
     primitives_section(&mut golden);
     euler_section(&mut golden);
+    meshes_section(&mut golden);
     golden.finish();
 }

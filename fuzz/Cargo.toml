@@ -42,6 +42,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "mesh"
+path = "fuzz_targets/mesh.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "feature"
 path = "fuzz_targets/feature.rs"
 test = false
