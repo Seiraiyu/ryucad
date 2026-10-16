@@ -3,7 +3,7 @@
 use super::KnotVector;
 use super::eval::Spline;
 use crate::Error;
-use crate::geom::{CurveEval, Point3, Vector3};
+use crate::geom::{CurveEval, Point3, UnitVector3, Vector3};
 
 /// A rational B-spline curve in model space. Immutable once built.
 #[derive(Clone, Debug, PartialEq)]
@@ -68,6 +68,23 @@ impl NurbsCurve {
             d1,
             d2,
         }
+    }
+
+    /// The derivatives against the domain normalized to length 1, so
+    /// vanishing is judged in metres whatever the knots' units.
+    fn unit_eval(&self, t: f64) -> CurveEval {
+        let [a, b] = self.domain();
+        self.eval(t).scaled(b - a)
+    }
+
+    /// The unit tangent; see [`CurveEval::tangent`].
+    pub fn tangent(&self, t: f64) -> Option<UnitVector3> {
+        self.unit_eval(t).tangent()
+    }
+
+    /// The curvature; see [`CurveEval::curvature`].
+    pub fn curvature(&self, t: f64) -> Option<f64> {
+        self.unit_eval(t).curvature()
     }
 }
 
@@ -200,6 +217,26 @@ mod tests {
         // Smooth across the seam.
         let (a, b) = (c.eval(4.0 - 1e-9), c.eval(1e-9));
         assert!(close(a.d1, b.d1, 1e-7));
+    }
+
+    #[test]
+    fn tangent_at_a_stationary_point() {
+        // P0 = P1: the curve starts with zero speed and leaves along P2 - P0.
+        let k = KnotVector::clamped(2, &[0.0, 1.0], &[3, 3]).unwrap();
+        let pts = vec![Point3::ORIGIN, Point3::ORIGIN, Point3::new(1.0, 0.0, 0.0)];
+        let c = NurbsCurve::new(k, pts, None).unwrap();
+        assert_eq!(c.tangent(0.0), Some(crate::geom::UnitVector3::X));
+        assert_eq!(c.curvature(0.0), None);
+        assert_eq!(c.curvature(0.5), Some(0.0));
+    }
+
+    #[test]
+    fn tangents_do_not_depend_on_the_parameter_scale() {
+        // One metre over a billion parameter units: |d1| is 1e-9.
+        let k = KnotVector::clamped(1, &[0.0, 1e9], &[2, 2]).unwrap();
+        let pts = vec![Point3::ORIGIN, Point3::new(1.0, 0.0, 0.0)];
+        let c = NurbsCurve::new(k, pts, None).unwrap();
+        assert_eq!(c.tangent(5e8), Some(crate::geom::UnitVector3::X));
     }
 
     #[test]

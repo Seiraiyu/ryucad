@@ -2,6 +2,7 @@
 //! differential geometry derived from them.
 
 use super::{Point3, UnitVector3, Vector3};
+use crate::tol::{ANGULAR_RESOLUTION, LINEAR_RESOLUTION};
 
 /// A curve's point and its first two derivatives at one parameter.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -26,6 +27,18 @@ impl CurveEval {
         self.d1.normalize()?;
         let speed = self.d1.length();
         Some(self.d1.cross(self.d2).length() / (speed * speed * speed))
+    }
+
+    /// The same derivatives against the parameter `t / s`: `d1` times `s`,
+    /// `d2` times `s²`. Tangent and curvature don't change, but the
+    /// vanishing tests then measure what moving across a parameter range
+    /// of length `s` does, rather than depending on the parameter's units.
+    pub fn scaled(&self, s: f64) -> Self {
+        Self {
+            point: self.point,
+            d1: self.d1 * s,
+            d2: self.d2 * (s * s),
+        }
     }
 }
 
@@ -54,10 +67,30 @@ pub struct PrincipalCurvatures {
 }
 
 impl SurfaceEval {
-    /// The direction of `du × dv`, or `None` where it vanishes (shorter
-    /// than [`crate::tol::LINEAR_RESOLUTION`]).
+    /// The direction of `du × dv`, or `None` where either derivative
+    /// vanishes (is no longer than [`LINEAR_RESOLUTION`]) or they are
+    /// parallel within [`ANGULAR_RESOLUTION`].
     pub fn normal(&self) -> Option<UnitVector3> {
-        self.du.cross(self.dv).normalize()
+        let (a, b) = (self.du.length(), self.dv.length());
+        let n = self.du.cross(self.dv);
+        let len = n.length();
+        if a <= LINEAR_RESOLUTION || b <= LINEAR_RESOLUTION || len <= ANGULAR_RESOLUTION * a * b {
+            return None;
+        }
+        Some(UnitVector3::new_unchecked(n / len))
+    }
+
+    /// The same derivatives against the parameters `(u / su, v / sv)`; see
+    /// [`CurveEval::scaled`].
+    pub fn scaled(&self, su: f64, sv: f64) -> Self {
+        Self {
+            point: self.point,
+            du: self.du * su,
+            dv: self.dv * sv,
+            duu: self.duu * (su * su),
+            duv: self.duv * (su * sv),
+            dvv: self.dvv * (sv * sv),
+        }
     }
 
     /// The principal curvatures against the unit normal `n`, from the first
@@ -179,6 +212,40 @@ mod tests {
         };
         assert_eq!(pinched.normal(), None);
         assert_eq!(pinched.principal_curvatures(UnitVector3::Z), None);
+    }
+
+    #[test]
+    fn surface_normal_needs_two_real_directions() {
+        // A tiny du vanishes even though du × dv is long.
+        let tiny = SurfaceEval {
+            du: Vector3::new(1e-9, 0.0, 0.0),
+            dv: Vector3::new(0.0, 1e9, 0.0),
+            ..saddle(0.0, 0.0)
+        };
+        assert_eq!(tiny.normal(), None);
+        // Parallel within the angular resolution.
+        let parallel = SurfaceEval {
+            du: Vector3::new(1.0, 0.0, 0.0),
+            dv: Vector3::new(1.0, 1e-12, 0.0),
+            ..saddle(0.0, 0.0)
+        };
+        assert_eq!(parallel.normal(), None);
+    }
+
+    #[test]
+    fn scaling_the_parameters_scales_the_derivatives() {
+        let e = saddle(0.5, 2.0).scaled(2.0, 3.0);
+        assert_eq!(e.point, saddle(0.5, 2.0).point);
+        assert_eq!(e.du, Vector3::new(2.0, 0.0, 4.0));
+        assert_eq!(e.dv, Vector3::new(0.0, 3.0, 1.5));
+        assert_eq!(e.duv, Vector3::new(0.0, 0.0, 6.0));
+        let c = CurveEval {
+            point: Point3::ORIGIN,
+            d1: Vector3::new(1.0, 0.0, 0.0),
+            d2: Vector3::new(0.0, 1.0, 0.0),
+        }
+        .scaled(3.0);
+        assert_eq!((c.d1.x, c.d2.y), (3.0, 9.0));
     }
 
     #[test]

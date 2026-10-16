@@ -2,7 +2,7 @@
 
 use super::KnotVector;
 use super::eval::check_weights;
-use crate::geom::{Point3, SurfaceEval, Vector3};
+use crate::geom::{Point3, PrincipalCurvatures, SurfaceEval, UnitVector3, Vector3};
 use crate::{Error, NurbsError};
 
 /// A rational B-spline surface, tensor product of a `u` and a `v` knot
@@ -125,6 +125,56 @@ impl NurbsSurface {
             duv: suv,
             dvv: svv,
         }
+    }
+
+    /// The derivatives against the domain normalized to `[0, 1]²`, so
+    /// vanishing is judged in metres whatever the knots' units.
+    fn unit_eval(&self, u: f64, v: f64) -> SurfaceEval {
+        let [[u0, u1], [v0, v1]] = self.domain();
+        self.eval(u, v).scaled(u1 - u0, v1 - v0)
+    }
+
+    /// The unit normal, along `du × dv`. Where that vanishes (a pole: a
+    /// collapsed row of control points) it is the limit normal: the first
+    /// of `du × duv`, `duv × dv`, `duu × dv` and `du × dvv` that does not
+    /// vanish, turned to agree with the normal a short step into the
+    /// domain. `None` if every candidate vanishes.
+    pub fn normal(&self, u: f64, v: f64) -> Option<UnitVector3> {
+        let e = self.unit_eval(u, v);
+        if let Some(n) = e.normal() {
+            return Some(n);
+        }
+        let n = [
+            e.du.cross(e.duv),
+            e.duv.cross(e.dv),
+            e.duu.cross(e.dv),
+            e.du.cross(e.dvv),
+        ]
+        .into_iter()
+        .find_map(Vector3::normalize)?;
+        let [[u0, u1], [v0, v1]] = self.domain();
+        let inward = |t: f64, a: f64, b: f64| {
+            let step = (b - a) * 1e-6;
+            if t < (a + b) / 2.0 {
+                t + step
+            } else {
+                t - step
+            }
+        };
+        let near = self
+            .unit_eval(inward(u, u0, u1), inward(v, v0, v1))
+            .normal();
+        Some(match near {
+            Some(m) if m.dot(n) < 0.0 => -n,
+            _ => n,
+        })
+    }
+
+    /// The principal curvatures against `du × dv`; `None` where that
+    /// vanishes.
+    pub fn principal_curvatures(&self, u: f64, v: f64) -> Option<PrincipalCurvatures> {
+        let e = self.unit_eval(u, v);
+        e.principal_curvatures(e.normal()?)
     }
 }
 
@@ -277,6 +327,52 @@ mod tests {
             assert!(a.point.distance(b.point) <= 1e-15);
             assert!(close(a.du, b.du, 1e-14) && close(a.duu, b.duu, 1e-13));
         }
+    }
+
+    /// The triangle (1,0,0), (0,1,0), (0,0,1) as a bilinear patch whose
+    /// `v = 1` row collapses to the last corner: a pole.
+    fn pole() -> NurbsSurface {
+        let points = vec![
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 0.0, 1.0),
+            Point3::new(0.0, 1.0, 0.0),
+            Point3::new(0.0, 0.0, 1.0),
+        ];
+        NurbsSurface::new([line(2), line(2)], points, None).unwrap()
+    }
+
+    #[test]
+    fn the_normal_at_a_pole_is_the_limit() {
+        let s = pole();
+        let n = 1.0 / 3.0f64.sqrt();
+        let expect = Vector3::new(n, n, n);
+        assert_eq!(s.eval(0.5, 1.0).normal(), None);
+        for u in [0.0, 0.3, 1.0] {
+            assert!(
+                close(s.normal(u, 1.0).unwrap().get(), expect, 1e-15),
+                "u={u}"
+            );
+            assert!(
+                close(s.normal(u, 0.5).unwrap().get(), expect, 1e-15),
+                "u={u}"
+            );
+        }
+        assert_eq!(s.principal_curvatures(0.5, 1.0), None);
+        let k = s.principal_curvatures(0.5, 0.5).unwrap();
+        assert_eq!((k.k1, k.k2), (0.0, 0.0));
+    }
+
+    #[test]
+    fn normals_do_not_depend_on_the_parameter_scale() {
+        let k = KnotVector::clamped(1, &[0.0, 1e9], &[2, 2]).unwrap();
+        let points = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+        ];
+        let s = NurbsSurface::new([k.clone(), k], points, None).unwrap();
+        assert_eq!(s.normal(5e8, 5e8), Some(crate::geom::UnitVector3::Z));
     }
 
     #[test]
