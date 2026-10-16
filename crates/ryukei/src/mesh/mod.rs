@@ -6,4 +6,5 @@
 
 mod bound;
 mod cdt;
+mod edge;
 mod uv;
