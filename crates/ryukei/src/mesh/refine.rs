@@ -18,7 +18,7 @@ use super::uv::{FaceGeom, U, V};
 use crate::geom::{Point2, Point3};
 use crate::predicates::{Sign, orient2d};
 use crate::topo::EdgeId;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 /// Why refinement stopped short of the targets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,9 +95,12 @@ pub(crate) fn refine(
             }
             // Not convex: split the edge instead, which also takes x off
             // the pole there.
-            let Some((tri, i)) = d.cdt.find_edge(x, a) else {
+            let Some((tri, i)) = d.cdt.find_edge(x, a).or_else(|| d.cdt.find_edge(a, x)) else {
                 continue;
             };
+            if d.cdt.is_fixed(tri, i) {
+                continue;
+            }
             let before = d.cdt.triangle_count();
             if split_inner(d, g, tri, i).is_some() {
                 flipped = true;
@@ -118,26 +121,27 @@ pub(crate) fn refine(
 /// Rounds of unpinching and refining again.
 const PINCH_ROUNDS: usize = 16;
 
-/// True when a vertex lies on a pole side.
-fn on_pole(d: &Domain, v: u32) -> bool {
-    let p = d.uv[v as usize];
-    let at = [(V, 0), (U, 1), (V, 1), (U, 0)];
-    (0..4).any(|s| d.sides[s] == Side::Pole && [p.x, p.y][at[s].0] == d.rect[at[s].0][at[s].1])
+/// Which position a vertex will weld to: its body anchor, or its class.
+fn weld(d: &Domain, v: u32) -> (u8, u32, u32) {
+    match d.classes.anchor(v) {
+        Anchor::Vertex(x) => (0, x.index() as u32, 0),
+        Anchor::Sample(e, k) => (1, e.index() as u32, k),
+        Anchor::Free => (2, d.classes.root(v), 0),
+    }
 }
 
-/// Edges to flip so that no vertex is pinched at a pole. Going round a
-/// vertex, its neighbours on a pole side must come in one run: once the
-/// pole is welded into one position, two runs would make its edge to the
-/// pole non-manifold. Near a pole the scaled plane stretches the surface
-/// sideways, so Delaunay triangles can reach past a nearer point to the
-/// pole twice. All but the longest run are flipped away; each flip takes
-/// one edge from the pole, so the repair ends.
+/// Edges to flip so that no vertex is pinched. Going round a vertex, the
+/// neighbours that weld to any one position must come in one run: two
+/// runs would make the welded edge to that position non-manifold. It
+/// happens at a pole (whose side welds to one point), where the scaled
+/// plane stretches the surface sideways so that Delaunay triangles can
+/// reach past a nearer point to the pole twice, and across a seam when
+/// triangles are wide enough to touch both of its sides. All but the
+/// longest run are flipped away; each flip (or split, where a flip
+/// can't be made) takes one edge from that position, so the repair ends.
 fn pinched(d: &Domain) -> Vec<(u32, u32)> {
     let mut out = Vec::new();
     for x in 0..d.uv.len() as u32 {
-        if on_pole(d, x) {
-            continue;
-        }
         let (fan, closed) = d.cdt.fan(x);
         // The neighbours counterclockwise, None across outside triangles.
         let mut ring: Vec<Option<u32>> = Vec::new();
@@ -151,38 +155,47 @@ fn pinched(d: &Domain) -> Vec<(u32, u32)> {
             }
             ring.push(inside.then_some(c[next(i)]));
         }
-        let pole = |k: usize| ring[k].is_some_and(|v| on_pole(d, v));
         let n = ring.len();
-        // Runs of pole neighbours, as index lists.
-        let mut runs: Vec<Vec<usize>> = Vec::new();
+        if n == 0 || ring.iter().all(Option::is_none) {
+            continue;
+        }
+        // Neighbours welding to x's own position (along a pole side) don't
+        // count.
+        let own = weld(d, x);
+        let key = |k: usize| ring[k].map(|v| weld(d, v)).filter(|&w| w != own);
+        // Start where the key changes, so that no run wraps.
         let start = if closed {
-            match (0..n).find(|&k| !pole(k)) {
+            match (0..n).find(|&k| key(k) != key((k + n - 1) % n)) {
                 Some(k) => k,
                 None => continue,
             }
         } else {
             0
         };
-        let mut run: Vec<usize> = Vec::new();
-        for j in 0..n {
+        // Runs of one key, as index lists.
+        let mut runs: BTreeMap<(u8, u32, u32), Vec<Vec<usize>>> = BTreeMap::new();
+        let mut j = 0;
+        while j < n {
             let k = (start + j) % n;
-            if pole(k) {
-                run.push(k);
-            } else if !run.is_empty() {
-                runs.push(core::mem::take(&mut run));
+            let Some(w) = key(k) else {
+                j += 1;
+                continue;
+            };
+            let mut run = vec![k];
+            while j + 1 < n && key((start + j + 1) % n) == Some(w) {
+                j += 1;
+                run.push((start + j) % n);
             }
+            runs.entry(w).or_default().push(run);
+            j += 1;
         }
-        if !run.is_empty() {
-            runs.push(run);
-        }
-        if runs.len() <= 1 {
-            continue;
-        }
-        let keep =
-            (0..runs.len()).fold(0, |b, r| if runs[r].len() > runs[b].len() { r } else { b });
-        for (r, run) in runs.iter().enumerate() {
-            if r != keep {
-                out.extend(run.iter().map(|&k| (x, ring[k].expect("a neighbour"))));
+        for list in runs.values().filter(|l| l.len() > 1) {
+            let keep =
+                (0..list.len()).fold(0, |b, r| if list[r].len() > list[b].len() { r } else { b });
+            for (r, run) in list.iter().enumerate() {
+                if r != keep {
+                    out.extend(run.iter().map(|&k| (x, ring[k].expect("a neighbour"))));
+                }
             }
         }
     }
