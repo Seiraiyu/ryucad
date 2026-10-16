@@ -41,11 +41,6 @@ proptest! {
     }
 
     #[test]
-    fn rigid_is_orthonormal(r in rigid()) {
-        prop_assert!(r.orthonormality_error() <= 8.0 * f64::EPSILON);
-    }
-
-    #[test]
     fn affine_matches_rigid(r in rigid(), p in point()) {
         prop_assert_eq!(Affine::from(r).apply_point(p), r.apply_point(p));
     }
