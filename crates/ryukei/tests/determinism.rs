@@ -217,6 +217,78 @@ fn analytic_section(golden: &mut Golden) {
     }
 }
 
+fn derivatives_section(golden: &mut Golden) {
+    let mut s = golden.section("derivatives");
+    let mut g = Lcg::new(0x6465_7276);
+    for _ in 0..256 {
+        let mut c = || g.next_f64(-10.0, 10.0);
+        let (o, z, x) = (
+            Point3::new(c(), c(), c()),
+            Vector3::new(c(), c(), c()),
+            Vector3::new(c(), c(), c()),
+        );
+        let (u, v) = (c(), c() / 10.0);
+        let (r, k, a) = (
+            c().abs() + 0.5,
+            (c().abs() + 1.0) / 12.0,
+            (c().abs() + 1.0) / 8.0,
+        );
+        let f = Frame::new(o, z, x).unwrap();
+        let curves = [
+            Curve::Line(Line::new(o, z).unwrap()),
+            Curve::Circle(Circle::new(f, r).unwrap()),
+        ];
+        for cv in curves {
+            let e = cv.eval(u);
+            let b = cv.bounds([u, u + r]);
+            for p in [e.point, b.min(), b.max()] {
+                s.f64(p.x);
+                s.f64(p.y);
+                s.f64(p.z);
+            }
+            for w in [e.d1, e.d2] {
+                s.f64(w.x);
+                s.f64(w.y);
+                s.f64(w.z);
+            }
+            s.f64(cv.curvature(u).unwrap());
+        }
+        let surfaces = [
+            Surface::Plane(Plane::new(f)),
+            Surface::Cylinder(Cylinder::new(f, r).unwrap()),
+            Surface::Cone(Cone::new(f, r, a).unwrap()),
+            Surface::Sphere(Sphere::new(f, r).unwrap()),
+            Surface::Torus(Torus::new(f, r, r * k).unwrap()),
+        ];
+        for sf in surfaces {
+            let e = sf.eval(u, v);
+            let b = sf.bounds();
+            for p in [e.point, b.min(), b.max()] {
+                s.f64(p.x);
+                s.f64(p.y);
+                s.f64(p.z);
+            }
+            for w in [e.du, e.dv, e.duu, e.duv, e.dvv] {
+                s.f64(w.x);
+                s.f64(w.y);
+                s.f64(w.z);
+            }
+            match sf.principal_curvatures(u, v) {
+                Some(k) => {
+                    s.f64(k.k1);
+                    s.f64(k.k2);
+                    for w in [k.dir1.get(), k.dir2.get()] {
+                        s.f64(w.x);
+                        s.f64(w.y);
+                        s.f64(w.z);
+                    }
+                }
+                None => s.u64(0),
+            }
+        }
+    }
+}
+
 fn primitives_section(golden: &mut Golden) {
     let mut s = golden.section("primitives");
     let axis = Vector3::new(1.0, -2.0, 0.5).normalize().unwrap();
@@ -291,6 +363,7 @@ fn determinism() {
     predicates_section(&mut golden);
     interval_section(&mut golden);
     analytic_section(&mut golden);
+    derivatives_section(&mut golden);
     primitives_section(&mut golden);
     euler_section(&mut golden);
     golden.finish();

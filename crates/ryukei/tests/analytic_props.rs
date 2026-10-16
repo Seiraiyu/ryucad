@@ -1,11 +1,14 @@
 //! Each closed-form distance and nearest parameter must agree with brute
 //! force: no sampled point of the curve or surface is closer than the
 //! closed-form distance, and the closed-form nearest point attains it.
+//! Closed-form derivatives must agree with finite differences, and
+//! principal curvatures with the turning of the normal.
 
 use core::f64::consts::TAU;
 use proptest::prelude::*;
 use ryukei::geom::{
-    Circle, Cone, Curve, Cylinder, Frame, Line, Plane, Point3, Sphere, Surface, Torus, Vector3,
+    Circle, Cone, Curve, Cylinder, Frame, Line, Plane, Point3, Sphere, Surface, Torus, UnitVector3,
+    Vector3,
 };
 
 /// Rounding allowance at these sizes (coordinates up to ~30 m).
@@ -110,6 +113,83 @@ proptest! {
         for q in [s.point(u + h, v), s.point(u, v + h)] {
             let step: Vector3 = q - p;
             prop_assert!(step.dot(n).abs() <= 1e-10, "{s:?} ({u}, {v})");
+        }
+    }
+}
+
+/// Within `tol` of each other, relative to the larger size (at least 1).
+fn agree(a: Vector3, b: Vector3, tol: f64) -> bool {
+    (a - b).length() <= tol * a.length().max(b.length()).max(1.0)
+}
+
+/// Keeps `v` clear of a cone's apex, where the derivatives degenerate.
+fn clear_of_apex(s: &Surface, v: f64) -> bool {
+    match s {
+        Surface::Cone(c) => v > c.apex_v() + 0.1,
+        _ => true,
+    }
+}
+
+proptest! {
+    #[test]
+    fn curve_derivatives_match_finite_differences(c in curve(), t in -3.0f64..3.0) {
+        let h = 1e-4;
+        let e = c.eval(t);
+        let (a, m, b) = (c.point(t - h), c.point(t), c.point(t + h));
+        prop_assert_eq!(e.point, m);
+        prop_assert!(agree(e.d1, (b - a) / (2.0 * h), 1e-6), "{c:?} at {t}");
+        prop_assert!(agree(e.d2, ((b - m) - (m - a)) / (h * h), 1e-5), "{c:?} at {t}");
+        let k = c.curvature(t).unwrap();
+        prop_assert!((k - e.curvature().unwrap()).abs() <= 1e-12 * k.max(1.0));
+    }
+
+    #[test]
+    fn surface_derivatives_match_finite_differences(
+        s in surface(),
+        u in 0.0f64..TAU,
+        v in -1.0f64..1.0,
+    ) {
+        prop_assume!(clear_of_apex(&s, v));
+        let h = 1e-4;
+        let e = s.eval(u, v);
+        let p = |a: f64, b: f64| s.point(u + a, v + b);
+        let m = p(0.0, 0.0);
+        prop_assert_eq!(e.point, m);
+        prop_assert!(agree(e.du, (p(h, 0.0) - p(-h, 0.0)) / (2.0 * h), 1e-6));
+        prop_assert!(agree(e.dv, (p(0.0, h) - p(0.0, -h)) / (2.0 * h), 1e-6));
+        let second = |a: Point3, b: Point3| ((a - m) + (b - m)) / (h * h);
+        prop_assert!(agree(e.duu, second(p(h, 0.0), p(-h, 0.0)), 1e-5), "{s:?}");
+        prop_assert!(agree(e.dvv, second(p(0.0, h), p(0.0, -h)), 1e-5), "{s:?}");
+        let cross = ((p(h, h) - p(h, -h)) - (p(-h, h) - p(-h, -h))) / (4.0 * h * h);
+        prop_assert!(agree(e.duv, cross, 1e-5), "{s:?}");
+    }
+
+    #[test]
+    fn principal_directions_turn_the_normal_by_their_curvature(
+        s in surface(),
+        u in 0.0f64..TAU,
+        v in -1.0f64..1.0,
+    ) {
+        prop_assume!(clear_of_apex(&s, v));
+        let k = s.principal_curvatures(u, v).unwrap();
+        let n = s.normal(u, v).unwrap();
+        prop_assert!(k.k1 >= k.k2);
+        prop_assert!(k.dir1.dot(k.dir2).abs() <= 1e-12);
+        prop_assert!(k.dir1.dot(n).abs() <= 1e-12 && k.dir2.dot(n).abs() <= 1e-12);
+        prop_assert!(k.dir1.get().cross(k.dir2.get()).dot(n.get()) > 0.0);
+        // Rodrigues: moving along a principal direction at unit speed turns
+        // the normal by minus its curvature times that direction.
+        let e = s.eval(u, v);
+        let (ee, ff, gg) = (e.du.dot(e.du), e.du.dot(e.dv), e.dv.dot(e.dv));
+        let det = ee * gg - ff * ff;
+        let h = 1e-5;
+        for (kk, dir) in [(k.k1, k.dir1), (k.k2, k.dir2)] {
+            let d: Vector3 = dir.get();
+            let (x, y) = (d.dot(e.du), d.dot(e.dv));
+            let (a, b) = ((gg * x - ff * y) / det, (ee * y - ff * x) / det);
+            let normal = |t: f64| -> UnitVector3 { s.normal(u + a * t, v + b * t).unwrap() };
+            let turn = (normal(h).get() - normal(-h).get()) / (2.0 * h);
+            prop_assert!(agree(turn, d * -kk, 1e-6), "{s:?} k={kk} {turn:?}");
         }
     }
 }
