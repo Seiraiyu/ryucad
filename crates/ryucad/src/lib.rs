@@ -3,6 +3,7 @@
 
 pub mod doc;
 pub mod error;
+pub mod inspect;
 pub mod proto;
 pub mod rebuild;
 pub mod server;

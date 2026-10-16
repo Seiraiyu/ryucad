@@ -101,10 +101,13 @@ pub fn handle(session: &mut Session, req: Request) -> Result<Value> {
             Code::Usage,
             "only a running daemon answers daemon requests",
         )),
-        other => Err(Error::new(
-            Code::Usage,
-            format!("{} is not implemented yet", other.method()),
-        )),
+        Request::Rebuild { part } => rebuild(session, part.as_deref()),
+        Request::Inspect {
+            part,
+            feature,
+            entity,
+        } => inspect(session, &part, feature.as_deref(), entity.as_deref()),
+        Request::CheckFormat {} => check_format(session),
     }
 }
 
@@ -441,6 +444,145 @@ fn feature_list(session: &Session, part: &str) -> Result<Value> {
     Ok(json!({"part": p.id, "features": features, "orphans": p.orphans(), "revision": p.revision}))
 }
 
+fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
+    let ids: Vec<Id> = match part {
+        Some(p) => vec![part_id(p)?],
+        None => session.project().parts.keys().cloned().collect(),
+    };
+    let mut parts = Vec::new();
+    let mut failed = 0;
+    for id in ids {
+        let revision = session.project().part(&id)?.revision.clone();
+        // A part whose list can't be read can't be rebuilt.
+        order(session.project().part(&id)?)?;
+        let r = session.rebuilt(&id)?;
+        failed += r.failed();
+        let features: Vec<Value> = r
+            .features
+            .iter()
+            .map(|(fid, b)| match b {
+                Ok(b) => {
+                    let c = b.body.counts();
+                    json!({"id": fid, "ok": true, "hash": b.hash,
+                           "counts": {"faces": c.faces, "edges": c.edges, "vertices": c.vertices}})
+                }
+                Err(e) => json!({"id": fid, "ok": false, "error": e}),
+            })
+            .collect();
+        parts.push(json!({"part": id, "revision": revision, "hash": r.hash,
+                          "failed": r.failed(), "features": features}));
+    }
+    let report = json!({ "parts": parts });
+    if failed > 0 {
+        // Every feature's status still reaches the agent, in the details.
+        return Err(Error {
+            code: Code::RebuildFailed,
+            message: format!("{failed} feature(s) failed to rebuild"),
+            details: report,
+        });
+    }
+    Ok(report)
+}
+
+fn inspect(
+    session: &mut Session,
+    part: &str,
+    only: Option<&str>,
+    entity: Option<&str>,
+) -> Result<Value> {
+    let pid = part_id(part)?;
+    let only = only.map(feature_id).transpose()?;
+    if let Some(f) = &only {
+        feature(session.project().part(&pid)?, f)?;
+    }
+    let features: Vec<(Id, Feature)> = session
+        .project()
+        .part(&pid)?
+        .features
+        .iter()
+        .filter_map(|(id, f)| Some((id.clone(), f.as_ref().ok()?.clone())))
+        .collect();
+    let result = session.rebuilt(&pid)?;
+    let mut bodies = Vec::new();
+    for (id, built) in &result.features {
+        if only.as_ref().is_some_and(|o| o != id) {
+            continue;
+        }
+        let Ok(built) = built else { continue };
+        let f = &features
+            .iter()
+            .find(|(i, _)| i == id)
+            .expect("built features loaded")
+            .1;
+        let mut v = crate::inspect::body(f, built);
+        v["feature"] = json!(id);
+        bodies.push(v);
+    }
+    if let Some(name) = entity {
+        // Just the one entity, wherever it is.
+        for b in &bodies {
+            for kind in ["faces", "edges", "vertices"] {
+                if let Some(e) = b[kind]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|e| e["name"] == name)
+                {
+                    return Ok(
+                        json!({"feature": b["feature"], "kind": &kind[..kind.len() - 1], "entity": e}),
+                    );
+                }
+            }
+        }
+        return Err(
+            Error::new(Code::NotFound, format!("no entity {name} in part {pid}"))
+                .with("entity", name),
+        );
+    }
+    Ok(json!({"part": pid, "bodies": bodies}))
+}
+
+fn check_format(session: &Session) -> Result<Value> {
+    let p = session.project();
+    let root = &p.root;
+    let rel = |path: &Path| crate::doc::project::relative(root, path);
+    let mut non_canonical = Vec::new();
+    let mut errors = Vec::new();
+    let mut orphans = Vec::new();
+    let mut check = |path: &Path| {
+        if let Ok(text) = fs::read_to_string(path)
+            && crate::doc::canonical::parse(&text).is_ok()
+            && !crate::doc::canonical::is_canonical(&text)
+        {
+            non_canonical.push(rel(path));
+        }
+    };
+    check(&root.join(MANIFEST));
+    for part in p.parts.values() {
+        check(&part_path(root, &part.id));
+        if let Err(e) = &part.file {
+            errors.push(json!(e));
+        }
+        for (fid, f) in &part.features {
+            check(&feature_path(root, &part.id, fid));
+            if let Err(e) = f {
+                errors.push(json!(e));
+            }
+        }
+        orphans.extend(
+            part.orphans()
+                .into_iter()
+                .map(|f| rel(&feature_path(root, &part.id, f))),
+        );
+    }
+    let clean =
+        non_canonical.is_empty() && errors.is_empty() && orphans.is_empty() && p.unknown.is_empty();
+    Ok(
+        json!({"clean": clean, "non_canonical": non_canonical, "errors": errors,
+              "orphans": orphans, "unknown": p.unknown}),
+    )
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -739,6 +881,108 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::InvalidJson);
+    }
+
+    #[test]
+    fn rebuild_and_inspect() {
+        let (_dir, mut s) = with_part();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "params": {"x": 1, "y": 2, "z": 3}, "id": "b"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "params": {"radius": 1}, "id": "s"}),
+        )
+        .unwrap();
+        let r = call(&mut s, "rebuild", json!({})).unwrap();
+        let part = &r["parts"][0];
+        assert_eq!(part["failed"], 0);
+        assert_eq!(
+            part["features"][0]["counts"],
+            json!({"faces": 6, "edges": 12, "vertices": 8})
+        );
+        let all = call(&mut s, "inspect", json!({"part": "p"})).unwrap();
+        assert_eq!(all["bodies"].as_array().unwrap().len(), 2);
+        let one = call(&mut s, "inspect", json!({"part": "p", "feature": "s"})).unwrap();
+        assert_eq!(one["bodies"][0]["feature"], "s");
+        let name = all["bodies"][0]["edges"][3]["name"].as_str().unwrap();
+        let e = call(&mut s, "inspect", json!({"part": "p", "entity": name})).unwrap();
+        assert_eq!(
+            (e["feature"].as_str(), e["kind"].as_str()),
+            (Some("b"), Some("edge"))
+        );
+        let e = call(&mut s, "inspect", json!({"part": "p", "entity": "0"})).unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+    }
+
+    #[test]
+    fn a_failing_feature_fails_the_rebuild_but_reports_everything() {
+        let (_dir, mut s) = with_part();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "params": {"radius": 1}, "id": "ok"}),
+        )
+        .unwrap();
+        call(&mut s, "feature.add", json!({"part": "p", "type": "torus", "params": {"major_radius": 1, "minor_radius": 1}, "id": "bad"})).unwrap();
+        let e = call(&mut s, "rebuild", json!({"part": "p"})).unwrap_err();
+        assert_eq!(e.code, Code::RebuildFailed);
+        let features = &e.details["parts"][0]["features"];
+        assert_eq!(features[0]["ok"], true);
+        assert_eq!(features[1]["error"]["code"], "rebuild_failed");
+        // Inspect still shows what did build.
+        let v = call(&mut s, "inspect", json!({"part": "p"})).unwrap();
+        assert_eq!(v["bodies"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn check_format_reports_every_kind_of_problem() {
+        let (dir, mut s) = with_part();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "params": {"radius": 1}, "id": "a"}),
+        )
+        .unwrap();
+        assert_eq!(
+            call(&mut s, "check_format", json!({})).unwrap()["clean"],
+            true
+        );
+        let root = dir.path();
+        let a = root.join("parts/p/features/a.json");
+        let compact = serde_json::to_string(
+            &crate::doc::canonical::parse(&fs::read_to_string(&a).unwrap()).unwrap(),
+        )
+        .unwrap();
+        fs::write(&a, compact).unwrap();
+        fs::write(
+            root.join("parts/p/features/orphan.json"),
+            fs::read_to_string(&a).unwrap(),
+        )
+        .unwrap();
+        fs::write(root.join("parts/p/features/broken.json"), "{").unwrap();
+        fs::write(root.join("parts/p/stray.txt"), "").unwrap();
+        let r = call(&mut s, "check_format", json!({})).unwrap();
+        assert_eq!(r["clean"], false);
+        assert!(
+            r["non_canonical"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("parts/p/features/a.json"))
+        );
+        assert_eq!(
+            r["orphans"],
+            json!([
+                "parts/p/features/broken.json",
+                "parts/p/features/orphan.json"
+            ])
+        );
+        assert_eq!(r["errors"][0]["code"], "invalid_json");
+        assert_eq!(r["unknown"], json!(["parts/p/stray.txt"]));
     }
 
     #[test]
