@@ -1,0 +1,20 @@
+{
+  "format": 0,
+  "kind": "ryucad.feature",
+  "praams": {
+    "radius": "1.5 m"
+  },
+  "plement": {
+    "os": "0.5 m"
+  },
+  "placement": {
+    "origin": [
+      "0 mm",
+      "0 mm",
+       0
+    ],
+    "z": [
+        ]
+  },
+  "type": "sphere"
+}

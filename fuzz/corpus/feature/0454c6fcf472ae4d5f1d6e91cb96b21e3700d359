@@ -1,0 +1,16 @@
+{
+  "format": 2,
+  "kind": "ryucad.feature",
+  "params": {
+    "x": "10[ mm",
+    "y":[
+           1,
+      0,
+        1,
+     0,
+      0,
+      1
+    ]
+  },
+  "type": "box"
+}

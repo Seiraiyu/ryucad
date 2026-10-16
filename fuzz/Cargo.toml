@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+ryucad = { path = "../crates/ryucad" }
 ryukei = { path = "../crates/ryukei" }
 ryukei-testkit = { path = "../crates/ryukei-testkit" }
 
@@ -36,6 +37,13 @@ bench = false
 [[bin]]
 name = "nurbs"
 path = "fuzz_targets/nurbs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "feature"
+path = "fuzz_targets/feature.rs"
 test = false
 doc = false
 bench = false

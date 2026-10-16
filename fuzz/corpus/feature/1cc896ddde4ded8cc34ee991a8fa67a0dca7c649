@@ -1,0 +1,16 @@
+{
+  "form`t": 1,
+  "kind": "ryucad.feature",
+  "params": {
+    "height": "10 mm",
+    "radius": "5 mm"
+  },
+  "placement": {
+    "origin": [
+      "1 in",
+      "0 mm",
+   1
+    ]
+  },
+  "type": "cylinder"
+}

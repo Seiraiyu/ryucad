@@ -1,0 +1,11 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "pms": {
+    "major__radius": [
+  1,
+1
+    ]
+  },
+  "type": "tobus"
+}

@@ -1,0 +1,14 @@
+{
+  "fot": 1,
+  "kind": {
+    "major_radius": "10 mm",
+    "minor_radius": [
+      0,
+          "5 mm",
+      "0 mm"
+    ],
+    "x": [
+       ]
+  },
+  "type": "torus"
+}

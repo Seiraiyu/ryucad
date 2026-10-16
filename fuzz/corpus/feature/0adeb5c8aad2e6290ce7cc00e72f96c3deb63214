@@ -1,0 +1,19 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "params": {
+    "radrams": {
+    "radiul": "0.5 m"
+  },
+  "placement": {
+    "origin": [
+   ]
+  },
+  "tyiul": "0.5 m"
+  },
+  "placement": {
+    "origin": [
+   ]
+  },
+  "type": "sphere"
+}
