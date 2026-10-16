@@ -3,6 +3,7 @@
 
 mod basis;
 mod bezier;
+mod bound;
 mod convert;
 mod curve;
 mod curve2;
