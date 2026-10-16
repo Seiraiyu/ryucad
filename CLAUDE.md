@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ryucad is CAD built for AI agents to drive, not primarily for humans clicking in a GUI. FreeCAD was rejected because it performs poorly on large assemblies, and its kernel, OCCT, is a main reason. This project builds its own kernel, **ryukei**, and the long-term target is Parasolid-level capability.
 
-The project is in its early stages. Roadmap phases 0 (foundations: deterministic math, the tolerance model, exact predicates, interval arithmetic, the test harness), 1 (topology core: flat-array B-rep bodies, Euler operators, the validity checker, stable names, the five primitives), 2 (geometry: rational NURBS, the ellipse, pcurves, derivatives, global projection) and 3 (tessellation: certified, watertight, parallel meshing, and the first OCCT comparison) are done. Sweeps (phase 4) come next; see `docs/roadmap.md`.
+The project is in its early stages. Roadmap phases 0 (foundations: deterministic math, the tolerance model, exact predicates, interval arithmetic, the test harness), 1 (topology core: flat-array B-rep bodies, Euler operators, the validity checker, stable names, the five primitives), 2 (geometry: rational NURBS, the ellipse, pcurves, derivatives, global projection) and 3 (tessellation: certified, watertight, parallel meshing, and the first OCCT comparison) are done. Sweeps (phase 4) come next; see design 14 (ryukei roadmap) in the Coxswain planning project `ryucad-ryukei`.
+
+Above the kernel sit ryucad, the application (feature files in Git, the agent CLI, a live viewer humans watch but don't model in, assemblies at scale), and ryupdm, product data management (revisions, releases, where-used, BOM, hosted review; PDM only, not PLM). ryupdm is the likely business; ryukei and ryucad may be open sourced. Their roadmaps are designs 20 (ryucad) and 21 (ryupdm), design 23 lines up all three, and design 22 is the business plan.
 
 ## Commands
 
@@ -41,7 +43,9 @@ The product targets Windows, macOS, and Linux natively, not just WSL. CI (`.gith
 - `crates/ryukei-testkit`: test-only helpers (exact references, seeded inputs, golden hashes, Euler operator sequences from bytes, random NURBS). Never a runtime dependency.
 - `crates/ryukei-bench`: divan benchmarks; the OCCT comparison (a `cxx` shim over a system OCCT 7.8, which the devcontainer installs) is behind its `occt` feature.
 - `fuzz/`: cargo-fuzz targets, outside the workspace (nightly only).
-- `docs/`: design documents. `docs/roadmap.md` holds the phased ryukei plan.
+- Design documents, roadmaps and plans live only in the Coxswain planning project `ryucad-ryukei` (`cox doc list`), never as markdown in the repo, so there is one copy of each.
+
+ryupdm code will live in this monorepo too; the repo may be split later if parts are open sourced.
 
 The boundary between the two crates is deliberate. ryukei works on single bodies (geometry, topology, booleans, blends, tessellation) and must not depend on documents, assemblies, or agents. Large-assembly performance (instancing, lazy loading, caching, incremental recompute) and the agent interface live in ryucad. Keep both in this repo until the kernel API settles.
 
@@ -55,8 +59,9 @@ The boundary between the two crates is deliberate. ryukei works on single bodies
 - **Deliberate numerical precision.** Decide explicitly which calculations must be exact and which can use floating point with tolerances.
 - **Identical results on every platform.** The same model must produce the same result on every OS and CPU. Don't use the platform's own math functions (`f64::sin` and similar) where results must match; use a portable implementation such as the `libm` crate. Use fused multiply-add only explicitly, never fast-math, and only portable or runtime-selected SIMD. Otherwise booleans can succeed on one OS and fail on another, and saved test results won't match across machines.
 - **CPU-only.** The kernel needs 64-bit floats and branch-heavy code, which GPUs handle poorly, so performance comes from the memory layout and running on many cores. GPU work (viewer, rendering for agents, clash detection) belongs in ryucad. CI uses software renderers for it.
-- **Keep OCCT out of the default build.** Put it behind a Cargo feature or in a separate bench crate, so the default build has no C++ dependency on any platform.
-- **Robustness through testing at scale.** Use a corpus of real models, randomly generated and mutated operations, checks that the topology stays valid after every operation, comparison of results against OCCT, and benchmarks against OCCT's numbers. OCCT may serve as a reference and benchmark baseline, and as a temporary fallback for operations ryukei can't do yet, but never as the long-term kernel.
+- **Keep C++ kernels out of the default build.** Put OCCT and SMLib behind a Cargo feature or in a separate bench crate, so the default build has no C++ dependency on any platform.
+- **Robustness through testing at scale.** Use a corpus of real models, randomly generated and mutated operations, checks that the topology stays valid after every operation, comparison of results against OCCT and SMLib, and benchmarks against OCCT's numbers. OCCT and SMLib may serve as references and benchmark baselines, and as a temporary fallback (in ryucad, preferring SMLib) for operations ryukei can't do yet, but never as the long-term kernel. See "Reference kernels" in design 14 (ryukei roadmap).
+- **Port SMLib's algorithms, not its numerics.** SMLib (NVIDIA's USD BRep, Apache 2.0) may be ported into ryukei. Keep its NOTICE and credit it in the ported file. Topology decisions still go through `ryukei::predicates`, `ryukei::interval` and `tol`, never SMLib's float tests.
 
 ## Numerics (decided in phase 0)
 
@@ -97,9 +102,14 @@ The design is document 19 in the Coxswain planning project `ryucad-ryukei`.
 - **Parallelism and determinism.** `ryukei` depends on `rayon`: edges, then faces, run on the current pool; each is a pure function and results are gathered in ID order, so the mesh is the same bits on any number of threads. Golden hashes pin meshes across platforms.
 - **Limits.** Closed directions are periodic ones only (a clamped NURBS face whose ends meet is `BadDomain`); doubly periodic faces must be loopless. Meshes are not FEA-quality, and ryukei makes about 1.5 to 18 times OCCT's triangles at the same chord.
 
+## Persistence (decided 2026-10-16)
+
+A ryucad model is a folder of canonical text feature files in a Git repo, one per feature or object, rebuilt deterministically by ryukei. Git provides history, branches and merges; ryucad supplies CAD-aware diff and merge drivers, and features reference topology by stable name. Derived data (bodies, meshes, renders) is a cache, never committed. ryupdm builds on the same repos rather than a second store. This follows the freecad-spike (github.com/Seiraiyu/freecad-spike) GO verdict, without FreeCAD.
+
 ## Open decisions
 
 Don't assume an answer to these. Ask the user, or record the decision here once it's made:
 
-- How agents talk to ryucad (CLI, library API, RPC, MCP, etc.) and how models are persisted.
-- License.
+- How agents talk to ryucad. The lean is a CLI with JSON output backed by a per-project session daemon, with MCP as a thin adapter later; not final.
+- Which parts are open source and which are paid.
+- License. Apache-2.0 is the lean (design 22), and ported SMLib code (Apache-2.0) rules out GPLv2-only.
