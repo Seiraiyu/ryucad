@@ -60,3 +60,39 @@ jobs:
         with:
           runCmd: cargo test --workspace
           push: never
+
+  installers:
+    name: installers on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release -p ryucad
+      - if: runner.os == 'Linux'
+        run: shellcheck install.sh scripts/test-install.sh
+      - if: runner.os != 'Windows'
+        run: sh scripts/test-install.sh
+      - if: runner.os == 'Windows'
+        name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) {
+            Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          }
+          $findings = 'install.ps1', 'scripts/test-install.ps1' |
+            ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Severity Warning, Error }
+          $findings
+          if ($findings) { throw 'PSScriptAnalyzer findings' }
+      - if: runner.os == 'Windows'
+        name: Windows PowerShell 5.1
+        shell: pwsh
+        run: scripts/test-install.ps1 -Shell powershell
+      - if: runner.os == 'Windows'
+        name: PowerShell 7
+        shell: pwsh
+        run: scripts/test-install.ps1 -Shell pwsh
