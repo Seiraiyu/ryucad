@@ -5,6 +5,7 @@
 //! feature, against a system OCCT 7.8 or later (`OCCT_DIR`, default
 //! `/usr`).
 
+use crate::{Primitive, Soup};
 use ryukei::geom::{Point3, Rigid};
 
 #[cxx::bridge(namespace = "ryukei_occt")]
@@ -49,27 +50,6 @@ unsafe impl Sync for ffi::Shape {}
 /// An OCCT solid.
 pub struct Solid(cxx::UniquePtr<ffi::Shape>);
 
-/// The primitives both kernels build, in the same local frames.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Primitive {
-    Block([f64; 3]),
-    Cylinder {
-        r: f64,
-        h: f64,
-    },
-    /// From radius `r0` at the base to `r1` (0 for a point) at height `h`.
-    Cone {
-        r0: f64,
-        r1: f64,
-        h: f64,
-    },
-    Sphere(f64),
-    Torus {
-        major: f64,
-        minor: f64,
-    },
-}
-
 impl Solid {
     /// A primitive moved by `at`.
     pub fn new(p: Primitive, at: &Rigid) -> Self {
@@ -112,38 +92,21 @@ impl Solid {
 }
 
 impl OcctMesh {
-    pub fn point(&self, i: u32) -> Point3 {
-        let k = 3 * i as usize;
-        Point3::new(
-            self.positions[k],
-            self.positions[k + 1],
-            self.positions[k + 2],
-        )
+    pub fn soup(&self) -> Soup<'_> {
+        Soup {
+            positions: &self.positions,
+            triangles: &self.triangles,
+        }
     }
 
     /// The enclosed volume and the area.
     pub fn volume_and_area(&self) -> (f64, f64) {
-        let (mut vol, mut area) = (0.0, 0.0);
-        for t in self.triangles.chunks(3) {
-            let [a, b, c] = [t[0], t[1], t[2]].map(|i| self.point(i).to_vector());
-            vol += a.dot(b.cross(c)) / 6.0;
-            area += (b - a).cross(c - a).length() / 2.0;
-        }
-        (vol, area)
+        self.soup().volume_and_area()
     }
 
     /// The largest distance from sampled points of every `every`-th
     /// triangle to the solid's boundary: one way only, mesh to solid.
     pub fn deviation(&self, solid: &Solid, every: usize) -> f64 {
-        let mut worst: f64 = 0.0;
-        for t in self.triangles.chunks(3).step_by(every) {
-            let [a, b, c] = [t[0], t[1], t[2]].map(|i| self.point(i).to_vector());
-            for (wa, wb) in [(1.0 / 3.0, 1.0 / 3.0), (0.5, 0.5), (0.5, 0.0), (0.0, 0.5)] {
-                let wc = 1.0 - wa - wb;
-                let p = Point3::ORIGIN + a * wa + b * wb + c * wc;
-                worst = worst.max(solid.distance(p));
-            }
-        }
-        worst
+        self.soup().deviation(every, |p| solid.distance(p))
     }
 }

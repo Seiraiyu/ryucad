@@ -1,6 +1,6 @@
 [package]
 name = "ryukei-bench"
-description = "Benchmarks for ryukei, and (behind `occt`) comparisons against OCCT"
+description = "Benchmarks for ryukei, and (behind `occt` and `smlib`) comparisons against OCCT and SMLib"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
@@ -10,6 +10,9 @@ publish = false
 # The OCCT comparison: a C++ shim linked against a system OCCT. Off by
 # default, so the default build has no C++ on any platform.
 occt = ["dep:cxx", "dep:cxx-build"]
+# The SMLib comparison: a C++ shim linked against libsmlib, built from
+# NVIDIA's USD BRep (the devcontainer builds it). Off by default too.
+smlib = ["dep:cxx", "dep:cxx-build"]
 
 [dependencies]
 cxx = { version = "1", optional = true }
@@ -44,6 +47,12 @@ name = "occt"
 harness = false
 required-features = ["occt"]
 
+[[bench]]
+name = "smlib"
+harness = false
+required-features = ["smlib"]
+
+# Three-way: SMLib's deviation and the exact values come from OCCT.
 [[test]]
-name = "occt"
-required-features = ["occt"]
+name = "kernels"
+required-features = ["occt", "smlib"]
