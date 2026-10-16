@@ -13,6 +13,11 @@ serde_json = "1"
 
 [dev-dependencies]
 assert_cmd = "2"
+num-bigint = "0.4"
+num-rational = { version = "0.4", features = ["num-bigint"] }
+num-traits = "0.2"
+proptest = "1"
+ryukei-testkit = { path = "../ryukei-testkit" }
 
 # musl's allocator is slow under multithreaded allocation, and rebuild runs
 # features in parallel. Kernel results don't depend on the allocator.

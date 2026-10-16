@@ -605,7 +605,12 @@ dependencies = [
  "assert_cmd",
  "clap",
  "mimalloc",
+ "num-bigint",
+ "num-rational",
+ "num-traits",
+ "proptest",
  "ryukei",
+ "ryukei-testkit",
  "serde",
  "serde_json",
 ]
