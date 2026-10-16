@@ -571,15 +571,18 @@ impl Cdt {
 
     /// Forces the segment between vertices `a` and `b` into the
     /// triangulation as fixed edges, split at any vertex lying on it.
-    /// Fails when it crosses a fixed edge.
-    pub(crate) fn insert_segment(&mut self, a: u32, b: u32) -> Result<(), Crossing> {
+    /// Returns its pieces in order from `a` to `b`. Fails when it crosses
+    /// a fixed edge.
+    pub(crate) fn insert_segment(&mut self, a: u32, b: u32) -> Result<Vec<[u32; 2]>, Crossing> {
         let mut todo = vec![(a, b)];
+        let mut pieces = Vec::new();
         while let Some((a, b)) = todo.pop() {
             if a == b {
                 continue;
             }
             if self.find_edge(a, b).is_some() || self.find_edge(b, a).is_some() {
                 self.fix(a, b);
+                pieces.push([a, b]);
                 continue;
             }
             let crossed = match self.trace(a, b) {
@@ -593,8 +596,9 @@ impl Cdt {
             };
             self.flip_out([a, b], crossed)?;
             self.fix(a, b);
+            pieces.push([a, b]);
         }
-        Ok(())
+        Ok(pieces)
     }
 
     /// Sloan's loop: flips each crossed edge whose quadrilateral is convex,
@@ -795,7 +799,7 @@ mod tests {
         let b = c.insert(p(0.9, 0.9)).unwrap();
         c.insert(p(0.3, 0.7)).unwrap();
         c.insert(p(0.7, 0.3)).unwrap();
-        c.insert_segment(a, b).unwrap();
+        assert_eq!(c.insert_segment(a, b).unwrap(), [[a, mid], [mid, b]]);
         c.validate();
         assert!(c.find_edge(a, mid).or(c.find_edge(mid, a)).is_some());
         assert!(c.find_edge(mid, b).or(c.find_edge(b, mid)).is_some());
