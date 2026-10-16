@@ -19,12 +19,17 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [dev-dependencies]
 assert_cmd = "2"
+divan = "0.1"
 num-bigint = "0.4"
 num-rational = { version = "0.4", features = ["num-bigint"] }
 num-traits = "0.2"
 proptest = "1"
 ryukei-testkit = { path = "../ryukei-testkit" }
 tempfile = "3"
+
+[[bench]]
+name = "session"
+harness = false
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

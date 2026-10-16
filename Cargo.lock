@@ -706,6 +706,7 @@ dependencies = [
  "assert_cmd",
  "blake3",
  "clap",
+ "divan",
  "interprocess",
  "libc",
  "mimalloc",
