@@ -67,6 +67,7 @@ fn edge(b: &Body, e: EdgeId, out: &mut Vec<Fault>) {
     let origin = match curve {
         Curve::Line(l) => l.origin(),
         Curve::Circle(c) => c.frame().origin(),
+        Curve::Ellipse(e) => e.frame().origin(),
     };
     let samples: Vec<Point3> = (0..SAMPLES)
         .map(|i| curve.point(t0 + (t1 - t0) * i as f64 / (SAMPLES - 1) as f64))

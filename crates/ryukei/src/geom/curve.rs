@@ -1,4 +1,6 @@
-use super::{Box3, CurveEval, Frame, Point3, Projection, Rigid, UnitVector3, Vector3, polar_angle};
+use super::{
+    Box3, CurveEval, Ellipse, Frame, Point3, Projection, Rigid, UnitVector3, Vector3, polar_angle,
+};
 use crate::Error;
 use crate::math;
 use crate::tol::LINEAR_RESOLUTION;
@@ -6,13 +8,14 @@ use core::f64::consts::TAU;
 
 /// A curve in model space, evaluated by a parameter `t`.
 ///
-/// Phase 1 has only the analytic curves. NURBS will be another variant;
-/// the analytic ones stay as fast paths with closed-form distances.
+/// Only analytic curves so far. NURBS will be another variant; the
+/// analytic ones stay as fast paths with closed-form distances.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Curve {
     Line(Line),
     Circle(Circle),
+    Ellipse(Ellipse),
 }
 
 /// An infinite straight line `origin + t dir`; `t` is arc length.
@@ -101,6 +104,7 @@ impl Curve {
         match self {
             Self::Line(l) => l.origin + l.dir.get() * t,
             Self::Circle(c) => c.frame.origin() + c.frame.radial(t) * c.radius,
+            Self::Ellipse(e) => e.point(t),
         }
     }
 
@@ -120,6 +124,7 @@ impl Curve {
                     d2: radial * -c.radius,
                 }
             }
+            Self::Ellipse(e) => e.eval(t),
         }
     }
 
@@ -135,30 +140,35 @@ impl Curve {
                     c.frame.x().get() * -s + c.frame.y().get() * co,
                 ))
             }
+            Self::Ellipse(e) => e.eval(t).tangent(),
         }
     }
 
-    /// The curvature at a parameter: 0 for a line, `1 / r` for a circle.
-    pub fn curvature(&self, _t: f64) -> Option<f64> {
+    /// The curvature at `t`, in closed form: 0 for a line, `1 / r` for a
+    /// circle.
+    pub fn curvature(&self, t: f64) -> Option<f64> {
         match self {
             Self::Line(_) => Some(0.0),
             Self::Circle(c) => Some(1.0 / c.radius),
+            Self::Ellipse(e) => Some(e.curvature(t)),
         }
     }
 
-    /// The parameter range: unbounded for a line, `[0, 2π]` for a circle.
+    /// The parameter range: unbounded for a line, `[0, 2π]` for a circle or
+    /// an ellipse.
     pub fn domain(&self) -> [f64; 2] {
         match self {
             Self::Line(_) => [f64::NEG_INFINITY, f64::INFINITY],
-            Self::Circle(_) => [0.0, TAU],
+            Self::Circle(_) | Self::Ellipse(_) => [0.0, TAU],
         }
     }
 
-    /// The parameter period of a closed curve: 2π for a circle.
+    /// The parameter period of a closed curve: 2π for a circle or an
+    /// ellipse.
     pub fn period(&self) -> Option<f64> {
         match self {
             Self::Line(_) => None,
-            Self::Circle(_) => Some(TAU),
+            Self::Circle(_) | Self::Ellipse(_) => Some(TAU),
         }
     }
 
@@ -175,11 +185,15 @@ impl Curve {
                 let dr = rho - c.radius;
                 math::sqrt(dr * dr + q.z * q.z)
             }
+            Self::Ellipse(e) => e.point(e.nearest_param(p)).distance(p),
         }
     }
 
-    /// The nearest point of the curve to `p`, in closed form. For a circle
-    /// the parameter is in `[0, 2π)`, and a point on the axis maps to 0.
+    /// The nearest point of the curve to `p`, in closed form (for an
+    /// ellipse, by a bisection that always converges). For a circle or an
+    /// ellipse the parameter is in `[0, 2π)`. A point on a circle's axis
+    /// maps to 0; where an ellipse has two nearest points the lower
+    /// parameter wins.
     pub fn project(&self, p: Point3) -> Projection<f64, Point3> {
         let param = match self {
             Self::Line(l) => (p - l.origin).dot(l.dir.get()),
@@ -187,6 +201,7 @@ impl Curve {
                 let q = c.frame.to_local(p);
                 polar_angle(q.y, q.x)
             }
+            Self::Ellipse(e) => e.nearest_param(p),
         };
         Projection {
             param,
@@ -196,8 +211,8 @@ impl Curve {
     }
 
     /// A box holding the curve over the parameter range `[t0, t1]`. A circle
-    /// gives the box of the whole circle. An unbounded range gives the
-    /// size box.
+    /// or an ellipse gives the box of the whole curve. An unbounded range on
+    /// a line gives the size box.
     pub fn bounds(&self, range: [f64; 2]) -> Box3 {
         match self {
             Self::Line(_) if !(range[0].is_finite() && range[1].is_finite()) => {
@@ -205,6 +220,7 @@ impl Curve {
             }
             Self::Line(_) => Box3::new(self.point(range[0]), self.point(range[1])),
             Self::Circle(c) => ring_box(&c.frame, c.radius, 0.0),
+            Self::Ellipse(e) => e.bounds(),
         }
     }
 
@@ -219,6 +235,7 @@ impl Curve {
                 frame: c.frame.transformed(r),
                 radius: c.radius,
             }),
+            Self::Ellipse(e) => Self::Ellipse(e.transformed(r)),
         }
     }
 }

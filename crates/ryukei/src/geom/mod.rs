@@ -3,6 +3,7 @@
 
 mod bbox;
 mod curve;
+mod ellipse;
 mod eval;
 mod frame;
 mod point;
@@ -13,6 +14,7 @@ mod vector;
 
 pub use bbox::Box3;
 pub use curve::{Circle, Curve, Line};
+pub use ellipse::Ellipse;
 pub use eval::{CurveEval, PrincipalCurvatures, SurfaceEval};
 pub use frame::Frame;
 pub(crate) use frame::polar_angle;

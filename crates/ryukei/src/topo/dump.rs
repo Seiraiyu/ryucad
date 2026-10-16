@@ -159,6 +159,12 @@ impl Body {
                     )
                 }
                 Curve::Circle(c) => format!("circle {} r={}", frame(c.frame()), bits(c.radius())),
+                Curve::Ellipse(e) => format!(
+                    "ellipse {} major={} minor={}",
+                    frame(e.frame()),
+                    bits(e.major()),
+                    bits(e.minor())
+                ),
             };
             line(format_args!("curve {} {geom}", id.index()));
         }
