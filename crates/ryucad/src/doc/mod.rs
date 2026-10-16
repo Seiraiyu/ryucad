@@ -4,3 +4,4 @@
 pub mod canonical;
 pub mod files;
 pub mod id;
+pub mod project;

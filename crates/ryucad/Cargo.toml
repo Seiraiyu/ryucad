@@ -6,6 +6,8 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Rust only: no C or assembly to build on any platform.
+blake3 = { version = "1", features = ["pure"] }
 clap = { version = "4", features = ["derive"] }
 ryukei = { path = "../ryukei" }
 serde = { version = "1", features = ["derive"] }
@@ -20,6 +22,7 @@ num-rational = { version = "0.4", features = ["num-bigint"] }
 num-traits = "0.2"
 proptest = "1"
 ryukei-testkit = { path = "../ryukei-testkit" }
+tempfile = "3"
 
 # musl's allocator is slow under multithreaded allocation, and rebuild runs
 # features in parallel. Kernel results don't depend on the allocator.
