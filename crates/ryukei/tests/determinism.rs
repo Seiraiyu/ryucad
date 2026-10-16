@@ -13,7 +13,7 @@ use ryukei::name::{Event, OpKey};
 use ryukei::predicates::{self, Sign};
 use ryukei::primitive;
 use ryukei_testkit::euler_script::{Bytes, start, valid_step};
-use ryukei_testkit::{Golden, Lcg};
+use ryukei_testkit::{Golden, Lcg, nurbs};
 
 fn math_section(golden: &mut Golden) {
     let mut s = golden.section("math");
@@ -382,6 +382,53 @@ fn conversion_section(golden: &mut Golden) {
     }
 }
 
+fn projection_section(golden: &mut Golden) {
+    let mut s = golden.section("projection");
+    let mut g = Lcg::new(0x7072_6f6a);
+    let point = |g: &mut Lcg| {
+        Point3::new(
+            g.next_f64(-8.0, 8.0),
+            g.next_f64(-8.0, 8.0),
+            g.next_f64(-8.0, 8.0),
+        )
+    };
+    for _ in 0..64 {
+        let c = nurbs::any_curve(&mut g);
+        for _ in 0..4 {
+            let p = point(&mut g);
+            let foot = c.project(p);
+            for x in [
+                foot.param,
+                foot.point.x,
+                foot.point.y,
+                foot.point.z,
+                foot.distance,
+            ] {
+                s.f64(x);
+            }
+            s.u64(c.local_minima(p).len() as u64);
+        }
+    }
+    for _ in 0..16 {
+        let sf = nurbs::any_surface(&mut g);
+        for _ in 0..2 {
+            let p = point(&mut g);
+            let foot = sf.project(p);
+            let (u, v) = foot.param;
+            for x in [
+                u,
+                v,
+                foot.point.x,
+                foot.point.y,
+                foot.point.z,
+                foot.distance,
+            ] {
+                s.f64(x);
+            }
+        }
+    }
+}
+
 fn primitives_section(golden: &mut Golden) {
     let mut s = golden.section("primitives");
     let axis = Vector3::new(1.0, -2.0, 0.5).normalize().unwrap();
@@ -459,6 +506,7 @@ fn determinism() {
     derivatives_section(&mut golden);
     ellipse_section(&mut golden);
     conversion_section(&mut golden);
+    projection_section(&mut golden);
     primitives_section(&mut golden);
     euler_section(&mut golden);
     golden.finish();

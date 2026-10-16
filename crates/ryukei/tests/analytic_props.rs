@@ -229,3 +229,25 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    #[test]
+    fn converted_circles_and_ellipses_project_alike(c in curve(), p in point()) {
+        prop_assume!(!matches!(c, Curve::Line(_)));
+        let Ok((n, _)) = c.to_nurbs([0.0, 1.0]) else {
+            return Ok(());
+        };
+        let (x, y) = (c.project(p), n.project(p));
+        prop_assert!((x.distance - y.distance).abs() <= EPS, "{c:?} {p:?}");
+    }
+
+    #[test]
+    fn converted_closed_surfaces_project_alike(s in surface(), p in point()) {
+        prop_assume!(matches!(s, Surface::Sphere(_) | Surface::Torus(_)));
+        let Ok((n, _)) = s.to_nurbs([[0.0; 2]; 2]) else {
+            return Ok(());
+        };
+        let (x, y) = (s.project(p), n.project(p));
+        prop_assert!((x.distance - y.distance).abs() <= EPS, "{s:?} {p:?}");
+    }
+}

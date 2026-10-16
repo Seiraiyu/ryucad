@@ -1,7 +1,7 @@
 //! Properties of random NURBS: derivatives agree with finite differences,
 //! refinement, clamping and splitting leave the shape unchanged, rigid
-//! transforms commute with evaluation, periodic splines repeat, and the
-//! hull bounds hold every point.
+//! transforms commute with evaluation, periodic splines repeat, the hull
+//! bounds hold every point, and projection is never beaten by brute force.
 
 use proptest::prelude::*;
 use ryukei::geom::{Direction, NurbsCurve, NurbsSurface, Point3, Rigid, Vector3};
@@ -166,5 +166,96 @@ proptest! {
             let (u, v) = (param(&mut g, du), param(&mut g, dv));
             prop_assert!(b.contains_with_tol(s.point(u, v), tol));
         }
+    }
+}
+
+/// A query point in a box a little larger than the random control nets.
+fn query(g: &mut Lcg) -> Point3 {
+    Point3::new(
+        g.next_f64(-8.0, 8.0),
+        g.next_f64(-8.0, 8.0),
+        g.next_f64(-8.0, 8.0),
+    )
+}
+
+/// The projection of a random point onto a random curve is a point of the
+/// curve at its distance, inside the domain, among the local minima, and
+/// no sample of the curve is nearer.
+fn curve_projection(seed: u64) -> Result<(), TestCaseError> {
+    let mut g = Lcg::new(seed);
+    let c = any_curve(&mut g);
+    let p = query(&mut g);
+    let foot = c.project(p);
+    prop_assert_eq!(c.point(foot.param), foot.point);
+    prop_assert!((foot.point.distance(p) - foot.distance).abs() <= 1e-15);
+    let [a, b] = c.domain();
+    prop_assert!(a <= foot.param && foot.param <= b);
+    let n = 4000;
+    for i in 0..=n {
+        let t = a + (b - a) * f64::from(i) / f64::from(n);
+        prop_assert!(
+            foot.distance <= c.point(t).distance(p) + 1e-12,
+            "beaten at {}",
+            t
+        );
+    }
+    let minima = c.local_minima(p);
+    prop_assert!(minima.iter().any(|m| m.param == foot.param));
+    Ok(())
+}
+
+/// The same for surfaces, against an 81 × 81 grid of samples.
+fn surface_projection(seed: u64) -> Result<(), TestCaseError> {
+    let mut g = Lcg::new(seed);
+    let s = any_surface(&mut g);
+    let p = query(&mut g);
+    let foot = s.project(p);
+    let (u, v) = foot.param;
+    prop_assert_eq!(s.point(u, v), foot.point);
+    let [[u0, u1], [v0, v1]] = s.domain();
+    prop_assert!(u0 <= u && u <= u1 && v0 <= v && v <= v1);
+    let n = 80;
+    for i in 0..=n {
+        for j in 0..=n {
+            let a = u0 + (u1 - u0) * f64::from(i) / f64::from(n);
+            let b = v0 + (v1 - v0) * f64::from(j) / f64::from(n);
+            prop_assert!(
+                foot.distance <= s.point(a, b).distance(p) + 1e-12,
+                "beaten at ({}, {})",
+                a,
+                b
+            );
+        }
+    }
+    let minima = s.local_minima(p);
+    prop_assert!(minima.iter().any(|m| m.param == foot.param));
+    Ok(())
+}
+
+proptest! {
+    #[test]
+    fn curve_projection_is_global(seed: u64) {
+        curve_projection(seed)?;
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn surface_projection_is_global(seed: u64) {
+        surface_projection(seed)?;
+    }
+}
+
+/// Seeds that once found a nearest point the search missed: on a kink of
+/// a curve, on a crease of a surface, and on creases of periodic splines.
+#[test]
+fn projection_regressions() {
+    for seed in [4032838485436544614, 4893023576973524366] {
+        curve_projection(seed).unwrap();
+    }
+    for seed in [282258199205089042, 2380777889367967749] {
+        surface_projection(seed).unwrap();
     }
 }
