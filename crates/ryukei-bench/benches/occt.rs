@@ -7,7 +7,8 @@ use ryukei::mesh::{MeshParams, tessellate};
 use ryukei::name::OpKey;
 use ryukei::primitive;
 use ryukei::topo::Body;
-use ryukei_bench::occt::{Primitive, Solid};
+use ryukei_bench::Primitive;
+use ryukei_bench::occt::Solid;
 
 fn main() {
     divan::main();

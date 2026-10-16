@@ -58,10 +58,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: devcontainers/ci@v0.3
         with:
-          # The workspace, then the OCCT comparison, which only the
-          # devcontainer (with OCCT installed) builds.
+          # The workspace, then the OCCT and SMLib comparison, which only
+          # the devcontainer (with OCCT and SMLib installed) builds.
           runCmd: |
             cargo test --workspace
-            cargo test -p ryukei-bench --features occt --release --test occt -- --nocapture
-            cargo bench -p ryukei-bench --features occt --no-run
+            cargo clippy -p ryukei-bench --features occt,smlib --all-targets -- -D warnings
+            cargo test -p ryukei-bench --features occt,smlib --release --test kernels -- --nocapture
+            cargo bench -p ryukei-bench --features occt,smlib --no-run
           push: never
