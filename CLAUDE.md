@@ -23,7 +23,7 @@ cargo fmt --all
 cargo run -p ryucad
 UPDATE_GOLDEN=1 cargo test -p ryukei --test determinism   # after a deliberate change to results
 cargo bench -p ryukei-bench
-cargo test -p ryukei-bench --features occt --release --test occt -- --nocapture   # OCCT head-to-head; devcontainer only
+cargo test -p ryukei-bench --features occt,smlib --release --test kernels -- --nocapture   # head-to-head with OCCT and SMLib; devcontainer only
 cd fuzz && cargo +nightly fuzz run predicates               # needs nightly + cargo-fuzz
 ```
 
@@ -41,7 +41,7 @@ The product targets Windows, macOS, and Linux natively, not just WSL. CI (`.gith
 - `crates/ryukei`: the B-rep geometry kernel (library).
 - `crates/ryucad`: the application layer and binary.
 - `crates/ryukei-testkit`: test-only helpers (exact references, seeded inputs, golden hashes, Euler operator sequences from bytes, random NURBS). Never a runtime dependency.
-- `crates/ryukei-bench`: divan benchmarks; the OCCT comparison (a `cxx` shim over a system OCCT 7.8, which the devcontainer installs) is behind its `occt` feature.
+- `crates/ryukei-bench`: divan benchmarks, and the comparisons behind its `occt` and `smlib` features: `cxx` shims over a system OCCT 7.8 and over `libsmlib`, the kernel of NVIDIA's USD BRep built from a pinned commit. The devcontainer installs both.
 - `fuzz/`: cargo-fuzz targets, outside the workspace (nightly only).
 - Design documents, roadmaps and plans live only in the Coxswain planning project `ryucad-ryukei` (`cox doc list`), never as markdown in the repo, so there is one copy of each.
 
