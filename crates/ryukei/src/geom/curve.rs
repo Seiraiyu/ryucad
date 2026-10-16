@@ -1,4 +1,4 @@
-use super::{CurveEval, Frame, Point3, Rigid, UnitVector3, Vector3, polar_angle};
+use super::{Box3, CurveEval, Frame, Point3, Projection, Rigid, UnitVector3, Vector3, polar_angle};
 use crate::Error;
 use crate::math;
 use crate::tol::LINEAR_RESOLUTION;
@@ -40,6 +40,17 @@ pub(super) fn check_length(x: f64) -> Result<f64, Error> {
     } else {
         Ok(x)
     }
+}
+
+/// The box of a circle of radius `r` about `frame`'s axis, grown by `pad`
+/// on every side: along each model axis the circle reaches
+/// `r sqrt(1 - z_i²)` from its centre.
+pub(super) fn ring_box(frame: &Frame, r: f64, pad: f64) -> Box3 {
+    let z = frame.z().get();
+    let reach = |zi: f64| r * crate::math::sqrt((1.0 - zi * zi).max(0.0)) + pad;
+    let d = Vector3::new(reach(z.x), reach(z.y), reach(z.z));
+    let o = frame.origin();
+    Box3::new(o - d, o + d)
 }
 
 impl Line {
@@ -167,15 +178,33 @@ impl Curve {
         }
     }
 
-    /// The parameter of the nearest point of the curve to `p`. For a circle
-    /// it is in `[0, 2π)`, and a point on the axis maps to 0.
-    pub fn param_of(&self, p: Point3) -> f64 {
-        match self {
+    /// The nearest point of the curve to `p`, in closed form. For a circle
+    /// the parameter is in `[0, 2π)`, and a point on the axis maps to 0.
+    pub fn project(&self, p: Point3) -> Projection<f64, Point3> {
+        let param = match self {
             Self::Line(l) => (p - l.origin).dot(l.dir.get()),
             Self::Circle(c) => {
                 let q = c.frame.to_local(p);
                 polar_angle(q.y, q.x)
             }
+        };
+        Projection {
+            param,
+            point: self.point(param),
+            distance: self.distance(p),
+        }
+    }
+
+    /// A box holding the curve over the parameter range `[t0, t1]`. A circle
+    /// gives the box of the whole circle. An unbounded range gives the
+    /// size box.
+    pub fn bounds(&self, range: [f64; 2]) -> Box3 {
+        match self {
+            Self::Line(_) if !(range[0].is_finite() && range[1].is_finite()) => {
+                crate::tol::size_box()
+            }
+            Self::Line(_) => Box3::new(self.point(range[0]), self.point(range[1])),
+            Self::Circle(c) => ring_box(&c.frame, c.radius, 0.0),
         }
     }
 
@@ -220,7 +249,7 @@ mod tests {
         assert_eq!(l.tangent(1.0).unwrap().get(), Vector3::new(0.6, 0.8, 0.0));
         assert_eq!(l.period(), None);
         assert_eq!(l.distance(Point3::new(0.0, 0.0, 2.0)), 2.0);
-        assert_eq!(l.param_of(Point3::new(3.0, 4.0, 7.0)), 5.0);
+        assert_eq!(l.project(Point3::new(3.0, 4.0, 7.0)).param, 5.0);
     }
 
     #[test]
@@ -263,14 +292,39 @@ mod tests {
         // 3 m from the axis (1 m outside the circle) and 4 m above its plane.
         let p = Point3::new(1.0, 2.0 - 3.0, 7.0);
         assert_eq!(c.distance(p), 17.0f64.sqrt());
-        assert_eq!(c.param_of(p), 3.0 * FRAC_PI_2);
-        assert_eq!(c.param_of(Point3::new(-5.0, 2.0, 3.0)), PI);
-        assert_eq!(c.param_of(Point3::new(1.0, 2.0, 9.0)), 0.0);
+        assert_eq!(c.project(p).param, 3.0 * FRAC_PI_2);
+        assert_eq!(c.project(Point3::new(-5.0, 2.0, 3.0)).param, PI);
+        assert_eq!(c.project(Point3::new(1.0, 2.0, 9.0)).param, 0.0);
         for t in [0.0, 0.5, 2.0, 4.0, 6.0] {
             let q = c.point(t);
             assert!(c.distance(q) <= 1e-15);
-            assert!((c.param_of(q) - t).abs() <= 1e-14);
+            let foot = c.project(q);
+            assert!((foot.param - t).abs() <= 1e-14);
+            assert_eq!(foot.point, c.point(foot.param));
+            assert_eq!(foot.distance, c.distance(q));
         }
+    }
+
+    #[test]
+    fn bounds() {
+        let l = Curve::Line(Line::through(Point3::ORIGIN, Point3::new(3.0, 4.0, 0.0)).unwrap());
+        let b = l.bounds([-5.0, 5.0]);
+        assert_eq!(b.min(), Point3::new(-3.0, -4.0, 0.0));
+        assert_eq!(b.max(), Point3::new(3.0, 4.0, 0.0));
+        assert_eq!(l.bounds([0.0, f64::INFINITY]), crate::tol::size_box());
+        // A circle tilted 45° about x: its box is tight on every axis.
+        let f = Frame::new(
+            Point3::new(1.0, 2.0, 3.0),
+            Vector3::new(0.0, -1.0, 1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap();
+        let c = Curve::Circle(Circle::new(f, 2.0).unwrap());
+        let b = c.bounds([0.0, 1.0]);
+        let h = 2.0f64.sqrt();
+        let close = |a: Point3, b: Point3| a.distance(b) <= 1e-15;
+        assert!(close(b.min(), Point3::new(-1.0, 2.0 - h, 3.0 - h)));
+        assert!(close(b.max(), Point3::new(3.0, 2.0 + h, 3.0 + h)));
     }
 
     #[test]

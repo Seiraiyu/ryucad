@@ -4,7 +4,7 @@
 //! the size box are ryucad's job at its boundary.
 
 use crate::Error;
-use crate::geom::{Point3, UnitVector3};
+use crate::geom::{Box3, Point3, UnitVector3};
 
 /// Two points closer than this are the same point (10 nm).
 pub const LINEAR_RESOLUTION: f64 = 1e-8;
@@ -29,6 +29,12 @@ pub fn is_zero_length(x: f64) -> bool {
 /// [`ANGULAR_RESOLUTION`] (compared via the sine of the angle).
 pub fn directions_parallel(u: UnitVector3, v: UnitVector3) -> bool {
     u.get().cross(v.get()).length() <= ANGULAR_RESOLUTION
+}
+
+/// The size box itself.
+pub fn size_box() -> Box3 {
+    let h = SIZE_BOX_HALF;
+    Box3::new(Point3::new(-h, -h, -h), Point3::new(h, h, h))
 }
 
 /// True when `p` lies inside the size box (boundary included).

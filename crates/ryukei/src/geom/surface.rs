@@ -1,6 +1,7 @@
-use super::curve::check_length;
+use super::curve::{check_length, ring_box};
 use super::{
-    Frame, Point3, PrincipalCurvatures, Rigid, SurfaceEval, UnitVector3, Vector3, polar_angle,
+    Box3, Frame, Point3, PrincipalCurvatures, Projection, Rigid, SurfaceEval, UnitVector3, Vector3,
+    polar_angle,
 };
 use crate::Error;
 use crate::math;
@@ -343,10 +344,32 @@ impl Surface {
         }
     }
 
-    /// The parameters of the nearest point of the surface to `p`. Angles
-    /// are in `[0, 2π)`; where the nearest point is not unique (on an axis,
-    /// at a centre), angle 0 is chosen.
-    pub fn params_of(&self, p: Point3) -> (f64, f64) {
+    /// The nearest point of the surface to `p`, in closed form. Angles are
+    /// in `[0, 2π)`; where the nearest point is not unique (on an axis, at a
+    /// centre), angle 0 is chosen.
+    pub fn project(&self, p: Point3) -> Projection<(f64, f64), Point3> {
+        let (u, v) = self.params_of(p);
+        Projection {
+            param: (u, v),
+            point: self.point(u, v),
+            distance: self.distance(p),
+        }
+    }
+
+    /// A box holding the surface. The open surfaces (plane, cylinder,
+    /// cone) are unbounded and give the size box.
+    pub fn bounds(&self) -> Box3 {
+        match self {
+            Self::Plane(_) | Self::Cylinder(_) | Self::Cone(_) => crate::tol::size_box(),
+            Self::Sphere(s) => {
+                let r = Vector3::new(s.radius, s.radius, s.radius);
+                Box3::new(s.frame.origin() - r, s.frame.origin() + r)
+            }
+            Self::Torus(s) => ring_box(&s.frame, s.major, s.minor),
+        }
+    }
+
+    fn params_of(&self, p: Point3) -> (f64, f64) {
         let q = self.frame().to_local(p);
         let rho = math::sqrt(q.x * q.x + q.y * q.y);
         let u = polar_angle(q.y, q.x);
@@ -540,25 +563,42 @@ mod tests {
             for (u, v) in [(0.0, 0.0), (0.5, 0.3), (2.0, -0.7), (4.0, 1.2), (6.0, 0.9)] {
                 let p = s.point(u, v);
                 assert!(s.distance(p) <= 1e-14, "{s:?} at {u}, {v}");
-                let (pu, pv) = s.params_of(p);
+                let foot = s.project(p);
+                let (pu, pv) = foot.param;
                 assert!(near(s.point(pu, pv), p), "{s:?} at {u}, {v}");
+                assert_eq!(foot.point, s.point(pu, pv));
+                assert_eq!(foot.distance, s.distance(p));
             }
         }
     }
 
     #[test]
-    fn params_of_off_surface_points_land_on_the_nearest_point() {
+    fn projections_of_off_surface_points_land_on_the_nearest_point() {
         let [_, cyl, cone, sphere, torus] = all();
         let p = Point3::new(1.0, 7.0, 4.0);
-        let (u, v) = cyl.params_of(p);
+        let (u, v) = cyl.project(p).param;
         assert_eq!((u, v), (FRAC_PI_2, 1.0));
-        let (u, v) = sphere.params_of(Point3::new(1.0, 2.0, 9.0));
+        let (u, v) = sphere.project(Point3::new(1.0, 2.0, 9.0)).param;
         assert_eq!((u, v), (0.0, FRAC_PI_2));
-        let (_, v) = torus.params_of(Point3::new(3.5, 2.0, 3.0));
+        let (_, v) = torus.project(Point3::new(3.5, 2.0, 3.0)).param;
         assert_eq!(v, PI);
         // Below the apex the nearest point is the apex.
-        let (_, v) = cone.params_of(Point3::new(1.0, 2.0, -5.0));
+        let (_, v) = cone.project(Point3::new(1.0, 2.0, -5.0)).param;
         assert_eq!(v, cone_apex_v(&cone));
+    }
+
+    #[test]
+    fn bounds() {
+        let [plane, cyl, cone, sphere, torus] = all();
+        for open in [plane, cyl, cone] {
+            assert_eq!(open.bounds(), crate::tol::size_box());
+        }
+        let b = sphere.bounds();
+        assert_eq!(b.min(), Point3::new(-1.0, 0.0, 1.0));
+        assert_eq!(b.max(), Point3::new(3.0, 4.0, 5.0));
+        let b = torus.bounds();
+        assert_eq!(b.min(), Point3::new(-3.0, -2.0, 2.0));
+        assert_eq!(b.max(), Point3::new(5.0, 6.0, 4.0));
     }
 
     #[test]

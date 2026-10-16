@@ -68,9 +68,9 @@ proptest! {
     #[test]
     fn curve_distance_is_attained_and_minimal(c in curve(), p in point()) {
         let d = c.distance(p);
-        let foot = c.point(c.param_of(p));
+        let foot = c.point(c.project(p).param);
         prop_assert!((foot.distance(p) - d).abs() <= EPS, "{c:?} {p:?}");
-        let (lo, hi) = range(c.period(), c.param_of(p), f64::NEG_INFINITY);
+        let (lo, hi) = range(c.period(), c.project(p).param, f64::NEG_INFINITY);
         for t in samples(lo, hi) {
             prop_assert!(c.point(t).distance(p) >= d - EPS, "{c:?} {p:?} t={t}");
         }
@@ -79,7 +79,7 @@ proptest! {
     #[test]
     fn surface_distance_is_attained_and_minimal(s in surface(), p in point()) {
         let d = s.distance(p);
-        let (u, v) = s.params_of(p);
+        let (u, v) = s.project(p).param;
         prop_assert!((s.point(u, v).distance(p) - d).abs() <= EPS, "{s:?} {p:?}");
         let lowest = match s {
             Surface::Cone(c) => c.apex_v(),

@@ -126,7 +126,7 @@ pub(crate) mod tests {
     fn face_normal(b: &Body, f: FaceId, p: Point3) -> Vector3 {
         let face = b.face(f).unwrap();
         let s = b.surface(face.surface).unwrap();
-        let (u, v) = s.params_of(p);
+        let (u, v) = s.project(p).param;
         let n = s.normal(u, v).unwrap().get();
         if face.sense == Sense::Forward { n } else { -n }
     }

@@ -186,7 +186,16 @@ fn analytic_section(golden: &mut Golden) {
         for cv in curves {
             let q = cv.point(u);
             let t = cv.tangent(u).unwrap().get();
-            for x in [q.x, q.y, q.z, t.x, t.y, t.z, cv.distance(p), cv.param_of(p)] {
+            for x in [
+                q.x,
+                q.y,
+                q.z,
+                t.x,
+                t.y,
+                t.z,
+                cv.distance(p),
+                cv.project(p).param,
+            ] {
                 s.f64(x);
             }
         }
@@ -200,7 +209,7 @@ fn analytic_section(golden: &mut Golden) {
         for sf in surfaces {
             let q = sf.point(u, v);
             let n = sf.normal(u, v).unwrap().get();
-            let (pu, pv) = sf.params_of(p);
+            let (pu, pv) = sf.project(p).param;
             for x in [q.x, q.y, q.z, n.x, n.y, n.z, sf.distance(p), pu, pv] {
                 s.f64(x);
             }
