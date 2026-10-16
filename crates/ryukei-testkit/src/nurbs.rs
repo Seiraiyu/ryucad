@@ -2,7 +2,13 @@
 //! sections, fuzzing and benchmarks.
 
 use crate::Lcg;
-use ryukei::geom::{KnotVector, NurbsCurve, NurbsCurve2, NurbsSurface, Point2, Point3};
+use ryukei::Error;
+use ryukei::euler;
+use ryukei::geom::{
+    Curve, KnotVector, NurbsCurve, NurbsCurve2, NurbsSurface, Point2, Point3, Surface,
+};
+use ryukei::topo::{Body, EdgeId, FaceId};
+use std::sync::Arc;
 
 /// A random knot vector of `degree` with `spans` spans of random length
 /// starting near 0. Interior multiplicities are 1 to `degree`. A periodic
@@ -106,4 +112,65 @@ pub fn any_surface(g: &mut Lcg) -> NurbsSurface {
 /// A parameter in `[a, b]`.
 pub fn param(g: &mut Lcg, [a, b]: [f64; 2]) -> f64 {
     g.next_f64(a, b)
+}
+
+/// Every curve and surface of `b` replaced by its exact NURBS form through
+/// the geometry setters. Edges keep their ends (the reparameterization
+/// maps their intervals) and faces their senses. Open surfaces are
+/// converted over a range a little larger than the face's boundary
+/// reaches, cut to the surface's domain.
+pub fn convert_body(b: &mut Body) -> Result<(), Error> {
+    let edges: Vec<EdgeId> = b.edges().collect();
+    for e in edges {
+        let edge = b.edge(e).expect("live edge");
+        let [t0, t1] = edge.interval;
+        let curve = b.curve(edge.curve).expect("live curve").clone();
+        let (n, r) = curve.to_nurbs([t0, t1])?;
+        let id = b.add_curve(Curve::Nurbs(Arc::new(n)));
+        euler::set_curve(b, e, id, [r.to_nurbs(t0), r.to_nurbs(t1)])?;
+    }
+    let faces: Vec<FaceId> = b.faces().collect();
+    for f in faces {
+        let face = b.face(f).expect("live face");
+        let (surface, sense) = (
+            b.surface(face.surface).expect("live surface").clone(),
+            face.sense,
+        );
+        let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+        let mut reach = |p: Point3| {
+            let (u, v) = surface.project(p).param;
+            for (k, x) in [u, v].into_iter().enumerate() {
+                lo[k] = lo[k].min(x);
+                hi[k] = hi[k].max(x);
+            }
+        };
+        for l in b.face_loops(f) {
+            let lp = b.loop_(l).expect("live loop");
+            if let Some(v) = lp.vertex {
+                reach(b.vertex(v).expect("live vertex").point);
+            }
+            for fin in b.loop_fins(l) {
+                let edge = b
+                    .edge(b.fin(fin).expect("live fin").edge)
+                    .expect("live edge");
+                let curve = b.curve(edge.curve).expect("live curve");
+                let [t0, t1] = edge.interval;
+                for i in 0..=8 {
+                    reach(curve.point(t0 + (t1 - t0) * f64::from(i) / 8.0));
+                }
+            }
+        }
+        let domain = surface.domain();
+        let ranges: [[f64; 2]; 2] = core::array::from_fn(|k| {
+            let pad = 1e-3 * (hi[k] - lo[k]).max(0.0) + 1e-6;
+            [
+                (lo[k] - pad).max(domain[k][0]),
+                (hi[k] + pad).min(domain[k][1]),
+            ]
+        });
+        let (n, _) = surface.to_nurbs(ranges)?;
+        let id = b.add_surface(Surface::Nurbs(Arc::new(n)));
+        euler::set_surface(b, f, id, sense)?;
+    }
+    Ok(())
 }

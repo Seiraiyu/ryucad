@@ -464,6 +464,25 @@ fn pcurves_section(golden: &mut Golden) {
     }
 }
 
+fn nurbs_bodies_section(golden: &mut Golden) {
+    let mut s = golden.section("nurbs_bodies");
+    let axis = Vector3::new(1.0, -2.0, 0.5).normalize().unwrap();
+    let at = Rigid::translation(Vector3::new(12.5, -3.25, 100.0))
+        .then_after(&Rigid::rotation(axis, 2.5));
+    let key = OpKey(0x6e75_7262);
+    let bodies = [
+        primitive::block(key, 1.5, 2.25, 0.75, &at),
+        primitive::cylinder(key, 0.5, 3.0, &at),
+        primitive::cone(key, 1.25, 2.0, &at),
+        primitive::frustum(key, 2.0, 0.5, 1.0, &at),
+    ];
+    for result in bodies {
+        let (mut body, _) = result.unwrap();
+        nurbs::convert_body(&mut body).unwrap();
+        s.str(&body.dump());
+    }
+}
+
 fn primitives_section(golden: &mut Golden) {
     let mut s = golden.section("primitives");
     let axis = Vector3::new(1.0, -2.0, 0.5).normalize().unwrap();
@@ -543,6 +562,7 @@ fn determinism() {
     conversion_section(&mut golden);
     projection_section(&mut golden);
     pcurves_section(&mut golden);
+    nurbs_bodies_section(&mut golden);
     primitives_section(&mut golden);
     euler_section(&mut golden);
     golden.finish();
