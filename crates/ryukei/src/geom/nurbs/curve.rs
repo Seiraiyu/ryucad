@@ -4,7 +4,7 @@ use super::KnotVector;
 use super::bezier::BezierCurve;
 use super::eval::Spline;
 use crate::Error;
-use crate::geom::{Box3, CurveEval, Point3, UnitVector3, Vector3};
+use crate::geom::{Box3, CurveEval, Point3, Rigid, UnitVector3, Vector3};
 use std::sync::OnceLock;
 
 /// A rational B-spline curve in model space. Immutable once built.
@@ -116,6 +116,16 @@ impl NurbsCurve {
     pub fn split(&self, t: f64) -> Result<(Self, Self), Error> {
         let [a, b] = self.spline.split(t)?;
         Ok((Self::from_spline(a), Self::from_spline(b)))
+    }
+
+    /// The curve moved by a rigid transform: control points moved, weights
+    /// and knots kept, so parameters are unchanged.
+    pub fn transformed(&self, r: &Rigid) -> Self {
+        let mut spline = self.spline.clone();
+        for p in spline.points.iter_mut() {
+            *p = r.apply_point(Point3::ORIGIN + *p).to_vector();
+        }
+        Self::from_spline(spline)
     }
 
     /// The Bézier pieces, in parameter order, built once.

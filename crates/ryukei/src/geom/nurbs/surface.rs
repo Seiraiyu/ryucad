@@ -4,7 +4,7 @@ use super::KnotVector;
 use super::bezier::{BezierPatch, patches};
 use super::eval::check_weights;
 use super::refine::{Hom, check_split, clamp, refine_flat, split_at};
-use crate::geom::{Box3, Point3, PrincipalCurvatures, SurfaceEval, UnitVector3, Vector3};
+use crate::geom::{Box3, Point3, PrincipalCurvatures, Rigid, SurfaceEval, UnitVector3, Vector3};
 use crate::{Error, NurbsError};
 use std::sync::OnceLock;
 
@@ -286,6 +286,21 @@ impl NurbsSurface {
             self.with_lines(dir, &halves[0][k].0, &lines)
         };
         Ok((half(0), half(1)))
+    }
+
+    /// The surface moved by a rigid transform; see
+    /// [`super::NurbsCurve::transformed`].
+    pub fn transformed(&self, r: &Rigid) -> Self {
+        Self {
+            knots: self.knots.clone(),
+            points: self
+                .points
+                .iter()
+                .map(|&p| r.apply_point(Point3::ORIGIN + p).to_vector())
+                .collect(),
+            weights: self.weights.clone(),
+            patches: OnceLock::new(),
+        }
     }
 
     /// The Bézier patches, row-major over the spans, built once.

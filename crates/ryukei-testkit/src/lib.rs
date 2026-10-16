@@ -4,11 +4,13 @@
 //! - [`Lcg`]: a seeded, platform-independent input generator.
 //! - [`Golden`]: bit-exact output hashing checked against committed hashes.
 //! - [`euler_script`]: Euler operator sequences played from bytes.
+//! - [`nurbs`]: seeded random NURBS curves and surfaces.
 
 pub mod euler_script;
 pub mod exact;
 mod golden;
 mod lcg;
+pub mod nurbs;
 
 pub use golden::Golden;
 pub use lcg::Lcg;
