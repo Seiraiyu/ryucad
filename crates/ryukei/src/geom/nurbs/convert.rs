@@ -1,8 +1,8 @@
 //! Exact rational NURBS forms of the analytic curves and surfaces.
 
-use super::{KnotVector, NurbsCurve};
+use super::{KnotVector, NurbsCurve, NurbsSurface};
 use crate::Error;
-use crate::geom::{Circle, Curve, Ellipse, Frame, Line};
+use crate::geom::{Circle, Curve, Ellipse, Frame, Line, Point3, Surface};
 use crate::math;
 use core::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, FRAC_PI_4, PI, SQRT_2, TAU};
 
@@ -131,10 +131,99 @@ impl Curve {
     }
 }
 
+/// A profile in a half-plane through the axis, as control points
+/// `(distance from the axis, height, weight)`.
+type Profile = Vec<(f64, f64, f64)>;
+
+/// The surface swept by turning `profile` once about `frame`'s axis, with
+/// `knots` along the profile (A8.1 in The NURBS Book): control point
+/// `(i, j)` is turn corner `i` scaled by the profile's distance `j`, at
+/// its height, weighted by both.
+fn revolve(frame: &Frame, knots: KnotVector, profile: &Profile) -> Result<NurbsSurface, Error> {
+    let (o, x, y, z) = (
+        frame.origin(),
+        frame.x().get(),
+        frame.y().get(),
+        frame.z().get(),
+    );
+    let mut points = Vec::with_capacity(TURN.len() * profile.len());
+    let mut weights = Vec::with_capacity(points.capacity());
+    for &(c, s, w) in &TURN {
+        for &(rho, h, wp) in profile {
+            points.push(o + x * (c * rho) + y * (s * rho) + z * h);
+            weights.push(w * wp);
+        }
+    }
+    NurbsSurface::new([turn_knots()?, knots], points, Some(weights))
+}
+
+impl Surface {
+    /// The exact NURBS form of an analytic surface and how each parameter
+    /// relates. `ranges` bounds the unbounded directions (both for a plane,
+    /// `v` for a cylinder or cone); closed directions and a sphere's `v`
+    /// convert whole and ignore their range. A cone's `v` range must not go
+    /// below its apex (`Degenerate`). Otherwise fails like
+    /// [`Line::to_nurbs`].
+    pub fn to_nurbs(&self, ranges: [[f64; 2]; 2]) -> Result<(NurbsSurface, [Reparam; 2]), Error> {
+        let [[u0, u1], [v0, v1]] = ranges;
+        let line = |a: f64, b: f64| KnotVector::clamped(1, &[a, b], &[2, 2]);
+        let f = self.frame();
+        let swept = [Reparam::Angle, Reparam::Identity];
+        let round = [Reparam::Angle, Reparam::Angle];
+        match self {
+            Self::Plane(_) => {
+                let points = [u0, u1]
+                    .iter()
+                    .flat_map(|&u| [v0, v1].map(|v| f.to_world(u, v, 0.0)))
+                    .collect::<Vec<Point3>>();
+                let s = NurbsSurface::new([line(u0, u1)?, line(v0, v1)?], points, None)?;
+                Ok((s, [Reparam::Identity; 2]))
+            }
+            Self::Cylinder(c) => {
+                let r = c.radius();
+                let profile = vec![(r, v0, 1.0), (r, v1, 1.0)];
+                Ok((revolve(f, line(v0, v1)?, &profile)?, swept))
+            }
+            Self::Cone(c) => {
+                if v0 < c.apex_v() {
+                    return Err(Error::Degenerate);
+                }
+                let (sin, cos) = math::sin_cos(c.half_angle());
+                let rho = |v: f64| (c.radius() + v * sin / cos).max(0.0);
+                let profile = vec![(rho(v0), v0, 1.0), (rho(v1), v1, 1.0)];
+                Ok((revolve(f, line(v0, v1)?, &profile)?, swept))
+            }
+            Self::Sphere(s) => {
+                let r = s.radius();
+                let knots = KnotVector::clamped(2, &[-FRAC_PI_2, 0.0, FRAC_PI_2], &[3, 2, 3])?;
+                let profile = vec![
+                    (0.0, -r, 1.0),
+                    (r, -r, H),
+                    (r, 0.0, 1.0),
+                    (r, r, H),
+                    (0.0, r, 1.0),
+                ];
+                Ok((revolve(f, knots, &profile)?, round))
+            }
+            Self::Torus(t) => {
+                let (big, r) = (t.major(), t.minor());
+                let profile = TURN
+                    .iter()
+                    .map(|&(c, s, w)| (big + r * c, r * s, w))
+                    .collect();
+                Ok((revolve(f, turn_knots()?, &profile)?, round))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geom::{Circle, Curve, Ellipse, Frame, Line, Point3, Vector3};
+    use crate::geom::{
+        Circle, Cone, Curve, Cylinder, Ellipse, Frame, Line, Plane, Point3, Sphere, Surface, Torus,
+        Vector3,
+    };
     use core::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
 
     fn frame() -> Frame {
@@ -234,6 +323,87 @@ mod tests {
         let l = Curve::Line(Line::new(Point3::ORIGIN, Vector3::new(0.0, 0.0, 1.0)).unwrap());
         let (n, _) = l.to_nurbs([0.0, 1.0]).unwrap();
         assert_eq!(n.domain(), [0.0, 1.0]);
+    }
+
+    /// The analytic surface and its conversion agree through the
+    /// reparameterizations at a grid of parameters, in points and in
+    /// normals.
+    fn agree_surface(s: &Surface, ranges: [[f64; 2]; 2]) {
+        let (n, [ru, rv]) = s.to_nurbs(ranges).unwrap();
+        let [[u0, u1], [v0, v1]] = ranges;
+        for i in 0..=16 {
+            for j in 0..=16 {
+                let u = u0 + (u1 - u0) * f64::from(i) / 16.0;
+                let v = v0 + (v1 - v0) * f64::from(j) / 16.0;
+                let (a, b) = (ru.to_nurbs(u), rv.to_nurbs(v));
+                let d = n.point(a, b).distance(s.point(u, v));
+                assert!(d <= 1e-14, "{s:?} at ({u}, {v}): {d}");
+                if let Some(m) = s.principal_curvatures(u, v).and(s.normal(u, v)) {
+                    let k = n.normal(a, b).unwrap();
+                    assert!((k.get() - m.get()).length() <= 1e-12, "{s:?} at ({u}, {v})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_surface_converts_exactly() {
+        let f = frame();
+        let around = [-TAU, TAU];
+        agree_surface(&Surface::Plane(Plane::new(f)), [[-2.0, 3.0], [1.0, 4.0]]);
+        agree_surface(
+            &Surface::Cylinder(Cylinder::new(f, 2.0).unwrap()),
+            [around, [-1.0, 3.0]],
+        );
+        let cone = Cone::new(f, 2.0, 0.4).unwrap();
+        // From the apex up: a pole row at the bottom.
+        agree_surface(&Surface::Cone(cone), [around, [cone.apex_v(), 3.0]]);
+        agree_surface(
+            &Surface::Sphere(Sphere::new(f, 2.0).unwrap()),
+            [around, [-FRAC_PI_2, FRAC_PI_2]],
+        );
+        agree_surface(
+            &Surface::Torus(Torus::new(f, 3.0, 1.0).unwrap()),
+            [around, around],
+        );
+    }
+
+    #[test]
+    fn surface_conversion_shapes() {
+        let f = frame();
+        let sphere = Surface::Sphere(Sphere::new(f, 2.0).unwrap());
+        let (n, r) = sphere.to_nurbs([[0.0, 0.0], [0.0, 0.0]]).unwrap();
+        assert_eq!(r, [Reparam::Angle, Reparam::Angle]);
+        assert_eq!(n.counts(), [8, 5]);
+        assert_eq!(n.periods(), (Some(TAU), None));
+        assert_eq!(n.domain()[1], [-FRAC_PI_2, FRAC_PI_2]);
+        // The poles are collapsed rows.
+        let south = n.control_point(0, 0);
+        assert!((0..8).all(|i| n.control_point(i, 0) == south));
+        assert!(south.distance(sphere.point(0.0, -FRAC_PI_2)) <= 1e-15);
+        let torus = Surface::Torus(Torus::new(f, 3.0, 1.0).unwrap());
+        let (n, _) = torus.to_nurbs([[0.0, 0.0], [0.0, 0.0]]).unwrap();
+        assert_eq!(n.counts(), [8, 8]);
+        assert_eq!(n.periods(), (Some(TAU), Some(TAU)));
+        let plane = Surface::Plane(Plane::new(f));
+        let (n, r) = plane.to_nurbs([[0.0, 1.0], [0.0, 2.0]]).unwrap();
+        assert_eq!(r, [Reparam::Identity, Reparam::Identity]);
+        assert_eq!((n.degrees(), n.counts()), ([1, 1], [2, 2]));
+    }
+
+    #[test]
+    fn surface_conversion_rejections() {
+        let f = frame();
+        let cone = Cone::new(f, 2.0, 0.4).unwrap();
+        let below = [[0.0, 1.0], [cone.apex_v() - 0.5, 1.0]];
+        assert_eq!(
+            Surface::Cone(cone).to_nurbs(below),
+            Err(crate::Error::Degenerate)
+        );
+        assert_eq!(
+            Surface::Plane(Plane::new(f)).to_nurbs([[1.0, 0.0], [0.0, 1.0]]),
+            Err(crate::Error::InvalidNurbs(crate::NurbsError::KnotOrder))
+        );
     }
 
     #[test]
