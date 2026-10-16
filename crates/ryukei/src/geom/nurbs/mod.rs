@@ -3,6 +3,7 @@
 
 mod basis;
 mod bezier;
+mod convert;
 mod curve;
 mod eval;
 mod knots;
@@ -10,6 +11,7 @@ mod refine;
 mod surface;
 
 pub use basis::Basis;
+pub use convert::Reparam;
 pub use curve::NurbsCurve;
 pub use knots::{KnotVector, MAX_DEGREE};
 pub use surface::{Direction, NurbsSurface};

@@ -19,7 +19,7 @@ pub use ellipse::Ellipse;
 pub use eval::{CurveEval, PrincipalCurvatures, SurfaceEval};
 pub use frame::Frame;
 pub(crate) use frame::polar_angle;
-pub use nurbs::{Basis, Direction, KnotVector, MAX_DEGREE, NurbsCurve, NurbsSurface};
+pub use nurbs::{Basis, Direction, KnotVector, MAX_DEGREE, NurbsCurve, NurbsSurface, Reparam};
 pub use point::{Point2, Point3};
 pub use project::Projection;
 pub use surface::{Cone, Cylinder, Plane, Sphere, Surface, Torus};
