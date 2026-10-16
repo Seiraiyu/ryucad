@@ -1,55 +1,102 @@
 //! The CLI as an agent sees it: run the binary, parse stdout as JSON.
+//!
+//! Every scenario runs twice, in two identical projects: once in process
+//! (`RYUCAD_NO_DAEMON=1`) and once through the project's daemon. Both must
+//! give the same JSON and the same exit code.
 
 use assert_cmd::Command;
 use serde_json::Value;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-fn ryucad_in(dir: &Path, args: &[&str]) -> (i32, Value) {
-    let out = Command::cargo_bin("ryucad")
-        .unwrap()
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .unwrap();
-    let json = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
-        panic!(
-            "stdout is not JSON ({e}): {}",
-            String::from_utf8_lossy(&out.stdout)
-        )
-    });
-    (out.status.code().unwrap(), json)
+/// Two identical projects, one served in process and one by a daemon.
+struct Pair {
+    _dir: tempfile::TempDir,
+    direct: PathBuf,
+    daemon: PathBuf,
+    run: PathBuf,
 }
 
-fn ryucad(args: &[&str]) -> (i32, Value) {
-    ryucad_in(&std::env::temp_dir(), args)
+impl Pair {
+    fn new() -> Pair {
+        let dir = tempfile::tempdir().unwrap();
+        let (direct, daemon) = (dir.path().join("direct"), dir.path().join("daemon"));
+        fs::create_dir(&direct).unwrap();
+        fs::create_dir(&daemon).unwrap();
+        Pair {
+            direct: direct.canonicalize().unwrap(),
+            daemon: daemon.canonicalize().unwrap(),
+            run: dir.path().join("run"),
+            _dir: dir,
+        }
+    }
+
+    fn run_in(&self, root: &Path, sub: &str, args: &[&str]) -> (i32, Value) {
+        let mut cmd = Command::cargo_bin("ryucad").unwrap();
+        cmd.current_dir(root.join(sub))
+            .args(args)
+            .env("RYUCAD_RUNTIME_DIR", &self.run)
+            .env("RYUCAD_IDLE_TIMEOUT", "60");
+        if root == self.direct {
+            cmd.env("RYUCAD_NO_DAEMON", "1");
+        }
+        let out = cmd.output().unwrap();
+        let text = String::from_utf8(out.stdout)
+            .unwrap()
+            .replace(root.to_str().unwrap(), "<root>");
+        let json = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {text}"));
+        (out.status.code().unwrap(), json)
+    }
+
+    /// Runs `args` from `sub` (relative to the project) both ways and
+    /// returns the common answer.
+    fn both_from(&self, sub: &str, args: &[&str]) -> (i32, Value) {
+        let a = self.run_in(&self.direct, sub, args);
+        let b = self.run_in(&self.daemon, sub, args);
+        assert_eq!(a, b, "{args:?}: in process vs daemon");
+        a
+    }
+
+    fn ok(&self, args: &[&str]) -> Value {
+        self.ok_from("", args)
+    }
+
+    fn ok_from(&self, sub: &str, args: &[&str]) -> Value {
+        let (code, v) = self.both_from(sub, args);
+        assert_eq!((code, &v["ok"]), (0, &Value::Bool(true)), "{args:?}: {v}");
+        assert_eq!(v["warnings"], serde_json::json!([]), "{args:?}");
+        v["result"].clone()
+    }
+
+    fn fails(&self, args: &[&str], error: &str, exit: i32) -> Value {
+        let (code, v) = self.both_from("", args);
+        assert_eq!(v["ok"], false, "{args:?}: {v}");
+        assert_eq!(
+            (code, v["error"]["code"].as_str().unwrap()),
+            (exit, error),
+            "{args:?}: {v}"
+        );
+        v["error"].clone()
+    }
+
+    /// Writes a file into both projects, as an agent or git would.
+    fn write(&self, rel: &str, contents: &str) {
+        fs::write(self.direct.join(rel), contents).unwrap();
+        fs::write(self.daemon.join(rel), contents).unwrap();
+    }
 }
 
-/// Runs a command that must succeed and returns its result.
-fn ok(dir: &Path, args: &[&str]) -> Value {
-    let (code, v) = ryucad_in(dir, args);
-    assert_eq!((code, &v["ok"]), (0, &Value::Bool(true)), "{args:?}: {v}");
-    v["result"].clone()
-}
-
-/// Runs a command that must fail with `error` and exit code `exit`.
-fn fails(dir: &Path, args: &[&str], error: &str, exit: i32) -> Value {
-    let (code, v) = ryucad_in(dir, args);
-    assert_eq!(v["ok"], false, "{args:?}: {v}");
-    assert_eq!(
-        (code, v["error"]["code"].as_str().unwrap()),
-        (exit, error),
-        "{args:?}: {v}"
-    );
-    v["error"].clone()
+impl Drop for Pair {
+    fn drop(&mut self) {
+        let _ = self.run_in(&self.daemon, "", &["daemon", "stop"]);
+    }
 }
 
 #[test]
 fn version_reports_every_component() {
-    let (code, v) = ryucad(&["version"]);
-    assert_eq!(code, 0);
-    assert_eq!(v["ok"], true);
-    let r = &v["result"];
+    let p = Pair::new();
+    let r = p.ok(&["version"]);
     assert_eq!(r["ryucad"], env!("CARGO_PKG_VERSION"));
     assert_eq!(r["ryukei"], env!("CARGO_PKG_VERSION"));
     assert_eq!(r["protocol"], 1);
@@ -59,83 +106,91 @@ fn version_reports_every_component() {
 
 #[test]
 fn an_agent_session() {
-    let dir = tempfile::tempdir().unwrap();
-    let d = dir.path();
-    ok(d, &["init", "--unit", "mm"]);
-    ok(d, &["part", "create", "bracket"]);
-    let r = ok(
-        d,
-        &[
-            "feature", "add", "bracket", "box", "--id", "plate", "--param", "x=100", "--param",
-            "y=60", "--param", "z=5",
-        ],
-    );
+    let p = Pair::new();
+    assert_eq!(p.ok(&["init", "--unit", "mm"])["root"], "<root>");
+    p.ok(&["part", "create", "bracket"]);
+    let r = p.ok(&[
+        "feature", "add", "bracket", "box", "--id", "plate", "--param", "x=100", "--param", "y=60",
+        "--param", "z=5",
+    ]);
     let rev = r["revision"].as_str().unwrap().to_owned();
-    ok(
-        d,
-        &[
-            "feature",
-            "add",
-            "bracket",
-            "cylinder",
-            "--param",
-            "radius=12.5",
-            "--param",
-            "height=2 in",
-            "--origin",
-            "50,30,5mm",
-            "--expect",
-            &rev,
-        ],
-    );
+    p.ok(&[
+        "feature",
+        "add",
+        "bracket",
+        "cylinder",
+        "--param",
+        "radius=12.5",
+        "--param",
+        "height=2 in",
+        "--origin",
+        "50,30,5mm",
+        "--expect",
+        &rev,
+    ]);
     // From a subfolder, the project is found above.
-    let sub = d.join("parts/bracket");
-    let list = ok(&sub, &["feature", "list", "bracket"]);
+    let list = p.ok_from("parts/bracket", &["feature", "list", "bracket"]);
     assert_eq!(list["features"][1]["id"], "cylinder-1");
-    let r = ok(d, &["rebuild"]);
+    let r = p.ok(&["rebuild"]);
     assert_eq!(r["parts"][0]["failed"], 0);
-    let inspect = ok(d, &["inspect", "bracket", "plate"]);
+    let inspect = p.ok(&["inspect", "bracket", "plate"]);
     let face = inspect["bodies"][0]["faces"][0]["name"]
         .as_str()
         .unwrap()
         .to_owned();
     // Editing keeps names.
-    ok(
-        d,
-        &["feature", "edit", "bracket", "plate", "--param", "x=120"],
-    );
-    let again = ok(d, &["inspect", "bracket", "plate", "--entity", &face]);
+    p.ok(&["feature", "edit", "bracket", "plate", "--param", "x=120"]);
+    let again = p.ok(&["inspect", "bracket", "plate", "--entity", &face]);
     assert_eq!(again["kind"], "face");
-    ok(d, &["feature", "move", "bracket", "cylinder-1", "--first"]);
-    ok(d, &["feature", "delete", "bracket", "plate"]);
-    assert_eq!(ok(d, &["check-format"])["clean"], true);
-    let shown = ok(d, &["feature", "show", "bracket", "cylinder-1"]);
+    p.ok(&["feature", "move", "bracket", "cylinder-1", "--first"]);
+    p.ok(&["feature", "delete", "bracket", "plate"]);
+    assert_eq!(p.ok(&["check-format"])["clean"], true);
+    let shown = p.ok(&["feature", "show", "bracket", "cylinder-1"]);
     assert_eq!(
         shown["params"]["height"],
         serde_json::json!({"value": "2 in", "m": 0.0508})
     );
     assert_eq!(shown["placement"]["origin"][2]["value"], "5 mm");
+    assert_eq!(p.ok(&["part", "list"])["parts"][0]["features"], 1);
+}
+
+#[test]
+fn external_edits_are_seen() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "sphere", "--id", "s", "--param", "radius=1",
+    ]);
+    p.ok(&["rebuild"]);
+    let path = "parts/p/features/s.json";
+    let text = fs::read_to_string(p.direct.join(path)).unwrap();
+    p.write(path, &text.replace("\"1 mm\"", "\"2 mm\""));
+    let shown = p.ok(&["feature", "show", "p", "s"]);
+    assert_eq!(shown["params"]["radius"]["value"], "2 mm");
+    // A new part made outside ryucad.
+    fs::create_dir_all(p.direct.join("parts/q")).unwrap();
+    fs::create_dir_all(p.daemon.join("parts/q")).unwrap();
+    p.write(
+        "parts/q/part.json",
+        "{\"features\": [], \"format\": 1, \"kind\": \"ryucad.part\"}",
+    );
+    let parts = p.ok(&["part", "list"]);
+    assert_eq!(parts["parts"][1]["part"], "q");
 }
 
 #[test]
 fn every_error_code_has_its_exit_code() {
-    let dir = tempfile::tempdir().unwrap();
-    let d = dir.path();
-    fails(d, &["part", "list"], "project_not_found", 3);
-    ok(d, &["init"]);
-    fails(d, &["init"], "project_exists", 1);
-    fails(d, &["part", "create", "Bad"], "invalid_id", 1);
-    ok(d, &["part", "create", "p"]);
-    fails(d, &["part", "create", "p"], "duplicate_id", 1);
-    fails(
-        d,
-        &["feature", "add", "p", "prism"],
-        "unknown_feature_type",
-        1,
-    );
-    fails(d, &["feature", "add", "p", "sphere"], "invalid_param", 1);
-    fails(
-        d,
+    let p = Pair::new();
+    p.fails(&["part", "list"], "project_not_found", 3);
+    p.ok(&["init"]);
+    p.fails(&["init"], "project_exists", 1);
+    p.fails(&["part", "create", "Bad"], "invalid_id", 1);
+    p.ok(&["part", "create", "p"]);
+    p.fails(&["part", "create", "p"], "duplicate_id", 1);
+    p.fails(&["feature", "add", "p", "prism"], "unknown_feature_type", 1);
+    p.fails(&["feature", "add", "p", "sphere"], "invalid_param", 1);
+    p.fails(
         &[
             "feature",
             "add",
@@ -147,65 +202,53 @@ fn every_error_code_has_its_exit_code() {
         "invalid_quantity",
         1,
     );
-    fails(
-        d,
+    p.fails(
         &[
             "feature", "add", "p", "sphere", "--param", "radius=1", "--z", "0,0,0",
         ],
         "invalid_placement",
         1,
     );
-    fails(d, &["feature", "show", "p", "ghost"], "not_found", 1);
-    let r = ok(
-        d,
-        &[
-            "feature",
-            "add",
-            "p",
-            "torus",
-            "--id",
-            "t",
-            "--param",
-            "major_radius=1",
-            "--param",
-            "minor_radius=1",
-        ],
-    );
-    fails(d, &["rebuild", "p"], "rebuild_failed", 1);
-    ok(
-        d,
-        &["feature", "edit", "p", "t", "--param", "major_radius=3"],
-    );
+    p.fails(&["feature", "show", "p", "ghost"], "not_found", 1);
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "torus",
+        "--id",
+        "t",
+        "--param",
+        "major_radius=1",
+        "--param",
+        "minor_radius=1",
+    ]);
+    p.fails(&["rebuild", "p"], "rebuild_failed", 1);
+    p.ok(&["feature", "edit", "p", "t", "--param", "major_radius=3"]);
     let stale = r["revision"].as_str().unwrap();
-    fails(
-        d,
+    p.fails(
         &["feature", "delete", "p", "t", "--expect", stale],
         "conflict",
         1,
     );
-    fails(d, &["feature", "bogus"], "usage", 2);
-    fails(
-        d,
+    p.fails(&["feature", "bogus"], "usage", 2);
+    p.fails(
         &["feature", "add", "p", "sphere", "--after", "t", "--first"],
         "usage",
         2,
     );
-    let t = d.join("parts/p/features/t.json");
-    fs::write(&t, "{").unwrap();
-    fails(d, &["feature", "show", "p", "t"], "invalid_json", 1);
-    fs::write(&t, "{}").unwrap();
-    fails(d, &["feature", "show", "p", "t"], "invalid_document", 1);
-    fs::write(
-        d.join("ryucad.json"),
+    p.write("parts/p/features/t.json", "{");
+    p.fails(&["feature", "show", "p", "t"], "invalid_json", 1);
+    p.write("parts/p/features/t.json", "{}");
+    p.fails(&["feature", "show", "p", "t"], "invalid_document", 1);
+    p.write(
+        "ryucad.json",
         r#"{"default_unit":"mm","format":2,"kind":"ryucad.project"}"#,
-    )
-    .unwrap();
-    fails(d, &["part", "list"], "format_too_new", 3);
+    );
+    p.fails(&["part", "list"], "format_too_new", 3);
 }
 
 #[test]
 fn pretty_output_is_the_same_document() {
-    let (_, compact) = ryucad(&["version"]);
     let out = Command::cargo_bin("ryucad")
         .unwrap()
         .args(["version", "--pretty"])
@@ -213,5 +256,13 @@ fn pretty_output_is_the_same_document() {
         .unwrap();
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.lines().count() > 3);
-    assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), compact);
+    let compact = Command::cargo_bin("ryucad")
+        .unwrap()
+        .arg("version")
+        .output()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&text).unwrap(),
+        serde_json::from_slice::<Value>(&compact.stdout).unwrap()
+    );
 }
