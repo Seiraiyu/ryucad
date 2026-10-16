@@ -123,3 +123,6 @@ try {
 
 if ($failures -ne 0) { throw "$failures installer test(s) failed" }
 Write-Host 'all installer tests passed'
+# The last case's installer failed on purpose; don't let its exit code
+# become the script's.
+exit 0

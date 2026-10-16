@@ -356,7 +356,7 @@ mod tests {
         let deep = dir.path().join("parts/p/features");
         assert_eq!(
             find_root(&deep).unwrap(),
-            dir.path().canonicalize().unwrap()
+            plain(dir.path().canonicalize().unwrap())
         );
         let elsewhere = tempfile::tempdir().unwrap();
         assert_eq!(
