@@ -13,3 +13,8 @@ serde_json = "1"
 
 [dev-dependencies]
 assert_cmd = "2"
+
+# musl's allocator is slow under multithreaded allocation, and rebuild runs
+# features in parallel. Kernel results don't depend on the allocator.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = "0.1"
