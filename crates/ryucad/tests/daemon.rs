@@ -164,3 +164,116 @@ fn a_stale_socket_is_replaced() {
     ask(&f.connect().unwrap(), &Request::DaemonShutdown {}).unwrap();
     assert!(exited(&mut again, Duration::from_secs(10)));
 }
+
+/// Runs the CLI in the fixture's project with its runtime folder.
+fn cli(f: &Fixture, args: &[&str]) -> Value {
+    let out = Command::new(cargo_bin("ryucad"))
+        .args(args)
+        .current_dir(&f.root)
+        .env(RUNTIME_DIR_VAR, &f.run)
+        .env("RYUCAD_IDLE_TIMEOUT", "60")
+        .output()
+        .unwrap();
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+fn the_cli_starts_a_daemon_and_stops_it() {
+    let f = fixture();
+    assert_eq!(cli(&f, &["daemon", "status"])["result"]["running"], false);
+    let r = cli(&f, &["part", "create", "p"]);
+    assert_eq!(
+        (r["ok"].as_bool(), r["warnings"].as_array().unwrap().len()),
+        (Some(true), 0)
+    );
+    let status = cli(&f, &["daemon", "status"])["result"].clone();
+    assert_eq!(status["running"], true);
+    assert_eq!(status["idle_timeout_s"], 60);
+    // The same daemon answers the next command.
+    cli(&f, &["part", "list"]);
+    assert_eq!(
+        cli(&f, &["daemon", "status"])["result"]["pid"],
+        status["pid"]
+    );
+    assert_eq!(cli(&f, &["daemon", "stop"])["result"]["stopped"], true);
+    assert_eq!(cli(&f, &["daemon", "status"])["result"]["running"], false);
+    assert_eq!(cli(&f, &["daemon", "stop"])["result"]["stopped"], false);
+}
+
+#[test]
+fn stop_all_stops_every_project() {
+    let (a, b) = (fixture(), fixture());
+    // Both projects' daemons in one runtime folder.
+    let b = Fixture {
+        run: a.run.clone(),
+        ..b
+    };
+    cli(&a, &["part", "list"]);
+    cli(&b, &["part", "list"]);
+    assert_eq!(
+        cli(&a, &["daemon", "stop", "--all"])["result"]["stopped"],
+        2
+    );
+    assert_eq!(cli(&b, &["daemon", "status"])["result"]["running"], false);
+}
+
+#[test]
+fn a_daemon_of_another_version_is_replaced() {
+    let f = fixture();
+    let endpoint = f.endpoint();
+    let listener = interprocess::local_socket::ListenerOptions::new()
+        .name(endpoint.name().unwrap())
+        .create_sync()
+        .unwrap();
+    // An impostor that claims an old version and leaves when asked.
+    let impostor = std::thread::spawn(move || {
+        for conn in listener.incoming() {
+            let conn = conn.unwrap();
+            let mut reader = BufReader::new(&conn);
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap() > 0 {
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let result = match req["method"].as_str().unwrap() {
+                    "daemon.status" => serde_json::json!({"version": {"ryucad": "0.0.0"}}),
+                    _ => serde_json::json!({"stopping": true}),
+                };
+                let reply =
+                    serde_json::json!({"jsonrpc": "2.0", "id": req["id"], "result": result});
+                (&conn).write_all(format!("{reply}\n").as_bytes()).unwrap();
+                if req["method"] == "daemon.shutdown" {
+                    return;
+                }
+                line.clear();
+            }
+        }
+    });
+    let r = cli(&f, &["part", "list"]);
+    impostor.join().unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    let status = cli(&f, &["daemon", "status"])["result"].clone();
+    assert_eq!(status["version"]["ryucad"], env!("CARGO_PKG_VERSION"));
+    cli(&f, &["daemon", "stop"]);
+}
+
+#[test]
+fn without_a_daemon_the_cli_still_answers() {
+    let f = fixture();
+    // A runtime folder that can't be created: no daemon is possible.
+    let blocked = Fixture {
+        run: f.root.join("ryucad.json").join("run"),
+        ..fixture()
+    };
+    let r = cli(&blocked, &["part", "list"]);
+    assert_eq!(r["ok"], true);
+    assert!(
+        r["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("ran in process"),
+        "{r}"
+    );
+    // --no-daemon never tries.
+    let r = cli(&f, &["--no-daemon", "part", "list"]);
+    assert_eq!(r["warnings"], serde_json::json!([]));
+    assert_eq!(cli(&f, &["daemon", "status"])["result"]["running"], false);
+}

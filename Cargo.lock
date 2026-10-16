@@ -720,6 +720,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "widestring",
+ "windows-sys",
 ]
 
 [[package]]

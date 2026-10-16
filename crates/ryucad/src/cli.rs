@@ -6,7 +6,7 @@ use ryucad::doc::project::find_root;
 use ryucad::error::{Code, Error, Result};
 use ryucad::proto::{PlacementArg, Position, Request, VersionInfo};
 use ryucad::units::Unit;
-use ryucad::{daemon, server};
+use ryucad::{client, daemon, server};
 use serde_json::{Map, Value, json};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -25,6 +25,10 @@ struct Cli {
     /// Indent the JSON output.
     #[arg(long, global = true)]
     pretty: bool,
+    /// Run in this process instead of through the project's daemon (also
+    /// RYUCAD_NO_DAEMON=1).
+    #[arg(long, global = true)]
+    no_daemon: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -71,6 +75,13 @@ enum DaemonCmd {
         /// Exit after this many seconds without a request.
         #[arg(long, value_name = "SECONDS")]
         idle_timeout: Option<u64>,
+    },
+    /// Whether the project's daemon is running, and its details.
+    Status,
+    /// Stop the project's daemon, or with --all every daemon of this user.
+    Stop {
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -319,7 +330,8 @@ fn request(cmd: &Command) -> Option<Request> {
     })
 }
 
-fn run(cli: &Cli) -> Result<Value> {
+/// Runs the command, collecting warnings for the output.
+fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
     let here = match &cli.dir {
         Some(d) => d.clone(),
         None => std::env::current_dir().map_err(|e| Error::io(std::path::Path::new("."), &e))?,
@@ -331,9 +343,21 @@ fn run(cli: &Cli) -> Result<Value> {
             let idle = idle_timeout.map_or(daemon::DEFAULT_IDLE, Duration::from_secs);
             daemon::run(&find_root(&here)?, idle).map(|()| Value::Null)
         }
+        Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
+        Command::Daemon(DaemonCmd::Stop { all: true }) => client::stop_all(),
+        Command::Daemon(DaemonCmd::Stop { all: false }) => client::stop(&find_root(&here)?),
         cmd => {
             let req = request(cmd).expect("every other command is a request");
             let root = find_root(&here)?;
+            let no_daemon =
+                cli.no_daemon || std::env::var("RYUCAD_NO_DAEMON").is_ok_and(|v| v == "1");
+            if !no_daemon {
+                match client::request(&root, &req) {
+                    Ok(answer) => return answer,
+                    // Never delivered, so running it here is safe.
+                    Err(e) => warnings.push(format!("{}; ran in process", e.message)),
+                }
+            }
             server::handle_safely(&mut None, &root, req)
         }
     }
@@ -359,7 +383,9 @@ pub fn main() -> ExitCode {
             );
         }
     };
-    finish(run(&cli), Vec::new(), cli.pretty)
+    let mut warnings = Vec::new();
+    let outcome = run(&cli, &mut warnings);
+    finish(outcome, warnings, cli.pretty)
 }
 
 fn finish(outcome: Result<Value>, warnings: Vec<String>, pretty: bool) -> ExitCode {
