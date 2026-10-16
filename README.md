@@ -4,4 +4,4 @@ CAD built for AI agents to drive, with a from-scratch B-rep kernel (**ryukei**) 
 
 - `crates/ryukei`: geometry kernel (single bodies: geometry, topology, booleans, blends, tessellation)
 - `crates/ryucad`: application layer (documents, assemblies, instancing, persistence, agent interface)
-- `docs/`: design documents
+- Design documents and roadmaps live in the Coxswain planning project `ryucad-ryukei`, not in this repo
