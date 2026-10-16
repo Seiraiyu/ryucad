@@ -20,6 +20,7 @@ pub(crate) trait Coords:
     + Div<f64, Output = Self>
 {
     const ZERO: Self;
+    fn dot(self, other: Self) -> f64;
     /// Componentwise least.
     fn min(self, other: Self) -> Self;
     /// Componentwise greatest.
@@ -28,6 +29,9 @@ pub(crate) trait Coords:
 
 impl Coords for Vector2 {
     const ZERO: Self = Vector2::ZERO;
+    fn dot(self, other: Self) -> f64 {
+        Vector2::dot(self, other)
+    }
     fn min(self, other: Self) -> Self {
         Vector2::new(self.x.min(other.x), self.y.min(other.y))
     }
@@ -38,6 +42,9 @@ impl Coords for Vector2 {
 
 impl Coords for Vector3 {
     const ZERO: Self = Vector3::ZERO;
+    fn dot(self, other: Self) -> f64 {
+        Vector3::dot(self, other)
+    }
     fn min(self, other: Self) -> Self {
         Vector3::min(self, other)
     }

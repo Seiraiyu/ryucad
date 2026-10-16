@@ -3,8 +3,9 @@
 use super::KnotVector;
 use super::bezier::BezierCurve;
 use super::eval::Spline;
+use super::project::nearest;
 use crate::Error;
-use crate::geom::{Box3, CurveEval, Point3, Rigid, UnitVector3, Vector3};
+use crate::geom::{Box3, CurveEval, Point3, Projection, Rigid, UnitVector3, Vector3};
 use std::sync::OnceLock;
 
 /// A rational B-spline curve in model space. Immutable once built.
@@ -126,6 +127,41 @@ impl NurbsCurve {
             *p = r.apply_point(Point3::ORIGIN + *p).to_vector();
         }
         Self::from_spline(spline)
+    }
+
+    /// The nearest point of the curve to `p`: within
+    /// [`crate::tol::LINEAR_RESOLUTION`] of the true global minimum. Of
+    /// minima that close to each other the lowest parameter wins; a periodic
+    /// curve's parameter is in `[t0, t0 + period)`.
+    pub fn project(&self, p: Point3) -> Projection<f64, Point3> {
+        let feet = self.spline.minima(self.pieces(), p.to_vector(), true);
+        let (param, v, distance) = nearest(&feet);
+        Projection {
+            param,
+            point: Point3::ORIGIN + v,
+            distance,
+        }
+    }
+
+    /// The distance from `p` to the curve: [`NurbsCurve::project`]'s.
+    pub fn distance(&self, p: Point3) -> f64 {
+        self.project(p).distance
+    }
+
+    /// Every local minimum of the distance from `p`, sorted by parameter:
+    /// interior ones and, on a clamped curve, ends where the curve moves
+    /// away from `p`. Where the distance is constant along a stretch, its
+    /// start stands for all of it.
+    pub fn local_minima(&self, p: Point3) -> Vec<Projection<f64, Point3>> {
+        self.spline
+            .minima(self.pieces(), p.to_vector(), false)
+            .into_iter()
+            .map(|(param, v, distance)| Projection {
+                param,
+                point: Point3::ORIGIN + v,
+                distance,
+            })
+            .collect()
     }
 
     /// The Bézier pieces, in parameter order, built once.

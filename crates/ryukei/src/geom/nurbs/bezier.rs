@@ -17,7 +17,7 @@ pub(crate) struct BezierCurve<V> {
 
 /// The componentwise least and greatest control points: with positive
 /// weights the piece lies in their convex hull, so also in this box.
-fn hull<V: Coords>(pts: &[Hom<V>]) -> (V, V) {
+pub(crate) fn hull<V: Coords>(pts: &[Hom<V>]) -> (V, V) {
     pts.iter().fold((pts[0].p, pts[0].p), |(lo, hi), h| {
         (lo.min(h.p), hi.max(h.p))
     })
@@ -26,6 +26,13 @@ fn hull<V: Coords>(pts: &[Hom<V>]) -> (V, V) {
 fn hull_box(pts: &[Hom<Vector3>]) -> Box3 {
     let (lo, hi) = hull(pts);
     Box3::new(Point3::ORIGIN + lo, Point3::ORIGIN + hi)
+}
+
+impl<V: Coords> BezierCurve<V> {
+    /// The least and greatest corners of the control-hull box.
+    pub(crate) fn hull(&self) -> (V, V) {
+        hull(&self.pts)
+    }
 }
 
 impl BezierCurve<Vector3> {

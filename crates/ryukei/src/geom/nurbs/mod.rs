@@ -7,6 +7,7 @@ mod convert;
 mod curve;
 mod eval;
 mod knots;
+mod project;
 mod refine;
 mod surface;
 
