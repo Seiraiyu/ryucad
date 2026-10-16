@@ -9,6 +9,7 @@ repository.workspace = true
 # Rust only: no C or assembly to build on any platform.
 blake3 = { version = "1", features = ["pure"] }
 clap = { version = "4", features = ["derive"] }
+rayon = "1"
 ryukei = { path = "../ryukei" }
 serde = { version = "1", features = ["derive"] }
 # Correctly rounded float parsing: without it, a number read back can be

@@ -4,4 +4,5 @@
 pub mod doc;
 pub mod error;
 pub mod proto;
+pub mod rebuild;
 pub mod units;
