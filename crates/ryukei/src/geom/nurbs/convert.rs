@@ -1,8 +1,8 @@
 //! Exact rational NURBS forms of the analytic curves and surfaces.
 
-use super::{KnotVector, NurbsCurve, NurbsSurface};
+use super::{KnotVector, NurbsCurve, NurbsCurve2, NurbsSurface};
 use crate::Error;
-use crate::geom::{Circle, Curve, Ellipse, Frame, Line, Point3, Surface};
+use crate::geom::{Circle, Curve, Curve2, Ellipse, Frame, Frame2, Line, Point3, Surface};
 use crate::math;
 use core::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, FRAC_PI_4, PI, SQRT_2, TAU};
 
@@ -127,6 +127,36 @@ impl Curve {
             Self::Line(l) => l.to_nurbs(range),
             Self::Circle(c) => c.to_nurbs(),
             Self::Ellipse(e) => e.to_nurbs(),
+        }
+    }
+}
+
+/// A full turn in the plane, as for [`turn`].
+fn turn2(frame: &Frame2, a: f64, b: f64) -> Result<NurbsCurve2, Error> {
+    let (o, x, y) = (frame.origin(), frame.x(), frame.y());
+    let points = TURN
+        .iter()
+        .map(|&(c, s, _)| o + x * (a * c) + y * (b * s))
+        .collect();
+    let weights = TURN.iter().map(|&(.., w)| w).collect();
+    NurbsCurve2::new(turn_knots()?, points, Some(weights))
+}
+
+impl Curve2 {
+    /// The exact NURBS form of a pcurve and how its parameter relates, as
+    /// for [`Curve::to_nurbs`]: `range` bounds a line; a NURBS is returned
+    /// as it is.
+    pub fn to_nurbs(&self, [t0, t1]: [f64; 2]) -> Result<(NurbsCurve2, Reparam), Error> {
+        match self {
+            Self::Line2(l) => {
+                let knots = KnotVector::clamped(1, &[t0, t1], &[2, 2])?;
+                let at = |t: f64| l.origin() + l.dir() * t;
+                let curve = NurbsCurve2::new(knots, vec![at(t0), at(t1)], None)?;
+                Ok((curve, Reparam::Identity))
+            }
+            Self::Circle2(c) => Ok((turn2(c.frame(), c.radius(), c.radius())?, Reparam::Angle)),
+            Self::Ellipse2(e) => Ok((turn2(e.frame(), e.major(), e.minor())?, Reparam::Angle)),
+            Self::Nurbs2(n) => Ok(((**n).clone(), Reparam::Identity)),
         }
     }
 }

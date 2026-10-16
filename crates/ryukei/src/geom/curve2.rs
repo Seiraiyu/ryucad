@@ -5,10 +5,11 @@
 
 use super::curve::check_length;
 use super::ellipse::nearest_on_ellipse;
-use super::{Box2, CurveEval2, Point2, Projection, Vector2, polar_angle};
+use super::{Box2, CurveEval2, NurbsCurve2, Point2, Projection, Vector2, polar_angle};
 use crate::Error;
 use crate::math;
 use core::f64::consts::TAU;
+use std::sync::Arc;
 
 /// An origin and a unit `x` direction in the plane, with `y` a quarter
 /// turn from `x` counterclockwise (`ccw`) or clockwise. Circles and
@@ -157,6 +158,7 @@ pub enum Curve2 {
     Line2(Line2),
     Circle2(Circle2),
     Ellipse2(Ellipse2),
+    Nurbs2(Arc<NurbsCurve2>),
 }
 
 /// `origin + a cos t x + b sin t y` and its derivatives.
@@ -185,12 +187,16 @@ impl Curve2 {
             },
             Self::Circle2(c) => turn(&c.frame, c.radius, c.radius, t),
             Self::Ellipse2(e) => turn(&e.frame, e.major, e.minor, t),
+            Self::Nurbs2(n) => n.eval(t),
         }
     }
 
     /// The unit tangent in the direction of increasing `t`.
     pub fn tangent(&self, t: f64) -> Option<Vector2> {
-        self.eval(t).tangent()
+        match self {
+            Self::Nurbs2(n) => n.tangent(t),
+            _ => self.eval(t).tangent(),
+        }
     }
 
     /// The curvature, in closed form.
@@ -204,14 +210,17 @@ impl Curve2 {
                 let q = a * a * s * s + b * b * c * c;
                 Some(a * b / (q * math::sqrt(q)))
             }
+            Self::Nurbs2(n) => n.curvature(t),
         }
     }
 
-    /// Unbounded for a line, `[0, 2π]` for a circle or an ellipse.
+    /// Unbounded for a line, `[0, 2π]` for a circle or an ellipse, the
+    /// knot domain for a NURBS.
     pub fn domain(&self) -> [f64; 2] {
         match self {
             Self::Line2(_) => [f64::NEG_INFINITY, f64::INFINITY],
             Self::Circle2(_) | Self::Ellipse2(_) => [0.0, TAU],
+            Self::Nurbs2(n) => n.domain(),
         }
     }
 
@@ -219,13 +228,15 @@ impl Curve2 {
         match self {
             Self::Line2(_) => None,
             Self::Circle2(_) | Self::Ellipse2(_) => Some(TAU),
+            Self::Nurbs2(n) => n.period(),
         }
     }
 
-    /// The nearest point to `p`, in closed form as for
-    /// [`crate::geom::Curve::project`].
+    /// The nearest point to `p`: in closed form as for
+    /// [`crate::geom::Curve::project`], or by [`NurbsCurve2::project`].
     pub fn project(&self, p: Point2) -> Projection<f64, Point2> {
         let param = match self {
+            Self::Nurbs2(n) => return n.project(p),
             Self::Line2(l) => (p - l.origin).dot(l.dir),
             Self::Circle2(c) => {
                 let (x, y) = c.frame.local(p);
@@ -250,8 +261,9 @@ impl Curve2 {
     }
 
     /// A box holding the curve over `[t0, t1]`: exact for a segment, the
-    /// whole curve's for a circle or an ellipse. A line's unbounded range
-    /// gives an unbounded box.
+    /// whole curve's for a circle or an ellipse, the hull boxes of the
+    /// overlapping pieces for a NURBS. A line's unbounded range gives an
+    /// unbounded box.
     pub fn bounds(&self, [t0, t1]: [f64; 2]) -> Box2 {
         let ring = |f: &Frame2, a: f64, b: f64| {
             let d = Vector2::new(
@@ -264,6 +276,7 @@ impl Curve2 {
             Self::Line2(_) => Box2::new(self.point(t0), self.point(t1)),
             Self::Circle2(c) => ring(&c.frame, c.radius, c.radius),
             Self::Ellipse2(e) => ring(&e.frame, e.major, e.minor),
+            Self::Nurbs2(n) => n.bounds([t0, t1]),
         }
     }
 }
