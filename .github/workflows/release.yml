@@ -75,6 +75,7 @@ jobs:
           echo "$out"
           echo "$out" | grep -q "\"target\":\"$TARGET\""
           echo "$out" | grep -q "\"ryucad\":\"${{ needs.version.outputs.version }}\""
+          sh scripts/smoke.sh "$exe"
       - name: package (Unix)
         if: runner.os != 'Windows'
         run: |
