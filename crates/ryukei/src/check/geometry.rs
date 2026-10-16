@@ -65,11 +65,17 @@ fn edge(b: &Body, e: EdgeId, out: &mut Vec<Fault>) {
     let curve = &b.curves[edge.curve];
     let [t0, t1] = edge.interval;
     let closed = edge.start == edge.end;
+    let [d0, d1] = curve.domain();
     let bad_interval = match (closed, curve.period()) {
         (true, Some(p)) => (t1 - t0 - p).abs() > ANGULAR_RESOLUTION,
-        (true, None) => true,
+        // A clamped curve whose ends meet closes over its whole domain.
+        (true, None) => {
+            !curve.is_closed()
+                || (t0 - d0).abs() > ANGULAR_RESOLUTION
+                || (t1 - d1).abs() > ANGULAR_RESOLUTION
+        }
         (false, Some(p)) => t1 - t0 >= p - ANGULAR_RESOLUTION,
-        (false, None) => t0 >= t1,
+        (false, None) => t0 >= t1 || t0 < d0 || t1 > d1,
     };
     if bad_interval {
         out.push(Fault::BadInterval { edge: e });
