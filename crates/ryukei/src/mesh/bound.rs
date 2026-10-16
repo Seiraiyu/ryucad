@@ -15,9 +15,10 @@
 //!
 //! The normal (or tangent) can turn across a triangle (or segment) by at
 //! most the turning rates of [`SurfaceBound`] (or `CurveBound`) times its
-//! parameter spans. Where no rate is known (a NURBS pole, a curve whose
-//! speed may vanish) the test is waived once the piece is shorter than
-//! the chord tolerance in model space.
+//! parameter spans. The angle test is waived for a piece shorter than the
+//! chord tolerance in model space: a turn faster than that is a feature
+//! smaller than the tolerance, and near a pole or an apex, where the
+//! normal has no limit, the rates are unbounded or nearly so.
 
 use crate::geom::{Curve, Point2, Point3, Surface, SurfaceBound};
 
@@ -129,13 +130,15 @@ pub(crate) fn triangle_ok(
         return false;
     }
     let spin = turn(&b, range);
-    spin <= t.angle || (!spin.is_finite() && size < t.waive)
+    spin <= t.angle || size < t.waive
 }
 
 /// True when the segment from `uv[0]` to `uv[1]` can be the edge of a
 /// triangle that passes [`triangle_ok`]: a triangle on it whose third
 /// corner lies in the circle on it as diameter has `R` half its length,
-/// so the segment gets half the chord and half the angle.
+/// so the segment gets half the chord and half the angle. The bounds are
+/// taken over the square holding that circle, where such a triangle
+/// lies, not just along the segment.
 pub(crate) fn face_segment_ok(
     surface: &Surface,
     metric: Metric,
@@ -143,14 +146,16 @@ pub(crate) fn face_segment_ok(
     xyz: [Point3; 2],
     t: &Targets,
 ) -> bool {
-    let range = uv_box(&uv);
-    let b = surface.derivative_bound(range);
     let h = metric.scale(uv[0]).distance(metric.scale(uv[1]));
+    let mid = Point2::new(0.5 * (uv[0].x + uv[1].x), 0.5 * (uv[0].y + uv[1].y));
+    let (hu, hv) = (0.5 * h / metric.a, 0.5 * h / metric.b);
+    let range = [[mid.x - hu, mid.x + hu], [mid.y - hv, mid.y + hv]];
+    let b = surface.derivative_bound(range);
     if second_derivative(&b, metric) * h * h / 8.0 > t.chord / 2.0 {
         return false;
     }
     let spin = turn(&b, range);
-    spin <= t.angle / 2.0 || (!spin.is_finite() && diameter(&xyz) < t.waive)
+    spin <= t.angle / 2.0 || diameter(&xyz) < t.waive
 }
 
 /// True when the chord from `xyz[0]` to `xyz[1]` over the curve's
@@ -171,7 +176,7 @@ pub(crate) fn curve_segment_ok(
         return false;
     }
     let spin = b.turn * dt;
-    spin <= t.angle || (!spin.is_finite() && size < t.waive)
+    spin <= t.angle || size < t.waive
 }
 
 #[cfg(test)]
@@ -284,7 +289,10 @@ mod tests {
             m,
             tri(0.02).0,
             tri(0.02).1,
-            &targets(1.0, 0.01)
+            &Targets {
+                waive: 0.0,
+                ..targets(1.0, 0.01)
+            }
         ));
         // And the edge length.
         let short = Targets {
@@ -308,7 +316,10 @@ mod tests {
             &c,
             [0.0, 0.019],
             seg(0.019),
-            &targets(1.0, 0.01)
+            &Targets {
+                waive: 0.0,
+                ..targets(1.0, 0.01)
+            }
         ));
     }
 

@@ -78,6 +78,127 @@ pub(crate) fn refine(
     cap: u64,
 ) -> Refined {
     let mut out = Refined::default();
+    for _ in 0..PINCH_ROUNDS {
+        if let Some(stop) = refine_pass(d, g, t, fixed, cap, &mut out) {
+            out.stop = Some(stop);
+            return out;
+        }
+        let pinches = pinched(d);
+        if pinches.is_empty() {
+            return out;
+        }
+        let mut flipped = false;
+        for (x, a) in pinches {
+            if d.cdt.flip_edge(x, a) {
+                flipped = true;
+                continue;
+            }
+            // Not convex: split the edge instead, which also takes x off
+            // the pole there.
+            let Some((tri, i)) = d.cdt.find_edge(x, a) else {
+                continue;
+            };
+            let before = d.cdt.triangle_count();
+            if split_inner(d, g, tri, i).is_some() {
+                flipped = true;
+                for t in before..d.cdt.triangle_count() {
+                    let inside = d.inside[d.cdt.origin(t as u32) as usize];
+                    d.inside.push(inside);
+                }
+            }
+        }
+        if !flipped {
+            break;
+        }
+    }
+    out.stop = Some(Stop::Stalled);
+    out
+}
+
+/// Rounds of unpinching and refining again.
+const PINCH_ROUNDS: usize = 16;
+
+/// True when a vertex lies on a pole side.
+fn on_pole(d: &Domain, v: u32) -> bool {
+    let p = d.uv[v as usize];
+    let at = [(V, 0), (U, 1), (V, 1), (U, 0)];
+    (0..4).any(|s| d.sides[s] == Side::Pole && [p.x, p.y][at[s].0] == d.rect[at[s].0][at[s].1])
+}
+
+/// Edges to flip so that no vertex is pinched at a pole. Going round a
+/// vertex, its neighbours on a pole side must come in one run: once the
+/// pole is welded into one position, two runs would make its edge to the
+/// pole non-manifold. Near a pole the scaled plane stretches the surface
+/// sideways, so Delaunay triangles can reach past a nearer point to the
+/// pole twice. All but the longest run are flipped away; each flip takes
+/// one edge from the pole, so the repair ends.
+fn pinched(d: &Domain) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    for x in 0..d.uv.len() as u32 {
+        if on_pole(d, x) {
+            continue;
+        }
+        let (fan, closed) = d.cdt.fan(x);
+        // The neighbours counterclockwise, None across outside triangles.
+        let mut ring: Vec<Option<u32>> = Vec::new();
+        // Each triangle adds the neighbour it shares with the next one; an
+        // open fan starts with its first triangle's other neighbour.
+        for (k, &(t, i)) in fan.iter().enumerate() {
+            let c = d.cdt.corners(t);
+            let inside = d.inside[t as usize];
+            if !closed && k == 0 {
+                ring.push(inside.then_some(c[prev(i)]));
+            }
+            ring.push(inside.then_some(c[next(i)]));
+        }
+        let pole = |k: usize| ring[k].is_some_and(|v| on_pole(d, v));
+        let n = ring.len();
+        // Runs of pole neighbours, as index lists.
+        let mut runs: Vec<Vec<usize>> = Vec::new();
+        let start = if closed {
+            match (0..n).find(|&k| !pole(k)) {
+                Some(k) => k,
+                None => continue,
+            }
+        } else {
+            0
+        };
+        let mut run: Vec<usize> = Vec::new();
+        for j in 0..n {
+            let k = (start + j) % n;
+            if pole(k) {
+                run.push(k);
+            } else if !run.is_empty() {
+                runs.push(core::mem::take(&mut run));
+            }
+        }
+        if !run.is_empty() {
+            runs.push(run);
+        }
+        if runs.len() <= 1 {
+            continue;
+        }
+        let keep =
+            (0..runs.len()).fold(0, |b, r| if runs[r].len() > runs[b].len() { r } else { b });
+        for (r, run) in runs.iter().enumerate() {
+            if r != keep {
+                out.extend(run.iter().map(|&k| (x, ring[k].expect("a neighbour"))));
+            }
+        }
+    }
+    out
+}
+
+/// One pass of refinement over the inside triangles.
+fn refine_pass(
+    d: &mut Domain,
+    g: &FaceGeom,
+    t: &Targets,
+    fixed: &dyn Fn(Anchor) -> Point3,
+    cap: u64,
+    out: &mut Refined,
+) -> Option<Stop> {
+    let mut stop = None;
     let mut count = d.inside.iter().filter(|&&x| x).count() as u64;
     let mut queue: VecDeque<u32> = (0..d.cdt.triangle_count() as u32)
         .filter(|&t| d.inside[t as usize])
@@ -96,15 +217,14 @@ pub(crate) fn refine(
             continue;
         }
         if count > cap {
-            out.stop = Some(Stop::TooLarge);
-            return out;
+            return Some(Stop::TooLarge);
         }
         // The longest edge in the scaled plane: opposite corner i.
         let scaled = uv.map(|p| g.metric.scale(p));
         let len = |i: usize| scaled[next(i)].distance(scaled[prev(i)]);
         let i = (0..3).fold(0, |best, i| if len(i) > len(best) { i } else { best });
         if len(i) < floor {
-            out.stop = Some(Stop::Stalled);
+            stop = Some(Stop::Stalled);
             continue;
         }
         let (b, c) = (corners[next(i)], corners[prev(i)]);
@@ -125,7 +245,7 @@ pub(crate) fn refine(
             continue;
         };
         let Some(made) = made else {
-            out.stop = Some(Stop::Stalled);
+            stop = Some(Stop::Stalled);
             continue;
         };
         for t in before..d.cdt.triangle_count() {
@@ -143,7 +263,7 @@ pub(crate) fn refine(
             }
         }
     }
-    out
+    stop
 }
 
 /// Splits an inner edge at its midpoint. The new vertex is free.

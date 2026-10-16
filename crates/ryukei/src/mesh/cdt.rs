@@ -484,6 +484,69 @@ impl Cdt {
         out
     }
 
+    /// The triangles around `a` in counterclockwise order, with `a`'s
+    /// corner index in each, and whether they close up all the way round
+    /// (`a` is not on the rectangle's boundary).
+    pub(crate) fn fan(&self, a: u32) -> (Vec<(u32, usize)>, bool) {
+        let index = |t: u32| {
+            self.tris[t as usize]
+                .v
+                .iter()
+                .position(|&x| x == a)
+                .expect("touching")
+        };
+        // Back clockwise to the boundary, if there is one.
+        let start = self.touch[a as usize];
+        let mut first = start;
+        loop {
+            let n = self.tris[first as usize].n[next(index(first))];
+            if n == NONE {
+                break;
+            }
+            if n == start {
+                first = start;
+                break;
+            }
+            first = n;
+        }
+        let mut out = vec![(first, index(first))];
+        let mut t = first;
+        loop {
+            let n = self.tris[t as usize].n[prev(index(t))];
+            if n == NONE {
+                return (out, false);
+            }
+            if n == first {
+                return (out, true);
+            }
+            out.push((n, index(n)));
+            t = n;
+        }
+    }
+
+    /// Flips the unfixed edge between `a` and `b` when the two triangles
+    /// on it make a strictly convex quadrilateral. Returns whether it did.
+    pub(crate) fn flip_edge(&mut self, a: u32, b: u32) -> bool {
+        let Some((t, i)) = self.find_edge(a, b) else {
+            return false;
+        };
+        if self.tris[t as usize].fixed[i] {
+            return false;
+        }
+        let Some(q) = self.across(t, i) else {
+            return false;
+        };
+        let p = self.tris[t as usize].v[i];
+        let convex = matches!(
+            (self.orient(p, q, a), self.orient(p, q, b)),
+            (Sign::Positive, Sign::Negative) | (Sign::Negative, Sign::Positive)
+        );
+        if convex {
+            self.flip(t, i);
+        }
+        convex
+    }
+
     /// The triangle with the directed edge `a → b`, and the corner the edge
     /// is opposite.
     pub(crate) fn find_edge(&self, a: u32, b: u32) -> Option<(u32, usize)> {
@@ -913,6 +976,27 @@ mod tests {
         }
         assert!(fixed > 20);
         assert!(c.is_delaunay());
+    }
+
+    #[test]
+    fn fans_and_flips() {
+        let mut c = square();
+        let m = c.insert(Point2::new(0.5, 0.5)).unwrap();
+        let (fan, closed) = c.fan(m);
+        assert!(closed);
+        assert_eq!(fan.len(), 4);
+        // Counterclockwise: each triangle shares its next corner with the
+        // following one, where it is the last corner.
+        for w in fan.windows(2) {
+            let (a, b) = (c.corners(w[0].0), c.corners(w[1].0));
+            assert_eq!(a[next(w[0].1)], b[prev(w[1].1)]);
+        }
+        let (fan, closed) = c.fan(0);
+        assert!(!closed && fan.len() == 2);
+        // The edge from the centre to a corner is between two triangles
+        // whose quadrilateral is a triangle: not strictly convex.
+        assert!(!c.flip_edge(m, 0));
+        c.validate();
     }
 
     #[test]

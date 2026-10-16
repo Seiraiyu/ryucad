@@ -29,12 +29,26 @@ pub(crate) struct FaceGeom<'a> {
 }
 
 /// The scale of a parameter direction: its speed at the first sample
-/// where that is more than resolution, or 1 where it never is.
+/// where that is more than resolution, or 1 where it never is, rounded to
+/// the nearest power of two. Scaling by a power of two is exact, so a
+/// point and its parameters always agree on which way a triangle winds.
 fn scale(speeds: impl Iterator<Item = f64>) -> f64 {
-    speeds
+    let s = speeds
         .into_iter()
-        .find(|&s| s > LINEAR_RESOLUTION)
-        .unwrap_or(1.0)
+        .find(|&s| s > LINEAR_RESOLUTION && s.is_finite())
+        .unwrap_or(1.0);
+    power_of_two(s)
+}
+
+/// The power of two nearest `x > 0` (by ratio).
+pub(crate) fn power_of_two(x: f64) -> f64 {
+    let e = ((x.to_bits() >> 52) & 0x7ff) as i64 - 1023;
+    let below = f64::from_bits(((e + 1023) as u64) << 52);
+    if x >= below * core::f64::consts::SQRT_2 {
+        below * 2.0
+    } else {
+        below
+    }
 }
 
 impl<'a> FaceGeom<'a> {
@@ -194,7 +208,7 @@ mod tests {
         assert_eq!(g.seam(U), Some(0.0));
         assert_eq!(g.seam(V), None);
         assert_eq!(g.collapsed, [[false; 2]; 2]);
-        assert!((g.metric.a - 2.0).abs() <= 1e-15 && g.metric.b == 1.0);
+        assert_eq!((g.metric.a, g.metric.b), (2.0, 1.0));
         // A point just short of a full turn lands on the seam.
         let p = Point3::new(2.0, -1e-10, 1.0);
         let (uv, d) = g.invert(p);
@@ -205,12 +219,20 @@ mod tests {
     }
 
     #[test]
+    fn scales_are_powers_of_two() {
+        assert_eq!(power_of_two(1.0), 1.0);
+        assert_eq!(power_of_two(1.4), 1.0);
+        assert_eq!(power_of_two(1.5), 2.0);
+        assert_eq!(power_of_two(0.3), 0.25);
+        assert_eq!(power_of_two(700.0), 512.0);
+    }
+
+    #[test]
     fn a_sphere_has_poles() {
         let (b, _) = primitive::sphere(OpKey(1), 2.0, &Rigid::IDENTITY).unwrap();
         let g = FaceGeom::new(&b, side(&b));
         assert_eq!(g.collapsed, [[false; 2], [true, true]]);
-        assert!((g.metric.a - 2.0).abs() <= 1e-12, "{:?}", g.metric);
-        assert!((g.metric.b - 2.0).abs() <= 1e-12);
+        assert_eq!((g.metric.a, g.metric.b), (2.0, 2.0));
         let (uv, _) = g.invert(Point3::new(0.0, 0.0, 2.0 + 1e-12));
         assert_eq!(uv.y, FRAC_PI_2);
         assert_eq!(g.pole(uv), Some((V, 1)));
