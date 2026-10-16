@@ -4,7 +4,6 @@
 
 use super::bound::Metric;
 use crate::geom::{Point2, Point3, Surface};
-use crate::math;
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, FaceId, Sense};
 
@@ -150,18 +149,6 @@ impl<'a> FaceGeom<'a> {
             .flat_map(|k| (0..2).map(move |e| (k, e)))
             .find(|&(k, e)| self.collapsed[k][e] && x[k] == self.domain[k][e])
     }
-
-    /// True when parameters within resolution of each other in the scaled
-    /// plane differ by a whole number of periods.
-    pub(crate) fn same_point(&self, a: Point2, b: Point2) -> bool {
-        let wrap = |k: usize, d: f64| match self.periods[k] {
-            Some(p) => d - (d / p).round() * p,
-            None => d,
-        };
-        let du = wrap(U, b.x - a.x) * self.metric.a;
-        let dv = wrap(V, b.y - a.y) * self.metric.b;
-        math::sqrt(du * du + dv * dv) <= LINEAR_RESOLUTION
-    }
 }
 
 /// Which boundary rows of a surface collapse to a point, `[direction][end]`.
@@ -242,13 +229,5 @@ mod tests {
         assert_eq!(g.periods[V], None);
         // The cone runs from its apex at v = -2 to its base at v = 0.
         assert_eq!(g.collapsed, [[false; 2], [true, false]]);
-    }
-
-    #[test]
-    fn same_points_across_the_seam() {
-        let (b, _) = primitive::cylinder(OpKey(1), 1.0, 1.0, &Rigid::IDENTITY).unwrap();
-        let g = FaceGeom::new(&b, side(&b));
-        assert!(g.same_point(Point2::new(0.0, 0.5), Point2::new(TAU, 0.5)));
-        assert!(!g.same_point(Point2::new(0.0, 0.5), Point2::new(TAU, 0.6)));
     }
 }

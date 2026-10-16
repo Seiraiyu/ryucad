@@ -15,6 +15,11 @@ pub enum Error {
     Topology(TopologyError),
     /// A knot vector, control net or weight a NURBS cannot be built from.
     InvalidNurbs(NurbsError),
+    /// Mesh parameters out of range: see [`crate::mesh::MeshParams`].
+    InvalidMeshParams,
+    /// A mesh would have more triangles than its budget allows: the
+    /// estimate, or the count when meshing stopped.
+    MeshTooLarge { triangles: u64 },
 }
 
 /// Why a NURBS constructor refused its input.
@@ -69,6 +74,10 @@ impl fmt::Display for Error {
             Self::NonFinite => f.write_str("non-finite coordinate"),
             Self::Topology(t) => write!(f, "topology: {t}"),
             Self::InvalidNurbs(n) => write!(f, "invalid NURBS: {n}"),
+            Self::InvalidMeshParams => f.write_str("mesh parameters out of range"),
+            Self::MeshTooLarge { triangles } => {
+                write!(f, "mesh too large: {triangles} triangles over budget")
+            }
         }
     }
 }
@@ -131,6 +140,10 @@ mod tests {
     #[test]
     fn displays() {
         assert_eq!(Error::NonFinite.to_string(), "non-finite coordinate");
+        assert_eq!(
+            Error::MeshTooLarge { triangles: 7 }.to_string(),
+            "mesh too large: 7 triangles over budget"
+        );
         let e: Box<dyn std::error::Error> = Box::new(Error::Degenerate);
         assert_eq!(e.to_string(), "degenerate geometry");
         assert_eq!(

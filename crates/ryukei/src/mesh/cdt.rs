@@ -178,6 +178,7 @@ impl Cdt {
 
     /// Where `p` lies, walking from the last triangle made. `None` when it
     /// is outside the rectangle.
+    #[cfg(test)]
     pub(crate) fn locate(&mut self, p: Point2) -> Option<Located> {
         self.locate_from(self.hint, p)
     }
