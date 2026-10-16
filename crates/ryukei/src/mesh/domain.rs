@@ -460,7 +460,7 @@ impl Domain {
 
     /// Pairs two vertices across a seam in direction `k`: they share a
     /// position.
-    fn pair(&mut self, k: usize, a: u32, b: u32) -> Result<(), BadDomain> {
+    pub(crate) fn pair(&mut self, k: usize, a: u32, b: u32) -> Result<(), BadDomain> {
         self.partner[k][a as usize] = b;
         self.partner[k][b as usize] = a;
         self.classes.join(a, b)

@@ -74,6 +74,12 @@ pub(crate) struct Cdt {
     hint: u32,
     /// Counts walk steps, so the walk varies which edge it tries first.
     turn: usize,
+    /// For each triangle, the one it was split from (itself for the first
+    /// two): area only moves between triangles across unfixed edges, so a
+    /// new triangle is on the same side of every fixed edge as its origin.
+    born: Vec<u32>,
+    /// The origin of the triangles being made.
+    origin: u32,
 }
 
 impl Cdt {
@@ -99,6 +105,8 @@ impl Cdt {
             touch: vec![0, 0, 0, 1],
             hint: 0,
             turn: 0,
+            born: vec![0, 1],
+            origin: 0,
         }
     }
 
@@ -124,6 +132,11 @@ impl Cdt {
         self.tris[t as usize].n[i]
     }
 
+    /// The triangle `t` was split from (itself for the first two).
+    pub(crate) fn origin(&self, t: u32) -> u32 {
+        self.born[t as usize]
+    }
+
     /// True when the edge opposite corner `i` is fixed (a rectangle side
     /// or a forced segment).
     pub(crate) fn is_fixed(&self, t: u32, i: usize) -> bool {
@@ -146,6 +159,7 @@ impl Cdt {
         }
         if t as usize == self.tris.len() {
             self.tris.push(tri);
+            self.born.push(self.origin);
         } else {
             self.tris[t as usize] = tri;
         }
@@ -262,6 +276,7 @@ impl Cdt {
             fixed,
         } = self.tris[t as usize].clone();
         let (t1, t2) = (self.tris.len() as u32, self.tris.len() as u32 + 1);
+        self.origin = t;
         self.set(
             t,
             Tri {
@@ -300,6 +315,7 @@ impl Cdt {
         let u = tri.n[i];
         let t2 = self.tris.len() as u32;
         let u2 = if u == NONE { NONE } else { t2 + 1 };
+        self.origin = t;
         // t becomes [a, b, v] and t2 [a, v, c]; across the edge, u becomes
         // [d, c, v] and u2 [d, v, b].
         self.set(
@@ -326,6 +342,7 @@ impl Cdt {
             let d = ut.v[j];
             let (nuc, nub) = (ut.n[next(j)], ut.n[prev(j)]);
             let (fuc, fub) = (ut.fixed[next(j)], ut.fixed[prev(j)]);
+            self.origin = u;
             self.set(
                 u,
                 Tri {
