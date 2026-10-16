@@ -283,7 +283,7 @@ fn param_error(ty: FeatureType, name: &str, at: &str, what: &str) -> Error {
 
 /// A JSON number for `x`: an integer when `x` is one, so `[0, 0, 1]`
 /// stays `[0, 0, 1]`.
-fn number(x: f64) -> Value {
+pub fn number(x: f64) -> Value {
     if x.fract() == 0.0 && x.abs() < 9_007_199_254_740_992.0 {
         json!(x as i64)
     } else {
