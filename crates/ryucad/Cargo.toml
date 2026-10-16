@@ -29,6 +29,9 @@ tempfile = "3"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+widestring = "1"
+
 # musl's allocator is slow under multithreaded allocation, and rebuild runs
 # features in parallel. Kernel results don't depend on the allocator.
 [target.'cfg(target_env = "musl")'.dependencies]

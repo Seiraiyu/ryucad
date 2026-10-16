@@ -719,6 +719,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "widestring",
 ]
 
 [[package]]

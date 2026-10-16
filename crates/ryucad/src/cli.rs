@@ -5,11 +5,12 @@ use clap::{Args, Parser, Subcommand};
 use ryucad::doc::project::find_root;
 use ryucad::error::{Code, Error, Result};
 use ryucad::proto::{PlacementArg, Position, Request, VersionInfo};
-use ryucad::server;
 use ryucad::units::Unit;
+use ryucad::{daemon, server};
 use serde_json::{Map, Value, json};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(
@@ -56,8 +57,21 @@ enum Command {
     },
     /// Report files that aren't canonical, broken, unlisted or unknown.
     CheckFormat,
+    /// Run, query or stop the project's session daemon.
+    #[command(subcommand)]
+    Daemon(DaemonCmd),
     /// Print the ryucad, ryukei and protocol versions.
     Version,
+}
+
+#[derive(Subcommand)]
+enum DaemonCmd {
+    /// Serve the project in the foreground (the CLI starts this itself).
+    Run {
+        /// Exit after this many seconds without a request.
+        #[arg(long, value_name = "SECONDS")]
+        idle_timeout: Option<u64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -228,7 +242,7 @@ impl PositionArgs {
 /// project.
 fn request(cmd: &Command) -> Option<Request> {
     Some(match cmd {
-        Command::Init { .. } | Command::Version => return None,
+        Command::Init { .. } | Command::Version | Command::Daemon(_) => return None,
         Command::Part(PartCmd::Create { part }) => Request::PartCreate { part: part.clone() },
         Command::Part(PartCmd::Delete { part, expect }) => Request::PartDelete {
             part: part.clone(),
@@ -313,6 +327,10 @@ fn run(cli: &Cli) -> Result<Value> {
     match &cli.command {
         Command::Version => Ok(json!(VersionInfo::current())),
         Command::Init { unit } => server::init(&here, *unit),
+        Command::Daemon(DaemonCmd::Run { idle_timeout }) => {
+            let idle = idle_timeout.map_or(daemon::DEFAULT_IDLE, Duration::from_secs);
+            daemon::run(&find_root(&here)?, idle).map(|()| Value::Null)
+        }
         cmd => {
             let req = request(cmd).expect("every other command is a request");
             let root = find_root(&here)?;
