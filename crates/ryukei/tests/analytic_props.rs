@@ -2,7 +2,8 @@
 //! force: no sampled point of the curve or surface is closer than the
 //! closed-form distance, and the closed-form nearest point attains it.
 //! Closed-form derivatives must agree with finite differences, and
-//! principal curvatures with the turning of the normal.
+//! principal curvatures with the turning of the normal. Exact NURBS
+//! conversions must agree with the analytic originals.
 
 use core::f64::consts::TAU;
 use proptest::prelude::*;
@@ -192,6 +193,39 @@ proptest! {
             let normal = |t: f64| -> UnitVector3 { s.normal(u + a * t, v + b * t).unwrap() };
             let turn = (normal(h).get() - normal(-h).get()) / (2.0 * h);
             prop_assert!(agree(turn, d * -kk, 1e-6), "{s:?} k={kk} {turn:?}");
+        }
+    }
+}
+
+proptest! {
+    #[test]
+    fn curve_conversions_agree(c in curve(), t in -10.0f64..10.0) {
+        let Ok((n, r)) = c.to_nurbs([t - 2.0, t + 2.0]) else {
+            // The control polygon of a large circle can leave the size box.
+            return Ok(());
+        };
+        let s = r.to_nurbs(t);
+        prop_assert!((r.from_nurbs(s) - t).abs() <= 1e-13);
+        prop_assert!(n.point(s).distance(c.point(t)) <= EPS, "{c:?} at {t}");
+        let (a, b) = (n.tangent(s).unwrap(), c.tangent(t).unwrap());
+        prop_assert!((a.get() - b.get()).length() <= 1e-9, "{c:?} at {t}");
+    }
+
+    #[test]
+    fn surface_conversions_agree(s in surface(), u in -7.0f64..7.0, v in -1.0f64..1.0) {
+        prop_assume!(clear_of_apex(&s, v));
+        let low = match &s {
+            Surface::Cone(c) => (v - 1.0).max(c.apex_v()),
+            _ => v - 1.0,
+        };
+        let Ok((n, [ru, rv])) = s.to_nurbs([[u - 1.0, u + 1.0], [low, v + 1.0]]) else {
+            return Ok(());
+        };
+        let (a, b) = (ru.to_nurbs(u), rv.to_nurbs(v));
+        prop_assert!(n.point(a, b).distance(s.point(u, v)) <= EPS, "{s:?} ({u}, {v})");
+        if s.principal_curvatures(u, v).is_some() {
+            let (x, y) = (n.normal(a, b).unwrap(), s.normal(u, v).unwrap());
+            prop_assert!((x.get() - y.get()).length() <= 1e-9, "{s:?} ({u}, {v})");
         }
     }
 }

@@ -324,6 +324,64 @@ fn ellipse_section(golden: &mut Golden) {
     }
 }
 
+fn conversion_section(golden: &mut Golden) {
+    let mut s = golden.section("conversion");
+    let mut g = Lcg::new(0x636f_6e76);
+    for _ in 0..64 {
+        let mut c = || g.next_f64(-10.0, 10.0);
+        let (o, z, x) = (
+            Point3::new(c(), c(), c()),
+            Vector3::new(c(), c(), c()),
+            Vector3::new(c(), c(), c()),
+        );
+        let (r, k, a) = (
+            c().abs() + 0.5,
+            (c().abs() + 1.0) / 12.0,
+            (c().abs() + 1.0) / 8.0,
+        );
+        let (t, h) = (c(), c().abs() + 0.1);
+        let f = Frame::new(o, z, x).unwrap();
+        let curves = [
+            Curve::Line(Line::new(o, z).unwrap()),
+            Curve::Circle(Circle::new(f, r).unwrap()),
+            Curve::Ellipse(Ellipse::new(f, r, r * k).unwrap()),
+        ];
+        for cv in curves {
+            let (n, rp) = cv.to_nurbs([t, t + h]).unwrap();
+            for p in n.control_points() {
+                s.f64(p.x);
+                s.f64(p.y);
+                s.f64(p.z);
+            }
+            for &w in n.weights() {
+                s.f64(w);
+            }
+            s.f64(rp.to_nurbs(t));
+            s.f64(rp.from_nurbs(t));
+        }
+        let cone = Cone::new(f, r, a).unwrap();
+        let surfaces = [
+            Surface::Plane(Plane::new(f)),
+            Surface::Cylinder(Cylinder::new(f, r).unwrap()),
+            Surface::Cone(cone),
+            Surface::Sphere(Sphere::new(f, r).unwrap()),
+            Surface::Torus(Torus::new(f, r, r * k).unwrap()),
+        ];
+        let v0 = cone.apex_v().max(t);
+        for sf in surfaces {
+            let (n, _) = sf.to_nurbs([[t, t + h], [v0, v0 + h]]).unwrap();
+            for p in n.control_points() {
+                s.f64(p.x);
+                s.f64(p.y);
+                s.f64(p.z);
+            }
+            for &w in n.weights() {
+                s.f64(w);
+            }
+        }
+    }
+}
+
 fn primitives_section(golden: &mut Golden) {
     let mut s = golden.section("primitives");
     let axis = Vector3::new(1.0, -2.0, 0.5).normalize().unwrap();
@@ -400,6 +458,7 @@ fn determinism() {
     analytic_section(&mut golden);
     derivatives_section(&mut golden);
     ellipse_section(&mut golden);
+    conversion_section(&mut golden);
     primitives_section(&mut golden);
     euler_section(&mut golden);
     golden.finish();
