@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ryucad is CAD built for AI agents to drive, not primarily for humans clicking in a GUI. FreeCAD was rejected because it performs poorly on large assemblies, and its kernel, OCCT, is a main reason. This project builds its own kernel, **ryukei**, and the long-term target is Parasolid-level capability.
 
-The project is in its early stages. Roadmap phases 0 (foundations: deterministic math, the tolerance model, exact predicates, interval arithmetic, the test harness), 1 (topology core: flat-array B-rep bodies, Euler operators, the validity checker, stable names, the five primitives) and 2 (geometry: rational NURBS, the ellipse, pcurves, derivatives, global projection) are done. Tessellation (phase 3) comes next; see `docs/roadmap.md`.
+The project is in its early stages. Roadmap phases 0 (foundations: deterministic math, the tolerance model, exact predicates, interval arithmetic, the test harness), 1 (topology core: flat-array B-rep bodies, Euler operators, the validity checker, stable names, the five primitives) and 2 (geometry: rational NURBS, the ellipse, pcurves, derivatives, global projection) are done. Tessellation (phase 3) comes next; see design 14 (ryukei roadmap) in the Coxswain planning project `ryucad-ryukei`.
+
+Above the kernel sit ryucad, the application (feature files in Git, the agent CLI, a live viewer humans watch but don't model in, assemblies at scale), and ryupdm, product data management (revisions, releases, where-used, BOM, hosted review; PDM only, not PLM). ryupdm is the likely business; ryukei and ryucad may be open sourced. Their roadmaps are designs 20 (ryucad) and 21 (ryupdm), design 23 lines up all three, and design 22 is the business plan.
 
 ## Commands
 
@@ -40,7 +42,9 @@ The product targets Windows, macOS, and Linux natively, not just WSL. CI (`.gith
 - `crates/ryukei-testkit`: test-only helpers (exact references, seeded inputs, golden hashes, Euler operator sequences from bytes, random NURBS). Never a runtime dependency.
 - `crates/ryukei-bench`: divan benchmarks; OCCT comparisons go behind its `occt` feature.
 - `fuzz/`: cargo-fuzz targets, outside the workspace (nightly only).
-- `docs/`: design documents. `docs/roadmap.md` holds the phased ryukei plan.
+- Design documents, roadmaps and plans live only in the Coxswain planning project `ryucad-ryukei` (`cox doc list`), never as markdown in the repo, so there is one copy of each.
+
+ryupdm code will live in this monorepo too; the repo may be split later if parts are open sourced.
 
 The boundary between the two crates is deliberate. ryukei works on single bodies (geometry, topology, booleans, blends, tessellation) and must not depend on documents, assemblies, or agents. Large-assembly performance (instancing, lazy loading, caching, incremental recompute) and the agent interface live in ryucad. Keep both in this repo until the kernel API settles.
 
@@ -85,9 +89,14 @@ The design is document 17 in the Coxswain planning project `ryucad-ryukei`.
 - **Projection.** `project` returns a point within `LINEAR_RESOLUTION` of the true global minimum, and among minima that close, the lowest parameter. The search works on the Bernstein coefficients of `(S - p)·S'` per Bézier piece: one sign means no stationary point, one sign change means exactly one (curves); surfaces add an interval Newton step and a depth limit, then Newton's method. Domain boundaries, kinks and creases (knots of multiplicity `degree`) are searched as curves, and every candidate must be a genuine local minimum. Degenerate splines (folds, collapsed patches, poles) are where this breaks: the property tests and the `nurbs` fuzz target pin the cases found so far.
 - **Bodies.** Euler operators, the checker, `compact` and the dump accept every variant. The checker measures distances through `project`, bounds NURBS by their hulls, requires edge intervals inside a clamped curve's domain, and lets a closed edge lie on a clamped curve whose ends meet. A face with no loops is still only allowed on an analytic sphere or torus.
 
+## Persistence (decided 2026-10-16)
+
+A ryucad model is a folder of canonical text feature files in a Git repo, one per feature or object, rebuilt deterministically by ryukei. Git provides history, branches and merges; ryucad supplies CAD-aware diff and merge drivers, and features reference topology by stable name. Derived data (bodies, meshes, renders) is a cache, never committed. ryupdm builds on the same repos rather than a second store. This follows the freecad-spike (github.com/Seiraiyu/freecad-spike) GO verdict, without FreeCAD.
+
 ## Open decisions
 
 Don't assume an answer to these. Ask the user, or record the decision here once it's made:
 
-- How agents talk to ryucad (CLI, library API, RPC, MCP, etc.) and how models are persisted.
+- How agents talk to ryucad. The lean is a CLI with JSON output backed by a per-project session daemon, with MCP as a thin adapter later; not final.
+- Which parts are open source and which are paid.
 - License.
