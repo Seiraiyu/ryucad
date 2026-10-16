@@ -2,6 +2,7 @@
 //! plus the analytic curves and surfaces that sit in a [`Frame`].
 
 mod bbox;
+mod bound2;
 mod curve;
 mod curve2;
 mod ellipse;
@@ -15,6 +16,7 @@ mod transform;
 mod vector;
 
 pub use bbox::{Box2, Box3};
+pub use bound2::{CurveBound, SurfaceBound};
 pub use curve::{Circle, Curve, Line};
 pub use curve2::{Circle2, Curve2, Ellipse2, Frame2, Line2};
 pub use ellipse::Ellipse;
