@@ -193,7 +193,7 @@ impl Body {
 
 #[cfg(test)]
 mod tests {
-    use crate::geom::{Cone, Frame, Sphere, Surface, Torus};
+    use crate::geom::{Circle, Cone, Curve, Ellipse, Frame, Sphere, Surface, Torus};
     use crate::topo::fixture::tetrahedron;
 
     #[test]
@@ -233,6 +233,29 @@ mod tests {
         assert!(b.dump().contains(" name="));
         assert!(!b.dump_unnamed().contains("name="));
         assert_eq!(b.dump_unnamed().lines().count(), b.dump().lines().count());
+    }
+
+    #[test]
+    fn every_curve_kind_dumps() {
+        let mut b = tetrahedron();
+        let f = Frame::WORLD;
+        let before = b.dump().lines().filter(|l| l.starts_with("curve ")).count();
+        b.add_curve(Curve::Circle(Circle::new(f, 2.0).unwrap()));
+        b.add_curve(Curve::Ellipse(Ellipse::new(f, 3.0, 2.0).unwrap()));
+        let d = b.dump();
+        assert!(d.contains(&format!(
+            "curve {} circle origin=0000000000000000,0000000000000000,0000000000000000 \
+             x=3ff0000000000000,0000000000000000,0000000000000000 \
+             z=0000000000000000,0000000000000000,3ff0000000000000 r=4000000000000000",
+            before
+        )));
+        assert!(d.contains(&format!(
+            "curve {} ellipse origin=0000000000000000,0000000000000000,0000000000000000 \
+             x=3ff0000000000000,0000000000000000,0000000000000000 \
+             z=0000000000000000,0000000000000000,3ff0000000000000 \
+             major=4008000000000000 minor=4000000000000000",
+            before + 1
+        )));
     }
 
     #[test]

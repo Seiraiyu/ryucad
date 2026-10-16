@@ -7,8 +7,8 @@
 use core::f64::consts::TAU;
 use proptest::prelude::*;
 use ryukei::geom::{
-    Circle, Cone, Curve, Cylinder, Frame, Line, Plane, Point3, Sphere, Surface, Torus, UnitVector3,
-    Vector3,
+    Circle, Cone, Curve, Cylinder, Ellipse, Frame, Line, Plane, Point3, Sphere, Surface, Torus,
+    UnitVector3, Vector3,
 };
 
 /// Rounding allowance at these sizes (coordinates up to ~30 m).
@@ -39,6 +39,8 @@ fn curve() -> impl Strategy<Value = Curve> {
             Line::new(o, d.to_vector()).ok().map(Curve::Line)
         }),
         (frame(), radius()).prop_map(|(f, r)| Curve::Circle(Circle::new(f, r).unwrap())),
+        (frame(), radius(), 0.05f64..=1.0)
+            .prop_map(|(f, a, k)| Curve::Ellipse(Ellipse::new(f, a, a * k).unwrap())),
     ]
 }
 

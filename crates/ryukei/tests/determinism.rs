@@ -4,8 +4,8 @@
 //! the diff like any other change.
 
 use ryukei::geom::{
-    Affine, Box3, Circle, Cone, Curve, Cylinder, Frame, Line, Plane, Point2, Point3, Rigid, Sphere,
-    Surface, Torus, Vector3,
+    Affine, Box3, Circle, Cone, Curve, Cylinder, Ellipse, Frame, Line, Plane, Point2, Point3,
+    Rigid, Sphere, Surface, Torus, Vector3,
 };
 use ryukei::interval::Interval;
 use ryukei::math;
@@ -289,6 +289,41 @@ fn derivatives_section(golden: &mut Golden) {
     }
 }
 
+fn ellipse_section(golden: &mut Golden) {
+    let mut s = golden.section("ellipse");
+    let mut g = Lcg::new(0x656c_6c70);
+    for _ in 0..512 {
+        let mut c = || g.next_f64(-10.0, 10.0);
+        let (o, z, x) = (
+            Point3::new(c(), c(), c()),
+            Vector3::new(c(), c(), c()),
+            Vector3::new(c(), c(), c()),
+        );
+        let a = c().abs() + 0.5;
+        let k = (c().abs() + 0.1) / 10.1;
+        let e = Curve::Ellipse(Ellipse::new(Frame::new(o, z, x).unwrap(), a, a * k).unwrap());
+        // Query points near the centre, where the solver works hardest.
+        let p = o + Vector3::new(c(), c(), c()) * (a / 10.0);
+        let t = c();
+        let ev = e.eval(t);
+        let foot = e.project(p);
+        let b = e.bounds([0.0, 1.0]);
+        for q in [ev.point, foot.point, b.min(), b.max()] {
+            s.f64(q.x);
+            s.f64(q.y);
+            s.f64(q.z);
+        }
+        for w in [ev.d1, ev.d2] {
+            s.f64(w.x);
+            s.f64(w.y);
+            s.f64(w.z);
+        }
+        s.f64(foot.param);
+        s.f64(foot.distance);
+        s.f64(e.curvature(t).unwrap());
+    }
+}
+
 fn primitives_section(golden: &mut Golden) {
     let mut s = golden.section("primitives");
     let axis = Vector3::new(1.0, -2.0, 0.5).normalize().unwrap();
@@ -364,6 +399,7 @@ fn determinism() {
     interval_section(&mut golden);
     analytic_section(&mut golden);
     derivatives_section(&mut golden);
+    ellipse_section(&mut golden);
     primitives_section(&mut golden);
     euler_section(&mut golden);
     golden.finish();
