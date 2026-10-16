@@ -2,8 +2,16 @@
 
 use super::KnotVector;
 use super::eval::check_weights;
+use super::refine::{Hom, check_split, clamp, refine_flat, split_at};
 use crate::geom::{Point3, PrincipalCurvatures, SurfaceEval, UnitVector3, Vector3};
 use crate::{Error, NurbsError};
+
+/// One of a surface's two parameter directions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    U,
+    V,
+}
 
 /// A rational B-spline surface, tensor product of a `u` and a `v` knot
 /// vector. Control points are row-major: point `(i, j)` (the `i`-th along
@@ -175,6 +183,95 @@ impl NurbsSurface {
     pub fn principal_curvatures(&self, u: f64, v: f64) -> Option<PrincipalCurvatures> {
         let e = self.unit_eval(u, v);
         e.principal_curvatures(e.normal()?)
+    }
+
+    /// The control lines running along `dir`: for `U`, column `j` for each
+    /// `j`; for `V`, row `i` for each `i`.
+    fn lines(&self, dir: Direction) -> Vec<Vec<Hom<Vector3>>> {
+        let [nu, nv] = self.counts();
+        let at = |i: usize, j: usize| Hom {
+            p: self.points[i * nv + j],
+            w: self.weights[i * nv + j],
+        };
+        match dir {
+            Direction::U => (0..nv)
+                .map(|j| (0..nu).map(|i| at(i, j)).collect())
+                .collect(),
+            Direction::V => (0..nu)
+                .map(|i| (0..nv).map(|j| at(i, j)).collect())
+                .collect(),
+        }
+    }
+
+    /// A surface from new lines along `dir` with clamped flat knots `flat`;
+    /// the other direction keeps its knots.
+    fn with_lines(&self, dir: Direction, flat: &[f64], lines: &[Vec<Hom<Vector3>>]) -> Self {
+        let d = dir as usize;
+        let mut knots = self.knots.clone();
+        knots[d] = KnotVector::clamped_flat(self.knots[d].degree(), flat);
+        let (outer, inner) = (lines.len(), lines[0].len());
+        let mut hom = Vec::with_capacity(outer * inner);
+        match dir {
+            Direction::U => {
+                for i in 0..inner {
+                    hom.extend(lines.iter().map(|line| line[i]));
+                }
+            }
+            Direction::V => hom.extend(lines.iter().flatten().copied()),
+        }
+        Self {
+            knots,
+            points: hom.iter().map(|h| h.p).collect(),
+            weights: hom.iter().map(|h| h.w).collect(),
+        }
+    }
+
+    /// The same surface with clamped knots in both directions, over one
+    /// period where it was periodic.
+    pub fn to_clamped(&self) -> Self {
+        let mut s = self.clone();
+        for dir in [Direction::U, Direction::V] {
+            let knots = &s.knots[dir as usize];
+            if knots.is_periodic() {
+                let lines: Vec<_> = s.lines(dir).iter().map(|l| clamp(knots, l)).collect();
+                let new: Vec<_> = lines.iter().map(|(_, h)| h.clone()).collect();
+                s = s.with_lines(dir, &lines[0].0, &new);
+            }
+        }
+        s
+    }
+
+    /// The same surface with each of `knots` inserted once along `dir`,
+    /// clamped in that direction. Fails like [`super::NurbsCurve::refine`].
+    pub fn refine(&self, dir: Direction, knots: &[f64]) -> Result<Self, Error> {
+        let kv = &self.knots[dir as usize];
+        let lines = self
+            .lines(dir)
+            .iter()
+            .map(|l| refine_flat(kv, l, knots))
+            .collect::<Result<Vec<_>, _>>()?;
+        let new: Vec<_> = lines.iter().map(|(_, h)| h.clone()).collect();
+        Ok(self.with_lines(dir, &lines[0].0, &new))
+    }
+
+    /// The surface cut along `dir` at `t` into two pieces, clamped in that
+    /// direction. Fails like [`super::NurbsCurve::split`].
+    pub fn split(&self, dir: Direction, t: f64) -> Result<(Self, Self), Error> {
+        let kv = &self.knots[dir as usize];
+        check_split(t, kv.domain())?;
+        let halves: Vec<_> = self
+            .lines(dir)
+            .iter()
+            .map(|l| {
+                let (flat, hom) = clamp(kv, l);
+                split_at(&flat, kv.degree(), &hom, t)
+            })
+            .collect();
+        let half = |k: usize| {
+            let lines: Vec<_> = halves.iter().map(|h| h[k].1.clone()).collect();
+            self.with_lines(dir, &halves[0][k].0, &lines)
+        };
+        Ok((half(0), half(1)))
     }
 }
 
@@ -373,6 +470,77 @@ mod tests {
         ];
         let s = NurbsSurface::new([k.clone(), k], points, None).unwrap();
         assert_eq!(s.normal(5e8, 5e8), Some(crate::geom::UnitVector3::Z));
+    }
+
+    fn wavy() -> NurbsSurface {
+        let ku = KnotVector::clamped(3, &[0.0, 0.5, 2.0], &[4, 1, 4]).unwrap();
+        let kv = KnotVector::periodic(2, &[0.0, 1.0, 1.5, 3.0], &[1, 2, 1, 1]).unwrap();
+        let (nu, nv) = (ku.control_count(), kv.control_count());
+        let mut points = Vec::new();
+        let mut weights = Vec::new();
+        for i in 0..nu {
+            for j in 0..nv {
+                let (x, y) = (i as f64, j as f64);
+                points.push(Point3::new(x, y, ((x * 1.7 + y * 0.9) % 2.0) - 1.0));
+                weights.push(0.5 + ((i * 7 + j * 3) % 5) as f64 * 0.3);
+            }
+        }
+        NurbsSurface::new([ku, kv], points, Some(weights)).unwrap()
+    }
+
+    /// The two surfaces agree on a 21 × 21 grid over `[u0, u1] × [v0, v1]`.
+    fn same_shape(a: &NurbsSurface, b: &NurbsSurface, [[u0, u1], [v0, v1]]: [[f64; 2]; 2]) -> bool {
+        (0..=20).all(|i| {
+            (0..=20).all(|j| {
+                let u = u0 + (u1 - u0) * f64::from(i) / 20.0;
+                let v = v0 + (v1 - v0) * f64::from(j) / 20.0;
+                a.point(u, v).distance(b.point(u, v)) <= 1e-14
+            })
+        })
+    }
+
+    #[test]
+    fn clamping_keeps_the_shape() {
+        let s = wavy();
+        let c = s.to_clamped();
+        assert_eq!(s.periods(), (None, Some(3.0)));
+        assert_eq!(c.periods(), (None, None));
+        assert_eq!(c.domain(), s.domain());
+        assert!(same_shape(&s, &c, s.domain()));
+    }
+
+    #[test]
+    fn refining_in_either_direction_keeps_the_shape() {
+        let s = wavy();
+        let u = s.refine(Direction::U, &[0.25, 1.0, 1.0]).unwrap();
+        assert_eq!(u.knots()[0].knots(), [0.0, 0.25, 0.5, 1.0, 2.0]);
+        assert_eq!(u.counts(), [s.counts()[0] + 3, s.counts()[1]]);
+        assert_eq!(u.periods(), s.periods());
+        assert!(same_shape(&s, &u, s.domain()));
+        let v = s.refine(Direction::V, &[2.0]).unwrap();
+        assert_eq!(v.periods(), (None, None));
+        assert!(same_shape(&s, &v, s.domain()));
+        assert_eq!(
+            s.refine(Direction::V, &[3.0]),
+            Err(Error::InvalidNurbs(NurbsError::KnotOrder))
+        );
+    }
+
+    #[test]
+    fn splitting_in_either_direction() {
+        let s = wavy();
+        let (a, b) = s.split(Direction::U, 0.7).unwrap();
+        assert_eq!(a.domain(), [[0.0, 0.7], [0.0, 3.0]]);
+        assert_eq!(b.domain(), [[0.7, 2.0], [0.0, 3.0]]);
+        assert!(same_shape(&s, &a, a.domain()));
+        assert!(same_shape(&s, &b, b.domain()));
+        let (a, b) = s.split(Direction::V, 1.5).unwrap();
+        assert!(same_shape(&s, &a, a.domain()));
+        assert!(same_shape(&s, &b, b.domain()));
+        assert_eq!(
+            s.split(Direction::U, 2.0),
+            Err(Error::InvalidNurbs(NurbsError::ShortDomain))
+        );
     }
 
     #[test]
