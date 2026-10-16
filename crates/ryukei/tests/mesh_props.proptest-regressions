@@ -1,0 +1,12 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0db11ac22a53fa78c92d27b5e1b0c689cef668793ae834335e6a0c559ebeb8d0 # shrinks to kind = 2, a = 0.2, b = 0.6165169156450687, chord = 0.0012233341251085103, angle = 0.2, at = Rigid { rot: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], trans: Vector3 { x: 7.3701617836420095, y: -3.6850808918210047, z: 2.4567205945473365 } }
+cc 583170a9b7e28befac34669a5828b5f19c7c4c157053caa0fd18777bd010a2d9 # shrinks to kind = 2, a = 0.9493599719589272, b = 0.3, chord = 0.005, at = Rigid { rot: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], trans: Vector3 { x: 0.0, y: 0.0, z: 0.0 } }
+cc 16a9b63668324265b66770c0f2144cc3421c7bd59550cb23710a1f50cf312cbb # shrinks to kind = 4, a = 0.5363976966831382, b = 0.2, chord = 0.0066168916384562225, angle = 0.2, at = Rigid { rot: [[0.583997092203393, 0.7650198898327949, 0.27146263915721486], [-0.8066069620434662, 0.5844886189933128, 0.08808100277755922], [-0.09128310402803007, -0.27040270417935636, 0.9584100231589294]], trans: Vector3 { x: 0.0, y: 0.0, z: 0.0 } }
+cc e072f271bd50b8028659af352fe253642401bd74297950f139e25a8266d506dd # shrinks to kind = 5, a = 0.2, b = 1.906142550245089, chord = 0.001, angle = 0.2, at = Rigid { rot: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], trans: Vector3 { x: 0.0, y: 0.0, z: 0.0 } }
+cc 6a3f0ec15eb2c5220af779cd39754ce28c5a1255e1e17470b7d51603c0a677e8 # shrinks to kind = 4, a = 0.2, b = 0.2, chord = 0.019020361073434904, angle = 0.8177579534636941, at = Rigid { rot: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], trans: Vector3 { x: 0.0, y: 0.0, z: 0.0 } }
+cc 503414441c5d6181bcf2298783a38a327e64539f8b7f6f22f344d3c0d41b84f8 # shrinks to kind = 2, a = 0.2, b = 0.2, chord = 0.018268271150115943, angle = 0.2, at = Rigid { rot: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], trans: Vector3 { x: 0.0, y: 0.0, z: 0.0 } }

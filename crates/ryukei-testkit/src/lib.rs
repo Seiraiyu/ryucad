@@ -5,11 +5,13 @@
 //! - [`Golden`]: bit-exact output hashing checked against committed hashes.
 //! - [`euler_script`]: Euler operator sequences played from bytes.
 //! - [`nurbs`]: seeded random NURBS curves and surfaces.
+//! - [`mesh`]: a NURBS-topped block, and measures of meshes.
 
 pub mod euler_script;
 pub mod exact;
 mod golden;
 mod lcg;
+pub mod mesh;
 pub mod nurbs;
 
 pub use golden::Golden;
