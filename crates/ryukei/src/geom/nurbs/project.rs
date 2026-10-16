@@ -174,6 +174,18 @@ fn curve_poly<V: Coords>(pts: &[Hom<V>], p: V) -> (Vec<f64>, f64) {
     (mul_dot(&a, &b), ZERO * size * big_da.max(big_dw))
 }
 
+/// The knots where a spline may have a kink: interior knots of
+/// multiplicity `degree` and, on a periodic spline, the seam if its
+/// multiplicity is `degree`.
+pub(crate) fn creases(knots: &KnotVector) -> Vec<f64> {
+    let (k, m, p) = (knots.knots(), knots.mults(), knots.degree());
+    let r = k.len() - 1;
+    let seam = (knots.is_periodic() && m[0] == p).then_some(k[0]);
+    seam.into_iter()
+        .chain((1..r).filter(|&i| m[i] == p).map(|i| k[i]))
+        .collect()
+}
+
 /// A periodic parameter in `[t0, t1)`: unchanged when it already is, so a
 /// knot stays bit for bit itself. Clamped parameters are unchanged.
 pub(crate) fn in_period(knots: &KnotVector, t: f64) -> f64 {

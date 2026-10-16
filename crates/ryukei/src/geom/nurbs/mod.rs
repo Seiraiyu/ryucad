@@ -8,6 +8,7 @@ mod curve;
 mod eval;
 mod knots;
 mod project;
+mod project_surface;
 mod refine;
 mod surface;
 

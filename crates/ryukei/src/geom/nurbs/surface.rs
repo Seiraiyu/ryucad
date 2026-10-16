@@ -3,8 +3,11 @@
 use super::KnotVector;
 use super::bezier::{BezierPatch, patches};
 use super::eval::check_weights;
+use super::project::nearest;
 use super::refine::{Hom, check_split, clamp, refine_flat, split_at};
-use crate::geom::{Box3, Point3, PrincipalCurvatures, Rigid, SurfaceEval, UnitVector3, Vector3};
+use crate::geom::{
+    Box3, Point3, PrincipalCurvatures, Projection, Rigid, SurfaceEval, UnitVector3, Vector3,
+};
 use crate::{Error, NurbsError};
 use std::sync::OnceLock;
 
@@ -243,16 +246,27 @@ impl NurbsSurface {
     /// The same surface with clamped knots in both directions, over one
     /// period where it was periodic.
     pub fn to_clamped(&self) -> Self {
-        let mut s = self.clone();
-        for dir in [Direction::U, Direction::V] {
-            let knots = &s.knots[dir as usize];
-            if knots.is_periodic() {
-                let lines: Vec<_> = s.lines(dir).iter().map(|l| clamp(knots, l)).collect();
-                let new: Vec<_> = lines.iter().map(|(_, h)| h.clone()).collect();
-                s = s.with_lines(dir, &lines[0].0, &new);
-            }
+        self.clamped_along(Direction::U).clamped_along(Direction::V)
+    }
+
+    /// The same surface with clamped knots along `dir` only.
+    pub(crate) fn clamped_along(&self, dir: Direction) -> Self {
+        let knots = &self.knots[dir as usize];
+        if !knots.is_periodic() {
+            return self.clone();
         }
-        s
+        let lines: Vec<_> = self.lines(dir).iter().map(|l| clamp(knots, l)).collect();
+        let new: Vec<_> = lines.iter().map(|(_, h)| h.clone()).collect();
+        self.with_lines(dir, &lines[0].0, &new)
+    }
+
+    /// Control point `(i, j)` with its weight.
+    pub(crate) fn hom(&self, i: usize, j: usize) -> Hom<Vector3> {
+        let k = i * self.counts()[1] + j;
+        Hom {
+            p: self.points[k],
+            w: self.weights[k],
+        }
     }
 
     /// The same surface with each of `knots` inserted once along `dir`,
@@ -301,6 +315,41 @@ impl NurbsSurface {
             weights: self.weights.clone(),
             patches: OnceLock::new(),
         }
+    }
+
+    /// The nearest point of the surface to `p`: within
+    /// [`crate::tol::LINEAR_RESOLUTION`] of the true global minimum. Of
+    /// minima that close to each other the lowest `(u, v)` wins; periodic
+    /// parameters are in `[start, start + period)`.
+    pub fn project(&self, p: Point3) -> Projection<(f64, f64), Point3> {
+        let feet = self.minima(p.to_vector(), true);
+        let (param, v, distance) = nearest(&feet);
+        Projection {
+            param,
+            point: Point3::ORIGIN + v,
+            distance,
+        }
+    }
+
+    /// The distance from `p` to the surface: [`NurbsSurface::project`]'s.
+    pub fn distance(&self, p: Point3) -> f64 {
+        self.project(p).distance
+    }
+
+    /// Every local minimum of the distance from `p`, sorted by `(u, v)`:
+    /// interior stationary points that are minima, and points of the
+    /// clamped boundary where moving inward doesn't bring the surface
+    /// closer. Where the distance is constant along a direction over a
+    /// whole Bézier patch, one edge of the patch stands for it.
+    pub fn local_minima(&self, p: Point3) -> Vec<Projection<(f64, f64), Point3>> {
+        self.minima(p.to_vector(), false)
+            .into_iter()
+            .map(|(param, v, distance)| Projection {
+                param,
+                point: Point3::ORIGIN + v,
+                distance,
+            })
+            .collect()
     }
 
     /// The Bézier patches, row-major over the spans, built once.
