@@ -46,6 +46,10 @@ pub enum Code {
     Daemon,
     /// A bug: a panic or a broken invariant.
     Internal,
+    /// A request that needs the daemon's live session, run without one.
+    NoLiveSession,
+    /// "The human" was meant, but several are attached.
+    AmbiguousParticipant,
 }
 
 impl Code {
@@ -122,6 +126,8 @@ mod tests {
         assert_eq!(Code::ProjectNotFound.exit_code(), 3);
         assert_eq!(Code::FormatTooNew.exit_code(), 3);
         assert_eq!(Code::Internal.exit_code(), 4);
+        assert_eq!(Code::NoLiveSession.exit_code(), 1);
+        assert_eq!(Code::AmbiguousParticipant.exit_code(), 1);
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub mod doc;
 pub mod endpoint;
 pub mod error;
 pub mod inspect;
+pub mod live;
 pub mod proto;
 pub mod rebuild;
 pub mod server;
