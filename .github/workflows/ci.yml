@@ -95,6 +95,15 @@ jobs:
       - run: cargo build --locked --release -p ryucad
       - if: runner.os == 'Linux'
         run: shellcheck install.sh scripts/test-install.sh scripts/smoke.sh
+      - if: runner.os == 'Linux'
+        name: the desktop entry and MIME type the installer registers
+        run: |
+          sudo apt-get update && sudo apt-get install -y desktop-file-utils libxml2-utils
+          desktop-file-validate packaging/linux/ryucad.desktop
+          xmllint --noout packaging/linux/ryucad.xml
+      - if: runner.os == 'macOS'
+        name: the launcher the installer compiles
+        run: osacompile -o "$RUNNER_TEMP/ryucad.app" packaging/macos/ryucad.applescript
       - name: smoke test
         shell: bash
         run: sh scripts/smoke.sh target/release/ryucad
