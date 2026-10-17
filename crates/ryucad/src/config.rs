@@ -246,7 +246,7 @@ impl Preferences {
 
 /// The `values` of a preferences file, keeping only known keys with valid
 /// values.
-fn parse(text: &str) -> core::result::Result<Map<String, Value>, String> {
+pub fn parse(text: &str) -> core::result::Result<Map<String, Value>, String> {
     let v = canonical::parse(text).map_err(|e| e.message)?;
     if v["kind"] != KIND {
         return Err(format!("not a {KIND} file"));

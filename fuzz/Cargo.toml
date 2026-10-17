@@ -54,3 +54,17 @@ path = "fuzz_targets/feature.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "mesh_wire"
+path = "fuzz_targets/mesh_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "preferences"
+path = "fuzz_targets/preferences.rs"
+test = false
+doc = false
+bench = false
