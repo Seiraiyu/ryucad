@@ -227,9 +227,17 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         participant: Option<String>,
     },
-    /// Sets the caller's own camera.
+    /// Sets the caller's own camera: explicitly, or from a standard `view`
+    /// and/or framing the entities in `fit` (the whole model when empty).
     #[serde(rename = "camera.set")]
-    CameraSet { camera: CameraArg },
+    CameraSet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        camera: Option<CameraArg>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fit: Vec<String>,
+    },
     /// Highlights entities for everyone to see, replacing the caller's
     /// highlight of the same style and label.
     #[serde(rename = "highlight.set")]

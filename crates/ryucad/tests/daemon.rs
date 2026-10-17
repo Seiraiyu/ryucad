@@ -622,3 +622,26 @@ fn an_agent_waits_for_the_human_to_select() {
     drop(human);
     cli(&f, &["daemon", "stop"]);
 }
+
+#[test]
+fn an_agent_frames_a_face_for_the_human() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    cli(
+        &f,
+        &[
+            "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+            "--param", "z=10",
+        ],
+    );
+    let body = cli(&f, &["inspect", "p", "b"])["result"]["bodies"][0].clone();
+    let face = format!("p/b/{}", body["faces"][0]["name"].as_str().unwrap());
+    let r = cli(&f, &["camera", "--view", "iso"]);
+    let c = &r["result"]["camera"];
+    assert_eq!(c["target"], serde_json::json!([0.005, 0.005, 0.005]));
+    let r = cli(&f, &["camera", "--fit", &face]);
+    assert_eq!(r["ok"], true, "{r}");
+    let r = cli(&f, &["camera", "--view", "sideways"]);
+    assert_eq!(r["error"]["code"], "invalid_param");
+    cli(&f, &["daemon", "stop"]);
+}

@@ -15,7 +15,7 @@ use crate::proto::{Answer, PlacementArg, Position, Request, Transfer, VersionInf
 use crate::rebuild;
 use crate::session::Session;
 use crate::units::{Quantity, Unit};
-use crate::view::Camera;
+use crate::view::{Camera, DEFAULT_PROJECTION, StandardView};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::fs;
@@ -242,10 +242,22 @@ fn dispatch(
                 None => json!({"participant": null, "camera": null}),
             })
         }
-        Request::CameraSet { camera } => {
+        Request::CameraSet { camera, view, fit } => {
             let live = live.ok_or_else(|| live::no_live_session("camera.set"))?;
-            let camera: Camera = camera.resolve(session.project().manifest.default_unit)?;
             let id = live.caller(me);
+            let camera: Camera = match camera {
+                Some(_) if view.is_some() || !fit.is_empty() => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        "give a camera, or a view and/or entities to fit, not both",
+                    ));
+                }
+                Some(c) => c.resolve(session.project().manifest.default_unit)?,
+                None => {
+                    let current = live.get(&id)?.camera.clone();
+                    framed(session, current.as_ref(), view.as_deref(), &fit)?
+                }
+            };
             live.get_mut(&id)?.camera = Some(camera.clone());
             Ok(json!({"participant": id, "camera": camera}))
         }
@@ -894,6 +906,85 @@ pub fn meshes(
             (id, r)
         })
         .collect())
+}
+
+/// The box around the given entities, or the whole model when there are
+/// none, from coarse display meshes.
+pub fn model_box(
+    session: &mut Session,
+    refs: &[EntityRef],
+) -> Result<Option<([f64; 3], [f64; 3])>> {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    let mut grow = |p: &ryukei::geom::Point3| {
+        for (k, x) in [p.x, p.y, p.z].into_iter().enumerate() {
+            lo[k] = lo[k].min(x);
+            hi[k] = hi[k].max(x);
+        }
+    };
+    let coarse = mesh::Quality::Coarse;
+    if refs.is_empty() {
+        let parts: Vec<Id> = session.project().parts.keys().cloned().collect();
+        for part in parts {
+            for (_, m) in meshes(session, &part, None, coarse)? {
+                if let Ok(Ok(mesh)) = m.as_ref().map(|m| m.mesh.mesh.as_ref()) {
+                    mesh.positions.iter().for_each(&mut grow);
+                }
+            }
+        }
+    }
+    for r in refs {
+        for (_, m) in meshes(session, &r.part, Some(&r.feature), coarse)? {
+            let Ok(m) = m else { continue };
+            let Ok(mesh) = &m.mesh.mesh else { continue };
+            let body = &m.body;
+            let named = |n: String| n == r.name;
+            for f in &mesh.faces {
+                if named(body.face(f.face).expect("live").name.to_string()) {
+                    for c in &mesh.corners[f.corners.start as usize..f.corners.end as usize] {
+                        grow(&mesh.positions[c.position as usize]);
+                    }
+                }
+            }
+            for e in &mesh.edges {
+                if named(body.edge(e.edge).expect("live").name.to_string()) {
+                    e.positions
+                        .iter()
+                        .for_each(|p| grow(&mesh.positions[*p as usize]));
+                }
+            }
+            for (i, v) in body.vertices().enumerate() {
+                if named(body.vertex(v).expect("live").name.to_string()) {
+                    grow(&mesh.positions[i]);
+                }
+            }
+        }
+    }
+    Ok((lo[0] <= hi[0]).then_some((lo, hi)))
+}
+
+/// A camera from a standard view and/or framing entities. With no view,
+/// it keeps `current`'s direction (iso when there is none).
+fn framed(
+    session: &mut Session,
+    current: Option<&Camera>,
+    view: Option<&str>,
+    fit: &[String],
+) -> Result<Camera> {
+    let view = view.map(StandardView::parse).transpose()?;
+    let refs = entity::parse_all(session, fit)?;
+    let Some((lo, hi)) = model_box(session, &refs)? else {
+        return Err(Error::new(Code::InvalidParam, "there is nothing to frame"));
+    };
+    Ok(match (view, current) {
+        (None, Some(c)) => crate::view::refit(c, lo, hi),
+        (v, c) => crate::view::frame(
+            lo,
+            hi,
+            v.unwrap_or(StandardView::Iso),
+            c.map_or(DEFAULT_PROJECTION, |c| c.projection),
+        ),
+    })
 }
 
 /// The part, feature and quality a mesh request names.
@@ -1644,6 +1735,21 @@ pub(crate) mod tests {
             json!({"camera": camera}),
         )
         .unwrap();
+        assert_eq!(r["camera"]["eye"], json!([0.0, -0.1, 0.0]));
+        // Framing a face keeps the direction and looks at the face's box.
+        let set =
+            |s: &mut Session, live: &mut Live, p: Value| call_live(s, live, me, "camera.set", p);
+        let r = set(&mut s, &mut live, json!({"fit": [face]})).unwrap();
+        let (eye, target) = (&r["camera"]["eye"], &r["camera"]["target"]);
+        assert!(eye[1].as_f64().unwrap() < target[1].as_f64().unwrap());
+        assert!(target[2].as_f64().unwrap().abs() < 1e-3);
+        let r = set(&mut s, &mut live, json!({"view": "top"})).unwrap();
+        assert_eq!(r["camera"]["up"], json!([0.0, 1.0, 0.0]));
+        // The participant's projection is kept.
+        assert_eq!(r["camera"]["projection"]["perspective"]["fov_deg"], 30.0);
+        let e = set(&mut s, &mut live, json!({"view": "top", "camera": camera})).unwrap_err();
+        assert_eq!(e.code, Code::Usage);
+        let r = set(&mut s, &mut live, json!({"camera": camera})).unwrap();
         assert_eq!(r["camera"]["eye"], json!([0.0, -0.1, 0.0]));
         let r = call_live(&mut s, &mut live, None, "camera.get", json!({})).unwrap();
         assert_eq!(

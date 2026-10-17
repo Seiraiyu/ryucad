@@ -90,8 +90,15 @@ enum Command {
     /// Show a participant's camera (the one human's, unless --of names
     /// another), or set this agent's with --eye, --target and --up.
     Camera {
-        #[arg(long = "of", value_name = "PARTICIPANT", conflicts_with = "eye")]
+        #[arg(long = "of", value_name = "PARTICIPANT", conflicts_with_all = ["eye", "view", "fit"])]
         of: Option<String>,
+        /// Look from a standard view: front, back, left, right, top,
+        /// bottom or iso, framing the model (or the --fit entities).
+        #[arg(long, conflicts_with = "eye")]
+        view: Option<String>,
+        /// Frame these entities, keeping the view direction.
+        #[arg(long, value_name = "REF", conflicts_with = "eye")]
+        fit: Vec<String>,
         /// The eye point, three quantities: 0,-100mm,50mm.
         #[arg(long, value_name = "X,Y,Z", value_parser = triple, requires_all = ["target", "up"])]
         eye: Option<[String; 3]>,
@@ -517,14 +524,23 @@ fn request(cmd: &Command) -> Option<Request> {
         },
         Command::Camera {
             of,
+            view,
+            fit,
             eye,
             target,
             up,
             fov,
             ortho,
         } => match (eye, target, up) {
+            _ if view.is_some() || !fit.is_empty() => Request::CameraSet {
+                camera: None,
+                view: view.clone(),
+                fit: fit.clone(),
+            },
             (Some(eye), Some(target), Some(up)) => Request::CameraSet {
-                camera: CameraArg {
+                view: None,
+                fit: Vec::new(),
+                camera: Some(CameraArg {
                     eye: eye.clone().map(Value::String),
                     target: target.clone().map(Value::String),
                     up: *up,
@@ -536,7 +552,7 @@ fn request(cmd: &Command) -> Option<Request> {
                             fov_deg: fov.unwrap_or(45.0),
                         },
                     },
-                },
+                }),
             },
             _ => Request::CameraGet {
                 participant: of.clone(),

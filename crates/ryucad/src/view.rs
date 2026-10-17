@@ -121,6 +121,99 @@ impl Camera {
     }
 }
 
+/// A named direction to look from. Z is up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StandardView {
+    Front,
+    Back,
+    Left,
+    Right,
+    Top,
+    Bottom,
+    Iso,
+}
+
+impl StandardView {
+    pub fn parse(s: &str) -> Result<StandardView> {
+        Ok(match s {
+            "front" => StandardView::Front,
+            "back" => StandardView::Back,
+            "left" => StandardView::Left,
+            "right" => StandardView::Right,
+            "top" => StandardView::Top,
+            "bottom" => StandardView::Bottom,
+            "iso" => StandardView::Iso,
+            _ => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("unknown view {s:?}; use front, back, left, right, top, bottom or iso"),
+                ));
+            }
+        })
+    }
+
+    /// From the target towards the eye, and up.
+    fn axes(self) -> ([f64; 3], [f64; 3]) {
+        match self {
+            StandardView::Front => ([0.0, -1.0, 0.0], [0.0, 0.0, 1.0]),
+            StandardView::Back => ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
+            StandardView::Left => ([-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+            StandardView::Right => ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+            StandardView::Top => ([0.0, 0.0, 1.0], [0.0, 1.0, 0.0]),
+            StandardView::Bottom => ([0.0, 0.0, -1.0], [0.0, 1.0, 0.0]),
+            StandardView::Iso => ([1.0, -1.0, 1.0], [0.0, 0.0, 1.0]),
+        }
+    }
+}
+
+/// The projection a framed view uses when there is none to keep.
+pub const DEFAULT_PROJECTION: Projection = Projection::Perspective { fov_deg: 30.0 };
+
+/// How much room a framed view leaves around the box.
+const MARGIN: f64 = 1.1;
+
+/// A camera looking along `dir` (from the eye towards the target, as
+/// `-back`) with `up`, framing the box `lo`..`hi` so its bounding sphere
+/// fits the view.
+fn frame_along(
+    lo: [f64; 3],
+    hi: [f64; 3],
+    back: [f64; 3],
+    up: [f64; 3],
+    projection: Projection,
+) -> Camera {
+    let target = [0, 1, 2].map(|k| lo[k] + (hi[k] - lo[k]) / 2.0);
+    let r = (norm(sub(hi, lo)) / 2.0).max(1e-6) * MARGIN;
+    let b = norm(back);
+    let back = back.map(|x| x / b);
+    let (distance, projection) = match projection {
+        Projection::Perspective { fov_deg } => {
+            let half = fov_deg * core::f64::consts::PI / 360.0;
+            (r / ryukei::math::sin(half), projection)
+        }
+        Projection::Orthographic { .. } => (2.0 * r, Projection::Orthographic { height: 2.0 * r }),
+    };
+    Camera {
+        eye: [0, 1, 2].map(|k| target[k] + back[k] * distance),
+        target,
+        up,
+        projection,
+    }
+}
+
+/// A camera on the box `lo`..`hi` from a standard view.
+pub fn frame(lo: [f64; 3], hi: [f64; 3], view: StandardView, projection: Projection) -> Camera {
+    let (back, up) = view.axes();
+    frame_along(lo, hi, back, up, projection)
+}
+
+/// `camera` moved to frame the box, keeping its direction, up and kind of
+/// projection.
+pub fn refit(camera: &Camera, lo: [f64; 3], hi: [f64; 3]) -> Camera {
+    let back = sub(camera.eye, camera.target);
+    frame_along(lo, hi, back, camera.up, camera.projection)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +239,40 @@ mod tests {
             json!({"eye": [0.1, 0.0, 1.0], "target": [0.0, 0.0, 0.0], "up": [0.0, 0.0, 1.0],
                    "projection": {"orthographic": {"height": 0.05}}})
         );
+    }
+
+    #[test]
+    fn standard_views_frame_the_box() {
+        let (lo, hi) = ([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]);
+        let c = frame(lo, hi, StandardView::Front, DEFAULT_PROJECTION);
+        assert_eq!(c.target, [1.0, 1.0, 1.0]);
+        assert!(c.eye[1] < 0.0 && c.eye[0] == 1.0 && c.eye[2] == 1.0);
+        assert!(c.check().is_ok());
+        // The bounding sphere fits the field of view.
+        let d = norm(sub(c.eye, c.target));
+        let r = 3f64.sqrt() * MARGIN;
+        assert!((ryukei::math::sin(15f64.to_radians()) * d - r).abs() < 1e-12);
+        let top = frame(
+            lo,
+            hi,
+            StandardView::Top,
+            Projection::Orthographic { height: 1.0 },
+        );
+        assert_eq!(top.up, [0.0, 1.0, 0.0]);
+        assert!(top.eye[2] > 2.0);
+        assert_eq!(top.projection, Projection::Orthographic { height: 2.0 * r });
+        for v in ["front", "back", "left", "right", "top", "bottom", "iso"] {
+            let c = frame(lo, hi, StandardView::parse(v).unwrap(), DEFAULT_PROJECTION);
+            assert!(c.check().is_ok(), "{v}");
+        }
+        assert_eq!(
+            StandardView::parse("side").unwrap_err().code,
+            Code::InvalidParam
+        );
+        // Refitting keeps the direction and moves to the new box.
+        let moved = refit(&c, [10.0; 3], [11.0; 3]);
+        assert_eq!(moved.target, [10.5; 3]);
+        assert_eq!(moved.up, c.up);
     }
 
     #[test]
