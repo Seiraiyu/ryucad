@@ -402,6 +402,27 @@ fn dispatch(
             }
             Ok(v)
         }
+        Request::AppOpen { participant } => {
+            let live = live.ok_or_else(|| live::no_live_session("app.open"))?;
+            let asked: Vec<String> = match participant {
+                Some(id) => {
+                    let p = live.get(&id)?;
+                    if p.kind != live::Kind::Human {
+                        return Err(Error::new(
+                            Code::InvalidParam,
+                            format!("participant {id} is not an app window"),
+                        )
+                        .with("participant", id));
+                    }
+                    vec![id]
+                }
+                None => live.humans().map(|p| p.id.clone()).collect(),
+            };
+            for id in &asked {
+                live.hub.send_to(id, "app.open", &json!({}));
+            }
+            Ok(json!({ "asked": asked }))
+        }
         Request::ActivitySet { status, entities } => {
             let live = live.ok_or_else(|| live::no_live_session("activity.set"))?;
             let refs = entity::parse_all(session, &entities)?;
@@ -1793,6 +1814,8 @@ pub(crate) mod tests {
         assert_eq!(e.code, Code::NoLiveSession);
         let r = call(&mut s, "participant.list", json!({})).unwrap();
         assert_eq!(r, json!({"participants": []}));
+        let e = call(&mut s, "app.open", json!({})).unwrap_err();
+        assert_eq!(e.code, Code::NoLiveSession);
     }
 
     #[test]

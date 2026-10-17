@@ -171,6 +171,45 @@ pub fn find_program(name: &str) -> Option<PathBuf> {
     beside.into_iter().chain(on_path).find(|p| p.is_file())
 }
 
+/// Names the desktop app `ryucad open` starts, instead of finding
+/// `ryucad-app`: for tests and unusual installs.
+pub const APP_VAR: &str = "RYUCAD_APP";
+
+/// Opens the folder `dir` in the desktop app. When `root` is a project
+/// whose daemon is running, the app windows attached to it come to the
+/// front; otherwise (or if none is attached) the app starts on `dir`. A
+/// daemon is never started just to ask.
+pub fn open(dir: &Path, root: Option<&Path>) -> Result<Value> {
+    if let Some(root) = root
+        && let Ok(mut conn) = Connection::connect(&Endpoint::for_project(root)?)
+        && let Ok(Ok(r)) = conn.call(&Request::AppOpen { participant: None })
+        && r["asked"].as_array().is_some_and(|a| !a.is_empty())
+    {
+        return Ok(json!({"opened": "existing", "asked": r["asked"], "dir": dir}));
+    }
+    let app = match std::env::var_os(APP_VAR) {
+        Some(p) => Some(PathBuf::from(p)).filter(|p| p.is_file()),
+        None => find_program("ryucad-app"),
+    };
+    let missing = || {
+        Error::new(
+            Code::AppNotInstalled,
+            "the desktop app, ryucad-app, isn't installed; install it, or use `ryucad render` to see the model",
+        )
+    };
+    let app = app.ok_or_else(missing)?;
+    let mut cmd = Command::new(&app);
+    cmd.arg(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    detach(&mut cmd);
+    let child = cmd
+        .spawn()
+        .map_err(|e| missing().with("path", &app).with("why", e.to_string()))?;
+    Ok(json!({"opened": "new", "app": app, "pid": child.id(), "dir": dir}))
+}
+
 /// The `ryucad` binary that daemons are started from, and its version.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Daemon {

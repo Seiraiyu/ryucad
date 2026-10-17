@@ -177,6 +177,40 @@ fn cli(f: &Fixture, args: &[&str]) -> Value {
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
+/// [`cli`], with `RYUCAD_APP` set to `app`.
+fn cli_with_app(f: &Fixture, app: &Path, args: &[&str]) -> (Value, Option<i32>) {
+    let out = Command::new(cargo_bin("ryucad"))
+        .args(args)
+        .current_dir(&f.root)
+        .env(RUNTIME_DIR_VAR, &f.run)
+        .env("RYUCAD_CONFIG_DIR", f.run.with_file_name("config"))
+        .env("RYUCAD_IDLE_TIMEOUT", "60")
+        .env(ryucad::client::APP_VAR, app)
+        .output()
+        .unwrap();
+    (
+        serde_json::from_slice(&out.stdout).unwrap(),
+        out.status.code(),
+    )
+}
+
+#[test]
+fn open_starts_the_app_when_no_window_is_attached() {
+    let f = fixture();
+    // Any program stands in for the app: this one, which exits at once.
+    let (r, _) = cli_with_app(&f, &cargo_bin("ryucad"), &["open"]);
+    assert_eq!(r["result"]["opened"], "new", "{r}");
+    assert_eq!(r["result"]["dir"], serde_json::json!(f.root));
+    assert!(r["result"]["pid"].as_u64().is_some());
+    // No daemon was started just to ask.
+    assert_eq!(cli(&f, &["daemon", "status"])["result"]["running"], false);
+    let (r, code) = cli_with_app(&f, &f.root.join("no-such-app"), &["open"]);
+    assert_eq!(
+        (r["error"]["code"].as_str(), code),
+        (Some("app_not_installed"), Some(4))
+    );
+}
+
 #[test]
 fn the_cli_starts_a_daemon_and_stops_it() {
     let f = fixture();
@@ -517,6 +551,38 @@ impl Watch {
             }
         }
     }
+}
+
+#[test]
+fn open_brings_attached_windows_forward() {
+    let f = fixture();
+    cli(&f, &["participants"]);
+    // A window that only watches the model still hears it is wanted.
+    let w = Watch::new(&f, &["model"]);
+    let missing = f.root.join("no-such-app");
+    let (r, _) = cli_with_app(&f, &missing, &["open"]);
+    assert_eq!(r["result"]["opened"], "existing", "{r}");
+    assert_eq!(r["result"]["asked"], serde_json::json!([w.me]));
+    assert_eq!(w.next("app.open"), serde_json::json!({}));
+    // Asking for an agent's window is refused.
+    let list = cli(&f, &["participants"]);
+    let agent = list["result"]["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["kind"] == "agent")
+        .unwrap()["id"]
+        .clone();
+    let conn = f.connect().unwrap();
+    let e = ask(
+        &conn,
+        &Request::AppOpen {
+            participant: Some(agent.as_str().unwrap().into()),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ryucad::error::Code::InvalidParam);
+    cli(&f, &["daemon", "stop"]);
 }
 
 #[test]
