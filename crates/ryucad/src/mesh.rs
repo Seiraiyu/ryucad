@@ -114,15 +114,53 @@ impl Cache {
         quality: Quality,
         budget: usize,
     ) -> Arc<DisplayMesh> {
-        self.clock += 1;
-        let key = (built.hash.clone(), quality);
-        if let Some((used, m)) = self.entries.get_mut(&key) {
-            *used = self.clock;
-            return Arc::clone(m);
+        self.get_all(&[(f, built)], quality, budget).remove(0)
+    }
+
+    /// The meshes of several bodies, in order: the ones not cached are
+    /// made in parallel.
+    pub fn get_all(
+        &mut self,
+        items: &[(&Feature, &Built)],
+        quality: Quality,
+        budget: usize,
+    ) -> Vec<Arc<DisplayMesh>> {
+        use rayon::prelude::*;
+        let missing: Vec<&(&Feature, &Built)> = items
+            .iter()
+            .filter(|(_, b)| !self.entries.contains_key(&(b.hash.clone(), quality)))
+            .collect();
+        let made: Vec<(String, Arc<DisplayMesh>)> = missing
+            .par_iter()
+            .map(|(f, b)| (b.hash.clone(), Arc::new(make(f, &b.body, quality))))
+            .collect();
+        let mut fresh: BTreeMap<String, Arc<DisplayMesh>> = BTreeMap::new();
+        for (hash, m) in made {
+            self.bytes += m.bytes();
+            self.entries
+                .insert((hash.clone(), quality), (self.clock, Arc::clone(&m)));
+            fresh.insert(hash, m);
         }
-        let m = Arc::new(make(f, &built.body, quality));
-        self.bytes += m.bytes();
-        self.entries.insert(key, (self.clock, Arc::clone(&m)));
+        let out: Vec<Arc<DisplayMesh>> = items
+            .iter()
+            .map(|(_, b)| {
+                self.clock += 1;
+                match self.entries.get_mut(&(b.hash.clone(), quality)) {
+                    Some((used, m)) => {
+                        *used = self.clock;
+                        Arc::clone(m)
+                    }
+                    None => Arc::clone(&fresh[&b.hash]),
+                }
+            })
+            .collect();
+        self.evict(budget);
+        out
+    }
+
+    /// Drops the least recently used meshes until the cache fits `budget`,
+    /// keeping at least one.
+    fn evict(&mut self, budget: usize) {
         while self.bytes > budget && self.entries.len() > 1 {
             let oldest = self
                 .entries
@@ -133,7 +171,6 @@ impl Cache {
             let (_, gone) = self.entries.remove(&oldest).expect("present");
             self.bytes -= gone.bytes();
         }
-        m
     }
 
     pub fn len(&self) -> usize {

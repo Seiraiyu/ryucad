@@ -932,16 +932,18 @@ pub fn meshes(
         .filter(|(id, _)| only.is_none_or(|o| o == id))
         .cloned()
         .collect();
+    let ok: Vec<(&Feature, &crate::rebuild::Built)> = built
+        .iter()
+        .filter_map(|(id, b)| Some((&features[id], b.as_ref().ok()?)))
+        .collect();
+    let mut made = session.meshes.get_all(&ok, quality, budget).into_iter();
     Ok(built
         .into_iter()
         .map(|(id, b)| {
-            let r = b.map(|b| {
-                let mesh = session.meshes.get(&features[&id], &b, quality, budget);
-                mesh::Meshed {
-                    body: b.body,
-                    hash: b.hash,
-                    mesh,
-                }
+            let r = b.map(|b| mesh::Meshed {
+                body: b.body,
+                hash: b.hash,
+                mesh: made.next().expect("one mesh per built body"),
             });
             (id, r)
         })
