@@ -8,12 +8,7 @@ use std::process::Command;
 
 #[test]
 fn the_smoke_run_loads_the_model_and_draws_it() {
-    if ryucad_app::ui::scene::headless().is_none() {
-        assert!(
-            std::env::var_os("RYUCAD_REQUIRE_GPU").is_none(),
-            "no GPU adapter"
-        );
-        eprintln!("no GPU adapter: skipped");
+    if common::gpu().is_none() {
         return;
     }
     let p = Project::new().with_part();

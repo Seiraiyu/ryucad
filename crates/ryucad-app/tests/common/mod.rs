@@ -71,6 +71,23 @@ pub fn ryucad() -> &'static Daemon {
     })
 }
 
+/// A graphics adapter to draw with, software ones included. Without one
+/// the tests that draw pass with a note, unless `RYUCAD_REQUIRE_GPU` is
+/// set (CI sets it where lavapipe or WARP is installed).
+pub fn gpu() -> Option<(
+    eframe::wgpu::Adapter,
+    eframe::wgpu::Device,
+    eframe::wgpu::Queue,
+)> {
+    let g = ryucad_app::ui::scene::headless();
+    if g.is_none() {
+        let required = std::env::var("RYUCAD_REQUIRE_GPU").is_ok_and(|v| !v.is_empty());
+        assert!(!required, "no GPU adapter, and RYUCAD_REQUIRE_GPU is set");
+        eprintln!("no GPU adapter: skipped");
+    }
+    g
+}
+
 /// A project in a folder of its own.
 pub struct Project {
     _dir: tempfile::TempDir,

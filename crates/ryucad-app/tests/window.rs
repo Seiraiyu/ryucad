@@ -1,6 +1,5 @@
 //! The main window, driven like a person would, against a real daemon.
-//! It needs a graphics adapter (software ones count): without one the
-//! tests pass with a note, unless RYUCAD_REQUIRE_GPU is set.
+//! It needs a graphics adapter (software ones count): see `common::gpu`.
 
 mod common;
 
@@ -12,15 +11,7 @@ use ryucad_app::ui::app::App;
 use std::time::{Duration, Instant};
 
 fn gpu() -> bool {
-    let ok = ryucad_app::ui::scene::headless().is_some();
-    if !ok {
-        assert!(
-            std::env::var_os("RYUCAD_REQUIRE_GPU").is_none(),
-            "no GPU adapter"
-        );
-        eprintln!("no GPU adapter: skipped");
-    }
-    ok
+    common::gpu().is_some()
 }
 
 fn window(p: &Project) -> Harness<'static, App> {

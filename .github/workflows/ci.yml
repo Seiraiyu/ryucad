@@ -20,9 +20,23 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      - if: runner.os == 'Linux'
+        name: a software graphics adapter (lavapipe) for ryucad-app's tests
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+        env:
+          # Linux has lavapipe and Windows has WARP, so the app's drawing
+          # tests must run there; a macOS runner may have no Metal device.
+          RYUCAD_REQUIRE_GPU: ${{ runner.os != 'macOS' && '1' || '' }}
+      - if: failure()
+        name: the viewport as drawn, if it no longer matches its snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: viewport-${{ matrix.os }}
+          path: crates/ryucad-app/tests/snapshots/*.new.png
+          if-no-files-found: ignore
       - run: cargo bench --workspace --no-run
 
   cpu-levels:
@@ -61,7 +75,7 @@ jobs:
           # The workspace, then the OCCT and SMLib comparison, which only
           # the devcontainer (with OCCT and SMLib installed) builds.
           runCmd: |
-            cargo test --workspace
+            RYUCAD_REQUIRE_GPU=1 cargo test --workspace
             cargo clippy -p ryukei-bench --features occt,smlib --all-targets -- -D warnings
             cargo test -p ryukei-bench --features occt,smlib --release --test kernels -- --nocapture
             cargo bench -p ryukei-bench --features occt,smlib --no-run

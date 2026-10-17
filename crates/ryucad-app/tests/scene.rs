@@ -1,10 +1,9 @@
 //! The 3D view drawn on whatever GPU the machine has: software adapters
-//! (lavapipe, WARP) count. Without one the tests pass with a note, unless
-//! RYUCAD_REQUIRE_GPU is set, as CI sets it.
+//! (lavapipe, WARP) count. See `common::gpu`.
 
 mod common;
 
-use common::{Project, ryucad};
+use common::{Project, gpu, ryucad};
 use ryucad::view::{self, StandardView};
 use ryucad_app::core::nav::Projector;
 use ryucad_app::core::pick::Picker;
@@ -12,22 +11,6 @@ use ryucad_app::core::workspace::Workspace;
 use ryucad_app::ui::scene::{self, DrawList, Scene, linear, theme};
 use std::sync::Arc;
 use std::time::Duration;
-
-fn gpu() -> Option<(
-    eframe::wgpu::Adapter,
-    eframe::wgpu::Device,
-    eframe::wgpu::Queue,
-)> {
-    let g = scene::headless();
-    if g.is_none() {
-        assert!(
-            std::env::var_os("RYUCAD_REQUIRE_GPU").is_none(),
-            "no GPU adapter"
-        );
-        eprintln!("no GPU adapter: skipped");
-    }
-    g
-}
 
 fn srgb(c: [f32; 3]) -> [u8; 3] {
     c.map(|x| (x * 255.0).round() as u8)
