@@ -203,6 +203,14 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         style: Option<Style>,
     },
+    /// Entries of the activity log older than `before`, oldest first.
+    #[serde(rename = "activity.log")]
+    ActivityLog {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<u64>,
+    },
     /// Says what the caller is doing; an empty status clears it.
     #[serde(rename = "activity.set")]
     ActivitySet {

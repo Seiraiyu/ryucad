@@ -103,6 +103,7 @@ pub struct Live {
     pub hub: Hub,
     /// What subscribers were last told about the model.
     pub seen: Seen,
+    pub log: crate::activity::Log,
 }
 
 /// The project and part revisions subscribers were last told about.

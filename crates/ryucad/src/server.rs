@@ -1,6 +1,7 @@
 //! The request handlers. The daemon and the in-process CLI both call
 //! [`handle`], so they give the same answers.
 
+use crate::activity::{self, EntryKind};
 use crate::doc::files::{Feature, FeatureType, Manifest, PartFile, Placement, number};
 use crate::doc::id::Id;
 use crate::doc::project::{MANIFEST, Part, feature_path, part_dir, part_path, write_json};
@@ -50,13 +51,33 @@ pub fn handle_live(
     me: Option<&str>,
     req: Request,
 ) -> Result<Value> {
-    let changed = session.refresh()?;
+    let external = session.refresh_changes()?;
+    let changed = !external.is_empty();
     let before = live.as_deref().map(Live::snapshot);
-    if let (Some(l), Some(me)) = (live.as_deref_mut(), me) {
-        l.touch(me);
+    if let Some(l) = live.as_deref_mut() {
+        if changed {
+            activity::record_external(l, external);
+        }
+        if let Some(me) = me {
+            l.touch(me);
+        }
     }
     let mutates = req.mutates();
+    // A daemon keeps what its writes change, for the log and for undo.
+    let (method, params) = (req.method(), req.params());
+    let files_before = match (&live, mutates) {
+        (Some(_), true) => Some(activity::snapshot(session.root())?),
+        _ => None,
+    };
     let result = dispatch(session, live.as_deref_mut(), me, req);
+    if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
+    {
+        let files = activity::diff(&files_before, &activity::snapshot(session.root())?);
+        if !files.is_empty() {
+            let who = l.caller(me);
+            activity::record(l, EntryKind::Change, &who, &method, params, None, files);
+        }
+    }
     if let (Some(l), Some(before)) = (live, before) {
         // Entities that no longer exist drop out of every selection.
         if changed || mutates {
@@ -222,6 +243,10 @@ fn dispatch(
             let id = live.caller(me);
             let highlights = live.clear_highlights(&id, style)?;
             Ok(json!({"participant": id, "highlights": highlights}))
+        }
+        Request::ActivityLog { limit, before } => {
+            let entries = live.map_or_else(Vec::new, |l| l.log.page(limit.unwrap_or(50), before));
+            Ok(json!({ "entries": entries }))
         }
         Request::ActivitySet { status, entities } => {
             let live = live.ok_or_else(|| live::no_live_session("activity.set"))?;
@@ -687,7 +712,9 @@ pub fn tick(slot: &mut Option<Session>, live: &mut Live, root: &Path) {
 pub fn settle(slot: &mut Option<Session>, live: &mut Live, root: &Path) {
     let _ = guarded(slot, root, |s| {
         let before = live.snapshot();
-        if s.refresh()? {
+        let external = s.refresh_changes()?;
+        if !external.is_empty() {
+            activity::record_external(live, external);
             live.prune(|r| r.resolve(s).is_ok());
         }
         live.announce(&before);
@@ -1495,6 +1522,63 @@ pub(crate) mod tests {
                 v["params"].clone(),
             ));
         }
+    }
+
+    #[test]
+    fn the_log_records_changes_and_who_made_them() {
+        let (dir, mut s) = with_part();
+        let mut live = Live::new();
+        let human = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "session.hello",
+            json!({"kind": "human", "name": "Dana"}),
+        )
+        .unwrap()["participant"]
+            .clone();
+        call_live(
+            &mut s,
+            &mut live,
+            human.as_str(),
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "id": "s", "params": {"radius": 1}}),
+        )
+        .unwrap();
+        // Reads and refused writes aren't logged.
+        call_live(&mut s, &mut live, None, "part.list", json!({})).unwrap();
+        call_live(&mut s, &mut live, None, "part.create", json!({"part": "p"})).unwrap_err();
+        // An edit behind the daemon's back is logged as external.
+        let mut other = Session::open(dir.path()).unwrap();
+        call(
+            &mut other,
+            "feature.edit",
+            json!({"part": "p", "id": "s", "params": {"radius": 2}}),
+        )
+        .unwrap();
+        call_live(&mut s, &mut live, None, "part.list", json!({})).unwrap();
+        let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
+        let e = log["entries"].as_array().unwrap();
+        assert_eq!(e.len(), 2);
+        assert_eq!(e[0]["kind"], "change");
+        assert_eq!(e[0]["method"], "feature.add");
+        assert_eq!(e[0]["participant"]["name"], "Dana");
+        assert_eq!(e[0]["params"]["id"], "s");
+        assert_eq!(
+            e[0]["files"],
+            json!([{"path": "parts/p/features/s.json", "change": "created"},
+                   {"path": "parts/p/part.json", "change": "modified"}])
+        );
+        assert_eq!(e[1]["kind"], "external");
+        assert_eq!(e[1]["participant"], Value::Null);
+        assert_eq!(
+            e[1]["files"],
+            json!([{"path": "parts/p/features/s.json", "change": "modified"}])
+        );
+        let page = call_live(&mut s, &mut live, None, "activity.log", json!({"limit": 1})).unwrap();
+        assert_eq!(page["entries"][0]["seq"], e[1]["seq"]);
+        let r = call(&mut s, "activity.log", json!({})).unwrap();
+        assert_eq!(r, json!({"entries": []}));
     }
 
     #[test]

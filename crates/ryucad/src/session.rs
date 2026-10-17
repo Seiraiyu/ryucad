@@ -57,9 +57,15 @@ impl Session {
     /// Brings the session up to date with the files. Returns whether the
     /// project was reloaded.
     pub fn refresh(&mut self) -> Result<bool> {
+        Ok(!self.refresh_changes()?.is_empty())
+    }
+
+    /// [`Session::refresh`], returning the files that changed (relative,
+    /// with `/`) and how: `created`, `modified` or `deleted`.
+    pub fn refresh_changes(&mut self) -> Result<Vec<(String, &'static str)>> {
         let files = files(self.root())?;
         let trusted_before = self.stamped_at.checked_sub(RACY);
-        let mut changed = files.len() != self.stamps.len();
+        let mut changes = Vec::new();
         let mut stamps = BTreeMap::new();
         for path in files {
             let meta = fs::metadata(&path).map_err(|e| Error::io(&path, &e))?;
@@ -79,18 +85,31 @@ impl Session {
                     hash,
                 }
             };
-            changed |= old.map(|o| o.hash) != Some(stamp.hash);
+            match old {
+                None => changes.push((path.clone(), "created")),
+                Some(o) if o.hash != stamp.hash => changes.push((path.clone(), "modified")),
+                Some(_) => {}
+            }
             stamps.insert(path, stamp);
+        }
+        for path in self.stamps.keys().filter(|p| !stamps.contains_key(*p)) {
+            changes.push((path.clone(), "deleted"));
         }
         self.stamped_at = SystemTime::now();
         self.stamps = stamps;
-        if changed {
+        let root = self.project.root.clone();
+        let mut changes: Vec<(String, &'static str)> = changes
+            .into_iter()
+            .map(|(p, c)| (crate::doc::project::relative(&root, &p), c))
+            .collect();
+        changes.sort();
+        if !changes.is_empty() {
             self.project = Project::load(&self.project.root)?;
             let live = &self.project.parts;
             self.results
                 .retain(|id, (rev, _)| live.get(id).is_some_and(|p| &p.revision == rev));
         }
-        Ok(changed)
+        Ok(changes)
     }
 
     /// Re-reads everything after this session wrote files.
@@ -146,7 +165,7 @@ fn hash_file(path: &Path) -> Result<blake3::Hash> {
 
 /// The files a project's state depends on: the manifest, and everything
 /// under `parts/` two and three levels down.
-fn files(root: &Path) -> Result<Vec<PathBuf>> {
+pub fn files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = vec![root.join(MANIFEST)];
     for part in read_dir(&root.join("parts"))? {
         if part.is_dir() {
@@ -235,6 +254,31 @@ mod tests {
         assert!(s.refresh().unwrap());
         assert_eq!(radius(&mut s), 0.002);
         assert!(!s.refresh().unwrap());
+    }
+
+    #[test]
+    fn says_which_files_changed() {
+        let dir = project();
+        let mut s = Session::open(dir.path()).unwrap();
+        write_json(
+            &feature_path(dir.path(), &id("p"), &id("a")),
+            &sphere("2 mm"),
+        )
+        .unwrap();
+        write_json(
+            &feature_path(dir.path(), &id("p"), &id("b")),
+            &sphere("1 mm"),
+        )
+        .unwrap();
+        fs::remove_file(dir.path().join("parts/p/part.json")).unwrap();
+        assert_eq!(
+            s.refresh_changes().unwrap(),
+            [
+                ("parts/p/features/a.json".to_owned(), "modified"),
+                ("parts/p/features/b.json".to_owned(), "created"),
+                ("parts/p/part.json".to_owned(), "deleted"),
+            ]
+        );
     }
 
     #[test]

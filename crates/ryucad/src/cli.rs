@@ -134,6 +134,15 @@ enum Command {
         #[arg(long, value_name = "SECONDS", default_value_t = 30)]
         timeout: u64,
     },
+    /// The session's activity log: every change, who made it, and the
+    /// files it touched, oldest first.
+    Activity {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Only entries older than this sequence number.
+        #[arg(long, value_name = "SEQ")]
+        before: Option<u64>,
+    },
     /// Say what this agent is doing; "" clears it.
     Status {
         text: String,
@@ -475,6 +484,10 @@ fn request(cmd: &Command) -> Option<Request> {
                 }
             }
         }
+        Command::Activity { limit, before } => Request::ActivityLog {
+            limit: Some(*limit),
+            before: *before,
+        },
         Command::Status { text, entities } => Request::ActivitySet {
             status: text.clone(),
             entities: entities.clone(),
