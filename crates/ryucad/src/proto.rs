@@ -211,6 +211,18 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         before: Option<u64>,
     },
+    /// Undoes `entry`, or the caller's latest change.
+    #[serde(rename = "undo")]
+    Undo {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<u64>,
+    },
+    /// Redoes `entry` (an undo), or the caller's latest undo.
+    #[serde(rename = "redo")]
+    Redo {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<u64>,
+    },
     /// Says what the caller is doing; an empty status clears it.
     #[serde(rename = "activity.set")]
     ActivitySet {
@@ -259,6 +271,8 @@ impl Request {
                 | Request::FeatureEdit { .. }
                 | Request::FeatureDelete { .. }
                 | Request::FeatureMove { .. }
+                | Request::Undo { .. }
+                | Request::Redo { .. }
         )
     }
 

@@ -63,9 +63,11 @@ pub fn handle_live(
         }
     }
     let mutates = req.mutates();
-    // A daemon keeps what its writes change, for the log and for undo.
+    // A daemon keeps what its writes change, for the log and for undo;
+    // undo and redo log themselves.
     let (method, params) = (req.method(), req.params());
-    let files_before = match (&live, mutates) {
+    let logs_itself = matches!(req, Request::Undo { .. } | Request::Redo { .. });
+    let files_before = match (&live, mutates && !logs_itself) {
         (Some(_), true) => Some(activity::snapshot(session.root())?),
         _ => None,
     };
@@ -247,6 +249,16 @@ fn dispatch(
         Request::ActivityLog { limit, before } => {
             let entries = live.map_or_else(Vec::new, |l| l.log.page(limit.unwrap_or(50), before));
             Ok(json!({ "entries": entries }))
+        }
+        Request::Undo { entry } => {
+            let live = live.ok_or_else(|| live::no_live_session("undo"))?;
+            let who = live.caller(me);
+            activity::undo(live, session, &who, entry, false)
+        }
+        Request::Redo { entry } => {
+            let live = live.ok_or_else(|| live::no_live_session("redo"))?;
+            let who = live.caller(me);
+            activity::undo(live, session, &who, entry, true)
         }
         Request::ActivitySet { status, entities } => {
             let live = live.ok_or_else(|| live::no_live_session("activity.set"))?;
@@ -1579,6 +1591,96 @@ pub(crate) mod tests {
         assert_eq!(page["entries"][0]["seq"], e[1]["seq"]);
         let r = call(&mut s, "activity.log", json!({})).unwrap();
         assert_eq!(r, json!({"entries": []}));
+    }
+
+    #[test]
+    fn undo_and_redo_go_through_the_files() {
+        let (dir, mut s) = with_part();
+        let mut live = Live::new();
+        let human = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "session.hello",
+            json!({"kind": "human"}),
+        )
+        .unwrap()["participant"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let h = Some(human.as_str());
+        let radius = |s: &mut Session| {
+            call(s, "feature.show", json!({"part": "p", "id": "s"}))
+                .map(|v| v["params"]["radius"]["value"].clone())
+        };
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "id": "s", "params": {"radius": 1}}),
+        )
+        .unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            h,
+            "feature.edit",
+            json!({"part": "p", "id": "s", "params": {"radius": 2}}),
+        )
+        .unwrap();
+        // The human undoes their own edit, then redoes it.
+        let r = call_live(&mut s, &mut live, h, "undo", json!({})).unwrap();
+        assert_eq!(r["entry"]["kind"], "undo");
+        assert_eq!(radius(&mut s).unwrap(), "1 mm");
+        assert!(r["revisions"]["p"].is_string());
+        let e = call_live(&mut s, &mut live, h, "undo", json!({})).unwrap_err();
+        assert_eq!(e.code, Code::NothingToUndo);
+        call_live(&mut s, &mut live, h, "redo", json!({})).unwrap();
+        assert_eq!(radius(&mut s).unwrap(), "2 mm");
+        let e = call_live(&mut s, &mut live, h, "redo", json!({})).unwrap_err();
+        assert_eq!(e.code, Code::NothingToUndo);
+        // A redo can itself be undone.
+        call_live(&mut s, &mut live, h, "undo", json!({})).unwrap();
+        assert_eq!(radius(&mut s).unwrap(), "1 mm");
+        call_live(&mut s, &mut live, h, "redo", json!({})).unwrap();
+        // The agent can't undo its add while the human's edit stands on
+        // top of it, by default or by number.
+        let e = call_live(&mut s, &mut live, None, "undo", json!({})).unwrap_err();
+        assert_eq!(e.code, Code::UndoConflict);
+        assert_eq!(e.details["files"], json!(["parts/p/features/s.json"]));
+        let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
+        let add = log["entries"][0]["seq"].as_u64().unwrap();
+        let e = call_live(&mut s, &mut live, None, "undo", json!({"entry": add})).unwrap_err();
+        assert_eq!(e.code, Code::UndoConflict);
+        // An edit behind the daemon's back can't be undone, and blocks
+        // undoing what it overwrote.
+        let mut other = Session::open(dir.path()).unwrap();
+        call(
+            &mut other,
+            "feature.edit",
+            json!({"part": "p", "id": "s", "params": {"radius": 3}}),
+        )
+        .unwrap();
+        call_live(&mut s, &mut live, None, "part.list", json!({})).unwrap();
+        let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
+        let entries = log["entries"].as_array().unwrap();
+        let external = entries.last().unwrap()["seq"].as_u64().unwrap();
+        let e = call_live(&mut s, &mut live, None, "undo", json!({"entry": external})).unwrap_err();
+        assert_eq!(e.code, Code::NothingToUndo);
+        let e = call_live(&mut s, &mut live, h, "undo", json!({})).unwrap_err();
+        assert_eq!(e.code, Code::UndoConflict);
+        // Undoing a part's creation removes its folder too.
+        call_live(&mut s, &mut live, None, "part.create", json!({"part": "q"})).unwrap();
+        assert!(dir.path().join("parts/q").is_dir());
+        call_live(&mut s, &mut live, None, "undo", json!({})).unwrap();
+        assert!(!dir.path().join("parts/q").exists());
+        // Undoing a deletion brings every file back.
+        call_live(&mut s, &mut live, None, "part.delete", json!({"part": "p"})).unwrap();
+        call_live(&mut s, &mut live, None, "undo", json!({})).unwrap();
+        assert_eq!(radius(&mut s).unwrap(), "3 mm");
+        let e = call(&mut s, "undo", json!({})).unwrap_err();
+        assert_eq!(e.code, Code::NoLiveSession);
     }
 
     #[test]

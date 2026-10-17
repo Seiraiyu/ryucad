@@ -331,6 +331,8 @@ fn every_protocol_method_has_a_command() {
         ("highlight.clear", &["highlight"]),
         ("activity.set", &["status"]),
         ("activity.log", &["activity"]),
+        ("undo", &["undo"]),
+        ("redo", &["redo"]),
     ];
     let methods = protocol_methods();
     assert!(methods.len() >= 26, "{methods:?}");

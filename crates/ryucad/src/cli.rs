@@ -143,6 +143,16 @@ enum Command {
         #[arg(long, value_name = "SEQ")]
         before: Option<u64>,
     },
+    /// Undo this agent's latest change, or the activity entry --entry.
+    Undo {
+        #[arg(long, value_name = "SEQ")]
+        entry: Option<u64>,
+    },
+    /// Redo this agent's latest undo, or the undo entry --entry.
+    Redo {
+        #[arg(long, value_name = "SEQ")]
+        entry: Option<u64>,
+    },
     /// Say what this agent is doing; "" clears it.
     Status {
         text: String,
@@ -488,6 +498,8 @@ fn request(cmd: &Command) -> Option<Request> {
             limit: Some(*limit),
             before: *before,
         },
+        Command::Undo { entry } => Request::Undo { entry: *entry },
+        Command::Redo { entry } => Request::Redo { entry: *entry },
         Command::Status { text, entities } => Request::ActivitySet {
             status: text.clone(),
             entities: entities.clone(),

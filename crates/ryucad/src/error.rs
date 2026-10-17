@@ -50,6 +50,10 @@ pub enum Code {
     NoLiveSession,
     /// "The human" was meant, but several are attached.
     AmbiguousParticipant,
+    /// Nothing of the caller's is left to undo or redo.
+    NothingToUndo,
+    /// The files an undo would restore have changed since.
+    UndoConflict,
 }
 
 impl Code {

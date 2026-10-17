@@ -3,9 +3,11 @@
 //! touched file's content before and after, which is what undo restores.
 //! It lives in the daemon's memory only; Git is the durable history.
 
-use crate::error::Result;
+use crate::doc::project::write_atomic;
+use crate::error::{Code, Error, Result};
 use crate::live::Live;
 use crate::notify::Topic;
+use crate::session::Session;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, VecDeque};
@@ -243,6 +245,138 @@ pub fn record_external(live: &mut Live, seen: Vec<(String, &'static str)>) {
     );
     let v = e.to_json();
     live.hub.send(Topic::Activity, "activity.appended", &v);
+}
+
+/// Puts each file back the way it was before `files` changed it, but only
+/// if every one is still as `files` left it. Returns the changes made.
+fn revert(root: &Path, files: &[FileChange]) -> Result<Vec<FileChange>> {
+    let current = snapshot(root)?;
+    let moved: Vec<&str> = files
+        .iter()
+        .filter(|f| current.get(&f.path) != f.after.as_ref())
+        .map(|f| f.path.as_str())
+        .collect();
+    if !moved.is_empty() {
+        return Err(Error::new(
+            Code::UndoConflict,
+            format!("{} file(s) changed since; nothing was undone", moved.len()),
+        )
+        .with("files", moved));
+    }
+    // Feature files, then lists and the manifest, then deletions: a crash
+    // part way leaves at worst an unlisted feature file, as any write does.
+    let index = |p: &str| p.ends_with("/part.json") || !p.contains('/');
+    let mut order: Vec<&FileChange> = files.iter().collect();
+    order.sort_by_key(|f| (f.before.is_none(), index(&f.path)));
+    for f in order {
+        let path = root.join(&f.path);
+        match &f.before {
+            Some(bytes) => write_atomic(&path, bytes)?,
+            None => {
+                std::fs::remove_file(&path).map_err(|e| Error::io(&path, &e))?;
+                remove_empty_dirs(root, &path);
+            }
+        }
+    }
+    Ok(files
+        .iter()
+        .map(|f| FileChange {
+            path: f.path.clone(),
+            before: f.after.clone(),
+            after: f.before.clone(),
+        })
+        .collect())
+}
+
+/// Removes the folders above `path` that are now empty, up to `parts/`.
+fn remove_empty_dirs(root: &Path, path: &Path) {
+    let stop = root.join("parts");
+    let mut dir = path.parent();
+    while let Some(d) = dir {
+        if d == stop || !d.starts_with(&stop) || std::fs::remove_dir(d).is_err() {
+            return;
+        }
+        dir = d.parent();
+    }
+}
+
+/// Undoes (or with `redo`, redoes) an entry: `entry`, or the caller's
+/// latest that can be. Records the result as a new entry.
+pub fn undo(
+    live: &mut Live,
+    session: &mut Session,
+    who: &str,
+    entry: Option<u64>,
+    redo: bool,
+) -> Result<Value> {
+    let what = if redo { "redo" } else { "undo" };
+    let undoable = |e: &Entry| {
+        e.undone_by.is_none()
+            && if redo {
+                e.kind == EntryKind::Undo
+            } else {
+                matches!(e.kind, EntryKind::Change | EntryKind::Redo)
+            }
+    };
+    let target = match entry {
+        Some(seq) => {
+            let e = live.log.get(seq).ok_or_else(|| {
+                Error::new(Code::NotFound, format!("no activity entry {seq}")).with("entry", seq)
+            })?;
+            if !undoable(e) {
+                return Err(Error::new(
+                    Code::NothingToUndo,
+                    format!("entry {seq} can't be {what}ne"),
+                )
+                .with("entry", seq));
+            }
+            seq
+        }
+        None => {
+            let mine = |e: &&Entry| e.participant["id"] == who;
+            let latest = live.log.entries().rev().filter(mine).find(|e| {
+                // A new change of one's own ends what can be redone.
+                undoable(e) || (redo && e.kind == EntryKind::Change)
+            });
+            match latest {
+                Some(e) if undoable(e) => e.seq,
+                _ => {
+                    return Err(Error::new(
+                        Code::NothingToUndo,
+                        format!("nothing of yours to {what}"),
+                    ));
+                }
+            }
+        }
+    };
+    let files = live.log.get(target).expect("found above").files.clone();
+    let changes = revert(session.root(), &files)?;
+    session.reload()?;
+    let kind = if redo {
+        EntryKind::Redo
+    } else {
+        EntryKind::Undo
+    };
+    let seq = record(
+        live,
+        kind,
+        who,
+        what,
+        json!({"entry": target}),
+        Some(target),
+        changes,
+    );
+    live.log.get_mut(target).expect("still there").undone_by = Some(seq);
+    let revisions: BTreeMap<String, String> = session
+        .project()
+        .parts
+        .values()
+        .map(|p| (p.id.to_string(), p.revision.clone()))
+        .collect();
+    Ok(json!({
+        "entry": live.log.get(seq).expect("just made").to_json(),
+        "revisions": revisions,
+    }))
 }
 
 #[cfg(test)]
