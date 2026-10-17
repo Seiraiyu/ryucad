@@ -81,6 +81,15 @@ impl Live {
             p.last_seen = Instant::now();
             return Ok(id.to_owned());
         }
+        if let Some(n) = name
+            && (n.trim().is_empty() || n.chars().count() > 64)
+        {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "a participant name is 1 to 64 characters",
+            )
+            .with("name", n));
+        }
         let id = match kind {
             Kind::Agent => self.agent(name.unwrap_or(DEFAULT_AGENT)),
             Kind::Human => {
@@ -252,6 +261,8 @@ mod tests {
         assert_ne!(h1, h2);
         assert_eq!(live.get(&h2).unwrap().name, "human 2");
         assert_eq!(live.participants().count(), 4);
+        let e = live.hello(Kind::Agent, Some(" "), None).unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
     }
 
     #[test]

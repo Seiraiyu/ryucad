@@ -3,12 +3,13 @@
 //! so they never diverge.
 
 use crate::error::{Code, Error, Result};
+use crate::live::Kind;
 use crate::units::Unit;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 /// The protocol version. A CLI and a daemon talk only when theirs match.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// What `ryucad version` reports. Future cache keys are built from it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,6 +144,18 @@ pub enum Request {
     CheckFormat {},
     #[serde(rename = "daemon.status")]
     DaemonStatus {},
+    /// Registers the connection as a participant of the live session.
+    #[serde(rename = "session.hello")]
+    SessionHello {
+        kind: Kind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// Join this participant instead (an app's second connection).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    #[serde(rename = "participant.list")]
+    ParticipantList {},
     #[serde(rename = "daemon.shutdown")]
     DaemonShutdown {},
 }
@@ -291,6 +304,12 @@ mod tests {
                 expected_revision: Some("r".into()),
             },
             Request::Rebuild { part: None },
+            Request::SessionHello {
+                kind: Kind::Human,
+                name: Some("Dana".into()),
+                participant: None,
+            },
+            Request::ParticipantList {},
         ];
         for (i, r) in reqs.into_iter().enumerate() {
             let line = rpc_request(i as u64, &r);

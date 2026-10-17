@@ -29,6 +29,10 @@ struct Cli {
     /// RYUCAD_NO_DAEMON=1).
     #[arg(long, global = true)]
     no_daemon: bool,
+    /// Act as the agent participant with this name (also
+    /// RYUCAD_PARTICIPANT); `agent` by default.
+    #[arg(long = "as", global = true, value_name = "NAME")]
+    as_name: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -61,6 +65,8 @@ enum Command {
     },
     /// Report files that aren't canonical, broken, unlisted or unknown.
     CheckFormat,
+    /// List the humans and agents attached to the project's session.
+    Participants,
     /// Run, query or stop the project's session daemon.
     #[command(subcommand)]
     Daemon(DaemonCmd),
@@ -327,6 +333,7 @@ fn request(cmd: &Command) -> Option<Request> {
             entity: entity.clone(),
         },
         Command::CheckFormat => Request::CheckFormat {},
+        Command::Participants => Request::ParticipantList {},
     })
 }
 
@@ -352,13 +359,17 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             let no_daemon =
                 cli.no_daemon || std::env::var("RYUCAD_NO_DAEMON").is_ok_and(|v| v == "1");
             if !no_daemon {
-                match client::request(&root, &req) {
+                let name = cli
+                    .as_name
+                    .clone()
+                    .or_else(|| std::env::var("RYUCAD_PARTICIPANT").ok());
+                match client::request(&root, &req, name.as_deref()) {
                     Ok(answer) => return answer,
                     // Never delivered, so running it here is safe.
                     Err(e) => warnings.push(format!("{}; ran in process", e.message)),
                 }
             }
-            server::handle_safely(&mut None, &root, req)
+            server::handle_safely(&mut None, None, None, &root, req)
         }
     }
 }

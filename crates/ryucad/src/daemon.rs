@@ -5,6 +5,7 @@
 use crate::doc::project::MANIFEST;
 use crate::endpoint::Endpoint;
 use crate::error::{Code, Error, Result};
+use crate::live::Live;
 use crate::proto::{Request, VersionInfo, parse_rpc_request, rpc_response};
 use crate::server::handle_safely;
 use crate::session::Session;
@@ -27,7 +28,14 @@ struct State {
     idle: Duration,
     started: Instant,
     last: Mutex<Instant>,
-    session: Mutex<Option<Session>>,
+    core: Mutex<Core>,
+}
+
+/// What requests work on, under one lock: the project's session (opened on
+/// first use) and the live session of who is attached.
+struct Core {
+    session: Option<Session>,
+    live: Live,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -61,7 +69,10 @@ pub fn run(root: &Path, idle: Duration) -> Result<()> {
         idle,
         started: Instant::now(),
         last: Mutex::new(Instant::now()),
-        session: Mutex::new(None),
+        core: Mutex::new(Core {
+            session: None,
+            live: Live::new(),
+        }),
     });
     let watcher = Arc::clone(&state);
     std::thread::spawn(move || {
@@ -70,8 +81,9 @@ pub fn run(root: &Path, idle: Duration) -> Result<()> {
             if !watcher.root.join(MANIFEST).is_file() {
                 stop(&watcher, "the project is gone");
             }
-            // Hold the session lock so no request is mid-flight.
-            let _busy = lock(&watcher.session);
+            // Hold the lock so no request is mid-flight.
+            let mut core = lock(&watcher.core);
+            core.live.expire(Instant::now());
             if lock(&watcher.last).elapsed() >= watcher.idle {
                 stop(&watcher, "idle");
             }
@@ -81,7 +93,13 @@ pub fn run(root: &Path, idle: Duration) -> Result<()> {
         match conn {
             Ok(conn) => {
                 let state = Arc::clone(&state);
-                std::thread::spawn(move || serve(&conn, &state));
+                std::thread::spawn(move || {
+                    let mut me = None;
+                    serve(&conn, &state, &mut me);
+                    if let Some(id) = me {
+                        lock(&state.core).live.goodbye(&id);
+                    }
+                });
             }
             Err(e) => log(&format!("accept failed: {e}")),
         }
@@ -157,8 +175,9 @@ fn status(state: &State) -> Value {
     })
 }
 
-/// Answers requests on one connection until the client hangs up.
-fn serve(conn: &Stream, state: &State) {
+/// Answers requests on one connection until the client hangs up. `me` is
+/// the participant the connection said hello as.
+fn serve(conn: &Stream, state: &State, me: &mut Option<String>) {
     let mut reader = BufReader::new(conn);
     let mut writer = conn;
     let mut line = String::new();
@@ -178,8 +197,17 @@ fn serve(conn: &Stream, state: &State) {
                 Ok(json!({"stopping": true, "pid": std::process::id()}))
             }
             Ok(req) => {
-                let mut session = lock(&state.session);
-                let r = handle_safely(&mut session, &state.root, req);
+                let hello = matches!(req, Request::SessionHello { .. });
+                let mut core = lock(&state.core);
+                let Core { session, live } = &mut *core;
+                let r = handle_safely(session, Some(live), me.as_deref(), &state.root, req);
+                if hello && let Ok(v) = &r {
+                    let id = v["participant"].as_str().map(str::to_owned);
+                    // Saying hello again moves the connection.
+                    if let Some(old) = std::mem::replace(me, id) {
+                        live.goodbye(&old);
+                    }
+                }
                 *lock(&state.last) = Instant::now();
                 r
             }
@@ -196,7 +224,7 @@ fn serve(conn: &Stream, state: &State) {
         }
         if shutdown {
             // Wait for any request in progress, then go.
-            let _busy = lock(&state.session);
+            let _busy = lock(&state.core);
             stop(state, "asked to shut down");
         }
     }

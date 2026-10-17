@@ -118,7 +118,7 @@ fn version_reports_every_component() {
     let r = p.ok(&["version"]);
     assert_eq!(r["ryucad"], env!("CARGO_PKG_VERSION"));
     assert_eq!(r["ryukei"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(r["protocol"], 1);
+    assert_eq!(r["protocol"], 2);
     assert!(r["target"].as_str().unwrap().contains('-'));
     assert!(!r["commit"].as_str().unwrap().is_empty());
 }

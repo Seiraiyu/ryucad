@@ -107,7 +107,7 @@ fn serves_requests_and_shuts_down() {
     let conn = f.connect().unwrap();
     let status = ask(&conn, &Request::DaemonStatus {}).unwrap();
     assert_eq!(status["pid"], child.id());
-    assert_eq!(status["version"]["protocol"], 1);
+    assert_eq!(status["version"]["protocol"], 2);
     ask(&conn, &Request::PartCreate { part: "p".into() }).unwrap();
     let list = ask(&conn, &Request::PartList {}).unwrap();
     assert_eq!(list["parts"][0]["part"], "p");
@@ -273,4 +273,53 @@ fn without_a_daemon_the_cli_still_answers() {
     let r = cli(&f, &["--no-daemon", "part", "list"]);
     assert_eq!(r["warnings"], serde_json::json!([]));
     assert_eq!(cli(&f, &["daemon", "status"])["result"]["running"], false);
+}
+
+/// The names of the attached participants, in ID order.
+fn names(v: &Value) -> Vec<String> {
+    v["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            format!(
+                "{}:{}",
+                p["kind"].as_str().unwrap(),
+                p["name"].as_str().unwrap()
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn participants_come_and_go() {
+    let f = fixture();
+    let r = cli(&f, &["participants"]);
+    assert_eq!(names(&r["result"]), ["agent:agent"]);
+    // An agent named with --as is a second participant; the first persists
+    // between CLI calls.
+    let r = cli(&f, &["--as", "reviewer", "participants"]);
+    assert_eq!(names(&r["result"]), ["agent:agent", "agent:reviewer"]);
+    // A human is attached while its connection is open.
+    let conn = f.connect().unwrap();
+    let hello = Request::SessionHello {
+        kind: ryucad::live::Kind::Human,
+        name: Some("Dana".into()),
+        participant: None,
+    };
+    let me = ask(&conn, &hello).unwrap()["participant"].clone();
+    let r = cli(&f, &["participants"]);
+    assert_eq!(
+        names(&r["result"]),
+        ["agent:agent", "agent:reviewer", "human:Dana"]
+    );
+    assert_eq!(r["result"]["participants"][2]["id"], me);
+    drop(conn);
+    f.wait_until(|| names(&cli(&f, &["participants"])["result"]).len() == 2);
+    let r = cli(&f, &["--as", " ", "participants"]);
+    assert_eq!(r["error"]["code"], "invalid_param");
+    // In process, nobody is attached.
+    let r = cli(&f, &["--no-daemon", "participants"]);
+    assert_eq!(r["result"], serde_json::json!({"participants": []}));
+    cli(&f, &["daemon", "stop"]);
 }

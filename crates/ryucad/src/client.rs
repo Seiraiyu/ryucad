@@ -4,6 +4,7 @@
 use crate::daemon::IDLE_VAR;
 use crate::endpoint::Endpoint;
 use crate::error::{Code, Error, Result};
+use crate::live::Kind;
 use crate::proto::{Request, VersionInfo, parse_rpc_response, rpc_request};
 use interprocess::local_socket::{RecvHalf, SendHalf, Stream, prelude::*};
 use serde_json::{Value, json};
@@ -55,15 +56,25 @@ fn unavailable(why: impl std::fmt::Display) -> Error {
     Error::new(Code::Daemon, format!("daemon unavailable: {why}"))
 }
 
-/// Sends `req` to the project's daemon, starting one if none is running.
+/// Sends `req` to the project's daemon, starting one if none is running,
+/// as the agent participant `name` (`agent` when `None`).
 ///
 /// `Err` means the request was never delivered, so running it in process
 /// instead is safe. `Ok` holds the daemon's answer; if the connection broke
 /// after sending, that answer is a `daemon` error, because the request may
 /// have been applied and must not be repeated.
-pub fn request(root: &Path, req: &Request) -> Result<Result<Value>> {
+pub fn request(root: &Path, req: &Request, name: Option<&str>) -> Result<Result<Value>> {
     let endpoint = Endpoint::for_project(root)?;
     let mut conn = ready(root, &endpoint)?;
+    let hello = Request::SessionHello {
+        kind: Kind::Agent,
+        name: name.map(str::to_owned),
+        participant: None,
+    };
+    // A refused hello (a bad name) is the agent's to fix; nothing else ran.
+    if let Err(e) = conn.call(&hello).map_err(unavailable)? {
+        return Ok(Err(e));
+    }
     Ok(conn.call(req).unwrap_or_else(|e| {
         Err(Error::new(
             Code::Daemon,

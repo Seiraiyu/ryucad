@@ -5,6 +5,7 @@ use crate::doc::files::{Feature, FeatureType, Manifest, PartFile, Placement, num
 use crate::doc::id::Id;
 use crate::doc::project::{MANIFEST, Part, feature_path, part_dir, part_path, write_json};
 use crate::error::{Code, Error, Result};
+use crate::live::{self, Live};
 use crate::proto::{PlacementArg, Position, Request, VersionInfo};
 use crate::rebuild;
 use crate::session::Session;
@@ -32,9 +33,23 @@ pub fn init(root: &Path, default_unit: Option<Unit>) -> Result<Value> {
 }
 
 /// Answers one request against `session`, after bringing it up to date
-/// with the files.
+/// with the files, as a run with no daemon does.
 pub fn handle(session: &mut Session, req: Request) -> Result<Value> {
+    handle_live(session, None, None, req)
+}
+
+/// Answers one request. `live` is the daemon's live session (`None` in
+/// process) and `me` the participant asking, if its connection said hello.
+pub fn handle_live(
+    session: &mut Session,
+    mut live: Option<&mut Live>,
+    me: Option<&str>,
+    req: Request,
+) -> Result<Value> {
     session.refresh()?;
+    if let (Some(l), Some(me)) = (live.as_deref_mut(), me) {
+        l.touch(me);
+    }
     match req {
         Request::ProjectInit { .. } => Err(Error::new(
             Code::ProjectExists,
@@ -108,14 +123,34 @@ pub fn handle(session: &mut Session, req: Request) -> Result<Value> {
             entity,
         } => inspect(session, &part, feature.as_deref(), entity.as_deref()),
         Request::CheckFormat {} => check_format(session),
+        Request::SessionHello {
+            kind,
+            name,
+            participant,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("session.hello"))?;
+            let id = live.hello(kind, name.as_deref(), participant.as_deref())?;
+            Ok(json!({"participant": id, "session": live.list()}))
+        }
+        // With no daemon, nobody is attached.
+        Request::ParticipantList {} => {
+            Ok(live.map_or_else(|| json!({"participants": []}), |l| l.list()))
+        }
     }
 }
 
-/// [`handle`] behind a panic boundary. `slot` holds the session between
-/// requests; it is opened on first use, and dropped after a panic so the
-/// next request starts again from the files.
-pub fn handle_safely(slot: &mut Option<Session>, root: &Path, req: Request) -> Result<Value> {
-    guarded(slot, root, |s| handle(s, req))
+/// [`handle_live`] behind a panic boundary. `slot` holds the session
+/// between requests; it is opened on first use, and dropped after a panic
+/// so the next request starts again from the files. The live session is
+/// kept: who is attached doesn't depend on the files.
+pub fn handle_safely(
+    slot: &mut Option<Session>,
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    root: &Path,
+    req: Request,
+) -> Result<Value> {
+    guarded(slot, root, |s| handle_live(s, live, me, req))
 }
 
 fn guarded(
@@ -1019,7 +1054,7 @@ pub(crate) mod tests {
     fn a_panic_is_an_internal_error_and_drops_the_session() {
         let (dir, _) = fresh();
         let mut slot = None;
-        let r = handle_safely(&mut slot, dir.path(), Request::PartList {}).unwrap();
+        let r = handle_safely(&mut slot, None, None, dir.path(), Request::PartList {}).unwrap();
         assert_eq!(r["parts"], json!([]));
         assert!(slot.is_some());
         let prev = std::panic::take_hook();
@@ -1031,7 +1066,7 @@ pub(crate) mod tests {
             (Code::Internal, Some("boom"))
         );
         assert!(slot.is_none());
-        assert!(handle_safely(&mut slot, dir.path(), Request::PartList {}).is_ok());
+        assert!(handle_safely(&mut slot, None, None, dir.path(), Request::PartList {}).is_ok());
     }
 
     #[test]
@@ -1039,5 +1074,46 @@ pub(crate) mod tests {
         let (_dir, mut s) = fresh();
         let e = call(&mut s, "daemon.status", json!({})).unwrap_err();
         assert_eq!(e.code, Code::Usage);
+    }
+
+    /// `call` with the daemon's live session, as participant `me`.
+    pub(crate) fn call_live(
+        s: &mut Session,
+        live: &mut Live,
+        me: Option<&str>,
+        method: &str,
+        params: Value,
+    ) -> Result<Value> {
+        handle_live(s, Some(live), me, Request::from_rpc(method, Some(params))?)
+    }
+
+    #[test]
+    fn without_a_daemon_nobody_is_attached() {
+        let (_dir, mut s) = fresh();
+        let e = call(&mut s, "session.hello", json!({"kind": "agent"})).unwrap_err();
+        assert_eq!(e.code, Code::NoLiveSession);
+        let r = call(&mut s, "participant.list", json!({})).unwrap();
+        assert_eq!(r, json!({"participants": []}));
+    }
+
+    #[test]
+    fn hello_registers_a_participant() {
+        let (_dir, mut s) = fresh();
+        let mut live = Live::new();
+        let r = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "session.hello",
+            json!({"kind": "human", "name": "Dana"}),
+        )
+        .unwrap();
+        let id = r["participant"].as_str().unwrap().to_owned();
+        assert_eq!(
+            r["session"]["participants"],
+            json!([{"id": id, "kind": "human", "name": "Dana", "status": null}])
+        );
+        let list = call_live(&mut s, &mut live, Some(&id), "participant.list", json!({})).unwrap();
+        assert_eq!(list, r["session"]);
     }
 }
