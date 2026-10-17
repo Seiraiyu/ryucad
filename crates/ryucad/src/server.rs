@@ -1,15 +1,23 @@
 //! The request handlers. The daemon and the in-process CLI both call
 //! [`handle`], so they give the same answers.
 
+use crate::activity::{self, EntryKind};
+use crate::config;
 use crate::doc::files::{Feature, FeatureType, Manifest, PartFile, Placement, number};
 use crate::doc::id::Id;
 use crate::doc::project::{MANIFEST, Part, feature_path, part_dir, part_path, write_json};
+use crate::entity::{self, EntityRef};
 use crate::error::{Code, Error, Result};
-use crate::proto::{PlacementArg, Position, Request, VersionInfo};
+use crate::live::{self, Live, SelectMode};
+use crate::mesh;
+use crate::notify::Topic;
+use crate::proto::{Answer, PlacementArg, Position, Request, Transfer, VersionInfo};
 use crate::rebuild;
 use crate::session::Session;
 use crate::units::{Quantity, Unit};
+use crate::view::{Camera, DEFAULT_PROJECTION, StandardView};
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -32,9 +40,114 @@ pub fn init(root: &Path, default_unit: Option<Unit>) -> Result<Value> {
 }
 
 /// Answers one request against `session`, after bringing it up to date
-/// with the files.
+/// with the files, as a run with no daemon does.
 pub fn handle(session: &mut Session, req: Request) -> Result<Value> {
-    session.refresh()?;
+    handle_live(session, None, None, req)
+}
+
+/// Answers one request. `live` is the daemon's live session (`None` in
+/// process) and `me` the participant asking, if its connection said hello.
+pub fn handle_live(
+    session: &mut Session,
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    req: Request,
+) -> Result<Value> {
+    answer_live(session, live, me, req).map(|a| a.result)
+}
+
+/// [`handle_live`], with any bytes the answer carries.
+pub fn answer_live(
+    session: &mut Session,
+    mut live: Option<&mut Live>,
+    me: Option<&str>,
+    req: Request,
+) -> Result<Answer> {
+    let external = session.refresh_changes()?;
+    let changed = !external.is_empty();
+    let before = live.as_deref().map(Live::snapshot);
+    if let Some(l) = live.as_deref_mut() {
+        if changed {
+            activity::record_external(l, external);
+        }
+        if let Some(me) = me {
+            l.touch(me);
+        }
+    }
+    let mutates = req.mutates();
+    // A daemon keeps what its writes change, for the log and for undo;
+    // undo and redo log themselves.
+    let (method, params) = (req.method(), req.params());
+    let logs_itself = matches!(req, Request::Undo { .. } | Request::Redo { .. });
+    let files_before = match (&live, mutates && !logs_itself) {
+        (Some(_), true) => Some(activity::snapshot(session.root())?),
+        _ => None,
+    };
+    let result = match req {
+        Request::MeshGet {
+            part,
+            feature,
+            quality,
+            transfer: Some(Transfer::Binary),
+        } => mesh_binary(session, &part, feature.as_deref(), quality.as_deref()),
+        Request::Render {
+            part,
+            camera,
+            participant,
+            view,
+            width,
+            height,
+            highlight,
+            edges,
+            labels,
+        } => {
+            let target = participant.as_deref().map(|p| (p, live.as_deref()));
+            let shown = match live.as_deref() {
+                Some(l) => l
+                    .participants()
+                    .flat_map(|p| p.highlights.clone())
+                    .collect(),
+                None => Vec::new(),
+            };
+            let ask = RenderAsk {
+                part,
+                camera,
+                view,
+                width: width.unwrap_or(800),
+                height: height.unwrap_or(600),
+                highlight,
+                edges: edges.unwrap_or(true),
+                labels: labels.unwrap_or(false),
+            };
+            render(session, target, shown, ask)
+        }
+        req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
+    };
+    if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
+    {
+        let files = activity::diff(&files_before, &activity::snapshot(session.root())?);
+        if !files.is_empty() {
+            let who = l.caller(me);
+            activity::record(l, EntryKind::Change, &who, &method, params, None, files);
+        }
+    }
+    if let (Some(l), Some(before)) = (live, before) {
+        // Entities that no longer exist drop out of every selection.
+        if changed || mutates {
+            l.prune(|r| r.resolve(session).is_ok());
+        }
+        l.announce(&before);
+        publish(l, session);
+    }
+    result
+}
+
+fn dispatch(
+    session: &mut Session,
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    req: Request,
+) -> Result<Value> {
     match req {
         Request::ProjectInit { .. } => Err(Error::new(
             Code::ProjectExists,
@@ -108,21 +221,216 @@ pub fn handle(session: &mut Session, req: Request) -> Result<Value> {
             entity,
         } => inspect(session, &part, feature.as_deref(), entity.as_deref()),
         Request::CheckFormat {} => check_format(session),
+        Request::SessionHello {
+            kind,
+            name,
+            participant,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("session.hello"))?;
+            let id = live.hello(kind, name.as_deref(), participant.as_deref())?;
+            Ok(json!({"participant": id, "session": live.list()}))
+        }
+        // With no daemon, nobody is attached.
+        Request::ParticipantList {} => {
+            Ok(live.map_or_else(|| json!({"participants": []}), |l| l.list()))
+        }
+        // A daemon's connection answers this itself: it needs the socket.
+        Request::Subscribe { .. } => match live {
+            None => Err(live::no_live_session("subscribe")),
+            Some(_) => Err(Error::new(Code::Usage, "subscribe needs a connection")),
+        },
+        Request::SelectionGet { participant } => {
+            let target = match &live {
+                Some(l) => l.target(participant.as_deref())?,
+                None => None,
+            };
+            Ok(match target {
+                Some(p) => json!({"participant": p.id, "selection": p.selection}),
+                None => json!({"participant": null, "selection": []}),
+            })
+        }
+        Request::SelectionSet { entities, mode } => {
+            let live = live.ok_or_else(|| live::no_live_session("selection.set"))?;
+            // What is being removed may no longer exist.
+            let refs = match mode {
+                SelectMode::Remove => entities
+                    .iter()
+                    .map(|s| EntityRef::parse(s))
+                    .collect::<Result<Vec<_>>>()?,
+                _ => entity::parse_all(session, &entities)?,
+            };
+            let id = live.caller(me);
+            let selection = live.select(&id, refs, mode)?;
+            Ok(json!({"participant": id, "selection": selection}))
+        }
+        Request::CameraGet { participant } => {
+            let target = match &live {
+                Some(l) => l.target(participant.as_deref())?,
+                None => None,
+            };
+            Ok(match target {
+                Some(p) => json!({"participant": p.id, "camera": p.camera}),
+                None => json!({"participant": null, "camera": null}),
+            })
+        }
+        Request::CameraSet { camera, view, fit } => {
+            let live = live.ok_or_else(|| live::no_live_session("camera.set"))?;
+            let id = live.caller(me);
+            let camera: Camera = match camera {
+                Some(_) if view.is_some() || !fit.is_empty() => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        "give a camera, or a view and/or entities to fit, not both",
+                    ));
+                }
+                Some(c) => c.resolve(session.project().manifest.default_unit)?,
+                None => {
+                    let current = live.get(&id)?.camera.clone();
+                    framed(session, current.as_ref(), view.as_deref(), &fit)?
+                }
+            };
+            live.get_mut(&id)?.camera = Some(camera.clone());
+            Ok(json!({"participant": id, "camera": camera}))
+        }
+        Request::HighlightSet {
+            entities,
+            style,
+            label,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("highlight.set"))?;
+            let refs = entity::parse_all(session, &entities)?;
+            let id = live.caller(me);
+            let highlights = live.highlight(&id, style, label, refs)?;
+            Ok(json!({"participant": id, "highlights": highlights}))
+        }
+        Request::HighlightClear { style } => {
+            let live = live.ok_or_else(|| live::no_live_session("highlight.clear"))?;
+            let id = live.caller(me);
+            let highlights = live.clear_highlights(&id, style)?;
+            Ok(json!({"participant": id, "highlights": highlights}))
+        }
+        Request::ActivityLog { limit, before } => {
+            let entries = live.map_or_else(Vec::new, |l| l.log.page(limit.unwrap_or(50), before));
+            Ok(json!({ "entries": entries }))
+        }
+        Request::Undo { entry } => {
+            let live = live.ok_or_else(|| live::no_live_session("undo"))?;
+            let who = live.caller(me);
+            activity::undo(live, session, &who, entry, false)
+        }
+        Request::Redo { entry } => {
+            let live = live.ok_or_else(|| live::no_live_session("redo"))?;
+            let who = live.caller(me);
+            activity::undo(live, session, &who, entry, true)
+        }
+        Request::MeshGet {
+            part,
+            feature,
+            quality,
+            transfer: _,
+        } => mesh_get(session, &part, feature.as_deref(), quality.as_deref()),
+        // A render's answer is bytes: `answer_live` handles it.
+        Request::Render { .. } => Err(Error::new(Code::Internal, "render answers with bytes")),
+        Request::Doctor {} => crate::doctor::report(session.root()),
+        Request::DoctorRepair { repairs, params } => {
+            let params = crate::doctor::Params::from_json(&params)?;
+            let r = crate::doctor::repair(session.root(), &repairs, &params)?;
+            session.reload()?;
+            Ok(r)
+        }
+        Request::HistoryLog { part, limit } => {
+            let part = part.as_deref().map(part_id).transpose()?;
+            if let Some(p) = &part {
+                session.project().part(p)?;
+            }
+            let files = activity::snapshot(session.root())?;
+            crate::git::history(
+                session.root(),
+                &files,
+                part.as_ref().map(Id::as_str),
+                limit.unwrap_or(50),
+            )
+        }
+        Request::ConfigGet { key, scope } => {
+            let scope = scope.as_deref().map(config::Scope::parse).transpose()?;
+            let mut v = config::get(
+                session.project().manifest.default_unit,
+                key.as_deref(),
+                scope,
+            )?;
+            v["project_revision"] = json!(config::project_revision(session.root())?);
+            Ok(v)
+        }
+        Request::ConfigSet {
+            key,
+            value,
+            scope,
+            expected_revision,
+        } => {
+            let scope = scope.as_deref().map(config::Scope::parse).transpose()?;
+            let v = match config::validate(&key, &value, scope)? {
+                config::Scope::Project => {
+                    let rev = config::project_revision(session.root())?;
+                    if let Some(e) = expected_revision.filter(|e| *e != rev) {
+                        return Err(Error::new(
+                            Code::Conflict,
+                            format!(
+                                "the project changed since revision {e}; read it again and retry"
+                            ),
+                        )
+                        .with("expected", e)
+                        .with("actual", rev));
+                    }
+                    let unit = Unit::parse(value.as_str().expect("validated")).expect("validated");
+                    write_json(
+                        &session.root().join(MANIFEST),
+                        &Manifest { default_unit: unit }.to_json(),
+                    )?;
+                    session.reload()?;
+                    let mut v = config::get(unit, Some(&key), None)?;
+                    v["project_revision"] = json!(config::project_revision(session.root())?);
+                    v
+                }
+                config::Scope::User => config::set_user(&key, value)?,
+            };
+            if let Some(live) = live {
+                if key == "daemon.poll_ms" {
+                    live.poll_ms = v["value"].as_u64().unwrap_or(250);
+                }
+                let note = json!({"key": key, "scope": v["scope"], "value": v["value"]});
+                live.hub.send(Topic::Project, "config.changed", &note);
+            }
+            Ok(v)
+        }
+        Request::ActivitySet { status, entities } => {
+            let live = live.ok_or_else(|| live::no_live_session("activity.set"))?;
+            let refs = entity::parse_all(session, &entities)?;
+            let id = live.caller(me);
+            live.set_status(&id, &status, refs)?;
+            Ok(json!({"participant": id, "status": live.get(&id)?.status}))
+        }
     }
 }
 
-/// [`handle`] behind a panic boundary. `slot` holds the session between
-/// requests; it is opened on first use, and dropped after a panic so the
-/// next request starts again from the files.
-pub fn handle_safely(slot: &mut Option<Session>, root: &Path, req: Request) -> Result<Value> {
-    guarded(slot, root, |s| handle(s, req))
+/// [`handle_live`] behind a panic boundary. `slot` holds the session
+/// between requests; it is opened on first use, and dropped after a panic
+/// so the next request starts again from the files. The live session is
+/// kept: who is attached doesn't depend on the files.
+pub fn handle_safely(
+    slot: &mut Option<Session>,
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    root: &Path,
+    req: Request,
+) -> Result<Answer> {
+    guarded(slot, root, |s| answer_live(s, live, me, req))
 }
 
-fn guarded(
+fn guarded<T>(
     slot: &mut Option<Session>,
     root: &Path,
-    f: impl FnOnce(&mut Session) -> Result<Value>,
-) -> Result<Value> {
+    f: impl FnOnce(&mut Session) -> Result<T>,
+) -> Result<T> {
     let session = match slot {
         Some(s) => s,
         None => slot.insert(Session::open(root)?),
@@ -474,6 +782,101 @@ fn feature_list(session: &Session, part: &str) -> Result<Value> {
     Ok(json!({"part": p.id, "features": features, "orphans": p.orphans(), "revision": p.revision}))
 }
 
+/// A part's rebuild as agents and subscribers see it: each feature's
+/// status, hash and counts.
+fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
+    let revision = session.project().part(id)?.revision.clone();
+    let r = session.rebuilt(id)?;
+    let features: Vec<Value> = r
+        .features
+        .iter()
+        .map(|(fid, b)| match b {
+            Ok(b) => {
+                let c = b.body.counts();
+                json!({"id": fid, "ok": true, "hash": b.hash,
+                       "counts": {"faces": c.faces, "edges": c.edges, "vertices": c.vertices}})
+            }
+            Err(e) => json!({"id": fid, "ok": false, "error": e}),
+        })
+        .collect();
+    Ok(json!({"part": id, "revision": revision, "hash": r.hash,
+              "failed": r.failed(), "features": features}))
+}
+
+/// Tells subscribers what changed since they were last told: the project
+/// (manifest and parts) and every part whose revision moved, rebuilt.
+/// While nobody watches, it only notes the current state, so a new
+/// subscriber hears of changes made after it subscribed.
+pub fn publish(live: &mut Live, session: &mut Session) {
+    let watched = live.hub.is_watched();
+    let p = session.project();
+    let project = json!({
+        "default_unit": p.manifest.default_unit,
+        "parts": p.parts.keys().collect::<Vec<_>>(),
+    });
+    if watched && live.seen.project != project {
+        live.hub.send(Topic::Project, "project.changed", &project);
+    }
+    live.seen.project = project;
+    let revisions: BTreeMap<Id, String> = p
+        .parts
+        .iter()
+        .map(|(id, part)| (id.clone(), part.revision.clone()))
+        .collect();
+    if !watched {
+        live.seen.parts = revisions;
+        return;
+    }
+    let mut parts = Vec::new();
+    for (id, rev) in &revisions {
+        if live.seen.parts.get(id) == Some(rev) {
+            continue;
+        }
+        let mut report =
+            part_report(session, id).unwrap_or_else(|e| json!({"part": id, "error": e}));
+        if let Ok(Err(e)) = session.project().part(id).map(|p| &p.file) {
+            report["error"] = json!(e);
+        }
+        parts.push(report);
+    }
+    let removed: Vec<&Id> = live
+        .seen
+        .parts
+        .keys()
+        .filter(|id| !revisions.contains_key(*id))
+        .collect();
+    if !parts.is_empty() || !removed.is_empty() {
+        let params = json!({"parts": parts, "removed": removed});
+        live.hub.send(Topic::Model, "model.changed", &params);
+    }
+    live.seen.parts = revisions;
+}
+
+/// The daemon's periodic check while anyone watches: picks up changes made
+/// behind its back (another process, an editor, `git checkout`) and tells
+/// subscribers. Errors wait for the next request to report them.
+pub fn tick(slot: &mut Option<Session>, live: &mut Live, root: &Path) {
+    if live.hub.is_watched() {
+        settle(slot, live, root);
+    }
+}
+
+/// Brings the session and what subscribers know up to date with the
+/// files.
+pub fn settle(slot: &mut Option<Session>, live: &mut Live, root: &Path) {
+    let _ = guarded(slot, root, |s| {
+        let before = live.snapshot();
+        let external = s.refresh_changes()?;
+        if !external.is_empty() {
+            activity::record_external(live, external);
+            live.prune(|r| r.resolve(s).is_ok());
+        }
+        live.announce(&before);
+        publish(live, s);
+        Ok(Value::Null)
+    });
+}
+
 fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
     let ids: Vec<Id> = match part {
         Some(p) => vec![part_id(p)?],
@@ -482,25 +885,11 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
     let mut parts = Vec::new();
     let mut failed = 0;
     for id in ids {
-        let revision = session.project().part(&id)?.revision.clone();
         // A part whose list can't be read can't be rebuilt.
         order(session.project().part(&id)?)?;
-        let r = session.rebuilt(&id)?;
-        failed += r.failed();
-        let features: Vec<Value> = r
-            .features
-            .iter()
-            .map(|(fid, b)| match b {
-                Ok(b) => {
-                    let c = b.body.counts();
-                    json!({"id": fid, "ok": true, "hash": b.hash,
-                           "counts": {"faces": c.faces, "edges": c.edges, "vertices": c.vertices}})
-                }
-                Err(e) => json!({"id": fid, "ok": false, "error": e}),
-            })
-            .collect();
-        parts.push(json!({"part": id, "revision": revision, "hash": r.hash,
-                          "failed": r.failed(), "features": features}));
+        let report = part_report(session, &id)?;
+        failed += report["failed"].as_u64().unwrap_or(0) as usize;
+        parts.push(report);
     }
     let report = json!({ "parts": parts });
     if failed > 0 {
@@ -512,6 +901,349 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
         });
     }
     Ok(report)
+}
+
+/// The display meshes of a part's bodies, `(feature, body, mesh)` in
+/// feature order; a feature that failed to build has its error instead.
+pub fn meshes(
+    session: &mut Session,
+    part: &Id,
+    only: Option<&Id>,
+    quality: mesh::Quality,
+) -> Result<Vec<(Id, Result<mesh::Meshed>)>> {
+    let p = session.project().part(part)?;
+    if let Some(f) = only {
+        feature(p, f)?;
+    }
+    let features: BTreeMap<Id, Feature> = p
+        .features
+        .iter()
+        .filter_map(|(id, f)| Some((id.clone(), f.as_ref().ok()?.clone())))
+        .collect();
+    let budget = config::user("display.mesh_cache_mib")
+        .as_u64()
+        .unwrap_or(256) as usize
+        * 1024
+        * 1024;
+    let built: Vec<(Id, Result<crate::rebuild::Built>)> = session
+        .rebuilt(part)?
+        .features
+        .iter()
+        .filter(|(id, _)| only.is_none_or(|o| o == id))
+        .cloned()
+        .collect();
+    let ok: Vec<(&Feature, &crate::rebuild::Built)> = built
+        .iter()
+        .filter_map(|(id, b)| Some((&features[id], b.as_ref().ok()?)))
+        .collect();
+    let mut made = session.meshes.get_all(&ok, quality, budget).into_iter();
+    Ok(built
+        .into_iter()
+        .map(|(id, b)| {
+            let r = b.map(|b| mesh::Meshed {
+                body: b.body,
+                hash: b.hash,
+                mesh: made.next().expect("one mesh per built body"),
+            });
+            (id, r)
+        })
+        .collect())
+}
+
+/// The box around the given entities, or the whole model when there are
+/// none, from coarse display meshes.
+pub fn model_box(
+    session: &mut Session,
+    refs: &[EntityRef],
+) -> Result<Option<([f64; 3], [f64; 3])>> {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    let mut grow = |p: &ryukei::geom::Point3| {
+        for (k, x) in [p.x, p.y, p.z].into_iter().enumerate() {
+            lo[k] = lo[k].min(x);
+            hi[k] = hi[k].max(x);
+        }
+    };
+    let coarse = mesh::Quality::Coarse;
+    if refs.is_empty() {
+        let parts: Vec<Id> = session.project().parts.keys().cloned().collect();
+        for part in parts {
+            for (_, m) in meshes(session, &part, None, coarse)? {
+                if let Ok(Ok(mesh)) = m.as_ref().map(|m| m.mesh.mesh.as_ref()) {
+                    mesh.positions.iter().for_each(&mut grow);
+                }
+            }
+        }
+    }
+    for r in refs {
+        for (_, m) in meshes(session, &r.part, Some(&r.feature), coarse)? {
+            let Ok(m) = m else { continue };
+            let Ok(mesh) = &m.mesh.mesh else { continue };
+            let body = &m.body;
+            let named = |n: String| n == r.name;
+            for f in &mesh.faces {
+                if named(body.face(f.face).expect("live").name.to_string()) {
+                    for c in &mesh.corners[f.corners.start as usize..f.corners.end as usize] {
+                        grow(&mesh.positions[c.position as usize]);
+                    }
+                }
+            }
+            for e in &mesh.edges {
+                if named(body.edge(e.edge).expect("live").name.to_string()) {
+                    e.positions
+                        .iter()
+                        .for_each(|p| grow(&mesh.positions[*p as usize]));
+                }
+            }
+            for (i, v) in body.vertices().enumerate() {
+                if named(body.vertex(v).expect("live").name.to_string()) {
+                    grow(&mesh.positions[i]);
+                }
+            }
+        }
+    }
+    Ok((lo[0] <= hi[0]).then_some((lo, hi)))
+}
+
+/// A camera from a standard view and/or framing entities. With no view,
+/// it keeps `current`'s direction (iso when there is none).
+fn framed(
+    session: &mut Session,
+    current: Option<&Camera>,
+    view: Option<&str>,
+    fit: &[String],
+) -> Result<Camera> {
+    let view = view.map(StandardView::parse).transpose()?;
+    let refs = entity::parse_all(session, fit)?;
+    let Some((lo, hi)) = model_box(session, &refs)? else {
+        return Err(Error::new(Code::InvalidParam, "there is nothing to frame"));
+    };
+    Ok(match (view, current) {
+        (None, Some(c)) => crate::view::refit(c, lo, hi),
+        (v, c) => crate::view::frame(
+            lo,
+            hi,
+            v.unwrap_or(StandardView::Iso),
+            c.map_or(DEFAULT_PROJECTION, |c| c.projection),
+        ),
+    })
+}
+
+/// A render request, unpacked.
+struct RenderAsk {
+    part: Option<String>,
+    camera: Option<crate::view::CameraArg>,
+    view: Option<String>,
+    width: u32,
+    height: u32,
+    highlight: Vec<String>,
+    edges: bool,
+    labels: bool,
+}
+
+/// Renders the model. `target` names a participant whose camera to use
+/// (with the live session to find it in, if any); `shown` are the
+/// participants' highlights, drawn in their styles.
+fn render(
+    session: &mut Session,
+    target: Option<(&str, Option<&Live>)>,
+    shown: Vec<live::Highlight>,
+    ask: RenderAsk,
+) -> Result<Answer> {
+    use crate::render::{self as r, Geometry, Label, Line, Options, Triangle};
+    r::check_size(ask.width, ask.height)?;
+    let parts: Vec<Id> = match &ask.part {
+        Some(p) => {
+            let id = part_id(p)?;
+            session.project().part(&id)?;
+            vec![id]
+        }
+        None => session.project().parts.keys().cloned().collect(),
+    };
+    // What to colour, and how: every participant's highlights in their
+    // styles, then the request's own as notes.
+    let mut marks: BTreeMap<String, (r::Rgb, Option<String>)> = BTreeMap::new();
+    for h in &shown {
+        let color = match h.style {
+            live::Style::Pending => r::PENDING,
+            live::Style::Changed => r::CHANGED,
+            live::Style::Note => r::NOTE,
+        };
+        for e in &h.entities {
+            marks.insert(e.to_string(), (color, h.label.clone()));
+        }
+    }
+    for e in entity::parse_all(session, &ask.highlight)? {
+        marks.insert(e.to_string(), (r::NOTE, None));
+    }
+    let mut g = Geometry::default();
+    // Renders don't follow anyone's display quality, so they compare
+    // across machines.
+    for part in &parts {
+        for (fid, m) in meshes(session, part, None, mesh::Quality::Normal)? {
+            let Ok(m) = m else { continue };
+            let Ok(mesh) = &m.mesh.mesh else { continue };
+            let base = g.positions.len() as u32;
+            g.positions
+                .extend(mesh.positions.iter().map(|p| [p.x, p.y, p.z]));
+            let key = |name: String| format!("{part}/{fid}/{name}");
+            let mut label = |name: &str, text: &Option<String>, pts: &[u32]| {
+                if !ask.labels || pts.is_empty() {
+                    return;
+                }
+                let n = pts.len() as f64;
+                let mut at = [0.0; 3];
+                for p in pts {
+                    let q = mesh.positions[*p as usize];
+                    at = [at[0] + q.x / n, at[1] + q.y / n, at[2] + q.z / n];
+                }
+                let text = text.clone().unwrap_or_else(|| name[..8].to_owned());
+                g.labels.push(Label { at, text });
+            };
+            for f in &mesh.faces {
+                let name = m.body.face(f.face).expect("live").name.to_string();
+                let mark = marks.get(&key(name.clone()));
+                let color = mark.map_or(r::SURFACE, |(c, _)| *c);
+                for t in &mesh.triangles[f.triangles.start as usize..f.triangles.end as usize] {
+                    let c = t.map(|i| mesh.corners[i as usize]);
+                    g.triangles.push(Triangle {
+                        p: c.map(|c| base + c.position),
+                        n: c.map(|c| {
+                            let n = c.normal.get();
+                            [n.x as f32, n.y as f32, n.z as f32]
+                        }),
+                        color,
+                    });
+                }
+                if let Some((_, text)) = mark {
+                    let pts: Vec<u32> = mesh.corners
+                        [f.corners.start as usize..f.corners.end as usize]
+                        .iter()
+                        .map(|c| c.position)
+                        .collect();
+                    label(&name, text, &pts);
+                }
+            }
+            for e in &mesh.edges {
+                let name = m.body.edge(e.edge).expect("live").name.to_string();
+                let points: Vec<u32> = e.positions.iter().map(|p| base + p).collect();
+                match marks.get(&key(name.clone())) {
+                    Some((color, text)) => {
+                        label(&name, text, &e.positions);
+                        g.lines.push(Line {
+                            points,
+                            color: *color,
+                            width: 3.0,
+                        });
+                    }
+                    None if ask.edges => g.lines.push(Line {
+                        points,
+                        color: r::EDGE,
+                        width: 1.0,
+                    }),
+                    None => {}
+                }
+            }
+            for (i, v) in m.body.vertices().enumerate() {
+                let name = m.body.vertex(v).expect("live").name.to_string();
+                if let Some((color, text)) = marks.get(&key(name.clone())) {
+                    label(&name, text, &[i as u32]);
+                    g.lines.push(Line {
+                        points: vec![base + i as u32],
+                        color: *color,
+                        width: 7.0,
+                    });
+                }
+            }
+        }
+    }
+    let camera = match (ask.camera, target, ask.view.as_deref()) {
+        (Some(c), _, _) => c.resolve(session.project().manifest.default_unit)?,
+        (None, Some((p, live)), _) => {
+            let live =
+                live.ok_or_else(|| live::no_live_session("render with a participant's camera"))?;
+            live.get(p)?.camera.clone().ok_or_else(|| {
+                Error::new(Code::InvalidParam, format!("participant {p} has no camera"))
+                    .with("participant", p)
+            })?
+        }
+        (None, None, view) => {
+            let view = view
+                .map(StandardView::parse)
+                .transpose()?
+                .unwrap_or(StandardView::Iso);
+            let (lo, hi) = bounds(&g.positions).unwrap_or(([-0.5; 3], [0.5; 3]));
+            crate::view::frame(lo, hi, view, DEFAULT_PROJECTION)
+        }
+    };
+    let options = Options {
+        silhouettes: ask.edges,
+        triad: true,
+    };
+    let img = r::render(&g, &camera, ask.width, ask.height, options)?;
+    let result =
+        json!({"part": ask.part, "width": ask.width, "height": ask.height, "camera": camera});
+    Ok(Answer::bytes(result, "image/png", img.png()))
+}
+
+/// The box around some points.
+fn bounds(points: &[[f64; 3]]) -> Option<([f64; 3], [f64; 3])> {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for p in points {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    (!points.is_empty()).then_some((lo, hi))
+}
+
+/// The part, feature and quality a mesh request names.
+fn mesh_args(
+    part: &str,
+    only: Option<&str>,
+    quality: Option<&str>,
+) -> Result<(Id, Option<Id>, mesh::Quality)> {
+    let quality = match quality {
+        Some(q) => mesh::Quality::parse(q)?,
+        None => mesh::Quality::preferred(),
+    };
+    Ok((part_id(part)?, only.map(feature_id).transpose()?, quality))
+}
+
+fn mesh_binary(
+    session: &mut Session,
+    part: &str,
+    only: Option<&str>,
+    quality: Option<&str>,
+) -> Result<Answer> {
+    let (pid, only, quality) = mesh_args(part, only, quality)?;
+    let bodies = meshes(session, &pid, only.as_ref(), quality)?;
+    let result = json!({"part": pid, "quality": quality.as_str()});
+    Ok(Answer::bytes(result, mesh::ENCODING, mesh::encode(&bodies)))
+}
+
+fn mesh_get(
+    session: &mut Session,
+    part: &str,
+    only: Option<&str>,
+    quality: Option<&str>,
+) -> Result<Value> {
+    let (pid, only, quality) = mesh_args(part, only, quality)?;
+    let bodies: Vec<Value> = meshes(session, &pid, only.as_ref(), quality)?
+        .into_iter()
+        .map(|(id, r)| match r {
+            Ok(m) => {
+                let mut v = mesh::to_json(&m.body, &m.mesh);
+                v["feature"] = json!(id);
+                v["hash"] = json!(m.hash);
+                v
+            }
+            Err(e) => json!({"feature": id, "ok": false, "error": e}),
+        })
+        .collect();
+    Ok(json!({"part": pid, "quality": quality.as_str(), "bodies": bodies}))
 }
 
 fn inspect(
@@ -1019,19 +1751,21 @@ pub(crate) mod tests {
     fn a_panic_is_an_internal_error_and_drops_the_session() {
         let (dir, _) = fresh();
         let mut slot = None;
-        let r = handle_safely(&mut slot, dir.path(), Request::PartList {}).unwrap();
+        let r = handle_safely(&mut slot, None, None, dir.path(), Request::PartList {})
+            .unwrap()
+            .result;
         assert_eq!(r["parts"], json!([]));
         assert!(slot.is_some());
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        let e = guarded(&mut slot, dir.path(), |_| panic!("boom")).unwrap_err();
+        let e = guarded::<Value>(&mut slot, dir.path(), |_| panic!("boom")).unwrap_err();
         std::panic::set_hook(prev);
         assert_eq!(
             (e.code, e.details["panic"].as_str()),
             (Code::Internal, Some("boom"))
         );
         assert!(slot.is_none());
-        assert!(handle_safely(&mut slot, dir.path(), Request::PartList {}).is_ok());
+        assert!(handle_safely(&mut slot, None, None, dir.path(), Request::PartList {}).is_ok());
     }
 
     #[test]
@@ -1039,5 +1773,603 @@ pub(crate) mod tests {
         let (_dir, mut s) = fresh();
         let e = call(&mut s, "daemon.status", json!({})).unwrap_err();
         assert_eq!(e.code, Code::Usage);
+    }
+
+    /// `call` with the daemon's live session, as participant `me`.
+    pub(crate) fn call_live(
+        s: &mut Session,
+        live: &mut Live,
+        me: Option<&str>,
+        method: &str,
+        params: Value,
+    ) -> Result<Value> {
+        handle_live(s, Some(live), me, Request::from_rpc(method, Some(params))?)
+    }
+
+    #[test]
+    fn without_a_daemon_nobody_is_attached() {
+        let (_dir, mut s) = fresh();
+        let e = call(&mut s, "session.hello", json!({"kind": "agent"})).unwrap_err();
+        assert_eq!(e.code, Code::NoLiveSession);
+        let r = call(&mut s, "participant.list", json!({})).unwrap();
+        assert_eq!(r, json!({"participants": []}));
+    }
+
+    #[test]
+    fn hello_registers_a_participant() {
+        let (_dir, mut s) = fresh();
+        let mut live = Live::new();
+        let r = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "session.hello",
+            json!({"kind": "human", "name": "Dana"}),
+        )
+        .unwrap();
+        let id = r["participant"].as_str().unwrap().to_owned();
+        assert_eq!(
+            r["session"]["participants"],
+            json!([{"id": id, "kind": "human", "name": "Dana", "status": null, "selection": [],
+                    "camera": null, "highlights": []}])
+        );
+        let list = call_live(&mut s, &mut live, Some(&id), "participant.list", json!({})).unwrap();
+        assert_eq!(list, r["session"]);
+    }
+
+    #[test]
+    fn selections_follow_the_model() {
+        let (_dir, mut s) = with_part();
+        let mut live = Live::new();
+        for id in ["a", "b"] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "p", "type": "box", "id": id, "params": {"x": 1, "y": 1, "z": 1}}),
+            )
+            .unwrap();
+        }
+        let face = |s: &mut Session, f: &str| {
+            let v = call(s, "inspect", json!({"part": "p", "feature": f})).unwrap();
+            format!(
+                "p/{f}/{}",
+                v["bodies"][0]["faces"][0]["name"].as_str().unwrap()
+            )
+        };
+        let (fa, fb) = (face(&mut s, "a"), face(&mut s, "b"));
+        let human = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "session.hello",
+            json!({"kind": "human"}),
+        )
+        .unwrap()["participant"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let r = call_live(
+            &mut s,
+            &mut live,
+            Some(&human),
+            "selection.set",
+            json!({"entities": [fa, fb]}),
+        )
+        .unwrap();
+        assert_eq!(r["selection"], json!([fa, fb]));
+        // Anyone asking without naming a participant gets the human's.
+        let r = call_live(&mut s, &mut live, None, "selection.get", json!({})).unwrap();
+        assert_eq!(
+            (&r["participant"], &r["selection"]),
+            (&json!(human), &json!([fa, fb]))
+        );
+        // A reference that doesn't resolve is refused, never matched.
+        let e = call_live(
+            &mut s,
+            &mut live,
+            Some(&human),
+            "selection.set",
+            json!({"entities": ["p/a/0123456789abcdef0123456789abcdef"], "mode": "add"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+        // Editing keeps names, so the selection stays; deleting drops it.
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.edit",
+            json!({"part": "p", "id": "a", "params": {"x": 2}}),
+        )
+        .unwrap();
+        let sel = |s: &mut Session, live: &mut Live| {
+            call_live(s, live, None, "selection.get", json!({})).unwrap()["selection"].clone()
+        };
+        assert_eq!(sel(&mut s, &mut live), json!([fa, fb]));
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.delete",
+            json!({"part": "p", "id": "a"}),
+        )
+        .unwrap();
+        assert_eq!(sel(&mut s, &mut live), json!([fb]));
+        // Removing works even for references that no longer resolve.
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&human),
+            "selection.set",
+            json!({"entities": [fa, fb], "mode": "remove"}),
+        )
+        .unwrap();
+        assert_eq!(sel(&mut s, &mut live), json!([]));
+        // Without a daemon there is no selection to change.
+        let e = call(&mut s, "selection.set", json!({"entities": []})).unwrap_err();
+        assert_eq!(e.code, Code::NoLiveSession);
+        let r = call(&mut s, "selection.get", json!({})).unwrap();
+        assert_eq!(r, json!({"participant": null, "selection": []}));
+    }
+
+    #[test]
+    fn cameras_highlights_and_status() {
+        let (_dir, mut s) = with_part();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "id": "s", "params": {"radius": 5}}),
+        )
+        .unwrap();
+        let v = call(&mut s, "inspect", json!({"part": "p"})).unwrap();
+        let face = format!(
+            "p/s/{}",
+            v["bodies"][0]["faces"][0]["name"].as_str().unwrap()
+        );
+        let mut live = Live::new();
+        let human = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "session.hello",
+            json!({"kind": "human"}),
+        )
+        .unwrap()["participant"]
+            .clone();
+        let me = Some(human.as_str().unwrap());
+        let camera = json!({"eye": [0, "-100 mm", 0], "target": [0, 0, 0], "up": [0, 0, 1],
+                            "projection": {"perspective": {"fov_deg": 30}}});
+        let r = call_live(
+            &mut s,
+            &mut live,
+            me,
+            "camera.set",
+            json!({"camera": camera}),
+        )
+        .unwrap();
+        assert_eq!(r["camera"]["eye"], json!([0.0, -0.1, 0.0]));
+        // Framing a face keeps the direction and looks at the face's box.
+        let set =
+            |s: &mut Session, live: &mut Live, p: Value| call_live(s, live, me, "camera.set", p);
+        let r = set(&mut s, &mut live, json!({"fit": [face]})).unwrap();
+        let (eye, target) = (&r["camera"]["eye"], &r["camera"]["target"]);
+        assert!(eye[1].as_f64().unwrap() < target[1].as_f64().unwrap());
+        assert!(target[2].as_f64().unwrap().abs() < 1e-3);
+        let r = set(&mut s, &mut live, json!({"view": "top"})).unwrap();
+        assert_eq!(r["camera"]["up"], json!([0.0, 1.0, 0.0]));
+        // The participant's projection is kept.
+        assert_eq!(r["camera"]["projection"]["perspective"]["fov_deg"], 30.0);
+        let e = set(&mut s, &mut live, json!({"view": "top", "camera": camera})).unwrap_err();
+        assert_eq!(e.code, Code::Usage);
+        let r = set(&mut s, &mut live, json!({"camera": camera})).unwrap();
+        assert_eq!(r["camera"]["eye"], json!([0.0, -0.1, 0.0]));
+        let r = call_live(&mut s, &mut live, None, "camera.get", json!({})).unwrap();
+        assert_eq!(
+            (&r["participant"], &r["camera"]["eye"]),
+            (&human, &json!([0.0, -0.1, 0.0]))
+        );
+        // An agent (no hello) highlights and reports status as itself.
+        let r = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "highlight.set",
+            json!({"entities": [face], "style": "pending", "label": "next"}),
+        )
+        .unwrap();
+        assert_eq!(
+            r["highlights"],
+            json!([{"style": "pending", "label": "next", "entities": [face]}])
+        );
+        let agent = r["participant"].clone();
+        assert_ne!(agent, human);
+        let r = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "activity.set",
+            json!({"status": "measuring", "entities": [face]}),
+        )
+        .unwrap();
+        assert_eq!(
+            r["status"],
+            json!({"text": "measuring", "entities": [face]})
+        );
+        let list = call_live(&mut s, &mut live, None, "participant.list", json!({})).unwrap();
+        let a = list["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == agent)
+            .unwrap()
+            .clone();
+        assert_eq!(a["status"]["text"], "measuring");
+        assert_eq!(a["highlights"][0]["label"], "next");
+        let r = call_live(&mut s, &mut live, None, "highlight.clear", json!({})).unwrap();
+        assert_eq!(r["highlights"], json!([]));
+        for (method, params) in [
+            ("camera.set", json!({"camera": camera})),
+            ("highlight.set", json!({"entities": [face]})),
+            ("highlight.clear", json!({})),
+            ("activity.set", json!({"status": "x"})),
+        ] {
+            let e = call(&mut s, method, params).unwrap_err();
+            assert_eq!(e.code, Code::NoLiveSession, "{method}");
+        }
+        let r = call(&mut s, "camera.get", json!({})).unwrap();
+        assert_eq!(r, json!({"participant": null, "camera": null}));
+    }
+
+    /// The notifications queued for `sub` so far, as (method, params).
+    fn drain(sub: &crate::notify::Subscriber) -> Vec<(String, Value)> {
+        let mut out = Vec::new();
+        // `next` blocks when empty, so close a clone's view by sending a
+        // marker first.
+        loop {
+            let line = sub.next().unwrap();
+            let v: Value = serde_json::from_str(&line).unwrap();
+            if v["method"] == "marker" {
+                return out;
+            }
+            out.push((
+                v["method"].as_str().unwrap().to_owned(),
+                v["params"].clone(),
+            ));
+        }
+    }
+
+    #[test]
+    fn the_log_records_changes_and_who_made_them() {
+        let (dir, mut s) = with_part();
+        let mut live = Live::new();
+        let human = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "session.hello",
+            json!({"kind": "human", "name": "Dana"}),
+        )
+        .unwrap()["participant"]
+            .clone();
+        call_live(
+            &mut s,
+            &mut live,
+            human.as_str(),
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "id": "s", "params": {"radius": 1}}),
+        )
+        .unwrap();
+        // Reads and refused writes aren't logged.
+        call_live(&mut s, &mut live, None, "part.list", json!({})).unwrap();
+        call_live(&mut s, &mut live, None, "part.create", json!({"part": "p"})).unwrap_err();
+        // An edit behind the daemon's back is logged as external.
+        let mut other = Session::open(dir.path()).unwrap();
+        call(
+            &mut other,
+            "feature.edit",
+            json!({"part": "p", "id": "s", "params": {"radius": 2}}),
+        )
+        .unwrap();
+        call_live(&mut s, &mut live, None, "part.list", json!({})).unwrap();
+        let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
+        let e = log["entries"].as_array().unwrap();
+        assert_eq!(e.len(), 2);
+        assert_eq!(e[0]["kind"], "change");
+        assert_eq!(e[0]["method"], "feature.add");
+        assert_eq!(e[0]["participant"]["name"], "Dana");
+        assert_eq!(e[0]["params"]["id"], "s");
+        assert_eq!(
+            e[0]["files"],
+            json!([{"path": "parts/p/features/s.json", "change": "created"},
+                   {"path": "parts/p/part.json", "change": "modified"}])
+        );
+        assert_eq!(e[1]["kind"], "external");
+        assert_eq!(e[1]["participant"], Value::Null);
+        assert_eq!(
+            e[1]["files"],
+            json!([{"path": "parts/p/features/s.json", "change": "modified"}])
+        );
+        let page = call_live(&mut s, &mut live, None, "activity.log", json!({"limit": 1})).unwrap();
+        assert_eq!(page["entries"][0]["seq"], e[1]["seq"]);
+        let r = call(&mut s, "activity.log", json!({})).unwrap();
+        assert_eq!(r, json!({"entries": []}));
+    }
+
+    #[test]
+    fn undo_and_redo_go_through_the_files() {
+        let (dir, mut s) = with_part();
+        let mut live = Live::new();
+        let human = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "session.hello",
+            json!({"kind": "human"}),
+        )
+        .unwrap()["participant"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let h = Some(human.as_str());
+        let radius = |s: &mut Session| {
+            call(s, "feature.show", json!({"part": "p", "id": "s"}))
+                .map(|v| v["params"]["radius"]["value"].clone())
+        };
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "id": "s", "params": {"radius": 1}}),
+        )
+        .unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            h,
+            "feature.edit",
+            json!({"part": "p", "id": "s", "params": {"radius": 2}}),
+        )
+        .unwrap();
+        // The human undoes their own edit, then redoes it.
+        let r = call_live(&mut s, &mut live, h, "undo", json!({})).unwrap();
+        assert_eq!(r["entry"]["kind"], "undo");
+        assert_eq!(radius(&mut s).unwrap(), "1 mm");
+        assert!(r["revisions"]["p"].is_string());
+        let e = call_live(&mut s, &mut live, h, "undo", json!({})).unwrap_err();
+        assert_eq!(e.code, Code::NothingToUndo);
+        call_live(&mut s, &mut live, h, "redo", json!({})).unwrap();
+        assert_eq!(radius(&mut s).unwrap(), "2 mm");
+        let e = call_live(&mut s, &mut live, h, "redo", json!({})).unwrap_err();
+        assert_eq!(e.code, Code::NothingToUndo);
+        // A redo can itself be undone.
+        call_live(&mut s, &mut live, h, "undo", json!({})).unwrap();
+        assert_eq!(radius(&mut s).unwrap(), "1 mm");
+        call_live(&mut s, &mut live, h, "redo", json!({})).unwrap();
+        // The agent can't undo its add while the human's edit stands on
+        // top of it, by default or by number.
+        let e = call_live(&mut s, &mut live, None, "undo", json!({})).unwrap_err();
+        assert_eq!(e.code, Code::UndoConflict);
+        assert_eq!(e.details["files"], json!(["parts/p/features/s.json"]));
+        let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
+        let add = log["entries"][0]["seq"].as_u64().unwrap();
+        let e = call_live(&mut s, &mut live, None, "undo", json!({"entry": add})).unwrap_err();
+        assert_eq!(e.code, Code::UndoConflict);
+        // An edit behind the daemon's back can't be undone, and blocks
+        // undoing what it overwrote.
+        let mut other = Session::open(dir.path()).unwrap();
+        call(
+            &mut other,
+            "feature.edit",
+            json!({"part": "p", "id": "s", "params": {"radius": 3}}),
+        )
+        .unwrap();
+        call_live(&mut s, &mut live, None, "part.list", json!({})).unwrap();
+        let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
+        let entries = log["entries"].as_array().unwrap();
+        let external = entries.last().unwrap()["seq"].as_u64().unwrap();
+        let e = call_live(&mut s, &mut live, None, "undo", json!({"entry": external})).unwrap_err();
+        assert_eq!(e.code, Code::NothingToUndo);
+        let e = call_live(&mut s, &mut live, h, "undo", json!({})).unwrap_err();
+        assert_eq!(e.code, Code::UndoConflict);
+        // Undoing a part's creation removes its folder too.
+        call_live(&mut s, &mut live, None, "part.create", json!({"part": "q"})).unwrap();
+        assert!(dir.path().join("parts/q").is_dir());
+        call_live(&mut s, &mut live, None, "undo", json!({})).unwrap();
+        assert!(!dir.path().join("parts/q").exists());
+        // Undoing a deletion brings every file back.
+        call_live(&mut s, &mut live, None, "part.delete", json!({"part": "p"})).unwrap();
+        call_live(&mut s, &mut live, None, "undo", json!({})).unwrap();
+        assert_eq!(radius(&mut s).unwrap(), "3 mm");
+        let e = call(&mut s, "undo", json!({})).unwrap_err();
+        assert_eq!(e.code, Code::NoLiveSession);
+    }
+
+    #[test]
+    fn setting_a_preference_tells_subscribers() {
+        crate::config::tests::with_config(|_| {
+            let (_dir, mut s) = fresh();
+            let mut live = Live::new();
+            let sub = live.hub.subscribe("p-x", &[Topic::Project]);
+            call_live(
+                &mut s,
+                &mut live,
+                None,
+                "config.set",
+                json!({"key": "daemon.poll_ms", "value": 100}),
+            )
+            .unwrap();
+            assert_eq!(live.poll_ms, 100);
+            live.hub.send(Topic::Project, "marker", &json!({}));
+            let got = drain(&sub);
+            assert_eq!(got[0].0, "config.changed");
+            assert_eq!(
+                got[0].1,
+                json!({"key": "daemon.poll_ms", "scope": "user", "value": 100})
+            );
+            // A project setting is logged like any file change; a
+            // preference isn't in the project, so it isn't.
+            call_live(
+                &mut s,
+                &mut live,
+                None,
+                "config.set",
+                json!({"key": "default_unit", "value": "cm"}),
+            )
+            .unwrap();
+            let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
+            let e = log["entries"].as_array().unwrap();
+            assert_eq!(e.len(), 1);
+            assert_eq!(
+                e[0]["files"],
+                json!([{"path": "ryucad.json", "change": "modified"}])
+            );
+        });
+    }
+
+    #[test]
+    fn editing_one_feature_meshes_one_body() {
+        crate::config::tests::with_config(|_| {
+            let (_dir, mut s) = with_part();
+            for (id, r) in [("a", 1), ("b", 2)] {
+                call(
+                    &mut s,
+                    "feature.add",
+                    json!({"part": "p", "type": "sphere", "id": id, "params": {"radius": r}}),
+                )
+                .unwrap();
+            }
+            let m = call(
+                &mut s,
+                "mesh.get",
+                json!({"part": "p", "quality": "coarse"}),
+            )
+            .unwrap();
+            assert_eq!(m["quality"], "coarse");
+            assert_eq!(m["bodies"][1]["feature"], "b");
+            assert_eq!(s.meshes.len(), 2);
+            call(
+                &mut s,
+                "feature.edit",
+                json!({"part": "p", "id": "a", "params": {"radius": 3}}),
+            )
+            .unwrap();
+            let again = call(
+                &mut s,
+                "mesh.get",
+                json!({"part": "p", "quality": "coarse"}),
+            )
+            .unwrap();
+            assert_eq!(s.meshes.len(), 3);
+            assert_eq!(again["bodies"][1], m["bodies"][1]);
+            assert_ne!(again["bodies"][0]["hash"], m["bodies"][0]["hash"]);
+            // The user's display quality is the default.
+            let v = call(&mut s, "mesh.get", json!({"part": "p", "feature": "b"})).unwrap();
+            assert_eq!(
+                (v["quality"].as_str(), v["bodies"].as_array().unwrap().len()),
+                (Some("normal"), 1)
+            );
+            let e = call(&mut s, "mesh.get", json!({"part": "p", "feature": "z"})).unwrap_err();
+            assert_eq!(e.code, Code::NotFound);
+        });
+    }
+
+    #[test]
+    fn a_repair_is_logged_and_can_be_undone() {
+        let (dir, mut s) = with_part();
+        let mut live = Live::new();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "id": "a", "params": {"radius": 1}}),
+        )
+        .unwrap();
+        let text = fs::read_to_string(dir.path().join("parts/p/features/a.json")).unwrap();
+        fs::write(dir.path().join("parts/p/features/b.json"), text).unwrap();
+        let r = call_live(&mut s, &mut live, None, "doctor", json!({})).unwrap();
+        let adopt = r["issues"][0]["repairs"][0]["id"].clone();
+        assert!(adopt.as_str().unwrap().starts_with("orphan_feature:adopt:"));
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "doctor.repair",
+            json!({"repairs": [adopt]}),
+        )
+        .unwrap();
+        assert_eq!(
+            s.project()
+                .part(&part_id("p").unwrap())
+                .unwrap()
+                .order()
+                .len(),
+            2
+        );
+        let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
+        let last = log["entries"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!(last["method"], "doctor.repair");
+        call_live(&mut s, &mut live, None, "undo", json!({})).unwrap();
+        assert_eq!(
+            s.project()
+                .part(&part_id("p").unwrap())
+                .unwrap()
+                .order()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn subscribers_hear_of_model_changes_once() {
+        let (dir, s) = with_part();
+        let mut live = Live::new();
+        let mut slot = Some(s);
+        // Changes from before the subscription aren't news.
+        settle(&mut slot, &mut live, dir.path());
+        let sub = live.hub.subscribe("p-x", &[Topic::Model, Topic::Project]);
+        let mark = |live: &mut Live| live.hub.send(Topic::Model, "marker", &json!({}));
+        let mut s = slot.take().unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "id": "s", "params": {"radius": 1}}),
+        )
+        .unwrap();
+        mark(&mut live);
+        let got = drain(&sub);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "model.changed");
+        let part = &got[0].1["parts"][0];
+        assert_eq!(part["features"][0]["id"], "s");
+        assert_eq!(part["features"][0]["ok"], true);
+        // Nothing changed: nothing is sent.
+        call_live(&mut s, &mut live, None, "part.list", json!({})).unwrap();
+        let mut slot = Some(s);
+        tick(&mut slot, &mut live, dir.path());
+        mark(&mut live);
+        assert!(drain(&sub).is_empty());
+        // An edit behind the daemon's back is found by the tick.
+        let mut other = Session::open(dir.path()).unwrap();
+        call(
+            &mut other,
+            "feature.edit",
+            json!({"part": "p", "id": "s", "params": {"radius": 2}}),
+        )
+        .unwrap();
+        tick(&mut slot, &mut live, dir.path());
+        mark(&mut live);
+        let got = drain(&sub);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "model.changed");
+        // A deleted part is reported as removed.
+        call(&mut other, "part.delete", json!({"part": "p"})).unwrap();
+        tick(&mut slot, &mut live, dir.path());
+        mark(&mut live);
+        let got = drain(&sub);
+        assert_eq!(got[0].0, "project.changed");
+        assert_eq!(got[0].1["parts"], json!([]));
+        assert_eq!(got[1].1["removed"], json!(["p"]));
     }
 }

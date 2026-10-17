@@ -4,12 +4,14 @@
 use crate::daemon::IDLE_VAR;
 use crate::endpoint::Endpoint;
 use crate::error::{Code, Error, Result};
-use crate::proto::{Request, VersionInfo, parse_rpc_response, rpc_request};
+use crate::live::Kind;
+use crate::proto::{Answer, Request, VersionInfo, parse_rpc_response, rpc_request};
 use interprocess::local_socket::{RecvHalf, SendHalf, Stream, prelude::*};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// How long the CLI waits for a daemon it started.
@@ -37,6 +39,12 @@ impl Connection {
     /// Sends one request and reads its answer. The outer error means the
     /// connection failed; the inner result is the daemon's answer.
     pub fn call(&mut self, req: &Request) -> std::io::Result<Result<Value>> {
+        Ok(self.call_answer(req)?.map(|a| a.result))
+    }
+
+    /// [`Connection::call`], with the bytes that follow the answer if it
+    /// announces any.
+    pub fn call_answer(&mut self, req: &Request) -> std::io::Result<Result<Answer>> {
         let id = self.next_id;
         self.next_id += 1;
         let mut line = rpc_request(id, req);
@@ -47,7 +55,42 @@ impl Connection {
         if self.reader.read_line(&mut answer)? == 0 {
             return Err(std::io::ErrorKind::UnexpectedEof.into());
         }
-        Ok(parse_rpc_response(&answer))
+        let result = match parse_rpc_response(&answer) {
+            Ok(v) => v,
+            Err(e) => return Ok(Err(e)),
+        };
+        let binary = match Answer::announced(&result) {
+            Some(n) => {
+                let mut bytes = vec![0; n];
+                std::io::Read::read_exact(&mut self.reader, &mut bytes)?;
+                Some(bytes)
+            }
+            None => None,
+        };
+        Ok(Ok(Answer { result, binary }))
+    }
+}
+
+impl Connection {
+    /// Hands the connection's incoming lines to a thread, which parses
+    /// them onto the returned channel; the send half is kept so the
+    /// connection stays open.
+    fn into_lines(self) -> (mpsc::Receiver<Value>, SendHalf) {
+        let (tx, rx) = mpsc::channel();
+        let mut reader = self.reader;
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|n| n > 0) {
+                let Ok(v) = serde_json::from_str(&line) else {
+                    return;
+                };
+                if tx.send(v).is_err() {
+                    return;
+                }
+                line.clear();
+            }
+        });
+        (rx, self.writer)
     }
 }
 
@@ -55,21 +98,69 @@ fn unavailable(why: impl std::fmt::Display) -> Error {
     Error::new(Code::Daemon, format!("daemon unavailable: {why}"))
 }
 
-/// Sends `req` to the project's daemon, starting one if none is running.
+/// Sends `req` to the project's daemon, starting one if none is running,
+/// as the agent participant `name` (`agent` when `None`).
 ///
 /// `Err` means the request was never delivered, so running it in process
 /// instead is safe. `Ok` holds the daemon's answer; if the connection broke
 /// after sending, that answer is a `daemon` error, because the request may
 /// have been applied and must not be repeated.
-pub fn request(root: &Path, req: &Request) -> Result<Result<Value>> {
+pub fn request(root: &Path, req: &Request, name: Option<&str>) -> Result<Result<Answer>> {
     let endpoint = Endpoint::for_project(root)?;
     let mut conn = ready(root, &endpoint)?;
-    Ok(conn.call(req).unwrap_or_else(|e| {
+    let hello = Request::SessionHello {
+        kind: Kind::Agent,
+        name: name.map(str::to_owned),
+        participant: None,
+    };
+    // A refused hello (a bad name) is the agent's to fix; nothing else ran.
+    if let Err(e) = conn.call(&hello).map_err(unavailable)? {
+        return Ok(Err(e));
+    }
+    Ok(conn.call_answer(req).unwrap_or_else(|e| {
         Err(Error::new(
             Code::Daemon,
             format!("the daemon stopped answering ({e}); the request may have been applied"),
         ))
     }))
+}
+
+/// Subscribes to `topics` as the agent `name` and collects notifications
+/// until there are `count` of them or `timeout` passes.
+pub fn watch(
+    root: &Path,
+    name: Option<&str>,
+    topics: &[String],
+    count: usize,
+    timeout: Duration,
+) -> Result<Value> {
+    let endpoint = Endpoint::for_project(root)?;
+    let mut conn = ready(root, &endpoint)?;
+    let hello = Request::SessionHello {
+        kind: Kind::Agent,
+        name: name.map(str::to_owned),
+        participant: None,
+    };
+    conn.call(&hello).map_err(unavailable)??;
+    let sub = Request::Subscribe {
+        topics: topics.to_vec(),
+    };
+    conn.call(&sub).map_err(unavailable)??;
+    let (rx, _keep) = conn.into_lines();
+    let deadline = Instant::now() + timeout;
+    let mut got = Vec::new();
+    while got.len() < count {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(v) => got.push(json!({"method": v["method"], "params": v["params"]})),
+            Err(mpsc::RecvTimeoutError::Timeout) => break,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(unavailable("the daemon closed the subscription"));
+            }
+        }
+    }
+    let timed_out = got.len() < count;
+    Ok(json!({"notifications": got, "timed_out": timed_out}))
 }
 
 /// A connection to a daemon running this exact binary.

@@ -3,12 +3,14 @@
 //! so they never diverge.
 
 use crate::error::{Code, Error, Result};
+use crate::live::{Kind, SelectMode, Style};
 use crate::units::Unit;
+use crate::view::CameraArg;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 /// The protocol version. A CLI and a daemon talk only when theirs match.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// What `ryucad version` reports. Future cache keys are built from it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +33,49 @@ impl VersionInfo {
             protocol: PROTOCOL_VERSION,
         }
     }
+}
+
+/// What a request answers: its JSON result and, for some requests, raw
+/// bytes sent right after the response line. A result with bytes says so
+/// in `binary: {encoding, length}`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Answer {
+    pub result: Value,
+    pub binary: Option<Vec<u8>>,
+}
+
+impl Answer {
+    pub fn json(result: Value) -> Answer {
+        Answer {
+            result,
+            binary: None,
+        }
+    }
+
+    pub fn bytes(mut result: Value, encoding: &str, bytes: Vec<u8>) -> Answer {
+        result["binary"] = json!({"encoding": encoding, "length": bytes.len()});
+        Answer {
+            result,
+            binary: Some(bytes),
+        }
+    }
+
+    /// How many bytes follow a response line with this result.
+    pub fn announced(result: &Value) -> Option<usize> {
+        result
+            .pointer("/binary/length")?
+            .as_u64()
+            .map(|n| n as usize)
+    }
+}
+
+/// How a request wants bulk data: in the JSON, or as bytes after it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Transfer {
+    #[default]
+    Json,
+    Binary,
 }
 
 /// Where a feature goes in a part's list: after `after`, first, or (with
@@ -143,6 +188,176 @@ pub enum Request {
     CheckFormat {},
     #[serde(rename = "daemon.status")]
     DaemonStatus {},
+    /// Registers the connection as a participant of the live session.
+    #[serde(rename = "session.hello")]
+    SessionHello {
+        kind: Kind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// Join this participant instead (an app's second connection).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    #[serde(rename = "participant.list")]
+    ParticipantList {},
+    /// Turns the connection into a subscription: after the answer, it
+    /// receives notifications for `topics` (all when empty).
+    #[serde(rename = "subscribe")]
+    Subscribe {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        topics: Vec<String>,
+    },
+    /// A participant's selection: `participant`, or the one human.
+    #[serde(rename = "selection.get")]
+    SelectionGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    /// Changes the caller's own selection.
+    #[serde(rename = "selection.set")]
+    SelectionSet {
+        #[serde(default)]
+        entities: Vec<String>,
+        #[serde(default)]
+        mode: SelectMode,
+    },
+    /// A participant's camera: `participant`, or the one human.
+    #[serde(rename = "camera.get")]
+    CameraGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    /// Sets the caller's own camera: explicitly, or from a standard `view`
+    /// and/or framing the entities in `fit` (the whole model when empty).
+    #[serde(rename = "camera.set")]
+    CameraSet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        camera: Option<CameraArg>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fit: Vec<String>,
+    },
+    /// Highlights entities for everyone to see, replacing the caller's
+    /// highlight of the same style and label.
+    #[serde(rename = "highlight.set")]
+    HighlightSet {
+        entities: Vec<String>,
+        #[serde(default)]
+        style: Style,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    /// Removes the caller's highlights of `style`, or all of them.
+    #[serde(rename = "highlight.clear")]
+    HighlightClear {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<Style>,
+    },
+    /// Entries of the activity log older than `before`, oldest first.
+    #[serde(rename = "activity.log")]
+    ActivityLog {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<u64>,
+    },
+    /// Undoes `entry`, or the caller's latest change.
+    #[serde(rename = "undo")]
+    Undo {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<u64>,
+    },
+    /// Redoes `entry` (an undo), or the caller's latest undo.
+    #[serde(rename = "redo")]
+    Redo {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<u64>,
+    },
+    /// One setting, or all of them (of `scope`, if given).
+    #[serde(rename = "config.get")]
+    ConfigGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+    },
+    /// Sets a project setting (in `ryucad.json`) or a user preference.
+    #[serde(rename = "config.set")]
+    ConfigSet {
+        key: String,
+        value: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        /// For project settings: the project revision last seen.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// The project's Git commits (or a part's), and what is uncommitted.
+    #[serde(rename = "history.log")]
+    HistoryLog {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+    /// Display meshes of a part's bodies (or one feature's).
+    #[serde(rename = "mesh.get")]
+    MeshGet {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feature: Option<String>,
+        /// coarse, normal or fine; the user's display quality by default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quality: Option<String>,
+        /// `binary` sends `ryucad.mesh.1` bytes after the answer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transfer: Option<Transfer>,
+    },
+    /// Draws a part (or the whole project) to a PNG, sent as bytes after
+    /// the answer. The view is `camera`, a participant's camera, a standard
+    /// `view`, or iso framing the model.
+    #[serde(rename = "render")]
+    Render {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        camera: Option<CameraArg>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<u32>,
+        /// Entities to point out, drawn as notes.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        highlight: Vec<String>,
+        /// Draw edges and silhouettes (default true).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edges: Option<bool>,
+        /// Label highlighted entities (default false).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        labels: Option<bool>,
+    },
+    /// Diagnoses the project folder: every problem, with a stable code.
+    #[serde(rename = "doctor")]
+    Doctor {},
+    /// Applies repairs `doctor` offered, by ID.
+    #[serde(rename = "doctor.repair")]
+    DoctorRepair {
+        repairs: Vec<String>,
+        #[serde(default, skip_serializing_if = "Map::is_empty")]
+        params: Map<String, Value>,
+    },
+    /// Says what the caller is doing; an empty status clears it.
+    #[serde(rename = "activity.set")]
+    ActivitySet {
+        status: String,
+        #[serde(default)]
+        entities: Vec<String>,
+    },
     #[serde(rename = "daemon.shutdown")]
     DaemonShutdown {},
 }
@@ -173,8 +388,11 @@ impl Request {
         self.to_value()["params"].take()
     }
 
-    /// Whether the request writes files.
+    /// Whether the request writes the project's files.
     pub fn mutates(&self) -> bool {
+        if let Request::ConfigSet { key, .. } = self {
+            return crate::config::scope_of(key).is_ok_and(|s| s == crate::config::Scope::Project);
+        }
         matches!(
             self,
             Request::ProjectInit { .. }
@@ -184,6 +402,9 @@ impl Request {
                 | Request::FeatureEdit { .. }
                 | Request::FeatureDelete { .. }
                 | Request::FeatureMove { .. }
+                | Request::Undo { .. }
+                | Request::Redo { .. }
+                | Request::DoctorRepair { .. }
         )
     }
 
@@ -291,6 +512,12 @@ mod tests {
                 expected_revision: Some("r".into()),
             },
             Request::Rebuild { part: None },
+            Request::SessionHello {
+                kind: Kind::Human,
+                name: Some("Dana".into()),
+                participant: None,
+            },
+            Request::ParticipantList {},
         ];
         for (i, r) in reqs.into_iter().enumerate() {
             let line = rpc_request(i as u64, &r);

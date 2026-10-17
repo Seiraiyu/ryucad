@@ -51,7 +51,8 @@ impl Pair {
         cmd.current_dir(root.join(sub))
             .args(args)
             .env("RYUCAD_RUNTIME_DIR", &self.run)
-            .env("RYUCAD_IDLE_TIMEOUT", "60");
+            .env("RYUCAD_IDLE_TIMEOUT", "60")
+            .env("RYUCAD_CONFIG_DIR", self.run.with_file_name("config"));
         if root == self.direct {
             cmd.env("RYUCAD_NO_DAEMON", "1");
         }
@@ -118,7 +119,7 @@ fn version_reports_every_component() {
     let r = p.ok(&["version"]);
     assert_eq!(r["ryucad"], env!("CARGO_PKG_VERSION"));
     assert_eq!(r["ryukei"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(r["protocol"], 1);
+    assert_eq!(r["protocol"], 2);
     assert!(r["target"].as_str().unwrap().contains('-'));
     assert!(!r["commit"].as_str().unwrap().is_empty());
 }
@@ -249,6 +250,8 @@ fn every_error_code_has_its_exit_code() {
         "conflict",
         1,
     );
+    p.fails(&["config", "set", "ui.colour", "x"], "unknown_setting", 1);
+    p.fails(&["config", "set", "ui.theme", "neon"], "invalid_setting", 1);
     p.fails(&["feature", "bogus"], "usage", 2);
     p.fails(
         &["feature", "add", "p", "sphere", "--after", "t", "--first"],
@@ -284,4 +287,302 @@ fn pretty_output_is_the_same_document() {
         serde_json::from_str::<Value>(&text).unwrap(),
         serde_json::from_slice::<Value>(&compact.stdout).unwrap()
     );
+}
+
+/// Every method in `proto::Request`, read from the variants' `rename`
+/// attributes (indented once; fields are indented twice).
+fn protocol_methods() -> Vec<String> {
+    let src = include_str!("../src/proto.rs");
+    let start = src.find("pub enum Request {").unwrap();
+    let end = start + src[start..].find("\n}\n").unwrap();
+    src[start..end]
+        .lines()
+        .filter_map(|l| l.strip_prefix("    #[serde(rename = \""))
+        .map(|s| s[..s.find('"').unwrap()].to_owned())
+        .collect()
+}
+
+/// Parity: nothing an agent can't do. Every protocol method has a CLI
+/// command, and each command exists.
+#[test]
+fn every_protocol_method_has_a_command() {
+    let commands: &[(&str, &[&str])] = &[
+        ("project.init", &["init"]),
+        ("project.info", &["version"]),
+        ("part.create", &["part", "create"]),
+        ("part.delete", &["part", "delete"]),
+        ("part.list", &["part", "list"]),
+        ("feature.add", &["feature", "add"]),
+        ("feature.edit", &["feature", "edit"]),
+        ("feature.delete", &["feature", "delete"]),
+        ("feature.move", &["feature", "move"]),
+        ("feature.list", &["feature", "list"]),
+        ("feature.show", &["feature", "show"]),
+        ("rebuild", &["rebuild"]),
+        ("inspect", &["inspect"]),
+        ("check_format", &["check-format"]),
+        ("daemon.status", &["daemon", "status"]),
+        ("daemon.shutdown", &["daemon", "stop"]),
+        ("session.hello", &["participants"]),
+        ("participant.list", &["participants"]),
+        ("subscribe", &["watch"]),
+        ("selection.get", &["selection"]),
+        ("selection.set", &["select"]),
+        ("camera.get", &["camera"]),
+        ("camera.set", &["camera"]),
+        ("highlight.set", &["highlight"]),
+        ("highlight.clear", &["highlight"]),
+        ("activity.set", &["status"]),
+        ("activity.log", &["activity"]),
+        ("undo", &["undo"]),
+        ("history.log", &["history"]),
+        ("mesh.get", &["mesh"]),
+        ("render", &["render"]),
+        ("doctor", &["doctor"]),
+        ("doctor.repair", &["doctor"]),
+        ("config.get", &["config", "get"]),
+        ("config.set", &["config", "set"]),
+        ("redo", &["redo"]),
+    ];
+    let methods = protocol_methods();
+    assert!(methods.len() >= 26, "{methods:?}");
+    for m in methods {
+        let Some((_, args)) = commands.iter().find(|(name, _)| *name == m) else {
+            panic!("protocol method {m} has no CLI command");
+        };
+        let out = Command::cargo_bin("ryucad")
+            .unwrap()
+            .args(*args)
+            .arg("--help")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "ryucad {args:?} --help");
+    }
+}
+
+#[test]
+fn settings_and_preferences() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    let v = p.ok(&["config", "get", "ui.theme"]);
+    assert_eq!(
+        (&v["value"], &v["default"]),
+        (&Value::from("system"), &Value::from(true))
+    );
+    p.ok(&["config", "set", "ui.theme", "dark"]);
+    p.ok(&["config", "set", "display.edges", "false"]);
+    let v = p.ok(&["config", "get", "--user"]);
+    let theme = v["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["key"] == "ui.theme")
+        .unwrap()
+        .clone();
+    assert_eq!(theme["value"], "dark");
+    assert_eq!(p.ok(&["config", "get", "display.edges"])["value"], false);
+    // A project setting is a file change, guarded by the project revision.
+    let rev = p.ok(&["config", "get", "default_unit"])["project_revision"].clone();
+    p.fails(
+        &["config", "set", "default_unit", "in", "--expect", "stale"],
+        "conflict",
+        1,
+    );
+    let v = p.ok(&[
+        "config",
+        "set",
+        "default_unit",
+        "in",
+        "--expect",
+        rev.as_str().unwrap(),
+    ]);
+    assert_eq!(v["value"], "in");
+    assert_ne!(v["project_revision"], rev);
+    p.fails(
+        &["config", "set", "ui.theme", "dark", "--project"],
+        "invalid_setting",
+        1,
+    );
+    p.ok(&["part", "create", "q"]);
+    let r = p.ok(&["feature", "add", "q", "sphere", "--param", "radius=1"]);
+    assert_eq!(r["feature"]["params"]["radius"]["value"], "1 in");
+}
+
+#[test]
+fn history_outside_and_inside_git() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    let v = p.ok(&["history"]);
+    assert_eq!(v["repository"], false);
+    assert_eq!(v["warnings"][0]["code"], "not_a_git_repo");
+    p.fails(&["history", "nope"], "not_found", 1);
+}
+
+#[test]
+fn meshes_are_the_same_both_ways() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "torus",
+        "--param",
+        "major_radius=10",
+        "--param",
+        "minor_radius=2",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=1", "--param", "y=2", "--param",
+        "z=3",
+    ]);
+    let m = p.ok(&["mesh", "p", "--quality", "coarse"]);
+    assert_eq!(m["bodies"].as_array().unwrap().len(), 2);
+    assert_eq!(m["bodies"][1]["faces"].as_array().unwrap().len(), 6);
+    p.fails(&["mesh", "p", "--quality", "ultra"], "invalid_param", 1);
+    // As bytes, through the daemon and in process alike.
+    let r = p.ok(&["mesh", "p", "--quality", "coarse", "--out", "m.bin"]);
+    assert_eq!(r["binary"]["encoding"], "ryucad.mesh.1");
+    assert_eq!(r["out"], "m.bin");
+    let a = fs::read(p.direct.join("m.bin")).unwrap();
+    assert_eq!(a, fs::read(p.daemon.join("m.bin")).unwrap());
+    assert_eq!(r["binary"]["length"], a.len());
+    let wire = ryucad::mesh::decode(&a).unwrap();
+    assert_eq!(wire[1].feature, "b");
+    let tris = wire[1].mesh.as_ref().unwrap().triangles.len();
+    assert_eq!(tris, m["bodies"][1]["triangles"].as_array().unwrap().len());
+}
+
+/// The pixels of a PNG file.
+fn pixels(path: &Path) -> (u32, u32, Vec<u8>) {
+    let dec = png::Decoder::new(std::io::BufReader::new(fs::File::open(path).unwrap()));
+    let mut r = dec.read_info().unwrap();
+    let mut buf = vec![0; r.output_buffer_size().unwrap()];
+    let info = r.next_frame(&mut buf).unwrap();
+    buf.truncate(info.buffer_size());
+    (info.width, info.height, buf)
+}
+
+#[test]
+fn renders_are_the_same_both_ways() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "cylinder",
+        "--id",
+        "c",
+        "--param",
+        "radius=5",
+        "--param",
+        "height=10",
+    ]);
+    let face = {
+        let v = p.ok(&["inspect", "p", "c"]);
+        format!(
+            "p/c/{}",
+            v["bodies"][0]["faces"][0]["name"].as_str().unwrap()
+        )
+    };
+    let r = p.ok(&[
+        "render",
+        "--out",
+        "a.png",
+        "--size",
+        "160x120",
+        "--highlight",
+        &face,
+        "--labels",
+    ]);
+    assert_eq!(r["binary"]["encoding"], "image/png");
+    assert_eq!(
+        (r["width"].as_u64(), r["height"].as_u64()),
+        (Some(160), Some(120))
+    );
+    let a = pixels(&p.direct.join("a.png"));
+    assert_eq!(a, pixels(&p.daemon.join("a.png")));
+    assert_eq!((a.0, a.1), (160, 120));
+    // The highlight shows: there is note-blue in the image.
+    assert!(a.2.chunks(4).any(|px| px[2] > 200 && px[0] < 140));
+    let r = p.ok(&[
+        "render",
+        "p",
+        "--out",
+        "top.png",
+        "--view",
+        "top",
+        "--no-edges",
+    ]);
+    assert_eq!(r["camera"]["up"], serde_json::json!([0.0, 1.0, 0.0]));
+    p.fails(
+        &["render", "--out", "x.png", "--size", "5000x10"],
+        "render_too_large",
+        1,
+    );
+    p.fails(
+        &["render", "--out", "x.png", "--view", "sideways"],
+        "invalid_param",
+        1,
+    );
+}
+
+#[test]
+fn a_project_that_lost_its_manifest_is_damaged() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    fs::remove_file(p.direct.join("ryucad.json")).unwrap();
+    fs::remove_file(p.daemon.join("ryucad.json")).unwrap();
+    let e = p.fails(&["part", "list"], "project_damaged", 3);
+    assert_eq!(e["details"]["repair"], "ryucad doctor");
+    let r = p.ok(&["doctor"]);
+    assert_eq!(r["issues"][0]["code"], "missing_manifest");
+}
+
+#[test]
+fn doctor_on_a_healthy_project() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "sphere", "--id", "s", "--param", "radius=1",
+    ]);
+    assert_eq!(p.ok(&["doctor"])["healthy"], true);
+    p.write("parts/p/features/t.json", "{");
+    let r = p.ok(&["doctor"]);
+    let codes: Vec<&str> = r["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(codes, ["invalid_json", "orphan_feature"]);
+}
+
+#[test]
+fn doctor_repairs_a_damaged_project() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "in"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "sphere", "--id", "s", "--param", "radius=1",
+    ]);
+    fs::remove_file(p.direct.join("ryucad.json")).unwrap();
+    fs::remove_file(p.daemon.join("ryucad.json")).unwrap();
+    let r = p.ok(&["doctor"]);
+    let id = r["issues"][0]["repairs"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(id.starts_with("missing_manifest:recreate:ryucad.json@"));
+    let out = p.ok(&["doctor", "--repair", &id, "--param", "unit=in"]);
+    assert_eq!(out["report"]["healthy"], true);
+    // The project works again, through the daemon too.
+    let v = p.ok(&["feature", "show", "p", "s"]);
+    assert_eq!(v["params"]["radius"]["value"], "1 in");
+    p.fails(&["doctor", "--repair", &id], "repair_conflict", 1);
 }

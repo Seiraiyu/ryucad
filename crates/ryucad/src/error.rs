@@ -46,6 +46,29 @@ pub enum Code {
     Daemon,
     /// A bug: a panic or a broken invariant.
     Internal,
+    /// A request that needs the daemon's live session, run without one.
+    NoLiveSession,
+    /// "The human" was meant, but several are attached.
+    AmbiguousParticipant,
+    /// Nothing of the caller's is left to undo or redo.
+    NothingToUndo,
+    /// The files an undo would restore have changed since.
+    UndoConflict,
+    /// A setting no schema knows.
+    UnknownSetting,
+    /// A setting's value, or scope, is wrong.
+    InvalidSetting,
+    /// The project isn't in a Git repository (a warning, not a failure).
+    NotAGitRepo,
+    /// The kernel couldn't mesh a body for display.
+    MeshFailed,
+    /// A render larger than the limit, or with no pixels.
+    RenderTooLarge,
+    /// A folder that looks like a project but can't be opened (no
+    /// manifest): `ryucad doctor` can repair it.
+    ProjectDamaged,
+    /// A repair planned against files that have changed since.
+    RepairConflict,
 }
 
 impl Code {
@@ -54,7 +77,7 @@ impl Code {
     pub fn exit_code(self) -> u8 {
         match self {
             Code::Usage => 2,
-            Code::ProjectNotFound | Code::FormatTooNew => 3,
+            Code::ProjectNotFound | Code::FormatTooNew | Code::ProjectDamaged => 3,
             Code::Io | Code::Daemon | Code::Internal => 4,
             _ => 1,
         }
@@ -122,6 +145,9 @@ mod tests {
         assert_eq!(Code::ProjectNotFound.exit_code(), 3);
         assert_eq!(Code::FormatTooNew.exit_code(), 3);
         assert_eq!(Code::Internal.exit_code(), 4);
+        assert_eq!(Code::NoLiveSession.exit_code(), 1);
+        assert_eq!(Code::AmbiguousParticipant.exit_code(), 1);
+        assert_eq!(Code::ProjectDamaged.exit_code(), 3);
     }
 
     #[test]
