@@ -510,3 +510,45 @@ fn subscribing_needs_a_hello() {
     ask(&conn, &Request::DaemonShutdown {}).unwrap();
     assert!(exited(&mut child, Duration::from_secs(10)));
 }
+
+#[test]
+fn watchers_see_the_model_change_however_it_changes() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    let w = Watch::new(&f, &["model"]);
+    // Through the daemon.
+    cli(
+        &f,
+        &[
+            "feature", "add", "p", "sphere", "--id", "s", "--param", "radius=5",
+        ],
+    );
+    let m = w.next("model.changed");
+    assert_eq!(m["parts"][0]["features"][0]["id"], "s");
+    let first = m["parts"][0]["features"][0]["hash"].clone();
+    // Behind its back: another process with no daemon.
+    let r = cli(
+        &f,
+        &[
+            "--no-daemon",
+            "feature",
+            "edit",
+            "p",
+            "s",
+            "--param",
+            "radius=6",
+        ],
+    );
+    assert_eq!(r["ok"], true);
+    let m = w.next("model.changed");
+    assert_ne!(m["parts"][0]["features"][0]["hash"], first);
+    // An editor rewriting a file with the same content changes nothing; a
+    // real edit does.
+    let path = f.root.join("parts/p/features/s.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, &text).unwrap();
+    std::fs::write(&path, text.replace("6 mm", "7 mm")).unwrap();
+    let m = w.next("model.changed");
+    assert_eq!(m["parts"][0]["failed"], 0);
+    cli(&f, &["daemon", "stop"]);
+}

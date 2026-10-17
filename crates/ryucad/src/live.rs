@@ -101,6 +101,15 @@ pub struct Live {
     participants: BTreeMap<String, Participant>,
     next: u32,
     pub hub: Hub,
+    /// What subscribers were last told about the model.
+    pub seen: Seen,
+}
+
+/// The project and part revisions subscribers were last told about.
+#[derive(Debug, Default)]
+pub struct Seen {
+    pub project: Value,
+    pub parts: BTreeMap<crate::doc::id::Id, String>,
 }
 
 /// Every participant's state, to compare before and after a change.

@@ -7,12 +7,14 @@ use crate::doc::project::{MANIFEST, Part, feature_path, part_dir, part_path, wri
 use crate::entity::{self, EntityRef};
 use crate::error::{Code, Error, Result};
 use crate::live::{self, Live, SelectMode};
+use crate::notify::Topic;
 use crate::proto::{PlacementArg, Position, Request, VersionInfo};
 use crate::rebuild;
 use crate::session::Session;
 use crate::units::{Quantity, Unit};
 use crate::view::Camera;
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -61,6 +63,7 @@ pub fn handle_live(
             l.prune(|r| r.resolve(session).is_ok());
         }
         l.announce(&before);
+        publish(l, session);
     }
     result
 }
@@ -600,6 +603,99 @@ fn feature_list(session: &Session, part: &str) -> Result<Value> {
     Ok(json!({"part": p.id, "features": features, "orphans": p.orphans(), "revision": p.revision}))
 }
 
+/// A part's rebuild as agents and subscribers see it: each feature's
+/// status, hash and counts.
+fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
+    let revision = session.project().part(id)?.revision.clone();
+    let r = session.rebuilt(id)?;
+    let features: Vec<Value> = r
+        .features
+        .iter()
+        .map(|(fid, b)| match b {
+            Ok(b) => {
+                let c = b.body.counts();
+                json!({"id": fid, "ok": true, "hash": b.hash,
+                       "counts": {"faces": c.faces, "edges": c.edges, "vertices": c.vertices}})
+            }
+            Err(e) => json!({"id": fid, "ok": false, "error": e}),
+        })
+        .collect();
+    Ok(json!({"part": id, "revision": revision, "hash": r.hash,
+              "failed": r.failed(), "features": features}))
+}
+
+/// Tells subscribers what changed since they were last told: the project
+/// (manifest and parts) and every part whose revision moved, rebuilt.
+/// While nobody watches, it only notes the current state, so a new
+/// subscriber hears of changes made after it subscribed.
+pub fn publish(live: &mut Live, session: &mut Session) {
+    let watched = live.hub.is_watched();
+    let p = session.project();
+    let project = json!({
+        "default_unit": p.manifest.default_unit,
+        "parts": p.parts.keys().collect::<Vec<_>>(),
+    });
+    if watched && live.seen.project != project {
+        live.hub.send(Topic::Project, "project.changed", &project);
+    }
+    live.seen.project = project;
+    let revisions: BTreeMap<Id, String> = p
+        .parts
+        .iter()
+        .map(|(id, part)| (id.clone(), part.revision.clone()))
+        .collect();
+    if !watched {
+        live.seen.parts = revisions;
+        return;
+    }
+    let mut parts = Vec::new();
+    for (id, rev) in &revisions {
+        if live.seen.parts.get(id) == Some(rev) {
+            continue;
+        }
+        let mut report =
+            part_report(session, id).unwrap_or_else(|e| json!({"part": id, "error": e}));
+        if let Ok(Err(e)) = session.project().part(id).map(|p| &p.file) {
+            report["error"] = json!(e);
+        }
+        parts.push(report);
+    }
+    let removed: Vec<&Id> = live
+        .seen
+        .parts
+        .keys()
+        .filter(|id| !revisions.contains_key(*id))
+        .collect();
+    if !parts.is_empty() || !removed.is_empty() {
+        let params = json!({"parts": parts, "removed": removed});
+        live.hub.send(Topic::Model, "model.changed", &params);
+    }
+    live.seen.parts = revisions;
+}
+
+/// The daemon's periodic check while anyone watches: picks up changes made
+/// behind its back (another process, an editor, `git checkout`) and tells
+/// subscribers. Errors wait for the next request to report them.
+pub fn tick(slot: &mut Option<Session>, live: &mut Live, root: &Path) {
+    if live.hub.is_watched() {
+        settle(slot, live, root);
+    }
+}
+
+/// Brings the session and what subscribers know up to date with the
+/// files.
+pub fn settle(slot: &mut Option<Session>, live: &mut Live, root: &Path) {
+    let _ = guarded(slot, root, |s| {
+        let before = live.snapshot();
+        if s.refresh()? {
+            live.prune(|r| r.resolve(s).is_ok());
+        }
+        live.announce(&before);
+        publish(live, s);
+        Ok(Value::Null)
+    });
+}
+
 fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
     let ids: Vec<Id> = match part {
         Some(p) => vec![part_id(p)?],
@@ -608,25 +704,11 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
     let mut parts = Vec::new();
     let mut failed = 0;
     for id in ids {
-        let revision = session.project().part(&id)?.revision.clone();
         // A part whose list can't be read can't be rebuilt.
         order(session.project().part(&id)?)?;
-        let r = session.rebuilt(&id)?;
-        failed += r.failed();
-        let features: Vec<Value> = r
-            .features
-            .iter()
-            .map(|(fid, b)| match b {
-                Ok(b) => {
-                    let c = b.body.counts();
-                    json!({"id": fid, "ok": true, "hash": b.hash,
-                           "counts": {"faces": c.faces, "edges": c.edges, "vertices": c.vertices}})
-                }
-                Err(e) => json!({"id": fid, "ok": false, "error": e}),
-            })
-            .collect();
-        parts.push(json!({"part": id, "revision": revision, "hash": r.hash,
-                          "failed": r.failed(), "features": features}));
+        let report = part_report(session, &id)?;
+        failed += report["failed"].as_u64().unwrap_or(0) as usize;
+        parts.push(report);
     }
     let report = json!({ "parts": parts });
     if failed > 0 {
@@ -1395,5 +1477,77 @@ pub(crate) mod tests {
         }
         let r = call(&mut s, "camera.get", json!({})).unwrap();
         assert_eq!(r, json!({"participant": null, "camera": null}));
+    }
+
+    /// The notifications queued for `sub` so far, as (method, params).
+    fn drain(sub: &crate::notify::Subscriber) -> Vec<(String, Value)> {
+        let mut out = Vec::new();
+        // `next` blocks when empty, so close a clone's view by sending a
+        // marker first.
+        loop {
+            let line = sub.next().unwrap();
+            let v: Value = serde_json::from_str(&line).unwrap();
+            if v["method"] == "marker" {
+                return out;
+            }
+            out.push((
+                v["method"].as_str().unwrap().to_owned(),
+                v["params"].clone(),
+            ));
+        }
+    }
+
+    #[test]
+    fn subscribers_hear_of_model_changes_once() {
+        let (dir, s) = with_part();
+        let mut live = Live::new();
+        let mut slot = Some(s);
+        // Changes from before the subscription aren't news.
+        settle(&mut slot, &mut live, dir.path());
+        let sub = live.hub.subscribe("p-x", &[Topic::Model, Topic::Project]);
+        let mark = |live: &mut Live| live.hub.send(Topic::Model, "marker", &json!({}));
+        let mut s = slot.take().unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "id": "s", "params": {"radius": 1}}),
+        )
+        .unwrap();
+        mark(&mut live);
+        let got = drain(&sub);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "model.changed");
+        let part = &got[0].1["parts"][0];
+        assert_eq!(part["features"][0]["id"], "s");
+        assert_eq!(part["features"][0]["ok"], true);
+        // Nothing changed: nothing is sent.
+        call_live(&mut s, &mut live, None, "part.list", json!({})).unwrap();
+        let mut slot = Some(s);
+        tick(&mut slot, &mut live, dir.path());
+        mark(&mut live);
+        assert!(drain(&sub).is_empty());
+        // An edit behind the daemon's back is found by the tick.
+        let mut other = Session::open(dir.path()).unwrap();
+        call(
+            &mut other,
+            "feature.edit",
+            json!({"part": "p", "id": "s", "params": {"radius": 2}}),
+        )
+        .unwrap();
+        tick(&mut slot, &mut live, dir.path());
+        mark(&mut live);
+        let got = drain(&sub);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "model.changed");
+        // A deleted part is reported as removed.
+        call(&mut other, "part.delete", json!({"part": "p"})).unwrap();
+        tick(&mut slot, &mut live, dir.path());
+        mark(&mut live);
+        let got = drain(&sub);
+        assert_eq!(got[0].0, "project.changed");
+        assert_eq!(got[0].1["parts"], json!([]));
+        assert_eq!(got[1].1["removed"], json!(["p"]));
     }
 }

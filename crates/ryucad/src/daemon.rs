@@ -8,7 +8,7 @@ use crate::error::{Code, Error, Result};
 use crate::live::Live;
 use crate::notify::{self, Subscriber};
 use crate::proto::{Request, VersionInfo, parse_rpc_request, rpc_response};
-use crate::server::handle_safely;
+use crate::server::{handle_safely, settle, tick};
 use crate::session::Session;
 use interprocess::local_socket::{ListenerOptions, Stream, prelude::*};
 use serde_json::{Value, json};
@@ -87,9 +87,12 @@ pub fn run(root: &Path, idle: Duration) -> Result<()> {
             let before = core.live.snapshot();
             core.live.expire(Instant::now());
             core.live.announce(&before);
-            // Someone watching keeps the daemon alive.
+            // Someone watching keeps the daemon alive, and sees changes
+            // made behind its back.
             if core.live.hub.is_watched() {
                 *lock(&watcher.last) = Instant::now();
+                let Core { session, live } = &mut *core;
+                tick(session, live, &watcher.root);
             }
             if lock(&watcher.last).elapsed() >= watcher.idle {
                 stop(&watcher, "idle");
@@ -308,7 +311,10 @@ fn subscribe(
     }
     let topics = notify::topics(names)?;
     let mut core = lock(&state.core);
-    let sub = core.live.hub.subscribe(me, &topics);
+    let Core { session, live } = &mut *core;
+    // What happened before the subscription isn't news to it.
+    settle(session, live, &state.root);
+    let sub = live.hub.subscribe(me, &topics);
     let shown = if topics.is_empty() {
         notify::Topic::ALL.to_vec()
     } else {
