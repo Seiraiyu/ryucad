@@ -806,7 +806,13 @@ fn feature_list(session: &Session, part: &str) -> Result<Value> {
 /// A part's rebuild as agents and subscribers see it: each feature's
 /// status, hash and counts.
 fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
-    let revision = session.project().part(id)?.revision.clone();
+    let part = session.project().part(id)?;
+    let revision = part.revision.clone();
+    let types: BTreeMap<Id, &'static str> = part
+        .features
+        .iter()
+        .filter_map(|(fid, f)| Some((fid.clone(), f.as_ref().ok()?.ty.as_str())))
+        .collect();
     let r = session.rebuilt(id)?;
     let features: Vec<Value> = r
         .features
@@ -814,10 +820,10 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
         .map(|(fid, b)| match b {
             Ok(b) => {
                 let c = b.body.counts();
-                json!({"id": fid, "ok": true, "hash": b.hash,
+                json!({"id": fid, "type": types.get(fid), "ok": true, "hash": b.hash,
                        "counts": {"faces": c.faces, "edges": c.edges, "vertices": c.vertices}})
             }
-            Err(e) => json!({"id": fid, "ok": false, "error": e}),
+            Err(e) => json!({"id": fid, "type": types.get(fid), "ok": false, "error": e}),
         })
         .collect();
     Ok(json!({"part": id, "revision": revision, "hash": r.hash,
@@ -1684,6 +1690,7 @@ pub(crate) mod tests {
         let r = call(&mut s, "rebuild", json!({})).unwrap();
         let part = &r["parts"][0];
         assert_eq!(part["failed"], 0);
+        assert_eq!(part["features"][1]["type"], "sphere");
         assert_eq!(
             part["features"][0]["counts"],
             json!({"faces": 6, "edges": 12, "vertices": 8})
