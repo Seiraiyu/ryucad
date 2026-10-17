@@ -76,23 +76,57 @@ fn plain(p: PathBuf) -> PathBuf {
     p
 }
 
-/// The nearest folder at or above `start` that holds a `ryucad.json`.
+/// The nearest folder at or above `start` that holds a `ryucad.json`. A
+/// folder that has lost its manifest but still has parts is
+/// `project_damaged`, not `project_not_found`.
 pub fn find_root(start: &Path) -> Result<PathBuf> {
+    match find_project(start)? {
+        (root, false) => Ok(root),
+        (root, true) => Err(Error::new(
+            Code::ProjectDamaged,
+            format!(
+                "{} has parts but no {MANIFEST}; run `ryucad doctor` to repair it",
+                root.display()
+            ),
+        )
+        .with("path", &root)
+        .with("repair", "ryucad doctor")),
+    }
+}
+
+/// The project at or above `start`, and whether it is damaged (parts but
+/// no manifest). The nearest folder with either wins.
+pub fn find_project(start: &Path) -> Result<(PathBuf, bool)> {
     let start = plain(start.canonicalize().map_err(|e| Error::io(start, &e))?);
-    start
-        .ancestors()
-        .find(|d| d.join(MANIFEST).is_file())
-        .map(Path::to_path_buf)
-        .ok_or_else(|| {
-            Error::new(
-                Code::ProjectNotFound,
-                format!(
-                    "no {MANIFEST} in {} or any folder above it; run `ryucad init` or pass -C <dir>",
-                    start.display()
-                ),
-            )
-            .with("path", &start)
-        })
+    for d in start.ancestors() {
+        if d.join(MANIFEST).is_file() {
+            return Ok((d.to_path_buf(), false));
+        }
+        if has_parts(d) {
+            return Ok((d.to_path_buf(), true));
+        }
+    }
+    Err(Error::new(
+        Code::ProjectNotFound,
+        format!(
+            "no {MANIFEST} in {} or any folder above it; run `ryucad init` or pass -C <dir>",
+            start.display()
+        ),
+    )
+    .with("path", &start))
+}
+
+/// Whether `dir/parts` holds a ryucad part file.
+fn has_parts(dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(dir.join("parts")) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        fs::read_to_string(e.path().join("part.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .is_some_and(|v| v["kind"] == "ryucad.part")
+    })
 }
 
 pub fn part_dir(root: &Path, part: &Id) -> PathBuf {
@@ -450,5 +484,24 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names, ["c.json"]);
+    }
+
+    #[test]
+    fn a_folder_with_parts_and_no_manifest_is_damaged() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let part = root.join("parts/p");
+        fs::create_dir_all(part.join("features")).unwrap();
+        fs::write(
+            part.join("part.json"),
+            r#"{"features":[],"format":1,"kind":"ryucad.part"}"#,
+        )
+        .unwrap();
+        let e = find_root(&part.join("features")).unwrap_err();
+        assert_eq!(e.code, Code::ProjectDamaged);
+        assert_eq!(find_project(&part).unwrap(), (plain(root.clone()), true));
+        // Some other folder called parts isn't a project.
+        fs::write(part.join("part.json"), "{}").unwrap();
+        assert_ne!(find_root(&part).unwrap_err().code, Code::ProjectDamaged);
     }
 }

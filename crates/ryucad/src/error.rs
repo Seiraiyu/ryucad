@@ -64,6 +64,9 @@ pub enum Code {
     MeshFailed,
     /// A render larger than the limit, or with no pixels.
     RenderTooLarge,
+    /// A folder that looks like a project but can't be opened (no
+    /// manifest): `ryucad doctor` can repair it.
+    ProjectDamaged,
 }
 
 impl Code {
@@ -72,7 +75,7 @@ impl Code {
     pub fn exit_code(self) -> u8 {
         match self {
             Code::Usage => 2,
-            Code::ProjectNotFound | Code::FormatTooNew => 3,
+            Code::ProjectNotFound | Code::FormatTooNew | Code::ProjectDamaged => 3,
             Code::Io | Code::Daemon | Code::Internal => 4,
             _ => 1,
         }
@@ -142,6 +145,7 @@ mod tests {
         assert_eq!(Code::Internal.exit_code(), 4);
         assert_eq!(Code::NoLiveSession.exit_code(), 1);
         assert_eq!(Code::AmbiguousParticipant.exit_code(), 1);
+        assert_eq!(Code::ProjectDamaged.exit_code(), 3);
     }
 
     #[test]

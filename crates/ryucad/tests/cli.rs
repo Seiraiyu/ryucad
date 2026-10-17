@@ -527,3 +527,14 @@ fn renders_are_the_same_both_ways() {
         1,
     );
 }
+
+#[test]
+fn a_project_that_lost_its_manifest_is_damaged() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    fs::remove_file(p.direct.join("ryucad.json")).unwrap();
+    fs::remove_file(p.daemon.join("ryucad.json")).unwrap();
+    let e = p.fails(&["part", "list"], "project_damaged", 3);
+    assert_eq!(e["details"]["repair"], "ryucad doctor");
+}
