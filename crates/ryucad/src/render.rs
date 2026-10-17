@@ -23,6 +23,11 @@ pub type Rgb = [f32; 3];
 
 pub const BACKGROUND: Rgb = [0.961, 0.965, 0.973];
 pub const SURFACE: Rgb = [0.78, 0.80, 0.84];
+pub const EDGE: Rgb = [0.12, 0.13, 0.15];
+/// Highlight colours: about to change, just changed, pointed out.
+pub const PENDING: Rgb = [1.0, 0.70, 0.22];
+pub const CHANGED: Rgb = [0.33, 0.78, 0.42];
+pub const NOTE: Rgb = [0.30, 0.58, 1.0];
 const AMBIENT: f32 = 0.3;
 const DIFFUSE: f32 = 0.7;
 
@@ -31,7 +36,35 @@ const DIFFUSE: f32 = 0.7;
 pub struct Geometry {
     pub positions: Vec<[f64; 3]>,
     pub triangles: Vec<Triangle>,
+    /// Drawn over the surfaces they lie on; a line of one point is a dot.
     pub lines: Vec<Line>,
+    pub labels: Vec<Label>,
+}
+
+/// Text drawn at a model point, on top of everything.
+#[derive(Clone, Debug)]
+pub struct Label {
+    pub at: [f64; 3],
+    pub text: String,
+}
+
+/// What else to draw.
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    /// Silhouettes, where a surface meets the background or passes in
+    /// front of another.
+    pub silhouettes: bool,
+    /// The axis triad in the bottom left corner.
+    pub triad: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            silhouettes: true,
+            triad: true,
+        }
+    }
 }
 
 /// A triangle of positions, counterclockwise from outside, with a normal
@@ -208,8 +241,8 @@ pub fn check_size(width: u32, height: u32) -> Result<()> {
 
 /// A band of supersampled rows: colour and depth per sample.
 struct Band {
-    /// The first supersampled row, which may be one above the band's own
-    /// rows (a margin for edge detection).
+    /// The first supersampled row: one above the band's own rows, except
+    /// at the top, so silhouettes can look across the band's edge.
     y0: usize,
     rows: usize,
     width: usize,
@@ -278,6 +311,80 @@ impl Band {
     }
 }
 
+impl Band {
+    /// A line segment `width` samples wide, drawn where it isn't behind a
+    /// surface (with a little slack, so lines on a surface show).
+    fn segment(&mut self, a: Screen, b: Screen, half: f32, color: Rgb) {
+        let lo_y = (a.y.min(b.y) - half).floor().max(self.y0 as f32) as usize;
+        let hi_y = ((a.y.max(b.y) + half)
+            .ceil()
+            .min((self.y0 + self.rows) as f32))
+        .max(0.0) as usize;
+        let lo_x = (a.x.min(b.x) - half).floor().max(0.0) as usize;
+        let hi_x = ((a.x.max(b.x) + half).ceil().min(self.width as f32)).max(0.0) as usize;
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len2 = dx * dx + dy * dy;
+        for y in lo_y..hi_y {
+            let py = y as f32 + 0.5;
+            for x in lo_x..hi_x {
+                let px = x as f32 + 0.5;
+                let t = if len2 > 0.0 {
+                    (((px - a.x) * dx + (py - a.y) * dy) / len2).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let (cx, cy) = (a.x + t * dx - px, a.y + t * dy - py);
+                if cx * cx + cy * cy > half * half {
+                    continue;
+                }
+                // Depth along the segment, interpolated over w.
+                let iw = (1.0 - t) / a.w + t / b.w;
+                let z = ((1.0 - t) * a.z / a.w + t * b.z / b.w) / iw;
+                let i = (y - self.y0) * self.width + x;
+                if z > self.depth[i] + 4e-3 * z.abs() + 1e-9 {
+                    continue;
+                }
+                self.color[i] = color;
+            }
+        }
+    }
+
+    /// Darkens covered samples next to the background or to a surface much
+    /// farther away.
+    fn silhouettes(&mut self) {
+        let (w, h) = (self.width, self.rows);
+        let edge: Vec<bool> = (0..w * h)
+            .map(|i| {
+                let z = self.depth[i];
+                if !z.is_finite() {
+                    return false;
+                }
+                let (x, y) = (i % w, i / w);
+                let mut near = Vec::with_capacity(4);
+                if x > 0 {
+                    near.push(i - 1);
+                }
+                if x + 1 < w {
+                    near.push(i + 1);
+                }
+                if y > 0 {
+                    near.push(i - w);
+                }
+                if y + 1 < h {
+                    near.push(i + w);
+                }
+                near.iter()
+                    .any(|&j| self.depth[j] > z + 0.02 * z.abs() + 1e-6)
+            })
+            .collect();
+        for (i, e) in edge.into_iter().enumerate() {
+            if e {
+                self.color[i] = EDGE;
+            }
+        }
+    }
+}
+
 /// Lighting at a corner: ambient plus diffuse.
 fn shade(n: [f32; 3], light: [f32; 3]) -> f32 {
     let d = n[0] * light[0] + n[1] * light[1] + n[2] * light[2];
@@ -289,7 +396,13 @@ fn to_u8(c: f32) -> u8 {
 }
 
 /// Renders `geometry` seen by `camera` into a `width`×`height` image.
-pub fn render(geometry: &Geometry, camera: &Camera, width: u32, height: u32) -> Result<Image> {
+pub fn render(
+    geometry: &Geometry,
+    camera: &Camera,
+    width: u32,
+    height: u32,
+    options: Options,
+) -> Result<Image> {
     check_size(width, height)?;
     camera.check()?;
     let view = View::new(camera, width, height);
@@ -306,8 +419,10 @@ pub fn render(geometry: &Geometry, camera: &Camera, width: u32, height: u32) -> 
         .enumerate()
         .for_each(|(band, out)| {
             let rows_out = out.len() / (w * 4);
-            let y0 = band * BAND * SS;
-            let mut b = Band::new(y0, rows_out * SS, sw);
+            let own = band * BAND * SS;
+            let top = usize::from(own > 0);
+            let bottom = usize::from(own + rows_out * SS < h * SS);
+            let mut b = Band::new(own - top, rows_out * SS + top + bottom, sw);
             for t in &geometry.triangles {
                 let (Some(a), Some(c), Some(d)) = (
                     screen[t.p[0] as usize],
@@ -323,12 +438,28 @@ pub fn render(geometry: &Geometry, camera: &Camera, width: u32, height: u32) -> 
                 ];
                 b.triangle([a, c, d], s, t.color);
             }
+            if options.silhouettes {
+                b.silhouettes();
+            }
+            for l in &geometry.lines {
+                let half = l.width * SS as f32 / 2.0;
+                let pts: Vec<Option<Screen>> =
+                    l.points.iter().map(|p| screen[*p as usize]).collect();
+                if let [Some(p)] = pts[..] {
+                    b.segment(p, p, half, l.color);
+                }
+                for pair in pts.windows(2) {
+                    if let [Some(p), Some(q)] = pair {
+                        b.segment(*p, *q, half, l.color);
+                    }
+                }
+            }
             for (i, px) in out.chunks_mut(4).enumerate() {
                 let (x, y) = (i % w, i / w);
                 let mut sum = [0.0f32; 3];
                 for dy in 0..SS {
                     for dx in 0..SS {
-                        let c = b.color[(y * SS + dy) * sw + x * SS + dx];
+                        let c = b.color[(y * SS + dy + top) * sw + x * SS + dx];
                         for k in 0..3 {
                             sum[k] += c[k];
                         }
@@ -338,11 +469,92 @@ pub fn render(geometry: &Geometry, camera: &Camera, width: u32, height: u32) -> 
                 px.copy_from_slice(&[to_u8(sum[0] / n), to_u8(sum[1] / n), to_u8(sum[2] / n), 255]);
             }
         });
-    Ok(Image {
+    let mut img = Image {
         width,
         height,
         rgba,
-    })
+    };
+    for l in &geometry.labels {
+        if let Some((x, y)) = view.pixel(l.at) {
+            img.text(x as i64 + 4, y as i64 - 12, &l.text);
+        }
+    }
+    if options.triad {
+        img.triad(&view);
+    }
+    Ok(img)
+}
+
+impl Image {
+    fn put(&mut self, x: i64, y: i64, c: [u8; 3]) {
+        if x < 0 || y < 0 || x >= self.width as i64 || y >= self.height as i64 {
+            return;
+        }
+        let i = ((y as u32 * self.width + x as u32) * 4) as usize;
+        self.rgba[i..i + 3].copy_from_slice(&c);
+    }
+
+    /// ASCII text, dark on a white halo, its top left at `(x, y)`.
+    fn text(&mut self, x: i64, y: i64, s: &str) {
+        let glyph = |c: char| {
+            let i = if c.is_ascii() {
+                c as usize
+            } else {
+                b'?' as usize
+            };
+            font8x8::legacy::BASIC_LEGACY[i]
+        };
+        let on = |c: char, gx: i64, gy: i64| {
+            (0..8).contains(&gx) && (0..8).contains(&gy) && glyph(c)[gy as usize] >> gx & 1 == 1
+        };
+        let white = [255, 255, 255];
+        let dark = EDGE.map(to_u8);
+        for (k, c) in s.chars().enumerate() {
+            let ox = x + 8 * k as i64;
+            for gy in -1..9 {
+                for gx in -1..9 {
+                    let near = (-1..=1).any(|dy| (-1..=1).any(|dx| on(c, gx + dx, gy + dy)));
+                    if on(c, gx, gy) {
+                        self.put(ox + gx, y + gy, dark);
+                    } else if near {
+                        self.put(ox + gx, y + gy, white);
+                    }
+                }
+            }
+        }
+    }
+
+    /// A line two pixels wide.
+    fn line(&mut self, a: (f32, f32), b: (f32, f32), c: [u8; 3]) {
+        let steps = ((b.0 - a.0).abs().max((b.1 - a.1).abs()).ceil() as i64).max(1);
+        for k in 0..=steps {
+            let t = k as f32 / steps as f32;
+            let (x, y) = (a.0 + t * (b.0 - a.0), a.1 + t * (b.1 - a.1));
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                self.put(x as i64 + dx, y as i64 + dy, c);
+            }
+        }
+    }
+
+    /// The world axes as seen by the view, bottom left.
+    fn triad(&mut self, view: &View) {
+        let o = (28.0, self.height as f32 - 28.0);
+        let axes = [
+            ([1.0, 0.0, 0.0], [214, 48, 49], "X"),
+            ([0.0, 1.0, 0.0], [39, 174, 96], "Y"),
+            ([0.0, 0.0, 1.0], [41, 98, 255], "Z"),
+        ];
+        for (d, c, name) in axes {
+            let (dx, dy) = view.direction(d);
+            let tip = (o.0 + 20.0 * dx, o.1 + 20.0 * dy);
+            self.line(o, tip, c);
+            self.text(
+                tip.0 as i64 + 2 * dx.signum() as i64 - 4,
+                tip.1 as i64 - 4 + 4 * dy.signum() as i64,
+                name,
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -378,6 +590,15 @@ pub(crate) mod tests {
             positions,
             triangles,
             lines: Vec::new(),
+            labels: Vec::new(),
+        }
+    }
+
+    /// Surfaces only.
+    fn bare() -> Options {
+        Options {
+            silhouettes: false,
+            triad: false,
         }
     }
 
@@ -397,7 +618,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_cube_covers_the_middle_and_not_the_corners() {
-        let img = render(&cube(), &camera([3.0, -4.0, 3.0]), 64, 48).unwrap();
+        let img = render(&cube(), &camera([3.0, -4.0, 3.0]), 64, 48, bare()).unwrap();
         let bg = BACKGROUND.map(to_u8);
         assert_eq!(&at(&img, 0, 0)[..3], &bg);
         assert_ne!(&at(&img, 32, 24)[..3], &bg);
@@ -408,12 +629,12 @@ pub(crate) mod tests {
     fn faces_towards_the_light_are_brighter() {
         // Looking straight at the -Y face, then from behind at the +Y face:
         // both are lit the same, being square to the view.
-        let front = render(&cube(), &camera([0.5, -5.0, 0.5]), 32, 32).unwrap();
-        let back = render(&cube(), &camera([0.5, 6.0, 0.5]), 32, 32).unwrap();
+        let front = render(&cube(), &camera([0.5, -5.0, 0.5]), 32, 32, bare()).unwrap();
+        let back = render(&cube(), &camera([0.5, 6.0, 0.5]), 32, 32, bare()).unwrap();
         assert_eq!(at(&front, 16, 16), at(&back, 16, 16));
         // From above at an angle, the top (facing the light more) is
         // brighter than a side.
-        let img = render(&cube(), &camera([0.5, -3.0, 4.0]), 64, 64).unwrap();
+        let img = render(&cube(), &camera([0.5, -3.0, 4.0]), 64, 64, bare()).unwrap();
         let top = at(&img, 32, 22)[0];
         let side = at(&img, 32, 40)[0];
         assert!(top > side, "{top} > {side}");
@@ -421,7 +642,16 @@ pub(crate) mod tests {
 
     #[test]
     fn the_same_pixels_on_any_number_of_threads() {
-        let g = cube();
+        let mut g = cube();
+        g.lines.push(Line {
+            points: vec![0, 1, 3, 2, 0],
+            color: EDGE,
+            width: 1.0,
+        });
+        g.labels.push(Label {
+            at: [1.0, 1.0, 1.0],
+            text: "corner".into(),
+        });
         let c = camera([2.0, -3.0, 1.5]);
         let one = rayon::ThreadPoolBuilder::new()
             .num_threads(1)
@@ -431,8 +661,8 @@ pub(crate) mod tests {
             .num_threads(7)
             .build()
             .unwrap();
-        let a = one.install(|| render(&g, &c, 200, 150).unwrap());
-        let b = many.install(|| render(&g, &c, 200, 150).unwrap());
+        let a = one.install(|| render(&g, &c, 200, 150, Options::default()).unwrap());
+        let b = many.install(|| render(&g, &c, 200, 150, Options::default()).unwrap());
         assert_eq!(a, b);
     }
 
@@ -442,23 +672,108 @@ pub(crate) mod tests {
         c.target = [0.5, 10.0, 0.5];
         // The eye is inside the cube: every face is behind or edge-on, or
         // seen from inside (culled).
-        let img = render(&cube(), &c, 16, 16).unwrap();
+        let img = render(&cube(), &c, 16, 16, bare()).unwrap();
         let bg = BACKGROUND.map(to_u8);
         assert!(img.rgba.chunks(4).all(|p| p[..3] == bg));
+    }
+
+    #[test]
+    fn lines_show_on_surfaces_but_not_through_them() {
+        let c = camera([0.5, -5.0, 0.5]);
+        // An edge along the near face's middle, and one on the far face.
+        let mut g = cube();
+        g.positions.extend([
+            [0.0, 0.0, 0.5],
+            [1.0, 0.0, 0.5],
+            [0.0, 1.0, 0.75],
+            [1.0, 1.0, 0.75],
+        ]);
+        let red = [1.0, 0.0, 0.0];
+        g.lines.push(Line {
+            points: vec![8, 9],
+            color: red,
+            width: 2.0,
+        });
+        g.lines.push(Line {
+            points: vec![10, 11],
+            color: red,
+            width: 2.0,
+        });
+        let img = render(&g, &c, 64, 64, bare()).unwrap();
+        let reds = |y: u32| {
+            (0..64)
+                .filter(|x| at(&img, *x, y)[..3] == [255, 0, 0])
+                .count()
+        };
+        assert!(reds(32) > 10, "the near edge shows");
+        let far_y = (0..64).find(|y| reds(*y) > 0 && (*y as i32 - 32).abs() > 3);
+        assert_eq!(far_y, None, "the far edge is hidden");
+    }
+
+    #[test]
+    fn silhouettes_outline_the_shape() {
+        let c = camera([3.0, -4.0, 3.0]);
+        let plain = render(&cube(), &c, 64, 64, bare()).unwrap();
+        let outlined = render(
+            &cube(),
+            &c,
+            64,
+            64,
+            Options {
+                silhouettes: true,
+                triad: false,
+            },
+        )
+        .unwrap();
+        let dark = |img: &Image| img.rgba.chunks(4).filter(|p| p[0] < 80).count();
+        assert!(dark(&outlined) > dark(&plain));
+    }
+
+    #[test]
+    fn labels_and_the_triad_draw_on_top() {
+        let c = camera([3.0, -4.0, 3.0]);
+        let mut g = cube();
+        g.labels.push(Label {
+            at: [0.5, 0.5, 0.5],
+            text: "hi".into(),
+        });
+        let plain = render(&g.clone(), &c, 64, 64, bare());
+        g.labels.clear();
+        let without = render(&g, &c, 64, 64, bare()).unwrap();
+        assert_ne!(plain.unwrap(), without);
+        let triad = render(
+            &g,
+            &c,
+            64,
+            64,
+            Options {
+                silhouettes: false,
+                triad: true,
+            },
+        )
+        .unwrap();
+        // The X axis is red near the bottom left corner.
+        let red = triad.rgba.chunks(4).enumerate().any(|(i, p)| {
+            let (x, y) = (i % 64, i / 64);
+            x < 40 && y > 24 && p[..3] == [214, 48, 49]
+        });
+        assert!(red);
     }
 
     #[test]
     fn sizes_and_png() {
         let c = camera([3.0, -4.0, 3.0]);
         assert_eq!(
-            render(&cube(), &c, 0, 10).unwrap_err().code,
+            render(&cube(), &c, 0, 10, bare()).unwrap_err().code,
             Code::RenderTooLarge
         );
         assert_eq!(
-            render(&cube(), &c, MAX_SIZE + 1, 10).unwrap_err().code,
+            render(&cube(), &c, MAX_SIZE + 1, 10, bare())
+                .unwrap_err()
+                .code,
             Code::RenderTooLarge
         );
-        let img = render(&cube(), &c, 20, 10).unwrap();
+        let img = render(&cube(), &c, 20, 10, bare()).unwrap();
         let png = img.png();
         let dec = png::Decoder::new(std::io::Cursor::new(&png));
         let mut reader = dec.read_info().unwrap();

@@ -13,6 +13,8 @@ clap = { version = "4", features = ["derive"] }
 gix = { version = "0.89", default-features = false, features = ["sha1"] }
 interprocess = "2"
 png = "0.18"
+# An 8×8 bitmap font for labels in renders.
+font8x8 = { version = "0.3", default-features = false }
 rayon = "1"
 ryukei = { path = "../ryukei" }
 serde = { version = "1", features = ["derive"] }
