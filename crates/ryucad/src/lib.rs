@@ -16,6 +16,7 @@ pub mod mesh;
 pub mod notify;
 pub mod proto;
 pub mod rebuild;
+pub mod render;
 pub mod server;
 pub mod session;
 pub mod units;

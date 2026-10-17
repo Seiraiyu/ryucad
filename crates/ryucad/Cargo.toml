@@ -12,6 +12,7 @@ clap = { version = "4", features = ["derive"] }
 # Reads history only: no network, no writes, no C.
 gix = { version = "0.89", default-features = false, features = ["sha1"] }
 interprocess = "2"
+png = "0.18"
 rayon = "1"
 ryukei = { path = "../ryukei" }
 serde = { version = "1", features = ["derive"] }

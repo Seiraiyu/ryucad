@@ -62,6 +62,8 @@ pub enum Code {
     NotAGitRepo,
     /// The kernel couldn't mesh a body for display.
     MeshFailed,
+    /// A render larger than the limit, or with no pixels.
+    RenderTooLarge,
 }
 
 impl Code {
