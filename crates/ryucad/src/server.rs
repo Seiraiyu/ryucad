@@ -332,6 +332,12 @@ fn dispatch(
         // A render's answer is bytes: `answer_live` handles it.
         Request::Render { .. } => Err(Error::new(Code::Internal, "render answers with bytes")),
         Request::Doctor {} => crate::doctor::report(session.root()),
+        Request::DoctorRepair { repairs, params } => {
+            let params = crate::doctor::Params::from_json(&params)?;
+            let r = crate::doctor::repair(session.root(), &repairs, &params)?;
+            session.reload()?;
+            Ok(r)
+        }
         Request::HistoryLog { part, limit } => {
             let part = part.as_deref().map(part_id).transpose()?;
             if let Some(p) = &part {
@@ -2264,6 +2270,51 @@ pub(crate) mod tests {
             let e = call(&mut s, "mesh.get", json!({"part": "p", "feature": "z"})).unwrap_err();
             assert_eq!(e.code, Code::NotFound);
         });
+    }
+
+    #[test]
+    fn a_repair_is_logged_and_can_be_undone() {
+        let (dir, mut s) = with_part();
+        let mut live = Live::new();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "id": "a", "params": {"radius": 1}}),
+        )
+        .unwrap();
+        let text = fs::read_to_string(dir.path().join("parts/p/features/a.json")).unwrap();
+        fs::write(dir.path().join("parts/p/features/b.json"), text).unwrap();
+        let r = call_live(&mut s, &mut live, None, "doctor", json!({})).unwrap();
+        let adopt = r["issues"][0]["repairs"][0]["id"].clone();
+        assert!(adopt.as_str().unwrap().starts_with("orphan_feature:adopt:"));
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "doctor.repair",
+            json!({"repairs": [adopt]}),
+        )
+        .unwrap();
+        assert_eq!(
+            s.project()
+                .part(&part_id("p").unwrap())
+                .unwrap()
+                .order()
+                .len(),
+            2
+        );
+        let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
+        let last = log["entries"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!(last["method"], "doctor.repair");
+        call_live(&mut s, &mut live, None, "undo", json!({})).unwrap();
+        assert_eq!(
+            s.project()
+                .part(&part_id("p").unwrap())
+                .unwrap()
+                .order()
+                .len(),
+            1
+        );
     }
 
     #[test]

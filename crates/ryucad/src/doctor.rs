@@ -9,8 +9,9 @@
 use crate::doc::canonical;
 use crate::doc::files::{Feature, Manifest, PartFile};
 use crate::doc::id::Id;
-use crate::doc::project::MANIFEST;
-use crate::error::{Code, Result};
+use crate::doc::project::{MANIFEST, write_atomic};
+use crate::error::{Code, Error, Result};
+use crate::git::Repo;
 use crate::units::Unit;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -455,15 +456,442 @@ fn diagnose_part(root: &Path, part: &str, unit: Unit, issues: &mut Vec<Issue>) {
     }
 }
 
-/// `doctor`: every issue, and a summary.
-pub fn report(root: &Path) -> Result<Value> {
-    let issues = diagnose(root);
-    let errors = issues.iter().filter(|i| i.severity == "error").count();
-    Ok(json!({
+/// A way to fix an issue: the exact file changes, and any parameters it
+/// takes. Its ID names the issue, the action and the first file, plus a
+/// short hash of the files involved, so a repair planned against files
+/// that have since changed is refused.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Repair {
+    pub id: String,
+    pub summary: String,
+    pub changes: Vec<Change>,
+    pub params: Vec<Param>,
+}
+
+/// One file written (with these bytes) or, with `None`, deleted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Change {
+    pub path: String,
+    pub content: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Param {
+    pub name: &'static str,
+    pub required: bool,
+    pub about: &'static str,
+}
+
+impl Repair {
+    fn to_json(&self) -> Value {
+        let changes: Vec<Value> = self
+            .changes
+            .iter()
+            .map(|c| match &c.content {
+                Some(b) => json!({"path": c.path, "action": "write",
+                                  "content": String::from_utf8_lossy(b)}),
+                None => json!({"path": c.path, "action": "delete"}),
+            })
+            .collect();
+        let params: Vec<Value> = self
+            .params
+            .iter()
+            .map(|p| json!({"name": p.name, "required": p.required, "about": p.about}))
+            .collect();
+        json!({"id": self.id, "summary": self.summary, "changes": changes, "params": params})
+    }
+
+    /// The ID without its hash: the same repair, whatever the files hold.
+    fn key(&self) -> &str {
+        key(&self.id)
+    }
+}
+
+fn key(id: &str) -> &str {
+    id.split_once('@').map_or(id, |(k, _)| k)
+}
+
+/// What repairs may be given.
+#[derive(Clone, Debug, Default)]
+pub struct Params {
+    /// For `missing_manifest`: the project's default unit (mm otherwise).
+    pub unit: Option<Unit>,
+    /// For `missing_part_index`: every feature, in order.
+    pub order: Option<Vec<String>>,
+}
+
+impl Params {
+    pub fn from_json(v: &serde_json::Map<String, Value>) -> Result<Params> {
+        let mut p = Params::default();
+        for (k, v) in v {
+            match k.as_str() {
+                "unit" => {
+                    let u = v.as_str().and_then(Unit::parse).ok_or_else(|| {
+                        Error::new(Code::InvalidParam, "unit is one of m, cm, mm, um, in, ft")
+                    })?;
+                    p.unit = Some(u);
+                }
+                "order" => {
+                    let list: Vec<String> = match v {
+                        Value::String(s) => s.split(',').map(|x| x.trim().to_owned()).collect(),
+                        Value::Array(a) => a
+                            .iter()
+                            .filter_map(|x| x.as_str().map(str::to_owned))
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    p.order = Some(list);
+                }
+                _ => {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        format!("unknown repair parameter {k:?}; use unit or order"),
+                    )
+                    .with("param", k));
+                }
+            }
+        }
+        Ok(p)
+    }
+}
+
+/// A short hash of the files an issue involves, as they are now.
+fn basis(root: &Path, files: &[String]) -> String {
+    let mut h = blake3::Hasher::new();
+    for f in files {
+        h.update(&(f.len() as u64).to_le_bytes());
+        h.update(f.as_bytes());
+        match fs::read(root.join(f)) {
+            Ok(b) => {
+                h.update(&(b.len() as u64).to_le_bytes());
+                h.update(&b);
+            }
+            Err(_) => {
+                h.update(&u64::MAX.to_le_bytes());
+            }
+        }
+    }
+    h.finalize().to_hex()[..8].to_owned()
+}
+
+fn canonical_bytes(v: &Value) -> Vec<u8> {
+    canonical::to_string(v).into_bytes()
+}
+
+/// The feature list in `parts/<part>/part.json`, if it can be read.
+fn listed(root: &Path, part: &str) -> Option<Vec<Id>> {
+    match read(root, &format!("parts/{part}/part.json")) {
+        Read::Json(v, _) => PartFile::from_json(&v).ok().map(|p| p.features),
+        _ => None,
+    }
+}
+
+/// The valid feature IDs with files in a part, sorted.
+fn feature_files(root: &Path, part: &str) -> Vec<String> {
+    names(&root.join(format!("parts/{part}/features")))
+        .into_iter()
+        .filter_map(|(n, d)| (!d).then_some(n.strip_suffix(".json")?.to_owned()))
+        .filter(|s| Id::parse(s, "feature").is_ok())
+        .collect()
+}
+
+fn index_with(features: &[String]) -> Result<Vec<u8>> {
+    let features = features
+        .iter()
+        .map(|f| Id::parse(f, "feature"))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(canonical_bytes(&PartFile { features }.to_json()))
+}
+
+/// `parts/<part>/...` → `<part>`.
+fn part_of(rel: &str) -> &str {
+    rel.split('/').nth(1).unwrap_or("")
+}
+
+/// `.../<stem>.json` → `<stem>`.
+fn stem_of(rel: &str) -> &str {
+    rel.rsplit('/')
+        .next()
+        .and_then(|n| n.strip_suffix(".json"))
+        .unwrap_or("")
+}
+
+/// The repairs for an issue, planned against the files as they are.
+fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<Vec<Repair>> {
+    let Some(first) = i.files.first() else {
+        return Ok(Vec::new());
+    };
+    let b = basis(root, &i.files);
+    let id = |action: &str| format!("{}:{action}:{first}@{b}", i.code);
+    let write = |path: &str, content: Vec<u8>| Change {
+        path: path.to_owned(),
+        content: Some(content),
+    };
+    let delete = |path: &str| Change {
+        path: path.to_owned(),
+        content: None,
+    };
+    let head = |rel: &str| -> Result<Option<Vec<u8>>> {
+        match repo {
+            Some(r) => r.head_file(rel),
+            None => Ok(None),
+        }
+    };
+    let mut out = Vec::new();
+    match i.code {
+        "missing_manifest" => {
+            let unit = params.unit.unwrap_or(Unit::Mm);
+            out.push(Repair {
+                id: id("recreate"),
+                summary: format!(
+                    "write a new {MANIFEST} (files keep their units, so no geometry changes)"
+                ),
+                changes: vec![write(
+                    MANIFEST,
+                    canonical_bytes(&Manifest { default_unit: unit }.to_json()),
+                )],
+                params: vec![Param {
+                    name: "unit",
+                    required: false,
+                    about: "the default unit for bare numbers (mm)",
+                }],
+            });
+        }
+        "missing_part_index" => {
+            let part = part_of(first);
+            let files = feature_files(root, part);
+            let committed: Vec<String> = head(first)?
+                .and_then(|b| canonical::parse(std::str::from_utf8(&b).ok()?).ok())
+                .and_then(|v| PartFile::from_json(&v).ok())
+                .map(|p| p.features.iter().map(|f| f.to_string()).collect())
+                .unwrap_or_default();
+            let mut order: Vec<String> = committed
+                .into_iter()
+                .filter(|f| files.contains(f))
+                .collect();
+            let rest: Vec<String> = files
+                .iter()
+                .filter(|f| !order.contains(f))
+                .cloned()
+                .collect();
+            let known = rest.is_empty() || files.len() == 1;
+            order.extend(rest);
+            if let Some(given) = &params.order {
+                order = given.clone();
+            }
+            out.push(Repair {
+                id: id("recreate"),
+                summary: if known {
+                    format!("write {first} listing the {} feature file(s)", files.len())
+                } else {
+                    format!("write {first}; the feature order can't be recovered, so give it as order=a,b,…")
+                },
+                changes: vec![write(first, index_with(&order)?)],
+                params: vec![Param {
+                    name: "order",
+                    required: !known,
+                    about: "every feature ID, comma separated, in order",
+                }],
+            });
+        }
+        "listed_feature_missing" => {
+            let (part, fid) = (part_of(first), stem_of(first));
+            if let Some(list) = listed(root, part) {
+                let kept: Vec<String> = list
+                    .iter()
+                    .filter(|f| f.as_str() != fid)
+                    .map(|f| f.to_string())
+                    .collect();
+                out.push(Repair {
+                    id: id("remove"),
+                    summary: format!("take {fid} out of parts/{part}/part.json"),
+                    changes: vec![write(&i.files[1], index_with(&kept)?)],
+                    params: Vec::new(),
+                });
+            }
+            if let Some(bytes) = head(first)? {
+                out.push(Repair {
+                    id: id("restore"),
+                    summary: format!("restore {first} as the last commit has it"),
+                    changes: vec![write(first, bytes)],
+                    params: Vec::new(),
+                });
+            }
+        }
+        "orphan_feature" => {
+            let (part, fid) = (part_of(first), stem_of(first));
+            if let Some(list) = listed(root, part) {
+                let mut all: Vec<String> = list.iter().map(|f| f.to_string()).collect();
+                all.push(fid.to_owned());
+                out.push(Repair {
+                    id: id("adopt"),
+                    summary: format!("list {fid} last in parts/{part}/part.json"),
+                    changes: vec![write(&i.files[1], index_with(&all)?)],
+                    params: Vec::new(),
+                });
+            }
+            out.push(Repair {
+                id: id("delete"),
+                summary: format!("delete {first}"),
+                changes: vec![delete(first)],
+                params: Vec::new(),
+            });
+        }
+        "invalid_json" | "invalid_document" => {
+            let current = fs::read(root.join(first)).ok();
+            let good = head(first)?.filter(|b| {
+                Some(b) != current.as_ref()
+                    && std::str::from_utf8(b).is_ok_and(|t| canonical::parse(t).is_ok())
+            });
+            if let Some(bytes) = good {
+                out.push(Repair {
+                    id: id("restore"),
+                    summary: format!("restore {first} as the last commit has it"),
+                    changes: vec![write(first, bytes)],
+                    params: Vec::new(),
+                });
+            }
+        }
+        "sync_conflict_copy" => {
+            let (copy, original) = (first, &i.files[1]);
+            out.push(Repair {
+                id: id("keep-original"),
+                summary: format!("delete the copy {copy}"),
+                changes: vec![delete(copy)],
+                params: Vec::new(),
+            });
+            if let Ok(bytes) = fs::read(root.join(copy)) {
+                out.push(Repair {
+                    id: id("use-copy"),
+                    summary: format!("replace {original} with {copy}, then delete the copy"),
+                    changes: vec![write(original, bytes), delete(copy)],
+                    params: Vec::new(),
+                });
+            }
+        }
+        "non_canonical" => {
+            if let Read::Json(v, _) = read(root, first) {
+                out.push(Repair {
+                    id: id("rewrite"),
+                    summary: format!("rewrite {first} in canonical form"),
+                    changes: vec![write(first, canonical_bytes(&v))],
+                    params: Vec::new(),
+                });
+            }
+        }
+        _ => {}
+    }
+    Ok(out)
+}
+
+/// Every issue with its repairs.
+fn planned(root: &Path, params: &Params) -> Result<Vec<(Issue, Vec<Repair>)>> {
+    let repo = Repo::open(root)?;
+    diagnose(root)
+        .into_iter()
+        .map(|i| {
+            let r = plan(root, &i, repo.as_ref(), params)?;
+            Ok((i, r))
+        })
+        .collect()
+}
+
+fn summary(issues: &[(Issue, Vec<Repair>)]) -> Value {
+    let errors = issues.iter().filter(|(i, _)| i.severity == "error").count();
+    let list: Vec<Value> = issues
+        .iter()
+        .map(|(i, r)| {
+            let mut v = i.to_json();
+            v["repairs"] = json!(r.iter().map(Repair::to_json).collect::<Vec<_>>());
+            v
+        })
+        .collect();
+    json!({
         "healthy": issues.is_empty(),
         "errors": errors,
         "warnings": issues.len() - errors,
-        "issues": issues.iter().map(Issue::to_json).collect::<Vec<_>>(),
+        "issues": list,
+    })
+}
+
+/// `doctor`: every issue and how to repair it. Writes nothing.
+pub fn report(root: &Path) -> Result<Value> {
+    Ok(summary(&planned(root, &Params::default())?))
+}
+
+/// `doctor.repair`: applies the named repairs, in order. Every one must be
+/// in a fresh diagnosis with the same hash, or nothing is done
+/// (`repair_conflict`); a repair that an earlier one made unnecessary is
+/// skipped.
+pub fn repair(root: &Path, ids: &[String], params: &Params) -> Result<Value> {
+    let now = planned(root, params)?;
+    let all: Vec<&Repair> = now.iter().flat_map(|(_, r)| r).collect();
+    for id in ids {
+        let Some(r) = all.iter().find(|r| r.id == *id) else {
+            return Err(Error::new(
+                Code::RepairConflict,
+                format!("no repair {id} now: the files changed, or it was never offered; run doctor again"),
+            )
+            .with("repair", id));
+        };
+        if let Some(p) = r
+            .params
+            .iter()
+            .find(|p| p.required && p.name == "order" && params.order.is_none())
+        {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("{id} needs the parameter {}: {}", p.name, p.about),
+            )
+            .with("repair", id));
+        }
+        if r.id.starts_with("missing_part_index:")
+            && let Some(order) = &params.order
+        {
+            let mut given = order.clone();
+            given.sort();
+            if given != feature_files(root, part_of(&r.changes[0].path)) {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "order must list every feature file of the part exactly once",
+                )
+                .with("repair", id));
+            }
+        }
+    }
+    let (mut applied, mut skipped, mut changes) = (Vec::new(), Vec::new(), Vec::new());
+    for id in ids {
+        // Planned again: an earlier repair may have changed shared files.
+        let fresh = planned(root, params)?;
+        let found = fresh
+            .iter()
+            .flat_map(|(_, r)| r)
+            .find(|r| r.key() == key(id))
+            .cloned();
+        let Some(r) = found else {
+            skipped.push(id.clone());
+            continue;
+        };
+        for c in &r.changes {
+            let path = root.join(&c.path);
+            match &c.content {
+                Some(bytes) => {
+                    write_atomic(&path, bytes)?;
+                    changes.push(json!({"path": c.path, "change": "written"}));
+                }
+                None => {
+                    crate::doc::project::remove_file(root, &path)?;
+                    changes.push(json!({"path": c.path, "change": "deleted"}));
+                }
+            }
+        }
+        applied.push(id.clone());
+    }
+    Ok(json!({
+        "applied": applied,
+        "skipped": skipped,
+        "changes": changes,
+        "report": report(root)?,
     }))
 }
 
@@ -623,5 +1051,183 @@ pub(crate) mod tests {
         let got = codes(&root);
         assert_eq!(got, [("cloud_sync_folder", vec![])]);
         assert_eq!(diagnose(&root)[0].severity, "warning");
+    }
+
+    /// The IDs of the repairs offered now, by issue code and action.
+    fn offered(root: &Path) -> BTreeMap<String, String> {
+        let v = report(root).unwrap();
+        let mut out = BTreeMap::new();
+        for i in v["issues"].as_array().unwrap() {
+            for r in i["repairs"].as_array().unwrap() {
+                let id = r["id"].as_str().unwrap().to_owned();
+                let mut parts = id.splitn(3, ':');
+                let (code, action) = (parts.next().unwrap(), parts.next().unwrap());
+                out.insert(
+                    format!(
+                        "{code}:{action}:{}",
+                        stem_of(i["files"][0].as_str().unwrap())
+                    ),
+                    id,
+                );
+            }
+        }
+        out
+    }
+
+    fn fix(root: &Path, ids: &[&String], params: Params) -> Value {
+        let ids: Vec<String> = ids.iter().map(|s| (*s).clone()).collect();
+        repair(root, &ids, &params).unwrap()
+    }
+
+    #[test]
+    fn orphans_are_adopted_or_deleted_and_copies_resolved() {
+        let dir = healthy();
+        let r = dir.path();
+        let a = fs::read_to_string(r.join("parts/p/features/a.json")).unwrap();
+        w(r, "parts/p/features/c.json", &a);
+        w(r, "parts/p/features/d.json", &a);
+        w(r, "parts/p/features/b (1).json", &a.replace("1 mm", "5 mm"));
+        let ids = offered(r);
+        // Planning writes nothing.
+        assert_eq!(diagnose(r).len(), 3);
+        // Two repairs on one part.json compose, and a copy is taken.
+        let out = fix(
+            r,
+            &[
+                &ids["orphan_feature:adopt:c"],
+                &ids["orphan_feature:delete:d"],
+                &ids["sync_conflict_copy:use-copy:b (1)"],
+            ],
+            Params::default(),
+        );
+        assert_eq!(out["skipped"], json!([]));
+        assert_eq!(out["report"]["healthy"], true, "{out}");
+        let list = listed(r, "p").unwrap();
+        assert_eq!(
+            list.iter().map(Id::as_str).collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+        assert!(!r.join("parts/p/features/d.json").exists());
+        let b = fs::read_to_string(r.join("parts/p/features/b.json")).unwrap();
+        assert!(b.contains("5 mm"));
+    }
+
+    #[test]
+    fn a_repair_planned_on_old_files_is_refused() {
+        let dir = healthy();
+        let r = dir.path();
+        let a = fs::read_to_string(r.join("parts/p/features/a.json")).unwrap();
+        w(r, "parts/p/features/c.json", &a);
+        let ids = offered(r);
+        w(r, "parts/p/features/c.json", &a.replace("1 mm", "2 mm"));
+        let e = repair(
+            r,
+            &[ids["orphan_feature:adopt:c"].clone()],
+            &Params::default(),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::RepairConflict);
+        // Nothing was done.
+        assert_eq!(listed(r, "p").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_lost_manifest_and_index_come_back() {
+        let dir = healthy();
+        let r = dir.path();
+        fs::remove_file(r.join(MANIFEST)).unwrap();
+        fs::remove_file(r.join("parts/p/part.json")).unwrap();
+        let ids = offered(r);
+        // Two features and no history: the order must be given.
+        let index = ids["missing_part_index:recreate:part"].clone();
+        let e = repair(r, std::slice::from_ref(&index), &Params::default()).unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        let bad = Params {
+            order: Some(vec!["b".into()]),
+            ..Params::default()
+        };
+        assert_eq!(
+            repair(r, std::slice::from_ref(&index), &bad)
+                .unwrap_err()
+                .code,
+            Code::InvalidParam
+        );
+        let params = Params {
+            unit: Some(Unit::In),
+            order: Some(vec!["b".into(), "a".into()]),
+        };
+        let out = fix(
+            r,
+            &[&ids["missing_manifest:recreate:ryucad"], &index],
+            params,
+        );
+        assert_eq!(out["report"]["healthy"], true, "{out}");
+        let list = listed(r, "p").unwrap();
+        assert_eq!(list.iter().map(Id::as_str).collect::<Vec<_>>(), ["b", "a"]);
+        let m = fs::read_to_string(r.join(MANIFEST)).unwrap();
+        assert!(m.contains("\"in\""));
+        // The project opens again.
+        crate::session::Session::open(r).unwrap();
+    }
+
+    #[test]
+    fn the_last_commit_restores_what_was_lost() {
+        let dir = healthy();
+        let r = dir.path();
+        crate::git::tests::git(r, &["init", "-q"]);
+        crate::git::tests::git(r, &["add", "."]);
+        crate::git::tests::git(r, &["commit", "-q", "-m", "start"]);
+        // A deleted file, a broken one, and a lost index with history.
+        fs::remove_file(r.join("parts/p/features/a.json")).unwrap();
+        w(r, "parts/p/features/b.json", "{");
+        let ids = offered(r);
+        let out = fix(
+            r,
+            &[
+                &ids["listed_feature_missing:restore:a"],
+                &ids["invalid_json:restore:b"],
+            ],
+            Params::default(),
+        );
+        assert_eq!(out["report"]["healthy"], true, "{out}");
+        fs::remove_file(r.join("parts/p/part.json")).unwrap();
+        let ids = offered(r);
+        let v = report(r).unwrap();
+        assert_eq!(v["issues"][0]["repairs"][0]["params"][0]["required"], false);
+        let out = fix(
+            r,
+            &[&ids["missing_part_index:recreate:part"]],
+            Params::default(),
+        );
+        assert_eq!(out["report"]["healthy"], true);
+        let list = listed(r, "p").unwrap();
+        assert_eq!(list.iter().map(Id::as_str).collect::<Vec<_>>(), ["a", "b"]);
+        // Removing a listed feature that's gone is the other way.
+        fs::remove_file(r.join("parts/p/features/a.json")).unwrap();
+        let ids = offered(r);
+        fix(
+            r,
+            &[&ids["listed_feature_missing:remove:a"]],
+            Params::default(),
+        );
+        assert_eq!(listed(r, "p").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn repairs_take_known_parameters_only() {
+        let p = |v: Value| Params::from_json(v.as_object().unwrap());
+        assert_eq!(p(json!({"unit": "cm"})).unwrap().unit, Some(Unit::Cm));
+        assert_eq!(
+            p(json!({"order": "a, b"})).unwrap().order.unwrap(),
+            ["a", "b"]
+        );
+        assert_eq!(
+            p(json!({"colour": "red"})).unwrap_err().code,
+            Code::InvalidParam
+        );
+        assert_eq!(
+            p(json!({"unit": "parsec"})).unwrap_err().code,
+            Code::InvalidParam
+        );
     }
 }

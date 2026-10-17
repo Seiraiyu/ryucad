@@ -68,8 +68,16 @@ enum Command {
     /// Report files that aren't canonical, broken, unlisted or unknown.
     CheckFormat,
     /// Diagnose the project folder: a lost manifest, unlisted or missing
-    /// feature files, conflict markers, sync tools' copies and more.
-    Doctor,
+    /// feature files, conflict markers, sync tools' copies and more. With
+    /// --repair, apply repairs it offered.
+    Doctor {
+        /// A repair ID from a doctor report.
+        #[arg(long = "repair", value_name = "ID")]
+        repairs: Vec<String>,
+        /// A repair parameter: unit=in, order=a,b,c.
+        #[arg(long = "param", value_name = "NAME=VALUE", value_parser = param, requires = "repairs")]
+        params: Vec<(String, String)>,
+    },
     /// List the humans and agents attached to the project's session.
     Participants,
     /// Set this agent's selection (entity references
@@ -578,7 +586,14 @@ fn request(cmd: &Command) -> Option<Request> {
             entity: entity.clone(),
         },
         Command::CheckFormat => Request::CheckFormat {},
-        Command::Doctor => Request::Doctor {},
+        Command::Doctor { repairs, params } if repairs.is_empty() => {
+            let _ = params;
+            Request::Doctor {}
+        }
+        Command::Doctor { repairs, params } => Request::DoctorRepair {
+            repairs: repairs.clone(),
+            params: params.iter().map(|(k, v)| (k.clone(), json!(v))).collect(),
+        },
         Command::Participants => Request::ParticipantList {},
         Command::Select {
             entities,
@@ -752,8 +767,13 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
         }
         // A damaged project has no daemon and no session: doctor works on
         // the folder.
-        Command::Doctor if find_project(&here)?.1 => {
-            ryucad::doctor::report(&find_project(&here)?.0)
+        Command::Doctor { repairs, params } if find_project(&here)?.1 => {
+            let root = find_project(&here)?.0;
+            if repairs.is_empty() {
+                return ryucad::doctor::report(&root);
+            }
+            let params = params.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+            ryucad::doctor::repair(&root, repairs, &ryucad::doctor::Params::from_json(&params)?)
         }
         cmd => {
             let req = request(cmd).expect("every other command is a request");

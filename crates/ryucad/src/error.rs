@@ -67,6 +67,8 @@ pub enum Code {
     /// A folder that looks like a project but can't be opened (no
     /// manifest): `ryucad doctor` can repair it.
     ProjectDamaged,
+    /// A repair planned against files that have changed since.
+    RepairConflict,
 }
 
 impl Code {

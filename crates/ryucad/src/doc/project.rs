@@ -321,6 +321,21 @@ pub fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
     })
 }
 
+/// Deletes a project file, then the folders above it that are left empty,
+/// up to `parts/`.
+pub fn remove_file(root: &Path, path: &Path) -> Result<()> {
+    fs::remove_file(path).map_err(|e| Error::io(path, &e))?;
+    let stop = root.join("parts");
+    let mut dir = path.parent();
+    while let Some(d) = dir {
+        if d == stop || !d.starts_with(&stop) || fs::remove_dir(d).is_err() {
+            break;
+        }
+        dir = d.parent();
+    }
+    Ok(())
+}
+
 /// Writes a JSON document in canonical form.
 pub fn write_json(path: &Path, v: &Value) -> Result<()> {
     write_atomic(path, canonical::to_string(v))

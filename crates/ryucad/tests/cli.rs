@@ -339,6 +339,7 @@ fn every_protocol_method_has_a_command() {
         ("mesh.get", &["mesh"]),
         ("render", &["render"]),
         ("doctor", &["doctor"]),
+        ("doctor.repair", &["doctor"]),
         ("config.get", &["config", "get"]),
         ("config.set", &["config", "set"]),
         ("redo", &["redo"]),
@@ -560,4 +561,28 @@ fn doctor_on_a_healthy_project() {
         .map(|i| i["code"].as_str().unwrap())
         .collect();
     assert_eq!(codes, ["invalid_json", "orphan_feature"]);
+}
+
+#[test]
+fn doctor_repairs_a_damaged_project() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "in"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "sphere", "--id", "s", "--param", "radius=1",
+    ]);
+    fs::remove_file(p.direct.join("ryucad.json")).unwrap();
+    fs::remove_file(p.daemon.join("ryucad.json")).unwrap();
+    let r = p.ok(&["doctor"]);
+    let id = r["issues"][0]["repairs"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(id.starts_with("missing_manifest:recreate:ryucad.json@"));
+    let out = p.ok(&["doctor", "--repair", &id, "--param", "unit=in"]);
+    assert_eq!(out["report"]["healthy"], true);
+    // The project works again, through the daemon too.
+    let v = p.ok(&["feature", "show", "p", "s"]);
+    assert_eq!(v["params"]["radius"]["value"], "1 in");
+    p.fails(&["doctor", "--repair", &id], "repair_conflict", 1);
 }

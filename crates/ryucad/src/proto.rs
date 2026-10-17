@@ -344,6 +344,13 @@ pub enum Request {
     /// Diagnoses the project folder: every problem, with a stable code.
     #[serde(rename = "doctor")]
     Doctor {},
+    /// Applies repairs `doctor` offered, by ID.
+    #[serde(rename = "doctor.repair")]
+    DoctorRepair {
+        repairs: Vec<String>,
+        #[serde(default, skip_serializing_if = "Map::is_empty")]
+        params: Map<String, Value>,
+    },
     /// Says what the caller is doing; an empty status clears it.
     #[serde(rename = "activity.set")]
     ActivitySet {
@@ -397,6 +404,7 @@ impl Request {
                 | Request::FeatureMove { .. }
                 | Request::Undo { .. }
                 | Request::Redo { .. }
+                | Request::DoctorRepair { .. }
         )
     }
 

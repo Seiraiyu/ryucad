@@ -273,8 +273,7 @@ fn revert(root: &Path, files: &[FileChange]) -> Result<Vec<FileChange>> {
         match &f.before {
             Some(bytes) => write_atomic(&path, bytes)?,
             None => {
-                std::fs::remove_file(&path).map_err(|e| Error::io(&path, &e))?;
-                remove_empty_dirs(root, &path);
+                crate::doc::project::remove_file(root, &path)?;
             }
         }
     }
@@ -286,18 +285,6 @@ fn revert(root: &Path, files: &[FileChange]) -> Result<Vec<FileChange>> {
             after: f.before.clone(),
         })
         .collect())
-}
-
-/// Removes the folders above `path` that are now empty, up to `parts/`.
-fn remove_empty_dirs(root: &Path, path: &Path) {
-    let stop = root.join("parts");
-    let mut dir = path.parent();
-    while let Some(d) = dir {
-        if d == stop || !d.starts_with(&stop) || std::fs::remove_dir(d).is_err() {
-            return;
-        }
-        dir = d.parent();
-    }
 }
 
 /// Undoes (or with `redo`, redoes) an entry: `entry`, or the caller's
