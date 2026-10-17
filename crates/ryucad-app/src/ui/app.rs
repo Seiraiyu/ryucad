@@ -50,6 +50,7 @@ pub fn open_workspace(root: &Path, daemon: &Daemon, wake: Wake) -> Result<Worksp
 pub struct App {
     pub ws: Workspace,
     pub view: View,
+    pub tab: panels::Tab,
     titled: bool,
 }
 
@@ -58,6 +59,7 @@ impl App {
         App {
             ws,
             view: View::new(),
+            tab: panels::Tab::default(),
             titled: false,
         }
     }
@@ -91,7 +93,12 @@ impl App {
             self.titled = true;
         }
         egui::Panel::top("people").show(ui, |ui| panels::people(ui, &mut self.ws));
+        self.shortcuts(&ctx);
         egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &self.ws));
+        egui::Panel::bottom("journal")
+            .resizable(true)
+            .default_size(160.0)
+            .show(ui, |ui| panels::journal(ui, &mut self.ws, &mut self.tab));
         egui::Panel::left("tree")
             .resizable(true)
             .default_size(220.0)
@@ -106,6 +113,24 @@ impl App {
                 egui::ScrollArea::vertical().show(ui, |ui| panels::properties(ui, &mut self.ws));
             });
         egui::CentralPanel::no_frame().show(ui, |ui| self.view.show(ui, &mut self.ws, gpu));
+    }
+}
+
+impl App {
+    /// Ctrl/Cmd+Z undoes this window's latest change, Shift+Ctrl/Cmd+Z
+    /// redoes; not while a text field has the keyboard (it has its own).
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.memory(|m| m.focused().is_some()) {
+            return;
+        }
+        use egui::{Key, KeyboardShortcut, Modifiers};
+        let redo = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        let undo = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
+        if ctx.input_mut(|i| i.consume_shortcut(&redo)) {
+            self.ws.redo(None);
+        } else if ctx.input_mut(|i| i.consume_shortcut(&undo)) {
+            self.ws.undo(None);
+        }
     }
 }
 

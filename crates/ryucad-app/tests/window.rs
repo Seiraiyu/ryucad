@@ -190,3 +190,34 @@ fn a_parameter_is_edited_in_the_property_panel() {
     let shown = p.ok(&["feature", "show", "p", "boss"]);
     assert_eq!(shown["params"]["radius"]["value"], "4.5 mm");
 }
+
+#[test]
+fn the_activity_tab_undoes_and_ctrl_z_does_too() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    p.ok(&["feature", "edit", "p", "boss", "--param", "radius=5"]);
+    frames(&mut h, |a| !a.ws.activity.entries.is_empty());
+    h.step();
+    h.get_by_label("feature.edit");
+    // Newest first: the top Undo is the edit's.
+    h.get_all_by_label("Undo").next().unwrap().click();
+    frames(&mut h, |a| {
+        a.ws.activity.entries.iter().any(|e| e["kind"] == "undo")
+    });
+    let radius =
+        |p: &Project| p.ok(&["feature", "show", "p", "boss"])["params"]["radius"]["value"].clone();
+    assert_eq!(radius(&p), "3 mm");
+    // That undo was the window's own: Shift+Ctrl+Z redoes it.
+    h.key_press_modifiers(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        egui::Key::Z,
+    );
+    frames(&mut h, |a| {
+        a.ws.activity.entries.iter().any(|e| e["kind"] == "redo")
+    });
+    assert_eq!(radius(&p), "5 mm");
+}

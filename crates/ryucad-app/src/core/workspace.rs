@@ -1,6 +1,7 @@
 //! An open project: the link to its daemon and what the window knows, kept
 //! up to date from answers and notifications.
 
+use crate::core::activity::{Activity, LOADED};
 use crate::core::edit::Form;
 use crate::core::link::{Event, Link, Wake};
 use crate::core::model::{BodyKey, Model, Part};
@@ -28,6 +29,8 @@ enum Pending {
     /// was when the save failed.
     Form(String, Option<Box<Form>>),
     Save,
+    Activity,
+    History,
     /// Only a failure matters.
     Quiet,
 }
@@ -74,6 +77,9 @@ pub struct Workspace {
     pub following: Option<String>,
     /// The property panel's form, for the feature chosen in the tree.
     pub form: Option<Form>,
+    pub activity: Activity,
+    /// The project's Git history (`history.log`), once asked for.
+    pub history: Option<Value>,
     /// Requests of the window's that failed, newest last.
     pub errors: Vec<Error>,
     /// The daemon is gone: the window shows its last state, greyed, and
@@ -108,6 +114,8 @@ impl Workspace {
             people,
             following: None,
             form: None,
+            activity: Activity::default(),
+            history: None,
             camera_due: None,
             camera_sent: None,
             errors: Vec::new(),
@@ -128,6 +136,31 @@ impl Workspace {
     fn load(&mut self) {
         self.send(Request::ProjectInfo {}, Pending::Info);
         self.send(Request::PartList {}, Pending::Parts);
+        let log = Request::ActivityLog {
+            limit: Some(LOADED),
+            before: None,
+        };
+        self.send(log, Pending::Activity);
+    }
+
+    /// Undoes an activity entry, or this window's latest change. A failure
+    /// (`undo_conflict`, `nothing_to_undo`) lands in `errors`.
+    pub fn undo(&mut self, entry: Option<u64>) {
+        self.send(Request::Undo { entry }, Pending::Quiet);
+    }
+
+    /// Redoes an undo, or this window's latest undo.
+    pub fn redo(&mut self, entry: Option<u64>) {
+        self.send(Request::Redo { entry }, Pending::Quiet);
+    }
+
+    /// Reads the project's Git history again.
+    pub fn load_history(&mut self) {
+        let req = Request::HistoryLog {
+            part: None,
+            limit: Some(100),
+        };
+        self.send(req, Pending::History);
     }
 
     fn send(&mut self, req: Request, why: Pending) {
@@ -401,6 +434,8 @@ impl Workspace {
             }
             (Pending::People, Ok(a)) => self.people.reset(&a.result["participants"]),
             (Pending::Quiet, Ok(_)) => {}
+            (Pending::Activity, Ok(a)) => self.activity.reset(&a.result["entries"]),
+            (Pending::History, Ok(a)) => self.history = Some(a.result),
             (Pending::Form(part, before), Ok(a)) => {
                 // Answers come in order, so the last form asked for wins;
                 // a reload after a conflict only if that form is still open.
@@ -477,6 +512,7 @@ impl Workspace {
                 let all = self.model.clear_meshes();
                 self.fetch(all);
             }
+            "activity.appended" => self.activity.appended(params),
             "participant.changed" => {
                 self.people.changed(params);
                 // Following someone who left ends.

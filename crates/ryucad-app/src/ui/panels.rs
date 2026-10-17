@@ -271,3 +271,140 @@ fn names(ui: &mut egui::Ui, ws: &Workspace, key: &(String, String)) {
             });
     });
 }
+
+/// The bottom panel's tabs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tab {
+    #[default]
+    Activity,
+    History,
+}
+
+/// How long ago `ms` (Unix milliseconds) was, for people.
+pub fn ago(ms: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    let s = now.saturating_sub(ms) / 1000;
+    match s {
+        0..60 => format!("{s} s ago"),
+        60..3600 => format!("{} min ago", s / 60),
+        3600..86_400 => format!("{} h ago", s / 3600),
+        _ => format!("{} d ago", s / 86_400),
+    }
+}
+
+/// The activity log, newest first, with undo and redo per entry; and the
+/// project's Git history, read-only.
+pub fn journal(ui: &mut egui::Ui, ws: &mut Workspace, tab: &mut Tab) {
+    ui.horizontal(|ui| {
+        ui.selectable_value(tab, Tab::Activity, "Activity");
+        if ui.selectable_value(tab, Tab::History, "History").clicked() {
+            ws.load_history();
+        }
+    });
+    ui.separator();
+    match tab {
+        Tab::Activity => activity(ui, ws),
+        Tab::History => history(ui, ws),
+    }
+}
+
+fn activity(ui: &mut egui::Ui, ws: &mut Workspace) {
+    let mut undo = None;
+    let mut redo = None;
+    egui::ScrollArea::vertical()
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            if ws.activity.entries.is_empty() {
+                ui.weak("Nothing has changed since the daemon started");
+            }
+            egui::Grid::new("activity")
+                .num_columns(5)
+                .striped(true)
+                .show(ui, |ui| {
+                    for e in ws.activity.entries.iter().rev() {
+                        let seq = e["seq"].as_u64().unwrap_or_default();
+                        ui.weak(ago(e["time_ms"].as_u64().unwrap_or_default()));
+                        let who = e["participant"]["name"]
+                            .as_str()
+                            .unwrap_or("outside ryucad");
+                        ui.label(who);
+                        let what = match e["kind"].as_str() {
+                            Some("undo") => format!("undo of {}", e["target"]),
+                            Some("redo") => format!("redo of {}", e["target"]),
+                            Some("external") => "files changed".to_owned(),
+                            _ => e["method"].as_str().unwrap_or_default().to_owned(),
+                        };
+                        ui.label(what);
+                        let files: Vec<String> = e["files"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|f| {
+                                format!(
+                                    "{} {}",
+                                    f["change"].as_str().unwrap_or(""),
+                                    f["path"].as_str().unwrap_or("")
+                                )
+                            })
+                            .collect();
+                        ui.label(format!("{} file(s)", files.len()))
+                            .on_hover_text(files.join("\n"));
+                        if crate::core::activity::can_undo(e) {
+                            if ui.small_button("Undo").clicked() {
+                                undo = Some(seq);
+                            }
+                        } else if crate::core::activity::can_redo(e) {
+                            if ui.small_button("Redo").clicked() {
+                                redo = Some(seq);
+                            }
+                        } else {
+                            ui.label("");
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+    if let Some(s) = undo {
+        ws.undo(Some(s));
+    }
+    if let Some(s) = redo {
+        ws.redo(Some(s));
+    }
+}
+
+fn history(ui: &mut egui::Ui, ws: &mut Workspace) {
+    if ui.small_button("Refresh").clicked() {
+        ws.load_history();
+    }
+    let Some(h) = &ws.history else {
+        ui.spinner();
+        return;
+    };
+    if h["repository"] == false {
+        ui.weak("This project isn't in a Git repository, so it has no history");
+        return;
+    }
+    egui::ScrollArea::vertical()
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            let uncommitted = h["uncommitted"].as_array().map_or(0, Vec::len);
+            if uncommitted > 0 {
+                ui.label(format!("{uncommitted} uncommitted change(s)"));
+            }
+            egui::Grid::new("history")
+                .num_columns(4)
+                .striped(true)
+                .show(ui, |ui| {
+                    for c in h["commits"].as_array().into_iter().flatten() {
+                        let id = c["id"].as_str().unwrap_or_default();
+                        ui.monospace(&id[..id.len().min(10)]);
+                        ui.label(c["author"].as_str().unwrap_or_default());
+                        ui.weak(ago(c["time"].as_u64().unwrap_or_default() * 1000));
+                        ui.label(c["subject"].as_str().unwrap_or_default());
+                        ui.end_row();
+                    }
+                });
+        });
+}
