@@ -4,6 +4,7 @@
 use clap::{Args, Parser, Subcommand};
 use ryucad::doc::project::find_root;
 use ryucad::error::{Code, Error, Result};
+use ryucad::live::SelectMode;
 use ryucad::proto::{PlacementArg, Position, Request, VersionInfo};
 use ryucad::units::Unit;
 use ryucad::{client, daemon, server};
@@ -67,6 +68,24 @@ enum Command {
     CheckFormat,
     /// List the humans and agents attached to the project's session.
     Participants,
+    /// Set this agent's selection (entity references
+    /// <part>/<feature>/<name>), or add to it, remove from it, or clear it.
+    Select {
+        #[arg(value_name = "REF")]
+        entities: Vec<String>,
+        #[arg(long, conflicts_with_all = ["remove", "clear"])]
+        add: bool,
+        #[arg(long, conflicts_with = "clear")]
+        remove: bool,
+        #[arg(long, conflicts_with = "entities")]
+        clear: bool,
+    },
+    /// What a participant has selected: the one human, unless --of names
+    /// another.
+    Selection {
+        #[arg(long = "of", value_name = "PARTICIPANT")]
+        of: Option<String>,
+    },
     /// Run, query or stop the project's session daemon.
     #[command(subcommand)]
     Daemon(DaemonCmd),
@@ -334,6 +353,24 @@ fn request(cmd: &Command) -> Option<Request> {
         },
         Command::CheckFormat => Request::CheckFormat {},
         Command::Participants => Request::ParticipantList {},
+        Command::Select {
+            entities,
+            add,
+            remove,
+            clear: _,
+        } => Request::SelectionSet {
+            entities: entities.clone(),
+            mode: if *add {
+                SelectMode::Add
+            } else if *remove {
+                SelectMode::Remove
+            } else {
+                SelectMode::Replace
+            },
+        },
+        Command::Selection { of } => Request::SelectionGet {
+            participant: of.clone(),
+        },
     })
 }
 

@@ -323,3 +323,34 @@ fn participants_come_and_go() {
     assert_eq!(r["result"], serde_json::json!({"participants": []}));
     cli(&f, &["daemon", "stop"]);
 }
+
+#[test]
+fn an_agent_selects_through_the_cli() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    cli(
+        &f,
+        &[
+            "feature", "add", "p", "box", "--id", "b", "--param", "x=1", "--param", "y=1",
+            "--param", "z=1",
+        ],
+    );
+    let body = cli(&f, &["inspect", "p", "b"])["result"]["bodies"][0].clone();
+    let face = format!("p/b/{}", body["faces"][0]["name"].as_str().unwrap());
+    let edge = format!("p/b/{}", body["edges"][0]["name"].as_str().unwrap());
+    let r = cli(&f, &["select", &face]);
+    assert_eq!(r["result"]["selection"], serde_json::json!([face]));
+    let me = r["result"]["participant"].as_str().unwrap().to_owned();
+    let r = cli(&f, &["select", "--add", &edge]);
+    assert_eq!(r["result"]["selection"], serde_json::json!([face, edge]));
+    // The selection outlives the CLI call; nobody human is attached.
+    let r = cli(&f, &["selection", "--of", &me]);
+    assert_eq!(r["result"]["selection"], serde_json::json!([face, edge]));
+    let r = cli(&f, &["selection"]);
+    assert_eq!(r["result"]["participant"], Value::Null);
+    let r = cli(&f, &["select", "--clear"]);
+    assert_eq!(r["result"]["selection"], serde_json::json!([]));
+    let r = cli(&f, &["--no-daemon", "select", &face]);
+    assert_eq!(r["error"]["code"], "no_live_session");
+    cli(&f, &["daemon", "stop"]);
+}

@@ -4,8 +4,9 @@
 use crate::doc::files::{Feature, FeatureType, Manifest, PartFile, Placement, number};
 use crate::doc::id::Id;
 use crate::doc::project::{MANIFEST, Part, feature_path, part_dir, part_path, write_json};
+use crate::entity::{self, EntityRef};
 use crate::error::{Code, Error, Result};
-use crate::live::{self, Live};
+use crate::live::{self, Live, SelectMode};
 use crate::proto::{PlacementArg, Position, Request, VersionInfo};
 use crate::rebuild;
 use crate::session::Session;
@@ -46,10 +47,27 @@ pub fn handle_live(
     me: Option<&str>,
     req: Request,
 ) -> Result<Value> {
-    session.refresh()?;
+    let changed = session.refresh()?;
     if let (Some(l), Some(me)) = (live.as_deref_mut(), me) {
         l.touch(me);
     }
+    let mutates = req.mutates();
+    let result = dispatch(session, live.as_deref_mut(), me, req);
+    // Entities that no longer exist drop out of every selection.
+    if let Some(l) = live
+        && (changed || mutates)
+    {
+        l.prune(|r| r.resolve(session).is_ok());
+    }
+    result
+}
+
+fn dispatch(
+    session: &mut Session,
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    req: Request,
+) -> Result<Value> {
     match req {
         Request::ProjectInit { .. } => Err(Error::new(
             Code::ProjectExists,
@@ -135,6 +153,30 @@ pub fn handle_live(
         // With no daemon, nobody is attached.
         Request::ParticipantList {} => {
             Ok(live.map_or_else(|| json!({"participants": []}), |l| l.list()))
+        }
+        Request::SelectionGet { participant } => {
+            let target = match &live {
+                Some(l) => l.target(participant.as_deref())?,
+                None => None,
+            };
+            Ok(match target {
+                Some(p) => json!({"participant": p.id, "selection": p.selection}),
+                None => json!({"participant": null, "selection": []}),
+            })
+        }
+        Request::SelectionSet { entities, mode } => {
+            let live = live.ok_or_else(|| live::no_live_session("selection.set"))?;
+            // What is being removed may no longer exist.
+            let refs = match mode {
+                SelectMode::Remove => entities
+                    .iter()
+                    .map(|s| EntityRef::parse(s))
+                    .collect::<Result<Vec<_>>>()?,
+                _ => entity::parse_all(session, &entities)?,
+            };
+            let id = live.caller(me);
+            let selection = live.select(&id, refs, mode)?;
+            Ok(json!({"participant": id, "selection": selection}))
         }
     }
 }
@@ -1111,9 +1153,104 @@ pub(crate) mod tests {
         let id = r["participant"].as_str().unwrap().to_owned();
         assert_eq!(
             r["session"]["participants"],
-            json!([{"id": id, "kind": "human", "name": "Dana", "status": null}])
+            json!([{"id": id, "kind": "human", "name": "Dana", "status": null, "selection": []}])
         );
         let list = call_live(&mut s, &mut live, Some(&id), "participant.list", json!({})).unwrap();
         assert_eq!(list, r["session"]);
+    }
+
+    #[test]
+    fn selections_follow_the_model() {
+        let (_dir, mut s) = with_part();
+        let mut live = Live::new();
+        for id in ["a", "b"] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "p", "type": "box", "id": id, "params": {"x": 1, "y": 1, "z": 1}}),
+            )
+            .unwrap();
+        }
+        let face = |s: &mut Session, f: &str| {
+            let v = call(s, "inspect", json!({"part": "p", "feature": f})).unwrap();
+            format!(
+                "p/{f}/{}",
+                v["bodies"][0]["faces"][0]["name"].as_str().unwrap()
+            )
+        };
+        let (fa, fb) = (face(&mut s, "a"), face(&mut s, "b"));
+        let human = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "session.hello",
+            json!({"kind": "human"}),
+        )
+        .unwrap()["participant"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let r = call_live(
+            &mut s,
+            &mut live,
+            Some(&human),
+            "selection.set",
+            json!({"entities": [fa, fb]}),
+        )
+        .unwrap();
+        assert_eq!(r["selection"], json!([fa, fb]));
+        // Anyone asking without naming a participant gets the human's.
+        let r = call_live(&mut s, &mut live, None, "selection.get", json!({})).unwrap();
+        assert_eq!(
+            (&r["participant"], &r["selection"]),
+            (&json!(human), &json!([fa, fb]))
+        );
+        // A reference that doesn't resolve is refused, never matched.
+        let e = call_live(
+            &mut s,
+            &mut live,
+            Some(&human),
+            "selection.set",
+            json!({"entities": ["p/a/0123456789abcdef0123456789abcdef"], "mode": "add"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+        // Editing keeps names, so the selection stays; deleting drops it.
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.edit",
+            json!({"part": "p", "id": "a", "params": {"x": 2}}),
+        )
+        .unwrap();
+        let sel = |s: &mut Session, live: &mut Live| {
+            call_live(s, live, None, "selection.get", json!({})).unwrap()["selection"].clone()
+        };
+        assert_eq!(sel(&mut s, &mut live), json!([fa, fb]));
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.delete",
+            json!({"part": "p", "id": "a"}),
+        )
+        .unwrap();
+        assert_eq!(sel(&mut s, &mut live), json!([fb]));
+        // Removing works even for references that no longer resolve.
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&human),
+            "selection.set",
+            json!({"entities": [fa, fb], "mode": "remove"}),
+        )
+        .unwrap();
+        assert_eq!(sel(&mut s, &mut live), json!([]));
+        // Without a daemon there is no selection to change.
+        let e = call(&mut s, "selection.set", json!({"entities": []})).unwrap_err();
+        assert_eq!(e.code, Code::NoLiveSession);
+        let r = call(&mut s, "selection.get", json!({})).unwrap();
+        assert_eq!(r, json!({"participant": null, "selection": []}));
     }
 }

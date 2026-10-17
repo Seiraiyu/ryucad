@@ -2,6 +2,7 @@
 //! looking at and doing. It lives only in the daemon's memory; the files
 //! never hold it, and a `--no-daemon` run has none.
 
+use crate::entity::EntityRef;
 use crate::error::{Code, Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -23,6 +24,16 @@ pub enum Kind {
     Agent,
 }
 
+/// How `selection.set` combines the given entities with the selection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectMode {
+    #[default]
+    Replace,
+    Add,
+    Remove,
+}
+
 /// One human (an app window) or agent attached to the session.
 #[derive(Clone, Debug)]
 pub struct Participant {
@@ -31,6 +42,8 @@ pub struct Participant {
     pub name: String,
     /// A short line saying what the participant is doing.
     pub status: Option<String>,
+    /// Selected entities, in the order they were selected.
+    pub selection: Vec<EntityRef>,
     connections: usize,
     last_seen: Instant,
 }
@@ -42,6 +55,7 @@ impl Participant {
             "kind": self.kind,
             "name": self.name,
             "status": self.status,
+            "selection": self.selection,
         })
     }
 }
@@ -128,6 +142,7 @@ impl Live {
                 kind,
                 name,
                 status: None,
+                selection: Vec::new(),
                 connections: 0,
                 last_seen: Instant::now(),
             },
@@ -222,6 +237,53 @@ impl Live {
         }
     }
 
+    /// The participant a request acts as: `me` if its connection said
+    /// hello, otherwise the default agent.
+    pub fn caller(&mut self, me: Option<&str>) -> String {
+        match me {
+            Some(id) if self.participants.contains_key(id) => id.to_owned(),
+            _ => self.agent(DEFAULT_AGENT),
+        }
+    }
+
+    /// Changes participant `id`'s selection; returns the new one.
+    pub fn select(
+        &mut self,
+        id: &str,
+        refs: Vec<EntityRef>,
+        mode: SelectMode,
+    ) -> Result<&[EntityRef]> {
+        let p = self.get_mut(id)?;
+        match mode {
+            SelectMode::Replace => p.selection.clear(),
+            SelectMode::Add => {}
+            SelectMode::Remove => {
+                p.selection.retain(|r| !refs.contains(r));
+                return Ok(&p.selection);
+            }
+        }
+        for r in refs {
+            if !p.selection.contains(&r) {
+                p.selection.push(r);
+            }
+        }
+        Ok(&p.selection)
+    }
+
+    /// Drops every selected reference `keep` refuses. Returns the IDs of
+    /// participants whose state changed.
+    pub fn prune(&mut self, mut keep: impl FnMut(&EntityRef) -> bool) -> Vec<String> {
+        let mut changed = Vec::new();
+        for p in self.participants.values_mut() {
+            let before = p.selection.len();
+            p.selection.retain(&mut keep);
+            if p.selection.len() != before {
+                changed.push(p.id.clone());
+            }
+        }
+        changed
+    }
+
     pub fn participants(&self) -> impl Iterator<Item = &Participant> {
         self.participants.values()
     }
@@ -293,6 +355,35 @@ mod tests {
         assert!(live.expire(now).is_empty());
         assert_eq!(live.expire(now + AGENT_EXPIRY), vec![a.clone()]);
         assert!(live.get(&a).is_err());
+    }
+
+    fn r(name: char) -> EntityRef {
+        EntityRef::parse(&format!("p/f/{}", name.to_string().repeat(32))).unwrap()
+    }
+
+    #[test]
+    fn selections_replace_add_and_remove() {
+        let mut live = Live::new();
+        let a = live.caller(None);
+        assert_eq!(live.get(&a).unwrap().name, DEFAULT_AGENT);
+        let sel = |l: &mut Live, refs: Vec<EntityRef>, m| l.select(&a, refs, m).unwrap().to_vec();
+        assert_eq!(
+            sel(&mut live, vec![r('a'), r('b')], SelectMode::Replace),
+            [r('a'), r('b')]
+        );
+        assert_eq!(
+            sel(&mut live, vec![r('b'), r('c')], SelectMode::Add),
+            [r('a'), r('b'), r('c')]
+        );
+        assert_eq!(
+            sel(&mut live, vec![r('a')], SelectMode::Remove),
+            [r('b'), r('c')]
+        );
+        assert_eq!(sel(&mut live, vec![], SelectMode::Replace), []);
+        sel(&mut live, vec![r('a'), r('b')], SelectMode::Replace);
+        assert_eq!(live.prune(|x| *x != r('a')), vec![a.clone()]);
+        assert_eq!(live.get(&a).unwrap().selection, [r('b')]);
+        assert!(live.prune(|_| true).is_empty());
     }
 
     #[test]

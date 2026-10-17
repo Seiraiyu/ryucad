@@ -5,6 +5,7 @@ pub mod client;
 pub mod daemon;
 pub mod doc;
 pub mod endpoint;
+pub mod entity;
 pub mod error;
 pub mod inspect;
 pub mod live;

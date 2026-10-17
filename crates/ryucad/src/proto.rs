@@ -3,7 +3,7 @@
 //! so they never diverge.
 
 use crate::error::{Code, Error, Result};
-use crate::live::Kind;
+use crate::live::{Kind, SelectMode};
 use crate::units::Unit;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -156,6 +156,20 @@ pub enum Request {
     },
     #[serde(rename = "participant.list")]
     ParticipantList {},
+    /// A participant's selection: `participant`, or the one human.
+    #[serde(rename = "selection.get")]
+    SelectionGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    /// Changes the caller's own selection.
+    #[serde(rename = "selection.set")]
+    SelectionSet {
+        #[serde(default)]
+        entities: Vec<String>,
+        #[serde(default)]
+        mode: SelectMode,
+    },
     #[serde(rename = "daemon.shutdown")]
     DaemonShutdown {},
 }
