@@ -72,13 +72,18 @@ pub fn run(root: &Path, idle: Duration) -> Result<()> {
         last: Mutex::new(Instant::now()),
         core: Mutex::new(Core {
             session: None,
-            live: Live::new(),
+            live: Live::with_poll(
+                crate::config::user("daemon.poll_ms")
+                    .as_u64()
+                    .unwrap_or(250),
+            ),
         }),
     });
     let watcher = Arc::clone(&state);
     std::thread::spawn(move || {
         loop {
-            std::thread::sleep(Duration::from_millis(250).min(watcher.idle));
+            let poll = Duration::from_millis(lock(&watcher.core).live.poll_ms);
+            std::thread::sleep(poll.min(watcher.idle));
             if !watcher.root.join(MANIFEST).is_file() {
                 stop(&watcher, "the project is gone");
             }

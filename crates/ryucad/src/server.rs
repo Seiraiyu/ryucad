@@ -2,6 +2,7 @@
 //! [`handle`], so they give the same answers.
 
 use crate::activity::{self, EntryKind};
+use crate::config;
 use crate::doc::files::{Feature, FeatureType, Manifest, PartFile, Placement, number};
 use crate::doc::id::Id;
 use crate::doc::project::{MANIFEST, Part, feature_path, part_dir, part_path, write_json};
@@ -259,6 +260,57 @@ fn dispatch(
             let live = live.ok_or_else(|| live::no_live_session("redo"))?;
             let who = live.caller(me);
             activity::undo(live, session, &who, entry, true)
+        }
+        Request::ConfigGet { key, scope } => {
+            let scope = scope.as_deref().map(config::Scope::parse).transpose()?;
+            let mut v = config::get(
+                session.project().manifest.default_unit,
+                key.as_deref(),
+                scope,
+            )?;
+            v["project_revision"] = json!(config::project_revision(session.root())?);
+            Ok(v)
+        }
+        Request::ConfigSet {
+            key,
+            value,
+            scope,
+            expected_revision,
+        } => {
+            let scope = scope.as_deref().map(config::Scope::parse).transpose()?;
+            let v = match config::validate(&key, &value, scope)? {
+                config::Scope::Project => {
+                    let rev = config::project_revision(session.root())?;
+                    if let Some(e) = expected_revision.filter(|e| *e != rev) {
+                        return Err(Error::new(
+                            Code::Conflict,
+                            format!(
+                                "the project changed since revision {e}; read it again and retry"
+                            ),
+                        )
+                        .with("expected", e)
+                        .with("actual", rev));
+                    }
+                    let unit = Unit::parse(value.as_str().expect("validated")).expect("validated");
+                    write_json(
+                        &session.root().join(MANIFEST),
+                        &Manifest { default_unit: unit }.to_json(),
+                    )?;
+                    session.reload()?;
+                    let mut v = config::get(unit, Some(&key), None)?;
+                    v["project_revision"] = json!(config::project_revision(session.root())?);
+                    v
+                }
+                config::Scope::User => config::set_user(&key, value)?,
+            };
+            if let Some(live) = live {
+                if key == "daemon.poll_ms" {
+                    live.poll_ms = v["value"].as_u64().unwrap_or(250);
+                }
+                let note = json!({"key": key, "scope": v["scope"], "value": v["value"]});
+                live.hub.send(Topic::Project, "config.changed", &note);
+            }
+            Ok(v)
         }
         Request::ActivitySet { status, entities } => {
             let live = live.ok_or_else(|| live::no_live_session("activity.set"))?;
@@ -1681,6 +1733,48 @@ pub(crate) mod tests {
         assert_eq!(radius(&mut s).unwrap(), "3 mm");
         let e = call(&mut s, "undo", json!({})).unwrap_err();
         assert_eq!(e.code, Code::NoLiveSession);
+    }
+
+    #[test]
+    fn setting_a_preference_tells_subscribers() {
+        crate::config::tests::with_config(|_| {
+            let (_dir, mut s) = fresh();
+            let mut live = Live::new();
+            let sub = live.hub.subscribe("p-x", &[Topic::Project]);
+            call_live(
+                &mut s,
+                &mut live,
+                None,
+                "config.set",
+                json!({"key": "daemon.poll_ms", "value": 100}),
+            )
+            .unwrap();
+            assert_eq!(live.poll_ms, 100);
+            live.hub.send(Topic::Project, "marker", &json!({}));
+            let got = drain(&sub);
+            assert_eq!(got[0].0, "config.changed");
+            assert_eq!(
+                got[0].1,
+                json!({"key": "daemon.poll_ms", "scope": "user", "value": 100})
+            );
+            // A project setting is logged like any file change; a
+            // preference isn't in the project, so it isn't.
+            call_live(
+                &mut s,
+                &mut live,
+                None,
+                "config.set",
+                json!({"key": "default_unit", "value": "cm"}),
+            )
+            .unwrap();
+            let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
+            let e = log["entries"].as_array().unwrap();
+            assert_eq!(e.len(), 1);
+            assert_eq!(
+                e[0]["files"],
+                json!([{"path": "ryucad.json", "change": "modified"}])
+            );
+        });
     }
 
     #[test]

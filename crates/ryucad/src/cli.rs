@@ -143,6 +143,10 @@ enum Command {
         #[arg(long, value_name = "SEQ")]
         before: Option<u64>,
     },
+    /// Read or change settings: project settings (in ryucad.json) and
+    /// user preferences.
+    #[command(subcommand)]
+    Config(ConfigCmd),
     /// Undo this agent's latest change, or the activity entry --entry.
     Undo {
         #[arg(long, value_name = "SEQ")]
@@ -182,6 +186,48 @@ enum DaemonCmd {
         #[arg(long)]
         all: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// One setting, or every setting.
+    Get {
+        key: Option<String>,
+        #[command(flatten)]
+        scope: ScopeArgs,
+    },
+    /// Set a setting. The value is JSON, or else a string: dark, false,
+    /// 500, '["/a/project"]'.
+    Set {
+        key: String,
+        value: String,
+        #[command(flatten)]
+        scope: ScopeArgs,
+        /// For project settings: fail with `conflict` unless the project is
+        /// still at this revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
+}
+
+#[derive(Args)]
+struct ScopeArgs {
+    /// Only project settings.
+    #[arg(long, conflicts_with = "user")]
+    project: bool,
+    /// Only user preferences.
+    #[arg(long)]
+    user: bool,
+}
+
+impl ScopeArgs {
+    fn get(&self) -> Option<String> {
+        match (self.project, self.user) {
+            (true, _) => Some("project".into()),
+            (_, true) => Some("user".into()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -497,6 +543,21 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Activity { limit, before } => Request::ActivityLog {
             limit: Some(*limit),
             before: *before,
+        },
+        Command::Config(ConfigCmd::Get { key, scope }) => Request::ConfigGet {
+            key: key.clone(),
+            scope: scope.get(),
+        },
+        Command::Config(ConfigCmd::Set {
+            key,
+            value,
+            scope,
+            expect,
+        }) => Request::ConfigSet {
+            key: key.clone(),
+            value: serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.clone())),
+            scope: scope.get(),
+            expected_revision: expect.clone(),
         },
         Command::Undo { entry } => Request::Undo { entry: *entry },
         Command::Redo { entry } => Request::Redo { entry: *entry },

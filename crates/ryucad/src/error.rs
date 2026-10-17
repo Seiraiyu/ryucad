@@ -54,6 +54,10 @@ pub enum Code {
     NothingToUndo,
     /// The files an undo would restore have changed since.
     UndoConflict,
+    /// A setting no schema knows.
+    UnknownSetting,
+    /// A setting's value, or scope, is wrong.
+    InvalidSetting,
 }
 
 impl Code {

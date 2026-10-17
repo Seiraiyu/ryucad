@@ -48,6 +48,7 @@ impl Fixture {
             .args(["daemon", "run", "--idle-timeout", &idle.to_string()])
             .current_dir(&self.root)
             .env(RUNTIME_DIR_VAR, &self.run)
+            .env("RYUCAD_CONFIG_DIR", self.run.with_file_name("config"))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -129,6 +130,7 @@ fn one_daemon_per_project() {
         .args(["daemon", "run"])
         .current_dir(&f.root)
         .env(RUNTIME_DIR_VAR, &f.run)
+        .env("RYUCAD_CONFIG_DIR", f.run.with_file_name("config"))
         .output()
         .unwrap();
     let v: Value = serde_json::from_slice(&second.stdout).unwrap();
@@ -168,6 +170,7 @@ fn cli(f: &Fixture, args: &[&str]) -> Value {
         .args(args)
         .current_dir(&f.root)
         .env(RUNTIME_DIR_VAR, &f.run)
+        .env("RYUCAD_CONFIG_DIR", f.run.with_file_name("config"))
         .env("RYUCAD_IDLE_TIMEOUT", "60")
         .output()
         .unwrap();
@@ -580,6 +583,7 @@ fn an_agent_waits_for_the_human_to_select() {
                 ])
                 .current_dir(&root)
                 .env(RUNTIME_DIR_VAR, &run)
+                .env("RYUCAD_CONFIG_DIR", run.with_file_name("config"))
                 .output()
                 .unwrap();
             serde_json::from_slice::<Value>(&out.stdout).unwrap()

@@ -104,6 +104,8 @@ pub struct Live {
     /// What subscribers were last told about the model.
     pub seen: Seen,
     pub log: crate::activity::Log,
+    /// How often a watched daemon checks the files, in milliseconds.
+    pub poll_ms: u64,
 }
 
 /// The project and part revisions subscribers were last told about.
@@ -118,7 +120,15 @@ pub type Snapshot = BTreeMap<String, Value>;
 
 impl Live {
     pub fn new() -> Live {
-        Live::default()
+        Live::with_poll(250)
+    }
+
+    /// A live session whose daemon checks the files every `poll_ms`.
+    pub fn with_poll(poll_ms: u64) -> Live {
+        Live {
+            poll_ms,
+            ..Live::default()
+        }
     }
 
     /// Registers a connection. With `participant`, the connection joins that

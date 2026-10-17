@@ -51,7 +51,8 @@ impl Pair {
         cmd.current_dir(root.join(sub))
             .args(args)
             .env("RYUCAD_RUNTIME_DIR", &self.run)
-            .env("RYUCAD_IDLE_TIMEOUT", "60");
+            .env("RYUCAD_IDLE_TIMEOUT", "60")
+            .env("RYUCAD_CONFIG_DIR", self.run.with_file_name("config"));
         if root == self.direct {
             cmd.env("RYUCAD_NO_DAEMON", "1");
         }
@@ -249,6 +250,8 @@ fn every_error_code_has_its_exit_code() {
         "conflict",
         1,
     );
+    p.fails(&["config", "set", "ui.colour", "x"], "unknown_setting", 1);
+    p.fails(&["config", "set", "ui.theme", "neon"], "invalid_setting", 1);
     p.fails(&["feature", "bogus"], "usage", 2);
     p.fails(
         &["feature", "add", "p", "sphere", "--after", "t", "--first"],
@@ -332,6 +335,8 @@ fn every_protocol_method_has_a_command() {
         ("activity.set", &["status"]),
         ("activity.log", &["activity"]),
         ("undo", &["undo"]),
+        ("config.get", &["config", "get"]),
+        ("config.set", &["config", "set"]),
         ("redo", &["redo"]),
     ];
     let methods = protocol_methods();
@@ -348,4 +353,52 @@ fn every_protocol_method_has_a_command() {
             .unwrap();
         assert!(out.status.success(), "ryucad {args:?} --help");
     }
+}
+
+#[test]
+fn settings_and_preferences() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    let v = p.ok(&["config", "get", "ui.theme"]);
+    assert_eq!(
+        (&v["value"], &v["default"]),
+        (&Value::from("system"), &Value::from(true))
+    );
+    p.ok(&["config", "set", "ui.theme", "dark"]);
+    p.ok(&["config", "set", "display.edges", "false"]);
+    let v = p.ok(&["config", "get", "--user"]);
+    let theme = v["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["key"] == "ui.theme")
+        .unwrap()
+        .clone();
+    assert_eq!(theme["value"], "dark");
+    assert_eq!(p.ok(&["config", "get", "display.edges"])["value"], false);
+    // A project setting is a file change, guarded by the project revision.
+    let rev = p.ok(&["config", "get", "default_unit"])["project_revision"].clone();
+    p.fails(
+        &["config", "set", "default_unit", "in", "--expect", "stale"],
+        "conflict",
+        1,
+    );
+    let v = p.ok(&[
+        "config",
+        "set",
+        "default_unit",
+        "in",
+        "--expect",
+        rev.as_str().unwrap(),
+    ]);
+    assert_eq!(v["value"], "in");
+    assert_ne!(v["project_revision"], rev);
+    p.fails(
+        &["config", "set", "ui.theme", "dark", "--project"],
+        "invalid_setting",
+        1,
+    );
+    p.ok(&["part", "create", "q"]);
+    let r = p.ok(&["feature", "add", "q", "sphere", "--param", "radius=1"]);
+    assert_eq!(r["feature"]["params"]["radius"]["value"], "1 in");
 }

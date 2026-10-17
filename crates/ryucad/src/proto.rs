@@ -223,6 +223,25 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         entry: Option<u64>,
     },
+    /// One setting, or all of them (of `scope`, if given).
+    #[serde(rename = "config.get")]
+    ConfigGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+    },
+    /// Sets a project setting (in `ryucad.json`) or a user preference.
+    #[serde(rename = "config.set")]
+    ConfigSet {
+        key: String,
+        value: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        /// For project settings: the project revision last seen.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// Says what the caller is doing; an empty status clears it.
     #[serde(rename = "activity.set")]
     ActivitySet {
@@ -260,8 +279,11 @@ impl Request {
         self.to_value()["params"].take()
     }
 
-    /// Whether the request writes files.
+    /// Whether the request writes the project's files.
     pub fn mutates(&self) -> bool {
+        if let Request::ConfigSet { key, .. } = self {
+            return crate::config::scope_of(key).is_ok_and(|s| s == crate::config::Scope::Project);
+        }
         matches!(
             self,
             Request::ProjectInit { .. }
