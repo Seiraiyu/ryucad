@@ -1,0 +1,13 @@
+[package]
+name = "ryucad-app"
+description = "The ryucad desktop app: watch, point at and adjust what agents build"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+ryucad = { path = "../ryucad" }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dev-dependencies]
+tempfile = "3"

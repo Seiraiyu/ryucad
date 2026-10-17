@@ -1833,6 +1833,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryucad-app"
+version = "0.1.0"
+dependencies = [
+ "ryucad",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "ryukei"
 version = "0.1.0"
 dependencies = [
