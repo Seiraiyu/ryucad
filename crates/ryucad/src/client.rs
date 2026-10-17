@@ -5,7 +5,7 @@ use crate::daemon::IDLE_VAR;
 use crate::endpoint::Endpoint;
 use crate::error::{Code, Error, Result};
 use crate::live::Kind;
-use crate::proto::{Request, VersionInfo, parse_rpc_response, rpc_request};
+use crate::proto::{Answer, Request, VersionInfo, parse_rpc_response, rpc_request};
 use interprocess::local_socket::{RecvHalf, SendHalf, Stream, prelude::*};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
@@ -39,6 +39,12 @@ impl Connection {
     /// Sends one request and reads its answer. The outer error means the
     /// connection failed; the inner result is the daemon's answer.
     pub fn call(&mut self, req: &Request) -> std::io::Result<Result<Value>> {
+        Ok(self.call_answer(req)?.map(|a| a.result))
+    }
+
+    /// [`Connection::call`], with the bytes that follow the answer if it
+    /// announces any.
+    pub fn call_answer(&mut self, req: &Request) -> std::io::Result<Result<Answer>> {
         let id = self.next_id;
         self.next_id += 1;
         let mut line = rpc_request(id, req);
@@ -49,7 +55,19 @@ impl Connection {
         if self.reader.read_line(&mut answer)? == 0 {
             return Err(std::io::ErrorKind::UnexpectedEof.into());
         }
-        Ok(parse_rpc_response(&answer))
+        let result = match parse_rpc_response(&answer) {
+            Ok(v) => v,
+            Err(e) => return Ok(Err(e)),
+        };
+        let binary = match Answer::announced(&result) {
+            Some(n) => {
+                let mut bytes = vec![0; n];
+                std::io::Read::read_exact(&mut self.reader, &mut bytes)?;
+                Some(bytes)
+            }
+            None => None,
+        };
+        Ok(Ok(Answer { result, binary }))
     }
 }
 
@@ -87,7 +105,7 @@ fn unavailable(why: impl std::fmt::Display) -> Error {
 /// instead is safe. `Ok` holds the daemon's answer; if the connection broke
 /// after sending, that answer is a `daemon` error, because the request may
 /// have been applied and must not be repeated.
-pub fn request(root: &Path, req: &Request, name: Option<&str>) -> Result<Result<Value>> {
+pub fn request(root: &Path, req: &Request, name: Option<&str>) -> Result<Result<Answer>> {
     let endpoint = Endpoint::for_project(root)?;
     let mut conn = ready(root, &endpoint)?;
     let hello = Request::SessionHello {
@@ -99,7 +117,7 @@ pub fn request(root: &Path, req: &Request, name: Option<&str>) -> Result<Result<
     if let Err(e) = conn.call(&hello).map_err(unavailable)? {
         return Ok(Err(e));
     }
-    Ok(conn.call(req).unwrap_or_else(|e| {
+    Ok(conn.call_answer(req).unwrap_or_else(|e| {
         Err(Error::new(
             Code::Daemon,
             format!("the daemon stopped answering ({e}); the request may have been applied"),

@@ -35,6 +35,49 @@ impl VersionInfo {
     }
 }
 
+/// What a request answers: its JSON result and, for some requests, raw
+/// bytes sent right after the response line. A result with bytes says so
+/// in `binary: {encoding, length}`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Answer {
+    pub result: Value,
+    pub binary: Option<Vec<u8>>,
+}
+
+impl Answer {
+    pub fn json(result: Value) -> Answer {
+        Answer {
+            result,
+            binary: None,
+        }
+    }
+
+    pub fn bytes(mut result: Value, encoding: &str, bytes: Vec<u8>) -> Answer {
+        result["binary"] = json!({"encoding": encoding, "length": bytes.len()});
+        Answer {
+            result,
+            binary: Some(bytes),
+        }
+    }
+
+    /// How many bytes follow a response line with this result.
+    pub fn announced(result: &Value) -> Option<usize> {
+        result
+            .pointer("/binary/length")?
+            .as_u64()
+            .map(|n| n as usize)
+    }
+}
+
+/// How a request wants bulk data: in the JSON, or as bytes after it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Transfer {
+    #[default]
+    Json,
+    Binary,
+}
+
 /// Where a feature goes in a part's list: after `after`, first, or (with
 /// neither) at the end.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -259,6 +302,9 @@ pub enum Request {
         /// coarse, normal or fine; the user's display quality by default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quality: Option<String>,
+        /// `binary` sends `ryucad.mesh.1` bytes after the answer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transfer: Option<Transfer>,
     },
     /// Says what the caller is doing; an empty status clears it.
     #[serde(rename = "activity.set")]

@@ -11,7 +11,7 @@ use crate::error::{Code, Error, Result};
 use crate::live::{self, Live, SelectMode};
 use crate::mesh;
 use crate::notify::Topic;
-use crate::proto::{PlacementArg, Position, Request, VersionInfo};
+use crate::proto::{Answer, PlacementArg, Position, Request, Transfer, VersionInfo};
 use crate::rebuild;
 use crate::session::Session;
 use crate::units::{Quantity, Unit};
@@ -49,10 +49,20 @@ pub fn handle(session: &mut Session, req: Request) -> Result<Value> {
 /// process) and `me` the participant asking, if its connection said hello.
 pub fn handle_live(
     session: &mut Session,
-    mut live: Option<&mut Live>,
+    live: Option<&mut Live>,
     me: Option<&str>,
     req: Request,
 ) -> Result<Value> {
+    answer_live(session, live, me, req).map(|a| a.result)
+}
+
+/// [`handle_live`], with any bytes the answer carries.
+pub fn answer_live(
+    session: &mut Session,
+    mut live: Option<&mut Live>,
+    me: Option<&str>,
+    req: Request,
+) -> Result<Answer> {
     let external = session.refresh_changes()?;
     let changed = !external.is_empty();
     let before = live.as_deref().map(Live::snapshot);
@@ -73,7 +83,15 @@ pub fn handle_live(
         (Some(_), true) => Some(activity::snapshot(session.root())?),
         _ => None,
     };
-    let result = dispatch(session, live.as_deref_mut(), me, req);
+    let result = match req {
+        Request::MeshGet {
+            part,
+            feature,
+            quality,
+            transfer: Some(Transfer::Binary),
+        } => mesh_binary(session, &part, feature.as_deref(), quality.as_deref()),
+        req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
+    };
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
     {
         let files = activity::diff(&files_before, &activity::snapshot(session.root())?);
@@ -266,6 +284,7 @@ fn dispatch(
             part,
             feature,
             quality,
+            transfer: _,
         } => mesh_get(session, &part, feature.as_deref(), quality.as_deref()),
         Request::HistoryLog { part, limit } => {
             let part = part.as_deref().map(part_id).transpose()?;
@@ -351,15 +370,15 @@ pub fn handle_safely(
     me: Option<&str>,
     root: &Path,
     req: Request,
-) -> Result<Value> {
-    guarded(slot, root, |s| handle_live(s, live, me, req))
+) -> Result<Answer> {
+    guarded(slot, root, |s| answer_live(s, live, me, req))
 }
 
-fn guarded(
+fn guarded<T>(
     slot: &mut Option<Session>,
     root: &Path,
-    f: impl FnOnce(&mut Session) -> Result<Value>,
-) -> Result<Value> {
+    f: impl FnOnce(&mut Session) -> Result<T>,
+) -> Result<T> {
     let session = match slot {
         Some(s) => s,
         None => slot.insert(Session::open(root)?),
@@ -877,18 +896,38 @@ pub fn meshes(
         .collect())
 }
 
+/// The part, feature and quality a mesh request names.
+fn mesh_args(
+    part: &str,
+    only: Option<&str>,
+    quality: Option<&str>,
+) -> Result<(Id, Option<Id>, mesh::Quality)> {
+    let quality = match quality {
+        Some(q) => mesh::Quality::parse(q)?,
+        None => mesh::Quality::preferred(),
+    };
+    Ok((part_id(part)?, only.map(feature_id).transpose()?, quality))
+}
+
+fn mesh_binary(
+    session: &mut Session,
+    part: &str,
+    only: Option<&str>,
+    quality: Option<&str>,
+) -> Result<Answer> {
+    let (pid, only, quality) = mesh_args(part, only, quality)?;
+    let bodies = meshes(session, &pid, only.as_ref(), quality)?;
+    let result = json!({"part": pid, "quality": quality.as_str()});
+    Ok(Answer::bytes(result, mesh::ENCODING, mesh::encode(&bodies)))
+}
+
 fn mesh_get(
     session: &mut Session,
     part: &str,
     only: Option<&str>,
     quality: Option<&str>,
 ) -> Result<Value> {
-    let pid = part_id(part)?;
-    let only = only.map(feature_id).transpose()?;
-    let quality = match quality {
-        Some(q) => mesh::Quality::parse(q)?,
-        None => mesh::Quality::preferred(),
-    };
+    let (pid, only, quality) = mesh_args(part, only, quality)?;
     let bodies: Vec<Value> = meshes(session, &pid, only.as_ref(), quality)?
         .into_iter()
         .map(|(id, r)| match r {
@@ -1409,12 +1448,14 @@ pub(crate) mod tests {
     fn a_panic_is_an_internal_error_and_drops_the_session() {
         let (dir, _) = fresh();
         let mut slot = None;
-        let r = handle_safely(&mut slot, None, None, dir.path(), Request::PartList {}).unwrap();
+        let r = handle_safely(&mut slot, None, None, dir.path(), Request::PartList {})
+            .unwrap()
+            .result;
         assert_eq!(r["parts"], json!([]));
         assert!(slot.is_some());
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        let e = guarded(&mut slot, dir.path(), |_| panic!("boom")).unwrap_err();
+        let e = guarded::<Value>(&mut slot, dir.path(), |_| panic!("boom")).unwrap_err();
         std::panic::set_hook(prev);
         assert_eq!(
             (e.code, e.details["panic"].as_str()),

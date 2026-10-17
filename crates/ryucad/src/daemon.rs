@@ -7,7 +7,7 @@ use crate::endpoint::Endpoint;
 use crate::error::{Code, Error, Result};
 use crate::live::Live;
 use crate::notify::{self, Subscriber};
-use crate::proto::{Request, VersionInfo, parse_rpc_request, rpc_response};
+use crate::proto::{Answer, Request, VersionInfo, parse_rpc_request, rpc_response};
 use crate::server::{handle_safely, settle, tick};
 use crate::session::Session;
 use interprocess::local_socket::{ListenerOptions, Stream, prelude::*};
@@ -209,10 +209,18 @@ struct Conn {
 
 impl Conn {
     fn send(&self, line: &str) -> std::io::Result<()> {
+        self.send_with(line, None)
+    }
+
+    /// A line, then the bytes it announces.
+    fn send_with(&self, line: &str, bytes: Option<&[u8]>) -> std::io::Result<()> {
         let _g = lock(&self.write);
         let mut w = &self.stream;
         w.write_all(line.as_bytes())?;
         w.write_all(b"\n")?;
+        if let Some(b) = bytes {
+            w.write_all(b)?;
+        }
         w.flush()
     }
 }
@@ -239,15 +247,17 @@ fn serve(
         let mut shutdown = false;
         let mut subscribed = None;
         let result = match req {
-            Ok(Request::DaemonStatus {}) => Ok(status(state)),
+            Ok(Request::DaemonStatus {}) => Ok(Answer::json(status(state))),
             Ok(Request::DaemonShutdown {}) => {
                 shutdown = true;
-                Ok(json!({"stopping": true, "pid": std::process::id()}))
+                Ok(Answer::json(
+                    json!({"stopping": true, "pid": std::process::id()}),
+                ))
             }
             Ok(Request::Subscribe { topics }) => {
                 subscribe(state, me.as_deref(), sub.is_some(), &topics).map(|(s, v)| {
                     subscribed = Some(s);
-                    v
+                    Answer::json(v)
                 })
             }
             Ok(req) => {
@@ -255,8 +265,8 @@ fn serve(
                 let mut core = lock(&state.core);
                 let Core { session, live } = &mut *core;
                 let r = handle_safely(session, Some(live), me.as_deref(), &state.root, req);
-                if hello && let Ok(v) = &r {
-                    let id = v["participant"].as_str().map(str::to_owned);
+                if hello && let Ok(a) = &r {
+                    let id = a.result["participant"].as_str().map(str::to_owned);
                     // Saying hello again moves the connection.
                     if let Some(old) = std::mem::replace(me, id) {
                         let before = live.snapshot();
@@ -269,7 +279,14 @@ fn serve(
             }
             Err(e) => Err(e),
         };
-        if conn.send(&rpc_response(id, &result)).is_err() {
+        let (result, bytes) = match result {
+            Ok(a) => (Ok(a.result), a.binary),
+            Err(e) => (Err(e), None),
+        };
+        if conn
+            .send_with(&rpc_response(id, &result), bytes.as_deref())
+            .is_err()
+        {
             if let Some(s) = subscribed {
                 s.close();
             }

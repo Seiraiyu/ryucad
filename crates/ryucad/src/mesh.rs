@@ -221,6 +221,382 @@ pub fn to_json(body: &Body, m: &DisplayMesh) -> Value {
     })
 }
 
+/// The binary encoding's name and magic.
+pub const ENCODING: &str = "ryucad.mesh.1";
+const MAGIC: &[u8; 4] = b"RYMS";
+const VERSION: u32 = 1;
+
+/// A stable name as 16 bytes.
+fn name_bytes(hex: &str) -> [u8; 16] {
+    u128::from_str_radix(hex, 16)
+        .expect("names are hex")
+        .to_be_bytes()
+}
+
+/// A body's centre: positions are sent as f32 offsets from it, which keeps
+/// display error far below a pixel anywhere in the ±500 m size box.
+fn centre(positions: &[ryukei::geom::Point3]) -> [f64; 3] {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for p in positions {
+        for (k, x) in [p.x, p.y, p.z].into_iter().enumerate() {
+            lo[k] = lo[k].min(x);
+            hi[k] = hi[k].max(x);
+        }
+    }
+    if positions.is_empty() {
+        return [0.0; 3];
+    }
+    [0, 1, 2].map(|k| lo[k] + (hi[k] - lo[k]) / 2.0)
+}
+
+struct Writer(Vec<u8>);
+
+impl Writer {
+    fn u8(&mut self, x: u8) {
+        self.0.push(x);
+    }
+    fn u16(&mut self, x: u16) {
+        self.0.extend_from_slice(&x.to_le_bytes());
+    }
+    fn u32(&mut self, x: u32) {
+        self.0.extend_from_slice(&x.to_le_bytes());
+    }
+    fn f32(&mut self, x: f32) {
+        self.0.extend_from_slice(&x.to_le_bytes());
+    }
+    fn f64(&mut self, x: f64) {
+        self.0.extend_from_slice(&x.to_le_bytes());
+    }
+    fn str16(&mut self, s: &str) {
+        self.u16(s.len() as u16);
+        self.0.extend_from_slice(s.as_bytes());
+    }
+    fn str32(&mut self, s: &str) {
+        self.u32(s.len() as u32);
+        self.0.extend_from_slice(s.as_bytes());
+    }
+    fn len(&mut self, n: usize) {
+        self.u32(u32::try_from(n).expect("fewer than 2^32 items"));
+    }
+}
+
+/// Encodes a part's display meshes as `ryucad.mesh.1` (little endian):
+///
+/// ```text
+/// "RYMS" u32:version u32:bodies
+/// per body: str16 feature, str16 hash, u8 status (0 ok, 1 error)
+///   error: str32 JSON of the error
+///   ok:    f64×3 origin, f64 chord, f64 angle
+///          u32 n, n × f32×3 positions (offsets from origin)
+///          u32 n, n × (u32 position, f32×3 normal) corners
+///          u32 n, n × u32×3 triangles (of corners)
+///          u32 n, n × (name, u32 corner start, end, u32 triangle start, end) faces
+///          u32 n, n × (name, u32 k, k × u32 position) edges
+///          u32 n, n × (name, u32 position) vertices
+///          u32 n, n × (name, str16 kind) faults
+/// name = 16 bytes; str16/str32 = u16/u32 length then UTF-8
+/// ```
+pub fn encode(bodies: &[(crate::doc::id::Id, Result<Meshed>)]) -> Vec<u8> {
+    let mut w = Writer(Vec::new());
+    w.0.extend_from_slice(MAGIC);
+    w.u32(VERSION);
+    w.len(bodies.len());
+    for (id, r) in bodies {
+        w.str16(id.as_str());
+        let m = match r {
+            Ok(m) => m,
+            Err(e) => {
+                w.str16("");
+                w.u8(1);
+                w.str32(&json!(e).to_string());
+                continue;
+            }
+        };
+        w.str16(&m.hash);
+        let mesh = match &m.mesh.mesh {
+            Ok(mesh) => mesh,
+            Err(e) => {
+                w.u8(1);
+                w.str32(&json!(e).to_string());
+                continue;
+            }
+        };
+        w.u8(0);
+        let body = &m.body;
+        let o = centre(&mesh.positions);
+        o.iter().for_each(|x| w.f64(*x));
+        w.f64(m.mesh.params.chord);
+        w.f64(m.mesh.params.angle);
+        w.len(mesh.positions.len());
+        for p in &mesh.positions {
+            for (k, x) in [p.x, p.y, p.z].into_iter().enumerate() {
+                w.f32((x - o[k]) as f32);
+            }
+        }
+        w.len(mesh.corners.len());
+        for c in &mesh.corners {
+            w.u32(c.position);
+            let n = c.normal.get();
+            [n.x, n.y, n.z].into_iter().for_each(|x| w.f32(x as f32));
+        }
+        w.len(mesh.triangles.len());
+        mesh.triangles.iter().flatten().for_each(|i| w.u32(*i));
+        let named = |w: &mut Writer, hex: String| w.0.extend_from_slice(&name_bytes(&hex));
+        w.len(mesh.faces.len());
+        for f in &mesh.faces {
+            named(
+                &mut w,
+                body.face(f.face).expect("live face").name.to_string(),
+            );
+            [
+                f.corners.start,
+                f.corners.end,
+                f.triangles.start,
+                f.triangles.end,
+            ]
+            .into_iter()
+            .for_each(|x| w.u32(x));
+        }
+        w.len(mesh.edges.len());
+        for e in &mesh.edges {
+            named(
+                &mut w,
+                body.edge(e.edge).expect("live edge").name.to_string(),
+            );
+            w.len(e.positions.len());
+            e.positions.iter().for_each(|p| w.u32(*p));
+        }
+        let vertices: Vec<_> = body.vertices().collect();
+        w.len(vertices.len());
+        for (i, v) in vertices.into_iter().enumerate() {
+            named(
+                &mut w,
+                body.vertex(v).expect("live vertex").name.to_string(),
+            );
+            w.u32(i as u32);
+        }
+        w.len(mesh.faults.len());
+        for f in &mesh.faults {
+            named(
+                &mut w,
+                body.face(f.face).expect("live face").name.to_string(),
+            );
+            w.str16(&format!("{:?}", f.kind));
+        }
+    }
+    w.0
+}
+
+/// One body of a decoded `ryucad.mesh.1`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WireBody {
+    pub feature: String,
+    pub hash: String,
+    /// The mesh, or the error (as JSON) why there is none.
+    pub mesh: core::result::Result<WireMesh, Value>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WireMesh {
+    pub origin: [f64; 3],
+    pub chord: f64,
+    pub angle: f64,
+    pub positions: Vec<[f32; 3]>,
+    pub corners: Vec<(u32, [f32; 3])>,
+    pub triangles: Vec<[u32; 3]>,
+    pub faces: Vec<WireFace>,
+    pub edges: Vec<([u8; 16], Vec<u32>)>,
+    pub vertices: Vec<([u8; 16], u32)>,
+    pub faults: Vec<([u8; 16], String)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WireFace {
+    pub name: [u8; 16],
+    pub corners: (u32, u32),
+    pub triangles: (u32, u32),
+}
+
+/// The 32 hex digits of a 16-byte name.
+pub fn name_hex(name: &[u8; 16]) -> String {
+    format!("{:032x}", u128::from_be_bytes(*name))
+}
+
+struct Reader<'a>(&'a [u8]);
+
+fn corrupt(why: &str) -> Error {
+    Error::new(Code::InvalidDocument, format!("bad {ENCODING} data: {why}"))
+}
+
+impl<'a> Reader<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+        if self.0.len() < n {
+            return Err(corrupt("truncated"));
+        }
+        let (a, b) = self.0.split_at(n);
+        self.0 = b;
+        Ok(a)
+    }
+    fn u8(&mut self) -> Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+    fn u16(&mut self) -> Result<u16> {
+        Ok(u16::from_le_bytes(
+            self.take(2)?.try_into().expect("2 bytes"),
+        ))
+    }
+    fn u32(&mut self) -> Result<u32> {
+        Ok(u32::from_le_bytes(
+            self.take(4)?.try_into().expect("4 bytes"),
+        ))
+    }
+    fn f32(&mut self) -> Result<f32> {
+        Ok(f32::from_le_bytes(
+            self.take(4)?.try_into().expect("4 bytes"),
+        ))
+    }
+    fn f64(&mut self) -> Result<f64> {
+        Ok(f64::from_le_bytes(
+            self.take(8)?.try_into().expect("8 bytes"),
+        ))
+    }
+    fn name(&mut self) -> Result<[u8; 16]> {
+        Ok(self.take(16)?.try_into().expect("16 bytes"))
+    }
+    fn string(&mut self, n: usize) -> Result<String> {
+        String::from_utf8(self.take(n)?.to_vec()).map_err(|_| corrupt("text is not UTF-8"))
+    }
+    fn str16(&mut self) -> Result<String> {
+        let n = self.u16()? as usize;
+        self.string(n)
+    }
+    fn str32(&mut self) -> Result<String> {
+        let n = self.u32()? as usize;
+        self.string(n)
+    }
+    /// A count of items at least `min` bytes each, refused if the data
+    /// can't hold them (so a corrupt count can't ask for a huge buffer).
+    fn count(&mut self, min: usize) -> Result<usize> {
+        let n = self.u32()? as usize;
+        if n.saturating_mul(min) > self.0.len() {
+            return Err(corrupt("a count larger than the data"));
+        }
+        Ok(n)
+    }
+}
+
+/// Decodes `ryucad.mesh.1`, checking every index.
+pub fn decode(bytes: &[u8]) -> Result<Vec<WireBody>> {
+    let mut r = Reader(bytes);
+    if r.take(4)? != MAGIC {
+        return Err(corrupt("not mesh data"));
+    }
+    let version = r.u32()?;
+    if version != VERSION {
+        return Err(corrupt(&format!("version {version}, expected {VERSION}")));
+    }
+    let n = r.count(5)?;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let feature = r.str16()?;
+        let hash = r.str16()?;
+        let mesh = match r.u8()? {
+            0 => Ok(decode_mesh(&mut r)?),
+            1 => Err(serde_json::from_str(&r.str32()?).map_err(|_| corrupt("bad error JSON"))?),
+            _ => return Err(corrupt("bad status")),
+        };
+        out.push(WireBody {
+            feature,
+            hash,
+            mesh,
+        });
+    }
+    if !r.0.is_empty() {
+        return Err(corrupt("trailing bytes"));
+    }
+    Ok(out)
+}
+
+fn decode_mesh(r: &mut Reader) -> Result<WireMesh> {
+    let origin = [r.f64()?, r.f64()?, r.f64()?];
+    let (chord, angle) = (r.f64()?, r.f64()?);
+    let mut positions = Vec::new();
+    for _ in 0..r.count(12)? {
+        positions.push([r.f32()?, r.f32()?, r.f32()?]);
+    }
+    let np = positions.len() as u32;
+    let mut corners = Vec::new();
+    for _ in 0..r.count(16)? {
+        let p = r.u32()?;
+        if p >= np {
+            return Err(corrupt("a corner past the positions"));
+        }
+        corners.push((p, [r.f32()?, r.f32()?, r.f32()?]));
+    }
+    let nc = corners.len() as u32;
+    let mut triangles = Vec::new();
+    for _ in 0..r.count(12)? {
+        let t = [r.u32()?, r.u32()?, r.u32()?];
+        if t.iter().any(|i| *i >= nc) {
+            return Err(corrupt("a triangle past the corners"));
+        }
+        triangles.push(t);
+    }
+    let nt = triangles.len() as u32;
+    let mut faces = Vec::new();
+    for _ in 0..r.count(32)? {
+        let name = r.name()?;
+        let (cs, ce, ts, te) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
+        if cs > ce || ce > nc || ts > te || te > nt {
+            return Err(corrupt("a face range past the data"));
+        }
+        faces.push(WireFace {
+            name,
+            corners: (cs, ce),
+            triangles: (ts, te),
+        });
+    }
+    let mut edges = Vec::new();
+    for _ in 0..r.count(20)? {
+        let name = r.name()?;
+        let mut ps = Vec::new();
+        for _ in 0..r.count(4)? {
+            let p = r.u32()?;
+            if p >= np {
+                return Err(corrupt("an edge point past the positions"));
+            }
+            ps.push(p);
+        }
+        edges.push((name, ps));
+    }
+    let mut vertices = Vec::new();
+    for _ in 0..r.count(20)? {
+        let name = r.name()?;
+        let p = r.u32()?;
+        if p >= np {
+            return Err(corrupt("a vertex past the positions"));
+        }
+        vertices.push((name, p));
+    }
+    let mut faults = Vec::new();
+    for _ in 0..r.count(18)? {
+        faults.push((r.name()?, r.str16()?));
+    }
+    Ok(WireMesh {
+        origin,
+        chord,
+        angle,
+        positions,
+        corners,
+        triangles,
+        faces,
+        edges,
+        vertices,
+        faults,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,6 +614,51 @@ mod tests {
         let id = Id::parse("s", "feature").unwrap();
         let b = build_feature(&id, &id, &f).unwrap();
         (f, b)
+    }
+
+    #[test]
+    fn binary_carries_what_json_does() {
+        let (f, b) = sphere("10 mm");
+        let mut cache = Cache::default();
+        let m = Meshed {
+            body: b.body.clone(),
+            hash: b.hash.clone(),
+            mesh: cache.get(&f, &b, Quality::Coarse, usize::MAX),
+        };
+        let id = |s: &str| Id::parse(s, "feature").unwrap();
+        let failed = Err(Error::new(Code::RebuildFailed, "no"));
+        let bytes = encode(&[(id("s"), Ok(m.clone())), (id("t"), failed)]);
+        let wire = decode(&bytes).unwrap();
+        assert_eq!(wire.len(), 2);
+        assert_eq!(
+            (wire[0].feature.as_str(), wire[0].hash.as_str()),
+            ("s", b.hash.as_str())
+        );
+        assert_eq!(wire[1].mesh.as_ref().unwrap_err()["code"], "rebuild_failed");
+        let w = wire[0].mesh.as_ref().unwrap();
+        let j = to_json(&m.body, &m.mesh);
+        assert_eq!(w.triangles.len(), j["triangles"].as_array().unwrap().len());
+        assert_eq!(json!(w.triangles), j["triangles"]);
+        assert_eq!(name_hex(&w.faces[0].name), j["faces"][0]["name"]);
+        // Positions agree to f32 precision around the body's centre.
+        for (p, q) in w.positions.iter().zip(j["positions"].as_array().unwrap()) {
+            for k in 0..3 {
+                let exact = q[k].as_f64().unwrap();
+                assert!((w.origin[k] + p[k] as f64 - exact).abs() < 1e-8);
+            }
+        }
+        // Truncations are errors, never panics: the first and last bytes,
+        // and cuts spread through the middle.
+        let step = (bytes.len() / 300).max(1);
+        let cuts = (0..64)
+            .chain((0..bytes.len()).step_by(step))
+            .chain(bytes.len() - 64..bytes.len());
+        for n in cuts {
+            assert!(decode(&bytes[..n]).is_err(), "{n}");
+        }
+        let mut bad = bytes.clone();
+        bad[0] = b'X';
+        assert!(decode(&bad).is_err());
     }
 
     #[test]

@@ -438,4 +438,15 @@ fn meshes_are_the_same_both_ways() {
     assert_eq!(m["bodies"].as_array().unwrap().len(), 2);
     assert_eq!(m["bodies"][1]["faces"].as_array().unwrap().len(), 6);
     p.fails(&["mesh", "p", "--quality", "ultra"], "invalid_param", 1);
+    // As bytes, through the daemon and in process alike.
+    let r = p.ok(&["mesh", "p", "--quality", "coarse", "--out", "m.bin"]);
+    assert_eq!(r["binary"]["encoding"], "ryucad.mesh.1");
+    assert_eq!(r["out"], "m.bin");
+    let a = fs::read(p.direct.join("m.bin")).unwrap();
+    assert_eq!(a, fs::read(p.daemon.join("m.bin")).unwrap());
+    assert_eq!(r["binary"]["length"], a.len());
+    let wire = ryucad::mesh::decode(&a).unwrap();
+    assert_eq!(wire[1].feature, "b");
+    let tris = wire[1].mesh.as_ref().unwrap().triangles.len();
+    assert_eq!(tris, m["bodies"][1]["triangles"].as_array().unwrap().len());
 }

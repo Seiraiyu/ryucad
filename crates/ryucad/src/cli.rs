@@ -5,7 +5,7 @@ use clap::{Args, Parser, Subcommand};
 use ryucad::doc::project::find_root;
 use ryucad::error::{Code, Error, Result};
 use ryucad::live::{SelectMode, Style};
-use ryucad::proto::{PlacementArg, Position, Request, VersionInfo};
+use ryucad::proto::{Answer, PlacementArg, Position, Request, Transfer, VersionInfo};
 use ryucad::units::Unit;
 use ryucad::view::{CameraArg, ProjectionArg};
 use ryucad::{client, daemon, server};
@@ -154,6 +154,9 @@ enum Command {
         /// coarse, normal or fine (the user's display quality by default).
         #[arg(long)]
         quality: Option<String>,
+        /// Write the meshes to this file as ryucad.mesh.1 instead.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
     },
     /// The project's Git commits (or one part's), and what is
     /// uncommitted. Read-only.
@@ -578,10 +581,12 @@ fn request(cmd: &Command) -> Option<Request> {
             part,
             feature,
             quality,
+            out,
         } => Request::MeshGet {
             part: part.clone(),
             feature: feature.clone(),
             quality: quality.clone(),
+            transfer: out.as_ref().map(|_| Transfer::Binary),
         },
         Command::History { part, limit } => Request::HistoryLog {
             part: part.clone(),
@@ -645,14 +650,38 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             let root = find_root(&here)?;
             if !no_daemon(cli) {
                 match client::request(&root, &req, participant(cli).as_deref()) {
-                    Ok(answer) => return answer,
+                    Ok(answer) => return deliver(cmd, answer?),
                     // Never delivered, so running it here is safe.
                     Err(e) => warnings.push(format!("{}; ran in process", e.message)),
                 }
             }
-            server::handle_safely(&mut None, None, None, &root, req)
+            deliver(
+                cmd,
+                server::handle_safely(&mut None, None, None, &root, req)?,
+            )
         }
     }
+}
+
+/// The result to print; bytes the answer carries go to the command's
+/// `--out` file.
+fn deliver(cmd: &Command, a: Answer) -> Result<Value> {
+    let Some(bytes) = a.binary else {
+        return Ok(a.result);
+    };
+    let out = match cmd {
+        Command::Mesh { out: Some(o), .. } => o,
+        _ => {
+            return Err(Error::new(
+                Code::Internal,
+                "bytes with nowhere to write them",
+            ));
+        }
+    };
+    std::fs::write(out, bytes).map_err(|e| Error::io(out, &e))?;
+    let mut result = a.result;
+    result["out"] = json!(out);
+    Ok(result)
 }
 
 pub fn main() -> ExitCode {
