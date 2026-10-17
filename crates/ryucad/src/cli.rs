@@ -147,6 +147,13 @@ enum Command {
     /// user preferences.
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// The project's Git commits (or one part's), and what is
+    /// uncommitted. Read-only.
+    History {
+        part: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
     /// Undo this agent's latest change, or the activity entry --entry.
     Undo {
         #[arg(long, value_name = "SEQ")]
@@ -558,6 +565,10 @@ fn request(cmd: &Command) -> Option<Request> {
             value: serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.clone())),
             scope: scope.get(),
             expected_revision: expect.clone(),
+        },
+        Command::History { part, limit } => Request::HistoryLog {
+            part: part.clone(),
+            limit: Some(*limit),
         },
         Command::Undo { entry } => Request::Undo { entry: *entry },
         Command::Redo { entry } => Request::Redo { entry: *entry },

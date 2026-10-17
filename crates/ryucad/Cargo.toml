@@ -9,6 +9,8 @@ repository.workspace = true
 # Rust only: no C or assembly to build on any platform.
 blake3 = { version = "1", features = ["pure"] }
 clap = { version = "4", features = ["derive"] }
+# Reads history only: no network, no writes, no C.
+gix = { version = "0.89", default-features = false, features = ["sha1"] }
 interprocess = "2"
 rayon = "1"
 ryukei = { path = "../ryukei" }

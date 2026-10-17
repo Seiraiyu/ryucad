@@ -9,6 +9,7 @@ pub mod doc;
 pub mod endpoint;
 pub mod entity;
 pub mod error;
+pub mod git;
 pub mod inspect;
 pub mod live;
 pub mod notify;

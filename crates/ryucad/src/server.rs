@@ -261,6 +261,19 @@ fn dispatch(
             let who = live.caller(me);
             activity::undo(live, session, &who, entry, true)
         }
+        Request::HistoryLog { part, limit } => {
+            let part = part.as_deref().map(part_id).transpose()?;
+            if let Some(p) = &part {
+                session.project().part(p)?;
+            }
+            let files = activity::snapshot(session.root())?;
+            crate::git::history(
+                session.root(),
+                &files,
+                part.as_ref().map(Id::as_str),
+                limit.unwrap_or(50),
+            )
+        }
         Request::ConfigGet { key, scope } => {
             let scope = scope.as_deref().map(config::Scope::parse).transpose()?;
             let mut v = config::get(

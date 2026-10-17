@@ -335,6 +335,7 @@ fn every_protocol_method_has_a_command() {
         ("activity.set", &["status"]),
         ("activity.log", &["activity"]),
         ("undo", &["undo"]),
+        ("history.log", &["history"]),
         ("config.get", &["config", "get"]),
         ("config.set", &["config", "set"]),
         ("redo", &["redo"]),
@@ -401,4 +402,14 @@ fn settings_and_preferences() {
     p.ok(&["part", "create", "q"]);
     let r = p.ok(&["feature", "add", "q", "sphere", "--param", "radius=1"]);
     assert_eq!(r["feature"]["params"]["radius"]["value"], "1 in");
+}
+
+#[test]
+fn history_outside_and_inside_git() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    let v = p.ok(&["history"]);
+    assert_eq!(v["repository"], false);
+    assert_eq!(v["warnings"][0]["code"], "not_a_git_repo");
+    p.fails(&["history", "nope"], "not_found", 1);
 }

@@ -242,6 +242,14 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// The project's Git commits (or a part's), and what is uncommitted.
+    #[serde(rename = "history.log")]
+    HistoryLog {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
     /// Says what the caller is doing; an empty status clears it.
     #[serde(rename = "activity.set")]
     ActivitySet {

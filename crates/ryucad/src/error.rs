@@ -58,6 +58,8 @@ pub enum Code {
     UnknownSetting,
     /// A setting's value, or scope, is wrong.
     InvalidSetting,
+    /// The project isn't in a Git repository (a warning, not a failure).
+    NotAGitRepo,
 }
 
 impl Code {
