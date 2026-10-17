@@ -33,6 +33,7 @@ enum Pending {
     Activity,
     History,
     Config,
+    Doctor,
     /// Only a failure matters.
     Quiet,
 }
@@ -83,6 +84,8 @@ pub struct Workspace {
     /// The project's Git history (`history.log`), once asked for.
     pub history: Option<Value>,
     pub settings: Settings,
+    /// The last doctor report, once asked for.
+    pub doctor: Option<Value>,
     /// Requests of the window's that failed, newest last.
     pub errors: Vec<Error>,
     /// The daemon is gone: the window shows its last state, greyed, and
@@ -120,6 +123,7 @@ impl Workspace {
             activity: Activity::default(),
             history: None,
             settings: Settings::default(),
+            doctor: None,
             camera_due: None,
             camera_sent: None,
             errors: Vec::new(),
@@ -182,6 +186,17 @@ impl Workspace {
     /// Redoes an undo, or this window's latest undo.
     pub fn redo(&mut self, entry: Option<u64>) {
         self.send(Request::Redo { entry }, Pending::Quiet);
+    }
+
+    /// Diagnoses the project (`doctor`).
+    pub fn diagnose(&mut self) {
+        self.send(Request::Doctor {}, Pending::Doctor);
+    }
+
+    /// Applies repairs from the last report (`doctor.repair`); the answer
+    /// brings the new report.
+    pub fn repair(&mut self, repairs: Vec<String>, params: serde_json::Map<String, Value>) {
+        self.send(Request::DoctorRepair { repairs, params }, Pending::Doctor);
     }
 
     /// Reads the project's Git history again.
@@ -466,6 +481,9 @@ impl Workspace {
             (Pending::Quiet, Ok(_)) => {}
             (Pending::Activity, Ok(a)) => self.activity.reset(&a.result["entries"]),
             (Pending::History, Ok(a)) => self.history = Some(a.result),
+            (Pending::Doctor, Ok(a)) => {
+                self.doctor = Some(crate::core::doctor::report_of(&a.result))
+            }
             // A whole reading, or one changed setting: read them all again,
             // which also brings the project revision up to date.
             (Pending::Config, Ok(a)) if a.result.get("settings").is_some() => {
@@ -539,6 +557,10 @@ impl Workspace {
                 }
             }
             "project.changed" => {
+                // Parts came or went: damage may have too.
+                if self.doctor.is_some() {
+                    self.diagnose();
+                }
                 if let Some(u) = params["default_unit"].as_str() {
                     self.model.default_unit = u.to_owned();
                     self.model.generation += 1;

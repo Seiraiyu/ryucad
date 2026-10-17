@@ -57,7 +57,8 @@ fn click(h: &Harness<'static, App>, pos: egui::Pos2) {
 }
 
 fn loaded(app: &App) -> bool {
-    app.ws.idle() && app.ws.model.meshes.len() == 2
+    let o = app.opened();
+    o.ws.idle() && o.ws.model.meshes.len() == 2
 }
 
 #[test]
@@ -69,14 +70,14 @@ fn the_tree_lists_features_and_frames_a_chosen_one() {
     let mut h = window(&p);
     frames(&mut h, loaded);
     h.get_by_label("base (box)");
-    let before = h.state().view.nav.camera.clone();
+    let before = h.state().opened().view.nav.camera.clone();
     h.get_by_label("boss (cylinder)").click();
-    frames(&mut h, |a| a.view.chosen.is_some());
+    frames(&mut h, |a| a.opened().view.chosen.is_some());
     assert_eq!(
-        h.state().view.chosen,
+        h.state().opened().view.chosen,
         Some(("p".to_owned(), "boss".to_owned()))
     );
-    assert_ne!(h.state().view.nav.camera, before);
+    assert_ne!(h.state().opened().view.nav.camera, before);
     // A failed feature is marked.
     p.ok(&[
         "feature",
@@ -91,7 +92,10 @@ fn the_tree_lists_features_and_frames_a_chosen_one() {
         "minor_radius=1",
     ]);
     frames(&mut h, |a| {
-        a.ws.part("p").is_some_and(|p| p.feature("ring").is_some())
+        a.opened()
+            .ws
+            .part("p")
+            .is_some_and(|p| p.feature("ring").is_some())
     });
     h.step();
     h.get_by_label("ring (torus): failed");
@@ -106,16 +110,26 @@ fn a_click_selects_and_agents_see_it() {
     let mut h = window(&p);
     frames(&mut h, loaded);
     h.step();
-    click(&h, h.state().view.rect.center());
+    click(&h, h.state().opened().view.rect.center());
     frames(&mut h, |a| {
-        a.ws.myself().is_some_and(|m| m.selection.len() == 1) && a.ws.idle()
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection.len() == 1)
+            && a.opened().ws.idle()
     });
-    let mine = h.state().ws.myself().unwrap().selection.clone();
+    let mine = h.state().opened().ws.myself().unwrap().selection.clone();
     assert_eq!(p.ok(&["selection"])["selection"], serde_json::json!(mine));
     // Clicking the background clears it.
-    click(&h, h.state().view.rect.left_top() + egui::vec2(5.0, 5.0));
+    click(
+        &h,
+        h.state().opened().view.rect.left_top() + egui::vec2(5.0, 5.0),
+    );
     frames(&mut h, |a| {
-        a.ws.myself().is_some_and(|m| m.selection.is_empty())
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection.is_empty())
     });
 }
 
@@ -130,7 +144,9 @@ fn the_window_follows_an_agent_until_the_human_navigates() {
     p.ok(&["status", "drilling the boss"]);
     p.ok(&["camera", "--view", "front"]);
     frames(&mut h, |a| {
-        a.ws.people
+        a.opened()
+            .ws
+            .people
             .all
             .values()
             .any(|p| p.camera.is_some() && p.name == "agent")
@@ -138,12 +154,12 @@ fn the_window_follows_an_agent_until_the_human_navigates() {
     h.step();
     h.get_by_label("drilling the boss");
     h.get_by_label("Follow").click();
-    frames(&mut h, |a| a.ws.following.is_some());
+    frames(&mut h, |a| a.opened().ws.following.is_some());
     h.step();
-    let agent = h.state().ws.followed_camera().unwrap().clone();
-    assert_eq!(h.state().view.nav.camera, agent);
+    let agent = h.state().opened().ws.followed_camera().unwrap().clone();
+    assert_eq!(h.state().opened().view.nav.camera, agent);
     // A drag in the viewport takes the camera back.
-    let c = h.state().view.rect.center();
+    let c = h.state().opened().view.rect.center();
     h.event(egui::Event::PointerMoved(c));
     h.event(egui::Event::PointerButton {
         pos: c,
@@ -164,8 +180,8 @@ fn the_window_follows_an_agent_until_the_human_navigates() {
         modifiers: egui::Modifiers::NONE,
     });
     h.step();
-    assert_eq!(h.state().ws.following, None);
-    assert_ne!(h.state().view.nav.camera, agent);
+    assert_eq!(h.state().opened().ws.following, None);
+    assert_ne!(h.state().opened().view.nav.camera, agent);
 }
 
 #[test]
@@ -177,7 +193,7 @@ fn a_parameter_is_edited_in_the_property_panel() {
     let mut h = window(&p);
     frames(&mut h, loaded);
     h.get_by_label("boss (cylinder)").click();
-    frames(&mut h, |a| a.ws.form.is_some());
+    frames(&mut h, |a| a.opened().ws.form.is_some());
     h.step();
     // The radius field holds the value as written; a person types over it.
     let field = h.get_all_by_value("3 mm").next().unwrap();
@@ -185,7 +201,11 @@ fn a_parameter_is_edited_in_the_property_panel() {
     h.step();
     h.get_by_label("Apply").click();
     frames(&mut h, |a| {
-        a.ws.form.as_ref().is_some_and(|f| !f.saving && !f.dirty())
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
     });
     let shown = p.ok(&["feature", "show", "p", "boss"]);
     assert_eq!(shown["params"]["radius"]["value"], "4.5 mm");
@@ -200,13 +220,18 @@ fn the_activity_tab_undoes_and_ctrl_z_does_too() {
     let mut h = window(&p);
     frames(&mut h, loaded);
     p.ok(&["feature", "edit", "p", "boss", "--param", "radius=5"]);
-    frames(&mut h, |a| !a.ws.activity.entries.is_empty());
+    frames(&mut h, |a| !a.opened().ws.activity.entries.is_empty());
     h.step();
     h.get_by_label("feature.edit");
     // Newest first: the top Undo is the edit's.
     h.get_all_by_label("Undo").next().unwrap().click();
     frames(&mut h, |a| {
-        a.ws.activity.entries.iter().any(|e| e["kind"] == "undo")
+        a.opened()
+            .ws
+            .activity
+            .entries
+            .iter()
+            .any(|e| e["kind"] == "undo")
     });
     let radius =
         |p: &Project| p.ok(&["feature", "show", "p", "boss"])["params"]["radius"]["value"].clone();
@@ -217,7 +242,12 @@ fn the_activity_tab_undoes_and_ctrl_z_does_too() {
         egui::Key::Z,
     );
     frames(&mut h, |a| {
-        a.ws.activity.entries.iter().any(|e| e["kind"] == "redo")
+        a.opened()
+            .ws
+            .activity
+            .entries
+            .iter()
+            .any(|e| e["kind"] == "redo")
     });
     assert_eq!(radius(&p), "5 mm");
 }
@@ -240,16 +270,18 @@ fn preferences_change_the_window_whoever_sets_them() {
     }
     h.get_by_label("Preferences…").click();
     frames(&mut h, |a| {
-        a.dialogs.preferences && !a.ws.settings.all.is_empty()
+        a.opened().dialogs.preferences && !a.opened().ws.settings.all.is_empty()
     });
     h.step();
-    let edges = h.state().view.edges;
+    let edges = h.state().opened().view.edges;
     h.get_by_role(egui::accesskit::Role::CheckBox).click();
-    frames(&mut h, |a| a.view.edges != edges);
+    frames(&mut h, |a| a.opened().view.edges != edges);
     assert_eq!(p.ok(&["config", "get", "display.edges"])["value"], !edges);
     // An agent picks the dark theme; the window follows.
     p.ok(&["config", "set", "ui.theme", "dark"]);
-    frames(&mut h, |a| a.ws.settings.text("ui.theme", "") == "dark");
+    frames(&mut h, |a| {
+        a.opened().ws.settings.text("ui.theme", "") == "dark"
+    });
     h.step();
     assert_eq!(
         h.ctx.options(|o| o.theme_preference),
@@ -257,4 +289,32 @@ fn preferences_change_the_window_whoever_sets_them() {
     );
     p.ok(&["config", "set", "ui.theme", "system"]);
     p.ok(&["config", "set", "display.edges", "true"]);
+}
+
+#[test]
+fn a_damaged_project_is_repaired_then_opened() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["daemon", "stop"]);
+    std::fs::remove_file(p.root.join("ryucad.json")).unwrap();
+    let mut h = window(&p);
+    let damaged = |a: &App| match &a.screen {
+        ryucad_app::ui::app::Screen::Damaged(d) => d.0.report.is_some(),
+        _ => false,
+    };
+    frames(&mut h, damaged);
+    h.step();
+    h.get_by_label("missing_manifest");
+    h.get_by_label("Repair").click();
+    frames(&mut h, |a| match &a.screen {
+        ryucad_app::ui::app::Screen::Damaged(d) => d.0.openable() && !d.0.busy(),
+        _ => false,
+    });
+    h.step();
+    h.get_by_label("Open project").click();
+    frames(&mut h, |a| {
+        matches!(a.screen, ryucad_app::ui::app::Screen::Opened(_)) && loaded(a)
+    });
 }

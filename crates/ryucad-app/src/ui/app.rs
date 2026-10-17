@@ -1,15 +1,18 @@
-//! The main window: the viewport between the feature tree, the
-//! participants bar and the status line.
+//! The app's window: a project open (the viewport between the feature
+//! tree, the participants bar, the property panel, the activity and the
+//! status line), or a damaged project being repaired.
 
+use crate::core::doctor::Offline;
 use crate::core::link::Wake;
 use crate::core::nav::Navigation;
 use crate::core::workspace::Workspace;
 use crate::ui::view::View;
-use crate::ui::{dialogs, menu, panels};
+use crate::ui::{dialogs, doctor, menu, panels};
 use eframe::egui;
 use ryucad::client::Daemon;
+use ryucad::doc::project::find_project;
 use ryucad::error::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -47,32 +50,118 @@ pub fn open_workspace(root: &Path, daemon: &Daemon, wake: Wake) -> Result<Worksp
     Workspace::open(root, daemon, &name, wake)
 }
 
-/// The app's state.
-pub struct App {
+/// An open project's window.
+pub struct Opened {
     pub ws: Workspace,
     pub view: View,
     pub tab: panels::Tab,
     pub dialogs: menu::Dialogs,
-    titled: bool,
+    pub doctor: doctor::State,
+}
+
+/// What the window shows.
+pub enum Screen {
+    Opened(Box<Opened>),
+    /// A folder with parts but no manifest: repaired before it opens.
+    Damaged(Box<(Offline, doctor::State)>),
+}
+
+/// The app's state.
+pub struct App {
+    pub screen: Screen,
+    pub daemon: Daemon,
+    wake: Wake,
+    /// The folder the title was last set for.
+    titled: Option<PathBuf>,
 }
 
 impl App {
-    pub fn new(ws: Workspace) -> App {
-        App {
+    /// The app on the project in or above `dir`, repainting when anything
+    /// arrives. A damaged project opens to its repairs.
+    pub fn open(ctx: &egui::Context, dir: &Path, daemon: &Daemon) -> Result<App> {
+        let ctx = ctx.clone();
+        let wake: Wake = Arc::new(move || ctx.request_repaint());
+        let (root, damaged) = find_project(dir)?;
+        let screen = if damaged {
+            Screen::Damaged(Box::new((
+                Offline::new(&root, daemon, wake.clone()),
+                doctor::State::default(),
+            )))
+        } else {
+            Screen::Opened(Box::new(Opened::new(open_workspace(
+                &root,
+                daemon,
+                wake.clone(),
+            )?)))
+        };
+        Ok(App {
+            screen,
+            daemon: daemon.clone(),
+            wake,
+            titled: None,
+        })
+    }
+
+    /// The open project. Panics if there is none: for tests.
+    pub fn opened(&self) -> &Opened {
+        match &self.screen {
+            Screen::Opened(o) => o,
+            _ => panic!("no project is open"),
+        }
+    }
+
+    /// The folder on screen.
+    pub fn root(&self) -> &Path {
+        match &self.screen {
+            Screen::Opened(o) => &o.ws.root,
+            Screen::Damaged(d) => &d.0.root,
+        }
+    }
+
+    /// One frame.
+    pub fn frame(&mut self, ui: &mut egui::Ui, gpu: Option<&eframe::egui_wgpu::RenderState>) {
+        let ctx = ui.ctx().clone();
+        if self.titled.as_deref() != Some(self.root()) {
+            let root = self.root().to_path_buf();
+            let name = root.file_name().map_or_else(
+                || root.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("{name} — ryucad")));
+            self.titled = Some(root);
+        }
+        let mut next = None;
+        match &mut self.screen {
+            Screen::Opened(o) => o.frame(ui, gpu),
+            Screen::Damaged(d) => {
+                let (offline, state) = &mut **d;
+                offline.poll();
+                if doctor::damaged(ui, offline, state) {
+                    match open_workspace(&offline.root, &self.daemon, self.wake.clone()) {
+                        Ok(ws) => next = Some(Screen::Opened(Box::new(Opened::new(ws)))),
+                        Err(e) => offline.error = Some(e),
+                    }
+                }
+            }
+        }
+        if let Some(s) = next {
+            self.screen = s;
+        }
+    }
+}
+
+impl Opened {
+    pub fn new(ws: Workspace) -> Opened {
+        let mut o = Opened {
             ws,
             view: View::new(),
             tab: panels::Tab::default(),
             dialogs: menu::Dialogs::default(),
-            titled: false,
-        }
-    }
-
-    /// The app on the project at `root`, repainting when the daemon says
-    /// anything.
-    pub fn open(ctx: &egui::Context, root: &Path, daemon: &Daemon) -> Result<App> {
-        let ctx = ctx.clone();
-        let wake: Wake = Arc::new(move || ctx.request_repaint());
-        Ok(App::new(open_workspace(root, daemon, wake)?))
+            doctor: doctor::State::default(),
+        };
+        // Damage that doesn't stop the project opening shows as badges.
+        o.ws.diagnose();
+        o
     }
 
     /// One frame: take what arrived, then draw.
@@ -86,14 +175,6 @@ impl App {
         }
         if let Some(at) = self.ws.retry_at() {
             ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));
-        }
-        if !self.titled {
-            let name = self.ws.root.file_name().map_or_else(
-                || self.ws.root.display().to_string(),
-                |n| n.to_string_lossy().into_owned(),
-            );
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("{name} — ryucad")));
-            self.titled = true;
         }
         self.apply_preferences(&ctx);
         egui::Panel::top("menu").show(ui, |ui| menu::bar(ui, self));
@@ -120,10 +201,14 @@ impl App {
         egui::CentralPanel::no_frame().show(ui, |ui| self.view.show(ui, &mut self.ws, gpu));
         dialogs::settings(&ctx, &mut self.ws, &mut self.dialogs.settings);
         dialogs::preferences(&ctx, &mut self.ws, &mut self.dialogs.preferences);
+        doctor::dialog(
+            &ctx,
+            &mut self.ws,
+            &mut self.dialogs.doctor,
+            &mut self.doctor,
+        );
     }
-}
 
-impl App {
     /// The user's preferences, as they stand: the daemon announces every
     /// change, whoever makes it.
     fn apply_preferences(&mut self, ctx: &egui::Context) {

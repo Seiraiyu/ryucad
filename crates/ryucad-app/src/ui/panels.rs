@@ -21,6 +21,23 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     }
     let mut choose = None;
     for part in ws.model.parts.values() {
+        // Damage doctor found in the part's files.
+        let prefix = format!("parts/{}/", part.id);
+        let damage: Vec<String> = ws
+            .doctor
+            .as_ref()
+            .and_then(|d| d["issues"].as_array())
+            .into_iter()
+            .flatten()
+            .filter(|i| {
+                i["files"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|f| f.as_str().is_some_and(|f| f.starts_with(&prefix)))
+            })
+            .map(|i| i["message"].as_str().unwrap_or_default().to_owned())
+            .collect();
         let title = match &part.error {
             Some(_) => {
                 RichText::new(format!("{} (broken)", part.id)).color(ui.visuals().warn_fg_color)
@@ -62,6 +79,11 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             });
         if let Some(e) = &part.error {
             header.header_response.on_hover_text(message(e));
+        }
+        if !damage.is_empty() {
+            let badge = format!("{} doctor issue(s)", damage.len());
+            ui.colored_label(ui.visuals().warn_fg_color, badge)
+                .on_hover_text(damage.join("\n"));
         }
     }
     if let Some(c) = choose {

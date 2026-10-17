@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod dialogs;
+pub mod doctor;
 pub mod menu;
 pub mod panels;
 pub mod scene;

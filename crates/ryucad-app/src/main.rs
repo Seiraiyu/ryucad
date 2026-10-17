@@ -1,7 +1,7 @@
 //! `ryucad-app [DIR]`: the desktop app on the project in `DIR` (this
 //! folder by default).
 
-use ryucad::doc::project::find_root;
+use ryucad::doc::project::find_project;
 use ryucad_app::core::link::find_ryucad;
 use ryucad_app::ui::app::App;
 use std::path::PathBuf;
@@ -17,9 +17,10 @@ fn main() -> ExitCode {
     let dir = args
         .first()
         .map_or_else(|| PathBuf::from("."), PathBuf::from);
-    let opened = find_root(&dir).and_then(|root| Ok((root, find_ryucad()?)));
-    let (root, daemon) = match opened {
-        Ok(o) => o,
+    // A damaged project opens too, to its repairs.
+    let opened = find_project(&dir).and_then(|_| find_ryucad());
+    let daemon = match opened {
+        Ok(d) => d,
         Err(e) => {
             eprintln!("ryucad-app: {}", e.message);
             return ExitCode::FAILURE;
@@ -35,7 +36,7 @@ fn main() -> ExitCode {
     let run = eframe::run_native(
         "ryucad",
         options,
-        Box::new(move |cc| Ok(Box::new(App::open(&cc.egui_ctx, &root, &daemon)?))),
+        Box::new(move |cc| Ok(Box::new(App::open(&cc.egui_ctx, &dir, &daemon)?))),
     );
     match run {
         Ok(()) => ExitCode::SUCCESS,
