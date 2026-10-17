@@ -254,6 +254,7 @@ impl Opened {
         egui::Panel::left("tree")
             .resizable(true)
             .default_size(220.0)
+            .min_size(180.0)
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .show(ui, |ui| panels::tree(ui, &mut self.ws, &mut self.view));

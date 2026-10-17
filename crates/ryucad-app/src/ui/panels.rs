@@ -15,6 +15,8 @@ pub fn message(e: &serde_json::Value) -> String {
 /// Parts and their features in order, with rebuild status and mesh
 /// faults. Choosing a feature paints and frames its body.
 pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
+    // Names are IDs: never broken across lines.
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
     ui.heading("Parts");
     if ws.model.parts.is_empty() {
         ui.weak("No parts yet");
@@ -172,6 +174,10 @@ pub fn status(ui: &mut egui::Ui, ws: &Workspace) {
         }
         if !ws.idle() {
             ui.spinner();
+        }
+        if crate::ui::platform::software() {
+            ui.separator();
+            ui.weak("Software rendering");
         }
         if let Some(e) = ws.errors.last() {
             ui.separator();
