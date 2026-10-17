@@ -6,6 +6,7 @@ pub mod client;
 pub mod config;
 pub mod daemon;
 pub mod doc;
+pub mod doctor;
 pub mod endpoint;
 pub mod entity;
 pub mod error;

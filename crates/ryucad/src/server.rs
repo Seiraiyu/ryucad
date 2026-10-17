@@ -331,6 +331,7 @@ fn dispatch(
         } => mesh_get(session, &part, feature.as_deref(), quality.as_deref()),
         // A render's answer is bytes: `answer_live` handles it.
         Request::Render { .. } => Err(Error::new(Code::Internal, "render answers with bytes")),
+        Request::Doctor {} => crate::doctor::report(session.root()),
         Request::HistoryLog { part, limit } => {
             let part = part.as_deref().map(part_id).transpose()?;
             if let Some(p) = &part {

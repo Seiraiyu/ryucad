@@ -2,7 +2,7 @@
 //! meaningful exit code.
 
 use clap::{Args, Parser, Subcommand};
-use ryucad::doc::project::find_root;
+use ryucad::doc::project::{find_project, find_root};
 use ryucad::error::{Code, Error, Result};
 use ryucad::live::{SelectMode, Style};
 use ryucad::proto::{Answer, PlacementArg, Position, Request, Transfer, VersionInfo};
@@ -67,6 +67,9 @@ enum Command {
     },
     /// Report files that aren't canonical, broken, unlisted or unknown.
     CheckFormat,
+    /// Diagnose the project folder: a lost manifest, unlisted or missing
+    /// feature files, conflict markers, sync tools' copies and more.
+    Doctor,
     /// List the humans and agents attached to the project's session.
     Participants,
     /// Set this agent's selection (entity references
@@ -575,6 +578,7 @@ fn request(cmd: &Command) -> Option<Request> {
             entity: entity.clone(),
         },
         Command::CheckFormat => Request::CheckFormat {},
+        Command::Doctor => Request::Doctor {},
         Command::Participants => Request::ParticipantList {},
         Command::Select {
             entities,
@@ -745,6 +749,11 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                 *count,
                 Duration::from_secs(*timeout),
             )
+        }
+        // A damaged project has no daemon and no session: doctor works on
+        // the folder.
+        Command::Doctor if find_project(&here)?.1 => {
+            ryucad::doctor::report(&find_project(&here)?.0)
         }
         cmd => {
             let req = request(cmd).expect("every other command is a request");

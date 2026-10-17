@@ -338,6 +338,7 @@ fn every_protocol_method_has_a_command() {
         ("history.log", &["history"]),
         ("mesh.get", &["mesh"]),
         ("render", &["render"]),
+        ("doctor", &["doctor"]),
         ("config.get", &["config", "get"]),
         ("config.set", &["config", "set"]),
         ("redo", &["redo"]),
@@ -537,4 +538,26 @@ fn a_project_that_lost_its_manifest_is_damaged() {
     fs::remove_file(p.daemon.join("ryucad.json")).unwrap();
     let e = p.fails(&["part", "list"], "project_damaged", 3);
     assert_eq!(e["details"]["repair"], "ryucad doctor");
+    let r = p.ok(&["doctor"]);
+    assert_eq!(r["issues"][0]["code"], "missing_manifest");
+}
+
+#[test]
+fn doctor_on_a_healthy_project() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "sphere", "--id", "s", "--param", "radius=1",
+    ]);
+    assert_eq!(p.ok(&["doctor"])["healthy"], true);
+    p.write("parts/p/features/t.json", "{");
+    let r = p.ok(&["doctor"]);
+    let codes: Vec<&str> = r["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(codes, ["invalid_json", "orphan_feature"]);
 }

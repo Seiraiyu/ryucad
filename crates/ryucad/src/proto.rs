@@ -341,6 +341,9 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         labels: Option<bool>,
     },
+    /// Diagnoses the project folder: every problem, with a stable code.
+    #[serde(rename = "doctor")]
+    Doctor {},
     /// Says what the caller is doing; an empty status clears it.
     #[serde(rename = "activity.set")]
     ActivitySet {
