@@ -92,7 +92,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --locked --release -p ryucad
+      - run: cargo build --locked --release -p ryucad -p ryucad-app
       - if: runner.os == 'Linux'
         run: shellcheck install.sh scripts/test-install.sh scripts/smoke.sh
       - if: runner.os == 'Linux'
@@ -104,9 +104,17 @@ jobs:
       - if: runner.os == 'macOS'
         name: the launcher the installer compiles
         run: osacompile -o "$RUNNER_TEMP/ryucad.app" packaging/macos/ryucad.applescript
+      - if: runner.os == 'Linux'
+        name: a software graphics adapter for the app's smoke run
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
       - name: smoke test
         shell: bash
-        run: sh scripts/smoke.sh target/release/ryucad
+        run: |
+          x=""
+          [ "$RUNNER_OS" = Windows ] && x=".exe"
+          sh scripts/smoke.sh "target/release/ryucad$x" "target/release/ryucad-app$x"
+        env:
+          RYUCAD_REQUIRE_GPU: ${{ runner.os != 'macOS' && '1' || '' }}
       - if: runner.os != 'Windows'
         run: sh scripts/test-install.sh
       - if: runner.os == 'Windows'

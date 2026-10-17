@@ -2,12 +2,16 @@
 # Drives a built ryucad binary through a short agent session: every
 # primitive, a rebuild, inspection, the live session (participants, camera,
 # status, watch), settings, a mesh, a render, undo, doctor and history, and
-# the daemon started and stopped.
+# the daemon started and stopped. Given the desktop app too, it checks that
+# the app loads the project and draws a frame offscreen (`--smoke`); with no
+# graphics adapter that is skipped, unless RYUCAD_REQUIRE_GPU=1.
 #
-#   scripts/smoke.sh path/to/ryucad
+#   scripts/smoke.sh path/to/ryucad [path/to/ryucad-app]
 set -eu
 
 exe=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+app=""
+[ $# -ge 2 ] && app=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/project"
@@ -56,6 +60,23 @@ run doctor
 case "$out" in *'"healthy":true'*) ;; *) echo "FAIL the project isn't healthy" && exit 1 ;; esac
 run history
 run watch --topic model --timeout 1
+if [ -n "$app" ]; then
+    out=$("$app" --smoke "$work/project") || true
+    case "$out" in
+        '{"ok":true'*) echo "ok   ryucad-app --smoke: $out" ;;
+        *"No graphics adapter"*)
+            if [ "${RYUCAD_REQUIRE_GPU:-}" = 1 ]; then
+                echo "FAIL ryucad-app --smoke: $out"
+                exit 1
+            fi
+            echo "skip ryucad-app --smoke: no graphics adapter"
+            ;;
+        *)
+            echo "FAIL ryucad-app --smoke: $out"
+            exit 1
+            ;;
+    esac
+fi
 run daemon status
 case "$out" in *'"running":true'*) ;; *) echo "FAIL no daemon is running" && exit 1 ;; esac
 run daemon stop
