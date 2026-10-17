@@ -354,3 +354,47 @@ fn an_agent_selects_through_the_cli() {
     assert_eq!(r["error"]["code"], "no_live_session");
     cli(&f, &["daemon", "stop"]);
 }
+
+#[test]
+fn camera_highlight_and_status_through_the_cli() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    cli(
+        &f,
+        &[
+            "feature", "add", "p", "sphere", "--id", "s", "--param", "radius=5",
+        ],
+    );
+    let body = cli(&f, &["inspect", "p", "s"])["result"]["bodies"][0].clone();
+    let face = format!("p/s/{}", body["faces"][0]["name"].as_str().unwrap());
+    let r = cli(
+        &f,
+        &[
+            "camera", "--eye", "0,-100,0", "--target", "0,0,0", "--up", "0,0,1", "--ortho", "50",
+        ],
+    );
+    assert_eq!(
+        r["result"]["camera"]["eye"],
+        serde_json::json!([0.0, -0.1, 0.0])
+    );
+    let me = r["result"]["participant"].as_str().unwrap().to_owned();
+    let r = cli(&f, &["camera", "--of", &me]);
+    assert_eq!(
+        r["result"]["camera"]["projection"],
+        serde_json::json!({"orthographic": {"height": 0.05}})
+    );
+    let r = cli(
+        &f,
+        &["highlight", &face, "--style", "changed", "--label", "grew"],
+    );
+    assert_eq!(r["result"]["highlights"][0]["style"], "changed");
+    let r = cli(&f, &["status", "checking the sphere", "--entity", &face]);
+    assert_eq!(r["result"]["status"]["text"], "checking the sphere");
+    let p = cli(&f, &["participants"])["result"]["participants"][0].clone();
+    assert_eq!(p["highlights"][0]["label"], "grew");
+    let r = cli(&f, &["highlight", "--clear"]);
+    assert_eq!(r["result"]["highlights"], serde_json::json!([]));
+    let r = cli(&f, &["highlight", &face, "--style", "loud"]);
+    assert_eq!(r["error"]["code"], "usage");
+    cli(&f, &["daemon", "stop"]);
+}

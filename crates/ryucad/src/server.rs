@@ -11,6 +11,7 @@ use crate::proto::{PlacementArg, Position, Request, VersionInfo};
 use crate::rebuild;
 use crate::session::Session;
 use crate::units::{Quantity, Unit};
+use crate::view::Camera;
 use serde_json::{Map, Value, json};
 use std::fs;
 use std::path::Path;
@@ -177,6 +178,47 @@ fn dispatch(
             let id = live.caller(me);
             let selection = live.select(&id, refs, mode)?;
             Ok(json!({"participant": id, "selection": selection}))
+        }
+        Request::CameraGet { participant } => {
+            let target = match &live {
+                Some(l) => l.target(participant.as_deref())?,
+                None => None,
+            };
+            Ok(match target {
+                Some(p) => json!({"participant": p.id, "camera": p.camera}),
+                None => json!({"participant": null, "camera": null}),
+            })
+        }
+        Request::CameraSet { camera } => {
+            let live = live.ok_or_else(|| live::no_live_session("camera.set"))?;
+            let camera: Camera = camera.resolve(session.project().manifest.default_unit)?;
+            let id = live.caller(me);
+            live.get_mut(&id)?.camera = Some(camera.clone());
+            Ok(json!({"participant": id, "camera": camera}))
+        }
+        Request::HighlightSet {
+            entities,
+            style,
+            label,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("highlight.set"))?;
+            let refs = entity::parse_all(session, &entities)?;
+            let id = live.caller(me);
+            let highlights = live.highlight(&id, style, label, refs)?;
+            Ok(json!({"participant": id, "highlights": highlights}))
+        }
+        Request::HighlightClear { style } => {
+            let live = live.ok_or_else(|| live::no_live_session("highlight.clear"))?;
+            let id = live.caller(me);
+            let highlights = live.clear_highlights(&id, style)?;
+            Ok(json!({"participant": id, "highlights": highlights}))
+        }
+        Request::ActivitySet { status, entities } => {
+            let live = live.ok_or_else(|| live::no_live_session("activity.set"))?;
+            let refs = entity::parse_all(session, &entities)?;
+            let id = live.caller(me);
+            live.set_status(&id, &status, refs)?;
+            Ok(json!({"participant": id, "status": live.get(&id)?.status}))
         }
     }
 }
@@ -1153,7 +1195,8 @@ pub(crate) mod tests {
         let id = r["participant"].as_str().unwrap().to_owned();
         assert_eq!(
             r["session"]["participants"],
-            json!([{"id": id, "kind": "human", "name": "Dana", "status": null, "selection": []}])
+            json!([{"id": id, "kind": "human", "name": "Dana", "status": null, "selection": [],
+                    "camera": null, "highlights": []}])
         );
         let list = call_live(&mut s, &mut live, Some(&id), "participant.list", json!({})).unwrap();
         assert_eq!(list, r["session"]);
@@ -1252,5 +1295,98 @@ pub(crate) mod tests {
         assert_eq!(e.code, Code::NoLiveSession);
         let r = call(&mut s, "selection.get", json!({})).unwrap();
         assert_eq!(r, json!({"participant": null, "selection": []}));
+    }
+
+    #[test]
+    fn cameras_highlights_and_status() {
+        let (_dir, mut s) = with_part();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "id": "s", "params": {"radius": 5}}),
+        )
+        .unwrap();
+        let v = call(&mut s, "inspect", json!({"part": "p"})).unwrap();
+        let face = format!(
+            "p/s/{}",
+            v["bodies"][0]["faces"][0]["name"].as_str().unwrap()
+        );
+        let mut live = Live::new();
+        let human = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "session.hello",
+            json!({"kind": "human"}),
+        )
+        .unwrap()["participant"]
+            .clone();
+        let me = Some(human.as_str().unwrap());
+        let camera = json!({"eye": [0, "-100 mm", 0], "target": [0, 0, 0], "up": [0, 0, 1],
+                            "projection": {"perspective": {"fov_deg": 30}}});
+        let r = call_live(
+            &mut s,
+            &mut live,
+            me,
+            "camera.set",
+            json!({"camera": camera}),
+        )
+        .unwrap();
+        assert_eq!(r["camera"]["eye"], json!([0.0, -0.1, 0.0]));
+        let r = call_live(&mut s, &mut live, None, "camera.get", json!({})).unwrap();
+        assert_eq!(
+            (&r["participant"], &r["camera"]["eye"]),
+            (&human, &json!([0.0, -0.1, 0.0]))
+        );
+        // An agent (no hello) highlights and reports status as itself.
+        let r = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "highlight.set",
+            json!({"entities": [face], "style": "pending", "label": "next"}),
+        )
+        .unwrap();
+        assert_eq!(
+            r["highlights"],
+            json!([{"style": "pending", "label": "next", "entities": [face]}])
+        );
+        let agent = r["participant"].clone();
+        assert_ne!(agent, human);
+        let r = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "activity.set",
+            json!({"status": "measuring", "entities": [face]}),
+        )
+        .unwrap();
+        assert_eq!(
+            r["status"],
+            json!({"text": "measuring", "entities": [face]})
+        );
+        let list = call_live(&mut s, &mut live, None, "participant.list", json!({})).unwrap();
+        let a = list["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == agent)
+            .unwrap()
+            .clone();
+        assert_eq!(a["status"]["text"], "measuring");
+        assert_eq!(a["highlights"][0]["label"], "next");
+        let r = call_live(&mut s, &mut live, None, "highlight.clear", json!({})).unwrap();
+        assert_eq!(r["highlights"], json!([]));
+        for (method, params) in [
+            ("camera.set", json!({"camera": camera})),
+            ("highlight.set", json!({"entities": [face]})),
+            ("highlight.clear", json!({})),
+            ("activity.set", json!({"status": "x"})),
+        ] {
+            let e = call(&mut s, method, params).unwrap_err();
+            assert_eq!(e.code, Code::NoLiveSession, "{method}");
+        }
+        let r = call(&mut s, "camera.get", json!({})).unwrap();
+        assert_eq!(r, json!({"participant": null, "camera": null}));
     }
 }

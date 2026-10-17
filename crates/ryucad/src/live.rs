@@ -4,6 +4,7 @@
 
 use crate::entity::EntityRef;
 use crate::error::{Code, Error, Result};
+use crate::view::Camera;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -34,16 +35,46 @@ pub enum SelectMode {
     Remove,
 }
 
+/// The longest status line.
+pub const STATUS_MAX: usize = 200;
+
+/// How a highlight is drawn: entities about to change, entities just
+/// changed, or entities pointed out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Style {
+    Pending,
+    Changed,
+    #[default]
+    Note,
+}
+
+/// A group of highlighted entities with one style and label.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Highlight {
+    pub style: Style,
+    pub label: Option<String>,
+    pub entities: Vec<EntityRef>,
+}
+
+/// What a participant says it is doing, and the entities it is working on.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Status {
+    pub text: String,
+    pub entities: Vec<EntityRef>,
+}
+
 /// One human (an app window) or agent attached to the session.
 #[derive(Clone, Debug)]
 pub struct Participant {
     pub id: String,
     pub kind: Kind,
     pub name: String,
-    /// A short line saying what the participant is doing.
-    pub status: Option<String>,
+    pub status: Option<Status>,
     /// Selected entities, in the order they were selected.
     pub selection: Vec<EntityRef>,
+    pub camera: Option<Camera>,
+    pub highlights: Vec<Highlight>,
     connections: usize,
     last_seen: Instant,
 }
@@ -56,6 +87,8 @@ impl Participant {
             "name": self.name,
             "status": self.status,
             "selection": self.selection,
+            "camera": self.camera,
+            "highlights": self.highlights,
         })
     }
 }
@@ -143,6 +176,8 @@ impl Live {
                 name,
                 status: None,
                 selection: Vec::new(),
+                camera: None,
+                highlights: Vec::new(),
                 connections: 0,
                 last_seen: Instant::now(),
             },
@@ -270,14 +305,71 @@ impl Live {
         Ok(&p.selection)
     }
 
-    /// Drops every selected reference `keep` refuses. Returns the IDs of
-    /// participants whose state changed.
+    /// Replaces participant `id`'s highlight with the same style and label.
+    /// No entities removes it.
+    pub fn highlight(
+        &mut self,
+        id: &str,
+        style: Style,
+        label: Option<String>,
+        entities: Vec<EntityRef>,
+    ) -> Result<&[Highlight]> {
+        let p = self.get_mut(id)?;
+        p.highlights
+            .retain(|h| !(h.style == style && h.label == label));
+        if !entities.is_empty() {
+            p.highlights.push(Highlight {
+                style,
+                label,
+                entities,
+            });
+        }
+        Ok(&p.highlights)
+    }
+
+    /// Removes participant `id`'s highlights of `style`, or all of them.
+    pub fn clear_highlights(&mut self, id: &str, style: Option<Style>) -> Result<&[Highlight]> {
+        let p = self.get_mut(id)?;
+        p.highlights.retain(|h| style.is_some_and(|s| s != h.style));
+        Ok(&p.highlights)
+    }
+
+    /// Sets participant `id`'s status; an empty text clears it.
+    pub fn set_status(&mut self, id: &str, text: &str, entities: Vec<EntityRef>) -> Result<()> {
+        if text.chars().count() > STATUS_MAX {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("a status is at most {STATUS_MAX} characters"),
+            ));
+        }
+        let p = self.get_mut(id)?;
+        p.status = (!text.is_empty()).then(|| Status {
+            text: text.to_owned(),
+            entities,
+        });
+        Ok(())
+    }
+
+    /// Drops every reference `keep` refuses from selections, highlights and
+    /// statuses. Returns the IDs of participants whose state changed.
     pub fn prune(&mut self, mut keep: impl FnMut(&EntityRef) -> bool) -> Vec<String> {
         let mut changed = Vec::new();
         for p in self.participants.values_mut() {
-            let before = p.selection.len();
-            p.selection.retain(&mut keep);
-            if p.selection.len() != before {
+            let mut gone = 0;
+            let mut retain = |v: &mut Vec<EntityRef>| {
+                let before = v.len();
+                v.retain(&mut keep);
+                gone += before - v.len();
+            };
+            retain(&mut p.selection);
+            for h in &mut p.highlights {
+                retain(&mut h.entities);
+            }
+            if let Some(s) = &mut p.status {
+                retain(&mut s.entities);
+            }
+            p.highlights.retain(|h| !h.entities.is_empty());
+            if gone > 0 {
                 changed.push(p.id.clone());
             }
         }
@@ -384,6 +476,40 @@ mod tests {
         assert_eq!(live.prune(|x| *x != r('a')), vec![a.clone()]);
         assert_eq!(live.get(&a).unwrap().selection, [r('b')]);
         assert!(live.prune(|_| true).is_empty());
+    }
+
+    #[test]
+    fn highlights_are_replaced_by_style_and_label() {
+        let mut live = Live::new();
+        let a = live.caller(None);
+        live.highlight(&a, Style::Note, None, vec![r('a')]).unwrap();
+        live.highlight(&a, Style::Note, Some("hole".into()), vec![r('b')])
+            .unwrap();
+        let h = live.highlight(&a, Style::Note, None, vec![r('c')]).unwrap();
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[1].entities, [r('c')]);
+        live.highlight(&a, Style::Pending, None, vec![r('a')])
+            .unwrap();
+        let h = live.clear_highlights(&a, Some(Style::Note)).unwrap();
+        assert_eq!(
+            h.iter().map(|h| h.style).collect::<Vec<_>>(),
+            [Style::Pending]
+        );
+        // Pruning empties the group, which then goes.
+        live.set_status(&a, "filleting", vec![r('a'), r('b')])
+            .unwrap();
+        assert_eq!(live.prune(|x| *x != r('a')), vec![a.clone()]);
+        let p = live.get(&a).unwrap();
+        assert!(p.highlights.is_empty());
+        assert_eq!(p.status.as_ref().unwrap().entities, [r('b')]);
+        live.set_status(&a, "", vec![]).unwrap();
+        assert!(live.get(&a).unwrap().status.is_none());
+        let long = "x".repeat(STATUS_MAX + 1);
+        assert_eq!(
+            live.set_status(&a, &long, vec![]).unwrap_err().code,
+            Code::InvalidParam
+        );
+        assert!(live.clear_highlights(&a, None).unwrap().is_empty());
     }
 
     #[test]

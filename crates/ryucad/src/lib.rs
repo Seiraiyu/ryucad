@@ -14,3 +14,4 @@ pub mod rebuild;
 pub mod server;
 pub mod session;
 pub mod units;
+pub mod view;

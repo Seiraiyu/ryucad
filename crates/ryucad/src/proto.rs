@@ -3,8 +3,9 @@
 //! so they never diverge.
 
 use crate::error::{Code, Error, Result};
-use crate::live::{Kind, SelectMode};
+use crate::live::{Kind, SelectMode, Style};
 use crate::units::Unit;
+use crate::view::CameraArg;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -169,6 +170,38 @@ pub enum Request {
         entities: Vec<String>,
         #[serde(default)]
         mode: SelectMode,
+    },
+    /// A participant's camera: `participant`, or the one human.
+    #[serde(rename = "camera.get")]
+    CameraGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    /// Sets the caller's own camera.
+    #[serde(rename = "camera.set")]
+    CameraSet { camera: CameraArg },
+    /// Highlights entities for everyone to see, replacing the caller's
+    /// highlight of the same style and label.
+    #[serde(rename = "highlight.set")]
+    HighlightSet {
+        entities: Vec<String>,
+        #[serde(default)]
+        style: Style,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    /// Removes the caller's highlights of `style`, or all of them.
+    #[serde(rename = "highlight.clear")]
+    HighlightClear {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<Style>,
+    },
+    /// Says what the caller is doing; an empty status clears it.
+    #[serde(rename = "activity.set")]
+    ActivitySet {
+        status: String,
+        #[serde(default)]
+        entities: Vec<String>,
     },
     #[serde(rename = "daemon.shutdown")]
     DaemonShutdown {},

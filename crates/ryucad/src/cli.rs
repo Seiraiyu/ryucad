@@ -4,9 +4,10 @@
 use clap::{Args, Parser, Subcommand};
 use ryucad::doc::project::find_root;
 use ryucad::error::{Code, Error, Result};
-use ryucad::live::SelectMode;
+use ryucad::live::{SelectMode, Style};
 use ryucad::proto::{PlacementArg, Position, Request, VersionInfo};
 use ryucad::units::Unit;
+use ryucad::view::{CameraArg, ProjectionArg};
 use ryucad::{client, daemon, server};
 use serde_json::{Map, Value, json};
 use std::path::PathBuf;
@@ -85,6 +86,47 @@ enum Command {
     Selection {
         #[arg(long = "of", value_name = "PARTICIPANT")]
         of: Option<String>,
+    },
+    /// Show a participant's camera (the one human's, unless --of names
+    /// another), or set this agent's with --eye, --target and --up.
+    Camera {
+        #[arg(long = "of", value_name = "PARTICIPANT", conflicts_with = "eye")]
+        of: Option<String>,
+        /// The eye point, three quantities: 0,-100mm,50mm.
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, requires_all = ["target", "up"])]
+        eye: Option<[String; 3]>,
+        /// The point looked at.
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, requires = "eye")]
+        target: Option<[String; 3]>,
+        /// The up direction: 0,0,1.
+        #[arg(long, value_name = "X,Y,Z", value_parser = vector, requires = "eye")]
+        up: Option<[f64; 3]>,
+        /// Perspective with this vertical field of view (45 by default).
+        #[arg(long, value_name = "DEGREES", conflicts_with = "ortho")]
+        fov: Option<f64>,
+        /// Orthographic, this tall at the target.
+        #[arg(long, value_name = "QUANTITY")]
+        ortho: Option<String>,
+    },
+    /// Highlight entities for everyone to see, or clear highlights.
+    Highlight {
+        #[arg(value_name = "REF", required_unless_present = "clear")]
+        entities: Vec<String>,
+        /// pending (about to change), changed, or note (the default).
+        #[arg(long, value_parser = style)]
+        style: Option<Style>,
+        #[arg(long)]
+        label: Option<String>,
+        /// Remove this agent's highlights (of --style only, if given).
+        #[arg(long, conflicts_with_all = ["entities", "label"])]
+        clear: bool,
+    },
+    /// Say what this agent is doing; "" clears it.
+    Status {
+        text: String,
+        /// An entity the work is on.
+        #[arg(long = "entity", value_name = "REF")]
+        entities: Vec<String>,
     },
     /// Run, query or stop the project's session daemon.
     #[command(subcommand)]
@@ -221,6 +263,10 @@ struct PlacementArgs {
 
 fn unit(s: &str) -> core::result::Result<Unit, String> {
     Unit::parse(s).ok_or_else(|| "use m, cm, mm, um, in or ft".to_owned())
+}
+
+fn style(s: &str) -> core::result::Result<Style, String> {
+    serde_json::from_value(json!(s)).map_err(|_| "use pending, changed or note".to_owned())
 }
 
 fn param(s: &str) -> core::result::Result<(String, String), String> {
@@ -370,6 +416,53 @@ fn request(cmd: &Command) -> Option<Request> {
         },
         Command::Selection { of } => Request::SelectionGet {
             participant: of.clone(),
+        },
+        Command::Camera {
+            of,
+            eye,
+            target,
+            up,
+            fov,
+            ortho,
+        } => match (eye, target, up) {
+            (Some(eye), Some(target), Some(up)) => Request::CameraSet {
+                camera: CameraArg {
+                    eye: eye.clone().map(Value::String),
+                    target: target.clone().map(Value::String),
+                    up: *up,
+                    projection: match ortho {
+                        Some(h) => ProjectionArg::Orthographic {
+                            height: Value::String(h.clone()),
+                        },
+                        None => ProjectionArg::Perspective {
+                            fov_deg: fov.unwrap_or(45.0),
+                        },
+                    },
+                },
+            },
+            _ => Request::CameraGet {
+                participant: of.clone(),
+            },
+        },
+        Command::Highlight {
+            entities,
+            style,
+            label,
+            clear,
+        } => {
+            if *clear {
+                Request::HighlightClear { style: *style }
+            } else {
+                Request::HighlightSet {
+                    entities: entities.clone(),
+                    style: style.unwrap_or_default(),
+                    label: label.clone(),
+                }
+            }
+        }
+        Command::Status { text, entities } => Request::ActivitySet {
+            status: text.clone(),
+            entities: entities.clone(),
         },
     })
 }
