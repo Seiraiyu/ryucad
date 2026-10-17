@@ -4084,6 +4084,7 @@ name = "ryucad-app"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "divan",
  "eframe",
  "egui_kittest",
  "png",
