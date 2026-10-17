@@ -2,9 +2,10 @@
 //! participants bar and the status line.
 
 use crate::core::link::Wake;
+use crate::core::nav::Navigation;
 use crate::core::workspace::Workspace;
-use crate::ui::panels;
 use crate::ui::view::View;
+use crate::ui::{dialogs, menu, panels};
 use eframe::egui;
 use ryucad::client::Daemon;
 use ryucad::error::Result;
@@ -51,6 +52,7 @@ pub struct App {
     pub ws: Workspace,
     pub view: View,
     pub tab: panels::Tab,
+    pub dialogs: menu::Dialogs,
     titled: bool,
 }
 
@@ -60,6 +62,7 @@ impl App {
             ws,
             view: View::new(),
             tab: panels::Tab::default(),
+            dialogs: menu::Dialogs::default(),
             titled: false,
         }
     }
@@ -92,6 +95,8 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("{name} — ryucad")));
             self.titled = true;
         }
+        self.apply_preferences(&ctx);
+        egui::Panel::top("menu").show(ui, |ui| menu::bar(ui, self));
         egui::Panel::top("people").show(ui, |ui| panels::people(ui, &mut self.ws));
         self.shortcuts(&ctx);
         egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &self.ws));
@@ -113,10 +118,32 @@ impl App {
                 egui::ScrollArea::vertical().show(ui, |ui| panels::properties(ui, &mut self.ws));
             });
         egui::CentralPanel::no_frame().show(ui, |ui| self.view.show(ui, &mut self.ws, gpu));
+        dialogs::settings(&ctx, &mut self.ws, &mut self.dialogs.settings);
+        dialogs::preferences(&ctx, &mut self.ws, &mut self.dialogs.preferences);
     }
 }
 
 impl App {
+    /// The user's preferences, as they stand: the daemon announces every
+    /// change, whoever makes it.
+    fn apply_preferences(&mut self, ctx: &egui::Context) {
+        let theme = match self.ws.settings.text("ui.theme", "system") {
+            "dark" => egui::ThemePreference::Dark,
+            "light" => egui::ThemePreference::Light,
+            _ => egui::ThemePreference::System,
+        };
+        if ctx.options(|o| o.theme_preference) != theme {
+            ctx.set_theme(theme);
+        }
+        self.view.nav.style = Navigation::parse(self.ws.settings.text("ui.navigation", "ryucad"));
+        self.view.edges = self
+            .ws
+            .settings
+            .get("display.edges")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+    }
+
     /// Ctrl/Cmd+Z undoes this window's latest change, Shift+Ctrl/Cmd+Z
     /// redoes; not while a text field has the keyboard (it has its own).
     fn shortcuts(&mut self, ctx: &egui::Context) {

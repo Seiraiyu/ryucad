@@ -221,3 +221,40 @@ fn the_activity_tab_undoes_and_ctrl_z_does_too() {
     });
     assert_eq!(radius(&p), "5 mm");
 }
+
+#[test]
+fn preferences_change_the_window_whoever_sets_them() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("Edit").click();
+    // The menu opens over a frame or two.
+    for _ in 0..10 {
+        h.step();
+        if h.query_by_label("Preferences…").is_some() {
+            break;
+        }
+    }
+    h.get_by_label("Preferences…").click();
+    frames(&mut h, |a| {
+        a.dialogs.preferences && !a.ws.settings.all.is_empty()
+    });
+    h.step();
+    let edges = h.state().view.edges;
+    h.get_by_role(egui::accesskit::Role::CheckBox).click();
+    frames(&mut h, |a| a.view.edges != edges);
+    assert_eq!(p.ok(&["config", "get", "display.edges"])["value"], !edges);
+    // An agent picks the dark theme; the window follows.
+    p.ok(&["config", "set", "ui.theme", "dark"]);
+    frames(&mut h, |a| a.ws.settings.text("ui.theme", "") == "dark");
+    h.step();
+    assert_eq!(
+        h.ctx.options(|o| o.theme_preference),
+        egui::ThemePreference::Dark
+    );
+    p.ok(&["config", "set", "ui.theme", "system"]);
+    p.ok(&["config", "set", "display.edges", "true"]);
+}

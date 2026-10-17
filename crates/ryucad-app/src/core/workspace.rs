@@ -6,6 +6,7 @@ use crate::core::edit::Form;
 use crate::core::link::{Event, Link, Wake};
 use crate::core::model::{BodyKey, Model, Part};
 use crate::core::people::{People, Person};
+use crate::core::settings::Settings;
 use ryucad::client::Daemon;
 use ryucad::error::{Code, Error, Result};
 use ryucad::live::SelectMode;
@@ -31,6 +32,7 @@ enum Pending {
     Save,
     Activity,
     History,
+    Config,
     /// Only a failure matters.
     Quiet,
 }
@@ -80,6 +82,7 @@ pub struct Workspace {
     pub activity: Activity,
     /// The project's Git history (`history.log`), once asked for.
     pub history: Option<Value>,
+    pub settings: Settings,
     /// Requests of the window's that failed, newest last.
     pub errors: Vec<Error>,
     /// The daemon is gone: the window shows its last state, greyed, and
@@ -116,6 +119,7 @@ impl Workspace {
             form: None,
             activity: Activity::default(),
             history: None,
+            settings: Settings::default(),
             camera_due: None,
             camera_sent: None,
             errors: Vec::new(),
@@ -141,6 +145,32 @@ impl Workspace {
             before: None,
         };
         self.send(log, Pending::Activity);
+        self.load_settings();
+    }
+
+    fn load_settings(&mut self) {
+        let req = Request::ConfigGet {
+            key: None,
+            scope: None,
+        };
+        self.send(req, Pending::Config);
+    }
+
+    /// Changes a setting through `config.set`: a project setting against
+    /// the revision it was read at. A failure lands in `errors`.
+    pub fn set_config(&mut self, key: &str, value: Value) {
+        let project = self
+            .settings
+            .all
+            .iter()
+            .any(|s| s.key == key && s.scope == "project");
+        let req = Request::ConfigSet {
+            key: key.to_owned(),
+            value,
+            scope: None,
+            expected_revision: project.then(|| self.settings.project_revision.clone()),
+        };
+        self.send(req, Pending::Config);
     }
 
     /// Undoes an activity entry, or this window's latest change. A failure
@@ -436,6 +466,12 @@ impl Workspace {
             (Pending::Quiet, Ok(_)) => {}
             (Pending::Activity, Ok(a)) => self.activity.reset(&a.result["entries"]),
             (Pending::History, Ok(a)) => self.history = Some(a.result),
+            // A whole reading, or one changed setting: read them all again,
+            // which also brings the project revision up to date.
+            (Pending::Config, Ok(a)) if a.result.get("settings").is_some() => {
+                self.settings.reset(&a.result);
+            }
+            (Pending::Config, Ok(_)) => self.load_settings(),
             (Pending::Form(part, before), Ok(a)) => {
                 // Answers come in order, so the last form asked for wins;
                 // a reload after a conflict only if that form is still open.
@@ -508,9 +544,15 @@ impl Workspace {
                     self.model.generation += 1;
                 }
             }
-            "config.changed" if params["key"] == "display.quality" => {
-                let all = self.model.clear_meshes();
-                self.fetch(all);
+            "config.changed" => {
+                self.settings.changed(params);
+                if params["key"] == "display.quality" {
+                    let all = self.model.clear_meshes();
+                    self.fetch(all);
+                }
+                if params["scope"] == "project" {
+                    self.load_settings();
+                }
             }
             "activity.appended" => self.activity.appended(params),
             "participant.changed" => {
