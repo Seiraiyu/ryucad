@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// How long the CLI waits for a daemon it started.
@@ -52,6 +53,29 @@ impl Connection {
     }
 }
 
+impl Connection {
+    /// Hands the connection's incoming lines to a thread, which parses
+    /// them onto the returned channel; the send half is kept so the
+    /// connection stays open.
+    fn into_lines(self) -> (mpsc::Receiver<Value>, SendHalf) {
+        let (tx, rx) = mpsc::channel();
+        let mut reader = self.reader;
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|n| n > 0) {
+                let Ok(v) = serde_json::from_str(&line) else {
+                    return;
+                };
+                if tx.send(v).is_err() {
+                    return;
+                }
+                line.clear();
+            }
+        });
+        (rx, self.writer)
+    }
+}
+
 fn unavailable(why: impl std::fmt::Display) -> Error {
     Error::new(Code::Daemon, format!("daemon unavailable: {why}"))
 }
@@ -81,6 +105,44 @@ pub fn request(root: &Path, req: &Request, name: Option<&str>) -> Result<Result<
             format!("the daemon stopped answering ({e}); the request may have been applied"),
         ))
     }))
+}
+
+/// Subscribes to `topics` as the agent `name` and collects notifications
+/// until there are `count` of them or `timeout` passes.
+pub fn watch(
+    root: &Path,
+    name: Option<&str>,
+    topics: &[String],
+    count: usize,
+    timeout: Duration,
+) -> Result<Value> {
+    let endpoint = Endpoint::for_project(root)?;
+    let mut conn = ready(root, &endpoint)?;
+    let hello = Request::SessionHello {
+        kind: Kind::Agent,
+        name: name.map(str::to_owned),
+        participant: None,
+    };
+    conn.call(&hello).map_err(unavailable)??;
+    let sub = Request::Subscribe {
+        topics: topics.to_vec(),
+    };
+    conn.call(&sub).map_err(unavailable)??;
+    let (rx, _keep) = conn.into_lines();
+    let deadline = Instant::now() + timeout;
+    let mut got = Vec::new();
+    while got.len() < count {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(v) => got.push(json!({"method": v["method"], "params": v["params"]})),
+            Err(mpsc::RecvTimeoutError::Timeout) => break,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(unavailable("the daemon closed the subscription"));
+            }
+        }
+    }
+    let timed_out = got.len() < count;
+    Ok(json!({"notifications": got, "timed_out": timed_out}))
 }
 
 /// A connection to a daemon running this exact binary.

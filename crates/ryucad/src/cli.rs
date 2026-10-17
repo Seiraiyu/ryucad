@@ -121,6 +121,19 @@ enum Command {
         #[arg(long, conflicts_with_all = ["entities", "label"])]
         clear: bool,
     },
+    /// Wait for notifications from the project's daemon: what humans
+    /// select, the model changing, and so on.
+    Watch {
+        /// model, project, participants or activity (all by default).
+        #[arg(long = "topic", value_name = "TOPIC")]
+        topics: Vec<String>,
+        /// Stop after this many notifications.
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+        /// Stop after this many seconds.
+        #[arg(long, value_name = "SECONDS", default_value_t = 30)]
+        timeout: u64,
+    },
     /// Say what this agent is doing; "" clears it.
     Status {
         text: String,
@@ -324,7 +337,9 @@ impl PositionArgs {
 /// project.
 fn request(cmd: &Command) -> Option<Request> {
     Some(match cmd {
-        Command::Init { .. } | Command::Version | Command::Daemon(_) => return None,
+        Command::Init { .. } | Command::Version | Command::Daemon(_) | Command::Watch { .. } => {
+            return None;
+        }
         Command::Part(PartCmd::Create { part }) => Request::PartCreate { part: part.clone() },
         Command::Part(PartCmd::Delete { part, expect }) => Request::PartDelete {
             part: part.clone(),
@@ -467,6 +482,17 @@ fn request(cmd: &Command) -> Option<Request> {
     })
 }
 
+fn no_daemon(cli: &Cli) -> bool {
+    cli.no_daemon || std::env::var("RYUCAD_NO_DAEMON").is_ok_and(|v| v == "1")
+}
+
+/// The agent participant to act as.
+fn participant(cli: &Cli) -> Option<String> {
+    cli.as_name
+        .clone()
+        .or_else(|| std::env::var("RYUCAD_PARTICIPANT").ok())
+}
+
 /// Runs the command, collecting warnings for the output.
 fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
     let here = match &cli.dir {
@@ -483,17 +509,28 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
         Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
         Command::Daemon(DaemonCmd::Stop { all: true }) => client::stop_all(),
         Command::Daemon(DaemonCmd::Stop { all: false }) => client::stop(&find_root(&here)?),
+        Command::Watch {
+            topics,
+            count,
+            timeout,
+        } => {
+            let root = find_root(&here)?;
+            if no_daemon(cli) {
+                return Err(ryucad::live::no_live_session("subscribe"));
+            }
+            client::watch(
+                &root,
+                participant(cli).as_deref(),
+                topics,
+                *count,
+                Duration::from_secs(*timeout),
+            )
+        }
         cmd => {
             let req = request(cmd).expect("every other command is a request");
             let root = find_root(&here)?;
-            let no_daemon =
-                cli.no_daemon || std::env::var("RYUCAD_NO_DAEMON").is_ok_and(|v| v == "1");
-            if !no_daemon {
-                let name = cli
-                    .as_name
-                    .clone()
-                    .or_else(|| std::env::var("RYUCAD_PARTICIPANT").ok());
-                match client::request(&root, &req, name.as_deref()) {
+            if !no_daemon(cli) {
+                match client::request(&root, &req, participant(cli).as_deref()) {
                     Ok(answer) => return answer,
                     // Never delivered, so running it here is safe.
                     Err(e) => warnings.push(format!("{}; ran in process", e.message)),

@@ -552,3 +552,69 @@ fn watchers_see_the_model_change_however_it_changes() {
     assert_eq!(m["parts"][0]["failed"], 0);
     cli(&f, &["daemon", "stop"]);
 }
+
+#[test]
+fn an_agent_waits_for_the_human_to_select() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    cli(
+        &f,
+        &[
+            "feature", "add", "p", "sphere", "--id", "s", "--param", "radius=5",
+        ],
+    );
+    let body = cli(&f, &["inspect", "p", "s"])["result"]["bodies"][0].clone();
+    let face = format!("p/s/{}", body["faces"][0]["name"].as_str().unwrap());
+    let waiter = {
+        let (root, run) = (f.root.clone(), f.run.clone());
+        std::thread::spawn(move || {
+            let out = Command::new(cargo_bin("ryucad"))
+                .args([
+                    "watch",
+                    "--topic",
+                    "participants",
+                    "--count",
+                    "2",
+                    "--timeout",
+                    "20",
+                ])
+                .current_dir(&root)
+                .env(RUNTIME_DIR_VAR, &run)
+                .output()
+                .unwrap();
+            serde_json::from_slice::<Value>(&out.stdout).unwrap()
+        })
+    };
+    // Give the watcher time to subscribe; then a human arrives and selects.
+    std::thread::sleep(Duration::from_millis(800));
+    let human = f.connect().unwrap();
+    let hello = Request::SessionHello {
+        kind: ryucad::live::Kind::Human,
+        name: Some("Dana".into()),
+        participant: None,
+    };
+    ask(&human, &hello).unwrap();
+    let select = Request::SelectionSet {
+        entities: vec![face.clone()],
+        mode: ryucad::live::SelectMode::Replace,
+    };
+    ask(&human, &select).unwrap();
+    let r = waiter.join().unwrap();
+    assert_eq!(r["result"]["timed_out"], false, "{r}");
+    let n = r["result"]["notifications"].as_array().unwrap();
+    assert_eq!(n[1]["method"], "participant.changed");
+    assert_eq!(
+        n[1]["params"]["participant"]["selection"],
+        serde_json::json!([face])
+    );
+    // Nothing happens: the watch times out with what it has.
+    let r = cli(&f, &["watch", "--topic", "model", "--timeout", "1"]);
+    assert_eq!(
+        r["result"],
+        serde_json::json!({"notifications": [], "timed_out": true})
+    );
+    let r = cli(&f, &["--no-daemon", "watch"]);
+    assert_eq!(r["error"]["code"], "no_live_session");
+    drop(human);
+    cli(&f, &["daemon", "stop"]);
+}

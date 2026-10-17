@@ -285,3 +285,64 @@ fn pretty_output_is_the_same_document() {
         serde_json::from_slice::<Value>(&compact.stdout).unwrap()
     );
 }
+
+/// Every method in `proto::Request`, read from the variants' `rename`
+/// attributes (indented once; fields are indented twice).
+fn protocol_methods() -> Vec<String> {
+    let src = include_str!("../src/proto.rs");
+    let start = src.find("pub enum Request {").unwrap();
+    let end = start + src[start..].find("\n}\n").unwrap();
+    src[start..end]
+        .lines()
+        .filter_map(|l| l.strip_prefix("    #[serde(rename = \""))
+        .map(|s| s[..s.find('"').unwrap()].to_owned())
+        .collect()
+}
+
+/// Parity: nothing an agent can't do. Every protocol method has a CLI
+/// command, and each command exists.
+#[test]
+fn every_protocol_method_has_a_command() {
+    let commands: &[(&str, &[&str])] = &[
+        ("project.init", &["init"]),
+        ("project.info", &["version"]),
+        ("part.create", &["part", "create"]),
+        ("part.delete", &["part", "delete"]),
+        ("part.list", &["part", "list"]),
+        ("feature.add", &["feature", "add"]),
+        ("feature.edit", &["feature", "edit"]),
+        ("feature.delete", &["feature", "delete"]),
+        ("feature.move", &["feature", "move"]),
+        ("feature.list", &["feature", "list"]),
+        ("feature.show", &["feature", "show"]),
+        ("rebuild", &["rebuild"]),
+        ("inspect", &["inspect"]),
+        ("check_format", &["check-format"]),
+        ("daemon.status", &["daemon", "status"]),
+        ("daemon.shutdown", &["daemon", "stop"]),
+        ("session.hello", &["participants"]),
+        ("participant.list", &["participants"]),
+        ("subscribe", &["watch"]),
+        ("selection.get", &["selection"]),
+        ("selection.set", &["select"]),
+        ("camera.get", &["camera"]),
+        ("camera.set", &["camera"]),
+        ("highlight.set", &["highlight"]),
+        ("highlight.clear", &["highlight"]),
+        ("activity.set", &["status"]),
+    ];
+    let methods = protocol_methods();
+    assert!(methods.len() >= 26, "{methods:?}");
+    for m in methods {
+        let Some((_, args)) = commands.iter().find(|(name, _)| *name == m) else {
+            panic!("protocol method {m} has no CLI command");
+        };
+        let out = Command::cargo_bin("ryucad")
+            .unwrap()
+            .args(*args)
+            .arg("--help")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "ryucad {args:?} --help");
+    }
+}
