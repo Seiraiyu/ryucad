@@ -942,9 +942,9 @@ pub(crate) mod tests {
         let f = |n: &str| format!("parts/p/features/{n}.json");
         let index = "parts/p/part.json".to_owned();
         let sphere = fs::read_to_string(r.join(f("a"))).unwrap();
-        // An orphan, a listed feature gone, a sync copy, a bad name, a
-        // case collision, an unknown file, a non-canonical file, invalid
-        // JSON, conflict markers, an invalid document, a newer format.
+        // An orphan, a listed feature gone, a sync copy, a bad name, an
+        // unknown file, a non-canonical file, invalid JSON, conflict
+        // markers, an invalid document, a newer format.
         w(r, &f("c"), &sphere);
         fs::remove_file(r.join(f("b"))).unwrap();
         w(r, "parts/p/features/a (1).json", &sphere);
@@ -959,16 +959,8 @@ pub(crate) mod tests {
             &f("i"),
             &sphere.replace("\"format\": 1", "\"format\": 9"),
         );
-        w(r, "parts/Q/part.json", "{}");
-        w(
-            r,
-            "parts/q/part.json",
-            r#"{"features":[],"format":1,"kind":"ryucad.part"}"#,
-        );
         let got = codes(r);
         let want: Vec<(&str, Vec<String>)> = vec![
-            ("case_collision", vec!["parts/Q".into(), "parts/q".into()]),
-            // Byte order: upper case first.
             (
                 "invalid_file_name",
                 vec!["parts/p/features/Hole.json".into()],
@@ -990,13 +982,35 @@ pub(crate) mod tests {
             ("orphan_feature", vec![f("g"), index.clone()]),
             ("orphan_feature", vec![f("h"), index.clone()]),
             ("orphan_feature", vec![f("i"), index.clone()]),
-            // Written by hand above, so not canonical.
-            ("non_canonical", vec!["parts/q/part.json".into()]),
         ];
         assert_eq!(got, want);
         let rep = report(r).unwrap();
         assert_eq!(rep["healthy"], false);
         assert!(rep["errors"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn names_that_differ_only_in_case_collide() {
+        let dir = healthy();
+        let r = dir.path();
+        w(r, "parts/Q/part.json", "{}");
+        if r.join("parts/q").exists() {
+            // A case-insensitive file system (macOS and Windows by
+            // default) can't hold both names, which is the point.
+            return;
+        }
+        w(
+            r,
+            "parts/q/part.json",
+            r#"{"features":[],"format":1,"kind":"ryucad.part"}"#,
+        );
+        let want: Vec<(&str, Vec<String>)> = vec![
+            // Byte order: upper case first.
+            ("case_collision", vec!["parts/Q".into(), "parts/q".into()]),
+            // Written by hand above, so not canonical.
+            ("non_canonical", vec!["parts/q/part.json".into()]),
+        ];
+        assert_eq!(codes(r), want);
     }
 
     #[test]
