@@ -99,6 +99,12 @@ impl App {
                 egui::ScrollArea::vertical()
                     .show(ui, |ui| panels::tree(ui, &mut self.ws, &mut self.view));
             });
+        egui::Panel::right("properties")
+            .resizable(true)
+            .default_size(280.0)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| panels::properties(ui, &mut self.ws));
+            });
         egui::CentralPanel::no_frame().show(ui, |ui| self.view.show(ui, &mut self.ws, gpu));
     }
 }

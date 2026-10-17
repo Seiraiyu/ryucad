@@ -66,6 +66,7 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     }
     if let Some(c) = choose {
         view.chosen = c;
+        ws.open_form(view.chosen.clone());
         if let Some(k) = view.chosen.clone() {
             view.fit(ws, Some(&k));
         }
@@ -154,5 +155,119 @@ pub fn status(ui: &mut egui::Ui, ws: &Workspace) {
             ui.separator();
             ui.colored_label(ui.visuals().error_fg_color, &e.message);
         }
+    });
+}
+
+fn field_row(ui: &mut egui::Ui, f: &mut crate::core::edit::Field, label: &str) {
+    ui.label(label);
+    let edit = egui::TextEdit::singleline(&mut f.text).desired_width(110.0);
+    let r = ui.add(edit);
+    if f.dirty() {
+        r.on_hover_text(format!("was {}", f.read));
+    }
+    ui.end_row();
+}
+
+/// The chosen feature's parameters and placement, edited in place. Apply
+/// sends `feature.edit` against the revision the form was read at.
+pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
+    let Some(form) = &mut ws.form else {
+        ui.weak("Choose a feature in the tree to see and edit it");
+        return;
+    };
+    ui.heading(&form.feature);
+    ui.label(format!("{} in part {}", form.ty, form.part));
+    if !form.changed.is_empty() {
+        let frame =
+            egui::Frame::group(ui.style()).fill(ui.visuals().warn_fg_color.gamma_multiply(0.15));
+        frame.show(ui, |ui| {
+            ui.label("Someone changed this feature while you edited it. It now reads:");
+            for c in &form.changed {
+                ui.label(format!("{}: {} (you typed {})", c.name, c.theirs, c.yours));
+            }
+            if ui.button("OK").clicked() {
+                form.changed.clear();
+            }
+        });
+    }
+    ui.separator();
+    egui::Grid::new("params").num_columns(2).show(ui, |ui| {
+        for f in &mut form.params {
+            let name = f.name.clone();
+            field_row(ui, f, &name);
+        }
+    });
+    ui.collapsing("Placement", |ui| {
+        egui::Grid::new("placement").num_columns(2).show(ui, |ui| {
+            for (axis, fields) in [
+                ("origin", &mut form.origin),
+                ("z axis", &mut form.z),
+                ("x axis", &mut form.x),
+            ] {
+                for (k, f) in ["x", "y", "z"].iter().zip(fields.iter_mut()) {
+                    field_row(ui, f, &format!("{axis} {k}"));
+                }
+            }
+        });
+    });
+    if let Some(e) = &form.error {
+        ui.colored_label(ui.visuals().error_fg_color, &e.message);
+    }
+    let (dirty, saving) = (form.dirty(), form.saving);
+    let mut save = false;
+    ui.horizontal(|ui| {
+        save = ui
+            .add_enabled(dirty && !saving, egui::Button::new("Apply"))
+            .clicked();
+        if ui
+            .add_enabled(dirty && !saving, egui::Button::new("Revert"))
+            .clicked()
+        {
+            for f in form
+                .params
+                .iter_mut()
+                .chain(&mut form.origin)
+                .chain(&mut form.z)
+                .chain(&mut form.x)
+            {
+                f.text.clone_from(&f.read);
+            }
+            form.error = None;
+        }
+        if saving {
+            ui.spinner();
+        }
+    });
+    let key = (form.part.clone(), form.feature.clone());
+    if save {
+        ws.save_form();
+    }
+    names(ui, ws, &key);
+}
+
+/// The stable names of a feature's faces, edges and vertices, to copy.
+fn names(ui: &mut egui::Ui, ws: &Workspace, key: &(String, String)) {
+    let Some(mesh) = ws.model.meshes.get(key).and_then(|m| m.mesh.as_ref().ok()) else {
+        return;
+    };
+    ui.collapsing("Stable names", |ui| {
+        let reference = |n: &[u8; 16]| format!("{}/{}/{}", key.0, key.1, ryucad::mesh::name_hex(n));
+        let mut rows: Vec<(&str, String)> = Vec::new();
+        rows.extend(mesh.faces.iter().map(|f| ("face", reference(&f.name))));
+        rows.extend(mesh.edges.iter().map(|(n, _)| ("edge", reference(n))));
+        rows.extend(mesh.vertices.iter().map(|(n, _)| ("vertex", reference(n))));
+        egui::ScrollArea::vertical()
+            .max_height(240.0)
+            .show(ui, |ui| {
+                for (kind, r) in rows {
+                    ui.horizontal(|ui| {
+                        ui.label(kind);
+                        ui.monospace(&r[r.len() - 32..]);
+                        if ui.small_button("Copy").clicked() {
+                            ui.ctx().copy_text(r.clone());
+                        }
+                    });
+                }
+            });
     });
 }

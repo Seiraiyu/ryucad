@@ -1,6 +1,7 @@
 //! An open project: the link to its daemon and what the window knows, kept
 //! up to date from answers and notifications.
 
+use crate::core::edit::Form;
 use crate::core::link::{Event, Link, Wake};
 use crate::core::model::{BodyKey, Model, Part};
 use crate::core::people::{People, Person};
@@ -23,6 +24,10 @@ enum Pending {
     Rebuild(String),
     Mesh(String),
     People,
+    /// A feature read for the form; after a conflict, with the form as it
+    /// was when the save failed.
+    Form(String, Option<Box<Form>>),
+    Save,
     /// Only a failure matters.
     Quiet,
 }
@@ -67,6 +72,8 @@ pub struct Workspace {
     pub people: People,
     /// The participant whose camera this window follows.
     pub following: Option<String>,
+    /// The property panel's form, for the feature chosen in the tree.
+    pub form: Option<Form>,
     /// Requests of the window's that failed, newest last.
     pub errors: Vec<Error>,
     /// The daemon is gone: the window shows its last state, greyed, and
@@ -100,6 +107,7 @@ impl Workspace {
             model: Model::default(),
             people,
             following: None,
+            form: None,
             camera_due: None,
             camera_sent: None,
             errors: Vec::new(),
@@ -156,6 +164,33 @@ impl Workspace {
             self.people.generation += 1;
         }
         self.send(Request::SelectionSet { entities, mode }, Pending::Quiet);
+    }
+
+    /// Opens the form for a feature (or closes it, with `None`).
+    pub fn open_form(&mut self, feature: Option<(String, String)>) {
+        self.form = None;
+        if let Some((part, id)) = feature {
+            self.send(
+                Request::FeatureShow {
+                    part: part.clone(),
+                    id,
+                },
+                Pending::Form(part, None),
+            );
+        }
+    }
+
+    /// Saves what was typed into the form.
+    pub fn save_form(&mut self) {
+        let Some(form) = &mut self.form else { return };
+        match form.request() {
+            Err(e) => form.error = Some(e),
+            Ok(req) => {
+                form.saving = true;
+                form.error = None;
+                self.send(req, Pending::Save);
+            }
+        }
     }
 
     /// Shares this window's camera with the session, at most every
@@ -366,6 +401,47 @@ impl Workspace {
             }
             (Pending::People, Ok(a)) => self.people.reset(&a.result["participants"]),
             (Pending::Quiet, Ok(_)) => {}
+            (Pending::Form(part, before), Ok(a)) => {
+                // Answers come in order, so the last form asked for wins;
+                // a reload after a conflict only if that form is still open.
+                let wanted = match (&before, &self.form) {
+                    (Some(b), Some(f)) => b.feature == f.feature && b.part == f.part,
+                    (None, _) => true,
+                    (Some(_), None) => false,
+                };
+                if wanted {
+                    self.form = Some(match before {
+                        Some(b) => b.reloaded(&a.result),
+                        None => Form::from_show(&part, &a.result),
+                    });
+                }
+            }
+            (Pending::Save, Ok(a)) => {
+                if let Some(f) = &self.form {
+                    let mut v = a.result["feature"].clone();
+                    v["revision"] = a.result["revision"].clone();
+                    self.form = Some(Form::from_show(&f.part, &v));
+                }
+            }
+            (Pending::Save, Err(e)) => {
+                if let Some(f) = &mut self.form {
+                    f.saving = false;
+                    if e.code == Code::Conflict {
+                        // Read it again and show what changed underneath.
+                        let (part, id) = (f.part.clone(), f.feature.clone());
+                        let before = Box::new(f.clone());
+                        self.send(
+                            Request::FeatureShow {
+                                part: part.clone(),
+                                id,
+                            },
+                            Pending::Form(part, Some(before)),
+                        );
+                    } else {
+                        f.error = Some(e);
+                    }
+                }
+            }
             (Pending::Mesh(part), Ok(a)) => match a.binary.as_deref().map(ryucad::mesh::decode) {
                 Some(Ok(bodies)) => {
                     for b in bodies {
@@ -422,6 +498,22 @@ impl Workspace {
     }
 
     fn part_changed(&mut self, report: &Value) {
+        // A form nobody is typing in follows the files.
+        if let Some(f) = &self.form
+            && report["part"] == f.part.as_str()
+            && report["revision"] != f.revision.as_str()
+            && !f.dirty()
+            && !f.saving
+        {
+            let (part, id) = (f.part.clone(), f.feature.clone());
+            self.send(
+                Request::FeatureShow {
+                    part: part.clone(),
+                    id,
+                },
+                Pending::Form(part, None),
+            );
+        }
         let wanted = self.model.apply_part(report);
         self.fetch(wanted);
     }

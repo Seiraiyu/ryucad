@@ -167,3 +167,26 @@ fn the_window_follows_an_agent_until_the_human_navigates() {
     assert_eq!(h.state().ws.following, None);
     assert_ne!(h.state().view.nav.camera, agent);
 }
+
+#[test]
+fn a_parameter_is_edited_in_the_property_panel() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("boss (cylinder)").click();
+    frames(&mut h, |a| a.ws.form.is_some());
+    h.step();
+    // The radius field holds the value as written; a person types over it.
+    let field = h.get_all_by_value("3 mm").next().unwrap();
+    field.set_text_value_accesskit("4.5 mm");
+    h.step();
+    h.get_by_label("Apply").click();
+    frames(&mut h, |a| {
+        a.ws.form.as_ref().is_some_and(|f| !f.saving && !f.dirty())
+    });
+    let shown = p.ok(&["feature", "show", "p", "boss"]);
+    assert_eq!(shown["params"]["radius"]["value"], "4.5 mm");
+}

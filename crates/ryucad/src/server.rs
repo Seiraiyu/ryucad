@@ -207,8 +207,11 @@ fn dispatch(
         Request::FeatureList { part } => feature_list(session, &part),
         Request::FeatureShow { part, id } => {
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
-            let f = feature(session.project().part(&part)?, &fid)?;
-            Ok(feature_report(&fid, f))
+            let p = session.project().part(&part)?;
+            let mut v = feature_report(&fid, feature(p, &fid)?);
+            // The revision it was read at: an edit made from it says so.
+            v["revision"] = json!(p.revision);
+            Ok(v)
         }
         Request::DaemonStatus {} | Request::DaemonShutdown {} => Err(Error::new(
             Code::Usage,
@@ -1485,6 +1488,8 @@ pub(crate) mod tests {
         assert_eq!(ids(&list), ["ball", "sphere-1", "cylinder-1"]);
         let show = call(&mut s, "feature.show", json!({"part": "p", "id": "ball"})).unwrap();
         assert_eq!(show["type"], "sphere");
+        let list = call(&mut s, "part.list", json!({})).unwrap();
+        assert_eq!(show["revision"], list["parts"][0]["revision"]);
         // The file on disk is canonical and explicit.
         let text = fs::read_to_string(dir.path().join("parts/p/features/cylinder-1.json")).unwrap();
         assert!(crate::doc::canonical::is_canonical(&text));
