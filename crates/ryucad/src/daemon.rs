@@ -6,6 +6,7 @@ use crate::doc::project::MANIFEST;
 use crate::endpoint::Endpoint;
 use crate::error::{Code, Error, Result};
 use crate::live::Live;
+use crate::notify::{self, Subscriber};
 use crate::proto::{Request, VersionInfo, parse_rpc_request, rpc_response};
 use crate::server::handle_safely;
 use crate::session::Session;
@@ -83,7 +84,13 @@ pub fn run(root: &Path, idle: Duration) -> Result<()> {
             }
             // Hold the lock so no request is mid-flight.
             let mut core = lock(&watcher.core);
+            let before = core.live.snapshot();
             core.live.expire(Instant::now());
+            core.live.announce(&before);
+            // Someone watching keeps the daemon alive.
+            if core.live.hub.is_watched() {
+                *lock(&watcher.last) = Instant::now();
+            }
             if lock(&watcher.last).elapsed() >= watcher.idle {
                 stop(&watcher, "idle");
             }
@@ -91,13 +98,23 @@ pub fn run(root: &Path, idle: Duration) -> Result<()> {
     });
     for conn in listener.incoming() {
         match conn {
-            Ok(conn) => {
+            Ok(stream) => {
                 let state = Arc::clone(&state);
+                let conn = Arc::new(Conn {
+                    stream,
+                    write: Mutex::new(()),
+                });
                 std::thread::spawn(move || {
-                    let mut me = None;
-                    serve(&conn, &state, &mut me);
+                    let (mut me, mut sub) = (None, None);
+                    serve(&conn, &state, &mut me, &mut sub);
+                    if let Some(s) = sub {
+                        s.close();
+                    }
                     if let Some(id) = me {
-                        lock(&state.core).live.goodbye(&id);
+                        let mut core = lock(&state.core);
+                        let before = core.live.snapshot();
+                        core.live.goodbye(&id);
+                        core.live.announce(&before);
                     }
                 });
             }
@@ -175,11 +192,33 @@ fn status(state: &State) -> Value {
     })
 }
 
+/// A client connection. Answers and notifications are written whole under
+/// `write`, so lines from the two never interleave.
+struct Conn {
+    stream: Stream,
+    write: Mutex<()>,
+}
+
+impl Conn {
+    fn send(&self, line: &str) -> std::io::Result<()> {
+        let _g = lock(&self.write);
+        let mut w = &self.stream;
+        w.write_all(line.as_bytes())?;
+        w.write_all(b"\n")?;
+        w.flush()
+    }
+}
+
 /// Answers requests on one connection until the client hangs up. `me` is
-/// the participant the connection said hello as.
-fn serve(conn: &Stream, state: &State, me: &mut Option<String>) {
-    let mut reader = BufReader::new(conn);
-    let mut writer = conn;
+/// the participant the connection said hello as, and `sub` its
+/// subscription.
+fn serve(
+    conn: &Arc<Conn>,
+    state: &State,
+    me: &mut Option<String>,
+    sub: &mut Option<Arc<Subscriber>>,
+) {
+    let mut reader = BufReader::new(&conn.stream);
     let mut line = String::new();
     loop {
         line.clear();
@@ -190,11 +229,18 @@ fn serve(conn: &Stream, state: &State, me: &mut Option<String>) {
         *lock(&state.last) = Instant::now();
         let (id, req) = parse_rpc_request(line.trim_end());
         let mut shutdown = false;
+        let mut subscribed = None;
         let result = match req {
             Ok(Request::DaemonStatus {}) => Ok(status(state)),
             Ok(Request::DaemonShutdown {}) => {
                 shutdown = true;
                 Ok(json!({"stopping": true, "pid": std::process::id()}))
+            }
+            Ok(Request::Subscribe { topics }) => {
+                subscribe(state, me.as_deref(), sub.is_some(), &topics).map(|(s, v)| {
+                    subscribed = Some(s);
+                    v
+                })
             }
             Ok(req) => {
                 let hello = matches!(req, Request::SessionHello { .. });
@@ -205,7 +251,9 @@ fn serve(conn: &Stream, state: &State, me: &mut Option<String>) {
                     let id = v["participant"].as_str().map(str::to_owned);
                     // Saying hello again moves the connection.
                     if let Some(old) = std::mem::replace(me, id) {
+                        let before = live.snapshot();
                         live.goodbye(&old);
+                        live.announce(&before);
                     }
                 }
                 *lock(&state.last) = Instant::now();
@@ -213,14 +261,23 @@ fn serve(conn: &Stream, state: &State, me: &mut Option<String>) {
             }
             Err(e) => Err(e),
         };
-        let mut out = rpc_response(id, &result);
-        out.push('\n');
-        if writer
-            .write_all(out.as_bytes())
-            .and_then(|()| writer.flush())
-            .is_err()
-        {
+        if conn.send(&rpc_response(id, &result)).is_err() {
+            if let Some(s) = subscribed {
+                s.close();
+            }
             return;
+        }
+        // Notifications start only after the answer is out.
+        if let Some(s) = subscribed {
+            let (c, pump) = (Arc::clone(conn), Arc::clone(&s));
+            std::thread::spawn(move || {
+                while let Some(line) = pump.next() {
+                    if c.send(&line).is_err() {
+                        pump.close();
+                    }
+                }
+            });
+            *sub = Some(s);
         }
         if shutdown {
             // Wait for any request in progress, then go.
@@ -228,4 +285,37 @@ fn serve(conn: &Stream, state: &State, me: &mut Option<String>) {
             stop(state, "asked to shut down");
         }
     }
+}
+
+/// Opens a subscription for the connection's participant.
+fn subscribe(
+    state: &State,
+    me: Option<&str>,
+    already: bool,
+    names: &[String],
+) -> Result<(Arc<Subscriber>, Value)> {
+    let Some(me) = me else {
+        return Err(Error::new(
+            Code::Usage,
+            "say session.hello on this connection before subscribe",
+        ));
+    };
+    if already {
+        return Err(Error::new(
+            Code::Usage,
+            "this connection is already subscribed",
+        ));
+    }
+    let topics = notify::topics(names)?;
+    let mut core = lock(&state.core);
+    let sub = core.live.hub.subscribe(me, &topics);
+    let shown = if topics.is_empty() {
+        notify::Topic::ALL.to_vec()
+    } else {
+        topics
+    };
+    Ok((
+        sub,
+        json!({"subscribed": shown, "session": core.live.list()}),
+    ))
 }

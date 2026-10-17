@@ -4,6 +4,7 @@
 
 use crate::entity::EntityRef;
 use crate::error::{Code, Error, Result};
+use crate::notify::{Hub, Topic};
 use crate::view::Camera;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -93,12 +94,17 @@ impl Participant {
     }
 }
 
-/// Everything the daemon knows about who is attached.
+/// Everything the daemon knows about who is attached, and the
+/// subscriptions it tells about changes.
 #[derive(Debug, Default)]
 pub struct Live {
     participants: BTreeMap<String, Participant>,
     next: u32,
+    pub hub: Hub,
 }
+
+/// Every participant's state, to compare before and after a change.
+pub type Snapshot = BTreeMap<String, Value>;
 
 impl Live {
     pub fn new() -> Live {
@@ -380,6 +386,35 @@ impl Live {
         self.participants.values()
     }
 
+    pub fn snapshot(&self) -> Snapshot {
+        self.participants
+            .iter()
+            .map(|(id, p)| (id.clone(), p.to_json()))
+            .collect()
+    }
+
+    /// Notifies subscribers of every participant that changed, arrived or
+    /// left since `before`.
+    pub fn announce(&mut self, before: &Snapshot) {
+        let after = self.snapshot();
+        for (id, v) in &after {
+            if before.get(id) != Some(v) {
+                self.hub.send(
+                    Topic::Participants,
+                    "participant.changed",
+                    &json!({ "participant": v }),
+                );
+            }
+        }
+        for id in before.keys().filter(|id| !after.contains_key(*id)) {
+            self.hub.send(
+                Topic::Participants,
+                "participant.changed",
+                &json!({"participant": {"id": id}, "left": true}),
+            );
+        }
+    }
+
     pub fn list(&self) -> Value {
         json!({"participants": self.participants().map(Participant::to_json).collect::<Vec<_>>()})
     }
@@ -510,6 +545,25 @@ mod tests {
             Code::InvalidParam
         );
         assert!(live.clear_highlights(&a, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn changes_are_announced() {
+        let mut live = Live::new();
+        let sub = live.hub.subscribe("p-x", &[Topic::Participants]);
+        let before = live.snapshot();
+        let h = live.hello(Kind::Human, Some("Dana"), None).unwrap();
+        live.announce(&before);
+        let v: Value = serde_json::from_str(&sub.next().unwrap()).unwrap();
+        assert_eq!(v["params"]["participant"]["name"], "Dana");
+        // Nothing visible changed: nothing is sent.
+        let before = live.snapshot();
+        live.touch(&h);
+        live.announce(&before);
+        live.goodbye(&h);
+        live.announce(&before);
+        let v: Value = serde_json::from_str(&sub.next().unwrap()).unwrap();
+        assert_eq!(v["params"], json!({"participant": {"id": h}, "left": true}));
     }
 
     #[test]

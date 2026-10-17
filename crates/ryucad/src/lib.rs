@@ -9,6 +9,7 @@ pub mod entity;
 pub mod error;
 pub mod inspect;
 pub mod live;
+pub mod notify;
 pub mod proto;
 pub mod rebuild;
 pub mod server;

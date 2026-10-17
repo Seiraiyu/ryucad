@@ -157,6 +157,13 @@ pub enum Request {
     },
     #[serde(rename = "participant.list")]
     ParticipantList {},
+    /// Turns the connection into a subscription: after the answer, it
+    /// receives notifications for `topics` (all when empty).
+    #[serde(rename = "subscribe")]
+    Subscribe {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        topics: Vec<String>,
+    },
     /// A participant's selection: `participant`, or the one human.
     #[serde(rename = "selection.get")]
     SelectionGet {

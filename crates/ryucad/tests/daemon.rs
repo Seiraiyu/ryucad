@@ -398,3 +398,115 @@ fn camera_highlight_and_status_through_the_cli() {
     assert_eq!(r["error"]["code"], "usage");
     cli(&f, &["daemon", "stop"]);
 }
+
+/// A human attached and subscribed: notifications arrive on `rx`.
+struct Watch {
+    me: String,
+    rx: std::sync::mpsc::Receiver<Value>,
+}
+
+impl Watch {
+    fn new(f: &Fixture, topics: &[&str]) -> Watch {
+        let mut reader = BufReader::new(f.connect().unwrap());
+        let mut call = |req: &Request| {
+            let mut w = reader.get_ref();
+            w.write_all(format!("{}\n", rpc_request(1, req)).as_bytes())
+                .unwrap();
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            parse_rpc_response(&line).unwrap()
+        };
+        let hello = Request::SessionHello {
+            kind: ryucad::live::Kind::Human,
+            name: Some("watcher".into()),
+            participant: None,
+        };
+        let me = call(&hello)["participant"].as_str().unwrap().to_owned();
+        let r = call(&Request::Subscribe {
+            topics: topics.iter().map(|t| t.to_string()).collect(),
+        });
+        let ids = r["session"]["participants"].as_array().unwrap();
+        assert!(ids.iter().any(|p| p["id"] == me.as_str()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|n| n > 0) {
+                if tx.send(serde_json::from_str(&line).unwrap()).is_err() {
+                    return;
+                }
+                line.clear();
+            }
+        });
+        Watch { me, rx }
+    }
+
+    /// The next notification with `method`, skipping others.
+    fn next(&self, method: &str) -> Value {
+        let t = Instant::now();
+        loop {
+            let left = Duration::from_secs(10).saturating_sub(t.elapsed());
+            let v = self
+                .rx
+                .recv_timeout(left)
+                .unwrap_or_else(|_| panic!("no {method} notification"));
+            assert_eq!(v["jsonrpc"], "2.0");
+            assert!(v.get("id").is_none(), "a notification has no id: {v}");
+            if v["method"] == method {
+                return v["params"].clone();
+            }
+        }
+    }
+}
+
+#[test]
+fn watchers_see_participants_change() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    cli(
+        &f,
+        &[
+            "feature", "add", "p", "sphere", "--id", "s", "--param", "radius=5",
+        ],
+    );
+    let body = cli(&f, &["inspect", "p", "s"])["result"]["bodies"][0].clone();
+    let face = format!("p/s/{}", body["faces"][0]["name"].as_str().unwrap());
+    let w = Watch::new(&f, &["participants"]);
+    cli(&f, &["--as", "fitter", "select", &face]);
+    // The agent arrives, then selects.
+    loop {
+        let p = w.next("participant.changed");
+        if p["participant"]["selection"] == serde_json::json!([face]) {
+            assert_eq!(p["participant"]["name"], "fitter");
+            break;
+        }
+    }
+    // Another human comes and goes.
+    let other = f.connect().unwrap();
+    let hello = Request::SessionHello {
+        kind: ryucad::live::Kind::Human,
+        name: Some("other".into()),
+        participant: None,
+    };
+    let id = ask(&other, &hello).unwrap()["participant"].clone();
+    let p = w.next("participant.changed");
+    assert_eq!(p["participant"]["id"], id);
+    drop(other);
+    let p = w.next("participant.changed");
+    assert_eq!(
+        p,
+        serde_json::json!({"participant": {"id": id}, "left": true})
+    );
+    assert!(!w.me.is_empty());
+    cli(&f, &["daemon", "stop"]);
+}
+
+#[test]
+fn subscribing_needs_a_hello() {
+    let f = fixture();
+    let mut child = f.start(60);
+    let conn = f.connect().unwrap();
+    let e = ask(&conn, &Request::Subscribe { topics: vec![] }).unwrap_err();
+    assert_eq!(e.code, ryucad::error::Code::Usage);
+    ask(&conn, &Request::DaemonShutdown {}).unwrap();
+    assert!(exited(&mut child, Duration::from_secs(10)));
+}

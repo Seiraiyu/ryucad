@@ -49,16 +49,18 @@ pub fn handle_live(
     req: Request,
 ) -> Result<Value> {
     let changed = session.refresh()?;
+    let before = live.as_deref().map(Live::snapshot);
     if let (Some(l), Some(me)) = (live.as_deref_mut(), me) {
         l.touch(me);
     }
     let mutates = req.mutates();
     let result = dispatch(session, live.as_deref_mut(), me, req);
-    // Entities that no longer exist drop out of every selection.
-    if let Some(l) = live
-        && (changed || mutates)
-    {
-        l.prune(|r| r.resolve(session).is_ok());
+    if let (Some(l), Some(before)) = (live, before) {
+        // Entities that no longer exist drop out of every selection.
+        if changed || mutates {
+            l.prune(|r| r.resolve(session).is_ok());
+        }
+        l.announce(&before);
     }
     result
 }
@@ -155,6 +157,11 @@ fn dispatch(
         Request::ParticipantList {} => {
             Ok(live.map_or_else(|| json!({"participants": []}), |l| l.list()))
         }
+        // A daemon's connection answers this itself: it needs the socket.
+        Request::Subscribe { .. } => match live {
+            None => Err(live::no_live_session("subscribe")),
+            Some(_) => Err(Error::new(Code::Usage, "subscribe needs a connection")),
+        },
         Request::SelectionGet { participant } => {
             let target = match &live {
                 Some(l) => l.target(participant.as_deref())?,
