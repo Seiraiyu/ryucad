@@ -1,5 +1,7 @@
-//! The CLI's side of the daemon: connect (starting the daemon if needed),
-//! check that it is this exact binary, and send requests.
+//! The clients' side of the daemon: connect (starting the daemon if
+//! needed), check that it is the same build, and send requests. The CLI
+//! starts the daemon from its own binary; another program (the desktop
+//! app) names the `ryucad` binary to start it from.
 
 use crate::daemon::IDLE_VAR;
 use crate::endpoint::Endpoint;
@@ -9,9 +11,10 @@ use crate::proto::{Answer, Request, VersionInfo, parse_rpc_response, rpc_request
 use interprocess::local_socket::{RecvHalf, SendHalf, Stream, prelude::*};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 /// How long the CLI waits for a daemon it started.
@@ -71,31 +74,147 @@ impl Connection {
     }
 }
 
+/// A subscribed connection. Dropping it ends the subscription and closes
+/// the connection.
+pub struct Subscription {
+    writer: Option<SendHalf>,
+    closing: Arc<AtomicBool>,
+}
+
 impl Connection {
-    /// Hands the connection's incoming lines to a thread, which parses
-    /// them onto the returned channel; the send half is kept so the
-    /// connection stays open.
-    fn into_lines(self) -> (mpsc::Receiver<Value>, SendHalf) {
-        let (tx, rx) = mpsc::channel();
+    /// Subscribes the connection to `topics` (all when empty) and hands
+    /// every notification to `note`, on a thread of the subscription's
+    /// own; `note(None)` means the daemon closed the connection. Returns
+    /// `subscribe`'s answer.
+    pub fn subscribe(
+        mut self,
+        topics: &[String],
+        mut note: impl FnMut(Option<Value>) + Send + 'static,
+    ) -> Result<(Value, Subscription)> {
+        let answer = self
+            .call(&Request::Subscribe {
+                topics: topics.to_vec(),
+            })
+            .map_err(unavailable)??;
+        let closing = Arc::new(AtomicBool::new(false));
+        let done = Arc::clone(&closing);
         let mut reader = self.reader;
         std::thread::spawn(move || {
             let mut line = String::new();
             while reader.read_line(&mut line).is_ok_and(|n| n > 0) {
-                let Ok(v) = serde_json::from_str(&line) else {
-                    return;
+                let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                    break;
                 };
-                if tx.send(v).is_err() {
-                    return;
-                }
                 line.clear();
+                // Only the request a closing subscription sends is answered.
+                if v.get("id").is_some() {
+                    if done.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    continue;
+                }
+                note(Some(v));
+            }
+            if !done.load(Ordering::SeqCst) {
+                note(None);
             }
         });
-        (rx, self.writer)
+        let sub = Subscription {
+            writer: Some(self.writer),
+            closing,
+        };
+        Ok((answer, sub))
+    }
+}
+
+impl Drop for Subscription {
+    /// The reader thread holds the connection open while it waits for a
+    /// line, and local sockets can't be shut down from another thread on
+    /// every platform. So the subscription asks the daemon something: the
+    /// answer wakes the reader, which sees it is closing and lets go.
+    fn drop(&mut self) {
+        self.closing.store(true, Ordering::SeqCst);
+        if let Some(mut w) = self.writer.take() {
+            let line = format!("{}\n", rpc_request(0, &Request::DaemonStatus {}));
+            let _ = w.write_all(line.as_bytes()).and_then(|()| w.flush());
+        }
     }
 }
 
 fn unavailable(why: impl std::fmt::Display) -> Error {
     Error::new(Code::Daemon, format!("daemon unavailable: {why}"))
+}
+
+impl VersionInfo {
+    /// Whether `v` (a `version` object as JSON) is the same build: the same
+    /// ryucad, ryukei, commit and protocol. The target may differ: on Linux
+    /// the app is a glibc build and the CLI a static musl one.
+    pub fn same_build(&self, v: &Value) -> bool {
+        let me = json!(self);
+        ["ryucad", "ryukei", "commit", "protocol"]
+            .iter()
+            .all(|k| v.get(k) == me.get(k))
+    }
+}
+
+/// A program next to this executable, or else on `PATH`: how the app finds
+/// `ryucad`, and `ryucad open` finds the app.
+pub fn find_program(name: &str) -> Option<PathBuf> {
+    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join(&file)));
+    let on_path = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .map(|d| d.join(&file));
+    beside.into_iter().chain(on_path).find(|p| p.is_file())
+}
+
+/// The `ryucad` binary that daemons are started from, and its version.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Daemon {
+    pub exe: PathBuf,
+    pub version: VersionInfo,
+}
+
+impl Daemon {
+    /// This binary: what the CLI uses.
+    pub fn this() -> Result<Daemon> {
+        Ok(Daemon {
+            exe: std::env::current_exe().map_err(unavailable)?,
+            version: VersionInfo::current(),
+        })
+    }
+
+    /// The `ryucad` binary at `exe`, asked for its version.
+    pub fn at(exe: &Path) -> Result<Daemon> {
+        let failed = |why: String| {
+            Error::new(Code::Daemon, format!("can't run {}: {why}", exe.display()))
+                .with("path", exe)
+        };
+        let out = Command::new(exe)
+            .arg("version")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|e| failed(e.to_string()))?;
+        let doc: Value = serde_json::from_slice(&out.stdout)
+            .map_err(|_| failed("it didn't answer `version` with JSON".into()))?;
+        let version = serde_json::from_value(doc["result"].clone())
+            .map_err(|_| failed("it isn't a ryucad of this protocol".into()))?;
+        Ok(Daemon {
+            exe: exe.to_path_buf(),
+            version,
+        })
+    }
+
+    /// A connection to the daemon of the project at `root` (canonical),
+    /// started from this binary if none is running. A daemon of another
+    /// build is replaced.
+    pub fn connect(&self, root: &Path) -> Result<Connection> {
+        ready(root, &Endpoint::for_project(root)?, self)
+    }
 }
 
 /// Sends `req` to the project's daemon, starting one if none is running,
@@ -106,8 +225,7 @@ fn unavailable(why: impl std::fmt::Display) -> Error {
 /// after sending, that answer is a `daemon` error, because the request may
 /// have been applied and must not be repeated.
 pub fn request(root: &Path, req: &Request, name: Option<&str>) -> Result<Result<Answer>> {
-    let endpoint = Endpoint::for_project(root)?;
-    let mut conn = ready(root, &endpoint)?;
+    let mut conn = Daemon::this()?.connect(root)?;
     let hello = Request::SessionHello {
         kind: Kind::Agent,
         name: name.map(str::to_owned),
@@ -134,19 +252,19 @@ pub fn watch(
     count: usize,
     timeout: Duration,
 ) -> Result<Value> {
-    let endpoint = Endpoint::for_project(root)?;
-    let mut conn = ready(root, &endpoint)?;
+    let mut conn = Daemon::this()?.connect(root)?;
     let hello = Request::SessionHello {
         kind: Kind::Agent,
         name: name.map(str::to_owned),
         participant: None,
     };
     conn.call(&hello).map_err(unavailable)??;
-    let sub = Request::Subscribe {
-        topics: topics.to_vec(),
-    };
-    conn.call(&sub).map_err(unavailable)??;
-    let (rx, _keep) = conn.into_lines();
+    let (tx, rx) = mpsc::channel();
+    let (_, _sub) = conn.subscribe(topics, move |v| {
+        if let Some(v) = v {
+            let _ = tx.send(v);
+        }
+    })?;
     let deadline = Instant::now() + timeout;
     let mut got = Vec::new();
     while got.len() < count {
@@ -163,14 +281,14 @@ pub fn watch(
     Ok(json!({"notifications": got, "timed_out": timed_out}))
 }
 
-/// A connection to a daemon running this exact binary.
-fn ready(root: &Path, endpoint: &Endpoint) -> Result<Connection> {
+/// A connection to a daemon of `daemon`'s build.
+fn ready(root: &Path, endpoint: &Endpoint, daemon: &Daemon) -> Result<Connection> {
     let mut restarted = false;
     loop {
         let mut conn = match Connection::connect(endpoint) {
             Ok(c) => c,
             Err(_) => {
-                spawn(root, endpoint)?;
+                spawn(root, endpoint, &daemon.exe)?;
                 wait_for(endpoint)?
             }
         };
@@ -178,7 +296,7 @@ fn ready(root: &Path, endpoint: &Endpoint) -> Result<Connection> {
             .call(&Request::DaemonStatus {})
             .map_err(unavailable)?
             .map_err(unavailable)?;
-        if status["version"] == json!(VersionInfo::current()) {
+        if daemon.version.same_build(&status["version"]) {
             return Ok(conn);
         }
         // Another ryucad's daemon (an upgrade, say): replace it, once.
@@ -214,9 +332,9 @@ fn wait_gone(endpoint: &Endpoint) {
     }
 }
 
-/// Starts `ryucad daemon run` for `root`, detached, logging to the
+/// Starts `<exe> daemon run` for `root`, detached, logging to the
 /// endpoint's log file.
-fn spawn(root: &Path, endpoint: &Endpoint) -> Result<()> {
+fn spawn(root: &Path, endpoint: &Endpoint, exe: &Path) -> Result<()> {
     if std::fs::metadata(&endpoint.log).is_ok_and(|m| m.len() > LOG_LIMIT) {
         let _ = std::fs::rename(&endpoint.log, endpoint.log.with_extension("log.1"));
     }
@@ -225,7 +343,6 @@ fn spawn(root: &Path, endpoint: &Endpoint) -> Result<()> {
         .append(true)
         .open(&endpoint.log)
         .map_err(|e| Error::io(&endpoint.log, &e))?;
-    let exe = std::env::current_exe().map_err(unavailable)?;
     let mut cmd = Command::new(exe);
     cmd.arg("-C").arg(root).args(["daemon", "run"]);
     if let Some(secs) = std::env::var(IDLE_VAR)
@@ -314,4 +431,35 @@ pub fn stop(root: &Path) -> Result<Value> {
 pub fn stop_all() -> Result<Value> {
     let stopped = Endpoint::all()?.iter().filter(|e| stop_endpoint(e)).count();
     Ok(json!({ "stopped": stopped }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_same_build_may_have_another_target() {
+        let me = VersionInfo::current();
+        let mut v = json!(me);
+        assert!(me.same_build(&v));
+        v["target"] = json!("x86_64-unknown-linux-musl");
+        assert!(me.same_build(&v));
+        v["commit"] = json!("0123456789ab");
+        assert!(!me.same_build(&v));
+        assert!(!me.same_build(&json!({"ryucad": "0.0.0"})));
+    }
+
+    #[test]
+    fn programs_are_found_beside_this_one() {
+        let exe = std::env::current_exe().unwrap();
+        let stem = exe.file_stem().unwrap().to_str().unwrap();
+        assert_eq!(find_program(stem), Some(exe));
+        assert_eq!(find_program("no-such-program-ryucad"), None);
+    }
+
+    #[test]
+    fn a_program_that_isnt_ryucad_is_refused() {
+        let e = Daemon::at(Path::new("/no/such/ryucad")).unwrap_err();
+        assert_eq!(e.code, Code::Daemon);
+    }
 }
