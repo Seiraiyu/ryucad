@@ -8,6 +8,7 @@ use crate::core::model::{BodyKey, Model};
 use crate::core::nav::Projector;
 use ryucad::entity::EntityKind;
 use ryucad::mesh::{WireBody, WireMesh, name_hex};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// How close, in pixels, the mouse must be to an edge or vertex.
@@ -39,6 +40,19 @@ struct Body {
 pub struct Picker {
     pub generation: u64,
     bodies: Vec<Body>,
+    /// Every entity reference: its body (an index into `bodies`), its kind
+    /// and its index in the body's mesh.
+    index: HashMap<String, (usize, EntityKind, usize)>,
+}
+
+/// Where an entity is drawn.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Place {
+    /// A face: its body and index among the mesh's faces.
+    Face(BodyKey, usize),
+    /// An edge's polyline.
+    Edge(Vec<[f64; 3]>),
+    Vertex([f64; 3]),
 }
 
 fn mesh(b: &WireBody) -> Option<&WireMesh> {
@@ -126,7 +140,7 @@ struct Near {
 
 impl Picker {
     pub fn new(model: &Model) -> Picker {
-        let bodies = model
+        let bodies: Vec<Body> = model
             .meshes
             .iter()
             .filter_map(|(key, b)| {
@@ -148,10 +162,59 @@ impl Picker {
                 })
             })
             .collect();
+        let mut index = HashMap::new();
+        for (i, b) in bodies.iter().enumerate() {
+            let m = mesh(&b.mesh).expect("only meshed bodies");
+            let named = |n: &[u8; 16]| format!("{}/{}/{}", b.key.0, b.key.1, name_hex(n));
+            for (j, f) in m.faces.iter().enumerate() {
+                index.insert(named(&f.name), (i, EntityKind::Face, j));
+            }
+            for (j, (n, _)) in m.edges.iter().enumerate() {
+                index.insert(named(n), (i, EntityKind::Edge, j));
+            }
+            for (j, (n, _)) in m.vertices.iter().enumerate() {
+                index.insert(named(n), (i, EntityKind::Vertex, j));
+            }
+        }
         Picker {
             generation: model.generation,
             bodies,
+            index,
         }
+    }
+
+    /// Where the entity `reference` is drawn, if it is in the meshes.
+    pub fn place(&self, reference: &str) -> Option<Place> {
+        let (i, kind, j) = *self.index.get(reference)?;
+        let b = &self.bodies[i];
+        let m = mesh(&b.mesh)?;
+        Some(match kind {
+            EntityKind::Face => Place::Face(b.key.clone(), j),
+            EntityKind::Edge => Place::Edge(m.edges[j].1.iter().map(|p| at(m, *p)).collect()),
+            EntityKind::Vertex => Place::Vertex(at(m, m.vertices[j].1)),
+        })
+    }
+
+    /// The kind of entity `reference` is, if it is in the meshes.
+    pub fn kind(&self, reference: &str) -> Option<EntityKind> {
+        self.index.get(reference).map(|e| e.1)
+    }
+
+    /// The faces of a body, by index: to paint it whole.
+    pub fn faces(&self, key: &BodyKey) -> usize {
+        self.bodies
+            .iter()
+            .find(|b| &b.key == key)
+            .and_then(|b| mesh(&b.mesh))
+            .map_or(0, |m| m.faces.len())
+    }
+
+    /// The box around one body.
+    pub fn body_bounds(&self, key: &BodyKey) -> Option<([f64; 3], [f64; 3])> {
+        self.bodies
+            .iter()
+            .find(|b| &b.key == key)
+            .map(|b| (b.lo, b.hi))
     }
 
     /// The box around every body, if there is any.
@@ -366,6 +429,27 @@ mod tests {
         );
         // Off the model, nothing.
         assert_eq!(pick([2.0, 2.0, 0.0], [0.0, 0.0]), None);
+        // Every entity can be found by reference.
+        let key = ("p".to_owned(), "f".to_owned());
+        assert_eq!(
+            picker.place(&format!("p/f/{}", hex(1))),
+            Some(Place::Face(key.clone(), 0))
+        );
+        assert_eq!(
+            picker.place(&format!("p/f/{}", hex(11))),
+            Some(Place::Edge(vec![[1.0, 0.0, 0.0], [1.0, 1.0, 0.0]]))
+        );
+        assert_eq!(
+            picker.place(&format!("p/f/{}", hex(23))),
+            Some(Place::Vertex([0.0, 1.0, 0.0]))
+        );
+        assert_eq!(
+            picker.kind(&format!("p/f/{}", hex(23))),
+            Some(EntityKind::Vertex)
+        );
+        assert_eq!(picker.place("p/f/00"), None);
+        assert_eq!(picker.faces(&key), 1);
+        assert_eq!(picker.body_bounds(&key), Some(([0.0; 3], [1.0, 1.0, 0.0])));
     }
 
     #[test]

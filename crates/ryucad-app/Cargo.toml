@@ -14,4 +14,5 @@ ryucad = { path = "../ryucad" }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [dev-dependencies]
+egui_kittest = { version = "0.37", features = ["eframe", "snapshot", "wgpu"] }
 tempfile = "3"
