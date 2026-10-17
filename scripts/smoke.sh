@@ -1,6 +1,8 @@
 #!/bin/sh
 # Drives a built ryucad binary through a short agent session: every
-# primitive, a rebuild, inspection, and the daemon started and stopped.
+# primitive, a rebuild, inspection, the live session (participants, camera,
+# status, watch), settings, a mesh, a render, undo, doctor and history, and
+# the daemon started and stopped.
 #
 #   scripts/smoke.sh path/to/ryucad
 set -eu
@@ -10,7 +12,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/project"
 cd "$work/project"
-export RYUCAD_RUNTIME_DIR="$work/run" RYUCAD_IDLE_TIMEOUT=60
+export RYUCAD_RUNTIME_DIR="$work/run" RYUCAD_IDLE_TIMEOUT=60 RYUCAD_CONFIG_DIR="$work/config"
 
 # run ARGS...: the command must print {"ok":true,...}.
 run() {
@@ -37,6 +39,23 @@ run feature add smoke torus --param major_radius=20 --param minor_radius=3 --x 0
 run rebuild
 run inspect smoke torus-1
 run check-format
+run participants
+run camera --view iso
+run status "smoke testing"
+run config set display.quality coarse
+run config get display.quality
+case "$out" in *'"value":"coarse"'*) ;; *) echo "FAIL the preference didn't stick" && exit 1 ;; esac
+run mesh smoke --out "$work/mesh.bin"
+[ -s "$work/mesh.bin" ] || { echo "FAIL no mesh written" && exit 1; }
+run render --size 320x240 --out "$work/render.png"
+[ "$(head -c 4 "$work/render.png" | tail -c 3)" = "PNG" ] || { echo "FAIL not a PNG" && exit 1; }
+run activity
+run undo
+run redo
+run doctor
+case "$out" in *'"healthy":true'*) ;; *) echo "FAIL the project isn't healthy" && exit 1 ;; esac
+run history
+run watch --topic model --timeout 1
 run daemon status
 case "$out" in *'"running":true'*) ;; *) echo "FAIL no daemon is running" && exit 1 ;; esac
 run daemon stop
