@@ -314,6 +314,33 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         transfer: Option<Transfer>,
     },
+    /// Draws a part (or the whole project) to a PNG, sent as bytes after
+    /// the answer. The view is `camera`, a participant's camera, a standard
+    /// `view`, or iso framing the model.
+    #[serde(rename = "render")]
+    Render {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        camera: Option<CameraArg>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<u32>,
+        /// Entities to point out, drawn as notes.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        highlight: Vec<String>,
+        /// Draw edges and silhouettes (default true).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edges: Option<bool>,
+        /// Label highlighted entities (default false).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        labels: Option<bool>,
+    },
     /// Says what the caller is doing; an empty status clears it.
     #[serde(rename = "activity.set")]
     ActivitySet {

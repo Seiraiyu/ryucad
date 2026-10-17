@@ -90,6 +90,37 @@ pub fn answer_live(
             quality,
             transfer: Some(Transfer::Binary),
         } => mesh_binary(session, &part, feature.as_deref(), quality.as_deref()),
+        Request::Render {
+            part,
+            camera,
+            participant,
+            view,
+            width,
+            height,
+            highlight,
+            edges,
+            labels,
+        } => {
+            let target = participant.as_deref().map(|p| (p, live.as_deref()));
+            let shown = match live.as_deref() {
+                Some(l) => l
+                    .participants()
+                    .flat_map(|p| p.highlights.clone())
+                    .collect(),
+                None => Vec::new(),
+            };
+            let ask = RenderAsk {
+                part,
+                camera,
+                view,
+                width: width.unwrap_or(800),
+                height: height.unwrap_or(600),
+                highlight,
+                edges: edges.unwrap_or(true),
+                labels: labels.unwrap_or(false),
+            };
+            render(session, target, shown, ask)
+        }
         req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
     };
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
@@ -298,6 +329,8 @@ fn dispatch(
             quality,
             transfer: _,
         } => mesh_get(session, &part, feature.as_deref(), quality.as_deref()),
+        // A render's answer is bytes: `answer_live` handles it.
+        Request::Render { .. } => Err(Error::new(Code::Internal, "render answers with bytes")),
         Request::HistoryLog { part, limit } => {
             let part = part.as_deref().map(part_id).transpose()?;
             if let Some(p) = &part {
@@ -985,6 +1018,176 @@ fn framed(
             c.map_or(DEFAULT_PROJECTION, |c| c.projection),
         ),
     })
+}
+
+/// A render request, unpacked.
+struct RenderAsk {
+    part: Option<String>,
+    camera: Option<crate::view::CameraArg>,
+    view: Option<String>,
+    width: u32,
+    height: u32,
+    highlight: Vec<String>,
+    edges: bool,
+    labels: bool,
+}
+
+/// Renders the model. `target` names a participant whose camera to use
+/// (with the live session to find it in, if any); `shown` are the
+/// participants' highlights, drawn in their styles.
+fn render(
+    session: &mut Session,
+    target: Option<(&str, Option<&Live>)>,
+    shown: Vec<live::Highlight>,
+    ask: RenderAsk,
+) -> Result<Answer> {
+    use crate::render::{self as r, Geometry, Label, Line, Options, Triangle};
+    r::check_size(ask.width, ask.height)?;
+    let parts: Vec<Id> = match &ask.part {
+        Some(p) => {
+            let id = part_id(p)?;
+            session.project().part(&id)?;
+            vec![id]
+        }
+        None => session.project().parts.keys().cloned().collect(),
+    };
+    // What to colour, and how: every participant's highlights in their
+    // styles, then the request's own as notes.
+    let mut marks: BTreeMap<String, (r::Rgb, Option<String>)> = BTreeMap::new();
+    for h in &shown {
+        let color = match h.style {
+            live::Style::Pending => r::PENDING,
+            live::Style::Changed => r::CHANGED,
+            live::Style::Note => r::NOTE,
+        };
+        for e in &h.entities {
+            marks.insert(e.to_string(), (color, h.label.clone()));
+        }
+    }
+    for e in entity::parse_all(session, &ask.highlight)? {
+        marks.insert(e.to_string(), (r::NOTE, None));
+    }
+    let mut g = Geometry::default();
+    // Renders don't follow anyone's display quality, so they compare
+    // across machines.
+    for part in &parts {
+        for (fid, m) in meshes(session, part, None, mesh::Quality::Normal)? {
+            let Ok(m) = m else { continue };
+            let Ok(mesh) = &m.mesh.mesh else { continue };
+            let base = g.positions.len() as u32;
+            g.positions
+                .extend(mesh.positions.iter().map(|p| [p.x, p.y, p.z]));
+            let key = |name: String| format!("{part}/{fid}/{name}");
+            let mut label = |name: &str, text: &Option<String>, pts: &[u32]| {
+                if !ask.labels || pts.is_empty() {
+                    return;
+                }
+                let n = pts.len() as f64;
+                let mut at = [0.0; 3];
+                for p in pts {
+                    let q = mesh.positions[*p as usize];
+                    at = [at[0] + q.x / n, at[1] + q.y / n, at[2] + q.z / n];
+                }
+                let text = text.clone().unwrap_or_else(|| name[..8].to_owned());
+                g.labels.push(Label { at, text });
+            };
+            for f in &mesh.faces {
+                let name = m.body.face(f.face).expect("live").name.to_string();
+                let mark = marks.get(&key(name.clone()));
+                let color = mark.map_or(r::SURFACE, |(c, _)| *c);
+                for t in &mesh.triangles[f.triangles.start as usize..f.triangles.end as usize] {
+                    let c = t.map(|i| mesh.corners[i as usize]);
+                    g.triangles.push(Triangle {
+                        p: c.map(|c| base + c.position),
+                        n: c.map(|c| {
+                            let n = c.normal.get();
+                            [n.x as f32, n.y as f32, n.z as f32]
+                        }),
+                        color,
+                    });
+                }
+                if let Some((_, text)) = mark {
+                    let pts: Vec<u32> = mesh.corners
+                        [f.corners.start as usize..f.corners.end as usize]
+                        .iter()
+                        .map(|c| c.position)
+                        .collect();
+                    label(&name, text, &pts);
+                }
+            }
+            for e in &mesh.edges {
+                let name = m.body.edge(e.edge).expect("live").name.to_string();
+                let points: Vec<u32> = e.positions.iter().map(|p| base + p).collect();
+                match marks.get(&key(name.clone())) {
+                    Some((color, text)) => {
+                        label(&name, text, &e.positions);
+                        g.lines.push(Line {
+                            points,
+                            color: *color,
+                            width: 3.0,
+                        });
+                    }
+                    None if ask.edges => g.lines.push(Line {
+                        points,
+                        color: r::EDGE,
+                        width: 1.0,
+                    }),
+                    None => {}
+                }
+            }
+            for (i, v) in m.body.vertices().enumerate() {
+                let name = m.body.vertex(v).expect("live").name.to_string();
+                if let Some((color, text)) = marks.get(&key(name.clone())) {
+                    label(&name, text, &[i as u32]);
+                    g.lines.push(Line {
+                        points: vec![base + i as u32],
+                        color: *color,
+                        width: 7.0,
+                    });
+                }
+            }
+        }
+    }
+    let camera = match (ask.camera, target, ask.view.as_deref()) {
+        (Some(c), _, _) => c.resolve(session.project().manifest.default_unit)?,
+        (None, Some((p, live)), _) => {
+            let live =
+                live.ok_or_else(|| live::no_live_session("render with a participant's camera"))?;
+            live.get(p)?.camera.clone().ok_or_else(|| {
+                Error::new(Code::InvalidParam, format!("participant {p} has no camera"))
+                    .with("participant", p)
+            })?
+        }
+        (None, None, view) => {
+            let view = view
+                .map(StandardView::parse)
+                .transpose()?
+                .unwrap_or(StandardView::Iso);
+            let (lo, hi) = bounds(&g.positions).unwrap_or(([-0.5; 3], [0.5; 3]));
+            crate::view::frame(lo, hi, view, DEFAULT_PROJECTION)
+        }
+    };
+    let options = Options {
+        silhouettes: ask.edges,
+        triad: true,
+    };
+    let img = r::render(&g, &camera, ask.width, ask.height, options)?;
+    let result =
+        json!({"part": ask.part, "width": ask.width, "height": ask.height, "camera": camera});
+    Ok(Answer::bytes(result, "image/png", img.png()))
+}
+
+/// The box around some points.
+fn bounds(points: &[[f64; 3]]) -> Option<([f64; 3], [f64; 3])> {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for p in points {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    (!points.is_empty()).then_some((lo, hi))
 }
 
 /// The part, feature and quality a mesh request names.

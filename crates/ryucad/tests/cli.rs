@@ -337,6 +337,7 @@ fn every_protocol_method_has_a_command() {
         ("undo", &["undo"]),
         ("history.log", &["history"]),
         ("mesh.get", &["mesh"]),
+        ("render", &["render"]),
         ("config.get", &["config", "get"]),
         ("config.set", &["config", "set"]),
         ("redo", &["redo"]),
@@ -449,4 +450,80 @@ fn meshes_are_the_same_both_ways() {
     assert_eq!(wire[1].feature, "b");
     let tris = wire[1].mesh.as_ref().unwrap().triangles.len();
     assert_eq!(tris, m["bodies"][1]["triangles"].as_array().unwrap().len());
+}
+
+/// The pixels of a PNG file.
+fn pixels(path: &Path) -> (u32, u32, Vec<u8>) {
+    let dec = png::Decoder::new(std::io::BufReader::new(fs::File::open(path).unwrap()));
+    let mut r = dec.read_info().unwrap();
+    let mut buf = vec![0; r.output_buffer_size().unwrap()];
+    let info = r.next_frame(&mut buf).unwrap();
+    buf.truncate(info.buffer_size());
+    (info.width, info.height, buf)
+}
+
+#[test]
+fn renders_are_the_same_both_ways() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "cylinder",
+        "--id",
+        "c",
+        "--param",
+        "radius=5",
+        "--param",
+        "height=10",
+    ]);
+    let face = {
+        let v = p.ok(&["inspect", "p", "c"]);
+        format!(
+            "p/c/{}",
+            v["bodies"][0]["faces"][0]["name"].as_str().unwrap()
+        )
+    };
+    let r = p.ok(&[
+        "render",
+        "--out",
+        "a.png",
+        "--size",
+        "160x120",
+        "--highlight",
+        &face,
+        "--labels",
+    ]);
+    assert_eq!(r["binary"]["encoding"], "image/png");
+    assert_eq!(
+        (r["width"].as_u64(), r["height"].as_u64()),
+        (Some(160), Some(120))
+    );
+    let a = pixels(&p.direct.join("a.png"));
+    assert_eq!(a, pixels(&p.daemon.join("a.png")));
+    assert_eq!((a.0, a.1), (160, 120));
+    // The highlight shows: there is note-blue in the image.
+    assert!(a.2.chunks(4).any(|px| px[2] > 200 && px[0] < 140));
+    let r = p.ok(&[
+        "render",
+        "p",
+        "--out",
+        "top.png",
+        "--view",
+        "top",
+        "--no-edges",
+    ]);
+    assert_eq!(r["camera"]["up"], serde_json::json!([0.0, 1.0, 0.0]));
+    p.fails(
+        &["render", "--out", "x.png", "--size", "5000x10"],
+        "render_too_large",
+        1,
+    );
+    p.fails(
+        &["render", "--out", "x.png", "--view", "sideways"],
+        "invalid_param",
+        1,
+    );
 }

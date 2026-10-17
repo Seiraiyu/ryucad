@@ -1,5 +1,6 @@
 //! Bit-exact determinism of everything ryucad computes from files. Every CI
-//! platform and CPU level must reproduce `tests/golden/rebuild.txt`. After
+//! platform and CPU level must reproduce `tests/golden/rebuild.txt`:
+//! rebuilt bodies, display meshes, and the pixels of renders. After
 //! a deliberate change, regenerate with
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
@@ -106,6 +107,120 @@ fn rebuild_section(golden: &mut Golden) {
     s.str(&result.hash);
 }
 
+/// A project with one of each primitive, placed apart and tilted.
+fn showcase() -> (tempfile::TempDir, ryucad::session::Session) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap()).unwrap()
+    };
+    call(&mut s, "part.create", serde_json::json!({"part": "show"}));
+    let features = [
+        (
+            "box",
+            serde_json::json!({"x": 10, "y": 20, "z": 30}),
+            [0, 0, 0],
+            [0.0, 0.0, 1.0],
+        ),
+        (
+            "cylinder",
+            serde_json::json!({"radius": 6, "height": 25}),
+            [30, 0, 0],
+            [0.0, 0.3, 1.0],
+        ),
+        (
+            "cone",
+            serde_json::json!({"radius": 8, "height": 20, "top_radius": 3}),
+            [60, 0, 0],
+            [0.2, 0.0, 1.0],
+        ),
+        (
+            "sphere",
+            serde_json::json!({"radius": 9}),
+            [0, 40, 10],
+            [0.0, 0.0, 1.0],
+        ),
+        (
+            "torus",
+            serde_json::json!({"major_radius": 12, "minor_radius": 3}),
+            [40, 40, 5],
+            [1.0, 1.0, 1.0],
+        ),
+    ];
+    for (ty, params, origin, z) in features {
+        call(
+            &mut s,
+            "feature.add",
+            serde_json::json!({"part": "show", "type": ty, "id": ty, "params": params,
+                               "placement": {"origin": origin, "z": z}}),
+        );
+    }
+    (dir, s)
+}
+
+fn display_section(golden: &mut Golden) {
+    let mut s = golden.section("display");
+    use ryucad::mesh::Quality;
+    let mut g = Lcg::new(0x6469_7370);
+    for _ in 0..256 {
+        let d = g.next_f64(1e-9, 1000.0);
+        for q in [Quality::Coarse, Quality::Normal, Quality::Fine] {
+            let p = q.params(d);
+            s.f64(p.chord);
+            s.f64(p.angle);
+        }
+    }
+    let (_dir, mut session) = showcase();
+    let part = Id::parse("show", "part").unwrap();
+    for q in [Quality::Coarse, Quality::Fine] {
+        let meshes = ryucad::server::meshes(&mut session, &part, None, q).unwrap();
+        s.str(&format!("{:x}", md(&ryucad::mesh::encode(&meshes))));
+    }
+}
+
+/// A short digest of bytes.
+fn md(bytes: &[u8]) -> u128 {
+    u128::from_le_bytes(blake3::hash(bytes).as_bytes()[..16].try_into().unwrap())
+}
+
+fn render_section(golden: &mut Golden) {
+    let mut s = golden.section("render");
+    let (dir, mut session) = showcase();
+    let face = {
+        let v = ryucad::server::handle(
+            &mut session,
+            ryucad::proto::Request::from_rpc(
+                "inspect",
+                Some(serde_json::json!({"part": "show", "feature": "torus"})),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        format!(
+            "show/torus/{}",
+            v["bodies"][0]["faces"][0]["name"].as_str().unwrap()
+        )
+    };
+    let views = ["iso", "front", "top", "right"];
+    for (i, view) in views.iter().enumerate() {
+        let params = serde_json::json!({"view": view, "width": 320, "height": 240,
+                                        "highlight": if i == 0 { vec![face.clone()] } else { vec![] },
+                                        "labels": i == 0, "edges": i != 3});
+        let req = ryucad::proto::Request::from_rpc("render", Some(params)).unwrap();
+        let a =
+            ryucad::server::handle_safely(&mut Some(session), None, None, dir.path(), req).unwrap();
+        session = ryucad::session::Session::open(dir.path()).unwrap();
+        let png = a.binary.unwrap();
+        let mut r = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .unwrap();
+        let mut buf = vec![0; r.output_buffer_size().unwrap()];
+        let info = r.next_frame(&mut buf).unwrap();
+        s.str(&format!("{:x}", md(&buf[..info.buffer_size()])));
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -115,5 +230,7 @@ fn determinism() {
     units_section(&mut golden);
     placement_section(&mut golden);
     rebuild_section(&mut golden);
+    display_section(&mut golden);
+    render_section(&mut golden);
     golden.finish();
 }

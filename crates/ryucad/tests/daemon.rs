@@ -645,3 +645,62 @@ fn an_agent_frames_a_face_for_the_human() {
     assert_eq!(r["error"]["code"], "invalid_param");
     cli(&f, &["daemon", "stop"]);
 }
+
+#[test]
+fn render_what_a_participant_sees() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    cli(
+        &f,
+        &[
+            "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+            "--param", "z=10",
+        ],
+    );
+    let body = cli(&f, &["inspect", "p", "b"])["result"]["bodies"][0].clone();
+    let face = format!("p/b/{}", body["faces"][0]["name"].as_str().unwrap());
+    let me = cli(&f, &["camera", "--view", "front"])["result"]["participant"].clone();
+    cli(&f, &["highlight", &face, "--style", "pending"]);
+    let out = f.root.join("seen.png");
+    let r = cli(
+        &f,
+        &[
+            "render",
+            "--of",
+            me.as_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--size",
+            "120x90",
+        ],
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(
+        r["result"]["camera"]["up"],
+        serde_json::json!([0.0, 0.0, 1.0])
+    );
+    let bytes = std::fs::read(&out).unwrap();
+    let mut rd = png::Decoder::new(std::io::Cursor::new(bytes))
+        .read_info()
+        .unwrap();
+    let mut buf = vec![0; rd.output_buffer_size().unwrap()];
+    rd.next_frame(&mut buf).unwrap();
+    // The agent's pending highlight is amber.
+    assert!(
+        buf.chunks(4)
+            .any(|px| px[0] > 200 && px[1] > 120 && px[2] < 110)
+    );
+    let r = cli(
+        &f,
+        &[
+            "--no-daemon",
+            "render",
+            "--of",
+            "p-00000001",
+            "--out",
+            "x.png",
+        ],
+    );
+    assert_eq!(r["error"]["code"], "no_live_session");
+    cli(&f, &["daemon", "stop"]);
+}

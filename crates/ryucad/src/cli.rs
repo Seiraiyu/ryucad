@@ -165,6 +165,47 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
     },
+    /// Draw a part (or the whole project) to a PNG: iso framing the model
+    /// unless a view, a participant's camera or a camera is given.
+    Render {
+        part: Option<String>,
+        /// The PNG to write.
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+        /// front, back, left, right, top, bottom or iso.
+        #[arg(long, conflicts_with_all = ["of", "eye"])]
+        view: Option<String>,
+        /// Use this participant's camera.
+        #[arg(long = "of", value_name = "PARTICIPANT", conflicts_with = "eye")]
+        of: Option<String>,
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, requires_all = ["target", "up"])]
+        eye: Option<[String; 3]>,
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, requires = "eye")]
+        target: Option<[String; 3]>,
+        #[arg(long, value_name = "X,Y,Z", value_parser = vector, requires = "eye")]
+        up: Option<[f64; 3]>,
+        #[arg(
+            long,
+            value_name = "DEGREES",
+            conflicts_with = "ortho",
+            requires = "eye"
+        )]
+        fov: Option<f64>,
+        #[arg(long, value_name = "QUANTITY", requires = "eye")]
+        ortho: Option<String>,
+        /// The image size, WIDTHxHEIGHT.
+        #[arg(long, value_name = "WxH", value_parser = size, default_value = "800x600")]
+        size: (u32, u32),
+        /// Point out an entity.
+        #[arg(long = "highlight", value_name = "REF")]
+        highlight: Vec<String>,
+        /// Label highlighted entities.
+        #[arg(long)]
+        labels: bool,
+        /// Leave out edges and silhouettes.
+        #[arg(long)]
+        no_edges: bool,
+    },
     /// The project's Git commits (or one part's), and what is
     /// uncommitted. Read-only.
     History {
@@ -372,6 +413,37 @@ fn style(s: &str) -> core::result::Result<Style, String> {
     serde_json::from_value(json!(s)).map_err(|_| "use pending, changed or note".to_owned())
 }
 
+fn size(s: &str) -> core::result::Result<(u32, u32), String> {
+    let bad = || "expected WIDTHxHEIGHT, such as 800x600".to_owned();
+    let (w, h) = s.split_once('x').ok_or_else(bad)?;
+    Ok((w.parse().map_err(|_| bad())?, h.parse().map_err(|_| bad())?))
+}
+
+/// A camera from command-line flags, when the eye, target and up are
+/// all given.
+fn camera_arg(
+    eye: &Option<[String; 3]>,
+    target: &Option<[String; 3]>,
+    up: &Option<[f64; 3]>,
+    fov: &Option<f64>,
+    ortho: &Option<String>,
+) -> Option<CameraArg> {
+    let (eye, target, up) = (eye.as_ref()?, target.as_ref()?, (*up)?);
+    Some(CameraArg {
+        eye: eye.clone().map(Value::String),
+        target: target.clone().map(Value::String),
+        up,
+        projection: match ortho {
+            Some(h) => ProjectionArg::Orthographic {
+                height: Value::String(h.clone()),
+            },
+            None => ProjectionArg::Perspective {
+                fov_deg: fov.unwrap_or(45.0),
+            },
+        },
+    })
+}
+
 fn param(s: &str) -> core::result::Result<(String, String), String> {
     s.split_once('=')
         .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
@@ -531,32 +603,45 @@ fn request(cmd: &Command) -> Option<Request> {
             up,
             fov,
             ortho,
-        } => match (eye, target, up) {
+        } => match camera_arg(eye, target, up, fov, ortho) {
             _ if view.is_some() || !fit.is_empty() => Request::CameraSet {
                 camera: None,
                 view: view.clone(),
                 fit: fit.clone(),
             },
-            (Some(eye), Some(target), Some(up)) => Request::CameraSet {
+            Some(camera) => Request::CameraSet {
                 view: None,
                 fit: Vec::new(),
-                camera: Some(CameraArg {
-                    eye: eye.clone().map(Value::String),
-                    target: target.clone().map(Value::String),
-                    up: *up,
-                    projection: match ortho {
-                        Some(h) => ProjectionArg::Orthographic {
-                            height: Value::String(h.clone()),
-                        },
-                        None => ProjectionArg::Perspective {
-                            fov_deg: fov.unwrap_or(45.0),
-                        },
-                    },
-                }),
+                camera: Some(camera),
             },
-            _ => Request::CameraGet {
+            None => Request::CameraGet {
                 participant: of.clone(),
             },
+        },
+        Command::Render {
+            part,
+            out: _,
+            view,
+            of,
+            eye,
+            target,
+            up,
+            fov,
+            ortho,
+            size,
+            highlight,
+            labels,
+            no_edges,
+        } => Request::Render {
+            part: part.clone(),
+            camera: camera_arg(eye, target, up, fov, ortho),
+            participant: of.clone(),
+            view: view.clone(),
+            width: Some(size.0),
+            height: Some(size.1),
+            highlight: highlight.clone(),
+            edges: Some(!no_edges),
+            labels: Some(*labels),
         },
         Command::Highlight {
             entities,
@@ -686,7 +771,7 @@ fn deliver(cmd: &Command, a: Answer) -> Result<Value> {
         return Ok(a.result);
     };
     let out = match cmd {
-        Command::Mesh { out: Some(o), .. } => o,
+        Command::Mesh { out: Some(o), .. } | Command::Render { out: o, .. } => o,
         _ => {
             return Err(Error::new(
                 Code::Internal,
