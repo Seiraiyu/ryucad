@@ -86,6 +86,8 @@ pub struct Workspace {
     pub settings: Settings,
     /// The last doctor report, once asked for.
     pub doctor: Option<Value>,
+    /// Someone asked for this window (`ryucad open`): bring it forward.
+    pub raised: bool,
     /// Requests of the window's that failed, newest last.
     pub errors: Vec<Error>,
     /// The daemon is gone: the window shows its last state, greyed, and
@@ -124,6 +126,7 @@ impl Workspace {
             history: None,
             settings: Settings::default(),
             doctor: None,
+            raised: false,
             camera_due: None,
             camera_sent: None,
             errors: Vec::new(),
@@ -577,6 +580,7 @@ impl Workspace {
                 }
             }
             "activity.appended" => self.activity.appended(params),
+            "app.open" => self.raised = true,
             "participant.changed" => {
                 self.people.changed(params);
                 // Following someone who left ends.

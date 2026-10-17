@@ -195,6 +195,35 @@ impl Picker {
         })
     }
 
+    /// The box around the given entities, those in the meshes.
+    pub fn bounds_of(&self, references: &[String]) -> Option<([f64; 3], [f64; 3])> {
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        let mut grow = |p: [f64; 3]| {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        };
+        for r in references {
+            let Some(&(i, kind, j)) = self.index.get(r) else {
+                continue;
+            };
+            let m = mesh(&self.bodies[i].mesh).expect("only meshed bodies");
+            match kind {
+                EntityKind::Face => {
+                    let f = &m.faces[j];
+                    for c in &m.corners[f.corners.0 as usize..f.corners.1 as usize] {
+                        grow(at(m, c.0));
+                    }
+                }
+                EntityKind::Edge => m.edges[j].1.iter().for_each(|p| grow(at(m, *p))),
+                EntityKind::Vertex => grow(at(m, m.vertices[j].1)),
+            }
+        }
+        (lo[0] <= hi[0]).then_some((lo, hi))
+    }
+
     /// The kind of entity `reference` is, if it is in the meshes.
     pub fn kind(&self, reference: &str) -> Option<EntityKind> {
         self.index.get(reference).map(|e| e.1)
@@ -448,6 +477,12 @@ mod tests {
             Some(EntityKind::Vertex)
         );
         assert_eq!(picker.place("p/f/00"), None);
+        let edge = format!("p/f/{}", hex(11));
+        assert_eq!(
+            picker.bounds_of(&[edge]),
+            Some(([1.0, 0.0, 0.0], [1.0, 1.0, 0.0]))
+        );
+        assert_eq!(picker.bounds_of(&["p/f/00".into()]), None);
         assert_eq!(picker.faces(&key), 1);
         assert_eq!(picker.body_bounds(&key), Some(([0.0; 3], [1.0, 1.0, 0.0])));
     }

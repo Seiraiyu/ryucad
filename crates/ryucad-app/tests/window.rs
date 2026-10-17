@@ -28,7 +28,20 @@ fn window(p: &Project) -> Harness<'static, App> {
     Harness::builder()
         .with_size(egui::vec2(1000.0, 700.0))
         .wgpu()
-        .build_eframe(move |cc| App::open(&cc.egui_ctx, &root, ryucad()).unwrap())
+        .build_eframe(move |cc| App::open(&cc.egui_ctx, Some(&root), ryucad()))
+}
+
+/// Opens the menu `menu` and clicks `item` in it.
+fn menu(h: &mut Harness<'static, App>, menu: &str, item: &str) {
+    h.get_by_label(menu).click();
+    // A menu opens over a frame or two.
+    for _ in 0..10 {
+        h.step();
+        if h.query_by_label(item).is_some() {
+            break;
+        }
+    }
+    h.get_by_label(item).click();
 }
 
 /// Runs frames until `done` holds.
@@ -57,8 +70,14 @@ fn click(h: &Harness<'static, App>, pos: egui::Pos2) {
 }
 
 fn loaded(app: &App) -> bool {
-    let o = app.opened();
-    o.ws.idle() && o.ws.model.meshes.len() == 2
+    match &app.screen {
+        ryucad_app::ui::app::Screen::Opened(o) => o.ws.idle() && o.ws.model.meshes.len() == 2,
+        ryucad_app::ui::app::Screen::Start(s) => {
+            assert!(s.error.is_none(), "{:?}", s.error);
+            false
+        }
+        _ => false,
+    }
 }
 
 #[test]
@@ -260,15 +279,7 @@ fn preferences_change_the_window_whoever_sets_them() {
     let p = Project::new().with_part();
     let mut h = window(&p);
     frames(&mut h, loaded);
-    h.get_by_label("Edit").click();
-    // The menu opens over a frame or two.
-    for _ in 0..10 {
-        h.step();
-        if h.query_by_label("Preferences…").is_some() {
-            break;
-        }
-    }
-    h.get_by_label("Preferences…").click();
+    menu(&mut h, "Edit", "Preferences…");
     frames(&mut h, |a| {
         a.opened().dialogs.preferences && !a.opened().ws.settings.all.is_empty()
     });
@@ -317,4 +328,58 @@ fn a_damaged_project_is_repaired_then_opened() {
     frames(&mut h, |a| {
         matches!(a.screen, ryucad_app::ui::app::Screen::Opened(_)) && loaded(a)
     });
+}
+
+#[test]
+fn the_start_window_reopens_recent_projects_and_creates_new_ones() {
+    if !gpu() {
+        return;
+    }
+    use ryucad_app::ui::app::Screen;
+    let p = Project::named("bracket").with_part();
+    // Opening a project records it as recent.
+    let mut h = window(&p);
+    frames(&mut h, |a| loaded(a) && a.opened().ws.idle());
+    // Other tests open projects too, so it is somewhere in the list.
+    let recent = |p: &Project| p.ok(&["config", "get", "app.recent_projects"])["value"].clone();
+    frames(&mut h, |_| {
+        recent(&p)
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(p.root))
+    });
+    // File > Close goes back to the start window, which lists it.
+    menu(&mut h, "File", "Close");
+    frames(
+        &mut h,
+        |a| matches!(&a.screen, Screen::Start(s) if s.recent.contains(&p.root)),
+    );
+    // Its thumbnail is a render of the project.
+    frames(&mut h, |a| match &a.screen {
+        Screen::Start(s) => matches!(s.thumbnails.done.get(&p.root), Some(Ok(_))),
+        _ => false,
+    });
+    // Other tests' projects are recent too: scroll to this one first.
+    h.step();
+    h.get_by_label("bracket").scroll_to_me();
+    h.run_steps(2);
+    h.get_by_label("bracket").click();
+    frames(&mut h, loaded);
+    // A folder that isn't a project is offered as a new one.
+    let empty = p.root.parent().unwrap().join("empty");
+    std::fs::create_dir(&empty).unwrap();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .wgpu()
+        .build_eframe(move |cc| App::open(&cc.egui_ctx, Some(&empty), ryucad()));
+    frames(
+        &mut h,
+        |a| matches!(&a.screen, Screen::Start(s) if s.not_a_project.is_some()),
+    );
+    h.step();
+    h.get_by_label("Create a project here").click();
+    frames(&mut h, |a| {
+        matches!(a.screen, Screen::Opened(_)) && a.opened().ws.idle()
+    });
+    assert!(p.root.parent().unwrap().join("empty/ryucad.json").is_file());
 }

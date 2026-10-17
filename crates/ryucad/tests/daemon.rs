@@ -330,6 +330,9 @@ fn another_program_connects_as_a_human() {
         .unwrap()
         .unwrap();
     assert_eq!(names(&list), ["human:Dana", "agent:agent"]);
+    // A window that says hello makes its project the most recent one.
+    let recent = cli(&f, &["config", "get", "app.recent_projects"]);
+    assert_eq!(recent["result"]["value"][0], serde_json::json!(f.root));
     // Closing both connections ends the human, and the subscription's
     // reader doesn't take it for the daemon going.
     drop((sub, requests));

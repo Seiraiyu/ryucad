@@ -79,8 +79,13 @@ pub struct Project {
 
 impl Project {
     pub fn new() -> Project {
+        Project::named("project")
+    }
+
+    /// A project in a folder called `name`.
+    pub fn named(name: &str) -> Project {
         let dir = tempfile::tempdir_in(shared()).unwrap();
-        let root = dir.path().canonicalize().unwrap().join("project");
+        let root = dir.path().canonicalize().unwrap().join(name);
         std::fs::create_dir(&root).unwrap();
         let p = Project { _dir: dir, root };
         p.ok(&["init", "--unit", "mm"]);

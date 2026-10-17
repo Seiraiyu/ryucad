@@ -88,3 +88,19 @@ fn windows_come_and_go() {
     assert!(ws.wait_until(WAIT, |ws| ws.people.get(&kai).is_none()));
     assert_eq!(ws.following, None);
 }
+
+#[test]
+fn ryucad_open_asks_the_window_forward() {
+    let p = Project::new().with_part();
+    let mut ws = open(&p, "Dana");
+    // With a window attached, nothing is started.
+    let out = std::process::Command::new(&ryucad().exe)
+        .arg("open")
+        .current_dir(&p.root)
+        .env(ryucad::client::APP_VAR, p.root.join("no-such-app"))
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["result"]["opened"], "existing", "{v}");
+    assert!(ws.wait_until(WAIT, |ws| ws.raised));
+}

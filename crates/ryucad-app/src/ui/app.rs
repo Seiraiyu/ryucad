@@ -6,12 +6,13 @@ use crate::core::doctor::Offline;
 use crate::core::link::Wake;
 use crate::core::nav::Navigation;
 use crate::core::workspace::Workspace;
+use crate::ui::start::{self, Start};
 use crate::ui::view::View;
 use crate::ui::{dialogs, doctor, menu, panels};
 use eframe::egui;
 use ryucad::client::Daemon;
 use ryucad::doc::project::find_project;
-use ryucad::error::Result;
+use ryucad::error::{Code, Result};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -57,10 +58,14 @@ pub struct Opened {
     pub tab: panels::Tab,
     pub dialogs: menu::Dialogs,
     pub doctor: doctor::State,
+    /// Recent projects, newest first, for the File menu.
+    pub recent: Vec<PathBuf>,
 }
 
 /// What the window shows.
 pub enum Screen {
+    /// No project: recent projects and Open.
+    Start(Box<Start>),
     Opened(Box<Opened>),
     /// A folder with parts but no manifest: repaired before it opens.
     Damaged(Box<(Offline, doctor::State)>),
@@ -71,35 +76,64 @@ pub struct App {
     pub screen: Screen,
     pub daemon: Daemon,
     wake: Wake,
-    /// The folder the title was last set for.
-    titled: Option<PathBuf>,
+    /// The window title last set.
+    titled: Option<String>,
 }
 
 impl App {
-    /// The app on the project in or above `dir`, repainting when anything
-    /// arrives. A damaged project opens to its repairs.
-    pub fn open(ctx: &egui::Context, dir: &Path, daemon: &Daemon) -> Result<App> {
+    /// The app on the project in or above `dir`, or the start window with
+    /// none. It repaints whenever anything arrives.
+    pub fn open(ctx: &egui::Context, dir: Option<&Path>, daemon: &Daemon) -> App {
         let ctx = ctx.clone();
         let wake: Wake = Arc::new(move || ctx.request_repaint());
-        let (root, damaged) = find_project(dir)?;
-        let screen = if damaged {
-            Screen::Damaged(Box::new((
-                Offline::new(&root, daemon, wake.clone()),
-                doctor::State::default(),
-            )))
-        } else {
-            Screen::Opened(Box::new(Opened::new(open_workspace(
-                &root,
-                daemon,
-                wake.clone(),
-            )?)))
-        };
-        Ok(App {
-            screen,
+        let mut app = App {
+            screen: Screen::Start(Box::new(Start::new(daemon, &wake))),
             daemon: daemon.clone(),
             wake,
             titled: None,
-        })
+        };
+        if let Some(dir) = dir {
+            app.go(dir);
+        }
+        app
+    }
+
+    /// Opens the project in or above `dir`: a damaged one to its repairs,
+    /// a folder that isn't one to the offer of a new project.
+    pub fn go(&mut self, dir: &Path) {
+        let failed = |app: &mut App, not_a_project: Option<PathBuf>, error: Option<String>| {
+            let mut start = Start::new(&app.daemon, &app.wake);
+            start.not_a_project = not_a_project;
+            start.error = error;
+            app.screen = Screen::Start(Box::new(start));
+        };
+        match find_project(dir) {
+            Ok((root, true)) => {
+                let offline = Offline::new(&root, &self.daemon, self.wake.clone());
+                self.screen = Screen::Damaged(Box::new((offline, doctor::State::default())));
+            }
+            Ok((root, false)) => match open_workspace(&root, &self.daemon, self.wake.clone()) {
+                Ok(ws) => self.screen = Screen::Opened(Box::new(Opened::new(ws))),
+                Err(e) => failed(self, None, Some(e.message)),
+            },
+            Err(e) if e.code == Code::ProjectNotFound => {
+                let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+                failed(self, Some(dir), None);
+            }
+            Err(e) => failed(self, None, Some(e.message)),
+        }
+    }
+
+    /// Makes `dir` a project (`ryucad init`), then opens it.
+    fn create(&mut self, dir: &Path) {
+        match crate::core::doctor::cli(&self.daemon, dir, &["init".to_owned()]) {
+            Ok(_) => self.go(dir),
+            Err(e) => {
+                if let Screen::Start(s) = &mut self.screen {
+                    s.error = Some(e.message);
+                }
+            }
+        }
     }
 
     /// The open project. Panics if there is none: for tests.
@@ -110,42 +144,59 @@ impl App {
         }
     }
 
-    /// The folder on screen.
-    pub fn root(&self) -> &Path {
+    fn title(&self) -> String {
+        let name = |root: &Path| {
+            root.file_name().map_or_else(
+                || root.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            )
+        };
         match &self.screen {
-            Screen::Opened(o) => &o.ws.root,
-            Screen::Damaged(d) => &d.0.root,
+            Screen::Start(_) => "ryucad".to_owned(),
+            Screen::Opened(o) => format!("{} — ryucad", name(&o.ws.root)),
+            Screen::Damaged(d) => format!("{} (needs repair) — ryucad", name(&d.0.root)),
         }
     }
 
     /// One frame.
     pub fn frame(&mut self, ui: &mut egui::Ui, gpu: Option<&eframe::egui_wgpu::RenderState>) {
         let ctx = ui.ctx().clone();
-        if self.titled.as_deref() != Some(self.root()) {
-            let root = self.root().to_path_buf();
-            let name = root.file_name().map_or_else(
-                || root.display().to_string(),
-                |n| n.to_string_lossy().into_owned(),
-            );
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("{name} — ryucad")));
-            self.titled = Some(root);
+        let title = self.title();
+        if self.titled.as_ref() != Some(&title) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.titled = Some(title);
         }
-        let mut next = None;
+        let mut go = None;
         match &mut self.screen {
-            Screen::Opened(o) => o.frame(ui, gpu),
+            Screen::Start(s) => match start::show(ui, s) {
+                Some(start::Action::Open(dir)) => go = Some(menu::Action::Open(Some(dir))),
+                Some(start::Action::Create(dir)) => {
+                    self.create(&dir);
+                    return;
+                }
+                None => {}
+            },
+            Screen::Opened(o) => go = o.frame(ui, gpu),
             Screen::Damaged(d) => {
                 let (offline, state) = &mut **d;
                 offline.poll();
                 if doctor::damaged(ui, offline, state) {
-                    match open_workspace(&offline.root, &self.daemon, self.wake.clone()) {
-                        Ok(ws) => next = Some(Screen::Opened(Box::new(Opened::new(ws)))),
-                        Err(e) => offline.error = Some(e),
-                    }
+                    go = Some(menu::Action::Open(Some(offline.root.clone())));
                 }
             }
         }
-        if let Some(s) = next {
-            self.screen = s;
+        match go {
+            Some(menu::Action::Open(Some(dir))) => self.go(&dir),
+            Some(menu::Action::Open(None)) => {
+                if let Some(dir) = start::pick_folder() {
+                    self.go(&dir);
+                }
+            }
+            Some(menu::Action::Close) => {
+                self.screen = Screen::Start(Box::new(Start::new(&self.daemon, &self.wake)));
+            }
+            Some(menu::Action::Quit) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            None => {}
         }
     }
 }
@@ -158,16 +209,28 @@ impl Opened {
             tab: panels::Tab::default(),
             dialogs: menu::Dialogs::default(),
             doctor: doctor::State::default(),
+            recent: crate::core::recent::load(),
         };
         // Damage that doesn't stop the project opening shows as badges.
         o.ws.diagnose();
         o
     }
 
-    /// One frame: take what arrived, then draw.
-    pub fn frame(&mut self, ui: &mut egui::Ui, gpu: Option<&eframe::egui_wgpu::RenderState>) {
+    /// One frame: take what arrived, then draw. Returns what the menus ask
+    /// of the app.
+    pub fn frame(
+        &mut self,
+        ui: &mut egui::Ui,
+        gpu: Option<&eframe::egui_wgpu::RenderState>,
+    ) -> Option<menu::Action> {
         let ctx = ui.ctx().clone();
         self.ws.pump();
+        // `ryucad open` asked for this window.
+        if std::mem::take(&mut self.ws.raised) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        self.read_recent();
         self.ws.tick(Instant::now());
         // Keep frames coming while something is due.
         if self.ws.camera_due() {
@@ -177,7 +240,10 @@ impl Opened {
             ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));
         }
         self.apply_preferences(&ctx);
-        egui::Panel::top("menu").show(ui, |ui| menu::bar(ui, self));
+        let recent = self.recent.clone();
+        let action = egui::Panel::top("menu")
+            .show(ui, |ui| menu::bar(ui, self, &recent))
+            .inner;
         egui::Panel::top("people").show(ui, |ui| panels::people(ui, &mut self.ws));
         self.shortcuts(&ctx);
         egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &self.ws));
@@ -207,6 +273,15 @@ impl Opened {
             &mut self.dialogs.doctor,
             &mut self.doctor,
         );
+        action
+    }
+
+    /// The recent projects, as the daemon last reported them: it puts
+    /// this project first when the window says hello.
+    fn read_recent(&mut self) {
+        if let Some(v) = self.ws.settings.get("app.recent_projects") {
+            self.recent = crate::core::recent::parse(v);
+        }
     }
 
     /// The user's preferences, as they stand: the daemon announces every

@@ -122,6 +122,14 @@ impl View {
         }
     }
 
+    /// Frames the given entities.
+    pub fn fit_entities(&mut self, ws: &mut Workspace, entities: &[String]) {
+        if let Some((lo, hi)) = self.picker(ws).bounds_of(entities) {
+            self.nav.fit(lo, hi);
+            self.moved(ws);
+        }
+    }
+
     /// The camera moved by this window's hand: following stops, and the
     /// session hears of it.
     fn moved(&mut self, ws: &mut Workspace) {
