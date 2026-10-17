@@ -6,6 +6,10 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+# egui on winit and wgpu: all Rust, no C. Only what the app uses.
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "wayland", "wgpu", "x11"] }
+pollster = "0.4"
 ryucad = { path = "../ryucad" }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 

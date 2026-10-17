@@ -3,3 +3,4 @@
 //! window, a thin view over `core`.
 
 pub mod core;
+pub mod ui;
