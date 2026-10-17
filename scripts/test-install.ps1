@@ -27,6 +27,8 @@ function Build-FakeRelease($dir) {
         $stage = Join-Path $work "stage\ryucad-$v-$target"
         New-Item -ItemType Directory -Force $d, $stage | Out-Null
         Copy-Item $Binary (Join-Path $stage 'ryucad.exe')
+        # A stand-in for the desktop app: the installer only copies it.
+        Copy-Item $Binary (Join-Path $stage 'ryucad-app.exe')
         $zip = Join-Path $d "ryucad-$v-$target.zip"
         Compress-Archive -Path $stage -DestinationPath $zip
         $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
@@ -69,6 +71,8 @@ function Test-Case($label, $cond, $run) {
 }
 
 $savedUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+$menuKeys = @('HKCU:\Software\Classes\Directory\shell\ryucad',
+              'HKCU:\Software\Classes\Directory\Background\shell\ryucad')
 try {
     $good = Join-Path $work 'good'
     Build-FakeRelease $good
@@ -84,6 +88,11 @@ try {
     Test-Case 'reports the installed version' ($r.Out -match '"ryucad":') $r
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     Test-Case 'user PATH gets the bin directory' (($userPath -split ';') -contains (Split-Path $exe)) $r
+    $app = Join-Path $r.Home '.ryucad\bin\ryucad-app.exe'
+    Test-Case 'app installed' (Test-Path $app) $r
+    $command = (Get-Item -Path "$($menuKeys[0])\command").GetValue('')
+    Test-Case '"Open in ryucad" runs the installed app on the folder' ($command -eq "`"$app`" `"%V`"") $r
+    Test-Case '"Open in ryucad" on a folder''s background too' (Test-Path "$($menuKeys[1])\command") $r
     $r = Invoke-Installer 'fresh' $good @{ RYUCAD_NO_MODIFY_PATH = '' }
     $count = @([Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ -eq (Split-Path $exe) }).Count
     Test-Case 'reinstall adds no second PATH entry' ($r.Ok -and $count -eq 1) $r
@@ -98,6 +107,11 @@ try {
     $running.WaitForExit()
     $r = Invoke-Installer 'fresh' $good $null
     Test-Case 'the next install removes ryucad.exe.old' ($r.Ok -and -not (Test-Path "$exe.old")) $r
+
+    foreach ($k in $menuKeys) { Remove-Item -Recurse -Force $k -ErrorAction SilentlyContinue }
+    $r = Invoke-Installer 'noapp' $good @{ RYUCAD_NO_APP = '1' }
+    Test-Case 'RYUCAD_NO_APP installs the command only' ($r.Ok -and -not (Test-Path (Join-Path $r.Home '.ryucad\bin\ryucad-app.exe'))) $r
+    Test-Case 'RYUCAD_NO_APP adds no Explorer entry' (-not (Test-Path $menuKeys[0])) $r
 
     $r = Invoke-Installer 'pinned' $good @{ RYUCAD_VERSION = '0.0.9' }
     Test-Case 'a pinned version installs' ($r.Ok -and $r.Out -match 'installing ryucad 0\.0\.9') $r
@@ -118,6 +132,7 @@ try {
     Test-Case 'unsupported platform fails' ((-not $r.Ok) -and $r.Out -match 'no ryucad build for Windows ARM64') $r
 } finally {
     [Environment]::SetEnvironmentVariable('Path', $savedUserPath, 'User')
+    foreach ($k in $menuKeys) { Remove-Item -Recurse -Force $k -ErrorAction SilentlyContinue }
     Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 }
 

@@ -8,7 +8,7 @@ CAD built for AI agents to drive, with a from-scratch B-rep kernel (**ryukei**) 
 
 ## Install
 
-Prebuilt binaries for Linux (x86_64 and aarch64, static), macOS (Apple silicon) and Windows (x64) are published with each release. The installers put `ryucad` in `~/.ryucad/bin` and add it to your PATH; running one again updates.
+Prebuilt binaries for Linux (x86_64 and aarch64), macOS (Apple silicon) and Windows (x64) are published with each release: the `ryucad` command (static on Linux) and the desktop app, `ryucad-app` (on Linux it needs glibc 2.35 or newer and a desktop). The installers put both in `~/.ryucad/bin`, add it to your PATH, and let you open a project folder in the app from your desktop: "Open in ryucad" on folders in Explorer, an application entry on Linux that also opens `ryucad.json`, and `~/Applications/ryucad.app` on macOS (drop a folder on it, or `open -a ryucad <folder>`). Running one again updates.
 
 While the repository is private, the installers need a GitHub token: they use `GH_TOKEN` or `GITHUB_TOKEN`, or ask `gh` (`gh auth login` first).
 
@@ -32,9 +32,9 @@ curl -fsSL https://github.com/Seiraiyu/ryucad/releases/latest/download/install.s
 irm https://github.com/Seiraiyu/ryucad/releases/latest/download/install.ps1 | iex
 ```
 
-Set `RYUCAD_VERSION=v0.1.0` to install a particular version, `RYUCAD_HOME` to install somewhere other than `~/.ryucad`, and `RYUCAD_NO_MODIFY_PATH=1` to leave your shell profile alone.
+Set `RYUCAD_VERSION=v0.1.0` to install a particular version, `RYUCAD_HOME` to install somewhere other than `~/.ryucad`, `RYUCAD_NO_MODIFY_PATH=1` to leave your shell profile alone, and `RYUCAD_NO_APP=1` to install the command only (servers, CI). `ryucad open [folder]` opens a project in the app, or brings its window forward.
 
-To uninstall, run `ryucad daemon stop --all`, delete `~/.ryucad` (`%USERPROFILE%\.ryucad` on Windows), and remove the PATH line the installer added (marked `# added by the ryucad installer`) or the entry in your Windows user PATH.
+To uninstall, run `ryucad daemon stop --all`, delete `~/.ryucad` (`%USERPROFILE%\.ryucad` on Windows), and remove the PATH line the installer added (marked `# added by the ryucad installer`) or the entry in your Windows user PATH. Then remove what lets the desktop open projects: on Linux `~/.local/share/applications/ryucad.desktop` and `~/.local/share/mime/packages/ryucad.xml` (then `update-mime-database ~/.local/share/mime`), on macOS `~/Applications/ryucad.app`, and on Windows the keys `HKCU\Software\Classes\Directory\shell\ryucad` and `HKCU\Software\Classes\Directory\Background\shell\ryucad`.
 
 ## Releasing
 
