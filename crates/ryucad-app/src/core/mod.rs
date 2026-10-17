@@ -2,4 +2,5 @@
 
 pub mod link;
 pub mod model;
+pub mod people;
 pub mod workspace;
