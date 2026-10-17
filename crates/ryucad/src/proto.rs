@@ -250,6 +250,16 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<usize>,
     },
+    /// Display meshes of a part's bodies (or one feature's).
+    #[serde(rename = "mesh.get")]
+    MeshGet {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feature: Option<String>,
+        /// coarse, normal or fine; the user's display quality by default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quality: Option<String>,
+    },
     /// Says what the caller is doing; an empty status clears it.
     #[serde(rename = "activity.set")]
     ActivitySet {

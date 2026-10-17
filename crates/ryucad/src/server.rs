@@ -9,6 +9,7 @@ use crate::doc::project::{MANIFEST, Part, feature_path, part_dir, part_path, wri
 use crate::entity::{self, EntityRef};
 use crate::error::{Code, Error, Result};
 use crate::live::{self, Live, SelectMode};
+use crate::mesh;
 use crate::notify::Topic;
 use crate::proto::{PlacementArg, Position, Request, VersionInfo};
 use crate::rebuild;
@@ -261,6 +262,11 @@ fn dispatch(
             let who = live.caller(me);
             activity::undo(live, session, &who, entry, true)
         }
+        Request::MeshGet {
+            part,
+            feature,
+            quality,
+        } => mesh_get(session, &part, feature.as_deref(), quality.as_deref()),
         Request::HistoryLog { part, limit } => {
             let part = part.as_deref().map(part_id).transpose()?;
             if let Some(p) = &part {
@@ -824,6 +830,78 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
         });
     }
     Ok(report)
+}
+
+/// The display meshes of a part's bodies, `(feature, body, mesh)` in
+/// feature order; a feature that failed to build has its error instead.
+pub fn meshes(
+    session: &mut Session,
+    part: &Id,
+    only: Option<&Id>,
+    quality: mesh::Quality,
+) -> Result<Vec<(Id, Result<mesh::Meshed>)>> {
+    let p = session.project().part(part)?;
+    if let Some(f) = only {
+        feature(p, f)?;
+    }
+    let features: BTreeMap<Id, Feature> = p
+        .features
+        .iter()
+        .filter_map(|(id, f)| Some((id.clone(), f.as_ref().ok()?.clone())))
+        .collect();
+    let budget = config::user("display.mesh_cache_mib")
+        .as_u64()
+        .unwrap_or(256) as usize
+        * 1024
+        * 1024;
+    let built: Vec<(Id, Result<crate::rebuild::Built>)> = session
+        .rebuilt(part)?
+        .features
+        .iter()
+        .filter(|(id, _)| only.is_none_or(|o| o == id))
+        .cloned()
+        .collect();
+    Ok(built
+        .into_iter()
+        .map(|(id, b)| {
+            let r = b.map(|b| {
+                let mesh = session.meshes.get(&features[&id], &b, quality, budget);
+                mesh::Meshed {
+                    body: b.body,
+                    hash: b.hash,
+                    mesh,
+                }
+            });
+            (id, r)
+        })
+        .collect())
+}
+
+fn mesh_get(
+    session: &mut Session,
+    part: &str,
+    only: Option<&str>,
+    quality: Option<&str>,
+) -> Result<Value> {
+    let pid = part_id(part)?;
+    let only = only.map(feature_id).transpose()?;
+    let quality = match quality {
+        Some(q) => mesh::Quality::parse(q)?,
+        None => mesh::Quality::preferred(),
+    };
+    let bodies: Vec<Value> = meshes(session, &pid, only.as_ref(), quality)?
+        .into_iter()
+        .map(|(id, r)| match r {
+            Ok(m) => {
+                let mut v = mesh::to_json(&m.body, &m.mesh);
+                v["feature"] = json!(id);
+                v["hash"] = json!(m.hash);
+                v
+            }
+            Err(e) => json!({"feature": id, "ok": false, "error": e}),
+        })
+        .collect();
+    Ok(json!({"part": pid, "quality": quality.as_str(), "bodies": bodies}))
 }
 
 fn inspect(
@@ -1787,6 +1865,53 @@ pub(crate) mod tests {
                 e[0]["files"],
                 json!([{"path": "ryucad.json", "change": "modified"}])
             );
+        });
+    }
+
+    #[test]
+    fn editing_one_feature_meshes_one_body() {
+        crate::config::tests::with_config(|_| {
+            let (_dir, mut s) = with_part();
+            for (id, r) in [("a", 1), ("b", 2)] {
+                call(
+                    &mut s,
+                    "feature.add",
+                    json!({"part": "p", "type": "sphere", "id": id, "params": {"radius": r}}),
+                )
+                .unwrap();
+            }
+            let m = call(
+                &mut s,
+                "mesh.get",
+                json!({"part": "p", "quality": "coarse"}),
+            )
+            .unwrap();
+            assert_eq!(m["quality"], "coarse");
+            assert_eq!(m["bodies"][1]["feature"], "b");
+            assert_eq!(s.meshes.len(), 2);
+            call(
+                &mut s,
+                "feature.edit",
+                json!({"part": "p", "id": "a", "params": {"radius": 3}}),
+            )
+            .unwrap();
+            let again = call(
+                &mut s,
+                "mesh.get",
+                json!({"part": "p", "quality": "coarse"}),
+            )
+            .unwrap();
+            assert_eq!(s.meshes.len(), 3);
+            assert_eq!(again["bodies"][1], m["bodies"][1]);
+            assert_ne!(again["bodies"][0]["hash"], m["bodies"][0]["hash"]);
+            // The user's display quality is the default.
+            let v = call(&mut s, "mesh.get", json!({"part": "p", "feature": "b"})).unwrap();
+            assert_eq!(
+                (v["quality"].as_str(), v["bodies"].as_array().unwrap().len()),
+                (Some("normal"), 1)
+            );
+            let e = call(&mut s, "mesh.get", json!({"part": "p", "feature": "z"})).unwrap_err();
+            assert_eq!(e.code, Code::NotFound);
         });
     }
 

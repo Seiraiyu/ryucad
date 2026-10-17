@@ -60,6 +60,8 @@ pub enum Code {
     InvalidSetting,
     /// The project isn't in a Git repository (a warning, not a failure).
     NotAGitRepo,
+    /// The kernel couldn't mesh a body for display.
+    MeshFailed,
 }
 
 impl Code {

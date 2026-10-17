@@ -147,6 +147,14 @@ enum Command {
     /// user preferences.
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// Display meshes of a part's bodies, by stable name.
+    Mesh {
+        part: String,
+        feature: Option<String>,
+        /// coarse, normal or fine (the user's display quality by default).
+        #[arg(long)]
+        quality: Option<String>,
+    },
     /// The project's Git commits (or one part's), and what is
     /// uncommitted. Read-only.
     History {
@@ -565,6 +573,15 @@ fn request(cmd: &Command) -> Option<Request> {
             value: serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.clone())),
             scope: scope.get(),
             expected_revision: expect.clone(),
+        },
+        Command::Mesh {
+            part,
+            feature,
+            quality,
+        } => Request::MeshGet {
+            part: part.clone(),
+            feature: feature.clone(),
+            quality: quality.clone(),
         },
         Command::History { part, limit } => Request::HistoryLog {
             part: part.clone(),

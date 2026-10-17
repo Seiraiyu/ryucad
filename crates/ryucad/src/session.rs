@@ -31,6 +31,8 @@ pub struct Session {
     stamps: BTreeMap<PathBuf, Stamp>,
     stamped_at: SystemTime,
     results: BTreeMap<Id, (String, PartResult)>,
+    /// Display meshes of rebuilt bodies.
+    pub meshes: crate::mesh::Cache,
 }
 
 impl Session {
@@ -41,6 +43,7 @@ impl Session {
             stamps: BTreeMap::new(),
             stamped_at: SystemTime::now(),
             results: BTreeMap::new(),
+            meshes: crate::mesh::Cache::default(),
         };
         s.stamps = s.stamp_all()?;
         Ok(s)

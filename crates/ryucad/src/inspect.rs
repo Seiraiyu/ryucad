@@ -91,6 +91,14 @@ pub fn entities(body: &Body) -> Value {
 /// An axis-aligned box around the feature: its local extent's corners,
 /// placed. Tight when the placement is axis-aligned.
 pub fn bounds(f: &Feature) -> Value {
+    match extent(f) {
+        Some((min, max)) => json!({"min": min, "max": max}),
+        None => Value::Null,
+    }
+}
+
+/// [`bounds`] as `(min, max)`; `None` when the placement is invalid.
+pub fn extent(f: &Feature) -> Option<([f64; 3], [f64; 3])> {
     let m = |k| f.meters(k);
     let (lo, hi) = match f.ty {
         FeatureType::Box => ([0.0; 3], [m("x"), m("y"), m("z")]),
@@ -107,9 +115,7 @@ pub fn bounds(f: &Feature) -> Value {
             ([-a, -a, -b], [a, a, b])
         }
     };
-    let Ok(at) = placement(&f.placement) else {
-        return Value::Null;
-    };
+    let at = placement(&f.placement).ok()?;
     let mut min = [f64::INFINITY; 3];
     let mut max = [f64::NEG_INFINITY; 3];
     for i in 0..8 {
@@ -120,7 +126,7 @@ pub fn bounds(f: &Feature) -> Value {
             max[k] = max[k].max(x);
         }
     }
-    json!({"min": min, "max": max})
+    Some((min, max))
 }
 
 /// A built feature: its hash, counts, bounds and entities.

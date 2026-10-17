@@ -12,6 +12,7 @@ pub mod error;
 pub mod git;
 pub mod inspect;
 pub mod live;
+pub mod mesh;
 pub mod notify;
 pub mod proto;
 pub mod rebuild;

@@ -336,6 +336,7 @@ fn every_protocol_method_has_a_command() {
         ("activity.log", &["activity"]),
         ("undo", &["undo"]),
         ("history.log", &["history"]),
+        ("mesh.get", &["mesh"]),
         ("config.get", &["config", "get"]),
         ("config.set", &["config", "set"]),
         ("redo", &["redo"]),
@@ -412,4 +413,29 @@ fn history_outside_and_inside_git() {
     assert_eq!(v["repository"], false);
     assert_eq!(v["warnings"][0]["code"], "not_a_git_repo");
     p.fails(&["history", "nope"], "not_found", 1);
+}
+
+#[test]
+fn meshes_are_the_same_both_ways() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "torus",
+        "--param",
+        "major_radius=10",
+        "--param",
+        "minor_radius=2",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=1", "--param", "y=2", "--param",
+        "z=3",
+    ]);
+    let m = p.ok(&["mesh", "p", "--quality", "coarse"]);
+    assert_eq!(m["bodies"].as_array().unwrap().len(), 2);
+    assert_eq!(m["bodies"][1]["faces"].as_array().unwrap().len(), 6);
+    p.fails(&["mesh", "p", "--quality", "ultra"], "invalid_param", 1);
 }
