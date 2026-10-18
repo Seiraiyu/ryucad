@@ -356,6 +356,38 @@ fn half_turns_and_more() {
 }
 
 #[test]
+fn torus_bands() {
+    // A circular hole through a part turn: a band of a torus between two
+    // circles, open across the tube's turn.
+    let p = profile(vec![
+        rect(1, 10, 1.0, 0.0, 2.0, 2.0),
+        circle(2, 20, (2.0, 1.0), 0.5),
+    ]);
+    for span in [1.0, PI, 5.0] {
+        let (b, _) = revolve(K, &p, y_axis(), 0.0, span).unwrap();
+        let want = span / 2.0 * (9.0 - 1.0) * 2.0 - PI * 0.25 * 2.0 * span;
+        assert!(close(volume(&b), want, 2e-3), "{span}");
+    }
+    // A slot turned whole: bands open along the tube, between circles.
+    let (big, r, l) = (1.5, 0.25, 0.5);
+    let slot = Loop {
+        key: LoopKey(1),
+        segments: keyed(
+            10,
+            vec![
+                line((big + r, 0.0), (big + r, l)),
+                arc((big, l), r, 0.0, PI),
+                line((big - r, l), (big - r, 0.0)),
+                arc((big, 0.0), r, PI, TAU),
+            ],
+        ),
+    };
+    let (b, _) = revolve(K, &profile(vec![slot]), y_axis(), 0.0, TAU).unwrap();
+    let area = 2.0 * r * l + PI * r * r;
+    assert!(close(volume(&b), area * TAU * big, 2e-3));
+}
+
+#[test]
 fn revolve_refuses_bad_profiles_and_parameters() {
     let sweep = |e| Err(Error::InvalidSweep(e));
     let crossing = profile(vec![rect(1, 10, -1.0, 0.0, 2.0, 1.0)]);
