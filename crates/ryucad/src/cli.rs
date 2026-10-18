@@ -61,7 +61,7 @@ enum Command {
     Inspect {
         part: String,
         feature: Option<String>,
-        /// Only the entity with this name.
+        /// Only this entity: its name, or a full reference <part>/<feature>/<name>.
         #[arg(long)]
         entity: Option<String>,
     },

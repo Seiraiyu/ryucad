@@ -1310,25 +1310,44 @@ fn inspect(
         v["feature"] = json!(id);
         bodies.push(v);
     }
-    if let Some(name) = entity {
+    if let Some(given) = entity {
+        // A bare name, or a full reference as `selection` and Copy
+        // reference give it: then only its own part and feature count.
+        let (name, in_feature) = if given.contains('/') {
+            let r = crate::entity::EntityRef::parse(given)?;
+            if r.part != pid {
+                return Err(Error::new(
+                    Code::NotFound,
+                    format!("{given} is in part {}, not {pid}", r.part),
+                )
+                .with("entity", given));
+            }
+            (r.name, Some(r.feature))
+        } else {
+            (given.to_owned(), None)
+        };
         // Just the one entity, wherever it is.
         for b in &bodies {
-            for kind in ["faces", "edges", "vertices"] {
-                if let Some(e) = b[kind]
+            if in_feature
+                .as_ref()
+                .is_some_and(|f| b["feature"] != f.as_str())
+            {
+                continue;
+            }
+            for (list, kind) in [("faces", "face"), ("edges", "edge"), ("vertices", "vertex")] {
+                if let Some(e) = b[list]
                     .as_array()
                     .unwrap()
                     .iter()
-                    .find(|e| e["name"] == name)
+                    .find(|e| e["name"] == name.as_str())
                 {
-                    return Ok(
-                        json!({"feature": b["feature"], "kind": &kind[..kind.len() - 1], "entity": e}),
-                    );
+                    return Ok(json!({"feature": b["feature"], "kind": kind, "entity": e}));
                 }
             }
         }
         return Err(
-            Error::new(Code::NotFound, format!("no entity {name} in part {pid}"))
-                .with("entity", name),
+            Error::new(Code::NotFound, format!("no entity {given} in part {pid}"))
+                .with("entity", given),
         );
     }
     Ok(json!({"part": pid, "bodies": bodies}))
@@ -1711,6 +1730,29 @@ pub(crate) mod tests {
             (Some("b"), Some("edge"))
         );
         let e = call(&mut s, "inspect", json!({"part": "p", "entity": "0"})).unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+        for (list, kind) in [("faces", "face"), ("edges", "edge"), ("vertices", "vertex")] {
+            let name = all["bodies"][0][list][0]["name"].as_str().unwrap();
+            let e = call(&mut s, "inspect", json!({"part": "p", "entity": name})).unwrap();
+            assert_eq!(e["kind"], kind);
+            // The full reference, as Copy reference and `selection` give it.
+            let full = format!("p/b/{name}");
+            let e = call(&mut s, "inspect", json!({"part": "p", "entity": full})).unwrap();
+            assert_eq!(
+                (e["kind"].as_str(), e["feature"].as_str()),
+                (Some(kind), Some("b"))
+            );
+        }
+        let elsewhere = format!("q/b/{name}");
+        let e = call(&mut s, "inspect", json!({"part": "p", "entity": elsewhere})).unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+        let wrong_feature = format!("p/s/{name}");
+        let e = call(
+            &mut s,
+            "inspect",
+            json!({"part": "p", "entity": wrong_feature}),
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::NotFound);
     }
 
