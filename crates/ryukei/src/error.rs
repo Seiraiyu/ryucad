@@ -1,3 +1,4 @@
+use crate::sweep::{LoopKey, SegmentKey};
 use core::fmt;
 
 /// Errors from fallible kernel constructors and operations.
@@ -20,6 +21,45 @@ pub enum Error {
     /// A mesh would have more triangles than its budget allows: the
     /// estimate, or the count when meshing stopped.
     MeshTooLarge { triangles: u64 },
+    /// A sweep profile that is not a valid planar region: see
+    /// [`crate::sweep::ValidProfile::new`].
+    InvalidProfile(ProfileError),
+}
+
+/// Why a sweep profile was refused. Each names the caller's keys, so the
+/// caller can point at its sketch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProfileError {
+    /// The profile has no loops.
+    Empty,
+    /// A loop has no segments.
+    EmptyLoop { loop_: LoopKey },
+    /// A segment key or a loop key is used twice. Segment keys are unique
+    /// across the whole profile.
+    DuplicateKey,
+    /// `t0` or `t1` is not finite, `t0 == t1`, the range leaves a clamped
+    /// curve's domain, or it is longer than a period.
+    BadRange { segment: SegmentKey },
+    /// The segment is shorter than [`crate::tol::LINEAR_RESOLUTION`]: nine
+    /// evenly spaced parameters all give points within resolution of its
+    /// start.
+    ShortSegment { segment: SegmentKey },
+    /// A segment spanning a whole period shares its loop with others.
+    ClosedSegmentNotAlone { segment: SegmentKey },
+    /// A loop's only segment is not a whole period of a periodic curve:
+    /// its ends would meet at a seam. Split it into two segments.
+    SeamLoop { segment: SegmentKey },
+    /// Segment `after` ends farther than resolution from the start of the
+    /// next segment in its loop (cyclically).
+    NotClosed { loop_: LoopKey, after: SegmentKey },
+    /// Two segments cross, overlap, come closer than resolution, or could
+    /// not be certified apart; `a == b` for a segment that touches itself.
+    Touching { a: SegmentKey, b: SegmentKey },
+    /// A loop's orientation or nesting could not be certified: its area is
+    /// too small to sign.
+    Degenerate { loop_: LoopKey },
+    /// The profile's image in model space leaves the size box.
+    OutsideSizeBox,
 }
 
 /// Why a NURBS constructor refused its input.
@@ -78,7 +118,53 @@ impl fmt::Display for Error {
             Self::MeshTooLarge { triangles } => {
                 write!(f, "mesh too large: {triangles} triangles over budget")
             }
+            Self::InvalidProfile(p) => write!(f, "invalid profile: {p}"),
         }
+    }
+}
+
+impl fmt::Display for ProfileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => f.write_str("no loops"),
+            Self::EmptyLoop { loop_ } => write!(f, "loop {:#x} has no segments", loop_.0),
+            Self::DuplicateKey => f.write_str("a segment or loop key is used twice"),
+            Self::BadRange { segment } => {
+                write!(f, "segment {:#x} has a bad parameter range", segment.0)
+            }
+            Self::ShortSegment { segment } => {
+                write!(f, "segment {:#x} is shorter than resolution", segment.0)
+            }
+            Self::ClosedSegmentNotAlone { segment } => write!(
+                f,
+                "closed segment {:#x} is not alone in its loop",
+                segment.0
+            ),
+            Self::SeamLoop { segment } => write!(
+                f,
+                "segment {:#x} closes its loop at a seam; split it in two",
+                segment.0
+            ),
+            Self::NotClosed { loop_, after } => write!(
+                f,
+                "loop {:#x} is open after segment {:#x}",
+                loop_.0, after.0
+            ),
+            Self::Touching { a, b } if a == b => write!(f, "segment {:#x} touches itself", a.0),
+            Self::Touching { a, b } => {
+                write!(f, "segments {:#x} and {:#x} touch", a.0, b.0)
+            }
+            Self::Degenerate { loop_ } => {
+                write!(f, "loop {:#x} is too small to orient", loop_.0)
+            }
+            Self::OutsideSizeBox => f.write_str("profile lies outside the size box"),
+        }
+    }
+}
+
+impl From<ProfileError> for Error {
+    fn from(p: ProfileError) -> Self {
+        Self::InvalidProfile(p)
     }
 }
 
@@ -149,6 +235,22 @@ mod tests {
         assert_eq!(
             Error::from(TopologyError::WouldDisconnect).to_string(),
             "topology: would split the shell"
+        );
+        assert_eq!(
+            Error::from(ProfileError::Touching {
+                a: SegmentKey(1),
+                b: SegmentKey(0x2a),
+            })
+            .to_string(),
+            "invalid profile: segments 0x1 and 0x2a touch"
+        );
+        assert_eq!(
+            ProfileError::Touching {
+                a: SegmentKey(3),
+                b: SegmentKey(3),
+            }
+            .to_string(),
+            "segment 0x3 touches itself"
         );
     }
 }
