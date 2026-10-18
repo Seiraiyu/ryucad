@@ -597,3 +597,28 @@ fn a_typed_folder_path_opens_without_the_os_dialog() {
     });
     assert_eq!(h.state().opened().ws.root, p.root);
 }
+
+#[test]
+fn the_viewport_shows_the_colours_it_draws() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.run_steps(3);
+    let rect = h.state().opened().view.rect;
+    let (dark, ppp) = (
+        h.ctx.global_style().visuals.dark_mode,
+        h.ctx.pixels_per_point(),
+    );
+    let img = h.render().unwrap();
+    // A corner of the viewport: background, framed with a margin.
+    let at = rect.min + egui::vec2(6.0, 6.0);
+    let px = img.get_pixel((at.x * ppp) as u32, (at.y * ppp) as u32).0;
+    let want = ryucad_app::ui::style::viewport_background(dark).map(|c| (c * 255.0).round() as u8);
+    assert!(
+        px.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 3),
+        "the background shows as {px:?}, drawn as {want:?}"
+    );
+}

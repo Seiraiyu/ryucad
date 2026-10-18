@@ -134,6 +134,10 @@ struct Target {
     color: Option<wgpu::TextureView>,
     resolved: wgpu::Texture,
     view: wgpu::TextureView,
+    /// The same pixels for egui to show: a plain (not sRGB) view, since
+    /// egui treats what it samples as already encoded. Sampled through
+    /// an sRGB view they would be decoded once more and show too dark.
+    shown: wgpu::TextureView,
     depth: wgpu::TextureView,
 }
 
@@ -382,7 +386,7 @@ impl Scene {
 
     fn target(&mut self, device: &wgpu::Device, size: [u32; 2]) -> &Target {
         if self.target.as_ref().is_none_or(|t| t.size != size) {
-            let tex = |label, format, samples, usage| {
+            let tex = |label, format, samples, usage, view_formats| {
                 device.create_texture(&wgpu::TextureDescriptor {
                     label: Some(label),
                     size: wgpu::Extent3d {
@@ -395,25 +399,33 @@ impl Scene {
                     dimension: wgpu::TextureDimension::D2,
                     format,
                     usage,
-                    view_formats: &[],
+                    view_formats,
                 })
             };
             let attach = wgpu::TextureUsages::RENDER_ATTACHMENT;
+            let plain = wgpu::TextureFormat::Rgba8Unorm;
+            let plain_too = [plain];
             let resolved = tex(
                 "scene",
                 FORMAT,
                 1,
                 attach | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                &plain_too,
             );
             let color = (self.samples > 1).then(|| {
-                tex("scene msaa", FORMAT, self.samples, attach).create_view(&Default::default())
+                tex("scene msaa", FORMAT, self.samples, attach, &[])
+                    .create_view(&Default::default())
             });
-            let depth =
-                tex("scene depth", DEPTH, self.samples, attach).create_view(&Default::default());
+            let depth = tex("scene depth", DEPTH, self.samples, attach, &[])
+                .create_view(&Default::default());
             self.target = Some(Target {
                 size,
                 color,
                 view: resolved.create_view(&Default::default()),
+                shown: resolved.create_view(&wgpu::TextureViewDescriptor {
+                    format: Some(plain),
+                    ..Default::default()
+                }),
                 resolved,
                 depth,
             });
@@ -422,7 +434,7 @@ impl Scene {
     }
 
     /// Draws `list` into the scene's texture, `size` pixels big, and
-    /// returns a view of it.
+    /// returns a view of it to show in egui.
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -508,7 +520,7 @@ impl Scene {
             }
         }
         queue.submit([enc.finish()]);
-        &self.target.as_ref().expect("made above").view
+        &self.target.as_ref().expect("made above").shown
     }
 
     /// The last frame's pixels, RGBA in rows top to bottom: for tests and
