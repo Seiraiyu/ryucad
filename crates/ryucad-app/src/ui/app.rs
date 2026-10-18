@@ -78,6 +78,8 @@ pub struct App {
     wake: Wake,
     /// The window title last set.
     titled: Option<String>,
+    /// The window has asked for the foreground once, when it first showed.
+    shown: bool,
 }
 
 impl App {
@@ -91,6 +93,7 @@ impl App {
             daemon: daemon.clone(),
             wake,
             titled: None,
+            shown: false,
         };
         if let Some(dir) = dir {
             app.go(dir);
@@ -336,6 +339,11 @@ impl Opened {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // A new window to the front: on Windows it otherwise stays behind
+        // whatever was in front when it was started.
+        if !std::mem::replace(&mut self.shown, true) {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
         let gpu = frame.wgpu_render_state().cloned();
         self.frame(ui, gpu.as_ref());
     }

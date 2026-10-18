@@ -41,7 +41,7 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 widestring = "1"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
 
 # musl's allocator is slow under multithreaded allocation, and rebuild runs
 # features in parallel. Kernel results don't depend on the allocator.
