@@ -8,8 +8,10 @@ pub mod occt;
 #[cfg(feature = "smlib")]
 pub mod smlib;
 
-use ryukei::geom::Point3;
+use ryukei::Error;
+use ryukei::geom::{Circle2, Curve2, Frame, Frame2, Line2, Point2, Point3, Vector2, Vector3};
 use ryukei::math::{cos, sin};
+use ryukei::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile};
 
 /// The primitives every kernel builds, in the same local frames: a block
 /// from the origin along +x, +y and +z; a cylinder and a cone on the
@@ -185,6 +187,52 @@ impl BenchProfile {
             loops,
             ..self.clone()
         }
+    }
+
+    /// The profile as ryukei's, validated: segment keys counted from 1 in
+    /// order, loop keys from 1.
+    pub fn to_ryukei(&self) -> Result<ValidProfile, Error> {
+        let frame = Frame::new(
+            Point3::new(self.origin[0], self.origin[1], self.origin[2]),
+            Vector3::new(self.x[0], self.x[1], self.x[2])
+                .cross(Vector3::new(self.y[0], self.y[1], self.y[2])),
+            Vector3::new(self.x[0], self.x[1], self.x[2]),
+        )?;
+        let mut key = 0;
+        let mut loops = Vec::new();
+        for (i, l) in self.loops.iter().enumerate() {
+            let mut segments = Vec::new();
+            for s in l {
+                key += 1;
+                let (curve, t0, t1) = match *s {
+                    BenchSegment::Line { a, b } => {
+                        let (a, b) = (Point2::new(a[0], a[1]), Point2::new(b[0], b[1]));
+                        (Curve2::Line2(Line2::through(a, b)?), 0.0, a.distance(b))
+                    }
+                    BenchSegment::Arc {
+                        centre,
+                        radius,
+                        a0,
+                        a1,
+                    } => {
+                        let c = Point2::new(centre[0], centre[1]);
+                        let f = Frame2::new(c, Vector2::new(1.0, 0.0), true)?;
+                        (Curve2::Circle2(Circle2::new(f, radius)?), a0, a1)
+                    }
+                };
+                segments.push(Segment {
+                    key: SegmentKey(key),
+                    curve,
+                    t0,
+                    t1,
+                });
+            }
+            loops.push(Loop {
+                key: LoopKey(i as u128 + 1),
+                segments,
+            });
+        }
+        ValidProfile::new(Profile { frame, loops })
     }
 
     /// The oriented profile flattened for the C++ shims: the frame

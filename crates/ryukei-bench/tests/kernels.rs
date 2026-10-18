@@ -6,13 +6,15 @@
 //! within its chord. OCCT's and SMLib's deviations are reported, not
 //! asserted; both are measured to OCCT's exact solid.
 //!
-//! Then OCCT's and SMLib's extrudes and revolves of a fixed set of
-//! profiles against closed forms, for comparison with ryukei's sweeps.
+//! Then the three kernels' extrudes and revolves of a fixed set of
+//! profiles against closed forms.
 
-use ryukei::geom::{Rigid, Vector3};
+use ryukei::check::check;
+use ryukei::geom::{Axis, Point3, Rigid, Vector3};
 use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::name::OpKey;
 use ryukei::primitive;
+use ryukei::sweep::{extrude, revolve};
 use ryukei::topo::Body;
 use ryukei_bench::occt::Solid;
 use ryukei_bench::smlib;
@@ -321,16 +323,29 @@ fn sweep_cases() -> Vec<SweepCase> {
     ]
 }
 
-/// OCCT's and SMLib's extrudes and revolves of the same profiles against
-/// the exact volume and area: OCCT's from its B-rep, SMLib's from its
-/// mesh. Prints a report (run with `--nocapture`) and asserts the cases
-/// each kernel gets right.
+/// The three kernels' extrudes and revolves of the same profiles against
+/// the exact volume and area: OCCT's from its B-rep, SMLib's and
+/// ryukei's from their meshes. Prints a report (run with `--nocapture`)
+/// and asserts the cases each kernel gets right.
 #[test]
 fn sweeps() {
     let (chord, angle) = (1e-4, 0.1);
     println!(
-        "{:<10} {:>9} {:>9} | {:>9} {:>9} {:>5} | {:>9} {:>9} {:>5} {:>8}",
-        "case", "volume", "area", "occt dV", "dA", "faces", "smlib dV", "dA", "faces", "tris"
+        "{:<10} {:>9} {:>9} | {:>9} {:>9} {:>5} | {:>9} {:>9} {:>5} {:>8} | {:>9} {:>9} {:>5} {:>8}",
+        "case",
+        "volume",
+        "area",
+        "occt dV",
+        "dA",
+        "faces",
+        "smlib dV",
+        "dA",
+        "faces",
+        "tris",
+        "ryukei dV",
+        "dA",
+        "faces",
+        "tris"
     );
     for c in sweep_cases() {
         let (o, s) = match c.sweep {
@@ -344,6 +359,25 @@ fn sweeps() {
             ),
         };
         let rel = |v: f64, exact: f64| (v - exact) / exact;
+        let p = c.profile.to_ryukei().expect("ryukei takes the profile");
+        let r = match c.sweep {
+            Sweep::Extrude(dir, dist) => {
+                let dir = Vector3::new(dir[0], dir[1], dir[2]);
+                extrude(OpKey(1), &p, dir, 0.0, dist)
+            }
+            Sweep::Revolve(t) => {
+                let [ox, oy, oz] = c.profile.origin;
+                let [yx, yy, yz] = c.profile.y;
+                let axis = Axis::new(Point3::new(ox, oy, oz), Vector3::new(yx, yy, yz)).unwrap();
+                revolve(OpKey(1), &p, axis, 0.0, t)
+            }
+        }
+        .map(|(b, _)| b);
+        let ry = r.as_ref().map(|b| {
+            let m = tessellate(b, &MeshParams::new(chord, angle)).unwrap();
+            let (v, a) = volume_and_area(&m);
+            (v, a, b.counts().faces, m.triangles.len(), m)
+        });
         let occt = match &o {
             Ok(o) => format!(
                 "{:>9.1e} {:>9.1e} {:>5}",
@@ -372,8 +406,18 @@ fn sweeps() {
             }
             Err(e) => format!("fails: {e}"),
         };
+        let ours = match &ry {
+            Ok((v, a, f, t, _)) => format!(
+                "{:>9.1e} {:>9.1e} {:>5} {:>8}",
+                rel(*v, c.volume),
+                rel(*a, c.area),
+                f,
+                t
+            ),
+            Err(e) => format!("fails: {e}"),
+        };
         println!(
-            "{:<10} {:>9.5} {:>9.5} | {occt} | {sm}",
+            "{:<10} {:>9.5} {:>9.5} | {occt} | {sm} | {ours}",
             c.name, c.volume, c.area
         );
         // Every case held when this was written: both kernels build it,
@@ -397,5 +441,19 @@ fn sweeps() {
             "{name}: SMLib volume"
         );
         assert!(rel(a, c.area).abs() <= 1e-3, "{name}: SMLib area");
+        // ryukei builds every case too, with OCCT's faces, a valid body and
+        // a sound mesh that encloses the volume to within its chord times
+        // the area.
+        let (v, a, faces, _, m) = ry.unwrap_or_else(|e| panic!("{name}: ryukei fails: {e}"));
+        let body = r.unwrap();
+        assert_eq!(check(&body), [], "{name}: ryukei body");
+        assert_eq!(check_mesh(&body, &m), Ok(()), "{name}: ryukei mesh");
+        assert!(m.faults.is_empty(), "{name}: ryukei faults");
+        assert_eq!(faces, o.faces() as usize, "{name}: ryukei faces");
+        assert!(
+            (v - c.volume).abs() <= chord * c.area,
+            "{name}: ryukei volume"
+        );
+        assert!(rel(a, c.area).abs() <= 1e-3, "{name}: ryukei area");
     }
 }
