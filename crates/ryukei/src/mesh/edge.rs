@@ -170,6 +170,31 @@ pub(crate) fn discretize(
     let mut stalled = false;
     while let Some(next) = stack.pop() {
         let cur = out.last().expect("started");
+        // An initial segment (between the ends and seeds) may run more than
+        // half a period round a face, which its ends alone can't tell from
+        // the short way round: when going by its middle disagrees with the
+        // ends, the middle becomes a sample first.
+        if cur.depth == 0 && next.depth == 0 {
+            let t = 0.5 * (cur.t + next.t);
+            let mid = sample(t, curve.point(t), 1);
+            let long = faces.iter().enumerate().any(|(i, &f)| {
+                let g = geom(f);
+                (0..2).any(|k| {
+                    let Some(period) = g.periods[k] else {
+                        return false;
+                    };
+                    let x = |p: Point2| [p.x, p.y][k];
+                    let step = |a: f64, b: f64| unwrap(b, a, Some(period)) - a;
+                    let (a, m, z) = (x(cur.uv[i]), x(mid.uv[i]), x(next.uv[i]));
+                    (step(a, m) + step(m, z) - step(a, z)).abs() > 0.5 * period
+                })
+            });
+            if long && t > cur.t && t < next.t {
+                stack.push(next);
+                stack.push(mid);
+                continue;
+            }
+        }
         // A seam crossing becomes a sample first.
         let crossing = faces
             .iter()

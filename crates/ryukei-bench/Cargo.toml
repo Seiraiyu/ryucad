@@ -43,6 +43,10 @@ name = "mesh"
 harness = false
 
 [[bench]]
+name = "sweep"
+harness = false
+
+[[bench]]
 name = "occt"
 harness = false
 required-features = ["occt"]
@@ -55,4 +59,9 @@ required-features = ["smlib"]
 # Three-way: SMLib's deviation and the exact values come from OCCT.
 [[test]]
 name = "kernels"
+required-features = ["occt", "smlib"]
+
+# The SMLib spike (design 27, stage 0): booleans, speed and repeatability.
+[[test]]
+name = "spike"
 required-features = ["occt", "smlib"]

@@ -161,6 +161,23 @@ pub(crate) fn refine_flat<V: Coords>(
     Ok((flat, hom))
 }
 
+/// Two clamped splines of degree `p` joined end to start, the second
+/// shifted in parameter by `shift`: the joint keeps multiplicity `p`, and
+/// the second's first control point (the same point as the first's last)
+/// is dropped.
+fn join<V: Coords>(
+    p: usize,
+    (fa, ha): (Vec<f64>, Vec<Hom<V>>),
+    (fb, hb): (Vec<f64>, Vec<Hom<V>>),
+    shift: f64,
+) -> (Vec<f64>, Vec<Hom<V>>) {
+    let mut flat = fa[..fa.len() - 1].to_vec();
+    flat.extend(fb[p + 1..].iter().map(|&u| u + shift));
+    let mut hom = ha;
+    hom.extend_from_slice(&hb[1..]);
+    (flat, hom)
+}
+
 impl<V: Coords> Spline<V> {
     pub(crate) fn hom(&self) -> Vec<Hom<V>> {
         self.points
@@ -191,6 +208,74 @@ impl<V: Coords> Spline<V> {
     pub(crate) fn refine(&self, extra: &[f64]) -> Result<Self, Error> {
         let (flat, hom) = refine_flat(&self.knots, &self.hom(), extra)?;
         Ok(Self::from_flat(self.knots.degree(), &flat, &hom))
+    }
+
+    /// The part over `[t0, t1]` as a clamped spline with the same
+    /// parameters. On a periodic spline `t0` is first wrapped into the
+    /// domain and the part may run on past its end, at most one period, so
+    /// the result's domain is `[wrap(t0), wrap(t0) + t1 - t0]`. Fails with
+    /// `NonFinite`, or `InvalidNurbs(KnotOrder)` for a range that is empty,
+    /// leaves a clamped domain, or is longer than a period.
+    pub(crate) fn part(&self, [t0, t1]: [f64; 2]) -> Result<Self, Error> {
+        if !(t0.is_finite() && t1.is_finite()) {
+            return Err(Error::NonFinite);
+        }
+        // A few ulps of the range's magnitude: what rounding leaves.
+        let slack = |period: f64| 8.0 * f64::EPSILON * (t0.abs() + t1.abs() + period);
+        let order = Error::InvalidNurbs(NurbsError::KnotOrder);
+        let p = self.knots.degree();
+        let [a, b] = self.knots.domain();
+        let (s, e, (mut flat, mut hom)) = match self.knots.period() {
+            None if t0 < a || t1 > b || t0 >= t1 => return Err(order),
+            None => (t0, t1, clamp(&self.knots, &self.hom())),
+            Some(period) if t0 >= t1 || t1 - t0 > period + slack(period) => return Err(order),
+            Some(period) => {
+                // A whole period mapped from another parameter may overshoot
+                // by a rounding error: it is one period.
+                let t1 = t0 + (t1 - t0).min(period);
+                // The range moved by whole periods to start in the domain.
+                // A start a rounding error past the domain's start (or
+                // short of its end) is the start: a sliver of a piece
+                // would collapse when shifted by the period.
+                let w = self.knots.wrap(t0);
+                let mut e = t1 + (w - t0);
+                let slack = slack(period);
+                let s = if w - a <= slack {
+                    a
+                } else if b - w <= slack {
+                    e -= period;
+                    a
+                } else {
+                    w
+                };
+                let (flat, hom) = clamp(&self.knots, &self.hom());
+                let seated = if s > a {
+                    let [head, tail] = split_at(&flat, p, &hom, s);
+                    join(p, tail, head, period)
+                } else {
+                    (flat, hom)
+                };
+                (s, e, seated)
+            }
+        };
+        let (lo, hi) = (flat[0], flat[flat.len() - 1]);
+        if s > lo {
+            [_, (flat, hom)] = split_at(&flat, p, &hom, s);
+        }
+        if e < hi {
+            [(flat, hom), _] = split_at(&flat, p, &hom, e);
+        }
+        Ok(Self::from_flat(p, &flat, &hom))
+    }
+
+    /// The spline run backwards in clamped form: `t` becomes `a + b - t`
+    /// over the clamped domain `[a, b]`.
+    pub(crate) fn reversed(&self) -> Self {
+        let (flat, hom) = clamp(&self.knots, &self.hom());
+        let (a, b) = (flat[0], flat[flat.len() - 1]);
+        let flat: Vec<f64> = flat.iter().rev().map(|&u| (a + b) - u).collect();
+        let hom: Vec<Hom<V>> = hom.into_iter().rev().collect();
+        Self::from_flat(self.knots.degree(), &flat, &hom)
     }
 
     pub(crate) fn split(&self, t: f64) -> Result<[Self; 2], Error> {

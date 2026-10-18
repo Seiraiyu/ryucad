@@ -21,6 +21,11 @@ pub(crate) struct FaceGeom<'a> {
     pub(crate) metric: Metric,
     /// The period of each direction, when it is periodic.
     pub(crate) periods: [Option<f64>; 2],
+    /// For a direction the surface is periodic in but the face is not (see
+    /// `open_unwound`), where the period holding the face starts.
+    pub(crate) wrap: [Option<f64>; 2],
+    /// The surface's own periods.
+    pub(crate) full: [Option<f64>; 2],
     pub(crate) domain: [[f64; 2]; 2],
     /// Whether the boundary row at each end (`[direction][end]`) of a
     /// direction that is not periodic shrinks to a single point: a
@@ -56,8 +61,9 @@ impl<'a> FaceGeom<'a> {
         let face = &b.faces[f];
         let surface = &b.surfaces[face.surface];
         let (pu, pv) = surface.periods();
-        let periods = [pu, pv];
         let domain = surface.domain();
+        let forward = face.sense == Sense::Forward;
+        let (periods, wrap) = open_unwound(b, f, surface, [pu, pv], forward);
         let collapsed = collapsed_rows(surface);
         // The parameter box of the face's vertices (or of its domain when
         // it has none), within the domain's finite part.
@@ -105,9 +111,11 @@ impl<'a> FaceGeom<'a> {
         Self {
             face: f,
             surface,
-            forward: face.sense == Sense::Forward,
+            forward,
             metric,
             periods,
+            wrap,
+            full: [pu, pv],
             domain,
             collapsed,
         }
@@ -144,6 +152,8 @@ impl<'a> FaceGeom<'a> {
                 if close(*x, seam) || close(*x, seam + period) {
                     *x = seam;
                 }
+            } else if let (Some(base), Some(period)) = (self.wrap[k], self.full[k]) {
+                *x = base + (*x - base).rem_euclid(period);
             } else {
                 for end in 0..2 {
                     if self.collapsed[k][end] && close(*x, self.domain[k][end]) {
@@ -165,11 +175,109 @@ impl<'a> FaceGeom<'a> {
     }
 }
 
+/// A face on a surface periodic both ways has a domain only when its
+/// loops cut it open in one direction: a torus face between two circles
+/// (a ring turned whole, or a pipe's elbow) is a strip periodic only the
+/// way its loops run. A direction no loop winds round is meshed as open,
+/// its parameters wrapped into the one period that holds the face, which
+/// starts just below where the face does: below the loop the face lies
+/// above (on the left of a loop winding round, by the face's sense), or
+/// below the face's single loop. The windings and extents are read from
+/// the face's edges, sampled, inverted and unwrapped. A face whose loops
+/// wind both ways keeps both periods (and is refused, as before).
+///
+/// Returns the periods to mesh with, and for an opened direction the start
+/// of its period.
+fn open_unwound(
+    b: &Body,
+    f: FaceId,
+    surface: &Surface,
+    periods: [Option<f64>; 2],
+    forward: bool,
+) -> ([Option<f64>; 2], [Option<f64>; 2]) {
+    const SAMPLES: usize = 16;
+    let none = (periods, [None; 2]);
+    let [Some(pu), Some(pv)] = periods else {
+        return none;
+    };
+    let period = [pu, pv];
+    // Each loop: its winding both ways, and its unwrapped extent.
+    let mut loops: Vec<([i64; 2], [[f64; 2]; 2])> = Vec::new();
+    for l in b.face_loops(f) {
+        let mut x: Vec<[f64; 2]> = Vec::new();
+        for fin in b.loop_fins(l) {
+            let e = &b.edges[b.fins[fin].edge];
+            let curve = &b.curves[e.curve];
+            let [t0, t1] = e.interval;
+            for i in 0..SAMPLES {
+                let s = i as f64 / SAMPLES as f64;
+                let s = if b.fins[fin].sense == Sense::Forward {
+                    s
+                } else {
+                    1.0 - s
+                };
+                let (u, v) = surface.project(curve.point(t0 + (t1 - t0) * s)).param;
+                let raw = [u, v];
+                let next = match x.last() {
+                    Some(p) => {
+                        core::array::from_fn(|k| super::edge::unwrap(raw[k], p[k], Some(period[k])))
+                    }
+                    None => raw,
+                };
+                x.push(next);
+            }
+        }
+        let (Some(first), Some(last)) = (x.first(), x.last()) else {
+            continue;
+        };
+        let wind: [i64; 2] = core::array::from_fn(|k| {
+            let close = super::edge::unwrap(first[k], last[k], Some(period[k]));
+            ((close - first[k]) / period[k]).round() as i64
+        });
+        let extent: [[f64; 2]; 2] = core::array::from_fn(|k| {
+            let lo = x.iter().map(|p| p[k]).fold(f64::INFINITY, f64::min);
+            let hi = x.iter().map(|p| p[k]).fold(f64::NEG_INFINITY, f64::max);
+            [lo, hi]
+        });
+        loops.push((wind, extent));
+    }
+    if loops.is_empty() {
+        return none;
+    }
+    let Some(k) = (0..2).find(|&k| loops.iter().all(|(w, _)| w[k] == 0)) else {
+        return none;
+    };
+    let j = 1 - k;
+    // The face is on the left of each loop when it uses the surface's
+    // normal: above (in v) a loop running +u, and above (in u) a loop
+    // running -v.
+    let up = if k == V { 1 } else { -1 };
+    let up = if forward { up } else { -up };
+    let below = loops.iter().find(|(w, _)| w[j] == up);
+    let lo = match below {
+        Some((_, extent)) => extent[k][0],
+        None => {
+            let widest = loops
+                .iter()
+                .max_by(|a, b| (a.1[k][1] - a.1[k][0]).total_cmp(&(b.1[k][1] - b.1[k][0])))
+                .expect("a loop");
+            widest.1[k][0]
+        }
+    };
+    let mut open = periods;
+    open[k] = None;
+    let mut wrap = [None; 2];
+    wrap[k] = Some(lo - 1e-9 * period[k]);
+    (open, wrap)
+}
+
 /// Which boundary rows of a surface collapse to a point, `[direction][end]`.
+/// An extrusion has none; a revolution's are its `v` ends on the axis.
 fn collapsed_rows(s: &Surface) -> [[bool; 2]; 2] {
     match s {
         Surface::Sphere(_) => [[false; 2], [true, true]],
         Surface::Cone(_) => [[false; 2], [true, false]],
+        Surface::Revolution(r) => [[false; 2], r.poles()],
         Surface::Nurbs(n) => {
             let [nu, nv] = n.counts();
             let (pu, pv) = n.periods();
@@ -251,5 +359,22 @@ mod tests {
         assert_eq!(g.periods[V], None);
         // The cone runs from its apex at v = -2 to its base at v = 0.
         assert_eq!(g.collapsed, [[false; 2], [true, false]]);
+    }
+
+    #[test]
+    fn an_extruded_side_is_like_a_cylinder() {
+        use crate::geom::{Circle, Curve, Extrusion, Frame, Vector3};
+        let (mut b, _) = primitive::cylinder(OpKey(1), 2.0, 3.0, &Rigid::IDENTITY).unwrap();
+        let f = side(&b);
+        let circle = Curve::Circle(Circle::new(Frame::WORLD, 2.0).unwrap());
+        let e = Extrusion::new(circle, Vector3::new(0.0, 0.0, 1.0)).unwrap();
+        let id = b.add_surface(Surface::Extrusion(Arc::new(e)));
+        crate::euler::set_surface(&mut b, f, id, Sense::Forward).unwrap();
+        let g = FaceGeom::new(&b, f);
+        assert_eq!(g.periods, [Some(TAU), None]);
+        assert_eq!(g.collapsed, [[false; 2]; 2]);
+        assert_eq!((g.metric.a, g.metric.b), (2.0, 1.0));
+        let (uv, _) = g.invert(Point3::new(2.0, -1e-10, 1.0));
+        assert_eq!(uv, Point2::new(0.0, 1.0));
     }
 }

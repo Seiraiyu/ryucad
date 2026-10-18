@@ -4,8 +4,8 @@
 //! the diff like any other change.
 
 use ryukei::geom::{
-    Affine, Box3, Circle, Circle2, Cone, Curve, Curve2, Cylinder, Ellipse, Ellipse2, Frame, Frame2,
-    Line, Line2, Plane, Point2, Point3, Rigid, Sphere, Surface, Torus, Vector2, Vector3,
+    Affine, Axis, Box3, Circle, Circle2, Cone, Curve, Curve2, Cylinder, Ellipse, Ellipse2, Frame,
+    Frame2, Line, Line2, Plane, Point2, Point3, Rigid, Sphere, Surface, Torus, Vector2, Vector3,
 };
 use ryukei::interval::Interval;
 use ryukei::math;
@@ -13,6 +13,7 @@ use ryukei::mesh::{BodyMesh, MeshParams, tessellate};
 use ryukei::name::{Event, OpKey};
 use ryukei::predicates::{self, Sign};
 use ryukei::primitive;
+use ryukei::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude, revolve};
 use ryukei_testkit::euler_script::{Bytes, start, valid_step};
 use ryukei_testkit::{Golden, Lcg, mesh, nurbs};
 
@@ -633,6 +634,113 @@ fn euler_section(golden: &mut Golden) {
     s.str(&body.dump());
 }
 
+/// A profile in a tilted frame: loops of lines and arcs, `(x, y)` pairs
+/// in order for a polygon or `(cx, cy, r)` for a whole circle.
+fn sweep_profile(loops: &[&[f64]], circle: &[bool]) -> ValidProfile {
+    let frame = Frame::new(
+        Point3::new(2.5, -1.0, 0.75),
+        Vector3::new(0.25, -0.5, 1.0),
+        Vector3::new(1.0, 0.5, 0.0),
+    )
+    .unwrap();
+    let mut key = 0u128;
+    let loops = loops
+        .iter()
+        .zip(circle)
+        .enumerate()
+        .map(|(l, (pts, &round))| {
+            let segments = if round {
+                key += 1;
+                let f = Frame2::new(Point2::new(pts[0], pts[1]), Vector2::new(1.0, 0.0), true);
+                vec![Segment {
+                    key: SegmentKey(key),
+                    curve: Curve2::Circle2(Circle2::new(f.unwrap(), pts[2]).unwrap()),
+                    t0: 0.0,
+                    t1: core::f64::consts::TAU,
+                }]
+            } else {
+                let n = pts.len() / 2;
+                (0..n)
+                    .map(|i| {
+                        key += 1;
+                        let j = (i + 1) % n;
+                        let a = Point2::new(pts[2 * i], pts[2 * i + 1]);
+                        let b = Point2::new(pts[2 * j], pts[2 * j + 1]);
+                        Segment {
+                            key: SegmentKey(key),
+                            curve: Curve2::Line2(Line2::through(a, b).unwrap()),
+                            t0: 0.0,
+                            t1: a.distance(b),
+                        }
+                    })
+                    .collect()
+            };
+            Loop {
+                key: LoopKey(l as u128 + 1),
+                segments,
+            }
+        })
+        .collect();
+    ValidProfile::new(Profile { frame, loops }).unwrap()
+}
+
+fn sweeps_section(golden: &mut Golden) {
+    let mut s = golden.section("sweeps");
+    let key = OpKey(0x7377_6570);
+    let square = [0.0, 0.0, 2.0, 0.0, 2.0, 1.5, 0.0, 1.5];
+    let off_axis = [1.0, 0.0, 2.0, 0.0, 2.0, 1.5, 1.0, 1.5];
+    let against = [0.0, 0.0, 1.0, 0.0, 1.0, 1.5, 0.0, 1.5];
+    let holed = sweep_profile(&[&square, &[1.0, 0.75, 0.4]], &[false, true]);
+    let lumps = sweep_profile(&[&square, &[4.0, 0.75, 0.5]], &[false, true]);
+    let ring = sweep_profile(&[&off_axis, &[1.5, 0.75, 0.25]], &[false, true]);
+    let torus = sweep_profile(&[&[2.0, 0.0, 0.5]], &[true]);
+    let solid = sweep_profile(&[&against], &[false]);
+    // A NURBS blob off the axis: an extrusion and a revolution.
+    let curve = nurbs::blob2(&mut Lcg::new(0x626c_6f62), Point2::new(2.0, 0.5), 0.75);
+    let [t0, t1] = curve.domain();
+    let blob = ValidProfile::new(Profile {
+        frame: *solid.frame(),
+        loops: vec![Loop {
+            key: LoopKey(1),
+            segments: vec![Segment {
+                key: SegmentKey(1),
+                curve: Curve2::Nurbs2(std::sync::Arc::new(curve)),
+                t0,
+                t1,
+            }],
+        }],
+    })
+    .unwrap();
+    let frame = holed.frame();
+    let (n, x, y) = (frame.z().get(), frame.x().get(), frame.y().get());
+    let axis = Axis::new(frame.origin(), y).unwrap();
+    let bodies = [
+        extrude(key, &holed, n, 0.0, 1.0),
+        extrude(key, &holed, n + x * 0.5, -0.25, 0.75),
+        extrude(key, &lumps, -n, 0.0, 0.5),
+        revolve(key, &ring, axis, 0.25, 2.0),
+        revolve(key, &torus, axis, 0.0, core::f64::consts::TAU),
+        revolve(key, &solid, axis, 0.0, core::f64::consts::TAU),
+        revolve(key, &solid, axis, -1.0, 1.0),
+        extrude(key, &blob, n, 0.0, 1.0),
+        revolve(key, &blob, axis, 0.0, 1.5),
+    ];
+    for result in bodies {
+        let (body, journal) = result.unwrap();
+        s.str(&body.dump());
+        for e in journal.events() {
+            if let Event::Created(n) = e {
+                s.u64(n.to_u128() as u64);
+                s.u64((n.to_u128() >> 64) as u64);
+            }
+        }
+        hash_mesh(
+            &mut s,
+            &tessellate(&body, &MeshParams::new(2e-2, 0.5)).unwrap(),
+        );
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -653,5 +761,6 @@ fn determinism() {
     primitives_section(&mut golden);
     euler_section(&mut golden);
     meshes_section(&mut golden);
+    sweeps_section(&mut golden);
     golden.finish();
 }

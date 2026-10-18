@@ -44,6 +44,37 @@ fn floats(xs: &[f64]) -> String {
     xs.iter().map(|&x| bits(x)).collect::<Vec<_>>().join(",")
 }
 
+/// A curve's kind and the exact bits of its data.
+fn curve(c: &Curve) -> String {
+    match c {
+        Curve::Line(l) => {
+            let d = l.dir().get();
+            format!(
+                "line origin={} dir={},{},{}",
+                point(l.origin()),
+                bits(d.x),
+                bits(d.y),
+                bits(d.z)
+            )
+        }
+        Curve::Circle(c) => format!("circle {} r={}", frame(c.frame()), bits(c.radius())),
+        Curve::Ellipse(e) => format!(
+            "ellipse {} major={} minor={}",
+            frame(e.frame()),
+            bits(e.major()),
+            bits(e.minor())
+        ),
+        Curve::Nurbs(n) => format!(
+            "nurbs degree={} periodic={} knots={} points={} weights={}",
+            n.degree(),
+            u8::from(n.knots().is_periodic()),
+            knots(n.knots()),
+            points(n.control_points()),
+            floats(n.weights())
+        ),
+    }
+}
+
 fn opt<I: Id>(id: Option<I>) -> String {
     id.map_or_else(|| "-".to_string(), |i| i.index().to_string())
 }
@@ -166,33 +197,7 @@ impl Body {
             ));
         }
         for (id, c) in self.curves.live() {
-            let geom = match c {
-                Curve::Line(l) => {
-                    let d = l.dir().get();
-                    format!(
-                        "line origin={} dir={},{},{}",
-                        point(l.origin()),
-                        bits(d.x),
-                        bits(d.y),
-                        bits(d.z)
-                    )
-                }
-                Curve::Circle(c) => format!("circle {} r={}", frame(c.frame()), bits(c.radius())),
-                Curve::Ellipse(e) => format!(
-                    "ellipse {} major={} minor={}",
-                    frame(e.frame()),
-                    bits(e.major()),
-                    bits(e.minor())
-                ),
-                Curve::Nurbs(n) => format!(
-                    "nurbs degree={} periodic={} knots={} points={} weights={}",
-                    n.degree(),
-                    u8::from(n.knots().is_periodic()),
-                    knots(n.knots()),
-                    points(n.control_points()),
-                    floats(n.weights())
-                ),
-            };
+            let geom = curve(c);
             line(format_args!("curve {} {geom}", id.index()));
         }
         for (id, s) in self.surfaces.live() {
@@ -211,6 +216,19 @@ impl Body {
                     bits(t.major()),
                     bits(t.minor())
                 ),
+                Surface::Extrusion(e) => {
+                    let d = e.dir().get();
+                    format!(
+                        "extrusion dir={},{},{} curve={}",
+                        bits(d.x),
+                        bits(d.y),
+                        bits(d.z),
+                        curve(e.curve())
+                    )
+                }
+                Surface::Revolution(r) => {
+                    format!("revolution {} curve={}", frame(r.frame()), curve(r.curve()))
+                }
                 Surface::Nurbs(n) => {
                     let ([p, q], [nu, nv]) = (n.degrees(), n.counts());
                     let [ku, kv] = n.knots();
@@ -344,5 +362,42 @@ mod tests {
         assert!(d.contains(" angle=3fe0000000000000"));
         assert!(d.contains("surface 6 torus "));
         assert!(d.contains(" major=4000000000000000 minor=3ff0000000000000"));
+    }
+
+    #[test]
+    fn swept_surfaces_dump_their_curves() {
+        use crate::geom::{Extrusion, Vector3};
+        use std::sync::Arc;
+        let mut b = tetrahedron();
+        let circle = Curve::Circle(Circle::new(Frame::WORLD, 2.0).unwrap());
+        let e = Extrusion::new(circle, Vector3::new(0.0, 0.0, 1.0)).unwrap();
+        b.add_surface(Surface::Extrusion(Arc::new(e)));
+        let d = b.dump();
+        assert!(d.contains(
+            "surface 4 extrusion dir=0000000000000000,0000000000000000,3ff0000000000000 \
+             curve=circle origin=0000000000000000,0000000000000000,0000000000000000 \
+             x=3ff0000000000000,0000000000000000,0000000000000000 \
+             z=0000000000000000,0000000000000000,3ff0000000000000 r=4000000000000000\n"
+        ));
+        // A torus's tube about the world z axis.
+        use crate::geom::{Point3, Revolution};
+        let tube = Frame::new(
+            Point3::new(3.0, 0.0, 0.0),
+            Vector3::new(0.0, -1.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap();
+        let tube = Curve::Circle(Circle::new(tube, 1.0).unwrap());
+        let r = Revolution::new(Frame::WORLD, tube).unwrap();
+        b.add_surface(Surface::Revolution(Arc::new(r)));
+        let d = b.dump();
+        assert!(d.contains(
+            "surface 5 revolution origin=0000000000000000,0000000000000000,0000000000000000 \
+             x=3ff0000000000000,0000000000000000,0000000000000000 \
+             z=0000000000000000,0000000000000000,3ff0000000000000 \
+             curve=circle origin=4008000000000000,0000000000000000,0000000000000000 \
+             x=3ff0000000000000,0000000000000000,0000000000000000 \
+             z=0000000000000000,bff0000000000000,0000000000000000 r=3ff0000000000000\n"
+        ));
     }
 }

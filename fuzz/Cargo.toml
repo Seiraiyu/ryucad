@@ -68,3 +68,10 @@ path = "fuzz_targets/preferences.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "sweep"
+path = "fuzz_targets/sweep.rs"
+test = false
+doc = false
+bench = false

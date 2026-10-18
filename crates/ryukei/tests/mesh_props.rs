@@ -165,3 +165,18 @@ fn threads_do_not_change_the_mesh() {
         assert_eq!(one, on(8));
     }
 }
+
+/// A NURBS cylinder turned by a hair off the axes: one interval bound over
+/// its whole side let a derivative reach zero, and the estimate refused it
+/// as billions of triangles. The estimate now bounds cell by cell.
+#[test]
+fn a_nurbs_cylinder_nearly_on_the_axes() {
+    let axis = Vector3::new(-2.0e-5, -0.005154, 0.007831)
+        .normalize()
+        .unwrap();
+    let at = Rigid::rotation(axis, 0.009361);
+    let (mut b, _) =
+        primitive::cylinder(OpKey(4), 1.5275634849023805, 1.4562347129475794, &at).unwrap();
+    convert_body(&mut b).unwrap();
+    sound(&b, &MeshParams::new(0.01, 0.5), 1, 7);
+}

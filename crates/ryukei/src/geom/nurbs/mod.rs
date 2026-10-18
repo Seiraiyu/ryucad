@@ -15,8 +15,10 @@ mod refine;
 mod surface;
 
 pub use basis::Basis;
+pub(crate) use bezier::BezierCurve;
 pub use convert::Reparam;
 pub use curve::NurbsCurve;
 pub use curve2::NurbsCurve2;
 pub use knots::{KnotVector, MAX_DEGREE};
+pub(crate) use refine::Hom;
 pub use surface::{Direction, NurbsSurface};

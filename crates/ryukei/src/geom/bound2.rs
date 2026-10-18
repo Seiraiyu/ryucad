@@ -162,6 +162,8 @@ impl Surface {
                 }
             }
             Self::Nurbs(n) => n.derivative_bound([ru, rv]),
+            Self::Extrusion(e) => e.derivative_bound([ru, rv]),
+            Self::Revolution(r) => r.derivative_bound([ru, rv]),
         }
     }
 }

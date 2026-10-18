@@ -109,7 +109,29 @@ impl NurbsCurve2 {
         Ok((Self::from_spline(a), Self::from_spline(b)))
     }
 
-    fn pieces(&self) -> &[BezierCurve<Vector2>] {
+    /// The Bézier pieces over the domain, in parameter order, built on
+    /// first use.
+    /// The part over `[t0, t1]` as a clamped curve with the same
+    /// parameters. On a periodic curve `t0` is first wrapped into the
+    /// domain and the part may run on past its end, at most one period, so
+    /// the result's domain is `[wrap(t0), wrap(t0) + t1 - t0]`; a start
+    /// within a few ulps of the domain's start is taken as it, and a range
+    /// a few ulps over a period as one period. Fails with `NonFinite`, or
+    /// `InvalidNurbs(KnotOrder)` for a range that is empty, leaves a
+    /// clamped domain, or is longer than a period.
+    pub fn part(&self, range: [f64; 2]) -> Result<Self, Error> {
+        Ok(Self::from_spline(self.spline.part(range)?))
+    }
+
+    /// The curve run backwards in clamped form: `t` becomes `a + b - t`
+    /// over the clamped domain `[a, b]`.
+    pub fn reversed(&self) -> Self {
+        Self::from_spline(self.spline.reversed())
+    }
+
+    /// The Bézier pieces over the domain, in parameter order, built on
+    /// first use.
+    pub(crate) fn pieces(&self) -> &[BezierCurve<Vector2>] {
         self.pieces.get_or_init(|| self.spline.pieces().into())
     }
 
@@ -270,5 +292,55 @@ mod tests {
             .to_nurbs([0.0, 1.0])
             .unwrap();
         assert_eq!(c.period(), Some(TAU));
+    }
+
+    #[test]
+    fn parts_and_reversals() {
+        let near = |a: Point2, b: Point2| a.distance(b) <= 1e-14;
+        // A clamped curve cut inside its domain.
+        let c = quarter();
+        let part = c.part([0.25, 0.75]).unwrap();
+        assert_eq!(part.domain(), [0.25, 0.75]);
+        for t in [0.25, 0.4, 0.75] {
+            assert!(near(part.point(t), c.point(t)));
+        }
+        let back = part.reversed();
+        assert_eq!(back.domain(), [0.25, 0.75]);
+        for t in [0.25, 0.4, 0.75] {
+            assert!(near(back.point(1.0 - t), c.point(t)));
+        }
+        assert!(c.part([0.5, 1.5]).is_err());
+        assert!(c.part([0.5, 0.5]).is_err());
+        // A periodic circle cut across its seam, past the end of its
+        // domain.
+        let frame = Frame2::new(Point2::new(1.0, 2.0), Vector2::new(1.0, 0.0), true).unwrap();
+        let circle = Curve2::Circle2(Circle2::new(frame, 3.0).unwrap());
+        let (n, _) = circle.to_nurbs([0.0, 0.0]).unwrap();
+        let part = n.part([TAU - 1.0, TAU + 2.0]).unwrap();
+        let [a, b] = part.domain();
+        assert_eq!((a, b), (TAU - 1.0, TAU + 2.0));
+        assert!(part.period().is_none());
+        for i in 0..=20 {
+            let t = a + (b - a) * f64::from(i) / 20.0;
+            assert!(near(part.point(t), n.point(t)), "at {t}");
+        }
+        // Starting before the domain wraps into it.
+        let wrapped = n.part([-1.0, 0.5]).unwrap();
+        assert_eq!(wrapped.domain(), [TAU - 1.0, TAU + 0.5]);
+        assert!(near(wrapped.point(TAU), n.point(0.0)));
+        // A whole period from anywhere.
+        let whole = n.part([1.0, 1.0 + TAU]).unwrap();
+        assert!(near(whole.point(1.0), whole.point(1.0 + TAU)));
+        assert!(n.part([0.0, TAU + 0.1]).is_err());
+        // A start a rounding error past the seam is the seam: the sliver
+        // would otherwise collapse to a repeated knot when moved round.
+        let seam = n.part([1e-16, 1.0]).unwrap();
+        assert_eq!(seam.domain(), [0.0, 1.0]);
+        let end = n.part([TAU - 1e-16, TAU + 1.0]).unwrap();
+        assert_eq!(end.domain()[0], 0.0);
+        // A whole period that overshoots by a rounding error is a period.
+        let over = n.part([0.5, 0.5 + TAU + 2e-15]).unwrap();
+        let [a, b] = over.domain();
+        assert!(b - a <= TAU);
     }
 }

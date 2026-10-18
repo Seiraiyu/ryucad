@@ -1,11 +1,12 @@
 //! OCCT, through a small C++ shim, for comparison: the same primitives
 //! built with `BRepPrimAPI`, NURBS forms through `BRepBuilderAPI_NurbsConvert`,
-//! meshes from `BRepMesh_IncrementalMesh` in absolute mode, and exact
-//! volume, area and distance from the B-rep. Only built with the `occt`
-//! feature, against a system OCCT 7.8 or later (`OCCT_DIR`, default
-//! `/usr`).
+//! sweeps from `BRepPrimAPI_MakePrism` and `BRepPrimAPI_MakeRevol` over a
+//! face built from a [`BenchProfile`], booleans from `BRepAlgoAPI_Cut`, meshes from `BRepMesh_IncrementalMesh`
+//! in absolute mode, and exact volume, area and distance from the B-rep.
+//! Only built with the `occt` feature, against a system OCCT 7.8 or later
+//! (`OCCT_DIR`, default `/usr`).
 
-use crate::{Primitive, Soup};
+use crate::{BenchProfile, Primitive, Soup};
 use ryukei::geom::{Point3, Rigid};
 
 #[cxx::bridge(namespace = "ryukei_occt")]
@@ -32,6 +33,24 @@ mod ffi {
         fn make_torus(major: f64, minor: f64) -> UniquePtr<Shape>;
         fn placed(s: &Shape, m: &[f64]) -> UniquePtr<Shape>;
         fn nurbs(s: &Shape) -> UniquePtr<Shape>;
+        fn extrude(
+            frame: &[f64],
+            sizes: &[u32],
+            segments: &[f64],
+            vector: &[f64],
+        ) -> Result<UniquePtr<Shape>>;
+        fn revolve(
+            frame: &[f64],
+            sizes: &[u32],
+            segments: &[f64],
+            axis: &[f64],
+            angle: f64,
+        ) -> Result<UniquePtr<Shape>>;
+        fn make_compound() -> UniquePtr<Shape>;
+        fn add_to_compound(compound: Pin<&mut Shape>, s: &Shape);
+        fn cut(s: &Shape, tools: &Shape, parallel: bool) -> Result<UniquePtr<Shape>>;
+        fn vertices(s: &Shape) -> Vec<f64>;
+        fn faces(s: &Shape) -> u32;
         fn mesh(s: &Shape, chord: f64, angle: f64, parallel: bool) -> OcctMesh;
         fn volume(s: &Shape) -> f64;
         fn area(s: &Shape) -> f64;
@@ -69,6 +88,49 @@ impl Solid {
     /// The same solid with every curve and surface converted to NURBS.
     pub fn to_nurbs(&self) -> Self {
         Self(ffi::nurbs(&self.0))
+    }
+
+    /// The profile's face swept `dist` along `dir`, with
+    /// `BRepPrimAPI_MakePrism`.
+    pub fn extrude(profile: &BenchProfile, dir: [f64; 3], dist: f64) -> Result<Self, String> {
+        let (frame, sizes, segments) = profile.flatten();
+        ffi::extrude(&frame, &sizes, &segments, &crate::sweep_vector(dir, dist))
+            .map(Self)
+            .map_err(|e| e.to_string())
+    }
+
+    /// The profile's face turned `angle` radians about the axis through
+    /// `axis_origin` along `axis_dir`, with `BRepPrimAPI_MakeRevol`.
+    pub fn revolve(
+        profile: &BenchProfile,
+        axis_origin: [f64; 3],
+        axis_dir: [f64; 3],
+        angle: f64,
+    ) -> Result<Self, String> {
+        let (frame, sizes, segments) = profile.flatten();
+        let axis: Vec<f64> = axis_origin.into_iter().chain(axis_dir).collect();
+        ffi::revolve(&frame, &sizes, &segments, &axis, angle)
+            .map(Self)
+            .map_err(|e| e.to_string())
+    }
+
+    /// This solid minus every one of `tools`, in one `BRepAlgoAPI_Cut`
+    /// with the tools as its tool list. On one thread unless `parallel`.
+    pub fn cut(&self, tools: &[Solid], parallel: bool) -> Self {
+        let mut compound = ffi::make_compound();
+        for t in tools {
+            ffi::add_to_compound(compound.pin_mut(), &t.0);
+        }
+        Self(ffi::cut(&self.0, &compound, parallel).expect("OCCT cuts"))
+    }
+
+    /// The B-rep's vertex positions (x, y, z flattened), in OCCT's order.
+    pub fn vertices(&self) -> Vec<f64> {
+        ffi::vertices(&self.0)
+    }
+
+    pub fn faces(&self) -> u32 {
+        ffi::faces(&self.0)
     }
 
     /// OCCT's mesh at an absolute chord (its "linear deflection") and

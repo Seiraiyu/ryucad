@@ -5,11 +5,15 @@
 #include <SmBSplineCurve.h>
 #include <SmBSplineSurface.h>
 #include <SmBrep.h>
+#include <SmCurve.h>
 #include <SmEdge.h>
 #include <SmFace.h>
+#include <SmMerge.h>
 #include <SmPoly.h>
 #include <SmPrimitiveCreation.h>
+#include <SmVertex.h>
 
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -30,8 +34,11 @@ static void check(SmStatus s, const char *what) {
 
 Body::Body() : context(std::make_unique<SmContext>()) {}
 
-// The brep before the context its objects live in.
-Body::~Body() { delete brep; }
+// The breps before the context their objects live in.
+Body::~Body() {
+  delete tools;
+  delete brep;
+}
 
 // Every surface and curve replaced by a plain B-spline copy, dropping
 // the analytic subclass (SMLib's analytic types are B-splines already).
@@ -55,11 +62,10 @@ static void to_bsplines(Body &body) {
   }
 }
 
-std::unique_ptr<Body> make(uint32_t kind, double a, double b, double c,
-                           rust::Slice<const double> at, bool nurbs) {
-  auto body = std::make_unique<Body>();
-  body->brep = new (*body->context) SmBrep();
-  SmPrimitiveCreation pc(body->brep->GetInfiniteRegion());
+// Adds the primitive to `brep`'s infinite region.
+static void create(SmBrep *brep, uint32_t kind, double a, double b, double c,
+                   rust::Slice<const double> at) {
+  SmPrimitiveCreation pc(brep->GetInfiniteRegion());
   SmAxis2Placement frame(at[0], at[1], at[2], at[3], at[4], at[5], at[6],
                          at[7], at[8]);
   switch (kind) {
@@ -78,19 +84,155 @@ std::unique_ptr<Body> make(uint32_t kind, double a, double b, double c,
   default:
     throw std::runtime_error("unknown primitive kind");
   }
+}
+
+std::unique_ptr<Body> make(uint32_t kind, double a, double b, double c,
+                           rust::Slice<const double> at, bool nurbs) {
+  auto body = std::make_unique<Body>();
+  body->brep = new (*body->context) SmBrep();
+  create(body->brep, kind, a, b, c, at);
   if (nurbs) {
     to_bsplines(*body);
   }
   return body;
 }
 
+// A profile's curves, as for the OCCT shim's `profile_face`, made the way
+// SmPrimitiveCreation makes its own sweeps' (CreateLineSegment and
+// CreateCircleSegment): SMLib finds the loops and their nesting itself.
+static void profile_curves(const SmContext &context,
+                           rust::Slice<const double> frame,
+                           rust::Slice<const uint32_t> sizes,
+                           rust::Slice<const double> segments,
+                           SmTArray<SmCurve *> &out) {
+  SmPoint3d o(frame[0], frame[1], frame[2]);
+  SmVector3d x(frame[3], frame[4], frame[5]);
+  SmVector3d y(frame[6], frame[7], frame[8]);
+  auto at = [&](double u, double v) { return o + u * x + v * y; };
+  size_t total = 0;
+  for (uint32_t size : sizes) {
+    total += size;
+  }
+  for (size_t k = 0; k < 6 * total; k += 6) {
+    const double *s = &segments[k];
+    SmBSplineCurve *curve = nullptr;
+    if (s[0] == 0.0) {
+      check(SmBSplineCurve::CreateLineSegment(context, 3, at(s[1], s[2]),
+                                              at(s[3], s[4]), curve),
+            "CreateLineSegment");
+    } else {
+      // A clockwise arc is a counterclockwise one about -y, angles negated.
+      bool ccw = s[5] > s[4];
+      SmAxis2Placement place(at(s[1], s[2]), x, ccw ? y : -y);
+      double a0 = (ccw ? s[4] : -s[4]) * DEGREES;
+      double a1 = (ccw ? s[5] : -s[5]) * DEGREES;
+      check(SmBSplineCurve::CreateCircleSegment(context, 3, place, s[3], a0,
+                                                a1, SM_CO_QUADRATIC, curve),
+            "CreateCircleSegment");
+    }
+    out.Add(curve);
+  }
+}
+
+std::unique_ptr<Body> extrude(rust::Slice<const double> frame,
+                              rust::Slice<const uint32_t> sizes,
+                              rust::Slice<const double> segments,
+                              rust::Slice<const double> vector) {
+  auto body = std::make_unique<Body>();
+  body->brep = new (*body->context) SmBrep();
+  SmTArray<SmCurve *> curves;
+  profile_curves(*body->context, frame, sizes, segments, curves);
+  SmVector3d v(vector[0], vector[1], vector[2]);
+  double length = v.Length();
+  SmPrimitiveCreation pc(body->brep->GetInfiniteRegion());
+  check(pc.CreateLinearSweep(curves, v / length, length, 1, TRUE),
+        "CreateLinearSweep");
+  return body;
+}
+
+// Caps only for a partial revolve, as SmPrimitiveCreation's own cones and
+// spheres do.
+std::unique_ptr<Body> revolve(rust::Slice<const double> frame,
+                              rust::Slice<const uint32_t> sizes,
+                              rust::Slice<const double> segments,
+                              rust::Slice<const double> axis, double angle) {
+  auto body = std::make_unique<Body>();
+  body->brep = new (*body->context) SmBrep();
+  SmTArray<SmCurve *> curves;
+  profile_curves(*body->context, frame, sizes, segments, curves);
+  double degrees = angle * DEGREES;
+  bool full = std::abs(degrees - 360.0) < 1e-9;
+  SmPrimitiveCreation pc(body->brep->GetInfiniteRegion());
+  check(pc.CreateRotationalSweep(curves, SmPoint3d(axis[0], axis[1], axis[2]),
+                                 SmVector3d(axis[3], axis[4], axis[5]),
+                                 degrees, 1, full ? FALSE : TRUE),
+        "CreateRotationalSweep");
+  return body;
+}
+
+// The tools go into one brep of their own, in the body's context (SmMerge
+// wants both breps in one), as separate lumps: they must not touch.
+void add_tool(Body &body, uint32_t kind, double a, double b, double c,
+              rust::Slice<const double> at) {
+  auto *tool = new (*body.context) SmBrep();
+  create(tool, kind, a, b, c, at);
+  if (body.tools == nullptr) {
+    body.tools = tool;
+    return;
+  }
+  SmObjDelete cleanup(tool);
+  check(body.tools->MergeBrep(*tool), "MergeBrep");
+}
+
+// SMLib's booleans and mesher run on TBB; cap it at one thread, for as
+// long as `control` lives, unless parallel.
+static void limit(std::optional<tbb::global_control> &control,
+                  bool parallel) {
+  if (!parallel) {
+    control.emplace(tbb::global_control::max_allowed_parallelism, 1);
+  }
+}
+
+// One difference with every tool at once, as with OCCT. SmMerge changes
+// the body's brep in place and deletes the tools.
+void subtract_tools(Body &body, bool parallel) {
+  if (body.tools == nullptr) {
+    throw std::runtime_error("no tools to subtract");
+  }
+  std::optional<tbb::global_control> one_thread;
+  limit(one_thread, parallel);
+  SmBrep *result = nullptr;
+  SmMerge merge(*body.context, body.brep, body.tools);
+  body.tools = nullptr;
+  check(merge.ManifoldBoolean(SM_BO_DIFFERENCE, result), "ManifoldBoolean");
+  if (result != body.brep) {
+    throw std::runtime_error("ManifoldBoolean returned another brep");
+  }
+}
+
+rust::Vec<double> vertices(const Body &body) {
+  SmTArray<SmVertex *> vertices;
+  body.brep->GetVertices(vertices);
+  rust::Vec<double> out;
+  for (ULONG i = 0; i < vertices.GetSize(); i++) {
+    SmPoint3d p = vertices[i]->GetPoint();
+    out.push_back(p.x);
+    out.push_back(p.y);
+    out.push_back(p.z);
+  }
+  return out;
+}
+
+uint32_t faces(const Body &body) {
+  SmTArray<SmFace *> faces;
+  body.brep->GetFaces(faces);
+  return static_cast<uint32_t>(faces.GetSize());
+}
+
 SmlibMesh mesh(const Body &body, double chord, double angle,
                bool parallel) {
-  // SMLib meshes faces with TBB; cap it at one thread unless parallel.
   std::optional<tbb::global_control> one_thread;
-  if (!parallel) {
-    one_thread.emplace(tbb::global_control::max_allowed_parallelism, 1);
-  }
+  limit(one_thread, parallel);
   // ConvertToPolyBrep meshes a copy, so the body is not changed.
   SmPolyBrep *poly = nullptr;
   SmBoolean failed = FALSE;

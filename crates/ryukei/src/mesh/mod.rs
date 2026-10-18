@@ -126,8 +126,15 @@ impl BodyMesh {
     }
 }
 
-/// Rounds of boundary split requests before a face gives up.
-const ROUNDS: usize = 3;
+/// The round after which an edge still asked for samples is halved all
+/// along rather than split where asked.
+const HALVE_AFTER: usize = 3;
+
+/// Rounds of boundary split requests before a face gives up. Most faces
+/// need none or one; a thin tube's band (a slot turned whole) asks for its
+/// boundary circles several times finer than the edge pass gives, and each
+/// round only halves the segments it asks about, so it takes about ten.
+const ROUNDS: usize = 12;
 
 /// One face's state between rounds.
 struct FaceWork {
@@ -197,6 +204,19 @@ pub fn tessellate(body: &Body, params: &MeshParams) -> Result<BodyMesh, Error> {
         for &(e, t) in &requests {
             extras[e.index()].push(t);
         }
+        // Remeshing a face moves its triangles, and now and then they ask
+        // for boundary samples somewhere new every round. Past the first
+        // few rounds, an edge still asked about is halved all along, so
+        // its samples close in geometrically and the asking stops.
+        if round + 1 >= HALVE_AFTER {
+            let mut asked: Vec<EdgeId> = requests.iter().map(|r| r.0).collect();
+            asked.dedup();
+            for e in asked {
+                let params = &samples[e.index()].as_ref().expect("sampled").params;
+                let mids = params.windows(2).map(|w| 0.5 * (w[0] + w[1]));
+                extras[e.index()].extend(mids);
+            }
+        }
         let mut split: Vec<EdgeId> = requests.iter().map(|r| r.0).collect();
         split.dedup();
         let resampled: Vec<(EdgeId, EdgeSamples)> = split
@@ -229,12 +249,15 @@ pub fn tessellate(body: &Body, params: &MeshParams) -> Result<BodyMesh, Error> {
     Ok(assemble::assemble(body, &geoms, &samples, &work))
 }
 
+/// Cells per direction a face's box is cut into for the estimate.
+const CELLS: usize = 8;
+
 /// A rough count of the triangles a body's mesh will have, from each
 /// face's parameter box (its edges' samples, or its domain when it has
 /// none) and the bounds over it: equilateral triangles at the size the
 /// chord allows (`M R² / 2 = chord`, area `1.3 R²`), the turn the angle
-/// allows, and the edge limit, plus two per boundary sample. It looks at
-/// the whole box, so for curved faces it errs high; it is there to refuse
+/// allows, and the edge limit, plus two per boundary sample. It bounds the
+/// box cell by cell and errs high; it is there to refuse
 /// a runaway request before meshing, not to predict exactly.
 fn estimate(
     b: &Body,
@@ -273,21 +296,35 @@ fn estimate(
         {
             continue;
         }
-        let (su, sv) = (range[0][1] - range[0][0], range[1][1] - range[1][0]);
-        let area = su * g.metric.a * sv * g.metric.b;
-        let bound = g.surface.derivative_bound(range);
-        let m = bound::second_derivative(&bound, g.metric);
-        let chord = area * m / (2.6 * params.chord);
-        let turn = |rate: f64, span: f64| {
-            if rate.is_finite() {
-                (rate * span / params.angle).ceil()
-            } else {
-                1.0
+        // Cell by cell: one bound over a whole NURBS face can let a
+        // derivative's interval reach zero and its turning rate blow up.
+        let mut face = 0.0;
+        for i in 0..CELLS {
+            for j in 0..CELLS {
+                let cut = |k: usize, c: usize| {
+                    let [a, b] = range[k];
+                    let at = |c: usize| a + (b - a) * c as f64 / CELLS as f64;
+                    [at(c), at(c + 1)]
+                };
+                let cell = [cut(0, i), cut(1, j)];
+                let (su, sv) = (cell[0][1] - cell[0][0], cell[1][1] - cell[1][0]);
+                let area = su * g.metric.a * sv * g.metric.b;
+                let bound = g.surface.derivative_bound(cell);
+                let m = bound::second_derivative(&bound, g.metric);
+                let chord = area * m / (2.6 * params.chord);
+                let turn = |rate: f64, span: f64| {
+                    if rate.is_finite() {
+                        (rate * span / params.angle).ceil()
+                    } else {
+                        1.0
+                    }
+                };
+                let angle = 2.0 * turn(bound.turn_u, su) * turn(bound.turn_v, sv);
+                let edge = params.max_edge.map_or(0.0, |e| area / (0.43 * e * e));
+                face += chord.max(angle).max(edge);
             }
-        };
-        let angle = 2.0 * turn(bound.turn_u, su) * turn(bound.turn_v, sv);
-        let edge = params.max_edge.map_or(0.0, |e| area / (0.43 * e * e));
-        total += chord.max(angle).max(edge) + 2.0 * boundary;
+        }
+        total += face + 2.0 * boundary;
     }
     if total.is_finite() && total < u64::MAX as f64 {
         total as u64
