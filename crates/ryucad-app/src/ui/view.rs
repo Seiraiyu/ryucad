@@ -28,8 +28,11 @@ pub struct View {
     reference: Option<[f64; 3]>,
     scene: Option<Scene>,
     texture: Option<egui::TextureId>,
-    /// The camera has framed the model once.
+    /// The camera has framed the whole model once: loading finished, or
+    /// the person moved the camera first.
     framed: bool,
+    /// What the camera last framed while the model loaded.
+    framing: Option<([f64; 3], [f64; 3])>,
     pivot: Option<[f64; 3]>,
     /// What the context menu was opened on.
     menu: Option<Hit>,
@@ -71,6 +74,7 @@ impl View {
             scene: None,
             texture: None,
             framed: false,
+            framing: None,
             pivot: None,
             menu: None,
         }
@@ -133,6 +137,8 @@ impl View {
     /// The camera moved by this window's hand: following stops, and the
     /// session hears of it.
     fn moved(&mut self, ws: &mut Workspace) {
+        // The person's camera from now on, loaded or not.
+        self.framed = true;
         ws.following = None;
         ws.share_camera(&self.nav.camera);
     }
@@ -219,12 +225,17 @@ impl View {
         let rect = ui.available_rect_before_wrap();
         self.rect = rect;
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
+        // Meshes arrive a body at a time: frame what has come so far, and
+        // again as more comes, until it has all come.
         if !self.framed
-            && let Some((lo, hi)) = self.bounds(ws)
+            && let Some(b) = self.bounds(ws)
         {
-            self.framed = true;
-            self.nav.fit(lo, hi);
-            ws.share_camera(&self.nav.camera);
+            if self.framing != Some(b) {
+                self.framing = Some(b);
+                self.nav.fit(b.0, b.1);
+                ws.share_camera(&self.nav.camera);
+            }
+            self.framed = ws.idle();
         }
         if let Some(c) = ws.followed_camera() {
             self.nav.camera = c.clone();

@@ -144,6 +144,57 @@ fn a_click_selects_and_agents_see_it() {
 }
 
 #[test]
+fn the_first_view_frames_the_whole_model() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new();
+    p.ok(&["part", "create", "p"]);
+    // A tiny first body, then many well away from it: their meshes arrive
+    // over many frames.
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "sphere",
+        "--id",
+        "a",
+        "--param",
+        "radius=0.5",
+    ]);
+    for i in 0..40 {
+        let (id, origin) = (format!("b{i}"), format!("{},0,0", 100 + 10 * i));
+        p.ok(&[
+            "feature", "add", "p", "box", "--id", &id, "--param", "x=10", "--param", "y=10",
+            "--param", "z=10", "--origin", &origin,
+        ]);
+    }
+    let mut h = window(&p);
+    frames(&mut h, |a| match &a.screen {
+        ryucad_app::ui::app::Screen::Opened(o) => o.ws.idle() && o.ws.model.meshes.len() == 41,
+        _ => false,
+    });
+    for _ in 0..3 {
+        h.step();
+    }
+    let o = h.state().opened();
+    let (lo, hi) = ryucad_app::core::pick::Picker::new(&o.ws.model)
+        .bounds()
+        .unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let aspect = f64::from(o.view.rect.width() / o.view.rect.height());
+    let pr = ryucad_app::core::nav::Projector::new(&o.view.nav.camera, aspect, centre, 0.2);
+    for corner in 0..8 {
+        let c = [0, 1, 2].map(|k| if corner >> k & 1 == 1 { hi[k] } else { lo[k] });
+        let n = pr.ndc(c).unwrap();
+        assert!(
+            n[0].abs() <= 1.0 && n[1].abs() <= 1.0,
+            "{c:?} is out of view at {n:?}"
+        );
+    }
+}
+
+#[test]
 fn an_agents_highlight_shows_its_label() {
     if !gpu() {
         return;
