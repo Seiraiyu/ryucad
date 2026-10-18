@@ -4,7 +4,9 @@ members = ["crates/ryukei", "crates/ryukei-bench", "crates/ryukei-testkit", "cra
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.1.0"
+# 0.0.0 in the repo: releases stamp the version from their tag
+# (scripts/stamp-version.sh, run by .github/workflows/release.yml).
+version = "0.0.0"
 edition = "2024"
 repository = "https://github.com/seiraiyu/ryucad"
 

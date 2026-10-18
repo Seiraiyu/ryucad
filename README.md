@@ -38,4 +38,4 @@ To uninstall, run `ryucad daemon stop --all`, delete `~/.ryucad` (`%USERPROFILE%
 
 ## Releasing
 
-Set `version` in the root `Cargo.toml`, merge, then push a tag `vX.Y.Z` matching it. The `Release` workflow builds and tests every target, publishes the archives with `SHA256SUMS` and both installers, and then tests the installers against the new release.
+Merge, then push a tag `vX.Y.Z` (or `vX.Y.Z-rc.1` for a prerelease). The version comes from the tag: the repo's workspace version stays `0.0.0`, and the workflow stamps the tag's version in before building. The `Release` workflow builds and tests every target, publishes the archives with `SHA256SUMS` and both installers, and then tests the installers against the new release.
