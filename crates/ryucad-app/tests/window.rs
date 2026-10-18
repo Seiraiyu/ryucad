@@ -436,6 +436,11 @@ fn a_damaged_project_is_repaired_then_opened() {
     frames(&mut h, damaged);
     h.step();
     h.get_by_label("missing_manifest");
+    // It says what a repair changes, and promises no undo it can't give
+    // (the project has no daemon, so no activity, until it opens).
+    h.get_by_label(
+        "Nothing is changed until you choose a repair, and a repair changes only the files in its planned changes. Git has the files as they were committed.",
+    );
     h.get_by_label("Repair").click();
     frames(&mut h, |a| match &a.screen {
         ryucad_app::ui::app::Screen::Damaged(d) => d.0.openable() && !d.0.busy(),
