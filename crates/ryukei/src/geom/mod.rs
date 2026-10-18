@@ -2,6 +2,7 @@
 //! plus the analytic curves and surfaces that sit in a [`Frame`], NURBS,
 //! and swept surfaces that keep their generating curve.
 
+mod axis;
 mod bbox;
 mod bound2;
 mod curve;
@@ -17,6 +18,7 @@ mod swept;
 mod transform;
 mod vector;
 
+pub use axis::Axis;
 pub use bbox::{Box2, Box3};
 pub use bound2::{CurveBound, SurfaceBound};
 pub use curve::{Circle, Curve, Line};

@@ -24,6 +24,8 @@ pub enum Error {
     /// A sweep profile that is not a valid planar region: see
     /// [`crate::sweep::ValidProfile::new`].
     InvalidProfile(ProfileError),
+    /// Extrude or revolve parameters that don't fit the profile.
+    InvalidSweep(SweepError),
 }
 
 /// Why a sweep profile was refused. Each names the caller's keys, so the
@@ -104,6 +106,9 @@ pub enum TopologyError {
     NotRemovable,
     /// The operation would split a shell in two.
     WouldDisconnect,
+    /// An operation built a body that fails `check_topology`: a kernel
+    /// bug, reported rather than handed on.
+    Inconsistent,
 }
 
 impl fmt::Display for Error {
@@ -119,6 +124,7 @@ impl fmt::Display for Error {
                 write!(f, "mesh too large: {triangles} triangles over budget")
             }
             Self::InvalidProfile(p) => write!(f, "invalid profile: {p}"),
+            Self::InvalidSweep(e) => write!(f, "invalid sweep: {e}"),
         }
     }
 }
@@ -162,9 +168,77 @@ impl fmt::Display for ProfileError {
     }
 }
 
+/// Why an extrude or a revolve refused its parameters. Segments and loops
+/// are named by the caller's keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SweepError {
+    /// An extrude direction within [`crate::tol::ANGULAR_RESOLUTION`] of
+    /// the profile's plane.
+    DirectionInPlane,
+    /// An extrude thinner than `10 × LINEAR_RESOLUTION` along the
+    /// profile's normal, or a revolve whose farthest point moves less.
+    ShortSpan,
+    /// A revolve axis that does not lie in the profile's plane.
+    AxisNotInPlane,
+    /// Revolve angles whose span is not in `(0, 2π]`.
+    BadAngle,
+    /// A segment that crosses a revolve's axis.
+    CrossesAxis { segment: SegmentKey },
+    /// A segment that touches a revolve's axis other than at its ends.
+    TouchesAxisInside { segment: SegmentKey },
+    /// A full revolve of a profile that touches the axis at a lone vertex,
+    /// the start of `segment`: the solid would meet itself in a point.
+    PinchedOnAxis { segment: SegmentKey },
+    /// A full revolve that would enclose a cavity: a hole, or a loop that
+    /// touches the axis in more than one stretch.
+    EnclosesVoid { loop_: LoopKey },
+    /// The swept solid would leave the size box.
+    OutsideSizeBox,
+}
+
+impl fmt::Display for SweepError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DirectionInPlane => f.write_str("extrude direction lies in the profile's plane"),
+            Self::ShortSpan => f.write_str("sweep shorter than resolution"),
+            Self::AxisNotInPlane => f.write_str("revolve axis is not in the profile's plane"),
+            Self::BadAngle => f.write_str("revolve angle not in (0, 2π]"),
+            Self::CrossesAxis { segment } => write!(f, "segment {:#x} crosses the axis", segment.0),
+            Self::TouchesAxisInside { segment } => {
+                write!(
+                    f,
+                    "segment {:#x} touches the axis between its ends",
+                    segment.0
+                )
+            }
+            Self::PinchedOnAxis { segment } => {
+                write!(
+                    f,
+                    "the profile touches the axis at the start of segment {:#x}",
+                    segment.0
+                )
+            }
+            Self::EnclosesVoid { loop_ } => {
+                write!(
+                    f,
+                    "a full turn of loop {:#x} would enclose a cavity",
+                    loop_.0
+                )
+            }
+            Self::OutsideSizeBox => f.write_str("the sweep leaves the size box"),
+        }
+    }
+}
+
 impl From<ProfileError> for Error {
     fn from(p: ProfileError) -> Self {
         Self::InvalidProfile(p)
+    }
+}
+
+impl From<SweepError> for Error {
+    fn from(e: SweepError) -> Self {
+        Self::InvalidSweep(e)
     }
 }
 
@@ -199,6 +273,7 @@ impl fmt::Display for TopologyError {
             Self::NotManifold => "edge does not have exactly two fins",
             Self::NotRemovable => "not in the shape this operator removes",
             Self::WouldDisconnect => "would split the shell",
+            Self::Inconsistent => "the result fails the topology check",
         })
     }
 }
@@ -251,6 +326,21 @@ mod tests {
             }
             .to_string(),
             "segment 0x3 touches itself"
+        );
+        assert_eq!(
+            Error::from(SweepError::CrossesAxis {
+                segment: SegmentKey(0x2a)
+            })
+            .to_string(),
+            "invalid sweep: segment 0x2a crosses the axis"
+        );
+        assert_eq!(
+            SweepError::EnclosesVoid { loop_: LoopKey(2) }.to_string(),
+            "a full turn of loop 0x2 would enclose a cavity"
+        );
+        assert_eq!(
+            Error::from(TopologyError::Inconsistent).to_string(),
+            "topology: the result fails the topology check"
         );
     }
 }

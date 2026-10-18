@@ -50,6 +50,8 @@ pub enum Role {
     /// A primitive's edge or vertex; its parents are the faces around it.
     Edge,
     Vertex,
+    /// An entity of an extrude or a revolve.
+    Sweep(SweepRole),
 }
 
 /// The faces of the primitives.
@@ -66,6 +68,37 @@ pub enum FaceRole {
     Bottom,
 }
 
+/// The entities of a sweep. Profile segments and loops have names of
+/// their own, made from the caller's keys, that only ever serve as
+/// parents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SweepRole {
+    /// Stand-ins for a caller's segment and loop keys.
+    Segment,
+    Loop,
+    /// The face a segment sweeps; its parent is the segment.
+    Side,
+    /// The caps a sweep starts and ends on; the parent is the lump's outer
+    /// loop.
+    StartCap,
+    EndCap,
+    /// The edge a profile vertex sweeps; its parents are the segments
+    /// before and after the vertex.
+    Lateral,
+    /// A segment's edge on a cap; its parents are the cap and the side.
+    CapEdge,
+    /// The edge of a segment that lies on a revolve's axis.
+    AxisEdge,
+    /// A profile vertex on the start cap, on the end cap, on both (a
+    /// revolve's axis) or on neither (a full revolve), or an apex where a
+    /// side meets the axis at an angle. The parents are the segments
+    /// before and after the profile vertex.
+    StartVertex,
+    EndVertex,
+    Vertex,
+    Apex,
+}
+
 impl Role {
     /// The role's fixed two-byte encoding inside a name.
     fn code(self) -> [u8; 2] {
@@ -78,6 +111,7 @@ impl Role {
             Self::Face(f) => [6, f as u8],
             Self::Edge => [7, 0],
             Self::Vertex => [8, 0],
+            Self::Sweep(r) => [9, r as u8],
         }
     }
 }
@@ -103,6 +137,20 @@ impl fmt::Display for Role {
             }),
             Self::Edge => f.write_str("edge"),
             Self::Vertex => f.write_str("vertex"),
+            Self::Sweep(r) => f.write_str(match r {
+                SweepRole::Segment => "segment",
+                SweepRole::Loop => "loop",
+                SweepRole::Side => "side",
+                SweepRole::StartCap => "start-cap",
+                SweepRole::EndCap => "end-cap",
+                SweepRole::Lateral => "lateral",
+                SweepRole::CapEdge => "cap-edge",
+                SweepRole::AxisEdge => "axis-edge",
+                SweepRole::StartVertex => "start-vertex",
+                SweepRole::EndVertex => "end-vertex",
+                SweepRole::Vertex => "sweep-vertex",
+                SweepRole::Apex => "apex",
+            }),
         }
     }
 }
@@ -226,6 +274,22 @@ mod tests {
             FaceRole::Bottom,
         ] {
             roles.push(Role::Face(f));
+        }
+        for r in [
+            SweepRole::Segment,
+            SweepRole::Loop,
+            SweepRole::Side,
+            SweepRole::StartCap,
+            SweepRole::EndCap,
+            SweepRole::Lateral,
+            SweepRole::CapEdge,
+            SweepRole::AxisEdge,
+            SweepRole::StartVertex,
+            SweepRole::EndVertex,
+            SweepRole::Vertex,
+            SweepRole::Apex,
+        ] {
+            roles.push(Role::Sweep(r));
         }
         let mut codes: Vec<[u8; 2]> = roles.iter().map(|r| r.code()).collect();
         codes.sort_unstable();
