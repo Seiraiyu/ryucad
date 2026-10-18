@@ -117,7 +117,9 @@ impl App {
                 Err(e) => failed(self, None, Some(e.message)),
             },
             Err(e) if e.code == Code::ProjectNotFound => {
-                let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+                let dir = dir
+                    .canonicalize()
+                    .map_or_else(|_| dir.to_path_buf(), ryucad::doc::project::plain);
                 failed(self, Some(dir), None);
             }
             Err(e) => failed(self, None, Some(e.message)),

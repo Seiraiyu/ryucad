@@ -2,7 +2,7 @@
 //! meaningful exit code.
 
 use clap::{Args, Parser, Subcommand};
-use ryucad::doc::project::{find_project, find_root};
+use ryucad::doc::project::{find_project, find_root, plain};
 use ryucad::error::{Code, Error, Result};
 use ryucad::live::{SelectMode, Style};
 use ryucad::proto::{Answer, PlacementArg, Position, Request, Transfer, VersionInfo};
@@ -758,7 +758,7 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
         Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
         Command::Open { dir } => {
             let dir = dir.as_ref().map_or_else(|| here.clone(), |d| here.join(d));
-            let dir = dir.canonicalize().map_err(|e| Error::io(&dir, &e))?;
+            let dir = plain(dir.canonicalize().map_err(|e| Error::io(&dir, &e))?);
             // A damaged project, or a folder that isn't one, opens in the
             // app too: it offers to repair or create one.
             let root = match find_project(&dir) {
