@@ -33,6 +33,17 @@ fn a_lost_daemon_is_replaced_and_the_window_catches_up() {
     let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     frames(&mut ws, |ws| ws.idle() && ws.model.meshes.len() == 2);
     let (before, me) = (boss_hash(&ws), ws.me().to_owned());
+    // The window's camera, shared before the daemon goes.
+    let camera = ryucad::view::frame(
+        [0.0; 3],
+        [0.01; 3],
+        ryucad::view::StandardView::Front,
+        ryucad::view::DEFAULT_PROJECTION,
+    );
+    ws.share_camera(&camera);
+    frames(&mut ws, |ws| {
+        ws.people.get(ws.me()).is_some_and(|m| m.camera.is_some())
+    });
     p.ok(&["daemon", "stop"]);
     frames(&mut ws, |ws| ws.lost);
     // The last state stays on screen while the window is lost.
@@ -54,6 +65,10 @@ fn a_lost_daemon_is_replaced_and_the_window_catches_up() {
     });
     assert_ne!(ws.me(), me);
     assert!(ws.people.get(ws.me()).is_some());
+    // The new session hears the window's camera again, unmoved.
+    frames(&mut ws, |ws| {
+        ws.people.get(ws.me()).is_some_and(|m| m.camera.is_some())
+    });
     // While it was away a part went: it goes from the window too.
     p.ok(&["daemon", "stop"]);
     frames(&mut ws, |ws| ws.lost);

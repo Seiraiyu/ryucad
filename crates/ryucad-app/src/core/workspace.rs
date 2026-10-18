@@ -106,6 +106,8 @@ pub struct Workspace {
     /// The camera to share, and when one was last shared.
     camera_due: Option<Camera>,
     camera_sent: Option<Instant>,
+    /// The camera last shared, to share again with a new daemon.
+    camera_last: Option<Camera>,
     daemon: Daemon,
     name: String,
     wake: Wake,
@@ -133,6 +135,7 @@ impl Workspace {
             raised: false,
             camera_due: None,
             camera_sent: None,
+            camera_last: None,
             errors: Vec::new(),
             error_at: None,
             lost: false,
@@ -286,8 +289,6 @@ impl Workspace {
         self.tick(Instant::now());
     }
 
-    /// Sends a camera that is due, and reconnects a lost window when it is
-    /// time. Call it every frame.
     fn fail(&mut self, e: Error) {
         self.errors.push(e);
         self.error_at = Some(Instant::now());
@@ -308,6 +309,8 @@ impl Workspace {
             .filter(|d| !d.is_zero())
     }
 
+    /// Sends a camera that is due, and reconnects a lost window when it is
+    /// time. Call it every frame.
     pub fn tick(&mut self, now: Instant) {
         if self.lost {
             self.reconnect(now);
@@ -318,6 +321,7 @@ impl Workspace {
             .is_none_or(|t| now.saturating_duration_since(t) >= CAMERA_EVERY);
         if ready && let Some(c) = self.camera_due.take() {
             self.camera_sent = Some(now);
+            self.camera_last = Some(c.clone());
             let req = Request::CameraSet {
                 camera: Some(camera_arg(&c)),
                 view: None,
@@ -377,6 +381,11 @@ impl Workspace {
         self.link = link;
         self.lost = false;
         self.lost_why = None;
+        // A new session knows nothing of this window's camera: tell it.
+        if self.camera_due.is_none() {
+            self.camera_due = self.camera_last.clone();
+        }
+        self.camera_sent = None;
         if self
             .following
             .as_ref()
