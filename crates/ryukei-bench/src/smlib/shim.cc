@@ -7,8 +7,10 @@
 #include <SmBrep.h>
 #include <SmEdge.h>
 #include <SmFace.h>
+#include <SmMerge.h>
 #include <SmPoly.h>
 #include <SmPrimitiveCreation.h>
+#include <SmVertex.h>
 
 #include <memory>
 #include <optional>
@@ -30,8 +32,11 @@ static void check(SmStatus s, const char *what) {
 
 Body::Body() : context(std::make_unique<SmContext>()) {}
 
-// The brep before the context its objects live in.
-Body::~Body() { delete brep; }
+// The breps before the context their objects live in.
+Body::~Body() {
+  delete tools;
+  delete brep;
+}
 
 // Every surface and curve replaced by a plain B-spline copy, dropping
 // the analytic subclass (SMLib's analytic types are B-splines already).
@@ -55,11 +60,10 @@ static void to_bsplines(Body &body) {
   }
 }
 
-std::unique_ptr<Body> make(uint32_t kind, double a, double b, double c,
-                           rust::Slice<const double> at, bool nurbs) {
-  auto body = std::make_unique<Body>();
-  body->brep = new (*body->context) SmBrep();
-  SmPrimitiveCreation pc(body->brep->GetInfiniteRegion());
+// Adds the primitive to `brep`'s infinite region.
+static void create(SmBrep *brep, uint32_t kind, double a, double b, double c,
+                   rust::Slice<const double> at) {
+  SmPrimitiveCreation pc(brep->GetInfiniteRegion());
   SmAxis2Placement frame(at[0], at[1], at[2], at[3], at[4], at[5], at[6],
                          at[7], at[8]);
   switch (kind) {
@@ -78,19 +82,82 @@ std::unique_ptr<Body> make(uint32_t kind, double a, double b, double c,
   default:
     throw std::runtime_error("unknown primitive kind");
   }
+}
+
+std::unique_ptr<Body> make(uint32_t kind, double a, double b, double c,
+                           rust::Slice<const double> at, bool nurbs) {
+  auto body = std::make_unique<Body>();
+  body->brep = new (*body->context) SmBrep();
+  create(body->brep, kind, a, b, c, at);
   if (nurbs) {
     to_bsplines(*body);
   }
   return body;
 }
 
+// The tools go into one brep of their own, in the body's context (SmMerge
+// wants both breps in one), as separate lumps: they must not touch.
+void add_tool(Body &body, uint32_t kind, double a, double b, double c,
+              rust::Slice<const double> at) {
+  auto *tool = new (*body.context) SmBrep();
+  create(tool, kind, a, b, c, at);
+  if (body.tools == nullptr) {
+    body.tools = tool;
+    return;
+  }
+  SmObjDelete cleanup(tool);
+  check(body.tools->MergeBrep(*tool), "MergeBrep");
+}
+
+// SMLib's booleans and mesher run on TBB; cap it at one thread, for as
+// long as `control` lives, unless parallel.
+static void limit(std::optional<tbb::global_control> &control,
+                  bool parallel) {
+  if (!parallel) {
+    control.emplace(tbb::global_control::max_allowed_parallelism, 1);
+  }
+}
+
+// One difference with every tool at once, as with OCCT. SmMerge changes
+// the body's brep in place and deletes the tools.
+void subtract_tools(Body &body, bool parallel) {
+  if (body.tools == nullptr) {
+    throw std::runtime_error("no tools to subtract");
+  }
+  std::optional<tbb::global_control> one_thread;
+  limit(one_thread, parallel);
+  SmBrep *result = nullptr;
+  SmMerge merge(*body.context, body.brep, body.tools);
+  body.tools = nullptr;
+  check(merge.ManifoldBoolean(SM_BO_DIFFERENCE, result), "ManifoldBoolean");
+  if (result != body.brep) {
+    throw std::runtime_error("ManifoldBoolean returned another brep");
+  }
+}
+
+rust::Vec<double> vertices(const Body &body) {
+  SmTArray<SmVertex *> vertices;
+  body.brep->GetVertices(vertices);
+  rust::Vec<double> out;
+  for (ULONG i = 0; i < vertices.GetSize(); i++) {
+    SmPoint3d p = vertices[i]->GetPoint();
+    out.push_back(p.x);
+    out.push_back(p.y);
+    out.push_back(p.z);
+  }
+  return out;
+}
+
+uint32_t faces(const Body &body) {
+  SmTArray<SmFace *> faces;
+  body.brep->GetFaces(faces);
+  return static_cast<uint32_t>(faces.GetSize());
+}
+
 SmlibMesh mesh(const Body &body, double chord, double angle,
                bool parallel) {
-  // SMLib meshes faces with TBB; cap it at one thread unless parallel.
   std::optional<tbb::global_control> one_thread;
-  if (!parallel) {
-    one_thread.emplace(tbb::global_control::max_allowed_parallelism, 1);
-  }
+  limit(one_thread, parallel);
   // ConvertToPolyBrep meshes a copy, so the body is not changed.
   SmPolyBrep *poly = nullptr;
   SmBoolean failed = FALSE;

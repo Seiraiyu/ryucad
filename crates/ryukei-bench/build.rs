@@ -37,6 +37,7 @@ fn occt() {
         "TKGeomAlgo",
         "TKTopAlgo",
         "TKPrim",
+        "TKBO",
         "TKMesh",
     ] {
         println!("cargo:rustc-link-lib={lib}");

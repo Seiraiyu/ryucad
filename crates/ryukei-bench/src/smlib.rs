@@ -1,8 +1,8 @@
 //! SMLib, the B-rep kernel in NVIDIA's USD BRep (Apache-2.0), through a
 //! small C++ shim, for comparison: the same primitives built with
 //! `SmPrimitiveCreation`, NURBS forms by replacing every surface and
-//! curve with a plain B-spline copy, and meshes from
-//! `SmBrep::ConvertToPolyBrep`, SMLib's one-call mesher. Only built with
+//! curve with a plain B-spline copy, booleans from `SmMerge`, and meshes
+//! from `SmBrep::ConvertToPolyBrep`, SMLib's one-call mesher. Only built with
 //! the `smlib` feature, against a `libsmlib.so` built from usd-brep's
 //! `source/SMLib` (`SMLIB_DIR`, default `/usr/local`; the devcontainer
 //! builds it).
@@ -49,6 +49,17 @@ mod ffi {
             at: &[f64],
             nurbs: bool,
         ) -> Result<UniquePtr<Body>>;
+        fn add_tool(
+            body: Pin<&mut Body>,
+            kind: u32,
+            a: f64,
+            b: f64,
+            c: f64,
+            at: &[f64],
+        ) -> Result<()>;
+        fn subtract_tools(body: Pin<&mut Body>, parallel: bool) -> Result<()>;
+        fn vertices(body: &Body) -> Vec<f64>;
+        fn faces(body: &Body) -> u32;
         fn mesh(b: &Body, chord: f64, angle: f64, parallel: bool) -> Result<SmlibMesh>;
     }
 }
@@ -63,23 +74,53 @@ unsafe impl Send for ffi::Body {}
 /// An SMLib solid.
 pub struct Solid(cxx::UniquePtr<ffi::Body>);
 
+/// SMLib's arguments for a primitive moved by `at`: the kind, three
+/// sizes, and the frame.
+fn args(p: Primitive, at: &Rigid) -> (u32, f64, f64, f64, [f64; 9]) {
+    let r = at.rotation_matrix();
+    let t = at.translation_part();
+    let m = [
+        t.x, t.y, t.z, r[0][0], r[1][0], r[2][0], r[0][1], r[1][1], r[2][1],
+    ];
+    let (kind, a, b, c) = match p {
+        Primitive::Block([x, y, z]) => (0, x, y, z),
+        Primitive::Cylinder { r, h } => (1, r, r, h),
+        Primitive::Cone { r0, r1, h } => (1, r0, r1, h),
+        Primitive::Sphere(r) => (2, r, 0.0, 0.0),
+        Primitive::Torus { major, minor } => (3, major, minor, 0.0),
+    };
+    (kind, a, b, c, m)
+}
+
 impl Solid {
     /// A primitive moved by `at`, with every surface and curve a plain
     /// B-spline if `nurbs`.
     pub fn new(p: Primitive, at: &Rigid, nurbs: bool) -> Self {
-        let r = at.rotation_matrix();
-        let t = at.translation_part();
-        let m = [
-            t.x, t.y, t.z, r[0][0], r[1][0], r[2][0], r[0][1], r[1][1], r[2][1],
-        ];
-        let (kind, a, b, c) = match p {
-            Primitive::Block([x, y, z]) => (0, x, y, z),
-            Primitive::Cylinder { r, h } => (1, r, r, h),
-            Primitive::Cone { r0, r1, h } => (1, r0, r1, h),
-            Primitive::Sphere(r) => (2, r, 0.0, 0.0),
-            Primitive::Torus { major, minor } => (3, major, minor, 0.0),
-        };
+        let (kind, a, b, c, m) = args(p, at);
         Self(ffi::make(kind, a, b, c, &m, nurbs).expect("SMLib builds the primitive"))
+    }
+
+    /// Adds a primitive moved by `at` to the tools that
+    /// [`subtract_tools`](Self::subtract_tools) takes away. Tools must
+    /// not touch each other.
+    pub fn add_tool(&mut self, p: Primitive, at: &Rigid) {
+        let (kind, a, b, c, m) = args(p, at);
+        ffi::add_tool(self.0.pin_mut(), kind, a, b, c, &m).expect("SMLib builds the tool");
+    }
+
+    /// This solid minus every tool added, in one `SmMerge` difference.
+    /// On one thread unless `parallel`.
+    pub fn subtract_tools(&mut self, parallel: bool) {
+        ffi::subtract_tools(self.0.pin_mut(), parallel).expect("SMLib subtracts");
+    }
+
+    /// The B-rep's vertex positions (x, y, z flattened), in SMLib's order.
+    pub fn vertices(&self) -> Vec<f64> {
+        ffi::vertices(&self.0)
+    }
+
+    pub fn faces(&self) -> u32 {
+        ffi::faces(&self.0)
     }
 
     /// SMLib's mesh at an absolute chord and angle (radians, used for

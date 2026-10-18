@@ -1,6 +1,7 @@
 #include "ryukei-bench/src/occt/shim.h"
 #include "ryukei-bench/src/occt.rs.h"
 
+#include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_NurbsConvert.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
@@ -12,13 +13,21 @@
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepPrimAPI_MakeTorus.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <GProp_GProps.hxx>
 #include <Poly_Triangulation.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <gp_Trsf.hxx>
+
+#include <stdexcept>
 
 namespace ryukei_occt {
 
@@ -56,6 +65,56 @@ std::unique_ptr<Shape> placed(const Shape &s, rust::Slice<const double> m) {
 
 std::unique_ptr<Shape> nurbs(const Shape &s) {
   return wrap(BRepBuilderAPI_NurbsConvert(s.shape, true).Shape());
+}
+
+std::unique_ptr<Shape> make_compound() {
+  TopoDS_Compound c;
+  BRep_Builder().MakeCompound(c);
+  return wrap(c);
+}
+
+void add_to_compound(Shape &compound, const Shape &s) {
+  BRep_Builder().Add(compound.shape, s.shape);
+}
+
+// One cut with every member of the compound `tools` as a tool, which is
+// how OCCT's Boolean Operations take many tools: cutting them one at a
+// time would intersect the growing result again at every step.
+std::unique_ptr<Shape> cut(const Shape &s, const Shape &tools, bool parallel) {
+  TopTools_ListOfShape arguments, list;
+  arguments.Append(s.shape);
+  for (TopoDS_Iterator it(tools.shape); it.More(); it.Next()) {
+    list.Append(it.Value());
+  }
+  BRepAlgoAPI_Cut op;
+  op.SetArguments(arguments);
+  op.SetTools(list);
+  op.SetRunParallel(parallel);
+  op.Build();
+  if (!op.IsDone() || op.HasErrors()) {
+    throw std::runtime_error("BRepAlgoAPI_Cut failed");
+  }
+  return wrap(op.Shape());
+}
+
+// The B-rep's vertex positions (x, y, z flattened), in TopExp's order.
+rust::Vec<double> vertices(const Shape &s) {
+  TopTools_IndexedMapOfShape map;
+  TopExp::MapShapes(s.shape, TopAbs_VERTEX, map);
+  rust::Vec<double> out;
+  for (int i = 1; i <= map.Extent(); ++i) {
+    gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(map(i)));
+    out.push_back(p.X());
+    out.push_back(p.Y());
+    out.push_back(p.Z());
+  }
+  return out;
+}
+
+uint32_t faces(const Shape &s) {
+  TopTools_IndexedMapOfShape map;
+  TopExp::MapShapes(s.shape, TopAbs_FACE, map);
+  return static_cast<uint32_t>(map.Extent());
 }
 
 OcctMesh mesh(const Shape &s, double chord, double angle, bool parallel) {

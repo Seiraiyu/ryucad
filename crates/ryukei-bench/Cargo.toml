@@ -56,3 +56,8 @@ required-features = ["smlib"]
 [[test]]
 name = "kernels"
 required-features = ["occt", "smlib"]
+
+# The SMLib spike (design 27, stage 0): booleans, speed and repeatability.
+[[test]]
+name = "spike"
+required-features = ["occt", "smlib"]
