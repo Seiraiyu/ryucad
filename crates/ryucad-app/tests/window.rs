@@ -506,3 +506,27 @@ fn the_start_window_reopens_recent_projects_and_creates_new_ones() {
     });
     assert!(p.root.parent().unwrap().join("empty/ryucad.json").is_file());
 }
+
+#[test]
+fn a_typed_folder_path_opens_without_the_os_dialog() {
+    if !gpu() {
+        return;
+    }
+    use ryucad_app::ui::app::Screen;
+    let p = Project::new().with_part();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .wgpu()
+        .build_eframe(|cc| App::open(&cc.egui_ctx, None, ryucad()));
+    h.step();
+    h.get_by_label("Folder path").click();
+    h.step();
+    h.get_by_label("Folder path")
+        .type_text(&p.root.display().to_string());
+    h.step();
+    h.get_by_label("Open folder").click();
+    frames(&mut h, |a| {
+        matches!(a.screen, Screen::Opened(_)) && a.opened().ws.idle()
+    });
+    assert_eq!(h.state().opened().ws.root, p.root);
+}

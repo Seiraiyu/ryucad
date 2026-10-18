@@ -24,6 +24,9 @@ pub struct Start {
     /// A folder that was opened but isn't a project.
     pub not_a_project: Option<PathBuf>,
     pub error: Option<String>,
+    /// A folder typed or pasted in: for when the OS has no folder dialog
+    /// (no desktop portal on Linux), or the path is at hand.
+    pub typed: String,
 }
 
 impl Start {
@@ -37,6 +40,7 @@ impl Start {
             textures: BTreeMap::new(),
             not_a_project: None,
             error: None,
+            typed: String::new(),
         }
     }
 
@@ -73,6 +77,20 @@ pub fn show(ui: &mut egui::Ui, start: &mut Start) -> Option<Action> {
         {
             action = Some(Action::Open(dir));
         }
+        ui.horizontal(|ui| {
+            let name = ui.label("Folder path");
+            let field = ui
+                .add(egui::TextEdit::singleline(&mut start.typed).desired_width(420.0))
+                .labelled_by(name.id);
+            let typed = start.typed.trim();
+            let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.add_enabled(!typed.is_empty(), egui::Button::new("Open folder")).clicked()
+                || entered)
+                && !typed.is_empty()
+            {
+                action = Some(Action::Open(PathBuf::from(typed)));
+            }
+        });
         if let Some(e) = &start.error {
             ui.colored_label(ui.visuals().error_fg_color, e);
         }
