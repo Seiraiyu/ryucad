@@ -154,6 +154,8 @@ pub struct DrawList<'a> {
     pub perspective: [f32; 2],
     /// Faces painted over, last on top.
     pub faces: &'a [PaintedFace],
+    /// The background, sRGB: see [`crate::ui::style::viewport_background`].
+    pub background: [f32; 3],
 }
 
 pub struct Scene {
@@ -453,7 +455,7 @@ impl Scene {
         let t = self.target.as_ref().expect("made above");
         let mut enc = device.create_command_encoder(&Default::default());
         {
-            let bg = linear(theme::BACKGROUND);
+            let bg = linear(list.background);
             let (view, resolve) = match &t.color {
                 Some(msaa) => (msaa, Some(&t.view)),
                 None => (&t.view, None),

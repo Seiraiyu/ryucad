@@ -372,6 +372,7 @@ impl View {
             light: scene::light(&pr.camera),
             edges: self.edges,
             faces,
+            background: crate::ui::style::viewport_background(ui.visuals().dark_mode),
         };
         let view = scene.render(&rs.device, &rs.queue, px, &list);
         let mut renderer = rs.renderer.write();

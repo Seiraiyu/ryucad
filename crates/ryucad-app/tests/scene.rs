@@ -37,7 +37,8 @@ fn the_model_is_drawn_with_its_edges_and_painted_faces() {
     let mut scene = Scene::new(&device, &adapter);
     scene.sync(&device, &ws.model, centre);
     let size = 160u32;
-    let mut draw = |edges: bool, faces: &[scene::PaintedFace]| {
+    let mut background = theme::BACKGROUND;
+    let mut draw = |edges: bool, faces: &[scene::PaintedFace], background: [f32; 3]| {
         let list = DrawList {
             reference: centre,
             matrix: pr.matrix(centre),
@@ -45,12 +46,13 @@ fn the_model_is_drawn_with_its_edges_and_painted_faces() {
             light: scene::light(&camera),
             edges,
             faces,
+            background,
         };
         scene.render(&device, &queue, [size, size], &list);
         scene.read_pixels(&device, &queue).unwrap().2
     };
     let at = |px: &[u8], x: u32, y: u32| px[((y * size + x) * 4) as usize..][..3].to_vec();
-    let plain = draw(true, &[]);
+    let plain = draw(true, &[], background);
     // The corner is background; the middle, the top of the box, is lit
     // surface.
     assert!(close(&at(&plain, 0, 0), srgb(theme::BACKGROUND), 2));
@@ -59,7 +61,7 @@ fn the_model_is_drawn_with_its_edges_and_painted_faces() {
     assert!(mid[0].abs_diff(mid[2]) < 20, "grey: {mid:?}");
     // Edges darken pixels; without them there are fewer dark ones.
     let dark = |px: &[u8]| px.chunks(4).filter(|c| c[0] < 80).count();
-    assert!(dark(&plain) > dark(&draw(false, &[])));
+    assert!(dark(&plain) > dark(&draw(false, &[], background)));
     // Painting the face in the middle colours it.
     let hit = picker
         .pick(
@@ -75,11 +77,16 @@ fn the_model_is_drawn_with_its_edges_and_painted_faces() {
         .iter()
         .position(|f| hit.entity.ends_with(&ryucad::mesh::name_hex(&f.name)))
         .unwrap();
-    let painted = draw(true, &[(key, face, linear(theme::NOTE))]);
+    let painted = draw(true, &[(key, face, linear(theme::NOTE))], background);
     let blue = at(&painted, size / 2, size / 2);
     assert!(blue[2] > blue[0] + 40, "{blue:?}");
     // The same frame twice is the same pixels.
-    assert_eq!(draw(true, &[]), plain);
+    assert_eq!(draw(true, &[], background), plain);
+    // The dark theme's background.
+    background = ryucad_app::ui::style::viewport_background(true);
+    let dark_frame = draw(true, &[], background);
+    assert!(close(&at(&dark_frame, 0, 0), srgb(background), 2));
+    assert!(at(&dark_frame, 0, 0)[0] < 90, "{:?}", at(&dark_frame, 0, 0));
 }
 
 /// Edges hidden behind a face stay hidden, even zoomed in close: the eye
@@ -152,6 +159,7 @@ fn hidden_edges_stay_hidden_close_up() {
         light: scene::light(&camera),
         edges: true,
         faces: &[],
+        background: theme::BACKGROUND,
     };
     scene.render(&device, &queue, [size, size], &list);
     let px = scene.read_pixels(&device, &queue).unwrap().2;
