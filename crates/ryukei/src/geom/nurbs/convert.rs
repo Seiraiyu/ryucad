@@ -189,11 +189,13 @@ fn revolve(frame: &Frame, knots: KnotVector, profile: &Profile) -> Result<NurbsS
 }
 
 impl Surface {
-    /// The exact NURBS form of an analytic surface and how each parameter
-    /// relates. `ranges` bounds the unbounded directions (both for a plane,
-    /// `v` for a cylinder or cone); closed directions and a sphere's `v`
-    /// convert whole and ignore their range; a NURBS is returned as it is.
-    /// A cone's `v` range must not go below its apex (`Degenerate`). Otherwise fails like
+    /// The exact NURBS form of an analytic or swept surface and how each
+    /// parameter relates. `ranges` bounds the unbounded directions (both
+    /// for a plane, `v` for a cylinder, cone or extrusion); closed
+    /// directions and a sphere's `v` convert whole and ignore their range;
+    /// a NURBS is returned as it is. An extrusion is its curve's NURBS
+    /// (see [`Curve::to_nurbs`]) times a degree 1 `v`. A cone's `v` range
+    /// must not go below its apex (`Degenerate`). Otherwise fails like
     /// [`Line::to_nurbs`].
     pub fn to_nurbs(&self, ranges: [[f64; 2]; 2]) -> Result<(NurbsSurface, [Reparam; 2]), Error> {
         let [[u0, u1], [v0, v1]] = ranges;
@@ -245,6 +247,21 @@ impl Surface {
                 Ok((revolve(f, turn_knots()?, &profile)?, round))
             }
             Self::Nurbs(n) => Ok(((**n).clone(), [Reparam::Identity; 2])),
+            Self::Extrusion(e) => {
+                let (c, r) = e.curve().to_nurbs([u0, u1])?;
+                let d = e.dir().get();
+                let mut points = Vec::with_capacity(2 * c.control_points().len());
+                let mut weights = Vec::with_capacity(points.capacity());
+                for (q, &w) in c.control_points().zip(c.weights()) {
+                    for v in [v0, v1] {
+                        points.push(q + d * v);
+                        weights.push(w);
+                    }
+                }
+                let s =
+                    NurbsSurface::new([c.knots().clone(), line(v0, v1)?], points, Some(weights))?;
+                Ok((s, [r, Reparam::Identity]))
+            }
         }
     }
 }

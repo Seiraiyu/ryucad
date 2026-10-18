@@ -166,6 +166,7 @@ impl<'a> FaceGeom<'a> {
 }
 
 /// Which boundary rows of a surface collapse to a point, `[direction][end]`.
+/// An extrusion has none.
 fn collapsed_rows(s: &Surface) -> [[bool; 2]; 2] {
     match s {
         Surface::Sphere(_) => [[false; 2], [true, true]],
@@ -251,5 +252,22 @@ mod tests {
         assert_eq!(g.periods[V], None);
         // The cone runs from its apex at v = -2 to its base at v = 0.
         assert_eq!(g.collapsed, [[false; 2], [true, false]]);
+    }
+
+    #[test]
+    fn an_extruded_side_is_like_a_cylinder() {
+        use crate::geom::{Circle, Curve, Extrusion, Frame, Vector3};
+        let (mut b, _) = primitive::cylinder(OpKey(1), 2.0, 3.0, &Rigid::IDENTITY).unwrap();
+        let f = side(&b);
+        let circle = Curve::Circle(Circle::new(Frame::WORLD, 2.0).unwrap());
+        let e = Extrusion::new(circle, Vector3::new(0.0, 0.0, 1.0)).unwrap();
+        let id = b.add_surface(Surface::Extrusion(Arc::new(e)));
+        crate::euler::set_surface(&mut b, f, id, Sense::Forward).unwrap();
+        let g = FaceGeom::new(&b, f);
+        assert_eq!(g.periods, [Some(TAU), None]);
+        assert_eq!(g.collapsed, [[false; 2]; 2]);
+        assert_eq!((g.metric.a, g.metric.b), (2.0, 1.0));
+        let (uv, _) = g.invert(Point3::new(2.0, -1e-10, 1.0));
+        assert_eq!(uv, Point2::new(0.0, 1.0));
     }
 }

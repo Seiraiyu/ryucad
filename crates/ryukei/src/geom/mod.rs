@@ -1,5 +1,6 @@
 //! Points, vectors, transforms and bounding boxes, all f64 in model meters,
-//! plus the analytic curves and surfaces that sit in a [`Frame`].
+//! plus the analytic curves and surfaces that sit in a [`Frame`], NURBS,
+//! and swept surfaces that keep their generating curve.
 
 mod bbox;
 mod bound2;
@@ -12,6 +13,7 @@ mod nurbs;
 mod point;
 mod project;
 mod surface;
+mod swept;
 mod transform;
 mod vector;
 
@@ -30,5 +32,6 @@ pub(crate) use nurbs::{BezierCurve, Hom};
 pub use point::{Point2, Point3};
 pub use project::Projection;
 pub use surface::{Cone, Cylinder, Plane, Sphere, Surface, Torus};
+pub use swept::Extrusion;
 pub use transform::{Affine, Rigid};
 pub use vector::{UnitVector3, Vector2, Vector3};
