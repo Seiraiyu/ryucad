@@ -235,6 +235,28 @@ impl BenchProfile {
         ValidProfile::new(Profile { frame, loops })
     }
 
+    /// A regular `n`-gon of circumradius 1 centred at `(2, 0)` in the
+    /// world's xy plane, for timing: off the y axis, so it revolves.
+    pub fn polygon(n: usize) -> Self {
+        let at = |i: usize| {
+            let a = 2.0 * core::f64::consts::PI * i as f64 / n as f64;
+            [2.0 + cos(a), sin(a)]
+        };
+        Self {
+            origin: [0.0; 3],
+            x: [1.0, 0.0, 0.0],
+            y: [0.0, 1.0, 0.0],
+            loops: vec![
+                (0..n)
+                    .map(|i| BenchSegment::Line {
+                        a: at(i),
+                        b: at((i + 1) % n),
+                    })
+                    .collect(),
+            ],
+        }
+    }
+
     /// The oriented profile flattened for the C++ shims: the frame
     /// (origin, x, y), each loop's segment count, and six numbers per
     /// segment: 0 and a line's ends, or 1 and an arc's centre, radius and

@@ -43,6 +43,10 @@ name = "mesh"
 harness = false
 
 [[bench]]
+name = "sweep"
+harness = false
+
+[[bench]]
 name = "occt"
 harness = false
 required-features = ["occt"]
