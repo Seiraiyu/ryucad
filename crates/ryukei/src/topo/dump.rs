@@ -226,6 +226,9 @@ impl Body {
                         curve(e.curve())
                     )
                 }
+                Surface::Revolution(r) => {
+                    format!("revolution {} curve={}", frame(r.frame()), curve(r.curve()))
+                }
                 Surface::Nurbs(n) => {
                     let ([p, q], [nu, nv]) = (n.degrees(), n.counts());
                     let [ku, kv] = n.knots();
@@ -375,6 +378,26 @@ mod tests {
              curve=circle origin=0000000000000000,0000000000000000,0000000000000000 \
              x=3ff0000000000000,0000000000000000,0000000000000000 \
              z=0000000000000000,0000000000000000,3ff0000000000000 r=4000000000000000\n"
+        ));
+        // A torus's tube about the world z axis.
+        use crate::geom::{Point3, Revolution};
+        let tube = Frame::new(
+            Point3::new(3.0, 0.0, 0.0),
+            Vector3::new(0.0, -1.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap();
+        let tube = Curve::Circle(Circle::new(tube, 1.0).unwrap());
+        let r = Revolution::new(Frame::WORLD, tube).unwrap();
+        b.add_surface(Surface::Revolution(Arc::new(r)));
+        let d = b.dump();
+        assert!(d.contains(
+            "surface 5 revolution origin=0000000000000000,0000000000000000,0000000000000000 \
+             x=3ff0000000000000,0000000000000000,0000000000000000 \
+             z=0000000000000000,0000000000000000,3ff0000000000000 \
+             curve=circle origin=4008000000000000,0000000000000000,0000000000000000 \
+             x=3ff0000000000000,0000000000000000,0000000000000000 \
+             z=0000000000000000,bff0000000000000,0000000000000000 r=3ff0000000000000\n"
         ));
     }
 }

@@ -5,7 +5,7 @@
 
 use proptest::prelude::*;
 use ryukei::geom::{
-    Circle, Curve, Ellipse, Extrusion, Frame, NurbsCurve, Point3, Surface, Vector3,
+    Circle, Curve, Ellipse, Extrusion, Frame, NurbsCurve, Point3, Revolution, Surface, Vector3,
 };
 use ryukei::tol::LINEAR_RESOLUTION;
 use ryukei_testkit::Lcg;
@@ -74,6 +74,52 @@ fn extrusion(g: &mut Lcg) -> Option<Surface> {
     Some(Surface::Extrusion(Arc::new(e)))
 }
 
+/// A random revolution about a random frame's `z`: a circle or an
+/// ellipse off the axis, or a NURBS in the half-plane at least 0.3 from
+/// the axis, one in three of which (when clamped) starts on the axis, and
+/// one in six ends on it too. Every curve lies within about 10 of the
+/// axis and of the frame's origin.
+fn revolution(g: &mut Lcg) -> Surface {
+    let f = frame(g);
+    let (x, y, z) = (f.x().get(), f.y().get(), f.z().get());
+    let at = |rho: f64, h: f64| f.to_world(rho, 0.0, h);
+    let curve = match g.next_u64() % 4 {
+        0 | 1 => {
+            let a = g.next_f64(0.1, 3.0);
+            let b = a * g.next_f64(0.05, 1.0);
+            let c = at(a + g.next_f64(0.3, 4.0), g.next_f64(-3.0, 3.0));
+            // The conic's own frame: its normal is the frame's -y, its
+            // major axis turned in the xz plane.
+            let (s, co) = ryukei::math::sin_cos(g.next_f64(0.0, 6.0));
+            let conic = Frame::new(c, -y, x * co + z * s).unwrap();
+            if g.next_u64().is_multiple_of(2) {
+                Curve::Circle(Circle::new(conic, a).unwrap())
+            } else {
+                Curve::Ellipse(Ellipse::new(conic, a, b).unwrap())
+            }
+        }
+        _ => {
+            let n = any_curve(g);
+            let mut local: Vec<(f64, f64)> = n
+                .control_points()
+                .map(|p| (0.3 + (p.x + 5.0) * 0.4, p.y))
+                .collect();
+            let last = local.len() - 1;
+            if n.period().is_none() {
+                match g.next_u64() % 6 {
+                    0 | 1 => local[0].0 = 0.0,
+                    2 => (local[0].0, local[last].0) = (0.0, 0.0),
+                    _ => {}
+                }
+            }
+            let points = local.iter().map(|&(r, h)| at(r, h)).collect();
+            let c = NurbsCurve::new(n.knots().clone(), points, Some(n.weights().to_vec())).unwrap();
+            Curve::Nurbs(Arc::new(c))
+        }
+    };
+    Surface::Revolution(Arc::new(Revolution::new(f, curve).unwrap()))
+}
+
 /// The finite part of a surface's domain: `v` in `[-3, 3]` where it is
 /// unbounded.
 fn finite_domain(s: &Surface) -> [[f64; 2]; 2] {
@@ -90,15 +136,17 @@ fn param(g: &mut Lcg, [a, b]: [f64; 2]) -> f64 {
     g.next_f64(a, b)
 }
 
-/// The knots of a NURBS generating curve, to keep stencils off them.
-fn knots(s: &Surface) -> Vec<f64> {
-    let c = match s {
-        Surface::Extrusion(e) => e.curve(),
-        _ => return Vec::new(),
+/// The knots of a NURBS generating curve and the direction (0 for `u`,
+/// 1 for `v`) that follows it, to keep stencils off them.
+fn knots(s: &Surface) -> (Vec<f64>, usize) {
+    let (c, k) = match s {
+        Surface::Extrusion(e) => (e.curve(), 0),
+        Surface::Revolution(r) => (r.curve(), 1),
+        _ => return (Vec::new(), 0),
     };
     match c {
-        Curve::Nurbs(n) => n.knots().knots().to_vec(),
-        _ => Vec::new(),
+        Curve::Nurbs(n) => (n.knots().knots().to_vec(), k),
+        _ => (Vec::new(), k),
     }
 }
 
@@ -106,13 +154,12 @@ fn knot_free(knots: &[f64], t: f64, h: f64) -> bool {
     knots.iter().all(|&k| (k - t).abs() > 2.0 * h)
 }
 
-fn derivatives_hold(s: &Surface, g: &mut Lcg, along_u: bool) -> Result<(), TestCaseError> {
+fn derivatives_hold(s: &Surface, g: &mut Lcg) -> Result<(), TestCaseError> {
     let [ru, rv] = finite_domain(s);
     let (u, v) = (param(g, ru), param(g, rv));
-    let k = knots(s);
+    let (k, along) = knots(s);
     let h = 1e-5;
-    let t = if along_u { u } else { v };
-    prop_assume!(knot_free(&k, t, h));
+    prop_assume!(knot_free(&k, [u, v][along], h));
     let e = s.eval(u, v);
     prop_assert_eq!(e.point, s.point(u, v));
     let ev = |du: f64, dv: f64| s.eval(u + du, v + dv);
@@ -254,12 +301,12 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
 
     #[test]
-    fn extrusion_derivatives_match_finite_differences(seed: u64, along_u: bool) {
+    fn extrusion_derivatives_match_finite_differences(seed: u64) {
         let mut g = Lcg::new(seed);
         let s = extrusion(&mut g);
         prop_assume!(s.is_some());
         let s = s.unwrap();
-        derivatives_hold(&s, &mut g, along_u)?;
+        derivatives_hold(&s, &mut g)?;
     }
 
     #[test]
@@ -295,5 +342,66 @@ proptest! {
         // nearest point's v is within 40 of 0.
         let [ru, _] = finite_domain(&s);
         projection_holds(&s, p, [ru, [-40.0, 40.0]])?;
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    #[test]
+    fn revolution_derivatives_match_finite_differences(seed: u64) {
+        let mut g = Lcg::new(seed);
+        derivatives_hold(&revolution(&mut g), &mut g)?;
+    }
+
+    #[test]
+    fn revolution_nurbs_agrees_with_evaluation(seed: u64) {
+        let mut g = Lcg::new(seed);
+        nurbs_agrees(&revolution(&mut g), &mut g)?;
+    }
+
+    #[test]
+    fn revolution_bounds_hold(seed: u64) {
+        let mut g = Lcg::new(seed);
+        bound_holds(&revolution(&mut g), &mut g)?;
+    }
+
+    #[test]
+    fn revolution_box_holds_every_point(seed: u64) {
+        let mut g = Lcg::new(seed);
+        let s = revolution(&mut g);
+        let b = s.bounds();
+        let [ru, rv] = s.domain();
+        for _ in 0..40 {
+            let p = s.point(param(&mut g, ru), param(&mut g, rv));
+            prop_assert!(b.contains_with_tol(p, ryukei::tol::Tolerance::RESOLUTION));
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(24))]
+
+    #[test]
+    fn revolution_projection_is_never_beaten(seed: u64) {
+        let mut g = Lcg::new(seed);
+        let s = revolution(&mut g);
+        let p = point(&mut g);
+        projection_holds(&s, p, s.domain())?;
+    }
+
+    #[test]
+    fn revolution_poles_collapse(seed: u64) {
+        let mut g = Lcg::new(seed);
+        let s = revolution(&mut g);
+        let Surface::Revolution(r) = &s else { unreachable!() };
+        let [_, [v0, v1]] = s.domain();
+        for (pole, v) in r.poles().into_iter().zip([v0, v1]) {
+            let a = s.point(0.0, v);
+            let b = s.point(2.0, v);
+            prop_assert_eq!(pole, a.distance(b) <= 2.0 * LINEAR_RESOLUTION);
+        }
+        let periodic = r.curve().period().is_some();
+        prop_assert_eq!(s.closed_genus().is_some(), periodic || r.poles() == [true, true]);
     }
 }

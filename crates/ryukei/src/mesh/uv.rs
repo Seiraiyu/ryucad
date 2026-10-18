@@ -166,11 +166,12 @@ impl<'a> FaceGeom<'a> {
 }
 
 /// Which boundary rows of a surface collapse to a point, `[direction][end]`.
-/// An extrusion has none.
+/// An extrusion has none; a revolution's are its `v` ends on the axis.
 fn collapsed_rows(s: &Surface) -> [[bool; 2]; 2] {
     match s {
         Surface::Sphere(_) => [[false; 2], [true, true]],
         Surface::Cone(_) => [[false; 2], [true, false]],
+        Surface::Revolution(r) => [[false; 2], r.poles()],
         Surface::Nurbs(n) => {
             let [nu, nv] = n.counts();
             let (pu, pv) = n.periods();

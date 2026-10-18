@@ -194,7 +194,9 @@ impl Surface {
     /// for a plane, `v` for a cylinder, cone or extrusion); closed
     /// directions and a sphere's `v` convert whole and ignore their range;
     /// a NURBS is returned as it is. An extrusion is its curve's NURBS
-    /// (see [`Curve::to_nurbs`]) times a degree 1 `v`. A cone's `v` range
+    /// (see [`Curve::to_nurbs`]) times a degree 1 `v`; a revolution is the
+    /// whole turn times its curve's NURBS, whose control points are
+    /// measured in the frame's xz plane. A cone's `v` range
     /// must not go below its apex (`Degenerate`). Otherwise fails like
     /// [`Line::to_nurbs`].
     pub fn to_nurbs(&self, ranges: [[f64; 2]; 2]) -> Result<(NurbsSurface, [Reparam; 2]), Error> {
@@ -261,6 +263,20 @@ impl Surface {
                 let s =
                     NurbsSurface::new([c.knots().clone(), line(v0, v1)?], points, Some(weights))?;
                 Ok((s, [r, Reparam::Identity]))
+            }
+            Self::Revolution(s) => {
+                let (c, r) = s.curve().to_nurbs([v0, v1])?;
+                let f = s.frame();
+                let (o, x, z) = (f.origin(), f.x().get(), f.z().get());
+                let profile = c
+                    .control_points()
+                    .zip(c.weights())
+                    .map(|(q, &w)| ((q - o).dot(x), (q - o).dot(z), w))
+                    .collect();
+                Ok((
+                    revolve(f, c.knots().clone(), &profile)?,
+                    [Reparam::Angle, r],
+                ))
             }
         }
     }

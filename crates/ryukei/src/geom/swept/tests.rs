@@ -431,3 +431,292 @@ fn extrusion_along_an_oblique_direction() {
     assert!(u.abs() <= 1e-9 || (u - TAU).abs() <= 1e-9, "{u}");
     assert!((v - 2.0 - 0.1 * h).abs() <= 1e-9, "{v}");
 }
+
+/// A curve in `f`'s xz half-plane through `(ρ, h)` control values.
+fn meridian(f: &Frame, knots: KnotVector, local: &[(f64, f64)], weights: Vec<f64>) -> Curve {
+    let points = local.iter().map(|&(r, h)| f.to_world(r, 0.0, h)).collect();
+    nurbs(knots, points, weights)
+}
+
+/// A straight segment from `a` to `b` over `[t0, t1]`, as a degree 1
+/// NURBS in `f`'s xz plane.
+fn segment(f: &Frame, a: (f64, f64), b: (f64, f64), [t0, t1]: [f64; 2]) -> Curve {
+    let k = KnotVector::clamped(1, &[t0, t1], &[2, 2]).unwrap();
+    meridian(f, k, &[a, b], vec![1.0; 2])
+}
+
+/// The NURBS semicircle of radius `r` from the south pole to the north,
+/// over `[-π/2, π/2]`: the sphere's own profile.
+fn semicircle(f: &Frame, r: f64) -> Curve {
+    let k = KnotVector::clamped(2, &[-FRAC_PI_2, 0.0, FRAC_PI_2], &[3, 2, 3]).unwrap();
+    let h = core::f64::consts::FRAC_1_SQRT_2;
+    let local = [(0.0, -r), (r, -r), (r, 0.0), (r, r), (0.0, r)];
+    meridian(f, k, &local, vec![1.0, h, 1.0, h, 1.0])
+}
+
+/// A circle of radius `r` about `(big, 0)` in `f`'s xz plane, running
+/// from `+x` towards `+z` as a torus's tube does.
+fn tube(f: &Frame, big: f64, r: f64) -> Curve {
+    let at = Frame::new(f.to_world(big, 0.0, 0.0), -f.y().get(), f.x().get()).unwrap();
+    Curve::Circle(Circle::new(at, r).unwrap())
+}
+
+fn revolution(f: Frame, curve: Curve) -> Surface {
+    Surface::Revolution(Arc::new(Revolution::new(f, curve).unwrap()))
+}
+
+/// Revolutions of every curve kind, with poles at none, one or both
+/// ends.
+fn revolutions() -> Vec<Surface> {
+    let f = frame();
+    let k = KnotVector::clamped(3, &[0.0, 1.0, 2.5], &[4, 1, 4]).unwrap();
+    let wave = [(1.0, 0.0), (3.0, 1.0), (0.5, 2.0), (2.0, 3.5), (1.0, 5.0)];
+    let k2 = KnotVector::clamped(2, &[0.0, 1.0, 2.0], &[3, 1, 3]).unwrap();
+    let dome = [(0.0, 0.0), (2.0, 0.0), (2.0, 1.5), (1.0, 2.0)];
+    let kp = KnotVector::periodic(2, &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[1; 6]).unwrap();
+    let blob = [(4.0, 0.0), (3.0, 1.5), (1.5, 2.0), (1.0, 0.0), (2.5, -2.5)];
+    let ellipse = Frame::new(f.to_world(3.0, 0.0, 1.0), -f.y().get(), f.z().get()).unwrap();
+    vec![
+        revolution(f, tube(&f, 3.0, 1.0)),
+        revolution(f, Curve::Ellipse(Ellipse::new(ellipse, 1.5, 0.75).unwrap())),
+        revolution(f, segment(&f, (2.0, -1.0), (2.0, 3.0), [-1.0, 3.0])),
+        revolution(f, segment(&f, (0.0, -2.0), (3.0, 1.0), [0.0, 2.0])),
+        revolution(f, semicircle(&f, 2.0)),
+        revolution(f, meridian(&f, k, &wave, vec![1.0, 0.7, 1.6, 0.9, 1.0])),
+        revolution(f, meridian(&f, k2, &dome, vec![1.0, 0.8, 1.2, 1.0])),
+        revolution(f, meridian(&f, kp, &blob, vec![1.0, 2.0, 0.5, 1.0, 1.5])),
+    ]
+}
+
+#[test]
+fn revolution_rejects_bad_input() {
+    let f = frame();
+    let new = |c: Curve| Revolution::new(f, c).map(|_| ());
+    let along = crate::geom::Line::new(f.origin(), f.z().get()).unwrap();
+    assert_eq!(new(Curve::Line(along)), Err(Error::Degenerate));
+    // Circles: off the plane, touching the axis, crossing it.
+    let off = Frame::new(f.to_world(3.0, 1e-6, 0.0), -f.y().get(), f.x().get()).unwrap();
+    assert_eq!(
+        new(Curve::Circle(Circle::new(off, 1.0).unwrap())),
+        Err(Error::Degenerate)
+    );
+    let tilted = Frame::new(f.to_world(3.0, 0.0, 0.0), f.z().get(), f.x().get()).unwrap();
+    assert_eq!(
+        new(Curve::Circle(Circle::new(tilted, 1.0).unwrap())),
+        Err(Error::Degenerate)
+    );
+    assert_eq!(new(tube(&f, 1.0, 1.0)), Err(Error::Degenerate));
+    assert_eq!(new(tube(&f, 1.0, 1.5)), Err(Error::Degenerate));
+    assert!(new(tube(&f, 1.0 + 1e-6, 1.0)).is_ok());
+    // NURBS: a control point off the plane or behind the axis.
+    let k = KnotVector::clamped(2, &[0.0, 1.0], &[3, 3]).unwrap();
+    let lifted = vec![
+        f.to_world(1.0, 0.0, 0.0),
+        f.to_world(2.0, 1e-6, 1.0),
+        f.to_world(1.0, 0.0, 2.0),
+    ];
+    assert_eq!(
+        new(nurbs(k.clone(), lifted, vec![1.0; 3])),
+        Err(Error::Degenerate)
+    );
+    let behind = [(1.0, 0.0), (-1e-6, 1.0), (1.0, 2.0)];
+    assert_eq!(
+        new(meridian(&f, k.clone(), &behind, vec![1.0; 3])),
+        Err(Error::Degenerate)
+    );
+    // A control point on the axis is fine when the curve keeps clear.
+    let clear = [(1.0, 0.0), (0.0, 1.0), (1.0, 2.0)];
+    assert!(new(meridian(&f, k.clone(), &clear, vec![1.0; 3])).is_ok());
+    // A touch inside the domain: a corner of a polyline on the axis.
+    let k1 = KnotVector::clamped(1, &[0.0, 1.0, 2.0], &[2, 1, 2]).unwrap();
+    assert_eq!(
+        new(meridian(&f, k1, &clear, vec![1.0; 3])),
+        Err(Error::Degenerate)
+    );
+    // A segment lying along the axis, and one leaving it along the axis.
+    let axial = segment(&f, (0.0, 0.0), (0.0, 1.0), [0.0, 1.0]);
+    assert_eq!(new(axial), Err(Error::Degenerate));
+    let grazing = [(0.0, 0.0), (0.0, 1.0), (1.0, 2.0)];
+    assert_eq!(
+        new(meridian(&f, k, &grazing, vec![1.0; 3])),
+        Err(Error::Degenerate)
+    );
+    // Almost touching inside: just inside resolution, and clear of it.
+    let k3 = KnotVector::clamped(2, &[0.0, 1.0], &[3, 3]).unwrap();
+    let dip = |d: f64| [(2.0 * d, 0.0), (0.0, 1.0), (2.0 * d, 2.0)];
+    assert_eq!(
+        new(meridian(&f, k3.clone(), &dip(0.6e-8), vec![1.0; 3])),
+        Err(Error::Degenerate)
+    );
+    assert!(new(meridian(&f, k3, &dip(1e-6), vec![1.0; 3])).is_ok());
+}
+
+#[test]
+fn revolution_poles_and_genus() {
+    let f = frame();
+    let s = revolutions();
+    let poles = |s: &Surface| match s {
+        Surface::Revolution(r) => r.poles(),
+        _ => unreachable!(),
+    };
+    let genus: Vec<_> = s.iter().map(Surface::closed_genus).collect();
+    assert_eq!(
+        genus,
+        [Some(1), Some(1), None, None, Some(0), None, None, Some(1)]
+    );
+    assert_eq!(poles(&s[0]), [false, false]);
+    assert_eq!(poles(&s[3]), [true, false]);
+    assert_eq!(poles(&s[4]), [true, true]);
+    assert_eq!(poles(&s[6]), [true, false]);
+    for s in &s {
+        assert_eq!(s.frame(), None);
+        assert_eq!(s.periods().0, Some(TAU));
+        assert_eq!(s.domain()[0], [0.0, TAU]);
+    }
+    assert_eq!(s[0].periods(), (Some(TAU), Some(TAU)));
+    assert_eq!(s[4].domain()[1], [-FRAC_PI_2, FRAC_PI_2]);
+    // The revolution keeps its frame and curve; equality is theirs.
+    let r = Revolution::new(f, semicircle(&f, 2.0)).unwrap();
+    assert_eq!(r.frame(), &f);
+    assert_eq!(r.curve(), &semicircle(&f, 2.0));
+    assert_eq!(r, Revolution::new(f, semicircle(&f, 2.0)).unwrap());
+}
+
+#[test]
+fn revolution_bounds_hold_every_point() {
+    for s in revolutions() {
+        let b = s.bounds();
+        for (u, v) in grid(&s, 24) {
+            let p = s.point(u, v);
+            assert!(b.contains_with_tol(p, crate::tol::Tolerance::RESOLUTION));
+        }
+    }
+    // A sphere's box is the sphere's, here.
+    let f = Frame::WORLD;
+    let b = revolution(f, semicircle(&f, 2.0)).bounds();
+    let sphere = Surface::Sphere(crate::geom::Sphere::new(f, 2.0).unwrap()).bounds();
+    assert!(b.min().distance(sphere.min()) <= 1e-15 && b.max().distance(sphere.max()) <= 1e-15);
+}
+
+#[test]
+fn revolution_derivatives_and_normals() {
+    for s in revolutions() {
+        derivatives_match_finite_differences(&s);
+        normal_is_natural(&s);
+    }
+}
+
+/// The revolution agrees with an analytic surface at the same `u` and the
+/// curve's parameter for its `v` (through `reparam`), in points and
+/// normals.
+fn same_as(rev: &Surface, analytic: &Surface, reparam: Reparam, vs: [f64; 2]) {
+    for i in 0..=12 {
+        for j in 0..=12 {
+            let u = TAU * f64::from(i) / 12.0;
+            let v = vs[0] + (vs[1] - vs[0]) * f64::from(j) / 12.0;
+            let w = reparam.to_nurbs(v);
+            let at = format!("{analytic:?} at ({u}, {v})");
+            assert!(
+                rev.point(u, w).distance(analytic.point(u, v)) <= 1e-14,
+                "{at}"
+            );
+            let (a, b) = (rev.normal(u, w).unwrap(), analytic.normal(u, v).unwrap());
+            assert!((a.get() - b.get()).length() <= 1e-12, "{at}");
+        }
+    }
+}
+
+#[test]
+fn revolutions_of_analytic_profiles() {
+    use crate::geom::{Cone, Sphere, Torus};
+    let f = frame();
+    let cyl = Surface::Cylinder(Cylinder::new(f, 2.0).unwrap());
+    let line = revolution(f, segment(&f, (2.0, -1.0), (2.0, 3.0), [-1.0, 3.0]));
+    same_as(&line, &cyl, Reparam::Identity, [-1.0, 3.0]);
+    // A cone of radius 1.5 and half-angle α has its apex at v = -1.5 /
+    // tan α; its generator rises by 1 in v as it widens by tan α.
+    let alpha: f64 = 0.6;
+    let cone = Cone::new(f, 1.5, alpha).unwrap();
+    let (apex, slope) = (cone.apex_v(), math::tan(alpha));
+    let generator = segment(&f, (0.0, apex), (1.5 + 2.0 * slope, 2.0), [apex, 2.0]);
+    same_as(
+        &revolution(f, generator),
+        &Surface::Cone(cone),
+        Reparam::Identity,
+        [apex, 2.0],
+    );
+    let sphere = Surface::Sphere(Sphere::new(f, 2.0).unwrap());
+    let semi = revolution(f, semicircle(&f, 2.0));
+    same_as(&semi, &sphere, Reparam::Angle, [-FRAC_PI_2, FRAC_PI_2]);
+    let torus = Surface::Torus(Torus::new(f, 3.0, 1.0).unwrap());
+    same_as(
+        &revolution(f, tube(&f, 3.0, 1.0)),
+        &torus,
+        Reparam::Identity,
+        [0.0, TAU],
+    );
+    // Projections agree with the closed forms (within the line's heights).
+    for p in [
+        f.to_world(3.0, 1.0, 0.5),
+        f.to_world(-0.5, 0.2, 1.5),
+        f.origin(),
+    ] {
+        for (rev, s) in [(&line, &cyl), (&semi, &sphere)] {
+            assert!((rev.distance(p) - s.distance(p)).abs() <= 1e-12, "{s:?}");
+        }
+    }
+}
+
+#[test]
+fn revolution_converts_exactly() {
+    for s in revolutions() {
+        nurbs_agrees(&s, s.domain());
+    }
+}
+
+#[test]
+fn revolution_projects_to_the_nearest_point() {
+    let f = frame();
+    let points = [
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(4.0, -1.0, 3.5),
+        f.origin(),
+        f.to_world(0.0, 0.0, 1.0),
+        Point3::new(-2.0, 5.0, 1.0),
+        Point3::new(6.0, 3.0, -2.0),
+    ];
+    for s in revolutions() {
+        for &p in &points {
+            projection_is_nearest(&s, p, s.domain());
+        }
+        for (u, v) in grid(&s, 5) {
+            assert!(s.distance(s.point(u, v)) <= 1e-12, "{s:?} at ({u}, {v})");
+        }
+    }
+}
+
+#[test]
+fn revolution_bounds_of_derivatives_hold() {
+    for s in revolutions() {
+        let [ru, rv] = s.domain();
+        bound_holds(&s, [ru, rv]);
+        let mid = (rv[0] + rv[1]) / 2.0;
+        bound_holds(&s, [[1.0, 1.3], [mid, mid + 0.1]]);
+        // Boxes past a clamped domain's ends are cut to it.
+        bound_holds(&s, [[1.0, 1.3], [rv[0] - 0.5, rv[0] + 0.1]]);
+    }
+    // A kink: slow before the double knot, fast after it, so |C'| jumps
+    // there and the speed bound must not cross it.
+    let f = frame();
+    let k = KnotVector::clamped(2, &[0.0, 1.0, 2.0], &[3, 2, 3]).unwrap();
+    let kinked = [(1.0, 0.0), (1.0, 0.1), (1.1, 0.2), (4.0, 3.0), (1.0, 6.0)];
+    let s = revolution(f, meridian(&f, k, &kinked, vec![1.0; 5]));
+    bound_holds(&s, [[0.0, 1.0], [0.3, 1.2]]);
+}
+
+#[test]
+fn revolution_transforms() {
+    for s in revolutions() {
+        transform_round_trips(&s);
+    }
+}

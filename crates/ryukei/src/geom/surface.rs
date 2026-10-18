@@ -3,7 +3,7 @@ use super::{
     Box3, Frame, Point3, PrincipalCurvatures, Projection, Rigid, SurfaceEval, UnitVector3, Vector3,
     polar_angle,
 };
-use super::{Curve2, Extrusion, NurbsSurface};
+use super::{Curve2, Extrusion, NurbsSurface, Revolution};
 use crate::Error;
 use crate::math;
 use crate::tol::ANGULAR_RESOLUTION;
@@ -28,6 +28,7 @@ pub enum Surface {
     Torus(Torus),
     Nurbs(Arc<NurbsSurface>),
     Extrusion(Arc<Extrusion>),
+    Revolution(Arc<Revolution>),
 }
 
 /// The frame's xy plane: `origin + u x + v y`. The normal is `z`.
@@ -175,7 +176,7 @@ impl Surface {
             Self::Cone(s) => Some(&s.frame),
             Self::Sphere(s) => Some(&s.frame),
             Self::Torus(s) => Some(&s.frame),
-            Self::Nurbs(_) | Self::Extrusion(_) => None,
+            Self::Nurbs(_) | Self::Extrusion(_) | Self::Revolution(_) => None,
         }
     }
 
@@ -201,6 +202,7 @@ impl Surface {
             }
             Self::Nurbs(n) => n.point(u, v),
             Self::Extrusion(e) => e.point(u, v),
+            Self::Revolution(r) => r.point(u, v),
         }
     }
 
@@ -270,6 +272,7 @@ impl Surface {
             }
             Self::Nurbs(n) => n.eval(u, v),
             Self::Extrusion(e) => e.eval(u, v),
+            Self::Revolution(r) => r.eval(u, v),
         }
     }
 
@@ -284,11 +287,14 @@ impl Surface {
     /// angle `u`, and at a sphere's poles it is the axis. For a NURBS see
     /// [`NurbsSurface::normal`]. An extrusion's is the direction of
     /// `T × d`, `T` the curve's unit tangent: `None` only where the curve
-    /// has no tangent.
+    /// has no tangent. A revolution's is the direction of
+    /// `h' radial(u) - ρ' z` (see [`Revolution`]), its limit at a pole;
+    /// `None` likewise.
     pub fn normal(&self, u: f64, v: f64) -> Option<UnitVector3> {
         Some(match self {
             Self::Nurbs(n) => return n.normal(u, v),
             Self::Extrusion(e) => return e.surface_normal(u),
+            Self::Revolution(r) => return r.surface_normal(u, v),
             Self::Plane(s) => s.frame.z(),
             Self::Cylinder(s) => UnitVector3::new_unchecked(s.frame.radial(u)),
             Self::Cone(s) => {
@@ -313,7 +319,8 @@ impl Surface {
 
     /// The parameter ranges `[[u0, u1], [v0, v1]]`. Open directions are
     /// unbounded; a cone's `v` starts at its apex; a NURBS has its knot
-    /// domains; an extrusion has its curve's domain in `u`.
+    /// domains; an extrusion has its curve's domain in `u`, a revolution
+    /// in `v`.
     pub fn domain(&self) -> [[f64; 2]; 2] {
         let all = [f64::NEG_INFINITY, f64::INFINITY];
         let turn = [0.0, TAU];
@@ -325,6 +332,7 @@ impl Surface {
             Self::Torus(_) => [turn, turn],
             Self::Nurbs(n) => n.domain(),
             Self::Extrusion(e) => e.domain(),
+            Self::Revolution(r) => r.domain(),
         }
     }
 
@@ -336,17 +344,21 @@ impl Surface {
             Self::Torus(_) => (Some(TAU), Some(TAU)),
             Self::Nurbs(n) => n.periods(),
             Self::Extrusion(e) => (e.curve().period(), None),
+            Self::Revolution(r) => (Some(TAU), r.curve().period()),
         }
     }
 
     /// For a surface that closes up on itself, the genus of that closed
     /// surface (sphere 0, torus 1). `None` for open surfaces (an extrusion
-    /// is one), and for every NURBS: its closed genus isn't worked out.
+    /// is one), and for every NURBS: its closed genus isn't worked out. A
+    /// revolution of a periodic curve has genus 1, and of a clamped one
+    /// with both ends on the axis genus 0; other revolutions are open.
     /// Only closed surfaces may carry a face with no loops.
     pub fn closed_genus(&self) -> Option<u32> {
         match self {
             Self::Sphere(_) => Some(0),
             Self::Torus(_) => Some(1),
+            Self::Revolution(r) => r.closed_genus(),
             Self::Plane(_)
             | Self::Cylinder(_)
             | Self::Cone(_)
@@ -389,6 +401,7 @@ impl Surface {
             }
             Self::Nurbs(n) => n.distance(p),
             Self::Extrusion(e) => e.project(p).distance,
+            Self::Revolution(r) => r.project(p).distance,
         }
     }
 
@@ -396,11 +409,13 @@ impl Surface {
     /// in `[0, 2π)`; where the nearest point is not unique (on an axis, at a
     /// centre), angle 0 is chosen. For a NURBS see [`NurbsSurface::project`].
     /// An extrusion projects onto its curve as seen along its direction,
-    /// with the guarantee of [`NurbsSurface::project`].
+    /// and a revolution onto its curve after turning the point into the
+    /// curve's half-plane, with the guarantee of [`NurbsSurface::project`].
     pub fn project(&self, p: Point3) -> Projection<(f64, f64), Point3> {
         let frame = match self {
             Self::Nurbs(n) => return n.project(p),
             Self::Extrusion(e) => return e.project(p),
+            Self::Revolution(r) => return r.project(p),
             Self::Plane(Plane { frame })
             | Self::Cylinder(Cylinder { frame, .. })
             | Self::Cone(Cone { frame, .. })
@@ -417,7 +432,8 @@ impl Surface {
 
     /// A box holding the surface. The open surfaces (plane, cylinder,
     /// cone, extrusion) are unbounded and give the size box; a NURBS gives
-    /// its hull bounds.
+    /// its hull bounds, and a revolution the box of a cylinder about its
+    /// axis holding its curve's bounds.
     pub fn bounds(&self) -> Box3 {
         match self {
             Self::Plane(_) | Self::Cylinder(_) | Self::Cone(_) | Self::Extrusion(_) => {
@@ -429,6 +445,7 @@ impl Surface {
             }
             Self::Torus(s) => ring_box(&s.frame, s.major, s.minor),
             Self::Nurbs(n) => n.bounds(),
+            Self::Revolution(r) => r.bounds(),
         }
     }
 
@@ -447,7 +464,7 @@ impl Surface {
             }
             Self::Sphere(_) => (u, math::atan2(q.z, rho)),
             Self::Torus(s) => (u, polar_angle(q.z, rho - s.major)),
-            Self::Nurbs(_) | Self::Extrusion(_) => self.project(p).param,
+            Self::Nurbs(_) | Self::Extrusion(_) | Self::Revolution(_) => self.project(p).param,
         }
     }
 
@@ -462,6 +479,7 @@ impl Surface {
             Self::Torus(s) => &mut s.frame,
             Self::Nurbs(n) => return Self::Nurbs(Arc::new(n.transformed(r))),
             Self::Extrusion(e) => return Self::Extrusion(Arc::new(e.transformed(r))),
+            Self::Revolution(s) => return Self::Revolution(Arc::new(s.transformed(r))),
         };
         *frame = frame.transformed(r);
         out
