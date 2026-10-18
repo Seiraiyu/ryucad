@@ -12,6 +12,12 @@ RUN apt-get update \
         libocct-visualization-dev libtbb-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Mesa's software Vulkan (lavapipe): the container has no GPU, and
+# ryucad-app's tests draw.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # SMLib, the kernel in NVIDIA's USD BRep (Apache-2.0), is only for the
 # `smlib` comparison in ryukei-bench. Its kernel builds on its own (no
 # OpenUSD, no Packman): compile it at a pinned commit into

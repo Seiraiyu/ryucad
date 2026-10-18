@@ -2,7 +2,7 @@
 //! meaningful exit code.
 
 use clap::{Args, Parser, Subcommand};
-use ryucad::doc::project::{find_project, find_root};
+use ryucad::doc::project::{find_project, find_root, plain};
 use ryucad::error::{Code, Error, Result};
 use ryucad::live::{SelectMode, Style};
 use ryucad::proto::{Answer, PlacementArg, Position, Request, Transfer, VersionInfo};
@@ -77,6 +77,12 @@ enum Command {
         /// A repair parameter: unit=in, order=a,b,c.
         #[arg(long = "param", value_name = "NAME=VALUE", value_parser = param, requires = "repairs")]
         params: Vec<(String, String)>,
+    },
+    /// Open a project (this folder by default) in the desktop app, or
+    /// bring its open windows to the front.
+    Open {
+        #[arg(value_name = "DIR")]
+        dir: Option<PathBuf>,
     },
     /// List the humans and agents attached to the project's session.
     Participants,
@@ -510,7 +516,11 @@ impl PositionArgs {
 /// project.
 fn request(cmd: &Command) -> Option<Request> {
     Some(match cmd {
-        Command::Init { .. } | Command::Version | Command::Daemon(_) | Command::Watch { .. } => {
+        Command::Init { .. }
+        | Command::Version
+        | Command::Daemon(_)
+        | Command::Watch { .. }
+        | Command::Open { .. } => {
             return None;
         }
         Command::Part(PartCmd::Create { part }) => Request::PartCreate { part: part.clone() },
@@ -746,6 +756,17 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             daemon::run(&find_root(&here)?, idle).map(|()| Value::Null)
         }
         Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
+        Command::Open { dir } => {
+            let dir = dir.as_ref().map_or_else(|| here.clone(), |d| here.join(d));
+            let dir = plain(dir.canonicalize().map_err(|e| Error::io(&dir, &e))?);
+            // A damaged project, or a folder that isn't one, opens in the
+            // app too: it offers to repair or create one.
+            let root = match find_project(&dir) {
+                Ok((root, false)) if !no_daemon(cli) => Some(root),
+                _ => None,
+            };
+            client::open(&dir, root.as_deref())
+        }
         Command::Daemon(DaemonCmd::Stop { all: true }) => client::stop_all(),
         Command::Daemon(DaemonCmd::Stop { all: false }) => client::stop(&find_root(&here)?),
         Command::Watch {

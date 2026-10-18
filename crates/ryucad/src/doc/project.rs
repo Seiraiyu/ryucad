@@ -63,7 +63,7 @@ impl Part {
 /// On Windows `canonicalize` gives a verbatim path (`\\?\C:\…`). Agents see
 /// the ordinary `C:\…` form, which is what `init` reports too. UNC paths and
 /// paths too long for the ordinary form stay verbatim.
-fn plain(p: PathBuf) -> PathBuf {
+pub fn plain(p: PathBuf) -> PathBuf {
     #[cfg(windows)]
     {
         if let Some(rest) = p.to_str().and_then(|s| s.strip_prefix(r"\\?\"))

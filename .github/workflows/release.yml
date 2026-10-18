@@ -16,20 +16,25 @@ permissions:
 
 jobs:
   version:
-    name: tag matches Cargo.toml
+    # The version comes from the tag; the repo's workspace version is a
+    # placeholder (0.0.0), stamped before anything is built.
+    name: version from the tag
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
       - id: v
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match workspace version $version"
-            exit 1
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version=${GITHUB_REF_NAME#v}
+            if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+              echo "::error::tag $GITHUB_REF_NAME is not vX.Y.Z or vX.Y.Z-pre"
+              exit 1
+            fi
+          else
+            version=0.0.0-dev
           fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build:
     name: ${{ matrix.target }}
@@ -37,26 +42,41 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `target` is the CLI's (and the archive's); `app` is ryucad-app's.
+        # On Linux the app is a glibc build on Ubuntu 22.04 (glibc 2.35 is
+        # its baseline): winit and wgpu load the desktop's libraries at run
+        # time, which a static musl binary can't.
         include:
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
-          - { os: macos-latest, target: aarch64-apple-darwin }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-musl, app: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-musl, app: aarch64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin, app: aarch64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, app: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     env:
       TARGET: ${{ matrix.target }}
+      APP: ${{ matrix.app }}
       NAME: ryucad-${{ needs.version.outputs.version }}-${{ matrix.target }}
       # Static binaries: musl links statically, and Windows needs no
       # VC++ redistributable with the static CRT.
       CC_x86_64_unknown_linux_musl: musl-gcc
       CC_aarch64_unknown_linux_musl: musl-gcc
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+      # The app's smoke run must draw: lavapipe, Metal or WARP.
+      RYUCAD_REQUIRE_GPU: "1"
     steps:
       - uses: actions/checkout@v4
-      - run: rustup toolchain install && rustup target add "$TARGET"
+      - name: stamp the version
+        run: sh scripts/stamp-version.sh "${{ needs.version.outputs.version }}"
         shell: bash
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        # The app's dependencies (wgpu, egui) fill the runner's small disk.
+        name: room on the disk
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - run: rustup toolchain install && rustup target add "$TARGET" "$APP"
+        shell: bash
+      - if: runner.os == 'Linux'
+        # musl for the CLI; lavapipe so the app's smoke run can draw.
+        run: sudo apt-get update && sudo apt-get install -y musl-tools mesa-vulkan-drivers
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
@@ -64,31 +84,42 @@ jobs:
         run: cargo test --locked -p ryukei -p ryucad --release --target "$TARGET" --test determinism
         shell: bash
       - name: build
-        run: RYUCAD_COMMIT="${GITHUB_SHA::12}" cargo build --locked --release -p ryucad --target "$TARGET"
+        run: |
+          RYUCAD_COMMIT="${GITHUB_SHA::12}" cargo build --locked --release -p ryucad --target "$TARGET"
+          RYUCAD_COMMIT="${GITHUB_SHA::12}" cargo build --locked --release -p ryucad-app --target "$APP"
         shell: bash
+      - name: stage
+        shell: bash
+        run: |
+          x=""
+          [ "$RUNNER_OS" = Windows ] && x=".exe"
+          mkdir -p "dist/$NAME"
+          cp "target/$TARGET/release/ryucad$x" "target/$APP/release/ryucad-app$x" README.md "dist/$NAME/"
+          case "$RUNNER_OS" in
+            Linux) mkdir -p "dist/$NAME/share" && cp packaging/linux/ryucad.desktop packaging/linux/ryucad.xml "dist/$NAME/share/" ;;
+            macOS) mkdir -p "dist/$NAME/share" && cp packaging/macos/ryucad.applescript "dist/$NAME/share/" ;;
+          esac
       - name: smoke test
         shell: bash
         run: |
-          exe="target/$TARGET/release/ryucad"
-          [ "$RUNNER_OS" = Windows ] && exe="$exe.exe"
+          x=""
+          [ "$RUNNER_OS" = Windows ] && x=".exe"
+          exe="dist/$NAME/ryucad$x"
           out=$("$exe" version)
           echo "$out"
           echo "$out" | grep -q "\"target\":\"$TARGET\""
           echo "$out" | grep -q "\"ryucad\":\"${{ needs.version.outputs.version }}\""
-          sh scripts/smoke.sh "$exe"
+          app=$("dist/$NAME/ryucad-app$x" --version)
+          echo "$app"
+          echo "$app" | grep -q "\"commit\":\"${GITHUB_SHA::12}\""
+          sh scripts/smoke.sh "$exe" "dist/$NAME/ryucad-app$x"
       - name: package (Unix)
         if: runner.os != 'Windows'
-        run: |
-          mkdir -p "dist/$NAME"
-          cp "target/$TARGET/release/ryucad" README.md "dist/$NAME/"
-          tar -czf "dist/$NAME.tar.gz" -C dist "$NAME"
+        run: tar -czf "dist/$NAME.tar.gz" -C dist "$NAME"
       - name: package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force "dist/$env:NAME" | Out-Null
-          Copy-Item "target/$env:TARGET/release/ryucad.exe", README.md "dist/$env:NAME/"
-          Compress-Archive -Path "dist/$env:NAME" -DestinationPath "dist/$env:NAME.zip"
+        run: Compress-Archive -Path "dist/$env:NAME" -DestinationPath "dist/$env:NAME.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.NAME }}
@@ -141,6 +172,7 @@ jobs:
         name: fresh shells find the installed version
         run: |
           bash -lc 'ryucad version' | grep -q "\"ryucad\":\"$WANT\""
+          bash -lc 'ryucad-app --version' | grep -q "\"ryucad\":\"$WANT\""
           if command -v zsh >/dev/null; then zsh -c 'ryucad version' | grep -q "\"ryucad\":\"$WANT\""; fi
       - if: runner.os == 'Windows'
         shell: pwsh

@@ -69,6 +69,8 @@ pub enum Code {
     ProjectDamaged,
     /// A repair planned against files that have changed since.
     RepairConflict,
+    /// `ryucad open` found no desktop app to start (a CLI-only install).
+    AppNotInstalled,
 }
 
 impl Code {
@@ -78,7 +80,7 @@ impl Code {
         match self {
             Code::Usage => 2,
             Code::ProjectNotFound | Code::FormatTooNew | Code::ProjectDamaged => 3,
-            Code::Io | Code::Daemon | Code::Internal => 4,
+            Code::Io | Code::Daemon | Code::Internal | Code::AppNotInstalled => 4,
             _ => 1,
         }
     }
@@ -147,6 +149,7 @@ mod tests {
         assert_eq!(Code::Internal.exit_code(), 4);
         assert_eq!(Code::NoLiveSession.exit_code(), 1);
         assert_eq!(Code::AmbiguousParticipant.exit_code(), 1);
+        assert_eq!(Code::AppNotInstalled.exit_code(), 4);
         assert_eq!(Code::ProjectDamaged.exit_code(), 3);
     }
 

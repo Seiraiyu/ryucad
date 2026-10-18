@@ -298,6 +298,11 @@ impl Live {
         }
     }
 
+    /// The humans attached: the app windows.
+    pub fn humans(&self) -> impl Iterator<Item = &Participant> {
+        self.participants.values().filter(|p| p.kind == Kind::Human)
+    }
+
     /// The participant a request acts as: `me` if its connection said
     /// hello, otherwise the default agent.
     pub fn caller(&mut self, me: Option<&str>) -> String {

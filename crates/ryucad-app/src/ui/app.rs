@@ -1,0 +1,350 @@
+//! The app's window: a project open (the viewport between the feature
+//! tree, the participants bar, the property panel, the activity and the
+//! status line), or a damaged project being repaired.
+
+use crate::core::doctor::Offline;
+use crate::core::link::Wake;
+use crate::core::nav::Navigation;
+use crate::core::workspace::Workspace;
+use crate::ui::start::{self, Start};
+use crate::ui::view::View;
+use crate::ui::{dialogs, doctor, menu, panels};
+use eframe::egui;
+use ryucad::client::Daemon;
+use ryucad::doc::project::find_project;
+use ryucad::error::{Code, Result};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
+
+/// The name a window says hello with: the OS user and the first window
+/// number no other window of theirs has, `dana (window 2)`.
+pub fn window_name(user: &str, participants: &serde_json::Value) -> String {
+    let taken: Vec<&str> = participants
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["kind"] == "human")
+        .filter_map(|p| p["name"].as_str())
+        .collect();
+    (1..)
+        .map(|n| format!("{user} (window {n})"))
+        .find(|name| !taken.contains(&name.as_str()))
+        .expect("a free number")
+}
+
+/// The OS user's name.
+pub fn os_user() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "someone".to_owned())
+}
+
+/// Opens the project at `root` as a new window of the OS user's.
+pub fn open_workspace(root: &Path, daemon: &Daemon, wake: Wake) -> Result<Workspace> {
+    let mut conn = daemon.connect(root)?;
+    let list = conn
+        .call(&ryucad::proto::Request::ParticipantList {})
+        .map_err(|e| ryucad::error::Error::new(ryucad::error::Code::Daemon, e.to_string()))??;
+    let name = window_name(&os_user(), &list["participants"]);
+    drop(conn);
+    Workspace::open(root, daemon, &name, wake)
+}
+
+/// An open project's window.
+pub struct Opened {
+    pub ws: Workspace,
+    pub view: View,
+    pub tab: panels::Tab,
+    pub dialogs: menu::Dialogs,
+    pub doctor: doctor::State,
+    /// Recent projects, newest first, for the File menu.
+    pub recent: Vec<PathBuf>,
+}
+
+/// What the window shows.
+pub enum Screen {
+    /// No project: recent projects and Open.
+    Start(Box<Start>),
+    Opened(Box<Opened>),
+    /// A folder with parts but no manifest: repaired before it opens.
+    Damaged(Box<(Offline, doctor::State)>),
+}
+
+/// The app's state.
+pub struct App {
+    pub screen: Screen,
+    pub daemon: Daemon,
+    wake: Wake,
+    /// The window title last set.
+    titled: Option<String>,
+}
+
+impl App {
+    /// The app on the project in or above `dir`, or the start window with
+    /// none. It repaints whenever anything arrives.
+    pub fn open(ctx: &egui::Context, dir: Option<&Path>, daemon: &Daemon) -> App {
+        let ctx = ctx.clone();
+        let wake: Wake = Arc::new(move || ctx.request_repaint());
+        let mut app = App {
+            screen: Screen::Start(Box::new(Start::new(daemon, &wake))),
+            daemon: daemon.clone(),
+            wake,
+            titled: None,
+        };
+        if let Some(dir) = dir {
+            app.go(dir);
+        }
+        app
+    }
+
+    /// Opens the project in or above `dir`: a damaged one to its repairs,
+    /// a folder that isn't one to the offer of a new project.
+    pub fn go(&mut self, dir: &Path) {
+        let failed = |app: &mut App, not_a_project: Option<PathBuf>, error: Option<String>| {
+            let mut start = Start::new(&app.daemon, &app.wake);
+            start.not_a_project = not_a_project;
+            start.error = error;
+            app.screen = Screen::Start(Box::new(start));
+        };
+        match find_project(dir) {
+            Ok((root, true)) => {
+                let offline = Offline::new(&root, &self.daemon, self.wake.clone());
+                self.screen = Screen::Damaged(Box::new((offline, doctor::State::default())));
+            }
+            Ok((root, false)) => match open_workspace(&root, &self.daemon, self.wake.clone()) {
+                Ok(ws) => self.screen = Screen::Opened(Box::new(Opened::new(ws))),
+                Err(e) => failed(self, None, Some(e.message)),
+            },
+            Err(e) if e.code == Code::ProjectNotFound => {
+                let dir = dir
+                    .canonicalize()
+                    .map_or_else(|_| dir.to_path_buf(), ryucad::doc::project::plain);
+                failed(self, Some(dir), None);
+            }
+            Err(e) => failed(self, None, Some(e.message)),
+        }
+    }
+
+    /// Makes `dir` a project (`ryucad init`), then opens it.
+    fn create(&mut self, dir: &Path) {
+        match crate::core::doctor::cli(&self.daemon, dir, &["init".to_owned()]) {
+            Ok(_) => self.go(dir),
+            Err(e) => {
+                if let Screen::Start(s) = &mut self.screen {
+                    s.error = Some(e.message);
+                }
+            }
+        }
+    }
+
+    /// The open project. Panics if there is none: for tests.
+    pub fn opened(&self) -> &Opened {
+        match &self.screen {
+            Screen::Opened(o) => o,
+            _ => panic!("no project is open"),
+        }
+    }
+
+    fn title(&self) -> String {
+        let name = |root: &Path| {
+            root.file_name().map_or_else(
+                || root.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            )
+        };
+        match &self.screen {
+            Screen::Start(_) => "ryucad".to_owned(),
+            Screen::Opened(o) => format!("{} — ryucad", name(&o.ws.root)),
+            Screen::Damaged(d) => format!("{} (needs repair) — ryucad", name(&d.0.root)),
+        }
+    }
+
+    /// One frame.
+    pub fn frame(&mut self, ui: &mut egui::Ui, gpu: Option<&eframe::egui_wgpu::RenderState>) {
+        let ctx = ui.ctx().clone();
+        let title = self.title();
+        if self.titled.as_ref() != Some(&title) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.titled = Some(title);
+        }
+        let mut go = None;
+        match &mut self.screen {
+            Screen::Start(s) => match start::show(ui, s) {
+                Some(start::Action::Open(dir)) => go = Some(menu::Action::Open(Some(dir))),
+                Some(start::Action::Create(dir)) => {
+                    self.create(&dir);
+                    return;
+                }
+                None => {}
+            },
+            Screen::Opened(o) => go = o.frame(ui, gpu),
+            Screen::Damaged(d) => {
+                let (offline, state) = &mut **d;
+                offline.poll();
+                if doctor::damaged(ui, offline, state) {
+                    go = Some(menu::Action::Open(Some(offline.root.clone())));
+                }
+            }
+        }
+        match go {
+            Some(menu::Action::Open(Some(dir))) => self.go(&dir),
+            Some(menu::Action::Open(None)) => {
+                if let Some(dir) = start::pick_folder() {
+                    self.go(&dir);
+                }
+            }
+            Some(menu::Action::Close) => {
+                self.screen = Screen::Start(Box::new(Start::new(&self.daemon, &self.wake)));
+            }
+            Some(menu::Action::Quit) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            None => {}
+        }
+    }
+}
+
+impl Opened {
+    pub fn new(ws: Workspace) -> Opened {
+        let mut o = Opened {
+            ws,
+            view: View::new(),
+            tab: panels::Tab::default(),
+            dialogs: menu::Dialogs::default(),
+            doctor: doctor::State::default(),
+            recent: crate::core::recent::load(),
+        };
+        // Damage that doesn't stop the project opening shows as badges.
+        o.ws.diagnose();
+        o
+    }
+
+    /// One frame: take what arrived, then draw. Returns what the menus ask
+    /// of the app.
+    pub fn frame(
+        &mut self,
+        ui: &mut egui::Ui,
+        gpu: Option<&eframe::egui_wgpu::RenderState>,
+    ) -> Option<menu::Action> {
+        let ctx = ui.ctx().clone();
+        self.ws.pump();
+        // `ryucad open` asked for this window.
+        if std::mem::take(&mut self.ws.raised) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        self.read_recent();
+        self.ws.tick(Instant::now());
+        // Keep frames coming while something is due.
+        if self.ws.camera_due() {
+            ctx.request_repaint_after(crate::core::workspace::CAMERA_EVERY);
+        }
+        if let Some(at) = self.ws.retry_at() {
+            ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));
+        }
+        self.apply_preferences(&ctx);
+        let recent = self.recent.clone();
+        let action = egui::Panel::top("menu")
+            .show(ui, |ui| menu::bar(ui, self, &recent))
+            .inner;
+        egui::Panel::top("people").show(ui, |ui| panels::people(ui, &mut self.ws));
+        self.shortcuts(&ctx);
+        egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &self.ws));
+        egui::Panel::bottom("journal")
+            .resizable(true)
+            .default_size(160.0)
+            .show(ui, |ui| panels::journal(ui, &mut self.ws, &mut self.tab));
+        egui::Panel::left("tree")
+            .resizable(true)
+            .default_size(220.0)
+            .min_size(180.0)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .show(ui, |ui| panels::tree(ui, &mut self.ws, &mut self.view));
+            });
+        egui::Panel::right("properties")
+            .resizable(true)
+            .default_size(280.0)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| panels::properties(ui, &mut self.ws));
+            });
+        egui::CentralPanel::no_frame().show(ui, |ui| self.view.show(ui, &mut self.ws, gpu));
+        dialogs::settings(&ctx, &mut self.ws, &mut self.dialogs.settings);
+        dialogs::preferences(&ctx, &mut self.ws, &mut self.dialogs.preferences);
+        doctor::dialog(
+            &ctx,
+            &mut self.ws,
+            &mut self.dialogs.doctor,
+            &mut self.doctor,
+        );
+        action
+    }
+
+    /// The recent projects, as the daemon last reported them: it puts
+    /// this project first when the window says hello.
+    fn read_recent(&mut self) {
+        if let Some(v) = self.ws.settings.get("app.recent_projects") {
+            self.recent = crate::core::recent::parse(v);
+        }
+    }
+
+    /// The user's preferences, as they stand: the daemon announces every
+    /// change, whoever makes it.
+    fn apply_preferences(&mut self, ctx: &egui::Context) {
+        let theme = match self.ws.settings.text("ui.theme", "system") {
+            "dark" => egui::ThemePreference::Dark,
+            "light" => egui::ThemePreference::Light,
+            _ => egui::ThemePreference::System,
+        };
+        if ctx.options(|o| o.theme_preference) != theme {
+            ctx.set_theme(theme);
+        }
+        self.view.nav.style = Navigation::parse(self.ws.settings.text("ui.navigation", "ryucad"));
+        self.view.edges = self
+            .ws
+            .settings
+            .get("display.edges")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+    }
+
+    /// Ctrl/Cmd+Z undoes this window's latest change, Shift+Ctrl/Cmd+Z
+    /// redoes; not while a text field has the keyboard (it has its own).
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.memory(|m| m.focused().is_some()) {
+            return;
+        }
+        use egui::{Key, KeyboardShortcut, Modifiers};
+        let redo = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        let undo = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
+        if ctx.input_mut(|i| i.consume_shortcut(&redo)) {
+            self.ws.redo(None);
+        } else if ctx.input_mut(|i| i.consume_shortcut(&undo)) {
+            self.ws.undo(None);
+        }
+    }
+}
+
+impl eframe::App for App {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let gpu = frame.wgpu_render_state().cloned();
+        self.frame(ui, gpu.as_ref());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn windows_are_numbered_per_user() {
+        let list = json!([
+            {"kind": "human", "name": "dana (window 1)"},
+            {"kind": "agent", "name": "dana (window 2)"},
+            {"kind": "human", "name": "kai (window 2)"},
+        ]);
+        assert_eq!(window_name("dana", &list), "dana (window 2)");
+        assert_eq!(window_name("kai", &list), "kai (window 1)");
+        assert_eq!(window_name("dana", &json!([])), "dana (window 1)");
+    }
+}

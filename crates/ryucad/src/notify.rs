@@ -136,6 +136,18 @@ impl Hub {
         }
     }
 
+    /// Queues a notification for `participant`'s subscriptions, whatever
+    /// their topics: a request meant for one app window.
+    pub fn send_to(&mut self, participant: &str, method: &str, params: &Value) {
+        self.subscribers.retain(|s| !s.is_closed());
+        let line = line(method, params);
+        for s in &self.subscribers {
+            if s.participant == participant {
+                s.push(line.clone());
+            }
+        }
+    }
+
     /// Whether anyone is subscribed.
     pub fn is_watched(&mut self) -> bool {
         self.subscribers.retain(|s| !s.is_closed());
@@ -208,6 +220,17 @@ mod tests {
         let (a, b) = waiter.join().unwrap();
         assert!(a.unwrap().contains("activity.appended"));
         assert_eq!(b, None);
+    }
+
+    #[test]
+    fn a_notification_for_one_participant() {
+        let mut hub = Hub::default();
+        let a = hub.subscribe("p-1", &[Topic::Model]);
+        let b = hub.subscribe("p-2", &[]);
+        hub.send_to("p-1", "app.open", &json!({}));
+        hub.send(Topic::Participants, "participant.changed", &json!({}));
+        assert!(a.next().unwrap().contains("app.open"));
+        assert!(b.next().unwrap().contains("participant.changed"));
     }
 
     #[test]
