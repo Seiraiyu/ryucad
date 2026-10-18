@@ -57,7 +57,8 @@ impl Quality {
     pub fn params(self, diagonal: f64) -> MeshParams {
         use core::f64::consts::PI;
         let (fraction, angle) = match self {
-            Quality::Coarse => (2e-3, PI / 6.0),
+            // Coarse is for size, not looks: visibly faceted.
+            Quality::Coarse => (1e-2, PI / 4.0),
             Quality::Normal => (5e-4, PI / 12.0),
             Quality::Fine => (1.25e-4, PI * 8.0 / 180.0),
         };
@@ -702,7 +703,7 @@ mod tests {
     fn quality_scales_with_size() {
         let p = Quality::Normal.params(2.0);
         assert_eq!(p.chord, 1e-3);
-        assert_eq!(Quality::Coarse.params(2.0).chord, 4e-3);
+        assert_eq!(Quality::Coarse.params(2.0).chord, 2e-2);
         assert_eq!(Quality::Fine.params(2.0).chord, 2.5e-4);
         // Tiny bodies stop at ryukei's floor.
         assert_eq!(
@@ -731,6 +732,11 @@ mod tests {
             fine.mesh.as_ref().unwrap().triangles.len(),
         );
         assert!(nf > n, "{nf} > {n}");
+        // Coarse is visibly coarse: a fraction of fine's triangles.
+        let coarse = cache.get(&f, &b, Quality::Coarse, usize::MAX);
+        let nc = coarse.mesh.as_ref().unwrap().triangles.len();
+        assert!(4 * nc <= n, "coarse {nc}, normal {n}");
+        assert!(16 * nc <= nf, "coarse {nc}, fine {nf}");
         // Over budget, the least recently used goes; the newest stays.
         let (f2, b2) = sphere("20 mm");
         cache.get(&f2, &b2, Quality::Normal, 1);
