@@ -178,6 +178,11 @@ impl Name {
     pub fn to_u128(self) -> u128 {
         self.0
     }
+
+    /// A caller's 128-bit key as a name, to serve as a parent.
+    pub(crate) fn from_u128(x: u128) -> Self {
+        Self(x)
+    }
 }
 
 impl fmt::Debug for Name {
