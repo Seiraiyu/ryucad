@@ -119,14 +119,16 @@ impl Nav {
         self.camera = view::zoom(&self.camera, factor, toward);
     }
 
-    /// A standard view framing the box `lo`..`hi`.
-    pub fn standard(&mut self, v: StandardView, lo: [f64; 3], hi: [f64; 3]) {
-        self.camera = view::frame(lo, hi, v, self.camera.projection);
+    /// A standard view framing `points` (not empty) in a viewport of
+    /// `aspect`.
+    pub fn standard(&mut self, v: StandardView, points: &[[f64; 3]], aspect: f64) {
+        self.camera = view::frame_points(points, v, self.camera.projection, aspect);
     }
 
-    /// The same direction, framing the box `lo`..`hi`.
-    pub fn fit(&mut self, lo: [f64; 3], hi: [f64; 3]) {
-        self.camera = view::refit(&self.camera, lo, hi);
+    /// The same direction, framing `points` (not empty) in a viewport of
+    /// `aspect`.
+    pub fn fit(&mut self, points: &[[f64; 3]], aspect: f64) {
+        self.camera = view::refit_points(&self.camera, points, aspect);
     }
 }
 
@@ -350,7 +352,7 @@ mod tests {
         let same = nav.clone();
         nav.drag(Gesture::None, [10.0, 10.0], 500.0, None);
         assert_eq!(nav, same);
-        nav.standard(StandardView::Top, [0.0; 3], [1.0; 3]);
+        nav.standard(StandardView::Top, &[[0.0; 3], [1.0; 3]], 1.0);
         assert_eq!(nav.camera.target, [0.5; 3]);
     }
 

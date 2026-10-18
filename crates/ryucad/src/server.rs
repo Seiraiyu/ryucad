@@ -980,20 +980,11 @@ pub fn meshes(
         .collect())
 }
 
-/// The box around the given entities, or the whole model when there are
-/// none, from coarse display meshes.
-pub fn model_box(
-    session: &mut Session,
-    refs: &[EntityRef],
-) -> Result<Option<([f64; 3], [f64; 3])>> {
-    let mut lo = [f64::INFINITY; 3];
-    let mut hi = [f64::NEG_INFINITY; 3];
-    let mut grow = |p: &ryukei::geom::Point3| {
-        for (k, x) in [p.x, p.y, p.z].into_iter().enumerate() {
-            lo[k] = lo[k].min(x);
-            hi[k] = hi[k].max(x);
-        }
-    };
+/// The points of the given entities, or of the whole model when there
+/// are none, from coarse display meshes: what a camera frames.
+pub fn model_points(session: &mut Session, refs: &[EntityRef]) -> Result<Vec<[f64; 3]>> {
+    let mut points = Vec::new();
+    let mut grow = |p: &ryukei::geom::Point3| points.push([p.x, p.y, p.z]);
     let coarse = mesh::Quality::Coarse;
     if refs.is_empty() {
         let parts: Vec<Id> = session.project().parts.keys().cloned().collect();
@@ -1032,7 +1023,7 @@ pub fn model_box(
             }
         }
     }
-    Ok((lo[0] <= hi[0]).then_some((lo, hi)))
+    Ok(points)
 }
 
 /// A camera from a standard view and/or framing entities. With no view,
@@ -1045,16 +1036,18 @@ fn framed(
 ) -> Result<Camera> {
     let view = view.map(StandardView::parse).transpose()?;
     let refs = entity::parse_all(session, fit)?;
-    let Some((lo, hi)) = model_box(session, &refs)? else {
+    let points = model_points(session, &refs)?;
+    if points.is_empty() {
         return Err(Error::new(Code::InvalidParam, "there is nothing to frame"));
-    };
+    }
     Ok(match (view, current) {
-        (None, Some(c)) => crate::view::refit(c, lo, hi),
-        (v, c) => crate::view::frame(
-            lo,
-            hi,
+        // Square: windows that follow the camera may be any shape.
+        (None, Some(c)) => crate::view::refit_points(c, &points, 1.0),
+        (v, c) => crate::view::frame_points(
+            &points,
             v.unwrap_or(StandardView::Iso),
             c.map_or(DEFAULT_PROJECTION, |c| c.projection),
+            1.0,
         ),
     })
 }
@@ -1202,8 +1195,12 @@ fn render(
                 .map(StandardView::parse)
                 .transpose()?
                 .unwrap_or(StandardView::Iso);
-            let (lo, hi) = bounds(&g.positions).unwrap_or(([-0.5; 3], [0.5; 3]));
-            crate::view::frame(lo, hi, view, DEFAULT_PROJECTION)
+            if g.positions.is_empty() {
+                crate::view::frame([-0.5; 3], [0.5; 3], view, DEFAULT_PROJECTION)
+            } else {
+                let aspect = f64::from(ask.width) / f64::from(ask.height);
+                crate::view::frame_points(&g.positions, view, DEFAULT_PROJECTION, aspect)
+            }
         }
     };
     let options = Options {
@@ -1214,19 +1211,6 @@ fn render(
     let result =
         json!({"part": ask.part, "width": ask.width, "height": ask.height, "camera": camera});
     Ok(Answer::bytes(result, "image/png", img.png()))
-}
-
-/// The box around some points.
-fn bounds(points: &[[f64; 3]]) -> Option<([f64; 3], [f64; 3])> {
-    let mut lo = [f64::INFINITY; 3];
-    let mut hi = [f64::NEG_INFINITY; 3];
-    for p in points {
-        for k in 0..3 {
-            lo[k] = lo[k].min(p[k]);
-            hi[k] = hi[k].max(p[k]);
-        }
-    }
-    (!points.is_empty()).then_some((lo, hi))
 }
 
 /// The part, feature and quality a mesh request names.

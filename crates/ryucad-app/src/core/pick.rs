@@ -195,6 +195,43 @@ impl Picker {
         })
     }
 
+    /// The mesh points of the given entities, those in the meshes: what a
+    /// camera frames.
+    pub fn points_of(&self, references: &[String]) -> Vec<[f64; 3]> {
+        let mut out = Vec::new();
+        for r in references {
+            let Some(&(i, kind, j)) = self.index.get(r) else {
+                continue;
+            };
+            let m = mesh(&self.bodies[i].mesh).expect("only meshed bodies");
+            match kind {
+                EntityKind::Face => {
+                    let f = &m.faces[j];
+                    for c in &m.corners[f.corners.0 as usize..f.corners.1 as usize] {
+                        out.push(at(m, c.0));
+                    }
+                }
+                EntityKind::Edge => out.extend(m.edges[j].1.iter().map(|p| at(m, *p))),
+                EntityKind::Vertex => out.push(at(m, m.vertices[j].1)),
+            }
+        }
+        out
+    }
+
+    /// The mesh points of one body, or of them all.
+    pub fn points(&self, body: Option<&BodyKey>) -> Vec<[f64; 3]> {
+        let mut out = Vec::new();
+        for b in self
+            .bodies
+            .iter()
+            .filter(|b| body.is_none_or(|k| &b.key == k))
+        {
+            let m = mesh(&b.mesh).expect("only meshed bodies");
+            out.extend((0..m.positions.len()).map(|i| at(m, i as u32)));
+        }
+        out
+    }
+
     /// The box around the given entities, those in the meshes.
     pub fn bounds_of(&self, references: &[String]) -> Option<([f64; 3], [f64; 3])> {
         let mut lo = [f64::INFINITY; 3];

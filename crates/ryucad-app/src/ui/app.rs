@@ -256,9 +256,10 @@ impl Opened {
         egui::Panel::top("people").show(ui, |ui| panels::people(ui, &mut self.ws));
         self.shortcuts(&ctx);
         egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &self.ws));
+        // Room for about ten entries; drag its top edge for more.
         egui::Panel::bottom("journal")
             .resizable(true)
-            .default_size(160.0)
+            .default_size(240.0)
             .show(ui, |ui| panels::journal(ui, &mut self.ws, &mut self.tab));
         egui::Panel::left("tree")
             .resizable(true)

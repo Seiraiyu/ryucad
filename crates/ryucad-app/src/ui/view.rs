@@ -106,30 +106,39 @@ impl View {
         Projector::new(&self.nav.camera, aspect, centre, radius)
     }
 
+    /// Width over height of the viewport (1 before it is laid out).
+    fn aspect(&self) -> f64 {
+        let (w, h) = (self.rect.width(), self.rect.height());
+        if w > 0.0 && h > 0.0 {
+            f64::from(w / h)
+        } else {
+            1.0
+        }
+    }
+
     /// Looks from a standard view at the whole model, and tells the session.
     pub fn standard(&mut self, ws: &mut Workspace, v: StandardView) {
-        if let Some((lo, hi)) = self.bounds(ws) {
-            self.nav.standard(v, lo, hi);
+        let points = self.picker(ws).points(None);
+        if !points.is_empty() {
+            self.nav.standard(v, &points, self.aspect());
             self.moved(ws);
         }
     }
 
     /// Frames the whole model, or one body.
     pub fn fit(&mut self, ws: &mut Workspace, body: Option<&BodyKey>) {
-        let b = match body {
-            Some(k) => self.picker(ws).body_bounds(k),
-            None => self.bounds(ws),
-        };
-        if let Some((lo, hi)) = b {
-            self.nav.fit(lo, hi);
+        let points = self.picker(ws).points(body);
+        if !points.is_empty() {
+            self.nav.fit(&points, self.aspect());
             self.moved(ws);
         }
     }
 
     /// Frames the given entities.
     pub fn fit_entities(&mut self, ws: &mut Workspace, entities: &[String]) {
-        if let Some((lo, hi)) = self.picker(ws).bounds_of(entities) {
-            self.nav.fit(lo, hi);
+        let points = self.picker(ws).points_of(entities);
+        if !points.is_empty() {
+            self.nav.fit(&points, self.aspect());
             self.moved(ws);
         }
     }
@@ -232,7 +241,8 @@ impl View {
         {
             if self.framing != Some(b) {
                 self.framing = Some(b);
-                self.nav.fit(b.0, b.1);
+                let points = self.picker(ws).points(None);
+                self.nav.fit(&points, self.aspect());
                 ws.share_camera(&self.nav.camera);
             }
             self.framed = ws.idle();
