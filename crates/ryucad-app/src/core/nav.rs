@@ -165,7 +165,9 @@ impl Projector {
         let r = radius.max(1e-6) * 1.05;
         let far = (d + r).max(1e-6);
         let near = match camera.projection {
-            Projection::Perspective { .. } => (d - r).max(far * 1e-5),
+            // Not too close: depth precision falls with near/far, and lines
+            // are pulled in front of faces by a fraction of their distance.
+            Projection::Perspective { .. } => (d - r).max(far * 1e-3),
             Projection::Orthographic { .. } => d - r,
         };
         Projector {
@@ -184,6 +186,19 @@ impl Projector {
             Projection::Orthographic { .. } => self.camera.half_height(0.0),
         };
         (hh * self.aspect, hh)
+    }
+
+    /// For pulling lines towards the eye (see the scene's line shader): 1
+    /// in perspective, and the eye's own clip z there, which the
+    /// projection gives the view-space origin.
+    pub fn line_pull(&self) -> [f32; 2] {
+        match self.camera.projection {
+            Projection::Perspective { .. } => {
+                let (n, fa) = (self.near, self.far);
+                [1.0, (n * fa / (n - fa)) as f32]
+            }
+            Projection::Orthographic { .. } => [0.0, 0.0],
+        }
     }
 
     /// Projection times view, for positions relative to `reference`.

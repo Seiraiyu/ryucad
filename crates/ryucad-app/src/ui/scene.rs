@@ -58,7 +58,9 @@ struct Uniforms {
     matrix: Mat4,
     /// Towards the light, in model space; w unused.
     light: [f32; 4],
-    /// x: how far lines are pulled towards the eye, in depth.
+    /// x: the fraction of their distance lines are pulled towards the
+    /// eye; y: 1 in perspective; z: the clip position of the eye's own z
+    /// (perspective).
     flags: [f32; 4],
 }
 
@@ -94,9 +96,18 @@ struct VOut {
 
 @vertex fn vs_line(v: VIn) -> VOut {
     var o: VOut;
-    o.clip = u.matrix * vec4<f32>(v.pos, 1.0);
-    // In front of the faces the edges bound.
-    o.clip.z = max(o.clip.z - u.flags.x * o.clip.w, 0.0);
+    let c = u.matrix * vec4<f32>(v.pos, 1.0);
+    // In front of the faces the edges bound, by a fraction of their
+    // distance: a fixed step in depth would be meters far back in a
+    // perspective view and pull hidden edges through solids. In
+    // perspective the point moves along its own sight line, towards the
+    // eye, so it stays on the same pixel.
+    let e = u.flags.x;
+    if u.flags.y > 0.5 {
+        o.clip = vec4<f32>(c.xy * (1.0 - e), c.z * (1.0 - e) + e * u.flags.z, c.w * (1.0 - e));
+    } else {
+        o.clip = vec4<f32>(c.xy, max(c.z - e * c.w, 0.0), c.w);
+    }
     o.normal = v.normal;
     o.color = v.color;
     return o;
@@ -138,6 +149,9 @@ pub struct DrawList<'a> {
     /// Towards the light, in model space.
     pub light: [f32; 3],
     pub edges: bool,
+    /// 1 in perspective, and the clip z of the eye: see
+    /// [`crate::core::nav::Projector::line_pull`].
+    pub perspective: [f32; 2],
     /// Faces painted over, last on top.
     pub faces: &'a [PaintedFace],
 }
@@ -418,7 +432,7 @@ impl Scene {
         let u = Uniforms {
             matrix: list.matrix,
             light: [list.light[0], list.light[1], list.light[2], 0.0],
-            flags: [2e-4, 0.0, 0.0, 0.0],
+            flags: [1e-3, list.perspective[0], list.perspective[1], 0.0],
         };
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&u));
         // The painted faces, all in one buffer.

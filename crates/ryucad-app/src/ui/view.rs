@@ -368,6 +368,7 @@ impl View {
         let list = DrawList {
             reference,
             matrix: pr.matrix(reference),
+            perspective: pr.line_pull(),
             light: scene::light(&pr.camera),
             edges: self.edges,
             faces,
