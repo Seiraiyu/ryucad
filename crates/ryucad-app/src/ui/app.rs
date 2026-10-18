@@ -241,6 +241,10 @@ impl Opened {
         if self.ws.camera_due() {
             ctx.request_repaint_after(crate::core::workspace::CAMERA_EVERY);
         }
+        // An error leaves the status line on time, mouse or not.
+        if let Some(d) = self.ws.error_due(Instant::now()) {
+            ctx.request_repaint_after(d);
+        }
         if let Some(at) = self.ws.retry_at() {
             ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));
         }
