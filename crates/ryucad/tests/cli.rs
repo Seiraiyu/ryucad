@@ -253,6 +253,9 @@ fn every_error_code_has_its_exit_code() {
     p.fails(&["config", "set", "ui.colour", "x"], "unknown_setting", 1);
     p.fails(&["config", "set", "ui.theme", "neon"], "invalid_setting", 1);
     p.fails(&["feature", "bogus"], "usage", 2);
+    // A group with no subcommand is a usage error too, in JSON, for agents.
+    p.fails(&["config"], "usage", 2);
+    p.fails(&["daemon"], "usage", 2);
     p.fails(
         &["feature", "add", "p", "sphere", "--after", "t", "--first"],
         "usage",
