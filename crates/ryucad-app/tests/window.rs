@@ -159,6 +159,73 @@ fn a_click_selects_and_agents_see_it() {
 }
 
 #[test]
+fn orbiting_from_the_background_keeps_the_model_in_view() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.step();
+    let rect = h.state().opened().view.rect;
+    // Zoom in towards a corner of the model, well off the middle.
+    let corner = rect.center() + egui::vec2(rect.width() * 0.18, rect.height() * 0.12);
+    h.event(egui::Event::PointerMoved(corner));
+    for _ in 0..12 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 1.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.step();
+    }
+    // The model fills the middle of the view.
+    let under_middle = |h: &Harness<'static, App>| {
+        let o = h.state().opened();
+        let (lo, hi) = ryucad_app::core::pick::Picker::new(&o.ws.model)
+            .bounds()
+            .unwrap();
+        let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+        let aspect = f64::from(rect.width() / rect.height());
+        let pr = ryucad_app::core::nav::Projector::new(&o.view.nav.camera, aspect, centre, 0.05);
+        let size = [f64::from(rect.width()), f64::from(rect.height())];
+        ryucad_app::core::pick::Picker::new(&o.ws.model)
+            .pick(&pr, size, [size[0] / 2.0, size[1] / 2.0])
+            .is_some()
+    };
+    assert!(under_middle(&h), "zoomed in on the model");
+    // Orbit from the background, a quarter turn or so.
+    let start = rect.left_top() + egui::vec2(8.0, 8.0);
+    h.event(egui::Event::PointerMoved(start));
+    h.event(egui::Event::PointerButton {
+        pos: start,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    for i in 1..10 {
+        h.event(egui::Event::PointerMoved(
+            start + egui::vec2(25.0 * i as f32, 0.0),
+        ));
+        h.step();
+    }
+    h.event(egui::Event::PointerButton {
+        pos: start + egui::vec2(225.0, 0.0),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    // Turned about what was in the middle, the model is still there.
+    assert!(
+        under_middle(&h),
+        "the orbit swung the model out of the middle"
+    );
+}
+
+#[test]
 fn the_first_view_frames_the_whole_model() {
     if !gpu() {
         return;

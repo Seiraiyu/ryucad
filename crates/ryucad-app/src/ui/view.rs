@@ -263,10 +263,20 @@ impl View {
             (b, m, i.smooth_scroll_delta.y)
         });
         if response.drag_started() {
-            self.pivot = response
+            // Turn about the model under the mouse; from the background,
+            // about what is in the middle of the view (the target may be
+            // well off the model after zooming towards a point), else the
+            // model's middle.
+            let middle = [size[0] / 2.0, size[1] / 2.0];
+            let picked = response
                 .interact_pointer_pos()
                 .and_then(|p| self.picker(ws).pick(&pr, size, local(p)))
+                .or_else(|| self.picker(ws).pick(&pr, size, middle))
                 .map(|h| h.point);
+            self.pivot = picked.or_else(|| {
+                self.bounds(ws)
+                    .map(|(lo, hi)| [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0))
+            });
         }
         if response.dragged() {
             let g = self.nav.style.gesture(buttons, modifiers);
