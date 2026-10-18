@@ -114,6 +114,29 @@ pub fn param(g: &mut Lcg, [a, b]: [f64; 2]) -> f64 {
     g.next_f64(a, b)
 }
 
+/// A random closed blob in the plane: a periodic quadratic with 8 to 12
+/// control points on the circle of `radius` about `centre`, at increasing
+/// angles each within a quarter step of even spacing, with weights in
+/// `[0.5, 2]` and knots `0, 1, ..., n`. The control polygon is convex, so
+/// the curve is a simple convex loop inside the circle; each point is a
+/// combination of three consecutive control points, so it keeps more than
+/// half the radius from the centre.
+pub fn blob2(g: &mut Lcg, centre: Point2, radius: f64) -> NurbsCurve2 {
+    let n = 8 + (g.next_u64() % 5) as usize;
+    let step = core::f64::consts::TAU / n as f64;
+    let points = (0..n)
+        .map(|i| {
+            let angle = step * (i as f64 + g.next_f64(-0.25, 0.25));
+            let (s, c) = ryukei::math::sin_cos(angle);
+            Point2::new(centre.x + radius * c, centre.y + radius * s)
+        })
+        .collect();
+    let weights = (0..n).map(|_| g.next_f64(0.5, 2.0)).collect();
+    let knots: Vec<f64> = (0..=n).map(|i| i as f64).collect();
+    let k = KnotVector::periodic(2, &knots, &vec![1; n + 1]).unwrap();
+    NurbsCurve2::new(k, points, Some(weights)).unwrap()
+}
+
 /// Every curve and surface of `b` replaced by its exact NURBS form through
 /// the geometry setters. Edges keep their ends (the reparameterization
 /// maps their intervals) and faces their senses. Open surfaces are
