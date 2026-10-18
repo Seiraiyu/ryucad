@@ -214,6 +214,134 @@ pub fn refit(camera: &Camera, lo: [f64; 3], hi: [f64; 3]) -> Camera {
     frame_along(lo, hi, back, camera.up, camera.projection)
 }
 
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn unit(a: [f64; 3]) -> [f64; 3] {
+    let n = norm(a);
+    a.map(|x| x / n)
+}
+
+fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn scale(a: [f64; 3], k: f64) -> [f64; 3] {
+    a.map(|x| x * k)
+}
+
+/// `v` turned by `angle` radians about the unit `axis` (Rodrigues).
+fn rotate(v: [f64; 3], axis: [f64; 3], angle: f64) -> [f64; 3] {
+    let (s, c) = ryukei::math::sin_cos(angle);
+    let along = scale(axis, dot(axis, v) * (1.0 - c));
+    add(add(scale(v, c), scale(cross(axis, v), s)), along)
+}
+
+impl Camera {
+    /// The view's unit axes: right, up and forward (from the eye towards
+    /// the target).
+    pub fn basis(&self) -> ([f64; 3], [f64; 3], [f64; 3]) {
+        let forward = unit(sub(self.target, self.eye));
+        let right = unit(cross(forward, self.up));
+        (right, cross(right, forward), forward)
+    }
+
+    /// Half the view's height at `depth` along the view direction (at any
+    /// depth, for an orthographic view).
+    pub fn half_height(&self, depth: f64) -> f64 {
+        match self.projection {
+            Projection::Perspective { fov_deg } => {
+                ryukei::math::tan(fov_deg * core::f64::consts::PI / 360.0) * depth
+            }
+            Projection::Orthographic { height } => height / 2.0,
+        }
+    }
+
+    /// The distance from the eye to the target.
+    pub fn distance(&self) -> f64 {
+        norm(sub(self.target, self.eye))
+    }
+}
+
+/// `camera` turned about `pivot`: `yaw` radians about the model's Z axis,
+/// then `pitch` radians about the view's right axis. Up turns with it, so
+/// the view can go over the top without flipping.
+pub fn orbit(camera: &Camera, pivot: [f64; 3], yaw: f64, pitch: f64) -> Camera {
+    let z = [0.0, 0.0, 1.0];
+    let (eye, target, up) = (sub(camera.eye, pivot), sub(camera.target, pivot), camera.up);
+    let (eye, target, up) = (
+        rotate(eye, z, yaw),
+        rotate(target, z, yaw),
+        rotate(up, z, yaw),
+    );
+    let right = unit(cross(sub(target, eye), up));
+    let (eye, target, up) = (
+        rotate(eye, right, pitch),
+        rotate(target, right, pitch),
+        rotate(up, right, pitch),
+    );
+    Camera {
+        eye: add(eye, pivot),
+        target: add(target, pivot),
+        up: unit(up),
+        projection: camera.projection,
+    }
+}
+
+/// `camera` moved in the view plane by `dx` (right) and `dy` (up), as
+/// fractions of the view's height at the target.
+pub fn pan(camera: &Camera, dx: f64, dy: f64) -> Camera {
+    let (right, up, _) = camera.basis();
+    let h = 2.0 * camera.half_height(camera.distance());
+    let shift = add(scale(right, dx * h), scale(up, dy * h));
+    Camera {
+        eye: add(camera.eye, shift),
+        target: add(camera.target, shift),
+        ..camera.clone()
+    }
+}
+
+/// `camera` zoomed by `factor` (below 1 is closer) towards `toward`, a
+/// point that stays where it is on screen; the target when `None`.
+pub fn zoom(camera: &Camera, factor: f64, toward: Option<[f64; 3]>) -> Camera {
+    let p = toward.unwrap_or(camera.target);
+    match camera.projection {
+        // Along the ray through `p`, which therefore stays put.
+        Projection::Perspective { .. } => {
+            let step = scale(sub(p, camera.eye), 1.0 - factor);
+            let eye = add(camera.eye, step);
+            // Towards a point, the target goes along, so later zooms and
+            // orbits keep their scale; towards the target, it stays.
+            let target = if toward.is_some() {
+                add(camera.target, step)
+            } else {
+                camera.target
+            };
+            Camera {
+                eye,
+                target,
+                ..camera.clone()
+            }
+        }
+        // Scaled about `p` in the view plane.
+        Projection::Orthographic { height } => {
+            let (_, _, forward) = camera.basis();
+            let rel = sub(camera.target, p);
+            let in_plane = sub(rel, scale(forward, dot(rel, forward)));
+            let shift = scale(in_plane, factor - 1.0);
+            Camera {
+                eye: add(camera.eye, shift),
+                target: add(camera.target, shift),
+                projection: Projection::Orthographic {
+                    height: height * factor,
+                },
+                ..camera.clone()
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,6 +401,59 @@ mod tests {
         let moved = refit(&c, [10.0; 3], [11.0; 3]);
         assert_eq!(moved.target, [10.5; 3]);
         assert_eq!(moved.up, c.up);
+    }
+
+    fn close(a: [f64; 3], b: [f64; 3]) -> bool {
+        norm(sub(a, b)) < 1e-9
+    }
+
+    #[test]
+    fn orbiting_keeps_the_distance_and_comes_round() {
+        let c = frame([0.0; 3], [1.0; 3], StandardView::Front, DEFAULT_PROJECTION);
+        let pivot = [0.5; 3];
+        let turned = orbit(&c, pivot, 0.7, -0.4);
+        assert!((norm(sub(turned.eye, pivot)) - norm(sub(c.eye, pivot))).abs() < 1e-12);
+        assert!(turned.check().is_ok());
+        assert!((dot(turned.up, sub(turned.target, turned.eye))).abs() < 1e-9);
+        let pi = core::f64::consts::PI;
+        let round = orbit(&orbit(&c, pivot, pi, 0.0), pivot, pi, 0.0);
+        assert!(close(round.eye, c.eye) && close(round.up, c.up));
+        // Over the top and back, with no flip.
+        let over = orbit(&orbit(&c, pivot, 0.0, 2.0), pivot, 0.0, -2.0);
+        assert!(close(over.eye, c.eye) && close(over.up, c.up));
+        // A yaw from the front view moves the eye round Z.
+        let side = orbit(&c, c.target, pi / 2.0, 0.0);
+        assert!(side.eye[0] > c.target[0] && (side.eye[1] - c.target[1]).abs() < 1e-9);
+    }
+
+    #[test]
+    fn panning_moves_the_view_plane() {
+        let c = frame([0.0; 3], [1.0; 3], StandardView::Front, DEFAULT_PROJECTION);
+        let h = 2.0 * c.half_height(c.distance());
+        let moved = pan(&c, 0.5, -0.25);
+        let d = sub(moved.target, c.target);
+        assert!(close(d, [0.5 * h, 0.0, -0.25 * h]));
+        assert!(close(sub(moved.eye, c.eye), d));
+    }
+
+    #[test]
+    fn zooming_keeps_the_point_in_place() {
+        let c = frame([0.0; 3], [1.0; 3], StandardView::Iso, DEFAULT_PROJECTION);
+        let closer = zoom(&c, 0.5, None);
+        assert!((closer.distance() - c.distance() / 2.0).abs() < 1e-12);
+        assert_eq!(closer.target, c.target);
+        let p = [1.0, 0.0, 1.0];
+        let ortho = Camera {
+            projection: Projection::Orthographic { height: 3.0 },
+            ..c.clone()
+        };
+        for cam in [c, ortho] {
+            let before = crate::render::View::new(&cam, 400, 300).pixel(p).unwrap();
+            let z = zoom(&cam, 0.8, Some(p));
+            assert!(z.check().is_ok());
+            let after = crate::render::View::new(&z, 400, 300).pixel(p).unwrap();
+            assert!((before.0 - after.0).abs() < 1e-3 && (before.1 - after.1).abs() < 1e-3);
+        }
     }
 
     #[test]

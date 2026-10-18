@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ryucad is CAD built for AI agents to drive, not primarily for humans clicking in a GUI. FreeCAD was rejected because it performs poorly on large assemblies, and its kernel, OCCT, is a main reason. This project builds its own kernel, **ryukei**, and the long-term target is Parasolid-level capability.
 
-The project is in its early stages. Roadmap phases 0 (foundations: deterministic math, the tolerance model, exact predicates, interval arithmetic, the test harness), 1 (topology core: flat-array B-rep bodies, Euler operators, the validity checker, stable names, the five primitives), 2 (geometry: rational NURBS, the ellipse, pcurves, derivatives, global projection) and 3 (tessellation: certified, watertight, parallel meshing, and the first OCCT comparison) are done. Sweeps (phase 4) come next; see design 14 (ryukei roadmap) in the Coxswain planning project `ryucad-ryukei`. On the application side, ryucad phase 0 (projects of feature files, deterministic rebuild of the primitives, the agent CLI, the session daemon, releases and installers) is done, and so is the daemon side of phase 1 (the live session, the activity log and undo, settings, Git history, display meshes, renders and `doctor`); the desktop app, `ryucad-app`, comes next (design 28).
+The project is in its early stages. Roadmap phases 0 (foundations: deterministic math, the tolerance model, exact predicates, interval arithmetic, the test harness), 1 (topology core: flat-array B-rep bodies, Euler operators, the validity checker, stable names, the five primitives), 2 (geometry: rational NURBS, the ellipse, pcurves, derivatives, global projection) and 3 (tessellation: certified, watertight, parallel meshing, and the first OCCT comparison) are done. Sweeps (phase 4) come next; see design 14 (ryukei roadmap) in the Coxswain planning project `ryucad-ryukei`. On the application side, ryucad phase 0 (projects of feature files, deterministic rebuild of the primitives, the agent CLI, the session daemon, releases and installers) is done, and so is phase 1 (design 28): the live session, the activity log and undo, settings, Git history, display meshes, renders and `doctor` in the daemon, and the desktop app, `ryucad-app`, with its installers.
 
 Above the kernel sit ryucad, the application (feature files in Git, the agent CLI, a live viewer humans watch but don't model in, assemblies at scale), and ryupdm, product data management (revisions, releases, where-used, BOM, hosted review; PDM only, not PLM). ryupdm is the likely business; ryukei and ryucad may be open sourced. Their roadmaps are designs 20 (ryucad) and 21 (ryupdm), design 23 lines up all three, and design 22 is the business plan.
 
@@ -25,13 +25,17 @@ UPDATE_GOLDEN=1 cargo test -p ryukei --test determinism   # after a deliberate c
 UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism   # the same for ryucad's rebuild hashes
 cargo bench -p ryukei-bench
 cargo bench -p ryucad
+cargo bench -p ryucad-app
+cargo run -p ryucad-app -- <project folder>                 # the desktop app (cargo build first: it needs ryucad beside it)
+RYUCAD_REQUIRE_GPU=1 cargo test -p ryucad-app               # fail, don't skip, the drawing tests without an adapter
+UPDATE_SNAPSHOTS=1 cargo test -p ryucad-app --test snapshot # redraw the viewport snapshot (lavapipe's)
 cargo test -p ryukei-bench --features occt,smlib --release --test kernels -- --nocapture   # head-to-head with OCCT and SMLib; devcontainer only
 cd fuzz && cargo +nightly fuzz run predicates               # needs nightly + cargo-fuzz
 sh scripts/test-install.sh target/release/ryucad          # install.sh against a fake release
-sh scripts/smoke.sh target/release/ryucad                 # a short agent session on a built binary
+sh scripts/smoke.sh target/release/ryucad target/release/ryucad-app   # an agent session, then the app's offscreen frame
 ```
 
-Releases are cut by pushing a tag `vX.Y.Z` that matches `version` in the root `Cargo.toml`; `.github/workflows/release.yml` builds, tests and publishes, then tests the installers against the new release. Pushing a tag publishes: only the owner does it, or asks for it.
+Releases are cut by pushing a tag `vX.Y.Z` (or `vX.Y.Z-pre`, published as a prerelease). The version comes from the tag, never from a file: the workspace version in the repo stays `0.0.0`, and `.github/workflows/release.yml` stamps the tag's version in (`scripts/stamp-version.sh`), builds, tests and publishes, then tests the installers against the new release. Pushing a tag publishes: only the owner does it, or asks for it.
 
 Development happens on a headless Linux VM using the devcontainer, driven by the `devcontainer` CLI rather than VS Code:
 
@@ -46,6 +50,8 @@ The product targets Windows, macOS, and Linux natively, not just WSL. CI (`.gith
 
 - `crates/ryukei`: the B-rep geometry kernel (library).
 - `crates/ryucad`: the application layer and binary.
+- `crates/ryucad-app`: the desktop app, a client of the daemon (`core`: link, model, people, navigation, picking, forms; `ui`: the egui window and the wgpu scene).
+- `packaging/`: what the installers register: the Linux desktop entry and project MIME type, and the macOS launcher's AppleScript.
 - `crates/ryukei-testkit`: test-only helpers (exact references, seeded inputs, golden hashes, Euler operator sequences from bytes, random NURBS). Never a runtime dependency.
 - `crates/ryukei-bench`: divan benchmarks, and the comparisons behind its `occt` and `smlib` features: `cxx` shims over a system OCCT 7.8 and over `libsmlib`, the kernel of NVIDIA's USD BRep built from a pinned commit. The devcontainer installs both.
 - `fuzz/`: cargo-fuzz targets, outside the workspace (nightly only).
@@ -135,6 +141,18 @@ The design is document 28 in the Coxswain planning project `ryucad-ryukei`.
 - **Settings.** A fixed schema in `config`: `default_unit` in `ryucad.json` (a logged, undoable file change guarded by the project revision), everything else in `preferences.json` under the OS config folder (`RYUCAD_CONFIG_DIR` overrides it); a file that can't be read is reported, used as defaults, and kept as `.bak` when next written.
 - **Meshes and renders.** Display meshes come from `display.quality` (chord a fraction of the body's diagonal), cached by body hash and quality, missed bodies meshed in parallel. `mesh.get` answers JSON, or with `transfer: binary`, `ryucad.mesh.1` bytes after the response line (`binary: {encoding, length}`); renders are always bytes. `render` is a CPU rasterizer in `ryucad::render`: twice the size averaged down, parallel bands, f32 pixel arithmetic, normal display quality and a fixed theme whatever the user's preferences, so its pixels are golden-tested on every platform.
 - **Doctor.** `doctor` reads the folder directly (it works with no manifest; a folder with parts but no manifest is `project_damaged`) and reports 14 issue codes, each with planned repairs: exact file changes, an ID with a hash of the files involved (`repair_conflict` if they changed), and parameters (`unit`, `order`). Repairs restore from Git `HEAD` where they can, and never rename (that would change stable names).
+
+## Desktop app (decided in ryucad phase 1)
+
+The design is document 28 in the Coxswain planning project `ryucad-ryukei`; the plan is the phase 1.B plan there.
+
+- **Process.** `ryucad-app` is eframe (egui on winit and wgpu), all Rust. It is a client of the project's daemon and nothing else: it depends on the `ryucad` library for `proto` and `client`, never touches project files (a damaged project is repaired by running `ryucad doctor`) and never calls ryukei. It starts daemons from the `ryucad` binary beside it, else on `PATH`, which must be the same build: the same ryucad, ryukei, commit and protocol (`VersionInfo::same_build`; the target differs on Linux, where the app is glibc and the CLI static musl). `RYUCAD_APP` names the app for `ryucad open`.
+- **Connections.** Two per window, as one human participant named `<OS user> (window n)`: requests on a thread, notifications on a `client::Subscription`, which wakes its own reader when dropped so a closed window leaves the session. A lost daemon greys the window, which reconnects with backoff and loads again.
+- **Model.** Parts and features from `rebuild` reports (which give each feature's `type`), meshes fetched as `ryucad.mesh.1` one body per request and kept by body hash, so an unchanged body is never fetched twice. Cameras move with `view::{orbit, pan, zoom}` and are shared at most every 150 ms; matrices are made relative to a reference point near the model so f32 GPU positions stay precise.
+- **Drawing.** The scene renders with wgpu into a texture of its own (MSAA when the adapter can), shown as an egui image and read back in tests; each body uploads once per hash, and selections, highlights and hover paint over faces from a per-frame buffer at equal depth. Picking is a CPU ray cast on faces and screen distance for edges and vertices (vertex over edge over face, nothing hidden). Hardware adapters first, else a software one (lavapipe, WARP) with a note in the status line.
+- **Writes.** The property panel saves through `feature.edit` against the revision `feature.show` read it at (`feature.show` now returns it); a conflict reloads the form and lists what changed. Settings go through `config.set`; preference writes hold a lock file, since every project's daemon shares `preferences.json`, and the daemon (not the app) puts a project first among the recent ones when a window says hello.
+- **Tests.** App tests run against real daemons, building `ryucad` themselves; drawing tests skip without an adapter unless `RYUCAD_REQUIRE_GPU` is set (CI sets it on Linux, with lavapipe, and Windows). Window tests drive the real app with `egui_kittest`, whose accessibility check means every control needs a name. The viewport snapshot is lavapipe's, compared within a tolerance.
+- **Packaging.** Release archives carry `ryucad` and `ryucad-app` (plus `share/` files on Linux and macOS); installers install both unless `RYUCAD_NO_APP=1`, and register "Open in ryucad" on folders (Windows, per user), a desktop entry and `ryucad.json` MIME type (Linux), and an AppleScript launcher compiled at install time into `~/Applications/ryucad.app` (macOS, unsigned).
 
 ## Open decisions
 

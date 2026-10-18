@@ -1,0 +1,26 @@
+[package]
+name = "ryucad-app"
+description = "The ryucad desktop app: watch, point at and adjust what agents build"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+# egui on winit and wgpu: all Rust, no C. Only what the app uses.
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "wayland", "wgpu", "x11"] }
+png = "0.18"
+pollster = "0.4"
+# Native Open dialogs: the XDG portal on Linux (all Rust), AppKit, Win32.
+rfd = "0.17"
+ryucad = { path = "../ryucad" }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dev-dependencies]
+divan = "0.1"
+egui_kittest = { version = "0.37", features = ["eframe", "snapshot", "wgpu"] }
+tempfile = "3"
+
+[[bench]]
+name = "view"
+harness = false

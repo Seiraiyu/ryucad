@@ -7,6 +7,8 @@
 #   RYUCAD_VERSION          tag to install (default: the latest release)
 #   RYUCAD_HOME             install root (default: ~/.ryucad); the binary goes in bin/
 #   RYUCAD_NO_MODIFY_PATH   set to 1 to leave shell profiles alone
+#   RYUCAD_NO_APP           set to 1 to install the ryucad command only, not the
+#                           desktop app (servers, CI)
 #   GH_TOKEN, GITHUB_TOKEN  a token for a private repository (else `gh auth token`)
 #   RYUCAD_DOWNLOAD_BASE    a mirror laid out as <base>/latest and
 #                           <base>/download/<tag>/<asset>; used by tests
@@ -81,6 +83,35 @@ private_hint() {
     die "could not reach $1. If the repository is private, set GH_TOKEN or run 'gh auth login' first"
 }
 
+# register BIN SHARE: lets the desktop open projects in the app: a desktop
+# entry and the project MIME type on Linux, ~/Applications/ryucad.app on
+# macOS. Running it again replaces them.
+register() {
+    case "$(uname -s)" in
+        Linux)
+            data=${XDG_DATA_HOME:-$HOME/.local/share}
+            mkdir -p "$data/applications" "$data/mime/packages"
+            sed "s|@BIN@|$1|g" "$2/ryucad.desktop" >"$data/applications/ryucad.desktop"
+            cp "$2/ryucad.xml" "$data/mime/packages/ryucad.xml"
+            if command -v update-mime-database >/dev/null 2>&1; then
+                update-mime-database "$data/mime" >/dev/null 2>&1 || true
+            fi
+            if command -v update-desktop-database >/dev/null 2>&1; then
+                update-desktop-database "$data/applications" >/dev/null 2>&1 || true
+            fi
+            ;;
+        Darwin)
+            # A launcher compiled here, so it knows where the binaries are.
+            if command -v osacompile >/dev/null 2>&1; then
+                mkdir -p "$HOME/Applications"
+                sed "s|@BIN@|$1|g" "$2/ryucad.applescript" >"$tmp/ryucad.applescript"
+                rm -rf "$HOME/Applications/ryucad.app"
+                osacompile -o "$HOME/Applications/ryucad.app" "$tmp/ryucad.applescript"
+            fi
+            ;;
+    esac
+}
+
 main() {
     target=$(detect_target)
     token=$(find_token)
@@ -153,6 +184,19 @@ main() {
     mv -f "$bin/.ryucad.new" "$bin/ryucad"
     # Daemons from the old version must not keep running.
     "$bin/ryucad" daemon stop --all >/dev/null 2>&1 || true
+
+    # The desktop app, unless only the command is wanted.
+    staged="$tmp/ryucad-$version-$target"
+    if [ "${RYUCAD_NO_APP:-0}" = 1 ]; then
+        say "RYUCAD_NO_APP=1: the desktop app is not installed"
+    elif [ -f "$staged/ryucad-app" ]; then
+        cp "$staged/ryucad-app" "$bin/.ryucad-app.new"
+        chmod 755 "$bin/.ryucad-app.new"
+        mv -f "$bin/.ryucad-app.new" "$bin/ryucad-app"
+        register "$bin" "$staged/share"
+        "$bin/ryucad-app" --version >/dev/null 2>&1 ||
+            say "warning: ryucad-app doesn't run on this machine (on Linux it needs glibc 2.35 or newer); the ryucad command works without it"
+    fi
 
     # PATH.
     case ":$PATH:" in

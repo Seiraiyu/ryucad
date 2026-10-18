@@ -358,6 +358,13 @@ pub enum Request {
         #[serde(default)]
         entities: Vec<String>,
     },
+    /// Asks attached app windows to come to the front: `participant`'s,
+    /// or every human's.
+    #[serde(rename = "app.open")]
+    AppOpen {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
     #[serde(rename = "daemon.shutdown")]
     DaemonShutdown {},
 }

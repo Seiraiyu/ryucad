@@ -94,9 +94,12 @@ pub fn user_prefix(dir: &Path) -> String {
 }
 
 impl Endpoint {
-    /// The endpoint for the project at `root` (already canonical).
+    /// The endpoint for the project at `root` (already canonical). A
+    /// verbatim Windows path (`\\?\C:\…`) and its ordinary form name the
+    /// same project, so they get the same endpoint.
     pub fn for_project(root: &Path) -> Result<Endpoint> {
         let dir = runtime_dir()?;
+        let root = crate::doc::project::plain(root.to_path_buf());
         let hash = short_hash(&root.to_string_lossy());
         #[cfg(unix)]
         let address = dir
@@ -170,6 +173,11 @@ mod tests {
         let b = Endpoint::for_project(Path::new("/projects/b")).unwrap();
         assert_ne!(a.address, b.address);
         assert_eq!(a, Endpoint::for_project(Path::new("/projects/a")).unwrap());
+        #[cfg(windows)]
+        assert_eq!(
+            Endpoint::for_project(Path::new(r"\\?\C:\projects\a")).unwrap(),
+            Endpoint::for_project(Path::new(r"C:\projects\a")).unwrap()
+        );
         assert!(a.log.starts_with(dir.path().join("run")));
         assert!(a.name().is_ok());
         #[cfg(unix)]

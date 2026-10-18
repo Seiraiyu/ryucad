@@ -207,8 +207,11 @@ fn dispatch(
         Request::FeatureList { part } => feature_list(session, &part),
         Request::FeatureShow { part, id } => {
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
-            let f = feature(session.project().part(&part)?, &fid)?;
-            Ok(feature_report(&fid, f))
+            let p = session.project().part(&part)?;
+            let mut v = feature_report(&fid, feature(p, &fid)?);
+            // The revision it was read at: an edit made from it says so.
+            v["revision"] = json!(p.revision);
+            Ok(v)
         }
         Request::DaemonStatus {} | Request::DaemonShutdown {} => Err(Error::new(
             Code::Usage,
@@ -401,6 +404,27 @@ fn dispatch(
                 live.hub.send(Topic::Project, "config.changed", &note);
             }
             Ok(v)
+        }
+        Request::AppOpen { participant } => {
+            let live = live.ok_or_else(|| live::no_live_session("app.open"))?;
+            let asked: Vec<String> = match participant {
+                Some(id) => {
+                    let p = live.get(&id)?;
+                    if p.kind != live::Kind::Human {
+                        return Err(Error::new(
+                            Code::InvalidParam,
+                            format!("participant {id} is not an app window"),
+                        )
+                        .with("participant", id));
+                    }
+                    vec![id]
+                }
+                None => live.humans().map(|p| p.id.clone()).collect(),
+            };
+            for id in &asked {
+                live.hub.send_to(id, "app.open", &json!({}));
+            }
+            Ok(json!({ "asked": asked }))
         }
         Request::ActivitySet { status, entities } => {
             let live = live.ok_or_else(|| live::no_live_session("activity.set"))?;
@@ -785,7 +809,13 @@ fn feature_list(session: &Session, part: &str) -> Result<Value> {
 /// A part's rebuild as agents and subscribers see it: each feature's
 /// status, hash and counts.
 fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
-    let revision = session.project().part(id)?.revision.clone();
+    let part = session.project().part(id)?;
+    let revision = part.revision.clone();
+    let types: BTreeMap<Id, &'static str> = part
+        .features
+        .iter()
+        .filter_map(|(fid, f)| Some((fid.clone(), f.as_ref().ok()?.ty.as_str())))
+        .collect();
     let r = session.rebuilt(id)?;
     let features: Vec<Value> = r
         .features
@@ -793,10 +823,10 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
         .map(|(fid, b)| match b {
             Ok(b) => {
                 let c = b.body.counts();
-                json!({"id": fid, "ok": true, "hash": b.hash,
+                json!({"id": fid, "type": types.get(fid), "ok": true, "hash": b.hash,
                        "counts": {"faces": c.faces, "edges": c.edges, "vertices": c.vertices}})
             }
-            Err(e) => json!({"id": fid, "ok": false, "error": e}),
+            Err(e) => json!({"id": fid, "type": types.get(fid), "ok": false, "error": e}),
         })
         .collect();
     Ok(json!({"part": id, "revision": revision, "hash": r.hash,
@@ -1458,6 +1488,8 @@ pub(crate) mod tests {
         assert_eq!(ids(&list), ["ball", "sphere-1", "cylinder-1"]);
         let show = call(&mut s, "feature.show", json!({"part": "p", "id": "ball"})).unwrap();
         assert_eq!(show["type"], "sphere");
+        let list = call(&mut s, "part.list", json!({})).unwrap();
+        assert_eq!(show["revision"], list["parts"][0]["revision"]);
         // The file on disk is canonical and explicit.
         let text = fs::read_to_string(dir.path().join("parts/p/features/cylinder-1.json")).unwrap();
         assert!(crate::doc::canonical::is_canonical(&text));
@@ -1663,6 +1695,7 @@ pub(crate) mod tests {
         let r = call(&mut s, "rebuild", json!({})).unwrap();
         let part = &r["parts"][0];
         assert_eq!(part["failed"], 0);
+        assert_eq!(part["features"][1]["type"], "sphere");
         assert_eq!(
             part["features"][0]["counts"],
             json!({"faces": 6, "edges": 12, "vertices": 8})
@@ -1793,6 +1826,8 @@ pub(crate) mod tests {
         assert_eq!(e.code, Code::NoLiveSession);
         let r = call(&mut s, "participant.list", json!({})).unwrap();
         assert_eq!(r, json!({"participants": []}));
+        let e = call(&mut s, "app.open", json!({})).unwrap_err();
+        assert_eq!(e.code, Code::NoLiveSession);
     }
 
     #[test]

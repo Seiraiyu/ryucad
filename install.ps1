@@ -6,6 +6,8 @@
 #   RYUCAD_VERSION          tag to install (default: the latest release)
 #   RYUCAD_HOME             install root (default: ~\.ryucad); the binary goes in bin\
 #   RYUCAD_NO_MODIFY_PATH   set to 1 to leave the user PATH alone
+#   RYUCAD_NO_APP           set to 1 to install the ryucad command only, not the
+#                           desktop app
 #   GH_TOKEN, GITHUB_TOKEN  a token for a private repository (else `gh auth token`)
 #   RYUCAD_DOWNLOAD_BASE    a directory laid out as <base>\latest and
 #                           <base>\download\<tag>\<asset>; used by tests
@@ -121,6 +123,27 @@ function Install-Ryucad {
         if (Test-Path $exe) { Move-Item -Force $exe $old }
         Copy-Item (Join-Path $tmp "ryucad-$version-$target\ryucad.exe") $exe
         Remove-Item -Force $old -ErrorAction SilentlyContinue
+
+        # The desktop app, unless only the command is wanted, and "Open in
+        # ryucad" on folders in Explorer, for this user only (no admin).
+        $appSrc = Join-Path $tmp "ryucad-$version-$target\ryucad-app.exe"
+        if ($env:RYUCAD_NO_APP -eq '1') {
+            Write-Host 'ryucad-install: RYUCAD_NO_APP=1: the desktop app is not installed'
+        } elseif (Test-Path $appSrc) {
+            $app = Join-Path $bin 'ryucad-app.exe'
+            $appOld = "$app.old"
+            Remove-Item -Force $appOld -ErrorAction SilentlyContinue
+            if (Test-Path $app) { Move-Item -Force $app $appOld }
+            Copy-Item $appSrc $app
+            Remove-Item -Force $appOld -ErrorAction SilentlyContinue
+            foreach ($key in @('HKCU:\Software\Classes\Directory\shell\ryucad',
+                               'HKCU:\Software\Classes\Directory\Background\shell\ryucad')) {
+                New-Item -Path "$key\command" -Force | Out-Null
+                Set-Item -Path $key -Value 'Open in ryucad'
+                Set-ItemProperty -Path $key -Name 'Icon' -Value "`"$app`""
+                Set-Item -Path "$key\command" -Value "`"$app`" `"%V`""
+            }
+        }
 
         # PATH: the user's, which needs no admin rights, and this session's.
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')

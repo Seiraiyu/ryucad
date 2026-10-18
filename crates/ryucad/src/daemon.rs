@@ -262,9 +262,24 @@ fn serve(
             }
             Ok(req) => {
                 let hello = matches!(req, Request::SessionHello { .. });
+                // A new app window, rather than its second connection.
+                let window = matches!(
+                    req,
+                    Request::SessionHello {
+                        kind: crate::live::Kind::Human,
+                        participant: None,
+                        ..
+                    }
+                );
                 let mut core = lock(&state.core);
                 let Core { session, live } = &mut *core;
                 let r = handle_safely(session, Some(live), me.as_deref(), &state.root, req);
+                // The project goes first among the recent ones. A
+                // preferences file that can't be written isn't the
+                // window's problem.
+                if window && r.is_ok() {
+                    let _ = crate::config::remember_project(&state.root);
+                }
                 if hello && let Ok(a) = &r {
                     let id = a.result["participant"].as_str().map(str::to_owned);
                     // Saying hello again moves the connection.

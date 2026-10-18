@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A ryucad project is a folder; its ryucad.json marks it. Opening that
+     file opens the project. -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-ryucad-project">
+    <comment>ryucad project</comment>
+    <sub-class-of type="application/json"/>
+    <glob pattern="ryucad.json" weight="90" case-sensitive="true"/>
+  </mime-type>
+</mime-info>

@@ -2,7 +2,7 @@
 
 use assert_cmd::cargo::cargo_bin;
 use interprocess::local_socket::{Stream, prelude::*};
-use ryucad::doc::project::find_root;
+use ryucad::doc::project::{find_root, write_atomic};
 use ryucad::endpoint::{Endpoint, RUNTIME_DIR_VAR};
 use ryucad::proto::{Request, parse_rpc_response, rpc_request};
 use serde_json::Value;
@@ -177,6 +177,40 @@ fn cli(f: &Fixture, args: &[&str]) -> Value {
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
+/// [`cli`], with `RYUCAD_APP` set to `app`.
+fn cli_with_app(f: &Fixture, app: &Path, args: &[&str]) -> (Value, Option<i32>) {
+    let out = Command::new(cargo_bin("ryucad"))
+        .args(args)
+        .current_dir(&f.root)
+        .env(RUNTIME_DIR_VAR, &f.run)
+        .env("RYUCAD_CONFIG_DIR", f.run.with_file_name("config"))
+        .env("RYUCAD_IDLE_TIMEOUT", "60")
+        .env(ryucad::client::APP_VAR, app)
+        .output()
+        .unwrap();
+    (
+        serde_json::from_slice(&out.stdout).unwrap(),
+        out.status.code(),
+    )
+}
+
+#[test]
+fn open_starts_the_app_when_no_window_is_attached() {
+    let f = fixture();
+    // Any program stands in for the app: this one, which exits at once.
+    let (r, _) = cli_with_app(&f, &cargo_bin("ryucad"), &["open"]);
+    assert_eq!(r["result"]["opened"], "new", "{r}");
+    assert_eq!(r["result"]["dir"], serde_json::json!(f.root));
+    assert!(r["result"]["pid"].as_u64().is_some());
+    // No daemon was started just to ask.
+    assert_eq!(cli(&f, &["daemon", "status"])["result"]["running"], false);
+    let (r, code) = cli_with_app(&f, &f.root.join("no-such-app"), &["open"]);
+    assert_eq!(
+        (r["error"]["code"].as_str(), code),
+        (Some("app_not_installed"), Some(4))
+    );
+}
+
 #[test]
 fn the_cli_starts_a_daemon_and_stops_it() {
     let f = fixture();
@@ -253,6 +287,67 @@ fn a_daemon_of_another_version_is_replaced() {
     let status = cli(&f, &["daemon", "status"])["result"].clone();
     assert_eq!(status["version"]["ryucad"], env!("CARGO_PKG_VERSION"));
     cli(&f, &["daemon", "stop"]);
+}
+
+/// Another program (the app) starts the daemon from a named `ryucad`,
+/// says hello as a human on two connections and hears what agents do.
+#[test]
+fn another_program_connects_as_a_human() {
+    let f = fixture();
+    let daemon = ryucad::client::Daemon::at(&cargo_bin("ryucad")).unwrap();
+    assert!(ryucad::proto::VersionInfo::current().same_build(&serde_json::json!(daemon.version)));
+    let (mut requests, mut notes) = with_env(&f.run, || {
+        // SAFETY: under with_env's lock, like the runtime folder.
+        unsafe { std::env::set_var("RYUCAD_CONFIG_DIR", f.run.with_file_name("config")) };
+        (
+            daemon.connect(&f.root).unwrap(),
+            daemon.connect(&f.root).unwrap(),
+        )
+    });
+    let hello = |conn: &mut ryucad::client::Connection, participant: Option<String>| {
+        let req = Request::SessionHello {
+            kind: ryucad::live::Kind::Human,
+            name: Some("Dana".into()),
+            participant,
+        };
+        conn.call(&req).unwrap().unwrap()["participant"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let me = hello(&mut requests, None);
+    assert_eq!(hello(&mut notes, Some(me.clone())), me);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (_, sub) = notes
+        .subscribe(&["project".into()], move |v| tx.send(v).unwrap())
+        .unwrap();
+    cli(&f, &["part", "create", "p"]);
+    let v = rx.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+    assert_eq!(v["method"], "project.changed");
+    assert_eq!(v["params"]["parts"], serde_json::json!(["p"]));
+    let list = requests
+        .call(&Request::ParticipantList {})
+        .unwrap()
+        .unwrap();
+    assert_eq!(names(&list), ["human:Dana", "agent:agent"]);
+    // A window that says hello makes its project the most recent one.
+    let recent = cli(&f, &["config", "get", "app.recent_projects"]);
+    assert_eq!(recent["result"]["value"][0], serde_json::json!(f.root));
+    // Closing both connections ends the human, and the subscription's
+    // reader doesn't take it for the daemon going.
+    drop((sub, requests));
+    f.wait_until(|| names(&cli(&f, &["participants"])["result"]) == ["agent:agent"]);
+    assert!(rx.try_recv().is_err());
+    // The daemon's going is heard as `None`.
+    let mut again = with_env(&f.run, || daemon.connect(&f.root).unwrap());
+    hello(&mut again, None);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (_, _sub) = again.subscribe(&[], move |v| tx.send(v).unwrap()).unwrap();
+    cli(&f, &["daemon", "stop"]);
+    let t = Instant::now();
+    while rx.recv_timeout(Duration::from_secs(10)).unwrap().is_some() {
+        assert!(t.elapsed() < Duration::from_secs(10));
+    }
 }
 
 #[test]
@@ -462,6 +557,38 @@ impl Watch {
 }
 
 #[test]
+fn open_brings_attached_windows_forward() {
+    let f = fixture();
+    cli(&f, &["participants"]);
+    // A window that only watches the model still hears it is wanted.
+    let w = Watch::new(&f, &["model"]);
+    let missing = f.root.join("no-such-app");
+    let (r, _) = cli_with_app(&f, &missing, &["open"]);
+    assert_eq!(r["result"]["opened"], "existing", "{r}");
+    assert_eq!(r["result"]["asked"], serde_json::json!([w.me]));
+    assert_eq!(w.next("app.open"), serde_json::json!({}));
+    // Asking for an agent's window is refused.
+    let list = cli(&f, &["participants"]);
+    let agent = list["result"]["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["kind"] == "agent")
+        .unwrap()["id"]
+        .clone();
+    let conn = f.connect().unwrap();
+    let e = ask(
+        &conn,
+        &Request::AppOpen {
+            participant: Some(agent.as_str().unwrap().into()),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ryucad::error::Code::InvalidParam);
+    cli(&f, &["daemon", "stop"]);
+}
+
+#[test]
 fn watchers_see_participants_change() {
     let f = fixture();
     cli(&f, &["part", "create", "p"]);
@@ -544,15 +671,19 @@ fn watchers_see_the_model_change_however_it_changes() {
     );
     assert_eq!(r["ok"], true);
     let m = w.next("model.changed");
-    assert_ne!(m["parts"][0]["features"][0]["hash"], first);
-    // An editor rewriting a file with the same content changes nothing; a
-    // real edit does.
+    let second = m["parts"][0]["features"][0]["hash"].clone();
+    assert_ne!(second, first);
+    // An editor saving the same content changes nothing; a real edit does.
+    // These save as ryucad does, renaming a finished file into place: one
+    // that writes in place can be caught half-written, and the daemon then
+    // rightly reports the feature broken until the write ends.
     let path = f.root.join("parts/p/features/s.json");
     let text = std::fs::read_to_string(&path).unwrap();
-    std::fs::write(&path, &text).unwrap();
-    std::fs::write(&path, text.replace("6 mm", "7 mm")).unwrap();
+    write_atomic(&path, &text).unwrap();
+    write_atomic(&path, text.replace("6 mm", "7 mm")).unwrap();
     let m = w.next("model.changed");
     assert_eq!(m["parts"][0]["failed"], 0);
+    assert_ne!(m["parts"][0]["features"][0]["hash"], second);
     cli(&f, &["daemon", "stop"]);
 }
 

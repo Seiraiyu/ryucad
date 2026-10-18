@@ -4,7 +4,8 @@
 #   scripts/test-install.sh [path/to/ryucad]   (default: target/release/ryucad)
 #
 # The fake release holds the given binary for every Unix target under two
-# versions, and the installer reaches it through RYUCAD_DOWNLOAD_BASE.
+# versions, with a stand-in for the desktop app and the files that register
+# it, and the installer reaches it through RYUCAD_DOWNLOAD_BASE.
 # The checks are strings evaluated later, so their $ must not expand early,
 # and $status is read only inside them.
 # shellcheck disable=SC2016,SC2034
@@ -28,8 +29,13 @@ release() {
         d="$1/download/v$v"
         mkdir -p "$d"
         for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin; do
-            mkdir -p "$work/stage/ryucad-$v-$t"
-            cp "$binary" "$work/stage/ryucad-$v-$t/ryucad"
+            s="$work/stage/ryucad-$v-$t"
+            mkdir -p "$s/share"
+            cp "$binary" "$s/ryucad"
+            printf '#!/bin/sh\necho "{\\"ryucad\\":\\"%s\\"}"\n' "$v" >"$s/ryucad-app"
+            chmod 755 "$s/ryucad-app"
+            cp "$root/packaging/linux/ryucad.desktop" "$root/packaging/linux/ryucad.xml" \
+                "$root/packaging/macos/ryucad.applescript" "$s/share/"
             tar -czf "$d/ryucad-$v-$t.tar.gz" -C "$work/stage" "ryucad-$v-$t"
         done
         if command -v sha256sum >/dev/null 2>&1; then
@@ -92,6 +98,24 @@ fi
 run fresh "$good"
 check "reinstall succeeds" '[ "$status" -eq 0 ]'
 check "reinstall adds no second PATH line" '[ "$(markers "$work/home-fresh/.profile")" = 1 ]'
+
+# The desktop app and what lets the desktop open projects in it.
+check "app installed" '[ -x "$work/home-fresh/.ryucad/bin/ryucad-app" ]'
+desktop="$work/home-fresh/.local/share/applications/ryucad.desktop"
+case "$(uname -s)" in
+    Linux)
+        check "desktop entry runs the installed app" 'grep -q "^Exec=\"$work/home-fresh/.ryucad/bin/ryucad-app\" %f$" "$desktop"'
+        check "project MIME type registered" '[ -f "$work/home-fresh/.local/share/mime/packages/ryucad.xml" ]'
+        ;;
+    Darwin)
+        if command -v osacompile >/dev/null 2>&1; then
+            check "launcher in ~/Applications" '[ -f "$work/home-fresh/Applications/ryucad.app/Contents/Info.plist" ]'
+        fi
+        ;;
+esac
+run noapp "$good" RYUCAD_NO_APP=1
+check "RYUCAD_NO_APP installs the command only" '[ "$status" -eq 0 ] && [ -x "$work/home-noapp/.ryucad/bin/ryucad" ] && [ ! -e "$work/home-noapp/.ryucad/bin/ryucad-app" ]'
+check "RYUCAD_NO_APP registers nothing" '[ ! -e "$work/home-noapp/.local/share/applications" ] && [ ! -e "$work/home-noapp/Applications" ]'
 
 # Pinned versions.
 run pinned "$good" RYUCAD_VERSION=0.0.9

@@ -332,9 +332,57 @@ pub fn validate(name: &str, value: &Value, scope: Option<Scope>) -> Result<Scope
 /// Sets a user preference.
 pub fn set_user(name: &str, value: Value) -> Result<Value> {
     validate(name, &value, Some(Scope::User))?;
-    let mut prefs = Preferences::load()?;
-    prefs.set(name, value)?;
-    Ok(report(key(name)?, prefs.values.get(name)))
+    locked(|| {
+        let mut prefs = Preferences::load()?;
+        prefs.set(name, value)?;
+        Ok(report(key(name)?, prefs.values.get(name)))
+    })
+}
+
+/// Runs a read-modify-write of the preferences holding their lock: the
+/// daemons of every project share the file, and without it one daemon's
+/// write can lose another's. The lock is a file of its own, so replacing
+/// `preferences.json` (a rename) never drops it.
+fn locked<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let dir = config_dir()?;
+    std::fs::create_dir_all(&dir).map_err(|e| Error::io(&dir, &e))?;
+    let path = dir.join("preferences.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|e| Error::io(&path, &e))?;
+    file.lock().map_err(|e| Error::io(&path, &e))?;
+    let r = f();
+    let _ = file.unlock();
+    r
+}
+
+/// Puts the project at `root` first among the recent projects: a human
+/// opened it in the app.
+pub fn remember_project(root: &Path) -> Result<()> {
+    locked(|| {
+        let mut prefs = Preferences::load()?;
+        let max = match key("app.recent_projects")?.rule {
+            Rule::Paths(n) => n,
+            _ => unreachable!("a list of paths"),
+        };
+        let root = root.to_string_lossy();
+        let mut list = vec![json!(root)];
+        let old = prefs
+            .values
+            .get("app.recent_projects")
+            .and_then(Value::as_array);
+        list.extend(
+            old.into_iter()
+                .flatten()
+                .filter(|p| p.as_str() != Some(&*root))
+                .cloned(),
+        );
+        list.truncate(max);
+        prefs.set("app.recent_projects", json!(list))
+    })
 }
 
 /// The value of a user preference, or its default.
@@ -396,6 +444,30 @@ pub(crate) mod tests {
                 user_only["settings"].as_array().unwrap().len(),
                 KEYS.len() - 1
             );
+        });
+    }
+
+    #[test]
+    fn daemons_writing_at_once_lose_nothing() {
+        with_config(|_| {
+            let roots: Vec<String> = (0..8).map(|i| format!("/projects/{i}")).collect();
+            std::thread::scope(|s| {
+                for r in &roots {
+                    s.spawn(move || remember_project(Path::new(r)).unwrap());
+                }
+                s.spawn(|| set_user("ui.theme", json!("dark")).unwrap());
+            });
+            let list = user("app.recent_projects");
+            for r in &roots {
+                assert!(
+                    list.as_array().unwrap().contains(&json!(r)),
+                    "{r} in {list}"
+                );
+            }
+            assert_eq!(user("ui.theme"), "dark");
+            remember_project(Path::new("/projects/3")).unwrap();
+            assert_eq!(user("app.recent_projects")[0], "/projects/3");
+            assert_eq!(user("app.recent_projects").as_array().unwrap().len(), 8);
         });
     }
 
