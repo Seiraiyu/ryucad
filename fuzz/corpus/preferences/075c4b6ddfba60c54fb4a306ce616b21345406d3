@@ -1,0 +1,8 @@
+{
+  "format": 1,
+  "kind": "ryucad.preferences",
+  "values": {
+   "{": 1,
+    "ui.theme": "dark"
+  }
+}

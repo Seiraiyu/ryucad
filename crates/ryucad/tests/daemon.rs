@@ -48,6 +48,7 @@ impl Fixture {
             .args(["daemon", "run", "--idle-timeout", &idle.to_string()])
             .current_dir(&self.root)
             .env(RUNTIME_DIR_VAR, &self.run)
+            .env("RYUCAD_CONFIG_DIR", self.run.with_file_name("config"))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -107,7 +108,7 @@ fn serves_requests_and_shuts_down() {
     let conn = f.connect().unwrap();
     let status = ask(&conn, &Request::DaemonStatus {}).unwrap();
     assert_eq!(status["pid"], child.id());
-    assert_eq!(status["version"]["protocol"], 1);
+    assert_eq!(status["version"]["protocol"], 2);
     ask(&conn, &Request::PartCreate { part: "p".into() }).unwrap();
     let list = ask(&conn, &Request::PartList {}).unwrap();
     assert_eq!(list["parts"][0]["part"], "p");
@@ -129,6 +130,7 @@ fn one_daemon_per_project() {
         .args(["daemon", "run"])
         .current_dir(&f.root)
         .env(RUNTIME_DIR_VAR, &f.run)
+        .env("RYUCAD_CONFIG_DIR", f.run.with_file_name("config"))
         .output()
         .unwrap();
     let v: Value = serde_json::from_slice(&second.stdout).unwrap();
@@ -168,6 +170,7 @@ fn cli(f: &Fixture, args: &[&str]) -> Value {
         .args(args)
         .current_dir(&f.root)
         .env(RUNTIME_DIR_VAR, &f.run)
+        .env("RYUCAD_CONFIG_DIR", f.run.with_file_name("config"))
         .env("RYUCAD_IDLE_TIMEOUT", "60")
         .output()
         .unwrap();
@@ -273,4 +276,431 @@ fn without_a_daemon_the_cli_still_answers() {
     let r = cli(&f, &["--no-daemon", "part", "list"]);
     assert_eq!(r["warnings"], serde_json::json!([]));
     assert_eq!(cli(&f, &["daemon", "status"])["result"]["running"], false);
+}
+
+/// The names of the attached participants, in ID order.
+fn names(v: &Value) -> Vec<String> {
+    v["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            format!(
+                "{}:{}",
+                p["kind"].as_str().unwrap(),
+                p["name"].as_str().unwrap()
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn participants_come_and_go() {
+    let f = fixture();
+    let r = cli(&f, &["participants"]);
+    assert_eq!(names(&r["result"]), ["agent:agent"]);
+    // An agent named with --as is a second participant; the first persists
+    // between CLI calls.
+    let r = cli(&f, &["--as", "reviewer", "participants"]);
+    assert_eq!(names(&r["result"]), ["agent:agent", "agent:reviewer"]);
+    // A human is attached while its connection is open.
+    let conn = f.connect().unwrap();
+    let hello = Request::SessionHello {
+        kind: ryucad::live::Kind::Human,
+        name: Some("Dana".into()),
+        participant: None,
+    };
+    let me = ask(&conn, &hello).unwrap()["participant"].clone();
+    let r = cli(&f, &["participants"]);
+    assert_eq!(
+        names(&r["result"]),
+        ["agent:agent", "agent:reviewer", "human:Dana"]
+    );
+    assert_eq!(r["result"]["participants"][2]["id"], me);
+    drop(conn);
+    f.wait_until(|| names(&cli(&f, &["participants"])["result"]).len() == 2);
+    let r = cli(&f, &["--as", " ", "participants"]);
+    assert_eq!(r["error"]["code"], "invalid_param");
+    // In process, nobody is attached.
+    let r = cli(&f, &["--no-daemon", "participants"]);
+    assert_eq!(r["result"], serde_json::json!({"participants": []}));
+    cli(&f, &["daemon", "stop"]);
+}
+
+#[test]
+fn an_agent_selects_through_the_cli() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    cli(
+        &f,
+        &[
+            "feature", "add", "p", "box", "--id", "b", "--param", "x=1", "--param", "y=1",
+            "--param", "z=1",
+        ],
+    );
+    let body = cli(&f, &["inspect", "p", "b"])["result"]["bodies"][0].clone();
+    let face = format!("p/b/{}", body["faces"][0]["name"].as_str().unwrap());
+    let edge = format!("p/b/{}", body["edges"][0]["name"].as_str().unwrap());
+    let r = cli(&f, &["select", &face]);
+    assert_eq!(r["result"]["selection"], serde_json::json!([face]));
+    let me = r["result"]["participant"].as_str().unwrap().to_owned();
+    let r = cli(&f, &["select", "--add", &edge]);
+    assert_eq!(r["result"]["selection"], serde_json::json!([face, edge]));
+    // The selection outlives the CLI call; nobody human is attached.
+    let r = cli(&f, &["selection", "--of", &me]);
+    assert_eq!(r["result"]["selection"], serde_json::json!([face, edge]));
+    let r = cli(&f, &["selection"]);
+    assert_eq!(r["result"]["participant"], Value::Null);
+    let r = cli(&f, &["select", "--clear"]);
+    assert_eq!(r["result"]["selection"], serde_json::json!([]));
+    let r = cli(&f, &["--no-daemon", "select", &face]);
+    assert_eq!(r["error"]["code"], "no_live_session");
+    cli(&f, &["daemon", "stop"]);
+}
+
+#[test]
+fn camera_highlight_and_status_through_the_cli() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    cli(
+        &f,
+        &[
+            "feature", "add", "p", "sphere", "--id", "s", "--param", "radius=5",
+        ],
+    );
+    let body = cli(&f, &["inspect", "p", "s"])["result"]["bodies"][0].clone();
+    let face = format!("p/s/{}", body["faces"][0]["name"].as_str().unwrap());
+    let r = cli(
+        &f,
+        &[
+            "camera", "--eye", "0,-100,0", "--target", "0,0,0", "--up", "0,0,1", "--ortho", "50",
+        ],
+    );
+    assert_eq!(
+        r["result"]["camera"]["eye"],
+        serde_json::json!([0.0, -0.1, 0.0])
+    );
+    let me = r["result"]["participant"].as_str().unwrap().to_owned();
+    let r = cli(&f, &["camera", "--of", &me]);
+    assert_eq!(
+        r["result"]["camera"]["projection"],
+        serde_json::json!({"orthographic": {"height": 0.05}})
+    );
+    let r = cli(
+        &f,
+        &["highlight", &face, "--style", "changed", "--label", "grew"],
+    );
+    assert_eq!(r["result"]["highlights"][0]["style"], "changed");
+    let r = cli(&f, &["status", "checking the sphere", "--entity", &face]);
+    assert_eq!(r["result"]["status"]["text"], "checking the sphere");
+    let p = cli(&f, &["participants"])["result"]["participants"][0].clone();
+    assert_eq!(p["highlights"][0]["label"], "grew");
+    let r = cli(&f, &["highlight", "--clear"]);
+    assert_eq!(r["result"]["highlights"], serde_json::json!([]));
+    let r = cli(&f, &["highlight", &face, "--style", "loud"]);
+    assert_eq!(r["error"]["code"], "usage");
+    cli(&f, &["daemon", "stop"]);
+}
+
+/// A human attached and subscribed: notifications arrive on `rx`.
+struct Watch {
+    me: String,
+    rx: std::sync::mpsc::Receiver<Value>,
+}
+
+impl Watch {
+    fn new(f: &Fixture, topics: &[&str]) -> Watch {
+        let mut reader = BufReader::new(f.connect().unwrap());
+        let mut call = |req: &Request| {
+            let mut w = reader.get_ref();
+            w.write_all(format!("{}\n", rpc_request(1, req)).as_bytes())
+                .unwrap();
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            parse_rpc_response(&line).unwrap()
+        };
+        let hello = Request::SessionHello {
+            kind: ryucad::live::Kind::Human,
+            name: Some("watcher".into()),
+            participant: None,
+        };
+        let me = call(&hello)["participant"].as_str().unwrap().to_owned();
+        let r = call(&Request::Subscribe {
+            topics: topics.iter().map(|t| t.to_string()).collect(),
+        });
+        let ids = r["session"]["participants"].as_array().unwrap();
+        assert!(ids.iter().any(|p| p["id"] == me.as_str()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|n| n > 0) {
+                if tx.send(serde_json::from_str(&line).unwrap()).is_err() {
+                    return;
+                }
+                line.clear();
+            }
+        });
+        Watch { me, rx }
+    }
+
+    /// The next notification with `method`, skipping others.
+    fn next(&self, method: &str) -> Value {
+        let t = Instant::now();
+        loop {
+            let left = Duration::from_secs(10).saturating_sub(t.elapsed());
+            let v = self
+                .rx
+                .recv_timeout(left)
+                .unwrap_or_else(|_| panic!("no {method} notification"));
+            assert_eq!(v["jsonrpc"], "2.0");
+            assert!(v.get("id").is_none(), "a notification has no id: {v}");
+            if v["method"] == method {
+                return v["params"].clone();
+            }
+        }
+    }
+}
+
+#[test]
+fn watchers_see_participants_change() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    cli(
+        &f,
+        &[
+            "feature", "add", "p", "sphere", "--id", "s", "--param", "radius=5",
+        ],
+    );
+    let body = cli(&f, &["inspect", "p", "s"])["result"]["bodies"][0].clone();
+    let face = format!("p/s/{}", body["faces"][0]["name"].as_str().unwrap());
+    let w = Watch::new(&f, &["participants"]);
+    cli(&f, &["--as", "fitter", "select", &face]);
+    // The agent arrives, then selects.
+    loop {
+        let p = w.next("participant.changed");
+        if p["participant"]["selection"] == serde_json::json!([face]) {
+            assert_eq!(p["participant"]["name"], "fitter");
+            break;
+        }
+    }
+    // Another human comes and goes.
+    let other = f.connect().unwrap();
+    let hello = Request::SessionHello {
+        kind: ryucad::live::Kind::Human,
+        name: Some("other".into()),
+        participant: None,
+    };
+    let id = ask(&other, &hello).unwrap()["participant"].clone();
+    let p = w.next("participant.changed");
+    assert_eq!(p["participant"]["id"], id);
+    drop(other);
+    let p = w.next("participant.changed");
+    assert_eq!(
+        p,
+        serde_json::json!({"participant": {"id": id}, "left": true})
+    );
+    assert!(!w.me.is_empty());
+    cli(&f, &["daemon", "stop"]);
+}
+
+#[test]
+fn subscribing_needs_a_hello() {
+    let f = fixture();
+    let mut child = f.start(60);
+    let conn = f.connect().unwrap();
+    let e = ask(&conn, &Request::Subscribe { topics: vec![] }).unwrap_err();
+    assert_eq!(e.code, ryucad::error::Code::Usage);
+    ask(&conn, &Request::DaemonShutdown {}).unwrap();
+    assert!(exited(&mut child, Duration::from_secs(10)));
+}
+
+#[test]
+fn watchers_see_the_model_change_however_it_changes() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    let w = Watch::new(&f, &["model"]);
+    // Through the daemon.
+    cli(
+        &f,
+        &[
+            "feature", "add", "p", "sphere", "--id", "s", "--param", "radius=5",
+        ],
+    );
+    let m = w.next("model.changed");
+    assert_eq!(m["parts"][0]["features"][0]["id"], "s");
+    let first = m["parts"][0]["features"][0]["hash"].clone();
+    // Behind its back: another process with no daemon.
+    let r = cli(
+        &f,
+        &[
+            "--no-daemon",
+            "feature",
+            "edit",
+            "p",
+            "s",
+            "--param",
+            "radius=6",
+        ],
+    );
+    assert_eq!(r["ok"], true);
+    let m = w.next("model.changed");
+    assert_ne!(m["parts"][0]["features"][0]["hash"], first);
+    // An editor rewriting a file with the same content changes nothing; a
+    // real edit does.
+    let path = f.root.join("parts/p/features/s.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, &text).unwrap();
+    std::fs::write(&path, text.replace("6 mm", "7 mm")).unwrap();
+    let m = w.next("model.changed");
+    assert_eq!(m["parts"][0]["failed"], 0);
+    cli(&f, &["daemon", "stop"]);
+}
+
+#[test]
+fn an_agent_waits_for_the_human_to_select() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    cli(
+        &f,
+        &[
+            "feature", "add", "p", "sphere", "--id", "s", "--param", "radius=5",
+        ],
+    );
+    let body = cli(&f, &["inspect", "p", "s"])["result"]["bodies"][0].clone();
+    let face = format!("p/s/{}", body["faces"][0]["name"].as_str().unwrap());
+    let waiter = {
+        let (root, run) = (f.root.clone(), f.run.clone());
+        std::thread::spawn(move || {
+            let out = Command::new(cargo_bin("ryucad"))
+                .args([
+                    "watch",
+                    "--topic",
+                    "participants",
+                    "--count",
+                    "2",
+                    "--timeout",
+                    "20",
+                ])
+                .current_dir(&root)
+                .env(RUNTIME_DIR_VAR, &run)
+                .env("RYUCAD_CONFIG_DIR", run.with_file_name("config"))
+                .output()
+                .unwrap();
+            serde_json::from_slice::<Value>(&out.stdout).unwrap()
+        })
+    };
+    // Give the watcher time to subscribe; then a human arrives and selects.
+    std::thread::sleep(Duration::from_millis(800));
+    let human = f.connect().unwrap();
+    let hello = Request::SessionHello {
+        kind: ryucad::live::Kind::Human,
+        name: Some("Dana".into()),
+        participant: None,
+    };
+    ask(&human, &hello).unwrap();
+    let select = Request::SelectionSet {
+        entities: vec![face.clone()],
+        mode: ryucad::live::SelectMode::Replace,
+    };
+    ask(&human, &select).unwrap();
+    let r = waiter.join().unwrap();
+    assert_eq!(r["result"]["timed_out"], false, "{r}");
+    let n = r["result"]["notifications"].as_array().unwrap();
+    assert_eq!(n[1]["method"], "participant.changed");
+    assert_eq!(
+        n[1]["params"]["participant"]["selection"],
+        serde_json::json!([face])
+    );
+    // Nothing happens: the watch times out with what it has.
+    let r = cli(&f, &["watch", "--topic", "model", "--timeout", "1"]);
+    assert_eq!(
+        r["result"],
+        serde_json::json!({"notifications": [], "timed_out": true})
+    );
+    let r = cli(&f, &["--no-daemon", "watch"]);
+    assert_eq!(r["error"]["code"], "no_live_session");
+    drop(human);
+    cli(&f, &["daemon", "stop"]);
+}
+
+#[test]
+fn an_agent_frames_a_face_for_the_human() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    cli(
+        &f,
+        &[
+            "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+            "--param", "z=10",
+        ],
+    );
+    let body = cli(&f, &["inspect", "p", "b"])["result"]["bodies"][0].clone();
+    let face = format!("p/b/{}", body["faces"][0]["name"].as_str().unwrap());
+    let r = cli(&f, &["camera", "--view", "iso"]);
+    let c = &r["result"]["camera"];
+    assert_eq!(c["target"], serde_json::json!([0.005, 0.005, 0.005]));
+    let r = cli(&f, &["camera", "--fit", &face]);
+    assert_eq!(r["ok"], true, "{r}");
+    let r = cli(&f, &["camera", "--view", "sideways"]);
+    assert_eq!(r["error"]["code"], "invalid_param");
+    cli(&f, &["daemon", "stop"]);
+}
+
+#[test]
+fn render_what_a_participant_sees() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    cli(
+        &f,
+        &[
+            "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+            "--param", "z=10",
+        ],
+    );
+    let body = cli(&f, &["inspect", "p", "b"])["result"]["bodies"][0].clone();
+    let face = format!("p/b/{}", body["faces"][0]["name"].as_str().unwrap());
+    let me = cli(&f, &["camera", "--view", "front"])["result"]["participant"].clone();
+    cli(&f, &["highlight", &face, "--style", "pending"]);
+    let out = f.root.join("seen.png");
+    let r = cli(
+        &f,
+        &[
+            "render",
+            "--of",
+            me.as_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--size",
+            "120x90",
+        ],
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(
+        r["result"]["camera"]["up"],
+        serde_json::json!([0.0, 0.0, 1.0])
+    );
+    let bytes = std::fs::read(&out).unwrap();
+    let mut rd = png::Decoder::new(std::io::Cursor::new(bytes))
+        .read_info()
+        .unwrap();
+    let mut buf = vec![0; rd.output_buffer_size().unwrap()];
+    rd.next_frame(&mut buf).unwrap();
+    // The agent's pending highlight is amber.
+    assert!(
+        buf.chunks(4)
+            .any(|px| px[0] > 200 && px[1] > 120 && px[2] < 110)
+    );
+    let r = cli(
+        &f,
+        &[
+            "--no-daemon",
+            "render",
+            "--of",
+            "p-00000001",
+            "--out",
+            "x.png",
+        ],
+    );
+    assert_eq!(r["error"]["code"], "no_live_session");
+    cli(&f, &["daemon", "stop"]);
 }

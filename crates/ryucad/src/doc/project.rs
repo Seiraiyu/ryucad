@@ -76,23 +76,57 @@ fn plain(p: PathBuf) -> PathBuf {
     p
 }
 
-/// The nearest folder at or above `start` that holds a `ryucad.json`.
+/// The nearest folder at or above `start` that holds a `ryucad.json`. A
+/// folder that has lost its manifest but still has parts is
+/// `project_damaged`, not `project_not_found`.
 pub fn find_root(start: &Path) -> Result<PathBuf> {
+    match find_project(start)? {
+        (root, false) => Ok(root),
+        (root, true) => Err(Error::new(
+            Code::ProjectDamaged,
+            format!(
+                "{} has parts but no {MANIFEST}; run `ryucad doctor` to repair it",
+                root.display()
+            ),
+        )
+        .with("path", &root)
+        .with("repair", "ryucad doctor")),
+    }
+}
+
+/// The project at or above `start`, and whether it is damaged (parts but
+/// no manifest). The nearest folder with either wins.
+pub fn find_project(start: &Path) -> Result<(PathBuf, bool)> {
     let start = plain(start.canonicalize().map_err(|e| Error::io(start, &e))?);
-    start
-        .ancestors()
-        .find(|d| d.join(MANIFEST).is_file())
-        .map(Path::to_path_buf)
-        .ok_or_else(|| {
-            Error::new(
-                Code::ProjectNotFound,
-                format!(
-                    "no {MANIFEST} in {} or any folder above it; run `ryucad init` or pass -C <dir>",
-                    start.display()
-                ),
-            )
-            .with("path", &start)
-        })
+    for d in start.ancestors() {
+        if d.join(MANIFEST).is_file() {
+            return Ok((d.to_path_buf(), false));
+        }
+        if has_parts(d) {
+            return Ok((d.to_path_buf(), true));
+        }
+    }
+    Err(Error::new(
+        Code::ProjectNotFound,
+        format!(
+            "no {MANIFEST} in {} or any folder above it; run `ryucad init` or pass -C <dir>",
+            start.display()
+        ),
+    )
+    .with("path", &start))
+}
+
+/// Whether `dir/parts` holds a ryucad part file.
+fn has_parts(dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(dir.join("parts")) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        fs::read_to_string(e.path().join("part.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .is_some_and(|v| v["kind"] == "ryucad.part")
+    })
 }
 
 pub fn part_dir(root: &Path, part: &Id) -> PathBuf {
@@ -270,14 +304,14 @@ fn list_dir(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
 
 /// Writes `contents` to `path` so that readers see the old file or the new
 /// one, never a mix: a temporary file in the same folder, then a rename.
-pub fn write_atomic(path: &Path, contents: &str) -> Result<()> {
+pub fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
     let dir = path.parent().expect("a file path has a parent");
     fs::create_dir_all(dir).map_err(|e| Error::io(dir, &e))?;
     let name = path.file_name().expect("a file path has a name");
     let tmp = dir.join(format!(".{}.tmp", name.to_string_lossy()));
     let write = || -> std::io::Result<()> {
         let mut f = fs::File::create(&tmp)?;
-        f.write_all(contents.as_bytes())?;
+        f.write_all(contents.as_ref())?;
         f.sync_all()?;
         fs::rename(&tmp, path)
     };
@@ -287,9 +321,24 @@ pub fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     })
 }
 
+/// Deletes a project file, then the folders above it that are left empty,
+/// up to `parts/`.
+pub fn remove_file(root: &Path, path: &Path) -> Result<()> {
+    fs::remove_file(path).map_err(|e| Error::io(path, &e))?;
+    let stop = root.join("parts");
+    let mut dir = path.parent();
+    while let Some(d) = dir {
+        if d == stop || !d.starts_with(&stop) || fs::remove_dir(d).is_err() {
+            break;
+        }
+        dir = d.parent();
+    }
+    Ok(())
+}
+
 /// Writes a JSON document in canonical form.
 pub fn write_json(path: &Path, v: &Value) -> Result<()> {
-    write_atomic(path, &canonical::to_string(v))
+    write_atomic(path, canonical::to_string(v))
 }
 
 #[cfg(test)]
@@ -450,5 +499,24 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names, ["c.json"]);
+    }
+
+    #[test]
+    fn a_folder_with_parts_and_no_manifest_is_damaged() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let part = root.join("parts/p");
+        fs::create_dir_all(part.join("features")).unwrap();
+        fs::write(
+            part.join("part.json"),
+            r#"{"features":[],"format":1,"kind":"ryucad.part"}"#,
+        )
+        .unwrap();
+        let e = find_root(&part.join("features")).unwrap_err();
+        assert_eq!(e.code, Code::ProjectDamaged);
+        assert_eq!(find_project(&part).unwrap(), (plain(root.clone()), true));
+        // Some other folder called parts isn't a project.
+        fs::write(part.join("part.json"), "{}").unwrap();
+        assert_ne!(find_root(&part).unwrap_err().code, Code::ProjectDamaged);
     }
 }

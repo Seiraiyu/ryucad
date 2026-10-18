@@ -5,8 +5,10 @@
 use crate::doc::project::MANIFEST;
 use crate::endpoint::Endpoint;
 use crate::error::{Code, Error, Result};
-use crate::proto::{Request, VersionInfo, parse_rpc_request, rpc_response};
-use crate::server::handle_safely;
+use crate::live::Live;
+use crate::notify::{self, Subscriber};
+use crate::proto::{Answer, Request, VersionInfo, parse_rpc_request, rpc_response};
+use crate::server::{handle_safely, settle, tick};
 use crate::session::Session;
 use interprocess::local_socket::{ListenerOptions, Stream, prelude::*};
 use serde_json::{Value, json};
@@ -27,7 +29,14 @@ struct State {
     idle: Duration,
     started: Instant,
     last: Mutex<Instant>,
-    session: Mutex<Option<Session>>,
+    core: Mutex<Core>,
+}
+
+/// What requests work on, under one lock: the project's session (opened on
+/// first use) and the live session of who is attached.
+struct Core {
+    session: Option<Session>,
+    live: Live,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -61,17 +70,35 @@ pub fn run(root: &Path, idle: Duration) -> Result<()> {
         idle,
         started: Instant::now(),
         last: Mutex::new(Instant::now()),
-        session: Mutex::new(None),
+        core: Mutex::new(Core {
+            session: None,
+            live: Live::with_poll(
+                crate::config::user("daemon.poll_ms")
+                    .as_u64()
+                    .unwrap_or(250),
+            ),
+        }),
     });
     let watcher = Arc::clone(&state);
     std::thread::spawn(move || {
         loop {
-            std::thread::sleep(Duration::from_millis(250).min(watcher.idle));
+            let poll = Duration::from_millis(lock(&watcher.core).live.poll_ms);
+            std::thread::sleep(poll.min(watcher.idle));
             if !watcher.root.join(MANIFEST).is_file() {
                 stop(&watcher, "the project is gone");
             }
-            // Hold the session lock so no request is mid-flight.
-            let _busy = lock(&watcher.session);
+            // Hold the lock so no request is mid-flight.
+            let mut core = lock(&watcher.core);
+            let before = core.live.snapshot();
+            core.live.expire(Instant::now());
+            core.live.announce(&before);
+            // Someone watching keeps the daemon alive, and sees changes
+            // made behind its back.
+            if core.live.hub.is_watched() {
+                *lock(&watcher.last) = Instant::now();
+                let Core { session, live } = &mut *core;
+                tick(session, live, &watcher.root);
+            }
             if lock(&watcher.last).elapsed() >= watcher.idle {
                 stop(&watcher, "idle");
             }
@@ -79,9 +106,25 @@ pub fn run(root: &Path, idle: Duration) -> Result<()> {
     });
     for conn in listener.incoming() {
         match conn {
-            Ok(conn) => {
+            Ok(stream) => {
                 let state = Arc::clone(&state);
-                std::thread::spawn(move || serve(&conn, &state));
+                let conn = Arc::new(Conn {
+                    stream,
+                    write: Mutex::new(()),
+                });
+                std::thread::spawn(move || {
+                    let (mut me, mut sub) = (None, None);
+                    serve(&conn, &state, &mut me, &mut sub);
+                    if let Some(s) = sub {
+                        s.close();
+                    }
+                    if let Some(id) = me {
+                        let mut core = lock(&state.core);
+                        let before = core.live.snapshot();
+                        core.live.goodbye(&id);
+                        core.live.announce(&before);
+                    }
+                });
             }
             Err(e) => log(&format!("accept failed: {e}")),
         }
@@ -157,10 +200,41 @@ fn status(state: &State) -> Value {
     })
 }
 
-/// Answers requests on one connection until the client hangs up.
-fn serve(conn: &Stream, state: &State) {
-    let mut reader = BufReader::new(conn);
-    let mut writer = conn;
+/// A client connection. Answers and notifications are written whole under
+/// `write`, so lines from the two never interleave.
+struct Conn {
+    stream: Stream,
+    write: Mutex<()>,
+}
+
+impl Conn {
+    fn send(&self, line: &str) -> std::io::Result<()> {
+        self.send_with(line, None)
+    }
+
+    /// A line, then the bytes it announces.
+    fn send_with(&self, line: &str, bytes: Option<&[u8]>) -> std::io::Result<()> {
+        let _g = lock(&self.write);
+        let mut w = &self.stream;
+        w.write_all(line.as_bytes())?;
+        w.write_all(b"\n")?;
+        if let Some(b) = bytes {
+            w.write_all(b)?;
+        }
+        w.flush()
+    }
+}
+
+/// Answers requests on one connection until the client hangs up. `me` is
+/// the participant the connection said hello as, and `sub` its
+/// subscription.
+fn serve(
+    conn: &Arc<Conn>,
+    state: &State,
+    me: &mut Option<String>,
+    sub: &mut Option<Arc<Subscriber>>,
+) {
+    let mut reader = BufReader::new(&conn.stream);
     let mut line = String::new();
     loop {
         line.clear();
@@ -171,33 +245,105 @@ fn serve(conn: &Stream, state: &State) {
         *lock(&state.last) = Instant::now();
         let (id, req) = parse_rpc_request(line.trim_end());
         let mut shutdown = false;
+        let mut subscribed = None;
         let result = match req {
-            Ok(Request::DaemonStatus {}) => Ok(status(state)),
+            Ok(Request::DaemonStatus {}) => Ok(Answer::json(status(state))),
             Ok(Request::DaemonShutdown {}) => {
                 shutdown = true;
-                Ok(json!({"stopping": true, "pid": std::process::id()}))
+                Ok(Answer::json(
+                    json!({"stopping": true, "pid": std::process::id()}),
+                ))
+            }
+            Ok(Request::Subscribe { topics }) => {
+                subscribe(state, me.as_deref(), sub.is_some(), &topics).map(|(s, v)| {
+                    subscribed = Some(s);
+                    Answer::json(v)
+                })
             }
             Ok(req) => {
-                let mut session = lock(&state.session);
-                let r = handle_safely(&mut session, &state.root, req);
+                let hello = matches!(req, Request::SessionHello { .. });
+                let mut core = lock(&state.core);
+                let Core { session, live } = &mut *core;
+                let r = handle_safely(session, Some(live), me.as_deref(), &state.root, req);
+                if hello && let Ok(a) = &r {
+                    let id = a.result["participant"].as_str().map(str::to_owned);
+                    // Saying hello again moves the connection.
+                    if let Some(old) = std::mem::replace(me, id) {
+                        let before = live.snapshot();
+                        live.goodbye(&old);
+                        live.announce(&before);
+                    }
+                }
                 *lock(&state.last) = Instant::now();
                 r
             }
             Err(e) => Err(e),
         };
-        let mut out = rpc_response(id, &result);
-        out.push('\n');
-        if writer
-            .write_all(out.as_bytes())
-            .and_then(|()| writer.flush())
+        let (result, bytes) = match result {
+            Ok(a) => (Ok(a.result), a.binary),
+            Err(e) => (Err(e), None),
+        };
+        if conn
+            .send_with(&rpc_response(id, &result), bytes.as_deref())
             .is_err()
         {
+            if let Some(s) = subscribed {
+                s.close();
+            }
             return;
+        }
+        // Notifications start only after the answer is out.
+        if let Some(s) = subscribed {
+            let (c, pump) = (Arc::clone(conn), Arc::clone(&s));
+            std::thread::spawn(move || {
+                while let Some(line) = pump.next() {
+                    if c.send(&line).is_err() {
+                        pump.close();
+                    }
+                }
+            });
+            *sub = Some(s);
         }
         if shutdown {
             // Wait for any request in progress, then go.
-            let _busy = lock(&state.session);
+            let _busy = lock(&state.core);
             stop(state, "asked to shut down");
         }
     }
+}
+
+/// Opens a subscription for the connection's participant.
+fn subscribe(
+    state: &State,
+    me: Option<&str>,
+    already: bool,
+    names: &[String],
+) -> Result<(Arc<Subscriber>, Value)> {
+    let Some(me) = me else {
+        return Err(Error::new(
+            Code::Usage,
+            "say session.hello on this connection before subscribe",
+        ));
+    };
+    if already {
+        return Err(Error::new(
+            Code::Usage,
+            "this connection is already subscribed",
+        ));
+    }
+    let topics = notify::topics(names)?;
+    let mut core = lock(&state.core);
+    let Core { session, live } = &mut *core;
+    // What happened before the subscription isn't news to it.
+    settle(session, live, &state.root);
+    let sub = live.hub.subscribe(me, &topics);
+    let shown = if topics.is_empty() {
+        notify::Topic::ALL.to_vec()
+    } else {
+        topics
+    };
+    Ok((
+        sub,
+        json!({"subscribed": shown, "session": core.live.list()}),
+    ))
 }

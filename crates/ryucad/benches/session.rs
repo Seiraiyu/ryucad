@@ -1,5 +1,7 @@
-//! Phase 0 benchmarks: the per-request freshness check, a cold rebuild,
-//! and a CLI command through the daemon, on a 100-feature project.
+//! Benchmarks on a 100-feature project: the per-request freshness check, a
+//! cold rebuild, a CLI command through the daemon, a watched daemon's
+//! periodic check, display meshes, a render, and a broadcast to
+//! subscribers.
 
 use divan::Bencher;
 use ryucad::doc::id::Id;
@@ -86,4 +88,84 @@ fn cli_feature_list_through_the_daemon(bencher: Bencher) {
     cli(dir.path(), &run, &["feature", "list", "p"]);
     bencher.bench_local(|| cli(dir.path(), &run, &["feature", "list", "p"]));
     cli(dir.path(), &run, &["daemon", "stop"]);
+}
+
+#[divan::bench(sample_count = 100)]
+fn watched_tick_100_features(bencher: Bencher) {
+    let dir = project();
+    let mut live = ryucad::live::Live::new();
+    let _sub = live.hub.subscribe("p-1", &[]);
+    let mut slot = Some(Session::open(dir.path()).unwrap());
+    std::thread::sleep(Duration::from_millis(2100));
+    ryucad::server::settle(&mut slot, &mut live, dir.path());
+    bencher.bench_local(|| ryucad::server::tick(&mut slot, &mut live, dir.path()));
+}
+
+fn mesh_request() -> Request {
+    Request::from_rpc(
+        "mesh.get",
+        Some(json!({"part": "p", "quality": "normal", "transfer": "binary"})),
+    )
+    .unwrap()
+}
+
+#[divan::bench(sample_count = 5)]
+fn mesh_get_cold_100_features(bencher: Bencher) {
+    let dir = project();
+    bencher.bench_local(|| {
+        let mut slot = None;
+        ryucad::server::handle_safely(&mut slot, None, None, dir.path(), mesh_request()).unwrap()
+    });
+}
+
+#[divan::bench(sample_count = 50)]
+fn mesh_get_cached_100_features(bencher: Bencher) {
+    let dir = project();
+    let mut slot = None;
+    ryucad::server::handle_safely(&mut slot, None, None, dir.path(), mesh_request()).unwrap();
+    bencher.bench_local(|| {
+        ryucad::server::handle_safely(&mut slot, None, None, dir.path(), mesh_request()).unwrap()
+    });
+}
+
+#[divan::bench(sample_count = 10)]
+fn render_1024x768_100_features(bencher: Bencher) {
+    let dir = project();
+    let req = || {
+        Request::from_rpc(
+            "render",
+            Some(json!({"part": "p", "width": 1024, "height": 768})),
+        )
+        .unwrap()
+    };
+    let mut slot = None;
+    ryucad::server::handle_safely(&mut slot, None, None, dir.path(), req()).unwrap();
+    bencher.bench_local(|| {
+        ryucad::server::handle_safely(&mut slot, None, None, dir.path(), req()).unwrap()
+    });
+}
+
+#[divan::bench(sample_count = 200)]
+fn broadcast_to_8_subscribers(bencher: Bencher) {
+    let mut hub = ryucad::notify::Hub::default();
+    let subs: Vec<_> = (0..8)
+        .map(|i| hub.subscribe(&format!("p-{i}"), &[]))
+        .collect();
+    let drains: Vec<_> = subs
+        .iter()
+        .map(|s| {
+            let s = std::sync::Arc::clone(s);
+            std::thread::spawn(move || while s.next().is_some() {})
+        })
+        .collect();
+    let params = json!({"participant": {"id": "p-1", "selection": ["a/b/0123456789abcdef0123456789abcdef"]}});
+    bencher.bench_local(|| {
+        hub.send(
+            ryucad::notify::Topic::Participants,
+            "participant.changed",
+            &params,
+        )
+    });
+    subs.iter().for_each(|s| s.close());
+    drains.into_iter().for_each(|d| d.join().unwrap());
 }
