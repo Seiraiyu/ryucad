@@ -222,6 +222,7 @@ fn unwrap_ring(g: &FaceGeom, ring: &[LoopPoint]) -> Result<(Vec<Flat>, [i64; 2])
             x[k] = unwrap(raw[k], last[k], g.periods[k]);
         }
         if i == n {
+            through_poles(g, &mut out, &poles);
             // Back at the start: the winding.
             let wind: [i64; 2] = core::array::from_fn(|k| match g.periods[k] {
                 Some(period) => ((x[k] - out[0].x[k]) / period).round() as i64,
@@ -270,6 +271,57 @@ fn unwrap_ring(g: &FaceGeom, ring: &[LoopPoint]) -> Result<(Vec<Flat>, [i64; 2])
         }
     }
     unreachable!()
+}
+
+/// Across a pole a ring's free parameter jumps, so continuity says
+/// nothing about which period the stretch after it belongs to: unwrapping
+/// takes the nearest, which for a face wider than half a turn between two
+/// poles (a lune, such as a sphere's wedge) is its complement. With two
+/// poles the stretch between them is moved by whole periods until the
+/// ring winds the way the face does: area on its left when the face uses
+/// the surface's normal.
+fn through_poles(g: &FaceGeom, out: &mut [Flat], poles: &[(usize, usize)]) {
+    let [(a, k), (b, k2)] = poles[..] else {
+        return;
+    };
+    let free = 1 - k;
+    let Some(period) = g.periods[free].filter(|_| k == k2) else {
+        return;
+    };
+    let area = |pts: &[Flat]| -> f64 {
+        let n = pts.len();
+        (0..n)
+            .map(|i| {
+                let (p, q) = (pts[i].x, pts[(i + 1) % n].x);
+                p[U] * q[V] - q[U] * p[V]
+            })
+            .sum::<f64>()
+            / 2.0
+    };
+    let off_pole = |pts: &[Flat]| -> Vec<Flat> {
+        pts.iter()
+            .enumerate()
+            .filter(|&(j, _)| j != a && j != b)
+            .map(|(_, p)| *p)
+            .collect()
+    };
+    let shifted = |m: f64| -> Vec<Flat> {
+        let mut pts = out.to_vec();
+        for p in &mut pts[a + 1..b] {
+            p.x[free] += m * period;
+        }
+        off_pole(&pts)
+    };
+    let want = if g.forward { 1.0 } else { -1.0 };
+    let best = [-1.0, 0.0, 1.0]
+        .into_iter()
+        .filter(|&m| area(&shifted(m)) * want > 0.0)
+        .min_by(|&x, &y| area(&shifted(x)).abs().total_cmp(&area(&shifted(y)).abs()));
+    if let Some(m) = best.filter(|&m| m != 0.0) {
+        for p in &mut out[a + 1..b] {
+            p.x[free] += m * period;
+        }
+    }
 }
 
 /// The strip index of a piece of a ring between seam points, by

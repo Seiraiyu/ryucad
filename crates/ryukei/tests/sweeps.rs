@@ -322,6 +322,28 @@ fn partial_revolves() {
     assert!(close(volume(&b), 1.5 / 2.0 * 2.0, 2e-3));
 }
 
+fn half_disc() -> ValidProfile {
+    profile(vec![Loop {
+        key: LoopKey(1),
+        segments: keyed(
+            10,
+            vec![
+                arc((0.0, 0.0), 1.0, -FRAC_PI_2, FRAC_PI_2),
+                line((0.0, 1.0), (0.0, -1.0)),
+            ],
+        ),
+    }])
+}
+
+#[test]
+fn a_wedge_of_a_sphere() {
+    // Three quarters of a turn: the sphere's face runs between two
+    // meridians that meet at the poles, on the axis edge.
+    let (b, _) = revolve(K, &half_disc(), y_axis(), 0.0, 1.5 * PI).unwrap();
+    assert_eq!(counts(&b), (2, 3, 3));
+    assert!(close(volume(&b), 4.0 / 3.0 * PI * 0.75, 2e-3));
+}
+
 #[test]
 fn revolve_refuses_bad_profiles_and_parameters() {
     let sweep = |e| Err(Error::InvalidSweep(e));
