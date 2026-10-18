@@ -345,6 +345,17 @@ fn a_wedge_of_a_sphere() {
 }
 
 #[test]
+fn half_turns_and_more() {
+    // Lateral arcs of half a turn and more, round cylinders and planes.
+    let p = profile(vec![rect(1, 10, 1.0, 0.0, 2.0, 2.0)]);
+    for span in [PI, 3.5, 5.0] {
+        let (b, _) = revolve(K, &p, y_axis(), 0.0, span).unwrap();
+        let want = span / 2.0 * (9.0 - 1.0) * 2.0;
+        assert!(close(volume(&b), want, 2e-3), "{span}");
+    }
+}
+
+#[test]
 fn revolve_refuses_bad_profiles_and_parameters() {
     let sweep = |e| Err(Error::InvalidSweep(e));
     let crossing = profile(vec![rect(1, 10, -1.0, 0.0, 2.0, 1.0)]);
