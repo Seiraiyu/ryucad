@@ -18,6 +18,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        # The app's dependencies (wgpu, egui) fill the runner's small disk.
+        name: room on the disk
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - if: runner.os == 'Linux'
@@ -70,6 +74,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        # The app's dependencies (wgpu, egui) fill the runner's small disk.
+        name: room on the disk
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
       - uses: devcontainers/ci@v0.3
         with:
           # The workspace, then the OCCT and SMLib comparison, which only

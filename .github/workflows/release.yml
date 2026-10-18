@@ -68,6 +68,10 @@ jobs:
       - name: stamp the version
         run: sh scripts/stamp-version.sh "${{ needs.version.outputs.version }}"
         shell: bash
+      - if: runner.os == 'Linux'
+        # The app's dependencies (wgpu, egui) fill the runner's small disk.
+        name: room on the disk
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
       - run: rustup toolchain install && rustup target add "$TARGET" "$APP"
         shell: bash
       - if: runner.os == 'Linux'
