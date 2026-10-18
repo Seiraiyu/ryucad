@@ -130,6 +130,21 @@ fn a_click_selects_and_agents_see_it() {
     });
     let mine = h.state().opened().ws.myself().unwrap().selection.clone();
     assert_eq!(p.ok(&["selection"])["selection"], serde_json::json!(mine));
+    // Escape clears it.
+    h.key_press(egui::Key::Escape);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection.is_empty())
+    });
+    click(&h, h.state().opened().view.rect.center());
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection.len() == 1)
+    });
     // Clicking the background clears it.
     click(
         &h,
@@ -344,6 +359,32 @@ fn the_activity_tab_undoes_and_ctrl_z_does_too() {
             .entries
             .iter()
             .any(|e| e["kind"] == "redo")
+    });
+    assert_eq!(radius(&p), "5 mm");
+    // Ctrl+Y redoes too, as Windows has it.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    frames(&mut h, |a| {
+        a.opened().ws.idle()
+            && a.opened()
+                .ws
+                .activity
+                .entries
+                .iter()
+                .filter(|e| e["kind"] == "undo")
+                .count()
+                == 2
+    });
+    assert_eq!(radius(&p), "3 mm");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Y);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .activity
+            .entries
+            .iter()
+            .filter(|e| e["kind"] == "redo")
+            .count()
+            == 2
     });
     assert_eq!(radius(&p), "5 mm");
 }

@@ -307,19 +307,29 @@ impl Opened {
             .unwrap_or(true);
     }
 
-    /// Ctrl/Cmd+Z undoes this window's latest change, Shift+Ctrl/Cmd+Z
-    /// redoes; not while a text field has the keyboard (it has its own).
+    /// Ctrl/Cmd+Z undoes this window's latest change, Shift+Ctrl/Cmd+Z or
+    /// Ctrl+Y redoes, and Escape clears the selection; not while a text
+    /// field has the keyboard (it has its own), and Escape not while a menu
+    /// or popup is open (it closes those).
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.memory(|m| m.focused().is_some()) {
             return;
         }
         use egui::{Key, KeyboardShortcut, Modifiers};
         let redo = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        let redo_y = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
         let undo = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
-        if ctx.input_mut(|i| i.consume_shortcut(&redo)) {
+        if ctx.input_mut(|i| i.consume_shortcut(&redo) || i.consume_shortcut(&redo_y)) {
             self.ws.redo(None);
         } else if ctx.input_mut(|i| i.consume_shortcut(&undo)) {
             self.ws.undo(None);
+        }
+        if !egui::Popup::is_any_open(ctx)
+            && self.ws.myself().is_some_and(|m| !m.selection.is_empty())
+            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            self.ws
+                .select(Vec::new(), ryucad::live::SelectMode::Replace);
         }
     }
 }
