@@ -126,8 +126,15 @@ impl BodyMesh {
     }
 }
 
-/// Rounds of boundary split requests before a face gives up.
-const ROUNDS: usize = 3;
+/// The round after which an edge still asked for samples is halved all
+/// along rather than split where asked.
+const HALVE_AFTER: usize = 3;
+
+/// Rounds of boundary split requests before a face gives up. Most faces
+/// need none or one; a thin tube's band (a slot turned whole) asks for its
+/// boundary circles several times finer than the edge pass gives, and each
+/// round only halves the segments it asks about, so it takes about ten.
+const ROUNDS: usize = 12;
 
 /// One face's state between rounds.
 struct FaceWork {
@@ -196,6 +203,19 @@ pub fn tessellate(body: &Body, params: &MeshParams) -> Result<BodyMesh, Error> {
         let mut redo: Vec<FaceId> = Vec::new();
         for &(e, t) in &requests {
             extras[e.index()].push(t);
+        }
+        // Remeshing a face moves its triangles, and now and then they ask
+        // for boundary samples somewhere new every round. Past the first
+        // few rounds, an edge still asked about is halved all along, so
+        // its samples close in geometrically and the asking stops.
+        if round + 1 >= HALVE_AFTER {
+            let mut asked: Vec<EdgeId> = requests.iter().map(|r| r.0).collect();
+            asked.dedup();
+            for e in asked {
+                let params = &samples[e.index()].as_ref().expect("sampled").params;
+                let mids = params.windows(2).map(|w| 0.5 * (w[0] + w[1]));
+                extras[e.index()].extend(mids);
+            }
         }
         let mut split: Vec<EdgeId> = requests.iter().map(|r| r.0).collect();
         split.dedup();

@@ -388,6 +388,48 @@ fn torus_bands() {
 }
 
 #[test]
+fn thin_tubes_and_tiny_blobs() {
+    // A slot turned whole: tori whose tubes are not much thicker than the
+    // chord, whose bands ask for their circles again and again.
+    let (big, r, l) = (1.5, 0.08, 0.5);
+    let slot = Loop {
+        key: LoopKey(1),
+        segments: keyed(
+            10,
+            vec![
+                line((big + r, 0.0), (big + r, l)),
+                arc((big, l), r, 0.0, PI),
+                line((big - r, l), (big - r, 0.0)),
+                arc((big, 0.0), r, PI, TAU),
+            ],
+        ),
+    };
+    let p = profile(vec![slot]);
+    let (b, _) = revolve(K, &p, y_axis(), 0.0, TAU).unwrap();
+    let m = tessellate(&b, &MeshParams::new(0.05, 0.5)).unwrap();
+    assert!(m.faults.is_empty(), "{:?}", m.faults);
+    let area = 2.0 * r * l + PI * r * r;
+    assert!(close(volume_and_area(&m).0, area * TAU * big, 0.05));
+    // A small NURBS blob extruded obliquely: its side asks for boundary
+    // samples somewhere new every round until its edges are halved.
+    let mut g = ryukei_testkit::Lcg::new(28);
+    let blob = ryukei_testkit::nurbs::blob2(&mut g, Point2::new(-1.6, -2.8), 0.02);
+    let [a, z] = blob.domain();
+    let lp = Loop {
+        key: LoopKey(1),
+        segments: keyed(10, vec![(Curve2::Nurbs2(Arc::new(blob)), a, z)]),
+    };
+    let p = profile(vec![lp]);
+    let dir = frame().z().get() + frame().x().get() * 0.7;
+    let (b, _) = extrude(K, &p, dir, 0.0, 1.0).unwrap();
+    let m = tessellate(&b, &MeshParams::new(0.0045, 0.5)).unwrap();
+    assert!(m.faults.is_empty(), "{:?}", m.faults);
+    let along = 1.0 / dir.length();
+    let want = p.lumps()[0].outer.area * along;
+    assert!(close(volume_and_area(&m).0, want, 5e-3));
+}
+
+#[test]
 fn revolve_refuses_bad_profiles_and_parameters() {
     let sweep = |e| Err(Error::InvalidSweep(e));
     let crossing = profile(vec![rect(1, 10, -1.0, 0.0, 2.0, 1.0)]);
