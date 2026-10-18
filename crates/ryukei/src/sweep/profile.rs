@@ -3,14 +3,16 @@
 //! Checks run in a fixed order and the first fault found is reported, in
 //! input order: the structure (loops, segments, keys), each segment
 //! (range, length, closed segments), the closure of each loop, the size
-//! box, the separation of the segments, then orientation.
+//! box, the separation of the segments, then orientation and nesting.
 
 use super::area;
 use super::chain::Chain;
 use super::intersect2;
+use super::nest::{self, Place};
 use crate::geom::{Box2, Curve2, Frame, Point2};
 use crate::tol::{self, LINEAR_RESOLUTION};
 use crate::{Error, ProfileError};
+use rayon::prelude::*;
 use std::collections::BTreeSet;
 
 /// A caller's key for a segment (ryucad hashes sketch entity IDs into
@@ -117,8 +119,10 @@ fn invalid(e: ProfileError) -> Error {
 }
 
 impl ValidProfile {
-    /// Validates a profile. For now every loop becomes a lump of its own,
-    /// turned counterclockwise.
+    /// Validates a profile and nests its loops into lumps: a loop inside
+    /// an even number of others is the outer loop of a lump, turned
+    /// counterclockwise; one inside an odd number is a hole of the loop
+    /// directly around it, turned clockwise.
     ///
     /// Fails with [`Error::InvalidProfile`], reporting the first fault in
     /// this order: no loops, an empty loop, a repeated key; then for each
@@ -126,7 +130,8 @@ impl ValidProfile {
     /// resolution, a whole period sharing its loop, a lone segment that is
     /// not a whole period; then each loop's closure; the size box; two
     /// segments that touch (the pair whose first segment comes first, then
-    /// whose second does); then a loop whose area is too small to orient.
+    /// whose second does); then a loop whose area is too small to orient,
+    /// or whose nesting can't be certified.
     pub fn new(profile: Profile) -> Result<ValidProfile, Error> {
         check_structure(&profile)?;
         for l in &profile.loops {
@@ -136,21 +141,24 @@ impl ValidProfile {
             check_closed(l)?;
         }
         check_size_box(&profile)?;
-        check_separation(&profile)?;
+        let chains = check_separation(&profile)?;
         let mut areas = Vec::with_capacity(profile.loops.len());
         for l in &profile.loops {
             let a = area::signed_area(&l.segments);
             areas.push(a.ok_or(invalid(ProfileError::Degenerate { loop_: l.key }))?);
         }
-        let lumps = profile
+        let points: Vec<_> = profile
             .loops
-            .into_iter()
-            .zip(areas)
-            .map(|(l, a)| Lump {
-                outer: ValidLoop::oriented(l, a, true),
-                holes: Vec::new(),
-            })
+            .iter()
+            .map(|l| l.segments[0].start().to_vector())
             .collect();
+        let chains: Vec<&[Chain]> = chains.iter().map(Vec::as_slice).collect();
+        let places = nest::places(&chains, &points).map_err(|i| {
+            invalid(ProfileError::Degenerate {
+                loop_: profile.loops[i].key,
+            })
+        })?;
+        let lumps = lumps(profile.loops, &areas, &places);
         Ok(Self {
             frame: profile.frame,
             lumps,
@@ -295,23 +303,58 @@ fn check_size_box(p: &Profile) -> Result<(), Error> {
     Ok(())
 }
 
-/// No two segments touch, except neighbours at their shared ends.
-fn check_separation(p: &Profile) -> Result<(), Error> {
+/// No two segments touch, except neighbours at their shared ends. Returns
+/// each loop's segments as chains.
+fn check_separation(p: &Profile) -> Result<Vec<Vec<Chain>>, Error> {
     let segments: Vec<&Segment> = p.loops.iter().flat_map(|l| &l.segments).collect();
-    let chains: Vec<Chain> = segments.iter().map(|s| Chain::new(s)).collect();
+    let chains: Vec<Chain> = segments.par_iter().map(|s| Chain::new(s)).collect();
     let mut loops = Vec::with_capacity(p.loops.len());
     let mut first = 0;
     for l in &p.loops {
         loops.push((first, l.segments.len()));
         first += l.segments.len();
     }
-    match intersect2::first_touching(&chains, &loops) {
-        Some((i, j)) => Err(invalid(ProfileError::Touching {
+    if let Some((i, j)) = intersect2::first_touching(&chains, &loops) {
+        return Err(invalid(ProfileError::Touching {
             a: segments[i].key,
             b: segments[j].key,
-        })),
-        None => Ok(()),
+        }));
     }
+    let mut rest = chains.into_iter();
+    Ok(loops
+        .iter()
+        .map(|&(_, n)| rest.by_ref().take(n).collect())
+        .collect())
+}
+
+/// The loops gathered into lumps by their places, each oriented: lumps
+/// in the order of their outer loops, holes in input order.
+fn lumps(loops: Vec<Loop>, areas: &[f64], places: &[Place]) -> Vec<Lump> {
+    let mut outer_of = vec![None; loops.len()];
+    let mut lumps: Vec<Lump> = Vec::new();
+    let mut holes = Vec::new();
+    for (i, (l, &area)) in loops.into_iter().zip(areas).enumerate() {
+        // A loop at odd depth is a hole; `nest::places` checked that it has
+        // a parent, one level up, so an outer loop.
+        let place = places[i];
+        match place.parent.filter(|_| !place.depth.is_multiple_of(2)) {
+            Some(parent) => holes.push((parent, ValidLoop::oriented(l, area, false))),
+            None => {
+                outer_of[i] = Some(lumps.len());
+                lumps.push(Lump {
+                    outer: ValidLoop::oriented(l, area, true),
+                    holes: Vec::new(),
+                });
+            }
+        }
+    }
+    for (parent, hole) in holes {
+        debug_assert!(outer_of[parent].is_some(), "a hole's parent is outer");
+        if let Some(lump) = outer_of[parent] {
+            lumps[lump].holes.push(hole);
+        }
+    }
+    lumps
 }
 
 #[cfg(test)]
