@@ -9,6 +9,7 @@ pub mod occt;
 pub mod smlib;
 
 use ryukei::geom::Point3;
+use ryukei::math::{cos, sin};
 
 /// The primitives every kernel builds, in the same local frames: a block
 /// from the origin along +x, +y and +z; a cylinder and a cone on the
@@ -77,5 +78,138 @@ impl Soup<'_> {
             }
         }
         worst
+    }
+}
+
+/// The vector `dist` along the direction of `dir`.
+pub fn sweep_vector(dir: [f64; 3], dist: f64) -> [f64; 3] {
+    let length = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+    dir.map(|d| d / length * dist)
+}
+
+/// A planar profile for the sweep comparisons: loops of segments in the
+/// plane through `origin` spanned by the unit vectors `x` and `y`. Loop
+/// 0 is the outer loop and later loops are holes in it; either way
+/// round is accepted ([`oriented`](Self::oriented) fixes the direction).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BenchProfile {
+    pub origin: [f64; 3],
+    pub x: [f64; 3],
+    pub y: [f64; 3],
+    pub loops: Vec<Vec<BenchSegment>>,
+}
+
+/// A segment of a [`BenchProfile`], in the profile plane's coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BenchSegment {
+    Line {
+        a: [f64; 2],
+        b: [f64; 2],
+    },
+    /// From angle `a0` to `a1` (radians from the plane's x axis):
+    /// counterclockwise when `a1 > a0`, clockwise otherwise.
+    Arc {
+        centre: [f64; 2],
+        radius: f64,
+        a0: f64,
+        a1: f64,
+    },
+}
+
+impl BenchSegment {
+    /// The same segment the other way round.
+    pub fn reversed(self) -> Self {
+        match self {
+            BenchSegment::Line { a, b } => BenchSegment::Line { a: b, b: a },
+            BenchSegment::Arc {
+                centre,
+                radius,
+                a0,
+                a1,
+            } => BenchSegment::Arc {
+                centre,
+                radius,
+                a0: a1,
+                a1: a0,
+            },
+        }
+    }
+
+    /// The integral of `(x dy - y dx) / 2` along the segment: summed
+    /// round a loop, the loop's signed area.
+    pub fn area_term(self) -> f64 {
+        match self {
+            BenchSegment::Line { a, b } => (a[0] * b[1] - b[0] * a[1]) / 2.0,
+            BenchSegment::Arc {
+                centre: [cx, cy],
+                radius: r,
+                a0,
+                a1,
+            } => {
+                (r * r * (a1 - a0) + r * cx * (sin(a1) - sin(a0)) - r * cy * (cos(a1) - cos(a0)))
+                    / 2.0
+            }
+        }
+    }
+}
+
+impl BenchProfile {
+    /// A loop's signed area: positive when counterclockwise.
+    pub fn loop_area(segments: &[BenchSegment]) -> f64 {
+        segments.iter().map(|s| s.area_term()).sum()
+    }
+
+    /// The profile's area: the outer loop's less the holes'.
+    pub fn area(&self) -> f64 {
+        let mut loops = self.loops.iter().map(|l| Self::loop_area(l).abs());
+        let outer = loops.next().unwrap_or(0.0);
+        outer - loops.sum::<f64>()
+    }
+
+    /// The same profile with the outer loop counterclockwise and the
+    /// holes clockwise, as the kernels want them.
+    pub fn oriented(&self) -> Self {
+        let loops = self
+            .loops
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                if (Self::loop_area(l) > 0.0) == (i == 0) {
+                    l.clone()
+                } else {
+                    l.iter().rev().map(|s| s.reversed()).collect()
+                }
+            })
+            .collect();
+        Self {
+            loops,
+            ..self.clone()
+        }
+    }
+
+    /// The oriented profile flattened for the C++ shims: the frame
+    /// (origin, x, y), each loop's segment count, and six numbers per
+    /// segment: 0 and a line's ends, or 1 and an arc's centre, radius and
+    /// angles.
+    pub fn flatten(&self) -> ([f64; 9], Vec<u32>, Vec<f64>) {
+        let p = self.oriented();
+        let mut frame = [0.0; 9];
+        frame[..3].copy_from_slice(&p.origin);
+        frame[3..6].copy_from_slice(&p.x);
+        frame[6..].copy_from_slice(&p.y);
+        let sizes = p.loops.iter().map(|l| l.len() as u32).collect();
+        let mut segments = Vec::new();
+        for s in p.loops.iter().flatten() {
+            segments.extend(match *s {
+                BenchSegment::Line { a, b } => [0.0, a[0], a[1], b[0], b[1], 0.0],
+                BenchSegment::Arc {
+                    centre,
+                    radius,
+                    a0,
+                    a1,
+                } => [1.0, centre[0], centre[1], radius, a0, a1],
+            });
+        }
+        (frame, sizes, segments)
     }
 }

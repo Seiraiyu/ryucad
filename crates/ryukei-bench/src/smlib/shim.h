@@ -1,6 +1,7 @@
 // A small C++ shim over SMLib (NVIDIA's USD BRep kernel, Apache-2.0) for
-// the comparison benchmarks: build the same primitives ryukei builds, cut
-// them, mesh them with ConvertToPolyBrep, and hand the triangles back.
+// the comparison benchmarks: build the same primitives ryukei builds,
+// sweep profiles, cut them, mesh them with ConvertToPolyBrep, and hand
+// the triangles back.
 #pragma once
 
 #include "rust/cxx.h"
@@ -26,6 +27,14 @@ public:
 
 std::unique_ptr<Body> make(uint32_t kind, double a, double b, double c,
                            rust::Slice<const double> at, bool nurbs);
+std::unique_ptr<Body> extrude(rust::Slice<const double> frame,
+                              rust::Slice<const uint32_t> sizes,
+                              rust::Slice<const double> segments,
+                              rust::Slice<const double> vector);
+std::unique_ptr<Body> revolve(rust::Slice<const double> frame,
+                              rust::Slice<const uint32_t> sizes,
+                              rust::Slice<const double> segments,
+                              rust::Slice<const double> axis, double angle);
 void add_tool(Body &body, uint32_t kind, double a, double b, double c,
               rust::Slice<const double> at);
 void subtract_tools(Body &body, bool parallel);

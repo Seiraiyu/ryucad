@@ -5,6 +5,7 @@
 #include <SmBSplineCurve.h>
 #include <SmBSplineSurface.h>
 #include <SmBrep.h>
+#include <SmCurve.h>
 #include <SmEdge.h>
 #include <SmFace.h>
 #include <SmMerge.h>
@@ -12,6 +13,7 @@
 #include <SmPrimitiveCreation.h>
 #include <SmVertex.h>
 
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -92,6 +94,79 @@ std::unique_ptr<Body> make(uint32_t kind, double a, double b, double c,
   if (nurbs) {
     to_bsplines(*body);
   }
+  return body;
+}
+
+// A profile's curves, as for the OCCT shim's `profile_face`, made the way
+// SmPrimitiveCreation makes its own sweeps' (CreateLineSegment and
+// CreateCircleSegment): SMLib finds the loops and their nesting itself.
+static void profile_curves(const SmContext &context,
+                           rust::Slice<const double> frame,
+                           rust::Slice<const uint32_t> sizes,
+                           rust::Slice<const double> segments,
+                           SmTArray<SmCurve *> &out) {
+  SmPoint3d o(frame[0], frame[1], frame[2]);
+  SmVector3d x(frame[3], frame[4], frame[5]);
+  SmVector3d y(frame[6], frame[7], frame[8]);
+  auto at = [&](double u, double v) { return o + u * x + v * y; };
+  size_t total = 0;
+  for (uint32_t size : sizes) {
+    total += size;
+  }
+  for (size_t k = 0; k < 6 * total; k += 6) {
+    const double *s = &segments[k];
+    SmBSplineCurve *curve = nullptr;
+    if (s[0] == 0.0) {
+      check(SmBSplineCurve::CreateLineSegment(context, 3, at(s[1], s[2]),
+                                              at(s[3], s[4]), curve),
+            "CreateLineSegment");
+    } else {
+      // A clockwise arc is a counterclockwise one about -y, angles negated.
+      bool ccw = s[5] > s[4];
+      SmAxis2Placement place(at(s[1], s[2]), x, ccw ? y : -y);
+      double a0 = (ccw ? s[4] : -s[4]) * DEGREES;
+      double a1 = (ccw ? s[5] : -s[5]) * DEGREES;
+      check(SmBSplineCurve::CreateCircleSegment(context, 3, place, s[3], a0,
+                                                a1, SM_CO_QUADRATIC, curve),
+            "CreateCircleSegment");
+    }
+    out.Add(curve);
+  }
+}
+
+std::unique_ptr<Body> extrude(rust::Slice<const double> frame,
+                              rust::Slice<const uint32_t> sizes,
+                              rust::Slice<const double> segments,
+                              rust::Slice<const double> vector) {
+  auto body = std::make_unique<Body>();
+  body->brep = new (*body->context) SmBrep();
+  SmTArray<SmCurve *> curves;
+  profile_curves(*body->context, frame, sizes, segments, curves);
+  SmVector3d v(vector[0], vector[1], vector[2]);
+  double length = v.Length();
+  SmPrimitiveCreation pc(body->brep->GetInfiniteRegion());
+  check(pc.CreateLinearSweep(curves, v / length, length, 1, TRUE),
+        "CreateLinearSweep");
+  return body;
+}
+
+// Caps only for a partial revolve, as SmPrimitiveCreation's own cones and
+// spheres do.
+std::unique_ptr<Body> revolve(rust::Slice<const double> frame,
+                              rust::Slice<const uint32_t> sizes,
+                              rust::Slice<const double> segments,
+                              rust::Slice<const double> axis, double angle) {
+  auto body = std::make_unique<Body>();
+  body->brep = new (*body->context) SmBrep();
+  SmTArray<SmCurve *> curves;
+  profile_curves(*body->context, frame, sizes, segments, curves);
+  double degrees = angle * DEGREES;
+  bool full = std::abs(degrees - 360.0) < 1e-9;
+  SmPrimitiveCreation pc(body->brep->GetInfiniteRegion());
+  check(pc.CreateRotationalSweep(curves, SmPoint3d(axis[0], axis[1], axis[2]),
+                                 SmVector3d(axis[3], axis[4], axis[5]),
+                                 degrees, 1, full ? FALSE : TRUE),
+        "CreateRotationalSweep");
   return body;
 }
 

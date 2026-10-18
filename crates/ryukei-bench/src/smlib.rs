@@ -1,9 +1,10 @@
 //! SMLib, the B-rep kernel in NVIDIA's USD BRep (Apache-2.0), through a
 //! small C++ shim, for comparison: the same primitives built with
 //! `SmPrimitiveCreation`, NURBS forms by replacing every surface and
-//! curve with a plain B-spline copy, booleans from `SmMerge`, and meshes
-//! from `SmBrep::ConvertToPolyBrep`, SMLib's one-call mesher. Only built with
-//! the `smlib` feature, against a `libsmlib.so` built from usd-brep's
+//! curve with a plain B-spline copy, sweeps of a [`BenchProfile`] from
+//! `SmPrimitiveCreation`'s linear and rotational sweeps, booleans from
+//! `SmMerge`, and meshes from `SmBrep::ConvertToPolyBrep`, SMLib's
+//! one-call mesher. Only built with the `smlib` feature, against a `libsmlib.so` built from usd-brep's
 //! `source/SMLib` (`SMLIB_DIR`, default `/usr/local`; the devcontainer
 //! builds it).
 //!
@@ -12,7 +13,7 @@
 //! `ConvertToPolyBrep` meshes a copy that recognizes analytic surfaces
 //! again: SMLib's NURBS meshes come out the same as the analytic ones.
 
-use crate::{Primitive, Soup};
+use crate::{BenchProfile, Primitive, Soup};
 use ryukei::geom::Rigid;
 
 #[cxx::bridge(namespace = "ryukei_smlib")]
@@ -48,6 +49,19 @@ mod ffi {
             c: f64,
             at: &[f64],
             nurbs: bool,
+        ) -> Result<UniquePtr<Body>>;
+        fn extrude(
+            frame: &[f64],
+            sizes: &[u32],
+            segments: &[f64],
+            vector: &[f64],
+        ) -> Result<UniquePtr<Body>>;
+        fn revolve(
+            frame: &[f64],
+            sizes: &[u32],
+            segments: &[f64],
+            axis: &[f64],
+            angle: f64,
         ) -> Result<UniquePtr<Body>>;
         fn add_tool(
             body: Pin<&mut Body>,
@@ -98,6 +112,32 @@ impl Solid {
     pub fn new(p: Primitive, at: &Rigid, nurbs: bool) -> Self {
         let (kind, a, b, c, m) = args(p, at);
         Self(ffi::make(kind, a, b, c, &m, nurbs).expect("SMLib builds the primitive"))
+    }
+
+    /// The profile swept `dist` along `dir`, with end caps, by
+    /// `SmPrimitiveCreation::CreateLinearSweep`.
+    pub fn extrude(profile: &BenchProfile, dir: [f64; 3], dist: f64) -> Result<Self, String> {
+        let (frame, sizes, segments) = profile.flatten();
+        ffi::extrude(&frame, &sizes, &segments, &crate::sweep_vector(dir, dist))
+            .map(Self)
+            .map_err(|e| e.to_string())
+    }
+
+    /// The profile turned `angle` radians about the axis through
+    /// `axis_origin` along `axis_dir`, by
+    /// `SmPrimitiveCreation::CreateRotationalSweep`, with end caps unless
+    /// the turn is full.
+    pub fn revolve(
+        profile: &BenchProfile,
+        axis_origin: [f64; 3],
+        axis_dir: [f64; 3],
+        angle: f64,
+    ) -> Result<Self, String> {
+        let (frame, sizes, segments) = profile.flatten();
+        let axis: Vec<f64> = axis_origin.into_iter().chain(axis_dir).collect();
+        ffi::revolve(&frame, &sizes, &segments, &axis, angle)
+            .map(Self)
+            .map_err(|e| e.to_string())
     }
 
     /// Adds a primitive moved by `at` to the tools that
