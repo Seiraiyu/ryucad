@@ -102,7 +102,8 @@ impl Project {
     /// A project in a folder called `name`.
     pub fn named(name: &str) -> Project {
         let dir = tempfile::tempdir_in(shared()).unwrap();
-        let root = dir.path().canonicalize().unwrap().join(name);
+        // The plain form, as ryucad reports it (not `\\?\C:\…` on Windows).
+        let root = ryucad::doc::project::plain(dir.path().canonicalize().unwrap()).join(name);
         std::fs::create_dir(&root).unwrap();
         let p = Project { _dir: dir, root };
         p.ok(&["init", "--unit", "mm"]);
