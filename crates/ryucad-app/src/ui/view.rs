@@ -28,8 +28,11 @@ pub struct View {
     reference: Option<[f64; 3]>,
     scene: Option<Scene>,
     texture: Option<egui::TextureId>,
-    /// The camera has framed the model once.
+    /// The camera has framed the whole model once: loading finished, or
+    /// the person moved the camera first.
     framed: bool,
+    /// What the camera last framed while the model loaded.
+    framing: Option<([f64; 3], [f64; 3])>,
     pivot: Option<[f64; 3]>,
     /// What the context menu was opened on.
     menu: Option<Hit>,
@@ -71,6 +74,7 @@ impl View {
             scene: None,
             texture: None,
             framed: false,
+            framing: None,
             pivot: None,
             menu: None,
         }
@@ -102,30 +106,39 @@ impl View {
         Projector::new(&self.nav.camera, aspect, centre, radius)
     }
 
+    /// Width over height of the viewport (1 before it is laid out).
+    fn aspect(&self) -> f64 {
+        let (w, h) = (self.rect.width(), self.rect.height());
+        if w > 0.0 && h > 0.0 {
+            f64::from(w / h)
+        } else {
+            1.0
+        }
+    }
+
     /// Looks from a standard view at the whole model, and tells the session.
     pub fn standard(&mut self, ws: &mut Workspace, v: StandardView) {
-        if let Some((lo, hi)) = self.bounds(ws) {
-            self.nav.standard(v, lo, hi);
+        let points = self.picker(ws).points(None);
+        if !points.is_empty() {
+            self.nav.standard(v, &points, self.aspect());
             self.moved(ws);
         }
     }
 
     /// Frames the whole model, or one body.
     pub fn fit(&mut self, ws: &mut Workspace, body: Option<&BodyKey>) {
-        let b = match body {
-            Some(k) => self.picker(ws).body_bounds(k),
-            None => self.bounds(ws),
-        };
-        if let Some((lo, hi)) = b {
-            self.nav.fit(lo, hi);
+        let points = self.picker(ws).points(body);
+        if !points.is_empty() {
+            self.nav.fit(&points, self.aspect());
             self.moved(ws);
         }
     }
 
     /// Frames the given entities.
     pub fn fit_entities(&mut self, ws: &mut Workspace, entities: &[String]) {
-        if let Some((lo, hi)) = self.picker(ws).bounds_of(entities) {
-            self.nav.fit(lo, hi);
+        let points = self.picker(ws).points_of(entities);
+        if !points.is_empty() {
+            self.nav.fit(&points, self.aspect());
             self.moved(ws);
         }
     }
@@ -133,6 +146,8 @@ impl View {
     /// The camera moved by this window's hand: following stops, and the
     /// session hears of it.
     fn moved(&mut self, ws: &mut Workspace) {
+        // The person's camera from now on, loaded or not.
+        self.framed = true;
         ws.following = None;
         ws.share_camera(&self.nav.camera);
     }
@@ -191,6 +206,23 @@ impl View {
         (faces, lines)
     }
 
+    /// Highlight labels and where they go: the middle of what each
+    /// highlight covers, in its colour.
+    fn labels(&mut self, ws: &Workspace) -> Vec<(String, [f64; 3], Rgb)> {
+        let picker = self.picker(ws);
+        let mut out = Vec::new();
+        for p in ws.people.all.values() {
+            for h in &p.highlights {
+                let Some(text) = &h.label else { continue };
+                if let Some((lo, hi)) = picker.bounds_of(&h.entities) {
+                    let mid = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+                    out.push((text.clone(), mid, style::highlight(h.style)));
+                }
+            }
+        }
+        out
+    }
+
     /// Draws the viewport into `ui`'s remaining space and handles its
     /// input. `gpu` is the window's wgpu state (`None` with no adapter).
     pub fn show(
@@ -202,12 +234,18 @@ impl View {
         let rect = ui.available_rect_before_wrap();
         self.rect = rect;
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
+        // Meshes arrive a body at a time: frame what has come so far, and
+        // again as more comes, until it has all come.
         if !self.framed
-            && let Some((lo, hi)) = self.bounds(ws)
+            && let Some(b) = self.bounds(ws)
         {
-            self.framed = true;
-            self.nav.fit(lo, hi);
-            ws.share_camera(&self.nav.camera);
+            if self.framing != Some(b) {
+                self.framing = Some(b);
+                let points = self.picker(ws).points(None);
+                self.nav.fit(&points, self.aspect());
+                ws.share_camera(&self.nav.camera);
+            }
+            self.framed = ws.idle();
         }
         if let Some(c) = ws.followed_camera() {
             self.nav.camera = c.clone();
@@ -235,10 +273,20 @@ impl View {
             (b, m, i.smooth_scroll_delta.y)
         });
         if response.drag_started() {
-            self.pivot = response
+            // Turn about the model under the mouse; from the background,
+            // about what is in the middle of the view (the target may be
+            // well off the model after zooming towards a point), else the
+            // model's middle.
+            let middle = [size[0] / 2.0, size[1] / 2.0];
+            let picked = response
                 .interact_pointer_pos()
                 .and_then(|p| self.picker(ws).pick(&pr, size, local(p)))
+                .or_else(|| self.picker(ws).pick(&pr, size, middle))
                 .map(|h| h.point);
+            self.pivot = picked.or_else(|| {
+                self.bounds(ws)
+                    .map(|(lo, hi)| [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0))
+            });
         }
         if response.dragged() {
             let g = self.nav.style.gesture(buttons, modifiers);
@@ -318,6 +366,20 @@ impl View {
                 Place::Face(..) => {}
             }
         }
+        for (i, (text, at, c)) in self.labels(ws).into_iter().enumerate() {
+            let Some(s) = to_screen(at).filter(|s| rect.contains(*s)) else {
+                continue;
+            };
+            egui::Area::new(ui.scope_id().with(("highlight label", i)))
+                .fixed_pos(s + egui::vec2(8.0, -8.0))
+                .order(egui::Order::Foreground)
+                .interactable(false)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.label(egui::RichText::new(text).color(style::color32(c)));
+                    });
+                });
+        }
         if ws.lost {
             painter.rect_filled(rect, 0.0, egui::Color32::from_white_alpha(140));
         }
@@ -368,9 +430,11 @@ impl View {
         let list = DrawList {
             reference,
             matrix: pr.matrix(reference),
+            perspective: pr.line_pull(),
             light: scene::light(&pr.camera),
             edges: self.edges,
             faces,
+            background: crate::ui::style::viewport_background(ui.visuals().dark_mode),
         };
         let view = scene.render(&rs.device, &rs.queue, px, &list);
         let mut renderer = rs.renderer.write();

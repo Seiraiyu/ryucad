@@ -24,6 +24,9 @@ pub struct Start {
     /// A folder that was opened but isn't a project.
     pub not_a_project: Option<PathBuf>,
     pub error: Option<String>,
+    /// A folder typed or pasted in: for when the OS has no folder dialog
+    /// (no desktop portal on Linux), or the path is at hand.
+    pub typed: String,
 }
 
 impl Start {
@@ -37,6 +40,7 @@ impl Start {
             textures: BTreeMap::new(),
             not_a_project: None,
             error: None,
+            typed: String::new(),
         }
     }
 
@@ -73,6 +77,20 @@ pub fn show(ui: &mut egui::Ui, start: &mut Start) -> Option<Action> {
         {
             action = Some(Action::Open(dir));
         }
+        ui.horizontal(|ui| {
+            let name = ui.label("Folder path");
+            let field = ui
+                .add(egui::TextEdit::singleline(&mut start.typed).desired_width(420.0))
+                .labelled_by(name.id);
+            let typed = start.typed.trim();
+            let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.add_enabled(!typed.is_empty(), egui::Button::new("Open folder")).clicked()
+                || entered)
+                && !typed.is_empty()
+            {
+                action = Some(Action::Open(PathBuf::from(typed)));
+            }
+        });
         if let Some(e) = &start.error {
             ui.colored_label(ui.visuals().error_fg_color, e);
         }
@@ -101,10 +119,13 @@ pub fn show(ui: &mut egui::Ui, start: &mut Start) -> Option<Action> {
             // Rows as wide as the window allows.
             let cell = size.x + ui.spacing().item_spacing.x;
             let per_row = ((ui.available_width() + ui.spacing().item_spacing.x) / cell).floor().max(1.0) as usize;
-            for row in start.recent.clone().chunks(per_row) {
+            let recent = start.recent.clone();
+            let names = recent::names(&recent);
+            let all: Vec<(PathBuf, String)> = recent.into_iter().zip(names).collect();
+            for row in all.chunks(per_row) {
                 ui.horizontal(|ui| {
-                    for root in row {
-                        if thumbnail(ui, start, root, size) {
+                    for (root, name) in row {
+                        if thumbnail(ui, start, root, name, size) {
                             action = Some(Action::Open(root.clone()));
                         }
                     }
@@ -117,11 +138,13 @@ pub fn show(ui: &mut egui::Ui, start: &mut Start) -> Option<Action> {
 
 /// One recent project: its thumbnail and name. Returns whether it was
 /// clicked.
-fn thumbnail(ui: &mut egui::Ui, start: &mut Start, root: &PathBuf, size: egui::Vec2) -> bool {
-    let name = root.file_name().map_or_else(
-        || root.display().to_string(),
-        |n| n.to_string_lossy().into_owned(),
-    );
+fn thumbnail(
+    ui: &mut egui::Ui,
+    start: &mut Start,
+    root: &PathBuf,
+    name: &str,
+    size: egui::Vec2,
+) -> bool {
     let texture = start.texture(ui.ctx(), root);
     ui.vertical(|ui| {
         ui.set_width(size.x);
@@ -139,7 +162,7 @@ fn thumbnail(ui: &mut egui::Ui, start: &mut Start, root: &PathBuf, size: egui::V
             }
         }
         let clicked = r.on_hover_text(root.display().to_string()).clicked();
-        ui.link(&name).clicked() || clicked
+        ui.link(name).clicked() || clicked
     })
     .inner
 }

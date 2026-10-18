@@ -61,7 +61,7 @@ enum Command {
     Inspect {
         part: String,
         feature: Option<String>,
-        /// Only the entity with this name.
+        /// Only this entity: its name, or a full reference <part>/<feature>/<name>.
         #[arg(long)]
         entity: Option<String>,
     },
@@ -840,8 +840,12 @@ pub fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(e) => {
             use clap::error::ErrorKind;
+            // `ryucad` alone, like --help, is a person asking: but a command
+            // missing its subcommand (`ryucad config`) is a usage error, in
+            // JSON, like any other.
+            let bare = std::env::args_os().len() <= 1;
             if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion)
-                || e.kind() == ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                || (e.kind() == ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand && bare)
             {
                 // Help is for people; print it as clap does.
                 let _ = e.print();

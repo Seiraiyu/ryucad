@@ -104,7 +104,12 @@ check "app installed" '[ -x "$work/home-fresh/.ryucad/bin/ryucad-app" ]'
 desktop="$work/home-fresh/.local/share/applications/ryucad.desktop"
 case "$(uname -s)" in
     Linux)
-        check "desktop entry runs the installed app" 'grep -q "^Exec=\"$work/home-fresh/.ryucad/bin/ryucad-app\" %f$" "$desktop"'
+        # Unquoted when the path needs no quoting: xdg-open's generic mode
+        # can't run a quoted program.
+        check "desktop entry runs the installed app" 'grep -qx "Exec=$work/home-fresh/.ryucad/bin/ryucad-app %f" "$desktop"'
+        if command -v desktop-file-validate >/dev/null 2>&1; then
+            check "desktop entry is valid" 'desktop-file-validate "$desktop"'
+        fi
         check "project MIME type registered" '[ -f "$work/home-fresh/.local/share/mime/packages/ryucad.xml" ]'
         ;;
     Darwin)
@@ -113,6 +118,14 @@ case "$(uname -s)" in
         fi
         ;;
 esac
+if [ "$(uname -s)" = Linux ]; then
+    run "with space" "$good"
+    spaced="$work/home-with space/.local/share/applications/ryucad.desktop"
+    check "a path with a space is quoted" 'grep -qx "Exec=\"$work/home-with space/.ryucad/bin/ryucad-app\" %f" "$spaced"'
+    if command -v desktop-file-validate >/dev/null 2>&1; then
+        check "the quoted entry is valid" 'desktop-file-validate "$spaced"'
+    fi
+fi
 run noapp "$good" RYUCAD_NO_APP=1
 check "RYUCAD_NO_APP installs the command only" '[ "$status" -eq 0 ] && [ -x "$work/home-noapp/.ryucad/bin/ryucad" ] && [ ! -e "$work/home-noapp/.ryucad/bin/ryucad-app" ]'
 check "RYUCAD_NO_APP registers nothing" '[ ! -e "$work/home-noapp/.local/share/applications" ] && [ ! -e "$work/home-noapp/Applications" ]'

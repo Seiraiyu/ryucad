@@ -91,7 +91,19 @@ register() {
         Linux)
             data=${XDG_DATA_HOME:-$HOME/.local/share}
             mkdir -p "$data/applications" "$data/mime/packages"
-            sed "s|@BIN@|$1|g" "$2/ryucad.desktop" >"$data/applications/ryucad.desktop"
+            # The program, quoted only if it must be: xdg-open's generic
+            # mode can't run a quoted one. Inside quotes the desktop-entry
+            # spec escapes \ " ` and $ with a backslash, itself escaped.
+            exe="$1/ryucad-app"
+            case "$exe" in
+                *[!A-Za-z0-9/._+-]*)
+                    exe=$(printf '%s' "$exe" | sed 's/[\\"`$]/\\\\&/g')
+                    exe="\"$exe\""
+                    ;;
+            esac
+            # As a sed replacement, & | and \ are special.
+            exe=$(printf '%s' "$exe" | sed 's/[&|\\]/\\&/g')
+            sed "s|@EXEC@|$exe|g" "$2/ryucad.desktop" >"$data/applications/ryucad.desktop"
             cp "$2/ryucad.xml" "$data/mime/packages/ryucad.xml"
             if command -v update-mime-database >/dev/null 2>&1; then
                 update-mime-database "$data/mime" >/dev/null 2>&1 || true

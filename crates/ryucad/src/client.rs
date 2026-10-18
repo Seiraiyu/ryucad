@@ -180,6 +180,7 @@ pub const APP_VAR: &str = "RYUCAD_APP";
 /// front; otherwise (or if none is attached) the app starts on `dir`. A
 /// daemon is never started just to ask.
 pub fn open(dir: &Path, root: Option<&Path>) -> Result<Value> {
+    allow_foreground();
     if let Some(root) = root
         && let Ok(mut conn) = Connection::connect(&Endpoint::for_project(root)?)
         && let Ok(Ok(r)) = conn.call(&Request::AppOpen { participant: None })
@@ -208,6 +209,21 @@ pub fn open(dir: &Path, root: Option<&Path>) -> Result<Value> {
         .spawn()
         .map_err(|e| missing().with("path", &app).with("why", e.to_string()))?;
     Ok(json!({"opened": "new", "app": app, "pid": child.id(), "dir": dir}))
+}
+
+/// Lets the window `open` raises or starts take the foreground. Windows
+/// keeps it from background processes (the app, asked through the
+/// daemon), and this process, run by the person at the keyboard, may hand
+/// it on; elsewhere there is nothing to do.
+fn allow_foreground() {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
+        // SAFETY: a plain Win32 call; failing just leaves focus as it is.
+        unsafe {
+            AllowSetForegroundWindow(ASFW_ANY);
+        }
+    }
 }
 
 /// The `ryucad` binary that daemons are started from, and its version.

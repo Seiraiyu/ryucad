@@ -69,6 +69,13 @@ fn an_undo_that_would_lose_a_later_change_is_refused() {
     ws.undo(None);
     assert!(ws.wait_until(WAIT, |ws| ws.errors.len() == 2));
     assert_eq!(ws.errors[1].code, ryucad::error::Code::NothingToUndo);
+    // The status line shows it for a while, then not.
+    let now = std::time::Instant::now();
+    assert_eq!(
+        ws.shown_error(now).map(|e| e.code),
+        Some(ryucad::error::Code::NothingToUndo)
+    );
+    assert!(ws.shown_error(now + Duration::from_secs(30)).is_none());
 }
 
 fn git(p: &Project, args: &[&str]) {

@@ -63,6 +63,8 @@ fn the_viewport_looks_as_it_did() {
     let list = DrawList {
         reference: centre,
         matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        background: ryucad_app::ui::scene::theme::BACKGROUND,
         light: scene::light(&camera),
         edges: true,
         faces: &faces,

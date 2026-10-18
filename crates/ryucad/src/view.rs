@@ -175,23 +175,85 @@ const MARGIN: f64 = 1.1;
 /// A camera looking along `dir` (from the eye towards the target, as
 /// `-back`) with `up`, framing the box `lo`..`hi` so its bounding sphere
 /// fits the view.
+/// The corners of the box `lo`..`hi`.
+fn corners(lo: [f64; 3], hi: [f64; 3]) -> [[f64; 3]; 8] {
+    core::array::from_fn(|i| [0, 1, 2].map(|k| if i >> k & 1 == 1 { hi[k] } else { lo[k] }))
+}
+
+/// A camera looking along `-back` at `points` (not empty), centred on
+/// them and as close as lets them all fit a view of `aspect` (width over
+/// height) with the margin. Fitting the points, not their box, frames real
+/// models tightly: a box's corners are mostly empty.
 fn frame_along(
-    lo: [f64; 3],
-    hi: [f64; 3],
+    points: &[[f64; 3]],
     back: [f64; 3],
     up: [f64; 3],
     projection: Projection,
+    aspect: f64,
 ) -> Camera {
-    let target = [0, 1, 2].map(|k| lo[k] + (hi[k] - lo[k]) / 2.0);
-    let r = (norm(sub(hi, lo)) / 2.0).max(1e-6) * MARGIN;
     let b = norm(back);
     let back = back.map(|x| x / b);
-    let (distance, projection) = match projection {
-        Projection::Perspective { fov_deg } => {
-            let half = fov_deg * core::f64::consts::PI / 360.0;
-            (r / ryukei::math::sin(half), projection)
+    // The view's axes, as `Camera::basis` will have them.
+    let forward = back.map(|x| -x);
+    let right = unit(cross(forward, up));
+    let up_ = cross(right, forward);
+    // The middle of the points' box, moved across the view to the middle
+    // of the points as the view sees them (no move for a symmetric model,
+    // so its target stays exact).
+    let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+    let (mut across_lo, mut across_hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+    for p in points {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
         }
-        Projection::Orthographic { .. } => (2.0 * r, Projection::Orthographic { height: 2.0 * r }),
+        for (k, axis) in [right, up_].into_iter().enumerate() {
+            across_lo[k] = across_lo[k].min(dot(*p, axis));
+            across_hi[k] = across_hi[k].max(dot(*p, axis));
+        }
+    }
+    let centre = [0, 1, 2].map(|k| lo[k] + (hi[k] - lo[k]) / 2.0);
+    let shift = |k: usize, axis: [f64; 3]| {
+        let by = (across_lo[k] + across_hi[k]) / 2.0 - dot(centre, axis);
+        // Below the kernel's resolution it is rounding, not asymmetry.
+        let by = if by.abs() < ryukei::tol::LINEAR_RESOLUTION {
+            0.0
+        } else {
+            by
+        };
+        scale(axis, by)
+    };
+    let target = add(centre, add(shift(0, right), shift(1, up_)));
+    let aspect = if aspect.is_finite() && aspect > 0.0 {
+        aspect
+    } else {
+        1.0
+    };
+    // Each point around the target: how far across the view it reaches
+    // (its width scaled to height) and how far towards the eye it stands.
+    let around = points.iter().map(|p| {
+        let q = sub(*p, target);
+        let across = (dot(q, right).abs() / aspect).max(dot(q, up_).abs());
+        (across, dot(q, back))
+    });
+    let floor = 1e-6;
+    let (distance, projection) = match projection {
+        // Back far enough that every point is inside the field of view,
+        // with the margin: a point `toward` the eye is that much nearer.
+        Projection::Perspective { fov_deg } => {
+            let tan = ryukei::math::tan(fov_deg * core::f64::consts::PI / 360.0);
+            let d = around
+                .map(|(across, toward)| across.max(floor) * MARGIN / tan + toward)
+                .fold(floor, f64::max);
+            (d, projection)
+        }
+        Projection::Orthographic { .. } => {
+            let (across, toward) =
+                around.fold((floor, 0.0f64), |(a, t), (x, y)| (a.max(x), t.max(y)));
+            let height = 2.0 * across * MARGIN;
+            // In front of the nearest point, as far again as the view is high.
+            (toward + height, Projection::Orthographic { height })
+        }
     };
     Camera {
         eye: [0, 1, 2].map(|k| target[k] + back[k] * distance),
@@ -203,15 +265,33 @@ fn frame_along(
 
 /// A camera on the box `lo`..`hi` from a standard view.
 pub fn frame(lo: [f64; 3], hi: [f64; 3], view: StandardView, projection: Projection) -> Camera {
+    frame_points(&corners(lo, hi), view, projection, 1.0)
+}
+
+/// A camera on `points` (not empty) from a standard view, for a view of
+/// `aspect` (width over height): the model's mesh points frame it far more
+/// tightly than its box.
+pub fn frame_points(
+    points: &[[f64; 3]],
+    view: StandardView,
+    projection: Projection,
+    aspect: f64,
+) -> Camera {
     let (back, up) = view.axes();
-    frame_along(lo, hi, back, up, projection)
+    frame_along(points, back, up, projection, aspect)
 }
 
 /// `camera` moved to frame the box, keeping its direction, up and kind of
 /// projection.
 pub fn refit(camera: &Camera, lo: [f64; 3], hi: [f64; 3]) -> Camera {
+    refit_points(camera, &corners(lo, hi), 1.0)
+}
+
+/// `camera` moved to frame `points` (not empty) in a view of `aspect`,
+/// keeping its direction, up and kind of projection.
+pub fn refit_points(camera: &Camera, points: &[[f64; 3]], aspect: f64) -> Camera {
     let back = sub(camera.eye, camera.target);
-    frame_along(lo, hi, back, camera.up, camera.projection)
+    frame_along(points, back, camera.up, camera.projection, aspect)
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -373,13 +453,10 @@ mod tests {
     fn standard_views_frame_the_box() {
         let (lo, hi) = ([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]);
         let c = frame(lo, hi, StandardView::Front, DEFAULT_PROJECTION);
-        assert_eq!(c.target, [1.0, 1.0, 1.0]);
+        assert!(close(c.target, [1.0, 1.0, 1.0]), "{:?}", c.target);
         assert!(c.eye[1] < 0.0 && c.eye[0] == 1.0 && c.eye[2] == 1.0);
         assert!(c.check().is_ok());
-        // The bounding sphere fits the field of view.
-        let d = norm(sub(c.eye, c.target));
-        let r = 3f64.sqrt() * MARGIN;
-        assert!((ryukei::math::sin(15f64.to_radians()) * d - r).abs() < 1e-12);
+        let r = MARGIN;
         let top = frame(
             lo,
             hi,
@@ -399,8 +476,77 @@ mod tests {
         );
         // Refitting keeps the direction and moves to the new box.
         let moved = refit(&c, [10.0; 3], [11.0; 3]);
-        assert_eq!(moved.target, [10.5; 3]);
+        assert!(close(moved.target, [10.5; 3]), "{:?}", moved.target);
         assert_eq!(moved.up, c.up);
+    }
+
+    /// The largest of a box's corners' distances from the middle of the
+    /// view, as a fraction of the half-height there (1 at the edge).
+    fn reach(c: &Camera, lo: [f64; 3], hi: [f64; 3]) -> f64 {
+        let (r, u, f) = c.basis();
+        let mut most: f64 = 0.0;
+        for i in 0..8 {
+            let p = [0, 1, 2].map(|k| if i >> k & 1 == 1 { hi[k] } else { lo[k] });
+            let q = sub(p, c.eye);
+            let depth = dot(q, f);
+            assert!(depth > 0.0, "a corner behind the eye");
+            let h = c.half_height(depth);
+            most = most.max(dot(q, r).abs() / h).max(dot(q, u).abs() / h);
+        }
+        most
+    }
+
+    #[test]
+    fn framing_is_tight_on_long_flat_models() {
+        let (lo, hi) = ([0.0, 0.0, 0.0], [0.2, 0.02, 0.01]);
+        for projection in [DEFAULT_PROJECTION, Projection::Orthographic { height: 1.0 }] {
+            for v in [StandardView::Front, StandardView::Top, StandardView::Iso] {
+                let c = frame(lo, hi, v, projection);
+                let k = reach(&c, lo, hi);
+                assert!(k <= 1.0 + 1e-9, "{v:?} {projection:?}: out of view ({k})");
+                assert!(
+                    k >= 1.0 / MARGIN - 1e-9,
+                    "{v:?} {projection:?}: loose ({k})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn points_frame_tighter_than_their_box() {
+        // A ring in the ground plane, seen from the front: its box's near
+        // corners stand out towards the eye, the ring doesn't.
+        let pts: Vec<[f64; 3]> = (0..64)
+            .map(|i| {
+                let (s, c) = ryukei::math::sin_cos(f64::from(i) * core::f64::consts::PI / 32.0);
+                [c, s, 0.0]
+            })
+            .collect();
+        let tight = frame_points(&pts, StandardView::Front, DEFAULT_PROJECTION, 1.0);
+        let boxed = frame(
+            [-1.0, -1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            StandardView::Front,
+            DEFAULT_PROJECTION,
+        );
+        assert!(tight.distance() < boxed.distance());
+        // Every point in view, the outermost near the margin.
+        let (r, u, f) = tight.basis();
+        let mut most: f64 = 0.0;
+        for p in &pts {
+            let q = sub(*p, tight.eye);
+            let h = tight.half_height(dot(q, f));
+            most = most.max(dot(q, r).abs() / h).max(dot(q, u).abs() / h);
+        }
+        assert!((1.0 / MARGIN - 1e-9..=1.0 + 1e-9).contains(&most), "{most}");
+    }
+
+    #[test]
+    fn a_wide_view_frames_a_wide_model_closer() {
+        let pts = [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.2]];
+        let square = frame_points(&pts, StandardView::Front, DEFAULT_PROJECTION, 1.0);
+        let wide = frame_points(&pts, StandardView::Front, DEFAULT_PROJECTION, 2.0);
+        assert!(wide.distance() < 0.6 * square.distance());
     }
 
     fn close(a: [f64; 3], b: [f64; 3]) -> bool {

@@ -58,7 +58,9 @@ struct Uniforms {
     matrix: Mat4,
     /// Towards the light, in model space; w unused.
     light: [f32; 4],
-    /// x: how far lines are pulled towards the eye, in depth.
+    /// x: the fraction of their distance lines are pulled towards the
+    /// eye; y: 1 in perspective; z: the clip position of the eye's own z
+    /// (perspective).
     flags: [f32; 4],
 }
 
@@ -94,9 +96,18 @@ struct VOut {
 
 @vertex fn vs_line(v: VIn) -> VOut {
     var o: VOut;
-    o.clip = u.matrix * vec4<f32>(v.pos, 1.0);
-    // In front of the faces the edges bound.
-    o.clip.z = max(o.clip.z - u.flags.x * o.clip.w, 0.0);
+    let c = u.matrix * vec4<f32>(v.pos, 1.0);
+    // In front of the faces the edges bound, by a fraction of their
+    // distance: a fixed step in depth would be meters far back in a
+    // perspective view and pull hidden edges through solids. In
+    // perspective the point moves along its own sight line, towards the
+    // eye, so it stays on the same pixel.
+    let e = u.flags.x;
+    if u.flags.y > 0.5 {
+        o.clip = vec4<f32>(c.xy * (1.0 - e), c.z * (1.0 - e) + e * u.flags.z, c.w * (1.0 - e));
+    } else {
+        o.clip = vec4<f32>(c.xy, max(c.z - e * c.w, 0.0), c.w);
+    }
     o.normal = v.normal;
     o.color = v.color;
     return o;
@@ -123,6 +134,10 @@ struct Target {
     color: Option<wgpu::TextureView>,
     resolved: wgpu::Texture,
     view: wgpu::TextureView,
+    /// The same pixels for egui to show: a plain (not sRGB) view, since
+    /// egui treats what it samples as already encoded. Sampled through
+    /// an sRGB view they would be decoded once more and show too dark.
+    shown: wgpu::TextureView,
     depth: wgpu::TextureView,
 }
 
@@ -138,8 +153,13 @@ pub struct DrawList<'a> {
     /// Towards the light, in model space.
     pub light: [f32; 3],
     pub edges: bool,
+    /// 1 in perspective, and the clip z of the eye: see
+    /// [`crate::core::nav::Projector::line_pull`].
+    pub perspective: [f32; 2],
     /// Faces painted over, last on top.
     pub faces: &'a [PaintedFace],
+    /// The background, sRGB: see [`crate::ui::style::viewport_background`].
+    pub background: [f32; 3],
 }
 
 pub struct Scene {
@@ -366,7 +386,7 @@ impl Scene {
 
     fn target(&mut self, device: &wgpu::Device, size: [u32; 2]) -> &Target {
         if self.target.as_ref().is_none_or(|t| t.size != size) {
-            let tex = |label, format, samples, usage| {
+            let tex = |label, format, samples, usage, view_formats| {
                 device.create_texture(&wgpu::TextureDescriptor {
                     label: Some(label),
                     size: wgpu::Extent3d {
@@ -379,25 +399,33 @@ impl Scene {
                     dimension: wgpu::TextureDimension::D2,
                     format,
                     usage,
-                    view_formats: &[],
+                    view_formats,
                 })
             };
             let attach = wgpu::TextureUsages::RENDER_ATTACHMENT;
+            let plain = wgpu::TextureFormat::Rgba8Unorm;
+            let plain_too = [plain];
             let resolved = tex(
                 "scene",
                 FORMAT,
                 1,
                 attach | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                &plain_too,
             );
             let color = (self.samples > 1).then(|| {
-                tex("scene msaa", FORMAT, self.samples, attach).create_view(&Default::default())
+                tex("scene msaa", FORMAT, self.samples, attach, &[])
+                    .create_view(&Default::default())
             });
-            let depth =
-                tex("scene depth", DEPTH, self.samples, attach).create_view(&Default::default());
+            let depth = tex("scene depth", DEPTH, self.samples, attach, &[])
+                .create_view(&Default::default());
             self.target = Some(Target {
                 size,
                 color,
                 view: resolved.create_view(&Default::default()),
+                shown: resolved.create_view(&wgpu::TextureViewDescriptor {
+                    format: Some(plain),
+                    ..Default::default()
+                }),
                 resolved,
                 depth,
             });
@@ -406,7 +434,7 @@ impl Scene {
     }
 
     /// Draws `list` into the scene's texture, `size` pixels big, and
-    /// returns a view of it.
+    /// returns a view of it to show in egui.
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -418,7 +446,7 @@ impl Scene {
         let u = Uniforms {
             matrix: list.matrix,
             light: [list.light[0], list.light[1], list.light[2], 0.0],
-            flags: [2e-4, 0.0, 0.0, 0.0],
+            flags: [1e-3, list.perspective[0], list.perspective[1], 0.0],
         };
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&u));
         // The painted faces, all in one buffer.
@@ -439,7 +467,7 @@ impl Scene {
         let t = self.target.as_ref().expect("made above");
         let mut enc = device.create_command_encoder(&Default::default());
         {
-            let bg = linear(theme::BACKGROUND);
+            let bg = linear(list.background);
             let (view, resolve) = match &t.color {
                 Some(msaa) => (msaa, Some(&t.view)),
                 None => (&t.view, None),
@@ -492,7 +520,7 @@ impl Scene {
             }
         }
         queue.submit([enc.finish()]);
-        &self.target.as_ref().expect("made above").view
+        &self.target.as_ref().expect("made above").shown
     }
 
     /// The last frame's pixels, RGBA in rows top to bottom: for tests and

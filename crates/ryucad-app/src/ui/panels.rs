@@ -179,7 +179,7 @@ pub fn status(ui: &mut egui::Ui, ws: &Workspace) {
             ui.separator();
             ui.weak("Software rendering");
         }
-        if let Some(e) = ws.errors.last() {
+        if let Some(e) = ws.shown_error(std::time::Instant::now()) {
             ui.separator();
             ui.colored_label(ui.visuals().error_fg_color, &e.message);
         }

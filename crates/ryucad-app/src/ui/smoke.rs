@@ -57,6 +57,8 @@ pub fn run(dir: &Path) -> Result<Value> {
     let list = DrawList {
         reference: centre,
         matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        background: crate::ui::scene::theme::BACKGROUND,
         light: scene::light(&camera),
         edges: true,
         faces: &[],

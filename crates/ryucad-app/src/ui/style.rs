@@ -43,3 +43,28 @@ pub fn color32(c: Rgb) -> Color32 {
     let b = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
     Color32::from_rgb(b(c[0]), b(c[1]), b(c[2]))
 }
+
+/// The 3D view's background: the render theme's in a light theme, so the
+/// window and agents' renders look alike; dark grey in a dark one, still
+/// lighter than edges so silhouettes show.
+pub fn viewport_background(dark: bool) -> Rgb {
+    if dark {
+        [0.22, 0.23, 0.26]
+    } else {
+        ryucad::render::BACKGROUND
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_dark_background_is_dark_but_not_edge_dark() {
+        let lum = |c: Rgb| (c[0] + c[1] + c[2]) / 3.0;
+        assert_eq!(viewport_background(false), ryucad::render::BACKGROUND);
+        let d = viewport_background(true);
+        assert!(lum(d) < 0.3);
+        assert!(lum(d) > lum(ryucad::render::EDGE) + 0.05);
+    }
+}

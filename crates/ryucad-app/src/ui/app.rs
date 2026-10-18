@@ -78,6 +78,8 @@ pub struct App {
     wake: Wake,
     /// The window title last set.
     titled: Option<String>,
+    /// The window has asked for the foreground once, when it first showed.
+    shown: bool,
 }
 
 impl App {
@@ -91,6 +93,7 @@ impl App {
             daemon: daemon.clone(),
             wake,
             titled: None,
+            shown: false,
         };
         if let Some(dir) = dir {
             app.go(dir);
@@ -238,6 +241,10 @@ impl Opened {
         if self.ws.camera_due() {
             ctx.request_repaint_after(crate::core::workspace::CAMERA_EVERY);
         }
+        // An error leaves the status line on time, mouse or not.
+        if let Some(d) = self.ws.error_due(Instant::now()) {
+            ctx.request_repaint_after(d);
+        }
         if let Some(at) = self.ws.retry_at() {
             ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));
         }
@@ -249,9 +256,10 @@ impl Opened {
         egui::Panel::top("people").show(ui, |ui| panels::people(ui, &mut self.ws));
         self.shortcuts(&ctx);
         egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &self.ws));
+        // Room for about ten entries; drag its top edge for more.
         egui::Panel::bottom("journal")
             .resizable(true)
-            .default_size(160.0)
+            .default_size(240.0)
             .show(ui, |ui| panels::journal(ui, &mut self.ws, &mut self.tab));
         egui::Panel::left("tree")
             .resizable(true)
@@ -307,25 +315,40 @@ impl Opened {
             .unwrap_or(true);
     }
 
-    /// Ctrl/Cmd+Z undoes this window's latest change, Shift+Ctrl/Cmd+Z
-    /// redoes; not while a text field has the keyboard (it has its own).
+    /// Ctrl/Cmd+Z undoes this window's latest change, Shift+Ctrl/Cmd+Z or
+    /// Ctrl+Y redoes, and Escape clears the selection; not while a text
+    /// field has the keyboard (it has its own), and Escape not while a menu
+    /// or popup is open (it closes those).
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.memory(|m| m.focused().is_some()) {
             return;
         }
         use egui::{Key, KeyboardShortcut, Modifiers};
         let redo = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        let redo_y = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
         let undo = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
-        if ctx.input_mut(|i| i.consume_shortcut(&redo)) {
+        if ctx.input_mut(|i| i.consume_shortcut(&redo) || i.consume_shortcut(&redo_y)) {
             self.ws.redo(None);
         } else if ctx.input_mut(|i| i.consume_shortcut(&undo)) {
             self.ws.undo(None);
+        }
+        if !egui::Popup::is_any_open(ctx)
+            && self.ws.myself().is_some_and(|m| !m.selection.is_empty())
+            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            self.ws
+                .select(Vec::new(), ryucad::live::SelectMode::Replace);
         }
     }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // A new window to the front: on Windows it otherwise stays behind
+        // whatever was in front when it was started.
+        if !std::mem::replace(&mut self.shown, true) {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
         let gpu = frame.wgpu_render_state().cloned();
         self.frame(ui, gpu.as_ref());
     }

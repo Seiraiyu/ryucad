@@ -204,9 +204,11 @@ pub fn damaged(ui: &mut egui::Ui, offline: &mut Offline, state: &mut State) -> b
     egui::CentralPanel::default().show(ui, |ui| {
         ui.heading("This project needs repair");
         ui.label(format!(
-            "{} has parts but can't be opened as it is. Nothing is changed until you choose a repair; every repair can be undone from the project's activity once it is open.",
+            "{} has parts but can't be opened as it is.",
             offline.root.display()
         ));
+        // No undo to promise: with no daemon there is no activity log yet.
+        ui.label("Nothing is changed until you choose a repair, and a repair changes only the files in its planned changes. Git has the files as they were committed.");
         if let Some(e) = &offline.error {
             ui.colored_label(ui.visuals().error_fg_color, &e.message);
         }

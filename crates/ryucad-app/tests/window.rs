@@ -130,6 +130,21 @@ fn a_click_selects_and_agents_see_it() {
     });
     let mine = h.state().opened().ws.myself().unwrap().selection.clone();
     assert_eq!(p.ok(&["selection"])["selection"], serde_json::json!(mine));
+    // Escape clears it.
+    h.key_press(egui::Key::Escape);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection.is_empty())
+    });
+    click(&h, h.state().opened().view.rect.center());
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection.len() == 1)
+    });
     // Clicking the background clears it.
     click(
         &h,
@@ -141,6 +156,159 @@ fn a_click_selects_and_agents_see_it() {
             .myself()
             .is_some_and(|m| m.selection.is_empty())
     });
+}
+
+#[test]
+fn orbiting_from_the_background_keeps_the_model_in_view() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.step();
+    let rect = h.state().opened().view.rect;
+    // Zoom in towards a corner of the model, well off the middle.
+    let corner = rect.center() + egui::vec2(rect.width() * 0.18, rect.height() * 0.12);
+    h.event(egui::Event::PointerMoved(corner));
+    for _ in 0..12 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 1.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.step();
+    }
+    // The model fills the middle of the view.
+    let under_middle = |h: &Harness<'static, App>| {
+        let o = h.state().opened();
+        let (lo, hi) = ryucad_app::core::pick::Picker::new(&o.ws.model)
+            .bounds()
+            .unwrap();
+        let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+        let aspect = f64::from(rect.width() / rect.height());
+        let pr = ryucad_app::core::nav::Projector::new(&o.view.nav.camera, aspect, centre, 0.05);
+        let size = [f64::from(rect.width()), f64::from(rect.height())];
+        ryucad_app::core::pick::Picker::new(&o.ws.model)
+            .pick(&pr, size, [size[0] / 2.0, size[1] / 2.0])
+            .is_some()
+    };
+    assert!(under_middle(&h), "zoomed in on the model");
+    // Orbit from the background, a quarter turn or so.
+    let start = rect.left_top() + egui::vec2(8.0, 8.0);
+    h.event(egui::Event::PointerMoved(start));
+    h.event(egui::Event::PointerButton {
+        pos: start,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    for i in 1..10 {
+        h.event(egui::Event::PointerMoved(
+            start + egui::vec2(25.0 * i as f32, 0.0),
+        ));
+        h.step();
+    }
+    h.event(egui::Event::PointerButton {
+        pos: start + egui::vec2(225.0, 0.0),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    // Turned about what was in the middle, the model is still there.
+    assert!(
+        under_middle(&h),
+        "the orbit swung the model out of the middle"
+    );
+}
+
+#[test]
+fn the_first_view_frames_the_whole_model() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new();
+    p.ok(&["part", "create", "p"]);
+    // A tiny first body, then many well away from it: their meshes arrive
+    // over many frames.
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "sphere",
+        "--id",
+        "a",
+        "--param",
+        "radius=0.5",
+    ]);
+    for i in 0..40 {
+        let (id, origin) = (format!("b{i}"), format!("{},0,0", 100 + 10 * i));
+        p.ok(&[
+            "feature", "add", "p", "box", "--id", &id, "--param", "x=10", "--param", "y=10",
+            "--param", "z=10", "--origin", &origin,
+        ]);
+    }
+    let mut h = window(&p);
+    frames(&mut h, |a| match &a.screen {
+        ryucad_app::ui::app::Screen::Opened(o) => o.ws.idle() && o.ws.model.meshes.len() == 41,
+        _ => false,
+    });
+    for _ in 0..3 {
+        h.step();
+    }
+    let o = h.state().opened();
+    let (lo, hi) = ryucad_app::core::pick::Picker::new(&o.ws.model)
+        .bounds()
+        .unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let aspect = f64::from(o.view.rect.width() / o.view.rect.height());
+    let pr = ryucad_app::core::nav::Projector::new(&o.view.nav.camera, aspect, centre, 0.2);
+    for corner in 0..8 {
+        let c = [0, 1, 2].map(|k| if corner >> k & 1 == 1 { hi[k] } else { lo[k] });
+        let n = pr.ndc(c).unwrap();
+        assert!(
+            n[0].abs() <= 1.0 && n[1].abs() <= 1.0,
+            "{c:?} is out of view at {n:?}"
+        );
+    }
+}
+
+#[test]
+fn an_agents_highlight_shows_its_label() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    let faces = p.ok(&["inspect", "p", "boss"])["bodies"][0]["faces"].clone();
+    let top = format!("p/boss/{}", faces[0]["name"].as_str().unwrap());
+    p.ok(&["highlight", &top, "--label", "check this"]);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .people
+            .all
+            .values()
+            .any(|p| !p.highlights.is_empty())
+    });
+    h.step();
+    h.get_by_label("check this");
+    // Cleared, it goes.
+    p.ok(&["highlight", "--clear"]);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .people
+            .all
+            .values()
+            .all(|p| p.highlights.is_empty())
+    });
+    h.step();
+    assert!(h.query_by_label("check this").is_none());
 }
 
 #[test]
@@ -260,6 +428,32 @@ fn the_activity_tab_undoes_and_ctrl_z_does_too() {
             .any(|e| e["kind"] == "redo")
     });
     assert_eq!(radius(&p), "5 mm");
+    // Ctrl+Y redoes too, as Windows has it.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    frames(&mut h, |a| {
+        a.opened().ws.idle()
+            && a.opened()
+                .ws
+                .activity
+                .entries
+                .iter()
+                .filter(|e| e["kind"] == "undo")
+                .count()
+                == 2
+    });
+    assert_eq!(radius(&p), "3 mm");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Y);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .activity
+            .entries
+            .iter()
+            .filter(|e| e["kind"] == "redo")
+            .count()
+            == 2
+    });
+    assert_eq!(radius(&p), "5 mm");
 }
 
 #[test]
@@ -309,6 +503,11 @@ fn a_damaged_project_is_repaired_then_opened() {
     frames(&mut h, damaged);
     h.step();
     h.get_by_label("missing_manifest");
+    // It says what a repair changes, and promises no undo it can't give
+    // (the project has no daemon, so no activity, until it opens).
+    h.get_by_label(
+        "Nothing is changed until you choose a repair, and a repair changes only the files in its planned changes. Git has the files as they were committed.",
+    );
     h.get_by_label("Repair").click();
     frames(&mut h, |a| match &a.screen {
         ryucad_app::ui::app::Screen::Damaged(d) => d.0.openable() && !d.0.busy(),
@@ -373,4 +572,53 @@ fn the_start_window_reopens_recent_projects_and_creates_new_ones() {
         matches!(a.screen, Screen::Opened(_)) && a.opened().ws.idle()
     });
     assert!(p.root.parent().unwrap().join("empty/ryucad.json").is_file());
+}
+
+#[test]
+fn a_typed_folder_path_opens_without_the_os_dialog() {
+    if !gpu() {
+        return;
+    }
+    use ryucad_app::ui::app::Screen;
+    let p = Project::new().with_part();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .wgpu()
+        .build_eframe(|cc| App::open(&cc.egui_ctx, None, ryucad()));
+    h.step();
+    h.get_by_label("Folder path").click();
+    h.step();
+    h.get_by_label("Folder path")
+        .type_text(&p.root.display().to_string());
+    h.step();
+    h.get_by_label("Open folder").click();
+    frames(&mut h, |a| {
+        matches!(a.screen, Screen::Opened(_)) && a.opened().ws.idle()
+    });
+    assert_eq!(h.state().opened().ws.root, p.root);
+}
+
+#[test]
+fn the_viewport_shows_the_colours_it_draws() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.run_steps(3);
+    let rect = h.state().opened().view.rect;
+    let (dark, ppp) = (
+        h.ctx.global_style().visuals.dark_mode,
+        h.ctx.pixels_per_point(),
+    );
+    let img = h.render().unwrap();
+    // A corner of the viewport: background, framed with a margin.
+    let at = rect.min + egui::vec2(6.0, 6.0);
+    let px = img.get_pixel((at.x * ppp) as u32, (at.y * ppp) as u32).0;
+    let want = ryucad_app::ui::style::viewport_background(dark).map(|c| (c * 255.0).round() as u8);
+    assert!(
+        px.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 3),
+        "the background shows as {px:?}, drawn as {want:?}"
+    );
 }
