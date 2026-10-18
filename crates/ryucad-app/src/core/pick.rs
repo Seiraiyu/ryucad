@@ -259,17 +259,8 @@ impl Picker {
         (lo[0] <= hi[0]).then_some((lo, hi))
     }
 
-    /// What is under the pixel `px` of a viewport `size` pixels big.
-    pub fn pick(&self, pr: &Projector, size: [f64; 2], px: [f64; 2]) -> Option<Hit> {
-        let ndc = [2.0 * px[0] / size[0] - 1.0, 1.0 - 2.0 * px[1] / size[1]];
-        let (o, d) = pr.ray(ndc);
-        let (_, _, forward) = pr.camera.basis();
-        let screen = |p: [f64; 3]| {
-            pr.ndc(p)
-                .map(|n| [(n[0] + 1.0) / 2.0 * size[0], (1.0 - n[1]) / 2.0 * size[1]])
-        };
-        let depth = |p: [f64; 3]| dot(sub(p, pr.camera.eye), forward);
-        // The nearest face along the ray.
+    /// The nearest face along the ray `o + t d`: its `t`, name and body.
+    fn face_along(&self, o: [f64; 3], d: [f64; 3]) -> Option<(f64, String, BodyKey)> {
         let mut face: Option<(f64, String, BodyKey)> = None;
         for b in &self.bodies {
             if !ray_box(o, d, b.lo, b.hi) {
@@ -287,14 +278,35 @@ impl Picker {
                 }
             }
         }
-        // Edges and vertices within reach and not behind the face.
-        let face_depth = face
-            .as_ref()
-            .map(|(t, ..)| depth([0, 1, 2].map(|k| o[k] + d[k] * t)));
-        let visible =
-            |z: f64| face_depth.is_none_or(|f| z <= f + 1e-3 * f.abs().max(pr.camera.distance()));
-        let mut vertex: Option<Near> = None;
-        let mut edge: Option<Near> = None;
+        face
+    }
+
+    /// What is under the pixel `px` of a viewport `size` pixels big.
+    pub fn pick(&self, pr: &Projector, size: [f64; 2], px: [f64; 2]) -> Option<Hit> {
+        let to_ndc = |q: [f64; 2]| [2.0 * q[0] / size[0] - 1.0, 1.0 - 2.0 * q[1] / size[1]];
+        let (o, d) = pr.ray(to_ndc(px));
+        let (_, _, forward) = pr.camera.basis();
+        let screen = |p: [f64; 3]| {
+            pr.ndc(p)
+                .map(|n| [(n[0] + 1.0) / 2.0 * size[0], (1.0 - n[1]) / 2.0 * size[1]])
+        };
+        let depth = |p: [f64; 3]| dot(sub(p, pr.camera.eye), forward);
+        // The nearest face along the ray.
+        let face = self.face_along(o, d);
+        // Is `p`, at screen position `s`, in front of whatever face is
+        // there? Judged at its own pixel, not the mouse's: beside an edge
+        // the mouse is over a face that may slope well away from it.
+        let visible = |p: [f64; 3], s: [f64; 2]| {
+            let (o, d) = pr.ray(to_ndc(s));
+            self.face_along(o, d).is_none_or(|(t, ..)| {
+                let f = depth([0, 1, 2].map(|k| o[k] + d[k] * t));
+                depth(p) <= f + 1e-3 * f.abs().max(pr.camera.distance())
+            })
+        };
+        // Vertices and edges within reach, nearest first; the first visible
+        // one wins.
+        let mut vertices: Vec<(Near, [f64; 2])> = Vec::new();
+        let mut edges: Vec<(Near, [f64; 2])> = Vec::new();
         for b in &self.bodies {
             let m = mesh(&b.mesh).expect("only meshed bodies");
             for (name, i) in &m.vertices {
@@ -302,40 +314,59 @@ impl Picker {
                 let Some(s) = screen(p) else { continue };
                 let (dx, dy) = (s[0] - px[0], s[1] - px[1]);
                 let dist = (dx * dx + dy * dy).sqrt();
-                let z = depth(p);
-                if dist <= VERTEX_REACH && visible(z) && vertex.as_ref().is_none_or(|v| dist < v.px)
-                {
-                    vertex = Some(Near {
+                if dist <= VERTEX_REACH {
+                    let n = Near {
                         px: dist,
                         point: p,
                         entity: name_hex(name),
                         key: b.key.clone(),
-                    });
+                    };
+                    vertices.push((n, s));
                 }
             }
             for (name, ps) in &m.edges {
+                // This edge's nearest segment within reach.
+                let mut best: Option<(Near, [f64; 2])> = None;
                 for w in ps.windows(2) {
                     let (a, c) = (at(m, w[0]), at(m, w[1]));
                     let (Some(sa), Some(sc)) = (screen(a), screen(c)) else {
                         continue;
                     };
                     let (dist, s) = to_segment(px, sa, sc);
-                    // Near enough, the point along the edge: screen
-                    // interpolation is close enough for this.
-                    let p = [0, 1, 2].map(|k| a[k] + (c[k] - a[k]) * s);
-                    let z = depth(p);
-                    if dist <= EDGE_REACH && visible(z) && edge.as_ref().is_none_or(|e| dist < e.px)
-                    {
-                        edge = Some(Near {
-                            px: dist,
-                            point: p,
-                            entity: name_hex(name),
-                            key: b.key.clone(),
-                        });
+                    if dist > EDGE_REACH || best.as_ref().is_some_and(|(n, _)| n.px <= dist) {
+                        continue;
                     }
+                    // The point along the edge under that pixel. In
+                    // perspective, a fraction across the screen is not the
+                    // same fraction along the edge: weigh by depth.
+                    let t = match pr.camera.projection {
+                        ryucad::view::Projection::Perspective { .. } => {
+                            let (za, zc) = (depth(a), depth(c));
+                            s * za / (s * za + (1.0 - s) * zc)
+                        }
+                        ryucad::view::Projection::Orthographic { .. } => s,
+                    };
+                    let p = [0, 1, 2].map(|k| a[k] + (c[k] - a[k]) * t);
+                    let at_s = [sa[0] + (sc[0] - sa[0]) * s, sa[1] + (sc[1] - sa[1]) * s];
+                    let n = Near {
+                        px: dist,
+                        point: p,
+                        entity: name_hex(name),
+                        key: b.key.clone(),
+                    };
+                    best = Some((n, at_s));
                 }
+                edges.extend(best);
             }
         }
+        let first_visible = |mut v: Vec<(Near, [f64; 2])>| {
+            v.sort_by(|a, b| a.0.px.total_cmp(&b.0.px));
+            v.into_iter()
+                .find(|(n, s)| visible(n.point, *s))
+                .map(|(n, _)| n)
+        };
+        let vertex = first_visible(vertices);
+        let edge = first_visible(edges);
         let hit = |kind, n: Near| Hit {
             entity: format!("{}/{}/{}", n.key.0, n.key.1, n.entity),
             kind,
