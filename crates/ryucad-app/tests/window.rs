@@ -144,6 +144,41 @@ fn a_click_selects_and_agents_see_it() {
 }
 
 #[test]
+fn an_agents_highlight_shows_its_label() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    let faces = p.ok(&["inspect", "p", "boss"])["bodies"][0]["faces"].clone();
+    let top = format!("p/boss/{}", faces[0]["name"].as_str().unwrap());
+    p.ok(&["highlight", &top, "--label", "check this"]);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .people
+            .all
+            .values()
+            .any(|p| !p.highlights.is_empty())
+    });
+    h.step();
+    h.get_by_label("check this");
+    // Cleared, it goes.
+    p.ok(&["highlight", "--clear"]);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .people
+            .all
+            .values()
+            .all(|p| p.highlights.is_empty())
+    });
+    h.step();
+    assert!(h.query_by_label("check this").is_none());
+}
+
+#[test]
 fn the_window_follows_an_agent_until_the_human_navigates() {
     if !gpu() {
         return;

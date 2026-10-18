@@ -191,6 +191,23 @@ impl View {
         (faces, lines)
     }
 
+    /// Highlight labels and where they go: the middle of what each
+    /// highlight covers, in its colour.
+    fn labels(&mut self, ws: &Workspace) -> Vec<(String, [f64; 3], Rgb)> {
+        let picker = self.picker(ws);
+        let mut out = Vec::new();
+        for p in ws.people.all.values() {
+            for h in &p.highlights {
+                let Some(text) = &h.label else { continue };
+                if let Some((lo, hi)) = picker.bounds_of(&h.entities) {
+                    let mid = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+                    out.push((text.clone(), mid, style::highlight(h.style)));
+                }
+            }
+        }
+        out
+    }
+
     /// Draws the viewport into `ui`'s remaining space and handles its
     /// input. `gpu` is the window's wgpu state (`None` with no adapter).
     pub fn show(
@@ -317,6 +334,20 @@ impl View {
                 }
                 Place::Face(..) => {}
             }
+        }
+        for (i, (text, at, c)) in self.labels(ws).into_iter().enumerate() {
+            let Some(s) = to_screen(at).filter(|s| rect.contains(*s)) else {
+                continue;
+            };
+            egui::Area::new(ui.scope_id().with(("highlight label", i)))
+                .fixed_pos(s + egui::vec2(8.0, -8.0))
+                .order(egui::Order::Foreground)
+                .interactable(false)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.label(egui::RichText::new(text).color(style::color32(c)));
+                    });
+                });
         }
         if ws.lost {
             painter.rect_filled(rect, 0.0, egui::Color32::from_white_alpha(140));
