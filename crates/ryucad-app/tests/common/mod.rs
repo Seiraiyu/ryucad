@@ -20,9 +20,19 @@ fn shared() -> &'static Path {
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(stem);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        // Sockets go in a short folder of their own: under a deep checkout
+        // the target folder's path leaves no room in a Unix socket address
+        // (107 bytes). It is named for `dir`, so checkouts stay apart.
+        let mut h = std::hash::DefaultHasher::new();
+        std::hash::Hash::hash(&dir, &mut h);
+        let run = std::env::temp_dir().join(format!(
+            "ryucad-{:08x}",
+            std::hash::Hasher::finish(&h) as u32
+        ));
+        let _ = std::fs::remove_dir_all(&run);
         // SAFETY: set once, before any test starts a daemon or reads them.
         unsafe {
-            std::env::set_var("RYUCAD_RUNTIME_DIR", dir.join("run"));
+            std::env::set_var("RYUCAD_RUNTIME_DIR", &run);
             std::env::set_var("RYUCAD_CONFIG_DIR", dir.join("config"));
             std::env::set_var("RYUCAD_IDLE_TIMEOUT", "120");
         }
