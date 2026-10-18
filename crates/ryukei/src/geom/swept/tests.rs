@@ -200,9 +200,20 @@ fn projection_is_nearest(s: &Surface, p: Point3, ranges: [[f64; 2]; 2]) {
 }
 
 /// Checks a bound against the derivatives on a grid of the box, and the
-/// normal's turning against finite differences.
+/// normal's turning against finite differences. A box past a clamped
+/// direction's domain is cut to it, as the bound is.
 fn bound_holds(s: &Surface, [ru, rv]: [[f64; 2]; 2]) {
     let b = s.derivative_bound([ru, rv]);
+    let cut = |r: [f64; 2], k: usize| {
+        let periods = s.periods();
+        let periodic = if k == 0 { periods.0 } else { periods.1 };
+        let [d0, d1] = s.domain()[k];
+        match periodic {
+            Some(_) => r,
+            None => [r[0].clamp(d0, d1), r[1].clamp(d0, d1)],
+        }
+    };
+    let (ru, rv) = (cut(ru, 0), cut(rv, 1));
     for i in 0..=30 {
         for j in 0..=30 {
             let u = ru[0] + (ru[1] - ru[0]) * f64::from(i) / 30.0;
@@ -718,5 +729,23 @@ fn revolution_bounds_of_derivatives_hold() {
 fn revolution_transforms() {
     for s in revolutions() {
         transform_round_trips(&s);
+    }
+}
+
+#[test]
+fn revolution_bounds_stay_tight_over_quarter_arcs() {
+    // Over a whole quarter circle a rational piece's derivative turns
+    // through a right angle, so one interval box of it can reach zero and
+    // the turning rate blow up, by how the box lines up with the axes.
+    // Bounded piecewise it stays near the true rate (1 / r per unit of
+    // parameter, scaled by the knot spans) whatever the placement.
+    let s = revolution(Frame::WORLD, semicircle(&Frame::WORLD, 0.3));
+    let x = Vector3::new(-0.0059, -0.991, -0.1338);
+    let z = Vector3::new(-0.99998, 0.0062, -0.0021);
+    let tilted = Rigid::from_frame(&Frame::new(Point3::ORIGIN, z, x).unwrap());
+    for s in [s.clone(), s.transformed(&tilted)] {
+        let b = s.derivative_bound(s.domain());
+        assert!(b.turn_v < 10.0, "{b:?}");
+        assert!(b.dvv < 2.0, "{b:?}");
     }
 }

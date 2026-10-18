@@ -2,6 +2,7 @@
 //! planar curve along a direction, a revolution turns a curve about an
 //! axis in its plane.
 
+use super::bound2::CurveBound;
 use super::bound2::SLACK;
 use super::{
     Box3, Curve, Frame, NurbsCurve, Point3, Projection, Reparam, Rigid, SurfaceBound, SurfaceEval,
@@ -282,7 +283,7 @@ impl Extrusion {
     /// `|T × d| >= |d · n|`, so it turns along `u` at most the curve's
     /// turning rate over `|d · n|`.
     pub(super) fn derivative_bound(&self, [ru, _]: [[f64; 2]; 2]) -> SurfaceBound {
-        let c = self.curve.derivative_bound(ru);
+        let c = piecewise_bound(&self.curve, ru);
         SurfaceBound {
             duu: c.d2,
             duv: 0.0,
@@ -609,29 +610,9 @@ impl Revolution {
     /// curve's knots, where `C'` is continuous (it may jump at a knot of
     /// multiplicity `degree`), its value at the middle plus the bound on
     /// `|C''|` times the half-width.
-    fn speed_bound(&self, [a, b]: [f64; 2]) -> f64 {
-        let mut cuts = vec![a];
-        if let Curve::Nurbs(n) = &self.curve {
-            let knots = n.knots().knots();
-            let (k0, period) = (knots[0], n.period().unwrap_or(0.0));
-            let turns = if period > 0.0 {
-                let first = ((a - k0) / period).floor() as i64;
-                first..=((b - k0) / period).ceil() as i64
-            } else {
-                0..=0
-            };
-            for q in turns {
-                cuts.extend(
-                    knots
-                        .iter()
-                        .map(|&k| k + q as f64 * period)
-                        .filter(|&t| t > a && t < b),
-                );
-            }
-        }
-        cuts.push(b);
-        cuts.sort_by(f64::total_cmp);
-        cuts.windows(2)
+    fn speed_bound(&self, range: [f64; 2]) -> f64 {
+        cuts(&self.curve, range)
+            .windows(2)
             .map(|w| {
                 let c = self.curve.derivative_bound([w[0], w[1]]);
                 let mid = (w[0] + w[1]) / 2.0;
@@ -654,7 +635,7 @@ impl Revolution {
                 [rv[0].clamp(d0, d1), rv[1].clamp(d0, d1)]
             }
         };
-        let c = self.curve.derivative_bound(rv);
+        let c = piecewise_bound(&self.curve, rv);
         let b = self.curve.bounds(rv);
         let reach = b
             .corners()
@@ -685,6 +666,60 @@ impl Revolution {
             bounds,
         }
     }
+}
+
+/// The parameters a curve's range is cut at for its bounds: its ends, the
+/// curve's knots inside it (moved by whole periods on a periodic curve),
+/// and each stretch between them in quarters.
+fn cuts(curve: &Curve, [a, b]: [f64; 2]) -> Vec<f64> {
+    let mut knots = vec![a];
+    if let Curve::Nurbs(n) = curve {
+        let ks = n.knots().knots();
+        let (k0, period) = (ks[0], n.period().unwrap_or(0.0));
+        let turns = if period > 0.0 {
+            let first = ((a - k0) / period).floor() as i64;
+            first..=((b - k0) / period).ceil() as i64
+        } else {
+            0..=0
+        };
+        for q in turns {
+            knots.extend(
+                ks.iter()
+                    .map(|&k| k + q as f64 * period)
+                    .filter(|&t| t > a && t < b),
+            );
+        }
+    }
+    knots.push(b);
+    knots.sort_by(f64::total_cmp);
+    let mut out = vec![a];
+    for w in knots.windows(2) {
+        for i in 1..=QUARTERS {
+            out.push(w[0] + (w[1] - w[0]) * i as f64 / QUARTERS as f64);
+        }
+    }
+    out
+}
+
+/// How many pieces each knot span is cut into for bounds.
+const QUARTERS: usize = 4;
+
+/// A curve's bounds over a range as the worst of its bounds over the
+/// pieces `cuts` gives: still certified, and far tighter where one box
+/// over a whole Bézier piece would let the derivative's interval reach
+/// zero (a quarter circle's derivative turns through a right angle) and
+/// the turning rate blow up.
+fn piecewise_bound(curve: &Curve, range: [f64; 2]) -> CurveBound {
+    if !(range[0].is_finite() && range[1].is_finite()) || range[0] >= range[1] {
+        return curve.derivative_bound(range);
+    }
+    cuts(curve, range)
+        .windows(2)
+        .map(|w| curve.derivative_bound([w[0], w[1]]))
+        .fold(CurveBound { d2: 0.0, turn: 0.0 }, |x, y| CurveBound {
+            d2: x.d2.max(y.d2),
+            turn: x.turn.max(y.turn),
+        })
 }
 
 #[cfg(test)]
