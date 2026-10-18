@@ -3,9 +3,11 @@
 //! Checks run in a fixed order and the first fault found is reported, in
 //! input order: the structure (loops, segments, keys), each segment
 //! (range, length, closed segments), the closure of each loop, the size
-//! box, then orientation.
+//! box, the separation of the segments, then orientation.
 
 use super::area;
+use super::chain::Chain;
+use super::intersect2;
 use crate::geom::{Box2, Curve2, Frame, Point2};
 use crate::tol::{self, LINEAR_RESOLUTION};
 use crate::{Error, ProfileError};
@@ -122,8 +124,9 @@ impl ValidProfile {
     /// this order: no loops, an empty loop, a repeated key; then for each
     /// segment in input order a bad range, a segment shorter than
     /// resolution, a whole period sharing its loop, a lone segment that is
-    /// not a whole period; then each loop's closure; the size box; then a
-    /// loop whose area is too small to orient.
+    /// not a whole period; then each loop's closure; the size box; two
+    /// segments that touch (the pair whose first segment comes first, then
+    /// whose second does); then a loop whose area is too small to orient.
     pub fn new(profile: Profile) -> Result<ValidProfile, Error> {
         check_structure(&profile)?;
         for l in &profile.loops {
@@ -133,6 +136,7 @@ impl ValidProfile {
             check_closed(l)?;
         }
         check_size_box(&profile)?;
+        check_separation(&profile)?;
         let mut areas = Vec::with_capacity(profile.loops.len());
         for l in &profile.loops {
             let a = area::signed_area(&l.segments);
@@ -289,6 +293,25 @@ fn check_size_box(p: &Profile) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// No two segments touch, except neighbours at their shared ends.
+fn check_separation(p: &Profile) -> Result<(), Error> {
+    let segments: Vec<&Segment> = p.loops.iter().flat_map(|l| &l.segments).collect();
+    let chains: Vec<Chain> = segments.iter().map(|s| Chain::new(s)).collect();
+    let mut loops = Vec::with_capacity(p.loops.len());
+    let mut first = 0;
+    for l in &p.loops {
+        loops.push((first, l.segments.len()));
+        first += l.segments.len();
+    }
+    match intersect2::first_touching(&chains, &loops) {
+        Some((i, j)) => Err(invalid(ProfileError::Touching {
+            a: segments[i].key,
+            b: segments[j].key,
+        })),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]

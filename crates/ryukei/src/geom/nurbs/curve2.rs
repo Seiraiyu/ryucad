@@ -109,7 +109,9 @@ impl NurbsCurve2 {
         Ok((Self::from_spline(a), Self::from_spline(b)))
     }
 
-    fn pieces(&self) -> &[BezierCurve<Vector2>] {
+    /// The Bézier pieces over the domain, in parameter order, built on
+    /// first use.
+    pub(crate) fn pieces(&self) -> &[BezierCurve<Vector2>] {
         self.pieces.get_or_init(|| self.spline.pieces().into())
     }
 

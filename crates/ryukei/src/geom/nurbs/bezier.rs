@@ -35,6 +35,39 @@ impl<V: Coords> BezierCurve<V> {
     }
 }
 
+impl<V: Coords> BezierCurve<V> {
+    /// The two pieces either side of local parameter `u` in `(0, 1)`, by
+    /// de Casteljau's algorithm in homogeneous coordinates.
+    pub(crate) fn split(&self, u: f64) -> [Self; 2] {
+        let n = self.pts.len();
+        let mut work = self.pts.clone();
+        let mut left = Vec::with_capacity(n);
+        let mut right = Vec::with_capacity(n);
+        left.push(work[0]);
+        right.push(work[n - 1]);
+        for k in 1..n {
+            for i in 0..n - k {
+                work[i] = Hom::lerp(work[i], work[i + 1], u);
+            }
+            left.push(work[0]);
+            right.push(work[n - 1 - k]);
+        }
+        right.reverse();
+        let [a, b] = self.range;
+        let m = a + (b - a) * u;
+        [
+            Self {
+                range: [a, m],
+                pts: left,
+            },
+            Self {
+                range: [m, b],
+                pts: right,
+            },
+        ]
+    }
+}
+
 impl BezierCurve<Vector3> {
     pub(crate) fn bounds(&self) -> Box3 {
         hull_box(&self.pts)
@@ -188,6 +221,29 @@ mod tests {
             let [a, b] = piece.range;
             for i in 0..=10 {
                 let t = a + (b - a) * f64::from(i) / 10.0;
+                assert!(as_curve.point(t).distance(c.point(t)) <= 1e-14);
+            }
+        }
+    }
+
+    #[test]
+    fn splitting_a_piece_keeps_the_shape() {
+        let c = wavy();
+        let piece = &c.pieces()[1];
+        let [a, b] = piece.range;
+        let [left, right] = piece.split(0.3);
+        let m = a + (b - a) * 0.3;
+        assert_eq!((left.range, right.range), ([a, m], [m, b]));
+        assert_eq!(left.pts.last(), right.pts.first());
+        for (half, [lo, hi]) in [(left, [a, m]), (right, [m, b])] {
+            let as_curve = NurbsCurve::new(
+                bezier([lo, hi], 3),
+                half.pts.iter().map(|h| Point3::ORIGIN + h.p).collect(),
+                Some(half.pts.iter().map(|h| h.w).collect()),
+            )
+            .unwrap();
+            for i in 0..=10 {
+                let t = lo + (hi - lo) * f64::from(i) / 10.0;
                 assert!(as_curve.point(t).distance(c.point(t)) <= 1e-14);
             }
         }

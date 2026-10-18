@@ -26,6 +26,7 @@ pub(crate) use frame::polar_angle;
 pub use nurbs::{
     Basis, Direction, KnotVector, MAX_DEGREE, NurbsCurve, NurbsCurve2, NurbsSurface, Reparam,
 };
+pub(crate) use nurbs::{BezierCurve, Hom};
 pub use point::{Point2, Point3};
 pub use project::Projection;
 pub use surface::{Cone, Cylinder, Plane, Sphere, Surface, Torus};
