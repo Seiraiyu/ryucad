@@ -5,11 +5,12 @@
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
 use ryukei::check::check;
 use ryukei::geom::{
-    Circle2, Curve2, Ellipse2, Frame, Frame2, Line2, Point2, Point3, Surface, Vector2, Vector3,
+    Axis, Circle2, Curve2, Ellipse2, Frame, Frame2, Line2, Point2, Point3, Surface, Vector2,
+    Vector3,
 };
 use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::name::{Event, OpKey};
-use ryukei::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
+use ryukei::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude, revolve};
 use ryukei::topo::Body;
 use ryukei::{Error, SweepError};
 use ryukei_testkit::mesh::volume_and_area;
@@ -255,6 +256,174 @@ fn extrude_refuses_bad_parameters() {
     );
 }
 
+/// The profile frame's y axis through its origin: the revolve axis used
+/// below, so profile x is the distance from it.
+fn y_axis() -> Axis {
+    Axis::new(frame().origin(), frame().y().get()).unwrap()
+}
+
+#[test]
+fn the_turned_primitives_by_revolve() {
+    // A cylinder: a rectangle against the axis.
+    let p = profile(vec![rect(1, 10, 0.0, 0.0, 1.0, 2.0)]);
+    let (b, _) = revolve(K, &p, y_axis(), 0.0, TAU).unwrap();
+    assert_eq!(counts(&b), (2, 2, 3));
+    assert_eq!(surfaces(&b), ["cylinder", "plane", "plane"]);
+    assert!(close(volume(&b), 2.0 * PI, 2e-3));
+    // A cone: a right triangle with a leg on the axis.
+    let p = profile(vec![polygon(1, 10, &[(0.0, 0.0), (1.0, 0.0), (0.0, 2.0)])]);
+    let (b, _) = revolve(K, &p, y_axis(), 0.0, TAU).unwrap();
+    assert_eq!(counts(&b), (2, 1, 2));
+    assert_eq!(surfaces(&b), ["cone", "plane"]);
+    assert!(close(volume(&b), 2.0 * PI / 3.0, 2e-3));
+    // A frustum.
+    let p = profile(vec![polygon(
+        1,
+        10,
+        &[(0.0, 0.0), (1.0, 0.0), (0.5, 2.0), (0.0, 2.0)],
+    )]);
+    let (b, _) = revolve(K, &p, y_axis(), 0.0, TAU).unwrap();
+    assert_eq!(counts(&b), (2, 2, 3));
+    assert!(close(volume(&b), PI * 2.0 / 3.0 * (1.0 + 0.5 + 0.25), 2e-3));
+    // A sphere: a half disc, one face with no vertices.
+    let half = Loop {
+        key: LoopKey(1),
+        segments: keyed(
+            10,
+            vec![
+                arc((0.0, 0.0), 1.0, -FRAC_PI_2, FRAC_PI_2),
+                line((0.0, 1.0), (0.0, -1.0)),
+            ],
+        ),
+    };
+    let (b, _) = revolve(K, &profile(vec![half]), y_axis(), 0.0, TAU).unwrap();
+    assert_eq!(counts(&b), (0, 0, 1));
+    assert_eq!(surfaces(&b), ["sphere"]);
+    assert!(close(volume(&b), 4.0 / 3.0 * PI, 2e-3));
+    // A torus: a circle off the axis.
+    let p = profile(vec![circle(1, 10, (3.0, 0.0), 1.0)]);
+    let (b, _) = revolve(K, &p, y_axis(), 0.0, TAU).unwrap();
+    assert_eq!(counts(&b), (0, 0, 1));
+    assert_eq!(surfaces(&b), ["torus"]);
+    assert!(close(volume(&b), 6.0 * PI * PI, 2e-3));
+}
+
+#[test]
+fn partial_revolves() {
+    // A quarter turn of a rectangle off the axis.
+    let p = profile(vec![rect(1, 10, 1.0, 0.0, 1.0, 2.0)]);
+    let (b, _) = revolve(K, &p, y_axis(), 0.0, FRAC_PI_2).unwrap();
+    assert_eq!(counts(&b), (8, 12, 6));
+    assert!(close(volume(&b), FRAC_PI_2 / 2.0 * 3.0 * 2.0, 2e-3));
+    // Against the axis: the axis edge is shared by the caps.
+    let p = profile(vec![rect(1, 10, 0.0, 0.0, 1.0, 2.0)]);
+    let (b, _) = revolve(K, &p, y_axis(), -0.5, 1.0).unwrap();
+    assert_eq!(counts(&b), (6, 9, 5));
+    assert!(close(volume(&b), 1.5 / 2.0 * 2.0, 2e-3));
+}
+
+#[test]
+fn revolve_refuses_bad_profiles_and_parameters() {
+    let sweep = |e| Err(Error::InvalidSweep(e));
+    let crossing = profile(vec![rect(1, 10, -1.0, 0.0, 2.0, 1.0)]);
+    assert!(matches!(
+        revolve(K, &crossing, y_axis(), 0.0, 1.0).map(|_| ()),
+        Err(Error::InvalidSweep(SweepError::CrossesAxis { .. }))
+    ));
+    // A circle touching the axis in its middle.
+    let touching = profile(vec![circle(1, 10, (1.0, 0.0), 1.0)]);
+    assert_eq!(
+        revolve(K, &touching, y_axis(), 0.0, 1.0).map(|_| ()),
+        sweep(SweepError::TouchesAxisInside {
+            segment: SegmentKey(10)
+        })
+    );
+    // A triangle touching the axis at a corner, turned whole.
+    let pinched = profile(vec![polygon(1, 10, &[(0.0, 0.0), (1.0, -1.0), (1.0, 1.0)])]);
+    assert_eq!(
+        revolve(K, &pinched, y_axis(), 0.0, TAU).map(|_| ()),
+        sweep(SweepError::PinchedOnAxis {
+            segment: SegmentKey(10)
+        })
+    );
+    // ...but a part turn of it is a solid.
+    let (b, _) = revolve(K, &pinched, y_axis(), 0.0, 1.0).unwrap();
+    assert!(volume(&b) > 0.0);
+    let ring = profile(vec![
+        rect(1, 10, 1.0, 0.0, 2.0, 2.0),
+        circle(2, 20, (2.0, 1.0), 0.5),
+    ]);
+    assert_eq!(
+        revolve(K, &ring, y_axis(), 0.0, TAU).map(|_| ()),
+        sweep(SweepError::EnclosesVoid { loop_: LoopKey(2) })
+    );
+    let notch = profile(vec![polygon(
+        1,
+        10,
+        &[
+            (0.0, 0.0),
+            (2.0, 0.0),
+            (2.0, 3.0),
+            (0.0, 3.0),
+            (0.0, 2.0),
+            (1.0, 2.0),
+            (1.0, 1.0),
+            (0.0, 1.0),
+        ],
+    )]);
+    assert_eq!(
+        revolve(K, &notch, y_axis(), 0.0, TAU).map(|_| ()),
+        sweep(SweepError::EnclosesVoid { loop_: LoopKey(1) })
+    );
+    let p = profile(vec![rect(1, 10, 1.0, 0.0, 1.0, 1.0)]);
+    let off = Axis::new(frame().origin() + frame().z().get(), frame().y().get()).unwrap();
+    assert_eq!(
+        revolve(K, &p, off, 0.0, 1.0).map(|_| ()),
+        sweep(SweepError::AxisNotInPlane)
+    );
+    let tilted = Axis::new(frame().origin(), frame().y().get() + frame().z().get()).unwrap();
+    assert_eq!(
+        revolve(K, &p, tilted, 0.0, 1.0).map(|_| ()),
+        sweep(SweepError::AxisNotInPlane)
+    );
+    assert_eq!(
+        revolve(K, &p, y_axis(), 1.0, 1.0).map(|_| ()),
+        sweep(SweepError::BadAngle)
+    );
+    assert_eq!(
+        revolve(K, &p, y_axis(), 0.0, 7.0).map(|_| ()),
+        sweep(SweepError::BadAngle)
+    );
+    assert_eq!(
+        revolve(K, &p, y_axis(), 0.0, 1e-9).map(|_| ()),
+        sweep(SweepError::ShortSpan)
+    );
+}
+
+#[test]
+fn revolutions_where_no_analytic_surface_fits() {
+    // A full ellipse off the axis: a loopless, doubly periodic face.
+    let f = Frame2::new(Point2::new(3.0, 0.0), Vector2::new(0.0, 1.0), true).unwrap();
+    let ellipse = Curve2::Ellipse2(Ellipse2::new(f, 2.0, 1.0).unwrap());
+    let lp = Loop {
+        key: LoopKey(1),
+        segments: keyed(10, vec![(ellipse.clone(), 0.0, TAU)]),
+    };
+    let (b, _) = revolve(K, &profile(vec![lp]), y_axis(), 0.0, TAU).unwrap();
+    assert_eq!((counts(&b), surfaces(&b)), ((0, 0, 1), vec!["revolution"]));
+    assert!(close(volume(&b), 2.0 * PI * 3.0 * 2.0 * PI, 3e-3));
+    // Half an ellipse against the axis: poles at both ends.
+    let f = Frame2::new(Point2::ORIGIN, Vector2::new(0.0, 1.0), true).unwrap();
+    let half = Curve2::Ellipse2(Ellipse2::new(f, 2.0, 1.0).unwrap());
+    let lp = Loop {
+        key: LoopKey(1),
+        segments: keyed(10, vec![(half, PI, TAU), line((0.0, 2.0), (0.0, -2.0))]),
+    };
+    let (b, _) = revolve(K, &profile(vec![lp]), y_axis(), 0.0, TAU).unwrap();
+    assert_eq!(surfaces(&b), ["revolution"]);
+    assert!(close(volume(&b), 4.0 / 3.0 * PI * 2.0, 3e-3));
+}
+
 /// The names of a body's faces, edges and vertices, sorted.
 fn names(b: &Body) -> Vec<u128> {
     let mut out: Vec<u128> = b
@@ -315,4 +484,14 @@ fn names_survive_edits() {
     let after = names(&extrude(K, &p, n, 0.0, 1.0).unwrap().0);
     let kept = base.iter().filter(|x| after.contains(x)).count();
     assert_eq!(kept, base.len() - 3, "{kept} of {}", base.len());
+}
+
+#[test]
+fn revolve_names_survive_edits() {
+    let build = |r: f64, h: f64, angle: f64| {
+        let p = profile(vec![rect(1, 10, 0.0, 0.0, r, h)]);
+        revolve(K, &p, y_axis(), 0.0, angle).unwrap().0
+    };
+    assert_eq!(names(&build(1.0, 2.0, TAU)), names(&build(2.0, 0.5, TAU)));
+    assert_eq!(names(&build(1.0, 2.0, 1.0)), names(&build(2.0, 0.5, 2.5)));
 }

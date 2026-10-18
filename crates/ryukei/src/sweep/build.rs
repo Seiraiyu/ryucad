@@ -1,5 +1,5 @@
 //! Swept bodies built through Euler operators, from geometry already
-//! chosen by `extrude`.
+//! chosen by `extrude` and `revolve`.
 //!
 //! A capped sweep (an extrude, or a revolve by less than a full turn)
 //! starts from a lamina on its near cap: a face whose path of edges, closed
@@ -7,7 +7,9 @@
 //! Each vertex of the twin grows a lateral edge (MEV) towards the far cap,
 //! and an MEF across the top of every segment cuts off its side face,
 //! leaving the twin as the far cap. Holes are made the same way inside the
-//! near cap and moved onto the far cap by KFMRH.
+//! near cap and moved onto the far cap by KFMRH. A full revolve has no
+//! caps: its sides are chained by closed circular edges, and a ring of
+//! them closes into a handle by KFMRH.
 //!
 //! "Near" and "far" are the caps the construction starts and ends on; the
 //! caller decides which of the start and end caps each one is. `u` is the
@@ -15,7 +17,7 @@
 //! run counterclockwise about it (see [`LoopPlan`]).
 
 use crate::Error;
-use crate::euler::{Corner, kfmrh, mef, mev, mvfs, mvr, set_surface};
+use crate::euler::{Corner, kfmrh, kvr, mef, mev, mvfs, mvr, set_surface};
 use crate::geom::Point3;
 use crate::name::{Name, OpKey, Role, SweepRole};
 use crate::topo::{Body, CurveId, EdgeId, FaceId, FinId, Sense, SurfaceId, VertexId};
@@ -361,11 +363,142 @@ fn hole_through(
     Ok(built)
 }
 
+/// One segment of a full revolve, in loop order from an axis contact (or
+/// from anywhere round a loop that never touches the axis).
+#[derive(Clone, Debug)]
+pub(crate) struct TurnSegment {
+    pub side: Sided,
+}
+
+/// A profile vertex of a full revolve, off the axis: it sweeps a closed
+/// circular edge with one vertex at `point`.
+#[derive(Clone, Debug)]
+pub(crate) struct TurnVertex {
+    pub point: Point3,
+    pub circle: Span,
+}
+
+/// A lump of a full revolve. Either a ring (`ends` is `None`): segment
+/// `i` runs from vertex `i` to vertex `i + 1` cyclically, and there may be
+/// one segment with no vertex (a closed curve turned whole); or a chain:
+/// segment 0 starts on the axis, segment `i` runs from vertex `i - 1` to
+/// vertex `i`, and the last segment ends on the axis. `ends` gives the
+/// chain's two axis points and whether each is an apex, a lone vertex of
+/// its side.
+#[derive(Clone, Debug)]
+pub(crate) struct TurnPlan {
+    pub segments: Vec<TurnSegment>,
+    pub vertices: Vec<TurnVertex>,
+    pub ends: Option<[(Point3, bool); 2]>,
+}
+
+/// What a full revolve's lump became: a face per segment, a circle and its
+/// vertex per profile vertex, and the apexes at the chain's ends.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TurnBuilt {
+    pub sides: Vec<FaceId>,
+    pub circles: Vec<EdgeId>,
+    pub vertices: Vec<VertexId>,
+    pub apexes: [Option<VertexId>; 2],
+}
+
+/// Builds one lump of a full revolve into `b`, as a new solid region.
+///
+/// The faces are made in a chain, one closed circle at a time: MVR then
+/// MEF across a face leaves the old face with the circle's fin against it
+/// and the new one along it. A ring's last face and first face are the
+/// same side, joined by KFMRH. Each side face ends up with the fin along
+/// the circle at its first vertex and against the circle at its last.
+pub(crate) fn turned(b: &mut Body, keys: &mut Keys, plan: &TurnPlan) -> Result<TurnBuilt, Error> {
+    let mut out = TurnBuilt::default();
+    let n = plan.vertices.len();
+    let first_side = plan.segments[0].side.0;
+    if n == 0 {
+        // One face on a closed surface: a whole closed curve turned, or a
+        // chain of one segment from the axis to the axis. MVFS starts it
+        // at an apex if there is one; otherwise KVR takes its vertex away.
+        let [(p, a), (q, z)] = plan.ends.unwrap_or([(Point3::ORIGIN, false); 2]);
+        let start = if !a && z { q } else { p };
+        let m = mvfs(b, keys.next(), start, first_side)?.0;
+        out.sides.push(m.face);
+        match (a, z) {
+            (false, false) => {
+                kvr(b, m.loop_)?;
+            }
+            (true, false) => out.apexes[0] = Some(m.vertex),
+            (false, true) => out.apexes[1] = Some(m.vertex),
+            (true, true) => {
+                out.apexes[0] = Some(m.vertex);
+                out.apexes[1] = Some(mvr(b, keys.next(), m.face, q)?.0.vertex);
+            }
+        }
+        set_sides(b, plan, &out)?;
+        return Ok(out);
+    }
+    let m = mvfs(b, keys.next(), plan.vertices[0].point, first_side)?.0;
+    let lone = Corner::Lone(m.loop_);
+    let c = &plan.vertices[0].circle;
+    let made = mef(b, keys.next(), lone, lone, c.curve, c.interval)?.0;
+    out.circles.push(made.edge);
+    out.vertices.push(m.vertex);
+    // The face against the first circle is the side before it; the one
+    // along it continues the chain.
+    let before = made.faces[1];
+    let mut cur = made.faces[0];
+    let mut sides = Vec::with_capacity(plan.segments.len());
+    for v in &plan.vertices[1..] {
+        let r = mvr(b, keys.next(), cur, v.point)?.0;
+        let lone = Corner::Lone(r.loop_);
+        let made = mef(
+            b,
+            keys.next(),
+            lone,
+            lone,
+            v.circle.curve,
+            v.circle.interval,
+        )?
+        .0;
+        out.circles.push(made.edge);
+        out.vertices.push(r.vertex);
+        sides.push(made.faces[1]);
+        cur = made.faces[0];
+    }
+    match plan.ends {
+        None => {
+            // The ring closes: the last face and the first are one side.
+            kfmrh(b, keys.next(), cur, before)?;
+            sides.push(cur);
+        }
+        Some([(p, a), (q, z)]) => {
+            sides.insert(0, before);
+            sides.push(cur);
+            if a {
+                out.apexes[0] = Some(mvr(b, keys.next(), before, p)?.0.vertex);
+            }
+            if z {
+                out.apexes[1] = Some(mvr(b, keys.next(), cur, q)?.0.vertex);
+            }
+        }
+    }
+    out.sides = sides;
+    set_sides(b, plan, &out)?;
+    Ok(out)
+}
+
+fn set_sides(b: &mut Body, plan: &TurnPlan, out: &TurnBuilt) -> Result<(), Error> {
+    for (s, &f) in plan.segments.iter().zip(&out.sides) {
+        set_surface(b, f, s.side.0, s.side.1)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::check::check;
-    use crate::geom::{Circle, Curve, Cylinder, Frame, Line, Plane, Surface, Vector3};
+    use crate::geom::{
+        Circle, Cone, Curve, Cylinder, Frame, Line, Plane, Sphere, Surface, Vector3,
+    };
     use core::f64::consts::{PI, TAU};
 
     fn span(b: &mut Body, p: Point3, q: Point3) -> Span {
@@ -564,5 +697,99 @@ mod tests {
         capped(&mut b, &mut Keys::new(OpKey(5)), &plan).unwrap();
         let exact = PI * 9.0 - 2.0 * PI * 0.25 - 1.0;
         assert!((volume(&b) - exact).abs() < 0.05, "{}", volume(&b));
+    }
+
+    /// A full turn about the z axis of the profile with corners `pts` in
+    /// the xz half-plane (as (x, z), in path order), the sides given.
+    fn turn_plan(b: &mut Body, pts: &[(f64, f64)], sides: Vec<Surface>, ends: bool) -> TurnPlan {
+        let mut vertices = Vec::new();
+        let inner = if ends { &pts[1..pts.len() - 1] } else { pts };
+        for &(x, z) in inner {
+            let point = Point3::new(x, 0.0, z);
+            vertices.push(TurnVertex {
+                point,
+                circle: circle_span(b, Point3::new(0.0, 0.0, z), x, true),
+            });
+        }
+        let ends = ends.then(|| {
+            let (a, z) = (pts[0], pts[pts.len() - 1]);
+            [
+                (Point3::new(a.0, 0.0, a.1), false),
+                (Point3::new(z.0, 0.0, z.1), false),
+            ]
+        });
+        TurnPlan {
+            segments: sides
+                .into_iter()
+                .map(|s| TurnSegment {
+                    side: (b.add_surface(s), Sense::Forward),
+                })
+                .collect(),
+            vertices,
+            ends,
+        }
+    }
+
+    fn flat(z: f64, up: bool) -> Surface {
+        let n = Vector3::new(0.0, 0.0, if up { 1.0 } else { -1.0 });
+        Surface::Plane(Plane::new(
+            Frame::new(Point3::new(0.0, 0.0, z), n, Vector3::new(1.0, 0.0, 0.0)).unwrap(),
+        ))
+    }
+
+    fn cylinder(r: f64) -> Surface {
+        Surface::Cylinder(Cylinder::new(Frame::WORLD, r).unwrap())
+    }
+
+    #[test]
+    fn a_square_ring_turned_whole() {
+        // Counterclockwise about -y (the direction a turn about +z moves
+        // the xz half-plane is +y): out along the bottom, up, back, down.
+        let pts = [(1.0, 0.0), (2.0, 0.0), (2.0, 1.0), (1.0, 1.0)];
+        let mut b = Body::new();
+        let sides = vec![
+            flat(0.0, false),
+            cylinder(2.0),
+            flat(1.0, true),
+            cylinder(1.0),
+        ];
+        let mut plan = turn_plan(&mut b, &pts, sides, false);
+        plan.segments[3].side.1 = Sense::Reversed;
+        turned(&mut b, &mut Keys::new(OpKey(5)), &plan).unwrap();
+        assert!((volume(&b) - 3.0 * PI).abs() < 0.02);
+    }
+
+    #[test]
+    fn chains_from_the_axis() {
+        // A solid cylinder: the bottom disc, the side, the top disc.
+        let pts = [(0.0, 0.0), (1.0, 0.0), (1.0, 2.0), (0.0, 2.0)];
+        let mut b = Body::new();
+        let sides = vec![flat(0.0, false), cylinder(1.0), flat(2.0, true)];
+        let plan = turn_plan(&mut b, &pts, sides, true);
+        let made = turned(&mut b, &mut Keys::new(OpKey(5)), &plan).unwrap();
+        assert_eq!(made.sides.len(), 3);
+        assert!((volume(&b) - 2.0 * PI).abs() < 0.02);
+        // A sphere: one face, no vertices.
+        let mut b = Body::new();
+        let sphere = Surface::Sphere(Sphere::new(Frame::WORLD, 1.0).unwrap());
+        let plan = turn_plan(&mut b, &[(0.0, -1.0), (0.0, 1.0)], vec![sphere], true);
+        turned(&mut b, &mut Keys::new(OpKey(5)), &plan).unwrap();
+        assert_eq!(b.counts().vertices, 0);
+        assert!((volume(&b) - 4.0 / 3.0 * PI).abs() < 0.02);
+        // A cone with its apex up: the apex is a lone vertex of the side.
+        let mut b = Body::new();
+        let down = Frame::new(
+            Point3::ORIGIN,
+            Vector3::new(0.0, 0.0, -1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        );
+        let cone = Cone::new(down.unwrap(), 1.0, crate::math::atan2(1.0, 2.0)).unwrap();
+        let sides = vec![flat(0.0, false), Surface::Cone(cone)];
+        let mut plan = turn_plan(&mut b, &[(0.0, 0.0), (1.0, 0.0), (0.0, 2.0)], sides, true);
+        plan.ends.as_mut().unwrap()[1].1 = true;
+        let made = turned(&mut b, &mut Keys::new(OpKey(5)), &plan).unwrap();
+        assert!(made.apexes[1].is_some());
+        assert_eq!(b.counts().vertices, 2);
+        assert!((volume(&b) - 2.0 * PI / 3.0).abs() < 0.02);
     }
 }
