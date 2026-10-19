@@ -27,6 +27,13 @@ impl Frame2 {
         if ![origin.x, origin.y, x.x, x.y].iter().all(|c| c.is_finite()) {
             return Err(Error::NonFinite);
         }
+        // Scaled down first where the squares would overflow, which would
+        // make the direction zero.
+        let x = if x.length_squared().is_infinite() {
+            x / x.x.abs().max(x.y.abs())
+        } else {
+            x
+        };
         let len = x.length();
         if len <= crate::tol::LINEAR_RESOLUTION {
             return Err(Error::Degenerate);

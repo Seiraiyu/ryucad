@@ -325,6 +325,8 @@ pub fn ago(ms: u64) -> String {
 /// The activity log, newest first, with undo and redo per entry; and the
 /// project's Git history, read-only.
 pub fn journal(ui: &mut egui::Ui, ws: &mut Workspace, tab: &mut Tab) {
+    // A short tab still fills the panel, so the view keeps its size.
+    ui.set_min_size(ui.available_size());
     ui.horizontal(|ui| {
         ui.selectable_value(tab, Tab::Activity, "Activity");
         if ui.selectable_value(tab, Tab::History, "History").clicked() {
@@ -358,13 +360,7 @@ fn activity(ui: &mut egui::Ui, ws: &mut Workspace) {
                             .as_str()
                             .unwrap_or("outside ryucad");
                         ui.label(who);
-                        let what = match e["kind"].as_str() {
-                            Some("undo") => format!("undo of {}", e["target"]),
-                            Some("redo") => format!("redo of {}", e["target"]),
-                            Some("external") => "files changed".to_owned(),
-                            _ => e["method"].as_str().unwrap_or_default().to_owned(),
-                        };
-                        ui.label(what);
+                        ui.label(ws.activity.describe(e));
                         let files: Vec<String> = e["files"]
                             .as_array()
                             .into_iter()
@@ -410,6 +406,13 @@ fn history(ui: &mut egui::Ui, ws: &mut Workspace) {
         ui.spinner();
         return;
     };
+    if let Some(e) = h["error"].as_str() {
+        ui.colored_label(
+            ui.visuals().error_fg_color,
+            format!("Can't read the history: {e}"),
+        );
+        return;
+    }
     if h["repository"] == false {
         ui.weak("This project isn't in a Git repository, so it has no history");
         return;

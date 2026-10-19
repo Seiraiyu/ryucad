@@ -7,7 +7,8 @@
 //! directly, as for curves. A part of a patch where either has one strict
 //! sign holds no stationary point; parts that can't be excluded are split
 //! four ways down to a depth limit, where Newton's method finds the point.
-//! Parts farther from `p` than the best point so far are pruned. Nearest
+//! Parts farther from `p` than the best point so far are pruned, and the
+//! nearest parts are searched first. Nearest
 //! points on the domain's boundary are those of its boundary curves.
 
 use super::KnotVector;
@@ -262,6 +263,65 @@ impl Node {
     }
 }
 
+/// The parts of a patch still to search. Pruning, the nearest by hull
+/// distance comes first (ties last in, first out), so the part holding the
+/// nearest point is searched before the budget can run out elsewhere;
+/// otherwise depth first.
+struct Frontier {
+    p: Option<Vector3>,
+    nodes: Vec<Node>,
+    heap: std::collections::BinaryHeap<Queued>,
+    seq: u64,
+}
+
+struct Queued(f64, u64, Node);
+
+impl PartialEq for Queued {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+impl Eq for Queued {}
+impl PartialOrd for Queued {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Queued {
+    /// The greatest is the nearest, then the latest.
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        other.0.total_cmp(&self.0).then(self.1.cmp(&other.1))
+    }
+}
+
+impl Frontier {
+    fn new(prune: bool, p: Vector3) -> Self {
+        Self {
+            p: prune.then_some(p),
+            nodes: Vec::new(),
+            heap: std::collections::BinaryHeap::new(),
+            seq: 0,
+        }
+    }
+
+    fn push(&mut self, node: Node) {
+        match self.p {
+            Some(p) => {
+                self.seq += 1;
+                self.heap.push(Queued(node.lower_bound(p), self.seq, node));
+            }
+            None => self.nodes.push(node),
+        }
+    }
+
+    fn pop(&mut self) -> Option<Node> {
+        match self.p {
+            Some(_) => self.heap.pop().map(|q| q.2),
+            None => self.nodes.pop(),
+        }
+    }
+}
+
 /// The signs of `g` on a node, leaving out an edge row or column that
 /// lies on the domain's boundary when all of it rounds to zero: roots
 /// there are boundary points, which the boundary curves find, and such an
@@ -436,7 +496,8 @@ impl NurbsSurface {
     /// cut from, both move the point by less than a sixteenth of
     /// [`LINEAR_RESOLUTION`], or when no step brings it closer; not when
     /// the steps run out. A step the line search cut short from a long one
-    /// proves nothing, however little it moved the point.
+    /// proves nothing, however little it moved the point, unless it was cut
+    /// to nothing.
     fn descend(
         &self,
         p: Vector3,
@@ -474,7 +535,10 @@ impl NurbsSurface {
                 }
                 t *= 0.5;
             }
-            let Some((nu, nv, ne, nr)) = next else {
+            // A step cut down until it rounds to no step at all is no step
+            // that brings the point closer: the full step is rounding noise,
+            // which the derivatives can make longer than the stopping size.
+            let Some((nu, nv, ne, nr)) = next.filter(|n| (n.0, n.1) != (u, v)) else {
                 return (u, v, e, true);
             };
             let moved = (ne.point - e.point).length();
@@ -707,7 +771,8 @@ impl NurbsSurface {
                 }
                 _ => {}
             }
-            let mut stack = vec![root];
+            let mut stack = Frontier::new(prune, p);
+            stack.push(root);
             let mut visits = 0;
             while let Some(node) = stack.pop() {
                 visits += 1;
@@ -761,7 +826,9 @@ impl NurbsSurface {
                     continue;
                 }
                 let [q0, q1, q2, q3] = node.split();
-                stack.extend([q3, q2, q1, q0]);
+                for q in [q3, q2, q1, q0] {
+                    stack.push(q);
+                }
             }
         }
         if exhausted {
@@ -1046,6 +1113,61 @@ mod tests {
         ];
         let s = NurbsSurface::new([ku, kv], points, Some(w)).unwrap();
         let p = Point3::new(-2.4705882352941178, -3.8823529411764706, 6.0);
+        let foot = s.project(p);
+        assert!(foot.distance <= sampled(&s, p, 300) + 1e-12, "{foot:?}");
+    }
+
+    /// A bilinear patch with one far corner and weights a hundredfold
+    /// apart: the parametrisation is crushed against the edges, where the
+    /// derivatives reach thousands.
+    fn crushed(v: [f64; 2], last: Point3, w: [f64; 4]) -> NurbsSurface {
+        let ku = KnotVector::clamped(1, &[-3.0, -2.8745098039215686], &[2, 2]).unwrap();
+        let kv = KnotVector::clamped(1, &v, &[2, 2]).unwrap();
+        let far = 472.9411764705883;
+        let points = vec![
+            Point3::new(6.0, 6.0, -3.223529411764706),
+            Point3::new(far, far, far),
+            Point3::new(1.670588235294118, 4.7294117647058815, 6.0),
+            last,
+        ];
+        NurbsSurface::new([ku, kv], points, Some(w.to_vec())).unwrap()
+    }
+
+    #[test]
+    fn newton_cut_to_nothing_has_converged() {
+        // The nearest point is just inside the v0 edge, where |Sv| is
+        // about 1600. There Newton's full step is rounding noise longer
+        // than the stopping size, and the line search cuts it until it
+        // rounds to no step at all: that must count as converged, or the
+        // point is lost and a far corner stands in. Found by fuzzing.
+        let s = crushed(
+            [-2.6941176470588237, -0.6941176470588237],
+            Point3::new(-3.223529411764706, -6.0, 6.0),
+            [
+                0.05,
+                1.1758823529411766,
+                4.475882352941177,
+                4.475882352941177,
+            ],
+        );
+        let p = Point3::new(4.7294117647058815, 4.7294117647058815, 6.0);
+        let foot = s.project(p);
+        assert!(foot.distance <= sampled(&s, p, 300) + 1e-12, "{foot:?}");
+    }
+
+    #[test]
+    fn a_crushed_edge_does_not_starve_the_patch() {
+        // Along the v0 edge |Su| is about 20000, so parts at the depth
+        // limit are still centimetres across and can't be pruned near a
+        // local minimum there. Searched depth first, they used up the
+        // patch's budget before the part holding the nearest point (by the
+        // u1 edge) was reached. Found by fuzzing.
+        let s = crushed(
+            [-0.12941176470588234, 1.8705882352941177],
+            Point3::new(6.0, 6.0, 6.0),
+            [0.05, 5.0, 0.36058823529411765, 1.1758823529411766],
+        );
+        let p = Point3::new(4.7294117647058815, 6.0, 6.0);
         let foot = s.project(p);
         assert!(foot.distance <= sampled(&s, p, 300) + 1e-12, "{foot:?}");
     }

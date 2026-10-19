@@ -80,6 +80,11 @@ pub struct App {
     titled: Option<String>,
     /// The window has asked for the foreground once, when it first showed.
     shown: bool,
+    /// Open… was chosen: the folder dialog runs once the frame is done,
+    /// not in the middle of drawing it.
+    pick: bool,
+    /// A Ctrl+click (macOS) is down, so its release is a right one too.
+    ctrl_click: bool,
 }
 
 impl App {
@@ -94,6 +99,8 @@ impl App {
             wake,
             titled: None,
             shown: false,
+            pick: false,
+            ctrl_click: false,
         };
         if let Some(dir) = dir {
             app.go(dir);
@@ -159,6 +166,9 @@ impl App {
         match &self.screen {
             Screen::Start(_) => "ryucad".to_owned(),
             Screen::Opened(o) => format!("{} — ryucad", name(&o.ws.root)),
+            Screen::Damaged(d) if d.0.openable() => {
+                format!("{} (repaired) — ryucad", name(&d.0.root))
+            }
             Screen::Damaged(d) => format!("{} (needs repair) — ryucad", name(&d.0.root)),
         }
     }
@@ -175,6 +185,7 @@ impl App {
         match &mut self.screen {
             Screen::Start(s) => match start::show(ui, s) {
                 Some(start::Action::Open(dir)) => go = Some(menu::Action::Open(Some(dir))),
+                Some(start::Action::Pick) => go = Some(menu::Action::Open(None)),
                 Some(start::Action::Create(dir)) => {
                     self.create(&dir);
                     return;
@@ -192,15 +203,17 @@ impl App {
         }
         match go {
             Some(menu::Action::Open(Some(dir))) => self.go(&dir),
-            Some(menu::Action::Open(None)) => {
-                if let Some(dir) = start::pick_folder() {
-                    self.go(&dir);
-                }
-            }
+            Some(menu::Action::Open(None)) => self.pick = true,
             Some(menu::Action::Close) => {
                 self.screen = Screen::Start(Box::new(Start::new(&self.daemon, &self.wake)));
             }
             Some(menu::Action::Quit) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            // With no project open, Close closes the window.
+            None if !matches!(self.screen, Screen::Opened(_))
+                && ctx.input_mut(|i| i.consume_shortcut(&menu::CLOSE)) =>
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
             None => {}
         }
     }
@@ -254,7 +267,7 @@ impl Opened {
             .show(ui, |ui| menu::bar(ui, self, &recent))
             .inner;
         egui::Panel::top("people").show(ui, |ui| panels::people(ui, &mut self.ws));
-        self.shortcuts(&ctx);
+        let action = action.or(self.shortcuts(&ctx));
         egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &self.ws));
         // Room for about ten entries; drag its top edge for more.
         egui::Panel::bottom("journal")
@@ -276,13 +289,15 @@ impl Opened {
                 egui::ScrollArea::vertical().show(ui, |ui| panels::properties(ui, &mut self.ws));
             });
         egui::CentralPanel::no_frame().show(ui, |ui| self.view.show(ui, &mut self.ws, gpu));
-        dialogs::settings(&ctx, &mut self.ws, &mut self.dialogs.settings);
-        dialogs::preferences(&ctx, &mut self.ws, &mut self.dialogs.preferences);
+        let view = self.view.rect;
+        dialogs::settings(&ctx, &mut self.ws, &mut self.dialogs.settings, view);
+        dialogs::preferences(&ctx, &mut self.ws, &mut self.dialogs.preferences, view);
         doctor::dialog(
             &ctx,
             &mut self.ws,
             &mut self.dialogs.doctor,
             &mut self.doctor,
+            view,
         );
         action
     }
@@ -319,30 +334,39 @@ impl Opened {
     /// Ctrl+Y redoes, and Escape clears the selection; not while a text
     /// field has the keyboard (it has its own), and Escape not while a menu
     /// or popup is open (it closes those).
-    fn shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.memory(|m| m.focused().is_some()) {
-            return;
+    /// The keyboard shortcuts; returns what they ask of the app.
+    fn shortcuts(&mut self, ctx: &egui::Context) -> Option<menu::Action> {
+        // Closing works from a text field too, as in any other app.
+        if ctx.input_mut(|i| i.consume_shortcut(&menu::CLOSE)) {
+            return Some(menu::Action::Close);
         }
-        use egui::{Key, KeyboardShortcut, Modifiers};
-        let redo = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
-        let redo_y = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
-        let undo = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
-        if ctx.input_mut(|i| i.consume_shortcut(&redo) || i.consume_shortcut(&redo_y)) {
+        if ctx.memory(|m| m.focused().is_some()) {
+            return None;
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&menu::REDO) || i.consume_shortcut(&menu::REDO_Y)) {
             self.ws.redo(None);
-        } else if ctx.input_mut(|i| i.consume_shortcut(&undo)) {
+        } else if ctx.input_mut(|i| i.consume_shortcut(&menu::UNDO)) {
             self.ws.undo(None);
         }
         if !egui::Popup::is_any_open(ctx)
             && self.ws.myself().is_some_and(|m| !m.selection.is_empty())
-            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+            && ctx.input_mut(|i| i.consume_shortcut(&menu::CLEAR_SELECTION))
         {
             self.ws
                 .select(Vec::new(), ryucad::live::SelectMode::Replace);
         }
+        None
     }
 }
 
 impl eframe::App for App {
+    /// On macOS, Ctrl+click is a right-click.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if cfg!(target_os = "macos") {
+            crate::ui::platform::ctrl_click_as_secondary(&mut raw.events, &mut self.ctrl_click);
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // A new window to the front: on Windows it otherwise stays behind
         // whatever was in front when it was started.
@@ -351,6 +375,14 @@ impl eframe::App for App {
         }
         let gpu = frame.wgpu_render_state().cloned();
         self.frame(ui, gpu.as_ref());
+        if std::mem::take(&mut self.pick) {
+            if let Some(dir) = start::pick_folder(frame) {
+                self.go(&dir);
+            }
+            // What the folder changed is drawn now, not at the next event:
+            // a click must find the buttons where it sees them.
+            ui.ctx().request_repaint();
+        }
     }
 }
 

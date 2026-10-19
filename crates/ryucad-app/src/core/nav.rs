@@ -119,6 +119,12 @@ impl Nav {
         self.camera = view::zoom(&self.camera, factor, toward);
     }
 
+    /// A pinch by `zoom` (above 1 is closer) zooms towards `toward`, the
+    /// point under the mouse, or the target.
+    pub fn pinch(&mut self, zoom: f32, toward: Option<[f64; 3]>) {
+        self.camera = view::zoom(&self.camera, 1.0 / f64::from(zoom.max(1e-3)), toward);
+    }
+
     /// A standard view framing `points` (not empty) in a viewport of
     /// `aspect`.
     pub fn standard(&mut self, v: StandardView, points: &[[f64; 3]], aspect: f64) {
@@ -272,6 +278,16 @@ impl Projector {
             }
         }
     }
+
+    /// The point on the ray through `ndc` as deep in the view as `point`:
+    /// what the mouse is over, at the model's depth, when it is over
+    /// nothing.
+    pub fn at_depth(&self, ndc: [f64; 2], point: [f64; 3]) -> [f64; 3] {
+        let (_, _, f) = self.camera.basis();
+        let (o, d) = self.ray(ndc);
+        let k = dot(sub(point, o), f) / dot(d, f);
+        along(o, d, k)
+    }
 }
 
 #[cfg(test)]
@@ -352,8 +368,11 @@ mod tests {
         let same = nav.clone();
         nav.drag(Gesture::None, [10.0, 10.0], 500.0, None);
         assert_eq!(nav, same);
+        // From above, at the points' middle depth (moved across, since the
+        // nearer one looks bigger).
         nav.standard(StandardView::Top, &[[0.0; 3], [1.0; 3]], 1.0);
-        assert_eq!(nav.camera.target, [0.5; 3]);
+        assert_eq!(nav.camera.basis().2, [0.0, 0.0, -1.0]);
+        assert_eq!(nav.camera.target[2], 0.5);
     }
 
     #[test]
@@ -387,5 +406,27 @@ mod tests {
         let pr = Projector::new(&iso(), 1.0, [0.0; 3], 0.01);
         let behind = along(iso().eye, sub(iso().eye, iso().target), 1.0);
         assert_eq!(pr.ndc(behind), None);
+    }
+
+    #[test]
+    fn a_point_on_a_ray_at_a_depth() {
+        let model = [0.003, -0.002, 0.004];
+        for projection in [
+            view::DEFAULT_PROJECTION,
+            Projection::Orthographic { height: 0.05 },
+        ] {
+            let cam = Camera {
+                projection,
+                ..iso()
+            };
+            let pr = Projector::new(&cam, 1.5, [0.0; 3], 0.01);
+            let at = [0.4, -0.7];
+            let p = pr.at_depth(at, model);
+            let n = pr.ndc(p).unwrap();
+            assert!((n[0] - at[0]).abs() < 1e-9 && (n[1] - at[1]).abs() < 1e-9);
+            let (_, _, f) = cam.basis();
+            let depth = |q: [f64; 3]| dot(sub(q, cam.eye), f);
+            assert!((depth(p) - depth(model)).abs() < 1e-12);
+        }
     }
 }

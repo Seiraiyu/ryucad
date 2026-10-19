@@ -22,17 +22,23 @@ fn window(p: &Project) -> Harness<'static, App> {
         .build_eframe(move |cc| App::open(&cc.egui_ctx, Some(&root), ryucad()))
 }
 
-/// Opens the menu `menu` and clicks `item` in it.
+/// Opens the menu `menu` and clicks `item` in it (named after its text,
+/// and its shortcut if it has one).
 fn menu(h: &mut Harness<'static, App>, menu: &str, item: &str) {
     h.get_by_label(menu).click();
+    let spaced = format!("{item} ");
+    let named = |n: &egui_kittest::kittest::AccessKitNode<'_>| {
+        n.label()
+            .is_some_and(|l| l == item || l.starts_with(&spaced))
+    };
     // A menu opens over a frame or two.
     for _ in 0..10 {
         h.step();
-        if h.query_by_label(item).is_some() {
+        if h.query_by(named).is_some() {
             break;
         }
     }
-    h.get_by_label(item).click();
+    h.get_by(named).click();
 }
 
 /// Runs frames until `done` holds.
@@ -226,6 +232,64 @@ fn orbiting_from_the_background_keeps_the_model_in_view() {
 }
 
 #[test]
+fn a_trackpad_pans_orbits_and_pinches() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.step();
+    let rect = h.state().opened().view.rect;
+    h.event(egui::Event::PointerMoved(rect.center()));
+    h.step();
+    let camera = |h: &Harness<'static, App>| h.state().opened().view.nav.camera.clone();
+    let fingers = |h: &Harness<'static, App>, modifiers: egui::Modifiers| {
+        for _ in 0..5 {
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(12.0, 6.0),
+                modifiers,
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Trackpad,
+            });
+        }
+    };
+    let dist = |a: [f64; 3], b: [f64; 3]| {
+        (0..3)
+            .map(|k| (a[k] - b[k]) * (a[k] - b[k]))
+            .sum::<f64>()
+            .sqrt()
+    };
+    let unit = |c: &ryucad::view::Camera| {
+        let d = dist(c.target, c.eye);
+        [0, 1, 2].map(|k| (c.target[k] - c.eye[k]) / d)
+    };
+    // Two fingers pan: same distance and direction, moved.
+    let before = camera(&h);
+    fingers(&h, egui::Modifiers::NONE);
+    h.step();
+    let after = camera(&h);
+    assert!(dist(after.target, before.target) > 1e-6, "panned");
+    assert!((after.distance() - before.distance()).abs() < 1e-9);
+    assert!(dist(unit(&after), unit(&before)) < 1e-9);
+    // With Shift they orbit: the direction turns.
+    let before = after;
+    fingers(&h, egui::Modifiers::SHIFT);
+    h.step();
+    let after = camera(&h);
+    assert!(dist(unit(&after), unit(&before)) > 1e-3, "orbited");
+    // A pinch zooms in.
+    let before = after;
+    h.event(egui::Event::Zoom(1.5));
+    h.step();
+    assert!(
+        camera(&h).distance() < before.distance() * 0.9,
+        "pinched in"
+    );
+}
+
+#[test]
 fn the_first_view_frames_the_whole_model() {
     if !gpu() {
         return;
@@ -312,6 +376,68 @@ fn an_agents_highlight_shows_its_label() {
 }
 
 #[test]
+fn a_highlight_label_stays_inside_the_view() {
+    if !gpu() {
+        return;
+    }
+    use ryucad_app::ui::app::Screen;
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    let faces = p.ok(&["inspect", "p", "boss"])["bodies"][0]["faces"].clone();
+    let top = format!("p/boss/{}", faces[0]["name"].as_str().unwrap());
+    let text = "a long label that would run past the edge of the view";
+    p.ok(&["highlight", &top, "--label", text]);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .people
+            .all
+            .values()
+            .any(|p| !p.highlights.is_empty())
+    });
+    h.step();
+    h.get_by_label(text);
+    // Panned in steps, the model goes to the right edge and past it; the
+    // label is shown only while it fits, or kept inside.
+    let mut shown = 0;
+    for _ in 0..40 {
+        if let Screen::Opened(o) = &mut h.state_mut().screen {
+            o.view.nav.camera = ryucad::view::pan(&o.view.nav.camera, -0.03, 0.0);
+        }
+        h.run_steps(2);
+        let view = h.state().opened().view.rect;
+        if let Some(label) = h.query_by_label(text) {
+            shown += 1;
+            assert!(
+                view.contains_rect(label.rect()),
+                "{:?} outside {view:?}",
+                label.rect()
+            );
+        }
+    }
+    assert!(shown > 0);
+}
+
+#[test]
+fn the_history_tab_keeps_the_view_its_size() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.run_steps(2);
+    let before = h.state().opened().view.rect;
+    // Whatever the history holds (here, the commits of the checkout the
+    // tests run in, if any), the view stays as it was.
+    h.get_by_label("History").click();
+    frames(&mut h, |a| a.opened().ws.history.is_some());
+    h.run_steps(2);
+    assert_eq!(h.state().opened().view.rect, before);
+}
+
+#[test]
 fn the_window_follows_an_agent_until_the_human_navigates() {
     if !gpu() {
         return;
@@ -336,6 +462,17 @@ fn the_window_follows_an_agent_until_the_human_navigates() {
     h.step();
     let agent = h.state().opened().ws.followed_camera().unwrap().clone();
     assert_eq!(h.state().opened().view.nav.camera, agent);
+    // The window shares the camera it shows: the agent's.
+    let followed = h.state().opened().ws.following.clone().unwrap();
+    let t = Instant::now();
+    while p.ok(&["camera"])["camera"] != p.ok(&["camera", "--of", &followed])["camera"] {
+        assert!(
+            t.elapsed() < Duration::from_secs(10),
+            "the window's camera isn't shared"
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(50));
+    }
     // A drag in the viewport takes the camera back.
     let c = h.state().opened().view.rect.center();
     h.event(egui::Event::PointerMoved(c));
@@ -400,7 +537,8 @@ fn the_activity_tab_undoes_and_ctrl_z_does_too() {
     p.ok(&["feature", "edit", "p", "boss", "--param", "radius=5"]);
     frames(&mut h, |a| !a.opened().ws.activity.entries.is_empty());
     h.step();
-    h.get_by_label("feature.edit");
+    // It names what it changed.
+    h.get_by_label("feature.edit p/boss");
     // Newest first: the top Undo is the edit's.
     h.get_all_by_label("Undo").next().unwrap().click();
     frames(&mut h, |a| {
@@ -514,6 +652,9 @@ fn a_damaged_project_is_repaired_then_opened() {
         _ => false,
     });
     h.step();
+    // It says so.
+    h.get_by_label("This project is repaired and ready to open");
+    assert!(h.query_by_label("This project needs repair").is_none());
     h.get_by_label("Open project").click();
     frames(&mut h, |a| {
         matches!(a.screen, ryucad_app::ui::app::Screen::Opened(_)) && loaded(a)
@@ -552,7 +693,17 @@ fn the_start_window_reopens_recent_projects_and_creates_new_ones() {
     // Other tests' projects are recent too: scroll to this one first.
     h.step();
     h.get_by_label("bracket").scroll_to_me();
-    h.run_steps(2);
+    // Scrolling is animated: click once it has stopped, or the click
+    // lands on a neighbour (another test's project, maybe deleted).
+    let mut at = h.get_by_label("bracket").rect();
+    loop {
+        h.step();
+        let now = h.get_by_label("bracket").rect();
+        if now == at {
+            break;
+        }
+        at = now;
+    }
     h.get_by_label("bracket").click();
     frames(&mut h, loaded);
     // A folder that isn't a project is offered as a new one.
@@ -572,6 +723,62 @@ fn the_start_window_reopens_recent_projects_and_creates_new_ones() {
         matches!(a.screen, Screen::Opened(_)) && a.opened().ws.idle()
     });
     assert!(p.root.parent().unwrap().join("empty/ryucad.json").is_file());
+}
+
+#[test]
+fn thumbnails_wait_until_the_start_window_shows() {
+    use ryucad_app::ui::start::Start;
+    let p = Project::named("lazy").with_part();
+    let daemon = ryucad(); // and the shared config folder
+    ryucad::config::remember_project(&p.root).unwrap();
+    // A window opened on a project builds a start screen it never shows:
+    // that renders nothing.
+    let wake: ryucad_app::core::link::Wake = std::sync::Arc::new(|| {});
+    let start = Start::new(daemon, &wake);
+    assert!(start.recent.contains(&p.root));
+    assert!(start.thumbnails.done.is_empty());
+}
+
+#[test]
+fn ctrl_w_closes_the_project_and_menus_show_their_shortcuts() {
+    if !gpu() {
+        return;
+    }
+    use ryucad_app::ui::app::Screen;
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("File").click();
+    h.run_steps(2);
+    let close = h.ctx.format_shortcut(&ryucad_app::ui::menu::CLOSE);
+    h.get_by_label_contains(&close);
+    h.key_press(egui::Key::Escape);
+    h.step();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::W);
+    frames(&mut h, |a| matches!(a.screen, Screen::Start(_)));
+}
+
+#[test]
+fn dialogs_open_clear_of_the_menus() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    let menus = h.get_by_label("File").rect().bottom();
+    for (m, item, title) in [
+        ("Edit", "Preferences…", "Preferences"),
+        ("Project", "Settings…", "Project settings"),
+        ("Project", "Doctor…", "Doctor"),
+    ] {
+        menu(&mut h, m, item);
+        h.run_steps(3);
+        let top = h.get_by_label(title).rect().top();
+        assert!(top > menus, "{title} at {top}, over the menus (to {menus})");
+        h.key_press(egui::Key::Escape);
+        h.run_steps(2);
+    }
 }
 
 #[test]
