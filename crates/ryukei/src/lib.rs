@@ -7,6 +7,7 @@ pub mod check;
 mod error;
 pub mod euler;
 pub mod geom;
+pub mod intersect;
 pub mod interval;
 pub mod math;
 pub mod mesh;

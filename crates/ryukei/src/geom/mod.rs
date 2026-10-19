@@ -9,6 +9,7 @@ mod bbox;
 pub(crate) mod bernstein;
 mod bound2;
 pub(crate) mod chain2;
+pub(crate) mod chain3;
 mod curve;
 mod curve2;
 mod ellipse;

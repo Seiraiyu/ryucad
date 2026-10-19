@@ -241,6 +241,12 @@ impl Bernstein {
         if common_sign(&self.c).is_some() {
             return;
         }
+        // Every piece of it would have coefficients holding zero too:
+        // nothing here can be signed.
+        if self.c.iter().all(|x| x.contains(0.0)) {
+            out.push(Root::Unresolved { lo: a, hi: b });
+            return;
+        }
         if self.degree() > 0
             && let Some(slope) = common_sign(&self.deriv().c)
         {
