@@ -180,6 +180,92 @@ fn corners(lo: [f64; 3], hi: [f64; 3]) -> [[f64; 3]; 8] {
     core::array::from_fn(|i| [0, 1, 2].map(|k| if i >> k & 1 == 1 { hi[k] } else { lo[k] }))
 }
 
+/// The unit axes of a view looking along `-back` with `up`: back, and
+/// right and up as `Camera::basis` will have them.
+fn axes(back: [f64; 3], up: [f64; 3]) -> ([f64; 3], [f64; 3], [f64; 3]) {
+    let b = norm(back);
+    let back = back.map(|x| x / b);
+    let forward = back.map(|x| -x);
+    let right = unit(cross(forward, up));
+    (back, right, cross(right, forward))
+}
+
+/// Of `points`, the few that frame them along `-back` with `up`:
+/// `refit_points` with a camera looking that way gives the same camera on
+/// them as on all of them, up to rounding. Everything a frame measures is
+/// an extreme of a linear function of the points (the box, the reach
+/// across the view, how far back to stand) or of a ratio of two (the
+/// angles the view sees), so it is taken at the extremes along x, y and z
+/// or at corners of the points as the view's right-back and up-back planes
+/// see them (their convex hulls there). A body's mesh of thousands of
+/// points comes down to a few hundred, which can be kept per body.
+pub fn framing_points(points: &[[f64; 3]], back: [f64; 3], up: [f64; 3]) -> Vec<[f64; 3]> {
+    let (back, right, up_) = axes(back, up);
+    let mut keep = vec![false; points.len()];
+    for k in 0..3 {
+        let along = |a: &usize, b: &usize| points[*a][k].total_cmp(&points[*b][k]);
+        if let (Some(lo), Some(hi)) = (
+            (0..points.len()).min_by(along),
+            (0..points.len()).max_by(along),
+        ) {
+            keep[lo] = true;
+            keep[hi] = true;
+        }
+    }
+    for axis in [right, up_] {
+        let seen: Vec<[f64; 2]> = points
+            .iter()
+            .map(|p| [dot(*p, axis), dot(*p, back)])
+            .collect();
+        for i in hull2(&seen) {
+            keep[i] = true;
+        }
+    }
+    points
+        .iter()
+        .zip(keep)
+        .filter_map(|(p, k)| k.then_some(*p))
+        .collect()
+}
+
+/// The indices of the corners of the convex hull of `points` (Andrew's
+/// monotone chain); points along its sides are left out.
+fn hull2(points: &[[f64; 2]]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..points.len()).collect();
+    order.sort_unstable_by(|a, b| {
+        let (p, q) = (points[*a], points[*b]);
+        p[0].total_cmp(&q[0]).then(p[1].total_cmp(&q[1]))
+    });
+    order.dedup_by(|a, b| points[*a] == points[*b]);
+    if order.len() < 3 {
+        return order;
+    }
+    // Positive when `o`, `a`, `b` turn counterclockwise.
+    let turn = |o: usize, a: usize, b: usize| {
+        let (o, a, b) = (points[o], points[a], points[b]);
+        (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    };
+    let mut hull: Vec<usize> = Vec::with_capacity(order.len() + 1);
+    // The lower side left to right, then the upper side back.
+    for (side, pass) in [order.clone(), order.into_iter().rev().collect()]
+        .into_iter()
+        .enumerate()
+    {
+        let start = if side == 0 { 0 } else { hull.len() - 1 };
+        for i in pass {
+            while hull.len() >= start + 2
+                && turn(hull[hull.len() - 2], hull[hull.len() - 1], i) <= 0.0
+            {
+                hull.pop();
+            }
+            hull.push(i);
+        }
+    }
+    // The last is the first again.
+    hull.pop();
+    hull
+}
+
 /// A camera looking along `-back` at `points` (not empty), centred on
 /// them and as close as lets them all fit a view of `aspect` (width over
 /// height) with the margin. Fitting the points, not their box, frames real
@@ -191,12 +277,7 @@ fn frame_along(
     projection: Projection,
     aspect: f64,
 ) -> Camera {
-    let b = norm(back);
-    let back = back.map(|x| x / b);
-    // The view's axes, as `Camera::basis` will have them.
-    let forward = back.map(|x| -x);
-    let right = unit(cross(forward, up));
-    let up_ = cross(right, forward);
+    let (back, right, up_) = axes(back, up);
     // The middle of the points' box, moved across the view to the middle
     // of the points as the view sees them (no move for a symmetric model
     // in orthographic, so its target stays exact; perspective moves it
@@ -583,6 +664,88 @@ mod tests {
             most = most.max(dot(q, r).abs() / h).max(dot(q, u).abs() / h);
         }
         assert!((1.0 / MARGIN - 1e-9..=1.0 + 1e-9).contains(&most), "{most}");
+    }
+
+    #[test]
+    fn framing_points_frame_as_all_the_points_do() {
+        // A finely sampled torus and sphere, as meshes are, and points
+        // scattered in a box.
+        let tau = 2.0 * core::f64::consts::PI;
+        let mut pts = Vec::new();
+        for i in 0..96 {
+            for j in 0..48 {
+                let (su, cu) = ryukei::math::sin_cos(f64::from(i) * tau / 96.0);
+                let (sv, cv) = ryukei::math::sin_cos(f64::from(j) * tau / 48.0);
+                let r = 0.3 + 0.1 * cv;
+                pts.push([0.2 + r * cu, -0.1 + r * su, 0.05 + 0.1 * sv]);
+                let (sl, cl) = ryukei::math::sin_cos(f64::from(j) * tau / 96.0);
+                pts.push([-0.4 + 0.15 * sl * cu, 0.3 + 0.15 * sl * su, 0.2 + 0.15 * cl]);
+            }
+        }
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        for _ in 0..2000 {
+            pts.push(core::array::from_fn(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+            }));
+        }
+        let size = 1.0;
+        let ortho = Projection::Orthographic { height: 1.0 };
+        for view in [
+            StandardView::Front,
+            StandardView::Top,
+            StandardView::Right,
+            StandardView::Iso,
+        ] {
+            for projection in [DEFAULT_PROJECTION, ortho] {
+                // A camera looking this way, nowhere near framed.
+                let (back, up) = view.axes();
+                let c = Camera {
+                    eye: add([0.3, 0.2, -0.1], scale(back, 7.0)),
+                    target: [0.3, 0.2, -0.1],
+                    up,
+                    projection,
+                };
+                let few = framing_points(&pts, sub(c.eye, c.target), c.up);
+                assert!(few.len() * 10 < pts.len(), "{} of {}", few.len(), pts.len());
+                for aspect in [1.0, 1.7, 0.6] {
+                    let all = refit_points(&c, &pts, aspect);
+                    let some = refit_points(&c, &few, aspect);
+                    assert!(norm(sub(all.eye, some.eye)) < 1e-12 * size, "{view:?}");
+                    assert!(norm(sub(all.target, some.target)) < 1e-12 * size);
+                    if let (
+                        Projection::Orthographic { height: a },
+                        Projection::Orthographic { height: b },
+                    ) = (all.projection, some.projection)
+                    {
+                        assert!((a - b).abs() < 1e-12 * size);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_hull_keeps_only_corners() {
+        // A square's corners, points along its sides, inside it, and again.
+        let pts = [
+            [0.5, 0.5],
+            [0.0, 0.0],
+            [0.5, 0.0],
+            [1.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 1.0],
+            [0.0, 0.5],
+            [1.0, 1.0],
+            [0.2, 0.7],
+        ];
+        let mut corners = hull2(&pts);
+        corners.sort_unstable();
+        assert_eq!(corners, [1, 3, 4, 5]);
+        assert_eq!(hull2(&[[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]]).len(), 2);
+        assert_eq!(hull2(&[[3.0, 1.0]]), [0]);
     }
 
     #[test]
