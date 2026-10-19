@@ -198,8 +198,9 @@ fn frame_along(
     let right = unit(cross(forward, up));
     let up_ = cross(right, forward);
     // The middle of the points' box, moved across the view to the middle
-    // of the points as the view sees them (no move for a symmetric model,
-    // so its target stays exact).
+    // of the points as the view sees them (no move for a symmetric model
+    // in orthographic, so its target stays exact; perspective moves it
+    // again below).
     let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
     let (mut across_lo, mut across_hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
     for p in points {
@@ -223,38 +224,78 @@ fn frame_along(
         };
         scale(axis, by)
     };
-    let target = add(centre, add(shift(0, right), shift(1, up_)));
+    let mut target = add(centre, add(shift(0, right), shift(1, up_)));
     let aspect = if aspect.is_finite() && aspect > 0.0 {
         aspect
     } else {
         1.0
     };
-    // Each point around the target: how far across the view it reaches
-    // (its width scaled to height) and how far towards the eye it stands.
-    let around = points.iter().map(|p| {
-        let q = sub(*p, target);
-        let across = (dot(q, right).abs() / aspect).max(dot(q, up_).abs());
-        (across, dot(q, back))
-    });
     let floor = 1e-6;
-    let (distance, projection) = match projection {
-        // Back far enough that every point is inside the field of view,
-        // with the margin: a point `toward` the eye is that much nearer.
-        Projection::Perspective { fov_deg } => {
-            let tan = ryukei::math::tan(fov_deg * core::f64::consts::PI / 360.0);
-            let d = around
-                .map(|(across, toward)| across.max(floor) * MARGIN / tan + toward)
-                .fold(floor, f64::max);
-            (d, projection)
-        }
-        Projection::Orthographic { .. } => {
-            let (across, toward) =
-                around.fold((floor, 0.0f64), |(a, t), (x, y)| (a.max(x), t.max(y)));
-            let height = 2.0 * across * MARGIN;
-            // In front of the nearest point, as far again as the view is high.
-            (toward + height, Projection::Orthographic { height })
+    let fit = |target: [f64; 3]| {
+        // Each point around the target: how far across the view it reaches
+        // (its width scaled to height) and how far towards the eye it
+        // stands.
+        let around = points.iter().map(|p| {
+            let q = sub(*p, target);
+            let across = (dot(q, right).abs() / aspect).max(dot(q, up_).abs());
+            (across, dot(q, back))
+        });
+        match projection {
+            // Back far enough that every point is inside the field of view,
+            // with the margin: a point `toward` the eye is that much nearer.
+            Projection::Perspective { fov_deg } => {
+                let tan = ryukei::math::tan(fov_deg * core::f64::consts::PI / 360.0);
+                let d = around
+                    .map(|(across, toward)| across.max(floor) * MARGIN / tan + toward)
+                    .fold(floor, f64::max);
+                (d, projection)
+            }
+            Projection::Orthographic { .. } => {
+                let (across, toward) =
+                    around.fold((floor, 0.0f64), |(a, t), (x, y)| (a.max(x), t.max(y)));
+                let height = 2.0 * across * MARGIN;
+                // In front of the nearest point, as far again as the view is
+                // high.
+                (toward + height, Projection::Orthographic { height })
+            }
         }
     };
+    let (mut distance, mut projection) = fit(target);
+    // In perspective nearer points look bigger, so the middle of what the
+    // view sees isn't the middle across: move the target until it is (the
+    // extremes on each side seen at equal angles), then step back to fit.
+    if let Projection::Perspective { .. } = projection {
+        for _ in 0..16 {
+            let mut moved = 0.0f64;
+            for axis in [right, up_] {
+                // The points seen furthest each way: across, and depth.
+                let seen = |p: &[f64; 3]| {
+                    let q = sub(*p, target);
+                    let (a, z) = (dot(q, axis), distance - dot(q, back));
+                    (a / z, a, z)
+                };
+                let (mut lo, mut hi) = ((f64::INFINITY, 0.0, 1.0), (f64::NEG_INFINITY, 0.0, 1.0));
+                for s in points.iter().map(seen) {
+                    if s.0 < lo.0 {
+                        lo = s;
+                    }
+                    if s.0 > hi.0 {
+                        hi = s;
+                    }
+                }
+                // The move `by` with (hi.a - by) / hi.z = -(lo.a - by) / lo.z.
+                let by = (hi.1 / hi.2 + lo.1 / lo.2) / (1.0 / hi.2 + 1.0 / lo.2);
+                if by.abs() >= ryukei::tol::LINEAR_RESOLUTION {
+                    target = add(target, scale(axis, by));
+                    moved = moved.max(by.abs());
+                }
+            }
+            (distance, projection) = fit(target);
+            if moved < ryukei::tol::LINEAR_RESOLUTION {
+                break;
+            }
+        }
+    }
     Camera {
         eye: [0, 1, 2].map(|k| target[k] + back[k] * distance),
         target,
@@ -391,10 +432,13 @@ pub fn zoom(camera: &Camera, factor: f64, toward: Option<[f64; 3]>) -> Camera {
         Projection::Perspective { .. } => {
             let step = scale(sub(p, camera.eye), 1.0 - factor);
             let eye = add(camera.eye, step);
-            // Towards a point, the target goes along, so later zooms and
-            // orbits keep their scale; towards the target, it stays.
+            // Towards a point, the target moves to the point's depth on
+            // the same axis, so later zooms and orbits keep their scale
+            // and the target stays by the model; towards the target, it
+            // stays.
             let target = if toward.is_some() {
-                add(camera.target, step)
+                let (_, _, forward) = camera.basis();
+                add(eye, scale(forward, dot(sub(p, eye), forward)))
             } else {
                 camera.target
             };
@@ -599,6 +643,51 @@ mod tests {
             assert!(z.check().is_ok());
             let after = crate::render::View::new(&z, 400, 300).pixel(p).unwrap();
             assert!((before.0 - after.0).abs() < 1e-3 && (before.1 - after.1).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn perspective_framing_centres_what_the_view_sees() {
+        // Tall, so its near top looks bigger than its far bottom.
+        let points = corners([0.0; 3], [1.0, 1.0, 3.0]);
+        for aspect in [1.0, 1.6] {
+            let c = frame_points(&points, StandardView::Iso, DEFAULT_PROJECTION, aspect);
+            let (r, u, f) = c.basis();
+            let seen = |axis: [f64; 3]| {
+                let s: Vec<f64> = points
+                    .iter()
+                    .map(|p| {
+                        let q = sub(*p, c.eye);
+                        dot(q, axis) / dot(q, f)
+                    })
+                    .collect();
+                let lo = s.iter().copied().fold(f64::INFINITY, f64::min);
+                let hi = s.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                (lo, hi)
+            };
+            for axis in [r, u] {
+                let (lo, hi) = seen(axis);
+                assert!((lo + hi).abs() < 1e-6 * (hi - lo), "{lo} .. {hi}");
+            }
+        }
+    }
+
+    #[test]
+    fn zooming_at_a_point_keeps_the_target_by_the_model() {
+        let c = frame([0.0; 3], [1.0; 3], StandardView::Iso, DEFAULT_PROJECTION);
+        let (_, _, forward) = c.basis();
+        let p = [1.0, 0.0, 1.0];
+        let start = dot(sub(p, c.target), sub(p, c.target)).sqrt();
+        let mut cam = c.clone();
+        for factor in [0.8; 6].into_iter().chain([1.25; 6]) {
+            cam = zoom(&cam, factor, Some(p));
+            // On the same axis, at the depth of the point zoomed at.
+            let (_, _, f) = cam.basis();
+            assert!(close(f, forward));
+            let depth = |q: [f64; 3]| dot(sub(q, cam.eye), forward);
+            assert!((depth(cam.target) - depth(p)).abs() < 1e-9);
+            // So never farther from the point than it began.
+            assert!(dot(sub(p, cam.target), sub(p, cam.target)).sqrt() <= start + 1e-9);
         }
     }
 

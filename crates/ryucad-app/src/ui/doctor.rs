@@ -150,10 +150,8 @@ pub fn issues(
                                     if let Some(text) = c["content"].as_str() {
                                         let shown: String = text.chars().take(2000).collect();
                                         ui.add(
-                                            egui::Label::new(
-                                                RichText::new(shown).monospace().small(),
-                                            )
-                                            .wrap(),
+                                            egui::Label::new(RichText::new(shown).monospace())
+                                                .wrap(),
                                         );
                                     }
                                 }
@@ -171,10 +169,16 @@ pub fn issues(
 }
 
 /// The Doctor dialog of an open project.
-pub fn dialog(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, state: &mut State) {
+pub fn dialog(
+    ctx: &egui::Context,
+    ws: &mut Workspace,
+    open: &mut bool,
+    state: &mut State,
+    view: egui::Rect,
+) {
     let mut chosen = None;
     let mut again = false;
-    egui::Window::new("Doctor")
+    crate::ui::dialogs::window("Doctor", view)
         .open(open)
         .default_width(520.0)
         .show(ctx, |ui| {
@@ -202,11 +206,16 @@ pub fn dialog(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, state: &
 pub fn damaged(ui: &mut egui::Ui, offline: &mut Offline, state: &mut State) -> bool {
     let mut open = false;
     egui::CentralPanel::default().show(ui, |ui| {
-        ui.heading("This project needs repair");
-        ui.label(format!(
-            "{} has parts but can't be opened as it is.",
-            offline.root.display()
-        ));
+        if offline.openable() {
+            ui.heading("This project is repaired and ready to open");
+            ui.label(format!("{} can be opened now.", offline.root.display()));
+        } else {
+            ui.heading("This project needs repair");
+            ui.label(format!(
+                "{} has parts but can't be opened as it is.",
+                offline.root.display()
+            ));
+        }
         // No undo to promise: with no daemon there is no activity log yet.
         ui.label("Nothing is changed until you choose a repair, and a repair changes only the files in its planned changes. Git has the files as they were committed.");
         if let Some(e) = &offline.error {

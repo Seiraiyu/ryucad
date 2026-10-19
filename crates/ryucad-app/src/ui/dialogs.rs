@@ -17,6 +17,14 @@ fn source(ws: &Workspace, key: &str) -> &'static str {
     }
 }
 
+/// A dialog window, first placed at the top of `view` (the 3D view's
+/// rectangle), clear of the menus and panels.
+pub fn window(title: &str, view: egui::Rect) -> egui::Window<'_> {
+    egui::Window::new(title)
+        .pivot(egui::Align2::CENTER_TOP)
+        .default_pos(view.center_top() + egui::vec2(0.0, 16.0))
+}
+
 fn about(ws: &Workspace, key: &str) -> String {
     ws.settings
         .all
@@ -92,8 +100,8 @@ fn number(ui: &mut egui::Ui, ws: &mut Workspace, key: &str, label: &str, range: 
 
 /// The project's settings: only what rebuilding or understanding the
 /// model needs.
-pub fn settings(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool) {
-    egui::Window::new("Project settings")
+pub fn settings(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, view: egui::Rect) {
+    window("Project settings", view)
         .open(open)
         .resizable(false)
         .show(ctx, |ui| {
@@ -116,8 +124,8 @@ pub fn settings(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool) {
 }
 
 /// This user's preferences, on this machine.
-pub fn preferences(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool) {
-    egui::Window::new("Preferences")
+pub fn preferences(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, view: egui::Rect) {
+    window("Preferences", view)
         .open(open)
         .resizable(false)
         .show(ctx, |ui| {

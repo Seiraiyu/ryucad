@@ -53,6 +53,57 @@ impl Activity {
     pub fn get(&self, seq: u64) -> Option<&Value> {
         self.entries.iter().find(|e| e["seq"] == seq)
     }
+
+    /// What an entry did, for its row: the method and the parts and
+    /// features it touched, and for an undo or redo, what it reverted.
+    pub fn describe(&self, e: &Value) -> String {
+        let reverted = |verb: &str| match e["target"].as_u64().and_then(|t| self.get(t)) {
+            Some(t) => format!("{verb} of {}", self.describe(t)),
+            None => format!("{verb} of an earlier change"),
+        };
+        match e["kind"].as_str() {
+            Some("undo") => reverted("undo"),
+            Some("redo") => reverted("redo"),
+            Some("external") => format!("files changed: {}", touched(e)),
+            _ => {
+                let method = e["method"].as_str().unwrap_or_default();
+                match touched(e) {
+                    t if t.is_empty() => method.to_owned(),
+                    t => format!("{method} {t}"),
+                }
+            }
+        }
+    }
+}
+
+/// The parts and features (`part/feature`) whose files an entry touched,
+/// and any other file by its path.
+fn touched(e: &Value) -> String {
+    let mut names: Vec<String> = Vec::new();
+    for f in e["files"].as_array().into_iter().flatten() {
+        let Some(path) = f["path"].as_str() else {
+            continue;
+        };
+        let parts: Vec<&str> = path.split('/').collect();
+        let name = match parts.as_slice() {
+            ["parts", part, "features", file] => {
+                format!("{part}/{}", file.strip_suffix(".json").unwrap_or(file))
+            }
+            ["parts", part, ..] => (*part).to_owned(),
+            _ => path.to_owned(),
+        };
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    const SHOWN: usize = 3;
+    let more = names.len().saturating_sub(SHOWN);
+    names.truncate(SHOWN);
+    let mut out = names.join(", ");
+    if more > 0 {
+        out.push_str(&format!(" and {more} more"));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -75,5 +126,33 @@ mod tests {
             &json!({"seq": 4, "kind": "external", "undone_by": null})
         ));
         assert_eq!(a.generation, 3);
+    }
+
+    #[test]
+    fn rows_say_what_they_touched() {
+        let mut a = Activity::default();
+        a.reset(&json!([
+            {"seq": 7, "kind": "change", "method": "feature.edit",
+             "params": {"part": "p", "feature": "boss"},
+             "files": [{"path": "parts/p/features/boss.json", "change": "modified"}]},
+            {"seq": 8, "kind": "change", "method": "doctor.repair", "params": {},
+             "files": [{"path": "parts/q/part.json", "change": "created"},
+                       {"path": "parts/q/features/a.json", "change": "modified"}]},
+            {"seq": 9, "kind": "external", "method": null,
+             "files": [{"path": "ryucad.json", "change": "modified"}]},
+            {"seq": 10, "kind": "undo", "target": 7, "files": []},
+            {"seq": 11, "kind": "undo", "target": 2, "files": []},
+        ]));
+        let d: Vec<String> = a.entries.iter().map(|e| a.describe(e)).collect();
+        assert_eq!(
+            d,
+            [
+                "feature.edit p/boss",
+                "doctor.repair q, q/a",
+                "files changed: ryucad.json",
+                "undo of feature.edit p/boss",
+                "undo of an earlier change",
+            ]
+        );
     }
 }

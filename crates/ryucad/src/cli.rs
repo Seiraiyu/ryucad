@@ -801,7 +801,7 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             let root = find_root(&here)?;
             if !no_daemon(cli) {
                 match client::request(&root, &req, participant(cli).as_deref()) {
-                    Ok(answer) => return deliver(cmd, answer?),
+                    Ok(answer) => return deliver(cmd, answer?).map(|r| lift(cmd, r, warnings)),
                     // Never delivered, so running it here is safe.
                     Err(e) => warnings.push(format!("{}; ran in process", e.message)),
                 }
@@ -810,8 +810,32 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                 cmd,
                 server::handle_safely(&mut None, None, None, &root, req)?,
             )
+            .map(|r| lift(cmd, r, warnings))
         }
     }
+}
+
+/// The CLI's warnings are all in its envelope: the warnings a request
+/// returns in its result (the protocol has no envelope) move there, as
+/// strings.
+fn lift(cmd: &Command, mut result: Value, warnings: &mut Vec<String>) -> Value {
+    if !matches!(
+        cmd,
+        Command::History { .. } | Command::Config(ConfigCmd::Get { .. })
+    ) {
+        return result;
+    }
+    if let Some(Value::Array(list)) = result.as_object_mut().and_then(|o| o.remove("warnings")) {
+        warnings.extend(list.into_iter().map(|w| {
+            match w {
+                Value::String(s) => s,
+                w => w["message"]
+                    .as_str()
+                    .map_or_else(|| w.to_string(), str::to_owned),
+            }
+        }));
+    }
+    result
 }
 
 /// The result to print; bytes the answer carries go to the command's

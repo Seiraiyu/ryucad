@@ -238,7 +238,12 @@ impl Preferences {
             std::fs::rename(&self.path, &bak).map_err(|e| Error::io(&self.path, &e))?;
             self.problem = None;
         }
-        self.values.insert(name.to_owned(), value);
+        // A preference set to its default is no longer one.
+        if key(name).is_ok_and(|k| (k.default)() == value) {
+            self.values.remove(name);
+        } else {
+            self.values.insert(name.to_owned(), value);
+        }
         let doc = json!({"format": FORMAT, "kind": KIND, "values": self.values});
         write_atomic(&self.path, canonical::to_string(&doc))
     }

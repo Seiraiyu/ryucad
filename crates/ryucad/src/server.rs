@@ -400,7 +400,8 @@ fn dispatch(
                 if key == "daemon.poll_ms" {
                     live.poll_ms = v["value"].as_u64().unwrap_or(250);
                 }
-                let note = json!({"key": key, "scope": v["scope"], "value": v["value"]});
+                let note = json!({"key": key, "scope": v["scope"], "value": v["value"],
+                                  "default": v["default"]});
                 live.hub.send(Topic::Project, "config.changed", &note);
             }
             Ok(v)
@@ -2266,7 +2267,7 @@ pub(crate) mod tests {
             assert_eq!(got[0].0, "config.changed");
             assert_eq!(
                 got[0].1,
-                json!({"key": "daemon.poll_ms", "scope": "user", "value": 100})
+                json!({"key": "daemon.poll_ms", "scope": "user", "value": 100, "default": false})
             );
             // A project setting is logged like any file change; a
             // preference isn't in the project, so it isn't.

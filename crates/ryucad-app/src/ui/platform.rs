@@ -86,3 +86,86 @@ pub fn crash_reports() {
         default(info);
     }));
 }
+
+/// Ctrl+click is a right-click, as on a one-button Mac: a primary press
+/// with Ctrl becomes a secondary one, without Ctrl, and so does its
+/// release, wherever Ctrl is by then (`held` remembers, across frames).
+pub fn ctrl_click_as_secondary(events: &mut [eframe::egui::Event], held: &mut bool) {
+    use eframe::egui::{Event, PointerButton};
+    for e in events {
+        if let Event::PointerButton {
+            button,
+            pressed,
+            modifiers,
+            ..
+        } = e
+            && *button == PointerButton::Primary
+        {
+            if *pressed {
+                *held = modifiers.ctrl && !modifiers.mac_cmd;
+            }
+            if *held {
+                *button = PointerButton::Secondary;
+                modifiers.ctrl = false;
+            }
+            if !*pressed {
+                *held = false;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod ctrl_click_tests {
+    use super::*;
+    use eframe::egui::{Event, Modifiers, PointerButton, pos2};
+
+    fn button(button: PointerButton, pressed: bool, modifiers: Modifiers) -> Event {
+        Event::PointerButton {
+            pos: pos2(1.0, 2.0),
+            button,
+            pressed,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn ctrl_click_is_a_right_click() {
+        let mut held = false;
+        // Ctrl released before the button: still one right-click.
+        let mut events = vec![
+            button(PointerButton::Primary, true, Modifiers::CTRL),
+            button(PointerButton::Primary, false, Modifiers::NONE),
+            button(PointerButton::Primary, true, Modifiers::NONE),
+            button(PointerButton::Primary, false, Modifiers::NONE),
+            // Cmd+click adds to the selection, as it did.
+            button(
+                PointerButton::Primary,
+                true,
+                Modifiers::MAC_CMD | Modifiers::COMMAND,
+            ),
+        ];
+        ctrl_click_as_secondary(&mut events, &mut held);
+        let buttons: Vec<(PointerButton, bool)> = events
+            .iter()
+            .map(|e| match e {
+                Event::PointerButton {
+                    button, modifiers, ..
+                } => (*button, modifiers.ctrl),
+                _ => unreachable!(),
+            })
+            .collect();
+        use PointerButton::{Primary, Secondary};
+        assert_eq!(
+            buttons,
+            [
+                (Secondary, false),
+                (Secondary, false),
+                (Primary, false),
+                (Primary, false),
+                (Primary, false)
+            ]
+        );
+        assert!(!held);
+    }
+}

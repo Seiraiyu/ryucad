@@ -59,7 +59,7 @@ impl Settings {
     pub fn changed(&mut self, v: &Value) {
         if let Some(s) = self.all.iter_mut().find(|s| v["key"] == s.key.as_str()) {
             s.value = v["value"].clone();
-            s.default = false;
+            s.default = v["default"] == true;
             self.generation += 1;
         }
     }
@@ -95,6 +95,9 @@ mod tests {
         s.changed(&json!({"key": "ui.theme", "scope": "user", "value": "dark"}));
         assert_eq!(s.text("ui.theme", "x"), "dark");
         assert!(!s.all[0].default);
+        // Set back to its default, it says so.
+        s.changed(&json!({"key": "ui.theme", "scope": "user", "value": "system", "default": true}));
+        assert!(s.all[0].default);
         assert_eq!((s.project_revision.as_str(), s.warnings.len()), ("r1", 1));
     }
 }
