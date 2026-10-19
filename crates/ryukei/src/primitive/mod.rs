@@ -52,8 +52,14 @@ fn check_extent(placement: &Rigid, lo: Point3, hi: Point3) -> Result<(), Error> 
 }
 
 /// Names every entity by role and reports it: faces from `roles`, edges
-/// and vertices from the sorted names of the faces around them.
-fn name_by_role(body: &mut Body, kind: &str, key: OpKey, roles: &[(FaceId, FaceRole)]) -> Journal {
+/// and vertices from the sorted names of the faces around them. Then
+/// gives every fin its exact pcurve.
+fn name_by_role(
+    body: &mut Body,
+    kind: &str,
+    key: OpKey,
+    roles: &[(FaceId, FaceRole)],
+) -> Result<Journal, Error> {
     let mut journal = Journal::new();
     for &(f, role) in roles {
         let name = body.derive_name(kind, key, Role::Face(role), &[]);
@@ -95,11 +101,12 @@ fn name_by_role(body: &mut Body, kind: &str, key: OpKey, roles: &[(FaceId, FaceR
     for (_, v) in body.vertices.live() {
         journal.push(Event::Created(v.name));
     }
+    crate::pcurve::fill(body)?;
     if cfg!(debug_assertions) {
         let faults = crate::check::check(body);
         assert!(faults.is_empty(), "{kind} primitive is invalid: {faults:?}");
     }
-    journal
+    Ok(journal)
 }
 
 #[cfg(test)]

@@ -55,7 +55,7 @@ pub fn revolve(
             capped::sweep(&mut b, &mut keys, &namer, profile.frame(), lump, &turn)?;
         }
     }
-    let journal = namer.finish(&b)?;
+    let journal = namer.finish(&mut b)?;
     Ok((b, journal))
 }
 
