@@ -405,6 +405,14 @@ fn settings_and_preferences() {
         .clone();
     assert_eq!(theme["value"], "dark");
     assert_eq!(p.ok(&["config", "get", "display.edges"])["value"], false);
+    // Set back to its default, it is the default again.
+    p.ok(&["config", "set", "display.edges", "true"]);
+    let v = p.ok(&["config", "get", "display.edges"]);
+    assert_eq!(
+        (&v["value"], &v["default"]),
+        (&Value::from(true), &Value::from(true))
+    );
+    p.ok(&["config", "set", "display.edges", "false"]);
     // A project setting is a file change, guarded by the project revision.
     let rev = p.ok(&["config", "get", "default_unit"])["project_revision"].clone();
     p.fails(
