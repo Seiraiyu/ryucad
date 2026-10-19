@@ -575,6 +575,20 @@ fn the_start_window_reopens_recent_projects_and_creates_new_ones() {
 }
 
 #[test]
+fn thumbnails_wait_until_the_start_window_shows() {
+    use ryucad_app::ui::start::Start;
+    let p = Project::named("lazy").with_part();
+    let daemon = ryucad(); // and the shared config folder
+    ryucad::config::remember_project(&p.root).unwrap();
+    // A window opened on a project builds a start screen it never shows:
+    // that renders nothing.
+    let wake: ryucad_app::core::link::Wake = std::sync::Arc::new(|| {});
+    let start = Start::new(daemon, &wake);
+    assert!(start.recent.contains(&p.root));
+    assert!(start.thumbnails.done.is_empty());
+}
+
+#[test]
 fn a_typed_folder_path_opens_without_the_os_dialog() {
     if !gpu() {
         return;

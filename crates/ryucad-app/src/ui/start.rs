@@ -19,7 +19,11 @@ pub enum Action {
 
 pub struct Start {
     pub recent: Vec<PathBuf>,
+    /// Asked for when the screen first shows, not when it is made: a
+    /// window opened on a project makes one it may never show.
     pub thumbnails: Thumbnails,
+    daemon: Daemon,
+    wake: Wake,
     textures: BTreeMap<PathBuf, egui::TextureHandle>,
     /// A folder that was opened but isn't a project.
     pub not_a_project: Option<PathBuf>,
@@ -31,12 +35,11 @@ pub struct Start {
 
 impl Start {
     pub fn new(daemon: &Daemon, wake: &Wake) -> Start {
-        let recent = recent::load();
-        let mut thumbnails = Thumbnails::default();
-        thumbnails.request(daemon, &recent, wake);
         Start {
-            recent,
-            thumbnails,
+            recent: recent::load(),
+            thumbnails: Thumbnails::default(),
+            daemon: daemon.clone(),
+            wake: wake.clone(),
             textures: BTreeMap::new(),
             not_a_project: None,
             error: None,
@@ -67,6 +70,10 @@ pub fn pick_folder() -> Option<PathBuf> {
 }
 
 pub fn show(ui: &mut egui::Ui, start: &mut Start) -> Option<Action> {
+    // Each is asked for once.
+    start
+        .thumbnails
+        .request(&start.daemon, &start.recent, &start.wake);
     start.thumbnails.poll();
     let mut action = None;
     egui::CentralPanel::default().show(ui, |ui| {
