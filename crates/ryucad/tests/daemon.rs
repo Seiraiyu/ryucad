@@ -835,3 +835,33 @@ fn render_what_a_participant_sees() {
     assert_eq!(r["error"]["code"], "no_live_session");
     cli(&f, &["daemon", "stop"]);
 }
+
+/// The CLI and the app find one daemon whatever `$TMPDIR` each was given
+/// (agent sessions, sudo and launchd jobs set their own).
+#[cfg(unix)]
+#[test]
+fn the_runtime_folder_doesnt_follow_tmpdir() {
+    let f = fixture();
+    // Short, so a socket under either would fit.
+    let tmps = [(); 2].map(|()| tempfile::tempdir_in("/tmp").unwrap());
+    let cli = |tmp: usize, args: &[&str]| -> Value {
+        let tmp = tmps[tmp].path();
+        let out = Command::new(cargo_bin("ryucad"))
+            .args(args)
+            .current_dir(&f.root)
+            .env_remove(RUNTIME_DIR_VAR)
+            .env_remove("XDG_RUNTIME_DIR")
+            .env("TMPDIR", tmp)
+            .env("RYUCAD_CONFIG_DIR", f.run.with_file_name("config"))
+            .env("RYUCAD_IDLE_TIMEOUT", "30")
+            .output()
+            .unwrap();
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let r = cli(0, &["part", "list"]);
+    assert_eq!(r["warnings"], serde_json::json!([]), "{r}");
+    let status = cli(1, &["daemon", "status"]);
+    let stop = cli(0, &["daemon", "stop"]);
+    assert_eq!(status["result"]["running"], true, "{status}");
+    assert_eq!(stop["ok"], true, "{stop}");
+}

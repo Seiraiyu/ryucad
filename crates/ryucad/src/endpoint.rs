@@ -35,13 +35,40 @@ pub fn runtime_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-#[cfg(unix)]
+/// Never from `$TMPDIR`: agent sessions, sudo, IDE terminals and launchd
+/// jobs set their own, and a CLI that looked elsewhere than the app would
+/// start a second daemon the app never sees.
+#[cfg(all(unix, not(target_os = "macos")))]
 fn default_runtime_dir() -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(d) if !d.is_empty() => PathBuf::from(d).join("ryucad"),
         // SAFETY: getuid has no preconditions and can't fail.
-        _ => std::env::temp_dir().join(format!("ryucad-{}", unsafe { libc::getuid() })),
+        _ => PathBuf::from("/tmp").join(format!("ryucad-{}", unsafe { libc::getuid() })),
     }
+}
+
+/// The user's own temporary folder, as the system has it (`TMPDIR` is
+/// usually set to it, but not always: see above).
+#[cfg(target_os = "macos")]
+fn default_runtime_dir() -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    let mut buf = vec![0u8; 1024];
+    // SAFETY: the buffer is as long as we say; confstr writes at most that,
+    // NUL-terminated, and returns the length it needed (0 on failure).
+    let n = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        )
+    };
+    // SAFETY: getuid has no preconditions and can't fail.
+    let uid = unsafe { libc::getuid() };
+    if n == 0 || n > buf.len() {
+        return PathBuf::from("/tmp").join(format!("ryucad-{uid}"));
+    }
+    buf.truncate(n - 1);
+    PathBuf::from(std::ffi::OsStr::from_bytes(&buf)).join("ryucad")
 }
 
 #[cfg(windows)]
