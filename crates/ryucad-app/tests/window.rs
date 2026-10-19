@@ -312,6 +312,50 @@ fn an_agents_highlight_shows_its_label() {
 }
 
 #[test]
+fn a_highlight_label_stays_inside_the_view() {
+    if !gpu() {
+        return;
+    }
+    use ryucad_app::ui::app::Screen;
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    let faces = p.ok(&["inspect", "p", "boss"])["bodies"][0]["faces"].clone();
+    let top = format!("p/boss/{}", faces[0]["name"].as_str().unwrap());
+    let text = "a long label that would run past the edge of the view";
+    p.ok(&["highlight", &top, "--label", text]);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .people
+            .all
+            .values()
+            .any(|p| !p.highlights.is_empty())
+    });
+    h.step();
+    h.get_by_label(text);
+    // Panned in steps, the model goes to the right edge and past it; the
+    // label is shown only while it fits, or kept inside.
+    let mut shown = 0;
+    for _ in 0..40 {
+        if let Screen::Opened(o) = &mut h.state_mut().screen {
+            o.view.nav.camera = ryucad::view::pan(&o.view.nav.camera, -0.03, 0.0);
+        }
+        h.run_steps(2);
+        let view = h.state().opened().view.rect;
+        if let Some(label) = h.query_by_label(text) {
+            shown += 1;
+            assert!(
+                view.contains_rect(label.rect()),
+                "{:?} outside {view:?}",
+                label.rect()
+            );
+        }
+    }
+    assert!(shown > 0);
+}
+
+#[test]
 fn the_window_follows_an_agent_until_the_human_navigates() {
     if !gpu() {
         return;

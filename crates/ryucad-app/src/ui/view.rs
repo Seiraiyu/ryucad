@@ -372,6 +372,8 @@ impl View {
             };
             egui::Area::new(ui.scope_id().with(("highlight label", i)))
                 .fixed_pos(s + egui::vec2(8.0, -8.0))
+                // Moved in from the edges rather than over the panels.
+                .constrain_to(rect)
                 .order(egui::Order::Foreground)
                 .interactable(false)
                 .show(ui.ctx(), |ui| {
