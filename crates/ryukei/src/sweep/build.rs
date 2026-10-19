@@ -17,10 +17,12 @@
 //! run counterclockwise about it (see [`LoopPlan`]).
 
 use crate::Error;
-use crate::euler::{Corner, kfmrh, kvr, mef, mev, mvfs, mvr, set_surface};
+use crate::euler::{Corner, kfmrh, kvr, mef, mev, mvfs, mvr, mvs, set_surface};
 use crate::geom::Point3;
 use crate::name::{Name, OpKey, Role, SweepRole};
-use crate::topo::{Body, CurveId, EdgeId, FaceId, FinId, Sense, SurfaceId, VertexId};
+use crate::topo::{
+    Body, CurveId, EdgeId, FaceId, FinId, LoopId, RegionId, Sense, SurfaceId, VertexId,
+};
 
 /// An edge's curve and interval, the parameter increasing the way the
 /// edge runs.
@@ -384,25 +386,52 @@ pub(crate) struct TurnVertex {
 /// segment 0 starts on the axis, segment `i` runs from vertex `i - 1` to
 /// vertex `i`, and the last segment ends on the axis. `ends` gives the
 /// chain's two axis points and whether each is an apex, a lone vertex of
-/// its side.
+/// its side. `region` is `None` for a lump's outer shell, which starts a
+/// solid region, or the region a void shell goes in.
 #[derive(Clone, Debug)]
 pub(crate) struct TurnPlan {
     pub segments: Vec<TurnSegment>,
     pub vertices: Vec<TurnVertex>,
     pub ends: Option<[(Point3, bool); 2]>,
+    pub region: Option<RegionId>,
 }
 
-/// What a full revolve's lump became: a face per segment, a circle and its
-/// vertex per profile vertex, and the apexes at the chain's ends.
-#[derive(Clone, Debug, Default)]
+/// What a full revolve's shell became: a face per segment, a circle and
+/// its vertex per profile vertex, the apexes at the chain's ends, and the
+/// region it is in.
+#[derive(Clone, Debug)]
 pub(crate) struct TurnBuilt {
     pub sides: Vec<FaceId>,
     pub circles: Vec<EdgeId>,
     pub vertices: Vec<VertexId>,
     pub apexes: [Option<VertexId>; 2],
+    pub region: RegionId,
 }
 
-/// Builds one lump of a full revolve into `b`, as a new solid region.
+/// The first face of a shell, on `surface` with a lone vertex at `point`:
+/// in a new solid region (MVFS), or in `region` (MVS). Returns the region,
+/// the face, its loop and the vertex.
+fn start_shell(
+    b: &mut Body,
+    keys: &mut Keys,
+    region: Option<RegionId>,
+    point: Point3,
+    surface: SurfaceId,
+) -> Result<(RegionId, FaceId, LoopId, VertexId), Error> {
+    Ok(match region {
+        None => {
+            let m = mvfs(b, keys.next(), point, surface)?.0;
+            (m.region, m.face, m.loop_, m.vertex)
+        }
+        Some(r) => {
+            let m = mvs(b, keys.next(), r, point, surface)?.0;
+            (r, m.face, m.loop_, m.vertex)
+        }
+    })
+}
+
+/// Builds one shell of a full revolve into `b`: a lump's outer shell as a
+/// new solid region, or a void shell in the plan's region.
 ///
 /// The faces are made in a chain, one closed circle at a time: MVR then
 /// MEF across a face leaves the old face with the circle's fin against it
@@ -410,37 +439,46 @@ pub(crate) struct TurnBuilt {
 /// same side, joined by KFMRH. Each side face ends up with the fin along
 /// the circle at its first vertex and against the circle at its last.
 pub(crate) fn turned(b: &mut Body, keys: &mut Keys, plan: &TurnPlan) -> Result<TurnBuilt, Error> {
-    let mut out = TurnBuilt::default();
     let n = plan.vertices.len();
     let first_side = plan.segments[0].side.0;
+    let mut out = TurnBuilt {
+        sides: Vec::new(),
+        circles: Vec::new(),
+        vertices: Vec::new(),
+        apexes: [None; 2],
+        region: b.outer_region(),
+    };
     if n == 0 {
         // One face on a closed surface: a whole closed curve turned, or a
         // chain of one segment from the axis to the axis. MVFS starts it
         // at an apex if there is one; otherwise KVR takes its vertex away.
         let [(p, a), (q, z)] = plan.ends.unwrap_or([(Point3::ORIGIN, false); 2]);
         let start = if !a && z { q } else { p };
-        let m = mvfs(b, keys.next(), start, first_side)?.0;
-        out.sides.push(m.face);
+        let (region, face, loop_, vertex) = start_shell(b, keys, plan.region, start, first_side)?;
+        out.region = region;
+        out.sides.push(face);
         match (a, z) {
             (false, false) => {
-                kvr(b, m.loop_)?;
+                kvr(b, loop_)?;
             }
-            (true, false) => out.apexes[0] = Some(m.vertex),
-            (false, true) => out.apexes[1] = Some(m.vertex),
+            (true, false) => out.apexes[0] = Some(vertex),
+            (false, true) => out.apexes[1] = Some(vertex),
             (true, true) => {
-                out.apexes[0] = Some(m.vertex);
-                out.apexes[1] = Some(mvr(b, keys.next(), m.face, q)?.0.vertex);
+                out.apexes[0] = Some(vertex);
+                out.apexes[1] = Some(mvr(b, keys.next(), face, q)?.0.vertex);
             }
         }
         set_sides(b, plan, &out)?;
         return Ok(out);
     }
-    let m = mvfs(b, keys.next(), plan.vertices[0].point, first_side)?.0;
-    let lone = Corner::Lone(m.loop_);
+    let (region, _, loop_, vertex) =
+        start_shell(b, keys, plan.region, plan.vertices[0].point, first_side)?;
+    out.region = region;
+    let lone = Corner::Lone(loop_);
     let c = &plan.vertices[0].circle;
     let made = mef(b, keys.next(), lone, lone, c.curve, c.interval)?.0;
     out.circles.push(made.edge);
-    out.vertices.push(m.vertex);
+    out.vertices.push(vertex);
     // The face against the first circle is the side before it; the one
     // along it continues the chain.
     let before = made.faces[1];
@@ -495,7 +533,19 @@ fn set_sides(b: &mut Body, plan: &TurnPlan, out: &TurnBuilt) -> Result<(), Error
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::check::check;
+    use crate::check::Fault;
+
+    /// The checker's faults once the builder's body has its pcurves, which
+    /// the sweeps add after building.
+    fn check(b: &Body) -> Vec<Fault> {
+        crate::check::check(&filled(b))
+    }
+
+    fn filled(b: &Body) -> Body {
+        let mut b = b.clone();
+        crate::pcurve::fill(&mut b).unwrap();
+        b
+    }
     use crate::geom::{
         Circle, Cone, Curve, Cylinder, Frame, Line, Plane, Sphere, Surface, Vector3,
     };
@@ -613,7 +663,8 @@ mod tests {
     /// mesh.
     fn volume(b: &Body) -> f64 {
         use crate::mesh::{MeshParams, check_mesh, tessellate};
-        assert_eq!(check(b), []);
+        let b = &filled(b);
+        assert_eq!(crate::check::check(b), []);
         let m = tessellate(b, &MeshParams::new(1e-3, 0.5)).unwrap();
         assert!(m.faults.is_empty(), "{:?}", m.faults);
         check_mesh(b, &m).unwrap();
@@ -727,6 +778,7 @@ mod tests {
                 .collect(),
             vertices,
             ends,
+            region: None,
         }
     }
 

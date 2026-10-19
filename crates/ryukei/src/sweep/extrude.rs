@@ -42,7 +42,7 @@ pub fn extrude(
     for lump in profile.lumps() {
         capped::sweep(&mut b, &mut keys, &namer, profile.frame(), lump, &motion)?;
     }
-    let journal = namer.finish(&b)?;
+    let journal = namer.finish(&mut b)?;
     Ok((b, journal))
 }
 

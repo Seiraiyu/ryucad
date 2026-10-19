@@ -112,7 +112,7 @@ fn turned(
         set_surface(&mut b, top.faces[0], top_plane, Sense::Forward)?;
         roles.push((top.faces[0], FaceRole::Top));
     }
-    let journal = name_by_role(&mut b, kind, key, &roles);
+    let journal = name_by_role(&mut b, kind, key, &roles)?;
     Ok((b, journal))
 }
 

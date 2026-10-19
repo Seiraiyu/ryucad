@@ -1511,7 +1511,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "ryucad"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "blake3",
  "clap",
@@ -1531,7 +1531,7 @@ dependencies = [
 
 [[package]]
 name = "ryukei"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "libm",
  "num-bigint",
@@ -1550,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "ryukei-testkit"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "num-bigint",
  "num-rational",

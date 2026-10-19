@@ -11,6 +11,7 @@ pub mod interval;
 pub mod math;
 pub mod mesh;
 pub mod name;
+pub mod pcurve;
 pub mod predicates;
 pub mod primitive;
 pub mod sweep;

@@ -45,6 +45,7 @@ pub fn bump_block(
     let s = NurbsSurface::new([knots()?, knots()?], points, None)?;
     let id = b.add_surface(Surface::Nurbs(Arc::new(s)));
     euler::set_surface(&mut b, top, id, Sense::Forward)?;
+    ryukei::pcurve::fill(&mut b)?;
     Ok(b)
 }
 

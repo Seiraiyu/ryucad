@@ -70,6 +70,7 @@ fn swap(b: &mut Body, f: FaceId, s: Surface, at: &Rigid) {
     };
     let id = b.add_surface(s);
     euler::set_surface(b, f, id, sense).unwrap();
+    ryukei::pcurve::fill(b).unwrap();
 }
 
 /// A mesh that passes every check, with its volume and area.

@@ -46,11 +46,13 @@ impl Namer {
         name
     }
 
-    /// The journal of a finished sweep: every face, then every edge, then
+    /// Gives every fin its exact pcurve, then returns the journal of the
+    /// finished sweep: every face, then every edge, then
     /// every vertex, created, in array order. Debug builds assert the whole
     /// check; release builds still refuse a body whose topology fails it,
     /// a kernel bug reported rather than handed on.
-    pub(crate) fn finish(&self, b: &Body) -> Result<Journal, Error> {
+    pub(crate) fn finish(&self, b: &mut Body) -> Result<Journal, Error> {
+        crate::pcurve::fill(b)?;
         let mut journal = Journal::new();
         for f in b.faces() {
             journal.push(Event::Created(b.faces[f].name));

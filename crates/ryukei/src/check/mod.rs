@@ -24,7 +24,7 @@ pub enum Fault {
     BadRegion { region: RegionId },
     /// A live record refers to an entity that is not live.
     DeadReference { from: EntityId, to: EntityId },
-    /// A face's surface or an edge's curve is not live.
+    /// A face's surface, an edge's curve or a fin's pcurve is not live.
     DeadGeometry { from: EntityId },
     /// The ring of members this entity owns is broken: a member is dead or
     /// claims another owner, a `prev` does not point back, the ring does
@@ -82,11 +82,18 @@ pub enum Fault {
         face: FaceId,
         distance: f64,
     },
+    /// A fin with no pcurve.
+    MissingPcurve { fin: FinId },
+    /// A fin's pcurve, taken onto its face's surface, strays farther than
+    /// the edge's tolerance from the edge (worst of the edge's samples).
+    PcurveOffEdge { fin: FinId, distance: f64 },
     /// A planar face with straight edges whose loops wind clockwise about
     /// its normal.
     FaceInsideOut { face: FaceId },
-    /// A solid whose faces are all planar with straight edges encloses no
-    /// positive volume: it is inside out or flat.
+    /// A solid whose faces are all planar with straight edges does not
+    /// have exactly one shell enclosing positive volume (its outside) with
+    /// every other shell enclosing negative volume (a cavity): a shell is
+    /// inside out or flat.
     NotOutward { region: RegionId },
 }
 
@@ -131,6 +138,64 @@ mod tests {
     #[test]
     fn a_tetrahedron_is_sound() {
         assert_eq!(faults(&tetrahedron()), []);
+    }
+
+    #[test]
+    fn pcurves_must_be_there_live_and_on_their_edges() {
+        use crate::geom::{Curve2, Line2, Vector2};
+        use crate::topo::{Curve2Id, Pcurve};
+        let mut b = tetrahedron();
+        let f = FinId::from_index(0);
+        let p = b.fins[f].pcurve.unwrap();
+        b.fins[f].pcurve = None;
+        assert_eq!(check(&b), [Fault::MissingPcurve { fin: f }]);
+        // Its own pcurve moved a little (within the edge's tolerance), then
+        // far.
+        let shifted = |b: &mut Body, d: f64| {
+            let Curve2::Line2(l) = b.curves2[p.curve].clone() else {
+                panic!("a line")
+            };
+            let moved = Line2::new(l.origin() + Vector2::new(0.0, d), l.dir()).unwrap();
+            let curve = b.add_curve2(Curve2::Line2(moved));
+            Pcurve { curve, ..p }
+        };
+        let near = shifted(&mut b, 0.5e-8);
+        b.fins[f].pcurve = Some(near);
+        assert_eq!(check(&b), []);
+        let far = shifted(&mut b, 0.25);
+        b.fins[f].pcurve = Some(far);
+        assert!(check(&b).iter().any(
+            |x| matches!(x, Fault::PcurveOffEdge { fin, distance } if *fin == f && *distance > 0.2)
+        ));
+        b.fins[f].pcurve = Some(Pcurve {
+            curve: Curve2Id::from_index(999),
+            ..p
+        });
+        assert_eq!(
+            check_topology(&b),
+            [Fault::DeadGeometry {
+                from: EntityId::Fin(f)
+            }]
+        );
+    }
+
+    #[test]
+    fn a_hollow_cube_is_sound_and_its_shells_point_the_right_way() {
+        use crate::topo::fixture::{cube, hollow_cube, polyhedron, split_shell};
+        let b = hollow_cube();
+        assert_eq!(check(&b), []);
+        let solid = RegionId::from_index(1);
+        assert_eq!(b.region_shells(solid).count(), 2);
+        // The cavity's faces pointing out of it, into the solid: two shells
+        // enclose positive volume.
+        let (mut points, mut faces) = cube(0.0, 3.0, 0, false);
+        let (inner, holes) = cube(1.0, 2.0, 8, false);
+        points.extend(inner);
+        faces.extend(holes);
+        let cycles: Vec<&[usize]> = faces.iter().map(Vec::as_slice).collect();
+        let mut b = polyhedron(&points, &cycles);
+        split_shell(&mut b, &(6..12).map(FaceId::from_index).collect::<Vec<_>>());
+        assert_eq!(check(&b), [Fault::NotOutward { region: solid }]);
     }
 
     #[test]
@@ -410,6 +475,7 @@ mod tests {
         let tau = core::f64::consts::TAU;
         let (mef, _) =
             crate::euler::mef(&mut b, crate::name::OpKey(2), lone, lone, c, [0.0, tau]).unwrap();
+        crate::pcurve::fill(&mut b).unwrap();
         assert_eq!(check(&b), []);
         b.edges[mef.edge].interval = [0.0, 3.0];
         assert!(check(&b).contains(&Fault::BadInterval { edge: mef.edge }));
@@ -450,6 +516,7 @@ mod tests {
         let tau = core::f64::consts::TAU;
         let (mef, _) =
             crate::euler::mef(&mut b, crate::name::OpKey(2), lone, lone, c, [0.0, tau]).unwrap();
+        crate::pcurve::fill(&mut b).unwrap();
         assert_eq!(check(&b), []);
         b.edges[mef.edge].interval = [0.0, 3.0];
         assert!(check(&b).contains(&Fault::BadInterval { edge: mef.edge }));

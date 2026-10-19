@@ -147,6 +147,7 @@ pub fn mekr(
             next: fin,
             prev: fin,
             around,
+            pcurve: None,
         });
     }
     // fwd, then round the `to` loop, rev, then round the `from` loop.
@@ -182,7 +183,8 @@ pub struct Kfmrh {
 
 /// Kill face, make ring (hole): `kill`, which must have exactly one loop
 /// and share a shell with `keep`, dies and its loop becomes an extra loop
-/// of `keep`. The shell's genus goes up by one.
+/// of `keep`. The shell's genus goes up by one. The loop's fins lose their
+/// pcurves when the two faces are on different surfaces.
 ///
 /// Names: both faces' names retire; `keep` is `(key, Merged, [a, b])` with
 /// the two names sorted.
@@ -210,6 +212,9 @@ pub fn kfmrh(
     let merged = body.derive_name("kfmrh", key, Role::Merged, &pair);
     let mut journal = Journal::new();
     journal.push(Event::merged(names[0], names[1], merged));
+    if body.faces[keep].surface != body.faces[kill].surface {
+        body.clear_pcurves(lp);
+    }
     body.unlink_loop(lp);
     body.link_loop(keep, lp);
     body.kill_face(kill);
@@ -509,5 +514,43 @@ mod tests {
             Err(TopologyError::NotRemovable.into())
         );
         assert_eq!(b.dump(), before);
+    }
+
+    /// The tetrahedron with the same placeholder pcurve on every fin.
+    fn with_pcurves() -> (crate::topo::Body, crate::topo::Pcurve) {
+        use crate::geom::{Curve2, Line2, Point2, Vector2};
+        let mut b = crate::topo::fixture::tetrahedron();
+        let c = b.add_curve2(Curve2::Line2(
+            Line2::new(Point2::new(0.0, 0.0), Vector2::new(1.0, 0.0)).unwrap(),
+        ));
+        let p = crate::topo::Pcurve {
+            curve: c,
+            map: [0.0, 1.0],
+        };
+        for f in b.fins().collect::<Vec<_>>() {
+            crate::euler::set_pcurve(&mut b, f, Some(p)).unwrap();
+        }
+        (b, p)
+    }
+
+    #[test]
+    fn a_loop_moved_to_another_surface_loses_its_pcurves() {
+        let (mut b, p) = with_pcurves();
+        let [f0, f1] = [0, 1].map(<FaceId as Id>::from_index);
+        let (k, _) = kfmrh(&mut b, OpKey(1), f0, f1).unwrap();
+        for l in b.face_loops(f0).collect::<Vec<_>>() {
+            let expect = if l == k.loop_ { None } else { Some(p) };
+            for fin in b.loop_fins(l).collect::<Vec<_>>() {
+                assert_eq!(b.fin(fin).unwrap().pcurve, expect);
+            }
+        }
+        // MFKRH keeps the surface, so the pcurves it moves stay.
+        let (mut b, p) = with_pcurves();
+        let (k, _) = kfmrh(&mut b, OpKey(1), f0, f1).unwrap();
+        for fin in b.loop_fins(k.loop_).collect::<Vec<_>>() {
+            crate::euler::set_pcurve(&mut b, fin, Some(p)).unwrap();
+        }
+        mfkrh(&mut b, OpKey(2), k.loop_).unwrap();
+        assert!(b.fins().all(|f| b.fin(f).unwrap().pcurve == Some(p)));
     }
 }
