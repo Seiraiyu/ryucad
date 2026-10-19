@@ -3,7 +3,10 @@
 //! and swept surfaces that keep their generating curve.
 
 mod axis;
+// Used by the intersections, from the next commit on.
 mod bbox;
+#[allow(dead_code)]
+pub(crate) mod bernstein;
 mod bound2;
 pub(crate) mod chain2;
 mod curve;

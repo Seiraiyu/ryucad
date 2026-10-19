@@ -53,6 +53,35 @@ impl Interval {
         }
     }
 
+    /// The smallest interval holding both.
+    pub fn hull(self, other: Self) -> Self {
+        Self {
+            lo: self.lo.min(other.lo),
+            hi: self.hi.max(other.hi),
+        }
+    }
+
+    /// The largest magnitude of any value inside: `max(|lo|, |hi|)`.
+    pub fn mag(self) -> f64 {
+        self.lo.abs().max(self.hi.abs())
+    }
+
+    /// `x²` for every `x` inside, tighter than `self * self` when the
+    /// interval straddles zero.
+    pub fn square(self) -> Self {
+        if self.lo >= 0.0 {
+            Self::outward(self.lo * self.lo, self.hi * self.hi)
+        } else if self.hi <= 0.0 {
+            Self::outward(self.hi * self.hi, self.lo * self.lo)
+        } else {
+            let m = self.mag();
+            Self {
+                lo: 0.0,
+                hi: (m * m).next_up(),
+            }
+        }
+    }
+
     /// The certified sign, or `None` when the interval contains zero.
     pub fn sign(self) -> Option<Sign> {
         if self.lo > 0.0 {
@@ -183,6 +212,17 @@ mod tests {
         assert!(r.contains(2.0));
         let two = Interval::point(2.0).sqrt().unwrap();
         assert!(two.lo() * two.lo() <= 2.0 && two.hi() * two.hi() >= 2.0);
+    }
+
+    #[test]
+    fn hull_magnitude_and_square() {
+        assert_eq!(iv(1.0, 2.0).hull(iv(-1.0, 0.5)), iv(-1.0, 2.0));
+        assert_eq!(iv(-3.0, 2.0).mag(), 3.0);
+        let s = iv(-3.0, 2.0).square();
+        assert!(s.lo() == 0.0 && s.hi() >= 9.0);
+        let s = iv(-3.0, -2.0).square();
+        assert!(s.contains(4.0) && s.contains(9.0) && s.lo() > 3.9);
+        assert!(iv(2.0, 3.0).square().contains(9.0));
     }
 
     #[test]
