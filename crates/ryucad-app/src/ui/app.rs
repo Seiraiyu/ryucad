@@ -205,6 +205,12 @@ impl App {
                 self.screen = Screen::Start(Box::new(Start::new(&self.daemon, &self.wake)));
             }
             Some(menu::Action::Quit) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            // With no project open, Close closes the window.
+            None if !matches!(self.screen, Screen::Opened(_))
+                && ctx.input_mut(|i| i.consume_shortcut(&menu::CLOSE)) =>
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
             None => {}
         }
     }
@@ -258,7 +264,7 @@ impl Opened {
             .show(ui, |ui| menu::bar(ui, self, &recent))
             .inner;
         egui::Panel::top("people").show(ui, |ui| panels::people(ui, &mut self.ws));
-        self.shortcuts(&ctx);
+        let action = action.or(self.shortcuts(&ctx));
         egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &self.ws));
         // Room for about ten entries; drag its top edge for more.
         egui::Panel::bottom("journal")
@@ -323,26 +329,28 @@ impl Opened {
     /// Ctrl+Y redoes, and Escape clears the selection; not while a text
     /// field has the keyboard (it has its own), and Escape not while a menu
     /// or popup is open (it closes those).
-    fn shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.memory(|m| m.focused().is_some()) {
-            return;
+    /// The keyboard shortcuts; returns what they ask of the app.
+    fn shortcuts(&mut self, ctx: &egui::Context) -> Option<menu::Action> {
+        // Closing works from a text field too, as in any other app.
+        if ctx.input_mut(|i| i.consume_shortcut(&menu::CLOSE)) {
+            return Some(menu::Action::Close);
         }
-        use egui::{Key, KeyboardShortcut, Modifiers};
-        let redo = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
-        let redo_y = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
-        let undo = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
-        if ctx.input_mut(|i| i.consume_shortcut(&redo) || i.consume_shortcut(&redo_y)) {
+        if ctx.memory(|m| m.focused().is_some()) {
+            return None;
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&menu::REDO) || i.consume_shortcut(&menu::REDO_Y)) {
             self.ws.redo(None);
-        } else if ctx.input_mut(|i| i.consume_shortcut(&undo)) {
+        } else if ctx.input_mut(|i| i.consume_shortcut(&menu::UNDO)) {
             self.ws.undo(None);
         }
         if !egui::Popup::is_any_open(ctx)
             && self.ws.myself().is_some_and(|m| !m.selection.is_empty())
-            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+            && ctx.input_mut(|i| i.consume_shortcut(&menu::CLEAR_SELECTION))
         {
             self.ws
                 .select(Vec::new(), ryucad::live::SelectMode::Replace);
         }
+        None
     }
 }
 

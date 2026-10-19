@@ -24,6 +24,23 @@ pub enum Action {
     Quit,
 }
 
+use egui::{Key, KeyboardShortcut, Modifiers};
+
+/// The window's shortcuts, shown in the menus. Command is Ctrl, or Cmd on
+/// macOS.
+pub const UNDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
+pub const REDO: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z);
+/// Redo as Windows has it too.
+pub const REDO_Y: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
+pub const CLOSE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
+pub const CLEAR_SELECTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::Escape);
+
+/// A menu item showing its shortcut.
+fn item(ui: &egui::Ui, text: &str, shortcut: &KeyboardShortcut) -> egui::Button<'static> {
+    egui::Button::new(text.to_owned()).shortcut_text(ui.ctx().format_shortcut(shortcut))
+}
+
 const VIEWS: [(&str, StandardView); 7] = [
     ("Front", StandardView::Front),
     ("Back", StandardView::Back),
@@ -48,7 +65,7 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened, recent: &[PathBuf]) -> Option<Acti
                     }
                 }
             });
-            if ui.button("Close").clicked() {
+            if ui.add(item(ui, "Close", &CLOSE)).clicked() {
                 action = Some(Action::Close);
             }
             if ui.button("Quit").clicked() {
@@ -56,10 +73,10 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened, recent: &[PathBuf]) -> Option<Acti
             }
         });
         ui.menu_button("Edit", |ui| {
-            if ui.button("Undo").clicked() {
+            if ui.add(item(ui, "Undo", &UNDO)).clicked() {
                 o.ws.undo(None);
             }
-            if ui.button("Redo").clicked() {
+            if ui.add(item(ui, "Redo", &REDO)).clicked() {
                 o.ws.redo(None);
             }
             let selection =
@@ -73,7 +90,10 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened, recent: &[PathBuf]) -> Option<Acti
                 ui.ctx().copy_text(selection.join("\n"));
             }
             if ui
-                .add_enabled(!selection.is_empty(), egui::Button::new("Clear selection"))
+                .add_enabled(
+                    !selection.is_empty(),
+                    item(ui, "Clear selection", &CLEAR_SELECTION),
+                )
                 .clicked()
             {
                 o.ws.select(Vec::new(), SelectMode::Replace);

@@ -22,17 +22,23 @@ fn window(p: &Project) -> Harness<'static, App> {
         .build_eframe(move |cc| App::open(&cc.egui_ctx, Some(&root), ryucad()))
 }
 
-/// Opens the menu `menu` and clicks `item` in it.
+/// Opens the menu `menu` and clicks `item` in it (named after its text,
+/// and its shortcut if it has one).
 fn menu(h: &mut Harness<'static, App>, menu: &str, item: &str) {
     h.get_by_label(menu).click();
+    let spaced = format!("{item} ");
+    let named = |n: &egui_kittest::kittest::AccessKitNode<'_>| {
+        n.label()
+            .is_some_and(|l| l == item || l.starts_with(&spaced))
+    };
     // A menu opens over a frame or two.
     for _ in 0..10 {
         h.step();
-        if h.query_by_label(item).is_some() {
+        if h.query_by(named).is_some() {
             break;
         }
     }
-    h.get_by_label(item).click();
+    h.get_by(named).click();
 }
 
 /// Runs frames until `done` holds.
@@ -660,6 +666,25 @@ fn thumbnails_wait_until_the_start_window_shows() {
     let start = Start::new(daemon, &wake);
     assert!(start.recent.contains(&p.root));
     assert!(start.thumbnails.done.is_empty());
+}
+
+#[test]
+fn ctrl_w_closes_the_project_and_menus_show_their_shortcuts() {
+    if !gpu() {
+        return;
+    }
+    use ryucad_app::ui::app::Screen;
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("File").click();
+    h.run_steps(2);
+    let close = h.ctx.format_shortcut(&ryucad_app::ui::menu::CLOSE);
+    h.get_by_label_contains(&close);
+    h.key_press(egui::Key::Escape);
+    h.step();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::W);
+    frames(&mut h, |a| matches!(a.screen, Screen::Start(_)));
 }
 
 #[test]
