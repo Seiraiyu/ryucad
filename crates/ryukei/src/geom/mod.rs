@@ -5,11 +5,13 @@
 mod axis;
 mod bbox;
 mod bound2;
+pub(crate) mod chain2;
 mod curve;
 mod curve2;
 mod ellipse;
 mod eval;
 mod frame;
+pub(crate) mod intersect2;
 mod nurbs;
 mod point;
 mod project;
@@ -17,6 +19,7 @@ mod surface;
 mod swept;
 mod transform;
 mod vector;
+pub(crate) mod winding2;
 
 pub use axis::Axis;
 pub use bbox::{Box2, Box3};

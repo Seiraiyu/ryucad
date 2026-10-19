@@ -9,14 +9,13 @@
 mod area;
 mod build;
 mod capped;
-mod chain;
 mod extrude;
-mod intersect2;
 mod names;
 mod nest;
 mod place;
 mod profile;
 mod revolve;
+mod separate;
 
 pub use extrude::extrude;
 pub use profile::{Loop, LoopKey, Lump, Profile, Segment, SegmentKey, ValidLoop, ValidProfile};
