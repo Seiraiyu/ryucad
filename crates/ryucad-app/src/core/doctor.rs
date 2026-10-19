@@ -4,16 +4,16 @@
 //! agent would. Either way the report is the daemon's JSON.
 
 use crate::core::link::Wake;
-use ryucad::client::Daemon;
+use ryucad::client::{Daemon, command};
 use ryucad::error::{Code, Error, Result};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 /// Runs `ryucad -C <dir> <args>` and returns its result, or its error.
 pub fn cli(daemon: &Daemon, dir: &Path, args: &[String]) -> Result<Value> {
-    let out = Command::new(&daemon.exe)
+    let out = command(&daemon.exe)
         .arg("-C")
         .arg(dir)
         .args(["--no-daemon"])

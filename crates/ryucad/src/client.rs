@@ -248,7 +248,7 @@ impl Daemon {
             Error::new(Code::Daemon, format!("can't run {}: {why}", exe.display()))
                 .with("path", exe)
         };
-        let out = Command::new(exe)
+        let out = command(exe)
             .arg("version")
             .stdin(Stdio::null())
             .stderr(Stdio::null())
@@ -412,6 +412,23 @@ fn spawn(root: &Path, endpoint: &Endpoint, exe: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A command that runs `exe` and waits for it: what a program without a
+/// console of its own (the app, a GUI on Windows) uses to run `ryucad`.
+/// On Windows it gets no console window, where it would otherwise get a
+/// new one that flashes up for as long as it runs; elsewhere it is a plain
+/// `Command`. Daemons are started detached instead (`detach`).
+pub fn command(exe: impl AsRef<std::ffi::OsStr>) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(exe);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Out of the terminal's process group, so Ctrl-C on the CLI spares it.
 #[cfg(unix)]
 fn detach(cmd: &mut Command) {
@@ -516,5 +533,40 @@ mod tests {
     fn a_program_that_isnt_ryucad_is_refused() {
         let e = Daemon::at(Path::new("/no/such/ryucad")).unwrap_err();
         assert_eq!(e.code, Code::Daemon);
+    }
+
+    /// Set in the child that `commands_get_no_console_window` starts.
+    #[cfg(windows)]
+    const CONSOLE_CHILD_VAR: &str = "RYUCAD_TEST_CONSOLE_CHILD";
+
+    /// Runs this test binary again, through `command`, as the child below,
+    /// which fails if it has a console window.
+    #[cfg(windows)]
+    #[test]
+    fn commands_get_no_console_window() {
+        let st = command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "client::tests::console_child",
+                "--test-threads=1",
+            ])
+            .env(CONSOLE_CHILD_VAR, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(st.success(), "the child had a console window");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn console_child() {
+        use windows_sys::Win32::System::Console::GetConsoleWindow;
+        if std::env::var_os(CONSOLE_CHILD_VAR).is_none() {
+            return;
+        }
+        // SAFETY: a plain Win32 call with no arguments.
+        assert!(unsafe { GetConsoleWindow() }.is_null());
     }
 }
