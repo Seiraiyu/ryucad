@@ -150,10 +150,8 @@ pub fn issues(
                                     if let Some(text) = c["content"].as_str() {
                                         let shown: String = text.chars().take(2000).collect();
                                         ui.add(
-                                            egui::Label::new(
-                                                RichText::new(shown).monospace().small(),
-                                            )
-                                            .wrap(),
+                                            egui::Label::new(RichText::new(shown).monospace())
+                                                .wrap(),
                                         );
                                     }
                                 }
