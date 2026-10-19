@@ -1,7 +1,7 @@
 //! Bodies: B-rep topology in flat arrays referenced by typed IDs.
 //!
 //! A [`Body`] owns its regions, shells, faces, loops, fins, edges and
-//! vertices, and the curves and surfaces they lie on. It is plain data:
+//! vertices, the curves and surfaces they lie on, and the fins' pcurves. It is plain data:
 //! cheap to clone and safe to share between threads. Edits go through
 //! [`crate::euler`]; everything here only reads.
 //!
@@ -19,12 +19,13 @@ pub(crate) mod fixture;
 pub use compact::Remap;
 pub(crate) use id::Id;
 pub use id::{
-    CurveId, EdgeId, EntityId, FaceId, FinId, LoopId, RegionId, ShellId, SurfaceId, VertexId,
+    Curve2Id, CurveId, EdgeId, EntityId, FaceId, FinId, LoopId, RegionId, ShellId, SurfaceId,
+    VertexId,
 };
 pub(crate) use store::Arena;
-pub use store::{Edge, Face, Fin, Loop, Region, RegionKind, Sense, Shell, Vertex};
+pub use store::{Edge, Face, Fin, Loop, Pcurve, Region, RegionKind, Sense, Shell, Vertex};
 
-use crate::geom::{Curve, Surface};
+use crate::geom::{Curve, Curve2, Point2, Surface};
 use crate::name::Name;
 use std::collections::BTreeMap;
 
@@ -40,6 +41,7 @@ pub struct Body {
     pub(crate) vertices: Arena<VertexId, Vertex>,
     pub(crate) curves: Arena<CurveId, Curve>,
     pub(crate) surfaces: Arena<SurfaceId, Surface>,
+    pub(crate) curves2: Arena<Curve2Id, Curve2>,
     /// Every live face, edge and vertex by name.
     pub(crate) names: BTreeMap<Name, EntityId>,
     /// Readable recipes of live names, when enabled.
@@ -93,6 +95,7 @@ impl Body {
             vertices: Arena::default(),
             curves: Arena::default(),
             surfaces: Arena::default(),
+            curves2: Arena::default(),
             names: BTreeMap::new(),
             recipes: Some(BTreeMap::new()),
         }
@@ -111,12 +114,27 @@ impl Body {
         self.surfaces.push(surface)
     }
 
+    pub fn add_curve2(&mut self, curve: Curve2) -> Curve2Id {
+        self.curves2.push(curve)
+    }
+
     pub fn curve(&self, id: CurveId) -> Option<&Curve> {
         self.curves.get(id)
     }
 
     pub fn surface(&self, id: SurfaceId) -> Option<&Surface> {
         self.surfaces.get(id)
+    }
+
+    pub fn curve2(&self, id: Curve2Id) -> Option<&Curve2> {
+        self.curves2.get(id)
+    }
+
+    /// Where a fin's pcurve puts the edge's parameter `t` in its face's
+    /// `(u, v)` plane, or `None` for a dead fin or one with no pcurve.
+    pub fn fin_uv(&self, f: FinId, t: f64) -> Option<Point2> {
+        let p = self.fins.get(f)?.pcurve?;
+        Some(self.curves2[p.curve].point(p.param(t)))
     }
 
     pub fn region(&self, id: RegionId) -> Option<&Region> {

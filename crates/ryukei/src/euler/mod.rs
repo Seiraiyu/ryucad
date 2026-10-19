@@ -6,8 +6,10 @@
 //! together: an operator that makes an edge takes its curve. Operators
 //! decide no geometry; the checker verifies it.
 //!
-//! [`set_point`], [`set_curve`] and [`set_surface`] change geometry without
-//! touching topology.
+//! [`set_point`], [`set_curve`], [`set_surface`] and [`set_pcurve`] change
+//! geometry without touching topology. New fins have no pcurve; operators
+//! keep the pcurves fins have while they stay valid, and drop them when a
+//! fin moves to a face on another surface or its geometry changes.
 //!
 //! Every operator checks all of its preconditions before writing
 //! anything, so on `Err` the body is unchanged. Operators that make or
@@ -23,7 +25,7 @@ mod shell;
 
 pub use edge::{Jekv, Mev, Semv, jekv, kev, mev, semv};
 pub use face::{Kef, Mef, kef, mef};
-pub use geometry::{set_curve, set_point, set_surface};
+pub use geometry::{set_curve, set_pcurve, set_point, set_surface};
 pub use ring::{Kemr, Kfmrh, Mekr, Mfkrh, kemr, kfmrh, mekr, mfkrh};
 pub use shell::{Mvfs, Mvr, kvfs, kvr, mvfs, mvr};
 
@@ -275,6 +277,14 @@ impl Body {
         self.loops[next].prev = prev;
         if self.faces[face].first_loop == Some(l) {
             self.faces[face].first_loop = other;
+        }
+    }
+
+    /// Drops the pcurves of a loop's fins, which no longer fit its face.
+    fn clear_pcurves(&mut self, l: LoopId) {
+        let fins: Vec<FinId> = self.loop_fins(l).collect();
+        for f in fins {
+            self.fins[f].pcurve = None;
         }
     }
 

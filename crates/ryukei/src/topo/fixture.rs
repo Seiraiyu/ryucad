@@ -116,6 +116,7 @@ pub(crate) fn polyhedron(points: &[Point3], faces: &[&[usize]]) -> Body {
                 next: FinId::from_index(first_fin.index() + (k + 1) % n),
                 prev: FinId::from_index(first_fin.index() + (k + n - 1) % n),
                 around,
+                pcurve: None,
             });
         }
     }

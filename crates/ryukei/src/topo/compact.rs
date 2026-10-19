@@ -1,6 +1,6 @@
 use super::{
-    Body, CurveId, EdgeId, EntityId, FaceId, FinId, Id, LoopId, RegionId, ShellId, SurfaceId,
-    VertexId,
+    Body, Curve2Id, CurveId, EdgeId, EntityId, FaceId, FinId, Id, LoopId, RegionId, ShellId,
+    SurfaceId, VertexId,
 };
 
 /// Where each entity went in [`Body::compact`]: the new ID of every old
@@ -16,6 +16,7 @@ pub struct Remap {
     vertices: Vec<Option<VertexId>>,
     curves: Vec<Option<CurveId>>,
     surfaces: Vec<Option<SurfaceId>>,
+    curves2: Vec<Option<Curve2Id>>,
 }
 
 fn lookup<I: Id>(map: &[Option<I>], old: I) -> Option<I> {
@@ -64,10 +65,14 @@ impl Remap {
     pub fn surface(&self, old: SurfaceId) -> Option<SurfaceId> {
         lookup(&self.surfaces, old)
     }
+
+    pub fn curve2(&self, old: Curve2Id) -> Option<Curve2Id> {
+        lookup(&self.curves2, old)
+    }
 }
 
 impl Body {
-    /// Drops dead slots and geometry that no live edge or face uses, and
+    /// Drops dead slots and geometry that no live edge, face or fin uses, and
     /// renumbers everything in its existing order. Names are unchanged.
     /// Every ID held from before is invalid afterwards; translate it
     /// through the returned [`Remap`].
@@ -79,6 +84,17 @@ impl Body {
         let mut used_surfaces = vec![false; self.surfaces.slot_count()];
         for (_, f) in self.faces.live() {
             used_surfaces[f.surface.index()] = true;
+        }
+        let mut used_curves2 = vec![false; self.curves2.slot_count()];
+        for (_, f) in self.fins.live() {
+            if let Some(p) = f.pcurve {
+                used_curves2[p.curve.index()] = true;
+            }
+        }
+        for (i, used) in used_curves2.into_iter().enumerate() {
+            if !used {
+                self.curves2.kill(Curve2Id::from_index(i));
+            }
         }
         for (i, used) in used_curves.into_iter().enumerate() {
             if !used {
@@ -100,6 +116,7 @@ impl Body {
             vertices: self.vertices.compact(),
             curves: self.curves.compact(),
             surfaces: self.surfaces.compact(),
+            curves2: self.curves2.compact(),
         };
         for r in self.regions.values_mut() {
             r.first_shell = r.first_shell.map(|s| to(&m.shells, s));
@@ -130,6 +147,9 @@ impl Body {
             f.next = to(&m.fins, f.next);
             f.prev = to(&m.fins, f.prev);
             f.around = to(&m.fins, f.around);
+            if let Some(p) = &mut f.pcurve {
+                p.curve = to(&m.curves2, p.curve);
+            }
         }
         for e in self.edges.values_mut() {
             e.fin = to(&m.fins, e.fin);
@@ -214,6 +234,38 @@ mod tests {
                 assert_eq!(b.fin_end(f), b.fin_start(fins[(i + 1) % fins.len()]));
             }
         }
+    }
+
+    #[test]
+    fn compact_keeps_used_pcurves_and_renumbers_them() {
+        use crate::geom::{Curve2, Line2, Point2, Vector2};
+        use crate::topo::Pcurve;
+        let mut b = tetrahedron();
+        let line = |x: f64| {
+            Curve2::Line2(Line2::new(Point2::new(x, 0.0), Vector2::new(1.0, 0.0)).unwrap())
+        };
+        let unused = b.add_curve2(line(0.0));
+        let used = b.add_curve2(line(1.0));
+        let f = FinId::from_index(4);
+        b.fins[f].pcurve = Some(Pcurve {
+            curve: used,
+            map: [0.5, 2.0],
+        });
+        let m = b.compact();
+        assert_eq!(m.curve2(unused), None);
+        let new = m.curve2(used).unwrap();
+        assert_eq!(new, Curve2Id::from_index(0));
+        assert_eq!(b.curves2.slot_count(), 1);
+        assert_eq!(
+            b.fins[f].pcurve,
+            Some(Pcurve {
+                curve: new,
+                map: [0.5, 2.0]
+            })
+        );
+        assert_eq!(b.curve2(new), Some(&line(1.0)));
+        assert_eq!(b.fin_uv(f, 1.0), Some(Point2::new(3.5, 0.0)));
+        assert_eq!(b.fin_uv(FinId::from_index(3), 1.0), None);
     }
 
     #[test]

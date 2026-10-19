@@ -92,6 +92,7 @@ pub fn mef(
             next: fin,
             prev: fin,
             around,
+            pcurve: None,
         });
     }
     body.faces.push(Face {
@@ -163,7 +164,8 @@ pub struct Kef {
 /// Kill edge, face: the inverse of [`mef`]. The edge's two fins must be on
 /// different faces. The face with the higher ID dies: its loop merges into
 /// the other face's loop around the edge, and its other loops move to the
-/// kept face.
+/// kept face. Fins that move to a face on another surface lose their
+/// pcurves.
 ///
 /// Names: both faces' names retire; the kept face is
 /// `(key, Merged, [a, b])` with the two names sorted.
@@ -192,6 +194,11 @@ pub fn kef(body: &mut Body, key: OpKey, edge: EdgeId) -> Result<(Kef, Journal), 
     kept.remove(0);
     ring.extend(kept);
     let other_loops: Vec<LoopId> = body.face_loops(gone).filter(|&l| l != ld).collect();
+    if body.faces[keep].surface != body.faces[gone].surface {
+        for l in other_loops.iter().copied().chain([ld]) {
+            body.clear_pcurves(l);
+        }
+    }
     let (start, end) = (body.edges[edge].start, body.edges[edge].end);
     body.unlink_loop(ld);
     body.loops.kill(ld);
@@ -411,5 +418,50 @@ mod tests {
             Err(TopologyError::WrongLoop.into())
         );
         assert_eq!(b.dump(), before);
+    }
+
+    /// The tetrahedron with the same placeholder pcurve on every fin.
+    fn with_pcurves_on_a_tetrahedron() -> (crate::topo::Body, crate::topo::Pcurve) {
+        use crate::geom::{Curve2, Line2, Point2, Vector2};
+        let mut b = crate::topo::fixture::tetrahedron();
+        let c = b.add_curve2(Curve2::Line2(
+            Line2::new(Point2::new(0.0, 0.0), Vector2::new(1.0, 0.0)).unwrap(),
+        ));
+        let p = crate::topo::Pcurve {
+            curve: c,
+            map: [0.0, 1.0],
+        };
+        for f in b.fins().collect::<Vec<_>>() {
+            crate::euler::set_pcurve(&mut b, f, Some(p)).unwrap();
+        }
+        (b, p)
+    }
+
+    #[test]
+    fn kef_drops_the_pcurves_of_fins_that_change_surface() {
+        let (mut b, p) = with_pcurves_on_a_tetrahedron();
+        // Edge 0 joins faces 0 and 1, on different planes.
+        let e = b.edges().next().unwrap();
+        let (k, _) = kef(&mut b, OpKey(1), e).unwrap();
+        let fins: Vec<_> = b
+            .face_loops(k.face)
+            .flat_map(|l| b.loop_fins(l).collect::<Vec<_>>())
+            .collect();
+        let kept = fins
+            .iter()
+            .filter(|&&f| b.fin(f).unwrap().pcurve == Some(p))
+            .count();
+        let lost = fins
+            .iter()
+            .filter(|&&f| b.fin(f).unwrap().pcurve.is_none())
+            .count();
+        assert_eq!((kept, lost), (2, 2));
+        // The other faces are untouched.
+        let others = b.fins().filter(|f| !fins.contains(f));
+        assert!(
+            others
+                .into_iter()
+                .all(|f| b.fin(f).unwrap().pcurve == Some(p))
+        );
     }
 }

@@ -1,5 +1,5 @@
 use super::{Body, Id, RegionKind, Sense};
-use crate::geom::{Curve, Frame, KnotVector, Point3, Surface};
+use crate::geom::{Curve, Curve2, Frame, Frame2, KnotVector, Point2, Point3, Surface};
 use core::fmt::Write;
 
 /// The exact bits of a float, so a dump is bit-exact.
@@ -70,6 +70,47 @@ fn curve(c: &Curve) -> String {
             u8::from(n.knots().is_periodic()),
             knots(n.knots()),
             points(n.control_points()),
+            floats(n.weights())
+        ),
+    }
+}
+
+fn point2(p: Point2) -> String {
+    format!("{},{}", bits(p.x), bits(p.y))
+}
+
+fn frame2(f: &Frame2) -> String {
+    format!(
+        "origin={} x={},{} ccw={}",
+        point2(f.origin()),
+        bits(f.x().x),
+        bits(f.x().y),
+        u8::from(f.is_ccw())
+    )
+}
+
+/// A pcurve's kind and the exact bits of its data.
+fn curve2(c: &Curve2) -> String {
+    match c {
+        Curve2::Line2(l) => format!(
+            "line2 origin={} dir={},{}",
+            point2(l.origin()),
+            bits(l.dir().x),
+            bits(l.dir().y)
+        ),
+        Curve2::Circle2(c) => format!("circle2 {} r={}", frame2(c.frame()), bits(c.radius())),
+        Curve2::Ellipse2(e) => format!(
+            "ellipse2 {} major={} minor={}",
+            frame2(e.frame()),
+            bits(e.major()),
+            bits(e.minor())
+        ),
+        Curve2::Nurbs2(n) => format!(
+            "nurbs2 degree={} periodic={} knots={} points={} weights={}",
+            n.degree(),
+            u8::from(n.knots().is_periodic()),
+            knots(n.knots()),
+            n.control_points().map(point2).collect::<Vec<_>>().join(";"),
             floats(n.weights())
         ),
     }
@@ -160,8 +201,16 @@ impl Body {
             ));
         }
         for (id, f) in self.fins.live() {
+            let pcurve = f.pcurve.map_or_else(String::new, |p| {
+                format!(
+                    " pcurve={} map={},{}",
+                    p.curve.index(),
+                    bits(p.map[0]),
+                    bits(p.map[1])
+                )
+            });
             line(format_args!(
-                "fin {} loop={} edge={} sense={} next={} prev={} around={}",
+                "fin {} loop={} edge={} sense={} next={} prev={} around={}{pcurve}",
                 id.index(),
                 f.loop_.index(),
                 f.edge.index(),
@@ -245,6 +294,10 @@ impl Body {
             };
             line(format_args!("surface {} {geom}", id.index()));
         }
+        for (id, c) in self.curves2.live() {
+            let geom = curve2(c);
+            line(format_args!("curve2 {} {geom}", id.index()));
+        }
         out
     }
 }
@@ -253,6 +306,48 @@ impl Body {
 mod tests {
     use crate::geom::{Circle, Cone, Curve, Ellipse, Frame, Sphere, Surface, Torus};
     use crate::topo::fixture::tetrahedron;
+
+    #[test]
+    fn pcurves_dump_on_their_fins_and_after_the_surfaces() {
+        use crate::geom::{
+            Circle2, Curve2, Ellipse2, Frame2, KnotVector, Line2, NurbsCurve2, Point2, Vector2,
+        };
+        use crate::topo::{FinId, Id, Pcurve};
+        use std::sync::Arc;
+        let mut b = tetrahedron();
+        let f2 = Frame2::new(Point2::new(1.0, 2.0), Vector2::new(1.0, 0.0), false).unwrap();
+        let line = b.add_curve2(Curve2::Line2(
+            Line2::new(Point2::new(0.0, 0.5), Vector2::new(0.0, 1.0)).unwrap(),
+        ));
+        b.add_curve2(Curve2::Circle2(Circle2::new(f2, 3.0).unwrap()));
+        b.add_curve2(Curve2::Ellipse2(Ellipse2::new(f2, 3.0, 2.0).unwrap()));
+        let knots = KnotVector::clamped(1, &[0.0, 1.0], &[2, 2]).unwrap();
+        let n = NurbsCurve2::new(
+            knots,
+            vec![Point2::new(0.0, 0.0), Point2::new(1.0, 1.0)],
+            None,
+        )
+        .unwrap();
+        b.add_curve2(Curve2::Nurbs2(Arc::new(n)));
+        b.fins[FinId::from_index(0)].pcurve = Some(Pcurve {
+            curve: line,
+            map: [0.0, 1.0],
+        });
+        let d = b.dump();
+        let fin0 = d.lines().find(|l| l.starts_with("fin 0 ")).unwrap();
+        assert!(
+            fin0.ends_with(" pcurve=0 map=0000000000000000,3ff0000000000000"),
+            "{fin0}"
+        );
+        let fin1 = d.lines().find(|l| l.starts_with("fin 1 ")).unwrap();
+        assert!(!fin1.contains("pcurve"), "{fin1}");
+        let tail: Vec<&str> = d.lines().rev().take(4).collect();
+        assert!(tail[3].starts_with("curve2 0 line2 origin=0000000000000000,3fe0000000000000"));
+        assert!(tail[2].starts_with("curve2 1 circle2 origin=3ff0000000000000,4000000000000000"));
+        assert!(tail[2].contains(" ccw=0 r=4008000000000000"));
+        assert!(tail[1].starts_with("curve2 2 ellipse2 "));
+        assert!(tail[0].starts_with("curve2 3 nurbs2 degree=1 periodic=0 knots="));
+    }
 
     #[test]
     fn dump_lists_every_entity_in_order() {

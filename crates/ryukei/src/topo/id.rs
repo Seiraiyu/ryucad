@@ -46,6 +46,8 @@ ids!(
     VertexId,
     CurveId,
     SurfaceId,
+    /// A curve in a face's parameter plane: a fin's pcurve.
+    Curve2Id,
 );
 
 /// Any topological entity.
