@@ -10,10 +10,10 @@
 
 mod coincide;
 mod cs;
+mod fit;
 mod implicit;
 mod ss;
 mod ss_exact;
-#[allow(dead_code)]
 mod ss_trace;
 
 pub use cs::{CurveHit, Side, curve_surface};

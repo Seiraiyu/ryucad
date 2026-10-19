@@ -114,6 +114,38 @@ impl Implicit {
         self.value(self.local(q.to_vector()))
     }
 
+    /// `f` and its gradient at a model point, in floating point: for
+    /// Newton's method, never for a decision.
+    pub(crate) fn eval_grad(&self, q: Point3) -> (f64, Vector3) {
+        let l = self.frame.to_local(q);
+        let (x, y, z) = (l.x, l.y, l.z);
+        let rho2 = x * x + y * y;
+        let (f, g) = match self.kind {
+            Kind::Plane => (z, [0.0, 0.0, 1.0]),
+            Kind::Cylinder { r } => (rho2 - r * r, [2.0 * x, 2.0 * y, 0.0]),
+            Kind::Cone { r, sin, cos } => {
+                let t = sin / cos;
+                let q = r + z * t;
+                (rho2 - q * q, [2.0 * x, 2.0 * y, -2.0 * q * t])
+            }
+            Kind::Sphere { r } => (rho2 + z * z - r * r, [2.0 * x, 2.0 * y, 2.0 * z]),
+            Kind::Torus { major, minor } => {
+                let s = rho2 + z * z + major * major - minor * minor;
+                let k = 8.0 * major * major;
+                (
+                    s * s - 4.0 * major * major * rho2,
+                    [4.0 * s * x - k * x, 4.0 * s * y - k * y, 4.0 * s * z],
+                )
+            }
+        };
+        let (fx, fy, fz) = (
+            self.frame.x().get(),
+            self.frame.y().get(),
+            self.frame.z().get(),
+        );
+        (f, fx * g[0] + fy * g[1] + fz * g[2])
+    }
+
     /// The certified side of the surface a model point is on: the sign of
     /// `f`, except that a cone's (one nappe) is the sign of `ρ - q`, so
     /// the region of the other nappe is outside. `None` when rounding

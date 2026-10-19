@@ -22,7 +22,7 @@
 
 use super::SLACK;
 use super::coincide::{off_axis, off_plane, parallel};
-use super::ss::{Branch, SurfaceHit};
+use super::ss::Raw;
 use crate::geom::{
     Box3, Circle, Cone, Curve, Ellipse, Frame, KnotVector, Line, NurbsCurve, Point3, Surface,
     Vector3,
@@ -32,8 +32,9 @@ use crate::tol::{ANGULAR_RESOLUTION, LINEAR_RESOLUTION, in_size_box};
 use core::f64::consts::{FRAC_PI_4, PI, TAU};
 use std::sync::Arc;
 
-/// The closed form for this pair, if it has one.
-pub(crate) fn exact(a: &Surface, b: &Surface, region: &Box3) -> Option<SurfaceHit> {
+/// The closed form for this pair, if it has one: its branches and
+/// points.
+pub(crate) fn exact(a: &Surface, b: &Surface, region: &Box3) -> Option<(Vec<Raw>, Vec<Point3>)> {
     let (a, b) = if rank(a) <= rank(b) { (a, b) } else { (b, a) };
     let mut out = Out::new(region);
     if let Some(axis) = common_axis(a, b) {
@@ -92,7 +93,7 @@ fn tolerance(gap: f64) -> f64 {
 /// region.
 struct Out {
     region: Box3,
-    branches: Vec<Branch>,
+    branches: Vec<Raw>,
     points: Vec<Point3>,
 }
 
@@ -105,11 +106,8 @@ impl Out {
         }
     }
 
-    fn finish(self) -> SurfaceHit {
-        SurfaceHit::Meet {
-            branches: self.branches,
-            points: self.points,
-        }
+    fn finish(self) -> (Vec<Raw>, Vec<Point3>) {
+        (self.branches, self.points)
     }
 
     fn inside(&self, p: Point3) -> bool {
@@ -151,7 +149,7 @@ impl Out {
         let Ok(line) = Line::new(origin + d * t0, d) else {
             return;
         };
-        self.branches.push(Branch {
+        self.branches.push(Raw {
             curve: Curve::Line(line),
             range: [0.0, t1 - t0],
             tangent,
@@ -161,7 +159,7 @@ impl Out {
 
     fn closed(&mut self, curve: Curve, tangent: bool, gap: f64) {
         if curve.bounds([0.0, TAU]).intersects(&self.region) {
-            self.branches.push(Branch {
+            self.branches.push(Raw {
                 curve,
                 range: [0.0, TAU],
                 tangent,
@@ -549,7 +547,7 @@ fn plane_cone(f: &Frame, g: &Frame, cone: &Cone, out: &mut Out) {
     for run in conic.runs(range, out) {
         if let Some(curve) = conic.nurbs(run) {
             let domain = curve.domain();
-            out.branches.push(Branch {
+            out.branches.push(Raw {
                 curve: Curve::Nurbs(Arc::new(curve)),
                 range: domain,
                 tangent: false,
@@ -718,7 +716,7 @@ impl Conic {
 
 #[cfg(test)]
 mod tests {
-    use super::super::ss::surface_surface;
+    use super::super::ss::{Branch, SurfaceHit, surface_surface};
     use super::*;
     use crate::geom::{Cylinder, Plane, Sphere, Torus};
 
@@ -940,13 +938,10 @@ mod tests {
             kinds(&meet(&a, &cylinder((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), 1.0)).0),
             [("ellipse", false), ("ellipse", false)]
         );
+        // Unequal radii have no closed form: traced, two loops.
         assert_eq!(
-            surface_surface(
-                &a,
-                &cylinder((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), 0.5),
-                &region()
-            ),
-            Err(super::super::Failure::Unsupported)
+            kinds(&meet(&a, &cylinder((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), 0.5)).0),
+            [("nurbs", false), ("nurbs", false)]
         );
     }
 

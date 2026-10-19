@@ -24,7 +24,9 @@
 //! cells must hold exactly one critical point of `F`, certified by
 //! Krawczyk's test, and lie on the curve: there branches meet (a
 //! tangency, or a crossing of two branches) or, with none, the surfaces
-//! touch at a point. Anything else is [`Failure::Uncertain`].
+//! touch at a point. Anything else is [`Failure::Uncertain`]. What lies
+//! on a cone's other nappe, which its implicit form also holds, is
+//! dropped.
 
 use super::Failure;
 use super::implicit::Implicit;
@@ -85,7 +87,15 @@ pub(crate) fn trace(a: &Surface, b: &Surface, region: &Box3) -> Result<Topology,
     };
     let (nurbs, _) = p.to_nurbs(ranges).map_err(|_| Failure::Uncertain)?;
     let periodic = [p.periods().0.is_some(), p.periods().1.is_some()];
-    Tracer::new(&nurbs, &imp, periodic, region).run()
+    let mut topo = Tracer::new(&nurbs, &imp, periodic, region).run()?;
+    // A cone's implicit form holds its other nappe too. A branch can pass
+    // from one nappe to the other only through the apex, a singular
+    // point that ends it, so a branch with a point past the apex lies
+    // wholly on the other nappe.
+    topo.branches
+        .retain(|b| !b.points.iter().any(|&x| imp.beyond_apex(x)));
+    topo.points.retain(|&x| !imp.beyond_apex(x));
+    Ok(topo)
 }
 
 /// The parameter box of `p` that covers the region: a plane's and the
@@ -791,7 +801,6 @@ mod tests {
 
     #[test]
     fn closed_forms_trace_the_same_branches() {
-        use super::super::ss::SurfaceHit;
         use super::super::ss_exact::exact;
         let z = (0.0, 0.0, 1.0);
         let pairs = [
@@ -815,7 +824,7 @@ mod tests {
             ),
         ];
         for (a, b) in pairs {
-            let Some(SurfaceHit::Meet { branches, .. }) = exact(&a, &b, &region()) else {
+            let Some((branches, _)) = exact(&a, &b, &region()) else {
                 panic!("a closed form")
             };
             let t = traced(&a, &b);

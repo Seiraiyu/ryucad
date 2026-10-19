@@ -29,6 +29,7 @@ pub(crate) mod winding2;
 pub use axis::Axis;
 pub use bbox::{Box2, Box3};
 pub use bound2::{CurveBound, SurfaceBound};
+pub(crate) use bound2::{cos_abs_max, cos_range};
 pub use curve::{Circle, Curve, Line};
 pub use curve2::{Circle2, Curve2, Ellipse2, Frame2, Line2};
 pub use ellipse::Ellipse;
@@ -38,7 +39,7 @@ pub(crate) use frame::polar_angle;
 pub use nurbs::{
     Basis, Direction, KnotVector, MAX_DEGREE, NurbsCurve, NurbsCurve2, NurbsSurface, Reparam,
 };
-pub(crate) use nurbs::{BezierCurve, BezierPatch, Hom};
+pub(crate) use nurbs::{BezierCurve, BezierPatch, Coords, Hom};
 pub use point::{Point2, Point3};
 pub use project::Projection;
 pub use surface::{Cone, Cylinder, Plane, Sphere, Surface, Torus};

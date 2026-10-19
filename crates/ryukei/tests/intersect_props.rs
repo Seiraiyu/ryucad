@@ -183,27 +183,49 @@ fn complete(
     Ok(())
 }
 
+/// Every branch, and its pcurve on each surface, within the branch's
+/// tolerance of both surfaces; and nothing sampling sees missed.
+fn agrees(a: &Surface, b: &Surface) -> Result<(), TestCaseError> {
+    let region = ryukei::geom::Box3::new(
+        Point3::new(-20.0, -20.0, -20.0),
+        Point3::new(20.0, 20.0, 20.0),
+    );
+    let Ok(hit) = ryukei::intersect::surface_surface(a, b, &region) else {
+        return Ok(());
+    };
+    let ryukei::intersect::SurfaceHit::Meet { branches, points } = hit else {
+        return Ok(());
+    };
+    for br in &branches {
+        for k in 0..=32 {
+            let t = br.range[0] + (br.range[1] - br.range[0]) * f64::from(k) / 32.0;
+            let p = br.curve.point(t);
+            prop_assert!(a.distance(p) <= br.tolerance + 1e-12);
+            prop_assert!(b.distance(p) <= br.tolerance + 1e-12);
+            for (s, (c2, map)) in [a, b].into_iter().zip(&br.pcurves) {
+                let q = c2.point(map[0] + map[1] * t);
+                prop_assert!(s.point(q.x, q.y).distance(p) <= br.tolerance + 1e-12);
+            }
+        }
+    }
+    complete(a, b, &branches, &points)?;
+    complete(b, a, &branches, &points)
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(300))]
 
     #[test]
-    fn closed_forms_agree_with_sampling((a, b) in prop_oneof![coaxial(), (surface(), surface())]) {
-        let region = ryukei::geom::Box3::new(Point3::new(-20.0, -20.0, -20.0), Point3::new(20.0, 20.0, 20.0));
-        let Ok(hit) = ryukei::intersect::surface_surface(&a, &b, &region) else {
-            return Ok(());
-        };
-        let ryukei::intersect::SurfaceHit::Meet { branches, points } = hit else {
-            return Ok(());
-        };
-        for br in &branches {
-            for k in 0..=32 {
-                let t = br.range[0] + (br.range[1] - br.range[0]) * f64::from(k) / 32.0;
-                let p = br.curve.point(t);
-                prop_assert!(a.distance(p) <= br.tolerance + 1e-12);
-                prop_assert!(b.distance(p) <= br.tolerance + 1e-12);
-            }
-        }
-        complete(&a, &b, &branches, &points)?;
-        complete(&b, &a, &branches, &points)?;
+    fn closed_forms_agree_with_sampling((a, b) in coaxial()) {
+        agrees(&a, &b)?;
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    #[test]
+    fn traced_and_closed_forms_agree_with_sampling(a in surface(), b in surface()) {
+        agrees(&a, &b)?;
     }
 }
