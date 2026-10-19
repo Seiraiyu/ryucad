@@ -90,8 +90,10 @@ pub enum Fault {
     /// A planar face with straight edges whose loops wind clockwise about
     /// its normal.
     FaceInsideOut { face: FaceId },
-    /// A solid whose faces are all planar with straight edges encloses no
-    /// positive volume: it is inside out or flat.
+    /// A solid whose faces are all planar with straight edges does not
+    /// have exactly one shell enclosing positive volume (its outside) with
+    /// every other shell enclosing negative volume (a cavity): a shell is
+    /// inside out or flat.
     NotOutward { region: RegionId },
 }
 
@@ -175,6 +177,25 @@ mod tests {
                 from: EntityId::Fin(f)
             }]
         );
+    }
+
+    #[test]
+    fn a_hollow_cube_is_sound_and_its_shells_point_the_right_way() {
+        use crate::topo::fixture::{cube, hollow_cube, polyhedron, split_shell};
+        let b = hollow_cube();
+        assert_eq!(check(&b), []);
+        let solid = RegionId::from_index(1);
+        assert_eq!(b.region_shells(solid).count(), 2);
+        // The cavity's faces pointing out of it, into the solid: two shells
+        // enclose positive volume.
+        let (mut points, mut faces) = cube(0.0, 3.0, 0, false);
+        let (inner, holes) = cube(1.0, 2.0, 8, false);
+        points.extend(inner);
+        faces.extend(holes);
+        let cycles: Vec<&[usize]> = faces.iter().map(Vec::as_slice).collect();
+        let mut b = polyhedron(&points, &cycles);
+        split_shell(&mut b, &(6..12).map(FaceId::from_index).collect::<Vec<_>>());
+        assert_eq!(check(&b), [Fault::NotOutward { region: solid }]);
     }
 
     #[test]

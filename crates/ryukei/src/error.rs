@@ -101,6 +101,9 @@ pub enum TopologyError {
     WrongFace,
     /// The same for shells.
     WrongShell,
+    /// The region is the void around the body, where the operator needs a
+    /// solid one.
+    WrongRegion,
     /// The loop is not a lone-vertex loop.
     NotLone,
     /// The edge does not have exactly two fins.
@@ -283,6 +286,7 @@ impl fmt::Display for TopologyError {
             Self::NotManifold => "edge does not have exactly two fins",
             Self::NotRemovable => "not in the shape this operator removes",
             Self::WouldDisconnect => "would split the shell",
+            Self::WrongRegion => "not a solid region",
             Self::Inconsistent => "the result fails the topology check",
         })
     }

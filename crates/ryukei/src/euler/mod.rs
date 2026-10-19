@@ -27,7 +27,7 @@ pub use edge::{Jekv, Mev, Semv, jekv, kev, mev, semv};
 pub use face::{Kef, Mef, kef, mef};
 pub use geometry::{set_curve, set_pcurve, set_point, set_surface};
 pub use ring::{Kemr, Kfmrh, Mekr, Mfkrh, kemr, kfmrh, mekr, mfkrh};
-pub use shell::{Mvfs, Mvr, kvfs, kvr, mvfs, mvr};
+pub use shell::{Mvfs, Mvr, Mvs, kvfs, kvr, mvfs, mvr, mvs};
 
 use crate::geom::Point3;
 use crate::name::{Name, OpKey, Role};

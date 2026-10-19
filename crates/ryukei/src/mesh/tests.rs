@@ -178,3 +178,20 @@ fn runaway_requests_are_refused_before_meshing() {
     assert!(matches!(r, Err(Error::MeshTooLarge { triangles }) if triangles > 50_000_000));
     assert!(start.elapsed().as_secs() < 10);
 }
+
+#[test]
+fn a_cavity_meshes_pointing_into_itself() {
+    let b = crate::topo::fixture::hollow_cube();
+    // 27 less the hollow's 1; both shells' areas.
+    sound(&b, 1e-3, 26.0, 6.0 * 9.0 + 6.0);
+}
+
+#[test]
+fn an_empty_body_is_sound_and_meshes_to_nothing() {
+    let b = Body::new();
+    assert_eq!(crate::check::check(&b), []);
+    let m = tessellate(&b, &MeshParams::new(1e-3, 0.3)).unwrap();
+    assert!(m.positions.is_empty() && m.faults.is_empty());
+    assert_eq!(m.welded_triangles().count(), 0);
+    assert_eq!(check_mesh(&b, &m), Ok(()));
+}

@@ -173,8 +173,10 @@ fn polygon(b: &Body, f: FaceId) -> Option<Vec<[Point3; 3]>> {
     Some(triangles)
 }
 
-/// Faces wind the way their normals say, and solids enclose positive
-/// volume. Decided exactly; only for planar faces with straight edges.
+/// Faces wind the way their normals say, and each solid has one shell
+/// enclosing positive volume (its outside) and any others negative
+/// volume (its cavities). Decided exactly; only for planar faces with
+/// straight edges.
 pub(super) fn orientation(b: &Body, out: &mut Vec<Fault>) {
     let mut polygons = vec![None; b.faces.slot_count()];
     for f in b.faces() {
@@ -199,17 +201,23 @@ pub(super) fn orientation(b: &Body, out: &mut Vec<Fault>) {
         if region.kind != RegionKind::Solid {
             continue;
         }
-        let mut triangles = Vec::new();
-        let all_planar = b.region_shells(r).all(|s| {
-            b.shell_faces(s).all(|f| match &polygons[f.index()] {
-                Some(t) => {
-                    triangles.extend_from_slice(t);
-                    true
+        // Each shell's volume sign, when all its faces are polygons.
+        let signs: Option<Vec<Sign>> = b
+            .region_shells(r)
+            .map(|s| {
+                let mut triangles = Vec::new();
+                for f in b.shell_faces(s) {
+                    triangles.extend_from_slice(polygons[f.index()].as_ref()?);
                 }
-                None => false,
+                Some(volume_sign(&triangles))
             })
-        });
-        if all_planar && volume_sign(&triangles) != Sign::Positive {
+            .collect();
+        let Some(signs) = signs else {
+            continue;
+        };
+        let outer = signs.iter().filter(|&&s| s == Sign::Positive).count();
+        let voids = signs.iter().filter(|&&s| s == Sign::Negative).count();
+        if outer != 1 || outer + voids != signs.len() {
             out.push(Fault::NotOutward { region: r });
         }
     }
