@@ -461,6 +461,17 @@ fn the_window_follows_an_agent_until_the_human_navigates() {
     h.step();
     let agent = h.state().opened().ws.followed_camera().unwrap().clone();
     assert_eq!(h.state().opened().view.nav.camera, agent);
+    // The window shares the camera it shows: the agent's.
+    let followed = h.state().opened().ws.following.clone().unwrap();
+    let t = Instant::now();
+    while p.ok(&["camera"])["camera"] != p.ok(&["camera", "--of", &followed])["camera"] {
+        assert!(
+            t.elapsed() < Duration::from_secs(10),
+            "the window's camera isn't shared"
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(50));
+    }
     // A drag in the viewport takes the camera back.
     let c = h.state().opened().view.rect.center();
     h.event(egui::Event::PointerMoved(c));

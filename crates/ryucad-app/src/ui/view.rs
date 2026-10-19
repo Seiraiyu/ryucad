@@ -251,8 +251,13 @@ impl View {
             }
             self.framed = ws.idle();
         }
-        if let Some(c) = ws.followed_camera() {
+        // Following, the window shows the other's camera, and shares it as
+        // its own: what it shows.
+        if let Some(c) = ws.followed_camera()
+            && *c != self.nav.camera
+        {
             self.nav.camera = c.clone();
+            ws.share_camera(&self.nav.camera);
         }
         let aspect = f64::from(rect.width().max(1.0) / rect.height().max(1.0));
         let size = [f64::from(rect.width()), f64::from(rect.height())];
