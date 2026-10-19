@@ -558,6 +558,9 @@ fn a_damaged_project_is_repaired_then_opened() {
         _ => false,
     });
     h.step();
+    // It says so.
+    h.get_by_label("This project is repaired and ready to open");
+    assert!(h.query_by_label("This project needs repair").is_none());
     h.get_by_label("Open project").click();
     frames(&mut h, |a| {
         matches!(a.screen, ryucad_app::ui::app::Screen::Opened(_)) && loaded(a)

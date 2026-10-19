@@ -202,11 +202,16 @@ pub fn dialog(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, state: &
 pub fn damaged(ui: &mut egui::Ui, offline: &mut Offline, state: &mut State) -> bool {
     let mut open = false;
     egui::CentralPanel::default().show(ui, |ui| {
-        ui.heading("This project needs repair");
-        ui.label(format!(
-            "{} has parts but can't be opened as it is.",
-            offline.root.display()
-        ));
+        if offline.openable() {
+            ui.heading("This project is repaired and ready to open");
+            ui.label(format!("{} can be opened now.", offline.root.display()));
+        } else {
+            ui.heading("This project needs repair");
+            ui.label(format!(
+                "{} has parts but can't be opened as it is.",
+                offline.root.display()
+            ));
+        }
         // No undo to promise: with no daemon there is no activity log yet.
         ui.label("Nothing is changed until you choose a repair, and a repair changes only the files in its planned changes. Git has the files as they were committed.");
         if let Some(e) = &offline.error {

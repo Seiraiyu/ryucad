@@ -163,6 +163,9 @@ impl App {
         match &self.screen {
             Screen::Start(_) => "ryucad".to_owned(),
             Screen::Opened(o) => format!("{} — ryucad", name(&o.ws.root)),
+            Screen::Damaged(d) if d.0.openable() => {
+                format!("{} (repaired) — ryucad", name(&d.0.root))
+            }
             Screen::Damaged(d) => format!("{} (needs repair) — ryucad", name(&d.0.root)),
         }
     }
