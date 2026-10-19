@@ -12,11 +12,13 @@ mod coincide;
 mod cs;
 mod fit;
 mod implicit;
+mod inface;
 mod ss;
 mod ss_exact;
 mod ss_trace;
 
 pub use cs::{CurveHit, Side, curve_surface};
+pub use inface::{Place, point_in_face};
 pub use ss::{Branch, SurfaceHit, surface_surface};
 
 /// Rounding slack added to every certified distance: the surfaces and
