@@ -302,7 +302,10 @@ impl View {
             })
         };
         if response.drag_started() {
-            self.pivot = pivot(self, ws, response.interact_pointer_pos());
+            // Where the button went down: a drag starts only once the
+            // pointer has moved a little, maybe onto the model.
+            let pressed = ui.input(|i| i.pointer.press_origin());
+            self.pivot = pivot(self, ws, pressed.or(response.interact_pointer_pos()));
         }
         if response.dragged() {
             let g = self.nav.style.gesture(buttons, modifiers);
