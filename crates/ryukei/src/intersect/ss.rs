@@ -74,10 +74,15 @@ pub fn surface_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<Surfac
     if let Some(same) = coincident(a, b) {
         return Ok(SurfaceHit::Coincident { same });
     }
-    if let Some((raws, points)) = ss_exact::exact(a, b, region) {
+    if let Some((raws, mut points)) = ss_exact::exact(a, b, region) {
         let mut branches = Vec::new();
         for raw in raws {
             for piece in split_at_poles(raw, [a, b]) {
+                // A sliver the region clips off a curve is a point.
+                if let Some(p) = sliver(&piece) {
+                    points.push(p);
+                    continue;
+                }
                 branches.push(with_pcurves(piece, [a, b])?);
             }
         }
@@ -182,6 +187,21 @@ fn split_at_poles(raw: Raw, surfaces: [&Surface; 2]) -> Vec<Raw> {
             ..raw.clone()
         })
         .collect()
+}
+
+/// The middle of a branch that stays within ten tolerances of it, which
+/// is a point by rule.
+fn sliver(raw: &Raw) -> Option<Point3> {
+    let [r0, r1] = raw.range;
+    let mid = raw.curve.point((r0 + r1) / 2.0);
+    (0..=8)
+        .all(|k| {
+            raw.curve
+                .point(r0 + (r1 - r0) * f64::from(k) / 8.0)
+                .distance(mid)
+                <= 10.0 * raw.tolerance
+        })
+        .then_some(mid)
 }
 
 /// A branch with its pcurve on each surface: exact where it can be,

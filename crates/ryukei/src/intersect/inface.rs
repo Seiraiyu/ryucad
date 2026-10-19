@@ -237,8 +237,12 @@ impl Rays<'_> {
                         if span.hi() < 0.0 || span.lo() > reach {
                             continue;
                         }
+                        // A crossing counts only where it is pinned down: a
+                        // pcurve nearly along the ray leaves a simple root
+                        // whose bracket can't be narrowed.
+                        let pinned = span.hi() - span.lo() <= 1e-9 * reach.max(1.0);
                         match r {
-                            Root::Simple { rising, .. } if span.lo() > 0.0 => {
+                            Root::Simple { rising, .. } if span.lo() > 0.0 && pinned => {
                                 hits.push((span, rising))
                             }
                             _ => unsettled.push(span),
@@ -334,6 +338,25 @@ mod tests {
             point_in_face(&b, f, Point2::new(u, v)),
             Ok(Place::OnVertex(corner))
         );
+    }
+
+    #[test]
+    fn points_on_an_edge_carried_on() {
+        // Rays aimed along the edge's own line meet it end on: no crossing.
+        let (b, _) = primitive::block(OpKey(1), 2.0, 2.0, 2.0, &Rigid::IDENTITY).unwrap();
+        for f in b.faces().collect::<Vec<_>>() {
+            let s = b.surfaces[b.faces[f].surface].clone();
+            for l in b.face_loops(f).collect::<Vec<_>>() {
+                for fin in b.loop_fins(l).collect::<Vec<_>>() {
+                    let e = &b.edges[b.fins[fin].edge];
+                    let c = &b.curves[e.curve];
+                    for t in [e.interval[0] - 0.7, e.interval[1] + 0.4] {
+                        let (u, v) = s.project(c.point(t)).param;
+                        assert_eq!(point_in_face(&b, f, Point2::new(u, v)), Ok(Place::Outside));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

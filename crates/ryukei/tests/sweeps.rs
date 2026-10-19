@@ -3,7 +3,7 @@
 //! that survive edits.
 
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
-use ryukei::check::check;
+use ryukei::check::{Fault, check, check_intersections};
 use ryukei::geom::{
     Axis, Circle2, Curve2, Ellipse2, Frame, Frame2, Line2, Point2, Point3, Surface, Vector2,
     Vector3,
@@ -89,8 +89,31 @@ fn profile(loops: Vec<Loop>) -> ValidProfile {
 }
 
 /// Checks a body and its mesh, and returns the mesh's volume.
+/// The self-intersection check passes, but for pairs it can't check
+/// because a face is on a surface with no implicit form (a swept or NURBS
+/// surface): only analytic pairs are intersected.
+fn self_sound(b: &Body) {
+    for f in check_intersections(b) {
+        let Fault::CannotCheck { a, b: c } = f else {
+            panic!("{f:?}")
+        };
+        let analytic = |x| {
+            matches!(
+                b.surface(b.face(x).unwrap().surface).unwrap(),
+                Surface::Plane(_)
+                    | Surface::Cylinder(_)
+                    | Surface::Cone(_)
+                    | Surface::Sphere(_)
+                    | Surface::Torus(_)
+            )
+        };
+        assert!(!analytic(a) || !analytic(c), "{f:?}");
+    }
+}
+
 fn volume(b: &Body) -> f64 {
     assert_eq!(check(b), []);
+    self_sound(b);
     let m = tessellate(b, &MeshParams::new(1e-3, 0.5)).unwrap();
     assert!(m.faults.is_empty(), "{:?}", m.faults);
     check_mesh(b, &m).unwrap();

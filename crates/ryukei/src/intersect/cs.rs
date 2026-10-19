@@ -68,6 +68,7 @@ pub fn curve_surface(
     let ctx = Context {
         curve,
         range: [t0, t1],
+        surface,
         imp: &imp,
         tolerance,
     };
@@ -115,6 +116,18 @@ struct Candidate {
     tangent: Option<f64>,
 }
 
+/// Touching stretches made one.
+fn merge_runs(parts: Vec<[f64; 2]>) -> Vec<[f64; 2]> {
+    let mut out: Vec<[f64; 2]> = Vec::with_capacity(parts.len());
+    for p in parts {
+        match out.last_mut() {
+            Some(last) if p[0] <= last[1] => last[1] = last[1].max(p[1]),
+            _ => out.push(p),
+        }
+    }
+    out
+}
+
 /// The local width at which a piece's roots are bracketed: about a
 /// thousandth of resolution along the piece.
 fn min_width(piece: &Piece3) -> f64 {
@@ -150,6 +163,7 @@ fn hull_local(imp: &Implicit, piece: &Piece3) -> [Interval; 3] {
 struct Context<'a> {
     curve: &'a Curve,
     range: [f64; 2],
+    surface: &'a Surface,
     imp: &'a Implicit,
     tolerance: f64,
 }
@@ -167,6 +181,19 @@ impl Context<'_> {
         let (poly, w) = imp.on_piece(piece);
         let wd = (0..imp.degree()).fold(1.0, |a, _| a * w);
         let width = min_width(piece);
+        // A piece certified within the tolerance of the surface all along
+        // touches it all along, whatever signs rounding gives `f`: on a
+        // surface whose implicit form magnifies distance (a cone nearly
+        // flat), `f` can be signed on a curve lying in it.
+        let mut budget = MAX_PARTS;
+        if self.within(&poly, piece, wd, &mut budget) {
+            out.push(Candidate {
+                t: piece.range,
+                simple: None,
+                tangent: None,
+            });
+            return Ok(());
+        }
         // Near misses: where the curve comes within the tolerance of the
         // surface without reaching it, at a turning point of the
         // polynomial, it touches by rule.
@@ -201,28 +228,40 @@ impl Context<'_> {
                         tangent: None,
                     });
                 }
-                Root::Unresolved { lo, hi } => {
+                Root::Unresolved { lo: l0, hi: h0 } => {
+                    // The stretch within the tolerance of the surface, less
+                    // what lies on a cone's other nappe (where `f`
+                    // vanishes too); anything else is uncertain.
                     let mut budget = MAX_PARTS;
-                    if !self.within(&poly.part(lo, hi), &part(piece, lo, hi), wd, &mut budget) {
-                        return Err(Failure::Uncertain);
+                    let near = self
+                        .near_parts(
+                            &poly.part(l0, h0),
+                            &part(piece, l0, h0),
+                            [l0, h0],
+                            wd,
+                            &mut budget,
+                        )
+                        .ok_or(Failure::Uncertain)?;
+                    for [lo, hi] in merge_runs(near) {
+                        // A double root leaves a stretch rounding can't
+                        // sign, but the derivative's root inside it is
+                        // simple.
+                        let pad = (hi - lo).max(width);
+                        let (a, b) = ((lo - pad).max(0.0), (hi + pad).min(1.0));
+                        let slope = poly.part(a, b).deriv().roots(width / (b - a));
+                        let tangent = match slope[..] {
+                            [Root::Simple { lo: l, hi: h, .. }] => {
+                                let s = a + (b - a) * (l + h) / 2.0;
+                                (lo <= s && s <= hi).then(|| chain.param(i, s))
+                            }
+                            _ => None,
+                        };
+                        out.push(Candidate {
+                            t: [chain.param(i, lo), chain.param(i, hi)],
+                            simple: None,
+                            tangent,
+                        });
                     }
-                    // A double root leaves a stretch rounding can't sign,
-                    // but the derivative's root inside it is simple.
-                    let pad = (hi - lo).max(width);
-                    let (a, b) = ((lo - pad).max(0.0), (hi + pad).min(1.0));
-                    let slope = poly.part(a, b).deriv().roots(width / (b - a));
-                    let tangent = match slope[..] {
-                        [Root::Simple { lo: l, hi: h, .. }] => {
-                            let s = a + (b - a) * (l + h) / 2.0;
-                            (lo <= s && s <= hi).then(|| chain.param(i, s))
-                        }
-                        _ => None,
-                    };
-                    out.push(Candidate {
-                        t: [chain.param(i, lo), chain.param(i, hi)],
-                        simple: None,
-                        tangent,
-                    });
                 }
             }
         }
@@ -280,13 +319,46 @@ impl Context<'_> {
         if self.imp.distance_bound(f_max, local) <= self.tolerance {
             return true;
         }
-        if *budget < 2 {
+        // A middle plainly beyond the tolerance can't be brought in by
+        // halving: give up at once.
+        let mid = Point3::ORIGIN + piece.split(0.5)[1].pts[0].p;
+        if *budget < 2 || self.surface.distance(mid) > 2.0 * self.tolerance {
             return false;
         }
         *budget -= 2;
         let (p0, p1) = poly.split(0.5);
         let [c0, c1] = piece.split(0.5);
         self.within(&p0, &c0, wd, budget) && self.within(&p1, &c1, wd, budget)
+    }
+
+    /// The parts of the stretch `[lo, hi]` of a piece (whose polynomial
+    /// there is `poly`, and sub-piece `piece`) certified within the
+    /// tolerance of the surface, halving where needed; parts certified
+    /// past a cone's apex are left out. `None` when a part is neither, or
+    /// the budget runs out.
+    fn near_parts(
+        &self,
+        poly: &Bernstein,
+        piece: &Piece3,
+        [lo, hi]: [f64; 2],
+        wd: f64,
+        budget: &mut u32,
+    ) -> Option<Vec<[f64; 2]>> {
+        let local = hull_local(self.imp, piece);
+        if self.imp.box_beyond_apex(local) {
+            return Some(Vec::new());
+        }
+        let f_max = (poly.range().mag() / wd).next_up();
+        if self.imp.distance_bound(f_max, local) <= self.tolerance {
+            return Some(vec![[lo, hi]]);
+        }
+        *budget = budget.checked_sub(2)?;
+        let mid = (lo + hi) / 2.0;
+        let (p0, p1) = poly.split(0.5);
+        let [c0, c1] = piece.split(0.5);
+        let mut out = self.near_parts(&p0, &c0, [lo, mid], wd, budget)?;
+        out.extend(self.near_parts(&p1, &c1, [mid, hi], wd, budget)?);
+        Some(out)
     }
 
     /// A simple root's bracket `[a, b]` narrowed by bisection on the

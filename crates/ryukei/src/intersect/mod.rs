@@ -8,6 +8,7 @@
 //! (plane, cylinder, cone, sphere, torus) are intersected; a surface with
 //! no implicit form is [`Failure::Unsupported`].
 
+pub(crate) mod broad;
 mod coincide;
 mod cs;
 mod face;

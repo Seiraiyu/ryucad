@@ -166,11 +166,14 @@ impl Implicit {
     /// True for a point certified to lie on the other nappe's side of a
     /// cone's apex, where `f` vanishes off the surface.
     pub(crate) fn beyond_apex(&self, q: Point3) -> bool {
+        self.box_beyond_apex(self.local(q.to_vector()))
+    }
+
+    /// True for a local box certified to lie on the other nappe's side of
+    /// a cone's apex.
+    pub(crate) fn box_beyond_apex(&self, [_, _, z]: [Interval; 3]) -> bool {
         match self.kind {
-            Kind::Cone { r, sin, cos } => {
-                let z = self.local(q.to_vector())[2];
-                (p(r) + z * tan(sin, cos)).hi() < 0.0
-            }
+            Kind::Cone { r, sin, cos } => (p(r) + z * tan(sin, cos)).hi() < 0.0,
             _ => false,
         }
     }
