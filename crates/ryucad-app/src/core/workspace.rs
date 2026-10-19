@@ -518,6 +518,11 @@ impl Workspace {
             (Pending::Quiet, Ok(_)) => {}
             (Pending::Activity, Ok(a)) => self.activity.reset(&a.result["entries"]),
             (Pending::History, Ok(a)) => self.history = Some(a.result),
+            // Said in the tab, not left spinning.
+            (Pending::History, Err(e)) => {
+                self.history = Some(json!({"error": e.message}));
+                self.fail(e);
+            }
             (Pending::Doctor, Ok(a)) => {
                 self.doctor = Some(crate::core::doctor::report_of(&a.result))
             }

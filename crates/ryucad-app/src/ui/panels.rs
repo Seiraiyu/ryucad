@@ -406,6 +406,13 @@ fn history(ui: &mut egui::Ui, ws: &mut Workspace) {
         ui.spinner();
         return;
     };
+    if let Some(e) = h["error"].as_str() {
+        ui.colored_label(
+            ui.visuals().error_fg_color,
+            format!("Can't read the history: {e}"),
+        );
+        return;
+    }
     if h["repository"] == false {
         ui.weak("This project isn't in a Git repository, so it has no history");
         return;

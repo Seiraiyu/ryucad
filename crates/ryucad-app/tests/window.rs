@@ -429,7 +429,8 @@ fn the_history_tab_keeps_the_view_its_size() {
     frames(&mut h, loaded);
     h.run_steps(2);
     let before = h.state().opened().view.rect;
-    // Not a Git repository: the tab says only that.
+    // Whatever the history holds (here, the commits of the checkout the
+    // tests run in, if any), the view stays as it was.
     h.get_by_label("History").click();
     frames(&mut h, |a| a.opened().ws.history.is_some());
     h.run_steps(2);
