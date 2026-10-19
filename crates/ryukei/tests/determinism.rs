@@ -743,6 +743,152 @@ fn sweeps_section(golden: &mut Golden) {
     }
 }
 
+/// Intersections: curve–surface hits, surface–surface branches with their
+/// pcurves (closed forms and traced), face–face stretches and the
+/// self-intersection check.
+fn intersections_section(golden: &mut Golden) {
+    use ryukei::intersect::{
+        CurveHit, FaceMeet, Side, SurfaceHit, curve_surface, face_face, surface_surface,
+    };
+    let mut s = golden.section("intersections");
+    let side = |x: Side| match x {
+        Side::Negative => 0u64,
+        Side::Positive => 1,
+        Side::Beyond => 2,
+    };
+    let f = |o: (f64, f64, f64), z: (f64, f64, f64)| {
+        Frame::new(
+            Point3::new(o.0, o.1, o.2),
+            Vector3::new(z.0, z.1, z.2),
+            Vector3::new(1.0, 0.2, 0.1),
+        )
+        .unwrap()
+    };
+    let z = (0.0, 0.0, 1.0);
+    let surfaces = [
+        Surface::Plane(Plane::new(f((0.0, 0.0, 0.3), (0.2, 0.1, 1.0)))),
+        Surface::Cylinder(Cylinder::new(f((0.0, 0.0, 0.0), z), 1.0).unwrap()),
+        Surface::Cone(Cone::new(f((0.1, 0.0, 0.0), z), 1.0, 0.5).unwrap()),
+        Surface::Sphere(Sphere::new(f((1.2, 0.0, 0.0), z), 1.0).unwrap()),
+        Surface::Torus(Torus::new(f((0.0, 0.0, 0.0), z), 3.0, 1.0).unwrap()),
+        Surface::Cylinder(Cylinder::new(f((0.0, 0.3, 0.0), (1.0, 0.0, 0.0)), 0.6).unwrap()),
+        Surface::Sphere(Sphere::new(f((0.0, 0.0, 1.5), z), 2.0).unwrap()),
+    ];
+    let mut g = Lcg::new(0x696e_7473);
+    for surface in &surfaces {
+        for _ in 0..16 {
+            let o = Point3::new(
+                g.next_f64(-3.0, 3.0),
+                g.next_f64(-3.0, 3.0),
+                g.next_f64(-3.0, 3.0),
+            );
+            let d = Vector3::new(
+                g.next_f64(-1.0, 1.0),
+                g.next_f64(-1.0, 1.0),
+                g.next_f64(-1.0, 1.0),
+            );
+            let curve = if g.next_f64(0.0, 1.0) < 0.5 {
+                Line::new(o, d).map(Curve::Line).ok()
+            } else {
+                Frame::new(o, d, Vector3::new(1.0, 0.0, 0.0))
+                    .ok()
+                    .and_then(|fr| Circle::new(fr, g.next_f64(0.5, 3.0)).ok())
+                    .map(Curve::Circle)
+            };
+            let Some(curve) = curve else { continue };
+            let range = match curve {
+                Curve::Line(_) => [-6.0, 6.0],
+                _ => [0.0, core::f64::consts::TAU],
+            };
+            match curve_surface(&curve, range, surface, 1e-8) {
+                Err(_) => s.u64(99),
+                Ok(hits) => {
+                    for h in hits {
+                        match h {
+                            CurveHit::Point {
+                                t,
+                                point,
+                                before,
+                                after,
+                            } => {
+                                s.f64(t);
+                                s.f64(point.x);
+                                s.u64(side(before) * 3 + side(after));
+                            }
+                            CurveHit::On { t } => {
+                                s.f64(t[0]);
+                                s.f64(t[1]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let region = Box3::new(Point3::new(-6.0, -6.0, -6.0), Point3::new(6.0, 6.0, 6.0));
+    for (i, a) in surfaces.iter().enumerate() {
+        for b in &surfaces[i + 1..] {
+            match surface_surface(a, b, &region) {
+                Err(_) => s.u64(99),
+                Ok(SurfaceHit::Coincident { same }) => s.u64(u64::from(same)),
+                Ok(SurfaceHit::Meet { branches, points }) => {
+                    for br in branches {
+                        s.f64(br.tolerance);
+                        s.u64(u64::from(br.tangent));
+                        for k in 0..=8 {
+                            let t = br.range[0] + (br.range[1] - br.range[0]) * f64::from(k) / 8.0;
+                            let p = br.curve.point(t);
+                            for x in [p.x, p.y, p.z] {
+                                s.f64(x);
+                            }
+                            for (c2, map) in &br.pcurves {
+                                let q = c2.point(map[0] + map[1] * t);
+                                s.f64(q.x);
+                                s.f64(q.y);
+                            }
+                        }
+                    }
+                    for p in points {
+                        s.f64(p.x);
+                    }
+                }
+            }
+        }
+    }
+    let (block, _) = primitive::block(OpKey(1), 2.0, 2.0, 2.0, &Rigid::IDENTITY).unwrap();
+    let (rod, _) = primitive::cylinder(
+        OpKey(2),
+        0.5,
+        3.0,
+        &Rigid::translation(Vector3::new(1.0, 1.0, -0.5)),
+    )
+    .unwrap();
+    for fa in block.faces() {
+        for fb in rod.faces() {
+            match face_face((&block, fa), (&rod, fb)) {
+                Ok(FaceMeet::Meet {
+                    stretches,
+                    contacts,
+                }) => {
+                    s.u64(stretches.len() as u64 * 16 + contacts.len() as u64);
+                    for st in stretches {
+                        s.f64(st.range[0]);
+                        s.f64(st.range[1]);
+                    }
+                }
+                Ok(FaceMeet::Coincident { rims, .. }) => s.u64(1000 + rims.len() as u64),
+                Err(_) => s.u64(99),
+            }
+        }
+    }
+    let torus = primitive::torus(OpKey(3), 2.0, 0.5, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    for body in [&block, &rod, &torus] {
+        s.u64(ryukei::check::check_intersections(body).len() as u64);
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -764,5 +910,6 @@ fn determinism() {
     euler_section(&mut golden);
     meshes_section(&mut golden);
     sweeps_section(&mut golden);
+    intersections_section(&mut golden);
     golden.finish();
 }

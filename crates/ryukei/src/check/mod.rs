@@ -5,13 +5,19 @@
 //! state an Euler operator leaves behind, including the half-built bodies
 //! inside a primitive, so the operators debug-assert it.
 //! [`check`] adds geometry and orientation: it holds for finished bodies.
+//! [`check_intersections`] adds that faces meet only at the edges and
+//! vertices they share; it is too costly to run after every operation, so
+//! it runs in tests, fuzzing, and on booleans' inputs and results.
 //!
 //! Neither panics or loops on a corrupted body: every lookup is checked and
 //! every walk is bounded. Faults come out in a fixed order: by check, then
 //! by entity in array order.
 
 mod geometry;
+mod intersect;
 mod topology;
+
+pub use intersect::check_intersections;
 
 use crate::name::Name;
 use crate::topo::{Body, EdgeId, EntityId, FaceId, FinId, LoopId, RegionId, ShellId, VertexId};
@@ -95,6 +101,17 @@ pub enum Fault {
     /// every other shell enclosing negative volume (a cavity): a shell is
     /// inside out or flat.
     NotOutward { region: RegionId },
+    /// Two faces meet away from the edges and vertices they share: they
+    /// cross, or touch along a curve or at a point. From
+    /// [`check_intersections`].
+    FacesCross { a: FaceId, b: FaceId },
+    /// Two faces on one surface overlap in an area. From
+    /// [`check_intersections`].
+    FacesOverlap { a: FaceId, b: FaceId },
+    /// Two faces that may meet could not be checked: a surface with no
+    /// implicit form not certified apart, or an intersection that stayed
+    /// uncertain. From [`check_intersections`].
+    CannotCheck { a: FaceId, b: FaceId },
 }
 
 /// Every check: structure, then (for a structurally sound body) geometry

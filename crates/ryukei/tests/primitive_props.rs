@@ -3,7 +3,7 @@
 
 use proptest::prelude::*;
 use ryukei::Error;
-use ryukei::check::check;
+use ryukei::check::{check, check_intersections};
 use ryukei::geom::{Point3, Rigid, Vector3};
 use ryukei::name::{Event, Journal, OpKey};
 use ryukei::primitive::{block, cone, cylinder, frustum, sphere, torus};
@@ -62,6 +62,7 @@ proptest! {
             Err(e) => prop_assert_eq!(e, Error::OutsideSizeBox),
             Ok((body, journal)) => {
                 prop_assert_eq!(check(&body), []);
+                prop_assert_eq!(check_intersections(&body), []);
                 let (here, j0) = build(which, d, OpKey(1), &Rigid::IDENTITY).unwrap();
                 prop_assert_eq!(names(&journal), names(&j0));
                 prop_assert_eq!(here.counts(), body.counts());

@@ -2,24 +2,14 @@
 //!
 //! Separation guarantees that different loops are more than
 //! [`crate::tol::LINEAR_RESOLUTION`] apart, so one point of a loop
-//! classifies the whole loop against every other one. The point's winding
-//! number about a loop is a sum of the angles its pieces subtend, each
-//! piece subdivided until its bound excludes the point.
+//! classifies the whole loop against every other one, by its certified
+//! winding number ([`crate::geom::winding2`]).
 
-use super::chain::{Chain, Piece};
-use super::intersect2::SLACK_2D;
 use crate::geom::Vector2;
-use crate::math;
-use core::f64::consts::TAU;
+use crate::geom::chain2::Chain2;
+use crate::geom::intersect2::SLACK_2D;
+use crate::geom::winding2::winding;
 use rayon::prelude::*;
-
-/// How many times a piece may be halved before its winding contribution
-/// counts as uncertain.
-const MAX_DEPTH: u32 = 100;
-
-/// The explicit rule for rounding a winding number: the angle sum over
-/// `2π` must be within this of an integer.
-const WINDING_SLACK: f64 = 0.25;
 
 /// Where each loop sits: how many loops contain it, and the containing
 /// loop of greatest depth.
@@ -33,7 +23,7 @@ pub(super) struct Place {
 /// Fails with the index of the first loop, in input order, whose
 /// classification could not be certified, or whose parent is not one
 /// level up (which certified winding numbers rule out).
-pub(super) fn places(loops: &[&[Chain]], points: &[Vector2]) -> Result<Vec<Place>, usize> {
+pub(super) fn places(loops: &[&[Chain2]], points: &[Vector2]) -> Result<Vec<Place>, usize> {
     let boxes: Vec<(Vector2, Vector2)> = loops.iter().map(|l| bounds(l)).collect();
     let containers: Vec<Option<Vec<usize>>> = (0..loops.len())
         .into_par_iter()
@@ -74,7 +64,7 @@ pub(super) fn places(loops: &[&[Chain]], points: &[Vector2]) -> Result<Vec<Place
 }
 
 /// The box of a loop's control hulls, grown by the rounding slack.
-fn bounds(chains: &[Chain]) -> (Vector2, Vector2) {
+fn bounds(chains: &[Chain2]) -> (Vector2, Vector2) {
     let grow = Vector2::new(SLACK_2D, SLACK_2D);
     let (lo, hi) = chains
         .iter()
@@ -91,53 +81,6 @@ fn bounds(chains: &[Chain]) -> (Vector2, Vector2) {
 
 fn contains((lo, hi): (Vector2, Vector2), p: Vector2) -> bool {
     lo.x <= p.x && p.x <= hi.x && lo.y <= p.y && p.y <= hi.y
-}
-
-/// The winding number of a loop about `p`, which must lie off it, or
-/// `None` when it can't be certified. The gaps between one segment's end
-/// and the next one's start are closed by straight lines.
-pub(super) fn winding(p: Vector2, chains: &[Chain]) -> Option<i64> {
-    let mut sum = 0.0;
-    for (i, c) in chains.iter().enumerate() {
-        for piece in &c.pieces {
-            sum += subtended(p, piece, MAX_DEPTH)?;
-        }
-        let next = &chains[(i + 1) % chains.len()];
-        sum += angle(p, end(c), next.pieces[0].pts[0].p);
-    }
-    let turns = sum / TAU;
-    let w = turns.round();
-    ((turns - w).abs() <= WINDING_SLACK).then_some(w as i64)
-}
-
-/// The last point of a chain.
-fn end(c: &Chain) -> Vector2 {
-    let last = &c.pieces[c.pieces.len() - 1];
-    last.pts[last.pts.len() - 1].p
-}
-
-/// The signed angle `piece` subtends at `p`: once its grown hull box
-/// excludes `p`, the piece lies in a half-plane away from `p`, so the angle
-/// between its ends is the angle it sweeps.
-fn subtended(p: Vector2, piece: &Piece, depth: u32) -> Option<f64> {
-    let (lo, hi) = piece.hull();
-    let grow = Vector2::new(SLACK_2D, SLACK_2D);
-    if !contains((lo - grow, hi + grow), p) {
-        let first = piece.pts[0].p;
-        let last = piece.pts[piece.pts.len() - 1].p;
-        return Some(angle(p, first, last));
-    }
-    if depth == 0 {
-        return None;
-    }
-    let [a, b] = piece.split(0.5);
-    Some(subtended(p, &a, depth - 1)? + subtended(p, &b, depth - 1)?)
-}
-
-/// The signed angle from `a` to `b` seen from `p`.
-fn angle(p: Vector2, a: Vector2, b: Vector2) -> f64 {
-    let (u, v) = (a - p, b - p);
-    math::atan2(u.cross(v), u.dot(v))
 }
 
 #[cfg(test)]
@@ -164,8 +107,11 @@ mod tests {
             .collect()
     }
 
-    fn chains(l: &Loop) -> Vec<Chain> {
-        l.segments.iter().map(Chain::new).collect()
+    fn chains(l: &Loop) -> Vec<Chain2> {
+        l.segments
+            .iter()
+            .map(|s| Chain2::new(&s.curve, s.t0, s.t1))
+            .collect()
     }
 
     #[test]

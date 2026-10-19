@@ -3,7 +3,7 @@
 //! that survive edits.
 
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
-use ryukei::check::check;
+use ryukei::check::{Fault, check, check_intersections};
 use ryukei::geom::{
     Axis, Circle2, Curve2, Ellipse2, Frame, Frame2, Line2, Point2, Point3, Surface, Vector2,
     Vector3,
@@ -89,8 +89,31 @@ fn profile(loops: Vec<Loop>) -> ValidProfile {
 }
 
 /// Checks a body and its mesh, and returns the mesh's volume.
+/// The self-intersection check passes, but for pairs it can't check
+/// because a face is on a surface with no implicit form (a swept or NURBS
+/// surface): only analytic pairs are intersected.
+fn self_sound(b: &Body) {
+    for f in check_intersections(b) {
+        let Fault::CannotCheck { a, b: c } = f else {
+            panic!("{f:?}")
+        };
+        let analytic = |x| {
+            matches!(
+                b.surface(b.face(x).unwrap().surface).unwrap(),
+                Surface::Plane(_)
+                    | Surface::Cylinder(_)
+                    | Surface::Cone(_)
+                    | Surface::Sphere(_)
+                    | Surface::Torus(_)
+            )
+        };
+        assert!(!analytic(a) || !analytic(c), "{f:?}");
+    }
+}
+
 fn volume(b: &Body) -> f64 {
     assert_eq!(check(b), []);
+    self_sound(b);
     let m = tessellate(b, &MeshParams::new(1e-3, 0.5)).unwrap();
     assert!(m.faults.is_empty(), "{:?}", m.faults);
     check_mesh(b, &m).unwrap();
@@ -223,6 +246,38 @@ fn a_slot_an_ellipse_and_a_nurbs_blob() {
     let area = p.lumps()[0].outer.area;
     let (b, _) = extrude(K, &p, n, 0.0, 0.5).unwrap();
     assert!(close(volume(&b), area * 0.5, 3e-3));
+}
+
+#[test]
+fn part_turns_of_a_slot_and_a_blob_do_not_cross_themselves() {
+    // A slot's lines meet its arcs tangentially, so its caps touch the
+    // swept arcs' tori at their vertices; a blob's pcurves come in many
+    // pieces. Both come out sound, by the self-intersection check too
+    // (in `volume`).
+    let slot = Loop {
+        key: LoopKey(1),
+        segments: keyed(
+            10,
+            vec![
+                line((2.0, 0.0), (4.0, 0.0)),
+                arc((4.0, 0.5), 0.5, -FRAC_PI_2, FRAC_PI_2),
+                line((4.0, 1.0), (2.0, 1.0)),
+                arc((2.0, 0.5), 0.5, FRAC_PI_2, 3.0 * FRAC_PI_2),
+            ],
+        ),
+    };
+    let y = Axis::new(frame().origin(), frame().y().get()).unwrap();
+    let (b, _) = revolve(K, &profile(vec![slot]), y, 0.3, 1.5).unwrap();
+    assert!(volume(&b) > 0.0);
+    let mut g = ryukei_testkit::Lcg::new(11);
+    let blob = ryukei_testkit::nurbs::blob2(&mut g, Point2::new(3.0, 0.0), 1.0);
+    let [a, z] = blob.domain();
+    let lp = Loop {
+        key: LoopKey(1),
+        segments: keyed(10, vec![(Curve2::Nurbs2(Arc::new(blob)), a, z)]),
+    };
+    let (b, _) = revolve(K, &profile(vec![lp]), y, 0.0, 2.0).unwrap();
+    assert!(volume(&b) > 0.0);
 }
 
 #[test]

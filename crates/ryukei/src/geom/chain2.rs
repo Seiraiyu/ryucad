@@ -1,55 +1,91 @@
-//! Segments as chains of rational Bézier pieces in the plane.
+//! Trimmed plane curves as chains of rational Bézier pieces.
 //!
 //! With positive weights, each piece lies in the convex hull of its
 //! Euclidean control points, which is what the certified tests in
-//! [`super::intersect2`] work from. Pieces run in the segment's direction,
-//! so a chain starts at the segment's start and ends at its end.
+//! [`super::intersect2`] work from. Pieces run in the direction of travel,
+//! so a chain starts at `curve(t0)` and ends at `curve(t1)`, whichever
+//! way round they are.
 
-use super::Segment;
-use crate::geom::{BezierCurve, Curve2, Frame2, Hom, NurbsCurve2, Vector2};
+use super::{BezierCurve, Curve2, Frame2, Hom, NurbsCurve2, Vector2};
 use crate::math;
 use core::f64::consts::FRAC_PI_2;
 
-/// One polynomial piece of a segment.
-pub(super) type Piece = BezierCurve<Vector2>;
+/// One polynomial piece of a trimmed curve.
+pub(crate) type Piece2 = BezierCurve<Vector2>;
 
-/// A segment as Bézier pieces, with the box of their control hulls.
+/// A trimmed curve as Bézier pieces, with the box of their control hulls.
 #[derive(Clone, Debug)]
-pub(super) struct Chain {
-    pub(super) pieces: Vec<Piece>,
-    /// The segment is a whole period, so its end is its start.
-    pub(super) closed: bool,
-    /// A NURBS segment, which can cross itself.
-    pub(super) free_form: bool,
-    pub(super) lo: Vector2,
-    pub(super) hi: Vector2,
+pub(crate) struct Chain2 {
+    pub(crate) pieces: Vec<Piece2>,
+    /// The range is a whole period, so the end is the start.
+    pub(crate) closed: bool,
+    /// A NURBS, which can cross itself.
+    pub(crate) free_form: bool,
+    pub(crate) lo: Vector2,
+    pub(crate) hi: Vector2,
+    /// The pieces are circular or elliptic arcs, measured by angle.
+    conic: bool,
 }
 
-/// How close, in units of the parameter's size, a NURBS segment's end
+/// How close, in units of the parameter's size, a NURBS range's end
 /// must be to a knot to be taken as the knot: a few ulps, so a caller's
 /// rounded knot value doesn't leave a piece a few ulps long.
 const KNOT_SNAP: f64 = 16.0 * f64::EPSILON;
 
-impl Chain {
-    pub(super) fn new(s: &Segment) -> Self {
-        let pieces = match &s.curve {
-            Curve2::Line2(_) => vec![line(s)],
-            Curve2::Circle2(c) => arc(c.frame(), c.radius(), c.radius(), s.t0, s.t1),
-            Curve2::Ellipse2(e) => arc(e.frame(), e.major(), e.minor(), s.t0, s.t1),
-            Curve2::Nurbs2(n) => nurbs(n, s.t0, s.t1),
+impl Chain2 {
+    /// `curve` from `t0` to `t1`; `t1 < t0` runs it backwards. The range
+    /// must not be empty, and must lie in a clamped curve's domain.
+    pub(crate) fn new(curve: &Curve2, t0: f64, t1: f64) -> Self {
+        let pieces = match curve {
+            Curve2::Line2(_) => vec![line(curve, t0, t1)],
+            Curve2::Circle2(c) => arc(c.frame(), c.radius(), c.radius(), t0, t1),
+            Curve2::Ellipse2(e) => arc(e.frame(), e.major(), e.minor(), t0, t1),
+            Curve2::Nurbs2(n) => nurbs(n, t0, t1),
         };
         let (lo, hi) = pieces
             .iter()
-            .map(Piece::hull)
+            .map(Piece2::hull)
             .reduce(|(a, b), (c, d)| (least(a, c), greatest(b, d)))
-            .expect("a segment has pieces");
+            .expect("a trimmed curve has pieces");
         Self {
             pieces,
-            closed: s.is_closed(),
-            free_form: matches!(s.curve, Curve2::Nurbs2(_)),
+            closed: curve.period() == Some((t1 - t0).abs()),
+            free_form: matches!(curve, Curve2::Nurbs2(_)),
             lo,
             hi,
+            conic: matches!(curve, Curve2::Circle2(_) | Curve2::Ellipse2(_)),
         }
+    }
+
+    /// The curve's parameter at local parameter `s` of piece `i`: affine
+    /// for a line or a NURBS, and for an arc the half-angle substitution
+    /// `tan((t - m) / 2) = tan(h / 2) (2 s - 1)`, as in
+    /// [`super::chain3`].
+    pub(crate) fn param(&self, i: usize, s: f64) -> f64 {
+        let [a, b] = self.pieces[i].range;
+        if s <= 0.0 {
+            return a;
+        }
+        if s >= 1.0 {
+            return b;
+        }
+        if self.conic {
+            let (m, h) = ((a + b) / 2.0, (b - a) / 2.0);
+            m + 2.0 * math::atan2(math::tan(h / 2.0) * (2.0 * s - 1.0), 1.0)
+        } else {
+            a + (b - a) * s
+        }
+    }
+
+    /// The first point.
+    pub(crate) fn start(&self) -> Vector2 {
+        self.pieces[0].pts[0].p
+    }
+
+    /// The last point.
+    pub(crate) fn end(&self) -> Vector2 {
+        let last = &self.pieces[self.pieces.len() - 1];
+        last.pts[last.pts.len() - 1].p
     }
 }
 
@@ -68,12 +104,12 @@ fn hom(p: Vector2, w: f64) -> Hom<Vector2> {
 }
 
 /// A line segment: one degree 1 piece.
-fn line(s: &Segment) -> Piece {
-    Piece {
-        range: [s.t0, s.t1],
+fn line(curve: &Curve2, t0: f64, t1: f64) -> Piece2 {
+    Piece2 {
+        range: [t0, t1],
         pts: vec![
-            hom(s.start().to_vector(), 1.0),
-            hom(s.end().to_vector(), 1.0),
+            hom(curve.point(t0).to_vector(), 1.0),
+            hom(curve.point(t1).to_vector(), 1.0),
         ],
     }
 }
@@ -83,7 +119,7 @@ fn line(s: &Segment) -> Piece {
 /// an arc of angle `2h` has its middle control point at the middle angle,
 /// `1 / cos h` times as far out, with weight `cos h` (an ellipse is the
 /// same affine image of the circle).
-fn arc(f: &Frame2, a: f64, b: f64, t0: f64, t1: f64) -> Vec<Piece> {
+fn arc(f: &Frame2, a: f64, b: f64, t0: f64, t1: f64) -> Vec<Piece2> {
     let at = |t: f64, scale: f64| {
         let (s, c) = math::sin_cos(t);
         f.origin().to_vector() + (f.x() * (a * c) + f.y() * (b * s)) / scale
@@ -96,7 +132,7 @@ fn arc(f: &Frame2, a: f64, b: f64, t0: f64, t1: f64) -> Vec<Piece> {
         .map(|i| {
             let start = t0 + step * i as f64;
             let end = if i + 1 == count { t1 } else { start + step };
-            Piece {
+            Piece2 {
                 range: [start, end],
                 pts: vec![
                     hom(at(start, 1.0), 1.0),
@@ -111,7 +147,7 @@ fn arc(f: &Frame2, a: f64, b: f64, t0: f64, t1: f64) -> Vec<Piece> {
 /// The pieces of a NURBS over `[t0, t1]`: its own Bézier pieces (repeated
 /// by the period for a periodic curve) cut to the range by de Casteljau
 /// subdivision.
-fn nurbs(n: &NurbsCurve2, t0: f64, t1: f64) -> Vec<Piece> {
+fn nurbs(n: &NurbsCurve2, t0: f64, t1: f64) -> Vec<Piece2> {
     let (lo, hi) = (t0.min(t1), t0.max(t1));
     let own = n.pieces();
     let shifts: Vec<f64> = match n.period() {
@@ -149,7 +185,7 @@ fn at_knot(t: f64, k: f64) -> bool {
 
 /// The part of `piece`, covering `[a, b]`, that lies in `[lo, hi]`, or
 /// `None` when they overlap by no more than a snapped end.
-fn cut(piece: &Piece, [a, b]: [f64; 2], [lo, hi]: [f64; 2]) -> Option<Piece> {
+fn cut(piece: &Piece2, [a, b]: [f64; 2], [lo, hi]: [f64; 2]) -> Option<Piece2> {
     let (c, d) = (lo.max(a), hi.min(b));
     if d <= c || at_knot(d, a) || at_knot(c, b) {
         return None;
@@ -180,31 +216,27 @@ fn cut(piece: &Piece, [a, b]: [f64; 2], [lo, hi]: [f64; 2]) -> Option<Piece> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geom::{Circle2, Ellipse2, KnotVector, Point2};
-    use crate::sweep::SegmentKey;
+    use crate::geom::{Circle2, Ellipse2, KnotVector, Line2, Point2};
     use core::f64::consts::{PI, TAU};
     use std::sync::Arc;
 
-    fn seg(curve: Curve2, t0: f64, t1: f64) -> Segment {
-        Segment {
-            key: SegmentKey(0),
-            curve,
-            t0,
-            t1,
-        }
+    /// A curve and a range on it.
+    struct Seg {
+        curve: Curve2,
+        t0: f64,
+        t1: f64,
     }
 
-    fn start(c: &Chain) -> Vector2 {
-        c.pieces[0].pts[0].p
+    fn seg(curve: Curve2, t0: f64, t1: f64) -> Seg {
+        Seg { curve, t0, t1 }
     }
 
-    fn end(c: &Chain) -> Vector2 {
-        let last = &c.pieces[c.pieces.len() - 1];
-        last.pts[last.pts.len() - 1].p
+    fn chain(s: &Seg) -> Chain2 {
+        Chain2::new(&s.curve, s.t0, s.t1)
     }
 
     /// The point of a piece at local parameter `u`.
-    fn point(p: &Piece, u: f64) -> Vector2 {
+    fn point(p: &Piece2, u: f64) -> Vector2 {
         if u <= 0.0 {
             return p.pts[0].p;
         }
@@ -214,11 +246,11 @@ mod tests {
         p.split(u)[1].pts[0].p
     }
 
-    /// Every piece follows the segment, and the chain runs from its start
+    /// Every piece follows the curve, and the chain runs from its start
     /// to its end.
-    fn follows(s: &Segment, c: &Chain, reparam: impl Fn(f64) -> f64) {
-        assert!((start(c) - s.start().to_vector()).length() <= 1e-14);
-        assert!((end(c) - s.end().to_vector()).length() <= 1e-14);
+    fn follows(s: &Seg, c: &Chain2, reparam: impl Fn(f64) -> f64) {
+        assert!((c.start() - s.curve.point(s.t0).to_vector()).length() <= 1e-14);
+        assert!((c.end() - s.curve.point(s.t1).to_vector()).length() <= 1e-14);
         for p in &c.pieces {
             let [a, b] = p.range;
             for i in 0..=8 {
@@ -238,7 +270,7 @@ mod tests {
             let f = Frame2::new(Point2::new(1.0, 2.0), Vector2::new(1.0, 1.0), ccw).unwrap();
             let e = Curve2::Ellipse2(Ellipse2::new(f, 3.0, 1.0).unwrap());
             let s = seg(e, 0.3, -2.0);
-            let c = Chain::new(&s);
+            let c = chain(&s);
             assert_eq!(c.pieces.len(), 2);
             assert!(!c.closed && !c.free_form);
             // The middle of a piece in local parameter is not its middle
@@ -250,10 +282,17 @@ mod tests {
                 }
             }
             // The ends are computed exactly as the curve computes them.
-            assert_eq!(start(&c), s.start().to_vector());
-            assert_eq!(end(&c), s.end().to_vector());
+            assert_eq!(c.start(), s.curve.point(s.t0).to_vector());
+            for (i, p) in c.pieces.iter().enumerate() {
+                for k in 0..=4 {
+                    let u = f64::from(k) / 4.0;
+                    let q = s.curve.point(c.param(i, u)).to_vector();
+                    assert!((point(p, u) - q).length() <= 1e-13);
+                }
+            }
+            assert_eq!(c.end(), s.curve.point(s.t1).to_vector());
             let circle = Curve2::Circle2(Circle2::new(f, 2.0).unwrap());
-            let whole = Chain::new(&seg(circle, 0.0, TAU));
+            let whole = chain(&seg(circle, 0.0, TAU));
             assert_eq!(whole.pieces.len(), 4);
             assert!(whole.closed);
         }
@@ -261,8 +300,13 @@ mod tests {
 
     #[test]
     fn a_line_is_one_piece() {
-        let l = crate::sweep::profile::tests::line(1, (0.0, 1.0), (3.0, -2.0));
-        let c = Chain::new(&l);
+        let (a, b) = (Point2::new(0.0, 1.0), Point2::new(3.0, -2.0));
+        let l = seg(
+            Curve2::Line2(Line2::through(a, b).unwrap()),
+            0.0,
+            a.distance(b),
+        );
+        let c = chain(&l);
         assert_eq!(c.pieces.len(), 1);
         follows(&l, &c, |t| t);
         assert_eq!(
@@ -291,14 +335,14 @@ mod tests {
         let n = Curve2::Nurbs2(Arc::new(wavy()));
         for (t0, t1, count) in [(0.2, 1.7, 3), (1.7, 0.2, 3), (0.4, 1.0, 1), (0.0, 2.5, 3)] {
             let s = seg(n.clone(), t0, t1);
-            let c = Chain::new(&s);
+            let c = chain(&s);
             assert_eq!(c.pieces.len(), count, "{t0}..{t1}");
             assert!(c.free_form && !c.closed);
             follows(&s, &c, |t| t);
         }
         // A range a few ulps past a knot doesn't leave a sliver piece.
         let s = seg(n, 0.0, 1.0 + 2.0 * f64::EPSILON);
-        assert_eq!(Chain::new(&s).pieces.len(), 2);
+        assert_eq!(chain(&s).pieces.len(), 2);
     }
 
     #[test]
@@ -309,11 +353,11 @@ mod tests {
             .unwrap();
         let n = Curve2::Nurbs2(Arc::new(n));
         let s = seg(n.clone(), 5.0, 5.0 + PI);
-        let c = Chain::new(&s);
+        let c = chain(&s);
         assert_eq!(c.pieces.len(), 3);
         follows(&s, &c, |t| t);
         let s = seg(n, 1.0 - TAU, 1.0);
-        let c = Chain::new(&s);
+        let c = chain(&s);
         assert_eq!(c.pieces.len(), 5);
         assert!(c.closed);
         follows(&s, &c, |t| t);

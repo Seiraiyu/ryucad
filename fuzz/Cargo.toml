@@ -75,3 +75,10 @@ path = "fuzz_targets/sweep.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "intersect"
+path = "fuzz_targets/intersect.rs"
+test = false
+doc = false
+bench = false

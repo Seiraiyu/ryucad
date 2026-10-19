@@ -5,10 +5,9 @@
 //! (range, length, closed segments), the closure of each loop, the size
 //! box, the separation of the segments, then orientation and nesting.
 
-use super::area;
-use super::chain::Chain;
-use super::intersect2;
 use super::nest::{self, Place};
+use super::{area, separate};
+use crate::geom::chain2::Chain2;
 use crate::geom::{Box2, Curve2, Frame, Point2};
 use crate::tol::{self, LINEAR_RESOLUTION};
 use crate::{Error, ProfileError};
@@ -152,7 +151,7 @@ impl ValidProfile {
             .iter()
             .map(|l| l.segments[0].start().to_vector())
             .collect();
-        let chains: Vec<&[Chain]> = chains.iter().map(Vec::as_slice).collect();
+        let chains: Vec<&[Chain2]> = chains.iter().map(Vec::as_slice).collect();
         let places = nest::places(&chains, &points).map_err(|i| {
             invalid(ProfileError::Degenerate {
                 loop_: profile.loops[i].key,
@@ -305,16 +304,19 @@ fn check_size_box(p: &Profile) -> Result<(), Error> {
 
 /// No two segments touch, except neighbours at their shared ends. Returns
 /// each loop's segments as chains.
-fn check_separation(p: &Profile) -> Result<Vec<Vec<Chain>>, Error> {
+fn check_separation(p: &Profile) -> Result<Vec<Vec<Chain2>>, Error> {
     let segments: Vec<&Segment> = p.loops.iter().flat_map(|l| &l.segments).collect();
-    let chains: Vec<Chain> = segments.par_iter().map(|s| Chain::new(s)).collect();
+    let chains: Vec<Chain2> = segments
+        .par_iter()
+        .map(|s| Chain2::new(&s.curve, s.t0, s.t1))
+        .collect();
     let mut loops = Vec::with_capacity(p.loops.len());
     let mut first = 0;
     for l in &p.loops {
         loops.push((first, l.segments.len()));
         first += l.segments.len();
     }
-    if let Some((i, j)) = intersect2::first_touching(&chains, &loops) {
+    if let Some((i, j)) = separate::first_touching(&chains, &loops) {
         return Err(invalid(ProfileError::Touching {
             a: segments[i].key,
             b: segments[j].key,

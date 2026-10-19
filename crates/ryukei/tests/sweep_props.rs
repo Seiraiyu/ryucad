@@ -1,11 +1,12 @@
-//! Random profiles swept: every result passes the checker, meshes with no
-//! faults and encloses the volume the profile's area says it should.
+//! Random profiles swept: every result passes the checker and the
+//! self-intersection check, meshes with no faults and encloses the volume
+//! the profile's area says it should.
 
 use core::f64::consts::TAU;
 use proptest::prelude::*;
-use ryukei::check::check;
+use ryukei::check::{Fault, check, check_intersections};
 use ryukei::geom::{
-    Axis, Circle2, Curve2, Frame, Frame2, Line2, Point2, Point3, Rigid, Vector2, Vector3,
+    Axis, Circle2, Curve2, Frame, Frame2, Line2, Point2, Point3, Rigid, Surface, Vector2, Vector3,
 };
 use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::name::OpKey;
@@ -99,8 +100,31 @@ fn frame(tilt: f64, turn: f64) -> Frame {
     Frame::new(Point3::new(0.5, -1.0, 2.0), z, x).unwrap()
 }
 
+/// The self-intersection check passes, but for pairs it can't check
+/// because a face is on a surface with no implicit form (a swept or NURBS
+/// surface): only analytic pairs are intersected.
+fn self_sound(b: &Body) {
+    for f in check_intersections(b) {
+        let Fault::CannotCheck { a, b: c } = f else {
+            panic!("{f:?}")
+        };
+        let analytic = |x| {
+            matches!(
+                b.surface(b.face(x).unwrap().surface).unwrap(),
+                Surface::Plane(_)
+                    | Surface::Cylinder(_)
+                    | Surface::Cone(_)
+                    | Surface::Sphere(_)
+                    | Surface::Torus(_)
+            )
+        };
+        assert!(!analytic(a) || !analytic(c), "{f:?}");
+    }
+}
+
 fn volume(b: &Body) -> f64 {
     assert_eq!(check(b), []);
+    self_sound(b);
     let m = tessellate(b, &MeshParams::new(2e-3, 0.5)).unwrap();
     assert!(m.faults.is_empty(), "{:?}", m.faults);
     check_mesh(b, &m).unwrap();
