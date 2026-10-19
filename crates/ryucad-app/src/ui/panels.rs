@@ -325,6 +325,8 @@ pub fn ago(ms: u64) -> String {
 /// The activity log, newest first, with undo and redo per entry; and the
 /// project's Git history, read-only.
 pub fn journal(ui: &mut egui::Ui, ws: &mut Workspace, tab: &mut Tab) {
+    // A short tab still fills the panel, so the view keeps its size.
+    ui.set_min_size(ui.available_size());
     ui.horizontal(|ui| {
         ui.selectable_value(tab, Tab::Activity, "Activity");
         if ui.selectable_value(tab, Tab::History, "History").clicked() {

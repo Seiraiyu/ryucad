@@ -356,6 +356,23 @@ fn a_highlight_label_stays_inside_the_view() {
 }
 
 #[test]
+fn the_history_tab_keeps_the_view_its_size() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.run_steps(2);
+    let before = h.state().opened().view.rect;
+    // Not a Git repository: the tab says only that.
+    h.get_by_label("History").click();
+    frames(&mut h, |a| a.opened().ws.history.is_some());
+    h.run_steps(2);
+    assert_eq!(h.state().opened().view.rect, before);
+}
+
+#[test]
 fn the_window_follows_an_agent_until_the_human_navigates() {
     if !gpu() {
         return;
