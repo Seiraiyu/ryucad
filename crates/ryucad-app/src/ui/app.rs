@@ -80,6 +80,9 @@ pub struct App {
     titled: Option<String>,
     /// The window has asked for the foreground once, when it first showed.
     shown: bool,
+    /// Open… was chosen: the folder dialog runs once the frame is done,
+    /// not in the middle of drawing it.
+    pick: bool,
 }
 
 impl App {
@@ -94,6 +97,7 @@ impl App {
             wake,
             titled: None,
             shown: false,
+            pick: false,
         };
         if let Some(dir) = dir {
             app.go(dir);
@@ -175,6 +179,7 @@ impl App {
         match &mut self.screen {
             Screen::Start(s) => match start::show(ui, s) {
                 Some(start::Action::Open(dir)) => go = Some(menu::Action::Open(Some(dir))),
+                Some(start::Action::Pick) => go = Some(menu::Action::Open(None)),
                 Some(start::Action::Create(dir)) => {
                     self.create(&dir);
                     return;
@@ -192,11 +197,7 @@ impl App {
         }
         match go {
             Some(menu::Action::Open(Some(dir))) => self.go(&dir),
-            Some(menu::Action::Open(None)) => {
-                if let Some(dir) = start::pick_folder() {
-                    self.go(&dir);
-                }
-            }
+            Some(menu::Action::Open(None)) => self.pick = true,
             Some(menu::Action::Close) => {
                 self.screen = Screen::Start(Box::new(Start::new(&self.daemon, &self.wake)));
             }
@@ -351,6 +352,14 @@ impl eframe::App for App {
         }
         let gpu = frame.wgpu_render_state().cloned();
         self.frame(ui, gpu.as_ref());
+        if std::mem::take(&mut self.pick) {
+            if let Some(dir) = start::pick_folder(frame) {
+                self.go(&dir);
+            }
+            // What the folder changed is drawn now, not at the next event:
+            // a click must find the buttons where it sees them.
+            ui.ctx().request_repaint();
+        }
     }
 }
 

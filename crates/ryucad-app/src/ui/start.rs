@@ -15,6 +15,8 @@ pub enum Action {
     Open(PathBuf),
     /// Make this folder a project, then open it.
     Create(PathBuf),
+    /// Ask the OS for a folder, then open it.
+    Pick,
 }
 
 pub struct Start {
@@ -62,10 +64,13 @@ impl Start {
     }
 }
 
-/// Asks the OS for a folder.
-pub fn pick_folder() -> Option<PathBuf> {
+/// Asks the OS for a folder, in a dialog of the window `parent`: when it
+/// closes the window has the focus again, so the next click isn't spent
+/// on bringing it back.
+pub fn pick_folder(parent: &eframe::Frame) -> Option<PathBuf> {
     rfd::FileDialog::new()
         .set_title("Open a ryucad project folder")
+        .set_parent(parent)
         .pick_folder()
 }
 
@@ -79,10 +84,8 @@ pub fn show(ui: &mut egui::Ui, start: &mut Start) -> Option<Action> {
     egui::CentralPanel::default().show(ui, |ui| {
         ui.heading("ryucad");
         ui.label("A ryucad project is a folder. Open one to watch, point at and adjust what agents build.");
-        if ui.button("Open…").clicked()
-            && let Some(dir) = pick_folder()
-        {
-            action = Some(Action::Open(dir));
+        if ui.button("Open…").clicked() {
+            action = Some(Action::Pick);
         }
         ui.horizontal(|ui| {
             let name = ui.label("Folder path");
@@ -108,10 +111,8 @@ pub fn show(ui: &mut egui::Ui, start: &mut Start) -> Option<Action> {
                     if ui.button("Create a project here").clicked() {
                         action = Some(Action::Create(dir.clone()));
                     }
-                    if ui.button("Choose another folder…").clicked()
-                        && let Some(d) = pick_folder()
-                    {
-                        action = Some(Action::Open(d));
+                    if ui.button("Choose another folder…").clicked() {
+                        action = Some(Action::Pick);
                     }
                 });
             });
