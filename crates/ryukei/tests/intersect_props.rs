@@ -104,3 +104,106 @@ proptest! {
         }
     }
 }
+
+/// A surface of each kind about `axis`'s frame, offset along it.
+fn about(axis: Frame, kind: usize, r: f64, a: f64, shift: f64) -> Surface {
+    let f = Frame::new(
+        axis.origin() + axis.z().get() * shift,
+        axis.z().get(),
+        axis.x().get(),
+    )
+    .unwrap();
+    match kind {
+        0 => Surface::Plane(Plane::new(f)),
+        1 => Surface::Cylinder(Cylinder::new(f, r).unwrap()),
+        2 => Surface::Cone(Cone::new(f, r, a * 2.0).unwrap()),
+        3 => Surface::Sphere(Sphere::new(f, r).unwrap()),
+        _ => Surface::Torus(Torus::new(f, r + 1.0, r).unwrap()),
+    }
+}
+
+fn coaxial() -> impl Strategy<Value = (Surface, Surface)> {
+    (
+        frame(),
+        (0usize..5, 0.5f64..2.0, 0.2f64..0.4, -1.0f64..1.0),
+        (0usize..5, 0.5f64..2.0, 0.2f64..0.4, -1.0f64..1.0),
+    )
+        .prop_filter("not two planes", |(_, a, b)| a.0 + b.0 > 0)
+        .prop_map(|(f, a, b)| (about(f, a.0, a.1, a.2, a.3), about(f, b.0, b.1, b.2, b.3)))
+}
+
+/// Points on `s` on a grid of its parameters, row by row.
+fn grid(s: &Surface, n: usize) -> Vec<Vec<Point3>> {
+    let [[u0, u1], [v0, v1]] = s.domain();
+    let clamp = |a: f64, b: f64| (a.max(-3.0), b.min(a.max(-3.0) + 6.0));
+    let (u0, u1) = clamp(u0, u1);
+    let (v0, v1) = clamp(v0, v1);
+    (0..=n)
+        .map(|i| {
+            (0..=n)
+                .map(|j| {
+                    let u = u0 + (u1 - u0) * i as f64 / n as f64;
+                    let v = v0 + (v1 - v0) * j as f64 / n as f64;
+                    s.point(u, v)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Every place sampling sees `a` cross `b` is near a branch or a point.
+fn complete(
+    a: &Surface,
+    b: &Surface,
+    branches: &[ryukei::intersect::Branch],
+    points: &[Point3],
+) -> Result<(), TestCaseError> {
+    let rows = grid(a, 60);
+    let near = |p: Point3, reach: f64| {
+        branches.iter().any(|br| br.curve.distance(p) <= reach)
+            || points.iter().any(|q| q.distance(p) <= reach)
+    };
+    for (i, row) in rows.iter().enumerate() {
+        for (j, &p) in row.iter().enumerate() {
+            for q in [row.get(j + 1), rows.get(i + 1).map(|r| &r[j])]
+                .into_iter()
+                .flatten()
+            {
+                let (Some(sp), Some(sq)) = (side(b, p), side(b, *q)) else {
+                    continue;
+                };
+                if sp != sq {
+                    let m = p + (*q - p) * 0.5;
+                    let reach = p.distance(*q);
+                    prop_assert!(near(m, reach), "missed a crossing near {:?}", m);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    #[test]
+    fn closed_forms_agree_with_sampling((a, b) in prop_oneof![coaxial(), (surface(), surface())]) {
+        let region = ryukei::geom::Box3::new(Point3::new(-20.0, -20.0, -20.0), Point3::new(20.0, 20.0, 20.0));
+        let Ok(hit) = ryukei::intersect::surface_surface(&a, &b, &region) else {
+            return Ok(());
+        };
+        let ryukei::intersect::SurfaceHit::Meet { branches, points } = hit else {
+            return Ok(());
+        };
+        for br in &branches {
+            for k in 0..=32 {
+                let t = br.range[0] + (br.range[1] - br.range[0]) * f64::from(k) / 32.0;
+                let p = br.curve.point(t);
+                prop_assert!(a.distance(p) <= br.tolerance + 1e-12);
+                prop_assert!(b.distance(p) <= br.tolerance + 1e-12);
+            }
+        }
+        complete(&a, &b, &branches, &points)?;
+        complete(&b, &a, &branches, &points)?;
+    }
+}

@@ -8,10 +8,14 @@
 //! (plane, cylinder, cone, sphere, torus) are intersected; a surface with
 //! no implicit form is [`Failure::Unsupported`].
 
+mod coincide;
 mod cs;
 mod implicit;
+mod ss;
+mod ss_exact;
 
 pub use cs::{CurveHit, Side, curve_surface};
+pub use ss::{Branch, SurfaceHit, surface_surface};
 
 /// Rounding slack added to every certified distance: the surfaces and
 /// curves evaluate in floating point, and their frames are orthonormal
