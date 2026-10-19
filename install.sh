@@ -118,7 +118,25 @@ register() {
                 mkdir -p "$HOME/Applications"
                 sed "s|@BIN@|$1|g" "$2/ryucad.applescript" >"$tmp/ryucad.applescript"
                 rm -rf "$HOME/Applications/ryucad.app"
-                osacompile -o "$HOME/Applications/ryucad.app" "$tmp/ryucad.applescript"
+                app="$HOME/Applications/ryucad.app"
+                osacompile -o "$app" "$tmp/ryucad.applescript"
+                # Offered by Finder (Open With, not the default) for
+                # folders and JSON files: ryucad.json is plain JSON, and
+                # no type can name one file.
+                plutil -replace CFBundleIdentifier -string com.seiraiyu.ryucad "$app/Contents/Info.plist"
+                plutil -replace CFBundleDocumentTypes -json '[
+                    {"CFBundleTypeName": "Folder", "CFBundleTypeRole": "Viewer",
+                     "LSHandlerRank": "Alternate", "LSItemContentTypes": ["public.folder"]},
+                    {"CFBundleTypeName": "ryucad project", "CFBundleTypeRole": "Viewer",
+                     "LSHandlerRank": "Alternate", "LSItemContentTypes": ["public.json"]}
+                ]' "$app/Contents/Info.plist"
+                # Signed again, since its Info.plist changed, and told to
+                # Launch Services.
+                codesign --force --sign - "$app" >/dev/null 2>&1 || true
+                lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+                if [ -x "$lsregister" ]; then
+                    "$lsregister" -f "$app" >/dev/null 2>&1 || true
+                fi
             fi
             ;;
     esac

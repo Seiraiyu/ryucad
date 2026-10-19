@@ -114,7 +114,13 @@ case "$(uname -s)" in
         ;;
     Darwin)
         if command -v osacompile >/dev/null 2>&1; then
-            check "launcher in ~/Applications" '[ -f "$work/home-fresh/Applications/ryucad.app/Contents/Info.plist" ]'
+            plist="$work/home-fresh/Applications/ryucad.app/Contents/Info.plist"
+            check "launcher in ~/Applications" '[ -f "$plist" ]'
+            # Finder offers it for folders and for ryucad.json.
+            types=$(plutil -extract CFBundleDocumentTypes json -o - "$plist" 2>/dev/null || true)
+            check "launcher opens folders" 'printf %s "$types" | grep -q "public.folder"'
+            check "launcher opens JSON" 'printf %s "$types" | grep -q "public.json"'
+            check "launcher is still signed" 'codesign --verify "$work/home-fresh/Applications/ryucad.app"'
         fi
         ;;
 esac
