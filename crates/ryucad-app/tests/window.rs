@@ -758,6 +758,29 @@ fn ctrl_w_closes_the_project_and_menus_show_their_shortcuts() {
 }
 
 #[test]
+fn dialogs_open_clear_of_the_menus() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    let menus = h.get_by_label("File").rect().bottom();
+    for (m, item, title) in [
+        ("Edit", "Preferences…", "Preferences"),
+        ("Project", "Settings…", "Project settings"),
+        ("Project", "Doctor…", "Doctor"),
+    ] {
+        menu(&mut h, m, item);
+        h.run_steps(3);
+        let top = h.get_by_label(title).rect().top();
+        assert!(top > menus, "{title} at {top}, over the menus (to {menus})");
+        h.key_press(egui::Key::Escape);
+        h.run_steps(2);
+    }
+}
+
+#[test]
 fn a_typed_folder_path_opens_without_the_os_dialog() {
     if !gpu() {
         return;

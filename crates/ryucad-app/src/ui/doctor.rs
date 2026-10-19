@@ -171,10 +171,16 @@ pub fn issues(
 }
 
 /// The Doctor dialog of an open project.
-pub fn dialog(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, state: &mut State) {
+pub fn dialog(
+    ctx: &egui::Context,
+    ws: &mut Workspace,
+    open: &mut bool,
+    state: &mut State,
+    view: egui::Rect,
+) {
     let mut chosen = None;
     let mut again = false;
-    egui::Window::new("Doctor")
+    crate::ui::dialogs::window("Doctor", view)
         .open(open)
         .default_width(520.0)
         .show(ctx, |ui| {

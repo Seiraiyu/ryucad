@@ -289,13 +289,15 @@ impl Opened {
                 egui::ScrollArea::vertical().show(ui, |ui| panels::properties(ui, &mut self.ws));
             });
         egui::CentralPanel::no_frame().show(ui, |ui| self.view.show(ui, &mut self.ws, gpu));
-        dialogs::settings(&ctx, &mut self.ws, &mut self.dialogs.settings);
-        dialogs::preferences(&ctx, &mut self.ws, &mut self.dialogs.preferences);
+        let view = self.view.rect;
+        dialogs::settings(&ctx, &mut self.ws, &mut self.dialogs.settings, view);
+        dialogs::preferences(&ctx, &mut self.ws, &mut self.dialogs.preferences, view);
         doctor::dialog(
             &ctx,
             &mut self.ws,
             &mut self.dialogs.doctor,
             &mut self.doctor,
+            view,
         );
         action
     }
