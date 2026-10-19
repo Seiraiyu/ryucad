@@ -31,7 +31,7 @@
 use super::Failure;
 use super::implicit::Implicit;
 use crate::geom::bernstein::{Bernstein, Root};
-use crate::geom::bernstein2::Bernstein2;
+use crate::geom::bernstein2::{Bernstein2, krawczyk};
 use crate::geom::{BezierCurve, BezierPatch, Box3, NurbsSurface, Point3, Surface, Vector3};
 use crate::interval::Interval;
 use crate::tol::LINEAR_RESOLUTION;
@@ -657,7 +657,10 @@ impl<'a> Tracer<'a> {
         // Krawczyk's test on a box around it, growing a few times.
         let mut half = ((s[1] - s[0]).max(t[1] - t[0])).max(1e-12);
         for _ in 0..8 {
-            if krawczyk(&fs, &ft, &fss, &fst, &ftt, [x, y], half) {
+            let sx = [(x - half).max(0.0), (x + half).min(1.0)];
+            let ty = [(y - half).max(0.0), (y + half).min(1.0)];
+            let unique = sx[0] < sx[1] && ty[0] < ty[1] && krawczyk(&fs, &ft, sx, ty) == Some(true);
+            if unique {
                 let p = self.point(first.patch, x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
                 let fp = self.imp.value_at(p);
                 if self
@@ -673,61 +676,6 @@ impl<'a> Tracer<'a> {
         }
         Err(Failure::Uncertain)
     }
-}
-
-/// Krawczyk's test for the gradient `(F_s, F_t)` on the box of half-width
-/// `h` about `c`: true when the box holds exactly one zero.
-fn krawczyk(
-    fs: &Bernstein2,
-    ft: &Bernstein2,
-    fss: &Bernstein2,
-    fst: &Bernstein2,
-    ftt: &Bernstein2,
-    c: [f64; 2],
-    h: f64,
-) -> bool {
-    let (s0, s1) = ((c[0] - h).max(0.0), (c[0] + h).min(1.0));
-    let (t0, t1) = ((c[1] - h).max(0.0), (c[1] + h).min(1.0));
-    if s1 <= s0 || t1 <= t0 {
-        return false;
-    }
-    let part = |p: &Bernstein2| {
-        let (_, right) = p.split_s(s0);
-        let (left, _) = right.split_s(((s1 - s0) / (1.0 - s0)).min(1.0));
-        let (_, up) = left.split_t(t0);
-        let (down, _) = up.split_t(((t1 - t0) / (1.0 - t0)).min(1.0));
-        down.range()
-    };
-    let (a, b, d) = (part(fss), part(fst), part(ftt));
-    let mid = |x: Interval| (x.lo() + x.hi()) / 2.0;
-    let (ma, mb, md) = (mid(a), mid(b), mid(d));
-    let det = ma * md - mb * mb;
-    if det == 0.0 || !det.is_finite() {
-        return false;
-    }
-    // Y, the inverse of the middle of the Jacobian.
-    let y = [[md / det, -mb / det], [-mb / det, ma / det]];
-    let g = [fs.eval(c[0], c[1]), ft.eval(c[0], c[1])];
-    let p = Interval::point;
-    let box_ = [
-        Interval::new(s0, s1).expect("ordered") - p(c[0]),
-        Interval::new(t0, t1).expect("ordered") - p(c[1]),
-    ];
-    let j = [[a, b], [b, d]];
-    for row in 0..2 {
-        let yg = p(y[row][0]) * g[0] + p(y[row][1]) * g[1];
-        let mut k = p(c[row]) - yg;
-        for col in 0..2 {
-            let ident = if row == col { 1.0 } else { 0.0 };
-            let m = p(ident) - (p(y[row][0]) * j[0][col] + p(y[row][1]) * j[1][col]);
-            k = k + m * box_[col];
-        }
-        let (lo, hi) = if row == 0 { (s0, s1) } else { (t0, t1) };
-        if !(k.lo() > lo && k.hi() < hi) {
-            return false;
-        }
-    }
-    true
 }
 
 #[cfg(test)]

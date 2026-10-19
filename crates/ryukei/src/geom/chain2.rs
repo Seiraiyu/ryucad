@@ -23,6 +23,8 @@ pub(crate) struct Chain2 {
     pub(crate) free_form: bool,
     pub(crate) lo: Vector2,
     pub(crate) hi: Vector2,
+    /// The pieces are circular or elliptic arcs, measured by angle.
+    conic: bool,
 }
 
 /// How close, in units of the parameter's size, a NURBS range's end
@@ -51,6 +53,27 @@ impl Chain2 {
             free_form: matches!(curve, Curve2::Nurbs2(_)),
             lo,
             hi,
+            conic: matches!(curve, Curve2::Circle2(_) | Curve2::Ellipse2(_)),
+        }
+    }
+
+    /// The curve's parameter at local parameter `s` of piece `i`: affine
+    /// for a line or a NURBS, and for an arc the half-angle substitution
+    /// `tan((t - m) / 2) = tan(h / 2) (2 s - 1)`, as in
+    /// [`super::chain3`].
+    pub(crate) fn param(&self, i: usize, s: f64) -> f64 {
+        let [a, b] = self.pieces[i].range;
+        if s <= 0.0 {
+            return a;
+        }
+        if s >= 1.0 {
+            return b;
+        }
+        if self.conic {
+            let (m, h) = ((a + b) / 2.0, (b - a) / 2.0);
+            m + 2.0 * math::atan2(math::tan(h / 2.0) * (2.0 * s - 1.0), 1.0)
+        } else {
+            a + (b - a) * s
         }
     }
 
@@ -260,6 +283,13 @@ mod tests {
             }
             // The ends are computed exactly as the curve computes them.
             assert_eq!(c.start(), s.curve.point(s.t0).to_vector());
+            for (i, p) in c.pieces.iter().enumerate() {
+                for k in 0..=4 {
+                    let u = f64::from(k) / 4.0;
+                    let q = s.curve.point(c.param(i, u)).to_vector();
+                    assert!((point(p, u) - q).length() <= 1e-13);
+                }
+            }
             assert_eq!(c.end(), s.curve.point(s.t1).to_vector());
             let circle = Curve2::Circle2(Circle2::new(f, 2.0).unwrap());
             let whole = chain(&seg(circle, 0.0, TAU));

@@ -191,6 +191,25 @@ impl Bernstein2 {
         (Self::new(self.m, self.n, l), Self::new(self.m, self.n, r))
     }
 
+    /// The piece over the box `s × t` of `[0, 1]²`, reparameterized to
+    /// `[0, 1]²`.
+    pub(crate) fn part(&self, [s0, s1]: [f64; 2], [t0, t1]: [f64; 2]) -> Self {
+        let mut p = self.clone();
+        if s1 < 1.0 {
+            p = p.split_s(s1).0;
+        }
+        if s0 > 0.0 {
+            p = p.split_s(s0 / s1).1;
+        }
+        if t1 < 1.0 {
+            p = p.split_t(t1).0;
+        }
+        if t0 > 0.0 {
+            p = p.split_t(t0 / t1).1;
+        }
+        p
+    }
+
     /// The univariate polynomial in `t` along the line `s = s0`.
     pub(crate) fn at_s(&self, s0: f64) -> Bernstein {
         let row = |i: usize| -> Vec<Interval> { (0..=self.n).map(|j| self.at(i, j)).collect() };
@@ -224,6 +243,60 @@ impl Bernstein2 {
     /// The value at `(s, t)`.
     pub(crate) fn eval(&self, s: f64, t: f64) -> Interval {
         self.at_s(s).eval(t)
+    }
+}
+
+/// Krawczyk's test for the system `f = g = 0` on the box `s × t` of
+/// `[0, 1]²`: `Some(true)` when it holds exactly one solution,
+/// `Some(false)` when it holds none, `None` when the test can't tell.
+pub(crate) fn krawczyk(f: &Bernstein2, g: &Bernstein2, s: [f64; 2], t: [f64; 2]) -> Option<bool> {
+    let p = Interval::point;
+    let mid = |x: Interval| (x.lo() + x.hi()) / 2.0;
+    let c = [(s[0] + s[1]) / 2.0, (t[0] + t[1]) / 2.0];
+    // The partials over the box.
+    let j = [
+        [
+            f.deriv_s().part(s, t).range(),
+            f.deriv_t().part(s, t).range(),
+        ],
+        [
+            g.deriv_s().part(s, t).range(),
+            g.deriv_t().part(s, t).range(),
+        ],
+    ];
+    let m = [[mid(j[0][0]), mid(j[0][1])], [mid(j[1][0]), mid(j[1][1])]];
+    let det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+    if det == 0.0 || !det.is_finite() {
+        return None;
+    }
+    let y = [
+        [m[1][1] / det, -m[0][1] / det],
+        [-m[1][0] / det, m[0][0] / det],
+    ];
+    let fc = [f.eval(c[0], c[1]), g.eval(c[0], c[1])];
+    let boxes = [
+        Interval::new(s[0], s[1])? - p(c[0]),
+        Interval::new(t[0], t[1])? - p(c[1]),
+    ];
+    let bounds = [s, t];
+    let (mut inside, mut apart) = (true, false);
+    for row in 0..2 {
+        let mut k = p(c[row]) - (p(y[row][0]) * fc[0] + p(y[row][1]) * fc[1]);
+        for (col, &b) in boxes.iter().enumerate() {
+            let ident = if row == col { 1.0 } else { 0.0 };
+            let e = p(ident) - (p(y[row][0]) * j[0][col] + p(y[row][1]) * j[1][col]);
+            k = k + e * b;
+        }
+        let [lo, hi] = bounds[row];
+        inside &= k.lo() > lo && k.hi() < hi;
+        apart |= k.hi() < lo || k.lo() > hi;
+    }
+    if apart {
+        Some(false)
+    } else if inside {
+        Some(true)
+    } else {
+        None
     }
 }
 
