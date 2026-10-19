@@ -202,9 +202,6 @@ pub enum SweepError {
     /// A full revolve of a profile that touches the axis at a lone vertex,
     /// the start of `segment`: the solid would meet itself in a point.
     PinchedOnAxis { segment: SegmentKey },
-    /// A full revolve that would enclose a cavity: a hole, or a loop that
-    /// touches the axis in more than one stretch.
-    EnclosesVoid { loop_: LoopKey },
     /// The swept solid would leave the size box.
     OutsideSizeBox,
 }
@@ -229,13 +226,6 @@ impl fmt::Display for SweepError {
                     f,
                     "the profile touches the axis at the start of segment {:#x}",
                     segment.0
-                )
-            }
-            Self::EnclosesVoid { loop_ } => {
-                write!(
-                    f,
-                    "a full turn of loop {:#x} would enclose a cavity",
-                    loop_.0
                 )
             }
             Self::OutsideSizeBox => f.write_str("the sweep leaves the size box"),
@@ -349,8 +339,16 @@ mod tests {
             "invalid sweep: segment 0x2a crosses the axis"
         );
         assert_eq!(
-            SweepError::EnclosesVoid { loop_: LoopKey(2) }.to_string(),
-            "a full turn of loop 0x2 would enclose a cavity"
+            Error::NoPcurve {
+                edge: crate::topo::Id::from_index(3),
+                face: crate::topo::Id::from_index(1)
+            }
+            .to_string(),
+            "edge 3 has no exact pcurve on face 1"
+        );
+        assert_eq!(
+            Error::from(TopologyError::WrongRegion).to_string(),
+            "topology: not a solid region"
         );
         assert_eq!(
             Error::from(TopologyError::Inconsistent).to_string(),

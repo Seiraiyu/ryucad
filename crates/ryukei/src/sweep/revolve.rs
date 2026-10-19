@@ -25,10 +25,10 @@ use std::sync::Arc;
 /// of 2π it is a full turn. The profile may touch the axis at a segment's
 /// ends, and segments may lie along it; it may not cross it
 /// (`CrossesAxis`) or touch it inside a segment (`TouchesAxisInside`). A
-/// full turn has no caps, so it can't have holes or a profile that
-/// touches the axis in more than one stretch (`EnclosesVoid`: those
-/// enclose a cavity), or that touches it at a lone vertex
-/// (`PinchedOnAxis`). The arc swept by the profile's farthest point must
+/// full turn has no caps: holes, and the stretches of a loop between
+/// two contacts with the axis that another of its stretches spans,
+/// enclose cavities, which become void shells. A full turn can't touch
+/// the axis at a lone vertex (`PinchedOnAxis`). The arc swept by the profile's farthest point must
 /// be at least `10 × LINEAR_RESOLUTION` long (`ShortSpan`), and the solid
 /// must stay in the size box (`OutsideSizeBox`).
 ///
@@ -445,9 +445,12 @@ impl Motion for Turn {
     }
 }
 
-/// A full turn of one lump: a ring of sides if the outer loop never
-/// touches the axis, or a chain of them from one stretch of it to the
-/// other end of that stretch.
+/// A full turn of one lump. Each loop turns into shells: a ring of sides
+/// if the loop never touches the axis, or one chain of sides between each
+/// stretch along the axis and the next. The outer loop's chain that spans
+/// the others along the axis (or its ring) is the lump's outer shell, a
+/// new solid region; its other chains, and every hole, enclose cavities
+/// and become void shells in that region.
 fn whole(
     b: &mut Body,
     keys: &mut Keys,
@@ -456,10 +459,25 @@ fn whole(
     lump: &Lump,
     turn: &Turn,
 ) -> Result<(), Error> {
-    if let Some(hole) = lump.holes.first() {
-        return Err(SweepError::EnclosesVoid { loop_: hole.key }.into());
+    let region = shells(b, keys, namer, frame, &lump.outer, turn, None)?;
+    for hole in &lump.holes {
+        shells(b, keys, namer, frame, hole, turn, Some(region))?;
     }
-    let lp = &lump.outer;
+    Ok(())
+}
+
+/// The shells a full turn of one loop makes: into `region`, or for an
+/// outer loop (`None`) its outer shell in a new solid region first, then
+/// its cavities there. Returns the region.
+fn shells(
+    b: &mut Body,
+    keys: &mut Keys,
+    namer: &Namer,
+    frame: &Frame,
+    lp: &super::ValidLoop,
+    turn: &Turn,
+    region: Option<crate::topo::RegionId>,
+) -> Result<crate::topo::RegionId, Error> {
     let n = lp.segments.len();
     let on: Vec<bool> = lp
         .segments
@@ -477,26 +495,70 @@ fn whole(
             .into());
         }
     }
-    // Stretches along the axis: the segments that start one.
-    let starts: Vec<usize> = (0..n).filter(|&i| on[i] && !on[(i + n - 1) % n]).collect();
-    if starts.len() > 1 || (on.iter().all(|&x| x)) {
-        return Err(SweepError::EnclosesVoid { loop_: lp.key }.into());
+    if on.iter().all(|&x| x) {
+        // A loop with no area; a valid profile has none.
+        return Err(Error::Degenerate);
     }
-    // The order the chain or ring runs in: from just after the stretch
-    // along the axis, round to its start. Paths run counterclockwise
+    // Stretches along the axis: the segments that start one. Each chain
+    // runs from just after a stretch to the start of the next.
+    let starts: Vec<usize> = (0..n).filter(|&i| on[i] && !on[(i + n - 1) % n]).collect();
+    let mut chains: Vec<(usize, usize)> = starts
+        .iter()
+        .map(|&s| {
+            let mut first = s;
+            while on[first] {
+                first = (first + 1) % n;
+            }
+            let count = (0..n).take_while(|&k| !on[(first + k) % n]).count();
+            (first, count)
+        })
+        .collect();
+    let chain = !chains.is_empty();
+    if !chain {
+        chains.push((0, n));
+    }
+    // The chain spanning the most of the axis encloses the others.
+    if region.is_none() && chains.len() > 1 {
+        let axial = |i: usize| turn.dir2.dot(lp.vertices[i % n] - turn.origin2);
+        let span = |&(first, count): &(usize, usize)| (axial(first + count) - axial(first)).abs();
+        let outer = (0..chains.len())
+            .max_by(|&x, &y| {
+                span(&chains[x])
+                    .total_cmp(&span(&chains[y]))
+                    .then(y.cmp(&x))
+            })
+            .expect("a chain");
+        chains.swap(0, outer);
+    }
+    let mut region = region;
+    for (first, count) in chains {
+        let built = turn_shell(b, keys, namer, frame, lp, turn, region, chain, first, count)?;
+        region.get_or_insert(built);
+    }
+    Ok(region.expect("a shell"))
+}
+
+/// One shell of a full turn: the `count` sides from loop index `first`
+/// on, as a chain between two axis contacts or a ring round the whole
+/// loop. Returns its region.
+#[allow(clippy::too_many_arguments)]
+fn turn_shell(
+    b: &mut Body,
+    keys: &mut Keys,
+    namer: &Namer,
+    frame: &Frame,
+    lp: &super::ValidLoop,
+    turn: &Turn,
+    region: Option<crate::topo::RegionId>,
+    chain: bool,
+    first: usize,
+    count: usize,
+) -> Result<crate::topo::RegionId, Error> {
+    let n = lp.segments.len();
+    // The order the chain or ring runs in: from just after a stretch
+    // along the axis, round to the next. Paths run counterclockwise
     // about the reverse of the motion, which is the loop's own way when
     // the motion is against the profile's normal.
-    let first = match starts.first() {
-        Some(&s) => {
-            let mut i = s;
-            while on[i] {
-                i = (i + 1) % n;
-            }
-            i
-        }
-        None => 0,
-    };
-    let count = (0..n).filter(|&k| !on[(first + k) % n]).count();
     let forward = turn.sign < 0.0;
     // Loop indices of the sides, in chain order.
     let sides: Vec<usize> = (0..count)
@@ -508,7 +570,6 @@ fn whole(
             }
         })
         .collect();
-    let chain = !starts.is_empty();
     // The profile vertices off the axis that the builder wants: for a
     // chain, the one between each side and the next; for a ring, the one
     // each side starts from. A ring of one closed segment has none.
@@ -530,6 +591,7 @@ fn whole(
         segments: Vec::with_capacity(count),
         vertices: Vec::with_capacity(verts.len()),
         ends: None,
+        region,
     };
     for &i in &sides {
         let s = &lp.segments[i];
@@ -570,6 +632,7 @@ fn whole(
         plan.ends = Some([(a, apex_a), (z, apex_z)]);
     }
     let made = build::turned(b, keys, &plan)?;
+    let region = made.region;
     // Tolerances and names.
     let segs: Vec<_> = lp
         .segments
@@ -615,5 +678,5 @@ fn whole(
             }
         }
     }
-    Ok(())
+    Ok(region)
 }

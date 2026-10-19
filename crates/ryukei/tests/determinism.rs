@@ -719,6 +719,8 @@ fn sweeps_section(golden: &mut Golden) {
         extrude(key, &holed, n + x * 0.5, -0.25, 0.75),
         extrude(key, &lumps, -n, 0.0, 0.5),
         revolve(key, &ring, axis, 0.25, 2.0),
+        // A cavity: the ring turned whole.
+        revolve(key, &ring, axis, 0.0, core::f64::consts::TAU),
         revolve(key, &torus, axis, 0.0, core::f64::consts::TAU),
         revolve(key, &solid, axis, 0.0, core::f64::consts::TAU),
         revolve(key, &solid, axis, -1.0, 1.0),

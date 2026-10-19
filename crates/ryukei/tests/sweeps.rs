@@ -456,32 +456,7 @@ fn revolve_refuses_bad_profiles_and_parameters() {
     // ...but a part turn of it is a solid.
     let (b, _) = revolve(K, &pinched, y_axis(), 0.0, 1.0).unwrap();
     assert!(volume(&b) > 0.0);
-    let ring = profile(vec![
-        rect(1, 10, 1.0, 0.0, 2.0, 2.0),
-        circle(2, 20, (2.0, 1.0), 0.5),
-    ]);
-    assert_eq!(
-        revolve(K, &ring, y_axis(), 0.0, TAU).map(|_| ()),
-        sweep(SweepError::EnclosesVoid { loop_: LoopKey(2) })
-    );
-    let notch = profile(vec![polygon(
-        1,
-        10,
-        &[
-            (0.0, 0.0),
-            (2.0, 0.0),
-            (2.0, 3.0),
-            (0.0, 3.0),
-            (0.0, 2.0),
-            (1.0, 2.0),
-            (1.0, 1.0),
-            (0.0, 1.0),
-        ],
-    )]);
-    assert_eq!(
-        revolve(K, &notch, y_axis(), 0.0, TAU).map(|_| ()),
-        sweep(SweepError::EnclosesVoid { loop_: LoopKey(1) })
-    );
+
     let p = profile(vec![rect(1, 10, 1.0, 0.0, 1.0, 1.0)]);
     let off = Axis::new(frame().origin() + frame().z().get(), frame().y().get()).unwrap();
     assert_eq!(
@@ -601,4 +576,46 @@ fn revolve_names_survive_edits() {
     };
     assert_eq!(names(&build(1.0, 2.0, TAU)), names(&build(2.0, 0.5, TAU)));
     assert_eq!(names(&build(1.0, 2.0, 1.0)), names(&build(2.0, 0.5, 2.5)));
+}
+
+#[test]
+fn full_turns_that_enclose_a_void_hollow_it_out() {
+    // A ring with a round hole: a torus-shaped cavity, by Pappus 16π less
+    // π².
+    let ring = profile(vec![
+        rect(1, 10, 1.0, 0.0, 2.0, 2.0),
+        circle(2, 20, (2.0, 1.0), 0.5),
+    ]);
+    let (b, j) = revolve(K, &ring, y_axis(), 0.0, TAU).unwrap();
+    let solid = b.regions().nth(1).unwrap();
+    assert_eq!(b.region_shells(solid).count(), 2);
+    assert_eq!(b.regions().count(), 2);
+    let v = volume(&b);
+    assert!(close(v, 16.0 * PI - PI * PI, 1e-3), "{v}");
+    assert!(j.events().iter().all(|e| matches!(e, Event::Created(_))));
+    // A notch in a profile against the axis: a cylinder of radius 2 and
+    // height 3 with a cylindrical cavity of radius 1 and height 1.
+    let notch = profile(vec![polygon(
+        1,
+        10,
+        &[
+            (0.0, 0.0),
+            (2.0, 0.0),
+            (2.0, 3.0),
+            (0.0, 3.0),
+            (0.0, 2.0),
+            (1.0, 2.0),
+            (1.0, 1.0),
+            (0.0, 1.0),
+        ],
+    )]);
+    let (b, _) = revolve(K, &notch, y_axis(), 0.0, TAU).unwrap();
+    let solid = b.regions().nth(1).unwrap();
+    assert_eq!(b.region_shells(solid).count(), 2);
+    let v = volume(&b);
+    assert!(close(v, 11.0 * PI, 1e-3), "{v}");
+    // Turned the other way round the axis: the same solid.
+    let back = Axis::new(frame().origin(), -frame().y().get()).unwrap();
+    let (b, _) = revolve(K, &notch, back, 0.0, TAU).unwrap();
+    assert!(close(volume(&b), 11.0 * PI, 1e-3));
 }
