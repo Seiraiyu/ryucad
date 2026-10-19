@@ -365,6 +365,24 @@ fn every_protocol_method_has_a_command() {
 }
 
 #[test]
+fn unreadable_preferences_are_an_envelope_warning() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    let config = p.run.with_file_name("config");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(config.join("preferences.json"), "{ not json").unwrap();
+    for args in [&["config", "get"][..], &["config", "get", "ui.theme"]] {
+        let (code, v) = p.both_from("", args);
+        assert_eq!(code, 0, "{v}");
+        assert!(v["result"].get("warnings").is_none(), "{v}");
+        assert!(
+            v["warnings"][0].as_str().unwrap().contains("preferences"),
+            "{v}"
+        );
+    }
+}
+
+#[test]
 fn settings_and_preferences() {
     let p = Pair::new();
     p.ok(&["init"]);
@@ -373,6 +391,8 @@ fn settings_and_preferences() {
         (&v["value"], &v["default"]),
         (&Value::from("system"), &Value::from(true))
     );
+    assert!(v.get("warnings").is_none(), "{v}");
+    assert!(p.ok(&["config", "get"]).get("warnings").is_none());
     p.ok(&["config", "set", "ui.theme", "dark"]);
     p.ok(&["config", "set", "display.edges", "false"]);
     let v = p.ok(&["config", "get", "--user"]);
@@ -416,9 +436,18 @@ fn settings_and_preferences() {
 fn history_outside_and_inside_git() {
     let p = Pair::new();
     p.ok(&["init"]);
-    let v = p.ok(&["history"]);
-    assert_eq!(v["repository"], false);
-    assert_eq!(v["warnings"][0]["code"], "not_a_git_repo");
+    // The warning is the envelope's, like every other command's.
+    let (code, v) = p.both_from("", &["history"]);
+    assert_eq!(code, 0);
+    assert_eq!(v["result"]["repository"], false);
+    assert!(v["result"].get("warnings").is_none(), "{v}");
+    assert!(
+        v["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("is not in a Git repository"),
+        "{v}"
+    );
     p.fails(&["history", "nope"], "not_found", 1);
 }
 
