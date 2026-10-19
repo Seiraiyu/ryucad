@@ -99,6 +99,10 @@ pub fn curve_surface(
     Ok(out)
 }
 
+/// A contact shorter than this many tolerances is a touch, not a stretch
+/// on the surface (as for plane curves in [`crate::geom::intersect2`]).
+const TOUCH: f64 = 100.0;
+
 /// How many parts a stretch may be halved into to certify that it lies
 /// within the tolerance of the surface.
 const MAX_PARTS: u32 = 4096;
@@ -393,15 +397,24 @@ impl Context<'_> {
             |a: f64, b: f64| self.curve.point(a).distance(self.curve.point(b)) <= self.tolerance;
         let [a, b] = c.t;
         let mid = c.tangent.unwrap_or((a + b) / 2.0);
+        // By rule, a contact shorter than [`TOUCH`] tolerances is a touch:
+        // rounding leaves a zone about that long around a tangency, which
+        // a curve truly lying on the surface outruns.
+        let short = |x: f64, y: f64| {
+            self.curve.point(x).distance(self.curve.point(y)) <= TOUCH * self.tolerance
+        };
         let point_like = c.simple.is_some()
             || c.tangent.is_some()
-            || (0..=8).all(|k| near(mid, a + (b - a) * f64::from(k) / 8.0));
+            || (0..=8).all(|k| short(mid, a + (b - a) * f64::from(k) / 8.0));
         if !point_like {
             let lo = if near(a, t0) { t0 } else { a };
             let hi = if near(b, t1) { t1 } else { b };
             return Ok(CurveHit::On { t: [lo, hi] });
         }
-        let (at_start, at_end) = (near(mid, t0), near(mid, t1));
+        // A contact whose zone reaches an end of the interval is at that
+        // end: a tangency is placed only to rounding's reach, which can
+        // be wider than the tolerance.
+        let (at_start, at_end) = (near(mid, t0) || a <= t0, near(mid, t1) || b >= t1);
         let t = if at_start {
             t0
         } else if at_end {
@@ -530,6 +543,16 @@ mod tests {
         let l = line((-3.0, 1.0 - 1e-6, 0.5), (1.0, 0.0, 0.0));
         let p = points(&curve_surface(&l, [0.0, 6.0], &c, TOL).unwrap());
         assert_eq!(p.len(), 2);
+    }
+
+    #[test]
+    fn a_touch_reaching_an_end_is_at_the_end() {
+        // A line ending where it is tangent to a cylinder: the touch is
+        // placed only to rounding's reach, but it is the end exactly.
+        let c = Surface::Cylinder(Cylinder::new(Frame::WORLD, 1.0).unwrap());
+        let l = line((-3.0, 1.0, 0.5), (1.0, 0.0, 0.0));
+        let p = points(&curve_surface(&l, [0.0, 3.0], &c, TOL).unwrap());
+        assert_eq!(p, [(3.0, Positive, Beyond)]);
     }
 
     #[test]

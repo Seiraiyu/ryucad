@@ -135,26 +135,34 @@ fn edge_distance(c: &Curve, [t0, t1]: [f64; 2], p: Point3) -> f64 {
     }
 }
 
-/// Points of the pcurves to aim rays at: the middle, then a third and two
-/// thirds of the way, of each, in that order.
+/// Points of the pcurves to aim rays at: inside a piece, away from the
+/// joints between pieces (where a crossing can't be certified), a
+/// middle piece's middle first, then pieces a third and two thirds
+/// along, at other fractions of them.
 fn targets(chains: &[Chain2]) -> Vec<Point2> {
     let mut out = Vec::new();
-    for frac in [0.5, 1.0 / 3.0, 2.0 / 3.0] {
+    for (frac, local) in [(0.5, 0.5), (1.0 / 3.0, 0.4), (2.0 / 3.0, 0.6)] {
         for c in chains {
-            let n = c.pieces.len() as f64;
-            let at = frac * n;
-            let i = (at.floor() as usize).min(c.pieces.len() - 1);
-            let local = at - i as f64;
-            let piece = &c.pieces[i];
-            let p = if local <= 0.0 {
-                piece.pts[0].p
-            } else {
-                piece.split(local.min(1.0))[1].pts[0].p
-            };
+            let i = ((frac * c.pieces.len() as f64) as usize).min(c.pieces.len() - 1);
+            let p = c.pieces[i].split(local)[1].pts[0].p;
             out.push(Point2::ORIGIN + p);
         }
     }
     out
+}
+
+/// Rays and pcurves crossing at less than this (the sine of the angle)
+/// don't settle anything: rounding can put such a crossing anywhere.
+const MIN_CROSSING: f64 = 1e-9;
+
+/// True when the piece crosses the direction `d` at local parameter `s`
+/// at an angle whose sine is over [`MIN_CROSSING`].
+fn transversal(piece: &crate::geom::chain2::Piece2, s: f64, d: Vector2) -> bool {
+    let [left, right] = piece.split(s.clamp(1e-9, 1.0 - 1e-9));
+    let (a, b) = (left.pts[left.pts.len() - 2].p, right.pts[1].p);
+    let tau = b - a;
+    let len = tau.length();
+    len > 0.0 && d.cross(tau).abs() > MIN_CROSSING * len
 }
 
 struct Rays<'a> {
@@ -240,7 +248,8 @@ impl Rays<'_> {
                         // A crossing counts only where it is pinned down: a
                         // pcurve nearly along the ray leaves a simple root
                         // whose bracket can't be narrowed.
-                        let pinned = span.hi() - span.lo() <= 1e-9 * reach.max(1.0);
+                        let pinned = span.hi() - span.lo() <= 1e-9 * reach.max(1.0)
+                            && transversal(piece, (s0 + s1) / 2.0, d);
                         match r {
                             Root::Simple { rising, .. } if span.lo() > 0.0 && pinned => {
                                 hits.push((span, rising))

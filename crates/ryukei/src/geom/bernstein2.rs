@@ -191,20 +191,22 @@ impl Bernstein2 {
         (Self::new(self.m, self.n, l), Self::new(self.m, self.n, r))
     }
 
-    /// The piece over the box `s × t` of `[0, 1]²`, reparameterized to
-    /// `[0, 1]²`.
+    /// The polynomial over the box `s × t`, reparameterized to `[0, 1]²`.
+    /// The box may reach past `[0, 1]²` (de Casteljau's algorithm
+    /// extrapolates exactly, and rounds outward like the rest); its upper
+    /// ends must be positive.
     pub(crate) fn part(&self, [s0, s1]: [f64; 2], [t0, t1]: [f64; 2]) -> Self {
         let mut p = self.clone();
-        if s1 < 1.0 {
+        if s1 != 1.0 {
             p = p.split_s(s1).0;
         }
-        if s0 > 0.0 {
+        if s0 != 0.0 {
             p = p.split_s(s0 / s1).1;
         }
-        if t1 < 1.0 {
+        if t1 != 1.0 {
             p = p.split_t(t1).0;
         }
-        if t0 > 0.0 {
+        if t0 != 0.0 {
             p = p.split_t(t0 / t1).1;
         }
         p

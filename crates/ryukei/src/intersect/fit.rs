@@ -332,7 +332,8 @@ pub(crate) fn fit_branch(surfaces: [&Surface; 2], traced: &Traced) -> Result<Fit
                 }
             };
             worst = worst.max(b);
-            if b > LINEAR_RESOLUTION {
+            if b > LINEAR_RESOLUTION && samples[i].p.distance(samples[i + 1].p) > LINEAR_RESOLUTION
+            {
                 split.push(i);
             }
         }
@@ -370,19 +371,30 @@ struct Branch<'a> {
 impl Branch<'_> {
     /// Samples at the traced points, with tangents along the chain.
     fn initial(&self, points: &[Point3]) -> Result<Vec<Sample>, Failure> {
-        let n = points.len();
+        // Points a hair apart (a crossing on a cell's corner seen from
+        // both sides) are one.
+        let mut pts: Vec<Point3> = Vec::with_capacity(points.len());
+        for &p in points {
+            if pts
+                .last()
+                .is_none_or(|q: &Point3| q.distance(p) > LINEAR_RESOLUTION)
+            {
+                pts.push(p);
+            }
+        }
+        let n = pts.len();
         if n < 2 {
             return Err(Failure::Uncertain);
         }
         let mut out: Vec<Sample> = Vec::with_capacity(n);
         for i in 0..n {
-            let chord = if i + 1 < n {
-                points[i + 1] - points[i]
+            let (chord, inward) = if i + 1 < n {
+                (pts[i + 1] - pts[i], pts[i + 1] - pts[i])
             } else {
-                points[i] - points[i - 1]
+                (pts[i] - pts[i - 1], pts[i - 1] - pts[i])
             };
             let prev = out.last().map(|s: &Sample| s.uv);
-            out.push(self.sample(points[i], chord, prev)?);
+            out.push(self.sample(pts[i], chord, prev, Some(inward))?);
         }
         Ok(out)
     }
@@ -390,11 +402,16 @@ impl Branch<'_> {
     /// A sample at `p` on both surfaces, its tangent along the surfaces'
     /// normals' cross product, turned to agree with `along`, or `along`
     /// itself where the normals are parallel (a singular point).
+    ///
+    /// At a pole or an apex, where a surface's parameters have no
+    /// derivative, they are read a little way towards `inward` (into the
+    /// branch, for its end samples) and carried back.
     fn sample(
         &self,
         p: Point3,
         along: Vector3,
         near: Option<[Point2; 2]>,
+        inward: Option<Vector3>,
     ) -> Result<Sample, Failure> {
         let (_, ga) = self.imps[0].eval_grad(p);
         let (_, gb) = self.imps[1].eval_grad(p);
@@ -410,7 +427,19 @@ impl Branch<'_> {
         let mut duv = [Vector2::ZERO; 2];
         for k in 0..2 {
             uv[k] = uv_near(self.surfaces[k], p, near.map(|n| n[k]));
-            duv[k] = uv_velocity(self.surfaces[k], uv[k], d).ok_or(Failure::Uncertain)?;
+            match uv_velocity(self.surfaces[k], uv[k], d) {
+                Some(v) => duv[k] = v,
+                None => {
+                    let dir = inward.ok_or(Failure::Uncertain)?;
+                    let sign = if dir.dot(d) >= 0.0 { 1.0 } else { -1.0 };
+                    let eps = 1e-7 * (1.0 + p.to_vector().length());
+                    let q = p + d * (sign * eps);
+                    let uq = uv_near(self.surfaces[k], q, near.map(|n| n[k]));
+                    let v = uv_velocity(self.surfaces[k], uq, d).ok_or(Failure::Uncertain)?;
+                    uv[k] = uq - v * (sign * eps);
+                    duv[k] = v;
+                }
+            }
         }
         Ok(Sample {
             s: 0.0,
@@ -427,7 +456,9 @@ impl Branch<'_> {
         while i + 1 < samples.len() {
             let (a, b) = (&samples[i], &samples[i + 1]);
             let turn = math::acos(a.d.dot(b.d).clamp(-1.0, 1.0));
-            if turn > MAX_TURN {
+            // A span shorter than resolution is not split: there is
+            // nothing between its ends to put a sample on.
+            if turn > MAX_TURN && a.p.distance(b.p) > LINEAR_RESOLUTION {
                 if samples.len() >= MAX_SAMPLES {
                     return Err(Failure::Uncertain);
                 }
@@ -473,7 +504,7 @@ impl Branch<'_> {
         {
             return Err(Failure::Uncertain);
         }
-        self.sample(x, chord, Some(a.uv))
+        self.sample(x, chord, Some(a.uv), None)
     }
 
     /// The certified bound of the span between two samples.

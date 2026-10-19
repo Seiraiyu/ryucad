@@ -32,7 +32,7 @@ use super::Failure;
 use super::implicit::Implicit;
 use crate::geom::bernstein::{Bernstein, Root};
 use crate::geom::bernstein2::{Bernstein2, krawczyk};
-use crate::geom::{BezierCurve, BezierPatch, Box3, NurbsSurface, Point3, Surface, Vector3};
+use crate::geom::{BezierCurve, BezierPatch, Box3, NurbsSurface, Point3, Rigid, Surface, Vector3};
 use crate::interval::Interval;
 use crate::tol::LINEAR_RESOLUTION;
 use core::f64::consts::{FRAC_PI_2, TAU};
@@ -79,15 +79,59 @@ pub(crate) fn rank(s: &Surface) -> u8 {
 }
 
 /// The topology of where `a` and `b` meet inside `region`.
+///
+/// Where the curve runs through a corner of a patch or along its side, or
+/// a singular point sits on a patch's boundary, the patches' crossings
+/// can't be certified; those depend only on where the parameterization
+/// puts its seams, so the trace is tried again with `p` turned about its
+/// own axis (and a sphere's poles tilted away), which moves the seams and
+/// leaves the surface where it is.
 pub(crate) fn trace(a: &Surface, b: &Surface, region: &Box3) -> Result<Topology, Failure> {
     let (p, q) = if rank(a) <= rank(b) { (a, b) } else { (b, a) };
     let imp = Implicit::of(q).ok_or(Failure::Unsupported)?;
+    for (spin, tilt) in TURNS {
+        match attempt(&reparameterized(p, spin, tilt), &imp, region) {
+            Err(Failure::Uncertain) => continue,
+            done => return done,
+        }
+    }
+    Err(Failure::Uncertain)
+}
+
+/// The turns a trace is tried with: about the surface's axis, and about
+/// its `x` axis for a sphere.
+const TURNS: [(f64, f64); 3] = [(0.0, 0.0), (0.407_1, 0.0), (1.291_3, 0.617_3)];
+
+/// `p` turned by `spin` about its axis and, for a sphere, by `tilt` about
+/// its `x` axis, through its origin: the same surface, its parameters
+/// moved.
+fn reparameterized(p: &Surface, spin: f64, tilt: f64) -> Surface {
+    let Some(f) = p.frame() else {
+        return p.clone();
+    };
+    if spin == 0.0 && tilt == 0.0 {
+        return p.clone();
+    }
+    let o = f.origin().to_vector();
+    let about = |axis, angle| {
+        Rigid::translation(o)
+            .then_after(&Rigid::rotation(axis, angle).then_after(&Rigid::translation(-o)))
+    };
+    let mut r = about(f.z(), spin);
+    if matches!(p, Surface::Sphere(_)) {
+        r = about(f.x(), tilt).then_after(&r);
+    }
+    p.transformed(&r)
+}
+
+/// One trace with `p` parameterized as it is.
+fn attempt(p: &Surface, imp: &Implicit, region: &Box3) -> Result<Topology, Failure> {
     let Some(ranges) = ranges(p, region) else {
         return Ok(Topology::default());
     };
     let (nurbs, _) = p.to_nurbs(ranges).map_err(|_| Failure::Uncertain)?;
     let periodic = [p.periods().0.is_some(), p.periods().1.is_some()];
-    let mut topo = Tracer::new(&nurbs, &imp, periodic, region).run()?;
+    let mut topo = Tracer::new(&nurbs, imp, periodic, region).run()?;
     // A cone's implicit form holds its other nappe too. A branch can pass
     // from one nappe to the other only through the apex, a singular
     // point that ends it, so a branch with a point past the apex lies
@@ -654,28 +698,75 @@ impl<'a> Tracer<'a> {
                 break;
             }
         }
-        // Krawczyk's test on a box around it, growing a few times.
-        let mut half = ((s[1] - s[0]).max(t[1] - t[0])).max(1e-12);
-        for _ in 0..8 {
-            let sx = [(x - half).max(0.0), (x + half).min(1.0)];
-            let ty = [(y - half).max(0.0), (y + half).min(1.0)];
-            let unique = sx[0] < sx[1] && ty[0] < ty[1] && krawczyk(&fs, &ft, sx, ty) == Some(true);
-            if unique {
-                let p = self.point(first.patch, x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
-                let fp = self.imp.value_at(p);
-                if self
-                    .imp
-                    .distance_bound(fp.mag(), self.imp.local(p.to_vector()))
-                    <= LINEAR_RESOLUTION
-                {
-                    return Ok(p);
-                }
+        // Newton must have stayed by the cluster.
+        let size = (s[1] - s[0]).max(t[1] - t[0]);
+        let by = |v: f64, r: [f64; 2]| v >= r[0] - size && v <= r[1] + size;
+        if !(by(x, s) && by(y, t)) {
+            return Err(Failure::Uncertain);
+        }
+        // Krawczyk's test on the largest box about it that passes, from
+        // one holding the whole cluster down to one so small that rounding
+        // in the gradient is all it must cover; then no other critical
+        // point in the rest of the cluster. The boxes may reach past the
+        // patch: a critical point on its boundary is the polynomial's all
+        // the same.
+        for half in [2.0 * size, size, size / 4.0, size / 16.0, 1e-6, 1e-8, 1e-10] {
+            let sx = [x - half, x + half];
+            let ty = [y - half, y + half];
+            if krawczyk(&fs, &ft, sx, ty) != Some(true) {
+                continue;
+            }
+            let cluster = (
+                [s[0] - size / 8.0, s[1] + size / 8.0],
+                [t[0] - size / 8.0, t[1] + size / 8.0],
+            );
+            if !no_critical(&fs, &ft, cluster, (sx, ty), 12) {
                 return Err(Failure::Uncertain);
             }
-            half *= 2.0;
+            let p = self.point(first.patch, x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
+            let fp = self.imp.value_at(p);
+            if self
+                .imp
+                .distance_bound(fp.mag(), self.imp.local(p.to_vector()))
+                <= LINEAR_RESOLUTION
+            {
+                return Ok(p);
+            }
+            return Err(Failure::Uncertain);
         }
         Err(Failure::Uncertain)
     }
+}
+
+/// True when the box `(s, t)` holds no zero of `(F_s, F_t)` outside the
+/// box `avoid`: each part is inside `avoid`, has a partial of one
+/// certified sign, or is excluded by Krawczyk's test, halving to `depth`.
+fn no_critical(
+    fs: &Bernstein2,
+    ft: &Bernstein2,
+    (s, t): ([f64; 2], [f64; 2]),
+    (a, b): ([f64; 2], [f64; 2]),
+    depth: u32,
+) -> bool {
+    if s[0] >= a[0] && s[1] <= a[1] && t[0] >= b[0] && t[1] <= b[1] {
+        return true;
+    }
+    let signed = |x: Interval| x.lo() > 0.0 || x.hi() < 0.0;
+    if signed(fs.part(s, t).range()) || signed(ft.part(s, t).range()) {
+        return true;
+    }
+    if krawczyk(fs, ft, s, t) == Some(false) {
+        return true;
+    }
+    if depth == 0 {
+        return false;
+    }
+    let (ms, mt) = ((s[0] + s[1]) / 2.0, (t[0] + t[1]) / 2.0);
+    [[s[0], ms], [ms, s[1]]].iter().all(|&ss| {
+        [[t[0], mt], [mt, t[1]]]
+            .iter()
+            .all(|&tt| no_critical(fs, ft, (ss, tt), (a, b), depth - 1))
+    })
 }
 
 #[cfg(test)]
@@ -790,6 +881,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn equal_tori_side_by_side_cross_on_a_seam() {
+        // Offset across their axes, two equal tori meet in curves that
+        // cross where the tori touch, on the tubes' tops: the seams of
+        // the torus patches, which no turn about the axis moves.
+        let z = (0.0, 1.0, 0.0);
+        let a = Surface::Torus(Torus::new(frame((0.0, 0.0, 0.5), z), 2.5, 1.0).unwrap());
+        let b = Surface::Torus(Torus::new(frame((0.0, 0.0, -0.5), z), 2.5, 1.0).unwrap());
+        let t = traced(&a, &b);
+        assert!(!t.branches.is_empty());
+        assert!(t.branches.iter().all(|b| !b.closed));
     }
 
     #[test]

@@ -249,6 +249,38 @@ fn a_slot_an_ellipse_and_a_nurbs_blob() {
 }
 
 #[test]
+fn part_turns_of_a_slot_and_a_blob_do_not_cross_themselves() {
+    // A slot's lines meet its arcs tangentially, so its caps touch the
+    // swept arcs' tori at their vertices; a blob's pcurves come in many
+    // pieces. Both come out sound, by the self-intersection check too
+    // (in `volume`).
+    let slot = Loop {
+        key: LoopKey(1),
+        segments: keyed(
+            10,
+            vec![
+                line((2.0, 0.0), (4.0, 0.0)),
+                arc((4.0, 0.5), 0.5, -FRAC_PI_2, FRAC_PI_2),
+                line((4.0, 1.0), (2.0, 1.0)),
+                arc((2.0, 0.5), 0.5, FRAC_PI_2, 3.0 * FRAC_PI_2),
+            ],
+        ),
+    };
+    let y = Axis::new(frame().origin(), frame().y().get()).unwrap();
+    let (b, _) = revolve(K, &profile(vec![slot]), y, 0.3, 1.5).unwrap();
+    assert!(volume(&b) > 0.0);
+    let mut g = ryukei_testkit::Lcg::new(11);
+    let blob = ryukei_testkit::nurbs::blob2(&mut g, Point2::new(3.0, 0.0), 1.0);
+    let [a, z] = blob.domain();
+    let lp = Loop {
+        key: LoopKey(1),
+        segments: keyed(10, vec![(Curve2::Nurbs2(Arc::new(blob)), a, z)]),
+    };
+    let (b, _) = revolve(K, &profile(vec![lp]), y, 0.0, 2.0).unwrap();
+    assert!(volume(&b) > 0.0);
+}
+
+#[test]
 fn extrude_refuses_bad_parameters() {
     let p = profile(vec![rect(1, 10, 0.0, 0.0, 1.0, 1.0)]);
     let (x, n) = (frame().x().get(), frame().z().get());

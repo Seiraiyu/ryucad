@@ -333,12 +333,28 @@ impl Bernstein {
             Sign::Positive
         };
         let (mut lo, mut hi) = (0.0, 1.0);
-        while (hi - lo) * (b - a) > w {
+        'narrow: while (hi - lo) * (b - a) > w {
             let m = (lo + hi) / 2.0;
             match strict(self.eval(m)) {
                 Some(s) if s == below => lo = m,
                 Some(_) => hi = m,
-                None => break,
+                // The root is about at the middle (as symmetric problems
+                // put it): bracket it by points either side, closer and
+                // closer, while their signs can be certified.
+                None => {
+                    let mut d = (hi - lo) / 4.0;
+                    while d * (b - a) > w / 2.0 {
+                        let (x, y) = (m - d, m + d);
+                        if strict(self.eval(x)) == Some(below)
+                            && strict(self.eval(y)).is_some_and(|s| s != below)
+                        {
+                            (lo, hi) = (x, y);
+                            continue 'narrow;
+                        }
+                        d /= 4.0;
+                    }
+                    break;
+                }
             }
         }
         Root::Simple {
@@ -419,6 +435,7 @@ mod tests {
         assert!(matches!(r[1], Root::Simple { rising: true, .. }));
         // Five close roots, and roots on the dyadic points a plain bisection
         // would split at.
+        brackets(&product(&[0.5]), &[0.5], 1e-13);
         let roots = [0.1, 0.1001, 0.25, 0.5, 0.75];
         brackets(&product(&roots), &roots, 1e-10);
         assert!(product(&[1.5, -0.2]).roots(1e-14).is_empty());

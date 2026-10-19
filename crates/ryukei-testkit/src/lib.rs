@@ -6,6 +6,7 @@
 //! - [`euler_script`]: Euler operator sequences played from bytes.
 //! - [`nurbs`]: seeded random NURBS curves and surfaces.
 //! - [`mesh`]: a NURBS-topped block, and measures of meshes.
+//! - [`sweep_bytes`]: sweeps from bytes, for fuzzing and its regressions.
 
 pub mod euler_script;
 pub mod exact;
@@ -13,6 +14,7 @@ mod golden;
 mod lcg;
 pub mod mesh;
 pub mod nurbs;
+pub mod sweep_bytes;
 
 pub use golden::{Golden, Section};
 pub use lcg::Lcg;

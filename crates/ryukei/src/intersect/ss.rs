@@ -14,8 +14,9 @@ use super::coincide::coincident;
 use super::fit::{fit_branch, fit_pcurve};
 use super::implicit::Implicit;
 use super::ss_exact;
-use super::ss_trace::{rank, trace};
+use super::ss_trace::{Traced, rank, trace};
 use crate::geom::{Box3, Curve, Curve2, Point3, Surface};
+use crate::tol::LINEAR_RESOLUTION;
 use std::sync::Arc;
 
 /// One branch of the curve where two surfaces meet.
@@ -92,8 +93,28 @@ pub fn surface_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<Surfac
     // The tracer takes the surface of lower rank as its first.
     let swapped = rank(a) > rank(b);
     let order = if swapped { [b, a] } else { [a, b] };
-    let mut branches = Vec::with_capacity(topo.branches.len());
-    for traced in &topo.branches {
+    let mut chains = topo.branches;
+    for s in [a, b] {
+        for pole in poles(s) {
+            if a.distance(pole) <= LINEAR_RESOLUTION && b.distance(pole) <= LINEAR_RESOLUTION {
+                chains = cut_at(chains, pole);
+            }
+        }
+    }
+    let mut branches = Vec::with_capacity(chains.len());
+    let mut points = topo.points;
+    for traced in &chains {
+        // A branch whose points all lie within ten resolutions of its
+        // first is a point by rule.
+        let first = traced.points[0];
+        if traced
+            .points
+            .iter()
+            .all(|p| p.distance(first) <= 10.0 * LINEAR_RESOLUTION)
+        {
+            points.push(first);
+            continue;
+        }
         let fitted = fit_branch(order, traced)?;
         let [p0, p1] = fitted.pcurves;
         let identity = [0.0, 1.0];
@@ -110,10 +131,72 @@ pub fn surface_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<Surfac
             pcurves: if swapped { [p1, p0] } else { [p0, p1] },
         });
     }
-    Ok(SurfaceHit::Meet {
-        branches,
-        points: topo.points,
-    })
+    Ok(SurfaceHit::Meet { branches, points })
+}
+
+/// Traced branches with the one that passes `pole` (a point of both
+/// surfaces) cut there: the pole goes in at the nearest stretch of the
+/// branch's points, and becomes an end of both pieces (both ends of a
+/// closed branch, opened there).
+fn cut_at(chains: Vec<Traced>, pole: Point3) -> Vec<Traced> {
+    let seg_distance = |a: Point3, b: Point3| {
+        let d = b - a;
+        let len2 = d.length_squared();
+        let t = if len2 > 0.0 {
+            ((pole - a).dot(d) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        (a + d * t).distance(pole)
+    };
+    // The nearest stretch over all branches, if the pole is within its
+    // length of it.
+    let mut best: Option<(usize, usize, f64)> = None;
+    for (k, c) in chains.iter().enumerate() {
+        let n = c.points.len();
+        let last = if c.closed { n } else { n - 1 };
+        for i in 0..last {
+            let (p, q) = (c.points[i], c.points[(i + 1) % n]);
+            let d = seg_distance(p, q);
+            if d <= p.distance(q).max(LINEAR_RESOLUTION) && best.is_none_or(|b| d < b.2) {
+                best = Some((k, i, d));
+            }
+        }
+    }
+    let Some((k, i, _)) = best else {
+        return chains;
+    };
+    let mut out = Vec::with_capacity(chains.len() + 1);
+    for (j, c) in chains.into_iter().enumerate() {
+        if j != k {
+            out.push(c);
+            continue;
+        }
+        let n = c.points.len();
+        if c.closed {
+            let mut pts = vec![pole];
+            pts.extend((1..=n).map(|m| c.points[(i + m) % n]));
+            pts.push(pole);
+            out.push(Traced {
+                points: pts,
+                closed: false,
+            });
+        } else {
+            let mut first: Vec<Point3> = c.points[..=i].to_vec();
+            first.push(pole);
+            let mut second = vec![pole];
+            second.extend_from_slice(&c.points[i + 1..]);
+            for part in [first, second] {
+                if part.len() >= 2 {
+                    out.push(Traced {
+                        points: part,
+                        closed: false,
+                    });
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The points where a surface's parameterization collapses: a sphere's
