@@ -110,9 +110,18 @@ impl Vector3 {
     }
 
     /// The direction of `self`, or `None` when it is shorter than
-    /// [`LINEAR_RESOLUTION`].
+    /// [`LINEAR_RESOLUTION`] (or not finite).
     pub fn normalize(self) -> Option<UnitVector3> {
         let len = self.length();
+        if len.is_infinite() {
+            // The squares overflowed (a component past about 1e154), which
+            // would make the direction zero: scale down first.
+            let big = self.x.abs().max(self.y.abs()).max(self.z.abs());
+            if !big.is_finite() {
+                return None;
+            }
+            return (self / big).normalize();
+        }
         (len > LINEAR_RESOLUTION).then(|| UnitVector3(self / len))
     }
 }
@@ -240,6 +249,17 @@ mod tests {
                 .is_some()
         );
         assert!(Vector3::ZERO.normalize().is_none());
+    }
+
+    #[test]
+    fn normalize_survives_overflowing_squares() {
+        // The squares overflow, which once made the direction zero. Found
+        // by fuzzing feature placements.
+        let u = Vector3::new(5.0, 1.0, 7.7976e307).normalize().unwrap();
+        assert!((u.get() - Vector3::new(0.0, 0.0, 1.0)).length() < 1e-15);
+        let u = Vector3::new(3e200, -4e200, 0.0).normalize().unwrap();
+        assert!((u.get() - Vector3::new(0.6, -0.8, 0.0)).length() < 1e-15);
+        assert!((u.get().length() - 1.0).abs() < 1e-15);
     }
 
     #[test]

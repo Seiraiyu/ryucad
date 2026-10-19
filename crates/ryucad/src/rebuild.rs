@@ -211,6 +211,17 @@ mod tests {
     }
 
     #[test]
+    fn huge_axes_are_directions() {
+        // Axes so long their squares overflow. Found by fuzzing.
+        let mut p = Placement::identity(Unit::Mm);
+        p.z = [1.1e170, 0.0, 1.0];
+        p.x = [0.0, 1.0, 0.0];
+        let r = placement(&p).unwrap();
+        let z = r.apply_vector(Vector3::new(0.0, 0.0, 1.0));
+        assert!((z - Vector3::new(1.0, 0.0, 0.0)).length() < 1e-15, "{z:?}");
+    }
+
+    #[test]
     fn kernel_refusals_are_rebuild_failures() {
         // Equal radii make no cone; a torus whose tube reaches the axis is degenerate.
         for f in [
