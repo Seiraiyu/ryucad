@@ -368,8 +368,11 @@ mod tests {
         let same = nav.clone();
         nav.drag(Gesture::None, [10.0, 10.0], 500.0, None);
         assert_eq!(nav, same);
+        // From above, at the points' middle depth (moved across, since the
+        // nearer one looks bigger).
         nav.standard(StandardView::Top, &[[0.0; 3], [1.0; 3]], 1.0);
-        assert_eq!(nav.camera.target, [0.5; 3]);
+        assert_eq!(nav.camera.basis().2, [0.0, 0.0, -1.0]);
+        assert_eq!(nav.camera.target[2], 0.5);
     }
 
     #[test]

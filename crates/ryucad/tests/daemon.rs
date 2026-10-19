@@ -768,8 +768,13 @@ fn an_agent_frames_a_face_for_the_human() {
     let body = cli(&f, &["inspect", "p", "b"])["result"]["bodies"][0].clone();
     let face = format!("p/b/{}", body["faces"][0]["name"].as_str().unwrap());
     let r = cli(&f, &["camera", "--view", "iso"]);
+    // At the cube: near its middle, moved a little so that the near
+    // corner, which looks bigger, is framed as the far ones are.
     let c = &r["result"]["camera"];
-    assert_eq!(c["target"], serde_json::json!([0.005, 0.005, 0.005]));
+    for k in 0..3 {
+        let t = c["target"][k].as_f64().unwrap();
+        assert!((t - 0.005).abs() < 0.001, "{c}");
+    }
     let r = cli(&f, &["camera", "--fit", &face]);
     assert_eq!(r["ok"], true, "{r}");
     let r = cli(&f, &["camera", "--view", "sideways"]);
