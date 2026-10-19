@@ -1,4 +1,5 @@
 use crate::sweep::{LoopKey, SegmentKey};
+use crate::topo::{EdgeId, FaceId};
 use core::fmt;
 
 /// Errors from fallible kernel constructors and operations.
@@ -26,6 +27,9 @@ pub enum Error {
     InvalidProfile(ProfileError),
     /// Extrude or revolve parameters that don't fit the profile.
     InvalidSweep(SweepError),
+    /// An edge with no exact pcurve on a face it bounds: see
+    /// [`crate::pcurve::exact`].
+    NoPcurve { edge: EdgeId, face: FaceId },
 }
 
 /// Why a sweep profile was refused. Each names the caller's keys, so the
@@ -125,6 +129,12 @@ impl fmt::Display for Error {
             }
             Self::InvalidProfile(p) => write!(f, "invalid profile: {p}"),
             Self::InvalidSweep(e) => write!(f, "invalid sweep: {e}"),
+            Self::NoPcurve { edge, face } => write!(
+                f,
+                "edge {} has no exact pcurve on face {}",
+                edge.index(),
+                face.index()
+            ),
         }
     }
 }
