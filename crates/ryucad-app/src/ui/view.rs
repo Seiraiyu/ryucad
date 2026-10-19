@@ -12,6 +12,7 @@ use eframe::egui::{self, PointerButton, Sense};
 use eframe::{egui_wgpu, wgpu};
 use ryucad::live::SelectMode;
 use ryucad::view::{self, StandardView};
+use std::collections::BTreeMap;
 
 /// What the window's viewport keeps between frames.
 pub struct View {
@@ -33,12 +34,38 @@ pub struct View {
     framed: bool,
     /// What the camera last framed while the model loaded.
     framing: Option<([f64; 3], [f64; 3])>,
+    /// Each body's few points that frame it as the camera looks.
+    framers: BTreeMap<BodyKey, Framers>,
     pivot: Option<[f64; 3]>,
     /// What a Shift+two-finger orbit on a trackpad turns about, from when
     /// the fingers go down until they lift.
     finger_pivot: Option<[f64; 3]>,
     /// What the context menu was opened on.
     menu: Option<Hit>,
+}
+
+/// A body's points that frame it from one direction
+/// (`view::framing_points`): a few hundred of its mesh's thousands.
+struct Framers {
+    hash: String,
+    /// The direction, unit back (towards the eye) and up.
+    back: [f64; 3],
+    up: [f64; 3],
+    points: Vec<[f64; 3]>,
+}
+
+fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn unit(a: [f64; 3]) -> [f64; 3] {
+    let n = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+    a.map(|x| x / n)
+}
+
+/// Whether unit `a` and `b` point the same way, but for rounding.
+fn same_way(a: [f64; 3], b: [f64; 3]) -> bool {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2] > 1.0 - 1e-12
 }
 
 impl Default for View {
@@ -78,6 +105,7 @@ impl View {
             texture: None,
             framed: false,
             framing: None,
+            framers: BTreeMap::new(),
             pivot: None,
             finger_pivot: None,
             menu: None,
@@ -129,9 +157,41 @@ impl View {
         }
     }
 
+    /// The points that frame the whole model as the camera looks: each
+    /// body's few, kept while its mesh and the camera's direction stay.
+    /// While a model loads it is framed again as each batch of meshes
+    /// comes: over all their points, each frame would cost more than the
+    /// last.
+    fn framing_points(&mut self, ws: &Workspace) -> Vec<[f64; 3]> {
+        let c = &self.nav.camera;
+        let (back, up) = (unit(sub(c.eye, c.target)), unit(c.up));
+        self.framers.retain(|k, _| ws.model.meshes.contains_key(k));
+        let mut out = Vec::new();
+        for (key, body) in &ws.model.meshes {
+            let kept = self.framers.get(key).is_some_and(|f| {
+                f.hash == body.hash && same_way(f.back, back) && same_way(f.up, up)
+            });
+            if !kept {
+                let points = self.picker(ws).points(Some(key));
+                let framers = Framers {
+                    hash: body.hash.clone(),
+                    back,
+                    up,
+                    points: view::framing_points(&points, back, up),
+                };
+                self.framers.insert(key.clone(), framers);
+            }
+            out.extend_from_slice(&self.framers[key].points);
+        }
+        out
+    }
+
     /// Frames the whole model, or one body.
     pub fn fit(&mut self, ws: &mut Workspace, body: Option<&BodyKey>) {
-        let points = self.picker(ws).points(body);
+        let points = match body {
+            None => self.framing_points(ws),
+            Some(_) => self.picker(ws).points(body),
+        };
         if !points.is_empty() {
             self.nav.fit(&points, self.aspect());
             self.moved(ws);
@@ -245,7 +305,7 @@ impl View {
         {
             if self.framing != Some(b) {
                 self.framing = Some(b);
-                let points = self.picker(ws).points(None);
+                let points = self.framing_points(ws);
                 self.nav.fit(&points, self.aspect());
                 ws.share_camera(&self.nav.camera);
             }
