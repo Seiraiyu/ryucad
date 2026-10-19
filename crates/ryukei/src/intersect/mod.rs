@@ -10,6 +10,7 @@
 
 mod coincide;
 mod cs;
+mod face;
 mod fit;
 mod implicit;
 mod inface;
@@ -18,6 +19,7 @@ mod ss_exact;
 mod ss_trace;
 
 pub use cs::{CurveHit, Side, curve_surface};
+pub use face::{Contact, FaceMeet, Rim, Stretch, face_box, face_face};
 pub use inface::{Place, point_in_face};
 pub use ss::{Branch, SurfaceHit, surface_surface};
 

@@ -315,8 +315,6 @@ const OVERLAP: f64 = 100.0;
 /// The most cells one pair of pieces may be cut into.
 const MEET_CELLS: usize = 1 << 16;
 
-// Used by face intersections, from the next commit on.
-#[allow(dead_code)]
 /// Every place two curves, each over a range of its parameter (`t1 < t0`
 /// runs it backwards), meet, by their parameters; points within
 /// [`OVERLAP`] tolerances of each other are one. Curves on one line,

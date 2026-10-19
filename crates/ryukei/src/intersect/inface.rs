@@ -114,7 +114,7 @@ fn on_boundary(body: &Body, face: FaceId, p: Point3) -> Option<Place> {
 /// The distance from `p` to a curve over `[t0, t1]`: its nearest point if
 /// that lies in the range, else the nearer end (and a NURBS's local
 /// minima in the range).
-pub(crate) fn edge_distance(c: &Curve, [t0, t1]: [f64; 2], p: Point3) -> f64 {
+fn edge_distance(c: &Curve, [t0, t1]: [f64; 2], p: Point3) -> f64 {
     let ends = c.point(t0).distance(p).min(c.point(t1).distance(p));
     let foot = c.project(p);
     let t = match c.period() {
