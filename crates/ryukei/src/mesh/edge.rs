@@ -7,13 +7,14 @@
 //! resting on it can always pass. A segment that crosses a periodic face's
 //! seam is split exactly there first, so that a face can cut its loops at
 //! the seam without inventing points. The end samples are the edge's
-//! vertices themselves.
+//! vertices themselves. A sample's parameters on a face come from the
+//! fin's pcurve; only a fin without one inverts the point.
 
 use super::bound::{Targets, curve_segment_ok, face_segment_ok};
 use super::uv::{FaceGeom, U};
 use crate::geom::{Point2, Point3};
 use crate::tol::LINEAR_RESOLUTION;
-use crate::topo::{Body, EdgeId, FaceId};
+use crate::topo::{Body, EdgeId, FaceId, FinId};
 
 /// The deepest a segment is bisected: 2^-48 of the edge's interval.
 const MAX_DEPTH: u32 = 48;
@@ -125,25 +126,41 @@ pub(crate) fn discretize(
     let edge = &b.edges[e];
     let curve = &b.curves[edge.curve];
     let [t0, t1] = edge.interval;
+    // Each face once, with the fin that puts the edge on it.
     let mut faces: Vec<FaceId> = Vec::new();
+    let mut fins: Vec<FinId> = Vec::new();
     for fin in b.edge_fins(e) {
         let f = b.loops[b.fins[fin].loop_].face;
         if !faces.contains(&f) {
             faces.push(f);
+            fins.push(fin);
         }
     }
     let geom = |f: FaceId| geoms[f.index()].as_ref().expect("face geometry");
+    // The raw parameters of the edge at `t` on the `i`th face, and how far
+    // the surface puts them from `p`: from the pcurve when the fin has one.
+    let raw = |i: usize, t: f64, p: Point3| -> (Point2, f64) {
+        let g = geom(faces[i]);
+        match b.fin_uv(fins[i], t) {
+            Some(uv) => (uv, g.surface.point(uv.x, uv.y).distance(p)),
+            None => {
+                let foot = g.surface.project(p);
+                (Point2::new(foot.param.0, foot.param.1), foot.distance)
+            }
+        }
+    };
     let mut off = Vec::new();
     let reach = edge.tolerance.get() + LINEAR_RESOLUTION;
     let mut sample = |t: f64, p: Point3, depth: u32| {
         let uv = faces
             .iter()
-            .map(|&f| {
-                let (uv, d) = geom(f).invert(p);
+            .enumerate()
+            .map(|(i, &f)| {
+                let (uv, d) = raw(i, t, p);
                 if d > reach && !off.contains(&f) {
                     off.push(f);
                 }
-                uv
+                geom(f).snap(uv)
             })
             .collect();
         Sample { t, p, uv, depth }
@@ -202,22 +219,22 @@ pub(crate) fn discretize(
             .find_map(|(i, &f)| seam_crossing(geom(f), cur.uv[i], next.uv[i]).map(|c| (i, c)));
         if let Some((i, (k, line))) = crossing {
             let g = geom(faces[i]);
-            // Which side of the seam line a point is on, from its exact
-            // (unsnapped) parameters.
-            let side = |p: Point3| {
-                let (u, v) = g.surface.project(p).param;
-                let x = [u, v][k];
+            // Which side of the seam line the edge is at `t`, from its
+            // exact (unsnapped) parameters.
+            let side = |t: f64| {
+                let (uv, _) = raw(i, t, curve.point(t));
+                let x = [uv.x, uv.y][k];
                 let x = unwrap(x, [cur.uv[i].x, cur.uv[i].y][k], g.periods[k]);
                 x < line
             };
-            let below = side(cur.p);
+            let below = side(cur.t);
             let (mut lo, mut hi) = (cur.t, next.t);
             for _ in 0..SEAM_STEPS {
                 let t = 0.5 * (lo + hi);
                 if t <= lo || t >= hi {
                     break;
                 }
-                if side(curve.point(t)) == below {
+                if side(t) == below {
                     lo = t;
                 } else {
                     hi = t;

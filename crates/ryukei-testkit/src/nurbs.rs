@@ -195,5 +195,5 @@ pub fn convert_body(b: &mut Body) -> Result<(), Error> {
         let id = b.add_surface(Surface::Nurbs(Arc::new(n)));
         euler::set_surface(b, f, id, sense)?;
     }
-    Ok(())
+    ryukei::pcurve::fill(b)
 }

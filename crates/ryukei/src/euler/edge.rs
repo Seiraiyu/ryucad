@@ -69,6 +69,7 @@ pub fn mev(
         next: back,
         prev,
         around: back,
+        pcurve: None,
     });
     body.fins.push(Fin {
         loop_: lp,
@@ -77,6 +78,7 @@ pub fn mev(
         next,
         prev: out,
         around: out,
+        pcurve: None,
     });
     match at {
         Corner::Before(f) => {
@@ -163,7 +165,8 @@ pub struct Semv {
 /// Split edge, make vertex: splits `edge` at parameter `t`, strictly inside
 /// its interval, with a new vertex at `point`. The edge keeps the start
 /// side; a new edge on the same curve takes the end side. Every fin of the
-/// edge gets a partner on the new edge beside it in its loop.
+/// edge gets a partner on the new edge beside it in its loop, with the
+/// fin's pcurve (the parameter is the same on both halves).
 ///
 /// Names: the edge's name retires; the start side is
 /// `(key, Part(0), [edge])`, the end side `(key, Part(1), [edge])` and the
@@ -214,7 +217,7 @@ pub fn semv(
     for (i, &f) in fins.iter().enumerate() {
         let g = partners[i];
         let fin = &body.fins[f];
-        let (loop_, sense) = (fin.loop_, fin.sense);
+        let (loop_, sense, pcurve) = (fin.loop_, fin.sense, fin.pcurve);
         // Along the edge the partner follows the fin; against it, it comes
         // first.
         let (prev, next) = match sense {
@@ -228,6 +231,7 @@ pub fn semv(
             next,
             prev,
             around: partners[(i + 1) % partners.len()],
+            pcurve,
         });
         body.fins[prev].next = g;
         body.fins[next].prev = g;
@@ -259,7 +263,8 @@ pub struct Jekv {
 /// Join edges, kill vertex: the inverse of [`semv`]. `vertex` must have
 /// exactly two edges, one ending there and one starting there, on the same
 /// curve with touching intervals, each fin of the second beside a fin of
-/// the first. The edge ending at the vertex absorbs the other.
+/// the first with the same pcurve. The edge ending at the vertex absorbs
+/// the other.
 ///
 /// Names: both edges' names retire; the kept edge is `(key, Merged, [a, b])`
 /// with the two names sorted.
@@ -293,7 +298,10 @@ pub fn jekv(body: &mut Body, key: OpKey, vertex: VertexId) -> Result<(Jekv, Jour
             Sense::Forward => fin.prev,
             Sense::Reversed => fin.next,
         };
-        if body.fins[beside].edge != e1 || body.fins[beside].sense != fin.sense {
+        if body.fins[beside].edge != e1
+            || body.fins[beside].sense != fin.sense
+            || body.fins[beside].pcurve != fin.pcurve
+        {
             return Err(not_removable());
         }
     }
@@ -544,5 +552,47 @@ mod tests {
             Err(TopologyError::NotRemovable.into())
         );
         assert_eq!(b.dump(), before);
+    }
+
+    #[test]
+    fn semv_shares_pcurves_and_jekv_needs_them_equal() {
+        use crate::euler::set_pcurve;
+        use crate::geom::{Curve2, Line2, Point2, Vector2};
+        use crate::topo::Pcurve;
+        let (mut b, sq) = square();
+        let l2 = b.add_curve2(Curve2::Line2(
+            Line2::new(Point2::new(0.0, 1.0), Vector2::new(0.0, -1.0)).unwrap(),
+        ));
+        let p0 = Pcurve {
+            curve: l2,
+            map: [0.0, 1.0],
+        };
+        set_pcurve(&mut b, sq.fins[0], Some(p0)).unwrap();
+        let before = shape(&b);
+        let (s, _) = semv(&mut b, OpKey(5), sq.edge, 0.25, p(0.0, 0.75)).unwrap();
+        let halves: Vec<Option<Pcurve>> = b
+            .edge_fins(s.edge)
+            .map(|f| b.fin(f).unwrap().pcurve)
+            .collect();
+        assert!(halves.contains(&Some(p0)) && halves.contains(&None));
+        // Halves whose pcurves differ can't be joined.
+        let half = b
+            .edge_fins(s.edge)
+            .find(|&f| b.fin(f).unwrap().pcurve.is_some())
+            .unwrap();
+        let p1 = Pcurve {
+            map: [0.0, 2.0],
+            ..p0
+        };
+        set_pcurve(&mut b, half, Some(p1)).unwrap();
+        let held = b.dump();
+        assert_eq!(
+            jekv(&mut b, OpKey(6), s.vertex),
+            Err(TopologyError::NotRemovable.into())
+        );
+        assert_eq!(b.dump(), held);
+        set_pcurve(&mut b, half, Some(p0)).unwrap();
+        jekv(&mut b, OpKey(6), s.vertex).unwrap();
+        assert_eq!(shape(&b), before);
     }
 }

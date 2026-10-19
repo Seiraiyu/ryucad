@@ -1,7 +1,7 @@
 //! The flat arrays and the records they hold.
 
 use super::id::{
-    CurveId, EdgeId, FaceId, FinId, Id, LoopId, RegionId, ShellId, SurfaceId, VertexId,
+    Curve2Id, CurveId, EdgeId, FaceId, FinId, Id, LoopId, RegionId, ShellId, SurfaceId, VertexId,
 };
 use crate::geom::Point3;
 use crate::name::Name;
@@ -165,6 +165,8 @@ pub struct Loop {
 
 /// One use of an edge by a loop. `Forward` runs from the edge's start to
 /// its end. `around` is the next fin in the ring of fins on the same edge.
+/// `pcurve` is the edge in the parameter plane of the loop's face; a
+/// finished body has one on every fin.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Fin {
     pub loop_: LoopId,
@@ -173,6 +175,25 @@ pub struct Fin {
     pub next: FinId,
     pub prev: FinId,
     pub around: FinId,
+    pub pcurve: Option<Pcurve>,
+}
+
+/// An edge in a face's `(u, v)` plane: at the edge's parameter `t` it is
+/// at `curve(map[0] + map[1] t)`, which the face's surface takes to within
+/// the edge's tolerance of the edge's curve at `t`. The affine map keeps
+/// pcurves exact where the plane's parameter runs at another speed than
+/// the edge's (a cone's ruling) or the other way.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pcurve {
+    pub curve: Curve2Id,
+    pub map: [f64; 2],
+}
+
+impl Pcurve {
+    /// The pcurve's own parameter at the edge's parameter `t`.
+    pub fn param(&self, t: f64) -> f64 {
+        self.map[0] + self.map[1] * t
+    }
 }
 
 /// An edge runs along its curve from `interval[0]` to `interval[1]`

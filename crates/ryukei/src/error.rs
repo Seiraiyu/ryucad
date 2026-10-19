@@ -1,4 +1,5 @@
 use crate::sweep::{LoopKey, SegmentKey};
+use crate::topo::{EdgeId, FaceId};
 use core::fmt;
 
 /// Errors from fallible kernel constructors and operations.
@@ -26,6 +27,9 @@ pub enum Error {
     InvalidProfile(ProfileError),
     /// Extrude or revolve parameters that don't fit the profile.
     InvalidSweep(SweepError),
+    /// An edge with no exact pcurve on a face it bounds: see
+    /// [`crate::pcurve::exact`].
+    NoPcurve { edge: EdgeId, face: FaceId },
 }
 
 /// Why a sweep profile was refused. Each names the caller's keys, so the
@@ -97,6 +101,9 @@ pub enum TopologyError {
     WrongFace,
     /// The same for shells.
     WrongShell,
+    /// The region is the void around the body, where the operator needs a
+    /// solid one.
+    WrongRegion,
     /// The loop is not a lone-vertex loop.
     NotLone,
     /// The edge does not have exactly two fins.
@@ -125,6 +132,12 @@ impl fmt::Display for Error {
             }
             Self::InvalidProfile(p) => write!(f, "invalid profile: {p}"),
             Self::InvalidSweep(e) => write!(f, "invalid sweep: {e}"),
+            Self::NoPcurve { edge, face } => write!(
+                f,
+                "edge {} has no exact pcurve on face {}",
+                edge.index(),
+                face.index()
+            ),
         }
     }
 }
@@ -189,9 +202,6 @@ pub enum SweepError {
     /// A full revolve of a profile that touches the axis at a lone vertex,
     /// the start of `segment`: the solid would meet itself in a point.
     PinchedOnAxis { segment: SegmentKey },
-    /// A full revolve that would enclose a cavity: a hole, or a loop that
-    /// touches the axis in more than one stretch.
-    EnclosesVoid { loop_: LoopKey },
     /// The swept solid would leave the size box.
     OutsideSizeBox,
 }
@@ -216,13 +226,6 @@ impl fmt::Display for SweepError {
                     f,
                     "the profile touches the axis at the start of segment {:#x}",
                     segment.0
-                )
-            }
-            Self::EnclosesVoid { loop_ } => {
-                write!(
-                    f,
-                    "a full turn of loop {:#x} would enclose a cavity",
-                    loop_.0
                 )
             }
             Self::OutsideSizeBox => f.write_str("the sweep leaves the size box"),
@@ -273,6 +276,7 @@ impl fmt::Display for TopologyError {
             Self::NotManifold => "edge does not have exactly two fins",
             Self::NotRemovable => "not in the shape this operator removes",
             Self::WouldDisconnect => "would split the shell",
+            Self::WrongRegion => "not a solid region",
             Self::Inconsistent => "the result fails the topology check",
         })
     }
@@ -335,8 +339,16 @@ mod tests {
             "invalid sweep: segment 0x2a crosses the axis"
         );
         assert_eq!(
-            SweepError::EnclosesVoid { loop_: LoopKey(2) }.to_string(),
-            "a full turn of loop 0x2 would enclose a cavity"
+            Error::NoPcurve {
+                edge: crate::topo::Id::from_index(3),
+                face: crate::topo::Id::from_index(1)
+            }
+            .to_string(),
+            "edge 3 has no exact pcurve on face 1"
+        );
+        assert_eq!(
+            Error::from(TopologyError::WrongRegion).to_string(),
+            "topology: not a solid region"
         );
         assert_eq!(
             Error::from(TopologyError::Inconsistent).to_string(),

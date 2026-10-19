@@ -1,5 +1,6 @@
-//! MVFS and KVFS: start and end a body's skeleton. MVR and KVR: a lone
-//! vertex in a face.
+//! MVFS and KVFS: start and end a body's skeleton. MVS: another shell in a
+//! solid region, which KVFS ends too. MVR and KVR: a lone vertex in a
+//! face.
 
 use super::{check_point, finish, live, next_id};
 use crate::geom::Point3;
@@ -97,9 +98,94 @@ pub fn mvfs(
     ))
 }
 
-/// Kill vertex, face, shell: the inverse of [`mvfs`]. The shell must hold
-/// exactly one face with exactly one loop, a lone vertex. Its region goes
-/// too when it has no other shell.
+/// What [`mvs`] made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mvs {
+    pub shell: ShellId,
+    pub face: FaceId,
+    pub loop_: LoopId,
+    pub vertex: VertexId,
+}
+
+/// Make vertex, face, shell in a region: like [`mvfs`], but the new shell
+/// joins the solid `region` instead of starting one. This is how a solid
+/// gets a cavity: the shell grows into a closed void shell inside the
+/// region's outer shell, its faces pointing into the cavity. [`kvfs`] is
+/// its inverse.
+///
+/// Names: the face is `(key, NewFace)`, the vertex `(key, NewVertex)`.
+pub fn mvs(
+    body: &mut Body,
+    key: OpKey,
+    region: RegionId,
+    point: Point3,
+    surface: SurfaceId,
+) -> Result<(Mvs, Journal), Error> {
+    if live(&body.regions, region)?.kind != RegionKind::Solid {
+        return Err(TopologyError::WrongRegion.into());
+    }
+    live(&body.surfaces, surface)?;
+    let point = check_point(point)?;
+    let (shell, face, loop_, vertex) = (
+        next_id(&body.shells),
+        next_id(&body.faces),
+        next_id(&body.loops),
+        next_id(&body.vertices),
+    );
+    let face_name = body.derive_name("mvs", key, Role::NewFace, &[]);
+    let vertex_name = body.derive_name("mvs", key, Role::NewVertex, &[]);
+    body.shells.push(Shell {
+        region,
+        next: shell,
+        prev: shell,
+        first_face: None,
+    });
+    body.faces.push(Face {
+        shell,
+        next: face,
+        prev: face,
+        first_loop: None,
+        surface,
+        sense: Sense::Forward,
+        name: face_name,
+    });
+    body.loops.push(Loop {
+        face,
+        next: loop_,
+        prev: loop_,
+        first_fin: None,
+        vertex: Some(vertex),
+    });
+    body.vertices.push(Vertex {
+        point,
+        tolerance: Tolerance::RESOLUTION,
+        edge: None,
+        lone: Some(loop_),
+        name: vertex_name,
+    });
+    body.link_shell(region, shell);
+    body.link_face(shell, face);
+    body.link_loop(face, loop_);
+    body.index_name(EntityId::Face(face));
+    body.index_name(EntityId::Vertex(vertex));
+    let mut journal = Journal::new();
+    journal.push(Event::Created(face_name));
+    journal.push(Event::Created(vertex_name));
+    finish(body);
+    Ok((
+        Mvs {
+            shell,
+            face,
+            loop_,
+            vertex,
+        },
+        journal,
+    ))
+}
+
+/// Kill vertex, face, shell: the inverse of [`mvfs`] and [`mvs`]. The
+/// shell must hold exactly one face with exactly one loop, a lone vertex.
+/// Its region goes too when it has no other shell.
 pub fn kvfs(body: &mut Body, shell: ShellId) -> Result<Journal, Error> {
     let s = live(&body.shells, shell)?;
     let face = s.first_face.ok_or(TopologyError::NotRemovable)?;
@@ -258,6 +344,38 @@ mod tests {
         assert_eq!(kvfs(&mut b, dead), Err(TopologyError::DeadEntity.into()));
         assert_eq!(b.dump(), before);
         assert!(kvfs(&mut b, m.shell).is_ok());
+    }
+
+    #[test]
+    fn mvs_adds_a_shell_to_a_region_and_kvfs_takes_it_away() {
+        let (mut b, s) = plane_body();
+        let (m, _) = mvfs(&mut b, K, Point3::ORIGIN, s).unwrap();
+        let before = shape(&b);
+        let (v, j) = mvs(&mut b, OpKey(2), m.region, Point3::new(1.0, 0.0, 0.0), s).unwrap();
+        assert_eq!(j.events().len(), 2);
+        assert_eq!(b.shell(v.shell).unwrap().region, m.region);
+        assert_eq!(
+            b.region_shells(m.region).collect::<Vec<_>>(),
+            [m.shell, v.shell]
+        );
+        assert_eq!(b.counts().regions, 2);
+        assert_eq!(b.counts().shells, 2);
+        kvfs(&mut b, v.shell).unwrap();
+        assert_eq!(shape(&b), before);
+        assert_eq!(b.region(m.region).unwrap().first_shell, Some(m.shell));
+        // Never in the void around the body, nor in a dead region.
+        let held = b.dump();
+        let void = b.outer_region();
+        assert_eq!(
+            mvs(&mut b, K, void, Point3::ORIGIN, s),
+            Err(TopologyError::WrongRegion.into())
+        );
+        let dead = <RegionId as crate::topo::Id>::from_index(9);
+        assert_eq!(
+            mvs(&mut b, K, dead, Point3::ORIGIN, s),
+            Err(TopologyError::DeadEntity.into())
+        );
+        assert_eq!(b.dump(), held);
     }
 
     #[test]

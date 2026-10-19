@@ -103,7 +103,7 @@ pub fn block(
         set_surface(&mut b, f, planes[k].0, Sense::Forward)?;
         roles.push((f, planes[k].1));
     }
-    let journal = name_by_role(&mut b, "block", key, &roles);
+    let journal = name_by_role(&mut b, "block", key, &roles)?;
     Ok((b, journal))
 }
 

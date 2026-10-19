@@ -213,6 +213,15 @@ pub(super) fn structure(b: &Body, out: &mut Vec<Fault>) {
         }
     }
 
+    for (f, fin) in b.fins.live() {
+        if let Some(p) = fin.pcurve
+            && b.curves2.get(p.curve).is_none()
+        {
+            out.push(Fault::DeadGeometry {
+                from: EntityId::Fin(f),
+            });
+        }
+    }
     edges(b, out);
     vertices(b, out);
 }

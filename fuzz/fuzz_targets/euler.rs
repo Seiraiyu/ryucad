@@ -30,6 +30,7 @@ fuzz_target!(|data: &[u8]| {
         let key = OpKey(1000 + n);
         if mode % 2 == 0 {
             if let Some(step) = valid_step(&mut b, key, &mut bytes) {
+                ryukei::pcurve::fill(&mut b).unwrap();
                 let faults = check(&b);
                 assert!(faults.is_empty(), "after {}: {faults:?}", step.op);
             }

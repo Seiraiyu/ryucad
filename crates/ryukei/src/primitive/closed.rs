@@ -48,7 +48,7 @@ fn closed(
     let s = b.add_surface(surface.transformed(placement));
     let (m, _) = mvfs(&mut b, key, placement.apply_point(on), s)?;
     kvr(&mut b, m.loop_)?;
-    let journal = name_by_role(&mut b, kind, key, &[(m.face, FaceRole::Side)]);
+    let journal = name_by_role(&mut b, kind, key, &[(m.face, FaceRole::Side)])?;
     Ok((b, journal))
 }
 
