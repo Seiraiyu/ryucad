@@ -4,7 +4,7 @@
 //! agent would. Either way the report is the daemon's JSON.
 
 use crate::core::link::Wake;
-use ryucad::client::Daemon;
+use ryucad::client::{Daemon, no_window};
 use ryucad::error::{Code, Error, Result};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
@@ -13,20 +13,22 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 
 /// Runs `ryucad -C <dir> <args>` and returns its result, or its error.
 pub fn cli(daemon: &Daemon, dir: &Path, args: &[String]) -> Result<Value> {
-    let out = Command::new(&daemon.exe)
-        .arg("-C")
+    let mut cmd = Command::new(&daemon.exe);
+    cmd.arg("-C")
         .arg(dir)
         .args(["--no-daemon"])
         .args(args)
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|e| {
-            Error::new(
-                Code::Daemon,
-                format!("can't run {}: {e}", daemon.exe.display()),
-            )
-        })?;
+        .stderr(Stdio::null());
+    // Thumbnails run this at start: a console flashing up for each would
+    // take the focus from the window.
+    no_window(&mut cmd);
+    let out = cmd.output().map_err(|e| {
+        Error::new(
+            Code::Daemon,
+            format!("can't run {}: {e}", daemon.exe.display()),
+        )
+    })?;
     let mut doc: Value = serde_json::from_slice(&out.stdout)
         .map_err(|_| Error::new(Code::Daemon, "ryucad didn't answer with JSON"))?;
     if doc["ok"] == true {

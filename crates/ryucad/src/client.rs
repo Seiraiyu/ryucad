@@ -248,12 +248,12 @@ impl Daemon {
             Error::new(Code::Daemon, format!("can't run {}: {why}", exe.display()))
                 .with("path", exe)
         };
-        let out = Command::new(exe)
-            .arg("version")
+        let mut cmd = Command::new(exe);
+        cmd.arg("version")
             .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .map_err(|e| failed(e.to_string()))?;
+            .stderr(Stdio::null());
+        no_window(&mut cmd);
+        let out = cmd.output().map_err(|e| failed(e.to_string()))?;
         let doc: Value = serde_json::from_slice(&out.stdout)
             .map_err(|_| failed("it didn't answer `version` with JSON".into()))?;
         let version = serde_json::from_value(doc["result"].clone())
@@ -441,6 +441,20 @@ fn detach(cmd: &mut Command) {
         }
     }
     cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+}
+
+/// Keeps a console program run by a windowed one from opening a console
+/// window of its own (on Windows; elsewhere there is nothing to do). Its
+/// output is still captured.
+pub fn no_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
 }
 
 /// The daemon's status, without starting one.
