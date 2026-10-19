@@ -495,7 +495,19 @@ fn set_sides(b: &mut Body, plan: &TurnPlan, out: &TurnBuilt) -> Result<(), Error
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::check::check;
+    use crate::check::Fault;
+
+    /// The checker's faults once the builder's body has its pcurves, which
+    /// the sweeps add after building.
+    fn check(b: &Body) -> Vec<Fault> {
+        crate::check::check(&filled(b))
+    }
+
+    fn filled(b: &Body) -> Body {
+        let mut b = b.clone();
+        crate::pcurve::fill(&mut b).unwrap();
+        b
+    }
     use crate::geom::{
         Circle, Cone, Curve, Cylinder, Frame, Line, Plane, Sphere, Surface, Vector3,
     };
@@ -613,7 +625,8 @@ mod tests {
     /// mesh.
     fn volume(b: &Body) -> f64 {
         use crate::mesh::{MeshParams, check_mesh, tessellate};
-        assert_eq!(check(b), []);
+        let b = &filled(b);
+        assert_eq!(crate::check::check(b), []);
         let m = tessellate(b, &MeshParams::new(1e-3, 0.5)).unwrap();
         assert!(m.faults.is_empty(), "{:?}", m.faults);
         check_mesh(b, &m).unwrap();

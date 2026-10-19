@@ -33,6 +33,8 @@ proptest! {
         while !bytes.is_empty() {
             n += 1;
             if let Some(step) = valid_step(&mut b, OpKey(1000 + n), &mut bytes) {
+                // New fins have no pcurves until someone gives them theirs.
+                ryukei::pcurve::fill(&mut b).unwrap();
                 let faults = check(&b);
                 prop_assert!(faults.is_empty(), "after {} (step {n}): {faults:?}", step.op);
             }
@@ -95,5 +97,6 @@ fn every_operator_runs() {
     for op in ryukei_testkit::euler_script::OPERATORS {
         assert!(seen.contains(op), "{op} never ran: {seen:?}");
     }
+    ryukei::pcurve::fill(&mut b).unwrap();
     assert_eq!(check(&b), []);
 }

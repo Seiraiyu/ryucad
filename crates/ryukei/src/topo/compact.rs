@@ -241,6 +241,9 @@ mod tests {
         use crate::geom::{Curve2, Line2, Point2, Vector2};
         use crate::topo::Pcurve;
         let mut b = tetrahedron();
+        for f in b.fins().collect::<Vec<_>>() {
+            b.fins[f].pcurve = None;
+        }
         let line = |x: f64| {
             Curve2::Line2(Line2::new(Point2::new(x, 0.0), Vector2::new(1.0, 0.0)).unwrap())
         };

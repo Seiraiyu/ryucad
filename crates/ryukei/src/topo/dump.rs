@@ -315,6 +315,10 @@ mod tests {
         use crate::topo::{FinId, Id, Pcurve};
         use std::sync::Arc;
         let mut b = tetrahedron();
+        for f in b.fins().collect::<Vec<_>>() {
+            b.fins[f].pcurve = None;
+        }
+        b.compact();
         let f2 = Frame2::new(Point2::new(1.0, 2.0), Vector2::new(1.0, 0.0), false).unwrap();
         let line = b.add_curve2(Curve2::Line2(
             Line2::new(Point2::new(0.0, 0.5), Vector2::new(0.0, 1.0)).unwrap(),
@@ -422,7 +426,7 @@ mod tests {
         let shared = Arc::new(n.clone());
         b.add_curve(Curve::Nurbs(shared.clone()));
         b.add_curve(Curve::Nurbs(shared));
-        b.add_surface(Surface::Nurbs(Arc::new(s)));
+        b.add_surface(Surface::Nurbs(Arc::new(s.clone())));
         let d = b.dump();
         let lines: Vec<&str> = d.lines().filter(|l| l.contains(" nurbs ")).collect();
         assert_eq!(lines.len(), 3);
@@ -434,10 +438,8 @@ mod tests {
         let mut c = tetrahedron();
         c.add_curve(Curve::Nurbs(Arc::new(n.clone())));
         c.add_curve(Curve::Nurbs(Arc::new(n)));
-        let mut d2 = c.dump();
-        d2.push_str(lines[2]);
-        d2.push('\n');
-        assert_eq!(d, d2);
+        c.add_surface(Surface::Nurbs(Arc::new(s)));
+        assert_eq!(d, c.dump());
     }
 
     #[test]

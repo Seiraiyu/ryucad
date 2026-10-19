@@ -125,6 +125,29 @@ fn edge(b: &Body, e: EdgeId, out: &mut Vec<Fault>) {
             });
         }
     }
+    for fin in b.edge_fins(e) {
+        let Some(p) = b.fins[fin].pcurve else {
+            out.push(Fault::MissingPcurve { fin });
+            continue;
+        };
+        let surface = &b.surfaces[b.faces[b.loops[b.fins[fin].loop_].face].surface];
+        let c2 = &b.curves2[p.curve];
+        let worst = samples
+            .iter()
+            .enumerate()
+            .map(|(i, &q)| {
+                let t = t0 + (t1 - t0) * i as f64 / (SAMPLES - 1) as f64;
+                let uv = c2.point(p.param(t));
+                surface.point(uv.x, uv.y).distance(q)
+            })
+            .fold(0.0, f64::max);
+        if worst > edge.tolerance.get() {
+            out.push(Fault::PcurveOffEdge {
+                fin,
+                distance: worst,
+            });
+        }
+    }
 }
 
 /// A face's loops as fan triangles, when the face is planar and bounded

@@ -7,7 +7,7 @@ use crate::name::{OpKey, Role};
 use crate::tol::Tolerance;
 
 /// A closed polyhedron from vertex positions and faces given as vertex
-/// cycles, counterclockwise seen from outside. Each entity's name uses a
+/// cycles, counterclockwise seen from outside, with exact pcurves. Each entity's name uses a
 /// key made from its index; every recipe reads `fixture#0/<role>`.
 pub(crate) fn polyhedron(points: &[Point3], faces: &[&[usize]]) -> Body {
     let mut b = Body::new();
@@ -120,6 +120,7 @@ pub(crate) fn polyhedron(points: &[Point3], faces: &[&[usize]]) -> Body {
             });
         }
     }
+    crate::pcurve::fill(&mut b).expect("planar faces with straight edges");
     b
 }
 

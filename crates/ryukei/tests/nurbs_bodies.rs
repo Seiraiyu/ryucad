@@ -33,6 +33,7 @@ fn ellipse_disc() -> Body {
     let lone = Corner::Lone(m.loop_);
     let tau = core::f64::consts::TAU;
     euler::mef(&mut b, OpKey(2), lone, lone, c, [0.0, tau]).unwrap();
+    ryukei::pcurve::fill(&mut b).unwrap();
     b
 }
 

@@ -5,7 +5,10 @@
 //! sweeps make:
 //!
 //! - **On a plane**, a line, circle, ellipse or planar NURBS maps to the
-//!   same kind of curve in the plane's frame, with the same parameter.
+//!   same kind of curve in the plane's frame, with the same parameter. On
+//!   a NURBS that is a parallelogram (degree 1 both ways, two control
+//!   points each way, equal weights), whose parameters are an affine map
+//!   of the plane, a line or NURBS maps the same way.
 //! - **On any other surface**, an edge along a parameter line (a circle
 //!   round an axis, a ruling of a cylinder or cone, a swept surface's
 //!   generator moved along it) is a [`Line2`] whose parameter is an affine
@@ -41,7 +44,10 @@ pub fn exact(
 ) -> Option<(Curve2, [f64; 2])> {
     let candidate = match surface {
         Surface::Plane(_) => on_plane(surface.frame()?, curve),
-        _ => iso_line(surface, curve, interval),
+        _ => match affine(surface) {
+            Some(a) => on_affine(&a, curve),
+            None => iso_line(surface, curve, interval),
+        },
     }?;
     fits(surface, curve, interval, tolerance, &candidate).then_some(candidate)
 }
@@ -99,6 +105,77 @@ fn on_plane(frame: &Frame, curve: &Curve) -> Option<(Curve2, [f64; 2])> {
         }
     };
     Some((c2, identity))
+}
+
+/// A surface `origin + u a + v b`.
+struct Affine {
+    origin: Point3,
+    a: crate::geom::Vector3,
+    b: crate::geom::Vector3,
+}
+
+impl Affine {
+    /// The parameters of the point of the surface nearest `p`.
+    fn local(&self, p: Point3) -> Point2 {
+        let (x, y) = self.solve(p - self.origin);
+        Point2::new(x, y)
+    }
+
+    /// The parameter step along the surface nearest the step `d`.
+    fn solve(&self, d: crate::geom::Vector3) -> (f64, f64) {
+        let (aa, ab, bb) = (self.a.dot(self.a), self.a.dot(self.b), self.b.dot(self.b));
+        let (ad, bd) = (self.a.dot(d), self.b.dot(d));
+        let det = aa * bb - ab * ab;
+        ((bb * ad - ab * bd) / det, (aa * bd - ab * ad) / det)
+    }
+}
+
+/// A NURBS parallelogram as an affine surface: degree 1 with two control
+/// points each way, equal weights, and opposite sides equal within
+/// resolution.
+fn affine(surface: &Surface) -> Option<Affine> {
+    let Surface::Nurbs(n) = surface else {
+        return None;
+    };
+    if n.degrees() != [1, 1] || n.counts() != [2, 2] {
+        return None;
+    }
+    let w = n.weights();
+    if w.iter().any(|&x| x != w[0]) {
+        return None;
+    }
+    let p = |i, j| n.control_point(i, j);
+    let skew = (p(1, 1) - p(1, 0)) - (p(0, 1) - p(0, 0));
+    if skew.length() > crate::tol::LINEAR_RESOLUTION {
+        return None;
+    }
+    let [[u0, u1], [v0, v1]] = n.domain();
+    let a = (p(1, 0) - p(0, 0)) / (u1 - u0);
+    let b = (p(0, 1) - p(0, 0)) / (v1 - v0);
+    let origin = p(0, 0) - a * u0 - b * v0;
+    let det = a.dot(a) * b.dot(b) - a.dot(b) * a.dot(b);
+    (det > 0.0).then_some(Affine { origin, a, b })
+}
+
+/// A line or NURBS on an affine surface: the line keeps its parameter up
+/// to its speed in the parameter plane, the NURBS its control points'
+/// images and its parameter.
+fn on_affine(s: &Affine, curve: &Curve) -> Option<(Curve2, [f64; 2])> {
+    match curve {
+        Curve::Line(l) => {
+            let (x, y) = s.solve(l.dir().get());
+            let dir = Vector2::new(x, y);
+            let line = Line2::new(s.local(l.origin()), dir).ok()?;
+            Some((Curve2::Line2(line), [0.0, dir.length()]))
+        }
+        Curve::Nurbs(n) => {
+            let points = n.control_points().map(|p| s.local(p)).collect();
+            let weights = Some(n.weights().to_vec());
+            let c = NurbsCurve2::new(n.knots().clone(), points, weights).ok()?;
+            Some((Curve2::Nurbs2(Arc::new(c)), [0.0, 1.0]))
+        }
+        _ => None,
+    }
 }
 
 /// A circle's or ellipse's frame in a plane's: its origin and `x` in the
@@ -251,6 +328,30 @@ mod tests {
         // A line leaving the plane gets nothing.
         let off = Curve::Line(Line::through(p(0.0, 0.0), f.to_world(0.0, 0.0, 1.0)).unwrap());
         assert_eq!(exact(&plane, &off, [0.0, 1.0], TOL), None);
+    }
+
+    #[test]
+    fn nurbs_parallelograms_map_lines_and_nurbs_affinely() {
+        let f = tilted();
+        let plane = Surface::Plane(Plane::new(f));
+        let (n, _) = plane.to_nurbs([[-1.0, 3.0], [0.5, 1.0]]).unwrap();
+        let s = Surface::Nurbs(Arc::new(n));
+        let p = |x: f64, y: f64| f.to_world(x, y, 0.0);
+        let line = Curve::Line(Line::through(p(0.1, 0.6), p(0.9, 0.8)).unwrap());
+        let (c2, map) = exact(&s, &line, [0.0, 0.5], TOL).unwrap();
+        assert!(matches!(c2, Curve2::Line2(_)));
+        assert!(map[1] > 0.0);
+        assert!(worst(&s, &line, [0.0, 0.5]) <= 1e-14);
+        let circle = Circle::new(
+            Frame::new(p(1.0, 0.75), f.z().get(), f.x().get()).unwrap(),
+            0.2,
+        )
+        .unwrap();
+        let (cn, _) = circle.to_nurbs().unwrap();
+        let cn = Curve::Nurbs(Arc::new(cn));
+        assert!(worst(&s, &cn, [0.0, TAU]) <= 1e-14);
+        // A circle itself has no exact pcurve on a parallelogram.
+        assert_eq!(exact(&s, &Curve::Circle(circle), [0.0, TAU], TOL), None);
     }
 
     #[test]

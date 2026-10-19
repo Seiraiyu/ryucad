@@ -7,7 +7,7 @@ geom 90cad8ca80df54df
 interval ceed4e3c202ab503
 math 48b722fd5e6bf4a3
 meshes 93001ff163744efe
-nurbs_bodies 9f8b8b70b9b00fee
+nurbs_bodies 8827a1ca1af0b551
 pcurves 793fa833add523b0
 predicates 582c63309c4c6f67
 primitives d1d75bf1aae07f71
