@@ -7,6 +7,7 @@ mod axis;
 mod bbox;
 #[allow(dead_code)]
 pub(crate) mod bernstein;
+pub(crate) mod bernstein2;
 mod bound2;
 pub(crate) mod chain2;
 pub(crate) mod chain3;
@@ -37,7 +38,7 @@ pub(crate) use frame::polar_angle;
 pub use nurbs::{
     Basis, Direction, KnotVector, MAX_DEGREE, NurbsCurve, NurbsCurve2, NurbsSurface, Reparam,
 };
-pub(crate) use nurbs::{BezierCurve, Hom};
+pub(crate) use nurbs::{BezierCurve, BezierPatch, Hom};
 pub use point::{Point2, Point3};
 pub use project::Projection;
 pub use surface::{Cone, Cylinder, Plane, Sphere, Surface, Torus};

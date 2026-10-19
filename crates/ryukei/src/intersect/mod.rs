@@ -13,6 +13,8 @@ mod cs;
 mod implicit;
 mod ss;
 mod ss_exact;
+#[allow(dead_code)]
+mod ss_trace;
 
 pub use cs::{CurveHit, Side, curve_surface};
 pub use ss::{Branch, SurfaceHit, surface_surface};

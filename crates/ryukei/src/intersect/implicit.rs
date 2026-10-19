@@ -17,8 +17,9 @@
 
 use super::SLACK;
 use crate::geom::bernstein::Bernstein;
+use crate::geom::bernstein2::Bernstein2;
 use crate::geom::chain3::Piece3;
-use crate::geom::{Frame, Point3, Surface, Vector3};
+use crate::geom::{BezierPatch, Frame, Point3, Surface, Vector3};
 use crate::interval::Interval;
 use crate::math;
 use crate::predicates::Sign;
@@ -165,6 +166,51 @@ impl Implicit {
             Bernstein::new(ys),
             Bernstein::new(zs),
             Bernstein::new(ws),
+        );
+        let rho2 = || x.mul(&x).add(&y.mul(&y));
+        let poly = match self.kind {
+            Kind::Plane => z,
+            Kind::Cylinder { r } => rho2().sub(&w.mul(&w).scale(p(r).square())),
+            Kind::Cone { r, sin, cos } => {
+                let q = w.scale(p(r)).add(&z.scale(tan(sin, cos)));
+                rho2().sub(&q.mul(&q))
+            }
+            Kind::Sphere { r } => rho2().add(&z.mul(&z)).sub(&w.mul(&w).scale(p(r).square())),
+            Kind::Torus { major, minor } => {
+                let w2 = w.mul(&w);
+                let s = rho2()
+                    .add(&z.mul(&z))
+                    .add(&w2.scale(p(major).square() - p(minor).square()));
+                s.mul(&s)
+                    .sub(&w2.mul(&rho2()).scale(p(4.0) * p(major).square()))
+            }
+        };
+        (poly, w_min)
+    }
+
+    /// `W^d f(A / W)` for a rational patch `A / W`, as a polynomial in the
+    /// patch's local parameters, and the least weight, as for
+    /// [`Implicit::on_piece`].
+    pub(crate) fn on_patch(&self, patch: &BezierPatch) -> (Bernstein2, f64) {
+        let [m, n] = patch.degrees;
+        let mut xs = Vec::with_capacity(patch.pts.len());
+        let mut ys = Vec::with_capacity(patch.pts.len());
+        let mut zs = Vec::with_capacity(patch.pts.len());
+        let mut ws = Vec::with_capacity(patch.pts.len());
+        for h in &patch.pts {
+            let [x, y, z] = self.local(h.p);
+            let w = p(h.w);
+            xs.push(x * w);
+            ys.push(y * w);
+            zs.push(z * w);
+            ws.push(w);
+        }
+        let w_min = patch.pts.iter().map(|h| h.w).fold(f64::INFINITY, f64::min);
+        let (x, y, z, w) = (
+            Bernstein2::new(m, n, xs),
+            Bernstein2::new(m, n, ys),
+            Bernstein2::new(m, n, zs),
+            Bernstein2::new(m, n, ws),
         );
         let rho2 = || x.mul(&x).add(&y.mul(&y));
         let poly = match self.kind {
