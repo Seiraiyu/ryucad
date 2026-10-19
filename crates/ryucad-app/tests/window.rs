@@ -232,6 +232,64 @@ fn orbiting_from_the_background_keeps_the_model_in_view() {
 }
 
 #[test]
+fn a_trackpad_pans_orbits_and_pinches() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.step();
+    let rect = h.state().opened().view.rect;
+    h.event(egui::Event::PointerMoved(rect.center()));
+    h.step();
+    let camera = |h: &Harness<'static, App>| h.state().opened().view.nav.camera.clone();
+    let fingers = |h: &Harness<'static, App>, modifiers: egui::Modifiers| {
+        for _ in 0..5 {
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(12.0, 6.0),
+                modifiers,
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Trackpad,
+            });
+        }
+    };
+    let dist = |a: [f64; 3], b: [f64; 3]| {
+        (0..3)
+            .map(|k| (a[k] - b[k]) * (a[k] - b[k]))
+            .sum::<f64>()
+            .sqrt()
+    };
+    let unit = |c: &ryucad::view::Camera| {
+        let d = dist(c.target, c.eye);
+        [0, 1, 2].map(|k| (c.target[k] - c.eye[k]) / d)
+    };
+    // Two fingers pan: same distance and direction, moved.
+    let before = camera(&h);
+    fingers(&h, egui::Modifiers::NONE);
+    h.step();
+    let after = camera(&h);
+    assert!(dist(after.target, before.target) > 1e-6, "panned");
+    assert!((after.distance() - before.distance()).abs() < 1e-9);
+    assert!(dist(unit(&after), unit(&before)) < 1e-9);
+    // With Shift they orbit: the direction turns.
+    let before = after;
+    fingers(&h, egui::Modifiers::SHIFT);
+    h.step();
+    let after = camera(&h);
+    assert!(dist(unit(&after), unit(&before)) > 1e-3, "orbited");
+    // A pinch zooms in.
+    let before = after;
+    h.event(egui::Event::Zoom(1.5));
+    h.step();
+    assert!(
+        camera(&h).distance() < before.distance() * 0.9,
+        "pinched in"
+    );
+}
+
+#[test]
 fn the_first_view_frames_the_whole_model() {
     if !gpu() {
         return;

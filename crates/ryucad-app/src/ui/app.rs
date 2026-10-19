@@ -83,6 +83,8 @@ pub struct App {
     /// Open… was chosen: the folder dialog runs once the frame is done,
     /// not in the middle of drawing it.
     pick: bool,
+    /// A Ctrl+click (macOS) is down, so its release is a right one too.
+    ctrl_click: bool,
 }
 
 impl App {
@@ -98,6 +100,7 @@ impl App {
             titled: None,
             shown: false,
             pick: false,
+            ctrl_click: false,
         };
         if let Some(dir) = dir {
             app.go(dir);
@@ -355,6 +358,13 @@ impl Opened {
 }
 
 impl eframe::App for App {
+    /// On macOS, Ctrl+click is a right-click.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if cfg!(target_os = "macos") {
+            crate::ui::platform::ctrl_click_as_secondary(&mut raw.events, &mut self.ctrl_click);
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // A new window to the front: on Windows it otherwise stays behind
         // whatever was in front when it was started.

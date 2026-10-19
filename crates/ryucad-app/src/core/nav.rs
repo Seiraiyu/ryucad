@@ -119,6 +119,12 @@ impl Nav {
         self.camera = view::zoom(&self.camera, factor, toward);
     }
 
+    /// A pinch by `zoom` (above 1 is closer) zooms towards `toward`, the
+    /// point under the mouse, or the target.
+    pub fn pinch(&mut self, zoom: f32, toward: Option<[f64; 3]>) {
+        self.camera = view::zoom(&self.camera, 1.0 / f64::from(zoom.max(1e-3)), toward);
+    }
+
     /// A standard view framing `points` (not empty) in a viewport of
     /// `aspect`.
     pub fn standard(&mut self, v: StandardView, points: &[[f64; 3]], aspect: f64) {

@@ -34,6 +34,9 @@ pub struct View {
     /// What the camera last framed while the model loaded.
     framing: Option<([f64; 3], [f64; 3])>,
     pivot: Option<[f64; 3]>,
+    /// What a Shift+two-finger orbit on a trackpad turns about, from when
+    /// the fingers go down until they lift.
+    finger_pivot: Option<[f64; 3]>,
     /// What the context menu was opened on.
     menu: Option<Hit>,
 }
@@ -76,6 +79,7 @@ impl View {
             framed: false,
             framing: None,
             pivot: None,
+            finger_pivot: None,
             menu: None,
         }
     }
@@ -260,7 +264,7 @@ impl View {
             _ => None,
         };
         // Navigation.
-        let (buttons, modifiers, scroll) = ui.input(|i| {
+        let (buttons, modifiers, wheel, fingers, pinch) = ui.input(|i| {
             let b = Buttons {
                 primary: i.pointer.button_down(PointerButton::Primary),
                 secondary: i.pointer.button_down(PointerButton::Secondary),
@@ -270,23 +274,30 @@ impl View {
                 shift: i.modifiers.shift,
                 ctrl: i.modifiers.command,
             };
-            (b, m, i.smooth_scroll_delta.y)
+            (
+                b,
+                m,
+                i.smooth_scroll_delta.y,
+                Fingers::of(&i.raw.events),
+                i.zoom_delta(),
+            )
         });
-        if response.drag_started() {
-            // Turn about the model under the mouse; from the background,
-            // about what is in the middle of the view (the target may be
-            // well off the model after zooming towards a point), else the
-            // model's middle.
+        // Turn about the model under `at`; from the background, about what
+        // is in the middle of the view (the target may be well off the
+        // model after zooming towards a point), else the model's middle.
+        let pivot = |view: &mut View, ws: &Workspace, at: Option<egui::Pos2>| {
             let middle = [size[0] / 2.0, size[1] / 2.0];
-            let picked = response
-                .interact_pointer_pos()
-                .and_then(|p| self.picker(ws).pick(&pr, size, local(p)))
-                .or_else(|| self.picker(ws).pick(&pr, size, middle))
+            let picked = at
+                .and_then(|p| view.picker(ws).pick(&pr, size, local(p)))
+                .or_else(|| view.picker(ws).pick(&pr, size, middle))
                 .map(|h| h.point);
-            self.pivot = picked.or_else(|| {
-                self.bounds(ws)
+            picked.or_else(|| {
+                view.bounds(ws)
                     .map(|(lo, hi)| [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0))
-            });
+            })
+        };
+        if response.drag_started() {
+            self.pivot = pivot(self, ws, response.interact_pointer_pos());
         }
         if response.dragged() {
             let g = self.nav.style.gesture(buttons, modifiers);
@@ -297,7 +308,28 @@ impl View {
                 self.moved(ws);
             }
         }
-        if response.hovered() && scroll != 0.0 {
+        // Two fingers on a trackpad pan, or with Shift orbit; a wheel (and
+        // a pinch) zooms.
+        if response.hovered() && fingers.delta != egui::Vec2::ZERO {
+            let height = rect.height().max(1.0);
+            let d = [-fingers.delta.x, -fingers.delta.y];
+            if fingers.shift {
+                if fingers.start || self.finger_pivot.is_none() {
+                    self.finger_pivot = pivot(self, ws, response.hover_pos());
+                }
+                self.nav.drag(Gesture::Orbit, d, height, self.finger_pivot);
+            } else {
+                // The model follows the fingers, as content does.
+                self.nav.drag(Gesture::Pan, [-d[0], -d[1]], height, None);
+            }
+            self.moved(ws);
+        }
+        if fingers.end {
+            self.finger_pivot = None;
+        }
+        let scroll = if fingers.any { 0.0 } else { wheel };
+        let pinched = (pinch - 1.0).abs() > f32::EPSILON;
+        if response.hovered() && (scroll != 0.0 || pinched) {
             // Towards the model under the mouse; over the background,
             // towards where the mouse is at the depth of the model's
             // middle (unless that is behind the eye: then the target).
@@ -312,7 +344,11 @@ impl View {
                     Some(pr.at_depth(ndc, middle))
                 })
             });
-            self.nav.scroll(scroll, toward);
+            if pinched {
+                self.nav.pinch(pinch, toward);
+            } else {
+                self.nav.scroll(scroll, toward);
+            }
             self.moved(ws);
         }
         // Picking.
@@ -469,5 +505,44 @@ impl View {
         };
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
         ui.painter().image(id, rect, uv, egui::Color32::WHITE);
+    }
+}
+
+/// This frame's scrolling by fingers on a trackpad: scrolls in points that
+/// the platform says (or, not saying, implies) come from fingers or their
+/// momentum. Wheels scroll in lines.
+#[derive(Debug, Default)]
+struct Fingers {
+    /// Any arrived (a frame of them never zooms, even with no movement).
+    any: bool,
+    delta: egui::Vec2,
+    /// They went down, or lifted.
+    start: bool,
+    end: bool,
+    /// Shift was held: they orbit.
+    shift: bool,
+}
+
+impl Fingers {
+    fn of(events: &[egui::Event]) -> Fingers {
+        let mut f = Fingers::default();
+        for e in events {
+            if let egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta,
+                phase,
+                source,
+                modifiers,
+            } = e
+                && *source != egui::MouseWheelSource::Wheel
+            {
+                f.any = true;
+                f.delta += *delta;
+                f.shift |= modifiers.shift;
+                f.start |= *phase == egui::TouchPhase::Start;
+                f.end |= matches!(phase, egui::TouchPhase::End | egui::TouchPhase::Cancel);
+            }
+        }
+        f
     }
 }
