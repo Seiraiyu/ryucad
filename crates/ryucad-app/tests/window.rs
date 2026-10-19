@@ -525,7 +525,8 @@ fn the_activity_tab_undoes_and_ctrl_z_does_too() {
     p.ok(&["feature", "edit", "p", "boss", "--param", "radius=5"]);
     frames(&mut h, |a| !a.opened().ws.activity.entries.is_empty());
     h.step();
-    h.get_by_label("feature.edit");
+    // It names what it changed.
+    h.get_by_label("feature.edit p/boss");
     // Newest first: the top Undo is the edit's.
     h.get_all_by_label("Undo").next().unwrap().click();
     frames(&mut h, |a| {

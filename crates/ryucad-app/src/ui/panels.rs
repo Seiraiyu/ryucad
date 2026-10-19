@@ -360,13 +360,7 @@ fn activity(ui: &mut egui::Ui, ws: &mut Workspace) {
                             .as_str()
                             .unwrap_or("outside ryucad");
                         ui.label(who);
-                        let what = match e["kind"].as_str() {
-                            Some("undo") => format!("undo of {}", e["target"]),
-                            Some("redo") => format!("redo of {}", e["target"]),
-                            Some("external") => "files changed".to_owned(),
-                            _ => e["method"].as_str().unwrap_or_default().to_owned(),
-                        };
-                        ui.label(what);
+                        ui.label(ws.activity.describe(e));
                         let files: Vec<String> = e["files"]
                             .as_array()
                             .into_iter()
