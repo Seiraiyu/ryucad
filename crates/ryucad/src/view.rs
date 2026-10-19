@@ -391,10 +391,13 @@ pub fn zoom(camera: &Camera, factor: f64, toward: Option<[f64; 3]>) -> Camera {
         Projection::Perspective { .. } => {
             let step = scale(sub(p, camera.eye), 1.0 - factor);
             let eye = add(camera.eye, step);
-            // Towards a point, the target goes along, so later zooms and
-            // orbits keep their scale; towards the target, it stays.
+            // Towards a point, the target moves to the point's depth on
+            // the same axis, so later zooms and orbits keep their scale
+            // and the target stays by the model; towards the target, it
+            // stays.
             let target = if toward.is_some() {
-                add(camera.target, step)
+                let (_, _, forward) = camera.basis();
+                add(eye, scale(forward, dot(sub(p, eye), forward)))
             } else {
                 camera.target
             };
@@ -599,6 +602,25 @@ mod tests {
             assert!(z.check().is_ok());
             let after = crate::render::View::new(&z, 400, 300).pixel(p).unwrap();
             assert!((before.0 - after.0).abs() < 1e-3 && (before.1 - after.1).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn zooming_at_a_point_keeps_the_target_by_the_model() {
+        let c = frame([0.0; 3], [1.0; 3], StandardView::Iso, DEFAULT_PROJECTION);
+        let (_, _, forward) = c.basis();
+        let p = [1.0, 0.0, 1.0];
+        let start = dot(sub(p, c.target), sub(p, c.target)).sqrt();
+        let mut cam = c.clone();
+        for factor in [0.8; 6].into_iter().chain([1.25; 6]) {
+            cam = zoom(&cam, factor, Some(p));
+            // On the same axis, at the depth of the point zoomed at.
+            let (_, _, f) = cam.basis();
+            assert!(close(f, forward));
+            let depth = |q: [f64; 3]| dot(sub(q, cam.eye), forward);
+            assert!((depth(cam.target) - depth(p)).abs() < 1e-9);
+            // So never farther from the point than it began.
+            assert!(dot(sub(p, cam.target), sub(p, cam.target)).sqrt() <= start + 1e-9);
         }
     }
 

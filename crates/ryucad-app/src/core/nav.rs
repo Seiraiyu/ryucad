@@ -272,6 +272,16 @@ impl Projector {
             }
         }
     }
+
+    /// The point on the ray through `ndc` as deep in the view as `point`:
+    /// what the mouse is over, at the model's depth, when it is over
+    /// nothing.
+    pub fn at_depth(&self, ndc: [f64; 2], point: [f64; 3]) -> [f64; 3] {
+        let (_, _, f) = self.camera.basis();
+        let (o, d) = self.ray(ndc);
+        let k = dot(sub(point, o), f) / dot(d, f);
+        along(o, d, k)
+    }
 }
 
 #[cfg(test)]
@@ -387,5 +397,27 @@ mod tests {
         let pr = Projector::new(&iso(), 1.0, [0.0; 3], 0.01);
         let behind = along(iso().eye, sub(iso().eye, iso().target), 1.0);
         assert_eq!(pr.ndc(behind), None);
+    }
+
+    #[test]
+    fn a_point_on_a_ray_at_a_depth() {
+        let model = [0.003, -0.002, 0.004];
+        for projection in [
+            view::DEFAULT_PROJECTION,
+            Projection::Orthographic { height: 0.05 },
+        ] {
+            let cam = Camera {
+                projection,
+                ..iso()
+            };
+            let pr = Projector::new(&cam, 1.5, [0.0; 3], 0.01);
+            let at = [0.4, -0.7];
+            let p = pr.at_depth(at, model);
+            let n = pr.ndc(p).unwrap();
+            assert!((n[0] - at[0]).abs() < 1e-9 && (n[1] - at[1]).abs() < 1e-9);
+            let (_, _, f) = cam.basis();
+            let depth = |q: [f64; 3]| dot(sub(q, cam.eye), f);
+            assert!((depth(p) - depth(model)).abs() < 1e-12);
+        }
     }
 }

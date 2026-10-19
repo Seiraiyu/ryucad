@@ -298,10 +298,21 @@ impl View {
             }
         }
         if response.hovered() && scroll != 0.0 {
-            let toward = response
-                .hover_pos()
-                .and_then(|p| self.picker(ws).pick(&pr, size, local(p)));
-            self.nav.scroll(scroll, toward.map(|h| h.point));
+            // Towards the model under the mouse; over the background,
+            // towards where the mouse is at the depth of the model's
+            // middle (unless that is behind the eye: then the target).
+            let toward = response.hover_pos().and_then(|p| {
+                let p = local(p);
+                let hit = self.picker(ws).pick(&pr, size, p).map(|h| h.point);
+                hit.or_else(|| {
+                    let (lo, hi) = self.bounds(ws)?;
+                    let middle = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+                    pr.ndc(middle)?;
+                    let ndc = [2.0 * p[0] / size[0] - 1.0, 1.0 - 2.0 * p[1] / size[1]];
+                    Some(pr.at_depth(ndc, middle))
+                })
+            });
+            self.nav.scroll(scroll, toward);
             self.moved(ws);
         }
         // Picking.
