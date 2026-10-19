@@ -65,9 +65,14 @@ fn agents_see_what_the_window_selects_and_looks_at() {
         projection: ryucad::view::Projection::Orthographic { height: 0.05 },
     };
     // Several moves in a burst: the first goes at once, the last after a pause.
+    let burst = std::time::Instant::now();
     ws.share_camera(&ryucad::view::pan(&camera, 0.5, 0.0));
     ws.share_camera(&camera);
-    assert!(ws.camera_due());
+    // Held back, unless a slow machine took the pause between the two
+    // (Windows CI has): then it went at once, as it should.
+    if burst.elapsed() < ryucad_app::core::workspace::CAMERA_EVERY {
+        assert!(ws.camera_due());
+    }
     std::thread::sleep(ryucad_app::core::workspace::CAMERA_EVERY);
     ws.tick(std::time::Instant::now());
     assert!(!ws.camera_due());
