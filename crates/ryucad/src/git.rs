@@ -197,15 +197,17 @@ impl Repo {
             let info = info.map_err(git_error)?;
             let commit = info.object().map_err(git_error)?;
             let tree = commit.tree().map_err(git_error)?;
+            // A shallow clone's oldest commits name parents it doesn't
+            // have: they read as first commits, as `git log` shows them.
             let parent = match info.parent_ids.first() {
-                Some(p) => Some(
+                Some(p) if self.repo.has_object(*p) => Some(
                     self.repo
                         .find_commit(*p)
                         .map_err(git_error)?
                         .tree()
                         .map_err(git_error)?,
                 ),
-                None => None,
+                _ => None,
             };
             let mine = self.entry(&tree, &path)?;
             let theirs = match &parent {
@@ -316,6 +318,38 @@ pub(crate) mod tests {
         let v = history(dir.path(), &files(dir.path()), None, 10).unwrap();
         assert_eq!(v["repository"], false);
         assert_eq!(v["warnings"][0]["code"], "not_a_git_repo");
+    }
+
+    #[test]
+    fn a_shallow_clone_has_the_history_it_holds() {
+        // CI checkouts and many agents' clones stop after a commit or so.
+        let dir = tempfile::tempdir().unwrap();
+        let full = dir.path().join("full");
+        std::fs::create_dir(&full).unwrap();
+        git(&full, &["init", "-q", "-b", "main"]);
+        crate::server::init(&full, None).unwrap();
+        git(&full, &["add", "."]);
+        git(&full, &["commit", "-q", "-m", "init"]);
+        let mut s = Session::open(&full).unwrap();
+        for part in ["a", "b"] {
+            call(&mut s, "part.create", serde_json::json!({"part": part})).unwrap();
+            git(&full, &["add", "."]);
+            git(&full, &["commit", "-q", "-m", &format!("part {part}")]);
+        }
+        let url = format!("file://{}", full.display());
+        git(
+            dir.path(),
+            &["clone", "-q", "--depth", "1", &url, "shallow"],
+        );
+        let root = dir.path().join("shallow");
+        let v = history(&root, &files(&root), None, 10).unwrap();
+        let subjects: Vec<&str> = v["commits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["subject"].as_str().unwrap())
+            .collect();
+        assert_eq!(subjects, ["part b"]);
     }
 
     #[test]
