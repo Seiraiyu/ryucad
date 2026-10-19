@@ -616,7 +616,17 @@ fn the_start_window_reopens_recent_projects_and_creates_new_ones() {
     // Other tests' projects are recent too: scroll to this one first.
     h.step();
     h.get_by_label("bracket").scroll_to_me();
-    h.run_steps(2);
+    // Scrolling is animated: click once it has stopped, or the click
+    // lands on a neighbour (another test's project, maybe deleted).
+    let mut at = h.get_by_label("bracket").rect();
+    loop {
+        h.step();
+        let now = h.get_by_label("bracket").rect();
+        if now == at {
+            break;
+        }
+        at = now;
+    }
     h.get_by_label("bracket").click();
     frames(&mut h, loaded);
     // A folder that isn't a project is offered as a new one.
