@@ -8,6 +8,7 @@
 //! very same bits.
 
 use crate::linalg::{Mat, cholesky_solve};
+use crate::loops::{self, Chain, Loop};
 use crate::report::{Free, State, diagnose};
 use crate::sketch::{Entity, Id, Sketch, SketchError};
 use crate::system::{Component, SOLVE_TOL, Scalar, System};
@@ -46,6 +47,10 @@ pub struct Report {
     pub redundant: Vec<Vec<Id>>,
     /// Minimal sets of constraints that can't all hold.
     pub conflicting: Vec<Vec<Id>>,
+    /// The closed loops of curves that aren't construction geometry.
+    pub loops: Vec<Loop>,
+    /// Curves that join but don't close.
+    pub open: Vec<Chain>,
 }
 
 /// Solves `sketch`: every constraint within [`SOLVE_TOL`] of holding,
@@ -70,6 +75,7 @@ pub fn solve(sketch: &Sketch) -> Result<Solved, SketchError> {
         iterations += steps;
     }
     let d = diagnose(&sys, &x, &held);
+    let (loops, open) = loops::find(sketch, &sys.group_of);
     let solved = write_back(sketch, &sys, &x);
     let changed = solved != *sketch;
     Ok(Solved {
@@ -83,6 +89,8 @@ pub fn solve(sketch: &Sketch) -> Result<Solved, SketchError> {
             free: d.free,
             redundant: d.redundant,
             conflicting: d.conflicting,
+            loops,
+            open,
         },
     })
 }

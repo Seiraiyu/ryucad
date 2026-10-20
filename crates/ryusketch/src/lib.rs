@@ -14,11 +14,13 @@
 
 mod equation;
 mod linalg;
+mod loops;
 mod report;
 mod sketch;
 mod solve;
 mod system;
 
+pub use loops::{Chain, Loop, Segment};
 pub use report::{Free, State};
 pub use sketch::{Constraint, Entity, Id, Sketch, SketchError};
 pub use solve::{Report, Solved, solve};
