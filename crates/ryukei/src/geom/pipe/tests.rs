@@ -337,3 +337,48 @@ fn derivative_bounds_hold() {
         );
     }
 }
+
+#[test]
+fn pcurves_on_pipes() {
+    // Round the cylinder, the ball touches it along an ellipse with the
+    // spine's own parameter: the spine scaled by 3 / (3 + R) towards the
+    // axis.
+    let p = round_cylinder();
+    let Curve::Ellipse(e) = p.spine() else {
+        unreachable!()
+    };
+    let k = 3.0 / (3.0 + R);
+    let f = e.frame();
+    let major = f.x().get() * e.major();
+    let squeezed = Vector3::new(major.x * k, major.y * k, major.z);
+    let frame = Frame::new(f.origin(), squeezed.cross(f.y().get()), squeezed).unwrap();
+    let contact = Curve::Ellipse(Ellipse::new(frame, squeezed.length(), e.minor() * k).unwrap());
+    for i in 0..8 {
+        let t = TAU * f64::from(i) / 8.0;
+        assert!(contact.point(t).distance(p.point(t, 0.0)) <= 1e-13, "{t}");
+    }
+    let surface = Surface::Pipe(Arc::new(p.clone()));
+    // An exact pcurve: the line θ = 0, by the spine's parameter.
+    let (c2, map) = crate::pcurve::exact(&surface, &contact, [0.5, 2.0], 1e-8).unwrap();
+    let q = c2.point(map[0] + map[1] * 1.3);
+    assert!((q.x - 1.3).abs() <= 1e-9 && q.y.abs() <= 1e-9, "{q:?}");
+    // A fitted one, certified through the pipe's first derivative bounds.
+    let (fitted, bound) = crate::intersect::fit_pcurve(&surface, &contact, [0.5, 2.0]).unwrap();
+    assert!(bound <= 10.0 * crate::tol::LINEAR_RESOLUTION, "{bound}");
+    for i in 0..=20 {
+        let t = 0.5 + 1.5 * f64::from(i) / 20.0;
+        let uv = fitted.point(t);
+        assert!(surface.point(uv.x, uv.y).distance(contact.point(t)) <= bound);
+    }
+    // First derivative bounds hold.
+    let (su, sv) = p.first_bound([[0.5, 2.0], [-1.0, 1.0]]);
+    for i in 0..=20 {
+        for j in 0..=20 {
+            let e = p.eval(
+                0.5 + 1.5 * f64::from(i) / 20.0,
+                -1.0 + 2.0 * f64::from(j) / 20.0,
+            );
+            assert!(e.du.length() <= su && e.dv.length() <= sv);
+        }
+    }
+}

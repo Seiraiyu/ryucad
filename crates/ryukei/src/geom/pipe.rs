@@ -462,6 +462,33 @@ impl Pipe {
         out
     }
 
+    /// Bounds on `|P_s|` and `|P_θ|` over a parameter box (`r` along
+    /// `θ`), from the jets' enclosures over pieces of it as
+    /// [`Pipe::derivative_bound`] takes them.
+    pub(crate) fn first_bound(&self, [rs, rt]: [[f64; 2]; 2]) -> (f64, f64) {
+        let [d0, d1] = self.spine.domain();
+        let rs = match self.spine.period() {
+            Some(_) => rs,
+            None => [rs[0].clamp(d0, d1), rs[1].clamp(d0, d1)],
+        };
+        let n = ((rs[1] - rs[0]) / ((d1 - d0) / 256.0))
+            .ceil()
+            .clamp(1.0, 256.0) as usize;
+        let mut su = 0.0f64;
+        for i in 0..n {
+            let at = |k: usize| rs[0] + (rs[1] - rs[0]) * k as f64 / n as f64;
+            let piece = [at(i), if i + 1 == n { rs[1] } else { at(i + 1) }];
+            let Some([p, _]) = self.jet_box([piece, rt]) else {
+                return (f64::INFINITY, f64::INFINITY);
+            };
+            let sum = p
+                .iter()
+                .fold(Interval::point(0.0), |acc, j| acc + j.d[0].square());
+            su = su.max(sum.sqrt().map_or(f64::INFINITY, Interval::hi));
+        }
+        (su, self.radius * (1.0 + 1e-12))
+    }
+
     fn bound_over(&self, rs: [f64; 2], rt: [f64; 2], depth: u32) -> SurfaceBound {
         let len = |f: &dyn Fn(&Jet<Interval>) -> Interval, v: &JVec<Interval>| {
             let sum = v
