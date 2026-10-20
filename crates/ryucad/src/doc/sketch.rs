@@ -665,7 +665,7 @@ fn constraint_from_json(v: &Value, at: &str, default: Unit, env: &Env) -> Result
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::doc::canonical;
     use crate::doc::files::Feature;

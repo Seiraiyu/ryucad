@@ -156,7 +156,7 @@ fn rebuild_section(golden: &mut Golden) {
     let result = rebuild_part(&part);
     assert_eq!(result.failed(), 0);
     for (_, b) in &result.features {
-        s.str(&b.as_ref().unwrap().body.dump());
+        s.str(&b.as_ref().unwrap().body().unwrap().body.dump());
     }
     s.str(&result.hash);
 }

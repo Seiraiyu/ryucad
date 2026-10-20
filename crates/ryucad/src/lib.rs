@@ -22,5 +22,6 @@ pub mod rebuild;
 pub mod render;
 pub mod server;
 pub mod session;
+pub mod sketch;
 pub mod units;
 pub mod view;

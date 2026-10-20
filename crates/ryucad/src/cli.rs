@@ -895,7 +895,7 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
 fn lift(cmd: &Command, mut result: Value, warnings: &mut Vec<String>) -> Value {
     if !matches!(
         cmd,
-        Command::History { .. } | Command::Config(ConfigCmd::Get { .. })
+        Command::History { .. } | Command::Config(ConfigCmd::Get { .. }) | Command::Rebuild { .. }
     ) {
         return result;
     }

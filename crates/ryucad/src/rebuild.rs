@@ -1,16 +1,19 @@
-//! Features to ryukei bodies. Each phase 0 feature is one primitive with
-//! its own body; they don't depend on each other, so they build in
-//! parallel and are collected in feature order.
+//! Features to ryukei bodies and solved sketches. Each primitive is its
+//! own body and each sketch is solved on its own; they don't depend on
+//! each other, so they build in parallel and are collected in feature
+//! order.
 
 use crate::doc::files::{Feature, Placement, Primitive, PrimitiveType};
 use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::error::{Code, Error, Result};
+use crate::sketch::Solved;
 use rayon::prelude::*;
 use ryukei::geom::{Frame, Point3, Rigid, Vector3};
 use ryukei::name::{Journal, OpKey};
 use ryukei::primitive;
 use ryukei::topo::Body;
+use std::sync::Arc;
 
 /// A feature's rebuilt body.
 #[derive(Clone, Debug)]
@@ -21,10 +24,46 @@ pub struct Built {
     pub hash: String,
 }
 
-/// A part's rebuild: each feature's body or error, in feature order.
+/// What a feature rebuilds to: a body, or a solved sketch.
+// A part holds a handful of these; boxing the body would only add a
+// pointer to every mesh and inspect.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug)]
+pub enum Output {
+    Body(Built),
+    Sketch(Arc<Solved>),
+}
+
+impl Output {
+    /// The body, if the feature makes one.
+    pub fn body(&self) -> Option<&Built> {
+        match self {
+            Output::Body(b) => Some(b),
+            Output::Sketch(_) => None,
+        }
+    }
+
+    /// The solved sketch, if the feature is one.
+    pub fn sketch(&self) -> Option<&Solved> {
+        match self {
+            Output::Sketch(s) => Some(s),
+            Output::Body(_) => None,
+        }
+    }
+
+    /// The body's or the sketch's hash: equal hashes, equal results.
+    pub fn hash(&self) -> &str {
+        match self {
+            Output::Body(b) => &b.hash,
+            Output::Sketch(s) => &s.hash,
+        }
+    }
+}
+
+/// A part's rebuild: each feature's output or error, in feature order.
 #[derive(Clone, Debug)]
 pub struct PartResult {
-    pub features: Vec<(Id, Result<Built>)>,
+    pub features: Vec<(Id, Result<Output>)>,
     /// Combines the features' hashes (or error codes) in order.
     pub hash: String,
 }
@@ -32,6 +71,26 @@ pub struct PartResult {
 impl PartResult {
     pub fn failed(&self) -> usize {
         self.features.iter().filter(|(_, r)| r.is_err()).count()
+    }
+
+    /// The feature's output, if it rebuilt.
+    pub fn output(&self, id: &Id) -> Option<&Output> {
+        self.features
+            .iter()
+            .find(|(f, _)| f == id)
+            .and_then(|(_, r)| r.as_ref().ok())
+    }
+
+    /// `sketch_stale` for each sketch rebuilt from positions solved in
+    /// memory.
+    pub fn warnings(&self) -> Vec<serde_json::Value> {
+        self.features
+            .iter()
+            .filter_map(|(id, r)| {
+                let s = r.as_ref().ok()?.sketch()?;
+                s.stale.then(|| crate::sketch::stale_warning(id))
+            })
+            .collect()
     }
 }
 
@@ -118,14 +177,22 @@ fn finish(id: &Id, ty: &str, (body, journal): (Body, Journal)) -> Result<Built> 
     })
 }
 
+/// Rebuilds one feature: solves a sketch, builds anything else.
+pub fn rebuild_feature(part: &Id, id: &Id, f: &Feature) -> Result<Output> {
+    match f {
+        Feature::Sketch(s) => crate::sketch::solve(id, s).map(|s| Output::Sketch(Arc::new(s))),
+        f => build_feature(part, id, f).map(Output::Body),
+    }
+}
+
 /// Rebuilds every listed feature of `part`, in parallel.
 pub fn rebuild_part(part: &Part) -> PartResult {
-    let features: Vec<(Id, Result<Built>)> = part
+    let features: Vec<(Id, Result<Output>)> = part
         .order()
         .par_iter()
         .map(|id| {
             let built = match &part.features[id] {
-                Ok(f) => build_feature(&part.id, id, f),
+                Ok(f) => rebuild_feature(&part.id, id, f),
                 Err(e) => Err(e.clone()),
             };
             (id.clone(), built)
@@ -134,7 +201,7 @@ pub fn rebuild_part(part: &Part) -> PartResult {
     let mut h = blake3::Hasher::new();
     for (id, r) in &features {
         let piece = match r {
-            Ok(b) => format!("{id} ok {}\n", b.hash),
+            Ok(b) => format!("{id} ok {}\n", b.hash()),
             Err(e) => format!("{id} err {}\n", serde_json::json!(e.code)),
         };
         h.update(piece.as_bytes());

@@ -878,16 +878,27 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
         .features
         .iter()
         .map(|(fid, b)| match b {
-            Ok(b) => {
+            Ok(crate::rebuild::Output::Body(b)) => {
                 let c = b.body.counts();
                 json!({"id": fid, "type": types.get(fid), "ok": true, "hash": b.hash,
                        "counts": {"faces": c.faces, "edges": c.edges, "vertices": c.vertices}})
             }
+            // A sketch makes no body: its state, not a body hash.
+            Ok(crate::rebuild::Output::Sketch(s)) => {
+                json!({"id": fid, "type": types.get(fid), "ok": true,
+                       "sketch": {"state": s.report.state_str(), "dof": s.report.dof,
+                                  "stale": s.stale}})
+            }
             Err(e) => json!({"id": fid, "type": types.get(fid), "ok": false, "error": e}),
         })
         .collect();
-    Ok(json!({"part": id, "revision": revision, "hash": r.hash,
-              "failed": r.failed(), "features": features}))
+    let mut v = json!({"part": id, "revision": revision, "hash": r.hash,
+                       "failed": r.failed(), "features": features});
+    let warnings = r.warnings();
+    if !warnings.is_empty() {
+        v["warnings"] = json!(warnings);
+    }
+    Ok(v)
 }
 
 /// Tells subscribers what changed since they were last told: the project
@@ -970,15 +981,22 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
         None => session.project().parts.keys().cloned().collect(),
     };
     let mut parts = Vec::new();
+    let mut warnings = Vec::new();
     let mut failed = 0;
     for id in ids {
         // A part whose list can't be read can't be rebuilt.
         order(session.project().part(&id)?)?;
-        let report = part_report(session, &id)?;
+        let mut report = part_report(session, &id)?;
         failed += report["failed"].as_u64().unwrap_or(0) as usize;
+        if let Some(Value::Array(w)) = report.as_object_mut().and_then(|o| o.remove("warnings")) {
+            warnings.extend(w);
+        }
         parts.push(report);
     }
-    let report = json!({ "parts": parts });
+    let mut report = json!({ "parts": parts });
+    if !warnings.is_empty() {
+        report["warnings"] = json!(warnings);
+    }
     if failed > 0 {
         // Every feature's status still reaches the agent, in the details.
         return Err(Error {
@@ -1012,12 +1030,22 @@ pub fn meshes(
         .unwrap_or(256) as usize
         * 1024
         * 1024;
+    // Sketches make no body, so they have no mesh.
+    let sketches: Vec<Id> = p
+        .features
+        .iter()
+        .filter(|(_, f)| f.as_ref().is_ok_and(|f| f.sketch().is_some()))
+        .map(|(id, _)| id.clone())
+        .collect();
     let built: Vec<(Id, Result<crate::rebuild::Built>)> = session
         .rebuilt(part)?
         .features
         .iter()
-        .filter(|(id, _)| only.is_none_or(|o| o == id))
-        .cloned()
+        .filter(|(id, _)| only.is_none_or(|o| o == id) && !sketches.contains(id))
+        .filter_map(|(id, r)| match r {
+            Ok(o) => Some((id.clone(), Ok(o.body()?.clone()))),
+            Err(e) => Some((id.clone(), Err(e.clone()))),
+        })
         .collect();
     let ok: Vec<(&Feature, &crate::rebuild::Built)> = built
         .iter()
@@ -1341,7 +1369,9 @@ fn inspect(
         if only.as_ref().is_some_and(|o| o != id) {
             continue;
         }
-        let Ok(built) = built else { continue };
+        let Some(built) = built.as_ref().ok().and_then(|o| o.body()) else {
+            continue;
+        };
         let f = &features
             .iter()
             .find(|(i, _)| i == id)
@@ -1800,6 +1830,76 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::NotFound);
+    }
+
+    /// Part `p` with parameter `width` and the rectangle sketch `s`,
+    /// written as a file.
+    pub(crate) fn with_sketch() -> (tempfile::TempDir, Session) {
+        let (dir, mut s) = with_part();
+        call(
+            &mut s,
+            "param.set",
+            json!({"part": "p", "parameters": {"width": "20 mm"}}),
+        )
+        .unwrap();
+        let root = dir.path();
+        write_json(
+            &root.join("parts/p/features/s.json"),
+            &crate::doc::sketch::tests::rectangle(),
+        )
+        .unwrap();
+        write_json(
+            &root.join("parts/p/part.json"),
+            &PartFile {
+                features: vec![Id::parse("s", "feature").unwrap()],
+            }
+            .to_json(),
+        )
+        .unwrap();
+        (dir, s)
+    }
+
+    #[test]
+    fn sketches_rebuild_to_their_state() {
+        let (_dir, mut s) = with_sketch();
+        let r = call(&mut s, "rebuild", json!({})).unwrap();
+        let f = &r["parts"][0]["features"][0];
+        assert_eq!(
+            (&f["type"], &f["ok"], &f["sketch"]),
+            (
+                &json!("sketch"),
+                &json!(true),
+                &json!({"state": "under", "dof": 4, "stale": false})
+            )
+        );
+        // A sketch has no body: no hash, no mesh, nothing to inspect.
+        assert!(f.get("hash").is_none());
+        assert!(r.get("warnings").is_none());
+        let m = call(&mut s, "mesh.get", json!({"part": "p"})).unwrap();
+        assert_eq!(m["bodies"], json!([]));
+        let i = call(&mut s, "inspect", json!({"part": "p"})).unwrap();
+        assert_eq!(i["bodies"], json!([]));
+        // A parameter that moves a dimension makes the sketch stale.
+        call(
+            &mut s,
+            "param.set",
+            json!({"part": "p", "parameters": {"width": "15 mm"}}),
+        )
+        .unwrap();
+        let r = call(&mut s, "rebuild", json!({})).unwrap();
+        assert_eq!(r["parts"][0]["features"][0]["sketch"]["stale"], true);
+        assert_eq!(r["warnings"][0]["code"], "sketch_stale");
+        assert_eq!(r["warnings"][0]["feature"], "s");
+        // One it can't solve fails alone.
+        call(
+            &mut s,
+            "param.set",
+            json!({"part": "p", "parameters": {"width": "50 mm"}}),
+        )
+        .unwrap();
+        let e = call(&mut s, "rebuild", json!({})).unwrap_err();
+        let f = &e.details["parts"][0]["features"][0];
+        assert_eq!(f["error"]["code"], "sketch_unsolved");
     }
 
     #[test]

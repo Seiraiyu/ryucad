@@ -80,7 +80,7 @@ fn other_features_dont_rename_a_feature() {
     let three = rebuild_part(&part(vec![("s", ball()), ("t", ball()), ("c", cyl())]));
     let get = |r: &ryucad::rebuild::PartResult, f: &str| {
         let (_, b) = r.features.iter().find(|(i, _)| i.as_str() == f).unwrap();
-        b.as_ref().unwrap().clone()
+        b.as_ref().unwrap().body().unwrap().clone()
     };
     assert_eq!(names(&get(&one, "c").body), names(&get(&three, "c").body));
     assert_eq!(get(&one, "c").hash, get(&three, "c").hash);

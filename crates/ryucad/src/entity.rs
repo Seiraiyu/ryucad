@@ -83,6 +83,11 @@ impl EntityRef {
                 .with("part", &self.part)
                 .with("feature", &self.feature));
         };
+        let Some(b) = b.body() else {
+            return Err(missing("the feature is a sketch, which has no body")
+                .with("part", &self.part)
+                .with("feature", &self.feature));
+        };
         let body = &b.body;
         let hit = |n: String| n == self.name;
         if body

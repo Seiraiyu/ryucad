@@ -80,6 +80,8 @@ pub enum Code {
     ParameterCycle,
     /// Refused: other features or parameters read what would go.
     HasDependents,
+    /// A sketch whose constraints can't all be made to hold.
+    SketchUnsolved,
 }
 
 impl Code {
