@@ -614,14 +614,21 @@ fn euler_section(golden: &mut Golden) {
         if let Some(step) = valid_step(&mut body, OpKey(1000 + n), &mut bytes) {
             s.str(step.op);
             for e in step.journal.events() {
-                let (tag, names) = match *e {
-                    Event::Created(n) => (0, vec![n]),
-                    Event::Deleted(n) => (1, vec![n]),
-                    Event::Modified(n) => (2, vec![n]),
-                    Event::Split { parent, children } => {
-                        (3, vec![parent, children[0], children[1]])
+                let (tag, names) = match e {
+                    Event::Created(n) => (0, vec![*n]),
+                    Event::Deleted(n) => (1, vec![*n]),
+                    Event::Modified(n) => (2, vec![*n]),
+                    Event::Split { parent, children } => (
+                        3,
+                        [*parent]
+                            .into_iter()
+                            .chain(children.iter().copied())
+                            .collect(),
+                    ),
+                    Event::Merged { parents, child } => {
+                        (4, parents.iter().copied().chain([*child]).collect())
                     }
-                    Event::Merged { parents, child } => (4, vec![parents[0], parents[1], child]),
+                    Event::Placed { from, to, .. } => (5, vec![*from, *to]),
                 };
                 s.u64(tag);
                 for n in names {

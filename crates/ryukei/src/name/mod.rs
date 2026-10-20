@@ -24,6 +24,12 @@ pub struct Name(u128);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OpKey(pub u128);
 
+/// The caller's key for one tool of a boolean, unique within the call.
+/// A tool's entities are renamed from the boolean's key and this one, so
+/// copies of one body placed as several tools get distinct names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ToolKey(pub u128);
+
 impl OpKey {
     /// The key for an operation identified by `bytes`: SipHash-2-4-128 of
     /// them under an all-zero key. ryucad derives a feature's key this way
@@ -52,6 +58,8 @@ pub enum Role {
     Vertex,
     /// An entity of an extrude or a revolve.
     Sweep(SweepRole),
+    /// An entity of a boolean.
+    Boolean(BooleanRole),
 }
 
 /// The faces of the primitives.
@@ -99,6 +107,26 @@ pub enum SweepRole {
     Apex,
 }
 
+/// The entities of a boolean (see [`crate::boolean`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BooleanRole {
+    /// A stand-in for a tool's key; the parent of its placed entities.
+    Tool,
+    /// A tool's entity, renamed: its parents are the tool and its own
+    /// name.
+    Placed,
+    /// A piece of a face split into several kept pieces.
+    Piece,
+    /// A piece of an edge cut into several kept pieces.
+    Cut,
+    /// An edge where two faces meet.
+    IntersectionEdge,
+    /// A vertex where faces meet.
+    IntersectionVertex,
+    /// Faces, edges or vertices merged after the boolean.
+    Merged,
+}
+
 impl Role {
     /// The role's fixed two-byte encoding inside a name.
     fn code(self) -> [u8; 2] {
@@ -112,6 +140,7 @@ impl Role {
             Self::Edge => [7, 0],
             Self::Vertex => [8, 0],
             Self::Sweep(r) => [9, r as u8],
+            Self::Boolean(r) => [10, r as u8],
         }
     }
 }
@@ -151,6 +180,15 @@ impl fmt::Display for Role {
                 SweepRole::Vertex => "sweep-vertex",
                 SweepRole::Apex => "apex",
             }),
+            Self::Boolean(r) => f.write_str(match r {
+                BooleanRole::Tool => "tool",
+                BooleanRole::Placed => "placed",
+                BooleanRole::Piece => "piece",
+                BooleanRole::Cut => "cut",
+                BooleanRole::IntersectionEdge => "intersection-edge",
+                BooleanRole::IntersectionVertex => "intersection-vertex",
+                BooleanRole::Merged => "boolean-merged",
+            }),
         }
     }
 }
@@ -179,7 +217,8 @@ impl Name {
         self.0
     }
 
-    /// A caller's 128-bit key as a name, to serve as a parent.
+    /// A caller's 128-bit key (or an ordinal) as a name, to serve as a
+    /// parent.
     pub(crate) fn from_u128(x: u128) -> Self {
         Self(x)
     }
@@ -228,6 +267,8 @@ mod tests {
         assert_eq!(format!("{n}"), "57796150f72b59a1a8966c739eed89b2");
         let m = Name::derive(OpKey(7), Role::Part(1), &[n]);
         assert_eq!(format!("{m:?}"), "Name(230a95de0113977e565e67b9356eeaf5)");
+        let b = Name::derive(OpKey(7), Role::Boolean(BooleanRole::Piece), &[n]);
+        assert_eq!(format!("{b}"), "38fb7cdc49fe3ca21b443fcf995d25c0");
     }
 
     #[test]
@@ -295,6 +336,17 @@ mod tests {
             SweepRole::Apex,
         ] {
             roles.push(Role::Sweep(r));
+        }
+        for r in [
+            BooleanRole::Tool,
+            BooleanRole::Placed,
+            BooleanRole::Piece,
+            BooleanRole::Cut,
+            BooleanRole::IntersectionEdge,
+            BooleanRole::IntersectionVertex,
+            BooleanRole::Merged,
+        ] {
+            roles.push(Role::Boolean(r));
         }
         let mut codes: Vec<[u8; 2]> = roles.iter().map(|r| r.code()).collect();
         codes.sort_unstable();

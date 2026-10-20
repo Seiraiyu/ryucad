@@ -1,29 +1,41 @@
-use super::Name;
+use super::{Name, ToolKey};
 
 /// One change to a named entity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Created(Name),
     Deleted(Name),
     /// The geometry changed but the identity did not.
     Modified(Name),
-    /// The parent's name retired; the children are in the operator's
-    /// documented order.
+    /// The parent's name retired. An Euler operator's children are in its
+    /// documented order; a boolean's are sorted.
     Split {
         parent: Name,
-        children: [Name; 2],
+        children: Vec<Name>,
     },
-    /// Both parents' names retired. The parents are sorted.
+    /// Every parent's name retired. The parents are sorted.
     Merged {
-        parents: [Name; 2],
+        parents: Vec<Name>,
         child: Name,
+    },
+    /// A boolean's tool entity: its own name `from` became `to`, derived
+    /// from the boolean's key and the tool's.
+    Placed {
+        tool: ToolKey,
+        from: Name,
+        to: Name,
     },
 }
 
 impl Event {
-    /// A merge, with its parents sorted.
+    /// A merge of two, with its parents sorted.
     pub fn merged(a: Name, b: Name, child: Name) -> Self {
-        let parents = if a <= b { [a, b] } else { [b, a] };
+        Self::merged_all(vec![a, b], child)
+    }
+
+    /// A merge of any number, with its parents sorted.
+    pub fn merged_all(mut parents: Vec<Name>, child: Name) -> Self {
+        parents.sort();
         Self::Merged { parents, child }
     }
 }
@@ -81,11 +93,36 @@ mod tests {
             &[
                 Event::Created(a),
                 Event::Merged {
-                    parents: [lo, hi],
+                    parents: vec![lo, hi],
                     child: c
                 },
                 Event::Deleted(c),
             ]
         );
+    }
+
+    #[test]
+    fn merges_of_many_are_sorted_and_tools_are_recorded() {
+        let names: Vec<Name> = (1..=4)
+            .map(|k| Name::derive(OpKey(k), Role::NewEdge, &[]))
+            .collect();
+        let child = Name::derive(OpKey(9), Role::Merged, &names);
+        let mut shuffled = names.clone();
+        shuffled.reverse();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(
+            Event::merged_all(shuffled, child),
+            Event::Merged {
+                parents: sorted,
+                child
+            }
+        );
+        let placed = Event::Placed {
+            tool: ToolKey(7),
+            from: names[0],
+            to: names[1],
+        };
+        assert_ne!(placed, Event::Created(names[1]));
     }
 }

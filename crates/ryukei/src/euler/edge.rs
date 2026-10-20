@@ -247,7 +247,7 @@ pub fn semv(
     let mut journal = Journal::new();
     journal.push(Event::Split {
         parent,
-        children: [part0, part1],
+        children: vec![part0, part1],
     });
     journal.push(Event::Created(vertex_name));
     finish(body);
@@ -481,7 +481,7 @@ mod tests {
             j.events()[0],
             Event::Split {
                 parent,
-                children: [part(0), part(1)]
+                children: vec![part(0), part(1)]
             }
         );
         let e = b.edge(sq.edge).unwrap();

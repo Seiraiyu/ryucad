@@ -139,7 +139,7 @@ pub fn mef(
     let mut journal = Journal::new();
     journal.push(Event::Split {
         parent,
-        children: [part0, part1],
+        children: vec![part0, part1],
     });
     journal.push(Event::Created(edge_name));
     finish(body);
@@ -317,7 +317,7 @@ mod tests {
             j.events()[0],
             Event::Split {
                 parent,
-                children: [part(0), part(1)]
+                children: vec![part(0), part(1)]
             }
         );
         assert_eq!(b.name_of(EntityId::Face(m.faces[0])), Some(part(0)));
