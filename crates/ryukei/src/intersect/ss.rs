@@ -13,6 +13,7 @@ use super::Failure;
 use super::coincide::coincident;
 use super::fit::{fit_branch, fit_pcurve};
 use super::implicit::Implicit;
+use super::pipe_trace;
 use super::ss_exact;
 use super::ss_trace::{Traced, rank, trace};
 use crate::geom::{Box3, Curve, Curve2, Point3, Surface};
@@ -101,11 +102,23 @@ pub fn surface_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<Surfac
             }
         }
     }
-    let mut branches = Vec::with_capacity(chains.len());
     let mut points = topo.points;
-    for traced in &chains {
-        // A branch whose points all lie within ten resolutions of its
-        // first is a point by rule.
+    let branches = fitted(&chains, order, swapped, &mut points)?;
+    Ok(SurfaceHit::Meet { branches, points })
+}
+
+/// Traced branches fitted with their pcurves on the surfaces in `order`,
+/// given back in the caller's order (`swapped` when that is the
+/// reverse). A branch whose points all lie within ten resolutions of its
+/// first is a point by rule, added to `points`.
+fn fitted(
+    chains: &[Traced],
+    order: [&Surface; 2],
+    swapped: bool,
+    points: &mut Vec<Point3>,
+) -> Result<Vec<Branch>, Failure> {
+    let mut branches = Vec::with_capacity(chains.len());
+    for traced in chains {
         let first = traced.points[0];
         if traced
             .points
@@ -131,6 +144,32 @@ pub fn surface_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<Surfac
             pcurves: if swapped { [p1, p0] } else { [p0, p1] },
         });
     }
+    Ok(branches)
+}
+
+/// Where a pipe meets an analytic surface inside `region`: one of `a`
+/// and `b` must be a pipe and the other analytic (else `Unsupported`).
+/// The branches are traced in the pipe's parameter plane (see
+/// [`super::pipe_trace`]), cut where they pass a pole or an apex of the
+/// analytic surface, and fitted with a pcurve on each, in the order the
+/// surfaces were given. A tangency along a curve (a fillet against its
+/// own support) is `Uncertain`.
+pub fn pipe_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
+    let (pipe, other, swapped) = match (a, b) {
+        (Surface::Pipe(p), o) if Implicit::of(o).is_some() => (p, o, false),
+        (o, Surface::Pipe(p)) if Implicit::of(o).is_some() => (p, o, true),
+        _ => return Err(Failure::Unsupported),
+    };
+    let ps = if swapped { b } else { a };
+    let topo = pipe_trace::trace(pipe, other, region)?;
+    let mut chains = topo.branches;
+    for pole in poles(other) {
+        if ps.distance(pole) <= LINEAR_RESOLUTION && other.distance(pole) <= LINEAR_RESOLUTION {
+            chains = cut_at(chains, pole);
+        }
+    }
+    let mut points = topo.points;
+    let branches = fitted(&chains, [ps, other], swapped, &mut points)?;
     Ok(SurfaceHit::Meet { branches, points })
 }
 

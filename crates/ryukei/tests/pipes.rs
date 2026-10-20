@@ -201,3 +201,144 @@ fn a_pipe_face_box_holds_its_face() {
     let whole = surface.bounds();
     assert!(fb.max().x - fb.min().x < 0.7 * (whole.max().x - whole.min().x));
 }
+
+mod meeting {
+    use super::*;
+    use ryukei::geom::{Box3, Cone, Sphere};
+    use ryukei::intersect::{Failure, SurfaceHit, pipe_surface};
+    use ryukei::tol::LINEAR_RESOLUTION;
+
+    /// The wavy tube rolling on the plane z = 0.
+    fn tube() -> Surface {
+        let k = KnotVector::clamped(3, &[0.0, 1.0, 2.0], &[4, 1, 4]).unwrap();
+        let pts = vec![
+            Point3::new(0.0, 0.0, R),
+            Point3::new(1.0, 1.0, R),
+            Point3::new(2.0, -0.5, R),
+            Point3::new(3.0, 0.5, R),
+            Point3::new(4.0, 0.0, R),
+        ];
+        let spine = Curve::Nurbs(Arc::new(NurbsCurve::new(k, pts, None).unwrap()));
+        Surface::Pipe(Arc::new(
+            Pipe::new(spine, R, Surface::Plane(Plane::new(Frame::WORLD))).unwrap(),
+        ))
+    }
+
+    fn region() -> Box3 {
+        Box3::new(
+            Point3::new(-10.0, -10.0, -10.0),
+            Point3::new(10.0, 10.0, 10.0),
+        )
+    }
+
+    fn frame(origin: Point3, z: Vector3) -> Frame {
+        let x = if z.x.abs() < 0.9 {
+            Vector3::new(1.0, 0.0, 0.0)
+        } else {
+            Vector3::new(0.0, 1.0, 0.0)
+        };
+        Frame::new(origin, z, x).unwrap()
+    }
+
+    /// Every branch lies within its tolerance of both surfaces, its
+    /// pcurves within it of the branch, and both orders agree.
+    fn meets(pipe: &Surface, other: &Surface) -> usize {
+        let SurfaceHit::Meet { branches, .. } = pipe_surface(pipe, other, &region()).unwrap()
+        else {
+            panic!("a pipe is never coincident")
+        };
+        let SurfaceHit::Meet {
+            branches: swapped, ..
+        } = pipe_surface(other, pipe, &region()).unwrap()
+        else {
+            panic!("a pipe is never coincident")
+        };
+        assert_eq!(branches.len(), swapped.len());
+        for (b, s) in branches.iter().zip(&swapped) {
+            assert_eq!(b.curve, s.curve);
+            assert_eq!(b.pcurves[0], s.pcurves[1]);
+            assert!(b.tolerance <= 10.0 * LINEAR_RESOLUTION, "{}", b.tolerance);
+            let [r0, r1] = b.range;
+            for i in 0..=64 {
+                let t = r0 + (r1 - r0) * f64::from(i) / 64.0;
+                let p = b.curve.point(t);
+                assert!(pipe.distance(p) <= b.tolerance, "off the pipe at {t}");
+                assert!(other.distance(p) <= b.tolerance, "off the other at {t}");
+                for (k, surface) in [pipe, other].into_iter().enumerate() {
+                    let (c, map) = &b.pcurves[k];
+                    let uv = c.point(map[0] + map[1] * t);
+                    assert!(surface.point(uv.x, uv.y).distance(p) <= b.tolerance);
+                }
+            }
+        }
+        branches.len()
+    }
+
+    #[test]
+    fn planes_spheres_cylinders_and_cones() {
+        let pipe = tube();
+        let plane = |o: Point3, z: Vector3| Surface::Plane(Plane::new(frame(o, z)));
+        // Across the tube: one loop. Along it, through the spine: two
+        // branches end to end.
+        assert_eq!(
+            meets(
+                &pipe,
+                &plane(Point3::new(1.5, 0.0, 0.0), Vector3::new(1.0, 0.0, 0.0))
+            ),
+            1
+        );
+        assert_eq!(
+            meets(
+                &pipe,
+                &plane(Point3::new(0.0, 0.0, R), Vector3::new(0.0, 0.0, 1.0))
+            ),
+            2
+        );
+        let c = match &pipe {
+            Surface::Pipe(p) => p.spine().point(0.8),
+            _ => unreachable!(),
+        };
+        let sphere =
+            Surface::Sphere(Sphere::new(frame(c, Vector3::new(0.0, 0.0, 1.0)), 0.4).unwrap());
+        assert_eq!(meets(&pipe, &sphere), 2);
+        let cylinder = Surface::Cylinder(
+            Cylinder::new(
+                frame(Point3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 0.3, 1.0)),
+                0.35,
+            )
+            .unwrap(),
+        );
+        assert!(meets(&pipe, &cylinder) >= 1);
+        let cone = Surface::Cone(
+            Cone::new(
+                frame(Point3::new(2.5, 0.2, -1.0), Vector3::new(0.1, 0.0, 1.0)),
+                0.1,
+                0.3,
+            )
+            .unwrap(),
+        );
+        assert!(meets(&pipe, &cone) >= 1);
+    }
+
+    #[test]
+    fn refusals() {
+        let pipe = tube();
+        // The anchor touches the tube along a whole curve.
+        let anchor = Surface::Plane(Plane::new(Frame::WORLD));
+        assert_eq!(
+            pipe_surface(&pipe, &anchor, &region()),
+            Err(Failure::Uncertain)
+        );
+        // Two pipes, or a pipe and a NURBS, are not supported.
+        assert_eq!(
+            pipe_surface(&pipe, &pipe, &region()),
+            Err(Failure::Unsupported)
+        );
+        let (n, _) = anchor.to_nurbs([[-1.0, 1.0], [-1.0, 1.0]]).unwrap();
+        let n = Surface::Nurbs(Arc::new(n));
+        assert_eq!(
+            pipe_surface(&pipe, &n, &region()),
+            Err(Failure::Unsupported)
+        );
+    }
+}

@@ -4,9 +4,10 @@
 //! where, and on which side it comes and goes) rests on interval
 //! arithmetic and exact predicates. Coincidence and tangency are decided
 //! by explicit tolerance rules, and what stays uncertain is reported as
-//! [`Failure::Uncertain`], never guessed. Only the analytic surfaces
-//! (plane, cylinder, cone, sphere, torus) are intersected; a surface with
-//! no implicit form is [`Failure::Unsupported`].
+//! [`Failure::Uncertain`], never guessed. The analytic surfaces (plane,
+//! cylinder, cone, sphere, torus) are intersected with each other, and a
+//! pipe with any of them ([`pipe_surface`]); a surface with no implicit
+//! form is otherwise [`Failure::Unsupported`].
 
 pub(crate) mod broad;
 mod coincide;
@@ -16,7 +17,6 @@ mod fit;
 mod implicit;
 mod inface;
 mod pipe;
-#[allow(dead_code)] // Used by pipe_surface, from Task 12 on.
 mod pipe_trace;
 mod solid;
 mod ss;
@@ -31,7 +31,7 @@ pub(crate) use fit::fit_pcurve;
 pub use inface::{Place, point_in_face};
 pub(crate) use solid::point_in_faces;
 pub use solid::{Inclusion, point_in_body};
-pub use ss::{Branch, SurfaceHit, surface_surface};
+pub use ss::{Branch, SurfaceHit, pipe_surface, surface_surface};
 
 /// Rounding slack added to every certified distance: the surfaces and
 /// curves evaluate in floating point, and their frames are orthonormal
