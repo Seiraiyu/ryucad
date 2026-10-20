@@ -1,0 +1,20 @@
+{
+  "kindformat": 0,
+  "kind": "ryucad.f\ue71a\ue700071a\ue7eaT\f00000000000000a1e70\ue7eaT\f\ue71a\ue70002000\ue7e7eaT\f\ue71a\ue70000000e71a\ue7eaT\f0000000000000000e71a\ue7eaT\f00000000000000a1e707e7eaT\f\ue71a\ue7000f0000000000000000e71a\ue7eaT\f00000\ue7e7e000000\ue7e7eaT\f\ue71a\ue70000000e71a\ue7eaT\f0000000000000000e71a\ue7eaT\f00000000000000a1e707e7eaT\f\ue71a\ue7000f0000000000000000e71a\ue7eaT\f0000000000000eature",
+  "praams": {
+    "radius": "1.5 m"
+  },
+  "plement": {
+    "os": "0.5 m"
+  },
+  "placement": {
+    "origin": [
+      "0 mm",
+      "0 mm",
+       0
+    ]
+  , "z": [
+        ]
+  },
+  "type": "sphere"
+}

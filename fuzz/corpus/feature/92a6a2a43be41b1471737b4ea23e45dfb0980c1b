@@ -1,0 +1,26 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "params": {
+    "x": "40 mm",
+    "y": "2u\n!u\nfiu\n!u\naqiufiu\n!uau\na1Nfnau\na0Nfiu\n!u\nfiu\n!u\naqiu\n\nc0ki!u\nd00000{/\ryuc000000.2t\"t3: re\t\"t2uc000000 mm",
+    "z": "30 mm"
+  },
+  "placement": {
+    "origin": [
+      "0 mm",
+      "0 mm",
+      "8 mm"
+    ],
+    "x": [
+      1,      1,
+      0
+    ],
+    "z": [
+      0,
+      1,
+      1111111111111111111111111111111111111111111111111111111111111111111111111111111
+    ]
+  },
+  "type": "box"
+}

@@ -1,0 +1,10 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "params": {
+    "x": "96mm",
+    "y":   777777777777777777777777777
+    
+  },
+  "type": "box"
+}

@@ -1,0 +1,28 @@
+{
+  "fot": 1,
+  "kind": {
+    "majokind": {
+    "major_radius": "10 m",
+    "minor_radius": [
+      0,
+          "5 mm",
+      "0 mm"
+    ],
+    "x": [
+ 1,
+   21
+    ]
+  },
+  "tr_radius": "10 mm",
+    "minor_radius": [
+     80,
+          "5 mm",
+      "0 mm"
+    ],
+    "x": [
+      1,
+   21
+    ]
+  },
+  "type": "torus"
+}

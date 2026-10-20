@@ -1,0 +1,22 @@
+{
+  "fot": 1,
+  "kind": {
+    "maj\b0t\b\b0tokind": {
+    "major_radius": "10 mm",
+      "x": [
+ 1,
+   21
+    ]
+  },
+  "tr_radius": "10 mm",
+    "minor_radius": [
+      0,
+          "m"
+    ],
+    "x": [
+      1,
+   21
+    ]
+  },
+  "type": "torus"
+}

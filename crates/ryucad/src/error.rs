@@ -71,6 +71,15 @@ pub enum Code {
     RepairConflict,
     /// `ryucad open` found no desktop app to start (a CLI-only install).
     AppNotInstalled,
+    /// An expression names a parameter the part doesn't have.
+    UnknownParameter,
+    /// An expression mixes what can't be mixed (a length plus an angle),
+    /// or gives the wrong kind (an angle where a length goes).
+    UnitMismatch,
+    /// Parameters that read each other in a circle.
+    ParameterCycle,
+    /// Refused: other features or parameters read what would go.
+    HasDependents,
 }
 
 impl Code {
@@ -151,6 +160,10 @@ mod tests {
         assert_eq!(Code::AmbiguousParticipant.exit_code(), 1);
         assert_eq!(Code::AppNotInstalled.exit_code(), 4);
         assert_eq!(Code::ProjectDamaged.exit_code(), 3);
+        assert_eq!(Code::UnknownParameter.exit_code(), 1);
+        assert_eq!(Code::UnitMismatch.exit_code(), 1);
+        assert_eq!(Code::ParameterCycle.exit_code(), 1);
+        assert_eq!(Code::HasDependents.exit_code(), 1);
     }
 
     #[test]

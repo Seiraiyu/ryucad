@@ -7,10 +7,11 @@
 //! it works on a project that can't be opened.
 
 use crate::doc::canonical;
-use crate::doc::files::{Feature, Manifest, PartFile};
+use crate::doc::files::{Feature, Manifest, ParametersFile, PartFile};
 use crate::doc::id::Id;
 use crate::doc::project::{MANIFEST, write_atomic};
 use crate::error::{Code, Error, Result};
+use crate::expr::Env;
 use crate::git::Repo;
 use crate::units::Unit;
 use serde_json::{Value, json};
@@ -360,10 +361,32 @@ fn diagnose_part(root: &Path, part: &str, unit: Unit, issues: &mut Vec<Issue>) {
         root,
         &dir,
         &entries,
-        |n, d| (n == "part.json" && !d) || (n == "features" && d),
-        &["part"],
+        |n, d| (n == "part.json" && !d) || (n == "parameters.json" && !d) || (n == "features" && d),
+        &["part", "parameters"],
         issues,
     );
+    let params = format!("{dir}/parameters.json");
+    // Features are checked against the parameters; when those can't be
+    // read, that is reported once, not again for every feature.
+    let env = match read(root, &params) {
+        Read::Missing => Env::empty(),
+        Read::Bad(i) => {
+            issues.push(i);
+            Env::broken(Error::new(Code::InvalidJson, "unreadable").with("parameters", &params))
+        }
+        Read::Json(v, canonical) => match ParametersFile::from_json(&v) {
+            Ok(p) => {
+                if !canonical {
+                    issues.push(non_canonical(&params));
+                }
+                p.env()
+            }
+            Err(e) => {
+                issues.push(document_issue(&params, &e));
+                Env::broken(e.with("parameters", &params))
+            }
+        },
+    };
     let fdir = format!("{dir}/features");
     let files = names(&root.join(&fdir));
     let feature_ids: Vec<&str> = files
@@ -390,9 +413,10 @@ fn diagnose_part(root: &Path, part: &str, unit: Unit, issues: &mut Vec<Issue>) {
         match read(root, &rel) {
             Read::Missing => {}
             Read::Bad(i) => issues.push(i),
-            Read::Json(v, canonical) => match Feature::from_json(&v, unit) {
+            Read::Json(v, canonical) => match Feature::from_json(&v, unit, &env) {
                 Ok(_) if !canonical => issues.push(non_canonical(&rel)),
                 Ok(_) => {}
+                Err(e) if e.details.get("parameters").is_some() => {}
                 Err(e) => issues.push(document_issue(&rel, &e)),
             },
         }
@@ -933,6 +957,37 @@ pub(crate) mod tests {
         let dir = healthy();
         assert_eq!(codes(dir.path()), []);
         assert_eq!(report(dir.path()).unwrap()["healthy"], true);
+    }
+
+    #[test]
+    fn parameters_are_checked_and_read() {
+        let dir = healthy();
+        let r = dir.path();
+        let params = "parts/p/parameters.json";
+        let a = "parts/p/features/a.json";
+        let sphere = fs::read_to_string(r.join(a)).unwrap();
+        let reads = sphere
+            .replace("\"1 mm\"", "\"r * 2\"")
+            .replace("\"format\": 1", "\"format\": 2");
+        w(r, a, &reads);
+        // Unknown until the parameter exists.
+        assert_eq!(codes(r), [("invalid_document", vec![a.to_owned()])]);
+        let good = canonical::to_string(&json!({"format": 1, "kind": "ryucad.parameters",
+                                                "parameters": {"r": "1 mm"}}));
+        w(r, params, &good);
+        assert_eq!(codes(r), []);
+        w(r, params, &good.replace('\n', "\r\n"));
+        assert_eq!(codes(r), [("non_canonical", vec![params.to_owned()])]);
+        // A broken parameters file is reported once, not for each reader.
+        w(r, params, "{");
+        assert_eq!(codes(r), [("invalid_json", vec![params.to_owned()])]);
+        w(r, params, &good.replace("\"r\"", "\"R\""));
+        assert_eq!(codes(r), [("invalid_document", vec![params.to_owned()])]);
+        w(r, "parts/p/parameters (1).json", &good);
+        assert!(codes(r).contains(&(
+            "sync_conflict_copy",
+            vec!["parts/p/parameters (1).json".to_owned(), params.to_owned()]
+        )));
     }
 
     #[test]

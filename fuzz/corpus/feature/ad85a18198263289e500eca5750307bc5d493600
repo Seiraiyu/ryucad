@@ -1,0 +1,22 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "params": {
+    "x": "10 mm",
+    "y": "20nau\na0Nfau\n!0Nfnau\na0Nfiu\n!u\nfiu\n!u\naqiufiu\n!uau\na1Nfnau\na0Nfiu\n!u\nfiu\n!u\naqiu\n\nc0ki!u\ndNnau\na0Nfiu\n!u\nfiu\n!u\naqiufiu\n!uau\na1Nfnau\na0Nfiu\n!u\nfiu\n!u\naqiu\n\nc0ki!u\nd mm",
+    "z": "30 mm"
+  },
+  "placement": {
+    "origin": [
+      "0 mm55555155400,90.777777777777577700,90.77777000000077)))))))))7777e7]7))))))))))))))))))700,90.777",
+      "5 m]m",
+      "0 mm"
+    ],
+    "x": [
+      0,
+      0,
+      1
+    ]
+  },
+  "type": "box"
+}

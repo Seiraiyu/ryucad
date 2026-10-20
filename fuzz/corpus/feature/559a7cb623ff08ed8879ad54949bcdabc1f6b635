@@ -1,0 +1,18 @@
+{
+  "fokind": "e",
+  "params": {
+    "x": "10 mm",
+    "y": "20 mm",
+    "z": "30 mm"
+  },
+  "placement": {
+    "orn": [
+      "0 mm",
+      "5 mm",
+      "0 mm"
+    ],
+    "x": [
+ ]
+  },
+  "type": "box"
+}

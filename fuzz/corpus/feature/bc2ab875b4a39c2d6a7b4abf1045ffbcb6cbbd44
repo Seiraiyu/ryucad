@@ -1,0 +1,11 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "params": {
+    "x": "ryucad.prjoect10 mm",
+    "y": "20"
+  },
+  "placement": {
+    },
+  "type": "box"
+}

@@ -55,6 +55,10 @@ enum Command {
     /// Add, edit, delete, move, list or show features.
     #[command(subcommand)]
     Feature(FeatureCmd),
+    /// List, set, delete or rename a part's parameters: named values, each an expression
+    /// such as "3 mm" or "wall * 2", that features' quantities can read.
+    #[command(subcommand)]
+    Param(ParamCmd),
     /// Rebuild one part, or all of them.
     Rebuild { part: Option<String> },
     /// List a part's bodies, faces, edges and vertices by stable name.
@@ -385,6 +389,35 @@ enum FeatureCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum ParamCmd {
+    /// Every parameter: as written, its value, and what reads it.
+    List { part: String },
+    /// Set or add parameters: wall="3 mm" hole="wall * 2" n=4.
+    Set {
+        part: String,
+        #[arg(value_name = "NAME=EXPRESSION", value_parser = param, required = true)]
+        values: Vec<(String, String)>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete a parameter that nothing reads.
+    Delete {
+        part: String,
+        name: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Rename a parameter, and every expression that reads it.
+    Rename {
+        part: String,
+        from: String,
+        to: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
 #[derive(Args)]
 struct Expect {
     /// Fail with `conflict` unless the part is still at this revision.
@@ -464,11 +497,26 @@ fn camera_arg(
 fn param(s: &str) -> core::result::Result<(String, String), String> {
     s.split_once('=')
         .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
-        .ok_or_else(|| "expected NAME=QUANTITY".to_owned())
+        .ok_or_else(|| "expected NAME=VALUE".to_owned())
 }
 
+/// Three comma-separated values; commas inside parentheses belong to an
+/// expression (`max(a, b),0,0`).
 fn triple(s: &str) -> core::result::Result<[String; 3], String> {
-    let parts: Vec<String> = s.split(',').map(|p| p.trim().to_owned()).collect();
+    let mut parts = Vec::new();
+    let (mut depth, mut start) = (0i32, 0);
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(s[start..i].trim().to_owned());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(s[start..].trim().to_owned());
     parts
         .try_into()
         .map_err(|_| "expected three values: X,Y,Z".to_owned())
@@ -584,6 +632,32 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Feature(FeatureCmd::Show { part, id }) => Request::FeatureShow {
             part: part.clone(),
             id: id.clone(),
+        },
+        Command::Param(ParamCmd::List { part }) => Request::ParamList { part: part.clone() },
+        Command::Param(ParamCmd::Set {
+            part,
+            values,
+            expect,
+        }) => Request::ParamSet {
+            part: part.clone(),
+            parameters: values.iter().map(|(k, v)| (k.clone(), json!(v))).collect(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Param(ParamCmd::Delete { part, name, expect }) => Request::ParamDelete {
+            part: part.clone(),
+            name: name.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Param(ParamCmd::Rename {
+            part,
+            from,
+            to,
+            expect,
+        }) => Request::ParamRename {
+            part: part.clone(),
+            from: from.clone(),
+            to: to.clone(),
+            expected_revision: expect.revision.clone(),
         },
         Command::Rebuild { part } => Request::Rebuild { part: part.clone() },
         Command::Inspect {

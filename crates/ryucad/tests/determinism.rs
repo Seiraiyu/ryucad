@@ -1,6 +1,6 @@
 //! Bit-exact determinism of everything ryucad computes from files. Every CI
 //! platform and CPU level must reproduce `tests/golden/rebuild.txt`:
-//! rebuilt bodies, display meshes, and the pixels of renders. After
+//! expressions, rebuilt bodies, display meshes, and the pixels of renders. After
 //! a deliberate change, regenerate with
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
@@ -30,6 +30,57 @@ fn units_section(golden: &mut Golden) {
     for _ in 0..4096 {
         let text = format!("{} {}", decimal(&mut g), unit(&mut g));
         s.f64(Quantity::parse(&text, Unit::Mm).unwrap().meters());
+    }
+}
+
+/// A random expression over `len`, `ang` and `n`, with every operator
+/// and function, `depth` levels deep.
+fn expression(g: &mut Lcg, depth: u32) -> String {
+    const LEAVES: [&str; 6] = ["len", "ang", "n", "pi", "2.5 mm", "7 deg"];
+    const FUNCTIONS: [&str; 11] = [
+        "sin", "cos", "tan", "asin", "acos", "atan", "sqrt", "abs", "floor", "ceil", "round",
+    ];
+    if depth == 0 {
+        return match g.next_u64() % 3 {
+            0 => decimal(g),
+            _ => LEAVES[(g.next_u64() % 6) as usize].to_owned(),
+        };
+    }
+    let a = expression(g, depth - 1);
+    match g.next_u64() % 8 {
+        0 => format!("{a} + {}", expression(g, depth - 1)),
+        1 => format!("{a} - {}", expression(g, depth - 1)),
+        2 => format!("{a} * {}", expression(g, depth - 1)),
+        3 => format!("{a} / ({})", expression(g, depth - 1)),
+        4 => format!("({a})^{}", g.next_u64() % 4),
+        5 => format!("{}({a})", FUNCTIONS[(g.next_u64() % 11) as usize]),
+        6 => format!("atan2({a}, {})", expression(g, depth - 1)),
+        _ => format!("max({a}, {})", expression(g, depth - 1)),
+    }
+}
+
+/// Expressions evaluated, values or the code that refused them. Most mix
+/// kinds and fail; the rest pin the arithmetic and `ryukei::math`.
+fn expressions_section(golden: &mut Golden) {
+    use ryucad::expr::{Expr, Val, no_parameters};
+    use ryucad::units::Dim;
+    let lookup = |name: &str| match name {
+        "len" => Ok(Val::new(0.0125, Dim::LENGTH)),
+        "ang" => Ok(Val::new(0.375, Dim::ANGLE)),
+        "n" => Ok(Val::new(3.0, Dim::NUMBER)),
+        _ => no_parameters(name),
+    };
+    let mut s = golden.section("expressions");
+    let mut g = Lcg::new(0x6578_7072);
+    for i in 0..4096 {
+        let text = expression(&mut g, 1 + i % 4);
+        match Expr::parse(&text).unwrap().eval(&lookup) {
+            Ok(v) => {
+                s.f64(v.x);
+                s.str(&v.dim.name());
+            }
+            Err(e) => s.str(&serde_json::json!(e.code).to_string()),
+        }
     }
 }
 
@@ -96,6 +147,9 @@ fn rebuild_section(golden: &mut Golden) {
     let part = Part {
         id: Id::parse("golden", "part").unwrap(),
         file: Ok(PartFile { features: order }),
+        parameters: None,
+        env: ryucad::expr::Env::empty(),
+        uses: Default::default(),
         features,
         revision: String::new(),
     };
@@ -228,6 +282,7 @@ fn determinism() {
         "/tests/golden/rebuild.txt"
     ));
     units_section(&mut golden);
+    expressions_section(&mut golden);
     placement_section(&mut golden);
     rebuild_section(&mut golden);
     display_section(&mut golden);

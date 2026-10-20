@@ -12,6 +12,7 @@ libfuzzer-sys = "0.4"
 ryucad = { path = "../crates/ryucad" }
 ryukei = { path = "../crates/ryukei" }
 ryukei-testkit = { path = "../crates/ryukei-testkit" }
+ryusketch = { path = "../crates/ryusketch" }
 
 [[bin]]
 name = "predicates"
@@ -79,6 +80,20 @@ bench = false
 [[bin]]
 name = "intersect"
 path = "fuzz_targets/intersect.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "expr"
+path = "fuzz_targets/expr.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sketch"
+path = "fuzz_targets/sketch.rs"
 test = false
 doc = false
 bench = false

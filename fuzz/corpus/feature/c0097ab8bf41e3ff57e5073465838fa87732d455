@@ -1,0 +1,11 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "params": {
+    "height": "10 mm",
+  "z": [
+         0,
+      0
+    ]  },
+  "type": "cmat"
+}

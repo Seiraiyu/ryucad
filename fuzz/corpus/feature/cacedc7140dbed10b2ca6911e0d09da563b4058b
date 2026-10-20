@@ -1,0 +1,11 @@
+{
+  "format": 1,
+  "kind": "ryucad.faeutre",
+  "params": {
+    "`eight": "10 mm",
+    "radius": "5 mm",
+ "top_raigin": [
+     0
+    ]
+  },  "t": "cone"
+}

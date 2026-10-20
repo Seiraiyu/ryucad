@@ -1,0 +1,10 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "params": {
+    "rin":[
+       2
+    ]
+  },
+  "type": "sphere"
+}

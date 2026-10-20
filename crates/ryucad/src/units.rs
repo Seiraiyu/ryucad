@@ -1,11 +1,13 @@
 //! Quantities at the boundary. Files and the CLI carry lengths as strings
-//! with units (`"10 mm"`); ryukei sees SI meters only.
+//! with units (`"10 mm"`); ryukei sees SI meters only. Angles (`deg`,
+//! `rad`) and plain numbers appear in expressions ([`crate::expr`]).
 //!
 //! The conversion is the nearest f64 to the decimal, times the unit's f64
 //! factor, rounded once more. That is the same on every platform; it does
 //! not promise the nearest f64 to the exact length.
 
 use crate::error::{Code, Error, Result};
+use crate::expr::{Expr, Val, no_parameters};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fmt;
@@ -64,35 +66,172 @@ impl fmt::Display for Unit {
     }
 }
 
-/// A length as written, `<number> <unit>`, and its value in meters.
+/// What a value measures, as powers of length and angle: a length is
+/// `{length: 1, angle: 0}`, an area `{2, 0}`, a plain number `{0, 0}`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Dim {
+    pub length: i8,
+    pub angle: i8,
+}
+
+impl Dim {
+    pub const NUMBER: Dim = Dim {
+        length: 0,
+        angle: 0,
+    };
+    pub const LENGTH: Dim = Dim {
+        length: 1,
+        angle: 0,
+    };
+    pub const ANGLE: Dim = Dim {
+        length: 0,
+        angle: 1,
+    };
+
+    /// The dimension of a product; `None` past the powers anyone needs.
+    pub fn times(self, o: Dim) -> Option<Dim> {
+        Dim::new(
+            self.length as i32 + o.length as i32,
+            self.angle as i32 + o.angle as i32,
+        )
+    }
+
+    /// The dimension of a quotient.
+    pub fn per(self, o: Dim) -> Option<Dim> {
+        Dim::new(
+            self.length as i32 - o.length as i32,
+            self.angle as i32 - o.angle as i32,
+        )
+    }
+
+    /// The dimension of `self` to the power `n`.
+    pub fn pow(self, n: i32) -> Option<Dim> {
+        Dim::new(self.length as i32 * n, self.angle as i32 * n)
+    }
+
+    /// The square root's dimension, when every power is even.
+    pub fn sqrt(self) -> Option<Dim> {
+        (self.length % 2 == 0 && self.angle % 2 == 0).then_some(Dim {
+            length: self.length / 2,
+            angle: self.angle / 2,
+        })
+    }
+
+    fn new(length: i32, angle: i32) -> Option<Dim> {
+        const MAX: i32 = 16;
+        (length.abs() <= MAX && angle.abs() <= MAX).then_some(Dim {
+            length: length as i8,
+            angle: angle as i8,
+        })
+    }
+
+    /// How people read it: `length`, `angle`, `number`, `length^2`,
+    /// `length*angle^-1`.
+    pub fn name(self) -> String {
+        let part = |name: &str, p: i8| match p {
+            0 => None,
+            1 => Some(name.to_owned()),
+            p => Some(format!("{name}^{p}")),
+        };
+        let parts: Vec<String> = [part("length", self.length), part("angle", self.angle)]
+            .into_iter()
+            .flatten()
+            .collect();
+        if parts.is_empty() {
+            "number".to_owned()
+        } else {
+            parts.join("*")
+        }
+    }
+
+    /// The key output gives the SI value under: `m`, `rad`, `n`, or `si`
+    /// for anything else.
+    pub fn key(self) -> &'static str {
+        match self {
+            Dim::LENGTH => "m",
+            Dim::ANGLE => "rad",
+            Dim::NUMBER => "n",
+            _ => "si",
+        }
+    }
+}
+
+/// Radians per degree, as an f64 constant: the same bits everywhere.
+pub const DEG: f64 = core::f64::consts::PI / 180.0;
+
+/// A unit a literal may carry: its factor to SI and what it measures.
+/// Lengths are the [`Unit`]s; angles are `deg` and `rad`.
+pub fn literal_unit(s: &str) -> Option<(f64, Dim)> {
+    match s {
+        "deg" => Some((DEG, Dim::ANGLE)),
+        "rad" => Some((1.0, Dim::ANGLE)),
+        _ => Unit::parse(s).map(|u| (u.factor(), Dim::LENGTH)),
+    }
+}
+
+/// Every unit name, for messages and reserved names.
+pub const UNIT_NAMES: [&str; 8] = ["m", "cm", "mm", "um", "in", "ft", "deg", "rad"];
+
+/// A length as written and its value in meters. Usually a literal,
+/// `<number> <unit>`; it may be any [`Expr`] that gives a length, such as
+/// `2 * wall + 3 mm`, whose value depends on the part's parameters.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Quantity {
-    number: String,
-    unit: Unit,
+    text: String,
     meters: f64,
+    literal: bool,
 }
 
 impl Quantity {
     /// Parses `"12.5 mm"`, `"12.5mm"` or a bare `"12.5"` (which takes
     /// `default`). The number is decimal, optionally signed, with an
-    /// optional exponent: `1`, `-0.5`, `.5`, `2.`, `1e-3`.
+    /// optional exponent: `1`, `-0.5`, `.5`, `2.`, `1e-3`. Anything else is
+    /// an expression with no parameters to read.
     pub fn parse(s: &str, default: Unit) -> Result<Quantity> {
-        let bad = |why: &str| {
-            Error::new(Code::InvalidQuantity, format!("bad quantity {s:?}: {why}")).with("value", s)
-        };
+        Quantity::eval(s, default, &no_parameters)
+    }
+
+    /// [`parse`](Self::parse), with `lookup` giving the parameters an
+    /// expression reads. Only a string that is nothing but a number takes
+    /// `default`; inside an expression a bare number is a plain number.
+    pub fn eval(s: &str, default: Unit, lookup: &dyn Fn(&str) -> Result<Val>) -> Result<Quantity> {
         let t = s.trim();
         let end = number_len(t);
-        if end == 0 {
-            return Err(bad("expected a number"));
+        if end > 0 {
+            let (number, rest) = t.split_at(end);
+            let rest = rest.trim_start();
+            let unit = if rest.is_empty() {
+                Some(default)
+            } else {
+                Unit::parse(rest)
+            };
+            if let Some(unit) = unit {
+                return Quantity::literal(s, number, unit);
+            }
         }
-        let (number, rest) = t.split_at(end);
-        let rest = rest.trim_start();
-        let unit = if rest.is_empty() {
-            default
-        } else {
-            Unit::parse(rest).ok_or_else(|| {
-                bad("unknown unit; use m, cm, mm, um, in or ft").with("unit", rest)
-            })?
+        let e = Expr::parse(t)?;
+        let v = e.eval(lookup)?;
+        if v.dim != Dim::LENGTH {
+            return Err(Error::new(
+                Code::UnitMismatch,
+                format!("{t} is a {}; a length goes here", v.dim.name()),
+            )
+            .with("value", t)
+            .with("at", e.text())
+            .with("kind", v.dim.name()));
+        }
+        Ok(Quantity {
+            text: e.text().to_owned(),
+            meters: v.x,
+            literal: e.is_literal(),
+        })
+    }
+
+    /// The phase 0 form, exactly: the nearest f64 to the decimal, times the
+    /// unit's factor.
+    fn literal(s: &str, number: &str, unit: Unit) -> Result<Quantity> {
+        let bad = |why: &str| {
+            Error::new(Code::InvalidQuantity, format!("bad quantity {s:?}: {why}")).with("value", s)
         };
         let value: f64 = number.parse().map_err(|_| bad("expected a number"))?;
         let meters = value * unit.factor();
@@ -100,17 +239,26 @@ impl Quantity {
             return Err(bad("too large"));
         }
         Ok(Quantity {
-            number: number.to_owned(),
-            unit,
+            text: format!("{number} {unit}"),
             meters,
+            literal: true,
         })
     }
 
     /// A quantity from JSON: a string as [`parse`](Self::parse), or a bare
     /// number in the default unit.
     pub fn from_json(v: &Value, default: Unit) -> Result<Quantity> {
+        Quantity::from_json_in(v, default, &no_parameters)
+    }
+
+    /// [`from_json`](Self::from_json), reading parameters through `lookup`.
+    pub fn from_json_in(
+        v: &Value,
+        default: Unit,
+        lookup: &dyn Fn(&str) -> Result<Val>,
+    ) -> Result<Quantity> {
         match v {
-            Value::String(s) => Quantity::parse(s, default),
+            Value::String(s) => Quantity::eval(s, default, lookup),
             Value::Number(n) => Quantity::parse(&n.to_string(), default),
             _ => Err(Error::new(
                 Code::InvalidQuantity,
@@ -124,24 +272,32 @@ impl Quantity {
         self.meters
     }
 
-    pub fn unit(&self) -> Unit {
-        self.unit
+    /// Whether it is a literal (`3 mm`, `-0.5 in`) rather than an
+    /// expression.
+    pub fn is_literal(&self) -> bool {
+        self.literal
     }
 
-    /// The canonical text, `<number> <unit>`.
+    /// The canonical text: `<number> <unit>` for a literal, else the
+    /// expression with canonical spacing.
     pub fn text(&self) -> String {
-        format!("{} {}", self.number, self.unit)
+        self.text.clone()
     }
 
-    /// How output reports a quantity: as written, and in meters.
+    /// How output reports a quantity: as written, and in meters; `expr`
+    /// marks one that isn't a literal.
     pub fn report(&self) -> Value {
-        json!({"value": self.text(), "m": self.meters})
+        let mut v = json!({"value": self.text, "m": self.meters});
+        if !self.literal {
+            v["expr"] = json!(true);
+        }
+        v
     }
 }
 
 impl fmt::Display for Quantity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}", self.number, self.unit)
+        f.write_str(&self.text)
     }
 }
 
@@ -227,20 +383,49 @@ mod tests {
 
     #[test]
     fn rejects_garbage() {
-        for s in [
-            "",
-            "mm",
-            "abc",
-            "1 furlong",
-            "1e",
-            "1..2 mm",
-            "- 1 mm",
-            "1 mm mm",
-            "1e999 m",
-        ] {
+        for s in ["", "mm", "1 furlong", "1e", "1..2 mm", "1 mm mm", "1e999 m"] {
             let e = Quantity::parse(s, Unit::Mm).unwrap_err();
             assert_eq!(e.code, Code::InvalidQuantity, "{s}");
         }
+        // A name is an expression reading a parameter that isn't there.
+        let e = Quantity::parse("abc", Unit::Mm).unwrap_err();
+        assert_eq!(e.code, Code::UnknownParameter);
+    }
+
+    #[test]
+    fn expressions_give_lengths() {
+        let wall = |name: &str| match name {
+            "wall" => Ok(Val::new(0.003, Dim::LENGTH)),
+            _ => no_parameters(name),
+        };
+        let x = Quantity::eval("2*wall+1mm", Unit::In, &wall).unwrap();
+        assert_eq!(
+            (x.text(), x.meters()),
+            ("2 * wall + 1 mm".to_owned(), 0.007)
+        );
+        assert!(!x.is_literal());
+        assert_eq!(
+            x.report(),
+            json!({"value": "2 * wall + 1 mm", "m": 0.007, "expr": true})
+        );
+        // A sign with a space is an expression now, and still a literal.
+        let x = q("- 1 mm");
+        assert_eq!(
+            (x.text(), x.meters(), x.is_literal()),
+            ("-1 mm".to_owned(), -0.001, true)
+        );
+        // Bare numbers inside an expression are plain numbers.
+        let e = Quantity::eval("wall + 3", Unit::Mm, &wall).unwrap_err();
+        assert_eq!(e.code, Code::UnitMismatch);
+        for s in ["15 deg", "2", "wall * wall"] {
+            let e = Quantity::eval(&format!("({s})"), Unit::Mm, &wall).unwrap_err();
+            assert_eq!(e.code, Code::UnitMismatch, "{s}");
+        }
+        let e = Quantity::parse("15 deg", Unit::Mm).unwrap_err();
+        assert_eq!(
+            (e.code, e.details["kind"].as_str()),
+            (Code::UnitMismatch, Some("angle"))
+        );
     }
 
     #[test]
@@ -256,6 +441,43 @@ mod tests {
     #[test]
     fn report_gives_both_forms() {
         assert_eq!(q("10 mm").report(), json!({"value": "10 mm", "m": 0.01}));
+    }
+
+    #[test]
+    fn dimensions_combine() {
+        let area = Dim::LENGTH.times(Dim::LENGTH).unwrap();
+        assert_eq!(area.name(), "length^2");
+        assert_eq!(area.sqrt(), Some(Dim::LENGTH));
+        assert_eq!(Dim::LENGTH.sqrt(), None);
+        assert_eq!(area.per(Dim::LENGTH), Some(Dim::LENGTH));
+        assert_eq!(
+            Dim::LENGTH.per(Dim::ANGLE).unwrap().name(),
+            "length*angle^-1"
+        );
+        assert_eq!(Dim::NUMBER.name(), "number");
+        assert_eq!(Dim::ANGLE.pow(3).unwrap().name(), "angle^3");
+        assert_eq!(Dim::LENGTH.pow(17), None);
+        assert_eq!(
+            [
+                Dim::LENGTH.key(),
+                Dim::ANGLE.key(),
+                Dim::NUMBER.key(),
+                area.key()
+            ],
+            ["m", "rad", "n", "si"]
+        );
+    }
+
+    #[test]
+    fn literal_units() {
+        assert_eq!(literal_unit("mm"), Some((0.001, Dim::LENGTH)));
+        assert_eq!(literal_unit("rad"), Some((1.0, Dim::ANGLE)));
+        assert_eq!(literal_unit("deg"), Some((DEG, Dim::ANGLE)));
+        assert_eq!(DEG * 180.0, core::f64::consts::PI);
+        assert_eq!(literal_unit("furlong"), None);
+        for u in UNIT_NAMES {
+            assert!(literal_unit(u).is_some(), "{u}");
+        }
     }
 
     #[test]

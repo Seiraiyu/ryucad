@@ -1546,6 +1546,7 @@ dependencies = [
  "ryucad",
  "ryukei",
  "ryukei-testkit",
+ "ryusketch",
 ]
 
 [[package]]
@@ -1555,6 +1556,13 @@ dependencies = [
  "num-bigint",
  "num-rational",
  "num-traits",
+ "ryukei",
+]
+
+[[package]]
+name = "ryusketch"
+version = "0.0.0"
+dependencies = [
  "ryukei",
 ]
 

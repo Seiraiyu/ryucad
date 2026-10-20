@@ -4129,6 +4129,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryusketch"
+version = "0.0.0"
+dependencies = [
+ "divan",
+ "proptest",
+ "ryukei",
+ "ryukei-testkit",
+]
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

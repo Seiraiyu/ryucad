@@ -1,0 +1,9 @@
+{ "format": 1,
+  "kind": "ryucad.feature",
+  "params": {  "origin": [
+   1,
+      0
+  ]
+  },
+  "type": "cone"
+}

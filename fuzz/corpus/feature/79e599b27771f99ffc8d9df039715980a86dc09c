@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "kindki": {
+    "height": "10 mm",
+    "radius": "5 mm"
+  },
+  "placemen": {
+    "origin": [
+     "0 mm"
+    ]
+  },
+  "type": "cylinder"
+}
