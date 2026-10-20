@@ -686,6 +686,38 @@ pub fn get(session: &Session, part: &str, sketch: &str) -> Result<Value> {
     Ok(v)
 }
 
+/// Points in model space that show where a sketch entity is: a point, a
+/// curve's points, and a circle's four quadrant points.
+pub fn entity_points(solved: &Solved, id: &Id) -> Vec<[f64; 3]> {
+    let s = &solved.sketch;
+    let m = |p: &Id| match s.entities.get(p).map(|e| &e.geometry) {
+        Some(Geometry::Point { m }) => *m,
+        _ => unreachable!("validated"),
+    };
+    let flat: Vec<[f64; 2]> = match s.entities.get(id).map(|e| &e.geometry) {
+        None => Vec::new(),
+        Some(Geometry::Point { m }) => vec![*m],
+        Some(Geometry::Circle { center, r_m }) => {
+            let c = m(center);
+            vec![
+                [c[0] + r_m, c[1]],
+                [c[0], c[1] + r_m],
+                [c[0] - r_m, c[1]],
+                [c[0], c[1] - r_m],
+            ]
+        }
+        Some(g) => g.points().into_iter().map(|(_, p)| m(p)).collect(),
+    };
+    flat.into_iter()
+        .map(|[x, y]| {
+            let p = solved
+                .frame
+                .apply_point(ryukei::geom::Point3::new(x, y, 0.0));
+            [p.x, p.y, p.z]
+        })
+        .collect()
+}
+
 /// Each loaded sketch's dimension values, as bits: what a parameter change
 /// can make stale.
 pub fn dimension_values(part: &Part) -> BTreeMap<Id, Vec<u64>> {

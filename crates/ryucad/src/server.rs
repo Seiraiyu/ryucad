@@ -1167,6 +1167,18 @@ pub fn model_points(session: &mut Session, refs: &[EntityRef]) -> Result<Vec<[f6
         }
     }
     for r in refs {
+        // A sketch entity shows by its points.
+        if let Some(sk) = session
+            .rebuilt(&r.part)?
+            .output(&r.feature)
+            .and_then(|o| o.sketch())
+        {
+            let id = Id::parse(&r.name, "entity")?;
+            for [x, y, z] in crate::sketch::entity_points(sk, &id) {
+                grow(&ryukei::geom::Point3::new(x, y, z));
+            }
+            continue;
+        }
         for (_, m) in meshes(session, &r.part, Some(&r.feature), coarse)? {
             let Ok(m) = m else { continue };
             let Ok(mesh) = &m.mesh.mesh else { continue };
@@ -2202,6 +2214,74 @@ pub(crate) mod tests {
         );
         let list = call_live(&mut s, &mut live, Some(&id), "participant.list", json!({})).unwrap();
         assert_eq!(list, r["session"]);
+    }
+
+    #[test]
+    fn sketch_entities_are_selected_highlighted_and_framed() {
+        let (_dir, mut s) = with_sketch();
+        let mut live = Live::new();
+        let human = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "session.hello",
+            json!({"kind": "human"}),
+        )
+        .unwrap()["participant"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let me = Some(human.as_str());
+        let r = call_live(
+            &mut s,
+            &mut live,
+            me,
+            "selection.set",
+            json!({"entities": ["p/s/l1", "p/s/p3"]}),
+        )
+        .unwrap();
+        assert_eq!(r["selection"], json!(["p/s/l1", "p/s/p3"]));
+        call_live(
+            &mut s,
+            &mut live,
+            me,
+            "highlight.set",
+            json!({"entities": ["p/s/l2"], "style": "pending"}),
+        )
+        .unwrap();
+        let e = call_live(
+            &mut s,
+            &mut live,
+            me,
+            "selection.set",
+            json!({"entities": ["p/s/l9"]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+        // Framing a line takes its two ends.
+        let r = call_live(
+            &mut s,
+            &mut live,
+            me,
+            "camera.set",
+            json!({"fit": ["p/s/l1"]}),
+        )
+        .unwrap();
+        assert!(r["camera"]["target"][0].as_f64().unwrap() > 0.0);
+        // An entity that goes drops out of the selection.
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [{"op": "remove", "id": "l3"},
+                                                            {"op": "remove", "id": "p3"},
+                                                            {"op": "remove", "id": "l2"},
+                                                            {"op": "remove", "id": "l5"}]}),
+        )
+        .unwrap();
+        let r = call_live(&mut s, &mut live, None, "selection.get", json!({})).unwrap();
+        assert_eq!(r["selection"], json!(["p/s/l1"]));
     }
 
     #[test]

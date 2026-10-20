@@ -1,7 +1,8 @@
 //! Entity references: one text form for a face, edge or vertex everywhere
 //! (selections, highlights, renders, the app's "copy reference"):
 //! `<part>/<feature>/<name>`, with `<name>` the 32 hex digits of the
-//! entity's stable name, as `inspect` prints it.
+//! entity's stable name, as `inspect` prints it. In a sketch, which has no
+//! body, the third part is a sketch entity's ID: `<part>/<sketch>/<entity>`.
 
 use crate::doc::id::Id;
 use crate::error::{Code, Error, Result};
@@ -13,7 +14,7 @@ use std::fmt;
 pub struct EntityRef {
     pub part: Id,
     pub feature: Id,
-    /// 32 lowercase hex digits.
+    /// 32 lowercase hex digits, or a sketch entity's ID.
     pub name: String,
 }
 
@@ -35,12 +36,23 @@ impl EntityKind {
     }
 }
 
+/// What a reference resolved to: an entity of a feature's body, or a
+/// sketch's entity (`point`, `line`, `arc` or `circle`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    Body(EntityKind),
+    Sketch(&'static str),
+}
+
 impl EntityRef {
     pub fn parse(s: &str) -> Result<EntityRef> {
         let bad = |why: &str| {
             Error::new(
                 Code::InvalidParam,
-                format!("bad entity reference {s:?}: {why}; use <part>/<feature>/<name>"),
+                format!(
+                    "bad entity reference {s:?}: {why}; use <part>/<feature>/<name> \
+                     or <part>/<sketch>/<entity>"
+                ),
             )
             .with("entity", s)
         };
@@ -50,12 +62,12 @@ impl EntityRef {
         else {
             return Err(bad("expected three parts separated by /"));
         };
-        let hex = name.len() == 32
-            && name
-                .bytes()
-                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c));
-        if !hex {
-            return Err(bad("the name is 32 lowercase hex digits"));
+        // A stable name's hex digits are a valid ID too: which it is
+        // depends on whether the feature is a sketch.
+        if Id::parse(name, "entity").is_err() {
+            return Err(bad(
+                "the name is 32 lowercase hex digits, or a sketch entity's ID",
+            ));
         }
         Ok(EntityRef {
             part: Id::parse(part, "part")?,
@@ -66,7 +78,7 @@ impl EntityRef {
 
     /// What the reference names in the current rebuild, or `not_found` with
     /// how far it resolved. Never a nearest match.
-    pub fn resolve(&self, session: &mut Session) -> Result<EntityKind> {
+    pub fn resolve(&self, session: &mut Session) -> Result<Target> {
         let missing = |what: &str| {
             Error::new(Code::NotFound, format!("{self} doesn't resolve: {what}"))
                 .with("entity", self.to_string())
@@ -83,10 +95,19 @@ impl EntityRef {
                 .with("part", &self.part)
                 .with("feature", &self.feature));
         };
+        if let Some(sk) = b.sketch() {
+            let e = Id::parse(&self.name, "entity")
+                .ok()
+                .and_then(|id| sk.sketch.entities.get(&id));
+            return match e {
+                Some(e) => Ok(Target::Sketch(e.geometry.type_name())),
+                None => Err(missing("no such entity in the sketch")
+                    .with("part", &self.part)
+                    .with("feature", &self.feature)),
+            };
+        }
         let Some(b) = b.body() else {
-            return Err(missing("the feature is a sketch, which has no body")
-                .with("part", &self.part)
-                .with("feature", &self.feature));
+            unreachable!("a feature is a body or a sketch")
         };
         let body = &b.body;
         let hit = |n: String| n == self.name;
@@ -94,19 +115,19 @@ impl EntityRef {
             .faces()
             .any(|f| hit(body.face(f).expect("live").name.to_string()))
         {
-            return Ok(EntityKind::Face);
+            return Ok(Target::Body(EntityKind::Face));
         }
         if body
             .edges()
             .any(|e| hit(body.edge(e).expect("live").name.to_string()))
         {
-            return Ok(EntityKind::Edge);
+            return Ok(Target::Body(EntityKind::Edge));
         }
         if body
             .vertices()
             .any(|v| hit(body.vertex(v).expect("live").name.to_string()))
         {
-            return Ok(EntityKind::Vertex);
+            return Ok(Target::Body(EntityKind::Vertex));
         }
         Err(missing("no such entity in the feature's body")
             .with("part", &self.part)
@@ -162,11 +183,13 @@ mod tests {
         assert_eq!((r.part.as_str(), r.feature.as_str()), ("p", "b"));
         assert_eq!(r.to_string(), format!("p/b/{NAME}"));
         assert_eq!(json!(r), json!(format!("p/b/{NAME}")));
+        // A sketch entity's ID.
+        assert_eq!(EntityRef::parse("p/s/l1").unwrap().name, "l1");
         for bad in [
             "p/b",
             "p/b/c/d",
             &format!("p/b/{}", NAME.to_uppercase()),
-            &format!("p/b/{}", &NAME[1..]),
+            "p/b/-x",
         ] {
             assert_eq!(
                 EntityRef::parse(bad).unwrap_err().code,
@@ -196,7 +219,7 @@ mod tests {
         ] {
             let name = body[key][0]["name"].as_str().unwrap();
             let r = EntityRef::parse(&format!("p/b/{name}")).unwrap();
-            assert_eq!(r.resolve(&mut s).unwrap(), kind);
+            assert_eq!(r.resolve(&mut s).unwrap(), Target::Body(kind));
         }
         for missing in [
             format!("q/b/{NAME}"),
