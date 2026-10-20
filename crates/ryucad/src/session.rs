@@ -9,7 +9,7 @@
 use crate::doc::id::Id;
 use crate::doc::project::{MANIFEST, Project};
 use crate::error::{Error, Result};
-use crate::rebuild::{PartResult, rebuild_part};
+use crate::rebuild::{Cache, PartResult, rebuild_part_with};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
@@ -32,6 +32,9 @@ pub struct Session {
     stamps: BTreeMap<PathBuf, Stamp>,
     stamped_at: SystemTime,
     results: BTreeMap<Id, (String, PartResult)>,
+    /// Each part's results by feature, keyed by their inputs' hash: a
+    /// rebuild reuses every feature whose inputs haven't changed.
+    cache: BTreeMap<Id, Cache>,
     /// What each name of a feature's body was, by part and feature, from
     /// every build this session has seen: its kind and, for a sweep, where
     /// it came from. Names are only added, so a reference whose name has
@@ -49,6 +52,7 @@ impl Session {
             stamps: BTreeMap::new(),
             stamped_at: SystemTime::now(),
             results: BTreeMap::new(),
+            cache: BTreeMap::new(),
             known: BTreeMap::new(),
             meshes: crate::mesh::Cache::default(),
         };
@@ -118,6 +122,7 @@ impl Session {
             let live = &self.project.parts;
             self.results
                 .retain(|id, (rev, _)| live.get(id).is_some_and(|p| &p.revision == rev));
+            self.cache.retain(|id, _| live.contains_key(id));
         }
         Ok(changes)
     }
@@ -129,6 +134,7 @@ impl Session {
         let live = &self.project.parts;
         self.results
             .retain(|id, (rev, _)| live.get(id).is_some_and(|p| &p.revision == rev));
+        self.cache.retain(|id, _| live.contains_key(id));
         Ok(())
     }
 
@@ -140,7 +146,9 @@ impl Session {
             .get(part)
             .is_some_and(|(rev, _)| *rev == p.revision);
         if !fresh {
-            let mut result = rebuild_part(p);
+            let empty = Cache::new();
+            let (mut result, cache) = rebuild_part_with(p, self.cache.get(part).unwrap_or(&empty));
+            self.cache.insert(part.clone(), cache);
             let revision = p.revision.clone();
             for (_, r) in &mut result.features {
                 if let Err(e) = r {
@@ -264,6 +272,7 @@ mod tests {
     use super::*;
     use crate::doc::files::{Feature, Manifest, PartFile, Placement, Primitive, PrimitiveType};
     use crate::doc::project::{feature_path, part_path, write_json};
+    use crate::rebuild::rebuild_part;
     use crate::units::{Quantity, Unit};
 
     fn id(s: &str) -> Id {
@@ -394,6 +403,83 @@ mod tests {
         .unwrap();
         s.refresh().unwrap();
         assert_ne!(s.rebuilt(&id("p")).unwrap().hash, h1);
+    }
+
+    #[test]
+    fn only_what_a_change_touches_is_rebuilt() {
+        use crate::server::tests::{call, fresh};
+        use serde_json::json;
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "param.set",
+            json!({"part": "p", "parameters": {"r": "2 mm", "w": "20 mm"}}),
+        )
+        .unwrap();
+        for f in [
+            json!({"type": "box", "id": "b", "params": {"x": "w", "y": 10, "z": 5}}),
+            json!({"type": "sphere", "id": "c", "params": {"radius": "r"}}),
+            json!({"type": "sketch", "id": "s"}),
+        ] {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(&mut s, "feature.add", f).unwrap();
+        }
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": crate::sketch::tests::rectangle_ops()}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "id": "e", "sketch": "s",
+                   "extent": {"length": "w"}}),
+        )
+        .unwrap();
+        let built = |s: &mut Session| -> Vec<String> {
+            let full = rebuild_part(s.project().part(&id("p")).unwrap()).hash;
+            let r = s.rebuilt(&id("p")).unwrap();
+            // Reusing changes nothing.
+            assert_eq!(r.hash, full);
+            r.built.iter().map(|i| i.to_string()).collect()
+        };
+        built(&mut s);
+        let edit = |s: &mut Session, method: &str, params: serde_json::Value| {
+            let mut params = params;
+            params["part"] = json!("p");
+            call(s, method, params).unwrap();
+            built(s)
+        };
+        assert_eq!(
+            edit(
+                &mut s,
+                "feature.edit",
+                json!({"id": "c", "params": {"radius": 3}})
+            ),
+            ["c"]
+        );
+        // w is read by the box and the extrude, not the sketch.
+        assert_eq!(
+            edit(&mut s, "param.set", json!({"parameters": {"w": "25 mm"}})),
+            ["b", "e"]
+        );
+        // The sketch changes, and so does the extrude made from it.
+        assert_eq!(
+            edit(
+                &mut s,
+                "sketch.edit",
+                json!({"sketch": "s", "ops": [{"op": "set", "id": "width", "value": "30 mm"}]}),
+            ),
+            ["s", "e"]
+        );
+        // Nothing changes: nothing is built.
+        assert_eq!(
+            edit(&mut s, "param.set", json!({"parameters": {"r": "3 mm"}})),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

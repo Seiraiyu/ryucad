@@ -35,12 +35,10 @@ pub struct Built {
 }
 
 /// What a feature rebuilds to: a body, or a solved sketch.
-// A part holds a handful of these; boxing the body would only add a
-// pointer to every mesh and inspect.
-#[allow(clippy::large_enum_variant)]
+/// Shared, so a cached result costs nothing to reuse.
 #[derive(Clone, Debug)]
 pub enum Output {
-    Body(Built),
+    Body(Arc<Built>),
     Sketch(Arc<Solved>),
 }
 
@@ -94,7 +92,14 @@ pub struct PartResult {
     pub features: Vec<(Id, Result<Output>)>,
     /// Combines the features' hashes (or error codes) in order.
     pub hash: String,
+    /// The features this rebuild built, in feature order; the others came
+    /// from the cache.
+    pub built: Vec<Id>,
 }
+
+/// A part's results by feature: the hash of the inputs each was built
+/// from, and what it built.
+pub type Cache = BTreeMap<Id, (blake3::Hash, Result<Output>)>;
 
 impl PartResult {
     pub fn failed(&self) -> usize {
@@ -457,17 +462,80 @@ pub fn rebuild_feature(part: &Part, id: &Id, f: &Feature, before: &dyn Results) 
             .and_then(|c| crate::sketch::solve_in(id, s, &c))
             .map(|s| Output::Sketch(Arc::new(s))),
         Feature::Extrude(_) | Feature::Revolve(_) => {
-            build_sweep(part, id, f, before).map(Output::Body)
+            build_sweep(part, id, f, before).map(|b| Output::Body(Arc::new(b)))
         }
-        f => build_feature(&part.id, id, f).map(Output::Body),
+        f => build_feature(&part.id, id, f).map(|b| Output::Body(Arc::new(b))),
     }
 }
 
-/// Rebuilds every listed feature of `part`: each depth of its graph in
-/// turn, the features of a depth in parallel.
+/// The hash of everything a feature's result depends on: ryucad's and
+/// ryukei's versions, the feature as written (canonical, every unit
+/// explicit), the value of each parameter it reads, and each input's place
+/// in the list and result. Equal hashes, equal results.
+fn input_hash(
+    part: &Part,
+    id: &Id,
+    f: &Feature,
+    before: &BTreeMap<Id, Result<Output>>,
+) -> blake3::Hash {
+    let mut h = blake3::Hasher::new();
+    // Length-prefixed, so no two sets of pieces hash alike.
+    let mut piece = |b: &[u8]| {
+        h.update(&(b.len() as u64).to_le_bytes());
+        h.update(b);
+    };
+    let v = crate::proto::VersionInfo::current();
+    piece(v.ryucad.as_bytes());
+    piece(v.ryukei.as_bytes());
+    piece(crate::doc::canonical::to_string(&f.to_json()).as_bytes());
+    for name in part.uses.get(id).into_iter().flatten() {
+        piece(name.as_bytes());
+        match part.env.get(name) {
+            Ok(v) => {
+                piece(&v.x.to_bits().to_le_bytes());
+                piece(format!("{:?}", v.dim).as_bytes());
+            }
+            Err(e) => piece(
+                serde_json::to_string(&e)
+                    .expect("errors serialize")
+                    .as_bytes(),
+            ),
+        }
+    }
+    let order = part.order();
+    let at = |x: &Id| order.iter().position(|o| o == x);
+    for input in crate::graph::inputs(f) {
+        piece(input.as_str().as_bytes());
+        let before_me = matches!((at(input), at(id)), (Some(i), Some(me)) if i < me);
+        piece(&[u8::from(before_me)]);
+        match before.get(input) {
+            Some(Ok(o)) => piece(o.hash().as_bytes()),
+            Some(Err(e)) => piece(
+                serde_json::to_string(&e.code)
+                    .expect("codes serialize")
+                    .as_bytes(),
+            ),
+            None => piece(b"unbuilt"),
+        }
+    }
+    h.finalize()
+}
+
+/// Rebuilds every listed feature of `part`, from nothing.
 pub fn rebuild_part(part: &Part) -> PartResult {
+    rebuild_part_with(part, &Cache::new()).0
+}
+
+/// Rebuilds every listed feature of `part`, each depth of its graph in
+/// turn and the features of a depth in parallel, reusing from `cache`
+/// every result whose inputs haven't changed. Returns the rebuild and the
+/// part's cache as it now stands. The result is the same, bit for bit,
+/// whatever the cache holds.
+pub fn rebuild_part_with(part: &Part, cache: &Cache) -> (PartResult, Cache) {
     let depths = crate::graph::depths(part);
     let mut built: BTreeMap<Id, Result<Output>> = BTreeMap::new();
+    let mut fresh = Cache::new();
+    let mut made = Vec::new();
     for depth in 0.. {
         let now: Vec<&Id> = part
             .order()
@@ -477,22 +545,45 @@ pub fn rebuild_part(part: &Part) -> PartResult {
         if now.is_empty() {
             break;
         }
-        let results: Vec<(Id, Result<Output>)> = now
+        let results: Vec<(Id, Option<blake3::Hash>, Result<Output>, bool)> = now
             .par_iter()
             .map(|id| {
-                let r = match &part.features[*id] {
-                    Ok(f) => rebuild_feature(part, id, f, &built),
-                    Err(e) => Err(e.clone()),
-                };
-                ((*id).clone(), r)
+                let id = (*id).clone();
+                match &part.features[&id] {
+                    Ok(f) => {
+                        let h = input_hash(part, &id, f, &built);
+                        match cache.get(&id) {
+                            Some((c, r)) if *c == h => (id, Some(h), r.clone(), false),
+                            _ => {
+                                let r = rebuild_feature(part, &id, f, &built);
+                                (id, Some(h), r, true)
+                            }
+                        }
+                    }
+                    Err(e) => (id, None, Err(e.clone()), false),
+                }
             })
             .collect();
-        built.extend(results);
+        for (id, h, r, new) in results {
+            if new {
+                made.push(id.clone());
+            }
+            if let Some(h) = h {
+                fresh.insert(id.clone(), (h, r.clone()));
+            }
+            built.insert(id, r);
+        }
     }
     let features: Vec<(Id, Result<Output>)> = part
         .order()
         .iter()
         .map(|id| (id.clone(), built[id].clone()))
+        .collect();
+    let built: Vec<Id> = part
+        .order()
+        .iter()
+        .filter(|id| made.contains(id))
+        .cloned()
         .collect();
     let mut h = blake3::Hasher::new();
     for (id, r) in &features {
@@ -502,10 +593,12 @@ pub fn rebuild_part(part: &Part) -> PartResult {
         };
         h.update(piece.as_bytes());
     }
-    PartResult {
+    let result = PartResult {
         features,
         hash: h.finalize().to_hex()[..32].to_owned(),
-    }
+        built,
+    };
+    (result, fresh)
 }
 
 #[cfg(test)]
