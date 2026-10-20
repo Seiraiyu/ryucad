@@ -39,6 +39,10 @@ use std::sync::Arc;
 /// Rounding slack on the clustering rule, as in [`crate::intersect`].
 const SLACK: f64 = 1e-10;
 
+/// A touch this many tolerances from an edge's end is at the end: the
+/// touch rule of [`crate::intersect::curve_surface`].
+const TOUCH: f64 = 100.0;
+
 /// A global vertex.
 pub(crate) type GvId = usize;
 /// A global edge.
@@ -587,7 +591,10 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
     for (ci, c) in carriers.iter_mut().enumerate() {
         c.points
             .sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
-        c.points.dedup_by(|x, y| x.1 == y.1);
+        // A vertex once on a carrier, at its first place: a closed
+        // carrier's own vertex may come back at the period's end.
+        let mut seen: BTreeSet<GvId> = BTreeSet::new();
+        c.points.retain(|x| seen.insert(x.1));
         let n = c.points.len();
         if n == 0 {
             continue;
@@ -715,15 +722,38 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
             }
         }
     }
+    // An edge lying on another operand's face's surface: each of its
+    // pieces in the stretch, by its own middle (the stretch may run out of
+    // the face and back).
+    let mut jobs: Vec<(usize, FaceRef)> = Vec::new();
     for o in &ons {
-        if o.place != Place::Inside {
-            continue;
-        }
         let c = edge_carrier[&o.edge];
         for &q in &carrier_pieces[c] {
-            if inside_range(&pieces[q], o.range, &carriers[c]) {
-                add_interior(&mut table, o.face, piece_ge[q]);
+            if inside_range(&pieces[q], o.range, &carriers[c]) && !jobs.contains(&(q, o.face)) {
+                jobs.push((q, o.face));
             }
+        }
+    }
+    let placed: Vec<Place> = jobs
+        .par_iter()
+        .map(|&(q, f)| {
+            let c = &carriers[pieces[q].carrier];
+            let mid = c
+                .curve
+                .point((pieces[q].range[0] + pieces[q].range[1]) / 2.0);
+            let fb = &ops[f.op];
+            let surface = &fb.surfaces[fb.faces[f.face].surface];
+            let (u, v) = surface.project(mid).param;
+            let own = match c.member {
+                Member::Edge(e) => face_of_edge(ops, e),
+                Member::Stretch { pair, .. } => pairs[pair].a,
+            };
+            point_in_face(fb, f.face, Point2::new(u, v)).map_err(|e| fail(e, own, f))
+        })
+        .collect::<Result<_, _>>()?;
+    for ((q, f), place) in jobs.into_iter().zip(placed) {
+        if place == Place::Inside {
+            add_interior(&mut table, f, piece_ge[q]);
         }
     }
     for t in &touches {
@@ -815,9 +845,30 @@ fn edge_hits(ops: &[Body], e: EdgeRef, f: FaceRef) -> Result<(Vec<Hit>, Vec<OnHi
     };
     let mut hits = Vec::new();
     let mut ons = Vec::new();
+    // A touch is placed only to within rounding's reach of a double root,
+    // more than the tolerance: one within the touch rule's length of the
+    // edge's end is at that end.
+    let snap = |t: f64, point: Point3, touch: bool| -> (f64, Point3) {
+        if touch {
+            for (end, v) in [(x.interval[0], x.start), (x.interval[1], x.end)] {
+                let p = eb.vertices[v].point;
+                if p.distance(point) <= TOUCH * tol {
+                    return (end, p);
+                }
+            }
+        }
+        (t, point)
+    };
     for h in found {
         match h {
-            CurveHit::Point { t, point, .. } => {
+            CurveHit::Point {
+                t,
+                point,
+                before,
+                after,
+            } => {
+                let touch = before == after;
+                let (t, point) = snap(t, point, touch);
                 let place = place_of(point)?;
                 if place != Place::Outside {
                     hits.push(Hit {
@@ -826,7 +877,8 @@ fn edge_hits(ops: &[Body], e: EdgeRef, f: FaceRef) -> Result<(Vec<Hit>, Vec<OnHi
                         point,
                         face: f,
                         place,
-                        radius: tol,
+                        // A touch is known only to within the rule's length.
+                        radius: if touch { TOUCH * tol } else { tol },
                     });
                 }
             }

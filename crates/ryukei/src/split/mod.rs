@@ -5,8 +5,9 @@
 //! all as pcurves, from the intersection table. At each vertex the arcs
 //! leaving it are ordered by angle about the face's outward normal (the
 //! surface's directions, so a pole or an apex, where every arc leaves at
-//! one point of the parameter plane, orders them too), by exact
-//! orientation tests, ties between tangent arcs broken a little way out.
+//! one point of the parameter plane, orders them too); arcs leaving within
+//! [`SAME_DIRECTION`] of one direction are tangent, and are ordered by
+//! where they are a little way out.
 //! Walking always turns the same way (arriving at a vertex, take the
 //! first arc clockwise from the one arrived by) gives the cycles that
 //! bound pieces, each piece on the left of its cycles as the face is on
@@ -28,7 +29,6 @@ use crate::geom::chain2::Chain2;
 use crate::geom::winding2::winding;
 use crate::geom::{Curve2, Point2, Surface, Vector2, Vector3};
 use crate::interval::Interval;
-use crate::predicates::{Sign, orient2d};
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, Sense};
 use core::cmp::Ordering;
@@ -306,30 +306,65 @@ impl Arrangement<'_> {
                 .iter()
                 .map(|&(_, d, end)| self.direction(&self.darts[d], end, n))
                 .collect();
-            let mut order: Vec<usize> = (0..list.len()).collect();
-            let mut failed = false;
-            order.sort_by(|&a, &b| {
-                match angle_cmp(dirs[a], dirs[b]) {
-                    Some(o) => o,
-                    None => {
-                        // Tangent arcs: compare a little way out.
-                        for k in [1e-4, 1e-3, 1e-2, 1e-1, 0.3] {
-                            let (da, ea) = (list[a].1, list[a].2);
-                            let (db, eb) = (list[b].1, list[b].2);
-                            let ca = self.chord(&self.darts[da], ea, k, n);
-                            let cb = self.chord(&self.darts[db], eb, k, n);
-                            if let Some(o) = angle_cmp(ca, cb) {
-                                return o;
-                            }
-                        }
-                        failed |= a != b;
-                        a.cmp(&b)
+            // Directions within SAME_DIRECTION of each other are tied at
+            // first order: groups of them, in order of angle, each group
+            // ordered a little way out.
+            let angle =
+                |v: Vector2| crate::math::atan2(v.y, v.x).rem_euclid(core::f64::consts::TAU);
+            let mut by_angle: Vec<(f64, usize)> = dirs
+                .iter()
+                .enumerate()
+                .map(|(i, &d)| (angle(d), i))
+                .collect();
+            by_angle.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
+            let m = by_angle.len();
+            let close = |a: f64, b: f64| {
+                let d = (a - b).abs();
+                d.min(core::f64::consts::TAU - d) <= SAME_DIRECTION
+            };
+            // Start the groups after a gap, so no group straddles the wrap.
+            let start = (0..m)
+                .find(|&i| !close(by_angle[(i + m - 1) % m].0, by_angle[i].0))
+                .unwrap_or(0);
+            let mut groups: Vec<Vec<usize>> = Vec::new();
+            for step in 0..m {
+                let (a, i) = by_angle[(start + step) % m];
+                match groups.last_mut() {
+                    Some(last)
+                        if step > 0 && close(angle(dirs[*last.last().expect("a member")]), a) =>
+                    {
+                        last.push(i)
                     }
+                    _ => groups.push(vec![i]),
                 }
-            });
+            }
+            let mut failed = false;
+            for group in &mut groups {
+                group.sort_by(|&a, &b| {
+                    for k in [1e-4, 1e-3, 1e-2, 1e-1, 0.3] {
+                        let (da, ea) = (list[a].1, list[a].2);
+                        let (db, eb) = (list[b].1, list[b].2);
+                        let ca = self.chord(&self.darts[da], ea, k, n);
+                        let cb = self.chord(&self.darts[db], eb, k, n);
+                        // Both near one direction: compare by the turn
+                        // from one to the other.
+                        let c = ca.cross(cb);
+                        if c.abs() > SAME_DIRECTION * ca.length() * cb.length() {
+                            return if c > 0.0 {
+                                Ordering::Less
+                            } else {
+                                Ordering::Greater
+                            };
+                        }
+                    }
+                    failed |= a != b;
+                    a.cmp(&b)
+                });
+            }
             if failed {
                 return None;
             }
+            let order: Vec<usize> = groups.into_iter().flatten().collect();
             for (k, &o) in order.iter().enumerate() {
                 let (slot, d, end) = list[o];
                 sorted[g].push(slot);
@@ -699,7 +734,18 @@ impl Arrangement<'_> {
     ) -> Option<usize> {
         let (pu, pv) = self.surface.periods();
         let period = if swap { pv } else { pu }?;
-        let (x, y) = if swap { (p.y, p.x) } else { (p.x, p.y) };
+        let (x0, y) = if swap { (p.y, p.x) } else { (p.x, p.y) };
+        // A line through a vertex can't be counted across: one a little
+        // either side of it serves, still in the point's band.
+        let x = [0.0, 1e-7, -1e-7, 1e-5, -1e-5]
+            .into_iter()
+            .map(|d| x0 + d * period)
+            .find(|&x| {
+                bands
+                    .iter()
+                    .flatten()
+                    .all(|&c| crossings(&lifted[c].chains, x, swap, period).is_some())
+            })?;
         let above = |c: usize| -> Option<bool> {
             let hits = crossings(&lifted[c].chains, x, swap, period)?;
             Some(hits.iter().filter(|&&h| h < y).count() % 2 == 1)
@@ -781,25 +827,10 @@ fn project(v: Vector3, n: Vector3) -> Vector2 {
     Vector2::new(v.dot(e1), v.dot(e2))
 }
 
-/// Compares the angles of two directions counterclockwise from the
-/// positive x axis, exactly; `None` when they are the same direction.
-fn angle_cmp(a: Vector2, b: Vector2) -> Option<Ordering> {
-    let half = |v: Vector2| v.y < 0.0 || (v.y == 0.0 && v.x < 0.0);
-    match (half(a), half(b)) {
-        (false, true) => Some(Ordering::Less),
-        (true, false) => Some(Ordering::Greater),
-        _ => match orient2d(Point2::ORIGIN, Point2::ORIGIN + a, Point2::ORIGIN + b) {
-            Sign::Positive => Some(Ordering::Less),
-            Sign::Negative => Some(Ordering::Greater),
-            Sign::Zero => {
-                if a.length() == 0.0 || b.length() == 0.0 {
-                    return None;
-                }
-                None
-            }
-        },
-    }
-}
+/// Directions this close (in angle, or the sine of the angle between
+/// chords) are the same: tangents are computed in floating point, so an
+/// exact test on them would order tangent arcs by rounding.
+const SAME_DIRECTION: f64 = 1e-9;
 
 /// A chain moved by `d`.
 fn moved(c: &Chain2, d: Vector2) -> Chain2 {

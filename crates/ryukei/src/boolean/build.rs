@@ -1014,12 +1014,16 @@ impl Grower<'_, '_> {
         let mut vertex_tol: BTreeMap<GvId, f64> = BTreeMap::new();
         for (&g, &e) in &self.edges {
             let ge = &table.edges[g];
-            euler::set_edge_tolerance(&mut self.body, e, tol(ge.tolerance)?).map_err(Self::topo)?;
+            // The edge's curve may end a little way from a vertex it was
+            // clustered onto: both tolerances cover the gap.
+            let mut t_edge = ge.tolerance;
             for (t, v) in [(ge.interval[0], ge.start), (ge.interval[1], ge.end)] {
-                let d = ge.curve.point(t).distance(table.vertices[v].point);
+                let d = ge.curve.point(t).distance(table.vertices[v].point) * 1.0001 + 1e-12;
+                t_edge = t_edge.max(d);
                 let x = vertex_tol.entry(v).or_insert(0.0);
-                *x = x.max(d * 1.0001 + 1e-12);
+                *x = x.max(d);
             }
+            euler::set_edge_tolerance(&mut self.body, e, tol(t_edge)?).map_err(Self::topo)?;
         }
         for (&g, &v) in &self.vertices {
             let t = table.vertices[g]
