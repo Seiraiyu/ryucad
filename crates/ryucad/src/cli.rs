@@ -453,6 +453,9 @@ enum SketchCmd {
         #[arg(value_name = "OPS", value_parser = ops)]
         ops: Option<Ops>,
     },
+    /// The solved geometry, in the sketch's frame and the part's, with each entity's and
+    /// constraint's state.
+    Get { part: String, sketch: String },
 }
 
 /// Sketch ops, parsed from one argument.
@@ -745,6 +748,10 @@ fn request(cmd: &Command) -> Option<Request> {
             part: part.clone(),
             sketch: sketch.clone(),
             ops: ops.clone().map_or_else(Vec::new, |o| o.0),
+        },
+        Command::Sketch(SketchCmd::Get { part, sketch }) => Request::SketchGet {
+            part: part.clone(),
+            sketch: sketch.clone(),
         },
         Command::Rebuild { part } => Request::Rebuild { part: part.clone() },
         Command::Inspect {

@@ -244,6 +244,7 @@ fn dispatch(
         Request::SketchSolve { part, sketch, ops } => {
             crate::sketch::solve_request(session, &part, &sketch, &ops)
         }
+        Request::SketchGet { part, sketch } => crate::sketch::get(session, &part, &sketch),
         Request::FeatureShow { part, id } => {
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
             let p = session.project().part(&part)?;

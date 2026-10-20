@@ -230,6 +230,9 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         ops: Vec<Value>,
     },
+    /// A sketch's solved geometry, states and report.
+    #[serde(rename = "sketch.get")]
+    SketchGet { part: String, sketch: String },
     #[serde(rename = "rebuild")]
     Rebuild {
         #[serde(default, skip_serializing_if = "Option::is_none")]

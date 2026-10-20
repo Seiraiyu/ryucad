@@ -598,6 +598,92 @@ pub fn solve_request(session: &Session, part: &str, sketch: &str, ops: &[Value])
     )
 }
 
+/// `sketch.get`: the solved geometry in the sketch's frame and in model
+/// space, each entity's and constraint's state, and the report. A sketch
+/// that can't be solved gives its best try, with the report saying so.
+pub fn get(session: &Session, part: &str, sketch: &str) -> Result<Value> {
+    let (pid, fid) = (server::part_id(part)?, server::feature_id(sketch)?);
+    let stored = sketch_of(session, &pid, &fid)?;
+    let (solved, report) = solve_any(&fid, &stored)?;
+    let frame = frame(&solved.plane)?;
+    let at = |m: [f64; 2]| {
+        let p = frame.apply_point(ryukei::geom::Point3::new(m[0], m[1], 0.0));
+        [p.x, p.y, p.z]
+    };
+    let axis = |x: f64, y: f64, z: f64| {
+        let v = frame.apply_vector(ryukei::geom::Vector3::new(x, y, z));
+        [v.x, v.y, v.z]
+    };
+    // What can move, and what takes part in a redundant or conflicting set.
+    let free: Vec<&Id> = report.free.iter().map(|(id, _)| id).collect();
+    let in_set = |sets: &[Vec<Id>], id: &Id| sets.iter().any(|s| s.contains(id));
+    let mut over: Vec<&Id> = Vec::new();
+    for (cid, c) in &solved.constraints {
+        if in_set(&report.redundant, cid) || in_set(&report.conflicting, cid) {
+            over.extend(&c.entities);
+        }
+    }
+    let mut entities = solved.fields()["entities"].clone();
+    for (id, e) in &solved.entities {
+        let moves = free.contains(&id) || e.geometry.points().iter().any(|(_, p)| free.contains(p));
+        let state = if over.contains(&id) {
+            if report.converged { "over" } else { "failing" }
+        } else if moves {
+            "under"
+        } else {
+            "well"
+        };
+        let v = &mut entities[id.as_str()];
+        v["state"] = json!(state);
+        match &e.geometry {
+            Geometry::Point { m } => v["at"] = json!(at(*m)),
+            Geometry::Arc { center, start, .. } => {
+                let m = |p: &Id| match solved.entities[p].geometry {
+                    Geometry::Point { m } => m,
+                    _ => unreachable!("validated"),
+                };
+                let (c, s) = (m(center), m(start));
+                v["r_m"] = json!(ryukei::math::hypot(s[0] - c[0], s[1] - c[1]));
+            }
+            _ => {}
+        }
+    }
+    let mut constraints = serde_json::Map::new();
+    for (id, c) in &solved.constraints {
+        let mut v = json!({"type": c.ty.as_str()});
+        for (e, f) in c.entities.iter().zip(crate::doc::sketch::ENTITY_FIELDS) {
+            v[f] = json!(e);
+        }
+        if let Some(q) = &c.value {
+            v["value"] = q.report();
+        }
+        v["state"] = json!(if in_set(&report.conflicting, id) {
+            "conflicting"
+        } else if in_set(&report.redundant, id) {
+            "redundant"
+        } else {
+            "ok"
+        });
+        constraints.insert(id.to_string(), v);
+    }
+    let o = frame.apply_point(ryukei::geom::Point3::new(0.0, 0.0, 0.0));
+    let mut v = json!({
+        "feature": fid,
+        "frame": {"origin": [o.x, o.y, o.z], "x": axis(1.0, 0.0, 0.0),
+                  "y": axis(0.0, 1.0, 0.0), "z": axis(0.0, 0.0, 1.0)},
+        "stale": solved != stored,
+        "report": report.to_json(),
+        "entities": entities,
+        "constraints": constraints,
+        "revision": session.project().part(&pid)?.revision,
+    });
+    match &solved.plane {
+        Plane::Origin(o) => v["plane"] = json!(o.as_str()),
+        Plane::Placement(_) => v["placement"] = solved.fields()["placement"].clone(),
+    }
+    Ok(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -945,5 +1031,41 @@ mod tests {
         call_live(&mut s, &mut live, None, "undo", json!({})).unwrap();
         let show = call(&mut s, "feature.show", json!({"part": "p", "id": "s"})).unwrap();
         assert_eq!(show["entities"], json!({}));
+    }
+
+    #[test]
+    fn get_gives_geometry_in_both_frames_and_states() {
+        let (_dir, mut s) = with_sketch();
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "s", "plane": "zx"}),
+        )
+        .unwrap();
+        let mut ops = rectangle_ops();
+        ops.as_array_mut().unwrap().pop();
+        edit(&mut s, ops).unwrap();
+        let g = call(&mut s, "sketch.get", json!({"part": "p", "sketch": "s"})).unwrap();
+        assert_eq!(g["plane"], "zx");
+        assert_eq!(g["frame"]["z"], json!([0.0, 1.0, 0.0]));
+        assert_eq!(g["stale"], false);
+        // p2 is 20 mm along the sketch's x, which is the part's z.
+        let at = &g["entities"]["p2"]["at"];
+        for (k, want) in [0.0, 0.0, 0.02].into_iter().enumerate() {
+            assert!(
+                (at[k].as_f64().unwrap() - want).abs() < ryusketch::SOLVE_TOL,
+                "{at}"
+            );
+        }
+        assert_eq!(g["entities"]["p1"]["state"], "well");
+        assert_eq!(g["entities"]["p3"]["state"], "under");
+        assert_eq!(g["entities"]["l2"]["state"], "under");
+        assert_eq!(g["entities"]["l1"]["state"], "well");
+        assert_eq!(
+            g["constraints"]["width"]["value"],
+            json!({"value": "20 mm", "m": 0.02})
+        );
+        assert_eq!(g["constraints"]["width"]["state"], "ok");
+        assert_eq!(g["report"]["dof"], 1);
     }
 }
