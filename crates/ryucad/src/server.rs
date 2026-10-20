@@ -1074,21 +1074,33 @@ fn check_references(
     }
     let p = session.project().part(part)?.clone();
     let results = session.rebuilt(part)?;
+    let checked = check_resolved(&p, order, id, f, results);
+    checked.map_err(|e| session.explain(part, e))
+}
+
+/// [`check_references`] against `results`.
+fn check_resolved(
+    p: &Part,
+    order: &[Id],
+    id: &Id,
+    f: &Feature,
+    results: &crate::rebuild::PartResult,
+) -> Result<()> {
     match f {
-        Feature::Sketch(s) => crate::sketch::context(&p, order, id, s, results).map(|_| ()),
+        Feature::Sketch(s) => crate::sketch::context(p, order, id, s, results).map(|_| ()),
         // What the target is; how far it is only rebuild can tell.
         Feature::Extrude(e) => match &e.extent {
             Extent::UpTo { target, .. } => {
                 use crate::reference::{kind, resolve, wrong_kind};
                 use ryukei::topo::EntityId;
-                let found = resolve(&p, order, id, "target", target, results)?;
+                let found = resolve(p, order, id, "target", target, results)?;
                 match found.1 {
                     EntityId::Vertex(_) => Ok(()),
                     EntityId::Face(_) => {
-                        crate::reference::plane(&p, id, "target", target, found).map(|_| ())
+                        crate::reference::plane(p, id, "target", target, found).map(|_| ())
                     }
                     e => Err(wrong_kind(
-                        &p,
+                        p,
                         id,
                         "target",
                         target,
@@ -1103,8 +1115,8 @@ fn check_references(
         // only rebuild can tell.
         Feature::Revolve(r) => match &r.axis {
             RevolveAxis::Edge(e) => {
-                let found = crate::reference::resolve(&p, order, id, "axis", e, results)?;
-                crate::reference::line(&p, id, "axis", e, found).map(|_| ())
+                let found = crate::reference::resolve(p, order, id, "axis", e, results)?;
+                crate::reference::line(p, id, "axis", e, found).map(|_| ())
             }
             RevolveAxis::Line(_) => Ok(()),
         },

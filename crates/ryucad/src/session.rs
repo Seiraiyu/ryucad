@@ -10,6 +10,7 @@ use crate::doc::id::Id;
 use crate::doc::project::{MANIFEST, Project};
 use crate::error::{Error, Result};
 use crate::rebuild::{PartResult, rebuild_part};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,6 +32,11 @@ pub struct Session {
     stamps: BTreeMap<PathBuf, Stamp>,
     stamped_at: SystemTime,
     results: BTreeMap<Id, (String, PartResult)>,
+    /// What each name of a feature's body was, by part and feature, from
+    /// every build this session has seen: its kind and, for a sweep, where
+    /// it came from. Names are only added, so a reference whose name has
+    /// gone can still say what it named.
+    known: BTreeMap<(Id, Id), BTreeMap<String, Value>>,
     /// Display meshes of rebuilt bodies.
     pub meshes: crate::mesh::Cache,
 }
@@ -43,6 +49,7 @@ impl Session {
             stamps: BTreeMap::new(),
             stamped_at: SystemTime::now(),
             results: BTreeMap::new(),
+            known: BTreeMap::new(),
             meshes: crate::mesh::Cache::default(),
         };
         s.stamps = s.stamp_all()?;
@@ -133,11 +140,68 @@ impl Session {
             .get(part)
             .is_some_and(|(rev, _)| *rev == p.revision);
         if !fresh {
-            let result = rebuild_part(p);
-            self.results
-                .insert(part.clone(), (p.revision.clone(), result));
+            let mut result = rebuild_part(p);
+            let revision = p.revision.clone();
+            for (_, r) in &mut result.features {
+                if let Err(e) = r {
+                    *e = self.explain(part, e.clone());
+                }
+            }
+            self.learn(part, &result);
+            self.results.insert(part.clone(), (revision, result));
         }
         Ok(&self.results[part].1)
+    }
+
+    /// Adds to `reference_unresolved` what its name was when it last
+    /// resolved (`was`: `{kind, from}`), if this session saw it.
+    pub fn explain(&self, part: &Id, mut e: Error) -> Error {
+        if e.code != crate::error::Code::ReferenceUnresolved {
+            return e;
+        }
+        let dependency = e.details["dependency"]
+            .as_str()
+            .and_then(|d| Id::parse(d, "feature").ok());
+        let name = e.details["reference"]
+            .as_str()
+            .and_then(|r| r.rsplit('/').next());
+        let was = dependency
+            .zip(name)
+            .and_then(|(d, n)| self.known.get(&(part.clone(), d))?.get(n));
+        if let Some(w) = was {
+            e.details["was"] = w.clone();
+        }
+        e
+    }
+
+    /// Notes what every name of the part's bodies is.
+    fn learn(&mut self, part: &Id, result: &PartResult) {
+        for (fid, r) in &result.features {
+            let Some(b) = r.as_ref().ok().and_then(|o| o.body()) else {
+                continue;
+            };
+            let known = self.known.entry((part.clone(), fid.clone())).or_default();
+            let body = &b.body;
+            let names = body
+                .faces()
+                .map(|f| (body.face(f).expect("live").name, "face"))
+                .chain(
+                    body.edges()
+                        .map(|e| (body.edge(e).expect("live").name, "edge")),
+                )
+                .chain(
+                    body.vertices()
+                        .map(|v| (body.vertex(v).expect("live").name, "vertex")),
+                );
+            for (name, kind) in names {
+                let name = name.to_string();
+                let mut was = json!({ "kind": kind });
+                if let Some(from) = b.origins.get(&name) {
+                    was["from"] = from.clone();
+                }
+                known.insert(name, was);
+            }
+        }
     }
 
     fn stamp_all(&mut self) -> Result<BTreeMap<PathBuf, Stamp>> {

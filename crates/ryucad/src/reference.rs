@@ -353,6 +353,69 @@ mod tests {
     }
 
     #[test]
+    fn an_unresolved_reference_says_what_it_was() {
+        let (_dir, mut s) = crate::sketch::tests::with_sketch();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": rectangle_ops()}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "id": "e", "sketch": "s",
+                   "extent": {"length": 5}}),
+        )
+        .unwrap();
+        let body = call(&mut s, "inspect", json!({"part": "p", "feature": "e"})).unwrap()["bodies"]
+            [0]
+        .clone();
+        let from_l2 = json!({"sketch": "s", "entity": "l2"});
+        let side = body["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["origin"] == from_l2)
+            .unwrap()["name"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "t", "face": format!("p/e/{side}")}),
+        )
+        .unwrap();
+        // l2 gives way to l5: the face it made goes, and t with it.
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [
+                {"op": "remove", "id": "l2"},
+                {"op": "add", "id": "l5", "type": "line", "start": "p2", "end": "p3"}
+            ]}),
+        )
+        .unwrap();
+        let e = call(&mut s, "rebuild", json!({})).unwrap_err();
+        let t = &e.details["parts"][0]["features"][2]["error"];
+        assert_eq!(t["code"], "reference_unresolved", "{t}");
+        assert_eq!(t["details"]["role"], "plane");
+        assert_eq!(
+            t["details"]["was"],
+            json!({"kind": "face", "from": from_l2})
+        );
+        // An edit that names it again is refused the same way.
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "face": format!("p/e/{side}")}),
+        )
+        .unwrap_err();
+        assert_eq!(e.details["was"]["from"], from_l2);
+    }
+
+    #[test]
     fn targets_that_wont_do() {
         let (_dir, mut s, body) = with_box_and_sketch();
         let (a, b) = (

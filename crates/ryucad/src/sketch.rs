@@ -416,7 +416,8 @@ pub fn context_now(session: &mut Session, part: &Id, id: &Id, s: &Sketch) -> Res
     }
     let p = session.project().part(part)?.clone();
     let results = session.rebuilt(part)?;
-    context(&p, p.order(), id, s, results)
+    let c = context(&p, p.order(), id, s, results);
+    c.map_err(|e| session.explain(part, e))
 }
 
 /// The frame of a sketch on a face: the face's outward normal, the part
