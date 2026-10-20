@@ -7,6 +7,7 @@
 //! not promise the nearest f64 to the exact length.
 
 use crate::error::{Code, Error, Result};
+use crate::expr::{Expr, Val, no_parameters};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fmt;
@@ -171,35 +172,66 @@ pub fn literal_unit(s: &str) -> Option<(f64, Dim)> {
 /// Every unit name, for messages and reserved names.
 pub const UNIT_NAMES: [&str; 8] = ["m", "cm", "mm", "um", "in", "ft", "deg", "rad"];
 
-/// A length as written, `<number> <unit>`, and its value in meters.
+/// A length as written and its value in meters. Usually a literal,
+/// `<number> <unit>`; it may be any [`Expr`] that gives a length, such as
+/// `2 * wall + 3 mm`, whose value depends on the part's parameters.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Quantity {
-    number: String,
-    unit: Unit,
+    text: String,
     meters: f64,
+    literal: bool,
 }
 
 impl Quantity {
     /// Parses `"12.5 mm"`, `"12.5mm"` or a bare `"12.5"` (which takes
     /// `default`). The number is decimal, optionally signed, with an
-    /// optional exponent: `1`, `-0.5`, `.5`, `2.`, `1e-3`.
+    /// optional exponent: `1`, `-0.5`, `.5`, `2.`, `1e-3`. Anything else is
+    /// an expression with no parameters to read.
     pub fn parse(s: &str, default: Unit) -> Result<Quantity> {
-        let bad = |why: &str| {
-            Error::new(Code::InvalidQuantity, format!("bad quantity {s:?}: {why}")).with("value", s)
-        };
+        Quantity::eval(s, default, &no_parameters)
+    }
+
+    /// [`parse`](Self::parse), with `lookup` giving the parameters an
+    /// expression reads. Only a string that is nothing but a number takes
+    /// `default`; inside an expression a bare number is a plain number.
+    pub fn eval(s: &str, default: Unit, lookup: &dyn Fn(&str) -> Result<Val>) -> Result<Quantity> {
         let t = s.trim();
         let end = number_len(t);
-        if end == 0 {
-            return Err(bad("expected a number"));
+        if end > 0 {
+            let (number, rest) = t.split_at(end);
+            let rest = rest.trim_start();
+            let unit = if rest.is_empty() {
+                Some(default)
+            } else {
+                Unit::parse(rest)
+            };
+            if let Some(unit) = unit {
+                return Quantity::literal(s, number, unit);
+            }
         }
-        let (number, rest) = t.split_at(end);
-        let rest = rest.trim_start();
-        let unit = if rest.is_empty() {
-            default
-        } else {
-            Unit::parse(rest).ok_or_else(|| {
-                bad("unknown unit; use m, cm, mm, um, in or ft").with("unit", rest)
-            })?
+        let e = Expr::parse(t)?;
+        let v = e.eval(lookup)?;
+        if v.dim != Dim::LENGTH {
+            return Err(Error::new(
+                Code::UnitMismatch,
+                format!("{t} is a {}; a length goes here", v.dim.name()),
+            )
+            .with("value", t)
+            .with("at", e.text())
+            .with("kind", v.dim.name()));
+        }
+        Ok(Quantity {
+            text: e.text().to_owned(),
+            meters: v.x,
+            literal: e.is_literal(),
+        })
+    }
+
+    /// The phase 0 form, exactly: the nearest f64 to the decimal, times the
+    /// unit's factor.
+    fn literal(s: &str, number: &str, unit: Unit) -> Result<Quantity> {
+        let bad = |why: &str| {
+            Error::new(Code::InvalidQuantity, format!("bad quantity {s:?}: {why}")).with("value", s)
         };
         let value: f64 = number.parse().map_err(|_| bad("expected a number"))?;
         let meters = value * unit.factor();
@@ -207,17 +239,26 @@ impl Quantity {
             return Err(bad("too large"));
         }
         Ok(Quantity {
-            number: number.to_owned(),
-            unit,
+            text: format!("{number} {unit}"),
             meters,
+            literal: true,
         })
     }
 
     /// A quantity from JSON: a string as [`parse`](Self::parse), or a bare
     /// number in the default unit.
     pub fn from_json(v: &Value, default: Unit) -> Result<Quantity> {
+        Quantity::from_json_in(v, default, &no_parameters)
+    }
+
+    /// [`from_json`](Self::from_json), reading parameters through `lookup`.
+    pub fn from_json_in(
+        v: &Value,
+        default: Unit,
+        lookup: &dyn Fn(&str) -> Result<Val>,
+    ) -> Result<Quantity> {
         match v {
-            Value::String(s) => Quantity::parse(s, default),
+            Value::String(s) => Quantity::eval(s, default, lookup),
             Value::Number(n) => Quantity::parse(&n.to_string(), default),
             _ => Err(Error::new(
                 Code::InvalidQuantity,
@@ -231,24 +272,32 @@ impl Quantity {
         self.meters
     }
 
-    pub fn unit(&self) -> Unit {
-        self.unit
+    /// Whether it is a literal (`3 mm`, `-0.5 in`) rather than an
+    /// expression.
+    pub fn is_literal(&self) -> bool {
+        self.literal
     }
 
-    /// The canonical text, `<number> <unit>`.
+    /// The canonical text: `<number> <unit>` for a literal, else the
+    /// expression with canonical spacing.
     pub fn text(&self) -> String {
-        format!("{} {}", self.number, self.unit)
+        self.text.clone()
     }
 
-    /// How output reports a quantity: as written, and in meters.
+    /// How output reports a quantity: as written, and in meters; `expr`
+    /// marks one that isn't a literal.
     pub fn report(&self) -> Value {
-        json!({"value": self.text(), "m": self.meters})
+        let mut v = json!({"value": self.text, "m": self.meters});
+        if !self.literal {
+            v["expr"] = json!(true);
+        }
+        v
     }
 }
 
 impl fmt::Display for Quantity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}", self.number, self.unit)
+        f.write_str(&self.text)
     }
 }
 
@@ -334,20 +383,49 @@ mod tests {
 
     #[test]
     fn rejects_garbage() {
-        for s in [
-            "",
-            "mm",
-            "abc",
-            "1 furlong",
-            "1e",
-            "1..2 mm",
-            "- 1 mm",
-            "1 mm mm",
-            "1e999 m",
-        ] {
+        for s in ["", "mm", "1 furlong", "1e", "1..2 mm", "1 mm mm", "1e999 m"] {
             let e = Quantity::parse(s, Unit::Mm).unwrap_err();
             assert_eq!(e.code, Code::InvalidQuantity, "{s}");
         }
+        // A name is an expression reading a parameter that isn't there.
+        let e = Quantity::parse("abc", Unit::Mm).unwrap_err();
+        assert_eq!(e.code, Code::UnknownParameter);
+    }
+
+    #[test]
+    fn expressions_give_lengths() {
+        let wall = |name: &str| match name {
+            "wall" => Ok(Val::new(0.003, Dim::LENGTH)),
+            _ => no_parameters(name),
+        };
+        let x = Quantity::eval("2*wall+1mm", Unit::In, &wall).unwrap();
+        assert_eq!(
+            (x.text(), x.meters()),
+            ("2 * wall + 1 mm".to_owned(), 0.007)
+        );
+        assert!(!x.is_literal());
+        assert_eq!(
+            x.report(),
+            json!({"value": "2 * wall + 1 mm", "m": 0.007, "expr": true})
+        );
+        // A sign with a space is an expression now, and still a literal.
+        let x = q("- 1 mm");
+        assert_eq!(
+            (x.text(), x.meters(), x.is_literal()),
+            ("-1 mm".to_owned(), -0.001, true)
+        );
+        // Bare numbers inside an expression are plain numbers.
+        let e = Quantity::eval("wall + 3", Unit::Mm, &wall).unwrap_err();
+        assert_eq!(e.code, Code::UnitMismatch);
+        for s in ["15 deg", "2", "wall * wall"] {
+            let e = Quantity::eval(&format!("({s})"), Unit::Mm, &wall).unwrap_err();
+            assert_eq!(e.code, Code::UnitMismatch, "{s}");
+        }
+        let e = Quantity::parse("15 deg", Unit::Mm).unwrap_err();
+        assert_eq!(
+            (e.code, e.details["kind"].as_str()),
+            (Code::UnitMismatch, Some("angle"))
+        );
     }
 
     #[test]

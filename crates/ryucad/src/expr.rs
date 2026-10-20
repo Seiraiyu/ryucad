@@ -8,7 +8,9 @@
 //! (`2*wall+3mm` is written `2 * wall + 3 mm`).
 
 use crate::error::{Code, Error, Result};
-use crate::units::UNIT_NAMES;
+use crate::units::{Dim, UNIT_NAMES, literal_unit};
+use ryukei::math;
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
@@ -24,6 +26,50 @@ pub const FUNCTIONS: [&str; 14] = [
 
 /// Names that are always constants.
 pub const CONSTANTS: [&str; 1] = ["pi"];
+
+/// How many arguments a function takes: `(least, most)`.
+fn arity(f: &str) -> Option<(usize, usize)> {
+    match f {
+        "atan2" => Some((2, 2)),
+        "min" | "max" => Some((2, usize::MAX)),
+        f if FUNCTIONS.contains(&f) => Some((1, 1)),
+        _ => None,
+    }
+}
+
+/// A value in SI units (meters, radians) and what it measures.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Val {
+    pub x: f64,
+    pub dim: Dim,
+}
+
+impl Val {
+    pub fn new(x: f64, dim: Dim) -> Val {
+        Val { x, dim }
+    }
+
+    /// How output reports a value: its kind and its SI value under the
+    /// kind's key (`m`, `rad`, `n`, or `si`).
+    pub fn report(&self) -> Value {
+        let mut v = json!({"kind": self.dim.name()});
+        v[self.dim.key()] = json!(self.x);
+        v
+    }
+}
+
+/// The lookup for a context with no parameters: every name is unknown.
+pub fn no_parameters(name: &str) -> Result<Val> {
+    Err(unknown_parameter(name))
+}
+
+pub fn unknown_parameter(name: &str) -> Error {
+    Error::new(
+        Code::UnknownParameter,
+        format!("no parameter {name}; add it with `ryucad param set`"),
+    )
+    .with("parameter", name)
+}
 
 /// A parsed expression and its canonical text.
 #[derive(Clone, Debug, PartialEq)]
@@ -115,6 +161,19 @@ impl Expr {
         out
     }
 
+    /// The value, with `lookup` giving each parameter's. Evaluation is f64
+    /// in a fixed order, with `ryukei::math` for every function, so it gives
+    /// the same bits on every platform. A result that isn't finite (a
+    /// division by zero, `asin(2)`) is `invalid_quantity`; mixing kinds is
+    /// `unit_mismatch`, naming the subexpression `at` fault.
+    pub fn eval(&self, lookup: &dyn Fn(&str) -> Result<Val>) -> Result<Val> {
+        Eval {
+            whole: &self.text,
+            lookup,
+        }
+        .node(&self.node)
+    }
+
     /// The same expression reading `to` wherever it read `from`.
     pub fn rename(&self, from: &str, to: &str) -> Expr {
         Expr::from_node(rename(&self.node, from, to))
@@ -151,6 +210,180 @@ fn rename(n: &Node, from: &str, to: &str) -> Node {
         Node::Pos(x) => Node::Pos(r(x)),
         Node::Paren(x) => Node::Paren(r(x)),
         Node::Bin(op, a, b) => Node::Bin(*op, r(a), r(b)),
+    }
+}
+
+struct Eval<'a> {
+    whole: &'a str,
+    lookup: &'a dyn Fn(&str) -> Result<Val>,
+}
+
+impl Eval<'_> {
+    fn fault(&self, code: Code, at: &Node, why: &str) -> Error {
+        let mut text = String::new();
+        write_node(&mut text, at);
+        let msg = if text == self.whole {
+            format!("{}: {why}", self.whole)
+        } else {
+            format!("{}: in {text}: {why}", self.whole)
+        };
+        Error::new(code, msg)
+            .with("value", self.whole)
+            .with("at", text)
+    }
+
+    fn mismatch(&self, at: &Node, why: &str) -> Error {
+        self.fault(Code::UnitMismatch, at, why)
+    }
+
+    fn node(&self, n: &Node) -> Result<Val> {
+        let v = self.value(n)?;
+        if !v.x.is_finite() {
+            return Err(self.fault(Code::InvalidQuantity, n, "is not a finite number"));
+        }
+        Ok(v)
+    }
+
+    fn value(&self, n: &Node) -> Result<Val> {
+        Ok(match n {
+            Node::Num { text, unit } => {
+                let x: f64 = text
+                    .parse()
+                    .map_err(|_| self.fault(Code::InvalidQuantity, n, "is not a number"))?;
+                match unit {
+                    None => Val::new(x, Dim::NUMBER),
+                    Some(u) => {
+                        let (factor, dim) = literal_unit(u).expect("the parser checked the unit");
+                        Val::new(x * factor, dim)
+                    }
+                }
+            }
+            Node::Name(s) if s == "pi" => Val::new(core::f64::consts::PI, Dim::NUMBER),
+            Node::Name(s) => (self.lookup)(s)?,
+            Node::Neg(x) => {
+                let v = self.node(x)?;
+                Val::new(-v.x, v.dim)
+            }
+            Node::Pos(x) | Node::Paren(x) => self.node(x)?,
+            Node::Bin(op, a, b) => {
+                let (va, vb) = (self.node(a)?, self.node(b)?);
+                let dim = match op {
+                    Op::Add | Op::Sub if va.dim != vb.dim => {
+                        let why = format!(
+                            "can't {} a {} and a {}",
+                            if *op == Op::Add { "add" } else { "subtract" },
+                            va.dim.name(),
+                            vb.dim.name()
+                        );
+                        return Err(self.mismatch(n, &why));
+                    }
+                    Op::Add | Op::Sub => Some(va.dim),
+                    Op::Mul => va.dim.times(vb.dim),
+                    Op::Div => va.dim.per(vb.dim),
+                    Op::Pow => return self.pow(n, va, vb),
+                };
+                let dim = dim.ok_or_else(|| self.mismatch(n, "powers of units too high"))?;
+                let x = match op {
+                    Op::Add => va.x + vb.x,
+                    Op::Sub => va.x - vb.x,
+                    Op::Mul => va.x * vb.x,
+                    _ => va.x / vb.x,
+                };
+                Val::new(x, dim)
+            }
+            Node::Call(f, args) => {
+                let vals = args
+                    .iter()
+                    .map(|a| self.node(a))
+                    .collect::<Result<Vec<Val>>>()?;
+                self.call(n, f, &vals)?
+            }
+        })
+    }
+
+    fn pow(&self, n: &Node, base: Val, exp: Val) -> Result<Val> {
+        if exp.dim != Dim::NUMBER {
+            return Err(self.mismatch(n, "an exponent must be a plain number"));
+        }
+        let dim = if base.dim == Dim::NUMBER {
+            Dim::NUMBER
+        } else if exp.x.fract() == 0.0 && exp.x.abs() <= 16.0 {
+            base.dim
+                .pow(exp.x as i32)
+                .ok_or_else(|| self.mismatch(n, "powers of units too high"))?
+        } else {
+            let why = format!("a {} can only be raised to a whole power", base.dim.name());
+            return Err(self.mismatch(n, &why));
+        };
+        Ok(Val::new(math::pow(base.x, exp.x), dim))
+    }
+
+    fn call(&self, n: &Node, f: &str, a: &[Val]) -> Result<Val> {
+        let want = |dim: Dim| -> Result<()> {
+            match a.iter().find(|v| v.dim != dim) {
+                Some(v) => Err(self.mismatch(
+                    n,
+                    &format!("{f} takes a {}, not a {}", dim.name(), v.dim.name()),
+                )),
+                None => Ok(()),
+            }
+        };
+        let same = || -> Result<Dim> {
+            want(a[0].dim)?;
+            Ok(a[0].dim)
+        };
+        let x = a[0].x;
+        Ok(match f {
+            "sin" | "cos" | "tan" => {
+                want(Dim::ANGLE)?;
+                let y = match f {
+                    "sin" => math::sin(x),
+                    "cos" => math::cos(x),
+                    _ => math::tan(x),
+                };
+                Val::new(y, Dim::NUMBER)
+            }
+            "asin" | "acos" | "atan" => {
+                want(Dim::NUMBER)?;
+                let y = match f {
+                    "asin" => math::asin(x),
+                    "acos" => math::acos(x),
+                    _ => math::atan2(x, 1.0),
+                };
+                Val::new(y, Dim::ANGLE)
+            }
+            "atan2" => {
+                same()?;
+                Val::new(math::atan2(x, a[1].x), Dim::ANGLE)
+            }
+            "sqrt" => {
+                let dim = a[0].dim.sqrt().ok_or_else(|| {
+                    self.mismatch(n, &format!("the square root of a {}", a[0].dim.name()))
+                })?;
+                Val::new(math::sqrt(x), dim)
+            }
+            "abs" => Val::new(x.abs(), a[0].dim),
+            "min" | "max" => {
+                let dim = same()?;
+                let pick = |m: f64, v: &Val| {
+                    if (f == "min" && v.x < m) || (f == "max" && v.x > m) {
+                        v.x
+                    } else {
+                        m
+                    }
+                };
+                Val::new(a[1..].iter().fold(x, pick), dim)
+            }
+            _ => {
+                want(Dim::NUMBER)?;
+                let y = match f {
+                    "floor" => x.floor(),
+                    "ceil" => x.ceil(),
+                    _ => x.round(),
+                };
+                Val::new(y, Dim::NUMBER)
+            }
+        })
     }
 }
 
@@ -459,12 +692,29 @@ impl Parser<'_> {
                 if !self.eat('(') {
                     return Ok(Node::Name(name));
                 }
+                let Some((least, most)) = arity(&name) else {
+                    let msg = format!(
+                        "unknown function {name}; functions are {}",
+                        FUNCTIONS.join(", ")
+                    );
+                    return Err(self.fault(pos, &msg));
+                };
+                self.deeper()?;
                 let mut args = vec![self.sum()?];
                 while self.eat(',') {
                     args.push(self.sum()?);
                 }
+                self.depth -= 1;
                 if !self.eat(')') {
                     return Err(self.fault(self.pos(), "expected ',' or ')'"));
+                }
+                if args.len() < least || args.len() > most {
+                    let n = if least == most {
+                        format!("{least}")
+                    } else {
+                        format!("at least {least}")
+                    };
+                    return Err(self.fault(pos, &format!("{name} takes {n} argument(s)")));
                 }
                 Ok(Node::Call(name, args))
             }
@@ -546,11 +796,14 @@ mod tests {
             ("mm", 0),
             ("1 mm mm", 5),
             ("(1", 2),
-            ("f(1 2)", 4),
+            ("max(1 2)", 6),
             ("1..2", 2),
             ("1 # 2", 2),
             ("1 + ,", 4),
             ("a b", 2),
+            ("cosh(1)", 0),
+            ("sin(1, 2)", 0),
+            ("2 * max(1)", 4),
         ] {
             let e = Expr::parse(s).unwrap_err();
             assert_eq!(e.code, Code::InvalidQuantity, "{s}");
@@ -559,6 +812,106 @@ mod tests {
         assert_eq!(
             Expr::parse("1 furlong").unwrap_err().details["unit"],
             "furlong"
+        );
+    }
+
+    fn eval(s: &str) -> Result<Val> {
+        let lookup = |name: &str| match name {
+            "wall" => Ok(Val::new(0.003, Dim::LENGTH)),
+            "n" => Ok(Val::new(4.0, Dim::NUMBER)),
+            "tilt" => Ok(Val::new(0.5, Dim::ANGLE)),
+            _ => no_parameters(name),
+        };
+        Expr::parse(s).unwrap().eval(&lookup)
+    }
+
+    fn val(s: &str) -> (f64, String) {
+        let v = eval(s).unwrap();
+        (v.x, v.dim.name())
+    }
+
+    #[test]
+    fn evaluates_in_si_with_dimensions() {
+        let deg = crate::units::DEG;
+        for (s, x, dim) in [
+            ("3 mm", 0.003, "length"),
+            ("2 * wall + 3 mm", 2.0 * 0.003 + 0.003, "length"),
+            ("wall * wall", 0.003 * 0.003, "length^2"),
+            ("sqrt(wall^2)", math::sqrt(math::pow(0.003, 2.0)), "length"),
+            ("n / 2", 2.0, "number"),
+            ("15 deg", 15.0 * deg, "angle"),
+            ("sin(30 deg)", math::sin(30.0 * deg), "number"),
+            ("atan(1)", math::atan2(1.0, 1.0), "angle"),
+            ("atan2(wall, 2 mm)", math::atan2(0.003, 0.002), "angle"),
+            ("wall / tilt", 0.003 / 0.5, "length*angle^-1"),
+            ("-2^2", -4.0, "number"),
+            ("2^-1", 0.5, "number"),
+            ("max(1 mm, wall, 2 mm)", 0.003, "length"),
+            ("min(n, 2, 3)", 2.0, "number"),
+            ("abs(-wall)", 0.003, "length"),
+            (
+                "floor(2.5) + ceil(0.5) + round(2.5)",
+                2.0 + 1.0 + 3.0,
+                "number",
+            ),
+            ("2 * pi * 1 m", 2.0 * core::f64::consts::PI * 1.0, "length"),
+            ("1 in", 0.0254, "length"),
+        ] {
+            assert_eq!(val(s), (x, dim.to_owned()), "{s}");
+        }
+    }
+
+    #[test]
+    fn mixing_kinds_is_a_unit_mismatch() {
+        for (s, at) in [
+            ("wall + 3", "wall + 3"),
+            ("2 * (wall - 1 deg)", "wall - 1 deg"),
+            ("sin(wall)", "sin(wall)"),
+            ("sqrt(wall)", "sqrt(wall)"),
+            ("wall^tilt", "wall^tilt"),
+            ("wall^0.5", "wall^0.5"),
+            ("n^wall", "n^wall"),
+            ("floor(wall)", "floor(wall)"),
+            ("max(wall, n)", "max(wall, n)"),
+            ("atan2(wall, n)", "atan2(wall, n)"),
+            ("wall^16 * wall", "wall^16 * wall"),
+        ] {
+            let e = eval(s).unwrap_err();
+            assert_eq!(e.code, Code::UnitMismatch, "{s}: {e}");
+            assert_eq!(e.details["at"], at, "{s}");
+            assert_eq!(e.details["value"], s, "{s}");
+        }
+        assert!(eval("wall^n").is_ok());
+    }
+
+    #[test]
+    fn non_finite_results_are_refused() {
+        for s in ["1 / 0", "asin(2)", "1e999", "sqrt(-1)", "10^400"] {
+            assert_eq!(eval(s).unwrap_err().code, Code::InvalidQuantity, "{s}");
+        }
+    }
+
+    #[test]
+    fn unknown_names() {
+        let e = eval("2 * gap").unwrap_err();
+        assert_eq!(e.code, Code::UnknownParameter);
+        assert_eq!(e.details["parameter"], "gap");
+    }
+
+    #[test]
+    fn reports_by_kind() {
+        assert_eq!(
+            Val::new(0.5, Dim::LENGTH).report(),
+            json!({"kind": "length", "m": 0.5})
+        );
+        assert_eq!(
+            Val::new(2.0, Dim::NUMBER).report(),
+            json!({"kind": "number", "n": 2.0})
+        );
+        let area = Dim::LENGTH.times(Dim::LENGTH).unwrap();
+        assert_eq!(
+            Val::new(2.0, area).report(),
+            json!({"kind": "length^2", "si": 2.0})
         );
     }
 

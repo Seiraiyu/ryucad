@@ -875,7 +875,7 @@ mod tests {
             with("projection", json!({"orthographic": {"height": "0 mm"}})).code,
             Code::InvalidParam
         );
-        let e = with("eye", json!(["x", 0, 0]));
+        let e = with("eye", json!(["1 parsec", 0, 0]));
         assert_eq!(
             (e.code, &e.details["pointer"]),
             (Code::InvalidQuantity, &json!("/camera/eye/0"))
