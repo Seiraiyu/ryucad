@@ -1,0 +1,20 @@
+{
+  "constraints": {
+    "c1": {
+      "a": "l1",
+      "type": "horizontal"
+    },
+    "d1": {
+      "a": "p1",
+      "b": "p2",
+      "type": "distance",
+      "value": "10 mm"
+    }
+  },
+  "entities": {
+    },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "plane": "xy",
+  "type": "sketch"
+}

@@ -1,0 +1,22 @@
+{
+  "constraints": {
+    "c1": {
+      "a": "l1",
+      "type": "horizo mm"
+    }
+  },
+  "entities": {
+    "aux": {
+        "m": [
+        0,
+       0.015,
+        0.004
+      ],
+      "type": "point"
+    }
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "plane": "xy",
+  "type": "sketch"
+}

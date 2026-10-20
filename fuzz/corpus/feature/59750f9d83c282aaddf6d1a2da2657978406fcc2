@@ -1,0 +1,25 @@
+{
+  "constraints"
+:    { "c1": {
+      "a": "l1",
+      "type": "hlineon mm"
+    }
+  },
+  "entities": {
+    "ci1": {
+      "construction": true,
+      "end": "p6",
+      "start": "p5",
+      "type": "line"
+    },
+    "p1": {
+      "m": [
+        ],
+      "type": "point"
+    }
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "plane": "xy",
+  "type": "sketch"
+}

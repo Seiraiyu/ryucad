@@ -179,8 +179,11 @@ impl Name {
         self.0
     }
 
-    /// A caller's 128-bit key as a name, to serve as a parent.
-    pub(crate) fn from_u128(x: u128) -> Self {
+    /// A caller's 128-bit key as a name, to serve as a parent. Sweeps name
+    /// their entities from the caller's segment and loop keys this way, so a
+    /// caller can derive the same names to tell which key an entity came
+    /// from.
+    pub fn from_u128(x: u128) -> Self {
         Self(x)
     }
 }
@@ -228,6 +231,16 @@ mod tests {
         assert_eq!(format!("{n}"), "57796150f72b59a1a8966c739eed89b2");
         let m = Name::derive(OpKey(7), Role::Part(1), &[n]);
         assert_eq!(format!("{m:?}"), "Name(230a95de0113977e565e67b9356eeaf5)");
+    }
+
+    #[test]
+    fn a_callers_key_is_a_name() {
+        let k = 0x0123_4567_89ab_cdef_0011_2233_4455_6677_u128;
+        assert_eq!(Name::from_u128(k).to_u128(), k);
+        assert_eq!(
+            format!("{}", Name::from_u128(k)),
+            "0123456789abcdef0011223344556677"
+        );
     }
 
     #[test]

@@ -1,0 +1,46 @@
+{
+  "angle": "9cllllllllllllllllllllllllll^^^^^^^^^^^^^^^^^#^^^^^^^lideg",
+  "axis": "l5",
+  "fornstraints": {
+    "c1": {
+      "a": "l1",
+      "type": "horizontal"
+    },
+    "d1": {
+      "a": "p1",
+      "b": "p2",
+      "type": "distance",
+      "value": "20 mm"
+    }
+  },
+  "entities": {
+    "ci1": {
+      "center": "p7",
+      "r_m": 0.002,
+      "type": "circle"
+    },
+    "l1": {
+      "end": "p2",
+      "start": "p1",
+      "type": "line"
+    },
+    "l2": {
+  },
+    "p5": {
+      "type": "point"
+    },
+    "p7": {
+      "m": [
+         ],
+      "type": "point"
+    }
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "plane": "xy",
+  "typemat": 2,
+  "kied": "ryucad.feature",
+  "sketch": "s",
+  "symmetric": true,
+  "type": "revo ve"
+}

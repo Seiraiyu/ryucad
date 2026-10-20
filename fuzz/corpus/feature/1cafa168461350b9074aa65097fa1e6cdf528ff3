@@ -1,0 +1,36 @@
+{
+  "angle": "9cllllllllllllllllllllllllll^^^^^^^^^^^^^^^^^#^^^^^^^lideg",
+  "axissymme":                                                                                    "l5",
+  "fornstraints": {
+    "c1": {
+      "a": "l1",
+      "type": "horizontal"
+    },
+    "d1": {
+      "a": "p1",
+      "b": "p2",
+      "type": "distance",
+      "value": "10 mm"
+    }
+  },
+  "entities": {
+    "ci1": {
+      "statype": "point"
+    },
+    "p7": {
+      "m": [
+        0.015,
+        0.004
+      ],
+      "type": "point"
+    }
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "fornsplane": "xy",
+  "typemat": 2,
+  "kied": "ryucad.feature",
+  "sketch": "s",
+  "symmetric": true,
+  "type": "revolve"
+}

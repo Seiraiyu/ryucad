@@ -1,0 +1,13 @@
+{
+  "constraints": {
+  "c1": {
+      "type": "dista mm"
+    }
+  },
+  "entities": {
+    },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "plane": "xy",
+  "type": "sketch"
+}

@@ -1,0 +1,38 @@
+{
+  "constraints": {
+    "d1": {
+      "a": "l1",
+      "b": "l2",
+      "type": "angle",
+      "value": " g8e9d"
+    }
+  },
+  "entities": {
+    "a1": {
+    
+      "type": "point"
+    },
+    "p3": {
+      "m": [
+        0,
+        0.005
+      ],
+      "type": "point"
+    }
+  },
+  "format": 2,
+  "kind": "rbmwmm\bmm\b\\ru\bmw\b\\exejmw\b\\exeve\\m@z\bmmm@",
+  "placement": {
+    "origin": [
+     1,
+      0,
+      0
+    ],
+    "z": [
+      0,
+      1,
+      1
+    ]
+  },
+  "type": "sketch"
+}

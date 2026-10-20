@@ -1,11 +1,12 @@
 //! Bit-exact determinism of everything ryucad computes from files. Every CI
 //! platform and CPU level must reproduce `tests/golden/rebuild.txt`:
-//! expressions, rebuilt bodies, display meshes, and the pixels of renders. After
+//! expressions, rebuilt bodies, display meshes, the pixels of renders, and
+//! solved sketches and the bodies swept from them. After
 //! a deliberate change, regenerate with
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
 
-use ryucad::doc::files::{Feature, FeatureType, PartFile, Placement};
+use ryucad::doc::files::{Feature, PartFile, Placement, Primitive, PrimitiveType};
 use ryucad::doc::id::Id;
 use ryucad::doc::project::Part;
 use ryucad::rebuild::{placement, rebuild_part};
@@ -120,27 +121,27 @@ fn rebuild_section(golden: &mut Golden) {
     let mut order = Vec::new();
     let mut features = std::collections::BTreeMap::new();
     for i in 0..120 {
-        let ty = FeatureType::ALL[i % 5];
+        let ty = PrimitiveType::ALL[i % 5];
         let q = |g: &mut Lcg| Quantity::parse(&format!("{} mm", decimal(g)), Unit::Mm).unwrap();
         let mut params = std::collections::BTreeMap::new();
         for name in ty.required() {
             params.insert(name.to_string(), q(&mut g));
         }
-        if ty == FeatureType::Torus {
+        if ty == PrimitiveType::Torus {
             // The tube must be thinner than the ring.
             let major = params["major_radius"].meters();
             let minor = Quantity::parse(&format!("{} m", major / 3.0), Unit::Mm).unwrap();
             params.insert("minor_radius".into(), minor);
         }
-        if ty == FeatureType::Cone && i % 2 == 0 {
+        if ty == PrimitiveType::Cone && i % 2 == 0 {
             params.insert("top_radius".into(), q(&mut g));
         }
         let id = Id::parse(&format!("f{i}"), "feature").unwrap();
-        let feature = Feature {
+        let feature = Feature::Primitive(Primitive {
             ty,
             params,
             placement: random_placement(&mut g),
-        };
+        });
         order.push(id.clone());
         features.insert(id, Ok(feature));
     }
@@ -156,7 +157,7 @@ fn rebuild_section(golden: &mut Golden) {
     let result = rebuild_part(&part);
     assert_eq!(result.failed(), 0);
     for (_, b) in &result.features {
-        s.str(&b.as_ref().unwrap().body.dump());
+        s.str(&b.as_ref().unwrap().body().unwrap().body.dump());
     }
     s.str(&result.hash);
 }
@@ -275,6 +276,102 @@ fn render_section(golden: &mut Golden) {
     }
 }
 
+/// A part with a sketch of each kind of curve, swept every way: a slot
+/// with a round hole, extruded and revolved part way and all the way.
+fn swept() -> (tempfile::TempDir, ryucad::session::Session) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap()).unwrap()
+    };
+    call(&mut s, "part.create", serde_json::json!({"part": "sw"}));
+    call(
+        &mut s,
+        "param.set",
+        serde_json::json!({"part": "sw", "parameters": {"len": "23.7 mm"}}),
+    );
+    call(
+        &mut s,
+        "feature.add",
+        serde_json::json!({"part": "sw", "type": "sketch", "id": "slot",
+                           "placement": {"origin": ["3 mm", "-2 mm", "1.5 mm"], "z": [0.2, 0.3, 1]}}),
+    );
+    let ops = serde_json::json!([
+        {"op": "add", "id": "c1", "type": "point", "at": [8, 6]},
+        {"op": "add", "id": "c2", "type": "point", "at": [30, 7]},
+        {"op": "add", "id": "p1", "type": "point", "at": [8, 1]},
+        {"op": "add", "id": "p2", "type": "point", "at": [30, 2]},
+        {"op": "add", "id": "p3", "type": "point", "at": [30, 12]},
+        {"op": "add", "id": "p4", "type": "point", "at": [8, 11]},
+        {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
+        {"op": "add", "id": "a1", "type": "arc", "center": "c2", "start": "p2", "end": "p3"},
+        {"op": "add", "id": "l2", "type": "line", "start": "p3", "end": "p4"},
+        {"op": "add", "id": "a2", "type": "arc", "center": "c1", "start": "p4", "end": "p1"},
+        {"op": "add", "id": "h", "type": "circle", "center": "c1", "r": 2},
+        {"op": "add", "id": "ax", "type": "line", "construction": true, "start": "q1", "end": "q2"},
+        {"op": "add", "id": "q1", "type": "point", "at": [0, -3]},
+        {"op": "add", "id": "q2", "type": "point", "at": [0, 20]},
+        {"op": "add", "type": "tangent", "a": "l1", "b": "a1"},
+        {"op": "add", "type": "tangent", "a": "l2", "b": "a1"},
+        {"op": "add", "type": "tangent", "a": "l2", "b": "a2"},
+        {"op": "add", "type": "tangent", "a": "l1", "b": "a2"},
+        {"op": "add", "type": "equal", "a": "a1", "b": "a2"},
+        {"op": "add", "type": "radius", "a": "a1", "value": "5.25 mm"},
+        {"op": "add", "type": "distance", "a": "c1", "b": "c2", "value": "len"},
+        {"op": "add", "type": "angle", "a": "ax", "b": "l1", "value": "-80 deg"},
+        {"op": "add", "type": "vertical", "a": "ax"},
+        {"op": "add", "type": "fix", "a": "q1"},
+        {"op": "add", "type": "fix", "a": "c1"}
+    ]);
+    // The axis's points come after the line that uses them in the batch.
+    let mut ops = ops.as_array().unwrap().clone();
+    let axis = ops.remove(11);
+    ops.insert(13, axis);
+    call(
+        &mut s,
+        "sketch.edit",
+        serde_json::json!({"part": "sw", "sketch": "slot", "ops": ops}),
+    );
+    for f in [
+        serde_json::json!({"type": "extrude", "id": "plate", "sketch": "slot",
+                           "extent": {"type": "symmetric", "length": "4.4 mm"}}),
+        serde_json::json!({"type": "extrude", "id": "boss", "sketch": "slot", "loops": ["h"],
+                           "extent": {"length": "len / 3"}, "reverse": true}),
+        serde_json::json!({"type": "revolve", "id": "ring", "sketch": "slot", "axis": "ax",
+                           "angle": "full"}),
+        serde_json::json!({"type": "revolve", "id": "arch", "sketch": "slot", "axis": "ax",
+                           "angle": "137.5 deg", "symmetric": true, "loops": ["l1"]}),
+    ] {
+        let mut f = f;
+        f["part"] = serde_json::json!("sw");
+        call(&mut s, "feature.add", f);
+    }
+    (dir, s)
+}
+
+/// The solved sketch, every swept body bit for bit, and their display
+/// meshes.
+fn sweeps_section(golden: &mut Golden) {
+    let mut s = golden.section("sweeps");
+    let (dir, mut session) = swept();
+    let text = std::fs::read_to_string(dir.path().join("parts/sw/features/slot.json")).unwrap();
+    s.str(&text);
+    let part = Id::parse("sw", "part").unwrap();
+    let result = session.rebuilt(&part).unwrap().clone();
+    assert_eq!(result.failed(), 0, "{:?}", result.features);
+    for (_, o) in &result.features {
+        match o.as_ref().unwrap().body() {
+            Some(b) => s.str(&b.body.dump()),
+            None => s.str(o.as_ref().unwrap().hash()),
+        }
+    }
+    s.str(&result.hash);
+    let meshes =
+        ryucad::server::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
+    s.str(&format!("{:x}", md(&ryucad::mesh::encode(&meshes))));
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -287,5 +384,6 @@ fn determinism() {
     rebuild_section(&mut golden);
     display_section(&mut golden);
     render_section(&mut golden);
+    sweeps_section(&mut golden);
     golden.finish();
 }

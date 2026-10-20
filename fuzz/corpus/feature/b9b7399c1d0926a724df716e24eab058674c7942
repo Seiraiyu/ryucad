@@ -1,0 +1,10 @@
+{
+  "extent": {
+    "lgth": "3 md"
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "ri1rse": true,
+  "sketch": "s",
+  "type": "extrude"
+}

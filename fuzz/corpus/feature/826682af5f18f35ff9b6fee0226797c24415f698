@@ -1,0 +1,37 @@
+{
+  "constraints": {
+    "c1": {
+      "a": "l1",
+      "type": "horizontal"
+    },
+    "d1": {
+      "a": "p1",
+      "b": "p2",
+      "type": "distance",
+      "value": "76 mm44444444444444444444444444444444444444444444"
+    }
+  },
+  "entities": {
+    "ci1": {
+      "center": "p7",
+      "r_m": 0.002,
+      "type": "circle"
+    },
+    "l1": {
+      "end": "p2",
+      "start": "p1",
+      "type": "line"
+     },
+    "p7": {
+      "m": [
+        0.015,
+        0.004
+      ],
+      "type": "point"
+    }
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "plane": "xy",
+  "type": "sketch"
+}

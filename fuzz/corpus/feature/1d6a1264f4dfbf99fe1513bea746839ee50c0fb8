@@ -1,0 +1,11 @@
+{
+  "extent": {
+    "length": "3 mm",
+    "type": "bpind"
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "reverse": true,
+  "sketch": "s",
+  "type": "extrude"
+}

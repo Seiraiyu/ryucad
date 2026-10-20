@@ -172,14 +172,45 @@ pub fn literal_unit(s: &str) -> Option<(f64, Dim)> {
 /// Every unit name, for messages and reserved names.
 pub const UNIT_NAMES: [&str; 8] = ["m", "cm", "mm", "um", "in", "ft", "deg", "rad"];
 
-/// A length as written and its value in meters. Usually a literal,
-/// `<number> <unit>`; it may be any [`Expr`] that gives a length, such as
-/// `2 * wall + 3 mm`, whose value depends on the part's parameters.
+/// A length or an angle as written, and its SI value (meters or
+/// radians). Usually a literal, `<number> <unit>`; it may be any [`Expr`]
+/// that gives the right kind, such as `2 * wall + 3 mm`, whose value
+/// depends on the part's parameters.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Quantity {
     text: String,
-    meters: f64,
+    si: f64,
     literal: bool,
+    dim: Dim,
+}
+
+/// What a field holds, and how a bare number in it reads: a length in
+/// the default unit, or an angle in degrees.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Field {
+    Length(Unit),
+    Angle,
+}
+
+impl Field {
+    fn dim(self) -> Dim {
+        match self {
+            Field::Length(_) => Dim::LENGTH,
+            Field::Angle => Dim::ANGLE,
+        }
+    }
+
+    /// The factor and name of a literal's unit: the default for a bare
+    /// number, else one of the field's own units.
+    fn unit(self, rest: &str) -> Option<(f64, String)> {
+        match (self, rest) {
+            (Field::Length(u), "") => Some((u.factor(), u.to_string())),
+            (Field::Length(_), r) => Unit::parse(r).map(|u| (u.factor(), u.to_string())),
+            (Field::Angle, "" | "deg") => Some((DEG, "deg".to_owned())),
+            (Field::Angle, "rad") => Some((1.0, "rad".to_owned())),
+            (Field::Angle, _) => None,
+        }
+    }
 }
 
 impl Quantity {
@@ -195,26 +226,36 @@ impl Quantity {
     /// expression reads. Only a string that is nothing but a number takes
     /// `default`; inside an expression a bare number is a plain number.
     pub fn eval(s: &str, default: Unit, lookup: &dyn Fn(&str) -> Result<Val>) -> Result<Quantity> {
+        Quantity::eval_as(s, Field::Length(default), lookup)
+    }
+
+    /// A quantity for `field`: a length, or an angle (`15 deg`, `0.2 rad`,
+    /// or a bare number of degrees).
+    pub fn eval_as(
+        s: &str,
+        field: Field,
+        lookup: &dyn Fn(&str) -> Result<Val>,
+    ) -> Result<Quantity> {
         let t = s.trim();
         let end = number_len(t);
         if end > 0 {
             let (number, rest) = t.split_at(end);
-            let rest = rest.trim_start();
-            let unit = if rest.is_empty() {
-                Some(default)
-            } else {
-                Unit::parse(rest)
-            };
-            if let Some(unit) = unit {
-                return Quantity::literal(s, number, unit);
+            if let Some(unit) = field.unit(rest.trim_start()) {
+                return Quantity::literal(s, number, unit, field.dim());
             }
         }
         let e = Expr::parse(t)?;
         let v = e.eval(lookup)?;
-        if v.dim != Dim::LENGTH {
+        let want = field.dim();
+        if v.dim != want {
             return Err(Error::new(
                 Code::UnitMismatch,
-                format!("{t} is a {}; a length goes here", v.dim.name()),
+                format!(
+                    "{t} is a {}; a{} {} goes here",
+                    v.dim.name(),
+                    if want == Dim::ANGLE { "n" } else { "" },
+                    want.name()
+                ),
             )
             .with("value", t)
             .with("at", e.text())
@@ -222,26 +263,28 @@ impl Quantity {
         }
         Ok(Quantity {
             text: e.text().to_owned(),
-            meters: v.x,
+            si: v.x,
             literal: e.is_literal(),
+            dim: want,
         })
     }
 
     /// The phase 0 form, exactly: the nearest f64 to the decimal, times the
     /// unit's factor.
-    fn literal(s: &str, number: &str, unit: Unit) -> Result<Quantity> {
+    fn literal(s: &str, number: &str, (factor, unit): (f64, String), dim: Dim) -> Result<Quantity> {
         let bad = |why: &str| {
             Error::new(Code::InvalidQuantity, format!("bad quantity {s:?}: {why}")).with("value", s)
         };
         let value: f64 = number.parse().map_err(|_| bad("expected a number"))?;
-        let meters = value * unit.factor();
-        if !meters.is_finite() {
+        let si = value * factor;
+        if !si.is_finite() {
             return Err(bad("too large"));
         }
         Ok(Quantity {
             text: format!("{number} {unit}"),
-            meters,
+            si,
             literal: true,
+            dim,
         })
     }
 
@@ -257,9 +300,18 @@ impl Quantity {
         default: Unit,
         lookup: &dyn Fn(&str) -> Result<Val>,
     ) -> Result<Quantity> {
+        Quantity::from_json_as(v, Field::Length(default), lookup)
+    }
+
+    /// A quantity for `field` from JSON: a string, or a bare number.
+    pub fn from_json_as(
+        v: &Value,
+        field: Field,
+        lookup: &dyn Fn(&str) -> Result<Val>,
+    ) -> Result<Quantity> {
         match v {
-            Value::String(s) => Quantity::eval(s, default, lookup),
-            Value::Number(n) => Quantity::parse(&n.to_string(), default),
+            Value::String(s) => Quantity::eval_as(s, field, lookup),
+            Value::Number(n) => Quantity::eval_as(&n.to_string(), field, &no_parameters),
             _ => Err(Error::new(
                 Code::InvalidQuantity,
                 format!("expected a quantity string such as \"10 mm\", got {v}"),
@@ -269,7 +321,18 @@ impl Quantity {
     }
 
     pub fn meters(&self) -> f64 {
-        self.meters
+        debug_assert_eq!(self.dim, Dim::LENGTH);
+        self.si
+    }
+
+    pub fn radians(&self) -> f64 {
+        debug_assert_eq!(self.dim, Dim::ANGLE);
+        self.si
+    }
+
+    /// What it measures: a length or an angle.
+    pub fn dim(&self) -> Dim {
+        self.dim
     }
 
     /// Whether it is a literal (`3 mm`, `-0.5 in`) rather than an
@@ -284,10 +347,11 @@ impl Quantity {
         self.text.clone()
     }
 
-    /// How output reports a quantity: as written, and in meters; `expr`
-    /// marks one that isn't a literal.
+    /// How output reports a quantity: as written, and in meters (`m`) or
+    /// radians (`rad`); `expr` marks one that isn't a literal.
     pub fn report(&self) -> Value {
-        let mut v = json!({"value": self.text, "m": self.meters});
+        let mut v = json!({"value": self.text});
+        v[self.dim.key()] = json!(self.si);
         if !self.literal {
             v["expr"] = json!(true);
         }
@@ -441,6 +505,50 @@ mod tests {
     #[test]
     fn report_gives_both_forms() {
         assert_eq!(q("10 mm").report(), json!({"value": "10 mm", "m": 0.01}));
+    }
+
+    fn angle(s: &str) -> Result<Quantity> {
+        Quantity::eval_as(s, Field::Angle, &no_parameters)
+    }
+
+    #[test]
+    fn angles_are_degrees_unless_they_say_radians() {
+        for (s, text, rad) in [
+            ("90", "90 deg", 90.0 * DEG),
+            ("15 deg", "15 deg", 15.0 * DEG),
+            ("15deg", "15 deg", 15.0 * DEG),
+            ("0.5 rad", "0.5 rad", 0.5),
+            ("-30", "-30 deg", -30.0 * DEG),
+        ] {
+            let a = angle(s).unwrap();
+            assert_eq!(
+                (a.text(), a.radians(), a.is_literal()),
+                (text.to_owned(), rad, true),
+                "{s}"
+            );
+            assert_eq!(a.dim(), Dim::ANGLE);
+        }
+        assert_eq!(
+            angle("90").unwrap().report(),
+            json!({"value": "90 deg", "rad": 90.0 * DEG})
+        );
+        // An expression of an angle; a length or a number is refused.
+        let half = angle("pi / 2 * 1 rad").unwrap();
+        assert_eq!(
+            (half.text(), half.radians()),
+            ("pi / 2 * 1 rad".to_owned(), core::f64::consts::FRAC_PI_2)
+        );
+        assert!(!half.is_literal());
+        for s in ["10 mm", "(2)", "1 furlong"] {
+            assert_ne!(angle(s).unwrap_err().code, Code::Internal, "{s}");
+        }
+        let e = angle("10 mm").unwrap_err();
+        assert_eq!(
+            (e.code, e.details["kind"].as_str()),
+            (Code::UnitMismatch, Some("length"))
+        );
+        let x = Quantity::from_json_as(&json!(45), Field::Angle, &no_parameters).unwrap();
+        assert_eq!(x.text(), "45 deg");
     }
 
     #[test]

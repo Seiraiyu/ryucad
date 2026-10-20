@@ -80,6 +80,22 @@ pub enum Code {
     ParameterCycle,
     /// Refused: other features or parameters read what would go.
     HasDependents,
+    /// A sketch whose constraints can't all be made to hold.
+    SketchUnsolved,
+    /// A sketch edit that would leave constraints redundant or in conflict.
+    SketchOverconstrained,
+    /// A sketch's loops don't make a profile to sweep: they cross, don't
+    /// close, or there are none.
+    ProfileInvalid,
+    /// An extrude's length or a revolve's angle out of range.
+    InvalidExtent,
+    /// A feature that refers to one after it in the part, or to itself.
+    ReferenceForward,
+    /// A reference to the wrong kind of thing: a box as a sketch, a circle
+    /// as an axis.
+    ReferenceWrongKind,
+    /// A feature whose input, another feature, failed to rebuild.
+    DependencyFailed,
 }
 
 impl Code {

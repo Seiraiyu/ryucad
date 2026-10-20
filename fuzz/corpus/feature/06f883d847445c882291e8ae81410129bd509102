@@ -1,0 +1,16 @@
+{
+  "entities": {
+    "ci1": {
+      },
+    "01": {
+      "m": [
+      0.004
+      ],
+ "@type": "point"
+    }
+  },
+  "format": 1,
+  "kind": "ryucad.feature",
+  "plane": "xy",
+  "type": "sketch"
+}

@@ -39,7 +39,7 @@ impl Issue {
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 14] = [
+pub const CODES: [(&str, &str); 15] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -54,6 +54,7 @@ pub const CODES: [(&str, &str); 14] = [
     ("non_canonical", "warning"),
     ("format_too_new", "error"),
     ("cloud_sync_folder", "warning"),
+    ("sketch_stale", "warning"),
 ];
 
 fn issue(code: &'static str, files: Vec<String>, message: String) -> Issue {
@@ -414,8 +415,23 @@ fn diagnose_part(root: &Path, part: &str, unit: Unit, issues: &mut Vec<Issue>) {
             Read::Missing => {}
             Read::Bad(i) => issues.push(i),
             Read::Json(v, canonical) => match Feature::from_json(&v, unit, &env) {
-                Ok(_) if !canonical => issues.push(non_canonical(&rel)),
-                Ok(_) => {}
+                Ok(feature) => {
+                    if !canonical {
+                        issues.push(non_canonical(&rel));
+                    }
+                    if solved_sketch(f, &feature).is_some() {
+                        // Its parameters are part of why, and of the repair's basis.
+                        let mut files = vec![rel.clone()];
+                        if root.join(&params).is_file() {
+                            files.push(params.clone());
+                        }
+                        issues.push(issue(
+                            "sketch_stale",
+                            files,
+                            format!("{rel}: its stored positions don't satisfy its constraints"),
+                        ));
+                    }
+                }
                 Err(e) if e.details.get("parameters").is_some() => {}
                 Err(e) => issues.push(document_issue(&rel, &e)),
             },
@@ -478,6 +494,33 @@ fn diagnose_part(root: &Path, part: &str, unit: Unit, issues: &mut Vec<Issue>) {
             ));
         }
     }
+}
+
+/// A sketch whose stored positions don't hold, solved; `None` for any
+/// other feature, and for a sketch that is current or can't be solved.
+fn solved_sketch(id: &str, f: &Feature) -> Option<Feature> {
+    let id = Id::parse(id, "feature").ok()?;
+    let solved = crate::sketch::solve(&id, f.sketch()?).ok()?;
+    solved.stale.then_some(Feature::Sketch(solved.sketch))
+}
+
+/// A feature file as it would be with its sketch solved, read with the
+/// project's unit and the part's parameters as they are now.
+fn solved_file(root: &Path, rel: &str) -> Option<Vec<u8>> {
+    let unit = match read(root, MANIFEST) {
+        Read::Json(v, _) => Manifest::from_json(&v).ok()?.default_unit,
+        _ => Unit::Mm,
+    };
+    let env = match read(root, &format!("parts/{}/parameters.json", part_of(rel))) {
+        Read::Missing => Env::empty(),
+        Read::Json(v, _) => ParametersFile::from_json(&v).ok()?.env(),
+        Read::Bad(_) => return None,
+    };
+    let Read::Json(v, _) = read(root, rel) else {
+        return None;
+    };
+    let f = Feature::from_json(&v, unit, &env).ok()?;
+    Some(canonical_bytes(&solved_sketch(stem_of(rel), &f)?.to_json()))
 }
 
 /// A way to fix an issue: the exact file changes, and any parameters it
@@ -793,6 +836,16 @@ fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<
                 });
             }
         }
+        "sketch_stale" => {
+            if let Some(bytes) = solved_file(root, first) {
+                out.push(Repair {
+                    id: id("solve"),
+                    summary: format!("write {first} with its positions solved"),
+                    changes: vec![write(first, bytes)],
+                    params: Vec::new(),
+                });
+            }
+        }
         "non_canonical" => {
             if let Read::Json(v, _) = read(root, first) {
                 out.push(Repair {
@@ -988,6 +1041,46 @@ pub(crate) mod tests {
             "sync_conflict_copy",
             vec!["parts/p/parameters (1).json".to_owned(), params.to_owned()]
         )));
+    }
+
+    #[test]
+    fn a_stale_sketch_is_solved_and_written() {
+        let dir = healthy();
+        let r = dir.path();
+        let params = "parts/p/parameters.json";
+        let s = "parts/p/features/s.json";
+        let width = |w: &str| {
+            canonical::to_string(&json!({"format": 1, "kind": "ryucad.parameters",
+                                         "parameters": {"width": w}}))
+        };
+        w(r, params, &width("20 mm"));
+        w(
+            r,
+            s,
+            &canonical::to_string(&crate::doc::sketch::tests::rectangle()),
+        );
+        w(
+            r,
+            "parts/p/part.json",
+            &canonical::to_string(&json!({"features": ["a", "b", "s"], "format": 1,
+                                          "kind": "ryucad.part"})),
+        );
+        assert_eq!(codes(r), []);
+        // Edited behind ryucad's back: reported, never written.
+        w(r, params, &width("15 mm"));
+        assert_eq!(
+            codes(r),
+            [("sketch_stale", vec![s.to_owned(), params.to_owned()])]
+        );
+        let before = fs::read_to_string(r.join(s)).unwrap();
+        let repairs = offered(r);
+        assert_eq!(fs::read_to_string(r.join(s)).unwrap(), before);
+        assert_eq!(repairs.keys().collect::<Vec<_>>(), ["sketch_stale:solve:s"]);
+        fix(r, &[&repairs["sketch_stale:solve:s"]], Params::default());
+        assert_eq!(codes(r), []);
+        // A sketch that can't be solved isn't stale, it's failing: rebuild says so.
+        w(r, params, &width("50 mm"));
+        assert_eq!(codes(r), []);
     }
 
     #[test]

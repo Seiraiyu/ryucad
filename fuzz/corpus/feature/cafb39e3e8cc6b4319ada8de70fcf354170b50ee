@@ -1,0 +1,11 @@
+{
+  "extent": {
+    "length": "; mm",
+    "type":" pbind"
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "rci1rse": true,
+  "sketch": "s",
+  "type": "extrude"
+}

@@ -1,0 +1,25 @@
+{
+  "constraints": {
+    "c1": {
+      "a": "Q1",
+      "lue": "76 mm"
+    }
+  },
+  "placement": {
+    "ci1": {
+   "type": "circle"
+    },
+    "l1": {
+      "end": "p2",
+      "start": "p1",
+      "type": "line"
+    },
+    "l2": {
+      "end": "p3nt"
+    }
+  },
+  "format": 1,
+  "kind": "ryucad.feature",
+  "plane": "xy",
+  "type": "sketch"
+}

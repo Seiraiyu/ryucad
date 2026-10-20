@@ -381,7 +381,7 @@ pub fn write_json(path: &Path, v: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::files::{FeatureType, Placement};
+    use crate::doc::files::{Placement, Primitive, PrimitiveType};
     use crate::units::{Quantity, Unit};
 
     fn id(s: &str) -> Id {
@@ -410,11 +410,11 @@ mod tests {
         )
         .unwrap();
         for (f, r) in [("a", "1"), ("b", "2")] {
-            let feature = Feature {
-                ty: FeatureType::Sphere,
+            let feature = Feature::Primitive(Primitive {
+                ty: PrimitiveType::Sphere,
                 params: [("radius".to_owned(), Quantity::parse(r, Unit::Mm).unwrap())].into(),
                 placement: Placement::identity(Unit::Mm),
-            };
+            });
             write_json(&feature_path(root, &p, &id(f)), &feature.to_json()).unwrap();
         }
         dir
@@ -428,7 +428,12 @@ mod tests {
         let part = project.part(&id("p")).unwrap();
         assert_eq!(part.order(), [id("a"), id("b")]);
         assert_eq!(
-            part.features[&id("b")].as_ref().unwrap().meters("radius"),
+            part.features[&id("b")]
+                .as_ref()
+                .unwrap()
+                .primitive()
+                .unwrap()
+                .meters("radius"),
             0.002
         );
         assert!(part.orphans().is_empty());
@@ -545,7 +550,7 @@ mod tests {
         assert_ne!(part.revision, before);
         assert_eq!(part.env.get("r").unwrap().x, 0.003);
         let f = part.features[&id("a")].as_ref().unwrap();
-        assert_eq!(f.meters("radius"), 0.006);
+        assert_eq!(f.primitive().unwrap().meters("radius"), 0.006);
         // The revision follows the parameters.
         write_json(
             &parameters_path(root, &p),
@@ -558,6 +563,8 @@ mod tests {
         assert_eq!(
             again.parts[&p].features[&id("a")]
                 .as_ref()
+                .unwrap()
+                .primitive()
                 .unwrap()
                 .meters("radius"),
             0.008

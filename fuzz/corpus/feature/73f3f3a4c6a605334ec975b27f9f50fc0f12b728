@@ -1,0 +1,13 @@
+{
+  "extent": {
+    "length": "3 mm",
+    "type":  2,
+  "kind": "ryucad.feature",
+ " reverse": true,
+  "sketch": "bd"
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "sketch": "s",
+  "type": "extrude"
+}

@@ -3,6 +3,8 @@
 //! the file system is [`super::project`]'s business.
 
 use super::id::Id;
+use super::sketch::Sketch;
+use super::sweep::{Extrude, Revolve};
 use crate::error::{Code, Error, Result};
 use crate::expr::{self, Env, Expr};
 use crate::units::{Quantity, Unit};
@@ -40,9 +42,9 @@ pub struct ParametersFile {
     pub parameters: BTreeMap<String, Expr>,
 }
 
-/// The primitive feature types of phase 0.
+/// The primitive types of phase 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum FeatureType {
+pub enum PrimitiveType {
     Box,
     Cylinder,
     Cone,
@@ -50,10 +52,19 @@ pub enum FeatureType {
     Torus,
 }
 
-/// A feature, `parts/<part>/features/<id>.json`.
+/// A feature, `parts/<part>/features/<id>.json`: its `type` says which.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Feature {
-    pub ty: FeatureType,
+pub enum Feature {
+    Primitive(Primitive),
+    Sketch(Sketch),
+    Extrude(Extrude),
+    Revolve(Revolve),
+}
+
+/// A primitive feature: one solid of a type, sized by its params.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Primitive {
+    pub ty: PrimitiveType,
     pub params: BTreeMap<String, Quantity>,
     pub placement: Placement,
 }
@@ -67,54 +78,46 @@ pub struct Placement {
     pub x: [f64; 3],
 }
 
-impl FeatureType {
-    pub const ALL: [FeatureType; 5] = [
-        FeatureType::Box,
-        FeatureType::Cylinder,
-        FeatureType::Cone,
-        FeatureType::Sphere,
-        FeatureType::Torus,
+impl PrimitiveType {
+    pub const ALL: [PrimitiveType; 5] = [
+        PrimitiveType::Box,
+        PrimitiveType::Cylinder,
+        PrimitiveType::Cone,
+        PrimitiveType::Sphere,
+        PrimitiveType::Torus,
     ];
 
     pub fn as_str(self) -> &'static str {
         match self {
-            FeatureType::Box => "box",
-            FeatureType::Cylinder => "cylinder",
-            FeatureType::Cone => "cone",
-            FeatureType::Sphere => "sphere",
-            FeatureType::Torus => "torus",
+            PrimitiveType::Box => "box",
+            PrimitiveType::Cylinder => "cylinder",
+            PrimitiveType::Cone => "cone",
+            PrimitiveType::Sphere => "sphere",
+            PrimitiveType::Torus => "torus",
         }
     }
 
-    pub fn parse(s: &str) -> Result<FeatureType> {
-        FeatureType::ALL
+    pub fn parse(s: &str) -> Result<PrimitiveType> {
+        PrimitiveType::ALL
             .into_iter()
             .find(|t| t.as_str() == s)
-            .ok_or_else(|| {
-                Error::new(
-                    Code::UnknownFeatureType,
-                    format!(
-                        "unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus"
-                    ),
-                )
-                .with("type", s)
-            })
+            .ok_or_else(|| unknown_type(s))
     }
 
     /// The required parameters, each a length greater than zero.
     pub fn required(self) -> &'static [&'static str] {
         match self {
-            FeatureType::Box => &["x", "y", "z"],
-            FeatureType::Cylinder | FeatureType::Cone => &["radius", "height"],
-            FeatureType::Sphere => &["radius"],
-            FeatureType::Torus => &["major_radius", "minor_radius"],
+            PrimitiveType::Box => &["x", "y", "z"],
+            PrimitiveType::Cylinder | PrimitiveType::Cone => &["radius", "height"],
+            PrimitiveType::Sphere => &["radius"],
+            PrimitiveType::Torus => &["major_radius", "minor_radius"],
         }
     }
 
     /// The optional parameters, each a length of zero or more.
     pub fn optional(self) -> &'static [&'static str] {
         match self {
-            FeatureType::Cone => &["top_radius"],
+            PrimitiveType::Cone => &["top_radius"],
             _ => &[],
         }
     }
@@ -252,8 +255,9 @@ pub fn expression(v: &Value) -> Result<Expr> {
     }
 }
 
-/// The expression strings in a feature's JSON: its params and the
-/// coordinates of its origin.
+/// The expression strings in a feature's JSON: its params, the
+/// coordinates of its origin, a sketch's dimensions, and a sweep's length
+/// or angle.
 fn expression_strings(v: &mut Value) -> Vec<&mut String> {
     let mut out = Vec::new();
     let Some(o) = v.as_object_mut() else {
@@ -273,6 +277,14 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
                     }));
                 }
             }
+            ("constraints", c) => out.extend(Sketch::expression_strings(c)),
+            ("extent", Value::Object(e)) => {
+                if let Some(Value::String(s)) = e.get_mut("length") {
+                    out.push(s);
+                }
+            }
+            // "full" is a word, not a parameter.
+            ("angle", Value::String(s)) if s != "full" => out.push(s),
             _ => {}
         }
     }
@@ -305,27 +317,47 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
     changed
 }
 
+/// The message for a `type` no feature has.
+fn unknown_type(s: &str) -> Error {
+    Error::new(
+        Code::UnknownFeatureType,
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve"),
+    )
+    .with("type", s)
+}
+
 impl Feature {
+    /// The `type` the file gives.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Feature::Primitive(p) => p.ty.as_str(),
+            Feature::Sketch(_) => "sketch",
+            Feature::Extrude(_) => "extrude",
+            Feature::Revolve(_) => "revolve",
+        }
+    }
+
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
-        let literal = self.params.values().all(Quantity::is_literal)
-            && self.placement.origin.iter().all(Quantity::is_literal);
-        if literal { 1 } else { FEATURE_FORMAT }
+        match self {
+            Feature::Primitive(p) => p.format(),
+            Feature::Sketch(s) => s.format(),
+            // New in format 2.
+            Feature::Extrude(_) | Feature::Revolve(_) => 2,
+        }
     }
 
     pub fn to_json(&self) -> Value {
-        let params: Map<String, Value> = self
-            .params
-            .iter()
-            .map(|(k, q)| (k.clone(), Value::String(q.text())))
-            .collect();
-        json!({
-            "format": self.format(),
-            "kind": FEATURE_KIND,
-            "params": params,
-            "placement": self.placement.to_json(),
-            "type": self.ty.as_str(),
-        })
+        let mut v = match self {
+            Feature::Primitive(p) => p.fields(),
+            Feature::Sketch(s) => s.fields(),
+            Feature::Extrude(e) => e.fields(),
+            Feature::Revolve(r) => r.fields(),
+        };
+        v["format"] = json!(self.format());
+        v["kind"] = json!(FEATURE_KIND);
+        v["type"] = json!(self.type_name());
+        v
     }
 
     /// Reads and validates a feature, its expressions reading `env`. Bare
@@ -333,16 +365,70 @@ impl Feature {
     pub fn from_json(v: &Value, default: Unit, env: &Env) -> Result<Feature> {
         let mut o = header(v, FEATURE_KIND, FEATURE_FORMAT)?;
         let ty = o.take("type")?;
-        let ty = FeatureType::parse(
-            ty.as_str()
-                .ok_or_else(|| invalid("/type", "type must be a string"))?,
-        )
-        .map_err(|e| e.with("pointer", "/type"))?;
-        let params = o.take("params")?;
-        let params = Feature::params_from_json(ty, &params, default, env)?;
-        let placement = Placement::from_json(&o.take("placement")?, default, "/placement", env)?;
+        let ty = ty
+            .as_str()
+            .ok_or_else(|| invalid("/type", "type must be a string"))?;
+        let f = match ty {
+            "sketch" => Feature::Sketch(Sketch::from_fields(&mut o, default, env)?),
+            "extrude" => Feature::Extrude(Extrude::from_fields(&mut o, default, env)?),
+            "revolve" => Feature::Revolve(Revolve::from_fields(&mut o, env)?),
+            _ => {
+                let ty = PrimitiveType::parse(ty).map_err(|e| e.with("pointer", "/type"))?;
+                Feature::Primitive(Primitive::from_fields(ty, &mut o, default, env)?)
+            }
+        };
         o.finish()?;
-        Ok(Feature {
+        Ok(f)
+    }
+
+    /// The primitive, if it is one.
+    pub fn primitive(&self) -> Option<&Primitive> {
+        match self {
+            Feature::Primitive(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// The sketch, if it is one.
+    pub fn sketch(&self) -> Option<&Sketch> {
+        match self {
+            Feature::Sketch(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The sketch an extrude or revolve sweeps.
+    pub fn swept(&self) -> Option<&Id> {
+        match self {
+            Feature::Extrude(e) => Some(&e.sketch),
+            Feature::Revolve(r) => Some(&r.sketch),
+            _ => None,
+        }
+    }
+}
+
+impl Primitive {
+    fn format(&self) -> u64 {
+        let literal = self.params.values().all(Quantity::is_literal)
+            && self.placement.origin.iter().all(Quantity::is_literal);
+        if literal { 1 } else { FEATURE_FORMAT }
+    }
+
+    /// Its fields in a feature file, besides the header.
+    fn fields(&self) -> Value {
+        let params: Map<String, Value> = self
+            .params
+            .iter()
+            .map(|(k, q)| (k.clone(), Value::String(q.text())))
+            .collect();
+        json!({"params": params, "placement": self.placement.to_json()})
+    }
+
+    fn from_fields(ty: PrimitiveType, o: &mut Obj, default: Unit, env: &Env) -> Result<Primitive> {
+        let params = o.take("params")?;
+        let params = Primitive::params_from_json(ty, &params, default, env)?;
+        let placement = Placement::from_json(&o.take("placement")?, default, "/placement", env)?;
+        Ok(Primitive {
             ty,
             params,
             placement,
@@ -352,7 +438,7 @@ impl Feature {
     /// Validates a params object for `ty`: every required parameter present
     /// and positive, optional ones non-negative, no others.
     pub fn params_from_json(
-        ty: FeatureType,
+        ty: PrimitiveType,
         v: &Value,
         default: Unit,
         env: &Env,
@@ -392,7 +478,7 @@ impl Feature {
     }
 }
 
-fn param_error(ty: FeatureType, name: &str, at: &str, what: &str) -> Error {
+fn param_error(ty: PrimitiveType, name: &str, at: &str, what: &str) -> Error {
     let known = [ty.required(), ty.optional()].concat().join(", ");
     Error::new(
         Code::InvalidParam,
@@ -415,7 +501,7 @@ pub fn number(x: f64) -> Value {
     }
 }
 
-fn invalid(at: &str, msg: &str) -> Error {
+pub(crate) fn invalid(at: &str, msg: &str) -> Error {
     Error::new(Code::InvalidDocument, msg).with("pointer", at)
 }
 
@@ -458,13 +544,13 @@ fn migrate(format: u64, newest: u64) {
 }
 
 /// The fields of a JSON object, taken one by one so leftovers are errors.
-struct Obj<'a> {
+pub(crate) struct Obj<'a> {
     map: BTreeMap<&'a str, &'a Value>,
     at: String,
 }
 
 impl<'a> Obj<'a> {
-    fn new(v: &'a Value, at: &str) -> Result<Obj<'a>> {
+    pub(crate) fn new(v: &'a Value, at: &str) -> Result<Obj<'a>> {
         let map = v
             .as_object()
             .ok_or_else(|| invalid(at, "expected a JSON object"))?;
@@ -474,7 +560,12 @@ impl<'a> Obj<'a> {
         })
     }
 
-    fn take(&mut self, key: &str) -> Result<Value> {
+    /// A field that may be left out.
+    pub(crate) fn take_opt(&mut self, key: &str) -> Option<Value> {
+        self.map.remove(key).cloned()
+    }
+
+    pub(crate) fn take(&mut self, key: &str) -> Result<Value> {
         self.map.remove(key).cloned().ok_or_else(|| {
             invalid(
                 &format!("{}/{key}", self.at),
@@ -483,7 +574,7 @@ impl<'a> Obj<'a> {
         })
     }
 
-    fn finish(self) -> Result<()> {
+    pub(crate) fn finish(self) -> Result<()> {
         match self.map.keys().next() {
             None => Ok(()),
             Some(k) => Err(invalid(
@@ -516,6 +607,11 @@ fn vector(v: &Value, at: &str) -> Result<[f64; 3]> {
 mod tests {
     use super::*;
     use crate::doc::canonical;
+
+    /// The primitive a feature holds.
+    fn prim(f: &Feature) -> &Primitive {
+        f.primitive().expect("a primitive")
+    }
 
     fn cylinder_json() -> Value {
         json!({
@@ -556,8 +652,8 @@ mod tests {
     #[test]
     fn feature_reads_and_writes_explicit_units() {
         let f = Feature::from_json(&cylinder_json(), Unit::Mm, &Env::empty()).unwrap();
-        assert_eq!(f.ty, FeatureType::Cylinder);
-        assert_eq!(f.meters("radius"), 0.0125);
+        assert_eq!(prim(&f).ty, PrimitiveType::Cylinder);
+        assert_eq!(prim(&f).meters("radius"), 0.0125);
         assert_eq!(
             canonical::to_string(&f.to_json()),
             "{\n  \"format\": 1,\n  \"kind\": \"ryucad.feature\",\n  \"params\": {\n    \"height\": \"40 mm\",\n    \"radius\": \"12.5 mm\"\n  },\n  \"placement\": {\n    \"origin\": [\n      \"0 mm\",\n      \"0 mm\",\n      \"10 mm\"\n    ],\n    \"x\": [\n      1,\n      0,\n      0\n    ],\n    \"z\": [\n      0,\n      0,\n      1\n    ]\n  },\n  \"type\": \"cylinder\"\n}\n"
@@ -649,9 +745,7 @@ mod tests {
         assert!(Feature::from_json(&v, Unit::Mm, &Env::empty()).is_ok());
         v["params"]["top_radius"] = json!(0);
         assert_eq!(
-            Feature::from_json(&v, Unit::Mm, &Env::empty())
-                .unwrap()
-                .meters("top_radius"),
+            prim(&Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap()).meters("top_radius"),
             0.0
         );
         v["params"]["radius"] = json!(0);
@@ -720,8 +814,8 @@ mod tests {
         let mut v = cylinder_json();
         v["params"]["radius"] = json!("hole/2+1mm");
         let f = Feature::from_json(&v, Unit::Mm, &wall()).unwrap();
-        assert_eq!(f.meters("radius"), 0.004);
-        assert_eq!(f.params["radius"].text(), "hole / 2 + 1 mm");
+        assert_eq!(prim(&f).meters("radius"), 0.004);
+        assert_eq!(prim(&f).params["radius"].text(), "hole / 2 + 1 mm");
         assert_eq!(f.format(), 2);
         assert_eq!(f.to_json()["format"], 2);
         // Written at format 2, it reads back the same.
@@ -731,7 +825,7 @@ mod tests {
         );
         v["placement"]["origin"][2] = json!("-wall");
         let f = Feature::from_json(&v, Unit::Mm, &wall()).unwrap();
-        assert_eq!(f.placement.origin[2].meters(), -0.003);
+        assert_eq!(prim(&f).placement.origin[2].meters(), -0.003);
         for (radius, code) in [
             ("gap", Code::UnknownParameter),
             ("n", Code::UnitMismatch),

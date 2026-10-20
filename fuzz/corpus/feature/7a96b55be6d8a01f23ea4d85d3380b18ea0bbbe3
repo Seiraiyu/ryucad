@@ -1,0 +1,13 @@
+{ "format": 2,
+  "kind": "ryucad.feature",
+  "placement":  
+{   "origin": [
+  "    1 mm",
+      "2 mm",
+      "3333333333332.6600066666631 )m"
+   ],
+    "x": [
+     ]
+  },
+  "type": "sketch"
+}
