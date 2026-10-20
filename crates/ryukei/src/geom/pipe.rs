@@ -298,12 +298,12 @@ impl Pipe {
             .expect("a certified pipe has a frame on its spine")
     }
 
-    pub(super) fn point(&self, s: f64, t: f64) -> Point3 {
+    pub(crate) fn point(&self, s: f64, t: f64) -> Point3 {
         let [p, _] = self.jets_at(s, t);
         Point3::new(p[0].v, p[1].v, p[2].v)
     }
 
-    pub(super) fn eval(&self, s: f64, t: f64) -> SurfaceEval {
+    pub(crate) fn eval(&self, s: f64, t: f64) -> SurfaceEval {
         let [p, _] = self.jets_at(s, t);
         let part = |f: &dyn Fn(&Jet<f64>) -> f64| Vector3::new(f(&p[0]), f(&p[1]), f(&p[2]));
         SurfaceEval {
@@ -316,16 +316,16 @@ impl Pipe {
         }
     }
 
-    pub(super) fn normal(&self, s: f64, t: f64) -> Option<UnitVector3> {
+    pub(crate) fn normal(&self, s: f64, t: f64) -> Option<UnitVector3> {
         let [_, n] = self.jets_at(s, t);
         Vector3::new(n[0].v, n[1].v, n[2].v).normalize()
     }
 
-    pub(super) fn domain(&self) -> [[f64; 2]; 2] {
+    pub(crate) fn domain(&self) -> [[f64; 2]; 2] {
         [self.spine.domain(), [-PI, PI]]
     }
 
-    pub(super) fn periods(&self) -> (Option<f64>, Option<f64>) {
+    pub(crate) fn periods(&self) -> (Option<f64>, Option<f64>) {
         (self.spine.period(), Some(TAU))
     }
 
@@ -348,7 +348,7 @@ impl Pipe {
     /// along `p - c(s)` seen in the circle's plane: angle `θ` from its
     /// components along `e₁` and `e₂`. The least distance among them wins,
     /// ties going to the lowest parameter.
-    pub(super) fn project(&self, p: Point3) -> Projection<(f64, f64), Point3> {
+    pub(crate) fn project(&self, p: Point3) -> Projection<(f64, f64), Point3> {
         let mut ss = match (&self.spine, &self.flat) {
             (Curve::Nurbs(n), _) => n.stationary(p),
             (_, Some((n, reparam))) => n
@@ -565,4 +565,4 @@ fn worse(a: SurfaceBound, b: SurfaceBound) -> SurfaceBound {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

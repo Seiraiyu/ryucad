@@ -3,11 +3,11 @@ use crate::geom::{Circle, Cylinder, Ellipse, Frame, KnotVector, Line, Plane, Sph
 use core::f64::consts::FRAC_PI_2;
 use std::sync::Arc;
 
-const R: f64 = 0.25;
+pub(crate) const R: f64 = 0.25;
 
 /// A wavy cubic spine at height `R` over the plane `z = 0`: a ball of
 /// radius `R` on it rolls on the plane.
-fn on_plane() -> Pipe {
+pub(crate) fn on_plane() -> Pipe {
     let k = KnotVector::clamped(3, &[0.0, 1.0, 2.0], &[4, 1, 4]).unwrap();
     let pts = vec![
         Point3::new(0.0, 0.0, R),
@@ -23,7 +23,7 @@ fn on_plane() -> Pipe {
 /// An ellipse where a plane tilted by 30° about `x` meets the cylinder
 /// of radius `3 + R` about `z`: a ball on it rolls round the cylinder of
 /// radius 3.
-fn round_cylinder() -> Pipe {
+pub(crate) fn round_cylinder() -> Pipe {
     let tilt = 30f64.to_radians();
     let (s, c) = math::sin_cos(tilt);
     let major = Vector3::new(0.0, c, s);

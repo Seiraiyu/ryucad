@@ -15,6 +15,8 @@ mod face;
 mod fit;
 mod implicit;
 mod inface;
+#[allow(dead_code)] // Used by the tracer, from Task 10 on.
+mod pipe;
 mod solid;
 mod ss;
 mod ss_exact;

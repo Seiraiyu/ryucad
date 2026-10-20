@@ -19,7 +19,7 @@ mod frame;
 pub(crate) mod intersect2;
 pub(crate) mod jet;
 mod nurbs;
-mod pipe;
+pub(crate) mod pipe;
 mod point;
 mod project;
 mod surface;
