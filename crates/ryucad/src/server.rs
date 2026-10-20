@@ -784,13 +784,25 @@ fn sweep_from(
     unit: Unit,
     env: &Env,
 ) -> Result<Feature> {
-    let mut v = current.unwrap_or_else(|| json!({}));
+    // A new extrude's extent is blind unless it says otherwise.
+    let fresh = match ty {
+        "extrude" => json!({"extent": {"type": "blind"}}),
+        _ => json!({}),
+    };
+    let mut v = current.unwrap_or(fresh);
+    let o = v.as_object_mut().expect("an object");
     for (k, x) in given.fields.given() {
-        // No loops is every loop: nothing to write.
+        // No loops is every loop, and false the default: nothing to write.
         if (k == "loops" && x == json!([])) || x == json!(false) {
-            v.as_object_mut().expect("an object").remove(&k);
-        } else {
-            v[k] = x;
+            o.remove(&k);
+            continue;
+        }
+        // An extent's length or type alone keeps the other.
+        match (o.get_mut(&k), x) {
+            (Some(Value::Object(old)), Value::Object(new)) if k == "extent" => old.extend(new),
+            (_, x) => {
+                o.insert(k, x);
+            }
         }
     }
     let mut o = crate::doc::files::Obj::new(&v, "")?;
@@ -800,6 +812,21 @@ fn sweep_from(
     };
     o.finish()?;
     Ok(f)
+}
+
+/// The listed features that sweep `sketch`.
+pub(crate) fn sweeps_of(part: &Part, sketch: &Id) -> Vec<Id> {
+    part.order()
+        .iter()
+        .filter(|f| {
+            part.features
+                .get(*f)
+                .and_then(|r| r.as_ref().ok())
+                .and_then(Feature::swept)
+                == Some(sketch)
+        })
+        .cloned()
+        .collect()
 }
 
 /// Refuses a sweep that names what isn't there: its sketch must be a
@@ -1046,6 +1073,18 @@ fn feature_delete(
     if !p.features.contains_key(&fid) {
         return Err(no_feature(p, &fid));
     }
+    let users = sweeps_of(p, &fid);
+    if !users.is_empty() {
+        return Err(Error::new(
+            Code::HasDependents,
+            format!(
+                "{fid} is swept by {}; delete or change those first",
+                users.iter().map(Id::as_str).collect::<Vec<_>>().join(", ")
+            ),
+        )
+        .with("feature", &fid)
+        .with("features", users));
+    }
     let mut list = order(p)?;
     list.retain(|f| *f != fid);
     // The list first: a crash then leaves an unlisted file, never a listed
@@ -1083,7 +1122,16 @@ fn feature_move(
         return Err(Error::new(Code::Usage, "a feature can't move after itself"));
     }
     list.remove(from);
-    list.insert(insert_at(&list, position)?, fid);
+    list.insert(insert_at(&list, position)?, fid.clone());
+    // A sweep must still come after its sketch.
+    for f in &list {
+        if let Some(Ok(feature)) = p.features.get(f)
+            && let Some(sketch) = feature.swept()
+            && (*f == fid || *sketch == fid)
+        {
+            check_sketch(p, &list, f, sketch)?;
+        }
+    }
     let revision = save(session, &pid, &[], list.clone())?;
     Ok(json!({"features": list, "revision": revision}))
 }
@@ -2409,6 +2457,85 @@ pub(crate) mod tests {
         assert_eq!(b["error"]["code"], "dependency_failed");
         assert_eq!(b["error"]["details"]["dependency"], "s");
         assert_eq!(b["error"]["details"]["cause"], "sketch_unsolved");
+    }
+
+    #[test]
+    fn sweeps_keep_their_sketch_before_them() {
+        let (_dir, mut s) = with_sketch();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "id": "ball", "params": {"radius": 1}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "revolve", "id": "r", "sketch": "s", "axis": "l4",
+                    "angle": 90, "loops": ["l1"]}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "id": "e", "sketch": "s",
+                    "extent": {"type": "symmetric", "length": "4 mm"}}),
+        )
+        .unwrap();
+        let e = call(&mut s, "feature.delete", json!({"part": "p", "id": "s"})).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["features"]),
+            (Code::HasDependents, &json!(["r", "e"]))
+        );
+        let e = call(
+            &mut s,
+            "feature.move",
+            json!({"part": "p", "id": "s", "after": "e"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ReferenceForward);
+        let e = call(
+            &mut s,
+            "feature.move",
+            json!({"part": "p", "id": "r", "first": true}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ReferenceForward);
+        // Moving what nothing sweeps, or a sweep that stays behind its sketch, is fine.
+        call(
+            &mut s,
+            "feature.move",
+            json!({"part": "p", "id": "ball", "first": true}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.move",
+            json!({"part": "p", "id": "r", "after": "e"}),
+        )
+        .unwrap();
+        // What a sweep names stays in its sketch.
+        for gone in ["l4", "l1"] {
+            let e = call(
+                &mut s,
+                "sketch.edit",
+                json!({"part": "p", "sketch": "s", "ops": [{"op": "remove", "id": gone}]}),
+            )
+            .unwrap_err();
+            assert_eq!(
+                (e.code, &e.details["entity"]),
+                (Code::HasDependents, &json!(gone))
+            );
+        }
+        // An extent's length alone keeps its type.
+        let r = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "e", "extent": {"length": "8 mm"}}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["extent"]["type"], "symmetric");
+        assert_eq!(r["feature"]["extent"]["length"]["m"], 0.008);
     }
 
     #[test]

@@ -563,6 +563,22 @@ pub fn edit(
     let env = p.env.clone();
     let mut s = sketch_of(session, &pid, &fid)?;
     let applied = apply(&mut s, ops, unit, &env)?;
+    // What sweeps name must stay.
+    for f in server::sweeps_of(p, &fid) {
+        let names = match p.features[&f].as_ref().expect("a loaded sweep") {
+            Feature::Extrude(e) => e.loops.clone(),
+            Feature::Revolve(r) => [r.loops.clone(), vec![r.axis.clone()]].concat(),
+            _ => unreachable!("a sweep"),
+        };
+        if let Some(gone) = names.iter().find(|e| !s.entities.contains_key(*e)) {
+            return Err(Error::new(
+                Code::HasDependents,
+                format!("{f} names {gone}; change {f} first"),
+            )
+            .with("entity", gone)
+            .with("features", [&f]));
+        }
+    }
     let (solved, report) = solve_edited(&fid, &s, &applied.moved)?;
     if !report.converged {
         return Err(unsolved(&fid, &report));
