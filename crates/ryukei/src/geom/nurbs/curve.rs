@@ -209,6 +209,61 @@ impl NurbsCurve {
     pub fn curvature(&self, t: f64) -> Option<f64> {
         self.unit_eval(t).curvature()
     }
+
+    /// The point and its first three derivatives at `t`, from the Bézier
+    /// piece holding it: the derivatives of its homogeneous numerator
+    /// `A = Σ B w P` and denominator `W = Σ B w`, each by de Casteljau's
+    /// algorithm on its difference net, then the quotient rule. Periodic
+    /// curves wrap `t`; clamped ones extrapolate their end pieces.
+    #[allow(dead_code)] // Used by pipes, from Task 5 on.
+    pub(crate) fn jet3(&self, t: f64) -> [Vector3; 4] {
+        let t = self.spline.knots.wrap(t);
+        let pieces = self.pieces();
+        let k = pieces
+            .partition_point(|p| p.range[1] <= t)
+            .min(pieces.len() - 1);
+        let piece = &pieces[k];
+        let [r0, r1] = piece.range;
+        let h = r1 - r0;
+        let x = (t - r0) / h;
+        let mut a: Vec<Vector3> = piece.pts.iter().map(|q| q.p * q.w).collect();
+        let mut w: Vec<f64> = piece.pts.iter().map(|q| q.w).collect();
+        let (mut av, mut wv) = ([Vector3::ZERO; 4], [0.0; 4]);
+        let mut scale = 1.0;
+        for k in 0..4 {
+            if a.is_empty() {
+                break;
+            }
+            av[k] = casteljau(&a, x) * scale;
+            wv[k] = casteljau(&w, x) * scale;
+            let n = (a.len() - 1) as f64;
+            a = a.windows(2).map(|p| (p[1] - p[0]) * n).collect();
+            w = w.windows(2).map(|p| (p[1] - p[0]) * n).collect();
+            scale /= h;
+        }
+        // C = A / W, and C⁽ᵏ⁾ = (A⁽ᵏ⁾ - Σ binom(k, j) W⁽ʲ⁾ C⁽ᵏ⁻ʲ⁾) / W.
+        let c = av[0] / wv[0];
+        let d1 = (av[1] - c * wv[1]) / wv[0];
+        let d2 = (av[2] - d1 * (2.0 * wv[1]) - c * wv[2]) / wv[0];
+        let d3 = (av[3] - d2 * (3.0 * wv[1]) - d1 * (3.0 * wv[2]) - c * wv[3]) / wv[0];
+        [c, d1, d2, d3]
+    }
+}
+
+/// A polynomial in Bernstein form over `[0, 1]` at `x`, by de Casteljau's
+/// algorithm.
+#[allow(dead_code)] // Used by pipes, from Task 5 on.
+fn casteljau<V>(c: &[V], x: f64) -> V
+where
+    V: Copy + core::ops::Add<Output = V> + core::ops::Mul<f64, Output = V>,
+{
+    let mut q = c.to_vec();
+    for k in 1..q.len() {
+        for i in 0..q.len() - k {
+            q[i] = q[i] * (1.0 - x) + q[i + 1] * x;
+        }
+    }
+    q[0]
 }
 
 #[cfg(test)]
@@ -219,6 +274,37 @@ mod tests {
 
     fn close(a: Vector3, b: Vector3, tol: f64) -> bool {
         (a - b).length() <= tol
+    }
+
+    #[test]
+    fn third_derivatives() {
+        // A cubic polynomial piece over [1, 3], so h = 2: its third
+        // derivative is 6 (P3 - 3 P2 + 3 P1 - P0) / h³.
+        let k = KnotVector::clamped(3, &[1.0, 3.0], &[4, 4]).unwrap();
+        let p = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 2.0, 0.0),
+            Point3::new(3.0, -1.0, 1.0),
+            Point3::new(4.0, 0.0, 2.0),
+        ];
+        let c = NurbsCurve::new(k, p.to_vec(), None).unwrap();
+        let v = |i: usize| p[i].to_vector();
+        let d3 = (v(3) - v(2) * 3.0 + v(1) * 3.0 - v(0)) * (6.0 / 8.0);
+        for t in [1.0, 1.3, 2.0, 2.9, 3.0] {
+            let [x, a, b, d] = c.jet3(t);
+            let e = c.eval(t);
+            assert!(close(x, e.point.to_vector(), 1e-14));
+            assert!(close(a, e.d1, 1e-13) && close(b, e.d2, 1e-13));
+            assert!(close(d, d3, 1e-13), "{t}");
+        }
+        // A rational curve against differences of its second derivative.
+        let q = quarter();
+        for t in [0.1, 0.5, 0.8] {
+            let eps = 1e-5;
+            let fd = (q.eval(t + eps).d2 - q.eval(t - eps).d2) / (2.0 * eps);
+            assert!(close(q.jet3(t)[3], fd, 1e-7), "{t}");
+            assert!(close(q.jet3(t)[2], q.eval(t).d2, 1e-13));
+        }
     }
 
     /// The quarter of the unit circle from +x to +y, exactly.
