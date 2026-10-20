@@ -72,6 +72,9 @@ pub struct Model {
     pub parts: BTreeMap<String, Part>,
     /// Display meshes by part and feature, each for the body hash it says.
     pub meshes: BTreeMap<BodyKey, Arc<WireBody>>,
+    /// Meshes asked for and not yet answered, by the body hash they were
+    /// asked for at: a burst of changes asks for each body once.
+    pub asked: BTreeMap<BodyKey, String>,
     /// Bumped whenever anything here changes, so views know to redraw.
     pub generation: u64,
 }
@@ -101,10 +104,40 @@ impl Model {
         wanted
     }
 
+    /// The bodies of `keys` not already asked for at their current hash,
+    /// with that hash, now noted as asked for.
+    pub fn ask(&mut self, keys: Vec<BodyKey>) -> Vec<(BodyKey, String)> {
+        let mut out = Vec::new();
+        for key in keys {
+            let Some(hash) = self
+                .parts
+                .get(&key.0)
+                .and_then(|p| p.feature(&key.1))
+                .and_then(|f| f.hash.clone())
+            else {
+                continue;
+            };
+            if self.asked.get(&key) != Some(&hash) {
+                self.asked.insert(key.clone(), hash.clone());
+                out.push((key, hash));
+            }
+        }
+        out
+    }
+
+    /// An answer to asking for `key` at `hash` came, or will never come.
+    /// Whatever it brought, later reports ask again if they need to.
+    pub fn answered(&mut self, key: &BodyKey, hash: &str) {
+        if self.asked.get(key).is_some_and(|h| h == hash) {
+            self.asked.remove(key);
+        }
+    }
+
     /// Forgets a part and its meshes.
     pub fn remove_part(&mut self, id: &str) {
         self.parts.remove(id);
         self.meshes.retain(|(p, _), _| p != id);
+        self.asked.retain(|(p, _), _| p != id);
         self.generation += 1;
     }
 
@@ -127,6 +160,7 @@ impl Model {
     /// Drops every mesh: the display quality changed.
     pub fn clear_meshes(&mut self) -> Vec<BodyKey> {
         self.meshes.clear();
+        self.asked.clear();
         self.generation += 1;
         self.parts
             .values()
@@ -186,5 +220,28 @@ mod tests {
         let g = m.generation;
         m.remove_part("p");
         assert!(m.meshes.is_empty() && m.parts.is_empty() && m.generation > g);
+    }
+
+    #[test]
+    fn a_body_is_asked_for_once_per_hash() {
+        let mut m = Model::default();
+        let want = m.apply_part(&report(&[("a", Some("1"))]));
+        assert_eq!(m.ask(want).len(), 1);
+        // More reports before the answer: nothing new is asked for.
+        let want = m.apply_part(&report(&[("a", Some("1")), ("b", Some("2"))]));
+        let asked = m.ask(want);
+        assert_eq!(asked, [(("p".to_owned(), "b".to_owned()), "2".to_owned())]);
+        // A body that changed while asked for is asked for again.
+        let want = m.apply_part(&report(&[("a", Some("3")), ("b", Some("2"))]));
+        let asked = m.ask(want);
+        assert_eq!(asked, [(("p".to_owned(), "a".to_owned()), "3".to_owned())]);
+        // The stale answer leaves the newer question open.
+        let a = ("p".to_owned(), "a".to_owned());
+        assert!(!m.take_mesh("p", body("a", "1")));
+        m.answered(&a, "1");
+        assert!(m.ask(vec![a.clone()]).is_empty());
+        // An answer that brought nothing lets the next report ask again.
+        m.answered(&a, "3");
+        assert_eq!(m.ask(vec![a]).len(), 1);
     }
 }

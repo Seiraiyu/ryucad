@@ -65,6 +65,26 @@ fn an_edit_refetches_one_body() {
 }
 
 #[test]
+fn a_burst_of_edits_fetches_each_body_once() {
+    let p = Project::new().with_part();
+    let mut ws = open(&p);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && meshed(ws)));
+    // The window reads nothing while the agent works, so every report
+    // arrives before any mesh: each one names all the new bodies.
+    for i in 0..5 {
+        let origin = format!("--origin={},0,0", 30 * (i + 1));
+        p.ok(&[
+            "feature", "add", "p", "sphere", "--param", "radius=2", &origin,
+        ]);
+    }
+    assert!(ws.wait_until(
+        WAIT,
+        |ws| ws.part("p").is_some_and(|p| p.features.len() == 7) && ws.idle() && meshed(ws)
+    ));
+    assert_eq!(ws.fetched, 2 + 5);
+}
+
+#[test]
 fn failures_deletions_and_new_parts_show() {
     let p = Project::new().with_part();
     let mut ws = open(&p);
