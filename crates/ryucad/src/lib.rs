@@ -10,6 +10,7 @@ pub mod doctor;
 pub mod endpoint;
 pub mod entity;
 pub mod error;
+pub mod expr;
 pub mod git;
 pub mod inspect;
 pub mod live;
