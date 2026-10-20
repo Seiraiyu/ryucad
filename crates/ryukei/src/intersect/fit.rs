@@ -603,12 +603,30 @@ pub(crate) fn fit_pcurve(
         let duv = uv_velocity(surface, uv, e.d1).ok_or(Failure::Uncertain)?;
         Ok((t, uv - duv * dt, duv))
     };
-    let mut samples = Vec::new();
+    // Each sample is unwrapped next to the one before, so no step may
+    // turn a periodic parameter by a quarter period or more: a longer
+    // step could unwrap the wrong way round and leave a jump of a whole
+    // period that refining never closes.
+    let (pu, pv) = surface.periods();
+    let small = |a: Point2, b: Point2| {
+        pu.is_none_or(|p| (b.x - a.x).abs() < p / 4.0)
+            && pv.is_none_or(|p| (b.y - a.y).abs() < p / 4.0)
+    };
     let n = 8;
-    for i in 0..=n {
-        let t = t0 + (t1 - t0) * i as f64 / n as f64;
-        let near = samples.last().map(|s: &(f64, Point2, Vector2)| s.1);
-        samples.push(at(t, near)?);
+    let mut samples = vec![at(t0, None)?];
+    let mut ahead: Vec<f64> = (1..=n)
+        .rev()
+        .map(|i| t0 + (t1 - t0) * i as f64 / n as f64)
+        .collect();
+    while let Some(t) = ahead.pop() {
+        let last = *samples.last().expect("one sample");
+        let s = at(t, Some(last.1))?;
+        if small(last.1, s.1) || samples.len() + ahead.len() > MAX_SAMPLES {
+            samples.push(s);
+        } else {
+            ahead.push(t);
+            ahead.push((last.0 + t) / 2.0);
+        }
     }
     let bound_of = |a: &(f64, Point2, Vector2), b: &(f64, Point2, Vector2)| {
         let h = b.0 - a.0;
@@ -763,5 +781,76 @@ mod tests {
         // Once round the cylinder: the pcurve winds a whole period in u.
         let (a, b) = (pc.point(0.0), pc.point(core::f64::consts::TAU));
         assert!(((b.x - a.x).abs() - core::f64::consts::TAU).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_pcurve_round_a_cone_far_from_its_axis_does_not_jump_a_period() {
+        // A plane cutting a frustum's cone obliquely, as a block's side
+        // does: round the far side of its ellipse, u turns more than half a
+        // period between the first coarse samples.
+        let cone = Surface::Cone(
+            crate::geom::Cone::new(
+                Frame::new(
+                    Point3::new(
+                        -0.008608865348833917,
+                        -0.08458643353936435,
+                        -0.5818371950286672,
+                    ),
+                    Vector3::new(
+                        -0.014640514631474661,
+                        -0.14385042252113564,
+                        -0.9894911375408151,
+                    ),
+                    Vector3::new(
+                        0.9943270645299778,
+                        0.10217408365665531,
+                        -0.029565949538618703,
+                    ),
+                )
+                .unwrap(),
+                0.6382232064294462,
+                0.30070550424513104,
+            )
+            .unwrap(),
+        );
+        let plane = Surface::Plane(Plane::new(
+            Frame::new(
+                Point3::new(
+                    -0.34557856925691477,
+                    -0.1495225089465062,
+                    -0.3751246083485936,
+                ),
+                Vector3::new(
+                    -0.7905403965321923,
+                    -0.47628647730274276,
+                    0.38496372944638296,
+                ),
+                Vector3::new(
+                    -0.28374551106380286,
+                    0.8419254014805647,
+                    0.45896634222231497,
+                ),
+            )
+            .unwrap(),
+        ));
+        let region = Box3::new(Point3::new(-2.0, -2.0, -2.0), Point3::new(2.0, 2.0, 2.0));
+        let super::super::ss::SurfaceHit::Meet { branches, .. } =
+            super::super::ss::surface_surface(&plane, &cone, &region).unwrap()
+        else {
+            panic!("the plane cuts the cone");
+        };
+        let br = &branches[0];
+        // Most of a turn, wrapping past the end of the branch's period.
+        let range = [2.8968530636395937, 9.154404442385939];
+        let (pc, tol) = fit_pcurve(&cone, &br.curve, range).unwrap();
+        assert!(tol <= 10.0 * LINEAR_RESOLUTION);
+        for k in 0..=1000 {
+            let t = range[0] + (range[1] - range[0]) * f64::from(k) / 1000.0;
+            let q = pc.point(t);
+            assert!(
+                cone.point(q.x, q.y).distance(br.curve.point(t)) <= tol,
+                "at {t}"
+            );
+        }
     }
 }
