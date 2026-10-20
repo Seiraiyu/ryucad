@@ -19,12 +19,7 @@ pub(super) fn geometry(b: &Body, out: &mut Vec<Fault>) {
         }
     }
     for (f, face) in b.faces.live() {
-        let surface = &b.surfaces[face.surface];
-        let inside = match surface.frame() {
-            Some(frame) => in_size_box(frame.origin()),
-            None => box_inside(&surface.bounds()),
-        };
-        if !inside {
+        if !surface_inside(&b.surfaces[face.surface]) {
             out.push(Fault::OutsideSizeBox {
                 entity: EntityId::Face(f),
             });
@@ -60,6 +55,43 @@ fn box_inside(b: &Box3) -> bool {
     in_size_box(b.min()) && in_size_box(b.max())
 }
 
+/// A face's surface in the size box: its frame's origin, or its bounds.
+fn surface_inside(surface: &crate::geom::Surface) -> bool {
+    match surface.frame() {
+        Some(frame) => in_size_box(frame.origin()),
+        None => box_inside(&surface.bounds()),
+    }
+}
+
+/// An edge's curve in the size box: a line's, circle's or ellipse's frame
+/// origin, otherwise the hull of the pieces the edge uses, and samples
+/// along the edge.
+fn edge_inside(b: &Body, e: EdgeId) -> bool {
+    let edge = &b.edges[e];
+    let curve = &b.curves[edge.curve];
+    let [t0, t1] = edge.interval;
+    let inside = match curve {
+        Curve::Line(l) => in_size_box(l.origin()),
+        Curve::Circle(c) => in_size_box(c.frame().origin()),
+        Curve::Ellipse(e) => in_size_box(e.frame().origin()),
+        _ => box_inside(&curve.bounds(edge.interval)),
+    };
+    inside
+        && (0..SAMPLES)
+            .map(|i| curve.point(t0 + (t1 - t0) * i as f64 / (SAMPLES - 1) as f64))
+            .all(in_size_box)
+}
+
+/// Whether any vertex, face surface or edge curve leaves the size box, by
+/// the same rules as [`geometry`].
+pub(crate) fn outside_size_box(b: &Body) -> bool {
+    b.vertices.live().any(|(_, v)| !in_size_box(v.point))
+        || b.faces
+            .live()
+            .any(|(_, f)| !surface_inside(&b.surfaces[f.surface]))
+        || b.edges().any(|e| !edge_inside(b, e))
+}
+
 fn edge(b: &Body, e: EdgeId, out: &mut Vec<Fault>) {
     let edge = &b.edges[e];
     let curve = &b.curves[edge.curve];
@@ -83,14 +115,7 @@ fn edge(b: &Body, e: EdgeId, out: &mut Vec<Fault>) {
     let samples: Vec<Point3> = (0..SAMPLES)
         .map(|i| curve.point(t0 + (t1 - t0) * i as f64 / (SAMPLES - 1) as f64))
         .collect();
-    let inside = match curve {
-        Curve::Line(l) => in_size_box(l.origin()),
-        Curve::Circle(c) => in_size_box(c.frame().origin()),
-        Curve::Ellipse(e) => in_size_box(e.frame().origin()),
-        // The hull of the pieces the edge uses holds all of it.
-        _ => box_inside(&curve.bounds(edge.interval)),
-    };
-    if !inside || !samples.iter().all(|&p| in_size_box(p)) {
+    if !edge_inside(b, e) {
         out.push(Fault::OutsideSizeBox {
             entity: EntityId::Edge(e),
         });
