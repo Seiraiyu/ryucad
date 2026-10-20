@@ -1,0 +1,9 @@
+{
+  "angle": "9clllllllideg  "
+,"axis": "@0",
+  "format": 2,
+  "kind": "ryucad.feature",
+  "sketch": "s",
+ "ummetric": true,
+  "type": "revolve"
+}

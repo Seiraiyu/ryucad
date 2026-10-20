@@ -1,0 +1,14 @@
+{
+  "extent":  "ryucad.feature",
+ " reverse": true,
+  "sketch": "s",
+  "type": {
+    "length": "3 mm",
+    "type": "blplanind"
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+ " reverse": true,
+  "sketch": "s",
+  "type": "extrude"
+}

@@ -1,0 +1,9 @@
+{
+  "angle": "cnst+lll/lllstarlllll^lllllllide",
+  "axis": "l6",
+  "format": 2,
+  "kind": "ryucad.feature",
+"sketch": "s",
+  "symmetric": true,
+  "type": "revolve"
+}

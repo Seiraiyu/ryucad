@@ -1,0 +1,21 @@
+{
+  "constraints": {
+    "c1": {
+      "a": "l1",
+       "end": "p1",
+      "start": "p4",
+      "type": "line"
+ },
+    "l5": {
+       "m": [
+            0.004
+      ],
+      "type": "point"
+    }
+  
+},
+  "format": 2,
+  "kind": "ryucad.feature",
+  "plane": "xyf",
+  "type": "sketch"
+}

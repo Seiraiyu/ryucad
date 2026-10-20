@@ -1,0 +1,31 @@
+{
+  "constraints": {
+    "c1": {
+    "a": "Q1",
+       "b": "p2",
+      "type": "distance",
+      "value": "76 mm"
+    }
+  },
+  "entities": {
+    "ci1": {
+      "center": "q7",
+     " r_m": 0.002,
+      "type": "circle"
+    },
+    "l1": {
+      "end": "p2",
+      "start": "p1",
+      "type": "line"
+    },
+    "l2": {
+         "type": "point"
+    },
+    "p5": {
+      }
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "plane": "xy",
+  "type": "sketch"
+}

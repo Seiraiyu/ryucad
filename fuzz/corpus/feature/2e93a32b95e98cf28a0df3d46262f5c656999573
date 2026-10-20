@@ -1,0 +1,140 @@
+{
+  "constraints": {
+    "c1": {
+      "a": "l1",
+ "traints": {
+ "end": "p6",
+      "start": "p5",
+      "type": "line"
+    },
+    "p1": {
+          },
+    "p4": {
+"start": "p5",
+      "type": "line"
+    },
+    "p1": {
+          },
+    "p4": {
+      },
+    "l5": {
+      "construction": true,
+      "end": "p6",
+      "start": "p5",
+      "type": "line"
+    },
+    "p1": {
+          },
+    "p4": {
+      "m": [
+        0.01,
+        0.008
+      ],
+      "traints": {
+ "end": "p6",
+      "start": "p5",
+      "type": "line"
+    },
+    "p1": {
+          },
+    "p4": {
+"start": "p5",
+      "type": "line"
+    },
+    "p1": {
+          },
+    "p4": {
+      "m": [
+      ],
+      "traints": {
+ "end": "p6",
+      "start": "p5",
+      "type": "line"
+    },
+    "p1": {
+          },
+         "start": "p5",
+      "type": "line"
+    },
+    "p1": {
+          },
+    "p4": {
+      "m": [
+        0.01,
+        0.008
+      ],
+      "traints": {
+ "end": "p6",
+      "start": "p5",
+      "type": "line"
+    },
+    "p1": {
+          },
+    "p4": {
+"start": "p5",
+      "type": "line"
+    },
+    "p1": {
+          },
+    "p4": {
+      },
+    "l5": {
+      "construction": true,
+      "end": "p6",
+      "start": "p5",
+      "type": "line"
+    },
+    "p1": {
+          },
+    "p4": {
+      "m": [
+        0.01,
+        0.008
+      ],
+      "traints": {
+ "end": "p6",
+      "start": "p5",
+      "type": "line"
+    },
+    "p1": {
+          },
+    "p4": {
+"start": "p5",
+     "type": "line"
+    },
+    "p1": {
+          },
+    "p4": {
+      "m": [
+      ],
+      "traints": {
+ "end": "p6",
+      "start": "p5",
+      "type": "line"
+    },
+    "p1": {
+          },
+    "p4": {
+"start": "p5",
+      "type": "line"
+    },
+    "p1": {
+          },
+    "p4": {
+      "m": p5",
+      "type": "line"
+    },
+    "p1": {
+          },
+    "p4": {
+"start": "p5",
+      "type": "line"
+    },
+    "p1": {
+          },
+    "p4": {
+      "m": [
+        0.01,
+"xy",
+  "type": "sketch"
+}

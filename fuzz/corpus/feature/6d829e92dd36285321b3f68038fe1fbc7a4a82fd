@@ -1,0 +1,36 @@
+{
+  "constraints": {
+    "d1": { "a": "l1",
+      "b": "l2",
+      "type": "angle",           "start": "p1",
+      "type": "line"
+    },
+    "p1": {
+      "m": [
+        0,
+        0
+      ],
+      "type": "pint"
+    }
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "placement": {
+    "origin": [
+      "1 mm",
+      "2um mm",
+      "3 nm"
+    ],
+    "x": [
+      1,
+      0, 
+     0
+    ],
+    "z": [
+      0,
+      1,
+      1
+    ]
+  },
+  "type": "sketch"
+}

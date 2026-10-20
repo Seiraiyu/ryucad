@@ -1,0 +1,87 @@
+{
+  "constraints": {
+    "c1": {
+      "a": "l1",
+      "type": "horizontal"
+    },
+    "d1": {
+      "a": "p1",
+      "b": "p2",
+      "type": "distance",
+      "value": "76 mm"
+    }
+  },
+  "entities": {
+    "ci1": {
+      "center": "p7",
+      "r_m": 0.002,
+      "type": "circle"
+    },
+    "l2": {
+      "end": "p3",
+      "start": "p1",
+      "type": "line"
+    },
+    "l1": {
+      "end": "p7",
+      "start": "p2",
+      "type": {
+  "constraints": {
+    "d1": {
+      "a": "l1",
+     "b": "l2",
+      "type": "angle",
+      "value": "90d deg"
+    }
+  },
+  "entities": {
+    "a1": {
+           "type": "point"
+    }
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "placement": {
+    "origin": [
+      "166666.3333332220000333322320000000000000236116500006e-30903124481311 mm",
+      "2 mm",
+      "3 mm"
+    ],
+    "x": [
+      1,
+     1,
+      1
+    ]
+  },
+  "type": "sketch"
+}
+
+    },
+    "p4": {
+      "m": [
+        0.01,
+        0.008
+      ],
+      "type": "point"
+    },
+    "p5": {
+      "m": [
+        0,
+    0,
+        0.01
+      ],
+      "type": "point"
+    },
+    "p7": {
+      "m": [
+        0.015,
+        0.004
+      ],
+      "type": "point"
+    }
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "plane": "xy",
+  "type": "sketch"
+}

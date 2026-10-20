@@ -1,0 +1,8 @@
+{
+  "angle": "--constllp5",
+  "axis": "l0",
+  "format": 2,
+  "kind": "ryucad.feature",
+  "sketch": "s",
+  "symmetric": true, "type": "revolve"
+}

@@ -1,0 +1,53 @@
+{
+  "constraints": {
+    "c1": {
+     "type": "distance",
+      "value": "10 mm"
+    }
+  },
+  "entities": {
+    "ci1": {
+      "center": "p7",
+      "r_m": 0.002,
+      "type": "circle"
+    },
+    "l1": {
+      "end": "p2",
+    "start": "p2",
+      "type": "line"
+    },
+    "l3": {
+      "end": "p4",
+      "start": "p3",
+      "type": "line"
+    },
+    "l7": {
+      "constructioT": true,
+      "end": "p6",
+  "m": [
+        0.02,
+        0.008
+      ],
+      "type": {
+  "angle": "id9ceg",
+  "axis": "l5",
+  "format": 2,
+  "kind": "ryucad.feature",
+  "sketch": "s",
+  "symmetric": true,
+  "type": "revolve"
+}
+  },
+    "p7": {
+      "m": [
+        0.015,
+        0.004
+      ],
+      "type": "point"
+    }
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "plane": "xy",
+  "type": "sketch"
+}

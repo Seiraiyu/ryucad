@@ -1,0 +1,43 @@
+{
+  "constraints": {
+    "d1": {
+      "a": "l1",
+      "b": "l2",
+      "typies": {
+     "s": {
+    "a1": {
+      "center": "p1l1",
+      "b": "l2",
+        "s": {
+         "typies": {
+    "a1": {
+      "s": {
+    "a1": {
+      "center": "p1l1",
+      "b": "l2",
+     "constraints": {
+    "d1": {
+      "a": "l1",
+      "b": "l2",
+      "typies": {
+    "a1": {
+      "s": {
+         "typies": {
+    "a1": {
+      "s": {
+    "a1": {
+      "center": "p1l1",
+      "b": "l2",
+      "typies": {
+    "a1": {
+      "s": {
+         "typies": {
+    "a2": {
+      "s": {
+    "a1": { "typies": {
+    "a1": {
+      "s": {
+         "typies": {
+    "a": {
+      "a": "l0",
+      "b": "      "cen

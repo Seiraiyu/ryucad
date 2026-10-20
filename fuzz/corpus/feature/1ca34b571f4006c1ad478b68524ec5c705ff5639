@@ -1,0 +1,25 @@
+{
+  "constraints": {
+    "c1": {
+      "a": "l1",
+      "type": "horizontal"
+    },
+    "d1": {
+      "a": "p1",
+      "be": "10 mm"
+    }
+  },
+  "entities": {
+    "ci1": {
+      "center": "p7",
+         "m": [
+      0.004
+      ],
+      "type": "point"
+    }
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "plane": "xy",
+  "type": "sketch"
+}

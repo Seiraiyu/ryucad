@@ -1,0 +1,9 @@
+{
+  "angle": "8",
+  "axis": "zl2",
+  "format": 2,
+  "kind": "ryucad.feature",
+  "sketch": "s",
+  "symmetric": true,
+  "type": "revolve"
+}

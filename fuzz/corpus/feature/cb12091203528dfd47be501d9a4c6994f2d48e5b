@@ -1,0 +1,10 @@
+{
+  "constraints": {
+    "d1": {
+      "a": "l1",
+    "b": "l2",
+      "value": "10 deg"
+    }
+  },
+  "entities": {
+    "a0*:   e

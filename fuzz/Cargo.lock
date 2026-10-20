@@ -1523,6 +1523,7 @@ dependencies = [
  "png",
  "rayon",
  "ryukei",
+ "ryusketch",
  "serde",
  "serde_json",
  "widestring",

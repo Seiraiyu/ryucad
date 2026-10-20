@@ -1,0 +1,10 @@
+{
+  "extent": {
+    "length": "3 mm",
+    "type": "blind"
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+   "sketch": "66.66004000s ", 
+"type": "extrude"
+}
