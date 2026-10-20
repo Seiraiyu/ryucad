@@ -289,7 +289,6 @@ fn curve_piece(pts: &[H], range: [f64; 2], s: [f64; 2]) -> CurveBound {
 /// over `[s0, s1]`, as [`curve_piece`] bounds the first two: the nets of
 /// the whole piece, centred on the part, then cut down, and the quotient
 /// rule `C''' = (A''' - 3 W' C'' - 3 W'' C' - W''' C) / W`.
-#[allow(dead_code)] // Used by pipes, from Task 5 on.
 fn jet_piece(pts: &[H], range: [f64; 2], s: [f64; 2]) -> [V3; 4] {
     let sub = sub_curve(pts, s[0], s[1]);
     let at = centre(&sub);
@@ -321,7 +320,6 @@ fn jet_piece(pts: &[H], range: [f64; 2], s: [f64; 2]) -> [V3; 4] {
 }
 
 /// The componentwise hull of two interval vectors.
-#[allow(dead_code)] // Used by pipes, from Task 5 on.
 fn hull3(a: V3, b: V3) -> V3 {
     core::array::from_fn(|k| hull(a[k], b[k]))
 }
@@ -330,7 +328,6 @@ impl NurbsCurve {
     /// Enclosures of the point and its first three derivatives at every
     /// parameter of `range`, clipped to the domain (a periodic range
     /// wraps): the hull of [`jet_piece`] over the pieces it overlaps.
-    #[allow(dead_code)] // Used by pipes, from Task 5 on.
     pub(crate) fn jet_box(&self, range: [f64; 2]) -> [V3; 4] {
         let mut out: Option<[V3; 4]> = None;
         for piece in self.pieces() {

@@ -3,7 +3,7 @@ use super::{
     Box3, Frame, Point3, PrincipalCurvatures, Projection, Rigid, SurfaceEval, UnitVector3, Vector3,
     polar_angle,
 };
-use super::{Curve2, Extrusion, NurbsSurface, Revolution};
+use super::{Curve2, Extrusion, NurbsSurface, Pipe, Revolution};
 use crate::Error;
 use crate::math;
 use crate::tol::ANGULAR_RESOLUTION;
@@ -16,8 +16,9 @@ use std::sync::Arc;
 /// NURBS surface, and a swept surface that keeps its generating curve, is
 /// shared behind an `Arc`, so cloning one is cheap. Each analytic natural
 /// normal points away from the axis (or along `z` for a plane), a NURBS's
-/// is along `du × dv`, and a swept surface's is described with its type;
-/// a face says whether it uses that normal or its reverse.
+/// is along `du × dv`, a swept surface's is described with its type, and
+/// a pipe's points away from its spine; a face says whether it uses that
+/// normal or its reverse.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Surface {
@@ -29,6 +30,7 @@ pub enum Surface {
     Nurbs(Arc<NurbsSurface>),
     Extrusion(Arc<Extrusion>),
     Revolution(Arc<Revolution>),
+    Pipe(Arc<Pipe>),
 }
 
 /// The frame's xy plane: `origin + u x + v y`. The normal is `z`.
@@ -176,7 +178,7 @@ impl Surface {
             Self::Cone(s) => Some(&s.frame),
             Self::Sphere(s) => Some(&s.frame),
             Self::Torus(s) => Some(&s.frame),
-            Self::Nurbs(_) | Self::Extrusion(_) | Self::Revolution(_) => None,
+            Self::Nurbs(_) | Self::Extrusion(_) | Self::Revolution(_) | Self::Pipe(_) => None,
         }
     }
 
@@ -203,6 +205,7 @@ impl Surface {
             Self::Nurbs(n) => n.point(u, v),
             Self::Extrusion(e) => e.point(u, v),
             Self::Revolution(r) => r.point(u, v),
+            Self::Pipe(p) => p.point(u, v),
         }
     }
 
@@ -273,6 +276,7 @@ impl Surface {
             Self::Nurbs(n) => n.eval(u, v),
             Self::Extrusion(e) => e.eval(u, v),
             Self::Revolution(r) => r.eval(u, v),
+            Self::Pipe(p) => p.eval(u, v),
         }
     }
 
@@ -295,6 +299,7 @@ impl Surface {
             Self::Nurbs(n) => return n.normal(u, v),
             Self::Extrusion(e) => return e.surface_normal(u),
             Self::Revolution(r) => return r.surface_normal(u, v),
+            Self::Pipe(p) => return p.normal(u, v),
             Self::Plane(s) => s.frame.z(),
             Self::Cylinder(s) => UnitVector3::new_unchecked(s.frame.radial(u)),
             Self::Cone(s) => {
@@ -333,6 +338,7 @@ impl Surface {
             Self::Nurbs(n) => n.domain(),
             Self::Extrusion(e) => e.domain(),
             Self::Revolution(r) => r.domain(),
+            Self::Pipe(p) => p.domain(),
         }
     }
 
@@ -345,6 +351,7 @@ impl Surface {
             Self::Nurbs(n) => n.periods(),
             Self::Extrusion(e) => (e.curve().period(), None),
             Self::Revolution(r) => (Some(TAU), r.curve().period()),
+            Self::Pipe(p) => p.periods(),
         }
     }
 
@@ -359,6 +366,7 @@ impl Surface {
             Self::Sphere(_) => Some(0),
             Self::Torus(_) => Some(1),
             Self::Revolution(r) => r.closed_genus(),
+            Self::Pipe(p) => p.closed_genus(),
             Self::Plane(_)
             | Self::Cylinder(_)
             | Self::Cone(_)
@@ -402,6 +410,7 @@ impl Surface {
             Self::Nurbs(n) => n.distance(p),
             Self::Extrusion(e) => e.project(p).distance,
             Self::Revolution(r) => r.project(p).distance,
+            Self::Pipe(s) => s.project(p).distance,
         }
     }
 
@@ -416,6 +425,7 @@ impl Surface {
             Self::Nurbs(n) => return n.project(p),
             Self::Extrusion(e) => return e.project(p),
             Self::Revolution(r) => return r.project(p),
+            Self::Pipe(s) => return s.project(p),
             Self::Plane(Plane { frame })
             | Self::Cylinder(Cylinder { frame, .. })
             | Self::Cone(Cone { frame, .. })
@@ -446,6 +456,7 @@ impl Surface {
             Self::Torus(s) => ring_box(&s.frame, s.major, s.minor),
             Self::Nurbs(n) => n.bounds(),
             Self::Revolution(r) => r.bounds(),
+            Self::Pipe(p) => p.bounds(),
         }
     }
 
@@ -464,7 +475,9 @@ impl Surface {
             }
             Self::Sphere(_) => (u, math::atan2(q.z, rho)),
             Self::Torus(s) => (u, polar_angle(q.z, rho - s.major)),
-            Self::Nurbs(_) | Self::Extrusion(_) | Self::Revolution(_) => self.project(p).param,
+            Self::Nurbs(_) | Self::Extrusion(_) | Self::Revolution(_) | Self::Pipe(_) => {
+                self.project(p).param
+            }
         }
     }
 
@@ -475,7 +488,8 @@ impl Surface {
     /// its frame moved by `-d sin α` along the axis and its radius there
     /// grown by `d cos α`.
     ///
-    /// `None` for a surface with no offset (a NURBS or a swept surface).
+    /// A pipe's radius grows by `d` about the same spine. `None` for a
+    /// surface with no offset (a NURBS or a swept surface).
     /// Fails with `NonFinite`, or `Degenerate` where the offset collapses:
     /// a radius that would fall below [`crate::tol::LINEAR_RESOLUTION`]
     /// (for a cone, its radius in its moved frame's plane), or a torus's
@@ -499,6 +513,7 @@ impl Surface {
                     .transformed(&Rigid::translation(s.frame.z().get() * -(d * s.sin)));
                 Cone::new(f, s.radius + d * s.cos, s.half_angle).map(Self::Cone)
             }
+            Self::Pipe(p) => p.offset(d).map(|p| Self::Pipe(Arc::new(p))),
             Self::Nurbs(_) | Self::Extrusion(_) | Self::Revolution(_) => return None,
         })
     }
@@ -515,6 +530,7 @@ impl Surface {
             Self::Nurbs(n) => return Self::Nurbs(Arc::new(n.transformed(r))),
             Self::Extrusion(e) => return Self::Extrusion(Arc::new(e.transformed(r))),
             Self::Revolution(s) => return Self::Revolution(Arc::new(s.transformed(r))),
+            Self::Pipe(p) => return Self::Pipe(Arc::new(p.transformed(r))),
         };
         *frame = frame.transformed(r);
         out

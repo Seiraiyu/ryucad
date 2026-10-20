@@ -167,7 +167,6 @@ impl NurbsCurve {
     /// Every parameter where the distance from `p` is stationary, minima
     /// and maxima, sorted (see `Spline::stationary`); a clamped curve's
     /// domain ends only where they are such points.
-    #[allow(dead_code)] // Used by pipes, from Task 6 on.
     pub(crate) fn stationary(&self, p: Point3) -> Vec<f64> {
         self.spline.stationary(self.pieces(), p.to_vector())
     }
@@ -223,7 +222,6 @@ impl NurbsCurve {
     /// `A = Σ B w P` and denominator `W = Σ B w`, each by de Casteljau's
     /// algorithm on its difference net, then the quotient rule. Periodic
     /// curves wrap `t`; clamped ones extrapolate their end pieces.
-    #[allow(dead_code)] // Used by pipes, from Task 5 on.
     pub(crate) fn jet3(&self, t: f64) -> [Vector3; 4] {
         let t = self.spline.knots.wrap(t);
         let pieces = self.pieces();
@@ -260,7 +258,6 @@ impl NurbsCurve {
 
 /// A polynomial in Bernstein form over `[0, 1]` at `x`, by de Casteljau's
 /// algorithm.
-#[allow(dead_code)] // Used by pipes, from Task 5 on.
 fn casteljau<V>(c: &[V], x: f64) -> V
 where
     V: Copy + core::ops::Add<Output = V> + core::ops::Mul<f64, Output = V>,

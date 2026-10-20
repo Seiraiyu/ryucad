@@ -17,9 +17,9 @@ mod ellipse;
 mod eval;
 mod frame;
 pub(crate) mod intersect2;
-#[allow(dead_code)] // Used by pipes, from Task 5 on.
 pub(crate) mod jet;
 mod nurbs;
+mod pipe;
 mod point;
 mod project;
 mod surface;
@@ -42,6 +42,7 @@ pub use nurbs::{
     Basis, Direction, KnotVector, MAX_DEGREE, NurbsCurve, NurbsCurve2, NurbsSurface, Reparam,
 };
 pub(crate) use nurbs::{BezierCurve, BezierPatch, Coords, Hom};
+pub use pipe::Pipe;
 pub use point::{Point2, Point3};
 pub use project::Projection;
 pub use surface::{Cone, Cylinder, Plane, Sphere, Surface, Torus};

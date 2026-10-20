@@ -86,7 +86,6 @@ pub(crate) fn cos_abs_max([a, b]: [f64; 2]) -> f64 {
 /// Enclosures of `cos` and `sin` over `[a, b]`, widened by `1e-15` to
 /// cover the rounding of `math::cos` at the ends (and of `a - π/2`, at an
 /// extremum where the function is flat), and kept inside `[-1, 1]`.
-#[allow(dead_code)] // Used by pipes, from Task 5 on.
 pub(crate) fn trig_box([a, b]: [f64; 2]) -> (Interval, Interval) {
     let widen = |(lo, hi): (f64, f64)| {
         Interval::new((lo - 1e-15).max(-1.0), (hi + 1e-15).min(1.0)).expect("ordered")
@@ -98,12 +97,10 @@ pub(crate) fn trig_box([a, b]: [f64; 2]) -> (Interval, Interval) {
 }
 
 /// An interval vector: a box in model space.
-#[allow(dead_code)] // Used by pipes, from Task 5 on.
 pub(crate) type IVec3 = [Interval; 3];
 
 /// `o + x a + y b` for points or directions `x`, `y` and intervals `a`,
 /// `b`.
-#[allow(dead_code)] // Used by pipes, from Task 5 on.
 fn combine(o: Vector3, x: Vector3, a: Interval, y: Vector3, b: Interval) -> IVec3 {
     let p = Interval::point;
     let (o, x, y) = (o.to_array(), x.to_array(), y.to_array());
@@ -113,7 +110,6 @@ fn combine(o: Vector3, x: Vector3, a: Interval, y: Vector3, b: Interval) -> IVec
 impl Curve {
     /// The point and its first three derivatives at `t`: closed forms for
     /// the analytic curves, [`NurbsCurve::jet3`] for a NURBS.
-    #[allow(dead_code)] // Used by pipes, from Task 5 on.
     pub(crate) fn jet3(&self, t: f64) -> [Vector3; 4] {
         match self {
             Self::Line(l) => [
@@ -134,7 +130,6 @@ impl Curve {
     /// parameter of `[t0, t1]`: closed forms over enclosures of `cos t`
     /// and `sin t` for a circle or an ellipse, a NURBS as
     /// [`NurbsCurve::jet_box`] gives. A line's must be a finite range.
-    #[allow(dead_code)] // Used by pipes, from Task 5 on.
     pub(crate) fn jet_box(&self, [t0, t1]: [f64; 2]) -> [IVec3; 4] {
         let zero = [Interval::point(0.0); 3];
         let conic = |f: &Frame, a: f64, b: f64| {
@@ -265,6 +260,7 @@ impl Surface {
             Self::Nurbs(n) => n.derivative_bound([ru, rv]),
             Self::Extrusion(e) => e.derivative_bound([ru, rv]),
             Self::Revolution(r) => r.derivative_bound([ru, rv]),
+            Self::Pipe(p) => p.derivative_bound([ru, rv]),
         }
     }
 }
