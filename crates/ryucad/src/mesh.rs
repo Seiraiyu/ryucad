@@ -184,8 +184,8 @@ impl Cache {
 }
 
 /// The diagonal of the feature's bounding box.
-fn diagonal(f: &Feature) -> f64 {
-    match crate::inspect::extent(f) {
+fn diagonal(f: &Feature, body: &Body) -> f64 {
+    match crate::inspect::extent(f).or_else(|| crate::inspect::body_extent(body)) {
         Some((lo, hi)) => {
             let d = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
             (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
@@ -195,7 +195,7 @@ fn diagonal(f: &Feature) -> f64 {
 }
 
 fn make(f: &Feature, body: &Body, quality: Quality) -> DisplayMesh {
-    let params = quality.params(diagonal(f));
+    let params = quality.params(diagonal(f, body));
     let mesh = ryukei::mesh::tessellate(body, &params).map_err(|e| {
         Error::new(Code::MeshFailed, format!("can't mesh the body: {e}"))
             .with("kernel", format!("{e:?}"))
@@ -638,17 +638,17 @@ fn decode_mesh(r: &mut Reader) -> Result<WireMesh> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::files::{FeatureType, Placement};
+    use crate::doc::files::{Placement, Primitive, PrimitiveType};
     use crate::doc::id::Id;
     use crate::rebuild::build_feature;
     use crate::units::{Quantity, Unit};
 
     fn sphere(r: &str) -> (Feature, Built) {
-        let f = Feature {
-            ty: FeatureType::Sphere,
+        let f = Feature::Primitive(Primitive {
+            ty: PrimitiveType::Sphere,
             params: [("radius".to_owned(), Quantity::parse(r, Unit::Mm).unwrap())].into(),
             placement: Placement::identity(Unit::Mm),
-        };
+        });
         let id = Id::parse("s", "feature").unwrap();
         let b = build_feature(&id, &id, &f).unwrap();
         (f, b)
@@ -745,8 +745,8 @@ mod tests {
 
     #[test]
     fn json_names_every_face_edge_and_vertex() {
-        let f = Feature {
-            ty: FeatureType::Cylinder,
+        let f = Feature::Primitive(Primitive {
+            ty: PrimitiveType::Cylinder,
             params: [
                 ("radius".to_owned(), Quantity::parse("5", Unit::Mm).unwrap()),
                 (
@@ -756,7 +756,7 @@ mod tests {
             ]
             .into(),
             placement: Placement::identity(Unit::Mm),
-        };
+        });
         let id = Id::parse("c", "feature").unwrap();
         let b = build_feature(&id, &id, &f).unwrap();
         let m = make(&f, &b.body, Quality::Coarse);

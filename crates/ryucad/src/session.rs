@@ -198,7 +198,7 @@ fn read_dir(dir: &Path) -> Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::files::{Feature, FeatureType, Manifest, PartFile, Placement};
+    use crate::doc::files::{Feature, Manifest, PartFile, Placement, Primitive, PrimitiveType};
     use crate::doc::project::{feature_path, part_path, write_json};
     use crate::units::{Quantity, Unit};
 
@@ -207,11 +207,11 @@ mod tests {
     }
 
     fn sphere(r: &str) -> serde_json::Value {
-        Feature {
-            ty: FeatureType::Sphere,
+        Feature::Primitive(Primitive {
+            ty: PrimitiveType::Sphere,
             params: [("radius".to_owned(), Quantity::parse(r, Unit::Mm).unwrap())].into(),
             placement: Placement::identity(Unit::Mm),
-        }
+        })
         .to_json()
     }
 
@@ -240,7 +240,12 @@ mod tests {
 
     fn radius(s: &mut Session) -> f64 {
         let p = s.project().part(&id("p")).unwrap();
-        p.features[&id("a")].as_ref().unwrap().meters("radius")
+        p.features[&id("a")]
+            .as_ref()
+            .unwrap()
+            .primitive()
+            .unwrap()
+            .meters("radius")
     }
 
     #[test]

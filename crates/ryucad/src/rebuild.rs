@@ -1,30 +1,78 @@
-//! Features to ryukei bodies. Each phase 0 feature is one primitive with
-//! its own body; they don't depend on each other, so they build in
-//! parallel and are collected in feature order.
+//! Features to ryukei bodies and solved sketches. Primitives and sketches
+//! depend on nothing else, so they build in parallel; then every extrude
+//! and revolve, each from its sketch, in parallel too. Results are
+//! collected in feature order.
 
-use crate::doc::files::{Feature, FeatureType, Placement};
+use crate::doc::files::{Feature, Placement, Primitive, PrimitiveType};
 use crate::doc::id::Id;
 use crate::doc::project::Part;
+use crate::doc::sketch::Geometry;
+use crate::doc::sweep::{Angle, Extent};
 use crate::error::{Code, Error, Result};
+use crate::profile::Keys;
+use crate::sketch::Solved;
+use core::f64::consts::TAU;
 use rayon::prelude::*;
-use ryukei::geom::{Frame, Point3, Rigid, Vector3};
+use ryukei::SweepError;
+use ryukei::geom::{Axis, Frame, Point3, Rigid, Vector3};
 use ryukei::name::{Journal, OpKey};
-use ryukei::primitive;
 use ryukei::topo::Body;
+use ryukei::{primitive, sweep};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// A feature's rebuilt body.
 #[derive(Clone, Debug)]
 pub struct Built {
     pub body: Body,
     pub journal: Journal,
+    /// Where a sweep's entities came from in its sketch, by name (see
+    /// [`crate::profile::origins`]); empty for a primitive.
+    pub origins: Arc<BTreeMap<String, serde_json::Value>>,
     /// BLAKE3 of the body's dump: equal hashes mean bit-identical bodies.
     pub hash: String,
 }
 
-/// A part's rebuild: each feature's body or error, in feature order.
+/// What a feature rebuilds to: a body, or a solved sketch.
+// A part holds a handful of these; boxing the body would only add a
+// pointer to every mesh and inspect.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug)]
+pub enum Output {
+    Body(Built),
+    Sketch(Arc<Solved>),
+}
+
+impl Output {
+    /// The body, if the feature makes one.
+    pub fn body(&self) -> Option<&Built> {
+        match self {
+            Output::Body(b) => Some(b),
+            Output::Sketch(_) => None,
+        }
+    }
+
+    /// The solved sketch, if the feature is one.
+    pub fn sketch(&self) -> Option<&Solved> {
+        match self {
+            Output::Sketch(s) => Some(s),
+            Output::Body(_) => None,
+        }
+    }
+
+    /// The body's or the sketch's hash: equal hashes, equal results.
+    pub fn hash(&self) -> &str {
+        match self {
+            Output::Body(b) => &b.hash,
+            Output::Sketch(s) => &s.hash,
+        }
+    }
+}
+
+/// A part's rebuild: each feature's output or error, in feature order.
 #[derive(Clone, Debug)]
 pub struct PartResult {
-    pub features: Vec<(Id, Result<Built>)>,
+    pub features: Vec<(Id, Result<Output>)>,
     /// Combines the features' hashes (or error codes) in order.
     pub hash: String,
 }
@@ -32,6 +80,26 @@ pub struct PartResult {
 impl PartResult {
     pub fn failed(&self) -> usize {
         self.features.iter().filter(|(_, r)| r.is_err()).count()
+    }
+
+    /// The feature's output, if it rebuilt.
+    pub fn output(&self, id: &Id) -> Option<&Output> {
+        self.features
+            .iter()
+            .find(|(f, _)| f == id)
+            .and_then(|(_, r)| r.as_ref().ok())
+    }
+
+    /// `sketch_stale` for each sketch rebuilt from positions solved in
+    /// memory.
+    pub fn warnings(&self) -> Vec<serde_json::Value> {
+        self.features
+            .iter()
+            .filter_map(|(id, r)| {
+                let s = r.as_ref().ok()?.sketch()?;
+                s.stale.then(|| crate::sketch::stale_warning(id))
+            })
+            .collect()
     }
 }
 
@@ -65,30 +133,222 @@ pub fn placement(p: &Placement) -> Result<Rigid> {
 
 /// Builds one feature and checks the result.
 pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
+    match f {
+        Feature::Primitive(p) => build_primitive(part, id, p),
+        Feature::Sketch(_) => Err(
+            Error::new(Code::Internal, format!("sketch {id} makes no body")).with("feature", id),
+        ),
+        Feature::Extrude(_) | Feature::Revolve(_) => Err(Error::new(
+            Code::Internal,
+            format!("{} {id} is built from its sketch", f.type_name()),
+        )
+        .with("feature", id)),
+    }
+}
+
+/// The solved sketch a sweep reads: listed before it, a sketch, and
+/// rebuilt.
+fn sketch_input<'a>(
+    part: &Part,
+    id: &Id,
+    sketch: &Id,
+    before: &'a BTreeMap<Id, Result<Output>>,
+) -> Result<&'a crate::sketch::Solved> {
+    let order = part.order();
+    let me = order.iter().position(|f| f == id);
+    match order.iter().position(|f| f == sketch) {
+        None => {
+            return Err(Error::new(
+                Code::NotFound,
+                format!("{id} sweeps {sketch}, which part {} doesn't list", part.id),
+            )
+            .with("feature", id)
+            .with("sketch", sketch));
+        }
+        Some(at) if Some(at) >= me => {
+            return Err(Error::new(
+                Code::ReferenceForward,
+                format!("{id} sweeps {sketch}, which comes after it"),
+            )
+            .with("feature", id)
+            .with("sketch", sketch));
+        }
+        Some(_) => {}
+    }
+    if let Some(Ok(f)) = part.features.get(sketch)
+        && f.sketch().is_none()
+    {
+        return Err(Error::new(
+            Code::ReferenceWrongKind,
+            format!(
+                "{id} sweeps {sketch}, which is a {}, not a sketch",
+                f.type_name()
+            ),
+        )
+        .with("feature", id)
+        .with("sketch", sketch));
+    }
+    match before.get(sketch) {
+        Some(Ok(o)) => Ok(o.sketch().expect("a sketch's output")),
+        Some(Err(e)) => Err(Error::new(
+            Code::DependencyFailed,
+            format!("{id} sweeps {sketch}, which failed to rebuild"),
+        )
+        .with("feature", id)
+        .with("dependency", sketch)
+        .with("cause", e.code)),
+        None => unreachable!("every listed feature before a sweep is built first"),
+    }
+}
+
+/// An extrude or a revolve, from its sketch's result.
+fn build_sweep(
+    part: &Part,
+    id: &Id,
+    f: &Feature,
+    before: &BTreeMap<Id, Result<Output>>,
+) -> Result<Built> {
+    let ty = f.type_name();
+    let sketch = f.swept().expect("a sweep");
+    let solved = sketch_input(part, id, sketch, before)?;
+    let (loops, axis) = match f {
+        Feature::Extrude(e) => (&e.loops, None),
+        Feature::Revolve(r) => (&r.loops, Some(&r.axis)),
+        _ => unreachable!("a sweep"),
+    };
+    let (valid, keys) = crate::profile::profile(&part.id, sketch, solved, loops)
+        .map_err(|e| e.with("feature", id).with("sketch", sketch))?;
+    let key = op_key(&part.id, id);
+    let made = match f {
+        Feature::Extrude(e) => {
+            let n = valid.frame().z().get();
+            let dir = if e.reverse { -n } else { n };
+            let l = e.extent.length().meters();
+            let (start, end) = match e.extent {
+                Extent::Blind(_) => (0.0, l),
+                Extent::Symmetric(_) => (-l / 2.0, l / 2.0),
+            };
+            sweep::extrude(key, &valid, dir, start, end)
+        }
+        Feature::Revolve(r) => {
+            let axis = sweep_axis(solved, id, &r.axis)?;
+            let (start, end) = match &r.angle {
+                Angle::Full => (0.0, TAU),
+                Angle::Of(q) if r.symmetric => (-q.radians() / 2.0, q.radians() / 2.0),
+                Angle::Of(q) => (0.0, q.radians()),
+            };
+            sweep::revolve(key, &valid, axis, start, end)
+        }
+        _ => unreachable!("a sweep"),
+    };
+    let made = made.map_err(|e| sweep_error(id, ty, e, &keys, axis))?;
+    let origins = crate::profile::origins(key, sketch, &valid, &keys);
+    finish(id, ty, made, origins)
+}
+
+/// A revolve's axis: a line of its sketch, from its start to its end.
+fn sweep_axis(solved: &crate::sketch::Solved, id: &Id, axis: &Id) -> Result<Axis> {
+    let s = &solved.sketch;
+    let at = |p: &Id| match s.entities[p].geometry {
+        Geometry::Point { m } => solved.frame.apply_point(Point3::new(m[0], m[1], 0.0)),
+        _ => unreachable!("validated: lines join points"),
+    };
+    match s.entities.get(axis).map(|e| &e.geometry) {
+        Some(Geometry::Line { start, end }) => {
+            let (a, b) = (at(start), at(end));
+            Axis::new(a, b - a).map_err(|e| {
+                Error::new(
+                    Code::InvalidExtent,
+                    format!("revolve {id}: its axis {axis} has no length"),
+                )
+                .with("feature", id)
+                .with("kernel", format!("{e:?}"))
+            })
+        }
+        Some(g) => Err(Error::new(
+            Code::ReferenceWrongKind,
+            format!(
+                "revolve {id}: its axis {axis} is a {}, not a line",
+                g.type_name()
+            ),
+        )
+        .with("feature", id)
+        .with("axis", axis)),
+        None => Err(Error::new(
+            Code::NotFound,
+            format!("revolve {id}: its sketch has no {axis}"),
+        )
+        .with("feature", id)
+        .with("axis", axis)),
+    }
+}
+
+/// The kernel's refusal of a sweep, in the sketch's terms.
+fn sweep_error(id: &Id, ty: &str, e: ryukei::Error, keys: &Keys, axis: Option<&Id>) -> Error {
+    let kernel = format!("{e:?}");
+    let (code, msg, entities) = match e {
+        ryukei::Error::InvalidSweep(
+            SweepError::CrossesAxis { segment }
+            | SweepError::TouchesAxisInside { segment }
+            | SweepError::PinchedOnAxis { segment },
+        ) => {
+            let seg = keys.segments[&segment.0].clone();
+            let mut entities = vec![seg.clone()];
+            entities.extend(axis.cloned());
+            let msg = format!("{seg} crosses or touches the axis");
+            (Code::ProfileInvalid, msg, entities)
+        }
+        ryukei::Error::InvalidSweep(SweepError::ShortSpan | SweepError::BadAngle) => (
+            Code::InvalidExtent,
+            "the sweep is too short".to_owned(),
+            Vec::new(),
+        ),
+        e => (Code::RebuildFailed, e.to_string(), Vec::new()),
+    };
+    let mut err = Error::new(code, format!("{ty} {id}: {msg}"))
+        .with("feature", id)
+        .with("kernel", kernel);
+    if !entities.is_empty() {
+        err = err.with("entities", entities);
+    }
+    err
+}
+
+fn build_primitive(part: &Id, id: &Id, f: &Primitive) -> Result<Built> {
     let key = op_key(part, id);
     let at = placement(&f.placement)?;
     let m = |name| f.meters(name);
     let made = match f.ty {
-        FeatureType::Box => primitive::block(key, m("x"), m("y"), m("z"), &at),
-        FeatureType::Cylinder => primitive::cylinder(key, m("radius"), m("height"), &at),
-        FeatureType::Cone if m("top_radius") > 0.0 => {
+        PrimitiveType::Box => primitive::block(key, m("x"), m("y"), m("z"), &at),
+        PrimitiveType::Cylinder => primitive::cylinder(key, m("radius"), m("height"), &at),
+        PrimitiveType::Cone if m("top_radius") > 0.0 => {
             primitive::frustum(key, m("radius"), m("top_radius"), m("height"), &at)
         }
-        FeatureType::Cone => primitive::cone(key, m("radius"), m("height"), &at),
-        FeatureType::Sphere => primitive::sphere(key, m("radius"), &at),
-        FeatureType::Torus => primitive::torus(key, m("major_radius"), m("minor_radius"), &at),
+        PrimitiveType::Cone => primitive::cone(key, m("radius"), m("height"), &at),
+        PrimitiveType::Sphere => primitive::sphere(key, m("radius"), &at),
+        PrimitiveType::Torus => primitive::torus(key, m("major_radius"), m("minor_radius"), &at),
     };
-    let (body, journal) = made.map_err(|e| {
+    let made = made.map_err(|e| {
         Error::new(Code::RebuildFailed, format!("{} {id}: {e}", f.ty.as_str()))
             .with("feature", id)
             .with("kernel", format!("{e:?}"))
     })?;
-    // A broken body is never reported as a success, in release builds too.
+    finish(id, f.ty.as_str(), made, BTreeMap::new())
+}
+
+/// Checks a body the kernel built and hashes it. A broken body is never
+/// reported as a success, in release builds too.
+fn finish(
+    id: &Id,
+    ty: &str,
+    (body, journal): (Body, Journal),
+    origins: BTreeMap<String, serde_json::Value>,
+) -> Result<Built> {
     let faults = ryukei::check::check(&body);
     if !faults.is_empty() {
         return Err(Error::new(
             Code::Internal,
-            format!("{} {id}: the kernel built an invalid body", f.ty.as_str()),
+            format!("{ty} {id}: the kernel built an invalid body"),
         )
         .with("feature", id)
         .with(
@@ -100,27 +360,65 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
     Ok(Built {
         body,
         journal,
+        origins: Arc::new(origins),
         hash,
     })
 }
 
-/// Rebuilds every listed feature of `part`, in parallel.
+/// Rebuilds one feature: solves a sketch, sweeps an extrude or revolve's
+/// sketch from `before` (the results of the features it may read), builds
+/// anything else.
+pub fn rebuild_feature(
+    part: &Part,
+    id: &Id,
+    f: &Feature,
+    before: &BTreeMap<Id, Result<Output>>,
+) -> Result<Output> {
+    match f {
+        Feature::Sketch(s) => crate::sketch::solve(id, s).map(|s| Output::Sketch(Arc::new(s))),
+        Feature::Extrude(_) | Feature::Revolve(_) => {
+            build_sweep(part, id, f, before).map(Output::Body)
+        }
+        f => build_feature(&part.id, id, f).map(Output::Body),
+    }
+}
+
+/// Rebuilds every listed feature of `part`, in parallel: first what reads
+/// no other feature, then the sweeps.
 pub fn rebuild_part(part: &Part) -> PartResult {
-    let features: Vec<(Id, Result<Built>)> = part
+    let sweeps = |id: &Id| matches!(&part.features[id], Ok(f) if f.swept().is_some());
+    let none = BTreeMap::new();
+    let build = |id: &Id, before: &BTreeMap<Id, Result<Output>>| {
+        let built = match &part.features[id] {
+            Ok(f) => rebuild_feature(part, id, f, before),
+            Err(e) => Err(e.clone()),
+        };
+        (id.clone(), built)
+    };
+    let first: BTreeMap<Id, Result<Output>> = part
         .order()
         .par_iter()
+        .filter(|id| !sweeps(id))
+        .map(|id| build(id, &none))
+        .collect();
+    let second: BTreeMap<Id, Result<Output>> = part
+        .order()
+        .par_iter()
+        .filter(|id| sweeps(id))
+        .map(|id| build(id, &first))
+        .collect();
+    let features: Vec<(Id, Result<Output>)> = part
+        .order()
+        .iter()
         .map(|id| {
-            let built = match &part.features[id] {
-                Ok(f) => build_feature(&part.id, id, f),
-                Err(e) => Err(e.clone()),
-            };
-            (id.clone(), built)
+            let r = first.get(id).or_else(|| second.get(id)).expect("built");
+            (id.clone(), r.clone())
         })
         .collect();
     let mut h = blake3::Hasher::new();
     for (id, r) in &features {
         let piece = match r {
-            Ok(b) => format!("{id} ok {}\n", b.hash),
+            Ok(b) => format!("{id} ok {}\n", b.hash()),
             Err(e) => format!("{id} err {}\n", serde_json::json!(e.code)),
         };
         h.update(piece.as_bytes());
@@ -140,30 +438,33 @@ mod tests {
         Id::parse(s, "feature").unwrap()
     }
 
-    fn feature(ty: FeatureType, params: &[(&str, &str)]) -> Feature {
-        Feature {
+    fn feature(ty: PrimitiveType, params: &[(&str, &str)]) -> Feature {
+        Feature::Primitive(Primitive {
             ty,
             params: params
                 .iter()
                 .map(|(k, v)| (k.to_string(), Quantity::parse(v, Unit::Mm).unwrap()))
                 .collect(),
             placement: Placement::identity(Unit::Mm),
-        }
+        })
     }
 
     #[test]
     fn every_type_builds_a_valid_body() {
         for f in [
-            feature(FeatureType::Box, &[("x", "10"), ("y", "20"), ("z", "30")]),
-            feature(FeatureType::Cylinder, &[("radius", "5"), ("height", "10")]),
-            feature(FeatureType::Cone, &[("radius", "5"), ("height", "10")]),
+            feature(PrimitiveType::Box, &[("x", "10"), ("y", "20"), ("z", "30")]),
             feature(
-                FeatureType::Cone,
+                PrimitiveType::Cylinder,
+                &[("radius", "5"), ("height", "10")],
+            ),
+            feature(PrimitiveType::Cone, &[("radius", "5"), ("height", "10")]),
+            feature(
+                PrimitiveType::Cone,
                 &[("radius", "5"), ("height", "10"), ("top_radius", "2")],
             ),
-            feature(FeatureType::Sphere, &[("radius", "5")]),
+            feature(PrimitiveType::Sphere, &[("radius", "5")]),
             feature(
-                FeatureType::Torus,
+                PrimitiveType::Torus,
                 &[("major_radius", "10"), ("minor_radius", "2")],
             ),
         ] {
@@ -226,14 +527,17 @@ mod tests {
         // Equal radii make no cone; a torus whose tube reaches the axis is degenerate.
         for f in [
             feature(
-                FeatureType::Cone,
+                PrimitiveType::Cone,
                 &[("radius", "5"), ("height", "10"), ("top_radius", "5")],
             ),
             feature(
-                FeatureType::Torus,
+                PrimitiveType::Torus,
                 &[("major_radius", "2"), ("minor_radius", "2")],
             ),
-            feature(FeatureType::Box, &[("x", "2000 m"), ("y", "1"), ("z", "1")]),
+            feature(
+                PrimitiveType::Box,
+                &[("x", "2000 m"), ("y", "1"), ("z", "1")],
+            ),
         ] {
             let e = build_feature(&id("p"), &id("f"), &f).unwrap_err();
             assert_eq!(e.code, Code::RebuildFailed, "{e}");

@@ -1,0 +1,11 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature2",
+  "0rams": {
+    "height": "10",
+    "radiuarams": {
+"kind": "ryucad.fe$ture",
+  "params": {
+    "x": "10 mm",
+    "y": [{
+  

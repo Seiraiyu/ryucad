@@ -1,0 +1,11 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "params": {
+    "x": "B-BBBBBBBBBBm",
+    "yx": [
+         0
+    ]
+  },
+  "type": "box"
+}

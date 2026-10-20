@@ -175,6 +175,296 @@ fn an_agent_session() {
 }
 
 #[test]
+fn parameters_drive_features() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    let r = p.ok(&["param", "set", "p", "wall=3mm", "n=4"]);
+    assert_eq!(r["parameters"][1]["value"], "3 mm");
+    let rev = r["revision"].as_str().unwrap().to_owned();
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "box",
+        "--id",
+        "b",
+        "--param",
+        "x=wall*n",
+        "--param",
+        "y=10",
+        "--param",
+        "z=wall",
+        "--origin",
+        "max(wall, 1 mm),0,-wall",
+        "--expect",
+        &rev,
+    ]);
+    let shown = p.ok(&["feature", "show", "p", "b"]);
+    assert_eq!(
+        shown["params"]["x"],
+        serde_json::json!({"value": "wall * n", "m": 0.012, "expr": true})
+    );
+    assert_eq!(shown["placement"]["origin"][0]["value"], "max(wall, 1 mm)");
+    let before = p.ok(&["rebuild"])["parts"][0]["hash"].clone();
+    p.ok(&["param", "set", "p", "wall=4 mm"]);
+    let after = p.ok(&["rebuild"]);
+    assert_ne!(after["parts"][0]["hash"], before);
+    assert_eq!(
+        p.ok(&["feature", "show", "p", "b"])["params"]["x"]["m"],
+        0.016
+    );
+    let list = p.ok(&["param", "list", "p"]);
+    assert_eq!(
+        list["parameters"][1]["used_by"]["features"],
+        serde_json::json!(["b"])
+    );
+    assert_eq!(p.ok(&["check-format"])["clean"], true);
+    p.fails(&["param", "set", "p", "wall=1 deg"], "unit_mismatch", 1);
+    p.fails(&["param", "set", "p", "wall=wall"], "parameter_cycle", 1);
+    p.fails(
+        &["feature", "edit", "p", "b", "--param", "y=gap"],
+        "unknown_parameter",
+        1,
+    );
+    p.fails(&["param", "set", "p"], "usage", 2);
+    p.fails(&["param", "delete", "p", "wall"], "has_dependents", 1);
+    let r = p.ok(&["param", "rename", "p", "wall", "skin"]);
+    assert_eq!(r["parameters"][1]["name"], "skin");
+    let shown = p.ok(&["feature", "show", "p", "b"]);
+    assert_eq!(shown["params"]["x"]["value"], "skin * n");
+    p.ok(&["feature", "delete", "p", "b"]);
+    p.ok(&["param", "delete", "p", "skin"]);
+    p.ok(&["param", "delete", "p", "n"]);
+    assert_eq!(
+        p.ok(&["param", "list", "p"])["parameters"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
+fn sketches_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&["param", "set", "p", "width=20 mm"]);
+    let r = p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--plane", "zx",
+    ]);
+    assert_eq!(r["feature"]["plane"], "zx");
+    let ops = r#"[
+        {"op": "add", "type": "point", "at": [0, 0]},
+        {"op": "add", "type": "point", "at": [19, 1]},
+        {"op": "add", "type": "point", "at": [21, 9]},
+        {"op": "add", "type": "point", "at": [1, 11]},
+        {"op": "add", "type": "line", "start": "p1", "end": "p2"},
+        {"op": "add", "type": "line", "start": "p2", "end": "p3"},
+        {"op": "add", "type": "line", "start": "p3", "end": "p4"},
+        {"op": "add", "type": "line", "start": "p4", "end": "p1"},
+        {"op": "add", "type": "horizontal", "a": "l1"},
+        {"op": "add", "type": "horizontal", "a": "l3"},
+        {"op": "add", "type": "vertical", "a": "l2"},
+        {"op": "add", "type": "vertical", "a": "l4"},
+        {"op": "add", "type": "fix", "a": "p1"},
+        {"op": "add", "type": "length", "a": "l1", "value": "width"}
+    ]"#;
+    p.write("ops.json", ops);
+    let r = p.ok(&["sketch", "edit", "p", "s", "@ops.json"]);
+    assert_eq!(r["report"]["state"], "under");
+    assert_eq!(r["report"]["dof"], 1);
+    let r = p.ok(&[
+        "sketch",
+        "edit",
+        "p",
+        "s",
+        r#"[{"op": "add", "type": "distance", "a": "p1", "b": "l3", "value": "width / 2"}]"#,
+    ]);
+    assert_eq!(r["added"], serde_json::json!(["d2"]));
+    assert_eq!(r["report"]["state"], "well");
+    let g = p.ok(&["sketch", "get", "p", "s"]);
+    assert_eq!(g["entities"]["p3"]["state"], "well");
+    assert_eq!(g["constraints"]["d2"]["value"]["value"], "width / 2");
+    // A proposal, solved but not written.
+    let dry = p.ok(&[
+        "sketch",
+        "solve",
+        "p",
+        "s",
+        r#"[{"op": "set", "id": "d2", "value": "width"}]"#,
+    ]);
+    assert_eq!(dry["changed"], true);
+    assert_eq!(p.ok(&["sketch", "solve", "p", "s"])["changed"], false);
+    let r = p.ok(&["rebuild", "p"]);
+    assert_eq!(r["parts"][0]["features"][0]["sketch"]["state"], "well");
+    // The parameter moves the sketch, written in the same change.
+    let r = p.ok(&["param", "set", "p", "width=30 mm"]);
+    assert_eq!(r["sketches"][0]["ok"], true);
+    assert_eq!(p.ok(&["check-format"])["clean"], true);
+    // Refused edits, by code.
+    p.fails(
+        &[
+            "sketch",
+            "edit",
+            "p",
+            "s",
+            r#"[{"op": "add", "type": "parallel", "a": "l1", "b": "l3"}]"#,
+        ],
+        "sketch_overconstrained",
+        1,
+    );
+    p.fails(
+        &[
+            "sketch",
+            "edit",
+            "p",
+            "s",
+            r#"[{"op": "add", "type": "length", "a": "l2", "value": "1 m"}]"#,
+        ],
+        "sketch_unsolved",
+        1,
+    );
+    p.fails(&["sketch", "edit", "p", "s", "[nope"], "usage", 2);
+    // Stale from outside: a warning in the envelope, and a repair.
+    p.write(
+        "parts/p/parameters.json",
+        "{\n  \"format\": 1,\n  \"kind\": \"ryucad.parameters\",\n  \"parameters\": {\n    \"width\": \"25 mm\"\n  }\n}\n",
+    );
+    let (code, v) = p.both_from("", &["rebuild", "p"]);
+    assert_eq!((code, &v["ok"]), (0, &serde_json::json!(true)), "{v}");
+    assert_eq!(v["warnings"].as_array().unwrap().len(), 1);
+    assert!(v["warnings"][0].as_str().unwrap().contains("sketch s"));
+    let d = p.ok(&["doctor"]);
+    let issue = &d["issues"][0];
+    assert_eq!(issue["code"], "sketch_stale");
+    let id = issue["repairs"][0]["id"].as_str().unwrap().to_owned();
+    p.ok(&["doctor", "--repair", &id]);
+    assert_eq!(p.ok(&["doctor"])["healthy"], true);
+}
+
+#[test]
+fn sketches_become_bodies_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&["feature", "add", "p", "sketch", "--id", "s"]);
+    p.ok(&[
+        "sketch",
+        "edit",
+        "p",
+        "s",
+        r#"[{"op": "add", "type": "point", "at": [10, 0]},
+            {"op": "add", "type": "point", "at": [20, 0]},
+            {"op": "add", "type": "point", "at": [20, 8]},
+            {"op": "add", "type": "point", "at": [10, 8]},
+            {"op": "add", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "type": "line", "start": "p3", "end": "p4"},
+            {"op": "add", "type": "line", "start": "p4", "end": "p1"},
+            {"op": "add", "type": "point", "at": [0, 0]},
+            {"op": "add", "type": "point", "at": [0, 10]},
+            {"op": "add", "type": "line", "start": "p5", "end": "p6", "construction": true}]"#,
+    ]);
+    let r = p.ok(&[
+        "feature", "add", "p", "extrude", "--id", "e", "--sketch", "s", "--length", "3",
+    ]);
+    assert_eq!(r["feature"]["extent"]["type"], "blind");
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "revolve",
+        "--id",
+        "r",
+        "--sketch",
+        "s",
+        "--axis",
+        "l5",
+        "--angle",
+        "90",
+        "--symmetric",
+    ]);
+    let r = p.ok(&["rebuild", "p"]);
+    let features = r["parts"][0]["features"].as_array().unwrap();
+    assert_eq!(features.len(), 3);
+    assert!(features[1]["hash"].is_string() && features[2]["hash"].is_string());
+    let v = p.ok(&["inspect", "p", "e"]);
+    assert_eq!(v["bodies"][0]["faces"][0]["origin"]["sketch"], "s");
+    p.ok(&[
+        "feature",
+        "edit",
+        "p",
+        "e",
+        "--extent",
+        "symmetric",
+        "--reverse",
+    ]);
+    p.ok(&[
+        "feature",
+        "edit",
+        "p",
+        "r",
+        "--angle",
+        "full",
+        "--symmetric",
+        "false",
+    ]);
+    let r = p.ok(&["render", "--out", "s.png", "--size", "160x120"]);
+    assert_eq!(r["width"], 160);
+    assert_eq!(
+        pixels(&p.direct.join("s.png")),
+        pixels(&p.daemon.join("s.png"))
+    );
+    // Refused, by code.
+    p.fails(&["feature", "delete", "p", "s"], "has_dependents", 1);
+    p.fails(
+        &["feature", "move", "p", "e", "--first"],
+        "reference_forward",
+        1,
+    );
+    p.fails(
+        &[
+            "feature", "add", "p", "revolve", "--sketch", "s", "--axis", "p1", "--angle", "9",
+        ],
+        "reference_wrong_kind",
+        1,
+    );
+    p.fails(
+        &[
+            "feature", "add", "p", "extrude", "--sketch", "s", "--length", "0",
+        ],
+        "invalid_extent",
+        1,
+    );
+    p.ok(&[
+        "feature", "add", "p", "extrude", "--id", "bad", "--sketch", "s", "--length", "1",
+        "--loop", "l5",
+    ]);
+    let (code, v) = p.both_from("", &["rebuild", "p"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("rebuild_failed")),
+        "{v}"
+    );
+    let bad = &v["error"]["details"]["parts"][0]["features"][3];
+    assert_eq!(bad["error"]["code"], "profile_invalid");
+    p.ok(&["feature", "delete", "p", "bad"]);
+    // A sketch that fails takes its sweeps with it: by hand, l1 is given two
+    // lengths at once.
+    let path = p.direct.join("parts/p/features/s.json");
+    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    v["constraints"]["x1"] = serde_json::json!({"a": "l1", "type": "length", "value": "10 mm"});
+    v["constraints"]["x2"] =
+        serde_json::json!({"a": "p1", "b": "p2", "type": "distance", "value": "12 mm"});
+    p.write(
+        "parts/p/features/s.json",
+        &serde_json::to_string_pretty(&v).unwrap(),
+    );
+    let (_, v) = p.both_from("", &["rebuild", "p"]);
+    let e = &v["error"]["details"]["parts"][0]["features"][1];
+    assert_eq!(e["error"]["code"], "dependency_failed", "{v}");
+}
+
+#[test]
 fn external_edits_are_seen() {
     let p = Pair::new();
     p.ok(&["init"]);
@@ -321,6 +611,13 @@ fn every_protocol_method_has_a_command() {
         ("feature.move", &["feature", "move"]),
         ("feature.list", &["feature", "list"]),
         ("feature.show", &["feature", "show"]),
+        ("param.list", &["param", "list"]),
+        ("param.set", &["param", "set"]),
+        ("param.delete", &["param", "delete"]),
+        ("param.rename", &["param", "rename"]),
+        ("sketch.edit", &["sketch", "edit"]),
+        ("sketch.solve", &["sketch", "solve"]),
+        ("sketch.get", &["sketch", "get"]),
         ("rebuild", &["rebuild"]),
         ("inspect", &["inspect"]),
         ("check_format", &["check-format"]),

@@ -1,18 +1,26 @@
-//! The three file kinds: the project manifest, a part's feature list and a
-//! feature. Each reads from and writes to a JSON value; the file system is
-//! [`super::project`]'s business.
+//! The file kinds: the project manifest, a part's feature list, its
+//! parameters and a feature. Each reads from and writes to a JSON value;
+//! the file system is [`super::project`]'s business.
 
 use super::id::Id;
+use super::sketch::Sketch;
+use super::sweep::{Extrude, Revolve};
 use crate::error::{Code, Error, Result};
+use crate::expr::{self, Env, Expr};
 use crate::units::{Quantity, Unit};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
-/// The format version this ryucad reads and writes, for every kind.
+/// The format version of the manifest, part and parameters files.
 pub const FORMAT: u64 = 1;
+
+/// The newest feature format: 2 adds expressions. A feature is written at
+/// the lowest format that holds it, so one with only literals stays 1.
+pub const FEATURE_FORMAT: u64 = 2;
 
 pub const PROJECT_KIND: &str = "ryucad.project";
 pub const PART_KIND: &str = "ryucad.part";
+pub const PARAMETERS_KIND: &str = "ryucad.parameters";
 pub const FEATURE_KIND: &str = "ryucad.feature";
 
 /// The project manifest, `ryucad.json`.
@@ -27,9 +35,16 @@ pub struct PartFile {
     pub features: Vec<Id>,
 }
 
-/// The primitive feature types of phase 0.
+/// A part's named parameters, `parts/<part>/parameters.json`: each an
+/// expression over the others.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ParametersFile {
+    pub parameters: BTreeMap<String, Expr>,
+}
+
+/// The primitive types of phase 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum FeatureType {
+pub enum PrimitiveType {
     Box,
     Cylinder,
     Cone,
@@ -37,10 +52,19 @@ pub enum FeatureType {
     Torus,
 }
 
-/// A feature, `parts/<part>/features/<id>.json`.
+/// A feature, `parts/<part>/features/<id>.json`: its `type` says which.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Feature {
-    pub ty: FeatureType,
+pub enum Feature {
+    Primitive(Primitive),
+    Sketch(Sketch),
+    Extrude(Extrude),
+    Revolve(Revolve),
+}
+
+/// A primitive feature: one solid of a type, sized by its params.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Primitive {
+    pub ty: PrimitiveType,
     pub params: BTreeMap<String, Quantity>,
     pub placement: Placement,
 }
@@ -54,54 +78,46 @@ pub struct Placement {
     pub x: [f64; 3],
 }
 
-impl FeatureType {
-    pub const ALL: [FeatureType; 5] = [
-        FeatureType::Box,
-        FeatureType::Cylinder,
-        FeatureType::Cone,
-        FeatureType::Sphere,
-        FeatureType::Torus,
+impl PrimitiveType {
+    pub const ALL: [PrimitiveType; 5] = [
+        PrimitiveType::Box,
+        PrimitiveType::Cylinder,
+        PrimitiveType::Cone,
+        PrimitiveType::Sphere,
+        PrimitiveType::Torus,
     ];
 
     pub fn as_str(self) -> &'static str {
         match self {
-            FeatureType::Box => "box",
-            FeatureType::Cylinder => "cylinder",
-            FeatureType::Cone => "cone",
-            FeatureType::Sphere => "sphere",
-            FeatureType::Torus => "torus",
+            PrimitiveType::Box => "box",
+            PrimitiveType::Cylinder => "cylinder",
+            PrimitiveType::Cone => "cone",
+            PrimitiveType::Sphere => "sphere",
+            PrimitiveType::Torus => "torus",
         }
     }
 
-    pub fn parse(s: &str) -> Result<FeatureType> {
-        FeatureType::ALL
+    pub fn parse(s: &str) -> Result<PrimitiveType> {
+        PrimitiveType::ALL
             .into_iter()
             .find(|t| t.as_str() == s)
-            .ok_or_else(|| {
-                Error::new(
-                    Code::UnknownFeatureType,
-                    format!(
-                        "unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus"
-                    ),
-                )
-                .with("type", s)
-            })
+            .ok_or_else(|| unknown_type(s))
     }
 
     /// The required parameters, each a length greater than zero.
     pub fn required(self) -> &'static [&'static str] {
         match self {
-            FeatureType::Box => &["x", "y", "z"],
-            FeatureType::Cylinder | FeatureType::Cone => &["radius", "height"],
-            FeatureType::Sphere => &["radius"],
-            FeatureType::Torus => &["major_radius", "minor_radius"],
+            PrimitiveType::Box => &["x", "y", "z"],
+            PrimitiveType::Cylinder | PrimitiveType::Cone => &["radius", "height"],
+            PrimitiveType::Sphere => &["radius"],
+            PrimitiveType::Torus => &["major_radius", "minor_radius"],
         }
     }
 
     /// The optional parameters, each a length of zero or more.
     pub fn optional(self) -> &'static [&'static str] {
         match self {
-            FeatureType::Cone => &["top_radius"],
+            PrimitiveType::Cone => &["top_radius"],
             _ => &[],
         }
     }
@@ -126,12 +142,13 @@ impl Placement {
         })
     }
 
-    /// Reads a placement object; `at` is its JSON pointer for errors.
-    pub fn from_json(v: &Value, default: Unit, at: &str) -> Result<Placement> {
+    /// Reads a placement object, its origin's expressions reading `env`;
+    /// `at` is its JSON pointer for errors.
+    pub fn from_json(v: &Value, default: Unit, at: &str, env: &Env) -> Result<Placement> {
         let mut o = Obj::new(v, at)?;
         let origin = o.take("origin")?;
         let origin = triple(&origin, &format!("{at}/origin"), |v, at| {
-            Quantity::from_json(v, default).map_err(|e| e.with("pointer", at))
+            Quantity::from_json_in(v, default, &|n| env.get(n)).map_err(|e| e.with("pointer", at))
         })?;
         let z = vector(&o.take("z")?, &format!("{at}/z"))?;
         let x = vector(&o.take("x")?, &format!("{at}/x"))?;
@@ -146,7 +163,7 @@ impl Manifest {
     }
 
     pub fn from_json(v: &Value) -> Result<Manifest> {
-        let mut o = header(v, PROJECT_KIND)?;
+        let mut o = header(v, PROJECT_KIND, FORMAT)?;
         let unit = o.take("default_unit")?;
         let default_unit = unit.as_str().and_then(Unit::parse).ok_or_else(|| {
             invalid(
@@ -165,7 +182,7 @@ impl PartFile {
     }
 
     pub fn from_json(v: &Value) -> Result<PartFile> {
-        let mut o = header(v, PART_KIND)?;
+        let mut o = header(v, PART_KIND, FORMAT)?;
         let list = o.take("features")?;
         let items = list
             .as_array()
@@ -191,36 +208,227 @@ impl PartFile {
     }
 }
 
-impl Feature {
+impl ParametersFile {
     pub fn to_json(&self) -> Value {
+        let params: Map<String, Value> = self
+            .parameters
+            .iter()
+            .map(|(k, e)| (k.clone(), Value::String(e.text().to_owned())))
+            .collect();
+        json!({"format": FORMAT, "kind": PARAMETERS_KIND, "parameters": params})
+    }
+
+    /// Reads a parameters file: valid names, and expressions that parse. It
+    /// doesn't evaluate them ([`Env::new`] does).
+    pub fn from_json(v: &Value) -> Result<ParametersFile> {
+        let mut o = header(v, PARAMETERS_KIND, FORMAT)?;
+        let list = o.take("parameters")?;
+        let map = list
+            .as_object()
+            .ok_or_else(|| invalid("/parameters", "parameters must be an object"))?;
+        let mut parameters = BTreeMap::new();
+        for (k, v) in map {
+            let at = format!("/parameters/{k}");
+            let name = expr::parameter_name(k).map_err(|e| e.with("pointer", &at))?;
+            parameters.insert(name, expression(v).map_err(|e| e.with("pointer", &at))?);
+        }
+        o.finish()?;
+        Ok(ParametersFile { parameters })
+    }
+
+    /// Their values.
+    pub fn env(&self) -> Env {
+        Env::new(&self.parameters)
+    }
+}
+
+/// An expression from JSON: a string, or a number (a plain number).
+pub fn expression(v: &Value) -> Result<Expr> {
+    match v {
+        Value::String(s) => Expr::parse(s),
+        Value::Number(n) => Expr::parse(&n.to_string()),
+        _ => Err(Error::new(
+            Code::InvalidQuantity,
+            format!("expected an expression string such as \"2 * wall\", got {v}"),
+        )
+        .with("value", v)),
+    }
+}
+
+/// The expression strings in a feature's JSON: its params, the
+/// coordinates of its origin, a sketch's dimensions, and a sweep's length
+/// or angle.
+fn expression_strings(v: &mut Value) -> Vec<&mut String> {
+    let mut out = Vec::new();
+    let Some(o) = v.as_object_mut() else {
+        return out;
+    };
+    for (k, field) in o.iter_mut() {
+        match (k.as_str(), field) {
+            ("params", Value::Object(m)) => out.extend(m.values_mut().filter_map(|x| match x {
+                Value::String(s) => Some(s),
+                _ => None,
+            })),
+            ("placement", Value::Object(p)) => {
+                if let Some(Value::Array(a)) = p.get_mut("origin") {
+                    out.extend(a.iter_mut().filter_map(|x| match x {
+                        Value::String(s) => Some(s),
+                        _ => None,
+                    }));
+                }
+            }
+            ("constraints", c) => out.extend(Sketch::expression_strings(c)),
+            ("extent", Value::Object(e)) => {
+                if let Some(Value::String(s)) = e.get_mut("length") {
+                    out.push(s);
+                }
+            }
+            // "full" is a word, not a parameter.
+            ("angle", Value::String(s)) if s != "full" => out.push(s),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The parameters a feature's JSON names, read from its text alone, so a
+/// feature that doesn't evaluate still says what it reads.
+pub fn feature_names(v: &Value) -> std::collections::BTreeSet<String> {
+    let mut v = v.clone();
+    expression_strings(&mut v)
+        .into_iter()
+        .filter_map(|s| Expr::parse(s).ok())
+        .flat_map(|e| e.names())
+        .collect()
+}
+
+/// Renames a parameter in a feature's JSON, in place. Returns whether
+/// anything changed; strings that don't parse are left as they are.
+pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
+    let mut changed = false;
+    for s in expression_strings(v) {
+        if let Ok(e) = Expr::parse(s)
+            && e.names().contains(from)
+        {
+            *s = e.rename(from, to).text().to_owned();
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// The message for a `type` no feature has.
+fn unknown_type(s: &str) -> Error {
+    Error::new(
+        Code::UnknownFeatureType,
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve"),
+    )
+    .with("type", s)
+}
+
+impl Feature {
+    /// The `type` the file gives.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Feature::Primitive(p) => p.ty.as_str(),
+            Feature::Sketch(_) => "sketch",
+            Feature::Extrude(_) => "extrude",
+            Feature::Revolve(_) => "revolve",
+        }
+    }
+
+    /// The lowest format that holds this feature.
+    pub fn format(&self) -> u64 {
+        match self {
+            Feature::Primitive(p) => p.format(),
+            Feature::Sketch(s) => s.format(),
+            // New in format 2.
+            Feature::Extrude(_) | Feature::Revolve(_) => 2,
+        }
+    }
+
+    pub fn to_json(&self) -> Value {
+        let mut v = match self {
+            Feature::Primitive(p) => p.fields(),
+            Feature::Sketch(s) => s.fields(),
+            Feature::Extrude(e) => e.fields(),
+            Feature::Revolve(r) => r.fields(),
+        };
+        v["format"] = json!(self.format());
+        v["kind"] = json!(FEATURE_KIND);
+        v["type"] = json!(self.type_name());
+        v
+    }
+
+    /// Reads and validates a feature, its expressions reading `env`. Bare
+    /// numbers take `default`.
+    pub fn from_json(v: &Value, default: Unit, env: &Env) -> Result<Feature> {
+        let mut o = header(v, FEATURE_KIND, FEATURE_FORMAT)?;
+        let ty = o.take("type")?;
+        let ty = ty
+            .as_str()
+            .ok_or_else(|| invalid("/type", "type must be a string"))?;
+        let f = match ty {
+            "sketch" => Feature::Sketch(Sketch::from_fields(&mut o, default, env)?),
+            "extrude" => Feature::Extrude(Extrude::from_fields(&mut o, default, env)?),
+            "revolve" => Feature::Revolve(Revolve::from_fields(&mut o, env)?),
+            _ => {
+                let ty = PrimitiveType::parse(ty).map_err(|e| e.with("pointer", "/type"))?;
+                Feature::Primitive(Primitive::from_fields(ty, &mut o, default, env)?)
+            }
+        };
+        o.finish()?;
+        Ok(f)
+    }
+
+    /// The primitive, if it is one.
+    pub fn primitive(&self) -> Option<&Primitive> {
+        match self {
+            Feature::Primitive(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// The sketch, if it is one.
+    pub fn sketch(&self) -> Option<&Sketch> {
+        match self {
+            Feature::Sketch(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The sketch an extrude or revolve sweeps.
+    pub fn swept(&self) -> Option<&Id> {
+        match self {
+            Feature::Extrude(e) => Some(&e.sketch),
+            Feature::Revolve(r) => Some(&r.sketch),
+            _ => None,
+        }
+    }
+}
+
+impl Primitive {
+    fn format(&self) -> u64 {
+        let literal = self.params.values().all(Quantity::is_literal)
+            && self.placement.origin.iter().all(Quantity::is_literal);
+        if literal { 1 } else { FEATURE_FORMAT }
+    }
+
+    /// Its fields in a feature file, besides the header.
+    fn fields(&self) -> Value {
         let params: Map<String, Value> = self
             .params
             .iter()
             .map(|(k, q)| (k.clone(), Value::String(q.text())))
             .collect();
-        json!({
-            "format": FORMAT,
-            "kind": FEATURE_KIND,
-            "params": params,
-            "placement": self.placement.to_json(),
-            "type": self.ty.as_str(),
-        })
+        json!({"params": params, "placement": self.placement.to_json()})
     }
 
-    /// Reads and validates a feature. Bare numbers take `default`.
-    pub fn from_json(v: &Value, default: Unit) -> Result<Feature> {
-        let mut o = header(v, FEATURE_KIND)?;
-        let ty = o.take("type")?;
-        let ty = FeatureType::parse(
-            ty.as_str()
-                .ok_or_else(|| invalid("/type", "type must be a string"))?,
-        )
-        .map_err(|e| e.with("pointer", "/type"))?;
+    fn from_fields(ty: PrimitiveType, o: &mut Obj, default: Unit, env: &Env) -> Result<Primitive> {
         let params = o.take("params")?;
-        let params = Feature::params_from_json(ty, &params, default)?;
-        let placement = Placement::from_json(&o.take("placement")?, default, "/placement")?;
-        o.finish()?;
-        Ok(Feature {
+        let params = Primitive::params_from_json(ty, &params, default, env)?;
+        let placement = Placement::from_json(&o.take("placement")?, default, "/placement", env)?;
+        Ok(Primitive {
             ty,
             params,
             placement,
@@ -230,9 +438,10 @@ impl Feature {
     /// Validates a params object for `ty`: every required parameter present
     /// and positive, optional ones non-negative, no others.
     pub fn params_from_json(
-        ty: FeatureType,
+        ty: PrimitiveType,
         v: &Value,
         default: Unit,
+        env: &Env,
     ) -> Result<BTreeMap<String, Quantity>> {
         let map = v
             .as_object()
@@ -244,7 +453,8 @@ impl Feature {
             if !required && !ty.optional().contains(&k.as_str()) {
                 return Err(param_error(ty, k, &at, "is not a parameter of"));
             }
-            let q = Quantity::from_json(v, default).map_err(|e| e.with("pointer", &at))?;
+            let q = Quantity::from_json_in(v, default, &|n| env.get(n))
+                .map_err(|e| e.with("pointer", &at))?;
             let m = q.meters();
             if (required && m <= 0.0) || m < 0.0 {
                 let want = if required {
@@ -268,7 +478,7 @@ impl Feature {
     }
 }
 
-fn param_error(ty: FeatureType, name: &str, at: &str, what: &str) -> Error {
+fn param_error(ty: PrimitiveType, name: &str, at: &str, what: &str) -> Error {
     let known = [ty.required(), ty.optional()].concat().join(", ");
     Error::new(
         Code::InvalidParam,
@@ -291,13 +501,13 @@ pub fn number(x: f64) -> Value {
     }
 }
 
-fn invalid(at: &str, msg: &str) -> Error {
+pub(crate) fn invalid(at: &str, msg: &str) -> Error {
     Error::new(Code::InvalidDocument, msg).with("pointer", at)
 }
 
-/// Checks `kind` and `format`, migrating older formats, and returns the
-/// remaining fields.
-fn header<'a>(v: &'a Value, kind: &str) -> Result<Obj<'a>> {
+/// Checks `kind` and `format` (at most `newest`), migrating older formats,
+/// and returns the remaining fields.
+fn header<'a>(v: &'a Value, kind: &str, newest: u64) -> Result<Obj<'a>> {
     let mut o = Obj::new(v, "")?;
     let k = o.take("kind")?;
     if k.as_str() != Some(kind) {
@@ -311,35 +521,36 @@ fn header<'a>(v: &'a Value, kind: &str) -> Result<Obj<'a>> {
         .as_u64()
         .filter(|f| *f >= 1)
         .ok_or_else(|| invalid("/format", "format must be a positive integer"))?;
-    if format > FORMAT {
+    if format > newest {
         return Err(Error::new(
             Code::FormatTooNew,
             format!(
-                "this file has format {format}; this ryucad reads up to {FORMAT}. Upgrade ryucad"
+                "this file has format {format}; this ryucad reads up to {newest}. Upgrade ryucad"
             ),
         )
         .with("format", format)
-        .with("supported", FORMAT));
+        .with("supported", newest));
     }
-    migrate(format);
+    migrate(format, newest);
     Ok(o)
 }
 
-/// Brings an older format up to [`FORMAT`], one step at a time. Format 1 is
-/// the first, so there is nothing to do yet; each later format adds a
-/// `format => step` arm that rewrites the fields in place.
-fn migrate(format: u64) {
-    debug_assert!(format <= FORMAT);
+/// Brings an older format up to `newest`, one step at a time. Each later
+/// format adds a `format => step` arm that rewrites the fields in place.
+/// Feature format 2 only adds expressions, which format 1 files don't
+/// have, so it needs no step.
+fn migrate(format: u64, newest: u64) {
+    debug_assert!(format <= newest);
 }
 
 /// The fields of a JSON object, taken one by one so leftovers are errors.
-struct Obj<'a> {
+pub(crate) struct Obj<'a> {
     map: BTreeMap<&'a str, &'a Value>,
     at: String,
 }
 
 impl<'a> Obj<'a> {
-    fn new(v: &'a Value, at: &str) -> Result<Obj<'a>> {
+    pub(crate) fn new(v: &'a Value, at: &str) -> Result<Obj<'a>> {
         let map = v
             .as_object()
             .ok_or_else(|| invalid(at, "expected a JSON object"))?;
@@ -349,7 +560,12 @@ impl<'a> Obj<'a> {
         })
     }
 
-    fn take(&mut self, key: &str) -> Result<Value> {
+    /// A field that may be left out.
+    pub(crate) fn take_opt(&mut self, key: &str) -> Option<Value> {
+        self.map.remove(key).cloned()
+    }
+
+    pub(crate) fn take(&mut self, key: &str) -> Result<Value> {
         self.map.remove(key).cloned().ok_or_else(|| {
             invalid(
                 &format!("{}/{key}", self.at),
@@ -358,7 +574,7 @@ impl<'a> Obj<'a> {
         })
     }
 
-    fn finish(self) -> Result<()> {
+    pub(crate) fn finish(self) -> Result<()> {
         match self.map.keys().next() {
             None => Ok(()),
             Some(k) => Err(invalid(
@@ -391,6 +607,11 @@ fn vector(v: &Value, at: &str) -> Result<[f64; 3]> {
 mod tests {
     use super::*;
     use crate::doc::canonical;
+
+    /// The primitive a feature holds.
+    fn prim(f: &Feature) -> &Primitive {
+        f.primitive().expect("a primitive")
+    }
 
     fn cylinder_json() -> Value {
         json!({
@@ -430,15 +651,18 @@ mod tests {
 
     #[test]
     fn feature_reads_and_writes_explicit_units() {
-        let f = Feature::from_json(&cylinder_json(), Unit::Mm).unwrap();
-        assert_eq!(f.ty, FeatureType::Cylinder);
-        assert_eq!(f.meters("radius"), 0.0125);
+        let f = Feature::from_json(&cylinder_json(), Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!(prim(&f).ty, PrimitiveType::Cylinder);
+        assert_eq!(prim(&f).meters("radius"), 0.0125);
         assert_eq!(
             canonical::to_string(&f.to_json()),
             "{\n  \"format\": 1,\n  \"kind\": \"ryucad.feature\",\n  \"params\": {\n    \"height\": \"40 mm\",\n    \"radius\": \"12.5 mm\"\n  },\n  \"placement\": {\n    \"origin\": [\n      \"0 mm\",\n      \"0 mm\",\n      \"10 mm\"\n    ],\n    \"x\": [\n      1,\n      0,\n      0\n    ],\n    \"z\": [\n      0,\n      0,\n      1\n    ]\n  },\n  \"type\": \"cylinder\"\n}\n"
         );
         // Written once, it reads back identically in any default unit.
-        assert_eq!(Feature::from_json(&f.to_json(), Unit::Ft).unwrap(), f);
+        assert_eq!(
+            Feature::from_json(&f.to_json(), Unit::Ft, &Env::empty()).unwrap(),
+            f
+        );
     }
 
     #[test]
@@ -482,7 +706,7 @@ mod tests {
                 "/placement/origin/1",
             ),
             ("/extra", json!(1), Code::InvalidDocument, "/extra"),
-            ("/format", json!(2), Code::FormatTooNew, ""),
+            ("/format", json!(3), Code::FormatTooNew, ""),
             (
                 "/kind",
                 json!("ryucad.part"),
@@ -493,7 +717,7 @@ mod tests {
         for (path, value, code, pointer) in cases {
             let mut v = cylinder_json();
             *v.pointer_mut_or_insert(path) = value;
-            let e = Feature::from_json(&v, Unit::Mm).unwrap_err();
+            let e = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap_err();
             assert_eq!(e.code, code, "{path}: {e}");
             if !pointer.is_empty() {
                 assert_eq!(e.details["pointer"], pointer, "{path}");
@@ -505,12 +729,12 @@ mod tests {
     fn missing_params() {
         let mut v = cylinder_json();
         v["params"].as_object_mut().unwrap().remove("height");
-        let e = Feature::from_json(&v, Unit::Mm).unwrap_err();
+        let e = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap_err();
         assert_eq!(e.code, Code::InvalidParam);
         assert_eq!(e.details["param"], "height");
         v.as_object_mut().unwrap().remove("placement");
         v["params"]["height"] = json!(1);
-        let e = Feature::from_json(&v, Unit::Mm).unwrap_err();
+        let e = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap_err();
         assert_eq!(e.details["pointer"], "/placement");
     }
 
@@ -518,19 +742,122 @@ mod tests {
     fn cone_top_radius_is_optional_and_may_be_zero() {
         let mut v = cylinder_json();
         v["type"] = json!("cone");
-        assert!(Feature::from_json(&v, Unit::Mm).is_ok());
+        assert!(Feature::from_json(&v, Unit::Mm, &Env::empty()).is_ok());
         v["params"]["top_radius"] = json!(0);
         assert_eq!(
-            Feature::from_json(&v, Unit::Mm)
-                .unwrap()
-                .meters("top_radius"),
+            prim(&Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap()).meters("top_radius"),
             0.0
         );
         v["params"]["radius"] = json!(0);
         assert_eq!(
-            Feature::from_json(&v, Unit::Mm).unwrap_err().code,
+            Feature::from_json(&v, Unit::Mm, &Env::empty())
+                .unwrap_err()
+                .code,
             Code::InvalidParam
         );
+    }
+
+    fn wall() -> Env {
+        ParametersFile::from_json(&json!({
+            "format": 1,
+            "kind": "ryucad.parameters",
+            "parameters": {"hole": "wall*2", "n": 4, "wall": "3mm"}
+        }))
+        .unwrap()
+        .env()
+    }
+
+    #[test]
+    fn parameters_round_trip() {
+        let v = json!({
+            "format": 1,
+            "kind": "ryucad.parameters",
+            "parameters": {"hole": "wall*2", "n": 4, "wall": "3mm"}
+        });
+        let p = ParametersFile::from_json(&v).unwrap();
+        assert_eq!(
+            p.to_json()["parameters"],
+            json!({"hole": "wall * 2", "n": "4", "wall": "3 mm"})
+        );
+        assert_eq!(ParametersFile::from_json(&p.to_json()).unwrap(), p);
+        assert_eq!(p.env().get("hole").unwrap().x, 0.006);
+    }
+
+    #[test]
+    fn parameter_files_are_checked() {
+        let base = |params: Value| {
+            ParametersFile::from_json(&json!({
+                "format": 1, "kind": "ryucad.parameters", "parameters": params
+            }))
+        };
+        let e = base(json!({"Wall": "1 mm"})).unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].as_str()),
+            (Code::InvalidId, Some("/parameters/Wall"))
+        );
+        let e = base(json!({"mm": "1 mm"})).unwrap_err();
+        assert_eq!(e.code, Code::InvalidId);
+        let e = base(json!({"a": "1 +"})).unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].as_str()),
+            (Code::InvalidQuantity, Some("/parameters/a"))
+        );
+        let e = base(json!({"a": true})).unwrap_err();
+        assert_eq!(e.code, Code::InvalidQuantity);
+        assert_eq!(base(json!([])).unwrap_err().code, Code::InvalidDocument);
+        // An unknown name or a cycle is the env's business, not the file's.
+        assert!(base(json!({"a": "b"})).is_ok());
+    }
+
+    #[test]
+    fn features_read_parameters() {
+        let mut v = cylinder_json();
+        v["params"]["radius"] = json!("hole/2+1mm");
+        let f = Feature::from_json(&v, Unit::Mm, &wall()).unwrap();
+        assert_eq!(prim(&f).meters("radius"), 0.004);
+        assert_eq!(prim(&f).params["radius"].text(), "hole / 2 + 1 mm");
+        assert_eq!(f.format(), 2);
+        assert_eq!(f.to_json()["format"], 2);
+        // Written at format 2, it reads back the same.
+        assert_eq!(
+            Feature::from_json(&f.to_json(), Unit::Ft, &wall()).unwrap(),
+            f
+        );
+        v["placement"]["origin"][2] = json!("-wall");
+        let f = Feature::from_json(&v, Unit::Mm, &wall()).unwrap();
+        assert_eq!(prim(&f).placement.origin[2].meters(), -0.003);
+        for (radius, code) in [
+            ("gap", Code::UnknownParameter),
+            ("n", Code::UnitMismatch),
+            ("wall - hole", Code::InvalidParam),
+        ] {
+            v["params"]["radius"] = json!(radius);
+            let e = Feature::from_json(&v, Unit::Mm, &wall()).unwrap_err();
+            assert_eq!(
+                (e.code, e.details["pointer"].as_str()),
+                (code, Some("/params/radius")),
+                "{radius}"
+            );
+        }
+        // A literal-only feature stays at format 1.
+        let f = Feature::from_json(&cylinder_json(), Unit::Mm, &wall()).unwrap();
+        assert_eq!(f.format(), 1);
+    }
+
+    #[test]
+    fn names_are_read_from_the_text() {
+        let mut v = cylinder_json();
+        v["params"]["radius"] = json!("wall*2");
+        v["params"]["height"] = json!("1 +");
+        v["placement"]["origin"][0] = json!("x0 + pi * 1 mm");
+        assert_eq!(
+            feature_names(&v).into_iter().collect::<Vec<_>>(),
+            ["wall", "x0"]
+        );
+        assert!(rename_in_feature(&mut v, "wall", "skin"));
+        assert_eq!(v["params"]["radius"], "skin * 2");
+        assert_eq!(v["params"]["height"], "1 +");
+        assert!(!rename_in_feature(&mut v, "wall", "skin"));
     }
 
     #[test]

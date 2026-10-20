@@ -5,7 +5,9 @@ use clap::{Args, Parser, Subcommand};
 use ryucad::doc::project::{find_project, find_root, plain};
 use ryucad::error::{Code, Error, Result};
 use ryucad::live::{SelectMode, Style};
-use ryucad::proto::{Answer, PlacementArg, Position, Request, Transfer, VersionInfo};
+use ryucad::proto::{
+    Answer, FeatureFields, PlacementArg, Position, Request, Transfer, VersionInfo,
+};
 use ryucad::units::Unit;
 use ryucad::view::{CameraArg, ProjectionArg};
 use ryucad::{client, daemon, server};
@@ -55,6 +57,14 @@ enum Command {
     /// Add, edit, delete, move, list or show features.
     #[command(subcommand)]
     Feature(FeatureCmd),
+    /// List, set, delete or rename a part's parameters: named values, each an expression
+    /// such as "3 mm" or "wall * 2", that features' quantities can read.
+    #[command(subcommand)]
+    Param(ParamCmd),
+    /// Edit, solve or read a sketch: points, lines, arcs and circles, and the constraints and
+    /// dimensions between them.
+    #[command(subcommand)]
+    Sketch(SketchCmd),
     /// Rebuild one part, or all of them.
     Rebuild { part: Option<String> },
     /// List a part's bodies, faces, edges and vertices by stable name.
@@ -329,8 +339,10 @@ enum PartCmd {
 #[derive(Subcommand)]
 enum FeatureCmd {
     /// Add a feature: box (x, y, z), cylinder (radius, height), cone
-    /// (radius, height, top_radius), sphere (radius) or torus
-    /// (major_radius, minor_radius).
+    /// (radius, height, top_radius), sphere (radius), torus
+    /// (major_radius, minor_radius), an empty sketch (--plane or a
+    /// placement; xy by default), an extrude (--sketch, --length) or a
+    /// revolve (--sketch, --axis, --angle).
     Add {
         part: String,
         #[arg(value_name = "TYPE")]
@@ -345,9 +357,12 @@ enum FeatureCmd {
         #[command(flatten)]
         placement: PlacementArgs,
         #[command(flatten)]
+        fields: FieldArgs,
+        #[command(flatten)]
         expect: Expect,
     },
-    /// Change some of a feature's parameters or placement.
+    /// Change some of a feature's parameters or placement, a sketch's
+    /// plane, or what an extrude or revolve sweeps and how far.
     Edit {
         part: String,
         id: String,
@@ -358,6 +373,8 @@ enum FeatureCmd {
         unset: Vec<String>,
         #[command(flatten)]
         placement: PlacementArgs,
+        #[command(flatten)]
+        fields: FieldArgs,
         #[command(flatten)]
         expect: Expect,
     },
@@ -385,6 +402,67 @@ enum FeatureCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum ParamCmd {
+    /// Every parameter: as written, its value, and what reads it.
+    List { part: String },
+    /// Set or add parameters: wall="3 mm" hole="wall * 2" n=4.
+    Set {
+        part: String,
+        #[arg(value_name = "NAME=EXPRESSION", value_parser = param, required = true)]
+        values: Vec<(String, String)>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete a parameter that nothing reads.
+    Delete {
+        part: String,
+        name: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Rename a parameter, and every expression that reads it.
+    Rename {
+        part: String,
+        from: String,
+        to: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum SketchCmd {
+    /// Apply a batch of edits with one solve, or refuse them all. OPS is a JSON array (or @FILE
+    /// holding one) of {"op": "add", "type": "point", "at": ["0", "10 mm"]}, {"op": "add",
+    /// "type": "line", "start": "p1", "end": "p2"}, {"op": "add", "type": "length", "a": "l1",
+    /// "value": "width"}, {"op": "remove", "id": "c3"}, {"op": "set", "id": "d1", "value":
+    /// "20 mm"} and {"op": "move", "id": "p3", "at": [...]}. With no ops, re-solves and writes
+    /// the positions.
+    Edit {
+        part: String,
+        sketch: String,
+        #[arg(value_name = "OPS", value_parser = ops)]
+        ops: Option<Ops>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Solve without writing: the report for the sketch as it is, or with OPS applied.
+    Solve {
+        part: String,
+        sketch: String,
+        #[arg(value_name = "OPS", value_parser = ops)]
+        ops: Option<Ops>,
+    },
+    /// The solved geometry, in the sketch's frame and the part's, with each entity's and
+    /// constraint's state.
+    Get { part: String, sketch: String },
+}
+
+/// Sketch ops, parsed from one argument.
+#[derive(Clone)]
+struct Ops(Vec<Value>);
+
 #[derive(Args)]
 struct Expect {
     /// Fail with `conflict` unless the part is still at this revision.
@@ -407,6 +485,67 @@ struct ParamArgs {
     /// A parameter, such as radius=12.5 or "height=2 in".
     #[arg(long = "param", value_name = "NAME=QUANTITY", value_parser = param)]
     params: Vec<(String, String)>,
+}
+
+#[derive(Args)]
+struct FieldArgs {
+    /// A sketch's plane: xy, yz or zx.
+    #[arg(long)]
+    plane: Option<String>,
+    /// The sketch an extrude or revolve sweeps.
+    #[arg(long)]
+    sketch: Option<String>,
+    /// An entity on a loop to sweep; repeat for several. Every closed loop when left out.
+    #[arg(long = "loop", value_name = "ENTITY")]
+    loops: Vec<String>,
+    /// Sweep every closed loop again, when editing.
+    #[arg(long, conflicts_with = "loops")]
+    all_loops: bool,
+    /// An extrude's length.
+    #[arg(long, value_name = "QUANTITY")]
+    length: Option<String>,
+    /// An extrude's extent: blind (from the sketch's plane, the default) or symmetric (half
+    /// each side).
+    #[arg(long, value_name = "TYPE")]
+    extent: Option<String>,
+    /// Extrude against the sketch's normal (or --reverse false).
+    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
+    reverse: Option<bool>,
+    /// A revolve's axis: a line of its sketch.
+    #[arg(long, value_name = "LINE")]
+    axis: Option<String>,
+    /// A revolve's angle: 90, "90 deg", or full.
+    #[arg(long)]
+    angle: Option<String>,
+    /// Revolve half the angle each side of the sketch's plane (or --symmetric false).
+    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
+    symmetric: Option<bool>,
+}
+
+impl FieldArgs {
+    fn to_fields(&self) -> FeatureFields {
+        let mut extent = Map::new();
+        if let Some(t) = &self.extent {
+            extent.insert("type".into(), json!(t));
+        }
+        if let Some(l) = &self.length {
+            extent.insert("length".into(), json!(l));
+        }
+        FeatureFields {
+            plane: self.plane.clone(),
+            sketch: self.sketch.clone(),
+            loops: if self.all_loops {
+                Some(Vec::new())
+            } else {
+                (!self.loops.is_empty()).then(|| self.loops.clone())
+            },
+            extent: (!extent.is_empty()).then_some(Value::Object(extent)),
+            reverse: self.reverse,
+            axis: self.axis.clone(),
+            angle: self.angle.clone().map(Value::String),
+            symmetric: self.symmetric,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -461,14 +600,40 @@ fn camera_arg(
     })
 }
 
+/// A JSON array of sketch ops, or `@FILE` holding one.
+fn ops(s: &str) -> core::result::Result<Ops, String> {
+    let text = match s.strip_prefix('@') {
+        Some(path) => std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?,
+        None => s.to_owned(),
+    };
+    serde_json::from_str(&text)
+        .map(Ops)
+        .map_err(|e| format!("OPS must be a JSON array of ops: {e}"))
+}
+
 fn param(s: &str) -> core::result::Result<(String, String), String> {
     s.split_once('=')
         .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
-        .ok_or_else(|| "expected NAME=QUANTITY".to_owned())
+        .ok_or_else(|| "expected NAME=VALUE".to_owned())
 }
 
+/// Three comma-separated values; commas inside parentheses belong to an
+/// expression (`max(a, b),0,0`).
 fn triple(s: &str) -> core::result::Result<[String; 3], String> {
-    let parts: Vec<String> = s.split(',').map(|p| p.trim().to_owned()).collect();
+    let mut parts = Vec::new();
+    let (mut depth, mut start) = (0i32, 0);
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(s[start..i].trim().to_owned());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(s[start..].trim().to_owned());
     parts
         .try_into()
         .map_err(|_| "expected three values: X,Y,Z".to_owned())
@@ -536,12 +701,14 @@ fn request(cmd: &Command) -> Option<Request> {
             position,
             params,
             placement,
+            fields,
             expect,
         }) => Request::FeatureAdd {
             part: part.clone(),
             ty: ty.clone(),
             params: params.to_map(),
             placement: placement.to_arg(),
+            fields: fields.to_fields(),
             id: id.clone(),
             position: position.to_position(),
             expected_revision: expect.revision.clone(),
@@ -552,6 +719,7 @@ fn request(cmd: &Command) -> Option<Request> {
             params,
             unset,
             placement,
+            fields,
             expect,
         }) => {
             let mut params = params.to_map();
@@ -561,6 +729,7 @@ fn request(cmd: &Command) -> Option<Request> {
                 id: id.clone(),
                 params,
                 placement: placement.to_arg(),
+                fields: fields.to_fields(),
                 expected_revision: expect.revision.clone(),
             }
         }
@@ -584,6 +753,52 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Feature(FeatureCmd::Show { part, id }) => Request::FeatureShow {
             part: part.clone(),
             id: id.clone(),
+        },
+        Command::Param(ParamCmd::List { part }) => Request::ParamList { part: part.clone() },
+        Command::Param(ParamCmd::Set {
+            part,
+            values,
+            expect,
+        }) => Request::ParamSet {
+            part: part.clone(),
+            parameters: values.iter().map(|(k, v)| (k.clone(), json!(v))).collect(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Param(ParamCmd::Delete { part, name, expect }) => Request::ParamDelete {
+            part: part.clone(),
+            name: name.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Param(ParamCmd::Rename {
+            part,
+            from,
+            to,
+            expect,
+        }) => Request::ParamRename {
+            part: part.clone(),
+            from: from.clone(),
+            to: to.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Sketch(SketchCmd::Edit {
+            part,
+            sketch,
+            ops,
+            expect,
+        }) => Request::SketchEdit {
+            part: part.clone(),
+            sketch: sketch.clone(),
+            ops: ops.clone().map_or_else(Vec::new, |o| o.0),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Sketch(SketchCmd::Solve { part, sketch, ops }) => Request::SketchSolve {
+            part: part.clone(),
+            sketch: sketch.clone(),
+            ops: ops.clone().map_or_else(Vec::new, |o| o.0),
+        },
+        Command::Sketch(SketchCmd::Get { part, sketch }) => Request::SketchGet {
+            part: part.clone(),
+            sketch: sketch.clone(),
         },
         Command::Rebuild { part } => Request::Rebuild { part: part.clone() },
         Command::Inspect {
@@ -821,7 +1036,7 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
 fn lift(cmd: &Command, mut result: Value, warnings: &mut Vec<String>) -> Value {
     if !matches!(
         cmd,
-        Command::History { .. } | Command::Config(ConfigCmd::Get { .. })
+        Command::History { .. } | Command::Config(ConfigCmd::Get { .. }) | Command::Rebuild { .. }
     ) {
         return result;
     }

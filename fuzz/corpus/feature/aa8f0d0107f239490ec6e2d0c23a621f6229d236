@@ -1,0 +1,17 @@
+{
+  "format": 1,"kind": "ryucad.feature",
+  "params": {
+    "major_radius": [
+      "0 mm",
+      "0 mM",
+      "/\f/o\r\\\\]\uca025\\=i\\",
+  "pain0 mm"
+    ],
+    "x": [
+      2,
+      0,1,
+      1
+    ]
+  },
+  "type": "torus"
+}

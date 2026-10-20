@@ -1,7 +1,7 @@
 //! Rebuild properties: names survive edits, and results don't depend on
 //! thread count.
 
-use ryucad::doc::files::{Feature, FeatureType, PartFile, Placement};
+use ryucad::doc::files::{Feature, PartFile, Placement, Primitive, PrimitiveType};
 use ryucad::doc::id::Id;
 use ryucad::doc::project::Part;
 use ryucad::rebuild::{build_feature, rebuild_part};
@@ -12,15 +12,15 @@ fn id(s: &str) -> Id {
     Id::parse(s, "feature").unwrap()
 }
 
-fn feature(ty: FeatureType, params: &[(&str, &str)]) -> Feature {
-    Feature {
+fn feature(ty: PrimitiveType, params: &[(&str, &str)]) -> Feature {
+    Feature::Primitive(Primitive {
         ty,
         params: params
             .iter()
             .map(|(k, v)| (k.to_string(), Quantity::parse(v, Unit::Mm).unwrap()))
             .collect(),
         placement: Placement::identity(Unit::Mm),
-    }
+    })
 }
 
 fn part(features: Vec<(&str, Feature)>) -> Part {
@@ -29,6 +29,9 @@ fn part(features: Vec<(&str, Feature)>) -> Part {
         file: Ok(PartFile {
             features: features.iter().map(|(f, _)| id(f)).collect(),
         }),
+        parameters: None,
+        env: ryucad::expr::Env::empty(),
+        uses: Default::default(),
         features: features.into_iter().map(|(f, x)| (id(f), Ok(x))).collect(),
         revision: String::new(),
     }
@@ -48,12 +51,15 @@ fn names(b: &Body) -> Vec<String> {
 
 #[test]
 fn editing_params_and_placement_keeps_every_name() {
-    let a = feature(FeatureType::Box, &[("x", "10"), ("y", "20"), ("z", "30")]);
+    let a = feature(PrimitiveType::Box, &[("x", "10"), ("y", "20"), ("z", "30")]);
     let mut b = feature(
-        FeatureType::Box,
+        PrimitiveType::Box,
         &[("x", "11"), ("y", "2 in"), ("z", "3 m")],
     );
-    b.placement.z = [1.0, 1.0, 0.0];
+    let Feature::Primitive(p) = &mut b else {
+        unreachable!()
+    };
+    p.placement.z = [1.0, 1.0, 0.0];
     let ba = build_feature(&id("p"), &id("f"), &a).unwrap();
     let bb = build_feature(&id("p"), &id("f"), &b).unwrap();
     assert_ne!(ba.hash, bb.hash);
@@ -63,13 +69,18 @@ fn editing_params_and_placement_keeps_every_name() {
 
 #[test]
 fn other_features_dont_rename_a_feature() {
-    let cyl = || feature(FeatureType::Cylinder, &[("radius", "5"), ("height", "10")]);
-    let ball = || feature(FeatureType::Sphere, &[("radius", "3")]);
+    let cyl = || {
+        feature(
+            PrimitiveType::Cylinder,
+            &[("radius", "5"), ("height", "10")],
+        )
+    };
+    let ball = || feature(PrimitiveType::Sphere, &[("radius", "3")]);
     let one = rebuild_part(&part(vec![("c", cyl())]));
     let three = rebuild_part(&part(vec![("s", ball()), ("t", ball()), ("c", cyl())]));
     let get = |r: &ryucad::rebuild::PartResult, f: &str| {
         let (_, b) = r.features.iter().find(|(i, _)| i.as_str() == f).unwrap();
-        b.as_ref().unwrap().clone()
+        b.as_ref().unwrap().body().unwrap().clone()
     };
     assert_eq!(names(&get(&one, "c").body), names(&get(&three, "c").body));
     assert_eq!(get(&one, "c").hash, get(&three, "c").hash);
@@ -89,7 +100,7 @@ fn thread_count_doesnt_change_the_result() {
             (
                 format!("f{i}"),
                 feature(
-                    FeatureType::Torus,
+                    PrimitiveType::Torus,
                     &[
                         ("major_radius", &format!("{} mm", 100 + i)),
                         ("minor_radius", &r),
@@ -126,15 +137,15 @@ fn thread_count_doesnt_change_the_result() {
 #[test]
 fn one_failure_doesnt_stop_the_others() {
     let mut p = part(vec![
-        ("a", feature(FeatureType::Sphere, &[("radius", "1")])),
+        ("a", feature(PrimitiveType::Sphere, &[("radius", "1")])),
         (
             "b",
             feature(
-                FeatureType::Torus,
+                PrimitiveType::Torus,
                 &[("major_radius", "1"), ("minor_radius", "1")],
             ),
         ),
-        ("c", feature(FeatureType::Sphere, &[("radius", "2")])),
+        ("c", feature(PrimitiveType::Sphere, &[("radius", "2")])),
     ]);
     let r = rebuild_part(&p);
     assert_eq!(r.failed(), 1);

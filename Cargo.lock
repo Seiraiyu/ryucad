@@ -4072,6 +4072,7 @@ dependencies = [
  "rayon",
  "ryukei",
  "ryukei-testkit",
+ "ryusketch",
  "serde",
  "serde_json",
  "tempfile",
@@ -4126,6 +4127,16 @@ dependencies = [
  "num-rational",
  "num-traits",
  "ryukei",
+]
+
+[[package]]
+name = "ryusketch"
+version = "0.0.0"
+dependencies = [
+ "divan",
+ "proptest",
+ "ryukei",
+ "ryukei-testkit",
 ]
 
 [[package]]

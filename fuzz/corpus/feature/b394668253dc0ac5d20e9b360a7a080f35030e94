@@ -1,0 +1,12 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "params": {
+        "top_radius": "2 mm"
+  },
+  "plment": {
+    "origin": [
+      "0 mm"]
+  },
+  "type": "cone"
+}

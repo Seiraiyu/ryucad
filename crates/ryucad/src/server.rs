@@ -3,15 +3,21 @@
 
 use crate::activity::{self, EntryKind};
 use crate::config;
-use crate::doc::files::{Feature, FeatureType, Manifest, PartFile, Placement, number};
+use crate::doc::files::{Feature, Manifest, PartFile, Placement, Primitive, PrimitiveType, number};
 use crate::doc::id::Id;
-use crate::doc::project::{MANIFEST, Part, feature_path, part_dir, part_path, write_json};
+use crate::doc::project::{
+    MANIFEST, Part, feature_path, parameters_path, part_dir, part_path, write_json,
+};
+use crate::doc::sketch::{OriginPlane, Plane, Sketch};
+use crate::doc::sweep::{Angle, Extrude, Revolve};
 use crate::entity::{self, EntityRef};
 use crate::error::{Code, Error, Result};
+use crate::expr::Env;
 use crate::live::{self, Live, SelectMode};
 use crate::mesh;
 use crate::notify::Topic;
-use crate::proto::{Answer, PlacementArg, Position, Request, Transfer, VersionInfo};
+use crate::param;
+use crate::proto::{Answer, FeatureFields, PlacementArg, Position, Request, Transfer, VersionInfo};
 use crate::rebuild;
 use crate::session::Session;
 use crate::units::{Quantity, Unit};
@@ -166,6 +172,7 @@ fn dispatch(
             ty,
             params,
             placement,
+            fields,
             id,
             position,
             expected_revision,
@@ -173,8 +180,11 @@ fn dispatch(
             session,
             &part,
             &ty,
-            params,
-            placement.unwrap_or_default(),
+            Given {
+                params,
+                placement,
+                fields,
+            },
             id.as_deref(),
             &position,
             expected_revision.as_deref(),
@@ -184,13 +194,17 @@ fn dispatch(
             id,
             params,
             placement,
+            fields,
             expected_revision,
         } => feature_edit(
             session,
             &part,
             &id,
-            params,
-            placement.unwrap_or_default(),
+            Given {
+                params,
+                placement,
+                fields,
+            },
             expected_revision.as_deref(),
         ),
         Request::FeatureDelete {
@@ -205,6 +219,33 @@ fn dispatch(
             expected_revision,
         } => feature_move(session, &part, &id, &position, expected_revision.as_deref()),
         Request::FeatureList { part } => feature_list(session, &part),
+        Request::ParamList { part } => param::list(session, &part),
+        Request::ParamSet {
+            part,
+            parameters,
+            expected_revision,
+        } => param::set(session, &part, parameters, expected_revision.as_deref()),
+        Request::ParamDelete {
+            part,
+            name,
+            expected_revision,
+        } => param::delete(session, &part, &name, expected_revision.as_deref()),
+        Request::ParamRename {
+            part,
+            from,
+            to,
+            expected_revision,
+        } => param::rename(session, &part, &from, &to, expected_revision.as_deref()),
+        Request::SketchEdit {
+            part,
+            sketch,
+            ops,
+            expected_revision,
+        } => crate::sketch::edit(session, &part, &sketch, &ops, expected_revision.as_deref()),
+        Request::SketchSolve { part, sketch, ops } => {
+            crate::sketch::solve_request(session, &part, &sketch, &ops)
+        }
+        Request::SketchGet { part, sketch } => crate::sketch::get(session, &part, &sketch),
         Request::FeatureShow { part, id } => {
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
             let p = session.project().part(&part)?;
@@ -484,12 +525,12 @@ fn project_info(session: &Session) -> Value {
     })
 }
 
-fn part_id(s: &str) -> Result<Id> {
+pub(crate) fn part_id(s: &str) -> Result<Id> {
     Id::parse(s, "part")
 }
 
 /// Refuses to write when the agent's view of the part is out of date.
-fn check_revision(part: &Part, expected: Option<&str>) -> Result<()> {
+pub(crate) fn check_revision(part: &Part, expected: Option<&str>) -> Result<()> {
     match expected {
         Some(e) if e != part.revision => Err(Error::new(
             Code::Conflict,
@@ -546,12 +587,12 @@ fn part_list(session: &Session) -> Value {
     json!({ "parts": parts })
 }
 
-fn feature_id(s: &str) -> Result<Id> {
+pub(crate) fn feature_id(s: &str) -> Result<Id> {
     Id::parse(s, "feature")
 }
 
 /// The part's feature list, or why it can't be used.
-fn order(part: &Part) -> Result<Vec<Id>> {
+pub(crate) fn order(part: &Part) -> Result<Vec<Id>> {
     part.file
         .as_ref()
         .map(|f| f.features.clone())
@@ -559,7 +600,7 @@ fn order(part: &Part) -> Result<Vec<Id>> {
 }
 
 /// A feature of `part`, or the error that keeps it from loading.
-fn feature<'a>(part: &'a Part, id: &Id) -> Result<&'a Feature> {
+pub(crate) fn feature<'a>(part: &'a Part, id: &Id) -> Result<&'a Feature> {
     match part.features.get(id) {
         Some(Ok(f)) => Ok(f),
         Some(Err(e)) => Err(e.clone()),
@@ -579,28 +620,66 @@ fn no_feature(part: &Part, id: &Id) -> Error {
 /// How a feature appears in output: every quantity as written and in
 /// meters.
 pub fn feature_report(id: &Id, f: &Feature) -> Value {
+    let mut v = match f {
+        Feature::Primitive(p) => primitive_report(p),
+        Feature::Sketch(s) => sketch_report(s),
+        Feature::Extrude(e) => {
+            let mut v = e.fields();
+            v["extent"]["length"] = e.extent.length().report();
+            v
+        }
+        Feature::Revolve(r) => {
+            let mut v = r.fields();
+            if let Angle::Of(q) = &r.angle {
+                v["angle"] = q.report();
+            }
+            v
+        }
+    };
+    v["id"] = json!(id);
+    v["type"] = json!(f.type_name());
+    v
+}
+
+/// A placement as output reports it: quantities as written and in meters.
+fn placement_report(p: &Placement) -> Value {
+    json!({
+        "origin": p.origin.iter().map(Quantity::report).collect::<Vec<_>>(),
+        "z": p.z.map(number),
+        "x": p.x.map(number),
+    })
+}
+
+/// A sketch as output reports it: its file's fields, with every dimension
+/// as written and evaluated.
+fn sketch_report(s: &Sketch) -> Value {
+    let mut v = s.fields();
+    if let Plane::Placement(p) = &s.plane {
+        v["placement"] = placement_report(p);
+    }
+    for (id, c) in &s.constraints {
+        if let Some(q) = &c.value {
+            v["constraints"][id.as_str()]["value"] = q.report();
+        }
+    }
+    v
+}
+
+fn primitive_report(f: &Primitive) -> Value {
     let params: Map<String, Value> = f
         .params
         .iter()
         .map(|(k, q)| (k.clone(), q.report()))
         .collect();
-    json!({
-        "id": id,
-        "type": f.ty.as_str(),
-        "params": params,
-        "placement": {
-            "origin": f.placement.origin.iter().map(Quantity::report).collect::<Vec<_>>(),
-            "z": f.placement.z.map(number),
-            "x": f.placement.x.map(number),
-        },
-    })
+    json!({"params": params, "placement": placement_report(&f.placement)})
 }
 
-/// Applies the parts of `arg` that are given to `p`.
-fn apply_placement(p: &mut Placement, arg: PlacementArg, unit: Unit) -> Result<()> {
+/// Applies the parts of `arg` that are given to `p`, its expressions
+/// reading `env`.
+fn apply_placement(p: &mut Placement, arg: PlacementArg, unit: Unit, env: &Env) -> Result<()> {
     if let Some(origin) = arg.origin {
         for (i, v) in origin.iter().enumerate() {
-            p.origin[i] = Quantity::from_json(v, unit)
+            p.origin[i] = Quantity::from_json_in(v, unit, &|n| env.get(n))
                 .map_err(|e| e.with("pointer", format!("/placement/origin/{i}")))?;
         }
     }
@@ -639,7 +718,7 @@ fn insert_at(order: &[Id], position: &Position) -> Result<usize> {
 
 /// Writes a feature file, then the part's list: a crash in between leaves
 /// at worst an unlisted feature file, which `check_format` reports.
-fn save(
+pub(crate) fn save(
     session: &mut Session,
     part: &Id,
     writes: &[(&Id, &Feature)],
@@ -656,13 +735,221 @@ fn save(
     Ok(session.project().part(part)?.revision.clone())
 }
 
-#[allow(clippy::too_many_arguments)]
+/// What a `feature.add` or `feature.edit` gives besides the feature's
+/// place: each part left out keeps its current or default value.
+struct Given {
+    params: Map<String, Value>,
+    placement: Option<PlacementArg>,
+    fields: FeatureFields,
+}
+
+impl Given {
+    /// The names of the fields given.
+    fn present(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.fields.given().keys().cloned().collect();
+        if !self.params.is_empty() {
+            out.push("params".into());
+        }
+        if self.placement.is_some() {
+            out.push("placement".into());
+        }
+        out
+    }
+
+    /// Refuses the fields `ty` doesn't take.
+    fn only(&self, ty: &str, allowed: &[&str]) -> Result<()> {
+        match self
+            .present()
+            .into_iter()
+            .find(|f| !allowed.contains(&f.as_str()))
+        {
+            None => Ok(()),
+            Some(name) => Err(
+                Error::new(Code::InvalidParam, format!("a {ty} has no {name}")).with("param", name),
+            ),
+        }
+    }
+}
+
+/// The fields an extrude and a revolve take.
+const EXTRUDE: [&str; 4] = ["sketch", "loops", "extent", "reverse"];
+const REVOLVE: [&str; 5] = ["sketch", "loops", "axis", "angle", "symmetric"];
+
+/// An extrude or revolve from its fields: the current ones (for an edit)
+/// with those given laid over them.
+fn sweep_from(
+    ty: &str,
+    current: Option<Value>,
+    given: &Given,
+    unit: Unit,
+    env: &Env,
+) -> Result<Feature> {
+    // A new extrude's extent is blind unless it says otherwise.
+    let fresh = match ty {
+        "extrude" => json!({"extent": {"type": "blind"}}),
+        _ => json!({}),
+    };
+    let mut v = current.unwrap_or(fresh);
+    let o = v.as_object_mut().expect("an object");
+    for (k, x) in given.fields.given() {
+        // No loops is every loop, and false the default: nothing to write.
+        if (k == "loops" && x == json!([])) || x == json!(false) {
+            o.remove(&k);
+            continue;
+        }
+        // An extent's length or type alone keeps the other.
+        match (o.get_mut(&k), x) {
+            (Some(Value::Object(old)), Value::Object(new)) if k == "extent" => old.extend(new),
+            (_, x) => {
+                o.insert(k, x);
+            }
+        }
+    }
+    let mut o = crate::doc::files::Obj::new(&v, "")?;
+    let f = match ty {
+        "extrude" => Feature::Extrude(Extrude::from_fields(&mut o, unit, env)?),
+        _ => Feature::Revolve(Revolve::from_fields(&mut o, env)?),
+    };
+    o.finish()?;
+    Ok(f)
+}
+
+/// The listed features that sweep `sketch`.
+pub(crate) fn sweeps_of(part: &Part, sketch: &Id) -> Vec<Id> {
+    part.order()
+        .iter()
+        .filter(|f| {
+            part.features
+                .get(*f)
+                .and_then(|r| r.as_ref().ok())
+                .and_then(Feature::swept)
+                == Some(sketch)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Refuses a sweep that names what isn't there: its sketch must be a
+/// sketch listed before it in `order`, with the entities it names, and its
+/// axis a line. Whether the loops make a profile only rebuild can tell.
+fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
+    let sketch = f.swept().expect("a sweep");
+    check_sketch(part, order, id, sketch)?;
+    let Some(Ok(Feature::Sketch(sk))) = part.features.get(sketch) else {
+        return Ok(());
+    };
+    let (loops, axis) = match f {
+        Feature::Extrude(e) => (&e.loops, None),
+        Feature::Revolve(r) => (&r.loops, Some(&r.axis)),
+        _ => unreachable!("a sweep"),
+    };
+    for (field, e) in loops
+        .iter()
+        .map(|e| ("loops", e))
+        .chain(axis.map(|a| ("axis", a)))
+    {
+        match sk.entities.get(e).map(|x| &x.geometry) {
+            None => {
+                return Err(
+                    Error::new(Code::NotFound, format!("sketch {sketch} has no {e}"))
+                        .with("sketch", sketch)
+                        .with("entity", e)
+                        .with("pointer", format!("/{field}")),
+                );
+            }
+            Some(g)
+                if field == "axis" && !matches!(g, crate::doc::sketch::Geometry::Line { .. }) =>
+            {
+                return Err(Error::new(
+                    Code::ReferenceWrongKind,
+                    format!("an axis is a line; {e} is a {}", g.type_name()),
+                )
+                .with("entity", e)
+                .with("pointer", "/axis"));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a sketch that isn't a sketch listed before `id` in `order`.
+fn check_sketch(part: &Part, order: &[Id], id: &Id, sketch: &Id) -> Result<()> {
+    let at = |f: &Id| order.iter().position(|x| x == f);
+    match (at(sketch), at(id)) {
+        (None, _) => {
+            return Err(Error::new(
+                Code::NotFound,
+                format!("part {} has no feature {sketch} to sweep", part.id),
+            )
+            .with("sketch", sketch));
+        }
+        (Some(s), Some(me)) if s >= me => {
+            return Err(Error::new(
+                Code::ReferenceForward,
+                format!("{id} would sweep {sketch}, which comes after it"),
+            )
+            .with("feature", id)
+            .with("sketch", sketch));
+        }
+        _ => {}
+    }
+    match part.features.get(sketch) {
+        Some(Ok(f)) if f.sketch().is_none() => Err(Error::new(
+            Code::ReferenceWrongKind,
+            format!("{sketch} is a {}, not a sketch", f.type_name()),
+        )
+        .with("sketch", sketch)),
+        _ => Ok(()),
+    }
+}
+
+/// A new feature's placement from what was given. With z given and x left
+/// out, x defaults to world X, or to world Y when z lies along X; either
+/// way the file records it.
+fn new_placement(arg: PlacementArg, unit: Unit, env: &Env) -> Result<Placement> {
+    let mut placed = Placement::identity(unit);
+    let along_x = arg.x.is_none()
+        && arg.z.is_some_and(|z| {
+            let mut p = Placement::identity(unit);
+            p.z = z;
+            rebuild::placement(&p).is_err_and(|e| e.details["kernel"] == "Degenerate")
+        });
+    if along_x {
+        placed.x = [0.0, 1.0, 0.0];
+    }
+    apply_placement(&mut placed, arg, unit, env)?;
+    Ok(placed)
+}
+
+/// A sketch's plane after an edit: an origin plane, or its placement with
+/// what was given applied. `None` for a new sketch.
+fn sketch_plane(current: Option<&Plane>, given: &Given, unit: Unit, env: &Env) -> Result<Plane> {
+    match (&given.fields.plane, &given.placement) {
+        (Some(_), Some(_)) => Err(Error::new(
+            Code::Usage,
+            "give a sketch a plane or a placement, not both",
+        )),
+        (Some(p), None) => Ok(Plane::Origin(
+            OriginPlane::parse(p).map_err(|e| e.with("pointer", "/plane"))?,
+        )),
+        (None, Some(arg)) => {
+            let mut p = match current {
+                Some(c) => c.placement(unit),
+                None => return Ok(Plane::Placement(new_placement(arg.clone(), unit, env)?)),
+            };
+            apply_placement(&mut p, arg.clone(), unit, env)?;
+            Ok(Plane::Placement(p))
+        }
+        (None, None) => Ok(current.cloned().unwrap_or(Plane::Origin(OriginPlane::Xy))),
+    }
+}
+
 fn feature_add(
     session: &mut Session,
     part: &str,
     ty: &str,
-    params: Map<String, Value>,
-    placement: PlacementArg,
+    given: Given,
     id: Option<&str>,
     position: &Position,
     expected: Option<&str>,
@@ -672,10 +959,31 @@ fn feature_add(
     let p = session.project().part(&pid)?;
     check_revision(p, expected)?;
     let mut list = order(p)?;
-    let ty = FeatureType::parse(ty)?;
+    let env = p.env.clone();
+    let f = match ty {
+        "sketch" => {
+            given.only(ty, &["plane", "placement"])?;
+            Feature::Sketch(Sketch::new(sketch_plane(None, &given, unit, &env)?))
+        }
+        "extrude" | "revolve" => {
+            given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
+            sweep_from(ty, None, &given, unit, &env)?
+        }
+        _ => {
+            let ty = PrimitiveType::parse(ty)?;
+            given.only(ty.as_str(), &["params", "placement"])?;
+            Feature::Primitive(Primitive {
+                ty,
+                params: Primitive::params_from_json(ty, &Value::Object(given.params), unit, &env)?,
+                placement: new_placement(given.placement.unwrap_or_default(), unit, &env)?,
+            })
+        }
+    };
     let fid = match id {
         Some(id) => feature_id(id)?,
-        None => Id::generate(ty.as_str(), |s| p.features.keys().any(|f| f.as_str() == s)),
+        None => Id::generate(f.type_name(), |s| {
+            p.features.keys().any(|f| f.as_str() == s)
+        }),
     };
     if p.features.contains_key(&fid) {
         return Err(Error::new(
@@ -684,26 +992,10 @@ fn feature_add(
         )
         .with("feature", &fid));
     }
-    let params = Feature::params_from_json(ty, &Value::Object(params), unit)?;
-    let mut placed = Placement::identity(unit);
-    // With z given and x left out, x defaults to world X, or to world Y
-    // when z lies along X; either way the file records it.
-    let along_x = placement.x.is_none()
-        && placement.z.is_some_and(|z| {
-            let mut p = Placement::identity(unit);
-            p.z = z;
-            rebuild::placement(&p).is_err_and(|e| e.details["kernel"] == "Degenerate")
-        });
-    if along_x {
-        placed.x = [0.0, 1.0, 0.0];
-    }
-    apply_placement(&mut placed, placement, unit)?;
-    let f = Feature {
-        ty,
-        params,
-        placement: placed,
-    };
     list.insert(insert_at(&list, position)?, fid.clone());
+    if f.swept().is_some() {
+        check_sweep(p, &list, &fid, &f)?;
+    }
     let revision = save(session, &pid, &[(&fid, &f)], list)?;
     Ok(json!({"feature": feature_report(&fid, &f), "revision": revision}))
 }
@@ -712,8 +1004,7 @@ fn feature_edit(
     session: &mut Session,
     part: &str,
     id: &str,
-    params: Map<String, Value>,
-    placement: PlacementArg,
+    given: Given,
     expected: Option<&str>,
 ) -> Result<Value> {
     let (pid, fid) = (part_id(part)?, feature_id(id)?);
@@ -721,21 +1012,50 @@ fn feature_edit(
     let p = session.project().part(&pid)?;
     check_revision(p, expected)?;
     let list = order(p)?;
-    let mut f = feature(p, &fid)?.clone();
-    let mut merged: Map<String, Value> = f
-        .params
-        .iter()
-        .map(|(k, q)| (k.clone(), Value::String(q.text())))
-        .collect();
-    for (k, v) in params {
-        if v.is_null() {
-            merged.remove(&k);
-        } else {
-            merged.insert(k, v);
+    let f = match feature(p, &fid)?.clone() {
+        Feature::Primitive(mut f) => {
+            given.only(f.ty.as_str(), &["params", "placement"])?;
+            let mut merged: Map<String, Value> = f
+                .params
+                .iter()
+                .map(|(k, q)| (k.clone(), Value::String(q.text())))
+                .collect();
+            for (k, v) in given.params {
+                if v.is_null() {
+                    merged.remove(&k);
+                } else {
+                    merged.insert(k, v);
+                }
+            }
+            f.params = Primitive::params_from_json(f.ty, &Value::Object(merged), unit, &p.env)?;
+            apply_placement(
+                &mut f.placement,
+                given.placement.unwrap_or_default(),
+                unit,
+                &p.env,
+            )?;
+            Feature::Primitive(f)
         }
-    }
-    f.params = Feature::params_from_json(f.ty, &Value::Object(merged), unit)?;
-    apply_placement(&mut f.placement, placement, unit)?;
+        // Its geometry changes through sketch.edit; the plane moves the
+        // sketch without changing its solve.
+        Feature::Sketch(mut s) => {
+            given.only("sketch", &["plane", "placement"])?;
+            s.plane = sketch_plane(Some(&s.plane), &given, unit, &p.env)?;
+            Feature::Sketch(s)
+        }
+        f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
+            let ty = f.type_name();
+            given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
+            let current = match &f {
+                Feature::Extrude(e) => e.fields(),
+                Feature::Revolve(r) => r.fields(),
+                _ => unreachable!("a sweep"),
+            };
+            let f = sweep_from(ty, Some(current), &given, unit, &p.env)?;
+            check_sweep(p, &list, &fid, &f)?;
+            f
+        }
+    };
     let revision = save(session, &pid, &[(&fid, &f)], list)?;
     Ok(json!({"feature": feature_report(&fid, &f), "revision": revision}))
 }
@@ -752,6 +1072,18 @@ fn feature_delete(
     // A broken feature file can still be deleted.
     if !p.features.contains_key(&fid) {
         return Err(no_feature(p, &fid));
+    }
+    let users = sweeps_of(p, &fid);
+    if !users.is_empty() {
+        return Err(Error::new(
+            Code::HasDependents,
+            format!(
+                "{fid} is swept by {}; delete or change those first",
+                users.iter().map(Id::as_str).collect::<Vec<_>>().join(", ")
+            ),
+        )
+        .with("feature", &fid)
+        .with("features", users));
     }
     let mut list = order(p)?;
     list.retain(|f| *f != fid);
@@ -790,7 +1122,16 @@ fn feature_move(
         return Err(Error::new(Code::Usage, "a feature can't move after itself"));
     }
     list.remove(from);
-    list.insert(insert_at(&list, position)?, fid);
+    list.insert(insert_at(&list, position)?, fid.clone());
+    // A sweep must still come after its sketch.
+    for f in &list {
+        if let Some(Ok(feature)) = p.features.get(f)
+            && let Some(sketch) = feature.swept()
+            && (*f == fid || *sketch == fid)
+        {
+            check_sketch(p, &list, f, sketch)?;
+        }
+    }
     let revision = save(session, &pid, &[], list.clone())?;
     Ok(json!({"features": list, "revision": revision}))
 }
@@ -800,7 +1141,7 @@ fn feature_list(session: &Session, part: &str) -> Result<Value> {
     let features: Vec<Value> = order(p)?
         .iter()
         .map(|id| match feature(p, id) {
-            Ok(f) => json!({"id": id, "type": f.ty.as_str(), "ok": true}),
+            Ok(f) => json!({"id": id, "type": f.type_name(), "ok": true}),
             Err(e) => json!({"id": id, "ok": false, "error": e}),
         })
         .collect();
@@ -815,23 +1156,34 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
     let types: BTreeMap<Id, &'static str> = part
         .features
         .iter()
-        .filter_map(|(fid, f)| Some((fid.clone(), f.as_ref().ok()?.ty.as_str())))
+        .filter_map(|(fid, f)| Some((fid.clone(), f.as_ref().ok()?.type_name())))
         .collect();
     let r = session.rebuilt(id)?;
     let features: Vec<Value> = r
         .features
         .iter()
         .map(|(fid, b)| match b {
-            Ok(b) => {
+            Ok(crate::rebuild::Output::Body(b)) => {
                 let c = b.body.counts();
                 json!({"id": fid, "type": types.get(fid), "ok": true, "hash": b.hash,
                        "counts": {"faces": c.faces, "edges": c.edges, "vertices": c.vertices}})
             }
+            // A sketch makes no body: its state, not a body hash.
+            Ok(crate::rebuild::Output::Sketch(s)) => {
+                json!({"id": fid, "type": types.get(fid), "ok": true,
+                       "sketch": {"state": s.report.state_str(), "dof": s.report.dof,
+                                  "stale": s.stale}})
+            }
             Err(e) => json!({"id": fid, "type": types.get(fid), "ok": false, "error": e}),
         })
         .collect();
-    Ok(json!({"part": id, "revision": revision, "hash": r.hash,
-              "failed": r.failed(), "features": features}))
+    let mut v = json!({"part": id, "revision": revision, "hash": r.hash,
+                       "failed": r.failed(), "features": features});
+    let warnings = r.warnings();
+    if !warnings.is_empty() {
+        v["warnings"] = json!(warnings);
+    }
+    Ok(v)
 }
 
 /// Tells subscribers what changed since they were last told: the project
@@ -914,15 +1266,22 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
         None => session.project().parts.keys().cloned().collect(),
     };
     let mut parts = Vec::new();
+    let mut warnings = Vec::new();
     let mut failed = 0;
     for id in ids {
         // A part whose list can't be read can't be rebuilt.
         order(session.project().part(&id)?)?;
-        let report = part_report(session, &id)?;
+        let mut report = part_report(session, &id)?;
         failed += report["failed"].as_u64().unwrap_or(0) as usize;
+        if let Some(Value::Array(w)) = report.as_object_mut().and_then(|o| o.remove("warnings")) {
+            warnings.extend(w);
+        }
         parts.push(report);
     }
-    let report = json!({ "parts": parts });
+    let mut report = json!({ "parts": parts });
+    if !warnings.is_empty() {
+        report["warnings"] = json!(warnings);
+    }
     if failed > 0 {
         // Every feature's status still reaches the agent, in the details.
         return Err(Error {
@@ -956,12 +1315,22 @@ pub fn meshes(
         .unwrap_or(256) as usize
         * 1024
         * 1024;
+    // Sketches make no body, so they have no mesh.
+    let sketches: Vec<Id> = p
+        .features
+        .iter()
+        .filter(|(_, f)| f.as_ref().is_ok_and(|f| f.sketch().is_some()))
+        .map(|(id, _)| id.clone())
+        .collect();
     let built: Vec<(Id, Result<crate::rebuild::Built>)> = session
         .rebuilt(part)?
         .features
         .iter()
-        .filter(|(id, _)| only.is_none_or(|o| o == id))
-        .cloned()
+        .filter(|(id, _)| only.is_none_or(|o| o == id) && !sketches.contains(id))
+        .filter_map(|(id, r)| match r {
+            Ok(o) => Some((id.clone(), Ok(o.body()?.clone()))),
+            Err(e) => Some((id.clone(), Err(e.clone()))),
+        })
         .collect();
     let ok: Vec<(&Feature, &crate::rebuild::Built)> = built
         .iter()
@@ -998,6 +1367,18 @@ pub fn model_points(session: &mut Session, refs: &[EntityRef]) -> Result<Vec<[f6
         }
     }
     for r in refs {
+        // A sketch entity shows by its points.
+        if let Some(sk) = session
+            .rebuilt(&r.part)?
+            .output(&r.feature)
+            .and_then(|o| o.sketch())
+        {
+            let id = Id::parse(&r.name, "entity")?;
+            for [x, y, z] in crate::sketch::entity_points(sk, &id) {
+                grow(&ryukei::geom::Point3::new(x, y, z));
+            }
+            continue;
+        }
         for (_, m) in meshes(session, &r.part, Some(&r.feature), coarse)? {
             let Ok(m) = m else { continue };
             let Ok(mesh) = &m.mesh.mesh else { continue };
@@ -1285,7 +1666,9 @@ fn inspect(
         if only.as_ref().is_some_and(|o| o != id) {
             continue;
         }
-        let Ok(built) = built else { continue };
+        let Some(built) = built.as_ref().ok().and_then(|o| o.body()) else {
+            continue;
+        };
         let f = &features
             .iter()
             .find(|(i, _)| i == id)
@@ -1358,6 +1741,11 @@ fn check_format(session: &Session) -> Result<Value> {
         check(&part_path(root, &part.id));
         if let Err(e) = &part.file {
             errors.push(json!(e));
+        }
+        match &part.parameters {
+            Some(Ok(_)) => check(&parameters_path(root, &part.id)),
+            Some(Err(e)) => errors.push(json!(e)),
+            None => {}
         }
         for (fid, f) in &part.features {
             check(&feature_path(root, &part.id, fid));
@@ -1741,6 +2129,508 @@ pub(crate) mod tests {
         assert_eq!(e.code, Code::NotFound);
     }
 
+    /// Part `p` with parameter `width` and the rectangle sketch `s`,
+    /// written as a file.
+    pub(crate) fn with_sketch() -> (tempfile::TempDir, Session) {
+        let (dir, mut s) = with_part();
+        call(
+            &mut s,
+            "param.set",
+            json!({"part": "p", "parameters": {"width": "20 mm"}}),
+        )
+        .unwrap();
+        let root = dir.path();
+        write_json(
+            &root.join("parts/p/features/s.json"),
+            &crate::doc::sketch::tests::rectangle(),
+        )
+        .unwrap();
+        write_json(
+            &root.join("parts/p/part.json"),
+            &PartFile {
+                features: vec![Id::parse("s", "feature").unwrap()],
+            }
+            .to_json(),
+        )
+        .unwrap();
+        (dir, s)
+    }
+
+    #[test]
+    fn sketches_are_added_on_a_plane() {
+        let (dir, mut s) = with_part();
+        let r = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch"}),
+        )
+        .unwrap();
+        assert_eq!(
+            r["feature"],
+            json!({"id": "sketch-1", "type": "sketch", "plane": "xy",
+                   "entities": {}, "constraints": {}})
+        );
+        let text = fs::read_to_string(dir.path().join("parts/p/features/sketch-1.json")).unwrap();
+        assert!(text.contains("\"format\": 2"));
+        let r = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "side", "plane": "zx"}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["plane"], "zx");
+        let r = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "up",
+                   "placement": {"origin": [0, 0, "5 mm"]}}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["placement"]["origin"][2]["m"], 0.005);
+        assert!(r["feature"].get("plane").is_none());
+        // Moved to another plane, and off it again.
+        let r = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "side", "placement": {"origin": [0, "1 mm", 0]}}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["placement"]["z"], json!([0, 1, 0]));
+        assert_eq!(r["feature"]["placement"]["x"], json!([0, 0, 1]));
+        let r = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "side", "plane": "yz"}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["plane"], "yz");
+        let show = call(&mut s, "feature.show", json!({"part": "p", "id": "side"})).unwrap();
+        assert_eq!(show["plane"], "yz");
+        for (method, params, code) in [
+            (
+                "feature.add",
+                json!({"type": "sketch", "plane": "xz"}),
+                Code::InvalidParam,
+            ),
+            (
+                "feature.add",
+                json!({"type": "sketch", "params": {"x": 1}}),
+                Code::InvalidParam,
+            ),
+            (
+                "feature.add",
+                json!({"type": "sketch", "plane": "xy",
+                                   "placement": {"z": [0, 0, 1]}}),
+                Code::Usage,
+            ),
+            (
+                "feature.add",
+                json!({"type": "sphere", "params": {"radius": 1},
+                                   "plane": "xy"}),
+                Code::InvalidParam,
+            ),
+            (
+                "feature.edit",
+                json!({"id": "side", "params": {"x": 1}}),
+                Code::InvalidParam,
+            ),
+        ] {
+            let mut params = params;
+            params["part"] = json!("p");
+            let e = call(&mut s, method, params.clone()).unwrap_err();
+            assert_eq!(e.code, code, "{params}");
+        }
+    }
+
+    #[test]
+    fn sketches_rebuild_to_their_state() {
+        let (dir, mut s) = with_sketch();
+        let r = call(&mut s, "rebuild", json!({})).unwrap();
+        let f = &r["parts"][0]["features"][0];
+        assert_eq!(
+            (&f["type"], &f["ok"], &f["sketch"]),
+            (
+                &json!("sketch"),
+                &json!(true),
+                &json!({"state": "under", "dof": 4, "stale": false})
+            )
+        );
+        // A sketch has no body: no hash, no mesh, nothing to inspect.
+        assert!(f.get("hash").is_none());
+        assert!(r.get("warnings").is_none());
+        let m = call(&mut s, "mesh.get", json!({"part": "p"})).unwrap();
+        assert_eq!(m["bodies"], json!([]));
+        let i = call(&mut s, "inspect", json!({"part": "p"})).unwrap();
+        assert_eq!(i["bodies"], json!([]));
+        // A parameter edited behind ryucad's back makes the sketch stale.
+        let params =
+            |w: &str| json!({"format": 1, "kind": "ryucad.parameters", "parameters": {"width": w}});
+        let path = dir.path().join("parts/p/parameters.json");
+        write_json(&path, &params("15 mm")).unwrap();
+        let r = call(&mut s, "rebuild", json!({})).unwrap();
+        assert_eq!(r["parts"][0]["features"][0]["sketch"]["stale"], true);
+        assert_eq!(r["warnings"][0]["code"], "sketch_stale");
+        assert_eq!(r["warnings"][0]["feature"], "s");
+        // One it can't solve fails alone.
+        write_json(&path, &params("50 mm")).unwrap();
+        let e = call(&mut s, "rebuild", json!({})).unwrap_err();
+        let f = &e.details["parts"][0]["features"][0];
+        assert_eq!(f["error"]["code"], "sketch_unsolved");
+    }
+
+    /// The rebuild report of feature `f` in part `p`.
+    fn built(s: &mut Session, f: &str) -> Value {
+        let r = match call(s, "rebuild", json!({"part": "p"})) {
+            Ok(r) => r,
+            Err(e) => e.details,
+        };
+        r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == f)
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn sketches_extrude_and_revolve_into_bodies() {
+        let (dir, mut s) = with_sketch();
+        let r = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "sketch": "s",
+                   "extent": {"type": "blind", "length": "width / 4"}}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["id"], "extrude-1");
+        assert_eq!(
+            r["feature"]["extent"]["length"],
+            json!({"value": "width / 4", "m": 0.005, "expr": true})
+        );
+        let text = fs::read_to_string(dir.path().join("parts/p/features/extrude-1.json")).unwrap();
+        assert!(
+            !text.contains("reverse") && !text.contains("loops"),
+            "{text}"
+        );
+        let b = built(&mut s, "extrude-1");
+        assert_eq!(b["counts"], json!({"faces": 6, "edges": 12, "vertices": 8}));
+        // About its left side, a full turn: a solid cylinder.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "revolve", "id": "r", "sketch": "s",
+                   "axis": "l4", "angle": "full"}),
+        )
+        .unwrap();
+        let b = built(&mut s, "r");
+        assert_eq!(b["ok"], true, "{b}");
+        assert_eq!(b["counts"]["faces"], 3);
+        // A quarter turn, both ways, has two more faces: its ends.
+        let r = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "r", "angle": 90, "symmetric": true}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["angle"]["value"], "90 deg");
+        assert_eq!(built(&mut s, "r")["counts"]["faces"], 5);
+        // Reversed and symmetric extrudes, and back.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "extrude-1", "reverse": true}),
+        )
+        .unwrap();
+        assert_eq!(built(&mut s, "extrude-1")["ok"], true);
+        let r = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "extrude-1", "reverse": false}),
+        )
+        .unwrap();
+        assert!(r["feature"].get("reverse").is_none());
+        let show = call(&mut s, "feature.show", json!({"part": "p", "id": "r"})).unwrap();
+        assert_eq!(
+            (show["axis"].as_str(), show["symmetric"].as_bool()),
+            (Some("l4"), Some(true))
+        );
+    }
+
+    #[test]
+    fn sweeps_refuse_what_cant_build() {
+        let (dir, mut s) = with_sketch();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "id": "ball", "params": {"radius": 1}}),
+        )
+        .unwrap();
+        let blind = json!({"type": "blind", "length": "5 mm"});
+        for (params, code) in [
+            (
+                json!({"type": "extrude", "sketch": "ghost", "extent": blind}),
+                Code::NotFound,
+            ),
+            (
+                json!({"type": "extrude", "sketch": "ball", "extent": blind}),
+                Code::ReferenceWrongKind,
+            ),
+            (
+                json!({"type": "extrude", "sketch": "s", "extent": blind, "first": true}),
+                Code::ReferenceForward,
+            ),
+            (
+                json!({"type": "extrude", "sketch": "s", "extent": {"type": "blind", "length": 0}}),
+                Code::InvalidExtent,
+            ),
+            (
+                json!({"type": "extrude", "sketch": "s", "extent": blind, "axis": "l1"}),
+                Code::InvalidParam,
+            ),
+            (
+                json!({"type": "extrude", "sketch": "s"}),
+                Code::InvalidDocument,
+            ),
+            (
+                json!({"type": "revolve", "sketch": "s", "axis": "l4", "angle": "400 deg"}),
+                Code::InvalidExtent,
+            ),
+        ] {
+            let mut params = params;
+            params["part"] = json!("p");
+            let e = call(&mut s, "feature.add", params.clone()).unwrap_err();
+            assert_eq!(e.code, code, "{params}: {e}");
+        }
+        for (params, code) in [
+            (json!({"axis": "l9", "angle": 90}), Code::NotFound),
+            (json!({"axis": "p1", "angle": 90}), Code::ReferenceWrongKind),
+            (
+                json!({"axis": "l4", "angle": 90, "loops": ["q"]}),
+                Code::NotFound,
+            ),
+        ] {
+            let mut params = params;
+            params["part"] = json!("p");
+            params["type"] = json!("revolve");
+            params["sketch"] = json!("s");
+            let e = call(&mut s, "feature.add", params.clone()).unwrap_err();
+            assert_eq!(e.code, code, "{params}: {e}");
+        }
+        // What only the rebuild can tell, each in the sketch's terms: the
+        // diagonal crosses the rectangle, and isn't on a loop.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "revolve", "id": "r", "sketch": "s", "axis": "l5",
+                    "angle": 90}),
+        )
+        .unwrap();
+        let b = built(&mut s, "r");
+        assert_eq!(b["error"]["code"], "profile_invalid");
+        assert_eq!(b["error"]["details"]["entities"][1], "l5");
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "r", "loops": ["l5"]}),
+        )
+        .unwrap();
+        let b = built(&mut s, "r");
+        assert_eq!(b["error"]["code"], "profile_invalid");
+        assert_eq!(b["error"]["details"]["entities"], json!(["l5"]));
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "r", "axis": "l4", "loops": ["l2"]}),
+        )
+        .unwrap();
+        assert_eq!(built(&mut s, "r")["ok"], true);
+        // A sketch that fails takes its sweeps with it.
+        let params =
+            |w: &str| json!({"format": 1, "kind": "ryucad.parameters", "parameters": {"width": w}});
+        write_json(
+            &dir.path().join("parts/p/parameters.json"),
+            &params("50 mm"),
+        )
+        .unwrap();
+        let b = built(&mut s, "r");
+        assert_eq!(b["error"]["code"], "dependency_failed");
+        assert_eq!(b["error"]["details"]["dependency"], "s");
+        assert_eq!(b["error"]["details"]["cause"], "sketch_unsolved");
+    }
+
+    #[test]
+    fn inspect_says_where_sweeps_came_from() {
+        let (_dir, mut s) = with_sketch();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "id": "e", "sketch": "s",
+                    "extent": {"length": "5 mm"}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "revolve", "id": "r", "sketch": "s", "axis": "l4",
+                    "angle": 90}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "revolve", "id": "full", "sketch": "s", "axis": "l4",
+                    "angle": "full"}),
+        )
+        .unwrap();
+        for f in ["e", "r", "full"] {
+            let v = call(&mut s, "inspect", json!({"part": "p", "feature": f})).unwrap();
+            let b = &v["bodies"][0];
+            for list in ["faces", "edges", "vertices"] {
+                for e in b[list].as_array().unwrap() {
+                    assert_eq!(e["origin"]["sketch"], "s", "{f} {list}: {e}");
+                }
+            }
+        }
+        let v = call(&mut s, "inspect", json!({"part": "p", "feature": "e"})).unwrap();
+        let b = &v["bodies"][0];
+        let origins: Vec<&Value> = b["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| &f["origin"])
+            .collect();
+        assert!(origins.contains(&&json!({"sketch": "s", "entity": "l1"})));
+        assert!(origins.contains(&&json!({"sketch": "s", "cap": "start", "loop": "l1"})));
+        assert!(origins.contains(&&json!({"sketch": "s", "cap": "end", "loop": "l1"})));
+        let near = |a: &Value, want: [f64; 3]| {
+            for k in 0..3 {
+                assert!(
+                    (a[k].as_f64().unwrap() - want[k]).abs() < 1e-9,
+                    "{a} != {want:?}"
+                );
+            }
+        };
+        near(&b["bounds"]["min"], [0.0, 0.0, 0.0]);
+        near(&b["bounds"]["max"], [0.02, 0.01, 0.005]);
+        // An origin is found by name too.
+        let side = b["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["origin"] == json!({"sketch": "s", "entity": "l2"}))
+            .unwrap();
+        let one = call(
+            &mut s,
+            "inspect",
+            json!({"part": "p", "entity": format!("p/e/{}", side["name"].as_str().unwrap())}),
+        )
+        .unwrap();
+        assert_eq!(one["entity"]["origin"]["entity"], "l2");
+        // Display meshes are sized to the body, not a metre.
+        let m = call(
+            &mut s,
+            "mesh.get",
+            json!({"part": "p", "feature": "e", "quality": "coarse"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 20, "y": 10, "z": 5}}),
+        )
+        .unwrap();
+        let b = call(
+            &mut s,
+            "mesh.get",
+            json!({"part": "p", "feature": "b", "quality": "coarse"}),
+        )
+        .unwrap();
+        // The same box as a primitive: the same chord.
+        let chord = m["bodies"][0]["params"]["chord"].as_f64().unwrap();
+        let want = b["bodies"][0]["params"]["chord"].as_f64().unwrap();
+        assert!((chord - want).abs() < 1e-9 * want, "{chord} vs {want}");
+    }
+
+    #[test]
+    fn sweeps_keep_their_sketch_before_them() {
+        let (_dir, mut s) = with_sketch();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "id": "ball", "params": {"radius": 1}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "revolve", "id": "r", "sketch": "s", "axis": "l4",
+                    "angle": 90, "loops": ["l1"]}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "id": "e", "sketch": "s",
+                    "extent": {"type": "symmetric", "length": "4 mm"}}),
+        )
+        .unwrap();
+        let e = call(&mut s, "feature.delete", json!({"part": "p", "id": "s"})).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["features"]),
+            (Code::HasDependents, &json!(["r", "e"]))
+        );
+        let e = call(
+            &mut s,
+            "feature.move",
+            json!({"part": "p", "id": "s", "after": "e"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ReferenceForward);
+        let e = call(
+            &mut s,
+            "feature.move",
+            json!({"part": "p", "id": "r", "first": true}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ReferenceForward);
+        // Moving what nothing sweeps, or a sweep that stays behind its sketch, is fine.
+        call(
+            &mut s,
+            "feature.move",
+            json!({"part": "p", "id": "ball", "first": true}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.move",
+            json!({"part": "p", "id": "r", "after": "e"}),
+        )
+        .unwrap();
+        // What a sweep names stays in its sketch.
+        for gone in ["l4", "l1"] {
+            let e = call(
+                &mut s,
+                "sketch.edit",
+                json!({"part": "p", "sketch": "s", "ops": [{"op": "remove", "id": gone}]}),
+            )
+            .unwrap_err();
+            assert_eq!(
+                (e.code, &e.details["entity"]),
+                (Code::HasDependents, &json!(gone))
+            );
+        }
+        // An extent's length alone keeps its type.
+        let r = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "e", "extent": {"length": "8 mm"}}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["extent"]["type"], "symmetric");
+        assert_eq!(r["feature"]["extent"]["length"]["m"], 0.008);
+    }
+
     #[test]
     fn a_failing_feature_fails_the_rebuild_but_reports_everything() {
         let (_dir, mut s) = with_part();
@@ -1877,6 +2767,74 @@ pub(crate) mod tests {
         );
         let list = call_live(&mut s, &mut live, Some(&id), "participant.list", json!({})).unwrap();
         assert_eq!(list, r["session"]);
+    }
+
+    #[test]
+    fn sketch_entities_are_selected_highlighted_and_framed() {
+        let (_dir, mut s) = with_sketch();
+        let mut live = Live::new();
+        let human = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "session.hello",
+            json!({"kind": "human"}),
+        )
+        .unwrap()["participant"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let me = Some(human.as_str());
+        let r = call_live(
+            &mut s,
+            &mut live,
+            me,
+            "selection.set",
+            json!({"entities": ["p/s/l1", "p/s/p3"]}),
+        )
+        .unwrap();
+        assert_eq!(r["selection"], json!(["p/s/l1", "p/s/p3"]));
+        call_live(
+            &mut s,
+            &mut live,
+            me,
+            "highlight.set",
+            json!({"entities": ["p/s/l2"], "style": "pending"}),
+        )
+        .unwrap();
+        let e = call_live(
+            &mut s,
+            &mut live,
+            me,
+            "selection.set",
+            json!({"entities": ["p/s/l9"]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+        // Framing a line takes its two ends.
+        let r = call_live(
+            &mut s,
+            &mut live,
+            me,
+            "camera.set",
+            json!({"fit": ["p/s/l1"]}),
+        )
+        .unwrap();
+        assert!(r["camera"]["target"][0].as_f64().unwrap() > 0.0);
+        // An entity that goes drops out of the selection.
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [{"op": "remove", "id": "l3"},
+                                                            {"op": "remove", "id": "p3"},
+                                                            {"op": "remove", "id": "l2"},
+                                                            {"op": "remove", "id": "l5"}]}),
+        )
+        .unwrap();
+        let r = call_live(&mut s, &mut live, None, "selection.get", json!({})).unwrap();
+        assert_eq!(r["selection"], json!(["p/s/l1"]));
     }
 
     #[test]

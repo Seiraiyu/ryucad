@@ -1,0 +1,11 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "pa2: %rm\tt2: re\t\"": 0,"t2: rt2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t21 re\t\"t2: %rm\tt2: rt2: re\t\"t2: %\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: rt2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\tt2:poin\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: rt2: re\t\"t2: %\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt\"t2: %rm\tt2: re\t\"": 0,"t2: rams": {
+    "radius": "07777777777E77(777PPPPPP7777777.5 1"
+  },
+  "placement": {
+    "origin": [   ]
+  },
+  "type": "sphere"
+}

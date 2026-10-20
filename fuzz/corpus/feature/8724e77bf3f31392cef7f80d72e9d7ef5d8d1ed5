@@ -1,0 +1,15 @@
+{
+  "conctraints": {
+    "d1": {
+    }
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "placement": {
+    "origin": [
+      "166667.333330000000000000000^00000777777777777777mm",
+      "2 mm",1
+    ]
+  },
+  "type": "sketch"
+}

@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "kindki": {
+    "height": "10 mm",
+    "radius": "4 mm"
+  },
+  "placement": {
+    "origin": [
+      "1 in",
+      "0 mm",
+      "0 mm"
+ }

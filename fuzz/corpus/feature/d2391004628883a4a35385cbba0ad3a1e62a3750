@@ -1,41 +1,0 @@
-{
-  "format": 1,
-  "kind": "ryucad.feature",
-  "params": {
-    "height": "10477777777777777767777777m"
-  },
-  "placement": {
-    "origin": [
-      "1 in",
-      "0 mm",
-      "0 mm"
-    ],
-    "x": [
-      1,
-      0,      0
-    ],
-    "z": [
-      0,
-   {
-  "format": 1,
-  "kind": "ryucad.feature",
-  "params": {
-    "height": "10477777777777777767777777m"
-  },
-  "placement": {
-    "origin": [
-      "1 in",
-      "0 mm",
-      "0 mm"
-    ],
-    "x": [
-      1,
-      0,      0
-    ],
-    "z": [
-      0,
-     0,
-      1
-    ]
-  },
- }

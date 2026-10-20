@@ -3,6 +3,7 @@
 //! ```text
 //! ryucad.json
 //! parts/<part>/part.json
+//! parts/<part>/parameters.json      (optional)
 //! parts/<part>/features/<feature>.json
 //! ```
 //!
@@ -10,11 +11,12 @@
 //! its place and the rest of the project stays usable.
 
 use super::canonical;
-use super::files::{Feature, Manifest, PartFile};
+use super::files::{Feature, Manifest, ParametersFile, PartFile};
 use super::id::Id;
 use crate::error::{Code, Error, Result};
+use crate::expr::Env;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -36,11 +38,18 @@ pub struct Part {
     pub id: Id,
     /// The feature list, or why `part.json` can't be used.
     pub file: Result<PartFile>,
+    /// `parameters.json`, if the part has one, or why it can't be used.
+    pub parameters: Option<Result<ParametersFile>>,
+    /// The parameters' values, which the features were evaluated with.
+    pub env: Env,
     /// Every feature file in `features/`, listed or not.
     pub features: BTreeMap<Id, Result<Feature>>,
-    /// A hash of the bytes of `ryucad.json`, `part.json` and the listed
-    /// feature files in order: it changes whenever anything that defines the
-    /// part does.
+    /// The parameters each feature file names, read from its text, so it
+    /// is known even for a feature that doesn't evaluate.
+    pub uses: BTreeMap<Id, BTreeSet<String>>,
+    /// A hash of the bytes of `ryucad.json`, `part.json`, `parameters.json`
+    /// and the listed feature files in order: it changes whenever anything
+    /// that defines the part does.
     pub revision: String,
 }
 
@@ -135,6 +144,12 @@ pub fn part_dir(root: &Path, part: &Id) -> PathBuf {
 
 pub fn part_path(root: &Path, part: &Id) -> PathBuf {
     part_dir(root, part).join("part.json")
+}
+
+pub const PARAMETERS: &str = "parameters.json";
+
+pub fn parameters_path(root: &Path, part: &Id) -> PathBuf {
+    part_dir(root, part).join(PARAMETERS)
 }
 
 pub fn feature_path(root: &Path, part: &Id, feature: &Id) -> PathBuf {
@@ -233,11 +248,28 @@ fn load_part(
         PartFile::from_json(&v).map_err(|e| e.with("path", relative(root, &part_path(root, &id))))
     });
     for (name, path) in list_dir(&dir)? {
-        if name != "part.json" && name != "features" {
+        if name != "part.json" && name != "features" && name != PARAMETERS {
             unknown.push(relative(root, &path));
         }
     }
+    let params_path = parameters_path(root, &id);
+    let parameters = params_path.is_file().then(|| {
+        read_json(root, &params_path).and_then(|(bytes, v)| {
+            // Tagged, so a part with an empty parameters file and one
+            // with none hash apart; a part with none hashes as before.
+            piece(&mut hasher, PARAMETERS.as_bytes());
+            piece(&mut hasher, &bytes);
+            ParametersFile::from_json(&v).map_err(|e| e.with("path", relative(root, &params_path)))
+        })
+    });
+    let env = match &parameters {
+        None => Env::empty(),
+        Some(Ok(p)) => p.env(),
+        // Features that read a parameter fail with this, naming the file.
+        Some(Err(e)) => Env::broken(e.clone().with("parameters", relative(root, &params_path))),
+    };
     let mut features = BTreeMap::new();
+    let mut uses = BTreeMap::new();
     let mut bytes_of = BTreeMap::new();
     for (name, path) in list_dir(&dir.join("features"))? {
         let fid = name
@@ -248,7 +280,9 @@ fn load_part(
                 let at = relative(root, &path);
                 let feature = read_json(root, &path).and_then(|(bytes, v)| {
                     bytes_of.insert(fid.clone(), bytes);
-                    Feature::from_json(&v, manifest.default_unit).map_err(|e| e.with("path", &at))
+                    uses.insert(fid.clone(), super::files::feature_names(&v));
+                    Feature::from_json(&v, manifest.default_unit, &env)
+                        .map_err(|e| e.with("path", &at))
                 });
                 features.insert(fid, feature);
             }
@@ -277,7 +311,10 @@ fn load_part(
     Ok(Part {
         id,
         file,
+        parameters,
+        env,
         features,
+        uses,
         revision,
     })
 }
@@ -344,7 +381,7 @@ pub fn write_json(path: &Path, v: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::files::{FeatureType, Placement};
+    use crate::doc::files::{Placement, Primitive, PrimitiveType};
     use crate::units::{Quantity, Unit};
 
     fn id(s: &str) -> Id {
@@ -373,11 +410,11 @@ mod tests {
         )
         .unwrap();
         for (f, r) in [("a", "1"), ("b", "2")] {
-            let feature = Feature {
-                ty: FeatureType::Sphere,
+            let feature = Feature::Primitive(Primitive {
+                ty: PrimitiveType::Sphere,
                 params: [("radius".to_owned(), Quantity::parse(r, Unit::Mm).unwrap())].into(),
                 placement: Placement::identity(Unit::Mm),
-            };
+            });
             write_json(&feature_path(root, &p, &id(f)), &feature.to_json()).unwrap();
         }
         dir
@@ -391,7 +428,12 @@ mod tests {
         let part = project.part(&id("p")).unwrap();
         assert_eq!(part.order(), [id("a"), id("b")]);
         assert_eq!(
-            part.features[&id("b")].as_ref().unwrap().meters("radius"),
+            part.features[&id("b")]
+                .as_ref()
+                .unwrap()
+                .primitive()
+                .unwrap()
+                .meters("radius"),
             0.002
         );
         assert!(part.orphans().is_empty());
@@ -485,6 +527,63 @@ mod tests {
         )
         .unwrap();
         assert_ne!(rev(), r1);
+    }
+
+    #[test]
+    fn features_read_the_parts_parameters() {
+        let dir = sample();
+        let root = dir.path();
+        let p = id("p");
+        let before = Project::load(root).unwrap().parts[&p].revision.clone();
+        write_json(
+            &parameters_path(root, &p),
+            &serde_json::json!({"format": 1, "kind": "ryucad.parameters",
+                                "parameters": {"r": "3 mm"}}),
+        )
+        .unwrap();
+        let a = feature_path(root, &p, &id("a"));
+        let text = fs::read_to_string(&a).unwrap();
+        fs::write(&a, text.replace("\"1 mm\"", "\"r * 2\"")).unwrap();
+        let project = Project::load(root).unwrap();
+        let part = &project.parts[&p];
+        assert!(project.unknown.is_empty());
+        assert_ne!(part.revision, before);
+        assert_eq!(part.env.get("r").unwrap().x, 0.003);
+        let f = part.features[&id("a")].as_ref().unwrap();
+        assert_eq!(f.primitive().unwrap().meters("radius"), 0.006);
+        // The revision follows the parameters.
+        write_json(
+            &parameters_path(root, &p),
+            &serde_json::json!({"format": 1, "kind": "ryucad.parameters",
+                                "parameters": {"r": "4 mm"}}),
+        )
+        .unwrap();
+        let again = Project::load(root).unwrap();
+        assert_ne!(again.parts[&p].revision, part.revision);
+        assert_eq!(
+            again.parts[&p].features[&id("a")]
+                .as_ref()
+                .unwrap()
+                .primitive()
+                .unwrap()
+                .meters("radius"),
+            0.008
+        );
+        // A broken parameters file fails the features that read it, alone.
+        fs::write(parameters_path(root, &p), "{ nope").unwrap();
+        let broken = Project::load(root).unwrap();
+        let part = &broken.parts[&p];
+        assert_eq!(
+            part.parameters.as_ref().unwrap().as_ref().unwrap_err().code,
+            Code::InvalidJson
+        );
+        let e = part.features[&id("a")].as_ref().unwrap_err();
+        assert_eq!(
+            (e.code, e.details["path"].as_str()),
+            (Code::InvalidJson, Some("parts/p/features/a.json"))
+        );
+        assert_eq!(e.details["parameters"], "parts/p/parameters.json");
+        assert!(part.features[&id("b")].is_ok());
     }
 
     #[test]

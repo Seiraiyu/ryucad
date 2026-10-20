@@ -57,9 +57,9 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: baseline release
-        run: cargo test -p ryukei -p ryucad --release --test determinism
+        run: cargo test -p ryukei -p ryusketch -p ryucad --release --test determinism
       - name: x86-64-v3
-        run: cargo test -p ryukei -p ryucad --release --test determinism
+        run: cargo test -p ryukei -p ryusketch -p ryucad --release --test determinism
         env:
           RUSTFLAGS: -C target-cpu=x86-64-v3
           CARGO_TARGET_DIR: target/v3
@@ -67,7 +67,7 @@ jobs:
         run: |
           if grep -qw avx512f /proc/cpuinfo; then
             RUSTFLAGS="-C target-cpu=x86-64-v4" CARGO_TARGET_DIR=target/v4 \
-              cargo test -p ryukei -p ryucad --release --test determinism
+              cargo test -p ryukei -p ryusketch -p ryucad --release --test determinism
           else
             echo "::notice::runner has no AVX-512; x86-64-v4 skipped"
           fi

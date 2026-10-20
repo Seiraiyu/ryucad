@@ -1,0 +1,8 @@
+{
+  "angle": "9                     rad               - fffffffff1dp8", "axis": "l2",
+  "format": 2,
+  "kind": "ryucad.feature",
+  "sketch": "s",
+  "etric": true,
+  "type": "revolve"
+}
