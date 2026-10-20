@@ -240,12 +240,18 @@ fn prefix(ty: &str) -> &'static str {
     }
 }
 
-/// The smallest `<prefix><n>` the sketch doesn't use.
+/// `<prefix><n>` for `n` one past the largest the sketch uses with that
+/// prefix. Never a gap: a loop is anchored on its first point, so a new
+/// point must not sort before the old ones.
 fn fresh(s: &Sketch, prefix: &str) -> Id {
-    (1u64..)
-        .map(|n| Id::parse(&format!("{prefix}{n}"), "entity").expect("a valid ID"))
-        .find(|id| !s.entities.contains_key(id) && !s.constraints.contains_key(id))
-        .expect("some n is free")
+    let n = s
+        .entities
+        .keys()
+        .chain(s.constraints.keys())
+        .filter_map(|id| id.as_str().strip_prefix(prefix)?.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0);
+    Id::parse(&format!("{prefix}{}", n + 1), "entity").expect("a valid ID")
 }
 
 fn op_error(i: usize, field: &str, msg: String) -> Error {

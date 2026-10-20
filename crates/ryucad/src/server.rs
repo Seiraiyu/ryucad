@@ -2501,8 +2501,8 @@ pub(crate) mod tests {
             .map(|f| &f["origin"])
             .collect();
         assert!(origins.contains(&&json!({"sketch": "s", "entity": "l1"})));
-        assert!(origins.contains(&&json!({"sketch": "s", "cap": "start", "loop": "l1"})));
-        assert!(origins.contains(&&json!({"sketch": "s", "cap": "end", "loop": "l1"})));
+        assert!(origins.contains(&&json!({"sketch": "s", "cap": "start", "loop": "p1"})));
+        assert!(origins.contains(&&json!({"sketch": "s", "cap": "end", "loop": "p1"})));
         let near = |a: &Value, want: [f64; 3]| {
             for k in 0..3 {
                 assert!(
