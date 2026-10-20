@@ -1,7 +1,8 @@
 //! Bit-exact determinism of everything ryucad computes from files. Every CI
 //! platform and CPU level must reproduce `tests/golden/rebuild.txt`:
 //! expressions, rebuilt bodies, display meshes, the pixels of renders, and
-//! solved sketches and the bodies swept from them. After
+//! solved sketches and the bodies swept from them, and features that
+//! refer to other features' faces, edges and vertices. After
 //! a deliberate change, regenerate with
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
@@ -372,6 +373,222 @@ fn sweeps_section(golden: &mut Golden) {
     s.str(&format!("{:x}", md(&ryucad::mesh::encode(&meshes))));
 }
 
+/// The entities of `kind` of `feature`'s body in `inspect`.
+fn listed(
+    s: &mut ryucad::session::Session,
+    part: &str,
+    feature: &str,
+    kind: &str,
+) -> Vec<serde_json::Value> {
+    let req = ryucad::proto::Request::from_rpc(
+        "inspect",
+        Some(serde_json::json!({"part": part, "feature": feature})),
+    )
+    .unwrap();
+    let v = ryucad::server::handle(s, req).unwrap();
+    v["bodies"][0][kind].as_array().unwrap().clone()
+}
+
+fn dot(a: &serde_json::Value, b: [f64; 3]) -> f64 {
+    (0..3).map(|k| a[k].as_f64().unwrap() * b[k]).sum()
+}
+
+/// A part whose features refer to each other every way, off the axes: a
+/// tilted box; a sketch on its top, placed by a corner and an edge, with
+/// that corner's far neighbour and an edge projected; its extrude; a
+/// cylinder's rim and the extrude's corner projected onto xy, extruded up
+/// to that corner; and a sketch on zx revolved about an upright box's
+/// edge.
+fn referenced() -> (tempfile::TempDir, ryucad::session::Session) {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    call(&mut s, "part.create", json!({"part": "rf"}));
+    call(
+        &mut s,
+        "param.set",
+        json!({"part": "rf", "parameters": {"w": "11.3 mm"}}),
+    );
+    let add = |s: &mut ryucad::session::Session, f: serde_json::Value| {
+        let mut f = f;
+        f["part"] = json!("rf");
+        call(s, "feature.add", f);
+    };
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": "31.3 mm", "y": "17.9 mm", "z": "6.1 mm"},
+               "placement": {"origin": ["1 mm", "2 mm", "3 mm"], "z": [0.1, 0.2, 1]}}),
+    );
+    // The top: the face whose outward normal rises most; its corners and
+    // edges are the points in its plane.
+    let faces = listed(&mut s, "rf", "b", "faces");
+    let normal = |f: &serde_json::Value| {
+        let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+        let z = &f["surface"]["frame"]["z"];
+        [0, 1, 2].map(|k| z[k].as_f64().unwrap() * sign)
+    };
+    let top = faces
+        .iter()
+        .max_by(|a, b| normal(a)[2].total_cmp(&normal(b)[2]))
+        .unwrap();
+    let (n, o) = (normal(top), top["surface"]["frame"]["origin"].clone());
+    let on_top = |p: &serde_json::Value| (dot(p, n) - dot(&o, n)).abs() < 1e-12;
+    let mut corners: Vec<serde_json::Value> = listed(&mut s, "rf", "b", "vertices")
+        .into_iter()
+        .filter(|v| on_top(&v["point"]))
+        .collect();
+    corners.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    let name = |v: &serde_json::Value| v["name"].as_str().unwrap().to_owned();
+    let (c0, c1) = (name(&corners[0]), name(&corners[1]));
+    let mut edges: Vec<serde_json::Value> = listed(&mut s, "rf", "b", "edges")
+        .into_iter()
+        .filter(|e| corners.iter().any(|c| c["name"] == e["start"]))
+        .filter(|e| corners.iter().any(|c| c["name"] == e["end"]))
+        .collect();
+    edges.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    let (e0, e1) = (name(&edges[0]), name(&edges[1]));
+    let r = |f: &str, n: &str| format!("rf/{f}/{n}");
+    add(
+        &mut s,
+        json!({"type": "sketch", "id": "s", "face": r("b", &name(top)),
+               "face_origin": r("b", &c0), "face_x": r("b", &e0)}),
+    );
+    call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "rf", "sketch": "s", "ops": [
+            {"op": "add", "id": "k", "type": "point", "projected": r("b", &c1)},
+            {"op": "add", "id": "rim", "type": "line", "construction": true,
+             "projected": r("b", &e1)},
+            {"op": "add", "type": "point", "at": [3, 3]},
+            {"op": "add", "type": "point", "at": [12, 3.5]},
+            {"op": "add", "type": "point", "at": [6, 9]},
+            {"op": "add", "type": "line", "start": "p3", "end": "p4"},
+            {"op": "add", "type": "line", "start": "p4", "end": "p5"},
+            {"op": "add", "type": "line", "start": "p5", "end": "p3"},
+            {"op": "add", "type": "length", "a": "l1", "value": "w"},
+            {"op": "add", "type": "parallel", "a": "l1", "b": "rim"},
+            {"op": "add", "type": "distance", "a": "k", "b": "p5", "value": "4.7 mm"}
+        ]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "extrude", "id": "e", "sketch": "s", "extent": {"length": "4.2 mm"}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "cylinder", "id": "c", "params": {"radius": "3.3 mm", "height": "7.7 mm"},
+               "placement": {"origin": ["60 mm", "0 mm", "0 mm"]}}),
+    );
+    let rim = listed(&mut s, "rf", "c", "edges")
+        .into_iter()
+        .find(|e| e["curve"]["type"] == "circle" && e["curve"]["frame"]["origin"][2] != 0.0)
+        .unwrap();
+    let peak = listed(&mut s, "rf", "e", "vertices")
+        .into_iter()
+        .max_by(|a, b| {
+            a["point"][2]
+                .as_f64()
+                .unwrap()
+                .total_cmp(&b["point"][2].as_f64().unwrap())
+        })
+        .unwrap();
+    add(&mut s, json!({"type": "sketch", "id": "t"}));
+    call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "rf", "sketch": "t", "ops": [
+            {"op": "add", "type": "circle", "projected": r("c", &name(&rim))},
+            {"op": "add", "type": "point", "projected": r("e", &name(&peak))}
+        ]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "extrude", "id": "f", "sketch": "t",
+               "extent": {"type": "up_to", "target": r("e", &name(&peak)), "offset": "0.3 mm"}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "box", "id": "d", "params": {"x": "9 mm", "y": "4 mm", "z": "2 mm"},
+               "placement": {"origin": ["-30 mm", "0 mm", "0 mm"]}}),
+    );
+    let along = listed(&mut s, "rf", "d", "edges")
+        .into_iter()
+        .find(|e| {
+            e["curve"]["type"] == "line"
+                && e["curve"]["dir"][0].as_f64().unwrap().abs() == 1.0
+                && e["curve"]["origin"][1] == 0.0
+                && e["curve"]["origin"][2] == 0.0
+        })
+        .unwrap();
+    add(&mut s, json!({"type": "sketch", "id": "u", "plane": "zx"}));
+    call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "rf", "sketch": "u", "ops": [
+            {"op": "add", "type": "point", "at": [3, -28]},
+            {"op": "add", "type": "point", "at": [7.5, -28]},
+            {"op": "add", "type": "point", "at": [5, -23.25]},
+            {"op": "add", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "type": "line", "start": "p3", "end": "p1"}
+        ]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "revolve", "id": "r", "sketch": "u", "axis": r("d", &name(&along)),
+               "angle": "211.7 deg"}),
+    );
+    (dir, s)
+}
+
+/// Every sketch file as written, every body bit for bit, and their
+/// display meshes.
+fn references_section(golden: &mut Golden) {
+    let mut s = golden.section("references");
+    let (dir, mut session) = referenced();
+    for f in ["s", "t", "u"] {
+        let path = dir.path().join(format!("parts/rf/features/{f}.json"));
+        s.str(&std::fs::read_to_string(path).unwrap());
+    }
+    let part = Id::parse("rf", "part").unwrap();
+    let result = session.rebuilt(&part).unwrap().clone();
+    assert_eq!(result.failed(), 0, "{:?}", result.features);
+    assert!(result.warnings().is_empty());
+    for (_, o) in &result.features {
+        match o.as_ref().unwrap().body() {
+            Some(b) => s.str(&b.body.dump()),
+            None => s.str(o.as_ref().unwrap().hash()),
+        }
+    }
+    s.str(&result.hash);
+    let meshes =
+        ryucad::server::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
+    s.str(&format!("{:x}", md(&ryucad::mesh::encode(&meshes))));
+}
+
+#[test]
+fn referenced_bodies_are_sound() {
+    let (_dir, mut session) = referenced();
+    let part = Id::parse("rf", "part").unwrap();
+    let result = session.rebuilt(&part).unwrap();
+    for (id, o) in &result.features {
+        let Some(b) = o.as_ref().unwrap().body() else {
+            continue;
+        };
+        assert!(ryukei::check::check(&b.body).is_empty(), "{id}");
+        assert!(
+            ryukei::check::check_intersections(&b.body).is_empty(),
+            "{id}"
+        );
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -385,5 +602,6 @@ fn determinism() {
     display_section(&mut golden);
     render_section(&mut golden);
     sweeps_section(&mut golden);
+    references_section(&mut golden);
     golden.finish();
 }

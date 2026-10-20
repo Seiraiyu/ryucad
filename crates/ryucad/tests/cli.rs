@@ -464,6 +464,187 @@ fn sketches_become_bodies_from_the_cli() {
     assert_eq!(e["error"]["code"], "dependency_failed", "{v}");
 }
 
+/// The name of the entity of `kind` in an `inspect` body that `pick`
+/// chooses.
+fn named(body: &Value, kind: &str, pick: impl Fn(&Value) -> bool) -> String {
+    let e = body[kind].as_array().unwrap().iter().find(|e| pick(e));
+    e.unwrap_or_else(|| panic!("no such entity in {kind}"))["name"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Whether `v` (three numbers) is `want`.
+fn at(v: &Value, want: [f64; 3]) -> bool {
+    (0..3).all(|k| (v[k].as_f64().unwrap() - want[k]).abs() < 1e-12)
+}
+
+#[test]
+fn references_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=20", "--param", "y=10", "--param",
+        "z=5",
+    ]);
+    let body = p.ok(&["inspect", "p", "b"])["bodies"][0].clone();
+    let top = named(&body, "faces", |f| {
+        let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+        f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == 1.0
+    });
+    let corner = named(&body, "vertices", |v| at(&v["point"], [0.02, 0.01, 0.005]));
+    let (o, x) = (
+        named(&body, "vertices", |v| at(&v["point"], [0.0, 0.0, 0.0])),
+        named(&body, "vertices", |v| at(&v["point"], [0.02, 0.0, 0.0])),
+    );
+    let along_x = named(&body, "edges", |e| {
+        (e["start"] == o.as_str() && e["end"] == x.as_str())
+            || (e["start"] == x.as_str() && e["end"] == o.as_str())
+    });
+    let r = |n: &str| format!("p/b/{n}");
+    // A sketch on the top, with a corner projected into it, extruded.
+    let v = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "sketch",
+        "--id",
+        "s",
+        "--face",
+        &r(&top),
+    ]);
+    assert_eq!(v["feature"]["face"], r(&top));
+    let ops = format!(
+        r#"[{{"op": "add", "type": "point", "at": [2, 2]}},
+            {{"op": "add", "type": "point", "projected": "{}"}},
+            {{"op": "add", "type": "point", "at": [2, 8]}},
+            {{"op": "add", "type": "line", "start": "p1", "end": "p2"}},
+            {{"op": "add", "type": "line", "start": "p2", "end": "p3"}},
+            {{"op": "add", "type": "line", "start": "p3", "end": "p1"}}]"#,
+        r(&corner)
+    );
+    p.ok(&["sketch", "edit", "p", "s", &ops]);
+    p.ok(&[
+        "feature", "add", "p", "extrude", "--id", "e", "--sketch", "s", "--length", "3",
+    ]);
+    // A second extrude up to the first's lid, a millimetre short.
+    let lid = named(&p.ok(&["inspect", "p", "e"])["bodies"][0], "faces", |f| {
+        f["origin"]["cap"] == "end"
+    });
+    p.ok(&["feature", "add", "p", "sketch", "--id", "t"]);
+    p.ok(&[
+        "sketch",
+        "edit",
+        "p",
+        "t",
+        r#"[{"op": "add", "type": "point", "at": [40, 0]},
+            {"op": "add", "type": "circle", "center": "p1", "r": 2}]"#,
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "extrude",
+        "--id",
+        "f",
+        "--sketch",
+        "t",
+        "--up-to",
+        &format!("p/e/{lid}"),
+        "--offset",
+        "-1",
+    ]);
+    // A rectangle on zx, revolved about the box's bottom edge.
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "u", "--plane", "zx",
+    ]);
+    p.ok(&[
+        "sketch",
+        "edit",
+        "p",
+        "u",
+        r#"[{"op": "add", "type": "point", "at": [-20, 2]},
+            {"op": "add", "type": "point", "at": [-12, 2]},
+            {"op": "add", "type": "point", "at": [-12, 8]},
+            {"op": "add", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "type": "line", "start": "p3", "end": "p1"}]"#,
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "revolve",
+        "--id",
+        "r",
+        "--sketch",
+        "u",
+        "--axis",
+        &r(&along_x),
+        "--angle",
+        "90",
+    ]);
+    let rb = p.ok(&["rebuild", "p"]);
+    assert_eq!(rb["parts"][0]["failed"], 0, "{rb}");
+    let list = p.ok(&["feature", "list", "p"]);
+    assert_eq!(list["features"][1]["uses"], serde_json::json!(["b"]));
+    assert_eq!(list["features"][4]["uses"], serde_json::json!(["t", "e"]));
+    let f = &p.ok(&["inspect", "p", "f"])["bodies"][0]["bounds"]["max"][2];
+    assert!((f.as_f64().unwrap() - 0.007).abs() < 1e-12, "{f}");
+    // Widening the box moves the corner: s is written solved with it.
+    let v = p.ok(&["feature", "edit", "p", "b", "--param", "x=25"]);
+    assert_eq!(
+        v["sketches"],
+        serde_json::json!([{"feature": "s", "ok": true}])
+    );
+    let v = p.ok(&["sketch", "get", "p", "s"]);
+    assert_eq!(v["stale"], false);
+    // Refused, by code.
+    p.fails(&["feature", "delete", "p", "b"], "has_dependents", 1);
+    p.fails(
+        &["feature", "move", "p", "b", "--after", "s"],
+        "reference_forward",
+        1,
+    );
+    p.fails(
+        &["feature", "add", "p", "sketch", "--face", &r(&along_x)],
+        "reference_wrong_kind",
+        1,
+    );
+    p.fails(
+        &[
+            "feature",
+            "add",
+            "p",
+            "sketch",
+            "--face",
+            "p/b/0123456789abcdef0123456789abcdef",
+        ],
+        "reference_unresolved",
+        1,
+    );
+    p.fails(
+        &["feature", "add", "p", "sketch", "--face-x", &r(&along_x)],
+        "usage",
+        2,
+    );
+    p.fails(
+        &[
+            "sketch",
+            "edit",
+            "p",
+            "t",
+            &format!(
+                r#"[{{"op": "add", "type": "line", "projected": "{}"}}]"#,
+                r(&top)
+            ),
+        ],
+        "reference_wrong_kind",
+        1,
+    );
+}
+
 #[test]
 fn external_edits_are_seen() {
     let p = Pair::new();

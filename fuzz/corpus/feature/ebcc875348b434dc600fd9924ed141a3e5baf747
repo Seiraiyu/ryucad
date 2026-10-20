@@ -1,0 +1,27 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "params": {
+    "x": "06 mm",
+  "y": "20 mm",
+    "z": "30 mm"
+  },
+  "plm\tt\"t2:[re\t\"t2:m\tt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t1: %rm\tt2: rt2: re\t\"t2: %\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2tt2:rme\tt2:poin\t\"t2: %rmtt\"t2: re\t\"t2: %rm\tt;2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: rt2: re\t\"t2: %rm\tt2: re\t\"": 0,"trm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: rt2: re\t\t2: re\t\"": 0,"t2: %rm\tt\"t2:, re\t\"t2: %rm\tt2:rme\tt2:poin\t\"t2: %rmtt\"t2{ re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\t=t\"t2: re\t\"t2: %rm\tt2: rt2: re\t\"t2: %ryaucd.feature": 0,"trm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\tt2:poin\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: \t2: re\t\t1: re\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt1: rt2: re\t\"t2: %\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2:[re\t\"t2: %rm\tt2: rt2: re\t\"t2:t2: %rm\tt\"t2: ret\"t2: %rm\tt;2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: rt2: re\t\"t2: %rm\tt2: re\t\"": 0,"trm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2\"t2: %rm\tt\"t2:\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2:[re\t\"t2: %rm\tt2: rt2: re\t\"t\t\"t2: %rm\tt2:tt\"t2: re\t\"t2: %rm\tt2: rt2: re\t\"t2: %rm\tt2: re\t\"": 0,"trm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\tt2:poin\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: PPPPPPre\t\"": 0,"ttt\"2\tt\"2:rm\tt2: re\t\"": 0,"\t2: re\t\t1: re\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt1: re\t\"": 0,"t2:re\t\"": 0,"t2: %rm\tt\"t2:[re\t\"t2: %rm\tt2: rt2: re\t\"t2: %\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2:[re\t\"t2: %rm\tt2: rt2: re\t\"t2: %rm\tt2: re re\t\"": 0,"t2tt2:rme\tt2:poin\t\"t2: %rmtt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: rt2: acement": {
+    "origin": [
+      "0 mm",
+      "4 mm",
+      "9 mm"
+    ],
+    "x": [
+    1,
+      1,
+      1
+    ],
+    "z": [
+      1,
+      0,
+      1
+    ]
+  },
+  "type": "box"
+}

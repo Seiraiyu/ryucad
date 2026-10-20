@@ -1,0 +1,17 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "params": {
+    "": "82 mm",
+    "y": "4444444444444444444444444444/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkkkkkkkkkkkkkkkk-kkkkkkkkkkkkkkkkkkkk4444/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkiiiiiiiiiiiiiiii88888888888888/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkkkkkkkkkkkkkkkk-kkkkkkkkkkkkkkkkkkkk4444/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-cikkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkiiiiiiiiiiiiiiiiiiiiikkkkkkkkkkkk-kkkkkk/kkkkkkkkkk-kkkkkkkkkk+kkkkkkkkkkkkkkkkkiiiiiiiiiiiiiikkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkiiiiiiiiiiiiiiiikkkkkkiiiiiiiiiiiiiikkkkkkkkkkkkkkkkk4444/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkiiiiiiiiiiiiiiiiiiiikkkkk4444/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkiiiiiiiiiiiiiiiiiiiiiiikkkkkkk+kkkkkkkkkkkkkkkkkkkkkiiiiikkkkkkkkkkkk-kkkkkk/kkkkkkkkkk-kkkkkkkkkk+kkkkkkkkkkkkkkkkkiiiiiiiiiiiiiikkkkkkkkiiiiiiiiiiiiiikkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkiiiiiiiiiiiiiiiiiiiikkkkk4444/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkiiiiiiiiiiiiiikkkkkkkkkkkkkkkkk4444/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkiiiiiiiiiiiiiiiiiiiikkkkk4444/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkiiiiiiiiiiiiiiiiiiiiiiikkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk967857PPPPPP4444421 mm",
+    "z": "30 mm"
+  },
+  "placement": {
+    "oriz": [
+      0,
+      0,
+      1
+    ]
+  },
+  "type": "box"
+}

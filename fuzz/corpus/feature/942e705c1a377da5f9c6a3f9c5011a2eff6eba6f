@@ -1,0 +1,13 @@
+{
+  "extent": {
+    "target": {
+      "feature": "b",
+      "name": "31b4c456200b230f24938fad87cd89d7"
+    },
+    "type": "up_to"
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "sketch": "s",
+  "type": "extrude"
+}

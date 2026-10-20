@@ -1,0 +1,54 @@
+{
+  "constraints": {},
+  "entities": {
+    "l1": {
+      "end": "p3",
+      "projected": {
+        "feature": "b",
+        "name": "1e42625f291e432200aea1d788fb280e"
+      },
+      "start": "p2",
+      "type": "line"
+    },
+    "p1": {
+      "m": [
+        0.02,
+        0.01
+      ],
+      "projected": {
+        "feature": "b",
+        "name": "04b4c456200b23042f938fad87cd89d7"
+      },
+      "type": "point"
+    },
+    "p2": {
+      "m": [
+        0,
+        0
+      ],
+      "type": "point"
+    },
+    "p3": {
+      "m": [
+        0.02,
+        0
+      ],
+      "type": "point"
+    }
+  },
+  "face": {
+    "feature": "b",
+    "name": "60ae7ee2805a7d2f6980f1e8c31fe96d"
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "origin": {
+    "feature": "b",
+    "name": "74b2a6fde9c51e39d11ad0afe82eeb15"
+  },
+  "type": "sketch",
+  "x": {
+    "feature": "b",
+    "name": "1e42625f291e432200aea1d788fb280e"
+  }
+}
