@@ -3,9 +3,12 @@
 //! The files are the truth. Before every request the session checks each
 //! file it depends on: an unchanged size and modification time is trusted
 //! unless the time is too recent to be reliable; otherwise the content is
-//! hashed. Any real change reloads the project. Rebuilds are cached by part
-//! revision, so only parts whose files changed are rebuilt.
+//! read again. A real change reloads only the parts it lies in (all of
+//! them when the manifest changed). The session keeps every file's bytes,
+//! so the activity log's snapshots cost no reading. Rebuilds are cached by
+//! part revision, so only parts whose files changed are rebuilt.
 
+use crate::activity::Files;
 use crate::doc::id::Id;
 use crate::doc::project::{MANIFEST, Project};
 use crate::error::{Error, Result};
@@ -14,6 +17,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 /// A modification time this close to when it was read may be followed by
@@ -24,7 +28,7 @@ const RACY: Duration = Duration::from_secs(2);
 struct Stamp {
     modified: Option<SystemTime>,
     len: u64,
-    hash: blake3::Hash,
+    bytes: Arc<[u8]>,
 }
 
 pub struct Session {
@@ -56,7 +60,7 @@ impl Session {
             known: BTreeMap::new(),
             meshes: crate::mesh::Cache::default(),
         };
-        s.stamps = s.stamp_all()?;
+        s.scan()?;
         Ok(s)
     }
 
@@ -77,48 +81,10 @@ impl Session {
     /// [`Session::refresh`], returning the files that changed (relative,
     /// with `/`) and how: `created`, `modified` or `deleted`.
     pub fn refresh_changes(&mut self) -> Result<Vec<(String, &'static str)>> {
-        let files = files(self.root())?;
-        let trusted_before = self.stamped_at.checked_sub(RACY);
-        let mut changes = Vec::new();
-        let mut stamps = BTreeMap::new();
-        for path in files {
-            let meta = fs::metadata(&path).map_err(|e| Error::io(&path, &e))?;
-            let (modified, len) = (meta.modified().ok(), meta.len());
-            let old = self.stamps.get(&path);
-            let trusted = match (old, modified, trusted_before) {
-                (Some(o), Some(m), Some(t)) => o.modified == Some(m) && o.len == len && m < t,
-                _ => false,
-            };
-            let stamp = if trusted {
-                old.cloned().expect("trusted stamps exist")
-            } else {
-                let hash = hash_file(&path)?;
-                Stamp {
-                    modified,
-                    len,
-                    hash,
-                }
-            };
-            match old {
-                None => changes.push((path.clone(), "created")),
-                Some(o) if o.hash != stamp.hash => changes.push((path.clone(), "modified")),
-                Some(_) => {}
-            }
-            stamps.insert(path, stamp);
-        }
-        for path in self.stamps.keys().filter(|p| !stamps.contains_key(*p)) {
-            changes.push((path.clone(), "deleted"));
-        }
-        self.stamped_at = SystemTime::now();
-        self.stamps = stamps;
-        let root = self.project.root.clone();
-        let mut changes: Vec<(String, &'static str)> = changes
-            .into_iter()
-            .map(|(p, c)| (crate::doc::project::relative(&root, &p), c))
-            .collect();
-        changes.sort();
+        let changes = self.scan()?;
         if !changes.is_empty() {
-            self.project = Project::load(&self.project.root)?;
+            let paths: Vec<String> = changes.iter().map(|(p, _)| p.clone()).collect();
+            self.project.reload(&paths)?;
             let live = &self.project.parts;
             self.results
                 .retain(|id, (rev, _)| live.get(id).is_some_and(|p| &p.revision == rev));
@@ -127,15 +93,21 @@ impl Session {
         Ok(changes)
     }
 
-    /// Re-reads everything after this session wrote files.
+    /// Takes in what this session just wrote. Every write goes through here
+    /// before it answers, so the project, the stamps and the snapshot
+    /// agree with the files.
     pub fn reload(&mut self) -> Result<()> {
-        self.project = Project::load(self.root())?;
-        self.stamps = self.stamp_all()?;
-        let live = &self.project.parts;
-        self.results
-            .retain(|id, (rev, _)| live.get(id).is_some_and(|p| &p.revision == rev));
-        self.cache.retain(|id, _| live.contains_key(id));
-        Ok(())
+        self.refresh_changes().map(drop)
+    }
+
+    /// Every file the project's state depends on, as last read: what the
+    /// activity log keeps of a change.
+    pub fn snapshot(&self) -> Files {
+        let root = self.root();
+        self.stamps
+            .iter()
+            .map(|(p, s)| (crate::doc::project::relative(root, p), s.bytes.to_vec()))
+            .collect()
     }
 
     /// The rebuild of `part`, from the cache when its files haven't changed.
@@ -212,59 +184,110 @@ impl Session {
         }
     }
 
-    fn stamp_all(&mut self) -> Result<BTreeMap<PathBuf, Stamp>> {
-        self.stamped_at = SystemTime::now();
-        files(self.root())?
-            .into_iter()
-            .map(|path| {
-                let meta = fs::metadata(&path).map_err(|e| Error::io(&path, &e))?;
-                let hash = hash_file(&path)?;
-                Ok((
-                    path,
+    /// Checks every file against its stamp, reading only those whose size
+    /// or time moved or whose time is too recent to trust. Returns what
+    /// changed, sorted.
+    fn scan(&mut self) -> Result<Vec<(String, &'static str)>> {
+        let files = listed(self.root())?;
+        let trusted_before = self.stamped_at.checked_sub(RACY);
+        let mut changes = Vec::new();
+        let mut stamps = BTreeMap::new();
+        for (path, meta) in files {
+            let (modified, len) = (meta.modified().ok(), meta.len());
+            let old = self.stamps.get(&path);
+            let trusted = match (old, modified, trusted_before) {
+                (Some(o), Some(m), Some(t)) => o.modified == Some(m) && o.len == len && m < t,
+                _ => false,
+            };
+            let stamp = match old {
+                Some(o) if trusted => o.clone(),
+                _ => {
+                    let bytes = fs::read(&path).map_err(|e| Error::io(&path, &e))?;
                     Stamp {
-                        modified: meta.modified().ok(),
-                        len: meta.len(),
-                        hash,
-                    },
-                ))
-            })
-            .collect()
+                        modified,
+                        len,
+                        bytes: bytes.into(),
+                    }
+                }
+            };
+            match old {
+                None => changes.push((path.clone(), "created")),
+                Some(o) if o.bytes != stamp.bytes => changes.push((path.clone(), "modified")),
+                Some(_) => {}
+            }
+            stamps.insert(path, stamp);
+        }
+        for path in self.stamps.keys().filter(|p| !stamps.contains_key(*p)) {
+            changes.push((path.clone(), "deleted"));
+        }
+        self.stamped_at = SystemTime::now();
+        self.stamps = stamps;
+        let root = self.project.root.clone();
+        let mut changes: Vec<(String, &'static str)> = changes
+            .into_iter()
+            .map(|(p, c)| (crate::doc::project::relative(&root, &p), c))
+            .collect();
+        changes.sort();
+        Ok(changes)
     }
-}
-
-fn hash_file(path: &Path) -> Result<blake3::Hash> {
-    fs::read(path)
-        .map(|b| blake3::hash(&b))
-        .map_err(|e| Error::io(path, &e))
 }
 
 /// The files a project's state depends on: the manifest, and everything
 /// under `parts/` two and three levels down.
 pub fn files(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = vec![root.join(MANIFEST)];
-    for part in read_dir(&root.join("parts"))? {
-        if part.is_dir() {
-            for entry in read_dir(&part)? {
-                if entry.is_dir() {
-                    out.extend(read_dir(&entry)?.into_iter().filter(|p| p.is_file()));
-                } else {
-                    out.push(entry);
+    Ok(listed(root)?.into_iter().map(|(p, _)| p).collect())
+}
+
+/// [`files`], each with its metadata. A directory listing says what each
+/// entry is (and on Windows gives its size and time) without opening it,
+/// so checking a project costs at most one `stat` per file.
+fn listed(root: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
+    let mut out = Vec::new();
+    let manifest = root.join(MANIFEST);
+    if let Ok(m) = fs::metadata(&manifest)
+        && m.is_file()
+    {
+        out.push((manifest, m));
+    }
+    for (part, m) in read_dir(&root.join("parts"))? {
+        if m.is_dir() {
+            for (entry, m) in read_dir(&part)? {
+                if m.is_dir() {
+                    out.extend(read_dir(&entry)?.into_iter().filter(|(_, m)| m.is_file()));
+                } else if m.is_file() {
+                    out.push((entry, m));
                 }
             }
         }
     }
-    out.retain(|p| p.is_file());
     Ok(out)
 }
 
-fn read_dir(dir: &Path) -> Result<Vec<PathBuf>> {
-    match fs::read_dir(dir) {
-        Ok(entries) => entries
-            .map(|e| e.map(|e| e.path()).map_err(|e| Error::io(dir, &e)))
-            .collect(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(Error::io(dir, &e)),
+/// Each entry in `dir` with its metadata, following symlinks; empty when
+/// `dir` doesn't exist. An entry gone by the time it is looked at is left
+/// out.
+fn read_dir(dir: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(Error::io(dir, &e)),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| Error::io(dir, &e))?;
+        let path = entry.path();
+        let meta = match entry.file_type() {
+            Ok(t) if t.is_symlink() => fs::metadata(&path),
+            Ok(_) => entry.metadata(),
+            Err(e) => Err(e),
+        };
+        match meta {
+            Ok(m) => out.push((path, m)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Error::io(&path, &e)),
+        }
     }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -480,6 +503,36 @@ mod tests {
             edit(&mut s, "param.set", json!({"parameters": {"r": "3 mm"}})),
             Vec::<String>::new()
         );
+    }
+
+    #[test]
+    fn a_change_in_one_part_leaves_the_others() {
+        let dir = project();
+        let root = dir.path();
+        write_json(
+            &part_path(root, &id("q")),
+            &PartFile {
+                features: vec![id("a")],
+            }
+            .to_json(),
+        )
+        .unwrap();
+        write_json(&feature_path(root, &id("q"), &id("a")), &sphere("1 mm")).unwrap();
+        let mut s = Session::open(root).unwrap();
+        let p = s.rebuilt(&id("p")).unwrap() as *const PartResult;
+        write_json(&feature_path(root, &id("q"), &id("a")), &sphere("4 mm")).unwrap();
+        assert!(s.refresh().unwrap());
+        assert_eq!(s.rebuilt(&id("p")).unwrap() as *const PartResult, p);
+        let fresh = Project::load(root).unwrap();
+        assert_eq!(format!("{:?}", s.project()), format!("{fresh:?}"));
+        // What the session wrote itself is in its snapshot once it reloads.
+        write_json(&feature_path(root, &id("p"), &id("a")), &sphere("5 mm")).unwrap();
+        s.reload().unwrap();
+        assert_eq!(
+            s.snapshot()["parts/p/features/a.json"],
+            fs::read(feature_path(root, &id("p"), &id("a"))).unwrap()
+        );
+        assert_eq!(s.snapshot(), crate::activity::snapshot(root).unwrap());
     }
 
     #[test]

@@ -32,6 +32,15 @@ proptest! {
     fn a_small_change_moves_a_little(seed in any::<u64>(), n in 3usize..9) {
         let mut g = Lcg::new(seed);
         let solved = solve(&polygon(&mut g, n, 1.0)).unwrap().sketch;
+        // Angles hold every side but the last two, so the last point sits
+        // where two circles meet: it moves by about 1/sin of its turn
+        // times the change. Nearly straight there, a small change moves it
+        // a lot, rightly (seed 1295630540368118342, n = 8, turned 0.13°).
+        let (p, q, r) = (at(&solved, n as u32 - 1), at(&solved, n as u32), at(&solved, 1));
+        let (u, w) = ([q[0] - p[0], q[1] - p[1]], [r[0] - q[0], r[1] - q[1]]);
+        let turn = (u[0] * w[1] - u[1] * w[0])
+            / ryukei::math::sqrt((u[0] * u[0] + u[1] * u[1]) * (w[0] * w[0] + w[1] * w[1]));
+        prop_assume!(turn.abs() > 0.05);
         let mut s = solved.clone();
         let Some(Constraint::Length(l, v)) = s.constraints.get(&2).cloned() else {
             unreachable!()
@@ -77,7 +86,10 @@ proptest! {
     fn slots_solve_at_any_size(l in 0.001f64..100.0, w in 0.001f64..10.0, seed in any::<u64>()) {
         let mut g = Lcg::new(seed);
         let mut s = slot(l, w);
-        jostle(&mut s, &mut g, w * 0.05);
+        // By its smaller size: jostled by more than its length, a long thin
+        // slot's arc centres pass each other, and the solver never flips a
+        // root to bring them back (l = 0.001, w = 5.57, seed = 648105).
+        jostle(&mut s, &mut g, l.min(w) * 0.05);
         let r = solve(&s).unwrap();
         prop_assert!(r.report.converged, "{:?}", r.report);
         prop_assert_eq!(r.report.state, State::Well);
