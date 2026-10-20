@@ -1,9 +1,11 @@
+use crate::geom::Point3;
+use crate::name::{Name, ToolKey};
 use crate::sweep::{LoopKey, SegmentKey};
 use crate::topo::{EdgeId, FaceId};
 use core::fmt;
 
 /// Errors from fallible kernel constructors and operations.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Error {
     /// Geometry outside the size box (see [`crate::tol::SIZE_BOX_HALF`]).
     OutsideSizeBox,
@@ -30,6 +32,27 @@ pub enum Error {
     /// An edge with no exact pcurve on a face it bounds: see
     /// [`crate::pcurve::exact`].
     NoPcurve { edge: EdgeId, face: FaceId },
+    /// A boolean that can't be done: see [`crate::boolean::boolean`].
+    InvalidBoolean(BooleanError),
+}
+
+/// Why a boolean was refused. Entities are named by their stable names,
+/// a tool's after it is placed (see [`crate::boolean`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum BooleanError {
+    /// Two tools share a key.
+    DuplicateToolKey { key: ToolKey },
+    /// A placed tool leaves the size box.
+    OutsideSizeBox { tool: ToolKey },
+    /// Two faces that may meet, one not on an analytic surface.
+    Unsupported { a: Name, b: Name },
+    /// The result would have an edge with more than two faces, or a
+    /// vertex where faces meet in more than one fan: bodies touching along
+    /// an edge or at a point.
+    NonManifold { at: Point3, faces: Vec<Name> },
+    /// An intersection, an ordering or a classification that stayed
+    /// uncertain: refused rather than guessed.
+    Uncertain { a: Name, b: Name },
 }
 
 /// Why a sweep profile was refused. Each names the caller's keys, so the
@@ -138,6 +161,7 @@ impl fmt::Display for Error {
                 edge.index(),
                 face.index()
             ),
+            Self::InvalidBoolean(b) => write!(f, "invalid boolean: {b}"),
         }
     }
 }
@@ -230,6 +254,38 @@ impl fmt::Display for SweepError {
             }
             Self::OutsideSizeBox => f.write_str("the sweep leaves the size box"),
         }
+    }
+}
+
+impl fmt::Display for BooleanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateToolKey { key } => write!(f, "tool key {:#x} is used twice", key.0),
+            Self::OutsideSizeBox { tool } => {
+                write!(f, "tool {:#x} leaves the size box", tool.0)
+            }
+            Self::Unsupported { a, b } => write!(
+                f,
+                "faces {a} and {b} may meet and one is not on an analytic surface"
+            ),
+            Self::NonManifold { at, faces } => write!(
+                f,
+                "the result would be non-manifold at ({}, {}, {}), between {} faces",
+                at.x,
+                at.y,
+                at.z,
+                faces.len()
+            ),
+            Self::Uncertain { a, b } => {
+                write!(f, "where faces {a} and {b} meet could not be certified")
+            }
+        }
+    }
+}
+
+impl From<BooleanError> for Error {
+    fn from(b: BooleanError) -> Self {
+        Self::InvalidBoolean(b)
     }
 }
 

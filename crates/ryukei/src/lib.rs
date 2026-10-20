@@ -16,14 +16,12 @@ pub mod name;
 pub mod pcurve;
 pub mod predicates;
 pub mod primitive;
-// Used by the boolean, from the commit that adds it on.
-#[allow(dead_code)]
 pub(crate) mod split;
 pub mod sweep;
 pub mod tol;
 pub mod topo;
 
-pub use error::{Error, NurbsError, ProfileError, SweepError, TopologyError};
+pub use error::{BooleanError, Error, NurbsError, ProfileError, SweepError, TopologyError};
 
 /// This kernel's version, for ryucad's `version` report and cache keys.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

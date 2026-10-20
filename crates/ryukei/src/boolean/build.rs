@@ -73,7 +73,10 @@ impl Kept {
 pub(crate) struct Built {
     pub(crate) body: Body,
     pub(crate) faces: Vec<FaceId>,
+    // Read by merging and naming, from the commits that add them on.
+    #[allow(dead_code)]
     pub(crate) edges: BTreeMap<GeId, EdgeId>,
+    #[allow(dead_code)]
     pub(crate) vertices: BTreeMap<GvId, VertexId>,
 }
 
