@@ -14,8 +14,14 @@ use crate::sketch::{Constraint, Entity, Id, Kind, Sketch};
 use ryukei::math;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-/// Every residual must be within this (meters) for a sketch to be solved.
+/// Every length-like residual must be within this (meters) for a sketch to
+/// be solved.
 pub const SOLVE_TOL: f64 = 1e-10;
+
+/// Every angle-like residual (the sine in a parallel, perpendicular or
+/// angle constraint) must be within this. It doesn't depend on the
+/// sketch's scale, so a sketch solved at one scale is solved at any.
+pub const ANGLE_TOL: f64 = 1e-12;
 
 /// An equation's input.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -706,18 +712,46 @@ impl System {
         self.components = by_root.into_values().collect();
     }
 
-    /// Equation `i`'s residual at variables `x`.
-    pub fn residual(&self, i: usize, x: &[f64]) -> f64 {
-        let eq = &self.eqs[i];
-        let v: Vec<f64> = eq
+    /// How close to zero equation `i`'s residual must be.
+    pub fn tol(&self, i: usize) -> f64 {
+        match self.eqs[i].form {
+            Form::Cross | Form::Dot | Form::Angle { .. } => ANGLE_TOL,
+            _ => SOLVE_TOL / self.scale,
+        }
+    }
+
+    /// Equation `i`'s inputs at variables `x`.
+    fn inputs(&self, i: usize, x: &[f64]) -> Vec<f64> {
+        self.eqs[i]
             .args
             .iter()
             .map(|a| match *a {
                 Scalar::Var(k) => x[k],
                 Scalar::Const(c) => c,
             })
-            .collect();
-        eq.form.residual(&v).v
+            .collect()
+    }
+
+    /// Equation `i`'s residual at variables `x`.
+    pub fn residual(&self, i: usize, x: &[f64]) -> f64 {
+        self.eqs[i].form.residual(&self.inputs(i, x)).v
+    }
+
+    /// Equation `i`'s residual at `x` as a multiple of its tolerance, so it
+    /// holds within 1. Infinite while a line whose direction it reads is
+    /// shorter than the length tolerance: such a line has no direction to
+    /// hold, and how its residual reads would depend on the scale.
+    pub fn misfit(&self, i: usize, x: &[f64]) -> f64 {
+        let v = self.inputs(i, x);
+        let tol = SOLVE_TOL / self.scale;
+        let collapsed = self.eqs[i].form.lines().iter().any(|&k| {
+            let (dx, dy) = (v[k + 2] - v[k], v[k + 3] - v[k + 1]);
+            (dx * dx + dy * dy).sqrt() < tol
+        });
+        if collapsed {
+            return f64::INFINITY;
+        }
+        self.eqs[i].form.residual(&v).v.abs() / self.tol(i)
     }
 
     /// Equation `i`'s residual at `x`, and its gradient added into `row`

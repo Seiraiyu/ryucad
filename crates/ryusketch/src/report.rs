@@ -77,7 +77,7 @@ pub(crate) fn diagnose(sys: &System, x: &[f64], converged: &[bool]) -> Diagnosis
     }
     for &i in &sys.constant_eqs {
         if let Owner::Constraint(c) = sys.eqs[i].owner {
-            if sys.residual(i, x).abs() <= tol {
+            if sys.misfit(i, x) <= 1.0 {
                 redundant.insert(vec![c]);
             } else {
                 conflicting.insert(vec![c]);

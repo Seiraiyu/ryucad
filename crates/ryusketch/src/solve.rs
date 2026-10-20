@@ -11,10 +11,20 @@ use crate::linalg::{Mat, cholesky_solve};
 use crate::loops::{self, Chain, Loop};
 use crate::report::{Free, State, diagnose};
 use crate::sketch::{Entity, Id, Sketch, SketchError};
-use crate::system::{Component, SOLVE_TOL, Scalar, System};
+#[cfg(doc)]
+use crate::system::SOLVE_TOL;
+use crate::system::{Component, Coord, Scalar, System};
 
 /// Steps tried per component, accepted or not.
 const MAX_STEPS: u32 = 200;
+/// A component holds when every residual is within its tolerance, and the
+/// solver stops only well inside it, so a solved sketch rounded a little
+/// differently (at another scale, say) still holds.
+const AIM: f64 = 0.25;
+/// The longest step, in solver units: the sketch fits in ±1 of them, so a
+/// step can't carry geometry off towards infinity, where angle residuals
+/// shrink without anything holding.
+const MAX_STEP: f64 = 0.5;
 /// The first damping, and the bounds it moves between.
 const DAMP_START: f64 = 1e-6;
 const DAMP_MIN: f64 = 1e-15;
@@ -31,7 +41,8 @@ pub struct Solved {
 /// What a solve found.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Report {
-    /// Whether every constraint holds within [`SOLVE_TOL`].
+    /// Whether every constraint holds: lengths within [`SOLVE_TOL`], angles
+    /// within [`ANGLE_TOL`](crate::ANGLE_TOL).
     pub converged: bool,
     /// Steps taken, over every component.
     pub iterations: u32,
@@ -53,23 +64,20 @@ pub struct Report {
     pub open: Vec<Chain>,
 }
 
-/// Solves `sketch`: every constraint within [`SOLVE_TOL`] of holding,
+/// Solves `sketch`: every constraint within [`SOLVE_TOL`] (lengths) or
+/// [`ANGLE_TOL`](crate::ANGLE_TOL) (angles) of holding,
 /// moving the geometry as little as the solver can. Fails only when the
 /// sketch refers to what isn't there ([`Sketch::validate`]).
 pub fn solve(sketch: &Sketch) -> Result<Solved, SketchError> {
     sketch.validate()?;
     let sys = System::new(sketch);
-    let tol = SOLVE_TOL / sys.scale;
     let mut x = sys.vars.clone();
     let mut iterations = 0;
     let mut converged = sys.faults.iter().all(|f| !f.conflicting)
-        && sys
-            .constant_eqs
-            .iter()
-            .all(|&i| sys.residual(i, &x).abs() <= tol);
+        && sys.constant_eqs.iter().all(|&i| sys.misfit(i, &x) <= 1.0);
     let mut held = Vec::with_capacity(sys.components.len());
     for comp in &sys.components {
-        let (ok, steps) = component(&sys, comp, &mut x, tol);
+        let (ok, steps) = component(&sys, comp, &mut x);
         converged &= ok;
         held.push(ok);
         iterations += steps;
@@ -95,11 +103,12 @@ pub fn solve(sketch: &Sketch) -> Result<Solved, SketchError> {
     })
 }
 
-/// The largest residual of `comp`'s equations at `x`.
+/// The largest misfit of `comp`'s equations at `x`
+/// ([`System::misfit`]).
 fn worst(sys: &System, comp: &Component, x: &[f64]) -> f64 {
     comp.eqs
         .iter()
-        .map(|&i| sys.residual(i, x).abs())
+        .map(|&i| sys.misfit(i, x))
         .fold(0.0, f64::max)
 }
 
@@ -133,8 +142,8 @@ pub(crate) fn jacobian(sys: &System, comp: &Component, x: &[f64]) -> (Mat, Vec<f
 
 /// Solves one component in place. Returns whether it converged and the
 /// steps tried.
-fn component(sys: &System, comp: &Component, x: &mut [f64], tol: f64) -> (bool, u32) {
-    if worst(sys, comp, x) <= tol {
+fn component(sys: &System, comp: &Component, x: &mut [f64]) -> (bool, u32) {
+    if worst(sys, comp, x) <= 1.0 {
         return (true, 0);
     }
     let mut damp = DAMP_START;
@@ -152,10 +161,25 @@ fn component(sys: &System, comp: &Component, x: &mut [f64], tol: f64) -> (bool, 
             }
             continue;
         };
+        let dx: Vec<f64> = (0..jac.cols)
+            .map(|j| (0..jac.rows).map(|i| jac.at(i, j) * y[i]).sum())
+            .collect();
+        let longest = dx.iter().fold(0.0, |m: f64, d| m.max(d.abs()));
+        let cut = if longest > MAX_STEP {
+            MAX_STEP / longest
+        } else {
+            1.0
+        };
         let mut trial = x.to_vec();
         for (j, &v) in comp.vars.iter().enumerate() {
-            let dx: f64 = (0..jac.rows).map(|i| jac.at(i, j) * y[i]).sum();
-            trial[v] -= dx;
+            trial[v] -= dx[j] * cut;
+        }
+        // A circle's radius can't go below zero: a step that would turn
+        // one inside out stops it at zero, and the rest of the step stands.
+        for &v in &comp.vars {
+            if sys.var_owner[v].1 == Coord::R && trial[v] < 0.0 {
+                trial[v] = 0.0;
+            }
         }
         let next = norm2(sys, comp, &trial);
         if next < current {
@@ -164,7 +188,7 @@ fn component(sys: &System, comp: &Component, x: &mut [f64], tol: f64) -> (bool, 
             }
             current = next;
             damp = (damp / 10.0).max(DAMP_MIN);
-            if worst(sys, comp, x) <= tol {
+            if worst(sys, comp, x) <= AIM {
                 return (true, step);
             }
         } else {
@@ -174,7 +198,7 @@ fn component(sys: &System, comp: &Component, x: &mut [f64], tol: f64) -> (bool, 
             }
         }
     }
-    (false, MAX_STEPS)
+    (worst(sys, comp, x) <= 1.0, MAX_STEPS)
 }
 
 /// `sketch` with the solved variables put back, in meters.
@@ -399,6 +423,122 @@ pub(crate) mod tests {
         let r = solve(&s).unwrap();
         assert!(r.report.converged);
         assert_eq!(at(&r.sketch, 1), [0.1, 0.2]);
+    }
+
+    #[test]
+    fn radii_never_turn_negative() {
+        // A circle of radius 0 made tangent inside a larger one: the
+        // smallest step would make its radius negative. Found by fuzzing.
+        let mut s = Sketch::default();
+        s.entities
+            .insert(1, point(0.6509803921568627, -1.3725490196078431));
+        s.entities.insert(
+            2,
+            Entity::Point {
+                at: [1.1529411764705881, -1.6705882352941177],
+                fixed: true,
+            },
+        );
+        for (id, center, r) in [(10, 1, 0.0), (11, 2, 1.1607843137254903)] {
+            s.entities.insert(
+                id,
+                Entity::Circle {
+                    center,
+                    r,
+                    fixed: false,
+                    construction: false,
+                },
+            );
+        }
+        s.constraints.insert(1, C::Tangent(10, 11));
+        let r = solve(&s).unwrap();
+        assert!(r.report.converged, "{:?}", r.report);
+        assert!(r.sketch.validate().is_ok(), "{:?}", r.sketch.entities[&10]);
+    }
+
+    #[test]
+    fn collapsed_lines_hold_no_direction() {
+        // A line from a free point to a fixed one at the same place, made
+        // tangent to an arc: the solver shrank it to 2.5e-12 m, where its
+        // tangency read as holding at one scale and not at the next, so the
+        // solved sketch didn't solve again. Found by fuzzing.
+        let mut s = Sketch::default();
+        for (id, x, y) in [(2, 2.0, 2.0), (3, 2.0, 2.0), (4, -1.780392156862745, 2.0)] {
+            s.entities.insert(id, point(x, y));
+        }
+        s.entities.insert(6, point(2.0, 2.0));
+        s.entities.insert(
+            5,
+            Entity::Point {
+                at: [2.0, 2.0],
+                fixed: true,
+            },
+        );
+        s.entities.insert(100, line(2, 5));
+        s.entities.insert(
+            101,
+            Entity::Arc {
+                center: 6,
+                start: 4,
+                end: 3,
+                construction: false,
+            },
+        );
+        s.constraints.insert(1, C::Tangent(100, 101));
+        let r = solve(&s).unwrap();
+        if r.report.converged {
+            let (a, b) = (at(&r.sketch, 2), at(&r.sketch, 5));
+            let (dx, dy) = (a[0] - b[0], a[1] - b[1]);
+            assert!((dx * dx + dy * dy).sqrt() >= crate::SOLVE_TOL, "{a:?}");
+            let again = solve(&r.sketch).unwrap();
+            assert!(again.report.converged, "{:?}", again.report);
+        }
+        // A fixed line of no length is square to nothing.
+        let mut flat = rectangle();
+        for p in [1, 2] {
+            flat.entities.insert(
+                p,
+                Entity::Point {
+                    at: [0.0, 0.0],
+                    fixed: true,
+                },
+            );
+        }
+        flat.constraints.insert(1, C::Perpendicular(11, 12));
+        assert!(!solve(&flat).unwrap().report.converged);
+    }
+
+    #[test]
+    fn angle_residuals_dont_lead_off_to_infinity() {
+        // Two lines through a free point made parallel: the sine shrinks
+        // as the point runs away, but the nearby solution is the one to
+        // find, and once found it holds as it is. Found by fuzzing.
+        let mut s = Sketch::default();
+        s.entities.insert(
+            0,
+            Entity::Point {
+                at: [-2.0, 2.0],
+                fixed: true,
+            },
+        );
+        s.entities
+            .insert(1, point(-0.16470588235294126, -0.16470588235294126));
+        s.entities.insert(
+            2,
+            Entity::Point {
+                at: [-2.0, -1.7490196078431373],
+                fixed: true,
+            },
+        );
+        s.entities.insert(101, line(1, 2));
+        s.entities.insert(102, line(0, 1));
+        s.constraints.insert(0, C::Parallel(102, 101));
+        let r = solve(&s).unwrap();
+        assert!(r.report.converged);
+        let p = at(&r.sketch, 1);
+        assert!((p[0] + 2.0).abs() < 1e-9 && p[1].abs() < 1.0, "{p:?}");
+        let again = solve(&r.sketch).unwrap();
+        assert!(!again.report.changed);
     }
 
     #[test]

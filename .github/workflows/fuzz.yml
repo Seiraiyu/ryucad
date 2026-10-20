@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [predicates, interval, euler, nurbs, mesh, feature, sweep, intersect, expr]
+        target: [predicates, interval, euler, nurbs, mesh, feature, sweep, intersect, expr, sketch]
     steps:
       - uses: actions/checkout@v4
       # cargo-fuzz needs nightly; the pinned stable toolchain stays the

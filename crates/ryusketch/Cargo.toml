@@ -10,5 +10,10 @@ repository.workspace = true
 ryukei = { path = "../ryukei" }
 
 [dev-dependencies]
+divan = "0.1"
 proptest = "1"
 ryukei-testkit = { path = "../ryukei-testkit" }
+
+[[bench]]
+name = "solve"
+harness = false

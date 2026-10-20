@@ -290,6 +290,17 @@ impl Form {
         }
     }
 
+    /// The lines whose directions it reads, by where each starts among its
+    /// inputs: a line is the points at `i` and `i + 2`.
+    pub fn lines(&self) -> &'static [usize] {
+        match *self {
+            Form::LineDist { .. } | Form::LineDistRad { .. } | Form::MidLine | Form::Along => &[0],
+            Form::Cross | Form::Dot | Form::Angle { .. } => &[0, 4],
+            Form::Collinear => &[2],
+            _ => &[],
+        }
+    }
+
     /// The residual and its gradient at `values` (one per input).
     pub fn residual(&self, values: &[f64]) -> D {
         let x: Vec<D> = values

@@ -55,19 +55,31 @@ impl Mat {
             .collect()
     }
 
-    /// `self * selfᵀ`.
+    /// `self * selfᵀ`. A sketch's Jacobian has a dozen entries a row at
+    /// most, so this goes column by column over the nonzero entries only.
+    /// Each entry still sums its products in column order, as the dense
+    /// product would, and skipped products are zeros, so the bits are the
+    /// same.
     pub fn gram(&self) -> Mat {
-        let mut g = Mat::zeros(self.rows, self.rows);
+        let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); self.cols];
         for i in 0..self.rows {
-            for j in 0..=i {
-                let d: f64 = self
-                    .row(i)
-                    .iter()
-                    .zip(self.row(j))
-                    .map(|(a, b)| a * b)
-                    .sum();
-                *g.at_mut(i, j) = d;
-                *g.at_mut(j, i) = d;
+            for (k, &v) in self.row(i).iter().enumerate() {
+                if v != 0.0 {
+                    cols[k].push((i, v));
+                }
+            }
+        }
+        let mut g = Mat::zeros(self.rows, self.rows);
+        for col in &cols {
+            for (x, &(i, a)) in col.iter().enumerate() {
+                for &(j, b) in &col[..=x] {
+                    *g.at_mut(i, j) += a * b;
+                }
+            }
+        }
+        for i in 0..self.rows {
+            for j in 0..i {
+                *g.at_mut(j, i) = g.at(i, j);
             }
         }
         g
@@ -127,8 +139,9 @@ pub(crate) fn cholesky_solve(a: &Mat, b: &[f64]) -> Option<Vec<f64>> {
 /// largest norm (the lowest index among equals).
 #[derive(Clone, Debug)]
 pub(crate) struct Qr {
-    /// `R` in its upper triangle; below it, what is left of `a`.
-    r: Mat,
+    /// `R`, column by column, in each column's first entries; below them,
+    /// what is left of `a`.
+    cols: Vec<Vec<f64>>,
     /// Column `k` of `a P` is column `perm[k]` of `a`.
     perm: Vec<usize>,
     /// How many of `R`'s diagonal entries pass the tolerance.
@@ -136,77 +149,83 @@ pub(crate) struct Qr {
 }
 
 /// Factors `a`. Its rank counts diagonal entries of `R` larger than `tol`
-/// times the first, stopping at the first that isn't.
+/// times the first, stopping at the first that isn't. It works on columns
+/// held one after another in memory, the order Householder steps read
+/// them in.
 pub(crate) fn qr(a: &Mat, tol: f64) -> Qr {
     let (m, n) = (a.rows, a.cols);
-    let mut w = a.clone();
+    let mut w: Vec<Vec<f64>> = (0..n)
+        .map(|j| (0..m).map(|i| a.at(i, j)).collect())
+        .collect();
     let mut perm: Vec<usize> = (0..n).collect();
-    let col_norm2 = |w: &Mat, j: usize, from: usize| -> f64 {
-        (from..m).map(|i| w.at(i, j) * w.at(i, j)).sum()
-    };
+    let norm2 = |c: &[f64]| -> f64 { c.iter().map(|x| x * x).sum() };
     for k in 0..m.min(n) {
-        let (mut best, mut best_norm) = (k, col_norm2(&w, k, k));
+        let (mut best, mut best_norm) = (k, norm2(&w[k][k..]));
         for j in k + 1..n {
-            let c = col_norm2(&w, j, k);
+            let c = norm2(&w[j][k..]);
             if c > best_norm {
                 best = j;
                 best_norm = c;
             }
         }
         if best != k {
-            for i in 0..m {
-                w.data.swap(i * n + k, i * n + best);
-            }
+            w.swap(k, best);
             perm.swap(k, best);
         }
         if best_norm == 0.0 {
             break;
         }
         let alpha = math::sqrt(best_norm);
-        let s = if w.at(k, k) >= 0.0 { -alpha } else { alpha };
-        let mut v: Vec<f64> = (k..m).map(|i| w.at(i, k)).collect();
+        let s = if w[k][k] >= 0.0 { -alpha } else { alpha };
+        let mut v: Vec<f64> = w[k][k..].to_vec();
         v[0] -= s;
-        let vv: f64 = v.iter().map(|x| x * x).sum();
+        let vv = norm2(&v);
         if vv == 0.0 {
             continue;
         }
-        for j in k..n {
-            let d: f64 = (k..m).map(|i| v[i - k] * w.at(i, j)).sum();
+        for col in &mut w[k..] {
+            let tail = &mut col[k..];
+            let d: f64 = v.iter().zip(tail.iter()).map(|(a, b)| a * b).sum();
             let f = 2.0 * d / vv;
-            for i in k..m {
-                *w.at_mut(i, j) -= f * v[i - k];
+            for (x, vi) in tail.iter_mut().zip(&v) {
+                *x -= f * vi;
             }
         }
         // Exactly what the reflection gives, without rounding noise.
-        *w.at_mut(k, k) = s;
-        for i in k + 1..m {
-            *w.at_mut(i, k) = 0.0;
+        w[k][k] = s;
+        for x in &mut w[k][k + 1..] {
+            *x = 0.0;
         }
     }
-    let first = if m.min(n) > 0 { w.at(0, 0).abs() } else { 0.0 };
+    let first = if m.min(n) > 0 { w[0][0].abs() } else { 0.0 };
     let rank = (0..m.min(n))
-        .take_while(|&k| first > 0.0 && w.at(k, k).abs() > tol * first)
+        .take_while(|&k| first > 0.0 && w[k][k].abs() > tol * first)
         .count();
-    Qr { r: w, perm, rank }
+    Qr {
+        cols: w,
+        perm,
+        rank,
+    }
 }
 
 impl Qr {
     /// A basis of `{x : a x = 0}` (as far as the rank says), each vector of
     /// unit length, in the order of the columns `P` put last.
     pub fn null_space(&self) -> Vec<Vec<f64>> {
-        let n = self.r.cols;
+        let n = self.cols.len();
         let r = self.rank;
+        let at = |i: usize, j: usize| self.cols[j][i];
         let mut out = Vec::new();
         for j in r..n {
             // Solve R11 z = -R12 e_j, then z's tail is e_j.
             let mut z = vec![0.0; n];
             z[j] = 1.0;
             for i in (0..r).rev() {
-                let mut s = -self.r.at(i, j);
+                let mut s = -at(i, j);
                 for k in i + 1..r {
-                    s -= self.r.at(i, k) * z[k];
+                    s -= at(i, k) * z[k];
                 }
-                z[i] = s / self.r.at(i, i);
+                z[i] = s / at(i, i);
             }
             let mut x = vec![0.0; n];
             for (k, &p) in self.perm.iter().enumerate() {
@@ -298,8 +317,29 @@ mod tests {
         let mut g = Lcg::new(3);
         let a = random(&mut g, 6, 9);
         let (x, y) = (qr(&a, 1e-10), qr(&a.clone(), 1e-10));
-        assert_eq!(x.r, y.r);
+        assert_eq!(x.cols, y.cols);
         assert_eq!(x.perm, y.perm);
+    }
+
+    #[test]
+    fn the_sparse_gram_is_the_dense_one() {
+        let mut g = Lcg::new(4);
+        let mut a = random(&mut g, 9, 14);
+        for x in a.data.iter_mut() {
+            if !g.next_u64().is_multiple_of(3) {
+                *x = 0.0;
+            }
+        }
+        let gram = a.gram();
+        for i in 0..9 {
+            for j in 0..9 {
+                let mut d = 0.0;
+                for k in 0..14 {
+                    d += a.at(i, k) * a.at(j, k);
+                }
+                assert_eq!(gram.at(i, j).to_bits(), d.to_bits());
+            }
+        }
     }
 
     #[test]
