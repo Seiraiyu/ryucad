@@ -8,7 +8,7 @@ use crate::doc::files::Feature;
 use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::error::{Code, Error, Result};
-use crate::rebuild::Output;
+use crate::rebuild::{Output, Results};
 use std::collections::BTreeMap;
 
 /// The features `f` reads, each once, in the order it names them.
@@ -89,17 +89,12 @@ pub fn check_order(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()
 
 /// The output of `input`, which feature `id` reads, from the results of
 /// the features built before it: `dependency_failed` if it failed.
-pub fn input<'a>(
-    part: &Part,
-    id: &Id,
-    input: &Id,
-    before: &'a BTreeMap<Id, Result<Output>>,
-) -> Result<&'a Output> {
+pub fn input<'a>(part: &Part, id: &Id, input: &Id, before: &'a dyn Results) -> Result<&'a Output> {
     let f = part.features.get(id).and_then(|f| f.as_ref().ok());
     if let Some(f) = f {
         check_order(part, part.order(), id, f)?;
     }
-    match before.get(input) {
+    match before.result(input) {
         Some(Ok(o)) => Ok(o),
         Some(Err(e)) => Err(Error::new(
             Code::DependencyFailed,

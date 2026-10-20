@@ -21,6 +21,7 @@ pub mod param;
 pub mod profile;
 pub mod proto;
 pub mod rebuild;
+pub mod reference;
 pub mod render;
 pub mod server;
 pub mod session;

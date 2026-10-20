@@ -8,7 +8,8 @@ use crate::doc::id::Id;
 use crate::doc::project::{
     MANIFEST, Part, feature_path, parameters_path, part_dir, part_path, write_json,
 };
-use crate::doc::sketch::{OriginPlane, Plane, Sketch};
+use crate::doc::reference::Reference;
+use crate::doc::sketch::{OnFace, OriginPlane, Plane, Sketch};
 use crate::doc::sweep::{Angle, Extrude, Revolve};
 use crate::entity::{self, EntityRef};
 use crate::error::{Code, Error, Result};
@@ -249,7 +250,7 @@ fn dispatch(
         Request::FeatureShow { part, id } => {
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
             let p = session.project().part(&part)?;
-            let mut v = feature_report(&fid, feature(p, &fid)?);
+            let mut v = feature_report(&part, &fid, feature(p, &fid)?);
             // The revision it was read at: an edit made from it says so.
             v["revision"] = json!(p.revision);
             Ok(v)
@@ -618,11 +619,11 @@ fn no_feature(part: &Part, id: &Id) -> Error {
 }
 
 /// How a feature appears in output: every quantity as written and in
-/// meters.
-pub fn feature_report(id: &Id, f: &Feature) -> Value {
+/// meters, every reference as `<part>/<feature>/<name>`.
+pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
     let mut v = match f {
         Feature::Primitive(p) => primitive_report(p),
-        Feature::Sketch(s) => sketch_report(s),
+        Feature::Sketch(s) => sketch_report(part, s),
         Feature::Extrude(e) => {
             let mut v = e.fields();
             v["extent"]["length"] = e.extent.length().report();
@@ -652,10 +653,20 @@ fn placement_report(p: &Placement) -> Value {
 
 /// A sketch as output reports it: its file's fields, with every dimension
 /// as written and evaluated.
-fn sketch_report(s: &Sketch) -> Value {
+fn sketch_report(part: &Id, s: &Sketch) -> Value {
     let mut v = s.fields();
-    if let Plane::Placement(p) = &s.plane {
-        v["placement"] = placement_report(p);
+    match &s.plane {
+        Plane::Placement(p) => v["placement"] = placement_report(p),
+        Plane::Face(on) => {
+            v["face"] = json!(on.face.text(part));
+            if let Some(r) = &on.origin {
+                v["origin"] = json!(r.text(part));
+            }
+            if let Some(r) = &on.x {
+                v["x"] = json!(r.text(part));
+            }
+        }
+        Plane::Origin(_) => {}
     }
     for (id, c) in &s.constraints {
         if let Some(q) = &c.value {
@@ -770,6 +781,9 @@ impl Given {
         }
     }
 }
+
+/// The fields a sketch takes.
+const SKETCH: [&str; 5] = ["plane", "placement", "face", "face_origin", "face_x"];
 
 /// The fields an extrude and a revolve take.
 const EXTRUDE: [&str; 4] = ["sketch", "loops", "extent", "reverse"];
@@ -922,26 +936,96 @@ fn new_placement(arg: PlacementArg, unit: Unit, env: &Env) -> Result<Placement> 
     Ok(placed)
 }
 
-/// A sketch's plane after an edit: an origin plane, or its placement with
-/// what was given applied. `None` for a new sketch.
-fn sketch_plane(current: Option<&Plane>, given: &Given, unit: Unit, env: &Env) -> Result<Plane> {
-    match (&given.fields.plane, &given.placement) {
-        (Some(_), Some(_)) => Err(Error::new(
+/// A sketch's plane after an edit: an origin plane, its placement with
+/// what was given applied, or a face with its origin and `x`. `current`
+/// is `None` for a new sketch.
+fn sketch_plane(
+    current: Option<&Plane>,
+    given: &Given,
+    part: &Id,
+    unit: Unit,
+    env: &Env,
+) -> Result<Plane> {
+    let f = &given.fields;
+    let chosen = [
+        f.plane.is_some(),
+        given.placement.is_some(),
+        f.face.is_some(),
+    ];
+    if chosen.iter().filter(|c| **c).count() > 1 {
+        return Err(Error::new(
             Code::Usage,
-            "give a sketch a plane or a placement, not both",
-        )),
-        (Some(p), None) => Ok(Plane::Origin(
-            OriginPlane::parse(p).map_err(|e| e.with("pointer", "/plane"))?,
-        )),
-        (None, Some(arg)) => {
-            let mut p = match current {
-                Some(c) => c.placement(unit),
-                None => return Ok(Plane::Placement(new_placement(arg.clone(), unit, env)?)),
+            "give a sketch one of a plane, a placement and a face",
+        ));
+    }
+    // A face's origin or x, or none: the default.
+    let reference = |s: &Option<String>| -> Result<Option<Option<Reference>>> {
+        match s.as_deref() {
+            None => Ok(None),
+            Some("") => Ok(Some(None)),
+            Some(t) => Reference::parse(t, part).map(|r| Some(Some(r))),
+        }
+    };
+    let (origin, x) = (reference(&f.face_origin)?, reference(&f.face_x)?);
+    let plane = match (&f.plane, &given.placement, &f.face) {
+        (Some(p), _, _) => {
+            Plane::Origin(OriginPlane::parse(p).map_err(|e| e.with("pointer", "/plane"))?)
+        }
+        (_, Some(arg), _) => {
+            let mut p = match current.and_then(|c| c.placement(unit)) {
+                Some(p) => p,
+                None => new_placement(arg.clone(), unit, env)?,
             };
             apply_placement(&mut p, arg.clone(), unit, env)?;
-            Ok(Plane::Placement(p))
+            Plane::Placement(p)
         }
-        (None, None) => Ok(current.cloned().unwrap_or(Plane::Origin(OriginPlane::Xy))),
+        (_, _, Some(face)) => Plane::Face(OnFace {
+            face: Reference::parse(face, part)?,
+            origin: None,
+            x: None,
+        }),
+        _ => current.cloned().unwrap_or(Plane::Origin(OriginPlane::Xy)),
+    };
+    match plane {
+        Plane::Face(mut on) => {
+            // A new face keeps no old origin or x.
+            let old = match current {
+                Some(Plane::Face(c)) if f.face.is_none() => Some(c),
+                _ => None,
+            };
+            on.origin = origin.unwrap_or_else(|| old.and_then(|c| c.origin.clone()));
+            on.x = x.unwrap_or_else(|| old.and_then(|c| c.x.clone()));
+            Ok(Plane::Face(on))
+        }
+        p if origin.is_some() || x.is_some() => {
+            let _ = p;
+            Err(Error::new(
+                Code::Usage,
+                "face_origin and face_x go with a sketch on a face",
+            ))
+        }
+        p => Ok(p),
+    }
+}
+
+/// Refuses a feature whose references don't resolve to what they must
+/// now, in the part's current rebuild; `order` is the list as the write
+/// leaves it.
+fn check_references(
+    session: &mut Session,
+    part: &Id,
+    order: &[Id],
+    id: &Id,
+    f: &Feature,
+) -> Result<()> {
+    if f.references().is_empty() {
+        return Ok(());
+    }
+    let p = session.project().part(part)?.clone();
+    let results = session.rebuilt(part)?;
+    match f {
+        Feature::Sketch(s) => crate::sketch::context(&p, order, id, s, results).map(|_| ()),
+        _ => Ok(()),
     }
 }
 
@@ -962,8 +1046,8 @@ fn feature_add(
     let env = p.env.clone();
     let f = match ty {
         "sketch" => {
-            given.only(ty, &["plane", "placement"])?;
-            Feature::Sketch(Sketch::new(sketch_plane(None, &given, unit, &env)?))
+            given.only(ty, &SKETCH)?;
+            Feature::Sketch(Sketch::new(sketch_plane(None, &given, &pid, unit, &env)?))
         }
         "extrude" | "revolve" => {
             given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
@@ -996,8 +1080,9 @@ fn feature_add(
     if f.swept().is_some() {
         check_sweep(p, &list, &fid, &f)?;
     }
+    check_references(session, &pid, &list, &fid, &f)?;
     let revision = save(session, &pid, &[(&fid, &f)], list)?;
-    Ok(json!({"feature": feature_report(&fid, &f), "revision": revision}))
+    Ok(json!({"feature": feature_report(&pid, &fid, &f), "revision": revision}))
 }
 
 fn feature_edit(
@@ -1012,7 +1097,8 @@ fn feature_edit(
     let p = session.project().part(&pid)?;
     check_revision(p, expected)?;
     let list = order(p)?;
-    let f = match feature(p, &fid)?.clone() {
+    let old = feature(p, &fid)?.clone();
+    let f = match old.clone() {
         Feature::Primitive(mut f) => {
             given.only(f.ty.as_str(), &["params", "placement"])?;
             let mut merged: Map<String, Value> = f
@@ -1039,8 +1125,8 @@ fn feature_edit(
         // Its geometry changes through sketch.edit; the plane moves the
         // sketch without changing its solve.
         Feature::Sketch(mut s) => {
-            given.only("sketch", &["plane", "placement"])?;
-            s.plane = sketch_plane(Some(&s.plane), &given, unit, &p.env)?;
+            given.only("sketch", &SKETCH)?;
+            s.plane = sketch_plane(Some(&s.plane), &given, &pid, unit, &p.env)?;
             Feature::Sketch(s)
         }
         f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
@@ -1056,8 +1142,12 @@ fn feature_edit(
             f
         }
     };
+    // References already there were checked when they were written.
+    if f.references() != old.references() {
+        check_references(session, &pid, &list, &fid, &f)?;
+    }
     let revision = save(session, &pid, &[(&fid, &f)], list)?;
-    Ok(json!({"feature": feature_report(&fid, &f), "revision": revision}))
+    Ok(json!({"feature": feature_report(&pid, &fid, &f), "revision": revision}))
 }
 
 fn feature_delete(

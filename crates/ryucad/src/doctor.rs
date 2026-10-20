@@ -500,7 +500,10 @@ fn diagnose_part(root: &Path, part: &str, unit: Unit, issues: &mut Vec<Issue>) {
 /// other feature, and for a sketch that is current or can't be solved.
 fn solved_sketch(id: &str, f: &Feature) -> Option<Feature> {
     let id = Id::parse(id, "feature").ok()?;
-    let solved = crate::sketch::solve(&id, f.sketch()?).ok()?;
+    // A sketch that reads other features is judged by rebuild.
+    let s = f.sketch()?;
+    let ctx = crate::sketch::Context::standalone(s)?.ok()?;
+    let solved = crate::sketch::solve_in(&id, s, &ctx).ok()?;
     solved.stale.then_some(Feature::Sketch(solved.sketch))
 }
 

@@ -402,7 +402,10 @@ impl Feature {
     /// with its role in the feature (`plane`, `x`, `target`, `axis`,
     /// `entities.<id>`), in a fixed order.
     pub fn references(&self) -> Vec<(String, &Reference)> {
-        Vec::new()
+        match self {
+            Feature::Sketch(s) => s.references(),
+            _ => Vec::new(),
+        }
     }
 
     /// The sketch an extrude or revolve sweeps.

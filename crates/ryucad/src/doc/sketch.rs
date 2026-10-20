@@ -8,6 +8,7 @@
 
 use super::files::{Obj, Placement, invalid, number};
 use super::id::Id;
+use super::reference::Reference;
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
 use crate::units::{Field, Quantity, Unit};
@@ -56,27 +57,53 @@ impl OriginPlane {
     }
 }
 
-/// Where a sketch lies: an origin plane, or an explicit frame whose `xy`
-/// plane it is.
+/// Where a sketch lies: an origin plane, an explicit frame whose `xy`
+/// plane it is, or a planar face of an earlier feature.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Plane {
     Origin(OriginPlane),
     Placement(Placement),
+    Face(OnFace),
+}
+
+/// A sketch on a planar face: its normal is the face's outward normal, its
+/// origin the part origin projected onto the face's plane or a vertex, its
+/// `x` the part's `x` projected (the part's `y` when `x` is along the
+/// normal) or a straight edge, from its start.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OnFace {
+    pub face: Reference,
+    pub origin: Option<Reference>,
+    pub x: Option<Reference>,
 }
 
 impl Plane {
     /// As a placement: an origin plane's frame sits at the part origin.
-    pub fn placement(&self, unit: Unit) -> Placement {
+    /// `None` on a face, whose frame only rebuild can tell.
+    pub fn placement(&self, unit: Unit) -> Option<Placement> {
         match self {
             Plane::Origin(o) => {
                 let (z, x) = o.axes();
                 let mut p = Placement::identity(unit);
                 p.z = z;
                 p.x = x;
-                p
+                Some(p)
             }
-            Plane::Placement(p) => p.clone(),
+            Plane::Placement(p) => Some(p.clone()),
+            Plane::Face(_) => None,
         }
+    }
+
+    /// Its references, each with its role: `plane` (the face), `origin`
+    /// and `x`.
+    pub fn references(&self) -> Vec<(String, &Reference)> {
+        let Plane::Face(on) = self else {
+            return Vec::new();
+        };
+        let mut out = vec![("plane".to_owned(), &on.face)];
+        out.extend(on.origin.iter().map(|r| ("origin".to_owned(), r)));
+        out.extend(on.x.iter().map(|r| ("x".to_owned(), r)));
+        out
     }
 }
 
@@ -328,6 +355,15 @@ impl Sketch {
         match &self.plane {
             Plane::Origin(o) => v["plane"] = json!(o.as_str()),
             Plane::Placement(p) => v["placement"] = p.to_json(),
+            Plane::Face(on) => {
+                v["face"] = on.face.to_json();
+                if let Some(r) = &on.origin {
+                    v["origin"] = r.to_json();
+                }
+                if let Some(r) = &on.x {
+                    v["x"] = r.to_json();
+                }
+            }
         }
         v
     }
@@ -335,23 +371,48 @@ impl Sketch {
     /// Reads a sketch's fields, its dimensions' expressions reading `env`.
     /// Bare numbers in lengths take `default`, in angles degrees.
     pub(crate) fn from_fields(o: &mut Obj, default: Unit, env: &Env) -> Result<Sketch> {
-        let plane = match (o.take_opt("plane"), o.take_opt("placement")) {
-            (Some(p), None) => {
+        let (origin, x) = (o.take_opt("origin"), o.take_opt("x"));
+        let plane = match (
+            o.take_opt("plane"),
+            o.take_opt("placement"),
+            o.take_opt("face"),
+        ) {
+            (Some(p), None, None) => {
                 let s = p
                     .as_str()
                     .ok_or_else(|| invalid("/plane", "plane must be xy, yz or zx"))?;
                 Plane::Origin(OriginPlane::parse(s).map_err(|e| e.with("pointer", "/plane"))?)
             }
-            (None, Some(p)) => {
+            (None, Some(p), None) => {
                 Plane::Placement(Placement::from_json(&p, default, "/placement", env)?)
             }
+            (None, None, Some(f)) => Plane::Face(OnFace {
+                face: Reference::from_json(&f, "/face")?,
+                origin: origin
+                    .as_ref()
+                    .map(|v| Reference::from_json(v, "/origin"))
+                    .transpose()?,
+                x: x.as_ref()
+                    .map(|v| Reference::from_json(v, "/x"))
+                    .transpose()?,
+            }),
             _ => {
                 return Err(invalid(
                     "/plane",
-                    "a sketch has exactly one of plane and placement",
+                    "a sketch has exactly one of plane, placement and face",
                 ));
             }
         };
+        if !matches!(plane, Plane::Face(_)) {
+            for (k, v) in [("origin", &origin), ("x", &x)] {
+                if v.is_some() {
+                    return Err(invalid(
+                        &format!("/{k}"),
+                        &format!("{k} goes with face: a vertex or edge of a sketch's face"),
+                    ));
+                }
+            }
+        }
         let entities = o.take("entities")?;
         let entities = entities
             .as_object()
@@ -382,6 +443,11 @@ impl Sketch {
         }
         s.validate()?;
         Ok(s)
+    }
+
+    /// Its references to other features, each with its role.
+    pub fn references(&self) -> Vec<(String, &Reference)> {
+        self.plane.references()
     }
 
     /// Checks that every reference names an entity of the right kind and
@@ -744,8 +810,8 @@ pub(crate) mod tests {
         let mut v = rectangle();
         v["plane"] = json!("zx");
         let s = read(&v).unwrap();
-        assert_eq!(s.plane.placement(Unit::Mm).z, [0.0, 1.0, 0.0]);
-        assert_eq!(s.plane.placement(Unit::Mm).x, [0.0, 0.0, 1.0]);
+        assert_eq!(s.plane.placement(Unit::Mm).unwrap().z, [0.0, 1.0, 0.0]);
+        assert_eq!(s.plane.placement(Unit::Mm).unwrap().x, [0.0, 0.0, 1.0]);
         v.as_object_mut().unwrap().remove("plane");
         v["placement"] = json!({"origin": ["0", "0", "width"], "x": [1, 0, 0], "z": [0, 0, 1]});
         let s = read(&v).unwrap();
@@ -762,6 +828,36 @@ pub(crate) mod tests {
             (e.code, e.details["pointer"].as_str()),
             (Code::InvalidParam, Some("/plane"))
         );
+    }
+
+    #[test]
+    fn sketches_on_faces() {
+        const N: &str = "0123456789abcdef0123456789abcdef";
+        let mut v = rectangle();
+        v.as_object_mut().unwrap().remove("plane");
+        v["face"] = json!({"feature": "b", "name": N});
+        v["x"] = json!({"feature": "b", "name": N});
+        let s = read(&v).unwrap();
+        let Plane::Face(on) = &s.plane else { panic!() };
+        assert_eq!((on.face.feature.as_str(), on.origin.is_none()), ("b", true));
+        assert_eq!(
+            s.plane
+                .references()
+                .iter()
+                .map(|(r, _)| r.as_str())
+                .collect::<Vec<_>>(),
+            ["plane", "x"]
+        );
+        let f = Feature::Sketch(s.clone());
+        assert_eq!(f.to_json()["x"], v["x"]);
+        assert_eq!(read(&f.to_json()).unwrap(), s);
+        assert!(s.plane.placement(Unit::Mm).is_none());
+        // origin and x go only with a face; a face goes alone.
+        let mut w = rectangle();
+        w["origin"] = json!({"feature": "b", "name": N});
+        assert_eq!(read(&w).unwrap_err().details["pointer"], "/origin");
+        v["plane"] = json!("xy");
+        assert_eq!(read(&v).unwrap_err().details["pointer"], "/plane");
     }
 
     #[test]

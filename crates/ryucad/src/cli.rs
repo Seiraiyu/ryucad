@@ -492,6 +492,15 @@ struct FieldArgs {
     /// A sketch's plane: xy, yz or zx.
     #[arg(long)]
     plane: Option<String>,
+    /// A planar face to sketch on: <part>/<feature>/<name>, as inspect gives it.
+    #[arg(long, value_name = "REFERENCE")]
+    face: Option<String>,
+    /// A sketch on a face: a vertex for its origin ("" for the part origin, projected).
+    #[arg(long, value_name = "REFERENCE")]
+    face_origin: Option<String>,
+    /// A sketch on a face: a straight edge for its x ("" for the part's x, projected).
+    #[arg(long, value_name = "REFERENCE")]
+    face_x: Option<String>,
     /// The sketch an extrude or revolve sweeps.
     #[arg(long)]
     sketch: Option<String>,
@@ -533,6 +542,9 @@ impl FieldArgs {
         }
         FeatureFields {
             plane: self.plane.clone(),
+            face: self.face.clone(),
+            face_origin: self.face_origin.clone(),
+            face_x: self.face_x.clone(),
             sketch: self.sketch.clone(),
             loops: if self.all_loops {
                 Some(Vec::new())

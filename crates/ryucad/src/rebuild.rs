@@ -69,6 +69,24 @@ impl Output {
     }
 }
 
+/// The results of features built so far, by ID: what a feature reads its
+/// inputs from, mid-rebuild or from a finished one.
+pub trait Results: Sync {
+    fn result(&self, id: &Id) -> Option<&Result<Output>>;
+}
+
+impl Results for BTreeMap<Id, Result<Output>> {
+    fn result(&self, id: &Id) -> Option<&Result<Output>> {
+        self.get(id)
+    }
+}
+
+impl Results for PartResult {
+    fn result(&self, id: &Id) -> Option<&Result<Output>> {
+        self.features.iter().find(|(f, _)| f == id).map(|(_, r)| r)
+    }
+}
+
 /// A part's rebuild: each feature's output or error, in feature order.
 #[derive(Clone, Debug)]
 pub struct PartResult {
@@ -152,7 +170,7 @@ fn sketch_input<'a>(
     part: &Part,
     id: &Id,
     sketch: &Id,
-    before: &'a BTreeMap<Id, Result<Output>>,
+    before: &'a dyn Results,
 ) -> Result<&'a crate::sketch::Solved> {
     let out = crate::graph::input(part, id, sketch, before)?;
     out.sketch().ok_or_else(|| {
@@ -169,12 +187,7 @@ fn sketch_input<'a>(
 }
 
 /// An extrude or a revolve, from its sketch's result.
-fn build_sweep(
-    part: &Part,
-    id: &Id,
-    f: &Feature,
-    before: &BTreeMap<Id, Result<Output>>,
-) -> Result<Built> {
+fn build_sweep(part: &Part, id: &Id, f: &Feature, before: &dyn Results) -> Result<Built> {
     let ty = f.type_name();
     let sketch = f.swept().expect("a sweep");
     let solved = sketch_input(part, id, sketch, before)?;
@@ -335,14 +348,11 @@ fn finish(
 /// Rebuilds one feature: solves a sketch, sweeps an extrude or revolve's
 /// sketch from `before` (the results of the features it may read), builds
 /// anything else.
-pub fn rebuild_feature(
-    part: &Part,
-    id: &Id,
-    f: &Feature,
-    before: &BTreeMap<Id, Result<Output>>,
-) -> Result<Output> {
+pub fn rebuild_feature(part: &Part, id: &Id, f: &Feature, before: &dyn Results) -> Result<Output> {
     match f {
-        Feature::Sketch(s) => crate::sketch::solve(id, s).map(|s| Output::Sketch(Arc::new(s))),
+        Feature::Sketch(s) => crate::sketch::context(part, part.order(), id, s, before)
+            .and_then(|c| crate::sketch::solve_in(id, s, &c))
+            .map(|s| Output::Sketch(Arc::new(s))),
         Feature::Extrude(_) | Feature::Revolve(_) => {
             build_sweep(part, id, f, before).map(Output::Body)
         }
