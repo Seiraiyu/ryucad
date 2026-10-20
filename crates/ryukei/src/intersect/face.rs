@@ -23,7 +23,7 @@ use super::Failure;
 use super::cs::{CurveHit, curve_surface};
 use super::fit::fit_pcurve;
 use super::implicit::Implicit;
-use super::inface::{Place, point_in_face};
+use super::inface::{Place, point_in_face, point_in_face_near};
 use super::ss::{SurfaceHit, surface_surface};
 use crate::geom::intersect2::{Meet2, crossings};
 use crate::geom::{
@@ -199,11 +199,14 @@ pub fn face_face(a: (&Body, FaceId), b: (&Body, FaceId)) -> Result<FaceMeet, Fai
                     tolerance = tolerance.max(bound);
                 }
             }
+            // The stretch is within its tolerance of the true curve, as is
+            // any edge fitted to it: such an edge is within both of it.
             let mut places = [Place::Outside; 2];
             for k in 0..2 {
                 let (c2, map) = &pcurves[k];
                 let uv = c2.point(map[0] + map[1] * mid);
-                places[k] = point_in_face(faces[k].0, faces[k].1, uv)?;
+                places[k] =
+                    point_in_face_near(faces[k].0, faces[k].1, uv, tolerance + super::SLACK)?;
             }
             if places.contains(&Place::Outside) {
                 continue;

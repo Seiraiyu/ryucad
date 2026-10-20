@@ -38,10 +38,23 @@ pub enum Place {
 /// Where the point at parameters `uv` of face `face`'s surface lies
 /// against the face. Periodic parameters may be given at any shift.
 pub fn point_in_face(body: &Body, face: FaceId, uv: Point2) -> Result<Place, Failure> {
+    point_in_face_near(body, face, uv, 0.0)
+}
+
+/// [`point_in_face`] for a point known only to within `slack`: within
+/// an edge's or a vertex's tolerance plus `slack` of it, it is on it. A
+/// point of an intersection curve fitted with that tolerance is on an
+/// edge fitted to the same curve.
+pub(crate) fn point_in_face_near(
+    body: &Body,
+    face: FaceId,
+    uv: Point2,
+    slack: f64,
+) -> Result<Place, Failure> {
     let f = body.face(face).ok_or(Failure::Uncertain)?;
     let surface = body.surface(f.surface).ok_or(Failure::Uncertain)?;
     let p = surface.point(uv.x, uv.y);
-    if let Some(on) = on_boundary(body, face, p) {
+    if let Some(on) = on_boundary(body, face, p, slack) {
         return Ok(on);
     }
     let mut chains = Vec::new();
@@ -80,13 +93,14 @@ pub fn point_in_face(body: &Body, face: FaceId, uv: Point2) -> Result<Place, Fai
     Err(Failure::Uncertain)
 }
 
-/// The vertex or edge of the face within its tolerance of `p`, if any.
-fn on_boundary(body: &Body, face: FaceId, p: Point3) -> Option<Place> {
+/// The vertex or edge of the face within its tolerance (plus `slack`) of
+/// `p`, if any.
+fn on_boundary(body: &Body, face: FaceId, p: Point3, slack: f64) -> Option<Place> {
     let mut edges = Vec::new();
     for l in body.face_loops(face) {
         if let Some(v) = body.loops[l].vertex {
             let vx = &body.vertices[v];
-            if vx.point.distance(p) <= vx.tolerance.get() {
+            if vx.point.distance(p) <= vx.tolerance.get() + slack {
                 return Some(Place::OnVertex(v));
             }
         }
@@ -95,7 +109,7 @@ fn on_boundary(body: &Body, face: FaceId, p: Point3) -> Option<Place> {
             let edge = &body.edges[e];
             for v in [edge.start, edge.end] {
                 let vx = &body.vertices[v];
-                if vx.point.distance(p) <= vx.tolerance.get() {
+                if vx.point.distance(p) <= vx.tolerance.get() + slack {
                     return Some(Place::OnVertex(v));
                 }
             }
@@ -106,7 +120,8 @@ fn on_boundary(body: &Body, face: FaceId, p: Point3) -> Option<Place> {
         .into_iter()
         .find(|&e| {
             let edge = &body.edges[e];
-            edge_distance(&body.curves[edge.curve], edge.interval, p) <= edge.tolerance.get()
+            edge_distance(&body.curves[edge.curve], edge.interval, p)
+                <= edge.tolerance.get() + slack
         })
         .map(Place::OnEdge)
 }
