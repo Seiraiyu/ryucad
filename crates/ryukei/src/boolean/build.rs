@@ -92,6 +92,10 @@ pub(crate) fn build(ops: &[Body], table: &Table, kept: &[Kept], key: OpKey) -> R
     // Which shells are voids, and the outer shell around each.
     let mut outer_of: Vec<Option<usize>> = vec![None; shells.len()];
     let mut voids = Vec::new();
+    // A lone shell bounds the result's only region: never a void.
+    if shells.len() == 1 {
+        return Ok(first);
+    }
     for (s, faces) in shells.iter().enumerate() {
         if plan.is_void(&first, faces)? {
             voids.push(s);
@@ -378,7 +382,10 @@ impl<'a> Plan<'a> {
                 if self.kept[k].reversed {
                     sign = -sign;
                 }
-                for eps in [1e-4, 1e-5, 1e-6] {
+                // Nearest first: a point pushed further off a face may
+                // cross into the solid beyond a neighbour meeting it at a
+                // shallow angle.
+                for eps in [1e-6, 1e-5, 1e-4] {
                     let p = q + n.get() * (sign * eps * size);
                     match point_in_faces(&built.body, &faces, p) {
                         Ok(Inclusion::Inside) => return Ok(true),
@@ -755,13 +762,19 @@ impl Grower<'_, '_> {
                 self.settle(hk, ha, l)?;
             }
         }
-        // Loops of one piece left on separate faces join it.
+        // Loops of one piece left on separate faces join the face holding
+        // the most of them (KFMRH takes faces with one loop).
         for &k in shell {
             let n = self.plan.loops[k].len();
-            let keep = self.face_of_loop(k, 0);
-            for l in 1..n {
-                let f = self.face_of_loop(k, l);
-                if f != keep {
+            let holders: Vec<FaceId> = (0..n).map(|l| self.face_of_loop(k, l)).collect();
+            let count = |f: FaceId| holders.iter().filter(|&&h| h == f).count();
+            let keep = holders
+                .iter()
+                .copied()
+                .max_by_key(|&f| (count(f), core::cmp::Reverse(f)))
+                .unwrap_or(holders[0]);
+            for &f in &holders {
+                if f != keep && self.body.face(f).is_some() {
                     euler::kfmrh(&mut self.body, self.keys.next(), keep, f).map_err(Self::topo)?;
                 }
             }
@@ -1050,16 +1063,17 @@ mod tests {
     use crate::primitive;
     use crate::split::split_all;
 
-    fn volume(b: &Body) -> f64 {
+    /// The volume and area of a body's mesh at a chord of 2e-3.
+    fn volume(b: &Body) -> (f64, f64) {
         let m = tessellate(b, &MeshParams::new(2e-3, 0.3)).unwrap();
         assert!(m.faults.is_empty(), "{:?}", m.faults);
         check_mesh(b, &m).unwrap();
         m.welded_triangles()
             .map(|t| {
                 let [a, b, c] = t.map(|i| m.positions[i as usize].to_vector());
-                a.dot(b.cross(c)) / 6.0
+                (a.dot(b.cross(c)) / 6.0, (b - a).cross(c - a).length() / 2.0)
             })
-            .sum()
+            .fold((0.0, 0.0), |(v, s), (dv, ds)| (v + dv, s + ds))
     }
 
     /// A body built again from its own faces.
@@ -1083,8 +1097,10 @@ mod tests {
         let b = rebuilt(a);
         let (ca, cb) = (a.counts(), b.counts());
         assert_eq!(ca, cb);
-        let (va, vb) = (volume(a), volume(&b));
-        assert!((va - vb).abs() <= 1e-9 * va.abs().max(1.0), "{va} {vb}");
+        // Both meshes lie within the chord of the same surfaces, though
+        // faces whose loops come in another order mesh differently.
+        let ((va, area), (vb, _)) = (volume(a), volume(&b));
+        assert!((va - vb).abs() <= 2.0 * 2e-3 * area, "{va} {vb}");
     }
 
     #[test]

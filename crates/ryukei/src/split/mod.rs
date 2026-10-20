@@ -449,12 +449,18 @@ impl Arrangement<'_> {
     }
 
     /// A cycle's darts lifted into one continuous path: their chains,
-    /// moved, and the shift that closes it (whole periods it winds, plus
-    /// nothing else).
-    fn lift(&self, cycle: &[usize]) -> (Vec<Chain2>, Vector2) {
+    /// moved, the stretches between them along a pole's line, and the
+    /// shift that closes it (whole periods it winds, plus nothing else).
+    fn lift(&self, cycle: &[usize]) -> (Vec<Chain2>, Vec<[Vector2; 2]>, Vector2) {
         let mut chains = Vec::with_capacity(cycle.len());
+        let mut gaps = Vec::new();
         let first = self.darts[cycle[0]].uv(0);
         let mut end = first;
+        let mut gap = |a: Point2, b: Point2| {
+            if a.distance(b) > 1e-12 {
+                gaps.push([a.to_vector(), b.to_vector()]);
+            }
+        };
         for (k, &d) in cycle.iter().enumerate() {
             let dart = &self.darts[d];
             let offset = if k == 0 {
@@ -462,12 +468,16 @@ impl Arrangement<'_> {
             } else {
                 self.carry(&self.darts[cycle[k - 1]], end, dart)
             };
+            if k > 0 {
+                gap(end, dart.uv(0) + offset);
+            }
             chains.push(moved(&dart.chain(), offset));
             end = dart.uv(1) + offset;
         }
         let last = &self.darts[cycle[cycle.len() - 1]];
         let close = self.carry(last, end, &self.darts[cycle[0]]);
-        (chains, close)
+        gap(end, first + close);
+        (chains, gaps, close)
     }
 
     /// Groups the cycles into pieces, and places the lone vertices.
@@ -475,13 +485,18 @@ impl Arrangement<'_> {
         let (pu, pv) = self.surface.periods();
         let mut lifted = Vec::new();
         for c in cycles {
-            let (chains, shift) = self.lift(c);
+            let (chains, gaps, shift) = self.lift(c);
             let wind = [
                 pu.map_or(0, |p| (shift.x / p).round() as i64),
                 pv.map_or(0, |p| (shift.y / p).round() as i64),
             ];
             let area = signed_area(&chains) * self.sigma;
-            lifted.push(Lifted { chains, wind, area });
+            lifted.push(Lifted {
+                chains,
+                gaps,
+                wind,
+                area,
+            });
         }
         let arcs_of = |c: &[usize]| -> Boundary {
             Boundary::Arcs(
@@ -614,7 +629,7 @@ impl Arrangement<'_> {
         let across = self.across(lifted, winding, swap, period)?;
         let mut keyed: Vec<(f64, bool, usize)> = Vec::new();
         for &i in winding {
-            let hits = crossings(&lifted[i].chains, across, swap, period)?;
+            let hits = crossings(&lifted[i], across, swap, period)?;
             let lowest = hits.into_iter().fold(f64::INFINITY, f64::min);
             if !lowest.is_finite() {
                 return None;
@@ -744,10 +759,10 @@ impl Arrangement<'_> {
                 bands
                     .iter()
                     .flatten()
-                    .all(|&c| crossings(&lifted[c].chains, x, swap, period).is_some())
+                    .all(|&c| crossings(&lifted[c], x, swap, period).is_some())
             })?;
         let above = |c: usize| -> Option<bool> {
-            let hits = crossings(&lifted[c].chains, x, swap, period)?;
+            let hits = crossings(&lifted[c], x, swap, period)?;
             Some(hits.iter().filter(|&&h| h < y).count() % 2 == 1)
         };
         let mut found = None;
@@ -809,6 +824,10 @@ impl Arrangement<'_> {
 /// A cycle lifted to the parameter plane.
 struct Lifted {
     chains: Vec<Chain2>,
+    /// Where it passes along a pole's line between chains: from the end
+    /// of one to the start of the next (or of the first, moved by the
+    /// shift that closes the cycle).
+    gaps: Vec<[Vector2; 2]>,
     /// Whole periods it winds round in `u` and `v`.
     wind: [i64; 2],
     /// Its signed area, positive counterclockwise seen from outside.
@@ -887,11 +906,26 @@ fn signed_area(chains: &[Chain2]) -> f64 {
 
 /// Where a lifted winding cycle crosses the line `u = x` (or `v = x`
 /// when swapped), at any shift by the period: the other parameter at each
-/// crossing. `None` when a crossing can't be certified.
-fn crossings(chains: &[Chain2], x: f64, swap: bool, period: f64) -> Option<Vec<f64>> {
+/// crossing, on its chains or along a pole's line between them. `None`
+/// when a crossing can't be certified.
+fn crossings(l: &Lifted, x: f64, swap: bool, period: f64) -> Option<Vec<f64>> {
     let mut out = Vec::new();
     let coord = |v: Vector2| if swap { (v.y, v.x) } else { (v.x, v.y) };
-    for c in chains {
+    // A stretch along a pole's line keeps the other parameter; the line
+    // never passes through its ends, which are vertices `across` avoids.
+    for &[a, b] in &l.gaps {
+        let ((xa, y), (xb, _)) = (coord(a), coord(b));
+        let (lo, hi) = (xa.min(xb), xa.max(xb));
+        let first = ((lo - x) / period).floor() as i64;
+        let last = ((hi - x) / period).ceil() as i64;
+        for k in first..=last {
+            let at = x + k as f64 * period;
+            if at > lo && at < hi {
+                out.push(y);
+            }
+        }
+    }
+    for c in &l.chains {
         let (lo, hi) = (coord(c.lo).0, coord(c.hi).0);
         let first = ((lo - x) / period).floor() as i64;
         let last = ((hi - x) / period).ceil() as i64;
@@ -1052,8 +1086,15 @@ mod tests {
         let poke = primitive::block(OpKey(4), 1.0, 0.4, 0.4, &at(0.7, -0.2, -0.2))
             .unwrap()
             .0;
-        let got = pieces_of(&[sphere, poke], 0, is_sphere);
+        let got = pieces_of(&[sphere.clone(), poke], 0, is_sphere);
         assert_eq!(got, [1, 1]);
+        // A block's corner at the centre, its edge through both poles: an
+        // octant reaching one pole, and the rest round the other, whose
+        // boundary passes along that pole's line between two meridians.
+        let corner = primitive::block(OpKey(5), 2.0, 2.0, 2.0, &at(-2.0, -2.0, -2.0))
+            .unwrap()
+            .0;
+        assert_eq!(pieces_of(&[sphere, corner], 0, is_sphere), [1, 1]);
     }
 
     #[test]

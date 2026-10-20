@@ -409,7 +409,11 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
                 vertex: x.start,
             }],
         )];
-        if x.start != x.end {
+        // Only a whole period wraps round; a closed edge on a clamped
+        // curve whose ends meet has its vertex at both ends.
+        let curve = &b.curves[x.curve];
+        let closed = x.start == x.end && whole_period(curve, x.interval);
+        if !closed {
             points.push((
                 x.interval[1],
                 vertex_gv[&VertexRef {
@@ -420,9 +424,9 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
         }
         carriers.push(Carrier {
             member: Member::Edge(e),
-            curve: b.curves[x.curve].clone(),
+            curve: curve.clone(),
             range: x.interval,
-            closed: x.start == x.end,
+            closed,
             tolerance: x.tolerance.get(),
             points,
         });
@@ -591,10 +595,18 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
     for (ci, c) in carriers.iter_mut().enumerate() {
         c.points
             .sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
-        // A vertex once on a carrier, at its first place: a closed
-        // carrier's own vertex may come back at the period's end.
-        let mut seen: BTreeSet<GvId> = BTreeSet::new();
-        c.points.retain(|x| seen.insert(x.1));
+        // A vertex repeated at one point of the carrier is one; the same
+        // vertex again further along (a loop's ends meeting) is kept, but
+        // a periodic carrier's own vertex coming back at the period's end
+        // is its start again.
+        let reach = c.tolerance.max(LINEAR_RESOLUTION) * 4.0 + SLACK;
+        let curve = c.curve.clone();
+        c.points.dedup_by(|x, y| {
+            x.1 == y.1 && curve.point(0.5 * (x.0 + y.0)).distance(curve.point(y.0)) <= reach
+        });
+        if c.closed && c.points.len() > 1 && c.points[c.points.len() - 1].1 == c.points[0].1 {
+            c.points.pop();
+        }
         let n = c.points.len();
         if n == 0 {
             continue;
@@ -621,8 +633,12 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
                 add([t0, t1], g0, g1);
             }
         } else {
+            // A piece from a vertex back to itself is a loop (a closed
+            // curve's clamped ends) unless it is no length at all.
+            let curve = c.curve.clone();
             for w in c.points.windows(2) {
-                if w[0].1 != w[1].1 {
+                let mid = curve.point(0.5 * (w[0].0 + w[1].0));
+                if w[0].1 != w[1].1 || mid.distance(curve.point(w[0].0)) > reach {
                     add([w[0].0, w[1].0], w[0].1, w[1].1);
                 }
             }
