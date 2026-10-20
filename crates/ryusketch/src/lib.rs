@@ -18,5 +18,7 @@ mod equation;
 #[allow(dead_code)]
 mod linalg;
 mod sketch;
+#[allow(dead_code)]
+mod system;
 
 pub use sketch::{Constraint, Entity, Id, Sketch, SketchError};
