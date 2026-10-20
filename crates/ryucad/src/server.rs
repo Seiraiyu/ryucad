@@ -86,7 +86,7 @@ pub fn answer_live(
     let (method, params) = (req.method(), req.params());
     let logs_itself = matches!(req, Request::Undo { .. } | Request::Redo { .. });
     let files_before = match (&live, mutates && !logs_itself) {
-        (Some(_), true) => Some(activity::snapshot(session.root())?),
+        (Some(_), true) => Some(session.snapshot()),
         _ => None,
     };
     let result = match req {
@@ -131,7 +131,7 @@ pub fn answer_live(
     };
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
     {
-        let files = activity::diff(&files_before, &activity::snapshot(session.root())?);
+        let files = activity::diff(&files_before, &session.snapshot());
         if !files.is_empty() {
             let who = l.caller(me);
             activity::record(l, EntryKind::Change, &who, &method, params, None, files);
@@ -387,7 +387,7 @@ fn dispatch(
             if let Some(p) = &part {
                 session.project().part(p)?;
             }
-            let files = activity::snapshot(session.root())?;
+            let files = session.snapshot();
             crate::git::history(
                 session.root(),
                 &files,

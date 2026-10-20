@@ -31,6 +31,8 @@ pub struct Project {
     /// Entries under `parts/` that don't belong there, as paths relative to
     /// the root.
     pub unknown: Vec<String>,
+    /// `ryucad.json` as read: every part's revision hashes it.
+    manifest_bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -218,7 +220,56 @@ impl Project {
             manifest,
             parts,
             unknown,
+            manifest_bytes,
         })
+    }
+
+    /// Brings the project up to date after the files at `changed` (paths
+    /// relative to the root, with `/`) changed, appeared or went: only the
+    /// parts they lie in are read again, unless the manifest or anything
+    /// outside a part changed. Leaves the project as [`Project::load`]
+    /// would.
+    pub fn reload(&mut self, changed: &[String]) -> Result<()> {
+        let mut ids = BTreeSet::new();
+        for path in changed {
+            let mut parts = path.split('/');
+            let in_part = match (parts.next(), parts.next(), parts.next()) {
+                (Some("parts"), Some(name), Some(_)) => Id::parse(name, "part").ok(),
+                _ => None,
+            };
+            match in_part {
+                Some(id) => ids.insert(id),
+                None => {
+                    *self = Project::load(&self.root)?;
+                    return Ok(());
+                }
+            };
+        }
+        for id in ids {
+            // A part's own entries sit together, where its name sorts.
+            let mine = format!("parts/{id}/");
+            self.unknown.retain(|u| !u.starts_with(&mine));
+            let at = self
+                .unknown
+                .iter()
+                .position(|u| u.split('/').nth(1).is_some_and(|n| n > id.as_str()))
+                .unwrap_or(self.unknown.len());
+            if part_dir(&self.root, &id).is_dir() {
+                let mut unknown = Vec::new();
+                let part = load_part(
+                    &self.root,
+                    &self.manifest,
+                    &self.manifest_bytes,
+                    id.clone(),
+                    &mut unknown,
+                )?;
+                self.parts.insert(id, part);
+                self.unknown.splice(at..at, unknown);
+            } else {
+                self.parts.remove(&id);
+            }
+        }
+        Ok(())
     }
 
     pub fn part(&self, id: &Id) -> Result<&Part> {
@@ -478,6 +529,67 @@ mod tests {
         assert_eq!(c.code, Code::InvalidDocument);
         assert_eq!(part.orphans(), [&id("c")]);
         assert_eq!(project.unknown, ["parts/Bad Name", "parts/p/notes.txt"]);
+    }
+
+    #[test]
+    fn reloading_what_changed_matches_a_fresh_load() {
+        let dir = sample();
+        let root = dir.path();
+        let mut project = Project::load(root).unwrap();
+        let same = |project: &Project| {
+            assert_eq!(
+                format!("{project:?}"),
+                format!("{:?}", Project::load(root).unwrap())
+            );
+        };
+        let feature = |r: &str| {
+            Feature::Primitive(Primitive {
+                ty: PrimitiveType::Sphere,
+                params: [("radius".to_owned(), Quantity::parse(r, Unit::Mm).unwrap())].into(),
+                placement: Placement::identity(Unit::Mm),
+            })
+            .to_json()
+        };
+        // An edit inside a part, a broken file and a stray one.
+        write_json(&feature_path(root, &id("p"), &id("a")), &feature("5")).unwrap();
+        fs::write(feature_path(root, &id("p"), &id("b")), "{ nope").unwrap();
+        fs::write(root.join("parts/p/notes.txt"), "hi").unwrap();
+        project
+            .reload(&[
+                "parts/p/features/a.json".into(),
+                "parts/p/features/b.json".into(),
+                "parts/p/notes.txt".into(),
+            ])
+            .unwrap();
+        same(&project);
+        // New parts either side of it, with strays of their own.
+        for q in ["a", "q"] {
+            write_json(
+                &part_path(root, &id(q)),
+                &PartFile { features: vec![] }.to_json(),
+            )
+            .unwrap();
+            fs::write(root.join(format!("parts/{q}/x.txt")), "x").unwrap();
+            let changed = [format!("parts/{q}/part.json"), format!("parts/{q}/x.txt")];
+            project.reload(&changed).unwrap();
+            same(&project);
+        }
+        // A part that goes, then the manifest, which every part hashes.
+        fs::remove_dir_all(root.join("parts/q")).unwrap();
+        project
+            .reload(&["parts/q/part.json".into(), "parts/q/x.txt".into()])
+            .unwrap();
+        same(&project);
+        write_json(
+            &root.join(MANIFEST),
+            &Manifest {
+                default_unit: Unit::In,
+            }
+            .to_json(),
+        )
+        .unwrap();
+        project.reload(&[MANIFEST.into()]).unwrap();
+        same(&project);
     }
 
     #[test]
