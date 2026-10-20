@@ -285,6 +285,71 @@ fn curve_piece(pts: &[H], range: [f64; 2], s: [f64; 2]) -> CurveBound {
     CurveBound { d2: d2_hi, turn }
 }
 
+/// Enclosures of one Bézier piece's point and first three derivatives
+/// over `[s0, s1]`, as [`curve_piece`] bounds the first two: the nets of
+/// the whole piece, centred on the part, then cut down, and the quotient
+/// rule `C''' = (A''' - 3 W' C'' - 3 W'' C' - W''' C) / W`.
+fn jet_piece(pts: &[H], range: [f64; 2], s: [f64; 2]) -> [V3; 4] {
+    let sub = sub_curve(pts, s[0], s[1]);
+    let at = centre(&sub);
+    let whole = centred(pts, at);
+    let n = (pts.len() - 1) as f64;
+    let Some(inv) = pt(1.0).checked_div(pt(range[1]) - pt(range[0])) else {
+        let all = Iv::new(f64::NEG_INFINITY, f64::INFINITY).expect("ordered");
+        return [[all; 3]; 4];
+    };
+    let net1 = diffs(&whole, pt(n) * inv);
+    let net2 = diffs(&net1, pt(n - 1.0) * inv);
+    let net3 = diffs(&net2, pt(n - 2.0) * inv);
+    let c = point_hull(&centred(&sub, at));
+    let (a1, w1) = parts(part_hull(&net1, s));
+    let (a2, w2) = parts(part_hull(&net2, s));
+    let (a3, w3) = parts(part_hull(&net3, s));
+    let (_, w) = parts(hull4(sub.iter().copied()));
+    let d1 = div3(sub3(a1, scale3(c, w1)), w);
+    let d2 = div3(sub3(sub3(a2, scale3(d1, pt(2.0) * w1)), scale3(c, w2)), w);
+    let d3 = div3(
+        sub3(
+            sub3(sub3(a3, scale3(d2, pt(3.0) * w1)), scale3(d1, pt(3.0) * w2)),
+            scale3(c, w3),
+        ),
+        w,
+    );
+    let at = [pt(at.x), pt(at.y), pt(at.z)];
+    [add3(c, at), d1, d2, d3]
+}
+
+/// The componentwise hull of two interval vectors.
+fn hull3(a: V3, b: V3) -> V3 {
+    core::array::from_fn(|k| hull(a[k], b[k]))
+}
+
+impl NurbsCurve {
+    /// Enclosures of the point and its first three derivatives at every
+    /// parameter of `range`, clipped to the domain (a periodic range
+    /// wraps): the hull of [`jet_piece`] over the pieces it overlaps.
+    pub(crate) fn jet_box(&self, range: [f64; 2]) -> [V3; 4] {
+        let mut out: Option<[V3; 4]> = None;
+        for piece in self.pieces() {
+            let pts: Vec<H> = piece.pts.iter().map(|h| hom(h.p, h.w)).collect();
+            for r in clip(self.domain(), self.period(), range) {
+                if let Some(s) = local(piece.range, r) {
+                    let j = jet_piece(&pts, piece.range, s);
+                    out = Some(match out {
+                        None => j,
+                        Some(o) => core::array::from_fn(|k| hull3(o[k], j[k])),
+                    });
+                }
+            }
+        }
+        out.unwrap_or_else(|| {
+            let [d0, d1] = self.domain();
+            let t = range[0].clamp(d0, d1);
+            self.jet_box([t, t])
+        })
+    }
+}
+
 fn worse(a: CurveBound, b: CurveBound) -> CurveBound {
     CurveBound {
         d2: a.d2.max(b.d2),

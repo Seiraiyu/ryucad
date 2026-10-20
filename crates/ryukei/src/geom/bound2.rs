@@ -6,7 +6,8 @@
 //! `math::sin_cos`; a NURBS uses interval arithmetic on the control nets of
 //! its Bézier pieces cut down to the range (see `nurbs::bound`).
 
-use super::{Curve, Surface};
+use super::{Curve, Frame, Surface, Vector3};
+use crate::interval::Interval;
 use crate::math;
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
 
@@ -82,7 +83,102 @@ pub(crate) fn cos_abs_max([a, b]: [f64; 2]) -> f64 {
     }
 }
 
+/// Enclosures of `cos` and `sin` over `[a, b]`, widened by `1e-15` to
+/// cover the rounding of `math::cos` at the ends (and of `a - π/2`, at an
+/// extremum where the function is flat), and kept inside `[-1, 1]`.
+pub(crate) fn trig_box([a, b]: [f64; 2]) -> (Interval, Interval) {
+    let widen = |(lo, hi): (f64, f64)| {
+        Interval::new((lo - 1e-15).max(-1.0), (hi + 1e-15).min(1.0)).expect("ordered")
+    };
+    (
+        widen(cos_range([a, b])),
+        widen(cos_range([a - FRAC_PI_2, b - FRAC_PI_2])),
+    )
+}
+
+/// An interval vector: a box in model space.
+pub(crate) type IVec3 = [Interval; 3];
+
+/// `o + x a + y b` for points or directions `x`, `y` and intervals `a`,
+/// `b`.
+fn combine(o: Vector3, x: Vector3, a: Interval, y: Vector3, b: Interval) -> IVec3 {
+    let p = Interval::point;
+    let (o, x, y) = (o.to_array(), x.to_array(), y.to_array());
+    core::array::from_fn(|k| p(o[k]) + p(x[k]) * a + p(y[k]) * b)
+}
+
 impl Curve {
+    /// The point and its first three derivatives at `t`: closed forms for
+    /// the analytic curves, [`NurbsCurve::jet3`] for a NURBS.
+    pub(crate) fn jet3(&self, t: f64) -> [Vector3; 4] {
+        match self {
+            Self::Line(l) => [
+                l.origin().to_vector() + l.dir().get() * t,
+                l.dir().get(),
+                Vector3::ZERO,
+                Vector3::ZERO,
+            ],
+            Self::Circle(_) | Self::Ellipse(_) => {
+                let e = self.eval(t);
+                [e.point.to_vector(), e.d1, e.d2, -e.d1]
+            }
+            Self::Nurbs(n) => n.jet3(t),
+        }
+    }
+
+    /// Enclosures of the point and its first three derivatives at every
+    /// parameter of `[t0, t1]`: closed forms over enclosures of `cos t`
+    /// and `sin t` for a circle or an ellipse, a NURBS as
+    /// [`NurbsCurve::jet_box`] gives. A line's must be a finite range.
+    pub(crate) fn jet_box(&self, [t0, t1]: [f64; 2]) -> [IVec3; 4] {
+        let zero = [Interval::point(0.0); 3];
+        let conic = |f: &Frame, a: f64, b: f64| {
+            let (c, s) = trig_box([t0, t1]);
+            let (x, y) = (f.x().get(), f.y().get());
+            let o = f.origin().to_vector();
+            let d1 = combine(
+                Vector3::ZERO,
+                x,
+                -s * Interval::point(a),
+                y,
+                c * Interval::point(b),
+            );
+            [
+                combine(o, x, c * Interval::point(a), y, s * Interval::point(b)),
+                d1,
+                combine(
+                    Vector3::ZERO,
+                    x,
+                    -c * Interval::point(a),
+                    y,
+                    -s * Interval::point(b),
+                ),
+                d1.map(|v| -v),
+            ]
+        };
+        match self {
+            Self::Line(l) => {
+                let t = Interval::new(t0, t1).expect("an ordered finite range");
+                let d = l.dir().get();
+                [
+                    combine(
+                        l.origin().to_vector(),
+                        d,
+                        t,
+                        Vector3::ZERO,
+                        Interval::point(0.0),
+                    ),
+                    d.to_array().map(Interval::point),
+                    zero,
+                    zero,
+                ]
+            }
+            Self::Circle(c) => conic(c.frame(), c.radius(), c.radius()),
+            Self::Ellipse(e) => conic(e.frame(), e.major(), e.minor()),
+            Self::Nurbs(n) => n.jet_box([t0, t1]),
+        }
+    }
+
     /// Bounds on the derivatives over `[t0, t1]`. A NURBS is bounded over
     /// the part of the range inside its domain; a periodic one wraps.
     pub fn derivative_bound(&self, range: [f64; 2]) -> CurveBound {
@@ -164,6 +260,7 @@ impl Surface {
             Self::Nurbs(n) => n.derivative_bound([ru, rv]),
             Self::Extrusion(e) => e.derivative_bound([ru, rv]),
             Self::Revolution(r) => r.derivative_bound([ru, rv]),
+            Self::Pipe(p) => p.derivative_bound([ru, rv]),
         }
     }
 }
@@ -263,6 +360,62 @@ mod tests {
         let tight = c.derivative_bound([1.25, 1.25 + 1e-3]);
         let true_d2 = c.eval(1.25).d2.length();
         assert!(tight.d2 <= true_d2 * 1.01, "{} vs {true_d2}", tight.d2);
+    }
+
+    /// Checks a curve's jet enclosures against its derivatives at many
+    /// parameters, allowing for their rounding.
+    fn jets_hold_for_curve(c: &Curve, [a, b]: [f64; 2]) {
+        let boxes = c.jet_box([a, b]);
+        for i in 0..=200 {
+            let t = a + (b - a) * f64::from(i) / 200.0;
+            for (k, v) in c.jet3(t).iter().enumerate() {
+                for (j, x) in v.to_array().iter().enumerate() {
+                    let iv = boxes[k][j];
+                    let slack = 1e-12 * (1.0 + x.abs());
+                    assert!(
+                        iv.lo() - slack <= *x && *x <= iv.hi() + slack,
+                        "derivative {k} component {j} at {t}: {x} outside {iv:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn jet_enclosures() {
+        let frame = Frame::new(
+            Point3::new(1.0, 2.0, 3.0),
+            Vector3::new(0.3, -0.2, 1.0),
+            Vector3::new(1.0, 0.5, 0.0),
+        )
+        .unwrap();
+        let ellipse = Curve::Ellipse(Ellipse::new(frame, 3.0, 0.5).unwrap());
+        for range in [[0.0, TAU], [0.2, 0.3], [-1.0, 1.0], [3.0, 3.3]] {
+            jets_hold_for_curve(&ellipse, range);
+        }
+        jets_hold_for_curve(&Curve::Circle(Circle::new(frame, 2.0).unwrap()), [1.0, 2.0]);
+        let line = Curve::Line(
+            crate::geom::Line::new(Point3::new(1.0, 0.0, 0.0), Vector3::new(1.0, 1.0, 0.0))
+                .unwrap(),
+        );
+        jets_hold_for_curve(&line, [-2.0, 3.0]);
+        let c = wavy();
+        for range in [[0.0, 2.5], [0.1, 0.3], [0.3, 1.7], [2.4, 2.5]] {
+            jets_hold_for_curve(&c, range);
+        }
+        // The third derivative of the ellipse against its closed form, and
+        // tight over a short range.
+        let [_, d1, _, d3] = ellipse.jet3(0.7);
+        assert!((d1 + d3).length() == 0.0);
+        let tight = c.jet_box([1.25, 1.25 + 1e-4])[3];
+        let true_d3 = c.jet3(1.25)[3];
+        for (k, x) in true_d3.to_array().iter().enumerate() {
+            assert!(tight[k].hi() - tight[k].lo() <= 0.05 * (1.0 + x.abs()));
+        }
+        // A periodic NURBS across its seam.
+        let circle = Curve::Circle(Circle::new(Frame::WORLD, 2.0).unwrap());
+        let (n, _) = circle.to_nurbs([0.0, 0.0]).unwrap();
+        jets_hold_for_curve(&Curve::Nurbs(Arc::new(n)), [5.5, 7.0]);
     }
 
     #[test]

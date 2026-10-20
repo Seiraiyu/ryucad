@@ -34,9 +34,11 @@ jobs:
           # Linux has lavapipe and Windows has WARP, so the app's drawing
           # tests must run there; a macOS runner may have no Metal device.
           RYUCAD_REQUIRE_GPU: ${{ runner.os != 'macOS' && '1' || '' }}
-      # Boolean property tests self-intersection-check every result: minutes
-      # in a debug build, so they are ignored there and run in release.
+      # Boolean property tests self-intersection-check every result, and
+      # pipe property tests fit every branch: minutes in a debug build, so
+      # they are ignored there and run in release.
       - run: cargo test -p ryukei --release --test boolean_props
+      - run: cargo test -p ryukei --release --test pipe_props
       - if: failure()
         name: the viewport as drawn, if it no longer matches its snapshot
         uses: actions/upload-artifact@v4

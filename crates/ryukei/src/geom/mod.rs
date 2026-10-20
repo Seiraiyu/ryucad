@@ -8,7 +8,7 @@ mod bbox;
 #[allow(dead_code)]
 pub(crate) mod bernstein;
 pub(crate) mod bernstein2;
-mod bound2;
+pub(crate) mod bound2;
 pub(crate) mod chain2;
 pub(crate) mod chain3;
 mod curve;
@@ -17,7 +17,9 @@ mod ellipse;
 mod eval;
 mod frame;
 pub(crate) mod intersect2;
+pub(crate) mod jet;
 mod nurbs;
+pub(crate) mod pipe;
 mod point;
 mod project;
 mod surface;
@@ -40,6 +42,7 @@ pub use nurbs::{
     Basis, Direction, KnotVector, MAX_DEGREE, NurbsCurve, NurbsCurve2, NurbsSurface, Reparam,
 };
 pub(crate) use nurbs::{BezierCurve, BezierPatch, Coords, Hom};
+pub use pipe::Pipe;
 pub use point::{Point2, Point3};
 pub use project::Projection;
 pub use surface::{Cone, Cylinder, Plane, Sphere, Surface, Torus};

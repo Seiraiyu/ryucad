@@ -280,7 +280,9 @@ fn overlap(a: &Box3, b: &Box3, slack: f64) -> Option<Box3> {
 /// A box holding a face: its edges' boxes, and what its surface bulges
 /// beyond them. A plane's face lies in its boundary's hull; a cylinder's
 /// or a cone's between the circles at the extremes of its loops' axial
-/// parameter; an extrusion's between its curve moved to those extremes;
+/// parameter; an extrusion's between its curve moved to those extremes; a
+/// pipe's within its radius of its spine over the stretch its loops span
+/// (on a clamped spine);
 /// any other surface's face inside the surface's own box.
 pub fn face_box(body: &Body, face: FaceId) -> Box3 {
     let surface = &body.surfaces[body.faces[face].surface];
@@ -292,12 +294,14 @@ pub fn face_box(body: &Body, face: FaceId) -> Box3 {
         });
     };
     let mut v_range = [f64::INFINITY, f64::NEG_INFINITY];
+    let mut u_range = [f64::INFINITY, f64::NEG_INFINITY];
     for l in body.face_loops(face) {
         if let Some(v) = body.loops[l].vertex {
             let p = body.vertices[v].point;
             add(Box3::new(p, p), &mut out);
-            let (_, pv) = surface.project(p).param;
+            let (pu, pv) = surface.project(p).param;
             v_range = [v_range[0].min(pv), v_range[1].max(pv)];
+            u_range = [u_range[0].min(pu), u_range[1].max(pu)];
         }
         for fin in body.loop_fins(l) {
             let fi = &body.fins[fin];
@@ -307,6 +311,7 @@ pub fn face_box(body: &Body, face: FaceId) -> Box3 {
                 let [s0, s1] = e.interval.map(|t| pc.param(t));
                 let b = body.curves2[pc.curve].bounds([s0.min(s1), s0.max(s1)]);
                 v_range = [v_range[0].min(b.min().y), v_range[1].max(b.max().y)];
+                u_range = [u_range[0].min(b.min().x), u_range[1].max(b.max().x)];
             }
         }
     }
@@ -333,6 +338,16 @@ pub fn face_box(body: &Body, face: FaceId) -> Box3 {
                         }
                     }
                 }
+            }
+            // About a closed spine a face between two loops may be the
+            // stretch that wraps round, outside their range.
+            Surface::Pipe(p) => {
+                let [u0, u1] = u_range;
+                if u0 > u1 || p.spine().period().is_some() {
+                    return None;
+                }
+                let b = p.spine().bounds([u0, u1]).grow(p.radius() * (1.0 + 1e-12));
+                *out = Some(out.map_or(b, |o| o.union(&b)));
             }
             Surface::Extrusion(e) => {
                 let c = e.curve().bounds(e.curve().domain());

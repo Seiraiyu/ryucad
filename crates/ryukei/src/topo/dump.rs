@@ -75,6 +75,57 @@ fn curve(c: &Curve) -> String {
     }
 }
 
+fn surface(s: &Surface) -> String {
+    let f = s.frame().map(frame).unwrap_or_default();
+    match s {
+        Surface::Plane(_) => format!("plane {f}"),
+        Surface::Cylinder(c) => format!("cylinder {f} r={}", bits(c.radius())),
+        Surface::Cone(c) => format!(
+            "cone {f} r={} angle={}",
+            bits(c.radius()),
+            bits(c.half_angle())
+        ),
+        Surface::Sphere(c) => format!("sphere {f} r={}", bits(c.radius())),
+        Surface::Torus(t) => format!(
+            "torus {f} major={} minor={}",
+            bits(t.major()),
+            bits(t.minor())
+        ),
+        Surface::Extrusion(e) => {
+            let d = e.dir().get();
+            format!(
+                "extrusion dir={},{},{} curve={}",
+                bits(d.x),
+                bits(d.y),
+                bits(d.z),
+                curve(e.curve())
+            )
+        }
+        Surface::Revolution(r) => {
+            format!("revolution {} curve={}", frame(r.frame()), curve(r.curve()))
+        }
+        Surface::Nurbs(n) => {
+            let ([p, q], [nu, nv]) = (n.degrees(), n.counts());
+            let [ku, kv] = n.knots();
+            format!(
+                "nurbs degrees={p},{q} periodic={},{} counts={nu},{nv} uknots={} vknots={} points={} weights={}",
+                u8::from(ku.is_periodic()),
+                u8::from(kv.is_periodic()),
+                knots(ku),
+                knots(kv),
+                points(n.control_points()),
+                floats(n.weights())
+            )
+        }
+        Surface::Pipe(p) => format!(
+            "pipe r={} spine={} anchor=({})",
+            bits(p.radius()),
+            curve(p.spine()),
+            surface(p.anchor())
+        ),
+    }
+}
+
 fn point2(p: Point2) -> String {
     format!("{},{}", bits(p.x), bits(p.y))
 }
@@ -250,48 +301,7 @@ impl Body {
             line(format_args!("curve {} {geom}", id.index()));
         }
         for (id, s) in self.surfaces.live() {
-            let f = s.frame().map(frame).unwrap_or_default();
-            let geom = match s {
-                Surface::Plane(_) => format!("plane {f}"),
-                Surface::Cylinder(c) => format!("cylinder {f} r={}", bits(c.radius())),
-                Surface::Cone(c) => format!(
-                    "cone {f} r={} angle={}",
-                    bits(c.radius()),
-                    bits(c.half_angle())
-                ),
-                Surface::Sphere(c) => format!("sphere {f} r={}", bits(c.radius())),
-                Surface::Torus(t) => format!(
-                    "torus {f} major={} minor={}",
-                    bits(t.major()),
-                    bits(t.minor())
-                ),
-                Surface::Extrusion(e) => {
-                    let d = e.dir().get();
-                    format!(
-                        "extrusion dir={},{},{} curve={}",
-                        bits(d.x),
-                        bits(d.y),
-                        bits(d.z),
-                        curve(e.curve())
-                    )
-                }
-                Surface::Revolution(r) => {
-                    format!("revolution {} curve={}", frame(r.frame()), curve(r.curve()))
-                }
-                Surface::Nurbs(n) => {
-                    let ([p, q], [nu, nv]) = (n.degrees(), n.counts());
-                    let [ku, kv] = n.knots();
-                    format!(
-                        "nurbs degrees={p},{q} periodic={},{} counts={nu},{nv} uknots={} vknots={} points={} weights={}",
-                        u8::from(ku.is_periodic()),
-                        u8::from(kv.is_periodic()),
-                        knots(ku),
-                        knots(kv),
-                        points(n.control_points()),
-                        floats(n.weights())
-                    )
-                }
-            };
+            let geom = surface(s);
             line(format_args!("surface {} {geom}", id.index()));
         }
         for (id, c) in self.curves2.live() {
