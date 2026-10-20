@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ryucad is CAD built for AI agents to drive, not primarily for humans clicking in a GUI. FreeCAD was rejected because it performs poorly on large assemblies, and its kernel, OCCT, is a main reason. This project builds its own kernel, **ryukei**, and the long-term target is Parasolid-level capability.
 
-The project is in its early stages. Roadmap phases 0 (foundations: deterministic math, the tolerance model, exact predicates, interval arithmetic, the test harness), 1 (topology core: flat-array B-rep bodies, Euler operators, the validity checker, stable names, the five primitives), 2 (geometry: rational NURBS, the ellipse, pcurves, derivatives, global projection), 3 (tessellation: certified, watertight, parallel meshing, and the first OCCT comparison) and 4 (sweeps: validated profiles, extrude, revolve, swept and spun surfaces) are done. Analytic booleans (phase 5, design 32) are under way: pcurves on every fin, cavities, certified intersections and the self-intersection check are done, splitting, classification and the boolean itself come next; see design 14 (ryukei roadmap) in the Coxswain planning project `ryucad-ryukei`. On the application side, ryucad phase 0 (projects of feature files, deterministic rebuild of the primitives, the agent CLI, the session daemon, releases and installers) is done, and so is phase 1 (design 28): the live session, the activity log and undo, settings, Git history, display meshes, renders and `doctor` in the daemon, and the desktop app, `ryucad-app`, with its installers.
+The project is in its early stages. Roadmap phases 0 (foundations: deterministic math, the tolerance model, exact predicates, interval arithmetic, the test harness), 1 (topology core: flat-array B-rep bodies, Euler operators, the validity checker, stable names, the five primitives), 2 (geometry: rational NURBS, the ellipse, pcurves, derivatives, global projection), 3 (tessellation: certified, watertight, parallel meshing, and the first OCCT comparison) and 4 (sweeps: validated profiles, extrude, revolve, swept and spun surfaces) are done. Analytic booleans (phase 5, design 32) are under way: pcurves on every fin, cavities, certified intersections and the self-intersection check are done, splitting, classification and the boolean itself come next; see design 14 (ryukei roadmap) in the Coxswain planning project `ryucad-ryukei`. On the application side, ryucad phase 0 (projects of feature files, deterministic rebuild of the primitives, the agent CLI, the session daemon, releases and installers) is done, and so is phase 1 (design 28): the live session, the activity log and undo, settings, Git history, display meshes, renders and `doctor` in the daemon, and the desktop app, `ryucad-app`, with its installers. Phase 2 (parametric parts, design 36) is under way: parameters and expressions, and stage 1 of the sketch solver `ryusketch`, are done (plan 2.A); sketch features, extrude and revolve, references and incremental recompute come next.
 
 Above the kernel sit ryucad, the application (feature files in Git, the agent CLI, a live viewer humans watch but don't model in, assemblies at scale), and ryupdm, product data management (revisions, releases, where-used, BOM, hosted review; PDM only, not PLM). ryupdm is the likely business; ryukei and ryucad may be open sourced. Their roadmaps are designs 20 (ryucad) and 21 (ryupdm), design 23 lines up all three, and design 22 is the business plan.
 
@@ -23,7 +23,9 @@ cargo fmt --all
 cargo run -p ryucad
 UPDATE_GOLDEN=1 cargo test -p ryukei --test determinism   # after a deliberate change to results
 UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism   # the same for ryucad's rebuild hashes
+UPDATE_GOLDEN=1 cargo test -p ryusketch --test determinism   # and for the sketch solver's
 cargo bench -p ryukei-bench
+cargo bench -p ryusketch
 cargo bench -p ryucad
 cargo bench -p ryucad-app
 cargo run -p ryucad-app -- <project folder>                 # the desktop app (cargo build first: it needs ryucad beside it)
@@ -31,7 +33,7 @@ RYUCAD_REQUIRE_GPU=1 cargo test -p ryucad-app               # fail, don't skip, 
 UPDATE_SNAPSHOTS=1 cargo test -p ryucad-app --test snapshot # redraw the viewport snapshot (lavapipe's)
 cargo test -p ryukei-bench --features occt,smlib --release --test kernels -- --nocapture   # head-to-head with OCCT and SMLib; devcontainer only
 cargo test -p ryukei-bench --features occt,smlib --release --test spike -- --nocapture     # OCCT and SMLib booleans, speed and repeatability; devcontainer only
-cd fuzz && cargo +nightly fuzz run predicates               # needs nightly + cargo-fuzz (targets also: interval, euler, nurbs, mesh, feature, sweep, intersect)
+cd fuzz && cargo +nightly fuzz run predicates               # needs nightly + cargo-fuzz (targets also: interval, euler, nurbs, mesh, feature, sweep, intersect, expr, sketch)
 sh scripts/test-install.sh target/release/ryucad          # install.sh against a fake release
 sh scripts/smoke.sh target/release/ryucad target/release/ryucad-app   # an agent session, then the app's offscreen frame
 ```
@@ -50,6 +52,7 @@ The product targets Windows, macOS, and Linux natively, not just WSL. CI (`.gith
 ## Layout
 
 - `crates/ryukei`: the B-rep geometry kernel (library).
+- `crates/ryusketch`: the 2D constraint solver for sketches (library). It depends on `ryukei` only for `math`.
 - `crates/ryucad`: the application layer and binary.
 - `crates/ryucad-app`: the desktop app, a client of the daemon (`core`: link, model, people, navigation, picking, forms; `ui`: the egui window and the wgpu scene).
 - `packaging/`: what the installers register: the Linux desktop entry and project MIME type, and the macOS launcher's AppleScript.
@@ -186,6 +189,24 @@ The design is document 28 in the Coxswain planning project `ryucad-ryukei`; the 
 - **Writes.** The property panel saves through `feature.edit` against the revision `feature.show` read it at (`feature.show` now returns it); a conflict reloads the form and lists what changed. Settings go through `config.set`; preference writes hold a lock file, since every project's daemon shares `preferences.json`, and the daemon (not the app) puts a project first among the recent ones when a window says hello.
 - **Tests.** App tests run against real daemons, building `ryucad` themselves; drawing tests skip without an adapter unless `RYUCAD_REQUIRE_GPU` is set (CI sets it on Linux, with lavapipe, and Windows). Window tests drive the real app with `egui_kittest`, whose accessibility check means every control needs a name. The viewport snapshot is lavapipe's, compared within a tolerance.
 - **Packaging.** Release archives carry `ryucad` and `ryucad-app` (plus `share/` files on Linux and macOS); installers install both unless `RYUCAD_NO_APP=1`, and register "Open in ryucad" on folders (Windows, per user), a desktop entry and `ryucad.json` MIME type (Linux), and an AppleScript launcher compiled at install time into `~/Applications/ryucad.app` (macOS, unsigned).
+
+## Parameters and expressions (decided in ryucad phase 2)
+
+The design is document 36 in the Coxswain planning project `ryucad-ryukei`; this is its phase 1.
+
+- **Expressions.** Anywhere a quantity goes, a string may be an expression (`ryucad::expr`): literals with units (`3 mm`, `15 deg`; angles are `deg` and `rad`), parameter names (`[a-z_][a-z0-9_]{0,62}`, not a unit, function or `pi`), `+ - * / ^`, parentheses and the functions in `expr::FUNCTIONS`, all from `ryukei::math`. A string that is only a number takes the default unit, as in phase 0; inside an expression a bare number is a plain number, so `wall + 3` is `unit_mismatch`. Values carry a dimension (`units::Dim`, powers of length and angle); syntax faults are `invalid_quantity` with a byte `position`. Text is kept token for token with canonical spacing (`2 * wall + 3 mm`), and output adds `"expr": true` to a quantity that isn't a literal.
+- **Parameters.** `parts/<part>/parameters.json` (kind `ryucad.parameters`) holds a part's parameters, each an expression over the others (`expr::Env`; cycles are `parameter_cycle`). The part's revision covers it. Features are evaluated against it when the part loads, so `Quantity` holds its value; a feature whose parameter is missing or broken fails alone. A feature with any expression is written at feature format 2, one with only literals at 1.
+- **Protocol.** `param.list`, `param.set`, `param.delete` (refused with `has_dependents` while anything reads it; the file goes with its last parameter) and `param.rename` (rewrites every expression that reads it, in one logged change). Writes refuse values that don't evaluate or that would break a feature that loads now.
+
+## Sketch solver (decided in ryucad phase 2)
+
+The design is document 36 in the Coxswain planning project `ryucad-ryukei`; this is its phase 2, stage 1 of the solver.
+
+- **Sketches.** `ryusketch::Sketch` holds points, lines, arcs (counterclockwise, radius `|start - center|`) and circles by caller IDs, and the constraints in `Constraint`; `fixed` points and circles are constants (projected geometry). `solve` validates it, then returns the sketch with solved positions and a `Report`.
+- **System.** Coincident points and concentric centers are merged before solving (a coincidence closing a loop is redundant by structure); everything is scaled by a power of two (exact); each constraint becomes residuals written once over forward-mode dual numbers, so the Jacobian is exact. Lengths hold within `SOLVE_TOL` (1e-10 m), angle-like residuals within `ANGLE_TOL` (1e-12), whatever the scale. A constraint that reads the direction of a line shorter than `SOLVE_TOL` never holds: a collapsed line has no direction.
+- **Solving.** Each connected component is solved by damped least-norm Gauss-Newton from the stored positions, so free geometry moves as little as it can and roots don't flip; steps are capped at half the sketch's size, radii stop at zero, and the solver aims at a quarter of the tolerance. A sketch that already holds returns the same bits with `changed` false.
+- **Report.** Degrees of freedom and what moves come from the rank and null space of the Jacobian; minimal redundant and conflicting sets from its left null space, cut down one constraint at a time. Profiles' closed loops and open chains come from shared points, never positions.
+- **Testing and limits.** `tests/props.rs` (random polygons and slots), golden hashes (`tests/golden/solve.txt`, in the `cpu-levels` job), the `sketch` fuzz target and benchmarks. Dense linear algebra: about 1 ms at 100 entities, 0.8 s at 1,000 in one component; stage 2 (decomposition) is design 36's phase 7.
 
 ## Open decisions
 
