@@ -11,7 +11,10 @@
 //! them, some reversed ([`select`]); the kept pieces are built into a
 //! new body through Euler operators ([`build`]); and what is left
 //! redundant (faces either side of an edge on one surface, vertices
-//! between two edges on one curve) is merged ([`merge`]).
+//! between two edges on one curve) is merged ([`merge`]). The result's
+//! entities are named from the caller's keys and from which faces cut
+//! which, and the journal says what happened to every operand's
+//! ([`names`]).
 //!
 //! Only faces on analytic surfaces (planes, cylinders, cones, spheres and
 //! tori) may meet; a face on any other surface takes part only where it
@@ -22,6 +25,7 @@
 pub(crate) mod build;
 pub(crate) mod classify;
 mod merge;
+mod names;
 mod place;
 mod select;
 pub(crate) mod table;
@@ -128,6 +132,8 @@ pub fn boolean(
         )
     };
     merge::merge(&mut body, &mut sources, &keep_lone, &mut keys).map_err(named)?;
+    let tool_keys: Vec<ToolKey> = tools.iter().map(|t| t.key).collect();
+    let journal = names::name(key, &ops, &tool_keys, &table, &kept, &mut body, &sources);
     if cfg!(debug_assertions) {
         let faults = crate::check::check(&body);
         assert!(
@@ -137,7 +143,7 @@ pub fn boolean(
     } else if !crate::check::check_topology(&body).is_empty() {
         return Err(Error::Topology(TopologyError::Inconsistent));
     }
-    Ok((body, Journal::new()))
+    Ok((body, journal))
 }
 
 /// The error for a failure, naming the operands' faces.

@@ -117,6 +117,8 @@ pub(crate) struct Table {
     /// Every face of every operand.
     pub(crate) faces: BTreeMap<FaceRef, FaceWork>,
     pub(crate) coincident: Vec<Coincidence>,
+    /// The faces of each pair intersected, in pair order.
+    pub(crate) pairs: Vec<(FaceRef, FaceRef)>,
 }
 
 /// Two faces' meeting, as [`face_face`] gave it.
@@ -322,7 +324,10 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
         Vec::new()
     };
     let crosses = crossings_of(ops, &pairs)?;
-    let mut table = Table::default();
+    let mut table = Table {
+        pairs: pairs.iter().map(|p| (p.a, p.b)).collect(),
+        ..Table::default()
+    };
     for p in &pairs {
         if let FaceMeet::Coincident { same, .. } = p.meet {
             table.coincident.push(Coincidence {
