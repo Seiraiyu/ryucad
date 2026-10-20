@@ -193,6 +193,14 @@ fn group_classes(
 ) -> Result<Vec<Option<Class>>, Fail> {
     let op = pieces[list[0]].face.op;
     let mut out: Vec<Option<Class>> = vec![None; ops.len()];
+    // Points inside the pieces, each found once however many operands it
+    // is classified against.
+    let mut points: BTreeMap<(usize, usize), Option<Point3>> = BTreeMap::new();
+    let mut point = |i: usize, attempt: usize| {
+        *points
+            .entry((i, attempt))
+            .or_insert_with(|| inner_point(ops, table, &pieces[i], attempt).map(|(p, _)| p))
+    };
     for j in 0..ops.len() {
         if j == op {
             continue;
@@ -203,7 +211,7 @@ fn group_classes(
         let mut class = None;
         'pieces: for &i in list.iter().filter(|&&i| !on[i].contains_key(&j)) {
             for attempt in 0..4 {
-                let Some((p, _)) = inner_point(ops, table, &pieces[i], attempt) else {
+                let Some(p) = point(i, attempt) else {
                     continue;
                 };
                 if boxes[j].is_none_or(|b| !b.grow(1e-6).intersects(&Box3::from_point(p))) {

@@ -330,6 +330,8 @@ impl<'a> Plan<'a> {
             faces: vec![None; self.kept.len()],
             edges: BTreeMap::new(),
             vertices: BTreeMap::new(),
+            edge_of: BTreeMap::new(),
+            vertex_of: BTreeMap::new(),
             surfaces: BTreeMap::new(),
             curves: BTreeMap::new(),
             curves2: BTreeMap::new(),
@@ -454,6 +456,9 @@ struct Grower<'p, 'a> {
     faces: Vec<Option<FaceId>>,
     edges: BTreeMap<GeId, EdgeId>,
     vertices: BTreeMap<GvId, VertexId>,
+    /// The other way: the global edge and vertex each built one is.
+    edge_of: BTreeMap<EdgeId, GeId>,
+    vertex_of: BTreeMap<VertexId, GvId>,
     surfaces: BTreeMap<(usize, SurfaceId), SurfaceId>,
     curves: BTreeMap<Member, CurveId>,
     /// Pcurves added, by face and carrier: pieces of one carrier on one
@@ -627,12 +632,12 @@ impl Grower<'_, '_> {
     fn owner(&self, l: crate::topo::LoopId) -> Option<usize> {
         let lp = self.body.loop_(l)?;
         if let Some(v) = lp.vertex {
-            let g = self.vertices.iter().find(|x| *x.1 == v)?.0;
+            let g = self.vertex_of.get(&v)?;
             return self.plan.lone.get(g).copied();
         }
         let f = lp.first_fin?;
         let fin = self.body.fin(f)?;
-        let g = *self.edges.iter().find(|x| *x.1 == fin.edge)?.0;
+        let g = *self.edge_of.get(&fin.edge)?;
         self.plan.uses[&g]
             .iter()
             .find(|u| self.plan.arc(u.0, u.1, u.2).1 == fin.sense)
@@ -712,28 +717,38 @@ impl Grower<'_, '_> {
         }
         // Components in the order faces reach them, each with the piece
         // loop it starts from.
-        let mut done: BTreeSet<GvId> = BTreeSet::new();
+        // Each piece loop's component, as a dense index.
+        let mut index: BTreeMap<GvId, usize> = BTreeMap::new();
+        let mut roots: Vec<GvId> = Vec::new();
+        let of: Vec<Vec<usize>> = shell
+            .iter()
+            .map(|&k| {
+                (0..self.plan.loops[k].len())
+                    .map(|l| {
+                        let c = comp[&self.loop_start(k, l)];
+                        *index.entry(c).or_insert_with(|| {
+                            roots.push(c);
+                            roots.len() - 1
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut done = vec![false; roots.len()];
         let mut order: Vec<Reach> = Vec::new();
         let first = (shell[0], 0usize);
-        order.push((
-            comp[&self.loop_start(first.0, first.1)],
-            first.0,
-            first.1,
-            None,
-        ));
-        done.insert(order[0].0);
+        order.push((roots[of[0][0]], first.0, first.1, None));
+        done[of[0][0]] = true;
         loop {
             // Every way to reach a new component: a piece with a loop in a
             // built component and one in the new one.
-            let mut ways: Vec<(GvId, usize, usize, usize)> = Vec::new();
-            for &k in shell {
-                let n = self.plan.loops[k].len();
-                let Some(a) = (0..n).find(|&l| done.contains(&comp[&self.loop_start(k, l)])) else {
+            let mut ways: Vec<(usize, usize, usize, usize)> = Vec::new();
+            for (i, &k) in shell.iter().enumerate() {
+                let Some(a) = of[i].iter().position(|&c| done[c]) else {
                     continue;
                 };
-                for l in 0..n {
-                    let c = comp[&self.loop_start(k, l)];
-                    if !done.contains(&c) {
+                for (l, &c) in of[i].iter().enumerate() {
+                    if !done[c] {
                         ways.push((c, k, l, a));
                     }
                 }
@@ -751,8 +766,8 @@ impl Grower<'_, '_> {
                 .or_else(|| ways.iter().find(|w| w.0 == c))
                 .copied()
                 .expect("a way");
-            done.insert(c);
-            order.push((c, pick.1, pick.2, Some((pick.1, pick.3))));
+            done[c] = true;
+            order.push((roots[c], pick.1, pick.2, Some((pick.1, pick.3))));
         }
         let mut region_out = region;
         for (c, k, l, host) in order {
@@ -823,6 +838,7 @@ impl Grower<'_, '_> {
                 };
                 out_region = Some(r);
                 self.vertices.insert(root, v);
+                self.vertex_of.insert(v, root);
             }
             Some((k, l)) => {
                 let f = self.face_of_loop(k, l);
@@ -830,6 +846,7 @@ impl Grower<'_, '_> {
                     .map_err(Self::topo)?
                     .0;
                 self.vertices.insert(root, m.vertex);
+                self.vertex_of.insert(m.vertex, root);
             }
         }
         // The component's edges, the start loop's first arc first.
@@ -890,7 +907,9 @@ impl Grower<'_, '_> {
                 .map_err(Self::topo)?
                 .0;
                 self.edges.insert(g, m.edge);
+                self.edge_of.insert(m.edge, g);
                 self.vertices.insert(w, m.vertex);
+                self.vertex_of.insert(m.vertex, w);
                 reached.insert(w);
                 tree.insert(g);
                 queue.push_back(w);
@@ -973,6 +992,7 @@ impl Grower<'_, '_> {
                 .edge
             };
             self.edges.insert(g, made);
+            self.edge_of.insert(made, g);
         }
         out_region.ok_or(Fail::Inconsistent)
     }
