@@ -468,6 +468,41 @@ impl Surface {
         }
     }
 
+    /// The surface moved by `d` along its natural normal, with the same
+    /// parameters: the offset's point at `(u, v)` is `S(u, v) + d N(u, v)`.
+    /// A plane shifts, a cylinder's or sphere's radius and a torus's minor
+    /// radius grow by `d`, and a cone keeps its axis and half-angle with
+    /// its frame moved by `-d sin α` along the axis and its radius there
+    /// grown by `d cos α`.
+    ///
+    /// `None` for a surface with no offset (a NURBS or a swept surface).
+    /// Fails with `NonFinite`, or `Degenerate` where the offset collapses:
+    /// a radius that would fall below [`crate::tol::LINEAR_RESOLUTION`]
+    /// (for a cone, its radius in its moved frame's plane), or a torus's
+    /// minor radius that would reach its major.
+    pub fn offset(&self, d: f64) -> Option<Result<Self, Error>> {
+        if !d.is_finite() {
+            return Some(Err(Error::NonFinite));
+        }
+        Some(match self {
+            // Moving a frame by a translation keeps its axes bit for bit.
+            Self::Plane(s) => Ok(Self::Plane(Plane::new(
+                s.frame
+                    .transformed(&Rigid::translation(s.frame.z().get() * d)),
+            ))),
+            Self::Cylinder(s) => Cylinder::new(s.frame, s.radius + d).map(Self::Cylinder),
+            Self::Sphere(s) => Sphere::new(s.frame, s.radius + d).map(Self::Sphere),
+            Self::Torus(s) => Torus::new(s.frame, s.major, s.minor + d).map(Self::Torus),
+            Self::Cone(s) => {
+                let f = s
+                    .frame
+                    .transformed(&Rigid::translation(s.frame.z().get() * -(d * s.sin)));
+                Cone::new(f, s.radius + d * s.cos, s.half_angle).map(Self::Cone)
+            }
+            Self::Nurbs(_) | Self::Extrusion(_) | Self::Revolution(_) => return None,
+        })
+    }
+
     /// The surface moved by a rigid transform. Parameters are unchanged.
     pub fn transformed(&self, r: &Rigid) -> Self {
         let mut out = self.clone();
@@ -742,6 +777,32 @@ mod tests {
         assert_eq!(cone.closed_genus(), None);
         assert_eq!(sphere.closed_genus(), Some(0));
         assert_eq!(torus.closed_genus(), Some(1));
+    }
+
+    #[test]
+    fn offsets_keep_their_parameters() {
+        for s in all() {
+            for d in [0.3, -0.2] {
+                let o = s.offset(d).unwrap().unwrap();
+                for (u, v) in [(0.0, 0.0), (0.5, 0.3), (2.0, -0.7), (4.0, 1.2)] {
+                    let n = s.normal(u, v).unwrap().get();
+                    let want = s.point(u, v) + n * d;
+                    assert!(o.point(u, v).distance(want) <= 1e-14, "{s:?} by {d}");
+                    assert!((o.normal(u, v).unwrap().get() - n).length() <= 1e-15);
+                }
+            }
+        }
+        // Collapses.
+        let [_, cyl, cone, sphere, torus] = all();
+        assert_eq!(cyl.offset(-2.0), Some(Err(Error::Degenerate)));
+        assert_eq!(sphere.offset(-3.0), Some(Err(Error::Degenerate)));
+        assert_eq!(torus.offset(2.0), Some(Err(Error::Degenerate)));
+        assert_eq!(torus.offset(-1.0), Some(Err(Error::Degenerate)));
+        // The cone's radius in its moved frame: 2 + d cos 45°.
+        assert_eq!(cone.offset(-3.0), Some(Err(Error::Degenerate)));
+        assert_eq!(cyl.offset(f64::NAN), Some(Err(Error::NonFinite)));
+        let (n, _) = sphere.to_nurbs([[0.0; 2]; 2]).unwrap();
+        assert_eq!(Surface::Nurbs(std::sync::Arc::new(n)).offset(0.1), None);
     }
 
     #[test]
