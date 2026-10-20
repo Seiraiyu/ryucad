@@ -12,13 +12,14 @@
 //! with `ryukei::math` for every function, so a sketch solves to the same
 //! bits on every platform.
 
-// Only tests reach it until `solve` does.
-#[allow(dead_code)]
 mod equation;
+// Ranks and null spaces are for the report, which comes next.
 #[allow(dead_code)]
 mod linalg;
 mod sketch;
-#[allow(dead_code)]
+mod solve;
 mod system;
 
 pub use sketch::{Constraint, Entity, Id, Sketch, SketchError};
+pub use solve::{Report, Solved, solve};
+pub use system::{Coord, SOLVE_TOL};
