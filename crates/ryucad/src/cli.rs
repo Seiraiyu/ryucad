@@ -497,6 +497,7 @@ impl FieldArgs {
     fn to_fields(&self) -> FeatureFields {
         FeatureFields {
             plane: self.plane.clone(),
+            ..Default::default()
         }
     }
 }

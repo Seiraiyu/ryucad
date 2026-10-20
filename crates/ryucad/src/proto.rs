@@ -89,14 +89,46 @@ pub struct Position {
     pub first: bool,
 }
 
-/// The fields of a feature that only some types take: a sketch's plane.
-/// Each is left out unless given.
+/// The fields of a feature that only some types take: a sketch's plane,
+/// what an extrude or revolve sweeps and how far. Each is left out unless
+/// given.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeatureFields {
     /// A sketch's origin plane: `xy`, `yz` or `zx`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plane: Option<String>,
+    /// The sketch an extrude or revolve sweeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sketch: Option<String>,
+    /// An entity on each loop to sweep; empty means every closed loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loops: Option<Vec<String>>,
+    /// An extrude's extent: `{"type": "blind" | "symmetric", "length"}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extent: Option<Value>,
+    /// Extrude against the sketch's normal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverse: Option<bool>,
+    /// A revolve's axis: a line of its sketch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axis: Option<String>,
+    /// A revolve's angle, or `"full"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angle: Option<Value>,
+    /// Revolve half the angle each side of the sketch's plane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symmetric: Option<bool>,
+}
+
+impl FeatureFields {
+    /// The fields given, as a feature file has them.
+    pub fn given(&self) -> Map<String, Value> {
+        match serde_json::to_value(self).expect("fields serialize") {
+            Value::Object(m) => m,
+            _ => unreachable!("a struct serializes to an object"),
+        }
+    }
 }
 
 /// A placement as given by an agent: any part left out keeps its current
@@ -583,6 +615,7 @@ mod tests {
                 placement: None,
                 fields: FeatureFields {
                     plane: Some("zx".into()),
+                    ..Default::default()
                 },
                 id: None,
                 position: Position::default(),

@@ -4,6 +4,7 @@
 
 use super::id::Id;
 use super::sketch::Sketch;
+use super::sweep::{Extrude, Revolve};
 use crate::error::{Code, Error, Result};
 use crate::expr::{self, Env, Expr};
 use crate::units::{Quantity, Unit};
@@ -56,6 +57,8 @@ pub enum PrimitiveType {
 pub enum Feature {
     Primitive(Primitive),
     Sketch(Sketch),
+    Extrude(Extrude),
+    Revolve(Revolve),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -253,7 +256,8 @@ pub fn expression(v: &Value) -> Result<Expr> {
 }
 
 /// The expression strings in a feature's JSON: its params, the
-/// coordinates of its origin and a sketch's dimensions.
+/// coordinates of its origin, a sketch's dimensions, and a sweep's length
+/// or angle.
 fn expression_strings(v: &mut Value) -> Vec<&mut String> {
     let mut out = Vec::new();
     let Some(o) = v.as_object_mut() else {
@@ -274,6 +278,13 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
                 }
             }
             ("constraints", c) => out.extend(Sketch::expression_strings(c)),
+            ("extent", Value::Object(e)) => {
+                if let Some(Value::String(s)) = e.get_mut("length") {
+                    out.push(s);
+                }
+            }
+            // "full" is a word, not a parameter.
+            ("angle", Value::String(s)) if s != "full" => out.push(s),
             _ => {}
         }
     }
@@ -310,7 +321,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve"),
     )
     .with("type", s)
 }
@@ -321,6 +332,8 @@ impl Feature {
         match self {
             Feature::Primitive(p) => p.ty.as_str(),
             Feature::Sketch(_) => "sketch",
+            Feature::Extrude(_) => "extrude",
+            Feature::Revolve(_) => "revolve",
         }
     }
 
@@ -329,6 +342,8 @@ impl Feature {
         match self {
             Feature::Primitive(p) => p.format(),
             Feature::Sketch(s) => s.format(),
+            // New in format 2.
+            Feature::Extrude(_) | Feature::Revolve(_) => 2,
         }
     }
 
@@ -336,6 +351,8 @@ impl Feature {
         let mut v = match self {
             Feature::Primitive(p) => p.fields(),
             Feature::Sketch(s) => s.fields(),
+            Feature::Extrude(e) => e.fields(),
+            Feature::Revolve(r) => r.fields(),
         };
         v["format"] = json!(self.format());
         v["kind"] = json!(FEATURE_KIND);
@@ -351,11 +368,14 @@ impl Feature {
         let ty = ty
             .as_str()
             .ok_or_else(|| invalid("/type", "type must be a string"))?;
-        let f = if ty == "sketch" {
-            Feature::Sketch(Sketch::from_fields(&mut o, default, env)?)
-        } else {
-            let ty = PrimitiveType::parse(ty).map_err(|e| e.with("pointer", "/type"))?;
-            Feature::Primitive(Primitive::from_fields(ty, &mut o, default, env)?)
+        let f = match ty {
+            "sketch" => Feature::Sketch(Sketch::from_fields(&mut o, default, env)?),
+            "extrude" => Feature::Extrude(Extrude::from_fields(&mut o, default, env)?),
+            "revolve" => Feature::Revolve(Revolve::from_fields(&mut o, env)?),
+            _ => {
+                let ty = PrimitiveType::parse(ty).map_err(|e| e.with("pointer", "/type"))?;
+                Feature::Primitive(Primitive::from_fields(ty, &mut o, default, env)?)
+            }
         };
         o.finish()?;
         Ok(f)
@@ -373,6 +393,15 @@ impl Feature {
     pub fn sketch(&self) -> Option<&Sketch> {
         match self {
             Feature::Sketch(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The sketch an extrude or revolve sweeps.
+    pub fn swept(&self) -> Option<&Id> {
+        match self {
+            Feature::Extrude(e) => Some(&e.sketch),
+            Feature::Revolve(r) => Some(&r.sketch),
             _ => None,
         }
     }

@@ -1,18 +1,24 @@
-//! Features to ryukei bodies and solved sketches. Each primitive is its
-//! own body and each sketch is solved on its own; they don't depend on
-//! each other, so they build in parallel and are collected in feature
-//! order.
+//! Features to ryukei bodies and solved sketches. Primitives and sketches
+//! depend on nothing else, so they build in parallel; then every extrude
+//! and revolve, each from its sketch, in parallel too. Results are
+//! collected in feature order.
 
 use crate::doc::files::{Feature, Placement, Primitive, PrimitiveType};
 use crate::doc::id::Id;
 use crate::doc::project::Part;
+use crate::doc::sketch::Geometry;
+use crate::doc::sweep::{Angle, Extent};
 use crate::error::{Code, Error, Result};
+use crate::profile::Keys;
 use crate::sketch::Solved;
+use core::f64::consts::TAU;
 use rayon::prelude::*;
-use ryukei::geom::{Frame, Point3, Rigid, Vector3};
+use ryukei::SweepError;
+use ryukei::geom::{Axis, Frame, Point3, Rigid, Vector3};
 use ryukei::name::{Journal, OpKey};
-use ryukei::primitive;
 use ryukei::topo::Body;
+use ryukei::{primitive, sweep};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// A feature's rebuilt body.
@@ -129,7 +135,179 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         Feature::Sketch(_) => Err(
             Error::new(Code::Internal, format!("sketch {id} makes no body")).with("feature", id),
         ),
+        Feature::Extrude(_) | Feature::Revolve(_) => Err(Error::new(
+            Code::Internal,
+            format!("{} {id} is built from its sketch", f.type_name()),
+        )
+        .with("feature", id)),
     }
+}
+
+/// The solved sketch a sweep reads: listed before it, a sketch, and
+/// rebuilt.
+fn sketch_input<'a>(
+    part: &Part,
+    id: &Id,
+    sketch: &Id,
+    before: &'a BTreeMap<Id, Result<Output>>,
+) -> Result<&'a crate::sketch::Solved> {
+    let order = part.order();
+    let me = order.iter().position(|f| f == id);
+    match order.iter().position(|f| f == sketch) {
+        None => {
+            return Err(Error::new(
+                Code::NotFound,
+                format!("{id} sweeps {sketch}, which part {} doesn't list", part.id),
+            )
+            .with("feature", id)
+            .with("sketch", sketch));
+        }
+        Some(at) if Some(at) >= me => {
+            return Err(Error::new(
+                Code::ReferenceForward,
+                format!("{id} sweeps {sketch}, which comes after it"),
+            )
+            .with("feature", id)
+            .with("sketch", sketch));
+        }
+        Some(_) => {}
+    }
+    if let Some(Ok(f)) = part.features.get(sketch)
+        && f.sketch().is_none()
+    {
+        return Err(Error::new(
+            Code::ReferenceWrongKind,
+            format!(
+                "{id} sweeps {sketch}, which is a {}, not a sketch",
+                f.type_name()
+            ),
+        )
+        .with("feature", id)
+        .with("sketch", sketch));
+    }
+    match before.get(sketch) {
+        Some(Ok(o)) => Ok(o.sketch().expect("a sketch's output")),
+        Some(Err(e)) => Err(Error::new(
+            Code::DependencyFailed,
+            format!("{id} sweeps {sketch}, which failed to rebuild"),
+        )
+        .with("feature", id)
+        .with("dependency", sketch)
+        .with("cause", e.code)),
+        None => unreachable!("every listed feature before a sweep is built first"),
+    }
+}
+
+/// An extrude or a revolve, from its sketch's result.
+fn build_sweep(
+    part: &Part,
+    id: &Id,
+    f: &Feature,
+    before: &BTreeMap<Id, Result<Output>>,
+) -> Result<Built> {
+    let ty = f.type_name();
+    let sketch = f.swept().expect("a sweep");
+    let solved = sketch_input(part, id, sketch, before)?;
+    let (loops, axis) = match f {
+        Feature::Extrude(e) => (&e.loops, None),
+        Feature::Revolve(r) => (&r.loops, Some(&r.axis)),
+        _ => unreachable!("a sweep"),
+    };
+    let (valid, keys) = crate::profile::profile(&part.id, sketch, solved, loops)
+        .map_err(|e| e.with("feature", id).with("sketch", sketch))?;
+    let key = op_key(&part.id, id);
+    let made = match f {
+        Feature::Extrude(e) => {
+            let n = valid.frame().z().get();
+            let dir = if e.reverse { -n } else { n };
+            let l = e.extent.length().meters();
+            let (start, end) = match e.extent {
+                Extent::Blind(_) => (0.0, l),
+                Extent::Symmetric(_) => (-l / 2.0, l / 2.0),
+            };
+            sweep::extrude(key, &valid, dir, start, end)
+        }
+        Feature::Revolve(r) => {
+            let axis = sweep_axis(solved, id, &r.axis)?;
+            let (start, end) = match &r.angle {
+                Angle::Full => (0.0, TAU),
+                Angle::Of(q) if r.symmetric => (-q.radians() / 2.0, q.radians() / 2.0),
+                Angle::Of(q) => (0.0, q.radians()),
+            };
+            sweep::revolve(key, &valid, axis, start, end)
+        }
+        _ => unreachable!("a sweep"),
+    };
+    let made = made.map_err(|e| sweep_error(id, ty, e, &keys, axis))?;
+    finish(id, ty, made)
+}
+
+/// A revolve's axis: a line of its sketch, from its start to its end.
+fn sweep_axis(solved: &crate::sketch::Solved, id: &Id, axis: &Id) -> Result<Axis> {
+    let s = &solved.sketch;
+    let at = |p: &Id| match s.entities[p].geometry {
+        Geometry::Point { m } => solved.frame.apply_point(Point3::new(m[0], m[1], 0.0)),
+        _ => unreachable!("validated: lines join points"),
+    };
+    match s.entities.get(axis).map(|e| &e.geometry) {
+        Some(Geometry::Line { start, end }) => {
+            let (a, b) = (at(start), at(end));
+            Axis::new(a, b - a).map_err(|e| {
+                Error::new(
+                    Code::InvalidExtent,
+                    format!("revolve {id}: its axis {axis} has no length"),
+                )
+                .with("feature", id)
+                .with("kernel", format!("{e:?}"))
+            })
+        }
+        Some(g) => Err(Error::new(
+            Code::ReferenceWrongKind,
+            format!(
+                "revolve {id}: its axis {axis} is a {}, not a line",
+                g.type_name()
+            ),
+        )
+        .with("feature", id)
+        .with("axis", axis)),
+        None => Err(Error::new(
+            Code::NotFound,
+            format!("revolve {id}: its sketch has no {axis}"),
+        )
+        .with("feature", id)
+        .with("axis", axis)),
+    }
+}
+
+/// The kernel's refusal of a sweep, in the sketch's terms.
+fn sweep_error(id: &Id, ty: &str, e: ryukei::Error, keys: &Keys, axis: Option<&Id>) -> Error {
+    let kernel = format!("{e:?}");
+    let (code, msg, entities) = match e {
+        ryukei::Error::InvalidSweep(
+            SweepError::CrossesAxis { segment }
+            | SweepError::TouchesAxisInside { segment }
+            | SweepError::PinchedOnAxis { segment },
+        ) => {
+            let seg = keys.segments[&segment.0].clone();
+            let mut entities = vec![seg.clone()];
+            entities.extend(axis.cloned());
+            let msg = format!("{seg} crosses or touches the axis");
+            (Code::ProfileInvalid, msg, entities)
+        }
+        ryukei::Error::InvalidSweep(SweepError::ShortSpan | SweepError::BadAngle) => (
+            Code::InvalidExtent,
+            "the sweep is too short".to_owned(),
+            Vec::new(),
+        ),
+        e => (Code::RebuildFailed, e.to_string(), Vec::new()),
+    };
+    let mut err = Error::new(code, format!("{ty} {id}: {msg}"))
+        .with("feature", id)
+        .with("kernel", kernel);
+    if !entities.is_empty() {
+        err = err.with("entities", entities);
+    }
+    err
 }
 
 fn build_primitive(part: &Id, id: &Id, f: &Primitive) -> Result<Built> {
@@ -177,25 +355,54 @@ fn finish(id: &Id, ty: &str, (body, journal): (Body, Journal)) -> Result<Built> 
     })
 }
 
-/// Rebuilds one feature: solves a sketch, builds anything else.
-pub fn rebuild_feature(part: &Id, id: &Id, f: &Feature) -> Result<Output> {
+/// Rebuilds one feature: solves a sketch, sweeps an extrude or revolve's
+/// sketch from `before` (the results of the features it may read), builds
+/// anything else.
+pub fn rebuild_feature(
+    part: &Part,
+    id: &Id,
+    f: &Feature,
+    before: &BTreeMap<Id, Result<Output>>,
+) -> Result<Output> {
     match f {
         Feature::Sketch(s) => crate::sketch::solve(id, s).map(|s| Output::Sketch(Arc::new(s))),
-        f => build_feature(part, id, f).map(Output::Body),
+        Feature::Extrude(_) | Feature::Revolve(_) => {
+            build_sweep(part, id, f, before).map(Output::Body)
+        }
+        f => build_feature(&part.id, id, f).map(Output::Body),
     }
 }
 
-/// Rebuilds every listed feature of `part`, in parallel.
+/// Rebuilds every listed feature of `part`, in parallel: first what reads
+/// no other feature, then the sweeps.
 pub fn rebuild_part(part: &Part) -> PartResult {
-    let features: Vec<(Id, Result<Output>)> = part
+    let sweeps = |id: &Id| matches!(&part.features[id], Ok(f) if f.swept().is_some());
+    let none = BTreeMap::new();
+    let build = |id: &Id, before: &BTreeMap<Id, Result<Output>>| {
+        let built = match &part.features[id] {
+            Ok(f) => rebuild_feature(part, id, f, before),
+            Err(e) => Err(e.clone()),
+        };
+        (id.clone(), built)
+    };
+    let first: BTreeMap<Id, Result<Output>> = part
         .order()
         .par_iter()
+        .filter(|id| !sweeps(id))
+        .map(|id| build(id, &none))
+        .collect();
+    let second: BTreeMap<Id, Result<Output>> = part
+        .order()
+        .par_iter()
+        .filter(|id| sweeps(id))
+        .map(|id| build(id, &first))
+        .collect();
+    let features: Vec<(Id, Result<Output>)> = part
+        .order()
+        .iter()
         .map(|id| {
-            let built = match &part.features[id] {
-                Ok(f) => rebuild_feature(&part.id, id, f),
-                Err(e) => Err(e.clone()),
-            };
-            (id.clone(), built)
+            let r = first.get(id).or_else(|| second.get(id)).expect("built");
+            (id.clone(), r.clone())
         })
         .collect();
     let mut h = blake3::Hasher::new();

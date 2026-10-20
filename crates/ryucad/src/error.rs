@@ -87,6 +87,15 @@ pub enum Code {
     /// A sketch's loops don't make a profile to sweep: they cross, don't
     /// close, or there are none.
     ProfileInvalid,
+    /// An extrude's length or a revolve's angle out of range.
+    InvalidExtent,
+    /// A feature that refers to one after it in the part, or to itself.
+    ReferenceForward,
+    /// A reference to the wrong kind of thing: a box as a sketch, a circle
+    /// as an axis.
+    ReferenceWrongKind,
+    /// A feature whose input, another feature, failed to rebuild.
+    DependencyFailed,
 }
 
 impl Code {

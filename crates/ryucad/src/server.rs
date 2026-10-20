@@ -9,6 +9,7 @@ use crate::doc::project::{
     MANIFEST, Part, feature_path, parameters_path, part_dir, part_path, write_json,
 };
 use crate::doc::sketch::{OriginPlane, Plane, Sketch};
+use crate::doc::sweep::{Angle, Extrude, Revolve};
 use crate::entity::{self, EntityRef};
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
@@ -622,6 +623,18 @@ pub fn feature_report(id: &Id, f: &Feature) -> Value {
     let mut v = match f {
         Feature::Primitive(p) => primitive_report(p),
         Feature::Sketch(s) => sketch_report(s),
+        Feature::Extrude(e) => {
+            let mut v = e.fields();
+            v["extent"]["length"] = e.extent.length().report();
+            v
+        }
+        Feature::Revolve(r) => {
+            let mut v = r.fields();
+            if let Angle::Of(q) = &r.angle {
+                v["angle"] = q.report();
+            }
+            v
+        }
     };
     v["id"] = json!(id);
     v["type"] = json!(f.type_name());
@@ -731,19 +744,136 @@ struct Given {
 }
 
 impl Given {
+    /// The names of the fields given.
+    fn present(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.fields.given().keys().cloned().collect();
+        if !self.params.is_empty() {
+            out.push("params".into());
+        }
+        if self.placement.is_some() {
+            out.push("placement".into());
+        }
+        out
+    }
+
     /// Refuses the fields `ty` doesn't take.
-    fn only(&self, ty: &str, params: bool, placement: bool, plane: bool) -> Result<()> {
-        let extra = [
-            ("params", !params && !self.params.is_empty()),
-            ("placement", !placement && self.placement.is_some()),
-            ("plane", !plane && self.fields.plane.is_some()),
-        ];
-        match extra.iter().find(|(_, bad)| *bad) {
+    fn only(&self, ty: &str, allowed: &[&str]) -> Result<()> {
+        match self
+            .present()
+            .into_iter()
+            .find(|f| !allowed.contains(&f.as_str()))
+        {
             None => Ok(()),
-            Some((name, _)) => Err(
+            Some(name) => Err(
                 Error::new(Code::InvalidParam, format!("a {ty} has no {name}")).with("param", name),
             ),
         }
+    }
+}
+
+/// The fields an extrude and a revolve take.
+const EXTRUDE: [&str; 4] = ["sketch", "loops", "extent", "reverse"];
+const REVOLVE: [&str; 5] = ["sketch", "loops", "axis", "angle", "symmetric"];
+
+/// An extrude or revolve from its fields: the current ones (for an edit)
+/// with those given laid over them.
+fn sweep_from(
+    ty: &str,
+    current: Option<Value>,
+    given: &Given,
+    unit: Unit,
+    env: &Env,
+) -> Result<Feature> {
+    let mut v = current.unwrap_or_else(|| json!({}));
+    for (k, x) in given.fields.given() {
+        // No loops is every loop: nothing to write.
+        if (k == "loops" && x == json!([])) || x == json!(false) {
+            v.as_object_mut().expect("an object").remove(&k);
+        } else {
+            v[k] = x;
+        }
+    }
+    let mut o = crate::doc::files::Obj::new(&v, "")?;
+    let f = match ty {
+        "extrude" => Feature::Extrude(Extrude::from_fields(&mut o, unit, env)?),
+        _ => Feature::Revolve(Revolve::from_fields(&mut o, env)?),
+    };
+    o.finish()?;
+    Ok(f)
+}
+
+/// Refuses a sweep that names what isn't there: its sketch must be a
+/// sketch listed before it in `order`, with the entities it names, and its
+/// axis a line. Whether the loops make a profile only rebuild can tell.
+fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
+    let sketch = f.swept().expect("a sweep");
+    check_sketch(part, order, id, sketch)?;
+    let Some(Ok(Feature::Sketch(sk))) = part.features.get(sketch) else {
+        return Ok(());
+    };
+    let (loops, axis) = match f {
+        Feature::Extrude(e) => (&e.loops, None),
+        Feature::Revolve(r) => (&r.loops, Some(&r.axis)),
+        _ => unreachable!("a sweep"),
+    };
+    for (field, e) in loops
+        .iter()
+        .map(|e| ("loops", e))
+        .chain(axis.map(|a| ("axis", a)))
+    {
+        match sk.entities.get(e).map(|x| &x.geometry) {
+            None => {
+                return Err(
+                    Error::new(Code::NotFound, format!("sketch {sketch} has no {e}"))
+                        .with("sketch", sketch)
+                        .with("entity", e)
+                        .with("pointer", format!("/{field}")),
+                );
+            }
+            Some(g)
+                if field == "axis" && !matches!(g, crate::doc::sketch::Geometry::Line { .. }) =>
+            {
+                return Err(Error::new(
+                    Code::ReferenceWrongKind,
+                    format!("an axis is a line; {e} is a {}", g.type_name()),
+                )
+                .with("entity", e)
+                .with("pointer", "/axis"));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a sketch that isn't a sketch listed before `id` in `order`.
+fn check_sketch(part: &Part, order: &[Id], id: &Id, sketch: &Id) -> Result<()> {
+    let at = |f: &Id| order.iter().position(|x| x == f);
+    match (at(sketch), at(id)) {
+        (None, _) => {
+            return Err(Error::new(
+                Code::NotFound,
+                format!("part {} has no feature {sketch} to sweep", part.id),
+            )
+            .with("sketch", sketch));
+        }
+        (Some(s), Some(me)) if s >= me => {
+            return Err(Error::new(
+                Code::ReferenceForward,
+                format!("{id} would sweep {sketch}, which comes after it"),
+            )
+            .with("feature", id)
+            .with("sketch", sketch));
+        }
+        _ => {}
+    }
+    match part.features.get(sketch) {
+        Some(Ok(f)) if f.sketch().is_none() => Err(Error::new(
+            Code::ReferenceWrongKind,
+            format!("{sketch} is a {}, not a sketch", f.type_name()),
+        )
+        .with("sketch", sketch)),
+        _ => Ok(()),
     }
 }
 
@@ -803,17 +933,24 @@ fn feature_add(
     check_revision(p, expected)?;
     let mut list = order(p)?;
     let env = p.env.clone();
-    let f = if ty == "sketch" {
-        given.only(ty, false, true, true)?;
-        Feature::Sketch(Sketch::new(sketch_plane(None, &given, unit, &env)?))
-    } else {
-        let ty = PrimitiveType::parse(ty)?;
-        given.only(ty.as_str(), true, true, false)?;
-        Feature::Primitive(Primitive {
-            ty,
-            params: Primitive::params_from_json(ty, &Value::Object(given.params), unit, &env)?,
-            placement: new_placement(given.placement.unwrap_or_default(), unit, &env)?,
-        })
+    let f = match ty {
+        "sketch" => {
+            given.only(ty, &["plane", "placement"])?;
+            Feature::Sketch(Sketch::new(sketch_plane(None, &given, unit, &env)?))
+        }
+        "extrude" | "revolve" => {
+            given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
+            sweep_from(ty, None, &given, unit, &env)?
+        }
+        _ => {
+            let ty = PrimitiveType::parse(ty)?;
+            given.only(ty.as_str(), &["params", "placement"])?;
+            Feature::Primitive(Primitive {
+                ty,
+                params: Primitive::params_from_json(ty, &Value::Object(given.params), unit, &env)?,
+                placement: new_placement(given.placement.unwrap_or_default(), unit, &env)?,
+            })
+        }
     };
     let fid = match id {
         Some(id) => feature_id(id)?,
@@ -829,6 +966,9 @@ fn feature_add(
         .with("feature", &fid));
     }
     list.insert(insert_at(&list, position)?, fid.clone());
+    if f.swept().is_some() {
+        check_sweep(p, &list, &fid, &f)?;
+    }
     let revision = save(session, &pid, &[(&fid, &f)], list)?;
     Ok(json!({"feature": feature_report(&fid, &f), "revision": revision}))
 }
@@ -847,7 +987,7 @@ fn feature_edit(
     let list = order(p)?;
     let f = match feature(p, &fid)?.clone() {
         Feature::Primitive(mut f) => {
-            given.only(f.ty.as_str(), true, true, false)?;
+            given.only(f.ty.as_str(), &["params", "placement"])?;
             let mut merged: Map<String, Value> = f
                 .params
                 .iter()
@@ -872,9 +1012,21 @@ fn feature_edit(
         // Its geometry changes through sketch.edit; the plane moves the
         // sketch without changing its solve.
         Feature::Sketch(mut s) => {
-            given.only("sketch", false, true, true)?;
+            given.only("sketch", &["plane", "placement"])?;
             s.plane = sketch_plane(Some(&s.plane), &given, unit, &p.env)?;
             Feature::Sketch(s)
+        }
+        f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
+            let ty = f.type_name();
+            given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
+            let current = match &f {
+                Feature::Extrude(e) => e.fields(),
+                Feature::Revolve(r) => r.fields(),
+                _ => unreachable!("a sweep"),
+            };
+            let f = sweep_from(ty, Some(current), &given, unit, &p.env)?;
+            check_sweep(p, &list, &fid, &f)?;
+            f
         }
     };
     let revision = save(session, &pid, &[(&fid, &f)], list)?;
@@ -2076,6 +2228,187 @@ pub(crate) mod tests {
         let e = call(&mut s, "rebuild", json!({})).unwrap_err();
         let f = &e.details["parts"][0]["features"][0];
         assert_eq!(f["error"]["code"], "sketch_unsolved");
+    }
+
+    /// The rebuild report of feature `f` in part `p`.
+    fn built(s: &mut Session, f: &str) -> Value {
+        let r = match call(s, "rebuild", json!({"part": "p"})) {
+            Ok(r) => r,
+            Err(e) => e.details,
+        };
+        r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == f)
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn sketches_extrude_and_revolve_into_bodies() {
+        let (dir, mut s) = with_sketch();
+        let r = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "sketch": "s",
+                   "extent": {"type": "blind", "length": "width / 4"}}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["id"], "extrude-1");
+        assert_eq!(
+            r["feature"]["extent"]["length"],
+            json!({"value": "width / 4", "m": 0.005, "expr": true})
+        );
+        let text = fs::read_to_string(dir.path().join("parts/p/features/extrude-1.json")).unwrap();
+        assert!(
+            !text.contains("reverse") && !text.contains("loops"),
+            "{text}"
+        );
+        let b = built(&mut s, "extrude-1");
+        assert_eq!(b["counts"], json!({"faces": 6, "edges": 12, "vertices": 8}));
+        // About its left side, a full turn: a solid cylinder.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "revolve", "id": "r", "sketch": "s",
+                   "axis": "l4", "angle": "full"}),
+        )
+        .unwrap();
+        let b = built(&mut s, "r");
+        assert_eq!(b["ok"], true, "{b}");
+        assert_eq!(b["counts"]["faces"], 3);
+        // A quarter turn, both ways, has two more faces: its ends.
+        let r = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "r", "angle": 90, "symmetric": true}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["angle"]["value"], "90 deg");
+        assert_eq!(built(&mut s, "r")["counts"]["faces"], 5);
+        // Reversed and symmetric extrudes, and back.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "extrude-1", "reverse": true}),
+        )
+        .unwrap();
+        assert_eq!(built(&mut s, "extrude-1")["ok"], true);
+        let r = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "extrude-1", "reverse": false}),
+        )
+        .unwrap();
+        assert!(r["feature"].get("reverse").is_none());
+        let show = call(&mut s, "feature.show", json!({"part": "p", "id": "r"})).unwrap();
+        assert_eq!(
+            (show["axis"].as_str(), show["symmetric"].as_bool()),
+            (Some("l4"), Some(true))
+        );
+    }
+
+    #[test]
+    fn sweeps_refuse_what_cant_build() {
+        let (dir, mut s) = with_sketch();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "id": "ball", "params": {"radius": 1}}),
+        )
+        .unwrap();
+        let blind = json!({"type": "blind", "length": "5 mm"});
+        for (params, code) in [
+            (
+                json!({"type": "extrude", "sketch": "ghost", "extent": blind}),
+                Code::NotFound,
+            ),
+            (
+                json!({"type": "extrude", "sketch": "ball", "extent": blind}),
+                Code::ReferenceWrongKind,
+            ),
+            (
+                json!({"type": "extrude", "sketch": "s", "extent": blind, "first": true}),
+                Code::ReferenceForward,
+            ),
+            (
+                json!({"type": "extrude", "sketch": "s", "extent": {"type": "blind", "length": 0}}),
+                Code::InvalidExtent,
+            ),
+            (
+                json!({"type": "extrude", "sketch": "s", "extent": blind, "axis": "l1"}),
+                Code::InvalidParam,
+            ),
+            (
+                json!({"type": "extrude", "sketch": "s"}),
+                Code::InvalidDocument,
+            ),
+            (
+                json!({"type": "revolve", "sketch": "s", "axis": "l4", "angle": "400 deg"}),
+                Code::InvalidExtent,
+            ),
+        ] {
+            let mut params = params;
+            params["part"] = json!("p");
+            let e = call(&mut s, "feature.add", params.clone()).unwrap_err();
+            assert_eq!(e.code, code, "{params}: {e}");
+        }
+        for (params, code) in [
+            (json!({"axis": "l9", "angle": 90}), Code::NotFound),
+            (json!({"axis": "p1", "angle": 90}), Code::ReferenceWrongKind),
+            (
+                json!({"axis": "l4", "angle": 90, "loops": ["q"]}),
+                Code::NotFound,
+            ),
+        ] {
+            let mut params = params;
+            params["part"] = json!("p");
+            params["type"] = json!("revolve");
+            params["sketch"] = json!("s");
+            let e = call(&mut s, "feature.add", params.clone()).unwrap_err();
+            assert_eq!(e.code, code, "{params}: {e}");
+        }
+        // What only the rebuild can tell, each in the sketch's terms: the
+        // diagonal crosses the rectangle, and isn't on a loop.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "revolve", "id": "r", "sketch": "s", "axis": "l5",
+                    "angle": 90}),
+        )
+        .unwrap();
+        let b = built(&mut s, "r");
+        assert_eq!(b["error"]["code"], "profile_invalid");
+        assert_eq!(b["error"]["details"]["entities"][1], "l5");
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "r", "loops": ["l5"]}),
+        )
+        .unwrap();
+        let b = built(&mut s, "r");
+        assert_eq!(b["error"]["code"], "profile_invalid");
+        assert_eq!(b["error"]["details"]["entities"], json!(["l5"]));
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "r", "axis": "l4", "loops": ["l2"]}),
+        )
+        .unwrap();
+        assert_eq!(built(&mut s, "r")["ok"], true);
+        // A sketch that fails takes its sweeps with it.
+        let params =
+            |w: &str| json!({"format": 1, "kind": "ryucad.parameters", "parameters": {"width": w}});
+        write_json(
+            &dir.path().join("parts/p/parameters.json"),
+            &params("50 mm"),
+        )
+        .unwrap();
+        let b = built(&mut s, "r");
+        assert_eq!(b["error"]["code"], "dependency_failed");
+        assert_eq!(b["error"]["details"]["dependency"], "s");
+        assert_eq!(b["error"]["details"]["cause"], "sketch_unsolved");
     }
 
     #[test]
