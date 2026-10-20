@@ -56,7 +56,9 @@ fn editing_params_and_placement_keeps_every_name() {
         PrimitiveType::Box,
         &[("x", "11"), ("y", "2 in"), ("z", "3 m")],
     );
-    let Feature::Primitive(p) = &mut b;
+    let Feature::Primitive(p) = &mut b else {
+        unreachable!()
+    };
     p.placement.z = [1.0, 1.0, 0.0];
     let ba = build_feature(&id("p"), &id("f"), &a).unwrap();
     let bb = build_feature(&id("p"), &id("f"), &b).unwrap();

@@ -17,6 +17,7 @@ png = "0.18"
 font8x8 = { version = "0.3", default-features = false }
 rayon = "1"
 ryukei = { path = "../ryukei" }
+ryusketch = { path = "../ryusketch" }
 serde = { version = "1", features = ["derive"] }
 # Correctly rounded float parsing: without it, a number read back can be
 # one ulp off what was written.

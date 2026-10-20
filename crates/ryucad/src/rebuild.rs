@@ -67,6 +67,9 @@ pub fn placement(p: &Placement) -> Result<Rigid> {
 pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
     match f {
         Feature::Primitive(p) => build_primitive(part, id, p),
+        Feature::Sketch(_) => Err(
+            Error::new(Code::Internal, format!("sketch {id} makes no body")).with("feature", id),
+        ),
     }
 }
 

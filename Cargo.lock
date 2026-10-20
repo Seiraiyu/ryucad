@@ -4072,6 +4072,7 @@ dependencies = [
  "rayon",
  "ryukei",
  "ryukei-testkit",
+ "ryusketch",
  "serde",
  "serde_json",
  "tempfile",

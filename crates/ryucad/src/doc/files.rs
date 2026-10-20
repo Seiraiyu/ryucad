@@ -3,6 +3,7 @@
 //! the file system is [`super::project`]'s business.
 
 use super::id::Id;
+use super::sketch::Sketch;
 use crate::error::{Code, Error, Result};
 use crate::expr::{self, Env, Expr};
 use crate::units::{Quantity, Unit};
@@ -54,6 +55,7 @@ pub enum PrimitiveType {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Feature {
     Primitive(Primitive),
+    Sketch(Sketch),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -250,8 +252,8 @@ pub fn expression(v: &Value) -> Result<Expr> {
     }
 }
 
-/// The expression strings in a feature's JSON: its params and the
-/// coordinates of its origin.
+/// The expression strings in a feature's JSON: its params, the
+/// coordinates of its origin and a sketch's dimensions.
 fn expression_strings(v: &mut Value) -> Vec<&mut String> {
     let mut out = Vec::new();
     let Some(o) = v.as_object_mut() else {
@@ -271,6 +273,7 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
                     }));
                 }
             }
+            ("constraints", c) => out.extend(Sketch::expression_strings(c)),
             _ => {}
         }
     }
@@ -307,7 +310,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch"),
     )
     .with("type", s)
 }
@@ -317,6 +320,7 @@ impl Feature {
     pub fn type_name(&self) -> &'static str {
         match self {
             Feature::Primitive(p) => p.ty.as_str(),
+            Feature::Sketch(_) => "sketch",
         }
     }
 
@@ -324,12 +328,14 @@ impl Feature {
     pub fn format(&self) -> u64 {
         match self {
             Feature::Primitive(p) => p.format(),
+            Feature::Sketch(s) => s.format(),
         }
     }
 
     pub fn to_json(&self) -> Value {
         let mut v = match self {
             Feature::Primitive(p) => p.fields(),
+            Feature::Sketch(s) => s.fields(),
         };
         v["format"] = json!(self.format());
         v["kind"] = json!(FEATURE_KIND);
@@ -345,16 +351,29 @@ impl Feature {
         let ty = ty
             .as_str()
             .ok_or_else(|| invalid("/type", "type must be a string"))?;
-        let ty = PrimitiveType::parse(ty).map_err(|e| e.with("pointer", "/type"))?;
-        let f = Primitive::from_fields(ty, &mut o, default, env)?;
+        let f = if ty == "sketch" {
+            Feature::Sketch(Sketch::from_fields(&mut o, default, env)?)
+        } else {
+            let ty = PrimitiveType::parse(ty).map_err(|e| e.with("pointer", "/type"))?;
+            Feature::Primitive(Primitive::from_fields(ty, &mut o, default, env)?)
+        };
         o.finish()?;
-        Ok(Feature::Primitive(f))
+        Ok(f)
     }
 
     /// The primitive, if it is one.
     pub fn primitive(&self) -> Option<&Primitive> {
         match self {
             Feature::Primitive(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// The sketch, if it is one.
+    pub fn sketch(&self) -> Option<&Sketch> {
+        match self {
+            Feature::Sketch(s) => Some(s),
+            _ => None,
         }
     }
 }
@@ -453,7 +472,7 @@ pub fn number(x: f64) -> Value {
     }
 }
 
-fn invalid(at: &str, msg: &str) -> Error {
+pub(crate) fn invalid(at: &str, msg: &str) -> Error {
     Error::new(Code::InvalidDocument, msg).with("pointer", at)
 }
 
@@ -496,13 +515,13 @@ fn migrate(format: u64, newest: u64) {
 }
 
 /// The fields of a JSON object, taken one by one so leftovers are errors.
-struct Obj<'a> {
+pub(crate) struct Obj<'a> {
     map: BTreeMap<&'a str, &'a Value>,
     at: String,
 }
 
 impl<'a> Obj<'a> {
-    fn new(v: &'a Value, at: &str) -> Result<Obj<'a>> {
+    pub(crate) fn new(v: &'a Value, at: &str) -> Result<Obj<'a>> {
         let map = v
             .as_object()
             .ok_or_else(|| invalid(at, "expected a JSON object"))?;
@@ -512,7 +531,12 @@ impl<'a> Obj<'a> {
         })
     }
 
-    fn take(&mut self, key: &str) -> Result<Value> {
+    /// A field that may be left out.
+    pub(crate) fn take_opt(&mut self, key: &str) -> Option<Value> {
+        self.map.remove(key).cloned()
+    }
+
+    pub(crate) fn take(&mut self, key: &str) -> Result<Value> {
         self.map.remove(key).cloned().ok_or_else(|| {
             invalid(
                 &format!("{}/{key}", self.at),
@@ -521,7 +545,7 @@ impl<'a> Obj<'a> {
         })
     }
 
-    fn finish(self) -> Result<()> {
+    pub(crate) fn finish(self) -> Result<()> {
         match self.map.keys().next() {
             None => Ok(()),
             Some(k) => Err(invalid(

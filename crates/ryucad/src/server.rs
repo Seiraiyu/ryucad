@@ -8,6 +8,7 @@ use crate::doc::id::Id;
 use crate::doc::project::{
     MANIFEST, Part, feature_path, parameters_path, part_dir, part_path, write_json,
 };
+use crate::doc::sketch::{Plane, Sketch};
 use crate::entity::{self, EntityRef};
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
@@ -602,9 +603,34 @@ fn no_feature(part: &Part, id: &Id) -> Error {
 pub fn feature_report(id: &Id, f: &Feature) -> Value {
     let mut v = match f {
         Feature::Primitive(p) => primitive_report(p),
+        Feature::Sketch(s) => sketch_report(s),
     };
     v["id"] = json!(id);
     v["type"] = json!(f.type_name());
+    v
+}
+
+/// A placement as output reports it: quantities as written and in meters.
+fn placement_report(p: &Placement) -> Value {
+    json!({
+        "origin": p.origin.iter().map(Quantity::report).collect::<Vec<_>>(),
+        "z": p.z.map(number),
+        "x": p.x.map(number),
+    })
+}
+
+/// A sketch as output reports it: its file's fields, with every dimension
+/// as written and evaluated.
+fn sketch_report(s: &Sketch) -> Value {
+    let mut v = s.fields();
+    if let Plane::Placement(p) = &s.plane {
+        v["placement"] = placement_report(p);
+    }
+    for (id, c) in &s.constraints {
+        if let Some(q) = &c.value {
+            v["constraints"][id.as_str()]["value"] = q.report();
+        }
+    }
     v
 }
 
@@ -614,14 +640,7 @@ fn primitive_report(f: &Primitive) -> Value {
         .iter()
         .map(|(k, q)| (k.clone(), q.report()))
         .collect();
-    json!({
-        "params": params,
-        "placement": {
-            "origin": f.placement.origin.iter().map(Quantity::report).collect::<Vec<_>>(),
-            "z": f.placement.z.map(number),
-            "x": f.placement.x.map(number),
-        },
-    })
+    json!({"params": params, "placement": placement_report(&f.placement)})
 }
 
 /// Applies the parts of `arg` that are given to `p`, its expressions
@@ -751,7 +770,13 @@ fn feature_edit(
     let p = session.project().part(&pid)?;
     check_revision(p, expected)?;
     let list = order(p)?;
-    let Feature::Primitive(mut f) = feature(p, &fid)?.clone();
+    let Feature::Primitive(mut f) = feature(p, &fid)?.clone() else {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("{fid} is a sketch: change its geometry with sketch.edit"),
+        )
+        .with("feature", &fid));
+    };
     let mut merged: Map<String, Value> = f
         .params
         .iter()
