@@ -17,6 +17,8 @@ mod ellipse;
 mod eval;
 mod frame;
 pub(crate) mod intersect2;
+#[allow(dead_code)] // Used by pipes, from Task 5 on.
+pub(crate) mod jet;
 mod nurbs;
 mod point;
 mod project;
