@@ -655,25 +655,35 @@ fn placement_report(p: &Placement) -> Value {
 /// as written and evaluated.
 fn sketch_report(part: &Id, s: &Sketch) -> Value {
     let mut v = s.fields();
-    match &s.plane {
-        Plane::Placement(p) => v["placement"] = placement_report(p),
-        Plane::Face(on) => {
-            v["face"] = json!(on.face.text(part));
-            if let Some(r) = &on.origin {
-                v["origin"] = json!(r.text(part));
-            }
-            if let Some(r) = &on.x {
-                v["x"] = json!(r.text(part));
-            }
-        }
-        Plane::Origin(_) => {}
+    if let Plane::Placement(p) = &s.plane {
+        v["placement"] = placement_report(p);
     }
+    reference_texts(part, s, &mut v);
     for (id, c) in &s.constraints {
         if let Some(q) = &c.value {
             v["constraints"][id.as_str()]["value"] = q.report();
         }
     }
     v
+}
+
+/// Rewrites a sketch's references in `v`, its fields as a file has them,
+/// as `<part>/<feature>/<name>`.
+pub(crate) fn reference_texts(part: &Id, s: &Sketch, v: &mut Value) {
+    if let Plane::Face(on) = &s.plane {
+        v["face"] = json!(on.face.text(part));
+        if let Some(r) = &on.origin {
+            v["origin"] = json!(r.text(part));
+        }
+        if let Some(r) = &on.x {
+            v["x"] = json!(r.text(part));
+        }
+    }
+    for (id, e) in &s.entities {
+        if let Some(r) = &e.projected {
+            v["entities"][id.as_str()]["projected"] = json!(r.text(part));
+        }
+    }
 }
 
 fn primitive_report(f: &Primitive) -> Value {

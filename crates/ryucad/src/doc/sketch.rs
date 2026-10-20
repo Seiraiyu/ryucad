@@ -155,12 +155,16 @@ impl Geometry {
     }
 }
 
-/// An entity: its geometry, and whether it is construction geometry, which
-/// profiles leave out.
+/// An entity: its geometry, whether it is construction geometry, which
+/// profiles leave out, and whether it is projected from an earlier
+/// feature's vertex or edge. A projected point, and the points a projected
+/// curve is built on, are fixed where the projection puts them, as is a
+/// projected circle's radius.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entity {
     pub geometry: Geometry,
     pub construction: bool,
+    pub projected: Option<Reference>,
 }
 
 /// What a constraint requires.
@@ -445,9 +449,16 @@ impl Sketch {
         Ok(s)
     }
 
-    /// Its references to other features, each with its role.
+    /// Its references to other features, each with its role: the plane's,
+    /// then each projected entity's (`entities.<id>`), in ID order.
     pub fn references(&self) -> Vec<(String, &Reference)> {
-        self.plane.references()
+        let mut out = self.plane.references();
+        for (id, e) in &self.entities {
+            if let Some(r) = &e.projected {
+                out.push((format!("entities.{id}"), r));
+            }
+        }
+        out
     }
 
     /// Checks that every reference names an entity of the right kind and
@@ -458,6 +469,15 @@ impl Sketch {
 
     /// The sketch as the solver takes it, with the IDs it uses.
     pub fn solver(&self) -> Result<(ryusketch::Sketch, Index)> {
+        self.solver_fixing(&std::collections::BTreeSet::new())
+    }
+
+    /// [`Sketch::solver`], with the points and circles in `fixed` held
+    /// where they are.
+    pub fn solver_fixing(
+        &self,
+        fixed: &std::collections::BTreeSet<&Id>,
+    ) -> Result<(ryusketch::Sketch, Index)> {
         let index = Index::of(self);
         let mut out = ryusketch::Sketch::default();
         let find = |id: &Id, at: String| {
@@ -476,7 +496,7 @@ impl Sketch {
             let solver = match &e.geometry {
                 Geometry::Point { m } => ryusketch::Entity::Point {
                     at: *m,
-                    fixed: false,
+                    fixed: fixed.contains(id),
                 },
                 Geometry::Line { start, end } => ryusketch::Entity::Line {
                     a: find(start, at("start"))?,
@@ -492,7 +512,7 @@ impl Sketch {
                 Geometry::Circle { center, r_m } => ryusketch::Entity::Circle {
                     center: find(center, at("center"))?,
                     r: *r_m,
-                    fixed: false,
+                    fixed: fixed.contains(id),
                     construction,
                 },
             };
@@ -612,6 +632,9 @@ fn entity_json(e: &Entity) -> Value {
     if e.construction {
         v["construction"] = json!(true);
     }
+    if let Some(r) = &e.projected {
+        v["projected"] = r.to_json();
+    }
     v
 }
 
@@ -685,10 +708,15 @@ fn entity_from_json(v: &Value, at: &str) -> Result<Entity> {
             ));
         }
     };
+    let projected = o
+        .take_opt("projected")
+        .map(|v| Reference::from_json(&v, &format!("{at}/projected")))
+        .transpose()?;
     o.finish()?;
     Ok(Entity {
         geometry,
         construction,
+        projected,
     })
 }
 
@@ -858,6 +886,35 @@ pub(crate) mod tests {
         assert_eq!(read(&w).unwrap_err().details["pointer"], "/origin");
         v["plane"] = json!("xy");
         assert_eq!(read(&v).unwrap_err().details["pointer"], "/plane");
+    }
+
+    #[test]
+    fn projected_entities() {
+        const N: &str = "0123456789abcdef0123456789abcdef";
+        let mut v = rectangle();
+        v["entities"]["l1"]["projected"] = json!({"feature": "b", "name": N});
+        v["entities"]["p3"]["projected"] = json!({"feature": "b", "name": N});
+        let s = read(&v).unwrap();
+        assert_eq!(
+            s.references()
+                .iter()
+                .map(|(r, _)| r.as_str())
+                .collect::<Vec<_>>(),
+            ["entities.l1", "entities.p3"]
+        );
+        assert_eq!(read(&Feature::Sketch(s.clone()).to_json()).unwrap(), s);
+        let fixed = [Id::parse("p1", "entity").unwrap()];
+        let (solver, index) = s.solver_fixing(&fixed.iter().collect()).unwrap();
+        let p1 = index.entity(&fixed[0]).unwrap();
+        assert!(matches!(
+            solver.entities[&p1],
+            ryusketch::Entity::Point { fixed: true, .. }
+        ));
+        v["entities"]["l1"]["projected"] = json!("b");
+        assert_eq!(
+            read(&v).unwrap_err().details["pointer"],
+            "/entities/l1/projected"
+        );
     }
 
     #[test]
