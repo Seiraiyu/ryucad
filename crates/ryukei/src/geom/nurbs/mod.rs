@@ -12,6 +12,7 @@ mod knots;
 mod project;
 mod project_surface;
 mod refine;
+mod ruled;
 mod surface;
 
 pub use basis::Basis;
