@@ -84,6 +84,9 @@ pub enum Code {
     SketchUnsolved,
     /// A sketch edit that would leave constraints redundant or in conflict.
     SketchOverconstrained,
+    /// A sketch's loops don't make a profile to sweep: they cross, don't
+    /// close, or there are none.
+    ProfileInvalid,
 }
 
 impl Code {

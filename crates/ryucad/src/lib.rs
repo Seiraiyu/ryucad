@@ -17,6 +17,7 @@ pub mod live;
 pub mod mesh;
 pub mod notify;
 pub mod param;
+pub mod profile;
 pub mod proto;
 pub mod rebuild;
 pub mod render;
