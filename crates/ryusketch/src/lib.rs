@@ -15,6 +15,8 @@
 // Only tests reach it until `solve` does.
 #[allow(dead_code)]
 mod equation;
+#[allow(dead_code)]
+mod linalg;
 mod sketch;
 
 pub use sketch::{Constraint, Entity, Id, Sketch, SketchError};
