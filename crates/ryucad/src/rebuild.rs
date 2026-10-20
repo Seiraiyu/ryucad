@@ -6,6 +6,7 @@
 use crate::doc::files::{Feature, Placement, Primitive, PrimitiveType};
 use crate::doc::id::Id;
 use crate::doc::project::Part;
+use crate::doc::reference::Reference;
 use crate::doc::sketch::Geometry;
 use crate::doc::sweep::{Angle, Extent};
 use crate::error::{Code, Error, Result};
@@ -203,10 +204,18 @@ fn build_sweep(part: &Part, id: &Id, f: &Feature, before: &dyn Results) -> Resul
         Feature::Extrude(e) => {
             let n = valid.frame().z().get();
             let dir = if e.reverse { -n } else { n };
-            let l = e.extent.length().meters();
-            let (start, end) = match e.extent {
-                Extent::Blind(_) => (0.0, l),
-                Extent::Symmetric(_) => (-l / 2.0, l / 2.0),
+            let (start, end) = match &e.extent {
+                Extent::Blind(q) => (0.0, q.meters()),
+                Extent::Symmetric(q) => (-q.meters() / 2.0, q.meters() / 2.0),
+                Extent::UpTo { target, offset } => {
+                    let to = UpTo {
+                        target,
+                        offset: offset.as_ref(),
+                        from: valid.frame().origin(),
+                        dir,
+                    };
+                    (0.0, to.length(part, id, before)?)
+                }
             };
             sweep::extrude(key, &valid, dir, start, end)
         }
@@ -224,6 +233,63 @@ fn build_sweep(part: &Part, id: &Id, f: &Feature, before: &dyn Results) -> Resul
     let made = made.map_err(|e| sweep_error(id, ty, e, &keys, axis))?;
     let origins = crate::profile::origins(key, sketch, &valid, &keys);
     finish(id, ty, made, origins)
+}
+
+/// An up-to extent, from a point of the sketch's plane along `dir`.
+struct UpTo<'a> {
+    target: &'a Reference,
+    offset: Option<&'a crate::units::Quantity>,
+    from: Point3,
+    dir: Vector3,
+}
+
+impl UpTo<'_> {
+    /// How far the extrude reaches: to the target's plane (a planar face
+    /// parallel to the sketch) or its point (a vertex), then the offset.
+    fn length(&self, part: &Part, id: &Id, before: &dyn Results) -> Result<f64> {
+        use crate::reference::{kind, plane, resolve, wrong_kind};
+        use ryukei::topo::EntityId;
+        let (t, text) = (self.target, self.target.text(&part.id));
+        let invalid = |msg: String| {
+            Error::new(
+                Code::InvalidExtent,
+                format!("extrude {id}: its target {text} {msg}"),
+            )
+            .with("feature", id)
+            .with("role", "target")
+            .with("reference", &text)
+        };
+        let found = resolve(part, part.order(), id, "target", t, before)?;
+        let at = match found.1 {
+            EntityId::Vertex(v) => found.0.body.vertex(v).expect("a live vertex").point,
+            EntityId::Face(_) => {
+                let (p, n) = plane(part, id, "target", t, found)?;
+                if n.cross(self.dir).length() > ryukei::tol::ANGULAR_RESOLUTION {
+                    return Err(invalid("isn't parallel to the sketch".into()));
+                }
+                p
+            }
+            e => {
+                return Err(wrong_kind(
+                    part,
+                    id,
+                    "target",
+                    t,
+                    kind(e),
+                    "a planar face or a vertex",
+                ));
+            }
+        };
+        let offset = self.offset.map_or(0.0, crate::units::Quantity::meters);
+        let l = (at - self.from).dot(self.dir) + offset;
+        if l <= ryukei::tol::LINEAR_RESOLUTION {
+            return Err(invalid(format!(
+                "is no further along than the sketch's plane ({l} m)"
+            ))
+            .with("length", l));
+        }
+        Ok(l)
+    }
 }
 
 /// A revolve's axis: a line of its sketch, from its start to its end.

@@ -10,7 +10,7 @@ use crate::doc::project::{
 };
 use crate::doc::reference::Reference;
 use crate::doc::sketch::{OnFace, OriginPlane, Plane, Sketch};
-use crate::doc::sweep::{Angle, Extrude, Revolve};
+use crate::doc::sweep::{Angle, Extent, Extrude, Revolve};
 use crate::entity::{self, EntityRef};
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
@@ -626,7 +626,15 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
         Feature::Sketch(s) => sketch_report(part, s),
         Feature::Extrude(e) => {
             let mut v = e.fields();
-            v["extent"]["length"] = e.extent.length().report();
+            match &e.extent {
+                Extent::Blind(q) | Extent::Symmetric(q) => v["extent"]["length"] = q.report(),
+                Extent::UpTo { target, offset } => {
+                    v["extent"]["target"] = json!(target.text(part));
+                    if let Some(q) = offset {
+                        v["extent"]["offset"] = q.report();
+                    }
+                }
+            }
             v
         }
         Feature::Revolve(r) => {
@@ -805,6 +813,7 @@ fn sweep_from(
     ty: &str,
     current: Option<Value>,
     given: &Given,
+    part: &Id,
     unit: Unit,
     env: &Env,
 ) -> Result<Feature> {
@@ -821,9 +830,31 @@ fn sweep_from(
             o.remove(&k);
             continue;
         }
-        // An extent's length or type alone keeps the other.
+        let x = match (k.as_str(), x) {
+            // An up-to target is given as text, and kept as a file holds it.
+            ("extent", Value::Object(mut e)) => {
+                if let Some(Value::String(t)) = e.get("target") {
+                    let r = Reference::parse(t, part)
+                        .map_err(|e| e.with("pointer", "/extent/target"))?;
+                    e.insert("target".into(), r.to_json());
+                }
+                Value::Object(e)
+            }
+            (_, x) => x,
+        };
+        // Part of an extent keeps the rest; a new type keeps only what it
+        // takes (blind and symmetric share a length).
         match (o.get_mut(&k), x) {
-            (Some(Value::Object(old)), Value::Object(new)) if k == "extent" => old.extend(new),
+            (Some(Value::Object(old)), Value::Object(new)) if k == "extent" => {
+                if let Some(t) = new.get("type").and_then(Value::as_str) {
+                    let takes: &[&str] = match t {
+                        "up_to" => &["target", "offset"],
+                        _ => &["length"],
+                    };
+                    old.retain(|f, _| takes.contains(&f.as_str()));
+                }
+                old.extend(new)
+            }
             (_, x) => {
                 o.insert(k, x);
             }
@@ -1035,6 +1066,29 @@ fn check_references(
     let results = session.rebuilt(part)?;
     match f {
         Feature::Sketch(s) => crate::sketch::context(&p, order, id, s, results).map(|_| ()),
+        // What the target is; how far it is only rebuild can tell.
+        Feature::Extrude(e) => match &e.extent {
+            Extent::UpTo { target, .. } => {
+                use crate::reference::{kind, resolve, wrong_kind};
+                use ryukei::topo::EntityId;
+                let found = resolve(&p, order, id, "target", target, results)?;
+                match found.1 {
+                    EntityId::Vertex(_) => Ok(()),
+                    EntityId::Face(_) => {
+                        crate::reference::plane(&p, id, "target", target, found).map(|_| ())
+                    }
+                    e => Err(wrong_kind(
+                        &p,
+                        id,
+                        "target",
+                        target,
+                        kind(e),
+                        "a planar face or a vertex",
+                    )),
+                }
+            }
+            _ => Ok(()),
+        },
         _ => Ok(()),
     }
 }
@@ -1061,7 +1115,7 @@ fn feature_add(
         }
         "extrude" | "revolve" => {
             given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
-            sweep_from(ty, None, &given, unit, &env)?
+            sweep_from(ty, None, &given, &pid, unit, &env)?
         }
         _ => {
             let ty = PrimitiveType::parse(ty)?;
@@ -1147,7 +1201,7 @@ fn feature_edit(
                 Feature::Revolve(r) => r.fields(),
                 _ => unreachable!("a sweep"),
             };
-            let f = sweep_from(ty, Some(current), &given, unit, &p.env)?;
+            let f = sweep_from(ty, Some(current), &given, &pid, unit, &p.env)?;
             check_sweep(p, &list, &fid, &f)?;
             f
         }

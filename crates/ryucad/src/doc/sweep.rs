@@ -3,6 +3,7 @@
 
 use super::files::{Obj, invalid};
 use super::id::Id;
+use super::reference::Reference;
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
 use crate::units::{Field, Quantity, Unit};
@@ -15,6 +16,13 @@ pub enum Extent {
     Blind(Quantity),
     /// This long in all, half each side of the sketch's plane.
     Symmetric(Quantity),
+    /// From the sketch's plane to a planar face parallel to it, or to a
+    /// vertex, measured along the direction, then `offset` further (a
+    /// length, of either sign; zero when left out).
+    UpTo {
+        target: Reference,
+        offset: Option<Quantity>,
+    },
 }
 
 /// An extrude: the sketch's loops along its normal.
@@ -53,43 +61,75 @@ fn invalid_extent(at: &str, msg: String) -> Error {
 }
 
 impl Extent {
-    pub fn length(&self) -> &Quantity {
+    /// A blind or symmetric extent's length.
+    pub fn length(&self) -> Option<&Quantity> {
         match self {
-            Extent::Blind(q) | Extent::Symmetric(q) => q,
+            Extent::Blind(q) | Extent::Symmetric(q) => Some(q),
+            Extent::UpTo { .. } => None,
+        }
+    }
+
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Extent::Blind(_) => "blind",
+            Extent::Symmetric(_) => "symmetric",
+            Extent::UpTo { .. } => "up_to",
         }
     }
 
     pub fn to_json(&self) -> Value {
-        let ty = match self {
-            Extent::Blind(_) => "blind",
-            Extent::Symmetric(_) => "symmetric",
-        };
-        json!({"type": ty, "length": self.length().text()})
+        let mut v = json!({"type": self.type_name()});
+        match self {
+            Extent::Blind(q) | Extent::Symmetric(q) => v["length"] = json!(q.text()),
+            Extent::UpTo { target, offset } => {
+                v["target"] = target.to_json();
+                if let Some(q) = offset {
+                    v["offset"] = json!(q.text());
+                }
+            }
+        }
+        v
     }
 
-    /// Reads an extent, its length reading `env`; it must be greater than
-    /// zero.
+    /// Reads an extent, its quantities reading `env`: a blind or symmetric
+    /// length greater than zero, or an up-to target and offset.
     pub fn from_json(v: &Value, default: Unit, env: &Env) -> Result<Extent> {
         let mut o = Obj::new(v, "/extent")?;
         let ty = o.take("type")?;
-        let length = o.take("length")?;
+        let quantity = |v: &Value, at: &str| {
+            Quantity::from_json_in(v, default, &|n| env.get(n)).map_err(|e| e.with("pointer", at))
+        };
+        let extent = match ty.as_str() {
+            Some(t @ ("blind" | "symmetric")) => {
+                let q = quantity(&o.take("length")?, "/extent/length")?;
+                if q.meters() <= 0.0 {
+                    return Err(invalid_extent(
+                        "/extent/length",
+                        format!("an extrude's length must be greater than zero, not {q}"),
+                    ));
+                }
+                if t == "blind" {
+                    Extent::Blind(q)
+                } else {
+                    Extent::Symmetric(q)
+                }
+            }
+            Some("up_to") => Extent::UpTo {
+                target: Reference::from_json(&o.take("target")?, "/extent/target")?,
+                offset: o
+                    .take_opt("offset")
+                    .map(|v| quantity(&v, "/extent/offset"))
+                    .transpose()?,
+            },
+            _ => {
+                return Err(invalid_extent(
+                    "/extent/type",
+                    format!("an extent's type is blind, symmetric or up_to, not {ty}"),
+                ));
+            }
+        };
         o.finish()?;
-        let q = Quantity::from_json_in(&length, default, &|n| env.get(n))
-            .map_err(|e| e.with("pointer", "/extent/length"))?;
-        if q.meters() <= 0.0 {
-            return Err(invalid_extent(
-                "/extent/length",
-                format!("an extrude's length must be greater than zero, not {q}"),
-            ));
-        }
-        match ty.as_str() {
-            Some("blind") => Ok(Extent::Blind(q)),
-            Some("symmetric") => Ok(Extent::Symmetric(q)),
-            _ => Err(invalid_extent(
-                "/extent/type",
-                format!("an extent's type is blind or symmetric, not {ty}"),
-            )),
-        }
+        Ok(extent)
     }
 }
 
@@ -272,8 +312,35 @@ mod tests {
     }
 
     #[test]
+    fn up_to_a_target() {
+        const N: &str = "0123456789abcdef0123456789abcdef";
+        let mut v = extrude();
+        v["extent"] = json!({"type": "up_to", "target": {"feature": "b", "name": N},
+                             "offset": "-depth"});
+        let f = read(&v).unwrap();
+        let Feature::Extrude(e) = &f else { panic!() };
+        let Extent::UpTo { target, offset } = &e.extent else {
+            panic!()
+        };
+        assert_eq!(target.feature.as_str(), "b");
+        assert_eq!(offset.as_ref().unwrap().meters(), -0.005);
+        assert!(e.extent.length().is_none());
+        assert_eq!(
+            f.references()
+                .iter()
+                .map(|(r, _)| r.as_str())
+                .collect::<Vec<_>>(),
+            ["target"]
+        );
+        let text = canonical::to_string(&f.to_json());
+        assert_eq!(read(&canonical::parse(&text).unwrap()).unwrap(), f);
+        v["extent"]["length"] = json!(3);
+        assert_eq!(read(&v).unwrap_err().details["pointer"], "/extent/length");
+    }
+
+    #[test]
     fn extents_are_checked() {
-        let cases: [(&str, Value, Code, &str); 7] = [
+        let cases: [(&str, Value, Code, &str); 8] = [
             (
                 "/extent/length",
                 json!("-1 mm"),
@@ -289,6 +356,12 @@ mod tests {
             (
                 "/extent/type",
                 json!("up_to"),
+                Code::InvalidDocument,
+                "/extent/target",
+            ),
+            (
+                "/extent/type",
+                json!("through"),
                 Code::InvalidExtent,
                 "/extent/type",
             ),

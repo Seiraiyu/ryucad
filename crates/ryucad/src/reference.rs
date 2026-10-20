@@ -167,3 +167,129 @@ pub fn line(
         _ => Err(wrong("curved edge")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::error::Code;
+    use crate::server::tests::call;
+    use crate::session::Session;
+    use crate::sketch::tests::{edge_between, face_along, rectangle_ops, vertex_at, with_box};
+    use serde_json::{Value, json};
+
+    /// The box `b` with the rectangle sketch `s` on xy beside it, and the
+    /// box's body in `inspect`.
+    fn with_box_and_sketch() -> (tempfile::TempDir, Session, Value) {
+        let (dir, mut s, body) = with_box();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": rectangle_ops()}),
+        )
+        .unwrap();
+        (dir, s, body)
+    }
+
+    /// The top of extrude `e`'s box.
+    fn top(s: &mut Session) -> f64 {
+        call(s, "inspect", json!({"part": "p", "feature": "e"})).unwrap()["bodies"][0]["bounds"]
+            ["max"][2]
+            .as_f64()
+            .unwrap()
+    }
+
+    #[test]
+    fn up_to_a_face_or_a_vertex() {
+        let (_dir, mut s, body) = with_box_and_sketch();
+        let face = format!("p/b/{}", face_along(&body, [0.0, 0.0, 1.0]));
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "id": "e", "sketch": "s",
+                   "extent": {"type": "up_to", "target": face}}),
+        )
+        .unwrap();
+        assert!((top(&mut s) - 0.005).abs() < 1e-15);
+        let show = call(&mut s, "feature.show", json!({"part": "p", "id": "e"})).unwrap();
+        assert_eq!(show["extent"], json!({"type": "up_to", "target": face}));
+        // An offset alone keeps the target.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "e", "extent": {"offset": "-1 mm"}}),
+        )
+        .unwrap();
+        assert!((top(&mut s) - 0.004).abs() < 1e-15);
+        // The target moves; the extrude follows.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"z": 8}}),
+        )
+        .unwrap();
+        assert!((top(&mut s) - 0.007).abs() < 1e-15);
+        // Up to a vertex, keeping the offset.
+        let corner = format!("p/b/{}", vertex_at(&body, [0.0, 0.0, 0.005]));
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "e", "extent": {"type": "up_to", "target": corner}}),
+        )
+        .unwrap();
+        assert!((top(&mut s) - 0.007).abs() < 1e-15);
+        // A new type starts afresh.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "e", "extent": {"type": "blind", "length": 2}}),
+        )
+        .unwrap();
+        assert!((top(&mut s) - 0.002).abs() < 1e-15);
+    }
+
+    #[test]
+    fn targets_that_wont_do() {
+        let (_dir, mut s, body) = with_box_and_sketch();
+        let (a, b) = (
+            vertex_at(&body, [0.0, 0.0, 0.005]),
+            vertex_at(&body, [0.02, 0.0, 0.005]),
+        );
+        let edge = format!("p/b/{}", edge_between(&body, &a, &b));
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "sketch": "s",
+                   "extent": {"type": "up_to", "target": edge}}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind);
+        // A side, the sketch's own plane, and a face behind it: only
+        // rebuild can tell.
+        let mut id = 0;
+        for (target, reverse) in [
+            (face_along(&body, [0.0, -1.0, 0.0]), false),
+            (face_along(&body, [0.0, 0.0, -1.0]), false),
+            (face_along(&body, [0.0, 0.0, 1.0]), true),
+        ] {
+            id += 1;
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "p", "type": "extrude", "id": format!("e{id}"), "sketch": "s",
+                       "reverse": reverse,
+                       "extent": {"type": "up_to", "target": format!("p/b/{target}")}}),
+            )
+            .unwrap();
+        }
+        let e = call(&mut s, "rebuild", json!({})).unwrap_err();
+        for f in &e.details["parts"][0]["features"].as_array().unwrap()[2..] {
+            assert_eq!(f["error"]["code"], "invalid_extent", "{f}");
+            assert_eq!(f["error"]["details"]["role"], "target", "{f}");
+        }
+    }
+}

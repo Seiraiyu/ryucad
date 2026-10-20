@@ -1226,7 +1226,7 @@ pub fn write_back(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::doc::files::Feature;
     use crate::expr::Env;
@@ -1302,7 +1302,7 @@ mod tests {
     use crate::server::tests::{call, fresh};
 
     /// Part `p` with an empty sketch `s` on xy.
-    fn with_sketch() -> (tempfile::TempDir, Session) {
+    pub(crate) fn with_sketch() -> (tempfile::TempDir, Session) {
         let (dir, mut s) = fresh();
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();
         call(
@@ -1315,7 +1315,7 @@ mod tests {
     }
 
     /// Ops drawing a rough 20 × 10 rectangle, held square and sized.
-    fn rectangle_ops() -> Value {
+    pub(crate) fn rectangle_ops() -> Value {
         json!([
             {"op": "add", "type": "point", "at": [0, 0]},
             {"op": "add", "type": "point", "at": [19, 1]},
@@ -1348,7 +1348,7 @@ mod tests {
         }
     }
 
-    fn edit(s: &mut Session, ops: Value) -> Result<Value> {
+    pub(crate) fn edit(s: &mut Session, ops: Value) -> Result<Value> {
         call(
             s,
             "sketch.edit",

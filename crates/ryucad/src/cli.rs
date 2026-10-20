@@ -513,10 +513,16 @@ struct FieldArgs {
     /// An extrude's length.
     #[arg(long, value_name = "QUANTITY")]
     length: Option<String>,
-    /// An extrude's extent: blind (from the sketch's plane, the default) or symmetric (half
-    /// each side).
+    /// An extrude's extent: blind (from the sketch's plane, the default), symmetric (half
+    /// each side) or up_to (--up-to).
     #[arg(long, value_name = "TYPE")]
     extent: Option<String>,
+    /// Extrude up to a planar face parallel to the sketch, or a vertex: <part>/<feature>/<name>.
+    #[arg(long, value_name = "REFERENCE")]
+    up_to: Option<String>,
+    /// How much further than --up-to's target to go (negative stops short).
+    #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
+    offset: Option<String>,
     /// Extrude against the sketch's normal (or --reverse false).
     #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
     reverse: Option<bool>,
@@ -539,6 +545,13 @@ impl FieldArgs {
         }
         if let Some(l) = &self.length {
             extent.insert("length".into(), json!(l));
+        }
+        if let Some(t) = &self.up_to {
+            extent.insert("type".into(), json!("up_to"));
+            extent.insert("target".into(), json!(t));
+        }
+        if let Some(o) = &self.offset {
+            extent.insert("offset".into(), json!(o));
         }
         FeatureFields {
             plane: self.plane.clone(),

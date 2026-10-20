@@ -280,8 +280,10 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
             }
             ("constraints", c) => out.extend(Sketch::expression_strings(c)),
             ("extent", Value::Object(e)) => {
-                if let Some(Value::String(s)) = e.get_mut("length") {
-                    out.push(s);
+                for (k, x) in e.iter_mut() {
+                    if let ("length" | "offset", Value::String(s)) = (k.as_str(), x) {
+                        out.push(s);
+                    }
                 }
             }
             // "full" is a word, not a parameter.
@@ -404,6 +406,10 @@ impl Feature {
     pub fn references(&self) -> Vec<(String, &Reference)> {
         match self {
             Feature::Sketch(s) => s.references(),
+            Feature::Extrude(e) => match &e.extent {
+                super::sweep::Extent::UpTo { target, .. } => vec![("target".to_owned(), target)],
+                _ => Vec::new(),
+            },
             _ => Vec::new(),
         }
     }
