@@ -393,6 +393,8 @@ fn every_protocol_method_has_a_command() {
         ("param.set", &["param", "set"]),
         ("param.delete", &["param", "delete"]),
         ("param.rename", &["param", "rename"]),
+        ("sketch.edit", &["sketch", "edit"]),
+        ("sketch.solve", &["sketch", "solve"]),
         ("rebuild", &["rebuild"]),
         ("inspect", &["inspect"]),
         ("check_format", &["check-format"]),

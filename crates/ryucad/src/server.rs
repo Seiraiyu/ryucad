@@ -235,6 +235,15 @@ fn dispatch(
             to,
             expected_revision,
         } => param::rename(session, &part, &from, &to, expected_revision.as_deref()),
+        Request::SketchEdit {
+            part,
+            sketch,
+            ops,
+            expected_revision,
+        } => crate::sketch::edit(session, &part, &sketch, &ops, expected_revision.as_deref()),
+        Request::SketchSolve { part, sketch, ops } => {
+            crate::sketch::solve_request(session, &part, &sketch, &ops)
+        }
         Request::FeatureShow { part, id } => {
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
             let p = session.project().part(&part)?;
@@ -576,12 +585,12 @@ fn part_list(session: &Session) -> Value {
     json!({ "parts": parts })
 }
 
-fn feature_id(s: &str) -> Result<Id> {
+pub(crate) fn feature_id(s: &str) -> Result<Id> {
     Id::parse(s, "feature")
 }
 
 /// The part's feature list, or why it can't be used.
-fn order(part: &Part) -> Result<Vec<Id>> {
+pub(crate) fn order(part: &Part) -> Result<Vec<Id>> {
     part.file
         .as_ref()
         .map(|f| f.features.clone())
@@ -589,7 +598,7 @@ fn order(part: &Part) -> Result<Vec<Id>> {
 }
 
 /// A feature of `part`, or the error that keeps it from loading.
-fn feature<'a>(part: &'a Part, id: &Id) -> Result<&'a Feature> {
+pub(crate) fn feature<'a>(part: &'a Part, id: &Id) -> Result<&'a Feature> {
     match part.features.get(id) {
         Some(Ok(f)) => Ok(f),
         Some(Err(e)) => Err(e.clone()),
@@ -695,7 +704,7 @@ fn insert_at(order: &[Id], position: &Position) -> Result<usize> {
 
 /// Writes a feature file, then the part's list: a crash in between leaves
 /// at worst an unlisted feature file, which `check_format` reports.
-fn save(
+pub(crate) fn save(
     session: &mut Session,
     part: &Id,
     writes: &[(&Id, &Feature)],

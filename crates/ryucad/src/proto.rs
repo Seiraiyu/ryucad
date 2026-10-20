@@ -212,6 +212,24 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// Applies a batch of sketch edits with one solve; atomic.
+    #[serde(rename = "sketch.edit")]
+    SketchEdit {
+        part: String,
+        sketch: String,
+        #[serde(default)]
+        ops: Vec<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Solves a sketch, or a proposed batch of edits, without writing.
+    #[serde(rename = "sketch.solve")]
+    SketchSolve {
+        part: String,
+        sketch: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ops: Vec<Value>,
+    },
     #[serde(rename = "rebuild")]
     Rebuild {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -453,6 +471,7 @@ impl Request {
                 | Request::ParamSet { .. }
                 | Request::ParamDelete { .. }
                 | Request::ParamRename { .. }
+                | Request::SketchEdit { .. }
                 | Request::Undo { .. }
                 | Request::Redo { .. }
                 | Request::DoctorRepair { .. }

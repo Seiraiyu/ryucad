@@ -82,6 +82,8 @@ pub enum Code {
     HasDependents,
     /// A sketch whose constraints can't all be made to hold.
     SketchUnsolved,
+    /// A sketch edit that would leave constraints redundant or in conflict.
+    SketchOverconstrained,
 }
 
 impl Code {

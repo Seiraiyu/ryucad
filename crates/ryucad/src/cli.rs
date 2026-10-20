@@ -61,6 +61,10 @@ enum Command {
     /// such as "3 mm" or "wall * 2", that features' quantities can read.
     #[command(subcommand)]
     Param(ParamCmd),
+    /// Edit, solve or read a sketch: points, lines, arcs and circles, and the constraints and
+    /// dimensions between them.
+    #[command(subcommand)]
+    Sketch(SketchCmd),
     /// Rebuild one part, or all of them.
     Rebuild { part: Option<String> },
     /// List a part's bodies, faces, edges and vertices by stable name.
@@ -426,6 +430,35 @@ enum ParamCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum SketchCmd {
+    /// Apply a batch of edits with one solve, or refuse them all. OPS is a JSON array (or @FILE
+    /// holding one) of {"op": "add", "type": "point", "at": ["0", "10 mm"]}, {"op": "add",
+    /// "type": "line", "start": "p1", "end": "p2"}, {"op": "add", "type": "length", "a": "l1",
+    /// "value": "width"}, {"op": "remove", "id": "c3"}, {"op": "set", "id": "d1", "value":
+    /// "20 mm"} and {"op": "move", "id": "p3", "at": [...]}. With no ops, re-solves and writes
+    /// the positions.
+    Edit {
+        part: String,
+        sketch: String,
+        #[arg(value_name = "OPS", value_parser = ops)]
+        ops: Option<Ops>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Solve without writing: the report for the sketch as it is, or with OPS applied.
+    Solve {
+        part: String,
+        sketch: String,
+        #[arg(value_name = "OPS", value_parser = ops)]
+        ops: Option<Ops>,
+    },
+}
+
+/// Sketch ops, parsed from one argument.
+#[derive(Clone)]
+struct Ops(Vec<Value>);
+
 #[derive(Args)]
 struct Expect {
     /// Fail with `conflict` unless the part is still at this revision.
@@ -515,6 +548,17 @@ fn camera_arg(
             },
         },
     })
+}
+
+/// A JSON array of sketch ops, or `@FILE` holding one.
+fn ops(s: &str) -> core::result::Result<Ops, String> {
+    let text = match s.strip_prefix('@') {
+        Some(path) => std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?,
+        None => s.to_owned(),
+    };
+    serde_json::from_str(&text)
+        .map(Ops)
+        .map_err(|e| format!("OPS must be a JSON array of ops: {e}"))
 }
 
 fn param(s: &str) -> core::result::Result<(String, String), String> {
@@ -685,6 +729,22 @@ fn request(cmd: &Command) -> Option<Request> {
             from: from.clone(),
             to: to.clone(),
             expected_revision: expect.revision.clone(),
+        },
+        Command::Sketch(SketchCmd::Edit {
+            part,
+            sketch,
+            ops,
+            expect,
+        }) => Request::SketchEdit {
+            part: part.clone(),
+            sketch: sketch.clone(),
+            ops: ops.clone().map_or_else(Vec::new, |o| o.0),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Sketch(SketchCmd::Solve { part, sketch, ops }) => Request::SketchSolve {
+            part: part.clone(),
+            sketch: sketch.clone(),
+            ops: ops.clone().map_or_else(Vec::new, |o| o.0),
         },
         Command::Rebuild { part } => Request::Rebuild { part: part.clone() },
         Command::Inspect {

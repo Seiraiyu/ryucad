@@ -626,7 +626,12 @@ fn entity_from_json(v: &Value, at: &str) -> Result<Entity> {
     })
 }
 
-fn constraint_from_json(v: &Value, at: &str, default: Unit, env: &Env) -> Result<Constraint> {
+pub(crate) fn constraint_from_json(
+    v: &Value,
+    at: &str,
+    default: Unit,
+    env: &Env,
+) -> Result<Constraint> {
     let mut o = Obj::new(v, at)?;
     let ty = o.take("type")?;
     let ty = ConstraintType::parse(

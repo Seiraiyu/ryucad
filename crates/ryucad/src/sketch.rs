@@ -7,14 +7,20 @@
 //! Otherwise the sketch is *stale*: rebuild uses positions solved in
 //! memory from the stored ones and warns `sketch_stale`.
 
+use crate::doc::files::Feature;
 use crate::doc::id::Id;
-use crate::doc::sketch::{Index, Plane, Sketch};
+use crate::doc::sketch::{
+    ConstraintType, Entity, Geometry, Index, Plane, Sketch, clean, constraint_from_json,
+};
 use crate::error::{Code, Error, Result};
+use crate::expr::Env;
 use crate::rebuild::placement;
-use crate::units::Unit;
+use crate::server;
+use crate::session::Session;
+use crate::units::{Field, Quantity, Unit};
 use ryukei::geom::Rigid;
 use ryusketch::{Coord, State};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 /// What a solve found, in the sketch's IDs.
 #[derive(Clone, Debug, PartialEq)]
@@ -127,23 +133,56 @@ pub struct Solved {
     pub hash: String,
 }
 
-/// Solves a sketch from its stored positions. A sketch whose constraints
-/// can't all be made to hold is `sketch_unsolved`, with the report.
-pub fn solve(id: &Id, s: &Sketch) -> Result<Solved> {
+/// Solves a sketch from its stored positions, whether or not every
+/// constraint can be made to hold: the sketch at the solution, and the
+/// report.
+pub fn solve_any(id: &Id, s: &Sketch) -> Result<(Sketch, Report)> {
     let (solver, index) = s.solver()?;
     let solved = ryusketch::solve(&solver)
         .map_err(|e| Error::new(Code::Internal, format!("sketch {id}: {e}")).with("feature", id))?;
-    let report = Report::new(&solved.report, &index);
-    if !report.converged {
-        return Err(Error::new(
-            Code::SketchUnsolved,
-            format!("sketch {id}: its constraints can't all be made to hold"),
-        )
-        .with("feature", id)
-        .with("report", report.to_json()));
-    }
     let mut sketch = s.clone();
     sketch.take_positions(&solved.sketch, &index);
+    Ok((sketch, Report::new(&solved.report, &index)))
+}
+
+/// Solves an edited sketch. What was moved is first held where it was put,
+/// so it stays there if everything else can follow; the solve from there
+/// gives the sketch's own report.
+pub fn solve_edited(id: &Id, s: &Sketch, moved: &[Id]) -> Result<(Sketch, Report)> {
+    let mut start = s.clone();
+    if !moved.is_empty() {
+        let (mut solver, index) = s.solver()?;
+        let first = solver.constraints.len() as u32;
+        for (c, m) in (first..).zip(moved) {
+            let e = index.entity(m).expect("moved entities exist");
+            solver.constraints.insert(c, ryusketch::Constraint::Fix(e));
+        }
+        if let Ok(held) = ryusketch::solve(&solver)
+            && held.report.converged
+        {
+            start.take_positions(&held.sketch, &index);
+        }
+    }
+    solve_any(id, &start)
+}
+
+/// `sketch_unsolved` for a sketch whose constraints can't all hold.
+fn unsolved(id: &Id, report: &Report) -> Error {
+    Error::new(
+        Code::SketchUnsolved,
+        format!("sketch {id}: its constraints can't all be made to hold"),
+    )
+    .with("feature", id)
+    .with("report", report.to_json())
+}
+
+/// Solves a sketch from its stored positions. A sketch whose constraints
+/// can't all be made to hold is `sketch_unsolved`, with the report.
+pub fn solve(id: &Id, s: &Sketch) -> Result<Solved> {
+    let (sketch, report) = solve_any(id, s)?;
+    if !report.converged {
+        return Err(unsolved(id, &report));
+    }
     let frame = frame(&sketch.plane)?;
     let hash = hash(&sketch, &frame, &report);
     Ok(Solved {
@@ -185,6 +224,378 @@ pub fn stale_warning(id: &Id) -> Value {
              rebuilt from positions solved in memory (run `ryucad doctor` to write them)"
         ),
     })
+}
+
+/// An entity type's prefix for generated IDs: `p3`, `l2`, `a1`, `ci4`.
+fn prefix(ty: &str) -> &'static str {
+    match ty {
+        "point" => "p",
+        "line" => "l",
+        "arc" => "a",
+        "circle" => "ci",
+        t if ConstraintType::parse(t).is_ok_and(|t| t.value().is_some()) => "d",
+        _ => "c",
+    }
+}
+
+/// The smallest `<prefix><n>` the sketch doesn't use.
+fn fresh(s: &Sketch, prefix: &str) -> Id {
+    (1u64..)
+        .map(|n| Id::parse(&format!("{prefix}{n}"), "entity").expect("a valid ID"))
+        .find(|id| !s.entities.contains_key(id) && !s.constraints.contains_key(id))
+        .expect("some n is free")
+}
+
+fn op_error(i: usize, field: &str, msg: String) -> Error {
+    let at = if field.is_empty() {
+        format!("/ops/{i}")
+    } else {
+        format!("/ops/{i}/{field}")
+    };
+    Error::new(Code::InvalidParam, msg).with("pointer", at)
+}
+
+/// A rough position, two quantities in the default unit.
+fn rough(v: &Value, i: usize, unit: Unit, env: &Env) -> Result<[f64; 2]> {
+    let a = v
+        .as_array()
+        .filter(|a| a.len() == 2)
+        .ok_or_else(|| op_error(i, "at", "at is two quantities: [x, y]".into()))?;
+    let q = |k: usize| {
+        Quantity::from_json_in(&a[k], unit, &|n| env.get(n))
+            .map(|q| clean(q.meters()))
+            .map_err(|e| e.with("pointer", format!("/ops/{i}/at/{k}")))
+    };
+    Ok([q(0)?, q(1)?])
+}
+
+/// The ID an op names, which must exist.
+fn named(s: &Sketch, o: &Map<String, Value>, i: usize) -> Result<Id> {
+    let id = o
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| op_error(i, "id", "this op names an entity or constraint: id".into()))?;
+    let id = Id::parse(id, "entity").map_err(|e| e.with("pointer", format!("/ops/{i}/id")))?;
+    if !s.entities.contains_key(&id) && !s.constraints.contains_key(&id) {
+        return Err(
+            Error::new(Code::NotFound, format!("the sketch has no {id}"))
+                .with("id", &id)
+                .with("pointer", format!("/ops/{i}/id")),
+        );
+    }
+    Ok(id)
+}
+
+/// Refuses fields an op doesn't take.
+fn only(o: &Map<String, Value>, i: usize, fields: &[&str]) -> Result<()> {
+    match o.keys().find(|k| !fields.contains(&k.as_str())) {
+        None => Ok(()),
+        Some(k) => Err(op_error(i, k, format!("this op takes no {k}"))),
+    }
+}
+
+/// What a batch of edits did besides changing the sketch.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Applied {
+    /// The IDs `add` ops gave or were given, in order.
+    pub added: Vec<Id>,
+    /// What `move` ops put somewhere.
+    pub moved: Vec<Id>,
+}
+
+/// Applies a batch of edits to a sketch, in order.
+pub fn apply(s: &mut Sketch, ops: &[Value], unit: Unit, env: &Env) -> Result<Applied> {
+    let mut added = Vec::new();
+    let mut moved = Vec::new();
+    for (i, op) in ops.iter().enumerate() {
+        let o = op.as_object().ok_or_else(|| {
+            op_error(
+                i,
+                "",
+                "an op is an object such as {\"op\": \"add\", ...}".into(),
+            )
+        })?;
+        match o.get("op").and_then(Value::as_str) {
+            Some("add") => added.push(add(s, o, i, unit, env)?),
+            Some("remove") => {
+                only(o, i, &["op", "id"])?;
+                let id = named(s, o, i)?;
+                s.entities.remove(&id);
+                s.constraints.remove(&id);
+                s.constraints.retain(|_, c| !c.entities.contains(&id));
+            }
+            Some("set") => {
+                only(o, i, &["op", "id", "value", "construction"])?;
+                let id = named(s, o, i)?;
+                set(s, &id, o, i, unit, env)?;
+            }
+            Some("move") => {
+                only(o, i, &["op", "id", "at", "r"])?;
+                let id = named(s, o, i)?;
+                moved.push(id.clone());
+                match (
+                    s.entities.get_mut(&id).map(|e| &mut e.geometry),
+                    o.get("at"),
+                    o.get("r"),
+                ) {
+                    (Some(Geometry::Point { m }), Some(at), None) => *m = rough(at, i, unit, env)?,
+                    (Some(Geometry::Circle { r_m, .. }), None, Some(r)) => {
+                        *r_m = Quantity::from_json_in(r, unit, &|n| env.get(n))
+                            .map_err(|e| e.with("pointer", format!("/ops/{i}/r")))?
+                            .meters()
+                    }
+                    _ => {
+                        return Err(op_error(
+                            i,
+                            "",
+                            format!("move a point with at, or a circle with r; {id} is neither"),
+                        ));
+                    }
+                }
+            }
+            _ => return Err(op_error(i, "op", "op is add, remove, set or move".into())),
+        }
+    }
+    // A curve can't outlive the points it is built on.
+    for (id, e) in &s.entities {
+        if let Some((_, p)) = e
+            .geometry
+            .points()
+            .into_iter()
+            .find(|(_, p)| !s.entities.contains_key(*p))
+        {
+            return Err(Error::new(
+                Code::HasDependents,
+                format!("{p} is gone but {id} is built on it; remove {id} too"),
+            )
+            .with("entity", p)
+            .with("dependents", [id]));
+        }
+    }
+    s.validate()?;
+    moved.retain(|id| s.entities.contains_key(id));
+    Ok(Applied { added, moved })
+}
+
+fn add(s: &mut Sketch, o: &Map<String, Value>, i: usize, unit: Unit, env: &Env) -> Result<Id> {
+    let ty = o
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| op_error(i, "type", "add needs a type".into()))?;
+    let id = match o.get("id") {
+        Some(v) => {
+            let id = v
+                .as_str()
+                .ok_or_else(|| op_error(i, "id", "id is a string".into()))?;
+            let id =
+                Id::parse(id, "entity").map_err(|e| e.with("pointer", format!("/ops/{i}/id")))?;
+            if s.entities.contains_key(&id) || s.constraints.contains_key(&id) {
+                return Err(
+                    Error::new(Code::DuplicateId, format!("the sketch already has {id}"))
+                        .with("id", &id)
+                        .with("pointer", format!("/ops/{i}/id")),
+                );
+            }
+            id
+        }
+        None => fresh(s, prefix(ty)),
+    };
+    let point = |f: &str| -> Result<Id> {
+        let v = o
+            .get(f)
+            .and_then(Value::as_str)
+            .ok_or_else(|| op_error(i, f, format!("a {ty} needs {f}: a point's ID")))?;
+        Id::parse(v, "entity").map_err(|e| e.with("pointer", format!("/ops/{i}/{f}")))
+    };
+    let construction = match o.get("construction") {
+        None => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => {
+            return Err(op_error(
+                i,
+                "construction",
+                "construction is true or false".into(),
+            ));
+        }
+    };
+    let geometry = match ty {
+        "point" => {
+            only(o, i, &["op", "id", "type", "at"])?;
+            let at = o
+                .get("at")
+                .ok_or_else(|| op_error(i, "at", "a point needs at: [x, y]".into()))?;
+            Some(Geometry::Point {
+                m: rough(at, i, unit, env)?,
+            })
+        }
+        "line" => {
+            only(o, i, &["op", "id", "type", "start", "end", "construction"])?;
+            Some(Geometry::Line {
+                start: point("start")?,
+                end: point("end")?,
+            })
+        }
+        "arc" => {
+            only(
+                o,
+                i,
+                &["op", "id", "type", "center", "start", "end", "construction"],
+            )?;
+            Some(Geometry::Arc {
+                center: point("center")?,
+                start: point("start")?,
+                end: point("end")?,
+            })
+        }
+        "circle" => {
+            only(o, i, &["op", "id", "type", "center", "r", "construction"])?;
+            let r = o
+                .get("r")
+                .ok_or_else(|| op_error(i, "r", "a circle needs r".into()))?;
+            let r = Quantity::from_json_in(r, unit, &|n| env.get(n))
+                .map_err(|e| e.with("pointer", format!("/ops/{i}/r")))?;
+            Some(Geometry::Circle {
+                center: point("center")?,
+                r_m: clean(r.meters()),
+            })
+        }
+        _ => None,
+    };
+    match geometry {
+        Some(geometry) => {
+            s.entities.insert(
+                id.clone(),
+                Entity {
+                    geometry,
+                    construction,
+                },
+            );
+        }
+        None => {
+            let mut c = o.clone();
+            c.remove("op");
+            c.remove("id");
+            let c = constraint_from_json(&Value::Object(c), &format!("/ops/{i}"), unit, env)?;
+            s.constraints.insert(id.clone(), c);
+        }
+    }
+    Ok(id)
+}
+
+fn set(
+    s: &mut Sketch,
+    id: &Id,
+    o: &Map<String, Value>,
+    i: usize,
+    unit: Unit,
+    env: &Env,
+) -> Result<()> {
+    if let Some(v) = o.get("value") {
+        let c = s
+            .constraints
+            .get_mut(id)
+            .filter(|c| c.ty.value().is_some())
+            .ok_or_else(|| op_error(i, "value", format!("{id} is not a dimension")))?;
+        let field = match c.ty.value().expect("a dimension") {
+            Field::Length(_) => Field::Length(unit),
+            f => f,
+        };
+        c.value = Some(
+            Quantity::from_json_as(v, field, &|n| env.get(n))
+                .map_err(|e| e.with("pointer", format!("/ops/{i}/value")))?,
+        );
+    }
+    if let Some(v) = o.get("construction") {
+        let e = s
+            .entities
+            .get_mut(id)
+            .filter(|e| !matches!(e.geometry, Geometry::Point { .. }))
+            .ok_or_else(|| {
+                op_error(
+                    i,
+                    "construction",
+                    format!("{id} is not a line, arc or circle"),
+                )
+            })?;
+        e.construction = v
+            .as_bool()
+            .ok_or_else(|| op_error(i, "construction", "construction is true or false".into()))?;
+    }
+    if o.get("value").is_none() && o.get("construction").is_none() {
+        return Err(op_error(
+            i,
+            "",
+            "set a dimension's value or a curve's construction".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The sketch feature `id` of a part.
+fn sketch_of(session: &Session, part: &Id, id: &Id) -> Result<Sketch> {
+    let p = session.project().part(part)?;
+    match server::feature(p, id)? {
+        Feature::Sketch(s) => Ok(s.clone()),
+        f => Err(Error::new(
+            Code::InvalidParam,
+            format!("{id} is a {}, not a sketch", f.type_name()),
+        )
+        .with("feature", id)),
+    }
+}
+
+/// `sketch.edit`: applies a batch of edits with one solve, and writes the
+/// solved positions, or refuses the whole batch.
+pub fn edit(
+    session: &mut Session,
+    part: &str,
+    sketch: &str,
+    ops: &[Value],
+    expected: Option<&str>,
+) -> Result<Value> {
+    let (pid, fid) = (server::part_id(part)?, server::feature_id(sketch)?);
+    let unit = session.project().manifest.default_unit;
+    let p = session.project().part(&pid)?;
+    server::check_revision(p, expected)?;
+    let list = server::order(p)?;
+    let env = p.env.clone();
+    let mut s = sketch_of(session, &pid, &fid)?;
+    let applied = apply(&mut s, ops, unit, &env)?;
+    let (solved, report) = solve_edited(&fid, &s, &applied.moved)?;
+    if !report.converged {
+        return Err(unsolved(&fid, &report));
+    }
+    if report.state == State::Over {
+        return Err(Error::new(
+            Code::SketchOverconstrained,
+            format!("sketch {fid}: some constraints are redundant or in conflict"),
+        )
+        .with("feature", &fid)
+        .with("report", report.to_json()));
+    }
+    // Whether the solve moved anything.
+    let changed = solved != s;
+    let f = Feature::Sketch(solved);
+    let revision = server::save(session, &pid, &[(&fid, &f)], list)?;
+    Ok(
+        json!({"feature": fid, "added": applied.added, "changed": changed,
+              "report": report.to_json(), "revision": revision}),
+    )
+}
+
+/// `sketch.solve`: the report for a sketch as it is, or with a batch of
+/// edits applied, and where its entities would be. Writes nothing.
+pub fn solve_request(session: &Session, part: &str, sketch: &str, ops: &[Value]) -> Result<Value> {
+    let (pid, fid) = (server::part_id(part)?, server::feature_id(sketch)?);
+    let unit = session.project().manifest.default_unit;
+    let env = session.project().part(&pid)?.env.clone();
+    let mut s = sketch_of(session, &pid, &fid)?;
+    let applied = apply(&mut s, ops, unit, &env)?;
+    let (solved, report) = solve_edited(&fid, &s, &applied.moved)?;
+    Ok(
+        json!({"feature": fid, "added": applied.added, "changed": solved != s,
+              "report": report.to_json(), "entities": solved.fields()["entities"]}),
+    )
 }
 
 #[cfg(test)]
@@ -259,5 +670,280 @@ mod tests {
         let e = solve(&id("s"), &s).unwrap_err();
         assert_eq!(e.code, Code::SketchUnsolved);
         assert_eq!(e.details["report"]["converged"], false);
+    }
+
+    use crate::server::tests::{call, fresh};
+
+    /// Part `p` with an empty sketch `s` on xy.
+    fn with_sketch() -> (tempfile::TempDir, Session) {
+        let (dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s"}),
+        )
+        .unwrap();
+        (dir, s)
+    }
+
+    /// Ops drawing a rough 20 × 10 rectangle, held square and sized.
+    fn rectangle_ops() -> Value {
+        json!([
+            {"op": "add", "type": "point", "at": [0, 0]},
+            {"op": "add", "type": "point", "at": [19, 1]},
+            {"op": "add", "type": "point", "at": [21, 9]},
+            {"op": "add", "type": "point", "at": [1, 11]},
+            {"op": "add", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "type": "line", "start": "p3", "end": "p4"},
+            {"op": "add", "type": "line", "start": "p4", "end": "p1"},
+            {"op": "add", "type": "horizontal", "a": "l1"},
+            {"op": "add", "type": "horizontal", "a": "l3"},
+            {"op": "add", "type": "vertical", "a": "l2"},
+            {"op": "add", "type": "vertical", "a": "l4"},
+            {"op": "add", "type": "fix", "a": "p1"},
+            {"op": "add", "id": "width", "type": "length", "a": "l1", "value": "20 mm"},
+            {"op": "add", "type": "distance", "a": "p1", "b": "l3", "value": 10}
+        ])
+    }
+
+    /// A point's position in a `feature.show`, which must be within the
+    /// solver's tolerance of `want`.
+    fn near(show: &Value, point: &str, want: [f64; 2]) {
+        let m = &show["entities"][point]["m"];
+        for k in 0..2 {
+            let x = m[k].as_f64().unwrap();
+            assert!(
+                (x - want[k]).abs() < ryusketch::SOLVE_TOL,
+                "{point}: {m} != {want:?}"
+            );
+        }
+    }
+
+    fn edit(s: &mut Session, ops: Value) -> Result<Value> {
+        call(
+            s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": ops}),
+        )
+    }
+
+    #[test]
+    fn a_batch_is_applied_and_solved_at_once() {
+        let (_dir, mut s) = with_sketch();
+        let r = edit(&mut s, rectangle_ops()).unwrap();
+        assert_eq!(
+            r["added"],
+            json!([
+                "p1", "p2", "p3", "p4", "l1", "l2", "l3", "l4", "c1", "c2", "c3", "c4", "c5",
+                "width", "d1"
+            ])
+        );
+        assert_eq!(r["changed"], true);
+        assert_eq!(r["report"]["state"], "well");
+        assert_eq!(
+            r["report"]["loops"][0]["entities"],
+            json!(["l1", "l2", "l3", "l4"])
+        );
+        let show = call(&mut s, "feature.show", json!({"part": "p", "id": "s"})).unwrap();
+        near(&show, "p3", [0.02, 0.01]);
+        assert_eq!(
+            show["constraints"]["d1"]["value"],
+            json!({"value": "10 mm", "m": 0.01})
+        );
+        // What was written is current: it rebuilds as stored.
+        let rb = call(&mut s, "rebuild", json!({})).unwrap();
+        assert_eq!(rb["parts"][0]["features"][0]["sketch"]["stale"], false);
+        // A dimension's value, and a curve made construction geometry.
+        let r = edit(
+            &mut s,
+            json!([{"op": "set", "id": "width", "value": "30 mm"},
+                   {"op": "set", "id": "l4", "construction": true}]),
+        )
+        .unwrap();
+        assert_eq!(r["report"]["loops"], json!([]));
+        let show = call(&mut s, "feature.show", json!({"part": "p", "id": "s"})).unwrap();
+        near(&show, "p2", [0.03, 0.0]);
+        assert_eq!(show["entities"]["l4"]["construction"], true);
+        // Removing a constraint frees what it held.
+        let r = edit(&mut s, json!([{"op": "remove", "id": "d1"}])).unwrap();
+        assert_eq!(
+            (r["report"]["state"].as_str(), r["report"]["dof"].as_u64()),
+            (Some("under"), Some(1))
+        );
+        assert_eq!(r["changed"], false);
+        // A free point moves where it is put, as far as it can.
+        let r = edit(&mut s, json!([{"op": "move", "id": "p3", "at": [30, 25]}])).unwrap();
+        assert_eq!(r["changed"], true);
+        let show = call(&mut s, "feature.show", json!({"part": "p", "id": "s"})).unwrap();
+        near(&show, "p4", [0.0, 0.025]);
+    }
+
+    #[test]
+    fn refused_batches_write_nothing() {
+        let (dir, mut s) = with_sketch();
+        edit(&mut s, rectangle_ops()).unwrap();
+        let path = dir.path().join("parts/p/features/s.json");
+        let before = std::fs::read_to_string(&path).unwrap();
+        for (ops, code, pointer) in [
+            // Already held: redundant.
+            (
+                json!([{"op": "add", "type": "parallel", "a": "l1", "b": "l3"}]),
+                Code::SketchOverconstrained,
+                None,
+            ),
+            // Can't hold with the rest.
+            (
+                json!([{"op": "add", "type": "length", "a": "l2", "value": "11 mm"}]),
+                Code::SketchUnsolved,
+                None,
+            ),
+            (
+                json!([{"op": "remove", "id": "p1"}]),
+                Code::HasDependents,
+                None,
+            ),
+            (
+                json!([{"op": "remove", "id": "ghost"}]),
+                Code::NotFound,
+                Some("/ops/0/id"),
+            ),
+            (
+                json!([{"op": "add", "id": "l1", "type": "point", "at": [0, 0]}]),
+                Code::DuplicateId,
+                Some("/ops/0/id"),
+            ),
+            (
+                json!([{"op": "add", "type": "point", "at": [0]}]),
+                Code::InvalidParam,
+                Some("/ops/0/at"),
+            ),
+            (
+                json!([{"op": "add", "type": "point", "at": [0, 0], "r": 1}]),
+                Code::InvalidParam,
+                Some("/ops/0/r"),
+            ),
+            (
+                json!([{"op": "add", "type": "glue", "a": "l1"}]),
+                Code::InvalidParam,
+                Some("/ops/0/type"),
+            ),
+            (
+                json!([{"op": "add", "type": "horizontal", "a": "p1"}]),
+                Code::InvalidDocument,
+                None,
+            ),
+            (
+                json!([{"op": "set", "id": "l1", "value": "1 mm"}]),
+                Code::InvalidParam,
+                Some("/ops/0/value"),
+            ),
+            (
+                json!([{"op": "set", "id": "width", "value": "1 deg"}]),
+                Code::UnitMismatch,
+                Some("/ops/0/value"),
+            ),
+            (
+                json!([{"op": "move", "id": "l1", "at": [0, 0]}]),
+                Code::InvalidParam,
+                Some("/ops/0"),
+            ),
+            (
+                json!([{"op": "explode"}]),
+                Code::InvalidParam,
+                Some("/ops/0/op"),
+            ),
+        ] {
+            let e = edit(&mut s, ops.clone()).unwrap_err();
+            assert_eq!(e.code, code, "{ops}: {e}");
+            if let Some(p) = pointer {
+                assert_eq!(e.details["pointer"], p, "{ops}");
+            }
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "{ops}");
+        }
+        // The report says what is wrong.
+        let e = edit(
+            &mut s,
+            json!([{"op": "add", "type": "parallel", "a": "l1", "b": "l3"}]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            e.details["report"]["redundant"][0],
+            json!(["c1", "c2", "c6"])
+        );
+        let e = call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [], "expected_revision": "old"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::Conflict);
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "id": "b", "params": {"radius": 1}}),
+        )
+        .unwrap();
+        let e = call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "b", "ops": []}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+    }
+
+    #[test]
+    fn solve_proposes_without_writing() {
+        let (dir, mut s) = with_sketch();
+        edit(&mut s, rectangle_ops()).unwrap();
+        let path = dir.path().join("parts/p/features/s.json");
+        let before = std::fs::read_to_string(&path).unwrap();
+        let r = call(&mut s, "sketch.solve", json!({"part": "p", "sketch": "s"})).unwrap();
+        assert_eq!(
+            (r["report"]["state"].as_str(), r["changed"].as_bool()),
+            (Some("well"), Some(false))
+        );
+        let r = call(
+            &mut s,
+            "sketch.solve",
+            json!({"part": "p", "sketch": "s",
+                   "ops": [{"op": "set", "id": "width", "value": "40 mm"}]}),
+        )
+        .unwrap();
+        near(&r, "p2", [0.04, 0.0]);
+        // Even an edit that would be refused gets its report.
+        let r = call(
+            &mut s,
+            "sketch.solve",
+            json!({"part": "p", "sketch": "s",
+                   "ops": [{"op": "add", "type": "length", "a": "l2", "value": "11 mm"}]}),
+        )
+        .unwrap();
+        assert_eq!(r["report"]["converged"], false);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn an_edit_is_one_change_and_undoes_as_one() {
+        use crate::live::Live;
+        use crate::server::tests::call_live;
+        let (_dir, mut s) = with_sketch();
+        let mut live = Live::new();
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": rectangle_ops()}),
+        )
+        .unwrap();
+        let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
+        let last = log["entries"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!(last["method"], "sketch.edit");
+        call_live(&mut s, &mut live, None, "undo", json!({})).unwrap();
+        let show = call(&mut s, "feature.show", json!({"part": "p", "id": "s"})).unwrap();
+        assert_eq!(show["entities"], json!({}));
     }
 }
