@@ -5,7 +5,9 @@ use clap::{Args, Parser, Subcommand};
 use ryucad::doc::project::{find_project, find_root, plain};
 use ryucad::error::{Code, Error, Result};
 use ryucad::live::{SelectMode, Style};
-use ryucad::proto::{Answer, PlacementArg, Position, Request, Transfer, VersionInfo};
+use ryucad::proto::{
+    Answer, FeatureFields, PlacementArg, Position, Request, Transfer, VersionInfo,
+};
 use ryucad::units::Unit;
 use ryucad::view::{CameraArg, ProjectionArg};
 use ryucad::{client, daemon, server};
@@ -333,8 +335,9 @@ enum PartCmd {
 #[derive(Subcommand)]
 enum FeatureCmd {
     /// Add a feature: box (x, y, z), cylinder (radius, height), cone
-    /// (radius, height, top_radius), sphere (radius) or torus
-    /// (major_radius, minor_radius).
+    /// (radius, height, top_radius), sphere (radius), torus
+    /// (major_radius, minor_radius), or an empty sketch (--plane or a
+    /// placement; xy by default).
     Add {
         part: String,
         #[arg(value_name = "TYPE")]
@@ -349,9 +352,12 @@ enum FeatureCmd {
         #[command(flatten)]
         placement: PlacementArgs,
         #[command(flatten)]
+        fields: FieldArgs,
+        #[command(flatten)]
         expect: Expect,
     },
-    /// Change some of a feature's parameters or placement.
+    /// Change some of a feature's parameters or placement, or a sketch's
+    /// plane.
     Edit {
         part: String,
         id: String,
@@ -362,6 +368,8 @@ enum FeatureCmd {
         unset: Vec<String>,
         #[command(flatten)]
         placement: PlacementArgs,
+        #[command(flatten)]
+        fields: FieldArgs,
         #[command(flatten)]
         expect: Expect,
     },
@@ -440,6 +448,21 @@ struct ParamArgs {
     /// A parameter, such as radius=12.5 or "height=2 in".
     #[arg(long = "param", value_name = "NAME=QUANTITY", value_parser = param)]
     params: Vec<(String, String)>,
+}
+
+#[derive(Args)]
+struct FieldArgs {
+    /// A sketch's plane: xy, yz or zx.
+    #[arg(long)]
+    plane: Option<String>,
+}
+
+impl FieldArgs {
+    fn to_fields(&self) -> FeatureFields {
+        FeatureFields {
+            plane: self.plane.clone(),
+        }
+    }
 }
 
 #[derive(Args)]
@@ -584,12 +607,14 @@ fn request(cmd: &Command) -> Option<Request> {
             position,
             params,
             placement,
+            fields,
             expect,
         }) => Request::FeatureAdd {
             part: part.clone(),
             ty: ty.clone(),
             params: params.to_map(),
             placement: placement.to_arg(),
+            fields: fields.to_fields(),
             id: id.clone(),
             position: position.to_position(),
             expected_revision: expect.revision.clone(),
@@ -600,6 +625,7 @@ fn request(cmd: &Command) -> Option<Request> {
             params,
             unset,
             placement,
+            fields,
             expect,
         }) => {
             let mut params = params.to_map();
@@ -609,6 +635,7 @@ fn request(cmd: &Command) -> Option<Request> {
                 id: id.clone(),
                 params,
                 placement: placement.to_arg(),
+                fields: fields.to_fields(),
                 expected_revision: expect.revision.clone(),
             }
         }

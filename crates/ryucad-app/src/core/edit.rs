@@ -155,6 +155,7 @@ impl Form {
             id: self.feature.clone(),
             params,
             placement: moved.then_some(placement),
+            fields: Default::default(),
             expected_revision: Some(self.revision.clone()),
         })
     }

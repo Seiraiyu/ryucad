@@ -8,7 +8,7 @@ use crate::doc::id::Id;
 use crate::doc::project::{
     MANIFEST, Part, feature_path, parameters_path, part_dir, part_path, write_json,
 };
-use crate::doc::sketch::{Plane, Sketch};
+use crate::doc::sketch::{OriginPlane, Plane, Sketch};
 use crate::entity::{self, EntityRef};
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
@@ -16,7 +16,7 @@ use crate::live::{self, Live, SelectMode};
 use crate::mesh;
 use crate::notify::Topic;
 use crate::param;
-use crate::proto::{Answer, PlacementArg, Position, Request, Transfer, VersionInfo};
+use crate::proto::{Answer, FeatureFields, PlacementArg, Position, Request, Transfer, VersionInfo};
 use crate::rebuild;
 use crate::session::Session;
 use crate::units::{Quantity, Unit};
@@ -171,6 +171,7 @@ fn dispatch(
             ty,
             params,
             placement,
+            fields,
             id,
             position,
             expected_revision,
@@ -178,8 +179,11 @@ fn dispatch(
             session,
             &part,
             &ty,
-            params,
-            placement.unwrap_or_default(),
+            Given {
+                params,
+                placement,
+                fields,
+            },
             id.as_deref(),
             &position,
             expected_revision.as_deref(),
@@ -189,13 +193,17 @@ fn dispatch(
             id,
             params,
             placement,
+            fields,
             expected_revision,
         } => feature_edit(
             session,
             &part,
             &id,
-            params,
-            placement.unwrap_or_default(),
+            Given {
+                params,
+                placement,
+                fields,
+            },
             expected_revision.as_deref(),
         ),
         Request::FeatureDelete {
@@ -704,13 +712,77 @@ fn save(
     Ok(session.project().part(part)?.revision.clone())
 }
 
-#[allow(clippy::too_many_arguments)]
+/// What a `feature.add` or `feature.edit` gives besides the feature's
+/// place: each part left out keeps its current or default value.
+struct Given {
+    params: Map<String, Value>,
+    placement: Option<PlacementArg>,
+    fields: FeatureFields,
+}
+
+impl Given {
+    /// Refuses the fields `ty` doesn't take.
+    fn only(&self, ty: &str, params: bool, placement: bool, plane: bool) -> Result<()> {
+        let extra = [
+            ("params", !params && !self.params.is_empty()),
+            ("placement", !placement && self.placement.is_some()),
+            ("plane", !plane && self.fields.plane.is_some()),
+        ];
+        match extra.iter().find(|(_, bad)| *bad) {
+            None => Ok(()),
+            Some((name, _)) => Err(
+                Error::new(Code::InvalidParam, format!("a {ty} has no {name}")).with("param", name),
+            ),
+        }
+    }
+}
+
+/// A new feature's placement from what was given. With z given and x left
+/// out, x defaults to world X, or to world Y when z lies along X; either
+/// way the file records it.
+fn new_placement(arg: PlacementArg, unit: Unit, env: &Env) -> Result<Placement> {
+    let mut placed = Placement::identity(unit);
+    let along_x = arg.x.is_none()
+        && arg.z.is_some_and(|z| {
+            let mut p = Placement::identity(unit);
+            p.z = z;
+            rebuild::placement(&p).is_err_and(|e| e.details["kernel"] == "Degenerate")
+        });
+    if along_x {
+        placed.x = [0.0, 1.0, 0.0];
+    }
+    apply_placement(&mut placed, arg, unit, env)?;
+    Ok(placed)
+}
+
+/// A sketch's plane after an edit: an origin plane, or its placement with
+/// what was given applied. `None` for a new sketch.
+fn sketch_plane(current: Option<&Plane>, given: &Given, unit: Unit, env: &Env) -> Result<Plane> {
+    match (&given.fields.plane, &given.placement) {
+        (Some(_), Some(_)) => Err(Error::new(
+            Code::Usage,
+            "give a sketch a plane or a placement, not both",
+        )),
+        (Some(p), None) => Ok(Plane::Origin(
+            OriginPlane::parse(p).map_err(|e| e.with("pointer", "/plane"))?,
+        )),
+        (None, Some(arg)) => {
+            let mut p = match current {
+                Some(c) => c.placement(unit),
+                None => return Ok(Plane::Placement(new_placement(arg.clone(), unit, env)?)),
+            };
+            apply_placement(&mut p, arg.clone(), unit, env)?;
+            Ok(Plane::Placement(p))
+        }
+        (None, None) => Ok(current.cloned().unwrap_or(Plane::Origin(OriginPlane::Xy))),
+    }
+}
+
 fn feature_add(
     session: &mut Session,
     part: &str,
     ty: &str,
-    params: Map<String, Value>,
-    placement: PlacementArg,
+    given: Given,
     id: Option<&str>,
     position: &Position,
     expected: Option<&str>,
@@ -720,10 +792,24 @@ fn feature_add(
     let p = session.project().part(&pid)?;
     check_revision(p, expected)?;
     let mut list = order(p)?;
-    let ty = PrimitiveType::parse(ty)?;
+    let env = p.env.clone();
+    let f = if ty == "sketch" {
+        given.only(ty, false, true, true)?;
+        Feature::Sketch(Sketch::new(sketch_plane(None, &given, unit, &env)?))
+    } else {
+        let ty = PrimitiveType::parse(ty)?;
+        given.only(ty.as_str(), true, true, false)?;
+        Feature::Primitive(Primitive {
+            ty,
+            params: Primitive::params_from_json(ty, &Value::Object(given.params), unit, &env)?,
+            placement: new_placement(given.placement.unwrap_or_default(), unit, &env)?,
+        })
+    };
     let fid = match id {
         Some(id) => feature_id(id)?,
-        None => Id::generate(ty.as_str(), |s| p.features.keys().any(|f| f.as_str() == s)),
+        None => Id::generate(f.type_name(), |s| {
+            p.features.keys().any(|f| f.as_str() == s)
+        }),
     };
     if p.features.contains_key(&fid) {
         return Err(Error::new(
@@ -732,26 +818,6 @@ fn feature_add(
         )
         .with("feature", &fid));
     }
-    let env = p.env.clone();
-    let params = Primitive::params_from_json(ty, &Value::Object(params), unit, &env)?;
-    let mut placed = Placement::identity(unit);
-    // With z given and x left out, x defaults to world X, or to world Y
-    // when z lies along X; either way the file records it.
-    let along_x = placement.x.is_none()
-        && placement.z.is_some_and(|z| {
-            let mut p = Placement::identity(unit);
-            p.z = z;
-            rebuild::placement(&p).is_err_and(|e| e.details["kernel"] == "Degenerate")
-        });
-    if along_x {
-        placed.x = [0.0, 1.0, 0.0];
-    }
-    apply_placement(&mut placed, placement, unit, &env)?;
-    let f = Feature::Primitive(Primitive {
-        ty,
-        params,
-        placement: placed,
-    });
     list.insert(insert_at(&list, position)?, fid.clone());
     let revision = save(session, &pid, &[(&fid, &f)], list)?;
     Ok(json!({"feature": feature_report(&fid, &f), "revision": revision}))
@@ -761,8 +827,7 @@ fn feature_edit(
     session: &mut Session,
     part: &str,
     id: &str,
-    params: Map<String, Value>,
-    placement: PlacementArg,
+    given: Given,
     expected: Option<&str>,
 ) -> Result<Value> {
     let (pid, fid) = (part_id(part)?, feature_id(id)?);
@@ -770,28 +835,38 @@ fn feature_edit(
     let p = session.project().part(&pid)?;
     check_revision(p, expected)?;
     let list = order(p)?;
-    let Feature::Primitive(mut f) = feature(p, &fid)?.clone() else {
-        return Err(Error::new(
-            Code::InvalidParam,
-            format!("{fid} is a sketch: change its geometry with sketch.edit"),
-        )
-        .with("feature", &fid));
-    };
-    let mut merged: Map<String, Value> = f
-        .params
-        .iter()
-        .map(|(k, q)| (k.clone(), Value::String(q.text())))
-        .collect();
-    for (k, v) in params {
-        if v.is_null() {
-            merged.remove(&k);
-        } else {
-            merged.insert(k, v);
+    let f = match feature(p, &fid)?.clone() {
+        Feature::Primitive(mut f) => {
+            given.only(f.ty.as_str(), true, true, false)?;
+            let mut merged: Map<String, Value> = f
+                .params
+                .iter()
+                .map(|(k, q)| (k.clone(), Value::String(q.text())))
+                .collect();
+            for (k, v) in given.params {
+                if v.is_null() {
+                    merged.remove(&k);
+                } else {
+                    merged.insert(k, v);
+                }
+            }
+            f.params = Primitive::params_from_json(f.ty, &Value::Object(merged), unit, &p.env)?;
+            apply_placement(
+                &mut f.placement,
+                given.placement.unwrap_or_default(),
+                unit,
+                &p.env,
+            )?;
+            Feature::Primitive(f)
         }
-    }
-    f.params = Primitive::params_from_json(f.ty, &Value::Object(merged), unit, &p.env)?;
-    apply_placement(&mut f.placement, placement, unit, &p.env)?;
-    let f = Feature::Primitive(f);
+        // Its geometry changes through sketch.edit; the plane moves the
+        // sketch without changing its solve.
+        Feature::Sketch(mut s) => {
+            given.only("sketch", false, true, true)?;
+            s.plane = sketch_plane(Some(&s.plane), &given, unit, &p.env)?;
+            Feature::Sketch(s)
+        }
+    };
     let revision = save(session, &pid, &[(&fid, &f)], list)?;
     Ok(json!({"feature": feature_report(&fid, &f), "revision": revision}))
 }
@@ -1857,6 +1932,92 @@ pub(crate) mod tests {
         )
         .unwrap();
         (dir, s)
+    }
+
+    #[test]
+    fn sketches_are_added_on_a_plane() {
+        let (dir, mut s) = with_part();
+        let r = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch"}),
+        )
+        .unwrap();
+        assert_eq!(
+            r["feature"],
+            json!({"id": "sketch-1", "type": "sketch", "plane": "xy",
+                   "entities": {}, "constraints": {}})
+        );
+        let text = fs::read_to_string(dir.path().join("parts/p/features/sketch-1.json")).unwrap();
+        assert!(text.contains("\"format\": 2"));
+        let r = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "side", "plane": "zx"}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["plane"], "zx");
+        let r = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "up",
+                   "placement": {"origin": [0, 0, "5 mm"]}}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["placement"]["origin"][2]["m"], 0.005);
+        assert!(r["feature"].get("plane").is_none());
+        // Moved to another plane, and off it again.
+        let r = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "side", "placement": {"origin": [0, "1 mm", 0]}}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["placement"]["z"], json!([0, 1, 0]));
+        assert_eq!(r["feature"]["placement"]["x"], json!([0, 0, 1]));
+        let r = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "side", "plane": "yz"}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["plane"], "yz");
+        let show = call(&mut s, "feature.show", json!({"part": "p", "id": "side"})).unwrap();
+        assert_eq!(show["plane"], "yz");
+        for (method, params, code) in [
+            (
+                "feature.add",
+                json!({"type": "sketch", "plane": "xz"}),
+                Code::InvalidParam,
+            ),
+            (
+                "feature.add",
+                json!({"type": "sketch", "params": {"x": 1}}),
+                Code::InvalidParam,
+            ),
+            (
+                "feature.add",
+                json!({"type": "sketch", "plane": "xy",
+                                   "placement": {"z": [0, 0, 1]}}),
+                Code::Usage,
+            ),
+            (
+                "feature.add",
+                json!({"type": "sphere", "params": {"radius": 1},
+                                   "plane": "xy"}),
+                Code::InvalidParam,
+            ),
+            (
+                "feature.edit",
+                json!({"id": "side", "params": {"x": 1}}),
+                Code::InvalidParam,
+            ),
+        ] {
+            let mut params = params;
+            params["part"] = json!("p");
+            let e = call(&mut s, method, params.clone()).unwrap_err();
+            assert_eq!(e.code, code, "{params}");
+        }
     }
 
     #[test]

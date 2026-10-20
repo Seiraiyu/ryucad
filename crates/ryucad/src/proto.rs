@@ -89,6 +89,16 @@ pub struct Position {
     pub first: bool,
 }
 
+/// The fields of a feature that only some types take: a sketch's plane.
+/// Each is left out unless given.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeatureFields {
+    /// A sketch's origin plane: `xy`, `yz` or `zx`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plane: Option<String>,
+}
+
 /// A placement as given by an agent: any part left out keeps its current
 /// value (or the identity's, for a new feature).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -132,6 +142,8 @@ pub enum Request {
         params: Map<String, Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         placement: Option<PlacementArg>,
+        #[serde(default, flatten)]
+        fields: FeatureFields,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         #[serde(default, flatten)]
@@ -148,6 +160,8 @@ pub enum Request {
         params: Map<String, Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         placement: Option<PlacementArg>,
+        #[serde(default, flatten)]
+        fields: FeatureFields,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
@@ -532,11 +546,24 @@ mod tests {
                     z: Some([0.0, 1.0, 0.0]),
                     ..Default::default()
                 }),
+                fields: FeatureFields::default(),
                 id: Some("b".into()),
                 position: Position {
                     after: Some("a".into()),
                     first: false,
                 },
+                expected_revision: None,
+            },
+            Request::FeatureAdd {
+                part: "p".into(),
+                ty: "sketch".into(),
+                params: Map::new(),
+                placement: None,
+                fields: FeatureFields {
+                    plane: Some("zx".into()),
+                },
+                id: None,
+                position: Position::default(),
                 expected_revision: None,
             },
             Request::FeatureMove {
