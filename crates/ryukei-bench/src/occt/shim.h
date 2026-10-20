@@ -36,6 +36,8 @@ std::unique_ptr<Shape> revolve(rust::Slice<const double> frame,
 std::unique_ptr<Shape> make_compound();
 void add_to_compound(Shape &compound, const Shape &s);
 std::unique_ptr<Shape> cut(const Shape &s, const Shape &tools, bool parallel);
+std::unique_ptr<Shape> boolean(const Shape &s, const Shape &tools, uint32_t op,
+                               bool parallel);
 rust::Vec<double> vertices(const Shape &s);
 uint32_t faces(const Shape &s);
 OcctMesh mesh(const Shape &s, double chord, double angle, bool parallel);

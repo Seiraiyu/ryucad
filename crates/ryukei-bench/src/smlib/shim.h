@@ -21,7 +21,7 @@ public:
   ~Body();
   std::unique_ptr<SmContext> context;
   SmBrep *brep = nullptr;
-  // Tools waiting to be subtracted from `brep`.
+  // Tools waiting to be combined with `brep`.
   SmBrep *tools = nullptr;
 };
 
@@ -38,6 +38,7 @@ std::unique_ptr<Body> revolve(rust::Slice<const double> frame,
 void add_tool(Body &body, uint32_t kind, double a, double b, double c,
               rust::Slice<const double> at);
 void subtract_tools(Body &body, bool parallel);
+void combine_tools(Body &body, uint32_t op, bool parallel);
 rust::Vec<double> vertices(const Body &body);
 uint32_t faces(const Body &body);
 SmlibMesh mesh(const Body &body, double chord, double angle, bool parallel);
