@@ -73,10 +73,7 @@ impl Kept {
 pub(crate) struct Built {
     pub(crate) body: Body,
     pub(crate) faces: Vec<FaceId>,
-    // Read by merging and naming, from the commits that add them on.
-    #[allow(dead_code)]
     pub(crate) edges: BTreeMap<GeId, EdgeId>,
-    #[allow(dead_code)]
     pub(crate) vertices: BTreeMap<GvId, VertexId>,
 }
 
@@ -452,7 +449,9 @@ struct Grower<'p, 'a> {
     vertices: BTreeMap<GvId, VertexId>,
     surfaces: BTreeMap<(usize, SurfaceId), SurfaceId>,
     curves: BTreeMap<Member, CurveId>,
-    curves2: BTreeMap<(GeId, FaceRef), Curve2Id>,
+    /// Pcurves added, by face and carrier: pieces of one carrier on one
+    /// face share their pcurve, so JEKV can join them again.
+    curves2: BTreeMap<(FaceRef, Member), Vec<(crate::geom::Curve2, Curve2Id)>>,
 }
 
 impl Grower<'_, '_> {
@@ -990,16 +989,21 @@ impl Grower<'_, '_> {
                 if let Boundary::Arcs(a) = lp {
                     for &(g, sn) in a {
                         let fin = self.fin(g, sn);
-                        let id = match self.curves2.get(&(g, src)) {
-                            Some(&id) => id,
+                        let (c, map) = &table.edges[g].pcurves[&src];
+                        let slot = (src, table.edges[g].members[0]);
+                        let found = self
+                            .curves2
+                            .get(&slot)
+                            .and_then(|list| list.iter().find(|x| x.0 == *c).map(|x| x.1));
+                        let id = match found {
+                            Some(id) => id,
                             None => {
-                                let (c, _) = &table.edges[g].pcurves[&src];
                                 let id = self.body.add_curve2(c.clone());
-                                self.curves2.insert((g, src), id);
+                                self.curves2.entry(slot).or_default().push((c.clone(), id));
                                 id
                             }
                         };
-                        let map = table.edges[g].pcurves[&src].1;
+                        let map = *map;
                         euler::set_pcurve(&mut self.body, fin, Some(Pcurve { curve: id, map }))
                             .map_err(Self::topo)?;
                     }

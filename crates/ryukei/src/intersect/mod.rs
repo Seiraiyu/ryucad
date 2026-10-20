@@ -20,6 +20,7 @@ mod ss;
 mod ss_exact;
 mod ss_trace;
 
+pub(crate) use coincide::coincident;
 pub use cs::{CurveHit, Side, curve_surface};
 pub use face::{Contact, FaceMeet, Rim, Stretch, face_box, face_face};
 pub(crate) use face::{shifted, shifts};

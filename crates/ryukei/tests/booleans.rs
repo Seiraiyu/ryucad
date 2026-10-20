@@ -134,3 +134,35 @@ fn three_holes_at_once() {
     let r = run(BooleanOp::Subtract, &plate, &tools);
     near(volume(&r), 12.0 - 3.0 * PI * 0.16);
 }
+
+#[test]
+fn faces_on_one_surface_merge() {
+    // Two blocks overlapping side by side, flush top, bottom, front and
+    // back: one box.
+    let a = primitive::block(OpKey(1), 2.0, 2.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let u = run(BooleanOp::Unite, &a, &[(&a, at(1.0, 0.0, 0.0))]);
+    near(volume(&u), 6.0);
+    let c = u.counts();
+    assert_eq!((c.faces, c.edges, c.vertices), (6, 12, 8));
+    // A pocket flush with the top.
+    let block = primitive::block(OpKey(1), 4.0, 4.0, 2.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let cutter = primitive::block(OpKey(2), 2.0, 2.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let pocket = run(BooleanOp::Subtract, &block, &[(&cutter, at(1.0, 1.0, 1.0))]);
+    near(volume(&pocket), 28.0);
+    let c = pocket.counts();
+    assert_eq!((c.faces, c.edges, c.vertices), (11, 24, 16));
+    // Two cylinders end to end on one axis: one cylinder.
+    let cyl = primitive::cylinder(OpKey(1), 1.0, 2.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let long = run(BooleanOp::Unite, &cyl, &[(&cyl, at(0.0, 0.0, 2.0))]);
+    near(volume(&long), PI * 4.0);
+    let c = long.counts();
+    assert_eq!((c.faces, c.edges, c.vertices), (3, 2, 2));
+}

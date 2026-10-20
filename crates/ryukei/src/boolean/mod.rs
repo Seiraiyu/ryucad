@@ -8,8 +8,10 @@
 //! disagree; each face is split in its parameter plane into pieces
 //! ([`crate::split`]); pieces are classified against the other operands
 //! by certified ray casts ([`classify`]); the operation keeps some of
-//! them, some reversed ([`select`]); and the kept pieces are built into a
-//! new body through Euler operators ([`build`]).
+//! them, some reversed ([`select`]); the kept pieces are built into a
+//! new body through Euler operators ([`build`]); and what is left
+//! redundant (faces either side of an edge on one surface, vertices
+//! between two edges on one curve) is merged ([`merge`]).
 //!
 //! Only faces on analytic surfaces (planes, cylinders, cones, spheres and
 //! tori) may meet; a face on any other surface takes part only where it
@@ -19,6 +21,7 @@
 
 pub(crate) mod build;
 pub(crate) mod classify;
+mod merge;
 mod place;
 mod select;
 pub(crate) mod table;
@@ -89,7 +92,42 @@ pub fn boolean(
     let classes = classify::classify(&ops, &table, &pieces).map_err(named)?;
     let kept = select::select(op, &pieces, &classes);
     let built = build::build(&ops, &table, &kept, key).map_err(named)?;
-    let body = built.body;
+    let mut body = built.body;
+    let mut sources = merge::Sources {
+        faces: built
+            .faces
+            .iter()
+            .enumerate()
+            .map(|(k, &f)| (f, vec![k]))
+            .collect(),
+        edges: built.edges.iter().map(|(&g, &e)| (e, vec![g])).collect(),
+        vertices: built.vertices.iter().map(|(&g, &v)| (v, g)).collect(),
+    };
+    // Lone vertices an operand had (a cone's apex) stay.
+    let keep_lone: BTreeSet<VertexId> = built
+        .vertices
+        .iter()
+        .filter(|(g, _)| {
+            table.vertices[**g]
+                .originals
+                .iter()
+                .any(|o| ops[o.op].vertices[o.vertex].lone.is_some())
+        })
+        .map(|(_, &v)| v)
+        .collect();
+    let mut count = 0u128;
+    let mut keys = || {
+        count += 1;
+        OpKey(
+            Name::derive(
+                key,
+                crate::name::Role::Boolean(crate::name::BooleanRole::Merged),
+                &[Name::from_u128(u128::MAX - count)],
+            )
+            .to_u128(),
+        )
+    };
+    merge::merge(&mut body, &mut sources, &keep_lone, &mut keys).map_err(named)?;
     if cfg!(debug_assertions) {
         let faults = crate::check::check(&body);
         assert!(
