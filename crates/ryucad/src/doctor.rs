@@ -4,7 +4,9 @@
 //! with a stable code, and never changes anything itself.
 //!
 //! It reads the folder directly, not through [`crate::doc::project`], so
-//! it works on a project that can't be opened.
+//! it works on a project that can't be opened. Only a sketch that reads
+//! other features is judged by loading the project and rebuilding its
+//! part, when the project loads.
 
 use crate::doc::canonical;
 use crate::doc::files::{Feature, Manifest, ParametersFile, PartFile};
@@ -13,6 +15,7 @@ use crate::doc::project::{MANIFEST, write_atomic};
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
 use crate::git::Repo;
+use crate::rebuild::PartResult;
 use crate::units::Unit;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -409,6 +412,7 @@ fn diagnose_part(root: &Path, part: &str, unit: Unit, issues: &mut Vec<Issue>) {
         &feature_ids,
         issues,
     );
+    let mut in_part: Option<BTreeMap<String, Vec<String>>> = None;
     for f in &feature_ids {
         let rel = format!("{fdir}/{f}.json");
         match read(root, &rel) {
@@ -419,12 +423,23 @@ fn diagnose_part(root: &Path, part: &str, unit: Unit, issues: &mut Vec<Issue>) {
                     if !canonical {
                         issues.push(non_canonical(&rel));
                     }
-                    if solved_sketch(f, &feature).is_some() {
-                        // Its parameters are part of why, and of the repair's basis.
+                    // A sketch that reads other features is judged in its
+                    // part, rebuilt once for all of them.
+                    let reads = feature.sketch().is_some_and(|s| !s.references().is_empty());
+                    let stale = if reads {
+                        let in_part = in_part.get_or_insert_with(|| stale_in_part(root, part));
+                        in_part.get(*f).cloned()
+                    } else {
+                        solved_sketch(f, &feature).map(|_| Vec::new())
+                    };
+                    if let Some(inputs) = stale {
+                        // Its parameters and what it reads are part of why,
+                        // and of the repair's basis.
                         let mut files = vec![rel.clone()];
                         if root.join(&params).is_file() {
                             files.push(params.clone());
                         }
+                        files.extend(inputs);
                         issues.push(issue(
                             "sketch_stale",
                             files,
@@ -500,12 +515,60 @@ fn diagnose_part(root: &Path, part: &str, unit: Unit, issues: &mut Vec<Issue>) {
 /// other feature, and for a sketch that is current or can't be solved.
 fn solved_sketch(id: &str, f: &Feature) -> Option<Feature> {
     let id = Id::parse(id, "feature").ok()?;
-    let solved = crate::sketch::solve(&id, f.sketch()?).ok()?;
+    // A sketch that reads other features is solved in its part.
+    let s = f.sketch()?;
+    let ctx = crate::sketch::Context::standalone(s)?.ok()?;
+    let solved = crate::sketch::solve_in(&id, s, &ctx).ok()?;
     solved.stale.then_some(Feature::Sketch(solved.sketch))
 }
 
+/// The part's rebuild from the files as they stand, if the project loads.
+fn rebuilt(root: &Path, part: &str) -> Option<(crate::doc::project::Part, PartResult)> {
+    let project = crate::doc::project::Project::load(root).ok()?;
+    let p = project.parts.get(&Id::parse(part, "part").ok()?)?.clone();
+    let r = crate::rebuild::rebuild_part(&p);
+    Some((p, r))
+}
+
+/// The stale sketches of `part` that read other features, each with the
+/// files of the features it reads, directly or not. Empty when the
+/// project can't be loaded.
+fn stale_in_part(root: &Path, part: &str) -> BTreeMap<String, Vec<String>> {
+    let Some((p, r)) = rebuilt(root, part) else {
+        return BTreeMap::new();
+    };
+    let mut out = BTreeMap::new();
+    for (id, o) in &r.features {
+        let Some(s) = o.as_ref().ok().and_then(|o| o.sketch()) else {
+            continue;
+        };
+        if !s.stale || s.sketch.references().is_empty() {
+            continue;
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut todo = vec![id.clone()];
+        while let Some(f) = todo.pop() {
+            let Some(Ok(feature)) = p.features.get(&f) else {
+                continue;
+            };
+            for i in crate::graph::inputs(feature) {
+                if seen.insert(i.clone()) {
+                    todo.push(i.clone());
+                }
+            }
+        }
+        let files = seen
+            .iter()
+            .map(|i| format!("parts/{part}/features/{i}.json"))
+            .collect();
+        out.insert(id.to_string(), files);
+    }
+    out
+}
+
 /// A feature file as it would be with its sketch solved, read with the
-/// project's unit and the part's parameters as they are now.
+/// project's unit and the part's parameters as they are now; a sketch that
+/// reads other features, solved in its part.
 fn solved_file(root: &Path, rel: &str) -> Option<Vec<u8>> {
     let unit = match read(root, MANIFEST) {
         Read::Json(v, _) => Manifest::from_json(&v).ok()?.default_unit,
@@ -520,6 +583,15 @@ fn solved_file(root: &Path, rel: &str) -> Option<Vec<u8>> {
         return None;
     };
     let f = Feature::from_json(&v, unit, &env).ok()?;
+    if f.sketch().is_some_and(|s| !s.references().is_empty()) {
+        let (_, r) = rebuilt(root, part_of(rel))?;
+        let s = r
+            .output(&Id::parse(stem_of(rel), "feature").ok()?)?
+            .sketch()?;
+        return s
+            .stale
+            .then(|| canonical_bytes(&Feature::Sketch(s.sketch.clone()).to_json()));
+    }
     Some(canonical_bytes(&solved_sketch(stem_of(rel), &f)?.to_json()))
 }
 
@@ -1081,6 +1153,55 @@ pub(crate) mod tests {
         // A sketch that can't be solved isn't stale, it's failing: rebuild says so.
         w(r, params, &width("50 mm"));
         assert_eq!(codes(r), []);
+    }
+
+    #[test]
+    fn a_stale_projection_is_solved_in_its_part() {
+        use crate::server::tests::{call, fresh};
+        let (dir, mut s) = fresh();
+        let r = dir.path();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 20, "y": 10, "z": 5}}),
+        )
+        .unwrap();
+        let body = call(&mut s, "inspect", json!({"part": "p", "feature": "b"})).unwrap()["bodies"]
+            [0]
+        .clone();
+        let corner = crate::sketch::tests::vertex_at(&body, [0.02, 0.01, 0.005]);
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [
+                {"op": "add", "type": "point", "projected": format!("p/b/{corner}")}
+            ]}),
+        )
+        .unwrap();
+        assert_eq!(codes(r), []);
+        // The box widens behind ryucad's back.
+        let b = "parts/p/features/b.json";
+        let text = fs::read_to_string(r.join(b))
+            .unwrap()
+            .replace("20 mm", "30 mm");
+        w(r, b, &text);
+        let sk = "parts/p/features/s.json";
+        assert_eq!(
+            codes(r),
+            [("sketch_stale", vec![sk.to_owned(), b.to_owned()])]
+        );
+        let repairs = offered(r);
+        fix(r, &[&repairs["sketch_stale:solve:s"]], Params::default());
+        assert_eq!(codes(r), []);
+        let v: Value = serde_json::from_str(&fs::read_to_string(r.join(sk)).unwrap()).unwrap();
+        assert_eq!(v["entities"]["p1"]["m"], json!([0.03, 0.01]));
     }
 
     #[test]

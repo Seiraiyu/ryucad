@@ -5,5 +5,6 @@ pub mod canonical;
 pub mod files;
 pub mod id;
 pub mod project;
+pub mod reference;
 pub mod sketch;
 pub mod sweep;

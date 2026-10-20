@@ -1,0 +1,11 @@
+{
+  "angle": "90 deg",
+  "axis": {
+    "feature": "b",
+    "name": "820%1ecb418056357874ed737136a154"
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "sketch": "3",
+  "type": "revolve"
+}

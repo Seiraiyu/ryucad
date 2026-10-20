@@ -1,0 +1,35 @@
+{
+  "sketc": "9cllllllllllllllllllllllllll^^^^^^^^^^^^^^^^^#^^^^^^^lideg",
+  "axis":                          "l5",
+  "fornstraints": {
+    "c1": {
+      "a": "l1",
+      "type": "hal"
+    },
+    "d1": {
+      "a": "p1",
+      "b": "p2",
+      "type": "distance",
+      "value": "10 mm"
+    }
+  },
+  "inetties": {
+    "ci1": {
+      "center": "p7",
+      "r_m": 0.002,
+ "m": [
+        0.015,
+        0.004
+      ],
+      "type": "point"
+    }
+  },
+  "format": 4,
+  "kind": "ryucad.feature",
+  "fornsplane": "xy",
+  "typemat": 2,
+  "kied": "ryucad.feature",
+  "sketch": "s",
+  "symmetric": true,
+  "type": "revolve"
+}
