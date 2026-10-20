@@ -317,6 +317,7 @@ pub(crate) fn fit_branch(surfaces: [&Surface; 2], traced: &Traced) -> Result<Fit
     }
     let mut samples = branch.initial(&points)?;
     branch.refine_turns(&mut samples)?;
+    branch.one_way(&samples)?;
     let mut bounds: Vec<Option<f64>> = vec![None; samples.len() - 1];
     for round in 0.. {
         rechord(&mut samples);
@@ -386,6 +387,19 @@ impl Branch<'_> {
         if n < 2 {
             return Err(Failure::Uncertain);
         }
+        // Each sample is unwrapped next to the one before, so no step may
+        // turn a periodic parameter by a quarter period or more (traced
+        // points can be far apart where a branch circles near an apex):
+        // a longer step could unwrap the wrong way round, and refining
+        // would only squeeze the jump of a whole period into one span.
+        let small = |a: &Sample, b: &Sample| {
+            a.p.distance(b.p) <= LINEAR_RESOLUTION
+                || (0..2).all(|k| {
+                    let (pu, pv) = self.surfaces[k].periods();
+                    pu.is_none_or(|p| (b.uv[k].x - a.uv[k].x).abs() < p / 4.0)
+                        && pv.is_none_or(|p| (b.uv[k].y - a.uv[k].y).abs() < p / 4.0)
+                })
+        };
         let mut out: Vec<Sample> = Vec::with_capacity(n);
         for i in 0..n {
             let (chord, inward) = if i + 1 < n {
@@ -393,8 +407,27 @@ impl Branch<'_> {
             } else {
                 (pts[i] - pts[i - 1], pts[i - 1] - pts[i])
             };
-            let prev = out.last().map(|s: &Sample| s.uv);
-            out.push(self.sample(pts[i], chord, prev, Some(inward))?);
+            loop {
+                let Some(last) = out.last().copied() else {
+                    out.push(self.sample(pts[i], chord, None, Some(inward))?);
+                    break;
+                };
+                let s = self.sample(pts[i], chord, Some(last.uv), Some(inward))?;
+                if small(&last, &s) || out.len() >= MAX_SAMPLES {
+                    out.push(s);
+                    break;
+                }
+                // A point of the branch near enough the last one.
+                let mut b = s;
+                loop {
+                    let mid = self.between(&last, &b)?;
+                    if small(&last, &mid) {
+                        out.push(mid);
+                        break;
+                    }
+                    b = mid;
+                }
+            }
         }
         Ok(out)
     }
@@ -505,6 +538,31 @@ impl Branch<'_> {
             return Err(Failure::Uncertain);
         }
         self.sample(x, chord, Some(a.uv), None)
+    }
+
+    /// Checks that the samples run along the branch one way: each chord
+    /// between neighbours the way the surfaces' normals' cross product
+    /// runs at its start (its sense along a regular branch never
+    /// changes). Traced points out of order along the curve (a branch
+    /// traced there and back), or a sample put on another stretch of a
+    /// curling branch, double back somewhere, and are refused.
+    fn one_way(&self, samples: &[Sample]) -> Result<(), Failure> {
+        let mut way = None;
+        for w in samples.windows(2) {
+            let chord = w[1].p - w[0].p;
+            let (_, ga) = self.imps[0].eval_grad(w[0].p);
+            let (_, gb) = self.imps[1].eval_grad(w[0].p);
+            let x = ga.cross(gb).dot(chord);
+            if x.abs() <= 1e-6 * ga.length() * gb.length() * chord.length() {
+                continue;
+            }
+            match way {
+                None => way = Some(x > 0.0),
+                Some(s) if s != (x > 0.0) => return Err(Failure::Uncertain),
+                Some(_) => {}
+            }
+        }
+        Ok(())
     }
 
     /// The certified bound of the span between two samples.
@@ -852,5 +910,96 @@ mod tests {
                 "at {t}"
             );
         }
+    }
+
+    #[test]
+    fn a_branch_circling_a_cone_near_its_apex_fits() {
+        // Traced points far apart in the cone's u, where the branch
+        // circles close to the apex: the fit once unwrapped one of them a
+        // whole turn off.
+        let cyl = Surface::Cylinder(
+            Cylinder::new(
+                Frame::new(
+                    Point3::new(
+                        -0.8946768561859982,
+                        -0.3615966316378397,
+                        0.009269854858855286,
+                    ),
+                    Vector3::new(
+                        0.9593409230085277,
+                        -0.10535328343257638,
+                        0.26185048999595406,
+                    ),
+                    Vector3::new(-0.1623643923734811, 0.5528694784616957, 0.8172962399734156),
+                )
+                .unwrap(),
+                0.4851043671149046,
+            )
+            .unwrap(),
+        );
+        let cone = Surface::Cone(
+            crate::geom::Cone::new(
+                Frame::new(
+                    Point3::new(-0.48069991826021563, 0.56441049213183, -0.1300870642674332),
+                    Vector3::new(-0.0608342608644305, 0.973382288344374, 0.22096631743898965),
+                    Vector3::new(
+                        -0.44890637296677166,
+                        -0.22440518028775924,
+                        0.8649424162161525,
+                    ),
+                )
+                .unwrap(),
+                0.28,
+                0.23690987726266408,
+            )
+            .unwrap(),
+        );
+        let region = Box3::new(
+            Point3::new(
+                -0.6106052900341638,
+                -0.4974128179537064,
+                -0.3959755072762124,
+            ),
+            Point3::new(
+                -0.29050023515201845,
+                0.11878921127194264,
+                -0.08320369748928888,
+            ),
+        );
+        let topo = trace(&cyl, &cone, &region).unwrap();
+        assert!(!topo.branches.is_empty());
+        for br in &topo.branches {
+            let f = fit_branch([&cyl, &cone], br).unwrap();
+            sound(&cyl, &cone, &f);
+        }
+    }
+
+    #[test]
+    fn a_branch_traced_there_and_back_is_refused() {
+        // The points of an open stretch of a branch, then back again,
+        // claimed closed: they lie on both surfaces, but the curve through
+        // them doubles back on itself.
+        let cyl =
+            Surface::Cylinder(Cylinder::new(frame((0.0, 0.0, 0.0), (0.0, 0.0, 1.0)), 1.0).unwrap());
+        let sphere =
+            Surface::Sphere(Sphere::new(frame((1.2, 0.0, 0.0), (0.0, 0.0, 1.0)), 1.0).unwrap());
+        let region = Box3::new(Point3::new(-6.0, -6.0, -6.0), Point3::new(6.0, 6.0, 6.0));
+        let topo = trace(&cyl, &sphere, &region).unwrap();
+        let br = &topo.branches[0];
+        let n = br.points.len();
+        assert!(n >= 6);
+        let half = &br.points[..n / 2];
+        let mut there_and_back: Vec<Point3> = half.to_vec();
+        there_and_back.extend(half[1..half.len() - 1].iter().rev());
+        let folded = Traced {
+            points: there_and_back,
+            closed: true,
+        };
+        assert_eq!(
+            fit_branch([&cyl, &sphere], &folded).err(),
+            Some(Failure::Uncertain)
+        );
+        // The branch as traced still fits.
+        sound(&cyl, &sphere, &fit_branch([&cyl, &sphere], br).unwrap());
     }
 }
