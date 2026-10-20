@@ -342,6 +342,129 @@ fn sketches_from_the_cli() {
 }
 
 #[test]
+fn sketches_become_bodies_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&["feature", "add", "p", "sketch", "--id", "s"]);
+    p.ok(&[
+        "sketch",
+        "edit",
+        "p",
+        "s",
+        r#"[{"op": "add", "type": "point", "at": [10, 0]},
+            {"op": "add", "type": "point", "at": [20, 0]},
+            {"op": "add", "type": "point", "at": [20, 8]},
+            {"op": "add", "type": "point", "at": [10, 8]},
+            {"op": "add", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "type": "line", "start": "p3", "end": "p4"},
+            {"op": "add", "type": "line", "start": "p4", "end": "p1"},
+            {"op": "add", "type": "point", "at": [0, 0]},
+            {"op": "add", "type": "point", "at": [0, 10]},
+            {"op": "add", "type": "line", "start": "p5", "end": "p6", "construction": true}]"#,
+    ]);
+    let r = p.ok(&[
+        "feature", "add", "p", "extrude", "--id", "e", "--sketch", "s", "--length", "3",
+    ]);
+    assert_eq!(r["feature"]["extent"]["type"], "blind");
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "revolve",
+        "--id",
+        "r",
+        "--sketch",
+        "s",
+        "--axis",
+        "l5",
+        "--angle",
+        "90",
+        "--symmetric",
+    ]);
+    let r = p.ok(&["rebuild", "p"]);
+    let features = r["parts"][0]["features"].as_array().unwrap();
+    assert_eq!(features.len(), 3);
+    assert!(features[1]["hash"].is_string() && features[2]["hash"].is_string());
+    let v = p.ok(&["inspect", "p", "e"]);
+    assert_eq!(v["bodies"][0]["faces"][0]["origin"]["sketch"], "s");
+    p.ok(&[
+        "feature",
+        "edit",
+        "p",
+        "e",
+        "--extent",
+        "symmetric",
+        "--reverse",
+    ]);
+    p.ok(&[
+        "feature",
+        "edit",
+        "p",
+        "r",
+        "--angle",
+        "full",
+        "--symmetric",
+        "false",
+    ]);
+    let r = p.ok(&["render", "--out", "s.png", "--size", "160x120"]);
+    assert_eq!(r["width"], 160);
+    assert_eq!(
+        pixels(&p.direct.join("s.png")),
+        pixels(&p.daemon.join("s.png"))
+    );
+    // Refused, by code.
+    p.fails(&["feature", "delete", "p", "s"], "has_dependents", 1);
+    p.fails(
+        &["feature", "move", "p", "e", "--first"],
+        "reference_forward",
+        1,
+    );
+    p.fails(
+        &[
+            "feature", "add", "p", "revolve", "--sketch", "s", "--axis", "p1", "--angle", "9",
+        ],
+        "reference_wrong_kind",
+        1,
+    );
+    p.fails(
+        &[
+            "feature", "add", "p", "extrude", "--sketch", "s", "--length", "0",
+        ],
+        "invalid_extent",
+        1,
+    );
+    p.ok(&[
+        "feature", "add", "p", "extrude", "--id", "bad", "--sketch", "s", "--length", "1",
+        "--loop", "l5",
+    ]);
+    let (code, v) = p.both_from("", &["rebuild", "p"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("rebuild_failed")),
+        "{v}"
+    );
+    let bad = &v["error"]["details"]["parts"][0]["features"][3];
+    assert_eq!(bad["error"]["code"], "profile_invalid");
+    p.ok(&["feature", "delete", "p", "bad"]);
+    // A sketch that fails takes its sweeps with it: by hand, l1 is given two
+    // lengths at once.
+    let path = p.direct.join("parts/p/features/s.json");
+    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    v["constraints"]["x1"] = serde_json::json!({"a": "l1", "type": "length", "value": "10 mm"});
+    v["constraints"]["x2"] =
+        serde_json::json!({"a": "p1", "b": "p2", "type": "distance", "value": "12 mm"});
+    p.write(
+        "parts/p/features/s.json",
+        &serde_json::to_string_pretty(&v).unwrap(),
+    );
+    let (_, v) = p.both_from("", &["rebuild", "p"]);
+    let e = &v["error"]["details"]["parts"][0]["features"][1];
+    assert_eq!(e["error"]["code"], "dependency_failed", "{v}");
+}
+
+#[test]
 fn external_edits_are_seen() {
     let p = Pair::new();
     p.ok(&["init"]);
