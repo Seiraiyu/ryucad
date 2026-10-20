@@ -16,7 +16,7 @@ use super::id::Id;
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -44,6 +44,9 @@ pub struct Part {
     pub env: Env,
     /// Every feature file in `features/`, listed or not.
     pub features: BTreeMap<Id, Result<Feature>>,
+    /// The parameters each feature file names, read from its text, so it
+    /// is known even for a feature that doesn't evaluate.
+    pub uses: BTreeMap<Id, BTreeSet<String>>,
     /// A hash of the bytes of `ryucad.json`, `part.json`, `parameters.json`
     /// and the listed feature files in order: it changes whenever anything
     /// that defines the part does.
@@ -266,6 +269,7 @@ fn load_part(
         Some(Err(e)) => Env::broken(e.clone().with("parameters", relative(root, &params_path))),
     };
     let mut features = BTreeMap::new();
+    let mut uses = BTreeMap::new();
     let mut bytes_of = BTreeMap::new();
     for (name, path) in list_dir(&dir.join("features"))? {
         let fid = name
@@ -276,6 +280,7 @@ fn load_part(
                 let at = relative(root, &path);
                 let feature = read_json(root, &path).and_then(|(bytes, v)| {
                     bytes_of.insert(fid.clone(), bytes);
+                    uses.insert(fid.clone(), super::files::feature_names(&v));
                     Feature::from_json(&v, manifest.default_unit, &env)
                         .map_err(|e| e.with("path", &at))
                 });
@@ -309,6 +314,7 @@ fn load_part(
         parameters,
         env,
         features,
+        uses,
         revision,
     })
 }

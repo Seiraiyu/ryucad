@@ -31,6 +31,7 @@ fn part(features: Vec<(&str, Feature)>) -> Part {
         }),
         parameters: None,
         env: ryucad::expr::Env::empty(),
+        uses: Default::default(),
         features: features.into_iter().map(|(f, x)| (id(f), Ok(x))).collect(),
         revision: String::new(),
     }

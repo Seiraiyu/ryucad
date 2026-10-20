@@ -171,6 +171,16 @@ pub enum Request {
     FeatureList { part: String },
     #[serde(rename = "feature.show")]
     FeatureShow { part: String, id: String },
+    #[serde(rename = "param.list")]
+    ParamList { part: String },
+    /// Sets or adds parameters, each an expression.
+    #[serde(rename = "param.set")]
+    ParamSet {
+        part: String,
+        parameters: Map<String, Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     #[serde(rename = "rebuild")]
     Rebuild {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -409,6 +419,7 @@ impl Request {
                 | Request::FeatureEdit { .. }
                 | Request::FeatureDelete { .. }
                 | Request::FeatureMove { .. }
+                | Request::ParamSet { .. }
                 | Request::Undo { .. }
                 | Request::Redo { .. }
                 | Request::DoctorRepair { .. }

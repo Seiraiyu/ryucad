@@ -98,6 +98,7 @@ fn rebuild_section(golden: &mut Golden) {
         file: Ok(PartFile { features: order }),
         parameters: None,
         env: ryucad::expr::Env::empty(),
+        uses: Default::default(),
         features,
         revision: String::new(),
     };

@@ -252,6 +252,59 @@ pub fn expression(v: &Value) -> Result<Expr> {
     }
 }
 
+/// The expression strings in a feature's JSON: its params and the
+/// coordinates of its origin.
+fn expression_strings(v: &mut Value) -> Vec<&mut String> {
+    let mut out = Vec::new();
+    let Some(o) = v.as_object_mut() else {
+        return out;
+    };
+    for (k, field) in o.iter_mut() {
+        match (k.as_str(), field) {
+            ("params", Value::Object(m)) => out.extend(m.values_mut().filter_map(|x| match x {
+                Value::String(s) => Some(s),
+                _ => None,
+            })),
+            ("placement", Value::Object(p)) => {
+                if let Some(Value::Array(a)) = p.get_mut("origin") {
+                    out.extend(a.iter_mut().filter_map(|x| match x {
+                        Value::String(s) => Some(s),
+                        _ => None,
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The parameters a feature's JSON names, read from its text alone, so a
+/// feature that doesn't evaluate still says what it reads.
+pub fn feature_names(v: &Value) -> std::collections::BTreeSet<String> {
+    let mut v = v.clone();
+    expression_strings(&mut v)
+        .into_iter()
+        .filter_map(|s| Expr::parse(s).ok())
+        .flat_map(|e| e.names())
+        .collect()
+}
+
+/// Renames a parameter in a feature's JSON, in place. Returns whether
+/// anything changed; strings that don't parse are left as they are.
+pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
+    let mut changed = false;
+    for s in expression_strings(v) {
+        if let Ok(e) = Expr::parse(s)
+            && e.names().contains(from)
+        {
+            *s = e.rename(from, to).text().to_owned();
+            changed = true;
+        }
+    }
+    changed
+}
+
 impl Feature {
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
@@ -695,6 +748,22 @@ mod tests {
         // A literal-only feature stays at format 1.
         let f = Feature::from_json(&cylinder_json(), Unit::Mm, &wall()).unwrap();
         assert_eq!(f.format(), 1);
+    }
+
+    #[test]
+    fn names_are_read_from_the_text() {
+        let mut v = cylinder_json();
+        v["params"]["radius"] = json!("wall*2");
+        v["params"]["height"] = json!("1 +");
+        v["placement"]["origin"][0] = json!("x0 + pi * 1 mm");
+        assert_eq!(
+            feature_names(&v).into_iter().collect::<Vec<_>>(),
+            ["wall", "x0"]
+        );
+        assert!(rename_in_feature(&mut v, "wall", "skin"));
+        assert_eq!(v["params"]["radius"], "skin * 2");
+        assert_eq!(v["params"]["height"], "1 +");
+        assert!(!rename_in_feature(&mut v, "wall", "skin"));
     }
 
     #[test]

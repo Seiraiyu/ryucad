@@ -14,6 +14,7 @@ use crate::expr::Env;
 use crate::live::{self, Live, SelectMode};
 use crate::mesh;
 use crate::notify::Topic;
+use crate::param;
 use crate::proto::{Answer, PlacementArg, Position, Request, Transfer, VersionInfo};
 use crate::rebuild;
 use crate::session::Session;
@@ -208,6 +209,12 @@ fn dispatch(
             expected_revision,
         } => feature_move(session, &part, &id, &position, expected_revision.as_deref()),
         Request::FeatureList { part } => feature_list(session, &part),
+        Request::ParamList { part } => param::list(session, &part),
+        Request::ParamSet {
+            part,
+            parameters,
+            expected_revision,
+        } => param::set(session, &part, parameters, expected_revision.as_deref()),
         Request::FeatureShow { part, id } => {
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
             let p = session.project().part(&part)?;
@@ -487,12 +494,12 @@ fn project_info(session: &Session) -> Value {
     })
 }
 
-fn part_id(s: &str) -> Result<Id> {
+pub(crate) fn part_id(s: &str) -> Result<Id> {
     Id::parse(s, "part")
 }
 
 /// Refuses to write when the agent's view of the part is out of date.
-fn check_revision(part: &Part, expected: Option<&str>) -> Result<()> {
+pub(crate) fn check_revision(part: &Part, expected: Option<&str>) -> Result<()> {
     match expected {
         Some(e) if e != part.revision => Err(Error::new(
             Code::Conflict,

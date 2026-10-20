@@ -175,6 +175,62 @@ fn an_agent_session() {
 }
 
 #[test]
+fn parameters_drive_features() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    let r = p.ok(&["param", "set", "p", "wall=3mm", "n=4"]);
+    assert_eq!(r["parameters"][1]["value"], "3 mm");
+    let rev = r["revision"].as_str().unwrap().to_owned();
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "box",
+        "--id",
+        "b",
+        "--param",
+        "x=wall*n",
+        "--param",
+        "y=10",
+        "--param",
+        "z=wall",
+        "--origin",
+        "max(wall, 1 mm),0,-wall",
+        "--expect",
+        &rev,
+    ]);
+    let shown = p.ok(&["feature", "show", "p", "b"]);
+    assert_eq!(
+        shown["params"]["x"],
+        serde_json::json!({"value": "wall * n", "m": 0.012, "expr": true})
+    );
+    assert_eq!(shown["placement"]["origin"][0]["value"], "max(wall, 1 mm)");
+    let before = p.ok(&["rebuild"])["parts"][0]["hash"].clone();
+    p.ok(&["param", "set", "p", "wall=4 mm"]);
+    let after = p.ok(&["rebuild"]);
+    assert_ne!(after["parts"][0]["hash"], before);
+    assert_eq!(
+        p.ok(&["feature", "show", "p", "b"])["params"]["x"]["m"],
+        0.016
+    );
+    let list = p.ok(&["param", "list", "p"]);
+    assert_eq!(
+        list["parameters"][1]["used_by"]["features"],
+        serde_json::json!(["b"])
+    );
+    assert_eq!(p.ok(&["check-format"])["clean"], true);
+    p.fails(&["param", "set", "p", "wall=1 deg"], "unit_mismatch", 1);
+    p.fails(&["param", "set", "p", "wall=wall"], "parameter_cycle", 1);
+    p.fails(
+        &["feature", "edit", "p", "b", "--param", "y=gap"],
+        "unknown_parameter",
+        1,
+    );
+    p.fails(&["param", "set", "p"], "usage", 2);
+}
+
+#[test]
 fn external_edits_are_seen() {
     let p = Pair::new();
     p.ok(&["init"]);
@@ -321,6 +377,8 @@ fn every_protocol_method_has_a_command() {
         ("feature.move", &["feature", "move"]),
         ("feature.list", &["feature", "list"]),
         ("feature.show", &["feature", "show"]),
+        ("param.list", &["param", "list"]),
+        ("param.set", &["param", "set"]),
         ("rebuild", &["rebuild"]),
         ("inspect", &["inspect"]),
         ("check_format", &["check-format"]),
