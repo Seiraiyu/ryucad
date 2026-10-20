@@ -1,7 +1,7 @@
 //! Bodies as agents see them: every face, edge and vertex by stable name,
 //! with its key geometry in meters.
 
-use crate::doc::files::{Feature, FeatureType};
+use crate::doc::files::{Feature, PrimitiveType};
 use crate::rebuild::{Built, placement};
 use ryukei::geom::{Curve, Frame, Point3, Surface};
 use ryukei::topo::{Body, Sense};
@@ -99,18 +99,19 @@ pub fn bounds(f: &Feature) -> Value {
 
 /// [`bounds`] as `(min, max)`; `None` when the placement is invalid.
 pub fn extent(f: &Feature) -> Option<([f64; 3], [f64; 3])> {
+    let f = f.primitive()?;
     let m = |k| f.meters(k);
     let (lo, hi) = match f.ty {
-        FeatureType::Box => ([0.0; 3], [m("x"), m("y"), m("z")]),
-        FeatureType::Cylinder | FeatureType::Cone => {
+        PrimitiveType::Box => ([0.0; 3], [m("x"), m("y"), m("z")]),
+        PrimitiveType::Cylinder | PrimitiveType::Cone => {
             let r = m("radius").max(m("top_radius"));
             ([-r, -r, 0.0], [r, r, m("height")])
         }
-        FeatureType::Sphere => {
+        PrimitiveType::Sphere => {
             let r = m("radius");
             ([-r; 3], [r; 3])
         }
-        FeatureType::Torus => {
+        PrimitiveType::Torus => {
             let (a, b) = (m("major_radius") + m("minor_radius"), m("minor_radius"));
             ([-a, -a, -b], [a, a, b])
         }
@@ -142,25 +143,25 @@ pub fn body(f: &Feature, b: &Built) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::files::Placement;
+    use crate::doc::files::{Placement, Primitive};
     use crate::doc::id::Id;
     use crate::rebuild::build_feature;
     use crate::units::{Quantity, Unit};
 
-    fn feature(ty: FeatureType, params: &[(&str, &str)]) -> Feature {
-        Feature {
+    fn feature(ty: PrimitiveType, params: &[(&str, &str)]) -> Feature {
+        Feature::Primitive(Primitive {
             ty,
             params: params
                 .iter()
                 .map(|(k, v)| (k.to_string(), Quantity::parse(v, Unit::M).unwrap()))
                 .collect(),
             placement: Placement::identity(Unit::M),
-        }
+        })
     }
 
     #[test]
     fn a_box_lists_everything_by_name() {
-        let f = feature(FeatureType::Box, &[("x", "1"), ("y", "2"), ("z", "3")]);
+        let f = feature(PrimitiveType::Box, &[("x", "1"), ("y", "2"), ("z", "3")]);
         let id = Id::parse("b", "feature").unwrap();
         let b = build_feature(&id, &id, &f).unwrap();
         let v = body(&f, &b);
@@ -190,7 +191,7 @@ mod tests {
     #[test]
     fn closed_surfaces_have_only_a_face() {
         let f = feature(
-            FeatureType::Torus,
+            PrimitiveType::Torus,
             &[("major_radius", "3"), ("minor_radius", "1")],
         );
         let id = Id::parse("t", "feature").unwrap();

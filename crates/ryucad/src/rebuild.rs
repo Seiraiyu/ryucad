@@ -2,7 +2,7 @@
 //! its own body; they don't depend on each other, so they build in
 //! parallel and are collected in feature order.
 
-use crate::doc::files::{Feature, FeatureType, Placement};
+use crate::doc::files::{Feature, Placement, Primitive, PrimitiveType};
 use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::error::{Code, Error, Result};
@@ -65,30 +65,41 @@ pub fn placement(p: &Placement) -> Result<Rigid> {
 
 /// Builds one feature and checks the result.
 pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
+    match f {
+        Feature::Primitive(p) => build_primitive(part, id, p),
+    }
+}
+
+fn build_primitive(part: &Id, id: &Id, f: &Primitive) -> Result<Built> {
     let key = op_key(part, id);
     let at = placement(&f.placement)?;
     let m = |name| f.meters(name);
     let made = match f.ty {
-        FeatureType::Box => primitive::block(key, m("x"), m("y"), m("z"), &at),
-        FeatureType::Cylinder => primitive::cylinder(key, m("radius"), m("height"), &at),
-        FeatureType::Cone if m("top_radius") > 0.0 => {
+        PrimitiveType::Box => primitive::block(key, m("x"), m("y"), m("z"), &at),
+        PrimitiveType::Cylinder => primitive::cylinder(key, m("radius"), m("height"), &at),
+        PrimitiveType::Cone if m("top_radius") > 0.0 => {
             primitive::frustum(key, m("radius"), m("top_radius"), m("height"), &at)
         }
-        FeatureType::Cone => primitive::cone(key, m("radius"), m("height"), &at),
-        FeatureType::Sphere => primitive::sphere(key, m("radius"), &at),
-        FeatureType::Torus => primitive::torus(key, m("major_radius"), m("minor_radius"), &at),
+        PrimitiveType::Cone => primitive::cone(key, m("radius"), m("height"), &at),
+        PrimitiveType::Sphere => primitive::sphere(key, m("radius"), &at),
+        PrimitiveType::Torus => primitive::torus(key, m("major_radius"), m("minor_radius"), &at),
     };
-    let (body, journal) = made.map_err(|e| {
+    let made = made.map_err(|e| {
         Error::new(Code::RebuildFailed, format!("{} {id}: {e}", f.ty.as_str()))
             .with("feature", id)
             .with("kernel", format!("{e:?}"))
     })?;
-    // A broken body is never reported as a success, in release builds too.
+    finish(id, f.ty.as_str(), made)
+}
+
+/// Checks a body the kernel built and hashes it. A broken body is never
+/// reported as a success, in release builds too.
+fn finish(id: &Id, ty: &str, (body, journal): (Body, Journal)) -> Result<Built> {
     let faults = ryukei::check::check(&body);
     if !faults.is_empty() {
         return Err(Error::new(
             Code::Internal,
-            format!("{} {id}: the kernel built an invalid body", f.ty.as_str()),
+            format!("{ty} {id}: the kernel built an invalid body"),
         )
         .with("feature", id)
         .with(
@@ -140,30 +151,33 @@ mod tests {
         Id::parse(s, "feature").unwrap()
     }
 
-    fn feature(ty: FeatureType, params: &[(&str, &str)]) -> Feature {
-        Feature {
+    fn feature(ty: PrimitiveType, params: &[(&str, &str)]) -> Feature {
+        Feature::Primitive(Primitive {
             ty,
             params: params
                 .iter()
                 .map(|(k, v)| (k.to_string(), Quantity::parse(v, Unit::Mm).unwrap()))
                 .collect(),
             placement: Placement::identity(Unit::Mm),
-        }
+        })
     }
 
     #[test]
     fn every_type_builds_a_valid_body() {
         for f in [
-            feature(FeatureType::Box, &[("x", "10"), ("y", "20"), ("z", "30")]),
-            feature(FeatureType::Cylinder, &[("radius", "5"), ("height", "10")]),
-            feature(FeatureType::Cone, &[("radius", "5"), ("height", "10")]),
+            feature(PrimitiveType::Box, &[("x", "10"), ("y", "20"), ("z", "30")]),
             feature(
-                FeatureType::Cone,
+                PrimitiveType::Cylinder,
+                &[("radius", "5"), ("height", "10")],
+            ),
+            feature(PrimitiveType::Cone, &[("radius", "5"), ("height", "10")]),
+            feature(
+                PrimitiveType::Cone,
                 &[("radius", "5"), ("height", "10"), ("top_radius", "2")],
             ),
-            feature(FeatureType::Sphere, &[("radius", "5")]),
+            feature(PrimitiveType::Sphere, &[("radius", "5")]),
             feature(
-                FeatureType::Torus,
+                PrimitiveType::Torus,
                 &[("major_radius", "10"), ("minor_radius", "2")],
             ),
         ] {
@@ -226,14 +240,17 @@ mod tests {
         // Equal radii make no cone; a torus whose tube reaches the axis is degenerate.
         for f in [
             feature(
-                FeatureType::Cone,
+                PrimitiveType::Cone,
                 &[("radius", "5"), ("height", "10"), ("top_radius", "5")],
             ),
             feature(
-                FeatureType::Torus,
+                PrimitiveType::Torus,
                 &[("major_radius", "2"), ("minor_radius", "2")],
             ),
-            feature(FeatureType::Box, &[("x", "2000 m"), ("y", "1"), ("z", "1")]),
+            feature(
+                PrimitiveType::Box,
+                &[("x", "2000 m"), ("y", "1"), ("z", "1")],
+            ),
         ] {
             let e = build_feature(&id("p"), &id("f"), &f).unwrap_err();
             assert_eq!(e.code, Code::RebuildFailed, "{e}");

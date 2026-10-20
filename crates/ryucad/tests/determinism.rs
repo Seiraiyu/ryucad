@@ -5,7 +5,7 @@
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
 
-use ryucad::doc::files::{Feature, FeatureType, PartFile, Placement};
+use ryucad::doc::files::{Feature, PartFile, Placement, Primitive, PrimitiveType};
 use ryucad::doc::id::Id;
 use ryucad::doc::project::Part;
 use ryucad::rebuild::{placement, rebuild_part};
@@ -120,27 +120,27 @@ fn rebuild_section(golden: &mut Golden) {
     let mut order = Vec::new();
     let mut features = std::collections::BTreeMap::new();
     for i in 0..120 {
-        let ty = FeatureType::ALL[i % 5];
+        let ty = PrimitiveType::ALL[i % 5];
         let q = |g: &mut Lcg| Quantity::parse(&format!("{} mm", decimal(g)), Unit::Mm).unwrap();
         let mut params = std::collections::BTreeMap::new();
         for name in ty.required() {
             params.insert(name.to_string(), q(&mut g));
         }
-        if ty == FeatureType::Torus {
+        if ty == PrimitiveType::Torus {
             // The tube must be thinner than the ring.
             let major = params["major_radius"].meters();
             let minor = Quantity::parse(&format!("{} m", major / 3.0), Unit::Mm).unwrap();
             params.insert("minor_radius".into(), minor);
         }
-        if ty == FeatureType::Cone && i % 2 == 0 {
+        if ty == PrimitiveType::Cone && i % 2 == 0 {
             params.insert("top_radius".into(), q(&mut g));
         }
         let id = Id::parse(&format!("f{i}"), "feature").unwrap();
-        let feature = Feature {
+        let feature = Feature::Primitive(Primitive {
             ty,
             params,
             placement: random_placement(&mut g),
-        };
+        });
         order.push(id.clone());
         features.insert(id, Ok(feature));
     }

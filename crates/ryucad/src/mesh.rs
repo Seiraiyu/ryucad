@@ -638,17 +638,17 @@ fn decode_mesh(r: &mut Reader) -> Result<WireMesh> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::files::{FeatureType, Placement};
+    use crate::doc::files::{Placement, Primitive, PrimitiveType};
     use crate::doc::id::Id;
     use crate::rebuild::build_feature;
     use crate::units::{Quantity, Unit};
 
     fn sphere(r: &str) -> (Feature, Built) {
-        let f = Feature {
-            ty: FeatureType::Sphere,
+        let f = Feature::Primitive(Primitive {
+            ty: PrimitiveType::Sphere,
             params: [("radius".to_owned(), Quantity::parse(r, Unit::Mm).unwrap())].into(),
             placement: Placement::identity(Unit::Mm),
-        };
+        });
         let id = Id::parse("s", "feature").unwrap();
         let b = build_feature(&id, &id, &f).unwrap();
         (f, b)
@@ -745,8 +745,8 @@ mod tests {
 
     #[test]
     fn json_names_every_face_edge_and_vertex() {
-        let f = Feature {
-            ty: FeatureType::Cylinder,
+        let f = Feature::Primitive(Primitive {
+            ty: PrimitiveType::Cylinder,
             params: [
                 ("radius".to_owned(), Quantity::parse("5", Unit::Mm).unwrap()),
                 (
@@ -756,7 +756,7 @@ mod tests {
             ]
             .into(),
             placement: Placement::identity(Unit::Mm),
-        };
+        });
         let id = Id::parse("c", "feature").unwrap();
         let b = build_feature(&id, &id, &f).unwrap();
         let m = make(&f, &b.body, Quality::Coarse);

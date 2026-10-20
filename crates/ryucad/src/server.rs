@@ -3,7 +3,7 @@
 
 use crate::activity::{self, EntryKind};
 use crate::config;
-use crate::doc::files::{Feature, FeatureType, Manifest, PartFile, Placement, number};
+use crate::doc::files::{Feature, Manifest, PartFile, Placement, Primitive, PrimitiveType, number};
 use crate::doc::id::Id;
 use crate::doc::project::{
     MANIFEST, Part, feature_path, parameters_path, part_dir, part_path, write_json,
@@ -600,14 +600,21 @@ fn no_feature(part: &Part, id: &Id) -> Error {
 /// How a feature appears in output: every quantity as written and in
 /// meters.
 pub fn feature_report(id: &Id, f: &Feature) -> Value {
+    let mut v = match f {
+        Feature::Primitive(p) => primitive_report(p),
+    };
+    v["id"] = json!(id);
+    v["type"] = json!(f.type_name());
+    v
+}
+
+fn primitive_report(f: &Primitive) -> Value {
     let params: Map<String, Value> = f
         .params
         .iter()
         .map(|(k, q)| (k.clone(), q.report()))
         .collect();
     json!({
-        "id": id,
-        "type": f.ty.as_str(),
         "params": params,
         "placement": {
             "origin": f.placement.origin.iter().map(Quantity::report).collect::<Vec<_>>(),
@@ -694,7 +701,7 @@ fn feature_add(
     let p = session.project().part(&pid)?;
     check_revision(p, expected)?;
     let mut list = order(p)?;
-    let ty = FeatureType::parse(ty)?;
+    let ty = PrimitiveType::parse(ty)?;
     let fid = match id {
         Some(id) => feature_id(id)?,
         None => Id::generate(ty.as_str(), |s| p.features.keys().any(|f| f.as_str() == s)),
@@ -707,7 +714,7 @@ fn feature_add(
         .with("feature", &fid));
     }
     let env = p.env.clone();
-    let params = Feature::params_from_json(ty, &Value::Object(params), unit, &env)?;
+    let params = Primitive::params_from_json(ty, &Value::Object(params), unit, &env)?;
     let mut placed = Placement::identity(unit);
     // With z given and x left out, x defaults to world X, or to world Y
     // when z lies along X; either way the file records it.
@@ -721,11 +728,11 @@ fn feature_add(
         placed.x = [0.0, 1.0, 0.0];
     }
     apply_placement(&mut placed, placement, unit, &env)?;
-    let f = Feature {
+    let f = Feature::Primitive(Primitive {
         ty,
         params,
         placement: placed,
-    };
+    });
     list.insert(insert_at(&list, position)?, fid.clone());
     let revision = save(session, &pid, &[(&fid, &f)], list)?;
     Ok(json!({"feature": feature_report(&fid, &f), "revision": revision}))
@@ -744,7 +751,7 @@ fn feature_edit(
     let p = session.project().part(&pid)?;
     check_revision(p, expected)?;
     let list = order(p)?;
-    let mut f = feature(p, &fid)?.clone();
+    let Feature::Primitive(mut f) = feature(p, &fid)?.clone();
     let mut merged: Map<String, Value> = f
         .params
         .iter()
@@ -757,8 +764,9 @@ fn feature_edit(
             merged.insert(k, v);
         }
     }
-    f.params = Feature::params_from_json(f.ty, &Value::Object(merged), unit, &p.env)?;
+    f.params = Primitive::params_from_json(f.ty, &Value::Object(merged), unit, &p.env)?;
     apply_placement(&mut f.placement, placement, unit, &p.env)?;
+    let f = Feature::Primitive(f);
     let revision = save(session, &pid, &[(&fid, &f)], list)?;
     Ok(json!({"feature": feature_report(&fid, &f), "revision": revision}))
 }
@@ -823,7 +831,7 @@ fn feature_list(session: &Session, part: &str) -> Result<Value> {
     let features: Vec<Value> = order(p)?
         .iter()
         .map(|id| match feature(p, id) {
-            Ok(f) => json!({"id": id, "type": f.ty.as_str(), "ok": true}),
+            Ok(f) => json!({"id": id, "type": f.type_name(), "ok": true}),
             Err(e) => json!({"id": id, "ok": false, "error": e}),
         })
         .collect();
@@ -838,7 +846,7 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
     let types: BTreeMap<Id, &'static str> = part
         .features
         .iter()
-        .filter_map(|(fid, f)| Some((fid.clone(), f.as_ref().ok()?.ty.as_str())))
+        .filter_map(|(fid, f)| Some((fid.clone(), f.as_ref().ok()?.type_name())))
         .collect();
     let r = session.rebuilt(id)?;
     let features: Vec<Value> = r
