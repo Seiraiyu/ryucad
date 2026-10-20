@@ -224,10 +224,18 @@ fn unwrap_ring(g: &FaceGeom, ring: &[LoopPoint]) -> Result<(Vec<Flat>, [i64; 2])
         if i == n {
             through_poles(g, &mut out, &poles);
             // Back at the start: the winding.
-            let wind: [i64; 2] = core::array::from_fn(|k| match g.periods[k] {
+            let mut wind: [i64; 2] = core::array::from_fn(|k| match g.periods[k] {
                 Some(period) => ((x[k] - out[0].x[k]) / period).round() as i64,
                 None => 0,
             });
+            // Through both poles of a row the jumps are free, so the ring
+            // never winds that row's free way; with half a turn each side
+            // (a hemisphere's lune) both jumps can round the same way.
+            if let [(_, k), (_, k2)] = poles[..]
+                && k == k2
+            {
+                wind[1 - k] = 0;
+            }
             // Points on poles take their neighbours' free parameters.
             let mut flat = Vec::with_capacity(out.len() + poles.len());
             for (j, f) in out.iter().enumerate() {

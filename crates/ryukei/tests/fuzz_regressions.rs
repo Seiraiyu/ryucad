@@ -120,3 +120,14 @@ fn an_edge_lying_on_a_face_out_of_a_tangent_tip() {
 fn the_same_tip_seen_from_the_other_side() {
     boolean_sound("29faf700000000000000047a7f7f7f7f7f7f7f7f2a");
 }
+
+/// A ball united with a tilted block whose face plane holds the ball's
+/// axis: the hemisphere left is a lune exactly half a turn wide, and the
+/// jumps across both poles round the same way, so its ring seemed to wind.
+#[test]
+fn a_hemisphere_cut_through_both_poles() {
+    boolean_sound(concat!(
+        "0f00000000000000000a000026000000000400007e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e",
+        "7e7e7e7e7e7e7e2400000000000000000a00",
+    ));
+}
