@@ -44,16 +44,17 @@ pub(crate) enum Located {
     Vertex(u32),
 }
 
-/// Why a segment could not be forced in: it crosses a fixed edge.
+/// Why a segment could not be forced in: it crosses a fixed edge, the one
+/// given when the trace met it.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Crossing;
+pub(crate) struct Crossing(pub(crate) Option<[u32; 2]>);
 
 /// Where tracing a segment stops short of its end.
 enum Stop {
     /// At a vertex on the segment.
     Vertex(u32),
     /// At a fixed edge the segment crosses.
-    Fixed,
+    Fixed([u32; 2]),
 }
 
 pub(crate) fn next(i: usize) -> usize {
@@ -604,7 +605,7 @@ impl Cdt {
         let (mut t, i) = first.expect("the segment leaves a");
         let tri = &self.tris[t as usize];
         if tri.fixed[i] {
-            return Err(Stop::Fixed);
+            return Err(Stop::Fixed([tri.v[next(i)], tri.v[prev(i)]]));
         }
         let mut edge = [tri.v[next(i)], tri.v[prev(i)]];
         let mut out = vec![edge];
@@ -643,7 +644,7 @@ impl Cdt {
                 })
                 .expect("edge of u");
             if ut.fixed[k] {
-                return Err(Stop::Fixed);
+                return Err(Stop::Fixed(edge));
             }
             out.push(edge);
             t = u;
@@ -673,7 +674,7 @@ impl Cdt {
                     todo.push((a, v));
                     continue;
                 }
-                Err(Stop::Fixed) => return Err(Crossing),
+                Err(Stop::Fixed(e)) => return Err(Crossing(Some(e))),
             };
             self.flip_out([a, b], crossed)?;
             self.fix(a, b);
@@ -703,7 +704,7 @@ impl Cdt {
                 queue.push_back([x, y]);
                 stuck += 1;
                 if stuck > 2 * queue.len() + 2 {
-                    return Err(Crossing);
+                    return Err(Crossing(None));
                 }
                 continue;
             }
@@ -898,7 +899,10 @@ mod tests {
         let x = c.insert(p(0.5, 0.1)).unwrap();
         let y = c.insert(p(0.5, 0.9)).unwrap();
         c.insert_segment(a, b).unwrap();
-        assert_eq!(c.insert_segment(x, y), Err(Crossing));
+        let Err(Crossing(Some(hit))) = c.insert_segment(x, y) else {
+            panic!("the segment crosses a b");
+        };
+        assert!(hit == [a, b] || hit == [b, a]);
     }
 
     #[test]
@@ -933,7 +937,7 @@ mod tests {
         assert!(d.is_delaunay());
         // Crossing it fails, and changes nothing.
         let before = d.clone();
-        assert_eq!(d.insert_segment(1, 3), Err(Crossing));
+        assert!(matches!(d.insert_segment(1, 3), Err(Crossing(Some(_)))));
         assert_eq!(d.tris, before.tris);
     }
 

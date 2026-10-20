@@ -19,7 +19,7 @@
 //! side of every loop segment are marked so, and the marks spread across
 //! unfixed edges. A face with no loop of edges is inside everywhere.
 
-use super::cdt::{Cdt, NONE};
+use super::cdt::{Cdt, Crossing, NONE};
 use super::edge::{EdgeSamples, unwrap};
 use super::uv::{FaceGeom, U, V};
 use crate::geom::Point2;
@@ -359,13 +359,57 @@ fn strip(g: &FaceGeom, d: usize, piece: &[Flat]) -> Result<i64, BadDomain> {
     Ok(if face_lower { ma - 1 } else { ma })
 }
 
+/// A ring that winds round neither period, moved by whole periods into
+/// the face's period rectangle, which it must fit without crossing a
+/// seam.
+fn whole_hole(g: &FaceGeom, mut flat: Vec<Flat>, wind: [i64; 2]) -> Result<Vec<Flat>, BadDomain> {
+    if wind != [0, 0] {
+        return Err(BadDomain);
+    }
+    for k in 0..2 {
+        fit(g, k, &mut flat)?;
+    }
+    Ok(flat)
+}
+
+/// Moves a ring by whole periods in direction `k` into the face's period
+/// there, which it must fit without crossing the seam.
+fn fit(g: &FaceGeom, k: usize, flat: &mut [Flat]) -> Result<(), BadDomain> {
+    let (Some(p), Some(s)) = (g.periods[k], g.seam(k)) else {
+        return Err(BadDomain);
+    };
+    let lo = flat.iter().map(|q| q.x[k]).fold(f64::INFINITY, f64::min);
+    let hi = flat
+        .iter()
+        .map(|q| q.x[k])
+        .fold(f64::NEG_INFINITY, f64::max);
+    let shift = ((s - lo) / p).ceil() * p;
+    if hi + shift >= s + p {
+        return Err(BadDomain);
+    }
+    for q in flat {
+        q.x[k] += shift;
+    }
+    Ok(())
+}
+
 impl Domain {
     /// Builds a face's region from its loops.
+    #[cfg(test)]
     pub(crate) fn new(g: &FaceGeom, loops: &Loops) -> Result<Self, BadDomain> {
+        Self::with_requests(g, loops, &mut Vec::new())
+    }
+
+    /// Builds a face's region from its loops. Where two loop segments
+    /// cross (edges of a sliver face too close for their samples), the
+    /// samples in the middle of both are pushed to `requests`: with them
+    /// the polylines draw apart.
+    pub(crate) fn with_requests(
+        g: &FaceGeom,
+        loops: &Loops,
+        requests: &mut Vec<(EdgeId, f64)>,
+    ) -> Result<Self, BadDomain> {
         let periodic: Vec<usize> = (0..2).filter(|&k| g.periods[k].is_some()).collect();
-        if periodic.len() == 2 && !loops.rings.is_empty() {
-            return Err(BadDomain);
-        }
         // Pieces: open polylines between seam points (or whole rings),
         // shifted into the period.
         let mut pieces: Vec<(Vec<Flat>, bool)> = Vec::new();
@@ -374,7 +418,27 @@ impl Domain {
             match periodic[..] {
                 [] => pieces.push((flat, true)),
                 [d] => pieces.extend(cut(g, d, flat, wind[d])?),
-                _ => unreachable!(),
+                // Periodic both ways: a hole that fits between the seams
+                // (which the face geometry puts between holes where it
+                // can) stays whole; a ring that fits between one way's
+                // seams (a band round the surface the other way, or a
+                // hole the other way's seam can't miss) is cut at the
+                // seam it crosses.
+                _ => {
+                    let fits = |k: usize| wind[k] == 0 && fit(g, k, &mut flat.clone()).is_ok();
+                    match (fits(U), fits(V)) {
+                        (true, true) => pieces.push((whole_hole(g, flat, wind)?, true)),
+                        (true, false) | (false, true) => {
+                            let k = if fits(U) { U } else { V };
+                            let mut flat = flat;
+                            fit(g, k, &mut flat)?;
+                            pieces.extend(cut(g, 1 - k, flat, wind[1 - k])?);
+                        }
+                        (false, false) => {
+                            return Err(BadDomain);
+                        }
+                    }
+                }
             }
         }
         let lone: Vec<(VertexId, Point2)> = loops
@@ -499,7 +563,16 @@ impl Domain {
                 }
                 let (a, b) = (row[i], row[(i + 1) % n]);
                 let seg = piece[i].seg;
-                let parts = d.cdt.insert_segment(a, b).map_err(|_| BadDomain)?;
+                let parts = match d.cdt.insert_segment(a, b) {
+                    Ok(parts) => parts,
+                    Err(Crossing(hit)) => {
+                        let other = hit.and_then(|[x, y]| d.segments.get(&[x.min(y), x.max(y)]));
+                        for &(e, t0, t1) in [Some(&seg), other].into_iter().flatten() {
+                            requests.push((e, 0.5 * (t0 + t1)));
+                        }
+                        return Err(BadDomain);
+                    }
+                };
                 for [x, y] in parts {
                     d.segments.insert([x.min(y), x.max(y)], seg);
                     marks.push((x, y));

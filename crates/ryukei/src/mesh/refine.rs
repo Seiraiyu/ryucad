@@ -69,17 +69,19 @@ fn side_of(d: &Domain, a: u32, b: u32) -> Option<usize> {
 
 /// Refines the inside triangles of a face's domain. `fixed` gives the
 /// positions of body anchors; `cap` is the most inside triangles the face
-/// may have.
+/// may have. An inner edge joining the boundary points in `split` (sorted;
+/// see [`chords`]) is split however well its triangles fit.
 pub(crate) fn refine(
     d: &mut Domain,
     g: &FaceGeom,
     t: &Targets,
     fixed: &dyn Fn(Anchor) -> Point3,
     cap: u64,
+    split: &[Chord],
 ) -> Refined {
     let mut out = Refined::default();
     for _ in 0..PINCH_ROUNDS {
-        if let Some(stop) = refine_pass(d, g, t, fixed, cap, &mut out) {
+        if let Some(stop) = refine_pass(d, g, t, fixed, cap, split, &mut out) {
             out.stop = Some(stop);
             return out;
         }
@@ -209,6 +211,7 @@ fn refine_pass(
     t: &Targets,
     fixed: &dyn Fn(Anchor) -> Point3,
     cap: u64,
+    split: &[Chord],
     out: &mut Refined,
 ) -> Option<Stop> {
     let mut stop = None;
@@ -226,7 +229,15 @@ fn refine_pass(
         pos.resize(d.uv.len(), None);
         let xyz = corners.map(|v| *pos[v as usize].get_or_insert_with(|| position(d, g, v, fixed)));
         let uv = corners.map(|v| d.uv[v as usize]);
-        if triangle_ok(g.surface, g.metric, uv, xyz, t) {
+        // An inner edge to split whatever the triangle's fit: opposite
+        // corner i.
+        let chord = (0..3).find(|&i| {
+            !split.is_empty()
+                && !d.cdt.is_fixed(tri, i)
+                && chord_of(d, corners[next(i)], corners[prev(i)])
+                    .is_some_and(|c| split.binary_search(&c).is_ok())
+        });
+        if chord.is_none() && triangle_ok(g.surface, g.metric, uv, xyz, t) {
             continue;
         }
         if count > cap {
@@ -235,7 +246,8 @@ fn refine_pass(
         // The longest edge in the scaled plane: opposite corner i.
         let scaled = uv.map(|p| g.metric.scale(p));
         let len = |i: usize| scaled[next(i)].distance(scaled[prev(i)]);
-        let i = (0..3).fold(0, |best, i| if len(i) > len(best) { i } else { best });
+        let i = chord
+            .unwrap_or_else(|| (0..3).fold(0, |best, i| if len(i) > len(best) { i } else { best }));
         if len(i) < floor {
             stop = Some(Stop::Stalled);
             continue;
@@ -277,6 +289,54 @@ fn refine_pass(
         }
     }
     stop
+}
+
+/// A boundary point's identity across faces: a body vertex, or an edge
+/// sample by edge and index.
+pub(crate) type Point = (u8, u32, u32);
+
+/// An inner mesh edge between two boundary points, the lesser first.
+pub(crate) type Chord = [Point; 2];
+
+fn point_of(d: &Domain, v: u32) -> Option<Point> {
+    match d.classes.anchor(v) {
+        Anchor::Vertex(x) => Some((0, x.index() as u32, 0)),
+        Anchor::Sample(e, k) => Some((1, e.index() as u32, k)),
+        Anchor::Free => None,
+    }
+}
+
+fn chord_of(d: &Domain, a: u32, b: u32) -> Option<Chord> {
+    let (p, q) = (point_of(d, a)?, point_of(d, b)?);
+    Some([p.min(q), p.max(q)])
+}
+
+/// The face's inside mesh edges that join two boundary points, sorted,
+/// each with whether it is a loop segment.
+///
+/// Where two faces meet in a wedge thinner than the chord (an edge
+/// bending into both, or two edges meeting at a shallow angle), each
+/// fills the sliver beside the boundary with triangles of boundary points
+/// alone, and one may draw an edge across it that the other draws too, as
+/// a chord or as a loop segment: the welded mesh then uses it more than
+/// twice. Such a chord is split in every face it is a chord of
+/// ([`refine`]'s `split`), each putting a point of its own surface on it.
+pub(crate) fn chords(d: &Domain) -> Vec<(Chord, bool)> {
+    let mut out = Vec::new();
+    for tri in 0..d.cdt.triangle_count() as u32 {
+        if !d.inside[tri as usize] {
+            continue;
+        }
+        let c = d.cdt.corners(tri);
+        for i in 0..3 {
+            if let Some(chord) = chord_of(d, c[next(i)], c[prev(i)]) {
+                out.push((chord, d.cdt.is_fixed(tri, i)));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Splits an inner edge at its midpoint. The new vertex is free.
@@ -400,7 +460,7 @@ mod tests {
             .map(|f| {
                 let geom = g[f.index()].as_ref().unwrap();
                 let mut d = Domain::new(geom, &gather(b, geom, &samples)).unwrap();
-                let r = refine(&mut d, geom, &t, &fixed, 1_000_000);
+                let r = refine(&mut d, geom, &t, &fixed, 1_000_000, &[]);
                 for tri in 0..d.cdt.triangle_count() as u32 {
                     if !d.inside[tri as usize] {
                         continue;
@@ -472,7 +532,7 @@ mod tests {
         let geom = g[f.index()].as_ref().unwrap();
         let mut d = Domain::new(geom, &gather(&b, geom, &[])).unwrap();
         let none = |_: Anchor| unreachable!();
-        let r = refine(&mut d, geom, &targets(1e-4, 0.2), &none, 50);
+        let r = refine(&mut d, geom, &targets(1e-4, 0.2), &none, 50, &[]);
         assert_eq!(r.stop, Some(Stop::TooLarge));
     }
 }

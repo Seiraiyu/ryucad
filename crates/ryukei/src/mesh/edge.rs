@@ -187,11 +187,21 @@ pub(crate) fn discretize(
     let mut stalled = false;
     while let Some(next) = stack.pop() {
         let cur = out.last().expect("started");
-        // An initial segment (between the ends and seeds) may run more than
-        // half a period round a face, which its ends alone can't tell from
-        // the short way round: when going by its middle disagrees with the
-        // ends, the middle becomes a sample first.
-        if cur.depth == 0 && next.depth == 0 {
+        // A segment may run more than half a period round a face, which its
+        // ends alone can't tell from the short way round: when its ends are
+        // more than a quarter period apart and going by its middle
+        // disagrees with the ends, the middle becomes a sample first.
+        let far = faces.iter().enumerate().any(|(i, &f)| {
+            let g = geom(f);
+            (0..2).any(|k| {
+                g.periods[k].is_some_and(|period| {
+                    let x = |p: Point2| [p.x, p.y][k];
+                    let (a, z) = (x(cur.uv[i]), x(next.uv[i]));
+                    (unwrap(z, a, Some(period)) - a).abs() > 0.25 * period
+                })
+            })
+        });
+        if (cur.depth == 0 && next.depth == 0) || far {
             let t = 0.5 * (cur.t + next.t);
             let mid = sample(t, curve.point(t), 1);
             let long = faces.iter().enumerate().any(|(i, &f)| {
@@ -241,6 +251,23 @@ pub(crate) fn discretize(
                 }
             }
             let t = 0.5 * (lo + hi);
+            // Over a segment more than half a period long, the side test
+            // (unwrapped next to its start) flips half a period away
+            // rather than at the seam: then the segment is halved first.
+            let (uv, _) = raw(i, t, curve.point(t));
+            let period = g.periods[k].expect("periodic");
+            let x = unwrap([uv.x, uv.y][k], line, Some(period));
+            if (x - line).abs() > 1e-6 * period {
+                let half = 0.5 * (cur.t + next.t);
+                let depth = cur.depth.max(next.depth) + 1;
+                if half > cur.t && half < next.t && depth <= MAX_DEPTH {
+                    let mut mid = sample(half, curve.point(half), depth);
+                    mid.depth = depth;
+                    stack.push(next);
+                    stack.push(mid);
+                    continue;
+                }
+            }
             let mut mid = sample(t, curve.point(t), 0);
             // Exactly on the seam on that face.
             let seam = g.seam(k).expect("periodic");
@@ -273,6 +300,18 @@ pub(crate) fn discretize(
             stack.push(next);
             stack.push(mid);
         }
+    }
+    // Two edges making a loop of their own (a sliver between an edge
+    // and a curve close beside it) each within the chord unsampled would
+    // make a polygon with no area: such an edge gets its middle.
+    if out.len() == 2
+        && edge.start != edge.end
+        && fins
+            .iter()
+            .any(|&fin| b.loop_fins(b.fins[fin].loop_).count() == 2)
+    {
+        let t = 0.5 * (t0 + t1);
+        out.insert(1, sample(t, curve.point(t), 1));
     }
     EdgeSamples {
         params: out.iter().map(|s| s.t).collect(),
