@@ -1,0 +1,11 @@
+{
+  "angle": "4-+55555-5555555555559-5+90 deg",
+  "axis": "l5",
+  "format": 2,
+  "kind": "ryucad.feature",
+  "sketch": "s",
+ "symmetrid": "ryucad.feature",
+  "sketch": "s",
+  "symmetric": true,
+  "type": "revolve"
+}

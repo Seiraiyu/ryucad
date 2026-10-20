@@ -1,0 +1,14 @@
+{
+  "extent": {
+    "offset": "-2 mm",
+    "target": {
+      "feature": "b",
+      "name": "d2ea6ff41f82679`674048865c452=62"
+    },
+    "type": "up_to"
+  },
+  "format": 1,
+  "kind": "ryucad.feature",
+  "sketch": "s",
+  "type": "extrude"
+}

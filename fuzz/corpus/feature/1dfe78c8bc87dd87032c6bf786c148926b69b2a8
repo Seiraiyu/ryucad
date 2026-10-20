@@ -1,0 +1,17 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "params": {
+    "": "82 mm",
+    "y": "4444444444444444444444444444/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkkkkkkkkkkkkkkkk-kkkkkkkkkkkkkkkkkkkk4444/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkiiiiiiiiiiiiiiii44444444444444/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkkkkkkkkkkkkkkkk-kkkkkkkkkkkkkkkkkkkk4444/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkiiiiiiiiiiiiiiiiiiiiikkkkkkkkkkkk-kkkkkk/kkkkkkkkkk-kkkkkkkkkkkkkiiiiiiiiiiiiiikkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk/kkkkkkkkkkkkkkkkkiiiiiiiiiiiiiiiikkkkkkiiiiiiiiiiiiiikkkkkkkkkkkkkkkkk4444/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/l4kkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkiiiiiiiiiiiiiiiiiiiikkkkk4444/kkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkiiiiiiiiiiiiiiiiiiiiiiikkkkkkk+kkkkkkkkkkkkkkkkkkkkkiiiiikkkkkkkkkkkk-kkkkkk/kkkkkkkkkk-kkkkkkkkkk+kkkkkkkkkkkkkkkkkiiiiiiiiiiiiiikkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkiiiiiiiiiiiiiiiikkkkkkiiiiiiiiiiiiiikkkkkkkkkkkkkkkkk4444/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkiiiiiiiiiiiiiiiiiiiikkkkk1788/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkk-kkkkkk/kkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkiiiiiiiiiiiiiiiiiiiiiiikkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk967857PPPPPP4444421 mm",
+    "z": "30 mm"
+  },
+  "placement": {
+    "oriz": [
+      0,
+      0,
+      1
+    ]
+  },
+  "type": "box"
+}

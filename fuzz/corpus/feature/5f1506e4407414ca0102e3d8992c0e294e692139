@@ -1,0 +1,22 @@
+{
+  "constraints": {
+    "d1": {
+
+    }
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "placement":  
+{   "origin": [
+  " +  1 mm",
+     "z mm?",
+      "1 mm"
+    ],
+    "x": [
+      1,
+      0,
+ 1
+    ]
+  },
+  "type": "sketch"
+}

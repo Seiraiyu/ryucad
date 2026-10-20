@@ -209,6 +209,33 @@ fn a_new_segment_renames_only_what_sat_where_it_joins() {
 }
 
 #[test]
+fn a_curve_that_sorts_first_keeps_the_caps() {
+    let (_dir, mut s) = project(false, &[extrude()]);
+    let caps = |m: &BTreeMap<String, Value>| -> Vec<String> {
+        m.iter()
+            .filter(|(_, o)| o.get("cap").is_some() && o.get("loop").is_some())
+            .map(|(n, _)| n.clone())
+            .collect()
+    };
+    let before = caps(&names(&mut s, "e"));
+    assert_eq!(before.len(), 2);
+    // The top becomes an arc a1, whose ID sorts before every line's, about
+    // a new centre point.
+    call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": "s", "ops": [
+            {"op": "remove", "id": "l3"},
+            {"op": "add", "type": "point", "at": [10, 10]},
+            {"op": "add", "id": "a1", "type": "arc", "center": "p5", "start": "p3", "end": "p4"}
+        ]}),
+    );
+    let after = names(&mut s, "e");
+    assert_eq!(caps(&after), before);
+    assert!(after.values().any(|o| o["loop"] == "p1"));
+}
+
+#[test]
 fn swept_bodies_are_sound() {
     let (_dir, mut s) = project(
         false,

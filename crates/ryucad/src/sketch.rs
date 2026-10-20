@@ -10,19 +10,21 @@
 use crate::doc::files::Feature;
 use crate::doc::id::Id;
 use crate::doc::project::Part;
+use crate::doc::reference::Reference;
 use crate::doc::sketch::{
-    ConstraintType, Entity, Geometry, Index, Plane, Sketch, clean, constraint_from_json,
+    ConstraintType, Entity, Geometry, Index, OnFace, Plane, Sketch, clean, constraint_from_json,
 };
+use crate::doc::sweep::RevolveAxis;
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
-use crate::rebuild::placement;
+use crate::rebuild::{Results, placement};
 use crate::server;
 use crate::session::Session;
 use crate::units::{Field, Quantity, Unit};
-use ryukei::geom::Rigid;
+use ryukei::geom::{Point3, Rigid};
 use ryusketch::{Coord, State};
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// What a solve found, in the sketch's IDs.
 #[derive(Clone, Debug, PartialEq)]
@@ -138,22 +140,38 @@ pub struct Solved {
 /// Solves a sketch from its stored positions, whether or not every
 /// constraint can be made to hold: the sketch at the solution, and the
 /// report.
-pub fn solve_any(id: &Id, s: &Sketch) -> Result<(Sketch, Report)> {
-    let (solver, index) = s.solver()?;
+pub fn solve_any(id: &Id, s: &Sketch, ctx: &Context) -> Result<(Sketch, Report)> {
+    let (sketch, solver, index) = projected(s, ctx)?;
     let solved = ryusketch::solve(&solver)
         .map_err(|e| Error::new(Code::Internal, format!("sketch {id}: {e}")).with("feature", id))?;
-    let mut sketch = s.clone();
+    let mut sketch = sketch;
     sketch.take_positions(&solved.sketch, &index);
     Ok((sketch, Report::new(&solved.report, &index)))
+}
+
+/// The sketch with what `ctx` projects put in place, and the solver's
+/// sketch with those entities fixed.
+fn projected(s: &Sketch, ctx: &Context) -> Result<(Sketch, ryusketch::Sketch, Index)> {
+    let mut sketch = s.clone();
+    for (id, p) in &ctx.projected {
+        match (sketch.entities.get_mut(id).map(|e| &mut e.geometry), p) {
+            (Some(Geometry::Point { m }), Projected::At(at)) => *m = *at,
+            (Some(Geometry::Circle { r_m, .. }), Projected::Radius(r)) => *r_m = clean(*r),
+            _ => unreachable!("projections fix points and circles of the sketch"),
+        }
+    }
+    let fixed = ctx.projected.keys().collect();
+    let (solver, index) = sketch.solver_fixing(&fixed)?;
+    Ok((sketch, solver, index))
 }
 
 /// Solves an edited sketch. What was moved is first held where it was put,
 /// so it stays there if everything else can follow; the solve from there
 /// gives the sketch's own report.
-pub fn solve_edited(id: &Id, s: &Sketch, moved: &[Id]) -> Result<(Sketch, Report)> {
+pub fn solve_edited(id: &Id, s: &Sketch, moved: &[Id], ctx: &Context) -> Result<(Sketch, Report)> {
     let mut start = s.clone();
     if !moved.is_empty() {
-        let (mut solver, index) = s.solver()?;
+        let (_, mut solver, index) = projected(s, ctx)?;
         let first = solver.constraints.len() as u32;
         for (c, m) in (first..).zip(moved) {
             let e = index.entity(m).expect("moved entities exist");
@@ -165,7 +183,7 @@ pub fn solve_edited(id: &Id, s: &Sketch, moved: &[Id]) -> Result<(Sketch, Report
             start.take_positions(&held.sketch, &index);
         }
     }
-    solve_any(id, &start)
+    solve_any(id, &start, ctx)
 }
 
 /// `sketch_unsolved` for a sketch whose constraints can't all hold.
@@ -178,14 +196,314 @@ fn unsolved(id: &Id, report: &Report) -> Error {
     .with("report", report.to_json())
 }
 
-/// Solves a sketch from its stored positions. A sketch whose constraints
-/// can't all be made to hold is `sketch_unsolved`, with the report.
+/// What a sketch reads from outside itself: the frame of its plane, and
+/// where its projected entities go.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Context {
+    pub frame: Rigid,
+    /// The points and circles projections fix, by ID.
+    pub projected: BTreeMap<Id, Projected>,
+}
+
+/// What a projection fixes: a point's position, in the sketch's frame, or
+/// a circle's radius.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Projected {
+    At([f64; 2]),
+    Radius(f64),
+}
+
+impl Context {
+    /// The context of a sketch that reads no other feature: on an origin
+    /// plane or a placement. `None` for one that does, whose context comes
+    /// from the features before it ([`context`]).
+    pub fn standalone(s: &Sketch) -> Option<Result<Context>> {
+        if !s.references().is_empty() {
+            return None;
+        }
+        // The unit only writes a zero origin; it doesn't change the frame.
+        let p = s.plane.placement(Unit::M)?;
+        Some(placement(&p).map(|frame| Context {
+            frame,
+            projected: BTreeMap::new(),
+        }))
+    }
+}
+
+/// The context of sketch `id` from the results of the features before it;
+/// `order` is the part's list as it is, or as a write would leave it.
+pub fn context(
+    part: &Part,
+    order: &[Id],
+    id: &Id,
+    s: &Sketch,
+    results: &dyn Results,
+) -> Result<Context> {
+    if let Some(c) = Context::standalone(s) {
+        return c;
+    }
+    let frame = match &s.plane {
+        Plane::Face(on) => face_frame(part, order, id, on, results)?,
+        p => placement(&p.placement(Unit::M).expect("not on a face"))?,
+    };
+    let mut projected = BTreeMap::new();
+    for (eid, e) in &s.entities {
+        if let Some(r) = &e.projected {
+            let at = Projection {
+                part,
+                order,
+                sketch: id,
+                entity: eid,
+                r,
+                frame: &frame,
+            };
+            at.project(e, results, &mut projected)?;
+        }
+    }
+    Ok(Context { frame, projected })
+}
+
+/// One projected entity of a sketch, and where it sits.
+struct Projection<'a> {
+    part: &'a Part,
+    order: &'a [Id],
+    sketch: &'a Id,
+    entity: &'a Id,
+    r: &'a Reference,
+    frame: &'a Rigid,
+}
+
+impl Projection<'_> {
+    fn role(&self) -> String {
+        format!("entities.{}", self.entity)
+    }
+
+    fn fail(&self, code: Code, msg: &str) -> Error {
+        let text = self.r.text(&self.part.id);
+        Error::new(
+            code,
+            format!(
+                "sketch {}: {} projects {text}, which {msg}",
+                self.sketch, self.entity
+            ),
+        )
+        .with("feature", self.sketch)
+        .with("role", self.role())
+        .with("reference", text)
+    }
+
+    /// A point of the model in the sketch's plane.
+    fn flat(&self, p: Point3) -> [f64; 2] {
+        let q = self.frame.inverse().apply_point(p);
+        [clean(q.x), clean(q.y)]
+    }
+
+    /// Fixes `id` at `p`. A point fixed twice must be fixed in one place.
+    fn put(&self, out: &mut BTreeMap<Id, Projected>, id: &Id, p: Projected) -> Result<()> {
+        match (out.get(id), p) {
+            (Some(Projected::At(a)), Projected::At(b))
+                if ryukei::math::hypot(a[0] - b[0], a[1] - b[1])
+                    > ryukei::tol::LINEAR_RESOLUTION =>
+            {
+                Err(self.fail(
+                    Code::ProjectionUnsupported,
+                    &format!("puts {id} somewhere another projection doesn't"),
+                ))
+            }
+            (Some(_), _) => Ok(()),
+            (None, p) => {
+                out.insert(id.clone(), p);
+                Ok(())
+            }
+        }
+    }
+
+    /// Where the entity's projection fixes its points and radius.
+    fn project(
+        &self,
+        e: &Entity,
+        results: &dyn Results,
+        out: &mut BTreeMap<Id, Projected>,
+    ) -> Result<()> {
+        use crate::reference::{kind, resolve, wrong_kind};
+        use ryukei::geom::{Curve, Vector3};
+        use ryukei::topo::EntityId;
+        let role = self.role();
+        let (b, found) = resolve(self.part, self.order, self.sketch, &role, self.r, results)?;
+        let body = &b.body;
+        let wrong =
+            |what: &str, want: &str| wrong_kind(self.part, self.sketch, &role, self.r, what, want);
+        let want = match e.geometry {
+            Geometry::Point { .. } => "a vertex",
+            Geometry::Line { .. } => "a straight edge",
+            Geometry::Arc { .. } => "an arc of a circle",
+            Geometry::Circle { .. } => "a whole circle",
+        };
+        let vertex = |v| body.vertex(v).expect("a live vertex").point;
+        match (&e.geometry, found) {
+            (Geometry::Point { .. }, EntityId::Vertex(v)) => {
+                self.put(out, self.entity, Projected::At(self.flat(vertex(v))))
+            }
+            (Geometry::Line { start, end }, EntityId::Edge(x)) => {
+                let edge = body.edge(x).expect("a live edge");
+                match body.curve(edge.curve) {
+                    Some(Curve::Line(_)) => {}
+                    Some(Curve::Circle(_)) => return Err(wrong("circular edge", want)),
+                    _ => {
+                        return Err(self.fail(
+                            Code::ProjectionUnsupported,
+                            "is neither straight nor a circle",
+                        ));
+                    }
+                }
+                let (a, z) = (self.flat(vertex(edge.start)), self.flat(vertex(edge.end)));
+                if ryukei::math::hypot(z[0] - a[0], z[1] - a[1]) <= ryukei::tol::LINEAR_RESOLUTION {
+                    return Err(self.fail(
+                        Code::ProjectionUnsupported,
+                        "runs along the sketch's normal",
+                    ));
+                }
+                self.put(out, start, Projected::At(a))?;
+                self.put(out, end, Projected::At(z))
+            }
+            (Geometry::Arc { center, .. } | Geometry::Circle { center, .. }, EntityId::Edge(x)) => {
+                let edge = body.edge(x).expect("a live edge");
+                let c = match body.curve(edge.curve) {
+                    Some(Curve::Circle(c)) => c,
+                    Some(Curve::Line(_)) => return Err(wrong("straight edge", want)),
+                    _ => {
+                        return Err(self.fail(
+                            Code::ProjectionUnsupported,
+                            "is neither straight nor a circle",
+                        ));
+                    }
+                };
+                let n = self.frame.apply_vector(Vector3::new(0.0, 0.0, 1.0));
+                let axis = c.frame().z().get();
+                if axis.cross(n).length() > ryukei::tol::ANGULAR_RESOLUTION {
+                    return Err(self.fail(
+                        Code::ProjectionUnsupported,
+                        "is a circle not parallel to the sketch",
+                    ));
+                }
+                let closed = edge.start == edge.end;
+                self.put(out, center, Projected::At(self.flat(c.frame().origin())))?;
+                match &e.geometry {
+                    Geometry::Circle { .. } if closed => {
+                        self.put(out, self.entity, Projected::Radius(c.radius()))
+                    }
+                    Geometry::Arc { start, end, .. } if !closed => {
+                        // Counterclockwise in the sketch: along the edge
+                        // when the circle turns the sketch's way.
+                        let (a, z) = (vertex(edge.start), vertex(edge.end));
+                        let (a, z) = if axis.dot(n) > 0.0 { (a, z) } else { (z, a) };
+                        self.put(out, start, Projected::At(self.flat(a)))?;
+                        self.put(out, end, Projected::At(self.flat(z)))
+                    }
+                    _ if closed => Err(wrong("whole circle", want)),
+                    _ => Err(wrong("arc of a circle", want)),
+                }
+            }
+            (_, found) => Err(wrong(kind(found), want)),
+        }
+    }
+}
+
+/// The context of sketch `id` of `part` from the part's current rebuild.
+pub fn context_now(session: &mut Session, part: &Id, id: &Id, s: &Sketch) -> Result<Context> {
+    if let Some(c) = Context::standalone(s) {
+        return c;
+    }
+    let p = session.project().part(part)?.clone();
+    let results = session.rebuilt(part)?;
+    let c = context(&p, p.order(), id, s, results);
+    c.map_err(|e| session.explain(part, e))
+}
+
+/// The frame of a sketch on a face: the face's outward normal, the part
+/// origin (or a vertex) projected onto its plane, and `x` along the
+/// part's `x` (or `y`, if `x` is along the normal) or a straight edge,
+/// projected onto the plane.
+fn face_frame(
+    part: &Part,
+    order: &[Id],
+    id: &Id,
+    on: &OnFace,
+    results: &dyn Results,
+) -> Result<Rigid> {
+    use crate::reference::{line, plane, point, resolve};
+    use ryukei::geom::{Frame, Point3, Vector3};
+    let found = resolve(part, order, id, "plane", &on.face, results)?;
+    let (p0, n) = plane(part, id, "plane", &on.face, found)?;
+    let onto = |q: Point3| q - n * (q - p0).dot(n);
+    let origin = match &on.origin {
+        Some(r) => {
+            let found = resolve(part, order, id, "origin", r, results)?;
+            onto(point(part, id, "origin", r, found)?)
+        }
+        None => onto(Point3::new(0.0, 0.0, 0.0)),
+    };
+    let hint = match &on.x {
+        Some(r) => {
+            let found = resolve(part, order, id, "x", r, results)?;
+            let (a, b) = line(part, id, "x", r, found)?;
+            let d = b - a;
+            let d = d - n * d.dot(n);
+            if Frame::new(origin, n, d).is_err() {
+                return Err(Error::new(
+                    Code::ReferenceWrongKind,
+                    format!(
+                        "{id}: its x {} runs along the face's normal",
+                        r.text(&part.id)
+                    ),
+                )
+                .with("feature", id)
+                .with("role", "x")
+                .with("reference", r.text(&part.id)));
+            }
+            d
+        }
+        None => {
+            let x = Vector3::new(1.0, 0.0, 0.0);
+            if Frame::new(origin, n, x).is_ok() {
+                x
+            } else {
+                Vector3::new(0.0, 1.0, 0.0)
+            }
+        }
+    };
+    let frame = Frame::new(origin, n, hint).map_err(|e| {
+        Error::new(
+            Code::InvalidPlacement,
+            format!("sketch {id}: its face gives no frame"),
+        )
+        .with("feature", id)
+        .with("kernel", format!("{e:?}"))
+    })?;
+    Ok(Rigid::from_frame(&frame))
+}
+
+/// Solves a sketch that reads no other feature from its stored positions.
 pub fn solve(id: &Id, s: &Sketch) -> Result<Solved> {
-    let (sketch, report) = solve_any(id, s)?;
+    match Context::standalone(s) {
+        Some(c) => solve_in(id, s, &c?),
+        None => Err(Error::new(
+            Code::Internal,
+            format!("sketch {id} reads other features: solve it in its part"),
+        )
+        .with("feature", id)),
+    }
+}
+
+/// Solves a sketch from its stored positions, in `ctx`. A sketch whose
+/// constraints can't all be made to hold is `sketch_unsolved`, with the
+/// report.
+pub fn solve_in(id: &Id, s: &Sketch, ctx: &Context) -> Result<Solved> {
+    let (sketch, report) = solve_any(id, s, ctx)?;
     if !report.converged {
         return Err(unsolved(id, &report));
     }
-    let frame = frame(&sketch.plane)?;
+    let frame = ctx.frame;
     let hash = hash(&sketch, &frame, &report);
     Ok(Solved {
         stale: sketch != *s,
@@ -194,12 +512,6 @@ pub fn solve(id: &Id, s: &Sketch) -> Result<Solved> {
         frame,
         hash,
     })
-}
-
-/// The rigid frame of a sketch's plane.
-pub fn frame(plane: &Plane) -> Result<Rigid> {
-    // The unit only writes a zero origin; it doesn't change the frame.
-    placement(&plane.placement(Unit::M))
 }
 
 fn hash(s: &Sketch, frame: &Rigid, report: &Report) -> String {
@@ -240,12 +552,18 @@ fn prefix(ty: &str) -> &'static str {
     }
 }
 
-/// The smallest `<prefix><n>` the sketch doesn't use.
+/// `<prefix><n>` for `n` one past the largest the sketch uses with that
+/// prefix. Never a gap: a loop is anchored on its first point, so a new
+/// point must not sort before the old ones.
 fn fresh(s: &Sketch, prefix: &str) -> Id {
-    (1u64..)
-        .map(|n| Id::parse(&format!("{prefix}{n}"), "entity").expect("a valid ID"))
-        .find(|id| !s.entities.contains_key(id) && !s.constraints.contains_key(id))
-        .expect("some n is free")
+    let n = s
+        .entities
+        .keys()
+        .chain(s.constraints.keys())
+        .filter_map(|id| id.as_str().strip_prefix(prefix)?.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0);
+    Id::parse(&format!("{prefix}{}", n + 1), "entity").expect("a valid ID")
 }
 
 fn op_error(i: usize, field: &str, msg: String) -> Error {
@@ -305,8 +623,8 @@ pub struct Applied {
     pub moved: Vec<Id>,
 }
 
-/// Applies a batch of edits to a sketch, in order.
-pub fn apply(s: &mut Sketch, ops: &[Value], unit: Unit, env: &Env) -> Result<Applied> {
+/// Applies a batch of edits to a sketch of `part`, in order.
+pub fn apply(s: &mut Sketch, part: &Id, ops: &[Value], unit: Unit, env: &Env) -> Result<Applied> {
     let mut added = Vec::new();
     let mut moved = Vec::new();
     for (i, op) in ops.iter().enumerate() {
@@ -318,7 +636,7 @@ pub fn apply(s: &mut Sketch, ops: &[Value], unit: Unit, env: &Env) -> Result<App
             )
         })?;
         match o.get("op").and_then(Value::as_str) {
-            Some("add") => added.push(add(s, o, i, unit, env)?),
+            Some("add") => add(s, o, i, part, unit, env, &mut added)?,
             Some("remove") => {
                 only(o, i, &["op", "id"])?;
                 let id = named(s, o, i)?;
@@ -379,7 +697,50 @@ pub fn apply(s: &mut Sketch, ops: &[Value], unit: Unit, env: &Env) -> Result<App
     Ok(Applied { added, moved })
 }
 
-fn add(s: &mut Sketch, o: &Map<String, Value>, i: usize, unit: Unit, env: &Env) -> Result<Id> {
+/// The point an op names in field `f`. A projected curve that leaves it
+/// out gets a new one, which the projection will place.
+fn point_of(
+    s: &mut Sketch,
+    o: &Map<String, Value>,
+    (i, ty, f): (usize, &str, &str),
+    projected: bool,
+    added: &mut Vec<Id>,
+) -> Result<Id> {
+    match o.get(f) {
+        Some(v) => {
+            let v = v
+                .as_str()
+                .ok_or_else(|| op_error(i, f, format!("a {ty} needs {f}: a point's ID")))?;
+            Id::parse(v, "entity").map_err(|e| e.with("pointer", format!("/ops/{i}/{f}")))
+        }
+        None if projected => {
+            let id = fresh(s, "p");
+            let geometry = Geometry::Point { m: [0.0, 0.0] };
+            s.entities.insert(
+                id.clone(),
+                Entity {
+                    geometry,
+                    construction: false,
+                    projected: None,
+                },
+            );
+            added.push(id.clone());
+            Ok(id)
+        }
+        None => Err(op_error(i, f, format!("a {ty} needs {f}: a point's ID"))),
+    }
+}
+
+/// Adds an entity or a constraint, and records what it added.
+fn add(
+    s: &mut Sketch,
+    o: &Map<String, Value>,
+    i: usize,
+    part: &Id,
+    unit: Unit,
+    env: &Env,
+    added: &mut Vec<Id>,
+) -> Result<()> {
     let ty = o
         .get("type")
         .and_then(Value::as_str)
@@ -402,13 +763,6 @@ fn add(s: &mut Sketch, o: &Map<String, Value>, i: usize, unit: Unit, env: &Env) 
         }
         None => fresh(s, prefix(ty)),
     };
-    let point = |f: &str| -> Result<Id> {
-        let v = o
-            .get(f)
-            .and_then(Value::as_str)
-            .ok_or_else(|| op_error(i, f, format!("a {ty} needs {f}: a point's ID")))?;
-        Id::parse(v, "entity").map_err(|e| e.with("pointer", format!("/ops/{i}/{f}")))
-    };
     let construction = match o.get("construction") {
         None => false,
         Some(Value::Bool(b)) => *b,
@@ -420,45 +774,100 @@ fn add(s: &mut Sketch, o: &Map<String, Value>, i: usize, unit: Unit, env: &Env) 
             ));
         }
     };
+    let projected = match o.get("projected") {
+        None => None,
+        Some(v) => {
+            let text = v.as_str().ok_or_else(|| {
+                op_error(
+                    i,
+                    "projected",
+                    "projected is a vertex or edge: <part>/<feature>/<name>".into(),
+                )
+            })?;
+            Some(
+                Reference::parse(text, part)
+                    .map_err(|e| e.with("pointer", format!("/ops/{i}/projected")))?,
+            )
+        }
+    };
+    let auto = projected.is_some();
+    let mut point = |s: &mut Sketch, f: &str| point_of(s, o, (i, ty, f), auto, added);
     let geometry = match ty {
         "point" => {
-            only(o, i, &["op", "id", "type", "at"])?;
-            let at = o
-                .get("at")
-                .ok_or_else(|| op_error(i, "at", "a point needs at: [x, y]".into()))?;
-            Some(Geometry::Point {
-                m: rough(at, i, unit, env)?,
-            })
+            only(o, i, &["op", "id", "type", "at", "projected"])?;
+            let m = match o.get("at") {
+                Some(at) => rough(at, i, unit, env)?,
+                None if auto => [0.0, 0.0],
+                None => return Err(op_error(i, "at", "a point needs at: [x, y]".into())),
+            };
+            Some(Geometry::Point { m })
         }
         "line" => {
-            only(o, i, &["op", "id", "type", "start", "end", "construction"])?;
+            only(
+                o,
+                i,
+                &[
+                    "op",
+                    "id",
+                    "type",
+                    "start",
+                    "end",
+                    "construction",
+                    "projected",
+                ],
+            )?;
             Some(Geometry::Line {
-                start: point("start")?,
-                end: point("end")?,
+                start: point(s, "start")?,
+                end: point(s, "end")?,
             })
         }
         "arc" => {
             only(
                 o,
                 i,
-                &["op", "id", "type", "center", "start", "end", "construction"],
+                &[
+                    "op",
+                    "id",
+                    "type",
+                    "center",
+                    "start",
+                    "end",
+                    "construction",
+                    "projected",
+                ],
             )?;
             Some(Geometry::Arc {
-                center: point("center")?,
-                start: point("start")?,
-                end: point("end")?,
+                center: point(s, "center")?,
+                start: point(s, "start")?,
+                end: point(s, "end")?,
             })
         }
         "circle" => {
-            only(o, i, &["op", "id", "type", "center", "r", "construction"])?;
-            let r = o
-                .get("r")
-                .ok_or_else(|| op_error(i, "r", "a circle needs r".into()))?;
-            let r = Quantity::from_json_in(r, unit, &|n| env.get(n))
-                .map_err(|e| e.with("pointer", format!("/ops/{i}/r")))?;
+            only(
+                o,
+                i,
+                &[
+                    "op",
+                    "id",
+                    "type",
+                    "center",
+                    "r",
+                    "construction",
+                    "projected",
+                ],
+            )?;
+            let r_m = match o.get("r") {
+                Some(r) => clean(
+                    Quantity::from_json_in(r, unit, &|n| env.get(n))
+                        .map_err(|e| e.with("pointer", format!("/ops/{i}/r")))?
+                        .meters(),
+                ),
+                None if auto => 0.0,
+                None => return Err(op_error(i, "r", "a circle needs r".into())),
+            };
             Some(Geometry::Circle {
-                center: point("center")?,
-                r_m: clean(r.meters()),
+                center: point(s, "center")?,
+                r_m,
             })
         }
         _ => None,
@@ -470,10 +879,18 @@ fn add(s: &mut Sketch, o: &Map<String, Value>, i: usize, unit: Unit, env: &Env) 
                 Entity {
                     geometry,
                     construction,
+                    projected,
                 },
             );
         }
         None => {
+            if auto {
+                return Err(op_error(
+                    i,
+                    "projected",
+                    "only a point, line, arc or circle is projected".into(),
+                ));
+            }
             let mut c = o.clone();
             c.remove("op");
             c.remove("id");
@@ -481,7 +898,8 @@ fn add(s: &mut Sketch, o: &Map<String, Value>, i: usize, unit: Unit, env: &Env) 
             s.constraints.insert(id.clone(), c);
         }
     }
-    Ok(id)
+    added.push(id);
+    Ok(())
 }
 
 fn set(
@@ -562,12 +980,15 @@ pub fn edit(
     let list = server::order(p)?;
     let env = p.env.clone();
     let mut s = sketch_of(session, &pid, &fid)?;
-    let applied = apply(&mut s, ops, unit, &env)?;
+    let applied = apply(&mut s, &pid, ops, unit, &env)?;
     // What sweeps name must stay.
     for f in server::sweeps_of(p, &fid) {
         let names = match p.features[&f].as_ref().expect("a loaded sweep") {
             Feature::Extrude(e) => e.loops.clone(),
-            Feature::Revolve(r) => [r.loops.clone(), vec![r.axis.clone()]].concat(),
+            Feature::Revolve(r) => match &r.axis {
+                RevolveAxis::Line(l) => [r.loops.clone(), vec![l.clone()]].concat(),
+                RevolveAxis::Edge(_) => r.loops.clone(),
+            },
             _ => unreachable!("a sweep"),
         };
         if let Some(gone) = names.iter().find(|e| !s.entities.contains_key(*e)) {
@@ -579,7 +1000,8 @@ pub fn edit(
             .with("features", [&f]));
         }
     }
-    let (solved, report) = solve_edited(&fid, &s, &applied.moved)?;
+    let ctx = context_now(session, &pid, &fid, &s)?;
+    let (solved, report) = solve_edited(&fid, &s, &applied.moved, &ctx)?;
     if !report.converged {
         return Err(unsolved(&fid, &report));
     }
@@ -594,22 +1016,33 @@ pub fn edit(
     // Whether the solve moved anything.
     let changed = solved != s;
     let f = Feature::Sketch(solved);
-    let revision = server::save(session, &pid, &[(&fid, &f)], list)?;
-    Ok(
-        json!({"feature": fid, "added": applied.added, "changed": changed,
-              "report": report.to_json(), "revision": revision}),
-    )
+    let before = current(session, &pid)?;
+    server::save(session, &pid, &[(&fid, &f)], list)?;
+    let sketches = keep_current(session, &pid, &before)?;
+    let revision = &session.project().part(&pid)?.revision;
+    let mut v = json!({"feature": fid, "added": applied.added, "changed": changed,
+                       "report": report.to_json(), "revision": revision});
+    if !sketches.is_empty() {
+        v["sketches"] = json!(sketches);
+    }
+    Ok(v)
 }
 
 /// `sketch.solve`: the report for a sketch as it is, or with a batch of
 /// edits applied, and where its entities would be. Writes nothing.
-pub fn solve_request(session: &Session, part: &str, sketch: &str, ops: &[Value]) -> Result<Value> {
+pub fn solve_request(
+    session: &mut Session,
+    part: &str,
+    sketch: &str,
+    ops: &[Value],
+) -> Result<Value> {
     let (pid, fid) = (server::part_id(part)?, server::feature_id(sketch)?);
     let unit = session.project().manifest.default_unit;
     let env = session.project().part(&pid)?.env.clone();
     let mut s = sketch_of(session, &pid, &fid)?;
-    let applied = apply(&mut s, ops, unit, &env)?;
-    let (solved, report) = solve_edited(&fid, &s, &applied.moved)?;
+    let applied = apply(&mut s, &pid, ops, unit, &env)?;
+    let ctx = context_now(session, &pid, &fid, &s)?;
+    let (solved, report) = solve_edited(&fid, &s, &applied.moved, &ctx)?;
     Ok(
         json!({"feature": fid, "added": applied.added, "changed": solved != s,
               "report": report.to_json(), "entities": solved.fields()["entities"]}),
@@ -619,11 +1052,12 @@ pub fn solve_request(session: &Session, part: &str, sketch: &str, ops: &[Value])
 /// `sketch.get`: the solved geometry in the sketch's frame and in model
 /// space, each entity's and constraint's state, and the report. A sketch
 /// that can't be solved gives its best try, with the report saying so.
-pub fn get(session: &Session, part: &str, sketch: &str) -> Result<Value> {
+pub fn get(session: &mut Session, part: &str, sketch: &str) -> Result<Value> {
     let (pid, fid) = (server::part_id(part)?, server::feature_id(sketch)?);
     let stored = sketch_of(session, &pid, &fid)?;
-    let (solved, report) = solve_any(&fid, &stored)?;
-    let frame = frame(&solved.plane)?;
+    let ctx = context_now(session, &pid, &fid, &stored)?;
+    let (solved, report) = solve_any(&fid, &stored, &ctx)?;
+    let frame = ctx.frame;
     let at = |m: [f64; 2]| {
         let p = frame.apply_point(ryukei::geom::Point3::new(m[0], m[1], 0.0));
         [p.x, p.y, p.z]
@@ -695,9 +1129,18 @@ pub fn get(session: &Session, part: &str, sketch: &str) -> Result<Value> {
         "constraints": constraints,
         "revision": session.project().part(&pid)?.revision,
     });
-    match &solved.plane {
-        Plane::Origin(o) => v["plane"] = json!(o.as_str()),
-        Plane::Placement(_) => v["placement"] = solved.fields()["placement"].clone(),
+    let mut fields = solved.fields();
+    server::reference_texts(&pid, &solved, &mut fields);
+    for k in ["plane", "placement", "face", "origin", "x"] {
+        if let Some(x) = fields.get(k) {
+            v[k] = x.clone();
+        }
+    }
+    for (id, e) in &solved.entities {
+        if e.projected.is_some() {
+            v["entities"][id.as_str()]["projected"] =
+                fields["entities"][id.as_str()]["projected"].clone();
+        }
     }
     Ok(v)
 }
@@ -734,51 +1177,46 @@ pub fn entity_points(solved: &Solved, id: &Id) -> Vec<[f64; 3]> {
         .collect()
 }
 
-/// Each loaded sketch's dimension values, as bits: what a parameter change
-/// can make stale.
-pub fn dimension_values(part: &Part) -> BTreeMap<Id, Vec<u64>> {
-    part.order()
+/// The sketches of `part` whose stored positions are current: they
+/// rebuild as stored. Of these, what a write leaves stale it writes back
+/// solved ([`keep_current`]).
+pub fn current(session: &mut Session, part: &Id) -> Result<BTreeSet<Id>> {
+    let p = session.project().part(part)?;
+    if !p
+        .features
+        .values()
+        .any(|f| matches!(f, Ok(Feature::Sketch(_))))
+    {
+        return Ok(BTreeSet::new());
+    }
+    let r = session.rebuilt(part)?;
+    Ok(r.features
         .iter()
-        .filter_map(|id| {
-            let s = part.features.get(id)?.as_ref().ok()?.sketch()?;
-            let values = s
-                .constraints
-                .values()
-                .filter_map(|c| c.value.as_ref())
-                .map(|q| crate::doc::sketch::si(q).to_bits())
-                .collect();
-            Some((id.clone(), values))
+        .filter_map(|(id, o)| {
+            let s = o.as_ref().ok()?.sketch()?;
+            (!s.stale).then(|| id.clone())
         })
-        .collect()
+        .collect())
 }
 
-/// Re-solves the sketches whose dimension values differ from `before`
-/// and writes those that solve; one that doesn't is left as it was. Each
-/// is reported: `{"feature", "ok"}`, with its error when it failed.
-pub fn write_back(
-    session: &mut Session,
-    part: &Id,
-    before: &BTreeMap<Id, Vec<u64>>,
-) -> Result<Vec<Value>> {
-    let p = session.project().part(part)?;
+/// After a write to `part`: writes the sketches of `before`, current until
+/// then, that the write left stale, with their solved positions, in the
+/// same change. One that now fails is left as it was. Each is reported:
+/// `{"feature", "ok"}`, with its error when it failed.
+pub fn keep_current(session: &mut Session, part: &Id, before: &BTreeSet<Id>) -> Result<Vec<Value>> {
+    if before.is_empty() {
+        return Ok(Vec::new());
+    }
+    let r = session.rebuilt(part)?;
     let mut out = Vec::new();
     let mut writes = Vec::new();
-    for (id, values) in dimension_values(p) {
-        if before.get(&id) == Some(&values) {
-            continue;
-        }
-        let s = p.features[&id]
-            .as_ref()
-            .ok()
-            .and_then(Feature::sketch)
-            .expect("a sketch");
-        match solve(&id, s) {
-            Ok(solved) => {
-                if solved.stale {
-                    writes.push((id.clone(), Feature::Sketch(solved.sketch)));
-                }
+    for (id, o) in r.features.iter().filter(|(id, _)| before.contains(id)) {
+        match o.as_ref().map(|o| o.sketch()) {
+            Ok(Some(s)) if s.stale => {
+                writes.push((id.clone(), Feature::Sketch(s.sketch.clone())));
                 out.push(json!({"feature": id, "ok": true}));
             }
+            Ok(_) => {}
             Err(e) => out.push(json!({"feature": id, "ok": false, "error": e})),
         }
     }
@@ -791,7 +1229,7 @@ pub fn write_back(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::doc::files::Feature;
     use crate::expr::Env;
@@ -867,7 +1305,7 @@ mod tests {
     use crate::server::tests::{call, fresh};
 
     /// Part `p` with an empty sketch `s` on xy.
-    fn with_sketch() -> (tempfile::TempDir, Session) {
+    pub(crate) fn with_sketch() -> (tempfile::TempDir, Session) {
         let (dir, mut s) = fresh();
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();
         call(
@@ -880,7 +1318,7 @@ mod tests {
     }
 
     /// Ops drawing a rough 20 × 10 rectangle, held square and sized.
-    fn rectangle_ops() -> Value {
+    pub(crate) fn rectangle_ops() -> Value {
         json!([
             {"op": "add", "type": "point", "at": [0, 0]},
             {"op": "add", "type": "point", "at": [19, 1]},
@@ -913,7 +1351,7 @@ mod tests {
         }
     }
 
-    fn edit(s: &mut Session, ops: Value) -> Result<Value> {
+    pub(crate) fn edit(s: &mut Session, ops: Value) -> Result<Value> {
         call(
             s,
             "sketch.edit",
@@ -1137,6 +1575,554 @@ mod tests {
         call_live(&mut s, &mut live, None, "undo", json!({})).unwrap();
         let show = call(&mut s, "feature.show", json!({"part": "p", "id": "s"})).unwrap();
         assert_eq!(show["entities"], json!({}));
+    }
+
+    /// The name of the face of `body` (an `inspect` body) whose outward
+    /// normal is `n`.
+    pub(crate) fn face_along(body: &Value, n: [f64; 3]) -> String {
+        body["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let z = &f["surface"]["frame"]["z"];
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && (0..3).all(|k| (z[k].as_f64().unwrap() * sign - n[k]).abs() < 1e-12)
+            })
+            .map(|f| f["name"].as_str().unwrap().to_owned())
+            .expect("a face along n")
+    }
+
+    /// The name of the vertex of `body` at `p`, and of the edge from `a`
+    /// to `b`.
+    pub(crate) fn vertex_at(body: &Value, p: [f64; 3]) -> String {
+        body["vertices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| (0..3).all(|k| (v["point"][k].as_f64().unwrap() - p[k]).abs() < 1e-9))
+            .map(|v| v["name"].as_str().unwrap().to_owned())
+            .expect("a vertex at p")
+    }
+
+    pub(crate) fn edge_between(body: &Value, a: &str, b: &str) -> String {
+        body["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| (e["start"] == a && e["end"] == b) || (e["start"] == b && e["end"] == a))
+            .map(|e| e["name"].as_str().unwrap().to_owned())
+            .expect("an edge from a to b")
+    }
+
+    /// Part `p` with a 20 × 10 × 5 mm box `b`, and its body in `inspect`.
+    pub(crate) fn with_box() -> (tempfile::TempDir, Session, Value) {
+        let (dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 20, "y": 10, "z": 5}}),
+        )
+        .unwrap();
+        let body = call(&mut s, "inspect", json!({"part": "p", "feature": "b"})).unwrap()["bodies"]
+            [0]
+        .clone();
+        (dir, s, body)
+    }
+
+    fn close(v: &Value, want: [f64; 3]) {
+        for k in 0..3 {
+            assert!(
+                (v[k].as_f64().unwrap() - want[k]).abs() < 1e-15,
+                "{v} != {want:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sketch_sits_on_a_face() {
+        let (_dir, mut s, body) = with_box();
+        let top = format!("p/b/{}", face_along(&body, [0.0, 0.0, 1.0]));
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s", "face": top}),
+        )
+        .unwrap();
+        let g = call(&mut s, "sketch.get", json!({"part": "p", "sketch": "s"})).unwrap();
+        close(&g["frame"]["origin"], [0.0, 0.0, 0.005]);
+        close(&g["frame"]["z"], [0.0, 0.0, 1.0]);
+        close(&g["frame"]["x"], [1.0, 0.0, 0.0]);
+        assert_eq!(g["face"], top);
+        let show = call(&mut s, "feature.show", json!({"part": "p", "id": "s"})).unwrap();
+        assert_eq!(show["face"], top);
+        // A corner for its origin, and the edge along y from it for x.
+        let corner = vertex_at(&body, [0.02, 0.0, 0.005]);
+        let far = vertex_at(&body, [0.02, 0.01, 0.005]);
+        let edge = edge_between(&body, &corner, &far);
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "s", "face_origin": format!("p/b/{corner}"),
+                   "face_x": format!("p/b/{edge}")}),
+        )
+        .unwrap();
+        let g = call(&mut s, "sketch.get", json!({"part": "p", "sketch": "s"})).unwrap();
+        close(&g["frame"]["origin"], [0.02, 0.0, 0.005]);
+        let x = g["frame"]["x"][1].as_f64().unwrap();
+        assert!(x.abs() == 1.0, "{}", g["frame"]);
+        // Back to the defaults.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "s", "face_origin": "", "face_x": ""}),
+        )
+        .unwrap();
+        let show = call(&mut s, "feature.show", json!({"part": "p", "id": "s"})).unwrap();
+        assert!(show.get("origin").is_none() && show.get("x").is_none());
+    }
+
+    #[test]
+    fn a_body_on_a_face_follows_it() {
+        let (_dir, mut s, body) = with_box();
+        let top = format!("p/b/{}", face_along(&body, [0.0, 0.0, 1.0]));
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s", "face": top}),
+        )
+        .unwrap();
+        edit(&mut s, rectangle_ops()).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "id": "e", "sketch": "s",
+                   "extent": {"length": 3}}),
+        )
+        .unwrap();
+        let bounds = |s: &mut Session| {
+            call(s, "inspect", json!({"part": "p", "feature": "e"})).unwrap()["bodies"][0]["bounds"]
+                .clone()
+        };
+        let z = |b: &Value, k: &str| b[k][2].as_f64().unwrap();
+        let b = bounds(&mut s);
+        assert!(
+            (z(&b, "min") - 0.005).abs() < 1e-12 && (z(&b, "max") - 0.008).abs() < 1e-12,
+            "{b}"
+        );
+        // The box grows; the sketch, still current, rides on its top.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"z": 7}}),
+        )
+        .unwrap();
+        let rb = call(&mut s, "rebuild", json!({})).unwrap();
+        assert_eq!(rb["parts"][0]["features"][1]["sketch"]["stale"], false);
+        let b = bounds(&mut s);
+        assert!((z(&b, "min") - 0.007).abs() < 1e-12, "{b}");
+        // What a sketch sits on can't be deleted, or moved after it.
+        let e = call(&mut s, "feature.delete", json!({"part": "p", "id": "b"})).unwrap_err();
+        assert_eq!(e.code, Code::HasDependents);
+        let e = call(
+            &mut s,
+            "feature.move",
+            json!({"part": "p", "id": "b", "after": "s"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ReferenceForward);
+    }
+
+    #[test]
+    fn faces_that_wont_do() {
+        let (dir, mut s, body) = with_box();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "cylinder", "id": "c",
+                   "params": {"radius": 2, "height": 4}}),
+        )
+        .unwrap();
+        let cyl = call(&mut s, "inspect", json!({"part": "p", "feature": "c"})).unwrap()["bodies"]
+            [0]
+        .clone();
+        let side = cyl["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["surface"]["type"] == "cylinder")
+            .unwrap()["name"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let top = face_along(&body, [0.0, 0.0, 1.0]);
+        let corner = vertex_at(&body, [0.0, 0.0, 0.005]);
+        let ghost = "0123456789abcdef0123456789abcdef";
+        for (fields, code) in [
+            (
+                json!({"face": format!("p/c/{side}")}),
+                Code::ReferenceWrongKind,
+            ),
+            (
+                json!({"face": format!("p/b/{corner}")}),
+                Code::ReferenceWrongKind,
+            ),
+            (
+                json!({"face": format!("p/b/{top}"), "face_origin": format!("p/b/{top}")}),
+                Code::ReferenceWrongKind,
+            ),
+            (
+                json!({"face": format!("p/b/{ghost}")}),
+                Code::ReferenceUnresolved,
+            ),
+            (json!({"face": format!("p/z/{top}")}), Code::NotFound),
+            (json!({"face": format!("q/b/{top}")}), Code::InvalidParam),
+            (
+                json!({"face": format!("p/b/{top}"), "plane": "xy"}),
+                Code::Usage,
+            ),
+            (json!({"face_x": format!("p/b/{corner}")}), Code::Usage),
+        ] {
+            let mut f = fields.clone();
+            f["part"] = json!("p");
+            f["type"] = json!("sketch");
+            let e = call(&mut s, "feature.add", f).unwrap_err();
+            assert_eq!(e.code, code, "{fields}: {e}");
+        }
+        // Before what it sits on.
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "face": format!("p/b/{top}"), "first": true}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ReferenceForward);
+        // A name that goes away behind ryucad's back fails at rebuild.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s", "face": format!("p/b/{top}")}),
+        )
+        .unwrap();
+        let path = dir.path().join("parts/p/features/s.json");
+        let text = std::fs::read_to_string(&path).unwrap().replace(&top, ghost);
+        std::fs::write(&path, text).unwrap();
+        let e = call(&mut s, "rebuild", json!({})).unwrap_err();
+        let f = &e.details["parts"][0]["features"][2];
+        assert_eq!(f["error"]["code"], "reference_unresolved", "{f}");
+        assert_eq!(f["error"]["details"]["role"], "plane");
+        assert_eq!(f["error"]["details"]["reference"], format!("p/b/{ghost}"));
+    }
+
+    /// Where a point of a `sketch.get` sits in the sketch's frame.
+    fn m(g: &Value, p: &str) -> [f64; 2] {
+        let m = &g["entities"][p]["m"];
+        [m[0].as_f64().unwrap(), m[1].as_f64().unwrap()]
+    }
+
+    fn near2(a: [f64; 2], b: [f64; 2]) -> bool {
+        (a[0] - b[0]).abs() < 1e-15 && (a[1] - b[1]).abs() < 1e-15
+    }
+
+    #[test]
+    fn projections_put_entities_where_edges_are() {
+        let (_dir, mut s, body) = with_box();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "cylinder", "id": "c",
+                   "placement": {"origin": [40, 0, 0]}, "params": {"radius": 2, "height": 4}}),
+        )
+        .unwrap();
+        let cyl = call(&mut s, "inspect", json!({"part": "p", "feature": "c"})).unwrap()["bodies"]
+            [0]
+        .clone();
+        let rim = cyl["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["curve"]["type"] == "circle" && e["curve"]["frame"]["origin"][2] == 0.004)
+            .unwrap()["name"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s"}),
+        )
+        .unwrap();
+        // The top's front edge and far corner, dropped onto xy.
+        let (a, b) = (
+            vertex_at(&body, [0.0, 0.0, 0.005]),
+            vertex_at(&body, [0.02, 0.0, 0.005]),
+        );
+        let front = edge_between(&body, &a, &b);
+        let far = vertex_at(&body, [0.02, 0.01, 0.005]);
+        let r = edit(
+            &mut s,
+            json!([
+                {"op": "add", "id": "l1", "type": "line", "projected": format!("p/b/{front}")},
+                {"op": "add", "id": "corner", "type": "point", "projected": format!("p/b/{far}")},
+                {"op": "add", "id": "ci1", "type": "circle", "projected": format!("p/c/{rim}")}
+            ]),
+        )
+        .unwrap();
+        assert_eq!(r["added"], json!(["p1", "p2", "l1", "corner", "p3", "ci1"]));
+        // Nothing projected can move.
+        assert_eq!(
+            (r["report"]["state"].as_str(), r["report"]["dof"].as_u64()),
+            (Some("well"), Some(0))
+        );
+        let g = call(&mut s, "sketch.get", json!({"part": "p", "sketch": "s"})).unwrap();
+        let ends = [m(&g, "p1"), m(&g, "p2")];
+        assert!(ends.iter().any(|e| near2(*e, [0.0, 0.0])), "{ends:?}");
+        assert!(ends.iter().any(|e| near2(*e, [0.02, 0.0])), "{ends:?}");
+        assert!(near2(m(&g, "corner"), [0.02, 0.01]));
+        assert!(near2(m(&g, "p3"), [0.04, 0.0]));
+        assert_eq!(g["entities"]["ci1"]["r_m"], 0.002);
+        assert_eq!(g["entities"]["l1"]["projected"], format!("p/b/{front}"));
+        let show = call(&mut s, "feature.show", json!({"part": "p", "id": "s"})).unwrap();
+        assert_eq!(
+            show["entities"]["corner"]["projected"],
+            format!("p/b/{far}")
+        );
+        // Fixed where projected: a dimension can't move them.
+        let e = edit(
+            &mut s,
+            json!([{"op": "add", "type": "length", "a": "l1", "value": "30 mm"}]),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::SketchUnsolved);
+        // The box grows: the projection follows, and the sketch is written
+        // solved in the same change.
+        let r = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"x": 25}}),
+        )
+        .unwrap();
+        assert_eq!(r["sketches"], json!([{"feature": "s", "ok": true}]));
+        let g = call(&mut s, "sketch.get", json!({"part": "p", "sketch": "s"})).unwrap();
+        assert!(
+            near2(m(&g, "corner"), [0.025, 0.01]),
+            "{}",
+            g["entities"]["corner"]
+        );
+        assert_eq!(g["stale"], false);
+        assert_eq!(r["revision"], g["revision"]);
+    }
+
+    #[test]
+    fn writes_keep_projecting_sketches_current() {
+        use crate::live::Live;
+        use crate::server::tests::call_live;
+        let (dir, mut s) = with_sketch();
+        let mut live = Live::new();
+        edit(&mut s, rectangle_ops()).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "id": "e", "sketch": "s",
+                   "extent": {"length": 5}}),
+        )
+        .unwrap();
+        let body = call(&mut s, "inspect", json!({"part": "p", "feature": "e"})).unwrap()["bodies"]
+            [0]
+        .clone();
+        let far = vertex_at(&body, [0.02, 0.01, 0.005]);
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "t", "plane": "zx"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "t", "ops": [
+                {"op": "add", "id": "k", "type": "point", "projected": format!("p/e/{far}")}
+            ]}),
+        )
+        .unwrap();
+        // Widening s moves e's corner, so t is written too, in one change.
+        let r = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s",
+                   "ops": [{"op": "set", "id": "width", "value": "30 mm"}]}),
+        )
+        .unwrap();
+        assert_eq!(r["sketches"], json!([{"feature": "t", "ok": true}]));
+        let rb = call(&mut s, "rebuild", json!({})).unwrap();
+        assert!(rb.get("warnings").is_none(), "{rb}");
+        let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
+        let last = log["entries"].as_array().unwrap().last().unwrap().clone();
+        let files: Vec<&str> = last["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            files,
+            ["parts/p/features/s.json", "parts/p/features/t.json"]
+        );
+        // Undo restores both.
+        let t = dir.path().join("parts/p/features/t.json");
+        call_live(&mut s, &mut live, None, "undo", json!({})).unwrap();
+        let g = call(&mut s, "sketch.get", json!({"part": "p", "sketch": "t"})).unwrap();
+        assert_eq!(g["stale"], false);
+        let k = &g["entities"]["k"]["m"];
+        // On zx, the part's x is the sketch's y: the corner is back at 20 mm.
+        assert!((k[1].as_f64().unwrap() - 0.02).abs() < 1e-9, "{k}");
+        assert!(std::fs::read_to_string(&t).unwrap().contains("projected"));
+        // Behind ryucad's back, nothing is written: rebuild warns instead.
+        let sp = dir.path().join("parts/p/features/s.json");
+        let text = std::fs::read_to_string(&sp)
+            .unwrap()
+            .replace("\"value\": \"20 mm\"", "\"value\": \"25 mm\"");
+        std::fs::write(&sp, text).unwrap();
+        let before = std::fs::read_to_string(&t).unwrap();
+        let rb = call(&mut s, "rebuild", json!({})).unwrap();
+        assert_eq!(rb["warnings"].as_array().unwrap().len(), 2, "{rb}");
+        assert_eq!(std::fs::read_to_string(&t).unwrap(), before);
+    }
+
+    #[test]
+    fn an_arc_projects_counterclockwise() {
+        let (_dir, mut s) = with_sketch();
+        // A half disc above the x axis, extruded.
+        edit(
+            &mut s,
+            json!([
+                {"op": "add", "type": "point", "at": [0, 0]},
+                {"op": "add", "type": "point", "at": [20, 0]},
+                {"op": "add", "type": "point", "at": [10, 0]},
+                {"op": "add", "type": "line", "start": "p1", "end": "p2"},
+                {"op": "add", "type": "arc", "center": "p3", "start": "p2", "end": "p1"}
+            ]),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "id": "e", "sketch": "s",
+                   "extent": {"length": 5}}),
+        )
+        .unwrap();
+        let body = call(&mut s, "inspect", json!({"part": "p", "feature": "e"})).unwrap()["bodies"]
+            [0]
+        .clone();
+        let top = body["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["curve"]["type"] == "circle" && e["curve"]["frame"]["origin"][2] == 0.005)
+            .unwrap()["name"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "t"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "t", "ops": [
+                {"op": "add", "type": "arc", "projected": format!("p/e/{top}")}
+            ]}),
+        )
+        .unwrap();
+        let g = call(&mut s, "sketch.get", json!({"part": "p", "sketch": "t"})).unwrap();
+        let a = &g["entities"]["a1"];
+        let at = |f: &str| m(&g, a[f].as_str().unwrap());
+        assert!(near2(at("center"), [0.01, 0.0]), "{g}");
+        assert!(near2(at("start"), [0.02, 0.0]), "{g}");
+        assert!(near2(at("end"), [0.0, 0.0]), "{g}");
+    }
+
+    #[test]
+    fn projections_that_wont_do() {
+        let (_dir, mut s, body) = with_box();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "cylinder", "id": "c",
+                   "params": {"radius": 2, "height": 4}}),
+        )
+        .unwrap();
+        let cyl = call(&mut s, "inspect", json!({"part": "p", "feature": "c"})).unwrap()["bodies"]
+            [0]
+        .clone();
+        let rim = cyl["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["curve"]["type"] == "circle")
+            .unwrap()["name"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s", "plane": "zx"}),
+        )
+        .unwrap();
+        let (a, b, up) = (
+            vertex_at(&body, [0.0, 0.0, 0.0]),
+            vertex_at(&body, [0.02, 0.0, 0.0]),
+            vertex_at(&body, [0.0, 0.0, 0.005]),
+        );
+        let bottom = edge_between(&body, &a, &b);
+        let rising = edge_between(&body, &a, &up);
+        let top = face_along(&body, [0.0, 0.0, 1.0]);
+        let rect = |ty: &str, r: String| json!([{"op": "add", "type": ty, "projected": r}]);
+        for (ops, code) in [
+            (
+                rect("circle", format!("p/c/{rim}")),
+                Code::ProjectionUnsupported,
+            ),
+            (rect("line", format!("p/c/{rim}")), Code::ReferenceWrongKind),
+            (
+                rect("circle", format!("p/b/{bottom}")),
+                Code::ReferenceWrongKind,
+            ),
+            (
+                rect("point", format!("p/b/{bottom}")),
+                Code::ReferenceWrongKind,
+            ),
+            (rect("line", format!("p/b/{top}")), Code::ReferenceWrongKind),
+            (
+                rect("line", format!("p/s/{bottom}")),
+                Code::ReferenceForward,
+            ),
+            (
+                json!([{"op": "add", "type": "horizontal", "a": "l1", "projected": format!("p/b/{a}")}]),
+                Code::InvalidParam,
+            ),
+        ] {
+            let e = edit(&mut s, ops.clone()).unwrap_err();
+            assert_eq!(e.code, code, "{ops}: {e}");
+        }
+        // On xy, the rising edge projects to a point.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "s", "plane": "xy"}),
+        )
+        .unwrap();
+        let e = edit(&mut s, rect("line", format!("p/b/{rising}"))).unwrap_err();
+        assert_eq!(e.code, Code::ProjectionUnsupported, "{e}");
+        assert_eq!(e.details["role"], "entities.l1");
     }
 
     #[test]

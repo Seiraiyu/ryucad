@@ -3,6 +3,7 @@
 //! the file system is [`super::project`]'s business.
 
 use super::id::Id;
+use super::reference::Reference;
 use super::sketch::Sketch;
 use super::sweep::{Extrude, Revolve};
 use crate::error::{Code, Error, Result};
@@ -279,8 +280,10 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
             }
             ("constraints", c) => out.extend(Sketch::expression_strings(c)),
             ("extent", Value::Object(e)) => {
-                if let Some(Value::String(s)) = e.get_mut("length") {
-                    out.push(s);
+                for (k, x) in e.iter_mut() {
+                    if let ("length" | "offset", Value::String(s)) = (k.as_str(), x) {
+                        out.push(s);
+                    }
                 }
             }
             // "full" is a word, not a parameter.
@@ -394,6 +397,24 @@ impl Feature {
         match self {
             Feature::Sketch(s) => Some(s),
             _ => None,
+        }
+    }
+
+    /// Its references to other features' faces, edges and vertices, each
+    /// with its role in the feature (`plane`, `x`, `target`, `axis`,
+    /// `entities.<id>`), in a fixed order.
+    pub fn references(&self) -> Vec<(String, &Reference)> {
+        match self {
+            Feature::Sketch(s) => s.references(),
+            Feature::Extrude(e) => match &e.extent {
+                super::sweep::Extent::UpTo { target, .. } => vec![("target".to_owned(), target)],
+                _ => Vec::new(),
+            },
+            Feature::Revolve(r) => match &r.axis {
+                super::sweep::RevolveAxis::Edge(e) => vec![("axis".to_owned(), e)],
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
         }
     }
 

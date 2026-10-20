@@ -492,6 +492,15 @@ struct FieldArgs {
     /// A sketch's plane: xy, yz or zx.
     #[arg(long)]
     plane: Option<String>,
+    /// A planar face to sketch on: <part>/<feature>/<name>, as inspect gives it.
+    #[arg(long, value_name = "REFERENCE")]
+    face: Option<String>,
+    /// A sketch on a face: a vertex for its origin ("" for the part origin, projected).
+    #[arg(long, value_name = "REFERENCE")]
+    face_origin: Option<String>,
+    /// A sketch on a face: a straight edge for its x ("" for the part's x, projected).
+    #[arg(long, value_name = "REFERENCE")]
+    face_x: Option<String>,
     /// The sketch an extrude or revolve sweeps.
     #[arg(long)]
     sketch: Option<String>,
@@ -504,14 +513,21 @@ struct FieldArgs {
     /// An extrude's length.
     #[arg(long, value_name = "QUANTITY")]
     length: Option<String>,
-    /// An extrude's extent: blind (from the sketch's plane, the default) or symmetric (half
-    /// each side).
+    /// An extrude's extent: blind (from the sketch's plane, the default), symmetric (half
+    /// each side) or up_to (--up-to).
     #[arg(long, value_name = "TYPE")]
     extent: Option<String>,
+    /// Extrude up to a planar face parallel to the sketch, or a vertex: <part>/<feature>/<name>.
+    #[arg(long, value_name = "REFERENCE")]
+    up_to: Option<String>,
+    /// How much further than --up-to's target to go (negative stops short).
+    #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
+    offset: Option<String>,
     /// Extrude against the sketch's normal (or --reverse false).
     #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
     reverse: Option<bool>,
-    /// A revolve's axis: a line of its sketch.
+    /// A revolve's axis: a line of its sketch, or a straight edge in the sketch's plane
+    /// (<part>/<feature>/<name>).
     #[arg(long, value_name = "LINE")]
     axis: Option<String>,
     /// A revolve's angle: 90, "90 deg", or full.
@@ -531,8 +547,18 @@ impl FieldArgs {
         if let Some(l) = &self.length {
             extent.insert("length".into(), json!(l));
         }
+        if let Some(t) = &self.up_to {
+            extent.insert("type".into(), json!("up_to"));
+            extent.insert("target".into(), json!(t));
+        }
+        if let Some(o) = &self.offset {
+            extent.insert("offset".into(), json!(o));
+        }
         FeatureFields {
             plane: self.plane.clone(),
+            face: self.face.clone(),
+            face_origin: self.face_origin.clone(),
+            face_x: self.face_x.clone(),
             sketch: self.sketch.clone(),
             loops: if self.all_loops {
                 Some(Vec::new())
