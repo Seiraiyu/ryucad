@@ -1,0 +1,10 @@
+{
+  "format": 1,"kind": "ryucad.feature",
+  "params": {
+    "major_radius": [
+      "0 mm",
+      1
+    ]
+  },
+  "type": "torus"
+}

@@ -1,0 +1,12 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "params": {
+    "x": "++++++++++++++++++4444+++++++"
+  },
+  "placement": {
+    "origin": [
+   ]
+  },
+  "type": "box"
+}

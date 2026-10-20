@@ -1,12 +1,0 @@
-{
-  "format": 0,
-  "kind": "ryucad.featur",
- "0nt": {
-    "origin": [
-      "0 mm",
-  0,
-      0,
-      1
-  },
-  "typ": "|sphere"
-}

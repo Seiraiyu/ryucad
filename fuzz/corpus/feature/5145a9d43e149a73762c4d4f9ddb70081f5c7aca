@@ -1,0 +1,25 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "params": {
+    "x": "11 mm",
+    "y": "20 mm",
+    "z": "30 mm"
+  },
+  "placement": {
+    "eaT\f\ue71a\ue70000000\ue7e7eaT\f\ue71a\ue70000000e71a\ue7eaT\f00000000000000a1e70\ue7000000000000080000a1e70\ue7eaT\f\ue71a\ue700000\f\ue71a\ue70000000e71a\ue7eaT\f000000000a\ue70000000e71a\ue7eaT\f0000ue7e7eaT\f\ue71a\ue70000000e71a\ue7eaT\f0000000000000000e71a\ue7eaT\f00000000000000a1e707e7eaT\f\ue71a\ue70000000e71a\ue7eaT000000\ue7e7eaT\f\ue71a\ue70000000e71a\ue7eaT\f0000000000000000e71a\ue7eaT\f0000000000\ue7e7eaT\f\ue71a\ue70000000e71a\ue7eaT\f0000000a1e70\ue7eaT\f\ue71a\ue70000000\ue7e7eaT\f\ue71a\ue70000000e71a\ue7eaT\f0000000000000000e71a\ue7eaT\f00000000000000a1e70\ue7eaT\f\ue71a\/e70000000\ue7e7eaT\f\ue71a\ue70000000e71a\ue7eaT\f00000000000000a1e777m7m7" ,
+      "5 m3m",
+      "0 mm"
+    ],
+    0,
+      8,
+      0
+    ],
+    "z": [
+   5,
+      5,
+      0
+    ]
+  },
+  "type": "box"
+}

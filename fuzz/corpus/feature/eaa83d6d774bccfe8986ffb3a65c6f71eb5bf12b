@@ -1,0 +1,10 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "params": {
+    "x": "06 mm",
+  "y": "20 mm",
+    "z": "30 mm"
+  },
+  "plm\t:m\tt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: r\t\"": 0,"t2: %rm\tt\"t2: re\t\"t1: %rm\tt2: rt2: ke\t\"t2: %\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2tt2:rme\tt2:poin\t\"t2: %rmtt\"t2: re\t\"t2: %rm\tt;2: re\t\"": 0,"t2: %r re\t\"t2: %rm\tt2: rt2: re\t\"t2: %rm\tt2: re\t\"": 0,"trm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: rt2: re\t\t2: re\t\"": 0,"t2: %rm\tt\"t2:, re\t\"t2: %rm\tt2:rme\tt2:poin\t\"t2: %rmtt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2:ture": 0,"trm\tt1: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\tt2:poin\t\"t2: e": "box"
+}

@@ -1,0 +1,10 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "params": {
+    "radius": "10 mm",
+    "radius": [
+     ]
+  },
+  "type": "0.5 nder"
+}

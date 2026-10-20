@@ -1,0 +1,12 @@
+{
+  "format": 1,
+  "kind": "ryucad.feature",
+  "format": {
+  "radius": "5 mm"
+  },
+  "placement": {
+    "origin": [
+    ]
+  },
+  "type": "cylinder"
+}
