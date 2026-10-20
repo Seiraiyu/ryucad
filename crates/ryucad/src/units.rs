@@ -1,5 +1,6 @@
 //! Quantities at the boundary. Files and the CLI carry lengths as strings
-//! with units (`"10 mm"`); ryukei sees SI meters only.
+//! with units (`"10 mm"`); ryukei sees SI meters only. Angles (`deg`,
+//! `rad`) and plain numbers appear in expressions ([`crate::expr`]).
 //!
 //! The conversion is the nearest f64 to the decimal, times the unit's f64
 //! factor, rounded once more. That is the same on every platform; it does
@@ -63,6 +64,112 @@ impl fmt::Display for Unit {
         f.write_str(self.as_str())
     }
 }
+
+/// What a value measures, as powers of length and angle: a length is
+/// `{length: 1, angle: 0}`, an area `{2, 0}`, a plain number `{0, 0}`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Dim {
+    pub length: i8,
+    pub angle: i8,
+}
+
+impl Dim {
+    pub const NUMBER: Dim = Dim {
+        length: 0,
+        angle: 0,
+    };
+    pub const LENGTH: Dim = Dim {
+        length: 1,
+        angle: 0,
+    };
+    pub const ANGLE: Dim = Dim {
+        length: 0,
+        angle: 1,
+    };
+
+    /// The dimension of a product; `None` past the powers anyone needs.
+    pub fn times(self, o: Dim) -> Option<Dim> {
+        Dim::new(
+            self.length as i32 + o.length as i32,
+            self.angle as i32 + o.angle as i32,
+        )
+    }
+
+    /// The dimension of a quotient.
+    pub fn per(self, o: Dim) -> Option<Dim> {
+        Dim::new(
+            self.length as i32 - o.length as i32,
+            self.angle as i32 - o.angle as i32,
+        )
+    }
+
+    /// The dimension of `self` to the power `n`.
+    pub fn pow(self, n: i32) -> Option<Dim> {
+        Dim::new(self.length as i32 * n, self.angle as i32 * n)
+    }
+
+    /// The square root's dimension, when every power is even.
+    pub fn sqrt(self) -> Option<Dim> {
+        (self.length % 2 == 0 && self.angle % 2 == 0).then_some(Dim {
+            length: self.length / 2,
+            angle: self.angle / 2,
+        })
+    }
+
+    fn new(length: i32, angle: i32) -> Option<Dim> {
+        const MAX: i32 = 16;
+        (length.abs() <= MAX && angle.abs() <= MAX).then_some(Dim {
+            length: length as i8,
+            angle: angle as i8,
+        })
+    }
+
+    /// How people read it: `length`, `angle`, `number`, `length^2`,
+    /// `length*angle^-1`.
+    pub fn name(self) -> String {
+        let part = |name: &str, p: i8| match p {
+            0 => None,
+            1 => Some(name.to_owned()),
+            p => Some(format!("{name}^{p}")),
+        };
+        let parts: Vec<String> = [part("length", self.length), part("angle", self.angle)]
+            .into_iter()
+            .flatten()
+            .collect();
+        if parts.is_empty() {
+            "number".to_owned()
+        } else {
+            parts.join("*")
+        }
+    }
+
+    /// The key output gives the SI value under: `m`, `rad`, `n`, or `si`
+    /// for anything else.
+    pub fn key(self) -> &'static str {
+        match self {
+            Dim::LENGTH => "m",
+            Dim::ANGLE => "rad",
+            Dim::NUMBER => "n",
+            _ => "si",
+        }
+    }
+}
+
+/// Radians per degree, as an f64 constant: the same bits everywhere.
+pub const DEG: f64 = core::f64::consts::PI / 180.0;
+
+/// A unit a literal may carry: its factor to SI and what it measures.
+/// Lengths are the [`Unit`]s; angles are `deg` and `rad`.
+pub fn literal_unit(s: &str) -> Option<(f64, Dim)> {
+    match s {
+        "deg" => Some((DEG, Dim::ANGLE)),
+        "rad" => Some((1.0, Dim::ANGLE)),
+        _ => Unit::parse(s).map(|u| (u.factor(), Dim::LENGTH)),
+    }
+}
+
+/// Every unit name, for messages and reserved names.
+pub const UNIT_NAMES: [&str; 8] = ["m", "cm", "mm", "um", "in", "ft", "deg", "rad"];
 
 /// A length as written, `<number> <unit>`, and its value in meters.
 #[derive(Clone, Debug, PartialEq)]
@@ -256,6 +363,43 @@ mod tests {
     #[test]
     fn report_gives_both_forms() {
         assert_eq!(q("10 mm").report(), json!({"value": "10 mm", "m": 0.01}));
+    }
+
+    #[test]
+    fn dimensions_combine() {
+        let area = Dim::LENGTH.times(Dim::LENGTH).unwrap();
+        assert_eq!(area.name(), "length^2");
+        assert_eq!(area.sqrt(), Some(Dim::LENGTH));
+        assert_eq!(Dim::LENGTH.sqrt(), None);
+        assert_eq!(area.per(Dim::LENGTH), Some(Dim::LENGTH));
+        assert_eq!(
+            Dim::LENGTH.per(Dim::ANGLE).unwrap().name(),
+            "length*angle^-1"
+        );
+        assert_eq!(Dim::NUMBER.name(), "number");
+        assert_eq!(Dim::ANGLE.pow(3).unwrap().name(), "angle^3");
+        assert_eq!(Dim::LENGTH.pow(17), None);
+        assert_eq!(
+            [
+                Dim::LENGTH.key(),
+                Dim::ANGLE.key(),
+                Dim::NUMBER.key(),
+                area.key()
+            ],
+            ["m", "rad", "n", "si"]
+        );
+    }
+
+    #[test]
+    fn literal_units() {
+        assert_eq!(literal_unit("mm"), Some((0.001, Dim::LENGTH)));
+        assert_eq!(literal_unit("rad"), Some((1.0, Dim::ANGLE)));
+        assert_eq!(literal_unit("deg"), Some((DEG, Dim::ANGLE)));
+        assert_eq!(DEG * 180.0, core::f64::consts::PI);
+        assert_eq!(literal_unit("furlong"), None);
+        for u in UNIT_NAMES {
+            assert!(literal_unit(u).is_some(), "{u}");
+        }
     }
 
     #[test]
