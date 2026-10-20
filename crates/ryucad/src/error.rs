@@ -78,6 +78,8 @@ pub enum Code {
     UnitMismatch,
     /// Parameters that read each other in a circle.
     ParameterCycle,
+    /// Refused: other features or parameters read what would go.
+    HasDependents,
 }
 
 impl Code {
@@ -161,6 +163,7 @@ mod tests {
         assert_eq!(Code::UnknownParameter.exit_code(), 1);
         assert_eq!(Code::UnitMismatch.exit_code(), 1);
         assert_eq!(Code::ParameterCycle.exit_code(), 1);
+        assert_eq!(Code::HasDependents.exit_code(), 1);
     }
 
     #[test]

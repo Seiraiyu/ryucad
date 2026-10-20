@@ -215,6 +215,17 @@ fn dispatch(
             parameters,
             expected_revision,
         } => param::set(session, &part, parameters, expected_revision.as_deref()),
+        Request::ParamDelete {
+            part,
+            name,
+            expected_revision,
+        } => param::delete(session, &part, &name, expected_revision.as_deref()),
+        Request::ParamRename {
+            part,
+            from,
+            to,
+            expected_revision,
+        } => param::rename(session, &part, &from, &to, expected_revision.as_deref()),
         Request::FeatureShow { part, id } => {
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
             let p = session.project().part(&part)?;

@@ -55,7 +55,7 @@ enum Command {
     /// Add, edit, delete, move, list or show features.
     #[command(subcommand)]
     Feature(FeatureCmd),
-    /// List or set a part's parameters: named values, each an expression
+    /// List, set, delete or rename a part's parameters: named values, each an expression
     /// such as "3 mm" or "wall * 2", that features' quantities can read.
     #[command(subcommand)]
     Param(ParamCmd),
@@ -401,6 +401,21 @@ enum ParamCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Delete a parameter that nothing reads.
+    Delete {
+        part: String,
+        name: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Rename a parameter, and every expression that reads it.
+    Rename {
+        part: String,
+        from: String,
+        to: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
 }
 
 #[derive(Args)]
@@ -626,6 +641,22 @@ fn request(cmd: &Command) -> Option<Request> {
         }) => Request::ParamSet {
             part: part.clone(),
             parameters: values.iter().map(|(k, v)| (k.clone(), json!(v))).collect(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Param(ParamCmd::Delete { part, name, expect }) => Request::ParamDelete {
+            part: part.clone(),
+            name: name.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Param(ParamCmd::Rename {
+            part,
+            from,
+            to,
+            expect,
+        }) => Request::ParamRename {
+            part: part.clone(),
+            from: from.clone(),
+            to: to.clone(),
             expected_revision: expect.revision.clone(),
         },
         Command::Rebuild { part } => Request::Rebuild { part: part.clone() },

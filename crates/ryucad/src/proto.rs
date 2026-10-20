@@ -181,6 +181,23 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// Removes a parameter nothing reads.
+    #[serde(rename = "param.delete")]
+    ParamDelete {
+        part: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Renames a parameter and every expression that reads it.
+    #[serde(rename = "param.rename")]
+    ParamRename {
+        part: String,
+        from: String,
+        to: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     #[serde(rename = "rebuild")]
     Rebuild {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -420,6 +437,8 @@ impl Request {
                 | Request::FeatureDelete { .. }
                 | Request::FeatureMove { .. }
                 | Request::ParamSet { .. }
+                | Request::ParamDelete { .. }
+                | Request::ParamRename { .. }
                 | Request::Undo { .. }
                 | Request::Redo { .. }
                 | Request::DoctorRepair { .. }

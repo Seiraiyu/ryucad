@@ -228,6 +228,18 @@ fn parameters_drive_features() {
         1,
     );
     p.fails(&["param", "set", "p"], "usage", 2);
+    p.fails(&["param", "delete", "p", "wall"], "has_dependents", 1);
+    let r = p.ok(&["param", "rename", "p", "wall", "skin"]);
+    assert_eq!(r["parameters"][1]["name"], "skin");
+    let shown = p.ok(&["feature", "show", "p", "b"]);
+    assert_eq!(shown["params"]["x"]["value"], "skin * n");
+    p.ok(&["feature", "delete", "p", "b"]);
+    p.ok(&["param", "delete", "p", "skin"]);
+    p.ok(&["param", "delete", "p", "n"]);
+    assert_eq!(
+        p.ok(&["param", "list", "p"])["parameters"],
+        serde_json::json!([])
+    );
 }
 
 #[test]
@@ -379,6 +391,8 @@ fn every_protocol_method_has_a_command() {
         ("feature.show", &["feature", "show"]),
         ("param.list", &["param", "list"]),
         ("param.set", &["param", "set"]),
+        ("param.delete", &["param", "delete"]),
+        ("param.rename", &["param", "rename"]),
         ("rebuild", &["rebuild"]),
         ("inspect", &["inspect"]),
         ("check_format", &["check-format"]),
