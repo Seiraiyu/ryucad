@@ -969,6 +969,143 @@ fn booleans_section(golden: &mut Golden) {
     }
 }
 
+fn pipes_section(golden: &mut Golden) {
+    use ryukei::geom::{KnotVector, NurbsCurve, Pipe};
+    use ryukei::intersect::{CurveHit, SurfaceHit, curve_pipe, pipe_surface};
+    use std::sync::Arc;
+    let mut s = golden.section("pipes");
+    let axis = Vector3::new(1.0, -2.0, 0.5).normalize().unwrap();
+    let far = Rigid::translation(Vector3::new(12.5, -3.25, 100.0))
+        .then_after(&Rigid::rotation(axis, 2.5));
+    // A wavy spine rolling on the plane z = 0, and an ellipse rolling
+    // round a cylinder.
+    let k = KnotVector::clamped(3, &[0.0, 1.0, 2.0], &[4, 1, 4]).unwrap();
+    let r = 0.25;
+    let pts = [(0.0, 0.0), (1.0, 1.0), (2.0, -0.5), (3.0, 0.5), (4.0, 0.0)]
+        .iter()
+        .map(|&(x, y)| Point3::new(x, y, r))
+        .collect();
+    let wavy = Curve::Nurbs(Arc::new(NurbsCurve::new(k, pts, None).unwrap()));
+    let on_plane = Surface::Pipe(Arc::new(
+        Pipe::new(wavy, r, Surface::Plane(Plane::new(Frame::WORLD))).unwrap(),
+    ));
+    let (sn, cs) = (0.5, 0.75f64.sqrt());
+    let tilted = Frame::new(
+        Point3::new(0.0, 0.0, 1.0),
+        Vector3::new(0.0, -sn, cs),
+        Vector3::new(0.0, cs, sn),
+    )
+    .unwrap();
+    let ellipse = Curve::Ellipse(Ellipse::new(tilted, 3.25 / cs, 3.25).unwrap());
+    let round = Surface::Pipe(Arc::new(
+        Pipe::new(
+            ellipse,
+            r,
+            Surface::Cylinder(Cylinder::new(Frame::WORLD, 3.0).unwrap()),
+        )
+        .unwrap(),
+    ));
+    let mut g = Lcg::new(0x7069_7065);
+    for pipe in [&on_plane, &round] {
+        for place in [Rigid::IDENTITY, far] {
+            let p = pipe.transformed(&place);
+            let [[s0, s1], _] = p.domain();
+            for _ in 0..24 {
+                let (u, v) = (g.next_f64(s0, s1), g.next_f64(-3.0, 3.0));
+                let e = p.eval(u, v);
+                for x in [e.point.to_vector(), e.du, e.dv, e.duu, e.duv, e.dvv] {
+                    for c in x.to_array() {
+                        s.f64(c);
+                    }
+                }
+                let q = e.point + Vector3::new(0.01, -0.02, 0.015);
+                let f = p.project(q);
+                s.f64(f.param.0);
+                s.f64(f.param.1);
+                s.f64(f.distance);
+                let b = p.derivative_bound([[u, u + 0.01], [v, v + 0.1]]);
+                for x in [b.duu, b.duv, b.dvv, b.turn_u, b.turn_v] {
+                    s.f64(x);
+                }
+            }
+        }
+    }
+    // A closed tube on its body, meshed.
+    let mut b = ryukei::topo::Body::new();
+    let surface = b.add_surface(round.clone());
+    let (m, _) = ryukei::euler::mvfs(&mut b, OpKey(1), round.point(0.0, 0.0), surface).unwrap();
+    ryukei::euler::kvr(&mut b, m.loop_).unwrap();
+    s.str(&b.dump());
+    hash_mesh(
+        &mut s,
+        &tessellate(&b, &MeshParams::new(2e-2, 0.5)).unwrap(),
+    );
+    // Where the wavy tube meets a plane across it and a sphere.
+    let c = match &on_plane {
+        Surface::Pipe(p) => p.spine().point(0.8),
+        _ => unreachable!(),
+    };
+    let across = Frame::new(
+        Point3::new(1.5, 0.0, 0.0),
+        Vector3::new(1.0, 0.1, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+    )
+    .unwrap();
+    let ball = Frame::new(c, Vector3::new(0.0, 0.0, 1.0), Vector3::new(1.0, 0.0, 0.0)).unwrap();
+    let region = Box3::new(Point3::new(-9.0, -9.0, -9.0), Point3::new(9.0, 9.0, 9.0));
+    for other in [
+        Surface::Plane(Plane::new(across)),
+        Surface::Sphere(Sphere::new(ball, 0.4).unwrap()),
+    ] {
+        match pipe_surface(&on_plane, &other, &region) {
+            Ok(SurfaceHit::Meet { branches, points }) => {
+                s.u64(points.len() as u64);
+                for br in &branches {
+                    s.f64(br.tolerance);
+                    let [r0, r1] = br.range;
+                    for i in 0..=8 {
+                        for x in br
+                            .curve
+                            .point(r0 + (r1 - r0) * f64::from(i) / 8.0)
+                            .to_array()
+                        {
+                            s.f64(x);
+                        }
+                    }
+                }
+            }
+            other => s.str(&format!("{other:?}")),
+        }
+    }
+    for _ in 0..8 {
+        let o = Point3::new(
+            g.next_f64(-1.0, 1.0),
+            g.next_f64(-1.0, 1.0),
+            g.next_f64(0.0, 1.0),
+        );
+        let d = Vector3::new(
+            g.next_f64(0.5, 1.0),
+            g.next_f64(-0.3, 0.3),
+            g.next_f64(-0.2, 0.2),
+        );
+        let line = Curve::Line(Line::new(o, d).unwrap());
+        match curve_pipe(&line, [0.0, 5.0], &on_plane, 1e-8) {
+            Ok(hits) => {
+                for h in hits {
+                    match h {
+                        CurveHit::Point { t, .. } => s.f64(t),
+                        CurveHit::On { t } => {
+                            s.f64(t[0]);
+                            s.f64(t[1]);
+                        }
+                    }
+                }
+            }
+            Err(e) => s.str(&format!("{e:?}")),
+        }
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -992,5 +1129,6 @@ fn determinism() {
     sweeps_section(&mut golden);
     intersections_section(&mut golden);
     booleans_section(&mut golden);
+    pipes_section(&mut golden);
     golden.finish();
 }

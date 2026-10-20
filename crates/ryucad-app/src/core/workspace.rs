@@ -24,7 +24,8 @@ enum Pending {
     Info,
     Parts,
     Rebuild(String),
-    Mesh(String),
+    /// A body's mesh, asked for at this hash.
+    Mesh(BodyKey, String),
     People,
     /// A feature read for the form; after a conflict, with the form as it
     /// was when the save failed.
@@ -455,6 +456,7 @@ impl Workspace {
             Event::Lost if !self.lost => {
                 self.lost = true;
                 self.pending.clear();
+                self.model.asked.clear();
                 self.retry = Some(Retry {
                     at: Instant::now() + RETRY_FIRST,
                     delay: RETRY_FIRST,
@@ -573,15 +575,20 @@ impl Workspace {
                     }
                 }
             }
-            (Pending::Mesh(part), Ok(a)) => match a.binary.as_deref().map(ryucad::mesh::decode) {
-                Some(Ok(bodies)) => {
-                    for b in bodies {
-                        self.model.take_mesh(&part, b);
+            (Pending::Mesh(key, hash), a) => {
+                self.model.answered(&key, &hash);
+                match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
+                    Ok(Some(Ok(bodies))) => {
+                        for b in bodies {
+                            self.model.take_mesh(&key.0, b);
+                        }
+                    }
+                    Ok(Some(Err(e))) | Err(e) => self.fail(e),
+                    Ok(None) => {
+                        self.fail(Error::new(Code::Daemon, "a mesh came without its bytes"));
                     }
                 }
-                Some(Err(e)) => self.fail(e),
-                None => self.fail(Error::new(Code::Daemon, "a mesh came without its bytes")),
-            },
+            }
             (_, Err(e)) => self.fail(e),
         }
     }
@@ -660,17 +667,18 @@ impl Workspace {
     }
 
     /// Fetches display meshes, one body per request: a part with one
-    /// changed feature sends one mesh.
+    /// changed feature sends one mesh, and a body already asked for at its
+    /// current hash isn't asked for again.
     fn fetch(&mut self, bodies: Vec<BodyKey>) {
-        for (part, feature) in bodies {
+        for (key, hash) in self.model.ask(bodies) {
             self.fetched += 1;
             let req = Request::MeshGet {
-                part: part.clone(),
-                feature: Some(feature),
+                part: key.0.clone(),
+                feature: Some(key.1.clone()),
                 quality: None,
                 transfer: Some(Transfer::Binary),
             };
-            self.send(req, Pending::Mesh(part));
+            self.send(req, Pending::Mesh(key, hash));
         }
     }
 

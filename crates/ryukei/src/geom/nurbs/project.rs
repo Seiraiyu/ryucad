@@ -225,19 +225,21 @@ impl<V: Coords> Spline<V> {
         (r.dot(d1), d1.dot(d1) + r.dot(d2), c)
     }
 
-    /// The root of `f` in `[lo, hi]`, where `f` rises through zero:
-    /// Newton's method, falling back to bisection whenever a step would
+    /// The root of `f` in `[lo, hi]`, where `f` rises through zero (or,
+    /// with `rising` false, falls through it): Newton's method, falling back to bisection whenever a step would
     /// leave the open bracket. The ends themselves are never evaluated: at
     /// a kink or a periodic seam the curve's derivative there is the other
     /// piece's. Stops when a step moves the point by less than a sixteenth
     /// of [`LINEAR_RESOLUTION`] (the point, not the parameter times the
     /// speed, since the speed can vanish where a curve folds back on
     /// itself), or when Newton's step doesn't move at all.
-    fn solve(&self, p: V, mut lo: f64, mut hi: f64) -> f64 {
+    fn solve(&self, p: V, mut lo: f64, mut hi: f64, rising: bool) -> f64 {
+        let sign = if rising { 1.0 } else { -1.0 };
         let mut t = (lo + hi) / 2.0;
         let mut last: Option<V> = None;
         for _ in 0..MAX_STEPS {
             let (f, df, c) = self.stationary_at(p, t);
+            let (f, df) = (f * sign, df * sign);
             if let Some(q) = last
                 && math::sqrt((c - q).dot(c - q)) < LINEAR_RESOLUTION / 16.0
             {
@@ -266,7 +268,7 @@ impl<V: Coords> Spline<V> {
     }
 
     /// The local minima of `f`'s piece polynomial `g` on `[a, b]`, pushed
-    /// onto `out`.
+    /// onto `out`; with `all`, its local maxima too.
     ///
     /// Only a whole piece can be found constant. After splits, coefficients
     /// near a root shrink with the interval until rounding can't sign them;
@@ -276,16 +278,18 @@ impl<V: Coords> Spline<V> {
         &self,
         p: V,
         [a, b]: [f64; 2],
-        g: &[f64],
-        zero: f64,
+        (g, zero): (&[f64], f64),
         depth: u32,
+        all: bool,
         out: &mut Vec<f64>,
     ) {
         let leaf = |out: &mut Vec<f64>| {
             let (fa, ..) = self.stationary_at(p, a);
             let (fb, ..) = self.stationary_at(p, b);
             if fa <= 0.0 && fb >= 0.0 {
-                out.push(self.solve(p, a, b));
+                out.push(self.solve(p, a, b, true));
+            } else if all && fa >= 0.0 && fb <= 0.0 {
+                out.push(self.solve(p, a, b, false));
             }
         };
         match signs(g.iter().copied(), zero) {
@@ -293,26 +297,80 @@ impl<V: Coords> Spline<V> {
             // The distance is constant: every point is a minimum.
             Signs::Zero if depth == 0 => out.push(a),
             Signs::Zero => leaf(out),
-            Signs::Edge { rising: true } => out.push(self.solve(p, a, b)),
-            Signs::Edge { rising: false } => {}
-            Signs::One { rising: true } => out.push(self.solve(p, a, b)),
-            Signs::One { rising: false } => {}
+            Signs::Edge { rising: true } | Signs::One { rising: true } => {
+                out.push(self.solve(p, a, b, true))
+            }
+            // One falling root; an `Edge` that isn't rising may hold one
+            // or none.
+            Signs::One { rising: false } if all => out.push(self.solve(p, a, b, false)),
+            Signs::Edge { rising: false }
+                if all
+                    && lead(g.iter().copied(), zero) > 0
+                    && lead(g.iter().rev().copied(), zero) < 0 =>
+            {
+                out.push(self.solve(p, a, b, false))
+            }
+            Signs::Edge { .. } | Signs::One { .. } => {}
             Signs::Unknown if depth >= MAX_SPLITS => leaf(out),
             Signs::Unknown => {
                 let (l, r) = split_scalar(g, 0.5);
                 let m = a + (b - a) * 0.5;
-                self.isolate(p, [a, m], &l, zero, depth + 1, out);
+                self.isolate(p, [a, m], (&l, zero), depth + 1, all, out);
                 // A root on the split itself is no root of either half: it
                 // shows as a zero at their shared end.
+                let (before, after) = (
+                    lead(l.iter().rev().copied(), zero),
+                    lead(r.iter().copied(), zero),
+                );
                 if l[l.len() - 1].abs() <= zero
-                    && lead(l.iter().rev().copied(), zero) < 0
-                    && lead(r.iter().copied(), zero) > 0
+                    && ((before < 0 && after > 0) || (all && before > 0 && after < 0))
                 {
                     out.push(m);
                 }
-                self.isolate(p, [m, b], &r, zero, depth + 1, out);
+                self.isolate(p, [m, b], (&r, zero), depth + 1, all, out);
             }
         }
+    }
+
+    /// Every parameter where the distance from `p` is stationary, sorted:
+    /// the roots of `f` on every piece, minima and maxima alike, and the
+    /// knots where `f` changes sign (a root there, or a kink), with
+    /// duplicates (points within [`LINEAR_RESOLUTION`]) removed. A clamped
+    /// curve's domain ends are not included unless they are such points.
+    pub(crate) fn stationary(&self, pieces: &[BezierCurve<V>], p: V) -> Vec<f64> {
+        let mut ts = Vec::new();
+        let mut ends = Vec::with_capacity(pieces.len());
+        for piece in pieces {
+            let (g, zero) = curve_poly(&piece.pts, p);
+            self.isolate(p, piece.range, (&g, zero), 0, true, &mut ts);
+            ends.push((
+                lead(g.iter().copied(), zero),
+                lead(g.iter().rev().copied(), zero),
+            ));
+        }
+        let n = pieces.len();
+        for i in 0..n {
+            let j = if i + 1 < n {
+                i + 1
+            } else if self.knots.is_periodic() {
+                0
+            } else {
+                continue;
+            };
+            let (before, after) = (ends[i].1, ends[j].0);
+            if before != 0 && after != 0 && before != after {
+                ts.push(pieces[i].range[1]);
+            }
+        }
+        let mut feet: Vec<Foot<f64, V>> = ts
+            .into_iter()
+            .map(|t| {
+                let t = in_period(&self.knots, t);
+                (t, self.eval(t)[0], 0.0)
+            })
+            .collect();
+        feet.sort_by(|x, y| x.0.total_cmp(&y.0));
+        distinct(feet).into_iter().map(|f| f.0).collect()
     }
 
     /// The local minima of the distance from `p`, sorted by parameter, with
@@ -343,7 +401,7 @@ impl<V: Coords> Spline<V> {
             }
             let (g, zero) = curve_poly(&piece.pts, p);
             let before = ts.len();
-            self.isolate(p, piece.range, &g, zero, 0, &mut ts);
+            self.isolate(p, piece.range, (&g, zero), 0, false, &mut ts);
             for &t in &ts[before..] {
                 bound = bound.min(dist(self.eval(t)[0]));
             }
@@ -523,6 +581,47 @@ mod tests {
         // And the global one is among them.
         let foot = c.project(p);
         assert!(minima.iter().any(|m| m.param == foot.param));
+    }
+
+    #[test]
+    fn every_stationary_point() {
+        let c = wavy();
+        let [a, b] = c.domain();
+        let n = 20_000;
+        for p in [
+            Point3::new(3.0, 1.0, 0.0),
+            Point3::new(4.0, 0.7, 0.9),
+            Point3::new(-1.0, 2.0, 0.0),
+        ] {
+            let ts = c.stationary(p);
+            assert!(ts.windows(2).all(|w| w[0] < w[1]));
+            let d = |i: u32| {
+                c.point(a + (b - a) * f64::from(i) / f64::from(n))
+                    .distance(p)
+            };
+            for i in 1..n {
+                let (x, y, z) = (d(i - 1), d(i), d(i + 1));
+                if (y < x && y < z) || (y > x && y > z) {
+                    let t = a + (b - a) * f64::from(i) / f64::from(n);
+                    let near = ts
+                        .iter()
+                        .any(|&s| (s - t).abs() <= 2.0 * (b - a) / f64::from(n));
+                    assert!(near, "sampled extremum at {t} missing from {ts:?}");
+                }
+            }
+            // Every one is a root of (C - p)·C'.
+            for &t in &ts {
+                let e = c.eval(t);
+                let f = (e.point - p).dot(e.d1);
+                assert!(f.abs() <= 1e-6 * (e.point - p).length() * e.d1.length());
+            }
+        }
+        // A full circle about a point inside it, off centre: one minimum
+        // and one maximum.
+        let circle = Circle::new(Frame::WORLD, 2.0).unwrap();
+        let (n, _) = circle.to_nurbs().unwrap();
+        let ts = n.stationary(Point3::new(0.5, 0.0, 0.0));
+        assert_eq!(ts.len(), 2, "{ts:?}");
     }
 
     #[test]

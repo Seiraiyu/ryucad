@@ -197,8 +197,8 @@ impl Surface {
     /// (see [`Curve::to_nurbs`]) times a degree 1 `v`; a revolution is the
     /// whole turn times its curve's NURBS, whose control points are
     /// measured in the frame's xz plane. A cone's `v` range
-    /// must not go below its apex (`Degenerate`). Otherwise fails like
-    /// [`Line::to_nurbs`].
+    /// must not go below its apex (`Degenerate`). A pipe has no exact
+    /// NURBS form (`Degenerate`). Otherwise fails like [`Line::to_nurbs`].
     pub fn to_nurbs(&self, ranges: [[f64; 2]; 2]) -> Result<(NurbsSurface, [Reparam; 2]), Error> {
         let [[u0, u1], [v0, v1]] = ranges;
         let line = |a: f64, b: f64| KnotVector::clamped(1, &[a, b], &[2, 2]);
@@ -264,6 +264,8 @@ impl Surface {
                     NurbsSurface::new([c.knots().clone(), line(v0, v1)?], points, Some(weights))?;
                 Ok((s, [r, Reparam::Identity]))
             }
+            // A pipe about a curved spine has no exact rational form.
+            Self::Pipe(_) => Err(Error::Degenerate),
             Self::Revolution(s) => {
                 let (c, r) = s.curve().to_nurbs([v0, v1])?;
                 let f = s.frame();

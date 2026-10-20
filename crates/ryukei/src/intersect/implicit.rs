@@ -19,6 +19,7 @@ use super::SLACK;
 use crate::geom::bernstein::Bernstein;
 use crate::geom::bernstein2::Bernstein2;
 use crate::geom::chain3::Piece3;
+use crate::geom::jet::{self, JVec, Jet, Num};
 use crate::geom::{BezierPatch, Frame, Point3, Surface, Vector3};
 use crate::interval::Interval;
 use crate::math;
@@ -105,6 +106,35 @@ impl Implicit {
             Kind::Torus { major, minor } => {
                 let s = rho2 + z.square() + p(major).square() - p(minor).square();
                 s.square() - p(4.0) * p(major).square() * rho2
+            }
+        }
+    }
+
+    /// `f` at a point given as jets in model space: its value and its
+    /// derivatives by the jets' two parameters, in floating point or in
+    /// intervals. Constants are formed in the jets' own arithmetic (`r²`
+    /// as `r · r`, `tan α` as `sin α / cos α`), so interval jets enclose
+    /// the true values.
+    pub(crate) fn over<T: Num>(&self, q: JVec<T>) -> Jet<T> {
+        let c = |v: f64| Jet::constant(T::of(v));
+        let axis = |a: Vector3| a.to_array().map(c);
+        let d = jet::sub(q, axis(self.frame.origin().to_vector()));
+        let x = jet::dot(d, axis(self.frame.x().get()));
+        let y = jet::dot(d, axis(self.frame.y().get()));
+        let z = jet::dot(d, axis(self.frame.z().get()));
+        let rho2 = x * x + y * y;
+        match self.kind {
+            Kind::Plane => z,
+            Kind::Cylinder { r } => rho2 - c(r) * c(r),
+            Kind::Cone { r, sin, cos } => {
+                let tan = T::of(cos).recip().expect("a cone's cosine is positive") * T::of(sin);
+                let q = c(r) + z * Jet::constant(tan);
+                rho2 - q * q
+            }
+            Kind::Sphere { r } => rho2 + z * z - c(r) * c(r),
+            Kind::Torus { major, minor } => {
+                let s = rho2 + z * z + c(major) * c(major) - c(minor) * c(minor);
+                s * s - c(4.0) * c(major) * c(major) * rho2
             }
         }
     }
