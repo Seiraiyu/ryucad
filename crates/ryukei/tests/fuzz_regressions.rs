@@ -1,8 +1,13 @@
 //! Inputs the `sweep` fuzz target found while the self-intersection check
-//! was being made robust, replayed: each sweep must come out sound, and
-//! not cross or overlap itself.
+//! was being made robust, and the `boolean` target while booleans were,
+//! replayed: each sweep must come out sound, and not cross or overlap
+//! itself; each boolean must also mesh without faults.
 
+use ryukei::boolean::boolean;
 use ryukei::check::{Fault, check, check_intersections};
+use ryukei::mesh::{MeshParams, check_mesh, tessellate};
+use ryukei::name::OpKey;
+use ryukei_testkit::boolean_bytes::boolean_case;
 use ryukei_testkit::sweep_bytes::sweep;
 
 fn bytes(hex: &str) -> Vec<u8> {
@@ -10,6 +15,17 @@ fn bytes(hex: &str) -> Vec<u8> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
         .collect()
+}
+
+/// A boolean from the bytes, which must succeed, come out sound and mesh.
+fn boolean_sound(hex: &str) {
+    let case = boolean_case(&bytes(hex)).expect("operands");
+    let (body, _) = boolean(OpKey(9), case.op, &case.target, &case.tools()).unwrap();
+    assert_eq!(check(&body), []);
+    assert_eq!(check_intersections(&body), []);
+    let m = tessellate(&body, &MeshParams::new(1e-2, 0.5)).unwrap();
+    assert_eq!(m.faults, []);
+    assert_eq!(check_mesh(&body, &m), Ok(()));
 }
 
 fn sound(hex: &str) {
@@ -55,4 +71,52 @@ fn a_blob_turned_part_way() {
         "a17a861847b10614dd2deafc9f8cb6406559d4a115dd7f85c5b9fd1b08c4d12e46f49e11",
         "466fa0f45f639361062357b52760fe4186190d",
     ));
+}
+
+/// A torus minus a coaxial cone touching its tube all round: the circle
+/// where they touch is an edge alone in two loops of the torus face, which
+/// merging must remove.
+#[test]
+fn a_torus_touched_all_round_by_a_cone() {
+    boolean_sound(concat!(
+        "0aafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafaf",
+        "afafafafafafafafafafaf0aff03",
+    ));
+}
+
+/// A torus minus two blocks: the torus face's loop passes through one
+/// vertex twice, and its two visits must be one point of the mesh.
+#[test]
+fn a_torus_face_whose_loop_passes_a_vertex_twice() {
+    boolean_sound("a319191919191919191919191919191919191919191919191919ff5b");
+}
+
+/// A block minus a cone and a block: a quarter of the cone from its apex,
+/// one edge along the seam, the apex exactly at the strip's edge.
+#[test]
+fn a_cone_wedge_along_its_seam() {
+    boolean_sound("970700001e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e20");
+}
+
+/// A cylinder minus a cone touching it near a point: out of the shared
+/// vertex at the tangent wedge's tip, both faces' edges run together.
+#[test]
+fn a_cylinder_minus_a_cone_touching_it() {
+    boolean_sound("0a0a060606060606060606060606060606d3c806060606060606060609000000adae");
+}
+
+/// Blocks united on a grid: out of a tangent wedge's tip, one face's edge
+/// lies on the other face within the touch rule's reach.
+#[test]
+fn an_edge_lying_on_a_face_out_of_a_tangent_tip() {
+    boolean_sound(concat!(
+        "0108ffbfffffffffffffffffffffffffffffffffffffffff3effffffffffffffffffffff",
+        "ffffffffffffffffffffffffffffffff2408",
+    ));
+}
+
+/// The same tangent tip, mirrored.
+#[test]
+fn the_same_tip_seen_from_the_other_side() {
+    boolean_sound("29faf700000000000000047a7f7f7f7f7f7f7f7f2a");
 }

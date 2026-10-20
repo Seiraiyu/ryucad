@@ -75,12 +75,30 @@ pub(crate) fn merge(
             }
             let fins: Vec<_> = body.edge_fins(e).collect();
             let [a, b] = fins[..] else { continue };
-            if body.fin(a).expect("live").loop_ != body.fin(b).expect("live").loop_ {
+            let (la, lb) = (
+                body.fin(a).expect("live").loop_,
+                body.fin(b).expect("live").loop_,
+            );
+            if la == lb {
+                euler::kemr(body, e).map_err(topo)?;
+                sources.edges.remove(&e);
+                done = false;
                 continue;
             }
-            euler::kemr(body, e).map_err(topo)?;
-            sources.edges.remove(&e);
-            done = false;
+            // A closed edge alone in two loops of one face: a circle where a
+            // tool only touched a periodic face all round. The second loop
+            // leaves as a face of its own, and the edge goes between them.
+            let face = body.loop_(la).expect("live").face;
+            let alone = |l| body.loop_fins(l).count() == 1;
+            if body.loop_(lb).expect("live").face == face && alone(la) && alone(lb) {
+                let m = euler::mfkrh(body, keys(), lb).map_err(topo)?.0;
+                let kept = euler::kef(body, keys(), e).map_err(topo)?.0.face;
+                let gone = if kept == face { m.face } else { face };
+                let moved = sources.faces.remove(&gone).unwrap_or_default();
+                sources.faces.entry(kept).or_default().extend(moved);
+                sources.edges.remove(&e);
+                done = false;
+            }
         }
         if done {
             break;

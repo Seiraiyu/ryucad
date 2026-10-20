@@ -334,8 +334,17 @@ fn strip(g: &FaceGeom, d: usize, piece: &[Flat]) -> Result<i64, BadDomain> {
         g.seam(d).expect("periodic"),
     );
     let inner = &piece[1..piece.len() - 1];
-    if let Some(p) = inner.iter().find(|p| p.line[d].is_none()) {
-        let m = ((p.x[d] - seam) / period).floor() as i64;
+    let free: Vec<f64> = inner
+        .iter()
+        .filter(|p| p.line[d].is_none())
+        .map(|p| p.x[d])
+        .collect();
+    if !free.is_empty() {
+        // The strip by the middle of the free points' range: one of them
+        // may lie exactly on the strip's edge (an apex at the seam).
+        let lo = free.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = free.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let m = ((0.5 * (lo + hi) - seam) / period).floor() as i64;
         // Every inner point must be in the same strip.
         let fits = inner.iter().all(|q| {
             let s = (q.x[d] - seam) / period - m as f64;
@@ -540,12 +549,25 @@ impl Domain {
                 d.classes.join(a, b)?;
             }
         }
-        // Points, in loop order, then lone vertices.
+        // Points, in loop order, then lone vertices. A loop through one
+        // vertex twice (a pinch) reaches it from two edges, whose samples
+        // put it a rounding apart: both visits take the first's parameters,
+        // so they are one point of the triangulation.
         let mut ids: Vec<Vec<u32>> = Vec::new();
+        let mut seen: BTreeMap<VertexId, Vec<Point2>> = BTreeMap::new();
+        let near = 1e-9 * (rect[U][1] - rect[U][0]).max(rect[V][1] - rect[V][0]);
         for (piece, _) in &pieces {
             let mut row = Vec::with_capacity(piece.len());
             for p in piece {
-                row.push(d.add(g, Point2::new(p.x[0], p.x[1]), p.anchor)?);
+                let mut uv = Point2::new(p.x[0], p.x[1]);
+                if let Anchor::Vertex(v) = p.anchor {
+                    let at = seen.entry(v).or_default();
+                    match at.iter().find(|q| q.distance(uv) <= near) {
+                        Some(&q) => uv = q,
+                        None => at.push(uv),
+                    }
+                }
+                row.push(d.add(g, uv, p.anchor)?);
             }
             ids.push(row);
         }

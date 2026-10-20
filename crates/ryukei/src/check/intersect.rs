@@ -8,7 +8,11 @@
 //! edge; by the touch rule, a stretch within 100 tolerances of a shared
 //! vertex or of a shared edge along all its length is benign too (two
 //! fits of one intersection curve may lie that far apart where the faces
-//! meet at a shallow angle). Anything else is
+//! meet at a shallow angle). Out of a vertex the faces share, a stretch
+//! inside at most one of them (an edge of one lying on the other) is
+//! benign for as long as surfaces meeting tangentially stay within that
+//! reach, `sqrt(2 × size × reach)`: the tip of a tangent wedge. Anything
+//! else is
 //! [`Fault::FacesCross`]; faces on one surface
 //! whose regions overlap in an area are [`Fault::FacesOverlap`]; a pair
 //! that can't be intersected is [`Fault::CannotCheck`].
@@ -130,6 +134,10 @@ fn prune(body: &Body, a: FaceId, b: FaceId, meet: FaceMeet) -> FaceMeet {
         })
     };
     let tol = slack(body, a).max(slack(body, b));
+    let size = {
+        let bx = face_box(body, a).union(&face_box(body, b));
+        (bx.max() - bx.min()).length()
+    };
     let stretches = stretches
         .into_iter()
         .filter(|s| {
@@ -140,7 +148,17 @@ fn prune(body: &Body, a: FaceId, b: FaceId, meet: FaceMeet) -> FaceMeet {
                         .point(s.range[0] + (s.range[1] - s.range[0]) * f64::from(k) / 8.0)
                 })
                 .collect();
-            !at_shared(&pts, reach) && !along_shared(&pts, reach)
+            // Out of a tangent wedge's tip at a vertex the faces share: an
+            // edge of one lying on the other (or both edges running
+            // together) within the reach, for no longer than surfaces
+            // meeting tangentially stay that close.
+            let length: f64 = pts.windows(2).map(|w| w[0].distance(w[1])).sum();
+            let from_shared = !s.places.iter().all(|p| *p == Place::Inside)
+                && length <= (2.0 * size * reach).sqrt()
+                && shared
+                    .iter()
+                    .any(|q| pts[0].distance(*q) <= reach || pts[8].distance(*q) <= reach);
+            !at_shared(&pts, reach) && !along_shared(&pts, reach) && !from_shared
         })
         .collect();
     let contacts = contacts

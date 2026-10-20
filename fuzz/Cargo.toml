@@ -82,3 +82,10 @@ path = "fuzz_targets/intersect.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "boolean"
+path = "fuzz_targets/boolean.rs"
+test = false
+doc = false
+bench = false
