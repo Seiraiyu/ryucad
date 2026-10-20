@@ -1241,8 +1241,15 @@ fn feature_edit(
     if f.references() != old.references() {
         check_references(session, &pid, &list, &fid, &f)?;
     }
-    let revision = save(session, &pid, &[(&fid, &f)], list)?;
-    Ok(json!({"feature": feature_report(&pid, &fid, &f), "revision": revision}))
+    let before = crate::sketch::current(session, &pid)?;
+    save(session, &pid, &[(&fid, &f)], list)?;
+    let sketches = crate::sketch::keep_current(session, &pid, &before)?;
+    let revision = &session.project().part(&pid)?.revision;
+    let mut v = json!({"feature": feature_report(&pid, &fid, &f), "revision": revision});
+    if !sketches.is_empty() {
+        v["sketches"] = json!(sketches);
+    }
+    Ok(v)
 }
 
 fn feature_delete(

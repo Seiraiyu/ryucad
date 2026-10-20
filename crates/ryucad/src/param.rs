@@ -117,9 +117,9 @@ pub fn set(
         changed.push(name);
     }
     check(session, p, &changed, &file.env())?;
-    let before = crate::sketch::dimension_values(p);
+    let before = crate::sketch::current(session, &pid)?;
     save(session, &pid, &file)?;
-    let sketches = crate::sketch::write_back(session, &pid, &before)?;
+    let sketches = crate::sketch::keep_current(session, &pid, &before)?;
     let mut v = list(session, part)?;
     if !sketches.is_empty() {
         v["sketches"] = json!(sketches);

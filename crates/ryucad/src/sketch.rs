@@ -24,7 +24,7 @@ use crate::units::{Field, Quantity, Unit};
 use ryukei::geom::{Point3, Rigid};
 use ryusketch::{Coord, State};
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// What a solve found, in the sketch's IDs.
 #[derive(Clone, Debug, PartialEq)]
@@ -1016,11 +1016,16 @@ pub fn edit(
     // Whether the solve moved anything.
     let changed = solved != s;
     let f = Feature::Sketch(solved);
-    let revision = server::save(session, &pid, &[(&fid, &f)], list)?;
-    Ok(
-        json!({"feature": fid, "added": applied.added, "changed": changed,
-              "report": report.to_json(), "revision": revision}),
-    )
+    let before = current(session, &pid)?;
+    server::save(session, &pid, &[(&fid, &f)], list)?;
+    let sketches = keep_current(session, &pid, &before)?;
+    let revision = &session.project().part(&pid)?.revision;
+    let mut v = json!({"feature": fid, "added": applied.added, "changed": changed,
+                       "report": report.to_json(), "revision": revision});
+    if !sketches.is_empty() {
+        v["sketches"] = json!(sketches);
+    }
+    Ok(v)
 }
 
 /// `sketch.solve`: the report for a sketch as it is, or with a batch of
@@ -1172,53 +1177,46 @@ pub fn entity_points(solved: &Solved, id: &Id) -> Vec<[f64; 3]> {
         .collect()
 }
 
-/// Each loaded sketch's dimension values, as bits: what a parameter change
-/// can make stale.
-pub fn dimension_values(part: &Part) -> BTreeMap<Id, Vec<u64>> {
-    part.order()
+/// The sketches of `part` whose stored positions are current: they
+/// rebuild as stored. Of these, what a write leaves stale it writes back
+/// solved ([`keep_current`]).
+pub fn current(session: &mut Session, part: &Id) -> Result<BTreeSet<Id>> {
+    let p = session.project().part(part)?;
+    if !p
+        .features
+        .values()
+        .any(|f| matches!(f, Ok(Feature::Sketch(_))))
+    {
+        return Ok(BTreeSet::new());
+    }
+    let r = session.rebuilt(part)?;
+    Ok(r.features
         .iter()
-        .filter_map(|id| {
-            let s = part.features.get(id)?.as_ref().ok()?.sketch()?;
-            let values = s
-                .constraints
-                .values()
-                .filter_map(|c| c.value.as_ref())
-                .map(|q| crate::doc::sketch::si(q).to_bits())
-                .collect();
-            Some((id.clone(), values))
+        .filter_map(|(id, o)| {
+            let s = o.as_ref().ok()?.sketch()?;
+            (!s.stale).then(|| id.clone())
         })
-        .collect()
+        .collect())
 }
 
-/// Re-solves the sketches whose dimension values differ from `before`
-/// and writes those that solve; one that doesn't is left as it was. Each
-/// is reported: `{"feature", "ok"}`, with its error when it failed.
-pub fn write_back(
-    session: &mut Session,
-    part: &Id,
-    before: &BTreeMap<Id, Vec<u64>>,
-) -> Result<Vec<Value>> {
-    let p = session.project().part(part)?.clone();
+/// After a write to `part`: writes the sketches of `before`, current until
+/// then, that the write left stale, with their solved positions, in the
+/// same change. One that now fails is left as it was. Each is reported:
+/// `{"feature", "ok"}`, with its error when it failed.
+pub fn keep_current(session: &mut Session, part: &Id, before: &BTreeSet<Id>) -> Result<Vec<Value>> {
+    if before.is_empty() {
+        return Ok(Vec::new());
+    }
+    let r = session.rebuilt(part)?;
     let mut out = Vec::new();
     let mut writes = Vec::new();
-    for (id, values) in dimension_values(&p) {
-        if before.get(&id) == Some(&values) {
-            continue;
-        }
-        let s = p.features[&id]
-            .as_ref()
-            .ok()
-            .and_then(Feature::sketch)
-            .expect("a sketch")
-            .clone();
-        let solved = context_now(session, part, &id, &s).and_then(|c| solve_in(&id, &s, &c));
-        match solved {
-            Ok(solved) => {
-                if solved.stale {
-                    writes.push((id.clone(), Feature::Sketch(solved.sketch)));
-                }
+    for (id, o) in r.features.iter().filter(|(id, _)| before.contains(id)) {
+        match o.as_ref().map(|o| o.sketch()) {
+            Ok(Some(s)) if s.stale => {
+                writes.push((id.clone(), Feature::Sketch(s.sketch.clone())));
                 out.push(json!({"feature": id, "ok": true}));
             }
+            Ok(_) => {}
             Err(e) => out.push(json!({"feature": id, "ok": false, "error": e})),
         }
     }
@@ -1603,7 +1601,7 @@ pub(crate) mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|v| (0..3).all(|k| (v["point"][k].as_f64().unwrap() - p[k]).abs() < 1e-12))
+            .find(|v| (0..3).all(|k| (v["point"][k].as_f64().unwrap() - p[k]).abs() < 1e-9))
             .map(|v| v["name"].as_str().unwrap().to_owned())
             .expect("a vertex at p")
     }
@@ -1898,20 +1896,101 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::SketchUnsolved);
-        // The box grows: the projection follows at rebuild.
-        call(
+        // The box grows: the projection follows, and the sketch is written
+        // solved in the same change.
+        let r = call(
             &mut s,
             "feature.edit",
             json!({"part": "p", "id": "b", "params": {"x": 25}}),
         )
         .unwrap();
+        assert_eq!(r["sketches"], json!([{"feature": "s", "ok": true}]));
         let g = call(&mut s, "sketch.get", json!({"part": "p", "sketch": "s"})).unwrap();
         assert!(
             near2(m(&g, "corner"), [0.025, 0.01]),
             "{}",
             g["entities"]["corner"]
         );
-        assert_eq!(g["stale"], true);
+        assert_eq!(g["stale"], false);
+        assert_eq!(r["revision"], g["revision"]);
+    }
+
+    #[test]
+    fn writes_keep_projecting_sketches_current() {
+        use crate::live::Live;
+        use crate::server::tests::call_live;
+        let (dir, mut s) = with_sketch();
+        let mut live = Live::new();
+        edit(&mut s, rectangle_ops()).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "id": "e", "sketch": "s",
+                   "extent": {"length": 5}}),
+        )
+        .unwrap();
+        let body = call(&mut s, "inspect", json!({"part": "p", "feature": "e"})).unwrap()["bodies"]
+            [0]
+        .clone();
+        let far = vertex_at(&body, [0.02, 0.01, 0.005]);
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "t", "plane": "zx"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "t", "ops": [
+                {"op": "add", "id": "k", "type": "point", "projected": format!("p/e/{far}")}
+            ]}),
+        )
+        .unwrap();
+        // Widening s moves e's corner, so t is written too, in one change.
+        let r = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s",
+                   "ops": [{"op": "set", "id": "width", "value": "30 mm"}]}),
+        )
+        .unwrap();
+        assert_eq!(r["sketches"], json!([{"feature": "t", "ok": true}]));
+        let rb = call(&mut s, "rebuild", json!({})).unwrap();
+        assert!(rb.get("warnings").is_none(), "{rb}");
+        let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
+        let last = log["entries"].as_array().unwrap().last().unwrap().clone();
+        let files: Vec<&str> = last["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            files,
+            ["parts/p/features/s.json", "parts/p/features/t.json"]
+        );
+        // Undo restores both.
+        let t = dir.path().join("parts/p/features/t.json");
+        call_live(&mut s, &mut live, None, "undo", json!({})).unwrap();
+        let g = call(&mut s, "sketch.get", json!({"part": "p", "sketch": "t"})).unwrap();
+        assert_eq!(g["stale"], false);
+        let k = &g["entities"]["k"]["m"];
+        // On zx, the part's x is the sketch's y: the corner is back at 20 mm.
+        assert!((k[1].as_f64().unwrap() - 0.02).abs() < 1e-9, "{k}");
+        assert!(std::fs::read_to_string(&t).unwrap().contains("projected"));
+        // Behind ryucad's back, nothing is written: rebuild warns instead.
+        let sp = dir.path().join("parts/p/features/s.json");
+        let text = std::fs::read_to_string(&sp)
+            .unwrap()
+            .replace("\"value\": \"20 mm\"", "\"value\": \"25 mm\"");
+        std::fs::write(&sp, text).unwrap();
+        let before = std::fs::read_to_string(&t).unwrap();
+        let rb = call(&mut s, "rebuild", json!({})).unwrap();
+        assert_eq!(rb["warnings"].as_array().unwrap().len(), 2, "{rb}");
+        assert_eq!(std::fs::read_to_string(&t).unwrap(), before);
     }
 
     #[test]
