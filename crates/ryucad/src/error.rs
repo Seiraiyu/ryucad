@@ -76,6 +76,8 @@ pub enum Code {
     /// An expression mixes what can't be mixed (a length plus an angle),
     /// or gives the wrong kind (an angle where a length goes).
     UnitMismatch,
+    /// Parameters that read each other in a circle.
+    ParameterCycle,
 }
 
 impl Code {
@@ -158,6 +160,7 @@ mod tests {
         assert_eq!(Code::ProjectDamaged.exit_code(), 3);
         assert_eq!(Code::UnknownParameter.exit_code(), 1);
         assert_eq!(Code::UnitMismatch.exit_code(), 1);
+        assert_eq!(Code::ParameterCycle.exit_code(), 1);
     }
 
     #[test]

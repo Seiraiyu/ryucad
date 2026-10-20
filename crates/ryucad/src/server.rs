@@ -5,9 +5,12 @@ use crate::activity::{self, EntryKind};
 use crate::config;
 use crate::doc::files::{Feature, FeatureType, Manifest, PartFile, Placement, number};
 use crate::doc::id::Id;
-use crate::doc::project::{MANIFEST, Part, feature_path, part_dir, part_path, write_json};
+use crate::doc::project::{
+    MANIFEST, Part, feature_path, parameters_path, part_dir, part_path, write_json,
+};
 use crate::entity::{self, EntityRef};
 use crate::error::{Code, Error, Result};
+use crate::expr::Env;
 use crate::live::{self, Live, SelectMode};
 use crate::mesh;
 use crate::notify::Topic;
@@ -596,11 +599,12 @@ pub fn feature_report(id: &Id, f: &Feature) -> Value {
     })
 }
 
-/// Applies the parts of `arg` that are given to `p`.
-fn apply_placement(p: &mut Placement, arg: PlacementArg, unit: Unit) -> Result<()> {
+/// Applies the parts of `arg` that are given to `p`, its expressions
+/// reading `env`.
+fn apply_placement(p: &mut Placement, arg: PlacementArg, unit: Unit, env: &Env) -> Result<()> {
     if let Some(origin) = arg.origin {
         for (i, v) in origin.iter().enumerate() {
-            p.origin[i] = Quantity::from_json(v, unit)
+            p.origin[i] = Quantity::from_json_in(v, unit, &|n| env.get(n))
                 .map_err(|e| e.with("pointer", format!("/placement/origin/{i}")))?;
         }
     }
@@ -684,7 +688,8 @@ fn feature_add(
         )
         .with("feature", &fid));
     }
-    let params = Feature::params_from_json(ty, &Value::Object(params), unit)?;
+    let env = p.env.clone();
+    let params = Feature::params_from_json(ty, &Value::Object(params), unit, &env)?;
     let mut placed = Placement::identity(unit);
     // With z given and x left out, x defaults to world X, or to world Y
     // when z lies along X; either way the file records it.
@@ -697,7 +702,7 @@ fn feature_add(
     if along_x {
         placed.x = [0.0, 1.0, 0.0];
     }
-    apply_placement(&mut placed, placement, unit)?;
+    apply_placement(&mut placed, placement, unit, &env)?;
     let f = Feature {
         ty,
         params,
@@ -734,8 +739,8 @@ fn feature_edit(
             merged.insert(k, v);
         }
     }
-    f.params = Feature::params_from_json(f.ty, &Value::Object(merged), unit)?;
-    apply_placement(&mut f.placement, placement, unit)?;
+    f.params = Feature::params_from_json(f.ty, &Value::Object(merged), unit, &p.env)?;
+    apply_placement(&mut f.placement, placement, unit, &p.env)?;
     let revision = save(session, &pid, &[(&fid, &f)], list)?;
     Ok(json!({"feature": feature_report(&fid, &f), "revision": revision}))
 }
@@ -1358,6 +1363,11 @@ fn check_format(session: &Session) -> Result<Value> {
         check(&part_path(root, &part.id));
         if let Err(e) = &part.file {
             errors.push(json!(e));
+        }
+        match &part.parameters {
+            Some(Ok(_)) => check(&parameters_path(root, &part.id)),
+            Some(Err(e)) => errors.push(json!(e)),
+            None => {}
         }
         for (fid, f) in &part.features {
             check(&feature_path(root, &part.id, fid));

@@ -29,6 +29,8 @@ fn part(features: Vec<(&str, Feature)>) -> Part {
         file: Ok(PartFile {
             features: features.iter().map(|(f, _)| id(f)).collect(),
         }),
+        parameters: None,
+        env: ryucad::expr::Env::empty(),
         features: features.into_iter().map(|(f, x)| (id(f), Ok(x))).collect(),
         revision: String::new(),
     }

@@ -96,6 +96,8 @@ fn rebuild_section(golden: &mut Golden) {
     let part = Part {
         id: Id::parse("golden", "part").unwrap(),
         file: Ok(PartFile { features: order }),
+        parameters: None,
+        env: ryucad::expr::Env::empty(),
         features,
         revision: String::new(),
     };

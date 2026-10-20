@@ -11,7 +11,8 @@ use crate::error::{Code, Error, Result};
 use crate::units::{Dim, UNIT_NAMES, literal_unit};
 use ryukei::math;
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 /// Deeper nesting than this is refused, so a hostile string can't
@@ -61,6 +62,106 @@ impl Val {
 /// The lookup for a context with no parameters: every name is unknown.
 pub fn no_parameters(name: &str) -> Result<Val> {
     Err(unknown_parameter(name))
+}
+
+/// A part's parameters, evaluated: each one's value, or why it has none.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Env {
+    values: BTreeMap<String, Result<Val>>,
+    /// Why the parameters can't be read at all, if they can't.
+    broken: Option<Error>,
+}
+
+impl Env {
+    /// No parameters.
+    pub fn empty() -> Env {
+        Env::default()
+    }
+
+    /// Parameters whose file can't be used: every name fails with `e`.
+    pub fn broken(e: Error) -> Env {
+        Env {
+            values: BTreeMap::new(),
+            broken: Some(e),
+        }
+    }
+
+    /// Evaluates every parameter, each reading the others. A parameter on a
+    /// cycle is `parameter_cycle`, naming the cycle; one that reads a
+    /// failed parameter fails with that parameter's error.
+    pub fn new(params: &BTreeMap<String, Expr>) -> Env {
+        let solver = Cycles {
+            params,
+            done: RefCell::new(BTreeMap::new()),
+            stack: RefCell::new(Vec::new()),
+        };
+        for name in params.keys() {
+            let _ = solver.get(name);
+        }
+        Env {
+            values: solver.done.into_inner(),
+            broken: None,
+        }
+    }
+
+    /// A parameter's value.
+    pub fn get(&self, name: &str) -> Result<Val> {
+        match (self.values.get(name), &self.broken) {
+            (Some(v), _) => v.clone(),
+            (None, Some(e)) => Err(e.clone()),
+            (None, None) => Err(unknown_parameter(name)),
+        }
+    }
+
+    /// Every parameter's value or error, by name.
+    pub fn values(&self) -> &BTreeMap<String, Result<Val>> {
+        &self.values
+    }
+}
+
+/// Evaluation in dependency order, finding cycles on the way.
+struct Cycles<'a> {
+    params: &'a BTreeMap<String, Expr>,
+    done: RefCell<BTreeMap<String, Result<Val>>>,
+    stack: RefCell<Vec<String>>,
+}
+
+impl Cycles<'_> {
+    fn get(&self, name: &str) -> Result<Val> {
+        if let Some(v) = self.done.borrow().get(name) {
+            return v.clone();
+        }
+        let Some(e) = self.params.get(name) else {
+            return Err(unknown_parameter(name));
+        };
+        let on_stack = self.stack.borrow().iter().position(|n| n == name);
+        if let Some(i) = on_stack {
+            let mut cycle: Vec<String> = self.stack.borrow()[i..].to_vec();
+            cycle.push(name.to_owned());
+            let err = Error::new(
+                Code::ParameterCycle,
+                format!(
+                    "parameters read each other in a circle: {}",
+                    cycle.join(" -> ")
+                ),
+            )
+            .with("cycle", &cycle);
+            let mut done = self.done.borrow_mut();
+            for n in &cycle {
+                done.insert(n.clone(), Err(err.clone()));
+            }
+            return Err(err);
+        }
+        self.stack.borrow_mut().push(name.to_owned());
+        let v = e.eval(&|n| self.get(n));
+        self.stack.borrow_mut().pop();
+        // A parameter on a cycle already has its error.
+        self.done
+            .borrow_mut()
+            .entry(name.to_owned())
+            .or_insert(v)
+            .clone()
+    }
 }
 
 pub fn unknown_parameter(name: &str) -> Error {
@@ -896,6 +997,54 @@ mod tests {
         let e = eval("2 * gap").unwrap_err();
         assert_eq!(e.code, Code::UnknownParameter);
         assert_eq!(e.details["parameter"], "gap");
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> Env {
+        Env::new(
+            &pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), Expr::parse(v).unwrap()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn parameters_read_each_other() {
+        let e = env(&[("hole", "wall * 2"), ("wall", "3 mm"), ("n", "4")]);
+        assert_eq!(e.get("hole").unwrap(), Val::new(0.006, Dim::LENGTH));
+        assert_eq!(e.get("n").unwrap(), Val::new(4.0, Dim::NUMBER));
+        assert_eq!(e.get("gap").unwrap_err().code, Code::UnknownParameter);
+        assert_eq!(e.values().len(), 3);
+    }
+
+    #[test]
+    fn cycles_are_named() {
+        let e = env(&[
+            ("a", "b + 1 mm"),
+            ("b", "c"),
+            ("c", "a"),
+            ("d", "b"),
+            ("z", "1 mm"),
+        ]);
+        for n in ["a", "b", "c"] {
+            let err = e.get(n).unwrap_err();
+            assert_eq!(err.code, Code::ParameterCycle, "{n}");
+            assert_eq!(err.details["cycle"], json!(["a", "b", "c", "a"]), "{n}");
+        }
+        assert_eq!(e.get("d").unwrap_err().code, Code::ParameterCycle);
+        assert!(e.get("z").is_ok());
+        let me = env(&[("x", "x")]);
+        assert_eq!(me.get("x").unwrap_err().details["cycle"], json!(["x", "x"]));
+    }
+
+    #[test]
+    fn failures_spread_to_readers() {
+        let e = env(&[("a", "gap * 2"), ("b", "a + 1 mm"), ("c", "1 mm + 1 deg")]);
+        assert_eq!(e.get("a").unwrap_err().code, Code::UnknownParameter);
+        assert_eq!(e.get("b").unwrap_err().details["parameter"], "gap");
+        assert_eq!(e.get("c").unwrap_err().code, Code::UnitMismatch);
+        let broken = Env::broken(Error::new(Code::InvalidJson, "bad"));
+        assert_eq!(broken.get("a").unwrap_err().code, Code::InvalidJson);
     }
 
     #[test]

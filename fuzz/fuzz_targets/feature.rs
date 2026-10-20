@@ -9,6 +9,7 @@ use libfuzzer_sys::fuzz_target;
 use ryucad::doc::canonical;
 use ryucad::doc::files::{Feature, Manifest, PartFile};
 use ryucad::doc::id::Id;
+use ryucad::expr::Env;
 use ryucad::rebuild::build_feature;
 use ryucad::units::Unit;
 
@@ -21,11 +22,16 @@ fuzz_target!(|data: &[u8]| {
     };
     let _ = Manifest::from_json(&v);
     let _ = PartFile::from_json(&v);
-    let Ok(f) = Feature::from_json(&v, Unit::Mm) else {
+    let Ok(f) = Feature::from_json(&v, Unit::Mm, &Env::empty()) else {
         return;
     };
     let written = canonical::to_string(&f.to_json());
-    let back = Feature::from_json(&canonical::parse(&written).unwrap(), Unit::In).unwrap();
+    let back = Feature::from_json(
+        &canonical::parse(&written).unwrap(),
+        Unit::In,
+        &Env::empty(),
+    )
+    .unwrap();
     assert_eq!(back, f);
     assert_eq!(canonical::to_string(&back.to_json()), written);
     let id = Id::parse("f", "feature").unwrap();
