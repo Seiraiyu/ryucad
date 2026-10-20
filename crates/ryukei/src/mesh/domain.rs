@@ -213,7 +213,7 @@ fn unwrap_ring(g: &FaceGeom, ring: &[LoopPoint]) -> Result<(Vec<Flat>, [i64; 2])
         let (period, seam) = (g.periods[k]?, g.seam(k)?);
         Some(((x - seam) / period).round() as i64)
     };
-    let mut poles = Vec::new();
+    let mut poles: Vec<(usize, usize)> = Vec::new();
     for i in 0..=n {
         let p = &ring[(start + i) % n];
         let raw = [p.uv.x, p.uv.y];
@@ -222,20 +222,29 @@ fn unwrap_ring(g: &FaceGeom, ring: &[LoopPoint]) -> Result<(Vec<Flat>, [i64; 2])
             x[k] = unwrap(raw[k], last[k], g.periods[k]);
         }
         if i == n {
-            through_poles(g, &mut out, &poles);
             // Back at the start: the winding.
             let mut wind: [i64; 2] = core::array::from_fn(|k| match g.periods[k] {
                 Some(period) => ((x[k] - out[0].x[k]) / period).round() as i64,
                 None => 0,
             });
-            // Through both poles of a row the jumps are free, so the ring
-            // never winds that row's free way; with half a turn each side
-            // (a hemisphere's lune) both jumps can round the same way.
-            if let [(_, k), (_, k2)] = poles[..]
-                && k == k2
+            // Across a pole the free parameter's jump is free, so a ring
+            // through poles of one row never winds that row's free way:
+            // the stretch after its last pole runs on into the one before
+            // its first, and is moved by whole periods to meet it. With
+            // half a turn across a pole (a hemisphere's lune) the nearest
+            // period is a tie, and rounding may have taken the far one.
+            if let Some(&(last_pole, k)) = poles.last()
+                && poles.iter().all(|&(_, k2)| k2 == k)
+                && let Some(period) = g.periods[1 - k]
             {
-                wind[1 - k] = 0;
+                let (free, w) = (1 - k, wind[1 - k]);
+                for p in &mut out[last_pole + 1..] {
+                    p.x[free] -= w as f64 * period;
+                    p.line[free] = p.line[free].map(|l| l - w);
+                }
+                wind[free] = 0;
             }
+            through_poles(g, &mut out, &poles);
             // Points on poles take their neighbours' free parameters.
             let mut flat = Vec::with_capacity(out.len() + poles.len());
             for (j, f) in out.iter().enumerate() {
@@ -253,6 +262,28 @@ fn unwrap_ring(g: &FaceGeom, ring: &[LoopPoint]) -> Result<(Vec<Flat>, [i64; 2])
                 q.line[free] = None;
                 q.jump = before != after;
                 flat.push(q);
+                // A jump across a seam line stops on it, so that the ring
+                // is cut there like anywhere else it crosses the seam.
+                if let (true, Some(period), Some(seam)) = (q.jump, g.periods[free], g.seam(free)) {
+                    let (lo, hi) = (before.min(after), before.max(after));
+                    let first = ((lo - seam) / period).ceil() as i64;
+                    let last = ((hi - seam) / period).floor() as i64;
+                    let mut lines: Vec<i64> = (first..=last)
+                        .filter(|&l| {
+                            let at = seam + l as f64 * period;
+                            at > lo && at < hi
+                        })
+                        .collect();
+                    if after < before {
+                        lines.reverse();
+                    }
+                    for l in lines {
+                        q.x[free] = seam + l as f64 * period;
+                        q.line[free] = Some(l);
+                        flat.push(q);
+                    }
+                    q.line[free] = None;
+                }
                 if q.jump {
                     q.x[free] = after;
                     q.jump = false;
@@ -328,6 +359,7 @@ fn through_poles(g: &FaceGeom, out: &mut [Flat], poles: &[(usize, usize)]) {
     if let Some(m) = best.filter(|&m| m != 0.0) {
         for p in &mut out[a + 1..b] {
             p.x[free] += m * period;
+            p.line[free] = p.line[free].map(|l| l + m as i64);
         }
     }
 }

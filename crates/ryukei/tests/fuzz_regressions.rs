@@ -131,3 +131,11 @@ fn a_hemisphere_cut_through_both_poles() {
         "7e7e7e7e7e7e7e2400000000000000000a00",
     ));
 }
+
+/// A ball united with two blocks, its centre on a face plane holding its
+/// axis: the half left runs through one pole, half a turn across it, and
+/// straddles the seam, which its jump along the pole crosses.
+#[test]
+fn a_hemisphere_through_one_pole_across_the_seam() {
+    boolean_sound("0f0000005d000000000a000026000000000400002400000000000000000a00");
+}
