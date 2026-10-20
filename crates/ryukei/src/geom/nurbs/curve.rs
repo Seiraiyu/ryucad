@@ -164,6 +164,14 @@ impl NurbsCurve {
             .collect()
     }
 
+    /// Every parameter where the distance from `p` is stationary, minima
+    /// and maxima, sorted (see `Spline::stationary`); a clamped curve's
+    /// domain ends only where they are such points.
+    #[allow(dead_code)] // Used by pipes, from Task 6 on.
+    pub(crate) fn stationary(&self, p: Point3) -> Vec<f64> {
+        self.spline.stationary(self.pieces(), p.to_vector())
+    }
+
     /// The Bézier pieces, in parameter order, built once.
     pub(crate) fn pieces(&self) -> &[BezierCurve<Vector3>] {
         self.pieces.get_or_init(|| self.spline.pieces().into())
