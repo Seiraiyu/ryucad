@@ -4,6 +4,7 @@ use super::{check_interval, check_point, live};
 use crate::Error;
 use crate::geom::Point3;
 use crate::name::{Event, Journal};
+use crate::tol::Tolerance;
 use crate::topo::{Body, CurveId, EdgeId, FaceId, FinId, Pcurve, Sense, SurfaceId, VertexId};
 
 /// Moves a vertex to `point`.
@@ -63,6 +64,34 @@ pub fn set_surface(
     Ok(journal)
 }
 
+/// Sets an edge's tolerance: how far its curve may stray from its faces'
+/// surfaces and from its vertices (see [`crate::check`]).
+pub fn set_edge_tolerance(
+    body: &mut Body,
+    edge: EdgeId,
+    tolerance: Tolerance,
+) -> Result<Journal, Error> {
+    live(&body.edges, edge)?;
+    body.edges[edge].tolerance = tolerance;
+    let mut journal = Journal::new();
+    journal.push(Event::Modified(body.edges[edge].name));
+    Ok(journal)
+}
+
+/// Sets a vertex's tolerance: how far it may stray from its edges' curves
+/// and its faces' surfaces.
+pub fn set_vertex_tolerance(
+    body: &mut Body,
+    vertex: VertexId,
+    tolerance: Tolerance,
+) -> Result<Journal, Error> {
+    live(&body.vertices, vertex)?;
+    body.vertices[vertex].tolerance = tolerance;
+    let mut journal = Journal::new();
+    journal.push(Event::Modified(body.vertices[vertex].name));
+    Ok(journal)
+}
+
 /// Gives a fin a pcurve in its face's parameter plane, or takes it away.
 /// The curve must be live and the map finite with a slope that is not
 /// zero. Nothing checks that the pcurve fits; [`crate::check::check`]
@@ -93,6 +122,34 @@ mod tests {
     use crate::name::OpKey;
     use crate::topo::{EntityId, Id};
     use crate::{Error, TopologyError};
+
+    #[test]
+    fn tolerances_are_set_and_reported() {
+        let (mut b, s) = plane_body();
+        let (m, _) = mvfs(&mut b, K, Point3::ORIGIN, s).unwrap();
+        let q = Point3::new(1.0, 0.0, 0.0);
+        let (c, t) = line(&mut b, Point3::ORIGIN, q);
+        let (e, _) = mev(&mut b, OpKey(2), Corner::Lone(m.loop_), q, c, t).unwrap();
+        let tol = Tolerance::new(3e-7).unwrap();
+        let j = set_edge_tolerance(&mut b, e.edge, tol).unwrap();
+        assert_eq!(b.edge(e.edge).unwrap().tolerance, tol);
+        let edge_name = b.name_of(EntityId::Edge(e.edge)).unwrap();
+        assert_eq!(j.events(), &[Event::Modified(edge_name)]);
+        let j = set_vertex_tolerance(&mut b, e.vertex, tol).unwrap();
+        assert_eq!(b.vertex(e.vertex).unwrap().tolerance, tol);
+        let vertex_name = b.name_of(EntityId::Vertex(e.vertex)).unwrap();
+        assert_eq!(j.events(), &[Event::Modified(vertex_name)]);
+        let dead = EdgeId::from_index(9);
+        assert_eq!(
+            set_edge_tolerance(&mut b, dead, tol),
+            Err(TopologyError::DeadEntity.into())
+        );
+        let dead = VertexId::from_index(9);
+        assert_eq!(
+            set_vertex_tolerance(&mut b, dead, tol),
+            Err(TopologyError::DeadEntity.into())
+        );
+    }
 
     #[test]
     fn setters_change_geometry_and_report_it() {

@@ -6,8 +6,9 @@
 //! together: an operator that makes an edge takes its curve. Operators
 //! decide no geometry; the checker verifies it.
 //!
-//! [`set_point`], [`set_curve`], [`set_surface`] and [`set_pcurve`] change
-//! geometry without touching topology. New fins have no pcurve; operators
+//! [`set_point`], [`set_curve`], [`set_surface`], [`set_pcurve`],
+//! [`set_edge_tolerance`] and [`set_vertex_tolerance`] change geometry
+//! without touching topology. New fins have no pcurve; operators
 //! keep the pcurves fins have while they stay valid, and drop them when a
 //! fin moves to a face on another surface or its geometry changes.
 //!
@@ -23,9 +24,11 @@ mod geometry;
 mod ring;
 mod shell;
 
-pub use edge::{Jekv, Mev, Semv, jekv, kev, mev, semv};
+pub use edge::{Jekv, Mev, Semv, jekv, kev, mev, mev_reversed, semv};
 pub use face::{Kef, Mef, kef, mef};
-pub use geometry::{set_curve, set_pcurve, set_point, set_surface};
+pub use geometry::{
+    set_curve, set_edge_tolerance, set_pcurve, set_point, set_surface, set_vertex_tolerance,
+};
 pub use ring::{Kemr, Kfmrh, Mekr, Mfkrh, kemr, kfmrh, mekr, mfkrh};
 pub use shell::{Mvfs, Mvr, Mvs, kvfs, kvr, mvfs, mvr, mvs};
 

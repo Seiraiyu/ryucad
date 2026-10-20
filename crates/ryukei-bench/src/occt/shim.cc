@@ -1,6 +1,7 @@
 #include "ryukei-bench/src/occt/shim.h"
 #include "ryukei-bench/src/occt.rs.h"
 
+#include <BRepAlgoAPI_BooleanOperation.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -91,20 +92,40 @@ void add_to_compound(Shape &compound, const Shape &s) {
 // how OCCT's Boolean Operations take many tools: cutting them one at a
 // time would intersect the growing result again at every step.
 std::unique_ptr<Shape> cut(const Shape &s, const Shape &tools, bool parallel) {
+  return boolean(s, tools, 2, parallel);
+}
+
+// `s` united with (op 0), intersected with (1) or minus (2) every solid of
+// the compound `tools`, in one boolean with the tools as its tool list.
+std::unique_ptr<Shape> boolean(const Shape &s, const Shape &tools, uint32_t op,
+                               bool parallel) {
   TopTools_ListOfShape arguments, list;
   arguments.Append(s.shape);
   for (TopoDS_Iterator it(tools.shape); it.More(); it.Next()) {
     list.Append(it.Value());
   }
-  BRepAlgoAPI_Cut op;
-  op.SetArguments(arguments);
-  op.SetTools(list);
-  op.SetRunParallel(parallel);
-  op.Build();
-  if (!op.IsDone() || op.HasErrors()) {
-    throw std::runtime_error("BRepAlgoAPI_Cut failed");
+  BRepAlgoAPI_BooleanOperation bop;
+  switch (op) {
+  case 0:
+    bop.SetOperation(BOPAlgo_FUSE);
+    break;
+  case 1:
+    bop.SetOperation(BOPAlgo_COMMON);
+    break;
+  case 2:
+    bop.SetOperation(BOPAlgo_CUT);
+    break;
+  default:
+    throw std::runtime_error("no such boolean");
   }
-  return wrap(op.Shape());
+  bop.SetArguments(arguments);
+  bop.SetTools(list);
+  bop.SetRunParallel(parallel);
+  bop.Build();
+  if (!bop.IsDone() || bop.HasErrors()) {
+    throw std::runtime_error("BRepAlgoAPI_BooleanOperation failed");
+  }
+  return wrap(bop.Shape());
 }
 
 // The B-rep's vertex positions (x, y, z flattened), in TopExp's order.

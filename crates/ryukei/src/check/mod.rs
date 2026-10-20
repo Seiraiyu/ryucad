@@ -17,6 +17,7 @@ mod geometry;
 mod intersect;
 mod topology;
 
+pub(crate) use geometry::outside_size_box;
 pub use intersect::check_intersections;
 
 use crate::name::Name;

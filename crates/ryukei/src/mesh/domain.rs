@@ -19,7 +19,7 @@
 //! side of every loop segment are marked so, and the marks spread across
 //! unfixed edges. A face with no loop of edges is inside everywhere.
 
-use super::cdt::{Cdt, NONE};
+use super::cdt::{Cdt, Crossing, NONE};
 use super::edge::{EdgeSamples, unwrap};
 use super::uv::{FaceGeom, U, V};
 use crate::geom::Point2;
@@ -213,7 +213,7 @@ fn unwrap_ring(g: &FaceGeom, ring: &[LoopPoint]) -> Result<(Vec<Flat>, [i64; 2])
         let (period, seam) = (g.periods[k]?, g.seam(k)?);
         Some(((x - seam) / period).round() as i64)
     };
-    let mut poles = Vec::new();
+    let mut poles: Vec<(usize, usize)> = Vec::new();
     for i in 0..=n {
         let p = &ring[(start + i) % n];
         let raw = [p.uv.x, p.uv.y];
@@ -222,12 +222,29 @@ fn unwrap_ring(g: &FaceGeom, ring: &[LoopPoint]) -> Result<(Vec<Flat>, [i64; 2])
             x[k] = unwrap(raw[k], last[k], g.periods[k]);
         }
         if i == n {
-            through_poles(g, &mut out, &poles);
             // Back at the start: the winding.
-            let wind: [i64; 2] = core::array::from_fn(|k| match g.periods[k] {
+            let mut wind: [i64; 2] = core::array::from_fn(|k| match g.periods[k] {
                 Some(period) => ((x[k] - out[0].x[k]) / period).round() as i64,
                 None => 0,
             });
+            // Across a pole the free parameter's jump is free, so a ring
+            // through poles of one row never winds that row's free way:
+            // the stretch after its last pole runs on into the one before
+            // its first, and is moved by whole periods to meet it. With
+            // half a turn across a pole (a hemisphere's lune) the nearest
+            // period is a tie, and rounding may have taken the far one.
+            if let Some(&(last_pole, k)) = poles.last()
+                && poles.iter().all(|&(_, k2)| k2 == k)
+                && let Some(period) = g.periods[1 - k]
+            {
+                let (free, w) = (1 - k, wind[1 - k]);
+                for p in &mut out[last_pole + 1..] {
+                    p.x[free] -= w as f64 * period;
+                    p.line[free] = p.line[free].map(|l| l - w);
+                }
+                wind[free] = 0;
+            }
+            through_poles(g, &mut out, &poles);
             // Points on poles take their neighbours' free parameters.
             let mut flat = Vec::with_capacity(out.len() + poles.len());
             for (j, f) in out.iter().enumerate() {
@@ -245,6 +262,28 @@ fn unwrap_ring(g: &FaceGeom, ring: &[LoopPoint]) -> Result<(Vec<Flat>, [i64; 2])
                 q.line[free] = None;
                 q.jump = before != after;
                 flat.push(q);
+                // A jump across a seam line stops on it, so that the ring
+                // is cut there like anywhere else it crosses the seam.
+                if let (true, Some(period), Some(seam)) = (q.jump, g.periods[free], g.seam(free)) {
+                    let (lo, hi) = (before.min(after), before.max(after));
+                    let first = ((lo - seam) / period).ceil() as i64;
+                    let last = ((hi - seam) / period).floor() as i64;
+                    let mut lines: Vec<i64> = (first..=last)
+                        .filter(|&l| {
+                            let at = seam + l as f64 * period;
+                            at > lo && at < hi
+                        })
+                        .collect();
+                    if after < before {
+                        lines.reverse();
+                    }
+                    for l in lines {
+                        q.x[free] = seam + l as f64 * period;
+                        q.line[free] = Some(l);
+                        flat.push(q);
+                    }
+                    q.line[free] = None;
+                }
                 if q.jump {
                     q.x[free] = after;
                     q.jump = false;
@@ -320,6 +359,7 @@ fn through_poles(g: &FaceGeom, out: &mut [Flat], poles: &[(usize, usize)]) {
     if let Some(m) = best.filter(|&m| m != 0.0) {
         for p in &mut out[a + 1..b] {
             p.x[free] += m * period;
+            p.line[free] = p.line[free].map(|l| l + m as i64);
         }
     }
 }
@@ -334,8 +374,17 @@ fn strip(g: &FaceGeom, d: usize, piece: &[Flat]) -> Result<i64, BadDomain> {
         g.seam(d).expect("periodic"),
     );
     let inner = &piece[1..piece.len() - 1];
-    if let Some(p) = inner.iter().find(|p| p.line[d].is_none()) {
-        let m = ((p.x[d] - seam) / period).floor() as i64;
+    let free: Vec<f64> = inner
+        .iter()
+        .filter(|p| p.line[d].is_none())
+        .map(|p| p.x[d])
+        .collect();
+    if !free.is_empty() {
+        // The strip by the middle of the free points' range: one of them
+        // may lie exactly on the strip's edge (an apex at the seam).
+        let lo = free.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = free.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let m = ((0.5 * (lo + hi) - seam) / period).floor() as i64;
         // Every inner point must be in the same strip.
         let fits = inner.iter().all(|q| {
             let s = (q.x[d] - seam) / period - m as f64;
@@ -359,13 +408,57 @@ fn strip(g: &FaceGeom, d: usize, piece: &[Flat]) -> Result<i64, BadDomain> {
     Ok(if face_lower { ma - 1 } else { ma })
 }
 
+/// A ring that winds round neither period, moved by whole periods into
+/// the face's period rectangle, which it must fit without crossing a
+/// seam.
+fn whole_hole(g: &FaceGeom, mut flat: Vec<Flat>, wind: [i64; 2]) -> Result<Vec<Flat>, BadDomain> {
+    if wind != [0, 0] {
+        return Err(BadDomain);
+    }
+    for k in 0..2 {
+        fit(g, k, &mut flat)?;
+    }
+    Ok(flat)
+}
+
+/// Moves a ring by whole periods in direction `k` into the face's period
+/// there, which it must fit without crossing the seam.
+fn fit(g: &FaceGeom, k: usize, flat: &mut [Flat]) -> Result<(), BadDomain> {
+    let (Some(p), Some(s)) = (g.periods[k], g.seam(k)) else {
+        return Err(BadDomain);
+    };
+    let lo = flat.iter().map(|q| q.x[k]).fold(f64::INFINITY, f64::min);
+    let hi = flat
+        .iter()
+        .map(|q| q.x[k])
+        .fold(f64::NEG_INFINITY, f64::max);
+    let shift = ((s - lo) / p).ceil() * p;
+    if hi + shift >= s + p {
+        return Err(BadDomain);
+    }
+    for q in flat {
+        q.x[k] += shift;
+    }
+    Ok(())
+}
+
 impl Domain {
     /// Builds a face's region from its loops.
+    #[cfg(test)]
     pub(crate) fn new(g: &FaceGeom, loops: &Loops) -> Result<Self, BadDomain> {
+        Self::with_requests(g, loops, &mut Vec::new())
+    }
+
+    /// Builds a face's region from its loops. Where two loop segments
+    /// cross (edges of a sliver face too close for their samples), the
+    /// samples in the middle of both are pushed to `requests`: with them
+    /// the polylines draw apart.
+    pub(crate) fn with_requests(
+        g: &FaceGeom,
+        loops: &Loops,
+        requests: &mut Vec<(EdgeId, f64)>,
+    ) -> Result<Self, BadDomain> {
         let periodic: Vec<usize> = (0..2).filter(|&k| g.periods[k].is_some()).collect();
-        if periodic.len() == 2 && !loops.rings.is_empty() {
-            return Err(BadDomain);
-        }
         // Pieces: open polylines between seam points (or whole rings),
         // shifted into the period.
         let mut pieces: Vec<(Vec<Flat>, bool)> = Vec::new();
@@ -374,7 +467,27 @@ impl Domain {
             match periodic[..] {
                 [] => pieces.push((flat, true)),
                 [d] => pieces.extend(cut(g, d, flat, wind[d])?),
-                _ => unreachable!(),
+                // Periodic both ways: a hole that fits between the seams
+                // (which the face geometry puts between holes where it
+                // can) stays whole; a ring that fits between one way's
+                // seams (a band round the surface the other way, or a
+                // hole the other way's seam can't miss) is cut at the
+                // seam it crosses.
+                _ => {
+                    let fits = |k: usize| wind[k] == 0 && fit(g, k, &mut flat.clone()).is_ok();
+                    match (fits(U), fits(V)) {
+                        (true, true) => pieces.push((whole_hole(g, flat, wind)?, true)),
+                        (true, false) | (false, true) => {
+                            let k = if fits(U) { U } else { V };
+                            let mut flat = flat;
+                            fit(g, k, &mut flat)?;
+                            pieces.extend(cut(g, 1 - k, flat, wind[1 - k])?);
+                        }
+                        (false, false) => {
+                            return Err(BadDomain);
+                        }
+                    }
+                }
             }
         }
         let lone: Vec<(VertexId, Point2)> = loops
@@ -476,12 +589,25 @@ impl Domain {
                 d.classes.join(a, b)?;
             }
         }
-        // Points, in loop order, then lone vertices.
+        // Points, in loop order, then lone vertices. A loop through one
+        // vertex twice (a pinch) reaches it from two edges, whose samples
+        // put it a rounding apart: both visits take the first's parameters,
+        // so they are one point of the triangulation.
         let mut ids: Vec<Vec<u32>> = Vec::new();
+        let mut seen: BTreeMap<VertexId, Vec<Point2>> = BTreeMap::new();
+        let near = 1e-9 * (rect[U][1] - rect[U][0]).max(rect[V][1] - rect[V][0]);
         for (piece, _) in &pieces {
             let mut row = Vec::with_capacity(piece.len());
             for p in piece {
-                row.push(d.add(g, Point2::new(p.x[0], p.x[1]), p.anchor)?);
+                let mut uv = Point2::new(p.x[0], p.x[1]);
+                if let Anchor::Vertex(v) = p.anchor {
+                    let at = seen.entry(v).or_default();
+                    match at.iter().find(|q| q.distance(uv) <= near) {
+                        Some(&q) => uv = q,
+                        None => at.push(uv),
+                    }
+                }
+                row.push(d.add(g, uv, p.anchor)?);
             }
             ids.push(row);
         }
@@ -499,7 +625,16 @@ impl Domain {
                 }
                 let (a, b) = (row[i], row[(i + 1) % n]);
                 let seg = piece[i].seg;
-                let parts = d.cdt.insert_segment(a, b).map_err(|_| BadDomain)?;
+                let parts = match d.cdt.insert_segment(a, b) {
+                    Ok(parts) => parts,
+                    Err(Crossing(hit)) => {
+                        let other = hit.and_then(|[x, y]| d.segments.get(&[x.min(y), x.max(y)]));
+                        for &(e, t0, t1) in [Some(&seg), other].into_iter().flatten() {
+                            requests.push((e, 0.5 * (t0 + t1)));
+                        }
+                        return Err(BadDomain);
+                    }
+                };
                 for [x, y] in parts {
                     d.segments.insert([x.min(y), x.max(y)], seg);
                     marks.push((x, y));

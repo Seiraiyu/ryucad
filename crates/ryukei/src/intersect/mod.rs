@@ -15,13 +15,19 @@ mod face;
 mod fit;
 mod implicit;
 mod inface;
+mod solid;
 mod ss;
 mod ss_exact;
 mod ss_trace;
 
+pub(crate) use coincide::coincident;
 pub use cs::{CurveHit, Side, curve_surface};
 pub use face::{Contact, FaceMeet, Rim, Stretch, face_box, face_face};
+pub(crate) use face::{shifted, shifts};
+pub(crate) use fit::fit_pcurve;
 pub use inface::{Place, point_in_face};
+pub(crate) use solid::point_in_faces;
+pub use solid::{Inclusion, point_in_body};
 pub use ss::{Branch, SurfaceHit, surface_surface};
 
 /// Rounding slack added to every certified distance: the surfaces and

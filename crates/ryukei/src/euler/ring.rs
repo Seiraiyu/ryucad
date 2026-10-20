@@ -275,7 +275,7 @@ pub fn mfkrh(body: &mut Body, key: OpKey, loop_: LoopId) -> Result<(Mfkrh, Journ
     let mut journal = Journal::new();
     journal.push(Event::Split {
         parent,
-        children: [part0, part1],
+        children: vec![part0, part1],
     });
     finish(body);
     Ok((Mfkrh { face: new_face }, journal))

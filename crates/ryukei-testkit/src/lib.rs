@@ -7,7 +7,10 @@
 //! - [`nurbs`]: seeded random NURBS curves and surfaces.
 //! - [`mesh`]: a NURBS-topped block, and measures of meshes.
 //! - [`sweep_bytes`]: sweeps from bytes, for fuzzing and its regressions.
+//! - [`boolean_bytes`]: booleans from bytes, for fuzzing and its
+//!   regressions.
 
+pub mod boolean_bytes;
 pub mod euler_script;
 pub mod exact;
 mod golden;

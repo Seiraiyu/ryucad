@@ -40,7 +40,7 @@ use core::ops::Range;
 use domain::{Anchor, Domain, gather};
 use edge::{EdgeSamples, discretize};
 use rayon::prelude::*;
-use refine::{Stop, refine};
+use refine::{Chord, Stop, refine};
 use uv::FaceGeom;
 
 /// A body's mesh.
@@ -176,6 +176,9 @@ pub fn tessellate(body: &Body, params: &MeshParams) -> Result<BodyMesh, Error> {
     }
     let mut extras: Vec<Vec<f64>> = vec![Vec::new(); body.edges.slot_count()];
     let mut work: Vec<Option<FaceWork>> = (0..body.faces.slot_count()).map(|_| None).collect();
+    // Chords between boundary points that faces split (see
+    // `refine::chords`).
+    let mut split: Vec<Chord> = Vec::new();
     let mut todo: Vec<FaceId> = faces;
     for round in 0..=ROUNDS {
         let done: Vec<(FaceId, FaceWork)> = todo
@@ -184,7 +187,7 @@ pub fn tessellate(body: &Body, params: &MeshParams) -> Result<BodyMesh, Error> {
                 let g = geoms[f.index()].as_ref().expect("live face");
                 (
                     f,
-                    mesh_face(body, g, &samples, &targets, params.max_triangles),
+                    mesh_face(body, g, &samples, &targets, params.max_triangles, &split),
                 )
             })
             .collect();
@@ -195,6 +198,22 @@ pub fn tessellate(body: &Body, params: &MeshParams) -> Result<BodyMesh, Error> {
             .iter()
             .flat_map(|f| work[f.index()].as_ref().expect("meshed").requests.clone())
             .collect();
+        if requests.is_empty() && round < ROUNDS {
+            // Chords between boundary points drawn by two faces.
+            let shared = shared_chords(body, &work);
+            if !shared.is_empty() {
+                todo = shared
+                    .iter()
+                    .flat_map(|(_, faces)| faces.iter().copied())
+                    .collect();
+                todo.sort();
+                todo.dedup();
+                split.extend(shared.into_iter().map(|(c, _)| c));
+                split.sort();
+                split.dedup();
+                continue;
+            }
+        }
         if requests.is_empty() || round == ROUNDS {
             break;
         }
@@ -334,12 +353,39 @@ fn estimate(
 }
 
 /// Meshes one face from its edges' samples.
+/// The chords between boundary points (see [`refine::chords`]) drawn
+/// inside one face and also in another (inside it or as a loop segment),
+/// and the faces they are drawn inside.
+fn shared_chords(body: &Body, work: &[Option<FaceWork>]) -> Vec<(Chord, Vec<FaceId>)> {
+    let mut all: Vec<(Chord, FaceId, bool)> = body
+        .faces()
+        .filter_map(|f| work[f.index()].as_ref()?.domain.as_ref().map(|d| (f, d)))
+        .flat_map(|(f, d)| {
+            refine::chords(d)
+                .into_iter()
+                .map(move |(c, fixed)| (c, f, fixed))
+        })
+        .collect();
+    all.sort();
+    let mut out: Vec<(Chord, Vec<FaceId>)> = Vec::new();
+    for group in all.chunk_by(|a, b| a.0 == b.0) {
+        let mut faces: Vec<FaceId> = group.iter().map(|x| x.1).collect();
+        faces.dedup();
+        let inside: Vec<FaceId> = group.iter().filter(|x| !x.2).map(|x| x.1).collect();
+        if !inside.is_empty() && faces.len() > 1 {
+            out.push((group[0].0, inside));
+        }
+    }
+    out
+}
+
 fn mesh_face(
     b: &Body,
     g: &FaceGeom,
     samples: &[Option<EdgeSamples>],
     t: &Targets,
     cap: u64,
+    split: &[Chord],
 ) -> FaceWork {
     let mut w = FaceWork {
         domain: None,
@@ -365,7 +411,7 @@ fn mesh_face(
             return w;
         }
     }
-    let Ok(mut d) = Domain::new(g, &gather(b, g, samples)) else {
+    let Ok(mut d) = Domain::with_requests(g, &gather(b, g, samples), &mut w.requests) else {
         w.fault = Some(MeshFaultKind::BadDomain);
         return w;
     };
@@ -374,7 +420,7 @@ fn mesh_face(
         Anchor::Sample(e, k) => samples[e.index()].as_ref().expect("sampled").points[k as usize],
         Anchor::Free => unreachable!("free points have no fixed position"),
     };
-    let r = refine(&mut d, g, t, &fixed, cap);
+    let r = refine(&mut d, g, t, &fixed, cap, split);
     w.triangles = d.inside.iter().filter(|&&x| x).count() as u64;
     match r.stop {
         Some(Stop::TooLarge) => w.too_large = true,

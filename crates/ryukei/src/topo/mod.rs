@@ -12,6 +12,7 @@ mod compact;
 mod dump;
 mod id;
 mod store;
+mod transform;
 
 #[cfg(test)]
 pub(crate) mod fixture;
