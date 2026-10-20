@@ -30,6 +30,7 @@ pub use face::{Contact, FaceMeet, Rim, Stretch, face_box, face_face};
 pub(crate) use face::{shifted, shifts};
 pub(crate) use fit::fit_pcurve;
 pub use inface::{Place, point_in_face};
+pub use pipe::{Cell, pipe_beside};
 pub use pipe_cs::curve_pipe;
 pub(crate) use solid::point_in_faces;
 pub use solid::{Inclusion, point_in_body};

@@ -16,12 +16,14 @@
 use super::Failure;
 use super::implicit::Implicit;
 use crate::geom::jet::Jet;
-use crate::geom::{Pipe, Point3};
+use crate::geom::{Curve2, Pipe, Point3, Surface};
 use crate::interval::Interval;
 use crate::math;
+use crate::predicates::Sign;
+use core::f64::consts::TAU;
 
 /// A box of the pipe's parameter plane: `[s range, θ range]`.
-pub(crate) type Cell = [[f64; 2]; 2];
+pub type Cell = [[f64; 2]; 2];
 
 /// The deepest a stretch of a side is halved while isolating roots.
 const ROOT_DEPTH: u32 = 48;
@@ -117,7 +119,9 @@ impl Field<'_> {
 
     /// Certified enclosures over a cell: the jets', narrowed by the mean
     /// value form about the cell's middle, `F(c) ⊂ F(m) + ∇F(cell) (c -
-    /// m)`, and likewise for the gradient from the Hessian.
+    /// m)`, and by the second order form `F(m) + ∇F(m) (c - m) + ½ (c -
+    /// m)ᵀ H(cell) (c - m)`, and likewise for the gradient from the
+    /// Hessian.
     pub(crate) fn enclose(&self, cell: Cell) -> Option<Enclosure> {
         let j = self.jets(cell)?;
         let [[s0, s1], [t0, t1]] = cell;
@@ -125,7 +129,17 @@ impl Field<'_> {
         let m = self.jets([[ms, ms], [mt, mt]])?;
         let ds = Interval::new(s0, s1)? - Interval::point(ms);
         let dt = Interval::new(t0, t1)? - Interval::point(mt);
-        let v = meet(j.v, m.v + j.d[0] * ds + j.d[1] * dt);
+        // The mean value form, and the second order form from the
+        // gradient at the middle (tight) and the Hessian over the cell.
+        let half = Interval::point(0.5);
+        let second = m.v
+            + m.d[0] * ds
+            + m.d[1] * dt
+            + half
+                * (j.h[0] * ds.square()
+                    + Interval::point(2.0) * j.h[1] * ds * dt
+                    + j.h[2] * dt.square());
+        let v = meet(meet(j.v, m.v + j.d[0] * ds + j.d[1] * dt), second);
         let fs = meet(j.d[0], m.d[0] + j.h[0] * ds + j.h[1] * dt);
         let ft = meet(j.d[1], m.d[1] + j.h[1] * ds + j.h[2] * dt);
         Some(Enclosure {
@@ -211,6 +225,127 @@ impl Field<'_> {
     }
 }
 
+/// The most cells [`pipe_beside`] may examine.
+const BESIDE_CELLS: usize = 1 << 16;
+
+/// The deepest [`pipe_beside`] halves a cell, one parameter at a time.
+const BESIDE_DEPTH: u32 = 64;
+
+/// Which side of an analytic surface `other` a pipe face lies on, away
+/// from a curve where the two touch (a fillet's rail, where it meets its
+/// support tangentially, so that no intersection can be traced there).
+///
+/// `cell` is the face's box in the pipe's parameter plane, and `rail` the
+/// touching curve's pcurve on the pipe over its parameter range. Every
+/// part of the box lying wholly within `strip` of the rail is left out;
+/// on the rest, `F = f ∘ P` must have one certified sign. A part is
+/// within the strip when the pcurve's pieces (256 of them, by their
+/// boxes) whose every `θ` lies within `strip / r` of every `θ` of the
+/// part cover its `s` range between them: at every `s` of the part the
+/// rail then passes (each piece is continuous), at an angle the part's
+/// points are within `r |Δθ| ≤ strip` of. The parts are halved along
+/// whichever parameter adds more to `F`'s enclosure, so the strip needs
+/// narrow parts across it only.
+///
+/// `Ok(Some(sign))` is that sign (`Positive` on the side `other`'s
+/// implicit form is positive: outside a cylinder, sphere or torus), or
+/// `Zero` when the whole box is within the strip; `Ok(None)` when parts
+/// of both signs are certified, so the pipe crosses `other` away from the
+/// strip. Fails with `Unsupported` unless `pipe` is a pipe and `other`
+/// analytic, and `Uncertain` where a part can't be signed.
+pub fn pipe_beside(
+    pipe: &Surface,
+    other: &Surface,
+    cell: Cell,
+    (rail, [r0, r1]): (&Curve2, [f64; 2]),
+    strip: f64,
+) -> Result<Option<Sign>, Failure> {
+    let (Surface::Pipe(p), Some(imp)) = (pipe, Implicit::of(other)) else {
+        return Err(Failure::Unsupported);
+    };
+    let field = Field { pipe: p, imp: &imp };
+    let pieces: Vec<[[f64; 2]; 2]> = (0..RAIL_PIECES)
+        .map(|i| {
+            let at = |k: u32| r0 + (r1 - r0) * f64::from(k) / f64::from(RAIL_PIECES);
+            let b = rail.bounds([at(i), at(i + 1)]);
+            [[b.min().x, b.max().x], [b.min().y, b.max().y]]
+        })
+        .collect();
+    let w = strip / p.radius();
+    let within = |[[s0, s1], [t0, t1]]: Cell| {
+        // The pieces whose every angle is within w of the part's (a whole
+        // turn either way too: pcurves unwrap across the seam), and
+        // whether their `s` ranges cover the part's between them.
+        let mut runs: Vec<[f64; 2]> = pieces
+            .iter()
+            .filter(|&&[ps, pt]| {
+                ps[1] >= s0
+                    && ps[0] <= s1
+                    && [-TAU, 0.0, TAU]
+                        .iter()
+                        .any(|&k| pt[1] - w <= t0 + k && t1 + k <= pt[0] + w)
+            })
+            .map(|&[ps, _]| ps)
+            .collect();
+        runs.sort_by(|a, b| a[0].total_cmp(&b[0]));
+        let mut reach = s0;
+        for [a, b] in runs {
+            if a > reach {
+                break;
+            }
+            reach = reach.max(b);
+        }
+        reach >= s1
+    };
+    // Breadth first, so that where the pipe crosses `other`, both signs
+    // turn up at coarse parts, before the parts along the crossing (which
+    // never sign) use up the budget.
+    let mut signs = [false; 2];
+    let mut budget = BESIDE_CELLS;
+    let mut queue = std::collections::VecDeque::from([(cell, 0u32)]);
+    while let Some((c, depth)) = queue.pop_front() {
+        budget = budget.checked_sub(1).ok_or(Failure::Uncertain)?;
+        if within(c) {
+            continue;
+        }
+        let e = field.enclose(c);
+        if let Some(e) = e
+            && signed(e.v)
+        {
+            signs[usize::from(e.v.lo() > 0.0)] = true;
+            if signs == [true, true] {
+                return Ok(None);
+            }
+            continue;
+        }
+        if depth == BESIDE_DEPTH {
+            return Err(Failure::Uncertain);
+        }
+        let [[s0, s1], [t0, t1]] = c;
+        let along_s = match e {
+            Some(e) => e.d[0].mag() * (s1 - s0) >= e.d[1].mag() * (t1 - t0),
+            None => true,
+        };
+        if along_s {
+            let m = (s0 + s1) / 2.0;
+            queue.push_back(([[s0, m], [t0, t1]], depth + 1));
+            queue.push_back(([[m, s1], [t0, t1]], depth + 1));
+        } else {
+            let m = (t0 + t1) / 2.0;
+            queue.push_back(([[s0, s1], [t0, m]], depth + 1));
+            queue.push_back(([[s0, s1], [m, t1]], depth + 1));
+        }
+    }
+    Ok(Some(match signs {
+        [false, true] => Sign::Positive,
+        [true, false] => Sign::Negative,
+        _ => Sign::Zero,
+    }))
+}
+
+/// How many pieces a rail's pcurve is cut into for [`pipe_beside`].
+const RAIL_PIECES: u32 = 256;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,6 +427,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn apart_beside_a_rail() {
+        // The tube on the plane z = 0 touches it along the spine's shadow,
+        // the line θ = 0: the rest of the tube is above it.
+        let pipe = on_plane();
+        let rail = crate::geom::Curve2::Line2(
+            crate::geom::Line2::new(
+                crate::geom::Point2::new(0.0, 0.0),
+                crate::geom::Vector2::new(1.0, 0.0),
+            )
+            .unwrap(),
+        );
+        let ps = Surface::Pipe(std::sync::Arc::new(pipe));
+        let plane = Surface::Plane(Plane::new(Frame::WORLD));
+        let whole = [[0.0, 2.0], [-PI, PI]];
+        assert_eq!(
+            pipe_beside(&ps, &plane, whole, (&rail, [-0.1, 2.1]), 1e-4),
+            Ok(Some(Sign::Positive))
+        );
+        // A plane a little above cuts the tube outside the strip.
+        let higher = Surface::Plane(Plane::new(
+            Frame::new(
+                Point3::new(0.0, 0.0, 0.01),
+                Vector3::new(0.0, 0.0, 1.0),
+                Vector3::new(1.0, 0.0, 0.0),
+            )
+            .unwrap(),
+        ));
+        assert_eq!(
+            pipe_beside(&ps, &higher, whole, (&rail, [-0.1, 2.1]), 1e-4),
+            Ok(None)
+        );
+        // With no strip to leave out, the touch can't be signed.
+        assert_eq!(
+            pipe_beside(&ps, &plane, whole, (&rail, [-0.1, 2.1]), 0.0),
+            Err(Failure::Uncertain)
+        );
+        assert_eq!(
+            pipe_beside(&plane, &ps, whole, (&rail, [-0.1, 2.1]), 1e-4),
+            Err(Failure::Unsupported)
+        );
     }
 
     #[test]
