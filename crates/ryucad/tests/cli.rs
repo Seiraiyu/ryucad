@@ -243,6 +243,105 @@ fn parameters_drive_features() {
 }
 
 #[test]
+fn sketches_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&["param", "set", "p", "width=20 mm"]);
+    let r = p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--plane", "zx",
+    ]);
+    assert_eq!(r["feature"]["plane"], "zx");
+    let ops = r#"[
+        {"op": "add", "type": "point", "at": [0, 0]},
+        {"op": "add", "type": "point", "at": [19, 1]},
+        {"op": "add", "type": "point", "at": [21, 9]},
+        {"op": "add", "type": "point", "at": [1, 11]},
+        {"op": "add", "type": "line", "start": "p1", "end": "p2"},
+        {"op": "add", "type": "line", "start": "p2", "end": "p3"},
+        {"op": "add", "type": "line", "start": "p3", "end": "p4"},
+        {"op": "add", "type": "line", "start": "p4", "end": "p1"},
+        {"op": "add", "type": "horizontal", "a": "l1"},
+        {"op": "add", "type": "horizontal", "a": "l3"},
+        {"op": "add", "type": "vertical", "a": "l2"},
+        {"op": "add", "type": "vertical", "a": "l4"},
+        {"op": "add", "type": "fix", "a": "p1"},
+        {"op": "add", "type": "length", "a": "l1", "value": "width"}
+    ]"#;
+    p.write("ops.json", ops);
+    let r = p.ok(&["sketch", "edit", "p", "s", "@ops.json"]);
+    assert_eq!(r["report"]["state"], "under");
+    assert_eq!(r["report"]["dof"], 1);
+    let r = p.ok(&[
+        "sketch",
+        "edit",
+        "p",
+        "s",
+        r#"[{"op": "add", "type": "distance", "a": "p1", "b": "l3", "value": "width / 2"}]"#,
+    ]);
+    assert_eq!(r["added"], serde_json::json!(["d2"]));
+    assert_eq!(r["report"]["state"], "well");
+    let g = p.ok(&["sketch", "get", "p", "s"]);
+    assert_eq!(g["entities"]["p3"]["state"], "well");
+    assert_eq!(g["constraints"]["d2"]["value"]["value"], "width / 2");
+    // A proposal, solved but not written.
+    let dry = p.ok(&[
+        "sketch",
+        "solve",
+        "p",
+        "s",
+        r#"[{"op": "set", "id": "d2", "value": "width"}]"#,
+    ]);
+    assert_eq!(dry["changed"], true);
+    assert_eq!(p.ok(&["sketch", "solve", "p", "s"])["changed"], false);
+    let r = p.ok(&["rebuild", "p"]);
+    assert_eq!(r["parts"][0]["features"][0]["sketch"]["state"], "well");
+    // The parameter moves the sketch, written in the same change.
+    let r = p.ok(&["param", "set", "p", "width=30 mm"]);
+    assert_eq!(r["sketches"][0]["ok"], true);
+    assert_eq!(p.ok(&["check-format"])["clean"], true);
+    // Refused edits, by code.
+    p.fails(
+        &[
+            "sketch",
+            "edit",
+            "p",
+            "s",
+            r#"[{"op": "add", "type": "parallel", "a": "l1", "b": "l3"}]"#,
+        ],
+        "sketch_overconstrained",
+        1,
+    );
+    p.fails(
+        &[
+            "sketch",
+            "edit",
+            "p",
+            "s",
+            r#"[{"op": "add", "type": "length", "a": "l2", "value": "1 m"}]"#,
+        ],
+        "sketch_unsolved",
+        1,
+    );
+    p.fails(&["sketch", "edit", "p", "s", "[nope"], "usage", 2);
+    // Stale from outside: a warning in the envelope, and a repair.
+    p.write(
+        "parts/p/parameters.json",
+        "{\n  \"format\": 1,\n  \"kind\": \"ryucad.parameters\",\n  \"parameters\": {\n    \"width\": \"25 mm\"\n  }\n}\n",
+    );
+    let (code, v) = p.both_from("", &["rebuild", "p"]);
+    assert_eq!((code, &v["ok"]), (0, &serde_json::json!(true)), "{v}");
+    assert_eq!(v["warnings"].as_array().unwrap().len(), 1);
+    assert!(v["warnings"][0].as_str().unwrap().contains("sketch s"));
+    let d = p.ok(&["doctor"]);
+    let issue = &d["issues"][0];
+    assert_eq!(issue["code"], "sketch_stale");
+    let id = issue["repairs"][0]["id"].as_str().unwrap().to_owned();
+    p.ok(&["doctor", "--repair", &id]);
+    assert_eq!(p.ok(&["doctor"])["healthy"], true);
+}
+
+#[test]
 fn external_edits_are_seen() {
     let p = Pair::new();
     p.ok(&["init"]);
