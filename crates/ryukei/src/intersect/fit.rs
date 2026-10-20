@@ -15,6 +15,11 @@
 //!   the surface's derivative bounds and the hulls of the pcurve's and
 //!   the curve's derivatives.
 //!
+//! A pipe has no implicit form: its side of a branch is sampled through
+//! its distance from its spine, and its distance from a span is certified
+//! by the pcurve's bound alone (the span is within that of the pipe's
+//! points along the pcurve).
+//!
 //! A span whose bound exceeds [`LINEAR_RESOLUTION`] gets a new sample in
 //! its middle, put on both surfaces by Newton's method, until every span
 //! passes. The worst bound, never below resolution, is the tolerance; a
@@ -27,8 +32,8 @@ use super::ss_trace::Traced;
 use super::{Failure, SLACK};
 use crate::geom::chain3::Piece3;
 use crate::geom::{
-    BezierCurve, Curve, Hom, KnotVector, NurbsCurve, NurbsCurve2, Point2, Point3, Surface, Vector2,
-    Vector3,
+    BezierCurve, Curve, Hom, KnotVector, NurbsCurve, NurbsCurve2, Pipe, Point2, Point3, Surface,
+    Vector2, Vector3,
 };
 use crate::geom::{cos_abs_max, cos_range};
 use crate::math;
@@ -306,11 +311,46 @@ fn surface_bound(imp: &Implicit, span: &Piece3, target: f64, depth: u32) -> f64 
     surface_bound(imp, &a, target, depth - 1).max(surface_bound(imp, &b, target, depth - 1))
 }
 
-/// Fits a traced branch where surfaces `a` and `b` meet.
+/// How a fit reads one surface of a branch: an analytic surface by its
+/// implicit form, a pipe by its distance from its spine.
+enum Side<'a> {
+    Implicit(Implicit),
+    Pipe(&'a Pipe),
+}
+
+impl<'a> Side<'a> {
+    fn of(s: &'a Surface) -> Option<Self> {
+        match s {
+            Surface::Pipe(p) => Some(Self::Pipe(p)),
+            _ => Implicit::of(s).map(Self::Implicit),
+        }
+    }
+
+    /// A function vanishing on the surface and its gradient, in floating
+    /// point: for Newton's method and directions, never for a decision.
+    /// A pipe's is the distance from its spine less its radius.
+    fn eval_grad(&self, p: Point3) -> (f64, Vector3) {
+        match self {
+            Self::Implicit(imp) => imp.eval_grad(p),
+            Self::Pipe(pipe) => {
+                let (s, _) = pipe.project(p).param;
+                let d = p - pipe.spine().point(s);
+                let len = d.length();
+                if len == 0.0 {
+                    return (-pipe.radius(), Vector3::ZERO);
+                }
+                (len - pipe.radius(), d / len)
+            }
+        }
+    }
+}
+
+/// Fits a traced branch where surfaces `a` and `b` meet, each analytic
+/// or a pipe.
 pub(crate) fn fit_branch(surfaces: [&Surface; 2], traced: &Traced) -> Result<Fitted, Failure> {
     let imps = [
-        Implicit::of(surfaces[0]).ok_or(Failure::Unsupported)?,
-        Implicit::of(surfaces[1]).ok_or(Failure::Unsupported)?,
+        Side::of(surfaces[0]).ok_or(Failure::Unsupported)?,
+        Side::of(surfaces[1]).ok_or(Failure::Unsupported)?,
     ];
     let branch = Branch { surfaces, imps };
     let mut points = traced.points.clone();
@@ -368,7 +408,7 @@ fn rechord(samples: &mut [Sample]) {
 
 struct Branch<'a> {
     surfaces: [&'a Surface; 2],
-    imps: [Implicit; 2],
+    imps: [Side<'a>; 2],
 }
 
 impl Branch<'_> {
@@ -576,12 +616,9 @@ impl Branch<'_> {
         );
         let mut worst = 0.0f64;
         for k in 0..2 {
-            worst = worst.max(surface_bound(
-                &self.imps[k],
-                &span,
-                LINEAR_RESOLUTION,
-                MAX_HALVINGS,
-            ));
+            if let Side::Implicit(imp) = &self.imps[k] {
+                worst = worst.max(surface_bound(imp, &span, LINEAR_RESOLUTION, MAX_HALVINGS));
+            }
             let p2 = piece(
                 hermite(
                     a.uv[k].to_vector(),
@@ -779,6 +816,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn branches_on_pipes() {
+        // The plane x = 1.5 across the tube rolling on a plane: one loop,
+        // fitted with the pipe's side certified through its pcurve.
+        let pipe = crate::geom::pipe::tests::on_plane();
+        let plane = Surface::Plane(crate::geom::Plane::new(
+            crate::geom::Frame::new(
+                Point3::new(1.5, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            )
+            .unwrap(),
+        ));
+        let region = crate::geom::Box3::new(
+            Point3::new(-10.0, -10.0, -10.0),
+            Point3::new(10.0, 10.0, 10.0),
+        );
+        let topo = super::super::pipe_trace::trace(&pipe, &plane, &region).unwrap();
+        let ps = Surface::Pipe(std::sync::Arc::new(pipe));
+        let f = fit_branch([&ps, &plane], &topo.branches[0]).unwrap();
+        assert!(f.tolerance <= 10.0 * LINEAR_RESOLUTION);
+        let [d0, d1] = f.curve.domain();
+        for i in 0..=100 {
+            let t = d0 + (d1 - d0) * f64::from(i) / 100.0;
+            let p = f.curve.point(t);
+            assert!(ps.distance(p) <= f.tolerance && plane.distance(p) <= f.tolerance);
+            for (k, s) in [&ps, &plane].into_iter().enumerate() {
+                let uv = f.pcurves[k].point(t);
+                assert!(s.point(uv.x, uv.y).distance(p) <= f.tolerance, "{k} at {t}");
+            }
+        }
+        // Closed: it ends where it starts.
+        assert!(f.curve.point(d0).distance(f.curve.point(d1)) <= f.tolerance);
     }
 
     #[test]
