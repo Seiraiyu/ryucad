@@ -16,6 +16,7 @@ use ryukei::geom::{Circle2, Curve2, Frame, Frame2, Line2, Point2, Vector2};
 use ryukei::math;
 use ryukei::name::OpKey;
 use ryukei::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 /// The 128-bit key for a sketch entity.
@@ -203,6 +204,81 @@ pub fn profile(
             .with("kernel", format!("{e:?}")),
     })?;
     Ok((valid, keys))
+}
+
+/// Where each entity of a sweep came from, by the hex of its stable name:
+/// a side from its sketch entity, a cap from its loop and end, an edge or
+/// vertex from the entities either side of it. These are the names the
+/// sweep derives from the profile's keys under `key`; entities a sweep
+/// doesn't make simply have no origin.
+pub fn origins(
+    key: OpKey,
+    sketch: &Id,
+    valid: &ValidProfile,
+    keys: &Keys,
+) -> BTreeMap<String, Value> {
+    use ryukei::name::{Name, Role, SweepRole as R};
+    let derive = |role: R, parents: &[Name]| Name::derive(key, Role::Sweep(role), parents);
+    let mut out = BTreeMap::new();
+    let mut put = |n: Name, v: Value| {
+        out.insert(n.to_string(), v);
+    };
+    for lump in valid.lumps() {
+        let outer = &lump.outer;
+        let lid = keys.loops[&outer.key.0].clone();
+        let stand = derive(R::Loop, &[Name::from_u128(outer.key.0)]);
+        let caps = [
+            ("start", derive(R::StartCap, &[stand])),
+            ("end", derive(R::EndCap, &[stand])),
+        ];
+        for (end, cap) in caps {
+            put(cap, json!({"sketch": sketch, "cap": end, "loop": lid}));
+        }
+        for l in std::iter::once(outer).chain(&lump.holes) {
+            let n = l.segments.len();
+            let ids: Vec<Id> = l
+                .segments
+                .iter()
+                .map(|g| keys.segments[&g.key.0].clone())
+                .collect();
+            let stands: Vec<Name> = l
+                .segments
+                .iter()
+                .map(|g| derive(R::Segment, &[Name::from_u128(g.key.0)]))
+                .collect();
+            for (k, e) in ids.iter().enumerate() {
+                let side = derive(R::Side, &[stands[k]]);
+                put(side, json!({"sketch": sketch, "entity": e}));
+                put(
+                    derive(R::AxisEdge, &[stands[k]]),
+                    json!({"sketch": sketch, "entity": e, "axis": true}),
+                );
+                for (end, cap) in caps {
+                    put(
+                        derive(R::CapEdge, &[cap, side]),
+                        json!({"sketch": sketch, "entity": e, "cap": end}),
+                    );
+                }
+                // The profile vertex between this curve and the one before.
+                let pair = [stands[(k + n - 1) % n], stands[k]];
+                let between = [&ids[(k + n - 1) % n], e];
+                for (role, extra) in [
+                    (R::Lateral, None),
+                    (R::Vertex, None),
+                    (R::StartVertex, Some(("cap", json!("start")))),
+                    (R::EndVertex, Some(("cap", json!("end")))),
+                    (R::Apex, Some(("apex", json!(true)))),
+                ] {
+                    let mut v = json!({"sketch": sketch, "entities": between});
+                    if let Some((k, x)) = extra {
+                        v[k] = x;
+                    }
+                    put(derive(role, &pair), v);
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

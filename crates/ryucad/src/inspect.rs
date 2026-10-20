@@ -88,13 +88,24 @@ pub fn entities(body: &Body) -> Value {
     json!({"faces": faces, "edges": edges, "vertices": vertices})
 }
 
-/// An axis-aligned box around the feature: its local extent's corners,
-/// placed. Tight when the placement is axis-aligned.
-pub fn bounds(f: &Feature) -> Value {
-    match extent(f) {
+/// An axis-aligned box around the feature: a primitive's local extent's
+/// corners, placed (tight when the placement is axis-aligned), or the box
+/// around any other body's faces.
+pub fn bounds(f: &Feature, body: &Body) -> Value {
+    match extent(f).or_else(|| body_extent(body)) {
         Some((min, max)) => json!({"min": min, "max": max}),
         None => Value::Null,
     }
+}
+
+/// The box around a body's faces; `None` for an empty body.
+pub fn body_extent(body: &Body) -> Option<([f64; 3], [f64; 3])> {
+    let b = body
+        .faces()
+        .map(|f| ryukei::intersect::face_box(body, f))
+        .reduce(|a, b| a.union(&b))?;
+    let (lo, hi) = (b.min(), b.max());
+    Some(([lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z]))
 }
 
 /// [`bounds`] as `(min, max)`; `None` when the placement is invalid.
@@ -130,13 +141,21 @@ pub fn extent(f: &Feature) -> Option<([f64; 3], [f64; 3])> {
     Some((min, max))
 }
 
-/// A built feature: its hash, counts, bounds and entities.
+/// A built feature: its hash, counts, bounds and entities, each with its
+/// origin when it came from a sketch.
 pub fn body(f: &Feature, b: &Built) -> Value {
     let c = b.body.counts();
     let mut v = entities(&b.body);
+    for list in ["faces", "edges", "vertices"] {
+        for e in v[list].as_array_mut().expect("lists") {
+            if let Some(o) = e["name"].as_str().and_then(|n| b.origins.get(n)) {
+                e["origin"] = o.clone();
+            }
+        }
+    }
     v["hash"] = json!(b.hash);
     v["counts"] = json!({"faces": c.faces, "edges": c.edges, "vertices": c.vertices});
-    v["bounds"] = bounds(f);
+    v["bounds"] = bounds(f, &b.body);
     v
 }
 

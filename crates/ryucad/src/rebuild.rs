@@ -26,6 +26,9 @@ use std::sync::Arc;
 pub struct Built {
     pub body: Body,
     pub journal: Journal,
+    /// Where a sweep's entities came from in its sketch, by name (see
+    /// [`crate::profile::origins`]); empty for a primitive.
+    pub origins: Arc<BTreeMap<String, serde_json::Value>>,
     /// BLAKE3 of the body's dump: equal hashes mean bit-identical bodies.
     pub hash: String,
 }
@@ -239,7 +242,8 @@ fn build_sweep(
         _ => unreachable!("a sweep"),
     };
     let made = made.map_err(|e| sweep_error(id, ty, e, &keys, axis))?;
-    finish(id, ty, made)
+    let origins = crate::profile::origins(key, sketch, &valid, &keys);
+    finish(id, ty, made, origins)
 }
 
 /// A revolve's axis: a line of its sketch, from its start to its end.
@@ -329,12 +333,17 @@ fn build_primitive(part: &Id, id: &Id, f: &Primitive) -> Result<Built> {
             .with("feature", id)
             .with("kernel", format!("{e:?}"))
     })?;
-    finish(id, f.ty.as_str(), made)
+    finish(id, f.ty.as_str(), made, BTreeMap::new())
 }
 
 /// Checks a body the kernel built and hashes it. A broken body is never
 /// reported as a success, in release builds too.
-fn finish(id: &Id, ty: &str, (body, journal): (Body, Journal)) -> Result<Built> {
+fn finish(
+    id: &Id,
+    ty: &str,
+    (body, journal): (Body, Journal),
+    origins: BTreeMap<String, serde_json::Value>,
+) -> Result<Built> {
     let faults = ryukei::check::check(&body);
     if !faults.is_empty() {
         return Err(Error::new(
@@ -351,6 +360,7 @@ fn finish(id: &Id, ty: &str, (body, journal): (Body, Journal)) -> Result<Built> 
     Ok(Built {
         body,
         journal,
+        origins: Arc::new(origins),
         hash,
     })
 }

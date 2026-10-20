@@ -184,8 +184,8 @@ impl Cache {
 }
 
 /// The diagonal of the feature's bounding box.
-fn diagonal(f: &Feature) -> f64 {
-    match crate::inspect::extent(f) {
+fn diagonal(f: &Feature, body: &Body) -> f64 {
+    match crate::inspect::extent(f).or_else(|| crate::inspect::body_extent(body)) {
         Some((lo, hi)) => {
             let d = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
             (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
@@ -195,7 +195,7 @@ fn diagonal(f: &Feature) -> f64 {
 }
 
 fn make(f: &Feature, body: &Body, quality: Quality) -> DisplayMesh {
-    let params = quality.params(diagonal(f));
+    let params = quality.params(diagonal(f, body));
     let mesh = ryukei::mesh::tessellate(body, &params).map_err(|e| {
         Error::new(Code::MeshFailed, format!("can't mesh the body: {e}"))
             .with("kernel", format!("{e:?}"))

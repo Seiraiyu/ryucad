@@ -2460,6 +2460,99 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn inspect_says_where_sweeps_came_from() {
+        let (_dir, mut s) = with_sketch();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "id": "e", "sketch": "s",
+                    "extent": {"length": "5 mm"}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "revolve", "id": "r", "sketch": "s", "axis": "l4",
+                    "angle": 90}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "revolve", "id": "full", "sketch": "s", "axis": "l4",
+                    "angle": "full"}),
+        )
+        .unwrap();
+        for f in ["e", "r", "full"] {
+            let v = call(&mut s, "inspect", json!({"part": "p", "feature": f})).unwrap();
+            let b = &v["bodies"][0];
+            for list in ["faces", "edges", "vertices"] {
+                for e in b[list].as_array().unwrap() {
+                    assert_eq!(e["origin"]["sketch"], "s", "{f} {list}: {e}");
+                }
+            }
+        }
+        let v = call(&mut s, "inspect", json!({"part": "p", "feature": "e"})).unwrap();
+        let b = &v["bodies"][0];
+        let origins: Vec<&Value> = b["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| &f["origin"])
+            .collect();
+        assert!(origins.contains(&&json!({"sketch": "s", "entity": "l1"})));
+        assert!(origins.contains(&&json!({"sketch": "s", "cap": "start", "loop": "l1"})));
+        assert!(origins.contains(&&json!({"sketch": "s", "cap": "end", "loop": "l1"})));
+        let near = |a: &Value, want: [f64; 3]| {
+            for k in 0..3 {
+                assert!(
+                    (a[k].as_f64().unwrap() - want[k]).abs() < 1e-9,
+                    "{a} != {want:?}"
+                );
+            }
+        };
+        near(&b["bounds"]["min"], [0.0, 0.0, 0.0]);
+        near(&b["bounds"]["max"], [0.02, 0.01, 0.005]);
+        // An origin is found by name too.
+        let side = b["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["origin"] == json!({"sketch": "s", "entity": "l2"}))
+            .unwrap();
+        let one = call(
+            &mut s,
+            "inspect",
+            json!({"part": "p", "entity": format!("p/e/{}", side["name"].as_str().unwrap())}),
+        )
+        .unwrap();
+        assert_eq!(one["entity"]["origin"]["entity"], "l2");
+        // Display meshes are sized to the body, not a metre.
+        let m = call(
+            &mut s,
+            "mesh.get",
+            json!({"part": "p", "feature": "e", "quality": "coarse"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 20, "y": 10, "z": 5}}),
+        )
+        .unwrap();
+        let b = call(
+            &mut s,
+            "mesh.get",
+            json!({"part": "p", "feature": "b", "quality": "coarse"}),
+        )
+        .unwrap();
+        // The same box as a primitive: the same chord.
+        let chord = m["bodies"][0]["params"]["chord"].as_f64().unwrap();
+        let want = b["bodies"][0]["params"]["chord"].as_f64().unwrap();
+        assert!((chord - want).abs() < 1e-9 * want, "{chord} vs {want}");
+    }
+
+    #[test]
     fn sweeps_keep_their_sketch_before_them() {
         let (_dir, mut s) = with_sketch();
         call(
