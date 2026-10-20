@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [predicates, interval, euler, nurbs, mesh, feature, sweep, intersect]
+        target: [predicates, interval, euler, nurbs, mesh, feature, sweep, intersect, boolean]
     steps:
       - uses: actions/checkout@v4
       # cargo-fuzz needs nightly; the pinned stable toolchain stays the
@@ -24,7 +24,10 @@ jobs:
       - run: cargo install cargo-fuzz --locked
       - name: Fuzz for 10 minutes
         working-directory: fuzz
-        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=600
+        # libFuzzer's own memory grows past 4 GB on the boolean target.
+        run: >-
+          cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=600
+          ${{ matrix.target == 'boolean' && '-rss_limit_mb=6144' || '' }}
       - name: Upload crashes
         if: failure()
         uses: actions/upload-artifact@v4
