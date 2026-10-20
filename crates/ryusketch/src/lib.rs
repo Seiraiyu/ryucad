@@ -12,6 +12,9 @@
 //! with `ryukei::math` for every function, so a sketch solves to the same
 //! bits on every platform.
 
+// Only tests reach it until `solve` does.
+#[allow(dead_code)]
+mod equation;
 mod sketch;
 
 pub use sketch::{Constraint, Entity, Id, Sketch, SketchError};
