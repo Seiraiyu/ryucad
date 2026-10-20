@@ -1,0 +1,85 @@
+{
+  "constraints": {
+    "c1": {
+      "a": "l2",
+      "type": "horizontal"
+    },
+    "d1": {
+      "a": "p1",
+      "b": "p2",
+      "type": "distance",
+      "value": "76 mm"
+    }
+  },
+  "entities": {
+    "ci1": {
+      "center": "p7",
+      "r_m": 0.000,
+      "type": "circle"
+    },
+    "l1": {
+      "end": "p2",
+      "sta\"t2: re\t\t1tt2: re\tt2u:poin\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: rt2: re\t\"t2: %\t\"t2: %rm\tt: re\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: rt2: re\t\"t2: %\t\"t2: %rm\tt\"t2: re\t\"t2: '%rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2:[re\t\"t2:m\tt\"t2: re\t\"t2: %rm\tt2: re\t\"t2: re\t\"t1: %rm\tt2: rt2: re\t\"t2: %\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2tt2:rme\tt2:poin\t\"t2: %rmtt\"t2: re\t\"t2: %rm\tt;2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %\t\"t2: %rm\tt2: re\t\"": 0,"trm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt\"t2:%%rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: rt2: re\t\t2: re\t\"": 0,"t2: %rm\tt\"2: t,re\t\"t2: %rm\tt2:rme\tt2:poin\t\"t2: %rmtt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: rt2: re\t\"t2: %ryaucd.feature": 0,"trm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\tt2:poin\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: PPPPPPre\t\"": 0,"ttt\"2]tt\"2:rm\tt2: re\t\"": 0,"\t2\\\\: re\t\t1: re\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2:. %rm\tt1: rt2: re\t\"t2: %\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2:[re\t\"t2: %rm\tt2: rt2: re\t\"t2: %\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2:[re\t\"t2: %rm\tt2: rt2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %r\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: rt2: re\t\"t2: %\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2:tt\"t2: re\t\"t2: %rm\tt2: rt2: re\t\"t2: %rm\tt2: re\t\"": 0,"trm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\tt2:poin\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: PPPPPPre\t\"": 0,"ttt\"2\tt\"2:rm\tt2: re\t\"": 0,"\t2: re\t\t1: re\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: rt2: re\t\"t2: %\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: %rm\tt\"t2:[re\t\"t2: %rm\tt2: rt2: re\t\"t2: %\t\"t2: %rm\tt\"t2: ret2: re re\t\"": 0,"t2tt2:rme\tt2:poin\t\"t2: %rmtt\"t2: re\t\"t2: %rm\tt2: %ryaucd.feature": 0,"trm\tt2: re\t\"": 0,"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\tt2:poin\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: PPPPPPre\t\"": 0,"ttt\"2\tt\"2:rm\tt2: re\t\"": 0,"\t2\\\\: re\t\t1: re\t\"t2: %rm\tt\"t2: re\t\"t2: %rm\tt2: re\t\"": 0,"t2: 2: %rm\tt2: rt2: rert": "p1",
+      "type": "",
+      "type": "line"
+    },
+    "l2": {
+    "end": "p4",
+      "start": "p5",
+      "type": "line"
+    },
+    "p1": {
+      "m": [
+        0.01,
+        0
+      ],
+      "type": "point"
+    },
+    "p2": {
+      "m": [
+        0.02,
+        4
+      ],
+      "type": "point"
+    },
+    "p3": {
+      "m": [
+        0.02,
+        0.008
+      ],
+      "type": "point"
+    },
+    "p4": {
+      "m": [
+        0.01,
+        0.008
+      ],
+      "type": "point"
+    },
+    "p5": {
+      "m": [
+        0,
+        1
+      ],
+      "type": "point"
+    },
+    "p6": {
+      "m": [
+        0,
+        0.01
+      ],
+      "type": "point"
+    },
+    "p7": {
+      "m": [
+        0.015,
+        0.004
+      ],
+      "type": "point"
+    }
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "plane": "xy",
+  "type": "sketch"
+}

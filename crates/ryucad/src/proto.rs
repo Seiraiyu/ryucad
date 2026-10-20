@@ -98,6 +98,17 @@ pub struct FeatureFields {
     /// A sketch's origin plane: `xy`, `yz` or `zx`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plane: Option<String>,
+    /// A planar face to sketch on: `<part>/<feature>/<name>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face: Option<String>,
+    /// A sketch on a face: a vertex for its origin (`""` for the default,
+    /// the part origin projected onto the face).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_origin: Option<String>,
+    /// A sketch on a face: a straight edge for its `x` (`""` for the
+    /// default, the part's `x` projected onto the face).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_x: Option<String>,
     /// The sketch an extrude or revolve sweeps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sketch: Option<String>,

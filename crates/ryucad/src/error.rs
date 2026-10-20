@@ -96,6 +96,12 @@ pub enum Code {
     ReferenceWrongKind,
     /// A feature whose input, another feature, failed to rebuild.
     DependencyFailed,
+    /// A reference to a face, edge or vertex whose name the referenced
+    /// feature's body no longer has.
+    ReferenceUnresolved,
+    /// An edge a sketch can't project: neither a line nor a circle parallel
+    /// to the sketch, or one that projects to nothing.
+    ProjectionUnsupported,
 }
 
 impl Code {

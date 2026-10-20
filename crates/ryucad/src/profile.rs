@@ -3,8 +3,11 @@
 //! them.
 //!
 //! A segment's key is SipHash of `ryucad.sketch\0<part>\0<sketch>\0<entity>`
-//! and a loop's the same over its smallest entity ID, so editing a
-//! dimension, or where a loop starts, renames nothing.
+//! and a loop's the same over its anchor: the first of the points where its
+//! curves join, in [`natural`] order (a lone circle's anchor is the circle).
+//! Editing a dimension, where a loop starts, or adding a segment or a
+//! fillet renames nothing: generated point IDs only grow, so a new point
+//! never sorts first.
 
 use crate::doc::id::Id;
 use crate::doc::sketch::Geometry;
@@ -35,7 +38,7 @@ pub fn entity_key(part: &Id, sketch: &Id, entity: &Id) -> u128 {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Keys {
     pub segments: BTreeMap<u128, Id>,
-    /// A loop's key, and its smallest entity, which names it.
+    /// A loop's key, and its anchor, which names it.
     pub loops: BTreeMap<u128, Id>,
 }
 
@@ -77,6 +80,34 @@ fn describe(e: &ProfileError) -> &'static str {
         ProfileError::OutsideSizeBox => "the profile leaves the ±500 m size box",
         _ => "the loops don't make a profile",
     }
+}
+
+/// The order anchors are chosen in: by the text before an ID's trailing
+/// digits, then by their number, so `p2` comes before `p10`.
+pub fn natural(id: &Id) -> (&str, usize, &str, &str) {
+    let s = id.as_str();
+    let stem = s.trim_end_matches(|c: char| c.is_ascii_digit());
+    let digits = s[stem.len()..].trim_start_matches('0');
+    (stem, digits.len(), digits, s)
+}
+
+/// A loop's anchor: the first of its curves' end points in [`natural`]
+/// order, or for a loop with none (a circle), its first curve.
+pub fn anchor(solved: &Solved, l: &[(Id, bool)]) -> Id {
+    let ends = l
+        .iter()
+        .flat_map(|(e, _)| match &solved.sketch.entities[e].geometry {
+            Geometry::Line { start, end } | Geometry::Arc { start, end, .. } => vec![start, end],
+            _ => vec![],
+        });
+    ends.min_by(|a, b| natural(a).cmp(&natural(b)))
+        .or_else(|| {
+            l.iter()
+                .map(|(e, _)| e)
+                .min_by(|a, b| natural(a).cmp(&natural(b)))
+        })
+        .expect("loops aren't empty")
+        .clone()
 }
 
 fn point(solved: &Solved, id: &Id) -> Point2 {
@@ -165,9 +196,9 @@ pub fn profile(
     let mut keys = Keys::default();
     let mut out = Vec::new();
     for l in loops {
-        let smallest = l.iter().map(|(e, _)| e).min().expect("loops aren't empty");
-        let lk = entity_key(part, sketch, smallest);
-        keys.loops.insert(lk, smallest.clone());
+        let anchor = anchor(solved, l);
+        let lk = entity_key(part, sketch, &anchor);
+        keys.loops.insert(lk, anchor);
         let mut segments = Vec::new();
         for (e, reversed) in l {
             let k = entity_key(part, sketch, e);
@@ -326,7 +357,7 @@ mod tests {
         assert_eq!(v.lumps().len(), 1);
         assert_eq!(v.lumps()[0].outer.segments.len(), 4);
         assert_eq!(keys.segments.len(), 4);
-        assert_eq!(keys.loops.values().collect::<Vec<_>>(), [&id("l1")]);
+        assert_eq!(keys.loops.values().collect::<Vec<_>>(), [&id("p1")]);
         // Chosen by any of its entities; the construction diagonal isn't on one.
         assert!(profile(&p, &id("s"), &s, &[id("l3")]).is_ok());
         let e = profile(&p, &id("s"), &s, &[id("l5")]).unwrap_err();
@@ -334,6 +365,14 @@ mod tests {
             (e.code, &e.details["entities"]),
             (Code::ProfileInvalid, &json!(["l5"]))
         );
+    }
+
+    #[test]
+    fn anchors_sort_naturally() {
+        let mut ids: Vec<Id> = ["p10", "p2", "a1", "p02", "corner", "p1"].map(id).into();
+        ids.sort_by(|a, b| natural(a).cmp(&natural(b)));
+        let ids: Vec<&str> = ids.iter().map(Id::as_str).collect();
+        assert_eq!(ids, ["a1", "corner", "p1", "p02", "p2", "p10"]);
     }
 
     #[test]
@@ -360,6 +399,10 @@ mod tests {
         assert_eq!(v.lumps().len(), 1);
         assert_eq!(v.lumps()[0].holes.len(), 1);
         assert_eq!(keys.segments.len(), 5);
+        // The slot is anchored on its first point, the hole on itself.
+        let anchors: Vec<&Id> = keys.loops.values().collect();
+        assert_eq!(anchors.len(), 2);
+        assert!(anchors.contains(&&id("p1")) && anchors.contains(&&id("h")));
         let arc = v.lumps()[0]
             .outer
             .segments

@@ -1,0 +1,46 @@
+{
+  "constraints": {
+    "d1": {
+      "a": "l1",
+      "b": "l2",
+      "type": "angle",
+      "value": "90 deg"
+    }
+  },
+  "entities": {
+    "a1": {
+      "center": "p1",
+      "end": "__?_^_______________1",
+      "start": "p3",
+      "type": "line"
+    },
+    "l2": {
+      "end": "p2",
+      "start": "p1",
+      "type": "line"
+    },
+    "p1": {
+          "type": "point"
+    }
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "placement": {
+    "origin": [
+      "0 mm",
+      "2 mm",
+      "3 mm"
+    ],
+    "x": [
+      5,
+      0,
+      0
+    ],
+    "z": [
+      0,
+      1,
+      1
+    ]
+  },
+  "type": "sketch"
+}
