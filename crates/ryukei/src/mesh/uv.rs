@@ -395,7 +395,8 @@ fn gap(extents: &[[f64; 2]], period: f64) -> Option<f64> {
 }
 
 /// Which boundary rows of a surface collapse to a point, `[direction][end]`.
-/// An extrusion has none; a revolution's are its `v` ends on the axis.
+/// An extrusion or a pipe has none; a revolution's are its `v` ends on
+/// the axis.
 fn collapsed_rows(s: &Surface) -> [[bool; 2]; 2] {
     match s {
         Surface::Sphere(_) => [[false; 2], [true, true]],

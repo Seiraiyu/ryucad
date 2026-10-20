@@ -431,18 +431,35 @@ impl Pipe {
     /// Bounds over a parameter box, from the jets' enclosures: `Suu`,
     /// `Suv` and `Svv` are the point's second derivatives, and the unit
     /// normal turns as fast as its own derivatives (`1` along `θ`). A
-    /// clamped spine's range is cut to its domain first. Where the frame
-    /// can't be certified over the whole range at once (enclosures of a
-    /// long stretch of spine are loose), it is halved, up to 8 times.
+    /// clamped spine's range is cut to its domain first.
+    ///
+    /// Interval jets over a long stretch of spine or a wide angle are
+    /// loose (by orders of magnitude over a tenth of an ellipse), so a
+    /// wide box is cut into pieces at most a 64th of the spine's domain
+    /// long and `π/8` wide, and a piece whose bounds are more than twice
+    /// the derivatives at its middle plus half their scale (or whose frame
+    /// can't be certified at once) is halved along `s`, up to 10 times.
+    /// The worst piece's bounds hold for the whole box.
     pub(super) fn derivative_bound(&self, [rs, rt]: [[f64; 2]; 2]) -> SurfaceBound {
+        let [d0, d1] = self.spine.domain();
         let rs = match self.spine.period() {
             Some(_) => rs,
-            None => {
-                let [d0, d1] = self.spine.domain();
-                [rs[0].clamp(d0, d1), rs[1].clamp(d0, d1)]
-            }
+            None => [rs[0].clamp(d0, d1), rs[1].clamp(d0, d1)],
         };
-        self.bound_over(rs, rt, 8)
+        let pieces = |[a, b]: [f64; 2], step: f64, most: f64| {
+            let n = ((b - a) / step).ceil().clamp(1.0, most) as usize;
+            (0..n).map(move |i| {
+                let at = |k: usize| a + (b - a) * k as f64 / n as f64;
+                [at(i), if i + 1 == n { b } else { at(i + 1) }]
+            })
+        };
+        let mut out = ZERO_BOUND;
+        for s in pieces(rs, (d1 - d0) / 64.0, 64.0) {
+            for t in pieces(rt, PI / 8.0, 16.0) {
+                out = worse(out, self.bound_over(s, t, 10));
+            }
+        }
+        out
     }
 
     fn bound_over(&self, rs: [f64; 2], rt: [f64; 2], depth: u32) -> SurfaceBound {
@@ -452,36 +469,71 @@ impl Pipe {
                 .fold(Interval::point(0.0), |acc, j| acc + f(j).square());
             sum.sqrt().map_or(f64::INFINITY, Interval::hi)
         };
-        match self.jet_box([rs, rt]) {
-            Some([p, n]) => SurfaceBound {
-                duu: len(&|j| j.h[0], &p),
-                duv: len(&|j| j.h[1], &p),
-                dvv: len(&|j| j.h[2], &p),
-                turn_u: len(&|j| j.d[0], &n),
-                turn_v: len(&|j| j.d[1], &n),
-            },
-            None if depth > 0 && rs[0] < rs[1] => {
+        let bound = self.jet_box([rs, rt]).map(|[p, n]| SurfaceBound {
+            duu: len(&|j| j.h[0], &p),
+            duv: len(&|j| j.h[1], &p),
+            dvv: len(&|j| j.h[2], &p),
+            turn_u: len(&|j| j.d[0], &n),
+            turn_v: len(&|j| j.d[1], &n),
+        });
+        let loose = |b: &SurfaceBound| {
+            let (ms, mt) = ((rs[0] + rs[1]) / 2.0, (rt[0] + rt[1]) / 2.0);
+            let [p, n] = self.jets_at(ms, mt);
+            let at = |f: &dyn Fn(&Jet<f64>) -> f64, v: &JVec<f64>| {
+                math::sqrt(v.iter().map(|j| f(j) * f(j)).sum::<f64>())
+            };
+            let (duu, duv, dvv) = (
+                at(&|j| j.h[0], &p),
+                at(&|j| j.h[1], &p),
+                at(&|j| j.h[2], &p),
+            );
+            let (turn, speed) = (at(&|j| j.d[0], &n), at(&|j| j.d[0], &p));
+            // Each compared with twice its value at the middle, and half
+            // the scale of its kind, so a value near zero there doesn't
+            // demand an exact zero.
+            let second = 0.5 * (duu + duv + dvv);
+            b.duu > 2.0 * duu + second
+                || b.duv > 2.0 * duv + second
+                || b.turn_u > 2.0 * turn + 0.5 * (turn + speed / self.radius)
+        };
+        match bound {
+            Some(b) if depth == 0 || rs[0] >= rs[1] || !loose(&b) => b,
+            None if depth == 0 || rs[0] >= rs[1] => INFINITE_BOUND,
+            _ => {
                 let m = (rs[0] + rs[1]) / 2.0;
-                let (a, b) = (
+                worse(
                     self.bound_over([rs[0], m], rt, depth - 1),
                     self.bound_over([m, rs[1]], rt, depth - 1),
-                );
-                SurfaceBound {
-                    duu: a.duu.max(b.duu),
-                    duv: a.duv.max(b.duv),
-                    dvv: a.dvv.max(b.dvv),
-                    turn_u: a.turn_u.max(b.turn_u),
-                    turn_v: a.turn_v.max(b.turn_v),
-                }
+                )
             }
-            None => SurfaceBound {
-                duu: f64::INFINITY,
-                duv: f64::INFINITY,
-                dvv: f64::INFINITY,
-                turn_u: f64::INFINITY,
-                turn_v: f64::INFINITY,
-            },
         }
+    }
+}
+
+const ZERO_BOUND: SurfaceBound = SurfaceBound {
+    duu: 0.0,
+    duv: 0.0,
+    dvv: 0.0,
+    turn_u: 0.0,
+    turn_v: 0.0,
+};
+
+const INFINITE_BOUND: SurfaceBound = SurfaceBound {
+    duu: f64::INFINITY,
+    duv: f64::INFINITY,
+    dvv: f64::INFINITY,
+    turn_u: f64::INFINITY,
+    turn_v: f64::INFINITY,
+};
+
+/// The larger of two bounds, each way.
+fn worse(a: SurfaceBound, b: SurfaceBound) -> SurfaceBound {
+    SurfaceBound {
+        duu: a.duu.max(b.duu),
+        duv: a.duv.max(b.duv),
+        dvv: a.dvv.max(b.dvv),
+        turn_u: a.turn_u.max(b.turn_u),
+        turn_v: a.turn_v.max(b.turn_v),
     }
 }
 
