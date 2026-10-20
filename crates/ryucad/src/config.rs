@@ -79,6 +79,13 @@ const KEYS: &[Key] = &[
         about: "the app's colours",
     },
     Key {
+        name: "ui.style",
+        scope: Scope::User,
+        rule: Rule::OneOf(&["drafting", "graphite", "studio"]),
+        default: || json!("drafting"),
+        about: "the app's look: palette, corners and spacing",
+    },
+    Key {
         name: "ui.navigation",
         scope: Scope::User,
         rule: Rule::OneOf(&["ryucad", "solidworks", "onshape"]),

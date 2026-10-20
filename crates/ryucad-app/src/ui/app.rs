@@ -7,6 +7,7 @@ use crate::core::link::Wake;
 use crate::core::nav::Navigation;
 use crate::core::workspace::Workspace;
 use crate::ui::start::{self, Start};
+use crate::ui::style::{self, Look};
 use crate::ui::view::View;
 use crate::ui::{dialogs, doctor, menu, panels};
 use eframe::egui;
@@ -51,6 +52,15 @@ pub fn open_workspace(root: &Path, daemon: &Daemon, wake: Wake) -> Result<Worksp
     Workspace::open(root, daemon, &name, wake)
 }
 
+/// The `ui.style` preference as the preferences file has it.
+fn user_look() -> Look {
+    Look::parse(
+        ryucad::config::user("ui.style")
+            .as_str()
+            .unwrap_or_default(),
+    )
+}
+
 /// An open project's window.
 pub struct Opened {
     pub ws: Workspace,
@@ -91,6 +101,9 @@ impl App {
     /// The app on the project in or above `dir`, or the start window with
     /// none. It repaints whenever anything arrives.
     pub fn open(ctx: &egui::Context, dir: Option<&Path>, daemon: &Daemon) -> App {
+        // The start window wears the user's style too; an open project
+        // follows the preference as the daemon announces it.
+        style::apply(ctx, user_look());
         let ctx = ctx.clone();
         let wake: Wake = Arc::new(move || ctx.request_repaint());
         let mut app = App {
@@ -229,6 +242,7 @@ impl Opened {
             doctor: doctor::State::default(),
             recent: crate::core::recent::load(),
         };
+        o.view.look = user_look();
         // Damage that doesn't stop the project opening shows as badges.
         o.ws.diagnose();
         o
@@ -320,6 +334,17 @@ impl Opened {
         };
         if ctx.options(|o| o.theme_preference) != theme {
             ctx.set_theme(theme);
+        }
+        let look = self
+            .ws
+            .settings
+            .get("ui.style")
+            .and_then(serde_json::Value::as_str);
+        if let Some(look) = look.map(Look::parse)
+            && self.view.look != look
+        {
+            style::apply(ctx, look);
+            self.view.look = look;
         }
         self.view.nav.style = Navigation::parse(self.ws.settings.text("ui.navigation", "ryucad"));
         self.view.edges = self

@@ -158,7 +158,7 @@ pub struct DrawList<'a> {
     pub perspective: [f32; 2],
     /// Faces painted over, last on top.
     pub faces: &'a [PaintedFace],
-    /// The background, sRGB: see [`crate::ui::style::viewport_background`].
+    /// The background, sRGB: see [`crate::ui::style::Look::viewport_background`].
     pub background: [f32; 3],
 }
 

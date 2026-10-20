@@ -19,6 +19,8 @@ pub struct View {
     pub nav: Nav,
     /// Draw B-rep edges (`display.edges`).
     pub edges: bool,
+    /// The window's look (`ui.style`), for the background.
+    pub look: crate::ui::style::Look,
     /// The feature chosen in the tree: its body is painted.
     pub chosen: Option<BodyKey>,
     pub hover: Option<Hit>,
@@ -96,6 +98,7 @@ impl View {
         View {
             nav: Nav::new(camera),
             edges: true,
+            look: crate::ui::style::Look::default(),
             chosen: None,
             hover: None,
             rect: egui::Rect::NOTHING,
@@ -551,7 +554,7 @@ impl View {
             light: scene::light(&pr.camera),
             edges: self.edges,
             faces,
-            background: crate::ui::style::viewport_background(ui.visuals().dark_mode),
+            background: self.look.viewport_background(ui.visuals().dark_mode),
         };
         let view = scene.render(&rs.device, &rs.queue, px, &list);
         let mut renderer = rs.renderer.write();
