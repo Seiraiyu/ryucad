@@ -5,7 +5,15 @@
 //! ([`face_face`]), in parallel. Faces may meet only along an edge they
 //! both use or at a vertex they both have: a stretch where they meet must
 //! lie on one shared edge, and a touching point on one shared vertex or
-//! edge. Anything else is [`Fault::FacesCross`]; faces on one surface
+//! edge; by the touch rule, a stretch within 100 tolerances of a shared
+//! vertex or of a shared edge along all its length is benign too (two
+//! fits of one intersection curve may lie that far apart where the faces
+//! meet at a shallow angle). Out of a vertex the faces share, a stretch
+//! inside at most one of them (an edge of one lying on the other) is
+//! benign for as long as surfaces meeting tangentially stay within that
+//! reach, `sqrt(2 × size × reach)`: the tip of a tangent wedge. Anything
+//! else is
+//! [`Fault::FacesCross`]; faces on one surface
 //! whose regions overlap in an area are [`Fault::FacesOverlap`]; a pair
 //! that can't be intersected is [`Fault::CannotCheck`].
 
@@ -31,7 +39,7 @@ pub fn check_intersections(body: &Body) -> Vec<Fault> {
             let (a, b) = (faces[i], faces[j]);
             match face_face((body, a), (body, b)) {
                 Err(_) => Some(Fault::CannotCheck { a, b }),
-                Ok(meet) => fault(a, b, &meet),
+                Ok(meet) => fault(a, b, &prune(body, a, b, meet)),
             }
         })
         .collect()
@@ -50,6 +58,117 @@ fn slack(body: &Body, f: FaceId) -> f64 {
         }
     }
     t
+}
+
+/// A stretch no longer than this many tolerances, all within as many of
+/// a vertex both faces have, touches at the vertex: the touch rule of
+/// [`crate::intersect::curve_surface`].
+const TOUCH: f64 = 100.0;
+
+/// Drops the stretches and contacts that, by the touch rule, are only the
+/// faces touching at a vertex they share.
+fn prune(body: &Body, a: FaceId, b: FaceId, meet: FaceMeet) -> FaceMeet {
+    let FaceMeet::Meet {
+        stretches,
+        contacts,
+    } = meet
+    else {
+        return meet;
+    };
+    let vertices = |f: FaceId| -> Vec<crate::topo::VertexId> {
+        let mut out = Vec::new();
+        for l in body.face_loops(f) {
+            if let Some(v) = body.loop_(l).and_then(|l| l.vertex) {
+                out.push(v);
+            }
+            for fin in body.loop_fins(l) {
+                out.extend(body.fin_start(fin));
+            }
+        }
+        out
+    };
+    let (va, vb) = (vertices(a), vertices(b));
+    let shared: Vec<crate::geom::Point3> = va
+        .iter()
+        .filter(|v| vb.contains(v))
+        .map(|&v| body.vertices[v].point)
+        .collect();
+    let at_shared = |pts: &[crate::geom::Point3], reach: f64| {
+        shared
+            .iter()
+            .any(|q| pts.iter().all(|p| p.distance(*q) <= reach))
+    };
+    // Edges both faces use: a stretch fitted to the same curve as one of
+    // them may lie farther from it than both tolerances where the faces
+    // meet at a shallow angle, but within the touch rule's reach.
+    let edges = |f: FaceId| -> Vec<crate::topo::EdgeId> {
+        body.face_loops(f)
+            .flat_map(|l| {
+                body.loop_fins(l)
+                    .map(|fin| body.fins[fin].edge)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    let (ea, eb) = (edges(a), edges(b));
+    let shared_edges: Vec<crate::topo::EdgeId> =
+        ea.iter().copied().filter(|e| eb.contains(e)).collect();
+    let along_shared = |pts: &[crate::geom::Point3], reach: f64| {
+        shared_edges.iter().any(|&e| {
+            let x = &body.edges[e];
+            let c = &body.curves[x.curve];
+            pts.iter().all(|&p| {
+                let foot = c.project(p);
+                let t = foot.param;
+                let inside = match c.period() {
+                    Some(per) => {
+                        let t = x.interval[0] + (t - x.interval[0]).rem_euclid(per);
+                        t <= x.interval[1]
+                    }
+                    None => t >= x.interval[0] && t <= x.interval[1],
+                };
+                (inside && foot.distance <= reach)
+                    || c.point(x.interval[0]).distance(p) <= reach
+                    || c.point(x.interval[1]).distance(p) <= reach
+            })
+        })
+    };
+    let tol = slack(body, a).max(slack(body, b));
+    let size = {
+        let bx = face_box(body, a).union(&face_box(body, b));
+        (bx.max() - bx.min()).length()
+    };
+    let stretches = stretches
+        .into_iter()
+        .filter(|s| {
+            let reach = TOUCH * s.tolerance.max(tol);
+            let pts: Vec<_> = (0..=8)
+                .map(|k| {
+                    s.curve
+                        .point(s.range[0] + (s.range[1] - s.range[0]) * f64::from(k) / 8.0)
+                })
+                .collect();
+            // Out of a tangent wedge's tip at a vertex the faces share: an
+            // edge of one lying on the other (or both edges running
+            // together) within the reach, for no longer than surfaces
+            // meeting tangentially stay that close.
+            let length: f64 = pts.windows(2).map(|w| w[0].distance(w[1])).sum();
+            let from_shared = !s.places.iter().all(|p| *p == Place::Inside)
+                && length <= (2.0 * size * reach).sqrt()
+                && shared
+                    .iter()
+                    .any(|q| pts[0].distance(*q) <= reach || pts[8].distance(*q) <= reach);
+            !at_shared(&pts, reach) && !along_shared(&pts, reach) && !from_shared
+        })
+        .collect();
+    let contacts = contacts
+        .into_iter()
+        .filter(|c| !at_shared(&[c.point], TOUCH * tol))
+        .collect();
+    FaceMeet::Meet {
+        stretches,
+        contacts,
+    }
 }
 
 /// The fault two faces' meeting makes, if any.

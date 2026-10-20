@@ -14,6 +14,7 @@
 //! again: SMLib's NURBS meshes come out the same as the analytic ones.
 
 use crate::{BenchProfile, Primitive, Soup};
+use ryukei::boolean::BooleanOp;
 use ryukei::geom::Rigid;
 
 #[cxx::bridge(namespace = "ryukei_smlib")]
@@ -72,6 +73,7 @@ mod ffi {
             at: &[f64],
         ) -> Result<()>;
         fn subtract_tools(body: Pin<&mut Body>, parallel: bool) -> Result<()>;
+        fn combine_tools(body: Pin<&mut Body>, op: u32, parallel: bool) -> Result<()>;
         fn vertices(body: &Body) -> Vec<f64>;
         fn faces(body: &Body) -> u32;
         fn mesh(b: &Body, chord: f64, angle: f64, parallel: bool) -> Result<SmlibMesh>;
@@ -152,6 +154,18 @@ impl Solid {
     /// On one thread unless `parallel`.
     pub fn subtract_tools(&mut self, parallel: bool) {
         ffi::subtract_tools(self.0.pin_mut(), parallel).expect("SMLib subtracts");
+    }
+
+    /// This solid united with, intersected with or minus every tool
+    /// added, in one `SmMerge` boolean. On one thread unless `parallel`.
+    /// SMLib's failure as text.
+    pub fn combine_tools(&mut self, op: BooleanOp, parallel: bool) -> Result<(), String> {
+        let code = match op {
+            BooleanOp::Unite => 0,
+            BooleanOp::Intersect => 1,
+            BooleanOp::Subtract => 2,
+        };
+        ffi::combine_tools(self.0.pin_mut(), code, parallel).map_err(|e| e.to_string())
     }
 
     /// The B-rep's vertex positions (x, y, z flattened), in SMLib's order.

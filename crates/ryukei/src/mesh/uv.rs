@@ -63,7 +63,17 @@ impl<'a> FaceGeom<'a> {
         let (pu, pv) = surface.periods();
         let domain = surface.domain();
         let forward = face.sense == Sense::Forward;
-        let (periods, wrap) = open_unwound(b, f, surface, [pu, pv], forward);
+        let Opened {
+            periods,
+            wrap,
+            seams,
+        } = open_unwound(b, f, surface, [pu, pv], forward);
+        let mut domain = domain;
+        for k in 0..2 {
+            if let (Some(s), Some(p)) = (seams[k], periods[k]) {
+                domain[k] = [s, s + p];
+            }
+        }
         let collapsed = collapsed_rows(surface);
         // The parameter box of the face's vertices (or of its domain when
         // it has none), within the domain's finite part.
@@ -184,25 +194,46 @@ impl<'a> FaceGeom<'a> {
 /// above (on the left of a loop winding round, by the face's sense), or
 /// below the face's single loop. The windings and extents are read from
 /// the face's edges, sampled, inverted and unwrapped. A face whose loops
-/// wind both ways keeps both periods (and is refused, as before).
+/// wind both ways keeps both periods (and is refused, as before), and so
+/// does one whose loops are all holes (a torus dented by a boolean),
+/// which covers the surface both ways round like a face with no loops.
 ///
-/// Returns the periods to mesh with, and for an opened direction the start
-/// of its period.
+/// How a face's periodic directions are meshed.
+struct Opened {
+    /// The periods to mesh with.
+    periods: [Option<f64>; 2],
+    /// For an opened direction, the start of its period.
+    wrap: [Option<f64>; 2],
+    /// Where to put the seams of a direction kept periodic, if not at the
+    /// surface's own: between the loops, so none crosses one.
+    seams: [Option<f64>; 2],
+}
+
+/// Returns the periods to mesh with, for an opened direction the start
+/// of its period, and for a face kept periodic both ways where to put
+/// its seams.
 fn open_unwound(
     b: &Body,
     f: FaceId,
     surface: &Surface,
     periods: [Option<f64>; 2],
     forward: bool,
-) -> ([Option<f64>; 2], [Option<f64>; 2]) {
+) -> Opened {
     const SAMPLES: usize = 16;
-    let none = (periods, [None; 2]);
+    let none = Opened {
+        periods,
+        wrap: [None; 2],
+        seams: [None; 2],
+    };
     let [Some(pu), Some(pv)] = periods else {
         return none;
     };
     let period = [pu, pv];
-    // Each loop: its winding both ways, and its unwrapped extent.
+    // Each loop: its winding both ways, its unwrapped extent, and whether
+    // it is a hole (it runs clockwise about what it encloses, seen from
+    // the face's side, so the face is outside it).
     let mut loops: Vec<([i64; 2], [[f64; 2]; 2])> = Vec::new();
+    let mut holes = 0;
     for l in b.face_loops(f) {
         let mut x: Vec<[f64; 2]> = Vec::new();
         for fin in b.loop_fins(l) {
@@ -239,7 +270,30 @@ fn open_unwound(
             let hi = x.iter().map(|p| p[k]).fold(f64::NEG_INFINITY, f64::max);
             [lo, hi]
         });
+        if wind == [0, 0] {
+            let n = x.len();
+            let area: f64 = (0..n)
+                .map(|i| x[i][0] * x[(i + 1) % n][1] - x[(i + 1) % n][0] * x[i][1])
+                .sum();
+            if (area < 0.0) == forward {
+                holes += 1;
+            }
+        }
         loops.push((wind, extent));
+    }
+    // A face whose loops are all holes covers the surface both ways
+    // round, like a face with no loops: both directions stay periodic,
+    // with the seams in gaps between the holes.
+    if holes == loops.len() {
+        let seams: [Option<f64>; 2] = core::array::from_fn(|k| {
+            let extents: Vec<[f64; 2]> = loops.iter().map(|(_, e)| e[k]).collect();
+            gap(&extents, period[k])
+        });
+        return Opened {
+            periods,
+            wrap: [None; 2],
+            seams,
+        };
     }
     if loops.is_empty() {
         return none;
@@ -264,11 +318,80 @@ fn open_unwound(
             widest.1[k][0]
         }
     };
+    // The period starts a little way below the loop's lowest sample: its
+    // true lowest point may lie between samples. A quarter of the gap the
+    // loops leave, or 5% of the period, is clear of the face.
+    // Each loop's extent moved by whole periods to start at or above `lo`.
+    let span = loops
+        .iter()
+        .map(|(_, e)| {
+            let [a, b] = e[k];
+            b + ((lo - a) / period[k]).ceil() * period[k]
+        })
+        .fold(f64::NEG_INFINITY, f64::max)
+        - lo;
+    // A band that spirals round the surface (at each height less than a
+    // turn wide, but more than a turn in all) fits no window of one
+    // period, and one within a tenth of a turn of that leaves too little
+    // margin for its loops' sampled extent: both directions stay
+    // periodic, with the seam across it in a gap between its loops,
+    // which then cross only the other seam.
+    if span >= 0.9 * period[k] {
+        let extents: Vec<[f64; 2]> = loops.iter().map(|(_, e)| e[k]).collect();
+        if let Some(seam) = gap(&extents, period[k]) {
+            let mut seams = [None; 2];
+            seams[k] = Some(seam);
+            return Opened {
+                periods,
+                wrap: [None; 2],
+                seams,
+            };
+        }
+    }
+    let margin = (0.25 * (period[k] - span))
+        .min(0.05 * period[k])
+        .max(1e-9 * period[k]);
     let mut open = periods;
     open[k] = None;
     let mut wrap = [None; 2];
-    wrap[k] = Some(lo - 1e-9 * period[k]);
-    (open, wrap)
+    wrap[k] = Some(lo - margin);
+    Opened {
+        periods: open,
+        wrap,
+        seams: [None; 2],
+    }
+}
+
+/// The middle of the widest stretch of a period that none of `extents`
+/// (unwrapped, each shorter than a period) covers, if any.
+fn gap(extents: &[[f64; 2]], period: f64) -> Option<f64> {
+    // Each extent a period either side too, so one that runs past the end
+    // of the period covers the start of it.
+    let mut spans: Vec<[f64; 2]> = extents
+        .iter()
+        .flat_map(|&[lo, hi]| {
+            let a = lo.rem_euclid(period);
+            [-period, 0.0, period].map(|k| [a + k, a + k + (hi - lo)])
+        })
+        .collect();
+    spans.sort_by(|x, y| x[0].total_cmp(&y[0]));
+    let mut merged: Vec<[f64; 2]> = Vec::new();
+    for s in spans {
+        match merged.last_mut() {
+            Some(m) if s[0] <= m[1] => m[1] = m[1].max(s[1]),
+            _ => merged.push(s),
+        }
+    }
+    // The gaps between merged spans whose middles lie in one period.
+    let mut best: Option<(f64, f64)> = None;
+    for w in merged.windows(2) {
+        let (end, next) = (w[0][1], w[1][0]);
+        let (width, mid) = (next - end, (end + next) / 2.0);
+        if (0.0..period).contains(&mid) && best.is_none_or(|(b, _)| width > b) {
+            best = Some((width, mid));
+        }
+    }
+    best.filter(|&(w, _)| w > 1e-6 * period).map(|(_, m)| m)
 }
 
 /// Which boundary rows of a surface collapse to a point, `[direction][end]`.

@@ -47,6 +47,10 @@ name = "sweep"
 harness = false
 
 [[bench]]
+name = "boolean"
+harness = false
+
+[[bench]]
 name = "occt"
 harness = false
 required-features = ["occt"]
@@ -56,6 +60,11 @@ name = "smlib"
 harness = false
 required-features = ["smlib"]
 
+[[bench]]
+name = "boolean_kernels"
+harness = false
+required-features = ["occt", "smlib"]
+
 # Three-way: SMLib's deviation and the exact values come from OCCT.
 [[test]]
 name = "kernels"
@@ -64,4 +73,9 @@ required-features = ["occt", "smlib"]
 # The SMLib spike (design 27, stage 0): booleans, speed and repeatability.
 [[test]]
 name = "spike"
+required-features = ["occt", "smlib"]
+
+# Booleans head to head (design 32, phase 6), and the 1000-hole race.
+[[test]]
+name = "booleans"
 required-features = ["occt", "smlib"]

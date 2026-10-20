@@ -30,6 +30,38 @@ pub fn mev(
     curve: CurveId,
     interval: [f64; 2],
 ) -> Result<(Mev, Journal), Error> {
+    make_edge_vertex(body, key, at, point, curve, interval, false)
+}
+
+/// Make edge, vertex, the edge reversed: like [`mev`], but the new edge
+/// runs from the new vertex at `point` to the corner's vertex, along
+/// `curve` over `interval`. A builder whose edges' directions are already
+/// fixed by their curves can then grow a tree from either end of an
+/// edge. `fins[0]` still runs out to the new vertex (against the edge)
+/// and `fins[1]` back; [`kev`] undoes it.
+///
+/// Names: as for [`mev`].
+pub fn mev_reversed(
+    body: &mut Body,
+    key: OpKey,
+    at: Corner,
+    point: Point3,
+    curve: CurveId,
+    interval: [f64; 2],
+) -> Result<(Mev, Journal), Error> {
+    make_edge_vertex(body, key, at, point, curve, interval, true)
+}
+
+/// MEV, with the edge running from the new vertex when `reversed`.
+fn make_edge_vertex(
+    body: &mut Body,
+    key: OpKey,
+    at: Corner,
+    point: Point3,
+    curve: CurveId,
+    interval: [f64; 2],
+    reversed: bool,
+) -> Result<(Mev, Journal), Error> {
     let (lp, v) = body.corner(at)?;
     live(&body.curves, curve)?;
     let point = check_point(point)?;
@@ -47,10 +79,15 @@ pub fn mev(
         lone: None,
         name: vertex_name,
     });
+    let (start, end, out_sense) = if reversed {
+        (vertex, v, Sense::Reversed)
+    } else {
+        (v, vertex, Sense::Forward)
+    };
     body.edges.push(Edge {
         fin: out,
-        start: v,
-        end: vertex,
+        start,
+        end,
         curve,
         interval,
         tolerance: Tolerance::RESOLUTION,
@@ -65,7 +102,7 @@ pub fn mev(
     body.fins.push(Fin {
         loop_: lp,
         edge,
-        sense: Sense::Forward,
+        sense: out_sense,
         next: back,
         prev,
         around: back,
@@ -74,7 +111,7 @@ pub fn mev(
     body.fins.push(Fin {
         loop_: lp,
         edge,
-        sense: Sense::Reversed,
+        sense: out_sense.flipped(),
         next,
         prev: out,
         around: out,
@@ -247,7 +284,7 @@ pub fn semv(
     let mut journal = Journal::new();
     journal.push(Event::Split {
         parent,
-        children: [part0, part1],
+        children: vec![part0, part1],
     });
     journal.push(Event::Created(vertex_name));
     finish(body);
@@ -380,6 +417,36 @@ mod tests {
     }
 
     #[test]
+    fn mev_reversed_runs_the_edge_into_the_corner() {
+        let (mut b, m, a, _) = path();
+        let before = shape(&b);
+        // From (1, 0), an edge whose curve runs from (2, 0) back to it.
+        let (c, i) = line(&mut b, p(2.0, 0.0), p(1.0, 0.0));
+        let at = Corner::Before(a.fins[1]);
+        let (r, j) = mev_reversed(&mut b, OpKey(7), at, p(2.0, 0.0), c, i).unwrap();
+        assert_eq!(j.events().len(), 2);
+        let e = b.edge(r.edge).unwrap();
+        assert_eq!((e.start, e.end), (r.vertex, a.vertex));
+        assert_eq!(b.fin(r.fins[0]).unwrap().sense, Sense::Reversed);
+        assert_eq!(b.fin_start(r.fins[0]), Some(a.vertex));
+        assert_eq!(b.fin_end(r.fins[0]), Some(r.vertex));
+        assert_eq!(b.loop_fins(m.loop_).count(), 6);
+        assert_eq!(crate::check::check_topology(&b), []);
+        kev(&mut b, r.edge, r.vertex).unwrap();
+        assert_eq!(shape(&b), before);
+        // From a lone vertex too.
+        let (mut b, s) = plane_body();
+        let (m, _) = mvfs(&mut b, K, p(0.0, 0.0), s).unwrap();
+        let (c, i) = line(&mut b, p(1.0, 0.0), p(0.0, 0.0));
+        let (r, _) =
+            mev_reversed(&mut b, OpKey(1), Corner::Lone(m.loop_), p(1.0, 0.0), c, i).unwrap();
+        assert_eq!(b.edge(r.edge).unwrap().start, r.vertex);
+        assert_eq!(b.vertex(m.vertex).unwrap().edge, Some(r.edge));
+        kev(&mut b, r.edge, r.vertex).unwrap();
+        assert_eq!(b.counts(), counts(1, 0, 1, 1));
+    }
+
+    #[test]
     fn mev_before_a_fin_splices_into_the_loop() {
         let (b, m, a, z) = path();
         assert_eq!(b.counts(), counts(3, 2, 1, 1));
@@ -481,7 +548,7 @@ mod tests {
             j.events()[0],
             Event::Split {
                 parent,
-                children: [part(0), part(1)]
+                children: vec![part(0), part(1)]
             }
         );
         let e = b.edge(sq.edge).unwrap();

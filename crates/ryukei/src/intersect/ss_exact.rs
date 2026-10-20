@@ -602,6 +602,10 @@ struct Conic {
 /// Samples along an open section when cutting it to the region.
 const RUN_SAMPLES: usize = 1024;
 
+/// The most pieces an open section's NURBS may be halved into before it
+/// is given up.
+const MAX_HALVINGS: usize = 256;
+
 impl Conic {
     /// `d` at a point `(cx, cy)` of the plane of the unit circle (affine,
     /// so it holds off the circle too).
@@ -636,8 +640,14 @@ impl Conic {
             while k < RUN_SAMPLES && inside[k] {
                 k += 1;
             }
+            // Widened by a step, but never past the range's ends: there
+            // the section runs off to infinity and beyond them it is on
+            // the other nappe.
             let (a, b) = (at(first), at(k - 1));
-            runs.push([self.widen(a, -step), self.widen(b, step)]);
+            runs.push([
+                self.widen(a, (u0 - a).max(-step)),
+                self.widen(b, (u1 - b).min(step)),
+            ]);
         }
         runs
     }
@@ -668,7 +678,9 @@ impl Conic {
             .collect();
         breaks[count] = u1;
         let sign = self.h.signum();
-        for _ in 0..24 {
+        // Near an asymptote the pieces must shrink with their distance from
+        // it, so a section close to the apex takes many halvings.
+        for _ in 0..MAX_HALVINGS {
             let mut points = Vec::new();
             let mut weights = Vec::new();
             let mut bad = None;
@@ -875,6 +887,23 @@ mod tests {
             section((0.0, 0.0, apex_v), (0.0, 1.0, 0.1)),
             [("line", false), ("line", false)]
         );
+    }
+
+    #[test]
+    fn a_plane_just_off_the_apex_cuts_a_whole_hyperbola() {
+        // Steeper than the side and 4 mm from the apex: the branch runs
+        // out to its asymptotes, nearly two rulings, and still comes back
+        // whole (property-test case: it was once dropped).
+        let k = cone((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0, 0.8);
+        let apex_v = -1.0 / math::tan(0.8);
+        let (b, _) = meet(&plane((0.0, 0.0, apex_v - 0.004), (0.0, 1.0, 0.3)), &k);
+        assert_eq!(kinds(&b), [("nurbs", false)]);
+        let br = &b[0];
+        // It runs up both rulings it nearly is, out to the region's edge.
+        let apex = Point3::new(0.0, 0.0, apex_v);
+        let far = [br.range[0], br.range[1]].map(|t| br.curve.point(t));
+        assert!(far.iter().all(|p| p.distance(apex) > 2.0), "{far:?}");
+        assert!(far[0].x * far[1].x < 0.0, "{far:?}");
     }
 
     #[test]

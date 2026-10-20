@@ -7,6 +7,7 @@
 //! (`OCCT_DIR`, default `/usr`).
 
 use crate::{BenchProfile, Primitive, Soup};
+use ryukei::boolean::BooleanOp;
 use ryukei::geom::{Point3, Rigid};
 
 #[cxx::bridge(namespace = "ryukei_occt")]
@@ -49,6 +50,7 @@ mod ffi {
         fn make_compound() -> UniquePtr<Shape>;
         fn add_to_compound(compound: Pin<&mut Shape>, s: &Shape);
         fn cut(s: &Shape, tools: &Shape, parallel: bool) -> Result<UniquePtr<Shape>>;
+        fn boolean(s: &Shape, tools: &Shape, op: u32, parallel: bool) -> Result<UniquePtr<Shape>>;
         fn vertices(s: &Shape) -> Vec<f64>;
         fn faces(s: &Shape) -> u32;
         fn mesh(s: &Shape, chord: f64, angle: f64, parallel: bool) -> OcctMesh;
@@ -122,6 +124,25 @@ impl Solid {
             ffi::add_to_compound(compound.pin_mut(), &t.0);
         }
         Self(ffi::cut(&self.0, &compound, parallel).expect("OCCT cuts"))
+    }
+
+    /// This solid united with, intersected with or minus every one of
+    /// `tools`, in one `BRepAlgoAPI_BooleanOperation` with the tools as
+    /// its tool list. On one thread unless `parallel`. OCCT's failure as
+    /// text.
+    pub fn boolean(&self, op: BooleanOp, tools: &[Solid], parallel: bool) -> Result<Self, String> {
+        let mut compound = ffi::make_compound();
+        for t in tools {
+            ffi::add_to_compound(compound.pin_mut(), &t.0);
+        }
+        let code = match op {
+            BooleanOp::Unite => 0,
+            BooleanOp::Intersect => 1,
+            BooleanOp::Subtract => 2,
+        };
+        ffi::boolean(&self.0, &compound, code, parallel)
+            .map(Self)
+            .map_err(|e| e.to_string())
     }
 
     /// The B-rep's vertex positions (x, y, z flattened), in OCCT's order.

@@ -23,7 +23,7 @@ use super::Failure;
 use super::cs::{CurveHit, curve_surface};
 use super::fit::fit_pcurve;
 use super::implicit::Implicit;
-use super::inface::{Place, point_in_face};
+use super::inface::{Place, point_in_face, point_in_face_near};
 use super::ss::{SurfaceHit, surface_surface};
 use crate::geom::intersect2::{Meet2, crossings};
 use crate::geom::{
@@ -183,11 +183,30 @@ pub fn face_face(a: (&Body, FaceId), b: (&Body, FaceId)) -> Result<FaceMeet, Fai
             {
                 continue;
             }
+            // A stretch that wraps past the end of a closed branch's period
+            // leaves a fitted pcurve's domain: fit it again over the stretch,
+            // before its middle is placed through it.
+            let mut pcurves = br.pcurves.clone();
+            let mut tolerance = br.tolerance;
+            for (k, s) in [sa, sb].into_iter().enumerate() {
+                let (c2, map) = &pcurves[k];
+                let [d0, d1] = c2.domain();
+                let [p0, p1] = [s0, s1].map(|t| map[0] + map[1] * t);
+                let slack = 1e-12 * (d1 - d0).abs().max(1.0);
+                if p0.min(p1) < d0 - slack || p0.max(p1) > d1 + slack {
+                    let (n, bound) = fit_pcurve(s, &br.curve, [s0, s1])?;
+                    pcurves[k] = (Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0]);
+                    tolerance = tolerance.max(bound);
+                }
+            }
+            // The stretch is within its tolerance of the true curve, as is
+            // any edge fitted to it: such an edge is within both of it.
             let mut places = [Place::Outside; 2];
             for k in 0..2 {
-                let (c2, map) = &br.pcurves[k];
+                let (c2, map) = &pcurves[k];
                 let uv = c2.point(map[0] + map[1] * mid);
-                places[k] = point_in_face(faces[k].0, faces[k].1, uv)?;
+                places[k] =
+                    point_in_face_near(faces[k].0, faces[k].1, uv, tolerance + super::SLACK)?;
             }
             if places.contains(&Place::Outside) {
                 continue;
@@ -196,8 +215,8 @@ pub fn face_face(a: (&Body, FaceId), b: (&Body, FaceId)) -> Result<FaceMeet, Fai
                 curve: br.curve.clone(),
                 range: [s0, s1],
                 tangent: br.tangent,
-                tolerance: br.tolerance,
-                pcurves: br.pcurves.clone(),
+                tolerance,
+                pcurves,
                 places,
             });
         }
@@ -484,7 +503,7 @@ fn coincident(
 
 /// The shifts by whole periods that bring curve `b` near curve `a` in the
 /// parameter plane.
-fn shifts(
+pub(crate) fn shifts(
     a: &Curve2,
     ra: [f64; 2],
     b: &Curve2,
@@ -511,7 +530,7 @@ fn shifts(
 }
 
 /// A plane curve moved by `d`.
-fn shifted(c: &Curve2, d: Vector2) -> Option<Curve2> {
+pub(crate) fn shifted(c: &Curve2, d: Vector2) -> Option<Curve2> {
     if d == Vector2::ZERO {
         return Some(c.clone());
     }
@@ -701,6 +720,51 @@ mod tests {
                         );
                     }
                     assert!(contacts.iter().all(|c| !c.places.contains(&Place::Inside)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stretches_wrapping_round_a_closed_branch_have_pcurves_all_along() {
+        // Equal cylinders crossing at right angles meet in two ellipses
+        // that cross each other where the cylinders touch; the faces' own
+        // edges are far off, so each ellipse is one stretch, and one of
+        // them is cut where the other face's box clips it. Every stretch's
+        // pcurves must fit it over its whole range.
+        let (a, _) = primitive::cylinder(
+            OpKey(1),
+            1.0,
+            4.0,
+            &Rigid::translation(Vector3::new(0.0, 0.0, -2.0)),
+        )
+        .unwrap();
+        let across = Rigid::rotation(
+            Vector3::new(1.0, 0.0, 0.0).normalize().unwrap(),
+            core::f64::consts::FRAC_PI_2,
+        )
+        .then_after(&Rigid::translation(Vector3::new(0.0, 0.0, -4.0)));
+        let (b, _) = primitive::cylinder(OpKey(2), 1.0, 4.0, &across).unwrap();
+        let side = |body: &Body| {
+            faces_of(body)
+                .into_iter()
+                .find(|&f| matches!(body.surfaces[body.faces[f].surface], Surface::Cylinder(_)))
+                .unwrap()
+        };
+        let (fa, fb) = (side(&a), side(&b));
+        let FaceMeet::Meet { stretches, .. } = face_face((&a, fa), (&b, fb)).unwrap() else {
+            panic!()
+        };
+        assert!(!stretches.is_empty());
+        for st in &stretches {
+            for (k, (body, f)) in [(&a, fa), (&b, fb)].into_iter().enumerate() {
+                let s = &body.surfaces[body.faces[f].surface];
+                let (c2, map) = &st.pcurves[k];
+                for i in 0..=16 {
+                    let t = st.range[0] + (st.range[1] - st.range[0]) * f64::from(i) / 16.0;
+                    let q = c2.point(map[0] + map[1] * t);
+                    let d = s.point(q.x, q.y).distance(st.curve.point(t));
+                    assert!(d <= st.tolerance * 1.01, "{d} at {t}");
                 }
             }
         }

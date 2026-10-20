@@ -193,18 +193,37 @@ static void limit(std::optional<tbb::global_control> &control,
   }
 }
 
-// One difference with every tool at once, as with OCCT. SmMerge changes
-// the body's brep in place and deletes the tools.
 void subtract_tools(Body &body, bool parallel) {
+  combine_tools(body, 2, parallel);
+}
+
+// One union (op 0), intersection (1) or difference (2) with every tool at
+// once, as with OCCT. SmMerge changes the body's brep in place and
+// deletes the tools.
+void combine_tools(Body &body, uint32_t op, bool parallel) {
   if (body.tools == nullptr) {
-    throw std::runtime_error("no tools to subtract");
+    throw std::runtime_error("no tools to combine");
+  }
+  SmBooleanOperationType operation;
+  switch (op) {
+  case 0:
+    operation = SM_BO_UNION;
+    break;
+  case 1:
+    operation = SM_BO_INTERSECTION;
+    break;
+  case 2:
+    operation = SM_BO_DIFFERENCE;
+    break;
+  default:
+    throw std::runtime_error("no such boolean");
   }
   std::optional<tbb::global_control> one_thread;
   limit(one_thread, parallel);
   SmBrep *result = nullptr;
   SmMerge merge(*body.context, body.brep, body.tools);
   body.tools = nullptr;
-  check(merge.ManifoldBoolean(SM_BO_DIFFERENCE, result), "ManifoldBoolean");
+  check(merge.ManifoldBoolean(operation, result), "ManifoldBoolean");
   if (result != body.brep) {
     throw std::runtime_error("ManifoldBoolean returned another brep");
   }

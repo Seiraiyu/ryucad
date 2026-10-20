@@ -85,6 +85,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "boolean"
+path = "fuzz_targets/boolean.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "expr"
 path = "fuzz_targets/expr.rs"
 test = false

@@ -614,14 +614,21 @@ fn euler_section(golden: &mut Golden) {
         if let Some(step) = valid_step(&mut body, OpKey(1000 + n), &mut bytes) {
             s.str(step.op);
             for e in step.journal.events() {
-                let (tag, names) = match *e {
-                    Event::Created(n) => (0, vec![n]),
-                    Event::Deleted(n) => (1, vec![n]),
-                    Event::Modified(n) => (2, vec![n]),
-                    Event::Split { parent, children } => {
-                        (3, vec![parent, children[0], children[1]])
+                let (tag, names) = match e {
+                    Event::Created(n) => (0, vec![*n]),
+                    Event::Deleted(n) => (1, vec![*n]),
+                    Event::Modified(n) => (2, vec![*n]),
+                    Event::Split { parent, children } => (
+                        3,
+                        [*parent]
+                            .into_iter()
+                            .chain(children.iter().copied())
+                            .collect(),
+                    ),
+                    Event::Merged { parents, child } => {
+                        (4, parents.iter().copied().chain([*child]).collect())
                     }
-                    Event::Merged { parents, child } => (4, vec![parents[0], parents[1], child]),
+                    Event::Placed { from, to, .. } => (5, vec![*from, *to]),
                 };
                 s.u64(tag);
                 for n in names {
@@ -889,6 +896,79 @@ fn intersections_section(golden: &mut Golden) {
     }
 }
 
+fn booleans_section(golden: &mut Golden) {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    let mut s = golden.section("booleans");
+    let axis = Vector3::new(1.0, -2.0, 0.5).normalize().unwrap();
+    let far = Rigid::translation(Vector3::new(12.5, -3.25, 100.0))
+        .then_after(&Rigid::rotation(axis, 2.5));
+    let key = OpKey(0x626f_6f6c);
+    let at = |x: f64, y: f64, z: f64| Rigid::translation(Vector3::new(x, y, z));
+    let y_axis = Vector3::new(0.0, 1.0, 0.0).normalize().unwrap();
+    // A rod turned onto the x axis, through the upright one's middle.
+    let across =
+        at(-1.5, 0.0, 1.5).then_after(&Rigid::rotation(y_axis, core::f64::consts::FRAC_PI_2));
+    let block = primitive::block(key, 2.0, 2.0, 2.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let rod = primitive::cylinder(key, 0.5, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let thin = primitive::cylinder(key, 0.35, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let ball = primitive::sphere(key, 0.8, &Rigid::IDENTITY).unwrap().0;
+    let torus = primitive::torus(key, 1.0, 0.3, &Rigid::IDENTITY).unwrap().0;
+    let slab = primitive::block(key, 3.0, 3.0, 0.4, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let cone = primitive::cone(key, 0.8, 1.5, &Rigid::IDENTITY).unwrap().0;
+    // Each case: the target, then its tools in place.
+    let cases: [(&ryukei::topo::Body, Vec<(&ryukei::topo::Body, Rigid)>); 5] = [
+        (&block, vec![(&rod, at(1.0, 1.0, -0.5))]),
+        (
+            &block,
+            vec![
+                (&rod, at(0.6, 0.6, -0.5)),
+                (&rod, at(1.4, 1.4, -0.5)),
+                (&ball, at(2.0, 2.0, 2.0)),
+            ],
+        ),
+        (&rod, vec![(&thin, across)]),
+        (&torus, vec![(&slab, at(-1.5, -1.5, -0.1))]),
+        (&cone, vec![(&ball, at(0.2, 0.0, 1.0))]),
+    ];
+    for place in [Rigid::IDENTITY, far] {
+        for (target, tools) in &cases {
+            let target = target.transformed(&place).unwrap();
+            let tools: Vec<Tool> = tools
+                .iter()
+                .enumerate()
+                .map(|(i, (body, p))| Tool {
+                    key: ToolKey(i as u128 + 1),
+                    body,
+                    place: place.then_after(p),
+                })
+                .collect();
+            for op in [BooleanOp::Unite, BooleanOp::Intersect, BooleanOp::Subtract] {
+                match boolean(key, op, &target, &tools) {
+                    Ok((body, journal)) => {
+                        s.str(&body.dump());
+                        s.u64(journal.events().len() as u64);
+                        if body.counts().faces > 0 {
+                            hash_mesh(
+                                &mut s,
+                                &tessellate(&body, &MeshParams::new(2e-2, 0.5)).unwrap(),
+                            );
+                        }
+                    }
+                    Err(e) => s.str(&format!("{e:?}")),
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -911,5 +991,6 @@ fn determinism() {
     meshes_section(&mut golden);
     sweeps_section(&mut golden);
     intersections_section(&mut golden);
+    booleans_section(&mut golden);
     golden.finish();
 }
