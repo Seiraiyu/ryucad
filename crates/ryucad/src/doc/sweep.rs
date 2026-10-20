@@ -43,14 +43,23 @@ pub enum Angle {
     Of(Quantity),
 }
 
-/// A revolve: the sketch's loops about one of its lines.
+/// What a revolve turns about, directed: the turn is counterclockwise
+/// about it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RevolveAxis {
+    /// A line of the sketch, from its start to its end.
+    Line(Id),
+    /// A straight edge of an earlier feature in the sketch's plane, from
+    /// its start to its end.
+    Edge(Reference),
+}
+
+/// A revolve: the sketch's loops about an axis.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Revolve {
     pub sketch: Id,
     pub loops: Vec<Id>,
-    /// A line of the sketch, directed from its start to its end; the turn
-    /// is counterclockwise about it.
-    pub axis: Id,
+    pub axis: RevolveAxis,
     pub angle: Angle,
     /// Half the angle each side of the sketch's plane.
     pub symmetric: bool,
@@ -230,7 +239,11 @@ impl Extrude {
 
 impl Revolve {
     pub fn fields(&self) -> Value {
-        let mut v = json!({"axis": self.axis, "angle": self.angle.to_json()});
+        let axis = match &self.axis {
+            RevolveAxis::Line(l) => json!(l),
+            RevolveAxis::Edge(r) => r.to_json(),
+        };
+        let mut v = json!({"axis": axis, "angle": self.angle.to_json()});
         common(&mut v, &self.sketch, &self.loops);
         if self.symmetric {
             v["symmetric"] = json!(true);
@@ -239,14 +252,22 @@ impl Revolve {
     }
 
     pub(crate) fn from_fields(o: &mut Obj, env: &Env) -> Result<Revolve> {
-        let axis = o.take("axis")?;
-        let axis = axis
-            .as_str()
-            .ok_or_else(|| invalid("/axis", "axis is a line of the sketch"))?;
+        let axis = match o.take("axis")? {
+            Value::String(l) => {
+                RevolveAxis::Line(Id::parse(&l, "entity").map_err(|e| e.with("pointer", "/axis"))?)
+            }
+            v @ Value::Object(_) => RevolveAxis::Edge(Reference::from_json(&v, "/axis")?),
+            _ => {
+                return Err(invalid(
+                    "/axis",
+                    "axis is a line of the sketch, or {feature, name}: a straight edge",
+                ));
+            }
+        };
         Ok(Revolve {
             sketch: sketch_id(o)?,
             loops: loops_from_json(o.take_opt("loops"))?,
-            axis: Id::parse(axis, "entity").map_err(|e| e.with("pointer", "/axis"))?,
+            axis,
             angle: Angle::from_json(&o.take("angle")?, env)?,
             symmetric: flag(o, "symmetric")?,
         })
@@ -336,6 +357,26 @@ mod tests {
         assert_eq!(read(&canonical::parse(&text).unwrap()).unwrap(), f);
         v["extent"]["length"] = json!(3);
         assert_eq!(read(&v).unwrap_err().details["pointer"], "/extent/length");
+    }
+
+    #[test]
+    fn an_axis_may_be_an_edge() {
+        const N: &str = "0123456789abcdef0123456789abcdef";
+        let mut v = revolve();
+        v["axis"] = json!({"feature": "b", "name": N});
+        let f = read(&v).unwrap();
+        let Feature::Revolve(r) = &f else { panic!() };
+        assert!(matches!(&r.axis, RevolveAxis::Edge(e) if e.feature.as_str() == "b"));
+        assert_eq!(
+            f.references()
+                .iter()
+                .map(|(r, _)| r.as_str())
+                .collect::<Vec<_>>(),
+            ["axis"]
+        );
+        assert_eq!(read(&f.to_json()).unwrap(), f);
+        v["axis"] = json!(3);
+        assert_eq!(read(&v).unwrap_err().details["pointer"], "/axis");
     }
 
     #[test]

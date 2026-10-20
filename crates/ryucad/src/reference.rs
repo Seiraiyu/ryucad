@@ -253,6 +253,106 @@ mod tests {
     }
 
     #[test]
+    fn revolve_about_an_edge() {
+        let (_dir, mut s, body) = with_box();
+        // On zx the sketch's x is the part's z and its y the part's x, so
+        // the box's bottom edge along x is the sketch's y axis.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s", "plane": "zx"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": rectangle_ops()}),
+        )
+        .unwrap();
+        let (a, b) = (
+            vertex_at(&body, [0.0, 0.0, 0.0]),
+            vertex_at(&body, [0.02, 0.0, 0.0]),
+        );
+        let along_x = edge_between(&body, &a, &b);
+        // Which way the edge runs decides which way the turn goes.
+        let starts_at_origin = {
+            let e = body["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["name"] == along_x.as_str())
+                .unwrap();
+            e["start"] == a.as_str()
+        };
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "revolve", "id": "r", "sketch": "s",
+                   "axis": format!("p/b/{along_x}"), "angle": 90}),
+        )
+        .unwrap();
+        let v = call(&mut s, "inspect", json!({"part": "p", "feature": "r"})).unwrap();
+        // A quarter turn about x takes the sketch's far corner, at z = 20 mm,
+        // to y = -20 mm (or +20 mm, turning the other way), z = 0.
+        let want = if starts_at_origin { -0.02 } else { 0.02 };
+        let swung = v["bodies"][0]["vertices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| {
+                let p = &x["point"];
+                (p[1].as_f64().unwrap() - want).abs() < 1e-9 && p[2].as_f64().unwrap().abs() < 1e-9
+            });
+        assert!(swung, "{}", v["bodies"][0]["vertices"]);
+        let show = call(&mut s, "feature.show", json!({"part": "p", "id": "r"})).unwrap();
+        assert_eq!(show["axis"], format!("p/b/{along_x}"));
+        let e = call(&mut s, "feature.delete", json!({"part": "p", "id": "b"})).unwrap_err();
+        assert_eq!(e.code, Code::HasDependents);
+    }
+
+    #[test]
+    fn axes_that_wont_do() {
+        let (_dir, mut s, body) = with_box();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s", "plane": "zx"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": rectangle_ops()}),
+        )
+        .unwrap();
+        let top = format!("p/b/{}", face_along(&body, [0.0, 0.0, 1.0]));
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "revolve", "sketch": "s", "axis": top, "angle": 90}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind);
+        // The back bottom edge is 10 mm behind the sketch's plane.
+        let (a, b) = (
+            vertex_at(&body, [0.0, 0.01, 0.0]),
+            vertex_at(&body, [0.02, 0.01, 0.0]),
+        );
+        let back = format!("p/b/{}", edge_between(&body, &a, &b));
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "revolve", "id": "r", "sketch": "s", "axis": back,
+                   "angle": 90}),
+        )
+        .unwrap();
+        let e = call(&mut s, "rebuild", json!({})).unwrap_err();
+        let f = &e.details["parts"][0]["features"][2];
+        assert_eq!(f["error"]["code"], "invalid_extent", "{f}");
+        assert_eq!(f["error"]["details"]["role"], "axis");
+    }
+
+    #[test]
     fn targets_that_wont_do() {
         let (_dir, mut s, body) = with_box_and_sketch();
         let (a, b) = (

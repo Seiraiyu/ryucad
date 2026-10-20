@@ -14,6 +14,7 @@ use crate::doc::reference::Reference;
 use crate::doc::sketch::{
     ConstraintType, Entity, Geometry, Index, OnFace, Plane, Sketch, clean, constraint_from_json,
 };
+use crate::doc::sweep::RevolveAxis;
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
 use crate::rebuild::{Results, placement};
@@ -983,7 +984,10 @@ pub fn edit(
     for f in server::sweeps_of(p, &fid) {
         let names = match p.features[&f].as_ref().expect("a loaded sweep") {
             Feature::Extrude(e) => e.loops.clone(),
-            Feature::Revolve(r) => [r.loops.clone(), vec![r.axis.clone()]].concat(),
+            Feature::Revolve(r) => match &r.axis {
+                RevolveAxis::Line(l) => [r.loops.clone(), vec![l.clone()]].concat(),
+                RevolveAxis::Edge(_) => r.loops.clone(),
+            },
             _ => unreachable!("a sweep"),
         };
         if let Some(gone) = names.iter().find(|e| !s.entities.contains_key(*e)) {

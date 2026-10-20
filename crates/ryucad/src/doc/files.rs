@@ -410,6 +410,10 @@ impl Feature {
                 super::sweep::Extent::UpTo { target, .. } => vec![("target".to_owned(), target)],
                 _ => Vec::new(),
             },
+            Feature::Revolve(r) => match &r.axis {
+                super::sweep::RevolveAxis::Edge(e) => vec![("axis".to_owned(), e)],
+                _ => Vec::new(),
+            },
             _ => Vec::new(),
         }
     }

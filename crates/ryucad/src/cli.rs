@@ -526,7 +526,8 @@ struct FieldArgs {
     /// Extrude against the sketch's normal (or --reverse false).
     #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
     reverse: Option<bool>,
-    /// A revolve's axis: a line of its sketch.
+    /// A revolve's axis: a line of its sketch, or a straight edge in the sketch's plane
+    /// (<part>/<feature>/<name>).
     #[arg(long, value_name = "LINE")]
     axis: Option<String>,
     /// A revolve's angle: 90, "90 deg", or full.

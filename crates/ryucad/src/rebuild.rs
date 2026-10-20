@@ -8,7 +8,7 @@ use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::doc::reference::Reference;
 use crate::doc::sketch::Geometry;
-use crate::doc::sweep::{Angle, Extent};
+use crate::doc::sweep::{Angle, Extent, RevolveAxis};
 use crate::error::{Code, Error, Result};
 use crate::profile::Keys;
 use crate::sketch::Solved;
@@ -194,7 +194,10 @@ fn build_sweep(part: &Part, id: &Id, f: &Feature, before: &dyn Results) -> Resul
     let solved = sketch_input(part, id, sketch, before)?;
     let (loops, axis) = match f {
         Feature::Extrude(e) => (&e.loops, None),
-        Feature::Revolve(r) => (&r.loops, Some(&r.axis)),
+        Feature::Revolve(r) => match &r.axis {
+            RevolveAxis::Line(l) => (&r.loops, Some(l)),
+            RevolveAxis::Edge(_) => (&r.loops, None),
+        },
         _ => unreachable!("a sweep"),
     };
     let (valid, keys) = crate::profile::profile(&part.id, sketch, solved, loops)
@@ -220,7 +223,10 @@ fn build_sweep(part: &Part, id: &Id, f: &Feature, before: &dyn Results) -> Resul
             sweep::extrude(key, &valid, dir, start, end)
         }
         Feature::Revolve(r) => {
-            let axis = sweep_axis(solved, id, &r.axis)?;
+            let axis = match &r.axis {
+                RevolveAxis::Line(l) => sweep_axis(solved, id, l)?,
+                RevolveAxis::Edge(e) => edge_axis(part, id, e, solved, before)?,
+            };
             let (start, end) = match &r.angle {
                 Angle::Full => (0.0, TAU),
                 Angle::Of(q) if r.symmetric => (-q.radians() / 2.0, q.radians() / 2.0),
@@ -327,6 +333,37 @@ fn sweep_axis(solved: &crate::sketch::Solved, id: &Id, axis: &Id) -> Result<Axis
         .with("feature", id)
         .with("axis", axis)),
     }
+}
+
+/// A revolve's axis from a straight edge lying in the sketch's plane,
+/// from its start to its end, its ends put exactly in the plane.
+fn edge_axis(
+    part: &Part,
+    id: &Id,
+    e: &Reference,
+    solved: &crate::sketch::Solved,
+    before: &dyn Results,
+) -> Result<Axis> {
+    let found = crate::reference::resolve(part, part.order(), id, "axis", e, before)?;
+    let (a, b) = crate::reference::line(part, id, "axis", e, found)?;
+    let inv = solved.frame.inverse();
+    let (a, b) = (inv.apply_point(a), inv.apply_point(b));
+    let text = e.text(&part.id);
+    let invalid = |msg: &str| {
+        Error::new(
+            Code::InvalidExtent,
+            format!("revolve {id}: its axis {text} {msg}"),
+        )
+        .with("feature", id)
+        .with("role", "axis")
+        .with("reference", &text)
+    };
+    if a.z.abs().max(b.z.abs()) > ryukei::tol::LINEAR_RESOLUTION {
+        return Err(invalid("doesn't lie in the sketch's plane"));
+    }
+    let flat = |p: Point3| solved.frame.apply_point(Point3::new(p.x, p.y, 0.0));
+    let (a, b) = (flat(a), flat(b));
+    Axis::new(a, b - a).map_err(|k| invalid("has no length").with("kernel", format!("{k:?}")))
 }
 
 /// The kernel's refusal of a sweep, in the sketch's terms.

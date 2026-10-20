@@ -10,7 +10,7 @@ use crate::doc::project::{
 };
 use crate::doc::reference::Reference;
 use crate::doc::sketch::{OnFace, OriginPlane, Plane, Sketch};
-use crate::doc::sweep::{Angle, Extent, Extrude, Revolve};
+use crate::doc::sweep::{Angle, Extent, Extrude, Revolve, RevolveAxis};
 use crate::entity::{self, EntityRef};
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
@@ -642,6 +642,9 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
             if let Angle::Of(q) = &r.angle {
                 v["angle"] = q.report();
             }
+            if let RevolveAxis::Edge(e) = &r.axis {
+                v["axis"] = json!(e.text(part));
+            }
             v
         }
     };
@@ -840,6 +843,10 @@ fn sweep_from(
                 }
                 Value::Object(e)
             }
+            // An axis given as text is an edge.
+            ("axis", Value::String(t)) if t.contains('/') => Reference::parse(&t, part)
+                .map_err(|e| e.with("pointer", "/axis"))?
+                .to_json(),
             (_, x) => x,
         };
         // Part of an extent keeps the rest; a new type keeps only what it
@@ -895,7 +902,10 @@ fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
     };
     let (loops, axis) = match f {
         Feature::Extrude(e) => (&e.loops, None),
-        Feature::Revolve(r) => (&r.loops, Some(&r.axis)),
+        Feature::Revolve(r) => match &r.axis {
+            RevolveAxis::Line(l) => (&r.loops, Some(l)),
+            RevolveAxis::Edge(_) => (&r.loops, None),
+        },
         _ => unreachable!("a sweep"),
     };
     for (field, e) in loops
@@ -1088,6 +1098,15 @@ fn check_references(
                 }
             }
             _ => Ok(()),
+        },
+        // That the edge is straight; whether it lies in the sketch's plane
+        // only rebuild can tell.
+        Feature::Revolve(r) => match &r.axis {
+            RevolveAxis::Edge(e) => {
+                let found = crate::reference::resolve(&p, order, id, "axis", e, results)?;
+                crate::reference::line(&p, id, "axis", e, found).map(|_| ())
+            }
+            RevolveAxis::Line(_) => Ok(()),
         },
         _ => Ok(()),
     }
