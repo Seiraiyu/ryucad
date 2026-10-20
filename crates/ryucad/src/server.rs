@@ -1073,12 +1073,12 @@ fn feature_delete(
     if !p.features.contains_key(&fid) {
         return Err(no_feature(p, &fid));
     }
-    let users = sweeps_of(p, &fid);
+    let users = crate::graph::dependents(p, &fid);
     if !users.is_empty() {
         return Err(Error::new(
             Code::HasDependents,
             format!(
-                "{fid} is swept by {}; delete or change those first",
+                "{fid} is read by {}; delete or change those first",
                 users.iter().map(Id::as_str).collect::<Vec<_>>().join(", ")
             ),
         )
@@ -1123,13 +1123,12 @@ fn feature_move(
     }
     list.remove(from);
     list.insert(insert_at(&list, position)?, fid.clone());
-    // A sweep must still come after its sketch.
+    // Everything must still come after what it reads.
     for f in &list {
         if let Some(Ok(feature)) = p.features.get(f)
-            && let Some(sketch) = feature.swept()
-            && (*f == fid || *sketch == fid)
+            && (*f == fid || crate::graph::inputs(feature).contains(&&fid))
         {
-            check_sketch(p, &list, f, sketch)?;
+            crate::graph::check_order(p, &list, f, feature)?;
         }
     }
     let revision = save(session, &pid, &[], list.clone())?;
@@ -1141,7 +1140,14 @@ fn feature_list(session: &Session, part: &str) -> Result<Value> {
     let features: Vec<Value> = order(p)?
         .iter()
         .map(|id| match feature(p, id) {
-            Ok(f) => json!({"id": id, "type": f.type_name(), "ok": true}),
+            Ok(f) => {
+                let mut v = json!({"id": id, "type": f.type_name(), "ok": true});
+                let uses = crate::graph::inputs(f);
+                if !uses.is_empty() {
+                    v["uses"] = json!(uses);
+                }
+                v
+            }
             Err(e) => json!({"id": id, "ok": false, "error": e}),
         })
         .collect();

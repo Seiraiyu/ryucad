@@ -1,7 +1,7 @@
-//! Features to ryukei bodies and solved sketches. Primitives and sketches
-//! depend on nothing else, so they build in parallel; then every extrude
-//! and revolve, each from its sketch, in parallel too. Results are
-//! collected in feature order.
+//! Features to ryukei bodies and solved sketches, in the order of the
+//! part's dependency graph ([`crate::graph`]): every feature of one depth
+//! in parallel, each reading the results of the features before it.
+//! Results are collected in feature order.
 
 use crate::doc::files::{Feature, Placement, Primitive, PrimitiveType};
 use crate::doc::id::Id;
@@ -154,51 +154,18 @@ fn sketch_input<'a>(
     sketch: &Id,
     before: &'a BTreeMap<Id, Result<Output>>,
 ) -> Result<&'a crate::sketch::Solved> {
-    let order = part.order();
-    let me = order.iter().position(|f| f == id);
-    match order.iter().position(|f| f == sketch) {
-        None => {
-            return Err(Error::new(
-                Code::NotFound,
-                format!("{id} sweeps {sketch}, which part {} doesn't list", part.id),
-            )
-            .with("feature", id)
-            .with("sketch", sketch));
-        }
-        Some(at) if Some(at) >= me => {
-            return Err(Error::new(
-                Code::ReferenceForward,
-                format!("{id} sweeps {sketch}, which comes after it"),
-            )
-            .with("feature", id)
-            .with("sketch", sketch));
-        }
-        Some(_) => {}
-    }
-    if let Some(Ok(f)) = part.features.get(sketch)
-        && f.sketch().is_none()
-    {
-        return Err(Error::new(
+    let out = crate::graph::input(part, id, sketch, before)?;
+    out.sketch().ok_or_else(|| {
+        let ty = part.features[sketch]
+            .as_ref()
+            .map_or("feature", Feature::type_name);
+        Error::new(
             Code::ReferenceWrongKind,
-            format!(
-                "{id} sweeps {sketch}, which is a {}, not a sketch",
-                f.type_name()
-            ),
+            format!("{id} sweeps {sketch}, which is a {ty}, not a sketch"),
         )
         .with("feature", id)
-        .with("sketch", sketch));
-    }
-    match before.get(sketch) {
-        Some(Ok(o)) => Ok(o.sketch().expect("a sketch's output")),
-        Some(Err(e)) => Err(Error::new(
-            Code::DependencyFailed,
-            format!("{id} sweeps {sketch}, which failed to rebuild"),
-        )
-        .with("feature", id)
-        .with("dependency", sketch)
-        .with("cause", e.code)),
-        None => unreachable!("every listed feature before a sweep is built first"),
-    }
+        .with("sketch", sketch)
+    })
 }
 
 /// An extrude or a revolve, from its sketch's result.
@@ -383,37 +350,36 @@ pub fn rebuild_feature(
     }
 }
 
-/// Rebuilds every listed feature of `part`, in parallel: first what reads
-/// no other feature, then the sweeps.
+/// Rebuilds every listed feature of `part`: each depth of its graph in
+/// turn, the features of a depth in parallel.
 pub fn rebuild_part(part: &Part) -> PartResult {
-    let sweeps = |id: &Id| matches!(&part.features[id], Ok(f) if f.swept().is_some());
-    let none = BTreeMap::new();
-    let build = |id: &Id, before: &BTreeMap<Id, Result<Output>>| {
-        let built = match &part.features[id] {
-            Ok(f) => rebuild_feature(part, id, f, before),
-            Err(e) => Err(e.clone()),
-        };
-        (id.clone(), built)
-    };
-    let first: BTreeMap<Id, Result<Output>> = part
-        .order()
-        .par_iter()
-        .filter(|id| !sweeps(id))
-        .map(|id| build(id, &none))
-        .collect();
-    let second: BTreeMap<Id, Result<Output>> = part
-        .order()
-        .par_iter()
-        .filter(|id| sweeps(id))
-        .map(|id| build(id, &first))
-        .collect();
+    let depths = crate::graph::depths(part);
+    let mut built: BTreeMap<Id, Result<Output>> = BTreeMap::new();
+    for depth in 0.. {
+        let now: Vec<&Id> = part
+            .order()
+            .iter()
+            .filter(|id| depths[*id] == depth)
+            .collect();
+        if now.is_empty() {
+            break;
+        }
+        let results: Vec<(Id, Result<Output>)> = now
+            .par_iter()
+            .map(|id| {
+                let r = match &part.features[*id] {
+                    Ok(f) => rebuild_feature(part, id, f, &built),
+                    Err(e) => Err(e.clone()),
+                };
+                ((*id).clone(), r)
+            })
+            .collect();
+        built.extend(results);
+    }
     let features: Vec<(Id, Result<Output>)> = part
         .order()
         .iter()
-        .map(|id| {
-            let r = first.get(id).or_else(|| second.get(id)).expect("built");
-            (id.clone(), r.clone())
-        })
+        .map(|id| (id.clone(), built[id].clone()))
         .collect();
     let mut h = blake3::Hasher::new();
     for (id, r) in &features {

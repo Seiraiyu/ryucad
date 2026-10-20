@@ -12,6 +12,7 @@ pub mod entity;
 pub mod error;
 pub mod expr;
 pub mod git;
+pub mod graph;
 pub mod inspect;
 pub mod live;
 pub mod mesh;

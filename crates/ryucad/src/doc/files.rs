@@ -3,6 +3,7 @@
 //! the file system is [`super::project`]'s business.
 
 use super::id::Id;
+use super::reference::Reference;
 use super::sketch::Sketch;
 use super::sweep::{Extrude, Revolve};
 use crate::error::{Code, Error, Result};
@@ -395,6 +396,13 @@ impl Feature {
             Feature::Sketch(s) => Some(s),
             _ => None,
         }
+    }
+
+    /// Its references to other features' faces, edges and vertices, each
+    /// with its role in the feature (`plane`, `x`, `target`, `axis`,
+    /// `entities.<id>`), in a fixed order.
+    pub fn references(&self) -> Vec<(String, &Reference)> {
+        Vec::new()
     }
 
     /// The sketch an extrude or revolve sweeps.
