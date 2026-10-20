@@ -220,6 +220,18 @@ impl Rays<'_> {
         for c in self.chains {
             for (du, dv) in self.shifts(c, lo, hi) {
                 let off = Vector2::new(du, dv);
+                // A ray through a joint between pcurves settles nothing
+                // there: their ends differ by rounding, and the ray may
+                // slip between them uncounted (or cross both).
+                let last = &c.pieces[c.pieces.len() - 1];
+                for end in [c.pieces[0].pts[0].p, last.pts[last.pts.len() - 1].p] {
+                    let w = end + off - p.to_vector();
+                    let a = w.dot(d);
+                    if w.dot(n).abs() <= 1e-9 * reach.max(1.0) && a >= -1e-9 * reach && a <= reach {
+                        let near = 1e-9 * reach.max(1.0);
+                        unsettled.push(Interval::new(a - near, a + near)?);
+                    }
+                }
                 for piece in &c.pieces {
                     let (plo, phi) = piece.hull();
                     let (plo, phi) = (plo + off, phi + off);
