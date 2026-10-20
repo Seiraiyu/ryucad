@@ -136,6 +136,13 @@ pub fn preferences(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, vie
             egui::Grid::new("preferences")
                 .num_columns(3)
                 .show(ui, |ui| {
+                    choice(
+                        ui,
+                        ws,
+                        "ui.style",
+                        "Style",
+                        &["drafting", "graphite", "studio"],
+                    );
                     choice(ui, ws, "ui.theme", "Theme", &["system", "light", "dark"]);
                     choice(
                         ui,

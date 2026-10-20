@@ -83,7 +83,7 @@ fn the_model_is_drawn_with_its_edges_and_painted_faces() {
     // The same frame twice is the same pixels.
     assert_eq!(draw(true, &[], background), plain);
     // The dark theme's background.
-    background = ryucad_app::ui::style::viewport_background(true);
+    background = ryucad_app::ui::style::Look::default().viewport_background(true);
     let dark_frame = draw(true, &[], background);
     assert!(close(&at(&dark_frame, 0, 0), srgb(background), 2));
     assert!(at(&dark_frame, 0, 0)[0] < 90, "{:?}", at(&dark_frame, 0, 0));

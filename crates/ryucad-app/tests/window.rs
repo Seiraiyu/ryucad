@@ -8,6 +8,7 @@ use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use ryucad_app::ui::app::App;
+use ryucad_app::ui::style::Look;
 use std::time::{Duration, Instant};
 
 fn gpu() -> bool {
@@ -621,6 +622,14 @@ fn preferences_change_the_window_whoever_sets_them() {
         h.ctx.options(|o| o.theme_preference),
         egui::ThemePreference::Dark
     );
+    // And a style: the window takes its colours, the viewport too.
+    p.ok(&["config", "set", "ui.style", "graphite"]);
+    frames(&mut h, |a| a.opened().view.look == Look::Graphite);
+    assert_eq!(
+        h.ctx.style_of(egui::Theme::Dark).visuals.panel_fill,
+        Look::Graphite.style(true).visuals.panel_fill
+    );
+    p.ok(&["config", "set", "ui.style", "drafting"]);
     p.ok(&["config", "set", "ui.theme", "system"]);
     p.ok(&["config", "set", "display.edges", "true"]);
 }
@@ -823,7 +832,13 @@ fn the_viewport_shows_the_colours_it_draws() {
     // A corner of the viewport: background, framed with a margin.
     let at = rect.min + egui::vec2(6.0, 6.0);
     let px = img.get_pixel((at.x * ppp) as u32, (at.y * ppp) as u32).0;
-    let want = ryucad_app::ui::style::viewport_background(dark).map(|c| (c * 255.0).round() as u8);
+    let want = h
+        .state()
+        .opened()
+        .view
+        .look
+        .viewport_background(dark)
+        .map(|c| (c * 255.0).round() as u8);
     assert!(
         px.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 3),
         "the background shows as {px:?}, drawn as {want:?}"
