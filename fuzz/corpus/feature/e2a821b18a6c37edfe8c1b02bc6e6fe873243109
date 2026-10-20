@@ -1,0 +1,9 @@
+{
+  "angle": "9+0312448132336116+pi++++++14",
+  "axis": "l2",
+  "format": 2,
+  "kind": "ryucad.feature",
+  "sketch": "s",
+ "symmec": true,
+  "type": "revolve"
+}
