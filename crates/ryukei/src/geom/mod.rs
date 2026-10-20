@@ -8,7 +8,7 @@ mod bbox;
 #[allow(dead_code)]
 pub(crate) mod bernstein;
 pub(crate) mod bernstein2;
-mod bound2;
+pub(crate) mod bound2;
 pub(crate) mod chain2;
 pub(crate) mod chain3;
 mod curve;
