@@ -8,7 +8,8 @@
 //! very same bits.
 
 use crate::linalg::{Mat, cholesky_solve};
-use crate::sketch::{Entity, Sketch, SketchError};
+use crate::report::{Free, State, diagnose};
+use crate::sketch::{Entity, Id, Sketch, SketchError};
 use crate::system::{Component, SOLVE_TOL, Scalar, System};
 
 /// Steps tried per component, accepted or not.
@@ -36,6 +37,15 @@ pub struct Report {
     /// Whether any position or radius changed. A sketch that already held
     /// comes back with the same bits and `changed` false.
     pub changed: bool,
+    pub state: State,
+    /// Degrees of freedom left.
+    pub dof: usize,
+    /// What can still move, by entity.
+    pub free: Vec<Free>,
+    /// Minimal sets of constraints that say the same thing and hold.
+    pub redundant: Vec<Vec<Id>>,
+    /// Minimal sets of constraints that can't all hold.
+    pub conflicting: Vec<Vec<Id>>,
 }
 
 /// Solves `sketch`: every constraint within [`SOLVE_TOL`] of holding,
@@ -52,11 +62,14 @@ pub fn solve(sketch: &Sketch) -> Result<Solved, SketchError> {
             .constant_eqs
             .iter()
             .all(|&i| sys.residual(i, &x).abs() <= tol);
+    let mut held = Vec::with_capacity(sys.components.len());
     for comp in &sys.components {
         let (ok, steps) = component(&sys, comp, &mut x, tol);
         converged &= ok;
+        held.push(ok);
         iterations += steps;
     }
+    let d = diagnose(&sys, &x, &held);
     let solved = write_back(sketch, &sys, &x);
     let changed = solved != *sketch;
     Ok(Solved {
@@ -65,6 +78,11 @@ pub fn solve(sketch: &Sketch) -> Result<Solved, SketchError> {
             converged,
             iterations,
             changed,
+            state: d.state(),
+            dof: d.dof,
+            free: d.free,
+            redundant: d.redundant,
+            conflicting: d.conflicting,
         },
     })
 }

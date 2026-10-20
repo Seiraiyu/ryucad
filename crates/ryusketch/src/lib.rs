@@ -13,13 +13,13 @@
 //! bits on every platform.
 
 mod equation;
-// Ranks and null spaces are for the report, which comes next.
-#[allow(dead_code)]
 mod linalg;
+mod report;
 mod sketch;
 mod solve;
 mod system;
 
+pub use report::{Free, State};
 pub use sketch::{Constraint, Entity, Id, Sketch, SketchError};
 pub use solve::{Report, Solved, solve};
 pub use system::{Coord, SOLVE_TOL};

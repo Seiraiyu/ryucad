@@ -48,6 +48,7 @@ impl Mat {
     }
 
     /// `self * x`.
+    #[cfg(test)]
     pub fn mul_vec(&self, x: &[f64]) -> Vec<f64> {
         (0..self.rows)
             .map(|i| self.row(i).iter().zip(x).map(|(a, b)| a * b).sum())
