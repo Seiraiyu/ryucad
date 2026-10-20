@@ -1,7 +1,9 @@
 //! A part's parameters through the protocol: list, set, delete and rename
 //! them. Every write is checked first: the new values must evaluate, no
 //! feature that rebuilt before may stop evaluating because of them, and
-//! nothing may be left reading a parameter that is gone.
+//! nothing may be left reading a parameter that is gone. Sketches whose
+//! dimensions a new value moves are re-solved and written in the same
+//! change, so they stay current.
 
 use crate::doc::canonical;
 use crate::doc::files::{Feature, ParametersFile, expression, rename_in_feature};
@@ -115,8 +117,14 @@ pub fn set(
         changed.push(name);
     }
     check(session, p, &changed, &file.env())?;
+    let before = crate::sketch::dimension_values(p);
     save(session, &pid, &file)?;
-    list(session, part)
+    let sketches = crate::sketch::write_back(session, &pid, &before)?;
+    let mut v = list(session, part)?;
+    if !sketches.is_empty() {
+        v["sketches"] = json!(sketches);
+    }
+    Ok(v)
 }
 
 /// The parameter `name`, or `not_found`.
@@ -528,5 +536,60 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::InvalidJson);
+    }
+
+    #[test]
+    fn sketches_follow_their_parameters_in_the_same_change() {
+        use crate::live::Live;
+        use crate::server::tests::{call_live, with_sketch};
+        let (dir, mut s) = with_sketch();
+        let mut live = Live::new();
+        let r = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "param.set",
+            json!({"part": "p", "parameters": {"width": "15 mm"}}),
+        )
+        .unwrap();
+        assert_eq!(r["sketches"], json!([{"feature": "s", "ok": true}]));
+        // Written back: current, so it rebuilds as stored.
+        let rb = call(&mut s, "rebuild", json!({})).unwrap();
+        assert_eq!(rb["parts"][0]["features"][0]["sketch"]["stale"], false);
+        assert!(rb.get("warnings").is_none());
+        let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
+        let last = log["entries"].as_array().unwrap().last().unwrap().clone();
+        let files: Vec<&str> = last["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            files,
+            ["parts/p/features/s.json", "parts/p/parameters.json"]
+        );
+        // A parameter nothing reads leaves the sketch alone.
+        let r = call(
+            &mut s,
+            "param.set",
+            json!({"part": "p", "parameters": {"spare": 1}}),
+        )
+        .unwrap();
+        assert!(r.get("sketches").is_none());
+        // One that can't be solved is reported and left as it was; the
+        // parameter is still set.
+        let path = dir.path().join("parts/p/features/s.json");
+        let before = fs::read_to_string(&path).unwrap();
+        let r = call(
+            &mut s,
+            "param.set",
+            json!({"part": "p", "parameters": {"width": "50 mm"}}),
+        )
+        .unwrap();
+        assert_eq!(r["sketches"][0]["ok"], false);
+        assert_eq!(r["sketches"][0]["error"]["code"], "sketch_unsolved");
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+        assert_eq!(r["parameters"][1]["value"], "50 mm");
     }
 }

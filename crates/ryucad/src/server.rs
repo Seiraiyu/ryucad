@@ -2032,7 +2032,7 @@ pub(crate) mod tests {
 
     #[test]
     fn sketches_rebuild_to_their_state() {
-        let (_dir, mut s) = with_sketch();
+        let (dir, mut s) = with_sketch();
         let r = call(&mut s, "rebuild", json!({})).unwrap();
         let f = &r["parts"][0]["features"][0];
         assert_eq!(
@@ -2050,24 +2050,17 @@ pub(crate) mod tests {
         assert_eq!(m["bodies"], json!([]));
         let i = call(&mut s, "inspect", json!({"part": "p"})).unwrap();
         assert_eq!(i["bodies"], json!([]));
-        // A parameter that moves a dimension makes the sketch stale.
-        call(
-            &mut s,
-            "param.set",
-            json!({"part": "p", "parameters": {"width": "15 mm"}}),
-        )
-        .unwrap();
+        // A parameter edited behind ryucad's back makes the sketch stale.
+        let params =
+            |w: &str| json!({"format": 1, "kind": "ryucad.parameters", "parameters": {"width": w}});
+        let path = dir.path().join("parts/p/parameters.json");
+        write_json(&path, &params("15 mm")).unwrap();
         let r = call(&mut s, "rebuild", json!({})).unwrap();
         assert_eq!(r["parts"][0]["features"][0]["sketch"]["stale"], true);
         assert_eq!(r["warnings"][0]["code"], "sketch_stale");
         assert_eq!(r["warnings"][0]["feature"], "s");
         // One it can't solve fails alone.
-        call(
-            &mut s,
-            "param.set",
-            json!({"part": "p", "parameters": {"width": "50 mm"}}),
-        )
-        .unwrap();
+        write_json(&path, &params("50 mm")).unwrap();
         let e = call(&mut s, "rebuild", json!({})).unwrap_err();
         let f = &e.details["parts"][0]["features"][0];
         assert_eq!(f["error"]["code"], "sketch_unsolved");

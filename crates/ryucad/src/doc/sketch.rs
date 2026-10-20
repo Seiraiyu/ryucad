@@ -526,7 +526,7 @@ impl Sketch {
 }
 
 /// A dimension's SI value.
-fn si(q: &Quantity) -> f64 {
+pub fn si(q: &Quantity) -> f64 {
     match q.dim() {
         d if d == crate::units::Dim::ANGLE => q.radians(),
         _ => q.meters(),

@@ -9,6 +9,7 @@
 
 use crate::doc::files::Feature;
 use crate::doc::id::Id;
+use crate::doc::project::Part;
 use crate::doc::sketch::{
     ConstraintType, Entity, Geometry, Index, Plane, Sketch, clean, constraint_from_json,
 };
@@ -21,6 +22,7 @@ use crate::units::{Field, Quantity, Unit};
 use ryukei::geom::Rigid;
 use ryusketch::{Coord, State};
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 
 /// What a solve found, in the sketch's IDs.
 #[derive(Clone, Debug, PartialEq)]
@@ -682,6 +684,62 @@ pub fn get(session: &Session, part: &str, sketch: &str) -> Result<Value> {
         Plane::Placement(_) => v["placement"] = solved.fields()["placement"].clone(),
     }
     Ok(v)
+}
+
+/// Each loaded sketch's dimension values, as bits: what a parameter change
+/// can make stale.
+pub fn dimension_values(part: &Part) -> BTreeMap<Id, Vec<u64>> {
+    part.order()
+        .iter()
+        .filter_map(|id| {
+            let s = part.features.get(id)?.as_ref().ok()?.sketch()?;
+            let values = s
+                .constraints
+                .values()
+                .filter_map(|c| c.value.as_ref())
+                .map(|q| crate::doc::sketch::si(q).to_bits())
+                .collect();
+            Some((id.clone(), values))
+        })
+        .collect()
+}
+
+/// Re-solves the sketches whose dimension values differ from `before`
+/// and writes those that solve; one that doesn't is left as it was. Each
+/// is reported: `{"feature", "ok"}`, with its error when it failed.
+pub fn write_back(
+    session: &mut Session,
+    part: &Id,
+    before: &BTreeMap<Id, Vec<u64>>,
+) -> Result<Vec<Value>> {
+    let p = session.project().part(part)?;
+    let mut out = Vec::new();
+    let mut writes = Vec::new();
+    for (id, values) in dimension_values(p) {
+        if before.get(&id) == Some(&values) {
+            continue;
+        }
+        let s = p.features[&id]
+            .as_ref()
+            .ok()
+            .and_then(Feature::sketch)
+            .expect("a sketch");
+        match solve(&id, s) {
+            Ok(solved) => {
+                if solved.stale {
+                    writes.push((id.clone(), Feature::Sketch(solved.sketch)));
+                }
+                out.push(json!({"feature": id, "ok": true}));
+            }
+            Err(e) => out.push(json!({"feature": id, "ok": false, "error": e})),
+        }
+    }
+    if !writes.is_empty() {
+        let list = server::order(session.project().part(part)?)?;
+        let refs: Vec<(&Id, &Feature)> = writes.iter().map(|(id, f)| (id, f)).collect();
+        server::save(session, part, &refs, list)?;
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
