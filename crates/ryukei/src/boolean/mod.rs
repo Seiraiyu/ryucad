@@ -9,11 +9,15 @@
 
 // Used by the boolean, from the commit that adds it on.
 #[allow(dead_code)]
+pub(crate) mod build;
+// Used by the boolean, from the commit that adds it on.
+#[allow(dead_code)]
 pub(crate) mod classify;
 // Used by the boolean, from the commit that adds it on.
 #[allow(dead_code)]
 pub(crate) mod table;
 
+use crate::geom::Point3;
 use crate::topo::{Body, EdgeId, FaceId, VertexId};
 
 /// A face of one of a boolean's operands: operand 0 is the target, then
@@ -46,6 +50,10 @@ pub(crate) enum Fail {
     Unsupported(FaceRef, FaceRef),
     /// An intersection, ordering or classification that stayed uncertain.
     Uncertain(FaceRef, FaceRef),
+    /// Kept faces that would meet at an edge or a point only.
+    NonManifold { at: Point3, faces: Vec<FaceRef> },
+    /// The kept pieces could not be built into a body: a kernel bug.
+    Inconsistent,
 }
 
 /// The largest tolerance on a face's boundary, at least resolution.

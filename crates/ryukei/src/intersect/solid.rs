@@ -49,9 +49,20 @@ const DIRECTIONS: [[f64; 3]; 12] = [
 /// Where `p` lies against `body`, a solid that passes
 /// [`crate::check::check`].
 pub fn point_in_body(body: &Body, p: Point3) -> Result<Inclusion, Failure> {
-    let faces: Vec<(FaceId, Box3, f64)> = body
-        .faces()
-        .map(|f| {
+    let faces: Vec<FaceId> = body.faces().collect();
+    point_in_faces(body, &faces, p)
+}
+
+/// Where `p` lies against the closed shells made of `faces` of `body`, as
+/// for [`point_in_body`].
+pub(crate) fn point_in_faces(
+    body: &Body,
+    faces: &[FaceId],
+    p: Point3,
+) -> Result<Inclusion, Failure> {
+    let faces: Vec<(FaceId, Box3, f64)> = faces
+        .iter()
+        .map(|&f| {
             let tol = face_tolerance(body, f);
             (f, face_box(body, f).grow(tol), tol)
         })
