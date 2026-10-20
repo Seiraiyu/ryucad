@@ -3,8 +3,13 @@
 //! The pipeline (design 32): the operands' faces are paired by a broad
 //! phase and intersected; every place where they meet, and every edge
 //! they cut, goes into one table ([`table`]), so neighbouring faces can't
-//! disagree.
+//! disagree; each face is split in its parameter plane into pieces
+//! ([`crate::split`]); pieces are classified against the other operands
+//! by certified ray casts ([`classify`]).
 
+// Used by the boolean, from the commit that adds it on.
+#[allow(dead_code)]
+pub(crate) mod classify;
 // Used by the boolean, from the commit that adds it on.
 #[allow(dead_code)]
 pub(crate) mod table;
