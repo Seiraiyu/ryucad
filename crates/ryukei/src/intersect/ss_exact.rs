@@ -8,7 +8,8 @@
 //!   through its centre, so a plane across an axis, a sphere centred on
 //!   one, and two spheres are all coaxial pairs.
 //! - **Plane–plane** is a line; **plane–cylinder** two lines, a tangent
-//!   line or an ellipse; **plane–cone** an ellipse, or a parabola or
+//!   line or an ellipse (its stretches in the region, as rational
+//!   quadratics, when its centre is outside the size box); **plane–cone** an ellipse, or a parabola or
 //!   hyperbola as an exact rational quadratic, or rulings through the
 //!   apex; a plane through a torus's axis cuts two circles.
 //! - **Cylinder–cylinder** with parallel axes meet in lines; with equal
@@ -396,8 +397,152 @@ fn plane_cylinder(f: &Frame, g: &Frame, r: f64, out: &mut Out) {
         out.line(foot - m.get() * w, z, false, false, 0.0);
         return;
     }
-    if let Some(e) = oblique_section(f, g, r) {
-        out.closed(Curve::Ellipse(e), false, 0.0);
+    match oblique_section(f, g, r) {
+        Some(e) => out.closed(Curve::Ellipse(e), false, 0.0),
+        // A plane nearly along the axis cuts an ellipse whose centre is
+        // outside the size box: its stretches in the region instead.
+        None => {
+            let section = Section::new(f, g, r);
+            for run in section.runs(out) {
+                if let Some(curve) = section.nurbs(run) {
+                    let domain = curve.domain();
+                    out.branches.push(Raw {
+                        curve: Curve::Nurbs(Arc::new(curve)),
+                        range: domain,
+                        tangent: false,
+                        tolerance: LINEAR_RESOLUTION,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// A plane's oblique section of a cylinder, `P(c) = centre + ex cx +
+/// ey cy` over the unit circle `c = (cos u, sin u)` of the cylinder's
+/// frame: `ex` and `ey` are the frame's `x` and `y` scaled by the radius
+/// and lifted along the axis onto the plane. The map is affine, so arcs
+/// of the circle go to exact rational quadratic arcs.
+struct Section {
+    centre: Point3,
+    ex: Vector3,
+    ey: Vector3,
+}
+
+impl Section {
+    fn new(f: &Frame, g: &Frame, r: f64) -> Self {
+        let (n, z) = (f.z().get(), g.z().get());
+        let cz = n.dot(z);
+        let lift = |v: Vector3| v * r - z * (r * n.dot(v) / cz);
+        Self {
+            centre: g.origin() + z * (n.dot(f.origin() - g.origin()) / cz),
+            ex: lift(g.x().get()),
+            ey: lift(g.y().get()),
+        }
+    }
+
+    fn at(&self, cx: f64, cy: f64) -> Point3 {
+        self.centre + self.ex * cx + self.ey * cy
+    }
+
+    fn point(&self, u: f64) -> Point3 {
+        let (s, c) = math::sin_cos(u);
+        self.at(c, s)
+    }
+
+    /// The stretches of the section in the region, cut where it crosses
+    /// the region's planes: each coordinate is `A + B cos u + C sin u`,
+    /// so each plane is crossed at most twice, in closed form.
+    fn runs(&self, out: &Out) -> Vec<[f64; 2]> {
+        let (lo, hi) = (out.region.min(), out.region.max());
+        let (c, x, y) = (self.centre, self.ex, self.ey);
+        let mut cuts = Vec::new();
+        for (a, b, s, bounds) in [
+            (c.x, x.x, y.x, [lo.x, hi.x]),
+            (c.y, x.y, y.y, [lo.y, hi.y]),
+            (c.z, x.z, y.z, [lo.z, hi.z]),
+        ] {
+            let m = math::hypot(b, s);
+            if m == 0.0 {
+                continue;
+            }
+            let phi = math::atan2(s, b);
+            for v in bounds {
+                let k = (v - a) / m;
+                if k.abs() <= 1.0 {
+                    let psi = math::acos(k);
+                    cuts.extend([phi + psi, phi - psi].map(|u| u.rem_euclid(TAU)));
+                }
+            }
+        }
+        cuts.sort_by(f64::total_cmp);
+        if cuts.is_empty() {
+            return if out.inside(self.point(0.0)) {
+                vec![[0.0, TAU]]
+            } else {
+                Vec::new()
+            };
+        }
+        let mut runs = Vec::new();
+        for (i, &a) in cuts.iter().enumerate() {
+            let b = cuts.get(i + 1).copied().unwrap_or(cuts[0] + TAU);
+            if b - a > 0.0 && out.inside(self.point((a + b) / 2.0)) {
+                runs.push([a, b]);
+            }
+        }
+        runs
+    }
+
+    /// The section over `[u0, u1]` as a rational quadratic NURBS whose
+    /// knots are the angles where its pieces meet, each the image of a
+    /// circular arc in the half-angle form. Pieces are halved until
+    /// every control point is in the size box.
+    fn nurbs(&self, [u0, u1]: [f64; 2]) -> Option<NurbsCurve> {
+        let count = ((u1 - u0) / FRAC_PI_4).ceil().max(1.0) as usize;
+        let mut breaks: Vec<f64> = (0..=count)
+            .map(|i| u0 + (u1 - u0) * i as f64 / count as f64)
+            .collect();
+        breaks[count] = u1;
+        for _ in 0..MAX_HALVINGS {
+            let mut points = Vec::new();
+            let mut weights = Vec::new();
+            let mut bad = None;
+            for (i, w) in breaks.windows(2).enumerate() {
+                let (a, b) = (w[0], w[1]);
+                let half = (b - a) / 2.0;
+                let mid = a + half;
+                let cw = math::cos(half);
+                let (sa, ca) = math::sin_cos(a);
+                let (sm, cm) = math::sin_cos(mid);
+                let (sb, cb) = math::sin_cos(b);
+                let ctl = [(ca, sa, 1.0), (cm / cw, sm / cw, cw), (cb, sb, 1.0)];
+                for (k, &(cx, cy, wk)) in ctl.iter().enumerate() {
+                    if i > 0 && k == 0 {
+                        continue;
+                    }
+                    let p = self.at(cx, cy);
+                    if !in_size_box(p) {
+                        bad = Some(i);
+                    }
+                    points.push(p);
+                    weights.push(wk);
+                }
+            }
+            match bad {
+                Some(i) => {
+                    let m = (breaks[i] + breaks[i + 1]) / 2.0;
+                    breaks.insert(i + 1, m);
+                }
+                None => {
+                    let mut mults = vec![2; breaks.len()];
+                    mults[0] = 3;
+                    *mults.last_mut()? = 3;
+                    let knots = KnotVector::clamped(2, &breaks, &mults).ok()?;
+                    return NurbsCurve::new(knots, points, Some(weights)).ok();
+                }
+            }
+        }
+        None
     }
 }
 
@@ -853,6 +998,25 @@ mod tests {
         assert_eq!(kinds(&b), [("line", true)]);
         let (b, _) = meet(&plane((2.1, 0.0, 0.0), (1.0, 0.0, 0.0)), &c);
         assert!(b.is_empty());
+    }
+
+    #[test]
+    fn a_plane_nearly_along_the_axis_cuts_the_region_out_of_its_ellipse() {
+        // The ellipse is centred 1000 m up the axis, outside the size
+        // box; in the region it is two stretches from bottom to top.
+        let c = cylinder((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 2.0);
+        let (b, _) = meet(&plane((1.0, 0.0, 0.0), (1.0, 0.0, 1e-3)), &c);
+        assert_eq!(kinds(&b), [("nurbs", false), ("nurbs", false)]);
+        for br in &b {
+            let ends = br.range.map(|t| br.curve.point(t));
+            let mut zs = ends.map(|p| p.z);
+            zs.sort_by(f64::total_cmp);
+            assert!(
+                (zs[0] + 10.0).abs() < 1e-6 && (zs[1] - 10.0).abs() < 1e-6,
+                "{ends:?}"
+            );
+            assert!(ends.iter().all(|p| (p.y.abs() - 3f64.sqrt()).abs() < 0.05));
+        }
     }
 
     #[test]

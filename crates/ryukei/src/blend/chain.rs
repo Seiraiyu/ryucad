@@ -1,12 +1,13 @@
 //! Chains of blended edges and the vertices between them.
 //!
 //! Every vertex of a blended edge is classed by how many edges meet there,
-//! how many are blended, and which meet tangentially (see
-//! [`super::convex`]). Phase 6.B builds four classes: a closed edge alone
-//! at its vertex, an end (one blended edge cut off by the third face at a
-//! vertex of three edges), and two kinds of join, where two blended edges
-//! meet tangentially and the blend runs on from one into the other. Every
-//! other vertex is refused, naming it.
+//! how many are blended, which meet tangentially (see [`super::convex`])
+//! and how they are blended: a closed edge alone at its vertex; an end,
+//! one blended edge cut off by the other faces there (one, or several in
+//! a fan); two kinds of join, where two blended edges meet tangentially
+//! and the blend runs on from one into the other; and the corners, where
+//! blended edges meet at angles: a trim of two, a ball, a roll or a
+//! mitre of three. Every other vertex is refused, naming it.
 //!
 //! Blended edges joined at joins make chains. The new rails of a chain
 //! all go on one face, its rail face: at a smooth join it is the face the
@@ -37,6 +38,76 @@ pub(crate) enum Class {
     /// and `smooth`, an edge between their other faces, which meet
     /// tangentially along it.
     SmoothJoin { smooth: EdgeId, common: FaceId },
+    /// Three blended edges, fillets of one radius bending the same way,
+    /// and no other edge: a ball corner (see [`super::corner`]).
+    Corner,
+    /// Two blended edges meeting at an angle, sharing a face, bending the
+    /// same way, and a sharp edge between their other faces: each blend is
+    /// trimmed by the other (see [`super::trim`]).
+    Trim,
+    /// Three blended edges, fillets, and no other edge, where one ball
+    /// can't close them: `first`, the larger fillet or the only one
+    /// bending its way, is built through the corner first, and the others
+    /// roll over it (see [`super::stage`]).
+    Rolled { first: EdgeId },
+    /// Three blended edges, chamfers, and no other edge: mitred (see
+    /// [`super::mitre`]).
+    Mitre,
+    /// One blended edge and three or more others: the blend runs on until
+    /// every other face there cuts it off, in a chain of end curves (see
+    /// [`fan`]).
+    Fan,
+}
+
+/// The faces round `v` from one face of `edge` to the other, not
+/// including them, and the edges between them, starting from the edge
+/// between `from` and the first: the end faces of a blend of `edge`
+/// ending at `v`, and the edges they meet along. `None` where the faces
+/// don't go round the vertex once.
+pub(crate) fn fan_from(
+    body: &Body,
+    edge: EdgeId,
+    v: VertexId,
+    from: FaceId,
+) -> Option<(Vec<FaceId>, Vec<EdgeId>)> {
+    let faces_of = |e: EdgeId| -> Vec<FaceId> {
+        body.edge_fins(e)
+            .map(|f| body.loops[body.fins[f].loop_].face)
+            .collect()
+    };
+    let ends = faces_of(edge);
+    let to = *ends.iter().find(|&&f| f != from)?;
+    let around = body.vertex_edges(v);
+    let (mut face, mut prev) = (from, edge);
+    let (mut faces, mut edges) = (Vec::new(), Vec::new());
+    for _ in 0..around.len() {
+        let next = around
+            .iter()
+            .copied()
+            .filter(|&g| g != prev && faces_of(g).contains(&face))
+            .collect::<Vec<_>>();
+        let [g] = next[..] else {
+            return None;
+        };
+        edges.push(g);
+        let f = faces_of(g);
+        let [a, b] = f[..] else {
+            return None;
+        };
+        face = if a == face { b } else { a };
+        if face == to {
+            return (edges.len() == around.len() - 1).then_some((faces, edges));
+        }
+        faces.push(face);
+        prev = g;
+    }
+    None
+}
+
+/// The end faces round `v` of a blend of `edge`, from its first face.
+fn fan(body: &Body, edge: EdgeId, v: VertexId) -> Option<(Vec<FaceId>, Vec<EdgeId>)> {
+    let fin = body.edge_fins(edge).next()?;
+    fan_from(body, edge, v, body.loops[body.fins[fin].loop_].face)
 }
 
 /// A maximal run of blended edges joined at joins.
@@ -263,7 +334,104 @@ fn classify(
                 _ => Err(unsupported()),
             }
         }
+        (1, n) if n > 3 => {
+            // The blend runs on past the vertex and is cut off by every
+            // other face there, one after another.
+            fan(body, blended[0], v).ok_or_else(unsupported)?;
+            Ok(Class::Fan)
+        }
+        (2, 3) => {
+            // Two blended edges meeting at an angle and a sharp one: the
+            // blends trim each other, if they share a face and the sharp
+            // edge lies between their other faces.
+            let (fa, fb) = (face_set(blended[0]), face_set(blended[1]));
+            let shared = fa.iter().filter(|f| fb.contains(f)).count();
+            let sharp = edges
+                .iter()
+                .copied()
+                .find(|g| !blended.contains(g))
+                .expect("a third edge");
+            let others = [fa, fb].map(|f| {
+                f.iter()
+                    .copied()
+                    .find(|x| !fa.contains(x) || !fb.contains(x))
+            });
+            let between = others
+                .iter()
+                .all(|o| o.is_some_and(|o| faces_of(sharp).contains(&o)));
+            if !(shared == 1 && between) {
+                return Err(unsupported());
+            }
+            // Bending opposite ways, the blends lie either side of the
+            // shared face and never meet.
+            let bends = [blended[0], blended[1]].map(|e| bend(body, e));
+            match bends {
+                [Ok(a), Ok(b)] if a == b && a != Bend::Smooth => Ok(Class::Trim),
+                [Err(BendFail::Uncertain), _] | [_, Err(BendFail::Uncertain)] => {
+                    Err(BlendError::Uncertain { at }.into())
+                }
+                _ => Err(unsupported()),
+            }
+        }
+        (3, 3) => corner_class(body, specs, &blended, at),
         _ => Err(unsupported()),
+    }
+}
+
+/// The class of a vertex where three blended edges meet at angles: a
+/// ball corner when they are fillets of one radius that bend the same
+/// way; rolled, built in two stages, when one of them is a larger fillet
+/// than the other two, or the only one bending its way, and the other two
+/// are fillets of one radius; mitred when all three are chamfers.
+/// Anything else is refused.
+fn corner_class(body: &Body, specs: &[Spec], blended: &[EdgeId], at: Name) -> Result<Class, Error> {
+    let unsupported = || -> Error { BlendError::Unsupported { at }.into() };
+    let mut radii = Vec::with_capacity(3);
+    let mut convex = Vec::with_capacity(3);
+    let chamfers = blended
+        .iter()
+        .filter(|&&e| {
+            let s = specs.iter().find(|s| s.edge == e).expect("a blended edge");
+            matches!(s.kind, BlendKind::Chamfer(_))
+        })
+        .count();
+    match chamfers {
+        0 => {}
+        3 => return Ok(Class::Mitre),
+        _ => return Err(unsupported()),
+    }
+    for &e in blended {
+        let s = specs.iter().find(|s| s.edge == e).expect("a blended edge");
+        let BlendKind::Fillet { radius } = s.kind else {
+            return Err(unsupported());
+        };
+        radii.push(radius);
+        convex.push(match bend(body, e) {
+            Ok(Bend::Convex) => true,
+            Ok(Bend::Concave) => false,
+            Ok(Bend::Smooth) => return Err(BlendError::SmoothEdge { edge: s.name }.into()),
+            Err(BendFail::Changes) => {
+                return Err(BlendError::ConvexityChanges { edge: s.name }.into());
+            }
+            Err(BendFail::Uncertain) => return Err(BlendError::Uncertain { at }.into()),
+        });
+    }
+    // The edge unlike the other two, which are alike, if there is one.
+    let odd = |same: &dyn Fn(usize, usize) -> bool| -> Option<usize> {
+        (0..3).find(|&i| {
+            let (j, k) = ((i + 1) % 3, (i + 2) % 3);
+            same(j, k) && !same(i, j)
+        })
+    };
+    let rest_alike = |i: usize| radii[(i + 1) % 3] == radii[(i + 2) % 3];
+    match odd(&|i, j| convex[i] == convex[j]) {
+        Some(i) if rest_alike(i) => Ok(Class::Rolled { first: blended[i] }),
+        Some(_) => Err(unsupported()),
+        None => match odd(&|i, j| radii[i] == radii[j]) {
+            None if radii[0] == radii[1] => Ok(Class::Corner),
+            Some(i) if radii[i] > radii[(i + 1) % 3] => Ok(Class::Rolled { first: blended[i] }),
+            _ => Err(unsupported()),
+        },
     }
 }
 
@@ -486,11 +654,40 @@ mod tests {
     }
 
     #[test]
-    fn two_box_edges_at_a_corner_are_not_built_yet() {
+    fn two_box_edges_at_a_corner_trim_each_other() {
         let b = block();
         let e = edge_of(&b, FaceRole::PlusX, FaceRole::PlusZ);
         let g = edge_of(&b, FaceRole::PlusY, FaceRole::PlusZ);
-        let err = chains_of(&b, &[fillet(e, 0.1), fillet(g, 0.1)]).unwrap_err();
+        let c = chains_of(&b, &[fillet(e, 0.1), fillet(g, 0.1)]).unwrap();
+        assert_eq!(c.len(), 2);
+        for chain in &c {
+            assert_eq!(
+                chain.classes.iter().filter(|x| **x == Class::Trim).count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn three_box_edges_meet_in_a_ball_or_roll() {
+        let b = block();
+        let [e, g, h] = [
+            edge_of(&b, FaceRole::PlusX, FaceRole::PlusZ),
+            edge_of(&b, FaceRole::PlusY, FaceRole::PlusZ),
+            edge_of(&b, FaceRole::PlusX, FaceRole::PlusY),
+        ];
+        let c = chains_of(&b, &[fillet(e, 0.1), fillet(g, 0.1), fillet(h, 0.1)]).unwrap();
+        assert_eq!(c.len(), 3);
+        assert!(c.iter().all(|x| x.classes.contains(&Class::Corner)));
+        // One larger is rolled over by the others; three sizes are
+        // refused.
+        let c = chains_of(&b, &[fillet(e, 0.1), fillet(g, 0.1), fillet(h, 0.2)]).unwrap();
+        let he = crate::blend::tests::edge_id(&b, h);
+        assert!(
+            c.iter()
+                .all(|x| x.classes.contains(&Class::Rolled { first: he }))
+        );
+        let err = chains_of(&b, &[fillet(e, 0.1), fillet(g, 0.2), fillet(h, 0.3)]).unwrap_err();
         assert!(matches!(
             err,
             Error::InvalidBlend(BlendError::Unsupported { .. })

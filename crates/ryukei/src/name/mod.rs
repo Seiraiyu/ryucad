@@ -142,12 +142,16 @@ pub enum BlendRole {
     /// its parents are the blend face, that face and the vertex the blend
     /// took away there.
     End,
-    /// An edge between two blend faces of one chain where the chain
-    /// changes surface; its parents are the two faces, sorted.
+    /// An edge between two blend faces where a chain changes surface or
+    /// two blends meet, or between a blend face and a corner face; its
+    /// parents are the two faces, sorted.
     Section,
     /// A vertex of a blend; its parents are the edges meeting there,
     /// sorted.
     Vertex,
+    /// A face closing a corner where blends meet; its parents are the
+    /// vertex the corner took away and the faces it touches, sorted.
+    Corner,
 }
 
 impl Role {
@@ -219,6 +223,7 @@ impl fmt::Display for Role {
                 BlendRole::End => "blend-end",
                 BlendRole::Section => "section",
                 BlendRole::Vertex => "blend-vertex",
+                BlendRole::Corner => "blend-corner",
             }),
         }
     }
@@ -399,6 +404,7 @@ mod tests {
             BlendRole::End,
             BlendRole::Section,
             BlendRole::Vertex,
+            BlendRole::Corner,
         ] {
             roles.push(Role::Blend(r));
         }
