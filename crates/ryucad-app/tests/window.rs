@@ -892,3 +892,39 @@ fn a_click_on_a_sketch_line_selects_it() {
         serde_json::json!(["p/top/l1"])
     );
 }
+
+#[test]
+fn a_dimension_label_opens_its_value() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part().with_top_sketch();
+    let mut h = window(&p);
+    frames(&mut h, sketched);
+    h.step();
+    h.get_by_label("1.5 mm").click();
+    frames(&mut h, |a| a.opened().ws.dimension.is_some());
+    h.step();
+    let field = h.get_all_by_value("1.5 mm").next().unwrap();
+    field.set_text_value_accesskit("2 mm");
+    h.step();
+    h.get_by_label("Apply").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .dimension
+            .as_ref()
+            .is_some_and(|f| !f.saving && f.value.read == "2 mm")
+    });
+    let shown = p.ok(&["feature", "show", "p", "top"]);
+    assert_eq!(shown["constraints"]["d1"]["value"]["value"], "2 mm");
+    // The label follows.
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .model
+            .sketches
+            .values()
+            .any(|d| d.labels[0].text == "2 mm")
+    });
+}

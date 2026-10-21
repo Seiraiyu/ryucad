@@ -2,7 +2,7 @@
 //! up to date from answers and notifications.
 
 use crate::core::activity::{Activity, LOADED};
-use crate::core::edit::Form;
+use crate::core::edit::{DimForm, Form};
 use crate::core::link::{Event, Link, Wake};
 use crate::core::model::{BodyKey, Model, Part};
 use crate::core::people::{People, Person};
@@ -33,6 +33,10 @@ enum Pending {
     /// was when the save failed.
     Form(String, Option<Box<Form>>),
     Save,
+    /// A sketch read for a dimension's form: its part, sketch and
+    /// constraint; after a conflict, with the form as it was.
+    Dim(String, String, String, Option<Box<DimForm>>),
+    DimSave,
     Activity,
     History,
     Config,
@@ -85,6 +89,9 @@ pub struct Workspace {
     pub following: Option<String>,
     /// The property panel's form, for the feature chosen in the tree.
     pub form: Option<Form>,
+    /// The property panel's form for a dimension chosen by its label;
+    /// shown instead of `form`.
+    pub dimension: Option<DimForm>,
     pub activity: Activity,
     /// The project's Git history (`history.log`), once asked for.
     pub history: Option<Value>,
@@ -131,6 +138,7 @@ impl Workspace {
             people,
             following: None,
             form: None,
+            dimension: None,
             activity: Activity::default(),
             history: None,
             settings: Settings::default(),
@@ -258,9 +266,11 @@ impl Workspace {
         self.send(Request::SelectionSet { entities, mode }, Pending::Quiet);
     }
 
-    /// Opens the form for a feature (or closes it, with `None`).
+    /// Opens the form for a feature (or closes it, with `None`); a
+    /// dimension's form closes.
     pub fn open_form(&mut self, feature: Option<(String, String)>) {
         self.form = None;
+        self.dimension = None;
         if let Some((part, id)) = feature {
             self.send(
                 Request::FeatureShow {
@@ -270,6 +280,40 @@ impl Workspace {
                 Pending::Form(part, None),
             );
         }
+    }
+
+    /// Opens the form for a sketch's dimension (or closes it, with
+    /// `None`); the feature's form closes.
+    pub fn open_dimension(&mut self, dimension: Option<(String, String, String)>) {
+        self.dimension = None;
+        if let Some((part, sketch, constraint)) = dimension {
+            self.form = None;
+            self.read_dimension(part, sketch, constraint, None);
+        }
+    }
+
+    fn read_dimension(
+        &mut self,
+        part: String,
+        sketch: String,
+        constraint: String,
+        before: Option<Box<DimForm>>,
+    ) {
+        let req = Request::SketchGet {
+            part: part.clone(),
+            sketch: sketch.clone(),
+            quality: None,
+        };
+        self.send(req, Pending::Dim(part, sketch, constraint, before));
+    }
+
+    /// Saves the value typed into the dimension's form.
+    pub fn save_dimension(&mut self) {
+        let Some(f) = &mut self.dimension else { return };
+        f.saving = true;
+        f.error = None;
+        let req = f.request();
+        self.send(req, Pending::DimSave);
     }
 
     /// Saves what was typed into the form.
@@ -552,6 +596,42 @@ impl Workspace {
                     });
                 }
             }
+            (Pending::Dim(part, sketch, constraint, before), Ok(a)) => {
+                // The last asked for wins, as for features.
+                let same = |f: &DimForm| {
+                    f.part == part && f.sketch == sketch && f.constraint == constraint
+                };
+                let wanted = match (&before, &self.dimension) {
+                    (Some(_), Some(f)) => same(f),
+                    (None, _) => true,
+                    (Some(_), None) => false,
+                };
+                if wanted {
+                    self.dimension = match before {
+                        Some(b) => b.reloaded(&a.result),
+                        None => DimForm::from_get(&part, &sketch, &constraint, &a.result),
+                    };
+                }
+            }
+            (Pending::DimSave, Ok(_)) => {
+                // Read it back as the files now have it.
+                if let Some(f) = &self.dimension {
+                    let (p, s, c) = (f.part.clone(), f.sketch.clone(), f.constraint.clone());
+                    self.read_dimension(p, s, c, None);
+                }
+            }
+            (Pending::DimSave, Err(e)) => {
+                if let Some(f) = &mut self.dimension {
+                    f.saving = false;
+                    if e.code == Code::Conflict {
+                        let before = Box::new(f.clone());
+                        let (p, s, c) = (f.part.clone(), f.sketch.clone(), f.constraint.clone());
+                        self.read_dimension(p, s, c, Some(before));
+                    } else {
+                        f.error = Some(e);
+                    }
+                }
+            }
             (Pending::Save, Ok(a)) => {
                 if let Some(f) = &self.form {
                     let mut v = a.result["feature"].clone();
@@ -683,6 +763,16 @@ impl Workspace {
                 },
                 Pending::Form(part, None),
             );
+        }
+        // So does a dimension's.
+        if let Some(f) = &self.dimension
+            && report["part"] == f.part.as_str()
+            && report["revision"] != f.revision.as_str()
+            && !f.dirty()
+            && !f.saving
+        {
+            let (p, s, c) = (f.part.clone(), f.sketch.clone(), f.constraint.clone());
+            self.read_dimension(p, s, c, None);
         }
         let wanted = self.model.apply_part(report);
         self.fetch(wanted);

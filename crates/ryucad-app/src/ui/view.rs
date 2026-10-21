@@ -11,6 +11,7 @@ use crate::ui::style::{self, Rgb};
 use eframe::egui::{self, PointerButton, Sense};
 use eframe::{egui_wgpu, wgpu};
 use ryucad::live::SelectMode;
+use ryucad::sketch_view::ConstraintState;
 use ryucad::view::{self, StandardView};
 use std::collections::BTreeMap;
 
@@ -310,6 +311,69 @@ impl View {
         out
     }
 
+    /// Sketches' dimensions as labels where they aren't hidden behind a
+    /// solid, in their states' colours; clicking one opens its value in
+    /// the property panel.
+    fn dimension_labels(
+        &mut self,
+        ui: &mut egui::Ui,
+        ws: &mut Workspace,
+        rect: egui::Rect,
+        pr: &Projector,
+    ) {
+        let size = [f64::from(rect.width()), f64::from(rect.height())];
+        let open = ws
+            .dimension
+            .as_ref()
+            .map(|f| (f.part.clone(), f.sketch.clone(), f.constraint.clone()));
+        let mut chosen = None;
+        let drawings: Vec<_> = ws
+            .model
+            .sketches
+            .iter()
+            .map(|(k, d)| (k.clone(), std::sync::Arc::clone(d)))
+            .collect();
+        for (key, d) in drawings {
+            for l in &d.labels {
+                let Some(n) = pr.ndc(l.at) else { continue };
+                let s = egui::pos2(
+                    rect.min.x + ((n[0] + 1.0) / 2.0 * size[0]) as f32,
+                    rect.min.y + ((1.0 - n[1]) / 2.0 * size[1]) as f32,
+                );
+                if !rect.contains(s) || self.picker(ws).hidden(pr, l.at) {
+                    continue;
+                }
+                let me = (key.0.clone(), key.1.clone(), l.constraint.clone());
+                let color = match (open.as_ref() == Some(&me), l.state) {
+                    (true, _) => style::color32(style::SELECTED),
+                    (_, ConstraintState::Ok) => ui.visuals().text_color(),
+                    (_, ConstraintState::Redundant) => style::color32(ryucad::render::SKETCH_OVER),
+                    (_, ConstraintState::Conflicting) => {
+                        style::color32(ryucad::render::SKETCH_FAILING)
+                    }
+                };
+                let id = ui.scope_id().with(("dimension", &key, &l.constraint));
+                egui::Area::new(id)
+                    .fixed_pos(s)
+                    .pivot(egui::Align2::CENTER_CENTER)
+                    .constrain_to(rect)
+                    .order(egui::Order::Middle)
+                    .show(ui.ctx(), |ui| {
+                        let text = egui::RichText::new(&l.text).color(color).small();
+                        let r = ui
+                            .add(egui::Button::new(text).small())
+                            .on_hover_text(format!("{} {} of {}", l.ty, l.constraint, key.1));
+                        if r.clicked() {
+                            chosen = Some(me.clone());
+                        }
+                    });
+            }
+        }
+        if let Some(c) = chosen {
+            ws.open_dimension(Some(c));
+        }
+    }
+
     /// Draws the viewport into `ui`'s remaining space and handles its
     /// input. `gpu` is the window's wgpu state (`None` with no adapter).
     pub fn show(
@@ -503,6 +567,9 @@ impl View {
                 }
                 Place::Face(..) => {}
             }
+        }
+        if self.sketches {
+            self.dimension_labels(ui, ws, rect, &pr);
         }
         for (i, (text, at, c)) in self.labels(ws).into_iter().enumerate() {
             let Some(s) = to_screen(at).filter(|s| rect.contains(*s)) else {

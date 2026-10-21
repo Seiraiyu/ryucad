@@ -78,3 +78,79 @@ fn the_default_unit_relabels_dimensions() {
             .is_some_and(|d| d.labels[0].text == "width = 2 cm")
     }));
 }
+
+/// The window with sketch `s` drawn and the form open for its dimension
+/// `d1` (the width).
+fn dimension_open(p: &Project) -> Workspace {
+    let mut ws = open(p);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && drawn(ws)));
+    ws.open_dimension(Some(("p".into(), "s".into(), "d1".into())));
+    assert!(ws.wait_until(WAIT, |ws| ws.dimension.is_some()));
+    ws
+}
+
+fn width_on_disk(p: &Project) -> String {
+    p.ok(&["feature", "show", "p", "s"])["constraints"]["d1"]["value"]["value"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn a_dimension_saves_through_sketch_edit() {
+    let p = Project::new().with_sketch();
+    let mut ws = dimension_open(&p);
+    let f = ws.dimension.as_mut().unwrap();
+    assert_eq!((f.ty.as_str(), f.value.read.as_str()), ("length", "width"));
+    f.value.text = "width + 5 mm".into();
+    ws.save_dimension();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.dimension
+            .as_ref()
+            .is_some_and(|f| !f.saving && f.value.read == "width + 5 mm")
+    }));
+    assert_eq!(width_on_disk(&p), "width + 5 mm");
+    // The sketch was solved and written: the extrude grew with it.
+    let log = p.ok(&["activity"]);
+    let last = log["entries"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["method"], "sketch.edit");
+    assert_eq!(last["participant"]["id"], ws.me());
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.model
+            .sketches
+            .get(&key())
+            .is_some_and(|d| d.labels[0].text == "width + 5 mm = 25 mm")
+    }));
+}
+
+#[test]
+fn a_stale_dimension_save_conflicts() {
+    let p = Project::new().with_sketch();
+    let mut ws = dimension_open(&p);
+    ws.dimension.as_mut().unwrap().value.text = "30 mm".into();
+    // An agent edits the same sketch first.
+    let ops = r#"[{"op": "set", "id": "d1", "value": "25 mm"}]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    ws.save_dimension();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.dimension.as_ref().is_some_and(|f| f.changed.is_some())
+    }));
+    let f = ws.dimension.as_ref().unwrap();
+    let c = f.changed.as_ref().unwrap();
+    assert_eq!((c.theirs.as_str(), c.yours.as_str()), ("25 mm", "30 mm"));
+    assert_eq!(f.value.text, "25 mm");
+    assert_eq!(width_on_disk(&p), "25 mm");
+}
+
+#[test]
+fn a_dimension_that_cant_hold_is_refused() {
+    let p = Project::new().with_sketch();
+    let mut ws = dimension_open(&p);
+    ws.dimension.as_mut().unwrap().value.text = "-3 mm".into();
+    ws.save_dimension();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.dimension.as_ref().is_some_and(|f| f.error.is_some())
+    }));
+    assert!(ws.dimension.as_ref().unwrap().dirty());
+    assert_eq!(width_on_disk(&p), "width");
+}

@@ -361,6 +361,21 @@ impl Picker {
         face
     }
 
+    /// Whether a face hides `p` from the eye (or it is behind the eye):
+    /// judged along its own sight line, as picking judges points.
+    pub fn hidden(&self, pr: &Projector, p: [f64; 3]) -> bool {
+        let Some(n) = pr.ndc(p) else {
+            return true;
+        };
+        let (o, d) = pr.ray(n);
+        let (_, _, forward) = pr.camera.basis();
+        let depth = |q: [f64; 3]| dot(sub(q, pr.camera.eye), forward);
+        self.face_along(o, d).is_some_and(|(t, ..)| {
+            let f = depth([0, 1, 2].map(|k| o[k] + d[k] * t));
+            depth(p) > f + 1e-3 * f.abs().max(pr.camera.distance())
+        })
+    }
+
     /// What is under the pixel `px` of a viewport `size` pixels big.
     pub fn pick(&self, pr: &Projector, size: [f64; 2], px: [f64; 2]) -> Option<Hit> {
         let to_ndc = |q: [f64; 2]| [2.0 * q[0] / size[0] - 1.0, 1.0 - 2.0 * q[1] / size[1]];

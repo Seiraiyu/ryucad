@@ -196,9 +196,67 @@ fn field_row(ui: &mut egui::Ui, f: &mut crate::core::edit::Field, label: &str) {
     ui.end_row();
 }
 
+/// A sketch dimension's value, edited in place. Apply sends `sketch.edit`
+/// against the revision it was read at.
+fn dimension(ui: &mut egui::Ui, ws: &mut Workspace) {
+    let Some(form) = &mut ws.dimension else {
+        return;
+    };
+    ui.heading(&form.constraint);
+    ui.label(format!(
+        "{} in sketch {} of part {}",
+        form.ty, form.sketch, form.part
+    ));
+    if let Some(c) = &form.changed {
+        let frame =
+            egui::Frame::group(ui.style()).fill(ui.visuals().warn_fg_color.gamma_multiply(0.15));
+        let mut ok = false;
+        frame.show(ui, |ui| {
+            ui.label("Someone changed this dimension while you edited it. It now reads:");
+            ui.label(format!("{} (you typed {})", c.theirs, c.yours));
+            ok = ui.button("OK").clicked();
+        });
+        if ok {
+            form.changed = None;
+        }
+    }
+    ui.separator();
+    egui::Grid::new("dimension").num_columns(2).show(ui, |ui| {
+        field_row(ui, &mut form.value, "value");
+    });
+    if let Some(e) = &form.error {
+        ui.colored_label(ui.visuals().error_fg_color, &e.message);
+    }
+    let (dirty, saving) = (form.dirty(), form.saving);
+    let mut save = false;
+    ui.horizontal(|ui| {
+        save = ui
+            .add_enabled(dirty && !saving, egui::Button::new("Apply"))
+            .clicked();
+        if ui
+            .add_enabled(dirty && !saving, egui::Button::new("Revert"))
+            .clicked()
+        {
+            form.value.text.clone_from(&form.value.read);
+            form.error = None;
+        }
+        if saving {
+            ui.spinner();
+        }
+    });
+    if save {
+        ws.save_dimension();
+    }
+}
+
 /// The chosen feature's parameters and placement, edited in place. Apply
-/// sends `feature.edit` against the revision the form was read at.
+/// sends `feature.edit` against the revision the form was read at. A
+/// dimension chosen by its label shows instead.
 pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
+    if ws.dimension.is_some() {
+        dimension(ui, ws);
+        return;
+    }
     let Some(form) = &mut ws.form else {
         ui.weak("Choose a feature in the tree to see and edit it");
         return;
