@@ -664,3 +664,65 @@ fn a_chain_round_a_pipe_fillets_end() {
     assert!(pipes >= 2);
     assert!(volume(&s, 1e-4) < volume(&r, 1e-4));
 }
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_chain_round_a_pipe_fillets_end_cut_off_square() {
+    use ryukei::blend::tangent_chain;
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::geom::{Curve, Surface, Vector3};
+    // The oblique rim less the part of it with x < 0.3: the plane cuts it
+    // off square to neither its rim nor its fillet.
+    let half = primitive::block(
+        OpKey(4),
+        3.0,
+        6.0,
+        6.0,
+        &Rigid::translation(Vector3::new(-2.7, -3.0, -1.0)),
+    )
+    .unwrap()
+    .0;
+    let tool = Tool {
+        key: ToolKey(9),
+        body: &half,
+        place: Rigid::IDENTITY,
+    };
+    let b = boolean(OpKey(5), BooleanOp::Subtract, &slanted(), &[tool])
+        .unwrap()
+        .0;
+    let arc = b
+        .edges()
+        .find(|&e| matches!(b.curve(b.edge(e).unwrap().curve), Some(Curve::Ellipse(_))))
+        .unwrap();
+    let (r, _) = blend(K, &b, &[fillet(b.edge(arc).unwrap().name, 0.2)]).unwrap();
+    assert_eq!(crossings_but_sections(&r), []);
+    let pipe = r
+        .faces()
+        .find(|&f| {
+            matches!(
+                r.surface(r.face(f).unwrap().surface),
+                Some(Surface::Pipe(_))
+            )
+        })
+        .unwrap();
+    // The chain round the cut face's top: its sides, the fillet's end
+    // curves and the edge along the oblique top between them.
+    let end = r
+        .face_loops(pipe)
+        .flat_map(|l| r.loop_fins(l).collect::<Vec<_>>())
+        .map(|f| r.fin(f).unwrap().edge)
+        .find(|&e| tangent_chain(&r, e).unwrap().len() > 1)
+        .unwrap();
+    let chain = tangent_chain(&r, end).unwrap();
+    assert_eq!(chain.len(), 5);
+    let blends: Vec<EdgeBlend> = chain
+        .iter()
+        .map(|&e| fillet(r.edge(e).unwrap().name, 0.05))
+        .collect();
+    let (s, _) = blend(OpKey(0xb2), &r, &blends).unwrap();
+    assert_eq!(crossings_but_sections(&s), []);
+    assert!(volume(&s, 1e-4) < volume(&r, 1e-4));
+}

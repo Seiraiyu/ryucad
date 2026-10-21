@@ -104,6 +104,15 @@ pub(crate) fn spine(body: &Body, spec: &Spec, radius: f64) -> Result<Spine, Erro
         return Err(BlendError::Uncertain { at }.into());
     }
     let b = branches.into_iter().nth(k).expect("a chosen branch");
+    // A closed branch fitted as a clamped spline starts opposite the ball
+    // at the edge's middle, so the blend takes one stretch of it.
+    let [r0, r1] = b.range;
+    let b = super::seam::reseamed(b, r0 + (mid - r0 + (r1 - r0) / 2.0).rem_euclid(r1 - r0));
+    let mid = if mid < b.range[0] {
+        mid + (r1 - r0)
+    } else {
+        mid
+    };
     let e = &body.edges[spec.edge];
     let [t0, t1] = e.interval;
     let along = body.curves[e.curve].eval((t0 + t1) / 2.0).d1;
@@ -248,7 +257,7 @@ fn mid_centre(
 
 /// The point `x` with `rows[k] · x = rhs[k]`, by Cramer's rule; `None`
 /// when the rows are nearly dependent.
-fn solve3(rows: [Vector3; 3], rhs: [f64; 3]) -> Option<Point3> {
+pub(crate) fn solve3(rows: [Vector3; 3], rhs: [f64; 3]) -> Option<Point3> {
     let [a, b, c] = rows;
     let det = a.dot(b.cross(c));
     if det.abs() <= 1e-12 {

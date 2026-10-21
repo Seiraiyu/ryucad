@@ -132,8 +132,8 @@ pub(crate) fn tangent_directions(a: UnitVector3, b: UnitVector3, slack: f64) -> 
 /// The direction an edge leaves `v` in, from its curve's tangent at the
 /// end at `v` (its start when it is closed), and how far that may be
 /// from the true direction: nothing for a line, circle or ellipse, and
-/// for a fitted NURBS four times its tolerance over the length of its
-/// piece at that end (a fit within `δ` of the curve turns up to about
+/// for a fitted NURBS four times its tolerance over the length of the
+/// piece the end lies in (a fit within `δ` of the curve turns up to about
 /// `δ / h` from it over a piece `h` long). `None` where the tangent
 /// vanishes.
 pub(crate) fn leaving(body: &Body, edge: EdgeId, v: VertexId) -> Option<(UnitVector3, f64)> {
@@ -148,15 +148,26 @@ pub(crate) fn leaving(body: &Body, edge: EdgeId, v: VertexId) -> Option<(UnitVec
     }?;
     let slack = match curve {
         crate::geom::Curve::Nurbs(n) => {
+            // The whole piece the end lies in, for a periodic curve by its
+            // parameter brought into the domain.
+            let t = if from_start { t0 } else { t1 };
+            let [d0, d1] = n.domain();
+            let shift = match n.period() {
+                Some(p) => ((t - d0) / p).floor() * p,
+                None => 0.0,
+            };
+            let u = t - shift;
             let knots = n.knots().knots();
             let (a, b) = if from_start {
-                let next = knots.iter().copied().find(|&k| k > t0).unwrap_or(t1);
-                (t0, next.min(t1))
+                let a = knots.iter().rev().copied().find(|&k| k <= u).unwrap_or(d0);
+                let b = knots.iter().copied().find(|&k| k > u).unwrap_or(d1);
+                (a, b)
             } else {
-                let prev = knots.iter().rev().copied().find(|&k| k < t1).unwrap_or(t0);
-                (prev.max(t0), t1)
+                let a = knots.iter().rev().copied().find(|&k| k < u).unwrap_or(d0);
+                let b = knots.iter().copied().find(|&k| k >= u).unwrap_or(d1);
+                (a, b)
             };
-            let h = curve.point(a).distance(curve.point(b));
+            let h = curve.point(a + shift).distance(curve.point(b + shift));
             if h > 0.0 {
                 4.0 * e.tolerance.get() / h
             } else {

@@ -53,6 +53,33 @@ impl Item<'_> {
         self.interval.map(|t| m[0] + m[1] * t)
     }
 
+    /// The pcurve's range less, at each end, the stretch over which a
+    /// curve touching an edge there tangentially stays within the
+    /// tolerances of it: ten times `sqrt(2 × size × tolerance)`, the
+    /// size about its length. `None` for a curve with nothing it may end
+    /// on.
+    fn inner(&self) -> Option<[f64; 2]> {
+        if self.allowed.is_empty() {
+            return None;
+        }
+        let [a, b] = self.interval;
+        let [p, q] = self.ends();
+        let size = p.distance(self.curve.point((a + b) / 2.0)) + q.distance(p);
+        let s = 10.0 * (2.0 * size * self.tolerance.max(LINEAR_RESOLUTION)).sqrt();
+        let speed = |t: f64| self.curve.eval(t).d1.length();
+        let (va, vb) = (speed(a), speed(b));
+        if !(va > 0.0 && vb > 0.0) {
+            return None;
+        }
+        let dir = (b - a).signum();
+        let [a2, b2] = [a + dir * s / va, b - dir * s / vb];
+        if (b2 - a2) * dir <= 0.0 {
+            return None;
+        }
+        let m = self.pcurve.1;
+        Some([m[0] + m[1] * a2, m[0] + m[1] * b2])
+    }
+
     fn bounds(&self) -> Box3 {
         let [a, b] = self.interval;
         self.curve.bounds([a.min(b), a.max(b)]).grow(self.tolerance)
@@ -171,6 +198,13 @@ pub(crate) fn check(
                 let c2 = &body.curves2[pc.curve];
                 let reach = 10.0 * (it.tolerance + e.tolerance.get());
                 for p in meets(body, face, (it.pcurve.0, it.range2()), (c2, range))
+                    .or_else(|| {
+                        // Rounding can't settle a tangent touch where the
+                        // curve ends on an edge it may end on: leave out
+                        // the stretch where the two stay that close.
+                        let inner = it.inner()?;
+                        meets(body, face, (it.pcurve.0, inner), (c2, range))
+                    })
                     .ok_or(BlendError::Uncertain { at: it.edge })?
                 {
                     let at_end = it.ends().iter().any(|q| q.distance(p) <= reach);

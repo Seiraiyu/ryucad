@@ -236,10 +236,10 @@ pub(crate) fn plan(body: &Body, specs: &[Spec], chain: &Chain) -> Result<Plan, E
         })
         .collect();
     for e in ends {
-        let seg = if e.vertex == 0 {
-            &segments[0]
+        let (seg, part) = if e.vertex == 0 {
+            (&segments[0], &parts[0])
         } else {
-            &segments[segments.len() - 1]
+            (&segments[segments.len() - 1], &parts[parts.len() - 1])
         };
         let vertex = chain.vertices[e.vertex];
         let end = &body.surfaces[body.faces[e.face].surface];
@@ -250,6 +250,7 @@ pub(crate) fn plan(body: &Body, specs: &[Spec], chain: &Chain) -> Result<Plan, E
             e.crossings[1].point,
             body.vertices[vertex].point,
             seg.reach,
+            &|m| on_face(part, m),
         )
         .map_err(|f| match f {
             EndFail::Unsupported => BlendError::Unsupported {
@@ -526,6 +527,35 @@ fn fillet_joint(
             },
         },
     })
+}
+
+/// Where a point `m` of a segment's surface lies against its face: at
+/// least 0 on it, below 0 round the back of the surface. For a fillet,
+/// how much nearer the middle of the section through `m` it is than the
+/// rails are (in the cosine of the angle about the spine); for a chamfer,
+/// how far outside the section's line between the rails it is, against
+/// that line's length.
+pub(crate) fn on_face(part: &Partial, m: Point3) -> f64 {
+    let (t, _) = nearest(&part.carrier, part.span, m);
+    let [a, b] = [0, 1].map(|s| part.rails[s].curve.point(part.rails[s].param(t)));
+    match &part.spine {
+        Some(spine) => {
+            let c = spine.curve.point(t);
+            let unit = |v: crate::geom::Vector3| v.normalize().map(|u| u.get());
+            let (Some(mid), Some(ua), Some(um)) =
+                (unit((a - c) + (b - c)), unit(a - c), unit(m - c))
+            else {
+                return f64::NEG_INFINITY;
+            };
+            um.dot(mid) - ua.dot(mid)
+        }
+        None => {
+            let ab = b - a;
+            let len2 = ab.length_squared();
+            let l = ((m - a).dot(ab) / len2).clamp(0.0, 1.0);
+            -(a + ab * l).distance(m) / len2.sqrt()
+        }
+    }
 }
 
 /// The error for a failed end.
