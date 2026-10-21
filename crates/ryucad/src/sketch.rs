@@ -1050,10 +1050,18 @@ pub fn solve_request(
 }
 
 /// `sketch.get`: the solved geometry in the sketch's frame and in model
-/// space, each entity's and constraint's state, and the report. A sketch
-/// that can't be solved gives its best try, with the report saying so.
-pub fn get(session: &mut Session, part: &str, sketch: &str) -> Result<Value> {
+/// space, each entity's and constraint's state, and the report; each
+/// curve's polyline (arcs and circles to `quality`'s angle) and each
+/// dimension's label ([`crate::sketch_view`]). A sketch that can't be
+/// solved gives its best try, with the report saying so.
+pub fn get(
+    session: &mut Session,
+    part: &str,
+    sketch: &str,
+    quality: crate::mesh::Quality,
+) -> Result<Value> {
     let (pid, fid) = (server::part_id(part)?, server::feature_id(sketch)?);
+    let unit = session.project().manifest.default_unit;
     let stored = sketch_of(session, &pid, &fid)?;
     let ctx = context_now(session, &pid, &fid, &stored)?;
     let (solved, report) = solve_any(&fid, &stored, &ctx)?;
@@ -1066,27 +1074,21 @@ pub fn get(session: &mut Session, part: &str, sketch: &str) -> Result<Value> {
         let v = frame.apply_vector(ryukei::geom::Vector3::new(x, y, z));
         [v.x, v.y, v.z]
     };
-    // What can move, and what takes part in a redundant or conflicting set.
-    let free: Vec<&Id> = report.free.iter().map(|(id, _)| id).collect();
-    let in_set = |sets: &[Vec<Id>], id: &Id| sets.iter().any(|s| s.contains(id));
-    let mut over: Vec<&Id> = Vec::new();
-    for (cid, c) in &solved.constraints {
-        if in_set(&report.redundant, cid) || in_set(&report.conflicting, cid) {
-            over.extend(&c.entities);
-        }
-    }
+    let view = Solved {
+        stale: solved != stored,
+        hash: String::new(),
+        sketch: solved,
+        report,
+        frame,
+    };
+    let (solved, report) = (&view.sketch, &view.report);
+    let states = crate::sketch_view::entity_states(solved, report);
+    let cstates = crate::sketch_view::constraint_states(solved, report);
+    let drawing = crate::sketch_view::drawing(&view, quality.angle(), unit);
     let mut entities = solved.fields()["entities"].clone();
     for (id, e) in &solved.entities {
-        let moves = free.contains(&id) || e.geometry.points().iter().any(|(_, p)| free.contains(p));
-        let state = if over.contains(&id) {
-            if report.converged { "over" } else { "failing" }
-        } else if moves {
-            "under"
-        } else {
-            "well"
-        };
         let v = &mut entities[id.as_str()];
-        v["state"] = json!(state);
+        v["state"] = json!(states[id].as_str());
         match &e.geometry {
             Geometry::Point { m } => v["at"] = json!(at(*m)),
             Geometry::Arc { center, start, .. } => {
@@ -1100,6 +1102,9 @@ pub fn get(session: &mut Session, part: &str, sketch: &str) -> Result<Value> {
             _ => {}
         }
     }
+    for c in &drawing.curves {
+        entities[c.entity.as_str()]["polyline"] = json!(c.points);
+    }
     let mut constraints = serde_json::Map::new();
     for (id, c) in &solved.constraints {
         let mut v = json!({"type": c.ty.as_str()});
@@ -1109,28 +1114,26 @@ pub fn get(session: &mut Session, part: &str, sketch: &str) -> Result<Value> {
         if let Some(q) = &c.value {
             v["value"] = q.report();
         }
-        v["state"] = json!(if in_set(&report.conflicting, id) {
-            "conflicting"
-        } else if in_set(&report.redundant, id) {
-            "redundant"
-        } else {
-            "ok"
-        });
+        v["state"] = json!(cstates[id].as_str());
         constraints.insert(id.to_string(), v);
+    }
+    for l in &drawing.labels {
+        constraints[l.constraint.as_str()]["label"] = json!({"at": l.at, "text": l.text});
     }
     let o = frame.apply_point(ryukei::geom::Point3::new(0.0, 0.0, 0.0));
     let mut v = json!({
         "feature": fid,
         "frame": {"origin": [o.x, o.y, o.z], "x": axis(1.0, 0.0, 0.0),
                   "y": axis(0.0, 1.0, 0.0), "z": axis(0.0, 0.0, 1.0)},
-        "stale": solved != stored,
+        "stale": view.stale,
         "report": report.to_json(),
+        "quality": quality.as_str(),
         "entities": entities,
         "constraints": constraints,
         "revision": session.project().part(&pid)?.revision,
     });
     let mut fields = solved.fields();
-    server::reference_texts(&pid, &solved, &mut fields);
+    server::reference_texts(&pid, solved, &mut fields);
     for k in ["plane", "placement", "face", "origin", "x"] {
         if let Some(x) = fields.get(k) {
             v[k] = x.clone();
@@ -1639,6 +1642,66 @@ pub(crate) mod tests {
                 "{v} != {want:?}"
             );
         }
+    }
+
+    #[test]
+    fn get_says_how_a_sketch_is_drawn() {
+        let (_dir, mut s) = with_sketch();
+        let mut ops = rectangle_ops().as_array().unwrap().clone();
+        ops.push(json!({"op": "add", "type": "point", "at": [10, 5]}));
+        ops.push(json!({"op": "add", "type": "circle", "center": "p5", "r": 3}));
+        ops.push(json!({"op": "add", "type": "radius", "a": "ci1", "value": "3 mm"}));
+        edit(&mut s, json!(ops)).unwrap();
+        let get = |s: &mut Session, q: &str| {
+            call(
+                s,
+                "sketch.get",
+                json!({"part": "p", "sketch": "s", "quality": q}),
+            )
+            .unwrap()
+        };
+        let g = get(&mut s, "normal");
+        assert_eq!(g["quality"], "normal");
+        // A line is its two ends; a circle is 24 pieces at normal quality,
+        // 8 when coarse.
+        // Solved, so within the solver's tolerance of the corners.
+        let l1 = &g["entities"]["l1"]["polyline"];
+        assert_eq!(l1.as_array().unwrap().len(), 2);
+        for (p, want) in l1.as_array().unwrap().iter().zip([[0.0, 0.0], [0.02, 0.0]]) {
+            for k in 0..2 {
+                assert!(
+                    (p[k].as_f64().unwrap() - want[k]).abs() < ryusketch::SOLVE_TOL,
+                    "{l1}"
+                );
+            }
+            assert_eq!(p[2], 0.0);
+        }
+        assert_eq!(
+            g["entities"]["ci1"]["polyline"].as_array().unwrap().len(),
+            25
+        );
+        assert!(g["entities"]["p1"].get("polyline").is_none());
+        assert_eq!(g["entities"]["l1"]["state"], "well");
+        assert_eq!(g["entities"]["p5"]["state"], "under");
+        assert_eq!(g["constraints"]["width"]["label"]["text"], "20 mm");
+        assert_eq!(g["constraints"]["d1"]["label"]["text"], "10 mm");
+        assert_eq!(g["constraints"]["d2"]["label"]["text"], "3 mm");
+        assert!(g["constraints"]["c1"].get("label").is_none());
+        let coarse = get(&mut s, "coarse");
+        assert_eq!(
+            coarse["entities"]["ci1"]["polyline"]
+                .as_array()
+                .unwrap()
+                .len(),
+            9
+        );
+        let e = call(
+            &mut s,
+            "sketch.get",
+            json!({"part": "p", "sketch": "s", "quality": "best"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
     }
 
     #[test]

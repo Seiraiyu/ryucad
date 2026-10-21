@@ -270,12 +270,15 @@ enum Command {
         /// Point out an entity.
         #[arg(long = "highlight", value_name = "REF")]
         highlight: Vec<String>,
-        /// Label highlighted entities.
+        /// Label highlighted entities and sketches' dimensions.
         #[arg(long)]
         labels: bool,
         /// Leave out edges and silhouettes.
         #[arg(long)]
         no_edges: bool,
+        /// Leave out sketches.
+        #[arg(long)]
+        no_sketches: bool,
     },
     /// The project's Git commits (or one part's), and what is
     /// uncommitted. Read-only.
@@ -517,8 +520,15 @@ enum SketchCmd {
         ops: Option<Ops>,
     },
     /// The solved geometry, in the sketch's frame and the part's, with each entity's and
-    /// constraint's state.
-    Get { part: String, sketch: String },
+    /// constraint's state, curves as polylines and dimensions' labels.
+    Get {
+        part: String,
+        sketch: String,
+        /// How finely arcs and circles are drawn: coarse, normal or fine (the
+        /// user's display quality by default).
+        #[arg(long)]
+        quality: Option<String>,
+    },
 }
 
 /// Sketch ops, parsed from one argument.
@@ -893,9 +903,14 @@ fn request(cmd: &Command) -> Option<Request> {
             sketch: sketch.clone(),
             ops: ops.clone().map_or_else(Vec::new, |o| o.0),
         },
-        Command::Sketch(SketchCmd::Get { part, sketch }) => Request::SketchGet {
+        Command::Sketch(SketchCmd::Get {
+            part,
+            sketch,
+            quality,
+        }) => Request::SketchGet {
             part: part.clone(),
             sketch: sketch.clone(),
+            quality: quality.clone(),
         },
         Command::Rebuild { part, rev } => Request::Rebuild {
             part: part.clone(),
@@ -997,6 +1012,7 @@ fn request(cmd: &Command) -> Option<Request> {
             highlight,
             labels,
             no_edges,
+            no_sketches,
         } => Request::Render {
             part: part.clone(),
             camera: camera_arg(eye, target, up, fov, ortho),
@@ -1007,6 +1023,7 @@ fn request(cmd: &Command) -> Option<Request> {
             highlight: highlight.clone(),
             edges: Some(!no_edges),
             labels: Some(*labels),
+            sketches: Some(!no_sketches),
         },
         Command::Highlight {
             entities,

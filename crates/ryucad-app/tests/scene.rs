@@ -47,6 +47,7 @@ fn the_model_is_drawn_with_its_edges_and_painted_faces() {
             edges,
             faces,
             background,
+            overlay: &[],
         };
         scene.render(&device, &queue, [size, size], &list);
         scene.read_pixels(&device, &queue).unwrap().2
@@ -159,6 +160,7 @@ fn hidden_edges_stay_hidden_close_up() {
         light: scene::light(&camera),
         edges: true,
         faces: &[],
+        overlay: &[],
         background: theme::BACKGROUND,
     };
     scene.render(&device, &queue, [size, size], &list);
@@ -167,4 +169,61 @@ fn hidden_edges_stay_hidden_close_up() {
     let edge = srgb(theme::EDGE);
     let lines = px.chunks(4).filter(|c| close(&c[..3], edge, 24)).count();
     assert_eq!(lines, 0, "hidden edges drawn over the slab");
+}
+
+/// Sketches draw in their solve state's colour on the face they lie on,
+/// and hide behind solids as edges do.
+#[test]
+fn sketches_show_on_faces_and_hide_behind_them() {
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::new().with_part().with_top_sketch();
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let key = ("p".to_owned(), "top".to_owned());
+    let drawn = |ws: &Workspace, z: f64| {
+        ws.model
+            .sketches
+            .get(&key)
+            .is_some_and(|d| (d.dots[0].at[2] - z).abs() < 1e-9)
+    };
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.model.meshes.len() == 2
+        && drawn(ws, 0.005)));
+    let size = 160u32;
+    let mut scene = Scene::new(&device, &adapter);
+    let mut blue = |ws: &Workspace| {
+        let picker = Picker::new(&ws.model);
+        let (lo, hi) = picker.bounds().unwrap();
+        let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+        let camera = view::frame(lo, hi, StandardView::Top, view::DEFAULT_PROJECTION);
+        let pr = Projector::new(&camera, 1.0, centre, 0.02);
+        scene.sync(&device, &ws.model, centre);
+        let s = f64::from(size);
+        let overlay = ryucad_app::core::sketch::overlay(
+            ws.model.sketches.values().map(|d| &**d),
+            &pr,
+            [s, s],
+            1.0,
+        );
+        let list = DrawList {
+            reference: centre,
+            matrix: pr.matrix(centre),
+            perspective: pr.line_pull(),
+            light: scene::light(&camera),
+            edges: true,
+            faces: &[],
+            background: theme::BACKGROUND,
+            overlay: &overlay,
+        };
+        scene.render(&device, &queue, [size, size], &list);
+        let px = scene.read_pixels(&device, &queue).unwrap().2;
+        let under = srgb(ryucad::render::SKETCH_UNDER);
+        px.chunks(4).filter(|c| close(&c[..3], under, 24)).count()
+    };
+    assert!(blue(&ws) > 60, "the sketch on the top face shows");
+    // Under the box, seen from above, it is hidden.
+    p.ok(&["feature", "edit", "p", "top", "--origin", "0,0,-1"]);
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle() && drawn(ws, -0.001)));
+    assert_eq!(blue(&ws), 0, "the sketch under the box is hidden");
 }

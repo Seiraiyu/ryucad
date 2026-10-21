@@ -342,6 +342,54 @@ fn sketches_from_the_cli() {
 }
 
 #[test]
+fn sketches_are_drawn_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&["feature", "add", "p", "sketch", "--id", "s"]);
+    let ops = r#"[
+        {"op": "add", "type": "point", "at": [0, 0]},
+        {"op": "add", "type": "point", "at": [20, 0]},
+        {"op": "add", "type": "point", "at": [10, 8]},
+        {"op": "add", "type": "line", "start": "p1", "end": "p2"},
+        {"op": "add", "type": "circle", "center": "p3", "r": 4},
+        {"op": "add", "type": "length", "a": "l1", "value": "20 mm"},
+        {"op": "add", "type": "radius", "a": "ci1", "value": "4 mm"}
+    ]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    // Curves as polylines, finer or coarser, and dimensions' labels.
+    let pieces = |q: &str| {
+        let g = p.ok(&["sketch", "get", "p", "s", "--quality", q]);
+        assert_eq!(g["quality"], q);
+        g["entities"]["ci1"]["polyline"].as_array().unwrap().len()
+    };
+    assert!(pieces("coarse") < pieces("normal") && pieces("normal") < pieces("fine"));
+    let g = p.ok(&["sketch", "get", "p", "s"]);
+    assert_eq!(g["entities"]["l1"]["polyline"].as_array().unwrap().len(), 2);
+    assert_eq!(g["constraints"]["d1"]["label"]["text"], "20 mm");
+    p.fails(
+        &["sketch", "get", "p", "s", "--quality", "best"],
+        "invalid_param",
+        1,
+    );
+    // Renders draw sketches unless told not to, the same both ways.
+    for (file, extra) in [("with.png", None), ("without.png", Some("--no-sketches"))] {
+        let mut args = vec!["render", "--out", file, "--size", "120x90", "--view", "top"];
+        args.extend(extra);
+        p.ok(&args);
+    }
+    let with = pixels(&p.direct.join("with.png"));
+    assert_eq!(with, pixels(&p.daemon.join("with.png")));
+    let without = pixels(&p.direct.join("without.png"));
+    assert_eq!(without, pixels(&p.daemon.join("without.png")));
+    assert_ne!(with, without);
+    // Without sketches, only the axis triad is off the background.
+    let bg = [245, 246, 248];
+    let drawn = |img: &(u32, u32, Vec<u8>)| img.2.chunks(4).filter(|c| c[..3] != bg).count();
+    assert!(drawn(&with) > drawn(&without) + 100);
+}
+
+#[test]
 fn sketches_become_bodies_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);

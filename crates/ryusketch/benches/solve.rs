@@ -1,6 +1,7 @@
-//! Solving polygons of 10, 100 and 1,000 entities (half points, half
-//! sides), all one connected component, from positions jostled by about a
-//! fiftieth of a side and from solved ones (which still diagnoses).
+//! Solving polygons of 10 to 10,000 entities (half points, half sides),
+//! all one connected component, from positions jostled by about a
+//! fiftieth of a side and from solved ones (which still diagnoses); and
+//! stage 1 alone (whole components), to 1,000, to compare.
 
 #[path = "../tests/common/mod.rs"]
 mod common;
@@ -8,7 +9,7 @@ mod common;
 use common::{jostle, polygon};
 use divan::Bencher;
 use ryukei_testkit::Lcg;
-use ryusketch::{Sketch, solve};
+use ryusketch::{Sketch, solve, solve_whole};
 
 fn main() {
     divan::main();
@@ -23,14 +24,26 @@ fn sketch(entities: usize) -> Sketch {
     s
 }
 
-#[divan::bench(args = [10, 100, 1000], sample_count = 10)]
+#[divan::bench(args = [10, 100, 1000, 10000], sample_count = 10)]
 fn jostled(b: Bencher, entities: usize) {
     let s = sketch(entities);
     b.bench(|| solve(&s).unwrap());
 }
 
-#[divan::bench(args = [10, 100, 1000], sample_count = 10)]
+#[divan::bench(args = [10, 100, 1000, 10000], sample_count = 10)]
 fn solved(b: Bencher, entities: usize) {
     let s = solve(&sketch(entities)).unwrap().sketch;
     b.bench(|| solve(&s).unwrap());
+}
+
+#[divan::bench(args = [10, 100, 1000], sample_count = 10)]
+fn whole_jostled(b: Bencher, entities: usize) {
+    let s = sketch(entities);
+    b.bench(|| solve_whole(&s).unwrap());
+}
+
+#[divan::bench(args = [10, 100, 1000], sample_count = 10)]
+fn whole_solved(b: Bencher, entities: usize) {
+    let s = solve_whole(&sketch(entities)).unwrap().sketch;
+    b.bench(|| solve_whole(&s).unwrap());
 }

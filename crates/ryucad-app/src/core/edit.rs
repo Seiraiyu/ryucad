@@ -17,7 +17,7 @@ pub struct Field {
 }
 
 impl Field {
-    fn new(name: &str, read: String) -> Field {
+    pub fn new(name: &str, read: String) -> Field {
         Field {
             name: name.to_owned(),
             text: read.clone(),
@@ -180,9 +180,119 @@ impl Form {
     }
 }
 
+/// The form for one of a sketch's dimensions: its value as written,
+/// saved with `sketch.edit` against the revision it was read at.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DimForm {
+    pub part: String,
+    pub sketch: String,
+    pub constraint: String,
+    /// `length`, `radius` and so on.
+    pub ty: String,
+    /// The part revision the value was read at.
+    pub revision: String,
+    pub value: Field,
+    /// What changed under a save that conflicted.
+    pub changed: Option<Changed>,
+    /// Why the last save failed, other than a conflict.
+    pub error: Option<Error>,
+    /// A save is on its way.
+    pub saving: bool,
+}
+
+impl DimForm {
+    /// The form for `constraint` in a `sketch.get` answer, if it is there
+    /// and has a value.
+    pub fn from_get(part: &str, sketch: &str, constraint: &str, v: &Value) -> Option<DimForm> {
+        let c = v["constraints"].get(constraint)?;
+        let value = c["value"]["value"].as_str()?;
+        Some(DimForm {
+            part: part.to_owned(),
+            sketch: sketch.to_owned(),
+            constraint: constraint.to_owned(),
+            ty: text(&c["type"]),
+            revision: text(&v["revision"]),
+            value: Field::new(constraint, value.to_owned()),
+            changed: None,
+            error: None,
+            saving: false,
+        })
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.value.dirty()
+    }
+
+    /// The `sketch.edit` that sets what was typed, guarded by the revision
+    /// the form was read at.
+    pub fn request(&self) -> Request {
+        Request::SketchEdit {
+            part: self.part.clone(),
+            sketch: self.sketch.clone(),
+            ops: vec![json!({"op": "set", "id": self.constraint,
+                             "value": self.value.text.trim()})],
+            expected_revision: Some(self.revision.clone()),
+        }
+    }
+
+    /// The form read again after a conflict, saying what changed under
+    /// what was typed; `None` if the dimension is gone.
+    pub fn reloaded(&self, v: &Value) -> Option<DimForm> {
+        let mut fresh = DimForm::from_get(&self.part, &self.sketch, &self.constraint, v)?;
+        if self.dirty() && fresh.value.read != self.value.read {
+            fresh.changed = Some(Changed {
+                name: self.constraint.clone(),
+                theirs: fresh.value.read.clone(),
+                yours: self.value.text.trim().to_owned(),
+            });
+        }
+        Some(fresh)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn got(width: &str, revision: &str) -> Value {
+        json!({"revision": revision, "constraints": {
+            "d1": {"type": "length", "a": "l1", "value": {"value": width, "m": 0.02}},
+            "c1": {"type": "horizontal", "a": "l1"}}})
+    }
+
+    #[test]
+    fn a_dimension_saves_through_sketch_edit() {
+        let mut f = DimForm::from_get("p", "s", "d1", &got("width", "r1")).unwrap();
+        assert_eq!((f.ty.as_str(), f.value.read.as_str()), ("length", "width"));
+        assert!(DimForm::from_get("p", "s", "c1", &got("width", "r1")).is_none());
+        assert!(DimForm::from_get("p", "s", "d9", &got("width", "r1")).is_none());
+        f.value.text = " 2 * width ".into();
+        assert!(f.dirty());
+        let Request::SketchEdit {
+            ops,
+            expected_revision,
+            ..
+        } = f.request()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            ops,
+            [json!({"op": "set", "id": "d1", "value": "2 * width"})]
+        );
+        assert_eq!(expected_revision.as_deref(), Some("r1"));
+        // Changed underneath: what it is now, and what was typed.
+        let again = f.reloaded(&got("25 mm", "r2")).unwrap();
+        assert_eq!(again.value.text, "25 mm");
+        assert_eq!(
+            again.changed,
+            Some(Changed {
+                name: "d1".into(),
+                theirs: "25 mm".into(),
+                yours: "2 * width".into()
+            })
+        );
+    }
 
     fn shown(radius: &str, revision: &str) -> Value {
         json!({

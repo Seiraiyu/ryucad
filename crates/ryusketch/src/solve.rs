@@ -6,7 +6,14 @@
 //! free moves as little as it can and a solve stays on the branch the
 //! sketch is already on. A sketch that already holds is returned with the
 //! very same bits.
+//!
+//! Stage 2 solves a component in the pieces of its Dulmage-Mendelsohn
+//! decomposition ([`crate::blocks`]): its over-determined part, then its
+//! square blocks in order, then its under-determined part, each by the
+//! same steps over its own variables. A piece that doesn't converge sends
+//! the whole component back to stage 1 from where it started.
 
+use crate::blocks::{Blocks, decompose};
 use crate::linalg::{Mat, cholesky_solve};
 use crate::loops::{self, Chain, Loop};
 use crate::report::{Free, State, diagnose};
@@ -69,6 +76,17 @@ pub struct Report {
 /// moving the geometry as little as the solver can. Fails only when the
 /// sketch refers to what isn't there ([`Sketch::validate`]).
 pub fn solve(sketch: &Sketch) -> Result<Solved, SketchError> {
+    solve_with(sketch, true)
+}
+
+/// [`solve`] by stage 1 alone: each component as a whole, diagnosed from
+/// its whole Jacobian. For comparing the stages in tests and fuzzing.
+#[doc(hidden)]
+pub fn solve_whole(sketch: &Sketch) -> Result<Solved, SketchError> {
+    solve_with(sketch, false)
+}
+
+fn solve_with(sketch: &Sketch, staged: bool) -> Result<Solved, SketchError> {
     sketch.validate()?;
     let sys = System::new(sketch);
     let mut x = sys.vars.clone();
@@ -76,13 +94,20 @@ pub fn solve(sketch: &Sketch) -> Result<Solved, SketchError> {
     let mut converged = sys.faults.iter().all(|f| !f.conflicting)
         && sys.constant_eqs.iter().all(|&i| sys.misfit(i, &x) <= 1.0);
     let mut held = Vec::with_capacity(sys.components.len());
+    let mut pieces = Vec::with_capacity(sys.components.len());
     for comp in &sys.components {
-        let (ok, steps) = component(&sys, comp, &mut x);
+        let (ok, steps, blocks) = if staged {
+            in_pieces(&sys, comp, &mut x)
+        } else {
+            let (ok, steps) = component(&sys, comp, &mut x);
+            (ok, steps, None)
+        };
         converged &= ok;
         held.push(ok);
+        pieces.push(blocks);
         iterations += steps;
     }
-    let d = diagnose(&sys, &x, &held);
+    let d = diagnose(&sys, &x, &held, &pieces);
     let (loops, open) = loops::find(sketch, &sys.group_of);
     let solved = write_back(sketch, &sys, &x);
     let changed = solved != *sketch;
@@ -123,13 +148,9 @@ fn norm2(sys: &System, comp: &Component, x: &[f64]) -> f64 {
 }
 
 /// The Jacobian and residuals of `comp` at `x`, columns in `comp.vars`
-/// order.
+/// order (ascending); variables outside `comp` are left out.
 pub(crate) fn jacobian(sys: &System, comp: &Component, x: &[f64]) -> (Mat, Vec<f64>) {
-    let mut col = vec![usize::MAX; sys.vars.len()];
-    for (j, &v) in comp.vars.iter().enumerate() {
-        col[v] = j;
-    }
-    let at = |v: usize| (col[v] != usize::MAX).then_some(col[v]);
+    let at = |v: usize| comp.vars.binary_search(&v).ok();
     let mut jac = Mat::zeros(comp.eqs.len(), comp.vars.len());
     let mut r = Vec::with_capacity(comp.eqs.len());
     for (i, &e) in comp.eqs.iter().enumerate() {
@@ -140,8 +161,32 @@ pub(crate) fn jacobian(sys: &System, comp: &Component, x: &[f64]) -> (Mat, Vec<f
     (jac, r)
 }
 
-/// Solves one component in place. Returns whether it converged and the
-/// steps tried.
+/// Solves one component in place, piece by piece. Returns whether it
+/// converged, the steps tried, and the pieces it was solved in (`None`
+/// when it went back to stage 1).
+fn in_pieces(sys: &System, comp: &Component, x: &mut [f64]) -> (bool, u32, Option<Blocks>) {
+    if worst(sys, comp, x) <= 1.0 {
+        return (true, 0, Some(decompose(sys, comp)));
+    }
+    let start: Vec<f64> = comp.vars.iter().map(|&v| x[v]).collect();
+    let blocks = decompose(sys, comp);
+    let mut steps = 0;
+    for piece in blocks.pieces() {
+        let (ok, n) = component(sys, piece, x);
+        steps += n;
+        if !ok {
+            for (&v, &s) in comp.vars.iter().zip(&start) {
+                x[v] = s;
+            }
+            let (ok, n) = component(sys, comp, x);
+            return (ok, steps + n, None);
+        }
+    }
+    (worst(sys, comp, x) <= 1.0, steps, Some(blocks))
+}
+
+/// Solves one component (or one piece of one) in place. Returns whether
+/// it converged and the steps tried.
 fn component(sys: &System, comp: &Component, x: &mut [f64]) -> (bool, u32) {
     if worst(sys, comp, x) <= 1.0 {
         return (true, 0);
@@ -170,28 +215,30 @@ fn component(sys: &System, comp: &Component, x: &mut [f64]) -> (bool, u32) {
         } else {
             1.0
         };
-        let mut trial = x.to_vec();
+        // The step is tried in place (only this component's variables
+        // move), and taken back if it doesn't help.
+        let before: Vec<f64> = comp.vars.iter().map(|&v| x[v]).collect();
         for (j, &v) in comp.vars.iter().enumerate() {
-            trial[v] -= dx[j] * cut;
+            x[v] -= dx[j] * cut;
         }
         // A circle's radius can't go below zero: a step that would turn
         // one inside out stops it at zero, and the rest of the step stands.
         for &v in &comp.vars {
-            if sys.var_owner[v].1 == Coord::R && trial[v] < 0.0 {
-                trial[v] = 0.0;
+            if sys.var_owner[v].1 == Coord::R && x[v] < 0.0 {
+                x[v] = 0.0;
             }
         }
-        let next = norm2(sys, comp, &trial);
+        let next = norm2(sys, comp, x);
         if next < current {
-            for &v in &comp.vars {
-                x[v] = trial[v];
-            }
             current = next;
             damp = (damp / 10.0).max(DAMP_MIN);
             if worst(sys, comp, x) <= AIM {
                 return (true, step);
             }
         } else {
+            for (&v, &b) in comp.vars.iter().zip(&before) {
+                x[v] = b;
+            }
             damp *= 10.0;
             if damp > DAMP_MAX {
                 return (false, step);

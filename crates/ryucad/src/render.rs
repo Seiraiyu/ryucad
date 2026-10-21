@@ -28,6 +28,12 @@ pub const EDGE: Rgb = [0.12, 0.13, 0.15];
 pub const PENDING: Rgb = [1.0, 0.70, 0.22];
 pub const CHANGED: Rgb = [0.33, 0.78, 0.42];
 pub const NOTE: Rgb = [0.30, 0.58, 1.0];
+/// Sketch colours by solve state: nothing can move, something can, some
+/// constraint is redundant, some constraint can't hold.
+pub const SKETCH_WELL: Rgb = [0.08, 0.09, 0.11];
+pub const SKETCH_UNDER: Rgb = [0.13, 0.38, 0.82];
+pub const SKETCH_OVER: Rgb = [0.86, 0.16, 0.16];
+pub const SKETCH_FAILING: Rgb = [0.72, 0.12, 0.62];
 const AMBIENT: f32 = 0.3;
 const DIFFUSE: f32 = 0.7;
 
@@ -76,12 +82,28 @@ pub struct Triangle {
     pub color: Rgb,
 }
 
-/// A polyline of positions drawn `width` output pixels wide.
+/// A polyline of positions drawn `width` output pixels wide, dashed if
+/// `dash`.
 #[derive(Clone, Debug)]
 pub struct Line {
     pub points: Vec<u32>,
     pub color: Rgb,
     pub width: f32,
+    pub dash: bool,
+}
+
+/// A dashed line's dashes and the gaps between them, in output pixels.
+pub const DASH: [f32; 2] = [6.0, 4.0];
+
+/// A sketch's colour for an entity in `state`.
+pub fn sketch_color(state: crate::sketch_view::EntityState) -> Rgb {
+    use crate::sketch_view::EntityState as S;
+    match state {
+        S::Well => SKETCH_WELL,
+        S::Under => SKETCH_UNDER,
+        S::Over => SKETCH_OVER,
+        S::Failing => SKETCH_FAILING,
+    }
 }
 
 /// An RGBA image, rows top to bottom.
@@ -348,7 +370,97 @@ impl Band {
             }
         }
     }
+}
 
+/// The point a fraction `t` along `a`..`b` on screen, its depth
+/// interpolated over w as [`Band::segment`] does.
+fn between(a: Screen, b: Screen, t: f32) -> Screen {
+    let iw = (1.0 - t) / a.w + t / b.w;
+    Screen {
+        x: a.x + t * (b.x - a.x),
+        y: a.y + t * (b.y - a.y),
+        z: ((1.0 - t) * a.z / a.w + t * b.z / b.w) / iw,
+        w: 1.0 / iw,
+    }
+}
+
+/// Where `t` along `a`..`b` is on screen, worked out in f64: the ends of
+/// a segment cut down to the screen, which may lie far outside it.
+fn between_far(a: Screen, b: Screen, t: f64) -> Screen {
+    let lerp = |p: f32, q: f32| f64::from(p) + t * (f64::from(q) - f64::from(p));
+    let (aw, bw) = (f64::from(a.w), f64::from(b.w));
+    let iw = (1.0 - t) / aw + t / bw;
+    let z = ((1.0 - t) * f64::from(a.z) / aw + t * f64::from(b.z) / bw) / iw;
+    Screen {
+        x: lerp(a.x, b.x) as f32,
+        y: lerp(a.y, b.y) as f32,
+        z: z as f32,
+        w: (1.0 / iw) as f32,
+    }
+}
+
+/// The dashes of a polyline on screen: `on` samples drawn, `off` left
+/// out, the pattern carried on along the whole polyline. Only what lies
+/// within `margin` of a screen `size` big is dashed.
+fn dashes(
+    points: &[Screen],
+    on: f32,
+    off: f32,
+    size: [f32; 2],
+    margin: f32,
+) -> Vec<(Screen, Screen)> {
+    let mut out = Vec::new();
+    // Where in the pattern the next point is.
+    let mut phase = 0.0f32;
+    let period = on + off;
+    for w in points.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let full = (dx * dx + dy * dy).sqrt();
+        // The pattern moves on over what isn't shown, before and after.
+        let skip = |phase: f32, t: f64| {
+            ((f64::from(phase) + t * f64::from(full)) % f64::from(period)) as f32
+        };
+        let shown = crate::sketch_view::on_screen(
+            [a.x, a.y].map(f64::from),
+            [b.x, b.y].map(f64::from),
+            size.map(f64::from),
+            f64::from(margin),
+        );
+        let Some((t0, t1)) = shown else {
+            phase = skip(phase, 1.0);
+            continue;
+        };
+        let (a, b, len) = if (t0, t1) == (0.0, 1.0) {
+            (a, b, full)
+        } else {
+            phase = skip(phase, t0);
+            let (a, b) = (between_far(a, b, t0), between_far(a, b, t1));
+            let (dx, dy) = (b.x - a.x, b.y - a.y);
+            (a, b, (dx * dx + dy * dy).sqrt())
+        };
+        let mut s = 0.0f32;
+        while s < len {
+            let (drawn, left) = if phase < on {
+                (true, on - phase)
+            } else {
+                (false, period - phase)
+            };
+            let step = left.min(len - s);
+            if drawn {
+                out.push((between(a, b, s / len), between(a, b, (s + step) / len)));
+            }
+            s += step;
+            phase = (phase + step) % period;
+        }
+        if t1 < 1.0 {
+            phase = skip(phase, 1.0 - t1);
+        }
+    }
+    out
+}
+
+impl Band {
     /// Darkens covered samples next to the background or to a surface much
     /// farther away.
     fn silhouettes(&mut self) {
@@ -447,6 +559,19 @@ pub fn render(
                     l.points.iter().map(|p| screen[*p as usize]).collect();
                 if let [Some(p)] = pts[..] {
                     b.segment(p, p, half, l.color);
+                }
+                if l.dash {
+                    // Each run of points in front of the eye is dashed on
+                    // its own.
+                    let [on, off] = DASH.map(|d| d * SS as f32);
+                    for run in pts.split(Option::is_none) {
+                        let run: Vec<Screen> = run.iter().flatten().copied().collect();
+                        let size = [sw as f32, (h * SS) as f32];
+                        for (p, q) in dashes(&run, on, off, size, half + 1.0) {
+                            b.segment(p, q, half, l.color);
+                        }
+                    }
+                    continue;
                 }
                 for pair in pts.windows(2) {
                     if let [Some(p), Some(q)] = pair {
@@ -647,6 +772,7 @@ pub(crate) mod tests {
             points: vec![0, 1, 3, 2, 0],
             color: EDGE,
             width: 1.0,
+            dash: false,
         });
         g.labels.push(Label {
             at: [1.0, 1.0, 1.0],
@@ -693,11 +819,13 @@ pub(crate) mod tests {
             points: vec![8, 9],
             color: red,
             width: 2.0,
+            dash: false,
         });
         g.lines.push(Line {
             points: vec![10, 11],
             color: red,
             width: 2.0,
+            dash: false,
         });
         let img = render(&g, &c, 64, 64, bare()).unwrap();
         let reds = |y: u32| {
@@ -708,6 +836,67 @@ pub(crate) mod tests {
         assert!(reds(32) > 10, "the near edge shows");
         let far_y = (0..64).find(|y| reds(*y) > 0 && (*y as i32 - 32).abs() > 3);
         assert_eq!(far_y, None, "the far edge is hidden");
+    }
+
+    #[test]
+    fn dashed_lines_have_gaps() {
+        let c = camera([0.5, -5.0, 0.5]);
+        let mut g = cube();
+        g.positions.extend([[0.0, 0.0, 0.5], [1.0, 0.0, 0.5]]);
+        let red = [1.0, 0.0, 0.0];
+        let line = |dash| Line {
+            points: vec![8, 9],
+            color: red,
+            width: 2.0,
+            dash,
+        };
+        let reds = |g: &Geometry| {
+            let img = render(g, &c, 64, 64, bare()).unwrap();
+            (0..64)
+                .filter(|x| at(&img, *x, 32)[..3] == [255, 0, 0])
+                .count()
+        };
+        g.lines.push(line(false));
+        let solid = reds(&g);
+        g.lines[0] = line(true);
+        let dashed = reds(&g);
+        // Six on, four off: about 60% of it.
+        assert!(
+            dashed > solid / 2 && dashed < solid * 3 / 4,
+            "{dashed} of {solid}"
+        );
+        // The pattern runs on across a polyline's corners.
+        let pts: Vec<Screen> = [[0.0, 0.0], [5.0, 0.0], [5.0, 5.0]]
+            .map(|[x, y]| Screen {
+                x,
+                y,
+                z: 1.0,
+                w: 1.0,
+            })
+            .to_vec();
+        let d = dashes(&pts, 6.0, 4.0, [100.0, 100.0], 1.0);
+        assert_eq!(d.len(), 2);
+        assert_eq!((d[0].1.x, d[0].1.y), (5.0, 0.0));
+        assert_eq!((d[1].0.x, d[1].0.y, d[1].1.y), (5.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn dashes_are_laid_only_where_they_show() {
+        // A construction line seen from very close runs far off screen
+        // both ways; past 2^28 pixels an f32 walk along it stops moving.
+        for far in [2e7f32, 1e10] {
+            let pts: Vec<Screen> = [[-far, 50.0], [far, 50.0]]
+                .map(|[x, y]| Screen {
+                    x,
+                    y,
+                    z: 1.0,
+                    w: 1.0,
+                })
+                .to_vec();
+            let d = dashes(&pts, 6.0, 4.0, [100.0, 100.0], 1.0);
+            assert!((10..=12).contains(&d.len()), "{far}: {}", d.len());
+            assert!(d.iter().all(|(p, q)| p.x >= -2.0 && q.x <= 102.0));
+        }
     }
 
     #[test]

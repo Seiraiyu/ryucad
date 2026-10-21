@@ -62,6 +62,7 @@ pub fn run(dir: &Path) -> Result<Value> {
         light: scene::light(&camera),
         edges: true,
         faces: &[],
+        overlay: &[],
     };
     scene.render(&device, &queue, SIZE, &list);
     let (w, h, px) = scene

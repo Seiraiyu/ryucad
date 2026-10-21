@@ -12,8 +12,34 @@ pub fn message(e: &serde_json::Value) -> String {
     e["message"].as_str().unwrap_or("failed").to_owned()
 }
 
+/// A feature's line in the tree: its ID and type, a sketch's solve state,
+/// and why it failed or how many faces weren't meshed.
+pub fn row_text(f: &crate::core::model::Feature, faults: usize) -> String {
+    let ty = f.ty.as_deref().unwrap_or("?");
+    let kind = match &f.sketch {
+        Some(s) if s.state == "under" => format!("{ty}, under, {} dof", s.dof),
+        Some(s) => format!("{ty}, {}", s.state),
+        None => ty.to_owned(),
+    };
+    let stale = if f.sketch.as_ref().is_some_and(|s| s.stale) {
+        ", stale"
+    } else {
+        ""
+    };
+    let text = format!("{} ({kind}{stale})", f.id);
+    match &f.error {
+        Some(e) => match e["code"].as_str() {
+            Some(code) => format!("{text}: failed ({code})"),
+            None => format!("{text}: failed"),
+        },
+        None if faults > 0 => format!("{text}: {faults} unmeshed"),
+        None => text,
+    }
+}
+
 /// Parts and their features in order, with rebuild status and mesh
-/// faults. Choosing a feature paints and frames its body.
+/// faults, and under each feature what it reads. Choosing a feature
+/// paints and frames its body, or its sketch.
 pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     // Names are IDs: never broken across lines.
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -58,13 +84,7 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                         .get(&key)
                         .and_then(|m| m.mesh.as_ref().ok())
                         .map_or(0, |m| m.faults.len());
-                    let ty = f.ty.as_deref().unwrap_or("?");
-                    let mut text = format!("{} ({ty})", f.id);
-                    if f.error.is_some() {
-                        text = format!("{text}: failed");
-                    } else if faults > 0 {
-                        text = format!("{text}: {faults} unmeshed");
-                    }
+                    let text = row_text(f, faults);
                     let chosen = view.chosen.as_ref() == Some(&key);
                     let r = ui.selectable_label(chosen, text);
                     let r = match &f.error {
@@ -76,6 +96,11 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                     };
                     if r.clicked() {
                         choose = Some(if chosen { None } else { Some(key) });
+                    }
+                    if !f.uses.is_empty() {
+                        ui.indent(("uses", &part.id, &f.id), |ui| {
+                            ui.weak(format!("uses {}", f.uses.join(", ")));
+                        });
                     }
                 }
             });
@@ -196,9 +221,165 @@ fn field_row(ui: &mut egui::Ui, f: &mut crate::core::edit::Field, label: &str) {
     ui.end_row();
 }
 
+/// The parameters of the chosen feature's part (or the first part), each
+/// editable, with a row to add one. Apply sends `param.set` against the
+/// revision they were read at.
+pub fn parameters(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
+    let part = view
+        .chosen
+        .as_ref()
+        .map(|k| k.0.clone())
+        .or_else(|| ws.model.parts.keys().next().cloned());
+    ws.show_params(part.as_deref());
+    let Some(p) = &mut ws.params else {
+        return;
+    };
+    ui.heading(format!("Parameters of {}", p.part));
+    if !p.changed.is_empty() {
+        let frame =
+            egui::Frame::group(ui.style()).fill(ui.visuals().warn_fg_color.gamma_multiply(0.15));
+        frame.show(ui, |ui| {
+            ui.label("Someone changed these parameters while you edited them. They now read:");
+            for c in &p.changed {
+                ui.label(format!("{}: {} (you typed {})", c.name, c.theirs, c.yours));
+            }
+            if ui.button("OK").clicked() {
+                p.changed.clear();
+            }
+        });
+    }
+    if p.params.is_empty() {
+        ui.weak("No parameters yet");
+    }
+    egui::Grid::new("parameters").num_columns(3).show(ui, |ui| {
+        for row in &mut p.params {
+            let name = ui.label(&row.field.name);
+            let edit = egui::TextEdit::singleline(&mut row.field.text).desired_width(110.0);
+            let r = ui.add(edit).labelled_by(name.id);
+            if row.field.dirty() {
+                r.on_hover_text(format!("was {}", row.field.read));
+            }
+            let shown = match &row.error {
+                Some(_) => ui.colored_label(ui.visuals().error_fg_color, "fails"),
+                None => ui.weak(&row.value),
+            };
+            match (&row.error, row.used_by.is_empty()) {
+                (Some(e), _) => {
+                    shown.on_hover_text(e);
+                }
+                (None, false) => {
+                    shown.on_hover_text(format!("used by {}", row.used_by.join(", ")));
+                }
+                (None, true) => {}
+            }
+            ui.end_row();
+        }
+        let add = egui::TextEdit::singleline(&mut p.new_name)
+            .hint_text("new name")
+            .desired_width(70.0);
+        let named = ui.add(add).on_hover_text("A new parameter's name");
+        named.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::TextInput, true, "new parameter's name")
+        });
+        let value = egui::TextEdit::singleline(&mut p.new_value)
+            .hint_text("value")
+            .desired_width(110.0);
+        let valued = ui.add(value).on_hover_text("A new parameter's expression");
+        valued.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::TextInput, true, "new parameter's value")
+        });
+        ui.end_row();
+    });
+    if let Some(e) = &p.error {
+        ui.colored_label(ui.visuals().error_fg_color, &e.message);
+    }
+    let (dirty, saving) = (p.dirty(), p.saving);
+    let mut save = false;
+    ui.horizontal(|ui| {
+        save = ui
+            .add_enabled(dirty && !saving, egui::Button::new("Apply parameters"))
+            .clicked();
+        if ui
+            .add_enabled(dirty && !saving, egui::Button::new("Revert parameters"))
+            .clicked()
+        {
+            for row in &mut p.params {
+                row.field.text.clone_from(&row.field.read);
+            }
+            p.new_name.clear();
+            p.new_value.clear();
+            p.error = None;
+        }
+        if saving {
+            ui.spinner();
+        }
+    });
+    if save {
+        ws.save_params();
+    }
+}
+
+/// A sketch dimension's value, edited in place. Apply sends `sketch.edit`
+/// against the revision it was read at.
+fn dimension(ui: &mut egui::Ui, ws: &mut Workspace) {
+    let Some(form) = &mut ws.dimension else {
+        return;
+    };
+    ui.heading(&form.constraint);
+    ui.label(format!(
+        "{} in sketch {} of part {}",
+        form.ty, form.sketch, form.part
+    ));
+    if let Some(c) = &form.changed {
+        let frame =
+            egui::Frame::group(ui.style()).fill(ui.visuals().warn_fg_color.gamma_multiply(0.15));
+        let mut ok = false;
+        frame.show(ui, |ui| {
+            ui.label("Someone changed this dimension while you edited it. It now reads:");
+            ui.label(format!("{} (you typed {})", c.theirs, c.yours));
+            ok = ui.button("OK").clicked();
+        });
+        if ok {
+            form.changed = None;
+        }
+    }
+    ui.separator();
+    egui::Grid::new("dimension").num_columns(2).show(ui, |ui| {
+        field_row(ui, &mut form.value, "value");
+    });
+    if let Some(e) = &form.error {
+        ui.colored_label(ui.visuals().error_fg_color, &e.message);
+    }
+    let (dirty, saving) = (form.dirty(), form.saving);
+    let mut save = false;
+    ui.horizontal(|ui| {
+        save = ui
+            .add_enabled(dirty && !saving, egui::Button::new("Apply"))
+            .clicked();
+        if ui
+            .add_enabled(dirty && !saving, egui::Button::new("Revert"))
+            .clicked()
+        {
+            form.value.text.clone_from(&form.value.read);
+            form.error = None;
+        }
+        if saving {
+            ui.spinner();
+        }
+    });
+    if save {
+        ws.save_dimension();
+    }
+}
+
 /// The chosen feature's parameters and placement, edited in place. Apply
-/// sends `feature.edit` against the revision the form was read at.
+/// sends `feature.edit` against the revision the form was read at. A
+/// dimension chosen by its label shows instead.
 pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
+    if ws.dimension.is_some() {
+        dimension(ui, ws);
+        return;
+    }
     let Some(form) = &mut ws.form else {
         ui.weak("Choose a feature in the tree to see and edit it");
         return;
@@ -438,4 +619,44 @@ fn history(ui: &mut egui::Ui, ws: &mut Workspace) {
                     }
                 });
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::model::{Feature, SketchState};
+    use serde_json::json;
+
+    fn feature(ty: &str) -> Feature {
+        Feature {
+            id: "f".into(),
+            ty: Some(ty.into()),
+            hash: None,
+            sketch: None,
+            uses: Vec::new(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn rows_say_state_and_failures() {
+        assert_eq!(row_text(&feature("box"), 0), "f (box)");
+        assert_eq!(row_text(&feature("box"), 2), "f (box): 2 unmeshed");
+        let mut s = feature("sketch");
+        s.sketch = Some(SketchState {
+            state: "under".into(),
+            dof: 3,
+            stale: false,
+        });
+        assert_eq!(row_text(&s, 0), "f (sketch, under, 3 dof)");
+        s.sketch = Some(SketchState {
+            state: "well".into(),
+            dof: 0,
+            stale: true,
+        });
+        assert_eq!(row_text(&s, 0), "f (sketch, well, stale)");
+        let mut e = feature("extrude");
+        e.error = Some(json!({"code": "dependency_failed", "message": "s failed"}));
+        assert_eq!(row_text(&e, 0), "f (extrude): failed (dependency_failed)");
+    }
 }

@@ -148,6 +148,13 @@ mod tests {
         let list = call(&mut s, "feature.list", json!({"part": "p"})).unwrap();
         assert_eq!(list["features"][2]["uses"], json!(["s"]));
         assert!(list["features"][0].get("uses").is_none());
+        // So does each rebuild report, for the app's tree, failed or not
+        // (the empty sketch has nothing to sweep).
+        let e = call(&mut s, "rebuild", json!({"part": "p"})).unwrap_err();
+        let r = &e.details["parts"][0]["features"];
+        assert_eq!(r[3]["uses"], json!(["s"]));
+        assert_eq!(r[3]["ok"], false);
+        assert!(r[1].get("uses").is_none());
         // Deleting what others read, or moving it after them, is refused.
         let e = call(&mut s, "feature.delete", json!({"part": "p", "id": "s"})).unwrap_err();
         assert_eq!(e.code, Code::HasDependents);
