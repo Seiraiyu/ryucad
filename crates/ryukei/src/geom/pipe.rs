@@ -58,7 +58,7 @@ fn constant<T: Num>(v: Vector3) -> JVec<T> {
 /// field over jets: the gradient of its signed distance. `None` where it
 /// may not be defined (on an axis, at a sphere's centre, on a torus's core
 /// circle) or for a surface that can't anchor a pipe.
-fn anchor_normal<T: Num>(anchor: &Surface, c: JVec<T>) -> Option<JVec<T>> {
+pub(crate) fn anchor_normal<T: Num>(anchor: &Surface, c: JVec<T>) -> Option<JVec<T>> {
     let f = anchor.frame()?;
     let (x, y, z) = (
         constant(f.x().get()),
