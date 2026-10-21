@@ -11,11 +11,15 @@
 
 // Unused until Task 11 builds blends from them.
 #[allow(dead_code)]
+mod chain;
+#[allow(dead_code)]
 mod convex;
 #[allow(dead_code)]
 mod spec;
 
+use crate::Error;
 use crate::name::Name;
+use crate::topo::{Body, EdgeId};
 
 #[cfg(doc)]
 use crate::BlendError;
@@ -57,6 +61,17 @@ pub enum Chamfer {
 pub struct EdgeBlend {
     pub edge: Name,
     pub kind: BlendKind,
+}
+
+/// The edges reachable from `edge` through vertices where an edge meets
+/// exactly one other tangentially, in order along the chain: from one end
+/// to the other for an open chain, from `edge` along its direction for a
+/// closed one. A blend refuses a blended edge that meets an unblended
+/// one tangentially ([`BlendError::OpenTangentChain`]); ryucad offers to
+/// blend the whole chain instead. Fails with `DeadEntity` for an edge
+/// that is not live.
+pub fn tangent_chain(body: &Body, edge: EdgeId) -> Result<Vec<EdgeId>, Error> {
+    chain::tangent_chain(body, edge)
 }
 
 #[cfg(test)]
