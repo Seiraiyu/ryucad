@@ -14,7 +14,7 @@ use super::spec::Spec;
 use crate::geom::{Box3, Curve, Curve2, Point3, Surface, Vector3};
 use crate::intersect::{self, Failure, SurfaceHit};
 use crate::tol::LINEAR_RESOLUTION;
-use crate::topo::{Body, Sense};
+use crate::topo::{Body, FaceId, Sense};
 use crate::{BlendError, Error};
 
 /// A fillet's spine.
@@ -31,7 +31,8 @@ pub(crate) struct Spine {
     /// How far the spine and its pcurves' images may stray from the
     /// offsets.
     pub(crate) tolerance: f64,
-    /// The faces' offsets.
+    /// The faces the spine was made from, and their offsets.
+    pub(crate) faces: [FaceId; 2],
     pub(crate) offsets: [Surface; 2],
     pub(crate) convex: bool,
     pub(crate) radius: f64,
@@ -111,6 +112,7 @@ pub(crate) fn spine(body: &Body, spec: &Spec, radius: f64) -> Result<Spine, Erro
         range: b.range,
         pcurves: b.pcurves,
         tolerance: b.tolerance.max(LINEAR_RESOLUTION),
+        faces: spec.faces,
         offsets,
         convex,
         radius,
@@ -147,9 +149,33 @@ impl Spine {
     }
 }
 
+/// Whether the ball touching both faces of another resolved edge at its
+/// middle is on `spine`: true for edges joined tangentially between the
+/// same two faces, whose offsets meet in the same branch.
+pub(crate) fn ball_on(body: &Body, spec: &Spec, spine: &Spine) -> bool {
+    let Some(offsets) = spine_faces(spine, spec) else {
+        return false;
+    };
+    let Some(c) = mid_centre(body, spec, &offsets, spine.radius, spine.convex) else {
+        return false;
+    };
+    let (_, d) = nearest(&spine.curve, spine.range, c);
+    d <= 10.0 * spine.tolerance
+}
+
+/// The spine's offsets in the order of `spec`'s faces, when it has the
+/// same two.
+fn spine_faces(spine: &Spine, spec: &Spec) -> Option<[Surface; 2]> {
+    let pick = |f: FaceId| {
+        let k = spine.faces.iter().position(|&g| g == f)?;
+        Some(spine.offsets[k].clone())
+    };
+    Some([pick(spec.faces[0])?, pick(spec.faces[1])?])
+}
+
 /// The parameter in `range` of the point of `curve` nearest `p`, and its
 /// distance.
-fn nearest(curve: &Curve, range: [f64; 2], p: Point3) -> (f64, f64) {
+pub(crate) fn nearest(curve: &Curve, range: [f64; 2], p: Point3) -> (f64, f64) {
     let t = curve.project(p).param;
     let t = match curve.period() {
         Some(period) if !(range[0]..=range[1]).contains(&t) => {

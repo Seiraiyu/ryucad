@@ -19,6 +19,8 @@ mod end;
 #[allow(dead_code)]
 mod fillet;
 #[allow(dead_code)]
+mod plan;
+#[allow(dead_code)]
 mod rail;
 #[allow(dead_code)]
 mod spec;
