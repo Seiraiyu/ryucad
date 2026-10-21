@@ -268,14 +268,55 @@ fn inconsistent(m: &Mat, r: &[f64], tol: f64) -> bool {
     })
 }
 
+/// The reduced echelon form of the span of `vectors` (each over a
+/// component's rows), pivoting from the last row back: one vector per
+/// pivot row, 1 there and 0 at every other pivot. It depends on the span
+/// alone, not on the basis it came in, so stage 1 and stage 2 name the
+/// same sets, and each set is a constraint with the earlier ones it
+/// repeats: `{d1, d9}` for a ninth dimension that says what the first
+/// does.
+fn echelon(mut vectors: Vec<Vec<f64>>) -> Vec<Vec<f64>> {
+    let rows = vectors.first().map_or(0, Vec::len);
+    let mut done = 0;
+    for j in (0..rows).rev() {
+        if done == vectors.len() {
+            break;
+        }
+        // The largest entry at row `j` among the vectors not yet pivoted.
+        let (best, size) = (done..vectors.len())
+            .map(|v| (v, vectors[v][j].abs()))
+            .fold((done, -1.0), |a, b| if b.1 > a.1 { b } else { a });
+        if size <= SUPPORT_TOL {
+            continue;
+        }
+        vectors.swap(done, best);
+        let p = vectors[done][j];
+        for x in &mut vectors[done] {
+            *x /= p;
+        }
+        let pivot = vectors[done].clone();
+        for (v, other) in vectors.iter_mut().enumerate() {
+            let f = other[j];
+            if v != done && f != 0.0 {
+                for (x, q) in other.iter_mut().zip(&pivot) {
+                    *x -= f * q;
+                }
+            }
+        }
+        done += 1;
+    }
+    vectors.truncate(done);
+    vectors
+}
+
 /// Minimal sets of constraints whose rows depend on each other, one per
-/// vector of the left null space (its rank judged against `scale`, the
-/// largest row norm of the Jacobian it is part of, if not `jac` itself),
-/// each cut down until removing any of its constraints makes it
-/// independent.
+/// vector of the left null space's echelon form (its rank judged against
+/// `scale`, the largest row norm of the Jacobian it is part of, if not
+/// `jac` itself), each cut down until removing any of its constraints
+/// makes it independent.
 fn dependent_sets(sys: &System, comp: &Component, jac: &Mat, scale: Option<f64>) -> Vec<Vec<Id>> {
     let mut out = BTreeSet::new();
-    for y in qr_against(&jac.transpose(), RANK_TOL, scale).null_space() {
+    for y in echelon(qr_against(&jac.transpose(), RANK_TOL, scale).null_space()) {
         let mut set: Vec<Id> = y
             .iter()
             .enumerate()
@@ -403,6 +444,38 @@ mod tests {
         s.constraints.insert(3, C::Coincident(6, 1));
         let r = solve(&s).unwrap().report;
         assert_eq!(r.redundant, [vec![1], vec![2, 3]]);
+    }
+
+    #[test]
+    fn echelon_forms_depend_on_the_span_alone() {
+        // Two bases of one plane in three rows.
+        let a = vec![vec![1.0, 1.0, 0.0], vec![0.0, 1.0, 1.0]];
+        let b = vec![vec![1.0, 2.0, 1.0], vec![-1.0, 0.0, 1.0]];
+        let (ea, eb) = (super::echelon(a), super::echelon(b));
+        assert_eq!(ea.len(), 2);
+        for (u, w) in ea.iter().zip(&eb) {
+            for (x, y) in u.iter().zip(w) {
+                assert!((x - y).abs() < 1e-12, "{ea:?} vs {eb:?}");
+            }
+        }
+        // Pivots on the last rows: each the later row with the first.
+        assert_eq!(ea[0], [-1.0, 0.0, 1.0]);
+        assert_eq!(ea[1], [1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn a_dimension_repeated_is_redundant_with_the_first() {
+        // Four lengths of one side: each later one with the first.
+        let mut s = dimensioned();
+        for id in [8, 9, 10] {
+            s.constraints.insert(id, C::Length(11, 3.0));
+        }
+        let r = solve(&s).unwrap().report;
+        assert_eq!(r.redundant, [vec![6, 8], vec![6, 9], vec![6, 10]]);
+        assert_eq!(
+            crate::solve_whole(&s).unwrap().report.redundant,
+            r.redundant
+        );
     }
 
     #[test]
