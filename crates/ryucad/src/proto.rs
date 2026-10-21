@@ -449,9 +449,13 @@ pub enum Request {
         /// Draw edges and silhouettes (default true).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         edges: Option<bool>,
-        /// Label highlighted entities (default false).
+        /// Label highlighted entities and sketches' dimensions (default
+        /// false).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         labels: Option<bool>,
+        /// Draw sketches (default true).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sketches: Option<bool>,
     },
     /// Diagnoses the project folder: every problem, with a stable code.
     #[serde(rename = "doctor")]

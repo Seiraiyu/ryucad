@@ -226,12 +226,15 @@ enum Command {
         /// Point out an entity.
         #[arg(long = "highlight", value_name = "REF")]
         highlight: Vec<String>,
-        /// Label highlighted entities.
+        /// Label highlighted entities and sketches' dimensions.
         #[arg(long)]
         labels: bool,
         /// Leave out edges and silhouettes.
         #[arg(long)]
         no_edges: bool,
+        /// Leave out sketches.
+        #[arg(long)]
+        no_sketches: bool,
     },
     /// The project's Git commits (or one part's), and what is
     /// uncommitted. Read-only.
@@ -914,6 +917,7 @@ fn request(cmd: &Command) -> Option<Request> {
             highlight,
             labels,
             no_edges,
+            no_sketches,
         } => Request::Render {
             part: part.clone(),
             camera: camera_arg(eye, target, up, fov, ortho),
@@ -924,6 +928,7 @@ fn request(cmd: &Command) -> Option<Request> {
             highlight: highlight.clone(),
             edges: Some(!no_edges),
             labels: Some(*labels),
+            sketches: Some(!no_sketches),
         },
         Command::Highlight {
             entities,

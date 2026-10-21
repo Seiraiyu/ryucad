@@ -107,6 +107,7 @@ pub fn answer_live(
             highlight,
             edges,
             labels,
+            sketches,
         } => {
             let target = participant.as_deref().map(|p| (p, live.as_deref()));
             let shown = match live.as_deref() {
@@ -125,6 +126,7 @@ pub fn answer_live(
                 highlight,
                 edges: edges.unwrap_or(true),
                 labels: labels.unwrap_or(false),
+                sketches: sketches.unwrap_or(true),
             };
             render(session, target, shown, ask)
         }
@@ -1652,6 +1654,7 @@ struct RenderAsk {
     highlight: Vec<String>,
     edges: bool,
     labels: bool,
+    sketches: bool,
 }
 
 /// Renders the model. `target` names a participant whose camera to use
@@ -1747,12 +1750,14 @@ fn render(
                             points,
                             color: *color,
                             width: 3.0,
+                            dash: false,
                         });
                     }
                     None if ask.edges => g.lines.push(Line {
                         points,
                         color: r::EDGE,
                         width: 1.0,
+                        dash: false,
                     }),
                     None => {}
                 }
@@ -1765,9 +1770,13 @@ fn render(
                         points: vec![base + i as u32],
                         color: *color,
                         width: 7.0,
+                        dash: false,
                     });
                 }
             }
+        }
+        if ask.sketches {
+            sketches(session, part, &marks, ask.labels, &mut g)?;
         }
     }
     let camera = match (ask.camera, target, ask.view.as_deref()) {
@@ -1801,6 +1810,62 @@ fn render(
     let result =
         json!({"part": ask.part, "width": ask.width, "height": ask.height, "camera": camera});
     Ok(Answer::bytes(result, "image/png", img.png()))
+}
+
+/// Draws `part`'s sketches into `g`: curves in their solve states'
+/// colours (construction dashed), points as dots, highlighted ones in
+/// their marks' colours, and with `labels` each dimension's label.
+fn sketches(
+    session: &mut Session,
+    part: &Id,
+    marks: &BTreeMap<String, (crate::render::Rgb, Option<String>)>,
+    labels: bool,
+    g: &mut crate::render::Geometry,
+) -> Result<()> {
+    use crate::render::{self as r, Label, Line};
+    let unit = session.project().manifest.default_unit;
+    let built = session.rebuilt(part)?;
+    for (fid, out) in &built.features {
+        let Some(sk) = out.as_ref().ok().and_then(|o| o.sketch()) else {
+            continue;
+        };
+        let d = crate::sketch_view::drawing(sk, mesh::Quality::Normal.angle(), unit);
+        let mark = |e: &Id| marks.get(&format!("{part}/{fid}/{e}")).map(|m| m.0);
+        for c in &d.curves {
+            let base = g.positions.len() as u32;
+            g.positions.extend(&c.points);
+            let (color, width) = match mark(&c.entity) {
+                Some(m) => (m, 3.0),
+                None => (r::sketch_color(c.state), 1.5),
+            };
+            g.lines.push(Line {
+                points: (base..g.positions.len() as u32).collect(),
+                color,
+                width,
+                dash: c.construction,
+            });
+        }
+        for p in &d.dots {
+            g.positions.push(p.at);
+            let (color, width) = match mark(&p.entity) {
+                Some(m) => (m, 7.0),
+                None => (r::sketch_color(p.state), 4.0),
+            };
+            g.lines.push(Line {
+                points: vec![g.positions.len() as u32 - 1],
+                color,
+                width,
+                dash: false,
+            });
+        }
+        if labels {
+            g.labels.extend(d.labels.into_iter().map(|l| Label {
+                at: l.at,
+                text: l.text,
+            }));
+        }
+    }
+    Ok(())
 }
 
 /// The part, feature and quality a mesh request names.
@@ -1989,6 +2054,48 @@ pub(crate) mod tests {
 
     pub(crate) fn call(s: &mut Session, method: &str, params: Value) -> Result<Value> {
         handle(s, Request::from_rpc(method, Some(params))?)
+    }
+
+    /// The pixels of a render of `s`'s project, RGB.
+    pub(crate) fn render_pixels(dir: &std::path::Path, s: Session, params: Value) -> Vec<[u8; 3]> {
+        let req = Request::from_rpc("render", Some(params)).unwrap();
+        let a = handle_safely(&mut Some(s), None, None, dir, req).unwrap();
+        let png = a.binary.unwrap();
+        let mut r = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .unwrap();
+        let mut buf = vec![0; r.output_buffer_size().unwrap()];
+        let info = r.next_frame(&mut buf).unwrap();
+        buf[..info.buffer_size()]
+            .chunks(4)
+            .map(|p| [p[0], p[1], p[2]])
+            .collect()
+    }
+
+    #[test]
+    fn renders_draw_sketches() {
+        use crate::render::{NOTE, SKETCH_WELL};
+        let (dir, mut s) = crate::sketch::tests::with_sketch();
+        crate::sketch::tests::edit(&mut s, crate::sketch::tests::rectangle_ops()).unwrap();
+        let px = |c: crate::render::Rgb| c.map(|x| (x * 255.0 + 0.5) as u8);
+        let count = |params: Value, c: [u8; 3]| {
+            let s = Session::open(dir.path()).unwrap();
+            render_pixels(dir.path(), s, params)
+                .into_iter()
+                .filter(|p| *p == c)
+                .count()
+        };
+        let base = json!({"view": "top", "width": 120, "height": 90});
+        // Fully defined: drawn in the well-defined colour.
+        assert!(count(base.clone(), px(SKETCH_WELL)) > 50);
+        let mut off = base.clone();
+        off["sketches"] = json!(false);
+        assert_eq!(count(off, px(SKETCH_WELL)), 0);
+        // A highlighted sketch entity takes its highlight's colour.
+        let mut lit = base;
+        lit["highlight"] = json!(["p/s/l1"]);
+        assert!(count(lit, px(NOTE)) > 20);
+        drop(s);
     }
 
     #[test]
