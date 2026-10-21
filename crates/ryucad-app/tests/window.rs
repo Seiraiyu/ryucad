@@ -115,7 +115,7 @@ fn the_tree_lists_features_and_frames_a_chosen_one() {
             .is_some_and(|p| p.feature("ring").is_some())
     });
     h.step();
-    h.get_by_label("ring (torus): failed");
+    h.get_by_label("ring (torus): failed (rebuild_failed)");
 }
 
 #[test]
@@ -927,4 +927,39 @@ fn a_dimension_label_opens_its_value() {
             .values()
             .any(|d| d.labels[0].text == "2 mm")
     });
+}
+
+#[test]
+fn the_tree_shows_sketches_and_what_features_read() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_sketch();
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        let o = a.opened();
+        o.ws.idle() && o.ws.model.meshes.len() == 1 && o.ws.model.sketches.len() == 1
+    });
+    h.step();
+    h.get_by_label("s (sketch, well)");
+    h.get_by_label("e (extrude)");
+    h.get_by_label("uses s");
+    // A sketch that can't hold fails what reads it.
+    let ops = r#"[{"op": "remove", "id": "c1"}]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .part("p")
+            .and_then(|p| p.feature("s"))
+            .and_then(|f| f.sketch.as_ref())
+            .is_some_and(|s| s.state == "under")
+    });
+    h.step();
+    h.get_by_label("s (sketch, under, 1 dof)");
+    // Choosing the sketch frames it.
+    let before = h.state().opened().view.nav.camera.clone();
+    h.get_by_label("s (sketch, under, 1 dof)").click();
+    frames(&mut h, |a| a.opened().view.chosen.is_some());
+    assert_ne!(h.state().opened().view.nav.camera, before);
 }
