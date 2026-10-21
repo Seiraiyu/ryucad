@@ -85,6 +85,9 @@ pub fn solve(sketch: &Sketch) -> Result<Solved, SketchError> {
     let d = diagnose(&sys, &x, &held);
     let (loops, open) = loops::find(sketch, &sys.group_of);
     let solved = write_back(sketch, &sys, &x);
+    // A solve that pushed geometry out of the size box hasn't solved it:
+    // the next solve would refuse what it gave.
+    converged &= solved.validate().is_ok();
     let changed = solved != *sketch;
     Ok(Solved {
         sketch: solved,
@@ -539,6 +542,44 @@ pub(crate) mod tests {
         assert!((p[0] + 2.0).abs() < 1e-9 && p[1].abs() < 1.0, "{p:?}");
         let again = solve(&r.sketch).unwrap();
         assert!(!again.report.changed);
+    }
+
+    #[test]
+    fn solves_stay_in_the_size_box() {
+        // A point 7.8e20 m out, its line made horizontal and a distance
+        // from it to another line: the solver "solved" it by tilting that
+        // line, but f64 can't resolve 1e-10 m out there, so every solve of
+        // the result tilted it again. Such sketches are now refused, and
+        // a solve the box stops can't hold. Found by fuzzing.
+        let mut s = Sketch::default();
+        for (id, x, y) in [
+            (2, 0.02, 7.8e20),
+            (3, 0.02, 0.008),
+            (5, 0.0, 0.0),
+            (6, 0.0, 0.01),
+        ] {
+            s.entities.insert(id, point(x, y));
+        }
+        s.entities.insert(11, line(2, 3));
+        s.entities.insert(12, line(5, 6));
+        s.constraints.insert(1, C::Horizontal(11));
+        s.constraints.insert(2, C::Distance(12, 2, 0.036));
+        assert!(solve(&s).is_err());
+        // A length that only fits by leaving the box.
+        let mut out = Sketch::default();
+        out.entities.insert(
+            1,
+            Entity::Point {
+                at: [0.0, 0.0],
+                fixed: true,
+            },
+        );
+        out.entities.insert(2, point(400.0, 0.0));
+        out.entities.insert(11, line(1, 2));
+        out.constraints.insert(1, C::Horizontal(11));
+        out.constraints.insert(2, C::Length(11, 900.0));
+        let r = solve(&out).unwrap();
+        assert!(!r.report.converged, "{:?}", at(&r.sketch, 2));
     }
 
     #[test]

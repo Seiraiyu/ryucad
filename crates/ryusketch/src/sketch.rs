@@ -1,7 +1,14 @@
 //! What a sketch holds, and the checks that make it solvable at all.
 
+use ryukei::tol::SIZE_BOX_HALF;
 use std::collections::BTreeMap;
 use std::fmt;
+
+/// The longest dimension a sketch may hold (meters): the width of ryukei's
+/// size box. Positions lie within `±SIZE_BOX_HALF` and radii are at most
+/// that, so [`SOLVE_TOL`](crate::SOLVE_TOL) stays well above f64's
+/// resolution everywhere in a sketch.
+pub const MAX_LENGTH: f64 = 2.0 * SIZE_BOX_HALF;
 
 /// An entity's or a constraint's ID, chosen by the caller. Entities and
 /// constraints have separate ID spaces.
@@ -158,7 +165,9 @@ impl Sketch {
     /// Checks references and numbers: every entity built on distinct,
     /// existing points; every constraint on entities of the kinds it takes;
     /// every position, radius and value finite; lengths and radii not
-    /// negative.
+    /// negative; positions within ryukei's size box, radii at most half
+    /// its width and lengths at most [`MAX_LENGTH`]. Past the box, f64
+    /// can't tell whether a length holds within [`SOLVE_TOL`](crate::SOLVE_TOL).
     pub fn validate(&self) -> Result<(), SketchError> {
         for (&id, e) in &self.entities {
             let bad = |why| SketchError::BadEntity { entity: id, why };
@@ -175,8 +184,14 @@ impl Sketch {
                 Entity::Point { at, .. } if !at.iter().all(|x| x.is_finite()) => {
                     return Err(bad("position is not finite"));
                 }
+                Entity::Point { at, .. } if at.iter().any(|x| x.abs() > SIZE_BOX_HALF) => {
+                    return Err(bad("position is outside the size box (±500 m)"));
+                }
                 Entity::Circle { r, .. } if !r.is_finite() || r < 0.0 => {
                     return Err(bad("radius must be finite and not negative"));
+                }
+                Entity::Circle { r, .. } if r > SIZE_BOX_HALF => {
+                    return Err(bad("radius is larger than the size box allows (500 m)"));
                 }
                 _ => {}
             }
@@ -247,6 +262,10 @@ impl Sketch {
             {
                 Err("a distance, length or radius can't be negative")
             }
+            (C::Angle(..), _) => Ok(()),
+            (_, Some(v)) if v.abs() > MAX_LENGTH => {
+                Err("value is longer than the size box allows (1000 m)")
+            }
             _ => Ok(()),
         }
     }
@@ -289,12 +308,16 @@ pub(crate) mod tests {
         s.constraints.insert(1, Constraint::Horizontal(11));
         s.constraints.insert(2, Constraint::Distance(1, 13, 1.0));
         s.constraints.insert(3, Constraint::DistanceX(1, 2, -2.0));
+        // The size box's limits are inclusive, and angles have none.
+        s.constraints.insert(4, Constraint::Length(12, MAX_LENGTH));
+        s.constraints.insert(5, Constraint::Angle(11, 12, 1e6));
+        s.entities.insert(5, point(500.0, -500.0));
         assert_eq!(s.validate(), Ok(()));
     }
 
     #[test]
     fn bad_entities() {
-        let cases: [(Entity, &str); 5] = [
+        let cases: [(Entity, &str); 8] = [
             (line(1, 99), "refers to an entity that isn't a point"),
             (line(1, 11), "refers to an entity that isn't a point"),
             (line(1, 1), "uses one point twice"),
@@ -307,6 +330,23 @@ pub(crate) mod tests {
                     construction: false,
                 },
                 "radius must be finite and not negative",
+            ),
+            (
+                point(0.0, 500.5),
+                "position is outside the size box (±500 m)",
+            ),
+            (
+                point(-7.8e20, 0.0),
+                "position is outside the size box (±500 m)",
+            ),
+            (
+                Entity::Circle {
+                    center: 1,
+                    r: 501.0,
+                    fixed: false,
+                    construction: false,
+                },
+                "radius is larger than the size box allows (500 m)",
             ),
         ];
         for (e, why) in cases {
@@ -337,6 +377,10 @@ pub(crate) mod tests {
             (
                 C::Length(11, -1.0),
                 "a distance, length or radius can't be negative",
+            ),
+            (
+                C::DistanceX(1, 2, -1000.5),
+                "value is longer than the size box allows (1000 m)",
             ),
         ] {
             let mut s = rectangle();

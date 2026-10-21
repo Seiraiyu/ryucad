@@ -22,6 +22,6 @@ mod system;
 
 pub use loops::{Chain, Loop, Segment};
 pub use report::{Free, State};
-pub use sketch::{Constraint, Entity, Id, Sketch, SketchError};
+pub use sketch::{Constraint, Entity, Id, MAX_LENGTH, Sketch, SketchError};
 pub use solve::{Report, Solved, solve};
 pub use system::{ANGLE_TOL, Coord, SOLVE_TOL};
