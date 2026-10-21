@@ -83,6 +83,26 @@ enum Command {
     },
     /// Report files that aren't canonical, broken, unlisted or unknown.
     CheckFormat,
+    /// What changed between two revisions: features, parameters and sketch
+    /// entities.
+    Diff {
+        /// The revision to compare from: HEAD by default.
+        #[arg(long, value_name = "REV")]
+        from: Option<String>,
+        /// The revision to compare to: the working files (working) by
+        /// default.
+        #[arg(long, value_name = "REV")]
+        to: Option<String>,
+        /// Only this part.
+        #[arg(long)]
+        part: Option<String>,
+        /// List every sketch position that moved.
+        #[arg(long)]
+        positions: bool,
+        /// Include what is the same.
+        #[arg(long)]
+        all: bool,
+    },
     /// Diagnose the project folder: a lost manifest, unlisted or missing
     /// feature files, conflict markers, sync tools' copies and more. With
     /// --repair, apply repairs it offered.
@@ -877,6 +897,19 @@ fn request(cmd: &Command) -> Option<Request> {
             rev: rev.rev.clone(),
         },
         Command::CheckFormat => Request::CheckFormat {},
+        Command::Diff {
+            from,
+            to,
+            part,
+            positions,
+            all,
+        } => Request::Diff {
+            from: from.clone(),
+            to: to.clone(),
+            part: part.clone(),
+            positions: *positions,
+            all: *all,
+        },
         Command::Doctor { repairs, params } if repairs.is_empty() => {
             let _ = params;
             Request::Doctor {}

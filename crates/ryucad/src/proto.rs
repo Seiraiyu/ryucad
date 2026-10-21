@@ -297,6 +297,21 @@ pub enum Request {
     },
     #[serde(rename = "check_format")]
     CheckFormat {},
+    /// What changed between two revisions (`HEAD` and the working files by
+    /// default): files as ryucad reads them.
+    #[serde(rename = "diff")]
+    Diff {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        positions: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all: bool,
+    },
     #[serde(rename = "daemon.status")]
     DaemonStatus {},
     /// Registers the connection as a participant of the live session.

@@ -282,6 +282,25 @@ fn dispatch(
             )
         }
         Request::CheckFormat {} => check_format(session),
+        Request::Diff {
+            from,
+            to,
+            part,
+            positions,
+            all,
+        } => {
+            let opts = crate::diff::Options {
+                part,
+                positions,
+                all,
+            };
+            diff(
+                session,
+                from.as_deref().unwrap_or("HEAD"),
+                to.as_deref().unwrap_or("working"),
+                &opts,
+            )
+        }
         Request::SessionHello {
             kind,
             name,
@@ -1963,6 +1982,29 @@ fn inspect(
         );
     }
     Ok(json!({"part": pid, "bodies": bodies}))
+}
+
+/// A revision's files, and how the answer names it: the working files
+/// (`working`) or a commit.
+fn files_at(session: &mut Session, rev: &str) -> Result<(Value, activity::Files)> {
+    if rev == "working" {
+        return Ok((json!({"rev": rev}), session.snapshot()));
+    }
+    let r = crate::git::revision(session.root(), rev)?;
+    Ok((json!({"rev": rev, "commit": r.commit}), r.files))
+}
+
+/// `diff`: what changed from one revision to another.
+fn diff(session: &mut Session, from: &str, to: &str, opts: &crate::diff::Options) -> Result<Value> {
+    if let Some(p) = &opts.part {
+        part_id(p)?;
+    }
+    let (a, fa) = files_at(session, from)?;
+    let (b, fb) = files_at(session, to)?;
+    let mut v = crate::diff::structural(&fa, &fb, opts);
+    v["from"] = a;
+    v["to"] = b;
+    Ok(v)
 }
 
 fn check_format(session: &Session) -> Result<Value> {

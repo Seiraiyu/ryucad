@@ -803,6 +803,7 @@ fn every_protocol_method_has_a_command() {
         ("rebuild", &["rebuild"]),
         ("inspect", &["inspect"]),
         ("check_format", &["check-format"]),
+        ("diff", &["diff"]),
         ("daemon.status", &["daemon", "status"]),
         ("daemon.shutdown", &["daemon", "stop"]),
         ("session.hello", &["participants"]),
