@@ -625,3 +625,74 @@ fn an_edge_up_to_a_pyramids_apex() {
     .0;
     near(volume(&out, 1e-5), volume(&want, 1e-5), 2e-6);
 }
+
+fn refused(r: Result<(Body, ryukei::name::Journal), ryukei::Error>) -> ryukei::BlendError {
+    match r {
+        Err(ryukei::Error::InvalidBlend(e)) => e,
+        Err(e) => panic!("{e:?}"),
+        Ok(_) => panic!("blended"),
+    }
+}
+
+#[test]
+fn corners_it_does_not_build() {
+    use FaceRole::*;
+    use ryukei::BlendError;
+    let k = OpKey(1);
+    let bx = primitive::block(k, 1.0, 1.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let [e1, e2, e3] = [
+        edge(k, PlusX, PlusZ),
+        edge(k, PlusY, PlusZ),
+        edge(k, PlusX, PlusY),
+    ];
+    let unsupported = |r| matches!(refused(r), BlendError::Unsupported { .. });
+    // Two larger fillets and a smaller one: the small ball would round a
+    // crease that vanishes.
+    assert!(unsupported(blend(
+        K,
+        &bx,
+        &[fillet(e1, 0.3), fillet(e2, 0.3), fillet(e3, 0.1)]
+    )));
+    // Three sizes.
+    assert!(unsupported(blend(
+        K,
+        &bx,
+        &[fillet(e1, 0.3), fillet(e2, 0.2), fillet(e3, 0.1)]
+    )));
+    // Fillets and a chamfer at one corner.
+    assert!(unsupported(blend(
+        K,
+        &bx,
+        &[fillet(e1, 0.2), fillet(e2, 0.2), chamfer(e3, 0.2)]
+    )));
+    // A chamfer so much larger the others' mitre would leave it.
+    assert!(unsupported(blend(
+        K,
+        &bx,
+        &[chamfer(e1, 0.6), chamfer(e2, 0.05), chamfer(e3, 0.05)]
+    )));
+    // A convex edge and a concave one sharing a face, the third sharp:
+    // their blends lie either side of the face.
+    let b = block_on_plate();
+    let foot = lines_where(&b, |p, q| {
+        p.z.max(q.z) < 1.0 + 1e-9
+            && p.z.min(q.z) > 1.0 - 1e-9
+            && (p.y - 1.0).abs() < 1e-9
+            && (q.y - 1.0).abs() < 1e-9
+            && p.x.min(q.x) > 0.5
+    });
+    let side = lines_where(&b, |p, q| {
+        (p.x - 1.0).abs() < 1e-9
+            && (q.x - 1.0).abs() < 1e-9
+            && (p.y - 1.0).abs() < 1e-9
+            && (q.y - 1.0).abs() < 1e-9
+    });
+    assert_eq!((foot.len(), side.len()), (1, 1));
+    assert!(unsupported(blend(
+        K,
+        &b,
+        &[fillet(foot[0], 0.1), fillet(side[0], 0.1)]
+    )));
+}
