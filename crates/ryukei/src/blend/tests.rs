@@ -77,3 +77,80 @@ pub(crate) fn slot() -> Body {
         .unwrap()
         .0
 }
+
+/// An edge by its name.
+pub(crate) fn edge_id(b: &Body, n: Name) -> crate::topo::EdgeId {
+    match b.by_name(n) {
+        Some(EntityId::Edge(e)) => e,
+        other => panic!("no edge {n}: {other:?}"),
+    }
+}
+
+/// A boss: a cylinder of radius 1 standing 1 high on a 4 × 4 × 1 plate,
+/// united; its foot is a concave circle at `z = 1`.
+pub(crate) fn boss() -> Body {
+    use crate::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use crate::geom::Vector3;
+    let plate = primitive::block(OpKey(2), 4.0, 4.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let cyl = primitive::cylinder(OpKey(1), 1.0, 1.5, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let tool = Tool {
+        key: ToolKey(1),
+        body: &cyl,
+        place: Rigid::translation(Vector3::new(2.0, 2.0, 0.5)),
+    };
+    boolean(OpKey(3), BooleanOp::Unite, &plate, &[tool])
+        .unwrap()
+        .0
+}
+
+/// A cylinder of radius 1 from `z = 0` to `2`, cut by a plane through
+/// `(0, 0, 1.5)` tilted 0.3 rad about `x`: its top rim is an ellipse.
+pub(crate) fn slanted() -> Body {
+    use crate::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use crate::geom::{UnitVector3, Vector3};
+    let cyl = primitive::cylinder(OpKey(1), 1.0, 2.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let cutter = primitive::block(OpKey(2), 6.0, 6.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let x = UnitVector3::new_unchecked(Vector3::new(1.0, 0.0, 0.0));
+    let place = Rigid::translation(Vector3::new(0.0, 0.0, 1.5))
+        .then_after(&Rigid::rotation(x, 0.3))
+        .then_after(&Rigid::translation(Vector3::new(-3.0, -3.0, 0.0)));
+    let tool = Tool {
+        key: ToolKey(1),
+        body: &cutter,
+        place,
+    };
+    boolean(OpKey(3), BooleanOp::Subtract, &cyl, &[tool])
+        .unwrap()
+        .0
+}
+
+/// A shaft of radius 1 along `x` from `-2` to `2`, and a boss of radius
+/// 0.5 along `z` standing on it to `z = 2`, united: the foot is a closed
+/// curve where two cylinders cross, fitted.
+pub(crate) fn shaft() -> Body {
+    use crate::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use crate::geom::{UnitVector3, Vector3};
+    let y = UnitVector3::new_unchecked(Vector3::new(0.0, 1.0, 0.0));
+    let along_x = Rigid::rotation(y, core::f64::consts::FRAC_PI_2)
+        .then_after(&Rigid::translation(Vector3::new(0.0, 0.0, -2.0)));
+    let shaft = primitive::cylinder(OpKey(1), 1.0, 4.0, &along_x).unwrap().0;
+    let boss = primitive::cylinder(OpKey(2), 0.5, 2.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let tool = Tool {
+        key: ToolKey(1),
+        body: &boss,
+        place: Rigid::IDENTITY,
+    };
+    boolean(OpKey(3), BooleanOp::Unite, &shaft, &[tool])
+        .unwrap()
+        .0
+}

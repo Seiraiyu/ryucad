@@ -119,6 +119,19 @@ impl NurbsCurve {
         Ok((Self::from_spline(a), Self::from_spline(b)))
     }
 
+    /// The curve run backwards in clamped form: `t` becomes `a + b - t`
+    /// over the clamped domain `[a, b]`.
+    pub fn reversed(&self) -> Self {
+        Self::from_spline(self.spline.reversed())
+    }
+
+    /// The curve over `range` alone, in clamped form. Fails with
+    /// `InvalidNurbs(KnotOrder)` for a range that is empty, leaves a
+    /// clamped domain, or is longer than a period.
+    pub fn part(&self, range: [f64; 2]) -> Result<Self, Error> {
+        Ok(Self::from_spline(self.spline.part(range)?))
+    }
+
     /// The curve moved by a rigid transform: control points moved, weights
     /// and knots kept, so parameters are unchanged.
     pub fn transformed(&self, r: &Rigid) -> Self {

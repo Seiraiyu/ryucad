@@ -161,6 +161,41 @@ impl Curve {
         }
     }
 
+    /// The same curve run backwards, and the constant `c` such that the
+    /// point at `t` on this curve is the point at `c - t` on the reversed
+    /// one: a line, circle or ellipse with its direction or axis reversed
+    /// (`c = 0`), a NURBS in clamped form over its domain `[a, b]`
+    /// (`c = a + b`).
+    pub fn reversed(&self) -> (Self, f64) {
+        match self {
+            Self::Line(l) => (
+                Self::Line(Line {
+                    origin: l.origin,
+                    dir: -l.dir,
+                }),
+                0.0,
+            ),
+            Self::Circle(c) => (
+                Self::Circle(Circle {
+                    frame: c.frame.flipped(),
+                    radius: c.radius,
+                }),
+                0.0,
+            ),
+            Self::Ellipse(e) => (
+                Self::Ellipse(
+                    Ellipse::new(e.frame().flipped(), e.major(), e.minor())
+                        .expect("a valid ellipse flipped"),
+                ),
+                0.0,
+            ),
+            Self::Nurbs(n) => {
+                let [a, b] = n.to_clamped().domain();
+                (Self::Nurbs(Arc::new(n.reversed())), a + b)
+            }
+        }
+    }
+
     /// The parameter range: unbounded for a line, `[0, 2π]` for a circle or
     /// an ellipse, the knot domain for a NURBS.
     pub fn domain(&self) -> [f64; 2] {

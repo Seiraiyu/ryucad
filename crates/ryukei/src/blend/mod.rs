@@ -16,6 +16,8 @@ mod chain;
 mod convex;
 #[allow(dead_code)]
 mod spec;
+#[allow(dead_code)]
+mod spine;
 
 use crate::Error;
 use crate::name::Name;
