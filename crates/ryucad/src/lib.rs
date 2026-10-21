@@ -5,6 +5,7 @@ pub mod activity;
 pub mod client;
 pub mod config;
 pub mod daemon;
+pub mod diff;
 pub mod doc;
 pub mod doctor;
 pub mod endpoint;

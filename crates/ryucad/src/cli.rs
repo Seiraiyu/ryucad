@@ -268,6 +268,9 @@ enum Command {
     /// Run, query or stop the project's session daemon.
     #[command(subcommand)]
     Daemon(DaemonCmd),
+    /// What Git runs: the diff driver's text conversion.
+    #[command(subcommand)]
+    Git(GitCmd),
     /// Print the ryucad, ryukei and protocol versions.
     Version,
 }
@@ -287,6 +290,13 @@ enum DaemonCmd {
         #[arg(long)]
         all: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum GitCmd {
+    /// Print a ryucad file as one line per value, for `git diff` (Git's
+    /// textconv): plain text, not JSON.
+    Textconv { file: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -726,6 +736,7 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Init { .. }
         | Command::Version
         | Command::Daemon(_)
+        | Command::Git(_)
         | Command::Watch { .. }
         | Command::Open { .. } => {
             return None;
@@ -1147,6 +1158,20 @@ pub fn main() -> ExitCode {
             );
         }
     };
+    // Git reads a textconv's output as the file's text, not JSON.
+    if let Command::Git(GitCmd::Textconv { file }) = &cli.command {
+        return match std::fs::read(file) {
+            Ok(bytes) => {
+                use std::io::Write;
+                let mut out = std::io::stdout().lock();
+                match out.write_all(&ryucad::diff::textconv(&bytes)) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(_) => ExitCode::from(Code::Io.exit_code()),
+                }
+            }
+            Err(e) => finish(Err(Error::io(file, &e)), Vec::new(), cli.pretty),
+        };
+    }
     let mut warnings = Vec::new();
     let outcome = run(&cli, &mut warnings);
     finish(outcome, warnings, cli.pretty)

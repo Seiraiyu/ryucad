@@ -1106,3 +1106,77 @@ fn doctor_repairs_a_damaged_project() {
     assert_eq!(v["params"]["radius"]["value"], "1 in");
     p.fails(&["doctor", "--repair", &id], "repair_conflict", 1);
 }
+
+/// Runs git in `dir` with a fixed identity, and its output.
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn git_diff_reads_values_through_textconv() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=20", "--param",
+        "z=5",
+    ]);
+    let root = &p.direct;
+    let file = root.join("parts/p/features/b.json");
+    let out = Command::cargo_bin("ryucad")
+        .unwrap()
+        .args(["git", "textconv"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        text.starts_with("ryucad.feature box (format 1)\n"),
+        "{text}"
+    );
+    assert!(text.contains("\nparams.x = 10 mm\n"), "{text}");
+    // Registered by hand here; `git install` does it for real.
+    fs::write(root.join(".gitattributes"), "*.json diff=ryucad\n").unwrap();
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "a box"]);
+    p.ok(&["feature", "edit", "p", "b", "--param", "x=12"]);
+    // Git runs it through a shell: forward slashes, even on Windows.
+    let bin = assert_cmd::cargo::cargo_bin("ryucad");
+    let bin = bin.to_str().unwrap().replace('\\', "/");
+    let driver = format!("diff.ryucad.textconv='{bin}' git textconv");
+    let diff = git(root, &["-c", &driver, "diff", "--no-color", "-U0"]);
+    assert!(
+        diff.contains("\n-params.x = 10 mm\n+params.x = 12 mm\n"),
+        "{diff}"
+    );
+    // A file that isn't there is an error, in JSON.
+    let out = Command::cargo_bin("ryucad")
+        .unwrap()
+        .args(["git", "textconv", "nowhere.json"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["error"]["code"], "io");
+}
