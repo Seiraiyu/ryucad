@@ -7,8 +7,19 @@
 //! dependency among its rows (its left null space) is a set of constraints
 //! that say the same thing, redundant if they all hold and conflicting if
 //! they can't.
+//!
+//! Stage 2 reads them from a component's pieces ([`crate::blocks`]) when
+//! they are clean: the over part of full column rank, every square block
+//! of full rank, the under part of full row rank. The Jacobian is then
+//! block triangular with those pieces on its diagonal, so its null space
+//! is the under part's and its left null space the over part's, and each
+//! is read from its piece alone. Ranks are judged against the whole
+//! Jacobian's scale, as stage 1 judges them. A piece that isn't clean
+//! (a dependency only the values show) sends the component back to stage
+//! 1's diagnosis.
 
-use crate::linalg::{Mat, qr};
+use crate::blocks::Blocks;
+use crate::linalg::{Mat, qr, qr_against};
 use crate::sketch::Id;
 use crate::solve::jacobian;
 use crate::system::{Component, Coord, Owner, SOLVE_TOL, System};
@@ -59,10 +70,116 @@ impl Diagnosis {
     }
 }
 
-/// Diagnoses `sys` at the solution `x`; `converged` says, per component,
-/// whether its equations hold.
-pub(crate) fn diagnose(sys: &System, x: &[f64], converged: &[bool]) -> Diagnosis {
+/// The largest column and row norms of `comp`'s Jacobian at `x`: what
+/// its pivoted QR and its transpose's take as their scale.
+fn norms(sys: &System, comp: &Component, x: &[f64]) -> (f64, f64) {
+    let mut cols: BTreeMap<usize, f64> = BTreeMap::new();
+    let mut row_max: f64 = 0.0;
+    for &e in &comp.eqs {
+        let mut row = 0.0;
+        for (v, g) in sys.partials(e, x) {
+            if comp.vars.binary_search(&v).is_ok() {
+                *cols.entry(v).or_default() += g * g;
+                row += g * g;
+            }
+        }
+        row_max = row_max.max(row);
+    }
+    let col_max = cols.values().fold(0.0, |m: f64, c| m.max(*c));
+    (ryukei::math::sqrt(col_max), ryukei::math::sqrt(row_max))
+}
+
+/// What one component adds to a diagnosis: its freedom, the variables
+/// that can move, and its dependent sets with whether each conflicts.
+#[derive(Default)]
+struct Part {
+    dof: usize,
+    free: BTreeSet<usize>,
+    sets: Vec<(Vec<Id>, bool)>,
+}
+
+/// The variables of `comp` a null space moves.
+fn support(comp: &Component, null: &[Vec<f64>]) -> BTreeSet<usize> {
+    let mut out = BTreeSet::new();
+    for v in null {
+        for (j, &var) in comp.vars.iter().enumerate() {
+            if v[j].abs() > SUPPORT_TOL {
+                out.insert(var);
+            }
+        }
+    }
+    out
+}
+
+/// A component's dependent sets, each with whether it conflicts.
+fn sets(
+    sys: &System,
+    comp: &Component,
+    jac: &Mat,
+    r: &[f64],
+    ok: bool,
+    scale: Option<f64>,
+) -> Vec<(Vec<Id>, bool)> {
     let tol = SOLVE_TOL / sys.scale;
+    dependent_sets(sys, comp, jac, scale)
+        .into_iter()
+        .map(|set| {
+            let rows = rows_of(sys, comp, &set);
+            let conflict = !ok && inconsistent(&jac.rows_of(&rows), &pick(r, &rows), tol);
+            (set, conflict)
+        })
+        .collect()
+}
+
+/// Stage 1: a component read from its whole Jacobian.
+fn whole(sys: &System, comp: &Component, x: &[f64], ok: bool) -> Part {
+    let (jac, r) = jacobian(sys, comp, x);
+    let f = qr(&jac, RANK_TOL);
+    Part {
+        dof: comp.vars.len() - f.rank,
+        free: support(comp, &f.null_space()),
+        sets: sets(sys, comp, &jac, &r, ok, None),
+    }
+}
+
+/// Stage 2: a component read from its pieces, when they are clean (see
+/// the module docs); `None` when they aren't.
+fn by_pieces(sys: &System, comp: &Component, b: &Blocks, x: &[f64], ok: bool) -> Option<Part> {
+    let (cols, rows) = norms(sys, comp, x);
+    let factor = |m: &Mat| qr_against(m, RANK_TOL, Some(cols));
+    let mut part = Part::default();
+    if !b.over.eqs.is_empty() {
+        let (jac, r) = jacobian(sys, &b.over, x);
+        if factor(&jac).rank < b.over.vars.len() {
+            return None;
+        }
+        part.sets = sets(sys, &b.over, &jac, &r, ok, Some(rows));
+    }
+    for blk in &b.square {
+        if factor(&jacobian(sys, blk, x).0).rank < blk.vars.len() {
+            return None;
+        }
+    }
+    if !b.under.vars.is_empty() {
+        let f = factor(&jacobian(sys, &b.under, x).0);
+        if f.rank < b.under.eqs.len() {
+            return None;
+        }
+        part.dof = b.under.vars.len() - f.rank;
+        part.free = support(&b.under, &f.null_space());
+    }
+    Some(part)
+}
+
+/// Diagnoses `sys` at the solution `x`; `converged` says, per component,
+/// whether its equations hold, and `pieces` what it was solved in (stage
+/// 2), if anything.
+pub(crate) fn diagnose(
+    sys: &System,
+    x: &[f64],
+    converged: &[bool],
+    pieces: &[Option<Blocks>],
+) -> Diagnosis {
     let mut dof = 0;
     let mut free: BTreeMap<Id, BTreeSet<Coord>> = BTreeMap::new();
     let mut redundant = BTreeSet::new();
@@ -84,23 +201,19 @@ pub(crate) fn diagnose(sys: &System, x: &[f64], converged: &[bool]) -> Diagnosis
             }
         }
     }
-    for (comp, &ok) in sys.components.iter().zip(converged) {
-        let (jac, r) = jacobian(sys, comp, x);
-        let f = qr(&jac, RANK_TOL);
-        dof += comp.vars.len() - f.rank;
-        for v in f.null_space() {
-            for (j, &var) in comp.vars.iter().enumerate() {
-                if v[j].abs() > SUPPORT_TOL {
-                    let (ids, coord) = &sys.var_owner[var];
-                    for id in ids {
-                        free.entry(*id).or_default().insert(*coord);
-                    }
-                }
+    for ((comp, &ok), blocks) in sys.components.iter().zip(converged).zip(pieces) {
+        let part = blocks
+            .as_ref()
+            .and_then(|b| by_pieces(sys, comp, b, x, ok))
+            .unwrap_or_else(|| whole(sys, comp, x, ok));
+        dof += part.dof;
+        for var in part.free {
+            let (ids, coord) = &sys.var_owner[var];
+            for id in ids {
+                free.entry(*id).or_default().insert(*coord);
             }
         }
-        for set in dependent_sets(sys, comp, &jac) {
-            let rows = rows_of(sys, comp, &set);
-            let conflict = !ok && inconsistent(&jac.rows_of(&rows), &pick(&r, &rows), tol);
+        for (set, conflict) in part.sets {
             if conflict {
                 conflicting.insert(set);
             } else {
@@ -156,11 +269,13 @@ fn inconsistent(m: &Mat, r: &[f64], tol: f64) -> bool {
 }
 
 /// Minimal sets of constraints whose rows depend on each other, one per
-/// vector of the left null space, each cut down until removing any of its
-/// constraints makes it independent.
-fn dependent_sets(sys: &System, comp: &Component, jac: &Mat) -> Vec<Vec<Id>> {
+/// vector of the left null space (its rank judged against `scale`, the
+/// largest row norm of the Jacobian it is part of, if not `jac` itself),
+/// each cut down until removing any of its constraints makes it
+/// independent.
+fn dependent_sets(sys: &System, comp: &Component, jac: &Mat, scale: Option<f64>) -> Vec<Vec<Id>> {
     let mut out = BTreeSet::new();
-    for y in qr(&jac.transpose(), RANK_TOL).null_space() {
+    for y in qr_against(&jac.transpose(), RANK_TOL, scale).null_space() {
         let mut set: Vec<Id> = y
             .iter()
             .enumerate()
@@ -288,6 +403,75 @@ mod tests {
         s.constraints.insert(3, C::Coincident(6, 1));
         let r = solve(&s).unwrap().report;
         assert_eq!(r.redundant, [vec![1], vec![2, 3]]);
+    }
+
+    #[test]
+    fn clean_pieces_are_read_alone_and_others_whole() {
+        use crate::blocks::decompose;
+        use crate::system::System;
+        let read = |s: &Sketch| {
+            let solved = solve(s).unwrap().sketch;
+            let sys = System::new(&solved);
+            let comp = sys
+                .components
+                .iter()
+                .max_by_key(|c| c.eqs.len())
+                .unwrap()
+                .clone();
+            let b = decompose(&sys, &comp);
+            let pieces = super::by_pieces(&sys, &comp, &b, &sys.vars, true);
+            let whole = super::whole(&sys, &comp, &sys.vars, true);
+            (pieces, whole)
+        };
+        // Square and clean: read from its pieces, as the whole reads it.
+        let (pieces, whole) = read(&dimensioned());
+        let pieces = pieces.expect("clean");
+        assert_eq!((pieces.dof, whole.dof), (0, 0));
+        // Free to slide: the under part holds all the freedom.
+        let mut s = dimensioned();
+        s.constraints.remove(&1);
+        let (pieces, whole) = read(&s);
+        let pieces = pieces.expect("clean");
+        assert_eq!((pieces.dof, &pieces.free), (whole.dof, &whole.free));
+        assert_eq!(pieces.dof, 2);
+        // Redundant by structure: the over part's set, as the whole's (the
+        // heights of the corners, by the horizontals, the vertical side's
+        // length and the new one).
+        let mut s = dimensioned();
+        s.constraints.insert(8, C::DistanceY(1, 4, 1.5));
+        let (pieces, whole) = read(&s);
+        let pieces = pieces.expect("clean");
+        assert_eq!(pieces.sets, whole.sets);
+        assert_eq!(pieces.sets, [(vec![2, 3, 7, 8], false)]);
+        // The vertical sides made parallel as well: an over part, read
+        // alone, as the whole reads it.
+        let mut s = dimensioned();
+        s.constraints.insert(8, C::Parallel(12, 14));
+        let (pieces, whole) = read(&s);
+        assert_eq!(pieces.expect("clean").sets, whole.sets);
+        // Two horizontal lines from fixed points, also parallel: square by
+        // structure (the parallel solved for the second line's far x), but
+        // that block is singular where the lines are level. Not clean:
+        // read whole, which finds the parallel redundant and that x free.
+        let mut s = Sketch::default();
+        for (id, x, y, fixed) in [
+            (1, 0.0, 0.0, true),
+            (2, 2.0, 0.1, false),
+            (3, 0.0, 1.0, true),
+            (4, 2.0, 1.2, false),
+        ] {
+            s.entities.insert(id, Entity::Point { at: [x, y], fixed });
+        }
+        s.entities.insert(10, line(1, 2));
+        s.entities.insert(11, line(3, 4));
+        s.constraints.insert(1, C::Horizontal(10));
+        s.constraints.insert(2, C::Horizontal(11));
+        s.constraints.insert(3, C::Parallel(10, 11));
+        s.constraints.insert(4, C::Length(10, 2.0));
+        let (pieces, whole) = read(&s);
+        assert!(pieces.is_none());
+        assert_eq!(whole.dof, 1);
+        assert_eq!(whole.sets, [(vec![1, 2, 3], false)]);
     }
 
     #[test]
