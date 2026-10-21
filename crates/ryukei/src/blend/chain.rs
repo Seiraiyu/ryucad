@@ -6,8 +6,8 @@
 //! one blended edge cut off by the third face there; two kinds of join,
 //! where two blended edges meet tangentially and the blend runs on from
 //! one into the other; and the corners, where blended edges meet at
-//! angles: a trim of two, a ball of three. Every other vertex is refused,
-//! naming it.
+//! angles: a trim of two, a ball or a mitre of three. Every other vertex
+//! is refused, naming it.
 //!
 //! Blended edges joined at joins make chains. The new rails of a chain
 //! all go on one face, its rail face: at a smooth join it is the face the
@@ -45,6 +45,9 @@ pub(crate) enum Class {
     /// same way, and a sharp edge between their other faces: each blend is
     /// trimmed by the other (see [`super::trim`]).
     Trim,
+    /// Three blended edges, chamfers, and no other edge: mitred (see
+    /// [`super::mitre`]).
+    Mitre,
 }
 
 /// A maximal run of blended edges joined at joins.
@@ -311,9 +314,21 @@ fn classify(
 
 /// The class of a vertex where three blended edges meet at angles: a
 /// ball corner when they are fillets of one radius that bend the same
-/// way. Anything else is refused.
+/// way; mitred when all three are chamfers. Anything else is refused.
 fn corner_class(body: &Body, specs: &[Spec], blended: &[EdgeId], at: Name) -> Result<Class, Error> {
     let unsupported = || -> Error { BlendError::Unsupported { at }.into() };
+    let chamfers = blended
+        .iter()
+        .filter(|&&e| {
+            let s = specs.iter().find(|s| s.edge == e).expect("a blended edge");
+            matches!(s.kind, BlendKind::Chamfer(_))
+        })
+        .count();
+    match chamfers {
+        0 => {}
+        3 => return Ok(Class::Mitre),
+        _ => return Err(unsupported()),
+    }
     let mut radii = Vec::with_capacity(3);
     let mut convex = Vec::with_capacity(3);
     for &e in blended {

@@ -320,7 +320,11 @@ fn corners_account_for_every_name() {
     let b = primitive::block(k, 1.0, 1.0, 1.0, &Rigid::IDENTITY)
         .unwrap()
         .0;
-    let [e1, e2] = [edge(k, PlusY, PlusZ), edge(k, PlusX, PlusY)];
+    let [e1, e2, e3] = [
+        edge(k, PlusY, PlusZ),
+        edge(k, PlusX, PlusY),
+        edge(k, PlusX, PlusZ),
+    ];
     let v = vertex(k, PlusX, PlusY, PlusZ);
     let cases: Vec<(Vec<EdgeBlend>, Vec<EdgeBlend>)> = vec![
         // Trims, equal and not: the same sizes' order keeps the names.
@@ -335,6 +339,11 @@ fn corners_account_for_every_name() {
         (
             vec![fillet(e1, 0.15), chamfer(e2, 0.3)],
             vec![fillet(e1, 0.1), chamfer(e2, 0.2)],
+        ),
+        // A mitre.
+        (
+            vec![chamfer(e1, 0.2), chamfer(e2, 0.2), chamfer(e3, 0.2)],
+            vec![chamfer(e1, 0.1), chamfer(e2, 0.1), chamfer(e3, 0.1)],
         ),
     ];
     for (one, other) in cases {

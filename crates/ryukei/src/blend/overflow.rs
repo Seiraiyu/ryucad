@@ -101,6 +101,7 @@ pub(crate) fn check(
     // Where curves of different chains may meet, end to end.
     let mut feet: Vec<Point3> = near.corners.iter().flat_map(|c| c.feet).collect();
     feet.extend(trims.iter().flat_map(|t| [t.q, t.p, t.g()]));
+    feet.extend(near.mitres.iter().flat_map(|m| m.q));
     let mut items: Vec<Item> = Vec::new();
     let mut blended: BTreeSet<EdgeId> = BTreeSet::new();
     for (ci, (chain, plan)) in chains.iter().zip(plans).enumerate() {

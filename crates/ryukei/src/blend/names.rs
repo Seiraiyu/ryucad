@@ -136,6 +136,16 @@ pub(crate) fn name(body: &mut Body, key: OpKey, made: &Made) -> Journal {
             created.insert(n);
         }
     }
+    // Mitres are sections between the chamfers either side.
+    for m in &made.mitres {
+        for &(e, [a, b]) in &m.edges {
+            let mut parents = [faces[segment_of(a)], faces[segment_of(b)]];
+            parents.sort();
+            let n = body.derive_name("blend", key, role(BlendRole::Section), &parents);
+            body.rename(EntityId::Edge(e), n);
+            created.insert(n);
+        }
+    }
     for &(e, [a, b]) in &made.sections {
         let mut parents = [faces[a], faces[b]];
         parents.sort();
@@ -177,6 +187,10 @@ pub(crate) fn name(body: &mut Body, key: OpKey, made: &Made) -> Journal {
     for (old, segs) in &made.replaced {
         let entry = replaced.entry(*old).or_default();
         entry.extend(segs.iter().map(|&k| faces[k]));
+    }
+    for m in &made.mitres {
+        let entry = replaced.entry(m.vertex).or_default();
+        entry.extend(m.chamfers.iter().map(|&e| faces[segment_of(e)]));
     }
     for t in &made.trims {
         let entry = replaced.entry(t.vertex).or_default();

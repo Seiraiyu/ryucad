@@ -11,10 +11,11 @@
 //! the balls sweep ([`fillet`]); for chamfers, rails set back along the
 //! faces and the planes, cones or ruled surfaces between them
 //! ([`chamfer`]); and where the blends end ([`end`]), meet in a ball
-//! ([`corner`]) or trim each other ([`trim`]). Every new curve is checked
-//! to stay on its face ([`overflow`]). Only then is a copy of the body
-//! rebuilt through Euler operators ([`build`]) and its new entities named
-//! from the blend's key and the names around them ([`names`]).
+//! ([`corner`]), trim each other ([`trim`]) or are mitred ([`mitre`]).
+//! Every new curve is checked to stay on its face ([`overflow`]). Only
+//! then is a copy of the body rebuilt through Euler operators ([`build`])
+//! and its new entities named from the blend's key and the names around
+//! them ([`names`]).
 //!
 //! Only faces on the analytic surfaces (planes, cylinders, cones, spheres
 //! and tori) and on earlier fillets' pipes may be blended; the rest is
@@ -27,6 +28,7 @@ mod convex;
 mod corner;
 mod end;
 mod fillet;
+mod mitre;
 mod names;
 mod overflow;
 mod plan;
@@ -92,9 +94,9 @@ pub struct EdgeBlend {
 /// vertex a blend ends where a third face cuts it off, runs on into a
 /// tangent blended edge (alone, or beside a smooth edge between their
 /// other faces), or meets the blends of the other edges there: of one
-/// more, bending its way, trimming each other, or of two more fillets of
-/// its size bending its way in a ball. Refusals are
-/// [`Error::InvalidBlend`], before anything is changed.
+/// more, bending its way, trimming each other; of two more fillets of its
+/// size bending its way in a ball; of three chamfers in a mitre. Refusals
+/// are [`Error::InvalidBlend`], before anything is changed.
 ///
 /// The input must pass [`crate::check::check`] (debug builds assert it).
 pub fn blend(key: OpKey, body: &Body, blends: &[EdgeBlend]) -> Result<(Body, Journal), Error> {
@@ -111,9 +113,11 @@ pub fn blend(key: OpKey, body: &Body, blends: &[EdgeBlend]) -> Result<(Body, Jou
     let partials = partials.into_iter().collect::<Result<Vec<_>, _>>()?;
     let corners = corner::corners(body, &specs, &chains)?;
     let trims = trim::trims(body, &specs, &chains, &partials)?;
+    let mitres = mitre::mitres(body, &specs, &chains, &partials)?;
     let near = Near {
         corners: &corners,
         trims: &trims,
+        mitres: &mitres,
     };
     let plans: Vec<Result<plan::Plan, Error>> = chains
         .par_iter()
@@ -135,10 +139,11 @@ pub fn blend(key: OpKey, body: &Body, blends: &[EdgeBlend]) -> Result<(Body, Jou
     Ok((out, journal))
 }
 
-/// The places where chains meet: ball corners and trims.
+/// The places where chains meet: ball corners, trims and mitres.
 pub(crate) struct Near<'a> {
     pub(crate) corners: &'a [corner::BallCorner],
     pub(crate) trims: &'a [trim::Trim],
+    pub(crate) mitres: &'a [mitre::Mitre],
 }
 
 /// The edges reachable from `edge` through vertices where an edge meets

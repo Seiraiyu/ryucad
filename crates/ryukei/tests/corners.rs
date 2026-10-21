@@ -322,3 +322,52 @@ fn a_fillet_and_a_chamfer_trim_each_other() {
         );
     }
 }
+
+#[test]
+fn chamfers_at_a_corner() {
+    use FaceRole::*;
+    let k = OpKey(1);
+    let bx = primitive::block(k, 1.0, 1.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let d = 0.2;
+    // Two trim each other.
+    let (out, _) = blend(
+        K,
+        &bx,
+        &[
+            chamfer(edge(k, PlusY, PlusZ), d),
+            chamfer(edge(k, PlusX, PlusY), d),
+        ],
+    )
+    .unwrap();
+    assert_eq!(check_intersections(&out), []);
+    near(volume(&out, 1e-5), 1.0 - d * d + (d * d * d) / 3.0, 1e-9);
+    // Three are mitred, at every corner of the box.
+    for x in [PlusX, MinusX] {
+        for y in [PlusY, MinusY] {
+            for z in [PlusZ, MinusZ] {
+                let blends = [
+                    chamfer(edge(k, x, y), d),
+                    chamfer(edge(k, y, z), d),
+                    chamfer(edge(k, z, x), d),
+                ];
+                let (out, _) = blend(K, &bx, &blends).unwrap();
+                assert_eq!(check_intersections(&out), []);
+                near(
+                    volume(&out, 1e-5),
+                    1.0 - 1.5 * d * d + 0.75 * (d * d * d),
+                    1e-9,
+                );
+            }
+        }
+    }
+    let blends: Vec<EdgeBlend> = all_edges(k).into_iter().map(|e| chamfer(e, d)).collect();
+    let (out, _) = blend(K, &bx, &blends).unwrap();
+    assert_eq!(check_intersections(&out), []);
+    near(
+        volume(&out, 1e-5),
+        1.0 - 6.0 * d * d + 6.0 * (d * d * d),
+        1e-9,
+    );
+}

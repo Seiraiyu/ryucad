@@ -29,13 +29,14 @@
 //! Where chains meet, the edges between their blend faces are made first,
 //! round the vertex, so that each chain's path just runs to them: a
 //! triangle of sections round a ball corner, a tree of new edges for a
-//! trim ([`grow`]). Every blended edge still becomes its rail on its
-//! other face, ending where that rail does.
+//! trim or a mitre ([`grow`]). Every blended edge still becomes its rail
+//! on its other face, ending where that rail does.
 
 use super::Near;
 use super::chain::Chain;
 use super::corner::BallCorner;
 use super::end::EndCurve;
+use super::mitre::Mitre;
 use super::plan::{Joint, Plan, Segment};
 use super::spec::Spec;
 use super::trim::Trim;
@@ -68,6 +69,18 @@ pub(crate) struct Made {
     pub(crate) modified: BTreeSet<EntityId>,
     pub(crate) corners: Vec<CornerMade>,
     pub(crate) trims: Vec<TrimMade>,
+    pub(crate) mitres: Vec<MitreMade>,
+}
+
+/// Three chamfers mitred together.
+#[derive(Clone, Debug)]
+pub(crate) struct MitreMade {
+    /// The name of the vertex they took away.
+    pub(crate) vertex: Name,
+    /// The mitres, each with the chamfered edges either side.
+    pub(crate) edges: Vec<(EdgeId, [Name; 2])>,
+    /// The chamfered edges.
+    pub(crate) chamfers: Vec<Name>,
 }
 
 /// Two blends trimmed against each other.
@@ -288,11 +301,17 @@ pub(crate) fn build(
             body, &mut keys, &mut specs, &other, t, &mut made,
         )?);
     }
+    let mut mitred: Vec<MitreBuilt> = Vec::with_capacity(near.mitres.len());
+    for m in near.mitres {
+        mitred.push(mitre_build(body, &mut keys, &mut specs, &other, m)?);
+    }
     for (ci, (chain, plan)) in chains.iter().zip(plans).enumerate() {
         let ready = Ready {
             corners: &built,
             trims,
             cut: &cut,
+            mitres: near.mitres,
+            mitred: &mitred,
             chain: ci,
             names: &names,
         };
@@ -302,6 +321,9 @@ pub(crate) fn build(
     }
     for (t, c) in trims.iter().zip(&cut) {
         trim_finish(body, &specs, &other, t, c, &mut made, &mut work)?;
+    }
+    for (m, c) in near.mitres.iter().zip(&mitred) {
+        mitre_finish(body, &specs, &other, m, c, &mut made, &mut work)?;
     }
     finish(body, &work)?;
     for (&f, &n) in &names {
@@ -366,6 +388,15 @@ fn chain_build(
                 .position(|e| e.chain == near.chain && e.first == (vi == 0))
                 .ok_or_else(inconsistent)?;
             path_ends[vi] = Some(near.cut[*trim].stops[i]);
+            continue;
+        }
+        if let Joint::Mitre { mitre } = joint {
+            let i = near.mitres[*mitre]
+                .ends
+                .iter()
+                .position(|e| e.chain == near.chain && e.first == (vi == 0))
+                .ok_or_else(inconsistent)?;
+            path_ends[vi] = Some(near.mitred[*mitre].stops[i]);
             continue;
         }
         let Joint::End { crossings, .. } = joint else {
@@ -492,7 +523,7 @@ fn chain_build(
                 euler::set_curve(body, edge, id, interval)?;
                 continue;
             }
-            Joint::Trim { .. } => continue,
+            Joint::Trim { .. } | Joint::Mitre { .. } => continue,
         }
         made.replaced
             .push((old, segs.iter().map(|s| first_seg + s).collect()));
@@ -751,11 +782,13 @@ fn ring(body: &Body, from: FinId, to: FinId) -> Vec<FinId> {
     out
 }
 
-/// What a chain needs of the corners and trims built before it.
+/// What a chain needs of the corners, trims and mitres built before it.
 struct Ready<'a> {
     corners: &'a [CornerBuilt],
     trims: &'a [Trim],
     cut: &'a [TrimBuilt],
+    mitres: &'a [Mitre],
+    mitred: &'a [MitreBuilt],
     /// The chain's index.
     chain: usize,
     /// The faces' names before the blend.
@@ -1033,6 +1066,107 @@ fn trim_finish(
         edge: c.edges[0],
         end,
         edges: [specs[n.spec].name, specs[w.spec].name],
+    });
+    Ok(())
+}
+
+/// What a mitre's construction left for its chains.
+struct MitreBuilt {
+    /// The mitres' edges, in the order of the mitre's curves.
+    edges: Vec<EdgeId>,
+    /// Where each mitre starts, at the crossing of the rails.
+    starts: Vec<VertexId>,
+    /// Where each chain's path on its rail face ends, in the order of the
+    /// mitre's ends.
+    stops: Vec<VertexId>,
+    /// The vertex the chamfers take away, and the tree's vertices.
+    name: Name,
+    vertices: Vec<VertexId>,
+}
+
+/// Builds a mitre's edges before its chains: a star from the point all
+/// three chamfers share to where each pair's rails cross, as a tree round
+/// the vertex (see [`grow`]); each chamfered edge ends at the crossing on
+/// the face it becomes a rail on.
+fn mitre_build(
+    body: &mut Body,
+    keys: &mut Keys,
+    specs: &mut [Spec],
+    other: &BTreeMap<usize, FaceId>,
+    m: &Mitre,
+) -> Result<MitreBuilt, Error> {
+    let rail = |k: usize| -> FaceId {
+        let f = specs[k].faces;
+        if f[0] == other[&k] { f[1] } else { f[0] }
+    };
+    // Tree vertices: the point, then the crossing on each face.
+    let mut points = vec![m.point];
+    points.extend(m.q);
+    let index = |f: FaceId| 1 + m.faces.iter().position(|&x| x == f).expect("a face");
+    let edges: Vec<([usize; 2], [FaceId; 2])> = m
+        .curves
+        .iter()
+        .enumerate()
+        .map(|(x, (_, [i, j]))| ([1 + x, 0], [rail(m.ends[*i].spec), rail(m.ends[*j].spec)]))
+        .collect();
+    let attach: Vec<(EdgeId, usize, Option<f64>)> = m
+        .ends
+        .iter()
+        .map(|e| (specs[e.spec].edge, index(other[&e.spec]), None))
+        .collect();
+    let name = body.vertices[m.vertex].name;
+    let g = grow(
+        body,
+        keys,
+        m.vertex,
+        &Tree {
+            points,
+            edges,
+            attach,
+        },
+    )?;
+    let stops = m
+        .ends
+        .iter()
+        .map(|e| g.vertices[index(rail(e.spec))])
+        .collect();
+    for (i, e) in m.ends.iter().enumerate() {
+        remap(body, &mut specs[e.spec], g.moved[i])?;
+    }
+    Ok(MitreBuilt {
+        edges: g.edges,
+        starts: (1..=3).map(|x| g.vertices[x]).collect(),
+        stops,
+        name,
+        vertices: g.vertices,
+    })
+}
+
+/// Puts the mitres' curves on their edges once the chains are built.
+fn mitre_finish(
+    body: &mut Body,
+    specs: &[Spec],
+    other: &BTreeMap<usize, FaceId>,
+    m: &Mitre,
+    c: &MitreBuilt,
+    made: &mut Made,
+    work: &mut Work,
+) -> Result<(), Error> {
+    let mut edges = Vec::with_capacity(3);
+    for (x, (curve, [i, _])) in m.curves.iter().enumerate() {
+        let first = blend_face(body, specs, other, m.ends[*i].spec);
+        put_curve(body, work, c.edges[x], c.starts[x], curve, first)?;
+        let [i, j] = m.curves[x].1;
+        edges.push((
+            c.edges[x],
+            [specs[m.ends[i].spec].name, specs[m.ends[j].spec].name],
+        ));
+    }
+    work.vertices.extend(c.vertices.iter().copied());
+    made.mitres.push(MitreMade {
+        vertex: c.name,
+        edges,
+        chamfers: m.ends.iter().map(|e| specs[e.spec].name).collect(),
     });
     Ok(())
 }

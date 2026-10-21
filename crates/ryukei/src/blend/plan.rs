@@ -8,8 +8,8 @@
 //! or a whole period round a closed chain. At a plain join the other
 //! face's rail is cut where the ball passes the vertex. At a smooth join
 //! the two segments' spines meet where the ball touches the smooth edge,
-//! and the section of the ball there separates their faces. At a corner
-//! or a trim the rails end where the geometry made for it says,
+//! and the section of the ball there separates their faces. At a corner,
+//! a trim or a mitre the rails end where the geometry made for it says,
 //! which needs every chain's carriers first: so the plan is made in two
 //! passes, the carriers and rails ([`partials`]) and then the ends
 //! ([`finish`]).
@@ -93,6 +93,11 @@ pub(crate) enum Joint {
     /// of trims.
     Trim {
         trim: usize,
+    },
+    /// Where the chain's chamfer is mitred with two others, `mitre` in the
+    /// list of mitres.
+    Mitre {
+        mitre: usize,
     },
 }
 
@@ -202,13 +207,14 @@ pub(crate) fn finish(
     mut parts: Vec<Partial>,
     near: &Near,
 ) -> Result<Plan, Error> {
-    let (corners, trims) = (near.corners, near.trims);
+    let (corners, trims, mitres) = (near.corners, near.trims, near.mitres);
     let kind = specs[chain.edges[0].0].kind;
     let n = chain.edges.len();
     let mut ends: Vec<EndAt> = Vec::new();
     let mut smooths: Vec<SmoothAt> = Vec::new();
     let mut at_corners: Vec<(usize, usize, f64)> = Vec::new();
     let mut at_trims: Vec<(usize, usize)> = Vec::new();
+    let mut at_mitres: Vec<(usize, usize)> = Vec::new();
     for (vi, class) in chain.classes.iter().enumerate() {
         match *class {
             Class::End { face, cuts } => {
@@ -302,6 +308,31 @@ pub(crate) fn finish(
                 }
                 at_trims.push((vi, ti));
             }
+            Class::Mitre => {
+                let first = vi == 0;
+                let p = if first { 0 } else { parts.len() - 1 };
+                let (mi, end) = mitres
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, m)| m.vertex == chain.vertices[vi])
+                    .find_map(|(mi, m)| {
+                        m.ends
+                            .iter()
+                            .find(|e| e.chain == ci && e.first == first)
+                            .map(|e| (mi, e))
+                    })
+                    .expect("a mitre at a mitre vertex");
+                let part = &mut parts[p];
+                for side in 0..2 {
+                    let t = end.param(part.faces[side]);
+                    if first {
+                        part.start[side] = Some(t);
+                    } else {
+                        part.end[side] = Some(t);
+                    }
+                }
+                at_mitres.push((vi, mi));
+            }
             Class::Closed | Class::Join => {}
         }
     }
@@ -371,6 +402,9 @@ pub(crate) fn finish(
     }
     for (vi, ti) in at_trims {
         joints[vi] = Joint::Trim { trim: ti };
+    }
+    for (vi, mi) in at_mitres {
+        joints[vi] = Joint::Mitre { mitre: mi };
     }
     for s in smooths {
         joints[s.vertex] = Joint::SmoothJoin {
@@ -707,6 +741,7 @@ mod tests {
                 let near = Near {
                     corners: &[],
                     trims: &[],
+                    mitres: &[],
                 };
                 finish(b, &specs, c, ci, partials(b, &specs, c)?, &near)
             })
