@@ -26,6 +26,8 @@ enum Pending {
     Rebuild(String),
     /// A body's mesh, asked for at this hash.
     Mesh(BodyKey, String),
+    /// A sketch's drawing, asked for at this part revision.
+    Sketch(BodyKey, String),
     People,
     /// A feature read for the form; after a conflict, with the form as it
     /// was when the save failed.
@@ -457,6 +459,7 @@ impl Workspace {
                 self.lost = true;
                 self.pending.clear();
                 self.model.asked.clear();
+                self.model.sketches_asked.clear();
                 self.retry = Some(Retry {
                     at: Instant::now() + RETRY_FIRST,
                     delay: RETRY_FIRST,
@@ -575,6 +578,16 @@ impl Workspace {
                     }
                 }
             }
+            (Pending::Sketch(key, revision), a) => {
+                self.model.sketch_answered(&key, &revision);
+                match a {
+                    Ok(a) => {
+                        self.model
+                            .take_sketch(&key, crate::core::sketch::Drawing::from_get(&a.result));
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
             (Pending::Mesh(key, hash), a) => {
                 self.model.answered(&key, &hash);
                 match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
@@ -608,9 +621,15 @@ impl Workspace {
                 if self.doctor.is_some() {
                     self.diagnose();
                 }
-                if let Some(u) = params["default_unit"].as_str() {
+                if let Some(u) = params["default_unit"].as_str()
+                    && u != self.model.default_unit
+                {
                     self.model.default_unit = u.to_owned();
                     self.model.generation += 1;
+                    // Dimensions' labels say their values in it.
+                    for part in self.model.clear_sketches() {
+                        self.fetch_sketches(&part);
+                    }
                 }
             }
             "config.changed" => {
@@ -618,6 +637,9 @@ impl Workspace {
                 if params["key"] == "display.quality" {
                     let all = self.model.clear_meshes();
                     self.fetch(all);
+                    for part in self.model.clear_sketches() {
+                        self.fetch_sketches(&part);
+                    }
                 }
                 if params["scope"] == "project" {
                     self.load_settings();
@@ -664,6 +686,22 @@ impl Workspace {
         }
         let wanted = self.model.apply_part(report);
         self.fetch(wanted);
+        if let Some(part) = report["part"].as_str() {
+            self.fetch_sketches(part);
+        }
+    }
+
+    /// Fetches the drawings of `part`'s sketches that are missing or
+    /// older than the part, one sketch per request.
+    fn fetch_sketches(&mut self, part: &str) {
+        for (key, revision) in self.model.ask_sketches(part) {
+            let req = Request::SketchGet {
+                part: key.0.clone(),
+                sketch: key.1.clone(),
+                quality: None,
+            };
+            self.send(req, Pending::Sketch(key, revision));
+        }
     }
 
     /// Fetches display meshes, one body per request: a part with one

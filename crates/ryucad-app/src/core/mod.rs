@@ -10,4 +10,5 @@ pub mod people;
 pub mod pick;
 pub mod recent;
 pub mod settings;
+pub mod sketch;
 pub mod workspace;
