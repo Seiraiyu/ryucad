@@ -782,7 +782,6 @@ pub(crate) fn fit_pcurve(
 }
 
 /// A curve fitted along a pcurve on a surface (see [`fit_along`]).
-#[allow(dead_code)] // Task 7 lifts rails with it.
 #[derive(Clone, Debug)]
 pub(crate) struct Lifted {
     pub(crate) curve: NurbsCurve,
@@ -797,12 +796,14 @@ pub(crate) struct Lifted {
 /// pcurve's parameter is `map[0] + map[1] t`: the image `S(P(t))` fitted
 /// by cubic Hermite spans in `t`, with a polynomial pcurve fitted through
 /// the same samples, and the certified bound on `|S(P̃(t)) - C(t)|` by
-/// [`pcurve_bound`]. A span whose bound exceeds [`LINEAR_RESOLUTION`]
-/// gets a sample in its middle; a fit that can't get within
-/// `10 × LINEAR_RESOLUTION` is [`Failure::Uncertain`]. A rail of a fillet
+/// [`pcurve_bound`]. A span whose bound exceeds [`LINEAR_RESOLUTION`], or
+/// whose pcurve's image is farther than that from the surface along the
+/// given pcurve at its middle, gets a sample in its middle; a fit that
+/// can't get within `10 × LINEAR_RESOLUTION` is [`Failure::Uncertain`].
+/// The middle test is sampled: it keeps the fit near the given curve,
+/// while the certified bound is what makes it an edge. A rail of a fillet
 /// along a fitted spine is the face's surface along the spine's pcurve
 /// on its offset.
-#[allow(dead_code)] // Task 7 lifts rails with it.
 pub(crate) fn fit_along(
     surface: &Surface,
     pcurve: &Curve2,
@@ -845,21 +846,36 @@ pub(crate) fn fit_along(
             ),
             [a.s, b.s],
         );
-        pcurve_bound(surface, &p2, &SpanTarget(&span), LINEAR_RESOLUTION)
+        // Where the fit's pcurve has drifted from the given one, the span
+        // counts as out of bounds.
+        let (q, _) = eval(&p2, 0.5);
+        let want = pcurve.point(map[0] + map[1] * (a.s + b.s) / 2.0);
+        let drift = surface
+            .point(q.x, q.y)
+            .distance(surface.point(want.x, want.y));
+        let bound = pcurve_bound(surface, &p2, &SpanTarget(&span), LINEAR_RESOLUTION);
+        if drift > LINEAR_RESOLUTION {
+            (bound, true)
+        } else {
+            (bound, false)
+        }
     };
-    let mut bounds: Vec<Option<f64>> = vec![None; samples.len() - 1];
+    let mut bounds: Vec<Option<(f64, bool)>> = vec![None; samples.len() - 1];
     for round in 0.. {
         let mut worst = 0.0f64;
+        let mut drifted = false;
         let mut split = Vec::new();
         for i in 0..samples.len() - 1 {
-            let b = *bounds[i].get_or_insert_with(|| bound_of(&samples[i], &samples[i + 1]));
+            let (b, drift) =
+                *bounds[i].get_or_insert_with(|| bound_of(&samples[i], &samples[i + 1]));
             worst = worst.max(b);
-            if b > LINEAR_RESOLUTION {
+            drifted |= drift;
+            if b > LINEAR_RESOLUTION || drift {
                 split.push(i);
             }
         }
         if split.is_empty() || round == MAX_ROUNDS || samples.len() + split.len() > MAX_SAMPLES {
-            if worst > 10.0 * LINEAR_RESOLUTION {
+            if worst > 10.0 * LINEAR_RESOLUTION || drifted {
                 return Err(Failure::Uncertain);
             }
             let knots: Vec<f64> = samples.iter().map(|s| s.s).collect();

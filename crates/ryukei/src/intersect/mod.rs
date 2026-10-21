@@ -28,9 +28,7 @@ pub(crate) use coincide::coincident;
 pub use cs::{CurveHit, Side, curve_surface};
 pub use face::{Contact, FaceMeet, Rim, Stretch, face_box, face_face};
 pub(crate) use face::{shifted, shifts};
-pub(crate) use fit::fit_pcurve;
-#[allow(unused_imports)] // Task 7 lifts rails with it.
-pub(crate) use fit::{Lifted, fit_along};
+pub(crate) use fit::{fit_along, fit_pcurve};
 pub use inface::{Place, point_in_face};
 pub use pipe::{Cell, pipe_beside};
 pub use pipe_cs::curve_pipe;

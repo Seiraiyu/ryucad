@@ -15,6 +15,10 @@ mod chain;
 #[allow(dead_code)]
 mod convex;
 #[allow(dead_code)]
+mod fillet;
+#[allow(dead_code)]
+mod rail;
+#[allow(dead_code)]
 mod spec;
 #[allow(dead_code)]
 mod spine;

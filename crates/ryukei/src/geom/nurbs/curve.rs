@@ -125,6 +125,39 @@ impl NurbsCurve {
         Self::from_spline(self.spline.reversed())
     }
 
+    /// A clamped curve in Bézier form (every interior knot of multiplicity
+    /// `degree`) whose ends meet within [`crate::tol::LINEAR_RESOLUTION`],
+    /// as the periodic curve with the same pieces over the same domain:
+    /// the last control point is dropped for the first. `None` for any
+    /// other curve.
+    pub(crate) fn bezier_periodic(&self) -> Option<Self> {
+        let kv = &self.spline.knots;
+        let p = kv.degree();
+        let (knots, mults) = (kv.knots(), kv.mults());
+        let r = knots.len() - 1;
+        if kv.is_periodic() || mults[1..r].iter().any(|&m| m != p) {
+            return None;
+        }
+        let pts = &self.spline.points;
+        let n = pts.len() - 1;
+        if (pts[0] - pts[n]).length() > crate::tol::LINEAR_RESOLUTION
+            || self.spline.weights[0] != self.spline.weights[n]
+        {
+            return None;
+        }
+        let periodic = KnotVector::periodic(p, knots, &vec![p; knots.len()]).ok()?;
+        // Clamped control point j weighs the periodic basis function
+        // starting `p - 1` knots later.
+        let mut points = vec![Vector3::ZERO; n];
+        let mut weights = vec![1.0; n];
+        for j in 0..n {
+            points[(j + p - 1) % n] = pts[j];
+            weights[(j + p - 1) % n] = self.spline.weights[j];
+        }
+        let spline = Spline::new(periodic, points, Some(weights)).ok()?;
+        Some(Self::from_spline(spline))
+    }
+
     /// The curve over `range` alone, in clamped form. Fails with
     /// `InvalidNurbs(KnotOrder)` for a range that is empty, leaves a
     /// clamped domain, or is longer than a period.
@@ -292,6 +325,30 @@ mod tests {
 
     fn close(a: Vector3, b: Vector3, tol: f64) -> bool {
         (a - b).length() <= tol
+    }
+
+    #[test]
+    fn a_closed_bezier_chain_becomes_periodic() {
+        let kv = KnotVector::clamped(3, &[0.0, 1.0, 3.0], &[4, 3, 4]).unwrap();
+        let pts = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, -1.0, 0.0),
+            Point3::new(2.0, 0.0, 0.5),
+            Point3::new(2.0, 1.0, 0.0),
+            Point3::new(2.0, 2.0, -0.5),
+            Point3::new(-1.0, 1.0, 0.0),
+            Point3::new(0.0, 0.0, 0.0),
+        ];
+        let c = NurbsCurve::new(kv, pts, Some(vec![1.0, 2.0, 1.0, 0.5, 1.0, 3.0, 1.0])).unwrap();
+        let p = c.bezier_periodic().unwrap();
+        assert_eq!(p.period(), Some(3.0));
+        assert_eq!(p.domain(), [0.0, 3.0]);
+        for i in 0..=30 {
+            let t = 3.0 * i as f64 / 30.0;
+            assert!(p.point(t).distance(c.point(t)) < 1e-12, "{t}");
+        }
+        let open = c.split(2.0).unwrap().0;
+        assert!(open.bezier_periodic().is_none());
     }
 
     #[test]
