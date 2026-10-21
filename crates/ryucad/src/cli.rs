@@ -455,8 +455,15 @@ enum SketchCmd {
         ops: Option<Ops>,
     },
     /// The solved geometry, in the sketch's frame and the part's, with each entity's and
-    /// constraint's state.
-    Get { part: String, sketch: String },
+    /// constraint's state, curves as polylines and dimensions' labels.
+    Get {
+        part: String,
+        sketch: String,
+        /// How finely arcs and circles are drawn: coarse, normal or fine (the
+        /// user's display quality by default).
+        #[arg(long)]
+        quality: Option<String>,
+    },
 }
 
 /// Sketch ops, parsed from one argument.
@@ -822,9 +829,14 @@ fn request(cmd: &Command) -> Option<Request> {
             sketch: sketch.clone(),
             ops: ops.clone().map_or_else(Vec::new, |o| o.0),
         },
-        Command::Sketch(SketchCmd::Get { part, sketch }) => Request::SketchGet {
+        Command::Sketch(SketchCmd::Get {
+            part,
+            sketch,
+            quality,
+        }) => Request::SketchGet {
             part: part.clone(),
             sketch: sketch.clone(),
+            quality: quality.clone(),
         },
         Command::Rebuild { part } => Request::Rebuild { part: part.clone() },
         Command::Inspect {

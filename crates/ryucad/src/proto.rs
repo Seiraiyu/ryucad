@@ -273,9 +273,16 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         ops: Vec<Value>,
     },
-    /// A sketch's solved geometry, states and report.
+    /// A sketch's solved geometry, states and report, and how it is drawn.
     #[serde(rename = "sketch.get")]
-    SketchGet { part: String, sketch: String },
+    SketchGet {
+        part: String,
+        sketch: String,
+        /// coarse, normal or fine: how finely arcs and circles are drawn;
+        /// the user's display quality by default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quality: Option<String>,
+    },
     #[serde(rename = "rebuild")]
     Rebuild {
         #[serde(default, skip_serializing_if = "Option::is_none")]

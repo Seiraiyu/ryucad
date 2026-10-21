@@ -246,7 +246,17 @@ fn dispatch(
         Request::SketchSolve { part, sketch, ops } => {
             crate::sketch::solve_request(session, &part, &sketch, &ops)
         }
-        Request::SketchGet { part, sketch } => crate::sketch::get(session, &part, &sketch),
+        Request::SketchGet {
+            part,
+            sketch,
+            quality,
+        } => {
+            let quality = match quality {
+                Some(q) => mesh::Quality::parse(&q)?,
+                None => mesh::Quality::preferred(),
+            };
+            crate::sketch::get(session, &part, &sketch, quality)
+        }
         Request::FeatureShow { part, id } => {
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
             let p = session.project().part(&part)?;
