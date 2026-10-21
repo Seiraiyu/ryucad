@@ -30,9 +30,9 @@ enum Pending {
     /// A sketch's drawing, asked for at this part revision.
     Sketch(BodyKey, String),
     People,
-    /// A feature read for the form; after a conflict, with the form as it
-    /// was when the save failed.
-    Form(String, Option<Box<Form>>),
+    /// A feature read for the form: its part and ID; after a conflict,
+    /// with the form as it was when the save failed.
+    Form(String, String, Option<Box<Form>>),
     Save,
     /// A sketch read for a dimension's form: its part, sketch and
     /// constraint; after a conflict, with the form as it was.
@@ -97,6 +97,10 @@ pub struct Workspace {
     /// The property panel's form for a dimension chosen by its label;
     /// shown instead of `form`.
     pub dimension: Option<DimForm>,
+    /// What the property panel was last asked to show, a feature or a
+    /// dimension: only its answer opens a form.
+    form_for: Option<(String, String)>,
+    dimension_for: Option<(String, String, String)>,
     /// The parameter panel, for the part it shows (see `show_params`).
     pub params: Option<Params>,
     params_part: Option<String>,
@@ -147,6 +151,8 @@ impl Workspace {
             following: None,
             form: None,
             dimension: None,
+            form_for: None,
+            dimension_for: None,
             params: None,
             params_part: None,
             activity: Activity::default(),
@@ -281,23 +287,29 @@ impl Workspace {
     pub fn open_form(&mut self, feature: Option<(String, String)>) {
         self.form = None;
         self.dimension = None;
+        self.dimension_for = None;
+        self.form_for.clone_from(&feature);
         if let Some((part, id)) = feature {
-            self.send(
-                Request::FeatureShow {
-                    part: part.clone(),
-                    id,
-                },
-                Pending::Form(part, None),
-            );
+            self.read_form(part, id, None);
         }
+    }
+
+    fn read_form(&mut self, part: String, id: String, before: Option<Box<Form>>) {
+        let req = Request::FeatureShow {
+            part: part.clone(),
+            id: id.clone(),
+        };
+        self.send(req, Pending::Form(part, id, before));
     }
 
     /// Opens the form for a sketch's dimension (or closes it, with
     /// `None`); the feature's form closes.
     pub fn open_dimension(&mut self, dimension: Option<(String, String, String)>) {
         self.dimension = None;
+        self.dimension_for.clone_from(&dimension);
         if let Some((part, sketch, constraint)) = dimension {
             self.form = None;
+            self.form_for = None;
             self.read_dimension(part, sketch, constraint, None);
         }
     }
@@ -477,6 +489,22 @@ impl Workspace {
             self.following = None;
         }
         self.load();
+        // Panels asked for whose answers were lost are asked for again.
+        if let Some(part) = self.params_part.clone()
+            && self.params.is_none()
+        {
+            self.read_params(part, None);
+        }
+        if let Some((part, id)) = self.form_for.clone()
+            && self.form.is_none()
+        {
+            self.read_form(part, id, None);
+        }
+        if let Some((part, sketch, constraint)) = self.dimension_for.clone()
+            && self.dimension.is_none()
+        {
+            self.read_dimension(part, sketch, constraint, None);
+        }
     }
 
     /// Whether a camera is waiting to be shared.
@@ -538,6 +566,16 @@ impl Workspace {
             Event::Lost if !self.lost => {
                 self.lost = true;
                 self.pending.clear();
+                // Saves that went unanswered can be tried again.
+                if let Some(f) = &mut self.form {
+                    f.saving = false;
+                }
+                if let Some(f) = &mut self.dimension {
+                    f.saving = false;
+                }
+                if let Some(p) = &mut self.params {
+                    p.saving = false;
+                }
                 self.model.asked.clear();
                 self.model.sketches_asked.clear();
                 self.retry = Some(Retry {
@@ -617,14 +655,17 @@ impl Workspace {
                 self.settings.reset(&a.result);
             }
             (Pending::Config, Ok(_)) => self.load_settings(),
-            (Pending::Form(part, before), Ok(a)) => {
-                // Answers come in order, so the last form asked for wins;
-                // a reload after a conflict only if that form is still open.
-                let wanted = match (&before, &self.form) {
-                    (Some(b), Some(f)) => b.feature == f.feature && b.part == f.part,
-                    (None, _) => true,
-                    (Some(_), None) => false,
-                };
+            (Pending::Form(part, id, before), Ok(a)) => {
+                // Only the form last asked for opens (a dimension may have
+                // been chosen since); a reload after a conflict only if
+                // that form is still open.
+                let asked = self.form_for.as_ref() == Some(&(part.clone(), id));
+                let wanted = asked
+                    && match (&before, &self.form) {
+                        (Some(b), Some(f)) => b.feature == f.feature && b.part == f.part,
+                        (None, _) => true,
+                        (Some(_), None) => false,
+                    };
                 if wanted {
                     self.form = Some(match before {
                         Some(b) => b.reloaded(&a.result),
@@ -633,15 +674,13 @@ impl Workspace {
                 }
             }
             (Pending::Dim(part, sketch, constraint, before), Ok(a)) => {
-                // The last asked for wins, as for features.
-                let same = |f: &DimForm| {
-                    f.part == part && f.sketch == sketch && f.constraint == constraint
-                };
-                let wanted = match (&before, &self.dimension) {
-                    (Some(_), Some(f)) => same(f),
-                    (None, _) => true,
-                    (Some(_), None) => false,
-                };
+                // Only the dimension last asked for opens, as for features.
+                let key = (part.clone(), sketch.clone(), constraint.clone());
+                let wanted = self.dimension_for.as_ref() == Some(&key)
+                    && match (&before, &self.dimension) {
+                        (Some(_), Some(_)) | (None, _) => true,
+                        (Some(_), None) => false,
+                    };
                 if wanted {
                     self.dimension = match before {
                         Some(b) => b.reloaded(&a.result),
@@ -709,13 +748,7 @@ impl Workspace {
                         // Read it again and show what changed underneath.
                         let (part, id) = (f.part.clone(), f.feature.clone());
                         let before = Box::new(f.clone());
-                        self.send(
-                            Request::FeatureShow {
-                                part: part.clone(),
-                                id,
-                            },
-                            Pending::Form(part, Some(before)),
-                        );
+                        self.read_form(part, id, Some(before));
                     } else {
                         f.error = Some(e);
                     }
@@ -819,13 +852,7 @@ impl Workspace {
             && !f.saving
         {
             let (part, id) = (f.part.clone(), f.feature.clone());
-            self.send(
-                Request::FeatureShow {
-                    part: part.clone(),
-                    id,
-                },
-                Pending::Form(part, None),
-            );
+            self.read_form(part, id, None);
         }
         // So do the parameters, and a dimension's form.
         if let Some(p) = &self.params

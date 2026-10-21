@@ -154,3 +154,23 @@ fn a_dimension_that_cant_hold_is_refused() {
     assert!(ws.dimension.as_ref().unwrap().dirty());
     assert_eq!(width_on_disk(&p), "width");
 }
+
+#[test]
+fn a_feature_chosen_while_a_dimension_loads_stays_chosen() {
+    let p = Project::new().with_sketch();
+    let mut ws = open(&p);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && drawn(ws)));
+    // A label clicked, then a feature picked before the sketch was read:
+    // the dimension's answer, coming later, doesn't cover the feature.
+    ws.open_dimension(Some(("p".into(), "s".into(), "d1".into())));
+    ws.open_form(Some(("p".into(), "e".into())));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.form.is_some()));
+    assert!(ws.dimension.is_none());
+    // And the other way round: the feature's form doesn't wait behind it.
+    ws.open_form(Some(("p".into(), "e".into())));
+    ws.open_dimension(Some(("p".into(), "s".into(), "d1".into())));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.dimension.is_some()));
+    assert!(ws.form.is_none());
+    ws.open_dimension(None);
+    assert!(ws.form.is_none());
+}
