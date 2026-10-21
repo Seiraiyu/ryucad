@@ -138,6 +138,10 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened, recent: &[PathBuf]) -> Option<Acti
             if ui.selectable_label(edges, "Edges").clicked() {
                 o.ws.set_config("display.edges", json!(!edges));
             }
+            let sketches = o.view.sketches;
+            if ui.selectable_label(sketches, "Sketches").clicked() {
+                o.ws.set_config("display.sketches", json!(!sketches));
+            }
         });
         ui.menu_button("Project", |ui| {
             if ui.button("Settings…").clicked() {

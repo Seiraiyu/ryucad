@@ -77,3 +77,30 @@ fn a_lost_daemon_is_replaced_and_the_window_catches_up() {
         !ws.lost && ws.idle() && ws.part("q").is_none()
     });
 }
+
+#[test]
+fn panels_asked_for_while_the_daemon_went_come_back() {
+    let p = Project::new().with_sketch();
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    frames(&mut ws, |ws| ws.idle() && ws.part("p").is_some());
+    // The parameters asked for as the daemon goes: never answered.
+    p.ok(&["daemon", "stop"]);
+    ws.show_params(Some("p"));
+    frames(&mut ws, |ws| ws.lost);
+    frames(&mut ws, |ws| !ws.lost && ws.idle() && ws.params.is_some());
+    // A save lost the same way leaves what was typed, ready to save again.
+    p.ok(&["daemon", "stop"]);
+    let params = ws.params.as_mut().unwrap();
+    let row = params
+        .params
+        .iter_mut()
+        .find(|r| r.field.name == "width")
+        .unwrap();
+    row.field.text = "25 mm".into();
+    ws.save_params();
+    frames(&mut ws, |ws| ws.lost);
+    frames(&mut ws, |ws| !ws.lost && ws.idle());
+    let params = ws.params.as_ref().unwrap();
+    assert!(!params.saving);
+    assert!(params.dirty());
+}

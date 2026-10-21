@@ -26,5 +26,6 @@ pub mod render;
 pub mod server;
 pub mod session;
 pub mod sketch;
+pub mod sketch_view;
 pub mod units;
 pub mod view;

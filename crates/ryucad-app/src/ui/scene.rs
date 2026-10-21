@@ -160,12 +160,16 @@ pub struct DrawList<'a> {
     pub faces: &'a [PaintedFace],
     /// The background, sRGB: see [`crate::ui::style::Look::viewport_background`].
     pub background: [f32; 3],
+    /// Sketches, as [`crate::core::sketch::overlay`] makes them.
+    pub overlay: &'a [crate::core::sketch::Corner],
 }
 
 pub struct Scene {
     faces: wgpu::RenderPipeline,
     paint: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
+    /// Flat triangles pulled towards the eye as lines are: sketches.
+    marks: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     bind: wgpu::BindGroup,
     samples: u32,
@@ -344,6 +348,12 @@ impl Scene {
                 wgpu::CompareFunction::LessEqual,
                 None,
             ),
+            marks: pipeline(
+                ("vs_line", "fs_line"),
+                tri,
+                wgpu::CompareFunction::LessEqual,
+                None,
+            ),
             uniforms,
             bind,
             samples,
@@ -463,6 +473,16 @@ impl Scene {
             painted.extend(face_vertices(m, self.reference, tris, *color));
         }
         let paint = (!painted.is_empty()).then(|| buffer(device, "painted", &painted));
+        let marks: Vec<Vertex> = list
+            .overlay
+            .iter()
+            .map(|(p, c)| Vertex {
+                pos: [0, 1, 2].map(|k| (p[k] - self.reference[k]) as f32),
+                normal: [0.0; 3],
+                color: linear(*c),
+            })
+            .collect();
+        let marked = (!marks.is_empty()).then(|| buffer(device, "marks", &marks));
         self.target(device, size);
         let t = self.target.as_ref().expect("made above");
         let mut enc = device.create_command_encoder(&Default::default());
@@ -517,6 +537,11 @@ impl Scene {
                     pass.set_vertex_buffer(0, b.edges.slice(..));
                     pass.draw(0..b.edge_count, 0..1);
                 }
+            }
+            if let Some(m) = &marked {
+                pass.set_pipeline(&self.marks);
+                pass.set_vertex_buffer(0, m.slice(..));
+                pass.draw(0..marks.len() as u32, 0..1);
             }
         }
         queue.submit([enc.finish()]);
