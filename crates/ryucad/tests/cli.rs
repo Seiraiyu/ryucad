@@ -1109,7 +1109,8 @@ fn doctor_repairs_a_damaged_project() {
     p.fails(&["doctor", "--repair", &id], "repair_conflict", 1);
 }
 
-/// Runs git in `dir` with a fixed identity, and its output.
+/// Runs git in `dir` with a fixed identity and time, so the same commits
+/// in two repositories have the same IDs, and its output.
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
         .args([
@@ -1121,6 +1122,8 @@ fn git(dir: &Path, args: &[&str]) -> String {
             "commit.gpgsign=false",
         ])
         .args(args)
+        .env("GIT_AUTHOR_DATE", "2026-10-21T12:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2026-10-21T12:00:00Z")
         .current_dir(dir)
         .output()
         .unwrap();
@@ -1251,4 +1254,77 @@ fn git_install_registers_the_driver() {
     assert!(local.contains("textconv"), "{local}");
     let (_, v) = run(&["doctor"]);
     assert_eq!(v["result"]["healthy"], true, "{v}");
+}
+
+impl Pair {
+    /// Runs git in both projects.
+    fn git(&self, args: &[&str]) {
+        git(&self.direct, args);
+        git(&self.daemon, args);
+    }
+}
+
+#[test]
+fn diff_and_check_through_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=20", "--param",
+        "z=5",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "sphere", "--id", "c", "--param", "radius=1",
+    ]);
+    p.git(&["init", "-q", "-b", "main"]);
+    // Registered in each repository, so the user's own config doesn't count.
+    p.git(&["config", "diff.ryucad.textconv", "ryucad git textconv"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "start"]);
+    let head = git(&p.direct, &["rev-parse", "HEAD"]).trim().to_owned();
+    assert_eq!(p.ok(&["diff"])["parts"], serde_json::json!({}));
+    p.ok(&["feature", "edit", "p", "b", "--param", "x=12"]);
+    let d = p.ok(&["diff"]);
+    assert_eq!(d["from"]["commit"], head.as_str());
+    assert_eq!(
+        d["parts"]["p"]["features"]["b"]["changes"][0],
+        serde_json::json!({"at": "/params/x", "from": "10 mm", "to": "12 mm"})
+    );
+    let m = p.ok(&["diff", "--model", "--part", "p"]);
+    let b = &m["parts"]["p"]["features"]["b"]["model"];
+    assert_eq!(b["body"]["faces"]["changed"].as_array().unwrap().len(), 5);
+    // The committed revision rebuilds, inspects and meshes as it was.
+    let r = p.ok(&["rebuild", "--rev", "HEAD"]);
+    assert_eq!(r["commit"], head.as_str());
+    assert_eq!(r["parts"][0]["features"][0]["hash"], b["from"]["hash"]);
+    let i = p.ok(&["inspect", "p", "b", "--rev", "HEAD"]);
+    assert_eq!(i["bodies"][0]["bounds"]["max"][0], 0.01);
+    let mesh = p.ok(&["mesh", "p", "c", "--rev", "HEAD", "--quality", "coarse"]);
+    assert_eq!(mesh["commit"], head.as_str());
+    // Check, and against a revision.
+    let c = p.ok(&["check"]);
+    assert_eq!(c["passed"], true, "{c}");
+    let c = p.ok(&["check", "--against", "HEAD"]);
+    assert_eq!(
+        c["against"]["parts"]["p"]["features"]["b"]["status"],
+        "changed"
+    );
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "torus",
+        "--id",
+        "t",
+        "--param",
+        "major_radius=1",
+        "--param",
+        "minor_radius=1",
+    ]);
+    let e = p.fails(&["check"], "check_failed", 1);
+    assert_eq!(e["details"]["findings"][0]["code"], "feature_failed");
+    assert_eq!(e["details"]["findings"][0]["feature"], "t");
+    p.fails(&["diff", "--from", "nowhere"], "rev_not_found", 1);
+    p.fails(&["rebuild", "--rev", "HEAD~5"], "rev_not_found", 1);
+    p.fails(&["check", "--against", "nowhere"], "rev_not_found", 1);
 }
