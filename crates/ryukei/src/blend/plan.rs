@@ -333,7 +333,7 @@ pub(crate) fn finish(
                 }
                 at_mitres.push((vi, mi));
             }
-            Class::Closed | Class::Join => {}
+            Class::Closed | Class::Join | Class::Rolled { .. } => {}
         }
     }
     let mut segments = Vec::with_capacity(parts.len());

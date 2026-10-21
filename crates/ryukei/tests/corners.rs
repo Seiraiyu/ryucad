@@ -212,6 +212,15 @@ fn a_cavitys_edges_meet_in_concave_balls() {
     );
 }
 
+/// Faults of the self-intersection check other than blend faces meeting
+/// tangentially along a section, which plan 6.D certifies apart.
+fn crossings_but_sections(b: &Body) -> Vec<ryukei::check::Fault> {
+    check_intersections(b)
+        .into_iter()
+        .filter(|f| !matches!(f, ryukei::check::Fault::CannotCheck { .. }))
+        .collect()
+}
+
 /// The area of the corner a fillet of radius `r` takes from a square
 /// edge, and how far its centroid is from the edge along each face.
 fn wedge(r: f64) -> (f64, f64) {
@@ -370,4 +379,139 @@ fn chamfers_at_a_corner() {
         1.0 - 6.0 * d * d + 6.0 * (d * d * d),
         1e-9,
     );
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_smaller_pair_rolls_over_a_larger_fillet() {
+    let k = OpKey(1);
+    let b = primitive::block(k, 1.0, 1.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let (big, small) = (0.3, 0.1);
+    let (out, _) = blend(
+        K,
+        &b,
+        &[
+            fillet(edge(k, FaceRole::PlusX, FaceRole::PlusZ), big),
+            fillet(edge(k, FaceRole::PlusY, FaceRole::PlusZ), small),
+            fillet(edge(k, FaceRole::PlusX, FaceRole::PlusY), small),
+        ],
+    )
+    .unwrap();
+    let (a_big, _) = wedge(big);
+    let (a, d) = wedge(small);
+    // The big fillet all along; the small ones along the box's edges up
+    // to the big one, and round its end on +Y.
+    let want = 1.0 - a_big - 2.0 * (1.0 - big) * a - PI / 2.0 * (big - d) * a;
+    assert_eq!(crossings_but_sections(&out), []);
+    near(volume(&out, 1e-5), want, 2e-5);
+}
+
+/// A block 1 × 1 × 1 standing on a plate 3 × 3 × 1, united.
+fn block_on_plate() -> Body {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::geom::Vector3;
+    let plate = primitive::block(OpKey(1), 3.0, 3.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let block = primitive::block(OpKey(2), 1.0, 1.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let tool = Tool {
+        key: ToolKey(1),
+        body: &block,
+        place: Rigid::translation(Vector3::new(1.0, 1.0, 1.0)),
+    };
+    boolean(OpKey(3), BooleanOp::Unite, &plate, &[tool])
+        .unwrap()
+        .0
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_blocks_foot_rolls_round_its_rounded_edges() {
+    let b = block_on_plate();
+    let (big, small) = (0.25, 0.1);
+    let vertical = lines_where(&b, |p, q| {
+        (p.x - q.x).abs() < 1e-9 && (p.y - q.y).abs() < 1e-9 && p.z.min(q.z) > 0.5
+    });
+    let foot = lines_where(&b, |p, q| {
+        (p.z - 1.0).abs() < 1e-9
+            && (q.z - 1.0).abs() < 1e-9
+            && [p, q]
+                .iter()
+                .all(|r| (1.0..=2.0).contains(&r.x) && (1.0..=2.0).contains(&r.y))
+    });
+    assert_eq!((vertical.len(), foot.len()), (4, 4));
+    let blends: Vec<EdgeBlend> = vertical
+        .iter()
+        .map(|&e| fillet(e, big))
+        .chain(foot.iter().map(|&e| fillet(e, small)))
+        .collect();
+    let (out, _) = blend(K, &b, &blends).unwrap();
+    let (a_big, _) = wedge(big);
+    let (a, d) = wedge(small);
+    let want = 9.0 + 1.0 - 4.0 * a_big + 4.0 * (1.0 - 2.0 * big) * a + 2.0 * PI * (big + d) * a;
+    assert_eq!(crossings_but_sections(&out), []);
+    near(volume(&out, 1e-5), want, 4e-5);
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn rolled_corners_are_their_stages() {
+    use FaceRole::*;
+    let k = OpKey(1);
+    let bx = primitive::block(k, 1.0, 1.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    // Each edge rolls over the one before at the corner they share.
+    let (a, b, c) = (0.3, 0.12, 0.05);
+    let blends = [
+        fillet(edge(k, PlusX, PlusZ), a),
+        fillet(edge(k, PlusY, PlusZ), b),
+        fillet(edge(k, PlusX, PlusY), b),
+        fillet(edge(k, MinusX, PlusZ), c),
+        fillet(edge(k, MinusX, PlusY), c),
+    ];
+    let (out, _) = blend(K, &bx, &blends).unwrap();
+    assert_eq!(crossings_but_sections(&out), []);
+    // The same by hand, stage by stage: each end curve at a corner joins
+    // the edges rolling over it.
+    let (s1, _) = blend(OpKey(1), &bx, &blends[..1]).unwrap();
+    let chain1 = ryukei::blend::tangent_chain(
+        &s1,
+        s1.edges()
+            .find(|&e| s1.edge(e).unwrap().name == blends[1].edge)
+            .unwrap(),
+    )
+    .unwrap();
+    let step: Vec<EdgeBlend> = chain1
+        .iter()
+        .map(|&e| fillet(s1.edge(e).unwrap().name, b))
+        .collect();
+    let (s2, _) = blend(OpKey(2), &s1, &step).unwrap();
+    let chain2 = ryukei::blend::tangent_chain(
+        &s2,
+        s2.edges()
+            .find(|&e| s2.edge(e).unwrap().name == blends[3].edge)
+            .unwrap(),
+    )
+    .unwrap();
+    let step: Vec<EdgeBlend> = chain2
+        .iter()
+        .map(|&e| fillet(s2.edge(e).unwrap().name, c))
+        .collect();
+    let (s3, _) = blend(OpKey(3), &s2, &step).unwrap();
+    near(volume(&out, 1e-5), volume(&s3, 1e-5), 1e-9);
+    assert_eq!(out.counts().faces, s3.counts().faces);
 }

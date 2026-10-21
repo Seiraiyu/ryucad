@@ -6,8 +6,8 @@
 //! one blended edge cut off by the third face there; two kinds of join,
 //! where two blended edges meet tangentially and the blend runs on from
 //! one into the other; and the corners, where blended edges meet at
-//! angles: a trim of two, a ball or a mitre of three. Every other vertex
-//! is refused, naming it.
+//! angles: a trim of two, a ball, a roll or a mitre of three. Every other
+//! vertex is refused, naming it.
 //!
 //! Blended edges joined at joins make chains. The new rails of a chain
 //! all go on one face, its rail face: at a smooth join it is the face the
@@ -45,6 +45,11 @@ pub(crate) enum Class {
     /// same way, and a sharp edge between their other faces: each blend is
     /// trimmed by the other (see [`super::trim`]).
     Trim,
+    /// Three blended edges, fillets, and no other edge, where one ball
+    /// can't close them: `first`, the larger fillet or the only one
+    /// bending its way, is built through the corner first, and the others
+    /// roll over it (see [`super::stage`]).
+    Rolled { first: EdgeId },
     /// Three blended edges, chamfers, and no other edge: mitred (see
     /// [`super::mitre`]).
     Mitre,
@@ -314,9 +319,14 @@ fn classify(
 
 /// The class of a vertex where three blended edges meet at angles: a
 /// ball corner when they are fillets of one radius that bend the same
-/// way; mitred when all three are chamfers. Anything else is refused.
+/// way; rolled, built in two stages, when one of them is a larger fillet
+/// than the other two, or the only one bending its way, and the other two
+/// are fillets of one radius; mitred when all three are chamfers.
+/// Anything else is refused.
 fn corner_class(body: &Body, specs: &[Spec], blended: &[EdgeId], at: Name) -> Result<Class, Error> {
     let unsupported = || -> Error { BlendError::Unsupported { at }.into() };
+    let mut radii = Vec::with_capacity(3);
+    let mut convex = Vec::with_capacity(3);
     let chamfers = blended
         .iter()
         .filter(|&&e| {
@@ -329,8 +339,6 @@ fn corner_class(body: &Body, specs: &[Spec], blended: &[EdgeId], at: Name) -> Re
         3 => return Ok(Class::Mitre),
         _ => return Err(unsupported()),
     }
-    let mut radii = Vec::with_capacity(3);
-    let mut convex = Vec::with_capacity(3);
     for &e in blended {
         let s = specs.iter().find(|s| s.edge == e).expect("a blended edge");
         let BlendKind::Fillet { radius } = s.kind else {
@@ -347,10 +355,22 @@ fn corner_class(body: &Body, specs: &[Spec], blended: &[EdgeId], at: Name) -> Re
             Err(BendFail::Uncertain) => return Err(BlendError::Uncertain { at }.into()),
         });
     }
-    if radii.iter().all(|&r| r == radii[0]) && convex.iter().all(|&c| c == convex[0]) {
-        Ok(Class::Corner)
-    } else {
-        Err(unsupported())
+    // The edge unlike the other two, which are alike, if there is one.
+    let odd = |same: &dyn Fn(usize, usize) -> bool| -> Option<usize> {
+        (0..3).find(|&i| {
+            let (j, k) = ((i + 1) % 3, (i + 2) % 3);
+            same(j, k) && !same(i, j)
+        })
+    };
+    let rest_alike = |i: usize| radii[(i + 1) % 3] == radii[(i + 2) % 3];
+    match odd(&|i, j| convex[i] == convex[j]) {
+        Some(i) if rest_alike(i) => Ok(Class::Rolled { first: blended[i] }),
+        Some(_) => Err(unsupported()),
+        None => match odd(&|i, j| radii[i] == radii[j]) {
+            None if radii[0] == radii[1] => Ok(Class::Corner),
+            Some(i) if radii[i] > radii[(i + 1) % 3] => Ok(Class::Rolled { first: blended[i] }),
+            _ => Err(unsupported()),
+        },
     }
 }
 
@@ -588,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn three_box_edges_meet_in_a_ball() {
+    fn three_box_edges_meet_in_a_ball_or_roll() {
         let b = block();
         let [e, g, h] = [
             edge_of(&b, FaceRole::PlusX, FaceRole::PlusZ),
@@ -598,7 +618,14 @@ mod tests {
         let c = chains_of(&b, &[fillet(e, 0.1), fillet(g, 0.1), fillet(h, 0.1)]).unwrap();
         assert_eq!(c.len(), 3);
         assert!(c.iter().all(|x| x.classes.contains(&Class::Corner)));
-        // Sizes that differ are not a ball.
+        // One larger is rolled over by the others; three sizes are
+        // refused.
+        let c = chains_of(&b, &[fillet(e, 0.1), fillet(g, 0.1), fillet(h, 0.2)]).unwrap();
+        let he = crate::blend::tests::edge_id(&b, h);
+        assert!(
+            c.iter()
+                .all(|x| x.classes.contains(&Class::Rolled { first: he }))
+        );
         let err = chains_of(&b, &[fillet(e, 0.1), fillet(g, 0.2), fillet(h, 0.3)]).unwrap_err();
         assert!(matches!(
             err,

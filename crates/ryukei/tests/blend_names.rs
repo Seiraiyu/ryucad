@@ -345,6 +345,11 @@ fn corners_account_for_every_name() {
             vec![chamfer(e1, 0.2), chamfer(e2, 0.2), chamfer(e3, 0.2)],
             vec![chamfer(e1, 0.1), chamfer(e2, 0.1), chamfer(e3, 0.1)],
         ),
+        // A roll, in two stages.
+        (
+            vec![fillet(e1, 0.3), fillet(e2, 0.1), fillet(e3, 0.1)],
+            vec![fillet(e1, 0.25), fillet(e2, 0.05), fillet(e3, 0.05)],
+        ),
     ];
     for (one, other) in cases {
         let (r, j) = blend(K, &b, &one).unwrap();
@@ -356,7 +361,14 @@ fn corners_account_for_every_name() {
             .collect();
         want.sort();
         let got = &replaced[&v];
-        assert_eq!(got, &want);
+        if one.len() == 3 && matches!(one[0].kind, BlendKind::Fillet { .. }) {
+            // A roll: the larger fillet's face, and the one rolling round
+            // its end there.
+            let first = Name::derive(K, Role::Blend(BlendRole::Face), &[e1]);
+            assert!(got.len() == 2 && got.contains(&first), "{got:?}");
+        } else {
+            assert_eq!(got, &want);
+        }
         let (s, _) = blend(K, &b, &other).unwrap();
         assert_eq!(names(&r), names(&s));
     }
