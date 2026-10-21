@@ -243,6 +243,8 @@ impl Project {
             };
             match in_part {
                 Some(id) => ids.insert(id),
+                // Git's attributes define nothing ryucad builds.
+                None if path == crate::drivers::ATTRIBUTES => continue,
                 None => {
                     *self = Project::load(&self.root)?;
                     return Ok(());

@@ -268,7 +268,8 @@ enum Command {
     /// Run, query or stop the project's session daemon.
     #[command(subcommand)]
     Daemon(DaemonCmd),
-    /// What Git runs: the diff driver's text conversion.
+    /// Register ryucad with Git, and what Git runs: the diff driver's text
+    /// conversion.
     #[command(subcommand)]
     Git(GitCmd),
     /// Print the ryucad, ryukei and protocol versions.
@@ -297,6 +298,13 @@ enum GitCmd {
     /// Print a ryucad file as one line per value, for `git diff` (Git's
     /// textconv): plain text, not JSON.
     Textconv { file: PathBuf },
+    /// Tell Git to read ryucad's files through ryucad: the diff driver, in
+    /// this repository's config, or with --global in yours (the installers
+    /// do that).
+    Install {
+        #[arg(long)]
+        global: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1031,6 +1039,7 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             daemon::run(&find_root(&here)?, idle).map(|()| Value::Null)
         }
         Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
+        Command::Git(GitCmd::Install { global }) => ryucad::drivers::install(&here, !global),
         Command::Open { dir } => {
             let dir = dir.as_ref().map_or_else(|| here.clone(), |d| here.join(d));
             let dir = plain(dir.canonicalize().map_err(|e| Error::io(&dir, &e))?);

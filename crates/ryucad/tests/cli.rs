@@ -1180,3 +1180,73 @@ fn git_diff_reads_values_through_textconv() {
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["error"]["code"], "io");
 }
+
+#[test]
+fn git_install_registers_the_driver() {
+    // Git's own config is the test's: a home of its own, no system file.
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let root = dir.path().join("project");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&root).unwrap();
+    let run = |args: &[&str]| -> (i32, Value) {
+        let out = Command::cargo_bin("ryucad")
+            .unwrap()
+            .args(args)
+            .current_dir(&root)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("RYUCAD_NO_DAEMON", "1")
+            .env("RYUCAD_CONFIG_DIR", dir.path().join("config"))
+            .output()
+            .unwrap();
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        (out.status.code().unwrap(), v)
+    };
+    let (code, v) = run(&["init"]);
+    assert_eq!(code, 0, "{v}");
+    let attributes = fs::read_to_string(root.join(".gitattributes")).unwrap();
+    assert!(
+        attributes.contains("\nparts/**/*.json diff=ryucad\n"),
+        "{attributes}"
+    );
+    // Not a repository: nothing to register in, and nothing to report.
+    let (code, v) = run(&["git", "install"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("not_a_git_repo"))
+    );
+    git(&root, &["init", "-q", "-b", "main"]);
+    let (_, v) = run(&["doctor"]);
+    let codes: Vec<&str> = v["result"]["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(codes, ["git_drivers_missing"]);
+    let (code, v) = run(&["git", "install", "--global"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["scope"], "global");
+    let set = v["result"]["config"]["diff.ryucad.textconv"]
+        .as_str()
+        .unwrap();
+    assert!(set.ends_with("' git textconv"), "{set}");
+    let global = fs::read_to_string(home.join(".gitconfig")).unwrap();
+    assert!(global.contains("[diff \"ryucad\"]"), "{global}");
+    let (_, v) = run(&["doctor"]);
+    assert_eq!(v["result"]["healthy"], true, "{v}");
+    // Again, in the repository's own config.
+    fs::remove_file(home.join(".gitconfig")).unwrap();
+    let (code, v) = run(&["git", "install"]);
+    assert_eq!(
+        (code, v["result"]["scope"].as_str()),
+        (0, Some("local")),
+        "{v}"
+    );
+    let local = fs::read_to_string(root.join(".git/config")).unwrap();
+    assert!(local.contains("textconv"), "{local}");
+    let (_, v) = run(&["doctor"]);
+    assert_eq!(v["result"]["healthy"], true, "{v}");
+}

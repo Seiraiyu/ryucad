@@ -29,8 +29,8 @@ pub struct Revision {
     /// The project folder's tree in that commit, in hex: equal trees, equal
     /// files. Empty when the commit has no such folder.
     pub tree: String,
-    /// The manifest and everything under `parts/`, by path relative to the
-    /// project.
+    /// The manifest, its Git attributes and everything under `parts/`, by
+    /// path relative to the project.
     pub files: Files,
 }
 
@@ -132,14 +132,14 @@ impl Repo {
     }
 
     /// The project's files in a commit's tree, by path relative to the
-    /// project: the manifest and everything under `parts/`.
+    /// project: the manifest, its Git attributes and everything under
+    /// `parts/`.
     fn project_blobs(&self, tree: &gix::Tree<'_>) -> Result<BTreeMap<String, gix::ObjectId>> {
         let mut out = BTreeMap::new();
-        if let Some(id) = self.entry(
-            tree,
-            &format!("{}{}", self.prefix, crate::doc::project::MANIFEST),
-        )? {
-            out.insert(crate::doc::project::MANIFEST.to_owned(), id);
+        for name in [crate::doc::project::MANIFEST, crate::drivers::ATTRIBUTES] {
+            if let Some(id) = self.entry(tree, &format!("{}{name}", self.prefix))? {
+                out.insert(name.to_owned(), id);
+            }
         }
         if let Some(id) = self.entry(tree, &format!("{}parts", self.prefix))? {
             self.blobs(id, "parts/", &mut out)?;
@@ -567,7 +567,8 @@ pub(crate) mod tests {
         assert_eq!(v["commits"], json!([]));
         assert_eq!(
             v["uncommitted"],
-            json!([{"path": "ryucad.json", "change": "created"}])
+            json!([{"path": ".gitattributes", "change": "created"},
+                   {"path": "ryucad.json", "change": "created"}])
         );
     }
 }

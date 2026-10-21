@@ -214,6 +214,12 @@ main() {
     mv -f "$bin/.ryucad.new" "$bin/ryucad"
     # Daemons from the old version must not keep running.
     "$bin/ryucad" daemon stop --all >/dev/null 2>&1 || true
+    # git diff reads ryucad's files through ryucad: its driver, in the
+    # user's Git config.
+    if command -v git >/dev/null 2>&1; then
+        "$bin/ryucad" git install --global >/dev/null 2>&1 ||
+            say "warning: couldn't register ryucad with Git; run: ryucad git install --global"
+    fi
 
     # The desktop app, unless only the command is wanted.
     staged="$tmp/ryucad-$version-$target"

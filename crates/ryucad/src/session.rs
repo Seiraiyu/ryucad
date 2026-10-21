@@ -312,8 +312,9 @@ impl Session {
     }
 }
 
-/// The files a project's state depends on: the manifest, and everything
-/// under `parts/` two and three levels down.
+/// The files a project's state depends on: the manifest, the attributes
+/// that register ryucad with Git, and everything under `parts/` two and
+/// three levels down.
 pub fn files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(listed(root)?.into_iter().map(|(p, _)| p).collect())
 }
@@ -323,11 +324,13 @@ pub fn files(root: &Path) -> Result<Vec<PathBuf>> {
 /// so checking a project costs at most one `stat` per file.
 fn listed(root: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
     let mut out = Vec::new();
-    let manifest = root.join(MANIFEST);
-    if let Ok(m) = fs::metadata(&manifest)
-        && m.is_file()
-    {
-        out.push((manifest, m));
+    for name in [MANIFEST, crate::drivers::ATTRIBUTES] {
+        let path = root.join(name);
+        if let Ok(m) = fs::metadata(&path)
+            && m.is_file()
+        {
+            out.push((path, m));
+        }
     }
     for (part, m) in read_dir(&root.join("parts"))? {
         if m.is_dir() {

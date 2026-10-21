@@ -8,6 +8,7 @@ pub mod daemon;
 pub mod diff;
 pub mod doc;
 pub mod doctor;
+pub mod drivers;
 pub mod endpoint;
 pub mod entity;
 pub mod error;

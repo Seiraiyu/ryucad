@@ -43,6 +43,7 @@ pub fn init(root: &Path, default_unit: Option<Unit>) -> Result<Value> {
         default_unit: default_unit.unwrap_or(Unit::Mm),
     };
     write_json(&manifest, &m.to_json())?;
+    crate::drivers::write_attributes(root)?;
     Ok(json!({"root": root, "default_unit": m.default_unit}))
 }
 

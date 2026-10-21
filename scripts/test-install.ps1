@@ -42,7 +42,8 @@ function Invoke-Installer($name, $base, $vars) {
     $profileDir = Join-Path $work "home-$name"
     New-Item -ItemType Directory -Force $profileDir | Out-Null
     $saved = @{}
-    $all = @{ USERPROFILE = $profileDir; RYUCAD_DOWNLOAD_BASE = $base; RYUCAD_NO_MODIFY_PATH = '1' }
+    # HOME too: Git reads its global config from there when it is set.
+    $all = @{ USERPROFILE = $profileDir; HOME = $profileDir; RYUCAD_DOWNLOAD_BASE = $base; RYUCAD_NO_MODIFY_PATH = '1' }
     if ($vars) { foreach ($k in $vars.Keys) { $all[$k] = $vars[$k] } }
     foreach ($k in $all.Keys) {
         $saved[$k] = [Environment]::GetEnvironmentVariable($k)
@@ -86,6 +87,10 @@ try {
     Test-Case 'fresh install succeeds' $r.Ok $r
     Test-Case 'binary installed' (Test-Path $exe) $r
     Test-Case 'reports the installed version' ($r.Out -match '"ryucad":') $r
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        $driver = & git config -f (Join-Path $r.Home '.gitconfig') diff.ryucad.textconv
+        Test-Case 'registers ryucad''s diff driver with Git' ($driver -match '/\.ryucad/bin/ryucad\.exe'' git textconv$') $r
+    }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     Test-Case 'user PATH gets the bin directory' (($userPath -split ';') -contains (Split-Path $exe)) $r
     $app = Join-Path $r.Home '.ryucad\bin\ryucad-app.exe'
