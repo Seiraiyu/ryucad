@@ -117,9 +117,22 @@ fn result(r: &Result<Output>) -> Value {
 }
 
 /// `check`: the whole project, or one part (with the project's own
-/// issues). Fails with `check_failed`, the report in its details, when any
-/// finding is an error.
-pub fn run(session: &mut Session, part: Option<&str>) -> Result<Value> {
+/// issues). With `against`, the report adds what changed from that
+/// revision to the working files, the model included (a pull request's
+/// check reads as what the branch did). Fails with `check_failed`, the
+/// report in its details, when any finding is an error.
+pub fn run(session: &mut Session, part: Option<&str>, against: Option<&str>) -> Result<Value> {
+    // A revision that isn't there fails before anything is built.
+    let changes = match against {
+        Some(rev) => {
+            let opts = crate::diff::Options {
+                part: part.map(str::to_owned),
+                ..Default::default()
+            };
+            Some(crate::server::diff(session, rev, "working", true, &opts)?)
+        }
+        None => None,
+    };
     let ids: Vec<Id> = match part {
         Some(p) => {
             let id = crate::server::part_id(p)?;
@@ -210,13 +223,16 @@ pub fn run(session: &mut Session, part: Option<&str>) -> Result<Value> {
         parts.push(json!({"part": id, "hash": fresh.hash, "features": features}));
     }
     let errors = findings.iter().filter(|f| f["severity"] == "error").count();
-    let report = json!({
+    let mut report = json!({
         "passed": errors == 0,
         "errors": errors,
         "warnings": findings.len() - errors,
         "findings": findings,
         "parts": parts,
     });
+    if let Some(c) = changes {
+        report["against"] = c;
+    }
     if errors > 0 {
         return Err(Error {
             code: Code::CheckFailed,
@@ -359,6 +375,50 @@ mod tests {
         assert_eq!(codes(&v), ["sketch_stale"]);
         assert_eq!(v["findings"][0]["severity"], "warning");
         assert_eq!(v["findings"][0]["source"], "doctor");
+    }
+
+    #[test]
+    fn against_a_revision_it_says_what_changed() {
+        use crate::git::tests::git;
+        let (dir, mut s) = project();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(
+            root,
+            &["config", crate::drivers::TEXTCONV, "ryucad git textconv"],
+        );
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "start"]);
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "q", "id": "c", "params": {"radius": 2}}),
+        )
+        .unwrap();
+        let v = call(&mut s, "check", json!({"against": "HEAD"})).unwrap();
+        assert_eq!(v["passed"], true, "{v}");
+        let c = &v["against"]["parts"]["q"]["features"]["c"];
+        assert_eq!(c["changes"][0]["to"], "2 mm");
+        assert_ne!(c["model"]["from"]["hash"], c["model"]["to"]["hash"]);
+        assert_eq!(v["against"]["from"]["rev"], "HEAD");
+        // Only the part asked about.
+        let p = call(&mut s, "check", json!({"part": "p", "against": "HEAD"})).unwrap();
+        assert_eq!(p["against"]["parts"], json!({}));
+        // A failing check keeps what changed in its report.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "q", "id": "c", "params": {"radius": 1000000}}),
+        )
+        .unwrap();
+        let e = call(&mut s, "check", json!({"against": "HEAD"})).unwrap_err();
+        assert_eq!(e.code, Code::CheckFailed);
+        assert_eq!(
+            e.details["against"]["parts"]["q"]["features"]["c"]["model"]["to"]["ok"],
+            false
+        );
+        let e = call(&mut s, "check", json!({"against": "nowhere"})).unwrap_err();
+        assert_eq!(e.code, Code::RevNotFound);
     }
 
     #[test]

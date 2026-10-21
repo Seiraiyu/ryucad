@@ -282,7 +282,9 @@ fn dispatch(
             )
         }
         Request::CheckFormat {} => check_format(session),
-        Request::Check { part } => crate::check::run(session, part.as_deref()),
+        Request::Check { part, against } => {
+            crate::check::run(session, part.as_deref(), against.as_deref())
+        }
         Request::Diff {
             from,
             to,
@@ -2010,7 +2012,7 @@ fn rebuilt_at(session: &mut Session, rev: &str) -> Result<BTreeMap<String, crate
 }
 
 /// `diff`: what changed from one revision to another.
-fn diff(
+pub(crate) fn diff(
     session: &mut Session,
     from: &str,
     to: &str,

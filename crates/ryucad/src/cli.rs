@@ -90,6 +90,10 @@ enum Command {
     Check {
         /// Only this part (and the project's own issues).
         part: Option<String>,
+        /// Also report what changed from this revision (main, HEAD~1),
+        /// bodies included, as `diff --model` does.
+        #[arg(long, value_name = "REV")]
+        against: Option<String>,
     },
     /// What changed between two revisions: features, parameters and sketch
     /// entities, and with --model what that did to the bodies.
@@ -909,7 +913,10 @@ fn request(cmd: &Command) -> Option<Request> {
             rev: rev.rev.clone(),
         },
         Command::CheckFormat => Request::CheckFormat {},
-        Command::Check { part } => Request::Check { part: part.clone() },
+        Command::Check { part, against } => Request::Check {
+            part: part.clone(),
+            against: against.clone(),
+        },
         Command::Diff {
             from,
             to,
