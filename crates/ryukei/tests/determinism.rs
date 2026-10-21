@@ -1174,6 +1174,74 @@ fn blends_section(golden: &mut Golden) {
     }
 }
 
+fn corners_section(golden: &mut Golden) {
+    use FaceRole::*;
+    use ryukei::blend::{BlendKind, Chamfer, EdgeBlend, blend};
+    use ryukei::name::{FaceRole, Name, Role};
+    let mut s = golden.section("corners");
+    let axis = Vector3::new(1.0, -2.0, 0.5).normalize().unwrap();
+    let far = Rigid::translation(Vector3::new(12.5, -3.25, 100.0))
+        .then_after(&Rigid::rotation(axis, 2.5));
+    let key = OpKey(0x636f_726e);
+    let face = |r: FaceRole| Name::derive(key, Role::Face(r), &[]);
+    let edge = |a: FaceRole, b: FaceRole| {
+        let mut f = [face(a), face(b)];
+        f.sort();
+        Name::derive(key, Role::Edge, &f)
+    };
+    let fillet = |e: Name, radius: f64| EdgeBlend {
+        edge: e,
+        kind: BlendKind::Fillet { radius },
+    };
+    let chamfer = |e: Name, distance: f64| EdgeBlend {
+        edge: e,
+        kind: BlendKind::Chamfer(Chamfer::Equal { distance }),
+    };
+    let [e1, e2, e3] = [edge(PlusX, PlusZ), edge(PlusY, PlusZ), edge(PlusX, PlusY)];
+    let all: Vec<Name> = [
+        (PlusX, PlusY),
+        (PlusX, MinusY),
+        (MinusX, PlusY),
+        (MinusX, MinusY),
+        (PlusX, PlusZ),
+        (PlusX, MinusZ),
+        (MinusX, PlusZ),
+        (MinusX, MinusZ),
+        (PlusY, PlusZ),
+        (PlusY, MinusZ),
+        (MinusY, PlusZ),
+        (MinusY, MinusZ),
+    ]
+    .iter()
+    .map(|&(a, b)| edge(a, b))
+    .collect();
+    let cases: Vec<Vec<EdgeBlend>> = vec![
+        // A ball corner, every edge, trims, a mitre, a roll.
+        vec![fillet(e1, 0.2), fillet(e2, 0.2), fillet(e3, 0.2)],
+        all.iter().map(|&e| fillet(e, 0.25)).collect(),
+        vec![fillet(e2, 0.2), fillet(e3, 0.2)],
+        vec![fillet(e2, 0.15), chamfer(e3, 0.3)],
+        vec![chamfer(e1, 0.2), chamfer(e2, 0.2), chamfer(e3, 0.2)],
+        vec![fillet(e1, 0.3), fillet(e2, 0.1), fillet(e3, 0.1)],
+    ];
+    for place in [Rigid::IDENTITY, far] {
+        let b = primitive::block(key, 1.0, 2.0, 3.0, &place).unwrap().0;
+        for blends in &cases {
+            match blend(key, &b, blends) {
+                Ok((r, journal)) => {
+                    s.str(&r.dump());
+                    s.u64(journal.events().len() as u64);
+                    hash_mesh(
+                        &mut s,
+                        &tessellate(&r, &MeshParams::new(2e-2, 0.5)).unwrap(),
+                    );
+                }
+                Err(e) => s.str(&format!("{e:?}")),
+            }
+        }
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -1199,5 +1267,6 @@ fn determinism() {
     booleans_section(&mut golden);
     pipes_section(&mut golden);
     blends_section(&mut golden);
+    corners_section(&mut golden);
     golden.finish();
 }
