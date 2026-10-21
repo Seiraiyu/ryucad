@@ -41,26 +41,25 @@ use crate::{Error, TopologyError};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// What the rebuild made, for naming.
-#[allow(dead_code)] // Task 12 names the blend's entities from it.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Made {
     pub(crate) segments: Vec<SegmentMade>,
-    /// End edges: the edge, its segment and the end face.
-    pub(crate) ends: Vec<(EdgeId, usize, FaceId)>,
+    /// End edges: the edge, its segment, the end face and the name of the
+    /// vertex the blend took away there.
+    pub(crate) ends: Vec<(EdgeId, usize, FaceId, Name)>,
     /// Sections: the edge and the segments either side.
     pub(crate) sections: Vec<(EdgeId, [usize; 2])>,
     /// Vertices the blend took away, by their names, and the segments at
     /// them.
     pub(crate) replaced: Vec<(Name, Vec<usize>)>,
-    /// Faces and edges an operator renamed that keep their identity, with
-    /// their names before the blend.
+    /// Edges an operator renamed that keep their identity, with their
+    /// names before the blend.
     pub(crate) keep: Vec<(EntityId, Name)>,
     /// Faces and edges whose geometry or boundary changed.
     pub(crate) modified: BTreeSet<EntityId>,
 }
 
 /// One blend face.
-#[allow(dead_code)] // Task 12 names the blend's entities from it.
 #[derive(Clone, Debug)]
 pub(crate) struct SegmentMade {
     pub(crate) face: FaceId,
@@ -69,6 +68,8 @@ pub(crate) struct SegmentMade {
     /// Its rails on the rail face (one) and on its other face (one per
     /// blended edge, fewer once joined).
     pub(crate) rails: [Vec<EdgeId>; 2],
+    /// The names of the rail face and the other face before the blend.
+    pub(crate) faces: [Name; 2],
 }
 
 /// Keys for the operators, one each, from the blend's key.
@@ -250,9 +251,12 @@ fn chain_build(
             [specs[k].fins[side], specs[k].fins[1 - side]]
         })
         .collect();
-    let rail_face = face_of(body, fins[0][0]);
-    made.keep
-        .push((EntityId::Face(rail_face), body.faces[rail_face].name));
+    let rail_name = body.faces[face_of(body, fins[0][0])].name;
+    let other_names: Vec<Name> = plan
+        .segments
+        .iter()
+        .map(|s| body.faces[face_of(body, fins[s.edges[0]][1])].name)
+        .collect();
     // Ends: split the rail face's cut where its rail crosses it.
     let mut end_edges: Vec<Option<(EdgeId, VertexId)>> = vec![None; chain.vertices.len()];
     for (vi, joint) in plan.joints.iter().enumerate() {
@@ -335,7 +339,7 @@ fn chain_build(
                 let (near, pa) = end_edges[vi].ok_or_else(inconsistent)?;
                 let strip = face_of(body, fins[p][0]);
                 end_curve(body, near, pa, strip, curve, work)?;
-                made.ends.push((near, first_seg + segs[0], *face));
+                made.ends.push((near, first_seg + segs[0], *face, old));
                 made.modified.insert(EntityId::Face(*face));
             }
             Joint::SmoothJoin {
@@ -405,6 +409,7 @@ fn chain_build(
                 .map(|&p| specs[chain.edges[p].0].name)
                 .collect(),
             rails: [vec![path.rails[k].0], others[k].clone()],
+            faces: [rail_name, other_names[k]],
         });
     }
     Ok(())

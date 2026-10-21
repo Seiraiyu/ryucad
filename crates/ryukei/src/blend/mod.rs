@@ -10,7 +10,8 @@
 //! faces' offsets ([`spine`]), rails ([`rail`]), the blend surfaces
 //! ([`fillet`]) and where the blends end ([`end`]); every new curve is
 //! checked to stay on its face ([`overflow`]). Only then is a copy of the
-//! body rebuilt through Euler operators ([`build`]).
+//! body rebuilt through Euler operators ([`build`]) and its new entities
+//! named from the blend's key and the names around them ([`names`]).
 //!
 //! Only faces on the analytic surfaces (planes, cylinders, cones, spheres
 //! and tori) and on earlier fillets' pipes may be blended; the rest is
@@ -21,6 +22,7 @@ mod chain;
 mod convex;
 mod end;
 mod fillet;
+mod names;
 mod overflow;
 mod plan;
 mod rail;
@@ -99,8 +101,8 @@ pub fn blend(key: OpKey, body: &Body, blends: &[EdgeBlend]) -> Result<(Body, Jou
     let plans = plans.into_iter().collect::<Result<Vec<_>, _>>()?;
     overflow::check(body, &specs, &chains, &plans)?;
     let mut out = body.clone();
-    build::build(&mut out, key, &specs, &chains, &plans)?;
-    let journal = Journal::new();
+    let made = build::build(&mut out, key, &specs, &chains, &plans)?;
+    let journal = names::name(&mut out, key, &made);
     if cfg!(debug_assertions) {
         let faults = crate::check::check(&out);
         assert!(faults.is_empty(), "a blend's result is invalid: {faults:?}");

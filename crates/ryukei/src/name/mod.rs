@@ -139,7 +139,8 @@ pub enum BlendRole {
     /// on; its parents are the blend face and that face.
     Rail,
     /// An edge where a blend face is cut off by a face across its end;
-    /// its parents are the blend face and that face.
+    /// its parents are the blend face, that face and the vertex the blend
+    /// took away there.
     End,
     /// An edge between two blend faces of one chain where the chain
     /// changes surface; its parents are the two faces, sorted.
