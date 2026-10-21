@@ -1368,23 +1368,43 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
         .iter()
         .filter_map(|(fid, f)| Some((fid.clone(), f.as_ref().ok()?.type_name())))
         .collect();
+    // What each feature reads, for showing dependencies.
+    let uses: BTreeMap<Id, Vec<Id>> = part
+        .features
+        .iter()
+        .filter_map(|(fid, f)| {
+            let ins = crate::graph::inputs(f.as_ref().ok()?);
+            (!ins.is_empty()).then(|| (fid.clone(), ins.into_iter().cloned().collect()))
+        })
+        .collect();
     let r = session.rebuilt(id)?;
     let features: Vec<Value> = r
         .features
         .iter()
-        .map(|(fid, b)| match b {
-            Ok(crate::rebuild::Output::Body(b)) => {
-                let c = b.body.counts();
-                json!({"id": fid, "type": types.get(fid), "ok": true, "hash": b.hash,
+        .map(|(fid, b)| {
+            (
+                fid,
+                match b {
+                    Ok(crate::rebuild::Output::Body(b)) => {
+                        let c = b.body.counts();
+                        json!({"id": fid, "type": types.get(fid), "ok": true, "hash": b.hash,
                        "counts": {"faces": c.faces, "edges": c.edges, "vertices": c.vertices}})
-            }
-            // A sketch makes no body: its state, not a body hash.
-            Ok(crate::rebuild::Output::Sketch(s)) => {
-                json!({"id": fid, "type": types.get(fid), "ok": true,
+                    }
+                    // A sketch makes no body: its state, not a body hash.
+                    Ok(crate::rebuild::Output::Sketch(s)) => {
+                        json!({"id": fid, "type": types.get(fid), "ok": true,
                        "sketch": {"state": s.report.state_str(), "dof": s.report.dof,
                                   "stale": s.stale}})
+                    }
+                    Err(e) => json!({"id": fid, "type": types.get(fid), "ok": false, "error": e}),
+                },
+            )
+        })
+        .map(|(fid, mut v)| {
+            if let Some(u) = uses.get(fid) {
+                v["uses"] = json!(u);
             }
-            Err(e) => json!({"id": fid, "type": types.get(fid), "ok": false, "error": e}),
+            v
         })
         .collect();
     let mut v = json!({"part": id, "revision": revision, "hash": r.hash,
