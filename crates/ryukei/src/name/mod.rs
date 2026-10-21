@@ -60,6 +60,8 @@ pub enum Role {
     Sweep(SweepRole),
     /// An entity of a boolean.
     Boolean(BooleanRole),
+    /// An entity of a blend.
+    Blend(BlendRole),
 }
 
 /// The faces of the primitives.
@@ -127,6 +129,26 @@ pub enum BooleanRole {
     Merged,
 }
 
+/// The entities of a blend: fillets and chamfers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BlendRole {
+    /// A blend face; its parents are the blended edges it replaces,
+    /// sorted.
+    Face,
+    /// An edge where a blend face meets a face it rolls on or is set back
+    /// on; its parents are the blend face and that face.
+    Rail,
+    /// An edge where a blend face is cut off by a face across its end;
+    /// its parents are the blend face and that face.
+    End,
+    /// An edge between two blend faces of one chain where the chain
+    /// changes surface; its parents are the two faces, sorted.
+    Section,
+    /// A vertex of a blend; its parents are the edges meeting there,
+    /// sorted.
+    Vertex,
+}
+
 impl Role {
     /// The role's fixed two-byte encoding inside a name.
     fn code(self) -> [u8; 2] {
@@ -141,6 +163,7 @@ impl Role {
             Self::Vertex => [8, 0],
             Self::Sweep(r) => [9, r as u8],
             Self::Boolean(r) => [10, r as u8],
+            Self::Blend(r) => [11, r as u8],
         }
     }
 }
@@ -188,6 +211,13 @@ impl fmt::Display for Role {
                 BooleanRole::IntersectionEdge => "intersection-edge",
                 BooleanRole::IntersectionVertex => "intersection-vertex",
                 BooleanRole::Merged => "boolean-merged",
+            }),
+            Self::Blend(r) => f.write_str(match r {
+                BlendRole::Face => "blend-face",
+                BlendRole::Rail => "rail",
+                BlendRole::End => "blend-end",
+                BlendRole::Section => "section",
+                BlendRole::Vertex => "blend-vertex",
             }),
         }
     }
@@ -271,6 +301,8 @@ mod tests {
         assert_eq!(format!("{m:?}"), "Name(230a95de0113977e565e67b9356eeaf5)");
         let b = Name::derive(OpKey(7), Role::Boolean(BooleanRole::Piece), &[n]);
         assert_eq!(format!("{b}"), "38fb7cdc49fe3ca21b443fcf995d25c0");
+        let f = Name::derive(OpKey(7), Role::Blend(BlendRole::Face), &[n]);
+        assert_eq!(format!("{f}"), "11fb0733562aa4cf3f72bf7a85100dbe");
     }
 
     #[test]
@@ -360,6 +392,15 @@ mod tests {
         ] {
             roles.push(Role::Boolean(r));
         }
+        for r in [
+            BlendRole::Face,
+            BlendRole::Rail,
+            BlendRole::End,
+            BlendRole::Section,
+            BlendRole::Vertex,
+        ] {
+            roles.push(Role::Blend(r));
+        }
         let mut codes: Vec<[u8; 2]> = roles.iter().map(|r| r.code()).collect();
         codes.sort_unstable();
         codes.dedup();
@@ -375,6 +416,10 @@ mod tests {
         assert_eq!(
             recipe("mef", OpKey(0x31), Role::Part(1), &["box#2a/+Z"]),
             "mef#31(box#2a/+Z)/part1"
+        );
+        assert_eq!(
+            recipe("blend", OpKey(5), Role::Blend(BlendRole::Rail), &["a", "b"]),
+            "blend#5(a,b)/rail"
         );
     }
 }

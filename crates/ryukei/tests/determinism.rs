@@ -629,6 +629,9 @@ fn euler_section(golden: &mut Golden) {
                         (4, parents.iter().copied().chain([*child]).collect())
                     }
                     Event::Placed { from, to, .. } => (5, vec![*from, *to]),
+                    Event::Replaced { old, new } => {
+                        (6, [*old].into_iter().chain(new.iter().copied()).collect())
+                    }
                 };
                 s.u64(tag);
                 for n in names {

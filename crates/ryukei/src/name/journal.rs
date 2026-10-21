@@ -25,6 +25,13 @@ pub enum Event {
         from: Name,
         to: Name,
     },
+    /// A blended edge or a vertex a blend took away: its name retired,
+    /// and `new` are the blend faces that took its place, sorted. ryucad
+    /// carries a reference to the edge over to its fillet this way.
+    Replaced {
+        old: Name,
+        new: Vec<Name>,
+    },
 }
 
 impl Event {
@@ -124,5 +131,10 @@ mod tests {
             to: names[1],
         };
         assert_ne!(placed, Event::Created(names[1]));
+        let replaced = Event::Replaced {
+            old: names[0],
+            new: vec![names[1]],
+        };
+        assert_ne!(replaced, Event::Deleted(names[0]));
     }
 }
