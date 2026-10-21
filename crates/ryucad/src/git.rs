@@ -267,18 +267,36 @@ impl Repo {
             .map_err(|e| not_found(e.to_string()))
     }
 
-    /// The project as `rev` has it.
-    pub fn revision(&self, rev: &str) -> Result<Revision> {
+    /// The commit `rev` names and the project folder's tree in it (empty
+    /// when the commit has no such folder), both in hex.
+    pub fn locate(&self, rev: &str) -> Result<(String, String)> {
         let commit = self.commit(rev)?;
         let tree = commit.tree().map_err(git_error)?;
         let folder = self.entry(&tree, &self.prefix)?;
+        Ok((
+            commit.id.to_string(),
+            folder.map(|t| t.to_string()).unwrap_or_default(),
+        ))
+    }
+
+    /// The project's files in the commit `id` (hex).
+    pub fn files(&self, id: &str) -> Result<Files> {
+        let commit = self.commit(id)?;
+        let tree = commit.tree().map_err(git_error)?;
         let mut files = Files::new();
         for (path, id) in self.project_blobs(&tree)? {
             files.insert(path, self.read(id)?);
         }
+        Ok(files)
+    }
+
+    /// The project as `rev` has it.
+    pub fn revision(&self, rev: &str) -> Result<Revision> {
+        let (commit, tree) = self.locate(rev)?;
+        let files = self.files(&commit)?;
         Ok(Revision {
-            commit: commit.id.to_string(),
-            tree: folder.map(|t| t.to_string()).unwrap_or_default(),
+            commit,
+            tree,
             files,
         })
     }
@@ -306,12 +324,15 @@ impl Repo {
     }
 }
 
+/// The repository holding the project at `root`, or `not_a_git_repo`.
+pub fn repo(root: &Path) -> Result<Repo> {
+    Repo::open(root)?.ok_or_else(|| no_repo(root))
+}
+
 /// The project at `root` as `rev` has it: `not_a_git_repo` outside a
 /// repository, `rev_not_found` for a revision it doesn't have.
 pub fn revision(root: &Path, rev: &str) -> Result<Revision> {
-    Repo::open(root)?
-        .ok_or_else(|| no_repo(root))?
-        .revision(rev)
+    repo(root)?.revision(rev)
 }
 
 /// `history.log`: the project's commits (or a part's), and what is

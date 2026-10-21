@@ -7,6 +7,11 @@
 //! them when the manifest changed). The session keeps every file's bytes,
 //! so the activity log's snapshots cost no reading. Rebuilds are cached by
 //! part revision, so only parts whose files changed are rebuilt.
+//!
+//! A request may name a Git revision instead of the working files: the
+//! session then answers from a frozen session over that revision's files,
+//! one of the few it keeps, which starts from the working files' results,
+//! so only what differs is rebuilt.
 
 use crate::activity::Files;
 use crate::doc::id::Id;
@@ -23,6 +28,9 @@ use std::time::{Duration, SystemTime};
 /// A modification time this close to when it was read may be followed by
 /// another write in the same timestamp tick, so it isn't trusted.
 const RACY: Duration = Duration::from_secs(2);
+
+/// How many revisions a session keeps loaded beside the working files.
+pub const REVISIONS: usize = 4;
 
 #[derive(Clone, Debug, PartialEq)]
 struct Stamp {
@@ -46,6 +54,12 @@ pub struct Session {
     known: BTreeMap<(Id, Id), BTreeMap<String, Value>>,
     /// Display meshes of rebuilt bodies.
     pub meshes: crate::mesh::Cache,
+    /// A revision's session: its files never change, and it never reads
+    /// the disk.
+    frozen: bool,
+    /// The revisions requests have named, by the project folder's tree,
+    /// most recently used first.
+    revisions: Vec<(String, Session)>,
 }
 
 impl Session {
@@ -59,9 +73,72 @@ impl Session {
             cache: BTreeMap::new(),
             known: BTreeMap::new(),
             meshes: crate::mesh::Cache::default(),
+            frozen: false,
+            revisions: Vec::new(),
         };
         s.scan()?;
         Ok(s)
+    }
+
+    /// A session over `files`, the project as a revision has it, starting
+    /// from what `from` has built and learnt.
+    fn frozen(from: &Session, files: Files) -> Result<Session> {
+        let root = from.root().to_path_buf();
+        let project = Project::load_from(&root, &files)?;
+        let stamps = files
+            .into_iter()
+            .map(|(rel, bytes)| {
+                let path = rel.split('/').fold(root.clone(), |p, s| p.join(s));
+                let stamp = Stamp {
+                    modified: None,
+                    len: bytes.len() as u64,
+                    bytes: bytes.into(),
+                };
+                (path, stamp)
+            })
+            .collect();
+        Ok(Session {
+            project,
+            stamps,
+            stamped_at: SystemTime::now(),
+            results: BTreeMap::new(),
+            cache: from.cache.clone(),
+            known: from.known.clone(),
+            meshes: crate::mesh::Cache::default(),
+            frozen: true,
+            revisions: Vec::new(),
+        })
+    }
+
+    /// The session to answer from for `rev`: this one for the working
+    /// files (no revision, or `working`), else one over the project as that
+    /// Git revision has it, with the commit it names.
+    pub fn at(&mut self, rev: Option<&str>) -> Result<(Option<String>, &mut Session)> {
+        let Some(rev) = rev.filter(|r| *r != "working") else {
+            return Ok((None, self));
+        };
+        let repo = crate::git::repo(self.root())?;
+        let (commit, tree) = repo.locate(rev)?;
+        if tree.is_empty() {
+            return Err(Error::new(
+                crate::error::Code::NotFound,
+                format!("{rev} has no project at {}", self.root().display()),
+            )
+            .with("rev", rev)
+            .with("commit", &commit));
+        }
+        let i = match self.revisions.iter().position(|(t, _)| *t == tree) {
+            Some(i) => i,
+            None => {
+                let s = Session::frozen(self, repo.files(&commit)?)?;
+                self.revisions.push((tree, s));
+                self.revisions.len() - 1
+            }
+        };
+        let used = self.revisions.remove(i);
+        self.revisions.insert(0, used);
+        self.revisions.truncate(REVISIONS);
+        Ok((Some(commit), &mut self.revisions[0].1))
     }
 
     pub fn root(&self) -> &Path {
@@ -81,6 +158,9 @@ impl Session {
     /// [`Session::refresh`], returning the files that changed (relative,
     /// with `/`) and how: `created`, `modified` or `deleted`.
     pub fn refresh_changes(&mut self) -> Result<Vec<(String, &'static str)>> {
+        if self.frozen {
+            return Ok(Vec::new());
+        }
         let changes = self.scan()?;
         if !changes.is_empty() {
             let paths: Vec<String> = changes.iter().map(|(p, _)| p.clone()).collect();
@@ -295,6 +375,7 @@ mod tests {
     use super::*;
     use crate::doc::files::{Feature, Manifest, PartFile, Placement, Primitive, PrimitiveType};
     use crate::doc::project::{feature_path, part_path, write_json};
+    use crate::error::Code;
     use crate::rebuild::rebuild_part;
     use crate::units::{Quantity, Unit};
 
@@ -533,6 +614,90 @@ mod tests {
             fs::read(feature_path(root, &id("p"), &id("a"))).unwrap()
         );
         assert_eq!(s.snapshot(), crate::activity::snapshot(root).unwrap());
+    }
+
+    #[test]
+    fn any_revision_rebuilds_from_its_own_files() {
+        use crate::git::tests::git;
+        use crate::server::tests::call;
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        crate::server::init(&root, None).unwrap();
+        let mut s = Session::open(&root).unwrap();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        let sphere = |s: &mut Session, r: u32| {
+            call(
+                s,
+                "feature.add",
+                json!({"part": "p", "type": "sphere", "id": format!("s{r}"), "params": {"radius": r}}),
+            )
+            .unwrap();
+        };
+        let mut hashes = Vec::new();
+        for r in 1..=6 {
+            sphere(&mut s, r);
+            git(&root, &["add", "."]);
+            git(&root, &["commit", "-q", "-m", &format!("sphere {r}")]);
+            hashes.push(
+                call(&mut s, "rebuild", json!({"part": "p"})).unwrap()["parts"][0]["hash"].clone(),
+            );
+        }
+        // Uncommitted: one more.
+        sphere(&mut s, 7);
+        let at = |s: &mut Session, rev: &str| call(s, "rebuild", json!({"part": "p", "rev": rev}));
+        let head = at(&mut s, "HEAD~2").unwrap();
+        assert_eq!(head["parts"][0]["hash"], hashes[3]);
+        let commit = head["commit"].as_str().unwrap().to_owned();
+        assert_eq!(commit.len(), 40);
+        assert_eq!(at(&mut s, &commit).unwrap()["parts"][0]["hash"], hashes[3]);
+        assert_eq!(
+            at(&mut s, "working").unwrap(),
+            call(&mut s, "rebuild", json!({"part": "p"})).unwrap()
+        );
+        // A revision starts from the working files' results: HEAD differs
+        // from them only by the uncommitted sphere, so nothing is built.
+        let (_, h) = s.at(Some("HEAD")).unwrap();
+        assert!(h.rebuilt(&id("p")).unwrap().built.is_empty());
+        // Inspect and meshes read the revision too; s5 didn't exist then.
+        let v = call(&mut s, "inspect", json!({"part": "p", "rev": "HEAD~3"})).unwrap();
+        assert_eq!(v["bodies"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            v["commit"],
+            call(&mut s, "rebuild", json!({"rev": "HEAD~3"})).unwrap()["commit"]
+        );
+        let m = call(
+            &mut s,
+            "mesh.get",
+            json!({"part": "p", "rev": "HEAD~3", "quality": "coarse"}),
+        )
+        .unwrap();
+        assert_eq!(m["bodies"].as_array().unwrap().len(), 3);
+        let e = call(
+            &mut s,
+            "inspect",
+            json!({"part": "p", "feature": "s5", "rev": "HEAD~3"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["commit"]),
+            (Code::NotFound, &v["commit"])
+        );
+        // A few revisions are kept, most recently used first.
+        for r in ["HEAD~5", "HEAD~4", "HEAD~3", "HEAD~2", "HEAD~1"] {
+            at(&mut s, r).unwrap();
+        }
+        assert_eq!(s.revisions.len(), REVISIONS);
+        // A revision's session never reads the disk.
+        fs::remove_file(root.join("parts/p/features/s1.json")).unwrap();
+        assert_eq!(at(&mut s, "HEAD~1").unwrap()["parts"][0]["hash"], hashes[4]);
+        let e = at(&mut s, "nowhere").unwrap_err();
+        assert_eq!(e.code, Code::RevNotFound);
+        let (outside, mut t) = crate::server::tests::fresh();
+        let e = call(&mut t, "rebuild", json!({"rev": "HEAD"})).unwrap_err();
+        assert_eq!(e.code, Code::NotAGitRepo);
+        drop(outside);
     }
 
     #[test]

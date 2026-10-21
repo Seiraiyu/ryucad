@@ -66,7 +66,11 @@ enum Command {
     #[command(subcommand)]
     Sketch(SketchCmd),
     /// Rebuild one part, or all of them.
-    Rebuild { part: Option<String> },
+    Rebuild {
+        part: Option<String>,
+        #[command(flatten)]
+        rev: RevArg,
+    },
     /// List a part's bodies, faces, edges and vertices by stable name.
     Inspect {
         part: String,
@@ -74,6 +78,8 @@ enum Command {
         /// Only this entity: its name, or a full reference <part>/<feature>/<name>.
         #[arg(long)]
         entity: Option<String>,
+        #[command(flatten)]
+        rev: RevArg,
     },
     /// Report files that aren't canonical, broken, unlisted or unknown.
     CheckFormat,
@@ -191,6 +197,8 @@ enum Command {
         /// Write the meshes to this file as ryucad.mesh.1 instead.
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
+        #[command(flatten)]
+        rev: RevArg,
     },
     /// Draw a part (or the whole project) to a PNG: iso framing the model
     /// unless a view, a participant's camera or a camera is given.
@@ -462,6 +470,14 @@ enum SketchCmd {
 /// Sketch ops, parsed from one argument.
 #[derive(Clone)]
 struct Ops(Vec<Value>);
+
+#[derive(Args)]
+struct RevArg {
+    /// Read the project as this Git revision has it (main, HEAD~2, a hash)
+    /// instead of the working files.
+    #[arg(long, value_name = "REV")]
+    rev: Option<String>,
+}
 
 #[derive(Args)]
 struct Expect {
@@ -826,15 +842,20 @@ fn request(cmd: &Command) -> Option<Request> {
             part: part.clone(),
             sketch: sketch.clone(),
         },
-        Command::Rebuild { part } => Request::Rebuild { part: part.clone() },
+        Command::Rebuild { part, rev } => Request::Rebuild {
+            part: part.clone(),
+            rev: rev.rev.clone(),
+        },
         Command::Inspect {
             part,
             feature,
             entity,
+            rev,
         } => Request::Inspect {
             part: part.clone(),
             feature: feature.clone(),
             entity: entity.clone(),
+            rev: rev.rev.clone(),
         },
         Command::CheckFormat => Request::CheckFormat {},
         Command::Doctor { repairs, params } if repairs.is_empty() => {
@@ -953,11 +974,13 @@ fn request(cmd: &Command) -> Option<Request> {
             feature,
             quality,
             out,
+            rev,
         } => Request::MeshGet {
             part: part.clone(),
             feature: feature.clone(),
             quality: quality.clone(),
             transfer: out.as_ref().map(|_| Transfer::Binary),
+            rev: rev.rev.clone(),
         },
         Command::History { part, limit } => Request::HistoryLog {
             part: part.clone(),
