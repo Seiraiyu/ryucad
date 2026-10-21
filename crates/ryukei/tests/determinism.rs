@@ -1109,6 +1109,71 @@ fn pipes_section(golden: &mut Golden) {
     }
 }
 
+fn blends_section(golden: &mut Golden) {
+    use ryukei::blend::{BlendKind, Chamfer, EdgeBlend, blend};
+    use ryukei::name::{FaceRole, Name, Role};
+    let mut s = golden.section("blends");
+    let axis = Vector3::new(1.0, -2.0, 0.5).normalize().unwrap();
+    let far = Rigid::translation(Vector3::new(12.5, -3.25, 100.0))
+        .then_after(&Rigid::rotation(axis, 2.5));
+    let key = OpKey(0x626c_656e);
+    let face = |r: FaceRole| Name::derive(key, Role::Face(r), &[]);
+    let edge = |a: FaceRole, b: FaceRole| {
+        let mut f = [face(a), face(b)];
+        f.sort();
+        Name::derive(key, Role::Edge, &f)
+    };
+    let fillet = |radius: f64| BlendKind::Fillet { radius };
+    let chamfer = BlendKind::Chamfer;
+    let box_edge = edge(FaceRole::PlusX, FaceRole::PlusZ);
+    let kinds = [
+        fillet(0.25),
+        chamfer(Chamfer::Equal { distance: 0.2 }),
+        chamfer(Chamfer::Distances {
+            first: 0.1,
+            second: 0.3,
+            first_face: face(FaceRole::PlusX),
+        }),
+        chamfer(Chamfer::DistanceAngle {
+            distance: 0.2,
+            angle: 0.5,
+            face: face(FaceRole::PlusZ),
+        }),
+    ];
+    for place in [Rigid::IDENTITY, far] {
+        let mut cases: Vec<(ryukei::topo::Body, Vec<EdgeBlend>)> = Vec::new();
+        let b = primitive::block(key, 1.0, 2.0, 3.0, &place).unwrap().0;
+        for kind in kinds {
+            cases.push((
+                b.clone(),
+                vec![EdgeBlend {
+                    edge: box_edge,
+                    kind,
+                }],
+            ));
+        }
+        let c = primitive::cylinder(key, 1.0, 1.5, &place).unwrap().0;
+        let rims: Vec<Name> = c.edges().map(|e| c.edge(e).unwrap().name).collect();
+        for kind in [fillet(0.2), chamfer(Chamfer::Equal { distance: 0.15 })] {
+            let all = rims.iter().map(|&edge| EdgeBlend { edge, kind }).collect();
+            cases.push((c.clone(), all));
+        }
+        for (body, blends) in &cases {
+            match blend(key, body, blends) {
+                Ok((r, journal)) => {
+                    s.str(&r.dump());
+                    s.u64(journal.events().len() as u64);
+                    hash_mesh(
+                        &mut s,
+                        &tessellate(&r, &MeshParams::new(2e-2, 0.5)).unwrap(),
+                    );
+                }
+                Err(e) => s.str(&format!("{e:?}")),
+            }
+        }
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -1133,5 +1198,6 @@ fn determinism() {
     intersections_section(&mut golden);
     booleans_section(&mut golden);
     pipes_section(&mut golden);
+    blends_section(&mut golden);
     golden.finish();
 }
