@@ -11,7 +11,7 @@
 
 use super::rail::Rail;
 use crate::geom::{Box3, Curve, Curve2, Point3, Surface};
-use crate::intersect::{self, CurveHit, Failure, SurfaceHit};
+use crate::intersect::{self, Branch, CurveHit, Failure, SurfaceHit};
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, EdgeId};
 
@@ -116,8 +116,10 @@ pub(crate) struct EndCurve {
 }
 
 /// The end curve where `blend` meets `end` between `from` and `to`, the
-/// rails' crossings, taking the arc nearer `vertex`. `reach` bounds how
-/// far the curve may go from them (the ball's diameter).
+/// rails' crossings near `vertex`: the arc whose middle `on_face` scores
+/// higher, a point's place on the blend face (at least 0 on it, below 0
+/// round the back of its surface). `reach` bounds how far the curve may
+/// go from them (the ball's diameter).
 pub(crate) fn end_curve(
     blend: &Surface,
     end: &Surface,
@@ -125,6 +127,7 @@ pub(crate) fn end_curve(
     to: Point3,
     vertex: Point3,
     reach: f64,
+    on_face: &dyn Fn(Point3) -> f64,
 ) -> Result<EndCurve, EndFail> {
     let region = Box3::new(from, to)
         .union(&Box3::from_point(vertex))
@@ -139,34 +142,45 @@ pub(crate) fn end_curve(
     let SurfaceHit::Meet { branches, .. } = hit else {
         return Err(EndFail::Uncertain);
     };
-    for b in branches {
+    for mut b in branches {
         let tol = b.tolerance.max(LINEAR_RESOLUTION);
-        let reach = 10.0 * tol;
-        let near = |p: Point3| -> Option<f64> {
-            let mut t = b.curve.project(p).param;
-            if let Some(period) = b.curve.period() {
-                t += ((b.range[0] - t) / period).ceil() * period;
+        let [r0, r1] = b.range;
+        // A closed branch: periodic, or fitted as a clamped spline that
+        // ends where it starts (a pipe cut all round).
+        let clamped = b.curve.period().is_none();
+        let closed = !clamped || b.curve.point(r0).distance(b.curve.point(r1)) <= tol;
+        let period = r1 - r0;
+        let wrap = |t: f64| {
+            if clamped {
+                r0 + (t - r0).rem_euclid(period)
+            } else {
+                t
             }
-            (b.range[0] <= t && t <= b.range[1] && b.curve.point(t).distance(p) <= reach)
-                .then_some(t)
         };
-        let (Some(a), Some(z)) = (near(from), near(to)) else {
+        let Some((a, z)) = arc_ends(&b, from, to, 10.0 * tol) else {
             continue;
         };
-        // The arc from `a` to `z`: forwards, or backwards, or round the
-        // seam of a closed branch, whichever passes nearer the vertex.
+        // The arc from `a` to `z`, or the other way round a closed branch,
+        // whichever lies on the blend face.
         let mut arcs = vec![(a, z)];
-        if let Some(period) = b.curve.period() {
+        if closed {
             arcs = vec![
                 (a, if z > a { z } else { z + period }),
                 (a, if z < a { z } else { z - period }),
             ];
         }
-        let mid = |(s, e): (f64, f64)| b.curve.point((s + e) / 2.0).distance(vertex);
-        arcs.sort_by(|x, y| mid(*x).total_cmp(&mid(*y)));
-        let (s, e) = arcs[0];
-        if arcs.len() == 2 && mid(arcs[1]) < 1.5 * mid(arcs[0]) {
+        let score = |(s, e): (f64, f64)| on_face(b.curve.point(wrap((s + e) / 2.0)));
+        arcs.sort_by(|x, y| score(*y).total_cmp(&score(*x)));
+        if arcs.len() == 2 && (score(arcs[0]) - score(arcs[1])).abs() <= 1e-9 {
             return Err(EndFail::Uncertain);
+        }
+        let (mut s, mut e) = arcs[0];
+        if clamped && closed && (s.max(e) > r1 || s.min(e) < r0) {
+            // The arc crosses the spline's start: move the start to the
+            // middle of the other arc.
+            let (os, oe) = arcs[1];
+            b = super::seam::reseamed(b, wrap((os + oe) / 2.0));
+            (s, e) = arc_ends(&b, from, to, 10.0 * tol).ok_or(EndFail::Uncertain)?;
         }
         let mut out = EndCurve {
             curve: b.curve,
@@ -177,12 +191,48 @@ pub(crate) fn end_curve(
         if e < s {
             out = out.reversed();
         }
-        return Ok(out);
+        return Ok(out.covered([blend, end])?);
     }
     Err(EndFail::Uncertain)
 }
 
+/// The parameters in its range where branch `b` passes within `reach` of
+/// `from` and `to`.
+fn arc_ends(b: &Branch, from: Point3, to: Point3, reach: f64) -> Option<(f64, f64)> {
+    let at = |p: Point3| -> Option<f64> {
+        let mut t = b.curve.project(p).param;
+        if let Some(period) = b.curve.period() {
+            t += ((b.range[0] - t) / period).ceil() * period;
+        }
+        (b.range[0] <= t && t <= b.range[1] && b.curve.point(t).distance(p) <= reach).then_some(t)
+    };
+    Some((at(from)?, at(to)?))
+}
+
 impl EndCurve {
+    /// The same curve, its pcurves on `surfaces` (in the order of its
+    /// pcurves) fitted again where their domain doesn't cover its
+    /// interval: a clamped pcurve of a closed branch, where the arc runs
+    /// across the branch's start.
+    pub(crate) fn covered(mut self, surfaces: [&Surface; 2]) -> Result<Self, Failure> {
+        for (k, surface) in surfaces.iter().enumerate() {
+            let (pc, m) = &self.pcurves[k];
+            if pc.period().is_some() {
+                continue;
+            }
+            let [d0, d1] = pc.domain();
+            let [a, b] = self.interval.map(|t| m[0] + m[1] * t);
+            let slack = 1e-9 * (d1 - d0).abs().max(1.0);
+            if a.min(b) >= d0 - slack && a.max(b) <= d1 + slack {
+                continue;
+            }
+            let (fit, bound) = intersect::fit_pcurve(surface, &self.curve, self.interval)?;
+            self.pcurves[k] = (Curve2::Nurbs2(std::sync::Arc::new(fit)), [0.0, 1.0]);
+            self.tolerance = self.tolerance.max(bound);
+        }
+        Ok(self)
+    }
+
     /// The same curve run the other way.
     pub(crate) fn reversed(self) -> Self {
         let (curve, c) = self.curve.reversed();
@@ -252,7 +302,10 @@ mod tests {
                 // A radius back from the vertex along the cut.
                 assert!((c.point.distance(vp) - r).abs() < 1e-12);
             }
-            let ec = end_curve(&blend, end, x[0].point, x[1].point, vp, 2.0 * r).unwrap();
+            let ec = end_curve(&blend, end, x[0].point, x[1].point, vp, 2.0 * r, &|p| {
+                -p.distance(vp)
+            })
+            .unwrap();
             let Curve::Circle(circle) = &ec.curve else {
                 panic!("{:?}", ec.curve)
             };

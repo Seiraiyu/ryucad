@@ -219,3 +219,157 @@ fn a_rim_accounts_for_every_name() {
     let (s, _) = blend(K, &b, &[fillet(n, 0.3)]).unwrap();
     assert_eq!(names(&r), names(&s));
 }
+
+#[test]
+fn edges_and_faces_two_blends_cut_keep_their_names() {
+    use FaceRole::*;
+    let k = OpKey(1);
+    // The box's four upright edges: every edge round its top and bottom
+    // is cut at both ends.
+    let b = primitive::block(k, 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let upright = [
+        edge(k, PlusX, PlusY),
+        edge(k, PlusX, MinusY),
+        edge(k, MinusX, PlusY),
+        edge(k, MinusX, MinusY),
+    ];
+    let (r, j) = blend(K, &b, &upright.map(|e| fillet(e, 0.2))).unwrap();
+    accounts(&b, &r, &j);
+    // A cylinder's two rims: each rail is named from the face it rolls
+    // on as it was before the blend, whichever rim was built first.
+    let c = primitive::cylinder(k, 1.0, 1.5, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let rims: Vec<Name> = c.edges().map(|e| c.edge(e).unwrap().name).collect();
+    let (r, j) = blend(
+        K,
+        &c,
+        &rims.iter().map(|&e| fillet(e, 0.2)).collect::<Vec<_>>(),
+    )
+    .unwrap();
+    accounts(&c, &r, &j);
+    for e in rims {
+        let f = Name::derive(K, Role::Blend(BlendRole::Face), &[e]);
+        let on = |side| {
+            let rail = Name::derive(K, Role::Blend(BlendRole::Rail), &[f, face(k, side)]);
+            matches!(r.by_name(rail), Some(EntityId::Edge(_)))
+        };
+        assert!(on(Side) && (on(Top) || on(Bottom)), "{e}");
+    }
+}
+
+/// A box's vertex between three of its faces.
+fn vertex(key: OpKey, a: FaceRole, b: FaceRole, c: FaceRole) -> Name {
+    let mut f = [face(key, a), face(key, b), face(key, c)];
+    f.sort();
+    Name::derive(key, Role::Vertex, &f)
+}
+
+#[test]
+fn a_ball_corner_replaces_its_vertex() {
+    use FaceRole::*;
+    let k = OpKey(1);
+    let b = primitive::block(k, 1.0, 1.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let edges = [
+        edge(k, PlusX, PlusY),
+        edge(k, PlusY, PlusZ),
+        edge(k, PlusX, PlusZ),
+    ];
+    let (r, j) = blend(K, &b, &edges.map(|e| fillet(e, 0.2))).unwrap();
+    let replaced = accounts(&b, &r, &j);
+    let v = vertex(k, PlusX, PlusY, PlusZ);
+    // The corner face, from the vertex and the faces it touches.
+    let mut faces = [face(k, PlusX), face(k, PlusY), face(k, PlusZ)];
+    faces.sort();
+    let corner = Name::derive(
+        K,
+        Role::Blend(BlendRole::Corner),
+        &[v, faces[0], faces[1], faces[2]],
+    );
+    assert!(matches!(r.by_name(corner), Some(EntityId::Face(_))));
+    let blend_faces = edges.map(|e| Name::derive(K, Role::Blend(BlendRole::Face), &[e]));
+    let mut want: Vec<Name> = blend_faces.into_iter().chain([corner]).collect();
+    want.sort();
+    assert_eq!(replaced[&v], want);
+    // Each section between a blend face and the corner face.
+    for f in blend_faces {
+        let mut parents = [f, corner];
+        parents.sort();
+        let n = Name::derive(K, Role::Blend(BlendRole::Section), &parents);
+        assert!(matches!(r.by_name(n), Some(EntityId::Edge(_))));
+    }
+    let (s, _) = blend(K, &b, &edges.map(|e| fillet(e, 0.25))).unwrap();
+    assert_eq!(names(&r), names(&s));
+}
+
+fn chamfer(edge: Name, distance: f64) -> EdgeBlend {
+    EdgeBlend {
+        edge,
+        kind: BlendKind::Chamfer(ryukei::blend::Chamfer::Equal { distance }),
+    }
+}
+
+#[test]
+fn corners_account_for_every_name() {
+    use FaceRole::*;
+    let k = OpKey(1);
+    let b = primitive::block(k, 1.0, 1.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let [e1, e2, e3] = [
+        edge(k, PlusY, PlusZ),
+        edge(k, PlusX, PlusY),
+        edge(k, PlusX, PlusZ),
+    ];
+    let v = vertex(k, PlusX, PlusY, PlusZ);
+    let cases: Vec<(Vec<EdgeBlend>, Vec<EdgeBlend>)> = vec![
+        // Trims, equal and not: the same sizes' order keeps the names.
+        (
+            vec![fillet(e1, 0.2), fillet(e2, 0.2)],
+            vec![fillet(e1, 0.25), fillet(e2, 0.25)],
+        ),
+        (
+            vec![fillet(e1, 0.15), fillet(e2, 0.3)],
+            vec![fillet(e1, 0.1), fillet(e2, 0.2)],
+        ),
+        (
+            vec![fillet(e1, 0.15), chamfer(e2, 0.3)],
+            vec![fillet(e1, 0.1), chamfer(e2, 0.2)],
+        ),
+        // A mitre.
+        (
+            vec![chamfer(e1, 0.2), chamfer(e2, 0.2), chamfer(e3, 0.2)],
+            vec![chamfer(e1, 0.1), chamfer(e2, 0.1), chamfer(e3, 0.1)],
+        ),
+        // A roll, in two stages.
+        (
+            vec![fillet(e1, 0.3), fillet(e2, 0.1), fillet(e3, 0.1)],
+            vec![fillet(e1, 0.25), fillet(e2, 0.05), fillet(e3, 0.05)],
+        ),
+    ];
+    for (one, other) in cases {
+        let (r, j) = blend(K, &b, &one).unwrap();
+        let replaced = accounts(&b, &r, &j);
+        // The vertex went to the faces of the blends there.
+        let mut want: Vec<Name> = one
+            .iter()
+            .map(|x| Name::derive(K, Role::Blend(BlendRole::Face), &[x.edge]))
+            .collect();
+        want.sort();
+        let got = &replaced[&v];
+        if one.len() == 3 && matches!(one[0].kind, BlendKind::Fillet { .. }) {
+            // A roll: the larger fillet's face, and the one rolling round
+            // its end there.
+            let first = Name::derive(K, Role::Blend(BlendRole::Face), &[e1]);
+            assert!(got.len() == 2 && got.contains(&first), "{got:?}");
+        } else {
+            assert_eq!(got, &want);
+        }
+        let (s, _) = blend(K, &b, &other).unwrap();
+        assert_eq!(names(&r), names(&s));
+    }
+}

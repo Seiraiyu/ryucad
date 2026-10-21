@@ -80,8 +80,7 @@ fn body(g: &mut Lcg) -> (Body, f64) {
 }
 
 /// One edge, or two: half the time sharing no vertex, a quarter of the
-/// time meeting at a corner (which the blend refuses until plan 6.C),
-/// and whether they meet.
+/// time meeting at a corner, and whether they meet.
 fn edges(g: &mut Lcg, b: &Body) -> (Vec<EdgeId>, bool) {
     let all: Vec<EdgeId> = b.edges().collect();
     let first = all[(g.next_u64() % all.len() as u64) as usize];
@@ -129,10 +128,10 @@ fn corner(b: &Body, e: EdgeId, size: f64) -> f64 {
 )]
 fn blends_of_random_primitives() {
     let mut g = Lcg::new(0x626c_656e_6473);
-    let (mut built, mut overflow, mut corners, mut other) = (0, 0, 0, 0);
+    let (mut built, mut overflow, mut other) = (0, 0, 0);
     for case in 0..48 {
         let (b, small) = body(&mut g);
-        let (picked, meet) = edges(&mut g, &b);
+        let (picked, _) = edges(&mut g, &b);
         let size = g.next_f64(0.02, 0.8) * small;
         let kind = match g.next_u64() % 3 {
             0 => BlendKind::Fillet { radius: size },
@@ -190,7 +189,6 @@ fn blends_of_random_primitives() {
             Err(Error::InvalidBlend(
                 BlendError::Overflow { .. } | BlendError::RadiusTooLarge { .. },
             )) => overflow += 1,
-            Err(Error::InvalidBlend(BlendError::Unsupported { .. })) if meet => corners += 1,
             Err(Error::InvalidBlend(e)) => {
                 other += 1;
                 eprintln!("case {case}: {e:?}");
@@ -198,8 +196,8 @@ fn blends_of_random_primitives() {
             Err(e) => panic!("case {case}: {e:?}"),
         }
     }
-    eprintln!("built {built}, overflowed {overflow}, corners {corners}, refused {other}");
+    eprintln!("built {built}, overflowed {overflow}, refused {other}");
     assert!(built >= 16, "only {built} built");
-    assert!(overflow >= 1 && corners >= 1, "{overflow} {corners}");
+    assert!(overflow >= 1, "{overflow}");
     assert!(other <= 4, "{other} refused");
 }

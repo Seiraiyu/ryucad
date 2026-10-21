@@ -13,6 +13,7 @@
 //! strip's blended edges, within the strip's ends. A loop that crosses a
 //! rail is caught by the crossings, so one point of each tells.
 
+use super::Near;
 use super::chain::Chain;
 use super::plan::{Joint, Plan};
 use super::spec::Spec;
@@ -53,6 +54,33 @@ impl Item<'_> {
         self.interval.map(|t| m[0] + m[1] * t)
     }
 
+    /// The pcurve's range less, at each end, the stretch over which a
+    /// curve touching an edge there tangentially stays within the
+    /// tolerances of it: ten times `sqrt(2 × size × tolerance)`, the
+    /// size about its length. `None` for a curve with nothing it may end
+    /// on.
+    fn inner(&self) -> Option<[f64; 2]> {
+        if self.allowed.is_empty() {
+            return None;
+        }
+        let [a, b] = self.interval;
+        let [p, q] = self.ends();
+        let size = p.distance(self.curve.point((a + b) / 2.0)) + q.distance(p);
+        let s = 10.0 * (2.0 * size * self.tolerance.max(LINEAR_RESOLUTION)).sqrt();
+        let speed = |t: f64| self.curve.eval(t).d1.length();
+        let (va, vb) = (speed(a), speed(b));
+        if !(va > 0.0 && vb > 0.0) {
+            return None;
+        }
+        let dir = (b - a).signum();
+        let [a2, b2] = [a + dir * s / va, b - dir * s / vb];
+        if (b2 - a2) * dir <= 0.0 {
+            return None;
+        }
+        let m = self.pcurve.1;
+        Some([m[0] + m[1] * a2, m[0] + m[1] * b2])
+    }
+
     fn bounds(&self) -> Box3 {
         let [a, b] = self.interval;
         self.curve.bounds([a.min(b), a.max(b)]).grow(self.tolerance)
@@ -67,7 +95,13 @@ pub(crate) fn check(
     specs: &[Spec],
     chains: &[Chain],
     plans: &[Plan],
+    near: &Near,
 ) -> Result<(), Error> {
+    let trims = near.trims;
+    // Where curves of different chains may meet, end to end.
+    let mut feet: Vec<Point3> = near.corners.iter().flat_map(|c| c.feet).collect();
+    feet.extend(trims.iter().flat_map(|t| [t.q, t.p, t.g()]));
+    feet.extend(near.mitres.iter().flat_map(|m| m.q));
     let mut items: Vec<Item> = Vec::new();
     let mut blended: BTreeSet<EdgeId> = BTreeSet::new();
     for (ci, (chain, plan)) in chains.iter().zip(plans).enumerate() {
@@ -79,7 +113,9 @@ pub(crate) fn check(
             .iter()
             .enumerate()
             .filter_map(|(vi, j)| match j {
-                Joint::End { crossings, .. } => Some((vi, [crossings[0].cut, crossings[1].cut])),
+                Joint::End { crossings, .. } | Joint::Fan { crossings, .. } => {
+                    Some((vi, [crossings[0].cut, crossings[1].cut]))
+                }
                 _ => None,
             })
             .collect();
@@ -91,10 +127,17 @@ pub(crate) fn check(
                 _ => None,
             })
             .collect();
+        // A trimmed blend's rails may end on the sharp edge there.
+        let sharp: Vec<EdgeId> = trims
+            .iter()
+            .filter(|t| t.ends.iter().any(|e| e.chain == ci))
+            .map(|t| t.sharp)
+            .collect();
         for seg in &plan.segments {
             let edge = specs[chain.edges[seg.edges[0]].0].name;
             for side in 0..2 {
                 let mut allowed: Vec<EdgeId> = ends.iter().map(|(_, c)| c[side]).collect();
+                allowed.extend(&sharp);
                 if side == 1 {
                     allowed.extend(&smooth);
                 }
@@ -117,23 +160,60 @@ pub(crate) fn check(
             }
         }
         for (vi, cuts) in &ends {
-            let Joint::End { face, curve, .. } = &plan.joints[*vi] else {
-                unreachable!("an end")
-            };
             let seg = if *vi == 0 {
                 &plan.segments[0]
             } else {
                 &plan.segments[plan.segments.len() - 1]
             };
+            let edge = specs[chain.edges[seg.edges[0]].0].name;
+            match &plan.joints[*vi] {
+                Joint::End { face, curve, .. } => items.push(Item {
+                    face: *face,
+                    curve: &curve.curve,
+                    interval: curve.interval,
+                    pcurve: (&curve.pcurves[1].0, curve.pcurves[1].1),
+                    tolerance: curve.tolerance,
+                    allowed: cuts.to_vec(),
+                    edge,
+                    chain: ci,
+                    strip: Vec::new(),
+                }),
+                Joint::Fan {
+                    faces,
+                    edges,
+                    curves,
+                    ..
+                } => {
+                    for (k, curve) in curves.iter().enumerate() {
+                        items.push(Item {
+                            face: faces[k],
+                            curve: &curve.curve,
+                            interval: curve.interval,
+                            pcurve: (&curve.pcurves[1].0, curve.pcurves[1].1),
+                            tolerance: curve.tolerance,
+                            allowed: vec![edges[k], edges[k + 1]],
+                            edge,
+                            chain: ci,
+                            strip: Vec::new(),
+                        });
+                    }
+                }
+                _ => unreachable!("an end"),
+            }
+        }
+    }
+    for t in trims {
+        if let Some((e, _)) = &t.end {
+            let wide = &t.ends[1];
             items.push(Item {
-                face: *face,
-                curve: &curve.curve,
-                interval: curve.interval,
-                pcurve: (&curve.pcurves[1].0, curve.pcurves[1].1),
-                tolerance: curve.tolerance,
-                allowed: cuts.to_vec(),
-                edge: specs[chain.edges[seg.edges[0]].0].name,
-                chain: ci,
+                face: t.ends[0].face,
+                curve: &e.curve,
+                interval: e.interval,
+                pcurve: (&e.pcurves[1].0, e.pcurves[1].1),
+                tolerance: e.tolerance,
+                allowed: vec![t.sharp],
+                edge: specs[wide.spec].name,
+                chain: wide.chain,
                 strip: Vec::new(),
             });
         }
@@ -171,6 +251,13 @@ pub(crate) fn check(
                 let c2 = &body.curves2[pc.curve];
                 let reach = 10.0 * (it.tolerance + e.tolerance.get());
                 for p in meets(body, face, (it.pcurve.0, it.range2()), (c2, range))
+                    .or_else(|| {
+                        // Rounding can't settle a tangent touch where the
+                        // curve ends on an edge it may end on: leave out
+                        // the stretch where the two stay that close.
+                        let inner = it.inner()?;
+                        meets(body, face, (it.pcurve.0, inner), (c2, range))
+                    })
                     .ok_or(BlendError::Uncertain { at: it.edge })?
                 {
                     let at_end = it.ends().iter().any(|q| q.distance(p) <= reach);
@@ -196,7 +283,8 @@ pub(crate) fn check(
                 .ok_or(BlendError::Uncertain { at: a.edge })?
                 {
                     let end_of = |it: &Item| it.ends().iter().any(|q| q.distance(p) <= reach);
-                    if !(a.chain == b.chain && end_of(a) && end_of(b)) {
+                    let corner = feet.iter().any(|q| q.distance(p) <= reach);
+                    if !((a.chain == b.chain || corner) && end_of(a) && end_of(b)) {
                         return Err(overflow(a));
                     }
                 }
