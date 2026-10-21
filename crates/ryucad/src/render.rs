@@ -384,29 +384,77 @@ fn between(a: Screen, b: Screen, t: f32) -> Screen {
     }
 }
 
+/// Where `t` along `a`..`b` is on screen, worked out in f64: the ends of
+/// a segment cut down to the screen, which may lie far outside it.
+fn between_far(a: Screen, b: Screen, t: f64) -> Screen {
+    let lerp = |p: f32, q: f32| f64::from(p) + t * (f64::from(q) - f64::from(p));
+    let (aw, bw) = (f64::from(a.w), f64::from(b.w));
+    let iw = (1.0 - t) / aw + t / bw;
+    let z = ((1.0 - t) * f64::from(a.z) / aw + t * f64::from(b.z) / bw) / iw;
+    Screen {
+        x: lerp(a.x, b.x) as f32,
+        y: lerp(a.y, b.y) as f32,
+        z: z as f32,
+        w: (1.0 / iw) as f32,
+    }
+}
+
 /// The dashes of a polyline on screen: `on` samples drawn, `off` left
-/// out, the pattern carried on along the whole polyline.
-fn dashes(points: &[Screen], on: f32, off: f32) -> Vec<(Screen, Screen)> {
+/// out, the pattern carried on along the whole polyline. Only what lies
+/// within `margin` of a screen `size` big is dashed.
+fn dashes(
+    points: &[Screen],
+    on: f32,
+    off: f32,
+    size: [f32; 2],
+    margin: f32,
+) -> Vec<(Screen, Screen)> {
     let mut out = Vec::new();
     // Where in the pattern the next point is.
     let mut phase = 0.0f32;
+    let period = on + off;
     for w in points.windows(2) {
         let (a, b) = (w[0], w[1]);
         let (dx, dy) = (b.x - a.x, b.y - a.y);
-        let len = (dx * dx + dy * dy).sqrt();
+        let full = (dx * dx + dy * dy).sqrt();
+        // The pattern moves on over what isn't shown, before and after.
+        let skip = |phase: f32, t: f64| {
+            ((f64::from(phase) + t * f64::from(full)) % f64::from(period)) as f32
+        };
+        let shown = crate::sketch_view::on_screen(
+            [a.x, a.y].map(f64::from),
+            [b.x, b.y].map(f64::from),
+            size.map(f64::from),
+            f64::from(margin),
+        );
+        let Some((t0, t1)) = shown else {
+            phase = skip(phase, 1.0);
+            continue;
+        };
+        let (a, b, len) = if (t0, t1) == (0.0, 1.0) {
+            (a, b, full)
+        } else {
+            phase = skip(phase, t0);
+            let (a, b) = (between_far(a, b, t0), between_far(a, b, t1));
+            let (dx, dy) = (b.x - a.x, b.y - a.y);
+            (a, b, (dx * dx + dy * dy).sqrt())
+        };
         let mut s = 0.0f32;
         while s < len {
             let (drawn, left) = if phase < on {
                 (true, on - phase)
             } else {
-                (false, on + off - phase)
+                (false, period - phase)
             };
             let step = left.min(len - s);
             if drawn {
                 out.push((between(a, b, s / len), between(a, b, (s + step) / len)));
             }
             s += step;
-            phase = (phase + step) % (on + off);
+            phase = (phase + step) % period;
+        }
+        if t1 < 1.0 {
+            phase = skip(phase, 1.0 - t1);
         }
     }
     out
@@ -518,7 +566,8 @@ pub fn render(
                     let [on, off] = DASH.map(|d| d * SS as f32);
                     for run in pts.split(Option::is_none) {
                         let run: Vec<Screen> = run.iter().flatten().copied().collect();
-                        for (p, q) in dashes(&run, on, off) {
+                        let size = [sw as f32, (h * SS) as f32];
+                        for (p, q) in dashes(&run, on, off, size, half + 1.0) {
                             b.segment(p, q, half, l.color);
                         }
                     }
@@ -825,10 +874,29 @@ pub(crate) mod tests {
                 w: 1.0,
             })
             .to_vec();
-        let d = dashes(&pts, 6.0, 4.0);
+        let d = dashes(&pts, 6.0, 4.0, [100.0, 100.0], 1.0);
         assert_eq!(d.len(), 2);
         assert_eq!((d[0].1.x, d[0].1.y), (5.0, 0.0));
         assert_eq!((d[1].0.x, d[1].0.y, d[1].1.y), (5.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn dashes_are_laid_only_where_they_show() {
+        // A construction line seen from very close runs far off screen
+        // both ways; past 2^28 pixels an f32 walk along it stops moving.
+        for far in [2e7f32, 1e10] {
+            let pts: Vec<Screen> = [[-far, 50.0], [far, 50.0]]
+                .map(|[x, y]| Screen {
+                    x,
+                    y,
+                    z: 1.0,
+                    w: 1.0,
+                })
+                .to_vec();
+            let d = dashes(&pts, 6.0, 4.0, [100.0, 100.0], 1.0);
+            assert!((10..=12).contains(&d.len()), "{far}: {}", d.len());
+            assert!(d.iter().all(|(p, q)| p.x >= -2.0 && q.x <= 102.0));
+        }
     }
 
     #[test]

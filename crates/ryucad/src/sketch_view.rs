@@ -178,6 +178,29 @@ pub fn label_text(q: &crate::units::Quantity, unit: Unit) -> String {
     format!("{} = {value}", q.text())
 }
 
+/// The stretch of the screen segment `a`..`b` within `margin` of a screen
+/// `size` big, as fractions along it (`(0, 1)` exactly when it is all
+/// there), or `None` if none of it is. Dashes are laid only there, so a
+/// segment running far off screen (a view zoomed far in) costs no more
+/// than what shows of it.
+pub fn on_screen(a: [f64; 2], b: [f64; 2], size: [f64; 2], margin: f64) -> Option<(f64, f64)> {
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for k in 0..2 {
+        let (lo, hi) = (-margin, size[k] + margin);
+        let d = b[k] - a[k];
+        if d == 0.0 {
+            if a[k] < lo || a[k] > hi {
+                return None;
+            }
+            continue;
+        }
+        let (u, v) = ((lo - a[k]) / d, (hi - a[k]) / d);
+        t0 = t0.max(u.min(v));
+        t1 = t1.min(u.max(v));
+    }
+    (t0 < t1).then_some((t0, t1))
+}
+
 fn sub(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
     [a[0] - b[0], a[1] - b[1]]
 }
@@ -416,6 +439,22 @@ mod tests {
         assert_eq!(number(0.1 + 0.2), "0.3");
         assert_eq!(number(-1e-9), "0");
         assert_eq!(number(1.234_567_89), "1.234568");
+    }
+
+    #[test]
+    fn only_what_shows_is_kept() {
+        let size = [100.0, 50.0];
+        // Inside, the whole segment, exactly.
+        assert_eq!(
+            on_screen([10.0, 10.0], [90.0, 40.0], size, 2.0),
+            Some((0.0, 1.0))
+        );
+        // Across, the stretch within the margin.
+        let (t0, t1) = on_screen([-1e9, 10.0], [1e9, 10.0], size, 2.0).unwrap();
+        assert!((t0 * 2e9 - 1e9 + 2.0).abs() < 1e-3 && (t1 * 2e9 - 1e9 - 102.0).abs() < 1e-3);
+        // Beside, or off every side, nothing.
+        assert_eq!(on_screen([-10.0, -10.0], [200.0, -5.0], size, 2.0), None);
+        assert_eq!(on_screen([50.0, 60.0], [50.0, 90.0], size, 2.0), None);
     }
 
     #[test]

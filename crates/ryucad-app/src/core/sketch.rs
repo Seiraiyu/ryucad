@@ -134,10 +134,25 @@ impl Drawing {
 /// The pieces of the segment `a`..`b` (`sa`..`sb` on screen) to draw
 /// with dashes of `on` pixels and gaps of `off`, from `phase` into the
 /// pattern; returns them as fractions along it, and moves `phase` on.
-fn dashed(sa: [f64; 2], sb: [f64; 2], on: f64, off: f64, phase: &mut f64) -> Vec<(f64, f64)> {
+/// Only what lies within `margin` of a viewport `size` big is dashed.
+fn dashed(
+    sa: [f64; 2],
+    sb: [f64; 2],
+    [on, off]: [f64; 2],
+    size: [f64; 2],
+    margin: f64,
+    phase: &mut f64,
+) -> Vec<(f64, f64)> {
     let (dx, dy) = (sb[0] - sa[0], sb[1] - sa[1]);
-    let len = (dx * dx + dy * dy).sqrt();
+    let full = (dx * dx + dy * dy).sqrt();
     let mut out = Vec::new();
+    let Some((t0, t1)) = ryucad::sketch_view::on_screen(sa, sb, size, margin) else {
+        *phase = (*phase + full) % (on + off);
+        return out;
+    };
+    // The pattern moves on over what isn't shown, before and after.
+    *phase = (*phase + t0 * full) % (on + off);
+    let len = (t1 - t0) * full;
     let mut s = 0.0;
     while s < len {
         let (drawn, left) = if *phase < on {
@@ -147,11 +162,12 @@ fn dashed(sa: [f64; 2], sb: [f64; 2], on: f64, off: f64, phase: &mut f64) -> Vec
         };
         let step = left.min(len - s);
         if drawn {
-            out.push((s / len, (s + step) / len));
+            out.push((t0 + s / full, t0 + (s + step) / full));
         }
         s += step;
         *phase = (*phase + step) % (on + off);
     }
+    *phase = (*phase + (1.0 - t1) * full) % (on + off);
     out
 }
 
@@ -204,7 +220,7 @@ pub fn overlay<'a>(
                 }
                 let n = [-dy / len, dx / len];
                 let pieces = if c.construction {
-                    dashed(sa, sb, on, off, &mut phase)
+                    dashed(sa, sb, [on, off], size, half + 1.0, &mut phase)
                 } else {
                     vec![(0.0, 1.0)]
                 };
@@ -335,12 +351,24 @@ mod tests {
 
     #[test]
     fn construction_curves_are_dashed() {
-        let mut phase = 0.0;
-        let d = dashed([0.0, 0.0], [25.0, 0.0], 6.0, 4.0, &mut phase);
+        let (size, mut phase) = ([100.0, 100.0], 0.0);
+        let d = dashed([0.0, 0.0], [25.0, 0.0], [6.0, 4.0], size, 1.0, &mut phase);
         assert_eq!(d, [(0.0, 0.24), (0.4, 0.64), (0.8, 1.0)]);
         // The pattern carries on into the next segment.
         assert_eq!(phase, 5.0);
-        let d = dashed([0.0, 0.0], [10.0, 0.0], 6.0, 4.0, &mut phase);
+        let d = dashed([0.0, 0.0], [10.0, 0.0], [6.0, 4.0], size, 1.0, &mut phase);
         assert_eq!(d, [(0.0, 0.1), (0.5, 1.0)]);
+        // A line from just in front of the eye runs far off screen: only
+        // what shows is dashed.
+        let mut phase = 0.0;
+        let d = dashed(
+            [-1e12, 50.0],
+            [1e12, 50.0],
+            [6.0, 4.0],
+            size,
+            1.0,
+            &mut phase,
+        );
+        assert!((10..=12).contains(&d.len()), "{}", d.len());
     }
 }
