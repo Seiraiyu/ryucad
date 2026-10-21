@@ -92,8 +92,8 @@ pub struct EdgeBlend {
 /// Each edge is rounded by a rolling-ball fillet, or bevelled by a
 /// chamfer, where it is convex and filled where it is concave. Edges
 /// meeting tangentially must be blended alike and form chains. At a
-/// vertex a blend ends where a third face cuts it off, runs on into a
-/// tangent blended edge, or meets the blends of the other edges
+/// vertex a blend ends where the other faces there cut it off, runs on
+/// into a tangent blended edge, or meets the blends of the other edges
 /// there: fillets of one size bending one way in a ball, a larger one or
 /// the only one bending its way rolled over by the other two, two of
 /// three edges trimming each other, three chamfers mitred. Refusals are

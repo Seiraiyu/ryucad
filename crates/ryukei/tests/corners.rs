@@ -515,3 +515,113 @@ fn rolled_corners_are_their_stages() {
     near(volume(&out, 1e-5), volume(&s3, 1e-5), 1e-9);
     assert_eq!(out.counts().faces, s3.counts().faces);
 }
+
+/// A square pyramid on `[-1, 1]²` at `z = 0` with its apex at
+/// `(0, 0, 1)`: a block with four slopes cut off. Four edges meet at the
+/// apex.
+fn pyramid() -> Body {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::geom::Vector3;
+    let block = primitive::block(
+        OpKey(1),
+        2.4,
+        2.4,
+        2.0,
+        &Rigid::translation(Vector3::new(-1.2, -1.2, 0.0)),
+    )
+    .unwrap()
+    .0;
+    let cutter = primitive::block(OpKey(2), 4.0, 6.0, 4.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let y = Vector3::new(0.0, 1.0, 0.0).normalize().unwrap();
+    let z = Vector3::new(0.0, 0.0, 1.0).normalize().unwrap();
+    let slope = Rigid::translation(Vector3::new(0.5, 0.0, 0.5))
+        .then_after(&Rigid::rotation(y, PI / 4.0))
+        .then_after(&Rigid::translation(Vector3::new(-2.0, -3.0, 0.0)));
+    let tools: Vec<Tool> = (0..4)
+        .map(|k| Tool {
+            key: ToolKey(k + 1),
+            body: &cutter,
+            place: Rigid::rotation(z, PI / 2.0 * k as f64).then_after(&slope),
+        })
+        .collect();
+    boolean(OpKey(3), BooleanOp::Subtract, &block, &tools)
+        .unwrap()
+        .0
+}
+
+#[test]
+fn an_edge_up_to_a_pyramids_apex() {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::geom::{Frame, Point3, Vector3};
+    let p = pyramid();
+    near(volume(&p, 1e-5), 4.0 / 3.0, 1e-9);
+    let e = lines_where(&p, |a, b| {
+        let (lo, hi) = if a.z < b.z { (a, b) } else { (b, a) };
+        lo.distance(Point3::new(1.0, 1.0, 0.0)) < 1e-9
+            && hi.distance(Point3::new(0.0, 0.0, 1.0)) < 1e-9
+    });
+    assert_eq!(e.len(), 1);
+    let r = 0.1;
+    let (out, _) = blend(K, &p, &[fillet(e[0], r)]).unwrap();
+    assert_eq!(check_intersections(&out), []);
+    // The same by booleans: the pyramid less what lies beyond the plane
+    // through the rails, towards the edge, outside the ball's cylinder.
+    let s2 = 2f64.sqrt();
+    let (na, nb) = (
+        Vector3::new(1.0, 0.0, 1.0) / s2,
+        Vector3::new(0.0, 1.0, 1.0) / s2,
+    );
+    let d = Vector3::new(-1.0, -1.0, 1.0) / 3f64.sqrt();
+    let c0 = Point3::new(1.0 - r * s2, 1.0 - r * s2, 0.0);
+    let on_rail = c0 + na * r;
+    let mut m = d.cross(na - nb);
+    if m.dot(Point3::new(1.0, 1.0, 0.0) - on_rail) < 0.0 {
+        m = -m;
+    }
+    let l = 8.0;
+    let side = primitive::block(
+        OpKey(4),
+        l,
+        l,
+        l,
+        &Rigid::from_frame(&Frame::new(on_rail, m, d).unwrap())
+            .then_after(&Rigid::translation(Vector3::new(-l / 2.0, -l / 2.0, 0.0))),
+    )
+    .unwrap()
+    .0;
+    let ball = primitive::cylinder(
+        OpKey(5),
+        r,
+        l,
+        &Rigid::from_frame(&Frame::new(c0 - d * (l / 2.0), d, na).unwrap()),
+    )
+    .unwrap()
+    .0;
+    let shell = boolean(
+        OpKey(6),
+        BooleanOp::Subtract,
+        &side,
+        &[Tool {
+            key: ToolKey(1),
+            body: &ball,
+            place: Rigid::IDENTITY,
+        }],
+    )
+    .unwrap()
+    .0;
+    let want = boolean(
+        OpKey(7),
+        BooleanOp::Subtract,
+        &p,
+        &[Tool {
+            key: ToolKey(1),
+            body: &shell,
+            place: Rigid::IDENTITY,
+        }],
+    )
+    .unwrap()
+    .0;
+    near(volume(&out, 1e-5), volume(&want, 1e-5), 2e-6);
+}

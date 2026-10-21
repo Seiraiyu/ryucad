@@ -3,11 +3,11 @@
 //! Every vertex of a blended edge is classed by how many edges meet there,
 //! how many are blended, which meet tangentially (see [`super::convex`])
 //! and how they are blended: a closed edge alone at its vertex; an end,
-//! one blended edge cut off by the third face there; two kinds of join,
-//! where two blended edges meet tangentially and the blend runs on from
-//! one into the other; and the corners, where blended edges meet at
-//! angles: a trim of two, a ball, a roll or a mitre of three. Every other
-//! vertex is refused, naming it.
+//! one blended edge cut off by the other faces there (one, or several in
+//! a fan); two kinds of join, where two blended edges meet tangentially
+//! and the blend runs on from one into the other; and the corners, where
+//! blended edges meet at angles: a trim of two, a ball, a roll or a
+//! mitre of three. Every other vertex is refused, naming it.
 //!
 //! Blended edges joined at joins make chains. The new rails of a chain
 //! all go on one face, its rail face: at a smooth join it is the face the
@@ -53,6 +53,61 @@ pub(crate) enum Class {
     /// Three blended edges, chamfers, and no other edge: mitred (see
     /// [`super::mitre`]).
     Mitre,
+    /// One blended edge and three or more others: the blend runs on until
+    /// every other face there cuts it off, in a chain of end curves (see
+    /// [`fan`]).
+    Fan,
+}
+
+/// The faces round `v` from one face of `edge` to the other, not
+/// including them, and the edges between them, starting from the edge
+/// between `from` and the first: the end faces of a blend of `edge`
+/// ending at `v`, and the edges they meet along. `None` where the faces
+/// don't go round the vertex once.
+pub(crate) fn fan_from(
+    body: &Body,
+    edge: EdgeId,
+    v: VertexId,
+    from: FaceId,
+) -> Option<(Vec<FaceId>, Vec<EdgeId>)> {
+    let faces_of = |e: EdgeId| -> Vec<FaceId> {
+        body.edge_fins(e)
+            .map(|f| body.loops[body.fins[f].loop_].face)
+            .collect()
+    };
+    let ends = faces_of(edge);
+    let to = *ends.iter().find(|&&f| f != from)?;
+    let around = body.vertex_edges(v);
+    let (mut face, mut prev) = (from, edge);
+    let (mut faces, mut edges) = (Vec::new(), Vec::new());
+    for _ in 0..around.len() {
+        let next = around
+            .iter()
+            .copied()
+            .filter(|&g| g != prev && faces_of(g).contains(&face))
+            .collect::<Vec<_>>();
+        let [g] = next[..] else {
+            return None;
+        };
+        edges.push(g);
+        let f = faces_of(g);
+        let [a, b] = f[..] else {
+            return None;
+        };
+        face = if a == face { b } else { a };
+        if face == to {
+            return (edges.len() == around.len() - 1).then_some((faces, edges));
+        }
+        faces.push(face);
+        prev = g;
+    }
+    None
+}
+
+/// The end faces round `v` of a blend of `edge`, from its first face.
+fn fan(body: &Body, edge: EdgeId, v: VertexId) -> Option<(Vec<FaceId>, Vec<EdgeId>)> {
+    let fin = body.edge_fins(edge).next()?;
+    fan_from(body, edge, v, body.loops[body.fins[fin].loop_].face)
 }
 
 /// A maximal run of blended edges joined at joins.
@@ -278,6 +333,12 @@ fn classify(
                 Err(BendFail::Uncertain) => Err(BlendError::Uncertain { at }.into()),
                 _ => Err(unsupported()),
             }
+        }
+        (1, n) if n > 3 => {
+            // The blend runs on past the vertex and is cut off by every
+            // other face there, one after another.
+            fan(body, blended[0], v).ok_or_else(unsupported)?;
+            Ok(Class::Fan)
         }
         (2, 3) => {
             // Two blended edges meeting at an angle and a sharp one: the

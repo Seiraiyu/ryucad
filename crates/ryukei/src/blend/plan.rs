@@ -99,6 +99,19 @@ pub(crate) enum Joint {
     Mitre {
         mitre: usize,
     },
+    /// An end at a vertex of more edges: `faces` cut the blend off one
+    /// after another from the rail face round to the other face, along
+    /// `edges` (the rail face's cut, the edges between the end faces, the
+    /// other face's cut). The rails cross the cuts at `crossings`, the
+    /// blend crosses each edge between in `inner` (the edge's parameter,
+    /// the point), and `curves` are the end curves on `faces`, in order.
+    Fan {
+        faces: Vec<FaceId>,
+        edges: Vec<EdgeId>,
+        crossings: [Crossing; 2],
+        inner: Vec<(f64, Point3)>,
+        curves: Vec<EndCurve>,
+    },
 }
 
 /// A chain's geometry.
@@ -215,6 +228,8 @@ pub(crate) fn finish(
     let mut at_corners: Vec<(usize, usize, f64)> = Vec::new();
     let mut at_trims: Vec<(usize, usize)> = Vec::new();
     let mut at_mitres: Vec<(usize, usize)> = Vec::new();
+    type FanAt = (usize, Vec<FaceId>, Vec<EdgeId>, [Crossing; 2]);
+    let mut fans: Vec<FanAt> = Vec::new();
     for (vi, class) in chain.classes.iter().enumerate() {
         match *class {
             Class::End { face, cuts } => {
@@ -333,6 +348,40 @@ pub(crate) fn finish(
                 }
                 at_mitres.push((vi, mi));
             }
+            Class::Fan => {
+                let first = vi == 0;
+                let p = if first { 0 } else { parts.len() - 1 };
+                let spec = &specs[chain.edges[if first { 0 } else { n - 1 }].0];
+                let v = chain.vertices[vi];
+                let at = body.vertices[v].name;
+                let part = &mut parts[p];
+                let (faces, edges) = super::chain::fan_from(body, spec.edge, v, part.faces[0])
+                    .ok_or(BlendError::Unsupported { at })?;
+                let near = body.vertices[v].point;
+                let mut x = Vec::with_capacity(2);
+                for side in 0..2 {
+                    let (face, cut) = if side == 0 {
+                        (faces[0], edges[0])
+                    } else {
+                        (faces[faces.len() - 1], edges[edges.len() - 1])
+                    };
+                    let surface = &body.surfaces[body.faces[face].surface];
+                    let rl = &part.rails[side];
+                    let range = [rl.param(part.span[0]), rl.param(part.span[1])];
+                    let f = part.faces[side];
+                    let c = crossing(body, rl, range, surface, cut, near).map_err(|e| {
+                        end_error(e, spec.name, body.faces[f].name, body.faces[face].name)
+                    })?;
+                    let t = (c.tau - rl.map[0]) / rl.map[1];
+                    if first {
+                        part.start[side] = Some(t);
+                    } else {
+                        part.end[side] = Some(t);
+                    }
+                    x.push(c);
+                }
+                fans.push((vi, faces, edges, [x[0], x[1]]));
+            }
             Class::Closed | Class::Join | Class::Rolled { .. } => {}
         }
     }
@@ -398,6 +447,76 @@ pub(crate) fn finish(
         joints[vi] = Joint::Corner {
             corner: ci,
             section,
+        };
+    }
+    for (vi, faces, edges, crossings) in fans {
+        let (seg, part) = if vi == 0 {
+            (&segments[0], &parts[0])
+        } else {
+            (&segments[segments.len() - 1], &parts[parts.len() - 1])
+        };
+        let v = chain.vertices[vi];
+        let near = body.vertices[v].point;
+        let at = body.vertices[v].name;
+        let uncertain = || -> Error { BlendError::Uncertain { at }.into() };
+        // Where the blend crosses each edge between the end faces.
+        let mut points = vec![crossings[0].point];
+        let mut inner = Vec::new();
+        for &g in &edges[1..edges.len() - 1] {
+            let e = &body.edges[g];
+            let curve = &body.curves[e.curve];
+            let tol = e.tolerance.get().max(crate::tol::LINEAR_RESOLUTION);
+            let hits = match &seg.surface {
+                Surface::Pipe(_) => {
+                    crate::intersect::curve_pipe(curve, e.interval, &seg.surface, tol)
+                }
+                s => crate::intersect::curve_surface(curve, e.interval, s, tol),
+            }
+            .map_err(|_| uncertain())?;
+            let mut best: Option<(f64, f64, Point3)> = None;
+            for h in hits {
+                let crate::intersect::CurveHit::Point { t, point, .. } = h else {
+                    return Err(uncertain());
+                };
+                let d = point.distance(near);
+                if e.interval[0] < t && t < e.interval[1] && best.is_none_or(|b| d < b.0) {
+                    best = Some((d, t, point));
+                }
+            }
+            let (_, t, point) = best.ok_or(BlendError::Overflow {
+                edge: specs[chain.edges[seg.edges[0]].0].name,
+                face: body.faces[faces[0]].name,
+            })?;
+            inner.push((t, point));
+            points.push(point);
+        }
+        points.push(crossings[1].point);
+        let mut curves = Vec::with_capacity(faces.len());
+        for (k, &f) in faces.iter().enumerate() {
+            let end = &body.surfaces[body.faces[f].surface];
+            let c = end_curve(
+                &seg.surface,
+                end,
+                points[k],
+                points[k + 1],
+                near,
+                seg.reach,
+                &|m| on_face(part, m),
+            )
+            .map_err(|e| match e {
+                EndFail::Unsupported => BlendError::Unsupported {
+                    at: body.faces[f].name,
+                },
+                _ => BlendError::Uncertain { at },
+            })?;
+            curves.push(c);
+        }
+        joints[vi] = Joint::Fan {
+            faces,
+            edges,
+            crossings,
+            inner,
+            curves,
         };
     }
     for (vi, ti) in at_trims {

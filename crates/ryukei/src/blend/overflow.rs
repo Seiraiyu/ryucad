@@ -113,7 +113,9 @@ pub(crate) fn check(
             .iter()
             .enumerate()
             .filter_map(|(vi, j)| match j {
-                Joint::End { crossings, .. } => Some((vi, [crossings[0].cut, crossings[1].cut])),
+                Joint::End { crossings, .. } | Joint::Fan { crossings, .. } => {
+                    Some((vi, [crossings[0].cut, crossings[1].cut]))
+                }
                 _ => None,
             })
             .collect();
@@ -158,25 +160,46 @@ pub(crate) fn check(
             }
         }
         for (vi, cuts) in &ends {
-            let Joint::End { face, curve, .. } = &plan.joints[*vi] else {
-                unreachable!("an end")
-            };
             let seg = if *vi == 0 {
                 &plan.segments[0]
             } else {
                 &plan.segments[plan.segments.len() - 1]
             };
-            items.push(Item {
-                face: *face,
-                curve: &curve.curve,
-                interval: curve.interval,
-                pcurve: (&curve.pcurves[1].0, curve.pcurves[1].1),
-                tolerance: curve.tolerance,
-                allowed: cuts.to_vec(),
-                edge: specs[chain.edges[seg.edges[0]].0].name,
-                chain: ci,
-                strip: Vec::new(),
-            });
+            let edge = specs[chain.edges[seg.edges[0]].0].name;
+            match &plan.joints[*vi] {
+                Joint::End { face, curve, .. } => items.push(Item {
+                    face: *face,
+                    curve: &curve.curve,
+                    interval: curve.interval,
+                    pcurve: (&curve.pcurves[1].0, curve.pcurves[1].1),
+                    tolerance: curve.tolerance,
+                    allowed: cuts.to_vec(),
+                    edge,
+                    chain: ci,
+                    strip: Vec::new(),
+                }),
+                Joint::Fan {
+                    faces,
+                    edges,
+                    curves,
+                    ..
+                } => {
+                    for (k, curve) in curves.iter().enumerate() {
+                        items.push(Item {
+                            face: faces[k],
+                            curve: &curve.curve,
+                            interval: curve.interval,
+                            pcurve: (&curve.pcurves[1].0, curve.pcurves[1].1),
+                            tolerance: curve.tolerance,
+                            allowed: vec![edges[k], edges[k + 1]],
+                            edge,
+                            chain: ci,
+                            strip: Vec::new(),
+                        });
+                    }
+                }
+                _ => unreachable!("an end"),
+            }
         }
     }
     for t in trims {

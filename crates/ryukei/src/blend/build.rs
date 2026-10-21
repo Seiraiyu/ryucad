@@ -30,7 +30,8 @@
 //! round the vertex, so that each chain's path just runs to them: a
 //! triangle of sections round a ball corner, a tree of new edges for a
 //! trim or a mitre ([`grow`]). Every blended edge still becomes its rail
-//! on its other face, ending where that rail does.
+//! on its other face, ending where that rail does; a fan of end faces is
+//! joined to the rail face by small faces merged into it.
 
 use super::Near;
 use super::chain::Chain;
@@ -276,7 +277,7 @@ pub(crate) fn build(
     let mut made = Made::default();
     let mut work = Work::default();
     let mut specs = specs.to_vec();
-    // Faces keep their names: corners, trims and chains split and merge
+    // Faces keep their names: corners, trims and ends split and merge
     // them on the way.
     let names: BTreeMap<FaceId, Name> = body.faces().map(|f| (f, body.faces[f].name)).collect();
     // The face each blended edge becomes a rail on: not its chain's rail
@@ -375,6 +376,7 @@ fn chain_build(
     // corner the rail ends where the ball touches the rail face.
     let mut end_edges: Vec<Option<(EdgeId, VertexId)>> = vec![None; chain.vertices.len()];
     let mut path_ends: Vec<Option<VertexId>> = vec![None; chain.vertices.len()];
+    let mut fan_edges: Vec<Vec<(EdgeId, VertexId)>> = vec![Vec::new(); chain.vertices.len()];
     for (vi, joint) in plan.joints.iter().enumerate() {
         if let Joint::Corner { corner, .. } = joint {
             let c = &corners[*corner];
@@ -388,6 +390,20 @@ fn chain_build(
                 .position(|e| e.chain == near.chain && e.first == (vi == 0))
                 .ok_or_else(inconsistent)?;
             path_ends[vi] = Some(near.cut[*trim].stops[i]);
+            continue;
+        }
+        if let Joint::Fan {
+            faces,
+            edges,
+            crossings,
+            inner,
+            ..
+        } = joint
+        {
+            let v = chain.vertices[vi];
+            let (w0, ends) = fan_build(body, keys, made, v, faces, edges, crossings, inner)?;
+            path_ends[vi] = Some(w0);
+            fan_edges[vi] = ends;
             continue;
         }
         if let Joint::Mitre { mitre } = joint {
@@ -524,6 +540,25 @@ fn chain_build(
                 continue;
             }
             Joint::Trim { .. } | Joint::Mitre { .. } => continue,
+            Joint::Fan {
+                faces,
+                edges,
+                crossings,
+                curves,
+                ..
+            } => {
+                let cut = edges[edges.len() - 1];
+                euler::set_point(body, v, crossings[1].point)?;
+                move_end(body, cut, v, crossings[1].at)?;
+                made.modified.insert(EntityId::Edge(cut));
+                let p = if vi == 0 { 0 } else { n - 1 };
+                let strip = face_of(body, fins[p][0]);
+                for (k, &(e, from)) in fan_edges[vi].iter().enumerate() {
+                    put_curve(body, work, e, from, &curves[k], strip)?;
+                    made.ends.push((e, first_seg + segs[0], faces[k], old));
+                    made.modified.insert(EntityId::Face(faces[k]));
+                }
+            }
         }
         made.replaced
             .push((old, segs.iter().map(|s| first_seg + s).collect()));
@@ -1199,6 +1234,84 @@ fn put_curve(
         work.pcurves.push((f, pc.clone(), compose(*m, map)));
     }
     Ok(())
+}
+
+/// The start of an end at a vertex of more edges: splits the rail
+/// face's cut and each edge between the end faces where the blend
+/// crosses them (SEMV), cuts a triangle off each end face but the last
+/// round the vertex (MEF) and merges it into the rail face (KEF), so the
+/// rail face reaches every end face. Returns the vertex where the rail
+/// path ends, and the edges for the end curves, each with the vertex it
+/// starts at; the last runs to the vertex, which then moves along the
+/// other face's cut.
+#[allow(clippy::too_many_arguments)]
+fn fan_build(
+    body: &mut Body,
+    keys: &mut Keys,
+    made: &mut Made,
+    v: VertexId,
+    faces: &[FaceId],
+    edges: &[EdgeId],
+    crossings: &[super::end::Crossing; 2],
+    inner: &[(f64, Point3)],
+) -> Result<(VertexId, Vec<(EdgeId, VertexId)>), Error> {
+    let m = faces.len();
+    // Split near the vertex: the stubs, the far pieces, the new vertices.
+    let mut stubs = Vec::with_capacity(m);
+    let mut far = Vec::with_capacity(m);
+    let mut ws = Vec::with_capacity(m);
+    let cuts: Vec<(EdgeId, f64, Point3)> =
+        core::iter::once((edges[0], crossings[0].at, crossings[0].point))
+            .chain(edges[1..m].iter().zip(inner).map(|(&g, &(t, p))| (g, t, p)))
+            .collect();
+    for (g, t, p) in cuts {
+        let old = made
+            .keep
+            .iter()
+            .find(|(x, _)| *x == EntityId::Edge(g))
+            .map_or(body.edges[g].name, |&(_, n)| n);
+        let starts_here = body.edges[g].start == v;
+        let (s, _) = euler::semv(body, keys.next(), g, t, p)?;
+        let (stub, rest) = if starts_here {
+            (g, s.edge)
+        } else {
+            (s.edge, g)
+        };
+        made.keep.push((EntityId::Edge(rest), old));
+        made.modified.insert(EntityId::Edge(rest));
+        stubs.push(stub);
+        far.push(rest);
+        ws.push(s.vertex);
+    }
+    // A triangle off each end face but the last, merged into the rail
+    // face across the stub before it.
+    let mut ends = Vec::with_capacity(m);
+    for k in 0..m - 1 {
+        let face = faces[k];
+        let old = body.faces[face].name;
+        let keep = body
+            .edge_fins(far[k + 1])
+            .find(|&f| face_of(body, f) == face)
+            .ok_or_else(inconsistent)?;
+        euler::start_loop_at(body, keep)?;
+        let a = starting_in(body, face, ws[k])?;
+        let b = starting_in(body, face, ws[k + 1])?;
+        let (p, q) = (body.vertices[ws[k]].point, body.vertices[ws[k + 1]].point);
+        let c = body.add_curve(Curve::Line(Line::through(p, q)?));
+        let (mf, _) = euler::mef(
+            body,
+            keys.next(),
+            Corner::Before(a),
+            Corner::Before(b),
+            c,
+            [0.0, p.distance(q)],
+        )?;
+        made.keep.push((EntityId::Face(face), old));
+        euler::kef(body, keys.next(), stubs[k])?;
+        ends.push((mf.edge, ws[k]));
+    }
+    ends.push((stubs[m - 1], ws[m - 1]));
+    Ok((ws[0], ends))
 }
 
 /// The segments meeting at chain vertex `vi`: the one before it and the
