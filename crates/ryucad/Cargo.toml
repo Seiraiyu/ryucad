@@ -10,7 +10,7 @@ repository.workspace = true
 blake3 = { version = "1", features = ["pure"] }
 clap = { version = "4", features = ["derive"] }
 # Reads history only: no network, no writes, no C.
-gix = { version = "0.89", default-features = false, features = ["sha1"] }
+gix = { version = "0.89", default-features = false, features = ["sha1", "revision"] }
 interprocess = "2"
 png = "0.18"
 # An 8×8 bitmap font for labels in renders.

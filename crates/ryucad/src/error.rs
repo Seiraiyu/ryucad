@@ -102,6 +102,9 @@ pub enum Code {
     /// An edge a sketch can't project: neither a line nor a circle parallel
     /// to the sketch, or one that projects to nothing.
     ProjectionUnsupported,
+    /// A Git revision (`main`, `HEAD~2`, a hash) the repository doesn't
+    /// have.
+    RevNotFound,
 }
 
 impl Code {
