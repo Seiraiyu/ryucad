@@ -26,10 +26,11 @@
 //! Edges at plain joins, on one rail curve, are joined again (JEKV) where
 //! they run the same way.
 //!
-//! Where chains meet in a ball corner, the triangle of sections round it
-//! is made first, so that each chain's path just runs to it. Every
-//! blended edge still becomes its rail on its other face, ending where
-//! that rail does.
+//! Where chains meet, the edges between their blend faces are made first,
+//! round the vertex, so that each chain's path just runs to them: a
+//! triangle of sections round a ball corner, a tree of new edges for a
+//! trim ([`grow`]). Every blended edge still becomes its rail on its
+//! other face, ending where that rail does.
 
 use super::Near;
 use super::chain::Chain;
@@ -37,8 +38,9 @@ use super::corner::BallCorner;
 use super::end::EndCurve;
 use super::plan::{Joint, Plan, Segment};
 use super::spec::Spec;
+use super::trim::Trim;
 use crate::euler::{self, Corner};
-use crate::geom::{Curve, Curve2, Line, Surface};
+use crate::geom::{Curve, Curve2, Line, Point3, Surface};
 use crate::name::{BlendRole, Name, OpKey, Role};
 use crate::tol::{LINEAR_RESOLUTION, Tolerance};
 use crate::topo::{
@@ -65,6 +67,20 @@ pub(crate) struct Made {
     /// Faces and edges whose geometry or boundary changed.
     pub(crate) modified: BTreeSet<EntityId>,
     pub(crate) corners: Vec<CornerMade>,
+    pub(crate) trims: Vec<TrimMade>,
+}
+
+/// Two blends trimmed against each other.
+#[derive(Clone, Debug)]
+pub(crate) struct TrimMade {
+    /// The name of the vertex the blends took away.
+    pub(crate) vertex: Name,
+    /// The edge where they meet.
+    pub(crate) edge: EdgeId,
+    /// The wide blend's end edge, and the face it ends on.
+    pub(crate) end: Option<(EdgeId, FaceId)>,
+    /// The blended edges, narrow then wide.
+    pub(crate) edges: [Name; 2],
 }
 
 /// One corner face.
@@ -242,13 +258,13 @@ pub(crate) fn build(
     plans: &[Plan],
     near: &Near,
 ) -> Result<Made, Error> {
-    let corners = near.corners;
+    let (corners, trims) = (near.corners, near.trims);
     let mut keys = Keys { base: key, n: 0 };
     let mut made = Made::default();
     let mut work = Work::default();
     let mut specs = specs.to_vec();
-    // Faces keep their names: corners and chains split and merge them on
-    // the way.
+    // Faces keep their names: corners, trims and chains split and merge
+    // them on the way.
     let names: BTreeMap<FaceId, Name> = body.faces().map(|f| (f, body.faces[f].name)).collect();
     // The face each blended edge becomes a rail on: not its chain's rail
     // face.
@@ -266,14 +282,26 @@ pub(crate) fn build(
         )?);
         work.blend_faces.insert(built.last().expect("built").face);
     }
-    for (chain, plan) in chains.iter().zip(plans) {
+    let mut cut: Vec<TrimBuilt> = Vec::with_capacity(trims.len());
+    for t in trims {
+        cut.push(trim_build(
+            body, &mut keys, &mut specs, &other, t, &mut made,
+        )?);
+    }
+    for (ci, (chain, plan)) in chains.iter().zip(plans).enumerate() {
         let ready = Ready {
             corners: &built,
+            trims,
+            cut: &cut,
+            chain: ci,
             names: &names,
         };
         chain_build(
             body, &mut keys, &specs, chain, plan, &ready, &mut made, &mut work,
         )?;
+    }
+    for (t, c) in trims.iter().zip(&cut) {
+        trim_finish(body, &specs, &other, t, c, &mut made, &mut work)?;
     }
     finish(body, &work)?;
     for (&f, &n) in &names {
@@ -329,6 +357,15 @@ fn chain_build(
         if let Joint::Corner { corner, .. } = joint {
             let c = &corners[*corner];
             path_ends[vi] = Some(c.points[&chain.rail_face]);
+            continue;
+        }
+        if let Joint::Trim { trim } = joint {
+            let i = near.trims[*trim]
+                .ends
+                .iter()
+                .position(|e| e.chain == near.chain && e.first == (vi == 0))
+                .ok_or_else(inconsistent)?;
+            path_ends[vi] = Some(near.cut[*trim].stops[i]);
             continue;
         }
         let Joint::End { crossings, .. } = joint else {
@@ -455,6 +492,7 @@ fn chain_build(
                 euler::set_curve(body, edge, id, interval)?;
                 continue;
             }
+            Joint::Trim { .. } => continue,
         }
         made.replaced
             .push((old, segs.iter().map(|s| first_seg + s).collect()));
@@ -713,11 +751,320 @@ fn ring(body: &Body, from: FinId, to: FinId) -> Vec<FinId> {
     out
 }
 
-/// What a chain needs of the corners built before it.
+/// What a chain needs of the corners and trims built before it.
 struct Ready<'a> {
     corners: &'a [CornerBuilt],
+    trims: &'a [Trim],
+    cut: &'a [TrimBuilt],
+    /// The chain's index.
+    chain: usize,
     /// The faces' names before the blend.
     names: &'a BTreeMap<FaceId, Name>,
+}
+
+/// A tree of new edges to grow round a vertex: where its vertices go,
+/// its edges (their ends, and the faces either side of each), and the
+/// vertex's edges, each with the tree vertex it must end at and, for an
+/// edge that keeps its curve, its parameter there.
+struct Tree {
+    points: Vec<Point3>,
+    edges: Vec<([usize; 2], [FaceId; 2])>,
+    attach: Vec<(EdgeId, usize, Option<f64>)>,
+}
+
+/// What [`grow`] made: the tree's vertices and edges, and each of the
+/// vertex's edges as it now is (its long piece, after splits).
+struct Grown {
+    vertices: Vec<VertexId>,
+    edges: Vec<EdgeId>,
+    moved: Vec<EdgeId>,
+}
+
+/// Grows `tree` round `v`. Each tree edge lies between the faces of one
+/// of the vertex's edges, and is a piece split off it near the vertex
+/// (SEMV), or lies inside one face, a spur (MEV). The vertex itself
+/// becomes the tree vertex from which every edge's pieces run in one
+/// line to where it must end.
+fn grow(body: &mut Body, keys: &mut Keys, v: VertexId, tree: &Tree) -> Result<Grown, Error> {
+    let faces = |body: &Body, e: EdgeId| -> BTreeSet<FaceId> {
+        body.edge_fins(e).map(|f| face_of(body, f)).collect()
+    };
+    // Each tree edge's source: the attached edge it is split from, or a
+    // spur in one face.
+    let mut source: Vec<Result<usize, FaceId>> = Vec::with_capacity(tree.edges.len());
+    for &(_, [a, b]) in &tree.edges {
+        if a == b {
+            source.push(Err(a));
+            continue;
+        }
+        let set: BTreeSet<FaceId> = [a, b].into();
+        let i = tree
+            .attach
+            .iter()
+            .position(|&(e, _, _)| faces(body, e) == set)
+            .ok_or_else(inconsistent)?;
+        source.push(Ok(i));
+    }
+    let n = tree.points.len();
+    // The tree edges from `r` to `a`, in order, and the vertices passed.
+    let path = |r: usize, a: usize| -> (Vec<usize>, Vec<usize>) {
+        let mut parent: Vec<Option<(usize, usize)>> = vec![None; n];
+        let mut seen = vec![false; n];
+        let mut queue = std::collections::VecDeque::from([r]);
+        seen[r] = true;
+        while let Some(u) = queue.pop_front() {
+            for (j, &([x, y], _)) in tree.edges.iter().enumerate() {
+                let w = if x == u {
+                    y
+                } else if y == u {
+                    x
+                } else {
+                    continue;
+                };
+                if !seen[w] {
+                    seen[w] = true;
+                    parent[w] = Some((u, j));
+                    queue.push_back(w);
+                }
+            }
+        }
+        let (mut edges, mut verts) = (Vec::new(), vec![a]);
+        let mut u = a;
+        while let Some((p, j)) = parent[u] {
+            edges.push(j);
+            verts.push(p);
+            u = p;
+        }
+        edges.reverse();
+        verts.reverse();
+        (edges, verts)
+    };
+    let fits = |r: usize| {
+        tree.attach.iter().enumerate().all(|(i, &(_, a, _))| {
+            let (p, _) = path(r, a);
+            p.iter().all(|&j| source[j] == Ok(i))
+                && (0..tree.edges.len())
+                    .filter(|&j| source[j] == Ok(i))
+                    .all(|j| p.contains(&j))
+        })
+    };
+    let root = (0..n).find(|&r| fits(r)).ok_or_else(inconsistent)?;
+    let mut ids: Vec<Option<VertexId>> = vec![None; n];
+    ids[root] = Some(v);
+    let mut edge_ids: Vec<Option<EdgeId>> = vec![None; tree.edges.len()];
+    let mut moved = Vec::with_capacity(tree.attach.len());
+    for &(e, a, param) in &tree.attach {
+        let (edges, verts) = path(root, a);
+        let ed = &body.edges[e];
+        let at_start = ed.start == v;
+        let [t0, t1] = ed.interval;
+        let (tv, tfar) = if at_start { (t0, t1) } else { (t1, t0) };
+        if edges.is_empty() {
+            if let Some(t) = param {
+                move_end(body, e, v, t)?;
+            }
+            moved.push(e);
+            continue;
+        }
+        let tf = param.unwrap_or(tv + (tfar - tv) * 1e-3);
+        let k = edges.len();
+        let (mut cur, mut prev) = (e, v);
+        for (step, &j) in edges.iter().enumerate() {
+            let u = verts[step + 1];
+            let t = tv + (tf - tv) * (step + 1) as f64 / k as f64;
+            let near_start = body.edges[cur].start == prev;
+            let (sp, _) = euler::semv(body, keys.next(), cur, t, tree.points[u])?;
+            let (stub, rest) = if near_start {
+                (cur, sp.edge)
+            } else {
+                (sp.edge, cur)
+            };
+            edge_ids[j] = Some(stub);
+            ids[u] = Some(sp.vertex);
+            (cur, prev) = (rest, sp.vertex);
+        }
+        moved.push(cur);
+    }
+    // Spurs, out from the root.
+    let mut order: Vec<usize> = (0..tree.edges.len()).collect();
+    order.sort_by_key(|&j| {
+        let [x, y] = tree.edges[j].0;
+        path(root, x).0.len().min(path(root, y).0.len())
+    });
+    for j in order {
+        let Err(face) = source[j] else {
+            continue;
+        };
+        let [x, y] = tree.edges[j].0;
+        let (from, to) = if ids[x].is_some() { (x, y) } else { (y, x) };
+        let fv = ids[from].ok_or_else(inconsistent)?;
+        let at = starting_in(body, face, fv)?;
+        let (p, q) = (tree.points[from], tree.points[to]);
+        let c = body.add_curve(Curve::Line(Line::through(p, q)?));
+        let (m, _) = euler::mev(
+            body,
+            keys.next(),
+            Corner::Before(at),
+            q,
+            c,
+            [0.0, p.distance(q)],
+        )?;
+        ids[to] = Some(m.vertex);
+        edge_ids[j] = Some(m.edge);
+    }
+    euler::set_point(body, v, tree.points[root])?;
+    Ok(Grown {
+        vertices: ids
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(inconsistent)?,
+        edges: edge_ids
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(inconsistent)?,
+        moved,
+    })
+}
+
+/// A spec's edge moved to its long piece: its fins there.
+fn remap(body: &Body, spec: &mut Spec, edge: EdgeId) -> Result<(), Error> {
+    if spec.edge == edge {
+        return Ok(());
+    }
+    spec.edge = edge;
+    spec.fins = [
+        fin_with(body, edge, Sense::Forward)?,
+        fin_with(body, edge, Sense::Reversed)?,
+    ];
+    Ok(())
+}
+
+/// What a trim's construction left for its chains.
+struct TrimBuilt {
+    /// The trim curve's ends, and the end curve's far end.
+    vertices: Vec<VertexId>,
+    /// The trim curve's edge, and the end curve's.
+    edges: Vec<EdgeId>,
+    /// Where each blend's path on its rail face ends: narrow, wide.
+    stops: [VertexId; 2],
+    /// The name of the vertex the blends take away.
+    name: Name,
+}
+
+/// Builds the edges where two blends will meet before their chains: the
+/// trim curve between them and the wide blend's end curve, as a tree
+/// round the vertex (see [`grow`]); each blended edge ends where its
+/// blend's rail on its other face does, the sharp edge where it is now
+/// cut off.
+fn trim_build(
+    body: &mut Body,
+    keys: &mut Keys,
+    specs: &mut [Spec],
+    other: &BTreeMap<usize, FaceId>,
+    t: &Trim,
+    made: &mut Made,
+) -> Result<TrimBuilt, Error> {
+    let [n, w] = &t.ends;
+    let rail = |k: usize| -> FaceId {
+        let f = specs[k].faces;
+        if f[0] == other[&k] { f[1] } else { f[0] }
+    };
+    let (rn, rw) = (rail(n.spec), rail(w.spec));
+    let mut points = vec![t.q, t.p];
+    let mut edges = vec![([0, 1], [rn, rw])];
+    if let Some((_, g)) = &t.end {
+        points.push(*g);
+        edges.push(([1, 2], [rw, n.face]));
+    }
+    let last = points.len() - 1;
+    let at = |k: usize, far: usize| if other[&k] == t.shared { 0 } else { far };
+    let tree = Tree {
+        points,
+        edges,
+        attach: vec![
+            (specs[n.spec].edge, at(n.spec, 1), None),
+            (specs[w.spec].edge, at(w.spec, last), None),
+            (t.sharp, last, Some(t.at)),
+        ],
+    };
+    let sharp_name = body.edges[t.sharp].name;
+    let name = body.vertices[t.vertex].name;
+    let g = grow(body, keys, t.vertex, &tree)?;
+    remap(body, &mut specs[n.spec], g.moved[0])?;
+    remap(body, &mut specs[w.spec], g.moved[1])?;
+    made.keep.push((EntityId::Edge(g.moved[2]), sharp_name));
+    made.modified.insert(EntityId::Edge(g.moved[2]));
+    let stop = |r: FaceId, far: usize| g.vertices[if r == t.shared { 0 } else { far }];
+    Ok(TrimBuilt {
+        stops: [stop(rn, 1), stop(rw, last)],
+        name,
+        vertices: g.vertices,
+        edges: g.edges,
+    })
+}
+
+/// Puts a trim's curves on its edges once both chains are built: the
+/// trim curve between the two blend faces, the end curve between the wide
+/// one and the narrow one's other face.
+fn trim_finish(
+    body: &mut Body,
+    specs: &[Spec],
+    other: &BTreeMap<usize, FaceId>,
+    t: &Trim,
+    c: &TrimBuilt,
+    made: &mut Made,
+    work: &mut Work,
+) -> Result<(), Error> {
+    let [n, w] = &t.ends;
+    let (fn_, fw) = (
+        blend_face(body, specs, other, n.spec),
+        blend_face(body, specs, other, w.spec),
+    );
+    put_curve(body, work, c.edges[0], c.vertices[0], &t.curve, fn_)?;
+    let mut end = None;
+    if let Some((e, _)) = &t.end {
+        put_curve(body, work, c.edges[1], c.vertices[1], e, fw)?;
+        end = Some((c.edges[1], n.face));
+        made.modified.insert(EntityId::Face(n.face));
+    }
+    work.vertices.extend(c.vertices.iter().copied());
+    made.trims.push(TrimMade {
+        vertex: c.name,
+        edge: c.edges[0],
+        end,
+        edges: [specs[n.spec].name, specs[w.spec].name],
+    });
+    Ok(())
+}
+
+/// A blend face: where its blended edge's fin on its rail face went.
+fn blend_face(body: &Body, specs: &[Spec], other: &BTreeMap<usize, FaceId>, k: usize) -> FaceId {
+    let side = usize::from(specs[k].faces[0] == other[&k]);
+    face_of(body, specs[k].fins[side])
+}
+
+/// Puts `curve` on `edge`, run from `from`, with its pcurves: its first
+/// on the fin on face `first`, its second on the other.
+fn put_curve(
+    body: &mut Body,
+    work: &mut Work,
+    edge: EdgeId,
+    from: VertexId,
+    curve: &EndCurve,
+    first: FaceId,
+) -> Result<(), Error> {
+    let along = body.edges[edge].start == from;
+    let (cv, interval, map) = oriented(&curve.curve, curve.interval, along);
+    let id = body.add_curve(cv);
+    euler::set_curve(body, edge, id, interval)?;
+    work.tolerances.insert(edge, curve.tolerance);
+    let fins: Vec<FinId> = body.edge_fins(edge).collect();
+    for f in fins {
+        let k = usize::from(face_of(body, f) != first);
+        let (pc, m) = &curve.pcurves[k];
+        work.pcurves.push((f, pc.clone(), compose(*m, map)));
+    }
+    Ok(())
 }
 
 /// The segments meeting at chain vertex `vi`: the one before it and the

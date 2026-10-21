@@ -97,8 +97,10 @@ pub(crate) fn check(
     plans: &[Plan],
     near: &Near,
 ) -> Result<(), Error> {
+    let trims = near.trims;
     // Where curves of different chains may meet, end to end.
-    let feet: Vec<Point3> = near.corners.iter().flat_map(|c| c.feet).collect();
+    let mut feet: Vec<Point3> = near.corners.iter().flat_map(|c| c.feet).collect();
+    feet.extend(trims.iter().flat_map(|t| [t.q, t.p, t.g()]));
     let mut items: Vec<Item> = Vec::new();
     let mut blended: BTreeSet<EdgeId> = BTreeSet::new();
     for (ci, (chain, plan)) in chains.iter().zip(plans).enumerate() {
@@ -122,10 +124,17 @@ pub(crate) fn check(
                 _ => None,
             })
             .collect();
+        // A trimmed blend's rails may end on the sharp edge there.
+        let sharp: Vec<EdgeId> = trims
+            .iter()
+            .filter(|t| t.ends.iter().any(|e| e.chain == ci))
+            .map(|t| t.sharp)
+            .collect();
         for seg in &plan.segments {
             let edge = specs[chain.edges[seg.edges[0]].0].name;
             for side in 0..2 {
                 let mut allowed: Vec<EdgeId> = ends.iter().map(|(_, c)| c[side]).collect();
+                allowed.extend(&sharp);
                 if side == 1 {
                     allowed.extend(&smooth);
                 }
@@ -165,6 +174,22 @@ pub(crate) fn check(
                 allowed: cuts.to_vec(),
                 edge: specs[chain.edges[seg.edges[0]].0].name,
                 chain: ci,
+                strip: Vec::new(),
+            });
+        }
+    }
+    for t in trims {
+        if let Some((e, _)) = &t.end {
+            let wide = &t.ends[1];
+            items.push(Item {
+                face: t.ends[0].face,
+                curve: &e.curve,
+                interval: e.interval,
+                pcurve: (&e.pcurves[1].0, e.pcurves[1].1),
+                tolerance: e.tolerance,
+                allowed: vec![t.sharp],
+                edge: specs[wide.spec].name,
+                chain: wide.chain,
                 strip: Vec::new(),
             });
         }

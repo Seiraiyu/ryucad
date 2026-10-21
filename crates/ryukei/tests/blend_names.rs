@@ -305,3 +305,50 @@ fn a_ball_corner_replaces_its_vertex() {
     let (s, _) = blend(K, &b, &edges.map(|e| fillet(e, 0.25))).unwrap();
     assert_eq!(names(&r), names(&s));
 }
+
+fn chamfer(edge: Name, distance: f64) -> EdgeBlend {
+    EdgeBlend {
+        edge,
+        kind: BlendKind::Chamfer(ryukei::blend::Chamfer::Equal { distance }),
+    }
+}
+
+#[test]
+fn corners_account_for_every_name() {
+    use FaceRole::*;
+    let k = OpKey(1);
+    let b = primitive::block(k, 1.0, 1.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let [e1, e2] = [edge(k, PlusY, PlusZ), edge(k, PlusX, PlusY)];
+    let v = vertex(k, PlusX, PlusY, PlusZ);
+    let cases: Vec<(Vec<EdgeBlend>, Vec<EdgeBlend>)> = vec![
+        // Trims, equal and not: the same sizes' order keeps the names.
+        (
+            vec![fillet(e1, 0.2), fillet(e2, 0.2)],
+            vec![fillet(e1, 0.25), fillet(e2, 0.25)],
+        ),
+        (
+            vec![fillet(e1, 0.15), fillet(e2, 0.3)],
+            vec![fillet(e1, 0.1), fillet(e2, 0.2)],
+        ),
+        (
+            vec![fillet(e1, 0.15), chamfer(e2, 0.3)],
+            vec![fillet(e1, 0.1), chamfer(e2, 0.2)],
+        ),
+    ];
+    for (one, other) in cases {
+        let (r, j) = blend(K, &b, &one).unwrap();
+        let replaced = accounts(&b, &r, &j);
+        // The vertex went to the faces of the blends there.
+        let mut want: Vec<Name> = one
+            .iter()
+            .map(|x| Name::derive(K, Role::Blend(BlendRole::Face), &[x.edge]))
+            .collect();
+        want.sort();
+        let got = &replaced[&v];
+        assert_eq!(got, &want);
+        let (s, _) = blend(K, &b, &other).unwrap();
+        assert_eq!(names(&r), names(&s));
+    }
+}

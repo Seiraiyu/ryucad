@@ -10,11 +10,11 @@
 //! from the faces' offsets ([`spine`]), rails ([`rail`]) and the surfaces
 //! the balls sweep ([`fillet`]); for chamfers, rails set back along the
 //! faces and the planes, cones or ruled surfaces between them
-//! ([`chamfer`]); and where the blends end ([`end`]) or meet in a ball
-//! ([`corner`]). Every new curve is checked to stay on its face
-//! ([`overflow`]). Only then is a copy of the body rebuilt through Euler
-//! operators ([`build`]) and its new entities named from the blend's key
-//! and the names around them ([`names`]).
+//! ([`chamfer`]); and where the blends end ([`end`]), meet in a ball
+//! ([`corner`]) or trim each other ([`trim`]). Every new curve is checked
+//! to stay on its face ([`overflow`]). Only then is a copy of the body
+//! rebuilt through Euler operators ([`build`]) and its new entities named
+//! from the blend's key and the names around them ([`names`]).
 //!
 //! Only faces on the analytic surfaces (planes, cylinders, cones, spheres
 //! and tori) and on earlier fillets' pipes may be blended; the rest is
@@ -34,6 +34,7 @@ mod rail;
 mod seam;
 mod spec;
 mod spine;
+mod trim;
 
 use crate::name::{Journal, Name, OpKey};
 use crate::topo::{Body, EdgeId};
@@ -90,9 +91,10 @@ pub struct EdgeBlend {
 /// meeting tangentially must be blended alike and form chains. At a
 /// vertex a blend ends where a third face cuts it off, runs on into a
 /// tangent blended edge (alone, or beside a smooth edge between their
-/// other faces), or meets two more fillets of its size bending its way in
-/// a ball. Refusals are [`Error::InvalidBlend`], before anything is
-/// changed.
+/// other faces), or meets the blends of the other edges there: of one
+/// more, bending its way, trimming each other, or of two more fillets of
+/// its size bending its way in a ball. Refusals are
+/// [`Error::InvalidBlend`], before anything is changed.
 ///
 /// The input must pass [`crate::check::check`] (debug builds assert it).
 pub fn blend(key: OpKey, body: &Body, blends: &[EdgeBlend]) -> Result<(Body, Journal), Error> {
@@ -102,11 +104,22 @@ pub fn blend(key: OpKey, body: &Body, blends: &[EdgeBlend]) -> Result<(Body, Jou
     }
     let specs = spec::resolve(body, blends)?;
     let chains = chain::chains(body, &specs)?;
+    let partials: Vec<Result<Vec<plan::Partial>, Error>> = chains
+        .par_iter()
+        .map(|c| plan::partials(body, &specs, c))
+        .collect();
+    let partials = partials.into_iter().collect::<Result<Vec<_>, _>>()?;
     let corners = corner::corners(body, &specs, &chains)?;
-    let near = Near { corners: &corners };
+    let trims = trim::trims(body, &specs, &chains, &partials)?;
+    let near = Near {
+        corners: &corners,
+        trims: &trims,
+    };
     let plans: Vec<Result<plan::Plan, Error>> = chains
         .par_iter()
-        .map(|c| plan::plan(body, &specs, c, &near))
+        .zip(partials)
+        .enumerate()
+        .map(|(ci, (c, parts))| plan::finish(body, &specs, c, ci, parts, &near))
         .collect();
     let plans = plans.into_iter().collect::<Result<Vec<_>, _>>()?;
     overflow::check(body, &specs, &chains, &plans, &near)?;
@@ -122,9 +135,10 @@ pub fn blend(key: OpKey, body: &Body, blends: &[EdgeBlend]) -> Result<(Body, Jou
     Ok((out, journal))
 }
 
-/// The places where chains meet: ball corners.
+/// The places where chains meet: ball corners and trims.
 pub(crate) struct Near<'a> {
     pub(crate) corners: &'a [corner::BallCorner],
+    pub(crate) trims: &'a [trim::Trim],
 }
 
 /// The edges reachable from `edge` through vertices where an edge meets

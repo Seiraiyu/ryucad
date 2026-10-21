@@ -113,6 +113,29 @@ pub(crate) fn name(body: &mut Body, key: OpKey, made: &Made) -> Journal {
         body.rename(EntityId::Edge(e), n);
         created.insert(n);
     }
+    // Trims: the edge where two blends meet is a section between them,
+    // the wide one's end curve an end.
+    for t in &made.trims {
+        let mut parents = t.edges.map(|e| faces[segment_of(e)]);
+        parents.sort();
+        let n = body.derive_name("blend", key, role(BlendRole::Section), &parents);
+        body.rename(EntityId::Edge(t.edge), n);
+        created.insert(n);
+        if let Some((e, face)) = t.end {
+            let n = body.derive_name(
+                "blend",
+                key,
+                role(BlendRole::End),
+                &[
+                    faces[segment_of(t.edges[1])],
+                    body.faces[face].name,
+                    t.vertex,
+                ],
+            );
+            body.rename(EntityId::Edge(e), n);
+            created.insert(n);
+        }
+    }
     for &(e, [a, b]) in &made.sections {
         let mut parents = [faces[a], faces[b]];
         parents.sort();
@@ -154,6 +177,10 @@ pub(crate) fn name(body: &mut Body, key: OpKey, made: &Made) -> Journal {
     for (old, segs) in &made.replaced {
         let entry = replaced.entry(*old).or_default();
         entry.extend(segs.iter().map(|&k| faces[k]));
+    }
+    for t in &made.trims {
+        let entry = replaced.entry(t.vertex).or_default();
+        entry.extend(t.edges.map(|e| faces[segment_of(e)]));
     }
     for (c, &cf) in made.corners.iter().zip(&corner_faces) {
         let entry = replaced.entry(c.vertex).or_default();

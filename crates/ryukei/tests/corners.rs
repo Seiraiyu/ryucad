@@ -211,3 +211,114 @@ fn a_cavitys_edges_meet_in_concave_balls() {
         2e-5,
     );
 }
+
+/// The area of the corner a fillet of radius `r` takes from a square
+/// edge, and how far its centroid is from the edge along each face.
+fn wedge(r: f64) -> (f64, f64) {
+    (
+        (1.0 - PI / 4.0) * r * r,
+        r * (10.0 - 3.0 * PI) / (12.0 - 3.0 * PI),
+    )
+}
+
+/// How deep a blend of `size` cuts into a unit cube's edge at `u` from
+/// one face, along the other: a fillet's arc or a chamfer's line.
+fn depth(fillet: bool, size: f64, u: f64) -> f64 {
+    let u = u - (1.0 - size);
+    if u <= 0.0 {
+        0.0
+    } else if fillet {
+        size - (size * size - u * u).max(0.0).sqrt()
+    } else {
+        u
+    }
+}
+
+/// The volume blends of sizes `a` and `b` on edges of a unit cube meeting
+/// at a corner (sharing a face) take away together: each one's wedge,
+/// less what both take, by Simpson's rule over the shared face's depth.
+fn two_wedges(a: (bool, f64), b: (bool, f64)) -> f64 {
+    let area = |(f, r): (bool, f64)| if f { wedge(r).0 } else { r * r / 2.0 };
+    let lo = 1.0 - a.1.min(b.1);
+    let n = 200_000;
+    let h = (1.0 - lo) / n as f64;
+    let g = |y: f64| depth(a.0, a.1, y) * depth(b.0, b.1, y);
+    let mut sum = g(lo) + g(1.0);
+    for i in 1..n {
+        let y = lo + h * i as f64;
+        sum += g(y) * if i % 2 == 1 { 4.0 } else { 2.0 };
+    }
+    area(a) + area(b) - sum * h / 3.0
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn two_fillets_at_a_corner_trim_each_other() {
+    let k = OpKey(1);
+    let bx = primitive::block(k, 1.0, 1.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    for (a, b) in [(0.2, 0.2), (0.15, 0.3), (0.3, 0.15)] {
+        let (out, _) = blend(
+            K,
+            &bx,
+            &[
+                fillet(edge(k, FaceRole::PlusY, FaceRole::PlusZ), a),
+                fillet(edge(k, FaceRole::PlusX, FaceRole::PlusY), b),
+            ],
+        )
+        .unwrap();
+        assert_eq!(check_intersections(&out), []);
+        if a == b {
+            near(
+                two_wedges((true, a), (true, b)),
+                2.0 * (1.0 - PI / 4.0) * a * a - (5.0 / 3.0 - PI / 2.0) * (a * a * a),
+                1e-9,
+            );
+        }
+        near(
+            volume(&out, 1e-5),
+            1.0 - two_wedges((true, a), (true, b)),
+            2e-5,
+        );
+    }
+}
+
+fn chamfer(edge: Name, distance: f64) -> EdgeBlend {
+    EdgeBlend {
+        edge,
+        kind: BlendKind::Chamfer(ryukei::blend::Chamfer::Equal { distance }),
+    }
+}
+
+#[test]
+fn a_fillet_and_a_chamfer_trim_each_other() {
+    use FaceRole::*;
+    let k = OpKey(1);
+    let bx = primitive::block(k, 1.0, 1.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    for (a, b) in [(0.2, 0.2), (0.1, 0.25), (0.25, 0.1)] {
+        let (out, _) = blend(
+            K,
+            &bx,
+            &[
+                fillet(edge(k, PlusY, PlusZ), a),
+                chamfer(edge(k, PlusX, PlusY), b),
+            ],
+        )
+        .unwrap();
+        assert_eq!(check_intersections(&out), []);
+        for f in out.faces() {
+            assert_eq!(out.face_loops(f).count(), 1);
+        }
+        near(
+            volume(&out, 1e-5),
+            1.0 - two_wedges((true, a), (false, b)),
+            2e-5,
+        );
+    }
+}

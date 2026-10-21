@@ -8,7 +8,11 @@
 //! or a whole period round a closed chain. At a plain join the other
 //! face's rail is cut where the ball passes the vertex. At a smooth join
 //! the two segments' spines meet where the ball touches the smooth edge,
-//! and the section of the ball there separates their faces.
+//! and the section of the ball there separates their faces. At a corner
+//! or a trim the rails end where the geometry made for it says,
+//! which needs every chain's carriers first: so the plan is made in two
+//! passes, the carriers and rails ([`partials`]) and then the ends
+//! ([`finish`]).
 
 use super::Near;
 use super::chain::{Chain, Class};
@@ -85,6 +89,11 @@ pub(crate) enum Joint {
         corner: usize,
         section: Section,
     },
+    /// Where the chain's blend is trimmed by another's, `trim` in the list
+    /// of trims.
+    Trim {
+        trim: usize,
+    },
 }
 
 /// A chain's geometry.
@@ -155,10 +164,9 @@ pub(crate) struct SmoothAt {
     pub(crate) section: Section,
 }
 
-/// The plan of a chain, its edges all fillets of one radius or all
-/// chamfers alike.
-pub(crate) fn plan(body: &Body, specs: &[Spec], chain: &Chain, near: &Near) -> Result<Plan, Error> {
-    let corners = near.corners;
+/// The carriers and rails of a chain's segments, before their ends are
+/// known: a fillet's spine, or a chamfer's carrier, per segment.
+pub(crate) fn partials(body: &Body, specs: &[Spec], chain: &Chain) -> Result<Vec<Partial>, Error> {
     let kind = specs[chain.edges[0].0].kind;
     let (starts, closed) = boundaries(chain);
     let n = chain.edges.len();
@@ -180,9 +188,27 @@ pub(crate) fn plan(body: &Body, specs: &[Spec], chain: &Chain, near: &Near) -> R
             BlendKind::Chamfer(c) => chamfer::partial(body, specs, chain, edges, &c, closed)?,
         });
     }
+    Ok(parts)
+}
+
+/// The plan of chain `ci`, its edges all fillets of one radius or all
+/// chamfers alike, from its partial segments, once the corners and trims
+/// round it are known.
+pub(crate) fn finish(
+    body: &Body,
+    specs: &[Spec],
+    chain: &Chain,
+    ci: usize,
+    mut parts: Vec<Partial>,
+    near: &Near,
+) -> Result<Plan, Error> {
+    let (corners, trims) = (near.corners, near.trims);
+    let kind = specs[chain.edges[0].0].kind;
+    let n = chain.edges.len();
     let mut ends: Vec<EndAt> = Vec::new();
     let mut smooths: Vec<SmoothAt> = Vec::new();
     let mut at_corners: Vec<(usize, usize, f64)> = Vec::new();
+    let mut at_trims: Vec<(usize, usize)> = Vec::new();
     for (vi, class) in chain.classes.iter().enumerate() {
         match *class {
             Class::End { face, cuts } => {
@@ -251,6 +277,31 @@ pub(crate) fn plan(body: &Body, specs: &[Spec], chain: &Chain, near: &Near) -> R
                 }
                 at_corners.push((vi, ci, t));
             }
+            Class::Trim => {
+                let first = vi == 0;
+                let p = if first { 0 } else { parts.len() - 1 };
+                let (ti, end) = trims
+                    .iter()
+                    .enumerate()
+                    .find_map(|(ti, t)| {
+                        t.ends
+                            .iter()
+                            .find(|e| e.chain == ci && e.first == first)
+                            .filter(|_| t.vertex == chain.vertices[vi])
+                            .map(|e| (ti, e))
+                    })
+                    .expect("a trim at a trim vertex");
+                let part = &mut parts[p];
+                for side in 0..2 {
+                    let t = end.ends[usize::from(part.faces[side] != trims[ti].shared)];
+                    if first {
+                        part.start[side] = Some(t);
+                    } else {
+                        part.end[side] = Some(t);
+                    }
+                }
+                at_trims.push((vi, ti));
+            }
             Class::Closed | Class::Join => {}
         }
     }
@@ -317,6 +368,9 @@ pub(crate) fn plan(body: &Body, specs: &[Spec], chain: &Chain, near: &Near) -> R
             corner: ci,
             section,
         };
+    }
+    for (vi, ti) in at_trims {
+        joints[vi] = Joint::Trim { trim: ti };
     }
     for s in smooths {
         joints[s.vertex] = Joint::SmoothJoin {
@@ -443,7 +497,7 @@ fn segment(body: &Body, specs: &[Spec], chain: &Chain, part: &Partial) -> Result
 }
 
 /// A fillet's surface over the spine's parameters `range`.
-fn fillet_face(
+pub(crate) fn fillet_face(
     body: &Body,
     part: &Partial,
     spine: &Spine,
@@ -646,10 +700,16 @@ mod tests {
             })
             .collect();
         let specs = resolve(b, &blends)?;
-        let near = Near { corners: &[] };
         chains(b, &specs)?
             .iter()
-            .map(|c| plan(b, &specs, c, &near))
+            .enumerate()
+            .map(|(ci, c)| {
+                let near = Near {
+                    corners: &[],
+                    trims: &[],
+                };
+                finish(b, &specs, c, ci, partials(b, &specs, c)?, &near)
+            })
             .collect()
     }
 

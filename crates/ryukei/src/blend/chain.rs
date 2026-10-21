@@ -1,12 +1,13 @@
 //! Chains of blended edges and the vertices between them.
 //!
 //! Every vertex of a blended edge is classed by how many edges meet there,
-//! how many are blended, and which meet tangentially (see
-//! [`super::convex`]). Phase 6.B builds four classes: a closed edge alone
-//! at its vertex, an end (one blended edge cut off by the third face at a
-//! vertex of three edges), and two kinds of join, where two blended edges
-//! meet tangentially and the blend runs on from one into the other. Every
-//! other vertex is refused, naming it.
+//! how many are blended, which meet tangentially (see [`super::convex`])
+//! and how they are blended: a closed edge alone at its vertex; an end,
+//! one blended edge cut off by the third face there; two kinds of join,
+//! where two blended edges meet tangentially and the blend runs on from
+//! one into the other; and the corners, where blended edges meet at
+//! angles: a trim of two, a ball of three. Every other vertex is refused,
+//! naming it.
 //!
 //! Blended edges joined at joins make chains. The new rails of a chain
 //! all go on one face, its rail face: at a smooth join it is the face the
@@ -40,6 +41,10 @@ pub(crate) enum Class {
     /// Three blended edges, fillets of one radius bending the same way,
     /// and no other edge: a ball corner (see [`super::corner`]).
     Corner,
+    /// Two blended edges meeting at an angle, sharing a face, bending the
+    /// same way, and a sharp edge between their other faces: each blend is
+    /// trimmed by the other (see [`super::trim`]).
+    Trim,
 }
 
 /// A maximal run of blended edges joined at joins.
@@ -263,6 +268,39 @@ fn classify(
             match bend(body, smooth) {
                 Ok(Bend::Smooth) if between => Ok(Class::SmoothJoin { smooth, common }),
                 Err(BendFail::Uncertain) => Err(BlendError::Uncertain { at }.into()),
+                _ => Err(unsupported()),
+            }
+        }
+        (2, 3) => {
+            // Two blended edges meeting at an angle and a sharp one: the
+            // blends trim each other, if they share a face and the sharp
+            // edge lies between their other faces.
+            let (fa, fb) = (face_set(blended[0]), face_set(blended[1]));
+            let shared = fa.iter().filter(|f| fb.contains(f)).count();
+            let sharp = edges
+                .iter()
+                .copied()
+                .find(|g| !blended.contains(g))
+                .expect("a third edge");
+            let others = [fa, fb].map(|f| {
+                f.iter()
+                    .copied()
+                    .find(|x| !fa.contains(x) || !fb.contains(x))
+            });
+            let between = others
+                .iter()
+                .all(|o| o.is_some_and(|o| faces_of(sharp).contains(&o)));
+            if !(shared == 1 && between) {
+                return Err(unsupported());
+            }
+            // Bending opposite ways, the blends lie either side of the
+            // shared face and never meet.
+            let bends = [blended[0], blended[1]].map(|e| bend(body, e));
+            match bends {
+                [Ok(a), Ok(b)] if a == b && a != Bend::Smooth => Ok(Class::Trim),
+                [Err(BendFail::Uncertain), _] | [_, Err(BendFail::Uncertain)] => {
+                    Err(BlendError::Uncertain { at }.into())
+                }
                 _ => Err(unsupported()),
             }
         }
@@ -520,15 +558,18 @@ mod tests {
     }
 
     #[test]
-    fn two_box_edges_at_a_corner_are_not_built_yet() {
+    fn two_box_edges_at_a_corner_trim_each_other() {
         let b = block();
         let e = edge_of(&b, FaceRole::PlusX, FaceRole::PlusZ);
         let g = edge_of(&b, FaceRole::PlusY, FaceRole::PlusZ);
-        let err = chains_of(&b, &[fillet(e, 0.1), fillet(g, 0.1)]).unwrap_err();
-        assert!(matches!(
-            err,
-            Error::InvalidBlend(BlendError::Unsupported { .. })
-        ));
+        let c = chains_of(&b, &[fillet(e, 0.1), fillet(g, 0.1)]).unwrap();
+        assert_eq!(c.len(), 2);
+        for chain in &c {
+            assert_eq!(
+                chain.classes.iter().filter(|x| **x == Class::Trim).count(),
+                1
+            );
+        }
     }
 
     #[test]

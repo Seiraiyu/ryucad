@@ -142,8 +142,8 @@ pub enum BlendRole {
     /// its parents are the blend face, that face and the vertex the blend
     /// took away there.
     End,
-    /// An edge between two blend faces of one chain where the chain
-    /// changes surface, or between a blend face and a corner face; its
+    /// An edge between two blend faces where a chain changes surface or
+    /// two blends meet, or between a blend face and a corner face; its
     /// parents are the two faces, sorted.
     Section,
     /// A vertex of a blend; its parents are the edges meeting there,
