@@ -48,15 +48,18 @@ impl From<Failure> for EndFail {
 }
 
 /// Where `rail` over its parameters `range` crosses `cut`, an edge of the
-/// face on `surface` the blend ends on. Exactly one hit of the rail with
-/// the surface must lie on the cut: within the cut's, the rail's and the
-/// hit's tolerances of the cut's curve, inside its interval.
+/// face on `surface` the blend ends on, near the vertex at `near`: of the
+/// rail's hits with the surface that lie on the cut (within the cut's and
+/// the rail's tolerances of its curve, inside its interval), the one
+/// nearest the vertex. A cut may run between both ends of a blend, which
+/// then crosses it twice.
 pub(crate) fn crossing(
     body: &Body,
     rail: &Rail,
     range: [f64; 2],
     surface: &Surface,
     cut: EdgeId,
+    near: Point3,
 ) -> Result<Crossing, EndFail> {
     let tol = rail.tolerance;
     let hits = match surface {
@@ -74,15 +77,14 @@ pub(crate) fn crossing(
         let Some(at) = on_edge(curve, e.interval, point, reach) else {
             continue;
         };
-        if found.is_some() {
-            return Err(EndFail::Overflow);
+        if found.is_none_or(|f| point.distance(near) < f.point.distance(near)) {
+            found = Some(Crossing {
+                tau: t,
+                point,
+                cut,
+                at,
+            });
         }
-        found = Some(Crossing {
-            tau: t,
-            point,
-            cut,
-            at,
-        });
     }
     found.ok_or(EndFail::Overflow)
 }
@@ -235,7 +237,15 @@ mod tests {
             let end = b.surface(b.face(face).unwrap().surface).unwrap();
             let x = [0, 1].map(|k| {
                 let range = [rails[k].param(s.range[0]), rails[k].param(s.range[1])];
-                crossing(&b, &rails[k], range, end, cuts[k]).unwrap()
+                crossing(
+                    &b,
+                    &rails[k],
+                    range,
+                    end,
+                    cuts[k],
+                    b.vertex(*v).unwrap().point,
+                )
+                .unwrap()
             });
             let vp = b.vertex(*v).unwrap().point;
             for c in &x {
@@ -293,7 +303,7 @@ mod tests {
             .unwrap();
         let range = [rl.param(s.range[0]), rl.param(s.range[1])];
         assert_eq!(
-            crossing(&b, &rl, range, minus_y, wrong).unwrap_err(),
+            crossing(&b, &rl, range, minus_y, wrong, Point3::ORIGIN).unwrap_err(),
             EndFail::Overflow
         );
     }

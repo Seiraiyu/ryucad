@@ -122,23 +122,50 @@ fn tangent_normals(a: Vector3, b: Vector3) -> bool {
 
 /// Whether two edges leaving a vertex in directions `a` and `b` meet
 /// tangentially: one runs on where the other stops, within
-/// [`ANGULAR_RESOLUTION`].
-pub(crate) fn tangent_directions(a: UnitVector3, b: UnitVector3) -> bool {
+/// [`ANGULAR_RESOLUTION`] plus `slack`, how far their directions there
+/// may be from the true ones (see [`leaving`]).
+pub(crate) fn tangent_directions(a: UnitVector3, b: UnitVector3, slack: f64) -> bool {
     let (a, b) = (a.get(), b.get());
-    a.dot(b) < 0.0 && a.cross(b).length() <= ANGULAR_RESOLUTION
+    a.dot(b) < 0.0 && a.cross(b).length() <= ANGULAR_RESOLUTION + slack
 }
 
 /// The direction an edge leaves `v` in, from its curve's tangent at the
-/// end at `v` (its start when it is closed). `None` where the tangent
+/// end at `v` (its start when it is closed), and how far that may be
+/// from the true direction: nothing for a line, circle or ellipse, and
+/// for a fitted NURBS four times its tolerance over the length of its
+/// piece at that end (a fit within `δ` of the curve turns up to about
+/// `δ / h` from it over a piece `h` long). `None` where the tangent
 /// vanishes.
-pub(crate) fn leaving(body: &Body, edge: EdgeId, v: VertexId) -> Option<UnitVector3> {
+pub(crate) fn leaving(body: &Body, edge: EdgeId, v: VertexId) -> Option<(UnitVector3, f64)> {
     let e = &body.edges[edge];
     let curve = &body.curves[e.curve];
-    if e.start == v {
-        curve.tangent(e.interval[0])
+    let [t0, t1] = e.interval;
+    let from_start = e.start == v;
+    let dir = if from_start {
+        curve.tangent(t0)
     } else {
-        curve.tangent(e.interval[1]).map(|t| -t)
-    }
+        curve.tangent(t1).map(|t| -t)
+    }?;
+    let slack = match curve {
+        crate::geom::Curve::Nurbs(n) => {
+            let knots = n.knots().knots();
+            let (a, b) = if from_start {
+                let next = knots.iter().copied().find(|&k| k > t0).unwrap_or(t1);
+                (t0, next.min(t1))
+            } else {
+                let prev = knots.iter().rev().copied().find(|&k| k < t1).unwrap_or(t0);
+                (prev.max(t0), t1)
+            };
+            let h = curve.point(a).distance(curve.point(b));
+            if h > 0.0 {
+                4.0 * e.tolerance.get() / h
+            } else {
+                f64::INFINITY
+            }
+        }
+        _ => 0.0,
+    };
+    Some((dir, slack))
 }
 
 /// One face of an edge, read through its fin.
@@ -288,7 +315,7 @@ mod tests {
             for (i, &x) in edges.iter().enumerate() {
                 for &y in &edges[i + 1..] {
                     let (a, c) = (leaving(&b, x, v).unwrap(), leaving(&b, y, v).unwrap());
-                    if tangent_directions(a, c) {
+                    if tangent_directions(a.0, c.0, a.1 + c.1) {
                         tangent += 1;
                     }
                 }

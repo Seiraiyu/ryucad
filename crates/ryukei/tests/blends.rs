@@ -546,3 +546,121 @@ fn holes_of(spec: &[(f64, f64, f64)]) -> Body {
         .unwrap()
         .0
 }
+
+/// Faults of the self-intersection check other than blend faces meeting
+/// tangentially along a section, which plan 6.D certifies apart.
+fn crossings_but_sections(b: &Body) -> Vec<ryukei::check::Fault> {
+    check_intersections(b)
+        .into_iter()
+        .filter(|f| !matches!(f, ryukei::check::Fault::CannotCheck { .. }))
+        .collect()
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_chain_across_an_earlier_fillets_end() {
+    use ryukei::blend::tangent_chain;
+    use ryukei::geom::Curve;
+    let k = OpKey(1);
+    let b = primitive::block(k, 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let (r, _) = blend(
+        K,
+        &b,
+        &[fillet(edge(k, FaceRole::PlusX, FaceRole::PlusZ), 0.25)],
+    )
+    .unwrap();
+    // The fillet's end arc on -Y runs on tangentially into the edges of
+    // that face either side: a chain of three, joined at the fillet's
+    // rails.
+    let arc = r
+        .edges()
+        .find(|&e| {
+            matches!(r.curve(r.edge(e).unwrap().curve), Some(Curve::Circle(c)) if c.frame().origin().y.abs() < 1e-9)
+        })
+        .unwrap();
+    let chain = tangent_chain(&r, arc).unwrap();
+    assert_eq!(chain.len(), 3);
+    let blends: Vec<EdgeBlend> = chain
+        .iter()
+        .map(|&e| fillet(r.edge(e).unwrap().name, 0.1))
+        .collect();
+    let (s, _) = blend(OpKey(0xb2), &r, &blends).unwrap();
+    assert_eq!(crossings_but_sections(&s), []);
+    // A fillet round a cylinder's end, between two straight ones.
+    assert!(volume(&s, 1e-4) < volume(&r, 1e-4));
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_chain_round_a_pipe_fillets_end() {
+    use ryukei::blend::tangent_chain;
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::geom::{Curve, Surface, Vector3};
+    // Half the oblique rim: the plane x = 0 cuts it square at its ends.
+    let half = primitive::block(
+        OpKey(4),
+        3.0,
+        6.0,
+        6.0,
+        &Rigid::translation(Vector3::new(-3.0, -3.0, -1.0)),
+    )
+    .unwrap()
+    .0;
+    let tool = Tool {
+        key: ToolKey(9),
+        body: &half,
+        place: Rigid::IDENTITY,
+    };
+    let b = boolean(OpKey(5), BooleanOp::Subtract, &slanted(), &[tool])
+        .unwrap()
+        .0;
+    let arc = b
+        .edges()
+        .find(|&e| matches!(b.curve(b.edge(e).unwrap().curve), Some(Curve::Ellipse(_))))
+        .unwrap();
+    let (r, _) = blend(K, &b, &[fillet(b.edge(arc).unwrap().name, 0.2)]).unwrap();
+    let pipe = r
+        .faces()
+        .find(|&f| {
+            matches!(
+                r.surface(r.face(f).unwrap().surface),
+                Some(Surface::Pipe(_))
+            )
+        })
+        .unwrap();
+    // An end curve of the pipe fillet, fitted, runs on tangentially into
+    // the cut face's edges: the chain round that face's top.
+    let end = r
+        .face_loops(pipe)
+        .flat_map(|l| r.loop_fins(l).collect::<Vec<_>>())
+        .map(|f| r.fin(f).unwrap().edge)
+        .find(|&e| tangent_chain(&r, e).unwrap().len() > 1)
+        .unwrap();
+    let chain = tangent_chain(&r, end).unwrap();
+    assert_eq!(chain.len(), 5);
+    let blends: Vec<EdgeBlend> = chain
+        .iter()
+        .map(|&e| fillet(r.edge(e).unwrap().name, 0.05))
+        .collect();
+    let (s, _) = blend(OpKey(0xb2), &r, &blends).unwrap();
+    // A blend face on a pipe beside the earlier one.
+    let pipes = s
+        .faces()
+        .filter(|&f| {
+            matches!(
+                s.surface(s.face(f).unwrap().surface),
+                Some(Surface::Pipe(_))
+            )
+        })
+        .count();
+    assert!(pipes >= 2);
+    assert!(volume(&s, 1e-4) < volume(&r, 1e-4));
+}

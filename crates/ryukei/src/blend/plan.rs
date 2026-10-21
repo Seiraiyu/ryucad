@@ -172,7 +172,8 @@ pub(crate) fn fillet_plan(
                     let cut = cuts[usize::from(spec.faces[1] == f)];
                     let rl = &part.rails[side];
                     let range = [rl.param(part.span[0]), rl.param(part.span[1])];
-                    let c = crossing(body, rl, range, surface, cut).map_err(|e| {
+                    let near = body.vertices[chain.vertices[vi]].point;
+                    let c = crossing(body, rl, range, surface, cut, near).map_err(|e| {
                         end_error(e, spec.name, body.faces[f].name, body.faces[face].name)
                     })?;
                     let t = (c.tau - rl.map[0]) / rl.map[1];

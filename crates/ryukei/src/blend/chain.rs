@@ -66,13 +66,13 @@ impl Chain {
 /// The other edge at `v` that meets `edge` tangentially, when exactly one
 /// does.
 fn next_tangent(body: &Body, edge: EdgeId, v: VertexId) -> Option<EdgeId> {
-    let here = leaving(body, edge, v)?;
+    let (here, slack) = leaving(body, edge, v)?;
     let mut found = None;
     for g in body.vertex_edges(v) {
         if g == edge {
             continue;
         }
-        if leaving(body, g, v).is_some_and(|d| tangent_directions(here, d)) {
+        if leaving(body, g, v).is_some_and(|(d, s)| tangent_directions(here, d, slack + s)) {
             if found.is_some() {
                 return None;
             }
@@ -191,7 +191,7 @@ fn classify(
     }
     let dirs: Vec<_> = edges.iter().map(|&e| leaving(body, e, v)).collect();
     let tangent = |i: usize, j: usize| match (dirs[i], dirs[j]) {
-        (Some(a), Some(b)) => tangent_directions(a, b),
+        (Some(a), Some(b)) => tangent_directions(a.0, b.0, a.1 + b.1),
         _ => false,
     };
     let pos = |e: EdgeId| edges.iter().position(|&x| x == e).expect("at v");
