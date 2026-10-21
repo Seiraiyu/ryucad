@@ -17,7 +17,7 @@ pub struct Field {
 }
 
 impl Field {
-    fn new(name: &str, read: String) -> Field {
+    pub fn new(name: &str, read: String) -> Field {
         Field {
             name: name.to_owned(),
             text: read.clone(),

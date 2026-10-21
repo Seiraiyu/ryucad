@@ -963,3 +963,40 @@ fn the_tree_shows_sketches_and_what_features_read() {
     frames(&mut h, |a| a.opened().view.chosen.is_some());
     assert_ne!(h.state().opened().view.nav.camera, before);
 }
+
+#[test]
+fn a_parameter_is_edited_in_its_panel() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_sketch();
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        let o = a.opened();
+        o.ws.idle() && o.ws.params.is_some() && o.ws.model.sketches.len() == 1
+    });
+    h.step();
+    h.get_by_label("Parameters of p");
+    let field = h.get_all_by_value("20 mm").next().unwrap();
+    field.set_text_value_accesskit("35 mm");
+    h.step();
+    h.get_by_label("Apply parameters").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .params
+            .as_ref()
+            .is_some_and(|p| !p.saving && !p.dirty() && p.params[0].field.read == "35 mm")
+    });
+    let list = p.ok(&["param", "list", "p"]);
+    assert_eq!(list["parameters"][0]["value"], "35 mm");
+    // The sketch's label follows.
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .model
+            .sketches
+            .values()
+            .any(|d| d.labels[0].text == "width = 35 mm")
+    });
+}

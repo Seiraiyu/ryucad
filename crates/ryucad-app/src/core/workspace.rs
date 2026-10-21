@@ -5,6 +5,7 @@ use crate::core::activity::{Activity, LOADED};
 use crate::core::edit::{DimForm, Form};
 use crate::core::link::{Event, Link, Wake};
 use crate::core::model::{BodyKey, Model, Part};
+use crate::core::params::Params;
 use crate::core::people::{People, Person};
 use crate::core::settings::Settings;
 use ryucad::client::Daemon;
@@ -37,6 +38,10 @@ enum Pending {
     /// constraint; after a conflict, with the form as it was.
     Dim(String, String, String, Option<Box<DimForm>>),
     DimSave,
+    /// A part's parameters for the panel; after a conflict, with the
+    /// panel as it was.
+    Params(String, Option<Box<Params>>),
+    ParamSave,
     Activity,
     History,
     Config,
@@ -92,6 +97,9 @@ pub struct Workspace {
     /// The property panel's form for a dimension chosen by its label;
     /// shown instead of `form`.
     pub dimension: Option<DimForm>,
+    /// The parameter panel, for the part it shows (see `show_params`).
+    pub params: Option<Params>,
+    params_part: Option<String>,
     pub activity: Activity,
     /// The project's Git history (`history.log`), once asked for.
     pub history: Option<Value>,
@@ -139,6 +147,8 @@ impl Workspace {
             following: None,
             form: None,
             dimension: None,
+            params: None,
+            params_part: None,
             activity: Activity::default(),
             history: None,
             settings: Settings::default(),
@@ -305,6 +315,32 @@ impl Workspace {
             quality: None,
         };
         self.send(req, Pending::Dim(part, sketch, constraint, before));
+    }
+
+    /// Shows `part`'s parameters in the panel, read if they aren't yet.
+    pub fn show_params(&mut self, part: Option<&str>) {
+        if self.params_part.as_deref() == part {
+            return;
+        }
+        self.params_part = part.map(str::to_owned);
+        self.params = None;
+        if let Some(p) = part {
+            self.read_params(p.to_owned(), None);
+        }
+    }
+
+    fn read_params(&mut self, part: String, before: Option<Box<Params>>) {
+        let req = Request::ParamList { part: part.clone() };
+        self.send(req, Pending::Params(part, before));
+    }
+
+    /// Saves what was typed into the parameter panel.
+    pub fn save_params(&mut self) {
+        let Some(p) = &mut self.params else { return };
+        p.saving = true;
+        p.error = None;
+        let req = p.request();
+        self.send(req, Pending::ParamSave);
     }
 
     /// Saves the value typed into the dimension's form.
@@ -613,6 +649,33 @@ impl Workspace {
                     };
                 }
             }
+            (Pending::Params(part, before), Ok(a)) => {
+                if self.params_part.as_deref() == Some(part.as_str()) {
+                    let unit = self.model.default_unit.clone();
+                    self.params = Some(match before {
+                        Some(b) => b.reloaded(&a.result, &unit),
+                        None => Params::from_list(&a.result, &unit),
+                    });
+                }
+            }
+            (Pending::ParamSave, Ok(_)) => {
+                if let Some(p) = &self.params {
+                    let part = p.part.clone();
+                    self.read_params(part, None);
+                }
+            }
+            (Pending::ParamSave, Err(e)) => {
+                if let Some(p) = &mut self.params {
+                    p.saving = false;
+                    if e.code == Code::Conflict {
+                        let before = Box::new(p.clone());
+                        let part = p.part.clone();
+                        self.read_params(part, Some(before));
+                    } else {
+                        p.error = Some(e);
+                    }
+                }
+            }
             (Pending::DimSave, Ok(_)) => {
                 // Read it back as the files now have it.
                 if let Some(f) = &self.dimension {
@@ -764,7 +827,16 @@ impl Workspace {
                 Pending::Form(part, None),
             );
         }
-        // So does a dimension's.
+        // So do the parameters, and a dimension's form.
+        if let Some(p) = &self.params
+            && report["part"] == p.part.as_str()
+            && report["revision"] != p.revision.as_str()
+            && !p.dirty()
+            && !p.saving
+        {
+            let part = p.part.clone();
+            self.read_params(part, None);
+        }
         if let Some(f) = &self.dimension
             && report["part"] == f.part.as_str()
             && report["revision"] != f.revision.as_str()

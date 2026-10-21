@@ -6,6 +6,7 @@ pub mod edit;
 pub mod link;
 pub mod model;
 pub mod nav;
+pub mod params;
 pub mod people;
 pub mod pick;
 pub mod recent;
