@@ -8,7 +8,10 @@
 //!   a blend renames nothing;
 //! - a rail from its blend face and the face it rolls on, an end edge
 //!   from its blend face, the end face and the vertex the blend took away
-//!   there, a section from the two blend faces either side, sorted;
+//!   there, a section from the two faces either side, sorted: two blend
+//!   faces, or a blend face and a corner face;
+//! - a corner face from the vertex it took away and the faces it touches,
+//!   sorted;
 //! - every vertex on a blend face from the edges meeting there, sorted;
 //! - faces the blend trims and edges it shortens keep their names.
 //!
@@ -43,7 +46,36 @@ pub(crate) fn name(body: &mut Body, key: OpKey, made: &Made) -> Journal {
         body.rename(EntityId::Face(s.face), n);
         faces.push(n);
     }
-    let blend_faces: BTreeSet<FaceId> = made.segments.iter().map(|s| s.face).collect();
+    // Corner faces, and the sections between them and the blend faces.
+    let mut corner_faces: Vec<Name> = Vec::with_capacity(made.corners.len());
+    for c in &made.corners {
+        let mut parents = vec![c.vertex];
+        parents.extend(&c.faces);
+        let n = body.derive_name("blend", key, role(BlendRole::Corner), &parents);
+        body.rename(EntityId::Face(c.face), n);
+        corner_faces.push(n);
+    }
+    let segment_of = |edge: Name| -> usize {
+        made.segments
+            .iter()
+            .position(|s| s.edges.contains(&edge))
+            .expect("a blended edge's segment")
+    };
+    for (c, &cf) in made.corners.iter().zip(&corner_faces) {
+        for &(e, edge) in &c.sections {
+            let mut parents = [faces[segment_of(edge)], cf];
+            parents.sort();
+            let n = body.derive_name("blend", key, role(BlendRole::Section), &parents);
+            body.rename(EntityId::Edge(e), n);
+            created.insert(n);
+        }
+    }
+    let blend_faces: BTreeSet<FaceId> = made
+        .segments
+        .iter()
+        .map(|s| s.face)
+        .chain(made.corners.iter().map(|c| c.face))
+        .collect();
     // Rails, and the faces they roll on keep their names.
     for (k, s) in made.segments.iter().enumerate() {
         for side in 0..2 {
@@ -122,6 +154,11 @@ pub(crate) fn name(body: &mut Body, key: OpKey, made: &Made) -> Journal {
     for (old, segs) in &made.replaced {
         let entry = replaced.entry(*old).or_default();
         entry.extend(segs.iter().map(|&k| faces[k]));
+    }
+    for (c, &cf) in made.corners.iter().zip(&corner_faces) {
+        let entry = replaced.entry(c.vertex).or_default();
+        entry.push(cf);
+        entry.extend(c.sections.iter().map(|&(_, e)| faces[segment_of(e)]));
     }
     for (old, mut new) in replaced {
         new.sort();

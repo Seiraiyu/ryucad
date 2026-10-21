@@ -10,10 +10,11 @@
 //! from the faces' offsets ([`spine`]), rails ([`rail`]) and the surfaces
 //! the balls sweep ([`fillet`]); for chamfers, rails set back along the
 //! faces and the planes, cones or ruled surfaces between them
-//! ([`chamfer`]); and where the blends end ([`end`]). Every new curve is
-//! checked to stay on its face ([`overflow`]). Only then is a copy of the
-//! body rebuilt through Euler operators ([`build`]) and its new entities
-//! named from the blend's key and the names around them ([`names`]).
+//! ([`chamfer`]); and where the blends end ([`end`]) or meet in a ball
+//! ([`corner`]). Every new curve is checked to stay on its face
+//! ([`overflow`]). Only then is a copy of the body rebuilt through Euler
+//! operators ([`build`]) and its new entities named from the blend's key
+//! and the names around them ([`names`]).
 //!
 //! Only faces on the analytic surfaces (planes, cylinders, cones, spheres
 //! and tori) and on earlier fillets' pipes may be blended; the rest is
@@ -23,6 +24,7 @@ mod build;
 mod chain;
 mod chamfer;
 mod convex;
+mod corner;
 mod end;
 mod fillet;
 mod names;
@@ -85,11 +87,12 @@ pub struct EdgeBlend {
 ///
 /// Each edge is rounded by a rolling-ball fillet, or bevelled by a
 /// chamfer, where it is convex and filled where it is concave. Edges
-/// meeting tangentially must be blended alike and form chains; the
-/// vertices this phase builds are ends (a third face cuts the blend off),
-/// closed edges alone, and joins between tangent blended edges (alone, or
-/// beside a smooth edge between their other faces). Refusals are
-/// [`Error::InvalidBlend`], before anything is changed.
+/// meeting tangentially must be blended alike and form chains. At a
+/// vertex a blend ends where a third face cuts it off, runs on into a
+/// tangent blended edge (alone, or beside a smooth edge between their
+/// other faces), or meets two more fillets of its size bending its way in
+/// a ball. Refusals are [`Error::InvalidBlend`], before anything is
+/// changed.
 ///
 /// The input must pass [`crate::check::check`] (debug builds assert it).
 pub fn blend(key: OpKey, body: &Body, blends: &[EdgeBlend]) -> Result<(Body, Journal), Error> {
@@ -99,14 +102,16 @@ pub fn blend(key: OpKey, body: &Body, blends: &[EdgeBlend]) -> Result<(Body, Jou
     }
     let specs = spec::resolve(body, blends)?;
     let chains = chain::chains(body, &specs)?;
+    let corners = corner::corners(body, &specs, &chains)?;
+    let near = Near { corners: &corners };
     let plans: Vec<Result<plan::Plan, Error>> = chains
         .par_iter()
-        .map(|c| plan::plan(body, &specs, c))
+        .map(|c| plan::plan(body, &specs, c, &near))
         .collect();
     let plans = plans.into_iter().collect::<Result<Vec<_>, _>>()?;
-    overflow::check(body, &specs, &chains, &plans)?;
+    overflow::check(body, &specs, &chains, &plans, &near)?;
     let mut out = body.clone();
-    let made = build::build(&mut out, key, &specs, &chains, &plans)?;
+    let made = build::build(&mut out, key, &specs, &chains, &plans, &near)?;
     let journal = names::name(&mut out, key, &made);
     if cfg!(debug_assertions) {
         let faults = crate::check::check(&out);
@@ -115,6 +120,11 @@ pub fn blend(key: OpKey, body: &Body, blends: &[EdgeBlend]) -> Result<(Body, Jou
         return Err(Error::Topology(TopologyError::Inconsistent));
     }
     Ok((out, journal))
+}
+
+/// The places where chains meet: ball corners.
+pub(crate) struct Near<'a> {
+    pub(crate) corners: &'a [corner::BallCorner],
 }
 
 /// The edges reachable from `edge` through vertices where an edge meets

@@ -25,8 +25,15 @@
 //!
 //! Edges at plain joins, on one rail curve, are joined again (JEKV) where
 //! they run the same way.
+//!
+//! Where chains meet in a ball corner, the triangle of sections round it
+//! is made first, so that each chain's path just runs to it. Every
+//! blended edge still becomes its rail on its other face, ending where
+//! that rail does.
 
+use super::Near;
 use super::chain::Chain;
+use super::corner::BallCorner;
 use super::end::EndCurve;
 use super::plan::{Joint, Plan, Segment};
 use super::spec::Spec;
@@ -57,6 +64,20 @@ pub(crate) struct Made {
     pub(crate) keep: Vec<(EntityId, Name)>,
     /// Faces and edges whose geometry or boundary changed.
     pub(crate) modified: BTreeSet<EntityId>,
+    pub(crate) corners: Vec<CornerMade>,
+}
+
+/// One corner face.
+#[derive(Clone, Debug)]
+pub(crate) struct CornerMade {
+    pub(crate) face: FaceId,
+    /// The name of the vertex the corner took away.
+    pub(crate) vertex: Name,
+    /// The names of the faces it touches, before the blend, sorted.
+    pub(crate) faces: Vec<Name>,
+    /// Its sections, each with the name of the blended edge whose blend
+    /// face is on the other side.
+    pub(crate) sections: Vec<(EdgeId, Name)>,
 }
 
 /// One blend face.
@@ -219,15 +240,39 @@ pub(crate) fn build(
     specs: &[Spec],
     chains: &[Chain],
     plans: &[Plan],
+    near: &Near,
 ) -> Result<Made, Error> {
+    let corners = near.corners;
     let mut keys = Keys { base: key, n: 0 };
     let mut made = Made::default();
     let mut work = Work::default();
-    // Faces keep their names: chains split and merge them on the way.
+    let mut specs = specs.to_vec();
+    // Faces keep their names: corners and chains split and merge them on
+    // the way.
     let names: BTreeMap<FaceId, Name> = body.faces().map(|f| (f, body.faces[f].name)).collect();
+    // The face each blended edge becomes a rail on: not its chain's rail
+    // face.
+    let mut other: BTreeMap<usize, FaceId> = BTreeMap::new();
+    for chain in chains {
+        for &(k, _) in &chain.edges {
+            let side = chain.rail_side(&specs, k);
+            other.insert(k, specs[k].faces[1 - side]);
+        }
+    }
+    let mut built: Vec<CornerBuilt> = Vec::with_capacity(corners.len());
+    for c in corners {
+        built.push(corner_build(
+            body, &mut keys, &mut specs, &other, c, &mut made,
+        )?);
+        work.blend_faces.insert(built.last().expect("built").face);
+    }
     for (chain, plan) in chains.iter().zip(plans) {
+        let ready = Ready {
+            corners: &built,
+            names: &names,
+        };
         chain_build(
-            body, &mut keys, specs, chain, plan, &names, &mut made, &mut work,
+            body, &mut keys, &specs, chain, plan, &ready, &mut made, &mut work,
         )?;
     }
     finish(body, &work)?;
@@ -242,7 +287,7 @@ pub(crate) fn build(
     Ok(made)
 }
 
-/// Builds one chain; `names` are the faces' names before the blend.
+/// Builds one chain.
 #[allow(clippy::too_many_arguments)]
 fn chain_build(
     body: &mut Body,
@@ -250,10 +295,11 @@ fn chain_build(
     specs: &[Spec],
     chain: &Chain,
     plan: &Plan,
-    names: &BTreeMap<FaceId, Name>,
+    near: &Ready,
     made: &mut Made,
     work: &mut Work,
 ) -> Result<(), Error> {
+    let corners = near.corners;
     let n = chain.edges.len();
     let first_seg = made.segments.len();
     // Each chain edge's fins on the rail face and on its other face.
@@ -266,18 +312,25 @@ fn chain_build(
         .collect();
     // The faces' names before the blend, by the faces the edges were
     // resolved on.
-    let rail_name = names[&chain.rail_face];
+    let rail_name = near.names[&chain.rail_face];
     let other_names: Vec<Name> = plan
         .segments
         .iter()
         .map(|s| {
             let k = chain.edges[s.edges[0]].0;
-            names[&specs[k].faces[1 - chain.rail_side(specs, k)]]
+            near.names[&specs[k].faces[1 - chain.rail_side(specs, k)]]
         })
         .collect();
-    // Ends: split the rail face's cut where its rail crosses it.
+    // Ends: split the rail face's cut where its rail crosses it. At a
+    // corner the rail ends where the ball touches the rail face.
     let mut end_edges: Vec<Option<(EdgeId, VertexId)>> = vec![None; chain.vertices.len()];
+    let mut path_ends: Vec<Option<VertexId>> = vec![None; chain.vertices.len()];
     for (vi, joint) in plan.joints.iter().enumerate() {
+        if let Joint::Corner { corner, .. } = joint {
+            let c = &corners[*corner];
+            path_ends[vi] = Some(c.points[&chain.rail_face]);
+            continue;
+        }
         let Joint::End { crossings, .. } = joint else {
             continue;
         };
@@ -301,13 +354,14 @@ fn chain_build(
         made.keep.push((EntityId::Edge(far), old));
         made.modified.insert(EntityId::Edge(far));
         end_edges[vi] = Some((near, s.vertex));
+        path_ends[vi] = Some(s.vertex);
         work.vertices.insert(s.vertex);
     }
     // The rail path on the rail face.
     let path = if chain.closed {
         closed_path(body, keys, chain, plan, &fins)?
     } else {
-        open_path(body, keys, plan, &fins, &end_edges)?
+        open_path(body, keys, plan, &fins, &path_ends)?
     };
     for (k, &(edge, map)) in path.rails.iter().enumerate() {
         let seg = &plan.segments[k];
@@ -389,6 +443,18 @@ fn chain_build(
                 let t = join_param(seg, chain, vi);
                 euler::set_point(body, v, seg.rails[1].curve.point(t))?;
             }
+            Joint::Corner { corner, section } => {
+                // The section from the rail face's foot to the other's.
+                let c = &corners[*corner];
+                let p = if vi == 0 { 0 } else { n - 1 };
+                let edge = c.sections[&chain.edges[p].0];
+                let from = c.points[&chain.rail_face];
+                let along = body.edges[edge].start == from;
+                let (curve, interval, _) = oriented(&section.curve, section.interval, along);
+                let id = body.add_curve(curve);
+                euler::set_curve(body, edge, id, interval)?;
+                continue;
+            }
         }
         made.replaced
             .push((old, segs.iter().map(|s| first_seg + s).collect()));
@@ -450,6 +516,210 @@ fn chain_build(
     Ok(())
 }
 
+/// What a corner's construction left for its chains.
+struct CornerBuilt {
+    /// The corner face.
+    face: FaceId,
+    /// The vertex where the ball touches each face.
+    points: BTreeMap<FaceId, VertexId>,
+    /// Each blended edge's section, by its spec.
+    sections: BTreeMap<usize, EdgeId>,
+}
+
+/// The fin on the new edge beside fin `f` just after SEMV split `f`'s
+/// edge.
+fn partner(body: &Body, f: FinId) -> FinId {
+    match body.fins[f].sense {
+        Sense::Forward => body.fins[f].next,
+        Sense::Reversed => body.fins[f].prev,
+    }
+}
+
+/// Builds the corner face of `corner` before its chains: a triangle of
+/// sections round the vertex, with a vertex where the ball touches each
+/// face. Each blended edge, which becomes its rail on its `other` face,
+/// must end at the vertex on that face; the chains' paths then run to the
+/// vertices on their rail faces.
+///
+/// The vertex stays where the ball touches the face that most blended
+/// edges become rails on (two, or with one each the face of the edge
+/// named first), keeping those edges. The others are split near the
+/// vertex (SEMV), the short pieces left as sections. With a face that no
+/// blended edge becomes a rail on, a spur (MEV) from the vertex reaches
+/// where the ball touches it, and MEF across that face closes the
+/// triangle; otherwise MEF across the face opposite the kept edge does.
+fn corner_build(
+    body: &mut Body,
+    keys: &mut Keys,
+    specs: &mut [Spec],
+    other: &BTreeMap<usize, FaceId>,
+    corner: &BallCorner,
+    made: &mut Made,
+) -> Result<CornerBuilt, Error> {
+    let v = corner.vertex;
+    let vertex_name = body.vertices[v].name;
+    let mut face_names: Vec<Name> = corner.faces.iter().map(|&f| body.faces[f].name).collect();
+    face_names.sort();
+    let others: [FaceId; 3] = corner.edges.map(|k| other[&k]);
+    let count = |f: FaceId| others.iter().filter(|&&g| g == f).count();
+    let (keep, star): (Vec<usize>, FaceId) =
+        match corner.faces.iter().copied().find(|&f| count(f) == 2) {
+            Some(x) => ((0..3).filter(|&i| others[i] == x).collect(), x),
+            None => (vec![0], others[0]),
+        };
+    let mut points: BTreeMap<FaceId, VertexId> = BTreeMap::new();
+    points.insert(star, v);
+    euler::set_point(body, v, corner.foot(star))?;
+    // Split the other blended edges near the vertex.
+    let mut stubs: Vec<(usize, EdgeId)> = Vec::new();
+    for i in (0..3).filter(|i| !keep.contains(i)) {
+        let k = corner.edges[i];
+        let e = specs[k].edge;
+        let (at_start, [t0, t1]) = (body.edges[e].start == v, body.edges[e].interval);
+        let t = if at_start {
+            t0 + (t1 - t0) * 1e-3
+        } else {
+            t1 - (t1 - t0) * 1e-3
+        };
+        let (s, _) = euler::semv(body, keys.next(), e, t, corner.foot(others[i]))?;
+        points.insert(others[i], s.vertex);
+        if at_start {
+            // The edge kept the short piece: the blend goes on with the
+            // rest.
+            let fins = specs[k].fins.map(|f| partner(body, f));
+            specs[k].edge = s.edge;
+            specs[k].fins = fins;
+            stubs.push((i, e));
+        } else {
+            stubs.push((i, s.edge));
+        }
+    }
+    let line = |body: &mut Body, a: VertexId, b: VertexId| -> Result<(CurveId, f64), Error> {
+        let (p, q) = (body.vertices[a].point, body.vertices[b].point);
+        let c = body.add_curve(Curve::Line(Line::through(p, q)?));
+        Ok((c, p.distance(q)))
+    };
+    // A blended edge's fin on `face`, which stays off the triangle.
+    let outside = |body: &Body, specs: &[Spec], face: FaceId| -> Result<FinId, Error> {
+        corner
+            .edges
+            .iter()
+            .flat_map(|&k| specs[k].fins)
+            .find(|&f| face_of(body, f) == face)
+            .ok_or_else(inconsistent)
+    };
+    let (across, from, to) = match corner.faces.iter().copied().find(|&f| count(f) == 0) {
+        Some(z) => {
+            let at = starting_in(body, z, v)?;
+            let (c, len) = {
+                let p = body.vertices[v].point;
+                let q = corner.foot(z);
+                let c = body.add_curve(Curve::Line(Line::through(p, q)?));
+                (c, p.distance(q))
+            };
+            let (spur, _) = euler::mev(
+                body,
+                keys.next(),
+                Corner::Before(at),
+                corner.foot(z),
+                c,
+                [0.0, len],
+            )?;
+            points.insert(z, spur.vertex);
+            // The split edge's vertex on z.
+            let (i, _) = stubs[0];
+            let w = points[&others[i]];
+            (z, spur.vertex, w)
+        }
+        None => {
+            let kept = specs[corner.edges[keep[0]]].faces;
+            let opposite = corner
+                .faces
+                .iter()
+                .copied()
+                .find(|f| !kept.contains(f))
+                .ok_or_else(inconsistent)?;
+            let [(i, _), (j, _)] = stubs[..] else {
+                return Err(inconsistent());
+            };
+            (opposite, points[&others[i]], points[&others[j]])
+        }
+    };
+    let far = outside(body, specs, across)?;
+    euler::start_loop_at(body, far)?;
+    let a = starting_in(body, across, from)?;
+    let b = starting_in(body, across, to)?;
+    let (c, len) = line(body, from, to)?;
+    let (m, _) = euler::mef(
+        body,
+        keys.next(),
+        Corner::Before(a),
+        Corner::Before(b),
+        c,
+        [0.0, len],
+    )?;
+    let kept = face_of(body, far);
+    let face = if m.faces[0] == kept {
+        m.faces[1]
+    } else {
+        m.faces[0]
+    };
+    // Each blended edge's section joins the vertices on its two faces.
+    let mut sections: BTreeMap<usize, EdgeId> = BTreeMap::new();
+    let fins: Vec<FinId> = body
+        .face_loops(face)
+        .flat_map(|l| body.loop_fins(l).collect::<Vec<_>>())
+        .collect();
+    for &k in &corner.edges {
+        let ends = specs[k].faces.map(|f| points[&f]);
+        let edge = fins
+            .iter()
+            .map(|&f| body.fins[f].edge)
+            .find(|&e| {
+                let ed = &body.edges[e];
+                (ed.start == ends[0] && ed.end == ends[1])
+                    || (ed.start == ends[1] && ed.end == ends[0])
+            })
+            .ok_or_else(inconsistent)?;
+        sections.insert(k, edge);
+    }
+    let surface = body.add_surface(corner.surface.clone());
+    euler::set_surface(body, face, surface, corner.sense)?;
+    made.corners.push(CornerMade {
+        face,
+        vertex: vertex_name,
+        faces: face_names,
+        sections: corner
+            .edges
+            .iter()
+            .map(|&k| (sections[&k], specs[k].name))
+            .collect(),
+    });
+    Ok(CornerBuilt {
+        face,
+        points,
+        sections,
+    })
+}
+
+/// The fins of a loop from `from` up to, not including, `to`.
+fn ring(body: &Body, from: FinId, to: FinId) -> Vec<FinId> {
+    let mut out = vec![from];
+    let mut f = body.fins[from].next;
+    while f != to && f != from {
+        out.push(f);
+        f = body.fins[f].next;
+    }
+    out
+}
+
+/// What a chain needs of the corners built before it.
+struct Ready<'a> {
+    corners: &'a [CornerBuilt],
+    /// The faces' names before the blend.
+    names: &'a BTreeMap<FaceId, Name>,
+}
+
 /// The segments meeting at chain vertex `vi`: the one before it and the
 /// one after (one when they are the same, or at an end).
 fn segments_at(plan: &Plan, chain: &Chain, vi: usize) -> Vec<usize> {
@@ -495,11 +765,11 @@ fn open_path(
     keys: &mut Keys,
     plan: &Plan,
     fins: &[[FinId; 2]],
-    end_edges: &[Option<(EdgeId, VertexId)>],
+    ends: &[Option<VertexId>],
 ) -> Result<Path, Error> {
-    let nv = end_edges.len();
-    let (_, start) = end_edges[0].ok_or_else(inconsistent)?;
-    let (_, stop) = end_edges[nv - 1].ok_or_else(inconsistent)?;
+    let nv = ends.len();
+    let start = ends[0].ok_or_else(inconsistent)?;
+    let stop = ends[nv - 1].ok_or_else(inconsistent)?;
     let l = body.fins[fins[0][0]].loop_;
     let mut at = Corner::Before(starting(body, l, start)?);
     let mut corners = vec![None; nv];
@@ -516,8 +786,17 @@ fn open_path(
             };
             let into = starting(body, l, stop)?;
             // The face's other loops stay with the side holding the loop's
-            // first fin: the far side, where the path's end fin leads.
-            euler::start_loop_at(body, into)?;
+            // first fin: the side away from the blended edges.
+            let Corner::Before(from) = at else {
+                return Err(inconsistent());
+            };
+            let strip = fins[0][0];
+            let far = if ring(body, into, from).contains(&strip) {
+                from
+            } else {
+                into
+            };
+            euler::start_loop_at(body, far)?;
             let to = Corner::Before(into);
             let (m, _) = euler::mef(body, keys.next(), at, to, c, interval)?;
             rails.push((m.edge, [0.0, 1.0]));

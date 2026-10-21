@@ -13,6 +13,7 @@
 //! strip's blended edges, within the strip's ends. A loop that crosses a
 //! rail is caught by the crossings, so one point of each tells.
 
+use super::Near;
 use super::chain::Chain;
 use super::plan::{Joint, Plan};
 use super::spec::Spec;
@@ -94,7 +95,10 @@ pub(crate) fn check(
     specs: &[Spec],
     chains: &[Chain],
     plans: &[Plan],
+    near: &Near,
 ) -> Result<(), Error> {
+    // Where curves of different chains may meet, end to end.
+    let feet: Vec<Point3> = near.corners.iter().flat_map(|c| c.feet).collect();
     let mut items: Vec<Item> = Vec::new();
     let mut blended: BTreeSet<EdgeId> = BTreeSet::new();
     for (ci, (chain, plan)) in chains.iter().zip(plans).enumerate() {
@@ -230,7 +234,8 @@ pub(crate) fn check(
                 .ok_or(BlendError::Uncertain { at: a.edge })?
                 {
                     let end_of = |it: &Item| it.ends().iter().any(|q| q.distance(p) <= reach);
-                    if !(a.chain == b.chain && end_of(a) && end_of(b)) {
+                    let corner = feet.iter().any(|q| q.distance(p) <= reach);
+                    if !((a.chain == b.chain || corner) && end_of(a) && end_of(b)) {
                         return Err(overflow(a));
                     }
                 }

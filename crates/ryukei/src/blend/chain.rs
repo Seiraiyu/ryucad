@@ -37,6 +37,9 @@ pub(crate) enum Class {
     /// and `smooth`, an edge between their other faces, which meet
     /// tangentially along it.
     SmoothJoin { smooth: EdgeId, common: FaceId },
+    /// Three blended edges, fillets of one radius bending the same way,
+    /// and no other edge: a ball corner (see [`super::corner`]).
+    Corner,
 }
 
 /// A maximal run of blended edges joined at joins.
@@ -263,7 +266,38 @@ fn classify(
                 _ => Err(unsupported()),
             }
         }
+        (3, 3) => corner_class(body, specs, &blended, at),
         _ => Err(unsupported()),
+    }
+}
+
+/// The class of a vertex where three blended edges meet at angles: a
+/// ball corner when they are fillets of one radius that bend the same
+/// way. Anything else is refused.
+fn corner_class(body: &Body, specs: &[Spec], blended: &[EdgeId], at: Name) -> Result<Class, Error> {
+    let unsupported = || -> Error { BlendError::Unsupported { at }.into() };
+    let mut radii = Vec::with_capacity(3);
+    let mut convex = Vec::with_capacity(3);
+    for &e in blended {
+        let s = specs.iter().find(|s| s.edge == e).expect("a blended edge");
+        let BlendKind::Fillet { radius } = s.kind else {
+            return Err(unsupported());
+        };
+        radii.push(radius);
+        convex.push(match bend(body, e) {
+            Ok(Bend::Convex) => true,
+            Ok(Bend::Concave) => false,
+            Ok(Bend::Smooth) => return Err(BlendError::SmoothEdge { edge: s.name }.into()),
+            Err(BendFail::Changes) => {
+                return Err(BlendError::ConvexityChanges { edge: s.name }.into());
+            }
+            Err(BendFail::Uncertain) => return Err(BlendError::Uncertain { at }.into()),
+        });
+    }
+    if radii.iter().all(|&r| r == radii[0]) && convex.iter().all(|&c| c == convex[0]) {
+        Ok(Class::Corner)
+    } else {
+        Err(unsupported())
     }
 }
 
@@ -491,6 +525,25 @@ mod tests {
         let e = edge_of(&b, FaceRole::PlusX, FaceRole::PlusZ);
         let g = edge_of(&b, FaceRole::PlusY, FaceRole::PlusZ);
         let err = chains_of(&b, &[fillet(e, 0.1), fillet(g, 0.1)]).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::InvalidBlend(BlendError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn three_box_edges_meet_in_a_ball() {
+        let b = block();
+        let [e, g, h] = [
+            edge_of(&b, FaceRole::PlusX, FaceRole::PlusZ),
+            edge_of(&b, FaceRole::PlusY, FaceRole::PlusZ),
+            edge_of(&b, FaceRole::PlusX, FaceRole::PlusY),
+        ];
+        let c = chains_of(&b, &[fillet(e, 0.1), fillet(g, 0.1), fillet(h, 0.1)]).unwrap();
+        assert_eq!(c.len(), 3);
+        assert!(c.iter().all(|x| x.classes.contains(&Class::Corner)));
+        // Sizes that differ are not a ball.
+        let err = chains_of(&b, &[fillet(e, 0.1), fillet(g, 0.2), fillet(h, 0.3)]).unwrap_err();
         assert!(matches!(
             err,
             Error::InvalidBlend(BlendError::Unsupported { .. })

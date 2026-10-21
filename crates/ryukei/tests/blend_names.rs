@@ -259,3 +259,49 @@ fn edges_and_faces_two_blends_cut_keep_their_names() {
         assert!(on(Side) && (on(Top) || on(Bottom)), "{e}");
     }
 }
+
+/// A box's vertex between three of its faces.
+fn vertex(key: OpKey, a: FaceRole, b: FaceRole, c: FaceRole) -> Name {
+    let mut f = [face(key, a), face(key, b), face(key, c)];
+    f.sort();
+    Name::derive(key, Role::Vertex, &f)
+}
+
+#[test]
+fn a_ball_corner_replaces_its_vertex() {
+    use FaceRole::*;
+    let k = OpKey(1);
+    let b = primitive::block(k, 1.0, 1.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let edges = [
+        edge(k, PlusX, PlusY),
+        edge(k, PlusY, PlusZ),
+        edge(k, PlusX, PlusZ),
+    ];
+    let (r, j) = blend(K, &b, &edges.map(|e| fillet(e, 0.2))).unwrap();
+    let replaced = accounts(&b, &r, &j);
+    let v = vertex(k, PlusX, PlusY, PlusZ);
+    // The corner face, from the vertex and the faces it touches.
+    let mut faces = [face(k, PlusX), face(k, PlusY), face(k, PlusZ)];
+    faces.sort();
+    let corner = Name::derive(
+        K,
+        Role::Blend(BlendRole::Corner),
+        &[v, faces[0], faces[1], faces[2]],
+    );
+    assert!(matches!(r.by_name(corner), Some(EntityId::Face(_))));
+    let blend_faces = edges.map(|e| Name::derive(K, Role::Blend(BlendRole::Face), &[e]));
+    let mut want: Vec<Name> = blend_faces.into_iter().chain([corner]).collect();
+    want.sort();
+    assert_eq!(replaced[&v], want);
+    // Each section between a blend face and the corner face.
+    for f in blend_faces {
+        let mut parents = [f, corner];
+        parents.sort();
+        let n = Name::derive(K, Role::Blend(BlendRole::Section), &parents);
+        assert!(matches!(r.by_name(n), Some(EntityId::Edge(_))));
+    }
+    let (s, _) = blend(K, &b, &edges.map(|e| fillet(e, 0.25))).unwrap();
+    assert_eq!(names(&r), names(&s));
+}

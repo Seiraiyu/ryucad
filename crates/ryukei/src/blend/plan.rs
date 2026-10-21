@@ -10,6 +10,7 @@
 //! the two segments' spines meet where the ball touches the smooth edge,
 //! and the section of the ball there separates their faces.
 
+use super::Near;
 use super::chain::{Chain, Class};
 use super::end::{Crossing, EndCurve, EndFail, crossing, end_curve, on_edge};
 use super::fillet::{SurfaceFail, fillet_surface};
@@ -75,6 +76,13 @@ pub(crate) enum Joint {
         smooth: EdgeId,
         point: Point3,
         at: f64,
+        section: Section,
+    },
+    /// A ball corner, `corner` in the list of corners; the section runs
+    /// from where the ball touches the rail face to where it touches the
+    /// other face.
+    Corner {
+        corner: usize,
         section: Section,
     },
 }
@@ -149,7 +157,8 @@ pub(crate) struct SmoothAt {
 
 /// The plan of a chain, its edges all fillets of one radius or all
 /// chamfers alike.
-pub(crate) fn plan(body: &Body, specs: &[Spec], chain: &Chain) -> Result<Plan, Error> {
+pub(crate) fn plan(body: &Body, specs: &[Spec], chain: &Chain, near: &Near) -> Result<Plan, Error> {
+    let corners = near.corners;
     let kind = specs[chain.edges[0].0].kind;
     let (starts, closed) = boundaries(chain);
     let n = chain.edges.len();
@@ -173,6 +182,7 @@ pub(crate) fn plan(body: &Body, specs: &[Spec], chain: &Chain) -> Result<Plan, E
     }
     let mut ends: Vec<EndAt> = Vec::new();
     let mut smooths: Vec<SmoothAt> = Vec::new();
+    let mut at_corners: Vec<(usize, usize, f64)> = Vec::new();
     for (vi, class) in chain.classes.iter().enumerate() {
         match *class {
             Class::End { face, cuts } => {
@@ -220,6 +230,27 @@ pub(crate) fn plan(body: &Body, specs: &[Spec], chain: &Chain) -> Result<Plan, E
                 parts[after].start = [Some(j.tb); 2];
                 smooths.push(j.at);
             }
+            Class::Corner => {
+                let first = vi == 0;
+                let p = if first { 0 } else { parts.len() - 1 };
+                let ci = corners
+                    .iter()
+                    .position(|c| c.vertex == chain.vertices[vi])
+                    .expect("a corner at a corner vertex");
+                let part = &mut parts[p];
+                let at = body.vertices[chain.vertices[vi]].name;
+                let spine = part.spine.as_ref().ok_or(BlendError::Unsupported { at })?;
+                let (t, d) = nearest(&spine.curve, part.span, corners[ci].centre);
+                if d > 10.0 * spine.tolerance.max(crate::tol::LINEAR_RESOLUTION) {
+                    return Err(BlendError::Uncertain { at }.into());
+                }
+                if first {
+                    part.start = [Some(t); 2];
+                } else {
+                    part.end = [Some(t); 2];
+                }
+                at_corners.push((vi, ci, t));
+            }
             Class::Closed | Class::Join => {}
         }
     }
@@ -264,6 +295,27 @@ pub(crate) fn plan(body: &Body, specs: &[Spec], chain: &Chain) -> Result<Plan, E
             face: e.face,
             crossings: e.crossings,
             curve: Box::new(curve),
+        };
+    }
+    for (vi, ci, t) in at_corners {
+        let part = if vi == 0 {
+            &parts[0]
+        } else {
+            &parts[parts.len() - 1]
+        };
+        let corner = &corners[ci];
+        let at = body.vertices[corner.vertex].name;
+        let spine = part.spine.as_ref().ok_or(BlendError::Unsupported { at })?;
+        let section = ball_section(
+            spine.curve.point(t),
+            corner.radius,
+            corner.foot(part.faces[0]),
+            corner.foot(part.faces[1]),
+        )
+        .ok_or(BlendError::Uncertain { at })?;
+        joints[vi] = Joint::Corner {
+            corner: ci,
+            section,
         };
     }
     for s in smooths {
@@ -508,11 +560,7 @@ fn fillet_joint(
     };
     // The section: the ball's circle in the plane normal to the spine,
     // from the corner to the point on the smooth edge.
-    let (x, y) = (corner - c, point - c);
-    let z = x.cross(y);
-    let frame = Frame::new(c, z, x).map_err(|_| uncertain())?;
-    let circle = Circle::new(frame, sa.radius).map_err(|_| uncertain())?;
-    let phi = crate::math::atan2(z.length(), x.dot(y));
+    let section = ball_section(c, sa.radius, corner, point).ok_or_else(uncertain)?;
     Ok(Joint2 {
         ta,
         tb,
@@ -521,10 +569,7 @@ fn fillet_joint(
             smooth,
             point,
             at: param,
-            section: Section {
-                curve: Curve::Circle(circle),
-                interval: [0.0, phi],
-            },
+            section,
         },
     })
 }
@@ -558,6 +603,20 @@ pub(crate) fn on_face(part: &Partial, m: Point3) -> f64 {
     }
 }
 
+/// The arc of the ball about `c` of `radius` from `from` to `to`, in the
+/// plane through all three.
+pub(crate) fn ball_section(c: Point3, radius: f64, from: Point3, to: Point3) -> Option<Section> {
+    let (x, y) = (from - c, to - c);
+    let z = x.cross(y);
+    let frame = Frame::new(c, z, x).ok()?;
+    let circle = Circle::new(frame, radius).ok()?;
+    let phi = crate::math::atan2(z.length(), x.dot(y));
+    Some(Section {
+        curve: Curve::Circle(circle),
+        interval: [0.0, phi],
+    })
+}
+
 /// The error for a failed end.
 pub(crate) fn end_error(e: EndFail, edge: Name, face: Name, end: Name) -> Error {
     match e {
@@ -587,9 +646,10 @@ mod tests {
             })
             .collect();
         let specs = resolve(b, &blends)?;
+        let near = Near { corners: &[] };
         chains(b, &specs)?
             .iter()
-            .map(|c| plan(b, &specs, c))
+            .map(|c| plan(b, &specs, c, &near))
             .collect()
     }
 
