@@ -298,7 +298,7 @@ pub enum Request {
     #[serde(rename = "check_format")]
     CheckFormat {},
     /// What changed between two revisions (`HEAD` and the working files by
-    /// default): files as ryucad reads them.
+    /// default): files as ryucad reads them, and with `model` the bodies.
     #[serde(rename = "diff")]
     Diff {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -307,6 +307,9 @@ pub enum Request {
         to: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         part: Option<String>,
+        /// Rebuild both and add what changed in the bodies.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        model: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         positions: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]

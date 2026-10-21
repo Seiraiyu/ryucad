@@ -84,7 +84,7 @@ enum Command {
     /// Report files that aren't canonical, broken, unlisted or unknown.
     CheckFormat,
     /// What changed between two revisions: features, parameters and sketch
-    /// entities.
+    /// entities, and with --model what that did to the bodies.
     Diff {
         /// The revision to compare from: HEAD by default.
         #[arg(long, value_name = "REV")]
@@ -96,6 +96,10 @@ enum Command {
         /// Only this part.
         #[arg(long)]
         part: Option<String>,
+        /// Rebuild both and say what changed in the bodies: faces, edges and
+        /// vertices gone, new and changed, and failures.
+        #[arg(long)]
+        model: bool,
         /// List every sketch position that moved.
         #[arg(long)]
         positions: bool,
@@ -901,12 +905,14 @@ fn request(cmd: &Command) -> Option<Request> {
             from,
             to,
             part,
+            model,
             positions,
             all,
         } => Request::Diff {
             from: from.clone(),
             to: to.clone(),
             part: part.clone(),
+            model: *model,
             positions: *positions,
             all: *all,
         },

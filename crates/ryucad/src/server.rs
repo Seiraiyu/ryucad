@@ -286,6 +286,7 @@ fn dispatch(
             from,
             to,
             part,
+            model,
             positions,
             all,
         } => {
@@ -298,6 +299,7 @@ fn dispatch(
                 session,
                 from.as_deref().unwrap_or("HEAD"),
                 to.as_deref().unwrap_or("working"),
+                model,
                 &opts,
             )
         }
@@ -1994,8 +1996,26 @@ fn files_at(session: &mut Session, rev: &str) -> Result<(Value, activity::Files)
     Ok((json!({"rev": rev, "commit": r.commit}), r.files))
 }
 
+/// Every part of a revision, rebuilt.
+fn rebuilt_at(session: &mut Session, rev: &str) -> Result<BTreeMap<String, crate::diff::Built>> {
+    let (_, s) = session.at(Some(rev))?;
+    let ids: Vec<Id> = s.project().parts.keys().cloned().collect();
+    let mut out = BTreeMap::new();
+    for id in ids {
+        let r = s.rebuilt(&id)?;
+        out.insert(id.to_string(), r.features.clone());
+    }
+    Ok(out)
+}
+
 /// `diff`: what changed from one revision to another.
-fn diff(session: &mut Session, from: &str, to: &str, opts: &crate::diff::Options) -> Result<Value> {
+fn diff(
+    session: &mut Session,
+    from: &str,
+    to: &str,
+    model: bool,
+    opts: &crate::diff::Options,
+) -> Result<Value> {
     if let Some(p) = &opts.part {
         part_id(p)?;
     }
@@ -2004,6 +2024,11 @@ fn diff(session: &mut Session, from: &str, to: &str, opts: &crate::diff::Options
     let mut v = crate::diff::structural(&fa, &fb, opts);
     v["from"] = a;
     v["to"] = b;
+    if model {
+        let from = rebuilt_at(session, from)?;
+        let to = rebuilt_at(session, to)?;
+        crate::diff::model(&mut v, &from, &to, opts);
+    }
     Ok(v)
 }
 

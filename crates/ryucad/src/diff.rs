@@ -1,7 +1,7 @@
 //! What changed between two versions of a project: [`textconv`] renders
 //! one file as lines for Git's own diff to compare; [`structural`] compares
 //! two versions' files as ryucad reads them, per part, feature, parameter
-//! and sketch entity.
+//! and sketch entity; [`model`] adds what that did to the rebuilt bodies.
 
 use crate::activity::Files;
 use serde_json::{Map, Value, json};
@@ -498,9 +498,227 @@ pub fn structural(from: &Files, to: &Files, opts: &Options) -> Value {
     json!({"manifest": {"changes": manifest}, "parts": out})
 }
 
+/// A part's rebuilt features on one side, in order.
+pub type Built = Vec<(
+    crate::doc::id::Id,
+    crate::error::Result<crate::rebuild::Output>,
+)>;
+
+/// A feature's result as the model diff reports it.
+fn result(r: Option<&crate::error::Result<crate::rebuild::Output>>) -> Value {
+    match r {
+        None => Value::Null,
+        Some(Ok(o)) => json!({"ok": true, "hash": o.hash()}),
+        Some(Err(e)) => json!({"ok": false, "error": e.code}),
+    }
+}
+
+/// A point's bits, so that equal means identical.
+fn bits(p: ryukei::geom::Point3) -> [u64; 3] {
+    [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]
+}
+
+/// Each face, edge and vertex of a body by name, with what its geometry
+/// is: a vertex's point, an edge's curve, range and end points, a face's
+/// surface, sense and boundary.
+struct Named<'a> {
+    body: &'a ryukei::topo::Body,
+    faces: BTreeMap<String, ryukei::topo::FaceId>,
+    edges: BTreeMap<String, ryukei::topo::EdgeId>,
+    vertices: BTreeMap<String, ryukei::topo::VertexId>,
+}
+
+impl<'a> Named<'a> {
+    fn new(body: &'a ryukei::topo::Body) -> Named<'a> {
+        let live = "live";
+        Named {
+            body,
+            faces: body
+                .faces()
+                .map(|f| (body.face(f).expect(live).name.to_string(), f))
+                .collect(),
+            edges: body
+                .edges()
+                .map(|e| (body.edge(e).expect(live).name.to_string(), e))
+                .collect(),
+            vertices: body
+                .vertices()
+                .map(|v| (body.vertex(v).expect(live).name.to_string(), v))
+                .collect(),
+        }
+    }
+
+    fn point(&self, v: ryukei::topo::VertexId) -> [u64; 3] {
+        bits(self.body.vertex(v).expect("live").point)
+    }
+
+    /// The names of a face's edges, in loop order.
+    fn boundary(&self, f: ryukei::topo::FaceId) -> Vec<String> {
+        let b = self.body;
+        b.face_loops(f)
+            .flat_map(|l| b.loop_fins(l).collect::<Vec<_>>())
+            .map(|fin| {
+                let e = b.fin(fin).expect("live").edge;
+                b.edge(e).expect("live").name.to_string()
+            })
+            .collect()
+    }
+}
+
+/// Whether the entity named `n` is the same on both sides, by its own
+/// geometry and (for edges and faces) its boundary's.
+fn same_vertex(a: &Named, b: &Named, n: &str) -> bool {
+    a.point(a.vertices[n]) == b.point(b.vertices[n])
+}
+
+fn same_edge(a: &Named, b: &Named, n: &str) -> bool {
+    let (x, y) = (
+        a.body.edge(a.edges[n]).expect("live"),
+        b.body.edge(b.edges[n]).expect("live"),
+    );
+    a.body.curve(x.curve) == b.body.curve(y.curve)
+        && x.interval.map(f64::to_bits) == y.interval.map(f64::to_bits)
+        && a.point(x.start) == b.point(y.start)
+        && a.point(x.end) == b.point(y.end)
+}
+
+fn same_face(a: &Named, b: &Named, n: &str) -> bool {
+    let (fa, fb) = (a.faces[n], b.faces[n]);
+    let (x, y) = (
+        a.body.face(fa).expect("live"),
+        b.body.face(fb).expect("live"),
+    );
+    let (ea, eb) = (a.boundary(fa), b.boundary(fb));
+    a.body.surface(x.surface) == b.body.surface(y.surface)
+        && x.sense == y.sense
+        && ea == eb
+        && ea
+            .iter()
+            .all(|e| !b.edges.contains_key(e) || same_edge(a, b, e))
+}
+
+/// Names on one side only, and those on both whose geometry differs, for
+/// one kind of entity.
+fn names(
+    a: &BTreeMap<String, impl Copy>,
+    b: &BTreeMap<String, impl Copy>,
+    same: impl Fn(&str) -> bool,
+) -> Value {
+    let gone: Vec<&String> = a.keys().filter(|n| !b.contains_key(*n)).collect();
+    let new: Vec<&String> = b.keys().filter(|n| !a.contains_key(*n)).collect();
+    let changed: Vec<&String> = a
+        .keys()
+        .filter(|n| b.contains_key(*n) && !same(n))
+        .collect();
+    json!({"gone": gone, "new": new, "changed": changed})
+}
+
+/// What changed between two builds of one feature's body. A face that was
+/// renamed is one gone and one new: that is what a reference to it sees.
+pub fn bodies(a: &ryukei::topo::Body, b: &ryukei::topo::Body) -> Value {
+    let (x, y) = (Named::new(a), Named::new(b));
+    let extent = |body| match crate::inspect::body_extent(body) {
+        Some((min, max)) => json!({"min": min, "max": max}),
+        None => Value::Null,
+    };
+    json!({
+        "faces": names(&x.faces, &y.faces, |n| same_face(&x, &y, n)),
+        "edges": names(&x.edges, &y.edges, |n| same_edge(&x, &y, n)),
+        "vertices": names(&x.vertices, &y.vertices, |n| same_vertex(&x, &y, n)),
+        "bounds": {"from": extent(a), "to": extent(b)},
+    })
+}
+
+/// One feature's results on each side: whether each built, and, when the
+/// results differ, what changed in its body or sketch.
+fn feature_model(
+    a: Option<&crate::error::Result<crate::rebuild::Output>>,
+    b: Option<&crate::error::Result<crate::rebuild::Output>>,
+) -> Value {
+    let mut v = json!({"from": result(a), "to": result(b)});
+    let ok = |r: Option<&crate::error::Result<crate::rebuild::Output>>| {
+        r.and_then(|r| r.as_ref().ok()).cloned()
+    };
+    match (ok(a), ok(b)) {
+        (Some(x), Some(y)) if x.hash() != y.hash() => match (x.body(), y.body()) {
+            (Some(p), Some(q)) => v["body"] = bodies(&p.body, &q.body),
+            _ => {
+                if let (Some(p), Some(q)) = (x.sketch(), y.sketch()) {
+                    let state = |s: &crate::sketch::Solved| json!({"state": s.report.state_str(), "dof": s.report.dof});
+                    v["sketch"] = json!({"from": state(p), "to": state(q)});
+                }
+            }
+        },
+        _ => {}
+    }
+    v
+}
+
+/// A feature's result among one side's.
+fn find<'a>(
+    side: &'a Built,
+    id: &crate::doc::id::Id,
+) -> Option<&'a crate::error::Result<crate::rebuild::Output>> {
+    side.iter().find(|(x, _)| x == id).map(|(_, r)| r)
+}
+
+/// Adds to a structural diff `v` what the change did to the model, from
+/// both sides' rebuilt parts: under each feature whose result differs (or
+/// every feature with `all`), `model` with its results on each side and,
+/// for a body, the faces, edges and vertices gone, new and changed, and
+/// its box; for a sketch, its state and freedom.
+pub fn model(
+    v: &mut Value,
+    from: &BTreeMap<String, Built>,
+    to: &BTreeMap<String, Built>,
+    opts: &Options,
+) {
+    let parts: BTreeSet<&String> = from.keys().chain(to.keys()).collect();
+    let none = Built::new();
+    for part in parts {
+        if opts.part.as_ref().is_some_and(|p| p != part) {
+            continue;
+        }
+        let (a, b) = (
+            from.get(part).unwrap_or(&none),
+            to.get(part).unwrap_or(&none),
+        );
+        // Every feature built on either side, in the newer order first.
+        let mut ids: Vec<&crate::doc::id::Id> = b.iter().map(|(id, _)| id).collect();
+        ids.extend(
+            a.iter()
+                .map(|(id, _)| id)
+                .filter(|id| !b.iter().any(|(x, _)| x == *id)),
+        );
+        for id in ids {
+            let (ra, rb) = (find(a, id), find(b, id));
+            let differs = result(ra) != result(rb);
+            if !differs && !opts.all {
+                continue;
+            }
+            let m = feature_model(ra, rb);
+            let p = &mut v["parts"][part.as_str()];
+            if p.is_null() {
+                *p = json!({
+                    "status": "same",
+                    "order": {"added": [], "removed": [], "moved": []},
+                    "parameters": {"added": [], "removed": [], "changed": []},
+                    "features": {},
+                });
+            }
+            let f = &mut p["features"][id.as_str()];
+            if f.is_null() {
+                *f = json!({"status": "same"});
+            }
+            f["model"] = m;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::Session;
     use serde_json::json;
 
     fn text(v: Value) -> String {
@@ -769,6 +987,112 @@ mod tests {
         assert_eq!(e.code, crate::error::Code::RevNotFound);
         let e = call(&mut s, "diff", json!({"part": "Bad Part"})).unwrap_err();
         assert_eq!(e.code, crate::error::Code::InvalidId);
+    }
+
+    #[test]
+    fn a_model_diff_says_what_the_bodies_did() {
+        use crate::git::tests::git;
+        use crate::server::tests::{call, fresh};
+        let (dir, mut s) = fresh();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        for f in [
+            json!({"type": "box", "id": "b", "params": {"x": 10, "y": 20, "z": 5}}),
+            json!({"type": "sphere", "id": "c", "params": {"radius": 1}}),
+            json!({"type": "torus", "id": "t", "params": {"major_radius": 9, "minor_radius": 1}}),
+            json!({"type": "sketch", "id": "s"}),
+        ] {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(&mut s, "feature.add", f).unwrap();
+        }
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": crate::sketch::tests::rectangle_ops()}),
+        )
+        .unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "start"]);
+        // The box grows along x, the sphere goes, the torus breaks and the
+        // sketch is wider.
+        let edit = |s: &mut Session, id: &str, params: Value| {
+            call(
+                s,
+                "feature.edit",
+                json!({"part": "p", "id": id, "params": params}),
+            )
+            .unwrap();
+        };
+        edit(&mut s, "b", json!({"x": 12}));
+        edit(&mut s, "t", json!({"major_radius": 1}));
+        call(&mut s, "feature.delete", json!({"part": "p", "id": "c"})).unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [{"op": "set", "id": "width", "value": "30 mm"}]}),
+        )
+        .unwrap();
+        let v = call(&mut s, "diff", json!({"model": true})).unwrap();
+        let f = &v["parts"]["p"]["features"];
+        let b = &f["b"]["model"];
+        assert_eq!(
+            (b["from"]["ok"].as_bool(), b["to"]["ok"].as_bool()),
+            (Some(true), Some(true))
+        );
+        assert_ne!(b["from"]["hash"], b["to"]["hash"]);
+        let count = |kind: &str, what: &str| b["body"][kind][what].as_array().unwrap().len();
+        // The face at x = 0 and its four edges stay where they were.
+        assert_eq!((count("faces", "gone"), count("faces", "new")), (0, 0));
+        assert_eq!(count("faces", "changed"), 5);
+        assert_eq!(count("edges", "changed"), 8);
+        assert_eq!(count("vertices", "changed"), 4);
+        assert_eq!(b["body"]["bounds"]["from"]["max"][0], 0.01);
+        assert_eq!(b["body"]["bounds"]["to"]["max"][0], 0.012);
+        assert_eq!(f["c"]["status"], "removed");
+        assert_eq!(f["c"]["model"]["to"], Value::Null);
+        assert_eq!(f["c"]["model"]["from"]["ok"], true);
+        assert_eq!(f["t"]["model"]["to"]["ok"], false);
+        assert_eq!(f["t"]["model"]["to"]["error"], "rebuild_failed");
+        let sk = &f["s"]["model"]["sketch"];
+        assert_eq!(sk["from"]["state"], sk["to"]["state"]);
+        // With nothing changed there is no model to report, unless asked.
+        let same = call(&mut s, "diff", json!({"to": "HEAD", "model": true})).unwrap();
+        assert_eq!(same["parts"], json!({}));
+        let all = call(
+            &mut s,
+            "diff",
+            json!({"to": "HEAD", "model": true, "all": true}),
+        )
+        .unwrap();
+        let c = &all["parts"]["p"]["features"]["c"];
+        assert_eq!(c["status"], "same");
+        assert_eq!(c["model"]["from"], c["model"]["to"]);
+        assert!(c["model"].get("body").is_none());
+    }
+
+    #[test]
+    fn a_renamed_body_is_all_gone_and_new() {
+        use crate::doc::files::{Feature, Placement, Primitive, PrimitiveType};
+        use crate::units::{Quantity, Unit};
+        let id = |s: &str| crate::doc::id::Id::parse(s, "feature").unwrap();
+        let f = Feature::Primitive(Primitive {
+            ty: PrimitiveType::Sphere,
+            params: [("radius".to_owned(), Quantity::parse("1", Unit::Mm).unwrap())].into(),
+            placement: Placement::identity(Unit::Mm),
+        });
+        let a = crate::rebuild::build_feature(&id("p"), &id("one"), &f).unwrap();
+        let b = crate::rebuild::build_feature(&id("p"), &id("two"), &f).unwrap();
+        let v = bodies(&a.body, &b.body);
+        assert_eq!(v["faces"]["gone"].as_array().unwrap().len(), 1);
+        assert_eq!(v["faces"]["new"].as_array().unwrap().len(), 1);
+        assert_ne!(v["faces"]["gone"], v["faces"]["new"]);
+        assert_eq!(v["faces"]["changed"], json!([]));
+        let same = bodies(&a.body, &a.body);
+        for kind in ["faces", "edges", "vertices"] {
+            assert_eq!(same[kind], json!({"gone": [], "new": [], "changed": []}));
+        }
     }
 
     #[test]
