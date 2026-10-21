@@ -42,6 +42,7 @@ jobs:
       - run: cargo test -p ryukei --release --test pipe_props
       - run: cargo test -p ryukei --release --test blends
       - run: cargo test -p ryukei --release --test chamfers
+      - run: cargo test -p ryukei --release --test blend_props
       - if: failure()
         name: the viewport as drawn, if it no longer matches its snapshot
         uses: actions/upload-artifact@v4
