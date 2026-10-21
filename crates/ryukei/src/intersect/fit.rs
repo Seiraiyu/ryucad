@@ -32,8 +32,8 @@ use super::ss_trace::Traced;
 use super::{Failure, SLACK};
 use crate::geom::chain3::Piece3;
 use crate::geom::{
-    BezierCurve, Curve, Hom, KnotVector, NurbsCurve, NurbsCurve2, Pipe, Point2, Point3, Surface,
-    Vector2, Vector3,
+    BezierCurve, Curve, Curve2, Hom, KnotVector, NurbsCurve, NurbsCurve2, Pipe, Point2, Point3,
+    Surface, Vector2, Vector3,
 };
 use crate::geom::{cos_abs_max, cos_range};
 use crate::math;
@@ -781,6 +781,124 @@ pub(crate) fn fit_pcurve(
     unreachable!("the loop returns")
 }
 
+/// A curve fitted along a pcurve on a surface (see [`fit_along`]).
+#[allow(dead_code)] // Task 7 lifts rails with it.
+#[derive(Clone, Debug)]
+pub(crate) struct Lifted {
+    pub(crate) curve: NurbsCurve,
+    /// The curve's own pcurve on the surface, by the same parameter.
+    pub(crate) pcurve: NurbsCurve2,
+    /// How far the pcurve's image may stray from the curve, certified (at
+    /// least [`LINEAR_RESOLUTION`]).
+    pub(crate) tolerance: f64,
+}
+
+/// The curve on `surface` along `pcurve` over `[t0, t1]`, where the
+/// pcurve's parameter is `map[0] + map[1] t`: the image `S(P(t))` fitted
+/// by cubic Hermite spans in `t`, with a polynomial pcurve fitted through
+/// the same samples, and the certified bound on `|S(P̃(t)) - C(t)|` by
+/// [`pcurve_bound`]. A span whose bound exceeds [`LINEAR_RESOLUTION`]
+/// gets a sample in its middle; a fit that can't get within
+/// `10 × LINEAR_RESOLUTION` is [`Failure::Uncertain`]. A rail of a fillet
+/// along a fitted spine is the face's surface along the spine's pcurve
+/// on its offset.
+#[allow(dead_code)] // Task 7 lifts rails with it.
+pub(crate) fn fit_along(
+    surface: &Surface,
+    pcurve: &Curve2,
+    map: [f64; 2],
+    [t0, t1]: [f64; 2],
+) -> Result<Lifted, Failure> {
+    let at = |t: f64| -> Result<Sample, Failure> {
+        let e = pcurve.eval(map[0] + map[1] * t);
+        let duv = e.d1 * map[1];
+        let s = surface.eval(e.point.x, e.point.y);
+        let d = s.du * duv.x + s.dv * duv.y;
+        if !(d.length().is_finite() && s.point.to_vector().length().is_finite()) {
+            return Err(Failure::Uncertain);
+        }
+        Ok(Sample {
+            s: t,
+            p: s.point,
+            d,
+            uv: [e.point; 2],
+            duv: [duv; 2],
+        })
+    };
+    let n = 8;
+    let mut samples = (0..=n)
+        .map(|i| at(t0 + (t1 - t0) * i as f64 / n as f64))
+        .collect::<Result<Vec<_>, _>>()?;
+    let bound_of = |a: &Sample, b: &Sample| {
+        let h = b.s - a.s;
+        let span = piece(
+            hermite(a.p.to_vector(), a.d, b.p.to_vector(), b.d, h),
+            [a.s, b.s],
+        );
+        let p2 = piece(
+            hermite(
+                a.uv[0].to_vector(),
+                a.duv[0],
+                b.uv[0].to_vector(),
+                b.duv[0],
+                h,
+            ),
+            [a.s, b.s],
+        );
+        pcurve_bound(surface, &p2, &SpanTarget(&span), LINEAR_RESOLUTION)
+    };
+    let mut bounds: Vec<Option<f64>> = vec![None; samples.len() - 1];
+    for round in 0.. {
+        let mut worst = 0.0f64;
+        let mut split = Vec::new();
+        for i in 0..samples.len() - 1 {
+            let b = *bounds[i].get_or_insert_with(|| bound_of(&samples[i], &samples[i + 1]));
+            worst = worst.max(b);
+            if b > LINEAR_RESOLUTION {
+                split.push(i);
+            }
+        }
+        if split.is_empty() || round == MAX_ROUNDS || samples.len() + split.len() > MAX_SAMPLES {
+            if worst > 10.0 * LINEAR_RESOLUTION {
+                return Err(Failure::Uncertain);
+            }
+            let knots: Vec<f64> = samples.iter().map(|s| s.s).collect();
+            let mut mults = vec![3; knots.len()];
+            mults[0] = 4;
+            mults[knots.len() - 1] = 4;
+            let kv = KnotVector::clamped(3, &knots, &mults).map_err(|_| Failure::Uncertain)?;
+            let mut pts3 = vec![samples[0].p];
+            let mut pts2 = vec![samples[0].uv[0]];
+            for w in samples.windows(2) {
+                let (a, b) = (&w[0], &w[1]);
+                let h = b.s - a.s;
+                let c = hermite(a.p.to_vector(), a.d, b.p.to_vector(), b.d, h);
+                pts3.extend(c[1..].iter().map(|&v| Point3::ORIGIN + v));
+                let c = hermite(
+                    a.uv[0].to_vector(),
+                    a.duv[0],
+                    b.uv[0].to_vector(),
+                    b.duv[0],
+                    h,
+                );
+                pts2.extend(c[1..].iter().map(|&v| Point2::ORIGIN + v));
+            }
+            return Ok(Lifted {
+                curve: NurbsCurve::new(kv.clone(), pts3, None).map_err(|_| Failure::Uncertain)?,
+                pcurve: NurbsCurve2::new(kv, pts2, None).map_err(|_| Failure::Uncertain)?,
+                tolerance: worst.max(LINEAR_RESOLUTION),
+            });
+        }
+        for &i in split.iter().rev() {
+            let mid = at((samples[i].s + samples[i + 1].s) / 2.0)?;
+            samples.insert(i + 1, mid);
+            bounds[i] = None;
+            bounds.insert(i + 1, None);
+        }
+    }
+    unreachable!("the loop returns")
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::ss_trace::trace;
@@ -889,6 +1007,29 @@ mod tests {
                     assert!(f.curve.point(s0).distance(f.curve.point(s1)) <= 1e-12);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_latitude_lifted_off_a_sphere_is_its_circle() {
+        use crate::geom::{Curve2, Line2, Vector2};
+        let s = Surface::Sphere(Sphere::new(frame((1.0, 2.0, 3.0), (0.0, 0.6, 0.8)), 2.0).unwrap());
+        let lat = 0.4;
+        let line =
+            Curve2::Line2(Line2::new(Point2::new(0.0, lat), Vector2::new(1.0, 0.0)).unwrap());
+        let tau = core::f64::consts::TAU;
+        // The circle's parameter is half the pcurve's, from 1.
+        let lifted = fit_along(&s, &line, [-2.0, 2.0], [1.0, 1.0 + tau / 2.0]).unwrap();
+        assert!(lifted.tolerance <= LINEAR_RESOLUTION * 1.0001);
+        let [a, b] = lifted.curve.domain();
+        assert_eq!([a, b], [1.0, 1.0 + tau / 2.0]);
+        assert!(lifted.curve.point(a).distance(lifted.curve.point(b)) < 1e-12);
+        for i in 0..=50 {
+            let t = a + (b - a) * i as f64 / 50.0;
+            let want = s.point(-2.0 + 2.0 * t, lat);
+            assert!(lifted.curve.point(t).distance(want) <= lifted.tolerance);
+            let uv = lifted.pcurve.point(t);
+            assert!(s.point(uv.x, uv.y).distance(lifted.curve.point(t)) <= lifted.tolerance);
         }
     }
 
