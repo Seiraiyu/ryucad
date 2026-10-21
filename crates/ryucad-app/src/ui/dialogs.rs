@@ -159,6 +159,7 @@ pub fn preferences(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, vie
                         &["coarse", "normal", "fine"],
                     );
                     toggle(ui, ws, "display.edges", "Draw edges");
+                    toggle(ui, ws, "display.sketches", "Draw sketches");
                     number(
                         ui,
                         ws,

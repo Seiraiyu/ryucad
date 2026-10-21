@@ -176,6 +176,29 @@ impl Project {
     }
 }
 
+impl Project {
+    /// After [`Project::with_part`]: a sketch `top` on the box's top face
+    /// (placed, not referenced), under-defined: a line, a circle of
+    /// radius 1.5 mm (dimension `d1`) and a construction line.
+    pub fn with_top_sketch(self) -> Project {
+        self.ok(&[
+            "feature", "add", "p", "sketch", "--id", "top", "--origin", "0,0,5",
+        ]);
+        let ops = serde_json::json!([
+            {"op": "add", "type": "point", "at": [5, 2]},
+            {"op": "add", "type": "point", "at": [17, 2]},
+            {"op": "add", "type": "point", "at": [15, 7]},
+            {"op": "add", "type": "point", "at": [6, 8]},
+            {"op": "add", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "type": "circle", "center": "p3", "r": 1.5},
+            {"op": "add", "type": "line", "construction": true, "start": "p4", "end": "p3"},
+            {"op": "add", "type": "radius", "a": "ci1", "value": "1.5 mm"}
+        ]);
+        self.ok(&["sketch", "edit", "p", "top", &ops.to_string()]);
+        self
+    }
+}
+
 impl Drop for Project {
     fn drop(&mut self) {
         let _ = Command::new(&ryucad().exe)

@@ -1,12 +1,14 @@
-//! Picking: which face, edge or vertex is under the mouse. Faces are hit
-//! by a ray cast against their triangles; edges and vertices by their
-//! distance on screen, so a thin edge can be picked without pixel-perfect
-//! aim. Within reach, a vertex wins over an edge and an edge over a face,
-//! and nothing hidden behind a face is picked.
+//! Picking: which face, edge or vertex, or sketch point or curve, is
+//! under the mouse. Faces are hit by a ray cast against their triangles;
+//! edges, vertices and sketch entities by their distance on screen, so a
+//! thin edge can be picked without pixel-perfect aim. Within reach, a
+//! vertex or sketch point wins over an edge or sketch curve, and those
+//! over a face; nothing hidden behind a face is picked.
 
 use crate::core::model::{BodyKey, Model};
 use crate::core::nav::Projector;
-use ryucad::entity::EntityKind;
+use crate::core::sketch::Drawing;
+use ryucad::entity::{EntityKind, Target};
 use ryucad::mesh::{WireBody, WireMesh, name_hex};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,9 +20,10 @@ pub const VERTEX_REACH: f64 = 7.0;
 /// What is under the mouse.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Hit {
-    /// The entity reference: `<part>/<feature>/<name>`.
+    /// The entity reference: `<part>/<feature>/<name>`, or
+    /// `<part>/<sketch>/<entity>`.
     pub entity: String,
-    pub kind: EntityKind,
+    pub kind: Target,
     pub part: String,
     pub feature: String,
     /// The point picked, in meters: where an orbit turns and a zoom aims.
@@ -35,14 +38,24 @@ struct Body {
     hi: [f64; 3],
 }
 
-/// The model's meshes prepared for picking. Rebuild it when the model's
-/// generation changes.
+/// Where an entity is in the picker: a body's face, edge or vertex by its
+/// index in the mesh, or a sketch's curve or point by its index in the
+/// drawing.
+#[derive(Clone, Copy, Debug)]
+enum Slot {
+    Body(usize, EntityKind, usize),
+    Curve(usize, usize),
+    Dot(usize, usize),
+}
+
+/// The model's meshes and sketches prepared for picking. Rebuild it when
+/// the model's generation changes.
 pub struct Picker {
     pub generation: u64,
     bodies: Vec<Body>,
-    /// Every entity reference: its body (an index into `bodies`), its kind
-    /// and its index in the body's mesh.
-    index: HashMap<String, (usize, EntityKind, usize)>,
+    sketches: Vec<(BodyKey, Arc<Drawing>)>,
+    /// Every entity reference, and where it is.
+    index: HashMap<String, Slot>,
 }
 
 /// Where an entity is drawn.
@@ -50,8 +63,9 @@ pub struct Picker {
 pub enum Place {
     /// A face: its body and index among the mesh's faces.
     Face(BodyKey, usize),
-    /// An edge's polyline.
+    /// An edge's or sketch curve's polyline.
     Edge(Vec<[f64; 3]>),
+    /// A vertex or sketch point.
     Vertex([f64; 3]),
 }
 
@@ -129,31 +143,45 @@ fn to_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> (f64, f64) {
     ((q[0] * q[0] + q[1] * q[1]).sqrt(), s)
 }
 
-/// A candidate edge or vertex: how far from the mouse on screen, and its
-/// point.
+/// A candidate point or curve: how far from the mouse on screen, its
+/// point, and what it is.
 struct Near {
     px: f64,
     point: [f64; 3],
     entity: String,
     key: BodyKey,
+    kind: Target,
+}
+
+/// The box around `points`, if there are any.
+fn bounds(points: impl IntoIterator<Item = [f64; 3]>) -> Option<([f64; 3], [f64; 3])> {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for p in points {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    (lo[0] <= hi[0]).then_some((lo, hi))
 }
 
 impl Picker {
+    /// The model's meshes and sketches.
     pub fn new(model: &Model) -> Picker {
+        Picker::of(model, true)
+    }
+
+    /// The model's meshes, and its sketches if `sketches` (they are
+    /// drawn).
+    pub fn of(model: &Model, sketches: bool) -> Picker {
         let bodies: Vec<Body> = model
             .meshes
             .iter()
             .filter_map(|(key, b)| {
                 let m = mesh(b)?;
-                let mut lo = [f64::INFINITY; 3];
-                let mut hi = [f64::NEG_INFINITY; 3];
-                for i in 0..m.positions.len() {
-                    let p = at(m, i as u32);
-                    for k in 0..3 {
-                        lo[k] = lo[k].min(p[k]);
-                        hi[k] = hi[k].max(p[k]);
-                    }
-                }
+                let (lo, hi) = bounds((0..m.positions.len()).map(|i| at(m, i as u32)))
+                    .unwrap_or(([0.0; 3], [0.0; 3]));
                 Some(Body {
                     key: key.clone(),
                     mesh: Arc::clone(b),
@@ -162,63 +190,96 @@ impl Picker {
                 })
             })
             .collect();
+        let sketches: Vec<(BodyKey, Arc<Drawing>)> = if sketches {
+            model
+                .sketches
+                .iter()
+                .map(|(k, d)| (k.clone(), Arc::clone(d)))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut index = HashMap::new();
         for (i, b) in bodies.iter().enumerate() {
             let m = mesh(&b.mesh).expect("only meshed bodies");
             let named = |n: &[u8; 16]| format!("{}/{}/{}", b.key.0, b.key.1, name_hex(n));
             for (j, f) in m.faces.iter().enumerate() {
-                index.insert(named(&f.name), (i, EntityKind::Face, j));
+                index.insert(named(&f.name), Slot::Body(i, EntityKind::Face, j));
             }
             for (j, (n, _)) in m.edges.iter().enumerate() {
-                index.insert(named(n), (i, EntityKind::Edge, j));
+                index.insert(named(n), Slot::Body(i, EntityKind::Edge, j));
             }
             for (j, (n, _)) in m.vertices.iter().enumerate() {
-                index.insert(named(n), (i, EntityKind::Vertex, j));
+                index.insert(named(n), Slot::Body(i, EntityKind::Vertex, j));
+            }
+        }
+        for (i, (key, d)) in sketches.iter().enumerate() {
+            let named = |e: &str| format!("{}/{}/{e}", key.0, key.1);
+            for (j, c) in d.curves.iter().enumerate() {
+                index.insert(named(&c.entity), Slot::Curve(i, j));
+            }
+            for (j, p) in d.dots.iter().enumerate() {
+                index.insert(named(&p.entity), Slot::Dot(i, j));
             }
         }
         Picker {
             generation: model.generation,
             bodies,
+            sketches,
             index,
         }
     }
 
-    /// Where the entity `reference` is drawn, if it is in the meshes.
+    /// The points that show where a slot is: a face's corners, an edge's
+    /// or curve's polyline, a vertex or point.
+    fn slot_points(&self, slot: Slot) -> Vec<[f64; 3]> {
+        match slot {
+            Slot::Body(i, kind, j) => {
+                let m = mesh(&self.bodies[i].mesh).expect("only meshed bodies");
+                match kind {
+                    EntityKind::Face => {
+                        let f = &m.faces[j];
+                        m.corners[f.corners.0 as usize..f.corners.1 as usize]
+                            .iter()
+                            .map(|c| at(m, c.0))
+                            .collect()
+                    }
+                    EntityKind::Edge => m.edges[j].1.iter().map(|p| at(m, *p)).collect(),
+                    EntityKind::Vertex => vec![at(m, m.vertices[j].1)],
+                }
+            }
+            Slot::Curve(i, j) => self.sketches[i].1.curves[j].points.clone(),
+            Slot::Dot(i, j) => vec![self.sketches[i].1.dots[j].at],
+        }
+    }
+
+    /// Where the entity `reference` is drawn, if it is in the meshes or
+    /// the sketches.
     pub fn place(&self, reference: &str) -> Option<Place> {
-        let (i, kind, j) = *self.index.get(reference)?;
-        let b = &self.bodies[i];
-        let m = mesh(&b.mesh)?;
-        Some(match kind {
-            EntityKind::Face => Place::Face(b.key.clone(), j),
-            EntityKind::Edge => Place::Edge(m.edges[j].1.iter().map(|p| at(m, *p)).collect()),
-            EntityKind::Vertex => Place::Vertex(at(m, m.vertices[j].1)),
+        let slot = *self.index.get(reference)?;
+        Some(match slot {
+            Slot::Body(i, EntityKind::Face, j) => Place::Face(self.bodies[i].key.clone(), j),
+            Slot::Body(_, EntityKind::Edge, _) | Slot::Curve(..) => {
+                Place::Edge(self.slot_points(slot))
+            }
+            Slot::Body(_, EntityKind::Vertex, _) | Slot::Dot(..) => {
+                Place::Vertex(self.slot_points(slot)[0])
+            }
         })
     }
 
-    /// The mesh points of the given entities, those in the meshes: what a
-    /// camera frames.
+    /// The points of the given entities, those in the meshes and
+    /// sketches: what a camera frames.
     pub fn points_of(&self, references: &[String]) -> Vec<[f64; 3]> {
-        let mut out = Vec::new();
-        for r in references {
-            let Some(&(i, kind, j)) = self.index.get(r) else {
-                continue;
-            };
-            let m = mesh(&self.bodies[i].mesh).expect("only meshed bodies");
-            match kind {
-                EntityKind::Face => {
-                    let f = &m.faces[j];
-                    for c in &m.corners[f.corners.0 as usize..f.corners.1 as usize] {
-                        out.push(at(m, c.0));
-                    }
-                }
-                EntityKind::Edge => out.extend(m.edges[j].1.iter().map(|p| at(m, *p))),
-                EntityKind::Vertex => out.push(at(m, m.vertices[j].1)),
-            }
-        }
-        out
+        references
+            .iter()
+            .filter_map(|r| self.index.get(r))
+            .flat_map(|s| self.slot_points(*s))
+            .collect()
     }
 
-    /// The mesh points of one body, or of them all.
+    /// The mesh points of one body, or the points of one sketch, or of
+    /// them all.
     pub fn points(&self, body: Option<&BodyKey>) -> Vec<[f64; 3]> {
         let mut out = Vec::new();
         for b in self
@@ -229,41 +290,29 @@ impl Picker {
             let m = mesh(&b.mesh).expect("only meshed bodies");
             out.extend((0..m.positions.len()).map(|i| at(m, i as u32)));
         }
+        for (_, d) in self
+            .sketches
+            .iter()
+            .filter(|(k, _)| body.is_none_or(|b| k == b))
+        {
+            out.extend(d.points());
+        }
         out
     }
 
-    /// The box around the given entities, those in the meshes.
+    /// The box around the given entities, those in the meshes and
+    /// sketches.
     pub fn bounds_of(&self, references: &[String]) -> Option<([f64; 3], [f64; 3])> {
-        let mut lo = [f64::INFINITY; 3];
-        let mut hi = [f64::NEG_INFINITY; 3];
-        let mut grow = |p: [f64; 3]| {
-            for k in 0..3 {
-                lo[k] = lo[k].min(p[k]);
-                hi[k] = hi[k].max(p[k]);
-            }
-        };
-        for r in references {
-            let Some(&(i, kind, j)) = self.index.get(r) else {
-                continue;
-            };
-            let m = mesh(&self.bodies[i].mesh).expect("only meshed bodies");
-            match kind {
-                EntityKind::Face => {
-                    let f = &m.faces[j];
-                    for c in &m.corners[f.corners.0 as usize..f.corners.1 as usize] {
-                        grow(at(m, c.0));
-                    }
-                }
-                EntityKind::Edge => m.edges[j].1.iter().for_each(|p| grow(at(m, *p))),
-                EntityKind::Vertex => grow(at(m, m.vertices[j].1)),
-            }
-        }
-        (lo[0] <= hi[0]).then_some((lo, hi))
+        bounds(self.points_of(references))
     }
 
-    /// The kind of entity `reference` is, if it is in the meshes.
-    pub fn kind(&self, reference: &str) -> Option<EntityKind> {
-        self.index.get(reference).map(|e| e.1)
+    /// What `reference` is, if it is in the meshes or the sketches.
+    pub fn kind(&self, reference: &str) -> Option<Target> {
+        Some(match *self.index.get(reference)? {
+            Slot::Body(_, k, _) => Target::Body(k),
+            Slot::Curve(i, j) => Target::Sketch(self.sketches[i].1.curves[j].ty),
+            Slot::Dot(..) => Target::Sketch("point"),
+        })
     }
 
     /// The faces of a body, by index: to paint it whole.
@@ -275,25 +324,19 @@ impl Picker {
             .map_or(0, |m| m.faces.len())
     }
 
-    /// The box around one body.
+    /// The box around one body, or one sketch.
     pub fn body_bounds(&self, key: &BodyKey) -> Option<([f64; 3], [f64; 3])> {
-        self.bodies
-            .iter()
-            .find(|b| &b.key == key)
-            .map(|b| (b.lo, b.hi))
+        match self.bodies.iter().find(|b| &b.key == key) {
+            Some(b) => Some((b.lo, b.hi)),
+            None => bounds(self.points(Some(key))),
+        }
     }
 
-    /// The box around every body, if there is any.
+    /// The box around every body and sketch, if there is any.
     pub fn bounds(&self) -> Option<([f64; 3], [f64; 3])> {
-        let mut lo = [f64::INFINITY; 3];
-        let mut hi = [f64::NEG_INFINITY; 3];
-        for b in &self.bodies {
-            for k in 0..3 {
-                lo[k] = lo[k].min(b.lo[k]);
-                hi[k] = hi[k].max(b.hi[k]);
-            }
-        }
-        (lo[0] <= hi[0]).then_some((lo, hi))
+        let corners = self.bodies.iter().flat_map(|b| [b.lo, b.hi]);
+        let sketched = self.sketches.iter().flat_map(|(_, d)| d.points());
+        bounds(corners.chain(sketched))
     }
 
     /// The nearest face along the ray `o + t d`: its `t`, name and body.
@@ -340,60 +383,84 @@ impl Picker {
                 depth(p) <= f + 1e-3 * f.abs().max(pr.camera.distance())
             })
         };
-        // Vertices and edges within reach, nearest first; the first visible
+        // A point within reach of the mouse.
+        let point_near = |p: [f64; 3], entity: String, key: &BodyKey, kind: Target| {
+            let s = screen(p)?;
+            let (dx, dy) = (s[0] - px[0], s[1] - px[1]);
+            let dist = (dx * dx + dy * dy).sqrt();
+            (dist <= VERTEX_REACH).then(|| {
+                let n = Near {
+                    px: dist,
+                    point: p,
+                    entity,
+                    key: key.clone(),
+                    kind,
+                };
+                (n, s)
+            })
+        };
+        // A polyline's nearest segment within reach of the mouse.
+        let curve_near = |ps: &[[f64; 3]], entity: &str, key: &BodyKey, kind: Target| {
+            let mut best: Option<(Near, [f64; 2])> = None;
+            for w in ps.windows(2) {
+                let (a, c) = (w[0], w[1]);
+                let (Some(sa), Some(sc)) = (screen(a), screen(c)) else {
+                    continue;
+                };
+                let (dist, s) = to_segment(px, sa, sc);
+                if dist > EDGE_REACH || best.as_ref().is_some_and(|(n, _)| n.px <= dist) {
+                    continue;
+                }
+                // The point along the curve under that pixel. In
+                // perspective, a fraction across the screen is not the
+                // same fraction along the curve: weigh by depth.
+                let t = match pr.camera.projection {
+                    ryucad::view::Projection::Perspective { .. } => {
+                        let (za, zc) = (depth(a), depth(c));
+                        s * za / (s * za + (1.0 - s) * zc)
+                    }
+                    ryucad::view::Projection::Orthographic { .. } => s,
+                };
+                let p = [0, 1, 2].map(|k| a[k] + (c[k] - a[k]) * t);
+                let at_s = [sa[0] + (sc[0] - sa[0]) * s, sa[1] + (sc[1] - sa[1]) * s];
+                let n = Near {
+                    px: dist,
+                    point: p,
+                    entity: entity.to_owned(),
+                    key: key.clone(),
+                    kind,
+                };
+                best = Some((n, at_s));
+            }
+            best
+        };
+        // Points and curves within reach, nearest first; the first visible
         // one wins.
-        let mut vertices: Vec<(Near, [f64; 2])> = Vec::new();
-        let mut edges: Vec<(Near, [f64; 2])> = Vec::new();
+        let mut points: Vec<(Near, [f64; 2])> = Vec::new();
+        let mut curves: Vec<(Near, [f64; 2])> = Vec::new();
         for b in &self.bodies {
             let m = mesh(&b.mesh).expect("only meshed bodies");
+            let vertex = Target::Body(EntityKind::Vertex);
             for (name, i) in &m.vertices {
-                let p = at(m, *i);
-                let Some(s) = screen(p) else { continue };
-                let (dx, dy) = (s[0] - px[0], s[1] - px[1]);
-                let dist = (dx * dx + dy * dy).sqrt();
-                if dist <= VERTEX_REACH {
-                    let n = Near {
-                        px: dist,
-                        point: p,
-                        entity: name_hex(name),
-                        key: b.key.clone(),
-                    };
-                    vertices.push((n, s));
-                }
+                points.extend(point_near(at(m, *i), name_hex(name), &b.key, vertex));
             }
+            let edge = Target::Body(EntityKind::Edge);
             for (name, ps) in &m.edges {
-                // This edge's nearest segment within reach.
-                let mut best: Option<(Near, [f64; 2])> = None;
-                for w in ps.windows(2) {
-                    let (a, c) = (at(m, w[0]), at(m, w[1]));
-                    let (Some(sa), Some(sc)) = (screen(a), screen(c)) else {
-                        continue;
-                    };
-                    let (dist, s) = to_segment(px, sa, sc);
-                    if dist > EDGE_REACH || best.as_ref().is_some_and(|(n, _)| n.px <= dist) {
-                        continue;
-                    }
-                    // The point along the edge under that pixel. In
-                    // perspective, a fraction across the screen is not the
-                    // same fraction along the edge: weigh by depth.
-                    let t = match pr.camera.projection {
-                        ryucad::view::Projection::Perspective { .. } => {
-                            let (za, zc) = (depth(a), depth(c));
-                            s * za / (s * za + (1.0 - s) * zc)
-                        }
-                        ryucad::view::Projection::Orthographic { .. } => s,
-                    };
-                    let p = [0, 1, 2].map(|k| a[k] + (c[k] - a[k]) * t);
-                    let at_s = [sa[0] + (sc[0] - sa[0]) * s, sa[1] + (sc[1] - sa[1]) * s];
-                    let n = Near {
-                        px: dist,
-                        point: p,
-                        entity: name_hex(name),
-                        key: b.key.clone(),
-                    };
-                    best = Some((n, at_s));
-                }
-                edges.extend(best);
+                let ps: Vec<[f64; 3]> = ps.iter().map(|p| at(m, *p)).collect();
+                curves.extend(curve_near(&ps, &name_hex(name), &b.key, edge));
+            }
+        }
+        for (key, d) in &self.sketches {
+            for p in &d.dots {
+                points.extend(point_near(
+                    p.at,
+                    p.entity.clone(),
+                    key,
+                    Target::Sketch("point"),
+                ));
+            }
+            for c in &d.curves {
+                curves.extend(curve_near(&c.points, &c.entity, key, Target::Sketch(c.ty)));
             }
         }
         let first_visible = |mut v: Vec<(Near, [f64; 2])>| {
@@ -402,32 +469,28 @@ impl Picker {
                 .find(|(n, s)| visible(n.point, *s))
                 .map(|(n, _)| n)
         };
-        let vertex = first_visible(vertices);
-        let edge = first_visible(edges);
-        let hit = |kind, n: Near| Hit {
+        let hit = |n: Near| Hit {
             entity: format!("{}/{}/{}", n.key.0, n.key.1, n.entity),
-            kind,
+            kind: n.kind,
             part: n.key.0,
             feature: n.key.1,
             point: n.point,
         };
-        if let Some(v) = vertex {
-            return Some(hit(EntityKind::Vertex, v));
+        if let Some(p) = first_visible(points) {
+            return Some(hit(p));
         }
-        if let Some(e) = edge {
-            return Some(hit(EntityKind::Edge, e));
+        if let Some(c) = first_visible(curves) {
+            return Some(hit(c));
         }
         let (t, name, key) = face?;
         let point = [0, 1, 2].map(|k| o[k] + d[k] * t);
-        Some(hit(
-            EntityKind::Face,
-            Near {
-                px: 0.0,
-                point,
-                entity: name,
-                key,
-            },
-        ))
+        Some(hit(Near {
+            px: 0.0,
+            point,
+            entity: name,
+            key,
+            kind: Target::Body(EntityKind::Face),
+        }))
     }
 }
 
@@ -504,7 +567,7 @@ mod tests {
         let h = pick([0.5, 0.5, 0.0], [0.0, 0.0]).unwrap();
         assert_eq!(
             (h.kind, h.entity.clone()),
-            (EntityKind::Face, format!("p/f/{}", hex(1)))
+            (Target::Body(EntityKind::Face), format!("p/f/{}", hex(1)))
         );
         assert!(
             h.point
@@ -516,13 +579,13 @@ mod tests {
         let h = pick([0.5, 0.0, 0.0], [0.0, -3.0]).unwrap();
         assert_eq!(
             (h.kind, h.entity),
-            (EntityKind::Edge, format!("p/f/{}", hex(10)))
+            (Target::Body(EntityKind::Edge), format!("p/f/{}", hex(10)))
         );
         // Near a corner, the vertex, even though an edge is nearer still.
         let h = pick([1.0, 1.0, 0.0], [-4.0, 0.0]).unwrap();
         assert_eq!(
             (h.kind, h.entity),
-            (EntityKind::Vertex, format!("p/f/{}", hex(22)))
+            (Target::Body(EntityKind::Vertex), format!("p/f/{}", hex(22)))
         );
         // Off the model, nothing.
         assert_eq!(pick([2.0, 2.0, 0.0], [0.0, 0.0]), None);
@@ -542,7 +605,7 @@ mod tests {
         );
         assert_eq!(
             picker.kind(&format!("p/f/{}", hex(23))),
-            Some(EntityKind::Vertex)
+            Some(Target::Body(EntityKind::Vertex))
         );
         assert_eq!(picker.place("p/f/00"), None);
         let edge = format!("p/f/{}", hex(11));
@@ -553,6 +616,75 @@ mod tests {
         assert_eq!(picker.bounds_of(&["p/f/00".into()]), None);
         assert_eq!(picker.faces(&key), 1);
         assert_eq!(picker.body_bounds(&key), Some(([0.0; 3], [1.0, 1.0, 0.0])));
+    }
+
+    #[test]
+    fn sketch_points_and_curves_pick_like_vertices_and_edges() {
+        use crate::core::sketch::{Curve, Dot, Drawing};
+        use ryucad::sketch_view::EntityState;
+        let mut model = square_model();
+        // A sketch just above the square: a line across its middle and a
+        // point on it; and one below it, hidden.
+        let sketch = |z: f64| Drawing {
+            revision: "r".into(),
+            curves: vec![Curve {
+                entity: "l1".into(),
+                ty: "line",
+                construction: false,
+                state: EntityState::Under,
+                points: vec![[0.1, 0.5, z], [0.9, 0.5, z]],
+            }],
+            dots: vec![Dot {
+                entity: "p1".into(),
+                state: EntityState::Under,
+                at: [0.3, 0.5, z],
+            }],
+            labels: Vec::new(),
+        };
+        model
+            .sketches
+            .insert(("p".into(), "s".into()), Arc::new(sketch(1e-4)));
+        model
+            .sketches
+            .insert(("p".into(), "u".into()), Arc::new(sketch(-0.5)));
+        let picker = Picker::new(&model);
+        let camera = view::frame(
+            [0.0, 0.0, -0.5],
+            [1.0, 1.0, 0.0],
+            StandardView::Top,
+            view::DEFAULT_PROJECTION,
+        );
+        let pr = Projector::new(&camera, 1.0, [0.5, 0.5, -0.25], 1.0);
+        let size = [400.0, 400.0];
+        let pick = |picker: &Picker, p: [f64; 3], nudge: f64| {
+            let n = pr.ndc(p).unwrap();
+            let s = [(n[0] + 1.0) / 2.0 * size[0], (1.0 - n[1]) / 2.0 * size[1]];
+            picker.pick(&pr, size, [s[0], s[1] + nudge])
+        };
+        let h = pick(&picker, [0.3, 0.5, 0.0], 2.0).unwrap();
+        assert_eq!(
+            (h.kind, h.entity.as_str()),
+            (Target::Sketch("point"), "p/s/p1")
+        );
+        let h = pick(&picker, [0.7, 0.5, 0.0], 2.0).unwrap();
+        assert_eq!(
+            (h.kind, h.entity.as_str()),
+            (Target::Sketch("line"), "p/s/l1")
+        );
+        assert!((h.point[0] - 0.7).abs() < 0.01, "{:?}", h.point);
+        // Placed and framed by reference; the hidden sketch is never picked.
+        assert_eq!(
+            picker.place("p/s/p1"),
+            Some(Place::Vertex([0.3, 0.5, 1e-4]))
+        );
+        assert_eq!(picker.kind("p/u/l1"), Some(Target::Sketch("line")));
+        assert_eq!(picker.points(Some(&("p".into(), "s".into()))).len(), 3);
+        assert_eq!(picker.bounds().unwrap().0[2], -0.5);
+        // Not drawn, not picked.
+        let bare = Picker::of(&model, false);
+        let h = pick(&bare, [0.3, 0.5, 0.0], 2.0).unwrap();
+        assert_eq!(h.kind, Target::Body(EntityKind::Face));
+        assert_eq!(bare.place("p/s/p1"), None);
     }
 
     #[test]
@@ -587,6 +719,9 @@ mod tests {
         let n = pr.ndc([0.5, 0.2, -0.5]).unwrap();
         let s = [(n[0] + 1.0) / 2.0 * size[0], (1.0 - n[1]) / 2.0 * size[1]];
         let h = picker.pick(&pr, size, s).unwrap();
-        assert_eq!((h.kind, h.feature.as_str()), (EntityKind::Face, "f"));
+        assert_eq!(
+            (h.kind, h.feature.as_str()),
+            (Target::Body(EntityKind::Face), "f")
+        );
     }
 }

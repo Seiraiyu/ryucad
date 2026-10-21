@@ -609,7 +609,8 @@ fn preferences_change_the_window_whoever_sets_them() {
     });
     h.step();
     let edges = h.state().opened().view.edges;
-    h.get_by_role(egui::accesskit::Role::CheckBox).click();
+    h.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Draw edges")
+        .click();
     frames(&mut h, |a| a.opened().view.edges != edges);
     assert_eq!(p.ok(&["config", "get", "display.edges"])["value"], !edges);
     // An agent picks the dark theme; the window follows.
@@ -842,5 +843,52 @@ fn the_viewport_shows_the_colours_it_draws() {
     assert!(
         px.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 3),
         "the background shows as {px:?}, drawn as {want:?}"
+    );
+}
+
+fn sketched(app: &App) -> bool {
+    loaded(app) && app.opened().ws.model.sketches.len() == 1
+}
+
+/// Where model point `p` is in the window now.
+fn on_screen(h: &Harness<'static, App>, p: [f64; 3]) -> egui::Pos2 {
+    let o = h.state().opened();
+    let rect = o.view.rect;
+    let aspect = f64::from(rect.width() / rect.height());
+    let pr = ryucad_app::core::nav::Projector::new(&o.view.nav.camera, aspect, p, 0.05);
+    let n = pr.ndc(p).unwrap();
+    egui::pos2(
+        rect.min.x + ((n[0] + 1.0) / 2.0) as f32 * rect.width(),
+        rect.min.y + ((1.0 - n[1]) / 2.0) as f32 * rect.height(),
+    )
+}
+
+#[test]
+fn a_click_on_a_sketch_line_selects_it() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part().with_top_sketch();
+    let mut h = window(&p);
+    frames(&mut h, sketched);
+    h.step();
+    // The middle of line l1, on the box's top.
+    let at = on_screen(&h, [0.011, 0.002, 0.005]);
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    let hover = h.state().opened().view.hover.clone().unwrap();
+    assert_eq!(hover.entity, "p/top/l1");
+    assert_eq!(hover.kind.as_str(), "line");
+    click(&h, at);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection == ["p/top/l1"])
+            && a.opened().ws.idle()
+    });
+    assert_eq!(
+        p.ok(&["selection"])["selection"],
+        serde_json::json!(["p/top/l1"])
     );
 }

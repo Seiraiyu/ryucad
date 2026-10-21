@@ -392,7 +392,8 @@ fn dashes(points: &[Screen], on: f32, off: f32) -> Vec<(Screen, Screen)> {
     let mut phase = 0.0f32;
     for w in points.windows(2) {
         let (a, b) = (w[0], w[1]);
-        let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len = (dx * dx + dy * dy).sqrt();
         let mut s = 0.0f32;
         while s < len {
             let (drawn, left) = if phase < on {

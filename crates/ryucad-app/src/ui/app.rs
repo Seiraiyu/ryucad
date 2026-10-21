@@ -347,12 +347,15 @@ impl Opened {
             self.view.look = look;
         }
         self.view.nav.style = Navigation::parse(self.ws.settings.text("ui.navigation", "ryucad"));
-        self.view.edges = self
-            .ws
-            .settings
-            .get("display.edges")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
+        let on = |key| {
+            self.ws
+                .settings
+                .get(key)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+        };
+        self.view.edges = on("display.edges");
+        self.view.sketches = on("display.sketches");
     }
 
     /// Ctrl/Cmd+Z undoes this window's latest change, Shift+Ctrl/Cmd+Z or
