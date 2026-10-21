@@ -11,6 +11,8 @@
 
 // Unused until Task 11 builds blends from them.
 #[allow(dead_code)]
+mod convex;
+#[allow(dead_code)]
 mod spec;
 
 use crate::name::Name;
