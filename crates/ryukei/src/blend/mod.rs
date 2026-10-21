@@ -8,8 +8,9 @@
 //! joined tangentially and every vertex is classed ([`chain`]); each
 //! chain's geometry is made in parallel ([`plan`]): spines from the
 //! faces' offsets ([`spine`]), rails ([`rail`]), the blend surfaces
-//! ([`fillet`]) and where the blends end ([`end`]). Only then is a copy
-//! of the body rebuilt through Euler operators ([`build`]).
+//! ([`fillet`]) and where the blends end ([`end`]); every new curve is
+//! checked to stay on its face ([`overflow`]). Only then is a copy of the
+//! body rebuilt through Euler operators ([`build`]).
 //!
 //! Only faces on the analytic surfaces (planes, cylinders, cones, spheres
 //! and tori) and on earlier fillets' pipes may be blended; the rest is
@@ -20,6 +21,7 @@ mod chain;
 mod convex;
 mod end;
 mod fillet;
+mod overflow;
 mod plan;
 mod rail;
 mod spec;
@@ -95,6 +97,7 @@ pub fn blend(key: OpKey, body: &Body, blends: &[EdgeBlend]) -> Result<(Body, Jou
         .map(|c| chain_plan(body, &specs, c))
         .collect();
     let plans = plans.into_iter().collect::<Result<Vec<_>, _>>()?;
+    overflow::check(body, &specs, &chains, &plans)?;
     let mut out = body.clone();
     build::build(&mut out, key, &specs, &chains, &plans)?;
     let journal = Journal::new();

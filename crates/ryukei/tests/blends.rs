@@ -408,6 +408,10 @@ fn holes(centres: &[(f64, f64)]) -> Body {
 }
 
 #[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
 fn other_holes_stay_on_their_face() {
     // One rim of two: the other hole stays on the top.
     let b = holes(&[(1.0, 1.0), (3.0, 3.0)]);
@@ -435,4 +439,110 @@ fn other_holes_stay_on_their_face() {
         assert_eq!(check_intersections(&r), []);
         near(volume(&r, 1e-5), 16.0 - PI * 0.25 - 4.0 * area, 1e-4);
     }
+}
+
+fn refused(r: Result<(Body, ryukei::name::Journal), ryukei::Error>) -> ryukei::BlendError {
+    match r {
+        Err(ryukei::Error::InvalidBlend(e)) => e,
+        Err(e) => panic!("{e:?}"),
+        Ok(_) => panic!("blended"),
+    }
+}
+
+#[test]
+fn blends_that_run_off_their_faces_are_refused() {
+    use ryukei::BlendError;
+    let k = OpKey(1);
+    let b = primitive::block(k, 1.0, 1.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let px = edge(k, FaceRole::PlusX, FaceRole::PlusZ);
+    let mx = edge(k, FaceRole::MinusX, FaceRole::PlusZ);
+    // A radius past the faces: the rail misses the edge it should end on.
+    let err = refused(blend(K, &b, &[fillet(px, 1.2)]));
+    assert!(
+        matches!(err, BlendError::Overflow { edge, .. } if edge == px),
+        "{err:?}"
+    );
+    // Both edges of the top, their strips overlapping in the middle.
+    let err = refused(blend(K, &b, &[fillet(px, 0.6), fillet(mx, 0.6)]));
+    assert!(matches!(err, BlendError::Overflow { .. }), "{err:?}");
+    assert!(blend(K, &b, &[fillet(px, 0.4), fillet(mx, 0.4)]).is_ok());
+    // A hole whose rim the rail would cross.
+    let p = holes_of(&[(3.5, 2.0, 0.3)]);
+    let e = edge(OpKey(1), FaceRole::PlusX, FaceRole::PlusZ);
+    let err = refused(blend(K, &p, &[fillet(e, 0.6)]));
+    assert!(matches!(err, BlendError::Overflow { .. }), "{err:?}");
+    // A hole inside the strip the fillet takes.
+    let p = holes_of(&[(3.88, 2.0, 0.05)]);
+    let err = refused(blend(K, &p, &[fillet(e, 0.25)]));
+    assert!(matches!(err, BlendError::Overflow { .. }), "{err:?}");
+    assert!(blend(K, &p, &[fillet(e, 0.06)]).is_ok());
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_tubes_rims_meet_on_its_top() {
+    use ryukei::BlendError;
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    let outer = primitive::cylinder(OpKey(1), 1.2, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let inner = primitive::cylinder(OpKey(2), 1.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let tool = Tool {
+        key: ToolKey(1),
+        body: &inner,
+        place: Rigid::translation(ryukei::geom::Vector3::new(0.0, 0.0, -1.0)),
+    };
+    let tube = boolean(OpKey(3), BooleanOp::Subtract, &outer, &[tool])
+        .unwrap()
+        .0;
+    let rims = circles_at(&tube, 1.0);
+    assert_eq!(rims.len(), 2);
+    let err = refused(blend(
+        K,
+        &tube,
+        &[fillet(rims[0], 0.15), fillet(rims[1], 0.15)],
+    ));
+    assert!(matches!(err, BlendError::Overflow { .. }), "{err:?}");
+    let (r, _) = blend(K, &tube, &[fillet(rims[0], 0.05), fillet(rims[1], 0.05)]).unwrap();
+    assert_eq!(check_intersections(&r), []);
+    let (area, d) = corner(0.05);
+    let want = PI * (1.44 - 1.0) - 2.0 * PI * (1.2 - d) * area - 2.0 * PI * (1.0 + d) * area;
+    near(volume(&r, 1e-5), want, 2e-4);
+}
+
+/// A plate 4 × 4 × 1 with holes `(x, y, radius)` through it.
+fn holes_of(spec: &[(f64, f64, f64)]) -> Body {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::geom::Vector3;
+    let plate = primitive::block(OpKey(1), 4.0, 4.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let rods: Vec<Body> = spec
+        .iter()
+        .map(|&(_, _, r)| {
+            primitive::cylinder(OpKey(2), r, 3.0, &Rigid::IDENTITY)
+                .unwrap()
+                .0
+        })
+        .collect();
+    let tools: Vec<Tool> = spec
+        .iter()
+        .zip(&rods)
+        .enumerate()
+        .map(|(i, (&(x, y, _), rod))| Tool {
+            key: ToolKey(i as u128 + 1),
+            body: rod,
+            place: Rigid::translation(Vector3::new(x, y, -1.0)),
+        })
+        .collect();
+    boolean(OpKey(3), BooleanOp::Subtract, &plate, &tools)
+        .unwrap()
+        .0
 }

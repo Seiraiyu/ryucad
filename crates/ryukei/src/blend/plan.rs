@@ -32,7 +32,6 @@ pub(crate) struct Segment {
     pub(crate) sense: Sense,
     /// The faces the segment lies between: the chain's rail face and its
     /// other face.
-    #[allow(dead_code)] // Task 11 checks the rails stay on them.
     pub(crate) faces: [FaceId; 2],
     /// The rails on those faces, both running along the chain.
     pub(crate) rails: [Rail; 2],
