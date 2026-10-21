@@ -2,13 +2,15 @@
 //! constraints of every kind between whatever the bytes pick, with any
 //! values. Solving must never panic, never give a position that isn't
 //! finite, and only name constraints that exist; a sketch that converged
-//! must solve again to the same positions, within the tolerance.
+//! must solve again to the same positions, within the tolerance. Stage 2
+//! (in pieces) must converge wherever stage 1 (whole) does, and say what
+//! stage 1 says of the positions it leaves.
 
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
 use ryukei_testkit::euler_script::Bytes;
-use ryusketch::{Constraint, Entity, Id, Sketch, solve};
+use ryusketch::{Constraint, Entity, Id, Sketch, solve, solve_whole};
 
 fn sketch(b: &mut Bytes) -> Sketch {
     let mut s = Sketch::default();
@@ -103,11 +105,31 @@ fuzz_target!(|data: &[u8]| {
     for c in named {
         assert!(s.constraints.contains_key(c), "{c}");
     }
+    let whole = solve_whole(&s).unwrap().report;
+    assert!(r.report.converged || !whole.converged, "{whole:?}");
     if r.report.converged {
         let again = solve(&r.sketch).unwrap();
         assert!(again.report.converged, "{:?}", again.report);
         for (a, b) in positions(&r.sketch).iter().zip(positions(&again.sketch)) {
             assert!((a - b).abs() <= 1e-6, "{a} vs {b}");
+        }
+        // Where stage 2 left it, both stages say the same of it: the same
+        // system (a fix holds what is where the solve starts, so solving
+        // the solved sketch builds a system of its own) at the same
+        // positions. From the start, the stages may find different roots
+        // of a degenerate sketch: a circle shrunk to its centre, say.
+        let one = solve_whole(&r.sketch).unwrap().report;
+        if !again.report.changed && !one.changed {
+            let say = |r: &ryusketch::Report| {
+                (
+                    r.state,
+                    r.dof,
+                    r.free.clone(),
+                    r.redundant.clone(),
+                    r.conflicting.clone(),
+                )
+            };
+            assert_eq!(say(&again.report), say(&one));
         }
     }
 });
