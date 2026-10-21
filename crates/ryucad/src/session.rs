@@ -213,6 +213,12 @@ impl Session {
         Ok(&self.results[part].1)
     }
 
+    /// The cached rebuild of `part`, to make it wrong in tests.
+    #[cfg(test)]
+    pub(crate) fn cached_mut(&mut self, part: &Id) -> Option<&mut PartResult> {
+        self.results.get_mut(part).map(|(_, r)| r)
+    }
+
     /// Adds to `reference_unresolved` what its name was when it last
     /// resolved (`was`: `{kind, from}`), if this session saw it.
     pub fn explain(&self, part: &Id, mut e: Error) -> Error {

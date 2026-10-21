@@ -2,6 +2,7 @@
 //! deterministic rebuild, the agent CLI and the session daemon.
 
 pub mod activity;
+pub mod check;
 pub mod client;
 pub mod config;
 pub mod daemon;

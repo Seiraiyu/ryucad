@@ -282,6 +282,7 @@ fn dispatch(
             )
         }
         Request::CheckFormat {} => check_format(session),
+        Request::Check { part } => crate::check::run(session, part.as_deref()),
         Request::Diff {
             from,
             to,

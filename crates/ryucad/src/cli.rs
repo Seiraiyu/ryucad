@@ -83,6 +83,14 @@ enum Command {
     },
     /// Report files that aren't canonical, broken, unlisted or unknown.
     CheckFormat,
+    /// Rebuild the project from its files alone, with nothing reused, and
+    /// verify it: doctor's issues, every feature builds, sketches are
+    /// current, bodies don't intersect themselves and mesh cleanly. Exits
+    /// 1 when anything fails.
+    Check {
+        /// Only this part (and the project's own issues).
+        part: Option<String>,
+    },
     /// What changed between two revisions: features, parameters and sketch
     /// entities, and with --model what that did to the bodies.
     Diff {
@@ -901,6 +909,7 @@ fn request(cmd: &Command) -> Option<Request> {
             rev: rev.rev.clone(),
         },
         Command::CheckFormat => Request::CheckFormat {},
+        Command::Check { part } => Request::Check { part: part.clone() },
         Command::Diff {
             from,
             to,

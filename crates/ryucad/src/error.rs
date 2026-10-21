@@ -105,6 +105,8 @@ pub enum Code {
     /// A Git revision (`main`, `HEAD~2`, a hash) the repository doesn't
     /// have.
     RevNotFound,
+    /// `ryucad check` found errors; its report is in the details.
+    CheckFailed,
 }
 
 impl Code {

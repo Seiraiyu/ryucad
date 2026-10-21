@@ -804,6 +804,7 @@ fn every_protocol_method_has_a_command() {
         ("inspect", &["inspect"]),
         ("check_format", &["check-format"]),
         ("diff", &["diff"]),
+        ("check", &["check"]),
         ("daemon.status", &["daemon", "status"]),
         ("daemon.shutdown", &["daemon", "stop"]),
         ("session.hello", &["participants"]),

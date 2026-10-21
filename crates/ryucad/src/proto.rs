@@ -297,6 +297,12 @@ pub enum Request {
     },
     #[serde(rename = "check_format")]
     CheckFormat {},
+    /// Rebuilds the project from its files alone and verifies it.
+    #[serde(rename = "check")]
+    Check {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+    },
     /// What changed between two revisions (`HEAD` and the working files by
     /// default): files as ryucad reads them, and with `model` the bodies.
     #[serde(rename = "diff")]
