@@ -16,7 +16,8 @@ use super::fillet::{SurfaceFail, fillet_surface};
 use super::rail::{Rail, rail};
 use super::spec::Spec;
 use super::spine::{Spine, ball_on, nearest, spine};
-use crate::geom::{Circle, Curve, Frame, Point3, Surface};
+use super::{BlendKind, chamfer};
+use crate::geom::{Circle, Curve, Frame, NurbsCurve, Point3, Surface};
 use crate::intersect::Failure;
 use crate::name::Name;
 use crate::topo::{Body, EdgeId, FaceId, Sense, VertexId};
@@ -40,8 +41,12 @@ pub(crate) struct Segment {
     /// The other face's rail parameter at each plain join inside the
     /// segment, in order.
     pub(crate) joins: Vec<f64>,
-    /// How far the blend reaches from its edges: the ball's diameter.
+    /// How far the blend reaches from its edges: the ball's diameter, or
+    /// twice a chamfer's larger setback.
     pub(crate) reach: f64,
+    /// The rails' parameters are the parameter along a pipe's spine (a
+    /// fillet's), so a rail's pcurve on a pipe needs no projection.
+    pub(crate) spine: bool,
 }
 
 /// The arc of the ball where two segments meet at a smooth join, from the
@@ -101,21 +106,29 @@ fn boundaries(chain: &Chain) -> (Vec<usize>, bool) {
     }
 }
 
-/// A segment's spine and rails, before its ends are known.
-struct Partial {
-    edges: Vec<usize>,
-    spine: Spine,
+/// A segment's carrier and rails, before its ends are known.
+pub(crate) struct Partial {
+    pub(crate) edges: Vec<usize>,
+    /// The curve the segment's sections follow, running along the chain:
+    /// a fillet's spine, a chamfer's edge.
+    pub(crate) carrier: Curve,
+    /// A fillet's spine.
+    pub(crate) spine: Option<Spine>,
     /// The rail face and the other face.
-    faces: [FaceId; 2],
-    /// The spine's indices of those faces.
-    sides: [usize; 2],
-    rails: [Rail; 2],
-    /// The spine parameters the rails cover.
-    span: [f64; 2],
-    /// The spine parameters where each rail starts and ends.
-    start: [Option<f64>; 2],
-    end: [Option<f64>; 2],
-    closed: bool,
+    pub(crate) faces: [FaceId; 2],
+    /// A fillet's spine's indices of those faces.
+    pub(crate) sides: [usize; 2],
+    pub(crate) rails: [Rail; 2],
+    /// A chamfer's rails fitted on shared knots, where its surface is
+    /// ruled.
+    pub(crate) ruled: Option<[NurbsCurve; 2]>,
+    /// The carrier's parameters the rails cover.
+    pub(crate) span: [f64; 2],
+    /// The carrier's parameters where each rail starts and ends.
+    pub(crate) start: [Option<f64>; 2],
+    pub(crate) end: [Option<f64>; 2],
+    pub(crate) closed: bool,
+    pub(crate) reach: f64,
 }
 
 /// What an end is found to be before the end curve is made.
@@ -126,21 +139,18 @@ struct EndAt {
 }
 
 /// The joint found at a smooth join.
-struct SmoothAt {
-    vertex: usize,
-    smooth: EdgeId,
-    point: Point3,
-    at: f64,
-    section: Section,
+pub(crate) struct SmoothAt {
+    pub(crate) vertex: usize,
+    pub(crate) smooth: EdgeId,
+    pub(crate) point: Point3,
+    pub(crate) at: f64,
+    pub(crate) section: Section,
 }
 
-/// The plan of a chain of fillets of `radius`.
-pub(crate) fn fillet_plan(
-    body: &Body,
-    specs: &[Spec],
-    chain: &Chain,
-    radius: f64,
-) -> Result<Plan, Error> {
+/// The plan of a chain, its edges all fillets of one radius or all
+/// chamfers alike.
+pub(crate) fn plan(body: &Body, specs: &[Spec], chain: &Chain) -> Result<Plan, Error> {
+    let kind = specs[chain.edges[0].0].kind;
     let (starts, closed) = boundaries(chain);
     let n = chain.edges.len();
     let mut parts: Vec<Partial> = Vec::new();
@@ -154,7 +164,12 @@ pub(crate) fn fillet_plan(
             starts.get(i + 1).copied().unwrap_or(n)
         };
         let edges: Vec<usize> = (s..stop).map(|p| p % n).collect();
-        parts.push(partial(body, specs, chain, edges, radius, closed)?);
+        parts.push(match kind {
+            BlendKind::Fillet { radius } => {
+                fillet_partial(body, specs, chain, edges, radius, closed)?
+            }
+            BlendKind::Chamfer(c) => chamfer::partial(body, specs, chain, edges, &c, closed)?,
+        });
     }
     let mut ends: Vec<EndAt> = Vec::new();
     let mut smooths: Vec<SmoothAt> = Vec::new();
@@ -196,7 +211,11 @@ pub(crate) fn fillet_plan(
                     .position(|p| p.edges[0] == vi)
                     .expect("a segment starts at a smooth join");
                 let before = (after + parts.len() - 1) % parts.len();
-                let j = smooth_joint(body, chain, &parts[before], &parts[after], vi, smooth)?;
+                let (a, b) = (&parts[before], &parts[after]);
+                let j = match kind {
+                    BlendKind::Fillet { .. } => fillet_joint(body, chain, a, b, vi, smooth)?,
+                    BlendKind::Chamfer(_) => chamfer::joint(body, chain, a, b, vi, smooth)?,
+                };
                 parts[before].end = [Some(j.ta); 2];
                 parts[after].start = [Some(j.tb); 2];
                 smooths.push(j.at);
@@ -206,7 +225,7 @@ pub(crate) fn fillet_plan(
     }
     let mut segments = Vec::with_capacity(parts.len());
     for part in &parts {
-        segments.push(segment(body, specs, chain, part, radius)?);
+        segments.push(segment(body, specs, chain, part)?);
     }
     let mut joints: Vec<Joint> = chain
         .classes
@@ -257,8 +276,9 @@ pub(crate) fn fillet_plan(
     Ok(Plan { segments, joints })
 }
 
-/// The spine and rails of the segment of `edges` (chain positions).
-fn partial(
+/// The spine and rails of the segment of `edges` (chain positions), for
+/// fillets of `radius`.
+fn fillet_partial(
     body: &Body,
     specs: &[Spec],
     chain: &Chain,
@@ -304,26 +324,23 @@ fn partial(
     };
     Ok(Partial {
         edges,
-        spine: s,
+        carrier: s.curve.clone(),
+        spine: Some(s),
         faces,
         sides,
         rails: [rails[0].clone(), rails[1].clone()],
+        ruled: None,
         span,
         start,
         end,
         closed,
+        reach: 2.0 * radius,
     })
 }
 
 /// A finished segment: its surface over the stretch its rails cover, and
 /// the other face's rail parameters at its plain joins.
-fn segment(
-    body: &Body,
-    specs: &[Spec],
-    chain: &Chain,
-    part: &Partial,
-    radius: f64,
-) -> Result<Segment, Error> {
+fn segment(body: &Body, specs: &[Spec], chain: &Chain, part: &Partial) -> Result<Segment, Error> {
     let name = specs[chain.edges[part.edges[0]].0].name;
     let uncertain = || -> Error { BlendError::Uncertain { at: name }.into() };
     let mut ts = [[0.0; 2]; 2];
@@ -348,30 +365,14 @@ fn segment(
         let margin = (hi - lo) / 4.0;
         [lo - margin, hi + margin]
     };
-    let surfaces = part
-        .faces
-        .map(|f| body.surfaces[body.faces[f].surface].clone());
-    let feet = [0, 1].map(|i| {
-        let mut both = [&surfaces[0], &surfaces[1]];
-        if part.sides[0] == 1 {
-            both.swap(0, 1);
-        }
-        part.spine.foot(both, i, part.spine.mid)
-    });
-    let anchor = if surfaces[0].frame().is_some() {
-        &surfaces[0]
-    } else {
-        &surfaces[1]
+    let (surface, sense) = match &part.spine {
+        Some(spine) => fillet_face(body, part, spine, range, name)?,
+        None => chamfer::face(body, specs, chain, part, name)?,
     };
-    let (surface, sense) =
-        fillet_surface(&part.spine, anchor, range, feet).map_err(|f| match f {
-            SurfaceFail::TooLarge => BlendError::RadiusTooLarge { edge: name },
-            SurfaceFail::Unsupported => BlendError::Unsupported { at: name },
-        })?;
     let mut joins = Vec::new();
     for &p in &part.edges[1..] {
         let v = body.vertices[chain.vertices[p]].point;
-        let (t, _) = nearest(&part.spine.curve, ts[1], v);
+        let (t, _) = nearest(&part.carrier, ts[1], v);
         joins.push(part.rails[1].param(t));
     }
     let intervals = [0, 1].map(|side| ts[side].map(|t| part.rails[side].param(t)));
@@ -383,23 +384,56 @@ fn segment(
         rails: part.rails.clone(),
         intervals,
         joins,
-        reach: 2.0 * radius,
+        reach: part.reach,
+        spine: part.spine.is_some(),
     })
 }
 
-/// Where two segments' spines meet at a smooth join.
-struct Joint2 {
-    ta: f64,
-    tb: f64,
-    at: SmoothAt,
+/// A fillet's surface over the spine's parameters `range`.
+fn fillet_face(
+    body: &Body,
+    part: &Partial,
+    spine: &Spine,
+    range: [f64; 2],
+    name: Name,
+) -> Result<(Surface, Sense), Error> {
+    let surfaces = part
+        .faces
+        .map(|f| body.surfaces[body.faces[f].surface].clone());
+    let feet = [0, 1].map(|i| {
+        let mut both = [&surfaces[0], &surfaces[1]];
+        if part.sides[0] == 1 {
+            both.swap(0, 1);
+        }
+        spine.foot(both, i, spine.mid)
+    });
+    let anchor = if surfaces[0].frame().is_some() {
+        &surfaces[0]
+    } else {
+        &surfaces[1]
+    };
+    fillet_surface(spine, anchor, range, feet).map_err(|f| {
+        match f {
+            SurfaceFail::TooLarge => BlendError::RadiusTooLarge { edge: name },
+            SurfaceFail::Unsupported => BlendError::Unsupported { at: name },
+        }
+        .into()
+    })
 }
 
-/// The joint at chain vertex `vi`, a smooth join on `smooth`, between the
-/// segment `a` ending there and `b` starting there: the ball on `a`'s
-/// spine whose foot on `a`'s other face lies on the smooth edge (by the
-/// secant method on the foot's signed distance from the edge across the
-/// face), on `b`'s spine too.
-fn smooth_joint(
+/// Where two segments' carriers meet at a smooth join.
+pub(crate) struct Joint2 {
+    pub(crate) ta: f64,
+    pub(crate) tb: f64,
+    pub(crate) at: SmoothAt,
+}
+
+/// The joint of fillets at chain vertex `vi`, a smooth join on `smooth`,
+/// between the segment `a` ending there and `b` starting there: the ball
+/// on `a`'s spine whose foot on `a`'s other face lies on the smooth edge
+/// (by the secant method on the foot's signed distance from the edge
+/// across the face), on `b`'s spine too.
+fn fillet_joint(
     body: &Body,
     chain: &Chain,
     a: &Partial,
@@ -419,7 +453,11 @@ fn smooth_joint(
     if a.sides[0] == 1 {
         both.swap(0, 1);
     }
-    let foot = |t: f64, side: usize| a.spine.foot(both, a.sides[side], t);
+    let (sa, sb) = (
+        a.spine.as_ref().ok_or_else(uncertain)?,
+        b.spine.as_ref().ok_or_else(uncertain)?,
+    );
+    let foot = |t: f64, side: usize| sa.foot(both, a.sides[side], t);
     let other = &surfaces[1];
     // The foot's signed distance from the smooth edge, across the face.
     let across = |t: f64| -> Option<f64> {
@@ -432,7 +470,7 @@ fn smooth_joint(
         Some((p - e.point).dot(w))
     };
     let v = body.vertices[vertex].point;
-    let (t0, _) = nearest(&a.spine.curve, a.span, v);
+    let (t0, _) = nearest(&sa.curve, a.span, v);
     let h = (a.span[1] - a.span[0]) * 1e-3;
     let (mut x0, mut x1) = (t0 - h, t0);
     let (mut f0, mut f1) = (
@@ -452,9 +490,9 @@ fn smooth_joint(
         return Err(uncertain());
     }
     let ta = x1;
-    let c = a.spine.curve.point(ta);
-    let (tb, d) = nearest(&b.spine.curve, b.span, c);
-    if d > 10.0 * a.spine.tolerance.max(b.spine.tolerance) {
+    let c = sa.curve.point(ta);
+    let (tb, d) = nearest(&sb.curve, b.span, c);
+    if d > 10.0 * sa.tolerance.max(sb.tolerance) {
         return Err(uncertain());
     }
     let corner = foot(ta, 0);
@@ -472,7 +510,7 @@ fn smooth_joint(
     let (x, y) = (corner - c, point - c);
     let z = x.cross(y);
     let frame = Frame::new(c, z, x).map_err(|_| uncertain())?;
-    let circle = Circle::new(frame, a.spine.radius).map_err(|_| uncertain())?;
+    let circle = Circle::new(frame, sa.radius).map_err(|_| uncertain())?;
     let phi = crate::math::atan2(z.length(), x.dot(y));
     Ok(Joint2 {
         ta,
@@ -491,7 +529,7 @@ fn smooth_joint(
 }
 
 /// The error for a failed end.
-fn end_error(e: EndFail, edge: Name, face: Name, end: Name) -> Error {
+pub(crate) fn end_error(e: EndFail, edge: Name, face: Name, end: Name) -> Error {
     match e {
         EndFail::Overflow => BlendError::Overflow { edge, face },
         EndFail::Unsupported => BlendError::Unsupported { at: end },
@@ -521,7 +559,7 @@ mod tests {
         let specs = resolve(b, &blends)?;
         chains(b, &specs)?
             .iter()
-            .map(|c| fillet_plan(b, &specs, c, r))
+            .map(|c| plan(b, &specs, c))
             .collect()
     }
 

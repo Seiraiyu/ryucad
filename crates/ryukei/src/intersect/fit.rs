@@ -954,6 +954,106 @@ pub(crate) fn fit_along(
     unreachable!("the loop returns")
 }
 
+/// Two curves, each on its surface, through the points `at` gives over
+/// `[t0, t1]`, each point with its derivative by `t`, fitted on shared
+/// knots: cubic Hermite spans in `t`, each certified within its bound of
+/// its surface through the surface's implicit form ([`surface_bound`]),
+/// split (in both curves) until both bounds are within
+/// [`LINEAR_RESOLUTION`] and both spans' middles are within it of the
+/// points `at` gives there (sampled: that keeps the fit near the given
+/// points, the bound makes it an edge). A chamfer's rails are the points
+/// at its setbacks in each section of its edge, and sharing knots makes
+/// the ruled surface between them simple. Returns the curves and their
+/// worst bounds; `Unsupported` for a surface with no implicit form,
+/// `Uncertain` where `at` fails or a fit can't get within
+/// `10 × LINEAR_RESOLUTION`.
+pub(crate) fn fit_on(
+    surfaces: [&Surface; 2],
+    [t0, t1]: [f64; 2],
+    at: &dyn Fn(f64) -> Option<[(Point3, Vector3); 2]>,
+) -> Result<([NurbsCurve; 2], [f64; 2]), Failure> {
+    let imps = [
+        Implicit::of(surfaces[0]).ok_or(Failure::Unsupported)?,
+        Implicit::of(surfaces[1]).ok_or(Failure::Unsupported)?,
+    ];
+    type S = (f64, [(Point3, Vector3); 2]);
+    let sample = |t: f64| -> Result<S, Failure> { Ok((t, at(t).ok_or(Failure::Uncertain)?)) };
+    let n = 8;
+    let mut samples = (0..=n)
+        .map(|i| sample(t0 + (t1 - t0) * i as f64 / n as f64))
+        .collect::<Result<Vec<_>, _>>()?;
+    let span = |a: &S, b: &S, k: usize| {
+        let h = b.0 - a.0;
+        let (pa, da) = a.1[k];
+        let (pb, db) = b.1[k];
+        piece(
+            hermite(pa.to_vector(), da, pb.to_vector(), db, h),
+            [a.0, b.0],
+        )
+    };
+    let bound_of = |a: &S, b: &S| -> ([f64; 2], bool) {
+        let mid = at((a.0 + b.0) / 2.0);
+        let mut drift = mid.is_none();
+        let mut out = [0.0; 2];
+        for (k, bound) in out.iter_mut().enumerate() {
+            let sp = span(a, b, k);
+            let (q, _) = eval(&sp, 0.5);
+            if let Some(m) = mid {
+                drift |= (Point3::ORIGIN + q).distance(m[k].0) > LINEAR_RESOLUTION;
+            }
+            *bound = surface_bound(&imps[k], &sp, LINEAR_RESOLUTION, MAX_HALVINGS);
+        }
+        (out, drift)
+    };
+    let mut bounds: Vec<Option<([f64; 2], bool)>> = vec![None; samples.len() - 1];
+    for round in 0.. {
+        let mut worst = [0.0f64; 2];
+        let mut drifted = false;
+        let mut split = Vec::new();
+        for i in 0..samples.len() - 1 {
+            let (b, drift) =
+                *bounds[i].get_or_insert_with(|| bound_of(&samples[i], &samples[i + 1]));
+            worst = [worst[0].max(b[0]), worst[1].max(b[1])];
+            drifted |= drift;
+            if b[0].max(b[1]) > LINEAR_RESOLUTION || drift {
+                split.push(i);
+            }
+        }
+        if split.is_empty() || round == MAX_ROUNDS || samples.len() + split.len() > MAX_SAMPLES {
+            if worst[0].max(worst[1]) > 10.0 * LINEAR_RESOLUTION || drifted {
+                return Err(Failure::Uncertain);
+            }
+            let knots: Vec<f64> = samples.iter().map(|s| s.0).collect();
+            let mut mults = vec![3; knots.len()];
+            mults[0] = 4;
+            mults[knots.len() - 1] = 4;
+            let kv = KnotVector::clamped(3, &knots, &mults).map_err(|_| Failure::Uncertain)?;
+            let curve = |k: usize| -> Result<NurbsCurve, Failure> {
+                let mut pts = vec![samples[0].1[k].0];
+                for w in samples.windows(2) {
+                    let h = w[1].0 - w[0].0;
+                    let (pa, da) = w[0].1[k];
+                    let (pb, db) = w[1].1[k];
+                    let c = hermite(pa.to_vector(), da, pb.to_vector(), db, h);
+                    pts.extend(c[1..].iter().map(|&v| Point3::ORIGIN + v));
+                }
+                NurbsCurve::new(kv.clone(), pts, None).map_err(|_| Failure::Uncertain)
+            };
+            return Ok((
+                [curve(0)?, curve(1)?],
+                worst.map(|w| w.max(LINEAR_RESOLUTION)),
+            ));
+        }
+        for &i in split.iter().rev() {
+            let mid = sample((samples[i].0 + samples[i + 1].0) / 2.0)?;
+            samples.insert(i + 1, mid);
+            bounds[i] = None;
+            bounds.insert(i + 1, None);
+        }
+    }
+    unreachable!("the loop returns")
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::ss_trace::trace;

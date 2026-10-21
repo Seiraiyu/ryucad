@@ -10,7 +10,7 @@
 //! form is otherwise [`Failure::Unsupported`].
 
 pub(crate) mod broad;
-mod coincide;
+pub(crate) mod coincide;
 mod cs;
 mod face;
 mod fit;
@@ -28,7 +28,7 @@ pub(crate) use coincide::coincident;
 pub use cs::{CurveHit, Side, curve_surface};
 pub use face::{Contact, FaceMeet, Rim, Stretch, face_box, face_face};
 pub(crate) use face::{shifted, shifts};
-pub(crate) use fit::{fit_along, fit_pcurve, fit_pcurve_by};
+pub(crate) use fit::{fit_along, fit_on, fit_pcurve, fit_pcurve_by};
 pub use inface::{Place, point_in_face};
 pub use pipe::{Cell, pipe_beside};
 pub use pipe_cs::curve_pipe;

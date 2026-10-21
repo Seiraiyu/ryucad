@@ -26,6 +26,10 @@ pub(crate) struct Rail {
     /// How far the rail may stray from its face, its pcurve's image and
     /// the blend surface, certified for a fitted rail.
     pub(crate) tolerance: f64,
+    /// Its pcurve on the blend surface, where the rail is known to lie on
+    /// a parameter line of it (a ruled chamfer's), by the rail's
+    /// parameter.
+    pub(crate) on_blend: Option<(Curve2, [f64; 2])>,
 }
 
 impl Rail {
@@ -66,6 +70,7 @@ pub(crate) fn rail(
             map,
             pcurve: (pc.clone(), pmap),
             tolerance: off.max(LINEAR_RESOLUTION) + spine.tolerance,
+            on_blend: None,
         });
     }
     let lifted = fit_along(surface, pc, *m, range)?;
@@ -74,6 +79,7 @@ pub(crate) fn rail(
         map: [0.0, 1.0],
         pcurve: (Curve2::Nurbs2(Arc::new(lifted.pcurve)), [0.0, 1.0]),
         tolerance: lifted.tolerance + spine.tolerance,
+        on_blend: None,
     })
 }
 
@@ -95,7 +101,10 @@ fn checked(
 
 /// A straight rail along a line spine: the line through the feet at the
 /// ends of the range, by length from the first.
-fn line_rail(foot: &dyn Fn(f64) -> Point3, [t0, t1]: [f64; 2]) -> Option<(Curve, [f64; 2], f64)> {
+pub(crate) fn line_rail(
+    foot: &dyn Fn(f64) -> Point3,
+    [t0, t1]: [f64; 2],
+) -> Option<(Curve, [f64; 2], f64)> {
     let (a, b) = (foot(t0), foot(t1));
     let line = Curve::Line(Line::through(a, b).ok()?);
     let speed = a.distance(b) / (t1 - t0);
@@ -106,7 +115,7 @@ fn line_rail(foot: &dyn Fn(f64) -> Point3, [t0, t1]: [f64; 2]) -> Option<(Curve,
 
 /// A circular rail along a circle spine: coaxial with it, through the
 /// foot at the middle of the range, by the same angle.
-fn circle_rail(
+pub(crate) fn circle_rail(
     spine: &Circle,
     foot: &dyn Fn(f64) -> Point3,
     [t0, t1]: [f64; 2],

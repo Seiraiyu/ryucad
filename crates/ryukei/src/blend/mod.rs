@@ -6,9 +6,11 @@
 //! changes anything: the edges are resolved and checked ([`spec`]), which
 //! way each bends is certified ([`convex`]), they are grouped into chains
 //! joined tangentially and every vertex is classed ([`chain`]); each
-//! chain's geometry is made in parallel ([`plan`]): spines from the
-//! faces' offsets ([`spine`]), rails ([`rail`]), the blend surfaces
-//! ([`fillet`]) and where the blends end ([`end`]); every new curve is
+//! chain's geometry is made in parallel ([`plan`]): for fillets, spines
+//! from the faces' offsets ([`spine`]), rails ([`rail`]) and the surfaces
+//! the balls sweep ([`fillet`]); for chamfers, rails set back along the
+//! faces and the planes, cones or ruled surfaces between them
+//! ([`chamfer`]); and where the blends end ([`end`]). Every new curve is
 //! checked to stay on its face ([`overflow`]). Only then is a copy of the
 //! body rebuilt through Euler operators ([`build`]) and its new entities
 //! named from the blend's key and the names around them ([`names`]).
@@ -19,6 +21,7 @@
 
 mod build;
 mod chain;
+mod chamfer;
 mod convex;
 mod end;
 mod fillet;
@@ -34,6 +37,7 @@ use crate::topo::{Body, EdgeId};
 use crate::{Error, TopologyError};
 use rayon::prelude::*;
 
+#[cfg(doc)]
 use crate::BlendError;
 
 /// What a blend does to one edge.
@@ -96,7 +100,7 @@ pub fn blend(key: OpKey, body: &Body, blends: &[EdgeBlend]) -> Result<(Body, Jou
     let chains = chain::chains(body, &specs)?;
     let plans: Vec<Result<plan::Plan, Error>> = chains
         .par_iter()
-        .map(|c| chain_plan(body, &specs, c))
+        .map(|c| plan::plan(body, &specs, c))
         .collect();
     let plans = plans.into_iter().collect::<Result<Vec<_>, _>>()?;
     overflow::check(body, &specs, &chains, &plans)?;
@@ -110,15 +114,6 @@ pub fn blend(key: OpKey, body: &Body, blends: &[EdgeBlend]) -> Result<(Body, Jou
         return Err(Error::Topology(TopologyError::Inconsistent));
     }
     Ok((out, journal))
-}
-
-/// A chain's geometry, by the kind of its edges (all alike).
-fn chain_plan(body: &Body, specs: &[spec::Spec], c: &chain::Chain) -> Result<plan::Plan, Error> {
-    let first = &specs[c.edges[0].0];
-    match first.kind {
-        BlendKind::Fillet { radius } => plan::fillet_plan(body, specs, c, radius),
-        BlendKind::Chamfer(_) => Err(BlendError::Unsupported { at: first.name }.into()),
-    }
 }
 
 /// The edges reachable from `edge` through vertices where an edge meets

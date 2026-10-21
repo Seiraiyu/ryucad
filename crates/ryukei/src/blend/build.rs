@@ -201,6 +201,8 @@ struct Work {
     /// Rails on rail faces, whose fin off the blend face gets the plan's
     /// pcurve: the edge, the pcurve and its map.
     rail_face: Vec<(EdgeId, Curve2, [f64; 2])>,
+    /// Rails on rail faces whose pcurve on the blend surface is known.
+    blend_side: Vec<(EdgeId, Curve2, [f64; 2])>,
     /// Vertices whose tolerance must be settled.
     vertices: BTreeSet<VertexId>,
     /// Faces the blend made, which get every missing pcurve.
@@ -287,11 +289,17 @@ fn chain_build(
         open_path(body, keys, plan, &fins, &end_edges)?
     };
     for (k, &(edge, map)) in path.rails.iter().enumerate() {
-        let rail = &plan.segments[k].rails[0];
+        let seg = &plan.segments[k];
+        let rail = &seg.rails[0];
         let (pc, m) = &rail.pcurve;
         work.rail_face.push((edge, pc.clone(), compose(*m, map)));
+        if let Some((pc, m)) = &rail.on_blend {
+            work.blend_side.push((edge, pc.clone(), compose(*m, map)));
+        }
         work.tolerances.insert(edge, rail.tolerance);
-        work.spines.insert(edge, spine_map(rail.map, map));
+        if seg.spine {
+            work.spines.insert(edge, spine_map(rail.map, map));
+        }
     }
     // The other faces: blended edges become their rails.
     let mut others: Vec<Vec<EdgeId>> = Vec::new();
@@ -310,8 +318,14 @@ fn chain_build(
             let (pc, m) = &rail.pcurve;
             work.pcurves
                 .push((fins[p][1], pc.clone(), compose(*m, map)));
+            if let Some((pc, m)) = &rail.on_blend {
+                work.pcurves
+                    .push((fins[p][0], pc.clone(), compose(*m, map)));
+            }
             work.tolerances.insert(e, rail.tolerance);
-            work.spines.insert(e, spine_map(rail.map, map));
+            if seg.spine {
+                work.spines.insert(e, spine_map(rail.map, map));
+            }
             made.modified
                 .insert(EntityId::Face(face_of(body, fins[p][1])));
             list.push(e);
@@ -676,6 +690,14 @@ fn finish(body: &mut Body, work: &Work) -> Result<(), Error> {
         let fins: Vec<FinId> = body.edge_fins(*edge).collect();
         for f in fins {
             if !work.blend_faces.contains(&face_of(body, f)) {
+                set(body, f, pc, *map)?;
+            }
+        }
+    }
+    for (edge, pc, map) in &work.blend_side {
+        let fins: Vec<FinId> = body.edge_fins(*edge).collect();
+        for f in fins {
+            if work.blend_faces.contains(&face_of(body, f)) {
                 set(body, f, pc, *map)?;
             }
         }
