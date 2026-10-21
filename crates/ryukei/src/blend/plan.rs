@@ -32,6 +32,7 @@ pub(crate) struct Segment {
     pub(crate) sense: Sense,
     /// The faces the segment lies between: the chain's rail face and its
     /// other face.
+    #[allow(dead_code)] // Task 11 checks the rails stay on them.
     pub(crate) faces: [FaceId; 2],
     /// The rails on those faces, both running along the chain.
     pub(crate) rails: [Rail; 2],
@@ -40,8 +41,6 @@ pub(crate) struct Segment {
     /// The other face's rail parameter at each plain join inside the
     /// segment, in order.
     pub(crate) joins: Vec<f64>,
-    /// The segment goes all the way round a closed chain.
-    pub(crate) closed: bool,
     /// How far the blend reaches from its edges: the ball's diameter.
     pub(crate) reach: f64,
 }
@@ -58,20 +57,18 @@ pub(crate) struct Section {
 #[derive(Clone, Debug)]
 pub(crate) enum Joint {
     Closed,
-    /// `cuts`, `crossings` and the end curve's direction are in the order
-    /// rail face, other face.
+    /// `crossings` and the end curve's direction are in the order rail
+    /// face, other face.
     End {
         face: FaceId,
-        cuts: [EdgeId; 2],
         crossings: [Crossing; 2],
         curve: Box<EndCurve>,
     },
     Join,
-    /// The rails on the rail face meet at `corner`; the vertex moves to
-    /// `point`, the smooth edge's parameter `at`.
+    /// The vertex moves to `point`, the smooth edge's parameter `at`; the
+    /// section starts where the rails on the rail face meet.
     SmoothJoin {
         smooth: EdgeId,
-        corner: Point3,
         point: Point3,
         at: f64,
         section: Section,
@@ -133,7 +130,6 @@ struct EndAt {
 struct SmoothAt {
     vertex: usize,
     smooth: EdgeId,
-    corner: Point3,
     point: Point3,
     at: f64,
     section: Section,
@@ -246,7 +242,6 @@ pub(crate) fn fillet_plan(
         })?;
         joints[e.vertex] = Joint::End {
             face: e.face,
-            cuts: [e.crossings[0].cut, e.crossings[1].cut],
             crossings: e.crossings,
             curve: Box::new(curve),
         };
@@ -254,7 +249,6 @@ pub(crate) fn fillet_plan(
     for s in smooths {
         joints[s.vertex] = Joint::SmoothJoin {
             smooth: s.smooth,
-            corner: s.corner,
             point: s.point,
             at: s.at,
             section: s.section,
@@ -389,7 +383,6 @@ fn segment(
         rails: part.rails.clone(),
         intervals,
         joins,
-        closed: part.closed,
         reach: 2.0 * radius,
     })
 }
@@ -487,7 +480,6 @@ fn smooth_joint(
         at: SmoothAt {
             vertex: vi,
             smooth,
-            corner,
             point,
             at: param,
             section: Section {
@@ -607,21 +599,16 @@ mod tests {
         assert_eq!((cyl, tor), (2, 2));
         rails_on_surfaces(&p);
         for j in &p.joints {
-            let Joint::SmoothJoin {
-                corner,
-                point,
-                section,
-                ..
-            } = j
-            else {
+            let Joint::SmoothJoin { point, section, .. } = j else {
                 panic!("{j:?}")
             };
+            let corner = &section.curve.point(section.interval[0]);
             // A radius in from the cap's edge, and a radius down the side.
             assert!((corner.z - 1.0).abs() < 1e-12);
             assert!((point.z - 0.9).abs() < 1e-12, "{point:?}");
             let [a, z] = section.interval;
             assert!((z - a - core::f64::consts::FRAC_PI_2).abs() < 1e-9);
-            assert!(section.curve.point(a).distance(*corner) < 1e-12);
+
             assert!(section.curve.point(z).distance(*point) < 1e-12);
         }
         // Each segment's rails end where the next one's start.
@@ -643,7 +630,6 @@ mod tests {
             .unwrap()
             .remove(0);
         assert_eq!(p.segments.len(), 1);
-        assert!(p.segments[0].closed);
         assert!(matches!(p.joints[..], [Joint::Closed]));
         rails_on_surfaces(&p);
         let mut b = block();

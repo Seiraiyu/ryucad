@@ -700,6 +700,45 @@ pub(crate) fn fit_pcurve(
         let duv = uv_velocity(surface, uv, e.d1).ok_or(Failure::Uncertain)?;
         Ok((t, uv - duv * dt, duv))
     };
+    fit_pcurve_with(surface, curve, [t0, t1], &at, LINEAR_RESOLUTION)
+}
+
+/// [`fit_pcurve`] where the caller knows the parameters on `surface` of
+/// the curve's points (a rail on a pipe, whose spine parameter is the
+/// rail's and whose angle comes from the pipe's frame): `uv` gives them,
+/// continuous along the curve, so nothing is projected. Spans are split
+/// until their bound is within `target` (the edge's own tolerance, at
+/// least resolution: a fitted rail is that far from the pipe already),
+/// and a fit that can't get within ten times that is
+/// [`Failure::Uncertain`].
+pub(crate) fn fit_pcurve_by(
+    surface: &Surface,
+    curve: &Curve,
+    [t0, t1]: [f64; 2],
+    uv: &dyn Fn(f64) -> Point2,
+    target: f64,
+) -> Result<(NurbsCurve2, f64), Failure> {
+    let at = |t: f64, _: Option<Point2>| -> Result<(f64, Point2, Vector2), Failure> {
+        let p = uv(t);
+        let duv = uv_velocity(surface, p, curve.eval(t).d1).ok_or(Failure::Uncertain)?;
+        Ok((t, p, duv))
+    };
+    fit_pcurve_with(surface, curve, [t0, t1], &at, target.max(LINEAR_RESOLUTION))
+}
+
+/// A sample of a pcurve fit: the curve's parameter, the surface's
+/// parameters, and their derivative by the curve's.
+type PcurveSample = (f64, Point2, Vector2);
+
+/// Fits a pcurve through samples `at` gives, unwrapped next to the one
+/// before, refining until every span's bound is within `target`.
+fn fit_pcurve_with(
+    surface: &Surface,
+    curve: &Curve,
+    [t0, t1]: [f64; 2],
+    at: &dyn Fn(f64, Option<Point2>) -> Result<PcurveSample, Failure>,
+    target: f64,
+) -> Result<(NurbsCurve2, f64), Failure> {
     // Each sample is unwrapped next to the one before, so no step may
     // turn a periodic parameter by a quarter period or more: a longer
     // step could unwrap the wrong way round and leave a jump of a whole
@@ -738,7 +777,7 @@ pub(crate) fn fit_pcurve(
                 curve,
                 t: [a.0, b.0],
             },
-            LINEAR_RESOLUTION,
+            target,
         )
     };
     let mut bounds: Vec<Option<f64>> = vec![None; samples.len() - 1];
@@ -748,12 +787,12 @@ pub(crate) fn fit_pcurve(
         for i in 0..samples.len() - 1 {
             let b = *bounds[i].get_or_insert_with(|| bound_of(&samples[i], &samples[i + 1]));
             worst = worst.max(b);
-            if b > LINEAR_RESOLUTION {
+            if b > target {
                 split.push(i);
             }
         }
         if split.is_empty() || round == MAX_ROUNDS || samples.len() + split.len() > MAX_SAMPLES {
-            if worst > 10.0 * LINEAR_RESOLUTION {
+            if worst > 10.0 * target {
                 return Err(Failure::Uncertain);
             }
             let knots: Vec<f64> = samples.iter().map(|s| s.0).collect();
@@ -768,7 +807,7 @@ pub(crate) fn fit_pcurve(
                 pts.extend(c[1..].iter().map(|&v| Point2::ORIGIN + v));
             }
             let pc = NurbsCurve2::new(kv, pts, None).map_err(|_| Failure::Uncertain)?;
-            return Ok((pc, worst.max(LINEAR_RESOLUTION)));
+            return Ok((pc, worst.max(target)));
         }
         for &i in split.iter().rev() {
             let t = (samples[i].0 + samples[i + 1].0) / 2.0;

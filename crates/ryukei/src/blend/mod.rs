@@ -3,35 +3,33 @@
 //! A blend takes any set of edges, each with its own fillet radius or
 //! chamfer, and rounds or bevels each where it is convex and fills it
 //! where it is concave. The pipeline makes every decision before it
-//! changes anything: the edges are resolved and checked ([`spec`]).
+//! changes anything: the edges are resolved and checked ([`spec`]), which
+//! way each bends is certified ([`convex`]), they are grouped into chains
+//! joined tangentially and every vertex is classed ([`chain`]); each
+//! chain's geometry is made in parallel ([`plan`]): spines from the
+//! faces' offsets ([`spine`]), rails ([`rail`]), the blend surfaces
+//! ([`fillet`]) and where the blends end ([`end`]). Only then is a copy
+//! of the body rebuilt through Euler operators ([`build`]).
 //!
 //! Only faces on the analytic surfaces (planes, cylinders, cones, spheres
 //! and tori) and on earlier fillets' pipes may be blended; the rest is
 //! refused with [`BlendError::Unsupported`], never guessed.
 
-// Unused until Task 11 builds blends from them.
-#[allow(dead_code)]
+mod build;
 mod chain;
-#[allow(dead_code)]
 mod convex;
-#[allow(dead_code)]
 mod end;
-#[allow(dead_code)]
 mod fillet;
-#[allow(dead_code)]
 mod plan;
-#[allow(dead_code)]
 mod rail;
-#[allow(dead_code)]
 mod spec;
-#[allow(dead_code)]
 mod spine;
 
-use crate::Error;
-use crate::name::Name;
+use crate::name::{Journal, Name, OpKey};
 use crate::topo::{Body, EdgeId};
+use crate::{Error, TopologyError};
+use rayon::prelude::*;
 
-#[cfg(doc)]
 use crate::BlendError;
 
 /// What a blend does to one edge.
@@ -71,6 +69,51 @@ pub enum Chamfer {
 pub struct EdgeBlend {
     pub edge: Name,
     pub kind: BlendKind,
+}
+
+/// Blends the edges of `body` named in `blends`: a new body (the input is
+/// untouched) and the journal of what happened to names.
+///
+/// Each edge is rounded by a rolling-ball fillet, or bevelled by a
+/// chamfer, where it is convex and filled where it is concave. Edges
+/// meeting tangentially must be blended alike and form chains; the
+/// vertices this phase builds are ends (a third face cuts the blend off),
+/// closed edges alone, and joins between tangent blended edges (alone, or
+/// beside a smooth edge between their other faces). Refusals are
+/// [`Error::InvalidBlend`], before anything is changed.
+///
+/// The input must pass [`crate::check::check`] (debug builds assert it).
+pub fn blend(key: OpKey, body: &Body, blends: &[EdgeBlend]) -> Result<(Body, Journal), Error> {
+    if cfg!(debug_assertions) {
+        let faults = crate::check::check(body);
+        assert!(faults.is_empty(), "a blend's input is invalid: {faults:?}");
+    }
+    let specs = spec::resolve(body, blends)?;
+    let chains = chain::chains(body, &specs)?;
+    let plans: Vec<Result<plan::Plan, Error>> = chains
+        .par_iter()
+        .map(|c| chain_plan(body, &specs, c))
+        .collect();
+    let plans = plans.into_iter().collect::<Result<Vec<_>, _>>()?;
+    let mut out = body.clone();
+    build::build(&mut out, key, &specs, &chains, &plans)?;
+    let journal = Journal::new();
+    if cfg!(debug_assertions) {
+        let faults = crate::check::check(&out);
+        assert!(faults.is_empty(), "a blend's result is invalid: {faults:?}");
+    } else if !crate::check::check_topology(&out).is_empty() {
+        return Err(Error::Topology(TopologyError::Inconsistent));
+    }
+    Ok((out, journal))
+}
+
+/// A chain's geometry, by the kind of its edges (all alike).
+fn chain_plan(body: &Body, specs: &[spec::Spec], c: &chain::Chain) -> Result<plan::Plan, Error> {
+    let first = &specs[c.edges[0].0];
+    match first.kind {
+        BlendKind::Fillet { radius } => plan::fillet_plan(body, specs, c, radius),
+        BlendKind::Chamfer(_) => Err(BlendError::Unsupported { at: first.name }.into()),
+    }
 }
 
 /// The edges reachable from `edge` through vertices where an edge meets
