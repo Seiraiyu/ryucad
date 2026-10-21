@@ -3,7 +3,7 @@
 mod common;
 
 use common::{Project, ryucad};
-use ryucad::entity::EntityKind;
+use ryucad::entity::{EntityKind, Target};
 use ryucad::view::{self, StandardView};
 use ryucad_app::core::nav::Projector;
 use ryucad_app::core::pick::Picker;
@@ -27,7 +27,10 @@ fn the_middle_of_a_top_view_is_the_boss_top() {
     let n = pr.ndc([0.0, 0.0, hi[2]]).unwrap();
     let px = [(n[0] + 1.0) / 2.0 * size[0], (1.0 - n[1]) / 2.0 * size[1]];
     let hit = picker.pick(&pr, size, px).unwrap();
-    assert_eq!((hit.kind, hit.feature.as_str()), (EntityKind::Face, "boss"));
+    assert_eq!(
+        (hit.kind, hit.feature.as_str()),
+        (Target::Body(EntityKind::Face), "boss")
+    );
     assert!((hit.point[2] - hi[2]).abs() < 1e-6, "{:?}", hit.point);
     // The daemon resolves the reference to a face of the cylinder.
     let name = hit.entity.rsplit('/').next().unwrap();
@@ -73,7 +76,7 @@ fn edges_are_picked_from_either_side() {
         let (sa, sb) = (screen(a), screen(b));
         let mid = [(sa[0] + sb[0]) / 2.0, (sa[1] + sb[1]) / 2.0];
         let on = picker.pick(&pr, size, mid);
-        if on.as_ref().map(|h| h.kind) != Some(EntityKind::Edge) {
+        if on.as_ref().map(|h| h.kind) != Some(Target::Body(EntityKind::Edge)) {
             continue; // Hidden from this side.
         }
         tried += 1;
@@ -85,7 +88,7 @@ fn edges_are_picked_from_either_side() {
             let hit = picker.pick(&pr, size, px).unwrap();
             assert_eq!(
                 (hit.kind, &hit.entity),
-                (EntityKind::Edge, &on.as_ref().unwrap().entity),
+                (Target::Body(EntityKind::Edge), &on.as_ref().unwrap().entity),
                 "{off} px beside the edge {a:?}-{b:?}"
             );
         }

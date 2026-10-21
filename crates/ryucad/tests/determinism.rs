@@ -1,8 +1,9 @@
 //! Bit-exact determinism of everything ryucad computes from files. Every CI
 //! platform and CPU level must reproduce `tests/golden/rebuild.txt`:
 //! expressions, rebuilt bodies, display meshes, the pixels of renders, and
-//! solved sketches and the bodies swept from them, and features that
-//! refer to other features' faces, edges and vertices. After
+//! solved sketches and the bodies swept from them, features that refer
+//! to other features' faces, edges and vertices, and how sketches are
+//! drawn. After
 //! a deliberate change, regenerate with
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
@@ -373,6 +374,40 @@ fn sweeps_section(golden: &mut Golden) {
     s.str(&format!("{:x}", md(&ryucad::mesh::encode(&meshes))));
 }
 
+/// How the swept part's sketch is drawn: `sketch.get` at each quality,
+/// and renders with its dimensions labelled and an entity highlighted.
+fn sketch_drawing_section(golden: &mut Golden) {
+    let mut s = golden.section("sketch_drawing");
+    let (dir, mut session) = swept();
+    for q in ["coarse", "normal", "fine"] {
+        let v = ryucad::server::handle(
+            &mut session,
+            ryucad::proto::Request::from_rpc(
+                "sketch.get",
+                Some(serde_json::json!({"part": "sw", "sketch": "slot", "quality": q})),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        s.str(&ryucad::doc::canonical::to_string(&v));
+    }
+    for (view, labels) in [("iso", true), ("top", false)] {
+        let params = serde_json::json!({"part": "sw", "view": view, "width": 320, "height": 240,
+                                        "highlight": ["sw/slot/a1"], "labels": labels});
+        let req = ryucad::proto::Request::from_rpc("render", Some(params)).unwrap();
+        let a =
+            ryucad::server::handle_safely(&mut Some(session), None, None, dir.path(), req).unwrap();
+        session = ryucad::session::Session::open(dir.path()).unwrap();
+        let png = a.binary.unwrap();
+        let mut r = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .unwrap();
+        let mut buf = vec![0; r.output_buffer_size().unwrap()];
+        let info = r.next_frame(&mut buf).unwrap();
+        s.str(&format!("{:x}", md(&buf[..info.buffer_size()])));
+    }
+}
+
 /// The entities of `kind` of `feature`'s body in `inspect`.
 fn listed(
     s: &mut ryucad::session::Session,
@@ -603,5 +638,6 @@ fn determinism() {
     render_section(&mut golden);
     sweeps_section(&mut golden);
     references_section(&mut golden);
+    sketch_drawing_section(&mut golden);
     golden.finish();
 }

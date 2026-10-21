@@ -62,7 +62,7 @@ pub(crate) struct Fault {
 
 /// The independent pieces of a system: variables and equations that reach
 /// only each other.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Component {
     pub vars: Vec<usize>,
     pub eqs: Vec<usize>,
@@ -752,6 +752,22 @@ impl System {
             return f64::INFINITY;
         }
         self.eqs[i].form.residual(&v).v.abs() / self.tol(i)
+    }
+
+    /// Equation `i`'s partial derivatives at `x`: each variable it reads,
+    /// once, in the order it first reads them.
+    pub(crate) fn partials(&self, i: usize, x: &[f64]) -> Vec<(usize, f64)> {
+        let d = self.eqs[i].form.residual(&self.inputs(i, x));
+        let mut out: Vec<(usize, f64)> = Vec::new();
+        for (slot, a) in self.eqs[i].args.iter().enumerate() {
+            if let Scalar::Var(k) = *a {
+                match out.iter_mut().find(|(v, _)| *v == k) {
+                    Some(e) => e.1 += d.g[slot],
+                    None => out.push((k, d.g[slot])),
+                }
+            }
+        }
+        out
     }
 
     /// Equation `i`'s residual at `x`, and its gradient added into `row`

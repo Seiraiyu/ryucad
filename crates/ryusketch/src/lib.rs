@@ -7,11 +7,19 @@
 //! constraints are redundant or in conflict, and the closed loops a profile
 //! can be made of.
 //!
+//! It solves each connected component in the pieces of its
+//! Dulmage-Mendelsohn decomposition (an over-determined part, square
+//! blocks one after another, an under-determined part), so a large sketch
+//! costs about as much as its pieces, and reads what is free, redundant or
+//! in conflict from those pieces where they allow it, else from the whole
+//! component as stage 1 did ([`solve_whole`] keeps stage 1 for comparison).
+//!
 //! It knows nothing of files, units, parts or bodies: positions are meters,
 //! angles radians, and IDs are opaque. Arithmetic is f64 in a fixed order,
 //! with `ryukei::math` for every function, so a sketch solves to the same
 //! bits on every platform.
 
+mod blocks;
 mod equation;
 mod linalg;
 mod loops;
@@ -23,5 +31,5 @@ mod system;
 pub use loops::{Chain, Loop, Segment};
 pub use report::{Free, State};
 pub use sketch::{Constraint, Entity, Id, Sketch, SketchError};
-pub use solve::{Report, Solved, solve};
+pub use solve::{Report, Solved, solve, solve_whole};
 pub use system::{ANGLE_TOL, Coord, SOLVE_TOL};

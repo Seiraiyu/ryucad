@@ -142,6 +142,63 @@ impl Project {
     }
 }
 
+impl Project {
+    /// A part with a sketch on xy: a 20 x 10 rectangle from the origin,
+    /// fully defined (its width a parameter), with a construction diagonal,
+    /// and a 5 mm extrude of it.
+    pub fn with_sketch(self) -> Project {
+        self.ok(&["part", "create", "p"]);
+        self.ok(&["param", "set", "p", "width=20 mm"]);
+        self.ok(&["feature", "add", "p", "sketch", "--id", "s"]);
+        let ops = serde_json::json!([
+            {"op": "add", "type": "point", "at": [0, 0]},
+            {"op": "add", "type": "point", "at": [19, 1]},
+            {"op": "add", "type": "point", "at": [21, 9]},
+            {"op": "add", "type": "point", "at": [1, 11]},
+            {"op": "add", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "type": "line", "start": "p3", "end": "p4"},
+            {"op": "add", "type": "line", "start": "p4", "end": "p1"},
+            {"op": "add", "type": "line", "construction": true, "start": "p1", "end": "p3"},
+            {"op": "add", "type": "horizontal", "a": "l1"},
+            {"op": "add", "type": "horizontal", "a": "l3"},
+            {"op": "add", "type": "vertical", "a": "l2"},
+            {"op": "add", "type": "vertical", "a": "l4"},
+            {"op": "add", "type": "fix", "a": "p1"},
+            {"op": "add", "type": "length", "a": "l1", "value": "width"},
+            {"op": "add", "type": "length", "a": "l2", "value": "10 mm"}
+        ]);
+        self.ok(&["sketch", "edit", "p", "s", &ops.to_string()]);
+        self.ok(&[
+            "feature", "add", "p", "extrude", "--id", "e", "--sketch", "s", "--length", "5",
+        ]);
+        self
+    }
+}
+
+impl Project {
+    /// After [`Project::with_part`]: a sketch `top` on the box's top face
+    /// (placed, not referenced), under-defined: a line, a circle of
+    /// radius 1.5 mm (dimension `d1`) and a construction line.
+    pub fn with_top_sketch(self) -> Project {
+        self.ok(&[
+            "feature", "add", "p", "sketch", "--id", "top", "--origin", "0,0,5",
+        ]);
+        let ops = serde_json::json!([
+            {"op": "add", "type": "point", "at": [5, 2]},
+            {"op": "add", "type": "point", "at": [17, 2]},
+            {"op": "add", "type": "point", "at": [15, 7]},
+            {"op": "add", "type": "point", "at": [6, 8]},
+            {"op": "add", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "type": "circle", "center": "p3", "r": 1.5},
+            {"op": "add", "type": "line", "construction": true, "start": "p4", "end": "p3"},
+            {"op": "add", "type": "radius", "a": "ci1", "value": "1.5 mm"}
+        ]);
+        self.ok(&["sketch", "edit", "p", "top", &ops.to_string()]);
+        self
+    }
+}
+
 impl Drop for Project {
     fn drop(&mut self) {
         let _ = Command::new(&ryucad().exe)

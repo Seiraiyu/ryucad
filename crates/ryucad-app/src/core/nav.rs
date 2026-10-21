@@ -260,6 +260,20 @@ impl Projector {
         }
     }
 
+    /// How far one pixel spans at `p`, in meters, on a viewport `height`
+    /// pixels high: what marks a few pixels wide are made of.
+    pub fn pixel(&self, p: [f64; 3], height: f64) -> f64 {
+        let (_, hh) = self.half();
+        let depth = match self.camera.projection {
+            Projection::Perspective { .. } => {
+                let (_, _, f) = self.camera.basis();
+                dot(sub(p, self.camera.eye), f).max(0.0)
+            }
+            Projection::Orthographic { .. } => 1.0,
+        };
+        2.0 * hh * depth / height
+    }
+
     /// The ray through a point in normalized device coordinates: its
     /// origin and unit direction.
     pub fn ray(&self, ndc: [f64; 2]) -> ([f64; 3], [f64; 3]) {

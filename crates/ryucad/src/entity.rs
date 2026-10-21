@@ -44,6 +44,16 @@ pub enum Target {
     Sketch(&'static str),
 }
 
+impl Target {
+    /// `face`, `edge` or `vertex`, or the sketch entity's type.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Target::Body(k) => k.as_str(),
+            Target::Sketch(t) => t,
+        }
+    }
+}
+
 impl EntityRef {
     pub fn parse(s: &str) -> Result<EntityRef> {
         let bad = |why: &str| {
