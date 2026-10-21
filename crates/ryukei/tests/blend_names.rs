@@ -219,3 +219,43 @@ fn a_rim_accounts_for_every_name() {
     let (s, _) = blend(K, &b, &[fillet(n, 0.3)]).unwrap();
     assert_eq!(names(&r), names(&s));
 }
+
+#[test]
+fn edges_and_faces_two_blends_cut_keep_their_names() {
+    use FaceRole::*;
+    let k = OpKey(1);
+    // The box's four upright edges: every edge round its top and bottom
+    // is cut at both ends.
+    let b = primitive::block(k, 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let upright = [
+        edge(k, PlusX, PlusY),
+        edge(k, PlusX, MinusY),
+        edge(k, MinusX, PlusY),
+        edge(k, MinusX, MinusY),
+    ];
+    let (r, j) = blend(K, &b, &upright.map(|e| fillet(e, 0.2))).unwrap();
+    accounts(&b, &r, &j);
+    // A cylinder's two rims: each rail is named from the face it rolls
+    // on as it was before the blend, whichever rim was built first.
+    let c = primitive::cylinder(k, 1.0, 1.5, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let rims: Vec<Name> = c.edges().map(|e| c.edge(e).unwrap().name).collect();
+    let (r, j) = blend(
+        K,
+        &c,
+        &rims.iter().map(|&e| fillet(e, 0.2)).collect::<Vec<_>>(),
+    )
+    .unwrap();
+    accounts(&c, &r, &j);
+    for e in rims {
+        let f = Name::derive(K, Role::Blend(BlendRole::Face), &[e]);
+        let on = |side| {
+            let rail = Name::derive(K, Role::Blend(BlendRole::Rail), &[f, face(k, side)]);
+            matches!(r.by_name(rail), Some(EntityId::Edge(_)))
+        };
+        assert!(on(Side) && (on(Top) || on(Bottom)), "{e}");
+    }
+}

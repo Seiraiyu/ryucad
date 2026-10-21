@@ -223,23 +223,34 @@ pub(crate) fn build(
     let mut keys = Keys { base: key, n: 0 };
     let mut made = Made::default();
     let mut work = Work::default();
+    // Faces keep their names: chains split and merge them on the way.
+    let names: BTreeMap<FaceId, Name> = body.faces().map(|f| (f, body.faces[f].name)).collect();
     for (chain, plan) in chains.iter().zip(plans) {
-        chain_build(body, &mut keys, specs, chain, plan, &mut made, &mut work)?;
+        chain_build(
+            body, &mut keys, specs, chain, plan, &names, &mut made, &mut work,
+        )?;
     }
     finish(body, &work)?;
+    for (&f, &n) in &names {
+        if body.face(f).is_some() && body.faces[f].name != n && !work.blend_faces.contains(&f) {
+            made.keep.push((EntityId::Face(f), n));
+        }
+    }
     for s in &mut made.segments {
         s.rails[1].retain(|&e| body.edge(e).is_some());
     }
     Ok(made)
 }
 
-/// Builds one chain.
+/// Builds one chain; `names` are the faces' names before the blend.
+#[allow(clippy::too_many_arguments)]
 fn chain_build(
     body: &mut Body,
     keys: &mut Keys,
     specs: &[Spec],
     chain: &Chain,
     plan: &Plan,
+    names: &BTreeMap<FaceId, Name>,
     made: &mut Made,
     work: &mut Work,
 ) -> Result<(), Error> {
@@ -253,11 +264,16 @@ fn chain_build(
             [specs[k].fins[side], specs[k].fins[1 - side]]
         })
         .collect();
-    let rail_name = body.faces[face_of(body, fins[0][0])].name;
+    // The faces' names before the blend, by the faces the edges were
+    // resolved on.
+    let rail_name = names[&chain.rail_face];
     let other_names: Vec<Name> = plan
         .segments
         .iter()
-        .map(|s| body.faces[face_of(body, fins[s.edges[0]][1])].name)
+        .map(|s| {
+            let k = chain.edges[s.edges[0]].0;
+            names[&specs[k].faces[1 - chain.rail_side(specs, k)]]
+        })
         .collect();
     // Ends: split the rail face's cut where its rail crosses it.
     let mut end_edges: Vec<Option<(EdgeId, VertexId)>> = vec![None; chain.vertices.len()];
@@ -268,7 +284,12 @@ fn chain_build(
         let v = chain.vertices[vi];
         let p = if vi == 0 { 0 } else { n - 1 };
         let cut = beside(body, fins[p][0], v);
-        let old = body.edges[cut].name;
+        // An edge cut at both ends keeps the name it had before the blend.
+        let old = made
+            .keep
+            .iter()
+            .find(|(x, _)| *x == EntityId::Edge(cut))
+            .map_or(body.edges[cut].name, |&(_, n)| n);
         let starts_here = body.edges[cut].start == v;
         let x = crossings[0];
         let (s, _) = euler::semv(body, keys.next(), cut, x.at, x.point)?;
