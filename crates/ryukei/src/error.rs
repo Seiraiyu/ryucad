@@ -34,6 +34,8 @@ pub enum Error {
     NoPcurve { edge: EdgeId, face: FaceId },
     /// A boolean that can't be done: see [`crate::boolean::boolean`].
     InvalidBoolean(BooleanError),
+    /// A blend that can't be done: see `crate::blend::blend`.
+    InvalidBlend(BlendError),
 }
 
 /// Why a boolean was refused. Entities are named by their stable names,
@@ -53,6 +55,46 @@ pub enum BooleanError {
     /// An intersection, an ordering or a classification that stayed
     /// uncertain: refused rather than guessed.
     Uncertain { a: Name, b: Name },
+}
+
+/// Why a blend was refused. Entities are named by their stable names in
+/// the body given to the blend; nothing is changed when it is refused.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BlendError {
+    /// No edge of the body has this name.
+    NoSuchEdge { edge: Name },
+    /// The edge is named twice.
+    DuplicateEdge { edge: Name },
+    /// A size that is not finite or under `10 × LINEAR_RESOLUTION`, or a
+    /// chamfer angle outside `(0, π/2]`.
+    BadSize { edge: Name },
+    /// A chamfer names a face the edge does not bound.
+    NotAFace { edge: Name, face: Name },
+    /// The edge's faces meet tangentially somewhere along it: there is
+    /// nothing to round.
+    SmoothEdge { edge: Name },
+    /// The edge is convex in one place and concave in another.
+    ConvexityChanges { edge: Name },
+    /// A blended edge meets an edge that is not blended tangentially:
+    /// the blend would have to stop where nothing ends it. Blend the
+    /// whole chain (see `crate::blend::tangent_chain`).
+    OpenTangentChain { blended: Name, open: Name },
+    /// Two edges that meet tangentially are blended with different kinds
+    /// or sizes.
+    SizeChangeAlongChain { a: Name, b: Name },
+    /// A blend would run off `face`, a face it lies on, or cross another
+    /// blend there.
+    Overflow { edge: Name, face: Name },
+    /// The radius or distance is too large for the curvature of the
+    /// faces or the edge.
+    RadiusTooLarge { edge: Name },
+    /// A face, a vertex or an edge the blend can't handle yet: a surface
+    /// it can't offset or intersect, or a kind of vertex it doesn't build.
+    Unsupported { at: Name },
+    /// A decision rounding left uncertain: refused rather than guessed.
+    Uncertain { at: Name },
+    /// Blends that would meet only at an edge or a point.
+    NonManifold { at: Name },
 }
 
 /// Why a sweep profile was refused. Each names the caller's keys, so the
@@ -162,6 +204,7 @@ impl fmt::Display for Error {
                 face.index()
             ),
             Self::InvalidBoolean(b) => write!(f, "invalid boolean: {b}"),
+            Self::InvalidBlend(b) => write!(f, "invalid blend: {b}"),
         }
     }
 }
@@ -280,6 +323,43 @@ impl fmt::Display for BooleanError {
                 write!(f, "where faces {a} and {b} meet could not be certified")
             }
         }
+    }
+}
+
+impl fmt::Display for BlendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoSuchEdge { edge } => write!(f, "no edge is named {edge}"),
+            Self::DuplicateEdge { edge } => write!(f, "edge {edge} is named twice"),
+            Self::BadSize { edge } => write!(f, "edge {edge} has a bad size"),
+            Self::NotAFace { edge, face } => write!(f, "edge {edge} does not bound face {face}"),
+            Self::SmoothEdge { edge } => write!(f, "the faces of edge {edge} are tangent"),
+            Self::ConvexityChanges { edge } => {
+                write!(f, "edge {edge} is convex in places and concave in others")
+            }
+            Self::OpenTangentChain { blended, open } => write!(
+                f,
+                "blended edge {blended} meets edge {open} tangentially and it is not blended"
+            ),
+            Self::SizeChangeAlongChain { a, b } => {
+                write!(f, "tangent edges {a} and {b} are blended differently")
+            }
+            Self::Overflow { edge, face } => {
+                write!(f, "the blend of edge {edge} runs off face {face}")
+            }
+            Self::RadiusTooLarge { edge } => write!(f, "the blend of edge {edge} is too large"),
+            Self::Unsupported { at } => write!(f, "blending at {at} is not supported"),
+            Self::Uncertain { at } => write!(f, "blending at {at} could not be certified"),
+            Self::NonManifold { at } => {
+                write!(f, "blends would meet in an edge or a point at {at}")
+            }
+        }
+    }
+}
+
+impl From<BlendError> for Error {
+    fn from(b: BlendError) -> Self {
+        Self::InvalidBlend(b)
     }
 }
 
@@ -409,6 +489,12 @@ mod tests {
         assert_eq!(
             Error::from(TopologyError::Inconsistent).to_string(),
             "topology: the result fails the topology check"
+        );
+        let n = Name::from_u128(0x2a);
+        assert_eq!(
+            Error::from(BlendError::Overflow { edge: n, face: n }).to_string(),
+            "invalid blend: the blend of edge 0000000000000000000000000000002a runs off face \
+             0000000000000000000000000000002a"
         );
     }
 }

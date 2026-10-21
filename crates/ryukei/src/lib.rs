@@ -3,6 +3,7 @@
 //! Operates on single bodies only; knows nothing about documents,
 //! assemblies, or agents (those live in `ryucad`).
 
+pub mod blend;
 pub mod boolean;
 pub mod check;
 mod error;
@@ -21,7 +22,9 @@ pub mod sweep;
 pub mod tol;
 pub mod topo;
 
-pub use error::{BooleanError, Error, NurbsError, ProfileError, SweepError, TopologyError};
+pub use error::{
+    BlendError, BooleanError, Error, NurbsError, ProfileError, SweepError, TopologyError,
+};
 
 /// This kernel's version, for ryucad's `version` report and cache keys.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

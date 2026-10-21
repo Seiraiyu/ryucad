@@ -51,6 +51,17 @@ pub enum Corner {
     Lone(LoopId),
 }
 
+/// Makes `fin` the first fin of its loop. The loop is the same cycle, so
+/// nothing about the topology changes; but the operators that split a
+/// loop keep the side holding its first fin in the old face, with the
+/// face's other loops, so a caller that knows which side those belong on
+/// starts the loop there first.
+pub(crate) fn start_loop_at(body: &mut Body, fin: FinId) -> Result<(), Error> {
+    let l = live(&body.fins, fin)?.loop_;
+    body.loops[l].first_fin = Some(fin);
+    Ok(())
+}
+
 pub(crate) fn dead() -> Error {
     Error::Topology(TopologyError::DeadEntity)
 }

@@ -140,6 +140,7 @@ fn the_journal_accounts_for_every_name() {
                 inputs.insert(*from);
                 made.insert(*to);
             }
+            Event::Replaced { .. } => panic!("a boolean replaces nothing"),
         }
     }
     let after = names(&b);

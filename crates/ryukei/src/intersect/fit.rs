@@ -32,8 +32,8 @@ use super::ss_trace::Traced;
 use super::{Failure, SLACK};
 use crate::geom::chain3::Piece3;
 use crate::geom::{
-    BezierCurve, Curve, Hom, KnotVector, NurbsCurve, NurbsCurve2, Pipe, Point2, Point3, Surface,
-    Vector2, Vector3,
+    BezierCurve, Curve, Curve2, Hom, KnotVector, NurbsCurve, NurbsCurve2, Pipe, Point2, Point3,
+    Surface, Vector2, Vector3,
 };
 use crate::geom::{cos_abs_max, cos_range};
 use crate::math;
@@ -700,6 +700,45 @@ pub(crate) fn fit_pcurve(
         let duv = uv_velocity(surface, uv, e.d1).ok_or(Failure::Uncertain)?;
         Ok((t, uv - duv * dt, duv))
     };
+    fit_pcurve_with(surface, curve, [t0, t1], &at, LINEAR_RESOLUTION)
+}
+
+/// [`fit_pcurve`] where the caller knows the parameters on `surface` of
+/// the curve's points (a rail on a pipe, whose spine parameter is the
+/// rail's and whose angle comes from the pipe's frame): `uv` gives them,
+/// continuous along the curve, so nothing is projected. Spans are split
+/// until their bound is within `target` (the edge's own tolerance, at
+/// least resolution: a fitted rail is that far from the pipe already),
+/// and a fit that can't get within ten times that is
+/// [`Failure::Uncertain`].
+pub(crate) fn fit_pcurve_by(
+    surface: &Surface,
+    curve: &Curve,
+    [t0, t1]: [f64; 2],
+    uv: &dyn Fn(f64) -> Point2,
+    target: f64,
+) -> Result<(NurbsCurve2, f64), Failure> {
+    let at = |t: f64, _: Option<Point2>| -> Result<(f64, Point2, Vector2), Failure> {
+        let p = uv(t);
+        let duv = uv_velocity(surface, p, curve.eval(t).d1).ok_or(Failure::Uncertain)?;
+        Ok((t, p, duv))
+    };
+    fit_pcurve_with(surface, curve, [t0, t1], &at, target.max(LINEAR_RESOLUTION))
+}
+
+/// A sample of a pcurve fit: the curve's parameter, the surface's
+/// parameters, and their derivative by the curve's.
+type PcurveSample = (f64, Point2, Vector2);
+
+/// Fits a pcurve through samples `at` gives, unwrapped next to the one
+/// before, refining until every span's bound is within `target`.
+fn fit_pcurve_with(
+    surface: &Surface,
+    curve: &Curve,
+    [t0, t1]: [f64; 2],
+    at: &dyn Fn(f64, Option<Point2>) -> Result<PcurveSample, Failure>,
+    target: f64,
+) -> Result<(NurbsCurve2, f64), Failure> {
     // Each sample is unwrapped next to the one before, so no step may
     // turn a periodic parameter by a quarter period or more: a longer
     // step could unwrap the wrong way round and leave a jump of a whole
@@ -738,7 +777,7 @@ pub(crate) fn fit_pcurve(
                 curve,
                 t: [a.0, b.0],
             },
-            LINEAR_RESOLUTION,
+            target,
         )
     };
     let mut bounds: Vec<Option<f64>> = vec![None; samples.len() - 1];
@@ -748,12 +787,12 @@ pub(crate) fn fit_pcurve(
         for i in 0..samples.len() - 1 {
             let b = *bounds[i].get_or_insert_with(|| bound_of(&samples[i], &samples[i + 1]));
             worst = worst.max(b);
-            if b > LINEAR_RESOLUTION {
+            if b > target {
                 split.push(i);
             }
         }
         if split.is_empty() || round == MAX_ROUNDS || samples.len() + split.len() > MAX_SAMPLES {
-            if worst > 10.0 * LINEAR_RESOLUTION {
+            if worst > 10.0 * target {
                 return Err(Failure::Uncertain);
             }
             let knots: Vec<f64> = samples.iter().map(|s| s.0).collect();
@@ -768,11 +807,245 @@ pub(crate) fn fit_pcurve(
                 pts.extend(c[1..].iter().map(|&v| Point2::ORIGIN + v));
             }
             let pc = NurbsCurve2::new(kv, pts, None).map_err(|_| Failure::Uncertain)?;
-            return Ok((pc, worst.max(LINEAR_RESOLUTION)));
+            return Ok((pc, worst.max(target)));
         }
         for &i in split.iter().rev() {
             let t = (samples[i].0 + samples[i + 1].0) / 2.0;
             let mid = at(t, Some(samples[i].1))?;
+            samples.insert(i + 1, mid);
+            bounds[i] = None;
+            bounds.insert(i + 1, None);
+        }
+    }
+    unreachable!("the loop returns")
+}
+
+/// A curve fitted along a pcurve on a surface (see [`fit_along`]).
+#[derive(Clone, Debug)]
+pub(crate) struct Lifted {
+    pub(crate) curve: NurbsCurve,
+    /// The curve's own pcurve on the surface, by the same parameter.
+    pub(crate) pcurve: NurbsCurve2,
+    /// How far the pcurve's image may stray from the curve, certified (at
+    /// least [`LINEAR_RESOLUTION`]).
+    pub(crate) tolerance: f64,
+}
+
+/// The curve on `surface` along `pcurve` over `[t0, t1]`, where the
+/// pcurve's parameter is `map[0] + map[1] t`: the image `S(P(t))` fitted
+/// by cubic Hermite spans in `t`, with a polynomial pcurve fitted through
+/// the same samples, and the certified bound on `|S(P̃(t)) - C(t)|` by
+/// [`pcurve_bound`]. A span whose bound exceeds [`LINEAR_RESOLUTION`], or
+/// whose pcurve's image is farther than that from the surface along the
+/// given pcurve at its middle, gets a sample in its middle; a fit that
+/// can't get within `10 × LINEAR_RESOLUTION` is [`Failure::Uncertain`].
+/// The middle test is sampled: it keeps the fit near the given curve,
+/// while the certified bound is what makes it an edge. A rail of a fillet
+/// along a fitted spine is the face's surface along the spine's pcurve
+/// on its offset.
+pub(crate) fn fit_along(
+    surface: &Surface,
+    pcurve: &Curve2,
+    map: [f64; 2],
+    [t0, t1]: [f64; 2],
+) -> Result<Lifted, Failure> {
+    let at = |t: f64| -> Result<Sample, Failure> {
+        let e = pcurve.eval(map[0] + map[1] * t);
+        let duv = e.d1 * map[1];
+        let s = surface.eval(e.point.x, e.point.y);
+        let d = s.du * duv.x + s.dv * duv.y;
+        if !(d.length().is_finite() && s.point.to_vector().length().is_finite()) {
+            return Err(Failure::Uncertain);
+        }
+        Ok(Sample {
+            s: t,
+            p: s.point,
+            d,
+            uv: [e.point; 2],
+            duv: [duv; 2],
+        })
+    };
+    let n = 8;
+    let mut samples = (0..=n)
+        .map(|i| at(t0 + (t1 - t0) * i as f64 / n as f64))
+        .collect::<Result<Vec<_>, _>>()?;
+    let bound_of = |a: &Sample, b: &Sample| {
+        let h = b.s - a.s;
+        let span = piece(
+            hermite(a.p.to_vector(), a.d, b.p.to_vector(), b.d, h),
+            [a.s, b.s],
+        );
+        let p2 = piece(
+            hermite(
+                a.uv[0].to_vector(),
+                a.duv[0],
+                b.uv[0].to_vector(),
+                b.duv[0],
+                h,
+            ),
+            [a.s, b.s],
+        );
+        // Where the fit's pcurve has drifted from the given one, the span
+        // counts as out of bounds.
+        let (q, _) = eval(&p2, 0.5);
+        let want = pcurve.point(map[0] + map[1] * (a.s + b.s) / 2.0);
+        let drift = surface
+            .point(q.x, q.y)
+            .distance(surface.point(want.x, want.y));
+        let bound = pcurve_bound(surface, &p2, &SpanTarget(&span), LINEAR_RESOLUTION);
+        if drift > LINEAR_RESOLUTION {
+            (bound, true)
+        } else {
+            (bound, false)
+        }
+    };
+    let mut bounds: Vec<Option<(f64, bool)>> = vec![None; samples.len() - 1];
+    for round in 0.. {
+        let mut worst = 0.0f64;
+        let mut drifted = false;
+        let mut split = Vec::new();
+        for i in 0..samples.len() - 1 {
+            let (b, drift) =
+                *bounds[i].get_or_insert_with(|| bound_of(&samples[i], &samples[i + 1]));
+            worst = worst.max(b);
+            drifted |= drift;
+            if b > LINEAR_RESOLUTION || drift {
+                split.push(i);
+            }
+        }
+        if split.is_empty() || round == MAX_ROUNDS || samples.len() + split.len() > MAX_SAMPLES {
+            if worst > 10.0 * LINEAR_RESOLUTION || drifted {
+                return Err(Failure::Uncertain);
+            }
+            let knots: Vec<f64> = samples.iter().map(|s| s.s).collect();
+            let mut mults = vec![3; knots.len()];
+            mults[0] = 4;
+            mults[knots.len() - 1] = 4;
+            let kv = KnotVector::clamped(3, &knots, &mults).map_err(|_| Failure::Uncertain)?;
+            let mut pts3 = vec![samples[0].p];
+            let mut pts2 = vec![samples[0].uv[0]];
+            for w in samples.windows(2) {
+                let (a, b) = (&w[0], &w[1]);
+                let h = b.s - a.s;
+                let c = hermite(a.p.to_vector(), a.d, b.p.to_vector(), b.d, h);
+                pts3.extend(c[1..].iter().map(|&v| Point3::ORIGIN + v));
+                let c = hermite(
+                    a.uv[0].to_vector(),
+                    a.duv[0],
+                    b.uv[0].to_vector(),
+                    b.duv[0],
+                    h,
+                );
+                pts2.extend(c[1..].iter().map(|&v| Point2::ORIGIN + v));
+            }
+            return Ok(Lifted {
+                curve: NurbsCurve::new(kv.clone(), pts3, None).map_err(|_| Failure::Uncertain)?,
+                pcurve: NurbsCurve2::new(kv, pts2, None).map_err(|_| Failure::Uncertain)?,
+                tolerance: worst.max(LINEAR_RESOLUTION),
+            });
+        }
+        for &i in split.iter().rev() {
+            let mid = at((samples[i].s + samples[i + 1].s) / 2.0)?;
+            samples.insert(i + 1, mid);
+            bounds[i] = None;
+            bounds.insert(i + 1, None);
+        }
+    }
+    unreachable!("the loop returns")
+}
+
+/// Two curves, each on its surface, through the points `at` gives over
+/// `[t0, t1]`, each point with its derivative by `t`, fitted on shared
+/// knots: cubic Hermite spans in `t`, each certified within its bound of
+/// its surface through the surface's implicit form ([`surface_bound`]),
+/// split (in both curves) until both bounds are within
+/// [`LINEAR_RESOLUTION`] and both spans' middles are within it of the
+/// points `at` gives there (sampled: that keeps the fit near the given
+/// points, the bound makes it an edge). A chamfer's rails are the points
+/// at its setbacks in each section of its edge, and sharing knots makes
+/// the ruled surface between them simple. Returns the curves and their
+/// worst bounds; `Unsupported` for a surface with no implicit form,
+/// `Uncertain` where `at` fails or a fit can't get within
+/// `10 × LINEAR_RESOLUTION`.
+pub(crate) fn fit_on(
+    surfaces: [&Surface; 2],
+    [t0, t1]: [f64; 2],
+    at: &dyn Fn(f64) -> Option<[(Point3, Vector3); 2]>,
+) -> Result<([NurbsCurve; 2], [f64; 2]), Failure> {
+    let imps = [
+        Implicit::of(surfaces[0]).ok_or(Failure::Unsupported)?,
+        Implicit::of(surfaces[1]).ok_or(Failure::Unsupported)?,
+    ];
+    type S = (f64, [(Point3, Vector3); 2]);
+    let sample = |t: f64| -> Result<S, Failure> { Ok((t, at(t).ok_or(Failure::Uncertain)?)) };
+    let n = 8;
+    let mut samples = (0..=n)
+        .map(|i| sample(t0 + (t1 - t0) * i as f64 / n as f64))
+        .collect::<Result<Vec<_>, _>>()?;
+    let span = |a: &S, b: &S, k: usize| {
+        let h = b.0 - a.0;
+        let (pa, da) = a.1[k];
+        let (pb, db) = b.1[k];
+        piece(
+            hermite(pa.to_vector(), da, pb.to_vector(), db, h),
+            [a.0, b.0],
+        )
+    };
+    let bound_of = |a: &S, b: &S| -> ([f64; 2], bool) {
+        let mid = at((a.0 + b.0) / 2.0);
+        let mut drift = mid.is_none();
+        let mut out = [0.0; 2];
+        for (k, bound) in out.iter_mut().enumerate() {
+            let sp = span(a, b, k);
+            let (q, _) = eval(&sp, 0.5);
+            if let Some(m) = mid {
+                drift |= (Point3::ORIGIN + q).distance(m[k].0) > LINEAR_RESOLUTION;
+            }
+            *bound = surface_bound(&imps[k], &sp, LINEAR_RESOLUTION, MAX_HALVINGS);
+        }
+        (out, drift)
+    };
+    let mut bounds: Vec<Option<([f64; 2], bool)>> = vec![None; samples.len() - 1];
+    for round in 0.. {
+        let mut worst = [0.0f64; 2];
+        let mut drifted = false;
+        let mut split = Vec::new();
+        for i in 0..samples.len() - 1 {
+            let (b, drift) =
+                *bounds[i].get_or_insert_with(|| bound_of(&samples[i], &samples[i + 1]));
+            worst = [worst[0].max(b[0]), worst[1].max(b[1])];
+            drifted |= drift;
+            if b[0].max(b[1]) > LINEAR_RESOLUTION || drift {
+                split.push(i);
+            }
+        }
+        if split.is_empty() || round == MAX_ROUNDS || samples.len() + split.len() > MAX_SAMPLES {
+            if worst[0].max(worst[1]) > 10.0 * LINEAR_RESOLUTION || drifted {
+                return Err(Failure::Uncertain);
+            }
+            let knots: Vec<f64> = samples.iter().map(|s| s.0).collect();
+            let mut mults = vec![3; knots.len()];
+            mults[0] = 4;
+            mults[knots.len() - 1] = 4;
+            let kv = KnotVector::clamped(3, &knots, &mults).map_err(|_| Failure::Uncertain)?;
+            let curve = |k: usize| -> Result<NurbsCurve, Failure> {
+                let mut pts = vec![samples[0].1[k].0];
+                for w in samples.windows(2) {
+                    let h = w[1].0 - w[0].0;
+                    let (pa, da) = w[0].1[k];
+                    let (pb, db) = w[1].1[k];
+                    let c = hermite(pa.to_vector(), da, pb.to_vector(), db, h);
+                    pts.extend(c[1..].iter().map(|&v| Point3::ORIGIN + v));
+                }
+                NurbsCurve::new(kv.clone(), pts, None).map_err(|_| Failure::Uncertain)
+            };
+            return Ok((
+                [curve(0)?, curve(1)?],
+                worst.map(|w| w.max(LINEAR_RESOLUTION)),
+            ));
+        }
+        for &i in split.iter().rev() {
+            let mid = sample((samples[i].0 + samples[i + 1].0) / 2.0)?;
             samples.insert(i + 1, mid);
             bounds[i] = None;
             bounds.insert(i + 1, None);
@@ -889,6 +1162,29 @@ mod tests {
                     assert!(f.curve.point(s0).distance(f.curve.point(s1)) <= 1e-12);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_latitude_lifted_off_a_sphere_is_its_circle() {
+        use crate::geom::{Curve2, Line2, Vector2};
+        let s = Surface::Sphere(Sphere::new(frame((1.0, 2.0, 3.0), (0.0, 0.6, 0.8)), 2.0).unwrap());
+        let lat = 0.4;
+        let line =
+            Curve2::Line2(Line2::new(Point2::new(0.0, lat), Vector2::new(1.0, 0.0)).unwrap());
+        let tau = core::f64::consts::TAU;
+        // The circle's parameter is half the pcurve's, from 1.
+        let lifted = fit_along(&s, &line, [-2.0, 2.0], [1.0, 1.0 + tau / 2.0]).unwrap();
+        assert!(lifted.tolerance <= LINEAR_RESOLUTION * 1.0001);
+        let [a, b] = lifted.curve.domain();
+        assert_eq!([a, b], [1.0, 1.0 + tau / 2.0]);
+        assert!(lifted.curve.point(a).distance(lifted.curve.point(b)) < 1e-12);
+        for i in 0..=50 {
+            let t = a + (b - a) * i as f64 / 50.0;
+            let want = s.point(-2.0 + 2.0 * t, lat);
+            assert!(lifted.curve.point(t).distance(want) <= lifted.tolerance);
+            let uv = lifted.pcurve.point(t);
+            assert!(s.point(uv.x, uv.y).distance(lifted.curve.point(t)) <= lifted.tolerance);
         }
     }
 
