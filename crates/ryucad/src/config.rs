@@ -107,6 +107,13 @@ const KEYS: &[Key] = &[
         about: "whether edges are drawn",
     },
     Key {
+        name: "display.sketches",
+        scope: Scope::User,
+        rule: Rule::Bool,
+        default: || json!(true),
+        about: "whether sketches are drawn",
+    },
+    Key {
         name: "display.mesh_cache_mib",
         scope: Scope::User,
         rule: Rule::Int(16, 65536),

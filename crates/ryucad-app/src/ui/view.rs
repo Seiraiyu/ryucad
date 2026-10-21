@@ -11,6 +11,7 @@ use crate::ui::style::{self, Rgb};
 use eframe::egui::{self, PointerButton, Sense};
 use eframe::{egui_wgpu, wgpu};
 use ryucad::live::SelectMode;
+use ryucad::sketch_view::ConstraintState;
 use ryucad::view::{self, StandardView};
 use std::collections::BTreeMap;
 
@@ -19,6 +20,8 @@ pub struct View {
     pub nav: Nav,
     /// Draw B-rep edges (`display.edges`).
     pub edges: bool,
+    /// Draw sketches (`display.sketches`).
+    pub sketches: bool,
     /// The window's look (`ui.style`), for the background.
     pub look: crate::ui::style::Look,
     /// The feature chosen in the tree: its body is painted.
@@ -27,6 +30,9 @@ pub struct View {
     /// Where the viewport was last drawn, in points.
     pub rect: egui::Rect,
     picker: Option<Picker>,
+    /// The model generation and whether sketches were shown, when the
+    /// picker was made.
+    picked_at: (u64, bool),
     /// The point vertex positions are relative to on the GPU.
     reference: Option<[f64; 3]>,
     scene: Option<Scene>,
@@ -98,11 +104,13 @@ impl View {
         View {
             nav: Nav::new(camera),
             edges: true,
+            sketches: true,
             look: crate::ui::style::Look::default(),
             chosen: None,
             hover: None,
             rect: egui::Rect::NOTHING,
             picker: None,
+            picked_at: (0, true),
             reference: None,
             scene: None,
             texture: None,
@@ -115,14 +123,13 @@ impl View {
         }
     }
 
-    /// The model prepared for picking, rebuilt when it changes.
+    /// The model prepared for picking, rebuilt when it changes or
+    /// sketches are shown or hidden.
     pub fn picker(&mut self, ws: &Workspace) -> &Picker {
-        if self
-            .picker
-            .as_ref()
-            .is_none_or(|p| p.generation != ws.model.generation)
-        {
-            self.picker = Some(Picker::new(&ws.model));
+        let wanted = (ws.model.generation, self.sketches);
+        if self.picker.is_none() || self.picked_at != wanted {
+            self.picker = Some(Picker::of(&ws.model, self.sketches));
+            self.picked_at = wanted;
         }
         self.picker.as_ref().expect("just made")
     }
@@ -185,6 +192,10 @@ impl View {
                 self.framers.insert(key.clone(), framers);
             }
             out.extend_from_slice(&self.framers[key].points);
+        }
+        // Sketches are few points: all of them.
+        if self.sketches {
+            out.extend(ws.model.sketches.values().flat_map(|d| d.points()));
         }
         out
     }
@@ -256,6 +267,10 @@ impl View {
             wanted.push((h.entity.clone(), style::HOVER));
         }
         let chosen = self.chosen.clone();
+        let chosen_sketch = chosen
+            .as_ref()
+            .filter(|_| self.sketches)
+            .and_then(|k| ws.model.sketches.get(k));
         let picker = self.picker(ws);
         let mut faces = Vec::new();
         if let Some(k) = chosen {
@@ -263,6 +278,12 @@ impl View {
             faces.extend((0..picker.faces(&k)).map(|i| (k.clone(), i, c)));
         }
         let mut lines = Vec::new();
+        // A sketch chosen in the tree: all of it.
+        if let Some(d) = chosen_sketch {
+            let c = style::CHOSEN;
+            lines.extend(d.curves.iter().map(|k| (Place::Edge(k.points.clone()), c)));
+            lines.extend(d.dots.iter().map(|p| (Place::Vertex(p.at), c)));
+        }
         for (e, c) in wanted {
             match picker.place(&e) {
                 Some(Place::Face(k, i)) => faces.push((k, i, linear(c))),
@@ -288,6 +309,69 @@ impl View {
             }
         }
         out
+    }
+
+    /// Sketches' dimensions as labels where they aren't hidden behind a
+    /// solid, in their states' colours; clicking one opens its value in
+    /// the property panel.
+    fn dimension_labels(
+        &mut self,
+        ui: &mut egui::Ui,
+        ws: &mut Workspace,
+        rect: egui::Rect,
+        pr: &Projector,
+    ) {
+        let size = [f64::from(rect.width()), f64::from(rect.height())];
+        let open = ws
+            .dimension
+            .as_ref()
+            .map(|f| (f.part.clone(), f.sketch.clone(), f.constraint.clone()));
+        let mut chosen = None;
+        let drawings: Vec<_> = ws
+            .model
+            .sketches
+            .iter()
+            .map(|(k, d)| (k.clone(), std::sync::Arc::clone(d)))
+            .collect();
+        for (key, d) in drawings {
+            for l in &d.labels {
+                let Some(n) = pr.ndc(l.at) else { continue };
+                let s = egui::pos2(
+                    rect.min.x + ((n[0] + 1.0) / 2.0 * size[0]) as f32,
+                    rect.min.y + ((1.0 - n[1]) / 2.0 * size[1]) as f32,
+                );
+                if !rect.contains(s) || self.picker(ws).hidden(pr, l.at) {
+                    continue;
+                }
+                let me = (key.0.clone(), key.1.clone(), l.constraint.clone());
+                let color = match (open.as_ref() == Some(&me), l.state) {
+                    (true, _) => style::color32(style::SELECTED),
+                    (_, ConstraintState::Ok) => ui.visuals().text_color(),
+                    (_, ConstraintState::Redundant) => style::color32(ryucad::render::SKETCH_OVER),
+                    (_, ConstraintState::Conflicting) => {
+                        style::color32(ryucad::render::SKETCH_FAILING)
+                    }
+                };
+                let id = ui.scope_id().with(("dimension", &key, &l.constraint));
+                egui::Area::new(id)
+                    .fixed_pos(s)
+                    .pivot(egui::Align2::CENTER_CENTER)
+                    .constrain_to(rect)
+                    .order(egui::Order::Middle)
+                    .show(ui.ctx(), |ui| {
+                        let text = egui::RichText::new(&l.text).color(color).small();
+                        let r = ui
+                            .add(egui::Button::new(text).small())
+                            .on_hover_text(format!("{} {} of {}", l.ty, l.constraint, key.1));
+                        if r.clicked() {
+                            chosen = Some(me.clone());
+                        }
+                    });
+            }
+        }
+        if let Some(c) = chosen {
+            ws.open_dimension(Some(c));
+        }
     }
 
     /// Draws the viewport into `ui`'s remaining space and handles its
@@ -484,6 +568,9 @@ impl View {
                 Place::Face(..) => {}
             }
         }
+        if self.sketches {
+            self.dimension_labels(ui, ws, rect, &pr);
+        }
         for (i, (text, at, c)) in self.labels(ws).into_iter().enumerate() {
             let Some(s) = to_screen(at).filter(|s| rect.contains(*s)) else {
                 continue;
@@ -547,6 +634,17 @@ impl View {
             .scene
             .get_or_insert_with(|| Scene::new(&rs.device, &rs.adapter));
         scene.sync(&rs.device, &ws.model, reference);
+        let overlay = if self.sketches {
+            let size = [f64::from(px[0]), f64::from(px[1])];
+            crate::core::sketch::overlay(
+                ws.model.sketches.values().map(|d| &**d),
+                pr,
+                size,
+                f64::from(ppp),
+            )
+        } else {
+            Vec::new()
+        };
         let list = DrawList {
             reference,
             matrix: pr.matrix(reference),
@@ -555,6 +653,7 @@ impl View {
             edges: self.edges,
             faces,
             background: self.look.viewport_background(ui.visuals().dark_mode),
+            overlay: &overlay,
         };
         let view = scene.render(&rs.device, &rs.queue, px, &list);
         let mut renderer = rs.renderer.write();

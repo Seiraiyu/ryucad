@@ -115,7 +115,7 @@ fn the_tree_lists_features_and_frames_a_chosen_one() {
             .is_some_and(|p| p.feature("ring").is_some())
     });
     h.step();
-    h.get_by_label("ring (torus): failed");
+    h.get_by_label("ring (torus): failed (rebuild_failed)");
 }
 
 #[test]
@@ -609,7 +609,8 @@ fn preferences_change_the_window_whoever_sets_them() {
     });
     h.step();
     let edges = h.state().opened().view.edges;
-    h.get_by_role(egui::accesskit::Role::CheckBox).click();
+    h.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Draw edges")
+        .click();
     frames(&mut h, |a| a.opened().view.edges != edges);
     assert_eq!(p.ok(&["config", "get", "display.edges"])["value"], !edges);
     // An agent picks the dark theme; the window follows.
@@ -843,4 +844,159 @@ fn the_viewport_shows_the_colours_it_draws() {
         px.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 3),
         "the background shows as {px:?}, drawn as {want:?}"
     );
+}
+
+fn sketched(app: &App) -> bool {
+    loaded(app) && app.opened().ws.model.sketches.len() == 1
+}
+
+/// Where model point `p` is in the window now.
+fn on_screen(h: &Harness<'static, App>, p: [f64; 3]) -> egui::Pos2 {
+    let o = h.state().opened();
+    let rect = o.view.rect;
+    let aspect = f64::from(rect.width() / rect.height());
+    let pr = ryucad_app::core::nav::Projector::new(&o.view.nav.camera, aspect, p, 0.05);
+    let n = pr.ndc(p).unwrap();
+    egui::pos2(
+        rect.min.x + ((n[0] + 1.0) / 2.0) as f32 * rect.width(),
+        rect.min.y + ((1.0 - n[1]) / 2.0) as f32 * rect.height(),
+    )
+}
+
+#[test]
+fn a_click_on_a_sketch_line_selects_it() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part().with_top_sketch();
+    let mut h = window(&p);
+    frames(&mut h, sketched);
+    h.step();
+    // The middle of line l1, on the box's top.
+    let at = on_screen(&h, [0.011, 0.002, 0.005]);
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    let hover = h.state().opened().view.hover.clone().unwrap();
+    assert_eq!(hover.entity, "p/top/l1");
+    assert_eq!(hover.kind.as_str(), "line");
+    click(&h, at);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection == ["p/top/l1"])
+            && a.opened().ws.idle()
+    });
+    assert_eq!(
+        p.ok(&["selection"])["selection"],
+        serde_json::json!(["p/top/l1"])
+    );
+}
+
+#[test]
+fn a_dimension_label_opens_its_value() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part().with_top_sketch();
+    let mut h = window(&p);
+    frames(&mut h, sketched);
+    h.step();
+    h.get_by_label("1.5 mm").click();
+    frames(&mut h, |a| a.opened().ws.dimension.is_some());
+    h.step();
+    let field = h.get_all_by_value("1.5 mm").next().unwrap();
+    field.set_text_value_accesskit("2 mm");
+    h.step();
+    h.get_by_label("Apply").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .dimension
+            .as_ref()
+            .is_some_and(|f| !f.saving && f.value.read == "2 mm")
+    });
+    let shown = p.ok(&["feature", "show", "p", "top"]);
+    assert_eq!(shown["constraints"]["d1"]["value"]["value"], "2 mm");
+    // The label follows.
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .model
+            .sketches
+            .values()
+            .any(|d| d.labels[0].text == "2 mm")
+    });
+}
+
+#[test]
+fn the_tree_shows_sketches_and_what_features_read() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_sketch();
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        let o = a.opened();
+        o.ws.idle() && o.ws.model.meshes.len() == 1 && o.ws.model.sketches.len() == 1
+    });
+    h.step();
+    h.get_by_label("s (sketch, well)");
+    h.get_by_label("e (extrude)");
+    h.get_by_label("uses s");
+    // A sketch that can't hold fails what reads it.
+    let ops = r#"[{"op": "remove", "id": "c1"}]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .part("p")
+            .and_then(|p| p.feature("s"))
+            .and_then(|f| f.sketch.as_ref())
+            .is_some_and(|s| s.state == "under")
+    });
+    h.step();
+    h.get_by_label("s (sketch, under, 1 dof)");
+    // Choosing the sketch frames it.
+    let before = h.state().opened().view.nav.camera.clone();
+    h.get_by_label("s (sketch, under, 1 dof)").click();
+    frames(&mut h, |a| a.opened().view.chosen.is_some());
+    assert_ne!(h.state().opened().view.nav.camera, before);
+}
+
+#[test]
+fn a_parameter_is_edited_in_its_panel() {
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_sketch();
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        let o = a.opened();
+        o.ws.idle() && o.ws.params.is_some() && o.ws.model.sketches.len() == 1
+    });
+    h.step();
+    h.get_by_label("Parameters of p");
+    let field = h.get_all_by_value("20 mm").next().unwrap();
+    field.set_text_value_accesskit("35 mm");
+    h.step();
+    h.get_by_label("Apply parameters").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .params
+            .as_ref()
+            .is_some_and(|p| !p.saving && !p.dirty() && p.params[0].field.read == "35 mm")
+    });
+    let list = p.ok(&["param", "list", "p"]);
+    assert_eq!(list["parameters"][0]["value"], "35 mm");
+    // The sketch's label follows.
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .model
+            .sketches
+            .values()
+            .any(|d| d.labels[0].text == "width = 35 mm")
+    });
 }

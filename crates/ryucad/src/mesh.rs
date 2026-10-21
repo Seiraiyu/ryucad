@@ -55,15 +55,25 @@ impl Quality {
     /// below what ryukei accepts. The same body and quality give the same
     /// parameters on every platform.
     pub fn params(self, diagonal: f64) -> MeshParams {
-        use core::f64::consts::PI;
-        let (fraction, angle) = match self {
+        let fraction = match self {
             // Coarse is for size, not looks: visibly faceted.
-            Quality::Coarse => (1e-2, PI / 4.0),
-            Quality::Normal => (5e-4, PI / 12.0),
-            Quality::Fine => (1.25e-4, PI * 8.0 / 180.0),
+            Quality::Coarse => 1e-2,
+            Quality::Normal => 5e-4,
+            Quality::Fine => 1.25e-4,
         };
         let floor = 10.0 * ryukei::tol::LINEAR_RESOLUTION;
-        MeshParams::new((diagonal * fraction).max(floor), angle)
+        MeshParams::new((diagonal * fraction).max(floor), self.angle())
+    }
+
+    /// The most a mesh's normal turns across a triangle, and a sketch's
+    /// arcs between the points they are drawn through.
+    pub fn angle(self) -> f64 {
+        use core::f64::consts::PI;
+        match self {
+            Quality::Coarse => PI / 4.0,
+            Quality::Normal => PI / 12.0,
+            Quality::Fine => PI * 8.0 / 180.0,
+        }
     }
 }
 

@@ -300,7 +300,11 @@ impl Opened {
             .resizable(true)
             .default_size(280.0)
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| panels::properties(ui, &mut self.ws));
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    panels::properties(ui, &mut self.ws);
+                    ui.separator();
+                    panels::parameters(ui, &mut self.ws, &self.view);
+                });
             });
         egui::CentralPanel::no_frame().show(ui, |ui| self.view.show(ui, &mut self.ws, gpu));
         let view = self.view.rect;
@@ -347,12 +351,15 @@ impl Opened {
             self.view.look = look;
         }
         self.view.nav.style = Navigation::parse(self.ws.settings.text("ui.navigation", "ryucad"));
-        self.view.edges = self
-            .ws
-            .settings
-            .get("display.edges")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
+        let on = |key| {
+            self.ws
+                .settings
+                .get(key)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+        };
+        self.view.edges = on("display.edges");
+        self.view.sketches = on("display.sketches");
     }
 
     /// Ctrl/Cmd+Z undoes this window's latest change, Shift+Ctrl/Cmd+Z or

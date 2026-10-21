@@ -46,10 +46,11 @@ fn the_viewport_looks_as_it_did() {
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
-    let p = Project::named("snapshot").with_part();
+    let p = Project::named("snapshot").with_part().with_top_sketch();
     let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
-        && ws.model.meshes.len() == 2));
+        && ws.model.meshes.len() == 2
+        && ws.model.sketches.len() == 1));
     let picker = Picker::new(&ws.model);
     let (lo, hi) = picker.bounds().unwrap();
     let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
@@ -60,6 +61,13 @@ fn the_viewport_looks_as_it_did() {
     // One face painted, as a selection is.
     let key = ("p".to_owned(), "boss".to_owned());
     let faces = [(key, 0, linear(theme::NOTE))];
+    // The sketch on the box's top, under-defined.
+    let overlay = ryucad_app::core::sketch::overlay(
+        ws.model.sketches.values().map(|d| &**d),
+        &pr,
+        [f64::from(W), f64::from(H)],
+        1.0,
+    );
     let list = DrawList {
         reference: centre,
         matrix: pr.matrix(centre),
@@ -68,6 +76,7 @@ fn the_viewport_looks_as_it_did() {
         light: scene::light(&camera),
         edges: true,
         faces: &faces,
+        overlay: &overlay,
     };
     scene.render(&device, &queue, [W, H], &list);
     let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();

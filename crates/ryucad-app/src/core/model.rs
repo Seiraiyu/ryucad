@@ -2,6 +2,7 @@
 //! their rebuild status, and a display mesh per body. It is built from the
 //! daemon's reports and never from the files.
 
+use crate::core::sketch::Drawing;
 use ryucad::mesh::WireBody;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -15,8 +16,21 @@ pub struct Feature {
     pub ty: Option<String>,
     /// The body's hash, when it built.
     pub hash: Option<String>,
+    /// A sketch's solve, when it solved.
+    pub sketch: Option<SketchState>,
+    /// The features it reads.
+    pub uses: Vec<String>,
     /// Why it didn't build.
     pub error: Option<Value>,
+}
+
+/// How a sketch solved: `under`, `well` or `over`, the freedom left, and
+/// whether its stored positions are stale.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SketchState {
+    pub state: String,
+    pub dof: u64,
+    pub stale: bool,
 }
 
 /// A part: its features in order.
@@ -40,6 +54,17 @@ impl Part {
                         id: text(&f["id"]),
                         ty: f["type"].as_str().map(str::to_owned),
                         hash: f["hash"].as_str().map(str::to_owned),
+                        sketch: f.get("sketch").map(|s| SketchState {
+                            state: text(&s["state"]),
+                            dof: s["dof"].as_u64().unwrap_or_default(),
+                            stale: s["stale"] == true,
+                        }),
+                        uses: f["uses"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(text)
+                            .collect(),
                         error: (f["ok"] == false).then(|| f["error"].clone()),
                     })
                     .collect()
@@ -75,13 +100,20 @@ pub struct Model {
     /// Meshes asked for and not yet answered, by the body hash they were
     /// asked for at: a burst of changes asks for each body once.
     pub asked: BTreeMap<BodyKey, String>,
+    /// How sketches are drawn, by part and feature, each for the part
+    /// revision it says.
+    pub sketches: BTreeMap<BodyKey, Arc<Drawing>>,
+    /// Sketches asked for and not yet answered, by the part revision they
+    /// were asked for at.
+    pub sketches_asked: BTreeMap<BodyKey, String>,
     /// Bumped whenever anything here changes, so views know to redraw.
     pub generation: u64,
 }
 
 impl Model {
     /// Takes a part's report. Returns the bodies whose meshes are now
-    /// missing or stale: they need fetching.
+    /// missing or stale: they need fetching ([`Model::sketches_wanted`]
+    /// says the same of sketches).
     pub fn apply_part(&mut self, report: &Value) -> Vec<BodyKey> {
         let part = Part::from_report(report);
         let id = part.id.clone();
@@ -92,6 +124,10 @@ impl Model {
                     .feature(f)
                     .is_some_and(|f| f.hash.as_deref() == Some(&m.hash))
         });
+        // Drawings of sketches that are gone, or failed, go; the others
+        // stay drawn until their new drawing comes.
+        self.sketches
+            .retain(|(p, f), _| *p != id || part.feature(f).is_some_and(|f| f.sketch.is_some()));
         let wanted = part
             .features
             .iter()
@@ -133,11 +169,68 @@ impl Model {
         }
     }
 
-    /// Forgets a part and its meshes.
+    /// The sketches of `part` whose drawings are missing or older than
+    /// the part, not already asked for at its revision, with that
+    /// revision, now noted as asked for.
+    pub fn ask_sketches(&mut self, part: &str) -> Vec<(BodyKey, String)> {
+        let Some(p) = self.parts.get(part) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for f in p.features.iter().filter(|f| f.sketch.is_some()) {
+            let key = (p.id.clone(), f.id.clone());
+            let drawn = self
+                .sketches
+                .get(&key)
+                .is_some_and(|d| d.revision == p.revision);
+            if !drawn && self.sketches_asked.get(&key) != Some(&p.revision) {
+                self.sketches_asked.insert(key.clone(), p.revision.clone());
+                out.push((key, p.revision.clone()));
+            }
+        }
+        out
+    }
+
+    /// An answer to asking for sketch `key` at `revision` came, or never
+    /// will.
+    pub fn sketch_answered(&mut self, key: &BodyKey, revision: &str) {
+        if self.sketches_asked.get(key).is_some_and(|r| r == revision) {
+            self.sketches_asked.remove(key);
+        }
+    }
+
+    /// Keeps a sketch's drawing if it is still a sketch that solved, and
+    /// the drawing is of the part as it is now, or the only one there is.
+    pub fn take_sketch(&mut self, key: &BodyKey, d: Drawing) -> bool {
+        let Some(p) = self.parts.get(&key.0) else {
+            return false;
+        };
+        let solved = p.feature(&key.1).is_some_and(|f| f.sketch.is_some());
+        let current = d.revision == p.revision || !self.sketches.contains_key(key);
+        if !solved || !current {
+            return false;
+        }
+        self.sketches.insert(key.clone(), Arc::new(d));
+        self.generation += 1;
+        true
+    }
+
+    /// Drops every drawing: the display quality or the default unit
+    /// changed. Returns the parts to ask again.
+    pub fn clear_sketches(&mut self) -> Vec<String> {
+        self.sketches.clear();
+        self.sketches_asked.clear();
+        self.generation += 1;
+        self.parts.keys().cloned().collect()
+    }
+
+    /// Forgets a part, its meshes and its sketches.
     pub fn remove_part(&mut self, id: &str) {
         self.parts.remove(id);
         self.meshes.retain(|(p, _), _| p != id);
         self.asked.retain(|(p, _), _| p != id);
+        self.sketches.retain(|(p, _), _| p != id);
+        self.sketches_asked.retain(|(p, _), _| p != id);
         self.generation += 1;
     }
 
@@ -220,6 +313,55 @@ mod tests {
         let g = m.generation;
         m.remove_part("p");
         assert!(m.meshes.is_empty() && m.parts.is_empty() && m.generation > g);
+    }
+
+    fn sketched(revision: &str, ok: bool) -> Value {
+        let s = if ok {
+            json!({"id": "s", "type": "sketch", "ok": true,
+                   "sketch": {"state": "under", "dof": 3, "stale": false}})
+        } else {
+            json!({"id": "s", "type": "sketch", "ok": false, "error": {"code": "sketch_unsolved"}})
+        };
+        json!({"part": "p", "revision": revision, "features": [s,
+               {"id": "e", "type": "extrude", "ok": true, "hash": "1", "uses": ["s"]}]})
+    }
+
+    fn drawing(revision: &str) -> Drawing {
+        Drawing {
+            revision: revision.into(),
+            ..Drawing::default()
+        }
+    }
+
+    #[test]
+    fn sketches_follow_the_part_revision() {
+        let mut m = Model::default();
+        m.apply_part(&sketched("r1", true));
+        let p = &m.parts["p"];
+        assert_eq!(p.features[1].uses, ["s"]);
+        assert_eq!(p.features[0].sketch.as_ref().unwrap().dof, 3);
+        let key = ("p".to_owned(), "s".to_owned());
+        assert_eq!(m.ask_sketches("p"), [(key.clone(), "r1".to_owned())]);
+        // Asked once per revision.
+        assert!(m.ask_sketches("p").is_empty());
+        assert!(m.take_sketch(&key, drawing("r1")));
+        m.sketch_answered(&key, "r1");
+        assert!(m.ask_sketches("p").is_empty());
+        // A new revision asks again, and the old drawing stays until the
+        // new one comes; an answer from before the drawing kept is refused.
+        m.apply_part(&sketched("r2", true));
+        assert_eq!(m.ask_sketches("p").len(), 1);
+        assert!(m.sketches.contains_key(&key));
+        assert!(m.take_sketch(&key, drawing("r2")));
+        assert!(!m.take_sketch(&key, drawing("r1")));
+        // A sketch that fails is no longer drawn.
+        m.apply_part(&sketched("r3", false));
+        assert!(m.sketches.is_empty());
+        assert!(m.ask_sketches("p").is_empty());
+        assert!(!m.take_sketch(&key, drawing("r3")));
+        m.apply_part(&sketched("r4", true));
+        assert_eq!(m.clear_sketches(), ["p"]);
+        assert_eq!(m.ask_sketches("p").len(), 1);
     }
 
     #[test]

@@ -153,6 +153,13 @@ pub(crate) struct Qr {
 /// held one after another in memory, the order Householder steps read
 /// them in.
 pub(crate) fn qr(a: &Mat, tol: f64) -> Qr {
+    qr_against(a, tol, None)
+}
+
+/// [`qr`], with the rank judged against `reference` instead of `R`'s
+/// first entry (the largest column's norm): a piece of a larger matrix is
+/// judged by the whole one's scale.
+pub(crate) fn qr_against(a: &Mat, tol: f64, reference: Option<f64>) -> Qr {
     let (m, n) = (a.rows, a.cols);
     let mut w: Vec<Vec<f64>> = (0..n)
         .map(|j| (0..m).map(|i| a.at(i, j)).collect())
@@ -197,7 +204,11 @@ pub(crate) fn qr(a: &Mat, tol: f64) -> Qr {
             *x = 0.0;
         }
     }
-    let first = if m.min(n) > 0 { w[0][0].abs() } else { 0.0 };
+    let first = match reference {
+        Some(r) => r,
+        None if m.min(n) > 0 => w[0][0].abs(),
+        None => 0.0,
+    };
     let rank = (0..m.min(n))
         .take_while(|&k| first > 0.0 && w[k][k].abs() > tol * first)
         .count();
@@ -302,6 +313,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn ranks_against_a_reference() {
+        // A small column is full rank alone, not beside a large one.
+        let a = Mat {
+            rows: 1,
+            cols: 1,
+            data: vec![1e-9],
+        };
+        assert_eq!(qr(&a, 1e-8).rank, 1);
+        assert_eq!(qr_against(&a, 1e-8, Some(1.0)).rank, 0);
+        assert_eq!(qr_against(&a, 1e-8, Some(1e-3)).rank, 1);
     }
 
     #[test]
