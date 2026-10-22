@@ -296,21 +296,15 @@ fn git_follows_a_feature_it_thinks_was_renamed() {
     r.ryucad(&["feature", "edit", "p", "c", "--param", "radius=2"]);
     r.commit("theirs: bigger");
     r.git(&["checkout", "-q", "main"]);
-    // Ours replaces c with d, the same sphere. Git sees a rename, whatever
-    // merge.renames says, and puts theirs' edit on d.
+    // Ours replaces c with d, the same sphere. Git sees a rename (by
+    // default; 2.47 even with merge.renames=false) and puts theirs' edit
+    // on d.
     r.ryucad(&["feature", "delete", "p", "c"]);
     r.ryucad(&[
         "feature", "add", "p", "sphere", "--id", "d", "--param", "radius=1",
     ]);
     r.commit("ours: c is d now");
-    r.git(&[
-        "-c",
-        "merge.renames=false",
-        "merge",
-        "-q",
-        "--no-edit",
-        "theirs",
-    ]);
+    r.git(&["merge", "-q", "--no-edit", "theirs"]);
     assert!(!r.root.join("parts/p/features/c.json").exists());
     assert_eq!(
         r.json("parts/p/features/d.json")["params"]["radius"],

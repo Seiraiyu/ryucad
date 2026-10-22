@@ -1335,7 +1335,7 @@ fn git_install_registers_the_drivers_and_the_hook() {
     assert!(v["result"].get("git").is_none(), "{v}");
     let attributes = fs::read_to_string(root.join(".gitattributes")).unwrap();
     assert!(
-        attributes.contains("\nparts/**/*.json merge=ryucad diff=ryucad\n"),
+        attributes.contains("\nparts/**/*.json merge=ryucad diff=ryucad text eol=lf\n"),
         "{attributes}"
     );
     // Not a repository: nothing to register in, and nothing to report.
@@ -1537,6 +1537,7 @@ fn merges_through_the_cli() {
     p.git(&["commit", "-q", "-am", "ours"]);
     for root in [&p.direct, &p.daemon] {
         let out = std::process::Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
             .args(["merge", "--no-edit", "theirs"])
             .current_dir(root)
             .output()

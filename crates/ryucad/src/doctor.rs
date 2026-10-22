@@ -1565,7 +1565,9 @@ pub(crate) mod tests {
         let hooks = r.join(".git/hooks");
         fs::create_dir_all(&hooks).unwrap();
         for h in HOOKS {
-            fs::write(hooks.join(h), "ryucad merge status --hook\n").unwrap();
+            // Someone's own hook that runs the check, harmless when Git
+            // runs it (Git for Windows runs hooks that aren't executable).
+            fs::write(hooks.join(h), "#!/bin/sh\n: ryucad merge status --hook\n").unwrap();
         }
         crate::drivers::write_attributes(r).unwrap();
     }
@@ -1591,7 +1593,7 @@ pub(crate) mod tests {
             v["issues"][0]["message"]
                 .as_str()
                 .unwrap()
-                .contains("parts/**/*.json merge=ryucad diff=ryucad")
+                .contains("parts/**/*.json merge=ryucad diff=ryucad text eol=lf")
         );
         let ids = offered(r);
         let out = fix(

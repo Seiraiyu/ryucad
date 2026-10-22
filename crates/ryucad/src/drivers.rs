@@ -11,10 +11,10 @@
 //! installers and `ryucad git install`. These are, with nothing else, the
 //! Git config ryucad writes.
 //!
-//! Git's merge follows renames whatever its config says (the `ort`
-//! strategy ignores `merge.renames`), so a feature deleted on one side and
-//! one like it added there can take the other side's edits; `merge status`
-//! reports that instead.
+//! Git's merge follows renames by default (Git 2.47 even with
+//! `merge.renames=false`; 2.56 honours it), so a feature deleted on one
+//! side and one like it added there can take the other side's edits;
+//! `merge status` reports that instead.
 
 use crate::error::{Code, Error, Result};
 use serde_json::{Map, Value, json};
@@ -24,16 +24,25 @@ use std::path::{Path, PathBuf};
 /// relative to the project folder.
 pub const ATTRIBUTES: &str = ".gitattributes";
 
-/// The lines ryucad needs in it: its own files and ryupdm's.
+/// The lines ryucad needs in it: its own files and ryupdm's. `eol=lf`
+/// keeps them canonical in every checkout: Git for Windows would otherwise
+/// check them out with CRLF.
 pub const LINES: [&str; 4] = [
+    "ryucad.json merge=ryucad diff=ryucad text eol=lf",
+    "ryupdm.json merge=ryucad diff=ryucad text eol=lf",
+    "parts/**/*.json merge=ryucad diff=ryucad text eol=lf",
+    "releases/**/*.json merge=ryucad diff=ryucad text eol=lf",
+];
+
+/// Lines an earlier ryucad wrote, which [`LINES`] replace.
+const OLD_LINES: [&str; 6] = [
+    "ryucad.json diff=ryucad",
+    "parts/**/*.json diff=ryucad",
     "ryucad.json merge=ryucad diff=ryucad",
     "ryupdm.json merge=ryucad diff=ryucad",
     "parts/**/*.json merge=ryucad diff=ryucad",
     "releases/**/*.json merge=ryucad diff=ryucad",
 ];
-
-/// Lines an earlier ryucad wrote, which [`LINES`] replace.
-const OLD_LINES: [&str; 2] = ["ryucad.json diff=ryucad", "parts/**/*.json diff=ryucad"];
 
 /// The comment that heads ryucad's lines.
 const HEADER: &str = "# ryucad: Git reads these files through ryucad (`ryucad git install`)";
@@ -324,9 +333,47 @@ mod tests {
         assert!(both.starts_with("*.png binary\n# ryucad"), "{both}");
         assert_eq!(both.lines().count(), 6);
         // One line already there, written by hand with spaces.
-        let one = with_lines("  ryucad.json merge=ryucad diff=ryucad  \n");
+        let one = with_lines("  ryucad.json merge=ryucad diff=ryucad text eol=lf  \n");
         assert_eq!(missing(&one), Vec::<&str>::new());
         assert_eq!(one.matches("ryucad.json").count(), 1);
+    }
+
+    #[test]
+    fn checkouts_keep_canonical_files_lf() {
+        // Git for Windows checks text out with CRLF by default; canonical
+        // files must come out as they went in.
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        let git = |args: &[&str]| crate::git::tests::git(r, args);
+        git(&["init", "-q"]);
+        git(&["config", "core.autocrlf", "true"]);
+        write_attributes(r).unwrap();
+        std::fs::create_dir_all(r.join("parts/p/features")).unwrap();
+        let text = "{\n  \"kind\": \"ryucad.feature\"\n}\n";
+        for f in [
+            "ryucad.json",
+            "parts/p/part.json",
+            "parts/p/features/a.json",
+        ] {
+            std::fs::write(r.join(f), text).unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "-q", "--no-verify", "-m", "one"]);
+        for f in [
+            "ryucad.json",
+            "parts/p/part.json",
+            "parts/p/features/a.json",
+        ] {
+            std::fs::remove_file(r.join(f)).unwrap();
+        }
+        git(&["checkout", "--", "."]);
+        for f in [
+            "ryucad.json",
+            "parts/p/part.json",
+            "parts/p/features/a.json",
+        ] {
+            assert_eq!(std::fs::read_to_string(r.join(f)).unwrap(), text, "{f}");
+        }
     }
 
     #[test]
