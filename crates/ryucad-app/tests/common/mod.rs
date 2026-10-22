@@ -150,6 +150,34 @@ impl Project {
         assert!(out.status.success(), "git {args:?}: {out:?}");
     }
 
+    /// [`Project::git`] for a command that may fail (a merge that stops
+    /// for conflicts): whether it succeeded.
+    pub fn try_git(&self, args: &[&str]) -> bool {
+        Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(&self.root)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
+    /// After [`Project::with_part`] and [`Project::committed`], with
+    /// ryucad's merge driver and hooks: the box made 15 mm long on branch
+    /// `theirs` and 12 mm on `main`, which is checked out. Merging
+    /// `theirs` leaves one conflict.
+    pub fn diverged(self) -> Project {
+        self.ok(&["git", "install"]);
+        self.git(&["checkout", "-q", "-b", "theirs"]);
+        self.ok(&["feature", "edit", "p", "base", "--param", "x=15"]);
+        self.git(&["commit", "-q", "-am", "theirs"]);
+        self.git(&["checkout", "-q", "main"]);
+        self.ok(&["feature", "edit", "p", "base", "--param", "x=12"]);
+        self.git(&["commit", "-q", "-am", "ours"]);
+        self
+    }
+
     /// The project in a repository of its own, everything committed on
     /// `main`.
     pub fn committed(self) -> Project {

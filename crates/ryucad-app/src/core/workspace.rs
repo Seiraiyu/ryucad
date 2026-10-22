@@ -5,6 +5,7 @@ use crate::core::activity::{Activity, LOADED};
 use crate::core::compare::Compare;
 use crate::core::edit::{DimForm, Form};
 use crate::core::link::{Event, Link, Wake};
+use crate::core::merge::Merge;
 use crate::core::model::{BodyKey, Model, Part};
 use crate::core::params::Params;
 use crate::core::people::{People, Person};
@@ -50,6 +51,9 @@ enum Pending {
     Compare(u64),
     /// A ghost's mesh, asked for at this hash.
     Ghost(BodyKey, String),
+    /// The merge Git is in, if any.
+    Merge,
+    Resolve,
     Doctor,
     /// Only a failure matters.
     Quiet,
@@ -120,6 +124,9 @@ pub struct Workspace {
     compare_asked: u64,
     compare_waiting: bool,
     compare_again: bool,
+    /// The merge Git is in the middle of, while it is in one: what is left
+    /// to settle.
+    pub merge: Option<Merge>,
     pub settings: Settings,
     /// The last doctor report, once asked for.
     pub doctor: Option<Value>,
@@ -174,6 +181,7 @@ impl Workspace {
             compare_asked: 0,
             compare_waiting: false,
             compare_again: false,
+            merge: None,
             settings: Settings::default(),
             doctor: None,
             raised: false,
@@ -205,6 +213,7 @@ impl Workspace {
         };
         self.send(log, Pending::Activity);
         self.load_settings();
+        self.send(Request::MergeStatus {}, Pending::Merge);
     }
 
     fn load_settings(&mut self) {
@@ -261,6 +270,21 @@ impl Workspace {
             limit: Some(100),
         };
         self.send(req, Pending::History);
+    }
+
+    /// Settles a merge conflict by `choice` (`ours`, `theirs`, or `repair`
+    /// with `repair`), against the revision of its part the window last
+    /// saw. The answer brings the new status; a failure is kept in the
+    /// merge's `failed`.
+    pub fn resolve(&mut self, conflict: &str, choice: &str, repair: Option<&str>) {
+        let Some(m) = &mut self.merge else { return };
+        let Some(c) = m.conflict(conflict) else {
+            return;
+        };
+        let req = crate::core::merge::resolution(c, choice, repair, &self.model.parts);
+        m.resolving = true;
+        m.failed = None;
+        self.send(req, Pending::Resolve);
     }
 
     /// Puts this window into a compare with `rev`, or (with `None`) out of
@@ -755,6 +779,35 @@ impl Workspace {
                     self.ask_diff();
                 }
             }
+            (Pending::Merge, Ok(a)) => {
+                // A failure read again after keeps saying why.
+                let failed = self.merge.as_mut().and_then(|m| m.failed.take());
+                let mut m = Merge::of(a.result);
+                m.failed = failed;
+                self.merge = Some(m);
+            }
+            // No merge: nothing to show.
+            (Pending::Merge, Err(e)) if matches!(e.code, Code::NotMerging | Code::NotAGitRepo) => {
+                self.merge = None;
+            }
+            (Pending::Merge, Err(e)) => self.merge = Some(Merge::broken(e)),
+            (Pending::Resolve, Ok(a)) => {
+                if let Some(m) = &mut self.merge {
+                    m.resolving = false;
+                    m.status = a.result["status"].clone();
+                }
+            }
+            (Pending::Resolve, Err(e)) => {
+                // Changed underneath: read the status again.
+                let again = matches!(e.code, Code::Conflict | Code::RepairConflict);
+                if let Some(m) = &mut self.merge {
+                    m.resolving = false;
+                    m.failed = Some(e);
+                }
+                if again {
+                    self.send(Request::MergeStatus {}, Pending::Merge);
+                }
+            }
             (Pending::Ghost(key, hash), a) => {
                 let Some(c) = &mut self.compare else { return };
                 c.answered(&key, &hash);
@@ -960,6 +1013,16 @@ impl Workspace {
                 if params["scope"] == "project" {
                     self.load_settings();
                 }
+            }
+            "merge.changed" => {
+                self.merge = match (params["merging"].as_bool(), params.get("status")) {
+                    (Some(true), Some(s)) => Some(Merge::of(s.clone())),
+                    (Some(true), None) => Some(Merge::broken(
+                        serde_json::from_value(params["error"].clone())
+                            .unwrap_or_else(|_| Error::new(Code::Internal, "no merge status")),
+                    )),
+                    _ => None,
+                };
             }
             "activity.appended" => self.activity.appended(params),
             "app.open" => self.raised = true,
