@@ -70,6 +70,8 @@ pub struct Opened {
     pub doctor: doctor::State,
     /// Recent projects, newest first, for the File menu.
     pub recent: Vec<PathBuf>,
+    /// A revision being typed to compare with (View > Compare with…).
+    pub compare_with: Option<String>,
 }
 
 /// What the window shows.
@@ -241,6 +243,7 @@ impl Opened {
             dialogs: menu::Dialogs::default(),
             doctor: doctor::State::default(),
             recent: crate::core::recent::load(),
+            compare_with: None,
         };
         o.view.look = user_look();
         // Damage that doesn't stop the project opening shows as badges.
@@ -281,6 +284,11 @@ impl Opened {
             .show(ui, |ui| menu::bar(ui, self, &recent))
             .inner;
         egui::Panel::top("people").show(ui, |ui| panels::people(ui, &mut self.ws));
+        if self.compare_with.is_some() || self.ws.compare.is_some() {
+            egui::Panel::top("compare").show(ui, |ui| {
+                panels::compare_bar(ui, &mut self.ws, &mut self.compare_with);
+            });
+        }
         let action = action.or(self.shortcuts(&ctx));
         egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &self.ws));
         // Room for about ten entries; drag its top edge for more.

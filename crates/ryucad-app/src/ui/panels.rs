@@ -242,6 +242,62 @@ pub fn people(ui: &mut egui::Ui, ws: &mut Workspace) {
     });
 }
 
+/// A compare: the revision, what differs and the colours that say so,
+/// and Stop; or, while one is typed (`typed`), the revision to compare
+/// with.
+pub fn compare_bar(ui: &mut egui::Ui, ws: &mut Workspace, typed: &mut Option<String>) {
+    ui.horizontal_wrapped(|ui| {
+        if let Some(text) = typed {
+            ui.label("Compare with");
+            let edit = egui::TextEdit::singleline(text)
+                .hint_text("HEAD, a branch or a commit")
+                .desired_width(180.0);
+            let r = ui.add(edit);
+            r.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::TextInput, true, "revision to compare with")
+            });
+            let go = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.button("Start comparing").clicked() || go) && !text.trim().is_empty() {
+                ws.set_compare(Some(text.trim().to_owned()));
+                *typed = None;
+            } else if ui.button("Cancel").clicked() {
+                *typed = None;
+            }
+            return;
+        }
+        let Some(c) = &ws.compare else { return };
+        let commit = c
+            .commit
+            .as_deref()
+            .map_or(String::new(), |c| format!(" ({})", &c[..c.len().min(10)]));
+        ui.label(format!("Comparing with {}{commit}", c.rev));
+        ui.separator();
+        match &c.error {
+            Some(e) => {
+                ui.colored_label(ui.visuals().error_fg_color, &e.message);
+            }
+            None if !c.loaded => {
+                ui.spinner();
+            }
+            None => {
+                let (added, removed, changed) = c.counts();
+                for (n, what, colour) in [
+                    (added, "added", style::NEW),
+                    (removed, "removed", style::REMOVED),
+                    (changed, "changed", style::CHANGED),
+                ] {
+                    let text = RichText::new(format!("{n} {what}")).color(style::color32(colour));
+                    ui.label(text);
+                }
+            }
+        }
+        ui.separator();
+        if ui.button("Stop comparing").clicked() {
+            ws.set_compare(None);
+        }
+    });
+}
+
 /// The connection, what agents are doing, and the model's state.
 pub fn status(ui: &mut egui::Ui, ws: &Workspace) {
     ui.horizontal(|ui| {
@@ -683,6 +739,8 @@ fn history(ui: &mut egui::Ui, ws: &mut Workspace) {
         ui.weak("This project isn't in a Git repository, so it has no history");
         return;
     }
+    let compared = ws.compare.as_ref().map(|c| c.rev.clone());
+    let mut pick = None;
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
@@ -691,7 +749,7 @@ fn history(ui: &mut egui::Ui, ws: &mut Workspace) {
                 ui.label(format!("{uncommitted} uncommitted change(s)"));
             }
             egui::Grid::new("history")
-                .num_columns(4)
+                .num_columns(5)
                 .striped(true)
                 .show(ui, |ui| {
                     for c in h["commits"].as_array().into_iter().flatten() {
@@ -700,10 +758,21 @@ fn history(ui: &mut egui::Ui, ws: &mut Workspace) {
                         ui.label(c["author"].as_str().unwrap_or_default());
                         ui.weak(ago(c["time"].as_u64().unwrap_or_default() * 1000));
                         ui.label(c["subject"].as_str().unwrap_or_default());
+                        let on = compared.as_deref() == Some(id);
+                        if ui
+                            .selectable_label(on, "Compare")
+                            .on_hover_text("Compare the working files with this commit")
+                            .clicked()
+                        {
+                            pick = Some((!on).then(|| id.to_owned()));
+                        }
                         ui.end_row();
                     }
                 });
         });
+    if let Some(rev) = pick {
+        ws.set_compare(rev);
+    }
 }
 
 #[cfg(test)]
