@@ -3,7 +3,7 @@
 //! `SmPrimitiveCreation`, NURBS forms by replacing every surface and
 //! curve with a plain B-spline copy, sweeps of a [`BenchProfile`] from
 //! `SmPrimitiveCreation`'s linear and rotational sweeps, booleans from
-//! `SmMerge`, and meshes from `SmBrep::ConvertToPolyBrep`, SMLib's
+//! `SmMerge`, fillets from `SmFilletExecutive`, and meshes from `SmBrep::ConvertToPolyBrep`, SMLib's
 //! one-call mesher. Only built with the `smlib` feature, against a `libsmlib.so` built from usd-brep's
 //! `source/SMLib` (`SMLIB_DIR`, default `/usr/local`; the devcontainer
 //! builds it).
@@ -13,7 +13,7 @@
 //! `ConvertToPolyBrep` meshes a copy that recognizes analytic surfaces
 //! again: SMLib's NURBS meshes come out the same as the analytic ones.
 
-use crate::{BenchProfile, Primitive, Soup};
+use crate::{BenchBlend, BenchKind, BenchProfile, Primitive, Soup};
 use ryukei::boolean::BooleanOp;
 use ryukei::geom::Rigid;
 
@@ -77,6 +77,8 @@ mod ffi {
         fn vertices(body: &Body) -> Vec<f64>;
         fn faces(body: &Body) -> u32;
         fn mesh(b: &Body, chord: f64, angle: f64, parallel: bool) -> Result<SmlibMesh>;
+        fn fillet(body: Pin<&mut Body>, edges: &[f64], radii: &[f64], parallel: bool)
+        -> Result<()>;
     }
 }
 
@@ -166,6 +168,22 @@ impl Solid {
             BooleanOp::Subtract => 2,
         };
         ffi::combine_tools(self.0.pin_mut(), code, parallel).map_err(|e| e.to_string())
+    }
+
+    /// Every edge of `blends` rounded, with one `SmFilletExecutive`
+    /// (circular sections, constant radius). SMLib measures chamfers as
+    /// a chord across the edge, not as setbacks, so only fillets are
+    /// compared. SMLib's failure as text.
+    pub fn fillet(&mut self, blends: &[BenchBlend], parallel: bool) -> Result<(), String> {
+        let mut radii = Vec::new();
+        for b in blends {
+            match b.kind {
+                BenchKind::Fillet(r) => radii.push(r),
+                _ => return Err("only fillets".into()),
+            }
+        }
+        let edges: Vec<f64> = blends.iter().flat_map(|b| b.at).collect();
+        ffi::fillet(self.0.pin_mut(), &edges, &radii, parallel).map_err(|e| e.to_string())
     }
 
     /// The B-rep's vertex positions (x, y, z flattened), in SMLib's order.

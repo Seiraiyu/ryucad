@@ -39,6 +39,7 @@ fn occt() {
         "TKPrim",
         "TKBO",
         "TKMesh",
+        "TKFillet",
     ] {
         println!("cargo:rustc-link-lib={lib}");
     }

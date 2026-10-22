@@ -42,5 +42,7 @@ void combine_tools(Body &body, uint32_t op, bool parallel);
 rust::Vec<double> vertices(const Body &body);
 uint32_t faces(const Body &body);
 SmlibMesh mesh(const Body &body, double chord, double angle, bool parallel);
+void fillet(Body &body, rust::Slice<const double> edges,
+            rust::Slice<const double> radii, bool parallel);
 
 } // namespace ryukei_smlib

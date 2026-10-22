@@ -1,12 +1,13 @@
 //! OCCT, through a small C++ shim, for comparison: the same primitives
 //! built with `BRepPrimAPI`, NURBS forms through `BRepBuilderAPI_NurbsConvert`,
 //! sweeps from `BRepPrimAPI_MakePrism` and `BRepPrimAPI_MakeRevol` over a
-//! face built from a [`BenchProfile`], booleans from `BRepAlgoAPI_Cut`, meshes from `BRepMesh_IncrementalMesh`
+//! face built from a [`BenchProfile`], booleans from `BRepAlgoAPI_Cut`,
+//! fillets and chamfers from `BRepFilletAPI`, meshes from `BRepMesh_IncrementalMesh`
 //! in absolute mode, and exact volume, area and distance from the B-rep.
 //! Only built with the `occt` feature, against a system OCCT 7.8 or later
 //! (`OCCT_DIR`, default `/usr`).
 
-use crate::{BenchProfile, Primitive, Soup};
+use crate::{BenchBlend, BenchKind, BenchProfile, Primitive, Soup};
 use ryukei::boolean::BooleanOp;
 use ryukei::geom::{Point3, Rigid};
 
@@ -57,6 +58,14 @@ mod ffi {
         fn volume(s: &Shape) -> f64;
         fn area(s: &Shape) -> f64;
         fn distance(s: &Shape, x: f64, y: f64, z: f64) -> f64;
+        fn fillet(s: &Shape, edges: &[f64], radii: &[f64]) -> Result<UniquePtr<Shape>>;
+        fn chamfer(
+            s: &Shape,
+            edges: &[f64],
+            modes: &[u32],
+            sizes: &[f64],
+            faces: &[f64],
+        ) -> Result<UniquePtr<Shape>>;
     }
 }
 
@@ -141,6 +150,53 @@ impl Solid {
             BooleanOp::Subtract => 2,
         };
         ffi::boolean(&self.0, &compound, code, parallel)
+            .map(Self)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Every edge of `blends` filleted, with one
+    /// `BRepFilletAPI_MakeFillet`, or chamfered, with one
+    /// `BRepFilletAPI_MakeChamfer` (two distances with `Add(d1, d2, E,
+    /// F)`, distance and angle with `AddDA`). OCCT's failure as text;
+    /// fillets and chamfers together are refused.
+    pub fn blend(&self, blends: &[BenchBlend]) -> Result<Self, String> {
+        let edges: Vec<f64> = blends.iter().flat_map(|b| b.at).collect();
+        if blends
+            .iter()
+            .all(|b| matches!(b.kind, BenchKind::Fillet(_)))
+        {
+            let radii: Vec<f64> = blends
+                .iter()
+                .map(|b| match b.kind {
+                    BenchKind::Fillet(r) => r,
+                    _ => unreachable!(),
+                })
+                .collect();
+            return ffi::fillet(&self.0, &edges, &radii)
+                .map(Self)
+                .map_err(|e| e.to_string());
+        }
+        let (mut modes, mut sizes, mut faces) = (Vec::new(), Vec::new(), Vec::new());
+        for b in blends {
+            let (m, s, f) = match b.kind {
+                BenchKind::Fillet(_) => return Err("fillets and chamfers together".into()),
+                BenchKind::Equal(d) => (0, [d, d], [0.0; 3]),
+                BenchKind::Distances {
+                    first,
+                    second,
+                    first_face,
+                } => (1, [first, second], first_face),
+                BenchKind::DistanceAngle {
+                    distance,
+                    angle,
+                    face,
+                } => (2, [distance, angle], face),
+            };
+            modes.push(m);
+            sizes.extend(s);
+            faces.extend(f);
+        }
+        ffi::chamfer(&self.0, &edges, &modes, &sizes, &faces)
             .map(Self)
             .map_err(|e| e.to_string())
     }

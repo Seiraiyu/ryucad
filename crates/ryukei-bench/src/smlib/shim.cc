@@ -8,6 +8,8 @@
 #include <SmCurve.h>
 #include <SmEdge.h>
 #include <SmFace.h>
+#include <SmFilletExecutive.h>
+#include <SmFilletSolver.h>
 #include <SmMerge.h>
 #include <SmPoly.h>
 #include <SmPrimitiveCreation.h>
@@ -294,6 +296,56 @@ SmlibMesh mesh(const Body &body, double chord, double angle,
     }
   }
   return out;
+}
+
+// Rounds the edges passing nearest each point of `edges` (x, y, z
+// flattened, each edge sampled at 17 points), each by its radius, with one SmFilletExecutive: circular
+// sections, constant radius, SMLib's default tolerances. The body's brep
+// is filleted in place.
+void fillet(Body &body, rust::Slice<const double> edges,
+            rust::Slice<const double> radii, bool parallel) {
+  SmTArray<SmEdge *> all;
+  body.brep->GetEdges(all);
+  SmTArray<SmEdge *> picked;
+  SmTArray<SmFilletSurfaceGeneratorType> sections;
+  SmTArray<SmFilletSolverType> solvers;
+  SmTArray<double> sizes;
+  for (size_t i = 0; i < radii.size(); i++) {
+    SmPoint3d at(edges[3 * i], edges[3 * i + 1], edges[3 * i + 2]);
+    SmEdge *best = nullptr;
+    double least = 1e300;
+    for (ULONG k = 0; k < all.GetSize(); k++) {
+      SmCurve *c = all[k]->GetCurve();
+      if (c == nullptr) {
+        continue;
+      }
+      SmExtent1d ivl = all[k]->GetInterval();
+      for (int j = 0; j <= 16; j++) {
+        SmPoint3d m;
+        double t = ivl.GetMin() + (ivl.GetMax() - ivl.GetMin()) * j / 16.0;
+        check(c->EvaluatePoint(t, m), "EvaluatePoint");
+        double d = (m - at).Length();
+        if (d < least) {
+          least = d;
+          best = all[k];
+        }
+      }
+    }
+    if (best == nullptr) {
+      throw std::runtime_error("no edge");
+    }
+    picked.Add(best);
+    sections.Add(SM_FSG_CIRCULAR);
+    solvers.Add(SM_FS_CONST_RADIUS);
+    sizes.Add(radii[i]);
+  }
+  std::optional<tbb::global_control> one_thread;
+  limit(one_thread, parallel);
+  SmFilletExecutive ex(*body.context, body.brep);
+  check(ex.SetFilletParameters(body.brep, picked, sections, solvers, sizes,
+                               nullptr, 0.0, 0.0, 0.0, 0.0),
+        "SetFilletParameters");
+  check(ex.DoFillet(), "DoFillet");
 }
 
 } // namespace ryukei_smlib
