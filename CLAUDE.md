@@ -42,7 +42,7 @@ cargo test -p ryukei --release --test blend_props           # blends of seeded r
 cargo test -p ryukei --release --test corners               # corners: balls, trims, mitres, rolls, fans (the slow ones are ignored in debug builds)
 cargo test -p ryukei --release --test corner_props          # corners of seeded random boxes and sweeps (ignored in debug builds)
 cargo test -p ryukei --release --test blend_booleans        # booleans through fillets, pipes included (the pipe ones are ignored in debug builds)
-cd fuzz && cargo +nightly fuzz run predicates               # needs nightly + cargo-fuzz (targets also: interval, euler, nurbs, mesh, feature, sweep, intersect, boolean, expr, sketch)
+cd fuzz && cargo +nightly fuzz run predicates               # needs nightly + cargo-fuzz (targets also: interval, euler, nurbs, mesh, feature, sweep, intersect, boolean, blend, expr, sketch)
 sh scripts/test-install.sh target/release/ryucad          # install.sh against a fake release
 sh scripts/smoke.sh target/release/ryucad target/release/ryucad-app   # an agent session, then the app's offscreen frame
 ```

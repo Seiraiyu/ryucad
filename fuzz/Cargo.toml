@@ -104,3 +104,10 @@ path = "fuzz_targets/sketch.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "blend"
+path = "fuzz_targets/blend.rs"
+test = false
+doc = false
+bench = false

@@ -48,7 +48,7 @@ fn place(b: &mut Bytes) -> Option<Rigid> {
 
 /// A placed primitive, or `None` when the bytes give one that can't be
 /// built.
-fn solid(b: &mut Bytes) -> Option<Body> {
+pub fn solid(b: &mut Bytes) -> Option<Body> {
     let at = place(b)?;
     let (s, t) = (grid(b, 0.5, 2.0, 3), grid(b, 0.5, 2.0, 3));
     let k = OpKey(1);
