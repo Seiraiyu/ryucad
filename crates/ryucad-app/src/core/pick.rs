@@ -3,8 +3,11 @@
 //! edges, vertices and sketch entities by their distance on screen, so a
 //! thin edge can be picked without pixel-perfect aim. Within reach, a
 //! vertex or sketch point wins over an edge or sketch curve, and those
-//! over a face; nothing hidden behind a face is picked.
+//! over a face; nothing hidden behind a face is picked. In a compare, a
+//! face the working files no longer have is picked in the ghost, where
+//! nothing of the model is nearer.
 
+use crate::core::compare::Compare;
 use crate::core::model::{BodyKey, Model};
 use crate::core::nav::Projector;
 use crate::core::sketch::Drawing;
@@ -28,6 +31,9 @@ pub struct Hit {
     pub feature: String,
     /// The point picked, in meters: where an orbit turns and a zoom aims.
     pub point: [f64; 3],
+    /// The revision it was picked at: a face gone from the working files,
+    /// picked in a compare's ghost. `None` for the working model.
+    pub rev: Option<String>,
 }
 
 /// A body ready for picking: its mesh and the box around it.
@@ -56,6 +62,11 @@ pub struct Picker {
     sketches: Vec<(BodyKey, Arc<Drawing>)>,
     /// Every entity reference, and where it is.
     index: HashMap<String, Slot>,
+    /// A compare's ghosts, each with the indices of its faces the working
+    /// files no longer have: only those are picked.
+    ghosts: Vec<(Body, Vec<usize>)>,
+    /// The revision the ghosts are of.
+    ghost_rev: Option<String>,
 }
 
 /// Where an entity is drawn.
@@ -227,7 +238,58 @@ impl Picker {
             bodies,
             sketches,
             index,
+            ghosts: Vec::new(),
+            ghost_rev: None,
         }
+    }
+
+    /// The same, with a compare's ghosts: the faces they have that the
+    /// working files don't can be picked.
+    pub fn with_compare(mut self, compare: Option<&Compare>) -> Picker {
+        let Some(c) = compare else { return self };
+        for (key, b) in &c.ghosts {
+            let Some(m) = mesh(b) else { continue };
+            let gone: Vec<usize> = (0..m.faces.len())
+                .filter(|i| c.is_gone(key, &name_hex(&m.faces[*i].name)))
+                .collect();
+            if gone.is_empty() {
+                continue;
+            }
+            let (lo, hi) = bounds((0..m.positions.len()).map(|i| at(m, i as u32)))
+                .unwrap_or(([0.0; 3], [0.0; 3]));
+            let body = Body {
+                key: key.clone(),
+                mesh: Arc::clone(b),
+                lo,
+                hi,
+            };
+            self.ghosts.push((body, gone));
+        }
+        self.ghost_rev = Some(c.rev.clone());
+        self
+    }
+
+    /// The nearest ghost face along the ray `o + t d`, of those that can
+    /// be picked: its `t`, name and body.
+    fn ghost_along(&self, o: [f64; 3], d: [f64; 3]) -> Option<(f64, String, BodyKey)> {
+        let mut face: Option<(f64, String, BodyKey)> = None;
+        for (b, gone) in &self.ghosts {
+            if !ray_box(o, d, b.lo, b.hi) {
+                continue;
+            }
+            let m = mesh(&b.mesh).expect("only meshed ghosts");
+            for f in gone.iter().map(|i| &m.faces[*i]) {
+                for t in &m.triangles[f.triangles.0 as usize..f.triangles.1 as usize] {
+                    let tri = t.map(|c| at(m, m.corners[c as usize].0));
+                    if let Some(t) = ray_triangle(o, d, tri)
+                        && face.as_ref().is_none_or(|(best, ..)| t < *best)
+                    {
+                        face = Some((t, name_hex(&f.name), b.key.clone()));
+                    }
+                }
+            }
+        }
+        face
     }
 
     /// The points that show where a slot is: a face's corners, an edge's
@@ -490,12 +552,28 @@ impl Picker {
             part: n.key.0,
             feature: n.key.1,
             point: n.point,
+            rev: None,
         };
         if let Some(p) = first_visible(points) {
             return Some(hit(p));
         }
         if let Some(c) = first_visible(curves) {
             return Some(hit(c));
+        }
+        // A gone face in the ghost, where the model has nothing nearer.
+        if let Some((t, name, key)) = self.ghost_along(o, d)
+            && face.as_ref().is_none_or(|(best, ..)| t < *best)
+        {
+            let point = [0, 1, 2].map(|k| o[k] + d[k] * t);
+            let mut h = hit(Near {
+                px: 0.0,
+                point,
+                entity: name,
+                key,
+                kind: Target::Body(EntityKind::Face),
+            });
+            h.rev.clone_from(&self.ghost_rev);
+            return Some(h);
         }
         let (t, name, key) = face?;
         let point = [0, 1, 2].map(|k| o[k] + d[k] * t);
@@ -700,6 +778,42 @@ mod tests {
         let h = pick(&bare, [0.3, 0.5, 0.0], 2.0).unwrap();
         assert_eq!(h.kind, Target::Body(EntityKind::Face));
         assert_eq!(bare.place("p/s/p1"), None);
+    }
+
+    #[test]
+    fn gone_faces_are_picked_in_the_ghost() {
+        let model = square_model();
+        let key = ("p".to_owned(), "f".to_owned());
+        // The square as the revision had it, a little above: its face is
+        // gone from the working files, so it is picked over the model's.
+        let mut above = model.meshes[&key].as_ref().clone();
+        above.hash = "old".into();
+        above.mesh.as_mut().unwrap().origin = [0.0, 0.0, 0.25];
+        let mut c = Compare::new("HEAD~1");
+        c.wanted.insert(key.clone(), "old".into());
+        c.take_ghost("p", above);
+        let camera = view::frame(
+            [0.0; 3],
+            [1.0, 1.0, 0.25],
+            StandardView::Top,
+            view::DEFAULT_PROJECTION,
+        );
+        let pr = Projector::new(&camera, 1.0, [0.5, 0.5, 0.1], 1.0);
+        let size = [400.0, 400.0];
+        let middle = |p: &Picker| p.pick(&pr, size, [200.0, 200.0]).unwrap();
+        let plain = Picker::new(&model).with_compare(Some(&c));
+        assert_eq!(middle(&plain).rev, None);
+        c.gone_bodies.insert(key.clone());
+        let ghosted = Picker::new(&model).with_compare(Some(&c));
+        let h = middle(&ghosted);
+        assert_eq!(h.rev.as_deref(), Some("HEAD~1"));
+        assert_eq!(h.kind, Target::Body(EntityKind::Face));
+        assert!((h.point[2] - 0.25).abs() < 1e-9);
+        // Its edges and corners are never picked: the model's are.
+        let n = pr.ndc([1.0, 1.0, 0.0]).unwrap();
+        let s = [(n[0] + 1.0) / 2.0 * size[0], (1.0 - n[1]) / 2.0 * size[1]];
+        let h = ghosted.pick(&pr, size, s).unwrap();
+        assert_eq!((h.kind, h.rev), (Target::Body(EntityKind::Vertex), None));
     }
 
     #[test]

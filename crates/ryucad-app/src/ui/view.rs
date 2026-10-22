@@ -84,8 +84,12 @@ impl Default for View {
 }
 
 /// An entity's kind and where it comes from, for people: "face of boss
-/// (cylinder)".
+/// (cylinder)", or for a face picked in a compare's ghost, "face of boss
+/// at HEAD, gone".
 pub fn describe(ws: &Workspace, hit: &Hit) -> String {
+    if let Some(rev) = &hit.rev {
+        return format!("{} of {} at {rev}, gone", hit.kind.as_str(), hit.feature);
+    }
     let ty = ws
         .part(&hit.part)
         .and_then(|p| p.feature(&hit.feature))
@@ -124,12 +128,13 @@ impl View {
         }
     }
 
-    /// The model prepared for picking, rebuilt when it changes or
-    /// sketches are shown or hidden.
+    /// The model prepared for picking, with a compare's ghost, rebuilt
+    /// when either changes or sketches are shown or hidden.
     pub fn picker(&mut self, ws: &Workspace) -> &Picker {
         let wanted = (ws.model.generation, self.sketches);
         if self.picker.is_none() || self.picked_at != wanted {
-            self.picker = Some(Picker::of(&ws.model, self.sketches));
+            self.picker =
+                Some(Picker::of(&ws.model, self.sketches).with_compare(ws.compare.as_ref()));
             self.picked_at = wanted;
         }
         self.picker.as_ref().expect("just made")
@@ -528,7 +533,10 @@ impl View {
             self.moved(ws);
         }
         // Picking.
-        if response.clicked() {
+        // A face picked in a compare's ghost isn't in the working model:
+        // it can't be selected, only described and its reference copied.
+        let ghost = self.hover.as_ref().is_some_and(|h| h.rev.is_some());
+        if response.clicked() && !ghost {
             let add = modifiers.shift || modifiers.ctrl;
             match (&self.hover, add) {
                 (Some(h), false) => ws.select(vec![h.entity.clone()], SelectMode::Replace),
@@ -619,7 +627,7 @@ impl View {
                     ui.ctx().copy_text(h.entity.clone());
                     ui.close();
                 }
-                if ui.button("Select").clicked() {
+                if h.rev.is_none() && ui.button("Select").clicked() {
                     ws.select(vec![h.entity.clone()], SelectMode::Replace);
                     ui.close();
                 }
