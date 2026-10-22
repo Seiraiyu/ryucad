@@ -11,6 +11,7 @@
 mod args;
 mod bspline;
 mod curve;
+mod derived;
 mod geometry;
 mod surface;
 
@@ -19,6 +20,7 @@ use rayon::prelude::*;
 pub use args::Id;
 pub use bspline::{BSplineCurve, BSplineSurface, Knots};
 pub use curve::Curve;
+pub use derived::{OnSurface, Trim};
 pub use geometry::{Placement, Point};
 pub use surface::Surface;
 
@@ -91,6 +93,12 @@ pub enum Entity {
     Placement(Placement),
     Curve(Curve),
     Surface(Surface),
+    /// `COMPOSITE_CURVE_SEGMENT`: `parent`, the same way as the composite
+    /// curve if `same_sense`.
+    Segment {
+        same_sense: bool,
+        parent: Id,
+    },
     /// An entity this crate doesn't read: its name, or a complex
     /// instance's names joined by spaces.
     Other(Box<str>),
@@ -106,6 +114,7 @@ impl Entity {
             Entity::Placement(p) => p.kind(),
             Entity::Curve(c) => c.kind(),
             Entity::Surface(s) => s.kind(),
+            Entity::Segment { .. } => "COMPOSITE_CURVE_SEGMENT",
             Entity::Other(name) => name,
         }
     }
@@ -191,6 +200,14 @@ impl Entities {
         }
     }
 
+    /// A `COMPOSITE_CURVE_SEGMENT`: its sense and its curve.
+    pub fn segment(&self, from: Id, id: Id) -> Result<(bool, Id), ImportError> {
+        match self.get(from, id)? {
+            Entity::Segment { same_sense, parent } => Ok((*same_sense, *parent)),
+            _ => Err(wrong(id, "a COMPOSITE_CURVE_SEGMENT")),
+        }
+    }
+
     /// A surface of any kind.
     pub fn surface(&self, from: Id, id: Id) -> Result<&Surface, ImportError> {
         match self.get(from, id)? {
@@ -214,6 +231,9 @@ fn decode(inst: &Instance) -> Result<Entity, ImportError> {
 
 /// A simple record, by its entity's name.
 fn simple(id: Id, name: &str, params: &[Param]) -> Result<Entity, ImportError> {
+    if let Some(d) = derived::simple(id, name, params) {
+        return d;
+    }
     if let Some(c) = curve::simple(id, name, params) {
         return c.map(Entity::Curve);
     }

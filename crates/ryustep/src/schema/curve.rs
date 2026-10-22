@@ -3,6 +3,7 @@
 
 use super::args::{Args, Id};
 use super::bspline::{self, BSplineCurve};
+use super::derived::{OnSurface, Trim};
 use crate::ImportError;
 use crate::part21::Param;
 
@@ -31,6 +32,37 @@ pub enum Curve {
     },
     /// Any `B_SPLINE_CURVE`, rational or not.
     BSpline(BSplineCurve),
+    /// `TRIMMED_CURVE`: `basis` from `trim_1` to `trim_2`, running the
+    /// way the basis does if `sense`; `master` says which of a trim's
+    /// point and parameter the writer trusts.
+    Trimmed {
+        basis: Id,
+        trim_1: Vec<Trim>,
+        trim_2: Vec<Trim>,
+        sense: bool,
+        master: Box<str>,
+    },
+    /// `COMPOSITE_CURVE` and its subtypes: segments end to end.
+    Composite { segments: Vec<Id> },
+    /// `POLYLINE`: straight segments through two or more points.
+    Polyline { points: Vec<Id> },
+    /// `OFFSET_CURVE_3D` (with `ref_direction`) or `OFFSET_CURVE_2D`.
+    Offset {
+        basis: Id,
+        distance: f64,
+        ref_direction: Option<Id>,
+    },
+    /// `PCURVE`: a curve in `surface`'s parameters, the one item of the
+    /// `DEFINITIONAL_REPRESENTATION` `representation`.
+    Pcurve { surface: Id, representation: Id },
+    /// `SURFACE_CURVE`, `SEAM_CURVE` or `INTERSECTION_CURVE`: a 3D curve
+    /// with its pcurves (or surfaces) on one or two surfaces.
+    OnSurface {
+        kind: OnSurface,
+        curve: Id,
+        associated: Vec<Id>,
+        master: Box<str>,
+    },
 }
 
 impl Curve {
@@ -42,6 +74,24 @@ impl Curve {
             Curve::Parabola { .. } => "PARABOLA",
             Curve::Hyperbola { .. } => "HYPERBOLA",
             Curve::BSpline(_) => "B_SPLINE_CURVE",
+            Curve::Trimmed { .. } => "TRIMMED_CURVE",
+            Curve::Composite { .. } => "COMPOSITE_CURVE",
+            Curve::Polyline { .. } => "POLYLINE",
+            Curve::Offset {
+                ref_direction: Some(_),
+                ..
+            } => "OFFSET_CURVE_3D",
+            Curve::Offset { .. } => "OFFSET_CURVE_2D",
+            Curve::Pcurve { .. } => "PCURVE",
+            Curve::OnSurface {
+                kind: OnSurface::Plain,
+                ..
+            } => "SURFACE_CURVE",
+            Curve::OnSurface {
+                kind: OnSurface::Seam,
+                ..
+            } => "SEAM_CURVE",
+            Curve::OnSurface { .. } => "INTERSECTION_CURVE",
         }
     }
 }

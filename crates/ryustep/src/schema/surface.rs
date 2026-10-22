@@ -34,6 +34,21 @@ pub enum Surface {
     },
     /// Any `B_SPLINE_SURFACE`, rational or not.
     BSpline(BSplineSurface),
+    /// `SURFACE_OF_LINEAR_EXTRUSION`: `curve` swept along a `VECTOR`.
+    Extrusion { curve: Id, vector: Id },
+    /// `SURFACE_OF_REVOLUTION`: `curve` turned about an `AXIS1_PLACEMENT`.
+    Revolution { curve: Id, axis: Id },
+    /// `OFFSET_SURFACE`: `basis` moved `distance` along its normal.
+    Offset { basis: Id, distance: f64 },
+    /// `RECTANGULAR_TRIMMED_SURFACE`: `basis` over `u` by `v`, each the
+    /// same way as the basis's parameter if its sense is true.
+    RectangularTrimmed {
+        basis: Id,
+        u: [f64; 2],
+        v: [f64; 2],
+        u_sense: bool,
+        v_sense: bool,
+    },
 }
 
 impl Surface {
@@ -48,6 +63,10 @@ impl Surface {
             } => "TOROIDAL_SURFACE",
             Surface::Torus { .. } => "DEGENERATE_TOROIDAL_SURFACE",
             Surface::BSpline(_) => "B_SPLINE_SURFACE",
+            Surface::Extrusion { .. } => "SURFACE_OF_LINEAR_EXTRUSION",
+            Surface::Revolution { .. } => "SURFACE_OF_REVOLUTION",
+            Surface::Offset { .. } => "OFFSET_SURFACE",
+            Surface::RectangularTrimmed { .. } => "RECTANGULAR_TRIMMED_SURFACE",
         }
     }
 }
