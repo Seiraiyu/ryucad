@@ -14,6 +14,7 @@ mod curve;
 mod derived;
 mod geometry;
 mod surface;
+mod topology;
 
 use rayon::prelude::*;
 
@@ -23,6 +24,7 @@ pub use curve::Curve;
 pub use derived::{OnSurface, Trim};
 pub use geometry::{Placement, Point};
 pub use surface::Surface;
+pub use topology::{Brep, Edge, Face, Loop};
 
 use crate::part21::{File, Header, Instance, Param, Part, Record};
 use crate::{ImportError, StepError};
@@ -99,6 +101,42 @@ pub enum Entity {
         same_sense: bool,
         parent: Id,
     },
+    /// `VERTEX_POINT`.
+    Vertex {
+        point: Id,
+    },
+    Edge(Edge),
+    /// `ORIENTED_EDGE`: `edge`, the way it runs if `orientation`.
+    OrientedEdge {
+        edge: Id,
+        orientation: bool,
+    },
+    Loop(Loop),
+    /// `FACE_BOUND`, or `FACE_OUTER_BOUND` if `outer`: a loop, the way it
+    /// runs if `orientation`.
+    Bound {
+        bound: Id,
+        orientation: bool,
+        outer: bool,
+    },
+    Face(Face),
+    /// `ORIENTED_FACE`.
+    OrientedFace {
+        face: Id,
+        orientation: bool,
+    },
+    /// `CLOSED_SHELL` or `OPEN_SHELL`.
+    Shell {
+        faces: Vec<Id>,
+        closed: bool,
+    },
+    /// `ORIENTED_CLOSED_SHELL` or `ORIENTED_OPEN_SHELL`.
+    OrientedShell {
+        shell: Id,
+        orientation: bool,
+        closed: bool,
+    },
+    Brep(Brep),
     /// An entity this crate doesn't read: its name, or a complex
     /// instance's names joined by spaces.
     Other(Box<str>),
@@ -115,6 +153,25 @@ impl Entity {
             Entity::Curve(c) => c.kind(),
             Entity::Surface(s) => s.kind(),
             Entity::Segment { .. } => "COMPOSITE_CURVE_SEGMENT",
+            Entity::Vertex { .. } => "VERTEX_POINT",
+            Entity::Edge(_) => "EDGE_CURVE",
+            Entity::OrientedEdge { .. } => "ORIENTED_EDGE",
+            Entity::Loop(Loop::Edges(_)) => "EDGE_LOOP",
+            Entity::Loop(Loop::Vertex(_)) => "VERTEX_LOOP",
+            Entity::Loop(Loop::Poly(_)) => "POLY_LOOP",
+            Entity::Bound { outer: true, .. } => "FACE_OUTER_BOUND",
+            Entity::Bound { .. } => "FACE_BOUND",
+            Entity::Face(Face { surface: None, .. }) => "FACE",
+            Entity::Face(_) => "ADVANCED_FACE",
+            Entity::OrientedFace { .. } => "ORIENTED_FACE",
+            Entity::Shell { closed: true, .. } => "CLOSED_SHELL",
+            Entity::Shell { .. } => "OPEN_SHELL",
+            Entity::OrientedShell { closed: true, .. } => "ORIENTED_CLOSED_SHELL",
+            Entity::OrientedShell { .. } => "ORIENTED_OPEN_SHELL",
+            Entity::Brep(Brep::Solid { faceted: true, .. }) => "FACETED_BREP",
+            Entity::Brep(Brep::Solid { voids, .. }) if !voids.is_empty() => "BREP_WITH_VOIDS",
+            Entity::Brep(Brep::Solid { .. }) => "MANIFOLD_SOLID_BREP",
+            Entity::Brep(Brep::Shells(_)) => "SHELL_BASED_SURFACE_MODEL",
             Entity::Other(name) => name,
         }
     }
@@ -231,6 +288,9 @@ fn decode(inst: &Instance) -> Result<Entity, ImportError> {
 
 /// A simple record, by its entity's name.
 fn simple(id: Id, name: &str, params: &[Param]) -> Result<Entity, ImportError> {
+    if let Some(t) = topology::simple(id, name, params) {
+        return t;
+    }
     if let Some(d) = derived::simple(id, name, params) {
         return d;
     }
