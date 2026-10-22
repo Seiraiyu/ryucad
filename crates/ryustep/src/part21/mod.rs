@@ -7,6 +7,7 @@
 // Task 3 reads whole files with it.
 #[allow(dead_code)]
 mod lex;
+mod text;
 
 /// One parameter of a record.
 #[derive(Clone, Debug, PartialEq)]

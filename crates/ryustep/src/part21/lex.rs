@@ -271,7 +271,8 @@ impl<'a> Cursor<'a> {
         self.pos - start
     }
 
-    /// `'…'`: a doubled quote is one quote, and line breaks are dropped.
+    /// `'…'`: a doubled quote is one quote, line breaks are dropped, and
+    /// the rest is decoded by `text::decode`.
     fn string(&mut self) -> Result<Box<str>, Fault> {
         let start = self.pos;
         self.pos += 1;
@@ -299,7 +300,7 @@ impl<'a> Cursor<'a> {
                 }
             }
         }
-        Ok(raw_text(&raw).into())
+        Ok(super::text::decode(&raw).into())
     }
 
     /// `.NAME.`, without its dots.
@@ -337,15 +338,6 @@ impl<'a> Cursor<'a> {
         }
         self.pos += 1;
         Ok(text)
-    }
-}
-
-/// Bytes between a string's quotes as text: UTF-8 if they are, else each
-/// byte as ISO 8859-1, which is what a byte above 127 meant before UTF-8.
-fn raw_text(raw: &[u8]) -> String {
-    match std::str::from_utf8(raw) {
-        Ok(s) => s.to_owned(),
-        Err(_) => raw.iter().map(|&b| char::from(b)).collect(),
     }
 }
 
