@@ -164,7 +164,7 @@ fn is_reference(v: &Value) -> bool {
 
 /// The walk over one file: the conflicts found so far.
 #[derive(Default)]
-struct Walk {
+pub struct Walk {
     conflicts: BTreeMap<String, Conflict>,
 }
 
@@ -302,6 +302,7 @@ fn unformatted(v: &Value) -> Value {
 /// - A feature whose `type` changes on either side is one value; a sketch
 ///   merges per entity and constraint (see [`sketch`]); any other feature
 ///   per JSON pointer to each leaf, a reference being one value.
+/// - A part's `features` list merges as an ordered list (see [`order`]).
 /// - Release and obsolete records are one value each: two different
 ///   records at one path are one conflict.
 /// - Every other kind, and every key not named above, merges per key, an
@@ -320,6 +321,7 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
     let mut value = match kind.as_str() {
         "ryupdm.release" | "ryupdm.obsolete" => walk.whole(b.as_ref(), &o, &t),
         crate::doc::files::FEATURE_KIND => feature(&mut walk, b.as_ref(), &o, &t),
+        crate::doc::files::PART_KIND => part(&mut walk, b.as_ref(), &o, &t),
         _ => walk.value("", b.as_ref(), Some(&o), Some(&t)).unwrap_or(o),
     };
     let format = match kind.as_str() {
@@ -351,6 +353,166 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
     }
     walk.value("", base, Some(ours), Some(theirs))
         .unwrap_or_else(|| ours.clone())
+}
+
+/// A list of distinct IDs, if `v` is one.
+fn ids(v: Option<&Value>) -> Option<Vec<String>> {
+    let list: Vec<String> = v?
+        .as_array()?
+        .iter()
+        .map(|x| x.as_str().map(str::to_owned))
+        .collect::<Option<_>>()?;
+    let distinct: BTreeSet<&String> = list.iter().collect();
+    (distinct.len() == list.len()).then_some(list)
+}
+
+/// A part file: its feature list by [`order`], the rest per key.
+fn part(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) -> Value {
+    let empty = Map::new();
+    let b = base.and_then(Value::as_object).unwrap_or(&empty);
+    let (o, t) = (
+        ours.as_object().expect("an object"),
+        theirs.as_object().expect("an object"),
+    );
+    let mut out = walk.object("", b, o, t, &["features"]);
+    let lists = (
+        ids(b.get("features")).or(base.is_none().then(Vec::new)),
+        ids(o.get("features")),
+        ids(t.get("features")),
+    );
+    let features = match lists {
+        (Some(bl), Some(ol), Some(tl)) => Some(json!(order(walk, &bl, &ol, &tl))),
+        // A list that isn't one is one value.
+        _ => walk.value(
+            "/features",
+            b.get("features"),
+            o.get("features"),
+            t.get("features"),
+        ),
+    };
+    if let Some(f) = features {
+        out.insert("features".to_owned(), f);
+    }
+    Value::Object(out)
+}
+
+/// Where `id` sits in `list`: `{"after": <the feature before it>}`,
+/// `{"first": true}`, or `None` when the list doesn't have it.
+pub fn place(list: &[String], id: &str) -> Option<Value> {
+    let i = list.iter().position(|f| f == id)?;
+    Some(match i {
+        0 => json!({"first": true}),
+        i => json!({"after": list[i - 1]}),
+    })
+}
+
+/// Which side a feature's place in the merged list comes from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum From {
+    Ours,
+    Theirs,
+}
+
+/// Inserts `id` into `out` after every feature before it in `side` that
+/// `out` has (first if none), and past any of `skip` that follow the last
+/// of those: whatever it could read on its side still comes before it.
+fn insert(out: &mut Vec<String>, side: &[String], id: &str, skip: &BTreeSet<String>) {
+    let i = side.iter().position(|f| f == id).expect("listed");
+    let mut at = side[..i]
+        .iter()
+        .filter_map(|p| out.iter().position(|f| f == p))
+        .max()
+        .map_or(0, |p| p + 1);
+    while at < out.len() && skip.contains(&out[at]) {
+        at += 1;
+    }
+    out.insert(at, id.to_owned());
+}
+
+/// A part's feature list, merged by identity. The result keeps base's
+/// features that neither side removed, in base's order; a feature one side
+/// moved takes that side's place; each side's additions go after the
+/// feature they follow on that side (after all that preceded them there,
+/// so nothing they could read comes after them), ours first where both
+/// add at one spot. A feature moved differently by both sides, moved on one and
+/// removed on the other, or added by both at different places is an
+/// `order` conflict at `/features/<id>`, its sides' places as
+/// [`place`] gives them.
+pub fn order(walk: &mut Walk, base: &[String], ours: &[String], theirs: &[String]) -> Vec<String> {
+    let has = |l: &[String], id: &str| l.iter().any(|f| f == id);
+    let (mo, mt) = (
+        crate::diff::moved_features(base, ours),
+        crate::diff::moved_features(base, theirs),
+    );
+    let mut out: Vec<String> = base
+        .iter()
+        .filter(|f| has(ours, f) && has(theirs, f) && !mo.contains(*f) && !mt.contains(*f))
+        .cloned()
+        .collect();
+    let all: BTreeSet<&String> = base.iter().chain(ours).chain(theirs).collect();
+    let mut from: BTreeMap<&String, From> = BTreeMap::new();
+    for id in all {
+        if out.contains(id) {
+            continue;
+        }
+        let (b, o, t) = (has(base, id), has(ours, id), has(theirs, id));
+        let (pb, po, pt) = (place(base, id), place(ours, id), place(theirs, id));
+        let conflict = |walk: &mut Walk| {
+            walk.conflict(
+                &child("/features", id),
+                Kind::Order,
+                pb.as_ref(),
+                po.as_ref(),
+                pt.as_ref(),
+            );
+        };
+        let side = match (b, o, t) {
+            (true, true, true) => match (mo.contains(id), mt.contains(id)) {
+                (true, true) if po != pt => {
+                    conflict(walk);
+                    Some(From::Ours)
+                }
+                (_, true) if !mo.contains(id) => Some(From::Theirs),
+                _ => Some(From::Ours),
+            },
+            // Moved on one side, removed on the other.
+            (true, true, false) if mo.contains(id) => {
+                conflict(walk);
+                Some(From::Ours)
+            }
+            (true, false, true) if mt.contains(id) => {
+                conflict(walk);
+                None
+            }
+            (true, _, _) => None,
+            (false, true, true) => {
+                if po != pt {
+                    conflict(walk);
+                }
+                Some(From::Ours)
+            }
+            (false, true, false) => Some(From::Ours),
+            (false, false, true) => Some(From::Theirs),
+            (false, false, false) => None,
+        };
+        if let Some(s) = side {
+            from.insert(id, s);
+        }
+    }
+    let none = BTreeSet::new();
+    let mut ours_placed = BTreeSet::new();
+    for id in ours {
+        if from.get(id) == Some(&From::Ours) {
+            insert(&mut out, ours, id, &none);
+            ours_placed.insert(id.clone());
+        }
+    }
+    for id in theirs {
+        if from.get(id) == Some(&From::Theirs) {
+            insert(&mut out, theirs, id, &ours_placed);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -479,6 +641,146 @@ mod tests {
         let m = merge(None, &rec("aa"), &rec("bb"));
         assert_eq!(m.conflicts[""].kind, Kind::IdCollision);
         assert!(merge(None, &rec("aa"), &rec("aa")).is_clean());
+    }
+
+    /// Merges three feature lists.
+    fn lists(base: &[&str], ours: &[&str], theirs: &[&str]) -> (Vec<String>, Vec<String>) {
+        let s = |l: &[&str]| -> Vec<String> { l.iter().map(|x| x.to_string()).collect() };
+        let mut walk = Walk::default();
+        let out = order(&mut walk, &s(base), &s(ours), &s(theirs));
+        (out, walk.conflicts.keys().cloned().collect())
+    }
+
+    #[test]
+    fn lists_merge_by_identity() {
+        let ok = |b: &[&str], o: &[&str], t: &[&str], want: &[&str]| {
+            let (out, conflicts) = lists(b, o, t);
+            assert_eq!(out, want, "{b:?} {o:?} {t:?}");
+            assert!(conflicts.is_empty(), "{conflicts:?}");
+        };
+        // Additions on both sides, after what they follow there.
+        ok(
+            &["a", "b"],
+            &["a", "x", "b"],
+            &["a", "b", "y"],
+            &["a", "x", "b", "y"],
+        );
+        // At one spot: ours first, then theirs.
+        ok(
+            &["a", "b"],
+            &["a", "x", "b"],
+            &["a", "y", "b"],
+            &["a", "x", "y", "b"],
+        );
+        ok(&["a"], &["x", "a"], &["y", "z", "a"], &["x", "y", "z", "a"]);
+        // A chain of additions stays together.
+        ok(
+            &["a"],
+            &["a", "x1", "x2"],
+            &["a", "y"],
+            &["a", "x1", "x2", "y"],
+        );
+        // Removals on either side.
+        ok(
+            &["a", "b", "c"],
+            &["a", "c"],
+            &["a", "b", "c", "d"],
+            &["a", "c", "d"],
+        );
+        // A move on one side.
+        ok(
+            &["a", "b", "c"],
+            &["c", "a", "b"],
+            &["a", "b", "c", "d"],
+            &["c", "a", "b", "d"],
+        );
+        ok(
+            &["a", "b", "c"],
+            &["a", "b", "c"],
+            &["b", "a", "c"],
+            &["b", "a", "c"],
+        );
+        // The same move, or the same addition at one place, on both.
+        ok(
+            &["a", "b", "c"],
+            &["b", "c", "a"],
+            &["b", "c", "a"],
+            &["b", "c", "a"],
+        );
+        ok(&["a"], &["a", "x"], &["a", "x"], &["a", "x"]);
+        // An addition after a feature the other side removed.
+        ok(&["a", "b"], &["a", "b", "x"], &["a"], &["a", "x"]);
+        // After a feature the other side moved earlier: still after all
+        // that came before it.
+        ok(
+            &["a", "b", "c"],
+            &["c", "a", "b"],
+            &["a", "b", "c", "d"],
+            &["c", "a", "b", "d"],
+        );
+        // Both new: a part both sides created.
+        ok(&[], &["a"], &["b"], &["a", "b"]);
+    }
+
+    #[test]
+    fn lists_conflict_on_order() {
+        // Moved differently on both sides: ours' place, a conflict.
+        let (out, c) = lists(&["a", "b", "c"], &["b", "a", "c"], &["b", "c", "a"]);
+        assert_eq!(
+            (out, c),
+            (
+                vec!["b".into(), "a".into(), "c".into()],
+                vec!["/features/a".into()]
+            )
+        );
+        // Moved on one side, removed on the other.
+        let (out, c) = lists(&["a", "b", "c"], &["c", "a", "b"], &["a", "b"]);
+        assert_eq!(
+            (out, c),
+            (
+                vec!["c".into(), "a".into(), "b".into()],
+                vec!["/features/c".into()]
+            )
+        );
+        let (out, c) = lists(&["a", "b", "c"], &["a", "b"], &["c", "a", "b"]);
+        assert_eq!(
+            (out, c),
+            (vec!["a".into(), "b".into()], vec!["/features/c".into()])
+        );
+        // Added by both at different places.
+        let (out, c) = lists(&["a", "b"], &["x", "a", "b"], &["a", "b", "x"]);
+        assert_eq!(
+            (out, c),
+            (
+                vec!["x".into(), "a".into(), "b".into()],
+                vec!["/features/x".into()]
+            )
+        );
+        let mut walk = Walk::default();
+        let s = |l: &[&str]| -> Vec<String> { l.iter().map(|x| x.to_string()).collect() };
+        order(
+            &mut walk,
+            &s(&["a", "b", "c"]),
+            &s(&["b", "a", "c"]),
+            &s(&["b", "c", "a"]),
+        );
+        assert_eq!(
+            walk.conflicts["/features/a"].to_json(),
+            json!({"kind": "order", "base": {"first": true}, "ours": {"after": "b"},
+                   "theirs": {"after": "c"}})
+        );
+    }
+
+    #[test]
+    fn a_part_file_merges_its_list() {
+        let part = |f: &[&str]| json!({"features": f, "format": 1, "kind": "ryucad.part"});
+        let m = merge(Some(&part(&["a"])), &part(&["a", "x"]), &part(&["y", "a"]));
+        assert!(m.is_clean());
+        assert_eq!(m.value, part(&["y", "a", "x"]));
+        // A list that isn't one is one value.
+        let bad = json!({"features": ["a", "a"], "format": 1, "kind": "ryucad.part"});
+        let m = merge(Some(&part(&["a"])), &bad, &part(&["b"]));
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/features"]);
     }
 
     #[test]

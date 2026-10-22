@@ -345,6 +345,14 @@ fn feature(a: Option<&Value>, b: Option<&Value>, opts: &Options) -> Value {
 fn order(a: &[String], b: &[String]) -> Value {
     let added: Vec<&String> = b.iter().filter(|f| !a.contains(f)).collect();
     let removed: Vec<&String> = a.iter().filter(|f| !b.contains(f)).collect();
+    let moved = moved_features(a, b);
+    let moved: Vec<&String> = b.iter().filter(|f| moved.contains(*f)).collect();
+    json!({"added": added, "removed": removed, "moved": moved})
+}
+
+/// The features `a` and `b` both list that `b` moved: those not in the
+/// longest run both keep in order, the fewest moves that explain `b`.
+pub(crate) fn moved_features(a: &[String], b: &[String]) -> BTreeSet<String> {
     let x: Vec<&String> = a.iter().filter(|f| b.contains(f)).collect();
     let y: Vec<&String> = b.iter().filter(|f| a.contains(f)).collect();
     // The longest common subsequence, by dynamic programming.
@@ -372,8 +380,10 @@ fn order(a: &[String], b: &[String]) -> Value {
             j += 1;
         }
     }
-    let moved: Vec<&&String> = y.iter().filter(|f| !kept.contains(**f)).collect();
-    json!({"added": added, "removed": removed, "moved": moved})
+    y.into_iter()
+        .filter(|f| !kept.contains(*f))
+        .cloned()
+        .collect()
 }
 
 /// A part's listed features, if its `part.json` reads.
