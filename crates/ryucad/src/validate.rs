@@ -9,9 +9,11 @@
 //! ryucad never touches the index: once a file is settled, `git add` and
 //! the commit are the agent's or the human's.
 
+use crate::doc::id::Id;
 use crate::error::{Code, Error, Result};
 use crate::git::{MergeState, Repo, Unmerged};
 use crate::merge::{Conflict, Kind};
+use crate::rebuild::Output;
 use crate::session::Session;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -217,6 +219,283 @@ fn unmerged(
     (conflicts, unstaged)
 }
 
+/// One side of a merge, rebuilt: its files, and each part's features by
+/// ID with what they built and what they read.
+struct Side {
+    files: crate::activity::Files,
+    parts: BTreeMap<Id, Built>,
+}
+
+/// A part on one side: each listed feature's result, and the features and
+/// parameters each one reads.
+#[derive(Default)]
+struct Built {
+    results: BTreeMap<Id, Result<Output>>,
+    inputs: BTreeMap<Id, Vec<Id>>,
+    uses: BTreeMap<Id, std::collections::BTreeSet<String>>,
+}
+
+/// A part as a session has it, rebuilt.
+fn built(s: &mut Session) -> Result<BTreeMap<Id, Built>> {
+    let ids: Vec<Id> = s.project().parts.keys().cloned().collect();
+    let mut out = BTreeMap::new();
+    for id in ids {
+        let p = s.project().part(&id)?.clone();
+        let mut b = Built {
+            uses: p.uses.clone(),
+            ..Default::default()
+        };
+        for (fid, f) in &p.features {
+            if let Ok(f) = f {
+                b.inputs.insert(
+                    fid.clone(),
+                    crate::graph::inputs(f).into_iter().cloned().collect(),
+                );
+            }
+        }
+        // A part whose list can't be read builds nothing.
+        if p.file.is_ok() {
+            b.results = s.rebuilt(&id)?.features.iter().cloned().collect();
+        }
+        out.insert(id, b);
+    }
+    Ok(out)
+}
+
+/// One side of the merge, from its commit (nothing, for a missing base).
+fn side(session: &mut Session, commit: Option<&str>) -> Result<Side> {
+    let Some(c) = commit else {
+        return Ok(Side {
+            files: Default::default(),
+            parts: BTreeMap::new(),
+        });
+    };
+    match session.at(Some(c)) {
+        Ok((_, s)) => Ok(Side {
+            files: s.snapshot(),
+            parts: built(s)?,
+        }),
+        // A commit with no project here has nothing of it.
+        Err(e) if e.code == Code::NotFound => Ok(Side {
+            files: Default::default(),
+            parts: BTreeMap::new(),
+        }),
+        Err(e) => Err(e),
+    }
+}
+
+/// The features a failure passes through: `id`, then each input whose
+/// failure made it fail (`dependency_failed`), to the one that failed for
+/// its own reasons. `None` when that one is a file the merge left
+/// conflicted, which the structural conflicts report.
+fn chain(results: &BTreeMap<Id, Result<Output>>, id: &Id) -> Option<Vec<Id>> {
+    let mut out = vec![id.clone()];
+    loop {
+        let at = out.last().expect("not empty");
+        let Some(Err(e)) = results.get(at) else {
+            return Some(out);
+        };
+        match e.code {
+            Code::MergeConflict => return None,
+            Code::DependencyFailed => {
+                let next = e.details["dependency"]
+                    .as_str()
+                    .and_then(|d| Id::parse(d, "feature").ok());
+                match next {
+                    Some(d) if !out.contains(&d) => out.push(d),
+                    _ => return Some(out),
+                }
+            }
+            _ => return Some(out),
+        }
+    }
+}
+
+/// The features `id` reads on any side, directly or not, and itself.
+fn closure(sides: &[&Built], id: &Id) -> Vec<Id> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut todo = vec![id.clone()];
+    while let Some(f) = todo.pop() {
+        if !seen.insert(f.clone()) {
+            continue;
+        }
+        for s in sides {
+            todo.extend(s.inputs.get(&f).into_iter().flatten().cloned());
+        }
+    }
+    seen.into_iter().collect()
+}
+
+/// What a feature's result is on a side that has it.
+fn result_on(side: &Side, part: &Id, id: &Id) -> Option<std::result::Result<(), Code>> {
+    let r = side.parts.get(part)?.results.get(id)?;
+    Some(r.as_ref().map(|_| ()).map_err(|e| e.code))
+}
+
+/// The files and parameters behind feature `id` of `part` that `side`
+/// changed from `base`: those of every feature it reads, its own, the
+/// parameters they read, and the manifest.
+fn touched(
+    part: &Id,
+    reads: &[Id],
+    uses: &std::collections::BTreeSet<String>,
+    side: &Side,
+    base: &Side,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let differs = |path: &str| side.files.get(path) != base.files.get(path);
+    if differs(crate::doc::project::MANIFEST) {
+        out.push(crate::doc::project::MANIFEST.to_owned());
+    }
+    for f in reads {
+        let path = format!("parts/{part}/features/{f}.json");
+        if differs(&path) {
+            out.push(path);
+        }
+    }
+    let params = format!("parts/{part}/parameters.json");
+    let entries = |s: &Side| -> BTreeMap<String, Value> {
+        s.files
+            .get(&params)
+            .and_then(|b| json_of(b))
+            .and_then(|v| v["parameters"].as_object().cloned())
+            .map(|m| m.into_iter().filter(|(k, _)| uses.contains(k)).collect())
+            .unwrap_or_default()
+    };
+    if entries(side) != entries(base) {
+        out.push(params);
+    }
+    out
+}
+
+/// What the merge broke: every feature that built on ours or theirs and
+/// fails in the merge, caused by the side whose changes reached what it
+/// reads; one that fails only because another the merge broke does is
+/// listed under that one. And the features that failed on a side already,
+/// which don't block.
+fn broken(
+    working: &BTreeMap<Id, Built>,
+    ours: &Side,
+    theirs: &Side,
+    base: &Side,
+) -> (Vec<Value>, Vec<Value>) {
+    let (mut broke, mut already) = (Vec::new(), Vec::new());
+    for (part, w) in working {
+        let sides = |id: &Id| {
+            let on = [
+                ("ours", result_on(ours, part, id)),
+                ("theirs", result_on(theirs, part, id)),
+            ];
+            let pick = |ok: bool| -> Vec<&'static str> {
+                on.iter()
+                    .filter(|(_, r)| r.as_ref().is_some_and(|r| r.is_ok() == ok))
+                    .map(|(s, _)| *s)
+                    .collect()
+            };
+            (pick(true), pick(false))
+        };
+        // Each failure: already failing on a side, the merge's doing (with
+        // the chain it fails through), or a conflicted file's.
+        let mut broke_here: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
+        for (id, r) in &w.results {
+            let Err(e) = r else { continue };
+            let (_, failed_on) = sides(id);
+            if !failed_on.is_empty() {
+                already.push(json!({"part": part, "feature": id, "error": e.code,
+                                    "failed_on": failed_on}));
+                continue;
+            }
+            if let Some(c) = chain(&w.results, id) {
+                broke_here.insert(id.clone(), c);
+            }
+        }
+        // Folded under the last feature of its chain that the merge broke.
+        let mut also: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
+        let mut own = Vec::new();
+        for (id, c) in &broke_here {
+            let anchor = c
+                .iter()
+                .rev()
+                .find(|f| broke_here.contains_key(*f))
+                .expect("it is in its own chain");
+            if anchor == id {
+                own.push(id.clone());
+            } else {
+                also.entry(anchor.clone()).or_default().push(id.clone());
+            }
+        }
+        let empty = Built::default();
+        let (bo, bt) = (
+            ours.parts.get(part).unwrap_or(&empty),
+            theirs.parts.get(part).unwrap_or(&empty),
+        );
+        for id in own {
+            let Some(Err(e)) = w.results.get(&id) else {
+                continue;
+            };
+            let (built_on, _) = sides(&id);
+            let reads = closure(&[w, bo, bt], &id);
+            let uses: std::collections::BTreeSet<String> = reads
+                .iter()
+                .flat_map(|f| [w, bo, bt].into_iter().flat_map(move |s| s.uses.get(f)))
+                .flatten()
+                .cloned()
+                .collect();
+            // It built on one side: what the other side changed broke it.
+            let mut causes = Vec::new();
+            let mut files = Vec::new();
+            for (on, other, other_side) in [("ours", "theirs", theirs), ("theirs", "ours", ours)] {
+                if built_on.contains(&on) {
+                    let t = touched(part, &reads, &uses, other_side, base);
+                    if !t.is_empty() {
+                        causes.push(other);
+                        files.extend(t);
+                    }
+                }
+            }
+            files.sort();
+            files.dedup();
+            let cause = match causes.as_slice() {
+                [one] => *one,
+                _ => "both",
+            };
+            let path = format!("parts/{part}/features/{id}.json");
+            let mut concerns = json!({"part": part, "feature": id});
+            if let Some(r) = e.details.get("reference") {
+                concerns["references"] = json!([r]);
+            }
+            if let Some(a) = also.get(&id) {
+                concerns["also"] = json!(a);
+            }
+            let built = if built_on.is_empty() {
+                "neither side has it".to_owned()
+            } else {
+                format!("it built on {}", built_on.join(" and "))
+            };
+            let mut c = conflict(
+                format!("{path}#merge_broke"),
+                "merge_broke",
+                if files.is_empty() {
+                    vec![path.clone()]
+                } else {
+                    files
+                },
+                concerns,
+                cause,
+                format!(
+                    "{part}/{id} fails in the merge ({}) but {built}: {}",
+                    json!(e.code).as_str().unwrap_or_default(),
+                    e.message
+                ),
+            );
+            c["error"] = json!(e);
+            c["built_on"] = json!(built_on);
+            broke.push(c);
+        }
+    }
+    (broke, already)
+}
+
 /// `merge.status`: what the merge in progress leaves to settle.
 pub fn status(session: &mut Session) -> Result<Value> {
     let root = session.root().to_path_buf();
@@ -225,15 +504,22 @@ pub fn status(session: &mut Session) -> Result<Value> {
     let mut conflicts = records(&working);
     let (more, unstaged) = unmerged(&root, &repo.unmerged()?);
     conflicts.extend(more);
+    let ours = side(session, Some(&state.ours))?;
+    let theirs = side(session, Some(&state.theirs))?;
+    let base = side(session, state.base.as_deref())?;
+    let now = built(session)?;
+    let (broke, already) = broken(&now, &ours, &theirs, &base);
+    conflicts.extend(broke);
     conflicts.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
-    let side = |c: Option<&String>| json!({ "commit": c });
+    let commit = |c: Option<&String>| json!({ "commit": c });
     Ok(json!({
         "step": state.step.as_str(),
-        "ours": side(Some(&state.ours)),
-        "theirs": side(Some(&state.theirs)),
-        "base": side(state.base.as_ref()),
+        "ours": commit(Some(&state.ours)),
+        "theirs": commit(Some(&state.theirs)),
+        "base": commit(state.base.as_ref()),
         "clean": conflicts.is_empty(),
         "conflicts": conflicts,
+        "already_failing": already,
         "unstaged": unstaged,
     }))
 }
@@ -466,6 +752,95 @@ pub(crate) mod tests {
         assert_eq!(v["conflicts"][0]["kind"], "merge_unparsed");
         assert_eq!(v["conflicts"][0]["id"], "parts/p/features/b.json#");
         assert_eq!(v["conflicts"][0]["theirs"]["params"]["x"], "15 mm");
+    }
+
+    /// Adds sketch `s` on xy, a 10 mm square drawn with lines `l1`..`l4`,
+    /// and an extrude `e` of it.
+    fn squared(m: &mut Merging) {
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s", "plane": "xy"}),
+        )
+        .unwrap();
+        m.call(
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [
+                {"op": "add", "type": "point", "at": [0, 0]},
+                {"op": "add", "type": "point", "at": [10, 0]},
+                {"op": "add", "type": "point", "at": [10, 10]},
+                {"op": "add", "type": "point", "at": [0, 10]},
+                {"op": "add", "type": "line", "start": "p1", "end": "p2"},
+                {"op": "add", "type": "line", "start": "p2", "end": "p3"},
+                {"op": "add", "type": "line", "start": "p3", "end": "p4"},
+                {"op": "add", "type": "line", "start": "p4", "end": "p1"},
+            ]}),
+        )
+        .unwrap();
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "id": "e", "sketch": "s",
+                   "extent": {"type": "blind", "length": "5 mm"}}),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn what_the_merge_broke_names_the_side_that_broke_it() {
+        let mut m = boxed();
+        squared(&mut m);
+        m.commit("a square, extruded");
+        // Theirs sketches on the extrude's top face.
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        let top = m
+            .call("inspect", json!({"part": "p", "feature": "e"}))
+            .unwrap();
+        let face = top["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                f["surface"]["type"] == "plane"
+                    && f["surface"]["frame"]["origin"][2]
+                        .as_f64()
+                        .is_some_and(|z| z > 0.004)
+            })
+            .map(|f| format!("p/e/{}", f["name"].as_str().unwrap()))
+            .expect("a top face");
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "t", "face": face}),
+        )
+        .unwrap();
+        m.commit("theirs: a sketch on top");
+        // Ours deletes the square's last line: the extrude has no loop.
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        m.call(
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [{"op": "remove", "id": "l4"}]}),
+        )
+        .unwrap();
+        m.commit("ours: an open square");
+        m.merge("theirs");
+        let v = m.call("merge.status", json!({})).unwrap();
+        // The extrude failed on ours already; the sketch on its face built
+        // on theirs and the merge broke it, through ours' change.
+        assert_eq!(v["already_failing"][0]["feature"], "e", "{v}");
+        assert_eq!(v["already_failing"][0]["failed_on"], json!(["ours"]));
+        let c: Vec<&Value> = v["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["kind"] == "merge_broke")
+            .collect();
+        assert_eq!(c.len(), 1, "{v}");
+        assert_eq!(c[0]["id"], "parts/p/features/t.json#merge_broke");
+        assert_eq!(c[0]["cause"], "ours");
+        assert_eq!(c[0]["built_on"], json!(["theirs"]));
+        assert_eq!(c[0]["files"], json!(["parts/p/features/s.json"]));
+        assert_eq!(c[0]["error"]["code"], "dependency_failed");
+        assert_eq!(v["clean"], false);
     }
 
     #[test]
