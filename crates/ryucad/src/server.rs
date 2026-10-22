@@ -273,6 +273,7 @@ fn dispatch(
             v["revision"] = json!(p.revision);
             Ok(v)
         }
+        Request::MergeStatus {} => crate::validate::status(session),
         Request::DaemonStatus {} | Request::DaemonShutdown {} => Err(Error::new(
             Code::Usage,
             "only a running daemon answers daemon requests",

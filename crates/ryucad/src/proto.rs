@@ -331,6 +331,9 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         all: bool,
     },
+    /// What the merge Git is in the middle of leaves to settle.
+    #[serde(rename = "merge.status")]
+    MergeStatus {},
     #[serde(rename = "daemon.status")]
     DaemonStatus {},
     /// Registers the connection as a participant of the live session.

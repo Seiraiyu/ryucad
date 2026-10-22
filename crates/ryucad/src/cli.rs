@@ -280,6 +280,10 @@ enum Command {
         #[arg(long)]
         no_sketches: bool,
     },
+    /// What the merge (or cherry-pick, revert or rebase step) Git is in the
+    /// middle of leaves to settle.
+    #[command(subcommand)]
+    Merge(MergeCmd),
     /// The project's Git commits (or one part's), and what is
     /// uncommitted. Read-only.
     History {
@@ -330,6 +334,14 @@ enum DaemonCmd {
         #[arg(long)]
         all: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum MergeCmd {
+    /// Every conflict the merge leaves: in files' conflict records, paths Git left unmerged,
+    /// and what the merge broke that built on either side, each with the side that caused it
+    /// and its choices.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -1089,6 +1101,7 @@ fn request(cmd: &Command) -> Option<Request> {
             part: part.clone(),
             limit: Some(*limit),
         },
+        Command::Merge(MergeCmd::Status) => Request::MergeStatus {},
         Command::Undo { entry } => Request::Undo { entry: *entry },
         Command::Redo { entry } => Request::Redo { entry: *entry },
         Command::Status { text, entities } => Request::ActivitySet {

@@ -32,4 +32,5 @@ pub mod session;
 pub mod sketch;
 pub mod sketch_view;
 pub mod units;
+pub mod validate;
 pub mod view;
