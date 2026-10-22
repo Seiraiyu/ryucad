@@ -197,6 +197,20 @@ enum Command {
         #[arg(long, conflicts_with_all = ["entities", "label"])]
         clear: bool,
     },
+    /// Show what a participant compares the working files against (the one
+    /// human, unless --of names another), or put them into a compare with
+    /// a Git revision (HEAD, a branch, a commit), or take them out with
+    /// --off. An app window then ghosts that revision and colours what
+    /// changed.
+    Compare {
+        #[arg(value_name = "REV", conflicts_with = "off")]
+        rev: Option<String>,
+        /// Stop comparing.
+        #[arg(long)]
+        off: bool,
+        #[arg(long = "of", value_name = "PARTICIPANT")]
+        of: Option<String>,
+    },
     /// Wait for notifications from the project's daemon: what humans
     /// select, the model changing, and so on.
     Watch {
@@ -1091,6 +1105,14 @@ fn request(cmd: &Command) -> Option<Request> {
                 }
             }
         }
+        Command::Compare { rev, off, of } if rev.is_none() && !off => Request::CompareGet {
+            participant: of.clone(),
+        },
+        Command::Compare { rev, off, of } => Request::CompareSet {
+            rev: rev.clone(),
+            off: *off,
+            participant: of.clone(),
+        },
         Command::Activity { limit, before } => Request::ActivityLog {
             limit: Some(*limit),
             before: *before,
