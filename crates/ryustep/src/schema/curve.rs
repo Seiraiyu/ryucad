@@ -2,6 +2,7 @@
 //! angles in its plane angle unit.
 
 use super::args::{Args, Id};
+use super::bspline::{self, BSplineCurve};
 use crate::ImportError;
 use crate::part21::Param;
 
@@ -28,6 +29,8 @@ pub enum Curve {
         semi_axis: f64,
         semi_imag_axis: f64,
     },
+    /// Any `B_SPLINE_CURVE`, rational or not.
+    BSpline(BSplineCurve),
 }
 
 impl Curve {
@@ -38,6 +41,7 @@ impl Curve {
             Curve::Ellipse { .. } => "ELLIPSE",
             Curve::Parabola { .. } => "PARABOLA",
             Curve::Hyperbola { .. } => "HYPERBOLA",
+            Curve::BSpline(_) => "B_SPLINE_CURVE",
         }
     }
 }
@@ -61,7 +65,7 @@ pub(super) fn simple(id: Id, name: &str, params: &[Param]) -> Option<Result<Curv
             semi_axis: r[0],
             semi_imag_axis: r[1],
         }),
-        _ => return None,
+        _ => return bspline::simple_curve(id, name, params).map(|c| c.map(Curve::BSpline)),
     };
     Some(curve)
 }

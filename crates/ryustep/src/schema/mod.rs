@@ -9,6 +9,7 @@
 //! the file wrote them, in its units; references stay instance numbers.
 
 mod args;
+mod bspline;
 mod curve;
 mod geometry;
 mod surface;
@@ -16,11 +17,12 @@ mod surface;
 use rayon::prelude::*;
 
 pub use args::Id;
+pub use bspline::{BSplineCurve, BSplineSurface, Knots};
 pub use curve::Curve;
 pub use geometry::{Placement, Point};
 pub use surface::Surface;
 
-use crate::part21::{File, Header, Instance, Param, Record};
+use crate::part21::{File, Header, Instance, Param, Part, Record};
 use crate::{ImportError, StepError};
 
 /// The application protocol a file follows. Their B-rep, unit and product
@@ -206,10 +208,7 @@ fn decode(inst: &Instance) -> Result<Entity, ImportError> {
     let id = inst.id;
     match &inst.record {
         Record::Simple(p) => simple(id, &p.name, &p.params),
-        Record::Complex(parts) => {
-            let names: Vec<&str> = parts.iter().map(|p| &*p.name).collect();
-            Ok(Entity::Other(names.join(" ").into()))
-        }
+        Record::Complex(parts) => complex(id, parts),
     }
 }
 
@@ -230,6 +229,18 @@ fn simple(id: Id, name: &str, params: &[Param]) -> Result<Entity, ImportError> {
         }
         _ => Ok(Entity::Other(name.into())),
     }
+}
+
+/// A complex instance, by the parts it has.
+fn complex(id: Id, parts: &[Part]) -> Result<Entity, ImportError> {
+    if let Some(c) = bspline::complex_curve(id, parts) {
+        return c.map(|c| Entity::Curve(Curve::BSpline(c)));
+    }
+    if let Some(s) = bspline::complex_surface(id, parts) {
+        return s.map(|s| Entity::Surface(Surface::BSpline(s)));
+    }
+    let names: Vec<&str> = parts.iter().map(|p| &*p.name).collect();
+    Ok(Entity::Other(names.join(" ").into()))
 }
 
 #[cfg(test)]

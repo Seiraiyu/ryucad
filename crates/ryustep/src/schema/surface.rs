@@ -2,6 +2,7 @@
 //! unit, angles in its plane angle unit.
 
 use super::args::{Args, Id};
+use super::bspline::{self, BSplineSurface};
 use crate::ImportError;
 use crate::part21::Param;
 
@@ -31,6 +32,8 @@ pub enum Surface {
         minor: f64,
         select_outer: Option<bool>,
     },
+    /// Any `B_SPLINE_SURFACE`, rational or not.
+    BSpline(BSplineSurface),
 }
 
 impl Surface {
@@ -44,6 +47,7 @@ impl Surface {
                 select_outer: None, ..
             } => "TOROIDAL_SURFACE",
             Surface::Torus { .. } => "DEGENERATE_TOROIDAL_SURFACE",
+            Surface::BSpline(_) => "B_SPLINE_SURFACE",
         }
     }
 }
@@ -68,7 +72,9 @@ pub(super) fn simple(id: Id, name: &str, params: &[Param]) -> Option<Result<Surf
             select_outer: None,
         }),
         "DEGENERATE_TOROIDAL_SURFACE" => degenerate_torus(id, params),
-        _ => return None,
+        _ => {
+            return bspline::simple_surface(id, name, params).map(|s| s.map(Surface::BSpline));
+        }
     };
     Some(surface)
 }

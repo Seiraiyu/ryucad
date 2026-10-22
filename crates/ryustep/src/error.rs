@@ -87,8 +87,10 @@ pub enum ImportError {
     ReferenceCycle { instance: u64 },
     /// An entity this crate doesn't read, where one it does is needed.
     UnsupportedEntity { instance: u64, name: Box<str> },
-    /// An attribute (counted from 0, in the order of a simple record's
-    /// parameters) doesn't have the type or value the schema requires.
+    /// An attribute doesn't have the type or value the schema requires.
+    /// Attributes count from 0 in a simple record's parameters, or within
+    /// a complex instance's part; a fault in the whole entity (lists of
+    /// different lengths) is attribute 0.
     Malformed {
         instance: u64,
         attribute: usize,
