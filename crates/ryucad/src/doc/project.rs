@@ -13,6 +13,7 @@
 use super::canonical;
 use super::files::{Feature, Manifest, ParametersFile, PartFile};
 use super::id::Id;
+use super::source::{Folder, Kind, Source, join};
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
 use serde_json::Value;
@@ -169,20 +170,17 @@ pub fn relative(root: &Path, path: &Path) -> String {
         .join("/")
 }
 
-/// Reads and parses a JSON file; errors carry its path relative to `root`.
-fn read_json(root: &Path, path: &Path) -> Result<(Vec<u8>, Value)> {
-    let at = relative(root, path);
-    let bytes = fs::read(path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            Error::new(Code::NotFound, format!("{at} is missing")).with("path", &at)
-        } else {
-            Error::io(path, &e).with("path", &at)
-        }
-    })?;
+/// Reads and parses the JSON file at `at` (relative to the root); errors
+/// carry that path.
+fn read_json(src: &dyn Source, at: &str) -> Result<(Vec<u8>, Value)> {
+    let bytes = src
+        .read(at)
+        .map_err(|e| e.with("path", at))?
+        .ok_or_else(|| Error::new(Code::NotFound, format!("{at} is missing")).with("path", at))?;
     let text = std::str::from_utf8(&bytes).map_err(|_| {
-        Error::new(Code::InvalidJson, format!("{at} is not UTF-8")).with("path", &at)
+        Error::new(Code::InvalidJson, format!("{at} is not UTF-8")).with("path", at)
     })?;
-    let value = canonical::parse(text).map_err(|e| e.with("path", &at))?;
+    let value = canonical::parse(text).map_err(|e| e.with("path", at))?;
     Ok((bytes, value))
 }
 
@@ -190,8 +188,14 @@ impl Project {
     /// Loads the project at `root`. Only a missing or broken manifest is an
     /// error; anything wrong inside a part is kept in that part.
     pub fn load(root: &Path) -> Result<Project> {
-        let manifest_path = root.join(MANIFEST);
-        let (manifest_bytes, v) = read_json(root, &manifest_path).map_err(|e| {
+        Project::load_from(root, &Folder(root))
+    }
+
+    /// Loads the project whose files `src` holds, as if they were at
+    /// `root`: the same project, faults and revisions as loading them from
+    /// a folder.
+    pub fn load_from(root: &Path, src: &dyn Source) -> Result<Project> {
+        let (manifest_bytes, v) = read_json(src, MANIFEST).map_err(|e| {
             if e.code == Code::NotFound {
                 Error::new(
                     Code::ProjectNotFound,
@@ -205,14 +209,14 @@ impl Project {
         let manifest = Manifest::from_json(&v).map_err(|e| e.with("path", MANIFEST))?;
         let mut parts = BTreeMap::new();
         let mut unknown = Vec::new();
-        for (name, path) in list_dir(&root.join("parts"))? {
+        for (name, kind) in src.list("parts")? {
             match Id::parse(&name, "part") {
-                Ok(id) if path.is_dir() => {
+                Ok(id) if kind == Kind::Dir => {
                     let part =
-                        load_part(root, &manifest, &manifest_bytes, id.clone(), &mut unknown)?;
+                        load_part(src, &manifest, &manifest_bytes, id.clone(), &mut unknown)?;
                     parts.insert(id, part);
                 }
-                _ => unknown.push(relative(root, &path)),
+                _ => unknown.push(join("parts", &name)),
             }
         }
         Ok(Project {
@@ -239,6 +243,8 @@ impl Project {
             };
             match in_part {
                 Some(id) => ids.insert(id),
+                // Git's attributes define nothing ryucad builds.
+                None if path == crate::drivers::ATTRIBUTES => continue,
                 None => {
                     *self = Project::load(&self.root)?;
                     return Ok(());
@@ -257,7 +263,7 @@ impl Project {
             if part_dir(&self.root, &id).is_dir() {
                 let mut unknown = Vec::new();
                 let part = load_part(
-                    &self.root,
+                    &Folder(&self.root),
                     &self.manifest,
                     &self.manifest_bytes,
                     id.clone(),
@@ -280,13 +286,13 @@ impl Project {
 }
 
 fn load_part(
-    root: &Path,
+    src: &dyn Source,
     manifest: &Manifest,
     manifest_bytes: &[u8],
     id: Id,
     unknown: &mut Vec<String>,
 ) -> Result<Part> {
-    let dir = part_dir(root, &id);
+    let dir = join("parts", id.as_str());
     // Each piece is length-prefixed, so no two sets of files hash alike.
     let mut hasher = blake3::Hasher::new();
     let piece = |h: &mut blake3::Hasher, bytes: &[u8]| {
@@ -294,42 +300,47 @@ fn load_part(
         h.update(bytes);
     };
     piece(&mut hasher, manifest_bytes);
-    let file = read_json(root, &part_path(root, &id)).and_then(|(bytes, v)| {
+    let part_at = join(&dir, "part.json");
+    let file = read_json(src, &part_at).and_then(|(bytes, v)| {
         piece(&mut hasher, &bytes);
-        PartFile::from_json(&v).map_err(|e| e.with("path", relative(root, &part_path(root, &id))))
+        PartFile::from_json(&v).map_err(|e| e.with("path", &part_at))
     });
-    for (name, path) in list_dir(&dir)? {
-        if name != "part.json" && name != "features" && name != PARAMETERS {
-            unknown.push(relative(root, &path));
+    let mut has_parameters = false;
+    for (name, kind) in src.list(&dir)? {
+        match name.as_str() {
+            "part.json" | "features" => {}
+            PARAMETERS => has_parameters = kind == Kind::File,
+            _ => unknown.push(join(&dir, &name)),
         }
     }
-    let params_path = parameters_path(root, &id);
-    let parameters = params_path.is_file().then(|| {
-        read_json(root, &params_path).and_then(|(bytes, v)| {
+    let params_at = join(&dir, PARAMETERS);
+    let parameters = has_parameters.then(|| {
+        read_json(src, &params_at).and_then(|(bytes, v)| {
             // Tagged, so a part with an empty parameters file and one
             // with none hash apart; a part with none hashes as before.
             piece(&mut hasher, PARAMETERS.as_bytes());
             piece(&mut hasher, &bytes);
-            ParametersFile::from_json(&v).map_err(|e| e.with("path", relative(root, &params_path)))
+            ParametersFile::from_json(&v).map_err(|e| e.with("path", &params_at))
         })
     });
     let env = match &parameters {
         None => Env::empty(),
         Some(Ok(p)) => p.env(),
         // Features that read a parameter fail with this, naming the file.
-        Some(Err(e)) => Env::broken(e.clone().with("parameters", relative(root, &params_path))),
+        Some(Err(e)) => Env::broken(e.clone().with("parameters", &params_at)),
     };
     let mut features = BTreeMap::new();
     let mut uses = BTreeMap::new();
     let mut bytes_of = BTreeMap::new();
-    for (name, path) in list_dir(&dir.join("features"))? {
+    let features_dir = join(&dir, "features");
+    for (name, kind) in src.list(&features_dir)? {
+        let at = join(&features_dir, &name);
         let fid = name
             .strip_suffix(".json")
             .and_then(|stem| Id::parse(stem, "feature").ok());
         match fid {
-            Some(fid) if path.is_file() => {
-                let at = relative(root, &path);
-                let feature = read_json(root, &path).and_then(|(bytes, v)| {
+            Some(fid) if kind == Kind::File => {
+                let feature = read_json(src, &at).and_then(|(bytes, v)| {
                     bytes_of.insert(fid.clone(), bytes);
                     uses.insert(fid.clone(), super::files::feature_names(&v));
                     Feature::from_json(&v, manifest.default_unit, &env)
@@ -337,7 +348,7 @@ fn load_part(
                 });
                 features.insert(fid, feature);
             }
-            _ => unknown.push(relative(root, &path)),
+            _ => unknown.push(at),
         }
     }
     if let Ok(f) = &file {
@@ -349,7 +360,7 @@ fn load_part(
                     piece(&mut hasher, bytes);
                 }
                 None => {
-                    let at = relative(root, &feature_path(root, &id, fid));
+                    let at = join(&features_dir, &format!("{fid}.json"));
                     features.entry(fid.clone()).or_insert_with(|| {
                         Err(Error::new(Code::NotFound, format!("{at} is missing"))
                             .with("path", &at))
@@ -368,26 +379,6 @@ fn load_part(
         uses,
         revision,
     })
-}
-
-/// `(name, path)` for each entry in `dir`, sorted by name; empty when `dir`
-/// doesn't exist.
-fn list_dir(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(Error::io(dir, &e)),
-    };
-    let mut out = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|e| Error::io(dir, &e))?;
-        out.push((
-            entry.file_name().to_string_lossy().into_owned(),
-            entry.path(),
-        ));
-    }
-    out.sort();
-    Ok(out)
 }
 
 /// Writes `contents` to `path` so that readers see the old file or the new
@@ -529,6 +520,54 @@ mod tests {
         assert_eq!(c.code, Code::InvalidDocument);
         assert_eq!(part.orphans(), [&id("c")]);
         assert_eq!(project.unknown, ["parts/Bad Name", "parts/p/notes.txt"]);
+    }
+
+    /// Every file under `root`, by relative path.
+    fn all_files(root: &Path) -> BTreeMap<String, Vec<u8>> {
+        let mut out = BTreeMap::new();
+        let mut dirs = vec![root.to_path_buf()];
+        while let Some(d) = dirs.pop() {
+            for e in fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    dirs.push(p);
+                } else {
+                    out.insert(relative(root, &p), fs::read(&p).unwrap());
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn files_in_memory_load_as_the_folder_does() {
+        let dir = sample();
+        let root = dir.path();
+        let same = || {
+            let from = Project::load_from(root, &all_files(root)).unwrap();
+            assert_eq!(
+                format!("{from:?}"),
+                format!("{:?}", Project::load(root).unwrap())
+            );
+        };
+        same();
+        // Faults stay in their places, with the same paths.
+        fs::write(feature_path(root, &id("p"), &id("a")), "{ nope").unwrap();
+        fs::write(root.join("parts/p/features/c.json"), "{}").unwrap();
+        fs::write(root.join("parts/p/notes.txt"), "hi").unwrap();
+        fs::write(root.join("parts/stray.json"), "{}").unwrap();
+        fs::create_dir_all(root.join("parts/p/features/deeper")).unwrap();
+        fs::write(root.join("parts/p/features/deeper/x.json"), "{}").unwrap();
+        write_json(
+            &parameters_path(root, &id("p")),
+            &serde_json::json!({"format": 1, "kind": "ryucad.parameters",
+                                "parameters": {"r": "3 mm"}}),
+        )
+        .unwrap();
+        same();
+        fs::remove_file(root.join(MANIFEST)).unwrap();
+        let e = Project::load_from(root, &all_files(root)).unwrap_err();
+        assert_eq!(e.code, Code::ProjectNotFound);
     }
 
     #[test]

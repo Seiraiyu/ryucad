@@ -42,7 +42,7 @@ impl Issue {
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 15] = [
+pub const CODES: [(&str, &str); 17] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -58,6 +58,8 @@ pub const CODES: [(&str, &str); 15] = [
     ("format_too_new", "error"),
     ("cloud_sync_folder", "warning"),
     ("sketch_stale", "warning"),
+    ("gitattributes_missing", "warning"),
+    ("git_drivers_missing", "warning"),
 ];
 
 fn issue(code: &'static str, files: Vec<String>, message: String) -> Issue {
@@ -346,7 +348,35 @@ pub fn diagnose(root: &Path) -> Vec<Issue> {
     for part in part_ids {
         diagnose_part(root, part, unit, &mut issues);
     }
+    diagnose_git(root, &mut issues);
     issues
+}
+
+/// In a repository: what lets Git read the project's files through ryucad.
+fn diagnose_git(root: &Path, issues: &mut Vec<Issue>) {
+    use crate::drivers::{ATTRIBUTES, TEXTCONV};
+    let Some(configured) = crate::drivers::configured(root) else {
+        return;
+    };
+    let text = fs::read_to_string(root.join(ATTRIBUTES)).unwrap_or_default();
+    let missing = crate::drivers::missing(&text);
+    if !missing.is_empty() {
+        issues.push(issue(
+            "gitattributes_missing",
+            vec![ATTRIBUTES.to_owned()],
+            format!(
+                "{ATTRIBUTES} lacks {}: git diff won't read the project's files through ryucad",
+                missing.join(" and ")
+            ),
+        ));
+    }
+    if !configured {
+        issues.push(issue(
+            "git_drivers_missing",
+            Vec::new(),
+            format!("Git has no ryucad diff driver ({TEXTCONV}); run `ryucad git install`"),
+        ));
+    }
 }
 
 fn non_canonical(rel: &str) -> Issue {
@@ -778,6 +808,16 @@ fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<
     };
     let mut out = Vec::new();
     match i.code {
+        "gitattributes_missing" => {
+            let path = root.join(first);
+            let text = fs::read_to_string(&path).unwrap_or_default();
+            out.push(Repair {
+                id: id("write"),
+                summary: format!("add ryucad's lines to {first}, keeping the rest"),
+                changes: vec![write(first, crate::drivers::with_lines(&text).into_bytes())],
+                params: Vec::new(),
+            });
+        }
         "missing_manifest" => {
             let unit = params.unit.unwrap_or(Unit::Mm);
             out.push(Repair {
@@ -1453,11 +1493,58 @@ pub(crate) mod tests {
         crate::session::Session::open(r).unwrap();
     }
 
+    /// Makes `r` a repository that registers ryucad with Git, whatever the
+    /// user's own config says.
+    fn in_repo(r: &Path) {
+        crate::git::tests::git(r, &["init", "-q"]);
+        crate::git::tests::git(
+            r,
+            &["config", crate::drivers::TEXTCONV, "ryucad git textconv"],
+        );
+        crate::drivers::write_attributes(r).unwrap();
+    }
+
+    #[test]
+    fn a_repository_needs_the_attributes() {
+        let dir = healthy();
+        let r = dir.path();
+        // Outside a repository, Git's files don't matter.
+        assert_eq!(report(r).unwrap()["healthy"], true);
+        in_repo(r);
+        assert_eq!(report(r).unwrap()["healthy"], true);
+        w(
+            r,
+            crate::drivers::ATTRIBUTES,
+            "*.png binary\nryucad.json diff=ryucad\n",
+        );
+        let v = report(r).unwrap();
+        assert_eq!(v["issues"][0]["code"], "gitattributes_missing");
+        assert_eq!(v["issues"][0]["severity"], "warning");
+        assert!(
+            v["issues"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("parts/**/*.json diff=ryucad")
+        );
+        let ids = offered(r);
+        let out = fix(
+            r,
+            &[&ids["gitattributes_missing:write:"]],
+            Params::default(),
+        );
+        assert_eq!(out["report"]["healthy"], true, "{out}");
+        let text = fs::read_to_string(r.join(crate::drivers::ATTRIBUTES)).unwrap();
+        assert!(
+            text.starts_with("*.png binary\nryucad.json diff=ryucad\n# ryucad"),
+            "{text}"
+        );
+    }
+
     #[test]
     fn the_last_commit_restores_what_was_lost() {
         let dir = healthy();
         let r = dir.path();
-        crate::git::tests::git(r, &["init", "-q"]);
+        in_repo(r);
         crate::git::tests::git(r, &["add", "."]);
         crate::git::tests::git(r, &["commit", "-q", "-m", "start"]);
         // A deleted file, a broken one, and a lost index with history.

@@ -43,6 +43,7 @@ pub fn init(root: &Path, default_unit: Option<Unit>) -> Result<Value> {
         default_unit: default_unit.unwrap_or(Unit::Mm),
     };
     write_json(&manifest, &m.to_json())?;
+    crate::drivers::write_attributes(root)?;
     Ok(json!({"root": root, "default_unit": m.default_unit}))
 }
 
@@ -96,7 +97,12 @@ pub fn answer_live(
             feature,
             quality,
             transfer: Some(Transfer::Binary),
-        } => mesh_binary(session, &part, feature.as_deref(), quality.as_deref()),
+            rev,
+        } => session.at(rev.as_deref()).and_then(|(commit, s)| {
+            let mut a = mesh_binary(s, &part, feature.as_deref(), quality.as_deref())?;
+            a.result = noted(Ok(a.result), commit)?;
+            Ok(a)
+        }),
         Request::Render {
             part,
             camera,
@@ -271,13 +277,47 @@ fn dispatch(
             Code::Usage,
             "only a running daemon answers daemon requests",
         )),
-        Request::Rebuild { part } => rebuild(session, part.as_deref()),
+        Request::Rebuild { part, rev } => {
+            let (commit, s) = session.at(rev.as_deref())?;
+            noted(rebuild(s, part.as_deref()), commit)
+        }
         Request::Inspect {
             part,
             feature,
             entity,
-        } => inspect(session, &part, feature.as_deref(), entity.as_deref()),
+            rev,
+        } => {
+            let (commit, s) = session.at(rev.as_deref())?;
+            noted(
+                inspect(s, &part, feature.as_deref(), entity.as_deref()),
+                commit,
+            )
+        }
         Request::CheckFormat {} => check_format(session),
+        Request::Check { part, against } => {
+            crate::check::run(session, part.as_deref(), against.as_deref())
+        }
+        Request::Diff {
+            from,
+            to,
+            part,
+            model,
+            positions,
+            all,
+        } => {
+            let opts = crate::diff::Options {
+                part,
+                positions,
+                all,
+            };
+            diff(
+                session,
+                from.as_deref().unwrap_or("HEAD"),
+                to.as_deref().unwrap_or("working"),
+                model,
+                &opts,
+            )
+        }
         Request::SessionHello {
             kind,
             name,
@@ -385,7 +425,14 @@ fn dispatch(
             feature,
             quality,
             transfer: _,
-        } => mesh_get(session, &part, feature.as_deref(), quality.as_deref()),
+            rev,
+        } => {
+            let (commit, s) = session.at(rev.as_deref())?;
+            noted(
+                mesh_get(s, &part, feature.as_deref(), quality.as_deref()),
+                commit,
+            )
+        }
         // A render's answer is bytes: `answer_live` handles it.
         Request::Render { .. } => Err(Error::new(Code::Internal, "render answers with bytes")),
         Request::Doctor {} => crate::doctor::report(session.root()),
@@ -1490,6 +1537,29 @@ pub fn settle(slot: &mut Option<Session>, live: &mut Live, root: &Path) {
     });
 }
 
+/// A request's answer, with the commit it read when it named a revision:
+/// in the result, or in a failure's details.
+fn noted(r: Result<Value>, commit: Option<String>) -> Result<Value> {
+    let Some(commit) = commit else {
+        return r;
+    };
+    match r {
+        Ok(mut v) => {
+            v["commit"] = json!(commit);
+            Ok(v)
+        }
+        Err(mut e) => {
+            if e.details.is_null() {
+                e.details = json!({});
+            }
+            if e.details.is_object() {
+                e.details["commit"] = json!(commit);
+            }
+            Err(e)
+        }
+    }
+}
+
 fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
     let ids: Vec<Id> = match part {
         Some(p) => vec![part_id(p)?],
@@ -2012,6 +2082,52 @@ fn inspect(
         );
     }
     Ok(json!({"part": pid, "bodies": bodies}))
+}
+
+/// A revision's files, and how the answer names it: the working files
+/// (`working`) or a commit.
+fn files_at(session: &mut Session, rev: &str) -> Result<(Value, activity::Files)> {
+    if rev == "working" {
+        return Ok((json!({"rev": rev}), session.snapshot()));
+    }
+    let r = crate::git::revision(session.root(), rev)?;
+    Ok((json!({"rev": rev, "commit": r.commit}), r.files))
+}
+
+/// Every part of a revision, rebuilt.
+fn rebuilt_at(session: &mut Session, rev: &str) -> Result<BTreeMap<String, crate::diff::Built>> {
+    let (_, s) = session.at(Some(rev))?;
+    let ids: Vec<Id> = s.project().parts.keys().cloned().collect();
+    let mut out = BTreeMap::new();
+    for id in ids {
+        let r = s.rebuilt(&id)?;
+        out.insert(id.to_string(), r.features.clone());
+    }
+    Ok(out)
+}
+
+/// `diff`: what changed from one revision to another.
+pub(crate) fn diff(
+    session: &mut Session,
+    from: &str,
+    to: &str,
+    model: bool,
+    opts: &crate::diff::Options,
+) -> Result<Value> {
+    if let Some(p) = &opts.part {
+        part_id(p)?;
+    }
+    let (a, fa) = files_at(session, from)?;
+    let (b, fb) = files_at(session, to)?;
+    let mut v = crate::diff::structural(&fa, &fb, opts);
+    v["from"] = a;
+    v["to"] = b;
+    if model {
+        let from = rebuilt_at(session, from)?;
+        let to = rebuilt_at(session, to)?;
+        crate::diff::model(&mut v, &from, &to, opts);
+    }
+    Ok(v)
 }
 
 fn check_format(session: &Session) -> Result<Value> {

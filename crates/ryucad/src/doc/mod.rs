@@ -7,4 +7,5 @@ pub mod id;
 pub mod project;
 pub mod reference;
 pub mod sketch;
+pub mod source;
 pub mod sweep;

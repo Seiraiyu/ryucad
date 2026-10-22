@@ -851,6 +851,8 @@ fn every_protocol_method_has_a_command() {
         ("rebuild", &["rebuild"]),
         ("inspect", &["inspect"]),
         ("check_format", &["check-format"]),
+        ("diff", &["diff"]),
+        ("check", &["check"]),
         ("daemon.status", &["daemon", "status"]),
         ("daemon.shutdown", &["daemon", "stop"]),
         ("session.hello", &["participants"]),
@@ -1153,4 +1155,224 @@ fn doctor_repairs_a_damaged_project() {
     let v = p.ok(&["feature", "show", "p", "s"]);
     assert_eq!(v["params"]["radius"]["value"], "1 in");
     p.fails(&["doctor", "--repair", &id], "repair_conflict", 1);
+}
+
+/// Runs git in `dir` with a fixed identity and time, so the same commits
+/// in two repositories have the same IDs, and its output.
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .env("GIT_AUTHOR_DATE", "2026-10-21T12:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2026-10-21T12:00:00Z")
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn git_diff_reads_values_through_textconv() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=20", "--param",
+        "z=5",
+    ]);
+    let root = &p.direct;
+    let file = root.join("parts/p/features/b.json");
+    let out = Command::cargo_bin("ryucad")
+        .unwrap()
+        .args(["git", "textconv"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        text.starts_with("ryucad.feature box (format 1)\n"),
+        "{text}"
+    );
+    assert!(text.contains("\nparams.x = 10 mm\n"), "{text}");
+    // Registered by hand here; `git install` does it for real.
+    fs::write(root.join(".gitattributes"), "*.json diff=ryucad\n").unwrap();
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "a box"]);
+    p.ok(&["feature", "edit", "p", "b", "--param", "x=12"]);
+    // Git runs it through a shell: forward slashes, even on Windows.
+    let bin = assert_cmd::cargo::cargo_bin("ryucad");
+    let bin = bin.to_str().unwrap().replace('\\', "/");
+    let driver = format!("diff.ryucad.textconv='{bin}' git textconv");
+    let diff = git(root, &["-c", &driver, "diff", "--no-color", "-U0"]);
+    assert!(
+        diff.contains("\n-params.x = 10 mm\n+params.x = 12 mm\n"),
+        "{diff}"
+    );
+    // A file that isn't there is an error, in JSON.
+    let out = Command::cargo_bin("ryucad")
+        .unwrap()
+        .args(["git", "textconv", "nowhere.json"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["error"]["code"], "io");
+}
+
+#[test]
+fn git_install_registers_the_driver() {
+    // Git's own config is the test's: a home of its own, no system file.
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let root = dir.path().join("project");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&root).unwrap();
+    let run = |args: &[&str]| -> (i32, Value) {
+        let out = Command::cargo_bin("ryucad")
+            .unwrap()
+            .args(args)
+            .current_dir(&root)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("RYUCAD_NO_DAEMON", "1")
+            .env("RYUCAD_CONFIG_DIR", dir.path().join("config"))
+            .output()
+            .unwrap();
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        (out.status.code().unwrap(), v)
+    };
+    let (code, v) = run(&["init"]);
+    assert_eq!(code, 0, "{v}");
+    let attributes = fs::read_to_string(root.join(".gitattributes")).unwrap();
+    assert!(
+        attributes.contains("\nparts/**/*.json diff=ryucad\n"),
+        "{attributes}"
+    );
+    // Not a repository: nothing to register in, and nothing to report.
+    let (code, v) = run(&["git", "install"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("not_a_git_repo"))
+    );
+    git(&root, &["init", "-q", "-b", "main"]);
+    let (_, v) = run(&["doctor"]);
+    let codes: Vec<&str> = v["result"]["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(codes, ["git_drivers_missing"]);
+    let (code, v) = run(&["git", "install", "--global"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["scope"], "global");
+    let set = v["result"]["config"]["diff.ryucad.textconv"]
+        .as_str()
+        .unwrap();
+    assert!(set.ends_with("' git textconv"), "{set}");
+    let global = fs::read_to_string(home.join(".gitconfig")).unwrap();
+    assert!(global.contains("[diff \"ryucad\"]"), "{global}");
+    let (_, v) = run(&["doctor"]);
+    assert_eq!(v["result"]["healthy"], true, "{v}");
+    // Again, in the repository's own config.
+    fs::remove_file(home.join(".gitconfig")).unwrap();
+    let (code, v) = run(&["git", "install"]);
+    assert_eq!(
+        (code, v["result"]["scope"].as_str()),
+        (0, Some("local")),
+        "{v}"
+    );
+    let local = fs::read_to_string(root.join(".git/config")).unwrap();
+    assert!(local.contains("textconv"), "{local}");
+    let (_, v) = run(&["doctor"]);
+    assert_eq!(v["result"]["healthy"], true, "{v}");
+}
+
+impl Pair {
+    /// Runs git in both projects.
+    fn git(&self, args: &[&str]) {
+        git(&self.direct, args);
+        git(&self.daemon, args);
+    }
+}
+
+#[test]
+fn diff_and_check_through_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=20", "--param",
+        "z=5",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "sphere", "--id", "c", "--param", "radius=1",
+    ]);
+    p.git(&["init", "-q", "-b", "main"]);
+    // Registered in each repository, so the user's own config doesn't count.
+    p.git(&["config", "diff.ryucad.textconv", "ryucad git textconv"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "start"]);
+    let head = git(&p.direct, &["rev-parse", "HEAD"]).trim().to_owned();
+    assert_eq!(p.ok(&["diff"])["parts"], serde_json::json!({}));
+    p.ok(&["feature", "edit", "p", "b", "--param", "x=12"]);
+    let d = p.ok(&["diff"]);
+    assert_eq!(d["from"]["commit"], head.as_str());
+    assert_eq!(
+        d["parts"]["p"]["features"]["b"]["changes"][0],
+        serde_json::json!({"at": "/params/x", "from": "10 mm", "to": "12 mm"})
+    );
+    let m = p.ok(&["diff", "--model", "--part", "p"]);
+    let b = &m["parts"]["p"]["features"]["b"]["model"];
+    assert_eq!(b["body"]["faces"]["changed"].as_array().unwrap().len(), 5);
+    // The committed revision rebuilds, inspects and meshes as it was.
+    let r = p.ok(&["rebuild", "--rev", "HEAD"]);
+    assert_eq!(r["commit"], head.as_str());
+    assert_eq!(r["parts"][0]["features"][0]["hash"], b["from"]["hash"]);
+    let i = p.ok(&["inspect", "p", "b", "--rev", "HEAD"]);
+    assert_eq!(i["bodies"][0]["bounds"]["max"][0], 0.01);
+    let mesh = p.ok(&["mesh", "p", "c", "--rev", "HEAD", "--quality", "coarse"]);
+    assert_eq!(mesh["commit"], head.as_str());
+    // Check, and against a revision.
+    let c = p.ok(&["check"]);
+    assert_eq!(c["passed"], true, "{c}");
+    let c = p.ok(&["check", "--against", "HEAD"]);
+    assert_eq!(
+        c["against"]["parts"]["p"]["features"]["b"]["status"],
+        "changed"
+    );
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "torus",
+        "--id",
+        "t",
+        "--param",
+        "major_radius=1",
+        "--param",
+        "minor_radius=1",
+    ]);
+    let e = p.fails(&["check"], "check_failed", 1);
+    assert_eq!(e["details"]["findings"][0]["code"], "feature_failed");
+    assert_eq!(e["details"]["findings"][0]["feature"], "t");
+    p.fails(&["diff", "--from", "nowhere"], "rev_not_found", 1);
+    p.fails(&["rebuild", "--rev", "HEAD~5"], "rev_not_found", 1);
+    p.fails(&["check", "--against", "nowhere"], "rev_not_found", 1);
 }

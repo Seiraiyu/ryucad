@@ -95,6 +95,9 @@ if command -v zsh >/dev/null 2>&1; then
 else
     check ".zshenv is not created without zsh" '[ ! -e "$work/home-fresh/.zshenv" ]'
 fi
+if command -v git >/dev/null 2>&1; then
+    check "registers ryucad's diff driver with Git" 'git config -f "$work/home-fresh/.gitconfig" diff.ryucad.textconv | grep -q "/.ryucad/bin/ryucad'"'"' git textconv$"'
+fi
 run fresh "$good"
 check "reinstall succeeds" '[ "$status" -eq 0 ]'
 check "reinstall adds no second PATH line" '[ "$(markers "$work/home-fresh/.profile")" = 1 ]'

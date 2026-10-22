@@ -66,7 +66,11 @@ enum Command {
     #[command(subcommand)]
     Sketch(SketchCmd),
     /// Rebuild one part, or all of them.
-    Rebuild { part: Option<String> },
+    Rebuild {
+        part: Option<String>,
+        #[command(flatten)]
+        rev: RevArg,
+    },
     /// List a part's bodies, faces, edges and vertices by stable name.
     Inspect {
         part: String,
@@ -74,9 +78,47 @@ enum Command {
         /// Only this entity: its name, or a full reference <part>/<feature>/<name>.
         #[arg(long)]
         entity: Option<String>,
+        #[command(flatten)]
+        rev: RevArg,
     },
     /// Report files that aren't canonical, broken, unlisted or unknown.
     CheckFormat,
+    /// Rebuild the project from its files alone, with nothing reused, and
+    /// verify it: doctor's issues, every feature builds, sketches are
+    /// current, bodies don't intersect themselves and mesh cleanly. Exits
+    /// 1 when anything fails.
+    Check {
+        /// Only this part (and the project's own issues).
+        part: Option<String>,
+        /// Also report what changed from this revision (main, HEAD~1),
+        /// bodies included, as `diff --model` does.
+        #[arg(long, value_name = "REV")]
+        against: Option<String>,
+    },
+    /// What changed between two revisions: features, parameters and sketch
+    /// entities, and with --model what that did to the bodies.
+    Diff {
+        /// The revision to compare from: HEAD by default.
+        #[arg(long, value_name = "REV")]
+        from: Option<String>,
+        /// The revision to compare to: the working files (working) by
+        /// default.
+        #[arg(long, value_name = "REV")]
+        to: Option<String>,
+        /// Only this part.
+        #[arg(long)]
+        part: Option<String>,
+        /// Rebuild both and say what changed in the bodies: faces, edges and
+        /// vertices gone, new and changed, and failures.
+        #[arg(long)]
+        model: bool,
+        /// List every sketch position that moved.
+        #[arg(long)]
+        positions: bool,
+        /// Include what is the same.
+        #[arg(long)]
+        all: bool,
+    },
     /// Diagnose the project folder: a lost manifest, unlisted or missing
     /// feature files, conflict markers, sync tools' copies and more. With
     /// --repair, apply repairs it offered.
@@ -191,6 +233,8 @@ enum Command {
         /// Write the meshes to this file as ryucad.mesh.1 instead.
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
+        #[command(flatten)]
+        rev: RevArg,
     },
     /// Draw a part (or the whole project) to a PNG: iso framing the model
     /// unless a view, a participant's camera or a camera is given.
@@ -263,6 +307,10 @@ enum Command {
     /// Run, query or stop the project's session daemon.
     #[command(subcommand)]
     Daemon(DaemonCmd),
+    /// Register ryucad with Git, and what Git runs: the diff driver's text
+    /// conversion.
+    #[command(subcommand)]
+    Git(GitCmd),
     /// Print the ryucad, ryukei and protocol versions.
     Version,
 }
@@ -281,6 +329,20 @@ enum DaemonCmd {
     Stop {
         #[arg(long)]
         all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum GitCmd {
+    /// Print a ryucad file as one line per value, for `git diff` (Git's
+    /// textconv): plain text, not JSON.
+    Textconv { file: PathBuf },
+    /// Tell Git to read ryucad's files through ryucad: the diff driver, in
+    /// this repository's config, or with --global in yours (the installers
+    /// do that).
+    Install {
+        #[arg(long)]
+        global: bool,
     },
 }
 
@@ -472,6 +534,14 @@ enum SketchCmd {
 /// Sketch ops, parsed from one argument.
 #[derive(Clone)]
 struct Ops(Vec<Value>);
+
+#[derive(Args)]
+struct RevArg {
+    /// Read the project as this Git revision has it (main, HEAD~2, a hash)
+    /// instead of the working files.
+    #[arg(long, value_name = "REV")]
+    rev: Option<String>,
+}
 
 #[derive(Args)]
 struct Expect {
@@ -720,6 +790,7 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Init { .. }
         | Command::Version
         | Command::Daemon(_)
+        | Command::Git(_)
         | Command::Watch { .. }
         | Command::Open { .. } => {
             return None;
@@ -841,17 +912,41 @@ fn request(cmd: &Command) -> Option<Request> {
             sketch: sketch.clone(),
             quality: quality.clone(),
         },
-        Command::Rebuild { part } => Request::Rebuild { part: part.clone() },
+        Command::Rebuild { part, rev } => Request::Rebuild {
+            part: part.clone(),
+            rev: rev.rev.clone(),
+        },
         Command::Inspect {
             part,
             feature,
             entity,
+            rev,
         } => Request::Inspect {
             part: part.clone(),
             feature: feature.clone(),
             entity: entity.clone(),
+            rev: rev.rev.clone(),
         },
         Command::CheckFormat => Request::CheckFormat {},
+        Command::Check { part, against } => Request::Check {
+            part: part.clone(),
+            against: against.clone(),
+        },
+        Command::Diff {
+            from,
+            to,
+            part,
+            model,
+            positions,
+            all,
+        } => Request::Diff {
+            from: from.clone(),
+            to: to.clone(),
+            part: part.clone(),
+            model: *model,
+            positions: *positions,
+            all: *all,
+        },
         Command::Doctor { repairs, params } if repairs.is_empty() => {
             let _ = params;
             Request::Doctor {}
@@ -970,11 +1065,13 @@ fn request(cmd: &Command) -> Option<Request> {
             feature,
             quality,
             out,
+            rev,
         } => Request::MeshGet {
             part: part.clone(),
             feature: feature.clone(),
             quality: quality.clone(),
             transfer: out.as_ref().map(|_| Transfer::Binary),
+            rev: rev.rev.clone(),
         },
         Command::History { part, limit } => Request::HistoryLog {
             part: part.clone(),
@@ -1014,6 +1111,7 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             daemon::run(&find_root(&here)?, idle).map(|()| Value::Null)
         }
         Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
+        Command::Git(GitCmd::Install { global }) => ryucad::drivers::install(&here, !global),
         Command::Open { dir } => {
             let dir = dir.as_ref().map_or_else(|| here.clone(), |d| here.join(d));
             let dir = plain(dir.canonicalize().map_err(|e| Error::io(&dir, &e))?);
@@ -1141,6 +1239,20 @@ pub fn main() -> ExitCode {
             );
         }
     };
+    // Git reads a textconv's output as the file's text, not JSON.
+    if let Command::Git(GitCmd::Textconv { file }) = &cli.command {
+        return match std::fs::read(file) {
+            Ok(bytes) => {
+                use std::io::Write;
+                let mut out = std::io::stdout().lock();
+                match out.write_all(&ryucad::diff::textconv(&bytes)) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(_) => ExitCode::from(Code::Io.exit_code()),
+                }
+            }
+            Err(e) => finish(Err(Error::io(file, &e)), Vec::new(), cli.pretty),
+        };
+    }
     let mut warnings = Vec::new();
     let outcome = run(&cli, &mut warnings);
     finish(outcome, warnings, cli.pretty)
