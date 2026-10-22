@@ -757,8 +757,41 @@ fn renumbering(
     vec![repair.to_json()]
 }
 
-/// `merge.status`: what the merge in progress leaves to settle.
+/// What a merge status is computed from: the merge (its step and
+/// commits), the index (what is staged) and the working files. `None` when
+/// Git is in no merge, or the project in no repository.
+pub fn key(session: &Session) -> Option<String> {
+    let repo = Repo::open(session.root()).ok()??;
+    let state = match repo.merge_state() {
+        Ok(Some(s)) => format!("{}:{}:{}:{:?}", s.step.as_str(), s.ours, s.theirs, s.base),
+        Ok(None) => return None,
+        Err(e) => format!("error:{}", e.message),
+    };
+    Some(format!(
+        "{state}:{}:{}",
+        repo.index_stamp(),
+        session.digest()
+    ))
+}
+
+/// `merge.status`: what the merge in progress leaves to settle. Kept by
+/// [`key`], so asking again about the same state costs nothing.
 pub fn status(session: &mut Session) -> Result<Value> {
+    let key = key(session);
+    if let (Some(k), Some((was, v))) = (&key, &session.merge_status)
+        && k == was
+    {
+        return Ok(v.clone());
+    }
+    let v = compute(session)?;
+    if let Some(k) = key {
+        session.merge_status = Some((k, v.clone()));
+    }
+    Ok(v)
+}
+
+/// [`status`], from nothing.
+fn compute(session: &mut Session) -> Result<Value> {
     let root = session.root().to_path_buf();
     let (repo, state) = merging(&root)?;
     let working = session.snapshot();
@@ -1918,6 +1951,47 @@ pub(crate) mod tests {
         assert_eq!(l, ["a", "b"]);
         put(&mut l, "z", Some(&json!({"after": "gone"})));
         assert_eq!(l, ["a", "b", "z"]);
+    }
+
+    #[test]
+    fn subscribers_hear_when_a_merge_starts_changes_and_ends() {
+        use crate::notify::Topic;
+        let mut m = boxed();
+        both_edit(&mut m, json!({"x": 15, "y": 1}), json!({"x": 12, "y": 2}));
+        let mut live = crate::live::Live::new();
+        crate::server::publish(&mut live, &mut m.session);
+        let sub = live.hub.subscribe("p-x", &[Topic::Merge]);
+        let told = |live: &mut crate::live::Live, m: &mut Merging| -> Vec<Value> {
+            m.session.reload().unwrap();
+            crate::server::publish(live, &mut m.session);
+            sub.drain()
+                .iter()
+                .map(|l| serde_json::from_str::<Value>(l).unwrap()["params"].clone())
+                .collect()
+        };
+        assert!(told(&mut live, &mut m).is_empty());
+        m.merge("theirs");
+        let v = told(&mut live, &mut m);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["merging"], true);
+        assert_eq!(v[0]["status"]["conflicts"].as_array().unwrap().len(), 2);
+        // Nothing changed: nothing said, and the status is kept.
+        assert!(told(&mut live, &mut m).is_empty());
+        let key = key(&m.session).unwrap();
+        assert_eq!(m.session.merge_status.as_ref().unwrap().0, key);
+        resolve(
+            &mut m,
+            "parts/p/features/b.json#/params/x",
+            json!({"choice": "ours"}),
+        )
+        .unwrap();
+        let v = told(&mut live, &mut m);
+        assert_eq!(v[0]["status"]["conflicts"].as_array().unwrap().len(), 1);
+        // Staging changes it too, then the merge ends.
+        m.git(&["add", "-A"]);
+        assert_eq!(told(&mut live, &mut m).len(), 1);
+        m.git(&["merge", "--abort"]);
+        assert_eq!(told(&mut live, &mut m), [json!({"merging": false})]);
     }
 
     #[test]

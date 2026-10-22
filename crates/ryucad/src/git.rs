@@ -399,6 +399,21 @@ impl Repo {
         Ok(None)
     }
 
+    /// The index file's size and time: `git add` and `git rm` change it.
+    pub fn index_stamp(&self) -> String {
+        match std::fs::metadata(self.repo.index_path()) {
+            Ok(m) => {
+                let t = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_nanos());
+                format!("{}:{t}", m.len())
+            }
+            Err(_) => String::new(),
+        }
+    }
+
     /// The merge of `heads` into `HEAD` that `step` makes.
     fn merging(&self, step: Step, heads: &[String]) -> Result<MergeState> {
         let head = match heads {
