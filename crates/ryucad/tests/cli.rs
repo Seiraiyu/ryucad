@@ -1240,6 +1240,63 @@ fn git_diff_reads_values_through_textconv() {
 }
 
 #[test]
+fn the_merge_driver_merges_three_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = |name: &str, radius: &str| {
+        let v = serde_json::json!({
+            "format": 1, "kind": "ryucad.feature", "type": "sphere",
+            "params": {"radius": radius},
+            "placement": {"origin": ["0 mm", "0 mm", "0 mm"], "x": [1, 0, 0], "z": [0, 0, 1]},
+        });
+        let path = dir.path().join(name);
+        fs::write(&path, ryucad::doc::canonical::to_string(&v)).unwrap();
+        path
+    };
+    let driver = |base: &Path, ours: &Path, theirs: &Path| -> (i32, String) {
+        let out = Command::cargo_bin("ryucad")
+            .unwrap()
+            .args(["git", "merge-driver"])
+            .args([base, ours, theirs])
+            .arg("parts/p/features/s.json")
+            .output()
+            .unwrap();
+        assert!(out.stdout.is_empty());
+        (
+            out.status.code().unwrap(),
+            fs::read_to_string(ours).unwrap(),
+        )
+    };
+    let base = file("base", "1 mm");
+    // Theirs changed it, ours didn't: theirs, and exit 0.
+    let (code, text) = driver(&base, &file("ours", "1 mm"), &file("theirs", "2 mm"));
+    assert_eq!(code, 0);
+    assert!(text.contains("\"radius\": \"2 mm\""), "{text}");
+    // Both changed it: ours in place, the record, exit 1.
+    let (code, text) = driver(&base, &file("ours", "3 mm"), &file("theirs", "2 mm"));
+    assert_eq!(code, 1);
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["params"]["radius"], "3 mm");
+    assert_eq!(v["conflicts"]["/params/radius"]["theirs"], "2 mm");
+    // What isn't a ryucad file merges as lines, and always exits 1, so Git
+    // leaves it for someone to look at.
+    let theirs = dir.path().join("plain");
+    fs::write(&theirs, "not json\n").unwrap();
+    let (code, text) = driver(&base, &file("ours", "1 mm"), &theirs);
+    assert_eq!((code, text.as_str()), (1, "not json\n"));
+    let (code, text) = driver(&base, &file("ours", "3 mm"), &theirs);
+    assert_eq!(code, 1);
+    assert!(text.starts_with("<<<<<<< ours\n"), "{text}");
+    // A file that isn't there: exit 4, a message for Git to show.
+    let out = Command::cargo_bin("ryucad")
+        .unwrap()
+        .args(["git", "merge-driver", "nowhere", "nor", "here"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&out.stderr).starts_with("ryucad: merging nor"));
+}
+
+#[test]
 fn git_install_registers_the_driver() {
     // Git's own config is the test's: a home of its own, no system file.
     let dir = tempfile::tempdir().unwrap();

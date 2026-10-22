@@ -661,6 +661,173 @@ pub fn order(walk: &mut Walk, base: &[String], ours: &[String], theirs: &[String
     out
 }
 
+/// How a file's merge came out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// Merged, nothing left to resolve.
+    Clean,
+    /// Merged, with this many conflicts in the file's record.
+    Conflicts(usize),
+    /// A version isn't a ryucad file this build can merge: merged as
+    /// lines, with this many conflicts marked as Git marks them.
+    Text(usize),
+}
+
+/// A file's JSON if ryucad can merge it: UTF-8, canonical, an object with
+/// a `kind`, no conflict record, and no format newer than this build reads.
+fn readable(bytes: &[u8]) -> Option<Value> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let v = crate::doc::canonical::parse(text).ok()?;
+    if crate::doc::canonical::to_string(&v) != text || v.get(CONFLICTS).is_some() {
+        return None;
+    }
+    let kind = v.get("kind")?.as_str()?;
+    let format = v.get("format")?.as_u64()?;
+    if newest(kind).is_some_and(|n| format > n) {
+        return None;
+    }
+    Some(v)
+}
+
+/// Merges three versions of a file as Git hands them to a merge driver;
+/// an empty base means both sides added the file. Files ryucad can read
+/// merge by value (see [`merge`]) and come out canonical; if any version
+/// can't be read, or they aren't of one kind, they merge as lines
+/// instead, as `git merge-file` does.
+pub fn bytes(base: &[u8], ours: &[u8], theirs: &[u8]) -> (Vec<u8>, Outcome) {
+    let b = if base.is_empty() {
+        Some(None)
+    } else {
+        readable(base).map(Some)
+    };
+    if let (Some(b), Some(o), Some(t)) = (b, readable(ours), readable(theirs)) {
+        let kind = |v: &Value| v["kind"].clone();
+        if kind(&o) == kind(&t) && b.as_ref().is_none_or(|b| kind(b) == kind(&o)) {
+            let m = merge(b.as_ref(), &o, &t);
+            let outcome = match m.conflicts.len() {
+                0 => Outcome::Clean,
+                n => Outcome::Conflicts(n),
+            };
+            return (
+                crate::doc::canonical::to_string(&m.to_json()).into_bytes(),
+                outcome,
+            );
+        }
+    }
+    let (out, n) = text(base, ours, theirs);
+    (out, Outcome::Text(n))
+}
+
+/// Lines with their endings.
+fn lines(b: &[u8]) -> Vec<&[u8]> {
+    b.split_inclusive(|c| *c == b'\n').collect()
+}
+
+/// The most cells the line matcher fills; past it the changed middle of
+/// two files is one change.
+const MATCH_CELLS: usize = 1 << 22;
+
+/// For each line of `a`, the line of `b` it is matched with in a longest
+/// common subsequence: common ends first, then the middle by dynamic
+/// programming when it is small enough.
+fn matches(a: &[&[u8]], b: &[&[u8]]) -> Vec<Option<usize>> {
+    let mut out = vec![None; a.len()];
+    let pre = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+    for (i, m) in out.iter_mut().enumerate().take(pre) {
+        *m = Some(i);
+    }
+    let suf = a[pre..]
+        .iter()
+        .rev()
+        .zip(b[pre..].iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count();
+    for i in 0..suf {
+        out[a.len() - 1 - i] = Some(b.len() - 1 - i);
+    }
+    let (x, y) = (&a[pre..a.len() - suf], &b[pre..b.len() - suf]);
+    let (n, m) = (x.len(), y.len());
+    if n == 0 || m == 0 || (n + 1) * (m + 1) > MATCH_CELLS {
+        return out;
+    }
+    let mut l = vec![0u32; (n + 1) * (m + 1)];
+    let at = |i: usize, j: usize| i * (m + 1) + j;
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            l[at(i, j)] = if x[i] == y[j] {
+                l[at(i + 1, j + 1)] + 1
+            } else {
+                l[at(i + 1, j)].max(l[at(i, j + 1)])
+            };
+        }
+    }
+    let (mut i, mut j) = (0, 0);
+    while i < n && j < m {
+        if x[i] == y[j] {
+            out[pre + i] = Some(pre + j);
+            i += 1;
+            j += 1;
+        } else if l[at(i + 1, j)] >= l[at(i, j + 1)] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    out
+}
+
+/// A three-way merge of lines, as `git merge-file` makes one: between the
+/// lines all three versions keep, a stretch only one side changed takes
+/// that side, one both changed alike takes it, and any other is marked
+/// `<<<<<<< ours`, `=======`, `>>>>>>> theirs`. The merged bytes and the
+/// number of conflicts.
+pub fn text(base: &[u8], ours: &[u8], theirs: &[u8]) -> (Vec<u8>, usize) {
+    let (b, o, t) = (lines(base), lines(ours), lines(theirs));
+    let (mo, mt) = (matches(&b, &o), matches(&b, &t));
+    let mut out: Vec<u8> = Vec::new();
+    let mut conflicts = 0;
+    let (mut i, mut j, mut k) = (0, 0, 0);
+    let emit = |out: &mut Vec<u8>, chunk: &[&[u8]]| {
+        for l in chunk {
+            out.extend_from_slice(l);
+        }
+    };
+    let marker = |out: &mut Vec<u8>, m: &str| {
+        if out.last().is_some_and(|c| *c != b'\n') {
+            out.push(b'\n');
+        }
+        out.extend_from_slice(m.as_bytes());
+    };
+    loop {
+        let next = (i..b.len()).find_map(|x| match (mo[x], mt[x]) {
+            (Some(y), Some(z)) if y >= j && z >= k => Some((x, y, z)),
+            _ => None,
+        });
+        let (bx, oy, tz) = next.unwrap_or((b.len(), o.len(), t.len()));
+        let (cb, co, ct) = (&b[i..bx], &o[j..oy], &t[k..tz]);
+        if co == cb {
+            emit(&mut out, ct);
+        } else if ct == cb || co == ct {
+            emit(&mut out, co);
+        } else {
+            conflicts += 1;
+            marker(&mut out, "<<<<<<< ours\n");
+            emit(&mut out, co);
+            marker(&mut out, "=======\n");
+            emit(&mut out, ct);
+            marker(&mut out, ">>>>>>> theirs\n");
+        }
+        match next {
+            None => break,
+            Some((x, y, z)) => {
+                out.extend_from_slice(b[x]);
+                (i, j, k) = (x + 1, y + 1, z + 1);
+            }
+        }
+    }
+    (out, conflicts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1079,6 +1246,88 @@ mod tests {
         assert_eq!(m.value["entities"]["p7"], ours["entities"]["p7"]);
         // The same addition on both sides is no conflict.
         assert!(merge(Some(&base), &ours, &ours).is_clean());
+    }
+
+    fn canonical(v: &Value) -> Vec<u8> {
+        crate::doc::canonical::to_string(v).into_bytes()
+    }
+
+    #[test]
+    fn files_merge_by_bytes() {
+        let base = feature_json("10 mm", [1, 0, 0]);
+        let ours = feature_json("12 mm", [1, 0, 0]);
+        let theirs = feature_json("10 mm", [0, 1, 0]);
+        let (out, o) = bytes(&canonical(&base), &canonical(&ours), &canonical(&theirs));
+        assert_eq!(o, Outcome::Clean);
+        assert_eq!(out, canonical(&feature_json("12 mm", [0, 1, 0])));
+        let clash = feature_json("15 mm", [1, 0, 0]);
+        let (out, o) = bytes(&canonical(&base), &canonical(&ours), &canonical(&clash));
+        assert_eq!(o, Outcome::Conflicts(1));
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(out, canonical(&v));
+        assert_eq!(record(&v).len(), 1);
+        // An empty base: both added the file.
+        let (_, o) = bytes(b"", &canonical(&ours), &canonical(&clash));
+        assert_eq!(o, Outcome::Conflicts(1));
+        assert_eq!(
+            bytes(b"", &canonical(&ours), &canonical(&ours)).1,
+            Outcome::Clean
+        );
+    }
+
+    #[test]
+    fn what_ryucad_cant_read_merges_as_lines() {
+        let base = canonical(&feature_json("10 mm", [1, 0, 0]));
+        let ours = canonical(&feature_json("12 mm", [1, 0, 0]));
+        // Not canonical, a newer format, another kind, a conflict record,
+        // not JSON: each falls back to lines.
+        let spaced = String::from_utf8(ours.clone())
+            .unwrap()
+            .replace(": ", ":  ");
+        let mut newer = feature_json("12 mm", [1, 0, 0]);
+        newer["format"] = json!(9);
+        let mut other = feature_json("12 mm", [1, 0, 0]);
+        other["kind"] = json!("ryucad.part");
+        let mut conflicted = feature_json("12 mm", [1, 0, 0]);
+        conflicted[CONFLICTS] = json!({});
+        for theirs in [
+            spaced.into_bytes(),
+            canonical(&newer),
+            canonical(&other),
+            canonical(&conflicted),
+            b"<<<<<<< x".to_vec(),
+        ] {
+            assert!(matches!(bytes(&base, &ours, &theirs).1, Outcome::Text(_)));
+        }
+    }
+
+    #[test]
+    fn lines_merge_as_git_merges_them() {
+        let (out, n) = text(b"a\nb\nc\n", b"A\nb\nc\n", b"a\nb\nC\n");
+        assert_eq!((out.as_slice(), n), (b"A\nb\nC\n".as_slice(), 0));
+        let (out, n) = text(b"a\nb\nc\n", b"a\nB\nc\n", b"a\nX\nc\n");
+        assert_eq!(
+            (String::from_utf8(out).unwrap().as_str(), n),
+            ("a\n<<<<<<< ours\nB\n=======\nX\n>>>>>>> theirs\nc\n", 1)
+        );
+        // The same change on both sides, and additions at the ends.
+        let (out, n) = text(b"a\n", b"0\na\nb", b"0\na\n");
+        assert_eq!((out.as_slice(), n), (b"0\na\nb".as_slice(), 0));
+        // A last line without its newline still gets markers on their own
+        // lines.
+        let (out, n) = text(b"a", b"b", b"c");
+        assert_eq!(
+            (String::from_utf8(out).unwrap().as_str(), n),
+            ("<<<<<<< ours\nb\n=======\nc\n>>>>>>> theirs\n", 1)
+        );
+        let (out, n) = text(b"", b"x\n", b"x\n");
+        assert_eq!((out.as_slice(), n), (b"x\n".as_slice(), 0));
+        // Doctor knows the markers.
+        assert!(
+            String::from_utf8(text(b"a", b"b", b"c").0)
+                .unwrap()
+                .contains(">>>>>>> ")
+        );
     }
 
     #[test]
