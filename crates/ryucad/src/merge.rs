@@ -616,7 +616,8 @@ fn insert(out: &mut Vec<String>, side: &[String], id: &str, skip: &BTreeSet<Stri
 /// feature they follow on that side (after all that preceded them there,
 /// so nothing they could read comes after them), ours first where both
 /// add at one spot. A feature moved differently by both sides, moved on one and
-/// removed on the other, or added by both at different places is an
+/// removed on the other, moved where the other side's moves leave it out
+/// of its side's order, or added by both at different places is an
 /// `order` conflict at `/features/<id>`, its sides' places as
 /// [`place`] gives them.
 pub fn order(walk: &mut Walk, base: &[String], ours: &[String], theirs: &[String]) -> Vec<String> {
@@ -691,6 +692,34 @@ pub fn order(walk: &mut Walk, base: &[String], ours: &[String], theirs: &[String
     for id in theirs {
         if from.get(id) == Some(&From::Theirs) {
             insert(&mut out, theirs, id, &ours_placed);
+        }
+    }
+    // Each side's moves keep that side's order against what it lists: two
+    // moves can pull against each other, and placing each alone would
+    // undo one of them silently.
+    let at = |l: &[String], id: &str| l.iter().position(|f| f == id);
+    for (side, moved) in [(ours, &mo), (theirs, &mt)] {
+        for id in moved {
+            let key = child("/features", id);
+            let (Some(si), Some(oi)) = (at(side, id), at(&out, id)) else {
+                continue;
+            };
+            if walk.conflicts.contains_key(&key) {
+                continue;
+            }
+            let broken = side
+                .iter()
+                .enumerate()
+                .any(|(j, f)| f != id && at(&out, f).is_some_and(|k| (j < si) != (k < oi)));
+            if broken {
+                walk.conflict(
+                    &key,
+                    Kind::Order,
+                    place(base, id).as_ref(),
+                    place(ours, id).as_ref(),
+                    place(theirs, id).as_ref(),
+                );
+            }
         }
     }
     out
@@ -1095,6 +1124,17 @@ mod tests {
         assert_eq!(
             (out, c),
             (vec!["a".into(), "b".into()], vec!["/features/c".into()])
+        );
+        // Moves that pull against each other: ours puts b before a, theirs
+        // c before b, and base keeps a before c. Placing each alone would
+        // undo ours' move silently.
+        let (out, c) = lists(&["a", "b", "c"], &["b", "a", "c"], &["a", "c", "b"]);
+        assert_eq!(
+            (out, c),
+            (
+                vec!["a".into(), "c".into(), "b".into()],
+                vec!["/features/a".into()]
+            )
         );
         // Added by both at different places.
         let (out, c) = lists(&["a", "b"], &["x", "a", "b"], &["a", "b", "x"]);
