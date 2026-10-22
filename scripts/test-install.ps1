@@ -90,6 +90,8 @@ try {
     if (Get-Command git -ErrorAction SilentlyContinue) {
         $driver = & git config -f (Join-Path $r.Home '.gitconfig') diff.ryucad.textconv
         Test-Case 'registers ryucad''s diff driver with Git' ($driver -match '/\.ryucad/bin/ryucad\.exe'' git textconv$') $r
+        $merge = & git config -f (Join-Path $r.Home '.gitconfig') merge.ryucad.driver
+        Test-Case 'registers ryucad''s merge driver with Git' ($merge -match '/\.ryucad/bin/ryucad\.exe'' git merge-driver %O %A %B %P$') $r
     }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     Test-Case 'user PATH gets the bin directory' (($userPath -split ';') -contains (Split-Path $exe)) $r

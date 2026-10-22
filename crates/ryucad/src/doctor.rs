@@ -42,7 +42,7 @@ impl Issue {
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 18] = [
+pub const CODES: [(&str, &str); 20] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -61,6 +61,8 @@ pub const CODES: [(&str, &str); 18] = [
     ("gitattributes_missing", "warning"),
     ("git_drivers_missing", "warning"),
     ("merge_conflict", "error"),
+    ("git_hook_missing", "warning"),
+    ("git_hook_foreign", "warning"),
 ];
 
 fn issue(code: &'static str, files: Vec<String>, message: String) -> Issue {
@@ -360,10 +362,11 @@ pub fn diagnose(root: &Path) -> Vec<Issue> {
     issues
 }
 
-/// In a repository: what lets Git read the project's files through ryucad.
+/// In a repository: what lets Git read and merge the project's files
+/// through ryucad, and refuse a merge commit while the merge is unresolved.
 fn diagnose_git(root: &Path, issues: &mut Vec<Issue>) {
-    use crate::drivers::{ATTRIBUTES, TEXTCONV};
-    let Some(configured) = crate::drivers::configured(root) else {
+    use crate::drivers::{ATTRIBUTES, HOOK, Hook};
+    let Some(setup) = crate::drivers::setup(root) else {
         return;
     };
     let text = fs::read_to_string(root.join(ATTRIBUTES)).unwrap_or_default();
@@ -373,17 +376,48 @@ fn diagnose_git(root: &Path, issues: &mut Vec<Issue>) {
             "gitattributes_missing",
             vec![ATTRIBUTES.to_owned()],
             format!(
-                "{ATTRIBUTES} lacks {}: git diff won't read the project's files through ryucad",
+                "{ATTRIBUTES} lacks {}: Git won't read or merge the project's files through ryucad",
                 missing.join(" and ")
             ),
         ));
     }
-    if !configured {
+    if !setup.missing.is_empty() {
         issues.push(issue(
             "git_drivers_missing",
             Vec::new(),
-            format!("Git has no ryucad diff driver ({TEXTCONV}); run `ryucad git install`"),
+            format!(
+                "Git has no {}: run `ryucad git install`",
+                setup.missing.join(" or ")
+            ),
         ));
+    }
+    let line = crate::drivers::hook_line().unwrap_or_default();
+    match setup.hook {
+        Hook::Installed(_) => {}
+        Hook::Missing(p) => issues.push(issue(
+            "git_hook_missing",
+            Vec::new(),
+            format!(
+                "this clone has no {HOOK} hook ({}): a merge commit can be made while the merge leaves the model broken; run `ryucad git install`",
+                p.display()
+            ),
+        )),
+        Hook::HooksPath(p) => issues.push(issue(
+            "git_hook_missing",
+            Vec::new(),
+            format!(
+                "core.hooksPath is set and {} doesn't run ryucad's merge check; add this line to it: {line}",
+                p.display()
+            ),
+        )),
+        Hook::Foreign(p) => issues.push(issue(
+            "git_hook_foreign",
+            Vec::new(),
+            format!(
+                "{} is another tool's, so ryucad left it alone; add this line to it: {line}",
+                p.display()
+            ),
+        )),
     }
 }
 
@@ -1514,12 +1548,21 @@ pub(crate) mod tests {
 
     /// Makes `r` a repository that registers ryucad with Git, whatever the
     /// user's own config says.
-    fn in_repo(r: &Path) {
-        crate::git::tests::git(r, &["init", "-q"]);
-        crate::git::tests::git(
-            r,
-            &["config", crate::drivers::TEXTCONV, "ryucad git textconv"],
-        );
+    /// Makes `r` a repository set up for ryucad, by hand: the test binary
+    /// isn't ryucad, so `git install` would register the wrong program.
+    pub(crate) fn in_repo(r: &Path) {
+        use crate::drivers::{HOOK, MERGE_DRIVER, TEXTCONV};
+        let git = |args: &[&str]| crate::git::tests::git(r, args);
+        git(&["init", "-q"]);
+        git(&["config", TEXTCONV, "ryucad git textconv"]);
+        git(&[
+            "config",
+            MERGE_DRIVER,
+            "ryucad git merge-driver %O %A %B %P",
+        ]);
+        let hooks = r.join(".git/hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        fs::write(hooks.join(HOOK), "ryucad merge status --hook\n").unwrap();
         crate::drivers::write_attributes(r).unwrap();
     }
 
@@ -1531,6 +1574,7 @@ pub(crate) mod tests {
         assert_eq!(report(r).unwrap()["healthy"], true);
         in_repo(r);
         assert_eq!(report(r).unwrap()["healthy"], true);
+        // An earlier ryucad's lines: the merge driver is missing.
         w(
             r,
             crate::drivers::ATTRIBUTES,
@@ -1543,7 +1587,7 @@ pub(crate) mod tests {
             v["issues"][0]["message"]
                 .as_str()
                 .unwrap()
-                .contains("parts/**/*.json diff=ryucad")
+                .contains("parts/**/*.json merge=ryucad diff=ryucad")
         );
         let ids = offered(r);
         let out = fix(
@@ -1553,10 +1597,43 @@ pub(crate) mod tests {
         );
         assert_eq!(out["report"]["healthy"], true, "{out}");
         let text = fs::read_to_string(r.join(crate::drivers::ATTRIBUTES)).unwrap();
+        assert!(text.starts_with("*.png binary\n# ryucad"), "{text}");
+        assert!(!text.contains("\nryucad.json diff=ryucad\n"), "{text}");
+    }
+
+    #[test]
+    fn a_clone_needs_the_drivers_and_the_hook() {
+        let dir = healthy();
+        let r = dir.path();
+        in_repo(r);
+        let git = |args: &[&str]| crate::git::tests::git(r, args);
+        git(&["config", "--unset", crate::drivers::MERGE_DRIVER]);
+        let hook = r.join(".git/hooks").join(crate::drivers::HOOK);
+        fs::write(&hook, "#!/bin/sh\necho someone else's\n").unwrap();
+        let v = report(r).unwrap();
+        let codes: Vec<&str> = v["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["code"].as_str().unwrap())
+            .collect();
+        assert_eq!(codes, ["git_drivers_missing", "git_hook_foreign"]);
         assert!(
-            text.starts_with("*.png binary\nryucad.json diff=ryucad\n# ryucad"),
-            "{text}"
+            v["issues"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("merge.ryucad.driver")
         );
+        assert!(
+            v["issues"][1]["message"]
+                .as_str()
+                .unwrap()
+                .ends_with("' merge status --hook || exit 1")
+        );
+        fs::remove_file(&hook).unwrap();
+        let v = report(r).unwrap();
+        assert_eq!(v["issues"][1]["code"], "git_hook_missing");
+        assert_eq!(v["warnings"], 2);
     }
 
     #[test]

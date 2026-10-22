@@ -97,6 +97,7 @@ else
 fi
 if command -v git >/dev/null 2>&1; then
     check "registers ryucad's diff driver with Git" 'git config -f "$work/home-fresh/.gitconfig" diff.ryucad.textconv | grep -q "/.ryucad/bin/ryucad'"'"' git textconv$"'
+    check "registers ryucad's merge driver with Git" 'git config -f "$work/home-fresh/.gitconfig" merge.ryucad.driver | grep -q "/.ryucad/bin/ryucad'"'"' git merge-driver %O %A %B %P$"'
 fi
 run fresh "$good"
 check "reinstall succeeds" '[ "$status" -eq 0 ]'

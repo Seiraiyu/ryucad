@@ -1297,18 +1297,18 @@ fn the_merge_driver_merges_three_files() {
 }
 
 #[test]
-fn git_install_registers_the_driver() {
+fn git_install_registers_the_drivers_and_the_hook() {
     // Git's own config is the test's: a home of its own, no system file.
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     let root = dir.path().join("project");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&root).unwrap();
-    let run = |args: &[&str]| -> (i32, Value) {
+    let run_in = |at: &Path, args: &[&str]| -> (i32, Value) {
         let out = Command::cargo_bin("ryucad")
             .unwrap()
             .args(args)
-            .current_dir(&root)
+            .current_dir(at)
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -1319,11 +1319,21 @@ fn git_install_registers_the_driver() {
         let v: Value = serde_json::from_slice(&out.stdout).unwrap();
         (out.status.code().unwrap(), v)
     };
+    let run = |args: &[&str]| run_in(&root, args);
+    let codes = |v: &Value| -> Vec<String> {
+        v["result"]["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["code"].as_str().unwrap().to_owned())
+            .collect()
+    };
     let (code, v) = run(&["init"]);
     assert_eq!(code, 0, "{v}");
+    assert!(v["result"].get("git").is_none(), "{v}");
     let attributes = fs::read_to_string(root.join(".gitattributes")).unwrap();
     assert!(
-        attributes.contains("\nparts/**/*.json diff=ryucad\n"),
+        attributes.contains("\nparts/**/*.json merge=ryucad diff=ryucad\n"),
         "{attributes}"
     );
     // Not a repository: nothing to register in, and nothing to report.
@@ -1334,25 +1344,30 @@ fn git_install_registers_the_driver() {
     );
     git(&root, &["init", "-q", "-b", "main"]);
     let (_, v) = run(&["doctor"]);
-    let codes: Vec<&str> = v["result"]["issues"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|i| i["code"].as_str().unwrap())
-        .collect();
-    assert_eq!(codes, ["git_drivers_missing"]);
+    assert_eq!(codes(&v), ["git_drivers_missing", "git_hook_missing"]);
+    // The drivers in the user's config; the clone's own setup is per clone.
     let (code, v) = run(&["git", "install", "--global"]);
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["result"]["scope"], "global");
-    let set = v["result"]["config"]["diff.ryucad.textconv"]
-        .as_str()
-        .unwrap();
-    assert!(set.ends_with("' git textconv"), "{set}");
+    let config = &v["result"]["config"];
+    assert!(
+        config["diff.ryucad.textconv"]
+            .as_str()
+            .unwrap()
+            .ends_with("' git textconv")
+    );
+    assert!(
+        config["merge.ryucad.driver"]
+            .as_str()
+            .unwrap()
+            .ends_with("' git merge-driver %O %A %B %P")
+    );
     let global = fs::read_to_string(home.join(".gitconfig")).unwrap();
     assert!(global.contains("[diff \"ryucad\"]"), "{global}");
+    assert!(global.contains("[merge \"ryucad\"]"), "{global}");
     let (_, v) = run(&["doctor"]);
-    assert_eq!(v["result"]["healthy"], true, "{v}");
-    // Again, in the repository's own config.
+    assert_eq!(codes(&v), ["git_hook_missing"]);
+    // In the repository's own config: the drivers and the hook.
     fs::remove_file(home.join(".gitconfig")).unwrap();
     let (code, v) = run(&["git", "install"]);
     assert_eq!(
@@ -1360,9 +1375,47 @@ fn git_install_registers_the_driver() {
         (0, Some("local")),
         "{v}"
     );
+    assert_eq!(v["result"]["hook"]["status"], "installed");
     let local = fs::read_to_string(root.join(".git/config")).unwrap();
-    assert!(local.contains("textconv"), "{local}");
+    assert!(
+        local.contains("textconv") && local.contains("merge-driver"),
+        "{local}"
+    );
+    let hook = root.join(".git/hooks/pre-merge-commit");
+    let script = fs::read_to_string(&hook).unwrap();
+    assert!(script.ends_with("' merge status --hook\n"), "{script}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&hook).unwrap().permissions().mode() & 0o111,
+            0o111
+        );
+    }
     let (_, v) = run(&["doctor"]);
+    assert_eq!(v["result"]["healthy"], true, "{v}");
+    // Someone else's hook is left alone, with the line to add.
+    fs::write(&hook, "#!/bin/sh\necho mine\n").unwrap();
+    let (code, v) = run(&["git", "install"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["hook"]["status"], "foreign");
+    assert!(
+        v["result"]["hook"]["line"]
+            .as_str()
+            .unwrap()
+            .ends_with("' merge status --hook || exit 1")
+    );
+    assert_eq!(fs::read_to_string(&hook).unwrap(), "#!/bin/sh\necho mine\n");
+    let (_, v) = run(&["doctor"]);
+    assert_eq!(codes(&v), ["git_hook_foreign"]);
+    // A project made inside a repository sets the clone up as it starts.
+    let other = dir.path().join("other");
+    fs::create_dir_all(&other).unwrap();
+    git(&other, &["init", "-q", "-b", "main"]);
+    let (code, v) = run_in(&other, &["init"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["git"]["hook"]["status"], "installed");
+    let (_, v) = run_in(&other, &["doctor"]);
     assert_eq!(v["result"]["healthy"], true, "{v}");
 }
 
@@ -1388,7 +1441,8 @@ fn diff_and_check_through_the_cli() {
     ]);
     p.git(&["init", "-q", "-b", "main"]);
     // Registered in each repository, so the user's own config doesn't count.
-    p.git(&["config", "diff.ryucad.textconv", "ryucad git textconv"]);
+    let installed = p.ok(&["git", "install"]);
+    assert_eq!(installed["hook"]["status"], "installed");
     p.git(&["add", "."]);
     p.git(&["commit", "-q", "-m", "start"]);
     let head = git(&p.direct, &["rev-parse", "HEAD"]).trim().to_owned();

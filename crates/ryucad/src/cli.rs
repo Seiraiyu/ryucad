@@ -349,9 +349,9 @@ enum GitCmd {
         /// The file's path in the repository, as Git names it.
         path: Option<String>,
     },
-    /// Tell Git to read ryucad's files through ryucad: the diff driver, in
-    /// this repository's config, or with --global in yours (the installers
-    /// do that).
+    /// Tell Git to read and merge ryucad's files through ryucad: the diff and
+    /// merge drivers, in this repository's config with its pre-merge-commit
+    /// hook, or with --global the drivers in yours (the installers do that).
     Install {
         #[arg(long)]
         global: bool,
@@ -1117,7 +1117,18 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
     };
     match &cli.command {
         Command::Version => Ok(json!(VersionInfo::current())),
-        Command::Init { unit } => server::init(&here, *unit),
+        Command::Init { unit } => {
+            let mut v = server::init(&here, *unit)?;
+            // In a repository, the clone is set up for ryucad too; the
+            // project is made either way, and `doctor` says what's missing.
+            if ryucad::git::Repo::open(&here)?.is_some() {
+                v["git"] = match ryucad::drivers::install(&here, true) {
+                    Ok(g) => g,
+                    Err(e) => json!({ "error": e }),
+                };
+            }
+            Ok(v)
+        }
         Command::Daemon(DaemonCmd::Run { idle_timeout }) => {
             let idle = idle_timeout.map_or(daemon::DEFAULT_IDLE, Duration::from_secs);
             daemon::run(&find_root(&here)?, idle).map(|()| Value::Null)
