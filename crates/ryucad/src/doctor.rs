@@ -694,7 +694,7 @@ pub struct Param {
 }
 
 impl Repair {
-    fn to_json(&self) -> Value {
+    pub(crate) fn to_json(&self) -> Value {
         let changes: Vec<Value> = self
             .changes
             .iter()
@@ -767,7 +767,7 @@ impl Params {
 }
 
 /// A short hash of the files an issue involves, as they are now.
-fn basis(root: &Path, files: &[String]) -> String {
+pub(crate) fn basis(root: &Path, files: &[String]) -> String {
     let mut h = blake3::Hasher::new();
     for f in files {
         h.update(&(f.len() as u64).to_le_bytes());
@@ -785,7 +785,7 @@ fn basis(root: &Path, files: &[String]) -> String {
     h.finalize().to_hex()[..8].to_owned()
 }
 
-fn canonical_bytes(v: &Value) -> Vec<u8> {
+pub(crate) fn canonical_bytes(v: &Value) -> Vec<u8> {
     canonical::to_string(v).into_bytes()
 }
 

@@ -368,6 +368,45 @@ fn touched(
     out
 }
 
+/// Who broke feature `id` of `part`, which built on the sides `built_on`:
+/// each other side whose changes reached what it reads (`both` when that
+/// is both, or neither), and the files where they did.
+fn blame(
+    part: &Id,
+    id: &Id,
+    built_on: &[&str],
+    graphs: [&Built; 3],
+    ours: &Side,
+    theirs: &Side,
+    base: &Side,
+) -> (&'static str, Vec<String>) {
+    let reads = closure(&graphs, id);
+    let uses: std::collections::BTreeSet<String> = reads
+        .iter()
+        .flat_map(|f| graphs.into_iter().flat_map(move |s| s.uses.get(f)))
+        .flatten()
+        .cloned()
+        .collect();
+    let mut causes = Vec::new();
+    let mut files = Vec::new();
+    for (on, other, other_side) in [("ours", "theirs", theirs), ("theirs", "ours", ours)] {
+        if built_on.contains(&on) {
+            let t = touched(part, &reads, &uses, other_side, base);
+            if !t.is_empty() {
+                causes.push(other);
+                files.extend(t);
+            }
+        }
+    }
+    files.sort();
+    files.dedup();
+    let cause = match causes.as_slice() {
+        [one] => *one,
+        _ => "both",
+    };
+    (cause, files)
+}
+
 /// What the merge broke: every feature that built on ours or theirs and
 /// fails in the merge, caused by the side whose changes reached what it
 /// reads; one that fails only because another the merge broke does is
@@ -434,31 +473,7 @@ fn broken(
                 continue;
             };
             let (built_on, _) = sides(&id);
-            let reads = closure(&[w, bo, bt], &id);
-            let uses: std::collections::BTreeSet<String> = reads
-                .iter()
-                .flat_map(|f| [w, bo, bt].into_iter().flat_map(move |s| s.uses.get(f)))
-                .flatten()
-                .cloned()
-                .collect();
-            // It built on one side: what the other side changed broke it.
-            let mut causes = Vec::new();
-            let mut files = Vec::new();
-            for (on, other, other_side) in [("ours", "theirs", theirs), ("theirs", "ours", ours)] {
-                if built_on.contains(&on) {
-                    let t = touched(part, &reads, &uses, other_side, base);
-                    if !t.is_empty() {
-                        causes.push(other);
-                        files.extend(t);
-                    }
-                }
-            }
-            files.sort();
-            files.dedup();
-            let cause = match causes.as_slice() {
-                [one] => *one,
-                _ => "both",
-            };
+            let (cause, files) = blame(part, &id, &built_on, [w, bo, bt], ours, theirs, base);
             let path = format!("parts/{part}/features/{id}.json");
             let mut concerns = json!({"part": part, "feature": id});
             if let Some(r) = e.details.get("reference") {
@@ -496,6 +511,85 @@ fn broken(
     (broke, already)
 }
 
+/// Whether a feature is a sketch whose stored positions don't hold, on a
+/// side that has it and built it.
+fn stale_on(side: &Side, part: &Id, id: &Id) -> Option<bool> {
+    let r = side.parts.get(part)?.results.get(id)?;
+    Some(r.as_ref().ok()?.sketch()?.stale)
+}
+
+/// The sketches the merge left stale that were current on the sides they
+/// came from, each with the repair that writes its solved positions.
+fn stale(
+    root: &std::path::Path,
+    working: &BTreeMap<Id, Built>,
+    ours: &Side,
+    theirs: &Side,
+    base: &Side,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    let empty = Built::default();
+    for (part, w) in working {
+        for (id, r) in &w.results {
+            let Some(solved) = r.as_ref().ok().and_then(|o| o.sketch()) else {
+                continue;
+            };
+            let on = [
+                ("ours", stale_on(ours, part, id)),
+                ("theirs", stale_on(theirs, part, id)),
+            ];
+            if !solved.stale || on.iter().any(|(_, s)| *s == Some(true)) {
+                continue;
+            }
+            let built_on: Vec<&str> = on
+                .iter()
+                .filter(|(_, s)| *s == Some(false))
+                .map(|(n, _)| *n)
+                .collect();
+            let graphs = [
+                w,
+                ours.parts.get(part).unwrap_or(&empty),
+                theirs.parts.get(part).unwrap_or(&empty),
+            ];
+            let (cause, mut files) = blame(part, id, &built_on, graphs, ours, theirs, base);
+            let path = format!("parts/{part}/features/{id}.json");
+            files.retain(|f| *f != path);
+            files.insert(0, path.clone());
+            let cid = format!("{path}#sketch_stale");
+            let content = crate::doctor::canonical_bytes(
+                &crate::doc::files::Feature::Sketch(solved.sketch.clone()).to_json(),
+            );
+            let repair = crate::doctor::Repair {
+                id: format!("{cid}:solve@{}", crate::doctor::basis(root, &files)),
+                summary: format!("write {path} with its positions solved"),
+                changes: vec![crate::doctor::Change {
+                    path: path.clone(),
+                    content: Some(content),
+                }],
+                params: Vec::new(),
+            };
+            let mut c = conflict(
+                cid,
+                "sketch_stale",
+                files,
+                json!({"part": part, "feature": id}),
+                cause,
+                format!(
+                    "{part}/{id}: the merged positions don't satisfy its constraints, though they did on {}",
+                    if built_on.is_empty() {
+                        "no side".to_owned()
+                    } else {
+                        built_on.join(" and ")
+                    }
+                ),
+            );
+            c["repairs"] = json!([repair.to_json()]);
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// `merge.status`: what the merge in progress leaves to settle.
 pub fn status(session: &mut Session) -> Result<Value> {
     let root = session.root().to_path_buf();
@@ -510,6 +604,7 @@ pub fn status(session: &mut Session) -> Result<Value> {
     let now = built(session)?;
     let (broke, already) = broken(&now, &ours, &theirs, &base);
     conflicts.extend(broke);
+    conflicts.extend(stale(&root, &now, &ours, &theirs, &base));
     conflicts.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     let commit = |c: Option<&String>| json!({ "commit": c });
     Ok(json!({
@@ -841,6 +936,67 @@ pub(crate) mod tests {
         assert_eq!(c[0]["files"], json!(["parts/p/features/s.json"]));
         assert_eq!(c[0]["error"]["code"], "dependency_failed");
         assert_eq!(v["clean"], false);
+    }
+
+    #[test]
+    fn a_sketch_the_merge_left_stale_is_solved_by_a_repair() {
+        let mut m = boxed();
+        squared(&mut m);
+        m.call(
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [
+                {"op": "add", "type": "horizontal", "a": "l1"},
+                {"op": "add", "type": "length", "a": "l1", "value": "10 mm"},
+            ]}),
+        )
+        .unwrap();
+        m.commit("a level square");
+        // Each side moves p2 a way its own constraints allow: each is
+        // current, and the merge takes ours' move with theirs' dimension.
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        m.call(
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [{"op": "set", "id": "d1", "value": "12 mm"}]}),
+        )
+        .unwrap();
+        m.commit("theirs: longer");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        m.call(
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [{"op": "move", "id": "p2", "at": [10, 3]},
+                                                        {"op": "remove", "id": "c1"}]}),
+        )
+        .unwrap();
+        m.commit("ours: p2 up, no longer level");
+        m.merge("theirs");
+        let v = m.call("merge.status", json!({})).unwrap();
+        let c: Vec<&Value> = v["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["kind"] == "sketch_stale")
+            .collect();
+        assert_eq!(c.len(), 1, "{v}");
+        assert_eq!(c[0]["id"], "parts/p/features/s.json#sketch_stale");
+        assert_eq!(c[0]["cause"], "both");
+        let r = &c[0]["repairs"][0];
+        assert!(
+            r["id"]
+                .as_str()
+                .unwrap()
+                .starts_with("parts/p/features/s.json#sketch_stale:solve@")
+        );
+        assert_eq!(r["changes"][0]["path"], "parts/p/features/s.json");
+        // Solved, the file holds: the sketch is current again.
+        let solved: Value =
+            serde_json::from_str(r["changes"][0]["content"].as_str().unwrap()).unwrap();
+        crate::doc::project::write_json(&m.root().join("parts/p/features/s.json"), &solved)
+            .unwrap();
+        m.session.reload().unwrap();
+        let v = m.call("merge.status", json!({})).unwrap();
+        assert_eq!(v["clean"], true, "{v}");
     }
 
     #[test]
