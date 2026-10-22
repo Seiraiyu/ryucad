@@ -138,6 +138,27 @@ impl Project {
         v["result"].clone()
     }
 
+    /// Runs Git in the project, as someone with a fixed identity (CI has
+    /// none).
+    pub fn git(&self, args: &[&str]) {
+        let out = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(&self.root)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    /// The project in a repository of its own, everything committed on
+    /// `main`.
+    pub fn committed(self) -> Project {
+        self.git(&["init", "-q", "-b", "main"]);
+        self.git(&["add", "."]);
+        self.git(&["commit", "-q", "-m", "start"]);
+        self
+    }
+
     /// A part with a box and a cylinder on it.
     pub fn with_part(self) -> Project {
         self.ok(&["part", "create", "p"]);
