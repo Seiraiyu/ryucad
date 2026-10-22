@@ -15,6 +15,14 @@ fn gpu() -> bool {
     common::gpu().is_some()
 }
 
+/// Held by each test for its whole run: lavapipe crashes (SIGSEGV) when
+/// several windows draw at once (in the devcontainer, and on the CI
+/// runners from 2026-10-22).
+fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ONE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn window(p: &Project) -> Harness<'static, App> {
     let root = p.root.clone();
     Harness::builder()
@@ -80,6 +88,7 @@ fn loaded(app: &App) -> bool {
 
 #[test]
 fn the_tree_lists_features_and_frames_a_chosen_one() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -120,6 +129,7 @@ fn the_tree_lists_features_and_frames_a_chosen_one() {
 
 #[test]
 fn a_click_selects_and_agents_see_it() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -167,6 +177,7 @@ fn a_click_selects_and_agents_see_it() {
 
 #[test]
 fn orbiting_from_the_background_keeps_the_model_in_view() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -234,6 +245,7 @@ fn orbiting_from_the_background_keeps_the_model_in_view() {
 
 #[test]
 fn a_trackpad_pans_orbits_and_pinches() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -292,6 +304,7 @@ fn a_trackpad_pans_orbits_and_pinches() {
 
 #[test]
 fn the_first_view_frames_the_whole_model() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -343,6 +356,7 @@ fn the_first_view_frames_the_whole_model() {
 
 #[test]
 fn an_agents_highlight_shows_its_label() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -378,6 +392,7 @@ fn an_agents_highlight_shows_its_label() {
 
 #[test]
 fn a_highlight_label_stays_inside_the_view() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -422,6 +437,7 @@ fn a_highlight_label_stays_inside_the_view() {
 
 #[test]
 fn the_history_tab_keeps_the_view_its_size() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -440,6 +456,7 @@ fn the_history_tab_keeps_the_view_its_size() {
 
 #[test]
 fn the_window_follows_an_agent_until_the_human_navigates() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -502,6 +519,7 @@ fn the_window_follows_an_agent_until_the_human_navigates() {
 
 #[test]
 fn a_parameter_is_edited_in_the_property_panel() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -529,6 +547,7 @@ fn a_parameter_is_edited_in_the_property_panel() {
 
 #[test]
 fn the_activity_tab_undoes_and_ctrl_z_does_too() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -597,6 +616,7 @@ fn the_activity_tab_undoes_and_ctrl_z_does_too() {
 
 #[test]
 fn preferences_change_the_window_whoever_sets_them() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -637,6 +657,7 @@ fn preferences_change_the_window_whoever_sets_them() {
 
 #[test]
 fn a_damaged_project_is_repaired_then_opened() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -673,6 +694,7 @@ fn a_damaged_project_is_repaired_then_opened() {
 
 #[test]
 fn the_start_window_reopens_recent_projects_and_creates_new_ones() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -737,6 +759,7 @@ fn the_start_window_reopens_recent_projects_and_creates_new_ones() {
 
 #[test]
 fn thumbnails_wait_until_the_start_window_shows() {
+    let _one = one_at_a_time();
     use ryucad_app::ui::start::Start;
     let p = Project::named("lazy").with_part();
     let daemon = ryucad(); // and the shared config folder
@@ -751,6 +774,7 @@ fn thumbnails_wait_until_the_start_window_shows() {
 
 #[test]
 fn ctrl_w_closes_the_project_and_menus_show_their_shortcuts() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -770,6 +794,7 @@ fn ctrl_w_closes_the_project_and_menus_show_their_shortcuts() {
 
 #[test]
 fn dialogs_open_clear_of_the_menus() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -793,6 +818,7 @@ fn dialogs_open_clear_of_the_menus() {
 
 #[test]
 fn a_typed_folder_path_opens_without_the_os_dialog() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -817,6 +843,7 @@ fn a_typed_folder_path_opens_without_the_os_dialog() {
 
 #[test]
 fn the_viewport_shows_the_colours_it_draws() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -865,6 +892,7 @@ fn on_screen(h: &Harness<'static, App>, p: [f64; 3]) -> egui::Pos2 {
 
 #[test]
 fn a_click_on_a_sketch_line_selects_it() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -895,6 +923,7 @@ fn a_click_on_a_sketch_line_selects_it() {
 
 #[test]
 fn a_dimension_label_opens_its_value() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -931,6 +960,7 @@ fn a_dimension_label_opens_its_value() {
 
 #[test]
 fn the_tree_shows_sketches_and_what_features_read() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
@@ -966,6 +996,7 @@ fn the_tree_shows_sketches_and_what_features_read() {
 
 #[test]
 fn a_parameter_is_edited_in_its_panel() {
+    let _one = one_at_a_time();
     if !gpu() {
         return;
     }
