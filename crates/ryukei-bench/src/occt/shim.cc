@@ -9,7 +9,10 @@
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_NurbsConvert.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepFilletAPI_MakeChamfer.hxx>
+#include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepGProp.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -21,10 +24,12 @@
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <Standard_Failure.hxx>
 #include <GProp_GProps.hxx>
 #include <Poly_Triangulation.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
@@ -39,6 +44,7 @@
 
 #include <optional>
 #include <stdexcept>
+#include <string>
 
 namespace ryukei_occt {
 
@@ -278,6 +284,110 @@ double distance(const Shape &s, double x, double y, double z) {
   TopExp_Explorer shell(s.shape, TopAbs_SHELL);
   BRepExtrema_DistShapeShape d(shell.More() ? shell.Current() : s.shape, v);
   return d.Value();
+}
+
+// The edge passing nearest (x, y, z), sampled at 17 points.
+static TopoDS_Edge edge_at(const TopoDS_Shape &s, double x, double y,
+                           double z) {
+  TopoDS_Edge best;
+  double least = 1e300;
+  for (TopExp_Explorer ex(s, TopAbs_EDGE); ex.More(); ex.Next()) {
+    const TopoDS_Edge &e = TopoDS::Edge(ex.Current());
+    if (BRep_Tool::Degenerated(e)) {
+      continue;
+    }
+    BRepAdaptor_Curve c(e);
+    double t0 = c.FirstParameter(), t1 = c.LastParameter();
+    for (int k = 0; k <= 16; k++) {
+      double d = c.Value(t0 + (t1 - t0) * k / 16.0).Distance(gp_Pnt(x, y, z));
+      if (d < least) {
+        least = d;
+        best = e;
+      }
+    }
+  }
+  if (best.IsNull()) {
+    throw std::runtime_error("no edge");
+  }
+  return best;
+}
+
+// Of the faces either side of `e`, the one nearest (x, y, z).
+static TopoDS_Face face_at(const TopoDS_Shape &s, const TopoDS_Edge &e,
+                           double x, double y, double z) {
+  TopTools_IndexedDataMapOfShapeListOfShape map;
+  TopExp::MapShapesAndAncestors(s, TopAbs_EDGE, TopAbs_FACE, map);
+  TopoDS_Face best;
+  double least = 1e300;
+  TopoDS_Vertex v = BRepBuilderAPI_MakeVertex(gp_Pnt(x, y, z));
+  for (const TopoDS_Shape &f : map.FindFromKey(e)) {
+    BRepExtrema_DistShapeShape d(v, f);
+    if (d.IsDone() && d.Value() < least) {
+      least = d.Value();
+      best = TopoDS::Face(f);
+    }
+  }
+  if (best.IsNull()) {
+    throw std::runtime_error("no face");
+  }
+  return best;
+}
+
+// edges: a point on or near each edge (x, y, z flattened); radii: one
+// each.
+std::unique_ptr<Shape> fillet(const Shape &s, rust::Slice<const double> edges,
+                              rust::Slice<const double> radii) {
+  try {
+    BRepFilletAPI_MakeFillet mk(s.shape);
+    for (size_t i = 0; i < radii.size(); i++) {
+      mk.Add(radii[i], edge_at(s.shape, edges[3 * i], edges[3 * i + 1],
+                               edges[3 * i + 2]));
+    }
+    mk.Build();
+    if (!mk.IsDone()) {
+      throw std::runtime_error("BRepFilletAPI_MakeFillet failed");
+    }
+    return wrap(mk.Shape());
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(std::string("BRepFilletAPI_MakeFillet: ") +
+                             e.GetMessageString());
+  }
+}
+
+// modes: 0 equal (sizes[2i] each way), 1 two distances (sizes[2i] on the
+// face nearest faces[3i..], sizes[2i + 1] on the other), 2 distance and
+// angle in radians (from the face nearest faces[3i..]).
+std::unique_ptr<Shape> chamfer(const Shape &s, rust::Slice<const double> edges,
+                               rust::Slice<const uint32_t> modes,
+                               rust::Slice<const double> sizes,
+                               rust::Slice<const double> faces) {
+  try {
+    BRepFilletAPI_MakeChamfer mk(s.shape);
+    for (size_t i = 0; i < modes.size(); i++) {
+      TopoDS_Edge e =
+          edge_at(s.shape, edges[3 * i], edges[3 * i + 1], edges[3 * i + 2]);
+      double a = sizes[2 * i], b = sizes[2 * i + 1];
+      if (modes[i] == 0) {
+        mk.Add(a, e);
+        continue;
+      }
+      TopoDS_Face f =
+          face_at(s.shape, e, faces[3 * i], faces[3 * i + 1], faces[3 * i + 2]);
+      if (modes[i] == 1) {
+        mk.Add(a, b, e, f);
+      } else {
+        mk.AddDA(a, b, e, f);
+      }
+    }
+    mk.Build();
+    if (!mk.IsDone()) {
+      throw std::runtime_error("BRepFilletAPI_MakeChamfer failed");
+    }
+    return wrap(mk.Shape());
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(std::string("BRepFilletAPI_MakeChamfer: ") +
+                             e.GetMessageString());
+  }
 }
 
 } // namespace ryukei_occt

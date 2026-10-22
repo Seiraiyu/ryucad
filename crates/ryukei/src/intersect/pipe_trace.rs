@@ -22,6 +22,7 @@ use super::Failure;
 use super::implicit::Implicit;
 use super::pipe::{Cell, Field, Line, signed};
 use super::ss_trace::{Topology, Traced};
+use crate::geom::sheet::Sheet;
 use crate::geom::{Box3, Pipe, Point3, Surface};
 use crate::interval::Interval;
 use crate::tol::LINEAR_RESOLUTION;
@@ -176,7 +177,10 @@ impl<'a> Tracer<'a> {
             })
             .collect();
         Self {
-            field: Field { pipe, imp },
+            field: Field {
+                sheet: Sheet::Pipe(pipe),
+                imp,
+            },
             region: region.grow(LINEAR_RESOLUTION),
             s_wrap: periodic.then(|| (s_cuts[0], s_cuts[s_cuts.len() - 1])),
             t_wrap: (start, start + TAU),
@@ -218,7 +222,7 @@ impl<'a> Tracer<'a> {
 
     /// Whether the pipe over a cell may reach the region.
     fn reaches(&self, cell: Cell) -> bool {
-        let Some([p, _]) = self.field.pipe.jet_box(cell) else {
+        let Some(p) = self.field.sheet.jet_box(cell) else {
             return true;
         };
         let b = Box3::new(

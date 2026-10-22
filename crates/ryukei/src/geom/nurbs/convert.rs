@@ -56,7 +56,7 @@ const H: f64 = FRAC_1_SQRT_2;
 /// The eight control points of a full turn as `(cos, sin, weight)`
 /// coefficients, in the periodic knot vector's order: the corner before
 /// angle 0 comes first, then the point at angle 0.
-const TURN: [(f64, f64, f64); 8] = [
+pub(crate) const TURN: [(f64, f64, f64); 8] = [
     (1.0, -1.0, H),
     (1.0, 0.0, 1.0),
     (1.0, 1.0, H),
@@ -69,7 +69,7 @@ const TURN: [(f64, f64, f64); 8] = [
 
 /// The knots of a full turn: a periodic quadratic with a double knot at
 /// every quarter.
-fn turn_knots() -> Result<KnotVector, Error> {
+pub(crate) fn turn_knots() -> Result<KnotVector, Error> {
     let quarters = [0.0, FRAC_PI_2, PI, PI + FRAC_PI_2, TAU];
     KnotVector::periodic(2, &quarters, &[2; 5])
 }

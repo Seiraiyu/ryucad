@@ -10,7 +10,7 @@
 //! --test corner_props`).
 
 use ryukei::blend::{BlendKind, Chamfer, EdgeBlend, blend};
-use ryukei::check::check;
+use ryukei::check::{Fault, check, check_intersections};
 use ryukei::geom::{Curve, Rigid, Surface, Vector3};
 use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::name::OpKey;
@@ -121,7 +121,7 @@ fn most(b: &Body, e: EdgeId, size: f64) -> f64 {
 )]
 fn corners_of_random_bodies() {
     let mut g = Lcg::new(0x636f_726e_6572);
-    let (mut built, mut overflow, mut unsupported, mut other) = (0, 0, 0, 0);
+    let (mut built, mut overflow, mut unsupported, mut other, mut unchecked) = (0, 0, 0, 0, 0);
     for case in 0..96u128 {
         let (b, small) = body(&mut g);
         let corners: Vec<[EdgeId; 3]> = b.vertices().filter_map(|v| corner_at(&b, v)).collect();
@@ -162,6 +162,21 @@ fn corners_of_random_bodies() {
             Ok((r, _)) => {
                 built += 1;
                 assert_eq!(check(&r), [], "case {case}");
+                // Faces never cross; a pair the check can't decide (two
+                // fillets of different sizes trimmed against each other,
+                // whose surfaces' intersection has a node where their
+                // rails cross) is rare.
+                let faults = check_intersections(&r);
+                assert!(
+                    faults
+                        .iter()
+                        .all(|f| matches!(f, Fault::CannotCheck { .. })),
+                    "case {case}: {faults:?}"
+                );
+                if !faults.is_empty() {
+                    unchecked += 1;
+                    eprintln!("case {case}: {faults:?}");
+                }
                 let (before, after) = (volume(&b), volume(&r));
                 let bound: f64 = picked
                     .iter()
@@ -197,8 +212,11 @@ fn corners_of_random_bodies() {
             Err(e) => panic!("case {case}: {e:?}"),
         }
     }
-    eprintln!("built {built}, overflowed {overflow}, unsupported {unsupported}, refused {other}");
+    eprintln!(
+        "built {built}, overflowed {overflow}, unsupported {unsupported}, refused {other}, unchecked {unchecked}"
+    );
     assert!(built >= 64, "only {built} built");
+    assert!(unchecked <= 1, "{unchecked} not checked");
     assert!(
         unsupported <= 8 && other <= 6,
         "{unsupported} {other} refused"

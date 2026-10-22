@@ -2,7 +2,7 @@
 //! checker, mesh without faults, and enclose the volume and area Pappus's
 //! theorems give: `π r² L` and `2 π r L` for a spine of length `L`.
 
-use ryukei::check::{Fault, check, check_intersections};
+use ryukei::check::{check, check_intersections};
 use ryukei::euler::{Corner, kvr, mef, mvfs, mvr, set_surface};
 use ryukei::geom::{
     Circle, Curve, Cylinder, Ellipse, Frame, KnotVector, NurbsCurve, Pipe, Plane, Point3, Surface,
@@ -34,11 +34,7 @@ fn length(c: &Curve) -> f64 {
 /// Pappus's.
 fn pappus(b: &Body, spine: &Curve) {
     assert_eq!(check(b), []);
-    // Pipe faces join the self-intersection check with booleans (plan
-    // 6.D): until then a pipe face and its neighbours can't be checked.
-    for fault in check_intersections(b) {
-        assert!(matches!(fault, Fault::CannotCheck { .. }), "{fault:?}");
-    }
+    assert_eq!(check_intersections(b), []);
     let m = tessellate(b, &MeshParams::new(2e-4, 0.2)).unwrap();
     assert!(m.faults.is_empty(), "{:?}", m.faults);
     check_mesh(b, &m).unwrap();

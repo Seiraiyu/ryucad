@@ -1242,6 +1242,89 @@ fn corners_section(golden: &mut Golden) {
     }
 }
 
+fn blend_booleans_section(golden: &mut Golden) {
+    use ryukei::blend::{BlendKind, EdgeBlend, blend};
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::check::check_intersections;
+    use ryukei::geom::Pipe;
+    use ryukei::intersect::beside;
+    use std::sync::Arc;
+    let mut s = golden.section("blend_booleans");
+    let axis = Vector3::new(1.0, -2.0, 0.5).normalize().unwrap();
+    let far = Rigid::translation(Vector3::new(12.5, -3.25, 100.0))
+        .then_after(&Rigid::rotation(axis, 2.5));
+    let key = OpKey(0x626f_6f6c);
+    // A cylinder's rounded rim halved by a block and drilled by a rod.
+    for place in [Rigid::IDENTITY, far] {
+        let c = primitive::cylinder(key, 1.0, 1.0, &place).unwrap().0;
+        let rim = c.edges().next().unwrap();
+        let blends = [EdgeBlend {
+            edge: c.edge(rim).unwrap().name,
+            kind: BlendKind::Fillet { radius: 0.2 },
+        }];
+        let (r, _) = blend(key, &c, &blends).unwrap();
+        let half = Rigid::translation(Vector3::new(0.0, -1.5, -1.0)).then_after(&place);
+        let block = primitive::block(OpKey(2), 3.0, 3.0, 3.0, &half).unwrap().0;
+        let down = Rigid::translation(Vector3::new(0.9, 0.0, -1.0)).then_after(&place);
+        let rod = primitive::cylinder(OpKey(3), 0.05, 3.0, &down).unwrap().0;
+        for tool in [&block, &rod] {
+            let t = Tool {
+                key: ToolKey(1),
+                body: tool,
+                place: Rigid::IDENTITY,
+            };
+            match boolean(key, BooleanOp::Subtract, &r, &[t]) {
+                Ok((b, journal)) => {
+                    s.str(&b.dump());
+                    s.u64(journal.events().len() as u64);
+                    s.u64(check_intersections(&b).len() as u64);
+                    hash_mesh(
+                        &mut s,
+                        &tessellate(&b, &MeshParams::new(2e-2, 0.5)).unwrap(),
+                    );
+                }
+                Err(e) => s.str(&format!("{e:?}")),
+            }
+        }
+    }
+    // An ellipse rolling round a cylinder: its NURBS form, and its side
+    // of the cylinder and of a plane across it.
+    let (sn, cs) = (0.5, 0.75f64.sqrt());
+    let tilted = Frame::new(
+        Point3::new(0.0, 0.0, 1.0),
+        Vector3::new(0.0, -sn, cs),
+        Vector3::new(0.0, cs, sn),
+    )
+    .unwrap();
+    let ellipse = Curve::Ellipse(Ellipse::new(tilted, 3.25 / cs, 3.25).unwrap());
+    let anchor = Surface::Cylinder(Cylinder::new(Frame::WORLD, 3.0).unwrap());
+    let pipe = Pipe::new(ellipse, 0.25, anchor.clone()).unwrap();
+    let (n, _, bound) = pipe.to_nurbs_within([0.5, 2.5], 1e-6).unwrap();
+    s.f64(bound);
+    for p in n.control_points() {
+        for c in p.to_vector().to_array() {
+            s.f64(c);
+        }
+    }
+    let surface = Surface::Pipe(Arc::new(pipe));
+    let rail = Curve2::Line2(Line2::new(Point2::new(0.0, 0.0), Vector2::new(1.0, 0.0)).unwrap());
+    let across = Surface::Plane(Plane::new(
+        Frame::new(
+            Point3::new(0.0, 0.0, 1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        )
+        .unwrap(),
+    ));
+    for other in [&anchor, &across] {
+        let cell = [[0.5, 2.5], [-0.5, 0.5]];
+        s.str(&format!(
+            "{:?}",
+            beside(&surface, other, cell, &[(&rail, [0.0, 3.0])], 1e-3)
+        ));
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -1268,5 +1351,6 @@ fn determinism() {
     pipes_section(&mut golden);
     blends_section(&mut golden);
     corners_section(&mut golden);
+    blend_booleans_section(&mut golden);
     golden.finish();
 }

@@ -13,11 +13,13 @@
 //! in the first face's parameter plane ([`crossings`]), and the pieces
 //! inside or along the other face are the rims of the overlap.
 //!
-//! A face on a surface that is not analytic may take part only if it is
+//! A pipe face meets an analytic face as an analytic one does
+//! ([`surface_surface`] and [`curve_surface`] take pipes). Any other face
+//! on a surface that is not analytic may take part only if it is
 //! certified apart from the other face: the analytic surface's implicit
 //! form must have one certified sign on every Bézier patch of the other
-//! surface inside the region. Otherwise the pair is
-//! [`Failure::Unsupported`].
+//! surface inside the region. Otherwise (two pipes among them) the pair
+//! is [`Failure::Unsupported`].
 
 use super::Failure;
 use super::cs::{CurveHit, curve_surface};
@@ -106,9 +108,11 @@ pub fn face_face(a: (&Body, FaceId), b: (&Body, FaceId)) -> Result<FaceMeet, Fai
     let Some(region) = overlap(&ba, &bb, slack) else {
         return Ok(FaceMeet::apart());
     };
-    let (ia, ib) = (Implicit::of(sa), Implicit::of(sb));
-    match (ia, ib) {
+    let pipe = |s: &Surface| matches!(s, Surface::Pipe(_));
+    match (Implicit::of(sa), Implicit::of(sb)) {
         (Some(_), Some(_)) => {}
+        (Some(_), None) if pipe(sb) => {}
+        (None, Some(_)) if pipe(sa) => {}
         (Some(i), None) => return certified_apart(&i, b, &region),
         (None, Some(i)) => return certified_apart(&i, a, &region),
         (None, None) => return Err(Failure::Unsupported),
@@ -117,12 +121,26 @@ pub fn face_face(a: (&Body, FaceId), b: (&Body, FaceId)) -> Result<FaceMeet, Fai
         SurfaceHit::Coincident { same } => return coincident(faces, [sa, sb], same),
         SurfaceHit::Meet { branches, points } => (branches, points),
     };
-    // Where each face's edges meet the other's surface.
+    // Where each face's edges meet the other's surface. An edge both faces
+    // use lies on both surfaces (the body is sound): only its ends cut.
     let mut cuts: Vec<Point3> = Vec::new();
+    let shared: Vec<EdgeId> = if core::ptr::eq(a.0, b.0) {
+        let theirs = edges(b);
+        edges(a)
+            .into_iter()
+            .filter(|e| theirs.contains(e))
+            .collect()
+    } else {
+        Vec::new()
+    };
     for (face, other) in [(a, sb), (b, sa)] {
         for e in edges(face) {
             let edge = &face.0.edges[e];
             let curve = &face.0.curves[edge.curve];
+            if shared.contains(&e) {
+                cuts.extend([edge.start, edge.end].map(|v| face.0.vertices[v].point));
+                continue;
+            }
             for hit in curve_surface(curve, edge.interval, other, edge.tolerance.get())? {
                 match hit {
                     CurveHit::Point { point, .. } => cuts.push(point),

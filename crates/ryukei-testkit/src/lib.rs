@@ -9,7 +9,9 @@
 //! - [`sweep_bytes`]: sweeps from bytes, for fuzzing and its regressions.
 //! - [`boolean_bytes`]: booleans from bytes, for fuzzing and its
 //!   regressions.
+//! - [`blend_bytes`]: blends from bytes, for fuzzing and its regressions.
 
+pub mod blend_bytes;
 pub mod boolean_bytes;
 pub mod euler_script;
 pub mod exact;

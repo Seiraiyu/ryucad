@@ -1,6 +1,6 @@
 // A small C++ shim over OCCT for the comparison benchmarks: build the
-// same primitives ryukei builds, sweep profiles, cut them, mesh them with
-// BRepMesh, and measure.
+// same primitives ryukei builds, sweep profiles, cut them, blend their
+// edges, mesh them with BRepMesh, and measure.
 #pragma once
 
 #include "rust/cxx.h"
@@ -44,5 +44,11 @@ OcctMesh mesh(const Shape &s, double chord, double angle, bool parallel);
 double volume(const Shape &s);
 double area(const Shape &s);
 double distance(const Shape &s, double x, double y, double z);
+std::unique_ptr<Shape> fillet(const Shape &s, rust::Slice<const double> edges,
+                              rust::Slice<const double> radii);
+std::unique_ptr<Shape> chamfer(const Shape &s, rust::Slice<const double> edges,
+                               rust::Slice<const uint32_t> modes,
+                               rust::Slice<const double> sizes,
+                               rust::Slice<const double> faces);
 
 } // namespace ryukei_occt

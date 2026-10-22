@@ -53,15 +53,20 @@ pub enum CurveHit {
 /// certified within it of the surface touches it, and hits closer than it
 /// to each other are one.
 ///
-/// Fails with `Unsupported` for a surface with no implicit form, and
-/// `Uncertain` where rounding leaves a stretch that is neither certified
-/// apart from the surface nor within the tolerance of it.
+/// A pipe is met by [`super::curve_pipe`], by the same rules.
+///
+/// Fails with `Unsupported` for any other surface with no implicit form,
+/// and `Uncertain` where rounding leaves a stretch that is neither
+/// certified apart from the surface nor within the tolerance of it.
 pub fn curve_surface(
     curve: &Curve,
     [t0, t1]: [f64; 2],
     surface: &Surface,
     tolerance: f64,
 ) -> Result<Vec<CurveHit>, Failure> {
+    if let Surface::Pipe(_) = surface {
+        return super::pipe_cs::curve_pipe(curve, [t0, t1], surface, tolerance);
+    }
     let imp = Implicit::of(surface).ok_or(Failure::Unsupported)?;
     let tolerance = tolerance.max(LINEAR_RESOLUTION);
     let chain = Chain3::new(curve, t0, t1);

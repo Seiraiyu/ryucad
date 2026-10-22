@@ -15,12 +15,10 @@
 
 use super::Failure;
 use super::implicit::Implicit;
+use crate::geom::Point3;
 use crate::geom::jet::Jet;
-use crate::geom::{Curve2, Pipe, Point3, Surface};
+use crate::geom::sheet::Sheet;
 use crate::interval::Interval;
-use crate::math;
-use crate::predicates::Sign;
-use core::f64::consts::TAU;
 
 /// A box of the pipe's parameter plane: `[s range, θ range]`.
 pub type Cell = [[f64; 2]; 2];
@@ -81,35 +79,30 @@ pub(crate) fn signed(x: Interval) -> bool {
     x.lo() > 0.0 || x.hi() < 0.0
 }
 
-/// A pipe and an analytic surface's implicit form.
+/// A surface written over jets (a pipe, or an analytic surface) and an
+/// analytic surface's implicit form.
 pub(crate) struct Field<'a> {
-    pub(crate) pipe: &'a Pipe,
+    pub(crate) sheet: Sheet<'a>,
     pub(crate) imp: &'a Implicit,
 }
 
 impl Field<'_> {
-    /// The interval jets of `F` over a cell; `None` where the pipe's frame
+    /// The interval jets of `F` over a cell; `None` where a pipe's frame
     /// can't be certified over it.
     fn jets(&self, cell: Cell) -> Option<Jet<Interval>> {
-        let [p, _] = self.pipe.jet_box(cell)?;
+        let p = self.sheet.jet_box(cell)?;
         Some(self.imp.over(p))
     }
 
     /// `F` and its derivatives at a point, in floating point: for Newton's
     /// method, never for a decision.
     pub(crate) fn at(&self, s: f64, t: f64) -> Jet<f64> {
-        let d = self.pipe.spine().jet3(s).map(|v| v.to_array());
-        let (sin, cos) = math::sin_cos(t);
-        let [p, _] = self
-            .pipe
-            .jets(d, cos, sin)
-            .expect("a certified pipe has a frame on its spine");
-        self.imp.over(p)
+        self.imp.over(self.sheet.jets_at(s, t))
     }
 
-    /// The pipe's point at `(s, θ)`.
+    /// The surface's point at `(s, θ)`.
     pub(crate) fn point(&self, s: f64, t: f64) -> Point3 {
-        self.pipe.point(s, t)
+        self.sheet.point(s, t)
     }
 
     /// A certified enclosure of `F` at a point.
@@ -225,127 +218,6 @@ impl Field<'_> {
     }
 }
 
-/// The most cells [`pipe_beside`] may examine.
-const BESIDE_CELLS: usize = 1 << 16;
-
-/// The deepest [`pipe_beside`] halves a cell, one parameter at a time.
-const BESIDE_DEPTH: u32 = 64;
-
-/// Which side of an analytic surface `other` a pipe face lies on, away
-/// from a curve where the two touch (a fillet's rail, where it meets its
-/// support tangentially, so that no intersection can be traced there).
-///
-/// `cell` is the face's box in the pipe's parameter plane, and `rail` the
-/// touching curve's pcurve on the pipe over its parameter range. Every
-/// part of the box lying wholly within `strip` of the rail is left out;
-/// on the rest, `F = f ∘ P` must have one certified sign. A part is
-/// within the strip when the pcurve's pieces (256 of them, by their
-/// boxes) whose every `θ` lies within `strip / r` of every `θ` of the
-/// part cover its `s` range between them: at every `s` of the part the
-/// rail then passes (each piece is continuous), at an angle the part's
-/// points are within `r |Δθ| ≤ strip` of. The parts are halved along
-/// whichever parameter adds more to `F`'s enclosure, so the strip needs
-/// narrow parts across it only.
-///
-/// `Ok(Some(sign))` is that sign (`Positive` on the side `other`'s
-/// implicit form is positive: outside a cylinder, sphere or torus), or
-/// `Zero` when the whole box is within the strip; `Ok(None)` when parts
-/// of both signs are certified, so the pipe crosses `other` away from the
-/// strip. Fails with `Unsupported` unless `pipe` is a pipe and `other`
-/// analytic, and `Uncertain` where a part can't be signed.
-pub fn pipe_beside(
-    pipe: &Surface,
-    other: &Surface,
-    cell: Cell,
-    (rail, [r0, r1]): (&Curve2, [f64; 2]),
-    strip: f64,
-) -> Result<Option<Sign>, Failure> {
-    let (Surface::Pipe(p), Some(imp)) = (pipe, Implicit::of(other)) else {
-        return Err(Failure::Unsupported);
-    };
-    let field = Field { pipe: p, imp: &imp };
-    let pieces: Vec<[[f64; 2]; 2]> = (0..RAIL_PIECES)
-        .map(|i| {
-            let at = |k: u32| r0 + (r1 - r0) * f64::from(k) / f64::from(RAIL_PIECES);
-            let b = rail.bounds([at(i), at(i + 1)]);
-            [[b.min().x, b.max().x], [b.min().y, b.max().y]]
-        })
-        .collect();
-    let w = strip / p.radius();
-    let within = |[[s0, s1], [t0, t1]]: Cell| {
-        // The pieces whose every angle is within w of the part's (a whole
-        // turn either way too: pcurves unwrap across the seam), and
-        // whether their `s` ranges cover the part's between them.
-        let mut runs: Vec<[f64; 2]> = pieces
-            .iter()
-            .filter(|&&[ps, pt]| {
-                ps[1] >= s0
-                    && ps[0] <= s1
-                    && [-TAU, 0.0, TAU]
-                        .iter()
-                        .any(|&k| pt[1] - w <= t0 + k && t1 + k <= pt[0] + w)
-            })
-            .map(|&[ps, _]| ps)
-            .collect();
-        runs.sort_by(|a, b| a[0].total_cmp(&b[0]));
-        let mut reach = s0;
-        for [a, b] in runs {
-            if a > reach {
-                break;
-            }
-            reach = reach.max(b);
-        }
-        reach >= s1
-    };
-    // Breadth first, so that where the pipe crosses `other`, both signs
-    // turn up at coarse parts, before the parts along the crossing (which
-    // never sign) use up the budget.
-    let mut signs = [false; 2];
-    let mut budget = BESIDE_CELLS;
-    let mut queue = std::collections::VecDeque::from([(cell, 0u32)]);
-    while let Some((c, depth)) = queue.pop_front() {
-        budget = budget.checked_sub(1).ok_or(Failure::Uncertain)?;
-        if within(c) {
-            continue;
-        }
-        let e = field.enclose(c);
-        if let Some(e) = e
-            && signed(e.v)
-        {
-            signs[usize::from(e.v.lo() > 0.0)] = true;
-            if signs == [true, true] {
-                return Ok(None);
-            }
-            continue;
-        }
-        if depth == BESIDE_DEPTH {
-            return Err(Failure::Uncertain);
-        }
-        let [[s0, s1], [t0, t1]] = c;
-        let along_s = match e {
-            Some(e) => e.d[0].mag() * (s1 - s0) >= e.d[1].mag() * (t1 - t0),
-            None => true,
-        };
-        if along_s {
-            let m = (s0 + s1) / 2.0;
-            queue.push_back(([[s0, m], [t0, t1]], depth + 1));
-            queue.push_back(([[m, s1], [t0, t1]], depth + 1));
-        } else {
-            let m = (t0 + t1) / 2.0;
-            queue.push_back(([[s0, s1], [t0, m]], depth + 1));
-            queue.push_back(([[s0, s1], [m, t1]], depth + 1));
-        }
-    }
-    Ok(Some(match signs {
-        [false, true] => Sign::Positive,
-        [true, false] => Sign::Negative,
-        _ => Sign::Zero,
-    }))
-}
-
-/// How many pieces a rail's pcurve is cut into for [`pipe_beside`].
-const RAIL_PIECES: u32 = 256;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,7 +245,7 @@ mod tests {
             for s in surfaces() {
                 let imp = Implicit::of(&s).unwrap();
                 let f = Field {
-                    pipe: &pipe,
+                    sheet: Sheet::Pipe(&pipe),
                     imp: &imp,
                 };
                 let [d0, d1] = pipe.spine().domain();
@@ -401,7 +273,7 @@ mod tests {
         for s in surfaces() {
             let imp = Implicit::of(&s).unwrap();
             let f = Field {
-                pipe: &pipe,
+                sheet: Sheet::Pipe(&pipe),
                 imp: &imp,
             };
             for cell in [
@@ -430,49 +302,6 @@ mod tests {
     }
 
     #[test]
-    fn apart_beside_a_rail() {
-        // The tube on the plane z = 0 touches it along the spine's shadow,
-        // the line θ = 0: the rest of the tube is above it.
-        let pipe = on_plane();
-        let rail = crate::geom::Curve2::Line2(
-            crate::geom::Line2::new(
-                crate::geom::Point2::new(0.0, 0.0),
-                crate::geom::Vector2::new(1.0, 0.0),
-            )
-            .unwrap(),
-        );
-        let ps = Surface::Pipe(std::sync::Arc::new(pipe));
-        let plane = Surface::Plane(Plane::new(Frame::WORLD));
-        let whole = [[0.0, 2.0], [-PI, PI]];
-        assert_eq!(
-            pipe_beside(&ps, &plane, whole, (&rail, [-0.1, 2.1]), 1e-4),
-            Ok(Some(Sign::Positive))
-        );
-        // A plane a little above cuts the tube outside the strip.
-        let higher = Surface::Plane(Plane::new(
-            Frame::new(
-                Point3::new(0.0, 0.0, 0.01),
-                Vector3::new(0.0, 0.0, 1.0),
-                Vector3::new(1.0, 0.0, 0.0),
-            )
-            .unwrap(),
-        ));
-        assert_eq!(
-            pipe_beside(&ps, &higher, whole, (&rail, [-0.1, 2.1]), 1e-4),
-            Ok(None)
-        );
-        // With no strip to leave out, the touch can't be signed.
-        assert_eq!(
-            pipe_beside(&ps, &plane, whole, (&rail, [-0.1, 2.1]), 0.0),
-            Err(Failure::Uncertain)
-        );
-        assert_eq!(
-            pipe_beside(&plane, &ps, whole, (&rail, [-0.1, 2.1]), 1e-4),
-            Err(Failure::Unsupported)
-        );
-    }
-
-    #[test]
     fn roots_along_lines() {
         // The plane x = 1.5 across the pipe on the plane: along each line
         // of constant θ there is one root, where the pipe's point has
@@ -488,7 +317,7 @@ mod tests {
         ));
         let imp = Implicit::of(&plane).unwrap();
         let f = Field {
-            pipe: &pipe,
+            sheet: Sheet::Pipe(&pipe),
             imp: &imp,
         };
         for t in [-3.0, -1.0, 0.1, 0.7, 2.9] {

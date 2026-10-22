@@ -7,8 +7,10 @@
 //! [`Failure::Uncertain`], never guessed. The analytic surfaces (plane,
 //! cylinder, cone, sphere, torus) are intersected with each other, and a
 //! pipe with any of them ([`pipe_surface`]); a surface with no implicit
-//! form is otherwise [`Failure::Unsupported`].
+//! form is otherwise [`Failure::Unsupported`]. Faces that touch along a
+//! curve are certified apart beside it instead ([`beside`]).
 
+mod beside;
 pub(crate) mod broad;
 pub(crate) mod coincide;
 mod cs;
@@ -24,13 +26,15 @@ mod ss;
 mod ss_exact;
 mod ss_trace;
 
+pub use beside::beside;
+pub(crate) use beside::face_beside;
 pub(crate) use coincide::coincident;
 pub use cs::{CurveHit, Side, curve_surface};
 pub use face::{Contact, FaceMeet, Rim, Stretch, face_box, face_face};
 pub(crate) use face::{shifted, shifts};
 pub(crate) use fit::{fit_along, fit_on, fit_pcurve, fit_pcurve_by};
 pub use inface::{Place, point_in_face};
-pub use pipe::{Cell, pipe_beside};
+pub use pipe::Cell;
 pub use pipe_cs::curve_pipe;
 pub(crate) use solid::point_in_faces;
 pub use solid::{Inclusion, point_in_body};

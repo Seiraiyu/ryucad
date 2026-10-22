@@ -37,6 +37,33 @@ pub enum Primitive {
     },
 }
 
+/// An edge to blend, picked by a point on it (each kernel finds its own
+/// edge passing nearest, sampled at 17 points), and how.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BenchBlend {
+    pub at: [f64; 3],
+    pub kind: BenchKind,
+}
+
+/// A fillet, or a chamfer as setbacks from the edge along its faces; a
+/// face is picked by a point nearer it than the edge's other face.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BenchKind {
+    Fillet(f64),
+    Equal(f64),
+    Distances {
+        first: f64,
+        second: f64,
+        first_face: [f64; 3],
+    },
+    /// `angle` (radians) between the chamfer and the face.
+    DistanceAngle {
+        distance: f64,
+        angle: f64,
+        face: [f64; 3],
+    },
+}
+
 /// A triangle soup as the C++ kernels hand it back: positions (x, y, z
 /// flattened) and triangles as position indices, counterclockwise seen
 /// from outside.

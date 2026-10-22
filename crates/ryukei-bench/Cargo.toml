@@ -79,3 +79,17 @@ required-features = ["occt", "smlib"]
 [[test]]
 name = "booleans"
 required-features = ["occt", "smlib"]
+
+# Blends head to head (design 43, phase 6), and the 1000-rim race.
+[[test]]
+name = "blends"
+required-features = ["occt", "smlib"]
+
+[[bench]]
+name = "blend"
+harness = false
+
+[[bench]]
+name = "blend_kernels"
+harness = false
+required-features = ["occt", "smlib"]

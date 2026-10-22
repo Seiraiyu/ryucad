@@ -199,12 +199,7 @@ fn a_slots_top_all_round() {
         .collect();
     let blends: Vec<EdgeBlend> = top.iter().map(|&e| equal(e, 0.1)).collect();
     let (r, _) = blend(K, &b, &blends).unwrap();
-    for f in check_intersections(&r) {
-        assert!(
-            matches!(f, ryukei::check::Fault::CannotCheck { .. }),
-            "{f:?}"
-        );
-    }
+    assert_eq!(check_intersections(&r), []);
     let c = r.counts();
     assert_eq!((c.faces, c.edges, c.vertices), (10, 20, 12));
     let tri = 0.5 * 0.1 * 0.1;
