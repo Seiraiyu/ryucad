@@ -9,12 +9,16 @@
 //! the file wrote them, in its units; references stay instance numbers.
 
 mod args;
+mod curve;
 mod geometry;
+mod surface;
 
 use rayon::prelude::*;
 
 pub use args::Id;
+pub use curve::Curve;
 pub use geometry::{Placement, Point};
+pub use surface::Surface;
 
 use crate::part21::{File, Header, Instance, Param, Record};
 use crate::{ImportError, StepError};
@@ -83,6 +87,8 @@ pub enum Entity {
         magnitude: f64,
     },
     Placement(Placement),
+    Curve(Curve),
+    Surface(Surface),
     /// An entity this crate doesn't read: its name, or a complex
     /// instance's names joined by spaces.
     Other(Box<str>),
@@ -96,6 +102,8 @@ impl Entity {
             Entity::Direction(_) => "DIRECTION",
             Entity::Vector { .. } => "VECTOR",
             Entity::Placement(p) => p.kind(),
+            Entity::Curve(c) => c.kind(),
+            Entity::Surface(s) => s.kind(),
             Entity::Other(name) => name,
         }
     }
@@ -172,6 +180,22 @@ impl Entities {
             _ => Err(wrong(id, "an axis placement")),
         }
     }
+
+    /// A curve of any kind.
+    pub fn curve(&self, from: Id, id: Id) -> Result<&Curve, ImportError> {
+        match self.get(from, id)? {
+            Entity::Curve(c) => Ok(c),
+            _ => Err(wrong(id, "a curve")),
+        }
+    }
+
+    /// A surface of any kind.
+    pub fn surface(&self, from: Id, id: Id) -> Result<&Surface, ImportError> {
+        match self.get(from, id)? {
+            Entity::Surface(s) => Ok(s),
+            _ => Err(wrong(id, "a surface")),
+        }
+    }
 }
 
 pub(crate) fn wrong(instance: Id, expected: &'static str) -> ImportError {
@@ -191,6 +215,12 @@ fn decode(inst: &Instance) -> Result<Entity, ImportError> {
 
 /// A simple record, by its entity's name.
 fn simple(id: Id, name: &str, params: &[Param]) -> Result<Entity, ImportError> {
+    if let Some(c) = curve::simple(id, name, params) {
+        return c.map(Entity::Curve);
+    }
+    if let Some(s) = surface::simple(id, name, params) {
+        return s.map(Entity::Surface);
+    }
     match name {
         "CARTESIAN_POINT" => geometry::point(id, params).map(Entity::Point),
         "DIRECTION" => geometry::point(id, params).map(Entity::Direction),
