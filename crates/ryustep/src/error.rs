@@ -87,6 +87,12 @@ pub enum ImportError {
     ReferenceCycle { instance: u64 },
     /// An entity this crate doesn't read, where one it does is needed.
     UnsupportedEntity { instance: u64, name: Box<str> },
+    /// Representation context `context` has no unit for `quantity`, which
+    /// its items need.
+    MissingUnit {
+        context: u64,
+        quantity: &'static str,
+    },
     /// An attribute doesn't have the type or value the schema requires.
     /// Attributes count from 0 in a simple record's parameters, or within
     /// a complex instance's part; a fault in the whole entity (lists of
@@ -113,6 +119,9 @@ impl fmt::Display for ImportError {
             }
             ImportError::UnsupportedEntity { instance, name } => {
                 write!(f, "#{instance} is a {name}, which ryustep doesn't read")
+            }
+            ImportError::MissingUnit { context, quantity } => {
+                write!(f, "context #{context} has no {quantity} unit")
             }
             ImportError::Malformed {
                 instance,

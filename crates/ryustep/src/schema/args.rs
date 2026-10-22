@@ -93,6 +93,15 @@ impl<'a> Args<'a> {
         }
     }
 
+    /// An enumeration, or `$`.
+    pub fn opt_enumeration(&mut self) -> Result<Option<&'a str>, ImportError> {
+        match self.next() {
+            Param::Enum(e) => Ok(Some(e)),
+            Param::Unset => Ok(None),
+            _ => Err(self.fault("expected an enumeration or $")),
+        }
+    }
+
     /// `.T.` or `.F.`.
     pub fn boolean(&mut self) -> Result<bool, ImportError> {
         match self.enumeration()? {

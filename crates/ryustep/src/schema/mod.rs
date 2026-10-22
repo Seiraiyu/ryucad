@@ -13,8 +13,10 @@ mod bspline;
 mod curve;
 mod derived;
 mod geometry;
+mod representation;
 mod surface;
 mod topology;
+mod units;
 
 use rayon::prelude::*;
 
@@ -25,6 +27,7 @@ pub use derived::{OnSurface, Trim};
 pub use geometry::{Placement, Point};
 pub use surface::Surface;
 pub use topology::{Brep, Edge, Face, Loop};
+pub use units::{Quantity, Unit, Units};
 
 use crate::part21::{File, Header, Instance, Param, Part, Record};
 use crate::{ImportError, StepError};
@@ -137,6 +140,66 @@ pub enum Entity {
         closed: bool,
     },
     Brep(Brep),
+    /// A representation of the kinds in `representation::REPRESENTATIONS`
+    /// (`kind` is its entity's name): `items` in `context`.
+    Representation {
+        kind: Box<str>,
+        items: Vec<Id>,
+        context: Id,
+    },
+    /// `MAPPED_ITEM`: the representation `source` maps, placed at
+    /// `target`.
+    MappedItem {
+        source: Id,
+        target: Id,
+    },
+    /// `REPRESENTATION_MAP`: `representation`, with `origin` its placement
+    /// that a mapped item's target takes the place of.
+    RepresentationMap {
+        origin: Id,
+        representation: Id,
+    },
+    /// `REPRESENTATION_RELATIONSHIP` and `SHAPE_REPRESENTATION_RELATIONSHIP`,
+    /// with a transformation when complex: `rep_1` in `rep_2`'s place.
+    RepresentationRelationship {
+        rep_1: Id,
+        rep_2: Id,
+        transformation: Option<Id>,
+    },
+    /// `ITEM_DEFINED_TRANSFORMATION`: the placement `item_1` (of the
+    /// relationship's `rep_1`) moved onto `item_2` (of `rep_2`).
+    ItemTransformation {
+        item_1: Id,
+        item_2: Id,
+    },
+    /// `CARTESIAN_TRANSFORMATION_OPERATOR_3D`.
+    Operator {
+        axis1: Option<Id>,
+        axis2: Option<Id>,
+        origin: Id,
+        scale: Option<f64>,
+        axis3: Option<Id>,
+    },
+    /// A representation context: its dimension, units and uncertainties.
+    Context {
+        dimension: Option<i64>,
+        units: Vec<Id>,
+        uncertainty: Vec<Id>,
+    },
+    Unit(Unit),
+    /// `LENGTH_MEASURE_WITH_UNIT`, `PLANE_ANGLE_MEASURE_WITH_UNIT` or
+    /// `MEASURE_WITH_UNIT`.
+    Measure {
+        value: f64,
+        unit: Id,
+    },
+    /// `UNCERTAINTY_MEASURE_WITH_UNIT`: `name` says which
+    /// (`distance_accuracy_value`).
+    Uncertainty {
+        value: f64,
+        unit: Id,
+        name: Box<str>,
+    },
     /// An entity this crate doesn't read: its name, or a complex
     /// instance's names joined by spaces.
     Other(Box<str>),
@@ -172,6 +235,17 @@ impl Entity {
             Entity::Brep(Brep::Solid { voids, .. }) if !voids.is_empty() => "BREP_WITH_VOIDS",
             Entity::Brep(Brep::Solid { .. }) => "MANIFOLD_SOLID_BREP",
             Entity::Brep(Brep::Shells(_)) => "SHELL_BASED_SURFACE_MODEL",
+            Entity::Representation { kind, .. } => kind,
+            Entity::MappedItem { .. } => "MAPPED_ITEM",
+            Entity::RepresentationMap { .. } => "REPRESENTATION_MAP",
+            Entity::RepresentationRelationship { .. } => "REPRESENTATION_RELATIONSHIP",
+            Entity::ItemTransformation { .. } => "ITEM_DEFINED_TRANSFORMATION",
+            Entity::Operator { .. } => "CARTESIAN_TRANSFORMATION_OPERATOR_3D",
+            Entity::Context { .. } => "REPRESENTATION_CONTEXT",
+            Entity::Unit(Unit::Si { .. }) => "SI_UNIT",
+            Entity::Unit(Unit::Conversion { .. }) => "CONVERSION_BASED_UNIT",
+            Entity::Measure { .. } => "MEASURE_WITH_UNIT",
+            Entity::Uncertainty { .. } => "UNCERTAINTY_MEASURE_WITH_UNIT",
             Entity::Other(name) => name,
         }
     }
@@ -291,6 +365,12 @@ fn simple(id: Id, name: &str, params: &[Param]) -> Result<Entity, ImportError> {
     if let Some(t) = topology::simple(id, name, params) {
         return t;
     }
+    if let Some(r) = representation::simple(id, name, params) {
+        return r;
+    }
+    if let Some(u) = units::simple(id, name, params) {
+        return u;
+    }
     if let Some(d) = derived::simple(id, name, params) {
         return d;
     }
@@ -318,6 +398,12 @@ fn complex(id: Id, parts: &[Part]) -> Result<Entity, ImportError> {
     }
     if let Some(s) = bspline::complex_surface(id, parts) {
         return s.map(|s| Entity::Surface(Surface::BSpline(s)));
+    }
+    if let Some(r) = representation::complex(id, parts) {
+        return r;
+    }
+    if let Some(u) = units::complex(id, parts) {
+        return u;
     }
     let names: Vec<&str> = parts.iter().map(|p| &*p.name).collect();
     Ok(Entity::Other(names.join(" ").into()))
