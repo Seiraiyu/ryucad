@@ -2,6 +2,7 @@
 //! sets this window's selection through the daemon; everyone's selections
 //! and highlights are painted over the model in their colours.
 
+use crate::core::compare::FaceMark;
 use crate::core::model::BodyKey;
 use crate::core::nav::{Buttons, Gesture, Modifiers, Nav, Projector};
 use crate::core::pick::{Hit, Picker, Place};
@@ -246,8 +247,8 @@ impl View {
     }
 
     /// Everything painted over the model this frame, last on top: the
-    /// chosen feature, other people's selections, highlights, this
-    /// window's selection, then the hover.
+    /// chosen feature, a compare's new and changed faces, other people's
+    /// selections, highlights, this window's selection, then the hover.
     fn painted(&mut self, ws: &Workspace) -> (Vec<PaintedFace>, Vec<(Place, Rgb)>) {
         let mut wanted: Vec<(String, Rgb)> = Vec::new();
         for p in ws.people.others(ws.me()) {
@@ -276,6 +277,26 @@ impl View {
         if let Some(k) = chosen {
             let c = linear(style::CHOSEN);
             faces.extend((0..picker.faces(&k)).map(|i| (k.clone(), i, c)));
+        }
+        // A compare's new and changed faces, over the chosen feature so
+        // choosing one still shows what changed in it.
+        if let Some(c) = &ws.compare {
+            for key in &c.new_bodies {
+                let new = linear(style::NEW);
+                faces.extend((0..picker.faces(key)).map(|i| (key.clone(), i, new)));
+            }
+            for (key, marks) in &c.faces {
+                for (name, m) in marks {
+                    let r = format!("{}/{}/{name}", key.0, key.1);
+                    if let Some(Place::Face(k, i)) = picker.place(&r) {
+                        let colour = match m {
+                            FaceMark::New => style::NEW,
+                            FaceMark::Changed => style::CHANGED,
+                        };
+                        faces.push((k, i, linear(colour)));
+                    }
+                }
+            }
         }
         let mut lines = Vec::new();
         // A sketch chosen in the tree: all of it.
@@ -634,6 +655,7 @@ impl View {
             .scene
             .get_or_insert_with(|| Scene::new(&rs.device, &rs.adapter));
         scene.sync(&rs.device, &ws.model, reference);
+        scene.sync_ghosts(&rs.device, ws.compare.as_ref());
         let overlay = if self.sketches {
             let size = [f64::from(px[0]), f64::from(px[1])];
             crate::core::sketch::overlay(
