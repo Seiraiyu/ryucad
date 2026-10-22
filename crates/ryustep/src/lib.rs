@@ -9,5 +9,6 @@
 
 mod error;
 pub mod part21;
+pub mod schema;
 
-pub use error::{StepError, WriteError};
+pub use error::{ImportError, StepError, WriteError};

@@ -69,3 +69,56 @@ impl fmt::Display for WriteError {
 }
 
 impl std::error::Error for WriteError {}
+
+/// Why an entity can't be read. It fails only what needs that entity: the
+/// body it belongs to, never the whole file. Instances are named by their
+/// numbers in the file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ImportError {
+    /// `instance` refers to `reference`, which the file doesn't define.
+    DanglingReference { instance: u64, reference: u64 },
+    /// `instance` is not the kind of entity its referrer needs.
+    WrongEntity {
+        instance: u64,
+        expected: &'static str,
+    },
+    /// Following references from `instance` leads back to it.
+    ReferenceCycle { instance: u64 },
+    /// An entity this crate doesn't read, where one it does is needed.
+    UnsupportedEntity { instance: u64, name: Box<str> },
+    /// An attribute (counted from 0, in the order of a simple record's
+    /// parameters) doesn't have the type or value the schema requires.
+    Malformed {
+        instance: u64,
+        attribute: usize,
+        what: &'static str,
+    },
+}
+
+impl fmt::Display for ImportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ImportError::DanglingReference {
+                instance,
+                reference,
+            } => write!(f, "#{instance} refers to #{reference}, which isn't defined"),
+            ImportError::WrongEntity { instance, expected } => {
+                write!(f, "#{instance} is not {expected}")
+            }
+            ImportError::ReferenceCycle { instance } => {
+                write!(f, "#{instance} refers back to itself")
+            }
+            ImportError::UnsupportedEntity { instance, name } => {
+                write!(f, "#{instance} is a {name}, which ryustep doesn't read")
+            }
+            ImportError::Malformed {
+                instance,
+                attribute,
+                what,
+            } => write!(f, "#{instance}, attribute {attribute}: {what}"),
+        }
+    }
+}
+
+impl std::error::Error for ImportError {}
