@@ -11,6 +11,7 @@ use crate::Error;
 use crate::interval::Interval;
 use crate::math;
 use core::f64::consts::{PI, TAU};
+use std::sync::OnceLock;
 
 /// `P(s, θ) = c(s) + r (cos θ e₁(s) + sin θ e₂(s))`: a circle of radius
 /// `r` about each point of a spine curve `c`, in the plane normal to it.
@@ -38,6 +39,9 @@ pub struct Pipe {
     /// An ellipse spine's exact NURBS form, for projection.
     flat: Option<(NurbsCurve, Reparam)>,
     bounds: Box3,
+    /// The frame's enclosures over each of [`Pipe::stretches`], made on
+    /// first use.
+    frames: Vec<OnceLock<Option<Vec<FrameBox>>>>,
 }
 
 impl PartialEq for Pipe {
@@ -183,6 +187,11 @@ impl Pipe {
             side: dist.signum(),
             flat,
             bounds,
+            frames: Vec::new(),
+        };
+        let pipe = Self {
+            frames: pipe.stretches().iter().map(|_| OnceLock::new()).collect(),
+            ..pipe
         };
         pipe.certify()?;
         Ok(pipe)
@@ -410,6 +419,7 @@ impl Pipe {
             radius: self.radius,
             anchor: self.anchor.transformed(r),
             side: self.side,
+            frames: self.frames.iter().map(|_| OnceLock::new()).collect(),
         }
     }
 
@@ -428,122 +438,178 @@ impl Pipe {
         self.jets(d, cos, sin)
     }
 
-    /// Bounds over a parameter box, from the jets' enclosures: `Suu`,
-    /// `Suv` and `Svv` are the point's second derivatives, and the unit
-    /// normal turns as fast as its own derivatives (`1` along `θ`). A
-    /// clamped spine's range is cut to its domain first.
-    ///
-    /// Interval jets over a long stretch of spine or a wide angle are
-    /// loose (by orders of magnitude over a tenth of an ellipse), so a
-    /// wide box is cut into pieces at most a 64th of the spine's domain
-    /// long and `π/8` wide, and a piece whose bounds are more than twice
-    /// the derivatives at its middle plus half their scale (or whose frame
-    /// can't be certified at once) is halved along `s`, up to 10 times.
-    /// The worst piece's bounds hold for the whole box.
+    /// Bounds over a parameter box, from the frame's enclosures over the
+    /// stretches of spine it covers ([`Frames`]): with `n = cos θ e₁ + sin
+    /// θ e₂`, `Pss = c'' + r nss`, `Psθ = r nsθ` and `|Pθθ| = r`; the unit
+    /// normal `n` turns by `|ns|` along `s` and `1` along `θ`. A clamped
+    /// spine's range is cut to its domain first.
     pub(super) fn derivative_bound(&self, [rs, rt]: [[f64; 2]; 2]) -> SurfaceBound {
-        let [d0, d1] = self.spine.domain();
-        let rs = match self.spine.period() {
-            Some(_) => rs,
-            None => [rs[0].clamp(d0, d1), rs[1].clamp(d0, d1)],
+        let (cos, sin) = trig_box(rt);
+        let r = Interval::point(self.radius);
+        let mut out = SurfaceBound {
+            duu: 0.0,
+            duv: 0.0,
+            dvv: self.radius * (1.0 + 1e-12),
+            turn_u: 0.0,
+            turn_v: 1.0 + 1e-12,
         };
-        let pieces = |[a, b]: [f64; 2], step: f64, most: f64| {
-            let n = ((b - a) / step).ceil().clamp(1.0, most) as usize;
-            (0..n).map(move |i| {
-                let at = |k: usize| a + (b - a) * k as f64 / n as f64;
-                [at(i), if i + 1 == n { b } else { at(i + 1) }]
-            })
-        };
-        let mut out = ZERO_BOUND;
-        for s in pieces(rs, (d1 - d0) / 64.0, 64.0) {
-            for t in pieces(rt, PI / 8.0, 16.0) {
-                out = worse(out, self.bound_over(s, t, 10));
-            }
-        }
-        out
+        let covered = self.frames_over(rs, &mut |f: &FrameBox| {
+            let ns = turn(f.e1d, f.e2d, cos, sin);
+            let nst = turn(f.e2d, f.e1d.map(|x| -x), cos, sin);
+            let nss = turn(f.e1dd, f.e2dd, cos, sin);
+            out.duu = out
+                .duu
+                .max(length(core::array::from_fn(|k| f.c2[k] + r * nss[k])));
+            out.duv = out.duv.max(length(nst.map(|x| r * x)));
+            out.turn_u = out.turn_u.max(length(ns));
+        });
+        if covered { out } else { INFINITE_BOUND }
     }
 
     /// Bounds on `|P_s|` and `|P_θ|` over a parameter box (`r` along
-    /// `θ`), from the jets' enclosures over pieces of it as
-    /// [`Pipe::derivative_bound`] takes them.
+    /// `θ`), from the frame's enclosures as [`Pipe::derivative_bound`]
+    /// takes them.
     pub(crate) fn first_bound(&self, [rs, rt]: [[f64; 2]; 2]) -> (f64, f64) {
-        let [d0, d1] = self.spine.domain();
-        let rs = match self.spine.period() {
-            Some(_) => rs,
-            None => [rs[0].clamp(d0, d1), rs[1].clamp(d0, d1)],
-        };
-        let n = ((rs[1] - rs[0]) / ((d1 - d0) / 256.0))
-            .ceil()
-            .clamp(1.0, 256.0) as usize;
+        let (cos, sin) = trig_box(rt);
+        let r = Interval::point(self.radius);
         let mut su = 0.0f64;
-        for i in 0..n {
-            let at = |k: usize| rs[0] + (rs[1] - rs[0]) * k as f64 / n as f64;
-            let piece = [at(i), if i + 1 == n { rs[1] } else { at(i + 1) }];
-            let Some([p, _]) = self.jet_box([piece, rt]) else {
-                return (f64::INFINITY, f64::INFINITY);
-            };
-            let sum = p
-                .iter()
-                .fold(Interval::point(0.0), |acc, j| acc + j.d[0].square());
-            su = su.max(sum.sqrt().map_or(f64::INFINITY, Interval::hi));
+        let covered = self.frames_over(rs, &mut |f: &FrameBox| {
+            let ns = turn(f.e1d, f.e2d, cos, sin);
+            su = su.max(length(core::array::from_fn(|k| f.c1[k] + r * ns[k])));
+        });
+        if covered {
+            (su, self.radius * (1.0 + 1e-12))
+        } else {
+            (f64::INFINITY, f64::INFINITY)
         }
-        (su, self.radius * (1.0 + 1e-12))
     }
 
-    fn bound_over(&self, rs: [f64; 2], rt: [f64; 2], depth: u32) -> SurfaceBound {
-        let len = |f: &dyn Fn(&Jet<Interval>) -> Interval, v: &JVec<Interval>| {
-            let sum = v
-                .iter()
-                .fold(Interval::point(0.0), |acc, j| acc + f(j).square());
-            sum.sqrt().map_or(f64::INFINITY, Interval::hi)
+    /// Calls `each` with every stretch of [`Frames`] that `[a, b]` meets
+    /// (cut to the domain of a clamped spine, wrapped round a periodic
+    /// one); `false` where some stretch has no certified frame.
+    fn frames_over(&self, [a, b]: [f64; 2], each: &mut dyn FnMut(&FrameBox)) -> bool {
+        let [d0, d1] = self.spine.domain();
+        let ranges: Vec<[f64; 2]> = match self.spine.period() {
+            None => vec![[a.clamp(d0, d1), b.clamp(d0, d1)]],
+            Some(p) if b - a >= p => vec![[d0, d1]],
+            Some(p) => {
+                let a0 = d0 + (a - d0).rem_euclid(p);
+                let b0 = a0 + (b - a);
+                if b0 <= d1 {
+                    vec![[a0, b0]]
+                } else {
+                    vec![[a0, d1], [d0, b0 - p]]
+                }
+            }
         };
-        let bound = self.jet_box([rs, rt]).map(|[p, n]| SurfaceBound {
-            duu: len(&|j| j.h[0], &p),
-            duv: len(&|j| j.h[1], &p),
-            dvv: len(&|j| j.h[2], &p),
-            turn_u: len(&|j| j.d[0], &n),
-            turn_v: len(&|j| j.d[1], &n),
-        });
-        let loose = |b: &SurfaceBound| {
-            let (ms, mt) = ((rs[0] + rs[1]) / 2.0, (rt[0] + rt[1]) / 2.0);
-            let [p, n] = self.jets_at(ms, mt);
-            let at = |f: &dyn Fn(&Jet<f64>) -> f64, v: &JVec<f64>| {
-                math::sqrt(v.iter().map(|j| f(j) * f(j)).sum::<f64>())
-            };
-            let (duu, duv, dvv) = (
-                at(&|j| j.h[0], &p),
-                at(&|j| j.h[1], &p),
-                at(&|j| j.h[2], &p),
-            );
-            let (turn, speed) = (at(&|j| j.d[0], &n), at(&|j| j.d[0], &p));
-            // Each compared with twice its value at the middle, and half
-            // the scale of its kind, so a value near zero there doesn't
-            // demand an exact zero.
-            let second = 0.5 * (duu + duv + dvv);
-            b.duu > 2.0 * duu + second
-                || b.duv > 2.0 * duv + second
-                || b.turn_u > 2.0 * turn + 0.5 * (turn + speed / self.radius)
-        };
-        match bound {
-            Some(b) if depth == 0 || rs[0] >= rs[1] || !loose(&b) => b,
-            None if depth == 0 || rs[0] >= rs[1] => INFINITE_BOUND,
-            _ => {
-                let m = (rs[0] + rs[1]) / 2.0;
-                worse(
-                    self.bound_over([rs[0], m], rt, depth - 1),
-                    self.bound_over([m, rs[1]], rt, depth - 1),
-                )
+        let stretches = self.stretches();
+        let mut ok = true;
+        for [lo, hi] in ranges {
+            for (i, &[s0, s1]) in stretches.iter().enumerate() {
+                if s1 < lo || s0 > hi {
+                    continue;
+                }
+                match self.frames[i].get_or_init(|| self.tabulate([s0, s1])) {
+                    Some(frames) => {
+                        for f in frames {
+                            if f.range[1] >= lo && f.range[0] <= hi {
+                                each(f);
+                            }
+                        }
+                    }
+                    None => ok = false,
+                }
             }
         }
+        ok
+    }
+
+    /// The frame's enclosures over a stretch of spine, halved where they
+    /// are loose; `None` where the frame can't be certified.
+    fn tabulate(&self, range: [f64; 2]) -> Option<Vec<FrameBox>> {
+        let mut out = Vec::new();
+        let mut stack = vec![(range, 0u32)];
+        while let Some((range, depth)) = stack.pop() {
+            let f = self.frame_over(range);
+            let tight = f.as_ref().is_some_and(|f| f.tight(self.radius));
+            if tight || depth == FRAME_DEPTH {
+                out.push(f?);
+                continue;
+            }
+            let m = (range[0] + range[1]) / 2.0;
+            // Pushed in reverse, so the stretches come out in order.
+            stack.push(([m, range[1]], depth + 1));
+            stack.push(([range[0], m], depth + 1));
+        }
+        Some(out)
+    }
+
+    /// The frame's enclosures over one stretch of spine.
+    fn frame_over(&self, range: [f64; 2]) -> Option<FrameBox> {
+        let d = self.spine.jet_box(range);
+        let (c, cp) = spine_jets(d);
+        let (e1, e2) = self.frame(c, cp)?;
+        Some(FrameBox {
+            range,
+            c1: d[1],
+            c2: d[2],
+            e1d: e1.map(|j| j.d[0]),
+            e2d: e2.map(|j| j.d[0]),
+            e1dd: e1.map(|j| j.h[0]),
+            e2dd: e2.map(|j| j.h[0]),
+        })
     }
 }
 
-const ZERO_BOUND: SurfaceBound = SurfaceBound {
-    duu: 0.0,
-    duv: 0.0,
-    dvv: 0.0,
-    turn_u: 0.0,
-    turn_v: 0.0,
-};
+/// How many times a stretch of spine is halved, at most, while
+/// tabulating its frame.
+const FRAME_DEPTH: u32 = 10;
+
+/// Enclosures over a stretch of spine of what a pipe's derivatives are
+/// made of: the spine's first and second derivatives and the frame's
+/// first and second derivatives by `s`. The frame depends on `s` alone,
+/// so these bound the pipe's derivatives over any range of `θ`.
+#[derive(Clone, Debug)]
+struct FrameBox {
+    range: [f64; 2],
+    c1: IVec3,
+    c2: IVec3,
+    e1d: IVec3,
+    e2d: IVec3,
+    e1dd: IVec3,
+    e2dd: IVec3,
+}
+
+impl FrameBox {
+    /// Whether every enclosure is narrow next to its own size, or to the
+    /// scale of its kind (the spine's speed over the radius for the
+    /// frame), so that halving would gain little.
+    fn tight(&self, radius: f64) -> bool {
+        let speed = length(self.c1);
+        let narrow = |v: IVec3, scale: f64| {
+            let width = length(v.map(|x| Interval::point(x.hi() - x.lo())));
+            width <= 0.125 * (length(v) + scale)
+        };
+        let k = speed / radius;
+        narrow(self.c1, speed)
+            && narrow(self.c2, speed * k)
+            && narrow(self.e1d, k)
+            && narrow(self.e2d, k)
+            && narrow(self.e1dd, k * k)
+            && narrow(self.e2dd, k * k)
+    }
+}
+
+/// `cos θ a + sin θ b` over enclosures of `cos θ` and `sin θ`.
+fn turn(a: IVec3, b: IVec3, cos: Interval, sin: Interval) -> IVec3 {
+    core::array::from_fn(|k| cos * a[k] + sin * b[k])
+}
+
+/// An upper bound on the length of any vector in a box.
+fn length(v: IVec3) -> f64 {
+    let sum = v[0].square() + v[1].square() + v[2].square();
+    sum.sqrt().map_or(f64::INFINITY, Interval::hi) * (1.0 + 1e-12)
+}
 
 const INFINITE_BOUND: SurfaceBound = SurfaceBound {
     duu: f64::INFINITY,
@@ -552,17 +618,6 @@ const INFINITE_BOUND: SurfaceBound = SurfaceBound {
     turn_u: f64::INFINITY,
     turn_v: f64::INFINITY,
 };
-
-/// The larger of two bounds, each way.
-fn worse(a: SurfaceBound, b: SurfaceBound) -> SurfaceBound {
-    SurfaceBound {
-        duu: a.duu.max(b.duu),
-        duv: a.duv.max(b.duv),
-        dvv: a.dvv.max(b.dvv),
-        turn_u: a.turn_u.max(b.turn_u),
-        turn_v: a.turn_v.max(b.turn_v),
-    }
-}
 
 #[cfg(test)]
 pub(crate) mod tests;

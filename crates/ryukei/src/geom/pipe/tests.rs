@@ -327,11 +327,13 @@ fn derivative_bounds_hold() {
                 }
             }
         }
-        // Over a small box the bounds are close to the true values.
+        // Over a small box the bounds are close to the true values: the
+        // frame's enclosures are tabulated over stretches of spine, each
+        // narrow to an eighth of its size.
         let (s, t) = (d0 + (d1 - d0) * 0.3, FRAC_PI_2);
         let b = p.derivative_bound([[s, s + 1e-4], [t, t + 1e-4]]);
         assert!(
-            b.dvv <= R * 1.01 && b.duu <= p.eval(s, t).duu.length() * 1.05 + 1e-9,
+            b.dvv <= R * 1.01 && b.duu <= p.eval(s, t).duu.length() * 1.5 + 1e-9,
             "{b:?} {:?}",
             p.eval(s, t)
         );
