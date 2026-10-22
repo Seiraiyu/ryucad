@@ -176,7 +176,15 @@ fn unmerged(
         if let Some(f) = feature {
             concerns["feature"] = json!(f);
         }
+        let file = std::fs::read(root.join(path)).ok();
         let mut x = if u.ours.is_none() || u.theirs.is_none() {
+            // Deleted in the working files: settled, waiting for `git rm`.
+            // Kept looks the same as Git left it, so it stays a conflict
+            // until it is staged.
+            if file.is_none() {
+                unstaged.push(path.clone());
+                continue;
+            }
             let by = if u.ours.is_none() { "ours" } else { "theirs" };
             let mut x = conflict(
                 format!("{path}#"),
@@ -184,12 +192,13 @@ fn unmerged(
                 vec![path.clone()],
                 concerns,
                 "both",
-                format!("{path} was deleted by {by} and changed by the other side"),
+                format!(
+                    "{path} was deleted by {by} and changed by the other side (once settled, `git add` or `git rm` it: kept, it looks as Git left it)"
+                ),
             );
             x["deleted_by"] = json!(by);
             x
         } else {
-            let file = std::fs::read(root.join(path)).ok();
             match file.as_deref().map(json_of) {
                 Some(Some(v)) if v.get(crate::doc::project::CONFLICTS).is_some() => continue,
                 Some(Some(_)) => {
@@ -619,6 +628,288 @@ pub fn status(session: &mut Session) -> Result<Value> {
     }))
 }
 
+/// Puts `x` at `pointer` in `v`, making the objects on the way; `None`
+/// removes what is there.
+fn set_at(v: &mut Value, pointer: &str, x: Option<Value>) {
+    if pointer.is_empty() {
+        if let Some(x) = x {
+            *v = x;
+        }
+        return;
+    }
+    let mut seg: Vec<String> = pointer
+        .split('/')
+        .skip(1)
+        .map(crate::merge::unescape)
+        .collect();
+    let last = seg.pop().expect("a pointer below the root has a segment");
+    let mut at = v;
+    for k in seg {
+        if !at.get(&k).is_some_and(Value::is_object) {
+            at[&k] = json!({});
+        }
+        at = at.get_mut(&k).expect("just made");
+    }
+    let Some(o) = at.as_object_mut() else { return };
+    match x {
+        Some(x) => {
+            o.insert(last, x);
+        }
+        None => {
+            o.remove(&last);
+        }
+    }
+}
+
+/// Puts feature `id` in `list` where `place` says ([`crate::merge::place`]'s
+/// form: first, or after a feature), or takes it out for `None`. After a
+/// feature the list doesn't have, or anywhere else, it goes last.
+fn put(list: &mut Vec<String>, id: &str, place: Option<&Value>) {
+    list.retain(|f| f != id);
+    let Some(p) = place else { return };
+    let at = match (p.get("first"), p.get("after").and_then(Value::as_str)) {
+        (Some(Value::Bool(true)), _) => 0,
+        (_, Some(after)) => list
+            .iter()
+            .position(|f| f == after)
+            .map_or(list.len(), |i| i + 1),
+        _ => list.len(),
+    };
+    list.insert(at, id.to_owned());
+}
+
+/// A file's JSON from the files being written.
+fn file_json(files: &crate::activity::Files, path: &str) -> Result<Value> {
+    files
+        .get(path)
+        .and_then(|b| json_of(b))
+        .ok_or_else(|| Error::new(Code::ConflictNotFound, format!("{path} isn't readable now")))
+}
+
+/// Settles the conflict `c` of a file's record at `pointer` with `x`, in
+/// `files`: the value put in place, the entry gone from the record (and
+/// the record when it was the last), the file at the lowest format.
+fn settle_record(
+    files: &mut crate::activity::Files,
+    path: &str,
+    pointer: &str,
+    kind: Kind,
+    x: Option<Value>,
+) -> Result<()> {
+    let mut v = file_json(files, path)?;
+    let mut record = crate::merge::record(&v);
+    if record.remove(pointer).is_none() {
+        return Err(Error::new(
+            Code::ConflictNotFound,
+            format!("{path} has no conflict at {pointer} now"),
+        )
+        .with("conflict", format!("{path}#{pointer}")));
+    }
+    let mut plain = crate::doc::project::without_conflicts(&v);
+    let order = kind == Kind::Order && pointer.starts_with("/features/");
+    if order {
+        let id = crate::merge::unescape(&pointer["/features/".len()..]);
+        let mut list: Vec<String> =
+            serde_json::from_value(plain["features"].clone()).unwrap_or_default();
+        put(&mut list, &id, x.as_ref().filter(|p| !p.is_null()));
+        plain["features"] = json!(list);
+    } else {
+        set_at(&mut plain, pointer, x);
+    }
+    if plain["kind"] == crate::doc::files::FEATURE_KIND {
+        plain["format"] = json!(crate::doc::files::feature_format(&plain));
+    }
+    v = crate::merge::Merged {
+        value: plain,
+        conflicts: record,
+    }
+    .to_json();
+    files.insert(path.to_owned(), crate::doctor::canonical_bytes(&v));
+    Ok(())
+}
+
+/// Settles a file Git left unmerged with one side's version: written as
+/// that side has it, or deleted where that side deleted it. A feature file
+/// kept is listed where that side lists it; one deleted, unlisted.
+fn settle_unmerged(
+    files: &mut crate::activity::Files,
+    path: &str,
+    side: Option<&Vec<u8>>,
+    side_files: &crate::activity::Files,
+) {
+    match side {
+        Some(b) => {
+            files.insert(path.to_owned(), b.clone());
+        }
+        None => {
+            files.remove(path);
+        }
+    }
+    let (Some(part), Some(feature)) = about(path) else {
+        return;
+    };
+    let index = format!("parts/{part}/part.json");
+    let Some(mut v) = files.get(&index).and_then(|b| json_of(b)) else {
+        return;
+    };
+    let Ok(mut list) = serde_json::from_value::<Vec<String>>(v["features"].clone()) else {
+        return;
+    };
+    let listed = list.iter().any(|f| f == feature);
+    let theirs_list: Vec<String> = side_files
+        .get(&index)
+        .and_then(|b| json_of(b))
+        .and_then(|v| serde_json::from_value(v["features"].clone()).ok())
+        .unwrap_or_default();
+    match (side.is_some(), listed) {
+        (true, false) => {
+            let place = crate::merge::place(&theirs_list, feature).unwrap_or(json!({}));
+            put(&mut list, feature, Some(&place));
+        }
+        (false, true) => list.retain(|f| f != feature),
+        _ => return,
+    }
+    v["features"] = json!(list);
+    files.insert(index, crate::doctor::canonical_bytes(&v));
+}
+
+/// `merge.resolve`: settles each conflict as asked, in order, and writes
+/// the files as one change, guarded by the part revisions given. Every
+/// conflict must be in the merge's status now, and every repair as it was
+/// planned there, or nothing is written. Answers what changed and the new
+/// status.
+pub fn resolve(
+    session: &mut Session,
+    resolutions: &[crate::proto::Resolution],
+    expected: &BTreeMap<String, String>,
+) -> Result<Value> {
+    for (part, rev) in expected {
+        let id = crate::server::part_id(part)?;
+        crate::server::check_revision(session.project().part(&id)?, Some(rev))?;
+    }
+    let root = session.root().to_path_buf();
+    let now = status(session)?;
+    let (repo, state) = merging(&root)?;
+    let unmerged = repo.unmerged()?;
+    let before = session.snapshot();
+    let mut files = before.clone();
+    let mut resolved = Vec::new();
+    for r in resolutions {
+        let found = now["conflicts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|c| c["id"] == r.conflict.as_str())
+            .ok_or_else(|| {
+                Error::new(
+                    Code::ConflictNotFound,
+                    format!(
+                        "the merge has no conflict {} now; run merge status",
+                        r.conflict
+                    ),
+                )
+                .with("conflict", &r.conflict)
+            })?;
+        let kind = found["kind"].as_str().unwrap_or_default();
+        let path = found["files"][0].as_str().unwrap_or_default().to_owned();
+        let usage = |why: String| Error::new(Code::Usage, why).with("conflict", &r.conflict);
+        match (kind, r.choice.as_str()) {
+            ("value" | "delete_edit" | "order" | "id_collision", "ours" | "theirs" | "value") => {
+                let x = match r.choice.as_str() {
+                    "value" => Some(
+                        r.value
+                            .clone()
+                            .ok_or_else(|| usage("choice value needs a value".to_owned()))?,
+                    ),
+                    side => found.get(side).cloned(),
+                };
+                let pointer = found["pointer"].as_str().unwrap_or_default();
+                let kind = crate::merge::Kind::parse(kind).expect("a record's kind");
+                settle_record(&mut files, &path, pointer, kind, x)?;
+            }
+            ("modify_delete" | "merge_unparsed", side @ ("ours" | "theirs")) => {
+                let u = unmerged.get(&path).cloned().unwrap_or_default();
+                let commit = if side == "ours" {
+                    &state.ours
+                } else {
+                    &state.theirs
+                };
+                let side_files = repo.files(commit)?;
+                let bytes = if side == "ours" { u.ours } else { u.theirs };
+                settle_unmerged(&mut files, &path, bytes.as_ref(), &side_files);
+            }
+            (_, "repair") => {
+                let id = r
+                    .repair
+                    .as_deref()
+                    .ok_or_else(|| usage("choice repair needs a repair".to_owned()))?;
+                let repair = found["repairs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|x| x["id"] == id)
+                    .ok_or_else(|| {
+                        Error::new(
+                            Code::RepairConflict,
+                            format!("no repair {id} for {} now: the files changed, or it was never offered; run merge status again", r.conflict),
+                        )
+                        .with("repair", id)
+                    })?;
+                for c in repair["changes"].as_array().into_iter().flatten() {
+                    let p = c["path"].as_str().unwrap_or_default().to_owned();
+                    match c["content"].as_str() {
+                        Some(text) => {
+                            files.insert(p, text.as_bytes().to_vec());
+                        }
+                        None => {
+                            files.remove(&p);
+                        }
+                    }
+                }
+            }
+            (_, choice) => {
+                let offered = found["choices"]
+                    .as_array()
+                    .map(|c| {
+                        c.iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!(
+                        "{} ({kind}) can't be settled by {choice:?}; it takes {}",
+                        r.conflict,
+                        if offered.is_empty() {
+                            "edits to the model, or its repairs".to_owned()
+                        } else {
+                            format!("{offered}, or its repairs")
+                        }
+                    ),
+                )
+                .with("conflict", &r.conflict)
+                .with("choice", choice));
+            }
+        }
+        resolved.push(r.conflict.clone());
+    }
+    let mut changes = Vec::new();
+    for (path, bytes) in &files {
+        if before.get(path) != Some(bytes) {
+            crate::doc::project::write_atomic(&root.join(path), bytes)?;
+            changes.push(json!({"path": path, "change": "written"}));
+        }
+    }
+    for path in before.keys().filter(|p| !files.contains_key(*p)) {
+        crate::doc::project::remove_file(&root, &root.join(path))?;
+        changes.push(json!({"path": path, "change": "deleted"}));
+    }
+    session.reload()?;
+    Ok(json!({"resolved": resolved, "changes": changes, "status": status(session)?}))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -997,6 +1288,249 @@ pub(crate) mod tests {
         m.session.reload().unwrap();
         let v = m.call("merge.status", json!({})).unwrap();
         assert_eq!(v["clean"], true, "{v}");
+    }
+
+    fn resolve(m: &mut Merging, conflict: &str, how: Value) -> Result<Value> {
+        let mut r = json!({"conflict": conflict});
+        for (k, v) in how.as_object().unwrap() {
+            r[k] = v.clone();
+        }
+        m.call("merge.resolve", json!({"resolutions": [r]}))
+    }
+
+    #[test]
+    fn a_conflict_takes_a_side_or_a_value() {
+        let mut m = boxed();
+        both_edit(&mut m, json!({"x": 15, "y": 1}), json!({"x": 12, "y": 2}));
+        m.merge("theirs");
+        let v = m.call("merge.status", json!({})).unwrap();
+        assert_eq!(v["conflicts"].as_array().unwrap().len(), 2);
+        let x = "parts/p/features/b.json#/params/x";
+        let y = "parts/p/features/b.json#/params/y";
+        // Both in one change: theirs for x, a value of the caller's for y.
+        let r = m
+            .call(
+                "merge.resolve",
+                json!({"resolutions": [
+                    {"conflict": x, "choice": "theirs"},
+                    {"conflict": y, "choice": "value", "value": "7 mm"},
+                ]}),
+            )
+            .unwrap();
+        assert_eq!(r["resolved"], json!([x, y]));
+        assert_eq!(
+            r["changes"],
+            json!([{"path": "parts/p/features/b.json", "change": "written"}])
+        );
+        assert_eq!(r["status"]["clean"], true, "{r}");
+        assert_eq!(r["status"]["unstaged"], json!(["parts/p/features/b.json"]));
+        let b = m
+            .call("feature.show", json!({"part": "p", "id": "b"}))
+            .unwrap();
+        assert_eq!(b["params"]["x"]["value"], "15 mm", "{b}");
+        assert_eq!(b["params"]["y"]["value"], "7 mm");
+        let text = std::fs::read_to_string(m.root().join("parts/p/features/b.json")).unwrap();
+        assert!(crate::doc::canonical::is_canonical(&text));
+        // Settled, it is no conflict any more.
+        let e = resolve(&mut m, x, json!({"choice": "ours"})).unwrap_err();
+        assert_eq!(e.code, Code::ConflictNotFound);
+    }
+
+    #[test]
+    fn what_cant_be_settled_so_is_refused_and_nothing_is_written() {
+        let mut m = boxed();
+        both_edit(&mut m, json!({"x": 15}), json!({"x": 12}));
+        m.merge("theirs");
+        let x = "parts/p/features/b.json#/params/x";
+        let before = std::fs::read(m.root().join("parts/p/features/b.json")).unwrap();
+        let rev = m
+            .session
+            .project()
+            .parts
+            .values()
+            .next()
+            .unwrap()
+            .revision
+            .clone();
+        for (r, code) in [
+            (
+                json!([{"conflict": "nowhere#", "choice": "ours"}]),
+                Code::ConflictNotFound,
+            ),
+            (json!([{"conflict": x, "choice": "value"}]), Code::Usage),
+            (
+                json!([{"conflict": x, "choice": "repair", "repair": "x:y@0"}]),
+                Code::RepairConflict,
+            ),
+            (
+                json!([{"conflict": x, "choice": "mine"}]),
+                Code::InvalidParam,
+            ),
+            // The first would do; the second refuses the batch.
+            (
+                json!([{"conflict": x, "choice": "ours"}, {"conflict": "nowhere#", "choice": "ours"}]),
+                Code::ConflictNotFound,
+            ),
+        ] {
+            let e = m
+                .call("merge.resolve", json!({"resolutions": r}))
+                .unwrap_err();
+            assert_eq!(e.code, code, "{r}");
+        }
+        let e = m
+            .call(
+                "merge.resolve",
+                json!({"resolutions": [{"conflict": x, "choice": "ours"}],
+                       "expected_revisions": {"p": "0000"}}),
+            )
+            .unwrap_err();
+        assert_eq!(e.code, Code::Conflict);
+        assert_eq!(
+            std::fs::read(m.root().join("parts/p/features/b.json")).unwrap(),
+            before
+        );
+        // At the revision read, it goes through.
+        m.call(
+            "merge.resolve",
+            json!({"resolutions": [{"conflict": x, "choice": "ours"}],
+                   "expected_revisions": {"p": rev}}),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_feature_deleted_and_changed_is_kept_or_deleted() {
+        let mut m = boxed();
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "id": "s", "params": {"radius": 1}}),
+        )
+        .unwrap();
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "id": "t", "params": {"radius": 1}}),
+        )
+        .unwrap();
+        m.commit("two spheres");
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        for id in ["s", "t"] {
+            m.call(
+                "feature.edit",
+                json!({"part": "p", "id": id, "params": {"radius": 2}}),
+            )
+            .unwrap();
+        }
+        m.commit("theirs: bigger");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        for id in ["s", "t"] {
+            m.call("feature.delete", json!({"part": "p", "id": id}))
+                .unwrap();
+        }
+        m.commit("ours: gone");
+        m.merge("theirs");
+        let (s, t) = ("parts/p/features/s.json#", "parts/p/features/t.json#");
+        // Theirs' sphere s stays, listed where theirs lists it.
+        let r = resolve(&mut m, s, json!({"choice": "theirs"})).unwrap();
+        assert_eq!(
+            r["changes"],
+            json!([{"path": "parts/p/part.json", "change": "written"}])
+        );
+        let list = m.call("feature.list", json!({"part": "p"})).unwrap();
+        let ids: Vec<&str> = list["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["b", "s"]);
+        // Ours' deletion of t stands: the file goes.
+        let r = resolve(&mut m, t, json!({"choice": "ours"})).unwrap();
+        assert_eq!(
+            r["changes"],
+            json!([{"path": "parts/p/features/t.json", "change": "deleted"}])
+        );
+        assert!(!m.root().join("parts/p/features/t.json").exists());
+        // Kept looks as Git left it: s waits for `git add`, t for `git rm`.
+        let v = &r["status"];
+        assert_eq!(v["conflicts"][0]["id"], s);
+        assert_eq!(v["unstaged"], json!(["parts/p/features/t.json"]));
+        m.git(&["add", "-A"]);
+        let v = m.call("merge.status", json!({})).unwrap();
+        assert_eq!(
+            (v["clean"].as_bool(), v["unstaged"].clone()),
+            (Some(true), json!([]))
+        );
+    }
+
+    #[test]
+    fn a_repair_is_applied_as_planned() {
+        let mut m = boxed();
+        squared(&mut m);
+        m.call(
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [
+                {"op": "add", "type": "length", "a": "l1", "value": "10 mm"},
+            ]}),
+        )
+        .unwrap();
+        m.commit("a dimensioned square");
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        m.call(
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [{"op": "set", "id": "d1", "value": "12 mm"}]}),
+        )
+        .unwrap();
+        m.commit("theirs");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        m.call(
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [{"op": "move", "id": "p2", "at": [10, 3]}]}),
+        )
+        .unwrap();
+        m.commit("ours");
+        m.merge("theirs");
+        let v = m.call("merge.status", json!({})).unwrap();
+        let c = v["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["kind"] == "sketch_stale")
+            .expect("a stale sketch")
+            .clone();
+        let id = c["repairs"][0]["id"].as_str().unwrap();
+        let r = resolve(
+            &mut m,
+            c["id"].as_str().unwrap(),
+            json!({"choice": "repair", "repair": id}),
+        )
+        .unwrap();
+        assert_eq!(r["status"]["clean"], true, "{r}");
+        let g = m
+            .call("sketch.get", json!({"part": "p", "sketch": "s"}))
+            .unwrap();
+        assert_eq!(g["stale"], false, "{g}");
+    }
+
+    #[test]
+    fn values_are_put_at_pointers() {
+        let mut v = json!({"a": {"b": 1}});
+        set_at(&mut v, "/a/c", Some(json!(2)));
+        set_at(&mut v, "/x/y~1z", Some(json!(3)));
+        set_at(&mut v, "/a/b", None);
+        assert_eq!(v, json!({"a": {"c": 2}, "x": {"y/z": 3}}));
+        let mut l: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        put(&mut l, "c", Some(&json!({"first": true})));
+        assert_eq!(l, ["c", "a", "b"]);
+        put(&mut l, "c", Some(&json!({"after": "a"})));
+        assert_eq!(l, ["a", "c", "b"]);
+        put(&mut l, "c", None);
+        assert_eq!(l, ["a", "b"]);
+        put(&mut l, "z", Some(&json!({"after": "gone"})));
+        assert_eq!(l, ["a", "b", "z"]);
     }
 
     #[test]

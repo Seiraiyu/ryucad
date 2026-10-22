@@ -342,6 +342,26 @@ enum MergeCmd {
     /// and what the merge broke that built on either side, each with the side that caused it
     /// and its choices.
     Status,
+    /// Settle a conflict with one side's value, a value of your own, or one of its planned
+    /// repairs, as one logged, undoable change. Marking the file resolved (git add) and
+    /// committing are yours.
+    Resolve {
+        /// The conflict's ID, as `merge status` gives it.
+        conflict: String,
+        #[arg(long, group = "how")]
+        ours: bool,
+        #[arg(long, group = "how")]
+        theirs: bool,
+        /// A JSON value to put in place.
+        #[arg(long, group = "how", value_name = "JSON")]
+        value: Option<String>,
+        /// A planned repair's ID.
+        #[arg(long, group = "how", value_name = "ID")]
+        repair: Option<String>,
+        /// Fail with `conflict` unless the conflict's part is still at this revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1102,6 +1122,43 @@ fn request(cmd: &Command) -> Option<Request> {
             limit: Some(*limit),
         },
         Command::Merge(MergeCmd::Status) => Request::MergeStatus {},
+        Command::Merge(MergeCmd::Resolve {
+            conflict,
+            ours,
+            theirs,
+            value,
+            repair,
+            expect,
+        }) => {
+            let choice = match (ours, theirs, value, repair) {
+                (true, _, _, _) => "ours",
+                (_, true, _, _) => "theirs",
+                (_, _, Some(_), _) => "value",
+                (_, _, _, Some(_)) => "repair",
+                _ => "",
+            };
+            // A value that isn't JSON is the text it says.
+            let value = value
+                .as_ref()
+                .map(|v| serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.clone())));
+            let part = conflict
+                .strip_prefix("parts/")
+                .and_then(|r| r.split('/').next())
+                .map(str::to_owned);
+            let expected_revisions = match (part, expect) {
+                (Some(p), Some(e)) => [(p, e.clone())].into_iter().collect(),
+                _ => Default::default(),
+            };
+            Request::MergeResolve {
+                resolutions: vec![ryucad::proto::Resolution {
+                    conflict: conflict.clone(),
+                    choice: choice.to_owned(),
+                    value,
+                    repair: repair.clone(),
+                }],
+                expected_revisions,
+            }
+        }
         Command::Undo { entry } => Request::Undo { entry: *entry },
         Command::Redo { entry } => Request::Redo { entry: *entry },
         Command::Status { text, entities } => Request::ActivitySet {

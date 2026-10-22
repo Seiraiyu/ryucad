@@ -274,6 +274,10 @@ fn dispatch(
             Ok(v)
         }
         Request::MergeStatus {} => crate::validate::status(session),
+        Request::MergeResolve {
+            resolutions,
+            expected_revisions,
+        } => crate::validate::resolve(session, &resolutions, &expected_revisions),
         Request::DaemonStatus {} | Request::DaemonShutdown {} => Err(Error::new(
             Code::Usage,
             "only a running daemon answers daemon requests",

@@ -116,6 +116,8 @@ pub enum Code {
     /// A merge ryucad can't report on: an octopus merge, of more than two
     /// heads.
     MergeUnsupported,
+    /// `merge.resolve` named a conflict the merge doesn't have (now).
+    ConflictNotFound,
 }
 
 impl Code {
@@ -203,6 +205,7 @@ mod tests {
         assert_eq!(Code::MergeConflict.exit_code(), 1);
         assert_eq!(Code::NotMerging.exit_code(), 1);
         assert_eq!(Code::MergeUnsupported.exit_code(), 1);
+        assert_eq!(Code::ConflictNotFound.exit_code(), 1);
     }
 
     #[test]
