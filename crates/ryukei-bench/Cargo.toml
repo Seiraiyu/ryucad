@@ -84,3 +84,12 @@ required-features = ["occt", "smlib"]
 [[test]]
 name = "blends"
 required-features = ["occt", "smlib"]
+
+[[bench]]
+name = "blend"
+harness = false
+
+[[bench]]
+name = "blend_kernels"
+harness = false
+required-features = ["occt", "smlib"]
