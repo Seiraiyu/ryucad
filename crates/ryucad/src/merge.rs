@@ -446,8 +446,8 @@ fn sketch(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Value 
 
 /// A sketch's entities or constraints, merged by ID. One added by one side
 /// is taken, two different ones added under one ID are an `id_collision`
-/// (ours' kept), one removed on one side and changed on the other is a
-/// `delete_edit`; one changed on both merges per field, positions
+/// (ours' kept), one removed on one side and changed on the other (beyond
+/// its positions) is a `delete_edit`; one changed on both merges per field, positions
 /// ([`POSITIONS`]) never conflicting: each takes the side that moved it,
 /// ours if both did.
 fn members(
@@ -470,7 +470,7 @@ fn members(
             _ if o == t => o.cloned(),
             (None, Some(_), Some(_)) => walk.conflict(&at, Kind::IdCollision, b, o, t),
             (None, x, y) => x.or(y).cloned(),
-            (Some(_), None, x) | (Some(_), x, None) if x == b => None,
+            (Some(_), None, x) | (Some(_), x, None) if fixed(x) == fixed(b) => None,
             (Some(_), None, _) | (Some(_), _, None) => {
                 walk.conflict(&at, Kind::DeleteEdit, b, o, t)
             }
@@ -484,27 +484,56 @@ fn members(
 }
 
 /// One entity or constraint changed on both sides: per field, positions
-/// from the side that moved them. Its `type` changing makes it one value.
+/// from the side that moved them. Its `type` changing makes the rest of it
+/// one value.
 fn member(walk: &mut Walk, at: &str, base: &Value, ours: &Value, theirs: &Value) -> Option<Value> {
     let (Some(b), Some(o), Some(t)) = (base.as_object(), ours.as_object(), theirs.as_object())
     else {
         return walk.value(at, Some(base), Some(ours), Some(theirs));
     };
-    if b.get("type") != o.get("type") || b.get("type") != t.get("type") {
-        return walk.value(at, Some(base), Some(ours), Some(theirs));
-    }
-    let mut out = walk.object(at, b, o, t, &POSITIONS);
+    let retyped = b.get("type") != o.get("type") || b.get("type") != t.get("type");
+    let mut out = if retyped {
+        // One value apart from positions: the side that changed it.
+        let (fb, fo, ft) = (fixed(Some(base)), fixed(Some(ours)), fixed(Some(theirs)));
+        let shape = if fo == fb {
+            t
+        } else if ft == fb || fo == ft {
+            o
+        } else {
+            return walk.conflict(at, Kind::Value, Some(base), Some(ours), Some(theirs));
+        };
+        let mut out = shape.clone();
+        out.retain(|k, _| !POSITIONS.contains(&k.as_str()));
+        out
+    } else {
+        walk.object(at, b, o, t, &POSITIONS)
+    };
+    let shape = if retyped && fixed(Some(ours)) == fixed(Some(base)) {
+        t
+    } else {
+        o
+    };
     for k in POSITIONS {
         let v = if o.get(k) != b.get(k) {
             o.get(k)
         } else {
             t.get(k)
         };
-        if let Some(v) = v {
+        // A retyped member keeps only the positions its new type has.
+        if let Some(v) = v.filter(|_| !retyped || shape.contains_key(k)) {
             out.insert(k.to_owned(), v.clone());
         }
     }
     Some(Value::Object(out))
+}
+
+/// A member without its positions: what it is apart from solver state.
+fn fixed(v: Option<&Value>) -> Option<Value> {
+    let mut v = v?.clone();
+    if let Some(o) = v.as_object_mut() {
+        o.retain(|k, _| !POSITIONS.contains(&k.as_str()));
+    }
+    Some(v)
 }
 
 /// A list of distinct IDs, if `v` is one.
@@ -1184,6 +1213,45 @@ mod tests {
             m.value["entities"]["p1"],
             json!({"type": "point", "m": [0.001, 0], "construction": true})
         );
+    }
+
+    #[test]
+    fn a_member_whose_type_changes_is_one_value() {
+        let base = base_sketch();
+        let mut ours = base.clone();
+        ours["constraints"]["d1"]["type"] = json!("distance");
+        let mut theirs = base.clone();
+        theirs["constraints"]["d1"]["value"] = json!("20 mm");
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/constraints/d1"]);
+        assert_eq!(m.value["constraints"]["d1"], ours["constraints"]["d1"]);
+        // A side that only moved it doesn't stand in the way.
+        let mut ours = base.clone();
+        ours["entities"]["p3"] = json!({"type": "circle", "m": [0, 0.01], "r_m": 0.002});
+        let mut theirs = base.clone();
+        theirs["entities"]["p3"]["m"] = json!([0, 0.02]);
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(
+            m.value["entities"]["p3"],
+            json!({"type": "circle", "m": [0, 0.02], "r_m": 0.002})
+        );
+    }
+
+    #[test]
+    fn a_member_only_moved_follows_its_removal() {
+        let base = base_sketch();
+        let mut ours = base.clone();
+        ours["entities"].as_object_mut().unwrap().remove("p3");
+        let mut theirs = base.clone();
+        theirs["entities"]["p3"]["m"] = json!([0, 0.02]);
+        theirs["constraints"]["d1"]["value"] = json!("12 mm");
+        for (o, t) in [(&ours, &theirs), (&theirs, &ours)] {
+            let m = merge(Some(&base), o, t);
+            assert!(m.is_clean(), "{:?}", m.conflicts);
+            assert!(m.value["entities"].get("p3").is_none());
+            assert_eq!(m.value["constraints"]["d1"]["value"], "12 mm");
+        }
     }
 
     #[test]
