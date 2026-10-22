@@ -1093,3 +1093,51 @@ fn a_compare_marks_the_tree_and_shows_what_changed() {
         compared(a) && a.opened().ws.compare.as_ref().unwrap().rev == "main"
     });
 }
+
+#[test]
+fn a_merge_conflict_is_settled_from_its_panel() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part().committed().diverged();
+    assert!(!p.try_git(&["merge", "--no-edit", "theirs"]));
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        let o = a.opened();
+        // The conflicted box fails in its place; the cylinder builds.
+        o.ws.idle() && o.ws.merge.is_some() && o.ws.model.meshes.len() == 1
+    });
+    h.step();
+    assert!(h.state().title().contains("(merge in progress)"));
+    h.get_by_label("merge in progress");
+    h.get_by_label("value in base").click();
+    h.step();
+    h.get_by_label("ours: 12 mm");
+    h.get_by_label("theirs: 15 mm");
+    h.get_by_label("Show").click();
+    frames(&mut h, |a| a.opened().view.chosen.is_some());
+    h.get_by_label("Take theirs").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .merge
+            .as_ref()
+            .is_some_and(|m| m.clean() && !m.resolving)
+    });
+    h.step();
+    // Said in the panel and the status line.
+    assert_eq!(
+        h.get_all_by_label("merge: settled, ready to git add and commit")
+            .count(),
+        2
+    );
+    h.get_by_label("Settled, waiting for git add: parts/p/features/base.json");
+    // Once committed, the panel goes.
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "--no-edit"]);
+    frames(&mut h, |a| a.opened().ws.merge.is_none());
+    h.step();
+    assert!(h.query_by_label("merge in progress").is_none());
+    assert!(!h.state().title().contains("in progress"));
+}

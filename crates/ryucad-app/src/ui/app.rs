@@ -171,7 +171,8 @@ impl App {
         }
     }
 
-    fn title(&self) -> String {
+    /// The window's title: the project, and a merge in progress.
+    pub fn title(&self) -> String {
         let name = |root: &Path| {
             root.file_name().map_or_else(
                 || root.display().to_string(),
@@ -180,7 +181,10 @@ impl App {
         };
         match &self.screen {
             Screen::Start(_) => "ryucad".to_owned(),
-            Screen::Opened(o) => format!("{} — ryucad", name(&o.ws.root)),
+            Screen::Opened(o) => match &o.ws.merge {
+                Some(m) => format!("{} ({} in progress) — ryucad", name(&o.ws.root), m.step()),
+                None => format!("{} — ryucad", name(&o.ws.root)),
+            },
             Screen::Damaged(d) if d.0.openable() => {
                 format!("{} (repaired) — ryucad", name(&d.0.root))
             }
@@ -309,6 +313,7 @@ impl Opened {
             .default_size(280.0)
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    panels::merge(ui, &mut self.ws, &mut self.view);
                     panels::changes(ui, &self.ws, &self.view);
                     panels::properties(ui, &mut self.ws);
                     ui.separator();

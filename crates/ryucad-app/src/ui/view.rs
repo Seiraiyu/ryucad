@@ -27,6 +27,8 @@ pub struct View {
     pub look: crate::ui::style::Look,
     /// The feature chosen in the tree: its body is painted.
     pub chosen: Option<BodyKey>,
+    /// Entities a merge conflict concerns, shown from the conflict panel.
+    pub marked: Vec<String>,
     pub hover: Option<Hit>,
     /// Where the viewport was last drawn, in points.
     pub rect: egui::Rect,
@@ -112,6 +114,7 @@ impl View {
             sketches: true,
             look: crate::ui::style::Look::default(),
             chosen: None,
+            marked: Vec::new(),
             hover: None,
             rect: egui::Rect::NOTHING,
             picker: None,
@@ -266,6 +269,8 @@ impl View {
                 wanted.extend(h.entities.iter().map(|e| (e.clone(), c)));
             }
         }
+        let note = style::highlight(ryucad::live::Style::Note);
+        wanted.extend(self.marked.iter().map(|e| (e.clone(), note)));
         if let Some(me) = ws.myself() {
             wanted.extend(me.selection.iter().map(|e| (e.clone(), style::SELECTED)));
         }
