@@ -221,7 +221,11 @@ fn refine_pass(
         .collect();
     let mut queued: Vec<bool> = d.inside.clone();
     let mut pos: Vec<Option<Point3>> = vec![None; d.uv.len()];
-    // Below this length in the scaled plane a triangle is not split.
+    // Below this length, both in the scaled plane and in model space, an
+    // edge is not split. The scaled plane alone can shrink an edge far
+    // below its length: near a cone's apex, scaled by the face's smallest
+    // radius, an edge across the face may be many times longer than it
+    // looks there.
     let floor = t.waive / 16.0;
     while let Some(tri) = queue.pop_front() {
         queued[tri as usize] = false;
@@ -248,7 +252,7 @@ fn refine_pass(
         let len = |i: usize| scaled[next(i)].distance(scaled[prev(i)]);
         let i = chord
             .unwrap_or_else(|| (0..3).fold(0, |best, i| if len(i) > len(best) { i } else { best }));
-        if len(i) < floor {
+        if len(i) < floor && xyz[next(i)].distance(xyz[prev(i)]) < floor {
             stop = Some(Stop::Stalled);
             continue;
         }
