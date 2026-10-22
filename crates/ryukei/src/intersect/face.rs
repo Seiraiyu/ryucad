@@ -121,12 +121,26 @@ pub fn face_face(a: (&Body, FaceId), b: (&Body, FaceId)) -> Result<FaceMeet, Fai
         SurfaceHit::Coincident { same } => return coincident(faces, [sa, sb], same),
         SurfaceHit::Meet { branches, points } => (branches, points),
     };
-    // Where each face's edges meet the other's surface.
+    // Where each face's edges meet the other's surface. An edge both faces
+    // use lies on both surfaces (the body is sound): only its ends cut.
     let mut cuts: Vec<Point3> = Vec::new();
+    let shared: Vec<EdgeId> = if core::ptr::eq(a.0, b.0) {
+        let theirs = edges(b);
+        edges(a)
+            .into_iter()
+            .filter(|e| theirs.contains(e))
+            .collect()
+    } else {
+        Vec::new()
+    };
     for (face, other) in [(a, sb), (b, sa)] {
         for e in edges(face) {
             let edge = &face.0.edges[e];
             let curve = &face.0.curves[edge.curve];
+            if shared.contains(&e) {
+                cuts.extend([edge.start, edge.end].map(|v| face.0.vertices[v].point));
+                continue;
+            }
             for hit in curve_surface(curve, edge.interval, other, edge.tolerance.get())? {
                 match hit {
                     CurveHit::Point { point, .. } => cuts.push(point),

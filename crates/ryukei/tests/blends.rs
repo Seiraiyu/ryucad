@@ -227,29 +227,12 @@ fn edges_at(b: &Body, z: f64) -> Vec<Name> {
     ignore = "slow in a debug build: CI runs it in release"
 )]
 fn a_slots_top_all_round() {
-    use ryukei::geom::Surface;
     let b = slot();
     let top = edges_at(&b, 1.0);
     assert_eq!(top.len(), 4);
     let blends: Vec<EdgeBlend> = top.iter().map(|&e| fillet(e, 0.1)).collect();
     let (r, _) = blend(K, &b, &blends).unwrap();
-    // Blend faces meeting tangentially along a section can't be checked
-    // apart until plan 6.D: every other pair can.
-    for f in check_intersections(&r) {
-        let ryukei::check::Fault::CannotCheck { a, b } = f else {
-            panic!("{f:?}")
-        };
-        let blend_face = |x| {
-            matches!(
-                r.surface(r.face(x).unwrap().surface),
-                Some(Surface::Cylinder(c)) if c.radius() == 0.1
-            ) || matches!(
-                r.surface(r.face(x).unwrap().surface),
-                Some(Surface::Torus(_))
-            )
-        };
-        assert!(blend_face(a) && blend_face(b));
-    }
+    assert_eq!(check_intersections(&r), []);
     let c = r.counts();
     // Four blend faces, four rails on the top, four sections between the
     // blend faces, and the four corners where the rails meet.
@@ -547,12 +530,23 @@ fn holes_of(spec: &[(f64, f64, f64)]) -> Body {
         .0
 }
 
-/// Faults of the self-intersection check other than blend faces meeting
-/// tangentially along a section, which plan 6.D certifies apart.
-fn crossings_but_sections(b: &Body) -> Vec<ryukei::check::Fault> {
+/// Faults of the self-intersection check other than two pipe faces
+/// meeting tangentially along an edge (a fillet rolling on an earlier
+/// pipe fillet), which neither surface's implicit form can separate
+/// (phase 8).
+fn faults_but_pipe_rails(b: &Body) -> Vec<ryukei::check::Fault> {
+    use ryukei::geom::Surface;
+    let pipe = |f| {
+        matches!(
+            b.surface(b.face(f).unwrap().surface),
+            Some(Surface::Pipe(_))
+        )
+    };
     check_intersections(b)
         .into_iter()
-        .filter(|f| !matches!(f, ryukei::check::Fault::CannotCheck { .. }))
+        .filter(
+            |f| !matches!(f, ryukei::check::Fault::CannotCheck { a, b } if pipe(*a) && pipe(*b)),
+        )
         .collect()
 }
 
@@ -590,7 +584,7 @@ fn a_chain_across_an_earlier_fillets_end() {
         .map(|&e| fillet(r.edge(e).unwrap().name, 0.1))
         .collect();
     let (s, _) = blend(OpKey(0xb2), &r, &blends).unwrap();
-    assert_eq!(crossings_but_sections(&s), []);
+    assert_eq!(faults_but_pipe_rails(&s), []);
     // A fillet round a cylinder's end, between two straight ones.
     assert!(volume(&s, 1e-4) < volume(&r, 1e-4));
 }
@@ -698,7 +692,7 @@ fn a_chain_round_a_pipe_fillets_end_cut_off_square() {
         .find(|&e| matches!(b.curve(b.edge(e).unwrap().curve), Some(Curve::Ellipse(_))))
         .unwrap();
     let (r, _) = blend(K, &b, &[fillet(b.edge(arc).unwrap().name, 0.2)]).unwrap();
-    assert_eq!(crossings_but_sections(&r), []);
+    assert_eq!(check_intersections(&r), []);
     let pipe = r
         .faces()
         .find(|&f| {
@@ -723,6 +717,6 @@ fn a_chain_round_a_pipe_fillets_end_cut_off_square() {
         .map(|&e| fillet(r.edge(e).unwrap().name, 0.05))
         .collect();
     let (s, _) = blend(OpKey(0xb2), &r, &blends).unwrap();
-    assert_eq!(crossings_but_sections(&s), []);
+    assert_eq!(faults_but_pipe_rails(&s), []);
     assert!(volume(&s, 1e-4) < volume(&r, 1e-4));
 }

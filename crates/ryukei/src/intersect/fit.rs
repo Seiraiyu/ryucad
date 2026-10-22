@@ -108,8 +108,8 @@ fn uv_velocity(s: &Surface, uv: Point2, d: Vector3) -> Option<Vector2> {
 }
 
 /// Bounds on `|S_u|` and `|S_v|` over a parameter box, in closed form;
-/// a pipe's from its jets.
-fn first_bound(s: &Surface, [ru, rv]: [[f64; 2]; 2]) -> (f64, f64) {
+/// a pipe's from its frame along the spine.
+pub(crate) fn first_bound(s: &Surface, [ru, rv]: [[f64; 2]; 2]) -> (f64, f64) {
     let k = 1.0 + 1e-12;
     let (su, sv) = match s {
         Surface::Plane(_) => (1.0, 1.0),

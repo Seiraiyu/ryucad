@@ -212,15 +212,6 @@ fn a_cavitys_edges_meet_in_concave_balls() {
     );
 }
 
-/// Faults of the self-intersection check other than blend faces meeting
-/// tangentially along a section, which plan 6.D certifies apart.
-fn crossings_but_sections(b: &Body) -> Vec<ryukei::check::Fault> {
-    check_intersections(b)
-        .into_iter()
-        .filter(|f| !matches!(f, ryukei::check::Fault::CannotCheck { .. }))
-        .collect()
-}
-
 /// The area of the corner a fillet of radius `r` takes from a square
 /// edge, and how far its centroid is from the edge along each face.
 fn wedge(r: f64) -> (f64, f64) {
@@ -407,7 +398,7 @@ fn a_smaller_pair_rolls_over_a_larger_fillet() {
     // The big fillet all along; the small ones along the box's edges up
     // to the big one, and round its end on +Y.
     let want = 1.0 - a_big - 2.0 * (1.0 - big) * a - PI / 2.0 * (big - d) * a;
-    assert_eq!(crossings_but_sections(&out), []);
+    assert_eq!(check_intersections(&out), []);
     near(volume(&out, 1e-5), want, 2e-5);
 }
 
@@ -459,7 +450,7 @@ fn a_blocks_foot_rolls_round_its_rounded_edges() {
     let (a_big, _) = wedge(big);
     let (a, d) = wedge(small);
     let want = 9.0 + 1.0 - 4.0 * a_big + 4.0 * (1.0 - 2.0 * big) * a + 2.0 * PI * (big + d) * a;
-    assert_eq!(crossings_but_sections(&out), []);
+    assert_eq!(check_intersections(&out), []);
     near(volume(&out, 1e-5), want, 4e-5);
 }
 
@@ -484,7 +475,7 @@ fn rolled_corners_are_their_stages() {
         fillet(edge(k, MinusX, PlusY), c),
     ];
     let (out, _) = blend(K, &bx, &blends).unwrap();
-    assert_eq!(crossings_but_sections(&out), []);
+    assert_eq!(check_intersections(&out), []);
     // The same by hand, stage by stage: each end curve at a corner joins
     // the edges rolling over it.
     let (s1, _) = blend(OpKey(1), &bx, &blends[..1]).unwrap();

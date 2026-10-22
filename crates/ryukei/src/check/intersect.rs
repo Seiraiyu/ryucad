@@ -16,11 +16,18 @@
 //! [`Fault::FacesCross`]; faces on one surface
 //! whose regions overlap in an area are [`Fault::FacesOverlap`]; a pair
 //! that can't be intersected is [`Fault::CannotCheck`].
+//!
+//! Faces tangent along an edge they share (a fillet and its support, two
+//! blends across a section) can't be traced there. They are certified
+//! apart outside a strip round their shared edges as wide as that reach
+//! allows a tangent wedge, `sqrt(2 × size × reach)` ([`face_beside`]), or
+//! reported as [`Fault::CannotCheck`].
 
 use super::Fault;
+use crate::geom::{Curve, Frame, Plane, Point3, Surface};
 use crate::intersect::broad::BoxTree;
-use crate::intersect::{FaceMeet, Place, face_box, face_face};
-use crate::topo::{Body, FaceId};
+use crate::intersect::{FaceMeet, Place, face_beside, face_box, face_face};
+use crate::topo::{Body, EdgeId, FaceId, VertexId};
 use rayon::prelude::*;
 
 /// Faces that cross, overlap or can't be checked, by pair in face order.
@@ -35,14 +42,189 @@ pub fn check_intersections(body: &Body) -> Vec<Fault> {
     let pairs = BoxTree::new(boxes).self_pairs();
     pairs
         .par_iter()
-        .filter_map(|&(i, j)| {
-            let (a, b) = (faces[i], faces[j]);
-            match face_face((body, a), (body, b)) {
-                Err(_) => Some(Fault::CannotCheck { a, b }),
-                Ok(meet) => fault(a, b, &prune(body, a, b, meet)),
-            }
-        })
+        .filter_map(|&(i, j)| pair(body, faces[i], faces[j]))
         .collect()
+}
+
+/// The fault two faces of a body make, if any.
+fn pair(body: &Body, a: FaceId, b: FaceId) -> Option<Fault> {
+    // Faces tangent along an edge they share can't be traced there: they
+    // are certified apart beside it, and only traced if that fails.
+    let shared = shared_edges(body, a, b);
+    let tangent = tangent(body, a, b, &shared);
+    if tangent && apart_beside(body, a, b, &shared) {
+        return None;
+    }
+    match face_face((body, a), (body, b)) {
+        Ok(meet) => fault(a, b, &prune(body, a, b, meet)),
+        // Faces crossing at an edge they share where it can't be traced (a
+        // pipe cut off at its spine's end), or touching at vertices they
+        // share, apart beside them all the same.
+        Err(_) if !tangent && !shared.is_empty() && apart_beside(body, a, b, &shared) => None,
+        Err(_) if shared.is_empty() && apart_at_vertices(body, a, b) => None,
+        Err(_) => Some(Fault::CannotCheck { a, b }),
+    }
+}
+
+/// The edges two faces both use, each once.
+fn shared_edges(body: &Body, a: FaceId, b: FaceId) -> Vec<EdgeId> {
+    let edges = |f: FaceId| -> Vec<EdgeId> {
+        body.face_loops(f)
+            .flat_map(|l| {
+                body.loop_fins(l)
+                    .map(|fin| body.fins[fin].edge)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    let eb = edges(b);
+    let mut out: Vec<EdgeId> = edges(a).into_iter().filter(|e| eb.contains(e)).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Whether two faces meet tangentially along an edge they share: their
+/// surfaces' normals are parallel, within a millionth of a radian, at
+/// the middle of one of them. This only chooses how the pair is checked; both
+/// ways are certified.
+fn tangent(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId]) -> bool {
+    shared.iter().any(|&e| {
+        let x = &body.edges[e];
+        let p = body.curves[x.curve].point((x.interval[0] + x.interval[1]) / 2.0);
+        let normal = |f: FaceId| {
+            let s = &body.surfaces[body.faces[f].surface];
+            let (u, v) = s.project(p).param;
+            s.normal(u, v)
+        };
+        match (normal(a), normal(b)) {
+            (Some(na), Some(nb)) => na.get().cross(nb.get()).length() <= 1e-6,
+            _ => false,
+        }
+    })
+}
+
+/// Whether two faces tangent along the edges they share are certified to
+/// meet nowhere else, outside a strip round those edges as wide as
+/// surfaces meeting tangentially stay within the touch rule's reach of
+/// each other, `sqrt(2 × size × reach)`: one face keeps off the other's
+/// surface there ([`face_beside`]), as a fillet does off the face it
+/// rolls on, or the two lie on either side of the plane of a planar edge
+/// they share, as blends do across a section.
+fn apart_beside(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId]) -> bool {
+    let reach = TOUCH * slack(body, a).max(slack(body, b));
+    let size = {
+        let bx = face_box(body, a).union(&face_box(body, b));
+        (bx.max() - bx.min()).length()
+    };
+    let strip = (2.0 * size * reach).sqrt();
+    let surface = |f: FaceId| &body.surfaces[body.faces[f].surface];
+    let side = |x: FaceId, of: &Surface| face_beside(body, x, of, shared, &[], strip).ok();
+    // The more curved face first: a fillet keeps off the surface of the
+    // face it rolls on, while that face may well run on past the fillet's
+    // surface.
+    let (x, y) = if rank(surface(a)) >= rank(surface(b)) {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    if side(x, surface(y)).is_some() || side(y, surface(x)).is_some() {
+        return true;
+    }
+    let Some(plane) = section_plane(body, shared) else {
+        return false;
+    };
+    match (side(a, &plane), side(b, &plane)) {
+        (Some(sa), Some(sb)) => {
+            let one = |s: [bool; 2]| s != [true, true];
+            one(sa)
+                && one(sb)
+                && (sa[0] && sb[1] || sa[1] && sb[0] || sa == [false; 2] || sb == [false; 2])
+        }
+        _ => false,
+    }
+}
+
+/// Whether two faces sharing vertices but no edge, which may touch at
+/// those vertices as tangent wedges do, are certified apart outside the
+/// balls round them as wide as the reach allows a tangent wedge
+/// ([`face_beside`]), one face keeping off the other's surface there.
+fn apart_at_vertices(body: &Body, a: FaceId, b: FaceId) -> bool {
+    let vertices = |f: FaceId| -> Vec<VertexId> {
+        body.face_loops(f)
+            .flat_map(|l| {
+                body.loop_fins(l)
+                    .filter_map(|fin| body.fin_start(fin))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    let vb = vertices(b);
+    let mut shared: Vec<VertexId> = vertices(a).into_iter().filter(|v| vb.contains(v)).collect();
+    shared.sort();
+    shared.dedup();
+    if shared.is_empty() {
+        return false;
+    }
+    let reach = TOUCH * slack(body, a).max(slack(body, b));
+    let size = {
+        let bx = face_box(body, a).union(&face_box(body, b));
+        (bx.max() - bx.min()).length()
+    };
+    let strip = (2.0 * size * reach).sqrt();
+    let surface = |f: FaceId| &body.surfaces[body.faces[f].surface];
+    face_beside(body, a, surface(b), &[], &shared, strip).is_ok()
+        || face_beside(body, b, surface(a), &[], &shared, strip).is_ok()
+}
+
+/// How curved a surface is, by kind: a plane least, a pipe most.
+fn rank(s: &Surface) -> u8 {
+    match s {
+        Surface::Plane(_) => 0,
+        Surface::Cylinder(_) | Surface::Cone(_) => 1,
+        Surface::Sphere(_) => 2,
+        Surface::Torus(_) => 3,
+        _ => 4,
+    }
+}
+
+/// The plane of a lone shared edge that is planar: a circle's or an
+/// ellipse's, or the plane through three of a NURBS's control points
+/// (spread as far apart as they go) when every control point lies within
+/// the edge's tolerance of it (so the curve does, inside their hull).
+/// The plane only separates the faces; the strip round the edge covers
+/// how far the edge lies from it.
+fn section_plane(body: &Body, shared: &[EdgeId]) -> Option<Surface> {
+    let [e] = shared else {
+        return None;
+    };
+    let frame = match &body.curves[body.edges[*e].curve] {
+        Curve::Circle(c) => *c.frame(),
+        Curve::Ellipse(c) => *c.frame(),
+        Curve::Nurbs(n) => {
+            let pts: Vec<Point3> = n.control_points().collect();
+            // Three control points spread as far apart as they go: the
+            // first, the farthest from it, and the farthest from the line
+            // through both.
+            let a = pts[0];
+            let far = |f: &dyn Fn(Point3) -> f64| {
+                pts.iter()
+                    .copied()
+                    .max_by(|p, q| f(*p).total_cmp(&f(*q)))
+                    .expect("control points")
+            };
+            let b = far(&|p| p.distance(a));
+            let c = far(&|p| (p - a).cross(b - a).length());
+            let frame = Frame::new(a, (b - a).cross(c - a), b - a).ok()?;
+            let off = |p: Point3| (p - a).dot(frame.z().get()).abs();
+            if pts.iter().any(|&p| off(p) > body.edges[*e].tolerance.get()) {
+                return None;
+            }
+            frame
+        }
+        _ => return None,
+    };
+    Some(Surface::Plane(Plane::new(frame)))
 }
 
 /// The largest tolerance on a face's boundary.
@@ -253,6 +435,15 @@ mod tests {
             faults.iter().all(|f| matches!(f, Fault::FacesCross { .. })),
             "{faults:?}"
         );
+    }
+
+    #[test]
+    fn a_flat_cones_side_meets_its_base_at_an_edge() {
+        // Radius 82, height a millimetre: the side meets the base at
+        // about 1e-5 rad, which is no tangency to be checked beside it.
+        let t = Rigid::rotation(Vector3::new(0.2, -0.2, 1.0).normalize().unwrap(), 2.9);
+        let b = primitive::cone(OpKey(1), 81.8, 0.001, &t).unwrap().0;
+        assert_eq!(check_intersections(&b), []);
     }
 
     #[test]

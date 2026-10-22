@@ -1,6 +1,7 @@
 //! Booleans on blend faces: holes and cuts through fillets, analytic
-//! (a torus) and not (a pipe). Every result passes the checker, meshes
-//! without faults, and encloses the volume it should: exactly where the fillet is analytic, half the body
+//! (a torus) and not (a pipe). Every result passes the checker and the
+//! self-intersection check, meshes without faults, and encloses the
+//! volume it should: exactly where the fillet is analytic, half the body
 //! where a symmetry plane halves it, and the rod's volume less where a
 //! rod drills through. Blending and meshing pipes is slow in a debug
 //! build, so the pipe cases run in release only (`cargo test -p ryukei
@@ -8,7 +9,7 @@
 
 use ryukei::blend::{BlendKind, EdgeBlend, blend};
 use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
-use ryukei::check::check;
+use ryukei::check::{check, check_intersections};
 use ryukei::geom::{Curve, Rigid, Surface, Vector3};
 use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::name::OpKey;
@@ -19,6 +20,7 @@ use std::f64::consts::{FRAC_PI_2, PI};
 /// The volume a sound body's mesh encloses.
 fn volume(b: &Body, chord: f64) -> f64 {
     assert_eq!(check(b), []);
+    assert_eq!(check_intersections(b), []);
     let m = tessellate(b, &MeshParams::new(chord, 0.1)).unwrap();
     assert!(m.faults.is_empty(), "{:?}", m.faults);
     check_mesh(b, &m).unwrap();

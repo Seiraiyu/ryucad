@@ -22,6 +22,7 @@ mod nurbs;
 pub(crate) mod pipe;
 mod point;
 mod project;
+pub(crate) mod sheet;
 mod surface;
 mod swept;
 mod transform;

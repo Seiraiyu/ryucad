@@ -11,7 +11,7 @@
 //! --release --test blend_props`).
 
 use ryukei::blend::{BlendKind, Chamfer, EdgeBlend, blend};
-use ryukei::check::check;
+use ryukei::check::{Fault, check, check_intersections};
 use ryukei::geom::{Curve, Rigid, Vector3};
 use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::name::OpKey;
@@ -128,7 +128,7 @@ fn corner(b: &Body, e: EdgeId, size: f64) -> f64 {
 )]
 fn blends_of_random_primitives() {
     let mut g = Lcg::new(0x626c_656e_6473);
-    let (mut built, mut overflow, mut other) = (0, 0, 0);
+    let (mut built, mut overflow, mut other, mut unchecked) = (0, 0, 0, 0);
     for case in 0..48 {
         let (b, small) = body(&mut g);
         let (picked, _) = edges(&mut g, &b);
@@ -171,6 +171,21 @@ fn blends_of_random_primitives() {
             Ok((r, _)) => {
                 built += 1;
                 assert_eq!(check(&r), [], "case {case}");
+                // Faces never cross; a pair the check can't decide (two
+                // fillets of different sizes trimmed against each other,
+                // whose surfaces' intersection has a node where their
+                // rails cross) is rare.
+                let faults = check_intersections(&r);
+                assert!(
+                    faults
+                        .iter()
+                        .all(|f| matches!(f, Fault::CannotCheck { .. })),
+                    "case {case}: {faults:?}"
+                );
+                if !faults.is_empty() {
+                    unchecked += 1;
+                    eprintln!("case {case}: {faults:?}");
+                }
                 let (before, after) = (volume(&b), volume(&r));
                 let most: f64 = picked.iter().map(|&e| corner(&b, e, size)).sum();
                 assert!(after < before, "case {case}: {before} {after}");
@@ -196,8 +211,9 @@ fn blends_of_random_primitives() {
             Err(e) => panic!("case {case}: {e:?}"),
         }
     }
-    eprintln!("built {built}, overflowed {overflow}, refused {other}");
+    eprintln!("built {built}, overflowed {overflow}, refused {other}, unchecked {unchecked}");
     assert!(built >= 16, "only {built} built");
+    assert!(unchecked <= 1, "{unchecked} not checked");
     assert!(overflow >= 1, "{overflow}");
     assert!(other <= 4, "{other} refused");
 }
