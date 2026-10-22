@@ -18,6 +18,7 @@ pub mod git;
 pub mod graph;
 pub mod inspect;
 pub mod live;
+pub mod merge;
 pub mod mesh;
 pub mod notify;
 pub mod param;
