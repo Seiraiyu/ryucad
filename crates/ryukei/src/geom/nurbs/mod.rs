@@ -18,6 +18,7 @@ mod surface;
 pub use basis::Basis;
 pub(crate) use bezier::{BezierCurve, BezierPatch};
 pub use convert::Reparam;
+pub(crate) use convert::{TURN, turn_knots};
 pub use curve::NurbsCurve;
 pub use curve2::NurbsCurve2;
 pub(crate) use eval::Coords;

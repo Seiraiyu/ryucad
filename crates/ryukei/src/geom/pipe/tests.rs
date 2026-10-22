@@ -384,3 +384,29 @@ fn pcurves_on_pipes() {
         }
     }
 }
+
+#[test]
+fn nurbs_within_a_tolerance() {
+    for (p, range) in [(on_plane(), [0.0, 2.0]), (round_cylinder(), [0.5, 3.0])] {
+        let (n, [rs, rt], bound) = p.to_nurbs_within(range, 1e-6).unwrap();
+        assert!(bound <= 1e-6, "{bound}");
+        assert_eq!((rs, rt), (Reparam::Identity, Reparam::Angle));
+        for i in 0..=24 {
+            for j in 0..=24 {
+                let s = range[0] + (range[1] - range[0]) * f64::from(i) / 24.0;
+                let t = TAU * f64::from(j) / 24.0;
+                let d = n.point(s, rt.to_nurbs(t)).distance(p.point(s, t));
+                assert!(d <= bound, "{d} > {bound} at {s}, {t}");
+            }
+        }
+        // Tighter takes more spans.
+        let (fine, ..) = p.to_nurbs_within(range, 1e-8).unwrap();
+        assert!(fine.counts()[0] > n.counts()[0]);
+    }
+    // Outside a clamped spine's domain.
+    let p = on_plane();
+    assert_eq!(
+        p.to_nurbs_within([-1.0, 1.0], 1e-6).err(),
+        Some(Error::Degenerate)
+    );
+}
