@@ -350,6 +350,7 @@ enum MergeCmd {
     /// Settle a conflict with one side's value, a value of your own, or one of its planned
     /// repairs, as one logged, undoable change. Marking the file resolved (git add) and
     /// committing are yours.
+    #[command(group = clap::ArgGroup::new("how").required(true))]
     Resolve {
         /// The conflict's ID, as `merge status` gives it.
         conflict: String,
@@ -1135,12 +1136,12 @@ fn request(cmd: &Command) -> Option<Request> {
             repair,
             expect,
         }) => {
-            let choice = match (ours, theirs, value, repair) {
-                (true, _, _, _) => "ours",
-                (_, true, _, _) => "theirs",
-                (_, _, Some(_), _) => "value",
-                (_, _, _, Some(_)) => "repair",
-                _ => "",
+            // Clap requires exactly one.
+            let choice = match (ours, theirs, value) {
+                (true, _, _) => "ours",
+                (_, true, _) => "theirs",
+                (_, _, Some(_)) => "value",
+                _ => "repair",
             };
             // A value that isn't JSON is the text it says.
             let value = value

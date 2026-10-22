@@ -1514,3 +1514,60 @@ fn diff_and_check_through_the_cli() {
     p.fails(&["rebuild", "--rev", "HEAD~5"], "rev_not_found", 1);
     p.fails(&["check", "--against", "nowhere"], "rev_not_found", 1);
 }
+
+#[test]
+fn merges_through_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=20", "--param",
+        "z=5",
+    ]);
+    p.git(&["init", "-q", "-b", "main"]);
+    p.ok(&["git", "install"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "start"]);
+    p.fails(&["merge", "status"], "not_merging", 1);
+    p.git(&["checkout", "-q", "-b", "theirs"]);
+    p.ok(&["feature", "edit", "p", "b", "--param", "x=15"]);
+    p.git(&["commit", "-q", "-am", "theirs"]);
+    p.git(&["checkout", "-q", "main"]);
+    p.ok(&["feature", "edit", "p", "b", "--param", "x=12"]);
+    p.git(&["commit", "-q", "-am", "ours"]);
+    for root in [&p.direct, &p.daemon] {
+        let out = std::process::Command::new("git")
+            .args(["merge", "--no-edit", "theirs"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1));
+    }
+    let id = "parts/p/features/b.json#/params/x";
+    let v = p.ok(&["merge", "status"]);
+    assert_eq!(v["step"], "merge");
+    assert_eq!(v["conflicts"][0]["id"], id);
+    assert_eq!(v["conflicts"][0]["theirs"], "15 mm");
+    p.fails(&["feature", "show", "p", "b"], "merge_conflict", 1);
+    p.fails(&["merge", "resolve", id], "usage", 2);
+    p.fails(
+        &["merge", "resolve", "nowhere#", "--ours"],
+        "conflict_not_found",
+        1,
+    );
+    p.fails(
+        &["merge", "resolve", id, "--theirs", "--expect", "0000"],
+        "conflict",
+        1,
+    );
+    let r = p.ok(&["merge", "resolve", id, "--value", "13 mm"]);
+    assert_eq!(r["status"]["clean"], true);
+    assert_eq!(r["status"]["unstaged"][0], "parts/p/features/b.json");
+    let b = p.ok(&["feature", "show", "p", "b"]);
+    assert_eq!(b["params"]["x"]["value"], "13 mm");
+    // The daemon logged it: undo brings the conflict back.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["merge", "status"]);
+    assert_eq!(v["result"]["conflicts"][0]["id"], id);
+}
