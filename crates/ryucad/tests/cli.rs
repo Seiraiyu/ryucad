@@ -1346,7 +1346,14 @@ fn git_install_registers_the_drivers_and_the_hook() {
     );
     git(&root, &["init", "-q", "-b", "main"]);
     let (_, v) = run(&["doctor"]);
-    assert_eq!(codes(&v), ["git_drivers_missing", "git_hook_missing"]);
+    assert_eq!(
+        codes(&v),
+        [
+            "git_drivers_missing",
+            "git_hook_missing",
+            "git_hook_missing"
+        ]
+    );
     // The drivers in the user's config; the clone's own setup is per clone.
     let (code, v) = run(&["git", "install", "--global"]);
     assert_eq!(code, 0, "{v}");
@@ -1368,7 +1375,7 @@ fn git_install_registers_the_drivers_and_the_hook() {
     assert!(global.contains("[diff \"ryucad\"]"), "{global}");
     assert!(global.contains("[merge \"ryucad\"]"), "{global}");
     let (_, v) = run(&["doctor"]);
-    assert_eq!(codes(&v), ["git_hook_missing"]);
+    assert_eq!(codes(&v), ["git_hook_missing", "git_hook_missing"]);
     // In the repository's own config: the drivers and the hook.
     fs::remove_file(home.join(".gitconfig")).unwrap();
     let (code, v) = run(&["git", "install"]);
@@ -1377,7 +1384,9 @@ fn git_install_registers_the_drivers_and_the_hook() {
         (0, Some("local")),
         "{v}"
     );
-    assert_eq!(v["result"]["hook"]["status"], "installed");
+    for h in ["pre-merge-commit", "pre-commit"] {
+        assert_eq!(v["result"]["hooks"][h]["status"], "installed", "{h}");
+    }
     let local = fs::read_to_string(root.join(".git/config")).unwrap();
     assert!(
         local.contains("textconv") && local.contains("merge-driver"),
@@ -1385,6 +1394,10 @@ fn git_install_registers_the_drivers_and_the_hook() {
     );
     let hook = root.join(".git/hooks/pre-merge-commit");
     let script = fs::read_to_string(&hook).unwrap();
+    assert_eq!(
+        fs::read_to_string(root.join(".git/hooks/pre-commit")).unwrap(),
+        script
+    );
     assert!(script.ends_with("' merge status --hook\n"), "{script}");
     #[cfg(unix)]
     {
@@ -1400,9 +1413,13 @@ fn git_install_registers_the_drivers_and_the_hook() {
     fs::write(&hook, "#!/bin/sh\necho mine\n").unwrap();
     let (code, v) = run(&["git", "install"]);
     assert_eq!(code, 0, "{v}");
-    assert_eq!(v["result"]["hook"]["status"], "foreign");
+    assert_eq!(
+        v["result"]["hooks"]["pre-merge-commit"]["status"],
+        "foreign"
+    );
+    assert_eq!(v["result"]["hooks"]["pre-commit"]["status"], "installed");
     assert!(
-        v["result"]["hook"]["line"]
+        v["result"]["hooks"]["pre-merge-commit"]["line"]
             .as_str()
             .unwrap()
             .ends_with("' merge status --hook || exit 1")
@@ -1416,7 +1433,10 @@ fn git_install_registers_the_drivers_and_the_hook() {
     git(&other, &["init", "-q", "-b", "main"]);
     let (code, v) = run_in(&other, &["init"]);
     assert_eq!(code, 0, "{v}");
-    assert_eq!(v["result"]["git"]["hook"]["status"], "installed");
+    assert_eq!(
+        v["result"]["git"]["hooks"]["pre-commit"]["status"],
+        "installed"
+    );
     let (_, v) = run_in(&other, &["doctor"]);
     assert_eq!(v["result"]["healthy"], true, "{v}");
 }
@@ -1444,7 +1464,7 @@ fn diff_and_check_through_the_cli() {
     p.git(&["init", "-q", "-b", "main"]);
     // Registered in each repository, so the user's own config doesn't count.
     let installed = p.ok(&["git", "install"]);
-    assert_eq!(installed["hook"]["status"], "installed");
+    assert_eq!(installed["hooks"]["pre-commit"]["status"], "installed");
     p.git(&["add", "."]);
     p.git(&["commit", "-q", "-m", "start"]);
     let head = git(&p.direct, &["rev-parse", "HEAD"]).trim().to_owned();

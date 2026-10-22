@@ -365,7 +365,7 @@ pub fn diagnose(root: &Path) -> Vec<Issue> {
 /// In a repository: what lets Git read and merge the project's files
 /// through ryucad, and refuse a merge commit while the merge is unresolved.
 fn diagnose_git(root: &Path, issues: &mut Vec<Issue>) {
-    use crate::drivers::{ATTRIBUTES, HOOK, Hook};
+    use crate::drivers::{ATTRIBUTES, Hook};
     let Some(setup) = crate::drivers::setup(root) else {
         return;
     };
@@ -392,32 +392,34 @@ fn diagnose_git(root: &Path, issues: &mut Vec<Issue>) {
         ));
     }
     let line = crate::drivers::hook_line().unwrap_or_default();
-    match setup.hook {
-        Hook::Installed(_) => {}
-        Hook::Missing(p) => issues.push(issue(
-            "git_hook_missing",
-            Vec::new(),
-            format!(
-                "this clone has no {HOOK} hook ({}): a merge commit can be made while the merge leaves the model broken; run `ryucad git install`",
-                p.display()
-            ),
-        )),
-        Hook::HooksPath(p) => issues.push(issue(
-            "git_hook_missing",
-            Vec::new(),
-            format!(
-                "core.hooksPath is set and {} doesn't run ryucad's merge check; add this line to it: {line}",
-                p.display()
-            ),
-        )),
-        Hook::Foreign(p) => issues.push(issue(
-            "git_hook_foreign",
-            Vec::new(),
-            format!(
-                "{} is another tool's, so ryucad left it alone; add this line to it: {line}",
-                p.display()
-            ),
-        )),
+    for (name, hook) in setup.hooks {
+        match hook {
+            Hook::Installed(_) => {}
+            Hook::Missing(p) => issues.push(issue(
+                "git_hook_missing",
+                Vec::new(),
+                format!(
+                    "this clone has no {name} hook ({}): a merge can be committed while it leaves the model broken; run `ryucad git install`",
+                    p.display()
+                ),
+            )),
+            Hook::HooksPath(p) => issues.push(issue(
+                "git_hook_missing",
+                Vec::new(),
+                format!(
+                    "core.hooksPath is set and its {name} hook ({}) doesn't run ryucad's merge check; add this line to it: {line}",
+                    p.display()
+                ),
+            )),
+            Hook::Foreign(p) => issues.push(issue(
+                "git_hook_foreign",
+                Vec::new(),
+                format!(
+                    "the {name} hook ({}) is another tool's, so ryucad left it alone; add this line to it: {line}",
+                    p.display()
+                ),
+            )),
+        }
     }
 }
 
@@ -1551,7 +1553,7 @@ pub(crate) mod tests {
     /// Makes `r` a repository set up for ryucad, by hand: the test binary
     /// isn't ryucad, so `git install` would register the wrong program.
     pub(crate) fn in_repo(r: &Path) {
-        use crate::drivers::{HOOK, MERGE_DRIVER, TEXTCONV};
+        use crate::drivers::{HOOKS, MERGE_DRIVER, TEXTCONV};
         let git = |args: &[&str]| crate::git::tests::git(r, args);
         git(&["init", "-q"]);
         git(&["config", TEXTCONV, "ryucad git textconv"]);
@@ -1562,7 +1564,9 @@ pub(crate) mod tests {
         ]);
         let hooks = r.join(".git/hooks");
         fs::create_dir_all(&hooks).unwrap();
-        fs::write(hooks.join(HOOK), "ryucad merge status --hook\n").unwrap();
+        for h in HOOKS {
+            fs::write(hooks.join(h), "ryucad merge status --hook\n").unwrap();
+        }
         crate::drivers::write_attributes(r).unwrap();
     }
 
@@ -1608,7 +1612,7 @@ pub(crate) mod tests {
         in_repo(r);
         let git = |args: &[&str]| crate::git::tests::git(r, args);
         git(&["config", "--unset", crate::drivers::MERGE_DRIVER]);
-        let hook = r.join(".git/hooks").join(crate::drivers::HOOK);
+        let hook = r.join(".git/hooks").join(crate::drivers::HOOKS[0]);
         fs::write(&hook, "#!/bin/sh\necho someone else's\n").unwrap();
         let v = report(r).unwrap();
         let codes: Vec<&str> = v["issues"]

@@ -10,7 +10,8 @@ use std::path::PathBuf;
 
 /// A repository holding a project, maybe below its root.
 struct Repo {
-    dir: tempfile::TempDir,
+    /// The folder of the test: the home, and every clone.
+    dir: std::rc::Rc<tempfile::TempDir>,
     /// The work tree.
     top: PathBuf,
     /// The project folder.
@@ -30,7 +31,11 @@ impl Repo {
         };
         fs::create_dir_all(&root).unwrap();
         fs::create_dir_all(dir.path().join("home")).unwrap();
-        let r = Repo { dir, top, root };
+        let r = Repo {
+            dir: std::rc::Rc::new(dir),
+            top,
+            root,
+        };
         r.ryucad(&["init"]);
         r.git(&["init", "-q", "-b", "main"]);
         let bin = assert_cmd::cargo::cargo_bin("ryucad");
@@ -41,6 +46,26 @@ impl Repo {
             "merge.ryucad.driver",
             &format!("'{bin}' git merge-driver %O %A %B %P"),
         ]);
+        r
+    }
+
+    /// A clone of this repository at `name` in the test's folder, set up
+    /// with `ryucad git install` as its owner would set it up.
+    fn clone_as(&self, name: &str) -> Repo {
+        let top = self.dir.path().join(name);
+        self.git(&[
+            "clone",
+            "-q",
+            self.top.to_str().unwrap(),
+            top.to_str().unwrap(),
+        ]);
+        let sub = self.root.strip_prefix(&self.top).unwrap();
+        let r = Repo {
+            dir: self.dir.clone(),
+            root: top.join(sub),
+            top,
+        };
+        r.ryucad(&["git", "install"]);
         r
     }
 
@@ -330,5 +355,108 @@ fn a_project_below_the_repository_root_merges_too() {
     assert_eq!(
         r.json(BOX)["params"],
         json!({"x": "12 mm", "y": "25 mm", "z": "5 mm"})
+    );
+}
+
+#[test]
+fn the_hooks_refuse_a_merge_commit_until_it_is_settled() {
+    let r = boxed("");
+    let installed = r.ryucad(&["git", "install"]);
+    assert_eq!(
+        installed["hooks"]["pre-merge-commit"]["status"],
+        "installed"
+    );
+    // Theirs adds a sphere sized by `wall`; ours deletes the parameter.
+    // Git merges the files cleanly: only rebuilding shows the break.
+    r.git(&["checkout", "-q", "-b", "theirs"]);
+    r.ryucad(&[
+        "feature",
+        "add",
+        "p",
+        "sphere",
+        "--id",
+        "s",
+        "--param",
+        "radius=wall",
+    ]);
+    r.commit("theirs: a sphere as big as the wall");
+    r.git(&["checkout", "-q", "main"]);
+    r.ryucad(&["param", "delete", "p", "wall"]);
+    r.commit("ours: no wall");
+    let (code, out) = r.git_status(&["merge", "--no-edit", "theirs"]);
+    assert_ne!(code, 0, "{out}");
+    assert!(
+        out.contains("ryucad: the merge leaves 1 conflict(s)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("parts/p/features/s.json#merge_broke (merge_broke, ours)"),
+        "{out}"
+    );
+    let v = r.ryucad(&["merge", "status"]);
+    assert_eq!(
+        v["conflicts"][0]["error"]["code"], "unknown_parameter",
+        "{v}"
+    );
+    // The agent puts the parameter back; the commit goes through.
+    r.ryucad(&["param", "set", "p", "wall=4 mm"]);
+    r.git(&["add", "-A"]);
+    r.git(&["commit", "-q", "--no-edit"]);
+    let parents = r.git(&["log", "-1", "--format=%P"]);
+    assert_eq!(parents.split_whitespace().count(), 2, "{parents}");
+    // A merge Git stopped for conflicts is checked when it is committed.
+    r.git(&["checkout", "-q", "-b", "later"]);
+    r.ryucad(&["feature", "edit", "p", "b", "--param", "x=15"]);
+    r.commit("later: longer");
+    r.git(&["checkout", "-q", "main"]);
+    r.ryucad(&["feature", "edit", "p", "b", "--param", "x=12"]);
+    r.commit("main: a bit longer");
+    let (code, _) = r.git_status(&["merge", "--no-edit", "later"]);
+    assert_eq!(code, 1);
+    // Marked resolved without settling it: the commit is refused.
+    r.git(&["add", "-A"]);
+    let (code, out) = r.git_status(&["commit", "--no-edit"]);
+    assert_ne!(code, 0, "{out}");
+    assert!(
+        out.contains("parts/p/features/b.json#/params/x (value, both)"),
+        "{out}"
+    );
+    r.ryucad(&[
+        "merge",
+        "resolve",
+        "parts/p/features/b.json#/params/x",
+        "--theirs",
+    ]);
+    r.git(&["add", "-A"]);
+    r.git(&["commit", "-q", "--no-edit"]);
+    assert_eq!(r.json(BOX)["params"]["x"], "15 mm");
+    // Outside a merge the check passes at once: ordinary commits pay nothing.
+    r.ryucad(&["feature", "edit", "p", "b", "--param", "z=6"]);
+    r.commit("an ordinary commit");
+}
+
+#[test]
+fn a_pull_is_checked_as_a_merge() {
+    let up = boxed("");
+    let down = up.clone_as("down");
+    // Upstream sizes a sphere by `wall`; downstream deletes the parameter.
+    up.ryucad(&[
+        "feature",
+        "add",
+        "p",
+        "sphere",
+        "--id",
+        "s",
+        "--param",
+        "radius=wall",
+    ]);
+    up.commit("a sphere as big as the wall");
+    down.ryucad(&["param", "delete", "p", "wall"]);
+    down.commit("no wall");
+    let (code, out) = down.git_status(&["pull", "--no-rebase", "--no-edit"]);
+    assert_ne!(code, 0, "{out}");
+    assert!(
+        out.contains("s.json#merge_broke (merge_broke, ours)"),
+        "{out}"
     );
 }

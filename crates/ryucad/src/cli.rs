@@ -341,7 +341,12 @@ enum MergeCmd {
     /// Every conflict the merge leaves: in files' conflict records, paths Git left unmerged,
     /// and what the merge broke that built on either side, each with the side that caused it
     /// and its choices.
-    Status,
+    Status {
+        /// As Git's hooks run it: check every ryucad project in the repository, print what
+        /// is unresolved for people, and exit 1 if anything is (0 outside a merge).
+        #[arg(long)]
+        hook: bool,
+    },
     /// Settle a conflict with one side's value, a value of your own, or one of its planned
     /// repairs, as one logged, undoable change. Marking the file resolved (git add) and
     /// committing are yours.
@@ -1121,7 +1126,7 @@ fn request(cmd: &Command) -> Option<Request> {
             part: part.clone(),
             limit: Some(*limit),
         },
-        Command::Merge(MergeCmd::Status) => Request::MergeStatus {},
+        Command::Merge(MergeCmd::Status { .. }) => Request::MergeStatus {},
         Command::Merge(MergeCmd::Resolve {
             conflict,
             ours,
@@ -1356,9 +1361,69 @@ pub fn main() -> ExitCode {
     {
         return merge_driver(base, ours, theirs, path.as_deref());
     }
+    // Git's hooks read the exit code; people read what it prints.
+    if let Command::Merge(MergeCmd::Status { hook: true }) = &cli.command {
+        let here = match &cli.dir {
+            Some(d) => d.clone(),
+            None => std::env::current_dir().unwrap_or_default(),
+        };
+        return hook_check(&here);
+    }
     let mut warnings = Vec::new();
     let outcome = run(&cli, &mut warnings);
     finish(outcome, warnings, cli.pretty)
+}
+
+/// `ryucad merge status --hook`: every project a merge in progress
+/// concerns, checked in this process. Exits 0 when nothing is unresolved
+/// (or nothing is merging), 1 otherwise, saying what to settle on stderr.
+fn hook_check(here: &std::path::Path) -> ExitCode {
+    let projects = match ryucad::git::merging_projects(here) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ryucad: checking the merge: {}", e.message);
+            return ExitCode::from(1);
+        }
+    };
+    let mut failed = false;
+    for root in projects {
+        let at = root.display();
+        match server::handle_safely(&mut None, None, None, &root, Request::MergeStatus {}) {
+            Ok(a) if a.result["clean"] == true => {}
+            Ok(a) => {
+                failed = true;
+                let list = a.result["conflicts"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                eprintln!(
+                    "ryucad: the merge leaves {} conflict(s) in {at}:",
+                    list.len()
+                );
+                for c in &list {
+                    eprintln!(
+                        "  {} ({}, {}): {}",
+                        c["id"].as_str().unwrap_or_default(),
+                        c["kind"].as_str().unwrap_or_default(),
+                        c["cause"].as_str().unwrap_or_default(),
+                        c["message"].as_str().unwrap_or_default()
+                    );
+                }
+            }
+            Err(e) if e.code == Code::NotMerging => {}
+            Err(e) => {
+                failed = true;
+                eprintln!("ryucad: checking the merge in {at}: {}", e.message);
+            }
+        }
+    }
+    if failed {
+        eprintln!(
+            "ryucad: see `ryucad merge status` and settle them with `ryucad merge resolve` or by editing the model; `git commit --no-verify` skips this check"
+        );
+        return ExitCode::from(1);
+    }
+    ExitCode::SUCCESS
 }
 
 /// `ryucad git merge-driver`: merges, writes over `ours`, and exits 0 when

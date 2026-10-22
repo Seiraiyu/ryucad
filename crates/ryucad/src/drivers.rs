@@ -1,10 +1,13 @@
 //! Registering ryucad with Git, so that `git diff` reads feature files as
 //! values and `git merge` merges them value by value: the project's
 //! `.gitattributes`, which says which files Git hands to ryucad; the driver
-//! entries in Git's config, which say how; and, per clone, the
-//! `pre-merge-commit` hook that refuses a merge commit while a project's
-//! merge is unresolved. The attributes are a project file, committed; the
-//! config and the hook are each clone's or user's, written by the
+//! entries in Git's config, which say how; and, per clone, the hooks that
+//! refuse a merge commit while a project's merge is unresolved:
+//! `pre-merge-commit`, which Git runs before committing a merge itself, and
+//! `pre-commit`, which it runs when someone commits a merge it stopped
+//! (and a cherry-pick or revert it stopped), and where the check costs
+//! nothing outside a merge. The attributes are a project file, committed;
+//! the config and the hooks are each clone's or user's, written by the
 //! installers and `ryucad git install`. These are, with nothing else, the
 //! Git config ryucad writes.
 //!
@@ -44,8 +47,10 @@ pub const MERGE_NAME: &str = "merge.ryucad.name";
 /// The config entry Git's merge runs.
 pub const MERGE_DRIVER: &str = "merge.ryucad.driver";
 
-/// The hook Git runs before recording a merge commit.
-pub const HOOK: &str = "pre-merge-commit";
+/// The hooks that run ryucad's merge check: before Git records a merge
+/// commit itself, and before any commit (one that concludes a merge Git
+/// stopped for conflicts runs only this one).
+pub const HOOKS: [&str; 2] = ["pre-merge-commit", "pre-commit"];
 
 /// The line that marks a hook as ryucad's.
 const HOOK_HEADER: &str = "# ryucad: refuse a merge commit while a ryucad project's merge is unresolved (`ryucad git install`)";
@@ -110,8 +115,8 @@ fn discover(here: &Path) -> Option<gix::Repository> {
 pub struct Setup {
     /// The driver entries Git doesn't have.
     pub missing: Vec<&'static str>,
-    /// The hook as it stands.
-    pub hook: Hook,
+    /// Each of [`HOOKS`] as it stands.
+    pub hooks: Vec<(&'static str, Hook)>,
 }
 
 /// The `pre-merge-commit` hook of a clone.
@@ -142,10 +147,10 @@ fn hooks_dir(repo: &gix::Repository) -> (PathBuf, bool) {
     }
 }
 
-/// The hook of the repository `repo`.
-fn hook(repo: &gix::Repository) -> Hook {
+/// The hook `name` of the repository `repo`.
+fn hook(repo: &gix::Repository, name: &str) -> Hook {
     let (dir, shared) = hooks_dir(repo);
-    let path = dir.join(HOOK);
+    let path = dir.join(name);
     match std::fs::read_to_string(&path) {
         Ok(text) if text.lines().any(|l| l == HOOK_HEADER) || text.contains(HOOK_CHECK) => {
             Hook::Installed(path)
@@ -168,8 +173,8 @@ pub fn setup(root: &Path) -> Option<Setup> {
         .into_iter()
         .filter(|k| snapshot.string(*k).is_none())
         .collect();
-    let hook = hook(&repo);
-    Some(Setup { missing, hook })
+    let hooks = HOOKS.into_iter().map(|h| (h, hook(&repo, h))).collect();
+    Some(Setup { missing, hooks })
 }
 
 /// This binary, quoted for the shell Git runs commands in, with forward
@@ -246,8 +251,8 @@ fn write_hook(path: &Path) -> Result<()> {
 
 /// `ryucad git install`: writes the driver entries to the user's global
 /// Git config, or with `local` to the config of the repository at `here`,
-/// with the clone's own hook (unless someone else's is there, which is left
-/// alone and reported with the line to add).
+/// with the clone's own hooks (except where someone else's is there, which
+/// is left alone and reported with the line to add).
 pub fn install(here: &Path, local: bool) -> Result<Value> {
     let entries = [
         (TEXTCONV, textconv_command()?),
@@ -279,17 +284,23 @@ pub fn install(here: &Path, local: bool) -> Result<Value> {
         }
         config.insert((*k).to_owned(), json!(v));
     }
-    let hook = match hook(&repo) {
-        Hook::Installed(p) | Hook::Missing(p) => {
-            if std::fs::read_to_string(&p).ok() != Some(hook_script()?) {
-                write_hook(&p)?;
+    let mut hooks = Map::new();
+    for name in HOOKS {
+        let v = match hook(&repo, name) {
+            Hook::Installed(p) | Hook::Missing(p) => {
+                if std::fs::read_to_string(&p).ok() != Some(hook_script()?) {
+                    write_hook(&p)?;
+                }
+                json!({"path": p, "status": "installed"})
             }
-            json!({"path": p, "status": "installed"})
-        }
-        Hook::Foreign(p) => json!({"path": p, "status": "foreign", "line": hook_line()?}),
-        Hook::HooksPath(p) => json!({"path": p, "status": "hooks_path", "line": hook_line()?}),
-    };
-    Ok(json!({"scope": "local", "config": config, "hook": hook}))
+            Hook::Foreign(p) => json!({"path": p, "status": "foreign", "line": hook_line()?}),
+            Hook::HooksPath(p) => {
+                json!({"path": p, "status": "hooks_path", "line": hook_line()?})
+            }
+        };
+        hooks.insert(name.to_owned(), v);
+    }
+    Ok(json!({"scope": "local", "config": config, "hooks": hooks}))
 }
 
 #[cfg(test)]
@@ -365,27 +376,29 @@ mod tests {
         let s = setup(r).unwrap();
         assert_eq!(s.missing, [TEXTCONV, MERGE_DRIVER]);
         let hooks = r.join(".git/hooks");
-        let path = hooks.join(HOOK);
-        assert_eq!(s.hook, Hook::Missing(path.clone()));
+        let path = hooks.join(HOOKS[0]);
+        let first = |r: &Path| setup(r).unwrap().hooks[0].1.clone();
+        assert_eq!(s.hooks[0], (HOOKS[0], Hook::Missing(path.clone())));
+        assert_eq!(
+            s.hooks[1],
+            (HOOKS[1], Hook::Missing(hooks.join("pre-commit")))
+        );
         std::fs::create_dir_all(&hooks).unwrap();
         std::fs::write(&path, "#!/bin/sh\necho mine\n").unwrap();
-        assert_eq!(setup(r).unwrap().hook, Hook::Foreign(path.clone()));
+        assert_eq!(first(r), Hook::Foreign(path.clone()));
         // Someone's own hook that runs the check counts.
         std::fs::write(
             &path,
             format!("#!/bin/sh\necho mine\n{}\n", hook_line().unwrap()),
         )
         .unwrap();
-        assert_eq!(setup(r).unwrap().hook, Hook::Installed(path.clone()));
+        assert_eq!(first(r), Hook::Installed(path.clone()));
         write_hook(&path).unwrap();
-        assert_eq!(setup(r).unwrap().hook, Hook::Installed(path.clone()));
+        assert_eq!(first(r), Hook::Installed(path.clone()));
         crate::git::tests::git(r, &["config", MERGE_DRIVER, "x"]);
         assert_eq!(setup(r).unwrap().missing, [TEXTCONV]);
         // A hooks folder of the user's choosing is never written to.
         crate::git::tests::git(r, &["config", "core.hooksPath", "githooks"]);
-        assert_eq!(
-            setup(r).unwrap().hook,
-            Hook::HooksPath(r.join("githooks").join(HOOK))
-        );
+        assert_eq!(first(r), Hook::HooksPath(r.join("githooks").join(HOOKS[0])));
     }
 }
