@@ -67,6 +67,17 @@ pub fn ryucad() -> &'static Daemon {
         }
         assert!(cmd.status().unwrap().success(), "building ryucad");
         let path = bin.join(format!("ryucad{}", std::env::consts::EXE_SUFFIX));
+        // The shared folder is a repository of its own with the diff driver
+        // in its config, so doctor finds the same Git setup whether the
+        // target folder sits inside a checkout (as in CI) or not.
+        let dir = shared();
+        let init = Command::new("git").args(["init", "-q"]).arg(dir).status();
+        assert!(init.unwrap().success(), "git init");
+        let install = Command::new(&path)
+            .args(["git", "install"])
+            .current_dir(dir)
+            .status();
+        assert!(install.unwrap().success(), "ryucad git install");
         Daemon::at(&path).unwrap()
     })
 }

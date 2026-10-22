@@ -123,6 +123,14 @@ function Install-Ryucad {
         if (Test-Path $exe) { Move-Item -Force $exe $old }
         Copy-Item (Join-Path $tmp "ryucad-$version-$target\ryucad.exe") $exe
         Remove-Item -Force $old -ErrorAction SilentlyContinue
+        # git diff reads ryucad's files through ryucad: its driver, in the
+        # user's Git config.
+        if (Get-Command git -ErrorAction SilentlyContinue) {
+            & $exe git install --global *> $null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host 'ryucad-install: warning: couldn''t register ryucad with Git; run: ryucad git install --global'
+            }
+        }
 
         # The desktop app, unless only the command is wanted, and "Open in
         # ryucad" on folders in Explorer, for this user only (no admin).

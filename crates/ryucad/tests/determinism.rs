@@ -2,8 +2,8 @@
 //! platform and CPU level must reproduce `tests/golden/rebuild.txt`:
 //! expressions, rebuilt bodies, display meshes, the pixels of renders, and
 //! solved sketches and the bodies swept from them, features that refer
-//! to other features' faces, edges and vertices, and how sketches are
-//! drawn. After
+//! to other features' faces, edges and vertices, how sketches are drawn,
+//! and what diffs say. After
 //! a deliberate change, regenerate with
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
@@ -624,6 +624,51 @@ fn referenced_bodies_are_sound() {
     }
 }
 
+/// Every file of the referenced project and of an edit of it as textconv
+/// prints them, the structural diff between them (every position listed)
+/// and the model diff, bounds and all.
+fn diff_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("diff");
+    let (dir, mut session) = referenced();
+    let part = Id::parse("rf", "part").unwrap();
+    let built = |session: &mut ryucad::session::Session| {
+        let r = session.rebuilt(&part).unwrap().features.clone();
+        [("rf".to_owned(), r)].into_iter().collect()
+    };
+    let before = ryucad::activity::snapshot(dir.path()).unwrap();
+    let from = built(&mut session);
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    call(
+        &mut session,
+        "param.set",
+        json!({"part": "rf", "parameters": {"w": "12.7 mm"}}),
+    );
+    call(
+        &mut session,
+        "feature.edit",
+        json!({"part": "rf", "id": "b", "params": {"x": "33.1 mm"}}),
+    );
+    let after = ryucad::activity::snapshot(dir.path()).unwrap();
+    let to = built(&mut session);
+    for files in [&before, &after] {
+        for bytes in files.values() {
+            s.str(&String::from_utf8(ryucad::diff::textconv(bytes)).unwrap());
+        }
+    }
+    let opts = ryucad::diff::Options {
+        positions: true,
+        ..Default::default()
+    };
+    let mut v = ryucad::diff::structural(&before, &after, &opts);
+    s.str(&ryucad::doc::canonical::to_string(&v));
+    ryucad::diff::model(&mut v, &from, &to, &opts);
+    s.str(&ryucad::doc::canonical::to_string(&v));
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -639,5 +684,6 @@ fn determinism() {
     sweeps_section(&mut golden);
     references_section(&mut golden);
     sketch_drawing_section(&mut golden);
+    diff_section(&mut golden);
     golden.finish();
 }

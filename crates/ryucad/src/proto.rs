@@ -287,6 +287,9 @@ pub enum Request {
     Rebuild {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         part: Option<String>,
+        /// A Git revision to rebuild instead of the working files.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
     #[serde(rename = "inspect")]
     Inspect {
@@ -295,9 +298,39 @@ pub enum Request {
         feature: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         entity: Option<String>,
+        /// A Git revision to inspect instead of the working files.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
     #[serde(rename = "check_format")]
     CheckFormat {},
+    /// Rebuilds the project from its files alone and verifies it.
+    #[serde(rename = "check")]
+    Check {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        /// Also report what changed from this revision, as `diff --model`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        against: Option<String>,
+    },
+    /// What changed between two revisions (`HEAD` and the working files by
+    /// default): files as ryucad reads them, and with `model` the bodies.
+    #[serde(rename = "diff")]
+    Diff {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        /// Rebuild both and add what changed in the bodies.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        model: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        positions: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all: bool,
+    },
     #[serde(rename = "daemon.status")]
     DaemonStatus {},
     /// Registers the connection as a participant of the live session.
@@ -425,6 +458,9 @@ pub enum Request {
         /// `binary` sends `ryucad.mesh.1` bytes after the answer.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         transfer: Option<Transfer>,
+        /// A Git revision to mesh instead of the working files.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
     /// Draws a part (or the whole project) to a PNG, sent as bytes after
     /// the answer. The view is `camera`, a participant's camera, a standard
@@ -652,7 +688,10 @@ mod tests {
                 },
                 expected_revision: Some("r".into()),
             },
-            Request::Rebuild { part: None },
+            Request::Rebuild {
+                part: None,
+                rev: None,
+            },
             Request::SessionHello {
                 kind: Kind::Human,
                 name: Some("Dana".into()),
@@ -716,7 +755,20 @@ mod tests {
     #[test]
     fn only_writers_mutate() {
         assert!(Request::PartCreate { part: "p".into() }.mutates());
-        assert!(!Request::Rebuild { part: None }.mutates());
-        assert_eq!(Request::Rebuild { part: None }.method(), "rebuild");
+        assert!(
+            !Request::Rebuild {
+                part: None,
+                rev: None,
+            }
+            .mutates()
+        );
+        assert_eq!(
+            Request::Rebuild {
+                part: None,
+                rev: None,
+            }
+            .method(),
+            "rebuild"
+        );
     }
 }

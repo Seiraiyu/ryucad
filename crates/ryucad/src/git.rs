@@ -1,7 +1,7 @@
 //! The project's Git history, read-only: the commits that touched the
-//! project (or one part), what is uncommitted, and files as `HEAD` has
-//! them. ryucad never writes to Git; committing stays with the agent or
-//! user.
+//! project (or one part), what is uncommitted, files as `HEAD` has them,
+//! and the whole project at any revision. ryucad never writes to Git;
+//! committing stays with the agent or user.
 
 use crate::activity::Files;
 use crate::error::{Code, Error, Result};
@@ -21,15 +21,31 @@ fn git_error(e: impl std::fmt::Display) -> Error {
     Error::new(Code::Io, format!("reading the Git repository: {e}"))
 }
 
+/// The project as a revision has it.
+#[derive(Clone, Debug)]
+pub struct Revision {
+    /// The commit the revision names, in hex.
+    pub commit: String,
+    /// The project folder's tree in that commit, in hex: equal trees, equal
+    /// files. Empty when the commit has no such folder.
+    pub tree: String,
+    /// The manifest, its Git attributes and everything under `parts/`, by
+    /// path relative to the project.
+    pub files: Files,
+}
+
+/// The error for a project outside any repository.
+fn no_repo(root: &Path) -> Error {
+    Error::new(
+        Code::NotAGitRepo,
+        format!("{} is not in a Git repository", root.display()),
+    )
+    .with("path", root)
+}
+
 /// The warning for a project outside any repository.
 pub fn not_a_repo(root: &Path) -> Value {
-    json!(
-        Error::new(
-            Code::NotAGitRepo,
-            format!("{} is not in a Git repository", root.display())
-        )
-        .with("path", root)
-    )
+    json!(no_repo(root))
 }
 
 /// Bytes equal once CRLF line endings are read as LF: a checkout with
@@ -116,14 +132,14 @@ impl Repo {
     }
 
     /// The project's files in a commit's tree, by path relative to the
-    /// project: the manifest and everything under `parts/`.
+    /// project: the manifest, its Git attributes and everything under
+    /// `parts/`.
     fn project_blobs(&self, tree: &gix::Tree<'_>) -> Result<BTreeMap<String, gix::ObjectId>> {
         let mut out = BTreeMap::new();
-        if let Some(id) = self.entry(
-            tree,
-            &format!("{}{}", self.prefix, crate::doc::project::MANIFEST),
-        )? {
-            out.insert(crate::doc::project::MANIFEST.to_owned(), id);
+        for name in [crate::doc::project::MANIFEST, crate::drivers::ATTRIBUTES] {
+            if let Some(id) = self.entry(tree, &format!("{}{name}", self.prefix))? {
+                out.insert(name.to_owned(), id);
+            }
         }
         if let Some(id) = self.entry(tree, &format!("{}parts", self.prefix))? {
             self.blobs(id, "parts/", &mut out)?;
@@ -231,6 +247,60 @@ impl Repo {
         Ok(out)
     }
 
+    /// The commit a revision expression names (`HEAD`, `main`, `HEAD~2`,
+    /// a hash), or `rev_not_found`.
+    pub fn commit(&self, rev: &str) -> Result<gix::Commit<'_>> {
+        let not_found = |why: String| {
+            Error::new(
+                Code::RevNotFound,
+                format!("no revision {rev} in the repository: {why}"),
+            )
+            .with("rev", rev)
+        };
+        let id = self
+            .repo
+            .rev_parse_single(rev)
+            .map_err(|e| not_found(e.to_string()))?;
+        let object = id.object().map_err(|e| not_found(e.to_string()))?;
+        object
+            .peel_to_commit()
+            .map_err(|e| not_found(e.to_string()))
+    }
+
+    /// The commit `rev` names and the project folder's tree in it (empty
+    /// when the commit has no such folder), both in hex.
+    pub fn locate(&self, rev: &str) -> Result<(String, String)> {
+        let commit = self.commit(rev)?;
+        let tree = commit.tree().map_err(git_error)?;
+        let folder = self.entry(&tree, &self.prefix)?;
+        Ok((
+            commit.id.to_string(),
+            folder.map(|t| t.to_string()).unwrap_or_default(),
+        ))
+    }
+
+    /// The project's files in the commit `id` (hex).
+    pub fn files(&self, id: &str) -> Result<Files> {
+        let commit = self.commit(id)?;
+        let tree = commit.tree().map_err(git_error)?;
+        let mut files = Files::new();
+        for (path, id) in self.project_blobs(&tree)? {
+            files.insert(path, self.read(id)?);
+        }
+        Ok(files)
+    }
+
+    /// The project as `rev` has it.
+    pub fn revision(&self, rev: &str) -> Result<Revision> {
+        let (commit, tree) = self.locate(rev)?;
+        let files = self.files(&commit)?;
+        Ok(Revision {
+            commit,
+            tree,
+            files,
+        })
+    }
+
     /// The project files a commit changed relative to its parent.
     fn changed(&self, tree: &gix::Tree<'_>, parent: Option<&gix::Tree<'_>>) -> Result<Vec<Value>> {
         let now = self.project_blobs(tree)?;
@@ -252,6 +322,17 @@ impl Repo {
         out.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
         Ok(out)
     }
+}
+
+/// The repository holding the project at `root`, or `not_a_git_repo`.
+pub fn repo(root: &Path) -> Result<Repo> {
+    Repo::open(root)?.ok_or_else(|| no_repo(root))
+}
+
+/// The project at `root` as `rev` has it: `not_a_git_repo` outside a
+/// repository, `rev_not_found` for a revision it doesn't have.
+pub fn revision(root: &Path, rev: &str) -> Result<Revision> {
+    repo(root)?.revision(rev)
 }
 
 /// `history.log`: the project's commits (or a part's), and what is
@@ -420,6 +501,64 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_project_at_any_revision() {
+        // The project sits in a subfolder, beside files that aren't its.
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path();
+        git(top, &["init", "-q", "-b", "main"]);
+        let root = top.join("cad");
+        std::fs::create_dir(&root).unwrap();
+        crate::server::init(&root, None).unwrap();
+        let mut s = Session::open(&root).unwrap();
+        call(&mut s, "part.create", serde_json::json!({"part": "a"})).unwrap();
+        git(top, &["add", "."]);
+        git(top, &["commit", "-q", "-m", "a"]);
+        let first = files(&root);
+        call(
+            &mut s,
+            "feature.add",
+            serde_json::json!({"part": "a", "type": "sphere", "id": "s", "params": {"radius": 1}}),
+        )
+        .unwrap();
+        git(top, &["add", "."]);
+        git(top, &["commit", "-q", "-m", "a sphere"]);
+        std::fs::write(top.join("README"), "not the project's").unwrap();
+        git(top, &["add", "."]);
+        git(top, &["commit", "-q", "-m", "readme"]);
+        let r = revision(&root, "HEAD~2").unwrap();
+        assert_eq!(r.files, first);
+        assert_eq!(revision(&root, "HEAD").unwrap().files, files(&root));
+        // A commit that leaves the project alone has the same tree.
+        assert_eq!(
+            revision(&root, "HEAD").unwrap().tree,
+            revision(&root, "HEAD~1").unwrap().tree
+        );
+        assert_ne!(r.tree, revision(&root, "HEAD").unwrap().tree);
+        assert_eq!(r.commit.len(), 40);
+        assert_eq!(revision(&root, &r.commit).unwrap().files, first);
+        assert_eq!(revision(&root, "main~2").unwrap().tree, r.tree);
+        // The files load as the project did then.
+        let then = crate::doc::project::Project::load_from(&root, &r.files).unwrap();
+        assert!(
+            then.parts[&crate::server::part_id("a").unwrap()]
+                .features
+                .is_empty()
+        );
+        for bad in ["nowhere", "HEAD~9", "0123456789abcdef"] {
+            let e = revision(&root, bad).unwrap_err();
+            assert_eq!(
+                (e.code, e.details["rev"].as_str()),
+                (Code::RevNotFound, Some(bad))
+            );
+        }
+        let outside = tempfile::tempdir().unwrap();
+        assert_eq!(
+            revision(outside.path(), "HEAD").unwrap_err().code,
+            Code::NotAGitRepo
+        );
+    }
+
+    #[test]
     fn a_repository_with_no_commits() {
         let (dir, _s) = fresh();
         git(dir.path(), &["init", "-q"]);
@@ -428,7 +567,8 @@ pub(crate) mod tests {
         assert_eq!(v["commits"], json!([]));
         assert_eq!(
             v["uncommitted"],
-            json!([{"path": "ryucad.json", "change": "created"}])
+            json!([{"path": ".gitattributes", "change": "created"},
+                   {"path": "ryucad.json", "change": "created"}])
         );
     }
 }

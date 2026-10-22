@@ -622,6 +622,7 @@ impl Workspace {
                         None => self.send(
                             Request::Rebuild {
                                 part: Some(id.clone()),
+                                rev: None,
                             },
                             Pending::Rebuild(id),
                         ),
@@ -904,6 +905,7 @@ impl Workspace {
                 feature: Some(key.1.clone()),
                 quality: None,
                 transfer: Some(Transfer::Binary),
+                rev: None,
             };
             self.send(req, Pending::Mesh(key, hash));
         }
