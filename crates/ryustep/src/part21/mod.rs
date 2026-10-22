@@ -4,10 +4,11 @@
 //! Nothing here knows any schema: an instance is a name and its values, and
 //! references are instance numbers, resolved by whoever reads them.
 
-// Task 3 reads whole files with it.
-#[allow(dead_code)]
+mod file;
 mod lex;
 mod text;
+
+pub use file::{File, Header, Instance, Record, parse};
 
 /// One parameter of a record.
 #[derive(Clone, Debug, PartialEq)]
