@@ -1,6 +1,7 @@
 //! The panels around the viewport: the feature tree, the participants bar
 //! and the status line.
 
+use crate::core::compare::{Change, Mark};
 use crate::core::workspace::Workspace;
 use crate::ui::style;
 use crate::ui::view::View;
@@ -37,9 +38,41 @@ pub fn row_text(f: &crate::core::model::Feature, faults: usize) -> String {
     }
 }
 
+/// How a feature differs in a compare, after its line in the tree:
+/// ` [changed, moved, failed at HEAD (rebuild_failed)]`; empty when it
+/// doesn't.
+pub fn mark_text(m: &Mark, rev: &str) -> String {
+    let mut says = Vec::new();
+    if m.change != Change::Same {
+        says.push(m.change.as_str().to_owned());
+    }
+    if m.moved {
+        says.push("moved".to_owned());
+    }
+    if let Some(code) = &m.failed_there {
+        says.push(format!("failed at {rev} ({code})"));
+    }
+    if says.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", says.join(", "))
+    }
+}
+
+/// The colour a compare gives a feature's line.
+fn mark_colour(m: &Mark) -> style::Rgb {
+    match m.change {
+        Change::Added => style::NEW,
+        Change::Removed => style::REMOVED,
+        _ => style::CHANGED,
+    }
+}
+
 /// Parts and their features in order, with rebuild status and mesh
 /// faults, and under each feature what it reads. Choosing a feature
-/// paints and frames its body, or its sketch.
+/// paints and frames its body, or its sketch. In a compare, features are
+/// marked by how they differ, and those only the other side has follow,
+/// to be chosen for their changes.
 pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     // Names are IDs: never broken across lines.
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -48,6 +81,9 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
         ui.weak("No parts yet");
     }
     let mut choose = None;
+    // A feature only a compare's other side has: chosen for its changes,
+    // with no form and nothing to frame.
+    let mut gone = None;
     for part in ws.model.parts.values() {
         // Damage doctor found in the part's files.
         let prefix = format!("parts/{}/", part.id);
@@ -84,7 +120,16 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                         .get(&key)
                         .and_then(|m| m.mesh.as_ref().ok())
                         .map_or(0, |m| m.faults.len());
-                    let text = row_text(f, faults);
+                    let mark = ws.compare.as_ref().and_then(|c| {
+                        let m = c.features.get(&key)?;
+                        Some((mark_text(m, &c.rev), mark_colour(m)))
+                    });
+                    let text = match &mark {
+                        Some((t, c)) => {
+                            RichText::new(row_text(f, faults) + t).color(style::color32(*c))
+                        }
+                        None => RichText::new(row_text(f, faults)),
+                    };
                     let chosen = view.chosen.as_ref() == Some(&key);
                     let r = ui.selectable_label(chosen, text);
                     let r = match &f.error {
@@ -103,6 +148,16 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                         });
                     }
                 }
+                let removed = ws.compare.as_ref().and_then(|c| c.removed.get(&part.id));
+                for id in removed.into_iter().flatten() {
+                    let key = (part.id.clone(), id.clone());
+                    let chosen = view.chosen.as_ref() == Some(&key);
+                    let text = RichText::new(format!("{id} [removed]"))
+                        .color(style::color32(style::REMOVED));
+                    if ui.selectable_label(chosen, text).clicked() {
+                        gone = Some(if chosen { None } else { Some(key) });
+                    }
+                }
             });
         if let Some(e) = &part.error {
             header.header_response.on_hover_text(message(e));
@@ -115,11 +170,42 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     }
     if let Some(c) = choose {
         view.chosen = c;
+        view.marked.clear();
         ws.open_form(view.chosen.clone());
         if let Some(k) = view.chosen.clone() {
             view.fit(ws, Some(&k));
         }
     }
+    if let Some(c) = gone {
+        view.chosen = c;
+        ws.open_form(None);
+    }
+}
+
+/// In a compare, what changed in the feature chosen in the tree since the
+/// revision compared with.
+pub fn changes(ui: &mut egui::Ui, ws: &Workspace, view: &View) {
+    let (Some(c), Some(key)) = (&ws.compare, &view.chosen) else {
+        return;
+    };
+    ui.heading(format!("Changes since {}", c.rev));
+    match c.features.get(key) {
+        Some(m) if !m.lines.is_empty() => {
+            for l in &m.lines {
+                ui.label(l);
+            }
+        }
+        Some(m) => {
+            ui.label(m.change.as_str());
+        }
+        None if !c.loaded => {
+            ui.spinner();
+        }
+        None => {
+            ui.weak(format!("{} is as it was", key.1));
+        }
+    }
+    ui.separator();
 }
 
 /// Everyone attached, what they say they are doing, and "Follow" for
@@ -155,6 +241,184 @@ pub fn people(ui: &mut egui::Ui, ws: &mut Workspace) {
             ws.following = f;
         }
     });
+}
+
+/// A compare: the revision, what differs and the colours that say so,
+/// and Stop; or, while one is typed (`typed`), the revision to compare
+/// with.
+pub fn compare_bar(ui: &mut egui::Ui, ws: &mut Workspace, typed: &mut Option<String>) {
+    ui.horizontal_wrapped(|ui| {
+        if let Some(text) = typed {
+            ui.label("Compare with");
+            let edit = egui::TextEdit::singleline(text)
+                .hint_text("HEAD, a branch or a commit")
+                .desired_width(180.0);
+            let r = ui.add(edit);
+            r.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::TextInput, true, "revision to compare with")
+            });
+            let go = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.button("Start comparing").clicked() || go) && !text.trim().is_empty() {
+                ws.set_compare(Some(text.trim().to_owned()));
+                *typed = None;
+            } else if ui.button("Cancel").clicked() {
+                *typed = None;
+            }
+            return;
+        }
+        let Some(c) = &ws.compare else { return };
+        let commit = c
+            .commit
+            .as_deref()
+            .map_or(String::new(), |c| format!(" ({})", &c[..c.len().min(10)]));
+        ui.label(format!("Comparing with {}{commit}", c.rev));
+        ui.separator();
+        match &c.error {
+            Some(e) => {
+                ui.colored_label(ui.visuals().error_fg_color, &e.message);
+            }
+            None if !c.loaded => {
+                ui.spinner();
+            }
+            None => {
+                let (added, removed, changed) = c.counts();
+                for (n, what, colour) in [
+                    (added, "added", style::NEW),
+                    (removed, "removed", style::REMOVED),
+                    (changed, "changed", style::CHANGED),
+                ] {
+                    let text = RichText::new(format!("{n} {what}")).color(style::color32(colour));
+                    ui.label(text);
+                }
+            }
+        }
+        ui.separator();
+        if ui.button("Stop comparing").clicked() {
+            ws.set_compare(None);
+        }
+    });
+}
+
+/// A value of a conflict's side, short enough for the panel.
+fn side(v: &serde_json::Value) -> String {
+    let text = match v {
+        serde_json::Value::String(s) => s.clone(),
+        v => v.to_string(),
+    };
+    match text.char_indices().nth(120) {
+        Some((i, _)) => format!("{}…", &text[..i]),
+        None => text,
+    }
+}
+
+/// The merge Git is in the middle of: each conflict with what it
+/// concerns, its sides and who caused it, and a button per choice and
+/// planned repair (`merge.resolve`); `merge_broke` conflicts are fixed in
+/// the model. "Show" chooses the feature and marks the entities it
+/// concerns.
+pub fn merge(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
+    let Some(m) = &ws.merge else { return };
+    ui.heading(format!("{} in progress", m.step()));
+    ui.label(m.summary());
+    ui.weak(
+        "ryucad never stages or commits: once everything is settled, git add the files and commit.",
+    );
+    if let Some(e) = m.error.as_ref().or(m.failed.as_ref()) {
+        ui.colored_label(ui.visuals().error_fg_color, &e.message);
+    }
+    let mut act: Option<(String, String, Option<String>)> = None;
+    let mut show: Option<serde_json::Value> = None;
+    for c in m.conflicts() {
+        let id = c["id"].as_str().unwrap_or_default();
+        let concerns = &c["concerns"];
+        let what = concerns["feature"]
+            .as_str()
+            .or(concerns["parameter"].as_str())
+            .or(c["files"][0].as_str())
+            .unwrap_or(id);
+        let title = format!("{} in {what}", c["kind"].as_str().unwrap_or("conflict"));
+        egui::CollapsingHeader::new(title)
+            .id_salt(("conflict", id))
+            .show(ui, |ui| {
+                ui.label(c["message"].as_str().unwrap_or_default());
+                ui.weak(format!(
+                    "caused by {}",
+                    c["cause"].as_str().unwrap_or("both")
+                ));
+                for k in ["base", "ours", "theirs"] {
+                    if let Some(v) = c.get(k) {
+                        ui.label(format!("{k}: {}", side(v)));
+                    }
+                }
+                if c["kind"] == "merge_broke" {
+                    ui.weak("Fix it in the model; the status is read again as it changes.");
+                }
+                ui.horizontal_wrapped(|ui| {
+                    let choices = c["choices"].as_array().into_iter().flatten();
+                    for choice in choices.filter_map(|x| x.as_str()) {
+                        let label = match choice {
+                            "ours" => "Take ours",
+                            "theirs" => "Take theirs",
+                            // A value is typed: the CLI's `--value`.
+                            _ => continue,
+                        };
+                        if ui
+                            .add_enabled(!m.resolving, egui::Button::new(label))
+                            .clicked()
+                        {
+                            act = Some((id.to_owned(), choice.to_owned(), None));
+                        }
+                    }
+                    for r in c["repairs"].as_array().into_iter().flatten() {
+                        let summary = r["summary"].as_str().unwrap_or("Repair");
+                        let button = egui::Button::new(summary);
+                        if ui.add_enabled(!m.resolving, button).clicked() {
+                            let rid = r["id"].as_str().map(str::to_owned);
+                            act = Some((id.to_owned(), "repair".to_owned(), rid));
+                        }
+                    }
+                    if concerns["feature"].is_string() && ui.button("Show").clicked() {
+                        show = Some(concerns.clone());
+                    }
+                });
+            });
+    }
+    let unstaged = m.unstaged();
+    if !unstaged.is_empty() {
+        ui.label(format!(
+            "Settled, waiting for git add: {}",
+            unstaged.join(", ")
+        ));
+    }
+    for f in m.status["already_failing"].as_array().into_iter().flatten() {
+        ui.weak(format!(
+            "{}/{} already failed before the merge ({})",
+            f["part"].as_str().unwrap_or_default(),
+            f["feature"].as_str().unwrap_or_default(),
+            f["error"].as_str().unwrap_or_default()
+        ));
+    }
+    if m.resolving {
+        ui.spinner();
+    }
+    ui.separator();
+    if let Some((id, choice, repair)) = act {
+        ws.resolve(&id, &choice, repair.as_deref());
+    }
+    if let Some(c) = show {
+        let part = c["part"].as_str().unwrap_or_default().to_owned();
+        let feature = c["feature"].as_str().unwrap_or_default().to_owned();
+        view.marked = c["entities"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| Some(format!("{part}/{feature}/{}", e.as_str()?)))
+            .collect();
+        let key = (part, feature);
+        view.chosen = Some(key.clone());
+        ws.open_form(Some(key.clone()));
+        view.fit(ws, Some(&key));
+    }
 }
 
 /// The connection, what agents are doing, and the model's state.
@@ -203,6 +467,10 @@ pub fn status(ui: &mut egui::Ui, ws: &Workspace) {
         if crate::ui::platform::software() {
             ui.separator();
             ui.weak("Software rendering");
+        }
+        if let Some(m) = &ws.merge {
+            ui.separator();
+            ui.colored_label(ui.visuals().warn_fg_color, m.summary());
         }
         if let Some(e) = ws.shown_error(std::time::Instant::now()) {
             ui.separator();
@@ -598,6 +866,8 @@ fn history(ui: &mut egui::Ui, ws: &mut Workspace) {
         ui.weak("This project isn't in a Git repository, so it has no history");
         return;
     }
+    let compared = ws.compare.as_ref().map(|c| c.rev.clone());
+    let mut pick = None;
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
@@ -606,7 +876,7 @@ fn history(ui: &mut egui::Ui, ws: &mut Workspace) {
                 ui.label(format!("{uncommitted} uncommitted change(s)"));
             }
             egui::Grid::new("history")
-                .num_columns(4)
+                .num_columns(5)
                 .striped(true)
                 .show(ui, |ui| {
                     for c in h["commits"].as_array().into_iter().flatten() {
@@ -615,10 +885,21 @@ fn history(ui: &mut egui::Ui, ws: &mut Workspace) {
                         ui.label(c["author"].as_str().unwrap_or_default());
                         ui.weak(ago(c["time"].as_u64().unwrap_or_default() * 1000));
                         ui.label(c["subject"].as_str().unwrap_or_default());
+                        let on = compared.as_deref() == Some(id);
+                        if ui
+                            .selectable_label(on, "Compare")
+                            .on_hover_text("Compare the working files with this commit")
+                            .clicked()
+                        {
+                            pick = Some((!on).then(|| id.to_owned()));
+                        }
                         ui.end_row();
                     }
                 });
         });
+    if let Some(rev) = pick {
+        ws.set_compare(rev);
+    }
 }
 
 #[cfg(test)]
@@ -636,6 +917,32 @@ mod tests {
             uses: Vec::new(),
             error: None,
         }
+    }
+
+    #[test]
+    fn marks_say_how_a_feature_differs() {
+        let mark = |change, moved, failed: Option<&str>| Mark {
+            change,
+            moved,
+            failed_there: failed.map(str::to_owned),
+            lines: Vec::new(),
+        };
+        assert_eq!(
+            mark_text(&mark(Change::Changed, true, None), "HEAD"),
+            " [changed, moved]"
+        );
+        assert_eq!(
+            mark_text(
+                &mark(Change::Rebuilt, false, Some("rebuild_failed")),
+                "main"
+            ),
+            " [rebuilt, failed at main (rebuild_failed)]"
+        );
+        assert_eq!(mark_text(&mark(Change::Same, false, None), "HEAD"), "");
+        assert_eq!(
+            mark_text(&mark(Change::Same, true, None), "HEAD"),
+            " [moved]"
+        );
     }
 
     #[test]

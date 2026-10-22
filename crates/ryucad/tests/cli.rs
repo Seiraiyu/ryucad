@@ -869,6 +869,8 @@ fn every_protocol_method_has_a_command() {
         ("selection.set", &["select"]),
         ("camera.get", &["camera"]),
         ("camera.set", &["camera"]),
+        ("compare.get", &["compare"]),
+        ("compare.set", &["compare"]),
         ("highlight.set", &["highlight"]),
         ("highlight.clear", &["highlight"]),
         ("activity.set", &["status"]),

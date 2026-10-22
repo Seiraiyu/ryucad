@@ -5,6 +5,7 @@
 //! over faces from a small buffer built every frame, so moving the mouse
 //! never uploads the model again.
 
+use crate::core::compare::Compare;
 use crate::core::model::{BodyKey, Model};
 use crate::core::nav::Mat4;
 use eframe::wgpu;
@@ -116,6 +117,24 @@ struct VOut {
 @fragment fn fs_line(i: VOut) -> @location(0) vec4<f32> {
     return i.color;
 }
+
+@vertex fn vs_ghost(v: VIn) -> VOut {
+    var o: VOut;
+    let c = u.matrix * vec4<f32>(v.pos, 1.0);
+    // Behind the model's faces by the fraction edges are in front of
+    // them, along its sight line: where a ghost face and a face of the
+    // model lie in one plane, triangulated differently, the model shows
+    // rather than fighting it pixel by pixel.
+    let e = -u.flags.x;
+    if u.flags.y > 0.5 {
+        o.clip = vec4<f32>(c.xy * (1.0 - e), c.z * (1.0 - e) + e * u.flags.z, c.w * (1.0 - e));
+    } else {
+        o.clip = vec4<f32>(c.xy, min(c.z - e * c.w, c.w), c.w);
+    }
+    o.normal = v.normal;
+    o.color = v.color;
+    return o;
+}
 "#;
 
 /// A body on the GPU.
@@ -170,13 +189,22 @@ pub struct Scene {
     lines: wgpu::RenderPipeline,
     /// Flat triangles pulled towards the eye as lines are: sketches.
     marks: wgpu::RenderPipeline,
+    /// Translucent faces behind nothing nearer: a compare's other side.
+    ghost: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     bind: wgpu::BindGroup,
     samples: u32,
     reference: [f64; 3],
     bodies: BTreeMap<BodyKey, GpuBody>,
+    /// A compare's ghosts, coloured for the compare generation they were
+    /// uploaded at.
+    ghosts: BTreeMap<BodyKey, GpuBody>,
+    ghosts_at: u64,
     target: Option<Target>,
 }
+
+/// How opaque a ghost is.
+pub const GHOST_ALPHA: f32 = 0.35;
 
 /// Vertices of a body's triangles, relative to `reference`.
 fn face_vertices(
@@ -282,7 +310,11 @@ impl Scene {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = |entry: (&str, &str), topology, compare, cull| {
+        let pipeline = |entry: (&str, &str),
+                        topology,
+                        compare,
+                        cull,
+                        blend: Option<wgpu::BlendState>| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(entry.0),
                 layout: Some(&pipeline_layout),
@@ -303,7 +335,8 @@ impl Scene {
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH,
-                    depth_write_enabled: Some(true),
+                    // Translucent faces hide nothing.
+                    depth_write_enabled: Some(blend.is_none()),
                     depth_compare: Some(compare),
                     stencil: Default::default(),
                     bias: Default::default(),
@@ -318,7 +351,7 @@ impl Scene {
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: FORMAT,
-                        blend: None,
+                        blend,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                 }),
@@ -334,6 +367,7 @@ impl Scene {
                 tri,
                 wgpu::CompareFunction::Less,
                 back,
+                None,
             ),
             // The same triangles again, so the same depths: equal passes.
             paint: pipeline(
@@ -341,11 +375,13 @@ impl Scene {
                 tri,
                 wgpu::CompareFunction::LessEqual,
                 back,
+                None,
             ),
             lines: pipeline(
                 ("vs_line", "fs_line"),
                 wgpu::PrimitiveTopology::LineList,
                 wgpu::CompareFunction::LessEqual,
+                None,
                 None,
             ),
             marks: pipeline(
@@ -353,12 +389,24 @@ impl Scene {
                 tri,
                 wgpu::CompareFunction::LessEqual,
                 None,
+                None,
+            ),
+            // Pushed back a little (see `vs_ghost`): where the ghost and the
+            // model are the same face, the model shows.
+            ghost: pipeline(
+                ("vs_ghost", "fs_face"),
+                tri,
+                wgpu::CompareFunction::Less,
+                back,
+                Some(wgpu::BlendState::ALPHA_BLENDING),
             ),
             uniforms,
             bind,
             samples,
             reference: [0.0; 3],
             bodies: BTreeMap::new(),
+            ghosts: BTreeMap::new(),
+            ghosts_at: u64::MAX,
             target: None,
         }
     }
@@ -368,6 +416,8 @@ impl Scene {
     pub fn sync(&mut self, device: &wgpu::Device, model: &Model, reference: [f64; 3]) {
         if reference != self.reference {
             self.bodies.clear();
+            self.ghosts.clear();
+            self.ghosts_at = u64::MAX;
             self.reference = reference;
         }
         self.bodies
@@ -389,6 +439,53 @@ impl Scene {
                     face_count: faces.len() as u32,
                     edges: buffer(device, "edges", &edges),
                     edge_count: edges.len() as u32,
+                },
+            );
+        }
+    }
+
+    /// Uploads a compare's ghosts, each face translucent in the ghost
+    /// colour or, gone from the working files, the removed one: again
+    /// whenever the compare changes. Call it after [`Scene::sync`]; with
+    /// no compare there are none.
+    pub fn sync_ghosts(&mut self, device: &wgpu::Device, compare: Option<&Compare>) {
+        let Some(c) = compare else {
+            self.ghosts.clear();
+            self.ghosts_at = u64::MAX;
+            return;
+        };
+        if self.ghosts_at == c.generation {
+            return;
+        }
+        self.ghosts.clear();
+        self.ghosts_at = c.generation;
+        let tint = |rgb: [f32; 3]| {
+            let mut l = linear(rgb);
+            l[3] = GHOST_ALPHA;
+            l
+        };
+        let (ghost, gone) = (
+            tint(crate::ui::style::GHOST),
+            tint(crate::ui::style::REMOVED),
+        );
+        for (key, body) in &c.ghosts {
+            let Ok(m) = &body.mesh else { continue };
+            let mut faces = Vec::new();
+            for f in &m.faces {
+                let tris = &m.triangles[f.triangles.0 as usize..f.triangles.1 as usize];
+                let name = ryucad::mesh::name_hex(&f.name);
+                let color = if c.is_gone(key, &name) { gone } else { ghost };
+                faces.extend(face_vertices(m, self.reference, tris, color));
+            }
+            self.ghosts.insert(
+                key.clone(),
+                GpuBody {
+                    hash: body.hash.clone(),
+                    mesh: Arc::clone(body),
+                    faces: buffer(device, "ghost", &faces),
+                    face_count: faces.len() as u32,
+                    edges: buffer(device, "ghost edges", &[]),
+                    edge_count: 0,
                 },
             );
         }
@@ -536,6 +633,13 @@ impl Scene {
                 for b in self.bodies.values() {
                     pass.set_vertex_buffer(0, b.edges.slice(..));
                     pass.draw(0..b.edge_count, 0..1);
+                }
+            }
+            if !self.ghosts.is_empty() {
+                pass.set_pipeline(&self.ghost);
+                for b in self.ghosts.values() {
+                    pass.set_vertex_buffer(0, b.faces.slice(..));
+                    pass.draw(0..b.face_count, 0..1);
                 }
             }
             if let Some(m) = &marked {

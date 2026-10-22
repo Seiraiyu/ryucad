@@ -2,6 +2,7 @@
 //! sets this window's selection through the daemon; everyone's selections
 //! and highlights are painted over the model in their colours.
 
+use crate::core::compare::FaceMark;
 use crate::core::model::BodyKey;
 use crate::core::nav::{Buttons, Gesture, Modifiers, Nav, Projector};
 use crate::core::pick::{Hit, Picker, Place};
@@ -26,6 +27,8 @@ pub struct View {
     pub look: crate::ui::style::Look,
     /// The feature chosen in the tree: its body is painted.
     pub chosen: Option<BodyKey>,
+    /// Entities a merge conflict concerns, shown from the conflict panel.
+    pub marked: Vec<String>,
     pub hover: Option<Hit>,
     /// Where the viewport was last drawn, in points.
     pub rect: egui::Rect,
@@ -83,8 +86,12 @@ impl Default for View {
 }
 
 /// An entity's kind and where it comes from, for people: "face of boss
-/// (cylinder)".
+/// (cylinder)", or for a face picked in a compare's ghost, "face of boss
+/// at HEAD, gone".
 pub fn describe(ws: &Workspace, hit: &Hit) -> String {
+    if let Some(rev) = &hit.rev {
+        return format!("{} of {} at {rev}, gone", hit.kind.as_str(), hit.feature);
+    }
     let ty = ws
         .part(&hit.part)
         .and_then(|p| p.feature(&hit.feature))
@@ -107,6 +114,7 @@ impl View {
             sketches: true,
             look: crate::ui::style::Look::default(),
             chosen: None,
+            marked: Vec::new(),
             hover: None,
             rect: egui::Rect::NOTHING,
             picker: None,
@@ -123,12 +131,13 @@ impl View {
         }
     }
 
-    /// The model prepared for picking, rebuilt when it changes or
-    /// sketches are shown or hidden.
+    /// The model prepared for picking, with a compare's ghost, rebuilt
+    /// when either changes or sketches are shown or hidden.
     pub fn picker(&mut self, ws: &Workspace) -> &Picker {
         let wanted = (ws.model.generation, self.sketches);
         if self.picker.is_none() || self.picked_at != wanted {
-            self.picker = Some(Picker::of(&ws.model, self.sketches));
+            self.picker =
+                Some(Picker::of(&ws.model, self.sketches).with_compare(ws.compare.as_ref()));
             self.picked_at = wanted;
         }
         self.picker.as_ref().expect("just made")
@@ -246,8 +255,8 @@ impl View {
     }
 
     /// Everything painted over the model this frame, last on top: the
-    /// chosen feature, other people's selections, highlights, this
-    /// window's selection, then the hover.
+    /// chosen feature, a compare's new and changed faces, other people's
+    /// selections, highlights, this window's selection, then the hover.
     fn painted(&mut self, ws: &Workspace) -> (Vec<PaintedFace>, Vec<(Place, Rgb)>) {
         let mut wanted: Vec<(String, Rgb)> = Vec::new();
         for p in ws.people.others(ws.me()) {
@@ -260,6 +269,8 @@ impl View {
                 wanted.extend(h.entities.iter().map(|e| (e.clone(), c)));
             }
         }
+        let note = style::highlight(ryucad::live::Style::Note);
+        wanted.extend(self.marked.iter().map(|e| (e.clone(), note)));
         if let Some(me) = ws.myself() {
             wanted.extend(me.selection.iter().map(|e| (e.clone(), style::SELECTED)));
         }
@@ -276,6 +287,26 @@ impl View {
         if let Some(k) = chosen {
             let c = linear(style::CHOSEN);
             faces.extend((0..picker.faces(&k)).map(|i| (k.clone(), i, c)));
+        }
+        // A compare's new and changed faces, over the chosen feature so
+        // choosing one still shows what changed in it.
+        if let Some(c) = &ws.compare {
+            for key in &c.new_bodies {
+                let new = linear(style::NEW);
+                faces.extend((0..picker.faces(key)).map(|i| (key.clone(), i, new)));
+            }
+            for (key, marks) in &c.faces {
+                for (name, m) in marks {
+                    let r = format!("{}/{}/{name}", key.0, key.1);
+                    if let Some(Place::Face(k, i)) = picker.place(&r) {
+                        let colour = match m {
+                            FaceMark::New => style::NEW,
+                            FaceMark::Changed => style::CHANGED,
+                        };
+                        faces.push((k, i, linear(colour)));
+                    }
+                }
+            }
         }
         let mut lines = Vec::new();
         // A sketch chosen in the tree: all of it.
@@ -507,7 +538,10 @@ impl View {
             self.moved(ws);
         }
         // Picking.
-        if response.clicked() {
+        // A face picked in a compare's ghost isn't in the working model:
+        // it can't be selected, only described and its reference copied.
+        let ghost = self.hover.as_ref().is_some_and(|h| h.rev.is_some());
+        if response.clicked() && !ghost {
             let add = modifiers.shift || modifiers.ctrl;
             match (&self.hover, add) {
                 (Some(h), false) => ws.select(vec![h.entity.clone()], SelectMode::Replace),
@@ -598,7 +632,7 @@ impl View {
                     ui.ctx().copy_text(h.entity.clone());
                     ui.close();
                 }
-                if ui.button("Select").clicked() {
+                if h.rev.is_none() && ui.button("Select").clicked() {
                     ws.select(vec![h.entity.clone()], SelectMode::Replace);
                     ui.close();
                 }
@@ -634,6 +668,7 @@ impl View {
             .scene
             .get_or_insert_with(|| Scene::new(&rs.device, &rs.adapter));
         scene.sync(&rs.device, &ws.model, reference);
+        scene.sync_ghosts(&rs.device, ws.compare.as_ref());
         let overlay = if self.sketches {
             let size = [f64::from(px[0]), f64::from(px[1])];
             crate::core::sketch::overlay(
