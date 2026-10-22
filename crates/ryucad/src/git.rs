@@ -1,7 +1,9 @@
 //! The project's Git history, read-only: the commits that touched the
 //! project (or one part), what is uncommitted, files as `HEAD` has them,
-//! and the whole project at any revision. ryucad never writes to Git;
-//! committing stays with the agent or user.
+//! the whole project at any revision, and a merge in progress (its step,
+//! each side's commit and the files Git left unmerged). ryucad never
+//! writes to Git; committing, and marking files resolved, stay with the
+//! agent or user.
 
 use crate::activity::Files;
 use crate::error::{Code, Error, Result};
@@ -32,6 +34,51 @@ pub struct Revision {
     /// The manifest, its Git attributes and everything under `parts/`, by
     /// path relative to the project.
     pub files: Files,
+}
+
+/// What Git is in the middle of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    Merge,
+    CherryPick,
+    Revert,
+    /// One step of a rebase: a commit being replayed.
+    Rebase,
+}
+
+impl Step {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Step::Merge => "merge",
+            Step::CherryPick => "cherry-pick",
+            Step::Revert => "revert",
+            Step::Rebase => "rebase",
+        }
+    }
+}
+
+/// A merge in progress: what Git is doing, and the commits it merges, in
+/// hex. Ours is `HEAD`; theirs and the base are what Git merges with it:
+/// for a merge the other head and their merge base; for a cherry-pick or
+/// a rebase step the picked commit and its parent; for a revert the
+/// reverted commit's parent, from the reverted commit as base.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MergeState {
+    pub step: Step,
+    pub ours: String,
+    pub theirs: String,
+    /// `None` when the two have no common ancestor (or a root commit was
+    /// picked).
+    pub base: Option<String>,
+}
+
+/// Each side's version of a file Git couldn't merge, from the index's
+/// stages; `None` where that side has no file (a deletion).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Unmerged {
+    pub base: Option<Vec<u8>>,
+    pub ours: Option<Vec<u8>>,
+    pub theirs: Option<Vec<u8>>,
 }
 
 /// The error for a project outside any repository.
@@ -301,6 +348,191 @@ impl Repo {
         })
     }
 
+    /// The commit `HEAD` points at, in hex.
+    fn head_id(&self) -> Result<String> {
+        self.head()
+            .map(|c| c.id.to_string())
+            .ok_or_else(|| Error::new(Code::NotMerging, "the repository has no commits"))
+    }
+
+    /// The first parent of the commit `id`, in hex, if it has one.
+    fn parent(&self, id: &str) -> Result<Option<String>> {
+        let commit = self.commit(id)?;
+        Ok(commit.parent_ids().next().map(|p| p.to_string()))
+    }
+
+    /// The merge Git is in the middle of, from the files it keeps while it
+    /// waits (`MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, and
+    /// `REBASE_HEAD` during a rebase), or, inside the hook Git runs before
+    /// committing a merge it made itself, from what it says it merges
+    /// ([`hook_heads`]); `None` otherwise. An octopus merge is
+    /// `merge_unsupported`.
+    pub fn merge_state(&self) -> Result<Option<MergeState>> {
+        let dir = self.repo.git_dir();
+        let waiting = WAITING.iter().any(|n| dir.join(n).is_file());
+        if !waiting {
+            let heads = hook_heads(dir);
+            if !heads.is_empty() {
+                return self.merging(Step::Merge, &heads).map(Some);
+            }
+        }
+        let rebasing = dir.join("rebase-merge").is_dir() || dir.join("rebase-apply").is_dir();
+        let steps = [
+            ("MERGE_HEAD", Step::Merge),
+            ("CHERRY_PICK_HEAD", Step::CherryPick),
+            ("REVERT_HEAD", Step::Revert),
+            ("REBASE_HEAD", Step::Rebase),
+        ];
+        for (name, step) in steps {
+            if step == Step::Rebase && !rebasing {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(dir.join(name)) else {
+                continue;
+            };
+            let heads: Vec<String> = text.split_whitespace().map(str::to_owned).collect();
+            if heads.is_empty() {
+                continue;
+            }
+            return self.merging(step, &heads).map(Some);
+        }
+        Ok(None)
+    }
+
+    /// The index file's size and time: `git add` and `git rm` change it.
+    pub fn index_stamp(&self) -> String {
+        match std::fs::metadata(self.repo.index_path()) {
+            Ok(m) => {
+                let t = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_nanos());
+                format!("{}:{t}", m.len())
+            }
+            Err(_) => String::new(),
+        }
+    }
+
+    /// The merge of `heads` into `HEAD` that `step` makes.
+    fn merging(&self, step: Step, heads: &[String]) -> Result<MergeState> {
+        let head = match heads {
+            [h] => h,
+            _ => {
+                return Err(Error::new(
+                    Code::MergeUnsupported,
+                    format!(
+                        "an octopus merge of {} heads: ryucad reports on merges of two",
+                        heads.len() + 1
+                    ),
+                )
+                .with("heads", heads));
+            }
+        };
+        let ours = self.head_id()?;
+        let named = self.commit(head)?.id.to_string();
+        let (theirs, base) = match step {
+            Step::Merge => {
+                let ours_id = gix::ObjectId::from_hex(ours.as_bytes()).map_err(git_error)?;
+                let theirs_id = gix::ObjectId::from_hex(named.as_bytes()).map_err(git_error)?;
+                let base = self
+                    .repo
+                    .merge_base(ours_id, theirs_id)
+                    .ok()
+                    .flatten()
+                    .map(|b| b.to_string());
+                (named, base)
+            }
+            Step::CherryPick | Step::Rebase => {
+                let base = self.parent(&named)?;
+                (named, base)
+            }
+            Step::Revert => {
+                let parent = self.parent(&named)?.ok_or_else(|| {
+                    Error::new(
+                        Code::MergeUnsupported,
+                        "reverting a root commit: there is no parent to merge",
+                    )
+                })?;
+                (parent, Some(named))
+            }
+        };
+        Ok(MergeState {
+            step,
+            ours,
+            theirs,
+            base,
+        })
+    }
+
+    /// The project's files Git left unmerged in the index, by path relative
+    /// to the project, with each side's version.
+    pub fn unmerged(&self) -> Result<BTreeMap<String, Unmerged>> {
+        use gix::index::entry::Stage;
+        let mut out: BTreeMap<String, Unmerged> = BTreeMap::new();
+        // A repository with no index yet has nothing unmerged.
+        let Ok(index) = self.repo.open_index() else {
+            return Ok(out);
+        };
+        for e in index.entries() {
+            let stage = e.stage();
+            if stage == Stage::Unconflicted {
+                continue;
+            }
+            let path = e.path(&index).to_string();
+            let Some(rel) = path.strip_prefix(&self.prefix) else {
+                continue;
+            };
+            let bytes = Some(self.read(e.id)?);
+            let entry = out.entry(rel.to_owned()).or_default();
+            match stage {
+                Stage::Base => entry.base = bytes,
+                Stage::Ours => entry.ours = bytes,
+                Stage::Theirs => entry.theirs = bytes,
+                Stage::Unconflicted => {}
+            }
+        }
+        Ok(out)
+    }
+
+    /// The project's files whose working copy isn't what the index holds
+    /// (changed, deleted or never added), by path relative to the project,
+    /// sorted: a commit would take the index's, not what was checked. Paths
+    /// Git left unmerged are [`Repo::unmerged`]'s and left out.
+    pub fn unstaged(&self, files: &Files) -> Result<Vec<String>> {
+        use gix::index::entry::Stage;
+        let mut staged = BTreeMap::new();
+        let mut unmerged = std::collections::BTreeSet::new();
+        if let Ok(index) = self.repo.open_index() {
+            for e in index.entries() {
+                let path = e.path(&index).to_string();
+                let Some(rel) = path.strip_prefix(&self.prefix) else {
+                    continue;
+                };
+                if !project_file(rel) {
+                    continue;
+                }
+                if e.stage() == Stage::Unconflicted {
+                    staged.insert(rel.to_owned(), e.id);
+                } else {
+                    unmerged.insert(rel.to_owned());
+                }
+            }
+        }
+        let mut out = std::collections::BTreeSet::new();
+        for (path, bytes) in files {
+            match staged.get(path) {
+                _ if unmerged.contains(path) => {}
+                Some(id) if same_text(&self.read(*id)?, bytes) => {}
+                _ => {
+                    out.insert(path.clone());
+                }
+            }
+        }
+        out.extend(staged.into_keys().filter(|p| !files.contains_key(p)));
+        Ok(out.into_iter().collect())
+    }
+
     /// The project files a commit changed relative to its parent.
     fn changed(&self, tree: &gix::Tree<'_>, parent: Option<&gix::Tree<'_>>) -> Result<Vec<Value>> {
         let now = self.project_blobs(tree)?;
@@ -322,6 +554,125 @@ impl Repo {
         out.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
         Ok(out)
     }
+}
+
+/// Whether `rel` (relative to a project) is one of the files its state
+/// depends on, as `session::files` lists them: the manifest, the
+/// attributes, and files two and three levels under `parts/`.
+fn project_file(rel: &str) -> bool {
+    if rel == crate::doc::project::MANIFEST || rel == crate::drivers::ATTRIBUTES {
+        return true;
+    }
+    let mut parts = rel.split('/');
+    parts.next() == Some("parts") && matches!(parts.count(), 2 | 3)
+}
+
+/// The files Git keeps while a merge, cherry-pick, revert or rebase step
+/// waits, and the heads they name.
+const WAITING: [&str; 4] = [
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "REBASE_HEAD",
+];
+
+/// What Git is merging when it runs a hook before committing a merge it
+/// made itself, before it writes `MERGE_HEAD`: the commits its reflog
+/// action names (`merge <commit>…`, options left out), or for a pull, the
+/// heads `FETCH_HEAD` marks for merging. Empty anywhere else.
+fn hook_heads(git_dir: &Path) -> Vec<String> {
+    let Ok(action) = std::env::var("GIT_REFLOG_ACTION") else {
+        return Vec::new();
+    };
+    let mut words = action.split_whitespace();
+    match words.next() {
+        Some("merge") => words
+            .filter(|w| !w.starts_with('-'))
+            .map(str::to_owned)
+            .collect(),
+        Some("pull") => std::fs::read_to_string(git_dir.join("FETCH_HEAD"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split('\t');
+                let (id, mark) = (f.next()?, f.next()?);
+                mark.is_empty().then(|| id.to_owned())
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The folders under `tree` (paths below `at`) that hold a `ryucad.json`.
+fn manifests(
+    repo: &gix::Repository,
+    tree: gix::ObjectId,
+    at: &str,
+    out: &mut Vec<String>,
+) -> Result<()> {
+    let obj = repo.find_object(tree).map_err(git_error)?;
+    let Ok(tree) = obj.try_into_tree() else {
+        return Ok(());
+    };
+    let decoded = tree.decode().map_err(git_error)?;
+    for e in &decoded.entries {
+        let name = e.filename.to_string();
+        if e.mode.is_tree() {
+            manifests(repo, e.oid.to_owned(), &format!("{at}{name}/"), out)?;
+        } else if name == crate::doc::project::MANIFEST {
+            out.push(at.to_owned());
+        }
+    }
+    Ok(())
+}
+
+/// The ryucad projects of the repository holding `here` that a merge in
+/// progress concerns: every folder with a `ryucad.json` in `HEAD` or in
+/// the commit being merged that the work tree still has, sorted. Empty,
+/// at once, when Git is in no merge (as for every ordinary commit).
+pub fn merging_projects(here: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let Ok(repo) = gix::discover(here) else {
+        return Ok(Vec::new());
+    };
+    let Some(workdir) = repo.workdir().map(Path::to_path_buf) else {
+        return Ok(Vec::new());
+    };
+    let dir = repo.git_dir().to_path_buf();
+    let mut heads: Vec<String> = WAITING
+        .iter()
+        .filter_map(|n| std::fs::read_to_string(dir.join(n)).ok())
+        .flat_map(|t| t.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
+        .collect();
+    if heads.is_empty() {
+        heads = hook_heads(&dir);
+    }
+    if heads.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut folders = Vec::new();
+    for rev in std::iter::once("HEAD".to_owned()).chain(heads) {
+        let Ok(id) = repo.rev_parse_single(rev.as_str()) else {
+            continue;
+        };
+        let commit = id
+            .object()
+            .map_err(git_error)?
+            .peel_to_commit()
+            .map_err(git_error)?;
+        let tree = commit.tree_id().map_err(git_error)?.detach();
+        manifests(&repo, tree, "", &mut folders)?;
+    }
+    folders.sort();
+    folders.dedup();
+    Ok(folders
+        .into_iter()
+        .map(|f| {
+            f.split('/')
+                .filter(|s| !s.is_empty())
+                .fold(workdir.clone(), |p, s| p.join(s))
+        })
+        .filter(|p| p.join(crate::doc::project::MANIFEST).is_file())
+        .collect())
 }
 
 /// The repository holding the project at `root`, or `not_a_git_repo`.
@@ -555,6 +906,187 @@ pub(crate) mod tests {
         assert_eq!(
             revision(outside.path(), "HEAD").unwrap_err().code,
             Code::NotAGitRepo
+        );
+    }
+
+    /// A repository with a project in `cad/` holding two plain files, and
+    /// branch `theirs` that edits the first and deletes the second, while
+    /// `main` edits both: a merge leaves both unmerged.
+    fn diverged() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().to_path_buf();
+        git(&top, &["init", "-q", "-b", "main"]);
+        let root = top.join("cad");
+        std::fs::create_dir(&root).unwrap();
+        crate::server::init(&root, None).unwrap();
+        let f = |name: &str, text: &str| {
+            let p = root.join("parts/p/features").join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        };
+        f("x.json", "a\n");
+        f("y.json", "y\n");
+        std::fs::write(top.join("README"), "outside\n").unwrap();
+        git(&top, &["add", "."]);
+        git(&top, &["commit", "-q", "-m", "base"]);
+        git(&top, &["checkout", "-q", "-b", "theirs"]);
+        f("x.json", "b\n");
+        std::fs::remove_file(root.join("parts/p/features/y.json")).unwrap();
+        std::fs::write(top.join("README"), "theirs\n").unwrap();
+        git(&top, &["commit", "-q", "-am", "theirs"]);
+        git(&top, &["checkout", "-q", "main"]);
+        f("x.json", "c\n");
+        f("y.json", "ours\n");
+        std::fs::write(top.join("README"), "ours\n").unwrap();
+        git(&top, &["commit", "-q", "-am", "ours"]);
+        (dir, root)
+    }
+
+    /// Runs git, which may fail.
+    fn try_git(dir: &Path, args: &[&str]) -> bool {
+        Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_EDITOR", "true")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
+    #[test]
+    fn a_merge_in_progress_and_what_it_left() {
+        let (dir, root) = diverged();
+        let top = dir.path();
+        let repo = Repo::open(&root).unwrap().unwrap();
+        assert_eq!(repo.merge_state().unwrap(), None);
+        assert!(repo.unmerged().unwrap().is_empty());
+        let rev = |r: &str| repo.commit(r).unwrap().id.to_string();
+        let (base, ours, theirs) = (rev("main~1"), rev("main"), rev("theirs"));
+        assert!(!try_git(top, &["merge", "theirs"]));
+        let repo = Repo::open(&root).unwrap().unwrap();
+        assert_eq!(
+            repo.merge_state().unwrap(),
+            Some(MergeState {
+                step: Step::Merge,
+                ours: ours.clone(),
+                theirs: theirs.clone(),
+                base: Some(base.clone()),
+            })
+        );
+        // Only the project's files, by path in the project.
+        let u = repo.unmerged().unwrap();
+        assert_eq!(
+            u.keys().collect::<Vec<_>>(),
+            ["parts/p/features/x.json", "parts/p/features/y.json"]
+        );
+        let x = &u["parts/p/features/x.json"];
+        assert_eq!(
+            (x.base.as_deref(), x.ours.as_deref(), x.theirs.as_deref()),
+            (Some(&b"a\n"[..]), Some(&b"c\n"[..]), Some(&b"b\n"[..]))
+        );
+        let y = &u["parts/p/features/y.json"];
+        assert_eq!(
+            (y.ours.as_deref(), y.theirs.as_deref()),
+            (Some(&b"ours\n"[..]), None)
+        );
+        git(top, &["merge", "--abort"]);
+        assert_eq!(repo.merge_state().unwrap(), None);
+        // A cherry-pick merges the picked commit from its parent.
+        assert!(!try_git(top, &["cherry-pick", "theirs"]));
+        let s = repo.merge_state().unwrap().unwrap();
+        assert_eq!(
+            (s.step, s.theirs.as_str(), s.base.as_deref()),
+            (Step::CherryPick, theirs.as_str(), Some(base.as_str()))
+        );
+        git(top, &["cherry-pick", "--abort"]);
+        // A rebase step replays a commit the same way.
+        git(top, &["checkout", "-q", "theirs"]);
+        assert!(!try_git(top, &["rebase", "main"]));
+        let s = repo.merge_state().unwrap().unwrap();
+        assert_eq!(
+            (
+                s.step,
+                s.ours.as_str(),
+                s.theirs.as_str(),
+                s.base.as_deref()
+            ),
+            (
+                Step::Rebase,
+                ours.as_str(),
+                theirs.as_str(),
+                Some(base.as_str())
+            )
+        );
+        git(top, &["rebase", "--abort"]);
+        // A revert merges the parent, from the reverted commit.
+        git(top, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("parts/p/features/x.json"), "d\n").unwrap();
+        git(top, &["commit", "-q", "-am", "after"]);
+        assert!(!try_git(top, &["revert", "--no-edit", "main~1"]));
+        let s = repo.merge_state().unwrap().unwrap();
+        assert_eq!(
+            (s.step, s.theirs.as_str(), s.base.as_deref()),
+            (Step::Revert, base.as_str(), Some(ours.as_str()))
+        );
+        git(top, &["revert", "--abort"]);
+        // An octopus is refused.
+        let git_dir = top.join(".git");
+        std::fs::write(git_dir.join("MERGE_HEAD"), format!("{theirs}\n{base}\n")).unwrap();
+        assert_eq!(repo.merge_state().unwrap_err().code, Code::MergeUnsupported);
+    }
+
+    #[test]
+    fn a_merge_concerns_every_project_either_side_has() {
+        let (dir, root) = diverged();
+        let top = dir.path();
+        assert!(merging_projects(top).unwrap().is_empty());
+        // A second project, only on theirs, and one only in the work tree.
+        git(top, &["checkout", "-q", "theirs"]);
+        let other = top.join("deep/other");
+        std::fs::create_dir_all(&other).unwrap();
+        crate::server::init(&other, None).unwrap();
+        git(top, &["add", "."]);
+        git(top, &["commit", "-q", "-m", "another"]);
+        git(top, &["checkout", "-q", "main"]);
+        let stray = top.join("stray");
+        std::fs::create_dir_all(&stray).unwrap();
+        crate::server::init(&stray, None).unwrap();
+        assert!(!try_git(top, &["merge", "theirs"]));
+        let found = merging_projects(&root.join("parts")).unwrap();
+        let canon = |p: &Path| p.canonicalize().unwrap();
+        assert_eq!(
+            found.iter().map(|p| canon(p)).collect::<Vec<_>>(),
+            [canon(&root), canon(&other)]
+        );
+    }
+
+    #[test]
+    fn files_the_index_doesnt_hold_as_they_are() {
+        let (dir, _s) = fresh();
+        let r = dir.path();
+        git(r, &["init", "-q"]);
+        git(r, &["add", "."]);
+        git(r, &["commit", "-q", "-m", "one"]);
+        let repo = Repo::open(r).unwrap().unwrap();
+        assert!(repo.unstaged(&files(r)).unwrap().is_empty());
+        // Changed, never added, and not a project file at all.
+        std::fs::write(r.join(crate::doc::project::MANIFEST), "{}\n").unwrap();
+        std::fs::create_dir_all(r.join("parts/p/features/deeper")).unwrap();
+        std::fs::write(r.join("parts/p/features/x.json"), "{}\n").unwrap();
+        std::fs::write(r.join("parts/p/features/deeper/y.json"), "{}\n").unwrap();
+        assert_eq!(
+            repo.unstaged(&files(r)).unwrap(),
+            ["parts/p/features/x.json", "ryucad.json"]
+        );
+        // Staged is settled; deleted but still staged isn't.
+        git(r, &["add", "ryucad.json"]);
+        std::fs::remove_file(r.join(crate::drivers::ATTRIBUTES)).unwrap();
+        assert_eq!(
+            repo.unstaged(&files(r)).unwrap(),
+            [".gitattributes", "parts/p/features/x.json"]
         );
     }
 

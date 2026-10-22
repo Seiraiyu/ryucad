@@ -273,6 +273,11 @@ fn dispatch(
             v["revision"] = json!(p.revision);
             Ok(v)
         }
+        Request::MergeStatus {} => crate::validate::status(session),
+        Request::MergeResolve {
+            resolutions,
+            expected_revisions,
+        } => crate::validate::resolve(session, &resolutions, &expected_revisions),
         Request::DaemonStatus {} | Request::DaemonShutdown {} => Err(Error::new(
             Code::Usage,
             "only a running daemon answers daemon requests",
@@ -1478,6 +1483,20 @@ pub fn publish(live: &mut Live, session: &mut Session) {
         live.hub.send(Topic::Project, "project.changed", &project);
     }
     live.seen.project = project;
+    // A merge: when it starts, ends, or what it leaves to settle changes.
+    let merge = crate::validate::key(session);
+    if watched && live.seen.merge != merge {
+        let params = match merge {
+            None => json!({"merging": false}),
+            Some(_) => match crate::validate::status(session) {
+                Ok(s) => json!({"merging": true, "status": s}),
+                Err(e) => json!({"merging": true, "error": e}),
+            },
+        };
+        live.hub.send(Topic::Merge, "merge.changed", &params);
+    }
+    live.seen.merge = merge;
+    let p = session.project();
     let revisions: BTreeMap<Id, String> = p
         .parts
         .iter()

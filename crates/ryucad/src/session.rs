@@ -60,6 +60,8 @@ pub struct Session {
     /// The revisions requests have named, by the project folder's tree,
     /// most recently used first.
     revisions: Vec<(String, Session)>,
+    /// The last merge status, by the key of what it was computed from.
+    pub(crate) merge_status: Option<(String, serde_json::Value)>,
 }
 
 impl Session {
@@ -75,6 +77,7 @@ impl Session {
             meshes: crate::mesh::Cache::default(),
             frozen: false,
             revisions: Vec::new(),
+            merge_status: None,
         };
         s.scan()?;
         Ok(s)
@@ -107,6 +110,7 @@ impl Session {
             meshes: crate::mesh::Cache::default(),
             frozen: true,
             revisions: Vec::new(),
+            merge_status: None,
         })
     }
 
@@ -188,6 +192,19 @@ impl Session {
             .iter()
             .map(|(p, s)| (crate::doc::project::relative(root, p), s.bytes.to_vec()))
             .collect()
+    }
+
+    /// A hash of every file the project's state depends on, as last read.
+    pub fn digest(&self) -> String {
+        let mut h = blake3::Hasher::new();
+        for (path, s) in &self.stamps {
+            let p = path.to_string_lossy();
+            h.update(&(p.len() as u64).to_le_bytes());
+            h.update(p.as_bytes());
+            h.update(&(s.bytes.len() as u64).to_le_bytes());
+            h.update(&s.bytes);
+        }
+        h.finalize().to_hex().to_string()
     }
 
     /// The rebuild of `part`, from the cache when its files haven't changed.

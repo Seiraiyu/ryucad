@@ -1,8 +1,9 @@
 //! `ryucad check`: the project rebuilt from its files alone, with nothing
 //! reused, and everything verified that can be without a stored result:
-//! `doctor`'s issues (stale sketches among them), that every feature
-//! builds, that every body passes ryukei's intersection check and meshes
-//! without faults, and that the session's cached results are what a
+//! `doctor`'s issues (stale sketches, conflict records and Git's setup
+//! among them), that no file is left unmerged in Git's index, that every
+//! feature builds, that every body passes ryukei's intersection check and
+//! meshes without faults, and that the session's cached results are what a
 //! rebuild from nothing gives. CI and hosted review run it.
 
 use crate::doc::id::Id;
@@ -13,12 +14,13 @@ use rayon::prelude::*;
 use serde_json::{Value, json};
 
 /// Every finding's code and severity: `doctor`'s issues keep their own.
-pub const CODES: [(&str, &str); 5] = [
+pub const CODES: [(&str, &str); 6] = [
     ("feature_failed", "error"),
     ("faces_intersect", "error"),
     ("cannot_check", "warning"),
     ("mesh_faults", "error"),
     ("cache_mismatch", "error"),
+    ("unmerged_path", "error"),
 ];
 
 fn severity(code: &str) -> &'static str {
@@ -160,6 +162,23 @@ pub fn run(session: &mut Session, part: Option<&str>, against: Option<&str>) -> 
             v
         })
         .collect();
+    // What Git left unmerged: a merge to finish before anything is checked
+    // in.
+    if let Some(repo) = crate::git::Repo::open(session.root())? {
+        for path in repo.unmerged()?.keys() {
+            let mine = match path.split('/').collect::<Vec<_>>().as_slice() {
+                ["parts", p, ..] => ids.iter().any(|id| id.as_str() == *p),
+                _ => true,
+            };
+            if mine {
+                findings.push(json!({
+                    "code": "unmerged_path", "severity": severity("unmerged_path"),
+                    "files": [path],
+                    "message": format!("{path} is unmerged in Git's index: settle the merge (`ryucad merge status`), then `git add` it"),
+                }));
+            }
+        }
+    }
     let mut parts = Vec::new();
     for id in &ids {
         let p = session.project().part(id)?.clone();
@@ -193,6 +212,8 @@ pub fn run(session: &mut Session, part: Option<&str>, against: Option<&str>) -> 
                 findings.push(f);
             }
             match r {
+                // A conflict record is doctor's to report.
+                Err(e) if e.code == Code::MergeConflict => {}
                 Err(e) => {
                     let mut f = finding("feature_failed", id, fid, e.message.clone());
                     f["error"] = json!(session.explain(id, e.clone()));
@@ -419,6 +440,47 @@ mod tests {
         );
         let e = call(&mut s, "check", json!({"against": "nowhere"})).unwrap_err();
         assert_eq!(e.code, Code::RevNotFound);
+    }
+
+    #[test]
+    fn an_unfinished_merge_fails() {
+        use crate::validate::tests::{both_edit, boxed};
+        let mut m = boxed();
+        both_edit(&mut m, json!({"x": 15}), json!({"x": 12}));
+        m.merge("theirs");
+        let e = m.call("check", json!({})).unwrap_err();
+        assert_eq!(e.code, Code::CheckFailed);
+        let found: Vec<(&str, &str)> = e.details["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| {
+                (
+                    f["code"].as_str().unwrap(),
+                    f["files"][0].as_str().unwrap_or(""),
+                )
+            })
+            .filter(|(c, _)| !c.starts_with("git_"))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("merge_conflict", "parts/p/features/b.json"),
+                ("unmerged_path", "parts/p/features/b.json")
+            ]
+        );
+        // Settled but not added: still unmerged.
+        m.call(
+            "merge.resolve",
+            json!({"resolutions": [{"conflict": "parts/p/features/b.json#/params/x",
+                                    "choice": "theirs"}]}),
+        )
+        .unwrap();
+        let e = m.call("check", json!({})).unwrap_err();
+        assert_eq!(e.details["errors"], 1);
+        m.git(&["add", "-A"]);
+        let v = m.call("check", json!({})).unwrap();
+        assert_eq!(v["passed"], true, "{v}");
     }
 
     #[test]

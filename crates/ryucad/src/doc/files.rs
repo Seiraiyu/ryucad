@@ -294,6 +294,24 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
     out
 }
 
+/// The lowest format that holds a feature's JSON, judged from the JSON
+/// alone, as [`Feature::format`] judges a loaded feature: sketches and
+/// sweeps are new in format 2, and a primitive needs it only for an
+/// expression.
+pub fn feature_format(v: &Value) -> u64 {
+    if matches!(
+        v.get("type").and_then(Value::as_str),
+        Some("sketch" | "extrude" | "revolve")
+    ) {
+        return FEATURE_FORMAT;
+    }
+    let mut v = v.clone();
+    let literal = expression_strings(&mut v)
+        .into_iter()
+        .all(|s| Expr::parse(s).is_ok_and(|e| e.is_literal()));
+    if literal { 1 } else { FEATURE_FORMAT }
+}
+
 /// The parameters a feature's JSON names, read from its text alone, so a
 /// feature that doesn't evaluate still says what it reads.
 pub fn feature_names(v: &Value) -> std::collections::BTreeSet<String> {
@@ -863,6 +881,11 @@ mod tests {
         // A literal-only feature stays at format 1.
         let f = Feature::from_json(&cylinder_json(), Unit::Mm, &wall()).unwrap();
         assert_eq!(f.format(), 1);
+        // The JSON alone says the same.
+        assert_eq!(feature_format(&f.to_json()), 1);
+        assert_eq!(feature_format(&v), 2);
+        let sketch = json!({"type": "sketch", "entities": {}, "constraints": {}});
+        assert_eq!(feature_format(&sketch), 2);
     }
 
     #[test]

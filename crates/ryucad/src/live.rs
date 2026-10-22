@@ -108,11 +108,13 @@ pub struct Live {
     pub poll_ms: u64,
 }
 
-/// The project and part revisions subscribers were last told about.
+/// The project and part revisions subscribers were last told about, and
+/// the merge in progress (its state's key; `None` when there is none).
 #[derive(Debug, Default)]
 pub struct Seen {
     pub project: Value,
     pub parts: BTreeMap<crate::doc::id::Id, String>,
+    pub merge: Option<String>,
 }
 
 /// Every participant's state, to compare before and after a change.

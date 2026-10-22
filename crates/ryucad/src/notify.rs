@@ -27,14 +27,18 @@ pub enum Topic {
     Participants,
     /// `activity.appended`: the activity log.
     Activity,
+    /// `merge.changed`: a merge in progress started, ended, or what it
+    /// leaves to settle changed.
+    Merge,
 }
 
 impl Topic {
-    pub const ALL: [Topic; 4] = [
+    pub const ALL: [Topic; 5] = [
         Topic::Model,
         Topic::Project,
         Topic::Participants,
         Topic::Activity,
+        Topic::Merge,
     ];
 }
 
@@ -91,6 +95,12 @@ impl Subscriber {
 
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
+    }
+
+    /// Every line queued now, without waiting.
+    #[cfg(test)]
+    pub(crate) fn drain(&self) -> Vec<String> {
+        lock(&self.queue).drain(..).collect()
     }
 }
 
@@ -163,7 +173,9 @@ pub fn topics(names: &[String]) -> Result<Vec<Topic>> {
             serde_json::from_value(json!(n)).map_err(|_| {
                 Error::new(
                     Code::InvalidParam,
-                    format!("unknown topic {n:?}; use model, project, participants or activity"),
+                    format!(
+                        "unknown topic {n:?}; use model, project, participants, activity or merge"
+                    ),
                 )
                 .with("topic", n)
             })

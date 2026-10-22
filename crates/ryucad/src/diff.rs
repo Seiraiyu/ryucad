@@ -345,6 +345,14 @@ fn feature(a: Option<&Value>, b: Option<&Value>, opts: &Options) -> Value {
 fn order(a: &[String], b: &[String]) -> Value {
     let added: Vec<&String> = b.iter().filter(|f| !a.contains(f)).collect();
     let removed: Vec<&String> = a.iter().filter(|f| !b.contains(f)).collect();
+    let moved = moved_features(a, b);
+    let moved: Vec<&String> = b.iter().filter(|f| moved.contains(*f)).collect();
+    json!({"added": added, "removed": removed, "moved": moved})
+}
+
+/// The features `a` and `b` both list that `b` moved: those not in the
+/// longest run both keep in order, the fewest moves that explain `b`.
+pub(crate) fn moved_features(a: &[String], b: &[String]) -> BTreeSet<String> {
     let x: Vec<&String> = a.iter().filter(|f| b.contains(f)).collect();
     let y: Vec<&String> = b.iter().filter(|f| a.contains(f)).collect();
     // The longest common subsequence, by dynamic programming.
@@ -372,8 +380,10 @@ fn order(a: &[String], b: &[String]) -> Value {
             j += 1;
         }
     }
-    let moved: Vec<&&String> = y.iter().filter(|f| !kept.contains(**f)).collect();
-    json!({"added": added, "removed": removed, "moved": moved})
+    y.into_iter()
+        .filter(|f| !kept.contains(*f))
+        .cloned()
+        .collect()
 }
 
 /// A part's listed features, if its `part.json` reads.
@@ -595,6 +605,106 @@ fn same_face(a: &Named, b: &Named, n: &str) -> bool {
         && ea
             .iter()
             .all(|e| !b.edges.contains_key(e) || same_edge(a, b, e))
+}
+
+/// An edge's parameter range and end points, by bits.
+type Ends = ([u64; 2], [u64; 3], [u64; 3]);
+
+/// Pairs each entity of `a` with the one entity of `b` whose geometry is
+/// the same, by `key` and then `same`; `None` unless every entity of each
+/// has exactly one such partner.
+fn pair<K: Ord>(
+    a: &BTreeMap<String, K>,
+    b: &BTreeMap<String, K>,
+    same: impl Fn(&str, &str) -> bool,
+) -> Option<BTreeMap<String, String>> {
+    if a.len() != b.len() {
+        return None;
+    }
+    let mut buckets: BTreeMap<&K, Vec<&String>> = BTreeMap::new();
+    for (n, k) in b {
+        buckets.entry(k).or_default().push(n);
+    }
+    let mut out = BTreeMap::new();
+    let mut taken = BTreeSet::new();
+    for (n, k) in a {
+        let found: Vec<&&String> = buckets.get(k)?.iter().filter(|m| same(n, m)).collect();
+        let [m] = found.as_slice() else {
+            return None;
+        };
+        if !taken.insert((**m).clone()) {
+            return None;
+        }
+        out.insert(n.clone(), (**m).clone());
+    }
+    Some(out)
+}
+
+/// What each face, edge and vertex of `a` is called in `b`, two builds of
+/// one feature's inputs under different names, matched by their geometry
+/// alone and compared by bits: a vertex by its point, an edge by its
+/// curve, range and end points, a face by its surface, sense and the
+/// edges it is bounded by. Names steer no geometry but a blend's rail or an
+/// ordinal, so the match is exact or there is none: `None` unless every
+/// entity of each matches exactly one of the other's.
+pub fn match_names(
+    a: &ryukei::topo::Body,
+    b: &ryukei::topo::Body,
+) -> Option<BTreeMap<String, String>> {
+    let (x, y) = (Named::new(a), Named::new(b));
+    let points = |n: &Named| -> BTreeMap<String, [u64; 3]> {
+        n.vertices
+            .iter()
+            .map(|(k, v)| (k.clone(), n.point(*v)))
+            .collect()
+    };
+    let vertices = pair(&points(&x), &points(&y), |_, _| true)?;
+    let ends = |n: &Named| -> BTreeMap<String, Ends> {
+        n.edges
+            .iter()
+            .map(|(k, e)| {
+                let edge = n.body.edge(*e).expect("live");
+                let key = (
+                    edge.interval.map(f64::to_bits),
+                    n.point(edge.start),
+                    n.point(edge.end),
+                );
+                (k.clone(), key)
+            })
+            .collect()
+    };
+    let edges = pair(&ends(&x), &ends(&y), |p, q| {
+        let (e, f) = (
+            x.body.edge(x.edges[p]).expect("live"),
+            y.body.edge(y.edges[q]).expect("live"),
+        );
+        x.body.curve(e.curve) == y.body.curve(f.curve)
+    })?;
+    let bounds =
+        |n: &Named, rename: &dyn Fn(&str) -> String| -> BTreeMap<String, (bool, Vec<String>)> {
+            n.faces
+                .iter()
+                .map(|(k, f)| {
+                    let reversed =
+                        n.body.face(*f).expect("live").sense == ryukei::topo::Sense::Reversed;
+                    let mut edges: Vec<String> = n.boundary(*f).iter().map(|e| rename(e)).collect();
+                    edges.sort();
+                    (k.clone(), (reversed, edges))
+                })
+                .collect()
+        };
+    let faces = pair(
+        &bounds(&x, &|e| edges[e].clone()),
+        &bounds(&y, &|e| e.to_owned()),
+        |p, q| {
+            let (f, g) = (
+                x.body.face(x.faces[p]).expect("live"),
+                y.body.face(y.faces[q]).expect("live"),
+            );
+            x.body.surface(f.surface) == y.body.surface(g.surface)
+        },
+    )?;
+    Some(faces.into_iter().chain(edges).chain(vertices).collect())
 }
 
 /// Names on one side only, and those on both whose geometry differs, for
@@ -1093,6 +1203,29 @@ mod tests {
         for kind in ["faces", "edges", "vertices"] {
             assert_eq!(same[kind], json!({"gone": [], "new": [], "changed": []}));
         }
+    }
+
+    #[test]
+    fn two_builds_of_one_body_match_by_geometry() {
+        use ryukei::name::OpKey;
+        let at = |key: &[u8], z: f64| {
+            let place = ryukei::geom::Rigid::translation(ryukei::geom::Vector3::new(0.0, 0.0, z));
+            ryukei::primitive::block(OpKey::from_bytes(key), 0.01, 0.02, 0.03, &place)
+                .unwrap()
+                .0
+        };
+        let (a, b) = (at(b"one", 0.0), at(b"two", 0.0));
+        let map = match_names(&a, &b).expect("the same box");
+        assert_eq!(map.len(), 6 + 12 + 8);
+        let named = |body: &ryukei::topo::Body| -> BTreeSet<String> {
+            body.faces()
+                .map(|f| body.face(f).unwrap().name.to_string())
+                .collect()
+        };
+        assert!(named(&a).iter().all(|n| named(&b).contains(&map[n])));
+        assert_ne!(named(&a), named(&b));
+        // Moved, nothing matches.
+        assert!(match_names(&a, &at(b"two", 0.001)).is_none());
     }
 
     #[test]
