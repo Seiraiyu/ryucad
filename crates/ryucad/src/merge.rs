@@ -334,6 +334,12 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
     if let Some(m) = value.as_object_mut() {
         m.insert("format".to_owned(), format);
     }
+    // A whole file's sides are whole files, formats and all.
+    if let Some(c) = walk.conflicts.get_mut("") {
+        c.base = base.cloned();
+        c.ours = Some(ours.clone());
+        c.theirs = Some(theirs.clone());
+    }
     Merged {
         value,
         conflicts: walk.conflicts,
@@ -917,6 +923,7 @@ mod tests {
         let m = merge(None, &sphere, &theirs);
         assert_eq!(m.conflicts[""].kind, Kind::IdCollision);
         assert_eq!(m.conflicts[""].base, None);
+        assert_eq!(m.conflicts[""].theirs.as_ref(), Some(&theirs));
         assert!(merge(None, &theirs, &theirs).is_clean());
     }
 

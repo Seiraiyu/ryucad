@@ -706,6 +706,57 @@ fn renames(
     out
 }
 
+/// The renumbering repair for an ID collision `c`, if one can be planned.
+fn renumbering(
+    root: &std::path::Path,
+    working: &crate::activity::Files,
+    ours: &Side,
+    theirs: &Side,
+    c: &Value,
+) -> Vec<Value> {
+    let path = c["files"][0].as_str().unwrap_or_default();
+    let pointer = c["pointer"].as_str().unwrap_or_default();
+    let record = Conflict {
+        kind: Kind::IdCollision,
+        base: c.get("base").cloned(),
+        ours: c.get("ours").cloned(),
+        theirs: c.get("theirs").cloned(),
+    };
+    let Some((r, changes)) = crate::renumber::plan(
+        root,
+        working,
+        &ours.files,
+        &theirs.files,
+        path,
+        pointer,
+        &record,
+    ) else {
+        return Vec::new();
+    };
+    let mut files: Vec<String> = changes.iter().map(|c| c.path.clone()).collect();
+    files.push(path.to_owned());
+    files.sort();
+    files.dedup();
+    let from = match &r {
+        crate::renumber::Rename::Feature { from, .. }
+        | crate::renumber::Rename::Entity { from, .. } => from.clone(),
+    };
+    let repair = crate::doctor::Repair {
+        id: format!(
+            "{}:renumber@{}",
+            c["id"].as_str().unwrap_or_default(),
+            crate::doctor::basis(root, &files)
+        ),
+        summary: format!(
+            "give theirs' {from} the ID {}; theirs' uses of it, and of what it built, follow",
+            r.to()
+        ),
+        changes,
+        params: Vec::new(),
+    };
+    vec![repair.to_json()]
+}
+
 /// `merge.status`: what the merge in progress leaves to settle.
 pub fn status(session: &mut Session) -> Result<Value> {
     let root = session.root().to_path_buf();
@@ -731,6 +782,9 @@ pub fn status(session: &mut Session) -> Result<Value> {
         })
     });
     conflicts.extend(renamed);
+    for c in conflicts.iter_mut().filter(|c| c["kind"] == "id_collision") {
+        c["repairs"] = json!(renumbering(&root, &working, &ours, &theirs, c));
+    }
     let now = built(session)?;
     let (broke, already) = broken(&now, &ours, &theirs, &base);
     conflicts.extend(broke);
@@ -785,7 +839,7 @@ fn set_at(v: &mut Value, pointer: &str, x: Option<Value>) {
 /// Puts feature `id` in `list` where `place` says ([`crate::merge::place`]'s
 /// form: first, or after a feature), or takes it out for `None`. After a
 /// feature the list doesn't have, or anywhere else, it goes last.
-fn put(list: &mut Vec<String>, id: &str, place: Option<&Value>) {
+pub(crate) fn put(list: &mut Vec<String>, id: &str, place: Option<&Value>) {
     list.retain(|f| f != id);
     let Some(p) = place else { return };
     let at = match (p.get("first"), p.get("after").and_then(Value::as_str)) {
@@ -1708,6 +1762,144 @@ pub(crate) mod tests {
                 assert_eq!(ids, ["b", "d"]);
             }
         }
+    }
+
+    /// The renumbering repair of the conflict `id`, applied.
+    fn renumber(m: &mut Merging, id: &str) -> Value {
+        let v = m.call("merge.status", json!({})).unwrap();
+        let c = v["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap_or_else(|| panic!("no {id}: {v}"))
+            .clone();
+        assert_eq!(c["kind"], "id_collision");
+        let repair = c["repairs"][0]["id"].as_str().expect("a repair").to_owned();
+        assert!(repair.contains(":renumber@"), "{repair}");
+        resolve(m, id, json!({"choice": "repair", "repair": repair})).unwrap()
+    }
+
+    #[test]
+    fn entities_added_under_one_id_are_renumbered() {
+        let mut m = boxed();
+        squared(&mut m);
+        m.commit("a square");
+        let add = |m: &mut Merging, at: [i32; 2], from: &str| {
+            m.call(
+                "sketch.edit",
+                json!({"part": "p", "sketch": "s", "ops": [
+                    {"op": "add", "type": "point", "at": at},
+                    {"op": "add", "type": "line", "start": from, "end": "p5"},
+                ]}),
+            )
+            .unwrap();
+        };
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        add(&mut m, [0, 20], "p4");
+        m.commit("theirs: a spur up");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        add(&mut m, [20, 0], "p2");
+        m.commit("ours: a spur across");
+        m.merge("theirs");
+        // Theirs' point first, then its line, which names it.
+        renumber(&mut m, "parts/p/features/s.json#/entities/p5");
+        let r = renumber(&mut m, "parts/p/features/s.json#/entities/l5");
+        assert_eq!(r["status"]["clean"], true, "{r}");
+        let s: Value = serde_json::from_str(
+            &std::fs::read_to_string(m.root().join("parts/p/features/s.json")).unwrap(),
+        )
+        .unwrap();
+        let e = &s["entities"];
+        assert_eq!(e["p5"]["m"], json!([0.02, 0]));
+        assert_eq!(e["p6"]["m"], json!([0, 0.02]));
+        assert_eq!(
+            (e["l5"]["start"].as_str(), e["l5"]["end"].as_str()),
+            (Some("p2"), Some("p5"))
+        );
+        assert_eq!(
+            (e["l6"]["start"].as_str(), e["l6"]["end"].as_str()),
+            (Some("p4"), Some("p6"))
+        );
+        assert!(s.get("conflicts").is_none());
+    }
+
+    #[test]
+    fn a_feature_added_under_one_id_is_renumbered_with_what_reads_it() {
+        let mut m = boxed();
+        let add_box = |m: &mut Merging, x: i32| {
+            m.call(
+                "feature.add",
+                json!({"part": "p", "type": "box", "id": "box-2",
+                       "params": {"x": x, "y": 10, "z": 10}}),
+            )
+            .unwrap();
+        };
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        add_box(&mut m, 30);
+        // Theirs sketches on its box's +x face, at x = 30 mm.
+        let faces = m
+            .call("inspect", json!({"part": "p", "feature": "box-2"}))
+            .unwrap();
+        let far = faces["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                f["surface"]["frame"]["origin"][0]
+                    .as_f64()
+                    .is_some_and(|x| x > 0.029)
+            })
+            .map(|f| f["name"].as_str().unwrap().to_owned())
+            .expect("a face at x = 30 mm");
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "on",
+                   "face": format!("p/box-2/{far}")}),
+        )
+        .unwrap();
+        m.commit("theirs: a long box, sketched on");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        add_box(&mut m, 5);
+        m.commit("ours: a short box");
+        m.merge("theirs");
+        let r = renumber(&mut m, "parts/p/features/box-2.json#");
+        assert_eq!(r["status"]["clean"], true, "{r}");
+        let list = m.call("feature.list", json!({"part": "p"})).unwrap();
+        let ids: Vec<&str> = list["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["id"].as_str().unwrap())
+            .collect();
+        // The first free ID, as ryucad generates them; after ours' box.
+        assert_eq!(ids, ["b", "box-2", "box-1", "on"]);
+        let show = |m: &mut Merging, id: &str| {
+            m.call("feature.show", json!({"part": "p", "id": id}))
+                .unwrap()
+        };
+        assert_eq!(show(&mut m, "box-2")["params"]["x"]["value"], "5 mm");
+        assert_eq!(show(&mut m, "box-1")["params"]["x"]["value"], "30 mm");
+        // The sketch follows theirs' box, by the name its face has there now.
+        let on: Value = serde_json::from_str(
+            &std::fs::read_to_string(m.root().join("parts/p/features/on.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(on["face"]["feature"], "box-1");
+        assert_ne!(on["face"]["name"], far.as_str());
+        let built = m.call("rebuild", json!({})).unwrap();
+        assert_eq!(built["parts"][0]["failed"], 0, "{built}");
+        let g = m
+            .call("sketch.get", json!({"part": "p", "sketch": "on"}))
+            .unwrap();
+        assert!(
+            (g["frame"]["origin"][0].as_f64().unwrap() - 0.03).abs() < 1e-12,
+            "{g}"
+        );
     }
 
     #[test]

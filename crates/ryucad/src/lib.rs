@@ -27,6 +27,7 @@ pub mod proto;
 pub mod rebuild;
 pub mod reference;
 pub mod render;
+pub mod renumber;
 pub mod server;
 pub mod session;
 pub mod sketch;
