@@ -8,6 +8,7 @@ use crate::units::Unit;
 use crate::view::CameraArg;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 
 /// The protocol version. A CLI and a daemon talk only when theirs match.
 pub const PROTOCOL_VERSION: u32 = 2;
@@ -153,6 +154,21 @@ pub struct PlacementArg {
     pub z: Option<[f64; 3]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x: Option<[f64; 3]>,
+}
+
+/// How one merge conflict is settled: by one side's value, a value given,
+/// or one of its planned repairs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Resolution {
+    /// The conflict's ID, as `merge.status` gives it.
+    pub conflict: String,
+    /// `ours`, `theirs`, `value` (with `value`) or `repair` (with `repair`).
+    pub choice: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair: Option<String>,
 }
 
 /// Every request a session answers, by JSON-RPC method name.
@@ -330,6 +346,17 @@ pub enum Request {
         positions: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         all: bool,
+    },
+    /// What the merge Git is in the middle of leaves to settle.
+    #[serde(rename = "merge.status")]
+    MergeStatus {},
+    /// Settles merge conflicts, as one change.
+    #[serde(rename = "merge.resolve")]
+    MergeResolve {
+        resolutions: Vec<Resolution>,
+        /// The part revisions the caller read, by part.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        expected_revisions: BTreeMap<String, String>,
     },
     #[serde(rename = "daemon.status")]
     DaemonStatus {},
@@ -568,6 +595,7 @@ impl Request {
                 | Request::Undo { .. }
                 | Request::Redo { .. }
                 | Request::DoctorRepair { .. }
+                | Request::MergeResolve { .. }
         )
     }
 
@@ -755,6 +783,14 @@ mod tests {
     #[test]
     fn only_writers_mutate() {
         assert!(Request::PartCreate { part: "p".into() }.mutates());
+        assert!(
+            Request::MergeResolve {
+                resolutions: Vec::new(),
+                expected_revisions: BTreeMap::new(),
+            }
+            .mutates()
+        );
+        assert!(!Request::MergeStatus {}.mutates());
         assert!(
             !Request::Rebuild {
                 part: None,

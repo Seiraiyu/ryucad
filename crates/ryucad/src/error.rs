@@ -107,6 +107,17 @@ pub enum Code {
     RevNotFound,
     /// `ryucad check` found errors; its report is in the details.
     CheckFailed,
+    /// A file a merge left with conflicts (a top-level `conflicts` key):
+    /// `ryucad merge status` lists them, `ryucad merge resolve` settles them.
+    MergeConflict,
+    /// A merge request when Git is in no merge, cherry-pick, revert or
+    /// rebase step.
+    NotMerging,
+    /// A merge ryucad can't report on: an octopus merge, of more than two
+    /// heads.
+    MergeUnsupported,
+    /// `merge.resolve` named a conflict the merge doesn't have (now).
+    ConflictNotFound,
 }
 
 impl Code {
@@ -191,6 +202,10 @@ mod tests {
         assert_eq!(Code::UnitMismatch.exit_code(), 1);
         assert_eq!(Code::ParameterCycle.exit_code(), 1);
         assert_eq!(Code::HasDependents.exit_code(), 1);
+        assert_eq!(Code::MergeConflict.exit_code(), 1);
+        assert_eq!(Code::NotMerging.exit_code(), 1);
+        assert_eq!(Code::MergeUnsupported.exit_code(), 1);
+        assert_eq!(Code::ConflictNotFound.exit_code(), 1);
     }
 
     #[test]

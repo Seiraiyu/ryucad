@@ -200,7 +200,7 @@ enum Command {
     /// Wait for notifications from the project's daemon: what humans
     /// select, the model changing, and so on.
     Watch {
-        /// model, project, participants or activity (all by default).
+        /// model, project, participants, activity or merge (all by default).
         #[arg(long = "topic", value_name = "TOPIC")]
         topics: Vec<String>,
         /// Stop after this many notifications.
@@ -280,6 +280,10 @@ enum Command {
         #[arg(long)]
         no_sketches: bool,
     },
+    /// What the merge (or cherry-pick, revert or rebase step) Git is in the
+    /// middle of leaves to settle.
+    #[command(subcommand)]
+    Merge(MergeCmd),
     /// The project's Git commits (or one part's), and what is
     /// uncommitted. Read-only.
     History {
@@ -308,7 +312,7 @@ enum Command {
     #[command(subcommand)]
     Daemon(DaemonCmd),
     /// Register ryucad with Git, and what Git runs: the diff driver's text
-    /// conversion.
+    /// conversion and the merge driver.
     #[command(subcommand)]
     Git(GitCmd),
     /// Print the ryucad, ryukei and protocol versions.
@@ -333,13 +337,59 @@ enum DaemonCmd {
 }
 
 #[derive(Subcommand)]
+enum MergeCmd {
+    /// Every conflict the merge leaves: in files' conflict records, paths Git left unmerged,
+    /// and what the merge broke that built on either side, each with the side that caused it
+    /// and its choices.
+    Status {
+        /// As Git's hooks run it: check every ryucad project in the repository, print what
+        /// is unresolved for people, and exit 1 if anything is (0 outside a merge).
+        #[arg(long)]
+        hook: bool,
+    },
+    /// Settle a conflict with one side's value, a value of your own, or one of its planned
+    /// repairs, as one logged, undoable change. Marking the file resolved (git add) and
+    /// committing are yours.
+    #[command(group = clap::ArgGroup::new("how").required(true))]
+    Resolve {
+        /// The conflict's ID, as `merge status` gives it.
+        conflict: String,
+        #[arg(long, group = "how")]
+        ours: bool,
+        #[arg(long, group = "how")]
+        theirs: bool,
+        /// A JSON value to put in place.
+        #[arg(long, group = "how", value_name = "JSON")]
+        value: Option<String>,
+        /// A planned repair's ID.
+        #[arg(long, group = "how", value_name = "ID")]
+        repair: Option<String>,
+        /// Fail with `conflict` unless the conflict's part is still at this revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum GitCmd {
     /// Print a ryucad file as one line per value, for `git diff` (Git's
     /// textconv): plain text, not JSON.
     Textconv { file: PathBuf },
-    /// Tell Git to read ryucad's files through ryucad: the diff driver, in
-    /// this repository's config, or with --global in yours (the installers
-    /// do that).
+    /// Merge three versions of a ryucad file value by value, for Git's merge
+    /// (`merge.ryucad.driver`): writes the result over OURS and exits 0, or 1
+    /// when conflicts are left in it. Prints nothing.
+    MergeDriver {
+        /// The common ancestor's version (empty when both sides added it).
+        base: PathBuf,
+        /// Ours, which the result replaces.
+        ours: PathBuf,
+        theirs: PathBuf,
+        /// The file's path in the repository, as Git names it.
+        path: Option<String>,
+    },
+    /// Tell Git to read and merge ryucad's files through ryucad: the diff and
+    /// merge drivers, in this repository's config with its pre-merge-commit
+    /// hook, or with --global the drivers in yours (the installers do that).
     Install {
         #[arg(long)]
         global: bool,
@@ -1077,6 +1127,44 @@ fn request(cmd: &Command) -> Option<Request> {
             part: part.clone(),
             limit: Some(*limit),
         },
+        Command::Merge(MergeCmd::Status { .. }) => Request::MergeStatus {},
+        Command::Merge(MergeCmd::Resolve {
+            conflict,
+            ours,
+            theirs,
+            value,
+            repair,
+            expect,
+        }) => {
+            // Clap requires exactly one.
+            let choice = match (ours, theirs, value) {
+                (true, _, _) => "ours",
+                (_, true, _) => "theirs",
+                (_, _, Some(_)) => "value",
+                _ => "repair",
+            };
+            // A value that isn't JSON is the text it says.
+            let value = value
+                .as_ref()
+                .map(|v| serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.clone())));
+            let part = conflict
+                .strip_prefix("parts/")
+                .and_then(|r| r.split('/').next())
+                .map(str::to_owned);
+            let expected_revisions = match (part, expect) {
+                (Some(p), Some(e)) => [(p, e.clone())].into_iter().collect(),
+                _ => Default::default(),
+            };
+            Request::MergeResolve {
+                resolutions: vec![ryucad::proto::Resolution {
+                    conflict: conflict.clone(),
+                    choice: choice.to_owned(),
+                    value,
+                    repair: repair.clone(),
+                }],
+                expected_revisions,
+            }
+        }
         Command::Undo { entry } => Request::Undo { entry: *entry },
         Command::Redo { entry } => Request::Redo { entry: *entry },
         Command::Status { text, entities } => Request::ActivitySet {
@@ -1105,7 +1193,18 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
     };
     match &cli.command {
         Command::Version => Ok(json!(VersionInfo::current())),
-        Command::Init { unit } => server::init(&here, *unit),
+        Command::Init { unit } => {
+            let mut v = server::init(&here, *unit)?;
+            // In a repository, the clone is set up for ryucad too; the
+            // project is made either way, and `doctor` says what's missing.
+            if ryucad::git::Repo::open(&here)?.is_some() {
+                v["git"] = match ryucad::drivers::install(&here, true) {
+                    Ok(g) => g,
+                    Err(e) => json!({ "error": e }),
+                };
+            }
+            Ok(v)
+        }
         Command::Daemon(DaemonCmd::Run { idle_timeout }) => {
             let idle = idle_timeout.map_or(daemon::DEFAULT_IDLE, Duration::from_secs);
             daemon::run(&find_root(&here)?, idle).map(|()| Value::Null)
@@ -1253,9 +1352,131 @@ pub fn main() -> ExitCode {
             Err(e) => finish(Err(Error::io(file, &e)), Vec::new(), cli.pretty),
         };
     }
+    // Git calls the merge driver: its answer is the file and the exit code.
+    if let Command::Git(GitCmd::MergeDriver {
+        base,
+        ours,
+        theirs,
+        path,
+    }) = &cli.command
+    {
+        return merge_driver(base, ours, theirs, path.as_deref());
+    }
+    // Git's hooks read the exit code; people read what it prints.
+    if let Command::Merge(MergeCmd::Status { hook: true }) = &cli.command {
+        let here = match &cli.dir {
+            Some(d) => d.clone(),
+            None => std::env::current_dir().unwrap_or_default(),
+        };
+        return hook_check(&here);
+    }
     let mut warnings = Vec::new();
     let outcome = run(&cli, &mut warnings);
     finish(outcome, warnings, cli.pretty)
+}
+
+/// `ryucad merge status --hook`: every project a merge in progress
+/// concerns, checked in this process. Exits 0 when nothing is unresolved
+/// (or nothing is merging), 1 otherwise, saying what to settle on stderr.
+fn hook_check(here: &std::path::Path) -> ExitCode {
+    let projects = match ryucad::git::merging_projects(here) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ryucad: checking the merge: {}", e.message);
+            return ExitCode::from(1);
+        }
+    };
+    let mut failed = false;
+    for root in projects {
+        let at = root.display();
+        match server::handle_safely(&mut None, None, None, &root, Request::MergeStatus {}) {
+            Ok(a) if a.result["clean"] == true => {}
+            Ok(a) => {
+                failed = true;
+                let list = a.result["conflicts"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                eprintln!(
+                    "ryucad: the merge leaves {} conflict(s) in {at}:",
+                    list.len()
+                );
+                for c in &list {
+                    eprintln!(
+                        "  {} ({}, {}): {}",
+                        c["id"].as_str().unwrap_or_default(),
+                        c["kind"].as_str().unwrap_or_default(),
+                        c["cause"].as_str().unwrap_or_default(),
+                        c["message"].as_str().unwrap_or_default()
+                    );
+                }
+            }
+            Err(e) if e.code == Code::NotMerging => {}
+            Err(e) => {
+                failed = true;
+                eprintln!("ryucad: checking the merge in {at}: {}", e.message);
+            }
+        }
+        // The check read the work tree; the commit takes the index.
+        let unstaged = ryucad::git::Repo::open(&root).and_then(|repo| match repo {
+            Some(repo) => repo.unstaged(&ryucad::activity::snapshot(&root)?),
+            None => Ok(Vec::new()),
+        });
+        match unstaged {
+            Ok(paths) if paths.is_empty() => {}
+            Ok(paths) => {
+                failed = true;
+                eprintln!(
+                    "ryucad: {} file(s) in {at} differ from what would be committed; `git add` (or restore) them first:",
+                    paths.len()
+                );
+                for p in &paths {
+                    eprintln!("  {p}");
+                }
+            }
+            Err(e) => {
+                failed = true;
+                eprintln!("ryucad: reading the index in {at}: {}", e.message);
+            }
+        }
+    }
+    if failed {
+        eprintln!(
+            "ryucad: see `ryucad merge status` and settle them with `ryucad merge resolve` or by editing the model; `git commit --no-verify` skips this check"
+        );
+        return ExitCode::from(1);
+    }
+    ExitCode::SUCCESS
+}
+
+/// `ryucad git merge-driver`: merges, writes over `ours`, and exits 0 when
+/// nothing is left to resolve, 1 when conflicts are (in the file's record,
+/// or as Git's markers when it fell back to merging lines), 4 when a file
+/// can't be read or written. Failures go to stderr: Git shows them.
+fn merge_driver(
+    base: &std::path::Path,
+    ours: &std::path::Path,
+    theirs: &std::path::Path,
+    path: Option<&str>,
+) -> ExitCode {
+    let read = |p: &std::path::Path| std::fs::read(p).map_err(|e| Error::io(p, &e));
+    let merged = (|| -> Result<ryucad::merge::Outcome> {
+        let (out, outcome) = ryucad::merge::bytes(&read(base)?, &read(ours)?, &read(theirs)?);
+        std::fs::write(ours, out).map_err(|e| Error::io(ours, &e))?;
+        Ok(outcome)
+    })();
+    match merged {
+        Ok(ryucad::merge::Outcome::Clean) => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::from(1),
+        Err(e) => {
+            eprintln!(
+                "ryucad: merging {}: {}",
+                path.unwrap_or(&ours.to_string_lossy()),
+                e.message
+            );
+            ExitCode::from(Code::Io.exit_code())
+        }
+    }
 }
 
 fn finish(outcome: Result<Value>, warnings: Vec<String>, pretty: bool) -> ExitCode {

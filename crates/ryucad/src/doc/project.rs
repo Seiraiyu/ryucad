@@ -8,7 +8,10 @@
 //! ```
 //!
 //! Loading never stops at a broken part or feature: the error is kept in
-//! its place and the rest of the project stays usable.
+//! its place and the rest of the project stays usable. A file a merge left
+//! with conflicts is broken in its place too (`merge_conflict`); a
+//! conflicted manifest breaks every part, but the project still opens, so
+//! the merge can be reported and resolved.
 
 use super::canonical;
 use super::files::{Feature, Manifest, ParametersFile, PartFile};
@@ -24,6 +27,10 @@ use std::path::{Path, PathBuf};
 
 pub const MANIFEST: &str = "ryucad.json";
 
+/// The key under which a file a merge couldn't settle lists its conflicts,
+/// by JSON pointer. No file kind uses it otherwise.
+pub const CONFLICTS: &str = "conflicts";
+
 #[derive(Clone, Debug)]
 pub struct Project {
     pub root: PathBuf,
@@ -32,6 +39,9 @@ pub struct Project {
     /// Entries under `parts/` that don't belong there, as paths relative to
     /// the root.
     pub unknown: Vec<String>,
+    /// Why every part fails when the manifest holds merge conflicts: the
+    /// manifest's other values are ours' as the merge left them.
+    pub manifest_fault: Option<Error>,
     /// `ryucad.json` as read: every part's revision hashes it.
     manifest_bytes: Vec<u8>,
 }
@@ -170,9 +180,50 @@ pub fn relative(root: &Path, path: &Path) -> String {
         .join("/")
 }
 
+/// `merge_conflict` for the file at `at` if its JSON lists merge
+/// conflicts, naming their pointers.
+pub fn conflicted(v: &Value, at: &str) -> Option<Error> {
+    let listed = v.as_object()?.get(CONFLICTS)?;
+    let pointers: Vec<&str> = listed
+        .as_object()
+        .map(|o| o.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    let at_list = if pointers.is_empty() {
+        String::new()
+    } else {
+        format!(" at {}", pointers.join(", "))
+    };
+    Some(
+        Error::new(
+            Code::MergeConflict,
+            format!("{at} has unresolved merge conflicts{at_list}; see `ryucad merge status`"),
+        )
+        .with("path", at)
+        .with("pointers", pointers),
+    )
+}
+
+/// `v` without its merge conflicts: the values the merge left in place.
+pub fn without_conflicts(v: &Value) -> Value {
+    let mut v = v.clone();
+    if let Some(o) = v.as_object_mut() {
+        o.remove(CONFLICTS);
+    }
+    v
+}
+
 /// Reads and parses the JSON file at `at` (relative to the root); errors
-/// carry that path.
+/// carry that path. A file with merge conflicts is `merge_conflict`.
 fn read_json(src: &dyn Source, at: &str) -> Result<(Vec<u8>, Value)> {
+    let (bytes, value) = read_raw(src, at)?;
+    match conflicted(&value, at) {
+        Some(e) => Err(e),
+        None => Ok((bytes, value)),
+    }
+}
+
+/// [`read_json`], conflicts or not.
+fn read_raw(src: &dyn Source, at: &str) -> Result<(Vec<u8>, Value)> {
     let bytes = src
         .read(at)
         .map_err(|e| e.with("path", at))?
@@ -195,7 +246,7 @@ impl Project {
     /// `root`: the same project, faults and revisions as loading them from
     /// a folder.
     pub fn load_from(root: &Path, src: &dyn Source) -> Result<Project> {
-        let (manifest_bytes, v) = read_json(src, MANIFEST).map_err(|e| {
+        let (manifest_bytes, v) = read_raw(src, MANIFEST).map_err(|e| {
             if e.code == Code::NotFound {
                 Error::new(
                     Code::ProjectNotFound,
@@ -206,14 +257,25 @@ impl Project {
                 e
             }
         })?;
-        let manifest = Manifest::from_json(&v).map_err(|e| e.with("path", MANIFEST))?;
+        let manifest_fault = conflicted(&v, MANIFEST);
+        let manifest = Manifest::from_json(&without_conflicts(&v)).map_err(|e| {
+            manifest_fault
+                .clone()
+                .unwrap_or_else(|| e.with("path", MANIFEST))
+        })?;
         let mut parts = BTreeMap::new();
         let mut unknown = Vec::new();
         for (name, kind) in src.list("parts")? {
             match Id::parse(&name, "part") {
                 Ok(id) if kind == Kind::Dir => {
-                    let part =
-                        load_part(src, &manifest, &manifest_bytes, id.clone(), &mut unknown)?;
+                    let part = load_part(
+                        src,
+                        &manifest,
+                        manifest_fault.as_ref(),
+                        &manifest_bytes,
+                        id.clone(),
+                        &mut unknown,
+                    )?;
                     parts.insert(id, part);
                 }
                 _ => unknown.push(join("parts", &name)),
@@ -224,6 +286,7 @@ impl Project {
             manifest,
             parts,
             unknown,
+            manifest_fault,
             manifest_bytes,
         })
     }
@@ -265,6 +328,7 @@ impl Project {
                 let part = load_part(
                     &Folder(&self.root),
                     &self.manifest,
+                    self.manifest_fault.as_ref(),
                     &self.manifest_bytes,
                     id.clone(),
                     &mut unknown,
@@ -288,6 +352,7 @@ impl Project {
 fn load_part(
     src: &dyn Source,
     manifest: &Manifest,
+    manifest_fault: Option<&Error>,
     manifest_bytes: &[u8],
     id: Id,
     unknown: &mut Vec<String>,
@@ -370,6 +435,11 @@ fn load_part(
         }
     }
     let revision = hasher.finalize().to_hex()[..32].to_owned();
+    // A conflicted manifest leaves no part usable.
+    let file = match manifest_fault {
+        Some(e) => Err(e.clone()),
+        None => file,
+    };
     Ok(Part {
         id,
         file,
@@ -520,6 +590,51 @@ mod tests {
         assert_eq!(c.code, Code::InvalidDocument);
         assert_eq!(part.orphans(), [&id("c")]);
         assert_eq!(project.unknown, ["parts/Bad Name", "parts/p/notes.txt"]);
+    }
+
+    #[test]
+    fn a_conflicted_file_fails_in_its_place() {
+        let dir = sample();
+        let root = dir.path();
+        let a = feature_path(root, &id("p"), &id("a"));
+        let mut v: Value = serde_json::from_str(&fs::read_to_string(&a).unwrap()).unwrap();
+        v[CONFLICTS] = serde_json::json!({
+            "/params/radius": {"base": "1 mm", "kind": "value", "ours": "1 mm", "theirs": "3 mm"},
+            "/placement/x": {"kind": "value", "ours": [1, 0, 0], "theirs": [0, 1, 0]},
+        });
+        write_json(&a, &v).unwrap();
+        let project = Project::load(root).unwrap();
+        let part = project.part(&id("p")).unwrap();
+        let e = part.features[&id("a")].as_ref().unwrap_err();
+        assert_eq!(
+            (e.code, e.details["path"].as_str()),
+            (Code::MergeConflict, Some("parts/p/features/a.json"))
+        );
+        assert_eq!(
+            e.details["pointers"],
+            serde_json::json!(["/params/radius", "/placement/x"])
+        );
+        assert!(part.features[&id("b")].is_ok());
+        // A conflicted manifest fails every part, not the project.
+        let mut m = Manifest {
+            default_unit: Unit::Mm,
+        }
+        .to_json();
+        m[CONFLICTS] = serde_json::json!({
+            "/default_unit": {"base": "mm", "kind": "value", "ours": "mm", "theirs": "in"},
+        });
+        write_json(&root.join(MANIFEST), &m).unwrap();
+        let project = Project::load(root).unwrap();
+        assert_eq!(project.manifest.default_unit, Unit::Mm);
+        let e = project.part(&id("p")).unwrap().file.as_ref().unwrap_err();
+        assert_eq!(
+            (e.code, e.details["path"].as_str()),
+            (Code::MergeConflict, Some(MANIFEST))
+        );
+        assert_eq!(
+            format!("{:?}", Project::load_from(root, &all_files(root)).unwrap()),
+            format!("{project:?}")
+        );
     }
 
     /// Every file under `root`, by relative path.

@@ -13,6 +13,7 @@ ryucad = { path = "../crates/ryucad" }
 ryukei = { path = "../crates/ryukei" }
 ryukei-testkit = { path = "../crates/ryukei-testkit" }
 ryusketch = { path = "../crates/ryusketch" }
+serde_json = "1"
 
 [[bin]]
 name = "predicates"
@@ -101,6 +102,13 @@ bench = false
 [[bin]]
 name = "sketch"
 path = "fuzz_targets/sketch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "merge"
+path = "fuzz_targets/merge.rs"
 test = false
 doc = false
 bench = false

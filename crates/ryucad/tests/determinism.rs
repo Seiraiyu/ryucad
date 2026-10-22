@@ -3,7 +3,7 @@
 //! expressions, rebuilt bodies, display meshes, the pixels of renders, and
 //! solved sketches and the bodies swept from them, features that refer
 //! to other features' faces, edges and vertices, how sketches are drawn,
-//! and what diffs say. After
+//! what diffs say, and what merges make. After
 //! a deliberate change, regenerate with
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
@@ -669,6 +669,193 @@ fn diff_section(golden: &mut Golden) {
     s.str(&ryucad::doc::canonical::to_string(&v));
 }
 
+/// A sketch: a square's corners, sides and a length, each corner moved a
+/// little by `g`.
+fn merge_sketch(g: &mut Lcg) -> serde_json::Value {
+    use serde_json::json;
+    let mut e = serde_json::Map::new();
+    for (i, [x, y]) in [[0.0, 0.0], [0.01, 0.0], [0.01, 0.01], [0.0, 0.01]]
+        .iter()
+        .enumerate()
+    {
+        let m = [x + g.next_f64(-1e-3, 1e-3), y + g.next_f64(-1e-3, 1e-3)];
+        e.insert(format!("p{}", i + 1), json!({"type": "point", "m": m}));
+        e.insert(
+            format!("l{}", i + 1),
+            json!({"type": "line", "start": format!("p{}", i + 1),
+                   "end": format!("p{}", (i + 1) % 4 + 1)}),
+        );
+    }
+    json!({"format": 2, "kind": "ryucad.feature", "type": "sketch", "plane": "xy",
+           "entities": e,
+           "constraints": {"d1": {"type": "length", "a": "l1", "value": "10 mm"}}})
+}
+
+/// One random edit of a sketch: a point moved, a point added (one past the
+/// largest, so two sides collide), a dimension changed, a side made
+/// construction, or a line removed.
+fn merge_edit(g: &mut Lcg, v: &mut serde_json::Value) {
+    use serde_json::json;
+    let n = (g.next_u64() % 4 + 1) as usize;
+    match g.next_u64() % 5 {
+        0 => {
+            v["entities"][format!("p{n}")]["m"] =
+                json!([g.next_f64(-0.02, 0.02), g.next_f64(-0.02, 0.02)])
+        }
+        1 => {
+            let next = (1..)
+                .map(|k| format!("p{k}"))
+                .find(|k| v["entities"].get(k).is_none())
+                .unwrap();
+            v["entities"][next] = json!({"type": "point", "m": [g.next_f64(0.0, 0.02), 0.03]});
+        }
+        2 => v["constraints"]["d1"]["value"] = json!(format!("{} mm", decimal(g))),
+        3 => v["entities"][format!("l{n}")]["construction"] = json!(true),
+        _ => {
+            v["entities"]
+                .as_object_mut()
+                .unwrap()
+                .remove(&format!("l{n}"));
+            if n == 1 {
+                v["constraints"].as_object_mut().unwrap().remove("d1");
+            }
+        }
+    }
+}
+
+/// Merged files: random edits of sketches, feature lists and parameters
+/// on two sides, a file merged as lines, and the renumbering of a feature
+/// both sides added, names mapped through two builds of it.
+fn merge_section(golden: &mut Golden) {
+    use ryucad::merge::bytes;
+    use serde_json::json;
+    let mut s = golden.section("merge");
+    let text = |v: &serde_json::Value| ryucad::doc::canonical::to_string(v).into_bytes();
+    let mut g = Lcg::new(0x6d65_7267);
+    for _ in 0..256 {
+        let base = merge_sketch(&mut g);
+        let (mut ours, mut theirs) = (base.clone(), base.clone());
+        for _ in 0..g.next_u64() % 4 {
+            merge_edit(&mut g, &mut ours);
+        }
+        for _ in 0..g.next_u64() % 4 {
+            merge_edit(&mut g, &mut theirs);
+        }
+        let (out, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
+        s.str(std::str::from_utf8(&out).unwrap());
+    }
+    for _ in 0..64 {
+        let base: Vec<String> = (0..6).map(|i| format!("f{i}")).collect();
+        let side = |g: &mut Lcg, prefix: &str| {
+            let mut l = base.clone();
+            for k in 0..g.next_u64() % 4 {
+                match g.next_u64() % 3 {
+                    0 if !l.is_empty() => {
+                        let i = (g.next_u64() % l.len() as u64) as usize;
+                        l.remove(i);
+                    }
+                    1 if !l.is_empty() => {
+                        let i = (g.next_u64() % l.len() as u64) as usize;
+                        let f = l.remove(i);
+                        let at = (g.next_u64() % (l.len() as u64 + 1)) as usize;
+                        l.insert(at, f);
+                    }
+                    _ => {
+                        let at = (g.next_u64() % (l.len() as u64 + 1)) as usize;
+                        l.insert(at, format!("{prefix}{k}"));
+                    }
+                }
+            }
+            json!({"features": l, "format": 1, "kind": "ryucad.part"})
+        };
+        let part = json!({"features": base, "format": 1, "kind": "ryucad.part"});
+        let (ours, theirs) = (side(&mut g, "o"), side(&mut g, "t"));
+        let (out, _) = bytes(&text(&part), &text(&ours), &text(&theirs));
+        s.str(std::str::from_utf8(&out).unwrap());
+        let params = |g: &mut Lcg| {
+            let mut p = serde_json::Map::new();
+            for i in 0..4 {
+                if g.next_u64().is_multiple_of(2) {
+                    p.insert(format!("p{i}"), json!(format!("{} mm", decimal(g))));
+                }
+            }
+            json!({"format": 1, "kind": "ryucad.parameters", "parameters": p})
+        };
+        let (b, o, t) = (params(&mut g), params(&mut g), params(&mut g));
+        let (out, _) = bytes(&text(&b), &text(&o), &text(&t));
+        s.str(std::str::from_utf8(&out).unwrap());
+    }
+    let (out, n) = ryucad::merge::text(b"a\nb\nc\nd\n", b"a\nB\nc\nd\ne\n", b"z\na\nX\nc\nd\n");
+    s.str(std::str::from_utf8(&out).unwrap());
+    s.u64(n as u64);
+    // Both sides add box-2; theirs sketches on its far face. Renumbered,
+    // the sketch follows theirs' box by the face's new name.
+    let files = |list: &[(&str, serde_json::Value)]| -> ryucad::activity::Files {
+        list.iter()
+            .map(|(p, v)| ((*p).to_owned(), text(v)))
+            .collect()
+    };
+    let manifest = json!({"default_unit": "mm", "format": 1, "kind": "ryucad.project"});
+    let boxed = |x: &str| {
+        json!({"format": 1, "kind": "ryucad.feature", "type": "box",
+               "params": {"x": x, "y": "10 mm", "z": "10 mm"},
+               "placement": {"origin": ["0 mm", "0 mm", "0 mm"], "x": [1, 0, 0], "z": [0, 0, 1]}})
+    };
+    let list = |f: &[&str]| json!({"features": f, "format": 1, "kind": "ryucad.part"});
+    let ours = files(&[
+        ("ryucad.json", manifest.clone()),
+        ("parts/p/part.json", list(&["box-2"])),
+        ("parts/p/features/box-2.json", boxed("5 mm")),
+    ]);
+    let alone = files(&[
+        ("ryucad.json", manifest.clone()),
+        ("parts/p/part.json", list(&["box-2"])),
+        ("parts/p/features/box-2.json", boxed("30 mm")),
+    ]);
+    let root = std::path::Path::new("/golden");
+    let project = ryucad::doc::project::Project::load_from(root, &alone).unwrap();
+    let built = rebuild_part(&project.parts[&Id::parse("p", "part").unwrap()]);
+    let body = &built.features[0].1.as_ref().unwrap().body().unwrap().body;
+    let far = body
+        .faces()
+        .find(|f| {
+            let face = body.face(*f).unwrap();
+            body.surface(face.surface)
+                .and_then(|s| s.frame())
+                .is_some_and(|frame| frame.origin().x > 0.029)
+        })
+        .map(|f| body.face(f).unwrap().name.to_string())
+        .unwrap();
+    let sketch = json!({"format": 2, "kind": "ryucad.feature", "type": "sketch",
+                        "face": {"feature": "box-2", "name": far},
+                        "entities": {}, "constraints": {}});
+    let theirs = files(&[
+        ("ryucad.json", manifest.clone()),
+        ("parts/p/part.json", list(&["box-2", "on"])),
+        ("parts/p/features/box-2.json", boxed("30 mm")),
+        ("parts/p/features/on.json", sketch.clone()),
+    ]);
+    let mut working = theirs.clone();
+    let m = ryucad::merge::merge(None, &boxed("5 mm"), &boxed("30 mm"));
+    working.insert("parts/p/features/box-2.json".into(), text(&m.to_json()));
+    let c = &m.conflicts[""];
+    let (r, changes) = ryucad::renumber::plan(
+        root,
+        &working,
+        &ours,
+        &theirs,
+        "parts/p/features/box-2.json",
+        "",
+        c,
+    )
+    .unwrap();
+    s.str(r.to());
+    for ch in changes {
+        s.str(&ch.path);
+        s.str(&String::from_utf8(ch.content.unwrap_or_default()).unwrap());
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -685,5 +872,6 @@ fn determinism() {
     references_section(&mut golden);
     sketch_drawing_section(&mut golden);
     diff_section(&mut golden);
+    merge_section(&mut golden);
     golden.finish();
 }
