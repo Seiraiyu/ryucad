@@ -1,10 +1,12 @@
 //! Merge validation: what a merge in progress leaves to settle, and
 //! settling it. `merge.status` lists every conflict: those in the files'
 //! conflict records, the paths Git left unmerged (a file deleted on one
-//! side and changed on the other, one merged as lines), and, from
-//! rebuilding both sides and the merge, what the merge broke that built on
-//! either side. Each conflict has a stable ID, the files and the parts of
-//! the model it concerns, the side that caused it, and its choices.
+//! side and changed on the other, one merged as lines), a feature Git took
+//! to be renamed and merged into another, and, from rebuilding both sides
+//! and the merge, what the merge broke that built on either side and the
+//! sketches it left stale. Each conflict has a stable ID, the files and the
+//! parts of the model it concerns, the side that caused it, its choices,
+//! and its planned repairs.
 //!
 //! ryucad never touches the index: once a file is settled, `git add` and
 //! the commit are the agent's or the human's.
@@ -19,7 +21,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 /// Every kind of conflict `merge.status` reports. The strings are stable.
-pub const KINDS: [&str; 8] = [
+pub const KINDS: [&str; 9] = [
     "value",
     "delete_edit",
     "order",
@@ -28,6 +30,7 @@ pub const KINDS: [&str; 8] = [
     "merge_unparsed",
     "merge_broke",
     "sketch_stale",
+    "rename_merged",
 ];
 
 /// The error for a request that needs a merge when there is none.
@@ -599,6 +602,110 @@ fn stale(
     out
 }
 
+/// Whether `path` is a feature file.
+fn is_feature(path: &str) -> bool {
+    matches!(about(path), (Some(_), Some(_)))
+}
+
+/// Features Git took to be renamed: a feature file one side added whose
+/// merged content isn't that side's but what merging it with a feature
+/// that side deleted and the other changed gives. Git's merge follows
+/// renames whatever its config says, so the other side's edits land on the
+/// added feature. Each comes with two repairs: `restore` puts the added
+/// file back as its side has it and brings the deleted feature back with
+/// the other side's edits, listed where that side lists it; `drop` only
+/// puts the added file back.
+fn renames(
+    root: &std::path::Path,
+    working: &crate::activity::Files,
+    ours: &Side,
+    theirs: &Side,
+    base: &Side,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    for (p, merged) in working.iter().filter(|(p, _)| is_feature(p)) {
+        for (name, s, other_name, other) in [
+            ("ours", ours, "theirs", theirs),
+            ("theirs", theirs, "ours", ours),
+        ] {
+            let Some(added) = s.files.get(p) else {
+                continue;
+            };
+            if base.files.contains_key(p) || other.files.contains_key(p) || merged == added {
+                continue;
+            }
+            let from = base.files.iter().find(|(q, qb)| {
+                is_feature(q)
+                    && !s.files.contains_key(*q)
+                    && !working.contains_key(*q)
+                    && other.files.get(*q).is_some_and(|x| x != *qb)
+                    && {
+                        let changed = &other.files[*q];
+                        let (o, t) = if name == "ours" {
+                            (added, changed)
+                        } else {
+                            (changed, added)
+                        };
+                        crate::merge::bytes(qb, o, t).0 == *merged
+                    }
+            });
+            let Some((q, _)) = from else { continue };
+            let (part, feature) = about(p);
+            let (_, deleted) = about(q);
+            let index = format!("parts/{}/part.json", part.unwrap_or_default());
+            let files = vec![p.clone(), q.clone(), index.clone()];
+            let cid = format!("{p}#rename_merged");
+            let b = crate::doctor::basis(root, &files);
+            let back = |path: &str, bytes: &[u8]| crate::doctor::Change {
+                path: path.to_owned(),
+                content: Some(bytes.to_vec()),
+            };
+            // The deleted feature listed again, where the other side lists it.
+            let mut restored = working.clone();
+            restored.insert(q.clone(), other.files[q].clone());
+            settle_unmerged(&mut restored, q, other.files.get(q), &other.files);
+            let mut changes = vec![back(p, added), back(q, &other.files[q])];
+            if let Some(i) = restored
+                .get(&index)
+                .filter(|i| working.get(&index) != Some(*i))
+            {
+                changes.push(back(&index, i));
+            }
+            let repairs = [
+                crate::doctor::Repair {
+                    id: format!("{cid}:restore@{b}"),
+                    summary: format!(
+                        "put {p} back as {name} has it, and bring {q} back with {other_name}'s changes"
+                    ),
+                    changes,
+                    params: Vec::new(),
+                },
+                crate::doctor::Repair {
+                    id: format!("{cid}:drop@{b}"),
+                    summary: format!(
+                        "put {p} back as {name} has it; {q} stays deleted, without {other_name}'s changes"
+                    ),
+                    changes: vec![back(p, added)],
+                    params: Vec::new(),
+                },
+            ];
+            let mut c = conflict(
+                cid,
+                "rename_merged",
+                files,
+                json!({"part": part, "feature": feature, "renamed_from": deleted}),
+                "both",
+                format!(
+                    "Git took {q}, which {name} deleted and {other_name} changed, to be renamed to {p}, which {name} added, and merged {other_name}'s changes into it"
+                ),
+            );
+            c["repairs"] = json!(repairs.iter().map(|r| r.to_json()).collect::<Vec<_>>());
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// `merge.status`: what the merge in progress leaves to settle.
 pub fn status(session: &mut Session) -> Result<Value> {
     let root = session.root().to_path_buf();
@@ -610,6 +717,20 @@ pub fn status(session: &mut Session) -> Result<Value> {
     let ours = side(session, Some(&state.ours))?;
     let theirs = side(session, Some(&state.theirs))?;
     let base = side(session, state.base.as_deref())?;
+    let renamed = renames(&root, &working, &ours, &theirs, &base);
+    // A renamed file's own conflicts go with it: its repairs rewrite it.
+    let gone: Vec<String> = renamed
+        .iter()
+        .map(|c| format!("{}#", c["files"][0].as_str().unwrap_or_default()))
+        .collect();
+    conflicts.retain(|c| {
+        !gone.iter().any(|g| {
+            c["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with(g.as_str()))
+        })
+    });
+    conflicts.extend(renamed);
     let now = built(session)?;
     let (broke, already) = broken(&now, &ours, &theirs, &base);
     conflicts.extend(broke);
@@ -1513,6 +1634,80 @@ pub(crate) mod tests {
             .call("sketch.get", json!({"part": "p", "sketch": "s"}))
             .unwrap();
         assert_eq!(g["stale"], false, "{g}");
+    }
+
+    #[test]
+    fn a_feature_git_took_to_be_renamed_is_restored_or_dropped() {
+        for repair in ["restore", "drop"] {
+            let mut m = boxed();
+            m.call(
+                "feature.add",
+                json!({"part": "p", "type": "sphere", "id": "c", "params": {"radius": 1}}),
+            )
+            .unwrap();
+            m.commit("a sphere");
+            m.git(&["checkout", "-q", "-b", "theirs"]);
+            m.session.reload().unwrap();
+            m.call(
+                "feature.edit",
+                json!({"part": "p", "id": "c", "params": {"radius": 2}}),
+            )
+            .unwrap();
+            m.commit("theirs: bigger");
+            m.git(&["checkout", "-q", "main"]);
+            m.session.reload().unwrap();
+            m.call("feature.delete", json!({"part": "p", "id": "c"}))
+                .unwrap();
+            m.call(
+                "feature.add",
+                json!({"part": "p", "type": "sphere", "id": "d", "params": {"radius": 1}}),
+            )
+            .unwrap();
+            m.commit("ours: c is d now");
+            m.merge("theirs");
+            let v = m.call("merge.status", json!({})).unwrap();
+            let c = &v["conflicts"][0];
+            assert_eq!(c["kind"], "rename_merged", "{v}");
+            assert_eq!(c["id"], "parts/p/features/d.json#rename_merged");
+            assert_eq!(
+                c["concerns"],
+                json!({"part": "p", "feature": "d", "renamed_from": "c"})
+            );
+            let id = c["repairs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["id"].as_str().unwrap().to_owned())
+                .find(|r| r.contains(&format!(":{repair}@")))
+                .unwrap();
+            let r = resolve(
+                &mut m,
+                c["id"].as_str().unwrap(),
+                json!({"choice": "repair", "repair": id}),
+            )
+            .unwrap();
+            assert_eq!(r["status"]["clean"], true, "{r}");
+            let radius = |id: &str, m: &mut Merging| {
+                m.call("feature.show", json!({"part": "p", "id": id}))
+                    .unwrap()["params"]["radius"]["value"]
+                    .clone()
+            };
+            assert_eq!(radius("d", &mut m), "1 mm");
+            let list = m.call("feature.list", json!({"part": "p"})).unwrap();
+            let ids: Vec<&str> = list["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| f["id"].as_str().unwrap())
+                .collect();
+            if repair == "restore" {
+                assert_eq!(radius("c", &mut m), "2 mm");
+                assert_eq!(ids, ["b", "c", "d"]);
+            } else {
+                assert!(!m.root().join("parts/p/features/c.json").exists());
+                assert_eq!(ids, ["b", "d"]);
+            }
+        }
     }
 
     #[test]
