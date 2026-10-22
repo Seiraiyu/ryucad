@@ -1417,6 +1417,28 @@ fn hook_check(here: &std::path::Path) -> ExitCode {
                 eprintln!("ryucad: checking the merge in {at}: {}", e.message);
             }
         }
+        // The check read the work tree; the commit takes the index.
+        let unstaged = ryucad::git::Repo::open(&root).and_then(|repo| match repo {
+            Some(repo) => repo.unstaged(&ryucad::activity::snapshot(&root)?),
+            None => Ok(Vec::new()),
+        });
+        match unstaged {
+            Ok(paths) if paths.is_empty() => {}
+            Ok(paths) => {
+                failed = true;
+                eprintln!(
+                    "ryucad: {} file(s) in {at} differ from what would be committed; `git add` (or restore) them first:",
+                    paths.len()
+                );
+                for p in &paths {
+                    eprintln!("  {p}");
+                }
+            }
+            Err(e) => {
+                failed = true;
+                eprintln!("ryucad: reading the index in {at}: {}", e.message);
+            }
+        }
     }
     if failed {
         eprintln!(

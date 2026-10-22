@@ -495,6 +495,44 @@ impl Repo {
         Ok(out)
     }
 
+    /// The project's files whose working copy isn't what the index holds
+    /// (changed, deleted or never added), by path relative to the project,
+    /// sorted: a commit would take the index's, not what was checked. Paths
+    /// Git left unmerged are [`Repo::unmerged`]'s and left out.
+    pub fn unstaged(&self, files: &Files) -> Result<Vec<String>> {
+        use gix::index::entry::Stage;
+        let mut staged = BTreeMap::new();
+        let mut unmerged = std::collections::BTreeSet::new();
+        if let Ok(index) = self.repo.open_index() {
+            for e in index.entries() {
+                let path = e.path(&index).to_string();
+                let Some(rel) = path.strip_prefix(&self.prefix) else {
+                    continue;
+                };
+                if !project_file(rel) {
+                    continue;
+                }
+                if e.stage() == Stage::Unconflicted {
+                    staged.insert(rel.to_owned(), e.id);
+                } else {
+                    unmerged.insert(rel.to_owned());
+                }
+            }
+        }
+        let mut out = std::collections::BTreeSet::new();
+        for (path, bytes) in files {
+            match staged.get(path) {
+                _ if unmerged.contains(path) => {}
+                Some(id) if same_text(&self.read(*id)?, bytes) => {}
+                _ => {
+                    out.insert(path.clone());
+                }
+            }
+        }
+        out.extend(staged.into_keys().filter(|p| !files.contains_key(p)));
+        Ok(out.into_iter().collect())
+    }
+
     /// The project files a commit changed relative to its parent.
     fn changed(&self, tree: &gix::Tree<'_>, parent: Option<&gix::Tree<'_>>) -> Result<Vec<Value>> {
         let now = self.project_blobs(tree)?;
@@ -516,6 +554,17 @@ impl Repo {
         out.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
         Ok(out)
     }
+}
+
+/// Whether `rel` (relative to a project) is one of the files its state
+/// depends on, as `session::files` lists them: the manifest, the
+/// attributes, and files two and three levels under `parts/`.
+fn project_file(rel: &str) -> bool {
+    if rel == crate::doc::project::MANIFEST || rel == crate::drivers::ATTRIBUTES {
+        return true;
+    }
+    let mut parts = rel.split('/');
+    parts.next() == Some("parts") && matches!(parts.count(), 2 | 3)
 }
 
 /// The files Git keeps while a merge, cherry-pick, revert or rebase step
@@ -1011,6 +1060,33 @@ pub(crate) mod tests {
         assert_eq!(
             found.iter().map(|p| canon(p)).collect::<Vec<_>>(),
             [canon(&root), canon(&other)]
+        );
+    }
+
+    #[test]
+    fn files_the_index_doesnt_hold_as_they_are() {
+        let (dir, _s) = fresh();
+        let r = dir.path();
+        git(r, &["init", "-q"]);
+        git(r, &["add", "."]);
+        git(r, &["commit", "-q", "-m", "one"]);
+        let repo = Repo::open(r).unwrap().unwrap();
+        assert!(repo.unstaged(&files(r)).unwrap().is_empty());
+        // Changed, never added, and not a project file at all.
+        std::fs::write(r.join(crate::doc::project::MANIFEST), "{}\n").unwrap();
+        std::fs::create_dir_all(r.join("parts/p/features/deeper")).unwrap();
+        std::fs::write(r.join("parts/p/features/x.json"), "{}\n").unwrap();
+        std::fs::write(r.join("parts/p/features/deeper/y.json"), "{}\n").unwrap();
+        assert_eq!(
+            repo.unstaged(&files(r)).unwrap(),
+            ["parts/p/features/x.json", "ryucad.json"]
+        );
+        // Staged is settled; deleted but still staged isn't.
+        git(r, &["add", "ryucad.json"]);
+        std::fs::remove_file(r.join(crate::drivers::ATTRIBUTES)).unwrap();
+        assert_eq!(
+            repo.unstaged(&files(r)).unwrap(),
+            [".gitattributes", "parts/p/features/x.json"]
         );
     }
 

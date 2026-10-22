@@ -427,6 +427,12 @@ fn the_hooks_refuse_a_merge_commit_until_it_is_settled() {
         "parts/p/features/b.json#/params/x",
         "--theirs",
     ]);
+    // Settled in the work tree but not staged: the index still holds the
+    // record, and that is what would be committed.
+    let (code, out) = r.git_status(&["commit", "--no-edit"]);
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains(&format!("  {BOX}")), "{out}");
+    assert!(out.contains("git add"), "{out}");
     r.git(&["add", "-A"]);
     r.git(&["commit", "-q", "--no-edit"]);
     assert_eq!(r.json(BOX)["params"]["x"], "15 mm");
