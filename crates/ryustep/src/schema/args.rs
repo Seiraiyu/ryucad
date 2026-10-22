@@ -13,8 +13,6 @@ pub(crate) struct Args<'a> {
     k: usize,
 }
 
-// Until the product tree (Task 11), some of these have no reader yet.
-#[allow(dead_code)]
 impl<'a> Args<'a> {
     /// The attributes of instance `id`; a record of any other length is
     /// `Malformed`.

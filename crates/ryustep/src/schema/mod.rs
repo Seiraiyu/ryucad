@@ -13,6 +13,7 @@ mod bspline;
 mod curve;
 mod derived;
 mod geometry;
+mod product;
 mod representation;
 mod surface;
 mod topology;
@@ -200,6 +201,47 @@ pub enum Entity {
         unit: Id,
         name: Box<str>,
     },
+    /// `PRODUCT`: its identifier (often a part number) and name.
+    Product {
+        id: Box<str>,
+        name: Box<str>,
+    },
+    /// `PRODUCT_DEFINITION_FORMATION` (a version of a product), with or
+    /// without a specified source.
+    Formation {
+        product: Id,
+    },
+    /// `PRODUCT_DEFINITION` (a view of a version), with or without
+    /// associated documents.
+    Definition {
+        id: Box<str>,
+        formation: Id,
+    },
+    /// `PRODUCT_DEFINITION_SHAPE`: the shape of a product definition, or
+    /// of an assembly usage.
+    DefinitionShape {
+        definition: Id,
+    },
+    /// `SHAPE_DEFINITION_REPRESENTATION`: a shape and a representation of
+    /// it.
+    ShapeDefinition {
+        definition: Id,
+        representation: Id,
+    },
+    /// `NEXT_ASSEMBLY_USAGE_OCCURRENCE`: `child` used once in `parent`,
+    /// both product definitions.
+    Usage {
+        id: Box<str>,
+        name: Box<str>,
+        parent: Id,
+        child: Id,
+    },
+    /// `CONTEXT_DEPENDENT_SHAPE_REPRESENTATION`: where a usage puts its
+    /// child, as a relationship between their representations.
+    ContextDependentShape {
+        relationship: Id,
+        product_shape: Id,
+    },
     /// An entity this crate doesn't read: its name, or a complex
     /// instance's names joined by spaces.
     Other(Box<str>),
@@ -246,6 +288,13 @@ impl Entity {
             Entity::Unit(Unit::Conversion { .. }) => "CONVERSION_BASED_UNIT",
             Entity::Measure { .. } => "MEASURE_WITH_UNIT",
             Entity::Uncertainty { .. } => "UNCERTAINTY_MEASURE_WITH_UNIT",
+            Entity::Product { .. } => "PRODUCT",
+            Entity::Formation { .. } => "PRODUCT_DEFINITION_FORMATION",
+            Entity::Definition { .. } => "PRODUCT_DEFINITION",
+            Entity::DefinitionShape { .. } => "PRODUCT_DEFINITION_SHAPE",
+            Entity::ShapeDefinition { .. } => "SHAPE_DEFINITION_REPRESENTATION",
+            Entity::Usage { .. } => "NEXT_ASSEMBLY_USAGE_OCCURRENCE",
+            Entity::ContextDependentShape { .. } => "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION",
             Entity::Other(name) => name,
         }
     }
@@ -370,6 +419,9 @@ fn simple(id: Id, name: &str, params: &[Param]) -> Result<Entity, ImportError> {
     }
     if let Some(u) = units::simple(id, name, params) {
         return u;
+    }
+    if let Some(p) = product::simple(id, name, params) {
+        return p;
     }
     if let Some(d) = derived::simple(id, name, params) {
         return d;
