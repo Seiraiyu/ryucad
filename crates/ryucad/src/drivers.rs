@@ -288,7 +288,13 @@ pub fn install(here: &Path, local: bool) -> Result<Value> {
     for name in HOOKS {
         let v = match hook(&repo, name) {
             Hook::Installed(p) | Hook::Missing(p) => {
-                if std::fs::read_to_string(&p).ok() != Some(hook_script()?) {
+                // Only ours is rewritten: someone's own hook that runs the
+                // check (the line `foreign` asks for) is left as it is.
+                let text = std::fs::read_to_string(&p).ok();
+                let ours = text
+                    .as_deref()
+                    .is_none_or(|t| t.lines().any(|l| l == HOOK_HEADER));
+                if ours && text != Some(hook_script()?) {
                     write_hook(&p)?;
                 }
                 json!({"path": p, "status": "installed"})
@@ -400,5 +406,27 @@ mod tests {
         // A hooks folder of the user's choosing is never written to.
         crate::git::tests::git(r, &["config", "core.hooksPath", "githooks"]);
         assert_eq!(first(r), Hook::HooksPath(r.join("githooks").join(HOOKS[0])));
+    }
+
+    #[test]
+    fn install_keeps_someones_own_hook_that_runs_the_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        crate::git::tests::git(r, &["init", "-q"]);
+        let hooks = r.join(".git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        // The line `install` asks for, added to a hook of their own.
+        let mine = format!("#!/bin/sh\necho mine\n{}\n", hook_line().unwrap());
+        let path = hooks.join(HOOKS[0]);
+        std::fs::write(&path, &mine).unwrap();
+        let out = install(r, true).unwrap();
+        assert_eq!(out["hooks"][HOOKS[0]]["status"], "installed");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), mine);
+        // Ours is still brought up to date, and a missing one written.
+        let theirs = hooks.join(HOOKS[1]);
+        assert_eq!(
+            std::fs::read_to_string(theirs).unwrap(),
+            hook_script().unwrap()
+        );
     }
 }
