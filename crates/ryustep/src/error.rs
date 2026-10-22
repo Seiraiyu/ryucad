@@ -41,3 +41,31 @@ impl fmt::Display for StepError {
 }
 
 impl std::error::Error for StepError {}
+
+/// Why a table can't be written: something in it has no Part 21 form.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WriteError {
+    /// `instance` is `None` in the header.
+    Unwritable {
+        instance: Option<u64>,
+        what: &'static str,
+    },
+}
+
+impl fmt::Display for WriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WriteError::Unwritable {
+                instance: Some(id),
+                what,
+            } => write!(f, "instance #{id} can't be written: {what}"),
+            WriteError::Unwritable {
+                instance: None,
+                what,
+            } => write!(f, "the header can't be written: {what}"),
+        }
+    }
+}
+
+impl std::error::Error for WriteError {}

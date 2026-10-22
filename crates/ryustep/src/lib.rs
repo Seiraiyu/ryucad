@@ -10,4 +10,4 @@
 mod error;
 pub mod part21;
 
-pub use error::StepError;
+pub use error::{StepError, WriteError};

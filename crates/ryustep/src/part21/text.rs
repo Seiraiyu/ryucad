@@ -104,8 +104,6 @@ fn push_raw(out: &mut String, raw: &[u8]) {
 /// `text` as a string's contents, without the quotes: printable ASCII as
 /// it is (quotes doubled, backslashes escaped), every other run as one
 /// `\X2\` run, or `\X4\` if it holds a character beyond U+FFFF.
-// Task 4 writes strings with it.
-#[allow(dead_code)]
 pub(crate) fn encode(text: &str) -> String {
     let printable = |c: char| (' '..='~').contains(&c);
     let mut out = String::with_capacity(text.len() + 2);

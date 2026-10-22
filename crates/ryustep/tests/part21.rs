@@ -112,3 +112,14 @@ fn one_thread_and_many_read_the_same_table() {
         assert_eq!(one, part21::parse(&bytes).unwrap(), "{name}");
     }
 }
+
+#[test]
+fn every_file_writes_and_reads_back() {
+    for name in FILES {
+        let f = part21::parse(&occt(name)).unwrap();
+        let bytes = part21::write(&f).unwrap();
+        let back = part21::parse(&bytes).unwrap();
+        assert_eq!(format!("{back:?}"), format!("{f:?}"), "{name}");
+        assert_eq!(part21::write(&back).unwrap(), bytes, "{name}");
+    }
+}

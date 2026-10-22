@@ -7,8 +7,10 @@
 mod file;
 mod lex;
 mod text;
+mod write;
 
 pub use file::{File, Header, Instance, Record, parse};
+pub use write::write;
 
 /// One parameter of a record.
 #[derive(Clone, Debug, PartialEq)]
