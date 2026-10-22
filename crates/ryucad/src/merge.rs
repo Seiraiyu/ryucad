@@ -341,18 +341,164 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
 }
 
 /// A feature file: one value when its type changes (or both sides added
-/// it differently), else per key.
+/// it differently), a sketch per member, else per key.
 fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) -> Value {
     let ty = |v: &Value| v.get("type").cloned();
     let same_type = match base {
         Some(b) => ty(b) == ty(ours) && ty(b) == ty(theirs),
         None => false,
     };
-    if !same_type {
-        return walk.whole(base, ours, theirs);
+    match base {
+        Some(b) if same_type && ty(b) == Some(json!("sketch")) => sketch(walk, b, ours, theirs),
+        Some(b) if same_type => walk
+            .value("", Some(b), Some(ours), Some(theirs))
+            .unwrap_or_else(|| ours.clone()),
+        _ => walk.whole(base, ours, theirs),
     }
-    walk.value("", base, Some(ours), Some(theirs))
-        .unwrap_or_else(|| ours.clone())
+}
+
+/// The fields of a sketch entity or constraint that name another entity.
+pub const NAMES: [&str; 6] = ["start", "end", "center", "a", "b", "about"];
+
+/// The fields that are solver state: a point's position, a circle's
+/// radius.
+pub const POSITIONS: [&str; 2] = ["m", "r_m"];
+
+/// The entities a sketch member names.
+pub fn names_in(member: &Value) -> Vec<&str> {
+    NAMES
+        .iter()
+        .filter_map(|f| member.get(*f).and_then(Value::as_str))
+        .collect()
+}
+
+/// A sketch: its entities and constraints per ID and, within one, per
+/// field (see [`members`]), the rest per key. Then an entity one side
+/// removed that something left in the merge still names (a constraint the
+/// other side added on it, a line it changed to end there) is a
+/// `delete_edit` conflict: ours' value in place, so it comes back when
+/// theirs removed it.
+fn sketch(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Value {
+    let obj = |v: &Value| v.as_object().cloned().unwrap_or_default();
+    let (b, o, t) = (obj(base), obj(ours), obj(theirs));
+    let mut out = walk.object("", &b, &o, &t, &["entities", "constraints"]);
+    let groups = ["entities", "constraints"];
+    for g in groups {
+        let at = child("", g);
+        let v = match (b.get(g), o.get(g), t.get(g)) {
+            (Some(Value::Object(x)), Some(Value::Object(y)), Some(Value::Object(z))) => {
+                Some(Value::Object(members(walk, &at, x, y, z)))
+            }
+            (x, y, z) => walk.value(&at, x, y, z),
+        };
+        if let Some(v) = v {
+            out.insert(g.to_owned(), v);
+        }
+    }
+    let (Some(Value::Object(bases)), Some(Value::Object(ourses)), Some(Value::Object(theirses))) =
+        (b.get("entities"), o.get("entities"), t.get("entities"))
+    else {
+        return Value::Object(out);
+    };
+    // Entities brought back are named again in turn: until nothing changes.
+    loop {
+        let present: BTreeSet<String> = out
+            .get("entities")
+            .and_then(Value::as_object)
+            .map(|e| e.keys().cloned().collect())
+            .unwrap_or_default();
+        let named: BTreeSet<String> = groups
+            .iter()
+            .filter_map(|g| out.get(*g).and_then(Value::as_object))
+            .flat_map(|m| m.values())
+            .flat_map(|m| names_in(m).into_iter().map(str::to_owned))
+            .collect();
+        let mut back = Vec::new();
+        for id in named.iter().filter(|n| !present.contains(*n)) {
+            let at = child("/entities", id);
+            let Some(bv) = bases.get(id) else { continue };
+            if walk.conflicts.contains_key(&at) {
+                continue;
+            }
+            let (ov, tv) = (ourses.get(id), theirses.get(id));
+            if let Some(v) = walk.conflict(&at, Kind::DeleteEdit, Some(bv), ov, tv) {
+                back.push((id.clone(), v));
+            }
+        }
+        if back.is_empty() {
+            break;
+        }
+        let entities = out
+            .entry("entities")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .expect("entities are an object");
+        entities.extend(back);
+    }
+    Value::Object(out)
+}
+
+/// A sketch's entities or constraints, merged by ID. One added by one side
+/// is taken, two different ones added under one ID are an `id_collision`
+/// (ours' kept), one removed on one side and changed on the other is a
+/// `delete_edit`; one changed on both merges per field, positions
+/// ([`POSITIONS`]) never conflicting: each takes the side that moved it,
+/// ours if both did.
+fn members(
+    walk: &mut Walk,
+    at: &str,
+    base: &Map<String, Value>,
+    ours: &Map<String, Value>,
+    theirs: &Map<String, Value>,
+) -> Map<String, Value> {
+    let ids: BTreeSet<&String> = base
+        .keys()
+        .chain(ours.keys())
+        .chain(theirs.keys())
+        .collect();
+    let mut out = Map::new();
+    for id in ids {
+        let at = child(at, id);
+        let (b, o, t) = (base.get(id), ours.get(id), theirs.get(id));
+        let v = match (b, o, t) {
+            _ if o == t => o.cloned(),
+            (None, Some(_), Some(_)) => walk.conflict(&at, Kind::IdCollision, b, o, t),
+            (None, x, y) => x.or(y).cloned(),
+            (Some(_), None, x) | (Some(_), x, None) if x == b => None,
+            (Some(_), None, _) | (Some(_), _, None) => {
+                walk.conflict(&at, Kind::DeleteEdit, b, o, t)
+            }
+            (Some(b), Some(o), Some(t)) => member(walk, &at, b, o, t),
+        };
+        if let Some(v) = v {
+            out.insert(id.clone(), v);
+        }
+    }
+    out
+}
+
+/// One entity or constraint changed on both sides: per field, positions
+/// from the side that moved them. Its `type` changing makes it one value.
+fn member(walk: &mut Walk, at: &str, base: &Value, ours: &Value, theirs: &Value) -> Option<Value> {
+    let (Some(b), Some(o), Some(t)) = (base.as_object(), ours.as_object(), theirs.as_object())
+    else {
+        return walk.value(at, Some(base), Some(ours), Some(theirs));
+    };
+    if b.get("type") != o.get("type") || b.get("type") != t.get("type") {
+        return walk.value(at, Some(base), Some(ours), Some(theirs));
+    }
+    let mut out = walk.object(at, b, o, t, &POSITIONS);
+    for k in POSITIONS {
+        let v = if o.get(k) != b.get(k) {
+            o.get(k)
+        } else {
+            t.get(k)
+        };
+        if let Some(v) = v {
+            out.insert(k.to_owned(), v.clone());
+        }
+    }
+    Some(Value::Object(out))
 }
 
 /// A list of distinct IDs, if `v` is one.
@@ -781,6 +927,158 @@ mod tests {
         let bad = json!({"features": ["a", "a"], "format": 1, "kind": "ryucad.part"});
         let m = merge(Some(&part(&["a"])), &bad, &part(&["b"]));
         assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/features"]);
+    }
+
+    /// A sketch on xy with the entities and constraints given.
+    fn sketch_json(entities: Value, constraints: Value) -> Value {
+        json!({"format": 2, "kind": "ryucad.feature", "type": "sketch", "plane": "xy",
+               "entities": entities, "constraints": constraints})
+    }
+
+    /// Three points and a line from the first to the second, with a length.
+    fn base_sketch() -> Value {
+        sketch_json(
+            json!({
+                "p1": {"type": "point", "m": [0, 0]},
+                "p2": {"type": "point", "m": [0.01, 0]},
+                "p3": {"type": "point", "m": [0, 0.01]},
+                "l1": {"type": "line", "start": "p1", "end": "p2"},
+            }),
+            json!({"d1": {"type": "length", "a": "l1", "value": "10 mm"}}),
+        )
+    }
+
+    #[test]
+    fn sketches_merge_per_entity_and_constraint() {
+        let base = base_sketch();
+        let mut ours = base.clone();
+        ours["entities"]["p4"] = json!({"type": "point", "m": [0.02, 0]});
+        ours["entities"]["l2"] = json!({"type": "line", "start": "p2", "end": "p4"});
+        ours["constraints"]["c1"] = json!({"type": "horizontal", "a": "l2"});
+        ours["entities"]["l1"]["construction"] = json!(true);
+        let mut theirs = base.clone();
+        theirs["entities"]["p5"] = json!({"type": "point", "m": [0, 0.02]});
+        theirs["constraints"]["d1"]["value"] = json!("wall * 2");
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        let e = &m.value["entities"];
+        assert_eq!(e["p4"], ours["entities"]["p4"]);
+        assert_eq!(e["p5"], theirs["entities"]["p5"]);
+        assert_eq!(e["l1"]["construction"], true);
+        assert_eq!(m.value["constraints"]["d1"]["value"], "wall * 2");
+        assert_eq!(m.value["constraints"]["c1"]["a"], "l2");
+        // A dimension changed differently on both sides conflicts.
+        ours["constraints"]["d1"]["value"] = json!("12 mm");
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(
+            m.conflicts.keys().collect::<Vec<_>>(),
+            ["/constraints/d1/value"]
+        );
+        assert_eq!(m.value["constraints"]["d1"]["value"], "12 mm");
+        // So does the plane.
+        let mut a = base.clone();
+        a["plane"] = json!("yz");
+        let mut b = base.clone();
+        b["plane"] = json!("zx");
+        assert_eq!(
+            merge(Some(&base), &a, &b)
+                .conflicts
+                .keys()
+                .collect::<Vec<_>>(),
+            ["/plane"]
+        );
+    }
+
+    #[test]
+    fn positions_never_conflict() {
+        let base = base_sketch();
+        let mut ours = base.clone();
+        let mut theirs = base.clone();
+        ours["entities"]["p1"]["m"] = json!([0.001, 0]);
+        theirs["entities"]["p1"]["m"] = json!([0.002, 0]);
+        theirs["entities"]["p2"]["m"] = json!([0.011, 0]);
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        // Ours where both moved it; theirs where only it did.
+        assert_eq!(m.value["entities"]["p1"]["m"], json!([0.001, 0]));
+        assert_eq!(m.value["entities"]["p2"]["m"], json!([0.011, 0]));
+        // A point both moved and one side made construction: still per field.
+        theirs["entities"]["p1"]["construction"] = json!(true);
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean());
+        assert_eq!(
+            m.value["entities"]["p1"],
+            json!({"type": "point", "m": [0.001, 0], "construction": true})
+        );
+    }
+
+    #[test]
+    fn removed_on_one_side_and_edited_or_used_on_the_other() {
+        let base = base_sketch();
+        // Ours removes the line and its length; theirs makes it construction.
+        let mut ours = base.clone();
+        ours["entities"].as_object_mut().unwrap().remove("l1");
+        ours["constraints"].as_object_mut().unwrap().remove("d1");
+        let mut theirs = base.clone();
+        theirs["entities"]["l1"]["construction"] = json!(true);
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/entities/l1"]);
+        let c = &m.conflicts["/entities/l1"];
+        assert_eq!((c.kind, c.ours.as_ref()), (Kind::DeleteEdit, None));
+        assert!(m.value["entities"].get("l1").is_none());
+        // Theirs removes a point that ours puts a new constraint on: it
+        // comes back, as ours has it, with a conflict.
+        let mut ours = base.clone();
+        ours["constraints"]["c2"] = json!({"type": "fix", "a": "p3"});
+        let mut theirs = base.clone();
+        theirs["entities"].as_object_mut().unwrap().remove("p3");
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/entities/p3"]);
+        assert_eq!(m.conflicts["/entities/p3"].kind, Kind::DeleteEdit);
+        assert_eq!(m.value["entities"]["p3"], base["entities"]["p3"]);
+        // The other way round, ours' removal stays, and so does the use.
+        let m = merge(Some(&base), &theirs, &ours);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/entities/p3"]);
+        assert!(m.value["entities"].get("p3").is_none());
+        // Theirs removes a line with its points; ours constrains the line:
+        // the line comes back, and the points it needs with it.
+        let mut theirs = base.clone();
+        for e in ["l1", "p1", "p2"] {
+            theirs["entities"].as_object_mut().unwrap().remove(e);
+        }
+        theirs["constraints"].as_object_mut().unwrap().remove("d1");
+        let mut ours = base.clone();
+        ours["constraints"]["c3"] = json!({"type": "horizontal", "a": "l1"});
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(
+            m.conflicts.keys().collect::<Vec<_>>(),
+            ["/entities/l1", "/entities/p1", "/entities/p2"]
+        );
+        for e in ["l1", "p1", "p2"] {
+            assert_eq!(m.value["entities"][e], base["entities"][e], "{e}");
+        }
+        // Removed on both sides is simply gone.
+        let m = merge(Some(&base), &theirs, &theirs);
+        assert!(m.is_clean());
+    }
+
+    #[test]
+    fn two_entities_added_under_one_id_collide() {
+        let base = base_sketch();
+        let mut ours = base.clone();
+        ours["entities"]["p7"] = json!({"type": "point", "m": [0, 0]});
+        let mut theirs = base.clone();
+        theirs["entities"]["p7"] = json!({"type": "point", "m": [0.01, 0]});
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(
+            m.to_json()[CONFLICTS],
+            json!({"/entities/p7": {"kind": "id_collision",
+                                    "ours": {"m": [0, 0], "type": "point"},
+                                    "theirs": {"m": [0.01, 0], "type": "point"}}})
+        );
+        assert_eq!(m.value["entities"]["p7"], ours["entities"]["p7"]);
+        // The same addition on both sides is no conflict.
+        assert!(merge(Some(&base), &ours, &ours).is_clean());
     }
 
     #[test]
