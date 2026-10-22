@@ -301,6 +301,7 @@ impl Opened {
             .default_size(280.0)
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    panels::changes(ui, &self.ws, &self.view);
                     panels::properties(ui, &mut self.ws);
                     ui.separator();
                     panels::parameters(ui, &mut self.ws, &self.view);

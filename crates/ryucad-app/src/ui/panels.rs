@@ -1,6 +1,7 @@
 //! The panels around the viewport: the feature tree, the participants bar
 //! and the status line.
 
+use crate::core::compare::{Change, Mark};
 use crate::core::workspace::Workspace;
 use crate::ui::style;
 use crate::ui::view::View;
@@ -37,9 +38,41 @@ pub fn row_text(f: &crate::core::model::Feature, faults: usize) -> String {
     }
 }
 
+/// How a feature differs in a compare, after its line in the tree:
+/// ` [changed, moved, failed at HEAD (rebuild_failed)]`; empty when it
+/// doesn't.
+pub fn mark_text(m: &Mark, rev: &str) -> String {
+    let mut says = Vec::new();
+    if m.change != Change::Same {
+        says.push(m.change.as_str().to_owned());
+    }
+    if m.moved {
+        says.push("moved".to_owned());
+    }
+    if let Some(code) = &m.failed_there {
+        says.push(format!("failed at {rev} ({code})"));
+    }
+    if says.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", says.join(", "))
+    }
+}
+
+/// The colour a compare gives a feature's line.
+fn mark_colour(m: &Mark) -> style::Rgb {
+    match m.change {
+        Change::Added => style::NEW,
+        Change::Removed => style::REMOVED,
+        _ => style::CHANGED,
+    }
+}
+
 /// Parts and their features in order, with rebuild status and mesh
 /// faults, and under each feature what it reads. Choosing a feature
-/// paints and frames its body, or its sketch.
+/// paints and frames its body, or its sketch. In a compare, features are
+/// marked by how they differ, and those only the other side has follow,
+/// to be chosen for their changes.
 pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     // Names are IDs: never broken across lines.
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -48,6 +81,9 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
         ui.weak("No parts yet");
     }
     let mut choose = None;
+    // A feature only a compare's other side has: chosen for its changes,
+    // with no form and nothing to frame.
+    let mut gone = None;
     for part in ws.model.parts.values() {
         // Damage doctor found in the part's files.
         let prefix = format!("parts/{}/", part.id);
@@ -84,7 +120,16 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                         .get(&key)
                         .and_then(|m| m.mesh.as_ref().ok())
                         .map_or(0, |m| m.faults.len());
-                    let text = row_text(f, faults);
+                    let mark = ws.compare.as_ref().and_then(|c| {
+                        let m = c.features.get(&key)?;
+                        Some((mark_text(m, &c.rev), mark_colour(m)))
+                    });
+                    let text = match &mark {
+                        Some((t, c)) => {
+                            RichText::new(row_text(f, faults) + t).color(style::color32(*c))
+                        }
+                        None => RichText::new(row_text(f, faults)),
+                    };
                     let chosen = view.chosen.as_ref() == Some(&key);
                     let r = ui.selectable_label(chosen, text);
                     let r = match &f.error {
@@ -101,6 +146,16 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                         ui.indent(("uses", &part.id, &f.id), |ui| {
                             ui.weak(format!("uses {}", f.uses.join(", ")));
                         });
+                    }
+                }
+                let removed = ws.compare.as_ref().and_then(|c| c.removed.get(&part.id));
+                for id in removed.into_iter().flatten() {
+                    let key = (part.id.clone(), id.clone());
+                    let chosen = view.chosen.as_ref() == Some(&key);
+                    let text = RichText::new(format!("{id} [removed]"))
+                        .color(style::color32(style::REMOVED));
+                    if ui.selectable_label(chosen, text).clicked() {
+                        gone = Some(if chosen { None } else { Some(key) });
                     }
                 }
             });
@@ -120,6 +175,36 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             view.fit(ws, Some(&k));
         }
     }
+    if let Some(c) = gone {
+        view.chosen = c;
+        ws.open_form(None);
+    }
+}
+
+/// In a compare, what changed in the feature chosen in the tree since the
+/// revision compared with.
+pub fn changes(ui: &mut egui::Ui, ws: &Workspace, view: &View) {
+    let (Some(c), Some(key)) = (&ws.compare, &view.chosen) else {
+        return;
+    };
+    ui.heading(format!("Changes since {}", c.rev));
+    match c.features.get(key) {
+        Some(m) if !m.lines.is_empty() => {
+            for l in &m.lines {
+                ui.label(l);
+            }
+        }
+        Some(m) => {
+            ui.label(m.change.as_str());
+        }
+        None if !c.loaded => {
+            ui.spinner();
+        }
+        None => {
+            ui.weak(format!("{} is as it was", key.1));
+        }
+    }
+    ui.separator();
 }
 
 /// Everyone attached, what they say they are doing, and "Follow" for
@@ -636,6 +721,32 @@ mod tests {
             uses: Vec::new(),
             error: None,
         }
+    }
+
+    #[test]
+    fn marks_say_how_a_feature_differs() {
+        let mark = |change, moved, failed: Option<&str>| Mark {
+            change,
+            moved,
+            failed_there: failed.map(str::to_owned),
+            lines: Vec::new(),
+        };
+        assert_eq!(
+            mark_text(&mark(Change::Changed, true, None), "HEAD"),
+            " [changed, moved]"
+        );
+        assert_eq!(
+            mark_text(
+                &mark(Change::Rebuilt, false, Some("rebuild_failed")),
+                "main"
+            ),
+            " [rebuilt, failed at main (rebuild_failed)]"
+        );
+        assert_eq!(mark_text(&mark(Change::Same, false, None), "HEAD"), "");
+        assert_eq!(
+            mark_text(&mark(Change::Same, true, None), "HEAD"),
+            " [moved]"
+        );
     }
 
     #[test]
