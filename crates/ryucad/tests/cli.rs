@@ -786,6 +786,11 @@ fn every_error_code_has_its_exit_code() {
     p.write("parts/p/features/t.json", "{}");
     p.fails(&["feature", "show", "p", "t"], "invalid_document", 1);
     p.write(
+        "parts/p/features/t.json",
+        r#"{"conflicts":{"/params/x":{"kind":"value"}},"format":1,"kind":"ryucad.feature"}"#,
+    );
+    p.fails(&["feature", "show", "p", "t"], "merge_conflict", 1);
+    p.write(
         "ryucad.json",
         r#"{"default_unit":"mm","format":2,"kind":"ryucad.project"}"#,
     );

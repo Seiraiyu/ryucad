@@ -42,7 +42,7 @@ impl Issue {
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 17] = [
+pub const CODES: [(&str, &str); 18] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -60,6 +60,7 @@ pub const CODES: [(&str, &str); 17] = [
     ("sketch_stale", "warning"),
     ("gitattributes_missing", "warning"),
     ("git_drivers_missing", "warning"),
+    ("merge_conflict", "error"),
 ];
 
 fn issue(code: &'static str, files: Vec<String>, message: String) -> Issue {
@@ -121,6 +122,13 @@ fn read(root: &Path, rel: &str) -> Read {
         ));
     }
     match canonical::parse(&text) {
+        Ok(v) if crate::doc::project::conflicted(&v, rel).is_some() => Read::Bad(issue(
+            "merge_conflict",
+            vec![rel.to_owned()],
+            format!(
+                "{rel} has unresolved merge conflicts: see `ryucad merge status`, then `ryucad merge resolve`"
+            ),
+        )),
         Ok(v) => Read::Json(v, canonical::is_canonical(&text)),
         Err(e) => Read::Bad(issue(
             "invalid_json",
@@ -1253,7 +1261,8 @@ pub(crate) mod tests {
         let sphere = fs::read_to_string(r.join(f("a"))).unwrap();
         // An orphan, a listed feature gone, a sync copy, a bad name, an
         // unknown file, a non-canonical file, invalid JSON, conflict
-        // markers, an invalid document, a newer format.
+        // markers, an invalid document, a newer format, a merge's
+        // conflict record.
         w(r, &f("c"), &sphere);
         fs::remove_file(r.join(f("b"))).unwrap();
         w(r, "parts/p/features/a (1).json", &sphere);
@@ -1267,6 +1276,14 @@ pub(crate) mod tests {
             r,
             &f("i"),
             &sphere.replace("\"format\": 1", "\"format\": 9"),
+        );
+        w(
+            r,
+            &f("j"),
+            &sphere.replace(
+                "{\n",
+                "{\n  \"conflicts\": {\n    \"/params/radius\": {\n      \"kind\": \"value\"\n    }\n  },\n",
+            ),
         );
         let got = codes(r);
         let want: Vec<(&str, Vec<String>)> = vec![
@@ -1284,6 +1301,7 @@ pub(crate) mod tests {
             ("conflict_markers", vec![f("g")]),
             ("invalid_document", vec![f("h")]),
             ("format_too_new", vec![f("i")]),
+            ("merge_conflict", vec![f("j")]),
             ("listed_feature_missing", vec![f("b"), index.clone()]),
             ("orphan_feature", vec![f("c"), index.clone()]),
             ("orphan_feature", vec![f("d"), index.clone()]),
@@ -1291,6 +1309,7 @@ pub(crate) mod tests {
             ("orphan_feature", vec![f("g"), index.clone()]),
             ("orphan_feature", vec![f("h"), index.clone()]),
             ("orphan_feature", vec![f("i"), index.clone()]),
+            ("orphan_feature", vec![f("j"), index.clone()]),
         ];
         assert_eq!(got, want);
         let rep = report(r).unwrap();

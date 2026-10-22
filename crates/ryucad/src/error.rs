@@ -107,6 +107,9 @@ pub enum Code {
     RevNotFound,
     /// `ryucad check` found errors; its report is in the details.
     CheckFailed,
+    /// A file a merge left with conflicts (a top-level `conflicts` key):
+    /// `ryucad merge status` lists them, `ryucad merge resolve` settles them.
+    MergeConflict,
 }
 
 impl Code {
@@ -191,6 +194,7 @@ mod tests {
         assert_eq!(Code::UnitMismatch.exit_code(), 1);
         assert_eq!(Code::ParameterCycle.exit_code(), 1);
         assert_eq!(Code::HasDependents.exit_code(), 1);
+        assert_eq!(Code::MergeConflict.exit_code(), 1);
     }
 
     #[test]
