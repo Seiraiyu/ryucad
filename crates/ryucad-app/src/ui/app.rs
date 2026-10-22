@@ -70,6 +70,8 @@ pub struct Opened {
     pub doctor: doctor::State,
     /// Recent projects, newest first, for the File menu.
     pub recent: Vec<PathBuf>,
+    /// A revision being typed to compare with (View > Compare with…).
+    pub compare_with: Option<String>,
 }
 
 /// What the window shows.
@@ -169,7 +171,8 @@ impl App {
         }
     }
 
-    fn title(&self) -> String {
+    /// The window's title: the project, and a merge in progress.
+    pub fn title(&self) -> String {
         let name = |root: &Path| {
             root.file_name().map_or_else(
                 || root.display().to_string(),
@@ -178,7 +181,10 @@ impl App {
         };
         match &self.screen {
             Screen::Start(_) => "ryucad".to_owned(),
-            Screen::Opened(o) => format!("{} — ryucad", name(&o.ws.root)),
+            Screen::Opened(o) => match &o.ws.merge {
+                Some(m) => format!("{} ({} in progress) — ryucad", name(&o.ws.root), m.step()),
+                None => format!("{} — ryucad", name(&o.ws.root)),
+            },
             Screen::Damaged(d) if d.0.openable() => {
                 format!("{} (repaired) — ryucad", name(&d.0.root))
             }
@@ -241,6 +247,7 @@ impl Opened {
             dialogs: menu::Dialogs::default(),
             doctor: doctor::State::default(),
             recent: crate::core::recent::load(),
+            compare_with: None,
         };
         o.view.look = user_look();
         // Damage that doesn't stop the project opening shows as badges.
@@ -281,6 +288,11 @@ impl Opened {
             .show(ui, |ui| menu::bar(ui, self, &recent))
             .inner;
         egui::Panel::top("people").show(ui, |ui| panels::people(ui, &mut self.ws));
+        if self.compare_with.is_some() || self.ws.compare.is_some() {
+            egui::Panel::top("compare").show(ui, |ui| {
+                panels::compare_bar(ui, &mut self.ws, &mut self.compare_with);
+            });
+        }
         let action = action.or(self.shortcuts(&ctx));
         egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &self.ws));
         // Room for about ten entries; drag its top edge for more.
@@ -301,6 +313,8 @@ impl Opened {
             .default_size(280.0)
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    panels::merge(ui, &mut self.ws, &mut self.view);
+                    panels::changes(ui, &self.ws, &self.view);
                     panels::properties(ui, &mut self.ws);
                     ui.separator();
                     panels::parameters(ui, &mut self.ws, &self.view);

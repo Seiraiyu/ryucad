@@ -76,6 +76,10 @@ pub struct Participant {
     pub selection: Vec<EntityRef>,
     pub camera: Option<Camera>,
     pub highlights: Vec<Highlight>,
+    /// The Git revision the participant compares the working files
+    /// against, as it was given (`HEAD`, a branch, a commit); `None` when
+    /// it isn't comparing.
+    pub compare: Option<String>,
     connections: usize,
     last_seen: Instant,
 }
@@ -90,6 +94,7 @@ impl Participant {
             "selection": self.selection,
             "camera": self.camera,
             "highlights": self.highlights,
+            "compare": self.compare.as_ref().map(|rev| json!({ "rev": rev })),
         })
     }
 }
@@ -206,6 +211,7 @@ impl Live {
                 selection: Vec::new(),
                 camera: None,
                 highlights: Vec::new(),
+                compare: None,
                 connections: 0,
                 last_seen: Instant::now(),
             },
@@ -365,6 +371,26 @@ impl Live {
         let p = self.get_mut(id)?;
         p.highlights.retain(|h| style.is_some_and(|s| s != h.style));
         Ok(&p.highlights)
+    }
+
+    /// Sets what participant `id` compares the working files against, or
+    /// (with `None`) stops it comparing.
+    pub fn set_compare(&mut self, id: &str, rev: Option<String>) -> Result<()> {
+        self.get_mut(id)?.compare = rev;
+        Ok(())
+    }
+
+    /// The participant whose compare `compare.set` changes: `id` if
+    /// given, else the one human (an agent shows a person what it did),
+    /// else, with no human attached, the caller `me`.
+    pub fn compare_target(&mut self, id: Option<&str>, me: Option<&str>) -> Result<String> {
+        if let Some(id) = id {
+            return Ok(self.get(id)?.id.clone());
+        }
+        match self.target(None)? {
+            Some(h) => Ok(h.id.clone()),
+            None => Ok(self.caller(me)),
+        }
     }
 
     /// Sets participant `id`'s status; an empty text clears it.
@@ -591,6 +617,29 @@ mod tests {
         live.announce(&before);
         let v: Value = serde_json::from_str(&sub.next().unwrap()).unwrap();
         assert_eq!(v["params"], json!({"participant": {"id": h}, "left": true}));
+    }
+
+    #[test]
+    fn a_compare_goes_to_the_one_human_unless_one_is_named() {
+        let mut live = Live::new();
+        let a = live.hello(Kind::Agent, None, None).unwrap();
+        // Nobody to show: the agent compares itself.
+        assert_eq!(live.compare_target(None, Some(&a)).unwrap(), a);
+        let h = live.hello(Kind::Human, Some("Dana"), None).unwrap();
+        assert_eq!(live.compare_target(None, Some(&a)).unwrap(), h);
+        assert_eq!(live.compare_target(Some(&a), Some(&a)).unwrap(), a);
+        live.set_compare(&h, Some("HEAD~1".into())).unwrap();
+        assert_eq!(
+            live.get(&h).unwrap().to_json()["compare"],
+            json!({"rev": "HEAD~1"})
+        );
+        live.set_compare(&h, None).unwrap();
+        assert_eq!(live.get(&h).unwrap().to_json()["compare"], Value::Null);
+        live.hello(Kind::Human, None, None).unwrap();
+        let e = live.compare_target(None, Some(&a)).unwrap_err();
+        assert_eq!(e.code, Code::AmbiguousParticipant);
+        let e = live.compare_target(Some("p-ffffffff"), None).unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
     }
 
     #[test]

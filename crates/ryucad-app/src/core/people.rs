@@ -26,6 +26,8 @@ pub struct Person {
     pub selection: Vec<String>,
     pub camera: Option<Camera>,
     pub highlights: Vec<Highlight>,
+    /// The Git revision they compare the working files against.
+    pub compare: Option<String>,
 }
 
 fn strings(v: &Value) -> Vec<String> {
@@ -66,6 +68,7 @@ impl Person {
             selection: strings(&v["selection"]),
             camera: serde_json::from_value(v["camera"].clone()).ok(),
             highlights,
+            compare: v["compare"]["rev"].as_str().map(str::to_owned),
         })
     }
 }

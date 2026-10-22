@@ -227,3 +227,57 @@ fn sketches_show_on_faces_and_hide_behind_them() {
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle() && drawn(ws, -0.001)));
     assert_eq!(blue(&ws), 0, "the sketch under the box is hidden");
 }
+
+/// A compare ghosts what the working files no longer have: a body that
+/// is gone shows, translucent, in the removed colour.
+#[test]
+fn a_compare_ghosts_what_is_gone() {
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::new().with_part().committed();
+    p.ok(&["feature", "delete", "p", "boss"]);
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.model.meshes.len() == 1));
+    p.ok(&["compare", "HEAD"]);
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.compare.as_ref().is_some_and(|c| c.ghosts.len() == 1)));
+    // From the top, over the box and the cylinder that stood on it.
+    let (lo, hi) = ([-0.004, -0.004, 0.0], [0.021, 0.011, 0.013]);
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Top, view::DEFAULT_PROJECTION);
+    let pr = Projector::new(&camera, 1.0, centre, 0.02);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    let size = 160u32;
+    let draw = |scene: &mut Scene| {
+        let list = DrawList {
+            reference: centre,
+            matrix: pr.matrix(centre),
+            perspective: pr.line_pull(),
+            light: scene::light(&camera),
+            edges: false,
+            faces: &[],
+            background: theme::BACKGROUND,
+            overlay: &[],
+        };
+        scene.render(&device, &queue, [size, size], &list);
+        scene.read_pixels(&device, &queue).unwrap().2
+    };
+    // The cylinder's axis, where it rose through the box's top.
+    let n = pr.ndc([0.0005, 0.0005, 0.013]).unwrap();
+    let (x, y) = (
+        ((n[0] + 1.0) / 2.0 * f64::from(size)) as u32,
+        ((1.0 - n[1]) / 2.0 * f64::from(size)) as u32,
+    );
+    let at = |px: &[u8]| px[((y * size + x) * 4) as usize..][..3].to_vec();
+    let plain = at(&draw(&mut scene));
+    scene.sync_ghosts(&device, ws.compare.as_ref());
+    let ghosted = at(&draw(&mut scene));
+    let red = |c: &[u8]| i32::from(c[0]) - i32::from(c[1]);
+    assert!(red(&ghosted) > red(&plain) + 30, "{plain:?} {ghosted:?}");
+    // Out of the compare, the ghost goes.
+    scene.sync_ghosts(&device, None);
+    assert_eq!(at(&draw(&mut scene)), plain);
+}

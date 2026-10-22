@@ -394,6 +394,60 @@ fn dispatch(
             live.get_mut(&id)?.camera = Some(camera.clone());
             Ok(json!({"participant": id, "camera": camera}))
         }
+        Request::CompareGet { participant } => {
+            let target = match &live {
+                Some(l) => l.target(participant.as_deref())?,
+                None => None,
+            };
+            let Some(p) = target else {
+                return Ok(json!({"participant": null, "compare": null}));
+            };
+            let (id, rev) = (p.id.clone(), p.compare.clone());
+            // The commit the revision names now; none if it no longer
+            // names one.
+            let compare = rev.map(|rev| {
+                let commit = crate::git::repo(session.root())
+                    .and_then(|r| r.locate(&rev))
+                    .ok()
+                    .map(|(c, _)| c);
+                json!({"rev": rev, "commit": commit})
+            });
+            Ok(json!({"participant": id, "compare": compare}))
+        }
+        Request::CompareSet {
+            rev,
+            off,
+            participant,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("compare.set"))?;
+            let rev = match (rev, off) {
+                (Some(r), false) => Some(r),
+                (None, true) => None,
+                _ => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        "give a revision to compare with, or off, not both",
+                    ));
+                }
+            };
+            if rev.as_deref() == Some("working") {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "a compare is against a Git revision: the working files are what it compares",
+                )
+                .with("rev", "working"));
+            }
+            let id = live.compare_target(participant.as_deref(), me)?;
+            // Refused unless the revision has the project; it is then
+            // ready for the diff and meshes the window asks for next.
+            let commit = match &rev {
+                Some(r) => session.at(Some(r))?.0,
+                None => None,
+            };
+            live.set_compare(&id, rev.clone())?;
+            let compare = rev.map(|rev| json!({"rev": rev, "commit": commit}));
+            Ok(json!({"participant": id, "compare": compare}))
+        }
         Request::HighlightSet {
             entities,
             style,
@@ -3233,7 +3287,7 @@ pub(crate) mod tests {
         assert_eq!(
             r["session"]["participants"],
             json!([{"id": id, "kind": "human", "name": "Dana", "status": null, "selection": [],
-                    "camera": null, "highlights": []}])
+                    "camera": null, "highlights": [], "compare": null}])
         );
         let list = call_live(&mut s, &mut live, Some(&id), "participant.list", json!({})).unwrap();
         assert_eq!(list, r["session"]);
@@ -3508,6 +3562,91 @@ pub(crate) mod tests {
         }
         let r = call(&mut s, "camera.get", json!({})).unwrap();
         assert_eq!(r, json!({"participant": null, "camera": null}));
+    }
+
+    #[test]
+    fn an_agent_puts_the_human_into_a_compare() {
+        use crate::git::tests::git;
+        let (dir, mut s) = fresh();
+        let mut live = Live::new();
+        let e = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "compare.set",
+            json!({"rev": "HEAD"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::NotAGitRepo);
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "start"]);
+        let human = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "session.hello",
+            json!({"kind": "human", "name": "Dana"}),
+        )
+        .unwrap()["participant"]
+            .clone();
+        // An agent (no hello) sets it: it goes to the one human.
+        let set =
+            |s: &mut Session, live: &mut Live, p: Value| call_live(s, live, None, "compare.set", p);
+        let r = set(&mut s, &mut live, json!({"rev": "main"})).unwrap();
+        assert_eq!(r["participant"], human);
+        assert_eq!(r["compare"]["rev"], "main");
+        let commit = r["compare"]["commit"].as_str().unwrap().to_owned();
+        assert_eq!(commit.len(), 40);
+        let r = call_live(&mut s, &mut live, None, "compare.get", json!({})).unwrap();
+        assert_eq!(
+            r,
+            json!({"participant": human, "compare": {"rev": "main", "commit": commit}})
+        );
+        let list = call_live(&mut s, &mut live, None, "participant.list", json!({})).unwrap();
+        let of = |id: &Value| {
+            list["participants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"] == *id)
+                .unwrap()["compare"]
+                .clone()
+        };
+        assert_eq!(of(&human), json!({"rev": "main"}));
+        // Revisions that don't resolve, and the working files, are refused;
+        // the compare stays as it was.
+        for (p, code) in [
+            (json!({"rev": "nowhere"}), Code::RevNotFound),
+            (json!({"rev": "working"}), Code::InvalidParam),
+            (json!({}), Code::Usage),
+            (json!({"rev": "HEAD", "off": true}), Code::Usage),
+            (
+                json!({"off": true, "participant": "p-ffffffff"}),
+                Code::NotFound,
+            ),
+        ] {
+            let e = set(&mut s, &mut live, p.clone()).unwrap_err();
+            assert_eq!(e.code, code, "{p}");
+        }
+        let r = call_live(&mut s, &mut live, None, "compare.get", json!({})).unwrap();
+        assert_eq!(r["compare"]["rev"], "main");
+        // Named, the agent compares itself; off ends the human's.
+        let r = set(
+            &mut s,
+            &mut live,
+            json!({"rev": "HEAD", "participant": human}),
+        )
+        .unwrap();
+        assert_eq!(r["compare"]["rev"], "HEAD");
+        let r = set(&mut s, &mut live, json!({"off": true})).unwrap();
+        assert_eq!(r, json!({"participant": human, "compare": null}));
+        // Without a daemon nobody compares.
+        let e = call(&mut s, "compare.set", json!({"rev": "HEAD"})).unwrap_err();
+        assert_eq!(e.code, Code::NoLiveSession);
+        let r = call(&mut s, "compare.get", json!({})).unwrap();
+        assert_eq!(r, json!({"participant": null, "compare": null}));
     }
 
     /// The notifications queued for `sub` so far, as (method, params).

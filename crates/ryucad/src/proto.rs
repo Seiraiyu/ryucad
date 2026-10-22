@@ -410,6 +410,24 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         fit: Vec<String>,
     },
+    /// What a participant (`participant`, or the one human) compares the
+    /// working files against, with the commit that revision names now.
+    #[serde(rename = "compare.get")]
+    CompareGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    /// Puts a participant into a compare with Git revision `rev`, or takes
+    /// it out (`off`): `participant`, else the one human, else the caller.
+    #[serde(rename = "compare.set")]
+    CompareSet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        off: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
     /// Highlights entities for everyone to see, replacing the caller's
     /// highlight of the same style and label.
     #[serde(rename = "highlight.set")]
@@ -726,6 +744,16 @@ mod tests {
                 participant: None,
             },
             Request::ParticipantList {},
+            Request::CompareSet {
+                rev: Some("HEAD~1".into()),
+                off: false,
+                participant: Some("p-00000001".into()),
+            },
+            Request::CompareSet {
+                rev: None,
+                off: true,
+                participant: None,
+            },
         ];
         for (i, r) in reqs.into_iter().enumerate() {
             let line = rpc_request(i as u64, &r);

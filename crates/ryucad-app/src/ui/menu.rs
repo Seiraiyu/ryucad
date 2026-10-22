@@ -142,6 +142,26 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened, recent: &[PathBuf]) -> Option<Acti
             if ui.selectable_label(sketches, "Sketches").clicked() {
                 o.ws.set_config("display.sketches", json!(!sketches));
             }
+            ui.separator();
+            let rev = o.ws.compare.as_ref().map(|c| c.rev.clone());
+            if ui
+                .add_enabled(
+                    rev.as_deref() != Some("HEAD"),
+                    egui::Button::new("Compare with HEAD"),
+                )
+                .clicked()
+            {
+                o.ws.set_compare(Some("HEAD".to_owned()));
+            }
+            if ui.button("Compare with…").clicked() {
+                o.compare_with = Some(String::new());
+            }
+            if ui
+                .add_enabled(rev.is_some(), egui::Button::new("Stop comparing"))
+                .clicked()
+            {
+                o.ws.set_compare(None);
+            }
         });
         ui.menu_button("Project", |ui| {
             if ui.button("Settings…").clicked() {

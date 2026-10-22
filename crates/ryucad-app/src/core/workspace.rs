@@ -2,8 +2,10 @@
 //! up to date from answers and notifications.
 
 use crate::core::activity::{Activity, LOADED};
+use crate::core::compare::Compare;
 use crate::core::edit::{DimForm, Form};
 use crate::core::link::{Event, Link, Wake};
+use crate::core::merge::Merge;
 use crate::core::model::{BodyKey, Model, Part};
 use crate::core::params::Params;
 use crate::core::people::{People, Person};
@@ -45,6 +47,13 @@ enum Pending {
     Activity,
     History,
     Config,
+    /// The diff of a compare, the `n`th asked for.
+    Compare(u64),
+    /// A ghost's mesh, asked for at this hash.
+    Ghost(BodyKey, String),
+    /// The merge Git is in, if any.
+    Merge,
+    Resolve,
     Doctor,
     /// Only a failure matters.
     Quiet,
@@ -107,6 +116,17 @@ pub struct Workspace {
     pub activity: Activity,
     /// The project's Git history (`history.log`), once asked for.
     pub history: Option<Value>,
+    /// This window's compare with a Git revision, while it is in one: it
+    /// follows the window's participant's compare state.
+    pub compare: Option<Compare>,
+    /// How many diffs were asked for, and whether one is on its way; one
+    /// asked for meanwhile waits for it (`compare_again`).
+    compare_asked: u64,
+    compare_waiting: bool,
+    compare_again: bool,
+    /// The merge Git is in the middle of, while it is in one: what is left
+    /// to settle.
+    pub merge: Option<Merge>,
     pub settings: Settings,
     /// The last doctor report, once asked for.
     pub doctor: Option<Value>,
@@ -157,6 +177,11 @@ impl Workspace {
             params_part: None,
             activity: Activity::default(),
             history: None,
+            compare: None,
+            compare_asked: 0,
+            compare_waiting: false,
+            compare_again: false,
+            merge: None,
             settings: Settings::default(),
             doctor: None,
             raised: false,
@@ -188,6 +213,7 @@ impl Workspace {
         };
         self.send(log, Pending::Activity);
         self.load_settings();
+        self.send(Request::MergeStatus {}, Pending::Merge);
     }
 
     fn load_settings(&mut self) {
@@ -244,6 +270,92 @@ impl Workspace {
             limit: Some(100),
         };
         self.send(req, Pending::History);
+    }
+
+    /// Settles a merge conflict by `choice` (`ours`, `theirs`, or `repair`
+    /// with `repair`), against the revision of its part the window last
+    /// saw. The answer brings the new status; a failure is kept in the
+    /// merge's `failed`.
+    pub fn resolve(&mut self, conflict: &str, choice: &str, repair: Option<&str>) {
+        let Some(m) = &mut self.merge else { return };
+        let Some(c) = m.conflict(conflict) else {
+            return;
+        };
+        let req = crate::core::merge::resolution(c, choice, repair, &self.model.parts);
+        m.resolving = true;
+        m.failed = None;
+        self.send(req, Pending::Resolve);
+    }
+
+    /// Puts this window into a compare with `rev`, or (with `None`) out of
+    /// one, through `compare.set`: the compare starts when the session
+    /// says so, as one an agent starts does.
+    pub fn set_compare(&mut self, rev: Option<String>) {
+        let req = Request::CompareSet {
+            off: rev.is_none(),
+            rev,
+            participant: Some(self.link.participant.clone()),
+        };
+        self.send(req, Pending::Quiet);
+    }
+
+    /// Starts, changes or ends the compare to match this window's
+    /// participant.
+    fn follow_compare(&mut self) {
+        let want = self.myself().and_then(|m| m.compare.clone());
+        match (&self.compare, want) {
+            (Some(c), Some(w)) if c.rev == w => {}
+            (_, Some(w)) => {
+                self.compare = Some(Compare::new(&w));
+                self.model.generation += 1;
+                self.ask_diff();
+            }
+            (Some(_), None) => {
+                self.compare = None;
+                self.model.generation += 1;
+            }
+            (None, None) => {}
+        }
+    }
+
+    /// Asks for the compare's diff, from its revision to the working
+    /// files; with one on its way, once that one comes.
+    fn ask_diff(&mut self) {
+        let Some(c) = &self.compare else { return };
+        if self.compare_waiting {
+            self.compare_again = true;
+            return;
+        }
+        let req = Request::Diff {
+            from: Some(c.rev.clone()),
+            to: None,
+            part: None,
+            model: true,
+            positions: false,
+            all: false,
+        };
+        self.compare_asked += 1;
+        self.compare_waiting = true;
+        self.compare_again = false;
+        let n = self.compare_asked;
+        self.send(req, Pending::Compare(n));
+    }
+
+    /// Fetches the ghosts the compare wants and doesn't have, one body
+    /// per request, at the commit the diff was made from.
+    fn fetch_ghosts(&mut self) {
+        let Some(c) = &mut self.compare else { return };
+        let rev = c.commit.clone().unwrap_or_else(|| c.rev.clone());
+        for (key, hash) in c.ask() {
+            let req = Request::MeshGet {
+                part: key.0.clone(),
+                feature: Some(key.1.clone()),
+                quality: None,
+                transfer: Some(Transfer::Binary),
+                rev: Some(rev.clone()),
+            };
+            self.send(req, Pending::Ghost(key, hash));
+        }
     }
 
     fn send(&mut self, req: Request, why: Pending) {
@@ -489,6 +601,11 @@ impl Workspace {
             self.following = None;
         }
         self.load();
+        // A new session knows nothing of this window's compare either.
+        if let Some(rev) = self.compare.as_ref().map(|c| c.rev.clone()) {
+            self.set_compare(Some(rev));
+            self.ask_diff();
+        }
         // Panels asked for whose answers were lost are asked for again.
         if let Some(part) = self.params_part.clone()
             && self.params.is_none()
@@ -578,6 +695,10 @@ impl Workspace {
                 }
                 self.model.asked.clear();
                 self.model.sketches_asked.clear();
+                self.compare_waiting = false;
+                if let Some(c) = &mut self.compare {
+                    c.asked.clear();
+                }
                 self.retry = Some(Retry {
                     at: Instant::now() + RETRY_FIRST,
                     delay: RETRY_FIRST,
@@ -638,7 +759,72 @@ impl Workspace {
                 };
                 self.part_changed(&report);
             }
-            (Pending::People, Ok(a)) => self.people.reset(&a.result["participants"]),
+            (Pending::People, Ok(a)) => {
+                self.people.reset(&a.result["participants"]);
+                self.follow_compare();
+            }
+            (Pending::Compare(n), r) => {
+                if n == self.compare_asked {
+                    self.compare_waiting = false;
+                }
+                if let Some(c) = self.compare.as_mut().filter(|_| n == self.compare_asked) {
+                    match r {
+                        Ok(a) => c.take_diff(&a.result),
+                        Err(e) => c.failed(e),
+                    }
+                    self.model.generation += 1;
+                    self.fetch_ghosts();
+                }
+                if std::mem::take(&mut self.compare_again) {
+                    self.ask_diff();
+                }
+            }
+            (Pending::Merge, Ok(a)) => {
+                // A failure read again after keeps saying why.
+                let failed = self.merge.as_mut().and_then(|m| m.failed.take());
+                let mut m = Merge::of(a.result);
+                m.failed = failed;
+                self.merge = Some(m);
+            }
+            // No merge: nothing to show.
+            (Pending::Merge, Err(e)) if matches!(e.code, Code::NotMerging | Code::NotAGitRepo) => {
+                self.merge = None;
+            }
+            (Pending::Merge, Err(e)) => self.merge = Some(Merge::broken(e)),
+            (Pending::Resolve, Ok(a)) => {
+                if let Some(m) = &mut self.merge {
+                    m.resolving = false;
+                    m.status = a.result["status"].clone();
+                }
+            }
+            (Pending::Resolve, Err(e)) => {
+                // Changed underneath: read the status again.
+                let again = matches!(e.code, Code::Conflict | Code::RepairConflict);
+                if let Some(m) = &mut self.merge {
+                    m.resolving = false;
+                    m.failed = Some(e);
+                }
+                if again {
+                    self.send(Request::MergeStatus {}, Pending::Merge);
+                }
+            }
+            (Pending::Ghost(key, hash), a) => {
+                let Some(c) = &mut self.compare else { return };
+                c.answered(&key, &hash);
+                match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
+                    Ok(Some(Ok(bodies))) => {
+                        for b in bodies {
+                            if c.take_ghost(&key.0, b) {
+                                self.model.generation += 1;
+                            }
+                        }
+                    }
+                    Ok(Some(Err(e))) | Err(e) => self.fail(e),
+                    Ok(None) => {
+                        self.fail(Error::new(Code::Daemon, "a mesh came without its bytes"));
+                    }
+                }
+            }
             (Pending::Quiet, Ok(_)) => {}
             (Pending::Activity, Ok(a)) => self.activity.reset(&a.result["entries"]),
             (Pending::History, Ok(a)) => self.history = Some(a.result),
@@ -792,6 +978,8 @@ impl Workspace {
                 for id in params["removed"].as_array().into_iter().flatten() {
                     self.model.remove_part(id.as_str().unwrap_or_default());
                 }
+                // What the working files differ by changed with them.
+                self.ask_diff();
             }
             "project.changed" => {
                 // Parts came or went: damage may have too.
@@ -817,15 +1005,30 @@ impl Workspace {
                     for part in self.model.clear_sketches() {
                         self.fetch_sketches(&part);
                     }
+                    if let Some(c) = &mut self.compare {
+                        c.clear_ghosts();
+                        self.fetch_ghosts();
+                    }
                 }
                 if params["scope"] == "project" {
                     self.load_settings();
                 }
             }
+            "merge.changed" => {
+                self.merge = match (params["merging"].as_bool(), params.get("status")) {
+                    (Some(true), Some(s)) => Some(Merge::of(s.clone())),
+                    (Some(true), None) => Some(Merge::broken(
+                        serde_json::from_value(params["error"].clone())
+                            .unwrap_or_else(|_| Error::new(Code::Internal, "no merge status")),
+                    )),
+                    _ => None,
+                };
+            }
             "activity.appended" => self.activity.appended(params),
             "app.open" => self.raised = true,
             "participant.changed" => {
                 self.people.changed(params);
+                self.follow_compare();
                 // Following someone who left ends.
                 if self
                     .following

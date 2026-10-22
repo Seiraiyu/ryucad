@@ -8,10 +8,12 @@ mod common;
 
 use common::{Project, gpu, ryucad};
 use ryucad::view::{self, StandardView};
+use ryucad_app::core::compare::FaceMark;
 use ryucad_app::core::nav::Projector;
 use ryucad_app::core::pick::Picker;
 use ryucad_app::core::workspace::Workspace;
 use ryucad_app::ui::scene::{self, DrawList, Scene, linear, theme};
+use ryucad_app::ui::style;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -80,9 +82,75 @@ fn the_viewport_looks_as_it_did() {
     };
     scene.render(&device, &queue, [W, H], &list);
     let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots/viewport-lavapipe.png");
+    looks_as_it_did(&adapter, &px, "viewport");
+}
+
+/// A compare with `HEAD`: the box made longer is painted where it
+/// changed and grew, and the cylinder taken off it stands as a ghost.
+#[test]
+fn a_compare_looks_as_it_did() {
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::named("snapshot").with_part().committed();
+    p.ok(&["feature", "edit", "p", "base", "--param", "x=30"]);
+    p.ok(&["feature", "delete", "p", "boss"]);
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    p.ok(&["compare", "HEAD"]);
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| {
+        ws.idle()
+            && ws.model.meshes.len() == 1
+            && ws
+                .compare
+                .as_ref()
+                .is_some_and(|c| c.loaded && c.ghosts.len() == 2)
+    }));
+    let c = ws.compare.as_ref().unwrap();
+    let picker = Picker::new(&ws.model);
+    let (lo, hi) = ([-0.004, -0.004, 0.0], [0.03, 0.01, 0.013]);
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Iso, view::DEFAULT_PROJECTION);
+    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.02);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    scene.sync_ghosts(&device, Some(c));
+    // Painted as the view paints a compare.
+    let mut faces = Vec::new();
+    for (key, marks) in &c.faces {
+        for (name, m) in marks {
+            let r = format!("{}/{}/{name}", key.0, key.1);
+            if let Some(ryucad_app::core::pick::Place::Face(k, i)) = picker.place(&r) {
+                let colour = match m {
+                    FaceMark::New => style::NEW,
+                    FaceMark::Changed => style::CHANGED,
+                };
+                faces.push((k, i, linear(colour)));
+            }
+        }
+    }
+    assert!(!faces.is_empty());
+    let list = DrawList {
+        reference: centre,
+        matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        background: theme::BACKGROUND,
+        light: scene::light(&camera),
+        edges: true,
+        faces: &faces,
+        overlay: &[],
+    };
+    scene.render(&device, &queue, [W, H], &list);
+    let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
+    looks_as_it_did(&adapter, &px, "compare");
+}
+
+/// Compares `px` with `tests/snapshots/<name>-lavapipe.png` on lavapipe,
+/// or only checks something was drawn on other adapters.
+fn looks_as_it_did(adapter: &eframe::wgpu::Adapter, px: &[u8], name: &str) {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/snapshots/{name}-lavapipe.png"));
     if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
-        write_png(&path, &px);
+        write_png(&path, px);
         return;
     }
     let info = adapter.get_info();
@@ -112,10 +180,10 @@ fn the_viewport_looks_as_it_did() {
         .count();
     let limit = (f64::from(W * H) * SHARE) as usize;
     if differ > limit {
-        write_png(&path.with_extension("new.png"), &px);
+        write_png(&path.with_extension("new.png"), px);
     }
     assert!(
         differ <= limit,
-        "{differ} pixels differ (at most {limit}); see viewport-lavapipe.new.png"
+        "{differ} pixels differ (at most {limit}); see {name}-lavapipe.new.png"
     );
 }

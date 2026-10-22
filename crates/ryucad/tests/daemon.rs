@@ -497,6 +497,46 @@ fn camera_highlight_and_status_through_the_cli() {
     cli(&f, &["daemon", "stop"]);
 }
 
+#[test]
+fn an_agent_puts_the_watching_human_into_a_compare() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    let git = |args: &[&str]| {
+        let st = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(&f.root)
+            .output()
+            .unwrap();
+        assert!(st.status.success(), "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "start"]);
+    let w = Watch::new(&f, &["participants"]);
+    let r = cli(&f, &["compare", "HEAD"]);
+    assert_eq!(r["result"]["participant"], w.me.as_str(), "{r}");
+    let p = w.next("participant.changed");
+    assert_eq!(
+        p["participant"]["compare"],
+        serde_json::json!({"rev": "HEAD"})
+    );
+    let r = cli(&f, &["compare"]);
+    assert_eq!(r["result"]["compare"]["rev"], "HEAD");
+    assert_eq!(r["result"]["compare"]["commit"].as_str().unwrap().len(), 40);
+    let r = cli(&f, &["compare", "nowhere"]);
+    assert_eq!(r["error"]["code"], "rev_not_found");
+    let r = cli(&f, &["compare", "HEAD", "--off"]);
+    assert_eq!(r["error"]["code"], "usage");
+    let r = cli(&f, &["compare", "--off"]);
+    assert_eq!(r["result"]["compare"], Value::Null);
+    let p = w.next("participant.changed");
+    assert_eq!(p["participant"]["compare"], Value::Null);
+    let r = cli(&f, &["--no-daemon", "compare", "HEAD"]);
+    assert_eq!(r["error"]["code"], "no_live_session");
+    cli(&f, &["daemon", "stop"]);
+}
+
 /// A human attached and subscribed: notifications arrive on `rx`.
 struct Watch {
     me: String,
