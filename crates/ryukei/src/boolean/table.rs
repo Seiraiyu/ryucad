@@ -820,9 +820,9 @@ fn fail(e: Failure, a: FaceRef, b: FaceRef) -> Fail {
     }
 }
 
-/// Whether a face's surface has an implicit form: only those take part
-/// in edge hits and touches. Faces on other surfaces must be certified
-/// apart by [`face_face`], so nothing can hit them.
+/// Whether a face's surface has an implicit form, or is a pipe: only
+/// those take part in edge hits and touches. Faces on other surfaces must
+/// be certified apart by [`face_face`], so nothing can hit them.
 fn analytic(ops: &[Body], f: FaceRef) -> bool {
     let b = &ops[f.op];
     matches!(
@@ -832,6 +832,7 @@ fn analytic(ops: &[Body], f: FaceRef) -> bool {
             | crate::geom::Surface::Cone(_)
             | crate::geom::Surface::Sphere(_)
             | crate::geom::Surface::Torus(_)
+            | crate::geom::Surface::Pipe(_)
     )
 }
 

@@ -13,11 +13,13 @@
 //! in the first face's parameter plane ([`crossings`]), and the pieces
 //! inside or along the other face are the rims of the overlap.
 //!
-//! A face on a surface that is not analytic may take part only if it is
+//! A pipe face meets an analytic face as an analytic one does
+//! ([`surface_surface`] and [`curve_surface`] take pipes). Any other face
+//! on a surface that is not analytic may take part only if it is
 //! certified apart from the other face: the analytic surface's implicit
 //! form must have one certified sign on every Bézier patch of the other
-//! surface inside the region. Otherwise the pair is
-//! [`Failure::Unsupported`].
+//! surface inside the region. Otherwise (two pipes among them) the pair
+//! is [`Failure::Unsupported`].
 
 use super::Failure;
 use super::cs::{CurveHit, curve_surface};
@@ -106,9 +108,11 @@ pub fn face_face(a: (&Body, FaceId), b: (&Body, FaceId)) -> Result<FaceMeet, Fai
     let Some(region) = overlap(&ba, &bb, slack) else {
         return Ok(FaceMeet::apart());
     };
-    let (ia, ib) = (Implicit::of(sa), Implicit::of(sb));
-    match (ia, ib) {
+    let pipe = |s: &Surface| matches!(s, Surface::Pipe(_));
+    match (Implicit::of(sa), Implicit::of(sb)) {
         (Some(_), Some(_)) => {}
+        (Some(_), None) if pipe(sb) => {}
+        (None, Some(_)) if pipe(sa) => {}
         (Some(i), None) => return certified_apart(&i, b, &region),
         (None, Some(i)) => return certified_apart(&i, a, &region),
         (None, None) => return Err(Failure::Unsupported),

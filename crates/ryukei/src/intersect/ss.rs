@@ -2,7 +2,9 @@
 //!
 //! A coincident pair is reported as such; a pair with a closed form
 //! ([`super::ss_exact`]) gets exact curves; any other analytic pair is
-//! traced ([`super::ss_trace`]) and fitted ([`super::fit`]). Every branch
+//! traced ([`super::ss_trace`]) and fitted ([`super::fit`]), and a pipe
+//! and an analytic surface are traced in the pipe's parameter plane
+//! ([`super::pipe_trace`]). Every branch
 //! comes with its pcurve on each surface: an exact one where
 //! [`crate::pcurve::exact`] finds it, otherwise one fitted by the curve's
 //! parameter with a certified bound, which the branch's tolerance covers.
@@ -66,10 +68,15 @@ pub(crate) struct Raw {
 /// the region where they are unbounded, and closed curves that meet it
 /// are returned whole.
 ///
-/// Fails with `Unsupported` unless both surfaces are analytic, and with
-/// `Uncertain` where a branch's topology, a singular point or a fit could
-/// not be certified.
+/// A pipe and an analytic surface are met by [`pipe_surface`].
+///
+/// Fails with `Unsupported` unless both surfaces are analytic or one is a
+/// pipe and the other analytic, and with `Uncertain` where a branch's
+/// topology, a singular point or a fit could not be certified.
 pub fn surface_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
+    if matches!(a, Surface::Pipe(_)) || matches!(b, Surface::Pipe(_)) {
+        return pipe_surface(a, b, region);
+    }
     if Implicit::of(a).is_none() || Implicit::of(b).is_none() {
         return Err(Failure::Unsupported);
     }
