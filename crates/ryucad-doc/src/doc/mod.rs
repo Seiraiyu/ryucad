@@ -3,9 +3,13 @@
 
 pub mod canonical;
 pub mod files;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod fixtures;
 pub mod id;
 pub mod project;
 pub mod reference;
 pub mod sketch;
+pub mod solid;
 pub mod source;
 pub mod sweep;

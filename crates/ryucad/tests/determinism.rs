@@ -2,8 +2,9 @@
 //! platform and CPU level must reproduce `tests/golden/rebuild.txt`:
 //! expressions, rebuilt bodies, display meshes, the pixels of renders, and
 //! solved sketches and the bodies swept from them, features that refer
-//! to other features' faces, edges and vertices, how sketches are drawn,
-//! what diffs say, and what merges make. After
+//! to other features' faces, edges and vertices, solids that features
+//! join, cut and intersect, how sketches are drawn, what diffs say, what
+//! merges make, and the content hashes release records name. After
 //! a deliberate change, regenerate with
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
@@ -143,6 +144,7 @@ fn rebuild_section(golden: &mut Golden) {
             ty,
             params,
             placement: random_placement(&mut g),
+            combine: ryucad::doc::solid::Combine::NEW,
         });
         order.push(id.clone());
         features.insert(id, Ok(feature));
@@ -372,6 +374,125 @@ fn sweeps_section(golden: &mut Golden) {
     let meshes =
         ryucad::server::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
     s.str(&format!("{:x}", md(&ryucad::mesh::encode(&meshes))));
+}
+
+/// A millimetre part of solids: a plate drilled through all by a
+/// sketch's two circles, a boss joined to it, a cross bore through the
+/// boss, and a second solid (a block cut by a sphere) united with it.
+fn solid() -> (tempfile::TempDir, ryucad::session::Session) {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    call(&mut s, "part.create", json!({"part": "so"}));
+    call(
+        &mut s,
+        "param.set",
+        json!({"part": "so", "parameters": {"t": "7.9 mm", "bore": "3.1 mm"}}),
+    );
+    let add = |s: &mut ryucad::session::Session, f: serde_json::Value| {
+        let mut f = f;
+        f["part"] = json!("so");
+        call(s, "feature.add", f);
+    };
+    add(
+        &mut s,
+        json!({"type": "box", "id": "plate", "params": {"x": "41.3 mm", "y": "28.7 mm", "z": "t"}}),
+    );
+    add(&mut s, json!({"type": "sketch", "id": "holes"}));
+    call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "so", "sketch": "holes", "ops": [
+            {"op": "add", "type": "point", "at": [7.3, 6.1]},
+            {"op": "add", "type": "point", "at": [33.9, 21.7]},
+            {"op": "add", "type": "fix", "a": "p1"},
+            {"op": "add", "type": "fix", "a": "p2"},
+            {"op": "add", "type": "circle", "center": "p1", "r": 2.2},
+            {"op": "add", "type": "circle", "center": "p2", "r": 2.2},
+            {"op": "add", "type": "radius", "a": "ci1", "value": "2.2 mm"},
+            {"op": "add", "type": "equal", "a": "ci1", "b": "ci2"}
+        ]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "extrude", "id": "drill", "sketch": "holes", "operation": "cut",
+               "extent": {"type": "through_all"}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "cylinder", "id": "boss", "operation": "join",
+               "params": {"radius": "6.35 mm", "height": "11.2 mm"},
+               "placement": {"origin": ["20.6 mm", "14.3 mm", "t"]}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "cylinder", "id": "cross", "operation": "cut",
+               "params": {"radius": "bore / 2", "height": "30 mm"},
+               "placement": {"origin": ["5.6 mm", "14.3 mm", "t + 5.5 mm"],
+                             "z": [1, 0, 0], "x": [0, 1, 0]}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "box", "id": "block", "params": {"x": "9 mm", "y": "9 mm", "z": "t"},
+               "placement": {"origin": ["41.3 mm", "9.1 mm", 0]}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "sphere", "id": "dimple", "operation": "cut", "targets": ["block"],
+               "params": {"radius": "3.3 mm"},
+               "placement": {"origin": ["45.8 mm", "13.6 mm", "t"]}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "boolean", "id": "whole", "op": "unite", "target": "plate",
+               "tools": ["block"]}),
+    );
+    (dir, s)
+}
+
+/// Every state of every solid bit for bit, the part's hash, and the
+/// meshes of the solids as they show.
+fn solids_section(golden: &mut Golden) {
+    let mut s = golden.section("solids");
+    let (_dir, mut session) = solid();
+    let part = Id::parse("so", "part").unwrap();
+    let result = session.rebuilt(&part).unwrap().clone();
+    assert_eq!(result.failed(), 0, "{:?}", result.features);
+    for (id, o) in &result.features {
+        let o = o.as_ref().unwrap();
+        s.str(id.as_str());
+        for (solid, b) in o.solids() {
+            s.str(solid.as_str());
+            s.str(&b.body.dump());
+        }
+        if o.solids().is_empty() {
+            s.str(o.hash());
+        }
+    }
+    s.str(&result.hash);
+    let meshes =
+        ryucad::server::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
+    assert_eq!(meshes.len(), 1);
+    s.str(&format!("{:x}", md(&ryucad::mesh::encode(&meshes))));
+}
+
+#[test]
+fn solids_are_sound() {
+    let (_dir, mut session) = solid();
+    let part = Id::parse("so", "part").unwrap();
+    let p = session.project().part(&part).unwrap().clone();
+    let result = session.rebuilt(&part).unwrap();
+    let solids = ryucad::solid::Solids::of(&p);
+    for shown in result.shown(&solids) {
+        let (f, b) = shown.state.unwrap();
+        assert!(ryukei::check::check(&b.body).is_empty(), "{f}");
+        assert_eq!(ryukei::check::check_intersections(&b.body), [], "{f}");
+    }
 }
 
 /// How the swept part's sketch is drawn: `sketch.get` at each quality,
@@ -633,7 +754,8 @@ fn diff_section(golden: &mut Golden) {
     let (dir, mut session) = referenced();
     let part = Id::parse("rf", "part").unwrap();
     let built = |session: &mut ryucad::session::Session| {
-        let r = session.rebuilt(&part).unwrap().features.clone();
+        let p = session.project().part(&part).unwrap().clone();
+        let r = ryucad::diff::Built::of(&p, session.rebuilt(&part).unwrap());
         [("rf".to_owned(), r)].into_iter().collect()
     };
     let before = ryucad::activity::snapshot(dir.path()).unwrap();
@@ -856,6 +978,56 @@ fn merge_section(golden: &mut Golden) {
     }
 }
 
+/// Content hashes of projects of random primitives, units and parameters,
+/// written as ryucad writes them: what a release record names must be the
+/// same everywhere.
+fn pdm_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("pdm");
+    let text = |v: &serde_json::Value| ryucad::doc::canonical::to_string(v).into_bytes();
+    let mut g = Lcg::new(0x7064_6d30);
+    for _ in 0..64 {
+        let unit = unit(&mut g);
+        let mut files = ryucad::activity::Files::new();
+        files.insert(
+            "ryucad.json".into(),
+            text(&ryucad::doc::files::Manifest::new(unit).to_json()),
+        );
+        let mut order = Vec::new();
+        for i in 0..1 + g.next_u64() % 4 {
+            let ty = PrimitiveType::ALL[(g.next_u64() % 5) as usize];
+            let params = ty
+                .required()
+                .iter()
+                .map(|n| {
+                    let q = format!("{} {}", decimal(&mut g), unit.as_str());
+                    (n.to_string(), Quantity::parse(&q, unit).unwrap())
+                })
+                .collect();
+            let f = Feature::Primitive(Primitive {
+                ty,
+                params,
+                placement: random_placement(&mut g),
+                combine: ryucad::doc::solid::Combine::NEW,
+            });
+            let id = format!("f{i}");
+            files.insert(format!("parts/p/features/{id}.json"), text(&f.to_json()));
+            order.push(Id::parse(&id, "feature").unwrap());
+        }
+        files.insert(
+            "parts/p/part.json".into(),
+            text(&PartFile { features: order }.to_json()),
+        );
+        if g.next_u64().is_multiple_of(2) {
+            let p = json!({"format": 1, "kind": "ryucad.parameters",
+                           "parameters": {"w": format!("{} mm", decimal(&mut g))}});
+            files.insert("parts/p/parameters.json".into(), text(&p));
+        }
+        let part = Id::parse("p", "part").unwrap();
+        s.str(&ryupdm::content::hash(&files, &part).unwrap());
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -870,8 +1042,10 @@ fn determinism() {
     render_section(&mut golden);
     sweeps_section(&mut golden);
     references_section(&mut golden);
+    solids_section(&mut golden);
     sketch_drawing_section(&mut golden);
     diff_section(&mut golden);
     merge_section(&mut golden);
+    pdm_section(&mut golden);
     golden.finish();
 }

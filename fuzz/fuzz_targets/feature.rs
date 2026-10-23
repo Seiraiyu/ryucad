@@ -1,11 +1,12 @@
 //! Feature files from bytes. Any text must either load to a feature that
 //! writes back canonically and reads back equal, or give a structured
-//! error. Loaded, it is built as feature `f` of a part after a box `b`
-//! and a rectangle sketch `s`, so its references resolve against real
-//! faces, edges and vertices: building must succeed or give a structured
-//! error, a body must pass the checks, and a sketch that solves must solve
-//! to finite positions that are current: solving them again, in the same
-//! context, changes nothing. Any panic is a bug.
+//! error. Loaded, it is built as feature `f` of a part after boxes `b`
+//! and `c` and a rectangle sketch `s`, so its references resolve against
+//! real faces, edges and vertices and its operations act on real solids:
+//! building must succeed or give a structured error, every body it leaves
+//! must pass the checks, and a sketch that solves must solve to finite
+//! positions that are current: solving them again, in the same context,
+//! changes nothing. Any panic is a bug.
 
 #![no_main]
 
@@ -25,7 +26,7 @@ fn id(s: &str) -> Id {
     Id::parse(s, "feature").unwrap()
 }
 
-/// The box `b` and the sketch `s` every fuzzed feature follows.
+/// The boxes `b` and `c` and the sketch `s` every fuzzed feature follows.
 fn base() -> &'static [(Id, Feature)] {
     static BASE: OnceLock<Vec<(Id, Feature)>> = OnceLock::new();
     BASE.get_or_init(|| {
@@ -44,10 +45,14 @@ fn base() -> &'static [(Id, Feature)] {
                         "l2": {"type": "line", "start": "p2", "end": "p3"},
                         "l3": {"type": "line", "start": "p3", "end": "p4"},
                         "l4": {"type": "line", "start": "p4", "end": "p1"}}}"#;
+        let c = r#"{"format": 1, "kind": "ryucad.feature", "type": "box",
+                    "params": {"x": "8 mm", "y": "8 mm", "z": "8 mm"},
+                    "placement": {"origin": ["16 mm", "4 mm", "2 mm"],
+                                  "x": [1, 0, 0], "z": [0, 0, 1]}}"#;
         let read = |t: &str| {
             Feature::from_json(&canonical::parse(t).unwrap(), Unit::Mm, &Env::empty()).unwrap()
         };
-        vec![(id("b"), read(b)), (id("s"), read(s))]
+        vec![(id("b"), read(b)), (id("c"), read(c)), (id("s"), read(s))]
     })
 }
 
@@ -61,7 +66,7 @@ fn part(f: Feature) -> Part {
     Part {
         id: Id::parse("fz", "part").unwrap(),
         file: Ok(PartFile {
-            features: vec![id("b"), id("s"), id("f")],
+            features: vec![id("b"), id("c"), id("s"), id("f")],
         }),
         parameters: None,
         env: Env::empty(),
@@ -96,7 +101,11 @@ fuzz_target!(|data: &[u8]| {
     let r = rebuild_part(&part);
     let me = id("f");
     match r.output(&me) {
-        Some(Output::Body(b)) => assert!(ryukei::check::check(&b.body).is_empty()),
+        Some(Output::Solids(m)) => {
+            for (_, b) in &m.solids {
+                assert!(ryukei::check::check(&b.body).is_empty());
+            }
+        }
         Some(Output::Sketch(solved)) => {
             for e in solved.sketch.entities.values() {
                 match e.geometry {

@@ -1,0 +1,22 @@
+[package]
+name = "ryupdm"
+description = "Local product data management for ryucad projects: part properties, revisions and releases"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The content hash, as ryucad hashes its files.
+blake3 = { version = "1", features = ["pure"] }
+# Release history and tags, read as ryucad reads Git.
+gix = { version = "0.89", default-features = false, features = ["sha1", "revision"] }
+# Fresh project IDs.
+getrandom = "0.3"
+# Part number patterns: Rust's regex syntax, ASCII classes (`\d` is 0-9).
+regex-lite = "0.1"
+ryucad-doc = { path = "../ryucad-doc" }
+serde = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 /// The project's attributes file, beside its manifest; its patterns are
 /// relative to the project folder.
-pub const ATTRIBUTES: &str = ".gitattributes";
+pub use crate::doc::project::ATTRIBUTES;
 
 /// The lines ryucad needs in it: its own files and ryupdm's. `eol=lf`
 /// keeps them canonical in every checkout: Git for Windows would otherwise

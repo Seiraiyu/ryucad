@@ -2,9 +2,10 @@
 //! parameters and a feature. Each reads from and writes to a JSON value;
 //! the file system is [`super::project`]'s business.
 
-use super::id::Id;
+use super::id::{Id, ProjectId};
 use super::reference::Reference;
 use super::sketch::Sketch;
+use super::solid::{Boolean, Combine};
 use super::sweep::{Extrude, Revolve};
 use crate::error::{Code, Error, Result};
 use crate::expr::{self, Env, Expr};
@@ -15,9 +16,14 @@ use std::collections::BTreeMap;
 /// The format version of the manifest, part and parameters files.
 pub const FORMAT: u64 = 1;
 
-/// The newest feature format: 2 adds expressions. A feature is written at
-/// the lowest format that holds it, so one with only literals stays 1.
-pub const FEATURE_FORMAT: u64 = 2;
+/// The newest manifest format: 2 adds the project's ID. A manifest without
+/// one stays at 1, so older builds still read projects that don't use PDM.
+pub const MANIFEST_FORMAT: u64 = 2;
+
+/// The newest feature format: 2 adds expressions, sketches and sweeps, 3
+/// operations on solids. A feature is written at the lowest format that
+/// holds it, so one with only literals stays 1.
+pub const FEATURE_FORMAT: u64 = 3;
 
 pub const PROJECT_KIND: &str = "ryucad.project";
 pub const PART_KIND: &str = "ryucad.part";
@@ -28,6 +34,8 @@ pub const FEATURE_KIND: &str = "ryucad.feature";
 #[derive(Clone, Debug, PartialEq)]
 pub struct Manifest {
     pub default_unit: Unit,
+    /// The project's identity, from its first PDM write on.
+    pub project: Option<ProjectId>,
 }
 
 /// A part's ordered feature list, `parts/<part>/part.json`.
@@ -60,6 +68,7 @@ pub enum Feature {
     Sketch(Sketch),
     Extrude(Extrude),
     Revolve(Revolve),
+    Boolean(Boolean),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -68,6 +77,8 @@ pub struct Primitive {
     pub ty: PrimitiveType,
     pub params: BTreeMap<String, Quantity>,
     pub placement: Placement,
+    /// A solid of its own, or what it does to others.
+    pub combine: Combine,
 }
 
 /// Where a feature's local frame sits: an origin, an axis `z` and a
@@ -159,12 +170,35 @@ impl Placement {
 }
 
 impl Manifest {
+    /// A manifest with no project ID.
+    pub fn new(default_unit: Unit) -> Manifest {
+        Manifest {
+            default_unit,
+            project: None,
+        }
+    }
+
     pub fn to_json(&self) -> Value {
-        json!({"default_unit": self.default_unit, "format": FORMAT, "kind": PROJECT_KIND})
+        let mut v =
+            json!({"default_unit": self.default_unit, "format": FORMAT, "kind": PROJECT_KIND});
+        if let Some(id) = &self.project {
+            v["project"] = json!(id);
+            v["format"] = json!(MANIFEST_FORMAT);
+        }
+        v
     }
 
     pub fn from_json(v: &Value) -> Result<Manifest> {
-        let mut o = header(v, PROJECT_KIND, FORMAT)?;
+        let mut o = header(v, PROJECT_KIND, MANIFEST_FORMAT)?;
+        let project = match o.take_opt("project") {
+            None => None,
+            Some(p) => Some(
+                p.as_str()
+                    .ok_or_else(|| invalid("/project", "project must be a string"))
+                    .and_then(ProjectId::parse)
+                    .map_err(|e| e.with("pointer", "/project"))?,
+            ),
+        };
         let unit = o.take("default_unit")?;
         let default_unit = unit.as_str().and_then(Unit::parse).ok_or_else(|| {
             invalid(
@@ -173,7 +207,10 @@ impl Manifest {
             )
         })?;
         o.finish()?;
-        Ok(Manifest { default_unit })
+        Ok(Manifest {
+            default_unit,
+            project,
+        })
     }
 }
 
@@ -294,22 +331,38 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
     out
 }
 
+/// The lowest manifest format that holds `v`: 2 with a project ID, else 1.
+pub fn manifest_format(v: &Value) -> u64 {
+    if v.get("project").is_some() {
+        MANIFEST_FORMAT
+    } else {
+        FORMAT
+    }
+}
+
 /// The lowest format that holds a feature's JSON, judged from the JSON
-/// alone, as [`Feature::format`] judges a loaded feature: sketches and
-/// sweeps are new in format 2, and a primitive needs it only for an
-/// expression.
+/// alone, as [`Feature::format`] judges a loaded feature: operations on
+/// solids are new in format 3, sketches and sweeps in format 2, and a
+/// primitive needs 2 only for an expression.
 pub fn feature_format(v: &Value) -> u64 {
+    let new = |o: &Value| o.as_str().is_none_or(|o| o == "new");
+    if v.get("targets").is_some()
+        || v.get("operation").is_some_and(|o| !new(o))
+        || v.get("type").and_then(Value::as_str) == Some("boolean")
+    {
+        return 3;
+    }
     if matches!(
         v.get("type").and_then(Value::as_str),
         Some("sketch" | "extrude" | "revolve")
     ) {
-        return FEATURE_FORMAT;
+        return 2;
     }
     let mut v = v.clone();
     let literal = expression_strings(&mut v)
         .into_iter()
         .all(|s| Expr::parse(s).is_ok_and(|e| e.is_literal()));
-    if literal { 1 } else { FEATURE_FORMAT }
+    if literal { 1 } else { 2 }
 }
 
 /// The parameters a feature's JSON names, read from its text alone, so a
@@ -342,7 +395,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean"),
     )
     .with("type", s)
 }
@@ -355,16 +408,21 @@ impl Feature {
             Feature::Sketch(_) => "sketch",
             Feature::Extrude(_) => "extrude",
             Feature::Revolve(_) => "revolve",
+            Feature::Boolean(_) => "boolean",
         }
     }
 
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
+        if self.combine().is_some_and(|c| !c.is_new()) {
+            return 3;
+        }
         match self {
             Feature::Primitive(p) => p.format(),
             Feature::Sketch(s) => s.format(),
             // New in format 2.
             Feature::Extrude(_) | Feature::Revolve(_) => 2,
+            Feature::Boolean(_) => 3,
         }
     }
 
@@ -374,6 +432,7 @@ impl Feature {
             Feature::Sketch(s) => s.fields(),
             Feature::Extrude(e) => e.fields(),
             Feature::Revolve(r) => r.fields(),
+            Feature::Boolean(b) => b.fields(),
         };
         v["format"] = json!(self.format());
         v["kind"] = json!(FEATURE_KIND);
@@ -393,6 +452,7 @@ impl Feature {
             "sketch" => Feature::Sketch(Sketch::from_fields(&mut o, default, env)?),
             "extrude" => Feature::Extrude(Extrude::from_fields(&mut o, default, env)?),
             "revolve" => Feature::Revolve(Revolve::from_fields(&mut o, env)?),
+            "boolean" => Feature::Boolean(Boolean::from_fields(&mut o)?),
             _ => {
                 let ty = PrimitiveType::parse(ty).map_err(|e| e.with("pointer", "/type"))?;
                 Feature::Primitive(Primitive::from_fields(ty, &mut o, default, env)?)
@@ -406,6 +466,36 @@ impl Feature {
     pub fn primitive(&self) -> Option<&Primitive> {
         match self {
             Feature::Primitive(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// What a body-making feature does with its body; `None` for a
+    /// feature that makes none.
+    pub fn combine(&self) -> Option<&Combine> {
+        match self {
+            Feature::Primitive(p) => Some(&p.combine),
+            Feature::Extrude(e) => Some(&e.combine),
+            Feature::Revolve(r) => Some(&r.combine),
+            Feature::Sketch(_) | Feature::Boolean(_) => None,
+        }
+    }
+
+    /// The solids it acts on, by their founders, in the order it names
+    /// them: an operation's targets, or a boolean's target then tools.
+    pub fn targets(&self) -> Vec<&Id> {
+        match self {
+            Feature::Boolean(b) => b.solids().collect(),
+            f => f
+                .combine()
+                .map_or(Vec::new(), |c| c.targets.iter().collect()),
+        }
+    }
+
+    /// The boolean, if it is one.
+    pub fn boolean(&self) -> Option<&Boolean> {
+        match self {
+            Feature::Boolean(b) => Some(b),
             _ => None,
         }
     }
@@ -450,7 +540,7 @@ impl Primitive {
     fn format(&self) -> u64 {
         let literal = self.params.values().all(Quantity::is_literal)
             && self.placement.origin.iter().all(Quantity::is_literal);
-        if literal { 1 } else { FEATURE_FORMAT }
+        if literal { 1 } else { 2 }
     }
 
     /// Its fields in a feature file, besides the header.
@@ -460,7 +550,9 @@ impl Primitive {
             .iter()
             .map(|(k, q)| (k.clone(), Value::String(q.text())))
             .collect();
-        json!({"params": params, "placement": self.placement.to_json()})
+        let mut v = json!({"params": params, "placement": self.placement.to_json()});
+        self.combine.write(&mut v);
+        v
     }
 
     fn from_fields(ty: PrimitiveType, o: &mut Obj, default: Unit, env: &Env) -> Result<Primitive> {
@@ -471,6 +563,7 @@ impl Primitive {
             ty,
             params,
             placement,
+            combine: Combine::from_fields(o)?,
         })
     }
 
@@ -540,13 +633,16 @@ pub fn number(x: f64) -> Value {
     }
 }
 
-pub(crate) fn invalid(at: &str, msg: &str) -> Error {
+/// `invalid_document` at the JSON pointer `at`.
+#[doc(hidden)]
+pub fn invalid(at: &str, msg: &str) -> Error {
     Error::new(Code::InvalidDocument, msg).with("pointer", at)
 }
 
 /// Checks `kind` and `format` (at most `newest`), migrating older formats,
 /// and returns the remaining fields.
-fn header<'a>(v: &'a Value, kind: &str, newest: u64) -> Result<Obj<'a>> {
+#[doc(hidden)]
+pub fn header<'a>(v: &'a Value, kind: &str, newest: u64) -> Result<Obj<'a>> {
     let mut o = Obj::new(v, "")?;
     let k = o.take("kind")?;
     if k.as_str() != Some(kind) {
@@ -583,13 +679,14 @@ fn migrate(format: u64, newest: u64) {
 }
 
 /// The fields of a JSON object, taken one by one so leftovers are errors.
-pub(crate) struct Obj<'a> {
+#[doc(hidden)]
+pub struct Obj<'a> {
     map: BTreeMap<&'a str, &'a Value>,
     at: String,
 }
 
 impl<'a> Obj<'a> {
-    pub(crate) fn new(v: &'a Value, at: &str) -> Result<Obj<'a>> {
+    pub fn new(v: &'a Value, at: &str) -> Result<Obj<'a>> {
         let map = v
             .as_object()
             .ok_or_else(|| invalid(at, "expected a JSON object"))?;
@@ -600,11 +697,11 @@ impl<'a> Obj<'a> {
     }
 
     /// A field that may be left out.
-    pub(crate) fn take_opt(&mut self, key: &str) -> Option<Value> {
+    pub fn take_opt(&mut self, key: &str) -> Option<Value> {
         self.map.remove(key).cloned()
     }
 
-    pub(crate) fn take(&mut self, key: &str) -> Result<Value> {
+    pub fn take(&mut self, key: &str) -> Result<Value> {
         self.map.remove(key).cloned().ok_or_else(|| {
             invalid(
                 &format!("{}/{key}", self.at),
@@ -613,7 +710,7 @@ impl<'a> Obj<'a> {
         })
     }
 
-    pub(crate) fn finish(self) -> Result<()> {
+    pub fn finish(self) -> Result<()> {
         match self.map.keys().next() {
             None => Ok(()),
             Some(k) => Err(invalid(
@@ -664,15 +761,29 @@ mod tests {
 
     #[test]
     fn manifest_round_trip() {
-        let m = Manifest {
-            default_unit: Unit::In,
-        };
+        let mut m = Manifest::new(Unit::In);
         let v = m.to_json();
         assert_eq!(
             v,
             json!({"default_unit": "in", "format": 1, "kind": "ryucad.project"})
         );
         assert_eq!(Manifest::from_json(&v).unwrap(), m);
+        // A project ID needs format 2.
+        m.project = Some(ProjectId::from_bytes([7; 16]));
+        let v = m.to_json();
+        assert_eq!(
+            v,
+            json!({"default_unit": "in", "format": 2, "kind": "ryucad.project",
+                   "project": "07".repeat(16)})
+        );
+        assert_eq!(Manifest::from_json(&v).unwrap(), m);
+        let bad = json!({"default_unit": "in", "format": 2, "kind": "ryucad.project",
+                         "project": "x"});
+        let e = Manifest::from_json(&bad).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["pointer"]),
+            (Code::InvalidId, &json!("/project"))
+        );
     }
 
     #[test]
@@ -745,7 +856,7 @@ mod tests {
                 "/placement/origin/1",
             ),
             ("/extra", json!(1), Code::InvalidDocument, "/extra"),
-            ("/format", json!(3), Code::FormatTooNew, ""),
+            ("/format", json!(4), Code::FormatTooNew, ""),
             (
                 "/kind",
                 json!("ryucad.part"),
@@ -889,6 +1000,30 @@ mod tests {
     }
 
     #[test]
+    fn operations_are_format_3() {
+        let mut v = cylinder_json();
+        v["operation"] = json!("cut");
+        v["targets"] = json!(["b"]);
+        let f = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!(f.targets(), [&Id::parse("b", "feature").unwrap()]);
+        assert_eq!(f.format(), 3);
+        assert_eq!(f.to_json()["format"], 3);
+        assert_eq!(feature_format(&f.to_json()), 3);
+        assert_eq!(
+            Feature::from_json(&f.to_json(), Unit::Ft, &Env::empty()).unwrap(),
+            f
+        );
+        // `new` is the default, and writes nothing.
+        v["operation"] = json!("new");
+        v.as_object_mut().unwrap().remove("targets");
+        let f = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+        assert!(f.combine().unwrap().is_new() && f.targets().is_empty());
+        assert_eq!(f.format(), 1);
+        assert!(f.to_json().get("operation").is_none());
+        assert_eq!(feature_format(&v), 1);
+    }
+
+    #[test]
     fn names_are_read_from_the_text() {
         let mut v = cylinder_json();
         v["params"]["radius"] = json!("wall*2");
@@ -916,16 +1051,13 @@ mod tests {
     fn migration_seam() {
         // Format 1 passes through; anything newer is refused before any
         // other field is read, and format 0 never existed.
-        let mut v = Manifest {
-            default_unit: Unit::Mm,
-        }
-        .to_json();
+        let mut v = Manifest::new(Unit::Mm).to_json();
         assert!(Manifest::from_json(&v).is_ok());
-        v["format"] = json!(2);
+        v["format"] = json!(3);
         v["default_unit"] = json!("parsec");
         let e = Manifest::from_json(&v).unwrap_err();
         assert_eq!(e.code, Code::FormatTooNew);
-        assert_eq!(e.details["supported"], 1);
+        assert_eq!(e.details["supported"], 2);
         v["format"] = json!(0);
         assert_eq!(
             Manifest::from_json(&v).unwrap_err().code,

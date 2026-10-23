@@ -131,6 +131,24 @@ pub struct FeatureFields {
     /// Revolve half the angle each side of the sketch's plane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symmetric: Option<bool>,
+    /// What a primitive, extrude or revolve does with its body: `new`
+    /// (the default), `join`, `cut` or `intersect`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    /// The solids a join, cut or intersect acts on, by their founders; a
+    /// boolean's one target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targets: Option<Vec<String>>,
+    /// How a boolean combines its target with its tools: `unite`,
+    /// `subtract` or `intersect`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<String>,
+    /// A boolean's target solid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// A boolean's tool solids, which it consumes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
 }
 
 impl FeatureFields {
@@ -271,6 +289,78 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// Gives the project its ID and ryupdm's default settings.
+    #[serde(rename = "pdm.init")]
+    PdmInit {},
+    /// ryupdm's settings, with their defaults filled in.
+    #[serde(rename = "pdm.config")]
+    PdmConfig {},
+    /// Changes ryupdm's settings; what isn't given stays.
+    #[serde(rename = "pdm.configure")]
+    PdmConfigure {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revisions: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        release_branch: Option<String>,
+        /// A part number pattern, or `""` for none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pattern: Option<String>,
+        /// Custom property declarations by name; `null` removes one.
+        #[serde(default, skip_serializing_if = "Map::is_empty")]
+        properties: Map<String, Value>,
+        /// Write even if parts' properties stop fitting.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        force: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A part's properties: every core and declared one, set or not.
+    #[serde(rename = "props.get")]
+    PropsGet { part: String },
+    /// Sets a part's properties; `null` clears one.
+    #[serde(rename = "props.set")]
+    PropsSet {
+        part: String,
+        properties: Map<String, Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Writes the record of a part's next revision, as a proposal.
+    #[serde(rename = "release.propose")]
+    ReleasePropose {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Release records (or one part's), where each became official, their
+    /// tags, and each part's state.
+    #[serde(rename = "release.list")]
+    ReleaseList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+    },
+    /// The release checks; with `results`, official releases are rebuilt.
+    #[serde(rename = "release.check")]
+    ReleaseCheck {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        results: bool,
+    },
+    /// Creates the local tag of every official release that has none, and
+    /// moves those that point elsewhere. Logged, not undoable.
+    #[serde(rename = "release.sync")]
+    ReleaseSync {},
+    /// Writes an obsolete record for a part's latest official revision.
+    #[serde(rename = "release.obsolete")]
+    ReleaseObsolete {
+        part: String,
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// Applies a batch of sketch edits with one solve; atomic.
     #[serde(rename = "sketch.edit")]
     SketchEdit {
@@ -328,6 +418,9 @@ pub enum Request {
         /// Also report what changed from this revision, as `diff --model`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         against: Option<String>,
+        /// Also rebuild official releases and compare their bodies.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        results: bool,
     },
     /// What changed between two revisions (`HEAD` and the working files by
     /// default): files as ryucad reads them, and with `model` the bodies.
@@ -609,6 +702,12 @@ impl Request {
                 | Request::ParamSet { .. }
                 | Request::ParamDelete { .. }
                 | Request::ParamRename { .. }
+                | Request::PdmInit { .. }
+                | Request::PdmConfigure { .. }
+                | Request::PropsSet { .. }
+                | Request::ReleasePropose { .. }
+                | Request::ReleaseObsolete { .. }
+                | Request::ReleaseSync { .. }
                 | Request::SketchEdit { .. }
                 | Request::Undo { .. }
                 | Request::Redo { .. }
@@ -753,6 +852,30 @@ mod tests {
                 rev: None,
                 off: true,
                 participant: None,
+            },
+            Request::PdmConfigure {
+                revisions: Some("numeric".into()),
+                release_branch: None,
+                pattern: Some(String::new()),
+                properties: [("finish".to_owned(), Value::Null)].into_iter().collect(),
+                force: true,
+                expected_revision: None,
+            },
+            Request::PropsSet {
+                part: "p".into(),
+                properties: [("number".to_owned(), json!("100"))].into_iter().collect(),
+                expected_revision: Some("r".into()),
+            },
+            Request::ReleasePropose {
+                part: "p".into(),
+                note: Some("why".into()),
+                expected_revision: None,
+            },
+            Request::ReleaseObsolete {
+                part: "p".into(),
+                label: "A".into(),
+                note: None,
+                expected_revision: Some("r".into()),
             },
         ];
         for (i, r) in reqs.into_iter().enumerate() {

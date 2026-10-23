@@ -144,6 +144,27 @@ impl Dim {
         }
     }
 
+    /// The dimension [`Dim::name`] writes as `s`.
+    pub fn parse(s: &str) -> Option<Dim> {
+        if s == "number" {
+            return Some(Dim::NUMBER);
+        }
+        let (mut length, mut angle) = (None, None);
+        for part in s.split('*') {
+            let (name, power) = match part.split_once('^') {
+                Some((n, p)) => (n, p.parse::<i32>().ok().filter(|p| *p != 0 && *p != 1)?),
+                None => (part, 1),
+            };
+            match name {
+                // Length comes first, each at most once.
+                "length" if length.is_none() && angle.is_none() => length = Some(power),
+                "angle" if angle.is_none() => angle = Some(power),
+                _ => return None,
+            }
+        }
+        Dim::new(length.unwrap_or(0), angle.unwrap_or(0))
+    }
+
     /// The key output gives the SI value under: `m`, `rad`, `n`, or `si`
     /// for anything else.
     pub fn key(self) -> &'static str {
@@ -409,6 +430,25 @@ fn number_len(s: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dimensions_read_back_their_names() {
+        for (l, a) in [(0, 0), (1, 0), (0, 1), (2, 0), (3, 0), (1, -1), (-2, 3)] {
+            let d = Dim::new(l, a).unwrap();
+            assert_eq!(Dim::parse(&d.name()), Some(d), "{}", d.name());
+        }
+        for bad in [
+            "",
+            "mass",
+            "angle*length",
+            "length^1",
+            "length^0",
+            "length*length",
+            "length^x",
+        ] {
+            assert_eq!(Dim::parse(bad), None, "{bad}");
+        }
+    }
 
     fn q(s: &str) -> Quantity {
         Quantity::parse(s, Unit::Mm).unwrap()

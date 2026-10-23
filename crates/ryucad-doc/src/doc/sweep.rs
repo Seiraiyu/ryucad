@@ -1,9 +1,10 @@
-//! Extrude and revolve features: a sketch's closed loops swept into solids,
-//! each feature its own body.
+//! Extrude and revolve features: a sketch's closed loops swept into a
+//! solid of their own, or joined to, cut from or intersected with others.
 
 use super::files::{Obj, invalid};
 use super::id::Id;
 use super::reference::Reference;
+use super::solid::{Combine, Operation};
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
 use crate::units::{Field, Quantity, Unit};
@@ -23,6 +24,9 @@ pub enum Extent {
         target: Reference,
         offset: Option<Quantity>,
     },
+    /// From the sketch's plane past everything of the solids it cuts or
+    /// intersects (`both`: each way), however far they reach.
+    ThroughAll { both: bool },
 }
 
 /// An extrude: the sketch's loops along its normal.
@@ -34,6 +38,7 @@ pub struct Extrude {
     pub extent: Extent,
     /// Against the sketch's normal.
     pub reverse: bool,
+    pub combine: Combine,
 }
 
 /// How far a revolve turns.
@@ -63,6 +68,7 @@ pub struct Revolve {
     pub angle: Angle,
     /// Half the angle each side of the sketch's plane.
     pub symmetric: bool,
+    pub combine: Combine,
 }
 
 fn invalid_extent(at: &str, msg: String) -> Error {
@@ -74,7 +80,7 @@ impl Extent {
     pub fn length(&self) -> Option<&Quantity> {
         match self {
             Extent::Blind(q) | Extent::Symmetric(q) => Some(q),
-            Extent::UpTo { .. } => None,
+            Extent::UpTo { .. } | Extent::ThroughAll { .. } => None,
         }
     }
 
@@ -83,6 +89,7 @@ impl Extent {
             Extent::Blind(_) => "blind",
             Extent::Symmetric(_) => "symmetric",
             Extent::UpTo { .. } => "up_to",
+            Extent::ThroughAll { .. } => "through_all",
         }
     }
 
@@ -96,12 +103,18 @@ impl Extent {
                     v["offset"] = json!(q.text());
                 }
             }
+            Extent::ThroughAll { both } => {
+                if *both {
+                    v["both"] = json!(true);
+                }
+            }
         }
         v
     }
 
     /// Reads an extent, its quantities reading `env`: a blind or symmetric
-    /// length greater than zero, or an up-to target and offset.
+    /// length greater than zero, an up-to target and offset, or through
+    /// all.
     pub fn from_json(v: &Value, default: Unit, env: &Env) -> Result<Extent> {
         let mut o = Obj::new(v, "/extent")?;
         let ty = o.take("type")?;
@@ -130,10 +143,17 @@ impl Extent {
                     .map(|v| quantity(&v, "/extent/offset"))
                     .transpose()?,
             },
+            Some("through_all") => Extent::ThroughAll {
+                both: match o.take_opt("both") {
+                    None => false,
+                    Some(Value::Bool(b)) => b,
+                    Some(_) => return Err(invalid("/extent/both", "both is true or false")),
+                },
+            },
             _ => {
                 return Err(invalid_extent(
                     "/extent/type",
-                    format!("an extent's type is blind, symmetric or up_to, not {ty}"),
+                    format!("an extent's type is blind, symmetric, up_to or through_all, not {ty}"),
                 ));
             }
         };
@@ -224,16 +244,32 @@ impl Extrude {
         if self.reverse {
             v["reverse"] = json!(true);
         }
+        self.combine.write(&mut v);
         v
     }
 
-    pub(crate) fn from_fields(o: &mut Obj, default: Unit, env: &Env) -> Result<Extrude> {
-        Ok(Extrude {
+    #[doc(hidden)]
+    pub fn from_fields(o: &mut Obj, default: Unit, env: &Env) -> Result<Extrude> {
+        let e = Extrude {
             sketch: sketch_id(o)?,
             loops: loops_from_json(o.take_opt("loops"))?,
             extent: Extent::from_json(&o.take("extent")?, default, env)?,
             reverse: flag(o, "reverse")?,
-        })
+            combine: Combine::from_fields(o)?,
+        };
+        // Through all reaches past what it cuts or intersects; a new solid
+        // or a join has nothing to reach past.
+        let reaches = matches!(e.combine.operation, Operation::Cut | Operation::Intersect);
+        if matches!(e.extent, Extent::ThroughAll { .. }) && !reaches {
+            return Err(invalid_extent(
+                "/extent/type",
+                format!(
+                    "through_all goes with a cut or an intersect, not {}",
+                    e.combine.operation.as_str()
+                ),
+            ));
+        }
+        Ok(e)
     }
 }
 
@@ -248,10 +284,12 @@ impl Revolve {
         if self.symmetric {
             v["symmetric"] = json!(true);
         }
+        self.combine.write(&mut v);
         v
     }
 
-    pub(crate) fn from_fields(o: &mut Obj, env: &Env) -> Result<Revolve> {
+    #[doc(hidden)]
+    pub fn from_fields(o: &mut Obj, env: &Env) -> Result<Revolve> {
         let axis = match o.take("axis")? {
             Value::String(l) => {
                 RevolveAxis::Line(Id::parse(&l, "entity").map_err(|e| e.with("pointer", "/axis"))?)
@@ -270,6 +308,7 @@ impl Revolve {
             axis,
             angle: Angle::from_json(&o.take("angle")?, env)?,
             symmetric: flag(o, "symmetric")?,
+            combine: Combine::from_fields(o)?,
         })
     }
 }
@@ -357,6 +396,46 @@ mod tests {
         assert_eq!(read(&canonical::parse(&text).unwrap()).unwrap(), f);
         v["extent"]["length"] = json!(3);
         assert_eq!(read(&v).unwrap_err().details["pointer"], "/extent/length");
+    }
+
+    #[test]
+    fn through_all() {
+        let mut v = extrude();
+        v["extent"] = json!({"type": "through_all"});
+        v["operation"] = json!("cut");
+        v["targets"] = json!(["b"]);
+        let f = read(&v).unwrap();
+        let Feature::Extrude(e) = &f else { panic!() };
+        assert_eq!(e.extent, Extent::ThroughAll { both: false });
+        assert!(e.extent.length().is_none());
+        assert_eq!(f.format(), 3);
+        assert_eq!(read(&f.to_json()).unwrap(), f);
+        v["extent"]["both"] = json!(true);
+        let f = read(&v).unwrap();
+        assert_eq!(
+            f.to_json()["extent"],
+            json!({"type": "through_all", "both": true})
+        );
+        v["operation"] = json!("intersect");
+        assert!(read(&v).is_ok());
+        // Nothing to reach past.
+        for op in ["join", "new"] {
+            v["operation"] = json!(op);
+            if op == "new" {
+                v.as_object_mut().unwrap().remove("targets");
+            }
+            let e = read(&v).unwrap_err();
+            assert_eq!(
+                (e.code, e.details["pointer"].as_str()),
+                (Code::InvalidExtent, Some("/extent/type")),
+                "{op}"
+            );
+        }
+        let mut v = extrude();
+        v["extent"] = json!({"type": "through_all", "both": "yes"});
+        v["operation"] = json!("cut");
+        v["targets"] = json!(["b"]);
+        assert_eq!(read(&v).unwrap_err().details["pointer"], "/extent/both");
     }
 
     #[test]

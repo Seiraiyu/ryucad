@@ -658,6 +658,7 @@ mod tests {
             ty: PrimitiveType::Sphere,
             params: [("radius".to_owned(), Quantity::parse(r, Unit::Mm).unwrap())].into(),
             placement: Placement::identity(Unit::Mm),
+            combine: crate::doc::solid::Combine::NEW,
         });
         let id = Id::parse("s", "feature").unwrap();
         let b = build_feature(&id, &id, &f).unwrap();
@@ -766,6 +767,7 @@ mod tests {
             ]
             .into(),
             placement: Placement::identity(Unit::Mm),
+            combine: crate::doc::solid::Combine::NEW,
         });
         let id = Id::parse("c", "feature").unwrap();
         let b = build_feature(&id, &id, &f).unwrap();

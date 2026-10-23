@@ -1,5 +1,6 @@
-//! Part and feature IDs. An ID is a file or directory name and the seed of
-//! every stable name under it, so it must be portable and never change.
+//! Part and feature IDs, and the project's ID. A part or feature ID is a
+//! file or directory name and the seed of every stable name under it, so
+//! it must be portable and never change.
 
 use crate::error::{Code, Error, Result};
 use serde::{Serialize, Serializer};
@@ -72,9 +73,66 @@ impl Serialize for Id {
     }
 }
 
+/// A project's identity: 128 random bits as 32 lowercase hex digits, in
+/// the manifest. It survives moves and renames, and a fork keeps it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProjectId(String);
+
+impl ProjectId {
+    pub fn parse(s: &str) -> Result<ProjectId> {
+        let ok = s.len() == 32
+            && s.bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c));
+        if !ok {
+            return Err(Error::new(
+                Code::InvalidId,
+                format!("bad project ID {s:?}: use 32 lowercase hex digits"),
+            )
+            .with("id", s));
+        }
+        Ok(ProjectId(s.to_owned()))
+    }
+
+    /// The ID for 16 bytes: the caller draws them at random.
+    pub fn from_bytes(bytes: [u8; 16]) -> ProjectId {
+        ProjectId(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ProjectId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Serialize for ProjectId {
+    fn serialize<S: Serializer>(&self, s: S) -> core::result::Result<S::Ok, S::Error> {
+        s.serialize_str(&self.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_ids_are_32_lowercase_hex() {
+        let id = ProjectId::from_bytes([0xab; 16]);
+        assert_eq!(id.as_str(), "ab".repeat(16));
+        assert_eq!(ProjectId::parse(id.as_str()).unwrap(), id);
+        for bad in [
+            "",
+            "AB".repeat(16).as_str(),
+            &"a".repeat(31),
+            &"g".repeat(32),
+        ] {
+            assert_eq!(ProjectId::parse(bad).unwrap_err().code, Code::InvalidId);
+        }
+    }
 
     #[test]
     fn accepts_portable_names() {

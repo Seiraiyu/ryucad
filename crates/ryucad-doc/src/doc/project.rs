@@ -2,10 +2,16 @@
 //!
 //! ```text
 //! ryucad.json
+//! ryupdm.json                       (optional: ryupdm's settings)
 //! parts/<part>/part.json
 //! parts/<part>/parameters.json      (optional)
+//! parts/<part>/properties.json      (optional: ryupdm's properties)
 //! parts/<part>/features/<feature>.json
+//! releases/<part>/<label>.json      (ryupdm's release records)
 //! ```
+//!
+//! ryupdm's files are read and checked by ryupdm; here they are only
+//! known, so they are tracked and hashed with the files they belong to.
 //!
 //! Loading never stops at a broken part or feature: the error is kept in
 //! its place and the rest of the project stays usable. A file a merge left
@@ -26,6 +32,20 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub const MANIFEST: &str = "ryucad.json";
+
+/// The project's Git attributes file, beside its manifest: it registers
+/// ryucad's drivers, and defines nothing ryucad builds.
+pub const ATTRIBUTES: &str = ".gitattributes";
+
+/// ryupdm's settings, beside the manifest. Nothing ryucad builds reads it.
+pub const PDM_CONFIG: &str = "ryupdm.json";
+
+/// The folder of ryupdm's release records, beside the manifest. Nothing
+/// ryucad builds reads it.
+pub const RELEASES: &str = "releases";
+
+/// The files at the project's root that a session tracks.
+pub const ROOT_FILES: [&str; 3] = [MANIFEST, ATTRIBUTES, PDM_CONFIG];
 
 /// The key under which a file a merge couldn't settle lists its conflicts,
 /// by JSON pointer. No file kind uses it otherwise.
@@ -163,6 +183,14 @@ pub const PARAMETERS: &str = "parameters.json";
 
 pub fn parameters_path(root: &Path, part: &Id) -> PathBuf {
     part_dir(root, part).join(PARAMETERS)
+}
+
+/// A part's ryupdm properties: one of the files that define the part, so
+/// its revision covers them, though nothing ryucad builds reads them.
+pub const PROPERTIES: &str = "properties.json";
+
+pub fn properties_path(root: &Path, part: &Id) -> PathBuf {
+    part_dir(root, part).join(PROPERTIES)
 }
 
 pub fn feature_path(root: &Path, part: &Id, feature: &Id) -> PathBuf {
@@ -306,8 +334,14 @@ impl Project {
             };
             match in_part {
                 Some(id) => ids.insert(id),
-                // Git's attributes define nothing ryucad builds.
-                None if path == crate::drivers::ATTRIBUTES => continue,
+                // Git's attributes, ryupdm's settings and its release
+                // records define nothing ryucad builds.
+                None if path == ATTRIBUTES
+                    || path == PDM_CONFIG
+                    || path.starts_with(&format!("{RELEASES}/")) =>
+                {
+                    continue;
+                }
                 None => {
                     *self = Project::load(&self.root)?;
                     return Ok(());
@@ -371,10 +405,12 @@ fn load_part(
         PartFile::from_json(&v).map_err(|e| e.with("path", &part_at))
     });
     let mut has_parameters = false;
+    let mut has_properties = false;
     for (name, kind) in src.list(&dir)? {
         match name.as_str() {
             "part.json" | "features" => {}
             PARAMETERS => has_parameters = kind == Kind::File,
+            PROPERTIES => has_properties = kind == Kind::File,
             _ => unknown.push(join(&dir, &name)),
         }
     }
@@ -432,6 +468,16 @@ fn load_part(
                     });
                 }
             }
+        }
+    }
+    // ryupdm's properties: their bytes as they are, tagged like the
+    // parameters, so a part without them hashes as before. Reading them is
+    // ryupdm's business.
+    if has_properties {
+        let at = join(&dir, PROPERTIES);
+        if let Some(bytes) = src.read(&at).map_err(|e| e.with("path", &at))? {
+            piece(&mut hasher, PROPERTIES.as_bytes());
+            piece(&mut hasher, &bytes);
         }
     }
     let revision = hasher.finalize().to_hex()[..32].to_owned();
@@ -504,14 +550,7 @@ mod tests {
     fn sample() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        write_json(
-            &root.join(MANIFEST),
-            &Manifest {
-                default_unit: Unit::Mm,
-            }
-            .to_json(),
-        )
-        .unwrap();
+        write_json(&root.join(MANIFEST), &Manifest::new(Unit::Mm).to_json()).unwrap();
         let p = id("p");
         write_json(
             &part_path(root, &p),
@@ -526,6 +565,7 @@ mod tests {
                 ty: PrimitiveType::Sphere,
                 params: [("radius".to_owned(), Quantity::parse(r, Unit::Mm).unwrap())].into(),
                 placement: Placement::identity(Unit::Mm),
+                combine: crate::doc::solid::Combine::NEW,
             });
             write_json(&feature_path(root, &p, &id(f)), &feature.to_json()).unwrap();
         }
@@ -616,10 +656,7 @@ mod tests {
         );
         assert!(part.features[&id("b")].is_ok());
         // A conflicted manifest fails every part, not the project.
-        let mut m = Manifest {
-            default_unit: Unit::Mm,
-        }
-        .to_json();
+        let mut m = Manifest::new(Unit::Mm).to_json();
         m[CONFLICTS] = serde_json::json!({
             "/default_unit": {"base": "mm", "kind": "value", "ours": "mm", "theirs": "in"},
         });
@@ -701,6 +738,7 @@ mod tests {
                 ty: PrimitiveType::Sphere,
                 params: [("radius".to_owned(), Quantity::parse(r, Unit::Mm).unwrap())].into(),
                 placement: Placement::identity(Unit::Mm),
+                combine: crate::doc::solid::Combine::NEW,
             })
             .to_json()
         };
@@ -734,16 +772,16 @@ mod tests {
             .reload(&["parts/q/part.json".into(), "parts/q/x.txt".into()])
             .unwrap();
         same(&project);
-        write_json(
-            &root.join(MANIFEST),
-            &Manifest {
-                default_unit: Unit::In,
-            }
-            .to_json(),
-        )
-        .unwrap();
+        write_json(&root.join(MANIFEST), &Manifest::new(Unit::In).to_json()).unwrap();
         project.reload(&[MANIFEST.into()]).unwrap();
         same(&project);
+        // A release record defines nothing a part is: nothing is read.
+        fs::create_dir_all(root.join("releases/p")).unwrap();
+        fs::write(root.join("releases/p/A.json"), "{}").unwrap();
+        fs::remove_file(root.join(MANIFEST)).unwrap();
+        let before = format!("{project:?}");
+        project.reload(&["releases/p/A.json".into()]).unwrap();
+        assert_eq!(format!("{project:?}"), before);
     }
 
     #[test]
@@ -785,14 +823,40 @@ mod tests {
         assert_eq!(rev(), r1);
         fs::write(
             root.join(MANIFEST),
-            Manifest {
-                default_unit: Unit::In,
-            }
-            .to_json()
-            .to_string(),
+            Manifest::new(Unit::In).to_json().to_string(),
         )
         .unwrap();
-        assert_ne!(rev(), r1);
+        let r2 = rev();
+        assert_ne!(r2, r1);
+        // ryupdm's properties define the part; its settings don't.
+        let props = properties_path(root, &id("p"));
+        fs::write(&props, "{}").unwrap();
+        let r3 = rev();
+        assert_ne!(r3, r2);
+        fs::write(&props, "{\"number\": \"1\"}").unwrap();
+        assert_ne!(rev(), r3);
+        fs::remove_file(&props).unwrap();
+        assert_eq!(rev(), r2);
+        fs::write(root.join(PDM_CONFIG), "{}").unwrap();
+        assert_eq!(rev(), r2);
+        let project = Project::load(root).unwrap();
+        assert!(project.unknown.is_empty(), "{:?}", project.unknown);
+    }
+
+    #[test]
+    fn ryupdm_files_are_known_and_reload_nothing_they_dont_define() {
+        let dir = sample();
+        let root = dir.path();
+        fs::write(properties_path(root, &id("p")), "{ not even json").unwrap();
+        let mut project = Project::load(root).unwrap();
+        assert!(project.unknown.is_empty());
+        let rev = project.parts[&id("p")].revision.clone();
+        fs::write(root.join(PDM_CONFIG), "{}").unwrap();
+        project.reload(&[PDM_CONFIG.into()]).unwrap();
+        assert_eq!(project.parts[&id("p")].revision, rev);
+        fs::write(properties_path(root, &id("p")), "{}").unwrap();
+        project.reload(&["parts/p/properties.json".into()]).unwrap();
+        assert_ne!(project.parts[&id("p")].revision, rev);
     }
 
     #[test]

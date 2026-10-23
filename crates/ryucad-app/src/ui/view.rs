@@ -284,9 +284,20 @@ impl View {
             .and_then(|k| ws.model.sketches.get(k));
         let picker = self.picker(ws);
         let mut faces = Vec::new();
-        if let Some(k) = chosen {
+        // What the chosen feature made, in the solids that show it.
+        if let Some(made) = ws
+            .made
+            .as_ref()
+            .filter(|m| chosen.as_ref() == Some(&m.feature))
+        {
             let c = linear(style::CHOSEN);
-            faces.extend((0..picker.faces(&k)).map(|i| (k.clone(), i, c)));
+            for ((part, solid), names) in &made.faces {
+                for n in names {
+                    if let Some(Place::Face(k, i)) = picker.place(&format!("{part}/{solid}/{n}")) {
+                        faces.push((k, i, c));
+                    }
+                }
+            }
         }
         // A compare's new and changed faces, over the chosen feature so
         // choosing one still shows what changed in it.

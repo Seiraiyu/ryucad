@@ -118,6 +118,40 @@ pub enum Code {
     MergeUnsupported,
     /// `merge.resolve` named a conflict the merge doesn't have (now).
     ConflictNotFound,
+    /// A part property that is neither one of ryupdm's core properties nor
+    /// declared in `ryupdm.json`.
+    PropertyUnknown,
+    /// A property value of the wrong type, outside its choices or of the
+    /// wrong dimension; or a declaration of a core property's name.
+    PropertyInvalid,
+    /// A part number that doesn't match the project's pattern.
+    PartNumberInvalid,
+    /// Two parts of one project with the same number.
+    PartNumberDuplicate,
+    /// A part ID that a release record names, so it can't be used again.
+    PartIdRetired,
+    /// The revision scheme can't change once any part has been released.
+    RevisionSchemeLocked,
+    /// A join, cut or intersect that changes nothing of its target: the
+    /// tool misses it, or a join lies inside it.
+    OperationNoEffect,
+    /// A cut or intersect that leaves nothing of its target.
+    BodyEmptied,
+    /// The kernel refused to join, cut or intersect: faces it can't
+    /// intersect yet, an uncertain intersection, or a result touching
+    /// itself. The faces are in the details.
+    BooleanFailed,
+    /// A feature acts on, or refers to, a solid that a `boolean` feature
+    /// before it used as a tool: it is part of the boolean's target now.
+    BodyConsumed,
+    /// A part that can't be released as it is: a load, rebuild or property
+    /// fault, a missing number or required property (each in `problems`).
+    ReleaseNotReady,
+    /// The part is already its latest release (or that revision is already
+    /// obsolete).
+    NothingToRelease,
+    /// The part has a proposed record that isn't official yet.
+    ReleasePending,
 }
 
 impl Code {
@@ -206,6 +240,13 @@ mod tests {
         assert_eq!(Code::NotMerging.exit_code(), 1);
         assert_eq!(Code::MergeUnsupported.exit_code(), 1);
         assert_eq!(Code::ConflictNotFound.exit_code(), 1);
+        assert_eq!(Code::PropertyUnknown.exit_code(), 1);
+        assert_eq!(Code::PartNumberDuplicate.exit_code(), 1);
+        assert_eq!(Code::PartIdRetired.exit_code(), 1);
+        assert_eq!(Code::RevisionSchemeLocked.exit_code(), 1);
+        assert_eq!(Code::ReleaseNotReady.exit_code(), 1);
+        assert_eq!(Code::NothingToRelease.exit_code(), 1);
+        assert_eq!(Code::ReleasePending.exit_code(), 1);
     }
 
     #[test]

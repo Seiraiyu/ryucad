@@ -10,6 +10,7 @@ use crate::doc::project::{
 };
 use crate::doc::reference::Reference;
 use crate::doc::sketch::{OnFace, OriginPlane, Plane, Sketch};
+use crate::doc::solid::{Boolean, Combine};
 use crate::doc::sweep::{Angle, Extent, Extrude, Revolve, RevolveAxis};
 use crate::entity::{self, EntityRef};
 use crate::error::{Code, Error, Result};
@@ -21,6 +22,7 @@ use crate::param;
 use crate::proto::{Answer, FeatureFields, PlacementArg, Position, Request, Transfer, VersionInfo};
 use crate::rebuild;
 use crate::session::Session;
+use crate::solid::Solids;
 use crate::units::{Quantity, Unit};
 use crate::view::{Camera, DEFAULT_PROJECTION, StandardView};
 use serde_json::{Map, Value, json};
@@ -39,9 +41,7 @@ pub fn init(root: &Path, default_unit: Option<Unit>) -> Result<Value> {
         )
         .with("path", root));
     }
-    let m = Manifest {
-        default_unit: default_unit.unwrap_or(Unit::Mm),
-    };
+    let m = Manifest::new(default_unit.unwrap_or(Unit::Mm));
     write_json(&manifest, &m.to_json())?;
     crate::drivers::write_attributes(root)?;
     Ok(json!({"root": root, "default_unit": m.default_unit}))
@@ -141,9 +141,11 @@ pub fn answer_live(
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
     {
         let files = activity::diff(&files_before, &session.snapshot());
+        let who = l.caller(me);
         if !files.is_empty() {
-            let who = l.caller(me);
             activity::record(l, EntryKind::Change, &who, &method, params, None, files);
+        } else if method == "release.sync" {
+            activity::record(l, EntryKind::Refs, &who, &method, params, None, files);
         }
     }
     if let (Some(l), Some(before)) = (live, before) {
@@ -228,6 +230,59 @@ fn dispatch(
             expected_revision,
         } => feature_move(session, &part, &id, &position, expected_revision.as_deref()),
         Request::FeatureList { part } => feature_list(session, &part),
+        Request::PdmInit {} => crate::pdm::init(session),
+        Request::PdmConfig {} => crate::pdm::config(session),
+        Request::PdmConfigure {
+            revisions,
+            release_branch,
+            pattern,
+            properties,
+            force,
+            expected_revision,
+        } => crate::pdm::configure(
+            session,
+            crate::pdm::Change {
+                revisions,
+                release_branch,
+                pattern,
+                properties,
+                force,
+            },
+            expected_revision.as_deref(),
+        ),
+        Request::PropsGet { part } => crate::pdm::get(session, &part),
+        Request::ReleaseList { part } => crate::release::list(session, part.as_deref()),
+        Request::ReleaseSync {} => crate::release::sync(session),
+        Request::ReleaseCheck { results } => crate::release::check(session, results),
+        Request::ReleasePropose {
+            part,
+            note,
+            expected_revision,
+        } => {
+            let who = participant_name(live, me);
+            crate::release::propose(session, &who, &part, note, expected_revision.as_deref())
+        }
+        Request::ReleaseObsolete {
+            part,
+            label,
+            note,
+            expected_revision,
+        } => {
+            let who = participant_name(live, me);
+            crate::release::obsolete(
+                session,
+                &who,
+                &part,
+                &label,
+                note,
+                expected_revision.as_deref(),
+            )
+        }
+        Request::PropsSet {
+            part,
+            properties,
+            expected_revision,
+        } => crate::pdm::set(session, &part, properties, expected_revision.as_deref()),
         Request::ParamList { part } => param::list(session, &part),
         Request::ParamSet {
             part,
@@ -299,9 +354,11 @@ fn dispatch(
             )
         }
         Request::CheckFormat {} => check_format(session),
-        Request::Check { part, against } => {
-            crate::check::run(session, part.as_deref(), against.as_deref())
-        }
+        Request::Check {
+            part,
+            against,
+            results,
+        } => crate::check::run(session, part.as_deref(), against.as_deref(), results),
         Request::Diff {
             from,
             to,
@@ -533,22 +590,14 @@ fn dispatch(
             let scope = scope.as_deref().map(config::Scope::parse).transpose()?;
             let v = match config::validate(&key, &value, scope)? {
                 config::Scope::Project => {
-                    let rev = config::project_revision(session.root())?;
-                    if let Some(e) = expected_revision.filter(|e| *e != rev) {
-                        return Err(Error::new(
-                            Code::Conflict,
-                            format!(
-                                "the project changed since revision {e}; read it again and retry"
-                            ),
-                        )
-                        .with("expected", e)
-                        .with("actual", rev));
-                    }
+                    config::check_project_revision(session.root(), expected_revision.as_deref())?;
                     let unit = Unit::parse(value.as_str().expect("validated")).expect("validated");
-                    write_json(
-                        &session.root().join(MANIFEST),
-                        &Manifest { default_unit: unit }.to_json(),
-                    )?;
+                    // The rest of the manifest (the project's ID) stays.
+                    let m = Manifest {
+                        default_unit: unit,
+                        ..session.project().manifest.clone()
+                    };
+                    write_json(&session.root().join(MANIFEST), &m.to_json())?;
                     session.reload()?;
                     let mut v = config::get(unit, Some(&key), None)?;
                     v["project_revision"] = json!(config::project_revision(session.root())?);
@@ -644,6 +693,19 @@ fn project_info(session: &Session) -> Value {
     })
 }
 
+/// The name of the participant asking: the live session's, else the one
+/// the caller gave (the CLI's `--as`), else the default agent's.
+fn participant_name(live: Option<&mut Live>, me: Option<&str>) -> String {
+    match live {
+        Some(l) => {
+            let id = l.caller(me);
+            l.get(&id)
+                .map_or_else(|_| live::DEFAULT_AGENT.to_owned(), |p| p.name.clone())
+        }
+        None => me.unwrap_or(live::DEFAULT_AGENT).to_owned(),
+    }
+}
+
 pub(crate) fn part_id(s: &str) -> Result<Id> {
     Id::parse(s, "part")
 }
@@ -672,6 +734,7 @@ fn part_create(session: &mut Session, part: &str) -> Result<Value> {
             Error::new(Code::DuplicateId, format!("part {id} already exists")).with("part", &id),
         );
     }
+    crate::pdm::check_not_retired(session.root(), &id)?;
     write_json(
         &part_path(session.root(), &id),
         &PartFile { features: vec![] }.to_json(),
@@ -746,6 +809,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
             let mut v = e.fields();
             match &e.extent {
                 Extent::Blind(q) | Extent::Symmetric(q) => v["extent"]["length"] = q.report(),
+                Extent::ThroughAll { .. } => {}
                 Extent::UpTo { target, offset } => {
                     v["extent"]["target"] = json!(target.text(part));
                     if let Some(q) = offset {
@@ -755,6 +819,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
             }
             v
         }
+        Feature::Boolean(b) => b.fields(),
         Feature::Revolve(r) => {
             let mut v = r.fields();
             if let Angle::Of(q) = &r.angle {
@@ -821,7 +886,9 @@ fn primitive_report(f: &Primitive) -> Value {
         .iter()
         .map(|(k, q)| (k.clone(), q.report()))
         .collect();
-    json!({"params": params, "placement": placement_report(&f.placement)})
+    let mut v = json!({"params": params, "placement": placement_report(&f.placement)});
+    f.combine.write(&mut v);
+    v
 }
 
 /// Applies the parts of `arg` that are given to `p`, its expressions
@@ -924,9 +991,141 @@ impl Given {
 /// The fields a sketch takes.
 const SKETCH: [&str; 5] = ["plane", "placement", "face", "face_origin", "face_x"];
 
-/// The fields an extrude and a revolve take.
-const EXTRUDE: [&str; 4] = ["sketch", "loops", "extent", "reverse"];
-const REVOLVE: [&str; 5] = ["sketch", "loops", "axis", "angle", "symmetric"];
+/// The fields a primitive, an extrude, a revolve and a boolean take.
+const PRIMITIVE: [&str; 4] = ["params", "placement", "operation", "targets"];
+const EXTRUDE: [&str; 6] = [
+    "sketch",
+    "loops",
+    "extent",
+    "reverse",
+    "operation",
+    "targets",
+];
+const REVOLVE: [&str; 7] = [
+    "sketch",
+    "loops",
+    "axis",
+    "angle",
+    "symmetric",
+    "operation",
+    "targets",
+];
+const BOOLEAN: [&str; 4] = ["op", "target", "targets", "tools"];
+
+/// A primitive's operation and targets: `current`'s, with what was
+/// given laid over them (`new` drops the targets).
+fn combine_from(current: &Combine, given: &Given) -> Result<Combine> {
+    let mut v = json!({});
+    current.write(&mut v);
+    let f = &given.fields;
+    if let Some(op) = &f.operation {
+        v["operation"] = json!(op);
+        if op == "new" {
+            v.as_object_mut().expect("an object").remove("targets");
+        }
+    }
+    if let Some(t) = &f.targets {
+        v["targets"] = json!(t);
+    }
+    let mut o = crate::doc::files::Obj::new(&v, "")?;
+    let c = Combine::from_fields(&mut o)?;
+    o.finish()?;
+    Ok(c)
+}
+
+/// A boolean from `current`'s fields (none for a new one) with what was
+/// given laid over them. Its target may come as `target`, or as the one
+/// entry of `targets`.
+fn boolean_from(current: Option<&Boolean>, given: &Given) -> Result<Boolean> {
+    let mut v = current.map_or_else(|| json!({}), Boolean::fields);
+    let f = &given.fields;
+    let target = match (&f.target, &f.targets) {
+        (Some(_), Some(_)) => {
+            return Err(Error::new(Code::Usage, "give a boolean's target once"));
+        }
+        (Some(t), None) => Some(t.clone()),
+        (None, Some(ts)) => match ts.as_slice() {
+            [t] => Some(t.clone()),
+            _ => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("a boolean has one target, not {}", ts.len()),
+                )
+                .with("param", "targets"));
+            }
+        },
+        (None, None) => None,
+    };
+    if let Some(op) = &f.op {
+        v["op"] = json!(op);
+    }
+    if let Some(t) = target {
+        v["target"] = json!(t);
+    }
+    if let Some(t) = &f.tools {
+        v["tools"] = json!(t);
+    }
+    let mut o = crate::doc::files::Obj::new(&v, "")?;
+    let b = Boolean::from_fields(&mut o)?;
+    o.finish()?;
+    Ok(b)
+}
+
+/// The solids a feature put at `at` in `order` could act on: founded
+/// before it and not consumed.
+fn solids_before(p: &Part, order: &[Id], at: usize) -> Vec<Id> {
+    Solids::of_order(p, &order[..at])
+        .tips()
+        .map(|(s, _)| s.clone())
+        .collect()
+}
+
+/// Refuses a write that would leave a feature acting on what isn't a
+/// solid before it in `q` (the part as the write leaves it): the written
+/// features, those that name them, and those that name a written
+/// boolean's tools.
+fn check_solids(q: &Part, written: &[&Id]) -> Result<()> {
+    let solids = Solids::of(q);
+    let mut named: Vec<&Id> = written.to_vec();
+    for w in written {
+        if let Some(Ok(Feature::Boolean(b))) = q.features.get(*w) {
+            named.extend(&b.tools);
+        }
+    }
+    for id in q.order() {
+        let Some(Ok(f)) = q.features.get(id) else {
+            continue;
+        };
+        let targets = f.targets();
+        let concerned = written.contains(&id) || targets.iter().any(|t| named.contains(t));
+        if targets.is_empty() || !concerned {
+            continue;
+        }
+        crate::graph::check_order(q, q.order(), id, f)?;
+        for t in targets {
+            if let Some(by) = solids.consumed_by(t, id) {
+                return Err(rebuild::consumed(id, t, by));
+            }
+            if !solids.is_solid(t) {
+                return Err(rebuild::not_a_solid(q, &solids, id, "targets", t));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The part as a write would leave it: `writes` in place, listed as
+/// `order`.
+fn proposed(p: &Part, order: &[Id], writes: &[(&Id, &Feature)]) -> Part {
+    let mut q = p.clone();
+    for (id, f) in writes {
+        q.features.insert((*id).clone(), Ok((*f).clone()));
+    }
+    q.file = Ok(PartFile {
+        features: order.to_vec(),
+    });
+    q
+}
 
 /// An extrude or revolve from its fields: the current ones (for an edit)
 /// with those given laid over them.
@@ -945,6 +1144,9 @@ fn sweep_from(
     };
     let mut v = current.unwrap_or(fresh);
     let o = v.as_object_mut().expect("an object");
+    if given.fields.operation.as_deref() == Some("new") {
+        o.remove("targets");
+    }
     for (k, x) in given.fields.given() {
         // No loops is every loop, and false the default: nothing to write.
         if (k == "loops" && x == json!([])) || x == json!(false) {
@@ -974,6 +1176,7 @@ fn sweep_from(
                 if let Some(t) = new.get("type").and_then(Value::as_str) {
                     let takes: &[&str] = match t {
                         "up_to" => &["target", "offset"],
+                        "through_all" => &["both"],
                         _ => &["length"],
                     };
                     old.retain(|f, _| takes.contains(&f.as_str()));
@@ -1193,7 +1396,7 @@ fn check_references(
     let p = session.project().part(part)?.clone();
     let results = session.rebuilt(part)?;
     let checked = check_resolved(&p, order, id, f, results);
-    checked.map_err(|e| session.explain(part, e))
+    checked.map_err(|e| session.explain_in(part, order, e))
 }
 
 /// [`check_references`] against `results`.
@@ -1246,7 +1449,7 @@ fn feature_add(
     session: &mut Session,
     part: &str,
     ty: &str,
-    given: Given,
+    mut given: Given,
     id: Option<&str>,
     position: &Position,
     expected: Option<&str>,
@@ -1257,6 +1460,32 @@ fn feature_add(
     check_revision(p, expected)?;
     let mut list = order(p)?;
     let env = p.env.clone();
+    let at = insert_at(&list, position)?;
+    // A join, cut or intersect with no targets acts on the part's one
+    // solid; the file names it all the same.
+    let acts = given
+        .fields
+        .operation
+        .as_deref()
+        .is_some_and(|o| o != "new");
+    if acts && given.fields.targets.is_none() {
+        let before = solids_before(p, &list, at);
+        match before.as_slice() {
+            [one] => given.fields.targets = Some(vec![one.to_string()]),
+            _ => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!(
+                        "a {} names the solids it acts on (targets): the part has {} before it",
+                        given.fields.operation.as_deref().unwrap_or_default(),
+                        before.len()
+                    ),
+                )
+                .with("param", "targets")
+                .with("solids", before));
+            }
+        }
+    }
     let f = match ty {
         "sketch" => {
             given.only(ty, &SKETCH)?;
@@ -1266,13 +1495,19 @@ fn feature_add(
             given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
             sweep_from(ty, None, &given, &pid, unit, &env)?
         }
+        "boolean" => {
+            given.only(ty, &BOOLEAN)?;
+            Feature::Boolean(boolean_from(None, &given)?)
+        }
         _ => {
             let ty = PrimitiveType::parse(ty)?;
-            given.only(ty.as_str(), &["params", "placement"])?;
+            given.only(ty.as_str(), &PRIMITIVE)?;
+            let combine = combine_from(&Combine::NEW, &given)?;
             Feature::Primitive(Primitive {
                 ty,
                 params: Primitive::params_from_json(ty, &Value::Object(given.params), unit, &env)?,
                 placement: new_placement(given.placement.unwrap_or_default(), unit, &env)?,
+                combine,
             })
         }
     };
@@ -1289,10 +1524,11 @@ fn feature_add(
         )
         .with("feature", &fid));
     }
-    list.insert(insert_at(&list, position)?, fid.clone());
+    list.insert(at, fid.clone());
     if f.swept().is_some() {
         check_sweep(p, &list, &fid, &f)?;
     }
+    check_solids(&proposed(p, &list, &[(&fid, &f)]), &[&fid])?;
     check_references(session, &pid, &list, &fid, &f)?;
     let revision = save(session, &pid, &[(&fid, &f)], list)?;
     Ok(json!({"feature": feature_report(&pid, &fid, &f), "revision": revision}))
@@ -1313,7 +1549,8 @@ fn feature_edit(
     let old = feature(p, &fid)?.clone();
     let f = match old.clone() {
         Feature::Primitive(mut f) => {
-            given.only(f.ty.as_str(), &["params", "placement"])?;
+            given.only(f.ty.as_str(), &PRIMITIVE)?;
+            f.combine = combine_from(&f.combine, &given)?;
             let mut merged: Map<String, Value> = f
                 .params
                 .iter()
@@ -1342,6 +1579,10 @@ fn feature_edit(
             s.plane = sketch_plane(Some(&s.plane), &given, &pid, unit, &p.env)?;
             Feature::Sketch(s)
         }
+        Feature::Boolean(b) => {
+            given.only("boolean", &BOOLEAN)?;
+            Feature::Boolean(boolean_from(Some(&b), &given)?)
+        }
         f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
             let ty = f.type_name();
             given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
@@ -1355,6 +1596,24 @@ fn feature_edit(
             f
         }
     };
+    // A solid's founder that stops founding it leaves what acts on it, or
+    // refers to it, with nothing.
+    let founded = |f: &Feature| f.combine().is_some_and(|c| c.is_new());
+    if founded(&old) && !founded(&f) {
+        let users = crate::graph::dependents(p, &fid);
+        if !users.is_empty() {
+            return Err(Error::new(
+                Code::HasDependents,
+                format!(
+                    "{fid} founds a solid that {} act on or refer to; change those first",
+                    users.iter().map(Id::as_str).collect::<Vec<_>>().join(", ")
+                ),
+            )
+            .with("feature", &fid)
+            .with("features", users));
+        }
+    }
+    check_solids(&proposed(p, &list, &[(&fid, &f)]), &[&fid])?;
     // References already there were checked when they were written.
     if f.references() != old.references() {
         check_references(session, &pid, &list, &fid, &f)?;
@@ -1433,7 +1692,8 @@ fn feature_move(
     }
     list.remove(from);
     list.insert(insert_at(&list, position)?, fid.clone());
-    // Everything must still come after what it reads.
+    // Everything must still come after what it reads, and act only on
+    // solids not yet consumed.
     for f in &list {
         if let Some(Ok(feature)) = p.features.get(f)
             && (*f == fid || crate::graph::inputs(feature).contains(&&fid))
@@ -1441,6 +1701,7 @@ fn feature_move(
             crate::graph::check_order(p, &list, f, feature)?;
         }
     }
+    check_solids(&proposed(p, &list, &[]), &[&fid])?;
     let revision = save(session, &pid, &[], list.clone())?;
     Ok(json!({"features": list, "revision": revision}))
 }
@@ -1469,6 +1730,7 @@ fn feature_list(session: &Session, part: &str) -> Result<Value> {
 fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
     let part = session.project().part(id)?;
     let revision = part.revision.clone();
+    let solids = Solids::of(part);
     let types: BTreeMap<Id, &'static str> = part
         .features
         .iter()
@@ -1483,38 +1745,90 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
             (!ins.is_empty()).then(|| (fid.clone(), ins.into_iter().cloned().collect()))
         })
         .collect();
+    // What each feature does to solids, and the tools a boolean consumes:
+    // for showing the chains.
+    let ops: BTreeMap<Id, (&'static str, Vec<Id>)> = part
+        .features
+        .iter()
+        .filter_map(|(fid, f)| match f.as_ref().ok()? {
+            Feature::Boolean(b) => Some((fid.clone(), (b.op.as_str(), b.tools.clone()))),
+            f => {
+                let c = f.combine().filter(|c| !c.is_new())?;
+                Some((fid.clone(), (c.operation.as_str(), Vec::new())))
+            }
+        })
+        .collect();
+    let counts = |b: &crate::rebuild::Built| {
+        let c = b.body.counts();
+        json!({"faces": c.faces, "edges": c.edges, "vertices": c.vertices})
+    };
     let r = session.rebuilt(id)?;
     let features: Vec<Value> = r
         .features
         .iter()
         .map(|(fid, b)| {
-            (
-                fid,
-                match b {
-                    Ok(crate::rebuild::Output::Body(b)) => {
-                        let c = b.body.counts();
-                        json!({"id": fid, "type": types.get(fid), "ok": true, "hash": b.hash,
-                       "counts": {"faces": c.faces, "edges": c.edges, "vertices": c.vertices}})
+            let mut v = match b {
+                Ok(o @ crate::rebuild::Output::Solids(_)) => {
+                    let mut v = json!({"id": fid, "type": types.get(fid), "ok": true,
+                                       "hash": o.hash()});
+                    match o.body() {
+                        Some(b) => v["counts"] = counts(b),
+                        None => {
+                            v["bodies"] = o
+                                .solids()
+                                .iter()
+                                .map(|(s, b)| {
+                                    json!({"solid": s, "hash": b.hash, "counts": counts(b)})
+                                })
+                                .collect();
+                        }
                     }
-                    // A sketch makes no body: its state, not a body hash.
-                    Ok(crate::rebuild::Output::Sketch(s)) => {
-                        json!({"id": fid, "type": types.get(fid), "ok": true,
-                       "sketch": {"state": s.report.state_str(), "dof": s.report.dof,
-                                  "stale": s.stale}})
-                    }
-                    Err(e) => json!({"id": fid, "type": types.get(fid), "ok": false, "error": e}),
-                },
-            )
-        })
-        .map(|(fid, mut v)| {
+                    v
+                }
+                // A sketch makes no body: its state, not a body hash.
+                Ok(crate::rebuild::Output::Sketch(s)) => {
+                    json!({"id": fid, "type": types.get(fid), "ok": true,
+                           "sketch": {"state": s.report.state_str(), "dof": s.report.dof,
+                                      "stale": s.stale}})
+                }
+                Err(e) => json!({"id": fid, "type": types.get(fid), "ok": false, "error": e}),
+            };
             if let Some(u) = uses.get(fid) {
                 v["uses"] = json!(u);
+            }
+            let of = solids.solids_of(fid);
+            if !of.is_empty() {
+                v["solids"] = json!(of);
+            }
+            if let Some((op, tools)) = ops.get(fid) {
+                v["operation"] = json!(op);
+                if !tools.is_empty() {
+                    v["consumes"] = json!(tools);
+                }
+            }
+            v
+        })
+        .collect();
+    // The model: each solid with its chain, and its body as it shows.
+    let shown: Vec<Value> = r
+        .shown(&solids)
+        .into_iter()
+        .map(|s| {
+            let mut v = json!({"solid": s.solid, "ok": s.error.is_none(),
+                               "features": solids.chain(s.solid)});
+            if let Some((f, b)) = s.state {
+                v["shown"] = json!(f);
+                v["hash"] = json!(b.hash);
+                v["counts"] = counts(b);
+            }
+            if let Some(e) = s.error {
+                v["error"] = json!(e);
             }
             v
         })
         .collect();
     let mut v = json!({"part": id, "revision": revision, "hash": r.hash,
-                       "failed": r.failed(), "features": features});
+                       "failed": r.failed(), "features": features, "solids": shown});
     let warnings = r.warnings();
     if !warnings.is_empty() {
         v["warnings"] = json!(warnings);
@@ -1550,6 +1864,26 @@ pub fn publish(live: &mut Live, session: &mut Session) {
         live.hub.send(Topic::Merge, "merge.changed", &params);
     }
     live.seen.merge = merge;
+    // Release states: from records, parts and the release branch's refs,
+    // read only while someone watches. The first reading after a
+    // subscription is what it starts from.
+    if watched {
+        let now = crate::release::summary(session);
+        if let Some(seen) = &live.seen.pdm {
+            let changed: Vec<&Value> = now
+                .iter()
+                .filter(|(id, v)| seen.get(*id) != Some(*v))
+                .map(|(_, v)| v)
+                .collect();
+            if !changed.is_empty() {
+                live.hub
+                    .send(Topic::Pdm, "pdm.changed", &json!({"parts": changed}));
+            }
+        }
+        live.seen.pdm = Some(now);
+    } else {
+        live.seen.pdm = None;
+    }
     let p = session.project();
     let revisions: BTreeMap<Id, String> = p
         .parts
@@ -1666,8 +2000,9 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
     Ok(report)
 }
 
-/// The display meshes of a part's bodies, `(feature, body, mesh)` in
-/// feature order; a feature that failed to build has its error instead.
+/// The display meshes of a part's solids as the model shows them,
+/// `(solid, body, mesh)` by founder; a solid that never built has its
+/// error instead. `only` keeps one solid; a sketch has none.
 pub fn meshes(
     session: &mut Session,
     part: &Id,
@@ -1675,8 +2010,12 @@ pub fn meshes(
     quality: mesh::Quality,
 ) -> Result<Vec<(Id, Result<mesh::Meshed>)>> {
     let p = session.project().part(part)?;
+    let solids = Solids::of(p);
     if let Some(f) = only {
-        feature(p, f)?;
+        let found = feature(p, f)?;
+        if found.sketch().is_none() && !solids.is_solid(f) {
+            return Err(rebuild::not_a_solid(p, &solids, f, "feature", f));
+        }
     }
     let features: BTreeMap<Id, Feature> = p
         .features
@@ -1688,32 +2027,33 @@ pub fn meshes(
         .unwrap_or(256) as usize
         * 1024
         * 1024;
-    // Sketches make no body, so they have no mesh.
-    let sketches: Vec<Id> = p
-        .features
-        .iter()
-        .filter(|(_, f)| f.as_ref().is_ok_and(|f| f.sketch().is_some()))
-        .map(|(id, _)| id.clone())
-        .collect();
-    let built: Vec<(Id, Result<crate::rebuild::Built>)> = session
-        .rebuilt(part)?
-        .features
-        .iter()
-        .filter(|(id, _)| only.is_none_or(|o| o == id) && !sketches.contains(id))
-        .filter_map(|(id, r)| match r {
-            Ok(o) => Some((id.clone(), Ok(o.body()?.clone()))),
-            Err(e) => Some((id.clone(), Err(e.clone()))),
+    let result = session.rebuilt(part)?;
+    // The feature each shown state is from sizes its mesh.
+    let built: Vec<(Id, Result<(Id, crate::rebuild::Built)>)> = result
+        .shown(&solids)
+        .into_iter()
+        .filter(|s| only.is_none_or(|o| o == s.solid))
+        .map(|s| {
+            let r = match (s.state, s.error) {
+                (Some((f, b)), _) => Ok((f.clone(), b.as_ref().clone())),
+                (None, Some(e)) => Err(e.clone()),
+                (None, None) => unreachable!("a solid that never built failed"),
+            };
+            (s.solid.clone(), r)
         })
         .collect();
     let ok: Vec<(&Feature, &crate::rebuild::Built)> = built
         .iter()
-        .filter_map(|(id, b)| Some((&features[id], b.as_ref().ok()?)))
+        .filter_map(|(_, b)| {
+            let (f, b) = b.as_ref().ok()?;
+            Some((&features[f], b))
+        })
         .collect();
     let mut made = session.meshes.get_all(&ok, quality, budget).into_iter();
     Ok(built
         .into_iter()
         .map(|(id, b)| {
-            let r = b.map(|b| mesh::Meshed {
+            let r = b.map(|(_, b)| mesh::Meshed {
                 body: b.body,
                 hash: b.hash,
                 mesh: made.next().expect("one mesh per built body"),
@@ -2075,6 +2415,8 @@ fn mesh_get(
             Err(e) => json!({"feature": id, "ok": false, "error": e}),
         })
         .collect();
+    // Each body is a solid, by its founder (`feature`, as entity
+    // references name it).
     Ok(json!({"part": pid, "quality": quality.as_str(), "bodies": bodies}))
 }
 
@@ -2096,23 +2438,39 @@ fn inspect(
         .iter()
         .filter_map(|(id, f)| Some((id.clone(), f.as_ref().ok()?.clone())))
         .collect();
+    let solids = Solids::of(session.project().part(&pid)?);
     let result = session.rebuilt(&pid)?;
-    let mut bodies = Vec::new();
-    for (id, built) in &result.features {
-        if only.as_ref().is_some_and(|o| o != id) {
-            continue;
-        }
-        let Some(built) = built.as_ref().ok().and_then(|o| o.body()) else {
-            continue;
-        };
-        let f = &features
+    let of = |id: &Id| {
+        &features
             .iter()
             .find(|(i, _)| i == id)
             .expect("built features loaded")
-            .1;
-        let mut v = crate::inspect::body(f, built);
+            .1
+    };
+    let mut bodies = Vec::new();
+    let mut put = |id: &Id, solid: &Id, b: &crate::rebuild::Built| {
+        let mut v = crate::inspect::body(of(id), b);
         v["feature"] = json!(id);
+        v["solid"] = json!(solid);
         bodies.push(v);
+    };
+    match &only {
+        // The solids a feature leaves, as it leaves them.
+        Some(f) => {
+            if let Some(out) = result.output(f) {
+                for (solid, b) in out.solids() {
+                    put(f, solid, b);
+                }
+            }
+        }
+        // The model: each solid as it shows.
+        None => {
+            for shown in result.shown(&solids) {
+                if let Some((f, b)) = shown.state {
+                    put(f, shown.solid, b);
+                }
+            }
+        }
     }
     if let Some(given) = entity {
         // A bare name, or a full reference as `selection` and Copy
@@ -2130,11 +2488,12 @@ fn inspect(
         } else {
             (given.to_owned(), None)
         };
-        // Just the one entity, wherever it is.
+        // Just the one entity, wherever it is. A reference names its
+        // solid.
         for b in &bodies {
             if in_feature
                 .as_ref()
-                .is_some_and(|f| b["feature"] != f.as_str())
+                .is_some_and(|f| b["solid"] != f.as_str())
             {
                 continue;
             }
@@ -2145,7 +2504,8 @@ fn inspect(
                     .iter()
                     .find(|e| e["name"] == name.as_str())
                 {
-                    return Ok(json!({"feature": b["feature"], "kind": kind, "entity": e}));
+                    return Ok(json!({"feature": b["feature"], "solid": b["solid"],
+                                     "kind": kind, "entity": e}));
                 }
             }
         }
@@ -2173,8 +2533,9 @@ fn rebuilt_at(session: &mut Session, rev: &str) -> Result<BTreeMap<String, crate
     let ids: Vec<Id> = s.project().parts.keys().cloned().collect();
     let mut out = BTreeMap::new();
     for id in ids {
+        let part = s.project().part(&id)?.clone();
         let r = s.rebuilt(&id)?;
-        out.insert(id.to_string(), r.features.clone());
+        out.insert(id.to_string(), crate::diff::Built::of(&part, r));
     }
     Ok(out)
 }
@@ -2219,8 +2580,10 @@ fn check_format(session: &Session) -> Result<Value> {
         }
     };
     check(&root.join(MANIFEST));
+    check(&root.join(crate::doc::project::PDM_CONFIG));
     for part in p.parts.values() {
         check(&part_path(root, &part.id));
+        check(&crate::doc::project::properties_path(root, &part.id));
         if let Err(e) = &part.file {
             errors.push(json!(e));
         }
@@ -2594,6 +2957,228 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn operations_through_the_protocol() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        let add = |s: &mut Session, f: Value| {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(s, "feature.add", f)
+        };
+        let unit = |id: &str, x: i32| {
+            json!({"type": "box", "id": id, "params": {"x": 10, "y": 10, "z": 10},
+                   "placement": {"origin": [x, 0, 0]}})
+        };
+        add(&mut s, unit("a", 0)).unwrap();
+        // With one solid, a cut acts on it; the file says so.
+        let mut cut = unit("c", 5);
+        cut["operation"] = json!("cut");
+        let r = add(&mut s, cut).unwrap();
+        assert_eq!(r["feature"]["operation"], "cut");
+        assert_eq!(r["feature"]["targets"], json!(["a"]));
+        let show = call(&mut s, "feature.show", json!({"part": "p", "id": "c"})).unwrap();
+        assert_eq!(show["targets"], json!(["a"]));
+        // With two, it must say which.
+        add(&mut s, unit("b", 20)).unwrap();
+        let mut join = unit("j", 25);
+        join["operation"] = json!("join");
+        let e = add(&mut s, join.clone()).unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        assert_eq!(e.details["solids"], json!(["a", "b"]));
+        join["targets"] = json!(["b"]);
+        add(&mut s, join).unwrap();
+        // What isn't a solid, or comes after, is refused.
+        let mut bad = unit("x", 0);
+        bad["operation"] = json!("cut");
+        bad["targets"] = json!(["c"]);
+        let e = add(&mut s, bad.clone()).unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
+        assert_eq!(e.details["solids"], json!(["a"]));
+        bad["targets"] = json!(["b"]);
+        bad["first"] = json!(true);
+        assert_eq!(add(&mut s, bad).unwrap_err().code, Code::ReferenceForward);
+        // A founder that stops founding leaves what acts on it with nothing.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "b", "operation": "join", "targets": ["a"]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::HasDependents, "{e}");
+        assert_eq!(e.details["features"], json!(["j"]));
+        // A cut made new again drops its targets.
+        let r = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "c", "operation": "new"}),
+        )
+        .unwrap();
+        assert!(r["feature"].get("targets").is_none());
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "c", "operation": "cut", "targets": ["a"]}),
+        )
+        .unwrap();
+        // A boolean takes its target as target, or as targets' one entry.
+        let r = add(
+            &mut s,
+            json!({"type": "boolean", "id": "u", "op": "unite", "targets": ["a"],
+                   "tools": ["b"]}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["target"], "a");
+        let show = call(&mut s, "feature.show", json!({"part": "p", "id": "u"})).unwrap();
+        assert_eq!(show["tools"], json!(["b"]));
+        let e = call(&mut s, "rebuild", json!({"part": "p"}));
+        assert!(e.is_ok(), "{e:?}");
+        // After it, b is the boolean's: nothing acts on it.
+        let mut late = unit("late", 22);
+        late["operation"] = json!("cut");
+        late["targets"] = json!(["b"]);
+        let e = add(&mut s, late).unwrap_err();
+        assert_eq!(e.code, Code::BodyConsumed, "{e}");
+        assert_eq!(e.details["consumed_by"], "u");
+        // Nor can the boolean move before what acts on its tools.
+        let e = call(
+            &mut s,
+            "feature.move",
+            json!({"part": "p", "id": "u", "after": "b"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::BodyConsumed, "{e}");
+        // Fields a type doesn't take are refused.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "u", "operation": "cut"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        let e = add(
+            &mut s,
+            json!({"type": "boolean", "op": "unite", "target": "a",
+                                   "targets": ["a"], "tools": ["c"]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::Usage);
+        // A founder others act on can't go.
+        let e = call(&mut s, "feature.delete", json!({"part": "p", "id": "a"})).unwrap_err();
+        assert_eq!(e.code, Code::HasDependents);
+    }
+
+    #[test]
+    fn the_model_is_its_solids() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        let add = |s: &mut Session, f: Value| {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(s, "feature.add", f).unwrap()
+        };
+        add(
+            &mut s,
+            json!({"type": "box", "id": "a", "params": {"x": 10, "y": 10, "z": 10}}),
+        );
+        add(
+            &mut s,
+            json!({"type": "box", "id": "c", "operation": "cut",
+                   "params": {"x": 4, "y": 20, "z": 20}, "placement": {"origin": [8, -5, -5]}}),
+        );
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let part = &r["parts"][0];
+        let solid = &part["solids"][0];
+        assert_eq!(part["solids"].as_array().unwrap().len(), 1);
+        assert_eq!(solid["solid"], "a");
+        assert_eq!(solid["features"], json!(["a", "c"]));
+        assert_eq!((&solid["ok"], &solid["shown"]), (&json!(true), &json!("c")));
+        assert_eq!(part["features"][1]["solids"], json!(["a"]));
+        assert_eq!(part["features"][1]["operation"], "cut");
+        assert!(part["features"][0].get("operation").is_none());
+        assert_eq!(solid["hash"], part["features"][1]["hash"]);
+        // Meshes are the solids', named by founder.
+        let m = call(&mut s, "mesh.get", json!({"part": "p"})).unwrap();
+        assert_eq!(m["bodies"].as_array().unwrap().len(), 1);
+        assert_eq!(m["bodies"][0]["feature"], "a");
+        assert_eq!(m["bodies"][0]["hash"], solid["hash"]);
+        let e = call(&mut s, "mesh.get", json!({"part": "p", "feature": "c"})).unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind);
+        assert_eq!(e.details["solids"], json!(["a"]));
+        // Inspect shows the model, or any feature's state.
+        let v = call(&mut s, "inspect", json!({"part": "p"})).unwrap();
+        let b = &v["bodies"][0];
+        assert_eq!((&b["solid"], &b["feature"]), (&json!("a"), &json!("c")));
+        let cut_face = b["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["origin"]["feature"] == "c")
+            .unwrap()["name"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let own = call(&mut s, "inspect", json!({"part": "p", "feature": "a"})).unwrap();
+        assert_eq!(own["bodies"][0]["counts"]["faces"], 6);
+        // A reference names the solid, and finds what the model shows.
+        let one = call(
+            &mut s,
+            "inspect",
+            json!({"part": "p", "entity": format!("p/a/{cut_face}")}),
+        )
+        .unwrap();
+        assert_eq!((&one["solid"], &one["kind"]), (&json!("a"), &json!("face")));
+        let mut live = Live::new();
+        let human = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "session.hello",
+            json!({"kind": "human"}),
+        )
+        .unwrap()["participant"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let picked = format!("p/a/{cut_face}");
+        let r = call_live(
+            &mut s,
+            &mut live,
+            Some(&human),
+            "selection.set",
+            json!({"entities": [picked]}),
+        )
+        .unwrap();
+        assert_eq!(r["selection"], json!([picked]));
+        // The cut's own ID names no solid.
+        let e = call_live(
+            &mut s,
+            &mut live,
+            Some(&human),
+            "selection.set",
+            json!({"entities": [format!("p/c/{cut_face}")]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+        assert_eq!(e.details["errors"][0]["details"]["solids"], json!(["a"]));
+        // A tip that fails leaves the solid showing its last good state,
+        // and failed.
+        add(
+            &mut s,
+            json!({"type": "box", "id": "miss", "operation": "cut", "targets": ["a"],
+                   "params": {"x": 1, "y": 1, "z": 1}, "placement": {"origin": [50, 0, 0]}}),
+        );
+        let e = call(&mut s, "rebuild", json!({"part": "p"})).unwrap_err();
+        let solid = &e.details["parts"][0]["solids"][0];
+        assert_eq!(
+            (&solid["ok"], &solid["shown"]),
+            (&json!(false), &json!("c"))
+        );
+        assert_eq!(solid["error"]["code"], "operation_no_effect");
+        let m = call(&mut s, "mesh.get", json!({"part": "p"})).unwrap();
+        assert_eq!(m["bodies"][0]["hash"], solid["hash"]);
+    }
+
+    #[test]
     fn rebuild_and_inspect() {
         let (_dir, mut s) = with_part();
         call(
@@ -2666,7 +3251,7 @@ pub(crate) mod tests {
         let root = dir.path();
         write_json(
             &root.join("parts/p/features/s.json"),
-            &crate::doc::sketch::tests::rectangle(),
+            &crate::doc::fixtures::rectangle(),
         )
         .unwrap();
         write_json(
@@ -3013,6 +3598,7 @@ pub(crate) mod tests {
             for list in ["faces", "edges", "vertices"] {
                 for e in b[list].as_array().unwrap() {
                     assert_eq!(e["origin"]["sketch"], "s", "{f} {list}: {e}");
+                    assert_eq!(e["origin"]["feature"], f, "{f} {list}: {e}");
                 }
             }
         }
@@ -3024,9 +3610,14 @@ pub(crate) mod tests {
             .iter()
             .map(|f| &f["origin"])
             .collect();
-        assert!(origins.contains(&&json!({"sketch": "s", "entity": "l1"})));
-        assert!(origins.contains(&&json!({"sketch": "s", "cap": "start", "loop": "p1"})));
-        assert!(origins.contains(&&json!({"sketch": "s", "cap": "end", "loop": "p1"})));
+        assert!(origins.contains(&&json!({"feature": "e", "sketch": "s", "entity": "l1"})));
+        assert!(
+            origins
+                .contains(&&json!({"feature": "e", "sketch": "s", "cap": "start", "loop": "p1"}))
+        );
+        assert!(
+            origins.contains(&&json!({"feature": "e", "sketch": "s", "cap": "end", "loop": "p1"}))
+        );
         let near = |a: &Value, want: [f64; 3]| {
             for k in 0..3 {
                 assert!(
@@ -3042,7 +3633,7 @@ pub(crate) mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|f| f["origin"] == json!({"sketch": "s", "entity": "l2"}))
+            .find(|f| f["origin"] == json!({"feature": "e", "sketch": "s", "entity": "l2"}))
             .unwrap();
         let one = call(
             &mut s,
@@ -3202,14 +3793,21 @@ pub(crate) mod tests {
         .unwrap();
         fs::write(root.join("parts/p/features/broken.json"), "{").unwrap();
         fs::write(root.join("parts/p/stray.txt"), "").unwrap();
+        // ryupdm's files are known, and must be canonical too.
+        fs::write(root.join("parts/p/properties.json"), "{\"name\":\"x\"}").unwrap();
+        fs::write(root.join("ryupdm.json"), "{\"format\":1}").unwrap();
         let r = call(&mut s, "check_format", json!({})).unwrap();
         assert_eq!(r["clean"], false);
-        assert!(
-            r["non_canonical"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("parts/p/features/a.json"))
-        );
+        for f in [
+            "parts/p/features/a.json",
+            "parts/p/properties.json",
+            "ryupdm.json",
+        ] {
+            assert!(
+                r["non_canonical"].as_array().unwrap().contains(&json!(f)),
+                "{f}: {r}"
+            );
+        }
         assert_eq!(
             r["orphans"],
             json!([
@@ -3853,6 +4451,32 @@ pub(crate) mod tests {
                 e[0]["files"],
                 json!([{"path": "ryucad.json", "change": "modified"}])
             );
+        });
+    }
+
+    #[test]
+    fn setting_the_unit_keeps_the_project_id() {
+        crate::config::tests::with_config(|_| {
+            let (dir, mut s) = fresh();
+            let id = crate::doc::id::ProjectId::from_bytes([9; 16]);
+            let m = Manifest {
+                project: Some(id.clone()),
+                ..Manifest::new(Unit::Mm)
+            };
+            write_json(&dir.path().join(MANIFEST), &m.to_json()).unwrap();
+            call(
+                &mut s,
+                "config.set",
+                json!({"key": "default_unit", "value": "in"}),
+            )
+            .unwrap();
+            let text = fs::read_to_string(dir.path().join(MANIFEST)).unwrap();
+            assert_eq!(
+                crate::doc::canonical::parse(&text).unwrap(),
+                json!({"default_unit": "in", "format": 2, "kind": "ryucad.project",
+                       "project": id})
+            );
+            assert_eq!(s.project().manifest.project, Some(id));
         });
     }
 

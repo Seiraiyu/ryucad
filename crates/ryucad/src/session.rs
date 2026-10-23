@@ -15,7 +15,7 @@
 
 use crate::activity::Files;
 use crate::doc::id::Id;
-use crate::doc::project::{MANIFEST, Project};
+use crate::doc::project::Project;
 use crate::error::{Error, Result};
 use crate::rebuild::{Cache, PartResult, rebuild_part_with};
 use serde_json::{Value, json};
@@ -62,6 +62,12 @@ pub struct Session {
     revisions: Vec<(String, Session)>,
     /// The last merge status, by the key of what it was computed from.
     pub(crate) merge_status: Option<(String, serde_json::Value)>,
+    /// The release branch as last read, by the key of the refs it was
+    /// read from (see [`crate::release::history`]).
+    pub(crate) releases: Option<(String, ryupdm::history::Releases)>,
+    /// Bodies of released content as this build rebuilds them, by content
+    /// hash, for `release_result_changed`.
+    pub(crate) release_results: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl Session {
@@ -78,6 +84,8 @@ impl Session {
             frozen: false,
             revisions: Vec::new(),
             merge_status: None,
+            releases: None,
+            release_results: BTreeMap::new(),
         };
         s.scan()?;
         Ok(s)
@@ -111,6 +119,8 @@ impl Session {
             frozen: true,
             revisions: Vec::new(),
             merge_status: None,
+            releases: None,
+            release_results: BTreeMap::new(),
         })
     }
 
@@ -237,8 +247,21 @@ impl Session {
     }
 
     /// Adds to `reference_unresolved` what its name was when it last
-    /// resolved (`was`: `{kind, from}`), if this session saw it.
-    pub fn explain(&self, part: &Id, mut e: Error) -> Error {
+    /// resolved (`was`: `{kind, from}`), if this session saw it, and
+    /// which feature of its solid's chain took it away (`removed_by`).
+    pub fn explain(&self, part: &Id, e: Error) -> Error {
+        let order = self
+            .project
+            .parts
+            .get(part)
+            .map(|p| p.order().to_vec())
+            .unwrap_or_default();
+        self.explain_in(part, &order, e)
+    }
+
+    /// [`Session::explain`] for the part's list as `order` has it: as a
+    /// write would leave it.
+    pub fn explain_in(&self, part: &Id, order: &[Id], mut e: Error) -> Error {
         if e.code != crate::error::Code::ReferenceUnresolved {
             return e;
         }
@@ -247,23 +270,76 @@ impl Session {
             .and_then(|d| Id::parse(d, "feature").ok());
         let name = e.details["reference"]
             .as_str()
-            .and_then(|r| r.rsplit('/').next());
+            .and_then(|r| r.rsplit('/').next())
+            .map(str::to_owned);
+        let name = name.as_deref();
         let was = dependency
+            .as_ref()
             .zip(name)
-            .and_then(|(d, n)| self.known.get(&(part.clone(), d))?.get(n));
+            .and_then(|(d, n)| self.known.get(&(part.clone(), d.clone()))?.get(n));
         if let Some(w) = was {
             e.details["was"] = w.clone();
+        }
+        let reader = e.details["feature"]
+            .as_str()
+            .and_then(|f| Id::parse(f, "feature").ok());
+        let removed = dependency
+            .zip(name.and_then(crate::doc::reference::parse_name))
+            .zip(reader)
+            .and_then(|((solid, name), reader)| {
+                self.removed_by(part, order, &solid, name, &reader)
+            });
+        if let Some(by) = removed {
+            e.details["removed_by"] = serde_json::json!(by);
         }
         e
     }
 
-    /// Notes what every name of the part's bodies is.
+    /// The feature of `solid`'s chain, before `reader`, that left the
+    /// solid without `name` after the one before it had it, in the cached
+    /// rebuild.
+    fn removed_by(
+        &self,
+        part: &Id,
+        order: &[Id],
+        solid: &Id,
+        name: ryukei::name::Name,
+        reader: &Id,
+    ) -> Option<Id> {
+        let p = self.project.parts.get(part)?;
+        let result = &self.results.get(part)?.1;
+        let solids = crate::solid::Solids::of_order(p, order);
+        let last = solids.view(solid, reader)?;
+        let chain = solids.chain(solid)?;
+        let has = |f: &Id| {
+            result
+                .output(f)
+                .and_then(|o| o.solid(solid))
+                .map(|b| b.body.by_name(name).is_some())
+        };
+        let mut had = false;
+        for f in chain {
+            match has(f) {
+                Some(true) => had = true,
+                Some(false) if had => return Some(f.clone()),
+                _ => {}
+            }
+            if f == last {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Notes what every name of the part's solids is, by solid.
     fn learn(&mut self, part: &Id, result: &PartResult) {
-        for (fid, r) in &result.features {
-            let Some(b) = r.as_ref().ok().and_then(|o| o.body()) else {
-                continue;
-            };
-            let known = self.known.entry((part.clone(), fid.clone())).or_default();
+        let solids = result
+            .features
+            .iter()
+            .filter_map(|(_, r)| r.as_ref().ok())
+            .flat_map(|o| o.solids());
+        for (solid, b) in solids {
+            let known = self.known.entry((part.clone(), solid.clone())).or_default();
             let body = &b.body;
             let names = body
                 .faces()
@@ -335,9 +411,51 @@ impl Session {
     }
 }
 
+/// The files as last read, without copying them: what the session reads
+/// on its own while polling (release states, for `pdm.changed`).
+impl crate::doc::source::Source for Session {
+    fn list(&self, dir: &str) -> Result<Vec<(String, crate::doc::source::Kind)>> {
+        use crate::doc::source::Kind;
+        let at = dir
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .fold(self.root().to_path_buf(), |p, s| p.join(s));
+        let mut out: Vec<(String, Kind)> = Vec::new();
+        for path in self.stamps.range(at.clone()..).map(|(p, _)| p) {
+            let Ok(rest) = path.strip_prefix(&at) else {
+                break;
+            };
+            let mut parts = rest.components();
+            let Some(name) = parts.next() else {
+                continue;
+            };
+            let kind = if parts.next().is_some() {
+                Kind::Dir
+            } else {
+                Kind::File
+            };
+            let entry = (name.as_os_str().to_string_lossy().into_owned(), kind);
+            if !out.contains(&entry) {
+                out.push(entry);
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
+    fn read(&self, rel: &str) -> Result<Option<Vec<u8>>> {
+        let path = rel
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .fold(self.root().to_path_buf(), |p, s| p.join(s));
+        Ok(self.stamps.get(&path).map(|s| s.bytes.to_vec()))
+    }
+}
+
 /// The files a project's state depends on: the manifest, the attributes
-/// that register ryucad with Git, and everything under `parts/` two and
-/// three levels down.
+/// that register ryucad with Git, ryupdm's settings, everything under
+/// `parts/` two and three levels down, and ryupdm's release records, two
+/// levels under `releases/`.
 pub fn files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(listed(root)?.into_iter().map(|(p, _)| p).collect())
 }
@@ -347,7 +465,7 @@ pub fn files(root: &Path) -> Result<Vec<PathBuf>> {
 /// so checking a project costs at most one `stat` per file.
 fn listed(root: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
     let mut out = Vec::new();
-    for name in [MANIFEST, crate::drivers::ATTRIBUTES] {
+    for name in crate::doc::project::ROOT_FILES {
         let path = root.join(name);
         if let Ok(m) = fs::metadata(&path)
             && m.is_file()
@@ -364,6 +482,12 @@ fn listed(root: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
                     out.push((entry, m));
                 }
             }
+        }
+    }
+    let releases = root.join(crate::doc::project::RELEASES);
+    for (part, m) in read_dir(&releases)? {
+        if m.is_dir() {
+            out.extend(read_dir(&part)?.into_iter().filter(|(_, m)| m.is_file()));
         }
     }
     Ok(out)
@@ -400,7 +524,7 @@ fn read_dir(dir: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
 mod tests {
     use super::*;
     use crate::doc::files::{Feature, Manifest, PartFile, Placement, Primitive, PrimitiveType};
-    use crate::doc::project::{feature_path, part_path, write_json};
+    use crate::doc::project::{MANIFEST, feature_path, part_path, write_json};
     use crate::error::Code;
     use crate::rebuild::rebuild_part;
     use crate::units::{Quantity, Unit};
@@ -414,6 +538,7 @@ mod tests {
             ty: PrimitiveType::Sphere,
             params: [("radius".to_owned(), Quantity::parse(r, Unit::Mm).unwrap())].into(),
             placement: Placement::identity(Unit::Mm),
+            combine: crate::doc::solid::Combine::NEW,
         })
         .to_json()
     }
@@ -421,14 +546,7 @@ mod tests {
     fn project() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        write_json(
-            &root.join(MANIFEST),
-            &Manifest {
-                default_unit: Unit::Mm,
-            }
-            .to_json(),
-        )
-        .unwrap();
+        write_json(&root.join(MANIFEST), &Manifest::new(Unit::Mm).to_json()).unwrap();
         write_json(
             &part_path(root, &id("p")),
             &PartFile {
@@ -482,14 +600,33 @@ mod tests {
         )
         .unwrap();
         fs::remove_file(dir.path().join("parts/p/part.json")).unwrap();
+        fs::write(dir.path().join("ryupdm.json"), "{}").unwrap();
+        fs::write(dir.path().join("parts/p/properties.json"), "{}").unwrap();
+        // Release records, two levels down; nothing else under releases/.
+        fs::create_dir_all(dir.path().join("releases/p/deeper")).unwrap();
+        fs::write(dir.path().join("releases/p/A.json"), "{}").unwrap();
+        fs::write(dir.path().join("releases/p/deeper/x.json"), "{}").unwrap();
+        fs::write(dir.path().join("releases/top.json"), "{}").unwrap();
         assert_eq!(
             s.refresh_changes().unwrap(),
             [
                 ("parts/p/features/a.json".to_owned(), "modified"),
                 ("parts/p/features/b.json".to_owned(), "created"),
                 ("parts/p/part.json".to_owned(), "deleted"),
+                ("parts/p/properties.json".to_owned(), "created"),
+                ("releases/p/A.json".to_owned(), "created"),
+                ("ryupdm.json".to_owned(), "created"),
             ]
         );
+        assert!(s.snapshot().contains_key("releases/p/A.json"));
+        // Read in place, the session lists and reads as its snapshot does.
+        use crate::doc::source::Source;
+        let snap = s.snapshot();
+        for dir in ["", "parts", "parts/p", "releases", "releases/p", "nowhere"] {
+            assert_eq!(s.list(dir).unwrap(), snap.list(dir).unwrap(), "{dir}");
+        }
+        assert_eq!(s.read("releases/p/A.json").unwrap(), Some(b"{}".to_vec()));
+        assert_eq!(s.read("parts/p/part.json").unwrap(), None);
     }
 
     #[test]

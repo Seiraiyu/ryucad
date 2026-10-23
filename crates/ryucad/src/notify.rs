@@ -30,15 +30,18 @@ pub enum Topic {
     /// `merge.changed`: a merge in progress started, ended, or what it
     /// leaves to settle changed.
     Merge,
+    /// `pdm.changed`: parts' release states or tags changed.
+    Pdm,
 }
 
 impl Topic {
-    pub const ALL: [Topic; 5] = [
+    pub const ALL: [Topic; 6] = [
         Topic::Model,
         Topic::Project,
         Topic::Participants,
         Topic::Activity,
         Topic::Merge,
+        Topic::Pdm,
     ];
 }
 
@@ -174,7 +177,7 @@ pub fn topics(names: &[String]) -> Result<Vec<Topic>> {
                 Error::new(
                     Code::InvalidParam,
                     format!(
-                        "unknown topic {n:?}; use model, project, participants, activity or merge"
+                        "unknown topic {n:?}; use model, project, participants, activity, merge or pdm"
                     ),
                 )
                 .with("topic", n)

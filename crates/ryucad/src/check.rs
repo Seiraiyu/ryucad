@@ -3,8 +3,16 @@
 //! `doctor`'s issues (stale sketches, conflict records and Git's setup
 //! among them), that no file is left unmerged in Git's index, that every
 //! feature builds, that every body passes ryukei's intersection check and
-//! meshes without faults, and that the session's cached results are what a
-//! rebuild from nothing gives. CI and hosted review run it.
+//! meshes without faults, that the session's cached results are what a
+//! rebuild from nothing gives, and ryupdm's release checks. CI and hosted
+//! review run it.
+//!
+//! The report is versioned (`schema`, [`ryupdm::check::SCHEMA`]): each
+//! finding is `{code, severity, source, part?, feature?, label?, message,
+//! details?}` plus what its code adds, `source` being `doctor`, `release`
+//! or absent for ryucad's own. Adding a field or a code is not a new
+//! schema; changing or removing one is. A hosted job can run `ryucad check
+//! --against <base>` and gate on the exit code and the findings.
 
 use crate::doc::id::Id;
 use crate::error::{Code, Error, Result};
@@ -121,9 +129,16 @@ fn result(r: &Result<Output>) -> Value {
 /// `check`: the whole project, or one part (with the project's own
 /// issues). With `against`, the report adds what changed from that
 /// revision to the working files, the model included (a pull request's
-/// check reads as what the branch did). Fails with `check_failed`, the
-/// report in its details, when any finding is an error.
-pub fn run(session: &mut Session, part: Option<&str>, against: Option<&str>) -> Result<Value> {
+/// check reads as what the branch did); with `results`, official releases
+/// are rebuilt and compared with their records. Fails with
+/// `check_failed`, the report in its details, when any finding is an
+/// error.
+pub fn run(
+    session: &mut Session,
+    part: Option<&str>,
+    against: Option<&str>,
+    results: bool,
+) -> Result<Value> {
     // A revision that isn't there fails before anything is built.
     let changes = match against {
         Some(rev) => {
@@ -179,6 +194,14 @@ pub fn run(session: &mut Session, part: Option<&str>, against: Option<&str>) -> 
             }
         }
     }
+    // A part's release findings belong to it, whether or not the part is
+    // still there.
+    let one = part.map(crate::server::part_id).transpose()?;
+    findings.extend(
+        crate::release::findings(session, results)?
+            .into_iter()
+            .filter(|f| one.as_ref().is_none_or(|p| f["part"] == p.as_str())),
+    );
     let mut parts = Vec::new();
     for id in &ids {
         let p = session.project().part(id)?.clone();
@@ -219,32 +242,46 @@ pub fn run(session: &mut Session, part: Option<&str>, against: Option<&str>) -> 
                     f["error"] = json!(session.explain(id, e.clone()));
                     findings.push(f);
                 }
-                Ok(Output::Body(b)) => bodies.push((fid.clone(), b.clone())),
-                // A stale sketch is doctor's to report, with its repair.
-                Ok(Output::Sketch(_)) => {}
+                // A body is checked as its solid shows; a stale sketch is
+                // doctor's to report, with its repair.
+                Ok(Output::Solids(_) | Output::Sketch(_)) => {}
             }
         }
-        let loaded: Vec<(Id, crate::doc::files::Feature)> = bodies
+        // Each solid as the model shows it, by founder, and the feature
+        // that left it so (which sizes its mesh).
+        let solids = crate::solid::Solids::of(&p);
+        for shown in fresh.shown(&solids) {
+            if let Some((f, b)) = shown.state {
+                bodies.push((shown.solid.clone(), f.clone(), b.clone()));
+            }
+        }
+        let loaded: Vec<crate::doc::files::Feature> = bodies
             .iter()
-            .filter_map(|(fid, _)| Some((fid.clone(), p.features[fid].as_ref().ok()?.clone())))
+            .map(|(_, f, _)| p.features[f].as_ref().expect("built, so loaded").clone())
             .collect();
         let items: Vec<(&crate::doc::files::Feature, &Built)> = bodies
             .iter()
             .zip(&loaded)
-            .map(|((_, b), (_, f))| (f, b.as_ref()))
+            .map(|((_, _, b), f)| (f, b.as_ref()))
             .collect();
         let meshes =
             crate::mesh::Cache::default().get_all(&items, crate::mesh::Quality::Normal, usize::MAX);
         let found: Vec<Vec<Value>> = bodies
             .par_iter()
             .zip(&meshes)
-            .map(|((fid, b), m)| body_findings(id, fid, b, m))
+            .map(|((solid, _, b), m)| body_findings(id, solid, b, m))
             .collect();
         findings.extend(found.into_iter().flatten());
-        parts.push(json!({"part": id, "hash": fresh.hash, "features": features}));
+        let checked: Vec<Value> = bodies
+            .iter()
+            .map(|(solid, f, _)| json!({"solid": solid, "shown": f}))
+            .collect();
+        parts.push(json!({"part": id, "hash": fresh.hash, "features": features,
+                          "solids": checked}));
     }
     let errors = findings.iter().filter(|f| f["severity"] == "error").count();
     let mut report = json!({
+        "schema": ryupdm::check::SCHEMA,
         "passed": errors == 0,
         "errors": errors,
         "warnings": findings.len() - errors,
@@ -351,6 +388,37 @@ mod tests {
     }
 
     #[test]
+    fn solids_are_checked_as_they_show() {
+        let (_dir, mut s) = project();
+        for f in [
+            json!({"type": "box", "id": "a", "params": {"x": 10, "y": 10, "z": 10}}),
+            json!({"type": "cylinder", "id": "hole", "operation": "cut", "targets": ["a"],
+                   "params": {"radius": 2, "height": 20}, "placement": {"origin": [5, 5, -5]}}),
+            json!({"type": "box", "id": "lug", "params": {"x": 4, "y": 4, "z": 4},
+                   "placement": {"origin": [10, 3, 0]}}),
+            json!({"type": "boolean", "id": "u", "op": "unite", "target": "a", "tools": ["lug"]}),
+        ] {
+            let mut f = f;
+            f["part"] = json!("q");
+            call(&mut s, "feature.add", f).unwrap();
+        }
+        let v = call(&mut s, "check", json!({"part": "q"})).unwrap();
+        assert_eq!(v["passed"], true, "{v}");
+        let q = v["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["part"] == "q")
+            .unwrap();
+        // The sphere already there, and a as the boolean left it; the lug
+        // is a's now.
+        assert_eq!(
+            q["solids"],
+            json!([{"solid": "c", "shown": "c"}, {"solid": "a", "shown": "u"}])
+        );
+    }
+
+    #[test]
     fn what_fails_is_found() {
         let (dir, mut s) = project();
         let root = dir.path();
@@ -381,6 +449,91 @@ mod tests {
         assert_eq!(p["parts"].as_array().unwrap().len(), 1);
         let e = call(&mut s, "check", json!({"part": "nope"})).unwrap_err();
         assert_eq!(e.code, Code::NotFound);
+    }
+
+    #[test]
+    fn parts_numbered_alike_fail() {
+        let (dir, mut s) = project();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "p", "properties": {"number": "7"}}),
+        )
+        .unwrap();
+        // By hand, as a merge of two branches might leave it.
+        let q = crate::doc::canonical::to_string(
+            &json!({"format": 1, "kind": "ryupdm.properties", "number": "7"}),
+        );
+        std::fs::write(dir.path().join("parts/q/properties.json"), q).unwrap();
+        let e = call(&mut s, "check", json!({})).unwrap_err();
+        assert_eq!(
+            codes(&e.details),
+            ["part_number_duplicate", "part_number_duplicate"]
+        );
+        assert_eq!(e.details["findings"][0]["source"], "doctor");
+        // Each involves both parts, so checking either keeps both.
+        let e = call(&mut s, "check", json!({"part": "q"})).unwrap_err();
+        assert_eq!(e.details["errors"], 2);
+    }
+
+    #[test]
+    fn release_findings_are_part_of_the_check() {
+        use crate::git::tests::git;
+        let (dir, mut s) = project();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "q", "properties": {"number": "1"}}),
+        )
+        .unwrap();
+        call(&mut s, "release.propose", json!({"part": "q"})).unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "release q A"]);
+        let v = call(&mut s, "check", json!({})).unwrap();
+        assert_eq!((&v["schema"], &v["passed"]), (&json!(1), &json!(true)));
+        let f = v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["source"] == "release")
+            .unwrap();
+        assert_eq!(
+            (&f["code"], &f["part"], &f["label"]),
+            (&json!("release_tag_missing"), &json!("q"), &json!("A"))
+        );
+        // Only the part asked about.
+        let p = call(&mut s, "check", json!({"part": "p"})).unwrap();
+        assert!(
+            p["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|f| f["source"] != "release")
+        );
+        // Released content rebuilds to what its record says.
+        let v = call(&mut s, "check", json!({"results": true})).unwrap();
+        let release: Vec<&Value> = v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["source"] == "release")
+            .collect();
+        assert_eq!(release.len(), 1, "{v}");
+        // An official record edited is an error.
+        let path = root.join("releases/q/A.json");
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replace("\"agent\"", "\"someone\"")).unwrap();
+        let e = call(&mut s, "check", json!({"part": "q"})).unwrap_err();
+        assert_eq!(e.code, Code::CheckFailed);
+        assert!(
+            e.details["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["code"] == "release_modified")
+        );
     }
 
     #[test]

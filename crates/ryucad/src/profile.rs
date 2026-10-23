@@ -324,7 +324,7 @@ mod tests {
     }
 
     fn solved(v: serde_json::Value) -> Solved {
-        let mut f = crate::doc::sketch::tests::rectangle();
+        let mut f = crate::doc::fixtures::rectangle();
         for (k, x) in v.as_object().unwrap() {
             f[k] = x.clone();
         }

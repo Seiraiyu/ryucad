@@ -16,7 +16,9 @@ png = "0.18"
 # An 8×8 bitmap font for labels in renders.
 font8x8 = { version = "0.3", default-features = false }
 rayon = "1"
+ryucad-doc = { path = "../ryucad-doc" }
 ryukei = { path = "../ryukei" }
+ryupdm = { path = "../ryupdm" }
 ryusketch = { path = "../ryusketch" }
 serde = { version = "1", features = ["derive"] }
 # Correctly rounded float parsing: without it, a number read back can be
@@ -30,6 +32,7 @@ num-bigint = "0.4"
 num-rational = { version = "0.4", features = ["num-bigint"] }
 num-traits = "0.2"
 proptest = "1"
+ryucad-doc = { path = "../ryucad-doc", features = ["test-support"] }
 ryukei-testkit = { path = "../ryukei-testkit" }
 tempfile = "3"
 
