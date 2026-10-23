@@ -109,6 +109,11 @@ impl Pair {
 
 impl Drop for Pair {
     fn drop(&mut self) {
+        // A panic here while a failed test unwinds would abort the whole
+        // binary and lose the failure's message.
+        if std::thread::panicking() {
+            return;
+        }
         let _ = self.run_in(&self.daemon, "", &["daemon", "stop"]);
     }
 }
