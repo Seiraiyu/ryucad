@@ -171,11 +171,19 @@ fn the_tree_groups_features_by_solid() {
     h.get_by_label("whole (boolean, unite)");
     h.get_by_label("boss (tool, consumed)");
     h.get_by_label("slot (box, cut)").click();
-    frames(&mut h, |a| a.opened().ws.made.is_some());
+    frames(&mut h, |a| {
+        a.opened().ws.made.is_some() && a.opened().ws.form.is_some()
+    });
     assert_eq!(
         h.state().opened().view.chosen,
         Some(("p".to_owned(), "slot".to_owned()))
     );
+    // Its form says what it does to which solids.
+    h.step();
+    h.get_by(|n| {
+        n.role() == egui::accesskit::Role::ComboBox && n.label().as_deref() == Some("operation")
+    });
+    h.get_by_label("targets: base");
 }
 
 #[test]

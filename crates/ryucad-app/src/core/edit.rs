@@ -1,11 +1,12 @@
-//! Editing a feature's parameters and placement: the property panel's form.
+//! Editing a feature's parameters and placement, what it does to solids,
+//! an extrude's extent and a boolean's solids: the property panel's form.
 //! Values stay as written (quantities with their units). A save is an
 //! ordinary `feature.edit` with the revision the form was read at, so a
 //! human's stale edit fails with `conflict` like an agent's; the form then
 //! reloads and lists what changed instead of overwriting it.
 
 use ryucad::error::Error;
-use ryucad::proto::{PlacementArg, Request};
+use ryucad::proto::{FeatureFields, PlacementArg, Request};
 use serde_json::{Map, Value, json};
 
 /// One editable value: its name, as read, and as typed.
@@ -27,6 +28,93 @@ impl Field {
 
     pub fn dirty(&self) -> bool {
         self.text.trim() != self.read
+    }
+}
+
+/// One of a list: as read, and as chosen.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Choice {
+    pub name: String,
+    pub options: Vec<String>,
+    pub read: String,
+    pub chosen: String,
+}
+
+impl Choice {
+    pub fn new(name: &str, options: &[&str], read: String) -> Choice {
+        Choice {
+            name: name.to_owned(),
+            options: options.iter().map(|o| (*o).to_owned()).collect(),
+            chosen: read.clone(),
+            read,
+        }
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.chosen != self.read
+    }
+}
+
+/// Some of a list, in the order chosen: as read, and as chosen.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Picks {
+    pub name: String,
+    pub options: Vec<String>,
+    pub read: Vec<String>,
+    pub chosen: Vec<String>,
+}
+
+impl Picks {
+    pub fn new(name: &str, read: Vec<String>) -> Picks {
+        Picks {
+            name: name.to_owned(),
+            options: read.clone(),
+            chosen: read.clone(),
+            read,
+        }
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.chosen != self.read
+    }
+
+    /// Picks `option`, last, or unpicks it.
+    pub fn toggle(&mut self, option: &str) {
+        match self.chosen.iter().position(|o| o == option) {
+            Some(i) => {
+                self.chosen.remove(i);
+            }
+            None => self.chosen.push(option.to_owned()),
+        }
+    }
+}
+
+/// True or false: as read, and as chosen.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Flag {
+    pub name: String,
+    pub read: bool,
+    pub chosen: bool,
+}
+
+impl Flag {
+    pub fn dirty(&self) -> bool {
+        self.chosen != self.read
+    }
+}
+
+/// An extrude's extent: its type, its length (blind or symmetric) and
+/// whether through all goes each way.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtentForm {
+    pub ty: Choice,
+    pub length: Field,
+    pub both: Flag,
+}
+
+impl ExtentForm {
+    pub fn dirty(&self) -> bool {
+        self.ty.dirty() || self.length.dirty() || self.both.dirty()
     }
 }
 
@@ -53,6 +141,16 @@ pub struct Form {
     pub origin: [Field; 3],
     pub z: [Field; 3],
     pub x: [Field; 3],
+    /// A primitive's, extrude's or revolve's operation and the solids it
+    /// acts on.
+    pub operation: Option<Choice>,
+    pub targets: Option<Picks>,
+    /// An extrude's extent.
+    pub extent: Option<ExtentForm>,
+    /// A boolean's operation, target and tools.
+    pub op: Option<Choice>,
+    pub target: Option<Choice>,
+    pub tools: Option<Picks>,
     /// What changed under a save that conflicted.
     pub changed: Vec<Changed>,
     /// Why the last save failed, other than a conflict.
@@ -85,19 +183,80 @@ impl Form {
             .map(|(k, q)| Field::new(k, text(q)))
             .collect();
         let p = &v["placement"];
+        let ty = text(&v["type"]);
+        let strings =
+            |v: &Value| -> Vec<String> { v.as_array().into_iter().flatten().map(text).collect() };
+        let acts = matches!(ty.as_str(), "extrude" | "revolve")
+            || v["params"].is_object() && v["placement"].is_object();
+        let operation = acts.then(|| {
+            let read = v["operation"].as_str().unwrap_or("new").to_owned();
+            Choice::new("operation", &["new", "join", "cut", "intersect"], read)
+        });
+        let targets = acts.then(|| Picks::new("targets", strings(&v["targets"])));
+        let extent = (ty == "extrude").then(|| {
+            let e = &v["extent"];
+            ExtentForm {
+                ty: Choice::new(
+                    "extent",
+                    &["blind", "symmetric", "up_to", "through_all"],
+                    text(&e["type"]),
+                ),
+                length: Field::new("length", text(&e["length"])),
+                both: Flag {
+                    name: "both ways".to_owned(),
+                    read: e["both"] == true,
+                    chosen: e["both"] == true,
+                },
+            }
+        });
+        let boolean = ty == "boolean";
         Form {
             part: part.to_owned(),
             feature: text(&v["id"]),
-            ty: text(&v["type"]),
             revision: text(&v["revision"]),
             params,
             origin: triple(["origin x", "origin y", "origin z"], &p["origin"]),
             z: triple(["z x", "z y", "z z"], &p["z"]),
             x: triple(["x x", "x y", "x z"], &p["x"]),
+            operation,
+            targets,
+            extent,
+            op: boolean
+                .then(|| Choice::new("op", &["unite", "subtract", "intersect"], text(&v["op"]))),
+            target: boolean.then(|| Choice::new("target", &[], text(&v["target"]))),
+            tools: boolean.then(|| Picks::new("tools", strings(&v["tools"]))),
+            ty,
             changed: Vec::new(),
             error: None,
             saving: false,
         }
+    }
+
+    /// Offers `solids` (by founder) to pick targets, tools and a target
+    /// from, besides those already chosen; never the feature itself.
+    pub fn offer(&mut self, solids: &[String]) {
+        let me = self.feature.clone();
+        let add = |options: &mut Vec<String>| {
+            for s in solids {
+                if *s != me && !options.contains(s) {
+                    options.push(s.clone());
+                }
+            }
+        };
+        for picks in [&mut self.targets, &mut self.tools].into_iter().flatten() {
+            add(&mut picks.options);
+        }
+        if let Some(t) = &mut self.target {
+            if !t.read.is_empty() && !t.options.contains(&t.read) {
+                t.options.push(t.read.clone());
+            }
+            add(&mut t.options);
+        }
+    }
+
+    /// Whether the feature has a placement to edit.
+    pub fn placed(&self) -> bool {
+        self.origin.iter().any(|f| !f.read.is_empty())
     }
 
     fn fields(&self) -> impl Iterator<Item = &Field> {
@@ -108,9 +267,78 @@ impl Form {
             .chain(&self.x)
     }
 
-    /// Whether anything was typed.
+    /// Whether anything was typed or chosen.
     pub fn dirty(&self) -> bool {
         self.fields().any(Field::dirty)
+            || [&self.operation, &self.op, &self.target]
+                .into_iter()
+                .flatten()
+                .any(Choice::dirty)
+            || [&self.targets, &self.tools]
+                .into_iter()
+                .flatten()
+                .any(Picks::dirty)
+            || self.extent.as_ref().is_some_and(ExtentForm::dirty)
+    }
+
+    /// Everything typed or chosen goes back as it was read.
+    pub fn revert(&mut self) {
+        for f in self
+            .params
+            .iter_mut()
+            .chain(&mut self.origin)
+            .chain(&mut self.z)
+            .chain(&mut self.x)
+        {
+            f.text.clone_from(&f.read);
+        }
+        for c in [&mut self.operation, &mut self.op, &mut self.target]
+            .into_iter()
+            .flatten()
+        {
+            c.chosen.clone_from(&c.read);
+        }
+        for p in [&mut self.targets, &mut self.tools].into_iter().flatten() {
+            p.chosen.clone_from(&p.read);
+        }
+        if let Some(e) = &mut self.extent {
+            e.ty.chosen.clone_from(&e.ty.read);
+            e.length.text.clone_from(&e.length.read);
+            e.both.chosen = e.both.read;
+        }
+        self.error = None;
+    }
+
+    /// The fields besides parameters and placement that changed, as
+    /// `feature.edit` takes them.
+    fn fields_given(&self) -> FeatureFields {
+        let chosen =
+            |c: &Option<Choice>| c.as_ref().filter(|c| c.dirty()).map(|c| c.chosen.clone());
+        let picked = |p: &Option<Picks>| p.as_ref().filter(|p| p.dirty()).map(|p| p.chosen.clone());
+        // Back to `new`, a feature has no targets to give.
+        let operation = chosen(&self.operation);
+        let targets = match operation.as_deref() {
+            Some("new") => None,
+            _ => picked(&self.targets),
+        };
+        let extent = self.extent.as_ref().filter(|e| e.dirty()).map(|e| {
+            let mut v = json!({"type": e.ty.chosen});
+            match e.ty.chosen.as_str() {
+                "blind" | "symmetric" => v["length"] = json!(e.length.text.trim()),
+                "through_all" => v["both"] = json!(e.both.chosen),
+                _ => {}
+            }
+            v
+        });
+        FeatureFields {
+            operation,
+            targets,
+            extent,
+            op: chosen(&self.op),
+            target: chosen(&self.target),
+            tools: picked(&self.tools),
+            ..FeatureFields::default()
+        }
     }
 
     /// The `feature.edit` that saves what was typed, guarded by the
@@ -155,7 +383,7 @@ impl Form {
             id: self.feature.clone(),
             params,
             placement: moved.then_some(placement),
-            fields: Default::default(),
+            fields: self.fields_given(),
             expected_revision: Some(self.revision.clone()),
         })
     }
@@ -164,6 +392,14 @@ impl Form {
     /// changed under what was typed listed.
     pub fn reloaded(&self, v: &Value) -> Form {
         let mut fresh = Form::from_show(&self.part, v);
+        // What was offered stays offered.
+        let offered: Vec<String> = [&self.targets, &self.tools]
+            .into_iter()
+            .flatten()
+            .flat_map(|p| p.options.clone())
+            .chain(self.target.iter().flat_map(|t| t.options.clone()))
+            .collect();
+        fresh.offer(&offered);
         fresh.changed = self
             .fields()
             .filter(|f| f.dirty())
@@ -176,6 +412,32 @@ impl Form {
                 })
             })
             .collect();
+        let choices = |f: &Form| -> Vec<(String, String, String)> {
+            [&f.operation, &f.op, &f.target]
+                .into_iter()
+                .flatten()
+                .map(|c| (c.name.clone(), c.read.clone(), c.chosen.clone()))
+                .chain(
+                    [&f.targets, &f.tools]
+                        .into_iter()
+                        .flatten()
+                        .map(|p| (p.name.clone(), p.read.join(", "), p.chosen.join(", "))),
+                )
+                .collect()
+        };
+        let now = choices(&fresh);
+        for (name, read, chosen) in choices(self) {
+            if read == chosen {
+                continue;
+            }
+            if let Some((_, theirs, _)) = now.iter().find(|(n, r, _)| *n == name && *r != read) {
+                fresh.changed.push(Changed {
+                    name,
+                    theirs: theirs.clone(),
+                    yours: chosen,
+                });
+            }
+        }
         fresh
     }
 }
@@ -301,6 +563,85 @@ mod tests {
             "placement": {"origin": [{"value": "0 mm", "m": 0.0}, {"value": "0 mm", "m": 0.0}, {"value": "5 mm", "m": 0.005}],
                           "z": [0, 0, 1], "x": [1, 0, 0]},
         })
+    }
+
+    /// The fields a form's `feature.edit` gives besides parameters and
+    /// placement.
+    fn given(f: &Form) -> FeatureFields {
+        let Request::FeatureEdit { fields, .. } = f.request().unwrap() else {
+            panic!()
+        };
+        fields
+    }
+
+    #[test]
+    fn what_a_feature_does_to_solids_is_edited() {
+        // A cylinder that cuts the base, with the boss offered too.
+        let mut v = shown("3 mm", "r1");
+        v["operation"] = json!("cut");
+        v["targets"] = json!(["base"]);
+        let mut f = Form::from_show("p", &v);
+        f.offer(&["base".into(), "boss".into(), "slot".into()]);
+        let t = f.targets.as_mut().unwrap();
+        assert_eq!(t.options, ["base", "slot"]);
+        assert_eq!(f.operation.as_ref().unwrap().read, "cut");
+        assert!(!f.dirty());
+        f.targets.as_mut().unwrap().toggle("slot");
+        f.operation.as_mut().unwrap().chosen = "join".into();
+        let fields = given(&f);
+        assert_eq!(fields.operation.as_deref(), Some("join"));
+        assert_eq!(
+            fields.targets,
+            Some(vec!["base".to_owned(), "slot".to_owned()])
+        );
+        // Back to new: no targets.
+        f.operation.as_mut().unwrap().chosen = "new".into();
+        assert_eq!(given(&f).targets, None);
+        f.revert();
+        assert!(!f.dirty());
+        // A sketch has none of it.
+        let sketch = Form::from_show("p", &json!({"id": "s", "type": "sketch", "plane": "xy"}));
+        assert!(sketch.operation.is_none() && sketch.extent.is_none() && !sketch.placed());
+    }
+
+    #[test]
+    fn an_extent_and_a_boolean_are_edited() {
+        let e = json!({"id": "h", "type": "extrude", "revision": "r1", "sketch": "s",
+                       "operation": "cut", "targets": ["base"],
+                       "extent": {"type": "blind", "length": {"value": "5 mm", "m": 0.005}}});
+        let mut f = Form::from_show("p", &e);
+        let x = f.extent.as_mut().unwrap();
+        assert_eq!(
+            (x.ty.read.as_str(), x.length.read.as_str()),
+            ("blind", "5 mm")
+        );
+        x.length.text = "6 mm".into();
+        assert_eq!(
+            given(&f).extent,
+            Some(json!({"type": "blind", "length": "6 mm"}))
+        );
+        let x = f.extent.as_mut().unwrap();
+        x.ty.chosen = "through_all".into();
+        x.both.chosen = true;
+        assert_eq!(
+            given(&f).extent,
+            Some(json!({"type": "through_all", "both": true}))
+        );
+        let b = json!({"id": "u", "type": "boolean", "revision": "r1", "op": "unite",
+                       "target": "base", "tools": ["boss"]});
+        let mut f = Form::from_show("p", &b);
+        f.offer(&["base".into(), "boss".into(), "lug".into(), "u".into()]);
+        assert_eq!(f.target.as_ref().unwrap().options, ["base", "boss", "lug"]);
+        assert!(f.operation.is_none());
+        f.op.as_mut().unwrap().chosen = "subtract".into();
+        f.tools.as_mut().unwrap().toggle("lug");
+        let fields = given(&f);
+        assert_eq!(fields.op.as_deref(), Some("subtract"));
+        assert_eq!(
+            fields.tools,
+            Some(vec!["boss".to_owned(), "lug".to_owned()])
+        );
+        assert_eq!(fields.target, None);
     }
 
     #[test]

@@ -91,3 +91,54 @@ fn the_window_shows_solids() {
     ws.choose(None);
     assert!(ws.made.is_none());
 }
+
+#[test]
+fn the_form_edits_what_a_feature_acts_on() {
+    let p = Project::new().with_part();
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "box",
+        "--id",
+        "slot",
+        "--operation",
+        "cut",
+        "--target",
+        "base",
+        "--param",
+        "x=4",
+        "--param",
+        "y=20",
+        "--param",
+        "z=4",
+        "--origin=-2,-5,3",
+    ]);
+    let mut ws = open(&p);
+    ws.open_form(Some(key("slot")));
+    assert!(ws.wait_until(WAIT, |ws| ws.form.is_some()));
+    let form = ws.form.as_mut().unwrap();
+    assert_eq!(form.operation.as_ref().unwrap().chosen, "cut");
+    let targets = form.targets.as_mut().unwrap();
+    assert_eq!(targets.options, ["base", "boss"]);
+    // The slot cuts the boss too: the same feature.edit an agent sends.
+    targets.toggle("boss");
+    ws.save_form();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.form.as_ref().is_some_and(|f| !f.saving && !f.dirty())
+    }));
+    let shown = p.ok(&["feature", "show", "p", "slot"]);
+    assert_eq!(shown["targets"], serde_json::json!(["base", "boss"]));
+    // A refusal says why, and keeps what was chosen.
+    let form = ws.form.as_mut().unwrap();
+    form.operation.as_mut().unwrap().chosen = "intersect".into();
+    form.targets.as_mut().unwrap().toggle("base");
+    form.targets.as_mut().unwrap().toggle("boss");
+    ws.save_form();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.form
+            .as_ref()
+            .is_some_and(|f| !f.saving && f.error.is_some())
+    }));
+    assert!(ws.form.as_ref().unwrap().dirty());
+}

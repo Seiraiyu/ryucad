@@ -120,6 +120,16 @@ impl Part {
         self.solids.iter().find(|s| s.id == id)
     }
 
+    /// The features that found solids, in list order: what a feature can
+    /// act on, consumed ones included (the daemon says which can't).
+    pub fn founders(&self) -> Vec<String> {
+        self.features
+            .iter()
+            .filter(|f| f.operation.is_none() && f.solids == [f.id.clone()])
+            .map(|f| f.id.clone())
+            .collect()
+    }
+
     /// The solids the model shows that `feature` founds or acts on.
     pub fn solids_of(&self, feature: &str) -> Vec<&Solid> {
         self.solids

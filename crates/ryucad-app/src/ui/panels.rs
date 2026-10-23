@@ -556,6 +556,37 @@ pub fn status(ui: &mut egui::Ui, ws: &Workspace) {
     });
 }
 
+/// A row choosing one of a list, by name.
+fn choice_row(ui: &mut egui::Ui, c: &mut crate::core::edit::Choice) {
+    ui.label(&c.name);
+    let r = egui::ComboBox::from_id_salt(("choice", &c.name))
+        .selected_text(&c.chosen)
+        .show_ui(ui, |ui| {
+            for o in &c.options {
+                ui.selectable_value(&mut c.chosen, o.clone(), o);
+            }
+        });
+    let r = r.response;
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &c.name));
+    if c.dirty() {
+        r.on_hover_text(format!("was {}", c.read));
+    }
+    ui.end_row();
+}
+
+/// Some of a list, each a checkbox, in the order picked.
+fn picks(ui: &mut egui::Ui, p: &mut crate::core::edit::Picks) {
+    ui.label(format!("{}: {}", p.name, p.chosen.join(", ")));
+    ui.horizontal_wrapped(|ui| {
+        for o in p.options.clone() {
+            let mut on = p.chosen.contains(&o);
+            if ui.checkbox(&mut on, &o).changed() {
+                p.toggle(&o);
+            }
+        }
+    });
+}
+
 fn field_row(ui: &mut egui::Ui, f: &mut crate::core::edit::Field, label: &str) {
     ui.label(label);
     let edit = egui::TextEdit::singleline(&mut f.text).desired_width(110.0);
@@ -750,20 +781,46 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
             let name = f.name.clone();
             field_row(ui, f, &name);
         }
-    });
-    ui.collapsing("Placement", |ui| {
-        egui::Grid::new("placement").num_columns(2).show(ui, |ui| {
-            for (axis, fields) in [
-                ("origin", &mut form.origin),
-                ("z axis", &mut form.z),
-                ("x axis", &mut form.x),
-            ] {
-                for (k, f) in ["x", "y", "z"].iter().zip(fields.iter_mut()) {
-                    field_row(ui, f, &format!("{axis} {k}"));
-                }
+        if let Some(e) = &mut form.extent {
+            choice_row(ui, &mut e.ty);
+            if matches!(e.ty.chosen.as_str(), "blind" | "symmetric") {
+                field_row(ui, &mut e.length, "length");
             }
-        });
+            if e.ty.chosen == "through_all" {
+                ui.label("");
+                ui.checkbox(&mut e.both.chosen, "both ways");
+                ui.end_row();
+            }
+        }
+        for c in [&mut form.operation, &mut form.op, &mut form.target]
+            .into_iter()
+            .flatten()
+        {
+            choice_row(ui, c);
+        }
     });
+    // What it acts on: none for a new solid.
+    let new = form.operation.as_ref().is_some_and(|o| o.chosen == "new");
+    for p in [&mut form.targets, &mut form.tools].into_iter().flatten() {
+        if !new {
+            picks(ui, p);
+        }
+    }
+    if form.placed() {
+        ui.collapsing("Placement", |ui| {
+            egui::Grid::new("placement").num_columns(2).show(ui, |ui| {
+                for (axis, fields) in [
+                    ("origin", &mut form.origin),
+                    ("z axis", &mut form.z),
+                    ("x axis", &mut form.x),
+                ] {
+                    for (k, f) in ["x", "y", "z"].iter().zip(fields.iter_mut()) {
+                        field_row(ui, f, &format!("{axis} {k}"));
+                    }
+                }
+            });
+        });
+    }
     if let Some(e) = &form.error {
         ui.colored_label(ui.visuals().error_fg_color, &e.message);
     }
@@ -777,16 +834,7 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
             .add_enabled(dirty && !saving, egui::Button::new("Revert"))
             .clicked()
         {
-            for f in form
-                .params
-                .iter_mut()
-                .chain(&mut form.origin)
-                .chain(&mut form.z)
-                .chain(&mut form.x)
-            {
-                f.text.clone_from(&f.read);
-            }
-            form.error = None;
+            form.revert();
         }
         if saving {
             ui.spinner();

@@ -927,10 +927,14 @@ impl Workspace {
                         (Some(_), None) => false,
                     };
                 if wanted {
-                    self.form = Some(match before {
+                    let mut form = match before {
                         Some(b) => b.reloaded(&a.result),
                         None => Form::from_show(&part, &a.result),
-                    });
+                    };
+                    if let Some(p) = self.model.parts.get(&part) {
+                        form.offer(&p.founders());
+                    }
+                    self.form = Some(form);
                 }
             }
             (Pending::Dim(part, sketch, constraint, before), Ok(a)) => {
