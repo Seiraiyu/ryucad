@@ -457,6 +457,13 @@ fn finish(
 /// sketch from `before` (the results of the features it may read), builds
 /// anything else.
 pub fn rebuild_feature(part: &Part, id: &Id, f: &Feature, before: &dyn Results) -> Result<Output> {
+    if f.combine().is_some_and(|c| !c.is_new()) {
+        return Err(Error::new(
+            Code::Internal,
+            format!("{id}: joining, cutting and intersecting solids comes in a later task"),
+        )
+        .with("feature", id));
+    }
     match f {
         Feature::Sketch(s) => crate::sketch::context(part, part.order(), id, s, before)
             .and_then(|c| crate::sketch::solve_in(id, s, &c))
@@ -618,6 +625,7 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), Quantity::parse(v, Unit::Mm).unwrap()))
                 .collect(),
             placement: Placement::identity(Unit::Mm),
+            combine: crate::doc::solid::Combine::NEW,
         })
     }
 

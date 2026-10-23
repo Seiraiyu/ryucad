@@ -1290,6 +1290,7 @@ fn feature_add(
                 ty,
                 params: Primitive::params_from_json(ty, &Value::Object(given.params), unit, &env)?,
                 placement: new_placement(given.placement.unwrap_or_default(), unit, &env)?,
+                combine: crate::doc::solid::Combine::NEW,
             })
         }
     };

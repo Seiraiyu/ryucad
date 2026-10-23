@@ -555,6 +555,7 @@ mod tests {
                 ty: PrimitiveType::Sphere,
                 params: [("radius".to_owned(), Quantity::parse(r, Unit::Mm).unwrap())].into(),
                 placement: Placement::identity(Unit::Mm),
+                combine: crate::doc::solid::Combine::NEW,
             });
             write_json(&feature_path(root, &p, &id(f)), &feature.to_json()).unwrap();
         }
@@ -727,6 +728,7 @@ mod tests {
                 ty: PrimitiveType::Sphere,
                 params: [("radius".to_owned(), Quantity::parse(r, Unit::Mm).unwrap())].into(),
                 placement: Placement::identity(Unit::Mm),
+                combine: crate::doc::solid::Combine::NEW,
             })
             .to_json()
         };

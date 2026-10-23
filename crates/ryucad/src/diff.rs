@@ -1191,6 +1191,7 @@ mod tests {
             ty: PrimitiveType::Sphere,
             params: [("radius".to_owned(), Quantity::parse("1", Unit::Mm).unwrap())].into(),
             placement: Placement::identity(Unit::Mm),
+            combine: crate::doc::solid::Combine::NEW,
         });
         let a = crate::rebuild::build_feature(&id("p"), &id("one"), &f).unwrap();
         let b = crate::rebuild::build_feature(&id("p"), &id("two"), &f).unwrap();

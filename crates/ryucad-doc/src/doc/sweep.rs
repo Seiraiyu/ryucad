@@ -1,9 +1,10 @@
-//! Extrude and revolve features: a sketch's closed loops swept into solids,
-//! each feature its own body.
+//! Extrude and revolve features: a sketch's closed loops swept into a
+//! solid of their own, or joined to, cut from or intersected with others.
 
 use super::files::{Obj, invalid};
 use super::id::Id;
 use super::reference::Reference;
+use super::solid::Combine;
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
 use crate::units::{Field, Quantity, Unit};
@@ -34,6 +35,7 @@ pub struct Extrude {
     pub extent: Extent,
     /// Against the sketch's normal.
     pub reverse: bool,
+    pub combine: Combine,
 }
 
 /// How far a revolve turns.
@@ -63,6 +65,7 @@ pub struct Revolve {
     pub angle: Angle,
     /// Half the angle each side of the sketch's plane.
     pub symmetric: bool,
+    pub combine: Combine,
 }
 
 fn invalid_extent(at: &str, msg: String) -> Error {
@@ -224,6 +227,7 @@ impl Extrude {
         if self.reverse {
             v["reverse"] = json!(true);
         }
+        self.combine.write(&mut v);
         v
     }
 
@@ -234,6 +238,7 @@ impl Extrude {
             loops: loops_from_json(o.take_opt("loops"))?,
             extent: Extent::from_json(&o.take("extent")?, default, env)?,
             reverse: flag(o, "reverse")?,
+            combine: Combine::from_fields(o)?,
         })
     }
 }
@@ -249,6 +254,7 @@ impl Revolve {
         if self.symmetric {
             v["symmetric"] = json!(true);
         }
+        self.combine.write(&mut v);
         v
     }
 
@@ -272,6 +278,7 @@ impl Revolve {
             axis,
             angle: Angle::from_json(&o.take("angle")?, env)?,
             symmetric: flag(o, "symmetric")?,
+            combine: Combine::from_fields(o)?,
         })
     }
 }

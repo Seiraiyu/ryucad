@@ -175,6 +175,7 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), Quantity::parse(v, Unit::M).unwrap()))
                 .collect(),
             placement: Placement::identity(Unit::M),
+            combine: crate::doc::solid::Combine::NEW,
         })
     }
 

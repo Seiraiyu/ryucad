@@ -143,6 +143,7 @@ fn rebuild_section(golden: &mut Golden) {
             ty,
             params,
             placement: random_placement(&mut g),
+            combine: ryucad::doc::solid::Combine::NEW,
         });
         order.push(id.clone());
         features.insert(id, Ok(feature));
