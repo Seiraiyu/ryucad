@@ -4197,6 +4197,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryupdm"
+version = "0.0.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "regex-lite",
+ "ryucad-doc",
+ "serde_json",
+]
+
+[[package]]
 name = "ryusketch"
 version = "0.0.0"
 dependencies = [

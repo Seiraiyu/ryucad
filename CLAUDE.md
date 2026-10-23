@@ -64,6 +64,7 @@ The product targets Windows, macOS, and Linux natively, not just WSL. CI (`.gith
 - `crates/ryukei`: the B-rep geometry kernel (library).
 - `crates/ryusketch`: the 2D constraint solver for sketches (library). It depends on `ryukei` only for `math`.
 - `crates/ryucad-doc`: ryucad's file format (`doc`, `units`, `expr`, `error`), split out so ryupdm can read projects; `ryucad` re-exports each under its old path.
+- `crates/ryupdm`: local product data management (library): the PDM settings, part properties and, later, revisions and releases. It reads projects through `ryucad-doc` and never calls the kernel, a session or the app.
 - `crates/ryucad`: the application layer and binary.
 - `crates/ryucad-app`: the desktop app, a client of the daemon (`core`: link, model, people, navigation, picking, forms; `ui`: the egui window and the wgpu scene).
 - `packaging/`: what the installers register: the Linux desktop entry and project MIME type, and the macOS launcher's AppleScript.

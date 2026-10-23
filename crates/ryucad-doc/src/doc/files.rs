@@ -581,13 +581,16 @@ pub fn number(x: f64) -> Value {
     }
 }
 
-pub(crate) fn invalid(at: &str, msg: &str) -> Error {
+/// `invalid_document` at the JSON pointer `at`.
+#[doc(hidden)]
+pub fn invalid(at: &str, msg: &str) -> Error {
     Error::new(Code::InvalidDocument, msg).with("pointer", at)
 }
 
 /// Checks `kind` and `format` (at most `newest`), migrating older formats,
 /// and returns the remaining fields.
-fn header<'a>(v: &'a Value, kind: &str, newest: u64) -> Result<Obj<'a>> {
+#[doc(hidden)]
+pub fn header<'a>(v: &'a Value, kind: &str, newest: u64) -> Result<Obj<'a>> {
     let mut o = Obj::new(v, "")?;
     let k = o.take("kind")?;
     if k.as_str() != Some(kind) {
