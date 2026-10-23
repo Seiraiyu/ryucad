@@ -28,6 +28,7 @@ pub mod profile;
 pub mod proto;
 pub mod rebuild;
 pub mod reference;
+pub mod release;
 pub mod render;
 pub mod renumber;
 pub mod server;

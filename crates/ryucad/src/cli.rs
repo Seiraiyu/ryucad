@@ -69,6 +69,10 @@ enum Command {
     /// measure, make or buy, and the project's own.
     #[command(subcommand)]
     Props(PropsCmd),
+    /// Propose a part's next revision, or make its latest one obsolete. Records are files
+    /// under releases/, official once the release branch holds them.
+    #[command(subcommand)]
+    Release(ReleaseCmd),
     /// Edit, solve or read a sketch: points, lines, arcs and circles, and the constraints and
     /// dimensions between them.
     #[command(subcommand)]
@@ -620,6 +624,31 @@ enum PropsCmd {
 }
 
 #[derive(Subcommand)]
+enum ReleaseCmd {
+    /// Write the record of a part's next revision, with its content hash, revising properties
+    /// and rebuilt bodies. It is a proposal until the release branch holds it; nothing is
+    /// committed.
+    Propose {
+        part: String,
+        /// Why this revision, for the record.
+        #[arg(long, value_name = "TEXT")]
+        note: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Write an obsolete record for a part's latest official revision (the part may be
+    /// deleted).
+    Obsolete {
+        part: String,
+        label: String,
+        #[arg(long, value_name = "TEXT")]
+        note: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
 enum SketchCmd {
     /// Apply a batch of edits with one solve, or refuse them all. OPS is a JSON array (or @FILE
     /// holding one) of {"op": "add", "type": "point", "at": ["0", "10 mm"]}, {"op": "add",
@@ -1055,6 +1084,22 @@ fn request(cmd: &Command) -> Option<Request> {
                 .collect(),
             expected_revision: expect.revision.clone(),
         },
+        Command::Release(ReleaseCmd::Propose { part, note, expect }) => Request::ReleasePropose {
+            part: part.clone(),
+            note: note.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Release(ReleaseCmd::Obsolete {
+            part,
+            label,
+            note,
+            expect,
+        }) => Request::ReleaseObsolete {
+            part: part.clone(),
+            label: label.clone(),
+            note: note.clone(),
+            expected_revision: expect.revision.clone(),
+        },
         Command::Sketch(SketchCmd::Edit {
             part,
             sketch,
@@ -1387,9 +1432,11 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                     Err(e) => warnings.push(format!("{}; ran in process", e.message)),
                 }
             }
+            // As the participant asked for, as through the daemon.
+            let me = participant(cli);
             deliver(
                 cmd,
-                server::handle_safely(&mut None, None, None, &root, req)?,
+                server::handle_safely(&mut None, None, me.as_deref(), &root, req)?,
             )
             .map(|r| lift(cmd, r, warnings))
         }

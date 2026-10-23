@@ -1,5 +1,6 @@
 //! ryupdm through the protocol: the project's PDM settings and its parts'
-//! properties. Writes are checked against the whole project first: one
+//! properties (with each part's release state; releases themselves are
+//! [`crate::release`]'s). Writes are checked against the whole project first: one
 //! that would give any part a fault it doesn't have now (an unknown or
 //! ill-fitting property, a number off the pattern or already taken) is
 //! refused with that fault, unless a settings change is forced.
@@ -59,7 +60,7 @@ pub fn check_not_retired(root: &Path, part: &Id) -> Result<()> {
 }
 
 /// The project's ID, written into the manifest first if it has none.
-fn ensure_id(session: &Session) -> Result<ProjectId> {
+pub(crate) fn ensure_id(session: &Session) -> Result<ProjectId> {
     let manifest = &session.project().manifest;
     if let Some(id) = &manifest.project {
         return Ok(id.clone());
@@ -278,7 +279,10 @@ pub fn get(session: &Session, part: &str) -> Result<Value> {
                        "faults": faults_of(name)})
             }),
     );
-    Ok(json!({"part": id, "revision": p.revision, "properties": list, "faults": pp.faults}))
+    Ok(
+        json!({"part": id, "revision": p.revision, "properties": list, "faults": pp.faults,
+              "state": crate::release::state_of(session, &id)}),
+    )
 }
 
 /// `props.set`: sets properties, or clears those given as `null`, as one

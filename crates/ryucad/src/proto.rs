@@ -307,6 +307,25 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// Writes the record of a part's next revision, as a proposal.
+    #[serde(rename = "release.propose")]
+    ReleasePropose {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Writes an obsolete record for a part's latest official revision.
+    #[serde(rename = "release.obsolete")]
+    ReleaseObsolete {
+        part: String,
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// Applies a batch of sketch edits with one solve; atomic.
     #[serde(rename = "sketch.edit")]
     SketchEdit {
@@ -648,6 +667,8 @@ impl Request {
                 | Request::PdmInit { .. }
                 | Request::PdmConfigure { .. }
                 | Request::PropsSet { .. }
+                | Request::ReleasePropose { .. }
+                | Request::ReleaseObsolete { .. }
                 | Request::SketchEdit { .. }
                 | Request::Undo { .. }
                 | Request::Redo { .. }
@@ -804,6 +825,17 @@ mod tests {
             Request::PropsSet {
                 part: "p".into(),
                 properties: [("number".to_owned(), json!("100"))].into_iter().collect(),
+                expected_revision: Some("r".into()),
+            },
+            Request::ReleasePropose {
+                part: "p".into(),
+                note: Some("why".into()),
+                expected_revision: None,
+            },
+            Request::ReleaseObsolete {
+                part: "p".into(),
+                label: "A".into(),
+                note: None,
                 expected_revision: Some("r".into()),
             },
         ];

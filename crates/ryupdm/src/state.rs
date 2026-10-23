@@ -122,7 +122,7 @@ pub(crate) fn place(scheme: Scheme, e: &Entry) -> Result<u64> {
 
 /// A part's records in order: by label, a release before its obsolete
 /// record. Fails on the first record that can't be read or placed.
-pub(crate) fn ordered<'a>(
+pub fn ordered<'a>(
     scheme: Scheme,
     records: &'a Records,
     part: &'a Id,

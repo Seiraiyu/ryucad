@@ -247,6 +247,30 @@ fn dispatch(
             expected_revision.as_deref(),
         ),
         Request::PropsGet { part } => crate::pdm::get(session, &part),
+        Request::ReleasePropose {
+            part,
+            note,
+            expected_revision,
+        } => {
+            let who = participant_name(live, me);
+            crate::release::propose(session, &who, &part, note, expected_revision.as_deref())
+        }
+        Request::ReleaseObsolete {
+            part,
+            label,
+            note,
+            expected_revision,
+        } => {
+            let who = participant_name(live, me);
+            crate::release::obsolete(
+                session,
+                &who,
+                &part,
+                &label,
+                note,
+                expected_revision.as_deref(),
+            )
+        }
         Request::PropsSet {
             part,
             properties,
@@ -658,6 +682,19 @@ fn project_info(session: &Session) -> Value {
         "parts": p.parts.keys().collect::<Vec<_>>(),
         "version": VersionInfo::current(),
     })
+}
+
+/// The name of the participant asking: the live session's, else the one
+/// the caller gave (the CLI's `--as`), else the default agent's.
+fn participant_name(live: Option<&mut Live>, me: Option<&str>) -> String {
+    match live {
+        Some(l) => {
+            let id = l.caller(me);
+            l.get(&id)
+                .map_or_else(|_| live::DEFAULT_AGENT.to_owned(), |p| p.name.clone())
+        }
+        None => me.unwrap_or(live::DEFAULT_AGENT).to_owned(),
+    }
 }
 
 pub(crate) fn part_id(s: &str) -> Result<Id> {

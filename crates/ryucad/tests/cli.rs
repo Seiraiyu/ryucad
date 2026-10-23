@@ -855,6 +855,8 @@ fn every_protocol_method_has_a_command() {
         ("pdm.configure", &["pdm", "configure"]),
         ("props.get", &["props", "show"]),
         ("props.set", &["props", "set"]),
+        ("release.propose", &["release", "propose"]),
+        ("release.obsolete", &["release", "obsolete"]),
         ("sketch.edit", &["sketch", "edit"]),
         ("sketch.solve", &["sketch", "solve"]),
         ("sketch.get", &["sketch", "get"]),

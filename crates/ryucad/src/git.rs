@@ -136,6 +136,17 @@ impl Repo {
         Ok(Some(Repo { repo, prefix }))
     }
 
+    /// The repository itself, for ryupdm.
+    pub fn gix(&self) -> &gix::Repository {
+        &self.repo
+    }
+
+    /// Where the project sits in the work tree: empty at its root, else
+    /// ending in `/`.
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
     /// The commit `HEAD` points at, or `None` before the first commit.
     fn head(&self) -> Option<gix::Commit<'_>> {
         self.repo.head_commit().ok()
