@@ -1,6 +1,9 @@
-//! Resolving references against the bodies of features built before: a
-//! name resolves to exactly the face, edge or vertex that carries it, or
-//! the feature holding the reference fails. Never a nearest match.
+//! Resolving references against the solids of features built before. A
+//! reference names a solid by the feature that founded it; its name
+//! resolves to exactly the face, edge or vertex that carries it in the
+//! solid as the features listed before the referring one left it (its
+//! view, see [`crate::solid`]), or the feature holding the reference
+//! fails. Never a nearest match.
 
 use crate::doc::id::Id;
 use crate::doc::project::Part;
@@ -10,9 +13,9 @@ use crate::rebuild::{Built, Results};
 use ryukei::geom::{Curve, Point3, Surface, Vector3};
 use ryukei::topo::{EntityId, Sense};
 
-/// The feature built from `r`, and the entity its name carries. `owner`
-/// holds the reference in its `role`; `order` is the part's list as it
-/// is, or as a write would leave it.
+/// The solid `r` names, as `owner` sees it, and the entity its name
+/// carries. `owner` holds the reference in its `role`; `order` is the
+/// part's list as it is, or as a write would leave it.
 pub fn resolve<'a>(
     part: &Part,
     order: &[Id],
@@ -44,7 +47,10 @@ pub fn resolve<'a>(
         }
         _ => {}
     }
-    match results.result(&r.feature) {
+    let solids = crate::solid::Solids::of_order(part, order);
+    // The feature whose result holds the solid as `owner` sees it.
+    let read = solids.view(&r.feature, owner).unwrap_or(&r.feature);
+    match results.result(read) {
         None => Err(fail(
             Code::NotFound,
             format!("names {}, which hasn't been built", r.feature),
@@ -53,23 +59,27 @@ pub fn resolve<'a>(
             Code::DependencyFailed,
             format!("names {}, which failed to rebuild", r.feature),
         )
-        .with("dependency", &r.feature)
+        .with("dependency", read)
         .with("cause", e.code)),
+        Some(Ok(o)) if o.sketch().is_some() => Err(fail(
+            Code::ReferenceWrongKind,
+            format!(
+                "names {}, a sketch, which has no faces, edges or vertices",
+                r.feature
+            ),
+        )),
         Some(Ok(o)) => {
-            let Some(b) = o.body() else {
-                return Err(fail(
-                    Code::ReferenceWrongKind,
-                    format!(
-                        "names {}, a sketch, which has no faces, edges or vertices",
-                        r.feature
-                    ),
-                ));
+            let Some(b) = o.solid(&r.feature) else {
+                return Err(
+                    crate::rebuild::not_a_solid(part, &solids, owner, role, &r.feature)
+                        .with("reference", &text),
+                );
             };
             match b.body.by_name(r.name) {
                 Some(e) => Ok((b, e)),
                 None => Err(fail(
                     Code::ReferenceUnresolved,
-                    format!("is gone from {}'s body", r.feature),
+                    format!("is gone from solid {}", r.feature),
                 )
                 .with("dependency", &r.feature)),
             }
@@ -371,7 +381,7 @@ mod tests {
         let body = call(&mut s, "inspect", json!({"part": "p", "feature": "e"})).unwrap()["bodies"]
             [0]
         .clone();
-        let from_l2 = json!({"sketch": "s", "entity": "l2"});
+        let from_l2 = json!({"feature": "e", "sketch": "s", "entity": "l2"});
         let side = body["faces"]
             .as_array()
             .unwrap()

@@ -96,7 +96,11 @@ fuzz_target!(|data: &[u8]| {
     let r = rebuild_part(&part);
     let me = id("f");
     match r.output(&me) {
-        Some(Output::Body(b)) => assert!(ryukei::check::check(&b.body).is_empty()),
+        Some(Output::Solids(m)) => {
+            for (_, b) in &m.solids {
+                assert!(ryukei::check::check(&b.body).is_empty());
+            }
+        }
         Some(Output::Sketch(solved)) => {
             for e in solved.sketch.entities.values() {
                 match e.geometry {

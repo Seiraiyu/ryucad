@@ -132,6 +132,15 @@ pub enum Code {
     PartIdRetired,
     /// The revision scheme can't change once any part has been released.
     RevisionSchemeLocked,
+    /// A join, cut or intersect that changes nothing of its target: the
+    /// tool misses it, or a join lies inside it.
+    OperationNoEffect,
+    /// A cut or intersect that leaves nothing of its target.
+    BodyEmptied,
+    /// The kernel refused to join, cut or intersect: faces it can't
+    /// intersect yet, an uncertain intersection, or a result touching
+    /// itself. The faces are in the details.
+    BooleanFailed,
 }
 
 impl Code {

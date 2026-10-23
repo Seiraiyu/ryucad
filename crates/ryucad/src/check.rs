@@ -219,7 +219,9 @@ pub fn run(session: &mut Session, part: Option<&str>, against: Option<&str>) -> 
                     f["error"] = json!(session.explain(id, e.clone()));
                     findings.push(f);
                 }
-                Ok(Output::Body(b)) => bodies.push((fid.clone(), b.clone())),
+                Ok(Output::Solids(m)) => {
+                    bodies.extend(m.solids.iter().map(|(_, b)| (fid.clone(), b.clone())));
+                }
                 // A stale sketch is doctor's to report, with its repair.
                 Ok(Output::Sketch(_)) => {}
             }

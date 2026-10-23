@@ -110,7 +110,8 @@ pub fn body_extent(body: &Body) -> Option<([f64; 3], [f64; 3])> {
 
 /// [`bounds`] as `(min, max)`; `None` when the placement is invalid.
 pub fn extent(f: &Feature) -> Option<([f64; 3], [f64; 3])> {
-    let f = f.primitive()?;
+    // A primitive that acts on other solids leaves them, not itself.
+    let f = f.primitive().filter(|p| p.combine.is_new())?;
     let m = |k| f.meters(k);
     let (lo, hi) = match f.ty {
         PrimitiveType::Box => ([0.0; 3], [m("x"), m("y"), m("z")]),

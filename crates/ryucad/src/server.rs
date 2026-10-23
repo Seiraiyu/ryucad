@@ -1509,10 +1509,27 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
             (
                 fid,
                 match b {
-                    Ok(crate::rebuild::Output::Body(b)) => {
-                        let c = b.body.counts();
-                        json!({"id": fid, "type": types.get(fid), "ok": true, "hash": b.hash,
-                       "counts": {"faces": c.faces, "edges": c.edges, "vertices": c.vertices}})
+                    Ok(o @ crate::rebuild::Output::Solids(_)) => {
+                        let counts = |b: &crate::rebuild::Built| {
+                            let c = b.body.counts();
+                            json!({"faces": c.faces, "edges": c.edges, "vertices": c.vertices})
+                        };
+                        let mut v = json!({"id": fid, "type": types.get(fid), "ok": true,
+                                           "hash": o.hash()});
+                        match o.body() {
+                            Some(b) => v["counts"] = counts(b),
+                            None => {
+                                v["solids"] = o
+                                    .solids()
+                                    .iter()
+                                    .map(|(s, b)| {
+                                        json!({"solid": s, "hash": b.hash,
+                                                         "counts": counts(b)})
+                                    })
+                                    .collect();
+                            }
+                        }
+                        v
                     }
                     // A sketch makes no body: its state, not a body hash.
                     Ok(crate::rebuild::Output::Sketch(s)) => {
@@ -2120,17 +2137,18 @@ fn inspect(
         if only.as_ref().is_some_and(|o| o != id) {
             continue;
         }
-        let Some(built) = built.as_ref().ok().and_then(|o| o.body()) else {
-            continue;
-        };
+        let Ok(built) = built else { continue };
         let f = &features
             .iter()
             .find(|(i, _)| i == id)
             .expect("built features loaded")
             .1;
-        let mut v = crate::inspect::body(f, built);
-        v["feature"] = json!(id);
-        bodies.push(v);
+        for (solid, b) in built.solids() {
+            let mut v = crate::inspect::body(f, b);
+            v["feature"] = json!(id);
+            v["solid"] = json!(solid);
+            bodies.push(v);
+        }
     }
     if let Some(given) = entity {
         // A bare name, or a full reference as `selection` and Copy
@@ -3033,6 +3051,7 @@ pub(crate) mod tests {
             for list in ["faces", "edges", "vertices"] {
                 for e in b[list].as_array().unwrap() {
                     assert_eq!(e["origin"]["sketch"], "s", "{f} {list}: {e}");
+                    assert_eq!(e["origin"]["feature"], f, "{f} {list}: {e}");
                 }
             }
         }
@@ -3044,9 +3063,14 @@ pub(crate) mod tests {
             .iter()
             .map(|f| &f["origin"])
             .collect();
-        assert!(origins.contains(&&json!({"sketch": "s", "entity": "l1"})));
-        assert!(origins.contains(&&json!({"sketch": "s", "cap": "start", "loop": "p1"})));
-        assert!(origins.contains(&&json!({"sketch": "s", "cap": "end", "loop": "p1"})));
+        assert!(origins.contains(&&json!({"feature": "e", "sketch": "s", "entity": "l1"})));
+        assert!(
+            origins
+                .contains(&&json!({"feature": "e", "sketch": "s", "cap": "start", "loop": "p1"}))
+        );
+        assert!(
+            origins.contains(&&json!({"feature": "e", "sketch": "s", "cap": "end", "loop": "p1"}))
+        );
         let near = |a: &Value, want: [f64; 3]| {
             for k in 0..3 {
                 assert!(
@@ -3062,7 +3086,7 @@ pub(crate) mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|f| f["origin"] == json!({"sketch": "s", "entity": "l2"}))
+            .find(|f| f["origin"] == json!({"feature": "e", "sketch": "s", "entity": "l2"}))
             .unwrap();
         let one = call(
             &mut s,

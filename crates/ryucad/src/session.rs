@@ -257,13 +257,15 @@ impl Session {
         e
     }
 
-    /// Notes what every name of the part's bodies is.
+    /// Notes what every name of the part's solids is, by solid.
     fn learn(&mut self, part: &Id, result: &PartResult) {
-        for (fid, r) in &result.features {
-            let Some(b) = r.as_ref().ok().and_then(|o| o.body()) else {
-                continue;
-            };
-            let known = self.known.entry((part.clone(), fid.clone())).or_default();
+        let solids = result
+            .features
+            .iter()
+            .filter_map(|(_, r)| r.as_ref().ok())
+            .flat_map(|o| o.solids());
+        for (solid, b) in solids {
+            let known = self.known.entry((part.clone(), solid.clone())).or_default();
             let body = &b.body;
             let names = body
                 .faces()

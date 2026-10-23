@@ -116,8 +116,12 @@ impl EntityRef {
                     .with("feature", &self.feature)),
             };
         }
-        let Some(b) = b.body() else {
-            unreachable!("a feature is a body or a sketch")
+        let Some(b) = b.solid(&self.feature).or_else(|| b.body()) else {
+            return Err(
+                missing("the feature acts on several solids; name one by its founder")
+                    .with("part", &self.part)
+                    .with("feature", &self.feature),
+            );
         };
         let body = &b.body;
         let hit = |n: String| n == self.name;

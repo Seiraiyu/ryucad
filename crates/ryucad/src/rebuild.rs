@@ -1,53 +1,103 @@
 //! Features to ryukei bodies and solved sketches, in the order of the
 //! part's dependency graph ([`crate::graph`]): every feature of one depth
 //! in parallel, each reading the results of the features before it.
-//! Results are collected in feature order.
+//! Results are collected in feature order. A body-making feature founds a
+//! solid, or joins its body to, cuts it from or intersects it with each
+//! solid it targets, as its view of that solid ([`crate::solid`]) left it.
 
 use crate::doc::files::{Feature, Placement, Primitive, PrimitiveType};
 use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::doc::reference::Reference;
 use crate::doc::sketch::Geometry;
+use crate::doc::solid::Operation;
 use crate::doc::sweep::{Angle, Extent, RevolveAxis};
 use crate::error::{Code, Error, Result};
 use crate::profile::Keys;
 use crate::sketch::Solved;
+use crate::solid::Solids;
 use core::f64::consts::TAU;
 use rayon::prelude::*;
 use ryukei::SweepError;
+use ryukei::boolean::{BooleanOp, Tool};
 use ryukei::geom::{Axis, Frame, Point3, Rigid, Vector3};
-use ryukei::name::{Journal, OpKey};
-use ryukei::topo::Body;
-use ryukei::{primitive, sweep};
-use std::collections::BTreeMap;
+use ryukei::name::{Event, Journal, Name, OpKey, ToolKey};
+use ryukei::topo::{Body, EntityId};
+use ryukei::{BooleanError, primitive, sweep};
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-/// A feature's rebuilt body.
+/// A solid as a feature leaves it.
 #[derive(Clone, Debug)]
 pub struct Built {
     pub body: Body,
     pub journal: Journal,
-    /// Where a sweep's entities came from in its sketch, by name (see
-    /// [`crate::profile::origins`]); empty for a primitive.
-    pub origins: Arc<BTreeMap<String, serde_json::Value>>,
+    /// Where each entity came from, by name: the feature that made it,
+    /// and for a sweep's the sketch entities (see
+    /// [`crate::profile::origins`]).
+    pub origins: Arc<BTreeMap<String, Value>>,
     /// BLAKE3 of the body's dump: equal hashes mean bit-identical bodies.
     pub hash: String,
 }
 
-/// What a feature rebuilds to: a body, or a solved sketch.
-/// Shared, so a cached result costs nothing to reuse.
+/// What a body-making feature leaves: the solid it founds, or each solid
+/// it acts on, by founder in the order it names them.
+#[derive(Clone, Debug)]
+pub struct Made {
+    pub solids: Vec<(Id, Arc<Built>)>,
+    /// The body's hash for one solid, else a hash of each solid's founder
+    /// and hash: equal hashes, equal results.
+    pub hash: String,
+}
+
+impl Made {
+    pub fn new(solids: Vec<(Id, Arc<Built>)>) -> Made {
+        let hash = match solids.as_slice() {
+            [(_, b)] => b.hash.clone(),
+            _ => {
+                let mut h = blake3::Hasher::new();
+                for (id, b) in &solids {
+                    h.update(format!("{id} {}\n", b.hash).as_bytes());
+                }
+                h.finalize().to_hex()[..32].to_owned()
+            }
+        };
+        Made { solids, hash }
+    }
+}
+
+/// What a feature rebuilds to: solids, or a solved sketch. Shared, so a
+/// cached result costs nothing to reuse.
 #[derive(Clone, Debug)]
 pub enum Output {
-    Body(Arc<Built>),
+    Solids(Arc<Made>),
     Sketch(Arc<Solved>),
 }
 
 impl Output {
-    /// The body, if the feature makes one.
-    pub fn body(&self) -> Option<&Built> {
+    /// The solids a body-making feature founds or acts on, as it leaves
+    /// them; none for a sketch.
+    pub fn solids(&self) -> &[(Id, Arc<Built>)] {
         match self {
-            Output::Body(b) => Some(b),
-            Output::Sketch(_) => None,
+            Output::Solids(m) => &m.solids,
+            Output::Sketch(_) => &[],
+        }
+    }
+
+    /// The solid founded by `founder`, as this feature leaves it.
+    pub fn solid(&self, founder: &Id) -> Option<&Built> {
+        self.solids()
+            .iter()
+            .find(|(s, _)| s == founder)
+            .map(|(_, b)| b.as_ref())
+    }
+
+    /// The body of a feature that founds or acts on exactly one solid.
+    pub fn body(&self) -> Option<&Built> {
+        match self.solids() {
+            [(_, b)] => Some(b),
+            _ => None,
         }
     }
 
@@ -55,14 +105,14 @@ impl Output {
     pub fn sketch(&self) -> Option<&Solved> {
         match self {
             Output::Sketch(s) => Some(s),
-            Output::Body(_) => None,
+            Output::Solids(_) => None,
         }
     }
 
-    /// The body's or the sketch's hash: equal hashes, equal results.
+    /// The solids' or the sketch's hash: equal hashes, equal results.
     pub fn hash(&self) -> &str {
         match self {
-            Output::Body(b) => &b.hash,
+            Output::Solids(m) => &m.hash,
             Output::Sketch(s) => &s.hash,
         }
     }
@@ -137,6 +187,16 @@ pub fn op_key(part: &Id, feature: &Id) -> OpKey {
     OpKey::from_bytes(&bytes)
 }
 
+/// The ryukei key for the body a feature joins to, cuts from or
+/// intersects with its targets: like [`op_key`], from IDs only.
+pub fn tool_key(part: &Id, feature: &Id) -> ToolKey {
+    let mut bytes = b"ryucad.tool\0".to_vec();
+    bytes.extend_from_slice(part.as_str().as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(feature.as_str().as_bytes());
+    ToolKey(OpKey::from_bytes(&bytes).0)
+}
+
 /// The rigid placement of a feature's local frame. `x` is made
 /// perpendicular to `z`; axes with no direction, or parallel ones, are
 /// `invalid_placement`.
@@ -155,7 +215,7 @@ pub fn placement(p: &Placement) -> Result<Rigid> {
     Ok(Rigid::from_frame(&frame))
 }
 
-/// Builds one feature and checks the result.
+/// Builds a primitive's own body, whatever its operation, and checks it.
 pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
     match f {
         Feature::Primitive(p) => build_primitive(part, id, p),
@@ -242,7 +302,10 @@ fn build_sweep(part: &Part, id: &Id, f: &Feature, before: &dyn Results) -> Resul
         _ => unreachable!("a sweep"),
     };
     let made = made.map_err(|e| sweep_error(id, ty, e, &keys, axis))?;
-    let origins = crate::profile::origins(key, sketch, &valid, &keys);
+    let mut origins = crate::profile::origins(key, sketch, &valid, &keys);
+    for o in origins.values_mut() {
+        o["feature"] = json!(id);
+    }
     finish(id, ty, made, origins)
 }
 
@@ -421,7 +484,253 @@ fn build_primitive(part: &Id, id: &Id, f: &Primitive) -> Result<Built> {
             .with("feature", id)
             .with("kernel", format!("{e:?}"))
     })?;
-    finish(id, f.ty.as_str(), made, BTreeMap::new())
+    let origins = names(&made.0)
+        .into_iter()
+        .map(|n| (n.to_string(), json!({"feature": id})))
+        .collect();
+    finish(id, f.ty.as_str(), made, origins)
+}
+
+/// The names of a body's faces, edges and vertices.
+fn names(b: &Body) -> BTreeSet<Name> {
+    let faces = b.faces().map(EntityId::Face);
+    let edges = b.edges().map(EntityId::Edge);
+    let vertices = b.vertices().map(EntityId::Vertex);
+    faces
+        .chain(edges)
+        .chain(vertices)
+        .map(|e| b.name_of(e).expect("a live entity"))
+        .collect()
+}
+
+/// The solid founded by `t` as feature `id` sees it: as its view, the
+/// last feature of its chain listed before `id`, left it.
+pub fn target<'a>(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    t: &Id,
+    before: &'a dyn Results,
+) -> Result<&'a Built> {
+    let Some(view) = solids.view(t, id) else {
+        // Not listed before `id` at all, or listed but no solid.
+        if let Some(Ok(f)) = part.features.get(id) {
+            crate::graph::check_order(part, part.order(), id, f)?;
+        }
+        return Err(not_a_solid(part, solids, id, "targets", t));
+    };
+    let out = crate::graph::input(part, id, view, before)?;
+    Ok(out.solid(t).expect("a solid's chain holds it"))
+}
+
+/// `reference_wrong_kind` for `t`, named in `owner`'s `role` where a
+/// solid goes, which founds none: with `solids`, the solids it acts on,
+/// for the agent to name instead.
+pub fn not_a_solid(part: &Part, solids: &Solids, owner: &Id, role: &str, t: &Id) -> Error {
+    let ty = part
+        .features
+        .get(t)
+        .and_then(|f| f.as_ref().ok())
+        .map_or("feature", Feature::type_name);
+    let of = solids.solids_of(t);
+    let hint = if of.is_empty() {
+        String::new()
+    } else {
+        let list: Vec<&str> = of.iter().map(|s| s.as_str()).collect();
+        format!(
+            "; name its solid by the feature that founded it: {}",
+            list.join(", ")
+        )
+    };
+    let mut e = Error::new(
+        Code::ReferenceWrongKind,
+        format!("{owner}: its {role} {t} is a {ty} that founds no solid{hint}"),
+    )
+    .with("feature", owner)
+    .with("role", role)
+    .with("names", t);
+    if !of.is_empty() {
+        e = e.with("solids", of);
+    }
+    e
+}
+
+/// What a body-making feature leaves: its own body as a new solid, or
+/// its body applied to each solid it targets.
+fn build_body(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    f: &Feature,
+    before: &dyn Results,
+) -> Result<Made> {
+    let c = f.combine().expect("a body-making feature");
+    // Its targets first: a cut of a solid that failed is
+    // `dependency_failed`, whatever its own body would be.
+    let targets: Vec<(&Id, &Built)> = c
+        .targets
+        .iter()
+        .map(|t| Ok((t, target(part, solids, id, t, before)?)))
+        .collect::<Result<_>>()?;
+    let own = match f {
+        Feature::Primitive(p) => build_primitive(&part.id, id, p)?,
+        _ => build_sweep(part, id, f, before)?,
+    };
+    if c.is_new() {
+        return Ok(Made::new(vec![(id.clone(), Arc::new(own))]));
+    }
+    let ty = f.type_name();
+    let made: Vec<(Id, Arc<Built>)> = targets
+        .par_iter()
+        .map(|(t, b)| {
+            let r = apply(part, id, ty, c.operation, t, b, &own)?;
+            Ok(((*t).clone(), Arc::new(r)))
+        })
+        .collect::<Result<_>>()?;
+    Ok(Made::new(made))
+}
+
+/// Joins `tool` (feature `id`'s own body) to solid `t`, cuts it from it
+/// or intersects it with it. Fails as `operation_no_effect` when the tool
+/// changes nothing, `body_emptied` when nothing is left.
+fn apply(
+    part: &Part,
+    id: &Id,
+    ty: &str,
+    op: Operation,
+    t: &Id,
+    target: &Built,
+    tool: &Built,
+) -> Result<Built> {
+    let kop = match op {
+        Operation::Join => BooleanOp::Unite,
+        Operation::Cut => BooleanOp::Subtract,
+        Operation::Intersect => BooleanOp::Intersect,
+        Operation::New => unreachable!("a new solid acts on nothing"),
+    };
+    let tools = [Tool {
+        key: tool_key(&part.id, id),
+        body: &tool.body,
+        place: Rigid::IDENTITY,
+    }];
+    let (body, journal) = ryukei::boolean::boolean(op_key(&part.id, id), kop, &target.body, &tools)
+        .map_err(|e| boolean_error(part, id, ty, t, target, tool, e))?;
+    let what = |code, msg: String| {
+        Error::new(code, format!("{ty} {id}: {msg}"))
+            .with("feature", id)
+            .with("target", t)
+            .with("operation", op.as_str())
+    };
+    if body.faces().next().is_none() {
+        return Err(what(
+            Code::BodyEmptied,
+            format!("the {} leaves nothing of {t}", op.as_str()),
+        ));
+    }
+    let kept = names(&body);
+    // The tool counts if any of it is left, or it took any of the target
+    // away: a join inside the target, a cut or an intersect that misses
+    // nothing, changes nothing.
+    let target_faces: BTreeSet<Name> = target
+        .body
+        .faces()
+        .map(|f| target.body.face(f).expect("live").name)
+        .collect();
+    let effect = journal.events().iter().any(|e| match e {
+        Event::Placed { to, .. } => kept.contains(to),
+        Event::Deleted(n) | Event::Split { parent: n, .. } => target_faces.contains(n),
+        _ => false,
+    });
+    if !effect {
+        return Err(what(
+            Code::OperationNoEffect,
+            format!("the {} changes nothing of {t}", op.as_str()),
+        ));
+    }
+    // Origins: the target's, the tool's under their placed names, and a
+    // split entity's for each of its pieces.
+    let mut from: BTreeMap<Name, Value> = BTreeMap::new();
+    for (n, o) in target.origins.iter() {
+        if let Some(n) = crate::doc::reference::parse_name(n) {
+            from.insert(n, o.clone());
+        }
+    }
+    for e in journal.events() {
+        if let Event::Placed { from: own, to, .. } = e
+            && let Some(o) = tool.origins.get(&own.to_string())
+        {
+            from.insert(*to, o.clone());
+        }
+    }
+    for e in journal.events() {
+        if let Event::Split { parent, children } = e
+            && let Some(o) = from.get(parent).cloned()
+        {
+            for c in children {
+                from.entry(*c).or_insert_with(|| o.clone());
+            }
+        }
+    }
+    let origins = from
+        .into_iter()
+        .filter(|(n, _)| kept.contains(n))
+        .map(|(n, o)| (n.to_string(), o))
+        .collect();
+    finish(id, ty, (body, journal), origins)
+}
+
+/// The kernel's refusal of a join, cut or intersect: `boolean_failed`,
+/// with the faces it names as the target's references or the tool's
+/// entities with their origins.
+fn boolean_error(
+    part: &Part,
+    id: &Id,
+    ty: &str,
+    t: &Id,
+    target: &Built,
+    tool: &Built,
+    e: ryukei::Error,
+) -> Error {
+    let face = |n: &Name| -> Value {
+        if target.body.by_name(*n).is_some() {
+            json!({"reference": format!("{}/{t}/{n}", part.id)})
+        } else {
+            let mut v = json!({"tool": id, "name": n.to_string()});
+            if let Some(o) = tool.origins.get(&n.to_string()) {
+                v["origin"] = o.clone();
+            }
+            v
+        }
+    };
+    let (msg, faces, at) = match &e {
+        ryukei::Error::InvalidBoolean(BooleanError::Unsupported { a, b }) => (
+            "two faces meet that ryukei can't intersect yet".to_owned(),
+            vec![face(a), face(b)],
+            None,
+        ),
+        ryukei::Error::InvalidBoolean(BooleanError::Uncertain { a, b }) => (
+            "where two faces meet stays uncertain".to_owned(),
+            vec![face(a), face(b)],
+            None,
+        ),
+        ryukei::Error::InvalidBoolean(BooleanError::NonManifold { at, faces }) => (
+            "the result would touch itself along an edge or at a point".to_owned(),
+            faces.iter().map(face).collect(),
+            Some([at.x, at.y, at.z]),
+        ),
+        e => (e.to_string(), Vec::new(), None),
+    };
+    let mut err = Error::new(Code::BooleanFailed, format!("{ty} {id}: {msg}"))
+        .with("feature", id)
+        .with("target", t)
+        .with("kernel", format!("{e:?}"));
+    if !faces.is_empty() {
+        err = err.with("faces", faces);
+    }
+    if let Some(at) = at {
+        err = err.with("at", at);
+    }
+    err
 }
 
 /// Checks a body the kernel built and hashes it. A broken body is never
@@ -430,7 +739,7 @@ fn finish(
     id: &Id,
     ty: &str,
     (body, journal): (Body, Journal),
-    origins: BTreeMap<String, serde_json::Value>,
+    origins: BTreeMap<String, Value>,
 ) -> Result<Built> {
     let faults = ryukei::check::check(&body);
     if !faults.is_empty() {
@@ -453,25 +762,22 @@ fn finish(
     })
 }
 
-/// Rebuilds one feature: solves a sketch, sweeps an extrude or revolve's
-/// sketch from `before` (the results of the features it may read), builds
-/// anything else.
-pub fn rebuild_feature(part: &Part, id: &Id, f: &Feature, before: &dyn Results) -> Result<Output> {
-    if f.combine().is_some_and(|c| !c.is_new()) {
-        return Err(Error::new(
-            Code::Internal,
-            format!("{id}: joining, cutting and intersecting solids comes in a later task"),
-        )
-        .with("feature", id));
-    }
+/// Rebuilds one feature from `before` (the results of the features it
+/// may read): solves a sketch; builds a body-making feature's own body,
+/// sweeping its sketch, and founds a solid with it or applies it to the
+/// solids it targets.
+pub fn rebuild_feature(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    f: &Feature,
+    before: &dyn Results,
+) -> Result<Output> {
     match f {
         Feature::Sketch(s) => crate::sketch::context(part, part.order(), id, s, before)
             .and_then(|c| crate::sketch::solve_in(id, s, &c))
             .map(|s| Output::Sketch(Arc::new(s))),
-        Feature::Extrude(_) | Feature::Revolve(_) => {
-            build_sweep(part, id, f, before).map(|b| Output::Body(Arc::new(b)))
-        }
-        f => build_feature(&part.id, id, f).map(|b| Output::Body(Arc::new(b))),
+        f => build_body(part, solids, id, f, before).map(|m| Output::Solids(Arc::new(m))),
     }
 }
 
@@ -565,7 +871,7 @@ pub fn rebuild_part_with(part: &Part, cache: &Cache) -> (PartResult, Cache) {
                         match cache.get(&id) {
                             Some((c, r)) if *c == h => (id, Some(h), r.clone(), false),
                             _ => {
-                                let r = rebuild_feature(part, &id, f, &built);
+                                let r = rebuild_feature(part, &solids, &id, f, &built);
                                 (id, Some(h), r, true)
                             }
                         }
@@ -726,6 +1032,221 @@ mod tests {
             assert_eq!(e.code, Code::RebuildFailed, "{e}");
             assert_eq!(e.details["feature"], "f");
         }
+    }
+
+    /// The volume a planar solid encloses, from its mesh.
+    fn volume(b: &Body) -> f64 {
+        let m = ryukei::mesh::tessellate(b, &ryukei::mesh::MeshParams::new(1e-5, 0.5)).unwrap();
+        ryukei_testkit::mesh::volume_and_area(&m).0
+    }
+
+    /// Solid `s` as feature `f` left it.
+    fn state<'a>(r: &'a PartResult, f: &str, s: &str) -> &'a Built {
+        r.output(&id(f)).unwrap().solid(&id(s)).unwrap()
+    }
+
+    fn close(a: f64, b: f64) {
+        assert!((a - b).abs() < 1e-18, "{a} != {b}");
+    }
+
+    #[test]
+    fn join_cut_and_intersect() {
+        use crate::doc::solid::Operation::*;
+        use crate::solid::tests::{boxed, part};
+        // Unit (1 mm) boxes along x: a at 0, b at 0.5, overlapping it.
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("b", boxed("0.5", New, &[])),
+            ("j", boxed("0.5", Join, &["a"])),
+            ("c", boxed("1", Cut, &["a"])),
+            ("both", boxed("0.75", Cut, &["a", "b"])),
+            ("i", boxed("0.25", Intersect, &["a"])),
+        ]);
+        let r = rebuild_part(&p);
+        assert_eq!(r.failed(), 0, "{:?}", r.features);
+        close(volume(&state(&r, "j", "a").body), 1.5e-9);
+        close(volume(&state(&r, "c", "a").body), 1e-9);
+        close(volume(&state(&r, "both", "a").body), 0.75e-9);
+        close(volume(&state(&r, "both", "b").body), 0.25e-9);
+        close(volume(&state(&r, "i", "a").body), 0.5e-9);
+        // A feature acting on several solids leaves each; its hash is
+        // theirs together.
+        let both = r.output(&id("both")).unwrap();
+        assert!(both.body().is_none());
+        assert_eq!(both.solids().len(), 2);
+        assert_eq!(both.hash().len(), 32);
+        // One solid's hash is its body's, so files from before solids
+        // hash as they did.
+        assert_eq!(r.output(&id("a")).unwrap().hash(), state(&r, "a", "a").hash);
+        // Every entity says which feature made it.
+        let after = state(&r, "both", "b");
+        let features: BTreeSet<&str> = after
+            .origins
+            .values()
+            .map(|o| o["feature"].as_str().unwrap())
+            .collect();
+        assert_eq!(features, BTreeSet::from(["b", "both"]));
+        // The same, bit for bit, from a cache or from nothing.
+        let (again, cache) = rebuild_part_with(&p, &Cache::new());
+        assert_eq!(again.hash, r.hash);
+        let (cached, _) = rebuild_part_with(&p, &cache);
+        assert!(cached.built.is_empty());
+        assert_eq!(cached.hash, r.hash);
+    }
+
+    #[test]
+    fn operations_that_do_nothing_or_everything() {
+        use crate::doc::solid::Operation::*;
+        use crate::solid::tests::{boxed, part};
+        // Each on a solid of its own: a failure fails the rest of its
+        // solid's chain.
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("b", boxed("0", New, &[])),
+            ("c", boxed("0", New, &[])),
+            ("d", boxed("0", New, &[])),
+            ("miss", boxed("5", Cut, &["a"])),
+            ("inside", boxed("0", Join, &["b"])),
+            ("all", boxed("0", Cut, &["c"])),
+            ("apart", boxed("5", Intersect, &["d"])),
+            ("then", boxed("0.5", Cut, &["a"])),
+        ]);
+        let r = rebuild_part(&p);
+        let err = |f: &str| {
+            let (_, r) = r.features.iter().find(|(i, _)| *i == id(f)).unwrap();
+            r.as_ref().unwrap_err().clone()
+        };
+        for (f, target, want) in [
+            ("miss", "a", Code::OperationNoEffect),
+            ("inside", "b", Code::OperationNoEffect),
+            ("all", "c", Code::BodyEmptied),
+            ("apart", "d", Code::BodyEmptied),
+        ] {
+            let e = err(f);
+            assert_eq!(e.code, want, "{f}: {e}");
+            assert_eq!(e.details["target"], target, "{f}");
+        }
+        let e = err("then");
+        assert_eq!(
+            (e.code, e.details["dependency"].as_str()),
+            (Code::DependencyFailed, Some("miss"))
+        );
+    }
+
+    #[test]
+    fn kernel_refusals_name_their_faces() {
+        use crate::doc::solid::Operation::*;
+        use crate::solid::tests::{boxed, part};
+        // A box touching a only along its vertical edge at x = y = 1 mm.
+        let mut corner = boxed("1", Join, &["a"]);
+        if let Feature::Primitive(p) = &mut corner {
+            p.placement.origin[1] = Quantity::parse("1", Unit::Mm).unwrap();
+        }
+        let p = part(vec![("a", boxed("0", New, &[])), ("corner", corner)]);
+        let r = rebuild_part(&p);
+        let (_, e) = &r.features[1];
+        let e = e.as_ref().unwrap_err();
+        assert_eq!(e.code, Code::BooleanFailed, "{e}");
+        assert!(
+            e.details["kernel"]
+                .as_str()
+                .unwrap()
+                .starts_with("InvalidBoolean(NonManifold")
+        );
+        let faces = e.details["faces"].as_array().unwrap();
+        // The target's faces as references, the tool's by the feature
+        // that made them.
+        assert!(faces.iter().any(|f| {
+            f["reference"]
+                .as_str()
+                .is_some_and(|r| r.starts_with("p/a/"))
+        }));
+        assert!(
+            faces
+                .iter()
+                .any(|f| f["tool"] == "corner" && f["origin"]["feature"] == "corner")
+        );
+        assert_eq!(e.details["at"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn targets_that_wont_do() {
+        use crate::doc::solid::Operation::*;
+        use crate::solid::tests::{boxed, part};
+        let mut huge = boxed("0", New, &[]);
+        if let Feature::Primitive(p) = &mut huge {
+            p.params
+                .insert("x".into(), Quantity::parse("2000 m", Unit::Mm).unwrap());
+        }
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("j", boxed("0.5", Join, &["a"])),
+            ("of_j", boxed("0.5", Cut, &["j"])),
+            ("early", boxed("0.5", Cut, &["late"])),
+            ("late", boxed("0", New, &[])),
+            ("huge", huge),
+            ("of_huge", boxed("0", Cut, &["huge"])),
+            ("after", boxed("0.2", Cut, &["a"])),
+        ]);
+        let r = rebuild_part(&p);
+        let err = |f: &str| {
+            let (_, r) = r.features.iter().find(|(i, _)| *i == id(f)).unwrap();
+            r.as_ref().unwrap_err().clone()
+        };
+        let e = err("of_j");
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
+        assert_eq!(e.details["solids"], json!(["a"]));
+        assert_eq!(err("early").code, Code::ReferenceForward);
+        let e = err("of_huge");
+        assert_eq!(
+            (e.code, e.details["dependency"].as_str()),
+            (Code::DependencyFailed, Some("huge"))
+        );
+        // The rest of a solid's chain still builds past a feature that
+        // fails on another solid.
+        assert!(r.output(&id("after")).is_some());
+    }
+
+    #[test]
+    fn references_read_the_solid_as_the_reader_sees_it() {
+        use crate::doc::reference::Reference;
+        use crate::doc::solid::Operation::*;
+        use crate::solid::tests::{boxed, part};
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("j", boxed("0.5", Join, &["a"])),
+        ]);
+        let r = rebuild_part(&p);
+        // a's face at x = 1 mm, which the join swallows.
+        let own = &state(&r, "a", "a").body;
+        let right = own
+            .faces()
+            .find(|f| {
+                let b = ryukei::intersect::face_box(own, *f);
+                b.min().x > 0.0009 && b.max().x < 0.0011
+            })
+            .unwrap();
+        let name = own.face(right).unwrap().name;
+        let face = Reference {
+            feature: id("a"),
+            name,
+        };
+        // Read from between a and j it is there; from after j it is gone.
+        let between = [id("a"), id("o"), id("j")];
+        let after = [id("a"), id("j"), id("o")];
+        let found = crate::reference::resolve(&p, &between, &id("o"), "plane", &face, &r).unwrap();
+        assert_eq!(found.1, EntityId::Face(right));
+        let e = crate::reference::resolve(&p, &after, &id("o"), "plane", &face, &r).unwrap_err();
+        assert_eq!(e.code, Code::ReferenceUnresolved, "{e}");
+        assert_eq!(e.details["dependency"], "a");
+        // A feature that acts on a solid isn't one.
+        let at_j = Reference {
+            feature: id("j"),
+            name,
+        };
+        let e = crate::reference::resolve(&p, &after, &id("o"), "plane", &at_j, &r).unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
+        assert_eq!(e.details["solids"], json!(["a"]));
     }
 
     #[test]
