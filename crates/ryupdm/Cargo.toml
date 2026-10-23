@@ -15,6 +15,7 @@ getrandom = "0.3"
 # Part number patterns: Rust's regex syntax, ASCII classes (`\d` is 0-9).
 regex-lite = "0.1"
 ryucad-doc = { path = "../ryucad-doc" }
+serde = "1"
 serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [dev-dependencies]

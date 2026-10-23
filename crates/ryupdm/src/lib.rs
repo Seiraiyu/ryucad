@@ -5,12 +5,14 @@
 //! release naming the hash of what it released ([`content`]) in a record
 //! under `releases/` ([`record`]) that is official once the release
 //! branch holds it ([`history`]). From those, each part has a state:
-//! in work, released, modified or obsolete ([`state`]).
+//! in work, released, modified or obsolete ([`state`]), and the records
+//! are checked against the parts, the branch and the tags ([`check`]).
 //!
 //! ryupdm reads projects through `ryucad-doc` and never calls the kernel,
 //! a session, the daemon or the app: ryucad exposes it through its
 //! protocol and CLI, and a service can link it to read any revision.
 
+pub mod check;
 pub mod config;
 pub mod content;
 pub mod history;

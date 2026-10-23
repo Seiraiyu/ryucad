@@ -4206,6 +4206,7 @@ dependencies = [
  "gix",
  "regex-lite",
  "ryucad-doc",
+ "serde",
  "serde_json",
  "tempfile",
 ]
