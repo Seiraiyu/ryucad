@@ -1,7 +1,11 @@
 //! ryupdm's releases through the protocol: proposing a part's next
-//! revision and making one obsolete. Each writes one record under
-//! `releases/` as a logged, undoable change, and never commits: a record
-//! becomes official when the release branch holds it.
+//! revision and making one obsolete, listing records with where they
+//! became official, and the release checks. Each write is one record
+//! under `releases/`, a logged, undoable change, and nothing is committed:
+//! a record becomes official when the release branch holds it.
+//!
+//! The release branch is read once per state of the refs it depends on
+//! (the branch's tip and the `ryupdm/` tags) and kept in the session.
 
 use crate::doc::id::Id;
 use crate::doc::project::write_json;
@@ -16,12 +20,32 @@ use ryupdm::record::{BuiltWith, Kind, Obsolete, Record, Records, Release, Releas
 use ryupdm::state::{self, Status};
 use serde_json::{Value, json};
 
-/// The project's repository and its release branch as read, or
-/// `not_a_git_repo`.
-pub(crate) fn history(session: &Session) -> Result<(crate::git::Repo, Releases)> {
+/// What the release branch as read depends on: the branch's name and
+/// tip, and every `ryupdm/` tag.
+fn refs_key(repo: &crate::git::Repo, config: &Config) -> Result<String> {
+    let branch = ryupdm::history::branch(repo.gix(), &config.release_branch)?;
+    let tags = ryupdm::history::tags(repo.gix())?;
+    Ok(format!(
+        "{}\0{:?}\0{tags:?}",
+        config.release_branch,
+        branch.map(|b| b.tip)
+    ))
+}
+
+/// The project's repository and its release branch as read, from the
+/// session's copy while the refs haven't moved; `not_a_git_repo` outside
+/// a repository.
+pub(crate) fn history(session: &mut Session) -> Result<(crate::git::Repo, Releases)> {
     let repo = crate::git::repo(session.root())?;
     let config = Config::read(&session.snapshot())?;
+    let key = refs_key(&repo, &config)?;
+    if let Some((k, r)) = &session.releases
+        && *k == key
+    {
+        return Ok((repo, r.clone()));
+    }
     let releases = Releases::read(repo.gix(), repo.prefix(), &config)?;
+    session.releases = Some((key, releases.clone()));
     Ok((repo, releases))
 }
 
@@ -289,9 +313,170 @@ pub fn obsolete(
 }
 
 /// The part's state, for `props.get`: in work outside a repository.
-pub(crate) fn state_of(session: &Session, part: &Id) -> Value {
+pub(crate) fn state_of(session: &mut Session, part: &Id) -> Value {
     let releases = history(session).map(|(_, r)| r).unwrap_or_default();
     state::derive(&session.snapshot(), part, &releases).to_json()
+}
+
+/// One record as `release.list` gives it.
+fn listed(entry: &ryupdm::record::Entry, releases: &Releases, has_repo: bool) -> Value {
+    let mut v = json!({"part": entry.part, "label": entry.label, "kind": entry.kind.as_str(),
+                       "path": entry.path});
+    match &entry.record {
+        Err(e) => v["error"] = json!(e),
+        Ok(r) => {
+            if let Some(rel) = r.release() {
+                v["supersedes"] = json!(rel.supersedes);
+            }
+            if let Some(n) = r.note() {
+                v["note"] = json!(n);
+            }
+            let by = r.released_by();
+            v["released_by"] = json!({"name": by.name, "email": by.email,
+                                      "participant": by.participant});
+        }
+    }
+    match releases.official.get(&entry.path) {
+        Some(o) => {
+            v["status"] = json!("official");
+            v["commit"] = json!(o.commit);
+            if o.shallow {
+                v["shallow"] = json!(true);
+            }
+            if entry.kind == Kind::Release {
+                let t = releases.tag(&entry.part, &entry.label, &o.commit);
+                let mut tag = json!({"name": ryupdm::history::tag_name(&entry.part, &entry.label),
+                                     "status": t.as_str()});
+                if let ryupdm::history::Tag::Moved(to) = t {
+                    tag["points_at"] = json!(to);
+                }
+                v["tag"] = tag;
+            }
+        }
+        None => v["status"] = json!(if has_repo { "proposed" } else { "unofficial" }),
+    }
+    v
+}
+
+/// `release.list`: every record (or one part's) with where it became
+/// official and its tag, and each part's state.
+pub fn list(session: &mut Session, part: Option<&str>) -> Result<Value> {
+    let part = part.map(part_id).transpose()?;
+    let (repo, releases) = match history(session) {
+        Ok((repo, r)) => (Some(repo), r),
+        Err(e) if e.code == Code::NotAGitRepo => (None, Releases::default()),
+        Err(e) => return Err(e),
+    };
+    let files = session.snapshot();
+    let config = Config::read(&files)?;
+    let records = Records::read(&files)?;
+    let mine = |p: &Id| part.as_ref().is_none_or(|x| x == p);
+    if let Some(p) = &part
+        && session.project().part(p).is_err()
+        && records.of(p).next().is_none()
+    {
+        return Err(Error::new(Code::NotFound, format!("no part {p}")).with("part", p));
+    }
+    let list: Vec<Value> = records
+        .entries
+        .iter()
+        .filter(|e| mine(&e.part))
+        .map(|e| listed(e, &releases, repo.is_some()))
+        .collect();
+    let parts: Vec<Value> = state::derive_all(&files, &releases)
+        .into_iter()
+        .filter(|(p, _)| mine(p))
+        .map(|(p, s)| {
+            let mut v = s.to_json();
+            v["part"] = json!(p);
+            v
+        })
+        .collect();
+    Ok(json!({
+        "repository": repo.is_some(),
+        "release_branch": config.release_branch,
+        "branch": releases.branch.as_ref().map(|b| json!({"name": b.name, "tip": b.tip})),
+        "shallow": releases.shallow,
+        "records": list,
+        "parts": parts,
+    }))
+}
+
+/// Rebuilds released content for `release_result_changed`, once per
+/// content hash in a session.
+struct Rebuilds<'a> {
+    root: std::path::PathBuf,
+    cache: &'a mut std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+}
+
+impl ryupdm::check::Results for Rebuilds<'_> {
+    fn bodies(
+        &mut self,
+        src: &dyn crate::doc::source::Source,
+        part: &Id,
+        content: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        if let Some(b) = self.cache.get(content) {
+            return Ok(b.clone());
+        }
+        let project = crate::doc::project::Project::load_from(&self.root, src)?;
+        let built = crate::rebuild::rebuild_part(project.part(part)?);
+        let bodies: std::collections::BTreeMap<String, String> = built
+            .features
+            .iter()
+            .filter_map(|(fid, r)| Some((fid.to_string(), r.as_ref().ok()?.body()?.hash.clone())))
+            .collect();
+        self.cache.insert(content.to_owned(), bodies.clone());
+        Ok(bodies)
+    }
+}
+
+/// The release findings for the project (a `schema: 1` finding each):
+/// with `results`, official releases are rebuilt too.
+pub(crate) fn findings(session: &mut Session, results: bool) -> Result<Vec<Value>> {
+    let files = session.snapshot();
+    let found = match history(session) {
+        Ok((repo, releases)) => {
+            let h = ryupdm::check::History {
+                repo: repo.gix(),
+                prefix: repo.prefix(),
+                releases: &releases,
+            };
+            let root = session.root().to_path_buf();
+            let mut rebuilds = Rebuilds {
+                root,
+                cache: &mut session.release_results,
+            };
+            let r: Option<&mut dyn ryupdm::check::Results> =
+                if results { Some(&mut rebuilds) } else { None };
+            ryupdm::check::run(&files, Some(h), r)?
+        }
+        Err(e) if e.code == Code::NotAGitRepo => ryupdm::check::run(&files, None, None)?,
+        Err(e) => return Err(e),
+    };
+    Ok(found.iter().map(ryupdm::check::Finding::to_json).collect())
+}
+
+/// `release.check`: the release checks alone, reported as `check` reports;
+/// fails with `check_failed` when any finding is an error.
+pub fn check(session: &mut Session, results: bool) -> Result<Value> {
+    let findings = findings(session, results)?;
+    let errors = findings.iter().filter(|f| f["severity"] == "error").count();
+    let report = json!({
+        "schema": ryupdm::check::SCHEMA,
+        "passed": errors == 0,
+        "errors": errors,
+        "warnings": findings.len() - errors,
+        "findings": findings,
+    });
+    if errors > 0 {
+        return Err(Error {
+            code: Code::CheckFailed,
+            message: format!("{errors} release check(s) failed"),
+            details: report,
+        });
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -462,6 +647,114 @@ pub(crate) mod tests {
         assert_eq!(e.code, Code::FormatTooNew);
         let got = call(&mut s, "props.get", json!({"part": "p"})).unwrap();
         assert_eq!(got["state"]["state"], "unknown");
+    }
+
+    #[test]
+    fn records_are_listed_with_their_commits_and_tags() {
+        let (dir, mut s) = released_project();
+        let root = dir.path();
+        let v = call(&mut s, "release.list", json!({})).unwrap();
+        assert_eq!(
+            (&v["branch"]["name"], &v["records"], &v["parts"][0]["text"]),
+            (&json!("main"), &json!([]), &json!("in work"))
+        );
+        propose(&mut s).unwrap();
+        let v = call(&mut s, "release.list", json!({"part": "p"})).unwrap();
+        let r = &v["records"][0];
+        assert_eq!(
+            (&r["label"], &r["status"], &r["note"]),
+            (&json!("A"), &json!("proposed"), &json!("first"))
+        );
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "release A"]);
+        let head = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(root)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        let v = call(&mut s, "release.list", json!({})).unwrap();
+        let r = &v["records"][0];
+        assert_eq!(
+            (&r["status"], &r["commit"]),
+            (&json!("official"), &json!(head))
+        );
+        assert_eq!(r["tag"], json!({"name": "ryupdm/p/A", "status": "missing"}));
+        assert_eq!(v["parts"][0]["text"], "released A");
+        git(root, &["tag", "ryupdm/p/A", &head]);
+        let v = call(&mut s, "release.list", json!({})).unwrap();
+        assert_eq!(v["records"][0]["tag"]["status"], "ok");
+        let e = call(&mut s, "release.list", json!({"part": "nope"})).unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+        // Outside a repository, records are listed, nothing official.
+        let (_d, mut t) = fresh();
+        let v = call(&mut t, "release.list", json!({})).unwrap();
+        assert_eq!(
+            (&v["repository"], &v["branch"]),
+            (&json!(false), &Value::Null)
+        );
+    }
+
+    #[test]
+    fn the_checks_report_and_fail_as_check_does() {
+        let (dir, mut s) = released_project();
+        let root = dir.path();
+        propose(&mut s).unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "release A"]);
+        let v = call(&mut s, "release.check", json!({})).unwrap();
+        assert_eq!(
+            (&v["schema"], &v["passed"], &v["warnings"]),
+            (&json!(1), &json!(true), &json!(1))
+        );
+        assert_eq!(v["findings"][0]["code"], "release_tag_missing");
+        assert_eq!(v["findings"][0]["source"], "release");
+        // Rebuilt, A's bodies are what the record says, once per content.
+        let v = call(&mut s, "release.check", json!({"results": true})).unwrap();
+        assert_eq!(v["warnings"], 1);
+        assert_eq!(s.release_results.len(), 1);
+        // A proposal the part has moved on from fails.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"x": 12}}),
+        )
+        .unwrap();
+        propose(&mut s).unwrap();
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"x": 13}}),
+        )
+        .unwrap();
+        let e = call(&mut s, "release.check", json!({})).unwrap_err();
+        assert_eq!(e.code, Code::CheckFailed);
+        let codes: Vec<&str> = e.details["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["code"].as_str().unwrap())
+            .collect();
+        assert_eq!(codes, ["release_stale", "release_tag_missing"]);
+        assert_eq!(e.details["errors"], 1);
+    }
+
+    #[test]
+    fn the_branch_is_read_again_only_when_refs_move() {
+        let (dir, mut s) = released_project();
+        let root = dir.path();
+        call(&mut s, "release.list", json!({})).unwrap();
+        let key = s.releases.as_ref().unwrap().0.clone();
+        call(&mut s, "release.list", json!({})).unwrap();
+        assert_eq!(s.releases.as_ref().unwrap().0, key);
+        git(root, &["commit", "-q", "--allow-empty", "-m", "moves main"]);
+        call(&mut s, "release.list", json!({})).unwrap();
+        assert_ne!(s.releases.as_ref().unwrap().0, key);
     }
 
     #[test]

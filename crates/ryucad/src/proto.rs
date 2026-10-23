@@ -316,6 +316,19 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// Release records (or one part's), where each became official, their
+    /// tags, and each part's state.
+    #[serde(rename = "release.list")]
+    ReleaseList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+    },
+    /// The release checks; with `results`, official releases are rebuilt.
+    #[serde(rename = "release.check")]
+    ReleaseCheck {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        results: bool,
+    },
     /// Writes an obsolete record for a part's latest official revision.
     #[serde(rename = "release.obsolete")]
     ReleaseObsolete {

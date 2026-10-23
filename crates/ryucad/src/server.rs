@@ -247,6 +247,8 @@ fn dispatch(
             expected_revision.as_deref(),
         ),
         Request::PropsGet { part } => crate::pdm::get(session, &part),
+        Request::ReleaseList { part } => crate::release::list(session, part.as_deref()),
+        Request::ReleaseCheck { results } => crate::release::check(session, results),
         Request::ReleasePropose {
             part,
             note,

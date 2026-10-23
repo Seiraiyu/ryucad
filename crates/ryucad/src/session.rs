@@ -62,6 +62,12 @@ pub struct Session {
     revisions: Vec<(String, Session)>,
     /// The last merge status, by the key of what it was computed from.
     pub(crate) merge_status: Option<(String, serde_json::Value)>,
+    /// The release branch as last read, by the key of the refs it was
+    /// read from (see [`crate::release::history`]).
+    pub(crate) releases: Option<(String, ryupdm::history::Releases)>,
+    /// Bodies of released content as this build rebuilds them, by content
+    /// hash, for `release_result_changed`.
+    pub(crate) release_results: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl Session {
@@ -78,6 +84,8 @@ impl Session {
             frozen: false,
             revisions: Vec::new(),
             merge_status: None,
+            releases: None,
+            release_results: BTreeMap::new(),
         };
         s.scan()?;
         Ok(s)
@@ -111,6 +119,8 @@ impl Session {
             frozen: true,
             revisions: Vec::new(),
             merge_status: None,
+            releases: None,
+            release_results: BTreeMap::new(),
         })
     }
 

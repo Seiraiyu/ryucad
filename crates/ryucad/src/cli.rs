@@ -636,6 +636,16 @@ enum ReleaseCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Every release record (or one part's): official at which commit or still proposed,
+    /// its tag, and each part's state.
+    List { part: Option<String> },
+    /// Check every record against the parts, the release branch and the tags; fails
+    /// (exit 1) on any error.
+    Check {
+        /// Also rebuild official releases and compare their bodies (slower).
+        #[arg(long)]
+        results: bool,
+    },
     /// Write an obsolete record for a part's latest official revision (the part may be
     /// deleted).
     Obsolete {
@@ -1084,6 +1094,10 @@ fn request(cmd: &Command) -> Option<Request> {
                 .collect(),
             expected_revision: expect.revision.clone(),
         },
+        Command::Release(ReleaseCmd::List { part }) => Request::ReleaseList { part: part.clone() },
+        Command::Release(ReleaseCmd::Check { results }) => {
+            Request::ReleaseCheck { results: *results }
+        }
         Command::Release(ReleaseCmd::Propose { part, note, expect }) => Request::ReleasePropose {
             part: part.clone(),
             note: note.clone(),

@@ -245,7 +245,7 @@ pub fn configure(session: &mut Session, change: Change, expected: Option<&str>) 
 
 /// `props.get`: every core and declared property, set or not, with its
 /// declaration, value as written and faults; then any set but unknown.
-pub fn get(session: &Session, part: &str) -> Result<Value> {
+pub fn get(session: &mut Session, part: &str) -> Result<Value> {
     let id = part_id(part)?;
     let p = session.project().part(&id)?;
     let pdm = Pdm::read(&session.snapshot(), session.project());
