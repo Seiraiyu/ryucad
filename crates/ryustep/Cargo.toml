@@ -11,3 +11,4 @@ ryukei = { path = "../ryukei" }
 
 [dev-dependencies]
 proptest = "1"
+ryukei-testkit = { path = "../ryukei-testkit" }

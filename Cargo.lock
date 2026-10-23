@@ -4200,6 +4200,7 @@ dependencies = [
  "proptest",
  "rayon",
  "ryukei",
+ "ryukei-testkit",
 ]
 
 [[package]]
