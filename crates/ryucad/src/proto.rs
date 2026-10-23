@@ -271,6 +271,42 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// Gives the project its ID and ryupdm's default settings.
+    #[serde(rename = "pdm.init")]
+    PdmInit {},
+    /// ryupdm's settings, with their defaults filled in.
+    #[serde(rename = "pdm.config")]
+    PdmConfig {},
+    /// Changes ryupdm's settings; what isn't given stays.
+    #[serde(rename = "pdm.configure")]
+    PdmConfigure {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revisions: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        release_branch: Option<String>,
+        /// A part number pattern, or `""` for none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pattern: Option<String>,
+        /// Custom property declarations by name; `null` removes one.
+        #[serde(default, skip_serializing_if = "Map::is_empty")]
+        properties: Map<String, Value>,
+        /// Write even if parts' properties stop fitting.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        force: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A part's properties: every core and declared one, set or not.
+    #[serde(rename = "props.get")]
+    PropsGet { part: String },
+    /// Sets a part's properties; `null` clears one.
+    #[serde(rename = "props.set")]
+    PropsSet {
+        part: String,
+        properties: Map<String, Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// Applies a batch of sketch edits with one solve; atomic.
     #[serde(rename = "sketch.edit")]
     SketchEdit {
@@ -609,6 +645,9 @@ impl Request {
                 | Request::ParamSet { .. }
                 | Request::ParamDelete { .. }
                 | Request::ParamRename { .. }
+                | Request::PdmInit { .. }
+                | Request::PdmConfigure { .. }
+                | Request::PropsSet { .. }
                 | Request::SketchEdit { .. }
                 | Request::Undo { .. }
                 | Request::Redo { .. }
@@ -753,6 +792,19 @@ mod tests {
                 rev: None,
                 off: true,
                 participant: None,
+            },
+            Request::PdmConfigure {
+                revisions: Some("numeric".into()),
+                release_branch: None,
+                pattern: Some(String::new()),
+                properties: [("finish".to_owned(), Value::Null)].into_iter().collect(),
+                force: true,
+                expected_revision: None,
+            },
+            Request::PropsSet {
+                part: "p".into(),
+                properties: [("number".to_owned(), json!("100"))].into_iter().collect(),
+                expected_revision: Some("r".into()),
             },
         ];
         for (i, r) in reqs.into_iter().enumerate() {

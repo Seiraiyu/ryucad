@@ -179,11 +179,11 @@ impl Repo {
     }
 
     /// The project's files in a commit's tree, by path relative to the
-    /// project: the manifest, its Git attributes and everything under
-    /// `parts/`.
+    /// project: the files at its root a session tracks and everything
+    /// under `parts/`.
     fn project_blobs(&self, tree: &gix::Tree<'_>) -> Result<BTreeMap<String, gix::ObjectId>> {
         let mut out = BTreeMap::new();
-        for name in [crate::doc::project::MANIFEST, crate::drivers::ATTRIBUTES] {
+        for name in crate::doc::project::ROOT_FILES {
             if let Some(id) = self.entry(tree, &format!("{}{name}", self.prefix))? {
                 out.insert(name.to_owned(), id);
             }
@@ -557,10 +557,10 @@ impl Repo {
 }
 
 /// Whether `rel` (relative to a project) is one of the files its state
-/// depends on, as `session::files` lists them: the manifest, the
-/// attributes, and files two and three levels under `parts/`.
+/// depends on, as `session::files` lists them: the files at its root,
+/// and files two and three levels under `parts/`.
 fn project_file(rel: &str) -> bool {
-    if rel == crate::doc::project::MANIFEST || rel == crate::drivers::ATTRIBUTES {
+    if crate::doc::project::ROOT_FILES.contains(&rel) {
         return true;
     }
     let mut parts = rel.split('/');
@@ -782,6 +782,22 @@ pub(crate) mod tests {
             .map(|c| c["subject"].as_str().unwrap())
             .collect();
         assert_eq!(subjects, ["part b"]);
+    }
+
+    #[test]
+    fn a_revision_holds_ryupdm_files() {
+        let (dir, _s) = fresh();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("ryupdm.json"), "{}").unwrap();
+        std::fs::create_dir_all(root.join("parts/p")).unwrap();
+        std::fs::write(root.join("parts/p/properties.json"), "{}").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "pdm"]);
+        let r = repo(root).unwrap().revision("HEAD").unwrap();
+        assert_eq!(r.files, files(root));
+        assert!(r.files.contains_key("ryupdm.json"));
+        assert!(r.files.contains_key("parts/p/properties.json"));
     }
 
     #[test]

@@ -413,11 +413,45 @@ pub fn user(name: &str) -> Value {
         .unwrap_or_else(k.default)
 }
 
-/// A project revision: a hash of the manifest's bytes.
+/// Refuses to write the project's own settings when the caller's view of
+/// them is out of date; returns the revision they are at.
+pub fn check_project_revision(root: &Path, expected: Option<&str>) -> Result<String> {
+    let rev = project_revision(root)?;
+    match expected {
+        Some(e) if e != rev => Err(Error::new(
+            Code::Conflict,
+            format!("the project changed since revision {e}; read it again and retry"),
+        )
+        .with("expected", e)
+        .with("actual", rev)),
+        _ => Ok(rev),
+    }
+}
+
+/// A project revision: a hash of the files that hold the project's own
+/// settings, the manifest and ryupdm's settings if there are any. Each
+/// piece is length-prefixed, and ryupdm's is tagged.
 pub fn project_revision(root: &Path) -> Result<String> {
-    let path = root.join(crate::doc::project::MANIFEST);
-    let bytes = std::fs::read(&path).map_err(|e| Error::io(&path, &e))?;
-    Ok(blake3::hash(&bytes).to_hex()[..32].to_owned())
+    use crate::doc::project::{MANIFEST, PDM_CONFIG};
+    let read = |name: &str| {
+        let path = root.join(name);
+        match std::fs::read(&path) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && name != MANIFEST => Ok(None),
+            Err(e) => Err(Error::io(&path, &e)),
+        }
+    };
+    let mut h = blake3::Hasher::new();
+    let mut piece = |bytes: &[u8]| {
+        h.update(&(bytes.len() as u64).to_le_bytes());
+        h.update(bytes);
+    };
+    piece(&read(MANIFEST)?.unwrap_or_default());
+    if let Some(pdm) = read(PDM_CONFIG)? {
+        piece(PDM_CONFIG.as_bytes());
+        piece(&pdm);
+    }
+    Ok(h.finalize().to_hex()[..32].to_owned())
 }
 
 #[cfg(test)]
@@ -520,6 +554,21 @@ pub(crate) mod tests {
                 Scope::Project
             );
         });
+    }
+
+    #[test]
+    fn the_project_revision_covers_ryupdm_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(crate::doc::project::MANIFEST), "{}").unwrap();
+        let r0 = project_revision(root).unwrap();
+        std::fs::write(root.join(crate::doc::project::PDM_CONFIG), "{}").unwrap();
+        let r1 = project_revision(root).unwrap();
+        assert_ne!(r1, r0);
+        std::fs::write(root.join(crate::doc::project::PDM_CONFIG), "{ }").unwrap();
+        assert_ne!(project_revision(root).unwrap(), r1);
+        std::fs::remove_file(root.join(crate::doc::project::MANIFEST)).unwrap();
+        assert_eq!(project_revision(root).unwrap_err().code, Code::Io);
     }
 
     #[test]

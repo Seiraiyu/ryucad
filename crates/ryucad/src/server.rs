@@ -39,9 +39,7 @@ pub fn init(root: &Path, default_unit: Option<Unit>) -> Result<Value> {
         )
         .with("path", root));
     }
-    let m = Manifest {
-        default_unit: default_unit.unwrap_or(Unit::Mm),
-    };
+    let m = Manifest::new(default_unit.unwrap_or(Unit::Mm));
     write_json(&manifest, &m.to_json())?;
     crate::drivers::write_attributes(root)?;
     Ok(json!({"root": root, "default_unit": m.default_unit}))
@@ -228,6 +226,32 @@ fn dispatch(
             expected_revision,
         } => feature_move(session, &part, &id, &position, expected_revision.as_deref()),
         Request::FeatureList { part } => feature_list(session, &part),
+        Request::PdmInit {} => crate::pdm::init(session),
+        Request::PdmConfig {} => crate::pdm::config(session),
+        Request::PdmConfigure {
+            revisions,
+            release_branch,
+            pattern,
+            properties,
+            force,
+            expected_revision,
+        } => crate::pdm::configure(
+            session,
+            crate::pdm::Change {
+                revisions,
+                release_branch,
+                pattern,
+                properties,
+                force,
+            },
+            expected_revision.as_deref(),
+        ),
+        Request::PropsGet { part } => crate::pdm::get(session, &part),
+        Request::PropsSet {
+            part,
+            properties,
+            expected_revision,
+        } => crate::pdm::set(session, &part, properties, expected_revision.as_deref()),
         Request::ParamList { part } => param::list(session, &part),
         Request::ParamSet {
             part,
@@ -533,22 +557,14 @@ fn dispatch(
             let scope = scope.as_deref().map(config::Scope::parse).transpose()?;
             let v = match config::validate(&key, &value, scope)? {
                 config::Scope::Project => {
-                    let rev = config::project_revision(session.root())?;
-                    if let Some(e) = expected_revision.filter(|e| *e != rev) {
-                        return Err(Error::new(
-                            Code::Conflict,
-                            format!(
-                                "the project changed since revision {e}; read it again and retry"
-                            ),
-                        )
-                        .with("expected", e)
-                        .with("actual", rev));
-                    }
+                    config::check_project_revision(session.root(), expected_revision.as_deref())?;
                     let unit = Unit::parse(value.as_str().expect("validated")).expect("validated");
-                    write_json(
-                        &session.root().join(MANIFEST),
-                        &Manifest { default_unit: unit }.to_json(),
-                    )?;
+                    // The rest of the manifest (the project's ID) stays.
+                    let m = Manifest {
+                        default_unit: unit,
+                        ..session.project().manifest.clone()
+                    };
+                    write_json(&session.root().join(MANIFEST), &m.to_json())?;
                     session.reload()?;
                     let mut v = config::get(unit, Some(&key), None)?;
                     v["project_revision"] = json!(config::project_revision(session.root())?);
@@ -672,6 +688,7 @@ fn part_create(session: &mut Session, part: &str) -> Result<Value> {
             Error::new(Code::DuplicateId, format!("part {id} already exists")).with("part", &id),
         );
     }
+    crate::pdm::check_not_retired(session.root(), &id)?;
     write_json(
         &part_path(session.root(), &id),
         &PartFile { features: vec![] }.to_json(),
@@ -2219,8 +2236,10 @@ fn check_format(session: &Session) -> Result<Value> {
         }
     };
     check(&root.join(MANIFEST));
+    check(&root.join(crate::doc::project::PDM_CONFIG));
     for part in p.parts.values() {
         check(&part_path(root, &part.id));
+        check(&crate::doc::project::properties_path(root, &part.id));
         if let Err(e) = &part.file {
             errors.push(json!(e));
         }
@@ -2666,7 +2685,7 @@ pub(crate) mod tests {
         let root = dir.path();
         write_json(
             &root.join("parts/p/features/s.json"),
-            &crate::doc::sketch::tests::rectangle(),
+            &crate::doc::fixtures::rectangle(),
         )
         .unwrap();
         write_json(
@@ -3202,14 +3221,21 @@ pub(crate) mod tests {
         .unwrap();
         fs::write(root.join("parts/p/features/broken.json"), "{").unwrap();
         fs::write(root.join("parts/p/stray.txt"), "").unwrap();
+        // ryupdm's files are known, and must be canonical too.
+        fs::write(root.join("parts/p/properties.json"), "{\"name\":\"x\"}").unwrap();
+        fs::write(root.join("ryupdm.json"), "{\"format\":1}").unwrap();
         let r = call(&mut s, "check_format", json!({})).unwrap();
         assert_eq!(r["clean"], false);
-        assert!(
-            r["non_canonical"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("parts/p/features/a.json"))
-        );
+        for f in [
+            "parts/p/features/a.json",
+            "parts/p/properties.json",
+            "ryupdm.json",
+        ] {
+            assert!(
+                r["non_canonical"].as_array().unwrap().contains(&json!(f)),
+                "{f}: {r}"
+            );
+        }
         assert_eq!(
             r["orphans"],
             json!([
@@ -3853,6 +3879,32 @@ pub(crate) mod tests {
                 e[0]["files"],
                 json!([{"path": "ryucad.json", "change": "modified"}])
             );
+        });
+    }
+
+    #[test]
+    fn setting_the_unit_keeps_the_project_id() {
+        crate::config::tests::with_config(|_| {
+            let (dir, mut s) = fresh();
+            let id = crate::doc::id::ProjectId::from_bytes([9; 16]);
+            let m = Manifest {
+                project: Some(id.clone()),
+                ..Manifest::new(Unit::Mm)
+            };
+            write_json(&dir.path().join(MANIFEST), &m.to_json()).unwrap();
+            call(
+                &mut s,
+                "config.set",
+                json!({"key": "default_unit", "value": "in"}),
+            )
+            .unwrap();
+            let text = fs::read_to_string(dir.path().join(MANIFEST)).unwrap();
+            assert_eq!(
+                crate::doc::canonical::parse(&text).unwrap(),
+                json!({"default_unit": "in", "format": 2, "kind": "ryucad.project",
+                       "project": id})
+            );
+            assert_eq!(s.project().manifest.project, Some(id));
         });
     }
 

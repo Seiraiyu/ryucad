@@ -4124,8 +4124,10 @@ dependencies = [
  "png",
  "proptest",
  "rayon",
+ "ryucad-doc",
  "ryukei",
  "ryukei-testkit",
+ "ryupdm",
  "ryusketch",
  "serde",
  "serde_json",
@@ -4146,6 +4148,18 @@ dependencies = [
  "pollster 0.4.0",
  "rfd",
  "ryucad",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "ryucad-doc"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "ryukei",
+ "ryusketch",
+ "serde",
  "serde_json",
  "tempfile",
 ]
@@ -4181,6 +4195,16 @@ dependencies = [
  "num-rational",
  "num-traits",
  "ryukei",
+]
+
+[[package]]
+name = "ryupdm"
+version = "0.0.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "regex-lite",
+ "ryucad-doc",
+ "serde_json",
 ]
 
 [[package]]

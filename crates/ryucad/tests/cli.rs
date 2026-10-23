@@ -5,7 +5,7 @@
 //! give the same JSON and the same exit code.
 
 use assert_cmd::Command;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -792,7 +792,7 @@ fn every_error_code_has_its_exit_code() {
     p.fails(&["feature", "show", "p", "t"], "merge_conflict", 1);
     p.write(
         "ryucad.json",
-        r#"{"default_unit":"mm","format":2,"kind":"ryucad.project"}"#,
+        r#"{"default_unit":"mm","format":3,"kind":"ryucad.project"}"#,
     );
     p.fails(&["part", "list"], "format_too_new", 3);
 }
@@ -850,6 +850,11 @@ fn every_protocol_method_has_a_command() {
         ("param.set", &["param", "set"]),
         ("param.delete", &["param", "delete"]),
         ("param.rename", &["param", "rename"]),
+        ("pdm.init", &["pdm", "init"]),
+        ("pdm.config", &["pdm", "config"]),
+        ("pdm.configure", &["pdm", "configure"]),
+        ("props.get", &["props", "show"]),
+        ("props.set", &["props", "set"]),
         ("sketch.edit", &["sketch", "edit"]),
         ("sketch.solve", &["sketch", "solve"]),
         ("sketch.get", &["sketch", "get"]),
@@ -1573,4 +1578,109 @@ fn merges_through_the_cli() {
     assert_eq!(code, 0, "{v}");
     let (_, v) = p.run_in(&p.daemon, "", &["merge", "status"]);
     assert_eq!(v["result"]["conflicts"][0]["id"], id);
+}
+
+#[test]
+fn pdm_settings_and_properties_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "a"]);
+    p.ok(&["part", "create", "b"]);
+    let c = p.ok(&["pdm", "config"]);
+    assert_eq!(
+        (&c["configured"], &c["revisions"]),
+        (&json!(false), &json!("letters"))
+    );
+    // Both projects get one ID, so the two ways answer alike; pdm init
+    // keeps an ID a project has.
+    let id = "0123456789abcdef0123456789abcdef";
+    p.write(
+        "ryucad.json",
+        &format!(
+            "{{\n  \"default_unit\": \"mm\",\n  \"format\": 2,\n  \"kind\": \"ryucad.project\",\n  \"project\": \"{id}\"\n}}\n"
+        ),
+    );
+    let c = p.ok(&["pdm", "init"]);
+    assert_eq!(
+        (&c["configured"], &c["project"]),
+        (&json!(true), &json!(id))
+    );
+    let c = p.ok(&[
+        "pdm",
+        "configure",
+        "--pattern",
+        r"\d{3}-\d{4}",
+        "--property",
+        r#"finish={"type":"enum","values":["bare","red"]}"#,
+        "--property",
+        r#"count={"type":"integer","revising":false}"#,
+        "--expect",
+        c["project_revision"].as_str().unwrap(),
+    ]);
+    assert_eq!(c["properties"]["count"]["revising"], false);
+    let v = p.ok(&[
+        "props",
+        "set",
+        "a",
+        "number=100-0001",
+        "count=3",
+        "finish=bare",
+    ]);
+    let count = v["properties"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["name"] == "count")
+        .unwrap();
+    assert_eq!(count["value"], 3);
+    let shown = p.ok(&["props", "show", "a"]);
+    assert_eq!(shown, v);
+    p.fails(
+        &["props", "set", "b", "number=100-0001"],
+        "part_number_duplicate",
+        1,
+    );
+    p.fails(&["props", "set", "b", "colour=red"], "property_unknown", 1);
+    p.fails(&["props", "set", "b", "finish=blue"], "property_invalid", 1);
+    p.fails(&["props", "set", "b", "number=1"], "part_number_invalid", 1);
+    p.fails(&["props", "set", "b"], "usage", 2);
+    p.fails(
+        &["pdm", "configure", "--property", "x={not json"],
+        "usage",
+        2,
+    );
+    p.fails(
+        &["pdm", "configure", "--remove-property", "count"],
+        "property_unknown",
+        1,
+    );
+    p.fails(
+        &["props", "set", "a", "count=4", "--expect", "0000"],
+        "conflict",
+        1,
+    );
+    p.ok(&["props", "set", "a", "count="]);
+    assert_eq!(p.ok(&["check"])["passed"], true);
+    // The daemon logged the last write: undo puts count back.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["props", "show", "a"]);
+    assert!(
+        v["result"]["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["name"] == "count" && x["value"] == 3),
+        "{v}"
+    );
+    // A released part's ID can't come back.
+    fs::create_dir_all(p.direct.join("releases/old")).unwrap();
+    fs::create_dir_all(p.daemon.join("releases/old")).unwrap();
+    p.write("releases/old/A.json", "{}");
+    p.fails(&["part", "create", "old"], "part_id_retired", 1);
+    p.fails(
+        &["pdm", "configure", "--revisions", "numeric"],
+        "revision_scheme_locked",
+        1,
+    );
 }

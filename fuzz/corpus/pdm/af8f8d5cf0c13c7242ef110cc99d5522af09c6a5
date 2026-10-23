@@ -1,0 +1,13 @@
+{
+  "c": "3",
+  "e": "x",
+  "f": 0.5,
+  "format": 1,
+  "g": "4 mm^2",
+  "h": true,
+  "kind": "ryupdm.properties",
+  "name": "Bracket",
+  "number": "AB-12",
+  "t": "two\nlines",
+  "uom": "each"
+}

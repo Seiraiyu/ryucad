@@ -61,6 +61,14 @@ enum Command {
     /// such as "3 mm" or "wall * 2", that features' quantities can read.
     #[command(subcommand)]
     Param(ParamCmd),
+    /// ryupdm's settings for this project: its ID, how revisions are labelled, the release
+    /// branch, the part number pattern and the custom properties parts may have.
+    #[command(subcommand)]
+    Pdm(PdmCmd),
+    /// Show or set a part's properties: its number, name, description, material, unit of
+    /// measure, make or buy, and the project's own.
+    #[command(subcommand)]
+    Props(PropsCmd),
     /// Edit, solve or read a sketch: points, lines, arcs and circles, and the constraints and
     /// dimensions between them.
     #[command(subcommand)]
@@ -561,6 +569,57 @@ enum ParamCmd {
 }
 
 #[derive(Subcommand)]
+enum PdmCmd {
+    /// Give the project its ID and the default settings (keeps any it has).
+    Init,
+    /// The settings, with their defaults filled in, and the project revision.
+    Config,
+    /// Change the settings; what isn't given stays.
+    Configure {
+        /// How revisions are labelled: letters (A, B, ...), numeric (1, 2, ...) or numeric2
+        /// (01, 02, ...). Fixed once any part is released.
+        #[arg(long)]
+        revisions: Option<String>,
+        /// The branch whose history makes releases official.
+        #[arg(long, value_name = "BRANCH")]
+        release_branch: Option<String>,
+        /// The pattern every part number must match whole (Rust regex syntax), or "" for
+        /// none.
+        #[arg(long, value_name = "REGEX")]
+        pattern: Option<String>,
+        /// Declare a custom property: finish='{"type":"enum","values":["bare","anodized"]}'.
+        /// Types: string, text, integer, number, quantity (with "dim"), boolean, enum (with
+        /// "values"); "required" (false) and "revising" (true) are optional.
+        #[arg(long = "property", value_name = "NAME=JSON", value_parser = declaration)]
+        properties: Vec<(String, Value)>,
+        /// Remove a custom property's declaration.
+        #[arg(long = "remove-property", value_name = "NAME")]
+        remove: Vec<String>,
+        /// Write even if parts' properties stop fitting the settings.
+        #[arg(long)]
+        force: bool,
+        /// Fail with `conflict` unless the project is still at this revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PropsCmd {
+    /// Every property of a part, set or not, with its declaration and faults.
+    Show { part: String },
+    /// Set properties: number=100-0042 material=6061-T6 count=4; NAME= clears one. Values are
+    /// read as each property's type.
+    Set {
+        part: String,
+        #[arg(value_name = "NAME=VALUE", value_parser = param, required = true)]
+        values: Vec<(String, String)>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
 enum SketchCmd {
     /// Apply a batch of edits with one solve, or refuse them all. OPS is a JSON array (or @FILE
     /// holding one) of {"op": "add", "type": "point", "at": ["0", "10 mm"]}, {"op": "add",
@@ -787,6 +846,13 @@ fn param(s: &str) -> core::result::Result<(String, String), String> {
         .ok_or_else(|| "expected NAME=VALUE".to_owned())
 }
 
+/// `NAME=JSON`, the JSON a property's declaration.
+fn declaration(s: &str) -> core::result::Result<(String, Value), String> {
+    let (k, v) = param(s)?;
+    let v = serde_json::from_str(&v).map_err(|e| format!("not JSON: {e}"))?;
+    Ok((k, v))
+}
+
 /// Three comma-separated values; commas inside parentheses belong to an
 /// expression (`max(a, b),0,0`).
 fn triple(s: &str) -> core::result::Result<[String; 3], String> {
@@ -949,6 +1015,44 @@ fn request(cmd: &Command) -> Option<Request> {
             part: part.clone(),
             from: from.clone(),
             to: to.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Pdm(PdmCmd::Init) => Request::PdmInit {},
+        Command::Pdm(PdmCmd::Config) => Request::PdmConfig {},
+        Command::Pdm(PdmCmd::Configure {
+            revisions,
+            release_branch,
+            pattern,
+            properties,
+            remove,
+            force,
+            expect,
+        }) => Request::PdmConfigure {
+            revisions: revisions.clone(),
+            release_branch: release_branch.clone(),
+            pattern: pattern.clone(),
+            properties: properties
+                .iter()
+                .cloned()
+                .chain(remove.iter().map(|n| (n.clone(), Value::Null)))
+                .collect(),
+            force: *force,
+            expected_revision: expect.clone(),
+        },
+        Command::Props(PropsCmd::Show { part }) => Request::PropsGet { part: part.clone() },
+        Command::Props(PropsCmd::Set {
+            part,
+            values,
+            expect,
+        }) => Request::PropsSet {
+            part: part.clone(),
+            properties: values
+                .iter()
+                .map(|(k, v)| {
+                    let v = if v.is_empty() { Value::Null } else { json!(v) };
+                    (k.clone(), v)
+                })
+                .collect(),
             expected_revision: expect.revision.clone(),
         },
         Command::Sketch(SketchCmd::Edit {

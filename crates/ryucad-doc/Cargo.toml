@@ -1,0 +1,23 @@
+[package]
+name = "ryucad-doc"
+description = "ryucad's file format: canonical JSON projects of parts and features"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[features]
+# Test files (`doc::fixtures`) for the crates above, in their tests.
+test-support = []
+
+[dependencies]
+# Rust only: no C or assembly to build on any platform.
+blake3 = { version = "1", features = ["pure"] }
+ryukei = { path = "../ryukei" }
+ryusketch = { path = "../ryusketch" }
+serde = { version = "1", features = ["derive"] }
+# Correctly rounded float parsing: without it, a number read back can be
+# one ulp off what was written.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dev-dependencies]
+tempfile = "3"

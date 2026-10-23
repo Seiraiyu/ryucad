@@ -11,7 +11,9 @@
 use crate::doc::canonical;
 use crate::doc::files::{Feature, Manifest, ParametersFile, PartFile};
 use crate::doc::id::Id;
-use crate::doc::project::{MANIFEST, write_atomic};
+use crate::doc::id::ProjectId;
+use crate::doc::project::{MANIFEST, PDM_CONFIG, Project, write_atomic};
+use crate::doc::source::Folder;
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
 use crate::git::Repo;
@@ -42,7 +44,7 @@ impl Issue {
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 20] = [
+pub const CODES: [(&str, &str); 25] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -63,6 +65,11 @@ pub const CODES: [(&str, &str); 20] = [
     ("merge_conflict", "error"),
     ("git_hook_missing", "warning"),
     ("git_hook_foreign", "warning"),
+    ("property_unknown", "error"),
+    ("property_invalid", "error"),
+    ("part_number_invalid", "error"),
+    ("part_number_duplicate", "error"),
+    ("project_id_missing", "warning"),
 ];
 
 fn issue(code: &'static str, files: Vec<String>, message: String) -> Issue {
@@ -312,6 +319,7 @@ pub fn diagnose(root: &Path) -> Vec<Issue> {
         ));
     }
     let mut unit = Unit::Mm;
+    let mut manifest = None;
     match read(root, MANIFEST) {
         Read::Missing => issues.push(issue(
             "missing_manifest",
@@ -325,6 +333,7 @@ pub fn diagnose(root: &Path) -> Vec<Issue> {
                 if !canonical {
                     issues.push(non_canonical(MANIFEST));
                 }
+                manifest = Some(m);
             }
             Err(e) => issues.push(document_issue(MANIFEST, &e)),
         },
@@ -355,11 +364,119 @@ pub fn diagnose(root: &Path) -> Vec<Issue> {
         &[],
         &mut issues,
     );
-    for part in part_ids {
+    for part in &part_ids {
         diagnose_part(root, part, unit, &mut issues);
     }
+    diagnose_pdm(root, manifest.as_ref(), &part_ids, &mut issues);
     diagnose_git(root, &mut issues);
     issues
+}
+
+/// ryupdm's files: its settings and each part's properties read as they
+/// should, the properties fit the settings, and a project that uses PDM
+/// has its ID.
+fn diagnose_pdm(root: &Path, manifest: Option<&Manifest>, parts: &[&str], issues: &mut Vec<Issue>) {
+    let config_ok = match read(root, PDM_CONFIG) {
+        Read::Missing => true,
+        Read::Bad(i) => {
+            issues.push(i);
+            false
+        }
+        Read::Json(v, canonical) => match ryupdm::config::Config::from_json(&v) {
+            Ok(_) => {
+                if !canonical {
+                    issues.push(non_canonical(PDM_CONFIG));
+                }
+                true
+            }
+            Err(e) => {
+                issues.push(document_issue(PDM_CONFIG, &e));
+                false
+            }
+        },
+    };
+    for part in parts {
+        let rel = format!("parts/{part}/properties.json");
+        match read(root, &rel) {
+            Read::Missing => {}
+            Read::Bad(i) => issues.push(i),
+            Read::Json(v, canonical) => match ryupdm::props::Properties::from_json(&v) {
+                Ok(_) if !canonical => issues.push(non_canonical(&rel)),
+                Ok(_) => {}
+                Err(e) => issues.push(document_issue(&rel, &e)),
+            },
+        }
+    }
+    // Properties are judged against readable settings, in a project that
+    // loads; a file that can't be read is reported above instead.
+    if let (true, Ok(project)) = (config_ok, Project::load(root)) {
+        let pdm = ryupdm::props::Pdm::read(&Folder(root), &project);
+        for (id, p) in &pdm.parts {
+            for f in &p.faults {
+                let code = match f.code {
+                    Code::PropertyUnknown => "property_unknown",
+                    Code::PropertyInvalid => "property_invalid",
+                    Code::PartNumberInvalid => "part_number_invalid",
+                    _ => "part_number_duplicate",
+                };
+                let mut files = vec![format!("parts/{id}/properties.json")];
+                if let Some(others) = f.details["parts"].as_array() {
+                    files.extend(
+                        others
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(|o| format!("parts/{o}/properties.json")),
+                    );
+                }
+                issues.push(issue(code, files, f.message.clone()));
+            }
+        }
+    }
+    let uses_pdm = root.join(PDM_CONFIG).is_file() || crate::pdm::released(root);
+    if uses_pdm && manifest.is_some_and(|m| m.project.is_none()) {
+        let mut files = vec![MANIFEST.to_owned()];
+        if root.join(PDM_CONFIG).is_file() {
+            files.push(PDM_CONFIG.to_owned());
+        }
+        issues.push(issue(
+            "project_id_missing",
+            files,
+            format!("the project uses ryupdm but {MANIFEST} has no project ID"),
+        ));
+    }
+}
+
+/// The project ID a release record names, if any does: the first in path
+/// order.
+fn recorded_project(root: &Path) -> Option<ProjectId> {
+    let mut paths: Vec<std::path::PathBuf> = fs::read_dir(root.join(crate::pdm::RELEASES))
+        .ok()?
+        .flatten()
+        .flat_map(|d| fs::read_dir(d.path()).into_iter().flatten().flatten())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    paths.sort();
+    paths.iter().find_map(|p| {
+        let v = canonical::parse(&fs::read_to_string(p).ok()?).ok()?;
+        ProjectId::parse(v["project"].as_str()?).ok()
+    })
+}
+
+/// An ID for a project that lost its own and has no record naming one:
+/// drawn from its folder and the files involved, so the repair doctor
+/// reports is the repair it makes.
+fn derived_project(root: &Path, files: &[String]) -> ProjectId {
+    let mut h = blake3::Hasher::new();
+    h.update(b"ryupdm.project\0");
+    h.update(root.to_string_lossy().as_bytes());
+    for f in files {
+        h.update(&[0]);
+        h.update(&fs::read(root.join(f)).unwrap_or_default());
+    }
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&h.finalize().as_bytes()[..16]);
+    ProjectId::from_bytes(bytes)
 }
 
 /// In a repository: what lets Git read and merge the project's files
@@ -439,8 +556,13 @@ fn diagnose_part(root: &Path, part: &str, unit: Unit, issues: &mut Vec<Issue>) {
         root,
         &dir,
         &entries,
-        |n, d| (n == "part.json" && !d) || (n == "parameters.json" && !d) || (n == "features" && d),
-        &["part", "parameters"],
+        |n, d| {
+            (n == "part.json" && !d)
+                || (n == "parameters.json" && !d)
+                || (n == "properties.json" && !d)
+                || (n == "features" && d)
+        },
+        &["part", "parameters", "properties"],
         issues,
     );
     let params = format!("{dir}/parameters.json");
@@ -871,7 +993,7 @@ fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<
                 ),
                 changes: vec![write(
                     MANIFEST,
-                    canonical_bytes(&Manifest { default_unit: unit }.to_json()),
+                    canonical_bytes(&Manifest::new(unit).to_json()),
                 )],
                 params: vec![Param {
                     name: "unit",
@@ -879,6 +1001,26 @@ fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<
                     about: "the default unit for bare numbers (mm)",
                 }],
             });
+        }
+        "project_id_missing" => {
+            if let Read::Json(v, _) = read(root, MANIFEST)
+                && let Ok(m) = Manifest::from_json(&v)
+            {
+                let (project, whence) = match recorded_project(root) {
+                    Some(p) => (p, "the one its release records name"),
+                    None => (derived_project(root, &i.files), "a new one"),
+                };
+                let m = Manifest {
+                    project: Some(project),
+                    ..m
+                };
+                out.push(Repair {
+                    id: id("write"),
+                    summary: format!("give the project its ID in {MANIFEST}: {whence}"),
+                    changes: vec![write(MANIFEST, canonical_bytes(&m.to_json()))],
+                    params: Vec::new(),
+                });
+            }
         }
         "missing_part_index" => {
             let part = part_of(first);
@@ -1213,7 +1355,7 @@ pub(crate) mod tests {
         w(
             r,
             s,
-            &canonical::to_string(&crate::doc::sketch::tests::rectangle()),
+            &canonical::to_string(&crate::doc::fixtures::rectangle()),
         );
         w(
             r,
@@ -1304,6 +1446,10 @@ pub(crate) mod tests {
         w(r, "parts/p/features/a (1).json", &sphere);
         w(r, "parts/p/features/Hole.json", &sphere);
         w(r, "parts/p/features/notes.txt", "hi");
+        // ryupdm's properties belong in a part; a sync copy of them doesn't.
+        let props = canonical::to_string(&json!({"format": 1, "kind": "ryupdm.properties"}));
+        w(r, "parts/p/properties.json", &props);
+        w(r, "parts/p/properties (1).json", &props);
         w(r, &f("d"), &sphere.replace('\n', "\r\n"));
         w(r, &f("e"), "{");
         w(r, &f("g"), "<<<<<<< HEAD\n{}\n=======\n{}\n>>>>>>> other\n");
@@ -1323,6 +1469,13 @@ pub(crate) mod tests {
         );
         let got = codes(r);
         let want: Vec<(&str, Vec<String>)> = vec![
+            (
+                "sync_conflict_copy",
+                vec![
+                    "parts/p/properties (1).json".into(),
+                    "parts/p/properties.json".into(),
+                ],
+            ),
             (
                 "invalid_file_name",
                 vec!["parts/p/features/Hole.json".into()],
@@ -1455,6 +1608,99 @@ pub(crate) mod tests {
     fn fix(root: &Path, ids: &[&String], params: Params) -> Value {
         let ids: Vec<String> = ids.iter().map(|s| (*s).clone()).collect();
         repair(root, &ids, &params).unwrap()
+    }
+
+    #[test]
+    fn pdm_files_are_read_and_judged() {
+        let dir = healthy();
+        let r = dir.path();
+        let mut s = crate::session::Session::open(r).unwrap();
+        call(&mut s, "part.create", json!({"part": "q"})).unwrap();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "p", "properties": {"number": "1"}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "q", "properties": {"number": "2"}}),
+        )
+        .unwrap();
+        assert!(codes(r).is_empty(), "{:?}", codes(r));
+        // Two parts with one number, and a property nobody declared: by
+        // hand, as a merge might leave them.
+        w(
+            r,
+            "parts/q/properties.json",
+            &canonical::to_string(
+                &json!({"format": 1, "kind": "ryupdm.properties", "number": "1", "x": 1}),
+            ),
+        );
+        let p = "parts/p/properties.json".to_owned();
+        let q = "parts/q/properties.json".to_owned();
+        assert_eq!(
+            codes(r),
+            [
+                ("part_number_duplicate", vec![p.clone(), q.clone()]),
+                ("property_unknown", vec![q.clone()]),
+                ("part_number_duplicate", vec![q.clone(), p.clone()]),
+            ]
+        );
+        w(r, &q, "{");
+        w(
+            r,
+            "ryupdm.json",
+            "{\"format\": 1, \"kind\": \"ryupdm.config\", \"revisions\": \"roman\"}",
+        );
+        assert_eq!(
+            codes(r),
+            [
+                ("invalid_document", vec!["ryupdm.json".into()]),
+                ("invalid_json", vec![q.clone()]),
+            ]
+        );
+        assert_eq!(report(r).unwrap()["errors"], 2);
+    }
+
+    #[test]
+    fn a_project_that_lost_its_id_gets_it_back() {
+        let dir = healthy();
+        let r = dir.path();
+        let mut s = crate::session::Session::open(r).unwrap();
+        let id = call(&mut s, "pdm.init", json!({})).unwrap()["project"].clone();
+        let with_id = fs::read_to_string(r.join(MANIFEST)).unwrap();
+        let without = canonical::to_string(&Manifest::new(Unit::Mm).to_json());
+        w(r, MANIFEST, &without);
+        let files = vec![MANIFEST.to_owned(), PDM_CONFIG.to_owned()];
+        assert_eq!(codes(r), [("project_id_missing", files.clone())]);
+        // With no record naming one, a new ID: the same in the report and
+        // the repair.
+        let rep = report(r).unwrap();
+        let shown = rep["issues"][0]["repairs"][0]["changes"][0]["content"].clone();
+        let new = offered(r);
+        fix(
+            r,
+            &[&new["project_id_missing:write:ryucad"]],
+            Params::default(),
+        );
+        assert_eq!(
+            fs::read_to_string(r.join(MANIFEST)).unwrap(),
+            shown.as_str().unwrap()
+        );
+        assert!(codes(r).is_empty());
+        // With a record, its ID.
+        w(r, MANIFEST, &without);
+        fs::create_dir_all(r.join("releases/p")).unwrap();
+        w(r, "releases/p/A.json", &format!("{{\"project\": {id}}}"));
+        let new = offered(r);
+        fix(
+            r,
+            &[&new["project_id_missing:write:ryucad"]],
+            Params::default(),
+        );
+        assert_eq!(fs::read_to_string(r.join(MANIFEST)).unwrap(), with_id);
     }
 
     #[test]

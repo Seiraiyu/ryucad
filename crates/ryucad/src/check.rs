@@ -384,6 +384,31 @@ mod tests {
     }
 
     #[test]
+    fn parts_numbered_alike_fail() {
+        let (dir, mut s) = project();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "p", "properties": {"number": "7"}}),
+        )
+        .unwrap();
+        // By hand, as a merge of two branches might leave it.
+        let q = crate::doc::canonical::to_string(
+            &json!({"format": 1, "kind": "ryupdm.properties", "number": "7"}),
+        );
+        std::fs::write(dir.path().join("parts/q/properties.json"), q).unwrap();
+        let e = call(&mut s, "check", json!({})).unwrap_err();
+        assert_eq!(
+            codes(&e.details),
+            ["part_number_duplicate", "part_number_duplicate"]
+        );
+        assert_eq!(e.details["findings"][0]["source"], "doctor");
+        // Each involves both parts, so checking either keeps both.
+        let e = call(&mut s, "check", json!({"part": "q"})).unwrap_err();
+        assert_eq!(e.details["errors"], 2);
+    }
+
+    #[test]
     fn a_stale_sketch_is_a_warning() {
         let (dir, mut s) = project();
         let path = dir.path().join("parts/p/features/s.json");
