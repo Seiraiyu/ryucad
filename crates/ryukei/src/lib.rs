@@ -11,6 +11,7 @@ pub mod euler;
 pub mod geom;
 pub mod intersect;
 pub mod interval;
+pub(crate) mod layout;
 pub mod math;
 pub mod mesh;
 pub mod name;
