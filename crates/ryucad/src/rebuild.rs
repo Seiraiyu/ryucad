@@ -252,8 +252,15 @@ fn sketch_input<'a>(
     })
 }
 
-/// An extrude or a revolve, from its sketch's result.
-fn build_sweep(part: &Part, id: &Id, f: &Feature, before: &dyn Results) -> Result<Built> {
+/// An extrude or a revolve, from its sketch's result; `targets` are the
+/// solids it acts on, which a through-all extrude reaches past.
+fn build_sweep(
+    part: &Part,
+    id: &Id,
+    f: &Feature,
+    targets: &[&Built],
+    before: &dyn Results,
+) -> Result<Built> {
     let ty = f.type_name();
     let sketch = f.swept().expect("a sweep");
     let solved = sketch_input(part, id, sketch, before)?;
@@ -284,6 +291,9 @@ fn build_sweep(part: &Part, id: &Id, f: &Feature, before: &dyn Results) -> Resul
                     };
                     (0.0, to.length(part, id, before)?)
                 }
+                Extent::ThroughAll { both } => {
+                    through_all(id, valid.frame().origin(), dir, *both, targets)?
+                }
             };
             sweep::extrude(key, &valid, dir, start, end)
         }
@@ -307,6 +317,56 @@ fn build_sweep(part: &Part, id: &Id, f: &Feature, before: &dyn Results) -> Resul
         o["feature"] = json!(id);
     }
     finish(id, ty, made, origins)
+}
+
+/// How far a through-all extrude goes from `from` along `dir`: a margin
+/// past every point of its targets' boxes, both ways if `both`. Fails as
+/// `invalid_extent` when all of them lie behind the sketch's plane.
+fn through_all(
+    id: &Id,
+    from: Point3,
+    dir: Vector3,
+    both: bool,
+    targets: &[&Built],
+) -> Result<(f64, f64)> {
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for b in targets {
+        for f in b.body.faces() {
+            let bx = ryukei::intersect::face_box(&b.body, f);
+            let (a, z) = (bx.min(), bx.max());
+            for (x, y, w) in [
+                (a.x, a.y, a.z),
+                (z.x, a.y, a.z),
+                (a.x, z.y, a.z),
+                (z.x, z.y, a.z),
+                (a.x, a.y, z.z),
+                (z.x, a.y, z.z),
+                (a.x, z.y, z.z),
+                (z.x, z.y, z.z),
+            ] {
+                let d = (Point3::new(x, y, w) - from).dot(dir);
+                lo = lo.min(d);
+                hi = hi.max(d);
+            }
+        }
+    }
+    // A hundredth of the targets' depth along the direction, so no end
+    // face lies on theirs.
+    let margin = (hi - lo).max(1e-6) * 0.01;
+    if both {
+        return Ok((lo.min(0.0) - margin, hi.max(0.0) + margin));
+    }
+    if hi <= ryukei::tol::LINEAR_RESOLUTION {
+        return Err(Error::new(
+            Code::InvalidExtent,
+            format!(
+                "extrude {id}: everything it cuts lies behind the sketch's plane; reverse it, or go through all both ways"
+            ),
+        )
+        .with("feature", id)
+        .with("pointer", "/extent"));
+    }
+    Ok((0.0, hi + margin))
 }
 
 /// An up-to extent, from a point of the sketch's plane along `dir`.
@@ -572,9 +632,10 @@ fn build_body(
         .iter()
         .map(|t| Ok((t, target(part, solids, id, t, before)?)))
         .collect::<Result<_>>()?;
+    let bodies: Vec<&Built> = targets.iter().map(|(_, b)| *b).collect();
     let own = match f {
         Feature::Primitive(p) => build_primitive(&part.id, id, p)?,
-        _ => build_sweep(part, id, f, before)?,
+        _ => build_sweep(part, id, f, &bodies, before)?,
     };
     if c.is_new() {
         return Ok(Made::new(vec![(id.clone(), Arc::new(own))]));
@@ -1247,6 +1308,92 @@ mod tests {
         let e = crate::reference::resolve(&p, &after, &id("o"), "plane", &at_j, &r).unwrap_err();
         assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
         assert_eq!(e.details["solids"], json!(["a"]));
+    }
+
+    /// Part `p`: box `b` (20 × 10 × 5 mm), a sketch `s` on `plane` (a
+    /// placement) holding a circle of radius 2 mm about (10, 5) mm, and
+    /// an extrude `e` of it cutting `b` through all, `both` ways or not,
+    /// reversed or not. Written by hand: the protocol takes operations in
+    /// a later task.
+    fn hole(z: &str, both: bool, reverse: bool) -> (tempfile::TempDir, crate::session::Session) {
+        use crate::server::tests::call;
+        let (dir, mut s, _) = crate::sketch::tests::with_box();
+        let placement = json!({"origin": [0, 0, z]});
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s", "placement": placement}),
+        )
+        .unwrap();
+        let ops = json!([
+            {"op": "add", "type": "point", "at": [10, 5]},
+            {"op": "add", "type": "fix", "a": "p1"},
+            {"op": "add", "type": "circle", "center": "p1", "r": 2},
+            {"op": "add", "type": "radius", "a": "ci1", "value": 2},
+        ]);
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": ops}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "id": "e", "sketch": "s",
+                   "extent": {"length": 1}}),
+        )
+        .unwrap();
+        let mut v = json!({"extent": {"type": "through_all"}, "format": 3,
+                           "kind": "ryucad.feature", "operation": "cut", "sketch": "s",
+                           "targets": ["b"], "type": "extrude"});
+        if both {
+            v["extent"]["both"] = json!(true);
+        }
+        if reverse {
+            v["reverse"] = json!(true);
+        }
+        let (p, e) = (id("p"), id("e"));
+        crate::doc::project::write_json(&crate::doc::project::feature_path(s.root(), &p, &e), &v)
+            .unwrap();
+        s.reload().unwrap();
+        (dir, s)
+    }
+
+    #[test]
+    fn through_all_reaches_past_its_targets() {
+        use core::f64::consts::PI;
+        let full = 1e-6 - PI * 4e-6 * 0.005;
+        let half = 1e-6 - PI * 4e-6 * 0.0025;
+        for (z, both, reverse, want) in [
+            // From the bottom up, all the way through.
+            ("0", false, false, Ok(full)),
+            // From half way up, up only, or both ways.
+            ("2.5 mm", false, false, Ok(half)),
+            ("2.5 mm", true, false, Ok(full)),
+            ("2.5 mm", false, true, Ok(half)),
+            // From below the box, both ways reaching it.
+            ("-3 mm", true, false, Ok(full)),
+            // From the bottom down: nothing to cut.
+            ("0", false, true, Err(Code::InvalidExtent)),
+        ] {
+            let (_dir, mut s) = hole(z, both, reverse);
+            let r = s.rebuilt(&id("p")).unwrap();
+            let (_, out) = r.features.iter().find(|(f, _)| *f == id("e")).unwrap();
+            match (out, want) {
+                (Ok(o), Ok(v)) => {
+                    // The mesh's polygons fall short of the hole's circle
+                    // by a few parts in ten thousand.
+                    let got = volume(&o.solid(&id("b")).unwrap().body);
+                    assert!(
+                        (got - v).abs() < 1e-3 * v,
+                        "{z} {both} {reverse}: {got} != {v}"
+                    );
+                }
+                (Err(e), Err(code)) => assert_eq!(e.code, code, "{z} {both} {reverse}: {e}"),
+                (o, w) => panic!("{z} {both} {reverse}: {o:?} != {w:?}"),
+            }
+        }
     }
 
     #[test]

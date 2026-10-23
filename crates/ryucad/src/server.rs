@@ -763,6 +763,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
             let mut v = e.fields();
             match &e.extent {
                 Extent::Blind(q) | Extent::Symmetric(q) => v["extent"]["length"] = q.report(),
+                Extent::ThroughAll { .. } => {}
                 Extent::UpTo { target, offset } => {
                     v["extent"]["target"] = json!(target.text(part));
                     if let Some(q) = offset {
@@ -991,6 +992,7 @@ fn sweep_from(
                 if let Some(t) = new.get("type").and_then(Value::as_str) {
                     let takes: &[&str] = match t {
                         "up_to" => &["target", "offset"],
+                        "through_all" => &["both"],
                         _ => &["length"],
                     };
                     old.retain(|f, _| takes.contains(&f.as_str()));
