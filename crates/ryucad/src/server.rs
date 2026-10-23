@@ -1686,6 +1686,7 @@ fn feature_list(session: &Session, part: &str) -> Result<Value> {
 fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
     let part = session.project().part(id)?;
     let revision = part.revision.clone();
+    let solids = Solids::of(part);
     let types: BTreeMap<Id, &'static str> = part
         .features
         .iter()
@@ -1700,55 +1701,71 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
             (!ins.is_empty()).then(|| (fid.clone(), ins.into_iter().cloned().collect()))
         })
         .collect();
+    let counts = |b: &crate::rebuild::Built| {
+        let c = b.body.counts();
+        json!({"faces": c.faces, "edges": c.edges, "vertices": c.vertices})
+    };
     let r = session.rebuilt(id)?;
     let features: Vec<Value> = r
         .features
         .iter()
         .map(|(fid, b)| {
-            (
-                fid,
-                match b {
-                    Ok(o @ crate::rebuild::Output::Solids(_)) => {
-                        let counts = |b: &crate::rebuild::Built| {
-                            let c = b.body.counts();
-                            json!({"faces": c.faces, "edges": c.edges, "vertices": c.vertices})
-                        };
-                        let mut v = json!({"id": fid, "type": types.get(fid), "ok": true,
-                                           "hash": o.hash()});
-                        match o.body() {
-                            Some(b) => v["counts"] = counts(b),
-                            None => {
-                                v["solids"] = o
-                                    .solids()
-                                    .iter()
-                                    .map(|(s, b)| {
-                                        json!({"solid": s, "hash": b.hash,
-                                                         "counts": counts(b)})
-                                    })
-                                    .collect();
-                            }
+            let mut v = match b {
+                Ok(o @ crate::rebuild::Output::Solids(_)) => {
+                    let mut v = json!({"id": fid, "type": types.get(fid), "ok": true,
+                                       "hash": o.hash()});
+                    match o.body() {
+                        Some(b) => v["counts"] = counts(b),
+                        None => {
+                            v["bodies"] = o
+                                .solids()
+                                .iter()
+                                .map(|(s, b)| {
+                                    json!({"solid": s, "hash": b.hash, "counts": counts(b)})
+                                })
+                                .collect();
                         }
-                        v
                     }
-                    // A sketch makes no body: its state, not a body hash.
-                    Ok(crate::rebuild::Output::Sketch(s)) => {
-                        json!({"id": fid, "type": types.get(fid), "ok": true,
-                       "sketch": {"state": s.report.state_str(), "dof": s.report.dof,
-                                  "stale": s.stale}})
-                    }
-                    Err(e) => json!({"id": fid, "type": types.get(fid), "ok": false, "error": e}),
-                },
-            )
-        })
-        .map(|(fid, mut v)| {
+                    v
+                }
+                // A sketch makes no body: its state, not a body hash.
+                Ok(crate::rebuild::Output::Sketch(s)) => {
+                    json!({"id": fid, "type": types.get(fid), "ok": true,
+                           "sketch": {"state": s.report.state_str(), "dof": s.report.dof,
+                                      "stale": s.stale}})
+                }
+                Err(e) => json!({"id": fid, "type": types.get(fid), "ok": false, "error": e}),
+            };
             if let Some(u) = uses.get(fid) {
                 v["uses"] = json!(u);
+            }
+            let of = solids.solids_of(fid);
+            if !of.is_empty() {
+                v["solids"] = json!(of);
+            }
+            v
+        })
+        .collect();
+    // The model: each solid with its chain, and its body as it shows.
+    let shown: Vec<Value> = r
+        .shown(&solids)
+        .into_iter()
+        .map(|s| {
+            let mut v = json!({"solid": s.solid, "ok": s.error.is_none(),
+                               "features": solids.chain(s.solid)});
+            if let Some((f, b)) = s.state {
+                v["shown"] = json!(f);
+                v["hash"] = json!(b.hash);
+                v["counts"] = counts(b);
+            }
+            if let Some(e) = s.error {
+                v["error"] = json!(e);
             }
             v
         })
         .collect();
     let mut v = json!({"part": id, "revision": revision, "hash": r.hash,
-                       "failed": r.failed(), "features": features});
+                       "failed": r.failed(), "features": features, "solids": shown});
     let warnings = r.warnings();
     if !warnings.is_empty() {
         v["warnings"] = json!(warnings);
@@ -1900,8 +1917,9 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
     Ok(report)
 }
 
-/// The display meshes of a part's bodies, `(feature, body, mesh)` in
-/// feature order; a feature that failed to build has its error instead.
+/// The display meshes of a part's solids as the model shows them,
+/// `(solid, body, mesh)` by founder; a solid that never built has its
+/// error instead. `only` keeps one solid; a sketch has none.
 pub fn meshes(
     session: &mut Session,
     part: &Id,
@@ -1909,8 +1927,12 @@ pub fn meshes(
     quality: mesh::Quality,
 ) -> Result<Vec<(Id, Result<mesh::Meshed>)>> {
     let p = session.project().part(part)?;
+    let solids = Solids::of(p);
     if let Some(f) = only {
-        feature(p, f)?;
+        let found = feature(p, f)?;
+        if found.sketch().is_none() && !solids.is_solid(f) {
+            return Err(rebuild::not_a_solid(p, &solids, f, "feature", f));
+        }
     }
     let features: BTreeMap<Id, Feature> = p
         .features
@@ -1922,32 +1944,33 @@ pub fn meshes(
         .unwrap_or(256) as usize
         * 1024
         * 1024;
-    // Sketches make no body, so they have no mesh.
-    let sketches: Vec<Id> = p
-        .features
-        .iter()
-        .filter(|(_, f)| f.as_ref().is_ok_and(|f| f.sketch().is_some()))
-        .map(|(id, _)| id.clone())
-        .collect();
-    let built: Vec<(Id, Result<crate::rebuild::Built>)> = session
-        .rebuilt(part)?
-        .features
-        .iter()
-        .filter(|(id, _)| only.is_none_or(|o| o == id) && !sketches.contains(id))
-        .filter_map(|(id, r)| match r {
-            Ok(o) => Some((id.clone(), Ok(o.body()?.clone()))),
-            Err(e) => Some((id.clone(), Err(e.clone()))),
+    let result = session.rebuilt(part)?;
+    // The feature each shown state is from sizes its mesh.
+    let built: Vec<(Id, Result<(Id, crate::rebuild::Built)>)> = result
+        .shown(&solids)
+        .into_iter()
+        .filter(|s| only.is_none_or(|o| o == s.solid))
+        .map(|s| {
+            let r = match (s.state, s.error) {
+                (Some((f, b)), _) => Ok((f.clone(), b.as_ref().clone())),
+                (None, Some(e)) => Err(e.clone()),
+                (None, None) => unreachable!("a solid that never built failed"),
+            };
+            (s.solid.clone(), r)
         })
         .collect();
     let ok: Vec<(&Feature, &crate::rebuild::Built)> = built
         .iter()
-        .filter_map(|(id, b)| Some((&features[id], b.as_ref().ok()?)))
+        .filter_map(|(_, b)| {
+            let (f, b) = b.as_ref().ok()?;
+            Some((&features[f], b))
+        })
         .collect();
     let mut made = session.meshes.get_all(&ok, quality, budget).into_iter();
     Ok(built
         .into_iter()
         .map(|(id, b)| {
-            let r = b.map(|b| mesh::Meshed {
+            let r = b.map(|(_, b)| mesh::Meshed {
                 body: b.body,
                 hash: b.hash,
                 mesh: made.next().expect("one mesh per built body"),
@@ -2309,6 +2332,8 @@ fn mesh_get(
             Err(e) => json!({"feature": id, "ok": false, "error": e}),
         })
         .collect();
+    // Each body is a solid, by its founder (`feature`, as entity
+    // references name it).
     Ok(json!({"part": pid, "quality": quality.as_str(), "bodies": bodies}))
 }
 
@@ -2330,23 +2355,38 @@ fn inspect(
         .iter()
         .filter_map(|(id, f)| Some((id.clone(), f.as_ref().ok()?.clone())))
         .collect();
+    let solids = Solids::of(session.project().part(&pid)?);
     let result = session.rebuilt(&pid)?;
-    let mut bodies = Vec::new();
-    for (id, built) in &result.features {
-        if only.as_ref().is_some_and(|o| o != id) {
-            continue;
-        }
-        let Ok(built) = built else { continue };
-        let f = &features
+    let of = |id: &Id| {
+        &features
             .iter()
             .find(|(i, _)| i == id)
             .expect("built features loaded")
-            .1;
-        for (solid, b) in built.solids() {
-            let mut v = crate::inspect::body(f, b);
-            v["feature"] = json!(id);
-            v["solid"] = json!(solid);
-            bodies.push(v);
+            .1
+    };
+    let mut bodies = Vec::new();
+    let mut put = |id: &Id, solid: &Id, b: &crate::rebuild::Built| {
+        let mut v = crate::inspect::body(of(id), b);
+        v["feature"] = json!(id);
+        v["solid"] = json!(solid);
+        bodies.push(v);
+    };
+    match &only {
+        // The solids a feature leaves, as it leaves them.
+        Some(f) => {
+            if let Some(out) = result.output(f) {
+                for (solid, b) in out.solids() {
+                    put(f, solid, b);
+                }
+            }
+        }
+        // The model: each solid as it shows.
+        None => {
+            for shown in result.shown(&solids) {
+                if let Some((f, b)) = shown.state {
+                    put(f, shown.solid, b);
+                }
+            }
         }
     }
     if let Some(given) = entity {
@@ -2365,11 +2405,12 @@ fn inspect(
         } else {
             (given.to_owned(), None)
         };
-        // Just the one entity, wherever it is.
+        // Just the one entity, wherever it is. A reference names its
+        // solid.
         for b in &bodies {
             if in_feature
                 .as_ref()
-                .is_some_and(|f| b["feature"] != f.as_str())
+                .is_some_and(|f| b["solid"] != f.as_str())
             {
                 continue;
             }
@@ -2380,7 +2421,8 @@ fn inspect(
                     .iter()
                     .find(|e| e["name"] == name.as_str())
                 {
-                    return Ok(json!({"feature": b["feature"], "kind": kind, "entity": e}));
+                    return Ok(json!({"feature": b["feature"], "solid": b["solid"],
+                                     "kind": kind, "entity": e}));
                 }
             }
         }
@@ -2939,6 +2981,115 @@ pub(crate) mod tests {
         // A founder others act on can't go.
         let e = call(&mut s, "feature.delete", json!({"part": "p", "id": "a"})).unwrap_err();
         assert_eq!(e.code, Code::HasDependents);
+    }
+
+    #[test]
+    fn the_model_is_its_solids() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        let add = |s: &mut Session, f: Value| {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(s, "feature.add", f).unwrap()
+        };
+        add(
+            &mut s,
+            json!({"type": "box", "id": "a", "params": {"x": 10, "y": 10, "z": 10}}),
+        );
+        add(
+            &mut s,
+            json!({"type": "box", "id": "c", "operation": "cut",
+                   "params": {"x": 4, "y": 20, "z": 20}, "placement": {"origin": [8, -5, -5]}}),
+        );
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let part = &r["parts"][0];
+        let solid = &part["solids"][0];
+        assert_eq!(part["solids"].as_array().unwrap().len(), 1);
+        assert_eq!(solid["solid"], "a");
+        assert_eq!(solid["features"], json!(["a", "c"]));
+        assert_eq!((&solid["ok"], &solid["shown"]), (&json!(true), &json!("c")));
+        assert_eq!(part["features"][1]["solids"], json!(["a"]));
+        assert_eq!(solid["hash"], part["features"][1]["hash"]);
+        // Meshes are the solids', named by founder.
+        let m = call(&mut s, "mesh.get", json!({"part": "p"})).unwrap();
+        assert_eq!(m["bodies"].as_array().unwrap().len(), 1);
+        assert_eq!(m["bodies"][0]["feature"], "a");
+        assert_eq!(m["bodies"][0]["hash"], solid["hash"]);
+        let e = call(&mut s, "mesh.get", json!({"part": "p", "feature": "c"})).unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind);
+        assert_eq!(e.details["solids"], json!(["a"]));
+        // Inspect shows the model, or any feature's state.
+        let v = call(&mut s, "inspect", json!({"part": "p"})).unwrap();
+        let b = &v["bodies"][0];
+        assert_eq!((&b["solid"], &b["feature"]), (&json!("a"), &json!("c")));
+        let cut_face = b["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["origin"]["feature"] == "c")
+            .unwrap()["name"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let own = call(&mut s, "inspect", json!({"part": "p", "feature": "a"})).unwrap();
+        assert_eq!(own["bodies"][0]["counts"]["faces"], 6);
+        // A reference names the solid, and finds what the model shows.
+        let one = call(
+            &mut s,
+            "inspect",
+            json!({"part": "p", "entity": format!("p/a/{cut_face}")}),
+        )
+        .unwrap();
+        assert_eq!((&one["solid"], &one["kind"]), (&json!("a"), &json!("face")));
+        let mut live = Live::new();
+        let human = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "session.hello",
+            json!({"kind": "human"}),
+        )
+        .unwrap()["participant"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let picked = format!("p/a/{cut_face}");
+        let r = call_live(
+            &mut s,
+            &mut live,
+            Some(&human),
+            "selection.set",
+            json!({"entities": [picked]}),
+        )
+        .unwrap();
+        assert_eq!(r["selection"], json!([picked]));
+        // The cut's own ID names no solid.
+        let e = call_live(
+            &mut s,
+            &mut live,
+            Some(&human),
+            "selection.set",
+            json!({"entities": [format!("p/c/{cut_face}")]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+        assert_eq!(e.details["errors"][0]["details"]["solids"], json!(["a"]));
+        // A tip that fails leaves the solid showing its last good state,
+        // and failed.
+        add(
+            &mut s,
+            json!({"type": "box", "id": "miss", "operation": "cut", "targets": ["a"],
+                   "params": {"x": 1, "y": 1, "z": 1}, "placement": {"origin": [50, 0, 0]}}),
+        );
+        let e = call(&mut s, "rebuild", json!({"part": "p"})).unwrap_err();
+        let solid = &e.details["parts"][0]["solids"][0];
+        assert_eq!(
+            (&solid["ok"], &solid["shown"]),
+            (&json!(false), &json!("c"))
+        );
+        assert_eq!(solid["error"]["code"], "operation_no_effect");
+        let m = call(&mut s, "mesh.get", json!({"part": "p"})).unwrap();
+        assert_eq!(m["bodies"][0]["hash"], solid["hash"]);
     }
 
     #[test]

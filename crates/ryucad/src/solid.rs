@@ -16,6 +16,8 @@ use std::collections::BTreeMap;
 pub struct Solids {
     /// Each solid's chain, founder first, by founder.
     chains: BTreeMap<Id, Vec<Id>>,
+    /// The founders in list order.
+    founders: Vec<Id>,
     /// Each listed feature's place in the list.
     at: BTreeMap<Id, usize>,
     /// Each consumed solid, by founder, with the boolean that consumed it.
@@ -38,6 +40,7 @@ impl Solids {
             .map(|(i, id)| (id.clone(), i))
             .collect();
         let mut chains: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
+        let mut founders: Vec<Id> = Vec::new();
         let mut consumed: BTreeMap<Id, Id> = BTreeMap::new();
         for id in order {
             let Some(Ok(f)) = part.features.get(id) else {
@@ -45,6 +48,7 @@ impl Solids {
             };
             if f.combine().is_some_and(|c| c.is_new()) {
                 chains.insert(id.clone(), vec![id.clone()]);
+                founders.push(id.clone());
                 continue;
             }
             // A solid joins the chain of what acts on it, until consumed.
@@ -67,6 +71,7 @@ impl Solids {
         }
         Solids {
             chains,
+            founders,
             at,
             consumed,
         }
@@ -94,12 +99,11 @@ impl Solids {
     }
 
     /// The solids `feature` belongs to: its own, if it founds one, else
-    /// those it acts on, by founder.
+    /// those it acts on, in list order.
     pub fn solids_of(&self, feature: &Id) -> Vec<&Id> {
-        self.chains
+        self.founders
             .iter()
-            .filter(|(_, c)| c.contains(feature))
-            .map(|(s, _)| s)
+            .filter(|s| self.chains[*s].contains(feature))
             .collect()
     }
 
@@ -117,12 +121,19 @@ impl Solids {
     }
 
     /// Every solid of the model, not consumed, with its tip, the last
-    /// feature of its chain, by founder.
+    /// feature of its chain, in list order.
     pub fn tips(&self) -> impl Iterator<Item = (&Id, &Id)> {
-        self.chains
+        self.founders
             .iter()
-            .filter(|(s, _)| !self.consumed.contains_key(*s))
-            .map(|(s, c)| (s, c.last().expect("a chain starts at its founder")))
+            .filter(|s| !self.consumed.contains_key(*s))
+            .map(|s| {
+                (
+                    s,
+                    self.chains[s]
+                        .last()
+                        .expect("a chain starts at its founder"),
+                )
+            })
     }
 
     /// The solid's tip, if `founder` founds one.

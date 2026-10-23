@@ -93,19 +93,17 @@ impl EntityRef {
             Error::new(Code::NotFound, format!("{self} doesn't resolve: {what}"))
                 .with("entity", self.to_string())
         };
-        if !session.project().parts.contains_key(&self.part) {
+        let Some(p) = session.project().parts.get(&self.part) else {
             return Err(missing("no such part"));
-        }
+        };
+        let solids = crate::solid::Solids::of(p);
         let built = session.rebuilt(&self.part)?;
         let Some((_, feature)) = built.features.iter().find(|(id, _)| *id == self.feature) else {
             return Err(missing("no such feature").with("part", &self.part));
         };
-        let Ok(b) = feature else {
-            return Err(missing("the feature failed to rebuild")
-                .with("part", &self.part)
-                .with("feature", &self.feature));
-        };
-        if let Some(sk) = b.sketch() {
+        if let Ok(b) = feature
+            && let Some(sk) = b.sketch()
+        {
             let e = Id::parse(&self.name, "entity")
                 .ok()
                 .and_then(|id| sk.sketch.entities.get(&id));
@@ -116,12 +114,24 @@ impl EntityRef {
                     .with("feature", &self.feature)),
             };
         }
-        let Some(b) = b.solid(&self.feature).or_else(|| b.body()) else {
-            return Err(
-                missing("the feature acts on several solids; name one by its founder")
-                    .with("part", &self.part)
-                    .with("feature", &self.feature),
-            );
+        // A face, edge or vertex is named by its solid's founder, and found
+        // in the solid as the model shows it.
+        let shown = built.shown(&solids);
+        let Some(shown) = shown.iter().find(|s| *s.solid == self.feature) else {
+            let what = match solids.consumer(&self.feature) {
+                Some(by) => format!("the boolean {by} consumed its solid"),
+                None => "the feature founds no solid; name a solid by the feature that founded it"
+                    .to_owned(),
+            };
+            return Err(missing(&what)
+                .with("part", &self.part)
+                .with("feature", &self.feature)
+                .with("solids", solids.solids_of(&self.feature)));
+        };
+        let Some((_, b)) = shown.state else {
+            return Err(missing("the feature failed to rebuild")
+                .with("part", &self.part)
+                .with("feature", &self.feature));
         };
         let body = &b.body;
         let hit = |n: String| n == self.name;
@@ -168,17 +178,17 @@ pub fn parse_all(session: &mut Session, refs: &[String]) -> Result<Vec<EntityRef
         .iter()
         .map(|s| EntityRef::parse(s))
         .collect::<Result<Vec<_>>>()?;
-    let unresolved: Vec<String> = parsed
+    let (unresolved, errors): (Vec<String>, Vec<Error>) = parsed
         .iter()
-        .filter(|r| r.resolve(session).is_err())
-        .map(ToString::to_string)
-        .collect();
+        .filter_map(|r| Some((r.to_string(), r.resolve(session).err()?)))
+        .unzip();
     if !unresolved.is_empty() {
         return Err(Error::new(
             Code::NotFound,
             format!("{} reference(s) don't resolve", unresolved.len()),
         )
-        .with("unresolved", unresolved));
+        .with("unresolved", unresolved)
+        .with("errors", errors));
     }
     Ok(parsed)
 }

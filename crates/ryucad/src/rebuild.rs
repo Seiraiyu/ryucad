@@ -170,7 +170,49 @@ impl Cache {
 /// from, and the body as a cache holds it, if it does.
 type ToolInput<'a> = (blake3::Hash, Option<&'a (blake3::Hash, Arc<Built>)>);
 
+/// A solid as the model shows it: as its tip left it, or, when the tip
+/// failed, as the last feature of its chain that built left it, with the
+/// tip's error.
+#[derive(Clone, Debug)]
+pub struct Shown<'a> {
+    /// The founder.
+    pub solid: &'a Id,
+    /// The last feature of its chain.
+    pub tip: &'a Id,
+    /// The feature whose result is shown, and the solid as it left it;
+    /// `None` when not even the founder built.
+    pub state: Option<(&'a Id, &'a Arc<Built>)>,
+    /// Why the tip failed.
+    pub error: Option<&'a Error>,
+}
+
 impl PartResult {
+    /// The part's solids, not consumed, by founder, as the model shows
+    /// them.
+    pub fn shown<'a>(&'a self, solids: &'a Solids) -> Vec<Shown<'a>> {
+        solids
+            .tips()
+            .map(|(solid, tip)| {
+                let chain = solids.chain(solid).expect("a solid has a chain");
+                let state = chain.iter().rev().find_map(|f| {
+                    let (_, b) = self.output(f)?.solids().iter().find(|(s, _)| s == solid)?;
+                    Some((f, b))
+                });
+                let error = self
+                    .features
+                    .iter()
+                    .find(|(i, _)| i == tip)
+                    .and_then(|(_, r)| r.as_ref().err());
+                Shown {
+                    solid,
+                    tip,
+                    state,
+                    error,
+                }
+            })
+            .collect()
+    }
+
     pub fn failed(&self) -> usize {
         self.features.iter().filter(|(_, r)| r.is_err()).count()
     }
