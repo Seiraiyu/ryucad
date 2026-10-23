@@ -400,6 +400,9 @@ pub enum Request {
         /// Also report what changed from this revision, as `diff --model`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         against: Option<String>,
+        /// Also rebuild official releases and compare their bodies.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        results: bool,
     },
     /// What changed between two revisions (`HEAD` and the working files by
     /// default): files as ryucad reads them, and with `model` the bodies.

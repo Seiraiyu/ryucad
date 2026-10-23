@@ -106,6 +106,10 @@ enum Command {
         /// bodies included, as `diff --model` does.
         #[arg(long, value_name = "REV")]
         against: Option<String>,
+        /// Also rebuild official releases and compare their bodies with their records
+        /// (slower).
+        #[arg(long)]
+        results: bool,
     },
     /// What changed between two revisions: features, parameters and sketch
     /// entities, and with --model what that did to the bodies.
@@ -1159,9 +1163,14 @@ fn request(cmd: &Command) -> Option<Request> {
             rev: rev.rev.clone(),
         },
         Command::CheckFormat => Request::CheckFormat {},
-        Command::Check { part, against } => Request::Check {
+        Command::Check {
+            part,
+            against,
+            results,
+        } => Request::Check {
             part: part.clone(),
             against: against.clone(),
+            results: *results,
         },
         Command::Diff {
             from,
