@@ -1,22 +1,74 @@
 #!/bin/sh
-# Builds the README's demo model, a flanged hub, with the ryucad CLI and
-# renders a frame after each step: the profile revolved round in steps, then
-# the ribs, then an orbit. The frames become assets/hero.gif (needs Python with
-# Pillow; PYTHON names it, python3 by default).
+# Builds the README's demo, a flanged hub, with the ryucad CLI in a real Git
+# repository, then has two agents change it on two branches and merges them:
+# ryucad's merge driver merges the parameters file by value, records the one
+# real conflict, and `ryucad merge status` and `merge resolve` settle it. Every
+# model frame is `ryucad render`; the terminal beside it shows the commands and
+# their real output (JSON condensed). The frames become assets/hero.gif (needs
+# git and Python with Pillow; PYTHON names Python, python3 by default, and FONT
+# a monospace TrueType font if neither Menlo nor DejaVu Sans Mono is found).
 #
 #   scripts/hero.sh path/to/ryucad [assets/hero.gif]
 set -eu
 
 R=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 GIF=${2:-assets/hero.gif}
+GIF=$(cd "$(dirname "$GIF")" && pwd)/$(basename "$GIF")
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-P=$work/project; OUT=$work/frames
+P=$work/project; OUT=$work/acts
 mkdir -p "$P" "$OUT"
-r() { out=$("$R" -C "$P" --no-daemon "$@") || { echo "ryucad $*: $out" >&2; exit 1; }; }
-"$R" -C "$P" init --unit mm >/dev/null
+cd "$P"
+
+# Fixed identities and dates, so commits (and what Git prints) repeat.
+export GIT_AUTHOR_DATE="2026-10-23T12:00:00Z" GIT_COMMITTER_DATE="2026-10-23T12:00:00Z"
+export GIT_CONFIG_NOSYSTEM=1
+git init -q -b main
+git config user.name demo; git config user.email demo@example.com
+git config advice.mergeConflict false 2>/dev/null || true
+
+r() { out=$("$R" --no-daemon "$@") || { echo "ryucad $*: $out" >&2; exit 1; }; }
+as() { who=$1; shift; out=$("$R" --no-daemon --as "$who" "$@") || { echo "ryucad $*: $out" >&2; exit 1; }; }
+
+# An act is a folder: `title`, `lines` (a tag, a space, the text: `$` a
+# command, `o` output, `+`/`-` added and removed lines, `!` a conflict, `#` a
+# note) and the model frames shown while it plays.
+act=0
+A=
+begin() { act=$((act+1)); A=$OUT/$(printf %02d $act); mkdir -p "$A"; printf '%s\n' "$1" > "$A/title"; : > "$A/lines"; frames=0; }
+say() { printf '%s %s\n' "$1" "$2" >> "$A/lines"; }
+# A command line, shown before its output and before the frame it led to.
+cmd() { say '$' "$*"; }
+output() { sed 's/^/o /' >> "$A/lines"; }
+diffout() { sed -n '/^@@/,$p' | sed '1d' | sed -e 's/^+/+ +/' -e 's/^-/- -/' -e 's/^ /o  /' >> "$A/lines"; }
+EYE="--eye 63,-77,66 --target 0,0,12 --up 0,0,1"
+frame() {
+  frames=$((frames+1))
+  # Each frame is shown after the lines written so far.
+  n=$(wc -l < "$A/lines" | tr -d ' ')
+  r render --out "$A/$(printf %03d $frames)-$n.png" --size 480x420 --no-sketches "$@"
+}
+# The faces of bodies whose results differ from REV: changed or new.
+changed() {
+  "$R" --no-daemon diff --from "$1" --model --part hub | "${PYTHON:-python3}" -c '
+import json, sys
+d = json.load(sys.stdin)["result"]["parts"]["hub"]["features"]
+for f, v in sorted(d.items()):
+    b = v.get("model", {}).get("body")
+    if b:
+        for n in b["faces"]["changed"] + b["faces"]["new"]:
+            print("--highlight=hub/%s/%s" % (f, n))'
+}
+
+begin "main"
+"$R" --no-daemon init --unit mm >/dev/null
+cmd 'ryucad init --unit mm'
 r part create hub
+cmd 'ryucad part create hub'
+r param set hub "bore=12 mm" "flange_d=60 mm" "flange_t=6 mm" "hub_d=28 mm" "height=30 mm" "rib_t=4 mm"
+cmd 'ryucad param set hub "bore=12 mm" "flange_d=60 mm" "rib_t=4 mm" ...'
 r feature add hub sketch --id profile --plane zx
+cmd 'ryucad feature add hub sketch --id profile --plane zx'
 r sketch edit hub profile '[
   {"op":"add","type":"point","at":[0,6]},
   {"op":"add","type":"point","at":[0,30]},
@@ -32,12 +84,26 @@ r sketch edit hub profile '[
   {"op":"add","type":"line","start":"p6","end":"p1"},
   {"op":"add","type":"point","at":[-5,0]},
   {"op":"add","type":"point","at":[40,0]},
-  {"op":"add","type":"line","start":"p7","end":"p8","construction":true}]'
-r feature add hub revolve --id body --sketch profile --axis l7 --angle 30
-n=0
-frame() { n=$((n+1)); r render --out "$OUT/$(printf %03d $n).png" --size 480x360 "$@"; }
-EYE="--eye 63,-77,66 --target 0,0,12 --up 0,0,1"
-for a in 30 60 90 120 150 180 210 240 270 300 330; do
+  {"op":"add","type":"line","start":"p7","end":"p8","construction":true},
+  {"op":"add","type":"fix","a":"p7"},
+  {"op":"add","type":"horizontal","a":"l7"},
+  {"op":"add","type":"distance_x","a":"p7","b":"p8","value":"45 mm"},
+  {"op":"add","type":"vertical","a":"l1"},
+  {"op":"add","type":"horizontal","a":"l2"},
+  {"op":"add","type":"vertical","a":"l3"},
+  {"op":"add","type":"horizontal","a":"l4"},
+  {"op":"add","type":"vertical","a":"l5"},
+  {"op":"add","type":"horizontal","a":"l6"},
+  {"op":"add","type":"distance_x","a":"p7","b":"p1","value":"5 mm"},
+  {"op":"add","type":"distance_y","a":"p7","b":"p1","value":"bore / 2"},
+  {"op":"add","type":"distance_y","a":"p7","b":"p2","value":"flange_d / 2"},
+  {"op":"add","type":"distance_x","a":"p1","b":"p3","value":"flange_t"},
+  {"op":"add","type":"distance_y","a":"p7","b":"p4","value":"hub_d / 2"},
+  {"op":"add","type":"distance_x","a":"p1","b":"p5","value":"height"}]'
+cmd 'ryucad sketch edit hub profile @profile.json'
+r feature add hub revolve --id body --sketch profile --axis l7 --angle 45
+cmd 'ryucad feature add hub revolve --id body --sketch profile --axis l7'
+for a in 45 90 135 180 225 270 315; do
   r feature edit hub body --angle $a; frame $EYE
 done
 r feature edit hub body --angle full; frame $EYE
@@ -47,28 +113,178 @@ r sketch edit hub ribs_a '[
   {"op":"add","type":"line","start":"p1","end":"p2"},{"op":"add","type":"line","start":"p2","end":"p3"},{"op":"add","type":"line","start":"p3","end":"p1"},
   {"op":"add","type":"point","at":[6,-14]},{"op":"add","type":"point","at":[22,-14]},{"op":"add","type":"point","at":[6,-27]},
   {"op":"add","type":"line","start":"p4","end":"p5"},{"op":"add","type":"line","start":"p5","end":"p6"},{"op":"add","type":"line","start":"p6","end":"p4"}]'
-r feature add hub extrude --id ribs_x --sketch ribs_a --length 4 --extent symmetric
-frame $EYE
+r feature add hub extrude --id ribs_x --sketch ribs_a --length rib_t --extent symmetric
 r feature add hub sketch --id ribs_b --plane yz
 r sketch edit hub ribs_b '[
   {"op":"add","type":"point","at":[14,6]},{"op":"add","type":"point","at":[27,6]},{"op":"add","type":"point","at":[14,22]},
   {"op":"add","type":"line","start":"p1","end":"p2"},{"op":"add","type":"line","start":"p2","end":"p3"},{"op":"add","type":"line","start":"p3","end":"p1"},
   {"op":"add","type":"point","at":[-14,6]},{"op":"add","type":"point","at":[-14,22]},{"op":"add","type":"point","at":[-27,6]},
   {"op":"add","type":"line","start":"p4","end":"p5"},{"op":"add","type":"line","start":"p5","end":"p6"},{"op":"add","type":"line","start":"p6","end":"p4"}]'
-r feature add hub extrude --id ribs_y --sketch ribs_b --length 4 --extent symmetric
+r feature add hub extrude --id ribs_y --sketch ribs_b --length rib_t --extent symmetric
+cmd 'ryucad feature add hub extrude --id ribs_x --sketch ribs_a --length rib_t ...'
+git add -A; git commit -qm "hub"
+cmd 'git add -A && git commit -m "hub"'
 frame $EYE
+
+begin "branch alice"
+git switch -qc alice main
+cmd 'git switch -c alice'
+as alice param set hub "bore=16 mm" "rib_t=3 mm"
+cmd 'ryucad param set hub "bore=16 mm" "rib_t=3 mm"'
+cmd 'git diff parts/hub/parameters.json'
+git -c color.ui=never diff -- parts/hub/parameters.json | diffout
+git commit -qam "alice: wider bore, thinner ribs"
+# shellcheck disable=SC2046
+frame $EYE $(changed main)
+
+begin "branch bob"
+git switch -qc bob main
+cmd 'git switch -c bob main'
+as bob param set hub "flange_d=72 mm" "rib_t=6 mm"
+cmd 'ryucad param set hub "flange_d=72 mm" "rib_t=6 mm"'
+cmd 'git diff parts/hub/parameters.json'
+git -c color.ui=never diff -- parts/hub/parameters.json | diffout
+git commit -qam "bob: bigger flange, thicker ribs"
+# shellcheck disable=SC2046
+frame $EYE $(changed main)
+
+begin "merging bob into alice"
+git switch -q alice
+cmd 'git switch alice && git merge bob'
+git merge bob > "$work/merge.txt" 2>&1 && { echo "the merge should conflict" >&2; exit 1; }
+sed -e 's/^CONFLICT/! CONFLICT/' -e '/^! /!s/^/o /' "$work/merge.txt" >> "$A/lines"
+cmd 'ryucad merge status'
+"$R" --no-daemon merge status | "${PYTHON:-python3}" -c '
+import json, sys
+s = json.load(sys.stdin)["result"]
+print("#  (JSON, condensed)")
+for c in s["conflicts"]:
+    w = c["concerns"]
+    print("! %s  %s/%s: base %s, ours %s, theirs %s" % (c["kind"], w["part"], w["parameter"], c["base"], c["ours"], c["theirs"]))
+' >> "$A/lines"
+# What merged by value: parameters that differ from the merge base and
+# aren't in the conflict record.
+git show "$(git merge-base HEAD MERGE_HEAD)":parts/hub/parameters.json > "$work/base.json"
+"${PYTHON:-python3}" - "$work/base.json" parts/hub/parameters.json >> "$A/lines" <<'MERGED'
+import json, sys
+base, now = (json.load(open(p)) for p in sys.argv[1:])
+done = [k for k, v in now["parameters"].items()
+        if v != base["parameters"].get(k) and "/parameters/" + k not in now.get("conflicts", {})]
+print("#  merged by value: " + ", ".join("%s = %s" % (k, now["parameters"][k]) for k in done))
+MERGED
+cmd "sed -n '/conflicts/,/^  }/p' parts/hub/parameters.json"
+sed -n '/conflicts/,/^  }/p' parts/hub/parameters.json | output
+# During the merge the part doesn't load; show ours, as alice left it.
+cp "$OUT/02/001-$(wc -l < "$OUT/02/lines" | tr -d ' ').png" "$A/001-0.png"
+
+begin "merged"
+id=$("$R" --no-daemon merge status | "${PYTHON:-python3}" -c 'import json, sys; print(json.load(sys.stdin)["result"]["conflicts"][0]["id"])')
+r merge resolve "$id" --theirs
+cmd "ryucad merge resolve '$id' --theirs"
+git add -A
+cmd 'git add -A && git commit -m "merge bob"'
+git commit -qm "merge bob" > "$work/commit.txt" 2>&1 || { cat "$work/commit.txt" >&2; exit 1; }
+cmd 'ryucad check'
+"$R" --no-daemon check | "${PYTHON:-python3}" -c '
+import json, sys
+c = json.load(sys.stdin)["result"]
+fs = [f for p in c["parts"] for f in p["features"]]
+print("o  passed: %s, %d of %d features built, %d findings" % (str(c["passed"]).lower(), sum(f["ok"] for f in fs), len(fs), len(c["findings"])))' >> "$A/lines"
+cmd 'git log --oneline --graph'
+git log --oneline --graph | output
+# shellcheck disable=SC2046
+frame $EYE $(changed main)
 for k in $(seq 1 36); do
   t=$(awk "BEGIN { a = $k * 3.14159265358979 / 18; printf \"%.6f,%.6f\", 99.5 * cos(a - 0.8850), 99.5 * sin(a - 0.8850) }")
   frame --eye="$t,66" --target 0,0,12 --up 0,0,1
 done
+
 "${PYTHON:-python3}" - "$OUT" "$GIF" <<'PY'
-import sys, pathlib
-from PIL import Image
-frames = [Image.open(p).convert("RGB") for p in sorted(pathlib.Path(sys.argv[1]).glob("*.png"))]
-pal = frames[-1].quantize(colors=128, method=Image.Quantize.MEDIANCUT)
+import os, pathlib, sys, textwrap
+from PIL import Image, ImageDraw, ImageFont
+
+def font(size):
+    for f in [os.environ.get("FONT"), "/System/Library/Fonts/Menlo.ttc",
+              "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+              "/usr/share/fonts/TTF/DejaVuSansMono.ttf", "C:/Windows/Fonts/consola.ttf"]:
+        if f and os.path.exists(f):
+            return ImageFont.truetype(f, size)
+    sys.exit("no monospace font found: set FONT")
+
+MONO, BOLD = font(13), font(14)
+W, H, TW = 480, 420, 600
+BG, FG, DIM = (30, 32, 36), (214, 218, 224), (128, 134, 144)
+COLOR = {"$": (120, 200, 255), "o": FG, "+": (126, 211, 126), "-": (240, 120, 120),
+         "!": (245, 196, 92), "#": DIM}
+CW = MONO.getbbox("M")[2]
+COLS = (TW - 28) // CW
+LH = 18
+
+def terminal(title, lines):
+    img = Image.new("RGB", (TW, H), BG)
+    d = ImageDraw.Draw(img)
+    d.text((14, 10), title, font=BOLD, fill=(245, 196, 92) if "merging" in title else (120, 200, 255))
+    rows = []
+    for tag, text in lines:
+        lead = "$ " if tag == "$" else ""
+        for i, part in enumerate(textwrap.wrap(lead + text, COLS, subsequent_indent="    ",
+                                               drop_whitespace=False, break_on_hyphens=False) or [""]):
+            rows.append((tag, part))
+    rows = rows[-((H - 44) // LH):]
+    for i, (tag, part) in enumerate(rows):
+        d.text((14, 38 + i * LH), part, font=MONO, fill=COLOR.get(tag, FG))
+    return img
+
+def label(model, title):
+    m = model.copy()
+    d = ImageDraw.Draw(m)
+    w = BOLD.getbbox(title)[2]
+    d.rounded_rectangle((10, 10, 26 + w, 34), 6, fill=(30, 32, 36))
+    d.text((18, 13), title, font=BOLD, fill=(255, 255, 255))
+    return m
+
+frames, durations = [], []
+def show(model, term, ms):
+    f = Image.new("RGB", (W + TW, H))
+    f.paste(label(model, title), (0, 0)); f.paste(term, (W, 0))
+    frames.append(f); durations.append(ms)
+
+# Each shot was taken after some of its act's lines. Lines appear one
+# command at a time; shots taken after no new line (the revolve turning, the
+# orbit) play quickly; each act holds where its last line appears.
+model = Image.new("RGB", (W, H), (244, 245, 247))
+for act in sorted(pathlib.Path(sys.argv[1]).iterdir()):
+    title = (act / "title").read_text().strip()
+    lines = [tuple(raw.partition(" ")[::2]) for raw in (act / "lines").read_text().splitlines()]
+    shown, hold = 0, None
+    for shot in sorted(act.glob("*.png")):
+        at = int(shot.stem.split("-")[1])
+        while shown < at:
+            shown += 1
+            if lines[shown - 1][0] == "$" and shown < at:
+                show(model, terminal(title, lines[:shown]), 450)
+        model = Image.open(shot).convert("RGB")
+        show(model, terminal(title, lines[:shown]), 140 if hold is None else 90)
+        if hold is None and shown == len(lines):
+            hold = len(frames) - 1
+    while shown < len(lines):
+        shown += 1
+        if lines[shown - 1][0] == "$" or shown == len(lines):
+            show(model, terminal(title, lines[:shown]), 450)
+    durations[hold if hold is not None else -1] = 3000
+
+# One palette for every frame, from the held ones (all the terminal's
+# colours) and the orbit's last.
+held = [frames[i] for i, ms in enumerate(durations) if ms == 3000] + [frames[-1]]
+sheet = Image.new("RGB", (W + TW, H * len(held)))
+for i, f in enumerate(held):
+    sheet.paste(f, (0, H * i))
+# Text is too thin to win a place in the palette; give its colours one.
+d = ImageDraw.Draw(sheet)
+for i, c in enumerate(list(COLOR.values()) + [(245, 196, 92), (120, 200, 255)]):
+    d.rectangle((i * 60, 0, i * 60 + 59, 59), fill=c)
+pal = sheet.quantize(colors=192, method=Image.Quantize.MEDIANCUT)
 q = [f.quantize(palette=pal, dither=Image.Dither.NONE) for f in frames]
-# 11 steps of the revolve, the full turn, two sets of ribs, the orbit.
-d = [150] * 11 + [900, 700, 1200] + [90] * (len(q) - 14)
-q[0].save(sys.argv[2], save_all=True, append_images=q[1:], duration=d, loop=0, optimize=True)
+q[0].save(sys.argv[2], save_all=True, append_images=q[1:], duration=durations, loop=0, optimize=True)
+print("wrote %s (%d frames)" % (sys.argv[2], len(q)))
 PY
-echo "wrote $GIF ($n frames)"
