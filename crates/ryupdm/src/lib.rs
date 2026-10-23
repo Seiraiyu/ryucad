@@ -2,7 +2,8 @@
 //! offline. A project's parts carry properties checked against the
 //! project's settings (this crate's [`props`] and [`config`]), and are
 //! released under labels its revision scheme derives ([`label`]), each
-//! release naming the hash of what it released ([`content`]).
+//! release naming the hash of what it released ([`content`]) in a record
+//! under `releases/` ([`record`]).
 //!
 //! ryupdm reads projects through `ryucad-doc` and never calls the kernel,
 //! a session, the daemon or the app: ryucad exposes it through its
@@ -12,6 +13,7 @@ pub mod config;
 pub mod content;
 pub mod label;
 pub mod props;
+pub mod record;
 
 use ryucad_doc::doc::canonical;
 use ryucad_doc::doc::id::ProjectId;

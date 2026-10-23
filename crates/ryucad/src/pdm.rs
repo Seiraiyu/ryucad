@@ -21,8 +21,7 @@ use ryupdm::props::{self, Pdm, Properties};
 use serde_json::{Map, Value, json};
 use std::path::Path;
 
-/// The folder release records live in, beside the manifest.
-pub const RELEASES: &str = "releases";
+pub use crate::doc::project::RELEASES;
 
 /// Whether any release record exists: from then on, the revision scheme
 /// can't change.

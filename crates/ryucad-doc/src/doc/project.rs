@@ -7,6 +7,7 @@
 //! parts/<part>/parameters.json      (optional)
 //! parts/<part>/properties.json      (optional: ryupdm's properties)
 //! parts/<part>/features/<feature>.json
+//! releases/<part>/<label>.json      (ryupdm's release records)
 //! ```
 //!
 //! ryupdm's files are read and checked by ryupdm; here they are only
@@ -38,6 +39,10 @@ pub const ATTRIBUTES: &str = ".gitattributes";
 
 /// ryupdm's settings, beside the manifest. Nothing ryucad builds reads it.
 pub const PDM_CONFIG: &str = "ryupdm.json";
+
+/// The folder of ryupdm's release records, beside the manifest. Nothing
+/// ryucad builds reads it.
+pub const RELEASES: &str = "releases";
 
 /// The files at the project's root that a session tracks.
 pub const ROOT_FILES: [&str; 3] = [MANIFEST, ATTRIBUTES, PDM_CONFIG];
