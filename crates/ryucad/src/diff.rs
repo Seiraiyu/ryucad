@@ -508,11 +508,40 @@ pub fn structural(from: &Files, to: &Files, opts: &Options) -> Value {
     json!({"manifest": {"changes": manifest}, "parts": out})
 }
 
-/// A part's rebuilt features on one side, in order.
-pub type Built = Vec<(
-    crate::doc::id::Id,
-    crate::error::Result<crate::rebuild::Output>,
-)>;
+/// A part rebuilt on one side: its features' results in order, and its
+/// solids by founder in list order, each as the model shows it (`None`
+/// when not even its founder built).
+#[derive(Clone, Debug, Default)]
+pub struct Built {
+    pub features: Vec<(
+        crate::doc::id::Id,
+        crate::error::Result<crate::rebuild::Output>,
+    )>,
+    pub solids: Vec<(
+        crate::doc::id::Id,
+        Option<std::sync::Arc<crate::rebuild::Built>>,
+    )>,
+}
+
+impl Built {
+    /// A part's rebuild, with its solids as `part`'s list makes them.
+    pub fn of(part: &crate::doc::project::Part, r: &crate::rebuild::PartResult) -> Built {
+        let solids = crate::solid::Solids::of(part);
+        Built {
+            features: r.features.clone(),
+            solids: r
+                .shown(&solids)
+                .into_iter()
+                .map(|s| {
+                    (
+                        s.solid.clone(),
+                        s.state.map(|(_, b)| std::sync::Arc::clone(b)),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
 
 /// A feature's result as the model diff reports it.
 fn result(r: Option<&crate::error::Result<crate::rebuild::Output>>) -> Value {
@@ -769,7 +798,7 @@ fn find<'a>(
     side: &'a Built,
     id: &crate::doc::id::Id,
 ) -> Option<&'a crate::error::Result<crate::rebuild::Output>> {
-    side.iter().find(|(x, _)| x == id).map(|(_, r)| r)
+    side.features.iter().find(|(x, _)| x == id).map(|(_, r)| r)
 }
 
 /// Adds to a structural diff `v` what the change did to the model, from
@@ -784,7 +813,7 @@ pub fn model(
     opts: &Options,
 ) {
     let parts: BTreeSet<&String> = from.keys().chain(to.keys()).collect();
-    let none = Built::new();
+    let none = Built::default();
     for part in parts {
         if opts.part.as_ref().is_some_and(|p| p != part) {
             continue;
@@ -794,11 +823,12 @@ pub fn model(
             to.get(part).unwrap_or(&none),
         );
         // Every feature built on either side, in the newer order first.
-        let mut ids: Vec<&crate::doc::id::Id> = b.iter().map(|(id, _)| id).collect();
+        let mut ids: Vec<&crate::doc::id::Id> = b.features.iter().map(|(id, _)| id).collect();
         ids.extend(
-            a.iter()
+            a.features
+                .iter()
                 .map(|(id, _)| id)
-                .filter(|id| !b.iter().any(|(x, _)| x == *id)),
+                .filter(|id| !b.features.iter().any(|(x, _)| x == *id)),
         );
         for id in ids {
             let (ra, rb) = (find(a, id), find(b, id));
@@ -821,6 +851,49 @@ pub fn model(
                 *f = json!({"status": "same"});
             }
             f["model"] = m;
+        }
+        // Each solid as the model shows it, on either side, by founder:
+        // those that differ (or every one with `all`).
+        let shown = |side: &'_ Built, id: &crate::doc::id::Id| {
+            side.solids
+                .iter()
+                .find(|(s, _)| s == id)
+                .map(|(_, b)| b.clone())
+        };
+        let mut solids: Vec<&crate::doc::id::Id> = b.solids.iter().map(|(s, _)| s).collect();
+        solids.extend(
+            a.solids
+                .iter()
+                .map(|(s, _)| s)
+                .filter(|s| !b.solids.iter().any(|(x, _)| x == *s)),
+        );
+        for id in solids {
+            let (x, y) = (shown(a, id), shown(b, id));
+            let hash = |s: &Option<Option<std::sync::Arc<crate::rebuild::Built>>>| match s {
+                None => Value::Null,
+                Some(None) => json!({"ok": false}),
+                Some(Some(b)) => json!({"ok": true, "hash": b.hash}),
+            };
+            let (hx, hy) = (hash(&x), hash(&y));
+            if hx == hy && !opts.all {
+                continue;
+            }
+            let mut m = json!({"from": hx, "to": hy});
+            if let (Some(Some(p)), Some(Some(q))) = (&x, &y)
+                && p.hash != q.hash
+            {
+                m["body"] = bodies(&p.body, &q.body);
+            }
+            let p = &mut v["parts"][part.as_str()];
+            if p.is_null() {
+                *p = json!({
+                    "status": "same",
+                    "order": {"added": [], "removed": [], "moved": []},
+                    "parameters": {"added": [], "removed": [], "changed": []},
+                    "features": {},
+                });
+            }
+            p["solids"][id.as_str()] = m;
         }
     }
 }
@@ -855,6 +928,32 @@ mod tests {
             "format": 2, "kind": "ryucad.feature", "sketch": "s1", "type": "extrude",
         });
         assert!(text(up_to).contains("\nextent.target = box1/0011aabb\n"));
+        // What it does to solids, and a boolean of them.
+        let cut = json!({
+            "extent": {"both": true, "type": "through_all"},
+            "format": 3, "kind": "ryucad.feature", "operation": "cut", "sketch": "s1",
+            "targets": ["a", "b"], "type": "extrude",
+        });
+        assert_eq!(
+            text(cut),
+            "ryucad.feature extrude (format 3)\n\
+             extent.both = true\n\
+             extent.type = through_all\n\
+             operation = cut\n\
+             sketch = s1\n\
+             targets = [a, b]\n"
+        );
+        let boolean = json!({
+            "format": 3, "kind": "ryucad.feature", "op": "subtract", "target": "a",
+            "tools": ["t", "u"], "type": "boolean",
+        });
+        assert_eq!(
+            text(boolean),
+            "ryucad.feature boolean (format 3)\n\
+             op = subtract\n\
+             target = a\n\
+             tools = [t, u]\n"
+        );
     }
 
     #[test]
@@ -1180,6 +1279,55 @@ mod tests {
         assert_eq!(c["status"], "same");
         assert_eq!(c["model"]["from"], c["model"]["to"]);
         assert!(c["model"].get("body").is_none());
+    }
+
+    #[test]
+    fn a_model_diff_says_what_each_solid_did() {
+        use crate::git::tests::git;
+        use crate::server::tests::{call, fresh};
+        let (dir, mut s) = fresh();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        for f in [
+            json!({"type": "box", "id": "a", "params": {"x": 10, "y": 10, "z": 10}}),
+            json!({"type": "box", "id": "c", "operation": "cut",
+                   "params": {"x": 4, "y": 20, "z": 20}, "placement": {"origin": [8, -5, -5]}}),
+            json!({"type": "sphere", "id": "ball", "params": {"radius": 1},
+                   "placement": {"origin": [30, 0, 0]}}),
+        ] {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(&mut s, "feature.add", f).unwrap();
+        }
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "start"]);
+        // A boss joined to a; the ball untouched.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "cylinder", "id": "boss", "operation": "join",
+                   "targets": ["a"], "params": {"radius": 2, "height": 5},
+                   "placement": {"origin": [4, 5, 10]}}),
+        )
+        .unwrap();
+        let v = call(&mut s, "diff", json!({"model": true})).unwrap();
+        let solids = &v["parts"]["p"]["solids"];
+        let a = &solids["a"];
+        assert_eq!(
+            (&a["from"]["ok"], &a["to"]["ok"]),
+            (&json!(true), &json!(true))
+        );
+        assert_ne!(a["from"]["hash"], a["to"]["hash"]);
+        let new_faces = a["body"]["faces"]["new"].as_array().unwrap().len();
+        assert_eq!(new_faces, 2, "{a}");
+        assert!(solids.get("ball").is_none());
+        let boss = &v["parts"]["p"]["features"]["boss"];
+        assert_eq!(boss["status"], "added");
+        assert_eq!(boss["model"]["to"]["ok"], true);
+        let all = call(&mut s, "diff", json!({"model": true, "all": true})).unwrap();
+        let ball = &all["parts"]["p"]["solids"]["ball"];
+        assert_eq!(ball["from"], ball["to"]);
     }
 
     #[test]

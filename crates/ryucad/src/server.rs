@@ -2450,8 +2450,9 @@ fn rebuilt_at(session: &mut Session, rev: &str) -> Result<BTreeMap<String, crate
     let ids: Vec<Id> = s.project().parts.keys().cloned().collect();
     let mut out = BTreeMap::new();
     for id in ids {
+        let part = s.project().part(&id)?.clone();
         let r = s.rebuilt(&id)?;
-        out.insert(id.to_string(), r.features.clone());
+        out.insert(id.to_string(), crate::diff::Built::of(&part, r));
     }
     Ok(out)
 }

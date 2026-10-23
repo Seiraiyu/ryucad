@@ -634,7 +634,8 @@ fn diff_section(golden: &mut Golden) {
     let (dir, mut session) = referenced();
     let part = Id::parse("rf", "part").unwrap();
     let built = |session: &mut ryucad::session::Session| {
-        let r = session.rebuilt(&part).unwrap().features.clone();
+        let p = session.project().part(&part).unwrap().clone();
+        let r = ryucad::diff::Built::of(&p, session.rebuilt(&part).unwrap());
         [("rf".to_owned(), r)].into_iter().collect()
     };
     let before = ryucad::activity::snapshot(dir.path()).unwrap();
