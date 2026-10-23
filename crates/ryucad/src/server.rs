@@ -10,6 +10,7 @@ use crate::doc::project::{
 };
 use crate::doc::reference::Reference;
 use crate::doc::sketch::{OnFace, OriginPlane, Plane, Sketch};
+use crate::doc::solid::{Boolean, Combine};
 use crate::doc::sweep::{Angle, Extent, Extrude, Revolve, RevolveAxis};
 use crate::entity::{self, EntityRef};
 use crate::error::{Code, Error, Result};
@@ -21,6 +22,7 @@ use crate::param;
 use crate::proto::{Answer, FeatureFields, PlacementArg, Position, Request, Transfer, VersionInfo};
 use crate::rebuild;
 use crate::session::Session;
+use crate::solid::Solids;
 use crate::units::{Quantity, Unit};
 use crate::view::{Camera, DEFAULT_PROJECTION, StandardView};
 use serde_json::{Map, Value, json};
@@ -840,7 +842,9 @@ fn primitive_report(f: &Primitive) -> Value {
         .iter()
         .map(|(k, q)| (k.clone(), q.report()))
         .collect();
-    json!({"params": params, "placement": placement_report(&f.placement)})
+    let mut v = json!({"params": params, "placement": placement_report(&f.placement)});
+    f.combine.write(&mut v);
+    v
 }
 
 /// Applies the parts of `arg` that are given to `p`, its expressions
@@ -943,9 +947,141 @@ impl Given {
 /// The fields a sketch takes.
 const SKETCH: [&str; 5] = ["plane", "placement", "face", "face_origin", "face_x"];
 
-/// The fields an extrude and a revolve take.
-const EXTRUDE: [&str; 4] = ["sketch", "loops", "extent", "reverse"];
-const REVOLVE: [&str; 5] = ["sketch", "loops", "axis", "angle", "symmetric"];
+/// The fields a primitive, an extrude, a revolve and a boolean take.
+const PRIMITIVE: [&str; 4] = ["params", "placement", "operation", "targets"];
+const EXTRUDE: [&str; 6] = [
+    "sketch",
+    "loops",
+    "extent",
+    "reverse",
+    "operation",
+    "targets",
+];
+const REVOLVE: [&str; 7] = [
+    "sketch",
+    "loops",
+    "axis",
+    "angle",
+    "symmetric",
+    "operation",
+    "targets",
+];
+const BOOLEAN: [&str; 4] = ["op", "target", "targets", "tools"];
+
+/// A primitive's operation and targets: `current`'s, with what was
+/// given laid over them (`new` drops the targets).
+fn combine_from(current: &Combine, given: &Given) -> Result<Combine> {
+    let mut v = json!({});
+    current.write(&mut v);
+    let f = &given.fields;
+    if let Some(op) = &f.operation {
+        v["operation"] = json!(op);
+        if op == "new" {
+            v.as_object_mut().expect("an object").remove("targets");
+        }
+    }
+    if let Some(t) = &f.targets {
+        v["targets"] = json!(t);
+    }
+    let mut o = crate::doc::files::Obj::new(&v, "")?;
+    let c = Combine::from_fields(&mut o)?;
+    o.finish()?;
+    Ok(c)
+}
+
+/// A boolean from `current`'s fields (none for a new one) with what was
+/// given laid over them. Its target may come as `target`, or as the one
+/// entry of `targets`.
+fn boolean_from(current: Option<&Boolean>, given: &Given) -> Result<Boolean> {
+    let mut v = current.map_or_else(|| json!({}), Boolean::fields);
+    let f = &given.fields;
+    let target = match (&f.target, &f.targets) {
+        (Some(_), Some(_)) => {
+            return Err(Error::new(Code::Usage, "give a boolean's target once"));
+        }
+        (Some(t), None) => Some(t.clone()),
+        (None, Some(ts)) => match ts.as_slice() {
+            [t] => Some(t.clone()),
+            _ => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("a boolean has one target, not {}", ts.len()),
+                )
+                .with("param", "targets"));
+            }
+        },
+        (None, None) => None,
+    };
+    if let Some(op) = &f.op {
+        v["op"] = json!(op);
+    }
+    if let Some(t) = target {
+        v["target"] = json!(t);
+    }
+    if let Some(t) = &f.tools {
+        v["tools"] = json!(t);
+    }
+    let mut o = crate::doc::files::Obj::new(&v, "")?;
+    let b = Boolean::from_fields(&mut o)?;
+    o.finish()?;
+    Ok(b)
+}
+
+/// The solids a feature put at `at` in `order` could act on: founded
+/// before it and not consumed.
+fn solids_before(p: &Part, order: &[Id], at: usize) -> Vec<Id> {
+    Solids::of_order(p, &order[..at])
+        .tips()
+        .map(|(s, _)| s.clone())
+        .collect()
+}
+
+/// Refuses a write that would leave a feature acting on what isn't a
+/// solid before it in `q` (the part as the write leaves it): the written
+/// features, those that name them, and those that name a written
+/// boolean's tools.
+fn check_solids(q: &Part, written: &[&Id]) -> Result<()> {
+    let solids = Solids::of(q);
+    let mut named: Vec<&Id> = written.to_vec();
+    for w in written {
+        if let Some(Ok(Feature::Boolean(b))) = q.features.get(*w) {
+            named.extend(&b.tools);
+        }
+    }
+    for id in q.order() {
+        let Some(Ok(f)) = q.features.get(id) else {
+            continue;
+        };
+        let targets = f.targets();
+        let concerned = written.contains(&id) || targets.iter().any(|t| named.contains(t));
+        if targets.is_empty() || !concerned {
+            continue;
+        }
+        crate::graph::check_order(q, q.order(), id, f)?;
+        for t in targets {
+            if let Some(by) = solids.consumed_by(t, id) {
+                return Err(rebuild::consumed(id, t, by));
+            }
+            if !solids.is_solid(t) {
+                return Err(rebuild::not_a_solid(q, &solids, id, "targets", t));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The part as a write would leave it: `writes` in place, listed as
+/// `order`.
+fn proposed(p: &Part, order: &[Id], writes: &[(&Id, &Feature)]) -> Part {
+    let mut q = p.clone();
+    for (id, f) in writes {
+        q.features.insert((*id).clone(), Ok((*f).clone()));
+    }
+    q.file = Ok(PartFile {
+        features: order.to_vec(),
+    });
+    q
+}
 
 /// An extrude or revolve from its fields: the current ones (for an edit)
 /// with those given laid over them.
@@ -964,6 +1100,9 @@ fn sweep_from(
     };
     let mut v = current.unwrap_or(fresh);
     let o = v.as_object_mut().expect("an object");
+    if given.fields.operation.as_deref() == Some("new") {
+        o.remove("targets");
+    }
     for (k, x) in given.fields.given() {
         // No loops is every loop, and false the default: nothing to write.
         if (k == "loops" && x == json!([])) || x == json!(false) {
@@ -1266,7 +1405,7 @@ fn feature_add(
     session: &mut Session,
     part: &str,
     ty: &str,
-    given: Given,
+    mut given: Given,
     id: Option<&str>,
     position: &Position,
     expected: Option<&str>,
@@ -1277,6 +1416,32 @@ fn feature_add(
     check_revision(p, expected)?;
     let mut list = order(p)?;
     let env = p.env.clone();
+    let at = insert_at(&list, position)?;
+    // A join, cut or intersect with no targets acts on the part's one
+    // solid; the file names it all the same.
+    let acts = given
+        .fields
+        .operation
+        .as_deref()
+        .is_some_and(|o| o != "new");
+    if acts && given.fields.targets.is_none() {
+        let before = solids_before(p, &list, at);
+        match before.as_slice() {
+            [one] => given.fields.targets = Some(vec![one.to_string()]),
+            _ => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!(
+                        "a {} names the solids it acts on (targets): the part has {} before it",
+                        given.fields.operation.as_deref().unwrap_or_default(),
+                        before.len()
+                    ),
+                )
+                .with("param", "targets")
+                .with("solids", before));
+            }
+        }
+    }
     let f = match ty {
         "sketch" => {
             given.only(ty, &SKETCH)?;
@@ -1286,14 +1451,19 @@ fn feature_add(
             given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
             sweep_from(ty, None, &given, &pid, unit, &env)?
         }
+        "boolean" => {
+            given.only(ty, &BOOLEAN)?;
+            Feature::Boolean(boolean_from(None, &given)?)
+        }
         _ => {
             let ty = PrimitiveType::parse(ty)?;
-            given.only(ty.as_str(), &["params", "placement"])?;
+            given.only(ty.as_str(), &PRIMITIVE)?;
+            let combine = combine_from(&Combine::NEW, &given)?;
             Feature::Primitive(Primitive {
                 ty,
                 params: Primitive::params_from_json(ty, &Value::Object(given.params), unit, &env)?,
                 placement: new_placement(given.placement.unwrap_or_default(), unit, &env)?,
-                combine: crate::doc::solid::Combine::NEW,
+                combine,
             })
         }
     };
@@ -1310,10 +1480,11 @@ fn feature_add(
         )
         .with("feature", &fid));
     }
-    list.insert(insert_at(&list, position)?, fid.clone());
+    list.insert(at, fid.clone());
     if f.swept().is_some() {
         check_sweep(p, &list, &fid, &f)?;
     }
+    check_solids(&proposed(p, &list, &[(&fid, &f)]), &[&fid])?;
     check_references(session, &pid, &list, &fid, &f)?;
     let revision = save(session, &pid, &[(&fid, &f)], list)?;
     Ok(json!({"feature": feature_report(&pid, &fid, &f), "revision": revision}))
@@ -1334,7 +1505,8 @@ fn feature_edit(
     let old = feature(p, &fid)?.clone();
     let f = match old.clone() {
         Feature::Primitive(mut f) => {
-            given.only(f.ty.as_str(), &["params", "placement"])?;
+            given.only(f.ty.as_str(), &PRIMITIVE)?;
+            f.combine = combine_from(&f.combine, &given)?;
             let mut merged: Map<String, Value> = f
                 .params
                 .iter()
@@ -1363,10 +1535,9 @@ fn feature_edit(
             s.plane = sketch_plane(Some(&s.plane), &given, &pid, unit, &p.env)?;
             Feature::Sketch(s)
         }
-        // Its fields are edited in a later task.
-        f @ Feature::Boolean(_) => {
-            given.only("boolean", &[])?;
-            f
+        Feature::Boolean(b) => {
+            given.only("boolean", &BOOLEAN)?;
+            Feature::Boolean(boolean_from(Some(&b), &given)?)
         }
         f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
             let ty = f.type_name();
@@ -1381,6 +1552,24 @@ fn feature_edit(
             f
         }
     };
+    // A solid's founder that stops founding it leaves what acts on it, or
+    // refers to it, with nothing.
+    let founded = |f: &Feature| f.combine().is_some_and(|c| c.is_new());
+    if founded(&old) && !founded(&f) {
+        let users = crate::graph::dependents(p, &fid);
+        if !users.is_empty() {
+            return Err(Error::new(
+                Code::HasDependents,
+                format!(
+                    "{fid} founds a solid that {} act on or refer to; change those first",
+                    users.iter().map(Id::as_str).collect::<Vec<_>>().join(", ")
+                ),
+            )
+            .with("feature", &fid)
+            .with("features", users));
+        }
+    }
+    check_solids(&proposed(p, &list, &[(&fid, &f)]), &[&fid])?;
     // References already there were checked when they were written.
     if f.references() != old.references() {
         check_references(session, &pid, &list, &fid, &f)?;
@@ -1459,7 +1648,8 @@ fn feature_move(
     }
     list.remove(from);
     list.insert(insert_at(&list, position)?, fid.clone());
-    // Everything must still come after what it reads.
+    // Everything must still come after what it reads, and act only on
+    // solids not yet consumed.
     for f in &list {
         if let Some(Ok(feature)) = p.features.get(f)
             && (*f == fid || crate::graph::inputs(feature).contains(&&fid))
@@ -1467,6 +1657,7 @@ fn feature_move(
             crate::graph::check_order(p, &list, f, feature)?;
         }
     }
+    check_solids(&proposed(p, &list, &[]), &[&fid])?;
     let revision = save(session, &pid, &[], list.clone())?;
     Ok(json!({"features": list, "revision": revision}))
 }
@@ -2637,6 +2828,117 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::InvalidJson);
+    }
+
+    #[test]
+    fn operations_through_the_protocol() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        let add = |s: &mut Session, f: Value| {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(s, "feature.add", f)
+        };
+        let unit = |id: &str, x: i32| {
+            json!({"type": "box", "id": id, "params": {"x": 10, "y": 10, "z": 10},
+                   "placement": {"origin": [x, 0, 0]}})
+        };
+        add(&mut s, unit("a", 0)).unwrap();
+        // With one solid, a cut acts on it; the file says so.
+        let mut cut = unit("c", 5);
+        cut["operation"] = json!("cut");
+        let r = add(&mut s, cut).unwrap();
+        assert_eq!(r["feature"]["operation"], "cut");
+        assert_eq!(r["feature"]["targets"], json!(["a"]));
+        let show = call(&mut s, "feature.show", json!({"part": "p", "id": "c"})).unwrap();
+        assert_eq!(show["targets"], json!(["a"]));
+        // With two, it must say which.
+        add(&mut s, unit("b", 20)).unwrap();
+        let mut join = unit("j", 25);
+        join["operation"] = json!("join");
+        let e = add(&mut s, join.clone()).unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        assert_eq!(e.details["solids"], json!(["a", "b"]));
+        join["targets"] = json!(["b"]);
+        add(&mut s, join).unwrap();
+        // What isn't a solid, or comes after, is refused.
+        let mut bad = unit("x", 0);
+        bad["operation"] = json!("cut");
+        bad["targets"] = json!(["c"]);
+        let e = add(&mut s, bad.clone()).unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
+        assert_eq!(e.details["solids"], json!(["a"]));
+        bad["targets"] = json!(["b"]);
+        bad["first"] = json!(true);
+        assert_eq!(add(&mut s, bad).unwrap_err().code, Code::ReferenceForward);
+        // A founder that stops founding leaves what acts on it with nothing.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "b", "operation": "join", "targets": ["a"]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::HasDependents, "{e}");
+        assert_eq!(e.details["features"], json!(["j"]));
+        // A cut made new again drops its targets.
+        let r = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "c", "operation": "new"}),
+        )
+        .unwrap();
+        assert!(r["feature"].get("targets").is_none());
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "c", "operation": "cut", "targets": ["a"]}),
+        )
+        .unwrap();
+        // A boolean takes its target as target, or as targets' one entry.
+        let r = add(
+            &mut s,
+            json!({"type": "boolean", "id": "u", "op": "unite", "targets": ["a"],
+                   "tools": ["b"]}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["target"], "a");
+        let show = call(&mut s, "feature.show", json!({"part": "p", "id": "u"})).unwrap();
+        assert_eq!(show["tools"], json!(["b"]));
+        let e = call(&mut s, "rebuild", json!({"part": "p"}));
+        assert!(e.is_ok(), "{e:?}");
+        // After it, b is the boolean's: nothing acts on it.
+        let mut late = unit("late", 22);
+        late["operation"] = json!("cut");
+        late["targets"] = json!(["b"]);
+        let e = add(&mut s, late).unwrap_err();
+        assert_eq!(e.code, Code::BodyConsumed, "{e}");
+        assert_eq!(e.details["consumed_by"], "u");
+        // Nor can the boolean move before what acts on its tools.
+        let e = call(
+            &mut s,
+            "feature.move",
+            json!({"part": "p", "id": "u", "after": "b"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::BodyConsumed, "{e}");
+        // Fields a type doesn't take are refused.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "u", "operation": "cut"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        let e = add(
+            &mut s,
+            json!({"type": "boolean", "op": "unite", "target": "a",
+                                   "targets": ["a"], "tools": ["c"]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::Usage);
+        // A founder others act on can't go.
+        let e = call(&mut s, "feature.delete", json!({"part": "p", "id": "a"})).unwrap_err();
+        assert_eq!(e.code, Code::HasDependents);
     }
 
     #[test]

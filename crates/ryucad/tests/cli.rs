@@ -1684,3 +1684,107 @@ fn pdm_settings_and_properties_from_the_cli() {
         1,
     );
 }
+
+#[test]
+fn solids_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    let unit = ["--param", "x=10", "--param", "y=10", "--param", "z=10"];
+    let mut base = vec!["feature", "add", "p", "box", "--id", "a"];
+    base.extend(unit);
+    p.ok(&base);
+    // A drilled hole through all of a, sketched on its bottom.
+    p.ok(&["feature", "add", "p", "sketch", "--id", "s"]);
+    let ops = r#"[
+        {"op": "add", "type": "point", "at": [5, 5]},
+        {"op": "add", "type": "fix", "a": "p1"},
+        {"op": "add", "type": "circle", "center": "p1", "r": 2},
+        {"op": "add", "type": "radius", "a": "ci1", "value": "2 mm"}
+    ]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    let hole = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "extrude",
+        "--id",
+        "h",
+        "--sketch",
+        "s",
+        "--operation",
+        "cut",
+        "--extent",
+        "through_all",
+    ]);
+    assert_eq!(hole["feature"]["targets"], serde_json::json!(["a"]));
+    assert_eq!(
+        hole["feature"]["extent"],
+        serde_json::json!({"type": "through_all"})
+    );
+    // A second solid, joined to the first by a boolean.
+    let mut second = vec![
+        "feature", "add", "p", "box", "--id", "b", "--origin", "10,0,0",
+    ];
+    second.extend(unit);
+    p.ok(&second);
+    p.fails(
+        &[
+            "feature",
+            "add",
+            "p",
+            "box",
+            "--id",
+            "j",
+            "--operation",
+            "join",
+            "--param",
+            "x=1",
+            "--param",
+            "y=1",
+            "--param",
+            "z=1",
+        ],
+        "invalid_param",
+        1,
+    );
+    let u = p.ok(&[
+        "feature", "add", "p", "boolean", "--id", "u", "--op", "unite", "--target", "a", "--tool",
+        "b",
+    ]);
+    assert_eq!(u["feature"]["target"], "a");
+    assert_eq!(u["feature"]["tools"], serde_json::json!(["b"]));
+    p.ok(&["rebuild", "p"]);
+    // b is the boolean's now.
+    let e = p.fails(
+        &[
+            "feature",
+            "add",
+            "p",
+            "box",
+            "--id",
+            "late",
+            "--operation",
+            "cut",
+            "--target",
+            "b",
+            "--param",
+            "x=1",
+            "--param",
+            "y=1",
+            "--param",
+            "z=1",
+        ],
+        "body_consumed",
+        1,
+    );
+    assert_eq!(e["details"]["consumed_by"], "u");
+    // Through all both ways from the sketch.
+    p.ok(&["feature", "edit", "p", "h", "--both"]);
+    let show = p.ok(&["feature", "show", "p", "h"]);
+    assert_eq!(
+        show["extent"],
+        serde_json::json!({"type": "through_all", "both": true})
+    );
+    p.ok(&["rebuild", "p"]);
+}

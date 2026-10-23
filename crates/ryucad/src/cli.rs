@@ -479,7 +479,9 @@ enum FeatureCmd {
     /// (radius, height, top_radius), sphere (radius), torus
     /// (major_radius, minor_radius), an empty sketch (--plane or a
     /// placement; xy by default), an extrude (--sketch, --length) or a
-    /// revolve (--sketch, --axis, --angle).
+    /// revolve (--sketch, --axis, --angle), each a solid of its own or,
+    /// with --operation, joined to, cut from or intersected with others
+    /// (--target); or a boolean (--op, --target, --tool) of whole solids.
     Add {
         part: String,
         #[arg(value_name = "TYPE")]
@@ -717,9 +719,13 @@ struct FieldArgs {
     #[arg(long, value_name = "QUANTITY")]
     length: Option<String>,
     /// An extrude's extent: blind (from the sketch's plane, the default), symmetric (half
-    /// each side) or up_to (--up-to).
+    /// each side), up_to (--up-to) or through_all (past everything it cuts or
+    /// intersects; --both for each way).
     #[arg(long, value_name = "TYPE")]
     extent: Option<String>,
+    /// Through all, each way from the sketch's plane (or --both false).
+    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
+    both: Option<bool>,
     /// Extrude up to a planar face parallel to the sketch, or a vertex: <part>/<feature>/<name>.
     #[arg(long, value_name = "REFERENCE")]
     up_to: Option<String>,
@@ -739,6 +745,20 @@ struct FieldArgs {
     /// Revolve half the angle each side of the sketch's plane (or --symmetric false).
     #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
     symmetric: Option<bool>,
+    /// What a primitive, extrude or revolve does with its body: new (a solid of its
+    /// own, the default), join, cut or intersect.
+    #[arg(long)]
+    operation: Option<String>,
+    /// A solid a join, cut or intersect acts on, by the feature that founded it; repeat
+    /// for several. A boolean's target. The part's one solid when left out.
+    #[arg(long = "target", value_name = "SOLID")]
+    targets: Vec<String>,
+    /// How a boolean combines its target with its tools: unite, subtract or intersect.
+    #[arg(long)]
+    op: Option<String>,
+    /// A solid a boolean uses as a tool, and consumes; repeat for several.
+    #[arg(long = "tool", value_name = "SOLID")]
+    tools: Vec<String>,
 }
 
 impl FieldArgs {
@@ -757,6 +777,9 @@ impl FieldArgs {
         if let Some(o) = &self.offset {
             extent.insert("offset".into(), json!(o));
         }
+        if let Some(b) = self.both {
+            extent.insert("both".into(), json!(b));
+        }
         FeatureFields {
             plane: self.plane.clone(),
             face: self.face.clone(),
@@ -773,6 +796,11 @@ impl FieldArgs {
             axis: self.axis.clone(),
             angle: self.angle.clone().map(Value::String),
             symmetric: self.symmetric,
+            operation: self.operation.clone(),
+            targets: (!self.targets.is_empty()).then(|| self.targets.clone()),
+            op: self.op.clone(),
+            target: None,
+            tools: (!self.tools.is_empty()).then(|| self.tools.clone()),
         }
     }
 }

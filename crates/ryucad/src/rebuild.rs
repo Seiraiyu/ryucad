@@ -606,13 +606,7 @@ pub fn target<'a>(
     before: &'a dyn Results,
 ) -> Result<&'a Built> {
     if let Some(by) = solids.consumed_by(t, id) {
-        return Err(Error::new(
-            Code::BodyConsumed,
-            format!("{id} acts on {t}, which the boolean {by} consumed"),
-        )
-        .with("feature", id)
-        .with("solid", t)
-        .with("consumed_by", by));
+        return Err(consumed(id, t, by));
     }
     let Some(view) = solids.view(t, id) else {
         // Not listed before `id` at all, or listed but no solid.
@@ -623,6 +617,18 @@ pub fn target<'a>(
     };
     let out = crate::graph::input(part, id, view, before)?;
     Ok(out.solid(t).expect("a solid's chain holds it"))
+}
+
+/// `body_consumed`: feature `id` acts on solid `t`, which the boolean
+/// `by` before it consumed.
+pub fn consumed(id: &Id, t: &Id, by: &Id) -> Error {
+    Error::new(
+        Code::BodyConsumed,
+        format!("{id} acts on {t}, which the boolean {by} consumed: act on its target instead"),
+    )
+    .with("feature", id)
+    .with("solid", t)
+    .with("consumed_by", by)
 }
 
 /// `reference_wrong_kind` for `t`, named in `owner`'s `role` where a
@@ -1652,11 +1658,10 @@ mod tests {
         assert_eq!(e.details["solids"], json!(["a"]));
     }
 
-    /// Part `p`: box `b` (20 × 10 × 5 mm), a sketch `s` on `plane` (a
-    /// placement) holding a circle of radius 2 mm about (10, 5) mm, and
-    /// an extrude `e` of it cutting `b` through all, `both` ways or not,
-    /// reversed or not. Written by hand: the protocol takes operations in
-    /// a later task.
+    /// Part `p`: box `b` (20 × 10 × 5 mm), a sketch `s` at height `z`
+    /// holding a circle of radius 2 mm about (10, 5) mm, and an extrude
+    /// `e` of it cutting `b` through all, `both` ways or not, reversed or
+    /// not.
     fn hole(z: &str, both: bool, reverse: bool) -> (tempfile::TempDir, crate::session::Session) {
         use crate::server::tests::call;
         let (dir, mut s, _) = crate::sketch::tests::with_box();
@@ -1683,22 +1688,10 @@ mod tests {
             &mut s,
             "feature.add",
             json!({"part": "p", "type": "extrude", "id": "e", "sketch": "s",
-                   "extent": {"length": 1}}),
+                   "operation": "cut", "reverse": reverse,
+                   "extent": {"type": "through_all", "both": both}}),
         )
         .unwrap();
-        let mut v = json!({"extent": {"type": "through_all"}, "format": 3,
-                           "kind": "ryucad.feature", "operation": "cut", "sketch": "s",
-                           "targets": ["b"], "type": "extrude"});
-        if both {
-            v["extent"]["both"] = json!(true);
-        }
-        if reverse {
-            v["reverse"] = json!(true);
-        }
-        let (p, e) = (id("p"), id("e"));
-        crate::doc::project::write_json(&crate::doc::project::feature_path(s.root(), &p, &e), &v)
-            .unwrap();
-        s.reload().unwrap();
         (dir, s)
     }
 

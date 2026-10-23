@@ -440,26 +440,15 @@ mod tests {
     fn a_name_a_later_feature_took_says_which() {
         let (_dir, mut s, body) = crate::sketch::tests::with_box();
         let top = format!("p/b/{}", face_along(&body, [0.0, 0.0, 1.0]));
-        // A cut taking the box's top millimetre, written by hand: the
-        // protocol takes operations in a later task.
+        // A cut taking the box's top millimetre.
         call(
             &mut s,
             "feature.add",
-            json!({"part": "p", "type": "box", "id": "c", "params": {"x": 1, "y": 1, "z": 1}}),
+            json!({"part": "p", "type": "box", "id": "c", "operation": "cut",
+                   "params": {"x": 30, "y": 30, "z": 2},
+                   "placement": {"origin": [-5, -5, 4]}}),
         )
         .unwrap();
-        let cut = json!({"format": 3, "kind": "ryucad.feature", "type": "box",
-                         "params": {"x": "30 mm", "y": "30 mm", "z": "2 mm"},
-                         "placement": {"origin": ["-5 mm", "-5 mm", "4 mm"],
-                                       "x": [1, 0, 0], "z": [0, 0, 1]},
-                         "operation": "cut", "targets": ["b"]});
-        let (p, c) = (
-            crate::doc::id::Id::parse("p", "part").unwrap(),
-            crate::doc::id::Id::parse("c", "feature").unwrap(),
-        );
-        crate::doc::project::write_json(&crate::doc::project::feature_path(s.root(), &p, &c), &cut)
-            .unwrap();
-        s.reload().unwrap();
         // A sketch on the top, after the cut: the name is gone, and the
         // cut took it.
         let e = call(

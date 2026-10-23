@@ -68,7 +68,8 @@ impl Combine {
     }
 
     /// Reads the optional `operation` and `targets` fields.
-    pub(crate) fn from_fields(o: &mut Obj) -> Result<Combine> {
+    #[doc(hidden)]
+    pub fn from_fields(o: &mut Obj) -> Result<Combine> {
         let operation = match o.take_opt("operation") {
             None => Operation::New,
             Some(v) => v.as_str().and_then(Operation::parse).ok_or_else(|| {
@@ -139,7 +140,8 @@ impl Boolean {
         json!({"op": self.op.as_str(), "target": self.target, "tools": self.tools})
     }
 
-    pub(crate) fn from_fields(o: &mut Obj) -> Result<Boolean> {
+    #[doc(hidden)]
+    pub fn from_fields(o: &mut Obj) -> Result<Boolean> {
         let op = o.take("op")?;
         let op = op
             .as_str()
