@@ -334,9 +334,14 @@ impl Project {
             };
             match in_part {
                 Some(id) => ids.insert(id),
-                // Git's attributes and ryupdm's settings define nothing
-                // ryucad builds.
-                None if path == ATTRIBUTES || path == PDM_CONFIG => continue,
+                // Git's attributes, ryupdm's settings and its release
+                // records define nothing ryucad builds.
+                None if path == ATTRIBUTES
+                    || path == PDM_CONFIG
+                    || path.starts_with(&format!("{RELEASES}/")) =>
+                {
+                    continue;
+                }
                 None => {
                     *self = Project::load(&self.root)?;
                     return Ok(());
@@ -768,6 +773,13 @@ mod tests {
         write_json(&root.join(MANIFEST), &Manifest::new(Unit::In).to_json()).unwrap();
         project.reload(&[MANIFEST.into()]).unwrap();
         same(&project);
+        // A release record defines nothing a part is: nothing is read.
+        fs::create_dir_all(root.join("releases/p")).unwrap();
+        fs::write(root.join("releases/p/A.json"), "{}").unwrap();
+        fs::remove_file(root.join(MANIFEST)).unwrap();
+        let before = format!("{project:?}");
+        project.reload(&["releases/p/A.json".into()]).unwrap();
+        assert_eq!(format!("{project:?}"), before);
     }
 
     #[test]

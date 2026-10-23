@@ -336,8 +336,9 @@ impl Session {
 }
 
 /// The files a project's state depends on: the manifest, the attributes
-/// that register ryucad with Git, ryupdm's settings, and everything under
-/// `parts/` two and three levels down.
+/// that register ryucad with Git, ryupdm's settings, everything under
+/// `parts/` two and three levels down, and ryupdm's release records, two
+/// levels under `releases/`.
 pub fn files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(listed(root)?.into_iter().map(|(p, _)| p).collect())
 }
@@ -364,6 +365,12 @@ fn listed(root: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
                     out.push((entry, m));
                 }
             }
+        }
+    }
+    let releases = root.join(crate::doc::project::RELEASES);
+    for (part, m) in read_dir(&releases)? {
+        if m.is_dir() {
+            out.extend(read_dir(&part)?.into_iter().filter(|(_, m)| m.is_file()));
         }
     }
     Ok(out)
@@ -477,6 +484,11 @@ mod tests {
         fs::remove_file(dir.path().join("parts/p/part.json")).unwrap();
         fs::write(dir.path().join("ryupdm.json"), "{}").unwrap();
         fs::write(dir.path().join("parts/p/properties.json"), "{}").unwrap();
+        // Release records, two levels down; nothing else under releases/.
+        fs::create_dir_all(dir.path().join("releases/p/deeper")).unwrap();
+        fs::write(dir.path().join("releases/p/A.json"), "{}").unwrap();
+        fs::write(dir.path().join("releases/p/deeper/x.json"), "{}").unwrap();
+        fs::write(dir.path().join("releases/top.json"), "{}").unwrap();
         assert_eq!(
             s.refresh_changes().unwrap(),
             [
@@ -484,9 +496,11 @@ mod tests {
                 ("parts/p/features/b.json".to_owned(), "created"),
                 ("parts/p/part.json".to_owned(), "deleted"),
                 ("parts/p/properties.json".to_owned(), "created"),
+                ("releases/p/A.json".to_owned(), "created"),
                 ("ryupdm.json".to_owned(), "created"),
             ]
         );
+        assert!(s.snapshot().contains_key("releases/p/A.json"));
     }
 
     #[test]
