@@ -1,0 +1,10 @@
+{
+  "format": 3,
+  "kind": "ryucad.feature",
+  "op": "unite",
+  "target": "b",
+  "tools": [
+    "c"
+  ],
+  "type": "boolean"
+}
