@@ -508,14 +508,7 @@ mod tests {
     fn sample() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        write_json(
-            &root.join(MANIFEST),
-            &Manifest {
-                default_unit: Unit::Mm,
-            }
-            .to_json(),
-        )
-        .unwrap();
+        write_json(&root.join(MANIFEST), &Manifest::new(Unit::Mm).to_json()).unwrap();
         let p = id("p");
         write_json(
             &part_path(root, &p),
@@ -620,10 +613,7 @@ mod tests {
         );
         assert!(part.features[&id("b")].is_ok());
         // A conflicted manifest fails every part, not the project.
-        let mut m = Manifest {
-            default_unit: Unit::Mm,
-        }
-        .to_json();
+        let mut m = Manifest::new(Unit::Mm).to_json();
         m[CONFLICTS] = serde_json::json!({
             "/default_unit": {"base": "mm", "kind": "value", "ours": "mm", "theirs": "in"},
         });
@@ -738,14 +728,7 @@ mod tests {
             .reload(&["parts/q/part.json".into(), "parts/q/x.txt".into()])
             .unwrap();
         same(&project);
-        write_json(
-            &root.join(MANIFEST),
-            &Manifest {
-                default_unit: Unit::In,
-            }
-            .to_json(),
-        )
-        .unwrap();
+        write_json(&root.join(MANIFEST), &Manifest::new(Unit::In).to_json()).unwrap();
         project.reload(&[MANIFEST.into()]).unwrap();
         same(&project);
     }
@@ -789,11 +772,7 @@ mod tests {
         assert_eq!(rev(), r1);
         fs::write(
             root.join(MANIFEST),
-            Manifest {
-                default_unit: Unit::In,
-            }
-            .to_json()
-            .to_string(),
+            Manifest::new(Unit::In).to_json().to_string(),
         )
         .unwrap();
         assert_ne!(rev(), r1);

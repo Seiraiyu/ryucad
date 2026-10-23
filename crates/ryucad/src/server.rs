@@ -39,9 +39,7 @@ pub fn init(root: &Path, default_unit: Option<Unit>) -> Result<Value> {
         )
         .with("path", root));
     }
-    let m = Manifest {
-        default_unit: default_unit.unwrap_or(Unit::Mm),
-    };
+    let m = Manifest::new(default_unit.unwrap_or(Unit::Mm));
     write_json(&manifest, &m.to_json())?;
     crate::drivers::write_attributes(root)?;
     Ok(json!({"root": root, "default_unit": m.default_unit}))
@@ -545,10 +543,12 @@ fn dispatch(
                         .with("actual", rev));
                     }
                     let unit = Unit::parse(value.as_str().expect("validated")).expect("validated");
-                    write_json(
-                        &session.root().join(MANIFEST),
-                        &Manifest { default_unit: unit }.to_json(),
-                    )?;
+                    // The rest of the manifest (the project's ID) stays.
+                    let m = Manifest {
+                        default_unit: unit,
+                        ..session.project().manifest.clone()
+                    };
+                    write_json(&session.root().join(MANIFEST), &m.to_json())?;
                     session.reload()?;
                     let mut v = config::get(unit, Some(&key), None)?;
                     v["project_revision"] = json!(config::project_revision(session.root())?);
@@ -3853,6 +3853,32 @@ pub(crate) mod tests {
                 e[0]["files"],
                 json!([{"path": "ryucad.json", "change": "modified"}])
             );
+        });
+    }
+
+    #[test]
+    fn setting_the_unit_keeps_the_project_id() {
+        crate::config::tests::with_config(|_| {
+            let (dir, mut s) = fresh();
+            let id = crate::doc::id::ProjectId::from_bytes([9; 16]);
+            let m = Manifest {
+                project: Some(id.clone()),
+                ..Manifest::new(Unit::Mm)
+            };
+            write_json(&dir.path().join(MANIFEST), &m.to_json()).unwrap();
+            call(
+                &mut s,
+                "config.set",
+                json!({"key": "default_unit", "value": "in"}),
+            )
+            .unwrap();
+            let text = fs::read_to_string(dir.path().join(MANIFEST)).unwrap();
+            assert_eq!(
+                crate::doc::canonical::parse(&text).unwrap(),
+                json!({"default_unit": "in", "format": 2, "kind": "ryucad.project",
+                       "project": id})
+            );
+            assert_eq!(s.project().manifest.project, Some(id));
         });
     }
 

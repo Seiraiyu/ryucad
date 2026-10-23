@@ -2,7 +2,7 @@
 //! parameters and a feature. Each reads from and writes to a JSON value;
 //! the file system is [`super::project`]'s business.
 
-use super::id::Id;
+use super::id::{Id, ProjectId};
 use super::reference::Reference;
 use super::sketch::Sketch;
 use super::sweep::{Extrude, Revolve};
@@ -14,6 +14,10 @@ use std::collections::BTreeMap;
 
 /// The format version of the manifest, part and parameters files.
 pub const FORMAT: u64 = 1;
+
+/// The newest manifest format: 2 adds the project's ID. A manifest without
+/// one stays at 1, so older builds still read projects that don't use PDM.
+pub const MANIFEST_FORMAT: u64 = 2;
 
 /// The newest feature format: 2 adds expressions. A feature is written at
 /// the lowest format that holds it, so one with only literals stays 1.
@@ -28,6 +32,8 @@ pub const FEATURE_KIND: &str = "ryucad.feature";
 #[derive(Clone, Debug, PartialEq)]
 pub struct Manifest {
     pub default_unit: Unit,
+    /// The project's identity, from its first PDM write on.
+    pub project: Option<ProjectId>,
 }
 
 /// A part's ordered feature list, `parts/<part>/part.json`.
@@ -159,12 +165,35 @@ impl Placement {
 }
 
 impl Manifest {
+    /// A manifest with no project ID.
+    pub fn new(default_unit: Unit) -> Manifest {
+        Manifest {
+            default_unit,
+            project: None,
+        }
+    }
+
     pub fn to_json(&self) -> Value {
-        json!({"default_unit": self.default_unit, "format": FORMAT, "kind": PROJECT_KIND})
+        let mut v =
+            json!({"default_unit": self.default_unit, "format": FORMAT, "kind": PROJECT_KIND});
+        if let Some(id) = &self.project {
+            v["project"] = json!(id);
+            v["format"] = json!(MANIFEST_FORMAT);
+        }
+        v
     }
 
     pub fn from_json(v: &Value) -> Result<Manifest> {
-        let mut o = header(v, PROJECT_KIND, FORMAT)?;
+        let mut o = header(v, PROJECT_KIND, MANIFEST_FORMAT)?;
+        let project = match o.take_opt("project") {
+            None => None,
+            Some(p) => Some(
+                p.as_str()
+                    .ok_or_else(|| invalid("/project", "project must be a string"))
+                    .and_then(ProjectId::parse)
+                    .map_err(|e| e.with("pointer", "/project"))?,
+            ),
+        };
         let unit = o.take("default_unit")?;
         let default_unit = unit.as_str().and_then(Unit::parse).ok_or_else(|| {
             invalid(
@@ -173,7 +202,10 @@ impl Manifest {
             )
         })?;
         o.finish()?;
-        Ok(Manifest { default_unit })
+        Ok(Manifest {
+            default_unit,
+            project,
+        })
     }
 }
 
@@ -292,6 +324,15 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
         }
     }
     out
+}
+
+/// The lowest manifest format that holds `v`: 2 with a project ID, else 1.
+pub fn manifest_format(v: &Value) -> u64 {
+    if v.get("project").is_some() {
+        MANIFEST_FORMAT
+    } else {
+        FORMAT
+    }
 }
 
 /// The lowest format that holds a feature's JSON, judged from the JSON
@@ -665,15 +706,29 @@ mod tests {
 
     #[test]
     fn manifest_round_trip() {
-        let m = Manifest {
-            default_unit: Unit::In,
-        };
+        let mut m = Manifest::new(Unit::In);
         let v = m.to_json();
         assert_eq!(
             v,
             json!({"default_unit": "in", "format": 1, "kind": "ryucad.project"})
         );
         assert_eq!(Manifest::from_json(&v).unwrap(), m);
+        // A project ID needs format 2.
+        m.project = Some(ProjectId::from_bytes([7; 16]));
+        let v = m.to_json();
+        assert_eq!(
+            v,
+            json!({"default_unit": "in", "format": 2, "kind": "ryucad.project",
+                   "project": "07".repeat(16)})
+        );
+        assert_eq!(Manifest::from_json(&v).unwrap(), m);
+        let bad = json!({"default_unit": "in", "format": 2, "kind": "ryucad.project",
+                         "project": "x"});
+        let e = Manifest::from_json(&bad).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["pointer"]),
+            (Code::InvalidId, &json!("/project"))
+        );
     }
 
     #[test]
@@ -917,16 +972,13 @@ mod tests {
     fn migration_seam() {
         // Format 1 passes through; anything newer is refused before any
         // other field is read, and format 0 never existed.
-        let mut v = Manifest {
-            default_unit: Unit::Mm,
-        }
-        .to_json();
+        let mut v = Manifest::new(Unit::Mm).to_json();
         assert!(Manifest::from_json(&v).is_ok());
-        v["format"] = json!(2);
+        v["format"] = json!(3);
         v["default_unit"] = json!("parsec");
         let e = Manifest::from_json(&v).unwrap_err();
         assert_eq!(e.code, Code::FormatTooNew);
-        assert_eq!(e.details["supported"], 1);
+        assert_eq!(e.details["supported"], 2);
         v["format"] = json!(0);
         assert_eq!(
             Manifest::from_json(&v).unwrap_err().code,

@@ -871,7 +871,7 @@ fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<
                 ),
                 changes: vec![write(
                     MANIFEST,
-                    canonical_bytes(&Manifest { default_unit: unit }.to_json()),
+                    canonical_bytes(&Manifest::new(unit).to_json()),
                 )],
                 params: vec![Param {
                     name: "unit",

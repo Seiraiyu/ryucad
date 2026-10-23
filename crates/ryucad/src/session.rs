@@ -421,14 +421,7 @@ mod tests {
     fn project() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        write_json(
-            &root.join(MANIFEST),
-            &Manifest {
-                default_unit: Unit::Mm,
-            }
-            .to_json(),
-        )
-        .unwrap();
+        write_json(&root.join(MANIFEST), &Manifest::new(Unit::Mm).to_json()).unwrap();
         write_json(
             &part_path(root, &id("p")),
             &PartFile {

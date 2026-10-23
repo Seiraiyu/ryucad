@@ -278,10 +278,12 @@ impl Walk {
 /// model (ryupdm's) are merged by the generic rule at any format.
 pub fn newest(kind: &str) -> Option<u64> {
     use crate::doc::files::{
-        FEATURE_FORMAT, FEATURE_KIND, FORMAT, PARAMETERS_KIND, PART_KIND, PROJECT_KIND,
+        FEATURE_FORMAT, FEATURE_KIND, FORMAT, MANIFEST_FORMAT, PARAMETERS_KIND, PART_KIND,
+        PROJECT_KIND,
     };
     match kind {
-        PROJECT_KIND | PART_KIND | PARAMETERS_KIND => Some(FORMAT),
+        PROJECT_KIND => Some(MANIFEST_FORMAT),
+        PART_KIND | PARAMETERS_KIND => Some(FORMAT),
         FEATURE_KIND => Some(FEATURE_FORMAT),
         _ => None,
     }
@@ -326,6 +328,7 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
     };
     let format = match kind.as_str() {
         crate::doc::files::FEATURE_KIND => json!(crate::doc::files::feature_format(&value)),
+        crate::doc::files::PROJECT_KIND => json!(crate::doc::files::manifest_format(&value)),
         _ => {
             let f = |v: &Value| v["format"].as_u64().unwrap_or(1);
             json!(f(ours).max(f(theirs)))
@@ -1461,5 +1464,17 @@ mod tests {
         let m = merge(Some(&ours), &lit, &ours);
         assert_eq!(m.value["format"], 1);
         assert!(m.is_clean());
+        // A manifest is format 2 while it holds a project ID.
+        let unit = |u: &str| json!({"default_unit": u, "format": 1, "kind": "ryucad.project"});
+        let mut with_id = unit("mm");
+        with_id["project"] = json!("ab".repeat(16));
+        with_id["format"] = json!(2);
+        let m = merge(Some(&unit("mm")), &unit("in"), &with_id);
+        assert_eq!(
+            m.value,
+            json!({"default_unit": "in", "format": 2, "kind": "ryucad.project",
+                   "project": "ab".repeat(16)})
+        );
+        assert!(readable(&crate::doc::canonical::to_string(&with_id).into_bytes()).is_some());
     }
 }

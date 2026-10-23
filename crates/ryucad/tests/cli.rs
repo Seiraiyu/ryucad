@@ -792,7 +792,7 @@ fn every_error_code_has_its_exit_code() {
     p.fails(&["feature", "show", "p", "t"], "merge_conflict", 1);
     p.write(
         "ryucad.json",
-        r#"{"default_unit":"mm","format":2,"kind":"ryucad.project"}"#,
+        r#"{"default_unit":"mm","format":3,"kind":"ryucad.project"}"#,
     );
     p.fails(&["part", "list"], "format_too_new", 3);
 }
