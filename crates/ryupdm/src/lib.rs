@@ -1,12 +1,14 @@
 //! ryupdm: product data management for ryucad projects, local and
 //! offline. A project's parts carry properties checked against the
-//! project's settings (this crate's [`props`] and [`config`]).
+//! project's settings (this crate's [`props`] and [`config`]), and are
+//! released under labels its revision scheme derives ([`label`]).
 //!
 //! ryupdm reads projects through `ryucad-doc` and never calls the kernel,
 //! a session, the daemon or the app: ryucad exposes it through its
 //! protocol and CLI, and a service can link it to read any revision.
 
 pub mod config;
+pub mod label;
 pub mod props;
 
 use ryucad_doc::doc::canonical;
