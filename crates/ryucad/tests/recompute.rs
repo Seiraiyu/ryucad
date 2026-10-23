@@ -83,8 +83,9 @@ fn rectangle(w: &str, h: &str, at: [f64; 2]) -> Value {
 
 /// Part `p`: a box `b`; a sketch `s` on its top and an extrude `e` of it;
 /// a sketch `t` on xy with a circle about a projected corner of the box,
-/// extruded up to `e`'s top as `f`; a cylinder `c`; and a sketch `u` on
-/// zx revolved about the box's bottom edge as `r`.
+/// extruded up to `e`'s top as `f`; a cylinder `c`; a sketch `u` on zx
+/// revolved about the box's bottom edge as `r`; a hole cut through `b`;
+/// and a lug united with `c` by a boolean.
 fn project() -> (tempfile::TempDir, Session) {
     let dir = tempfile::tempdir().unwrap();
     ryucad::server::init(dir.path(), None).unwrap();
@@ -148,6 +149,20 @@ fn project() -> (tempfile::TempDir, Session) {
         &mut s,
         json!({"type": "revolve", "id": "r", "sketch": "u", "axis": along_x, "angle": 90}),
     );
+    add(
+        &mut s,
+        json!({"type": "cylinder", "id": "hole", "operation": "cut", "targets": ["b"],
+               "params": {"radius": "r / 2", "height": 30}, "placement": {"origin": [5, 5, -10]}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "box", "id": "lug", "params": {"x": 6, "y": 2, "z": 3},
+               "placement": {"origin": [40, -1, 1]}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "boolean", "id": "both", "op": "unite", "target": "c", "tools": ["lug"]}),
+    );
     (dir, s)
 }
 
@@ -160,7 +175,7 @@ fn mm(g: &mut Lcg, lo: u64, hi: u64) -> String {
 /// One random edit. Some are refused, or leave a feature failing; both
 /// must rebuild the same way however they are reached.
 fn edit(g: &mut Lcg, s: &mut Session) {
-    let (method, params) = match g.next_u64() % 7 {
+    let (method, params) = match g.next_u64() % 9 {
         0 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
         1 => (
             "param.set",
@@ -178,6 +193,14 @@ fn edit(g: &mut Lcg, s: &mut Session) {
         5 => (
             "feature.edit",
             json!({"id": "r", "angle": format!("{} deg", 30 + g.next_u64() % 300)}),
+        ),
+        6 => (
+            "feature.edit",
+            json!({"id": "hole", "placement": {"origin": [mm(g, 2, 18), "5 mm", "-10 mm"]}}),
+        ),
+        7 => (
+            "feature.edit",
+            json!({"id": "lug", "params": {"x": mm(g, 2, 9)}}),
         ),
         _ => (
             "sketch.edit",

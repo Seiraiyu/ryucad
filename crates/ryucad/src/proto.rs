@@ -131,6 +131,24 @@ pub struct FeatureFields {
     /// Revolve half the angle each side of the sketch's plane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symmetric: Option<bool>,
+    /// What a primitive, extrude or revolve does with its body: `new`
+    /// (the default), `join`, `cut` or `intersect`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    /// The solids a join, cut or intersect acts on, by their founders; a
+    /// boolean's one target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targets: Option<Vec<String>>,
+    /// How a boolean combines its target with its tools: `unite`,
+    /// `subtract` or `intersect`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<String>,
+    /// A boolean's target solid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// A boolean's tool solids, which it consumes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
 }
 
 impl FeatureFields {

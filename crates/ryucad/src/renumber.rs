@@ -1,9 +1,10 @@
 //! The repair for an ID collision: two different things added under one
 //! ID on the two sides of a merge. Ours keeps the ID; theirs' thing takes
 //! the next free one, and every use of it that came from theirs follows: a
-//! feature's file, its place in the part's list, the sweeps of a sketch and
-//! the references to its faces; a sketch entity's key, the entities and
-//! constraints built on it, and the sweeps that name it.
+//! feature's file, its place in the part's list, the sweeps of a sketch,
+//! the features that act on a solid it founds, and the references to its
+//! faces; a sketch entity's key, the entities and constraints built on it,
+//! and the sweeps that name it.
 //!
 //! Names hash IDs, so renumbering renames what theirs built from it. Which
 //! name became which is found by building theirs as committed and theirs
@@ -181,9 +182,26 @@ fn transform(
         return (new != *node).then_some(new);
     }
     match r {
-        Rename::Feature { from, to, .. } => {
-            (pointer == "/sketch" && node.as_str() == Some(from)).then(|| json!(to))
-        }
+        Rename::Feature { from, to, .. } => match pointer {
+            "/sketch" | "/target" => (node.as_str() == Some(from)).then(|| json!(to)),
+            // The solids an operation or a boolean acts on.
+            "/targets" | "/tools" => {
+                let list: Vec<Value> = node
+                    .as_array()?
+                    .iter()
+                    .map(|x| {
+                        if x.as_str() == Some(from) {
+                            json!(to)
+                        } else {
+                            x.clone()
+                        }
+                    })
+                    .collect();
+                let new = json!(list);
+                (new != *node).then_some(new)
+            }
+            _ => None,
+        },
         Rename::Entity {
             sketch, from, to, ..
         } => {
@@ -298,8 +316,13 @@ fn renumbered(files: &Files, r: &Rename) -> Files {
     out
 }
 
-/// The bodies of `part` built from `files`, by feature.
-fn bodies(root: &Path, files: &Files, part: &str) -> Option<BTreeMap<String, ryukei::topo::Body>> {
+/// Every state of every solid of `part` built from `files`, by solid and
+/// the feature that left it so.
+fn bodies(
+    root: &Path,
+    files: &Files,
+    part: &str,
+) -> Option<BTreeMap<(String, String), ryukei::topo::Body>> {
     let project = Project::load_from(root, files).ok()?;
     let p = project.parts.get(&Id::parse(part, "part").ok()?)?;
     let built = crate::rebuild::rebuild_part(p);
@@ -307,14 +330,21 @@ fn bodies(root: &Path, files: &Files, part: &str) -> Option<BTreeMap<String, ryu
         built
             .features
             .into_iter()
-            .filter_map(|(id, r)| Some((id.to_string(), r.ok()?.body()?.body.clone())))
+            .filter_map(|(id, r)| Some((id, r.ok()?)))
+            .flat_map(|(id, o)| {
+                o.solids()
+                    .iter()
+                    .map(|(s, b)| ((s.to_string(), id.to_string()), b.body.clone()))
+                    .collect::<Vec<_>>()
+            })
             .collect(),
     )
 }
 
-/// Which name of each of theirs' bodies became which under `r`, by the
-/// feature as theirs calls it; `None` when some body's pairing isn't one
-/// to one.
+/// Which name of each of theirs' solids became which under `r`, by the
+/// solid as theirs calls it, across every state of it a reference may
+/// read; `None` when some state's pairing isn't one to one, or a name
+/// would map two ways.
 fn names(
     root: &Path,
     theirs: &Files,
@@ -323,19 +353,26 @@ fn names(
     let part = r.part();
     let before = bodies(root, theirs, part)?;
     let after = bodies(root, &renumbered(theirs, r), part)?;
-    let mut out = BTreeMap::new();
-    for (f, body) in &before {
-        let g = match r {
-            Rename::Feature { from, to, .. } if f == from => to.clone(),
-            _ => f.clone(),
-        };
-        let other = after.get(&g)?;
+    let renamed = |f: &String| match r {
+        Rename::Feature { from, to, .. } if f == from => to.clone(),
+        _ => f.clone(),
+    };
+    let mut out: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for ((solid, f), body) in &before {
+        let other = after.get(&(renamed(solid), renamed(f)))?;
         let map = crate::diff::match_names(body, other)?;
-        let renamed: BTreeMap<String, String> = map.into_iter().filter(|(a, b)| a != b).collect();
-        if !renamed.is_empty() {
-            out.insert(f.clone(), renamed);
+        let names = out.entry(solid.clone()).or_default();
+        for (a, b) in map {
+            if names.get(&a).is_some_and(|was| *was != b) {
+                return None;
+            }
+            names.insert(a, b);
         }
     }
+    for m in out.values_mut() {
+        m.retain(|a, b| a != b);
+    }
+    out.retain(|_, m| !m.is_empty());
     Some(out)
 }
 

@@ -2,6 +2,7 @@
 //! and the status line.
 
 use crate::core::compare::{Change, Mark};
+use crate::core::model::{BodyKey, Part};
 use crate::core::workspace::Workspace;
 use crate::ui::style;
 use crate::ui::view::View;
@@ -16,11 +17,15 @@ pub fn message(e: &serde_json::Value) -> String {
 /// A feature's line in the tree: its ID and type, a sketch's solve state,
 /// and why it failed or how many faces weren't meshed.
 pub fn row_text(f: &crate::core::model::Feature, faults: usize) -> String {
-    let ty = f.ty.as_deref().unwrap_or("?");
+    let ty = match (&f.ty, &f.operation) {
+        (Some(t), Some(op)) => format!("{t}, {op}"),
+        (Some(t), None) => t.clone(),
+        (None, _) => "?".to_owned(),
+    };
     let kind = match &f.sketch {
         Some(s) if s.state == "under" => format!("{ty}, under, {} dof", s.dof),
         Some(s) => format!("{ty}, {}", s.state),
-        None => ty.to_owned(),
+        None => ty,
     };
     let stale = if f.sketch.as_ref().is_some_and(|s| s.stale) {
         ", stale"
@@ -68,11 +73,102 @@ fn mark_colour(m: &Mark) -> style::Rgb {
     }
 }
 
-/// Parts and their features in order, with rebuild status and mesh
-/// faults, and under each feature what it reads. Choosing a feature
-/// paints and frames its body, or its sketch. In a compare, features are
-/// marked by how they differ, and those only the other side has follow,
-/// to be chosen for their changes.
+/// One feature's line in the tree: its status, how a compare marks it,
+/// and under it what it reads. Clicking it chooses it, or unchooses it.
+fn feature_row(
+    ui: &mut egui::Ui,
+    ws: &Workspace,
+    view: &View,
+    part: &Part,
+    f: &crate::core::model::Feature,
+    choose: &mut Option<Option<BodyKey>>,
+) {
+    let key = (part.id.clone(), f.id.clone());
+    let mark = ws.compare.as_ref().and_then(|c| {
+        let m = c.features.get(&key)?;
+        Some((mark_text(m, &c.rev), mark_colour(m)))
+    });
+    let text = match &mark {
+        Some((t, c)) => RichText::new(row_text(f, 0) + t).color(style::color32(*c)),
+        None => RichText::new(row_text(f, 0)),
+    };
+    let chosen = view.chosen.as_ref() == Some(&key);
+    let r = ui.selectable_label(chosen, text);
+    let r = match &f.error {
+        Some(e) => r.on_hover_text(message(e)),
+        None => r,
+    };
+    if r.clicked() {
+        *choose = Some(if chosen { None } else { Some(key) });
+    }
+    if !f.uses.is_empty() {
+        ui.indent(("uses", &part.id, &f.id), |ui| {
+            ui.weak(format!("uses {}", f.uses.join(", ")));
+        });
+    }
+}
+
+/// A solid in the tree: its founder, its state and mesh faults, and its
+/// chain of features in order; a boolean's consumed tools under it.
+fn solid_group(
+    ui: &mut egui::Ui,
+    ws: &Workspace,
+    view: &View,
+    part: &Part,
+    solid: &str,
+    tool: bool,
+    choose: &mut Option<Option<BodyKey>>,
+) {
+    let shown = part.solid(solid);
+    let faults = ws
+        .model
+        .meshes
+        .get(&(part.id.clone(), solid.to_owned()))
+        .and_then(|m| m.mesh.as_ref().ok())
+        .map_or(0, |m| m.faults.len());
+    let mut title = if tool {
+        format!("{solid} (tool, consumed)")
+    } else {
+        format!("{solid} (solid)")
+    };
+    if let Some(code) = shown
+        .and_then(|s| s.error.as_ref())
+        .and_then(|e| e["code"].as_str())
+    {
+        title.push_str(&format!(": failed ({code}), showing its last good state"));
+    } else if faults > 0 {
+        title.push_str(&format!(": {faults} unmeshed"));
+    }
+    let header = egui::CollapsingHeader::new(RichText::new(title).strong())
+        .id_salt(("solid", &part.id, solid))
+        .default_open(!tool)
+        .show(ui, |ui| {
+            let chain = part
+                .features
+                .iter()
+                .filter(|f| f.solids.iter().any(|s| s == solid));
+            for f in chain {
+                feature_row(ui, ws, view, part, f, choose);
+                for t in &f.consumes {
+                    ui.indent(("tools", &part.id, &f.id, t), |ui| {
+                        solid_group(ui, ws, view, part, t, true, choose);
+                    });
+                }
+            }
+        });
+    if faults > 0 {
+        header.header_response.on_hover_text(format!(
+            "{faults} face(s) couldn't be meshed: the kernel left them out"
+        ));
+    }
+}
+
+/// Parts with their solids and sketches in order: each solid with its
+/// state, mesh faults and chain of features, each feature with its
+/// rebuild status and under it what it reads. Choosing a feature paints
+/// what it made and frames its solid, or paints its sketch. In a compare,
+/// features are marked by how they differ, and those only the other side
+/// has follow, to be chosen for their changes.
 pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     // Names are IDs: never broken across lines.
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -113,39 +209,16 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             .default_open(true)
             .show(ui, |ui| {
                 for f in &part.features {
-                    let key = (part.id.clone(), f.id.clone());
-                    let faults = ws
-                        .model
-                        .meshes
-                        .get(&key)
-                        .and_then(|m| m.mesh.as_ref().ok())
-                        .map_or(0, |m| m.faults.len());
-                    let mark = ws.compare.as_ref().and_then(|c| {
-                        let m = c.features.get(&key)?;
-                        Some((mark_text(m, &c.rev), mark_colour(m)))
-                    });
-                    let text = match &mark {
-                        Some((t, c)) => {
-                            RichText::new(row_text(f, faults) + t).color(style::color32(*c))
+                    match f.solids.as_slice() {
+                        // A sketch, or a file that doesn't load.
+                        [] => feature_row(ui, ws, view, part, f, &mut choose),
+                        // A solid shows where its founder is listed; what
+                        // acts on solids shows in them, a consumed solid
+                        // under its boolean.
+                        [s] if *s == f.id && f.operation.is_none() && part.solid(s).is_some() => {
+                            solid_group(ui, ws, view, part, s, false, &mut choose);
                         }
-                        None => RichText::new(row_text(f, faults)),
-                    };
-                    let chosen = view.chosen.as_ref() == Some(&key);
-                    let r = ui.selectable_label(chosen, text);
-                    let r = match &f.error {
-                        Some(e) => r.on_hover_text(message(e)),
-                        None if faults > 0 => r.on_hover_text(format!(
-                            "{faults} face(s) couldn't be meshed: the kernel left them out"
-                        )),
-                        None => r,
-                    };
-                    if r.clicked() {
-                        choose = Some(if chosen { None } else { Some(key) });
-                    }
-                    if !f.uses.is_empty() {
-                        ui.indent(("uses", &part.id, &f.id), |ui| {
-                            ui.weak(format!("uses {}", f.uses.join(", ")));
-                        });
+                        _ => {}
                     }
                 }
                 let removed = ws.compare.as_ref().and_then(|c| c.removed.get(&part.id));
@@ -172,13 +245,17 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
         view.chosen = c;
         view.marked.clear();
         ws.open_form(view.chosen.clone());
+        ws.choose(view.chosen.clone());
+        // A sketch frames itself; anything else its solid.
         if let Some(k) = view.chosen.clone() {
-            view.fit(ws, Some(&k));
+            let body = ws.model.solid_of(&k).unwrap_or(k);
+            view.fit(ws, Some(&body));
         }
     }
     if let Some(c) = gone {
         view.chosen = c;
         ws.open_form(None);
+        ws.choose(None);
     }
 }
 
@@ -479,6 +556,37 @@ pub fn status(ui: &mut egui::Ui, ws: &Workspace) {
     });
 }
 
+/// A row choosing one of a list, by name.
+fn choice_row(ui: &mut egui::Ui, c: &mut crate::core::edit::Choice) {
+    ui.label(&c.name);
+    let r = egui::ComboBox::from_id_salt(("choice", &c.name))
+        .selected_text(&c.chosen)
+        .show_ui(ui, |ui| {
+            for o in &c.options {
+                ui.selectable_value(&mut c.chosen, o.clone(), o);
+            }
+        });
+    let r = r.response;
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &c.name));
+    if c.dirty() {
+        r.on_hover_text(format!("was {}", c.read));
+    }
+    ui.end_row();
+}
+
+/// Some of a list, each a checkbox, in the order picked.
+fn picks(ui: &mut egui::Ui, p: &mut crate::core::edit::Picks) {
+    ui.label(format!("{}: {}", p.name, p.chosen.join(", ")));
+    ui.horizontal_wrapped(|ui| {
+        for o in p.options.clone() {
+            let mut on = p.chosen.contains(&o);
+            if ui.checkbox(&mut on, &o).changed() {
+                p.toggle(&o);
+            }
+        }
+    });
+}
+
 fn field_row(ui: &mut egui::Ui, f: &mut crate::core::edit::Field, label: &str) {
     ui.label(label);
     let edit = egui::TextEdit::singleline(&mut f.text).desired_width(110.0);
@@ -673,20 +781,46 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
             let name = f.name.clone();
             field_row(ui, f, &name);
         }
-    });
-    ui.collapsing("Placement", |ui| {
-        egui::Grid::new("placement").num_columns(2).show(ui, |ui| {
-            for (axis, fields) in [
-                ("origin", &mut form.origin),
-                ("z axis", &mut form.z),
-                ("x axis", &mut form.x),
-            ] {
-                for (k, f) in ["x", "y", "z"].iter().zip(fields.iter_mut()) {
-                    field_row(ui, f, &format!("{axis} {k}"));
-                }
+        if let Some(e) = &mut form.extent {
+            choice_row(ui, &mut e.ty);
+            if matches!(e.ty.chosen.as_str(), "blind" | "symmetric") {
+                field_row(ui, &mut e.length, "length");
             }
-        });
+            if e.ty.chosen == "through_all" {
+                ui.label("");
+                ui.checkbox(&mut e.both.chosen, "both ways");
+                ui.end_row();
+            }
+        }
+        for c in [&mut form.operation, &mut form.op, &mut form.target]
+            .into_iter()
+            .flatten()
+        {
+            choice_row(ui, c);
+        }
     });
+    // What it acts on: none for a new solid.
+    let new = form.operation.as_ref().is_some_and(|o| o.chosen == "new");
+    for p in [&mut form.targets, &mut form.tools].into_iter().flatten() {
+        if !new {
+            picks(ui, p);
+        }
+    }
+    if form.placed() {
+        ui.collapsing("Placement", |ui| {
+            egui::Grid::new("placement").num_columns(2).show(ui, |ui| {
+                for (axis, fields) in [
+                    ("origin", &mut form.origin),
+                    ("z axis", &mut form.z),
+                    ("x axis", &mut form.x),
+                ] {
+                    for (k, f) in ["x", "y", "z"].iter().zip(fields.iter_mut()) {
+                        field_row(ui, f, &format!("{axis} {k}"));
+                    }
+                }
+            });
+        });
+    }
     if let Some(e) = &form.error {
         ui.colored_label(ui.visuals().error_fg_color, &e.message);
     }
@@ -700,16 +834,7 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
             .add_enabled(dirty && !saving, egui::Button::new("Revert"))
             .clicked()
         {
-            for f in form
-                .params
-                .iter_mut()
-                .chain(&mut form.origin)
-                .chain(&mut form.z)
-                .chain(&mut form.x)
-            {
-                f.text.clone_from(&f.read);
-            }
-            form.error = None;
+            form.revert();
         }
         if saving {
             ui.spinner();
@@ -722,8 +847,13 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
     names(ui, ws, &key);
 }
 
-/// The stable names of a feature's faces, edges and vertices, to copy.
+/// The stable names of the faces, edges and vertices of a feature's
+/// solid as the model shows it, to copy.
 fn names(ui: &mut egui::Ui, ws: &Workspace, key: &(String, String)) {
+    let Some(key) = ws.model.solid_of(key) else {
+        return;
+    };
+    let key = &key;
     let Some(mesh) = ws.model.meshes.get(key).and_then(|m| m.mesh.as_ref().ok()) else {
         return;
     };
@@ -915,6 +1045,9 @@ mod tests {
             hash: None,
             sketch: None,
             uses: Vec::new(),
+            operation: None,
+            solids: Vec::new(),
+            consumes: Vec::new(),
             error: None,
         }
     }

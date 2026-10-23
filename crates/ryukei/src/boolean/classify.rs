@@ -243,8 +243,10 @@ fn group_classes(
 
 /// A point inside a piece, a little way off one of its boundary arcs to
 /// the piece's side: off the longest arc of its first loop, at a distance
-/// that shrinks with `attempt`; or the lone vertex of a piece with only
-/// lone vertices. Also returns its parameters.
+/// that shrinks with `attempt` and stays under half the way to the rest
+/// of the boundary, so it can't cross into another region however the
+/// surface's parameters are scaled; or the lone vertex of a piece with
+/// only lone vertices. Also returns its parameters.
 pub(crate) fn inner_point(
     ops: &[Body],
     table: &Table,
@@ -259,11 +261,12 @@ pub(crate) fn inner_point(
     } else {
         -1.0
     };
-    // Arcs of every loop, longest first by their pcurves' chords.
-    let mut arcs: Vec<(f64, GeId, Sense)> = Vec::new();
-    for l in &p.loops {
+    // Arcs of every loop, longest first by their pcurves' chords, with
+    // their places in the loops.
+    let mut arcs: Vec<(f64, GeId, Sense, (usize, usize))> = Vec::new();
+    for (li, l) in p.loops.iter().enumerate() {
         if let Boundary::Arcs(a) = l {
-            for &(g, s) in a {
+            for (ai, &(g, s)) in a.iter().enumerate() {
                 let e = &table.edges[g];
                 let (c, map) = &e.pcurves[&p.face];
                 let [s0, s1] = e.interval.map(|t| map[0] + map[1] * t);
@@ -273,7 +276,7 @@ pub(crate) fn inner_point(
                         at(k).distance(at(k + 1))
                     })
                     .sum();
-                arcs.push((len, g, s));
+                arcs.push((len, g, s, (li, ai)));
             }
         }
     }
@@ -293,7 +296,7 @@ pub(crate) fn inner_point(
         return Some((surface.point(u, v), Point2::new(u, v)));
     }
     arcs.sort_by(|x, y| y.0.total_cmp(&x.0));
-    let (len, g, s) = arcs[attempt % arcs.len()];
+    let (_, g, s, place) = arcs[attempt % arcs.len()];
     let e = &table.edges[g];
     let (c, map) = &e.pcurves[&p.face];
     let [s0, s1] = e.interval.map(|t| map[0] + map[1] * t);
@@ -312,30 +315,92 @@ pub(crate) fn inner_point(
     // The piece is on the left of its loops (on the right on a reversed
     // face).
     let left = Vector2::new(-t.y, t.x) / n * sigma;
-    let delta = len * [1e-2, 1e-3, 1e-4, 3e-3][attempt.min(3)];
-    let q = mid + left * delta;
-    // Nothing of the piece's boundary may come nearer than half that.
-    for l in &p.loops {
-        if let Boundary::Arcs(arcs) = l {
-            for &(h, _) in arcs {
-                let e = &table.edges[h];
-                let (c2, map2) = &e.pcurves[&p.face];
-                let [r0, r1] = e.interval.map(|t| map2[0] + map2[1] * t);
-                let foot = c2.project(q);
-                let tt = foot.param;
-                let (lo, hi) = (r0.min(r1), r0.max(r1));
-                let d = if tt >= lo && tt <= hi {
-                    foot.distance
-                } else {
-                    c2.point(r0).distance(q).min(c2.point(r1).distance(q))
-                };
-                if d < delta * 0.5 {
-                    return None;
-                }
-            }
+    // Distances along the surface, never in its parameters: a step
+    // along the parameters is no step along the surface (a band round a
+    // small cylinder is far shorter across, in metres, than a fraction of
+    // its length round, in radians), and a pcurve may lie a period round
+    // from its neighbour's. The distance from `x` to an arc's edge:
+    let from = |h: GeId, x: Point3| {
+        let e = &table.edges[h];
+        let [a, b] = e.interval;
+        let (lo, hi) = (a.min(b), a.max(b));
+        let foot = e.curve.project(x);
+        let t = match e.curve.period() {
+            Some(p) => lo + (foot.param - lo).rem_euclid(p),
+            None => foot.param,
+        };
+        if t >= lo && t <= hi {
+            foot.distance
+        } else {
+            e.curve
+                .point(lo)
+                .distance(x)
+                .min(e.curve.point(hi).distance(x))
         }
+    };
+    let boundary = || {
+        p.loops.iter().enumerate().flat_map(|(li, l)| match l {
+            Boundary::Arcs(a) => a
+                .iter()
+                .enumerate()
+                .map(move |(ai, &(h, _))| ((li, ai), h))
+                .collect(),
+            Boundary::Lone(_) => Vec::new(),
+        })
+    };
+    // The step reaches less than half the way, along the surface, to the
+    // rest of the boundary, so it never crosses it: to the other arcs, and
+    // to the arc's own stretches away from its middle (the far side of a
+    // loop that is a single closed arc).
+    let at = surface.eval(mid.x, mid.y);
+    // Off the arc at right angles on the surface, not in the parameters,
+    // which may stretch one way far more than the other: the parameter
+    // direction whose image is the surface's normal crossed with the
+    // arc's tangent, by the first fundamental form, on the piece's side.
+    // Where the form degenerates (a pole) the parameters' own right angle
+    // stands in.
+    let tangent = at.du * t.x + at.dv * t.y;
+    let across = at.du.cross(at.dv).cross(tangent);
+    let (e, f, h) = (at.du.dot(at.du), at.du.dot(at.dv), at.dv.dot(at.dv));
+    let det = e * h - f * f;
+    let (bu, bv) = (at.du.dot(across), at.dv.dot(across));
+    let mut off = if det > 1e-12 * e * h {
+        Vector2::new((h * bu - f * bv) / det, (e * bv - f * bu) / det)
+    } else {
+        left
+    };
+    let side = |w: Vector2| t.x * w.y - t.y * w.x;
+    if side(off) * side(left) < 0.0 {
+        off = -off;
     }
-    Some((surface.point(q.x, q.y), q))
+    let speed = (at.du * off.x + at.dv * off.y).length();
+    let own = &table.edges[g];
+    let [i0, i1] = own.interval;
+    let along = |k: i32| own.curve.point(i0 + (i1 - i0) * f64::from(k) / 16.0);
+    let length: f64 = (0..16).map(|k| along(k).distance(along(k + 1))).sum();
+    let ends = (0..=4)
+        .chain(12..=16)
+        .map(|k| along(k).distance(at.point))
+        .fold(f64::INFINITY, f64::min);
+    // The arc's own edge may bound the piece again from its other side (a
+    // torus band cut along one circle): no step off one side reaches it.
+    let room = boundary()
+        .filter(|&(w, h)| w != place && h != g)
+        .map(|(_, h)| from(h, at.point))
+        .fold(ends, f64::min);
+    let step = (length * [1e-2, 1e-3, 1e-4, 3e-3][attempt.min(3)]).min(room * 0.5);
+    let delta = step / speed;
+    if !delta.is_finite() || delta <= 0.0 {
+        return None;
+    }
+    let q = mid + off * delta;
+    let point = surface.point(q.x, q.y);
+    // Nothing of the piece's boundary may come nearer than half the step.
+    let moved = point.distance(at.point);
+    if boundary().any(|(_, h)| from(h, point) < moved * 0.5) {
+        return None;
+    }
+    Some((point, q))
 }
 
 #[cfg(test)]

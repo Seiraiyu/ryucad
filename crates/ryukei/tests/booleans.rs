@@ -1,10 +1,11 @@
 //! Booleans against exact volumes: every result passes the checker and
 //! the self-intersection check, meshes without faults, and encloses the
-//! volume it should.
+//! volume it should. The cases at other scales run in release only
+//! (`cargo test -p ryukei --release --test booleans`).
 
 use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
 use ryukei::check::{check, check_intersections};
-use ryukei::geom::{Rigid, Vector3};
+use ryukei::geom::{Frame, Point3, Rigid, Vector3};
 use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::name::OpKey;
 use ryukei::primitive;
@@ -17,9 +18,15 @@ fn at(x: f64, y: f64, z: f64) -> Rigid {
 
 /// The volume a sound body's mesh encloses.
 fn volume(b: &Body) -> f64 {
+    volume_at(b, 1.0)
+}
+
+/// [`volume`] of a body `scale` times the size, meshed as finely for
+/// its size.
+fn volume_at(b: &Body, scale: f64) -> f64 {
     assert_eq!(check(b), []);
     assert_eq!(check_intersections(b), []);
-    let m = tessellate(b, &MeshParams::new(1e-3, 0.2)).unwrap();
+    let m = tessellate(b, &MeshParams::new(1e-3 * scale, 0.2)).unwrap();
     assert!(m.faults.is_empty(), "{:?}", m.faults);
     check_mesh(b, &m).unwrap();
     m.welded_triangles()
@@ -67,6 +74,110 @@ fn a_hole_through_a_plate() {
     near(volume(&i), PI * 0.25);
     let u = run(BooleanOp::Unite, &plate, &[(&rod, at(2.0, 2.0, -1.0))]);
     near(volume(&u), 16.0 + PI * 0.25 * 2.0);
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "minutes in a debug build: CI runs it in release"
+)]
+fn results_dont_depend_on_scale() {
+    // A millimetre plate drilled once failed: a point found to classify
+    // the hole's wall stepped off it by a fraction of its length round,
+    // in radians, which carried it out of a wall a few millimetres high.
+    for s in [1e-3, 1e-2, 10.0] {
+        let at_s = |x: f64, y: f64, z: f64| at(x * s, y * s, z * s);
+        let vol = |b: &Body| volume_at(b, s) / (s * s * s);
+        let plate = primitive::block(OpKey(1), 4.0 * s, 4.0 * s, 1.0 * s, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        for (z, h) in [(-1.0, 3.0), (0.0, 1.0), (0.0, 3.0), (0.5, 3.0)] {
+            let rod = primitive::cylinder(OpKey(2), 0.5 * s, h * s, &Rigid::IDENTITY)
+                .unwrap()
+                .0;
+            let place = at_s(2.0, 2.0, z);
+            // How far the rod runs inside the plate's thickness.
+            let depth = (z + h).min(1.0) - z.max(0.0);
+            let r = run(BooleanOp::Subtract, &plate, &[(&rod, place)]);
+            near(vol(&r), 16.0 - PI * 0.25 * depth);
+            let i = run(BooleanOp::Intersect, &plate, &[(&rod, place)]);
+            near(vol(&i), PI * 0.25 * depth);
+        }
+        let c = primitive::cylinder(OpKey(1), s, 4.0 * s, &at_s(0.0, 0.0, -2.0))
+            .unwrap()
+            .0;
+        let across = Rigid::rotation(Vector3::new(1.0, 0.0, 0.0).normalize().unwrap(), PI / 2.0);
+        near(
+            vol(&run(BooleanOp::Intersect, &c, &[(&c, across)])),
+            16.0 / 3.0,
+        );
+        let t = primitive::torus(OpKey(1), 3.0 * s, s, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let below = primitive::block(OpKey(2), 10.0 * s, 10.0 * s, 5.0 * s, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let half = run(BooleanOp::Subtract, &t, &[(&below, at_s(-5.0, -5.0, -5.0))]);
+        near(vol(&half), PI * PI * 3.0);
+    }
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "minutes in a debug build: CI runs it in release"
+)]
+fn cross_bores_at_any_scale() {
+    // A 20-unit cube bored through along z (radius 3), then across along
+    // x: smaller through the middle, equal, and off the middle. At a
+    // millimetre the walls between bores were classified from points
+    // stepped off their arcs in the parameter plane, where a radian round
+    // a 3 mm bore is 3 mm and a metre along it a metre: they landed off
+    // the wall, and the result was refused as non-manifold.
+    let along_x = |s: f64, y: f64| {
+        Rigid::from_frame(
+            &Frame::new(
+                Point3::new(-10.0 * s, y * s, 10.0 * s),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            )
+            .unwrap(),
+        )
+    };
+    for s in [1e-3, 1e-2, 1.0] {
+        let cube = primitive::block(OpKey(1), 20.0 * s, 20.0 * s, 20.0 * s, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let bore = |r: f64| {
+            primitive::cylinder(OpKey(2), r * s, 40.0 * s, &Rigid::IDENTITY)
+                .unwrap()
+                .0
+        };
+        let down = at(10.0 * s, 10.0 * s, -10.0 * s);
+        let one = run(BooleanOp::Subtract, &cube, &[(&bore(3.0), down)]);
+        let vol = |b: &Body| volume_at(b, s) / (s * s * s);
+        near(vol(&one), 8000.0 - PI * 9.0 * 20.0);
+        for (r, y) in [(2.0, 10.0), (3.0, 10.0), (2.0, 12.0)] {
+            let two = boolean(
+                OpKey(101),
+                BooleanOp::Subtract,
+                &one,
+                &[Tool {
+                    key: ToolKey(9),
+                    body: &bore(r),
+                    place: along_x(s, y),
+                }],
+            )
+            .unwrap_or_else(|e| panic!("scale {s}, radius {r} at {y}: {e:?}"))
+            .0;
+            // Less than both bores apart, more than the larger alone.
+            let v = vol(&two);
+            assert!(
+                v < vol(&one) - 1.0 && v > vol(&one) - PI * r * r * 20.0,
+                "{s} {r} {y}: {v}"
+            );
+        }
+    }
 }
 
 #[test]

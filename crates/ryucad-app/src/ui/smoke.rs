@@ -30,8 +30,8 @@ pub fn run(dir: &Path) -> Result<Value> {
     let loaded = ws.wait_until(WAIT, |ws| {
         ws.idle()
             && ws.model.parts.values().all(|p| {
-                p.features.iter().all(|f| {
-                    f.hash.is_none() || ws.model.meshes.contains_key(&(p.id.clone(), f.id.clone()))
+                p.solids.iter().all(|s| {
+                    s.hash.is_none() || ws.model.meshes.contains_key(&(p.id.clone(), s.id.clone()))
                 })
             })
     });
