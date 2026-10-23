@@ -11,6 +11,18 @@
 //! ryupdm reads projects through `ryucad-doc` and never calls the kernel,
 //! a session, the daemon or the app: ryucad exposes it through its
 //! protocol and CLI, and a service can link it to read any revision.
+//!
+//! # As a library
+//!
+//! Every function takes a [`ryucad_doc::doc::source::Source`], and where
+//! history matters a `gix::Repository` and the project's place in it, so
+//! it works on a bare repository at any commit ([`history::files`] reads
+//! one): [`content::hash`], [`props::Pdm::read`],
+//! [`history::Releases::read`], [`state::derive`], [`check::run`] (whose
+//! findings have a versioned shape, [`check::SCHEMA`]) and
+//! [`check::staged`], the commit guard. This API follows the workspace's
+//! version, and changes to these functions are called out in the release
+//! notes.
 
 pub mod check;
 pub mod config;

@@ -490,6 +490,104 @@ fn the_commit_guard_keeps_release_records_true() {
     }
 }
 
+/// The record of `p`'s revision A, as listed.
+fn record_a(r: &Repo) -> Value {
+    r.ryucad(&["release", "list", "p"])["records"][0].clone()
+}
+
+#[test]
+fn two_branches_proposing_one_label_conflict() {
+    let r = boxed("");
+    r.ryucad(&["props", "set", "p", "number=100"]);
+    r.commit("numbered");
+    r.git(&["checkout", "-q", "-b", "longer"]);
+    r.ryucad(&["feature", "edit", "p", "b", "--param", "x=15"]);
+    r.ryucad(&["release", "propose", "p"]);
+    r.commit("longer, proposed as A");
+    r.git(&["checkout", "-q", "main"]);
+    r.ryucad(&["feature", "edit", "p", "b", "--param", "x=12"]);
+    r.ryucad(&["release", "propose", "p"]);
+    r.commit("a bit longer, proposed as A");
+    let (code, out) = r.git_status(&["merge", "--no-edit", "longer"]);
+    assert_ne!(code, 0, "{out}");
+    let v = r.ryucad(&["merge", "status"]);
+    let files: Vec<&str> = v["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["files"][0].as_str().unwrap())
+        .collect();
+    assert!(files.contains(&"releases/p/A.json"), "{v}");
+}
+
+#[test]
+fn rewritten_history_moves_official_commits_and_sync_follows() {
+    let r = boxed("");
+    r.ryucad(&["props", "set", "p", "number=100"]);
+    r.ryucad(&["release", "propose", "p"]);
+    r.commit("release p A");
+    r.ryucad(&["release", "sync"]);
+    let before = record_a(&r);
+    assert_eq!(before["tag"]["status"], "ok");
+    r.git(&["commit", "-q", "--amend", "-m", "release p A, reworded"]);
+    let after = record_a(&r);
+    assert_ne!(after["commit"], before["commit"]);
+    assert_eq!(after["tag"]["status"], "moved");
+    assert_eq!(after["tag"]["points_at"], before["commit"]);
+    let v = r.ryucad(&["release", "sync"]);
+    assert_eq!(v["moved"][0]["to"], after["commit"]);
+    assert_eq!(record_a(&r)["tag"]["status"], "ok");
+}
+
+#[test]
+fn a_clone_reads_releases_from_origin_and_says_when_it_is_shallow() {
+    let up = boxed("");
+    up.ryucad(&["props", "set", "p", "number=100"]);
+    up.commit("numbered");
+    let down = up.clone_as("down");
+    // Released upstream: official for the clone once it fetches, though
+    // its own main hasn't the record yet.
+    up.ryucad(&["release", "propose", "p"]);
+    up.commit("release p A");
+    let listed = down.ryucad(&["release", "list"]);
+    assert_eq!(listed["branch"]["name"], "origin/main");
+    assert_eq!(listed["records"], json!([]));
+    down.git(&["pull", "-q", "--no-rebase"]);
+    assert_eq!(record_a(&down)["status"], "official");
+    // Proposed downstream and committed on its main, but not pushed: not
+    // official, since origin/main decides.
+    down.ryucad(&["feature", "edit", "p", "b", "--param", "x=11"]);
+    down.ryucad(&["release", "propose", "p"]);
+    down.commit("release p B");
+    let v = down.ryucad(&["release", "list"]);
+    let b = &v["records"][1];
+    assert_eq!(
+        (&b["label"], &b["status"]),
+        (&json!("B"), &json!("proposed"))
+    );
+    // A shallow clone sees only so far back.
+    let shallow = up.dir.path().join("shallow");
+    let url = format!("file://{}", up.top.to_str().unwrap().replace('\\', "/"));
+    up.git(&[
+        "clone",
+        "-q",
+        "--depth",
+        "1",
+        &url,
+        shallow.to_str().unwrap(),
+    ]);
+    let s = Repo {
+        dir: up.dir.clone(),
+        root: shallow.clone(),
+        top: shallow,
+    };
+    let v = s.ryucad(&["release", "list"]);
+    assert_eq!(
+        (&v["shallow"], &v["records"][0]["shallow"]),
+        (&json!(true), &json!(true))
+    );
+}
+
 #[test]
 fn a_pull_is_checked_as_a_merge() {
     let up = boxed("");
