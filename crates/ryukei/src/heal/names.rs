@@ -8,7 +8,8 @@
 //! - an edge, its curve's kind and data, its interval, and its two
 //!   vertices' points, sorted, so the way it runs doesn't matter;
 //! - a face, its surface's kind and data, its sense, and its edges'
-//!   hashes, sorted.
+//!   hashes, sorted, but for edges it uses twice: a seam is where a
+//!   writer cut the face open, which says nothing about the face.
 //!
 //! The name has no parents beyond that, so a face's name doesn't change
 //! because a neighbour did; a face whose boundary changed, or that moved,
@@ -74,6 +75,18 @@ pub(super) fn names(key: OpKey, s: &Shape) -> Names {
             }
         }
     }
+    // A face's own seams: edges it uses twice.
+    let seams: Vec<Vec<usize>> = face_edges
+        .iter()
+        .map(|list| {
+            let mut x = list.clone();
+            x.sort_unstable();
+            x.windows(2)
+                .filter(|w| w[0] == w[1])
+                .map(|w| w[0])
+                .collect()
+        })
+        .collect();
     for (k, e) in s.edges.iter().enumerate() {
         vertex_edges[e.start].push(k);
         if e.end != e.start {
@@ -87,6 +100,7 @@ pub(super) fn names(key: OpKey, s: &Shape) -> Names {
         .map(|(k, f)| {
             let mut edges: Vec<String> = face_edges[k]
                 .iter()
+                .filter(|e| !seams[k].contains(e))
                 .map(|&e| format!("{:032x}", eh[e]))
                 .collect();
             edges.sort();

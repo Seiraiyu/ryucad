@@ -63,11 +63,15 @@ pub struct Shape {
 }
 
 /// A vertex at `point`, with the tolerance its source gives it (0 where
-/// it gives none).
+/// it gives none). `seam` marks a vertex a writer added only to end a
+/// seam where it crosses a loop inside an edge (see [`seamed`]): once the
+/// seam is gone, healing removes it and joins the edge's two pieces. A
+/// file's own vertices are never removed that way.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Vertex {
     pub point: Point3,
     pub tolerance: f64,
+    pub seam: bool,
 }
 
 /// An edge along curve `curve` over `interval` (increasing), from vertex

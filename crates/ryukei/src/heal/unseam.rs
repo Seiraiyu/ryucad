@@ -11,11 +11,14 @@
 //! same way. A sphere or torus left with no loops is
 //! the whole surface.
 //!
-//! Writers often put a vertex on each loop where the seam meets it,
-//! splitting a circle there. A vertex a seam ran to that is left between
-//! two edges on one curve, running on from each other, goes, and the two
-//! edges are joined: into a closed edge of one period where they meet
-//! again at their other ends.
+//! A writer may put a vertex on a loop where the seam meets it, splitting
+//! an edge there, and mark it as the seam's ([`super::Vertex::seam`]).
+//! Such a vertex, left between two edges on one curve running on from
+//! each other, goes and the two edges are joined: into a closed edge of
+//! one period where they meet again at their other ends. The joined
+//! edge is named from the names of every edge of the file it joins,
+//! sorted, so an edge several seams split is named alike whichever join
+//! comes first. A file's own vertices stay, wherever they are.
 
 use super::names::Names;
 use super::{Edge, Loop, Shape, Use};
@@ -65,18 +68,23 @@ pub(super) fn unseam(key: OpKey, s: &mut Shape, names: &mut Names) -> Result<Uns
             out.journal.push(Event::Deleted(names.edges[e]));
             remove(s, k, e, &mut empty);
         }
-        // Vertex loops the file put on the face.
+        // Vertex loops the file put at a pole of the face's surface.
         let mut l = 0;
         while l < s.faces[k].loops.len() {
-            if let Loop::Vertex(v) = s.faces[k].loops[l] {
-                s.faces[k].loops.remove(l);
-                empty.push((k, v));
-            } else {
-                l += 1;
+            match s.faces[k].loops[l] {
+                Loop::Vertex(v)
+                    if kind(&s.surfaces[s.faces[k].surface], s.vertices[v].point)
+                        == Point::Pole =>
+                {
+                    s.faces[k].loops.remove(l);
+                    empty.push((k, v));
+                }
+                _ => l += 1,
             }
         }
     }
-    // Every point left alone: an apex keeps its vertex, a pole loses it.
+    // Every point a seam left alone: an apex keeps its vertex, a pole or
+    // anywhere else loses it.
     let used = used_vertices(s);
     let mut kept: BTreeSet<usize> = BTreeSet::new();
     for (k, v) in empty {
@@ -84,7 +92,8 @@ pub(super) fn unseam(key: OpKey, s: &mut Shape, names: &mut Names) -> Result<Uns
             continue;
         }
         let surface = &s.surfaces[s.faces[k].surface];
-        if apex(surface, s.vertices[v].point) {
+        // A vertex a writer added to end a seam marks nothing.
+        if !s.vertices[v].seam && kind(surface, s.vertices[v].point) == Point::Apex {
             kept.insert(v);
             s.faces[k].loops.push(Loop::Vertex(v));
         } else if !out.poles.contains(&names.vertices[v]) {
@@ -92,8 +101,17 @@ pub(super) fn unseam(key: OpKey, s: &mut Shape, names: &mut Names) -> Result<Uns
             out.journal.push(Event::Deleted(names.vertices[v]));
         }
     }
-    for v in seam_ends {
-        join(key, s, names, v, &mut out);
+    // Vertices in the order of their names; each edge carries the names
+    // of the file's edges it joins, so an edge split by several seams is
+    // named the same whichever is joined first.
+    let mut parts: Vec<Vec<Name>> = names.edges.iter().map(|&n| vec![n]).collect();
+    let mut ends: Vec<usize> = seam_ends
+        .into_iter()
+        .filter(|&v| s.vertices[v].seam)
+        .collect();
+    ends.sort_by_key(|&v| names.vertices[v]);
+    for v in ends {
+        join(key, s, names, &mut parts, v, &mut out);
     }
     out.seams.sort();
     out.poles.sort();
@@ -101,12 +119,21 @@ pub(super) fn unseam(key: OpKey, s: &mut Shape, names: &mut Names) -> Result<Uns
     Ok(out)
 }
 
-/// Whether `p` is an apex of `surface`: a point where a row of its
-/// parameters collapses (see [`crate::mesh::uv::collapsed_rows`]) and
-/// its normal turns as the free parameter does (a cone's tip), not a
-/// pole the normal passes smoothly (a sphere's). A point on no collapsed
-/// row is no apex: a lone vertex there would mark nothing.
-fn apex(surface: &crate::geom::Surface, p: crate::geom::Point3) -> bool {
+/// What a point of a surface is to a lone vertex.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Point {
+    /// Where a row of the parameters collapses (see
+    /// [`crate::mesh::uv::collapsed_rows`]) and the normal turns as the
+    /// free parameter does: a cone's tip.
+    Apex,
+    /// Where a row collapses and the normal passes smoothly: a sphere's
+    /// pole.
+    Pole,
+    /// Anywhere else.
+    Regular,
+}
+
+fn kind(surface: &crate::geom::Surface, p: crate::geom::Point3) -> Point {
     let domain = surface.domain();
     let collapsed = crate::mesh::uv::collapsed_rows(surface);
     for d in 0..2 {
@@ -130,15 +157,16 @@ fn apex(surface: &crate::geom::Surface, p: crate::geom::Point3) -> bool {
                     surface.normal(q.0, q.1)
                 })
                 .collect();
-            let Some(n0) = normals[0] else {
-                return true;
+            let turns = match normals[0] {
+                None => true,
+                Some(n0) => normals
+                    .iter()
+                    .any(|n| n.is_none_or(|n| n.dot(n0) < 1.0 - 1e-12)),
             };
-            return normals
-                .iter()
-                .any(|n| n.is_none_or(|n| n.dot(n0) < 1.0 - 1e-12));
+            return if turns { Point::Apex } else { Point::Pole };
         }
     }
-    false
+    Point::Regular
 }
 
 /// The first edge face `k` uses twice, if any.
@@ -273,7 +301,14 @@ fn same_curve(s: &Shape, a: usize, b: usize) -> bool {
 /// Joins the two edges at vertex `v` into one, if they are all there is
 /// at it, on one curve and run on from each other, and every face runs
 /// them one after the other.
-fn join(key: OpKey, s: &mut Shape, names: &mut Names, v: usize, out: &mut Unseamed) {
+fn join(
+    key: OpKey,
+    s: &mut Shape,
+    names: &mut Names,
+    parts: &mut Vec<Vec<Name>>,
+    v: usize,
+    out: &mut Unseamed,
+) {
     let mut at: BTreeSet<usize> = BTreeSet::new();
     for f in &s.faces {
         for l in &f.loops {
@@ -327,8 +362,22 @@ fn join(key: OpKey, s: &mut Shape, names: &mut Names, v: usize, out: &mut Unseam
     let closed = e1.start == e2.end;
     let interval = match (closed, period) {
         (true, Some(p)) => [start, start + p],
-        (true, None) => return,
-        (false, _) => [start, start + length],
+        // A clamped curve whose ends meet: the closed edge is its whole
+        // domain.
+        (true, None) => {
+            let domain = curve.domain();
+            let near = |a: f64, b: f64| (a - b).abs() <= 1e-9 * scale;
+            if !(near(start, domain[0]) && near(e2.interval[1], domain[1])) {
+                return;
+            }
+            domain
+        }
+        // The second piece's own end, moved by whole periods to run on
+        // from the first: its bits, not a sum's.
+        (false, _) => {
+            let shift = period.map_or(0.0, |p| ((e1.interval[1] - e2.interval[0]) / p).round() * p);
+            [start, e2.interval[1] + shift]
+        }
     };
     if let Some(p) = period
         && !closed
@@ -363,10 +412,17 @@ fn join(key: OpKey, s: &mut Shape, names: &mut Names, v: usize, out: &mut Unseam
                     continue;
                 }
                 if m == i {
+                    // A seam's pieces share their edge's pcurve, written
+                    // once or once a piece: the joined edge keeps it.
+                    let (x, y) = (uses[i].pcurve, uses[(i + 1) % n].pcurve);
+                    let pcurve = match (x, y) {
+                        (Some(p), Some(q)) if p == q || s.curves2[p] == s.curves2[q] => Some(p),
+                        _ => None,
+                    };
                     list.push(Use {
                         edge: new,
                         sense: uses[i].sense,
-                        pcurve: None,
+                        pcurve,
                     });
                 } else {
                     list.push(uses[m]);
@@ -385,10 +441,13 @@ fn join(key: OpKey, s: &mut Shape, names: &mut Names, v: usize, out: &mut Unseam
     for (k, l, list) in replaced {
         s.faces[k].loops[l] = Loop::Edges(list);
     }
+    let mut all: Vec<Name> = parts[first].iter().chain(&parts[second]).copied().collect();
+    all.sort();
+    let child = Name::derive(key, Role::Merged, &all);
     let mut parents = [names.edges[first], names.edges[second]];
     parents.sort();
-    let child = Name::derive(key, Role::Merged, &parents);
     names.edges.push(child);
+    parts.push(all);
     out.joined.push(names.vertices[v]);
     out.journal.push(Event::Deleted(names.vertices[v]));
     out.journal

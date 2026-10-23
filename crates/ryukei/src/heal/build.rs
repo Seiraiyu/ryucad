@@ -81,14 +81,15 @@ pub(super) fn build(
         }
     }
     report.approximated.sort_by_key(|x| x.0);
-    let layout = lay_out(s, pcurves);
+    let order = Order::new(names);
+    let layout = lay_out(s, names, &order, pcurves);
     let fail = |e: BuildError| -> Error {
         match e {
             BuildError::NonManifold { at, faces } => {
                 // The layout's vertex there, else the first face.
                 let v = s.vertices.iter().position(|v| v.point == at);
                 HealError::NonManifold {
-                    at: v.map_or(names.faces[faces[0]], |v| names.vertices[v]),
+                    at: v.map_or(names.faces[order.faces[faces[0]]], |v| names.vertices[v]),
                 }
                 .into()
             }
@@ -98,14 +99,29 @@ pub(super) fn build(
     let plan = Plan::new(&layout).map_err(fail)?;
     // The shells as the shape lists them, outer shells first: each must
     // be one connected piece.
+    // Solids in the order of their outer shells' least face, each with
+    // its voids in the same order.
     let found: BTreeSet<Vec<usize>> = plan.shells().into_iter().collect();
+    let laid = |sh: usize| -> Vec<usize> {
+        let mut faces: Vec<usize> = s.shells[sh].faces.iter().map(|&f| order.fpos[f]).collect();
+        faces.sort_unstable();
+        faces
+    };
+    let mut solids: Vec<(Vec<usize>, Vec<Vec<usize>>)> = s
+        .solids
+        .iter()
+        .map(|so| {
+            let mut voids: Vec<Vec<usize>> = so.voids.iter().map(|&v| laid(v)).collect();
+            voids.sort();
+            (laid(so.outer), voids)
+        })
+        .collect();
+    solids.sort();
     let mut shells: Vec<Vec<usize>> = Vec::new();
     let mut outer_of: Vec<Option<usize>> = Vec::new();
-    for so in &s.solids {
+    for (outer, voids) in solids {
         let o = shells.len();
-        for (i, &sh) in core::iter::once(&so.outer).chain(&so.voids).enumerate() {
-            let mut faces = s.shells[sh].faces.clone();
-            faces.sort_unstable();
+        for (i, faces) in core::iter::once(outer).chain(voids).enumerate() {
             if !found.contains(&faces) {
                 return Err(super::malformed("a shell's faces are not connected"));
             }
@@ -118,13 +134,13 @@ pub(super) fn build(
     renumber_geometry(&mut body);
     body.set_recipes(true);
     for (k, &f) in built.faces.iter().enumerate() {
-        body.rename(EntityId::Face(f), names.faces[k]);
+        body.rename(EntityId::Face(f), names.faces[order.faces[k]]);
     }
     for (&g, &e) in &built.edges {
-        body.rename(EntityId::Edge(e), names.edges[g]);
+        body.rename(EntityId::Edge(e), names.edges[order.edges[g]]);
     }
     for (&g, &v) in &built.vertices {
-        body.rename(EntityId::Vertex(v), names.vertices[g]);
+        body.rename(EntityId::Vertex(v), names.vertices[order.vertices[g]]);
     }
     let faults = check::check(&body);
     if let Some(f) = faults.first() {
@@ -208,10 +224,49 @@ fn renumber_geometry(b: &mut Body) {
     b.curves2 = curves2;
 }
 
-/// The shape as a layout: its geometry as it is, the pcurves found, and
-/// tolerances at least the resolution, an edge's and its vertices'
-/// covering the faces they bound.
-fn lay_out(s: &Shape, pcurves: &Pcurves) -> Layout {
+/// Where each of the shape's vertices, edges and faces goes in the
+/// layout: in the order of their names, so the body built doesn't depend
+/// on the order of the shape's arrays.
+struct Order {
+    vertices: Vec<usize>,
+    edges: Vec<usize>,
+    faces: Vec<usize>,
+    vpos: Vec<usize>,
+    epos: Vec<usize>,
+    fpos: Vec<usize>,
+}
+
+impl Order {
+    fn new(names: &Names) -> Self {
+        let sorted = |list: &[Name]| {
+            let mut o: Vec<usize> = (0..list.len()).collect();
+            o.sort_by_key(|&i| list[i]);
+            let mut pos = vec![0; list.len()];
+            for (k, &i) in o.iter().enumerate() {
+                pos[i] = k;
+            }
+            (o, pos)
+        };
+        let (vertices, vpos) = sorted(&names.vertices);
+        let (edges, epos) = sorted(&names.edges);
+        let (faces, fpos) = sorted(&names.faces);
+        Self {
+            vertices,
+            edges,
+            faces,
+            vpos,
+            epos,
+            fpos,
+        }
+    }
+}
+
+/// The shape as a layout, in the order of `order`: its geometry as it is,
+/// the pcurves found, tolerances at least the resolution (an edge's and
+/// its vertices' covering the faces they bound and their pcurves'
+/// bounds), each face's loops in the order of the least name on them,
+/// each loop starting at its least-named edge.
+fn lay_out(s: &Shape, names: &Names, order: &Order, pcurves: &Pcurves) -> Layout {
     let mut out = Layout {
         surfaces: s.surfaces.clone(),
         curves: s.curves.clone(),
@@ -219,60 +274,67 @@ fn lay_out(s: &Shape, pcurves: &Pcurves) -> Layout {
     };
     let mut edge_tol: Vec<f64> = s.edges.iter().map(|e| e.tolerance).collect();
     let mut vertex_tol: Vec<f64> = s.vertices.iter().map(|v| v.tolerance).collect();
-    for (k, f) in s.faces.iter().enumerate() {
-        let mut loops = Vec::new();
+    for &k in &order.faces {
+        let f = &s.faces[k];
+        let mut loops: Vec<(Name, layout::Boundary)> = Vec::new();
         for (l, lp) in f.loops.iter().enumerate() {
             match lp {
                 Loop::Vertex(v) => {
                     vertex_tol[*v] = vertex_tol[*v].max(f.tolerance);
-                    loops.push(layout::Boundary::Lone(*v));
+                    loops.push((names.vertices[*v], layout::Boundary::Lone(order.vpos[*v])));
                 }
                 Loop::Edges(list) => {
+                    let first = (0..list.len())
+                        .min_by_key(|&i| names.edges[list[i].edge])
+                        .expect("a loop has edges");
                     let mut arcs = Vec::new();
-                    for (i, u) in list.iter().enumerate() {
+                    for m in 0..list.len() {
+                        let i = (first + m) % list.len();
+                        let u = list[i];
                         let e = &s.edges[u.edge];
-                        edge_tol[u.edge] = edge_tol[u.edge].max(f.tolerance);
+                        let (c2, map, bound) = &pcurves[k][l][i];
+                        edge_tol[u.edge] = edge_tol[u.edge].max(f.tolerance).max(*bound);
                         for v in [e.start, e.end] {
                             vertex_tol[v] = vertex_tol[v].max(f.tolerance);
                         }
-                        let (c2, map, bound) = &pcurves[k][l][i];
-                        edge_tol[u.edge] = edge_tol[u.edge].max(*bound);
                         out.curves2.push(c2.clone());
                         arcs.push(layout::Use {
-                            edge: u.edge,
+                            edge: order.epos[u.edge],
                             sense: u.sense,
                             pcurve: Some((out.curves2.len() - 1, *map)),
                         });
                     }
-                    loops.push(layout::Boundary::Arcs(arcs));
+                    loops.push((names.edges[list[first].edge], layout::Boundary::Arcs(arcs)));
                 }
             }
         }
+        loops.sort_by_key(|x| x.0);
         out.faces.push(layout::Face {
             surface: f.surface,
             sense: f.sense,
-            loops,
+            loops: loops.into_iter().map(|x| x.1).collect(),
         });
     }
-    out.vertices = s
+    out.vertices = order
         .vertices
         .iter()
-        .zip(&vertex_tol)
-        .map(|(v, &t)| layout::Vertex {
-            point: v.point,
-            tolerance: t.max(LINEAR_RESOLUTION),
+        .map(|&v| layout::Vertex {
+            point: s.vertices[v].point,
+            tolerance: vertex_tol[v].max(LINEAR_RESOLUTION),
         })
         .collect();
-    out.edges = s
+    out.edges = order
         .edges
         .iter()
-        .zip(&edge_tol)
-        .map(|(e, &t)| layout::Edge {
-            start: e.start,
-            end: e.end,
-            curve: e.curve,
-            interval: e.interval,
-            tolerance: t.max(LINEAR_RESOLUTION),
+        .map(|&g| {
+            let e = &s.edges[g];
+            layout::Edge {
+                start: order.vpos[e.start],
+                end: order.vpos[e.end],
+                curve: e.curve,
+                interval: e.interval,
+                tolerance: edge_tol[g].max(LINEAR_RESOLUTION),
+            }
         })
         .collect();
     out

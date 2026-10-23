@@ -30,6 +30,7 @@ fn shape_of(b: &Body, pcurves: bool) -> Shape {
         s.vertices.push(Vertex {
             point: b.vertices[v].point,
             tolerance: 0.0,
+            seam: false,
         });
     }
     for e in b.edges() {
