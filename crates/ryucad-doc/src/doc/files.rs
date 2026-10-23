@@ -5,7 +5,7 @@
 use super::id::{Id, ProjectId};
 use super::reference::Reference;
 use super::sketch::Sketch;
-use super::solid::Combine;
+use super::solid::{Boolean, Combine};
 use super::sweep::{Extrude, Revolve};
 use crate::error::{Code, Error, Result};
 use crate::expr::{self, Env, Expr};
@@ -68,6 +68,7 @@ pub enum Feature {
     Sketch(Sketch),
     Extrude(Extrude),
     Revolve(Revolve),
+    Boolean(Boolean),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -345,7 +346,10 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// primitive needs 2 only for an expression.
 pub fn feature_format(v: &Value) -> u64 {
     let new = |o: &Value| o.as_str().is_none_or(|o| o == "new");
-    if v.get("targets").is_some() || v.get("operation").is_some_and(|o| !new(o)) {
+    if v.get("targets").is_some()
+        || v.get("operation").is_some_and(|o| !new(o))
+        || v.get("type").and_then(Value::as_str) == Some("boolean")
+    {
         return 3;
     }
     if matches!(
@@ -391,7 +395,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean"),
     )
     .with("type", s)
 }
@@ -404,6 +408,7 @@ impl Feature {
             Feature::Sketch(_) => "sketch",
             Feature::Extrude(_) => "extrude",
             Feature::Revolve(_) => "revolve",
+            Feature::Boolean(_) => "boolean",
         }
     }
 
@@ -417,6 +422,7 @@ impl Feature {
             Feature::Sketch(s) => s.format(),
             // New in format 2.
             Feature::Extrude(_) | Feature::Revolve(_) => 2,
+            Feature::Boolean(_) => 3,
         }
     }
 
@@ -426,6 +432,7 @@ impl Feature {
             Feature::Sketch(s) => s.fields(),
             Feature::Extrude(e) => e.fields(),
             Feature::Revolve(r) => r.fields(),
+            Feature::Boolean(b) => b.fields(),
         };
         v["format"] = json!(self.format());
         v["kind"] = json!(FEATURE_KIND);
@@ -445,6 +452,7 @@ impl Feature {
             "sketch" => Feature::Sketch(Sketch::from_fields(&mut o, default, env)?),
             "extrude" => Feature::Extrude(Extrude::from_fields(&mut o, default, env)?),
             "revolve" => Feature::Revolve(Revolve::from_fields(&mut o, env)?),
+            "boolean" => Feature::Boolean(Boolean::from_fields(&mut o)?),
             _ => {
                 let ty = PrimitiveType::parse(ty).map_err(|e| e.with("pointer", "/type"))?;
                 Feature::Primitive(Primitive::from_fields(ty, &mut o, default, env)?)
@@ -469,14 +477,27 @@ impl Feature {
             Feature::Primitive(p) => Some(&p.combine),
             Feature::Extrude(e) => Some(&e.combine),
             Feature::Revolve(r) => Some(&r.combine),
-            Feature::Sketch(_) => None,
+            Feature::Sketch(_) | Feature::Boolean(_) => None,
         }
     }
 
     /// The solids it acts on, by their founders, in the order it names
-    /// them.
-    pub fn targets(&self) -> &[Id] {
-        self.combine().map_or(&[], |c| &c.targets)
+    /// them: an operation's targets, or a boolean's target then tools.
+    pub fn targets(&self) -> Vec<&Id> {
+        match self {
+            Feature::Boolean(b) => b.solids().collect(),
+            f => f
+                .combine()
+                .map_or(Vec::new(), |c| c.targets.iter().collect()),
+        }
+    }
+
+    /// The boolean, if it is one.
+    pub fn boolean(&self) -> Option<&Boolean> {
+        match self {
+            Feature::Boolean(b) => Some(b),
+            _ => None,
+        }
     }
 
     /// The sketch, if it is one.
@@ -984,7 +1005,7 @@ mod tests {
         v["operation"] = json!("cut");
         v["targets"] = json!(["b"]);
         let f = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
-        assert_eq!(f.targets(), [Id::parse("b", "feature").unwrap()]);
+        assert_eq!(f.targets(), [&Id::parse("b", "feature").unwrap()]);
         assert_eq!(f.format(), 3);
         assert_eq!(f.to_json()["format"], 3);
         assert_eq!(feature_format(&f.to_json()), 3);

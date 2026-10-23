@@ -1,6 +1,7 @@
 //! What a body-making feature does with the body it builds: found a solid
 //! of its own (`new`), or join it to, cut it from or intersect it with
 //! the solids it names. A solid is named by the feature that founded it.
+//! A `boolean` feature combines whole solids, consuming its tools.
 
 use super::files::{Obj, invalid};
 use super::id::Id;
@@ -99,6 +100,72 @@ impl Combine {
     }
 }
 
+/// How a `boolean` feature combines its target with its tools.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BooleanOp {
+    Unite,
+    Subtract,
+    Intersect,
+}
+
+impl BooleanOp {
+    pub const ALL: [BooleanOp; 3] = [BooleanOp::Unite, BooleanOp::Subtract, BooleanOp::Intersect];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BooleanOp::Unite => "unite",
+            BooleanOp::Subtract => "subtract",
+            BooleanOp::Intersect => "intersect",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<BooleanOp> {
+        BooleanOp::ALL.into_iter().find(|o| o.as_str() == s)
+    }
+}
+
+/// A `boolean` feature: its target solid united with, less, or
+/// intersected with its tool solids, which it consumes: nothing acts on
+/// them after it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Boolean {
+    pub op: BooleanOp,
+    pub target: Id,
+    pub tools: Vec<Id>,
+}
+
+impl Boolean {
+    pub fn fields(&self) -> Value {
+        json!({"op": self.op.as_str(), "target": self.target, "tools": self.tools})
+    }
+
+    pub(crate) fn from_fields(o: &mut Obj) -> Result<Boolean> {
+        let op = o.take("op")?;
+        let op = op
+            .as_str()
+            .and_then(BooleanOp::parse)
+            .ok_or_else(|| invalid("/op", "op is one of unite, subtract, intersect"))?;
+        let target = o.take("target")?;
+        let target = target
+            .as_str()
+            .ok_or_else(|| invalid("/target", "target is a solid's feature ID"))?;
+        let target = Id::parse(target, "feature").map_err(|e| e.with("pointer", "/target"))?;
+        let tools = targets_from_json(&o.take("tools")?, "/tools")?;
+        if let Some(i) = tools.iter().position(|t| *t == target) {
+            return Err(invalid(
+                &format!("/tools/{i}"),
+                &format!("{target} is the target; it can't be a tool too"),
+            ));
+        }
+        Ok(Boolean { op, target, tools })
+    }
+
+    /// The solids it names: the target, then the tools.
+    pub fn solids(&self) -> impl Iterator<Item = &Id> {
+        core::iter::once(&self.target).chain(&self.tools)
+    }
+}
+
 /// Reads an array of solids by their founders' IDs: at least one, each
 /// once. `at` is its JSON pointer.
 pub(crate) fn targets_from_json(v: &Value, at: &str) -> Result<Vec<Id>> {
@@ -150,6 +217,37 @@ mod tests {
         let mut v = json!({});
         Combine::NEW.write(&mut v);
         assert_eq!(v, json!({}));
+    }
+
+    #[test]
+    fn booleans_round_trip() {
+        let v = json!({"op": "subtract", "target": "a", "tools": ["c", "b"]});
+        let mut o = Obj::new(&v, "").unwrap();
+        let b = Boolean::from_fields(&mut o).unwrap();
+        o.finish().unwrap();
+        assert_eq!(b.op, BooleanOp::Subtract);
+        assert_eq!(
+            b.solids().map(Id::as_str).collect::<Vec<_>>(),
+            ["a", "c", "b"]
+        );
+        assert_eq!(b.fields(), v);
+        for (v, pointer) in [
+            (json!({"op": "glue", "target": "a", "tools": ["b"]}), "/op"),
+            (
+                json!({"op": "unite", "target": 1, "tools": ["b"]}),
+                "/target",
+            ),
+            (json!({"op": "unite", "target": "a", "tools": []}), "/tools"),
+            (
+                json!({"op": "unite", "target": "a", "tools": ["b", "a"]}),
+                "/tools/1",
+            ),
+            (json!({"op": "unite", "tools": ["b"]}), "/target"),
+        ] {
+            let mut o = Obj::new(&v, "").unwrap();
+            let e = Boolean::from_fields(&mut o).unwrap_err();
+            assert_eq!(e.details["pointer"], pointer, "{v}");
+        }
     }
 
     #[test]

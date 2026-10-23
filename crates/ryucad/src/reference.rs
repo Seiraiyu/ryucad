@@ -48,6 +48,17 @@ pub fn resolve<'a>(
         _ => {}
     }
     let solids = crate::solid::Solids::of_order(part, order);
+    if let Some(by) = solids.consumed_by(&r.feature, owner) {
+        return Err(fail(
+            Code::BodyConsumed,
+            format!(
+                "names {}, which the boolean {by} consumed: refer to its target instead",
+                r.feature
+            ),
+        )
+        .with("solid", &r.feature)
+        .with("consumed_by", by));
+    }
     // The feature whose result holds the solid as `owner` sees it.
     let read = solids.view(&r.feature, owner).unwrap_or(&r.feature);
     match results.result(read) {

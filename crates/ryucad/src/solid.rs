@@ -3,7 +3,9 @@
 //! target changes it, in list order: the solid's chain. A feature's view
 //! of a solid is the last of its chain listed before the feature: what it
 //! reads the solid's faces, edges and vertices from. The solid's tip, the
-//! last of its chain, is what the part's model shows.
+//! last of its chain, is what the part's model shows. A `boolean` feature
+//! joins its target's chain and consumes its tools: their chains end, and
+//! they are no longer part of the model.
 
 use crate::doc::id::Id;
 use crate::doc::project::Part;
@@ -16,6 +18,8 @@ pub struct Solids {
     chains: BTreeMap<Id, Vec<Id>>,
     /// Each listed feature's place in the list.
     at: BTreeMap<Id, usize>,
+    /// Each consumed solid, by founder, with the boolean that consumed it.
+    consumed: BTreeMap<Id, Id>,
 }
 
 impl Solids {
@@ -34,22 +38,49 @@ impl Solids {
             .map(|(i, id)| (id.clone(), i))
             .collect();
         let mut chains: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
+        let mut consumed: BTreeMap<Id, Id> = BTreeMap::new();
         for id in order {
             let Some(Ok(f)) = part.features.get(id) else {
                 continue;
             };
-            let Some(c) = f.combine() else { continue };
-            if c.is_new() {
+            if f.combine().is_some_and(|c| c.is_new()) {
                 chains.insert(id.clone(), vec![id.clone()]);
                 continue;
             }
-            for t in &c.targets {
-                if let Some(chain) = chains.get_mut(t) {
+            // A solid joins the chain of what acts on it, until consumed.
+            let (acts_on, consumes) = match f.boolean() {
+                Some(b) => (vec![&b.target], b.tools.iter().collect()),
+                None => (f.targets(), Vec::new()),
+            };
+            for t in acts_on {
+                if !consumed.contains_key(t)
+                    && let Some(chain) = chains.get_mut(t)
+                {
                     chain.push(id.clone());
                 }
             }
+            for t in consumes {
+                if chains.contains_key(t) && !consumed.contains_key(t) {
+                    consumed.insert(t.clone(), id.clone());
+                }
+            }
         }
-        Solids { chains, at }
+        Solids {
+            chains,
+            at,
+            consumed,
+        }
+    }
+
+    /// The boolean that consumed `solid` before `reader`, if one did.
+    pub fn consumed_by(&self, solid: &Id, reader: &Id) -> Option<&Id> {
+        let by = self.consumed.get(solid)?;
+        (self.at.get(by)? < self.at.get(reader)?).then_some(by)
+    }
+
+    /// The boolean that consumed `solid`, if one did.
+    pub fn consumer(&self, solid: &Id) -> Option<&Id> {
+        self.consumed.get(solid)
     }
 
     /// Whether `id` founds a solid.
@@ -85,11 +116,12 @@ impl Solids {
             .last()
     }
 
-    /// Every solid with its tip, the last feature of its chain, by
-    /// founder.
+    /// Every solid of the model, not consumed, with its tip, the last
+    /// feature of its chain, by founder.
     pub fn tips(&self) -> impl Iterator<Item = (&Id, &Id)> {
         self.chains
             .iter()
+            .filter(|(s, _)| !self.consumed.contains_key(*s))
             .map(|(s, c)| (s, c.last().expect("a chain starts at its founder")))
     }
 
@@ -143,6 +175,43 @@ pub(crate) mod tests {
             uses: BTreeMap::<Id, BTreeSet<String>>::new(),
             revision: String::new(),
         }
+    }
+
+    /// A boolean of `op` on `target` with `tools`.
+    pub(crate) fn boolean(
+        op: crate::doc::solid::BooleanOp,
+        target: &str,
+        tools: &[&str],
+    ) -> Feature {
+        Feature::Boolean(crate::doc::solid::Boolean {
+            op,
+            target: id(target),
+            tools: tools.iter().map(|t| id(t)).collect(),
+        })
+    }
+
+    #[test]
+    fn a_boolean_consumes_its_tools() {
+        use crate::doc::solid::BooleanOp::Subtract;
+        use Operation::*;
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("t", boxed("0.5", New, &[])),
+            ("u", boxed("0.2", New, &[])),
+            ("cut", boolean(Subtract, "a", &["t", "u"])),
+            ("after", boxed("0", Join, &["t"])),
+            ("more", boxed("2", Join, &["a"])),
+        ]);
+        let s = Solids::of(&p);
+        assert_eq!(s.chain(&id("a")).unwrap(), [id("a"), id("cut"), id("more")]);
+        // A consumed solid's chain ends; nothing joins it after.
+        assert_eq!(s.chain(&id("t")).unwrap(), [id("t")]);
+        assert_eq!(s.consumed_by(&id("t"), &id("after")), Some(&id("cut")));
+        assert_eq!(s.consumed_by(&id("t"), &id("cut")), None);
+        assert_eq!(s.consumer(&id("u")), Some(&id("cut")));
+        assert_eq!(s.view(&id("t"), &id("cut")), Some(&id("t")));
+        // Only what remains is the model.
+        assert_eq!(s.tips().collect::<Vec<_>>(), [(&id("a"), &id("more"))]);
     }
 
     #[test]

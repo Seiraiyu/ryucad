@@ -773,6 +773,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
             }
             v
         }
+        Feature::Boolean(b) => b.fields(),
         Feature::Revolve(r) => {
             let mut v = r.fields();
             if let Angle::Of(q) = &r.angle {
@@ -1361,6 +1362,11 @@ fn feature_edit(
             given.only("sketch", &SKETCH)?;
             s.plane = sketch_plane(Some(&s.plane), &given, &pid, unit, &p.env)?;
             Feature::Sketch(s)
+        }
+        // Its fields are edited in a later task.
+        f @ Feature::Boolean(_) => {
+            given.only("boolean", &[])?;
+            f
         }
         f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
             let ty = f.type_name();

@@ -197,6 +197,18 @@ pub fn tool_key(part: &Id, feature: &Id) -> ToolKey {
     ToolKey(OpKey::from_bytes(&bytes).0)
 }
 
+/// The ryukei key for a solid a `boolean` feature uses as a tool, by the
+/// solid's founder.
+pub fn solid_key(part: &Id, feature: &Id, solid: &Id) -> ToolKey {
+    let mut bytes = b"ryucad.tool\0".to_vec();
+    for id in [part, feature, solid] {
+        bytes.extend_from_slice(id.as_str().as_bytes());
+        bytes.push(0);
+    }
+    bytes.pop();
+    ToolKey(OpKey::from_bytes(&bytes).0)
+}
+
 /// The rigid placement of a feature's local frame. `x` is made
 /// perpendicular to `z`; axes with no direction, or parallel ones, are
 /// `invalid_placement`.
@@ -219,9 +231,11 @@ pub fn placement(p: &Placement) -> Result<Rigid> {
 pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
     match f {
         Feature::Primitive(p) => build_primitive(part, id, p),
-        Feature::Sketch(_) => Err(
-            Error::new(Code::Internal, format!("sketch {id} makes no body")).with("feature", id),
-        ),
+        Feature::Sketch(_) | Feature::Boolean(_) => Err(Error::new(
+            Code::Internal,
+            format!("{} {id} makes no body of its own", f.type_name()),
+        )
+        .with("feature", id)),
         Feature::Extrude(_) | Feature::Revolve(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} is built from its sketch", f.type_name()),
@@ -572,6 +586,15 @@ pub fn target<'a>(
     t: &Id,
     before: &'a dyn Results,
 ) -> Result<&'a Built> {
+    if let Some(by) = solids.consumed_by(t, id) {
+        return Err(Error::new(
+            Code::BodyConsumed,
+            format!("{id} acts on {t}, which the boolean {by} consumed"),
+        )
+        .with("feature", id)
+        .with("solid", t)
+        .with("consumed_by", by));
+    }
     let Some(view) = solids.view(t, id) else {
         // Not listed before `id` at all, or listed but no solid.
         if let Some(Ok(f)) = part.features.get(id) {
@@ -641,74 +664,99 @@ fn build_body(
         return Ok(Made::new(vec![(id.clone(), Arc::new(own))]));
     }
     let ty = f.type_name();
+    let kop = match c.operation {
+        Operation::Join => BooleanOp::Unite,
+        Operation::Cut => BooleanOp::Subtract,
+        Operation::Intersect => BooleanOp::Intersect,
+        Operation::New => unreachable!("a new solid acts on nothing"),
+    };
+    let tool = [ToolBody {
+        key: tool_key(&part.id, id),
+        built: &own,
+        name: id,
+    }];
     let made: Vec<(Id, Arc<Built>)> = targets
         .par_iter()
         .map(|(t, b)| {
-            let r = apply(part, id, ty, c.operation, t, b, &own)?;
+            let r = apply(part, id, ty, (kop, c.operation.as_str()), t, b, &tool)?;
             Ok(((*t).clone(), Arc::new(r)))
         })
         .collect::<Result<_>>()?;
     Ok(Made::new(made))
 }
 
-/// Joins `tool` (feature `id`'s own body) to solid `t`, cuts it from it
-/// or intersects it with it. Fails as `operation_no_effect` when the tool
-/// changes nothing, `body_emptied` when nothing is left.
+/// A body a feature applies to a solid: its key, the body, and what to
+/// call it in errors (the feature whose own body it is, or the solid a
+/// `boolean` uses as a tool).
+struct ToolBody<'a> {
+    key: ToolKey,
+    built: &'a Built,
+    name: &'a Id,
+}
+
+/// Unites solid `t` with `tools`, subtracts them from it or intersects
+/// it with them, for feature `id` (`what` names the operation in
+/// messages). Fails as `operation_no_effect` when a tool leaves nothing
+/// of itself and nothing of the target changes, `body_emptied` when
+/// nothing is left.
 fn apply(
     part: &Part,
     id: &Id,
     ty: &str,
-    op: Operation,
+    (kop, what): (BooleanOp, &str),
     t: &Id,
     target: &Built,
-    tool: &Built,
+    tools: &[ToolBody],
 ) -> Result<Built> {
-    let kop = match op {
-        Operation::Join => BooleanOp::Unite,
-        Operation::Cut => BooleanOp::Subtract,
-        Operation::Intersect => BooleanOp::Intersect,
-        Operation::New => unreachable!("a new solid acts on nothing"),
-    };
-    let tools = [Tool {
-        key: tool_key(&part.id, id),
-        body: &tool.body,
-        place: Rigid::IDENTITY,
-    }];
-    let (body, journal) = ryukei::boolean::boolean(op_key(&part.id, id), kop, &target.body, &tools)
-        .map_err(|e| boolean_error(part, id, ty, t, target, tool, e))?;
-    let what = |code, msg: String| {
+    let placed: Vec<Tool> = tools
+        .iter()
+        .map(|x| Tool {
+            key: x.key,
+            body: &x.built.body,
+            place: Rigid::IDENTITY,
+        })
+        .collect();
+    let (body, journal) =
+        ryukei::boolean::boolean(op_key(&part.id, id), kop, &target.body, &placed)
+            .map_err(|e| boolean_error(part, id, ty, t, target, tools, e))?;
+    let fail = |code, msg: String| {
         Error::new(code, format!("{ty} {id}: {msg}"))
             .with("feature", id)
             .with("target", t)
-            .with("operation", op.as_str())
+            .with("operation", what)
     };
     if body.faces().next().is_none() {
-        return Err(what(
+        return Err(fail(
             Code::BodyEmptied,
-            format!("the {} leaves nothing of {t}", op.as_str()),
+            format!("the {what} leaves nothing of {t}"),
         ));
     }
     let kept = names(&body);
-    // The tool counts if any of it is left, or it took any of the target
-    // away: a join inside the target, a cut or an intersect that misses
-    // nothing, changes nothing.
+    // A tool counts if any of it is left, or any of the target went: a
+    // join inside the target, a cut or an intersect that misses nothing,
+    // changes nothing.
     let target_faces: BTreeSet<Name> = target
         .body
         .faces()
         .map(|f| target.body.face(f).expect("live").name)
         .collect();
-    let effect = journal.events().iter().any(|e| match e {
-        Event::Placed { to, .. } => kept.contains(to),
+    let changed = journal.events().iter().any(|e| match e {
         Event::Deleted(n) | Event::Split { parent: n, .. } => target_faces.contains(n),
         _ => false,
     });
-    if !effect {
-        return Err(what(
-            Code::OperationNoEffect,
-            format!("the {} changes nothing of {t}", op.as_str()),
-        ));
+    for x in tools {
+        let left = journal.events().iter().any(
+            |e| matches!(e, Event::Placed { tool, to, .. } if *tool == x.key && kept.contains(to)),
+        );
+        if !left && !changed {
+            return Err(fail(
+                Code::OperationNoEffect,
+                format!("the {what} with {} changes nothing of {t}", x.name),
+            )
+            .with("tool", x.name));
+        }
     }
-    // Origins: the target's, the tool's under their placed names, and a
+    // Origins: the target's, each tool's under their placed names, and a
     // split entity's for each of its pieces.
     let mut from: BTreeMap<Name, Value> = BTreeMap::new();
     for (n, o) in target.origins.iter() {
@@ -717,8 +765,13 @@ fn apply(
         }
     }
     for e in journal.events() {
-        if let Event::Placed { from: own, to, .. } = e
-            && let Some(o) = tool.origins.get(&own.to_string())
+        if let Event::Placed {
+            tool,
+            from: own,
+            to,
+        } = e
+            && let Some(x) = tools.iter().find(|x| x.key == *tool)
+            && let Some(o) = x.built.origins.get(&own.to_string())
         {
             from.insert(*to, o.clone());
         }
@@ -740,28 +793,30 @@ fn apply(
     finish(id, ty, (body, journal), origins)
 }
 
-/// The kernel's refusal of a join, cut or intersect: `boolean_failed`,
-/// with the faces it names as the target's references or the tool's
-/// entities with their origins.
+/// The kernel's refusal of a join, cut, intersect or boolean:
+/// `boolean_failed`, with the faces it names as the target's references
+/// or the tools' entities with their origins.
 fn boolean_error(
     part: &Part,
     id: &Id,
     ty: &str,
     t: &Id,
     target: &Built,
-    tool: &Built,
+    tools: &[ToolBody],
     e: ryukei::Error,
 ) -> Error {
     let face = |n: &Name| -> Value {
         if target.body.by_name(*n).is_some() {
-            json!({"reference": format!("{}/{t}/{n}", part.id)})
-        } else {
-            let mut v = json!({"tool": id, "name": n.to_string()});
-            if let Some(o) = tool.origins.get(&n.to_string()) {
-                v["origin"] = o.clone();
-            }
-            v
+            return json!({"reference": format!("{}/{t}/{n}", part.id)});
         }
+        let Some(x) = tools.iter().find(|x| x.built.body.by_name(*n).is_some()) else {
+            return json!({"name": n.to_string()});
+        };
+        let mut v = json!({"tool": x.name, "name": n.to_string()});
+        if let Some(o) = x.built.origins.get(&n.to_string()) {
+            v["origin"] = o.clone();
+        }
+        v
     };
     let (msg, faces, at) = match &e {
         ryukei::Error::InvalidBoolean(BooleanError::Unsupported { a, b }) => (
@@ -792,6 +847,44 @@ fn boolean_error(
         err = err.with("at", at);
     }
     err
+}
+
+/// A `boolean` feature: its target as it sees it, with its tools as it
+/// sees them, each placed under a key from its founder.
+fn build_boolean(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    b: &crate::doc::solid::Boolean,
+    before: &dyn Results,
+) -> Result<Made> {
+    let target = self::target(part, solids, id, &b.target, before)?;
+    let tools: Vec<(&Id, &Built)> = b
+        .tools
+        .iter()
+        .map(|t| Ok((t, self::target(part, solids, id, t, before)?)))
+        .collect::<Result<_>>()?;
+    let keys: Vec<ToolKey> = b.tools.iter().map(|t| solid_key(&part.id, id, t)).collect();
+    let tools: Vec<ToolBody> = tools
+        .iter()
+        .zip(keys)
+        .map(|((name, built), key)| ToolBody { key, built, name })
+        .collect();
+    let kop = match b.op {
+        crate::doc::solid::BooleanOp::Unite => BooleanOp::Unite,
+        crate::doc::solid::BooleanOp::Subtract => BooleanOp::Subtract,
+        crate::doc::solid::BooleanOp::Intersect => BooleanOp::Intersect,
+    };
+    let built = apply(
+        part,
+        id,
+        "boolean",
+        (kop, b.op.as_str()),
+        &b.target,
+        target,
+        &tools,
+    )?;
+    Ok(Made::new(vec![(b.target.clone(), Arc::new(built))]))
 }
 
 /// Checks a body the kernel built and hashes it. A broken body is never
@@ -838,6 +931,9 @@ pub fn rebuild_feature(
         Feature::Sketch(s) => crate::sketch::context(part, part.order(), id, s, before)
             .and_then(|c| crate::sketch::solve_in(id, s, &c))
             .map(|s| Output::Sketch(Arc::new(s))),
+        Feature::Boolean(b) => {
+            build_boolean(part, solids, id, b, before).map(|m| Output::Solids(Arc::new(m)))
+        }
         f => build_body(part, solids, id, f, before).map(|m| Output::Solids(Arc::new(m))),
     }
 }
@@ -1192,6 +1288,66 @@ mod tests {
             (e.code, e.details["dependency"].as_str()),
             (Code::DependencyFailed, Some("miss"))
         );
+    }
+
+    #[test]
+    fn booleans_combine_whole_solids() {
+        use crate::doc::solid::BooleanOp::{Intersect, Subtract, Unite};
+        use crate::doc::solid::Operation::*;
+        use crate::solid::tests::{boolean, boxed, part};
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("t", boxed("0.5", New, &[])),
+            ("u", boxed("0.2", New, &[])),
+            ("cut", boolean(Subtract, "a", &["t", "u"])),
+            ("far", boxed("5", New, &[])),
+            ("near", boxed("3", New, &[])),
+            ("both", boolean(Unite, "far", &["near"])),
+            ("x", boxed("5.5", New, &[])),
+            ("y", boxed("9", New, &[])),
+            ("common", boolean(Intersect, "x", &["far"])),
+            ("miss", boolean(Subtract, "y", &["x"])),
+            ("late", boxed("0.5", Join, &["t"])),
+            ("more", boxed("0.1", Join, &["a"])),
+        ]);
+        let r = rebuild_part(&p);
+        let err = |f: &str| {
+            let (_, r) = r.features.iter().find(|(i, _)| *i == id(f)).unwrap();
+            r.as_ref().unwrap_err().clone()
+        };
+        close(volume(&state(&r, "cut", "a").body), 0.2e-9);
+        // Apart, they stay apart: two lumps of one solid.
+        close(volume(&state(&r, "both", "far").body), 2e-9);
+        close(volume(&state(&r, "common", "x").body), 0.5e-9);
+        // The tools' entities say where they came from: what is left of
+        // the cut is u's face at 0.2 mm; all of t's lay inside u.
+        let o = &state(&r, "cut", "a").origins;
+        assert!(o.values().any(|o| o["feature"] == "u"));
+        assert!(!o.values().any(|o| o["feature"] == "t"));
+        let e = err("miss");
+        assert_eq!(e.code, Code::OperationNoEffect, "{e}");
+        assert_eq!(e.details["tool"], "x");
+        // Nothing acts on a consumed solid.
+        let e = err("late");
+        assert_eq!(e.code, Code::BodyConsumed, "{e}");
+        assert_eq!(e.details["consumed_by"], "cut");
+        // [0, 0.2] mm and [0.1, 1.1] mm.
+        close(volume(&state(&r, "more", "a").body), 1.1e-9);
+        // Nor does anything refer to it: it is the target's now.
+        let own = &state(&r, "t", "t").body;
+        let name = own.face(own.faces().next().unwrap()).unwrap().name;
+        let face = crate::doc::reference::Reference {
+            feature: id("t"),
+            name,
+        };
+        let e =
+            crate::reference::resolve(&p, p.order(), &id("more"), "plane", &face, &r).unwrap_err();
+        assert_eq!(e.code, Code::BodyConsumed, "{e}");
+        // What the model shows: every tool is consumed, x by the boolean
+        // that failed with it too.
+        let solids = crate::solid::Solids::of(&p);
+        let tips: Vec<(&Id, &Id)> = solids.tips().collect();
+        assert_eq!(tips, [(&id("a"), &id("more")), (&id("y"), &id("miss"))]);
     }
 
     #[test]

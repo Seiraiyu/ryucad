@@ -141,6 +141,9 @@ pub enum Code {
     /// intersect yet, an uncertain intersection, or a result touching
     /// itself. The faces are in the details.
     BooleanFailed,
+    /// A feature acts on, or refers to, a solid that a `boolean` feature
+    /// before it used as a tool: it is part of the boolean's target now.
+    BodyConsumed,
 }
 
 impl Code {
