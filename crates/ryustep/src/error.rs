@@ -51,6 +51,10 @@ pub enum WriteError {
         instance: Option<u64>,
         what: &'static str,
     },
+    /// A body's face that can't be cut open into a region of its surface
+    /// (its loops wind round a torus both ways), or a pipe face that can't
+    /// be approximated within the tolerance: named by its stable name.
+    NotRepresentable { face: ryukei::name::Name },
 }
 
 impl fmt::Display for WriteError {
@@ -64,6 +68,9 @@ impl fmt::Display for WriteError {
                 instance: None,
                 what,
             } => write!(f, "the header can't be written: {what}"),
+            WriteError::NotRepresentable { face } => {
+                write!(f, "face {face} has no form a file can hold")
+            }
         }
     }
 }
