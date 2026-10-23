@@ -219,31 +219,42 @@ pub fn run(session: &mut Session, part: Option<&str>, against: Option<&str>) -> 
                     f["error"] = json!(session.explain(id, e.clone()));
                     findings.push(f);
                 }
-                Ok(Output::Solids(m)) => {
-                    bodies.extend(m.solids.iter().map(|(_, b)| (fid.clone(), b.clone())));
-                }
-                // A stale sketch is doctor's to report, with its repair.
-                Ok(Output::Sketch(_)) => {}
+                // A body is checked as its solid shows; a stale sketch is
+                // doctor's to report, with its repair.
+                Ok(Output::Solids(_) | Output::Sketch(_)) => {}
             }
         }
-        let loaded: Vec<(Id, crate::doc::files::Feature)> = bodies
+        // Each solid as the model shows it, by founder, and the feature
+        // that left it so (which sizes its mesh).
+        let solids = crate::solid::Solids::of(&p);
+        for shown in fresh.shown(&solids) {
+            if let Some((f, b)) = shown.state {
+                bodies.push((shown.solid.clone(), f.clone(), b.clone()));
+            }
+        }
+        let loaded: Vec<crate::doc::files::Feature> = bodies
             .iter()
-            .filter_map(|(fid, _)| Some((fid.clone(), p.features[fid].as_ref().ok()?.clone())))
+            .map(|(_, f, _)| p.features[f].as_ref().expect("built, so loaded").clone())
             .collect();
         let items: Vec<(&crate::doc::files::Feature, &Built)> = bodies
             .iter()
             .zip(&loaded)
-            .map(|((_, b), (_, f))| (f, b.as_ref()))
+            .map(|((_, _, b), f)| (f, b.as_ref()))
             .collect();
         let meshes =
             crate::mesh::Cache::default().get_all(&items, crate::mesh::Quality::Normal, usize::MAX);
         let found: Vec<Vec<Value>> = bodies
             .par_iter()
             .zip(&meshes)
-            .map(|((fid, b), m)| body_findings(id, fid, b, m))
+            .map(|((solid, _, b), m)| body_findings(id, solid, b, m))
             .collect();
         findings.extend(found.into_iter().flatten());
-        parts.push(json!({"part": id, "hash": fresh.hash, "features": features}));
+        let checked: Vec<Value> = bodies
+            .iter()
+            .map(|(solid, f, _)| json!({"solid": solid, "shown": f}))
+            .collect();
+        parts.push(json!({"part": id, "hash": fresh.hash, "features": features,
+                          "solids": checked}));
     }
     let errors = findings.iter().filter(|f| f["severity"] == "error").count();
     let mut report = json!({
@@ -349,6 +360,37 @@ mod tests {
         assert_eq!(
             p["features"][2],
             json!({"id": "e", "ok": true, "hash": rebuilt["parts"][0]["features"][2]["hash"]})
+        );
+    }
+
+    #[test]
+    fn solids_are_checked_as_they_show() {
+        let (_dir, mut s) = project();
+        for f in [
+            json!({"type": "box", "id": "a", "params": {"x": 10, "y": 10, "z": 10}}),
+            json!({"type": "cylinder", "id": "hole", "operation": "cut", "targets": ["a"],
+                   "params": {"radius": 2, "height": 20}, "placement": {"origin": [5, 5, -5]}}),
+            json!({"type": "box", "id": "lug", "params": {"x": 4, "y": 4, "z": 4},
+                   "placement": {"origin": [10, 3, 0]}}),
+            json!({"type": "boolean", "id": "u", "op": "unite", "target": "a", "tools": ["lug"]}),
+        ] {
+            let mut f = f;
+            f["part"] = json!("q");
+            call(&mut s, "feature.add", f).unwrap();
+        }
+        let v = call(&mut s, "check", json!({"part": "q"})).unwrap();
+        assert_eq!(v["passed"], true, "{v}");
+        let q = v["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["part"] == "q")
+            .unwrap();
+        // The sphere already there, and a as the boolean left it; the lug
+        // is a's now.
+        assert_eq!(
+            q["solids"],
+            json!([{"solid": "c", "shown": "c"}, {"solid": "a", "shown": "u"}])
         );
     }
 
