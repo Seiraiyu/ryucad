@@ -16,21 +16,29 @@
 //! 2. **Uses.** Every edge must be used twice, once each way: a shell
 //!    that leaves an edge used once is open, one that uses it more often
 //!    is non-manifold.
-//! 3. **Pcurves.** Every use of an edge gets its pcurve on the face:
+//! 3. **Seams and poles.** Seam edges come out of periodic faces, vertex
+//!    loops at poles go, and edges a seam split are joined again (see
+//!    `unseam`).
+//! 4. **Pcurves.** Every use of an edge gets its pcurve on the face:
 //!    [`crate::pcurve::exact`] first, else the file's, if it fits the
 //!    edge.
-//! 4. **Build.** The shape is laid out and built through Euler operators
+//! 5. **Build.** The shape is laid out and built through Euler operators
 //!    ([`crate::layout`]), each solid's voids in its region, and renamed
 //!    with the names of step 1. Tolerances cover the gaps between curves'
 //!    ends and their vertices, and the bounds of approximated geometry.
 //!    [`crate::check::check`] must then hold.
 //!
 //! Healing knows nothing of any file format: an importer of any kind
-//! builds the same [`Shape`].
+//! builds the same [`Shape`]. [`seamed`] goes the other way, a body as a
+//! file must describe it.
 
 mod build;
 mod names;
 mod pcurves;
+mod seamed;
+mod unseam;
+
+pub use seamed::seamed;
 
 use crate::Error;
 use crate::geom::{Curve, Curve2, Point3, Surface};
@@ -142,6 +150,12 @@ impl Default for HealOptions {
 #[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct HealReport {
+    /// Seam edges removed.
+    pub seams: Vec<Name>,
+    /// Pole vertices dropped with their loops or seams.
+    pub poles: Vec<Name>,
+    /// Vertices removed between two edges on one curve, which were joined.
+    pub joined: Vec<Name>,
     /// Entities whose tolerance is above [`crate::tol::LINEAR_RESOLUTION`],
     /// with it.
     pub tolerances: Vec<(Name, f64)>,
@@ -160,10 +174,18 @@ pub fn heal(
     options: &HealOptions,
 ) -> Result<(Body, Journal, HealReport), Error> {
     validate(shape)?;
-    let names = names::names(key, shape);
+    let mut names = names::names(key, shape);
     build::uses(shape, &names)?;
-    let pcurves = pcurves::pcurves(shape, &names)?;
-    build::build(key, shape, &names, &pcurves, options)
+    let mut shape = shape.clone();
+    let unseamed = unseam::unseam(key, &mut shape, &mut names)?;
+    let pcurves = pcurves::pcurves(&shape, &names)?;
+    let (body, created, mut report) = build::build(key, &shape, &names, &pcurves, options)?;
+    let mut journal = unseamed.journal;
+    journal.append(created);
+    report.seams = unseamed.seams;
+    report.poles = unseamed.poles;
+    report.joined = unseamed.joined;
+    Ok((body, journal, report))
 }
 
 fn malformed(what: &'static str) -> Error {

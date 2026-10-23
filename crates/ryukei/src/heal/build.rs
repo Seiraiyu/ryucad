@@ -115,6 +115,7 @@ pub(super) fn build(
     }
     let built = plan.build(key, ROLE, &shells, &outer_of).map_err(fail)?;
     let mut body = built.body;
+    renumber_geometry(&mut body);
     body.set_recipes(true);
     for (k, &f) in built.faces.iter().enumerate() {
         body.rename(EntityId::Face(f), names.faces[k]);
@@ -165,6 +166,46 @@ pub(super) fn build(
     }
     report.tolerances.sort_by_key(|x| x.0);
     Ok((body, journal, report))
+}
+
+/// Puts the body's geometry in the order of what uses it: surfaces by
+/// face, curves by edge, pcurves by fin. The body then doesn't depend on
+/// the order of the shape's arrays or where its loops started.
+fn renumber_geometry(b: &mut Body) {
+    use crate::topo::{Arena, Curve2Id, CurveId, SurfaceId};
+    use std::collections::BTreeMap;
+    let mut surfaces: Arena<SurfaceId, _> = Arena::default();
+    let mut map: BTreeMap<SurfaceId, SurfaceId> = BTreeMap::new();
+    for f in b.faces().collect::<Vec<_>>() {
+        let old = b.faces[f].surface;
+        let new = *map
+            .entry(old)
+            .or_insert_with(|| surfaces.push(b.surfaces[old].clone()));
+        b.faces[f].surface = new;
+    }
+    b.surfaces = surfaces;
+    let mut curves: Arena<CurveId, _> = Arena::default();
+    let mut map: BTreeMap<CurveId, CurveId> = BTreeMap::new();
+    for e in b.edges().collect::<Vec<_>>() {
+        let old = b.edges[e].curve;
+        let new = *map
+            .entry(old)
+            .or_insert_with(|| curves.push(b.curves[old].clone()));
+        b.edges[e].curve = new;
+    }
+    b.curves = curves;
+    let mut curves2: Arena<Curve2Id, _> = Arena::default();
+    let mut map: BTreeMap<Curve2Id, Curve2Id> = BTreeMap::new();
+    for f in b.fins().collect::<Vec<_>>() {
+        if let Some(mut p) = b.fins[f].pcurve {
+            let old = p.curve;
+            p.curve = *map
+                .entry(old)
+                .or_insert_with(|| curves2.push(b.curves2[old].clone()));
+            b.fins[f].pcurve = Some(p);
+        }
+    }
+    b.curves2 = curves2;
 }
 
 /// The shape as a layout: its geometry as it is, the pcurves found, and

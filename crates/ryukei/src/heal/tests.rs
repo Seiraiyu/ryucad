@@ -452,3 +452,110 @@ fn a_files_pcurves_are_used_where_they_fit() {
     }
     heal_ok(&t);
 }
+
+/// Each entity's geometry as text, sorted: what a round trip must keep.
+fn geometry(b: &Body) -> (Vec<String>, Vec<String>, Vec<String>) {
+    use crate::topo::dump;
+    let mut s: Vec<String> = b
+        .faces()
+        .map(|f| {
+            format!(
+                "{} {:?}",
+                dump::surface(&b.surfaces[b.faces[f].surface]),
+                b.faces[f].sense
+            )
+        })
+        .collect();
+    let mut c: Vec<String> = b
+        .edges()
+        .map(|e| dump::curve(&b.curves[b.edges[e].curve]))
+        .collect();
+    let mut p: Vec<String> = b
+        .vertices()
+        .map(|v| dump::point(b.vertices[v].point))
+        .collect();
+    s.sort();
+    c.sort();
+    p.sort();
+    (s, c, p)
+}
+
+/// `b` written with seams and healed again: the same faces on the same
+/// surfaces, edges on the same curves and vertices at the same points;
+/// and healing what it gives written again is the same body.
+pub(crate) fn round_trip(b: &Body) -> Body {
+    let s = seamed(b, 1e-7).unwrap();
+    // Every face of the shape is cut open: no periodic face wraps.
+    for (k, f) in s.faces.iter().enumerate() {
+        for l in &f.loops {
+            if let Loop::Edges(uses) = l {
+                for u in uses {
+                    if let Some(p) = u.pcurve {
+                        let e = &s.edges[u.edge];
+                        assert!(
+                            crate::pcurve::fits(
+                                &s.surfaces[f.surface],
+                                &s.curves[e.curve],
+                                e.interval,
+                                1e-7,
+                                &(s.curves2[p].clone(), [0.0, 1.0])
+                            ),
+                            "face {k}: a pcurve off its edge"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let (h, _, _) = heal(OpKey(9), &s, &HealOptions::default()).unwrap();
+    assert_eq!(check::check(&h), [], "{}", h.dump());
+    assert_eq!(h.counts(), b.counts());
+    assert_eq!(geometry(&h), geometry(b));
+    let again = heal(
+        OpKey(9),
+        &seamed(&h, 1e-7).unwrap(),
+        &HealOptions::default(),
+    )
+    .unwrap()
+    .0;
+    assert_eq!(again.dump(), h.dump());
+    h
+}
+
+#[test]
+fn primitives_round_trip_through_seams() {
+    let t = tilted();
+    let k = OpKey(1);
+    for b in [
+        primitive::block(k, 1.0, 2.0, 3.0, &t).unwrap().0,
+        primitive::cylinder(k, 1.0, 2.0, &t).unwrap().0,
+        primitive::cone(k, 1.0, 2.0, &t).unwrap().0,
+        primitive::frustum(k, 1.0, 0.4, 2.0, &t).unwrap().0,
+        primitive::sphere(k, 1.0, &t).unwrap().0,
+        primitive::torus(k, 2.0, 0.5, &t).unwrap().0,
+    ] {
+        round_trip(&b);
+    }
+}
+
+#[test]
+fn seams_and_poles_are_reported() {
+    let b = primitive::sphere(OpKey(1), 1.0, &tilted()).unwrap().0;
+    let s = seamed(&b, 1e-7).unwrap();
+    // One face, one loop: the seam there and back between the poles.
+    assert_eq!(s.faces.len(), 1);
+    let Loop::Edges(uses) = &s.faces[0].loops[0] else {
+        panic!()
+    };
+    assert_eq!(uses.len(), 2);
+    assert_eq!(uses[0].edge, uses[1].edge);
+    let (_, journal, report) = heal_ok(&s);
+    assert_eq!(report.seams.len(), 1);
+    assert_eq!(report.poles.len(), 2);
+    assert!(
+        journal
+            .events()
+            .iter()
+            .any(|e| *e == Event::Deleted(report.seams[0]))
+    );
+}
