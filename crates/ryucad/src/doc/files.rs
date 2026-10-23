@@ -583,13 +583,14 @@ fn migrate(format: u64, newest: u64) {
 }
 
 /// The fields of a JSON object, taken one by one so leftovers are errors.
-pub(crate) struct Obj<'a> {
+#[doc(hidden)]
+pub struct Obj<'a> {
     map: BTreeMap<&'a str, &'a Value>,
     at: String,
 }
 
 impl<'a> Obj<'a> {
-    pub(crate) fn new(v: &'a Value, at: &str) -> Result<Obj<'a>> {
+    pub fn new(v: &'a Value, at: &str) -> Result<Obj<'a>> {
         let map = v
             .as_object()
             .ok_or_else(|| invalid(at, "expected a JSON object"))?;
@@ -600,11 +601,11 @@ impl<'a> Obj<'a> {
     }
 
     /// A field that may be left out.
-    pub(crate) fn take_opt(&mut self, key: &str) -> Option<Value> {
+    pub fn take_opt(&mut self, key: &str) -> Option<Value> {
         self.map.remove(key).cloned()
     }
 
-    pub(crate) fn take(&mut self, key: &str) -> Result<Value> {
+    pub fn take(&mut self, key: &str) -> Result<Value> {
         self.map.remove(key).cloned().ok_or_else(|| {
             invalid(
                 &format!("{}/{key}", self.at),
@@ -613,7 +614,7 @@ impl<'a> Obj<'a> {
         })
     }
 
-    pub(crate) fn finish(self) -> Result<()> {
+    pub fn finish(self) -> Result<()> {
         match self.map.keys().next() {
             None => Ok(()),
             Some(k) => Err(invalid(

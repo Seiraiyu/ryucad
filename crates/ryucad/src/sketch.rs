@@ -1242,7 +1242,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn rectangle() -> Sketch {
-        let v = crate::doc::sketch::tests::rectangle();
+        let v = crate::doc::fixtures::rectangle();
         let p = [(
             "width".to_owned(),
             crate::expr::Expr::parse("20 mm").unwrap(),

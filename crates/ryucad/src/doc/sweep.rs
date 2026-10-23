@@ -227,7 +227,8 @@ impl Extrude {
         v
     }
 
-    pub(crate) fn from_fields(o: &mut Obj, default: Unit, env: &Env) -> Result<Extrude> {
+    #[doc(hidden)]
+    pub fn from_fields(o: &mut Obj, default: Unit, env: &Env) -> Result<Extrude> {
         Ok(Extrude {
             sketch: sketch_id(o)?,
             loops: loops_from_json(o.take_opt("loops"))?,
@@ -251,7 +252,8 @@ impl Revolve {
         v
     }
 
-    pub(crate) fn from_fields(o: &mut Obj, env: &Env) -> Result<Revolve> {
+    #[doc(hidden)]
+    pub fn from_fields(o: &mut Obj, env: &Env) -> Result<Revolve> {
         let axis = match o.take("axis")? {
             Value::String(l) => {
                 RevolveAxis::Line(Id::parse(&l, "entity").map_err(|e| e.with("pointer", "/axis"))?)

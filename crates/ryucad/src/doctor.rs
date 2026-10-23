@@ -1213,7 +1213,7 @@ pub(crate) mod tests {
         w(
             r,
             s,
-            &canonical::to_string(&crate::doc::sketch::tests::rectangle()),
+            &canonical::to_string(&crate::doc::fixtures::rectangle()),
         );
         w(
             r,

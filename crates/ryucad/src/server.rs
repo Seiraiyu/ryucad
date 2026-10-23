@@ -2666,7 +2666,7 @@ pub(crate) mod tests {
         let root = dir.path();
         write_json(
             &root.join("parts/p/features/s.json"),
-            &crate::doc::sketch::tests::rectangle(),
+            &crate::doc::fixtures::rectangle(),
         )
         .unwrap();
         write_json(

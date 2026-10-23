@@ -3,6 +3,9 @@
 
 pub mod canonical;
 pub mod files;
+#[cfg(test)]
+#[doc(hidden)]
+pub mod fixtures;
 pub mod id;
 pub mod project;
 pub mod reference;

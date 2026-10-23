@@ -27,6 +27,10 @@ use std::path::{Path, PathBuf};
 
 pub const MANIFEST: &str = "ryucad.json";
 
+/// The project's Git attributes file, beside its manifest: it registers
+/// ryucad's drivers, and defines nothing ryucad builds.
+pub const ATTRIBUTES: &str = ".gitattributes";
+
 /// The key under which a file a merge couldn't settle lists its conflicts,
 /// by JSON pointer. No file kind uses it otherwise.
 pub const CONFLICTS: &str = "conflicts";
@@ -307,7 +311,7 @@ impl Project {
             match in_part {
                 Some(id) => ids.insert(id),
                 // Git's attributes define nothing ryucad builds.
-                None if path == crate::drivers::ATTRIBUTES => continue,
+                None if path == ATTRIBUTES => continue,
                 None => {
                     *self = Project::load(&self.root)?;
                     return Ok(());
