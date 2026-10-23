@@ -2,10 +2,15 @@
 //!
 //! ```text
 //! ryucad.json
+//! ryupdm.json                       (optional: ryupdm's settings)
 //! parts/<part>/part.json
 //! parts/<part>/parameters.json      (optional)
+//! parts/<part>/properties.json      (optional: ryupdm's properties)
 //! parts/<part>/features/<feature>.json
 //! ```
+//!
+//! ryupdm's files are read and checked by ryupdm; here they are only
+//! known, so they are tracked and hashed with the files they belong to.
 //!
 //! Loading never stops at a broken part or feature: the error is kept in
 //! its place and the rest of the project stays usable. A file a merge left
@@ -30,6 +35,12 @@ pub const MANIFEST: &str = "ryucad.json";
 /// The project's Git attributes file, beside its manifest: it registers
 /// ryucad's drivers, and defines nothing ryucad builds.
 pub const ATTRIBUTES: &str = ".gitattributes";
+
+/// ryupdm's settings, beside the manifest. Nothing ryucad builds reads it.
+pub const PDM_CONFIG: &str = "ryupdm.json";
+
+/// The files at the project's root that a session tracks.
+pub const ROOT_FILES: [&str; 3] = [MANIFEST, ATTRIBUTES, PDM_CONFIG];
 
 /// The key under which a file a merge couldn't settle lists its conflicts,
 /// by JSON pointer. No file kind uses it otherwise.
@@ -167,6 +178,14 @@ pub const PARAMETERS: &str = "parameters.json";
 
 pub fn parameters_path(root: &Path, part: &Id) -> PathBuf {
     part_dir(root, part).join(PARAMETERS)
+}
+
+/// A part's ryupdm properties: one of the files that define the part, so
+/// its revision covers them, though nothing ryucad builds reads them.
+pub const PROPERTIES: &str = "properties.json";
+
+pub fn properties_path(root: &Path, part: &Id) -> PathBuf {
+    part_dir(root, part).join(PROPERTIES)
 }
 
 pub fn feature_path(root: &Path, part: &Id, feature: &Id) -> PathBuf {
@@ -310,8 +329,9 @@ impl Project {
             };
             match in_part {
                 Some(id) => ids.insert(id),
-                // Git's attributes define nothing ryucad builds.
-                None if path == ATTRIBUTES => continue,
+                // Git's attributes and ryupdm's settings define nothing
+                // ryucad builds.
+                None if path == ATTRIBUTES || path == PDM_CONFIG => continue,
                 None => {
                     *self = Project::load(&self.root)?;
                     return Ok(());
@@ -375,10 +395,12 @@ fn load_part(
         PartFile::from_json(&v).map_err(|e| e.with("path", &part_at))
     });
     let mut has_parameters = false;
+    let mut has_properties = false;
     for (name, kind) in src.list(&dir)? {
         match name.as_str() {
             "part.json" | "features" => {}
             PARAMETERS => has_parameters = kind == Kind::File,
+            PROPERTIES => has_properties = kind == Kind::File,
             _ => unknown.push(join(&dir, &name)),
         }
     }
@@ -436,6 +458,16 @@ fn load_part(
                     });
                 }
             }
+        }
+    }
+    // ryupdm's properties: their bytes as they are, tagged like the
+    // parameters, so a part without them hashes as before. Reading them is
+    // ryupdm's business.
+    if has_properties {
+        let at = join(&dir, PROPERTIES);
+        if let Some(bytes) = src.read(&at).map_err(|e| e.with("path", &at))? {
+            piece(&mut hasher, PROPERTIES.as_bytes());
+            piece(&mut hasher, &bytes);
         }
     }
     let revision = hasher.finalize().to_hex()[..32].to_owned();
@@ -775,7 +807,37 @@ mod tests {
             Manifest::new(Unit::In).to_json().to_string(),
         )
         .unwrap();
-        assert_ne!(rev(), r1);
+        let r2 = rev();
+        assert_ne!(r2, r1);
+        // ryupdm's properties define the part; its settings don't.
+        let props = properties_path(root, &id("p"));
+        fs::write(&props, "{}").unwrap();
+        let r3 = rev();
+        assert_ne!(r3, r2);
+        fs::write(&props, "{\"number\": \"1\"}").unwrap();
+        assert_ne!(rev(), r3);
+        fs::remove_file(&props).unwrap();
+        assert_eq!(rev(), r2);
+        fs::write(root.join(PDM_CONFIG), "{}").unwrap();
+        assert_eq!(rev(), r2);
+        let project = Project::load(root).unwrap();
+        assert!(project.unknown.is_empty(), "{:?}", project.unknown);
+    }
+
+    #[test]
+    fn ryupdm_files_are_known_and_reload_nothing_they_dont_define() {
+        let dir = sample();
+        let root = dir.path();
+        fs::write(properties_path(root, &id("p")), "{ not even json").unwrap();
+        let mut project = Project::load(root).unwrap();
+        assert!(project.unknown.is_empty());
+        let rev = project.parts[&id("p")].revision.clone();
+        fs::write(root.join(PDM_CONFIG), "{}").unwrap();
+        project.reload(&[PDM_CONFIG.into()]).unwrap();
+        assert_eq!(project.parts[&id("p")].revision, rev);
+        fs::write(properties_path(root, &id("p")), "{}").unwrap();
+        project.reload(&["parts/p/properties.json".into()]).unwrap();
+        assert_ne!(project.parts[&id("p")].revision, rev);
     }
 
     #[test]

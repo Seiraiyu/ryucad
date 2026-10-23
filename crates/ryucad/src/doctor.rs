@@ -439,8 +439,13 @@ fn diagnose_part(root: &Path, part: &str, unit: Unit, issues: &mut Vec<Issue>) {
         root,
         &dir,
         &entries,
-        |n, d| (n == "part.json" && !d) || (n == "parameters.json" && !d) || (n == "features" && d),
-        &["part", "parameters"],
+        |n, d| {
+            (n == "part.json" && !d)
+                || (n == "parameters.json" && !d)
+                || (n == "properties.json" && !d)
+                || (n == "features" && d)
+        },
+        &["part", "parameters", "properties"],
         issues,
     );
     let params = format!("{dir}/parameters.json");
@@ -1304,6 +1309,9 @@ pub(crate) mod tests {
         w(r, "parts/p/features/a (1).json", &sphere);
         w(r, "parts/p/features/Hole.json", &sphere);
         w(r, "parts/p/features/notes.txt", "hi");
+        // ryupdm's properties belong in a part; a sync copy of them doesn't.
+        w(r, "parts/p/properties.json", "{}");
+        w(r, "parts/p/properties (1).json", "{}");
         w(r, &f("d"), &sphere.replace('\n', "\r\n"));
         w(r, &f("e"), "{");
         w(r, &f("g"), "<<<<<<< HEAD\n{}\n=======\n{}\n>>>>>>> other\n");
@@ -1323,6 +1331,13 @@ pub(crate) mod tests {
         );
         let got = codes(r);
         let want: Vec<(&str, Vec<String>)> = vec![
+            (
+                "sync_conflict_copy",
+                vec![
+                    "parts/p/properties (1).json".into(),
+                    "parts/p/properties.json".into(),
+                ],
+            ),
             (
                 "invalid_file_name",
                 vec!["parts/p/features/Hole.json".into()],

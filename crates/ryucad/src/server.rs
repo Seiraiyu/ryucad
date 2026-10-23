@@ -2219,8 +2219,10 @@ fn check_format(session: &Session) -> Result<Value> {
         }
     };
     check(&root.join(MANIFEST));
+    check(&root.join(crate::doc::project::PDM_CONFIG));
     for part in p.parts.values() {
         check(&part_path(root, &part.id));
+        check(&crate::doc::project::properties_path(root, &part.id));
         if let Err(e) = &part.file {
             errors.push(json!(e));
         }
@@ -3202,14 +3204,21 @@ pub(crate) mod tests {
         .unwrap();
         fs::write(root.join("parts/p/features/broken.json"), "{").unwrap();
         fs::write(root.join("parts/p/stray.txt"), "").unwrap();
+        // ryupdm's files are known, and must be canonical too.
+        fs::write(root.join("parts/p/properties.json"), "{\"name\":\"x\"}").unwrap();
+        fs::write(root.join("ryupdm.json"), "{\"format\":1}").unwrap();
         let r = call(&mut s, "check_format", json!({})).unwrap();
         assert_eq!(r["clean"], false);
-        assert!(
-            r["non_canonical"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("parts/p/features/a.json"))
-        );
+        for f in [
+            "parts/p/features/a.json",
+            "parts/p/properties.json",
+            "ryupdm.json",
+        ] {
+            assert!(
+                r["non_canonical"].as_array().unwrap().contains(&json!(f)),
+                "{f}: {r}"
+            );
+        }
         assert_eq!(
             r["orphans"],
             json!([

@@ -15,7 +15,7 @@
 
 use crate::activity::Files;
 use crate::doc::id::Id;
-use crate::doc::project::{MANIFEST, Project};
+use crate::doc::project::Project;
 use crate::error::{Error, Result};
 use crate::rebuild::{Cache, PartResult, rebuild_part_with};
 use serde_json::{Value, json};
@@ -336,8 +336,8 @@ impl Session {
 }
 
 /// The files a project's state depends on: the manifest, the attributes
-/// that register ryucad with Git, and everything under `parts/` two and
-/// three levels down.
+/// that register ryucad with Git, ryupdm's settings, and everything under
+/// `parts/` two and three levels down.
 pub fn files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(listed(root)?.into_iter().map(|(p, _)| p).collect())
 }
@@ -347,7 +347,7 @@ pub fn files(root: &Path) -> Result<Vec<PathBuf>> {
 /// so checking a project costs at most one `stat` per file.
 fn listed(root: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
     let mut out = Vec::new();
-    for name in [MANIFEST, crate::drivers::ATTRIBUTES] {
+    for name in crate::doc::project::ROOT_FILES {
         let path = root.join(name);
         if let Ok(m) = fs::metadata(&path)
             && m.is_file()
@@ -400,7 +400,7 @@ fn read_dir(dir: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
 mod tests {
     use super::*;
     use crate::doc::files::{Feature, Manifest, PartFile, Placement, Primitive, PrimitiveType};
-    use crate::doc::project::{feature_path, part_path, write_json};
+    use crate::doc::project::{MANIFEST, feature_path, part_path, write_json};
     use crate::error::Code;
     use crate::rebuild::rebuild_part;
     use crate::units::{Quantity, Unit};
@@ -475,12 +475,16 @@ mod tests {
         )
         .unwrap();
         fs::remove_file(dir.path().join("parts/p/part.json")).unwrap();
+        fs::write(dir.path().join("ryupdm.json"), "{}").unwrap();
+        fs::write(dir.path().join("parts/p/properties.json"), "{}").unwrap();
         assert_eq!(
             s.refresh_changes().unwrap(),
             [
                 ("parts/p/features/a.json".to_owned(), "modified"),
                 ("parts/p/features/b.json".to_owned(), "created"),
                 ("parts/p/part.json".to_owned(), "deleted"),
+                ("parts/p/properties.json".to_owned(), "created"),
+                ("ryupdm.json".to_owned(), "created"),
             ]
         );
     }
