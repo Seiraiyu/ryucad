@@ -1667,9 +1667,12 @@ dependencies = [
 name = "ryupdm"
 version = "0.0.0"
 dependencies = [
+ "blake3",
  "getrandom 0.3.4",
+ "gix",
  "regex-lite",
  "ryucad-doc",
+ "serde",
  "serde_json",
 ]
 
