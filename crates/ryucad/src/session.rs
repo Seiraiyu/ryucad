@@ -345,6 +345,47 @@ impl Session {
     }
 }
 
+/// The files as last read, without copying them: what the session reads
+/// on its own while polling (release states, for `pdm.changed`).
+impl crate::doc::source::Source for Session {
+    fn list(&self, dir: &str) -> Result<Vec<(String, crate::doc::source::Kind)>> {
+        use crate::doc::source::Kind;
+        let at = dir
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .fold(self.root().to_path_buf(), |p, s| p.join(s));
+        let mut out: Vec<(String, Kind)> = Vec::new();
+        for path in self.stamps.range(at.clone()..).map(|(p, _)| p) {
+            let Ok(rest) = path.strip_prefix(&at) else {
+                break;
+            };
+            let mut parts = rest.components();
+            let Some(name) = parts.next() else {
+                continue;
+            };
+            let kind = if parts.next().is_some() {
+                Kind::Dir
+            } else {
+                Kind::File
+            };
+            let entry = (name.as_os_str().to_string_lossy().into_owned(), kind);
+            if !out.contains(&entry) {
+                out.push(entry);
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
+    fn read(&self, rel: &str) -> Result<Option<Vec<u8>>> {
+        let path = rel
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .fold(self.root().to_path_buf(), |p, s| p.join(s));
+        Ok(self.stamps.get(&path).map(|s| s.bytes.to_vec()))
+    }
+}
+
 /// The files a project's state depends on: the manifest, the attributes
 /// that register ryucad with Git, ryupdm's settings, everything under
 /// `parts/` two and three levels down, and ryupdm's release records, two
@@ -511,6 +552,14 @@ mod tests {
             ]
         );
         assert!(s.snapshot().contains_key("releases/p/A.json"));
+        // Read in place, the session lists and reads as its snapshot does.
+        use crate::doc::source::Source;
+        let snap = s.snapshot();
+        for dir in ["", "parts", "parts/p", "releases", "releases/p", "nowhere"] {
+            assert_eq!(s.list(dir).unwrap(), snap.list(dir).unwrap(), "{dir}");
+        }
+        assert_eq!(s.read("releases/p/A.json").unwrap(), Some(b"{}".to_vec()));
+        assert_eq!(s.read("parts/p/part.json").unwrap(), None);
     }
 
     #[test]

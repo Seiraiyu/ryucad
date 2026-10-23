@@ -1611,6 +1611,26 @@ pub fn publish(live: &mut Live, session: &mut Session) {
         live.hub.send(Topic::Merge, "merge.changed", &params);
     }
     live.seen.merge = merge;
+    // Release states: from records, parts and the release branch's refs,
+    // read only while someone watches. The first reading after a
+    // subscription is what it starts from.
+    if watched {
+        let now = crate::release::summary(session);
+        if let Some(seen) = &live.seen.pdm {
+            let changed: Vec<&Value> = now
+                .iter()
+                .filter(|(id, v)| seen.get(*id) != Some(*v))
+                .map(|(_, v)| v)
+                .collect();
+            if !changed.is_empty() {
+                live.hub
+                    .send(Topic::Pdm, "pdm.changed", &json!({"parts": changed}));
+            }
+        }
+        live.seen.pdm = Some(now);
+    } else {
+        live.seen.pdm = None;
+    }
     let p = session.project();
     let revisions: BTreeMap<Id, String> = p
         .parts

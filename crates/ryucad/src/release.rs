@@ -41,7 +41,7 @@ fn refs_key(repo: &crate::git::Repo, config: &Config) -> Result<String> {
 /// a repository.
 pub(crate) fn history(session: &mut Session) -> Result<(crate::git::Repo, Releases)> {
     let repo = crate::git::repo(session.root())?;
-    let config = Config::read(&session.snapshot())?;
+    let config = Config::read(&*session)?;
     let key = refs_key(&repo, &config)?;
     if let Some((k, r)) = &session.releases
         && *k == key
@@ -320,6 +320,31 @@ pub fn obsolete(
 pub(crate) fn state_of(session: &mut Session, part: &Id) -> Value {
     let releases = history(session).map(|(_, r)| r).unwrap_or_default();
     state::derive(&session.snapshot(), part, &releases).to_json()
+}
+
+/// Each part's release state and its releases' tags, for `pdm.changed`:
+/// `{part, state, tags: [{tag, status}]}` by part.
+pub(crate) fn summary(session: &mut Session) -> std::collections::BTreeMap<Id, Value> {
+    let releases = history(session).map(|(_, r)| r).unwrap_or_default();
+    state::derive_all(&*session, &releases)
+        .into_iter()
+        .map(|(part, s)| {
+            let tags: Vec<Value> = releases
+                .official
+                .iter()
+                .filter_map(|(path, o)| {
+                    let name = path.strip_prefix(&format!("releases/{part}/"))?;
+                    let (label, kind) = ryupdm::record::parse_name(name)?;
+                    (kind == Kind::Release).then(|| {
+                        json!({"tag": ryupdm::history::tag_name(&part, &label),
+                               "status": releases.tag(&part, &label, &o.commit).as_str()})
+                    })
+                })
+                .collect();
+            let v = json!({"part": part, "state": s.to_json(), "tags": tags});
+            (part, v)
+        })
+        .collect()
 }
 
 /// One record as `release.list` gives it.
@@ -929,6 +954,73 @@ pub(crate) mod tests {
         assert_eq!(r["entry"]["kind"], "undo");
         assert!(!root.join("releases/p/A.json").exists());
         assert_eq!(rev(root, "ryupdm/p/A").len(), 40);
+    }
+
+    #[test]
+    fn subscribers_hear_when_release_states_and_tags_change() {
+        use crate::notify::Topic;
+        let (dir, mut s) = released_project();
+        let root = dir.path();
+        let mut live = crate::live::Live::new();
+        let sub = live.hub.subscribe("p-x", &[Topic::Pdm]);
+        let mut told = |s: &mut Session| -> Vec<String> {
+            s.reload().unwrap();
+            crate::server::publish(&mut live, s);
+            sub.drain()
+                .iter()
+                .flat_map(|l| {
+                    let v: Value = serde_json::from_str(l).unwrap();
+                    assert_eq!(v["method"], "pdm.changed");
+                    v["params"]["parts"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|p| {
+                            let tags: Vec<&str> = p["tags"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|t| t["status"].as_str().unwrap())
+                                .collect();
+                            format!(
+                                "{} {} {tags:?}",
+                                p["part"].as_str().unwrap(),
+                                p["state"]["text"].as_str().unwrap()
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        // The first reading is where it starts.
+        assert!(told(&mut s).is_empty());
+        assert!(told(&mut s).is_empty());
+        propose(&mut s).unwrap();
+        assert_eq!(told(&mut s), [r#"p in work, A proposed []"#]);
+        // The release branch moving makes it official, behind the
+        // session's back.
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "release A"]);
+        assert_eq!(told(&mut s), [r#"p released A ["missing"]"#]);
+        call(&mut s, "release.sync", json!({})).unwrap();
+        assert_eq!(told(&mut s), [r#"p released A ["ok"]"#]);
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"x": 12}}),
+        )
+        .unwrap();
+        assert_eq!(told(&mut s), [r#"p A modified ["ok"]"#]);
+        // A part without release changes says nothing.
+        call(&mut s, "part.create", json!({"part": "q"})).unwrap();
+        assert_eq!(told(&mut s), [r#"q in work []"#]);
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "q", "type": "sphere", "id": "s", "params": {"radius": 1}}),
+        )
+        .unwrap();
+        assert!(told(&mut s).is_empty());
     }
 
     #[test]
