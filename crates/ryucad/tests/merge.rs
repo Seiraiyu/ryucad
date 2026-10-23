@@ -1,7 +1,8 @@
 //! Merges through Git itself: real repositories, branches, and `git merge`,
-//! `git rebase` and `git cherry-pick` calling ryucad's merge driver. Git's
-//! config is the test's own (a home of its own, no system file), and the
-//! driver is the ryucad binary these tests build.
+//! `git rebase` and `git cherry-pick` calling ryucad's merge driver, and
+//! the hooks ryucad installs refusing commits. Git's config is the test's
+//! own (a home of its own, no system file), and the driver is the ryucad
+//! binary these tests build.
 
 use assert_cmd::Command;
 use serde_json::{Value, json};
@@ -433,6 +434,60 @@ fn the_hooks_refuse_a_merge_commit_until_it_is_settled() {
     // Outside a merge the check passes at once: ordinary commits pay nothing.
     r.ryucad(&["feature", "edit", "p", "b", "--param", "z=6"]);
     r.commit("an ordinary commit");
+}
+
+#[test]
+fn the_commit_guard_keeps_release_records_true() {
+    for sub in ["", "cad"] {
+        let r = boxed(sub);
+        r.ryucad(&["git", "install"]);
+        r.ryucad(&["props", "set", "p", "number=100"]);
+        r.commit("numbered");
+        // A proposal on a branch commits.
+        r.git(&["checkout", "-q", "-b", "propose"]);
+        r.ryucad(&["release", "propose", "p", "--note", "first"]);
+        r.commit("propose p A");
+        // Editing the proposed part is refused: the record would be stale.
+        r.ryucad(&["feature", "edit", "p", "b", "--param", "x=11"]);
+        r.git(&["add", "-A"]);
+        let (code, out) = r.git_status(&["commit", "-q", "-m", "edit after proposing"]);
+        assert_ne!(code, 0, "{out}");
+        assert!(out.contains("release_stale"), "{out}");
+        assert!(out.contains("--no-verify"), "{out}");
+        // Past the hook, check finds it.
+        r.git(&["commit", "-q", "--no-verify", "-m", "edit anyway"]);
+        let (code, v) = r.ryucad_status(&["check"]);
+        assert_eq!(code, 1, "{v}");
+        let codes: Vec<&str> = v["error"]["details"]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["source"] == "release")
+            .map(|f| f["code"].as_str().unwrap())
+            .collect();
+        assert_eq!(codes, ["release_stale"]);
+        // Withdrawn and proposed again, it commits and merges to main.
+        fs::remove_file(r.root.join("releases/p/A.json")).unwrap();
+        r.ryucad(&["release", "propose", "p"]);
+        r.commit("propose p A again");
+        r.git(&["checkout", "-q", "main"]);
+        r.git(&["merge", "-q", "--no-ff", "--no-edit", "propose"]);
+        let listed = r.ryucad(&["release", "list"]);
+        assert_eq!(listed["records"][0]["status"], "official", "{listed}");
+        // On main the record is official: it may not change, the part may.
+        let a = r.root.join("releases/p/A.json");
+        let text = fs::read_to_string(&a).unwrap();
+        fs::write(&a, text.replace("\"agent\"", "\"someone\"")).unwrap();
+        r.git(&["add", "-A"]);
+        let (code, out) = r.git_status(&["commit", "-q", "-m", "rewrite A"]);
+        assert_ne!(code, 0, "{out}");
+        assert!(out.contains("release_modified"), "{out}");
+        r.git(&["checkout", "-q", "HEAD", "--", "."]);
+        r.ryucad(&["feature", "edit", "p", "b", "--param", "x=12"]);
+        r.commit("work towards B");
+        let state = r.ryucad(&["props", "show", "p"]);
+        assert_eq!(state["state"]["text"], "A modified");
+    }
 }
 
 #[test]

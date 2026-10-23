@@ -693,6 +693,52 @@ pub fn merging_projects(here: &Path) -> Result<Vec<std::path::PathBuf>> {
         .collect())
 }
 
+/// What a commit of the index would get wrong about releases, for every
+/// ryucad project the index holds (a folder with a `ryucad.json`): each
+/// project's folder in the work tree with ryupdm's commit guard findings
+/// (`ryupdm::check::staged`), those with none left out. Nothing outside a
+/// repository.
+pub fn release_guard(
+    here: &Path,
+) -> Result<Vec<(std::path::PathBuf, Vec<ryupdm::check::Finding>)>> {
+    let Ok(repo) = gix::discover(here) else {
+        return Ok(Vec::new());
+    };
+    let Some(workdir) = repo.workdir().map(Path::to_path_buf) else {
+        return Ok(Vec::new());
+    };
+    let Ok(index) = repo.open_index() else {
+        return Ok(Vec::new());
+    };
+    let manifest = format!("/{}", crate::doc::project::MANIFEST);
+    let mut prefixes: Vec<String> = index
+        .entries()
+        .iter()
+        .filter(|e| e.stage() == gix::index::entry::Stage::Unconflicted)
+        .filter_map(|e| {
+            let path = e.path(&index).to_string();
+            if path == crate::doc::project::MANIFEST {
+                return Some(String::new());
+            }
+            path.strip_suffix(&manifest).map(|dir| format!("{dir}/"))
+        })
+        .collect();
+    prefixes.sort();
+    prefixes.dedup();
+    let mut out = Vec::new();
+    for prefix in prefixes {
+        let found = ryupdm::check::staged(&repo, &prefix)?;
+        if !found.is_empty() {
+            let root = prefix
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .fold(workdir.clone(), |p, s| p.join(s));
+            out.push((root, found));
+        }
+    }
+    Ok(out)
+}
+
 /// The repository holding the project at `root`, or `not_a_git_repo`.
 pub fn repo(root: &Path) -> Result<Repo> {
     Repo::open(root)?.ok_or_else(|| no_repo(root))

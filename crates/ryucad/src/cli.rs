@@ -373,7 +373,8 @@ enum MergeCmd {
     /// and its choices.
     Status {
         /// As Git's hooks run it: check every ryucad project in the repository, print what
-        /// is unresolved for people, and exit 1 if anything is (0 outside a merge).
+        /// is unresolved for people, and exit 1 if anything is. Outside a merge only the
+        /// release records and parts staged are checked.
         #[arg(long)]
         hook: bool,
     },
@@ -1576,8 +1577,9 @@ pub fn main() -> ExitCode {
 }
 
 /// `ryucad merge status --hook`: every project a merge in progress
-/// concerns, checked in this process. Exits 0 when nothing is unresolved
-/// (or nothing is merging), 1 otherwise, saying what to settle on stderr.
+/// concerns, checked in this process, then on every commit what the
+/// index would commit wrong about releases. Exits 0 when nothing is
+/// unresolved, 1 otherwise, saying what to settle on stderr.
 fn hook_check(here: &std::path::Path) -> ExitCode {
     let projects = match ryucad::git::merging_projects(here) {
         Ok(p) => p,
@@ -1587,6 +1589,25 @@ fn hook_check(here: &std::path::Path) -> ExitCode {
         }
     };
     let mut failed = false;
+    match ryucad::git::release_guard(here) {
+        Ok(found) => {
+            for (root, list) in found {
+                failed = true;
+                eprintln!(
+                    "ryucad: this commit would leave {} release problem(s) in {}:",
+                    list.len(),
+                    root.display()
+                );
+                for f in &list {
+                    eprintln!("  {}: {}", f.code, f.message);
+                }
+            }
+        }
+        Err(e) => {
+            failed = true;
+            eprintln!("ryucad: checking the release records staged: {}", e.message);
+        }
+    }
     for root in projects {
         let at = root.display();
         match server::handle_safely(&mut None, None, None, &root, Request::MergeStatus {}) {
@@ -1642,7 +1663,7 @@ fn hook_check(here: &std::path::Path) -> ExitCode {
     }
     if failed {
         eprintln!(
-            "ryucad: see `ryucad merge status` and settle them with `ryucad merge resolve` or by editing the model; `git commit --no-verify` skips this check"
+            "ryucad: see `ryucad merge status` and `ryucad release check`, and settle them with `ryucad merge resolve` or by editing the model; `git commit --no-verify` skips this check"
         );
         return ExitCode::from(1);
     }
