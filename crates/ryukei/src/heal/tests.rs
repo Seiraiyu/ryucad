@@ -10,6 +10,16 @@ use std::collections::BTreeMap;
 /// would give them: no pcurves, every tolerance 0, the outer shell of
 /// each solid the one with the largest box.
 pub(crate) fn plain(b: &Body) -> Shape {
+    shape_of(b, false)
+}
+
+/// [`plain`], with each fin's pcurve as the file's where its map is the
+/// identity.
+fn with_pcurves(b: &Body) -> Shape {
+    shape_of(b, true)
+}
+
+fn shape_of(b: &Body, pcurves: bool) -> Shape {
     let mut s = Shape::default();
     let mut surfaces = BTreeMap::new();
     let mut curves = BTreeMap::new();
@@ -53,7 +63,13 @@ pub(crate) fn plain(b: &Body) -> Shape {
                         .map(|fin| Use {
                             edge: edges[&b.fins[fin].edge],
                             sense: b.fins[fin].sense,
-                            pcurve: None,
+                            pcurve: b.fins[fin]
+                                .pcurve
+                                .filter(|p| pcurves && p.map == [0.0, 1.0])
+                                .map(|p| {
+                                    s.curves2.push(b.curves2[p.curve].clone());
+                                    s.curves2.len() - 1
+                                }),
                         })
                         .collect(),
                 ),
@@ -355,4 +371,84 @@ fn a_vertex_off_its_curve_is_a_gap() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+/// Two cylinders crossed at right angles, united: their intersection
+/// edges are splines, with fitted pcurves on both.
+fn crossed() -> Body {
+    use crate::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    let a = primitive::cylinder(
+        OpKey(1),
+        1.0,
+        4.0,
+        &Rigid::translation(Vector3::new(0.0, 0.0, -2.0)),
+    )
+    .unwrap()
+    .0;
+    let turn = Rigid::rotation(crate::geom::UnitVector3::X, core::f64::consts::FRAC_PI_2);
+    let b = primitive::cylinder(
+        OpKey(2),
+        0.6,
+        4.0,
+        &Rigid::translation(Vector3::new(0.0, 2.0, 0.0)),
+    )
+    .unwrap()
+    .0;
+    boolean(
+        OpKey(3),
+        BooleanOp::Unite,
+        &a,
+        &[Tool {
+            key: ToolKey(1),
+            body: &b,
+            place: turn,
+        }],
+    )
+    .unwrap()
+    .0
+}
+
+#[test]
+fn pcurves_no_formula_gives_are_fitted() {
+    let b = crossed();
+    let nurbs = b
+        .edges()
+        .filter(|&e| matches!(b.curves[b.edges[e].curve], crate::geom::Curve::Nurbs(_)))
+        .count();
+    assert!(nurbs > 0);
+    let (h, _, report) = heal_ok(&plain(&b));
+    assert_eq!(h.counts(), b.counts());
+    // Fitted pcurves within resolution need no larger tolerance.
+    assert!(report.tolerances.iter().all(|t| t.1 <= 1e-7), "{report:?}");
+}
+
+#[test]
+fn a_files_pcurves_are_used_where_they_fit() {
+    let b = crossed();
+    let s = with_pcurves(&b);
+    assert!(!s.curves2.is_empty());
+    let (h, _, _) = heal_ok(&s);
+    // The intersection edges' pcurves are the file's, bit for bit.
+    let theirs: Vec<String> = s.curves2.iter().map(crate::topo::dump::curve2).collect();
+    let used = h
+        .fins()
+        .filter_map(|f| h.fins[f].pcurve)
+        .filter(|p| theirs.contains(&crate::topo::dump::curve2(&h.curves2[p.curve])))
+        .count();
+    assert!(used > 0);
+    // A pcurve off its edge is not used: the edge's is fitted instead.
+    let mut t = s.clone();
+    for c in &mut t.curves2 {
+        if let crate::geom::Curve2::Nurbs2(n) = c {
+            let pts: Vec<crate::geom::Point2> = n
+                .control_points()
+                .map(|p| crate::geom::Point2::new(p.x + 0.1, p.y))
+                .collect();
+            *c = crate::geom::Curve2::Nurbs2(std::sync::Arc::new(
+                crate::geom::NurbsCurve2::new(n.knots().clone(), pts, Some(n.weights().to_vec()))
+                    .unwrap(),
+            ));
+        }
+    }
+    heal_ok(&t);
 }

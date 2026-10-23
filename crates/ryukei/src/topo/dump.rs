@@ -142,7 +142,7 @@ fn frame2(f: &Frame2) -> String {
 }
 
 /// A pcurve's kind and the exact bits of its data.
-fn curve2(c: &Curve2) -> String {
+pub(crate) fn curve2(c: &Curve2) -> String {
     match c {
         Curve2::Line2(l) => format!(
             "line2 origin={} dir={},{}",

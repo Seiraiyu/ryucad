@@ -1,5 +1,5 @@
 //! Pcurves for every use of an edge: exact where [`pcurve::exact`] finds
-//! one, else the file's.
+//! one, else the file's, else one fitted by projection.
 //!
 //! A file's pcurve runs on its own parameter, which an importer may have
 //! changed from the edge's (a line's is its length, whatever speed the
@@ -9,18 +9,36 @@
 //! the edge's ends, and for a closed edge on a closed pcurve the turn
 //! either way from its start. A map counts only where the pcurve fits
 //! the edge at every sample, as an exact one must.
+//!
+//! A fitted pcurve (a cubic spline through the edge's points projected
+//! onto the surface, [`crate::intersect::fit_pcurve`]) comes with a
+//! certified bound on how far the surface takes it from the edge; the
+//! edge's tolerance grows to cover it, and its search stops at 512
+//! samples. A fit is accepted within ten times the tolerance, so an edge
+//! farther than that from the surface at any of 17 points is
+//! `GapTooLarge` at once, with the gap measured.
 
 use super::names::Names;
 use super::{Face, Loop, Shape, Use};
 use crate::geom::{Curve, Curve2, Point2, Surface};
+use crate::intersect::fit_pcurve_within;
 use crate::pcurve;
 use crate::tol::LINEAR_RESOLUTION;
 use crate::{Error, HealError};
 use rayon::prelude::*;
+use std::sync::Arc;
 
-/// Each face's pcurves, by loop and use: a curve and the affine map from
-/// the edge's parameter to its own. A lone vertex's loop has none.
-pub(super) type Pcurves = Vec<Vec<Vec<(Curve2, [f64; 2])>>>;
+/// The most samples a fitted pcurve may take: an edge needing more is no
+/// edge a file means, and searching further only costs time.
+const FIT_SAMPLES: usize = 512;
+
+/// A use's pcurve: a curve, the affine map from the edge's parameter to
+/// its own, and how far its image may stray from the edge (0 unless it
+/// was fitted).
+pub(super) type Found = (Curve2, [f64; 2], f64);
+
+/// Each face's pcurves, by loop and use. A lone vertex's loop has none.
+pub(super) type Pcurves = Vec<Vec<Vec<Found>>>;
 
 pub(super) fn pcurves(s: &Shape, names: &Names) -> Result<Pcurves, Error> {
     s.faces
@@ -33,14 +51,18 @@ pub(super) fn pcurves(s: &Shape, names: &Names) -> Result<Pcurves, Error> {
                     Loop::Vertex(_) => Ok(Vec::new()),
                     Loop::Edges(uses) => uses
                         .iter()
-                        .map(|u| {
-                            one(s, f, u).ok_or_else(|| {
-                                HealError::NoPcurve {
-                                    edge: names.edges[u.edge],
-                                    face: names.faces[k],
-                                }
-                                .into()
-                            })
+                        .map(|u| match one(s, f, u) {
+                            Ok(Some(found)) => Ok(found),
+                            Ok(None) => Err(HealError::NoPcurve {
+                                edge: names.edges[u.edge],
+                                face: names.faces[k],
+                            }
+                            .into()),
+                            Err(gap) => Err(HealError::GapTooLarge {
+                                entity: names.edges[u.edge],
+                                gap,
+                            }
+                            .into()),
                         })
                         .collect(),
                 })
@@ -57,17 +79,37 @@ pub(super) fn tolerance(s: &Shape, f: &Face, u: &Use) -> f64 {
         .max(LINEAR_RESOLUTION)
 }
 
-fn one(s: &Shape, f: &Face, u: &Use) -> Option<(Curve2, [f64; 2])> {
+/// A use's pcurve, `None` if none is found, or the gap between the edge
+/// and the face's surface where that is too wide to fit one across.
+fn one(s: &Shape, f: &Face, u: &Use) -> Result<Option<Found>, f64> {
     let e = &s.edges[u.edge];
     let surface = &s.surfaces[f.surface];
     let curve = &s.curves[e.curve];
     let tol = tolerance(s, f, u);
-    if let Some(p) = pcurve::exact(surface, curve, e.interval, tol) {
-        return Some(p);
+    if let Some((c2, map)) = pcurve::exact(surface, curve, e.interval, tol) {
+        return Ok(Some((c2, map, 0.0)));
     }
-    let c2 = &s.curves2[u.pcurve?];
-    let map = file_map(surface, curve, e.interval, c2, tol)?;
-    Some((c2.clone(), map))
+    if let Some(i) = u.pcurve {
+        let c2 = &s.curves2[i];
+        if let Some(map) = file_map(surface, curve, e.interval, c2, tol) {
+            return Ok(Some((c2.clone(), map, 0.0)));
+        }
+    }
+    // A fit is accepted within ten times the tolerance: an edge farther
+    // from the surface than that needn't be fitted to find out.
+    let [t0, t1] = e.interval;
+    let gap = (0..17)
+        .map(|i| {
+            let t = t0 + (t1 - t0) * i as f64 / 16.0;
+            surface.project(curve.point(t)).distance
+        })
+        .fold(0.0, f64::max);
+    if gap > 10.0 * tol {
+        return Err(gap);
+    }
+    Ok(fit_pcurve_within(surface, curve, e.interval, FIT_SAMPLES)
+        .ok()
+        .map(|(c2, bound)| (Curve2::Nurbs2(Arc::new(c2)), [0.0, 1.0], bound)))
 }
 
 /// The affine map that makes a file's pcurve fit its edge, if any.

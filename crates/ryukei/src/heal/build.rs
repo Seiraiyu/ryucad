@@ -194,7 +194,8 @@ fn lay_out(s: &Shape, pcurves: &Pcurves) -> Layout {
                         for v in [e.start, e.end] {
                             vertex_tol[v] = vertex_tol[v].max(f.tolerance);
                         }
-                        let (c2, map) = &pcurves[k][l][i];
+                        let (c2, map, bound) = &pcurves[k][l][i];
+                        edge_tol[u.edge] = edge_tol[u.edge].max(*bound);
                         out.curves2.push(c2.clone());
                         arcs.push(layout::Use {
                             edge: u.edge,
