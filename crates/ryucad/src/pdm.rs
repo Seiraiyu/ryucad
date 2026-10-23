@@ -26,7 +26,7 @@ pub const RELEASES: &str = "releases";
 
 /// Whether any release record exists: from then on, the revision scheme
 /// can't change.
-fn released(root: &Path) -> bool {
+pub(crate) fn released(root: &Path) -> bool {
     std::fs::read_dir(root.join(RELEASES))
         .map(|mut it| it.any(|e| e.is_ok_and(|e| has_files(&e.path()))))
         .unwrap_or(false)
