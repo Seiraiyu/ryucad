@@ -41,6 +41,22 @@ impl Frame {
         Ok(Self { origin, x, z })
     }
 
+    /// A frame from axes that are already unit and perpendicular as
+    /// closely as the kernel's own frames are (`|x · z| <= 1e-12`), kept
+    /// bit for bit, so a frame written out and read back is the same
+    /// frame ([`Frame::new`] would orthogonalize and normalize them again,
+    /// moving their last bits).
+    ///
+    /// Fails with `NonFinite` or `OutsideSizeBox` for the origin, and
+    /// `Degenerate` when the axes are not perpendicular that closely.
+    pub fn from_axes(origin: Point3, z: UnitVector3, x: UnitVector3) -> Result<Self, Error> {
+        let origin = Point3::try_new(origin.x, origin.y, origin.z)?;
+        if x.dot(z).abs() > 1e-12 {
+            return Err(Error::Degenerate);
+        }
+        Ok(Self { origin, x, z })
+    }
+
     /// The frame a rigid placement carries the world frame to: the
     /// placement's translation and its rotated x and z axes.
     pub fn from_rigid(placement: &Rigid) -> Result<Self, Error> {
@@ -146,6 +162,28 @@ mod tests {
 
     fn close(a: Vector3, b: Vector3) -> bool {
         (a - b).length() <= 1e-15
+    }
+
+    #[test]
+    fn from_axes_keeps_its_axes() {
+        let f = Frame::new(
+            Point3::new(1.0, 2.0, 3.0),
+            Vector3::new(0.3, -0.2, 1.0),
+            Vector3::new(1.0, 0.7, 0.0),
+        )
+        .unwrap();
+        let g = Frame::from_axes(f.origin(), f.z(), f.x()).unwrap();
+        assert_eq!(f, g);
+        let z = UnitVector3::Z;
+        let x = UnitVector3::exact(Vector3::new(0.6, 0.0, 0.8)).unwrap();
+        assert_eq!(
+            Frame::from_axes(Point3::ORIGIN, z, x),
+            Err(Error::Degenerate)
+        );
+        assert_eq!(
+            Frame::from_axes(Point3::new(600.0, 0.0, 0.0), z, UnitVector3::X),
+            Err(Error::OutsideSizeBox)
+        );
     }
 
     #[test]
