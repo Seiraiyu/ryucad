@@ -62,6 +62,12 @@ pub struct Session {
     revisions: Vec<(String, Session)>,
     /// The last merge status, by the key of what it was computed from.
     pub(crate) merge_status: Option<(String, serde_json::Value)>,
+    /// The release branch as last read, by the key of the refs it was
+    /// read from (see [`crate::release::history`]).
+    pub(crate) releases: Option<(String, ryupdm::history::Releases)>,
+    /// Bodies of released content as this build rebuilds them, by content
+    /// hash, for `release_result_changed`.
+    pub(crate) release_results: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl Session {
@@ -78,6 +84,8 @@ impl Session {
             frozen: false,
             revisions: Vec::new(),
             merge_status: None,
+            releases: None,
+            release_results: BTreeMap::new(),
         };
         s.scan()?;
         Ok(s)
@@ -111,6 +119,8 @@ impl Session {
             frozen: true,
             revisions: Vec::new(),
             merge_status: None,
+            releases: None,
+            release_results: BTreeMap::new(),
         })
     }
 
@@ -401,9 +411,51 @@ impl Session {
     }
 }
 
+/// The files as last read, without copying them: what the session reads
+/// on its own while polling (release states, for `pdm.changed`).
+impl crate::doc::source::Source for Session {
+    fn list(&self, dir: &str) -> Result<Vec<(String, crate::doc::source::Kind)>> {
+        use crate::doc::source::Kind;
+        let at = dir
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .fold(self.root().to_path_buf(), |p, s| p.join(s));
+        let mut out: Vec<(String, Kind)> = Vec::new();
+        for path in self.stamps.range(at.clone()..).map(|(p, _)| p) {
+            let Ok(rest) = path.strip_prefix(&at) else {
+                break;
+            };
+            let mut parts = rest.components();
+            let Some(name) = parts.next() else {
+                continue;
+            };
+            let kind = if parts.next().is_some() {
+                Kind::Dir
+            } else {
+                Kind::File
+            };
+            let entry = (name.as_os_str().to_string_lossy().into_owned(), kind);
+            if !out.contains(&entry) {
+                out.push(entry);
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
+    fn read(&self, rel: &str) -> Result<Option<Vec<u8>>> {
+        let path = rel
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .fold(self.root().to_path_buf(), |p, s| p.join(s));
+        Ok(self.stamps.get(&path).map(|s| s.bytes.to_vec()))
+    }
+}
+
 /// The files a project's state depends on: the manifest, the attributes
-/// that register ryucad with Git, ryupdm's settings, and everything under
-/// `parts/` two and three levels down.
+/// that register ryucad with Git, ryupdm's settings, everything under
+/// `parts/` two and three levels down, and ryupdm's release records, two
+/// levels under `releases/`.
 pub fn files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(listed(root)?.into_iter().map(|(p, _)| p).collect())
 }
@@ -430,6 +482,12 @@ fn listed(root: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
                     out.push((entry, m));
                 }
             }
+        }
+    }
+    let releases = root.join(crate::doc::project::RELEASES);
+    for (part, m) in read_dir(&releases)? {
+        if m.is_dir() {
+            out.extend(read_dir(&part)?.into_iter().filter(|(_, m)| m.is_file()));
         }
     }
     Ok(out)
@@ -544,6 +602,11 @@ mod tests {
         fs::remove_file(dir.path().join("parts/p/part.json")).unwrap();
         fs::write(dir.path().join("ryupdm.json"), "{}").unwrap();
         fs::write(dir.path().join("parts/p/properties.json"), "{}").unwrap();
+        // Release records, two levels down; nothing else under releases/.
+        fs::create_dir_all(dir.path().join("releases/p/deeper")).unwrap();
+        fs::write(dir.path().join("releases/p/A.json"), "{}").unwrap();
+        fs::write(dir.path().join("releases/p/deeper/x.json"), "{}").unwrap();
+        fs::write(dir.path().join("releases/top.json"), "{}").unwrap();
         assert_eq!(
             s.refresh_changes().unwrap(),
             [
@@ -551,9 +614,19 @@ mod tests {
                 ("parts/p/features/b.json".to_owned(), "created"),
                 ("parts/p/part.json".to_owned(), "deleted"),
                 ("parts/p/properties.json".to_owned(), "created"),
+                ("releases/p/A.json".to_owned(), "created"),
                 ("ryupdm.json".to_owned(), "created"),
             ]
         );
+        assert!(s.snapshot().contains_key("releases/p/A.json"));
+        // Read in place, the session lists and reads as its snapshot does.
+        use crate::doc::source::Source;
+        let snap = s.snapshot();
+        for dir in ["", "parts", "parts/p", "releases", "releases/p", "nowhere"] {
+            assert_eq!(s.list(dir).unwrap(), snap.list(dir).unwrap(), "{dir}");
+        }
+        assert_eq!(s.read("releases/p/A.json").unwrap(), Some(b"{}".to_vec()));
+        assert_eq!(s.read("parts/p/part.json").unwrap(), None);
     }
 
     #[test]

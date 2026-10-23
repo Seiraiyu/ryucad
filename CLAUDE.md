@@ -66,7 +66,7 @@ The product targets Windows, macOS, and Linux natively, not just WSL. CI (`.gith
 - `crates/ryukei`: the B-rep geometry kernel (library).
 - `crates/ryusketch`: the 2D constraint solver for sketches (library). It depends on `ryukei` only for `math`.
 - `crates/ryucad-doc`: ryucad's file format (`doc`, `units`, `expr`, `error`), split out so ryupdm can read projects; `ryucad` re-exports each under its old path.
-- `crates/ryupdm`: local product data management (library): the PDM settings, part properties and, later, revisions and releases. It reads projects through `ryucad-doc` and never calls the kernel, a session or the app.
+- `crates/ryupdm`: local product data management (library): the PDM settings, part properties, revision labels, release records, the release branch's history and tags, part states, the release checks and the commit guard. It reads projects through `ryucad-doc` and Git through `gix`, and never calls the kernel, a session or the app.
 - `crates/ryustep`: STEP files (library): Part 21 exchange structures, the AP203/AP214/AP242 entities, units and the product tree. `tests/data/occt` holds files OCCT wrote, with the `gen.cpp` that made them.
 - `crates/ryucad`: the application layer and binary.
 - `crates/ryucad-app`: the desktop app, a client of the daemon (`core`: link, model, people, navigation, picking, forms; `ui`: the egui window and the wgpu scene).

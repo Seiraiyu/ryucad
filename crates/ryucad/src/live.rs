@@ -120,6 +120,8 @@ pub struct Seen {
     pub project: Value,
     pub parts: BTreeMap<crate::doc::id::Id, String>,
     pub merge: Option<String>,
+    /// Each part's release state and tags, while anyone watches.
+    pub pdm: Option<BTreeMap<crate::doc::id::Id, Value>>,
 }
 
 /// Every participant's state, to compare before and after a change.

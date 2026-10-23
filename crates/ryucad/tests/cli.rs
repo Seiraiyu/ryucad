@@ -109,6 +109,11 @@ impl Pair {
 
 impl Drop for Pair {
     fn drop(&mut self) {
+        // A panic here while a failed test unwinds would abort the whole
+        // binary and lose the failure's message.
+        if std::thread::panicking() {
+            return;
+        }
         let _ = self.run_in(&self.daemon, "", &["daemon", "stop"]);
     }
 }
@@ -855,6 +860,11 @@ fn every_protocol_method_has_a_command() {
         ("pdm.configure", &["pdm", "configure"]),
         ("props.get", &["props", "show"]),
         ("props.set", &["props", "set"]),
+        ("release.list", &["release", "list"]),
+        ("release.check", &["release", "check"]),
+        ("release.sync", &["release", "sync"]),
+        ("release.propose", &["release", "propose"]),
+        ("release.obsolete", &["release", "obsolete"]),
         ("sketch.edit", &["sketch", "edit"]),
         ("sketch.solve", &["sketch", "solve"]),
         ("sketch.get", &["sketch", "get"]),
@@ -1787,4 +1797,84 @@ fn solids_from_the_cli() {
         serde_json::json!({"type": "through_all", "both": true})
     );
     p.ok(&["rebuild", "p"]);
+}
+
+#[test]
+fn releases_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=20", "--param",
+        "z=5",
+    ]);
+    // One ID for both projects, so the two ways write the same records.
+    p.write(
+        "ryucad.json",
+        "{\n  \"default_unit\": \"mm\",\n  \"format\": 2,\n  \"kind\": \"ryucad.project\",\n  \"project\": \"0123456789abcdef0123456789abcdef\"\n}\n",
+    );
+    p.ok(&["props", "set", "p", "number=100"]);
+    p.fails(&["release", "propose", "p"], "not_a_git_repo", 1);
+    p.git(&["init", "-q", "-b", "main"]);
+    p.ok(&["git", "install"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "start"]);
+    let v = p.ok(&["release", "list"]);
+    assert_eq!(
+        (&v["branch"]["name"], &v["parts"][0]["text"]),
+        (&json!("main"), &json!("in work"))
+    );
+    let v = p.ok(&["release", "propose", "p", "--note", "first"]);
+    assert_eq!(
+        (&v["path"], &v["record"]["note"]),
+        (&json!("releases/p/A.json"), &json!("first"))
+    );
+    p.fails(&["release", "propose", "p"], "release_pending", 1);
+    p.fails(&["release", "obsolete", "p", "A"], "release_pending", 1);
+    assert_eq!(p.ok(&["release", "check"])["findings"], json!([]));
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "release p A"]);
+    p.fails(&["release", "propose", "p"], "nothing_to_release", 1);
+    let v = p.ok(&["release", "list", "p"]);
+    assert_eq!(
+        (
+            &v["records"][0]["status"],
+            &v["records"][0]["tag"]["status"]
+        ),
+        (&json!("official"), &json!("missing"))
+    );
+    let v = p.ok(&["release", "check"]);
+    assert_eq!(v["findings"][0]["code"], "release_tag_missing");
+    let v = p.ok(&["release", "sync"]);
+    assert_eq!(v["created"][0]["tag"], "ryupdm/p/A");
+    let v = p.ok(&["release", "check", "--results"]);
+    assert_eq!((&v["schema"], &v["findings"]), (&json!(1), &json!([])));
+    assert_eq!(p.ok(&["props", "show", "p"])["state"]["text"], "released A");
+    // An edit is work towards B; a stale proposal fails the checks.
+    p.ok(&["feature", "edit", "p", "b", "--param", "x=12"]);
+    assert_eq!(p.ok(&["props", "show", "p"])["state"]["text"], "A modified");
+    p.ok(&["release", "propose", "p"]);
+    p.ok(&["feature", "edit", "p", "b", "--param", "x=13"]);
+    let e = p.fails(&["release", "check"], "check_failed", 1);
+    assert_eq!(e["details"]["findings"][0]["code"], "release_stale");
+    let e = p.fails(&["check"], "check_failed", 1);
+    assert!(
+        e["details"]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "release_stale" && f["source"] == "release")
+    );
+    fs::remove_file(p.direct.join("releases/p/B.json")).unwrap();
+    fs::remove_file(p.daemon.join("releases/p/B.json")).unwrap();
+    p.fails(&["release", "obsolete", "p", "B"], "invalid_param", 1);
+    let v = p.ok(&["release", "obsolete", "p", "A", "--note", "replaced by q"]);
+    assert_eq!(v["path"], "releases/p/A.obsolete.json");
+    // The daemon logged it: undo takes the record away, redo puts it back.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(!p.daemon.join("releases/p/A.obsolete.json").exists());
+    let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(p.daemon.join("releases/p/A.obsolete.json").exists());
 }

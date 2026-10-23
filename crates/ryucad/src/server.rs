@@ -141,9 +141,11 @@ pub fn answer_live(
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
     {
         let files = activity::diff(&files_before, &session.snapshot());
+        let who = l.caller(me);
         if !files.is_empty() {
-            let who = l.caller(me);
             activity::record(l, EntryKind::Change, &who, &method, params, None, files);
+        } else if method == "release.sync" {
+            activity::record(l, EntryKind::Refs, &who, &method, params, None, files);
         }
     }
     if let (Some(l), Some(before)) = (live, before) {
@@ -249,6 +251,33 @@ fn dispatch(
             expected_revision.as_deref(),
         ),
         Request::PropsGet { part } => crate::pdm::get(session, &part),
+        Request::ReleaseList { part } => crate::release::list(session, part.as_deref()),
+        Request::ReleaseSync {} => crate::release::sync(session),
+        Request::ReleaseCheck { results } => crate::release::check(session, results),
+        Request::ReleasePropose {
+            part,
+            note,
+            expected_revision,
+        } => {
+            let who = participant_name(live, me);
+            crate::release::propose(session, &who, &part, note, expected_revision.as_deref())
+        }
+        Request::ReleaseObsolete {
+            part,
+            label,
+            note,
+            expected_revision,
+        } => {
+            let who = participant_name(live, me);
+            crate::release::obsolete(
+                session,
+                &who,
+                &part,
+                &label,
+                note,
+                expected_revision.as_deref(),
+            )
+        }
         Request::PropsSet {
             part,
             properties,
@@ -325,9 +354,11 @@ fn dispatch(
             )
         }
         Request::CheckFormat {} => check_format(session),
-        Request::Check { part, against } => {
-            crate::check::run(session, part.as_deref(), against.as_deref())
-        }
+        Request::Check {
+            part,
+            against,
+            results,
+        } => crate::check::run(session, part.as_deref(), against.as_deref(), results),
         Request::Diff {
             from,
             to,
@@ -660,6 +691,19 @@ fn project_info(session: &Session) -> Value {
         "parts": p.parts.keys().collect::<Vec<_>>(),
         "version": VersionInfo::current(),
     })
+}
+
+/// The name of the participant asking: the live session's, else the one
+/// the caller gave (the CLI's `--as`), else the default agent's.
+fn participant_name(live: Option<&mut Live>, me: Option<&str>) -> String {
+    match live {
+        Some(l) => {
+            let id = l.caller(me);
+            l.get(&id)
+                .map_or_else(|_| live::DEFAULT_AGENT.to_owned(), |p| p.name.clone())
+        }
+        None => me.unwrap_or(live::DEFAULT_AGENT).to_owned(),
+    }
 }
 
 pub(crate) fn part_id(s: &str) -> Result<Id> {
@@ -1820,6 +1864,26 @@ pub fn publish(live: &mut Live, session: &mut Session) {
         live.hub.send(Topic::Merge, "merge.changed", &params);
     }
     live.seen.merge = merge;
+    // Release states: from records, parts and the release branch's refs,
+    // read only while someone watches. The first reading after a
+    // subscription is what it starts from.
+    if watched {
+        let now = crate::release::summary(session);
+        if let Some(seen) = &live.seen.pdm {
+            let changed: Vec<&Value> = now
+                .iter()
+                .filter(|(id, v)| seen.get(*id) != Some(*v))
+                .map(|(_, v)| v)
+                .collect();
+            if !changed.is_empty() {
+                live.hub
+                    .send(Topic::Pdm, "pdm.changed", &json!({"parts": changed}));
+            }
+        }
+        live.seen.pdm = Some(now);
+    } else {
+        live.seen.pdm = None;
+    }
     let p = session.project();
     let revisions: BTreeMap<Id, String> = p
         .parts

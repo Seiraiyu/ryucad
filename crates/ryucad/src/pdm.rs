@@ -1,5 +1,6 @@
 //! ryupdm through the protocol: the project's PDM settings and its parts'
-//! properties. Writes are checked against the whole project first: one
+//! properties (with each part's release state; releases themselves are
+//! [`crate::release`]'s). Writes are checked against the whole project first: one
 //! that would give any part a fault it doesn't have now (an unknown or
 //! ill-fitting property, a number off the pattern or already taken) is
 //! refused with that fault, unless a settings change is forced.
@@ -21,8 +22,7 @@ use ryupdm::props::{self, Pdm, Properties};
 use serde_json::{Map, Value, json};
 use std::path::Path;
 
-/// The folder release records live in, beside the manifest.
-pub const RELEASES: &str = "releases";
+pub use crate::doc::project::RELEASES;
 
 /// Whether any release record exists: from then on, the revision scheme
 /// can't change.
@@ -60,7 +60,7 @@ pub fn check_not_retired(root: &Path, part: &Id) -> Result<()> {
 }
 
 /// The project's ID, written into the manifest first if it has none.
-fn ensure_id(session: &Session) -> Result<ProjectId> {
+pub(crate) fn ensure_id(session: &Session) -> Result<ProjectId> {
     let manifest = &session.project().manifest;
     if let Some(id) = &manifest.project {
         return Ok(id.clone());
@@ -245,7 +245,7 @@ pub fn configure(session: &mut Session, change: Change, expected: Option<&str>) 
 
 /// `props.get`: every core and declared property, set or not, with its
 /// declaration, value as written and faults; then any set but unknown.
-pub fn get(session: &Session, part: &str) -> Result<Value> {
+pub fn get(session: &mut Session, part: &str) -> Result<Value> {
     let id = part_id(part)?;
     let p = session.project().part(&id)?;
     let pdm = Pdm::read(&session.snapshot(), session.project());
@@ -279,7 +279,10 @@ pub fn get(session: &Session, part: &str) -> Result<Value> {
                        "faults": faults_of(name)})
             }),
     );
-    Ok(json!({"part": id, "revision": p.revision, "properties": list, "faults": pp.faults}))
+    Ok(
+        json!({"part": id, "revision": p.revision, "properties": list, "faults": pp.faults,
+              "state": crate::release::state_of(session, &id)}),
+    )
 }
 
 /// `props.set`: sets properties, or clears those given as `null`, as one

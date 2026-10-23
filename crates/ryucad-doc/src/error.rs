@@ -144,6 +144,14 @@ pub enum Code {
     /// A feature acts on, or refers to, a solid that a `boolean` feature
     /// before it used as a tool: it is part of the boolean's target now.
     BodyConsumed,
+    /// A part that can't be released as it is: a load, rebuild or property
+    /// fault, a missing number or required property (each in `problems`).
+    ReleaseNotReady,
+    /// The part is already its latest release (or that revision is already
+    /// obsolete).
+    NothingToRelease,
+    /// The part has a proposed record that isn't official yet.
+    ReleasePending,
 }
 
 impl Code {
@@ -236,6 +244,9 @@ mod tests {
         assert_eq!(Code::PartNumberDuplicate.exit_code(), 1);
         assert_eq!(Code::PartIdRetired.exit_code(), 1);
         assert_eq!(Code::RevisionSchemeLocked.exit_code(), 1);
+        assert_eq!(Code::ReleaseNotReady.exit_code(), 1);
+        assert_eq!(Code::NothingToRelease.exit_code(), 1);
+        assert_eq!(Code::ReleasePending.exit_code(), 1);
     }
 
     #[test]

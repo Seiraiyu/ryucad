@@ -69,6 +69,10 @@ enum Command {
     /// measure, make or buy, and the project's own.
     #[command(subcommand)]
     Props(PropsCmd),
+    /// Propose a part's next revision, or make its latest one obsolete. Records are files
+    /// under releases/, official once the release branch holds them.
+    #[command(subcommand)]
+    Release(ReleaseCmd),
     /// Edit, solve or read a sketch: points, lines, arcs and circles, and the constraints and
     /// dimensions between them.
     #[command(subcommand)]
@@ -102,6 +106,10 @@ enum Command {
         /// bodies included, as `diff --model` does.
         #[arg(long, value_name = "REV")]
         against: Option<String>,
+        /// Also rebuild official releases and compare their bodies with their records
+        /// (slower).
+        #[arg(long)]
+        results: bool,
     },
     /// What changed between two revisions: features, parameters and sketch
     /// entities, and with --model what that did to the bodies.
@@ -222,7 +230,7 @@ enum Command {
     /// Wait for notifications from the project's daemon: what humans
     /// select, the model changing, and so on.
     Watch {
-        /// model, project, participants, activity or merge (all by default).
+        /// model, project, participants, activity, merge or pdm (all by default).
         #[arg(long = "topic", value_name = "TOPIC")]
         topics: Vec<String>,
         /// Stop after this many notifications.
@@ -365,7 +373,8 @@ enum MergeCmd {
     /// and its choices.
     Status {
         /// As Git's hooks run it: check every ryucad project in the repository, print what
-        /// is unresolved for people, and exit 1 if anything is (0 outside a merge).
+        /// is unresolved for people, and exit 1 if anything is. Outside a merge only the
+        /// release records and parts staged are checked.
         #[arg(long)]
         hook: bool,
     },
@@ -616,6 +625,44 @@ enum PropsCmd {
         part: String,
         #[arg(value_name = "NAME=VALUE", value_parser = param, required = true)]
         values: Vec<(String, String)>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReleaseCmd {
+    /// Write the record of a part's next revision, with its content hash, revising properties
+    /// and rebuilt bodies. It is a proposal until the release branch holds it; nothing is
+    /// committed.
+    Propose {
+        part: String,
+        /// Why this revision, for the record.
+        #[arg(long, value_name = "TEXT")]
+        note: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Every release record (or one part's): official at which commit or still proposed,
+    /// its tag, and each part's state.
+    List { part: Option<String> },
+    /// Check every record against the parts, the release branch and the tags; fails
+    /// (exit 1) on any error.
+    Check {
+        /// Also rebuild official releases and compare their bodies (slower).
+        #[arg(long)]
+        results: bool,
+    },
+    /// Create the local tag ryupdm/<part>/<label> of every official release that has none,
+    /// and move those that point elsewhere. Nothing is pushed or deleted.
+    Sync,
+    /// Write an obsolete record for a part's latest official revision (the part may be
+    /// deleted).
+    Obsolete {
+        part: String,
+        label: String,
+        #[arg(long, value_name = "TEXT")]
+        note: Option<String>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -1083,6 +1130,27 @@ fn request(cmd: &Command) -> Option<Request> {
                 .collect(),
             expected_revision: expect.revision.clone(),
         },
+        Command::Release(ReleaseCmd::List { part }) => Request::ReleaseList { part: part.clone() },
+        Command::Release(ReleaseCmd::Sync) => Request::ReleaseSync {},
+        Command::Release(ReleaseCmd::Check { results }) => {
+            Request::ReleaseCheck { results: *results }
+        }
+        Command::Release(ReleaseCmd::Propose { part, note, expect }) => Request::ReleasePropose {
+            part: part.clone(),
+            note: note.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Release(ReleaseCmd::Obsolete {
+            part,
+            label,
+            note,
+            expect,
+        }) => Request::ReleaseObsolete {
+            part: part.clone(),
+            label: label.clone(),
+            note: note.clone(),
+            expected_revision: expect.revision.clone(),
+        },
         Command::Sketch(SketchCmd::Edit {
             part,
             sketch,
@@ -1124,9 +1192,14 @@ fn request(cmd: &Command) -> Option<Request> {
             rev: rev.rev.clone(),
         },
         Command::CheckFormat => Request::CheckFormat {},
-        Command::Check { part, against } => Request::Check {
+        Command::Check {
+            part,
+            against,
+            results,
+        } => Request::Check {
             part: part.clone(),
             against: against.clone(),
+            results: *results,
         },
         Command::Diff {
             from,
@@ -1415,9 +1488,11 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                     Err(e) => warnings.push(format!("{}; ran in process", e.message)),
                 }
             }
+            // As the participant asked for, as through the daemon.
+            let me = participant(cli);
             deliver(
                 cmd,
-                server::handle_safely(&mut None, None, None, &root, req)?,
+                server::handle_safely(&mut None, None, me.as_deref(), &root, req)?,
             )
             .map(|r| lift(cmd, r, warnings))
         }
@@ -1530,8 +1605,9 @@ pub fn main() -> ExitCode {
 }
 
 /// `ryucad merge status --hook`: every project a merge in progress
-/// concerns, checked in this process. Exits 0 when nothing is unresolved
-/// (or nothing is merging), 1 otherwise, saying what to settle on stderr.
+/// concerns, checked in this process, then on every commit what the
+/// index would commit wrong about releases. Exits 0 when nothing is
+/// unresolved, 1 otherwise, saying what to settle on stderr.
 fn hook_check(here: &std::path::Path) -> ExitCode {
     let projects = match ryucad::git::merging_projects(here) {
         Ok(p) => p,
@@ -1541,6 +1617,25 @@ fn hook_check(here: &std::path::Path) -> ExitCode {
         }
     };
     let mut failed = false;
+    match ryucad::git::release_guard(here) {
+        Ok(found) => {
+            for (root, list) in found {
+                failed = true;
+                eprintln!(
+                    "ryucad: this commit would leave {} release problem(s) in {}:",
+                    list.len(),
+                    root.display()
+                );
+                for f in &list {
+                    eprintln!("  {}: {}", f.code, f.message);
+                }
+            }
+        }
+        Err(e) => {
+            failed = true;
+            eprintln!("ryucad: checking the release records staged: {}", e.message);
+        }
+    }
     for root in projects {
         let at = root.display();
         match server::handle_safely(&mut None, None, None, &root, Request::MergeStatus {}) {
@@ -1596,7 +1691,7 @@ fn hook_check(here: &std::path::Path) -> ExitCode {
     }
     if failed {
         eprintln!(
-            "ryucad: see `ryucad merge status` and settle them with `ryucad merge resolve` or by editing the model; `git commit --no-verify` skips this check"
+            "ryucad: see `ryucad merge status` and `ryucad release check`, and settle them with `ryucad merge resolve` or by editing the model; `git commit --no-verify` skips this check"
         );
         return ExitCode::from(1);
     }

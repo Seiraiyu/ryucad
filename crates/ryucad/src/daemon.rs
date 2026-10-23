@@ -352,6 +352,8 @@ fn subscribe(
     // What happened before the subscription isn't news to it.
     settle(session, live, &state.root);
     let sub = live.hub.subscribe(me, &topics);
+    // Now watched: what is news to it is measured from here.
+    settle(session, live, &state.root);
     let shown = if topics.is_empty() {
         notify::Topic::ALL.to_vec()
     } else {
