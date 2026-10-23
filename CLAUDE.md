@@ -37,6 +37,7 @@ cargo test -p ryukei-bench --features occt,smlib --release --test spike -- --noc
 cargo test -p ryukei-bench --features occt,smlib --release --test booleans -- --nocapture  # booleans head to head with OCCT and SMLib, and the 1000-hole race; devcontainer only
 cargo test -p ryukei-bench --features occt,smlib --release --test blends -- --nocapture    # blends head to head with OCCT and SMLib, and the 1000-rim race; devcontainer only
 cargo test -p ryukei --release --test boolean_props         # the boolean property tests (ignored in debug builds: minutes there)
+cargo test -p ryukei --release --test booleans              # booleans at a millimetre and a centimetre (the scaled cases are ignored in debug builds)
 cargo test -p ryukei --release --test pipe_props            # pipes against seeded random surfaces and lines (ignored in debug builds)
 cargo test -p ryukei --release --test blends                # fillets, pipe ones included (the slow ones are ignored in debug builds)
 cargo test -p ryukei --release --test chamfers              # chamfers, ruled ones included (likewise)
