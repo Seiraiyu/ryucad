@@ -145,11 +145,30 @@ pub struct PartResult {
     /// The features this rebuild built, in feature order; the others came
     /// from the cache.
     pub built: Vec<Id>,
+    /// The joins, cuts and intersects whose own bodies this rebuild built,
+    /// in feature order; the others' came from the cache.
+    pub tools: Vec<Id>,
 }
 
-/// A part's results by feature: the hash of the inputs each was built
-/// from, and what it built.
-pub type Cache = BTreeMap<Id, (blake3::Hash, Result<Output>)>;
+/// What a rebuild keeps for the next: each feature's result by the hash
+/// of the inputs it was built from, and the body each join, cut or
+/// intersect applied by the hash of that body's own inputs, so a change
+/// to what it acts on alone builds it again from the body it applies.
+#[derive(Clone, Debug, Default)]
+pub struct Cache {
+    pub features: BTreeMap<Id, (blake3::Hash, Result<Output>)>,
+    pub tools: BTreeMap<Id, (blake3::Hash, Arc<Built>)>,
+}
+
+impl Cache {
+    pub fn new() -> Cache {
+        Cache::default()
+    }
+}
+
+/// A join, cut or intersect's own body: the hash of what it is built
+/// from, and the body as a cache holds it, if it does.
+type ToolInput<'a> = (blake3::Hash, Option<&'a (blake3::Hash, Arc<Built>)>);
 
 impl PartResult {
     pub fn failed(&self) -> usize {
@@ -646,22 +665,35 @@ fn build_body(
     id: &Id,
     f: &Feature,
     before: &dyn Results,
-) -> Result<Made> {
+    tool: Option<ToolInput>,
+) -> (Result<Made>, Option<Arc<Built>>) {
     let c = f.combine().expect("a body-making feature");
     // Its targets first: a cut of a solid that failed is
     // `dependency_failed`, whatever its own body would be.
-    let targets: Vec<(&Id, &Built)> = c
+    let targets: Result<Vec<(&Id, &Built)>> = c
         .targets
         .iter()
         .map(|t| Ok((t, target(part, solids, id, t, before)?)))
-        .collect::<Result<_>>()?;
+        .collect();
+    let targets = match targets {
+        Ok(t) => t,
+        Err(e) => return (Err(e), None),
+    };
     let bodies: Vec<&Built> = targets.iter().map(|(_, b)| *b).collect();
-    let own = match f {
-        Feature::Primitive(p) => build_primitive(&part.id, id, p)?,
-        _ => build_sweep(part, id, f, &bodies, before)?,
+    let own = match tool {
+        Some((h, Some((c, b)))) if *c == h => Ok(Arc::clone(b)),
+        _ => match f {
+            Feature::Primitive(p) => build_primitive(&part.id, id, p),
+            _ => build_sweep(part, id, f, &bodies, before),
+        }
+        .map(Arc::new),
+    };
+    let own = match own {
+        Ok(own) => own,
+        Err(e) => return (Err(e), None),
     };
     if c.is_new() {
-        return Ok(Made::new(vec![(id.clone(), Arc::new(own))]));
+        return (Ok(Made::new(vec![(id.clone(), own)])), None);
     }
     let ty = f.type_name();
     let kop = match c.operation {
@@ -672,17 +704,19 @@ fn build_body(
     };
     let tool = [ToolBody {
         key: tool_key(&part.id, id),
-        built: &own,
+        built: own.as_ref(),
         name: id,
     }];
-    let made: Vec<(Id, Arc<Built>)> = targets
+    // The body is kept however applying it goes: moving what it misses
+    // needs it again.
+    let made: Result<Vec<(Id, Arc<Built>)>> = targets
         .par_iter()
         .map(|(t, b)| {
             let r = apply(part, id, ty, (kop, c.operation.as_str()), t, b, &tool)?;
             Ok(((*t).clone(), Arc::new(r)))
         })
-        .collect::<Result<_>>()?;
-    Ok(Made::new(made))
+        .collect();
+    (made.map(Made::new), Some(own))
 }
 
 /// A body a feature applies to a solid: its key, the body, and what to
@@ -927,14 +961,32 @@ pub fn rebuild_feature(
     f: &Feature,
     before: &dyn Results,
 ) -> Result<Output> {
+    rebuild_with(part, solids, id, f, before, None).0
+}
+
+/// [`rebuild_feature`], taking a join, cut or intersect's own body from
+/// `tool` when its hash matches; also returns that body, to cache.
+fn rebuild_with(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    f: &Feature,
+    before: &dyn Results,
+    tool: Option<ToolInput>,
+) -> (Result<Output>, Option<Arc<Built>>) {
+    let solid = |m: Made| Output::Solids(Arc::new(m));
     match f {
-        Feature::Sketch(s) => crate::sketch::context(part, part.order(), id, s, before)
-            .and_then(|c| crate::sketch::solve_in(id, s, &c))
-            .map(|s| Output::Sketch(Arc::new(s))),
-        Feature::Boolean(b) => {
-            build_boolean(part, solids, id, b, before).map(|m| Output::Solids(Arc::new(m)))
+        Feature::Sketch(s) => {
+            let r = crate::sketch::context(part, part.order(), id, s, before)
+                .and_then(|c| crate::sketch::solve_in(id, s, &c))
+                .map(|s| Output::Sketch(Arc::new(s)));
+            (r, None)
         }
-        f => build_body(part, solids, id, f, before).map(|m| Output::Solids(Arc::new(m))),
+        Feature::Boolean(b) => (build_boolean(part, solids, id, b, before).map(solid), None),
+        f => {
+            let (r, own) = build_body(part, solids, id, f, before, tool);
+            (r.map(solid), own)
+        }
     }
 }
 
@@ -950,6 +1002,53 @@ fn input_hash(
     f: &Feature,
     before: &BTreeMap<Id, Result<Output>>,
 ) -> blake3::Hash {
+    let reads = crate::graph::reads(solids, id, f);
+    hash_of(part, id, &f.to_json(), &reads, before)
+}
+
+/// The hash of everything a join, cut or intersect's own body depends
+/// on: [`input_hash`]'s, but for the feature as written less its
+/// operation and targets, and for what it reads less its targets, unless
+/// it goes through all of them.
+fn tool_hash(
+    part: &Part,
+    solids: &crate::solid::Solids,
+    id: &Id,
+    f: &Feature,
+    before: &BTreeMap<Id, Result<Output>>,
+) -> blake3::Hash {
+    let mut v = f.to_json();
+    if let Some(o) = v.as_object_mut() {
+        o.remove("operation");
+        o.remove("targets");
+    }
+    let through = matches!(
+        f,
+        Feature::Extrude(e) if matches!(e.extent, Extent::ThroughAll { .. })
+    );
+    let named = f
+        .swept()
+        .into_iter()
+        .chain(f.references().into_iter().map(|(_, r)| &r.feature))
+        .chain(if through { f.targets() } else { Vec::new() });
+    let mut reads: Vec<&Id> = Vec::new();
+    for input in named {
+        let read = solids.view(input, id).unwrap_or(input);
+        if !reads.contains(&read) {
+            reads.push(read);
+        }
+    }
+    hash_of(part, id, &v, &reads, before)
+}
+
+/// The hash of a feature's versions, JSON, parameters and reads.
+fn hash_of(
+    part: &Part,
+    id: &Id,
+    json: &Value,
+    reads: &[&Id],
+    before: &BTreeMap<Id, Result<Output>>,
+) -> blake3::Hash {
     let mut h = blake3::Hasher::new();
     // Length-prefixed, so no two sets of pieces hash alike.
     let mut piece = |b: &[u8]| {
@@ -959,7 +1058,7 @@ fn input_hash(
     let v = crate::proto::VersionInfo::current();
     piece(v.ryucad.as_bytes());
     piece(v.ryukei.as_bytes());
-    piece(crate::doc::canonical::to_string(&f.to_json()).as_bytes());
+    piece(crate::doc::canonical::to_string(json).as_bytes());
     for name in part.uses.get(id).into_iter().flatten() {
         piece(name.as_bytes());
         match part.env.get(name) {
@@ -976,7 +1075,7 @@ fn input_hash(
     }
     let order = part.order();
     let at = |x: &Id| order.iter().position(|o| o == x);
-    for input in crate::graph::reads(solids, id, f) {
+    for input in reads {
         piece(input.as_str().as_bytes());
         let before_me = matches!((at(input), at(id)), (Some(i), Some(me)) if i < me);
         piece(&[u8::from(before_me)]);
@@ -991,6 +1090,30 @@ fn input_hash(
         }
     }
     h.finalize()
+}
+
+/// One feature's turn in a rebuild: the hash of its inputs (none for a
+/// file that doesn't load), its result, whether this rebuild built it,
+/// and a join, cut or intersect's own body with its hash and whether this
+/// rebuild built that.
+struct Step {
+    id: Id,
+    hash: Option<blake3::Hash>,
+    result: Result<Output>,
+    new: bool,
+    tool: Option<(blake3::Hash, Arc<Built>, bool)>,
+}
+
+impl Step {
+    fn failed(id: Id, e: Error) -> Step {
+        Step {
+            id,
+            hash: None,
+            result: Err(e),
+            new: false,
+            tool: None,
+        }
+    }
 }
 
 /// Rebuilds every listed feature of `part`, from nothing.
@@ -1009,6 +1132,7 @@ pub fn rebuild_part_with(part: &Part, cache: &Cache) -> (PartResult, Cache) {
     let mut built: BTreeMap<Id, Result<Output>> = BTreeMap::new();
     let mut fresh = Cache::new();
     let mut made = Vec::new();
+    let mut tools_made = Vec::new();
     for depth in 0.. {
         let now: Vec<&Id> = part
             .order()
@@ -1018,33 +1142,55 @@ pub fn rebuild_part_with(part: &Part, cache: &Cache) -> (PartResult, Cache) {
         if now.is_empty() {
             break;
         }
-        let results: Vec<(Id, Option<blake3::Hash>, Result<Output>, bool)> = now
+        let results: Vec<Step> = now
             .par_iter()
             .map(|id| {
                 let id = (*id).clone();
-                match &part.features[&id] {
-                    Ok(f) => {
-                        let h = input_hash(part, &solids, &id, f, &built);
-                        match cache.get(&id) {
-                            Some((c, r)) if *c == h => (id, Some(h), r.clone(), false),
-                            _ => {
-                                let r = rebuild_feature(part, &solids, &id, f, &built);
-                                (id, Some(h), r, true)
-                            }
-                        }
+                let f = match &part.features[&id] {
+                    Ok(f) => f,
+                    Err(e) => return Step::failed(id, e.clone()),
+                };
+                let h = input_hash(part, &solids, &id, f, &built);
+                let applies = f.combine().is_some_and(|c| !c.is_new());
+                let kept = cache.tools.get(&id);
+                let (result, new, tool) = match cache.features.get(&id) {
+                    Some((c, r)) if *c == h => {
+                        let tool = kept.map(|(th, b)| (*th, Arc::clone(b), false));
+                        (r.clone(), false, tool)
                     }
-                    Err(e) => (id, None, Err(e.clone()), false),
+                    _ if applies => {
+                        let th = tool_hash(part, &solids, &id, f, &built);
+                        let (r, own) =
+                            rebuild_with(part, &solids, &id, f, &built, Some((th, kept)));
+                        let fresh = !kept.is_some_and(|(c, _)| *c == th);
+                        (r, true, own.map(|b| (th, b, fresh)))
+                    }
+                    _ => (rebuild_feature(part, &solids, &id, f, &built), true, None),
+                };
+                Step {
+                    id,
+                    hash: Some(h),
+                    result,
+                    new,
+                    tool,
                 }
             })
             .collect();
-        for (id, h, r, new) in results {
-            if new {
+        for step in results {
+            let id = step.id;
+            if step.new {
                 made.push(id.clone());
             }
-            if let Some(h) = h {
-                fresh.insert(id.clone(), (h, r.clone()));
+            if let Some((th, b, built)) = step.tool {
+                if built {
+                    tools_made.push(id.clone());
+                }
+                fresh.tools.insert(id.clone(), (th, b));
             }
-            built.insert(id, r);
+            if let Some(h) = step.hash {
+                fresh.features.insert(id.clone(), (h, step.result.clone()));
+            }
+            built.insert(id, step.result);
         }
     }
     let features: Vec<(Id, Result<Output>)> = part
@@ -1066,10 +1212,17 @@ pub fn rebuild_part_with(part: &Part, cache: &Cache) -> (PartResult, Cache) {
         };
         h.update(piece.as_bytes());
     }
+    let tools = part
+        .order()
+        .iter()
+        .filter(|id| tools_made.contains(id))
+        .cloned()
+        .collect();
     let result = PartResult {
         features,
         hash: h.finalize().to_hex()[..32].to_owned(),
         built,
+        tools,
     };
     (result, fresh)
 }
@@ -1249,6 +1402,39 @@ mod tests {
         let (cached, _) = rebuild_part_with(&p, &cache);
         assert!(cached.built.is_empty());
         assert_eq!(cached.hash, r.hash);
+    }
+
+    #[test]
+    fn a_change_to_a_target_alone_keeps_the_tool() {
+        use crate::doc::solid::Operation::*;
+        use crate::solid::tests::{boxed, part};
+        let at = |a: &str, c: &str| {
+            part(vec![
+                ("a", boxed(a, New, &[])),
+                ("c", boxed(c, Cut, &["a"])),
+            ])
+        };
+        let (first, cache) = rebuild_part_with(&at("0", "0.5"), &Cache::new());
+        assert_eq!(first.tools, [id("c")]);
+        // The target moves: the cut is built again, from the same body.
+        let p = at("0.2", "0.5");
+        let (moved, cache) = rebuild_part_with(&p, &cache);
+        assert_eq!(moved.built, [id("a"), id("c")]);
+        assert!(moved.tools.is_empty());
+        assert_eq!(moved.hash, rebuild_part(&p).hash);
+        // The cut moves: its body is built again.
+        let (cut, cache) = rebuild_part_with(&at("0.2", "0.6"), &cache);
+        assert_eq!(cut.tools, [id("c")]);
+        // A cut that misses keeps its body, for when the target comes to
+        // it.
+        let (miss, cache) = rebuild_part_with(&at("0.2", "5"), &cache);
+        assert_eq!(miss.failed(), 1);
+        assert_eq!(miss.tools, [id("c")]);
+        let p = at("4.8", "5");
+        let (hit, _) = rebuild_part_with(&p, &cache);
+        assert_eq!(hit.failed(), 0);
+        assert!(hit.tools.is_empty());
+        assert_eq!(hit.hash, rebuild_part(&p).hash);
     }
 
     #[test]
