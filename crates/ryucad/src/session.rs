@@ -237,8 +237,21 @@ impl Session {
     }
 
     /// Adds to `reference_unresolved` what its name was when it last
-    /// resolved (`was`: `{kind, from}`), if this session saw it.
-    pub fn explain(&self, part: &Id, mut e: Error) -> Error {
+    /// resolved (`was`: `{kind, from}`), if this session saw it, and
+    /// which feature of its solid's chain took it away (`removed_by`).
+    pub fn explain(&self, part: &Id, e: Error) -> Error {
+        let order = self
+            .project
+            .parts
+            .get(part)
+            .map(|p| p.order().to_vec())
+            .unwrap_or_default();
+        self.explain_in(part, &order, e)
+    }
+
+    /// [`Session::explain`] for the part's list as `order` has it: as a
+    /// write would leave it.
+    pub fn explain_in(&self, part: &Id, order: &[Id], mut e: Error) -> Error {
         if e.code != crate::error::Code::ReferenceUnresolved {
             return e;
         }
@@ -247,14 +260,65 @@ impl Session {
             .and_then(|d| Id::parse(d, "feature").ok());
         let name = e.details["reference"]
             .as_str()
-            .and_then(|r| r.rsplit('/').next());
+            .and_then(|r| r.rsplit('/').next())
+            .map(str::to_owned);
+        let name = name.as_deref();
         let was = dependency
+            .as_ref()
             .zip(name)
-            .and_then(|(d, n)| self.known.get(&(part.clone(), d))?.get(n));
+            .and_then(|(d, n)| self.known.get(&(part.clone(), d.clone()))?.get(n));
         if let Some(w) = was {
             e.details["was"] = w.clone();
         }
+        let reader = e.details["feature"]
+            .as_str()
+            .and_then(|f| Id::parse(f, "feature").ok());
+        let removed = dependency
+            .zip(name.and_then(crate::doc::reference::parse_name))
+            .zip(reader)
+            .and_then(|((solid, name), reader)| {
+                self.removed_by(part, order, &solid, name, &reader)
+            });
+        if let Some(by) = removed {
+            e.details["removed_by"] = serde_json::json!(by);
+        }
         e
+    }
+
+    /// The feature of `solid`'s chain, before `reader`, that left the
+    /// solid without `name` after the one before it had it, in the cached
+    /// rebuild.
+    fn removed_by(
+        &self,
+        part: &Id,
+        order: &[Id],
+        solid: &Id,
+        name: ryukei::name::Name,
+        reader: &Id,
+    ) -> Option<Id> {
+        let p = self.project.parts.get(part)?;
+        let result = &self.results.get(part)?.1;
+        let solids = crate::solid::Solids::of_order(p, order);
+        let last = solids.view(solid, reader)?;
+        let chain = solids.chain(solid)?;
+        let has = |f: &Id| {
+            result
+                .output(f)
+                .and_then(|o| o.solid(solid))
+                .map(|b| b.body.by_name(name).is_some())
+        };
+        let mut had = false;
+        for f in chain {
+            match has(f) {
+                Some(true) => had = true,
+                Some(false) if had => return Some(f.clone()),
+                _ => {}
+            }
+            if f == last {
+                break;
+            }
+        }
+        None
     }
 
     /// Notes what every name of the part's solids is, by solid.

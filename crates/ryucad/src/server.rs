@@ -1213,7 +1213,7 @@ fn check_references(
     let p = session.project().part(part)?.clone();
     let results = session.rebuilt(part)?;
     let checked = check_resolved(&p, order, id, f, results);
-    checked.map_err(|e| session.explain(part, e))
+    checked.map_err(|e| session.explain_in(part, order, e))
 }
 
 /// [`check_references`] against `results`.
