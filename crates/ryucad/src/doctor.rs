@@ -368,6 +368,7 @@ pub fn diagnose(root: &Path) -> Vec<Issue> {
         diagnose_part(root, part, unit, &mut issues);
     }
     diagnose_pdm(root, manifest.as_ref(), &part_ids, &mut issues);
+    diagnose_releases(root, &mut issues);
     diagnose_git(root, &mut issues);
     issues
 }
@@ -443,6 +444,62 @@ fn diagnose_pdm(root: &Path, manifest: Option<&Manifest>, parts: &[&str], issues
             files,
             format!("the project uses ryupdm but {MANIFEST} has no project ID"),
         ));
+    }
+}
+
+/// ryupdm's release records: `releases/` holds a folder per part ID and
+/// in it only records, each of which reads as a record of the part and
+/// label its path gives. Whether they agree with the parts and history is
+/// `release check`'s to say.
+fn diagnose_releases(root: &Path, issues: &mut Vec<Issue>) {
+    use crate::doc::project::RELEASES;
+    use ryupdm::record::parse_name;
+    let dirs = names(&root.join(RELEASES));
+    classify(
+        root,
+        RELEASES,
+        &dirs,
+        |n, d| d && Id::parse(n, "part").is_ok(),
+        &[],
+        issues,
+    );
+    for (dir, _) in dirs
+        .iter()
+        .filter(|(n, d)| *d && Id::parse(n, "part").is_ok())
+    {
+        let at = format!("{RELEASES}/{dir}");
+        let files = names(&root.join(RELEASES).join(dir));
+        let labels: Vec<String> = files
+            .iter()
+            .filter_map(|(n, d)| (!d).then(|| parse_name(n)).flatten())
+            .map(|(l, k)| match k {
+                ryupdm::record::Kind::Release => l,
+                ryupdm::record::Kind::Obsolete => format!("{l}.obsolete"),
+            })
+            .collect();
+        let originals: Vec<&str> = labels.iter().map(String::as_str).collect();
+        classify(
+            root,
+            &at,
+            &files,
+            |n, d| !d && parse_name(n).is_some(),
+            &originals,
+            issues,
+        );
+    }
+    let Ok(records) = ryupdm::record::Records::read(&Folder(root)) else {
+        return;
+    };
+    for e in &records.entries {
+        match read(root, &e.path) {
+            Read::Missing => {}
+            Read::Bad(i) => issues.push(i),
+            Read::Json(_, canonical) => match &e.record {
+                Err(err) => issues.push(document_issue(&e.path, err)),
+                Ok(_) if !canonical => issues.push(non_canonical(&e.path)),
+                Ok(_) => {}
+            },
+        }
     }
 }
 
@@ -1662,6 +1719,59 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(report(r).unwrap()["errors"], 2);
+    }
+
+    /// A release record of `part`'s `label`, as ryupdm writes one.
+    fn record(part: &str, label: &str) -> Value {
+        json!({"built_with": {"commit": "c", "ryucad": "0", "ryukei": "0"},
+               "content": "c".repeat(64), "format": 1, "kind": "ryupdm.release",
+               "label": label, "part": part, "project": "0123456789abcdef0123456789abcdef",
+               "properties": {}, "released_by": {"participant": "agent"}, "results": {},
+               "supersedes": null})
+    }
+
+    #[test]
+    fn release_records_are_read_where_they_lie() {
+        let dir = healthy();
+        let r = dir.path();
+        let mut s = crate::session::Session::open(r).unwrap();
+        call(&mut s, "pdm.init", json!({})).unwrap();
+        fs::create_dir_all(r.join("releases/p")).unwrap();
+        let a = canonical::to_string(&record("p", "A"));
+        w(r, "releases/p/A.json", &a);
+        assert!(codes(r).is_empty(), "{:?}", codes(r));
+        fs::create_dir_all(r.join("releases/Bad Name")).unwrap();
+        let mut newer = record("p", "C");
+        newer["format"] = json!(2);
+        w(r, "releases/p/A (1).json", &a);
+        w(
+            r,
+            "releases/p/B.json",
+            &a.replace('\n', "\r\n").replace("\"A\"", "\"B\""),
+        );
+        w(r, "releases/p/C.json", &canonical::to_string(&newer));
+        w(
+            r,
+            "releases/p/D.json",
+            &canonical::to_string(&record("q", "D")),
+        );
+        w(r, "releases/p/E.obsolete.json", "{");
+        w(r, "releases/p/notes.txt", "hi");
+        w(r, "releases/stray.json", "{}");
+        let p = |n: &str| format!("releases/p/{n}");
+        assert_eq!(
+            codes(r),
+            [
+                ("unknown_file", vec!["releases/Bad Name".into()]),
+                ("unknown_file", vec!["releases/stray.json".into()]),
+                ("sync_conflict_copy", vec![p("A (1).json"), p("A.json")]),
+                ("unknown_file", vec![p("notes.txt")]),
+                ("non_canonical", vec![p("B.json")]),
+                ("format_too_new", vec![p("C.json")]),
+                ("invalid_document", vec![p("D.json")]),
+                ("invalid_json", vec![p("E.obsolete.json")]),
+            ]
+        );
     }
 
     #[test]

@@ -31,8 +31,8 @@ pub struct Revision {
     /// The project folder's tree in that commit, in hex: equal trees, equal
     /// files. Empty when the commit has no such folder.
     pub tree: String,
-    /// The manifest, its Git attributes and everything under `parts/`, by
-    /// path relative to the project.
+    /// The manifest, its Git attributes, ryupdm's settings and everything
+    /// under `parts/` and `releases/`, by path relative to the project.
     pub files: Files,
 }
 
@@ -136,6 +136,17 @@ impl Repo {
         Ok(Some(Repo { repo, prefix }))
     }
 
+    /// The repository itself, for ryupdm.
+    pub fn gix(&self) -> &gix::Repository {
+        &self.repo
+    }
+
+    /// Where the project sits in the work tree: empty at its root, else
+    /// ending in `/`.
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
     /// The commit `HEAD` points at, or `None` before the first commit.
     fn head(&self) -> Option<gix::Commit<'_>> {
         self.repo.head_commit().ok()
@@ -180,7 +191,7 @@ impl Repo {
 
     /// The project's files in a commit's tree, by path relative to the
     /// project: the files at its root a session tracks and everything
-    /// under `parts/`.
+    /// under `parts/` and `releases/`.
     fn project_blobs(&self, tree: &gix::Tree<'_>) -> Result<BTreeMap<String, gix::ObjectId>> {
         let mut out = BTreeMap::new();
         for name in crate::doc::project::ROOT_FILES {
@@ -188,8 +199,10 @@ impl Repo {
                 out.insert(name.to_owned(), id);
             }
         }
-        if let Some(id) = self.entry(tree, &format!("{}parts", self.prefix))? {
-            self.blobs(id, "parts/", &mut out)?;
+        for dir in ["parts", crate::doc::project::RELEASES] {
+            if let Some(id) = self.entry(tree, &format!("{}{dir}", self.prefix))? {
+                self.blobs(id, &format!("{dir}/"), &mut out)?;
+            }
         }
         Ok(out)
     }
@@ -558,13 +571,18 @@ impl Repo {
 
 /// Whether `rel` (relative to a project) is one of the files its state
 /// depends on, as `session::files` lists them: the files at its root,
-/// and files two and three levels under `parts/`.
+/// files two and three levels under `parts/`, and files two levels under
+/// `releases/`.
 fn project_file(rel: &str) -> bool {
     if crate::doc::project::ROOT_FILES.contains(&rel) {
         return true;
     }
     let mut parts = rel.split('/');
-    parts.next() == Some("parts") && matches!(parts.count(), 2 | 3)
+    match parts.next() {
+        Some("parts") => matches!(parts.count(), 2 | 3),
+        Some(crate::doc::project::RELEASES) => parts.count() == 2,
+        _ => false,
+    }
 }
 
 /// The files Git keeps while a merge, cherry-pick, revert or rebase step
@@ -673,6 +691,52 @@ pub fn merging_projects(here: &Path) -> Result<Vec<std::path::PathBuf>> {
         })
         .filter(|p| p.join(crate::doc::project::MANIFEST).is_file())
         .collect())
+}
+
+/// What a commit of the index would get wrong about releases, for every
+/// ryucad project the index holds (a folder with a `ryucad.json`): each
+/// project's folder in the work tree with ryupdm's commit guard findings
+/// (`ryupdm::check::staged`), those with none left out. Nothing outside a
+/// repository.
+pub fn release_guard(
+    here: &Path,
+) -> Result<Vec<(std::path::PathBuf, Vec<ryupdm::check::Finding>)>> {
+    let Ok(repo) = gix::discover(here) else {
+        return Ok(Vec::new());
+    };
+    let Some(workdir) = repo.workdir().map(Path::to_path_buf) else {
+        return Ok(Vec::new());
+    };
+    let Ok(index) = repo.open_index() else {
+        return Ok(Vec::new());
+    };
+    let manifest = format!("/{}", crate::doc::project::MANIFEST);
+    let mut prefixes: Vec<String> = index
+        .entries()
+        .iter()
+        .filter(|e| e.stage() == gix::index::entry::Stage::Unconflicted)
+        .filter_map(|e| {
+            let path = e.path(&index).to_string();
+            if path == crate::doc::project::MANIFEST {
+                return Some(String::new());
+            }
+            path.strip_suffix(&manifest).map(|dir| format!("{dir}/"))
+        })
+        .collect();
+    prefixes.sort();
+    prefixes.dedup();
+    let mut out = Vec::new();
+    for prefix in prefixes {
+        let found = ryupdm::check::staged(&repo, &prefix)?;
+        if !found.is_empty() {
+            let root = prefix
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .fold(workdir.clone(), |p, s| p.join(s));
+            out.push((root, found));
+        }
+    }
+    Ok(out)
 }
 
 /// The repository holding the project at `root`, or `not_a_git_repo`.
@@ -792,12 +856,24 @@ pub(crate) mod tests {
         std::fs::write(root.join("ryupdm.json"), "{}").unwrap();
         std::fs::create_dir_all(root.join("parts/p")).unwrap();
         std::fs::write(root.join("parts/p/properties.json"), "{}").unwrap();
+        std::fs::create_dir_all(root.join("releases/p")).unwrap();
+        std::fs::write(root.join("releases/p/A.json"), "{}").unwrap();
         git(root, &["add", "."]);
         git(root, &["commit", "-q", "-m", "pdm"]);
-        let r = repo(root).unwrap().revision("HEAD").unwrap();
+        let repo = repo(root).unwrap();
+        let r = repo.revision("HEAD").unwrap();
         assert_eq!(r.files, files(root));
         assert!(r.files.contains_key("ryupdm.json"));
         assert!(r.files.contains_key("parts/p/properties.json"));
+        assert!(r.files.contains_key("releases/p/A.json"));
+        // A record changed and one never added are what a commit would
+        // leave out.
+        std::fs::write(root.join("releases/p/A.json"), "{ }").unwrap();
+        std::fs::write(root.join("releases/p/B.json"), "{}").unwrap();
+        assert_eq!(
+            repo.unstaged(&files(root)).unwrap(),
+            ["releases/p/A.json", "releases/p/B.json"]
+        );
     }
 
     #[test]

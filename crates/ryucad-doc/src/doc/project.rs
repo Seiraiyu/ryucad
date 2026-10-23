@@ -7,6 +7,7 @@
 //! parts/<part>/parameters.json      (optional)
 //! parts/<part>/properties.json      (optional: ryupdm's properties)
 //! parts/<part>/features/<feature>.json
+//! releases/<part>/<label>.json      (ryupdm's release records)
 //! ```
 //!
 //! ryupdm's files are read and checked by ryupdm; here they are only
@@ -38,6 +39,10 @@ pub const ATTRIBUTES: &str = ".gitattributes";
 
 /// ryupdm's settings, beside the manifest. Nothing ryucad builds reads it.
 pub const PDM_CONFIG: &str = "ryupdm.json";
+
+/// The folder of ryupdm's release records, beside the manifest. Nothing
+/// ryucad builds reads it.
+pub const RELEASES: &str = "releases";
 
 /// The files at the project's root that a session tracks.
 pub const ROOT_FILES: [&str; 3] = [MANIFEST, ATTRIBUTES, PDM_CONFIG];
@@ -329,9 +334,14 @@ impl Project {
             };
             match in_part {
                 Some(id) => ids.insert(id),
-                // Git's attributes and ryupdm's settings define nothing
-                // ryucad builds.
-                None if path == ATTRIBUTES || path == PDM_CONFIG => continue,
+                // Git's attributes, ryupdm's settings and its release
+                // records define nothing ryucad builds.
+                None if path == ATTRIBUTES
+                    || path == PDM_CONFIG
+                    || path.starts_with(&format!("{RELEASES}/")) =>
+                {
+                    continue;
+                }
                 None => {
                     *self = Project::load(&self.root)?;
                     return Ok(());
@@ -763,6 +773,13 @@ mod tests {
         write_json(&root.join(MANIFEST), &Manifest::new(Unit::In).to_json()).unwrap();
         project.reload(&[MANIFEST.into()]).unwrap();
         same(&project);
+        // A release record defines nothing a part is: nothing is read.
+        fs::create_dir_all(root.join("releases/p")).unwrap();
+        fs::write(root.join("releases/p/A.json"), "{}").unwrap();
+        fs::remove_file(root.join(MANIFEST)).unwrap();
+        let before = format!("{project:?}");
+        project.reload(&["releases/p/A.json".into()]).unwrap();
+        assert_eq!(format!("{project:?}"), before);
     }
 
     #[test]

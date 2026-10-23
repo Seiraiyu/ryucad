@@ -1,13 +1,37 @@
 //! ryupdm: product data management for ryucad projects, local and
 //! offline. A project's parts carry properties checked against the
-//! project's settings (this crate's [`props`] and [`config`]).
+//! project's settings (this crate's [`props`] and [`config`]), and are
+//! released under labels its revision scheme derives ([`label`]), each
+//! release naming the hash of what it released ([`content`]) in a record
+//! under `releases/` ([`record`]) that is official once the release
+//! branch holds it ([`history`]). From those, each part has a state:
+//! in work, released, modified or obsolete ([`state`]), and the records
+//! are checked against the parts, the branch and the tags ([`check`]).
 //!
 //! ryupdm reads projects through `ryucad-doc` and never calls the kernel,
 //! a session, the daemon or the app: ryucad exposes it through its
 //! protocol and CLI, and a service can link it to read any revision.
+//!
+//! # As a library
+//!
+//! Every function takes a [`ryucad_doc::doc::source::Source`], and where
+//! history matters a `gix::Repository` and the project's place in it, so
+//! it works on a bare repository at any commit ([`history::files`] reads
+//! one): [`content::hash`], [`props::Pdm::read`],
+//! [`history::Releases::read`], [`state::derive`], [`check::run`] (whose
+//! findings have a versioned shape, [`check::SCHEMA`]) and
+//! [`check::staged`], the commit guard. This API follows the workspace's
+//! version, and changes to these functions are called out in the release
+//! notes.
 
+pub mod check;
 pub mod config;
+pub mod content;
+pub mod history;
+pub mod label;
 pub mod props;
+pub mod record;
+pub mod state;
 
 use ryucad_doc::doc::canonical;
 use ryucad_doc::doc::id::ProjectId;

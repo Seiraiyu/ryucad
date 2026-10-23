@@ -30,6 +30,9 @@ pub enum EntryKind {
     Redo,
     /// Files changed behind the daemon's back.
     External,
+    /// Git refs a request wrote (`release.sync`'s tags): logged, but not
+    /// project files, so never undone.
+    Refs,
 }
 
 /// A file's content before or after a change; `None` when it didn't
