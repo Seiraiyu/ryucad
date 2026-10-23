@@ -413,6 +413,21 @@ pub fn user(name: &str) -> Value {
         .unwrap_or_else(k.default)
 }
 
+/// Refuses to write the project's own settings when the caller's view of
+/// them is out of date; returns the revision they are at.
+pub fn check_project_revision(root: &Path, expected: Option<&str>) -> Result<String> {
+    let rev = project_revision(root)?;
+    match expected {
+        Some(e) if e != rev => Err(Error::new(
+            Code::Conflict,
+            format!("the project changed since revision {e}; read it again and retry"),
+        )
+        .with("expected", e)
+        .with("actual", rev)),
+        _ => Ok(rev),
+    }
+}
+
 /// A project revision: a hash of the files that hold the project's own
 /// settings, the manifest and ryupdm's settings if there are any. Each
 /// piece is length-prefixed, and ryupdm's is tagged.

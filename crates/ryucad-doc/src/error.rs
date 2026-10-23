@@ -128,6 +128,10 @@ pub enum Code {
     PartNumberInvalid,
     /// Two parts of one project with the same number.
     PartNumberDuplicate,
+    /// A part ID that a release record names, so it can't be used again.
+    PartIdRetired,
+    /// The revision scheme can't change once any part has been released.
+    RevisionSchemeLocked,
 }
 
 impl Code {
@@ -218,6 +222,8 @@ mod tests {
         assert_eq!(Code::ConflictNotFound.exit_code(), 1);
         assert_eq!(Code::PropertyUnknown.exit_code(), 1);
         assert_eq!(Code::PartNumberDuplicate.exit_code(), 1);
+        assert_eq!(Code::PartIdRetired.exit_code(), 1);
+        assert_eq!(Code::RevisionSchemeLocked.exit_code(), 1);
     }
 
     #[test]

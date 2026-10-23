@@ -139,6 +139,30 @@ pub fn fits(decl: &Decl, value: &Value, unit: Unit) -> Option<String> {
     }
 }
 
+/// `value` as `decl`'s type stores it: a string that spells a whole
+/// number, a number or a boolean becomes one, so a command line can give
+/// every value as text. Anything else is left for [`fits`] to judge.
+pub fn coerce(decl: &Decl, value: Value) -> Value {
+    let Some(s) = value.as_str().map(str::trim) else {
+        return value;
+    };
+    let typed = match decl.ty {
+        Type::Integer => s.parse::<i64>().ok().map(Value::from),
+        Type::Number => s
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number),
+        Type::Boolean => match s {
+            "true" => Some(Value::Bool(true)),
+            "false" => Some(Value::Bool(false)),
+            _ => None,
+        },
+        _ => None,
+    };
+    typed.unwrap_or(value)
+}
+
 /// The faults of one part's properties against `config`, by property name:
 /// unknown properties, values that don't fit, a number off the pattern.
 /// Numbers shared with other parts are [`duplicates`]'.
@@ -397,6 +421,20 @@ mod tests {
         .collect();
         want.sort_by(|a, b| a.1.cmp(&b.1));
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn text_becomes_the_declared_type() {
+        let c = config();
+        let decl = |n: &str| c.decl(n).unwrap();
+        assert_eq!(coerce(&decl("count"), json!(" 12 ")), json!(12));
+        assert_eq!(coerce(&decl("ratio"), json!("0.25")), json!(0.25));
+        assert_eq!(coerce(&decl("coated"), json!("true")), json!(true));
+        assert_eq!(coerce(&decl("count"), json!("twelve")), json!("twelve"));
+        assert_eq!(coerce(&decl("ratio"), json!("inf")), json!("inf"));
+        // Text stays text: a part number of digits is still a string.
+        assert_eq!(coerce(&decl("number"), json!("100")), json!("100"));
+        assert_eq!(coerce(&decl("count"), json!(3)), json!(3));
     }
 
     #[test]

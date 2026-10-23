@@ -4127,6 +4127,7 @@ dependencies = [
  "ryucad-doc",
  "ryukei",
  "ryukei-testkit",
+ "ryupdm",
  "ryusketch",
  "serde",
  "serde_json",
