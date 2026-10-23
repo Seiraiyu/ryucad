@@ -3,10 +3,12 @@
 //! working files, and from the other side's meshes (`mesh.get` at that
 //! revision), never from the files.
 //!
-//! Only bodies whose results differ take part: their faces are coloured
-//! new or changed, and the other side's body is ghosted with the faces it
-//! loses in the removed colour. Unchanged bodies are the same on both
-//! sides, so a ghost of them would only fight the model for its pixels.
+//! Features are marked by how they differ. Only solids whose bodies, as
+//! the model shows them, differ take part in the drawing: their faces are
+//! coloured new or changed, and the other side's solid is ghosted with
+//! the faces it loses in the removed colour. Unchanged solids are the same
+//! on both sides, so a ghost of them would only fight the model for its
+//! pixels.
 
 use crate::core::model::BodyKey;
 use ryucad::error::Error;
@@ -247,9 +249,12 @@ impl Compare {
                         },
                     );
                 }
-                if !m.is_object() {
-                    continue;
-                }
+            }
+            // The model's solids, by founder: their faces new or changed,
+            // ghosts of what they were, and what is gone of them.
+            let solids = p["solids"].as_object().into_iter().flatten();
+            for (id, m) in solids {
+                let key = (part.clone(), id.clone());
                 let (from_ok, to_ok) = (m["from"]["ok"] == true, m["to"]["ok"] == true);
                 let b = &m["body"];
                 if b.is_object() {
@@ -265,8 +270,7 @@ impl Compare {
                         self.gone.insert(key.clone(), gone);
                     }
                 } else if to_ok && !from_ok {
-                    // Added, or failing there: all of it is new. A sketch
-                    // has no body, so nothing is painted for it.
+                    // New, or failing there: all of it is new.
                     self.new_bodies.insert(key.clone());
                 }
                 if from_ok {
@@ -385,6 +389,13 @@ mod tests {
                     "t": {"status": "same",
                           "model": {"from": {"ok": false, "error": "rebuild_failed"},
                                     "to": {"ok": true, "hash": "h5"}}}
+                },
+                "solids": {
+                    "b": {"from": {"ok": true, "hash": "h1"}, "to": {"ok": true, "hash": "h2"},
+                          "body": body},
+                    "c": {"from": {"ok": true, "hash": "h3"}, "to": null},
+                    "n": {"from": null, "to": {"ok": true, "hash": "h4"}},
+                    "t": {"from": {"ok": false}, "to": {"ok": true, "hash": "h5"}}
                 }
             }}
         })
@@ -459,10 +470,9 @@ mod tests {
         c.take_diff(&diff());
         assert!(c.ghosts.contains_key(&key("b")));
         let mut d = diff();
-        d["parts"]["p"]["features"]
-            .as_object_mut()
-            .unwrap()
-            .remove("b");
+        for list in ["features", "solids"] {
+            d["parts"]["p"][list].as_object_mut().unwrap().remove("b");
+        }
         c.take_diff(&d);
         assert!(c.ghosts.is_empty());
         c.failed(Error::new(ryucad::error::Code::RevNotFound, "gone"));

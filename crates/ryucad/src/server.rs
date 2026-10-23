@@ -1701,6 +1701,19 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
             (!ins.is_empty()).then(|| (fid.clone(), ins.into_iter().cloned().collect()))
         })
         .collect();
+    // What each feature does to solids, and the tools a boolean consumes:
+    // for showing the chains.
+    let ops: BTreeMap<Id, (&'static str, Vec<Id>)> = part
+        .features
+        .iter()
+        .filter_map(|(fid, f)| match f.as_ref().ok()? {
+            Feature::Boolean(b) => Some((fid.clone(), (b.op.as_str(), b.tools.clone()))),
+            f => {
+                let c = f.combine().filter(|c| !c.is_new())?;
+                Some((fid.clone(), (c.operation.as_str(), Vec::new())))
+            }
+        })
+        .collect();
     let counts = |b: &crate::rebuild::Built| {
         let c = b.body.counts();
         json!({"faces": c.faces, "edges": c.edges, "vertices": c.vertices})
@@ -1742,6 +1755,12 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
             let of = solids.solids_of(fid);
             if !of.is_empty() {
                 v["solids"] = json!(of);
+            }
+            if let Some((op, tools)) = ops.get(fid) {
+                v["operation"] = json!(op);
+                if !tools.is_empty() {
+                    v["consumes"] = json!(tools);
+                }
             }
             v
         })
@@ -3010,6 +3029,8 @@ pub(crate) mod tests {
         assert_eq!(solid["features"], json!(["a", "c"]));
         assert_eq!((&solid["ok"], &solid["shown"]), (&json!(true), &json!("c")));
         assert_eq!(part["features"][1]["solids"], json!(["a"]));
+        assert_eq!(part["features"][1]["operation"], "cut");
+        assert!(part["features"][0].get("operation").is_none());
         assert_eq!(solid["hash"], part["features"][1]["hash"]);
         // Meshes are the solids', named by founder.
         let m = call(&mut s, "mesh.get", json!({"part": "p"})).unwrap();

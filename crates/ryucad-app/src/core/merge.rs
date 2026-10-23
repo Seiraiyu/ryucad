@@ -158,6 +158,7 @@ mod tests {
             id: "p".into(),
             revision: "r1".into(),
             features: Vec::new(),
+            solids: Vec::new(),
             error: None,
         };
         let parts = [("p".to_owned(), part)].into_iter().collect();

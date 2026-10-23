@@ -128,6 +128,57 @@ fn the_tree_lists_features_and_frames_a_chosen_one() {
 }
 
 #[test]
+fn the_tree_groups_features_by_solid() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "box",
+        "--id",
+        "slot",
+        "--operation",
+        "cut",
+        "--target",
+        "base",
+        "--param",
+        "x=4",
+        "--param",
+        "y=20",
+        "--param",
+        "z=2",
+        "--origin",
+        "8,-5,4",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "boolean", "--id", "whole", "--op", "unite", "--target", "base",
+        "--tool", "boss",
+    ]);
+    let mut h = window(&p);
+    frames(&mut h, |a| match &a.screen {
+        ryucad_app::ui::app::Screen::Opened(o) => o.ws.idle() && o.ws.model.meshes.len() == 1,
+        _ => false,
+    });
+    h.step();
+    // The base's solid, its chain, and the boss it consumed under the
+    // boolean.
+    h.get_by_label("base (solid)");
+    h.get_by_label("base (box)");
+    h.get_by_label("whole (boolean, unite)");
+    h.get_by_label("boss (tool, consumed)");
+    h.get_by_label("slot (box, cut)").click();
+    frames(&mut h, |a| a.opened().ws.made.is_some());
+    assert_eq!(
+        h.state().opened().view.chosen,
+        Some(("p".to_owned(), "slot".to_owned()))
+    );
+}
+
+#[test]
 fn a_click_selects_and_agents_see_it() {
     let _one = one_at_a_time();
     if !gpu() {
