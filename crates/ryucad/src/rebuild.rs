@@ -477,10 +477,12 @@ pub fn rebuild_feature(part: &Part, id: &Id, f: &Feature, before: &dyn Results) 
 
 /// The hash of everything a feature's result depends on: ryucad's and
 /// ryukei's versions, the feature as written (canonical, every unit
-/// explicit), the value of each parameter it reads, and each input's place
-/// in the list and result. Equal hashes, equal results.
+/// explicit), the value of each parameter it reads, and the place in the
+/// list and result of each feature it reads (a solid as its view). Equal
+/// hashes, equal results.
 fn input_hash(
     part: &Part,
+    solids: &crate::solid::Solids,
     id: &Id,
     f: &Feature,
     before: &BTreeMap<Id, Result<Output>>,
@@ -511,7 +513,7 @@ fn input_hash(
     }
     let order = part.order();
     let at = |x: &Id| order.iter().position(|o| o == x);
-    for input in crate::graph::inputs(f) {
+    for input in crate::graph::reads(solids, id, f) {
         piece(input.as_str().as_bytes());
         let before_me = matches!((at(input), at(id)), (Some(i), Some(me)) if i < me);
         piece(&[u8::from(before_me)]);
@@ -540,6 +542,7 @@ pub fn rebuild_part(part: &Part) -> PartResult {
 /// whatever the cache holds.
 pub fn rebuild_part_with(part: &Part, cache: &Cache) -> (PartResult, Cache) {
     let depths = crate::graph::depths(part);
+    let solids = crate::solid::Solids::of(part);
     let mut built: BTreeMap<Id, Result<Output>> = BTreeMap::new();
     let mut fresh = Cache::new();
     let mut made = Vec::new();
@@ -558,7 +561,7 @@ pub fn rebuild_part_with(part: &Part, cache: &Cache) -> (PartResult, Cache) {
                 let id = (*id).clone();
                 match &part.features[&id] {
                     Ok(f) => {
-                        let h = input_hash(part, &id, f, &built);
+                        let h = input_hash(part, &solids, &id, f, &built);
                         match cache.get(&id) {
                             Some((c, r)) if *c == h => (id, Some(h), r.clone(), false),
                             _ => {
