@@ -238,8 +238,8 @@ struct Side {
     parts: BTreeMap<Id, Built>,
 }
 
-/// A part on one side: each listed feature's result, and the features and
-/// parameters each one reads.
+/// A part on one side: each listed feature's result, and the features
+/// (a solid as the feature's view of it) and parameters each one reads.
 #[derive(Default)]
 struct Built {
     results: BTreeMap<Id, Result<Output>>,
@@ -257,11 +257,15 @@ fn built(s: &mut Session) -> Result<BTreeMap<Id, Built>> {
             uses: p.uses.clone(),
             ..Default::default()
         };
+        let solids = crate::solid::Solids::of(&p);
         for (fid, f) in &p.features {
             if let Ok(f) = f {
                 b.inputs.insert(
                     fid.clone(),
-                    crate::graph::inputs(f).into_iter().cloned().collect(),
+                    crate::graph::reads(&solids, fid, f)
+                        .into_iter()
+                        .cloned()
+                        .collect(),
                 );
             }
         }
@@ -819,7 +823,16 @@ fn compute(session: &mut Session) -> Result<Value> {
         c["repairs"] = json!(renumbering(&root, &working, &ours, &theirs, c));
     }
     let now = built(session)?;
-    let (broke, already) = broken(&now, &ours, &theirs, &base);
+    let (mut broke, already) = broken(&now, &ours, &theirs, &base);
+    // What a name that is gone was, and which feature took it.
+    for c in &mut broke {
+        let part = c["concerns"]["part"]
+            .as_str()
+            .and_then(|p| Id::parse(p, "part").ok());
+        if let (Some(part), Ok(e)) = (part, serde_json::from_value::<Error>(c["error"].clone())) {
+            c["error"] = json!(session.explain(&part, e));
+        }
+    }
     conflicts.extend(broke);
     conflicts.extend(stale(&root, &now, &ours, &theirs, &base));
     conflicts.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
@@ -1438,6 +1451,56 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_cut_the_other_side_added_is_blamed_for_the_face_it_took() {
+        let mut m = boxed();
+        // Theirs sketches on the box's top.
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        let v = m.call("inspect", json!({"part": "p"})).unwrap();
+        let top = v["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                f["surface"]["frame"]["origin"][2]
+                    .as_f64()
+                    .is_some_and(|z| z > 0.004)
+            })
+            .map(|f| format!("p/b/{}", f["name"].as_str().unwrap()))
+            .expect("a top face");
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "t", "face": top}),
+        )
+        .unwrap();
+        m.commit("theirs: a sketch on top");
+        // Ours cuts the top millimetre away.
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "skim", "operation": "cut",
+                   "params": {"x": 30, "y": 30, "z": 2}, "placement": {"origin": [-5, -5, 4]}}),
+        )
+        .unwrap();
+        m.commit("ours: the top skimmed");
+        m.merge("theirs");
+        let v = m.call("merge.status", json!({})).unwrap();
+        let c: Vec<&Value> = v["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["kind"] == "merge_broke")
+            .collect();
+        assert_eq!(c.len(), 1, "{v}");
+        assert_eq!(c[0]["concerns"]["feature"], "t");
+        assert_eq!(c[0]["cause"], "ours", "{v}");
+        assert_eq!(c[0]["files"], json!(["parts/p/features/skim.json"]));
+        assert_eq!(c[0]["error"]["code"], "reference_unresolved");
+        assert_eq!(c[0]["error"]["details"]["removed_by"], "skim");
+    }
+
+    #[test]
     fn a_sketch_the_merge_left_stale_is_solved_by_a_repair() {
         let mut m = boxed();
         squared(&mut m);
@@ -1857,6 +1920,83 @@ pub(crate) mod tests {
             (Some("p4"), Some("p6"))
         );
         assert!(s.get("conflicts").is_none());
+    }
+
+    #[test]
+    fn a_solid_added_under_one_id_is_renumbered_with_what_acts_on_it() {
+        let mut m = boxed();
+        let add_box = |m: &mut Merging, x: i32| {
+            m.call(
+                "feature.add",
+                json!({"part": "p", "type": "box", "id": "box-2",
+                       "params": {"x": x, "y": 10, "z": 10}}),
+            )
+            .unwrap();
+        };
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        add_box(&mut m, 30);
+        // Theirs cuts a slot across its box, then sketches on the box's +x
+        // face, at x = 30 mm, as the cut left it.
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "slot", "operation": "cut",
+                   "targets": ["box-2"], "params": {"x": 4, "y": 20, "z": 5},
+                   "placement": {"origin": [10, -5, 6]}}),
+        )
+        .unwrap();
+        let faces = m.call("inspect", json!({"part": "p"})).unwrap();
+        let body = faces["bodies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["solid"] == "box-2")
+            .unwrap()
+            .clone();
+        let far = body["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                f["surface"]["frame"]["origin"][0]
+                    .as_f64()
+                    .is_some_and(|x| x > 0.029)
+            })
+            .map(|f| f["name"].as_str().unwrap().to_owned())
+            .expect("a face at x = 30 mm");
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "on",
+                   "face": format!("p/box-2/{far}")}),
+        )
+        .unwrap();
+        m.commit("theirs: a slotted box, sketched on");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        add_box(&mut m, 5);
+        m.commit("ours: a short box");
+        m.merge("theirs");
+        let r = renumber(&mut m, "parts/p/features/box-2.json#");
+        assert_eq!(r["status"]["clean"], true, "{r}");
+        let show = |m: &mut Merging, id: &str| {
+            m.call("feature.show", json!({"part": "p", "id": id}))
+                .unwrap()
+        };
+        // The slot cuts theirs' box, by its new ID; the sketch follows it.
+        assert_eq!(show(&mut m, "slot")["targets"], json!(["box-1"]));
+        assert_eq!(
+            show(&mut m, "on")["face"].as_str().unwrap()[..8],
+            *"p/box-1/"
+        );
+        let built = m.call("rebuild", json!({})).unwrap();
+        assert_eq!(built["parts"][0]["failed"], 0, "{built}");
+        let solids: Vec<&str> = built["parts"][0]["solids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["solid"].as_str().unwrap())
+            .collect();
+        assert_eq!(solids, ["b", "box-2", "box-1"]);
     }
 
     #[test]
