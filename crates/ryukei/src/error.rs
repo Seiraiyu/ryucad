@@ -36,6 +36,42 @@ pub enum Error {
     InvalidBoolean(BooleanError),
     /// A blend that can't be done: see `crate::blend::blend`.
     InvalidBlend(BlendError),
+    /// A shape that can't be healed into a body: see
+    /// [`crate::heal::heal`].
+    InvalidHeal(HealError),
+}
+
+/// Why a shape couldn't be healed into a body. Entities are named by
+/// their import names (see [`crate::heal`]); nothing is built when one
+/// is refused.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HealError {
+    /// The shape refers to an entity it doesn't have, or breaks its own
+    /// rules in a way no file can mean: `what` says how.
+    Malformed { what: &'static str },
+    /// A shell's faces leave these edges used once: it doesn't close.
+    OpenShell { free_edges: Vec<Name> },
+    /// An edge used by more than two faces, or a vertex where faces meet
+    /// in more than one fan: `at` is the edge or vertex.
+    NonManifold { at: Name },
+    /// The two uses of an edge run the same way along it, or a face or
+    /// shell faces inwards: `at` is the edge or face.
+    Misoriented { at: Name },
+    /// An edge one face uses twice that isn't a seam: a whole parameter
+    /// line where the face's surface wraps.
+    BadSeam { face: Name },
+    /// A face whose loops don't bound a region of its surface ryukei can
+    /// hold: no loops on a surface that doesn't close up, or loops that
+    /// wind the wrong way.
+    BadDomain { face: Name },
+    /// An edge that gets no pcurve on a face it bounds: none exact, the
+    /// file's off the edge, and none could be fitted.
+    NoPcurve { edge: Name, face: Name },
+    /// An edge, vertex or face farther from the geometry it should lie
+    /// on than its tolerance allows: `gap` is the distance found.
+    GapTooLarge { entity: Name, gap: f64 },
+    /// A decision rounding left uncertain: refused rather than guessed.
+    Uncertain { at: Name },
 }
 
 /// Why a boolean was refused. Entities are named by their stable names,
@@ -205,6 +241,7 @@ impl fmt::Display for Error {
             ),
             Self::InvalidBoolean(b) => write!(f, "invalid boolean: {b}"),
             Self::InvalidBlend(b) => write!(f, "invalid blend: {b}"),
+            Self::InvalidHeal(h) => write!(f, "can't heal: {h}"),
         }
     }
 }
@@ -354,6 +391,36 @@ impl fmt::Display for BlendError {
                 write!(f, "blends would meet in an edge or a point at {at}")
             }
         }
+    }
+}
+
+impl fmt::Display for HealError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Malformed { what } => write!(f, "malformed shape: {what}"),
+            Self::OpenShell { free_edges } => {
+                write!(f, "a shell is open at {} edges", free_edges.len())?;
+                if let Some(e) = free_edges.first() {
+                    write!(f, ", the first {e}")?;
+                }
+                Ok(())
+            }
+            Self::NonManifold { at } => write!(f, "faces meet in more than one fan at {at}"),
+            Self::Misoriented { at } => write!(f, "{at} is oriented against its neighbours"),
+            Self::BadSeam { face } => write!(f, "face {face} uses an edge twice off a seam"),
+            Self::BadDomain { face } => write!(f, "the loops of face {face} bound no region"),
+            Self::NoPcurve { edge, face } => write!(f, "edge {edge} has no pcurve on face {face}"),
+            Self::GapTooLarge { entity, gap } => {
+                write!(f, "{entity} is {gap:e} m from where it should be")
+            }
+            Self::Uncertain { at } => write!(f, "healing at {at} could not be certified"),
+        }
+    }
+}
+
+impl From<HealError> for Error {
+    fn from(h: HealError) -> Self {
+        Self::InvalidHeal(h)
     }
 }
 

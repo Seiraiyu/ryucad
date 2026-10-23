@@ -243,7 +243,7 @@ fn unwrap(x: f64, near: f64, period: Option<f64>) -> f64 {
 
 /// Whether the surface takes the pcurve to within `tolerance` of the edge
 /// at every sample.
-fn fits(
+pub(crate) fn fits(
     surface: &Surface,
     curve: &Curve,
     [t0, t1]: [f64; 2],

@@ -62,6 +62,9 @@ pub enum Role {
     Boolean(BooleanRole),
     /// An entity of a blend.
     Blend(BlendRole),
+    /// An entity of an imported body; its parents are the hash of its
+    /// geometry and an ordinal (see [`crate::heal`]).
+    Import(ImportRole),
 }
 
 /// The faces of the primitives.
@@ -154,6 +157,14 @@ pub enum BlendRole {
     Corner,
 }
 
+/// The entities of an imported body (see [`crate::heal`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ImportRole {
+    Vertex,
+    Edge,
+    Face,
+}
+
 impl Role {
     /// The role's fixed two-byte encoding inside a name.
     fn code(self) -> [u8; 2] {
@@ -169,6 +180,7 @@ impl Role {
             Self::Sweep(r) => [9, r as u8],
             Self::Boolean(r) => [10, r as u8],
             Self::Blend(r) => [11, r as u8],
+            Self::Import(r) => [12, r as u8],
         }
     }
 }
@@ -224,6 +236,11 @@ impl fmt::Display for Role {
                 BlendRole::Section => "section",
                 BlendRole::Vertex => "blend-vertex",
                 BlendRole::Corner => "blend-corner",
+            }),
+            Self::Import(r) => f.write_str(match r {
+                ImportRole::Vertex => "import-vertex",
+                ImportRole::Edge => "import-edge",
+                ImportRole::Face => "import-face",
             }),
         }
     }
@@ -407,6 +424,9 @@ mod tests {
             BlendRole::Corner,
         ] {
             roles.push(Role::Blend(r));
+        }
+        for r in [ImportRole::Vertex, ImportRole::Edge, ImportRole::Face] {
+            roles.push(Role::Import(r));
         }
         let mut codes: Vec<[u8; 2]> = roles.iter().map(|r| r.code()).collect();
         codes.sort_unstable();

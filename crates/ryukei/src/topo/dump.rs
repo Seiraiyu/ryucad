@@ -3,11 +3,11 @@ use crate::geom::{Curve, Curve2, Frame, Frame2, KnotVector, Point2, Point3, Surf
 use core::fmt::Write;
 
 /// The exact bits of a float, so a dump is bit-exact.
-fn bits(x: f64) -> String {
+pub(crate) fn bits(x: f64) -> String {
     format!("{:016x}", x.to_bits())
 }
 
-fn point(p: Point3) -> String {
+pub(crate) fn point(p: Point3) -> String {
     format!("{},{},{}", bits(p.x), bits(p.y), bits(p.z))
 }
 
@@ -45,7 +45,7 @@ fn floats(xs: &[f64]) -> String {
 }
 
 /// A curve's kind and the exact bits of its data.
-fn curve(c: &Curve) -> String {
+pub(crate) fn curve(c: &Curve) -> String {
     match c {
         Curve::Line(l) => {
             let d = l.dir().get();
@@ -75,7 +75,8 @@ fn curve(c: &Curve) -> String {
     }
 }
 
-fn surface(s: &Surface) -> String {
+/// A surface's kind and the exact bits of its data.
+pub(crate) fn surface(s: &Surface) -> String {
     let f = s.frame().map(frame).unwrap_or_default();
     match s {
         Surface::Plane(_) => format!("plane {f}"),
