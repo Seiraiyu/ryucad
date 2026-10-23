@@ -103,7 +103,7 @@ pub fn tag_name(part: &Id, label: &str) -> String {
 
 /// The project folder's entry `path` (relative to the project, below
 /// `prefix`) in the tree `tree`.
-fn entry(
+pub(crate) fn entry(
     repo: &gix::Repository,
     tree: gix::ObjectId,
     prefix: &str,
@@ -126,7 +126,7 @@ fn entry(
 }
 
 /// Every blob under the tree `id`, by path below it starting with `at`.
-fn blobs(
+pub(crate) fn blobs(
     repo: &gix::Repository,
     id: gix::ObjectId,
     at: &str,
@@ -163,6 +163,21 @@ fn records(repo: &gix::Repository, id: gix::ObjectId) -> Result<BTreeMap<String,
         }
     });
     Ok(all)
+}
+
+/// The records the commit `id` holds for the project at `prefix`, by path
+/// relative to the project.
+pub fn records_at(
+    repo: &gix::Repository,
+    id: &str,
+    prefix: &str,
+) -> Result<BTreeMap<String, gix::ObjectId>> {
+    let commit = repo.find_commit(commit_of(repo, id)?).map_err(git_error)?;
+    let tree = commit.tree_id().map_err(git_error)?.detach();
+    match entry(repo, tree, prefix, RELEASES)? {
+        Some(t) => records(repo, t),
+        None => Ok(BTreeMap::new()),
+    }
 }
 
 /// The commit `rev` names, in hex.

@@ -503,6 +503,235 @@ fn sequence(config: &Config, part: &Id, entries: &[(&Entry, &Record)]) -> Vec<Fi
     out
 }
 
+/// The project's files as Git's index stages them, read on demand.
+struct Staged<'a> {
+    repo: &'a gix::Repository,
+    files: BTreeMap<String, gix::ObjectId>,
+}
+
+impl Source for Staged<'_> {
+    fn list(&self, dir: &str) -> Result<Vec<(String, ryucad_doc::doc::source::Kind)>> {
+        use ryucad_doc::doc::source::Kind as K;
+        let prefix = if dir.is_empty() {
+            String::new()
+        } else {
+            format!("{dir}/")
+        };
+        let mut out: Vec<(String, K)> = Vec::new();
+        for path in self.files.range(prefix.clone()..).map(|(p, _)| p) {
+            let Some(rest) = path.strip_prefix(&prefix) else {
+                break;
+            };
+            let entry = match rest.split_once('/') {
+                Some((name, _)) => (name.to_owned(), K::Dir),
+                None => (rest.to_owned(), K::File),
+            };
+            if !out.contains(&entry) {
+                out.push(entry);
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
+    fn read(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        match self.files.get(path) {
+            None => Ok(None),
+            Some(id) => Ok(Some(
+                self.repo
+                    .find_object(*id)
+                    .map_err(crate::history::git_error)?
+                    .data
+                    .clone(),
+            )),
+        }
+    }
+}
+
+/// The commit guard: what a commit of Git's index would get wrong about
+/// releases, for the project at `prefix`. It reads only the index, `HEAD`
+/// and the release branch's tip, and rebuilds nothing:
+///
+/// - `release_stale`: a part staged with a proposed (not official)
+///   release that no longer describes it, or a release staged that
+///   doesn't describe its staged part;
+/// - `release_sequence` and `release_project_mismatch` for records staged
+///   new or changed;
+/// - `release_modified`: an official record staged changed or deleted.
+///
+/// A commit that stages no record and no file of a part with records is
+/// passed at once. Withdrawing a proposal (deleting its record) is fine.
+pub fn staged(repo: &gix::Repository, prefix: &str) -> Result<Vec<Finding>> {
+    use crate::history::git_error;
+    use ryucad_doc::doc::project::RELEASES;
+    let mut index = BTreeMap::new();
+    if let Ok(file) = repo.open_index() {
+        for e in file.entries() {
+            if e.stage() != gix::index::entry::Stage::Unconflicted {
+                continue;
+            }
+            let path = e.path(&file).to_string();
+            if let Some(rel) = path.strip_prefix(prefix) {
+                index.insert(rel.to_owned(), e.id);
+            }
+        }
+    }
+    let head: BTreeMap<String, gix::ObjectId> = match repo.head_commit() {
+        Ok(c) => {
+            let mut all = crate::history::records_at(repo, &c.id.to_string(), prefix)?;
+            // Part files, to see which parts the commit touches.
+            let tree = c.tree_id().map_err(git_error)?.detach();
+            if let Some(parts) = crate::history::entry(repo, tree, prefix, "parts")? {
+                crate::history::blobs(repo, parts, "parts/", &mut all)?;
+            }
+            all
+        }
+        Err(_) => BTreeMap::new(),
+    };
+    let changed = |p: &String| index.get(p) != head.get(p);
+    let paths: std::collections::BTreeSet<&String> = index.keys().chain(head.keys()).collect();
+    let mut records_changed: Vec<String> = Vec::new();
+    let mut parts_touched: std::collections::BTreeSet<Id> = Default::default();
+    for p in paths {
+        if !changed(p) {
+            continue;
+        }
+        let mut seg = p.split('/');
+        match (seg.next(), seg.next(), seg.next()) {
+            (Some(RELEASES), Some(part), Some(file)) if seg.next().is_none() => {
+                if let (Ok(id), Some(_)) =
+                    (Id::parse(part, "part"), crate::record::parse_name(file))
+                {
+                    records_changed.push(p.clone());
+                    parts_touched.insert(id);
+                }
+            }
+            (Some("parts"), Some(part), Some(_)) => {
+                if let Ok(id) = Id::parse(part, "part") {
+                    parts_touched.insert(id);
+                }
+            }
+            _ => {}
+        }
+    }
+    let src = Staged { repo, files: index };
+    let records = Records::read(&src)?;
+    let has_records = |p: &Id| records.of(p).next().is_some();
+    if records_changed.is_empty() && !parts_touched.iter().any(has_records) {
+        return Ok(Vec::new());
+    }
+    let config = Config::read(&src)?;
+    let official: BTreeMap<String, gix::ObjectId> =
+        match crate::history::branch(repo, &config.release_branch)? {
+            Some(b) => crate::history::records_at(repo, &b.tip, prefix)?,
+            None => BTreeMap::new(),
+        };
+    let project = crate::read_json(&src, MANIFEST)
+        .ok()
+        .flatten()
+        .and_then(|v| Manifest::from_json(&v).ok())
+        .and_then(|m| m.project);
+    let mut out = Vec::new();
+    for path in &records_changed {
+        let Some(blob) = official.get(path) else {
+            continue;
+        };
+        if src.files.get(path) == Some(blob) {
+            continue;
+        }
+        let (part, label) = path_part_label(path);
+        let what = if src.files.contains_key(path) {
+            "changes"
+        } else {
+            "deletes"
+        };
+        out.push(
+            Finding::new(
+                "release_modified",
+                &part,
+                Some(&label),
+                format!(
+                    "this commit {what} {path}, which is official: records never change once official"
+                ),
+            )
+            .with("path", path),
+        );
+    }
+    for part in &parts_touched {
+        let entries: Vec<(&Entry, &Record)> = records
+            .of(part)
+            .filter_map(|e| Some((e, e.record.as_ref().ok()?)))
+            .collect();
+        let mine = |e: &Entry| records_changed.contains(&e.path);
+        for (e, r) in &entries {
+            if mine(e)
+                && let Some(p) = &project
+                && r.project() != p
+            {
+                out.push(
+                    Finding::new(
+                        "release_project_mismatch",
+                        part,
+                        Some(&e.label),
+                        format!(
+                            "{} names project {}, but this project is {p}",
+                            e.path,
+                            r.project()
+                        ),
+                    )
+                    .with("path", &e.path),
+                );
+            }
+        }
+        out.extend(sequence(&config, part, &entries).into_iter().filter(|f| {
+            f.details["path"]
+                .as_str()
+                .is_some_and(|p| records_changed.iter().any(|c| c == p))
+        }));
+        let content = crate::content::hash(&src, part);
+        let working = props::read(&src, part);
+        for (e, r) in &entries {
+            let Some(rel) = r.release() else {
+                continue;
+            };
+            if official.contains_key(&e.path) {
+                continue;
+            }
+            let changes = match (&content, &working) {
+                (Ok(c), Ok(p)) => rel.changes(c, &config, p),
+                _ => vec!["content".to_owned()],
+            };
+            if !changes.is_empty() {
+                out.push(
+                    Finding::new(
+                        "release_stale",
+                        part,
+                        Some(&e.label),
+                        format!(
+                            "{} proposes {part} {} but the part being committed differs ({}): withdraw the proposal (delete it) and propose again, or undo the change",
+                            e.path,
+                            e.label,
+                            changes.join(", ")
+                        ),
+                    )
+                    .with("path", &e.path)
+                    .with("changes", &changes),
+                );
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The part and label a record's path names.
+fn path_part_label(path: &str) -> (Id, String) {
+    let mut seg = path.split('/').skip(1);
+    let part = Id::parse(seg.next().unwrap_or_default(), "part").expect("a record's path");
+    let (label, _) =
+        crate::record::parse_name(seg.next().unwrap_or_default()).expect("a record's name");
+    (part, label)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -703,5 +932,105 @@ mod tests {
         assert_eq!(codes(&found), [("release_result_changed", "A".into())]);
         assert_eq!(found[0].severity(), "warning");
         assert_eq!(found[0].details["features"], json!(["a"]));
+    }
+
+    /// Stages everything in `dir` and runs the guard.
+    fn guard(dir: &Path) -> Vec<(&'static str, String)> {
+        git(dir, &["add", "-A"]);
+        let repo = gix::open(dir).unwrap();
+        codes(&staged(&repo, "").unwrap())
+    }
+
+    #[test]
+    fn the_guard_passes_a_proposal_and_refuses_a_stale_one() {
+        let dir = crate::history::tests::repo();
+        let d = dir.path();
+        let mut f = project();
+        write(d, &f);
+        commit(d, "a part");
+        git(d, &["switch", "-q", "-c", "work"]);
+        let a = release_now(&f, "A", None);
+        add(&mut f, &a);
+        write(d, &f);
+        assert!(guard(d).is_empty());
+        commit(d, "propose A");
+        // Nothing about releases staged: passed at once.
+        put(d, "notes.txt", "x");
+        assert!(guard(d).is_empty());
+        // Editing the proposed part is refused...
+        put(d, "parts/p/features/a.json", "{\"x\": 2}");
+        assert_eq!(guard(d), [("release_stale", "A".into())]);
+        // ...until the proposal is withdrawn.
+        std::fs::remove_file(d.join(a.path())).unwrap();
+        assert!(guard(d).is_empty());
+    }
+
+    #[test]
+    fn the_guard_keeps_official_records_as_they_are() {
+        let dir = crate::history::tests::repo();
+        let d = dir.path();
+        let mut f = project();
+        let a = release_now(&f, "A", None);
+        add(&mut f, &a);
+        write(d, &f);
+        commit(d, "release A on main");
+        // The part may move on: it is work towards B.
+        put(d, "parts/p/features/a.json", "{\"x\": 2}");
+        assert!(guard(d).is_empty());
+        git(d, &["checkout", "-q", "--", "."]);
+        git(d, &["reset", "-q"]);
+        let path = a.path();
+        let text = std::fs::read_to_string(d.join(&path)).unwrap();
+        put(d, &path, &text.replace("agent", "someone"));
+        assert_eq!(guard(d), [("release_modified", "A".into())]);
+        git(d, &["reset", "-q", "--hard"]);
+        std::fs::remove_file(d.join(&path)).unwrap();
+        let repo = gix::open(d).unwrap();
+        git(d, &["add", "-A"]);
+        let found = staged(&repo, "").unwrap();
+        assert_eq!(codes(&found), [("release_modified", "A".into())]);
+        assert!(found[0].message.contains("deletes"));
+    }
+
+    #[test]
+    fn the_guard_checks_what_new_records_say() {
+        let dir = crate::history::tests::repo();
+        let d = dir.path();
+        let mut f = project();
+        write(d, &f);
+        commit(d, "a part");
+        let mut b = release_now(&f, "B", Some("A"));
+        if let Record::Release(x) = &mut b {
+            x.project = ProjectId::parse("ffffffffffffffffffffffffffffffff").unwrap();
+        }
+        add(&mut f, &b);
+        write(d, &f);
+        assert_eq!(
+            guard(d),
+            [
+                ("release_project_mismatch", "B".into()),
+                ("release_sequence", "B".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn the_guard_reads_a_project_below_the_root() {
+        let dir = crate::history::tests::repo();
+        let d = dir.path();
+        let mut f = project();
+        let a = release_now(&f, "A", None);
+        add(&mut f, &a);
+        f.insert("parts/p/features/a.json".into(), b"{\"x\": 5}".to_vec());
+        for (p, b) in &f {
+            put(d, &format!("cad/{p}"), std::str::from_utf8(b).unwrap());
+        }
+        git(d, &["add", "-A"]);
+        let repo = gix::open(d).unwrap();
+        assert_eq!(
+            codes(&staged(&repo, "cad/").unwrap()),
+            [("release_stale", "A".into())]
+        );
+        assert!(staged(&repo, "").unwrap().is_empty());
     }
 }
