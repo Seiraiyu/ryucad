@@ -4124,6 +4124,7 @@ dependencies = [
  "png",
  "proptest",
  "rayon",
+ "ryucad-doc",
  "ryukei",
  "ryukei-testkit",
  "ryusketch",
@@ -4146,6 +4147,18 @@ dependencies = [
  "pollster 0.4.0",
  "rfd",
  "ryucad",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "ryucad-doc"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "ryukei",
+ "ryusketch",
+ "serde",
  "serde_json",
  "tempfile",
 ]

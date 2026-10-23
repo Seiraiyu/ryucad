@@ -3,7 +3,7 @@
 
 pub mod canonical;
 pub mod files;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod fixtures;
 pub mod id;

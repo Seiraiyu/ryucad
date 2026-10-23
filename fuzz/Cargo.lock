@@ -1585,12 +1585,24 @@ dependencies = [
  "mimalloc",
  "png",
  "rayon",
+ "ryucad-doc",
  "ryukei",
  "ryusketch",
  "serde",
  "serde_json",
  "widestring",
  "windows-sys",
+]
+
+[[package]]
+name = "ryucad-doc"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "ryukei",
+ "ryusketch",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
