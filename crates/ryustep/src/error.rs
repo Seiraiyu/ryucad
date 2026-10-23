@@ -73,7 +73,7 @@ impl std::error::Error for WriteError {}
 /// Why an entity can't be read. It fails only what needs that entity: the
 /// body it belongs to, never the whole file. Instances are named by their
 /// numbers in the file.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum ImportError {
     /// `instance` refers to `reference`, which the file doesn't define.
@@ -102,6 +102,17 @@ pub enum ImportError {
         attribute: usize,
         what: &'static str,
     },
+    /// The kernel refuses `instance`'s geometry as the file gives it: a
+    /// spline's knots, a zero radius, a direction of no length.
+    InvalidGeometry { instance: u64, error: ryukei::Error },
+    /// `instance` lies outside ryukei's size box, in meters.
+    OutsideSizeBox { instance: u64 },
+    /// An offset curve or surface whose basis has no exact offset (a
+    /// spline's or a swept surface's): one within a certified bound comes
+    /// with healing.
+    NotBounded { instance: u64 },
+    /// The solid's shape, read, couldn't be healed into a body.
+    Heal(ryukei::HealError),
 }
 
 impl fmt::Display for ImportError {
@@ -128,6 +139,16 @@ impl fmt::Display for ImportError {
                 attribute,
                 what,
             } => write!(f, "#{instance}, attribute {attribute}: {what}"),
+            ImportError::InvalidGeometry { instance, error } => {
+                write!(f, "#{instance} is not valid geometry: {error}")
+            }
+            ImportError::OutsideSizeBox { instance } => {
+                write!(f, "#{instance} lies outside the size box")
+            }
+            ImportError::NotBounded { instance } => {
+                write!(f, "#{instance} is an offset with no exact form")
+            }
+            ImportError::Heal(h) => write!(f, "can't heal the solid: {h}"),
         }
     }
 }

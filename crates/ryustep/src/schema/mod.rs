@@ -105,8 +105,10 @@ pub enum Entity {
         same_sense: bool,
         parent: Id,
     },
-    /// `VERTEX_POINT`.
+    /// `VERTEX_POINT`, with its name (`ryukei:seam` marks a vertex a
+    /// writer added only to end a seam: see `ryukei::heal::Vertex`).
     Vertex {
+        name: Box<str>,
         point: Id,
     },
     Edge(Edge),
