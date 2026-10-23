@@ -329,6 +329,10 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         results: bool,
     },
+    /// Creates the local tag of every official release that has none, and
+    /// moves those that point elsewhere. Logged, not undoable.
+    #[serde(rename = "release.sync")]
+    ReleaseSync {},
     /// Writes an obsolete record for a part's latest official revision.
     #[serde(rename = "release.obsolete")]
     ReleaseObsolete {
@@ -682,6 +686,7 @@ impl Request {
                 | Request::PropsSet { .. }
                 | Request::ReleasePropose { .. }
                 | Request::ReleaseObsolete { .. }
+                | Request::ReleaseSync { .. }
                 | Request::SketchEdit { .. }
                 | Request::Undo { .. }
                 | Request::Redo { .. }

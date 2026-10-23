@@ -646,6 +646,9 @@ enum ReleaseCmd {
         #[arg(long)]
         results: bool,
     },
+    /// Create the local tag ryupdm/<part>/<label> of every official release that has none,
+    /// and move those that point elsewhere. Nothing is pushed or deleted.
+    Sync,
     /// Write an obsolete record for a part's latest official revision (the part may be
     /// deleted).
     Obsolete {
@@ -1095,6 +1098,7 @@ fn request(cmd: &Command) -> Option<Request> {
             expected_revision: expect.revision.clone(),
         },
         Command::Release(ReleaseCmd::List { part }) => Request::ReleaseList { part: part.clone() },
+        Command::Release(ReleaseCmd::Sync) => Request::ReleaseSync {},
         Command::Release(ReleaseCmd::Check { results }) => {
             Request::ReleaseCheck { results: *results }
         }

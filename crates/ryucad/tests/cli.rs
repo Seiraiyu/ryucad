@@ -857,6 +857,7 @@ fn every_protocol_method_has_a_command() {
         ("props.set", &["props", "set"]),
         ("release.list", &["release", "list"]),
         ("release.check", &["release", "check"]),
+        ("release.sync", &["release", "sync"]),
         ("release.propose", &["release", "propose"]),
         ("release.obsolete", &["release", "obsolete"]),
         ("sketch.edit", &["sketch", "edit"]),

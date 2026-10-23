@@ -139,9 +139,11 @@ pub fn answer_live(
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
     {
         let files = activity::diff(&files_before, &session.snapshot());
+        let who = l.caller(me);
         if !files.is_empty() {
-            let who = l.caller(me);
             activity::record(l, EntryKind::Change, &who, &method, params, None, files);
+        } else if method == "release.sync" {
+            activity::record(l, EntryKind::Refs, &who, &method, params, None, files);
         }
     }
     if let (Some(l), Some(before)) = (live, before) {
@@ -248,6 +250,7 @@ fn dispatch(
         ),
         Request::PropsGet { part } => crate::pdm::get(session, &part),
         Request::ReleaseList { part } => crate::release::list(session, part.as_deref()),
+        Request::ReleaseSync {} => crate::release::sync(session),
         Request::ReleaseCheck { results } => crate::release::check(session, results),
         Request::ReleasePropose {
             part,

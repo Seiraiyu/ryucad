@@ -6,6 +6,10 @@
 //!
 //! The release branch is read once per state of the refs it depends on
 //! (the branch's tip and the `ryupdm/` tags) and kept in the session.
+//!
+//! `release.sync` is ryucad's one write to Git: it creates and moves
+//! local `ryupdm/<part>/<label>` tags to match the records, and never
+//! pushes, deletes a tag or touches any other ref.
 
 use crate::doc::id::Id;
 use crate::doc::project::write_json;
@@ -402,6 +406,70 @@ pub fn list(session: &mut Session, part: Option<&str>) -> Result<Value> {
     }))
 }
 
+/// `release.sync`: the tag of every official release, created where
+/// missing and moved where it points elsewhere. A tag no official release
+/// accounts for is reported, never deleted. Fails as a whole on the first
+/// ref that can't be written, saying which were.
+pub fn sync(session: &mut Session) -> Result<Value> {
+    use gix::refs::transaction::{PreviousValue, RefEdit};
+    let (repo, releases) = history(session)?;
+    let mut created = Vec::new();
+    let mut moved = Vec::new();
+    let mut unchanged = 0;
+    for (path, o) in &releases.official {
+        let mut seg = path.split('/').skip(1);
+        let (Some(part), Some(file)) = (seg.next(), seg.next()) else {
+            continue;
+        };
+        let (Ok(part), Some((label, Kind::Release))) =
+            (Id::parse(part, "part"), ryupdm::record::parse_name(file))
+        else {
+            continue;
+        };
+        let name = ryupdm::history::tag_name(&part, &label);
+        let expected = match releases.tag(&part, &label, &o.commit) {
+            ryupdm::history::Tag::Ok => {
+                unchanged += 1;
+                continue;
+            }
+            ryupdm::history::Tag::Missing => PreviousValue::MustNotExist,
+            ryupdm::history::Tag::Moved(_) => PreviousValue::MustExist,
+        };
+        let failed = |e: String| {
+            Error::new(
+                Code::Internal,
+                format!("writing tag {name}: {e}; tags written before it are kept"),
+            )
+            .with("tag", &name)
+            .with("created", &created)
+            .with("moved", &moved)
+        };
+        let id = gix::ObjectId::from_hex(o.commit.as_bytes()).map_err(|e| failed(e.to_string()))?;
+        let full = gix::refs::FullName::try_from(format!("refs/tags/{name}"))
+            .map_err(|e| failed(e.to_string()))?;
+        let move_from = match &expected {
+            PreviousValue::MustExist => Some(releases.tags[&format!("{part}/{label}")].clone()),
+            _ => None,
+        };
+        repo.gix()
+            .edit_reference(RefEdit::update(full, id, expected, "ryucad release sync"))
+            .map_err(|e| failed(e.to_string()))?;
+        match move_from {
+            Some(from) => moved.push(json!({"tag": name, "from": from, "to": o.commit})),
+            None => created.push(json!({"tag": name, "at": o.commit})),
+        }
+    }
+    let orphaned: Vec<String> = releases
+        .orphaned_tags()
+        .into_iter()
+        .map(|k| format!("{}{k}", ryupdm::history::TAG_PREFIX))
+        .collect();
+    Ok(
+        json!({"created": created, "moved": moved, "unchanged": unchanged,
+              "orphaned": orphaned}),
+    )
+}
+
 /// Rebuilds released content for `release_result_changed`, once per
 /// content hash in a session.
 struct Rebuilds<'a> {
@@ -755,6 +823,112 @@ pub(crate) mod tests {
         git(root, &["commit", "-q", "--allow-empty", "-m", "moves main"]);
         call(&mut s, "release.list", json!({})).unwrap();
         assert_ne!(s.releases.as_ref().unwrap().0, key);
+    }
+
+    fn rev(root: &std::path::Path, what: &str) -> String {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", what])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    #[test]
+    fn sync_makes_and_moves_tags_and_leaves_others() {
+        let (dir, mut s) = released_project();
+        let root = dir.path();
+        propose(&mut s).unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "release A"]);
+        let a = rev(root, "HEAD");
+        git(root, &["commit", "-q", "--allow-empty", "-m", "later"]);
+        git(root, &["tag", "ryupdm/q/Z", "HEAD"]);
+        git(root, &["tag", "other", "HEAD"]);
+        let v = call(&mut s, "release.sync", json!({})).unwrap();
+        assert_eq!(
+            v,
+            json!({"created": [{"tag": "ryupdm/p/A", "at": a}], "moved": [], "unchanged": 0,
+                   "orphaned": ["ryupdm/q/Z"]})
+        );
+        assert_eq!(rev(root, "ryupdm/p/A"), a);
+        // Again: nothing to do.
+        let v = call(&mut s, "release.sync", json!({})).unwrap();
+        assert_eq!((&v["created"], &v["unchanged"]), (&json!([]), &json!(1)));
+        // Moved by hand, moved back.
+        git(root, &["tag", "-f", "ryupdm/p/A", "HEAD"]);
+        let later = rev(root, "HEAD");
+        let v = call(&mut s, "release.sync", json!({})).unwrap();
+        assert_eq!(
+            v["moved"],
+            json!([{"tag": "ryupdm/p/A", "from": later, "to": a}])
+        );
+        assert_eq!(rev(root, "ryupdm/p/A"), a);
+        // Others are left alone; nothing official, nothing written.
+        assert_eq!(rev(root, "other"), later);
+        assert_eq!(rev(root, "ryupdm/q/Z"), later);
+        let v = call(&mut s, "release.check", json!({})).unwrap();
+        assert_eq!(v["findings"][0]["code"], "release_tag_orphaned");
+        let (_d, mut t) = fresh();
+        assert_eq!(
+            call(&mut t, "release.sync", json!({})).unwrap_err().code,
+            Code::NotAGitRepo
+        );
+    }
+
+    #[test]
+    fn writes_are_logged_and_only_files_are_undone() {
+        use crate::live::Live;
+        use crate::server::tests::call_live;
+        let (dir, mut s) = released_project();
+        let root = dir.path();
+        let mut live = Live::new();
+        // As a human names itself.
+        let me = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "session.hello",
+            json!({"kind": "human", "name": "Dana"}),
+        )
+        .unwrap()["participant"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let me = Some(me.as_str());
+        let v = call_live(
+            &mut s,
+            &mut live,
+            me,
+            "release.propose",
+            json!({"part": "p"}),
+        )
+        .unwrap();
+        assert_eq!(v["record"]["released_by"]["participant"], "Dana");
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "release A"]);
+        call_live(&mut s, &mut live, me, "release.sync", json!({})).unwrap();
+        let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
+        let kinds: Vec<(&str, &str)> = log["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    e["kind"].as_str().unwrap(),
+                    e["method"].as_str().unwrap_or(""),
+                )
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [("change", "release.propose"), ("refs", "release.sync")]
+        );
+        // Undo passes over the tags to the record.
+        let r = call_live(&mut s, &mut live, me, "undo", json!({})).unwrap();
+        assert_eq!(r["entry"]["kind"], "undo");
+        assert!(!root.join("releases/p/A.json").exists());
+        assert_eq!(rev(root, "ryupdm/p/A").len(), 40);
     }
 
     #[test]
