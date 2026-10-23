@@ -3,7 +3,8 @@
 //! expressions, rebuilt bodies, display meshes, the pixels of renders, and
 //! solved sketches and the bodies swept from them, features that refer
 //! to other features' faces, edges and vertices, how sketches are drawn,
-//! what diffs say, and what merges make. After
+//! what diffs say, what merges make, and the content hashes release
+//! records name. After
 //! a deliberate change, regenerate with
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
@@ -856,6 +857,55 @@ fn merge_section(golden: &mut Golden) {
     }
 }
 
+/// Content hashes of projects of random primitives, units and parameters,
+/// written as ryucad writes them: what a release record names must be the
+/// same everywhere.
+fn pdm_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("pdm");
+    let text = |v: &serde_json::Value| ryucad::doc::canonical::to_string(v).into_bytes();
+    let mut g = Lcg::new(0x7064_6d30);
+    for _ in 0..64 {
+        let unit = unit(&mut g);
+        let mut files = ryucad::activity::Files::new();
+        files.insert(
+            "ryucad.json".into(),
+            text(&ryucad::doc::files::Manifest::new(unit).to_json()),
+        );
+        let mut order = Vec::new();
+        for i in 0..1 + g.next_u64() % 4 {
+            let ty = PrimitiveType::ALL[(g.next_u64() % 5) as usize];
+            let params = ty
+                .required()
+                .iter()
+                .map(|n| {
+                    let q = format!("{} {}", decimal(&mut g), unit.as_str());
+                    (n.to_string(), Quantity::parse(&q, unit).unwrap())
+                })
+                .collect();
+            let f = Feature::Primitive(Primitive {
+                ty,
+                params,
+                placement: random_placement(&mut g),
+            });
+            let id = format!("f{i}");
+            files.insert(format!("parts/p/features/{id}.json"), text(&f.to_json()));
+            order.push(Id::parse(&id, "feature").unwrap());
+        }
+        files.insert(
+            "parts/p/part.json".into(),
+            text(&PartFile { features: order }.to_json()),
+        );
+        if g.next_u64().is_multiple_of(2) {
+            let p = json!({"format": 1, "kind": "ryucad.parameters",
+                           "parameters": {"w": format!("{} mm", decimal(&mut g))}});
+            files.insert("parts/p/parameters.json".into(), text(&p));
+        }
+        let part = Id::parse("p", "part").unwrap();
+        s.str(&ryupdm::content::hash(&files, &part).unwrap());
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -873,5 +923,6 @@ fn determinism() {
     sketch_drawing_section(&mut golden);
     diff_section(&mut golden);
     merge_section(&mut golden);
+    pdm_section(&mut golden);
     golden.finish();
 }

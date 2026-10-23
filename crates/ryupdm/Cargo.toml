@@ -6,9 +6,14 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+# The content hash, as ryucad hashes its files.
+blake3 = { version = "1", features = ["pure"] }
 # Fresh project IDs.
 getrandom = "0.3"
 # Part number patterns: Rust's regex syntax, ASCII classes (`\d` is 0-9).
 regex-lite = "0.1"
 ryucad-doc = { path = "../ryucad-doc" }
 serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dev-dependencies]
+tempfile = "3"
