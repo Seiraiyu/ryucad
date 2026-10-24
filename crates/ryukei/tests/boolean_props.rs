@@ -219,7 +219,7 @@ proptest! {
     }
 }
 
-/// Issue #27: a torus and a cone whose boolean the mesher once refused
+/// Issue #27 (work item #639): a torus and a cone whose boolean the mesher once refused
 /// (`RefinementStalled`), pinned by value since a regression seed means
 /// another case whenever the strategy changes.
 #[test]

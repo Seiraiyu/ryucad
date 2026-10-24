@@ -1991,3 +1991,47 @@ fn releases_from_the_cli() {
     assert_eq!(code, 0, "{v}");
     assert!(p.daemon.join("releases/p/A.obsolete.json").exists());
 }
+
+#[test]
+fn pdm_in_diff_and_through_textconv() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=20", "--param",
+        "z=5",
+    ]);
+    p.write(
+        "ryucad.json",
+        "{\n  \"default_unit\": \"mm\",\n  \"format\": 2,\n  \"kind\": \"ryucad.project\",\n  \"project\": \"0123456789abcdef0123456789abcdef\"\n}\n",
+    );
+    p.ok(&["props", "set", "p", "number=100"]);
+    p.git(&["init", "-q", "-b", "main"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "start"]);
+    p.ok(&["release", "propose", "p"]);
+    p.ok(&["props", "set", "p", "name=Pin"]);
+    let v = p.ok(&["diff"]);
+    assert_eq!(
+        v["parts"]["p"]["pdm"],
+        json!({"properties": {"name": {"revising": false, "to": "Pin"}},
+               "records": {"added": [{"label": "A", "kind": "release"}],
+                           "removed": [], "changed": []},
+               "state": {"from": "in work", "to": "in work, A proposed"}})
+    );
+    // Git's own diff reads the record and the properties by value.
+    let root = &p.direct;
+    git(root, &["add", "."]);
+    let bin = assert_cmd::cargo::cargo_bin("ryucad");
+    let bin = bin.to_str().unwrap().replace('\\', "/");
+    let driver = format!("diff.ryucad.textconv='{bin}' git textconv");
+    fs::write(root.join(".gitattributes"), "*.json diff=ryucad\n").unwrap();
+    let diff = git(
+        root,
+        &["-c", &driver, "diff", "--cached", "--no-color", "-U0"],
+    );
+    assert!(diff.contains("\n+name = Pin\n"), "{diff}");
+    assert!(diff.contains("\n+ryupdm.release (format 1)\n"), "{diff}");
+    assert!(diff.contains("\n+released_by = "), "{diff}");
+    assert!(diff.contains("\n+\n+results.b = "), "{diff}");
+}

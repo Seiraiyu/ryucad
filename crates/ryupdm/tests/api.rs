@@ -1,7 +1,8 @@
 //! ryupdm's public API as a service links it: every function driven from a
 //! bare repository at a pinned commit, with no work tree, through files in
 //! memory. The commit guard needs Git's index, so it runs in the clone the
-//! repository was made from.
+//! repository was made from; merge validation reads a merge's sides from
+//! the bare repository's commits.
 
 use ryucad_doc::doc::canonical;
 use ryucad_doc::doc::id::{Id, ProjectId};
@@ -58,13 +59,18 @@ fn commit(dir: &Path, message: &str) -> String {
 
 /// The release of `p` as the files in `dir` have it, labelled A.
 fn release_a(dir: &Path) -> Record {
+    release(dir, "A", None)
+}
+
+/// The release of `p` as the files in `dir` have it.
+fn release(dir: &Path, label: &str, supersedes: Option<&str>) -> Record {
     let src = Folder(dir);
     let p = Id::parse("p", "part").unwrap();
     let config = Config::read(&src).unwrap();
     Record::Release(Release {
         project: ProjectId::parse(PROJECT).unwrap(),
         part: p.clone(),
-        label: "A".into(),
+        label: label.into(),
         content: ryupdm::content::hash(&src, &p).unwrap(),
         properties: revising(&config, &ryupdm::props::read(&src, &p).unwrap()),
         results: BTreeMap::new(),
@@ -78,7 +84,7 @@ fn release_a(dir: &Path) -> Record {
             email: None,
             participant: "agent".into(),
         },
-        supersedes: None,
+        supersedes: supersedes.map(str::to_owned),
         note: None,
     })
 }
@@ -114,6 +120,17 @@ fn the_library_reads_a_bare_repository_at_a_pinned_commit() {
     git(w, &["merge", "-q", "--no-ff", "-m", "merge", "propose"]);
     let official = git(w, &["rev-parse", "HEAD"]);
     git(w, &["tag", "ryupdm/p/A", &official]);
+    // A branch renumbers p and proposes it as B.
+    git(w, &["switch", "-q", "-c", "renumber"]);
+    put(
+        w,
+        "cad/parts/p/properties.json",
+        &json!({"format": 1, "kind": "ryupdm.properties", "number": "101"}),
+    );
+    let b = release(&w.join("cad"), "B", Some("A"));
+    put(w, &format!("cad/{}", b.path()), &b.to_json());
+    commit(w, "propose p B");
+    git(w, &["switch", "-q", "main"]);
     // Work goes on after the pinned commit.
     put(w, "cad/parts/p/features/a.json", &json!({"x": 2}));
     commit(w, "later");
@@ -152,6 +169,26 @@ fn the_library_reads_a_bare_repository_at_a_pinned_commit() {
     };
     let found = check::run(&src, Some(h), None).unwrap();
     assert!(found.is_empty(), "{found:?}");
+    // merge::validate: main's work merged with the branch's proposal.
+    let theirs = history::files(&repo, "renumber", "cad/").unwrap();
+    let mut merged = tip.clone();
+    for path in ["parts/p/properties.json", "releases/p/B.json"] {
+        merged.insert(path.to_owned(), theirs[path].clone());
+    }
+    let broke = ryupdm::merge::validate(&src, &tip, &theirs, &merged, &releases);
+    assert_eq!(broke.len(), 1, "{broke:?}");
+    assert_eq!(
+        (
+            broke[0].code.as_str(),
+            broke[0].cause.as_str(),
+            broke[0].withdraw
+        ),
+        ("release_stale", "ours", true)
+    );
+    assert_eq!(
+        broke[0].files,
+        ["releases/p/B.json", "parts/p/features/a.json"]
+    );
 
     // check::staged needs an index: the clone it was made from.
     put(w, "cad/parts/p/features/a.json", &json!({"x": 3}));
