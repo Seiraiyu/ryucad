@@ -173,6 +173,10 @@ pub struct Workspace {
     pub settings: Settings,
     /// The last doctor report, once asked for.
     pub doctor: Option<Value>,
+    /// Whether a report is on its way, and whether the project changed
+    /// meanwhile, so the badges need another.
+    doctor_waiting: bool,
+    doctor_again: bool,
     /// Someone asked for this window (`ryucad open`): bring it forward.
     pub raised: bool,
     /// Requests of the window's that failed, newest last.
@@ -229,6 +233,8 @@ impl Workspace {
             merge: None,
             settings: Settings::default(),
             doctor: None,
+            doctor_waiting: false,
+            doctor_again: false,
             raised: false,
             camera_due: None,
             camera_sent: None,
@@ -299,12 +305,26 @@ impl Workspace {
 
     /// Diagnoses the project (`doctor`).
     pub fn diagnose(&mut self) {
+        self.doctor_waiting = true;
         self.send(Request::Doctor {}, Pending::Doctor);
+    }
+
+    /// Diagnoses the project again after it changed, so badges don't
+    /// outlive the damage they show (a conflict record settled, say): at
+    /// most one report on its way, and one more after it if the project
+    /// changed meanwhile. Nothing until the window first asked.
+    fn rediagnose(&mut self) {
+        if self.doctor_waiting {
+            self.doctor_again = true;
+        } else if self.doctor.is_some() {
+            self.diagnose();
+        }
     }
 
     /// Applies repairs from the last report (`doctor.repair`); the answer
     /// brings the new report.
     pub fn repair(&mut self, repairs: Vec<String>, params: serde_json::Map<String, Value>) {
+        self.doctor_waiting = true;
         self.send(Request::DoctorRepair { repairs, params }, Pending::Doctor);
     }
 
@@ -679,6 +699,8 @@ impl Workspace {
             self.set_compare(Some(rev));
             self.ask_diff();
         }
+        // A new daemon may see damage the old one didn't.
+        self.rediagnose();
         // Panels asked for whose answers were lost are asked for again.
         if let Some(part) = self.params_part.clone()
             && self.params.is_none()
@@ -769,6 +791,8 @@ impl Workspace {
                 self.model.asked.clear();
                 self.model.sketches_asked.clear();
                 self.compare_waiting = false;
+                self.doctor_waiting = false;
+                self.doctor_again = false;
                 if let Some(c) = &mut self.compare {
                     c.asked.clear();
                 }
@@ -783,6 +807,17 @@ impl Workspace {
     }
 
     fn answered(&mut self, why: Pending, answer: Result<Answer>) {
+        let doctor = matches!(why, Pending::Doctor);
+        self.answer(why, answer);
+        if doctor {
+            self.doctor_waiting = false;
+            if std::mem::take(&mut self.doctor_again) {
+                self.diagnose();
+            }
+        }
+    }
+
+    fn answer(&mut self, why: Pending, answer: Result<Answer>) {
         match (why, answer) {
             (Pending::Info, Ok(a)) => {
                 self.model.default_unit = a.result["default_unit"].as_str().unwrap_or("mm").into();
@@ -1067,14 +1102,15 @@ impl Workspace {
                 for id in params["removed"].as_array().into_iter().flatten() {
                     self.model.remove_part(id.as_str().unwrap_or_default());
                 }
-                // What the working files differ by changed with them.
+                // What the working files differ by changed with them, and
+                // so may their damage (a conflict record comes and goes
+                // with a file).
                 self.ask_diff();
+                self.rediagnose();
             }
             "project.changed" => {
                 // Parts came or went: damage may have too.
-                if self.doctor.is_some() {
-                    self.diagnose();
-                }
+                self.rediagnose();
                 if let Some(u) = params["default_unit"].as_str()
                     && u != self.model.default_unit
                 {
@@ -1112,6 +1148,7 @@ impl Workspace {
                     )),
                     _ => None,
                 };
+                self.rediagnose();
             }
             "activity.appended" => self.activity.appended(params),
             "app.open" => self.raised = true,
