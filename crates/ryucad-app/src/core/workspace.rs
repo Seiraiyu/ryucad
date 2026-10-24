@@ -1029,6 +1029,8 @@ impl Workspace {
                 match r {
                     Ok(a) => {
                         self.releases.proposal = None;
+                        self.releases.confirm = None;
+                        self.releases.note.clear();
                         self.releases.done = Some(match a.result.get("path") {
                             Some(p) => format!("wrote {}", p.as_str().unwrap_or_default()),
                             None => crate::core::releases::synced(&a.result),

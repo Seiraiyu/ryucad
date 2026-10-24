@@ -9,9 +9,23 @@
 use ryucad::error::Error;
 use serde_json::Value;
 
+/// A write the tab asks a person to confirm first.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Confirm {
+    /// Make `part`'s latest official revision `label` obsolete.
+    Obsolete { part: String, label: String },
+    /// Create and move the local tags.
+    Sync,
+}
+
 /// What the tab knows.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ReleaseTab {
+    /// The write waiting for a person to confirm it (the Propose dialog is
+    /// `proposal`).
+    pub confirm: Option<Confirm>,
+    /// The note typed into the open dialog.
+    pub note: String,
     /// `release.list` for the whole project, once read.
     pub list: Option<Value>,
     /// The release checks' findings, once read.
@@ -93,6 +107,12 @@ impl ReleaseTab {
     pub fn in_repository(&self) -> bool {
         self.list.as_ref().is_some_and(|l| l["repository"] == true)
     }
+}
+
+/// A note as a request takes it: none when nothing was typed.
+pub fn note(text: &str) -> Option<String> {
+    let t = text.trim();
+    (!t.is_empty()).then(|| t.to_owned())
 }
 
 /// One record as the tab lists it: `A release, official at 0123456789,
