@@ -1,4 +1,5 @@
-//! Orientation: loops that run the way their face says.
+//! Orientation: loops that run the way their face says, faces that agree
+//! with their neighbours.
 //!
 //! **Loops.** A face's region lies to the left of its loops about its
 //! normal. Where the loops alone fix the region, their directions can be
@@ -16,6 +17,14 @@
 //! another is [`HealError::SelfCrossingLoop`]) and every loop that runs
 //! the wrong way is reversed. A loop whose area or depth rounding can't
 //! settle is [`HealError::Uncertain`].
+//!
+//! **Faces.** Every edge must then be used once each way. Faces are
+//! turned over (sense and every loop reversed together, so the region
+//! stays) to make it so: from the least-named face of each connected
+//! piece, kept as the file has it, across each edge to the next. A piece
+//! that can't be made consistent (a Möbius band) is
+//! [`HealError::Misoriented`] at the first edge found against it. Which
+//! way each shell then faces is decided once it is built (see `shells`).
 
 use super::names::Names;
 use super::{Loop, Shape, Use};
@@ -24,7 +33,7 @@ use crate::name::Name;
 use crate::predicates::{Sign, orient2d};
 use crate::topo::Sense;
 use crate::{Error, HealError};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
 /// Samples along each use, its start included and its end left to the
 /// next use.
@@ -295,4 +304,79 @@ pub(super) fn loops(s: &mut Shape, names: &Names) -> Result<Vec<Name>, Error> {
     }
     changed.sort();
     Ok(changed)
+}
+
+/// Turns faces over until every edge is used once each way. Returns the
+/// faces turned.
+pub(super) fn faces(s: &mut Shape, names: &Names) -> Result<Vec<Name>, Error> {
+    // Each edge's uses: face and sense.
+    let mut uses: Vec<Vec<(usize, Sense)>> = vec![Vec::new(); s.edges.len()];
+    let mut edges_of: Vec<Vec<usize>> = vec![Vec::new(); s.faces.len()];
+    for (k, f) in s.faces.iter().enumerate() {
+        for l in &f.loops {
+            if let Loop::Edges(list) = l {
+                for u in list {
+                    uses[u.edge].push((k, u.sense));
+                    edges_of[k].push(u.edge);
+                }
+            }
+        }
+    }
+    // Faces from the least-named, each piece from its least-named face.
+    let mut order: Vec<usize> = (0..s.faces.len()).collect();
+    order.sort_by_key(|&k| names.faces[k]);
+    let mut turn: Vec<Option<bool>> = vec![None; s.faces.len()];
+    let mut against: Option<Name> = None;
+    for &root in &order {
+        if turn[root].is_some() {
+            continue;
+        }
+        turn[root] = Some(false);
+        let mut queue = VecDeque::from([root]);
+        while let Some(k) = queue.pop_front() {
+            let mut list = edges_of[k].clone();
+            list.sort_by_key(|&e| names.edges[e]);
+            for e in list {
+                let [(a, sa), (b, sb)] = uses[e][..] else {
+                    continue;
+                };
+                let (other, mine, theirs) = if a == k { (b, sa, sb) } else { (a, sb, sa) };
+                // The other face is turned when its use runs the same way
+                // as this face's, once this face's turn is applied.
+                let want = turn[k].expect("visited") ^ (mine == theirs);
+                match turn[other] {
+                    None => {
+                        turn[other] = Some(want);
+                        queue.push_back(other);
+                    }
+                    Some(t) if t != want => {
+                        let n = names.edges[e];
+                        if against.is_none_or(|x| n < x) {
+                            against = Some(n);
+                        }
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+    if let Some(at) = against {
+        return Err(HealError::Misoriented { at }.into());
+    }
+    let mut turned = Vec::new();
+    for (k, t) in turn.iter().enumerate() {
+        if *t != Some(true) {
+            continue;
+        }
+        let f = &mut s.faces[k];
+        f.sense = f.sense.flipped();
+        for l in &mut f.loops {
+            if let Loop::Edges(list) = l {
+                reverse(list);
+            }
+        }
+        turned.push(names.faces[k]);
+    }
+    turned.sort();
+    Ok(turned)
 }

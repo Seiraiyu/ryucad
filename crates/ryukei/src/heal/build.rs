@@ -39,25 +39,6 @@ pub(super) fn uses(s: &Shape, names: &Names) -> Result<(), Error> {
     at.map_or(Ok(()), |at| Err(HealError::NonManifold { at }.into()))
 }
 
-/// Every edge used once each way: else the least-named edge that isn't.
-pub(super) fn consistent(s: &Shape, names: &Names) -> Result<(), Error> {
-    let mut senses: Vec<Vec<Sense>> = vec![Vec::new(); s.edges.len()];
-    for f in &s.faces {
-        for l in &f.loops {
-            if let Loop::Edges(list) = l {
-                for u in list {
-                    senses[u.edge].push(u.sense);
-                }
-            }
-        }
-    }
-    let at = (0..s.edges.len())
-        .filter(|&e| senses[e].len() == 2 && senses[e][0] == senses[e][1])
-        .map(|e| names.edges[e])
-        .min();
-    at.map_or(Ok(()), |at| Err(HealError::Misoriented { at }.into()))
-}
-
 /// The scaffold names' role: every entity is renamed afterwards.
 const ROLE: Role = Role::Import(ImportRole::Face);
 

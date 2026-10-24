@@ -286,13 +286,15 @@ fn a_use_run_the_wrong_way_is_misoriented() {
     let Loop::Edges(uses) = &mut s.faces[0].loops[0] else {
         panic!()
     };
+    // One use of a loop against the rest: no face can be turned to agree.
     uses[0].sense = uses[0].sense.flipped();
-    let e = uses[0].edge;
     let names = names::names(OpKey(7), &s);
-    assert_eq!(
-        heal(OpKey(7), &s, &HealOptions::default()).unwrap_err(),
-        HealError::Misoriented { at: names.edges[e] }.into()
-    );
+    match heal(OpKey(7), &s, &HealOptions::default()) {
+        Err(Error::InvalidHeal(HealError::Misoriented { at })) => {
+            assert!(names.edges.contains(&at))
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]
@@ -943,4 +945,32 @@ fn loops_that_cross_have_no_direction() {
         }
         .into()
     );
+}
+
+/// Face `k` of a shape turned over: its sense and every loop reversed.
+fn turn_face(s: &mut Shape, k: usize) {
+    s.faces[k].sense = s.faces[k].sense.flipped();
+    for l in 0..s.faces[k].loops.len() {
+        if matches!(s.faces[k].loops[l], Loop::Edges(_)) {
+            reverse_loop(s, k, l);
+        }
+    }
+}
+
+#[test]
+fn faces_against_their_neighbours_are_turned_over() {
+    let b = plate();
+    let s = plain(&b);
+    let names = names::names(OpKey(7), &s);
+    // Every face but the least-named, one at a time.
+    let least = (0..s.faces.len()).min_by_key(|&k| names.faces[k]).unwrap();
+    for k in (0..s.faces.len()).filter(|&k| k != least) {
+        let mut t = s.clone();
+        turn_face(&mut t, k);
+        let names = names::names(OpKey(7), &t);
+        let (h, journal, report) = heal_ok(&t);
+        assert_eq!(h.counts(), b.counts());
+        assert_eq!(report.turned, [names.faces[k]]);
+        assert!(journal.events().contains(&Event::Modified(names.faces[k])));
+    }
 }
