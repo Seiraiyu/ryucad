@@ -37,6 +37,7 @@ pub mod reference;
 pub mod release;
 pub mod render;
 pub mod renumber;
+pub mod review;
 pub mod server;
 pub mod session;
 pub mod sketch;
