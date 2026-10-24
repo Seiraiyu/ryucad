@@ -3,6 +3,7 @@
 //! status line), or a damaged project being repaired.
 
 use crate::core::doctor::Offline;
+use crate::core::geometry::{self, Geometry, Tracker};
 use crate::core::link::Wake;
 use crate::core::nav::Navigation;
 use crate::core::workspace::Workspace;
@@ -52,6 +53,11 @@ pub fn open_workspace(root: &Path, daemon: &Daemon, wake: Wake) -> Result<Worksp
     Workspace::open(root, daemon, &name, wake)
 }
 
+/// The window geometry the `app.window` preference holds, if sensible.
+pub fn saved_geometry() -> Option<Geometry> {
+    Geometry::from_value(&ryucad::config::user("app.window"))
+}
+
 /// The `ui.style` preference as the preferences file has it.
 fn user_look() -> Look {
     Look::parse(
@@ -97,6 +103,10 @@ pub struct App {
     pick: bool,
     /// A Ctrl+click (macOS) is down, so its release is a right one too.
     ctrl_click: bool,
+    /// The window's inner size, in points, and its scale at the last frame.
+    size: Option<(egui::Vec2, f32)>,
+    /// The window's size, saved in `app.window` once it settles.
+    geometry: Tracker,
 }
 
 impl App {
@@ -115,7 +125,9 @@ impl App {
             titled: None,
             shown: false,
             pick: false,
+            size: None,
             ctrl_click: false,
+            geometry: Tracker::new(saved_geometry()),
         };
         if let Some(dir) = dir {
             app.go(dir);
@@ -263,11 +275,14 @@ impl Opened {
         gpu: Option<&eframe::egui_wgpu::RenderState>,
     ) -> Option<menu::Action> {
         let ctx = ui.ctx().clone();
+        // Before the menus draw: an Escape that closes one is theirs.
+        let popup_open = egui::Popup::is_any_open(&ctx);
         self.ws.pump();
         // `ryucad open` asked for this window.
         if std::mem::take(&mut self.ws.raised) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            for c in crate::ui::platform::raise(crate::ui::platform::wayland()) {
+                ctx.send_viewport_cmd(c);
+            }
         }
         self.read_recent();
         self.ws.tick(Instant::now());
@@ -293,13 +308,21 @@ impl Opened {
                 panels::compare_bar(ui, &mut self.ws, &mut self.compare_with);
             });
         }
-        let action = action.or(self.shortcuts(&ctx));
+        let action = action.or(self.shortcuts(&ctx, popup_open));
         egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &self.ws));
         // Room for about ten entries; drag its top edge for more.
         egui::Panel::bottom("journal")
             .resizable(true)
             .default_size(240.0)
-            .show(ui, |ui| panels::journal(ui, &mut self.ws, &mut self.tab));
+            .show(ui, |ui| {
+                let part = self
+                    .view
+                    .chosen
+                    .as_ref()
+                    .map(|k| k.0.clone())
+                    .or_else(|| self.ws.model.parts.keys().next().cloned());
+                panels::journal(ui, &mut self.ws, &mut self.tab, part.as_deref());
+            });
         egui::Panel::left("tree")
             .resizable(true)
             .default_size(220.0)
@@ -318,12 +341,15 @@ impl Opened {
                     panels::properties(ui, &mut self.ws);
                     ui.separator();
                     panels::parameters(ui, &mut self.ws, &self.view);
+                    ui.separator();
+                    panels::part_section(ui, &mut self.ws, &self.view);
                 });
             });
         egui::CentralPanel::no_frame().show(ui, |ui| self.view.show(ui, &mut self.ws, gpu));
         let view = self.view.rect;
         dialogs::settings(&ctx, &mut self.ws, &mut self.dialogs.settings, view);
         dialogs::preferences(&ctx, &mut self.ws, &mut self.dialogs.preferences, view);
+        panels::release_dialogs(&ctx, &mut self.ws, view);
         doctor::dialog(
             &ctx,
             &mut self.ws,
@@ -379,9 +405,10 @@ impl Opened {
     /// Ctrl/Cmd+Z undoes this window's latest change, Shift+Ctrl/Cmd+Z or
     /// Ctrl+Y redoes, and Escape clears the selection; not while a text
     /// field has the keyboard (it has its own), and Escape not while a menu
-    /// or popup is open (it closes those).
+    /// or popup is open (it closes those): `popup_open` says whether one
+    /// was when the frame began, since the menus have closed it by now.
     /// The keyboard shortcuts; returns what they ask of the app.
-    fn shortcuts(&mut self, ctx: &egui::Context) -> Option<menu::Action> {
+    fn shortcuts(&mut self, ctx: &egui::Context, popup_open: bool) -> Option<menu::Action> {
         // Closing works from a text field too, as in any other app.
         if ctx.input_mut(|i| i.consume_shortcut(&menu::CLOSE)) {
             return Some(menu::Action::Close);
@@ -394,14 +421,71 @@ impl Opened {
         } else if ctx.input_mut(|i| i.consume_shortcut(&menu::UNDO)) {
             self.ws.undo(None);
         }
-        if !egui::Popup::is_any_open(ctx)
-            && self.ws.myself().is_some_and(|m| !m.selection.is_empty())
+        // Esc clears the selection and the tree's choice with it.
+        let selected = self.ws.myself().is_some_and(|m| !m.selection.is_empty());
+        if !popup_open
+            && !egui::Popup::is_any_open(ctx)
+            && (selected || self.view.chosen.is_some())
             && ctx.input_mut(|i| i.consume_shortcut(&menu::CLEAR_SELECTION))
         {
-            self.ws
-                .select(Vec::new(), ryucad::live::SelectMode::Replace);
+            if selected {
+                self.ws
+                    .select(Vec::new(), ryucad::live::SelectMode::Replace);
+            }
+            self.view.unchoose(&mut self.ws);
         }
         None
+    }
+}
+
+impl App {
+    /// Brings the window back onto its monitor when a change of size left
+    /// it past it ([`crate::ui::platform::keep_on_screen`]).
+    fn keep_on_screen(&mut self, ctx: &egui::Context) {
+        let info = ctx.input(|i| i.viewport().clone());
+        let (Some(inner), Some(outer), Some(monitor)) =
+            (info.inner_rect, info.outer_rect, info.monitor_size)
+        else {
+            return;
+        };
+        let full = info.maximized == Some(true) || info.fullscreen == Some(true);
+        let now = (inner.size(), info.native_pixels_per_point.unwrap_or(1.0));
+        // The first frame has nothing to compare with.
+        let resized = self.size.replace(now).is_some_and(|(size, scale)| {
+            (size - now.0).length() >= 0.5 || (scale - now.1).abs() > 1e-3
+        });
+        if full {
+            return;
+        }
+        if let Some((size, pos)) =
+            crate::ui::platform::keep_on_screen(resized, inner, outer, monitor)
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+        }
+    }
+
+    /// Saves the window's size once it settles, through the open project's
+    /// `config.set` (the start window has no daemon to ask).
+    fn keep_geometry(&mut self, ctx: &egui::Context) {
+        let Screen::Opened(o) = &mut self.screen else {
+            return;
+        };
+        // The viewport rect is the window's inner size in points.
+        let (r, maximized) = ctx.input(|i| (i.viewport_rect(), i.viewport().maximized));
+        let size = [r.width(), r.height()];
+        if let Some(g) = self
+            .geometry
+            .observe(size, maximized.unwrap_or(false), Instant::now())
+        {
+            o.ws.set_config(
+                "app.window",
+                g.into_value(&ryucad::config::user("app.window")),
+            );
+        }
+        if self.geometry.pending() {
+            ctx.request_repaint_after(geometry::SETTLE);
+        }
     }
 }
 
@@ -417,10 +501,13 @@ impl eframe::App for App {
         // A new window to the front: on Windows it otherwise stays behind
         // whatever was in front when it was started.
         if !std::mem::replace(&mut self.shown, true) {
+            crate::ui::platform::note_display(frame);
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
         }
+        self.keep_on_screen(ui.ctx());
         let gpu = frame.wgpu_render_state().cloned();
         self.frame(ui, gpu.as_ref());
+        self.keep_geometry(ui.ctx());
         if std::mem::take(&mut self.pick) {
             if let Some(dir) = start::pick_folder(frame) {
                 self.go(&dir);

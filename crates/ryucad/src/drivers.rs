@@ -11,10 +11,13 @@
 //! installers and `ryucad git install`. These are, with nothing else, the
 //! Git config ryucad writes.
 //!
-//! Git's merge follows renames by default (Git 2.47 even with
-//! `merge.renames=false`; 2.56 honours it), so a feature deleted on one
-//! side and one like it added there can take the other side's edits;
-//! `merge status` reports that instead.
+//! Git's merge follows renames by default, and feature files are small and
+//! alike, so a feature deleted on one side and another added there looks
+//! like a rename: the merge driver never sees the real three-way merge, an
+//! edit is lost and an ID collision goes unseen. Each clone therefore gets
+//! `merge.renames=false` (Git 2.47 ignored it; 2.50 honours it), never the
+//! user's global config, which every other repository reads too; `merge
+//! status` still reports a merge that followed a rename.
 
 use crate::error::{Code, Error, Result};
 use serde_json::{Map, Value, json};
@@ -55,6 +58,10 @@ pub const MERGE_NAME: &str = "merge.ryucad.name";
 
 /// The config entry Git's merge runs.
 pub const MERGE_DRIVER: &str = "merge.ryucad.driver";
+
+/// The config entry that stops Git's merge following renames, so every
+/// feature file reaches the merge driver as itself.
+pub const RENAMES: &str = "merge.renames";
 
 /// The hooks that run ryucad's merge check: before Git records a merge
 /// commit itself, and before any commit (one that concludes a merge Git
@@ -115,14 +122,24 @@ pub fn write_attributes(root: &Path) -> Result<()> {
 }
 
 /// The repository holding `here`, if any.
+#[cfg(not(test))]
 fn discover(here: &Path) -> Option<gix::Repository> {
     gix::discover(here).ok()
+}
+
+/// The repository holding `here`, if any, reading only its own config:
+/// the user's global config (where the installers put the drivers) and
+/// the system's must not decide what tests see.
+#[cfg(test)]
+fn discover(here: &Path) -> Option<gix::Repository> {
+    gix::discover_opts(here, Default::default(), gix::open::Options::isolated()).ok()
 }
 
 /// How Git, as configured for the repository at `root`, is set up for
 /// ryucad; `None` outside a repository.
 pub struct Setup {
-    /// The driver entries Git doesn't have.
+    /// The driver entries Git doesn't have, and [`RENAMES`] where it isn't
+    /// false.
     pub missing: Vec<&'static str>,
     /// Each of [`HOOKS`] as it stands.
     pub hooks: Vec<(&'static str, Hook)>,
@@ -178,10 +195,13 @@ const HOOK_CHECK: &str = "merge status --hook";
 pub fn setup(root: &Path) -> Option<Setup> {
     let repo = discover(root)?;
     let snapshot = repo.config_snapshot();
-    let missing = [TEXTCONV, MERGE_DRIVER]
+    let mut missing: Vec<&str> = [TEXTCONV, MERGE_DRIVER]
         .into_iter()
         .filter(|k| snapshot.string(*k).is_none())
         .collect();
+    if snapshot.boolean(RENAMES) != Some(false) {
+        missing.push(RENAMES);
+    }
     let hooks = HOOKS.into_iter().map(|h| (h, hook(&repo, h))).collect();
     Some(Setup { missing, hooks })
 }
@@ -260,8 +280,9 @@ fn write_hook(path: &Path) -> Result<()> {
 
 /// `ryucad git install`: writes the driver entries to the user's global
 /// Git config, or with `local` to the config of the repository at `here`,
-/// with the clone's own hooks (except where someone else's is there, which
-/// is left alone and reported with the line to add).
+/// with [`RENAMES`] off and the clone's own hooks (except where someone
+/// else's is there, which is left alone and reported with the line to
+/// add).
 pub fn install(here: &Path, local: bool) -> Result<Value> {
     let entries = [
         (TEXTCONV, textconv_command()?),
@@ -293,6 +314,10 @@ pub fn install(here: &Path, local: bool) -> Result<Value> {
         }
         config.insert((*k).to_owned(), json!(v));
     }
+    if snapshot.boolean(RENAMES) != Some(false) {
+        git_config(Some(&dir), &["--local", RENAMES, "false"])?;
+    }
+    config.insert(RENAMES.to_owned(), json!("false"));
     let mut hooks = Map::new();
     for name in HOOKS {
         let v = match hook(&repo, name) {
@@ -427,7 +452,7 @@ mod tests {
         let r = dir.path();
         crate::git::tests::git(r, &["init", "-q"]);
         let s = setup(r).unwrap();
-        assert_eq!(s.missing, [TEXTCONV, MERGE_DRIVER]);
+        assert_eq!(s.missing, [TEXTCONV, MERGE_DRIVER, RENAMES]);
         let hooks = r.join(".git/hooks");
         let path = hooks.join(HOOKS[0]);
         let first = |r: &Path| setup(r).unwrap().hooks[0].1.clone();
@@ -449,6 +474,10 @@ mod tests {
         write_hook(&path).unwrap();
         assert_eq!(first(r), Hook::Installed(path.clone()));
         crate::git::tests::git(r, &["config", MERGE_DRIVER, "x"]);
+        assert_eq!(setup(r).unwrap().missing, [TEXTCONV, RENAMES]);
+        crate::git::tests::git(r, &["config", RENAMES, "true"]);
+        assert_eq!(setup(r).unwrap().missing, [TEXTCONV, RENAMES]);
+        crate::git::tests::git(r, &["config", RENAMES, "false"]);
         assert_eq!(setup(r).unwrap().missing, [TEXTCONV]);
         // A hooks folder of the user's choosing is never written to.
         crate::git::tests::git(r, &["config", "core.hooksPath", "githooks"]);
@@ -468,6 +497,8 @@ mod tests {
         std::fs::write(&path, &mine).unwrap();
         let out = install(r, true).unwrap();
         assert_eq!(out["hooks"][HOOKS[0]]["status"], "installed");
+        assert_eq!(out["config"][RENAMES], "false");
+        assert!(setup(r).unwrap().missing.is_empty());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), mine);
         // Ours is still brought up to date, and a missing one written.
         let theirs = hooks.join(HOOKS[1]);

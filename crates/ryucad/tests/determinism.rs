@@ -280,6 +280,69 @@ fn render_section(golden: &mut Golden) {
     }
 }
 
+/// The showcase committed, then its box widened and its sphere removed:
+/// renders compared with the commit, of the commit framed with the
+/// working files, and of the working files framed with the commit.
+fn compare_section(golden: &mut Golden) {
+    let mut s = golden.section("compare");
+    let (dir, mut session) = showcase();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .env("GIT_AUTHOR_DATE", "2026-10-21T12:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2026-10-21T12:00:00Z")
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "showcase"]);
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap()).unwrap()
+    };
+    call(
+        &mut session,
+        "feature.edit",
+        serde_json::json!({"part": "show", "id": "box", "params": {"x": 18}}),
+    );
+    call(
+        &mut session,
+        "feature.delete",
+        serde_json::json!({"part": "show", "id": "sphere"}),
+    );
+    drop(session);
+    for params in [
+        serde_json::json!({"compare": "HEAD", "width": 320, "height": 240}),
+        serde_json::json!({"rev": "HEAD", "frame": ["working"], "width": 320, "height": 240}),
+        serde_json::json!({"frame": ["HEAD"], "compare": "HEAD", "view": "top",
+                           "width": 320, "height": 240}),
+    ] {
+        let req = ryucad::proto::Request::from_rpc("render", Some(params)).unwrap();
+        let a = ryucad::server::handle_safely(&mut None, None, None, dir.path(), req).unwrap();
+        let png = a.binary.unwrap();
+        let mut r = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .unwrap();
+        let mut buf = vec![0; r.output_buffer_size().unwrap()];
+        let info = r.next_frame(&mut buf).unwrap();
+        s.str(&format!("{:x}", md(&buf[..info.buffer_size()])));
+    }
+}
+
 /// A part with a sketch of each kind of curve, swept every way: a slot
 /// with a round hole, extruded and revolved part way and all the way.
 fn swept() -> (tempfile::TempDir, ryucad::session::Session) {
@@ -994,7 +1057,7 @@ fn diff_section(golden: &mut Golden) {
         positions: true,
         ..Default::default()
     };
-    let mut v = ryucad::diff::structural(&before, &after, &opts);
+    let mut v = ryucad::diff::structural(&before, &after, &opts, &Default::default());
     s.str(&ryucad::doc::canonical::to_string(&v));
     ryucad::diff::model(&mut v, &from, &to, &opts);
     s.str(&ryucad::doc::canonical::to_string(&v));
@@ -1249,6 +1312,7 @@ fn determinism() {
     rebuild_section(&mut golden);
     display_section(&mut golden);
     render_section(&mut golden);
+    compare_section(&mut golden);
     sweeps_section(&mut golden);
     references_section(&mut golden);
     solids_section(&mut golden);

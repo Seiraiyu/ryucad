@@ -204,7 +204,7 @@ pub struct Scene {
 }
 
 /// How opaque a ghost is.
-pub const GHOST_ALPHA: f32 = 0.35;
+pub const GHOST_ALPHA: f32 = ryucad::render::GHOST_ALPHA;
 
 /// Vertices of a body's triangles, relative to `reference`.
 fn face_vertices(
@@ -699,18 +699,14 @@ impl Scene {
     }
 }
 
-/// A device for drawing without a window: tests and the smoke run. Any
-/// adapter will do, software ones (lavapipe, WARP) included; `None` when
-/// the machine has none.
+/// A device for drawing without a window: tests and the smoke run. The
+/// window's choice ([`crate::ui::platform::choose`]): an adapter the scene
+/// can use, hardware first, software ones (lavapipe, WARP) included;
+/// `None` when the machine has none.
 pub fn headless() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::LowPower,
-        force_fallback_adapter: false,
-        compatible_surface: None,
-        ..Default::default()
-    }))
-    .ok()?;
+    let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+    let adapter = crate::ui::platform::choose(&adapters, None).ok()?;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("ryucad-app headless"),
         required_limits: wgpu::Limits::downlevel_defaults(),

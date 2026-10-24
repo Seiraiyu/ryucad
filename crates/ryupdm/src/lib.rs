@@ -7,6 +7,8 @@
 //! branch holds it ([`history`]). From those, each part has a state:
 //! in work, released, modified or obsolete ([`state`]), and the records
 //! are checked against the parts, the branch and the tags ([`check`]).
+//! A merge's result is checked against its sides for faults neither had
+//! ([`merge`]).
 //!
 //! ryupdm reads projects through `ryucad-doc` and never calls the kernel,
 //! a session, the daemon or the app: ryucad exposes it through its
@@ -20,7 +22,8 @@
 //! one): [`content::hash`], [`props::Pdm::read`],
 //! [`history::Releases::read`], [`state::derive`], [`check::run`] (whose
 //! findings have a versioned shape, [`check::SCHEMA`]) and
-//! [`check::staged`], the commit guard. This API follows the workspace's
+//! [`check::staged`], the commit guard, and [`merge::validate`], what a
+//! merge broke. This API follows the workspace's
 //! version, and changes to these functions are called out in the release
 //! notes.
 
@@ -29,6 +32,7 @@ pub mod config;
 pub mod content;
 pub mod history;
 pub mod label;
+pub mod merge;
 pub mod props;
 pub mod record;
 pub mod state;

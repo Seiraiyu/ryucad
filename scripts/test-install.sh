@@ -115,6 +115,10 @@ case "$(uname -s)" in
             check "desktop entry is valid" 'desktop-file-validate "$desktop"'
         fi
         check "project MIME type registered" '[ -f "$work/home-fresh/.local/share/mime/packages/ryucad.xml" ]'
+        # Folders open in the app through Open With, never by default: a
+        # desktop with no default for folders (Xfce) takes the first entry
+        # that lists them.
+        check "desktop entry opens projects, not every folder" 'grep -qx "MimeType=application/x-ryucad-project;" "$desktop"'
         ;;
     Darwin)
         if command -v osacompile >/dev/null 2>&1; then
@@ -125,6 +129,8 @@ case "$(uname -s)" in
             check "launcher opens folders" 'printf %s "$types" | grep -q "public.folder"'
             check "launcher opens JSON" 'printf %s "$types" | grep -q "public.json"'
             check "launcher is still signed" 'codesign --verify "$work/home-fresh/Applications/ryucad.app"'
+            # The reinstall above replaced the launcher: no word of signing.
+            check "says nothing of signing" '! grep -q "signature" "$work/out"'
         fi
         ;;
 esac

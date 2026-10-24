@@ -24,9 +24,14 @@ fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn window(p: &Project) -> Harness<'static, App> {
+    sized(p, 700.0)
+}
+
+/// A window `height` tall: the right panel's lower sections need room.
+fn sized(p: &Project, height: f32) -> Harness<'static, App> {
     let root = p.root.clone();
     Harness::builder()
-        .with_size(egui::vec2(1000.0, 700.0))
+        .with_size(egui::vec2(1000.0, height))
         .wgpu()
         .build_eframe(move |cc| App::open(&cc.egui_ctx, Some(&root), ryucad()))
 }
@@ -61,6 +66,18 @@ fn frames(h: &mut Harness<'static, App>, done: impl Fn(&App) -> bool) {
         assert!(t.elapsed() < Duration::from_secs(30), "timed out");
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Runs frames until something labelled `label` shows: a dialog takes a
+/// frame or two to appear.
+fn shown(h: &mut Harness<'static, App>, label: &str) {
+    for _ in 0..20 {
+        h.step();
+        if h.query_by_label(label).is_some() {
+            return;
+        }
+    }
+    panic!("{label} never showed");
 }
 
 fn click(h: &Harness<'static, App>, pos: egui::Pos2) {
@@ -104,6 +121,16 @@ fn the_tree_lists_features_and_frames_a_chosen_one() {
         Some(("p".to_owned(), "boss".to_owned()))
     );
     assert_ne!(h.state().opened().view.nav.camera, before);
+    // Clicking it again keeps it, and its form (#771); Ctrl/Cmd+click
+    // lets it go.
+    h.get_by_label("boss (cylinder)").click();
+    h.run_steps(3);
+    assert!(h.state().opened().view.chosen.is_some());
+    h.get_by_label("boss (cylinder)")
+        .click_modifiers(egui::Modifiers::COMMAND);
+    frames(&mut h, |a| a.opened().view.chosen.is_none());
+    h.get_by_label("boss (cylinder)").click();
+    frames(&mut h, |a| a.opened().view.chosen.is_some());
     // A failed feature is marked.
     p.ok(&[
         "feature",
@@ -125,6 +152,90 @@ fn the_tree_lists_features_and_frames_a_chosen_one() {
     });
     h.step();
     h.get_by_label("ring (torus): failed (rebuild_failed)");
+}
+
+#[test]
+fn the_trees_choice_follows_what_is_picked_and_cleared() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    let choose = |h: &mut Harness<'static, App>| {
+        h.get_by_label("boss (cylinder)").click();
+        frames(h, |a| a.opened().view.chosen.is_some());
+    };
+    let chosen = |h: &Harness<'static, App>| h.state().opened().view.chosen.clone();
+    // Esc clears it, even with nothing selected.
+    choose(&mut h);
+    h.key_press(egui::Key::Escape);
+    h.step();
+    assert_eq!(chosen(&h), None);
+    // So does a click on the background.
+    choose(&mut h);
+    h.step();
+    let rect = h.state().opened().view.rect;
+    let corner = rect.min + egui::vec2(5.0, 5.0);
+    h.event(egui::Event::PointerMoved(corner));
+    h.step();
+    assert!(h.state().opened().view.hover.is_none());
+    click(&h, corner);
+    h.step();
+    assert_eq!(chosen(&h), None);
+    // And a click on another feature's solid; one on its own keeps it.
+    choose(&mut h);
+    h.step();
+    let rect = h.state().opened().view.rect;
+    let mut found = std::collections::BTreeMap::new();
+    for i in 1..20 {
+        for j in 1..20 {
+            let at = rect.min
+                + egui::vec2(
+                    rect.width() * i as f32 / 20.0,
+                    rect.height() * j as f32 / 20.0,
+                );
+            h.event(egui::Event::PointerMoved(at));
+            h.step();
+            if let Some(hit) = &h.state().opened().view.hover {
+                let solid = hit.entity.split('/').nth(1).unwrap().to_owned();
+                found.entry(solid).or_insert(at);
+            }
+        }
+    }
+    let (Some(&base), Some(&boss)) = (found.get("base"), found.get("boss")) else {
+        panic!("found only {found:?}");
+    };
+    click(&h, boss);
+    h.step();
+    assert_eq!(chosen(&h), Some(("p".to_owned(), "boss".to_owned())));
+    click(&h, base);
+    h.step();
+    assert_eq!(chosen(&h), None);
+}
+
+#[test]
+fn the_window_keeps_its_size() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    // Once it has held still, the size goes to `app.window`, from which
+    // the next window opens.
+    let saved = |p: &Project| p.ok(&["config", "get", "app.window"])["value"].clone();
+    let t = Instant::now();
+    while saved(&p)["size"] != serde_json::json!([1000.0, 700.0]) {
+        assert!(t.elapsed() < Duration::from_secs(30), "{}", saved(&p));
+        h.step();
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(saved(&p)["maximized"], false);
+    let g = ryucad_app::ui::app::saved_geometry().unwrap();
+    assert_eq!(g.size, [1000.0, 700.0]);
 }
 
 #[test]
@@ -206,7 +317,15 @@ fn a_click_selects_and_agents_see_it() {
     });
     let mine = h.state().opened().ws.myself().unwrap().selection.clone();
     assert_eq!(p.ok(&["selection"])["selection"], serde_json::json!(mine));
-    // Escape clears it.
+    // Escape that closes a menu leaves it (#769)...
+    h.get_by_label("File").click();
+    h.run_steps(2);
+    assert!(egui::Popup::is_any_open(&h.ctx));
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(!egui::Popup::is_any_open(&h.ctx));
+    assert_eq!(h.state().opened().ws.myself().unwrap().selection, mine);
+    // ...and the next Escape clears it.
     h.key_press(egui::Key::Escape);
     frames(&mut h, |a| {
         a.opened()
@@ -299,6 +418,36 @@ fn orbiting_from_the_background_keeps_the_model_in_view() {
     assert!(
         under_middle(&h),
         "the orbit swung the model out of the middle"
+    );
+}
+
+#[test]
+fn the_hover_goes_when_the_pointer_leaves_the_view() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.step();
+    let rect = h.state().opened().view.rect;
+    let over = |h: &mut Harness<'static, App>, e: egui::Event| {
+        h.event(e);
+        h.step();
+        h.step();
+        h.state().opened().view.hover.is_some()
+    };
+    assert!(over(&mut h, egui::Event::PointerMoved(rect.center())));
+    // Out of the window, and over a panel beside the view.
+    assert!(!over(&mut h, egui::Event::PointerGone));
+    assert!(over(&mut h, egui::Event::PointerMoved(rect.center())));
+    let beside = egui::pos2(rect.min.x - 20.0, rect.center().y);
+    assert!(!over(&mut h, egui::Event::PointerMoved(beside)));
+    // Nor is its description left drawn.
+    assert!(
+        h.query_by(|n| n.label().is_some_and(|l| l.contains("face of")))
+            .is_none()
     );
 }
 
@@ -794,6 +943,20 @@ fn a_damaged_project_is_repaired_then_opened() {
     // It says so.
     h.get_by_label("This project is repaired and ready to open");
     assert!(h.query_by_label("This project needs repair").is_none());
+    // What a repair would change is said only while one is left to make.
+    let left = match &h.state().screen {
+        ryucad_app::ui::app::Screen::Damaged(d) => d.0.report.as_ref().unwrap()["issues"]
+            .as_array()
+            .is_some_and(|i| !i.is_empty()),
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        h.query_by_label(
+            "Nothing is changed until you choose a repair, and a repair changes only the files in its planned changes. Git has the files as they were committed.",
+        )
+        .is_some(),
+        left
+    );
     h.get_by_label("Open project").click();
     frames(&mut h, |a| {
         matches!(a.screen, ryucad_app::ui::app::Screen::Opened(_)) && loaded(a)
@@ -1248,4 +1411,135 @@ fn a_merge_conflict_is_settled_from_its_panel() {
     h.step();
     assert!(h.query_by_label("merge in progress").is_none());
     assert!(!h.state().title().contains("in progress"));
+}
+
+#[test]
+fn parts_show_their_release_state_and_a_compare_marks_proposals() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["pdm", "init"]);
+    p.ok(&["props", "set", "p", "number=100"]);
+    let p = p.committed();
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        loaded(a) && a.opened().ws.states.get("p").is_some()
+    });
+    h.step();
+    h.get_by_label("p (in work)");
+    p.ok(&["release", "propose", "p"]);
+    frames(&mut h, |a| {
+        a.opened().ws.states.badge("p").as_deref() == Some("in work, A proposed")
+    });
+    h.step();
+    h.get_by_label("p (in work, A proposed)");
+    // Compared with HEAD, the part is marked with what it proposes, and
+    // its changes listed with a feature's.
+    menu(&mut h, "View", "Compare with HEAD");
+    frames(&mut h, |a| {
+        compared(a)
+            && a.opened()
+                .ws
+                .compare
+                .as_ref()
+                .is_some_and(|c| c.pdm.contains_key("p"))
+    });
+    h.step();
+    h.get_by_label("p (in work, A proposed) [proposes A]");
+    h.get_by_label("base (box)").click();
+    frames(&mut h, |a| a.opened().view.chosen.is_some());
+    h.step();
+    h.get_by_label("Part p");
+    h.get_by_label("state: in work -> in work, A proposed");
+}
+
+#[test]
+fn a_property_is_edited_in_the_part_section_and_pdm_set_up() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = sized(&p, 1200.0);
+    frames(&mut h, |a| {
+        let o = a.opened();
+        loaded(a) && o.ws.props.is_some() && o.ws.pdm_config.is_some()
+    });
+    h.step();
+    h.get_by_label("Properties of p");
+    // No ID yet: PDM is set up from the window.
+    h.get_by_label("Set up PDM").click();
+    frames(&mut h, |a| a.opened().ws.pdm_ready());
+    h.step();
+    assert!(h.query_by_label("Set up PDM").is_none());
+    h.get_by_label("number *").click();
+    let field = h.get_by_label("number *");
+    field.set_text_value_accesskit("100-0042");
+    h.step();
+    h.get_by_label("Apply properties").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .props
+            .as_ref()
+            .is_some_and(|p| !p.saving && !p.dirty() && p.props[0].field.read == "100-0042")
+    });
+    let got = p.ok(&["props", "show", "p"]);
+    assert_eq!(got["properties"][0]["value"], "100-0042");
+}
+
+#[test]
+fn a_release_is_proposed_synced_and_made_obsolete_from_the_releases_tab() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["pdm", "init"]);
+    p.ok(&["props", "set", "p", "number=100"]);
+    let p = p.committed();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("Releases").click();
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.releases.list.is_some()
+    });
+    h.step();
+    h.get_by_label("Releases of p");
+    h.get_by_label("No release records yet");
+    // Propose: the dialog says the label, then the record is written.
+    h.get_by_label("Propose…").click();
+    frames(&mut h, |a| a.opened().ws.releases.proposal.is_some());
+    shown(&mut h, "It will be revision A.");
+    h.get_by_label("Note").click();
+    h.get_by_label("Note").set_text_value_accesskit("first");
+    h.step();
+    h.get_by_label("Propose").click();
+    frames(&mut h, |a| a.opened().ws.releases.records("p").len() == 1);
+    shown(&mut h, "wrote releases/p/A.json");
+    assert!(h.query_by_label("It will be revision A.").is_none());
+    // Official once main holds it; its tag is synced after confirming.
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "release p A"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && !a.opened().ws.releases.to_sync().is_empty()
+    });
+    h.step();
+    h.get_by_label("Sync tags…").click();
+    shown(&mut h, "create ryupdm/p/A");
+    h.get_by_label("Sync").click();
+    frames(&mut h, |a| {
+        let t = &a.opened().ws.releases;
+        a.opened().ws.idle() && !t.busy && t.done.is_some() && t.to_sync().is_empty()
+    });
+    shown(&mut h, "tags: 1 created, 0 moved");
+    // Obsolete, confirmed.
+    h.get_by_label("Obsolete…").click();
+    shown(&mut h, "Make obsolete");
+    h.get_by_label("Make obsolete").click();
+    frames(&mut h, |a| a.opened().ws.releases.records("p").len() == 2);
+    let list = p.ok(&["release", "list", "p"]);
+    assert_eq!(list["records"][1]["kind"], "obsolete");
 }

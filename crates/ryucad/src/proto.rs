@@ -364,6 +364,10 @@ pub enum Request {
         note: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
+        /// Write nothing: answer the label it would take and every reason
+        /// it would be refused.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
     },
     /// Release records (or one part's), where each became official, their
     /// tags, and each part's state.
@@ -633,7 +637,9 @@ pub enum Request {
     },
     /// Draws a part (or the whole project) to a PNG, sent as bytes after
     /// the answer. The view is `camera`, a participant's camera, a standard
-    /// `view`, or iso framing the model.
+    /// `view`, or iso framing the model. `rev` renders a Git revision;
+    /// `compare` paints what changed since a revision and ghosts it;
+    /// `frame` widens the framing to other revisions.
     #[serde(rename = "render")]
     Render {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -661,6 +667,18 @@ pub enum Request {
         /// Draw sketches (default true).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sketches: Option<bool>,
+        /// Render the project as this Git revision has it (the working
+        /// files by default).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        /// Frame these revisions' models too (`working` for the working
+        /// files), so renders of each share a camera.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        frame: Vec<String>,
+        /// Paint what changed since this revision (faces new and changed)
+        /// and ghost what it had, as the app's compare view does.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compare: Option<String>,
     },
     /// Diagnoses the project folder: every problem, with a stable code.
     #[serde(rename = "doctor")]
@@ -736,7 +754,7 @@ impl Request {
                 | Request::PdmInit { .. }
                 | Request::PdmConfigure { .. }
                 | Request::PropsSet { .. }
-                | Request::ReleasePropose { .. }
+                | Request::ReleasePropose { dry_run: false, .. }
                 | Request::ReleaseObsolete { .. }
                 | Request::ReleaseSync { .. }
                 | Request::SketchEdit { .. }
@@ -901,6 +919,13 @@ mod tests {
                 part: "p".into(),
                 note: Some("why".into()),
                 expected_revision: None,
+                dry_run: false,
+            },
+            Request::ReleasePropose {
+                part: "p".into(),
+                note: None,
+                expected_revision: None,
+                dry_run: true,
             },
             Request::ReleaseObsolete {
                 part: "p".into(),

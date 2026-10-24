@@ -556,13 +556,27 @@ fn diagnose_git(root: &Path, issues: &mut Vec<Issue>) {
         ));
     }
     if !setup.missing.is_empty() {
+        let renames = setup.missing.contains(&crate::drivers::RENAMES);
+        let drivers: Vec<&str> = setup
+            .missing
+            .iter()
+            .copied()
+            .filter(|k| *k != crate::drivers::RENAMES)
+            .collect();
+        let mut why = Vec::new();
+        if !drivers.is_empty() {
+            why.push(format!("Git has no {}", drivers.join(" or ")));
+        }
+        if renames {
+            why.push(format!(
+                "{} isn't false, so Git can take a deleted feature and an added one for a rename and merge them past ryucad",
+                crate::drivers::RENAMES
+            ));
+        }
         issues.push(issue(
             "git_drivers_missing",
             Vec::new(),
-            format!(
-                "Git has no {}: run `ryucad git install`",
-                setup.missing.join(" or ")
-            ),
+            format!("{}: run `ryucad git install`", why.join("; ")),
         ));
     }
     let line = crate::drivers::hook_line().unwrap_or_default();
@@ -860,12 +874,18 @@ pub struct Repair {
     pub params: Vec<Param>,
 }
 
-/// One file written (with these bytes) or, with `None`, deleted.
+/// One file written (with these bytes) or, with `None`, deleted; or, with
+/// the path [`GIT_INSTALL`], the clone set up as `ryucad git install`
+/// sets it up (its config and hooks are the clone's, not project files, so
+/// this isn't logged or undone).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Change {
     pub path: String,
     pub content: Option<Vec<u8>>,
 }
+
+/// The change that runs `ryucad git install` in the project's clone.
+pub const GIT_INSTALL: &str = "ryucad git install";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Param {
@@ -880,6 +900,7 @@ impl Repair {
             .changes
             .iter()
             .map(|c| match &c.content {
+                _ if c.path == GIT_INSTALL => json!({"action": "git_install"}),
                 Some(b) => json!({"path": c.path, "action": "write",
                                   "content": String::from_utf8_lossy(b)}),
                 None => json!({"path": c.path, "action": "delete"}),
@@ -1010,6 +1031,30 @@ fn stem_of(rel: &str) -> &str {
 
 /// The repairs for an issue, planned against the files as they are.
 fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<Vec<Repair>> {
+    // What `ryucad git install` sets up in the clone (the drivers, renames
+    // off, the hooks), except a hooks folder the user chose, which ryucad
+    // never writes to.
+    let installs = match i.code {
+        "git_drivers_missing" => Some("drivers"),
+        "git_hook_missing" if !i.message.starts_with("core.hooksPath") => Some(
+            crate::drivers::HOOKS
+                .into_iter()
+                .find(|h| i.message.contains(&format!(" no {h} hook ")))
+                .unwrap_or("hooks"),
+        ),
+        _ => None,
+    };
+    if let Some(what) = installs {
+        return Ok(vec![Repair {
+            id: format!("{}:install:{what}", i.code),
+            summary: "set this clone up for ryucad as `ryucad git install` does: the merge and diff drivers, merge.renames=false and the merge hooks (Git's config and hooks, not project files: not undoable)".to_owned(),
+            changes: vec![Change {
+                path: GIT_INSTALL.to_owned(),
+                content: None,
+            }],
+            params: Vec::new(),
+        }]);
+    }
     let Some(first) = i.files.first() else {
         return Ok(Vec::new());
     };
@@ -1305,6 +1350,11 @@ pub fn repair(root: &Path, ids: &[String], params: &Params) -> Result<Value> {
             continue;
         };
         for c in &r.changes {
+            if c.path == GIT_INSTALL {
+                crate::drivers::install(root, true)?;
+                changes.push(json!({"change": "git_install"}));
+                continue;
+            }
             let path = root.join(&c.path);
             match &c.content {
                 Some(bytes) => {
@@ -1909,9 +1959,10 @@ pub(crate) mod tests {
     /// Makes `r` a repository set up for ryucad, by hand: the test binary
     /// isn't ryucad, so `git install` would register the wrong program.
     pub(crate) fn in_repo(r: &Path) {
-        use crate::drivers::{HOOKS, MERGE_DRIVER, TEXTCONV};
+        use crate::drivers::{HOOKS, MERGE_DRIVER, RENAMES, TEXTCONV};
         let git = |args: &[&str]| crate::git::tests::git(r, args);
         git(&["init", "-q"]);
+        git(&["config", RENAMES, "false"]);
         git(&["config", TEXTCONV, "ryucad git textconv"]);
         git(&[
             "config",
@@ -1996,6 +2047,28 @@ pub(crate) mod tests {
         let v = report(r).unwrap();
         assert_eq!(v["issues"][1]["code"], "git_hook_missing");
         assert_eq!(v["warnings"], 2);
+        // Renames left on are the drivers' issue too.
+        git(&["config", crate::drivers::RENAMES, "true"]);
+        let v = report(r).unwrap();
+        let message = v["issues"][0]["message"].as_str().unwrap();
+        assert!(message.contains("merge.renames"), "{message}");
+        // A fresh clone's repair sets it all up, as `git install` there.
+        let hook_fix = &v["issues"][1]["repairs"][0];
+        assert_eq!(hook_fix["id"], "git_hook_missing:install:pre-merge-commit");
+        assert_eq!(hook_fix["changes"], json!([{"action": "git_install"}]));
+        let ids = [
+            v["issues"][0]["repairs"][0]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            hook_fix["id"].as_str().unwrap().to_owned(),
+        ];
+        let out = repair(r, &ids, &Params::default()).unwrap();
+        // The first did both; the second had nothing left to do.
+        assert_eq!(out["applied"], json!([ids[0]]));
+        assert_eq!(out["skipped"], json!([ids[1]]));
+        assert_eq!(out["report"]["healthy"], true, "{out}");
+        assert!(crate::drivers::setup(r).unwrap().missing.is_empty());
     }
 
     #[test]

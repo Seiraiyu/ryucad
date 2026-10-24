@@ -1,6 +1,8 @@
 //! `ryucad-app [DIR]`: the desktop app, on the project in `DIR` or on its
-//! start window. `--version` prints the build; `--smoke [DIR]` loads the
-//! project and draws one frame offscreen, for release checks.
+//! start window. `--help` says so, `--version` (or `-V`) prints the build in
+//! the CLI's envelope; `--smoke [DIR]` loads the project and draws one frame
+//! offscreen, for release checks. Anything else is a usage error, never a
+//! folder.
 
 // A release build on Windows opens no console window.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
@@ -11,10 +13,24 @@ use ryucad_app::ui::platform;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+const USAGE: &str = "Usage: ryucad-app [DIR]
+
+Opens the ryucad project in or above DIR, or the start window without one.
+
+Options:
+  --version      Print the build, as JSON
+  --smoke [DIR]  Load the project and draw one frame offscreen (release checks)
+  -h, --help     Print this help";
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--version") {
-        let v = serde_json::json!(ryucad::proto::VersionInfo::current());
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        // The CLI's envelope, as `ryucad version` prints it.
+        let v = serde_json::json!({
+            "ok": true,
+            "result": ryucad::proto::VersionInfo::current(),
+            "warnings": [],
+        });
         println!("{v}");
         return ExitCode::SUCCESS;
     }
@@ -35,6 +51,25 @@ fn main() -> ExitCode {
         println!("{doc}");
         return code;
     }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
+    // A flag it doesn't know, or more than one folder, is a mistake, not
+    // a folder to open.
+    if args.len() > 1 || args.first().is_some_and(|a| a.starts_with('-')) {
+        eprintln!(
+            "ryucad-app: unexpected argument '{}'\n\n{USAGE}",
+            args.join(" ")
+        );
+        return ExitCode::from(2);
+    }
+    // Before winit opens the display, and before any thread starts.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if let Some(m) = platform::x_modifiers(std::env::var_os("RYUCAD_XIM").is_some()) {
+        // SAFETY: nothing else runs yet to read the environment.
+        unsafe { std::env::set_var("XMODIFIERS", m) };
+    }
     platform::crash_reports();
     // A project to open; the start window without one.
     let dir = args.first().map(PathBuf::from);
@@ -45,10 +80,13 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // The size the last window was left at (`app.window`), else 1280×800.
+    let saved = ryucad_app::ui::app::saved_geometry();
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("ryucad")
-            .with_inner_size([1280.0, 800.0]),
+            .with_inner_size(saved.map_or([1280.0, 800.0], |g| g.size))
+            .with_maximized(saved.is_some_and(|g| g.maximized)),
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: platform::wgpu_options(),
         ..Default::default()

@@ -64,6 +64,20 @@ pub fn mark_text(m: &Mark, rev: &str) -> String {
     }
 }
 
+/// A part's line in the tree: its ID, its release state (`p (B
+/// modified, C proposed)`) once known, and in a compare the records it
+/// adds (`[proposes C]`).
+pub fn part_text(id: &str, badge: Option<&str>, marks: &[String]) -> String {
+    let mut s = id.to_owned();
+    if let Some(b) = badge {
+        s.push_str(&format!(" ({b})"));
+    }
+    if !marks.is_empty() {
+        s.push_str(&format!(" [{}]", marks.join(", ")));
+    }
+    s
+}
+
 /// The colour a compare gives a feature's line.
 fn mark_colour(m: &Mark) -> style::Rgb {
     match m.change {
@@ -98,8 +112,8 @@ fn feature_row(
         Some(e) => r.on_hover_text(message(e)),
         None => r,
     };
-    if r.clicked() {
-        *choose = Some(if chosen { None } else { Some(key) });
+    if let Some(c) = toggle(ui, &r, chosen, key) {
+        *choose = Some(c);
     }
     if !f.uses.is_empty() {
         ui.indent(("uses", &part.id, &f.id), |ui| {
@@ -198,11 +212,18 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             })
             .map(|i| i["message"].as_str().unwrap_or_default().to_owned())
             .collect();
+        let marks = ws
+            .compare
+            .as_ref()
+            .and_then(|c| c.pdm.get(&part.id))
+            .map_or(&[][..], |m| m.marks.as_slice());
+        let state = ws.states.get(&part.id);
+        let badge = state.map(crate::core::pdm::badge);
+        let text = part_text(&part.id, badge.as_deref(), marks);
         let title = match &part.error {
-            Some(_) => {
-                RichText::new(format!("{} (broken)", part.id)).color(ui.visuals().warn_fg_color)
-            }
-            None => RichText::new(&part.id),
+            Some(_) => RichText::new(format!("{text} (broken)")).color(ui.visuals().warn_fg_color),
+            None if !marks.is_empty() => RichText::new(text).color(style::color32(style::NEW)),
+            None => RichText::new(text),
         };
         let header = egui::CollapsingHeader::new(title)
             .id_salt(("part", &part.id))
@@ -227,13 +248,23 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                     let chosen = view.chosen.as_ref() == Some(&key);
                     let text = RichText::new(format!("{id} [removed]"))
                         .color(style::color32(style::REMOVED));
-                    if ui.selectable_label(chosen, text).clicked() {
-                        gone = Some(if chosen { None } else { Some(key) });
+                    let r = ui.selectable_label(chosen, text);
+                    if let Some(c) = toggle(ui, &r, chosen, key) {
+                        gone = Some(c);
                     }
                 }
             });
-        if let Some(e) = &part.error {
-            header.header_response.on_hover_text(message(e));
+        let why = state.and_then(crate::core::pdm::reason);
+        match (&part.error, why) {
+            (Some(e), _) => {
+                header.header_response.on_hover_text(message(e));
+            }
+            (None, Some(w)) => {
+                header
+                    .header_response
+                    .on_hover_text(format!("release state unknown: {w}"));
+            }
+            (None, None) => {}
         }
         if !damage.is_empty() {
             let badge = format!("{} doctor issue(s)", damage.len());
@@ -259,6 +290,33 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     }
 }
 
+/// What a click on a tree row chooses: the row, or with Ctrl/Cmd on the
+/// chosen row nothing. A plain click on the chosen row keeps it, so a
+/// second click never throws away what its form holds.
+fn toggle(
+    ui: &egui::Ui,
+    r: &egui::Response,
+    chosen: bool,
+    key: BodyKey,
+) -> Option<Option<BodyKey>> {
+    if !r.clicked() {
+        return None;
+    }
+    // The release's own modifiers, as egui's clicks are judged at it.
+    let command = ui.input(|i| {
+        i.modifiers.command
+            || i.events.iter().any(|e| {
+                matches!(e, egui::Event::PointerButton { pressed: false, modifiers, .. }
+                    if modifiers.command)
+            })
+    });
+    match (chosen, command) {
+        (true, true) => Some(None),
+        (true, false) => None,
+        (false, _) => Some(Some(key)),
+    }
+}
+
 /// In a compare, what changed in the feature chosen in the tree since the
 /// revision compared with.
 pub fn changes(ui: &mut egui::Ui, ws: &Workspace, view: &View) {
@@ -266,6 +324,13 @@ pub fn changes(ui: &mut egui::Ui, ws: &Workspace, view: &View) {
         return;
     };
     ui.heading(format!("Changes since {}", c.rev));
+    // The part's properties, records and state, beside its features'.
+    if let Some(m) = c.pdm.get(&key.0) {
+        ui.label(RichText::new(format!("Part {}", key.0)).strong());
+        for l in m.marks.iter().chain(&m.lines) {
+            ui.label(l);
+        }
+    }
     match c.features.get(key) {
         Some(m) if !m.lines.is_empty() => {
             for l in &m.lines {
@@ -408,13 +473,7 @@ pub fn merge(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     for c in m.conflicts() {
         let id = c["id"].as_str().unwrap_or_default();
         let concerns = &c["concerns"];
-        let what = concerns["feature"]
-            .as_str()
-            .or(concerns["parameter"].as_str())
-            .or(c["files"][0].as_str())
-            .unwrap_or(id);
-        let title = format!("{} in {what}", c["kind"].as_str().unwrap_or("conflict"));
-        egui::CollapsingHeader::new(title)
+        egui::CollapsingHeader::new(crate::core::merge::title(c))
             .id_salt(("conflict", id))
             .show(ui, |ui| {
                 ui.label(c["message"].as_str().unwrap_or_default());
@@ -427,8 +486,8 @@ pub fn merge(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                         ui.label(format!("{k}: {}", side(v)));
                     }
                 }
-                if c["kind"] == "merge_broke" {
-                    ui.weak("Fix it in the model; the status is read again as it changes.");
+                if let Some(h) = crate::core::merge::hint(c) {
+                    ui.weak(h);
                 }
                 ui.horizontal_wrapped(|ui| {
                     let choices = c["choices"].as_array().into_iter().flatten();
@@ -643,6 +702,20 @@ fn blend(ui: &mut egui::Ui, b: &mut crate::core::edit::BlendForm) {
     ui.checkbox(&mut b.propagate.chosen, "propagate along tangent chains");
 }
 
+/// The width of a text field in a grid's column: a grid gives a column
+/// other than its last only the width it had last frame, at least 40
+/// points, so a field there asking for more never gets it (`add_sized`
+/// takes it). A share of the panel, within limits.
+fn field_width(ui: &egui::Ui, share: f32, min: f32, max: f32) -> f32 {
+    (ui.available_width() * share).clamp(min, max)
+}
+
+/// Adds a single line text field `width` wide, in a grid cell or not.
+fn sized(ui: &mut egui::Ui, edit: egui::TextEdit<'_>, width: f32) -> egui::Response {
+    let height = ui.spacing().interact_size.y;
+    ui.add_sized([width, height], edit)
+}
+
 fn field_row(ui: &mut egui::Ui, f: &mut crate::core::edit::Field, label: &str) {
     ui.label(label);
     let edit = egui::TextEdit::singleline(&mut f.text).desired_width(110.0);
@@ -683,11 +756,15 @@ pub fn parameters(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
     if p.params.is_empty() {
         ui.weak("No parameters yet");
     }
+    let (name_w, value_w) = (
+        field_width(ui, 0.3, 70.0, 160.0),
+        field_width(ui, 0.45, 110.0, 280.0),
+    );
     egui::Grid::new("parameters").num_columns(3).show(ui, |ui| {
         for row in &mut p.params {
             let name = ui.label(&row.field.name);
-            let edit = egui::TextEdit::singleline(&mut row.field.text).desired_width(110.0);
-            let r = ui.add(edit).labelled_by(name.id);
+            let edit = egui::TextEdit::singleline(&mut row.field.text);
+            let r = sized(ui, edit, value_w).labelled_by(name.id);
             if row.field.dirty() {
                 r.on_hover_text(format!("was {}", row.field.read));
             }
@@ -706,17 +783,13 @@ pub fn parameters(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
             }
             ui.end_row();
         }
-        let add = egui::TextEdit::singleline(&mut p.new_name)
-            .hint_text("new name")
-            .desired_width(70.0);
-        let named = ui.add(add).on_hover_text("A new parameter's name");
+        let add = egui::TextEdit::singleline(&mut p.new_name).hint_text("new name");
+        let named = sized(ui, add, name_w).on_hover_text("A new parameter's name");
         named.widget_info(|| {
             egui::WidgetInfo::labeled(egui::Role::TextInput, true, "new parameter's name")
         });
-        let value = egui::TextEdit::singleline(&mut p.new_value)
-            .hint_text("value")
-            .desired_width(110.0);
-        let valued = ui.add(value).on_hover_text("A new parameter's expression");
+        let value = egui::TextEdit::singleline(&mut p.new_value).hint_text("value");
+        let valued = sized(ui, value, value_w).on_hover_text("A new parameter's expression");
         valued.widget_info(|| {
             egui::WidgetInfo::labeled(egui::Role::TextInput, true, "new parameter's value")
         });
@@ -748,6 +821,143 @@ pub fn parameters(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
     });
     if save {
         ws.save_params();
+    }
+}
+
+/// One property's control, by its type: a line or a box of text, a
+/// choice, or a checkbox; labelled by `name` for accessibility.
+fn prop_control(ui: &mut egui::Ui, prop: &mut crate::core::props::Prop, name: egui::Id) {
+    use crate::core::props::Control;
+    let f = &mut prop.field;
+    let r = match &prop.control {
+        Control::Text { multiline: true } => ui.add(
+            egui::TextEdit::multiline(&mut f.text)
+                .desired_rows(2)
+                .desired_width(150.0),
+        ),
+        Control::Boolean => {
+            let mut on = f.text == "true";
+            let r = ui.checkbox(&mut on, "");
+            if r.changed() {
+                f.text = on.to_string();
+            }
+            r
+        }
+        Control::Enum(values) => {
+            let shown = if f.text.is_empty() {
+                "(not set)".to_owned()
+            } else {
+                f.text.clone()
+            };
+            egui::ComboBox::from_id_salt(("property", &f.name))
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut f.text, String::new(), "(not set)");
+                    for v in values {
+                        ui.selectable_value(&mut f.text, v.clone(), v);
+                    }
+                })
+                .response
+        }
+        _ => ui.add(egui::TextEdit::singleline(&mut f.text).desired_width(150.0)),
+    };
+    let r = r.labelled_by(name);
+    if f.dirty() {
+        r.on_hover_text(format!(
+            "was {}",
+            if f.read.is_empty() {
+                "not set"
+            } else {
+                &f.read
+            }
+        ));
+    }
+}
+
+/// The Part section: the chosen feature's part (or the first part), its
+/// release state and every property, each with a control for its type,
+/// marked required (`*`) or revising, its faults beside it. Apply sends
+/// `props.set` against the revision they were read at. With PDM not set
+/// up, Set up PDM (`pdm.init`) gives the project its ID.
+pub fn part_section(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
+    let part = view
+        .chosen
+        .as_ref()
+        .map(|k| k.0.clone())
+        .or_else(|| ws.model.parts.keys().next().cloned());
+    ws.show_props(part.as_deref());
+    if ws.pdm_config.is_some() && !ws.pdm_ready() {
+        ui.weak("PDM isn't set up: the project has no ID for release records yet.");
+        if ui.button("Set up PDM").clicked() {
+            ws.pdm_init();
+        }
+    }
+    let badge = part.as_deref().and_then(|p| ws.states.badge(p));
+    let Some(p) = &mut ws.props else {
+        return;
+    };
+    ui.heading(format!("Properties of {}", p.part));
+    if let Some(b) = badge {
+        ui.weak(format!("Release state: {b}"));
+    }
+    if !p.changed.is_empty() {
+        let frame =
+            egui::Frame::group(ui.style()).fill(ui.visuals().warn_fg_color.gamma_multiply(0.15));
+        frame.show(ui, |ui| {
+            ui.label("Someone changed these properties while you edited them. They now read:");
+            for c in &p.changed {
+                ui.label(format!("{}: {} (you typed {})", c.name, c.theirs, c.yours));
+            }
+            if ui.button("OK").clicked() {
+                p.changed.clear();
+            }
+        });
+    }
+    let error = ui.visuals().error_fg_color;
+    egui::Grid::new("properties").num_columns(3).show(ui, |ui| {
+        for prop in &mut p.props {
+            let star = if prop.required { " *" } else { "" };
+            let name = ui.label(format!("{}{star}", prop.field.name));
+            prop_control(ui, prop, name.id);
+            if prop.revising {
+                ui.weak("revising").on_hover_text(
+                    "A release records it: changing it is work towards the next revision",
+                );
+            } else {
+                ui.label("");
+            }
+            ui.end_row();
+            for fault in &prop.faults {
+                ui.label("");
+                ui.colored_label(error, fault);
+                ui.end_row();
+            }
+        }
+    });
+    if let Some(e) = &p.error {
+        ui.colored_label(error, &e.message);
+    }
+    let (dirty, saving) = (p.dirty(), p.saving);
+    let mut save = false;
+    ui.horizontal(|ui| {
+        save = ui
+            .add_enabled(dirty && !saving, egui::Button::new("Apply properties"))
+            .clicked();
+        if ui
+            .add_enabled(dirty && !saving, egui::Button::new("Revert properties"))
+            .clicked()
+        {
+            for prop in &mut p.props {
+                prop.field.text.clone_from(&prop.field.read);
+            }
+            p.error = None;
+        }
+        if saving {
+            ui.spinner();
+        }
+    });
+    if save {
+        ws.save_props();
     }
 }
 
@@ -944,6 +1154,7 @@ pub enum Tab {
     #[default]
     Activity,
     History,
+    Releases,
 }
 
 /// How long ago `ms` (Unix milliseconds) was, for people.
@@ -960,9 +1171,10 @@ pub fn ago(ms: u64) -> String {
     }
 }
 
-/// The activity log, newest first, with undo and redo per entry; and the
-/// project's Git history, read-only.
-pub fn journal(ui: &mut egui::Ui, ws: &mut Workspace, tab: &mut Tab) {
+/// The activity log, newest first, with undo and redo per entry; the
+/// project's Git history, read-only; and the release records of `part`
+/// (the chosen feature's part, else the first).
+pub fn journal(ui: &mut egui::Ui, ws: &mut Workspace, tab: &mut Tab, part: Option<&str>) {
     // A short tab still fills the panel, so the view keeps its size.
     ui.set_min_size(ui.available_size());
     ui.horizontal(|ui| {
@@ -970,11 +1182,212 @@ pub fn journal(ui: &mut egui::Ui, ws: &mut Workspace, tab: &mut Tab) {
         if ui.selectable_value(tab, Tab::History, "History").clicked() {
             ws.load_history();
         }
+        if ui
+            .selectable_value(tab, Tab::Releases, "Releases")
+            .clicked()
+        {
+            ws.load_releases();
+        }
     });
     ui.separator();
     match tab {
         Tab::Activity => activity(ui, ws),
         Tab::History => history(ui, ws),
+        Tab::Releases => releases(ui, ws, part),
+    }
+}
+
+/// `part`'s release records, the checks' findings about it, and Propose…,
+/// Obsolete… and Sync tags…, each opening a dialog to confirm.
+fn releases(ui: &mut egui::Ui, ws: &mut Workspace, part: Option<&str>) {
+    use crate::core::releases::{Confirm, record_line};
+    let Some(part) = part else {
+        ui.weak("No parts yet");
+        return;
+    };
+    let badge = ws.states.badge(part);
+    let t = &mut ws.releases;
+    if t.list.is_none() {
+        ui.spinner();
+        return;
+    }
+    let mut dry = false;
+    egui::ScrollArea::vertical()
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.strong(format!("Releases of {part}"));
+                if let Some(b) = &badge {
+                    ui.weak(b);
+                }
+            });
+            if !t.in_repository() {
+                ui.weak("This project isn't in a Git repository: no record can become official.");
+            }
+            let records = t.records(part);
+            if records.is_empty() {
+                ui.weak("No release records yet");
+            }
+            for r in records {
+                ui.label(record_line(r));
+            }
+            let obsoletable = t.obsoletable(part);
+            ui.horizontal(|ui| {
+                let idle = !t.busy;
+                if ui
+                    .add_enabled(idle, egui::Button::new("Propose…"))
+                    .on_hover_text("Write the record of this part's next revision")
+                    .clicked()
+                {
+                    dry = true;
+                }
+                let obsolete = egui::Button::new("Obsolete…");
+                if ui
+                    .add_enabled(idle && obsoletable.is_some(), obsolete)
+                    .on_hover_text("Make this part's latest official revision obsolete")
+                    .clicked()
+                    && let Some(label) = obsoletable.clone()
+                {
+                    t.note.clear();
+                    t.confirm = Some(Confirm::Obsolete {
+                        part: part.to_owned(),
+                        label,
+                    });
+                }
+                if ui
+                    .add_enabled(idle, egui::Button::new("Sync tags…"))
+                    .on_hover_text("Create and move the local ryupdm/ tags to match the records")
+                    .clicked()
+                {
+                    t.confirm = Some(Confirm::Sync);
+                }
+                if t.busy {
+                    ui.spinner();
+                }
+            });
+            if let Some(d) = &t.done {
+                ui.label(d);
+            }
+            if let Some(e) = &t.error {
+                ui.colored_label(ui.visuals().error_fg_color, &e.message);
+            }
+            let findings = t.findings_of(part);
+            if !findings.is_empty() {
+                ui.strong("Checks");
+                for f in findings {
+                    ui.label(format!(
+                        "{} {}: {}",
+                        f["severity"].as_str().unwrap_or_default(),
+                        f["code"].as_str().unwrap_or_default(),
+                        f["message"].as_str().unwrap_or_default()
+                    ));
+                }
+            }
+        });
+    if dry {
+        ws.releases.note.clear();
+        ws.propose_dry(part);
+    }
+}
+
+/// The Releases tab's dialogs, placed at the top of `view`: Propose
+/// (the label it takes, every reason it can't yet, a note), Obsolete
+/// and Sync tags (what it will write), each confirmed or cancelled.
+pub fn release_dialogs(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
+    use crate::core::releases::{Confirm, note};
+    let t = &mut ws.releases;
+    // What a dialog's button asks for: a proposal with its note, or a
+    // confirmed obsolete record or sync.
+    let mut act: Option<(Confirm, Option<String>)> = None;
+    let mut propose: Option<(String, Option<String>)> = None;
+    if let Some((part, dry)) = t.proposal.clone() {
+        let mut open = true;
+        crate::ui::dialogs::window(&format!("Propose {part}"), view)
+            .open(&mut open)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                let label = dry["label"].as_str().unwrap_or("?");
+                ui.label(format!("It will be revision {label}."));
+                let problems = dry["problems"].as_array().cloned().unwrap_or_default();
+                if !problems.is_empty() {
+                    ui.label("It can't be proposed yet:");
+                    for p in &problems {
+                        ui.colored_label(ui.visuals().error_fg_color, message(p));
+                    }
+                }
+                let name = ui.label("Note");
+                ui.add(egui::TextEdit::multiline(&mut t.note).desired_rows(2))
+                    .labelled_by(name.id);
+                ui.horizontal(|ui| {
+                    let ready = dry["ready"] == true && !t.busy;
+                    if ui
+                        .add_enabled(ready, egui::Button::new("Propose"))
+                        .clicked()
+                    {
+                        propose = Some((part.clone(), note(&t.note)));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        t.proposal = None;
+                    }
+                });
+            });
+        if !open {
+            t.proposal = None;
+        }
+    }
+    if let Some(c) = t.confirm.clone() {
+        let title = match &c {
+            Confirm::Obsolete { part, label } => format!("Make {part} {label} obsolete"),
+            Confirm::Sync => "Sync tags".to_owned(),
+        };
+        let to_sync = t.to_sync();
+        let mut open = true;
+        crate::ui::dialogs::window(&title, view)
+            .open(&mut open)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                let go = match &c {
+                    Confirm::Obsolete { part, label } => {
+                        ui.label(format!(
+                            "This writes an obsolete record for {part} {label}; it becomes official when the release branch holds it."
+                        ));
+                        let name = ui.label("Note");
+                        ui.add(egui::TextEdit::multiline(&mut t.note).desired_rows(2))
+                            .labelled_by(name.id);
+                        "Make obsolete"
+                    }
+                    Confirm::Sync => {
+                        if to_sync.is_empty() {
+                            ui.label("Every tag is where its release is: nothing to do.");
+                        }
+                        for (tag, what) in &to_sync {
+                            ui.label(format!("{what} {tag}"));
+                        }
+                        ui.weak("Only local tags: nothing is pushed or deleted.");
+                        "Sync"
+                    }
+                };
+                ui.horizontal(|ui| {
+                    let can = !t.busy && !(c == Confirm::Sync && to_sync.is_empty());
+                    if ui.add_enabled(can, egui::Button::new(go)).clicked() {
+                        act = Some((c.clone(), note(&t.note)));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        t.confirm = None;
+                    }
+                });
+            });
+        if !open {
+            t.confirm = None;
+        }
+    }
+    if let Some((part, n)) = propose {
+        ws.propose(&part, n);
+    }
+    match act {
+        Some((Confirm::Obsolete { part, label }, n)) => ws.obsolete(&part, &label, n),
+        Some((Confirm::Sync, _)) => ws.sync_tags(),
+        None => {}
     }
 }
 
@@ -1040,6 +1453,10 @@ fn history(ui: &mut egui::Ui, ws: &mut Workspace) {
     if ui.small_button("Refresh").clicked() {
         ws.load_history();
     }
+    // Commits made in a terminal change no project file: while the tab
+    // shows, it reads the history again now and then.
+    let next = ws.history_shown(std::time::Instant::now());
+    ui.ctx().request_repaint_after(next);
     let Some(h) = &ws.history else {
         ui.spinner();
         return;
@@ -1134,6 +1551,16 @@ mod tests {
         assert_eq!(
             mark_text(&mark(Change::Same, true, None), "HEAD"),
             " [moved]"
+        );
+    }
+
+    #[test]
+    fn parts_say_their_release_state_and_proposals() {
+        assert_eq!(part_text("p", None, &[]), "p");
+        assert_eq!(part_text("p", Some("in work"), &[]), "p (in work)");
+        assert_eq!(
+            part_text("p", Some("A modified, B proposed"), &["proposes B".into()]),
+            "p (A modified, B proposed) [proposes B]"
         );
     }
 

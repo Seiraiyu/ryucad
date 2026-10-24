@@ -40,10 +40,35 @@ pub fn runtime_dir() -> Result<PathBuf> {
 /// start a second daemon the app never sees.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn default_runtime_dir() -> PathBuf {
-    match std::env::var_os("XDG_RUNTIME_DIR") {
+    // SAFETY: getuid has no preconditions and can't fail.
+    let uid = unsafe { libc::getuid() };
+    unix_runtime_dir(std::env::var_os("XDG_RUNTIME_DIR"), uid, |d| {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        std::fs::symlink_metadata(d)
+            .is_ok_and(|m| m.is_dir() && m.uid() == uid && m.permissions().mode() & 0o077 == 0)
+    })
+}
+
+/// `$XDG_RUNTIME_DIR/ryucad`; without it (cron, `sudo -u`, some ssh
+/// shells) the folder logind makes for the user's desktop session, if it
+/// is there and theirs alone, so a CLI started there finds the app's
+/// daemon; else `/tmp/ryucad-<uid>`.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn unix_runtime_dir(
+    xdg: Option<std::ffi::OsString>,
+    uid: u32,
+    private: impl Fn(&Path) -> bool,
+) -> PathBuf {
+    match xdg {
         Some(d) if !d.is_empty() => PathBuf::from(d).join("ryucad"),
-        // SAFETY: getuid has no preconditions and can't fail.
-        _ => PathBuf::from("/tmp").join(format!("ryucad-{}", unsafe { libc::getuid() })),
+        _ => {
+            let session = PathBuf::from(format!("/run/user/{uid}"));
+            if private(&session) {
+                session.join("ryucad")
+            } else {
+                PathBuf::from("/tmp").join(format!("ryucad-{uid}"))
+            }
+        }
     }
 }
 
@@ -190,6 +215,25 @@ impl Endpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn without_xdg_runtime_dir_the_session_folder_is_found() {
+        let yes = |_: &Path| true;
+        let no = |_: &Path| false;
+        assert_eq!(
+            unix_runtime_dir(Some("/run/user/7".into()), 7, no),
+            Path::new("/run/user/7/ryucad")
+        );
+        // Unset or empty: logind's folder when it is there and private.
+        for xdg in [None, Some("".into())] {
+            assert_eq!(
+                unix_runtime_dir(xdg.clone(), 7, yes),
+                Path::new("/run/user/7/ryucad")
+            );
+            assert_eq!(unix_runtime_dir(xdg, 7, no), Path::new("/tmp/ryucad-7"));
+        }
+    }
 
     #[test]
     fn one_endpoint_per_project() {

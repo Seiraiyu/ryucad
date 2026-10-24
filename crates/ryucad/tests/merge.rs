@@ -314,6 +314,60 @@ fn git_follows_a_feature_it_thinks_was_renamed() {
 }
 
 #[test]
+fn a_set_up_clone_merges_a_delete_and_an_add_as_themselves() {
+    // Issue #44: a feature deleted and another added on one side looked
+    // like a rename, so the merge lost the other side's edit and never
+    // saw the two features colliding at one ID.
+    let r = boxed("");
+    r.ryucad(&[
+        "feature", "add", "p", "sphere", "--id", "knob", "--param", "radius=4",
+    ]);
+    r.commit("a knob");
+    // `ryucad git install` turns merge.renames off in the clone.
+    let c = r.clone_as("clone");
+    c.git(&["checkout", "-q", "-b", "feat-b"]);
+    c.ryucad(&[
+        "feature", "add", "p", "box", "--id", "lug", "--param", "x=4", "--param", "y=4", "--param",
+        "z=4",
+    ]);
+    c.ryucad(&["feature", "delete", "p", "knob"]);
+    c.commit("feat-b: a lug for the knob");
+    c.git(&["checkout", "-q", "main"]);
+    c.ryucad(&[
+        "feature",
+        "add",
+        "p",
+        "torus",
+        "--id",
+        "lug",
+        "--param",
+        "major_radius=4",
+        "--param",
+        "minor_radius=1",
+    ]);
+    c.ryucad(&["feature", "edit", "p", "knob", "--param", "radius=5"]);
+    c.commit("main: a lug and a bigger knob");
+    let (code, text) = c.git_status(&["merge", "--no-edit", "feat-b"]);
+    assert_ne!(code, 0, "{text}");
+    assert!(!text.contains("rename"), "{text}");
+    let v = c.ryucad(&["merge", "status"]);
+    let kinds: Vec<(&str, &str)> = v["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["kind"].as_str().unwrap(), c["files"][0].as_str().unwrap()))
+        .collect();
+    assert!(
+        kinds.contains(&("modify_delete", "parts/p/features/knob.json")),
+        "{v}"
+    );
+    assert!(
+        kinds.contains(&("id_collision", "parts/p/features/lug.json")),
+        "{v}"
+    );
+}
+
+#[test]
 fn rebase_and_cherry_pick_merge_through_the_driver() {
     let r = boxed("");
     r.git(&["checkout", "-q", "-b", "theirs"]);
@@ -612,4 +666,65 @@ fn a_pull_is_checked_as_a_merge() {
         out.contains("s.json#merge_broke (merge_broke, ours)"),
         "{out}"
     );
+}
+
+#[test]
+fn the_hook_refuses_what_a_merge_broke_in_pdm_until_it_is_settled() {
+    let r = boxed("");
+    r.ryucad(&["git", "install"]);
+    r.ryucad(&["part", "create", "q"]);
+    r.ryucad(&["part", "create", "s"]);
+    r.ryucad(&["props", "set", "p", "number=100"]);
+    r.commit("numbered");
+    // Theirs proposes p and numbers q; ours makes p's box longer and gives
+    // s q's number. Git merges every file cleanly.
+    r.git(&["checkout", "-q", "-b", "theirs"]);
+    r.ryucad(&["release", "propose", "p"]);
+    r.ryucad(&["props", "set", "q", "number=300"]);
+    r.commit("theirs: propose p A, number q");
+    r.git(&["checkout", "-q", "main"]);
+    r.ryucad(&["feature", "edit", "p", "b", "--param", "x=12"]);
+    r.ryucad(&["props", "set", "s", "number=300"]);
+    r.commit("ours: longer, number s");
+    let (code, out) = r.git_status(&["merge", "--no-edit", "theirs"]);
+    assert_ne!(code, 0, "{out}");
+    let stale = "releases/p/A.json#pdm_broke/release_stale";
+    let s = "parts/s/properties.json#pdm_broke/part_number_duplicate/number";
+    for line in [
+        format!("{stale} (pdm_broke, ours)"),
+        "parts/q/properties.json#pdm_broke/part_number_duplicate/number (pdm_broke, ours)".into(),
+        format!("{s} (pdm_broke, theirs)"),
+    ] {
+        assert!(out.contains(&line), "{line}: {out}");
+    }
+    // check sees the same, as release and doctor findings.
+    let (code, v) = r.ryucad_status(&["check"]);
+    assert_eq!(code, 1, "{v}");
+    let codes: Vec<&str> = v["error"]["details"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    assert!(codes.contains(&"release_stale"), "{codes:?}");
+    assert!(codes.contains(&"part_number_duplicate"), "{codes:?}");
+    // The proposal is withdrawn and s renumbered; the merge commits.
+    let v = r.ryucad(&["merge", "status"]);
+    let repair = v["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == stale)
+        .map(|c| c["repairs"][0]["id"].as_str().unwrap().to_owned())
+        .expect("the stale proposal");
+    r.ryucad(&["merge", "resolve", stale, "--repair", &repair]);
+    let v = r.ryucad(&["merge", "resolve", s, "--value", "\"301\""]);
+    assert_eq!(v["status"]["clean"], true, "{v}");
+    assert!(!r.root.join("releases/p/A.json").exists());
+    r.git(&["add", "-A"]);
+    r.git(&["commit", "-q", "--no-edit"]);
+    // The merged part is proposed again.
+    let v = r.ryucad(&["release", "propose", "p"]);
+    assert_eq!(v["record"]["label"], "A");
+    assert_eq!(r.json("parts/s/properties.json")["number"], "301");
 }

@@ -39,7 +39,10 @@ fn version_and_a_folder_that_isnt_a_project() {
         .output()
         .unwrap();
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["ryucad"], env!("CARGO_PKG_VERSION"));
+    // The CLI's envelope, as `ryucad version` prints it.
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["warnings"], serde_json::json!([]));
+    assert_eq!(v["result"]["ryucad"], env!("CARGO_PKG_VERSION"));
     let dir = tempfile::tempdir().unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_ryucad-app"))
         .arg("--smoke")
@@ -49,4 +52,22 @@ fn version_and_a_folder_that_isnt_a_project() {
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["error"]["code"], "project_not_found", "{v}");
     assert!(!out.status.success());
+}
+
+#[test]
+fn help_and_unknown_arguments_open_no_window() {
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ryucad-app"))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let out = run(&["--help"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Usage: ryucad-app [DIR]"));
+    for args in [&["--frobnicate"][..], &["a", "b"]] {
+        let out = run(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("Usage:"));
+    }
 }

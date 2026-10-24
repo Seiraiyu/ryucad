@@ -1,8 +1,8 @@
 //! Three versions of a file from bytes, merged as the merge driver merges
 //! them. The first byte picks how the rest is read: raw text (three
 //! versions split at `0xff` bytes, so anything at all reaches the driver),
-//! or a base sketch, part list or parameters file and two sides' edits to
-//! it, two bytes an edit. Merging must never panic, must give the same
+//! or a base sketch, part list, parameters file, part's properties or
+//! release record and two sides' edits to it, two bytes an edit. Merging must never panic, must give the same
 //! bytes twice, must be canonical JSON whose record holds as many conflicts
 //! as it says unless it fell back to lines, and readable files never fall
 //! back. A side that changed nothing gives the other.
@@ -158,6 +158,42 @@ fn edit_parameters(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// Applies edit `(op, arg)` to a part's properties: a property removed,
+/// set to text, or set to a number.
+fn edit_properties(v: &mut Value, op: u8, arg: u8) {
+    let names = [
+        "number",
+        "name",
+        "description",
+        "material",
+        "finish",
+        "mass",
+    ];
+    let name = names[arg as usize % names.len()];
+    let o = v.as_object_mut().expect("an object");
+    match op % 3 {
+        0 => {
+            o.remove(name);
+        }
+        1 => {
+            o.insert(name.to_owned(), json!(format!("v{}", op / 3)));
+        }
+        _ => {
+            o.insert(name.to_owned(), json!(op / 3));
+        }
+    }
+}
+
+/// Applies edit `(op, arg)` to a release record: its note, content or
+/// properties changed. A record merges as a whole file.
+fn edit_record(v: &mut Value, op: u8, arg: u8) {
+    match op % 3 {
+        0 => v["note"] = json!(format!("note {arg}")),
+        1 => v["content"] = json!(format!("{arg:064x}")),
+        _ => v["properties"]["number"] = json!(format!("{}", 100 + u32::from(arg))),
+    }
+}
+
 fn text(v: &Value) -> Vec<u8> {
     canonical::to_string(v).into_bytes()
 }
@@ -166,7 +202,7 @@ fuzz_target!(|data: &[u8]| {
     let Some((&mode, rest)) = data.split_first() else {
         return;
     };
-    let (base, ours, theirs, readable) = if mode % 4 == 3 {
+    let (base, ours, theirs, readable) = if mode % 6 == 3 {
         let mut parts = rest.splitn(3, |b| *b == 0xff);
         let (b, o, t) = (
             parts.next().unwrap_or(&[]).to_vec(),
@@ -175,16 +211,24 @@ fuzz_target!(|data: &[u8]| {
         );
         (b, o, t, false)
     } else {
-        let base = match mode % 4 {
+        let base = match mode % 6 {
             0 => sketch(),
             1 => json!({"features": ["a", "b", "c", "d"], "format": 1, "kind": "ryucad.part"}),
-            _ => json!({"format": 1, "kind": "ryucad.parameters",
+            2 => json!({"format": 1, "kind": "ryucad.parameters",
                         "parameters": {"p0": "1 mm", "p1": "p0 * 2"}}),
+            4 => json!({"format": 1, "kind": "ryupdm.properties", "name": "P", "number": "100"}),
+            _ => json!({"built_with": {"commit": "c", "ryucad": "0", "ryukei": "0"},
+                        "content": "0".repeat(64), "format": 1, "kind": "ryupdm.release",
+                        "label": "A", "part": "p", "project": "0123456789abcdef0123456789abcdef",
+                        "properties": {"number": "100"}, "released_by": {"participant": "agent"},
+                        "results": {}, "supersedes": null}),
         };
-        let edit = |v: &mut Value, op: u8, arg: u8| match mode % 4 {
+        let edit = |v: &mut Value, op: u8, arg: u8| match mode % 6 {
             0 => edit_sketch(v, op, arg),
             1 => edit_part(v, op, arg),
-            _ => edit_parameters(v, op, arg),
+            2 => edit_parameters(v, op, arg),
+            4 => edit_properties(v, op, arg),
+            _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
         let (mut ours, mut theirs) = (base.clone(), base.clone());

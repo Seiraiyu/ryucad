@@ -152,6 +152,38 @@ pub enum Code {
     NothingToRelease,
     /// The part has a proposed record that isn't official yet.
     ReleasePending,
+    /// `ryucad review` has no GitHub token, or the service refused the one
+    /// it has.
+    ReviewUnauthenticated,
+    /// The clone has no `origin` remote on GitHub, so `ryucad review`
+    /// doesn't know which repository to ask about.
+    ReviewNoRemote,
+    /// The review service can't be reached (network, DNS, TLS, timeout).
+    ReviewUnreachable,
+    /// The App isn't installed on the repository, or the repository isn't
+    /// in the beta.
+    ReviewNotInstalled,
+    /// The service has no such pull request, thread or artifact.
+    ReviewNotFound,
+    /// The token can't read the repository, or can't push to the branch a
+    /// merge-in would update.
+    ReviewForbidden,
+    /// The service hasn't finished the work asked about; try again later.
+    ReviewPending,
+    /// The PR's head moved since the merge was validated.
+    ReviewHeadMoved,
+    /// The PR's base moved since the merge was validated; it is being
+    /// validated again.
+    ReviewBaseMoved,
+    /// A fork's PR whose head repository the App isn't installed on.
+    ReviewForkNotInstalled,
+    /// A job passed one of the service's limits (time, memory, disk, size).
+    ReviewLimitExceeded,
+    /// A comment named an entity reference the service can't read.
+    ReviewReferenceInvalid,
+    /// The service failed, or answered with a code this build doesn't know
+    /// (in the details as `service_code`).
+    ReviewFailed,
     /// A fillet or chamfer whose edges belong to more than one solid: one
     /// feature rounds or bevels one solid.
     TargetsMixed,
@@ -171,7 +203,12 @@ impl Code {
         match self {
             Code::Usage => 2,
             Code::ProjectNotFound | Code::FormatTooNew | Code::ProjectDamaged => 3,
-            Code::Io | Code::Daemon | Code::Internal | Code::AppNotInstalled => 4,
+            Code::Io
+            | Code::Daemon
+            | Code::Internal
+            | Code::AppNotInstalled
+            | Code::ReviewUnreachable
+            | Code::ReviewFailed => 4,
             _ => 1,
         }
     }
@@ -257,6 +294,15 @@ mod tests {
         assert_eq!(Code::ReleaseNotReady.exit_code(), 1);
         assert_eq!(Code::NothingToRelease.exit_code(), 1);
         assert_eq!(Code::ReleasePending.exit_code(), 1);
+        assert_eq!(Code::ReviewUnauthenticated.exit_code(), 1);
+        assert_eq!(Code::ReviewNoRemote.exit_code(), 1);
+        assert_eq!(Code::ReviewHeadMoved.exit_code(), 1);
+        assert_eq!(Code::ReviewUnreachable.exit_code(), 4);
+        assert_eq!(Code::ReviewFailed.exit_code(), 4);
+        assert_eq!(
+            json!(Code::ReviewForkNotInstalled),
+            json!("review_fork_not_installed")
+        );
         assert_eq!(Code::TargetsMixed.exit_code(), 1);
         assert_eq!(Code::EdgeListedTwice.exit_code(), 1);
         assert_eq!(Code::BlendFailed.exit_code(), 1);

@@ -431,7 +431,7 @@ fn short(commit: &str) -> &str {
 /// `release_sequence` for a part's readable records: releases follow one
 /// another in the scheme, each superseding the one before, and an
 /// obsolete record names a release.
-fn sequence(config: &Config, part: &Id, entries: &[(&Entry, &Record)]) -> Vec<Finding> {
+pub(crate) fn sequence(config: &Config, part: &Id, entries: &[(&Entry, &Record)]) -> Vec<Finding> {
     let scheme = config.revisions;
     let mut out = Vec::new();
     let mut placed: Vec<(u64, &Entry, &Record)> = Vec::new();

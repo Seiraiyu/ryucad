@@ -8,7 +8,10 @@ use crate::core::link::{Event, Link, Wake};
 use crate::core::merge::Merge;
 use crate::core::model::{BodyKey, Model, Part};
 use crate::core::params::Params;
+use crate::core::pdm::States;
 use crate::core::people::{People, Person};
+use crate::core::props::PartProps;
+use crate::core::releases::ReleaseTab;
 use crate::core::settings::Settings;
 use ryucad::client::Daemon;
 use ryucad::error::{Code, Error, Result};
@@ -54,6 +57,20 @@ enum Pending {
     /// The model's solids, read for the faces a feature made, at this
     /// part revision.
     Made(BodyKey, String),
+    /// Every release record and part's release state (`release.list`).
+    States,
+    /// The release checks' findings, for the Releases tab.
+    ReleaseCheck,
+    /// A proposal's dry run, for `part`'s Propose dialog.
+    ProposeDry(String),
+    /// A proposal, an obsolete record or a tag sync, from the Releases tab.
+    ReleaseWrite,
+    /// ryupdm's settings, and whether the project has an ID yet.
+    PdmConfig,
+    /// A part's properties for the Part section; after a conflict, with
+    /// the form as it was.
+    Props(String, Option<Box<PartProps>>),
+    PropsSave,
     /// The merge Git is in, if any.
     Merge,
     Resolve,
@@ -72,6 +89,11 @@ pub const ERROR_SHOWN: Duration = Duration::from_secs(8);
 /// first and at most: each failure doubles the wait.
 pub const RETRY_FIRST: Duration = Duration::from_millis(250);
 pub const RETRY_MAX: Duration = Duration::from_secs(5);
+
+/// How often the History tab reads the Git history again while it is
+/// shown: commits made outside ryucad change no project file, so no
+/// notification says so.
+pub const HISTORY_EVERY: Duration = Duration::from_secs(5);
 
 /// A lost window's next attempt to reconnect.
 struct Retry {
@@ -117,6 +139,11 @@ impl Made {
     }
 }
 
+/// The findings of a check report.
+fn findings(report: &Value) -> Vec<Value> {
+    report["findings"].as_array().cloned().unwrap_or_default()
+}
+
 /// A camera as a request gives it: points as quantities in meters.
 pub fn camera_arg(c: &Camera) -> CameraArg {
     let q = |x: f64| json!(format!("{x} m"));
@@ -159,6 +186,11 @@ pub struct Workspace {
     pub activity: Activity,
     /// The project's Git history (`history.log`), once asked for.
     pub history: Option<Value>,
+    /// When it was last asked for, whether an answer is on its way, and
+    /// whether it was wanted again meanwhile.
+    history_at: Option<Instant>,
+    history_waiting: bool,
+    history_again: bool,
     /// This window's compare with a Git revision, while it is in one: it
     /// follows the window's participant's compare state.
     pub compare: Option<Compare>,
@@ -170,9 +202,25 @@ pub struct Workspace {
     /// The merge Git is in the middle of, while it is in one: what is left
     /// to settle.
     pub merge: Option<Merge>,
+    /// Every part's release state (ryupdm), for the tree's badges.
+    pub states: States,
+    /// ryupdm's settings (`pdm.config`): `project` is null until PDM is
+    /// set up.
+    pub pdm_config: Option<Value>,
+    /// The Part section's form, for the part it shows (see `show_props`).
+    pub props: Option<PartProps>,
+    props_part: Option<String>,
+    /// The Releases tab, and whether it was opened (it follows changes
+    /// from then on).
+    pub releases: ReleaseTab,
+    releases_open: bool,
     pub settings: Settings,
     /// The last doctor report, once asked for.
     pub doctor: Option<Value>,
+    /// Whether a report is on its way, and whether the project changed
+    /// meanwhile, so the badges need another.
+    doctor_waiting: bool,
+    doctor_again: bool,
     /// Someone asked for this window (`ryucad open`): bring it forward.
     pub raised: bool,
     /// Requests of the window's that failed, newest last.
@@ -222,13 +270,24 @@ impl Workspace {
             params_part: None,
             activity: Activity::default(),
             history: None,
+            history_at: None,
+            history_waiting: false,
+            history_again: false,
             compare: None,
             compare_asked: 0,
             compare_waiting: false,
             compare_again: false,
             merge: None,
+            states: States::default(),
+            pdm_config: None,
+            props: None,
+            props_part: None,
+            releases: ReleaseTab::default(),
+            releases_open: false,
             settings: Settings::default(),
             doctor: None,
+            doctor_waiting: false,
+            doctor_again: false,
             raised: false,
             camera_due: None,
             camera_sent: None,
@@ -259,6 +318,8 @@ impl Workspace {
         self.send(log, Pending::Activity);
         self.load_settings();
         self.send(Request::MergeStatus {}, Pending::Merge);
+        self.send(Request::ReleaseList { part: None }, Pending::States);
+        self.send(Request::PdmConfig {}, Pending::PdmConfig);
     }
 
     fn load_settings(&mut self) {
@@ -299,22 +360,60 @@ impl Workspace {
 
     /// Diagnoses the project (`doctor`).
     pub fn diagnose(&mut self) {
+        self.doctor_waiting = true;
         self.send(Request::Doctor {}, Pending::Doctor);
+    }
+
+    /// Diagnoses the project again after it changed, so badges don't
+    /// outlive the damage they show (a conflict record settled, say): at
+    /// most one report on its way, and one more after it if the project
+    /// changed meanwhile. Nothing until the window first asked.
+    fn rediagnose(&mut self) {
+        if self.doctor_waiting {
+            self.doctor_again = true;
+        } else if self.doctor.is_some() {
+            self.diagnose();
+        }
     }
 
     /// Applies repairs from the last report (`doctor.repair`); the answer
     /// brings the new report.
     pub fn repair(&mut self, repairs: Vec<String>, params: serde_json::Map<String, Value>) {
+        self.doctor_waiting = true;
         self.send(Request::DoctorRepair { repairs, params }, Pending::Doctor);
     }
 
     /// Reads the project's Git history again.
     pub fn load_history(&mut self) {
+        self.history_at = Some(Instant::now());
+        self.history_waiting = true;
         let req = Request::HistoryLog {
             part: None,
             limit: Some(100),
         };
         self.send(req, Pending::History);
+    }
+
+    /// Reads the history again after the project changed, once it was
+    /// asked for: at most one reading on its way, and one more after it.
+    fn reload_history(&mut self) {
+        if self.history_waiting {
+            self.history_again = true;
+        } else if self.history.is_some() {
+            self.load_history();
+        }
+    }
+
+    /// The History tab is shown: read the history again when the last
+    /// reading is older than [`HISTORY_EVERY`]. Returns when to look again.
+    pub fn history_shown(&mut self, now: Instant) -> Duration {
+        let due = self.history_at.map_or(now, |t| t + HISTORY_EVERY);
+        if now >= due && !self.history_waiting {
+            self.load_history();
+            return HISTORY_EVERY;
+        }
+        due.saturating_duration_since(now)
+            .max(Duration::from_millis(100))
     }
 
     /// Settles a merge conflict by `choice` (`ours`, `theirs`, or `repair`
@@ -540,6 +639,108 @@ impl Workspace {
         self.send(req, Pending::ParamSave);
     }
 
+    /// Shows `part`'s properties in the Part section, read if they aren't
+    /// yet.
+    pub fn show_props(&mut self, part: Option<&str>) {
+        if self.props_part.as_deref() == part {
+            return;
+        }
+        self.props_part = part.map(str::to_owned);
+        self.props = None;
+        if let Some(p) = part {
+            self.read_props(p.to_owned(), None);
+        }
+    }
+
+    fn read_props(&mut self, part: String, before: Option<Box<PartProps>>) {
+        let req = Request::PropsGet { part: part.clone() };
+        self.send(req, Pending::Props(part, before));
+    }
+
+    /// Saves what was typed into the Part section.
+    pub fn save_props(&mut self) {
+        let Some(p) = &mut self.props else { return };
+        p.saving = true;
+        p.error = None;
+        let req = p.request();
+        self.send(req, Pending::PropsSave);
+    }
+
+    /// Reads the Releases tab: every record and the release checks; from
+    /// now on they are read again as they change.
+    pub fn load_releases(&mut self) {
+        self.releases_open = true;
+        self.send(Request::ReleaseList { part: None }, Pending::States);
+        let req = Request::ReleaseCheck { results: false };
+        self.send(req, Pending::ReleaseCheck);
+    }
+
+    /// The dry run of proposing `part`, for its Propose dialog: the label
+    /// it takes and every reason it can't yet.
+    pub fn propose_dry(&mut self, part: &str) {
+        self.releases.proposal = None;
+        let req = Request::ReleasePropose {
+            part: part.to_owned(),
+            note: None,
+            expected_revision: None,
+            dry_run: true,
+        };
+        self.send(req, Pending::ProposeDry(part.to_owned()));
+    }
+
+    /// The revision of `part` the window last saw, to guard a write.
+    fn revision_of(&self, part: &str) -> Option<String> {
+        self.model.parts.get(part).map(|p| p.revision.clone())
+    }
+
+    /// Proposes `part`'s next revision (`release.propose`), against the
+    /// revision of it the window last saw.
+    pub fn propose(&mut self, part: &str, note: Option<String>) {
+        let req = Request::ReleasePropose {
+            part: part.to_owned(),
+            note,
+            expected_revision: self.revision_of(part),
+            dry_run: false,
+        };
+        self.release_write(req);
+    }
+
+    /// Makes `part`'s latest official revision, `label`, obsolete.
+    pub fn obsolete(&mut self, part: &str, label: &str, note: Option<String>) {
+        let req = Request::ReleaseObsolete {
+            part: part.to_owned(),
+            label: label.to_owned(),
+            note,
+            expected_revision: self.revision_of(part),
+        };
+        self.release_write(req);
+    }
+
+    /// Creates and moves the local `ryupdm/` tags (`release.sync`).
+    pub fn sync_tags(&mut self) {
+        self.release_write(Request::ReleaseSync {});
+    }
+
+    fn release_write(&mut self, req: Request) {
+        self.releases.busy = true;
+        self.releases.error = None;
+        self.releases.done = None;
+        self.send(req, Pending::ReleaseWrite);
+    }
+
+    /// Whether ryupdm is set up: the project has its ID.
+    pub fn pdm_ready(&self) -> bool {
+        self.pdm_config
+            .as_ref()
+            .is_some_and(|c| c["project"].is_string())
+    }
+
+    /// Sets up ryupdm (`pdm.init`): the project's ID and default
+    /// settings. The answer is the new settings.
+    pub fn pdm_init(&mut self) {
+        self.send(Request::PdmInit {}, Pending::PdmConfig);
+    }
+
     /// Saves the value typed into the dimension's form.
     pub fn save_dimension(&mut self) {
         let Some(f) = &mut self.dimension else { return };
@@ -679,6 +880,9 @@ impl Workspace {
             self.set_compare(Some(rev));
             self.ask_diff();
         }
+        // A new daemon may see damage, and commits, the old one didn't.
+        self.rediagnose();
+        self.reload_history();
         // Panels asked for whose answers were lost are asked for again.
         if let Some(part) = self.params_part.clone()
             && self.params.is_none()
@@ -689,6 +893,14 @@ impl Workspace {
             && self.form.is_none()
         {
             self.read_form(part, id, None);
+        }
+        if let Some(part) = self.props_part.clone()
+            && self.props.is_none()
+        {
+            self.read_props(part, None);
+        }
+        if self.releases_open {
+            self.load_releases();
         }
         if let Some((part, sketch, constraint)) = self.dimension_for.clone()
             && self.dimension.is_none()
@@ -766,9 +978,17 @@ impl Workspace {
                 if let Some(p) = &mut self.params {
                     p.saving = false;
                 }
+                if let Some(p) = &mut self.props {
+                    p.saving = false;
+                }
+                self.releases.busy = false;
                 self.model.asked.clear();
                 self.model.sketches_asked.clear();
                 self.compare_waiting = false;
+                self.doctor_waiting = false;
+                self.doctor_again = false;
+                self.history_waiting = false;
+                self.history_again = false;
                 if let Some(c) = &mut self.compare {
                     c.asked.clear();
                 }
@@ -783,6 +1003,26 @@ impl Workspace {
     }
 
     fn answered(&mut self, why: Pending, answer: Result<Answer>) {
+        let (doctor, history) = (
+            matches!(why, Pending::Doctor),
+            matches!(why, Pending::History),
+        );
+        self.answer(why, answer);
+        if doctor {
+            self.doctor_waiting = false;
+            if std::mem::take(&mut self.doctor_again) {
+                self.diagnose();
+            }
+        }
+        if history {
+            self.history_waiting = false;
+            if std::mem::take(&mut self.history_again) {
+                self.load_history();
+            }
+        }
+    }
+
+    fn answer(&mut self, why: Pending, answer: Result<Answer>) {
         match (why, answer) {
             (Pending::Info, Ok(a)) => {
                 self.model.default_unit = a.result["default_unit"].as_str().unwrap_or("mm").into();
@@ -850,6 +1090,75 @@ impl Workspace {
                 }
                 if std::mem::take(&mut self.compare_again) {
                     self.ask_diff();
+                }
+            }
+            (Pending::States, Ok(a)) => {
+                self.states.reset(&a.result);
+                self.releases.list = Some(a.result);
+            }
+            (Pending::ReleaseCheck, r) => match r {
+                Ok(a) => self.releases.findings = findings(&a.result),
+                // A failing check is still a report.
+                Err(e) if e.code == Code::CheckFailed => {
+                    self.releases.findings = findings(&e.details);
+                }
+                Err(e) => self.releases.error = Some(e),
+            },
+            (Pending::ProposeDry(part), r) => match r {
+                Ok(a) => self.releases.proposal = Some((part, a.result)),
+                Err(e) => self.releases.error = Some(e),
+            },
+            (Pending::ReleaseWrite, r) => {
+                self.releases.busy = false;
+                match r {
+                    Ok(a) => {
+                        self.releases.proposal = None;
+                        self.releases.confirm = None;
+                        self.releases.note.clear();
+                        self.releases.done = Some(match a.result.get("path") {
+                            Some(p) => format!("wrote {}", p.as_str().unwrap_or_default()),
+                            None => crate::core::releases::synced(&a.result),
+                        });
+                        self.load_releases();
+                    }
+                    Err(e) => self.releases.error = Some(e),
+                }
+            }
+            (Pending::PdmConfig, Ok(a)) => {
+                let was = self.pdm_ready();
+                self.pdm_config = Some(a.result);
+                // Set up just now: the properties' faults may have moved.
+                if !was
+                    && self.pdm_ready()
+                    && let Some(part) = self.props_part.clone()
+                {
+                    self.read_props(part, None);
+                }
+            }
+            (Pending::Props(part, before), Ok(a)) => {
+                if self.props_part.as_deref() == Some(part.as_str()) {
+                    self.props = Some(match before {
+                        Some(b) => b.reloaded(&a.result),
+                        None => PartProps::from_get(&a.result),
+                    });
+                }
+            }
+            (Pending::PropsSave, Ok(_)) => {
+                if let Some(p) = &self.props {
+                    let part = p.part.clone();
+                    self.read_props(part, None);
+                }
+            }
+            (Pending::PropsSave, Err(e)) => {
+                if let Some(p) = &mut self.props {
+                    p.saving = false;
+                    if e.code == Code::Conflict {
+                        let before = Box::new(p.clone());
+                        let part = p.part.clone();
+                        self.read_props(part, Some(before));
+                    } else {
+                        p.error = Some(e);
+                    }
                 }
             }
             (Pending::Merge, Ok(a)) => {
@@ -1067,14 +1376,24 @@ impl Workspace {
                 for id in params["removed"].as_array().into_iter().flatten() {
                     self.model.remove_part(id.as_str().unwrap_or_default());
                 }
-                // What the working files differ by changed with them.
+                // What the working files differ by changed with them, and
+                // so may their damage (a conflict record comes and goes
+                // with a file) and the history's uncommitted changes.
                 self.ask_diff();
+                // A proposal may be stale now.
+                if self.releases_open {
+                    let req = Request::ReleaseCheck { results: false };
+                    self.send(req, Pending::ReleaseCheck);
+                }
+                self.rediagnose();
+                self.reload_history();
             }
             "project.changed" => {
+                // The manifest may have its ID now, or ryupdm.json changed.
+                self.send(Request::PdmConfig {}, Pending::PdmConfig);
                 // Parts came or went: damage may have too.
-                if self.doctor.is_some() {
-                    self.diagnose();
-                }
+                self.rediagnose();
+                self.reload_history();
                 if let Some(u) = params["default_unit"].as_str()
                     && u != self.model.default_unit
                 {
@@ -1112,6 +1431,13 @@ impl Workspace {
                     )),
                     _ => None,
                 };
+                self.rediagnose();
+            }
+            "pdm.changed" => {
+                self.states.changed(params);
+                if self.releases_open {
+                    self.load_releases();
+                }
             }
             "activity.appended" => self.activity.appended(params),
             "app.open" => self.raised = true,
@@ -1156,6 +1482,15 @@ impl Workspace {
         {
             let part = p.part.clone();
             self.read_params(part, None);
+        }
+        if let Some(p) = &self.props
+            && report["part"] == p.part.as_str()
+            && report["revision"] != p.revision.as_str()
+            && !p.dirty()
+            && !p.saving
+        {
+            let part = p.part.clone();
+            self.read_props(part, None);
         }
         if let Some(f) = &self.dimension
             && report["part"] == f.part.as_str()
