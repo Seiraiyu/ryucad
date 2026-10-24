@@ -272,18 +272,27 @@ impl Pdm {
     /// Reads `project`'s settings and its parts' properties from `src`, the
     /// files `project` was loaded from.
     pub fn read(src: &dyn Source, project: &Project) -> Pdm {
+        Pdm::of(
+            src,
+            project.parts.keys().cloned(),
+            project.manifest.default_unit,
+        )
+    }
+
+    /// [`Pdm::read`] for the parts `parts` of the project `src` holds,
+    /// whose default unit is `unit`: for files no project was loaded from
+    /// (a merge's sides).
+    pub fn of(src: &dyn Source, parts: impl IntoIterator<Item = Id>, unit: Unit) -> Pdm {
         let config = Config::read(src);
-        let unit = project.manifest.default_unit;
-        let mut parts: BTreeMap<Id, PartProperties> = project
-            .parts
-            .keys()
+        let mut parts: BTreeMap<Id, PartProperties> = parts
+            .into_iter()
             .map(|id| {
-                let file = read(src, id);
+                let file = read(src, &id);
                 let faults = match (&config, &file) {
-                    (Ok(c), Ok(p)) => check(c, unit, id, p),
+                    (Ok(c), Ok(p)) => check(c, unit, &id, p),
                     _ => Vec::new(),
                 };
-                (id.clone(), PartProperties { file, faults })
+                (id, PartProperties { file, faults })
             })
             .collect();
         if config.is_ok() {
