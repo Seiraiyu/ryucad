@@ -5,6 +5,12 @@
 // paths, so ryupdm can read projects without the rest of ryucad.
 pub use ryucad_doc::{doc, error, expr, units};
 
+/// The version of the shape of the JSON that `check`, `diff`, `inspect`,
+/// `release list` and `mesh` give (`"schema"` in each). Adding a field or
+/// a code doesn't change it; changing or removing one does. Other tools,
+/// the hosted review service among them, read these.
+pub const OUTPUT_SCHEMA: u64 = 1;
+
 pub mod activity;
 pub mod check;
 pub mod client;

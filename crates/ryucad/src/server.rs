@@ -100,7 +100,7 @@ pub fn answer_live(
             rev,
         } => session.at(rev.as_deref()).and_then(|(commit, s)| {
             let mut a = mesh_binary(s, &part, feature.as_deref(), quality.as_deref())?;
-            a.result = noted(Ok(a.result), commit)?;
+            a.result = versioned(noted(Ok(a.result), commit))?;
             Ok(a)
         }),
         Request::Render {
@@ -257,7 +257,7 @@ fn dispatch(
             expected_revision.as_deref(),
         ),
         Request::PropsGet { part } => crate::pdm::get(session, &part),
-        Request::ReleaseList { part } => crate::release::list(session, part.as_deref()),
+        Request::ReleaseList { part } => versioned(crate::release::list(session, part.as_deref())),
         Request::ReleaseSync {} => crate::release::sync(session),
         Request::ReleaseCheck { results } => crate::release::check(session, results),
         Request::ReleasePropose {
@@ -354,10 +354,10 @@ fn dispatch(
             rev,
         } => {
             let (commit, s) = session.at(rev.as_deref())?;
-            noted(
+            versioned(noted(
                 inspect(s, &part, feature.as_deref(), entity.as_deref()),
                 commit,
-            )
+            ))
         }
         Request::CheckFormat {} => check_format(session),
         Request::Check {
@@ -378,13 +378,13 @@ fn dispatch(
                 positions,
                 all,
             };
-            diff(
+            versioned(diff(
                 session,
                 from.as_deref().unwrap_or("HEAD"),
                 to.as_deref().unwrap_or("working"),
                 model,
                 &opts,
-            )
+            ))
         }
         Request::SessionHello {
             kind,
@@ -550,10 +550,10 @@ fn dispatch(
             rev,
         } => {
             let (commit, s) = session.at(rev.as_deref())?;
-            noted(
+            versioned(noted(
                 mesh_get(s, &part, feature.as_deref(), quality.as_deref()),
                 commit,
-            )
+            ))
         }
         // A render's answer is bytes: `answer_live` handles it.
         Request::Render { .. } => Err(Error::new(Code::Internal, "render answers with bytes")),
@@ -1952,6 +1952,14 @@ pub fn settle(slot: &mut Option<Session>, live: &mut Live, root: &Path) {
 
 /// A request's answer, with the commit it read when it named a revision:
 /// in the result, or in a failure's details.
+/// An answer whose shape is an interface: it says its schema.
+fn versioned(r: Result<Value>) -> Result<Value> {
+    r.map(|mut v| {
+        v["schema"] = json!(crate::OUTPUT_SCHEMA);
+        v
+    })
+}
+
 fn noted(r: Result<Value>, commit: Option<String>) -> Result<Value> {
     let Some(commit) = commit else {
         return r;

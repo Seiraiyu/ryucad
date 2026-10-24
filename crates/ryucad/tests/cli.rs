@@ -2067,3 +2067,26 @@ fn renders_a_committed_revision() {
         1,
     );
 }
+
+#[test]
+fn outputs_carry_their_schema() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "sphere", "--id", "s", "--param", "radius=1",
+    ]);
+    p.git(&["init", "-q", "-b", "main"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "start"]);
+    for args in [
+        &["diff"][..],
+        &["inspect", "p"],
+        &["mesh", "p"],
+        &["mesh", "p", "--out", "m.bin"],
+        &["release", "list"],
+        &["check"],
+    ] {
+        assert_eq!(p.ok(args)["schema"], 1, "{args:?}");
+    }
+}
