@@ -31,10 +31,10 @@ ryucad sketch edit hub profile @profile.json        # the profile, dimensioned b
 ryucad feature add hub revolve --id body --sketch profile --axis l7 --angle full
 ryucad feature add hub sketch --id ribs_a --plane zx
 ryucad sketch edit hub ribs_a @ribs_a.json
-ryucad feature add hub extrude --id ribs_x --sketch ribs_a --length rib_t --extent symmetric
+ryucad feature add hub extrude --id ribs_x --sketch ribs_a --length rib_t --extent symmetric --operation join --target body
 ryucad feature add hub sketch --id ribs_b --plane yz
 ryucad sketch edit hub ribs_b @ribs_b.json
-ryucad feature add hub extrude --id ribs_y --sketch ribs_b --length rib_t --extent symmetric
+ryucad feature add hub extrude --id ribs_y --sketch ribs_b --length rib_t --extent symmetric --operation join --target body
 git add -A && git commit -m hub
 
 git switch -c alice
@@ -71,12 +71,12 @@ ryucad diff --from main --model          # what the merge did to the bodies, fac
 | Kernel | `crates/ryukei` | Box, cylinder, sphere, cone and torus; rational NURBS curves and surfaces; extrude and revolve from validated profiles; certified, watertight, parallel tessellation; certified curve and surface intersections and a self-intersection check; unite, intersect and subtract with any number of tools, through fillets too; pipes, constant-radius fillets and chamfers on edges and tangent chains, and the corners where they meet |
 | STEP | `crates/ryustep` | Reading and writing Part 21 files; AP203, AP214 and AP242 entities typed for B-rep solids; units and the product tree (bodies to and from the kernel come next) |
 | Sketch solver | `crates/ryusketch` | Points, lines, arcs and circles with geometric and dimensional constraints, solved block by block; degrees of freedom, and redundant and conflicting sets reported |
-| Application | `crates/ryucad` | Projects of feature files; parameters and expressions with units; sketches, extrude and revolve; references to earlier features by stable name; incremental recompute; the agent CLI and per-project session daemon; activity log with undo; renders; `doctor`; Git: any revision rebuilt, `git diff` as values, `ryucad diff --model`, `ryucad check`, a merge driver that merges by value, merge status and resolution, commit hooks |
+| Application | `crates/ryucad` | Projects of feature files; parameters and expressions with units; sketches, extrude and revolve; solids, with features that join, cut or intersect and boolean features; references to earlier features by stable name; incremental recompute; the agent CLI and per-project session daemon; activity log with undo; renders; `doctor`; Git: any revision rebuilt, `git diff` as values, `ryucad diff --model`, `ryucad check`, a merge driver that merges by value, merge status and resolution, commit hooks |
 | Desktop app | `crates/ryucad-app` | A live viewer (egui and wgpu) attached to the daemon: feature tree, properties, sketches and their dimensions, parameters, history, picking that yields stable references, settings; a compare view that ghosts a Git revision and colours what changed; a conflict panel during merges |
 | PDM | `crates/ryupdm` | Part properties and numbers, revision labels, release records in the repo, the release branch's history and tags, part states, release checks and a commit guard |
 | Testing | `crates/ryukei-testkit`, `crates/ryukei-bench`, `fuzz/` | Seeded and property tests, fuzz targets, golden hashes, and head-to-head comparisons with OCCT and SMLib |
 
-Booleans and fillets are in the kernel but not yet features in ryucad; that is ryucad phase 4. Design documents and roadmaps live in the Coxswain planning project `ryucad-ryukei`, not in this repo.
+Fillets and chamfers are in the kernel but not yet features in ryucad; that is ryucad plan 4.B. Design documents and roadmaps live in the Coxswain planning project `ryucad-ryukei`, not in this repo.
 
 ## Roadmap and releases
 
@@ -93,14 +93,14 @@ Three layers, each with its own phased roadmap: **ryukei** (the kernel), **ryuca
 | [v0.3.0](https://github.com/Seiraiyu/ryucad/releases/tag/v0.3.0) | 2026-10-20 | ryukei phase 5 complete (certified intersections, the self-intersection check, booleans) and 6.A (pipes). ryucad phases 2.A–2.C: parameters and expressions, the sketch solver, sketches to extrudes and revolves, references by stable name, incremental recompute. App looks (`ui.style`) |
 | [v0.3.1](https://github.com/Seiraiyu/ryucad/releases/tag/v0.3.1) | 2026-10-21 | ryukei phase 6.B: constant-radius fillets and chamfers on edges and tangent chains. ryucad phase 2.D: sketches, labels and the parameter panel in the app, and solver stage 2 |
 | [v0.4.0](https://github.com/Seiraiyu/ryucad/releases/tag/v0.4.0) | 2026-10-22 | ryukei phase 6 complete: corners (6.C), booleans on blends and hardening (6.D). ryucad phase 3, the Git-native workflow: any revision rebuilt, `git diff` as values, `ryucad diff` and `ryucad check` (3.A); the merge driver, merge status and resolution, and the hooks (3.B); the app's compare view and conflict panel (3.C) |
-| `main`, unreleased | | ryukei phase 7.A: STEP files (`ryustep`). ryupdm phase 1.A and 1.B: the `ryupdm` crate, properties, revisions, release records, tags and the commit guard |
+| `main`, unreleased | | ryukei phase 7.A: STEP files (`ryustep`). ryucad phase 4.A: solids, join, cut and intersect operations, boolean features and through-all extrudes, in Git and the app. ryupdm phase 1.A and 1.B: the `ryupdm` crate, properties, revisions, release records, tags and the commit guard |
 
 ### Next
 
 | Layer | Now | Then |
 |---|---|---|
 | ryukei | Phase 7, STEP interop: bodies both ways (7.B), healing imported geometry (7.C), real-world files (7.D) | 8 full NURBS (general intersections, NURBS booleans and blends, offset, shell, loft), 9 Parasolid-class (direct editing, sheets, draft, mass properties) |
-| ryucad | Phase 4, solid modeling: boolean, fillet, chamfer, hole, pattern and shell features | 5 assemblies, 6 STEP, 7 scale (10k+ part assemblies), 8 other formats and drawings |
+| ryucad | Phase 4, solid modeling: fillet and chamfer features (4.B), holes and patterns (4.C), hardening (4.D) | 5 assemblies, 6 STEP, 7 scale (10k+ part assemblies), 8 other formats and drawings |
 | ryupdm | Phase 1, local PDM: releases in `merge status`, `diff` and textconv (1.C), then releases in the app (1.D) | 2 hosted review, 3 where-used and BOM, 4 release workflow, 5 multi-repo, 6 teams and hosting |
 
 Roadmaps are plans, not commitments; versions aren't assigned ahead of time.

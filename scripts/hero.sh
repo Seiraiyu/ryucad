@@ -104,16 +104,17 @@ for w in Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnl
 }
 # What the agent shows the person watching: a compare, or none.
 compare() { "$R" -C "$P" compare "$@" >/dev/null; }
-# The faces of bodies whose results differ from REV: changed or new.
+# The faces of solids that differ from REV, changed or new, by the feature
+# that founded each.
 changed() {
   "$R" --no-daemon diff --from "$1" --model --part hub | "${PYTHON:-python3}" -c '
 import json, sys
-d = json.load(sys.stdin)["result"]["parts"]["hub"]["features"]
-for f, v in sorted(d.items()):
-    b = v.get("model", {}).get("body")
+d = json.load(sys.stdin)["result"]["parts"]["hub"].get("solids") or {}
+for s, v in sorted(d.items()):
+    b = v.get("body")
     if b:
         for n in b["faces"]["changed"] + b["faces"]["new"]:
-            print("--highlight=hub/%s/%s" % (f, n))'
+            print("--highlight=hub/%s/%s" % (s, n))'
 }
 
 begin "main"
@@ -166,19 +167,19 @@ done
 r feature edit hub body --angle full; frame $EYE
 r feature add hub sketch --id ribs_a --plane zx
 r sketch edit hub ribs_a '[
-  {"op":"add","type":"point","at":[6,14]},{"op":"add","type":"point","at":[6,27]},{"op":"add","type":"point","at":[22,14]},
+  {"op":"add","type":"point","at":[5,12]},{"op":"add","type":"point","at":[5,27]},{"op":"add","type":"point","at":[22,12]},
   {"op":"add","type":"line","start":"p1","end":"p2"},{"op":"add","type":"line","start":"p2","end":"p3"},{"op":"add","type":"line","start":"p3","end":"p1"},
-  {"op":"add","type":"point","at":[6,-14]},{"op":"add","type":"point","at":[22,-14]},{"op":"add","type":"point","at":[6,-27]},
+  {"op":"add","type":"point","at":[5,-12]},{"op":"add","type":"point","at":[22,-12]},{"op":"add","type":"point","at":[5,-27]},
   {"op":"add","type":"line","start":"p4","end":"p5"},{"op":"add","type":"line","start":"p5","end":"p6"},{"op":"add","type":"line","start":"p6","end":"p4"}]'
-r feature add hub extrude --id ribs_x --sketch ribs_a --length rib_t --extent symmetric
+r feature add hub extrude --id ribs_x --sketch ribs_a --length rib_t --extent symmetric --operation join --target body
 r feature add hub sketch --id ribs_b --plane yz
 r sketch edit hub ribs_b '[
-  {"op":"add","type":"point","at":[14,6]},{"op":"add","type":"point","at":[27,6]},{"op":"add","type":"point","at":[14,22]},
+  {"op":"add","type":"point","at":[12,5]},{"op":"add","type":"point","at":[27,5]},{"op":"add","type":"point","at":[12,22]},
   {"op":"add","type":"line","start":"p1","end":"p2"},{"op":"add","type":"line","start":"p2","end":"p3"},{"op":"add","type":"line","start":"p3","end":"p1"},
-  {"op":"add","type":"point","at":[-14,6]},{"op":"add","type":"point","at":[-14,22]},{"op":"add","type":"point","at":[-27,6]},
+  {"op":"add","type":"point","at":[-12,5]},{"op":"add","type":"point","at":[-12,22]},{"op":"add","type":"point","at":[-27,5]},
   {"op":"add","type":"line","start":"p4","end":"p5"},{"op":"add","type":"line","start":"p5","end":"p6"},{"op":"add","type":"line","start":"p6","end":"p4"}]'
-r feature add hub extrude --id ribs_y --sketch ribs_b --length rib_t --extent symmetric
-cmd 'ryucad feature add hub extrude --id ribs_x --sketch ribs_a --length rib_t ...'
+r feature add hub extrude --id ribs_y --sketch ribs_b --length rib_t --extent symmetric --operation join --target body
+cmd 'ryucad feature add hub extrude --id ribs_x --sketch ribs_a --length rib_t --operation join ...'
 git add -A; git commit -qm "hub"
 cmd 'git add -A && git commit -m "hub"'
 frame $EYE
