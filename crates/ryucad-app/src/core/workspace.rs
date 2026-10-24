@@ -813,6 +813,9 @@ impl Workspace {
                 c.answered(&key, &hash);
                 match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
                     Ok(Some(Ok(bodies))) => {
+                        if !bodies.iter().any(|b| b.feature == key.1) {
+                            c.no_ghost(&key, &hash);
+                        }
                         for b in bodies {
                             if c.take_ghost(&key.0, b) {
                                 self.model.generation += 1;

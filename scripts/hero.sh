@@ -8,16 +8,34 @@
 # git and Python with Pillow; PYTHON names Python, python3 by default, and FONT
 # a monospace TrueType font if neither Menlo nor DejaVu Sans Mono is found).
 #
-#   scripts/hero.sh path/to/ryucad [assets/hero.gif]
+# Given the desktop app (macOS only: it photographs the window with
+# screencapture, and finds it with pyobjc's Quartz, `pip install
+# pyobjc-framework-Quartz`), it also opens the real app on the project and,
+# at each step, photographs its window into assets/compare.gif. Nobody clicks
+# it: the agent drives it with `ryucad compare`, as an agent shows a person
+# what it did, and the conflict panel comes up on its own. The window opens on
+# the screen while it runs; leave it be.
+#
+#   scripts/hero.sh path/to/ryucad [assets/hero.gif [path/to/ryucad-app [assets/compare.gif]]]
 set -eu
 
 R=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 GIF=${2:-assets/hero.gif}
 GIF=$(cd "$(dirname "$GIF")" && pwd)/$(basename "$GIF")
+APP=${3:-}
+APPGIF=${4:-assets/compare.gif}
+if [ -n "$APP" ]; then
+  APP=$(cd "$(dirname "$APP")" && pwd)/$(basename "$APP")
+  APPGIF=$(cd "$(dirname "$APPGIF")" && pwd)/$(basename "$APPGIF")
+fi
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
-P=$work/project; OUT=$work/acts
-mkdir -p "$P" "$OUT"
+# The folder names the window: "hub-demo — ryucad".
+P=$work/hub-demo; OUT=$work/acts; APPS=$work/app
+pid=
+trap '[ -z "$pid" ] || { kill "$pid"; wait "$pid"; } 2>/dev/null; "$R" -C "$P" daemon stop >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
+mkdir -p "$P" "$OUT" "$APPS" "$work/config"
+# Default preferences, for the app and its daemon: not the owner's own.
+export RYUCAD_CONFIG_DIR=$work/config
 cd "$P"
 
 # Fixed identities and dates, so commits (and what Git prints) repeat.
@@ -27,8 +45,10 @@ git init -q -b main
 git config user.name demo; git config user.email demo@example.com
 git config advice.mergeConflict false 2>/dev/null || true
 
-r() { out=$("$R" --no-daemon "$@") || { echo "ryucad $*: $out" >&2; exit 1; }; }
-as() { who=$1; shift; out=$("$R" --no-daemon --as "$who" "$@") || { echo "ryucad $*: $out" >&2; exit 1; }; }
+# Every edit goes through the project's session, so its activity log (and
+# the app's) names who made it.
+r() { out=$("$R" "$@") || { echo "ryucad $*: $out" >&2; exit 1; }; }
+as() { who=$1; shift; out=$("$R" --as "$who" "$@") || { echo "ryucad $*: $out" >&2; exit 1; }; }
 
 # An act is a folder: `title`, `lines` (a tag, a space, the text: `$` a
 # command, `o` output, `+`/`-` added and removed lines, `!` a conflict, `#` a
@@ -48,6 +68,42 @@ frame() {
   n=$(wc -l < "$A/lines" | tr -d ' ')
   r render --out "$A/$(printf %03d $frames)-$n.png" --size 480x420 --no-sketches "$@"
 }
+# The app's window, once it has settled (two pictures alike), with a caption.
+# The status line shows a failed request for 8 s: `app --after-error` waits
+# that out.
+shot=0
+window=
+app() {
+  [ -n "$APP" ] || return 0
+  [ "$1" != --after-error ] || { shift; sleep 8; }
+  shot=$((shot+1))
+  last=$work/settle.png; : > "$last"
+  for _ in $(seq 1 40); do
+    sleep 0.5
+    screencapture -x -o -l"$window" "$APPS/$shot.png"
+    cmp -s "$APPS/$shot.png" "$last" && break
+    cp "$APPS/$shot.png" "$last"
+  done
+  printf '%s\n' "$1" > "$APPS/$shot.txt"
+}
+# Opens the app on the project and finds its window.
+open_app() {
+  [ -n "$APP" ] || return 0
+  "$APP" "$P" > "$work/app.log" 2>&1 &
+  pid=$!
+  for _ in $(seq 1 60); do
+    sleep 0.5
+    window=$("${PYTHON:-python3}" -c '
+import Quartz
+for w in Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, 0):
+    if w.get("kCGWindowOwnerPID") == '"$pid"' and w.get("kCGWindowLayer") == 0:
+        print(w["kCGWindowNumber"]); break')
+    [ -z "$window" ] || return 0
+  done
+  echo "the app's window never showed: $(cat "$work/app.log")" >&2; exit 1
+}
+# What the agent shows the person watching: a compare, or none.
+compare() { "$R" -C "$P" compare "$@" >/dev/null; }
 # The faces of bodies whose results differ from REV: changed or new.
 changed() {
   "$R" --no-daemon diff --from "$1" --model --part hub | "${PYTHON:-python3}" -c '
@@ -61,10 +117,11 @@ for f, v in sorted(d.items()):
 }
 
 begin "main"
-"$R" --no-daemon init --unit mm >/dev/null
+"$R" init --unit mm >/dev/null
 cmd 'ryucad init --unit mm'
 r part create hub
 cmd 'ryucad part create hub'
+open_app
 r param set hub "bore=12 mm" "flange_d=60 mm" "flange_t=6 mm" "hub_d=28 mm" "height=30 mm" "rib_t=4 mm"
 cmd 'ryucad param set hub "bore=12 mm" "flange_d=60 mm" "rib_t=4 mm" ...'
 r feature add hub sketch --id profile --plane zx
@@ -125,6 +182,7 @@ cmd 'ryucad feature add hub extrude --id ribs_x --sketch ribs_a --length rib_t .
 git add -A; git commit -qm "hub"
 cmd 'git add -A && git commit -m "hub"'
 frame $EYE
+app "main: the hub as an agent built it, committed, in the app a person watches"
 
 begin "branch alice"
 git switch -qc alice main
@@ -136,6 +194,8 @@ git -c color.ui=never diff -- parts/hub/parameters.json | diffout
 git commit -qam "alice: wider bore, thinner ribs"
 # shellcheck disable=SC2046
 frame $EYE $(changed main)
+compare main
+app "alice's branch: the agent runs \`ryucad compare main\`; changed faces turn orange, main's bore is ghosted"
 
 begin "branch bob"
 git switch -qc bob main
@@ -147,8 +207,10 @@ git -c color.ui=never diff -- parts/hub/parameters.json | diffout
 git commit -qam "bob: bigger flange, thicker ribs"
 # shellcheck disable=SC2046
 frame $EYE $(changed main)
+app "bob's branch, still compared with main: the bigger flange and thicker ribs in orange"
 
 begin "merging bob into alice"
+compare --off
 git switch -q alice
 cmd 'git switch alice && git merge bob'
 git merge bob > "$work/merge.txt" 2>&1 && { echo "the merge should conflict" >&2; exit 1; }
@@ -174,13 +236,15 @@ print("#  merged by value: " + ", ".join("%s = %s" % (k, now["parameters"][k]) f
 MERGED
 cmd "sed -n '/conflicts/,/^  }/p' parts/hub/parameters.json"
 sed -n '/conflicts/,/^  }/p' parts/hub/parameters.json | output
+app "git merge bob: bore and flange merged by value; rib thickness waits in the conflict panel"
 # During the merge the part doesn't load; show ours, as alice left it.
 cp "$OUT/02/001-$(wc -l < "$OUT/02/lines" | tr -d ' ').png" "$A/001-0.png"
 
 begin "merged"
 id=$("$R" --no-daemon merge status | "${PYTHON:-python3}" -c 'import json, sys; print(json.load(sys.stdin)["result"]["conflicts"][0]["id"])')
-r merge resolve "$id" --theirs
+as alice merge resolve "$id" --theirs
 cmd "ryucad merge resolve '$id' --theirs"
+app --after-error "the agent settles it with \`ryucad merge resolve --theirs\`; the panel says what is left to do"
 git add -A
 cmd 'git add -A && git commit -m "merge bob"'
 git commit -qm "merge bob" > "$work/commit.txt" 2>&1 || { cat "$work/commit.txt" >&2; exit 1; }
@@ -194,6 +258,8 @@ cmd 'git log --oneline --graph'
 git log --oneline --graph | output
 # shellcheck disable=SC2046
 frame $EYE $(changed main)
+compare main
+app --after-error "merged and committed, compared with main: both agents' changes in one model"
 for k in $(seq 1 36); do
   t=$(awk "BEGIN { a = $k * 3.14159265358979 / 18; printf \"%.6f,%.6f\", 99.5 * cos(a - 0.8850), 99.5 * sin(a - 0.8850) }")
   frame --eye="$t,66" --target 0,0,12 --up 0,0,1
@@ -287,4 +353,46 @@ pal = sheet.quantize(colors=192, method=Image.Quantize.MEDIANCUT)
 q = [f.quantize(palette=pal, dither=Image.Dither.NONE) for f in frames]
 q[0].save(sys.argv[2], save_all=True, append_images=q[1:], duration=durations, loop=0, optimize=True)
 print("wrote %s (%d frames)" % (sys.argv[2], len(q)))
+PY
+
+[ -n "$APP" ] || exit 0
+"${PYTHON:-python3}" - "$APPS" "$APPGIF" <<'PY'
+import os, pathlib, sys
+from PIL import Image, ImageDraw, ImageFont
+
+def font(size):
+    for f in [os.environ.get("FONT"), "/System/Library/Fonts/Menlo.ttc",
+              "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+              "/usr/share/fonts/TTF/DejaVuSansMono.ttf", "C:/Windows/Fonts/consola.ttf"]:
+        if f and os.path.exists(f):
+            return ImageFont.truetype(f, size)
+    sys.exit("no monospace font found: set FONT")
+
+CAP = font(17)
+shots = sorted(pathlib.Path(sys.argv[1]).glob("*.png"), key=lambda p: int(p.stem))
+stills = []
+for i, p in enumerate(shots):
+    img = Image.open(p).convert("RGB")
+    w, h = img.size
+    f = Image.new("RGB", (w, h + 52), (30, 32, 36))
+    f.paste(img, (0, 52))
+    d = ImageDraw.Draw(f)
+    d.text((16, 15), "%d/%d  " % (i + 1, len(shots)), font=CAP, fill=(128, 134, 144))
+    d.text((16 + CAP.getbbox("%d/%d  " % (i + 1, len(shots)))[2], 15),
+           p.with_suffix(".txt").read_text().strip(), font=CAP, fill=(245, 196, 92))
+    stills.append(f)
+# Each still held, then a short fade into the next (and back to the first).
+frames, durations = [], []
+for i, f in enumerate(stills):
+    frames.append(f); durations.append(4200)
+    g = stills[(i + 1) % len(stills)]
+    for k in (1, 2, 3):
+        frames.append(Image.blend(f, g, k / 4)); durations.append(70)
+sheet = Image.new("RGB", (stills[0].width, stills[0].height * len(stills)))
+for i, f in enumerate(stills):
+    sheet.paste(f, (0, stills[0].height * i))
+pal = sheet.quantize(colors=224, method=Image.Quantize.MEDIANCUT)
+q = [f.quantize(palette=pal, dither=Image.Dither.NONE) for f in frames]
+q[0].save(sys.argv[2], save_all=True, append_images=q[1:], duration=durations, loop=0, optimize=True)
+print("wrote %s (%d stills)" % (sys.argv[2], len(stills)))
 PY

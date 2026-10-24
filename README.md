@@ -11,6 +11,14 @@ CAD built for AI agents to drive, with a from-scratch B-rep kernel (**ryukei**) 
 
 Two agents change one part on two branches, and Git merges them. A ryucad model is a folder of plain feature files in a Git repo. ryucad registers itself with Git, so `git diff` reads as values (`parameters.bore = 16 mm`, not JSON), and `git merge` merges files by value. Here the bore and the flange merge cleanly. Rib thickness is a real conflict, so it is recorded in the file, which stays valid JSON with no conflict markers. `ryucad merge status` reports it with its base, ours and theirs, and `ryucad merge resolve` settles it. The commit hook won't let the merge through until it is settled, and `ryucad check` rebuilds the result from nothing. Every frame of the model was drawn by `ryucad render`, and humans can watch the same session live in `ryucad-app`, which ghosts a revision and colours what changed.
 
+### The same merge, watched in the app
+
+<p align="center">
+  <img src="assets/compare.gif" alt="The real ryucad-app window on macOS during the same story: the hub on main; alice's branch compared with main, changed faces orange and main's bore ghosted; bob's branch; the merge in progress with the conflict panel; the conflict settled; the merged model compared with main. The activity log names agent, alice and bob, each change with Undo">
+</p>
+
+This is the desktop app, `ryucad-app`, running on a Mac while the agents work, and nobody clicked it. `ryucad compare main` is how an agent shows the person watching what changed: their window ghosts `main`, colours new and changed faces, and marks the feature tree. During the merge the conflict panel comes up on its own, with Take ours and Take theirs. The activity log names each agent, and every change can be undone.
+
 <details>
 <summary>What the agents ran</summary>
 
@@ -45,7 +53,7 @@ ryucad check
 ryucad diff --from main --model          # what the merge did to the bodies, face by face
 ```
 
-`scripts/hero.sh target/release/ryucad` rebuilds the model, the branches, the merge and the animation (it needs Git and Python with Pillow).
+`scripts/hero.sh target/release/ryucad` rebuilds the model, the branches, the merge and the first animation (it needs Git and Python with Pillow). On a Mac, `scripts/hero.sh target/release/ryucad assets/hero.gif target/release/ryucad-app` also opens the app and photographs its window for the second (it also needs `pyobjc-framework-Quartz`).
 
 </details>
 
