@@ -110,3 +110,26 @@ fn a_window_compares_with_any_revision() {
     assert_eq!(ws.errors.last().unwrap().code, Code::RevNotFound);
     assert_eq!(ws.compare.as_ref().unwrap().rev, "main");
 }
+
+#[test]
+fn a_proposal_and_property_changes_show_in_a_compare() {
+    let p = Project::new().with_part();
+    p.ok(&["pdm", "init"]);
+    p.ok(&["props", "set", "p", "number=100"]);
+    let p = p.committed();
+    p.ok(&["props", "set", "p", "number=101"]);
+    p.ok(&["release", "propose", "p"]);
+    let mut ws = open(&p);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.model.meshes.len() == 2));
+    ws.set_compare(Some("HEAD".into()));
+    assert!(ws.wait_until(WAIT, ghosted));
+    let m = &ws.compare.as_ref().unwrap().pdm["p"];
+    assert_eq!(m.marks, ["proposes A"]);
+    assert_eq!(
+        m.lines,
+        [
+            "number: 100 -> 101 (revising)",
+            "state: in work -> in work, A proposed"
+        ]
+    );
+}
