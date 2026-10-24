@@ -20,6 +20,9 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 # decorations to the window (GNOME), a title bar that shows the title.
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 winit = { version = "0.30", default-features = false, features = ["wayland-csd-adwaita"] }
+# The X11 work area (the screen less panels), which winit doesn't give: the
+# all-Rust connection winit's X11 backend already builds.
+x11rb = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 divan = "0.1"

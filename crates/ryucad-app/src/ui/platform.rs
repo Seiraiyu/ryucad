@@ -53,13 +53,18 @@ pub fn raise(wayland: bool) -> Vec<eframe::egui::ViewportCommand> {
 /// fits, or when it wasn't `resized` (in size or scale) since the last
 /// frame: then someone moved it there. Only a
 /// window starting on the monitor at the origin is moved, since that is
-/// the only monitor whose place is known.
+/// the only monitor whose place is known. There it is kept inside the
+/// desktop's work `area` too, when known ([`work_area`]): a window manager
+/// keeps windows off its panels, so a window as tall as the monitor would
+/// be pushed down past its bottom edge.
 pub fn keep_on_screen(
     resized: bool,
     inner: eframe::egui::Rect,
     outer: eframe::egui::Rect,
     monitor: eframe::egui::Vec2,
+    area: Option<eframe::egui::Rect>,
 ) -> Option<(eframe::egui::Vec2, eframe::egui::Pos2)> {
+    use eframe::egui::{Pos2, Rect};
     const SLACK: f32 = 0.5;
     if !resized {
         return None;
@@ -68,22 +73,89 @@ pub fn keep_on_screen(
         && outer.min.y >= -SLACK
         && outer.min.x < monitor.x
         && outer.min.y < monitor.y;
-    let too_big = outer.width() > monitor.x + SLACK || outer.height() > monitor.y + SLACK;
-    let past = on_origin && (outer.max.x > monitor.x + SLACK || outer.max.y > monitor.y + SLACK);
+    let screen = Rect::from_min_size(Pos2::ZERO, monitor);
+    let usable = match area {
+        Some(a) if on_origin => Some(a.intersect(screen)).filter(|r| r.is_positive()),
+        _ => None,
+    }
+    .unwrap_or(screen);
+    let too_big =
+        outer.width() > usable.width() + SLACK || outer.height() > usable.height() + SLACK;
+    let past =
+        on_origin && (outer.max.x > usable.max.x + SLACK || outer.max.y > usable.max.y + SLACK);
     if !too_big && !past {
         return None;
     }
-    let size = outer.size().min(monitor);
+    let size = outer.size().min(usable.size());
     let frame = outer.size() - inner.size();
     let pos = if on_origin {
-        outer
-            .min
-            .min((monitor - size).to_pos2())
-            .max(eframe::egui::Pos2::ZERO)
+        outer.min.min(usable.max - size).max(usable.min)
     } else {
         outer.min
     };
     Some((size - frame, pos))
+}
+
+/// The desktop's work area, the screen less panels and docks, in pixels:
+/// what an X11 window manager publishes as `_NET_WORKAREA` for the current
+/// desktop. `None` on Wayland and other systems, or when the window
+/// manager doesn't say. Asked of the X server at most once a second, since
+/// a window being resized asks every frame.
+pub fn work_area() -> Option<eframe::egui::Rect> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+        type Cached = Option<(Instant, Option<eframe::egui::Rect>)>;
+        static CACHE: Mutex<Cached> = Mutex::new(None);
+        if wayland() {
+            return None;
+        }
+        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, area)) = *cache
+            && at.elapsed() < Duration::from_secs(1)
+        {
+            return area;
+        }
+        let area = x11_work_area().map(|[x, y, w, h]| {
+            eframe::egui::Rect::from_min_size(
+                eframe::egui::pos2(x as f32, y as f32),
+                eframe::egui::vec2(w as f32, h as f32),
+            )
+        });
+        *cache = Some((Instant::now(), area));
+        area
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    None
+}
+
+/// `_NET_WORKAREA` of the current desktop (`_NET_CURRENT_DESKTOP`, else
+/// the first) on the display in `DISPLAY`: x, y, width and height.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn x11_work_area() -> Option<[u32; 4]> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt};
+    let (conn, screen) = x11rb::connect(None).ok()?;
+    let root = conn.setup().roots.get(screen)?.root;
+    let atom = |name: &[u8]| {
+        let a = conn.intern_atom(true, name).ok()?.reply().ok()?.atom;
+        (a != u32::from(AtomEnum::NONE)).then_some(a)
+    };
+    let cardinals = |property: u32, offset: u32, count: u32| {
+        let reply = conn
+            .get_property(false, root, property, AtomEnum::CARDINAL, offset, count)
+            .ok()?
+            .reply()
+            .ok()?;
+        Some(reply.value32()?.collect::<Vec<u32>>())
+    };
+    let desktop = atom(b"_NET_CURRENT_DESKTOP")
+        .and_then(|a| cardinals(a, 0, 1))
+        .and_then(|v| v.first().copied())
+        .unwrap_or(0);
+    let v = cardinals(atom(b"_NET_WORKAREA")?, desktop.checked_mul(4)?, 4)?;
+    Some([*v.first()?, *v.get(1)?, *v.get(2)?, *v.get(3)?])
 }
 
 /// The message when no adapter at all will draw.
@@ -241,16 +313,45 @@ mod screen_tests {
         let inner = Rect::from_min_size(pos2(2.0, 235.0), vec2(1600.0, 1000.0));
         let outer = Rect::from_min_size(pos2(2.0, 215.0), vec2(1600.0, 1020.0));
         assert_eq!(
-            keep_on_screen(true, inner, outer, monitor),
+            keep_on_screen(true, inner, outer, monitor, None),
             Some((vec2(1600.0, 1000.0), pos2(0.0, 180.0)))
         );
         // 2000x1400: shrunk to the monitor too.
         let inner = Rect::from_min_size(pos2(0.0, 20.0), vec2(2000.0, 1400.0));
         let outer = Rect::from_min_size(pos2(0.0, 0.0), vec2(2000.0, 1420.0));
         assert_eq!(
-            keep_on_screen(true, inner, outer, monitor),
+            keep_on_screen(true, inner, outer, monitor, None),
             Some((vec2(1600.0, 1180.0), pos2(0.0, 0.0)))
         );
+    }
+
+    #[test]
+    fn a_grown_window_is_kept_off_the_panels() {
+        // #448's re-run: Xfce with a 27-point top panel on a 1533x1138
+        // screen; 1400x1000 at DPI 96 grown by 120 to 1750x1250 under
+        // xfwm4's frame (5, 5, 29, 5). Shrunk to the whole screen, it was
+        // pushed below the panel and its status line past the bottom.
+        let monitor = vec2(1533.0, 1138.0);
+        let area = Some(Rect::from_min_size(pos2(0.0, 27.0), vec2(1533.0, 1111.0)));
+        let inner = Rect::from_min_size(pos2(10.0, 85.0), vec2(1750.0, 1250.0));
+        let outer = Rect::from_min_size(pos2(5.0, 56.0), vec2(1760.0, 1284.0));
+        assert_eq!(
+            keep_on_screen(true, inner, outer, monitor, area),
+            Some((vec2(1523.0, 1077.0), pos2(0.0, 27.0)))
+        );
+        // Fits the monitor but runs onto a bottom panel too: moved up.
+        let both = Some(Rect::from_min_max(pos2(0.0, 27.0), pos2(1533.0, 1077.0)));
+        let inner = Rect::from_min_size(pos2(105.0, 129.0), vec2(1000.0, 1000.0));
+        let outer = Rect::from_min_size(pos2(100.0, 100.0), vec2(1010.0, 1034.0));
+        assert_eq!(keep_on_screen(true, inner, outer, monitor, None), None);
+        assert_eq!(keep_on_screen(true, inner, outer, monitor, area), None);
+        assert_eq!(
+            keep_on_screen(true, inner, outer, monitor, both),
+            Some((vec2(1000.0, 1000.0), pos2(100.0, 43.0)))
+        );
+        // A work area that misses the monitor is no help: the monitor's used.
+        let away = Some(Rect::from_min_size(pos2(2000.0, 0.0), vec2(800.0, 600.0)));
+        assert_eq!(keep_on_screen(true, inner, outer, monitor, away), None);
     }
 
     #[test]
@@ -259,16 +360,16 @@ mod screen_tests {
         let inner = Rect::from_min_size(pos2(900.0, 820.0), vec2(1280.0, 800.0));
         let outer = Rect::from_min_size(pos2(900.0, 800.0), vec2(1280.0, 820.0));
         // Moved past the edge, not resized: someone put it there.
-        assert_eq!(keep_on_screen(false, inner, outer, monitor), None);
+        assert_eq!(keep_on_screen(false, inner, outer, monitor, None), None);
         // Resized, and fits.
         let inner = Rect::from_min_size(pos2(10.0, 30.0), vec2(1000.0, 700.0));
         let outer = Rect::from_min_size(pos2(10.0, 10.0), vec2(1000.0, 720.0));
-        assert_eq!(keep_on_screen(true, inner, outer, monitor), None);
+        assert_eq!(keep_on_screen(true, inner, outer, monitor, None), None);
         // On another monitor (to the right): shrunk, not moved.
         let inner = Rect::from_min_size(pos2(1700.0, 20.0), vec2(2000.0, 1000.0));
         let outer = Rect::from_min_size(pos2(1700.0, 0.0), vec2(2000.0, 1020.0));
         assert_eq!(
-            keep_on_screen(true, inner, outer, monitor),
+            keep_on_screen(true, inner, outer, monitor, None),
             Some((vec2(1600.0, 1000.0), pos2(1700.0, 0.0)))
         );
     }
