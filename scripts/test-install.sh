@@ -125,6 +125,8 @@ case "$(uname -s)" in
             check "launcher opens folders" 'printf %s "$types" | grep -q "public.folder"'
             check "launcher opens JSON" 'printf %s "$types" | grep -q "public.json"'
             check "launcher is still signed" 'codesign --verify "$work/home-fresh/Applications/ryucad.app"'
+            # The reinstall above replaced the launcher: no word of signing.
+            check "says nothing of signing" '! grep -q "signature" "$work/out"'
         fi
         ;;
 esac

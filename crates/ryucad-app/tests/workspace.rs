@@ -3,9 +3,9 @@
 mod common;
 
 use common::{Project, ryucad};
-use ryucad_app::core::workspace::Workspace;
+use ryucad_app::core::workspace::{HISTORY_EVERY, Workspace};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const WAIT: Duration = Duration::from_secs(30);
 
@@ -154,4 +154,33 @@ fn the_display_quality_refetches_every_mesh() {
         .len();
     assert!(after > before, "{after} > {before}");
     p.ok(&["config", "set", "display.quality", "normal"]);
+}
+
+#[test]
+fn the_history_follows_changes_and_commits() {
+    let p = Project::new().with_part().committed();
+    let mut ws = open(&p);
+    let count = |ws: &Workspace, key: &str| {
+        ws.history
+            .as_ref()
+            .and_then(|h| h[key].as_array().map(Vec::len))
+    };
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && meshed(ws)));
+    ws.load_history();
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.history.is_some()));
+    assert_eq!(count(&ws, "uncommitted"), Some(0));
+    let before = count(&ws, "commits").unwrap();
+    // An edit reads it again: the change is uncommitted.
+    p.ok(&["feature", "edit", "p", "boss", "--param", "radius=4"]);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && count(ws, "uncommitted") == Some(1)));
+    // A commit from a terminal changes no project file: the tab reads the
+    // history again once its reading is old enough, and not before.
+    p.git(&["commit", "-q", "-am", "radius"]);
+    let now = Instant::now();
+    assert!(ws.history_shown(now) > Duration::ZERO);
+    assert!(ws.idle());
+    ws.history_shown(now + HISTORY_EVERY);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()
+        && count(ws, "commits") == Some(before + 1)));
+    assert_eq!(count(&ws, "uncommitted"), Some(0));
 }

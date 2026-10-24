@@ -4,6 +4,7 @@ pub mod activity;
 pub mod compare;
 pub mod doctor;
 pub mod edit;
+pub mod geometry;
 pub mod link;
 pub mod merge;
 pub mod model;
