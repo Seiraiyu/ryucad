@@ -572,36 +572,36 @@ fn gaps_under_the_cap_are_covered_by_tolerances() {
         .0;
     let mut s = plain(&b);
     // Off its faces, away from the block's middle (at right angles to the
-    // edge), by 3 µm.
+    // edge), by 3 µm, its vertices with it: tightening puts the edge back
+    // on its faces, but its vertices stay where the file put them.
     let away = (middle(&s, 0) - crate::geom::Point3::new(0.5, 1.0, 1.5))
         .normalize()
         .unwrap();
     move_edge(&mut s, 0, away.get() * 3e-6);
+    for v in [s.edges[0].start, s.edges[0].end] {
+        s.vertices[v].point += away.get() * 3e-6;
+    }
     let names = names::names(OpKey(7), &s);
     let (h, _, report) = heal_ok(&s);
+    assert_eq!(report.tightened, [names.edges[0]]);
     let EntityId::Edge(e) = built(&h, names.edges[0]) else {
         panic!()
     };
-    // Its farthest from either face's plane.
-    let gap = h
-        .edge_fins(e)
-        .map(|f| {
-            let face = h.loops[h.fins[f].loop_].face;
-            h.surfaces[h.faces[face].surface].distance(middle(&s, 0))
-        })
-        .fold(0.0, f64::max);
-    // The edge's tolerance also covers its vertices, 3 µm from its ends.
+    // The edge's tolerance covers its vertices, 3 µm from its ends, and
+    // theirs covers them.
     let t = h.edges[e].tolerance.get();
-    assert!(
-        gap < 3e-6 && (3e-6..=3e-6 * 1.001).contains(&t),
-        "{t} for {gap}"
-    );
-    for v in [h.edges[e].start, h.edges[e].end] {
+    assert!((3e-6..=3e-6 * 1.001).contains(&t), "{t}");
+    let ends = [h.edges[e].start, h.edges[e].end];
+    for v in ends {
         let tv = h.vertices[v].tolerance.get();
         assert!((3e-6..=3e-6 * 1.001).contains(&tv), "{tv}");
     }
-    assert!(report.tolerances.iter().any(|x| x.0 == names.edges[0]));
-    assert_eq!(report.tolerances.len(), 3);
+    for n in [names.edges[0]]
+        .into_iter()
+        .chain(ends.map(|v| h.vertices[v].name))
+    {
+        assert!(report.tolerances.iter().any(|x| x.0 == n));
+    }
 }
 
 #[test]
@@ -631,12 +631,14 @@ fn gaps_on_analytic_surfaces_are_certified_tightly() {
         .unwrap();
     let gap = gaps::edge_gap(&s.curves[x.curve], x.interval, side);
     assert!((2e-6..=2e-6 * 1.01 + 2e-10).contains(&gap), "{gap}");
+    // Healing then puts it back on the cylinder.
     let names = names::names(OpKey(7), &s);
-    let (h, _, _) = heal_ok(&s);
+    let (h, _, report) = heal_ok(&s);
+    assert_eq!(report.tightened, [names.edges[rim]]);
     let EntityId::Edge(e) = built(&h, names.edges[rim]) else {
         panic!()
     };
-    assert!(h.edges[e].tolerance.get() >= gap);
+    assert!(h.edges[e].tolerance.get() <= 1e-7);
 }
 
 #[test]
@@ -1138,4 +1140,60 @@ fn shells_that_cross_are_refused() {
         matches!(r, Err(Error::InvalidHeal(HealError::ShellsCross { a, b })) if a < b),
         "{r:?}"
     );
+}
+
+#[test]
+fn edges_off_their_faces_are_tightened_onto_them() {
+    use crate::geom::{Circle, Line};
+    use crate::topo::EntityId;
+    let b = plate();
+    let mut s = plain(&b);
+    // The hole's rim 3 µm wide of the bore, and a straight edge 2 µm off
+    // both its planes, its vertices left where they were.
+    let rim = (0..s.edges.len())
+        .find(|&e| matches!(s.curves[s.edges[e].curve], Curve::Circle(_)))
+        .unwrap();
+    let Curve::Circle(c) = s.curves[s.edges[rim].curve].clone() else {
+        panic!()
+    };
+    let true_rim = Curve::Circle(c);
+    s.curves.push(Curve::Circle(
+        Circle::new(*c.frame(), c.radius() + 3e-6).unwrap(),
+    ));
+    s.edges[rim].curve = s.curves.len() - 1;
+    let straight = (0..s.edges.len())
+        .find(|&e| matches!(s.curves[s.edges[e].curve], Curve::Line(_)))
+        .unwrap();
+    let Curve::Line(l) = s.curves[s.edges[straight].curve].clone() else {
+        panic!()
+    };
+    let true_line = Curve::Line(l);
+    let off = l
+        .dir()
+        .get()
+        .cross(Vector3::new(0.3, 0.5, 0.8))
+        .normalize()
+        .unwrap();
+    s.curves.push(Curve::Line(
+        Line::new(l.origin() + off.get() * 2e-6, l.dir().get()).unwrap(),
+    ));
+    s.edges[straight].curve = s.curves.len() - 1;
+    let names = names::names(OpKey(7), &s);
+    let (h, journal, report) = heal_ok(&s);
+    let mut want = vec![names.edges[rim], names.edges[straight]];
+    want.sort();
+    assert_eq!(report.tightened, want);
+    for (g, truth) in [(rim, &true_rim), (straight, &true_line)] {
+        let EntityId::Edge(e) = built(&h, names.edges[g]) else {
+            panic!()
+        };
+        let edge = &h.edges[e];
+        let [t0, t1] = edge.interval;
+        for i in 0..=8 {
+            let p = h.curves[edge.curve].point(t0 + (t1 - t0) * i as f64 / 8.0);
+            assert!(truth.distance(p) <= 1e-9, "{}", truth.distance(p));
+        }
+        assert!(edge.tolerance.get() <= 1e-7, "{}", edge.tolerance.get());
+        assert!(journal.events().contains(&Event::Modified(names.edges[g])));
+    }
 }
