@@ -995,6 +995,10 @@ fn history(ui: &mut egui::Ui, ws: &mut Workspace) {
     if ui.small_button("Refresh").clicked() {
         ws.load_history();
     }
+    // Commits made in a terminal change no project file: while the tab
+    // shows, it reads the history again now and then.
+    let next = ws.history_shown(std::time::Instant::now());
+    ui.ctx().request_repaint_after(next);
     let Some(h) = &ws.history else {
         ui.spinner();
         return;
