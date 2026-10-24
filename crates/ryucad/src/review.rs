@@ -165,3 +165,99 @@ pub fn refusal(status: u16, body: &Value) -> Error {
     }
     err
 }
+
+/// The token to send: `RYUCAD_REVIEW_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`
+/// (the first that isn't empty), else what `gh auth token` prints.
+pub fn token() -> Result<String> {
+    token_from(
+        |k| std::env::var(k).ok(),
+        || {
+            let out = std::process::Command::new("gh")
+                .args(["auth", "token"])
+                .output()
+                .ok()?;
+            let t = String::from_utf8(out.stdout).ok()?.trim().to_owned();
+            (out.status.success() && !t.is_empty()).then_some(t)
+        },
+    )
+}
+
+fn token_from(
+    env: impl Fn(&str) -> Option<String>,
+    gh: impl FnOnce() -> Option<String>,
+) -> Result<String> {
+    [TOKEN_VAR, "GH_TOKEN", "GITHUB_TOKEN"]
+        .iter()
+        .find_map(|k| env(k).filter(|v| !v.trim().is_empty()))
+        .map(|v| v.trim().to_owned())
+        .or_else(gh)
+        .ok_or_else(|| {
+            Error::new(
+                Code::ReviewUnauthenticated,
+                format!(
+                    "no GitHub token: set {TOKEN_VAR} or GH_TOKEN, or log in with gh auth login"
+                ),
+            )
+        })
+}
+
+/// The service's URL: `RYUCAD_REVIEW_URL`, else the `review.url`
+/// preference.
+pub fn base_url() -> String {
+    std::env::var(URL_VAR)
+        .ok()
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| {
+            crate::config::user("review.url")
+                .as_str()
+                .unwrap_or("https://review.seiraiyu.com")
+                .to_owned()
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| (*v).to_owned())
+        }
+    }
+
+    #[test]
+    fn the_token_comes_from_the_first_place_that_has_one() {
+        let no_gh = || None;
+        assert_eq!(
+            token_from(env(&[(TOKEN_VAR, "a"), ("GH_TOKEN", "b")]), no_gh).unwrap(),
+            "a"
+        );
+        assert_eq!(
+            token_from(env(&[(TOKEN_VAR, ""), ("GH_TOKEN", "b")]), no_gh).unwrap(),
+            "b"
+        );
+        assert_eq!(
+            token_from(env(&[("GITHUB_TOKEN", "c")]), no_gh).unwrap(),
+            "c"
+        );
+        assert_eq!(token_from(env(&[]), || Some("d".to_owned())).unwrap(), "d");
+        let e = token_from(env(&[]), no_gh).unwrap_err();
+        assert_eq!(e.code, Code::ReviewUnauthenticated);
+        assert!(e.message.contains("gh auth login"), "{}", e.message);
+    }
+
+    #[test]
+    fn refusal_maps_codes() {
+        let r = |s, c: &str| refusal(s, &json!({"error": {"code": c, "message": "m"}})).code;
+        assert_eq!(r(403, "forbidden"), Code::ReviewForbidden);
+        assert_eq!(r(400, "reference_invalid"), Code::ReviewReferenceInvalid);
+        assert_eq!(r(409, "someday_new"), Code::ReviewFailed);
+        assert_eq!(
+            refusal(502, &Value::Null).message,
+            "the review service answered 502"
+        );
+    }
+}
