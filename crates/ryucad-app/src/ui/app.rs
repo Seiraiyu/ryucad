@@ -454,11 +454,13 @@ impl App {
         let resized = self.size.replace(now).is_some_and(|(size, scale)| {
             (size - now.0).length() >= 0.5 || (scale - now.1).abs() > 1e-3
         });
-        if full {
+        if full || !resized {
             return;
         }
+        // The work area is in pixels; the window's rects are in points.
+        let area = crate::ui::platform::work_area().map(|r| r * (1.0 / now.1));
         if let Some((size, pos)) =
-            crate::ui::platform::keep_on_screen(resized, inner, outer, monitor)
+            crate::ui::platform::keep_on_screen(resized, inner, outer, monitor, area)
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
