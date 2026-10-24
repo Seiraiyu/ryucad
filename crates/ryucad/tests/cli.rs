@@ -1830,6 +1830,11 @@ fn releases_from_the_cli() {
         (&json!("releases/p/A.json"), &json!("first"))
     );
     p.fails(&["release", "propose", "p"], "release_pending", 1);
+    let dry = p.ok(&["release", "propose", "p", "--dry-run"]);
+    assert_eq!(
+        (&dry["ready"], &dry["problems"][0]["code"]),
+        (&json!(false), &json!("release_pending"))
+    );
     p.fails(&["release", "obsolete", "p", "A"], "release_pending", 1);
     assert_eq!(p.ok(&["release", "check"])["findings"], json!([]));
     p.git(&["add", "."]);

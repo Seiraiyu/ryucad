@@ -258,9 +258,17 @@ fn dispatch(
             part,
             note,
             expected_revision,
+            dry_run,
         } => {
             let who = participant_name(live, me);
-            crate::release::propose(session, &who, &part, note, expected_revision.as_deref())
+            crate::release::propose(
+                session,
+                &who,
+                &part,
+                note,
+                expected_revision.as_deref(),
+                dry_run,
+            )
         }
         Request::ReleaseObsolete {
             part,
