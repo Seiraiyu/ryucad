@@ -10,6 +10,7 @@ use crate::core::model::{BodyKey, Model, Part};
 use crate::core::params::Params;
 use crate::core::pdm::States;
 use crate::core::people::{People, Person};
+use crate::core::props::PartProps;
 use crate::core::settings::Settings;
 use ryucad::client::Daemon;
 use ryucad::error::{Code, Error, Result};
@@ -57,6 +58,12 @@ enum Pending {
     Made(BodyKey, String),
     /// Every part's release state.
     States,
+    /// ryupdm's settings, and whether the project has an ID yet.
+    PdmConfig,
+    /// A part's properties for the Part section; after a conflict, with
+    /// the form as it was.
+    Props(String, Option<Box<PartProps>>),
+    PropsSave,
     /// The merge Git is in, if any.
     Merge,
     Resolve,
@@ -175,6 +182,12 @@ pub struct Workspace {
     pub merge: Option<Merge>,
     /// Every part's release state (ryupdm), for the tree's badges.
     pub states: States,
+    /// ryupdm's settings (`pdm.config`): `project` is null until PDM is
+    /// set up.
+    pub pdm_config: Option<Value>,
+    /// The Part section's form, for the part it shows (see `show_props`).
+    pub props: Option<PartProps>,
+    props_part: Option<String>,
     pub settings: Settings,
     /// The last doctor report, once asked for.
     pub doctor: Option<Value>,
@@ -233,6 +246,9 @@ impl Workspace {
             compare_again: false,
             merge: None,
             states: States::default(),
+            pdm_config: None,
+            props: None,
+            props_part: None,
             settings: Settings::default(),
             doctor: None,
             raised: false,
@@ -266,6 +282,7 @@ impl Workspace {
         self.load_settings();
         self.send(Request::MergeStatus {}, Pending::Merge);
         self.send(Request::ReleaseList { part: None }, Pending::States);
+        self.send(Request::PdmConfig {}, Pending::PdmConfig);
     }
 
     fn load_settings(&mut self) {
@@ -547,6 +564,46 @@ impl Workspace {
         self.send(req, Pending::ParamSave);
     }
 
+    /// Shows `part`'s properties in the Part section, read if they aren't
+    /// yet.
+    pub fn show_props(&mut self, part: Option<&str>) {
+        if self.props_part.as_deref() == part {
+            return;
+        }
+        self.props_part = part.map(str::to_owned);
+        self.props = None;
+        if let Some(p) = part {
+            self.read_props(p.to_owned(), None);
+        }
+    }
+
+    fn read_props(&mut self, part: String, before: Option<Box<PartProps>>) {
+        let req = Request::PropsGet { part: part.clone() };
+        self.send(req, Pending::Props(part, before));
+    }
+
+    /// Saves what was typed into the Part section.
+    pub fn save_props(&mut self) {
+        let Some(p) = &mut self.props else { return };
+        p.saving = true;
+        p.error = None;
+        let req = p.request();
+        self.send(req, Pending::PropsSave);
+    }
+
+    /// Whether ryupdm is set up: the project has its ID.
+    pub fn pdm_ready(&self) -> bool {
+        self.pdm_config
+            .as_ref()
+            .is_some_and(|c| c["project"].is_string())
+    }
+
+    /// Sets up ryupdm (`pdm.init`): the project's ID and default
+    /// settings. The answer is the new settings.
+    pub fn pdm_init(&mut self) {
+        self.send(Request::PdmInit {}, Pending::PdmConfig);
+    }
+
     /// Saves the value typed into the dimension's form.
     pub fn save_dimension(&mut self) {
         let Some(f) = &mut self.dimension else { return };
@@ -697,6 +754,11 @@ impl Workspace {
         {
             self.read_form(part, id, None);
         }
+        if let Some(part) = self.props_part.clone()
+            && self.props.is_none()
+        {
+            self.read_props(part, None);
+        }
         if let Some((part, sketch, constraint)) = self.dimension_for.clone()
             && self.dimension.is_none()
         {
@@ -771,6 +833,9 @@ impl Workspace {
                     f.saving = false;
                 }
                 if let Some(p) = &mut self.params {
+                    p.saving = false;
+                }
+                if let Some(p) = &mut self.props {
                     p.saving = false;
                 }
                 self.model.asked.clear();
@@ -860,6 +925,43 @@ impl Workspace {
                 }
             }
             (Pending::States, Ok(a)) => self.states.reset(&a.result),
+            (Pending::PdmConfig, Ok(a)) => {
+                let was = self.pdm_ready();
+                self.pdm_config = Some(a.result);
+                // Set up just now: the properties' faults may have moved.
+                if !was
+                    && self.pdm_ready()
+                    && let Some(part) = self.props_part.clone()
+                {
+                    self.read_props(part, None);
+                }
+            }
+            (Pending::Props(part, before), Ok(a)) => {
+                if self.props_part.as_deref() == Some(part.as_str()) {
+                    self.props = Some(match before {
+                        Some(b) => b.reloaded(&a.result),
+                        None => PartProps::from_get(&a.result),
+                    });
+                }
+            }
+            (Pending::PropsSave, Ok(_)) => {
+                if let Some(p) = &self.props {
+                    let part = p.part.clone();
+                    self.read_props(part, None);
+                }
+            }
+            (Pending::PropsSave, Err(e)) => {
+                if let Some(p) = &mut self.props {
+                    p.saving = false;
+                    if e.code == Code::Conflict {
+                        let before = Box::new(p.clone());
+                        let part = p.part.clone();
+                        self.read_props(part, Some(before));
+                    } else {
+                        p.error = Some(e);
+                    }
+                }
+            }
             (Pending::Merge, Ok(a)) => {
                 // A failure read again after keeps saying why.
                 let failed = self.merge.as_mut().and_then(|m| m.failed.take());
@@ -1079,6 +1181,8 @@ impl Workspace {
                 self.ask_diff();
             }
             "project.changed" => {
+                // The manifest may have its ID now, or ryupdm.json changed.
+                self.send(Request::PdmConfig {}, Pending::PdmConfig);
                 // Parts came or went: damage may have too.
                 if self.doctor.is_some() {
                     self.diagnose();
@@ -1165,6 +1269,15 @@ impl Workspace {
         {
             let part = p.part.clone();
             self.read_params(part, None);
+        }
+        if let Some(p) = &self.props
+            && report["part"] == p.part.as_str()
+            && report["revision"] != p.revision.as_str()
+            && !p.dirty()
+            && !p.saving
+        {
+            let part = p.part.clone();
+            self.read_props(part, None);
         }
         if let Some(f) = &self.dimension
             && report["part"] == f.part.as_str()
