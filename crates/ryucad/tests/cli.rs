@@ -792,9 +792,28 @@ fn every_error_code_has_its_exit_code() {
     p.fails(&["feature", "show", "p", "t"], "invalid_document", 1);
     p.write(
         "parts/p/features/t.json",
-        r#"{"conflicts":{"/params/x":{"kind":"value"}},"format":1,"kind":"ryucad.feature"}"#,
+        r#"{"conflicts":{"/params/x":{"kind":"value"}},"format":1,"kind":"ryucad.feature","type":"box"}"#,
     );
     p.fails(&["feature", "show", "p", "t"], "merge_conflict", 1);
+    // It still says what it is, for the tree.
+    let rebuilt = p.fails(&["rebuild"], "rebuild_failed", 1);
+    let listed = p.ok(&["feature", "list", "p"]);
+    for all in [
+        &rebuilt["details"]["parts"][0]["features"],
+        &listed["features"],
+    ] {
+        let t = all
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == "t")
+            .unwrap();
+        assert_eq!(
+            (t["ok"].as_bool(), t["type"].as_str()),
+            (Some(false), Some("box")),
+            "{t}"
+        );
+    }
     p.write(
         "ryucad.json",
         r#"{"default_unit":"mm","format":3,"kind":"ryucad.project"}"#,

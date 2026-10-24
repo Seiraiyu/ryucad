@@ -1719,7 +1719,13 @@ fn feature_list(session: &Session, part: &str) -> Result<Value> {
                 }
                 v
             }
-            Err(e) => json!({"id": id, "ok": false, "error": e}),
+            Err(e) => {
+                let mut v = json!({"id": id, "ok": false, "error": e});
+                if let Some(t) = e.details.get("type").filter(|t| t.is_string()) {
+                    v["type"] = t.clone();
+                }
+                v
+            }
         })
         .collect();
     Ok(json!({"part": p.id, "features": features, "orphans": p.orphans(), "revision": p.revision}))
@@ -1731,10 +1737,18 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
     let part = session.project().part(id)?;
     let revision = part.revision.clone();
     let solids = Solids::of(part);
-    let types: BTreeMap<Id, &'static str> = part
+    // A feature that doesn't load may still say what it is: a conflict
+    // record's type where the merge left it alone.
+    let types: BTreeMap<Id, Value> = part
         .features
         .iter()
-        .filter_map(|(fid, f)| Some((fid.clone(), f.as_ref().ok()?.type_name())))
+        .filter_map(|(fid, f)| {
+            let ty = match f {
+                Ok(f) => json!(f.type_name()),
+                Err(e) => e.details.get("type").filter(|t| t.is_string())?.clone(),
+            };
+            Some((fid.clone(), ty))
+        })
         .collect();
     // What each feature reads, for showing dependencies.
     let uses: BTreeMap<Id, Vec<Id>> = part
