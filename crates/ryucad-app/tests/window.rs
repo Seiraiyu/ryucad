@@ -1422,7 +1422,12 @@ fn a_property_is_edited_in_the_part_section_and_pdm_set_up() {
     h.get_by_label("Properties of p");
     // No ID yet: PDM is set up from the window.
     h.get_by_label("Set up PDM").click();
-    frames(&mut h, |a| a.opened().ws.pdm_ready());
+    // Set up, the window reads the part's properties again; typing before
+    // that answer lands would be lost under it (seen on Windows CI, where
+    // the round trip is slow). Wait for it: nothing pending.
+    frames(&mut h, |a| {
+        a.opened().ws.pdm_ready() && a.opened().ws.idle()
+    });
     h.step();
     assert!(h.query_by_label("Set up PDM").is_none());
     h.get_by_label("number *").click();
