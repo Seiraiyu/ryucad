@@ -800,8 +800,14 @@ fn compute(session: &mut Session) -> Result<Value> {
     let (repo, state) = merging(&root)?;
     let working = session.snapshot();
     let mut conflicts = records(&working);
-    let (more, unstaged) = unmerged(&root, &repo.unmerged()?);
+    let (more, mut unstaged) = unmerged(&root, &repo.unmerged()?);
     conflicts.extend(more);
+    // A file staged and then settled again (a conflict record `git add`ed,
+    // then resolved) is no longer unmerged, but a commit would still take
+    // what the index holds: everything the hook would refuse is listed.
+    unstaged.extend(repo.unstaged(&working)?);
+    unstaged.sort();
+    unstaged.dedup();
     let ours = side(session, Some(&state.ours))?;
     let theirs = side(session, Some(&state.theirs))?;
     let base = side(session, state.base.as_deref())?;
@@ -1335,6 +1341,14 @@ pub(crate) mod tests {
         let v = m.call("merge.status", json!({})).unwrap();
         assert_eq!(v["unstaged"], json!(["parts/p/features/b.json"]));
         assert_eq!(v["conflicts"].as_array().unwrap().len(), 1);
+        // Issue #54: the record added to the index, then settled: no longer
+        // unmerged, but a commit would take the record.
+        let settled = std::fs::read(&b).unwrap();
+        std::fs::write(&b, &text).unwrap();
+        m.git(&["add", "parts/p/features/b.json"]);
+        std::fs::write(&b, &settled).unwrap();
+        let v = m.call("merge.status", json!({})).unwrap();
+        assert_eq!(v["unstaged"], json!(["parts/p/features/b.json"]), "{v}");
     }
 
     #[test]
@@ -1723,10 +1737,14 @@ pub(crate) mod tests {
             json!([{"path": "parts/p/features/t.json", "change": "deleted"}])
         );
         assert!(!m.root().join("parts/p/features/t.json").exists());
-        // Kept looks as Git left it: s waits for `git add`, t for `git rm`.
+        // Kept looks as Git left it: s waits for `git add`, t for `git rm`,
+        // and the list theirs' s was put back in for `git add` too.
         let v = &r["status"];
         assert_eq!(v["conflicts"][0]["id"], s);
-        assert_eq!(v["unstaged"], json!(["parts/p/features/t.json"]));
+        assert_eq!(
+            v["unstaged"],
+            json!(["parts/p/features/t.json", "parts/p/part.json"])
+        );
         m.git(&["add", "-A"]);
         let v = m.call("merge.status", json!({})).unwrap();
         assert_eq!(
