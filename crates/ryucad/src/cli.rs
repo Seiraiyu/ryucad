@@ -1543,7 +1543,24 @@ fn deliver(cmd: &Command, a: Answer) -> Result<Value> {
     Ok(result)
 }
 
+/// Whether the arguments ask only for the version the way most tools take
+/// it (`--version`, `-V`), beside `--pretty`: answered as `ryucad version`.
+fn version_flag(args: &[String]) -> bool {
+    let (flags, rest): (Vec<&String>, Vec<&String>) = args
+        .iter()
+        .skip(1)
+        .partition(|a| *a == "--version" || *a == "-V");
+    !flags.is_empty() && rest.iter().all(|a| *a == "--pretty")
+}
+
 pub fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args_os()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    if version_flag(&args) {
+        let pretty = args.iter().any(|a| a == "--pretty");
+        return finish(Ok(json!(VersionInfo::current())), Vec::new(), pretty);
+    }
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
@@ -1744,6 +1761,13 @@ fn finish(outcome: Result<Value>, warnings: Vec<String>, pretty: bool) -> ExitCo
     } else {
         serde_json::to_string(&doc)
     };
-    println!("{}", s.expect("JSON values always serialize"));
+    // A reader that stops early (`| head`) has what it wanted: a closed
+    // pipe isn't worth a panic, and the exit code still says what happened.
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stdout().lock(),
+        "{}",
+        s.expect("JSON values always serialize")
+    );
     ExitCode::from(code)
 }

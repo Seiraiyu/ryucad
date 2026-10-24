@@ -822,6 +822,47 @@ fn pretty_output_is_the_same_document() {
     );
 }
 
+#[test]
+fn version_flags_are_the_version_command() {
+    let run = |args: &[&str]| {
+        let out = Command::cargo_bin("ryucad")
+            .unwrap()
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}");
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    let v = run(&["version"]);
+    assert_eq!(run(&["--version"]), v);
+    assert_eq!(run(&["-V"]), v);
+    assert_eq!(run(&["--version", "--pretty"]), v);
+    // With anything else it is still a usage error, as before.
+    let out = Command::cargo_bin("ryucad")
+        .unwrap()
+        .args(["part", "list", "--version"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn a_reader_closing_early_is_no_panic() {
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryucad"))
+        .args(["version", "--pretty"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Closed before the process gets to write: `| head -c 0`.
+    drop(child.stdout.take());
+    let out = child.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("panicked"), "{err}");
+    assert!(out.status.success());
+}
+
 /// Every method in `proto::Request`, read from the variants' `rename`
 /// attributes (indented once; fields are indented twice).
 fn protocol_methods() -> Vec<String> {
