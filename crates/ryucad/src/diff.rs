@@ -12,7 +12,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// `ryucad git textconv`. A header names the file's kind (and a feature's
 /// type) and format; a part lists its features one per line; a sketch gives
 /// each entity and constraint a line, and its solved positions last, apart
-/// from the intent. Anything that isn't JSON comes back as it is.
+/// from the intent. ryupdm's files: a part's properties one per line, each
+/// declared property in the settings on one line, and a release record's
+/// author on one line and its rebuilt results last, apart. Anything that
+/// isn't JSON comes back as it is.
 pub fn textconv(bytes: &[u8]) -> Vec<u8> {
     let Some(Value::Object(o)) = std::str::from_utf8(bytes)
         .ok()
@@ -34,9 +37,10 @@ pub fn textconv(bytes: &[u8]) -> Vec<u8> {
         .filter(|(k, _)| !matches!(k.as_str(), "kind" | "format" | "type"))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    // Lines sorted together, and a sketch's positions after them.
+    // Lines sorted together, and a sketch's positions or a record's
+    // results after them.
     let mut lines = Vec::new();
-    let mut positions = Vec::new();
+    let mut last = Vec::new();
     match kind {
         // A part's features keep their order.
         Some("ryucad.part") => {
@@ -48,7 +52,7 @@ pub fn textconv(bytes: &[u8]) -> Vec<u8> {
             if let Some(Value::Object(entities)) = rest.remove("entities") {
                 for (id, e) in &entities {
                     lines.push(format!("entities.{id} = {}", entity(e)));
-                    positions.extend(position(id, e));
+                    last.extend(position(id, e));
                 }
             }
             if let Some(Value::Object(constraints)) = rest.remove("constraints") {
@@ -57,14 +61,31 @@ pub fn textconv(bytes: &[u8]) -> Vec<u8> {
                 }
             }
         }
+        Some(ryupdm::config::KIND) => {
+            if let Some(Value::Object(decls)) = rest.remove("properties") {
+                for (name, d) in &decls {
+                    lines.push(format!("properties.{name} = {}", declaration(d)));
+                }
+            }
+        }
+        Some(ryupdm::record::RELEASE_KIND | ryupdm::record::OBSOLETE_KIND) => {
+            if let Some(by) = rest.remove("released_by") {
+                lines.push(format!("released_by = {}", released_by(&by)));
+            }
+            if let Some(Value::Object(results)) = rest.remove("results") {
+                for (f, hash) in &results {
+                    last.push(format!("results.{f} = {}", scalar(hash)));
+                }
+            }
+        }
         _ => {}
     }
     flatten("", &Value::Object(rest), &mut lines);
     lines.sort();
     out.extend(lines);
-    if !positions.is_empty() {
+    if !last.is_empty() {
         out.push(String::new());
-        out.extend(positions);
+        out.extend(last);
     }
     let mut text = out.join("\n");
     text.push('\n');
@@ -124,6 +145,53 @@ fn flatten(path: &str, v: &Value, out: &mut Vec<String>) {
         }
         v => out.push(format!("{path} = {}", scalar(v))),
     }
+}
+
+/// A declared property: `enum anodized, bare (required, revising)`,
+/// `quantity length`, `string`.
+fn declaration(d: &Value) -> String {
+    let mut s = d.get("type").map(scalar).unwrap_or_default();
+    if let Some(Value::Array(values)) = d.get("values") {
+        let list: Vec<String> = values.iter().map(scalar).collect();
+        s.push_str(&format!(" {}", list.join(", ")));
+    }
+    if let Some(dim) = d.get("dim") {
+        s.push_str(&format!(" {}", scalar(dim)));
+    }
+    let flags: Vec<&str> = ["required", "revising"]
+        .into_iter()
+        .filter(|f| d.get(*f) == Some(&Value::Bool(true)))
+        .collect();
+    if !flags.is_empty() {
+        s.push_str(&format!(" ({})", flags.join(", ")));
+    }
+    if let Some(o) = d.as_object() {
+        for (k, v) in o {
+            if !matches!(
+                k.as_str(),
+                "type" | "values" | "dim" | "required" | "revising"
+            ) {
+                s.push_str(&format!(" {k}={}", scalar(v)));
+            }
+        }
+    }
+    s
+}
+
+/// Who wrote a record: `Ada <ada@example.com> as agent`, each part only
+/// when it is there.
+fn released_by(by: &Value) -> String {
+    let mut parts = Vec::new();
+    if let Some(n) = by.get("name") {
+        parts.push(scalar(n));
+    }
+    if let Some(e) = by.get("email") {
+        parts.push(format!("<{}>", scalar(e)));
+    }
+    if let Some(p) = by.get("participant") {
+        parts.push(format!("as {}", scalar(p)));
+    }
+    parts.join(" ")
 }
 
 /// A sketch entity without its position: `line p1 → p2`, `arc p5: p2 → p3`,
@@ -1006,6 +1074,77 @@ mod tests {
              \n\
              positions.ci1.r = 0.005\n\
              positions.p1 = 0, 0.01\n"
+        );
+    }
+
+    #[test]
+    fn pdm_files_are_one_line_per_value() {
+        let props = json!({"finish": "anodized", "format": 1, "kind": "ryupdm.properties",
+                           "mass": "1.5 kg", "number": "100-0042"});
+        assert_eq!(
+            text(props),
+            "ryupdm.properties (format 1)\n\
+             finish = anodized\n\
+             mass = 1.5 kg\n\
+             number = 100-0042\n"
+        );
+        let config = json!({
+            "format": 1, "kind": "ryupdm.config", "part_number": {"pattern": "^100-[0-9]{4}$"},
+            "properties": {
+                "finish": {"required": true, "revising": true, "type": "enum",
+                           "values": ["anodized", "bare"]},
+                "length": {"dim": "length", "required": false, "revising": false,
+                           "type": "quantity"},
+            },
+            "release_branch": "main", "revisions": "letters",
+        });
+        assert_eq!(
+            text(config),
+            "ryupdm.config (format 1)\n\
+             part_number.pattern = ^100-[0-9]{4}$\n\
+             properties.finish = enum anodized, bare (required, revising)\n\
+             properties.length = quantity length\n\
+             release_branch = main\n\
+             revisions = letters\n"
+        );
+        let record = json!({
+            "built_with": {"commit": "abc", "ryucad": "0.1.0", "ryukei": "0.1.0"},
+            "content": "c0ffee", "format": 1, "kind": "ryupdm.release", "label": "B",
+            "note": "longer", "part": "p", "project": "0123456789abcdef0123456789abcdef",
+            "properties": {"number": "100-0042"},
+            "released_by": {"email": "ada@example.com", "name": "Ada", "participant": "agent"},
+            "results": {"b": "1111", "a": "2222"}, "supersedes": "A",
+        });
+        assert_eq!(
+            text(record),
+            "ryupdm.release (format 1)\n\
+             built_with.commit = abc\n\
+             built_with.ryucad = 0.1.0\n\
+             built_with.ryukei = 0.1.0\n\
+             content = c0ffee\n\
+             label = B\n\
+             note = longer\n\
+             part = p\n\
+             project = 0123456789abcdef0123456789abcdef\n\
+             properties.number = 100-0042\n\
+             released_by = Ada <ada@example.com> as agent\n\
+             supersedes = A\n\
+             \n\
+             results.a = 2222\n\
+             results.b = 1111\n"
+        );
+        let obsolete = json!({
+            "format": 1, "kind": "ryupdm.obsolete", "label": "A", "part": "p",
+            "project": "0123456789abcdef0123456789abcdef",
+            "released_by": {"participant": "agent"},
+        });
+        assert_eq!(
+            text(obsolete),
+            "ryupdm.obsolete (format 1)\n\
+             label = A\n\
+             part = p\n\
+             project = 0123456789abcdef0123456789abcdef\n\
+             released_by = as agent\n"
         );
     }
 
