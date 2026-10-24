@@ -6,7 +6,9 @@
 //! pixel), in horizontal bands that are independent of each other, so
 //! bands run in parallel and the result doesn't depend on the thread
 //! count. Pixel arithmetic is f32 with no transcendental functions; the
-//! view set-up is f64 through `ryukei::math`.
+//! view set-up is f64 through `ryukei::math`. Ghosts are blended after the
+//! model and its silhouettes, nearest ghost first, so their order doesn't
+//! matter.
 
 use crate::error::{Code, Error, Result};
 use crate::view::{Camera, Projection};
@@ -28,6 +30,18 @@ pub const EDGE: Rgb = [0.12, 0.13, 0.15];
 pub const PENDING: Rgb = [1.0, 0.70, 0.22];
 pub const CHANGED: Rgb = [0.33, 0.78, 0.42];
 pub const NOTE: Rgb = [0.30, 0.58, 1.0];
+/// A compare's colours (the app's too): faces only the rendered side has,
+/// faces on both sides whose geometry differs, faces only the other side
+/// has (in its ghost), and the rest of the ghost.
+pub const COMPARE_NEW: Rgb = [0.30, 0.72, 0.38];
+pub const COMPARE_CHANGED: Rgb = [0.96, 0.66, 0.18];
+pub const COMPARE_REMOVED: Rgb = [0.90, 0.28, 0.28];
+pub const COMPARE_GHOST: Rgb = [0.55, 0.60, 0.72];
+/// How much of a ghost shows over what it covers.
+pub const GHOST_ALPHA: f32 = 0.35;
+/// How far a ghost is pushed back, as a fraction of its depth, so a face
+/// it shares with the model shows the model.
+const GHOST_PUSH: f32 = 1e-3;
 /// Sketch colours by solve state: nothing can move, something can, some
 /// constraint is redundant, some constraint can't hold.
 pub const SKETCH_WELL: Rgb = [0.08, 0.09, 0.11];
@@ -45,6 +59,10 @@ pub struct Geometry {
     /// Drawn over the surfaces they lie on; a line of one point is a dot.
     pub lines: Vec<Line>,
     pub labels: Vec<Label>,
+    /// Drawn translucent over the rest, where nothing of the model is in
+    /// front of them: the nearest ghost at each sample, so the order of
+    /// ghosts doesn't matter.
+    pub ghosts: Vec<Triangle>,
 }
 
 /// Text drawn at a model point, on top of everything.
@@ -270,6 +288,10 @@ struct Band {
     width: usize,
     color: Vec<Rgb>,
     depth: Vec<f32>,
+    /// The nearest ghost's colour and depth at each sample; empty when
+    /// there are no ghosts.
+    ghost: Vec<Rgb>,
+    ghost_depth: Vec<f32>,
 }
 
 impl Band {
@@ -280,10 +302,19 @@ impl Band {
             width,
             color: vec![BACKGROUND; rows * width],
             depth: vec![f32::INFINITY; rows * width],
+            ghost: Vec::new(),
+            ghost_depth: Vec::new(),
         }
     }
 
-    fn triangle(&mut self, s: [Screen; 3], shade: [f32; 3], color: Rgb) {
+    /// Calls `put(band, sample, depth, light)` for every sample a
+    /// front-facing triangle covers.
+    fn fill(
+        &mut self,
+        s: [Screen; 3],
+        shade: [f32; 3],
+        mut put: impl FnMut(&mut Band, usize, f32, f32),
+    ) {
         // Counterclockwise from outside stays counterclockwise on screen,
         // which with y down has negative area: anything else faces away
         // or is edge-on, and isn't drawn. Swapping two corners makes the
@@ -322,12 +353,38 @@ impl Band {
                 };
                 let z = lerp([s[0].z, s[1].z, s[2].z]);
                 let i = (y - self.y0) * self.width + x;
-                if z >= self.depth[i] {
-                    continue;
-                }
-                let light = lerp(shade);
-                self.depth[i] = z;
-                self.color[i] = color.map(|c| c * light);
+                put(self, i, z, lerp(shade));
+            }
+        }
+    }
+
+    fn triangle(&mut self, s: [Screen; 3], shade: [f32; 3], color: Rgb) {
+        self.fill(s, shade, |b, i, z, light| {
+            if z < b.depth[i] {
+                b.depth[i] = z;
+                b.color[i] = color.map(|c| c * light);
+            }
+        });
+    }
+
+    /// A ghost triangle: kept where it is the nearest ghost and nothing
+    /// of the model is in front of it, pushed back a little.
+    fn ghost_triangle(&mut self, s: [Screen; 3], shade: [f32; 3], color: Rgb) {
+        self.fill(s, shade, |b, i, z, light| {
+            let z = z + GHOST_PUSH * z.abs();
+            if z < b.depth[i] && z < b.ghost_depth[i] {
+                b.ghost_depth[i] = z;
+                b.ghost[i] = color.map(|c| c * light);
+            }
+        });
+    }
+
+    /// Mixes each sample's nearest ghost into it.
+    fn blend_ghosts(&mut self) {
+        for (i, gz) in self.ghost_depth.iter().enumerate() {
+            if gz.is_finite() {
+                let (c, g) = (self.color[i], self.ghost[i]);
+                self.color[i] = [0, 1, 2].map(|k| c[k] + GHOST_ALPHA * (g[k] - c[k]));
             }
         }
     }
@@ -553,6 +610,27 @@ pub fn render(
             if options.silhouettes {
                 b.silhouettes();
             }
+            if !geometry.ghosts.is_empty() {
+                let n = b.color.len();
+                b.ghost = vec![BACKGROUND; n];
+                b.ghost_depth = vec![f32::INFINITY; n];
+                for t in &geometry.ghosts {
+                    let (Some(a), Some(c), Some(d)) = (
+                        screen[t.p[0] as usize],
+                        screen[t.p[1] as usize],
+                        screen[t.p[2] as usize],
+                    ) else {
+                        continue;
+                    };
+                    let s = [
+                        shade(t.n[0], light),
+                        shade(t.n[1], light),
+                        shade(t.n[2], light),
+                    ];
+                    b.ghost_triangle([a, c, d], s, t.color);
+                }
+                b.blend_ghosts();
+            }
             for l in &geometry.lines {
                 let half = l.width * SS as f32 / 2.0;
                 let pts: Vec<Option<Screen>> =
@@ -716,7 +794,59 @@ pub(crate) mod tests {
             triangles,
             lines: Vec::new(),
             labels: Vec::new(),
+            ghosts: Vec::new(),
         }
+    }
+
+    /// A unit cube moved along x, as ghosts.
+    fn moved(g: &mut Geometry, dx: f64, color: Rgb) {
+        let plain = cube();
+        let base = g.positions.len() as u32;
+        g.positions
+            .extend(plain.positions.iter().map(|p| [p[0] + dx, p[1], p[2]]));
+        g.ghosts.extend(plain.triangles.iter().map(|t| Triangle {
+            p: t.p.map(|i| base + i),
+            n: t.n,
+            color,
+        }));
+    }
+
+    #[test]
+    fn ghosts_tint_what_they_cover_and_hide_behind_the_model() {
+        let c = camera([0.5, -5.0, 0.5]);
+        let plain = render(&cube(), &c, 128, 64, bare()).unwrap();
+        let mut g = cube();
+        // One ghost exactly where the model is (pushed back, so hidden),
+        // and one beside it, over the background.
+        moved(&mut g, 0.0, COMPARE_GHOST);
+        moved(&mut g, 1.5, COMPARE_REMOVED);
+        let img = render(&g, &c, 128, 64, bare()).unwrap();
+        assert_eq!(at(&img, 64, 32), at(&plain, 64, 32));
+        let bg = BACKGROUND.map(to_u8);
+        assert_eq!(&at(&plain, 97, 32)[..3], &bg);
+        let px = at(&img, 97, 32);
+        assert_ne!(&px[..3], &bg);
+        // Removed red over the background's grey: more red than green.
+        assert!(px[0] > px[1], "{px:?}");
+    }
+
+    #[test]
+    fn ghosts_are_the_same_on_any_number_of_threads() {
+        let mut g = cube();
+        moved(&mut g, 0.6, COMPARE_GHOST);
+        moved(&mut g, -0.7, COMPARE_REMOVED);
+        let c = camera([2.0, -3.0, 1.5]);
+        let one = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let many = rayon::ThreadPoolBuilder::new()
+            .num_threads(7)
+            .build()
+            .unwrap();
+        let a = one.install(|| render(&g, &c, 200, 150, Options::default()).unwrap());
+        let b = many.install(|| render(&g, &c, 200, 150, Options::default()).unwrap());
+        assert_eq!(a, b);
     }
 
     /// Surfaces only.
