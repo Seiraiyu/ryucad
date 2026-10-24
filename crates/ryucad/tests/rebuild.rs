@@ -20,6 +20,7 @@ fn feature(ty: PrimitiveType, params: &[(&str, &str)]) -> Feature {
             .map(|(k, v)| (k.to_string(), Quantity::parse(v, Unit::Mm).unwrap()))
             .collect(),
         placement: Placement::identity(Unit::Mm),
+        combine: ryucad::doc::solid::Combine::NEW,
     })
 }
 

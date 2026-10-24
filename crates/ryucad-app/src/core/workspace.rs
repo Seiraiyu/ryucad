@@ -51,6 +51,9 @@ enum Pending {
     Compare(u64),
     /// A ghost's mesh, asked for at this hash.
     Ghost(BodyKey, String),
+    /// The model's solids, read for the faces a feature made, at this
+    /// part revision.
+    Made(BodyKey, String),
     /// The merge Git is in, if any.
     Merge,
     Resolve,
@@ -78,6 +81,42 @@ struct Retry {
     trying: Option<Receiver<Result<Link>>>,
 }
 
+/// The faces a feature made, as the model shows them: by solid, by name
+/// (hex), at a part revision.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Made {
+    pub feature: BodyKey,
+    pub revision: String,
+    pub faces: std::collections::BTreeMap<BodyKey, std::collections::BTreeSet<String>>,
+}
+
+impl Made {
+    /// The faces of an `inspect` of the model whose origin is `feature`.
+    pub fn from_inspect(feature: &BodyKey, revision: &str, v: &Value) -> Made {
+        let mut faces = std::collections::BTreeMap::new();
+        for b in v["bodies"].as_array().into_iter().flatten() {
+            let Some(solid) = b["solid"].as_str() else {
+                continue;
+            };
+            let names: std::collections::BTreeSet<String> = b["faces"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|f| f["origin"]["feature"] == feature.1.as_str())
+                .filter_map(|f| f["name"].as_str().map(str::to_owned))
+                .collect();
+            if !names.is_empty() {
+                faces.insert((feature.0.clone(), solid.to_owned()), names);
+            }
+        }
+        Made {
+            feature: feature.clone(),
+            revision: revision.to_owned(),
+            faces,
+        }
+    }
+}
+
 /// A camera as a request gives it: points as quantities in meters.
 pub fn camera_arg(c: &Camera) -> CameraArg {
     let q = |x: f64| json!(format!("{x} m"));
@@ -103,6 +142,10 @@ pub struct Workspace {
     pub following: Option<String>,
     /// The property panel's form, for the feature chosen in the tree.
     pub form: Option<Form>,
+    /// The faces the feature chosen in the tree made, by the solid that
+    /// shows them; and the feature, once asked for.
+    pub made: Option<Made>,
+    made_for: Option<BodyKey>,
     /// The property panel's form for a dimension chosen by its label;
     /// shown instead of `form`.
     pub dimension: Option<DimForm>,
@@ -170,6 +213,8 @@ impl Workspace {
             people,
             following: None,
             form: None,
+            made: None,
+            made_for: None,
             dimension: None,
             form_for: None,
             dimension_for: None,
@@ -396,6 +441,34 @@ impl Workspace {
 
     /// Opens the form for a feature (or closes it, with `None`); a
     /// dimension's form closes.
+    /// Chooses a feature in the tree (or none): what it made is read, to
+    /// be painted.
+    pub fn choose(&mut self, feature: Option<BodyKey>) {
+        self.made = None;
+        self.made_for.clone_from(&feature);
+        if let Some(key) = feature {
+            self.ask_made(key);
+        }
+    }
+
+    /// Reads the faces `key` made, unless it is a sketch: it makes none.
+    fn ask_made(&mut self, key: BodyKey) {
+        let Some(p) = self.model.parts.get(&key.0) else {
+            return;
+        };
+        if p.feature(&key.1).is_none_or(|f| f.sketch.is_some()) {
+            return;
+        }
+        let revision = p.revision.clone();
+        let req = Request::Inspect {
+            part: key.0.clone(),
+            feature: None,
+            entity: None,
+            rev: None,
+        };
+        self.send(req, Pending::Made(key, revision));
+    }
+
     pub fn open_form(&mut self, feature: Option<(String, String)>) {
         self.form = None;
         self.dimension = None;
@@ -857,10 +930,14 @@ impl Workspace {
                         (Some(_), None) => false,
                     };
                 if wanted {
-                    self.form = Some(match before {
+                    let mut form = match before {
                         Some(b) => b.reloaded(&a.result),
                         None => Form::from_show(&part, &a.result),
-                    });
+                    };
+                    if let Some(p) = self.model.parts.get(&part) {
+                        form.offer(&p.founders());
+                    }
+                    self.form = Some(form);
                 }
             }
             (Pending::Dim(part, sketch, constraint, before), Ok(a)) => {
@@ -952,6 +1029,15 @@ impl Workspace {
                             .take_sketch(&key, crate::core::sketch::Drawing::from_get(&a.result));
                     }
                     Err(e) => self.fail(e),
+                }
+            }
+            (Pending::Made(key, revision), a) => {
+                if self.made_for.as_ref() == Some(&key) {
+                    match a {
+                        Ok(a) => self.made = Some(Made::from_inspect(&key, &revision, &a.result)),
+                        Err(e) => self.fail(e),
+                    }
+                    self.model.generation += 1;
                 }
             }
             (Pending::Mesh(key, hash), a) => {
@@ -1082,6 +1168,16 @@ impl Workspace {
         }
         let wanted = self.model.apply_part(report);
         self.fetch(wanted);
+        // What the chosen feature made moves with its part.
+        if let Some(key) = self.made_for.clone()
+            && report["part"] == key.0.as_str()
+            && self
+                .made
+                .as_ref()
+                .is_none_or(|m| report["revision"] != m.revision.as_str())
+        {
+            self.ask_made(key);
+        }
         if let Some(part) = report["part"].as_str() {
             self.fetch_sketches(part);
         }

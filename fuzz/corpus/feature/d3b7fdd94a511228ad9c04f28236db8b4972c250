@@ -1,0 +1,15 @@
+{
+  "extent": {
+    "both": true,
+    "type": "through_all"
+  },
+  "format": 3,
+  "kind": "ryucad.feature",
+  "operation": "cut",
+  "sketch": "s",
+  "targets": [
+    "b",
+    "c"
+  ],
+  "type": "extrude"
+}

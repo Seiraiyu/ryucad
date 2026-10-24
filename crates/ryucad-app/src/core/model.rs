@@ -1,6 +1,6 @@
 //! What the window shows of the model: parts, their features in order with
-//! their rebuild status, and a display mesh per body. It is built from the
-//! daemon's reports and never from the files.
+//! their rebuild status, their solids, and a display mesh per solid. It is
+//! built from the daemon's reports and never from the files.
 
 use crate::core::sketch::Drawing;
 use ryucad::mesh::WireBody;
@@ -14,8 +14,16 @@ pub struct Feature {
     pub id: String,
     /// `box`, `cylinder` and so on; `None` when the file can't be read.
     pub ty: Option<String>,
-    /// The body's hash, when it built.
+    /// Its result's hash, when it built.
     pub hash: Option<String>,
+    /// What it does to solids: `join`, `cut` or `intersect`, or a
+    /// boolean's `unite`, `subtract` or `intersect`; `None` for a feature
+    /// that founds a solid, or makes none.
+    pub operation: Option<String>,
+    /// The solids it founds or acts on, by founder.
+    pub solids: Vec<String>,
+    /// The solids a boolean consumes.
+    pub consumes: Vec<String>,
     /// A sketch's solve, when it solved.
     pub sketch: Option<SketchState>,
     /// The features it reads.
@@ -33,12 +41,27 @@ pub struct SketchState {
     pub stale: bool,
 }
 
-/// A part: its features in order.
+/// A solid as the model shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Solid {
+    /// Its founder.
+    pub id: String,
+    /// Its chain, founder first.
+    pub features: Vec<String>,
+    /// The hash of its body as shown, when anything of it built.
+    pub hash: Option<String>,
+    /// Why its last feature failed: it shows as the last that built.
+    pub error: Option<Value>,
+}
+
+/// A part: its features in order, and its solids.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Part {
     pub id: String,
     pub revision: String,
     pub features: Vec<Feature>,
+    /// The solids of the model, not consumed, in list order.
+    pub solids: Vec<Solid>,
     /// Why the part's list can't be read.
     pub error: Option<Value>,
 }
@@ -59,21 +82,31 @@ impl Part {
                             dof: s["dof"].as_u64().unwrap_or_default(),
                             stale: s["stale"] == true,
                         }),
-                        uses: f["uses"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .map(text)
-                            .collect(),
+                        uses: texts(&f["uses"]),
+                        operation: f["operation"].as_str().map(str::to_owned),
+                        solids: texts(&f["solids"]),
+                        consumes: texts(&f["consumes"]),
                         error: (f["ok"] == false).then(|| f["error"].clone()),
                     })
                     .collect()
             })
             .unwrap_or_default();
+        let solids = v["solids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|s| Solid {
+                id: text(&s["solid"]),
+                features: texts(&s["features"]),
+                hash: s["hash"].as_str().map(str::to_owned),
+                error: (s["ok"] == false).then(|| s["error"].clone()),
+            })
+            .collect();
         Part {
             id: text(&v["part"]),
             revision: text(&v["revision"]),
             features,
+            solids,
             error: v.get("error").cloned(),
         }
     }
@@ -81,13 +114,41 @@ impl Part {
     pub fn feature(&self, id: &str) -> Option<&Feature> {
         self.features.iter().find(|f| f.id == id)
     }
+
+    /// The solid founded by `id`, if the model shows it.
+    pub fn solid(&self, id: &str) -> Option<&Solid> {
+        self.solids.iter().find(|s| s.id == id)
+    }
+
+    /// The features that found solids, in list order: what a feature can
+    /// act on, consumed ones included (the daemon says which can't).
+    pub fn founders(&self) -> Vec<String> {
+        self.features
+            .iter()
+            .filter(|f| f.operation.is_none() && f.solids == [f.id.clone()])
+            .map(|f| f.id.clone())
+            .collect()
+    }
+
+    /// The solids the model shows that `feature` founds or acts on.
+    pub fn solids_of(&self, feature: &str) -> Vec<&Solid> {
+        self.solids
+            .iter()
+            .filter(|s| s.features.iter().any(|f| f == feature))
+            .collect()
+    }
 }
 
 fn text(v: &Value) -> String {
     v.as_str().unwrap_or_default().to_owned()
 }
 
-/// A body's place: its part and feature.
+fn texts(v: &Value) -> Vec<String> {
+    v.as_array().into_iter().flatten().map(text).collect()
+}
+
+/// A body's place: its part and the feature that names it: a solid's
+/// founder, or a sketch.
 pub type BodyKey = (String, String);
 
 /// The model as the window knows it.
@@ -95,7 +156,7 @@ pub type BodyKey = (String, String);
 pub struct Model {
     pub default_unit: String,
     pub parts: BTreeMap<String, Part>,
-    /// Display meshes by part and feature, each for the body hash it says.
+    /// Display meshes by part and solid, each for the body hash it says.
     pub meshes: BTreeMap<BodyKey, Arc<WireBody>>,
     /// Meshes asked for and not yet answered, by the body hash they were
     /// asked for at: a burst of changes asks for each body once.
@@ -117,22 +178,22 @@ impl Model {
     pub fn apply_part(&mut self, report: &Value) -> Vec<BodyKey> {
         let part = Part::from_report(report);
         let id = part.id.clone();
-        // Meshes of features that are gone, or failed, go.
-        self.meshes.retain(|(p, f), m| {
+        // Meshes of solids that are gone, or changed, go.
+        self.meshes.retain(|(p, s), m| {
             *p != id
                 || part
-                    .feature(f)
-                    .is_some_and(|f| f.hash.as_deref() == Some(&m.hash))
+                    .solid(s)
+                    .is_some_and(|s| s.hash.as_deref() == Some(&m.hash))
         });
         // Drawings of sketches that are gone, or failed, go; the others
         // stay drawn until their new drawing comes.
         self.sketches
             .retain(|(p, f), _| *p != id || part.feature(f).is_some_and(|f| f.sketch.is_some()));
         let wanted = part
-            .features
+            .solids
             .iter()
-            .filter(|f| f.hash.is_some())
-            .map(|f| (id.clone(), f.id.clone()))
+            .filter(|s| s.hash.is_some())
+            .map(|s| (id.clone(), s.id.clone()))
             .filter(|k| !self.meshes.contains_key(k))
             .collect();
         self.parts.insert(id, part);
@@ -148,8 +209,8 @@ impl Model {
             let Some(hash) = self
                 .parts
                 .get(&key.0)
-                .and_then(|p| p.feature(&key.1))
-                .and_then(|f| f.hash.clone())
+                .and_then(|p| p.solid(&key.1))
+                .and_then(|s| s.hash.clone())
             else {
                 continue;
             };
@@ -239,8 +300,8 @@ impl Model {
         let current = self
             .parts
             .get(part)
-            .and_then(|p| p.feature(&body.feature))
-            .and_then(|f| f.hash.as_deref());
+            .and_then(|p| p.solid(&body.feature))
+            .and_then(|s| s.hash.as_deref());
         if current != Some(&body.hash) {
             return false;
         }
@@ -258,12 +319,20 @@ impl Model {
         self.parts
             .values()
             .flat_map(|p| {
-                p.features
+                p.solids
                     .iter()
-                    .filter(|f| f.hash.is_some())
-                    .map(|f| (p.id.clone(), f.id.clone()))
+                    .filter(|s| s.hash.is_some())
+                    .map(|s| (p.id.clone(), s.id.clone()))
             })
             .collect()
+    }
+
+    /// The solid a feature shows in: its own, or the first the model
+    /// shows of those it acts on.
+    pub fn solid_of(&self, key: &BodyKey) -> Option<BodyKey> {
+        let p = self.parts.get(&key.0)?;
+        let s = p.solids_of(&key.1).into_iter().next()?;
+        Some((key.0.clone(), s.id.clone()))
     }
 }
 
@@ -272,15 +341,26 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// A part of solids, each founded by one feature with its hash, or
+    /// failed.
     fn report(hashes: &[(&str, Option<&str>)]) -> Value {
         let features: Vec<Value> = hashes
             .iter()
             .map(|(id, h)| match h {
-                Some(h) => json!({"id": id, "type": "box", "ok": true, "hash": h}),
-                None => json!({"id": id, "type": "torus", "ok": false, "error": {"code": "rebuild_failed"}}),
+                Some(h) => json!({"id": id, "type": "box", "ok": true, "hash": h, "solids": [id]}),
+                None => json!({"id": id, "type": "torus", "ok": false, "solids": [id],
+                               "error": {"code": "rebuild_failed"}}),
             })
             .collect();
-        json!({"part": "p", "revision": "r", "features": features})
+        let solids: Vec<Value> = hashes
+            .iter()
+            .map(|(id, h)| match h {
+                Some(h) => json!({"solid": id, "ok": true, "features": [id], "hash": h}),
+                None => json!({"solid": id, "ok": false, "features": [id],
+                               "error": {"code": "rebuild_failed"}}),
+            })
+            .collect();
+        json!({"part": "p", "revision": "r", "features": features, "solids": solids})
     }
 
     fn body(feature: &str, hash: &str) -> WireBody {

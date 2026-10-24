@@ -1,0 +1,29 @@
+{
+  "format": 3,
+  "kind": "ryucad.feature",
+  "operation": "intersect",
+  "params": {
+    "radius": "9 mm"
+  },
+  "placement": {
+    "origin": [
+      "10 mm",
+      "5 mm",
+      "2 mm"
+    ],
+    "x": [
+      1,
+      0,
+      0
+    ],
+    "z": [
+      0,
+      0,
+      1
+    ]
+  },
+  "targets": [
+    "b"
+  ],
+  "type": "sphere"
+}

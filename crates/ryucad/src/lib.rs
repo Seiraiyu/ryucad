@@ -35,5 +35,6 @@ pub mod server;
 pub mod session;
 pub mod sketch;
 pub mod sketch_view;
+pub mod solid;
 pub mod validate;
 pub mod view;
