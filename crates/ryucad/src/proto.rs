@@ -606,7 +606,9 @@ pub enum Request {
     },
     /// Draws a part (or the whole project) to a PNG, sent as bytes after
     /// the answer. The view is `camera`, a participant's camera, a standard
-    /// `view`, or iso framing the model.
+    /// `view`, or iso framing the model. `rev` renders a Git revision;
+    /// `compare` paints what changed since a revision and ghosts it;
+    /// `frame` widens the framing to other revisions.
     #[serde(rename = "render")]
     Render {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -634,6 +636,18 @@ pub enum Request {
         /// Draw sketches (default true).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sketches: Option<bool>,
+        /// Render the project as this Git revision has it (the working
+        /// files by default).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        /// Frame these revisions' models too (`working` for the working
+        /// files), so renders of each share a camera.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        frame: Vec<String>,
+        /// Paint what changed since this revision (faces new and changed)
+        /// and ghost what it had, as the app's compare view does.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compare: Option<String>,
     },
     /// Diagnoses the project folder: every problem, with a stable code.
     #[serde(rename = "doctor")]

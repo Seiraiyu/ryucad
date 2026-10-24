@@ -90,6 +90,11 @@ pub const ERROR_SHOWN: Duration = Duration::from_secs(8);
 pub const RETRY_FIRST: Duration = Duration::from_millis(250);
 pub const RETRY_MAX: Duration = Duration::from_secs(5);
 
+/// How often the History tab reads the Git history again while it is
+/// shown: commits made outside ryucad change no project file, so no
+/// notification says so.
+pub const HISTORY_EVERY: Duration = Duration::from_secs(5);
+
 /// A lost window's next attempt to reconnect.
 struct Retry {
     at: Instant,
@@ -181,6 +186,11 @@ pub struct Workspace {
     pub activity: Activity,
     /// The project's Git history (`history.log`), once asked for.
     pub history: Option<Value>,
+    /// When it was last asked for, whether an answer is on its way, and
+    /// whether it was wanted again meanwhile.
+    history_at: Option<Instant>,
+    history_waiting: bool,
+    history_again: bool,
     /// This window's compare with a Git revision, while it is in one: it
     /// follows the window's participant's compare state.
     pub compare: Option<Compare>,
@@ -207,6 +217,10 @@ pub struct Workspace {
     pub settings: Settings,
     /// The last doctor report, once asked for.
     pub doctor: Option<Value>,
+    /// Whether a report is on its way, and whether the project changed
+    /// meanwhile, so the badges need another.
+    doctor_waiting: bool,
+    doctor_again: bool,
     /// Someone asked for this window (`ryucad open`): bring it forward.
     pub raised: bool,
     /// Requests of the window's that failed, newest last.
@@ -256,6 +270,9 @@ impl Workspace {
             params_part: None,
             activity: Activity::default(),
             history: None,
+            history_at: None,
+            history_waiting: false,
+            history_again: false,
             compare: None,
             compare_asked: 0,
             compare_waiting: false,
@@ -269,6 +286,8 @@ impl Workspace {
             releases_open: false,
             settings: Settings::default(),
             doctor: None,
+            doctor_waiting: false,
+            doctor_again: false,
             raised: false,
             camera_due: None,
             camera_sent: None,
@@ -341,22 +360,60 @@ impl Workspace {
 
     /// Diagnoses the project (`doctor`).
     pub fn diagnose(&mut self) {
+        self.doctor_waiting = true;
         self.send(Request::Doctor {}, Pending::Doctor);
+    }
+
+    /// Diagnoses the project again after it changed, so badges don't
+    /// outlive the damage they show (a conflict record settled, say): at
+    /// most one report on its way, and one more after it if the project
+    /// changed meanwhile. Nothing until the window first asked.
+    fn rediagnose(&mut self) {
+        if self.doctor_waiting {
+            self.doctor_again = true;
+        } else if self.doctor.is_some() {
+            self.diagnose();
+        }
     }
 
     /// Applies repairs from the last report (`doctor.repair`); the answer
     /// brings the new report.
     pub fn repair(&mut self, repairs: Vec<String>, params: serde_json::Map<String, Value>) {
+        self.doctor_waiting = true;
         self.send(Request::DoctorRepair { repairs, params }, Pending::Doctor);
     }
 
     /// Reads the project's Git history again.
     pub fn load_history(&mut self) {
+        self.history_at = Some(Instant::now());
+        self.history_waiting = true;
         let req = Request::HistoryLog {
             part: None,
             limit: Some(100),
         };
         self.send(req, Pending::History);
+    }
+
+    /// Reads the history again after the project changed, once it was
+    /// asked for: at most one reading on its way, and one more after it.
+    fn reload_history(&mut self) {
+        if self.history_waiting {
+            self.history_again = true;
+        } else if self.history.is_some() {
+            self.load_history();
+        }
+    }
+
+    /// The History tab is shown: read the history again when the last
+    /// reading is older than [`HISTORY_EVERY`]. Returns when to look again.
+    pub fn history_shown(&mut self, now: Instant) -> Duration {
+        let due = self.history_at.map_or(now, |t| t + HISTORY_EVERY);
+        if now >= due && !self.history_waiting {
+            self.load_history();
+            return HISTORY_EVERY;
+        }
+        due.saturating_duration_since(now)
+            .max(Duration::from_millis(100))
     }
 
     /// Settles a merge conflict by `choice` (`ours`, `theirs`, or `repair`
@@ -823,6 +880,9 @@ impl Workspace {
             self.set_compare(Some(rev));
             self.ask_diff();
         }
+        // A new daemon may see damage, and commits, the old one didn't.
+        self.rediagnose();
+        self.reload_history();
         // Panels asked for whose answers were lost are asked for again.
         if let Some(part) = self.params_part.clone()
             && self.params.is_none()
@@ -925,6 +985,10 @@ impl Workspace {
                 self.model.asked.clear();
                 self.model.sketches_asked.clear();
                 self.compare_waiting = false;
+                self.doctor_waiting = false;
+                self.doctor_again = false;
+                self.history_waiting = false;
+                self.history_again = false;
                 if let Some(c) = &mut self.compare {
                     c.asked.clear();
                 }
@@ -939,6 +1003,26 @@ impl Workspace {
     }
 
     fn answered(&mut self, why: Pending, answer: Result<Answer>) {
+        let (doctor, history) = (
+            matches!(why, Pending::Doctor),
+            matches!(why, Pending::History),
+        );
+        self.answer(why, answer);
+        if doctor {
+            self.doctor_waiting = false;
+            if std::mem::take(&mut self.doctor_again) {
+                self.diagnose();
+            }
+        }
+        if history {
+            self.history_waiting = false;
+            if std::mem::take(&mut self.history_again) {
+                self.load_history();
+            }
+        }
+    }
+
+    fn answer(&mut self, why: Pending, answer: Result<Answer>) {
         match (why, answer) {
             (Pending::Info, Ok(a)) => {
                 self.model.default_unit = a.result["default_unit"].as_str().unwrap_or("mm").into();
@@ -1292,21 +1376,24 @@ impl Workspace {
                 for id in params["removed"].as_array().into_iter().flatten() {
                     self.model.remove_part(id.as_str().unwrap_or_default());
                 }
-                // What the working files differ by changed with them.
+                // What the working files differ by changed with them, and
+                // so may their damage (a conflict record comes and goes
+                // with a file) and the history's uncommitted changes.
                 self.ask_diff();
                 // A proposal may be stale now.
                 if self.releases_open {
                     let req = Request::ReleaseCheck { results: false };
                     self.send(req, Pending::ReleaseCheck);
                 }
+                self.rediagnose();
+                self.reload_history();
             }
             "project.changed" => {
                 // The manifest may have its ID now, or ryupdm.json changed.
                 self.send(Request::PdmConfig {}, Pending::PdmConfig);
                 // Parts came or went: damage may have too.
-                if self.doctor.is_some() {
-                    self.diagnose();
-                }
+                self.rediagnose();
+                self.reload_history();
                 if let Some(u) = params["default_unit"].as_str()
                     && u != self.model.default_unit
                 {
@@ -1344,6 +1431,7 @@ impl Workspace {
                     )),
                     _ => None,
                 };
+                self.rediagnose();
             }
             "pdm.changed" => {
                 self.states.changed(params);
