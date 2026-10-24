@@ -490,7 +490,9 @@ enum FeatureCmd {
     /// placement; xy by default), an extrude (--sketch, --length) or a
     /// revolve (--sketch, --axis, --angle), each a solid of its own or,
     /// with --operation, joined to, cut from or intersected with others
-    /// (--target); or a boolean (--op, --target, --tool) of whole solids.
+    /// (--target); a boolean (--op, --target, --tool) of whole solids; or a
+    /// fillet (--radius, --edge) or chamfer (--form, --d, --d1, --d2, --angle,
+    /// --face, --edge) of a solid's edges, or several sizes (--groups).
     Add {
         part: String,
         #[arg(value_name = "TYPE")]
@@ -510,7 +512,8 @@ enum FeatureCmd {
         expect: Expect,
     },
     /// Change some of a feature's parameters or placement, a sketch's
-    /// plane, or what an extrude or revolve sweeps and how far.
+    /// plane, what an extrude or revolve sweeps and how far, or a fillet's
+    /// or chamfer's sizes and edges.
     Edit {
         part: String,
         id: String,
@@ -707,6 +710,10 @@ enum SketchCmd {
 #[derive(Clone)]
 struct Ops(Vec<Value>);
 
+/// A fillet's or chamfer's groups, parsed from one argument.
+#[derive(Clone)]
+struct Groups(Value);
+
 #[derive(Args)]
 struct RevArg {
     /// Read the project as this Git revision has it (main, HEAD~2, a hash)
@@ -744,7 +751,8 @@ struct FieldArgs {
     /// A sketch's plane: xy, yz or zx.
     #[arg(long)]
     plane: Option<String>,
-    /// A planar face to sketch on: <part>/<feature>/<name>, as inspect gives it.
+    /// A planar face to sketch on, or the face a chamfer's first distance runs along:
+    /// <part>/<feature>/<name>, as inspect gives it.
     #[arg(long, value_name = "REFERENCE")]
     face: Option<String>,
     /// A sketch on a face: a vertex for its origin ("" for the part origin, projected).
@@ -786,7 +794,8 @@ struct FieldArgs {
     /// (<part>/<feature>/<name>).
     #[arg(long, value_name = "LINE")]
     axis: Option<String>,
-    /// A revolve's angle: 90, "90 deg", or full.
+    /// A revolve's angle: 90, "90 deg", or full; a chamfer's angle to its face
+    /// (distance_angle).
     #[arg(long)]
     angle: Option<String>,
     /// Revolve half the angle each side of the sketch's plane (or --symmetric false).
@@ -806,6 +815,34 @@ struct FieldArgs {
     /// A solid a boolean uses as a tool, and consumes; repeat for several.
     #[arg(long = "tool", value_name = "SOLID")]
     tools: Vec<String>,
+    /// A fillet's radius.
+    #[arg(long, value_name = "QUANTITY")]
+    radius: Option<String>,
+    /// An edge a fillet or chamfer rounds or bevels: <part>/<solid>/<name>, as inspect
+    /// gives it; repeat for several.
+    #[arg(long = "edge", value_name = "REFERENCE")]
+    edges: Vec<String>,
+    /// A chamfer's form: equal (--d, the default), distances (--d1 along --face, --d2
+    /// along the other face) or distance_angle (--d along --face, at --angle to it).
+    #[arg(long)]
+    form: Option<String>,
+    /// A chamfer's distance: along both faces, or along --face.
+    #[arg(long, value_name = "QUANTITY")]
+    d: Option<String>,
+    /// A chamfer's distance along --face.
+    #[arg(long, value_name = "QUANTITY")]
+    d1: Option<String>,
+    /// A chamfer's distance along the other face.
+    #[arg(long, value_name = "QUANTITY")]
+    d2: Option<String>,
+    /// Grow each edge to the chain of edges meeting it tangentially (the default), or
+    /// --propagate false.
+    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
+    propagate: Option<bool>,
+    /// A fillet's or chamfer's groups as JSON, or @FILE holding them, for more than one
+    /// size: [{"radius": "2 mm", "edges": ["<part>/<solid>/<name>"]}, ...].
+    #[arg(long, value_name = "JSON", value_parser = groups)]
+    groups: Option<Groups>,
 }
 
 impl FieldArgs {
@@ -848,6 +885,14 @@ impl FieldArgs {
             op: self.op.clone(),
             target: None,
             tools: (!self.tools.is_empty()).then(|| self.tools.clone()),
+            groups: self.groups.clone().map(|g| g.0),
+            propagate: self.propagate,
+            radius: self.radius.clone().map(Value::String),
+            edges: (!self.edges.is_empty()).then(|| self.edges.clone()),
+            form: self.form.clone(),
+            d: self.d.clone().map(Value::String),
+            d1: self.d1.clone().map(Value::String),
+            d2: self.d2.clone().map(Value::String),
         }
     }
 }
@@ -913,6 +958,20 @@ fn ops(s: &str) -> core::result::Result<Ops, String> {
     serde_json::from_str(&text)
         .map(Ops)
         .map_err(|e| format!("OPS must be a JSON array of ops: {e}"))
+}
+
+/// A JSON array of a fillet's or chamfer's groups, or `@FILE` holding
+/// one.
+fn groups(s: &str) -> core::result::Result<Groups, String> {
+    let text = match s.strip_prefix('@') {
+        Some(path) => std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?,
+        None => s.to_owned(),
+    };
+    match serde_json::from_str(&text) {
+        Ok(v @ Value::Array(_)) => Ok(Groups(v)),
+        Ok(_) => Err("JSON must be an array of groups".to_owned()),
+        Err(e) => Err(format!("JSON must be an array of groups: {e}")),
+    }
 }
 
 fn param(s: &str) -> core::result::Result<(String, String), String> {

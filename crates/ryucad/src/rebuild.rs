@@ -1124,6 +1124,40 @@ fn blend_edges<'g>(
     Ok(out)
 }
 
+/// The one solid a fillet or chamfer (feature `id`) acts on, and whether
+/// it propagates: `targets_mixed` when its references name several.
+fn blend_solid(id: &Id, f: &Feature) -> Result<(Id, bool)> {
+    let ty = f.type_name();
+    match (f.targets().as_slice(), f) {
+        ([one], Feature::Fillet(x)) => Ok(((*one).clone(), x.propagate)),
+        ([one], Feature::Chamfer(x)) => Ok(((*one).clone(), x.propagate)),
+        (many, _) => Err(Error::new(
+            Code::TargetsMixed,
+            format!(
+                "{ty} {id}: its edges belong to {}; a {ty} acts on one solid, so split it in two",
+                many.iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+        .with("feature", id)
+        .with("solids", many)),
+    }
+}
+
+/// Refuses a fillet or chamfer (feature `id` of `part`, as a write would
+/// leave it) whose references don't resolve in `results` to what it
+/// needs: edges of one solid, a face where a face goes, no edge in two
+/// groups. What the kernel makes of them only rebuild can tell.
+pub fn check_blend(part: &Part, id: &Id, f: &Feature, results: &dyn Results) -> Result<()> {
+    let solids = Solids::of(part);
+    let (solid, propagate) = blend_solid(id, f)?;
+    let built = target(part, &solids, id, &solid, results)?;
+    let groups = groups(part, id, f, results)?;
+    blend_edges(part, id, &solid, built, &groups, propagate, results).map(drop)
+}
+
 /// The kernel's refusal of a fillet or chamfer: `blend_failed`, with its
 /// `reason` and each entity it names (`entities`, with its `role` in the
 /// refusal): as a reference into the solid as the feature sees it, its
@@ -1247,21 +1281,7 @@ fn build_blend(
     before: &dyn Results,
 ) -> Result<Made> {
     let ty = f.type_name();
-    let (solid, propagate) = match (f.targets().as_slice(), f) {
-        ([one], Feature::Fillet(x)) => ((*one).clone(), x.propagate),
-        ([one], Feature::Chamfer(x)) => ((*one).clone(), x.propagate),
-        (many, _) => {
-            return Err(Error::new(
-                Code::TargetsMixed,
-                format!(
-                    "{ty} {id}: its edges belong to {}; a {ty} acts on one solid, so split it in two",
-                    many.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
-                ),
-            )
-            .with("feature", id)
-            .with("solids", many));
-        }
-    };
+    let (solid, propagate) = blend_solid(id, f)?;
     let built = target(part, solids, id, &solid, before)?;
     let groups = groups(part, id, f, before)?;
     let listed = blend_edges(part, id, &solid, built, &groups, propagate, before)?;

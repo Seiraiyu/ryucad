@@ -1051,6 +1051,18 @@ const REVOLVE: [&str; 7] = [
     "targets",
 ];
 const BOOLEAN: [&str; 4] = ["op", "target", "targets", "tools"];
+const FILLET: [&str; 4] = ["groups", "propagate", "radius", "edges"];
+const CHAMFER: [&str; 9] = [
+    "groups",
+    "propagate",
+    "form",
+    "d",
+    "d1",
+    "d2",
+    "angle",
+    "face",
+    "edges",
+];
 
 /// A primitive's operation and targets: `current`'s, with what was
 /// given laid over them (`new` drops the targets).
@@ -1109,6 +1121,124 @@ fn boolean_from(current: Option<&Boolean>, given: &Given) -> Result<Boolean> {
     let b = Boolean::from_fields(&mut o)?;
     o.finish()?;
     Ok(b)
+}
+
+/// A fillet or chamfer (`ty`) from `current`'s fields (none for a new
+/// one) with what was given laid over them: its `groups` whole, or its
+/// one group's fields (`radius`, or `form`, `d`, `d1`, `d2`, `angle` and
+/// `face`; and `edges`), and `propagate`. Edges and faces are given as
+/// text and kept as a file holds them; a new form keeps only what it
+/// takes.
+fn blend_from(
+    ty: &str,
+    current: Option<&Feature>,
+    given: &Given,
+    part: &Id,
+    unit: Unit,
+    env: &Env,
+) -> Result<Feature> {
+    use crate::doc::blend::{Chamfer, Fillet};
+    let f = &given.fields;
+    let reference = |v: &Value, at: &str| -> Result<Value> {
+        match v {
+            Value::String(t) => Ok(Reference::parse(t, part)
+                .map_err(|e| e.with("pointer", at))?
+                .to_json()),
+            v => Ok(v.clone()),
+        }
+    };
+    let mut v = match current {
+        Some(Feature::Fillet(x)) => x.fields(),
+        Some(Feature::Chamfer(x)) => x.fields(),
+        _ if ty == "chamfer" => json!({"groups": [{"form": "equal"}]}),
+        _ => json!({"groups": [{}]}),
+    };
+    let sizes = [
+        ("radius", &f.radius),
+        ("d", &f.d),
+        ("d1", &f.d1),
+        ("d2", &f.d2),
+        ("angle", &f.angle),
+    ];
+    let one = sizes.iter().any(|(_, x)| x.is_some())
+        || f.edges.is_some()
+        || f.form.is_some()
+        || f.face.is_some();
+    if let Some(groups) = &f.groups {
+        if one {
+            return Err(Error::new(
+                Code::Usage,
+                format!("give a {ty}'s groups, or its one group's fields, not both"),
+            ));
+        }
+        let mut groups = groups.clone();
+        if let Value::Array(gs) = &mut groups {
+            for (i, g) in gs.iter_mut().enumerate() {
+                if let Some(Value::Array(es)) = g.get_mut("edges") {
+                    for (j, e) in es.iter_mut().enumerate() {
+                        *e = reference(e, &format!("/groups/{i}/edges/{j}"))?;
+                    }
+                }
+                if let Some(face) = g.get_mut("face") {
+                    *face = reference(face, &format!("/groups/{i}/face"))?;
+                }
+            }
+        }
+        v["groups"] = groups;
+    } else if one {
+        let gs = v["groups"].as_array_mut().expect("groups");
+        if gs.len() != 1 {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "this {ty} has {} groups: give them all, as groups",
+                    gs.len()
+                ),
+            )
+            .with("param", "groups"));
+        }
+        let g = gs[0].as_object_mut().expect("a group");
+        if let Some(form) = &f.form {
+            let takes: &[&str] = match form.as_str() {
+                "equal" => &["d", "edges"],
+                "distances" => &["d1", "d2", "face", "edges"],
+                "distance_angle" => &["d", "angle", "face", "edges"],
+                _ => &["edges"],
+            };
+            g.retain(|k, _| takes.contains(&k.as_str()));
+            g.insert("form".into(), json!(form));
+        }
+        for (k, x) in sizes {
+            if let Some(x) = x {
+                g.insert(k.into(), x.clone());
+            }
+        }
+        if let Some(face) = &f.face {
+            g.insert("face".into(), reference(&json!(face), "/groups/0/face")?);
+        }
+        if let Some(edges) = &f.edges {
+            let edges: Vec<Value> = edges
+                .iter()
+                .enumerate()
+                .map(|(j, e)| reference(&json!(e), &format!("/groups/0/edges/{j}")))
+                .collect::<Result<_>>()?;
+            g.insert("edges".into(), json!(edges));
+        }
+    }
+    match f.propagate {
+        Some(false) => v["propagate"] = json!(false),
+        Some(true) => {
+            v.as_object_mut().expect("an object").remove("propagate");
+        }
+        None => {}
+    }
+    let mut o = crate::doc::files::Obj::new(&v, "")?;
+    let out = match ty {
+        "fillet" => Feature::Fillet(Fillet::from_fields(&mut o, unit, env)?),
+        _ => Feature::Chamfer(Chamfer::from_fields(&mut o, unit, env)?),
+    };
+    o.finish()?;
+    Ok(out)
 }
 
 /// The solids a feature put at `at` in `order` could act on: founded
@@ -1472,6 +1602,11 @@ fn check_resolved(
             }
             _ => Ok(()),
         },
+        // Edges of one solid, a face where a face goes, no edge twice; what
+        // the kernel makes of them only rebuild can tell.
+        Feature::Fillet(_) | Feature::Chamfer(_) => {
+            rebuild::check_blend(&proposed(p, order, &[(id, f)]), id, f, results)
+        }
         // That the edge is straight; whether it lies in the sketch's plane
         // only rebuild can tell.
         Feature::Revolve(r) => match &r.axis {
@@ -1538,6 +1673,10 @@ fn feature_add(
         "boolean" => {
             given.only(ty, &BOOLEAN)?;
             Feature::Boolean(boolean_from(None, &given)?)
+        }
+        "fillet" | "chamfer" => {
+            given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
+            blend_from(ty, None, &given, &pid, unit, &env)?
         }
         _ => {
             let ty = PrimitiveType::parse(ty)?;
@@ -1624,8 +1763,9 @@ fn feature_edit(
             Feature::Boolean(boolean_from(Some(&b), &given)?)
         }
         f @ (Feature::Fillet(_) | Feature::Chamfer(_)) => {
-            given.only(f.type_name(), &[])?;
-            f
+            let ty = f.type_name();
+            given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
+            blend_from(ty, Some(&f), &given, &pid, unit, &p.env)?
         }
         f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
             let ty = f.type_name();
@@ -1658,8 +1798,15 @@ fn feature_edit(
         }
     }
     check_solids(&proposed(p, &list, &[(&fid, &f)]), &[&fid])?;
-    // References already there were checked when they were written.
-    if f.references() != old.references() {
+    // References already there were checked when they were written; a
+    // fillet or chamfer that now grows its edges, or stops, may reach an
+    // edge twice.
+    let propagates = |f: &Feature| match f {
+        Feature::Fillet(x) => x.propagate,
+        Feature::Chamfer(x) => x.propagate,
+        _ => false,
+    };
+    if f.references() != old.references() || propagates(&f) != propagates(&old) {
         check_references(session, &pid, &list, &fid, &f)?;
     }
     let before = crate::sketch::current(session, &pid)?;
@@ -3109,6 +3256,145 @@ pub(crate) mod tests {
         // A founder others act on can't go.
         let e = call(&mut s, "feature.delete", json!({"part": "p", "id": "a"})).unwrap_err();
         assert_eq!(e.code, Code::HasDependents);
+    }
+
+    #[test]
+    fn fillets_and_chamfers_through_the_protocol() {
+        use crate::sketch::tests::{edge_between, face_along, vertex_at, with_box};
+        let (dir, mut s, body) = with_box();
+        let add = |s: &mut Session, f: Value| {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(s, "feature.add", f)
+        };
+        let edit = |s: &mut Session, f: Value| {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(s, "feature.edit", f)
+        };
+        let edge = |a: [f64; 3], b: [f64; 3]| {
+            let (a, b) = (vertex_at(&body, a), vertex_at(&body, b));
+            format!("p/b/{}", edge_between(&body, &a, &b))
+        };
+        // The box's vertical edge at its far corner, and its top front edge.
+        let up = edge([0.02, 0.01, 0.0], [0.02, 0.01, 0.005]);
+        let front = edge([0.0, 0.0, 0.005], [0.02, 0.0, 0.005]);
+        let top = format!("p/b/{}", face_along(&body, [0.0, 0.0, 1.0]));
+        let r = add(
+            &mut s,
+            json!({"type": "fillet", "id": "f", "radius": "1 mm", "edges": [up]}),
+        )
+        .unwrap();
+        assert_eq!(
+            r["feature"]["groups"],
+            json!([{"radius": {"value": "1 mm", "m": 0.001}, "edges": [up]}])
+        );
+        // The file keeps the reference as {feature, name}, and no default.
+        let file: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("parts/p/features/f.json")).unwrap(),
+        )
+        .unwrap();
+        let name = up.rsplit('/').next().unwrap();
+        assert_eq!(
+            file["groups"][0]["edges"],
+            json!([{"feature": "b", "name": name}])
+        );
+        assert!(file.get("propagate").is_none());
+        assert_eq!(file["format"], 3);
+        // One group's fields edit it; propagate is written only when false.
+        let r = edit(&mut s, json!({"id": "f", "radius": 2, "propagate": false})).unwrap();
+        assert_eq!(r["feature"]["groups"][0]["radius"]["value"], "2 mm");
+        assert_eq!(r["feature"]["propagate"], false);
+        let r = edit(&mut s, json!({"id": "f", "propagate": true})).unwrap();
+        assert!(r["feature"].get("propagate").is_none());
+        // Several sizes are several groups, given whole.
+        let groups = json!([{"radius": "2 mm", "edges": [up]},
+                            {"radius": "0.5 mm", "edges": [front]}]);
+        let r = edit(&mut s, json!({"id": "f", "groups": groups})).unwrap();
+        assert_eq!(r["feature"]["groups"][1]["edges"], json!([front]));
+        let e = edit(&mut s, json!({"id": "f", "radius": 3})).unwrap_err();
+        assert_eq!(
+            (e.code, e.details["param"].as_str()),
+            (Code::InvalidParam, Some("groups"))
+        );
+        let e = edit(&mut s, json!({"id": "f", "radius": 3, "groups": groups})).unwrap_err();
+        assert_eq!(e.code, Code::Usage);
+        // A chamfer: equal unless it says otherwise; a new form keeps only
+        // what it takes.
+        // (The left back vertical edge, clear of the fillet: where a chamfer
+        // would meet it the kernel has no corner yet.)
+        let back = edge([0.0, 0.01, 0.0], [0.0, 0.01, 0.005]);
+        let r = add(
+            &mut s,
+            json!({"type": "chamfer", "id": "c", "d": "0.5 mm", "edges": [back]}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["groups"][0]["form"], "equal");
+        let r = edit(
+            &mut s,
+            json!({"id": "c", "form": "distance_angle", "angle": 30, "face": top}),
+        )
+        .unwrap();
+        let g = &r["feature"]["groups"][0];
+        assert_eq!(g["d"]["value"], "0.5 mm");
+        assert_eq!(g["angle"]["value"], "30 deg");
+        assert_eq!(g["face"], top);
+        let r = edit(&mut s, json!({"id": "c", "form": "equal", "d": 1})).unwrap();
+        assert!(r["feature"]["groups"][0].get("face").is_none());
+        call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        // What can't be blended now is refused before anything is written.
+        let e = add(
+            &mut s,
+            json!({"type": "fillet", "radius": 1, "edges": [top]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
+        // The fillet took the corner edge: naming it after says so.
+        let e = add(
+            &mut s,
+            json!({"type": "fillet", "radius": 1, "edges": [up]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ReferenceUnresolved, "{e}");
+        assert_eq!(e.details["removed_by"], "f");
+        let e = add(
+            &mut s,
+            json!({"type": "fillet", "after": "b",
+                   "groups": [{"radius": 1, "edges": [up]}, {"radius": 2, "edges": [up]}]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::EdgeListedTwice, "{e}");
+        add(
+            &mut s,
+            json!({"type": "box", "id": "o", "params": {"x": 1, "y": 1, "z": 1},
+                   "placement": {"origin": [30, 0, 0]}}),
+        )
+        .unwrap();
+        let other = {
+            let o = call(&mut s, "inspect", json!({"part": "p", "feature": "o"})).unwrap();
+            let o = &o["bodies"][0];
+            let (a, b) = (
+                vertex_at(o, [0.03, 0.0, 0.0]),
+                vertex_at(o, [0.03, 0.0, 0.001]),
+            );
+            format!("p/o/{}", edge_between(o, &a, &b))
+        };
+        let e = add(
+            &mut s,
+            json!({"type": "fillet", "radius": 0.1, "edges": [front, other]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::TargetsMixed, "{e}");
+        // Fields a fillet doesn't take, and a box's founder others round.
+        let e = add(
+            &mut s,
+            json!({"type": "fillet", "radius": 1, "d": 1, "edges": [front]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        let e = call(&mut s, "feature.delete", json!({"part": "p", "id": "b"})).unwrap_err();
+        assert_eq!(e.code, Code::HasDependents);
+        assert_eq!(e.details["features"], json!(["f", "c"]));
     }
 
     #[test]
