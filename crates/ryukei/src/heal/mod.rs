@@ -225,7 +225,7 @@ pub fn heal(
     let mut shape = shape.clone();
     let sewn = sew::sew(key, &mut shape, &mut names, options.tolerance_cap)?;
     build::uses(&shape, &names)?;
-    let unseamed = unseam::unseam(key, &mut shape, &mut names)?;
+    let unseamed = unseam::unseam(key, &mut shape, &mut names, options.tolerance_cap)?;
     let reversed = orient::loops(&mut shape, &names)?;
     let turned = orient::faces(&mut shape, &names)?;
     let tightened = tighten::tighten(&mut shape, &names, options.tolerance_cap);

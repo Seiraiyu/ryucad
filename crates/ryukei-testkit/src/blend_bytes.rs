@@ -21,7 +21,7 @@ pub struct BlendCase {
 
 /// The body from the first byte's choice and as many bytes as the second
 /// gives, or `None` when they give none.
-fn body(data: &[u8]) -> Option<(Body, &[u8])> {
+pub fn body(data: &[u8]) -> Option<(Body, &[u8])> {
     let (&kind, rest) = data.split_first()?;
     let (&len, rest) = rest.split_first()?;
     let n = usize::from(len).min(rest.len());

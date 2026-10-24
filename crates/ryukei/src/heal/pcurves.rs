@@ -109,10 +109,11 @@ fn one(s: &Shape, f: &Face, u: &Use) -> Result<Option<Found>, f64> {
     }
     // An edge may lie its tolerance off the surface. A fit's bound can't
     // come within less than that, and its spans halve only while it is
-    // under half their target: an edge with a tolerance of its own aims
-    // at twice it, and its tolerance grows to the bound.
-    let target = if tol > LINEAR_RESOLUTION {
-        2.0 * tol
+    // under half their target: an edge with a tolerance of its own, or
+    // measurably off the surface, aims at twice the larger of the two,
+    // and its tolerance grows to the bound.
+    let target = if tol > LINEAR_RESOLUTION || gap > LINEAR_RESOLUTION / 4.0 {
+        2.0 * tol.max(gap)
     } else {
         LINEAR_RESOLUTION
     };

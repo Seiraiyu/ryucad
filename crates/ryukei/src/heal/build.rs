@@ -260,7 +260,9 @@ impl Order {
 /// The shape as a layout, in the order of `order`: its geometry as it is,
 /// the pcurves found, tolerances at least the resolution (an edge's and
 /// its vertices' covering the faces they bound and their pcurves'
-/// bounds), each face's loops in the order of the least name on them,
+/// bounds, and an edge's its curve's ends off its vertices on top of
+/// that: a pcurve's image there is as far from the vertex as both
+/// together), each face's loops in the order of the least name on them,
 /// each loop starting at its least-named edge.
 fn lay_out(s: &Shape, names: &Names, order: &Order, pcurves: &Pcurves) -> Layout {
     let mut out = Layout {
@@ -319,6 +321,17 @@ fn lay_out(s: &Shape, names: &Names, order: &Order, pcurves: &Pcurves) -> Layout
             tolerance: vertex_tol[v].max(LINEAR_RESOLUTION),
         })
         .collect();
+    for (g, e) in s.edges.iter().enumerate() {
+        let c = &s.curves[e.curve];
+        let ends = c
+            .point(e.interval[0])
+            .distance(s.vertices[e.start].point)
+            .max(c.point(e.interval[1]).distance(s.vertices[e.end].point));
+        // What layout covers anyway: rounding at the joints.
+        if ends > 1e-12 {
+            edge_tol[g] = edge_tol[g].max(LINEAR_RESOLUTION) + ends * 1.0001 + 1e-12;
+        }
+    }
     out.edges = order
         .edges
         .iter()
