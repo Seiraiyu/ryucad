@@ -683,8 +683,21 @@ impl Branch<'_> {
 pub(crate) fn fit_pcurve(
     surface: &Surface,
     curve: &Curve,
-    [t0, t1]: [f64; 2],
+    range: [f64; 2],
 ) -> Result<(NurbsCurve2, f64), Failure> {
+    fit_pcurve_within(surface, curve, range, MAX_SAMPLES)
+}
+
+/// [`fit_pcurve`] with at most `max_samples` samples: for an edge from a
+/// file that may lie nowhere near where a fit could certify it, so the
+/// search stops long before [`fit_pcurve`]'s budget.
+pub(crate) fn fit_pcurve_within(
+    surface: &Surface,
+    curve: &Curve,
+    range: [f64; 2],
+    max_samples: usize,
+) -> Result<(NurbsCurve2, f64), Failure> {
+    let [t0, t1] = range;
     let at = |t: f64, near: Option<Point2>| -> Result<(f64, Point2, Vector2), Failure> {
         let e = curve.eval(t);
         let uv = uv_near(surface, e.point, near);
@@ -700,7 +713,7 @@ pub(crate) fn fit_pcurve(
         let duv = uv_velocity(surface, uv, e.d1).ok_or(Failure::Uncertain)?;
         Ok((t, uv - duv * dt, duv))
     };
-    fit_pcurve_with(surface, curve, [t0, t1], &at, LINEAR_RESOLUTION)
+    fit_pcurve_with(surface, curve, range, &at, LINEAR_RESOLUTION, max_samples)
 }
 
 /// [`fit_pcurve`] where the caller knows the parameters on `surface` of
@@ -723,7 +736,14 @@ pub(crate) fn fit_pcurve_by(
         let duv = uv_velocity(surface, p, curve.eval(t).d1).ok_or(Failure::Uncertain)?;
         Ok((t, p, duv))
     };
-    fit_pcurve_with(surface, curve, [t0, t1], &at, target.max(LINEAR_RESOLUTION))
+    fit_pcurve_with(
+        surface,
+        curve,
+        [t0, t1],
+        &at,
+        target.max(LINEAR_RESOLUTION),
+        MAX_SAMPLES,
+    )
 }
 
 /// A sample of a pcurve fit: the curve's parameter, the surface's
@@ -738,6 +758,7 @@ fn fit_pcurve_with(
     [t0, t1]: [f64; 2],
     at: &dyn Fn(f64, Option<Point2>) -> Result<PcurveSample, Failure>,
     target: f64,
+    max_samples: usize,
 ) -> Result<(NurbsCurve2, f64), Failure> {
     // Each sample is unwrapped next to the one before, so no step may
     // turn a periodic parameter by a quarter period or more: a longer
@@ -757,7 +778,7 @@ fn fit_pcurve_with(
     while let Some(t) = ahead.pop() {
         let last = *samples.last().expect("one sample");
         let s = at(t, Some(last.1))?;
-        if small(last.1, s.1) || samples.len() + ahead.len() > MAX_SAMPLES {
+        if small(last.1, s.1) || samples.len() + ahead.len() > max_samples {
             samples.push(s);
         } else {
             ahead.push(t);
@@ -791,7 +812,7 @@ fn fit_pcurve_with(
                 split.push(i);
             }
         }
-        if split.is_empty() || round == MAX_ROUNDS || samples.len() + split.len() > MAX_SAMPLES {
+        if split.is_empty() || round == MAX_ROUNDS || samples.len() + split.len() > max_samples {
             if worst > 10.0 * target {
                 return Err(Failure::Uncertain);
             }

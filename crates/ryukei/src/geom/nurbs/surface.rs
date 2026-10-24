@@ -151,6 +151,40 @@ impl NurbsSurface {
         }
     }
 
+    /// The parameter line at `t` in direction `dir`, as a curve along the
+    /// other direction with that direction's knots and parameter: at
+    /// `u = t` for [`Direction::U`], at `v = t` for [`Direction::V`].
+    /// Exact: each control point of the curve is a row of the surface's
+    /// combined by the basis at `t` in homogeneous coordinates, its weight
+    /// the combined weights. Fails like [`super::NurbsCurve::new`].
+    pub fn iso(&self, dir: Direction, t: f64) -> Result<super::NurbsCurve, Error> {
+        let [nu, nv] = self.counts();
+        let (k, across, along) = match dir {
+            Direction::U => (0, nu, nv),
+            Direction::V => (1, nv, nu),
+        };
+        let b = self.knots[k].basis(t);
+        let p = self.knots[k].degree();
+        let idx = |i: usize, j: usize| match dir {
+            Direction::U => i * nv + j,
+            Direction::V => j * nv + i,
+        };
+        let mut points = Vec::with_capacity(along);
+        let mut weights = Vec::with_capacity(along);
+        for j in 0..along {
+            let (mut a, mut w) = (Vector3::ZERO, 0.0);
+            for (r, &n) in b.values(0).iter().enumerate() {
+                let i = (b.span() - p + r) % across;
+                let wi = self.weights[idx(i, j)];
+                a += self.points[idx(i, j)] * (wi * n);
+                w += wi * n;
+            }
+            points.push(Point3::ORIGIN + a / w);
+            weights.push(w);
+        }
+        super::NurbsCurve::new(self.knots[1 - k].clone(), points, Some(weights))
+    }
+
     /// The derivatives against the domain normalized to `[0, 1]²`, so
     /// vanishing is judged in metres whatever the knots' units.
     fn unit_eval(&self, u: f64, v: f64) -> SurfaceEval {
@@ -392,6 +426,54 @@ mod tests {
         mults[n - 1] = 2;
         let knots: Vec<f64> = (0..n).map(|i| i as f64).collect();
         KnotVector::clamped(1, &knots, &mults).unwrap()
+    }
+
+    #[test]
+    fn iso_curves_are_the_surfaces_parameter_lines() {
+        use crate::geom::{Frame, Surface, Torus};
+        let frame = Frame::new(
+            Point3::new(1.0, -2.0, 0.5),
+            Vector3::new(0.2, 0.3, 1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap();
+        let torus = Surface::Torus(Torus::new(frame, 3.0, 1.0).unwrap());
+        let (n, _) = torus.to_nurbs(torus.domain()).unwrap();
+        for t in [0.0, 0.7, 2.0, 5.9, 7.1] {
+            let u = n.iso(Direction::U, t).unwrap();
+            let v = n.iso(Direction::V, t).unwrap();
+            assert_eq!(u.period(), n.periods().1);
+            for s in [0.0, 0.3, 1.9, 4.4] {
+                assert!(close(
+                    u.point(s).to_vector(),
+                    n.point(t, s).to_vector(),
+                    1e-14
+                ));
+                assert!(close(
+                    v.point(s).to_vector(),
+                    n.point(s, t).to_vector(),
+                    1e-14
+                ));
+            }
+        }
+        // A clamped direction keeps its ends.
+        let p = NurbsSurface::new(
+            [line(3), line(2)],
+            (0..6)
+                .map(|i| Point3::new(i as f64, (i * i) as f64, 1.0))
+                .collect(),
+            Some(vec![1.0, 2.0, 1.0, 0.5, 1.0, 3.0]),
+        )
+        .unwrap();
+        let c = p.iso(Direction::V, 0.25).unwrap();
+        assert_eq!(c.domain(), [0.0, 2.0]);
+        for s in [0.0, 0.6, 1.5, 2.0] {
+            assert!(close(
+                c.point(s).to_vector(),
+                p.point(s, 0.25).to_vector(),
+                1e-14
+            ));
+        }
     }
 
     #[test]

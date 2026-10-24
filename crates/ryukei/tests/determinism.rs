@@ -1325,6 +1325,56 @@ fn blend_booleans_section(golden: &mut Golden) {
     }
 }
 
+/// Bodies written as a file must describe them and healed again: the
+/// seamed shapes and the bodies healed from them, for the primitives and
+/// for seeded sweeps, booleans and blends.
+fn heal_section(golden: &mut Golden) {
+    use ryukei::blend::blend;
+    use ryukei::boolean::boolean;
+    use ryukei::heal::{HealOptions, heal, seamed};
+    use ryukei_testkit::blend_bytes::blend_case;
+    use ryukei_testkit::boolean_bytes::boolean_case;
+    use ryukei_testkit::sweep_bytes::sweep;
+    let mut s = golden.section("heal");
+    let t = Rigid::rotation(Vector3::new(1.0, 2.0, 0.5).normalize().unwrap(), 0.7);
+    let k = OpKey(1);
+    let mut bodies = vec![
+        primitive::block(k, 1.0, 2.0, 3.0, &t).unwrap().0,
+        primitive::cylinder(k, 1.0, 2.0, &t).unwrap().0,
+        primitive::cone(k, 1.0, 2.0, &t).unwrap().0,
+        primitive::sphere(k, 1.0, &t).unwrap().0,
+        primitive::torus(k, 2.0, 0.5, &t).unwrap().0,
+    ];
+    let bytes = |seed: u64| {
+        let mut g = Lcg::new(seed);
+        (0..96)
+            .map(|_| (g.next_u64() >> 56) as u8)
+            .collect::<Vec<u8>>()
+    };
+    for seed in 0..12 {
+        if let Some((b, _)) = sweep(&bytes(seed)) {
+            bodies.push(b);
+        }
+        if let Some(case) = boolean_case(&bytes(seed))
+            && let Ok((b, _)) = boolean(OpKey(9), case.op, &case.target, &case.tools())
+        {
+            bodies.push(b);
+        }
+        if let Some(case) = blend_case(&bytes(seed))
+            && let Ok((b, _)) = blend(OpKey(9), &case.body, &case.blends)
+        {
+            bodies.push(b);
+        }
+    }
+    for b in &bodies {
+        let shape = seamed(b, 1e-7).unwrap();
+        s.str(&format!("{shape:?}"));
+        let (h, journal, report) = heal(OpKey(3), &shape, &HealOptions::default()).unwrap();
+        s.str(&h.dump());
+        s.str(&format!("{journal:?} {report:?}"));
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -1352,5 +1402,6 @@ fn determinism() {
     blends_section(&mut golden);
     corners_section(&mut golden);
     blend_booleans_section(&mut golden);
+    heal_section(&mut golden);
     golden.finish();
 }

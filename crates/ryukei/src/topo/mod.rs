@@ -9,7 +9,7 @@
 //! corrupted ring could loop, so the checker never uses it.
 
 mod compact;
-mod dump;
+pub(crate) mod dump;
 mod id;
 mod store;
 mod transform;

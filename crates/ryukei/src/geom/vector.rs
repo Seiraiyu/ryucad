@@ -131,6 +131,17 @@ impl UnitVector3 {
     pub const Y: Self = Self(Vector3::new(0.0, 1.0, 0.0));
     pub const Z: Self = Self(Vector3::new(0.0, 0.0, 1.0));
 
+    /// `v` as it is, when it already has unit length as closely as the
+    /// kernel's own directions do (`|v · v - 1| <= 1e-12`: rotations
+    /// carry their rounding along), else `None`. A direction this kernel
+    /// made, written out and read back, keeps its bits this way, which
+    /// [`Vector3::normalize`] needn't: dividing by a length a few ulps off
+    /// 1 moves them.
+    pub fn exact(v: Vector3) -> Option<Self> {
+        let n = v.length_squared();
+        ((n - 1.0).abs() <= 1e-12).then_some(Self(v))
+    }
+
     /// For transforms that are known to preserve length (rotations).
     pub(crate) fn new_unchecked(v: Vector3) -> Self {
         debug_assert!((v.length() - 1.0).abs() < 1e-12, "not unit: {v:?}");
@@ -232,6 +243,16 @@ mod tests {
         assert_eq!(a.max(b), Vector3::new(1.0, 5.0, 3.0));
         assert_eq!(a.abs(), Vector3::new(1.0, 5.0, 3.0));
         assert_eq!(a.lerp(b, 0.5), Vector3::new(0.0, 0.0, 3.0));
+    }
+
+    #[test]
+    fn exact_keeps_unit_vectors_bit_for_bit() {
+        let u = Vector3::new(1.0, 2.0, 3.0).normalize().unwrap().get();
+        assert_eq!(UnitVector3::exact(u).unwrap().get(), u);
+        let v = Vector3::new(0.6, 0.8, 0.0);
+        assert_eq!(UnitVector3::exact(v).unwrap().get(), v);
+        assert!(UnitVector3::exact(Vector3::new(0.6, 0.8, 1e-5)).is_none());
+        assert!(UnitVector3::exact(Vector3::new(f64::NAN, 0.0, 1.0)).is_none());
     }
 
     #[test]

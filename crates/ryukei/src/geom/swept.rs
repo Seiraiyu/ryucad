@@ -176,6 +176,13 @@ impl Extrusion {
     pub fn new(curve: Curve, dir: Vector3) -> Result<Self, Error> {
         Vector3::try_new(dir.x, dir.y, dir.z)?;
         let d = dir.normalize().ok_or(Error::Degenerate)?;
+        Self::from_unit(curve, d)
+    }
+
+    /// The curve moved along a direction that is already unit, kept bit
+    /// for bit (see [`UnitVector3::exact`]). Fails like
+    /// [`Extrusion::new`].
+    pub fn from_unit(curve: Curve, d: UnitVector3) -> Result<Self, Error> {
         let (normal, origin) = curve_plane(&curve)?;
         let lean = d.dot(normal).abs();
         if lean <= math::sin(ANGULAR_RESOLUTION) {

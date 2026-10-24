@@ -69,6 +69,13 @@ impl Line {
         Ok(Self { origin, dir })
     }
 
+    /// A line along a direction that is already unit, kept bit for bit
+    /// (see [`UnitVector3::exact`]). Fails like [`Line::new`].
+    pub fn from_unit(origin: Point3, dir: UnitVector3) -> Result<Self, Error> {
+        let origin = Point3::try_new(origin.x, origin.y, origin.z)?;
+        Ok(Self { origin, dir })
+    }
+
     /// The line from `a` towards `b`; `b` is at `t = a.distance(b)`.
     pub fn through(a: Point3, b: Point3) -> Result<Self, Error> {
         Self::new(a, b - a)

@@ -37,7 +37,9 @@ jobs:
       # Boolean property tests and the booleans at other scales
       # self-intersection-check every result, pipe
       # property tests fit every branch, blends on pipes and ruled
-      # chamfers fit their rails, and corners mesh many blended boxes:
+      # chamfers fit their rails, corners mesh many blended boxes, and
+      # heal and STEP round trip tests write and heal hundreds of seeded
+      # bodies:
       # minutes in a debug build, so they are ignored there and run in
       # release.
       - run: cargo test -p ryukei --release --test boolean_props
@@ -49,6 +51,8 @@ jobs:
       - run: cargo test -p ryukei --release --test corners
       - run: cargo test -p ryukei --release --test corner_props
       - run: cargo test -p ryukei --release --test blend_booleans
+      - run: cargo test -p ryukei --release --test heal_props
+      - run: cargo test -p ryustep --release --test round_trip_props
       - if: failure()
         name: the viewport as drawn, if it no longer matches its snapshot
         uses: actions/upload-artifact@v4
@@ -69,9 +73,9 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: baseline release
-        run: cargo test -p ryukei -p ryusketch -p ryucad --release --test determinism
+        run: cargo test -p ryukei -p ryusketch -p ryustep -p ryucad --release --test determinism
       - name: x86-64-v3
-        run: cargo test -p ryukei -p ryusketch -p ryucad --release --test determinism
+        run: cargo test -p ryukei -p ryusketch -p ryustep -p ryucad --release --test determinism
         env:
           RUSTFLAGS: -C target-cpu=x86-64-v3
           CARGO_TARGET_DIR: target/v3
@@ -79,7 +83,7 @@ jobs:
         run: |
           if grep -qw avx512f /proc/cpuinfo; then
             RUSTFLAGS="-C target-cpu=x86-64-v4" CARGO_TARGET_DIR=target/v4 \
-              cargo test -p ryukei -p ryusketch -p ryucad --release --test determinism
+              cargo test -p ryukei -p ryusketch -p ryustep -p ryucad --release --test determinism
           else
             echo "::notice::runner has no AVX-512; x86-64-v4 skipped"
           fi

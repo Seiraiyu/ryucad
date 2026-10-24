@@ -122,7 +122,12 @@ fn ids(id: Id, params: &[Param]) -> Result<Vec<Id>, ImportError> {
 
 /// `VERTEX_POINT(name, vertex_geometry)`.
 fn vertex(id: Id, params: &[Param]) -> Result<Entity, ImportError> {
-    one(id, params).map(|point| Entity::Vertex { point })
+    let mut a = Args::new(id, params, 2)?;
+    let name = a.string()?;
+    Ok(Entity::Vertex {
+        name,
+        point: a.id()?,
+    })
 }
 
 /// `EDGE_CURVE(name, edge_start, edge_end, edge_geometry, same_sense)`.
@@ -208,7 +213,13 @@ mod tests {
              #7=VERTEX_LOOP('',#1);#8=POLY_LOOP('',(#9,#11,#12));#13=EDGE_LOOP('',());",
         );
         let get = |id| e.get(0, id).unwrap().clone();
-        assert_eq!(get(1), Entity::Vertex { point: 9 });
+        assert_eq!(
+            get(1),
+            Entity::Vertex {
+                name: "".into(),
+                point: 9
+            }
+        );
         assert_eq!(
             get(2),
             Entity::Edge(Edge {

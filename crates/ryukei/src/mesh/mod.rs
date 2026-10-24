@@ -27,7 +27,7 @@ mod domain;
 mod edge;
 mod params;
 mod refine;
-mod uv;
+pub(crate) mod uv;
 
 pub use check::{MeshCheckFault, check_mesh};
 pub use params::MeshParams;

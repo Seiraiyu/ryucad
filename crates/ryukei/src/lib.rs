@@ -9,8 +9,10 @@ pub mod check;
 mod error;
 pub mod euler;
 pub mod geom;
+pub mod heal;
 pub mod intersect;
 pub mod interval;
+pub(crate) mod layout;
 pub mod math;
 pub mod mesh;
 pub mod name;
@@ -23,7 +25,7 @@ pub mod tol;
 pub mod topo;
 
 pub use error::{
-    BlendError, BooleanError, Error, NurbsError, ProfileError, SweepError, TopologyError,
+    BlendError, BooleanError, Error, HealError, NurbsError, ProfileError, SweepError, TopologyError,
 };
 
 /// This kernel's version, for ryucad's `version` report and cache keys.
