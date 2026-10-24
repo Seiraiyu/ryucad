@@ -1200,3 +1200,45 @@ fn a_merge_conflict_is_settled_from_its_panel() {
     assert!(h.query_by_label("merge in progress").is_none());
     assert!(!h.state().title().contains("in progress"));
 }
+
+#[test]
+fn parts_show_their_release_state_and_a_compare_marks_proposals() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["pdm", "init"]);
+    p.ok(&["props", "set", "p", "number=100"]);
+    let p = p.committed();
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        loaded(a) && a.opened().ws.states.get("p").is_some()
+    });
+    h.step();
+    h.get_by_label("p (in work)");
+    p.ok(&["release", "propose", "p"]);
+    frames(&mut h, |a| {
+        a.opened().ws.states.badge("p").as_deref() == Some("in work, A proposed")
+    });
+    h.step();
+    h.get_by_label("p (in work, A proposed)");
+    // Compared with HEAD, the part is marked with what it proposes, and
+    // its changes listed with a feature's.
+    menu(&mut h, "View", "Compare with HEAD");
+    frames(&mut h, |a| {
+        compared(a)
+            && a.opened()
+                .ws
+                .compare
+                .as_ref()
+                .is_some_and(|c| c.pdm.contains_key("p"))
+    });
+    h.step();
+    h.get_by_label("p (in work, A proposed) [proposes A]");
+    h.get_by_label("base (box)").click();
+    frames(&mut h, |a| a.opened().view.chosen.is_some());
+    h.step();
+    h.get_by_label("Part p");
+    h.get_by_label("state: in work -> in work, A proposed");
+}
