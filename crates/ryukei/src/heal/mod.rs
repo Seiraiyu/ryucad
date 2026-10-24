@@ -30,24 +30,29 @@
 //! 7. **Gaps.** Every edge's and vertex's tolerance grows to cover how
 //!    far it lies from its curves and surfaces, up to the cap (see
 //!    `gaps`).
-//! 8. **Pcurves.** Every use of an edge gets its pcurve on the face:
+//! 8. **Collapsing.** Edges shorter than their tolerance go, their
+//!    vertices joined, and so do slivers narrower than their edges'
+//!    tolerances, their two edges joined (see `collapse`); the gaps are
+//!    measured again.
+//! 9. **Pcurves.** Every use of an edge gets its pcurve on the face:
 //!    [`crate::pcurve::exact`] first, else the file's, if it fits the
 //!    edge.
-//! 9. **Build.** The shape is laid out and built through Euler operators
-//!    ([`crate::layout`]), every connected piece a solid of its own, and
-//!    renamed with the names of step 1. Each shell's volume then says
-//!    which way it faces and which encloses which; shells facing the
-//!    wrong way are turned over, cavities go in the solids around them,
-//!    and the body is built again if anything changed (see `shells`).
-//!    Tolerances cover the gaps between curves' ends and their vertices,
-//!    and the bounds of approximated geometry.
-//!    [`crate::check::check`] must then hold.
+//! 10. **Build.** The shape is laid out and built through Euler operators
+//!     ([`crate::layout`]), every connected piece a solid of its own, and
+//!     renamed with the names of step 1. Each shell's volume then says
+//!     which way it faces and which encloses which; shells facing the
+//!     wrong way are turned over, cavities go in the solids around them,
+//!     and the body is built again if anything changed (see `shells`).
+//!     Tolerances cover the gaps between curves' ends and their vertices,
+//!     and the bounds of approximated geometry.
+//!     [`crate::check::check`] must then hold.
 //!
 //! Healing knows nothing of any file format: an importer of any kind
 //! builds the same [`Shape`]. [`seamed`] goes the other way, a body as a
 //! file must describe it.
 
 mod build;
+mod collapse;
 mod gaps;
 mod names;
 mod orient;
@@ -175,10 +180,15 @@ impl Default for HealOptions {
 #[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct HealReport {
-    /// Edges made by sewing two of the file's that were one.
+    /// Edges made by joining two of the file's that were one: sewn, or
+    /// either side of a collapsed sliver.
     pub sewn: Vec<Name>,
-    /// Vertices made by joining the file's at the ends of sewn edges.
+    /// Vertices made by joining the file's: at the ends of sewn edges, or
+    /// across collapsed ones.
     pub merged: Vec<Name>,
+    /// Edges shorter than their tolerance and slivers narrower than it,
+    /// removed.
+    pub collapsed: Vec<Name>,
     /// Seam edges removed.
     pub seams: Vec<Name>,
     /// Faces some of whose loops ran against the region they bound, and
@@ -220,6 +230,10 @@ pub fn heal(
     let turned = orient::faces(&mut shape, &names)?;
     let tightened = tighten::tighten(&mut shape, &names, options.tolerance_cap);
     gaps::tolerate(&mut shape, &names, options.tolerance_cap)?;
+    let collapsed = collapse::collapse(key, &mut shape, &mut names);
+    if !collapsed.removed.is_empty() {
+        gaps::tolerate(&mut shape, &names, options.tolerance_cap)?;
+    }
     let mut pcurves = pcurves::pcurves(&shape, &names)?;
     let first = build::assemble(key, &shape, &names, &pcurves, None)?;
     let index: BTreeMap<Name, usize> = names
@@ -252,6 +266,7 @@ pub fn heal(
     let turned: Vec<Name> = turned.into_iter().collect();
     let mut journal = sewn.journal;
     journal.append(unseamed.journal);
+    journal.append(collapsed.journal);
     journal.append(created);
     for &f in &reversed {
         journal.push(Event::Modified(f));
@@ -265,8 +280,11 @@ pub fn heal(
     report.reversed = reversed;
     report.turned = turned;
     report.tightened = tightened;
-    report.sewn = sewn.edges;
-    report.merged = sewn.vertices;
+    report.sewn = [sewn.edges, collapsed.edges].concat();
+    report.sewn.sort();
+    report.merged = [sewn.vertices, collapsed.vertices].concat();
+    report.merged.sort();
+    report.collapsed = collapsed.removed;
     report.seams = unseamed.seams;
     report.poles = unseamed.poles;
     report.joined = unseamed.joined;

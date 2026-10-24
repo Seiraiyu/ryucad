@@ -62,7 +62,7 @@ fn uses_of(s: &Shape) -> Vec<Vec<(usize, usize, usize)>> {
 
 /// The distance from `p` to edge `e`: to its curve where the foot lies in
 /// its interval, else to the nearer end. Never less than the true one.
-fn to_edge(s: &Shape, e: &Edge, p: Point3) -> f64 {
+pub(super) fn to_edge(s: &Shape, e: &Edge, p: Point3) -> f64 {
     let curve = &s.curves[e.curve];
     let [lo, hi] = e.interval;
     let foot = curve.project(p);
@@ -139,7 +139,7 @@ fn fit(s: &Shape, a: usize, b: usize, cap: f64) -> Option<(f64, bool)> {
     (gap <= cap && gap < chord(&sa).min(chord(&sb)) / 2.0).then_some((gap, same))
 }
 
-fn find(parent: &mut [usize], mut i: usize) -> usize {
+pub(super) fn find(parent: &mut [usize], mut i: usize) -> usize {
     while parent[i] != i {
         parent[i] = parent[parent[i]];
         i = parent[i];
@@ -335,7 +335,7 @@ pub(super) fn sew(key: OpKey, s: &mut Shape, names: &mut Names, cap: f64) -> Res
     Ok(out)
 }
 
-fn sorted(mut x: Vec<Name>) -> Vec<Name> {
+pub(super) fn sorted(mut x: Vec<Name>) -> Vec<Name> {
     x.sort();
     x
 }

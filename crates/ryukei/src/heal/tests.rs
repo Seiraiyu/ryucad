@@ -2,7 +2,7 @@ use super::*;
 use crate::geom::{Curve, Rigid, Surface, Vector3};
 use crate::name::{Event, Role};
 use crate::primitive;
-use crate::topo::{FaceId, ShellId};
+use crate::topo::{FaceId, Sense, ShellId};
 use crate::{HealError, check};
 use std::collections::BTreeMap;
 
@@ -1196,4 +1196,144 @@ fn edges_off_their_faces_are_tightened_onto_them() {
         assert!(edge.tolerance.get() <= 1e-7, "{}", edge.tolerance.get());
         assert!(journal.events().contains(&Event::Modified(names.edges[g])));
     }
+}
+
+#[test]
+fn an_edge_shorter_than_its_tolerance_is_collapsed() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &tilted())
+        .unwrap()
+        .0;
+    let mut s = plain(&b);
+    // Edge 0 cut 50 nm before its end, the short piece with a tolerance
+    // of 100 nm.
+    let e0 = s.edges[0];
+    let cut = e0.interval[1] - 5e-8;
+    let vn = s.vertices.len();
+    s.vertices.push(Vertex {
+        point: s.curves[e0.curve].point(cut),
+        tolerance: 0.0,
+        seam: false,
+    });
+    s.edges[0].interval = [e0.interval[0], cut];
+    s.edges[0].end = vn;
+    let short = s.edges.len();
+    s.edges.push(Edge {
+        interval: [cut, e0.interval[1]],
+        start: vn,
+        tolerance: 1e-7,
+        ..e0
+    });
+    for f in &mut s.faces {
+        for l in &mut f.loops {
+            let Loop::Edges(list) = l else { continue };
+            let Some(i) = list.iter().position(|u| u.edge == 0) else {
+                continue;
+            };
+            let u = list[i];
+            let piece = Use { edge: short, ..u };
+            match u.sense {
+                Sense::Forward => list.insert(i + 1, piece),
+                Sense::Reversed => list.insert(i, piece),
+            }
+        }
+    }
+    let names = names::names(OpKey(7), &s);
+    let (h, journal, report) = heal_ok(&s);
+    assert_eq!(h.counts(), b.counts());
+    assert_eq!(report.collapsed, [names.edges[short]]);
+    assert_eq!(report.merged.len(), 1);
+    assert!(
+        journal
+            .events()
+            .contains(&Event::Deleted(names.edges[short]))
+    );
+    let mut joined = vec![names.vertices[vn], names.vertices[e0.end]];
+    joined.sort();
+    assert!(journal.events().contains(&Event::Merged {
+        parents: joined,
+        child: report.merged[0],
+    }));
+}
+
+#[test]
+fn a_sliver_narrower_than_its_tolerance_is_collapsed() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let mut s = plain(&b);
+    // The faces either side of edge 0, and how the first runs it.
+    let mut by: Vec<(usize, Sense)> = Vec::new();
+    for (k, f) in s.faces.iter().enumerate() {
+        for l in &f.loops {
+            if let Loop::Edges(list) = l
+                && let Some(u) = list.iter().find(|u| u.edge == 0)
+            {
+                by.push((k, u.sense));
+            }
+        }
+    }
+    let [(f1, s1), (f2, _)] = by[..] else {
+        panic!()
+    };
+    // A copy of edge 0 50 nm out in the first face's plane, used by the
+    // second face, and a sliver on the first face's plane between them,
+    // with tolerances of 100 nm.
+    let p1 = &s.surfaces[s.faces[f1].surface];
+    assert!(matches!(p1, Surface::Plane(_)));
+    let Curve::Line(l) = s.curves[s.edges[0].curve] else {
+        panic!()
+    };
+    let n1 = p1.frame().unwrap().z().get();
+    let mut out = l.dir().get().cross(n1);
+    if (s.vertices[s.edges[0].start].point - crate::geom::Point3::new(0.5, 1.0, 1.5)).dot(out) < 0.0
+    {
+        out = -out;
+    }
+    s.curves
+        .push(s.curves[s.edges[0].curve].transformed(&Rigid::translation(out * 5e-8)));
+    let copy = s.edges.len();
+    s.edges.push(Edge {
+        curve: s.curves.len() - 1,
+        tolerance: 1e-7,
+        ..s.edges[0]
+    });
+    s.edges[0].tolerance = 1e-7;
+    for l in &mut s.faces[f2].loops {
+        if let Loop::Edges(list) = l {
+            for u in list.iter_mut().filter(|u| u.edge == 0) {
+                u.edge = copy;
+            }
+        }
+    }
+    let sliver = s.faces.len();
+    s.faces.push(Face {
+        loops: vec![Loop::Edges(vec![
+            Use {
+                edge: 0,
+                sense: s1.flipped(),
+                pcurve: None,
+            },
+            Use {
+                edge: copy,
+                sense: s1,
+                pcurve: None,
+            },
+        ])],
+        ..s.faces[f1].clone()
+    });
+    s.shells[0].faces.push(sliver);
+    let names = names::names(OpKey(7), &s);
+    let (h, journal, report) = heal_ok(&s);
+    assert_eq!(h.counts(), b.counts());
+    assert_eq!(report.collapsed, [names.faces[sliver]]);
+    assert!(
+        journal
+            .events()
+            .contains(&Event::Deleted(names.faces[sliver]))
+    );
+    let mut joined = vec![names.edges[0], names.edges[copy]];
+    joined.sort();
+    assert!(journal.events().iter().any(
+        |e| matches!(e, Event::Merged { parents, child } if *parents == joined && report.sewn.contains(child))
+    ));
 }
