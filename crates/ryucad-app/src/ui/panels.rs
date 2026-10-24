@@ -64,6 +64,20 @@ pub fn mark_text(m: &Mark, rev: &str) -> String {
     }
 }
 
+/// A part's line in the tree: its ID, its release state (`p (B
+/// modified, C proposed)`) once known, and in a compare the records it
+/// adds (`[proposes C]`).
+pub fn part_text(id: &str, badge: Option<&str>, marks: &[String]) -> String {
+    let mut s = id.to_owned();
+    if let Some(b) = badge {
+        s.push_str(&format!(" ({b})"));
+    }
+    if !marks.is_empty() {
+        s.push_str(&format!(" [{}]", marks.join(", ")));
+    }
+    s
+}
+
 /// The colour a compare gives a feature's line.
 fn mark_colour(m: &Mark) -> style::Rgb {
     match m.change {
@@ -198,11 +212,18 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             })
             .map(|i| i["message"].as_str().unwrap_or_default().to_owned())
             .collect();
+        let marks = ws
+            .compare
+            .as_ref()
+            .and_then(|c| c.pdm.get(&part.id))
+            .map_or(&[][..], |m| m.marks.as_slice());
+        let state = ws.states.get(&part.id);
+        let badge = state.map(crate::core::pdm::badge);
+        let text = part_text(&part.id, badge.as_deref(), marks);
         let title = match &part.error {
-            Some(_) => {
-                RichText::new(format!("{} (broken)", part.id)).color(ui.visuals().warn_fg_color)
-            }
-            None => RichText::new(&part.id),
+            Some(_) => RichText::new(format!("{text} (broken)")).color(ui.visuals().warn_fg_color),
+            None if !marks.is_empty() => RichText::new(text).color(style::color32(style::NEW)),
+            None => RichText::new(text),
         };
         let header = egui::CollapsingHeader::new(title)
             .id_salt(("part", &part.id))
@@ -232,8 +253,17 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                     }
                 }
             });
-        if let Some(e) = &part.error {
-            header.header_response.on_hover_text(message(e));
+        let why = state.and_then(crate::core::pdm::reason);
+        match (&part.error, why) {
+            (Some(e), _) => {
+                header.header_response.on_hover_text(message(e));
+            }
+            (None, Some(w)) => {
+                header
+                    .header_response
+                    .on_hover_text(format!("release state unknown: {w}"));
+            }
+            (None, None) => {}
         }
         if !damage.is_empty() {
             let badge = format!("{} doctor issue(s)", damage.len());
@@ -266,6 +296,13 @@ pub fn changes(ui: &mut egui::Ui, ws: &Workspace, view: &View) {
         return;
     };
     ui.heading(format!("Changes since {}", c.rev));
+    // The part's properties, records and state, beside its features'.
+    if let Some(m) = c.pdm.get(&key.0) {
+        ui.label(RichText::new(format!("Part {}", key.0)).strong());
+        for l in m.marks.iter().chain(&m.lines) {
+            ui.label(l);
+        }
+    }
     match c.features.get(key) {
         Some(m) if !m.lines.is_empty() => {
             for l in &m.lines {
@@ -408,13 +445,7 @@ pub fn merge(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     for c in m.conflicts() {
         let id = c["id"].as_str().unwrap_or_default();
         let concerns = &c["concerns"];
-        let what = concerns["feature"]
-            .as_str()
-            .or(concerns["parameter"].as_str())
-            .or(c["files"][0].as_str())
-            .unwrap_or(id);
-        let title = format!("{} in {what}", c["kind"].as_str().unwrap_or("conflict"));
-        egui::CollapsingHeader::new(title)
+        egui::CollapsingHeader::new(crate::core::merge::title(c))
             .id_salt(("conflict", id))
             .show(ui, |ui| {
                 ui.label(c["message"].as_str().unwrap_or_default());
@@ -427,8 +458,8 @@ pub fn merge(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                         ui.label(format!("{k}: {}", side(v)));
                     }
                 }
-                if c["kind"] == "merge_broke" {
-                    ui.weak("Fix it in the model; the status is read again as it changes.");
+                if let Some(h) = crate::core::merge::hint(c) {
+                    ui.weak(h);
                 }
                 ui.horizontal_wrapped(|ui| {
                     let choices = c["choices"].as_array().into_iter().flatten();
@@ -1075,6 +1106,16 @@ mod tests {
         assert_eq!(
             mark_text(&mark(Change::Same, true, None), "HEAD"),
             " [moved]"
+        );
+    }
+
+    #[test]
+    fn parts_say_their_release_state_and_proposals() {
+        assert_eq!(part_text("p", None, &[]), "p");
+        assert_eq!(part_text("p", Some("in work"), &[]), "p (in work)");
+        assert_eq!(
+            part_text("p", Some("A modified, B proposed"), &["proposes B".into()]),
+            "p (A modified, B proposed) [proposes B]"
         );
     }
 
