@@ -333,6 +333,10 @@ pub enum Request {
         note: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
+        /// Write nothing: answer the label it would take and every reason
+        /// it would be refused.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
     },
     /// Release records (or one part's), where each became official, their
     /// tags, and each part's state.
@@ -705,7 +709,7 @@ impl Request {
                 | Request::PdmInit { .. }
                 | Request::PdmConfigure { .. }
                 | Request::PropsSet { .. }
-                | Request::ReleasePropose { .. }
+                | Request::ReleasePropose { dry_run: false, .. }
                 | Request::ReleaseObsolete { .. }
                 | Request::ReleaseSync { .. }
                 | Request::SketchEdit { .. }
@@ -870,6 +874,13 @@ mod tests {
                 part: "p".into(),
                 note: Some("why".into()),
                 expected_revision: None,
+                dry_run: false,
+            },
+            Request::ReleasePropose {
+                part: "p".into(),
+                note: None,
+                expected_revision: None,
+                dry_run: true,
             },
             Request::ReleaseObsolete {
                 part: "p".into(),

@@ -640,6 +640,9 @@ enum ReleaseCmd {
         /// Why this revision, for the record.
         #[arg(long, value_name = "TEXT")]
         note: Option<String>,
+        /// Write nothing: say the label it would take and every reason it would be refused.
+        #[arg(long)]
+        dry_run: bool,
         #[command(flatten)]
         expect: Expect,
     },
@@ -1135,10 +1138,16 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Release(ReleaseCmd::Check { results }) => {
             Request::ReleaseCheck { results: *results }
         }
-        Command::Release(ReleaseCmd::Propose { part, note, expect }) => Request::ReleasePropose {
+        Command::Release(ReleaseCmd::Propose {
+            part,
+            note,
+            dry_run,
+            expect,
+        }) => Request::ReleasePropose {
             part: part.clone(),
             note: note.clone(),
             expected_revision: expect.revision.clone(),
+            dry_run: *dry_run,
         },
         Command::Release(ReleaseCmd::Obsolete {
             part,
