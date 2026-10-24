@@ -24,9 +24,14 @@ fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn window(p: &Project) -> Harness<'static, App> {
+    sized(p, 700.0)
+}
+
+/// A window `height` tall: the right panel's lower sections need room.
+fn sized(p: &Project, height: f32) -> Harness<'static, App> {
     let root = p.root.clone();
     Harness::builder()
-        .with_size(egui::vec2(1000.0, 700.0))
+        .with_size(egui::vec2(1000.0, height))
         .wgpu()
         .build_eframe(move |cc| App::open(&cc.egui_ctx, Some(&root), ryucad()))
 }
@@ -1241,4 +1246,39 @@ fn parts_show_their_release_state_and_a_compare_marks_proposals() {
     h.step();
     h.get_by_label("Part p");
     h.get_by_label("state: in work -> in work, A proposed");
+}
+
+#[test]
+fn a_property_is_edited_in_the_part_section_and_pdm_set_up() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = sized(&p, 1200.0);
+    frames(&mut h, |a| {
+        let o = a.opened();
+        loaded(a) && o.ws.props.is_some() && o.ws.pdm_config.is_some()
+    });
+    h.step();
+    h.get_by_label("Properties of p");
+    // No ID yet: PDM is set up from the window.
+    h.get_by_label("Set up PDM").click();
+    frames(&mut h, |a| a.opened().ws.pdm_ready());
+    h.step();
+    assert!(h.query_by_label("Set up PDM").is_none());
+    h.get_by_label("number *").click();
+    let field = h.get_by_label("number *");
+    field.set_text_value_accesskit("100-0042");
+    h.step();
+    h.get_by_label("Apply properties").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .props
+            .as_ref()
+            .is_some_and(|p| !p.saving && !p.dirty() && p.props[0].field.read == "100-0042")
+    });
+    let got = p.ok(&["props", "show", "p"]);
+    assert_eq!(got["properties"][0]["value"], "100-0042");
 }
