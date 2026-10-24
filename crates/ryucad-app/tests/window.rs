@@ -104,6 +104,16 @@ fn the_tree_lists_features_and_frames_a_chosen_one() {
         Some(("p".to_owned(), "boss".to_owned()))
     );
     assert_ne!(h.state().opened().view.nav.camera, before);
+    // Clicking it again keeps it, and its form (#771); Ctrl/Cmd+click
+    // lets it go.
+    h.get_by_label("boss (cylinder)").click();
+    h.run_steps(3);
+    assert!(h.state().opened().view.chosen.is_some());
+    h.get_by_label("boss (cylinder)")
+        .click_modifiers(egui::Modifiers::COMMAND);
+    frames(&mut h, |a| a.opened().view.chosen.is_none());
+    h.get_by_label("boss (cylinder)").click();
+    frames(&mut h, |a| a.opened().view.chosen.is_some());
     // A failed feature is marked.
     p.ok(&[
         "feature",
@@ -206,7 +216,15 @@ fn a_click_selects_and_agents_see_it() {
     });
     let mine = h.state().opened().ws.myself().unwrap().selection.clone();
     assert_eq!(p.ok(&["selection"])["selection"], serde_json::json!(mine));
-    // Escape clears it.
+    // Escape that closes a menu leaves it (#769)...
+    h.get_by_label("File").click();
+    h.run_steps(2);
+    assert!(egui::Popup::is_any_open(&h.ctx));
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(!egui::Popup::is_any_open(&h.ctx));
+    assert_eq!(h.state().opened().ws.myself().unwrap().selection, mine);
+    // ...and the next Escape clears it.
     h.key_press(egui::Key::Escape);
     frames(&mut h, |a| {
         a.opened()
