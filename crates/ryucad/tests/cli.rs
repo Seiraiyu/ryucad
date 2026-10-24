@@ -1922,3 +1922,38 @@ fn pdm_in_diff_and_through_textconv() {
     assert!(diff.contains("\n+released_by = "), "{diff}");
     assert!(diff.contains("\n+\n+results.b = "), "{diff}");
 }
+
+#[test]
+fn renders_a_committed_revision() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=10", "--param",
+        "z=10",
+    ]);
+    p.git(&["init", "-q", "-b", "main"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "start"]);
+    let head = git(&p.direct, &["rev-parse", "HEAD"]).trim().to_owned();
+    let before = p.ok(&["render", "--out", "head.png", "--size", "160x120"]);
+    p.ok(&["feature", "edit", "p", "b", "--param", "x=30"]);
+    let r = p.ok(&[
+        "render", "--out", "rev.png", "--size", "160x120", "--rev", "HEAD",
+    ]);
+    assert_eq!(r["commit"], head.as_str());
+    assert_eq!(r["camera"], before["camera"]);
+    assert_eq!(
+        pixels(&p.direct.join("rev.png")),
+        pixels(&p.direct.join("head.png"))
+    );
+    assert_eq!(
+        pixels(&p.direct.join("rev.png")),
+        pixels(&p.daemon.join("rev.png"))
+    );
+    p.fails(
+        &["render", "--out", "x.png", "--rev", "nowhere"],
+        "rev_not_found",
+        1,
+    );
+}

@@ -602,7 +602,7 @@ pub enum Request {
     },
     /// Draws a part (or the whole project) to a PNG, sent as bytes after
     /// the answer. The view is `camera`, a participant's camera, a standard
-    /// `view`, or iso framing the model.
+    /// `view`, or iso framing the model. `rev` renders a Git revision.
     #[serde(rename = "render")]
     Render {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -630,6 +630,10 @@ pub enum Request {
         /// Draw sketches (default true).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sketches: Option<bool>,
+        /// Render the project as this Git revision has it (the working
+        /// files by default).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
     /// Diagnoses the project folder: every problem, with a stable code.
     #[serde(rename = "doctor")]

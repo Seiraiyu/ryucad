@@ -309,6 +309,8 @@ enum Command {
         /// Leave out sketches.
         #[arg(long)]
         no_sketches: bool,
+        #[command(flatten)]
+        rev: RevArg,
     },
     /// What the merge (or cherry-pick, revert or rebase step) Git is in the
     /// middle of leaves to settle.
@@ -1282,6 +1284,7 @@ fn request(cmd: &Command) -> Option<Request> {
             labels,
             no_edges,
             no_sketches,
+            rev,
         } => Request::Render {
             part: part.clone(),
             camera: camera_arg(eye, target, up, fov, ortho),
@@ -1293,6 +1296,7 @@ fn request(cmd: &Command) -> Option<Request> {
             edges: Some(!no_edges),
             labels: Some(*labels),
             sketches: Some(!no_sketches),
+            rev: rev.rev.clone(),
         },
         Command::Highlight {
             entities,

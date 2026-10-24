@@ -114,6 +114,7 @@ pub fn answer_live(
             edges,
             labels,
             sketches,
+            rev,
         } => {
             let target = participant.as_deref().map(|p| (p, live.as_deref()));
             let shown = match live.as_deref() {
@@ -133,6 +134,7 @@ pub fn answer_live(
                 edges: edges.unwrap_or(true),
                 labels: labels.unwrap_or(false),
                 sketches: sketches.unwrap_or(true),
+                rev,
             };
             render(session, target, shown, ask)
         }
@@ -2158,6 +2160,19 @@ struct RenderAsk {
     edges: bool,
     labels: bool,
     sketches: bool,
+    rev: Option<String>,
+}
+
+/// The parts a render draws: the one asked for, or all of them.
+fn render_parts(session: &Session, part: Option<&str>) -> Result<Vec<Id>> {
+    Ok(match part {
+        Some(p) => {
+            let id = part_id(p)?;
+            session.project().part(&id)?;
+            vec![id]
+        }
+        None => session.project().parts.keys().cloned().collect(),
+    })
 }
 
 /// Renders the model. `target` names a participant whose camera to use
@@ -2171,14 +2186,8 @@ fn render(
 ) -> Result<Answer> {
     use crate::render::{self as r, Geometry, Label, Line, Options, Triangle};
     r::check_size(ask.width, ask.height)?;
-    let parts: Vec<Id> = match &ask.part {
-        Some(p) => {
-            let id = part_id(p)?;
-            session.project().part(&id)?;
-            vec![id]
-        }
-        None => session.project().parts.keys().cloned().collect(),
-    };
+    let (commit, session) = session.at(ask.rev.as_deref())?;
+    let parts = render_parts(session, ask.part.as_deref())?;
     // What to colour, and how: every participant's highlights in their
     // styles, then the request's own as notes.
     let mut marks: BTreeMap<String, (r::Rgb, Option<String>)> = BTreeMap::new();
@@ -2310,8 +2319,11 @@ fn render(
         triad: true,
     };
     let img = r::render(&g, &camera, ask.width, ask.height, options)?;
-    let result =
+    let mut result =
         json!({"part": ask.part, "width": ask.width, "height": ask.height, "camera": camera});
+    if let Some(c) = commit {
+        result["commit"] = json!(c);
+    }
     Ok(Answer::bytes(result, "image/png", img.png()))
 }
 
