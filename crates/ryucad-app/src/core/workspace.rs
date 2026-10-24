@@ -8,6 +8,7 @@ use crate::core::link::{Event, Link, Wake};
 use crate::core::merge::Merge;
 use crate::core::model::{BodyKey, Model, Part};
 use crate::core::params::Params;
+use crate::core::pdm::States;
 use crate::core::people::{People, Person};
 use crate::core::settings::Settings;
 use ryucad::client::Daemon;
@@ -54,6 +55,8 @@ enum Pending {
     /// The model's solids, read for the faces a feature made, at this
     /// part revision.
     Made(BodyKey, String),
+    /// Every part's release state.
+    States,
     /// The merge Git is in, if any.
     Merge,
     Resolve,
@@ -170,6 +173,8 @@ pub struct Workspace {
     /// The merge Git is in the middle of, while it is in one: what is left
     /// to settle.
     pub merge: Option<Merge>,
+    /// Every part's release state (ryupdm), for the tree's badges.
+    pub states: States,
     pub settings: Settings,
     /// The last doctor report, once asked for.
     pub doctor: Option<Value>,
@@ -227,6 +232,7 @@ impl Workspace {
             compare_waiting: false,
             compare_again: false,
             merge: None,
+            states: States::default(),
             settings: Settings::default(),
             doctor: None,
             raised: false,
@@ -259,6 +265,7 @@ impl Workspace {
         self.send(log, Pending::Activity);
         self.load_settings();
         self.send(Request::MergeStatus {}, Pending::Merge);
+        self.send(Request::ReleaseList { part: None }, Pending::States);
     }
 
     fn load_settings(&mut self) {
@@ -852,6 +859,7 @@ impl Workspace {
                     self.ask_diff();
                 }
             }
+            (Pending::States, Ok(a)) => self.states.reset(&a.result),
             (Pending::Merge, Ok(a)) => {
                 // A failure read again after keeps saying why.
                 let failed = self.merge.as_mut().and_then(|m| m.failed.take());
@@ -1113,6 +1121,7 @@ impl Workspace {
                     _ => None,
                 };
             }
+            "pdm.changed" => self.states.changed(params),
             "activity.appended" => self.activity.appended(params),
             "app.open" => self.raised = true,
             "participant.changed" => {

@@ -9,6 +9,7 @@ pub mod merge;
 pub mod model;
 pub mod nav;
 pub mod params;
+pub mod pdm;
 pub mod people;
 pub mod pick;
 pub mod recent;
