@@ -1,5 +1,6 @@
 //! `ryucad-app [DIR]`: the desktop app, on the project in `DIR` or on its
-//! start window. `--version` prints the build; `--smoke [DIR]` loads the
+//! start window. `--version` (or `-V`) prints the build in the CLI's
+//! envelope; `--smoke [DIR]` loads the
 //! project and draws one frame offscreen, for release checks.
 
 // A release build on Windows opens no console window.
@@ -13,8 +14,13 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--version") {
-        let v = serde_json::json!(ryucad::proto::VersionInfo::current());
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        // The CLI's envelope, as `ryucad version` prints it.
+        let v = serde_json::json!({
+            "ok": true,
+            "result": ryucad::proto::VersionInfo::current(),
+            "warnings": [],
+        });
         println!("{v}");
         return ExitCode::SUCCESS;
     }
