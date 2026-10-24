@@ -292,11 +292,13 @@ pub fn placement(p: &Placement) -> Result<Rigid> {
 pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
     match f {
         Feature::Primitive(p) => build_primitive(part, id, p),
-        Feature::Sketch(_) | Feature::Boolean(_) => Err(Error::new(
-            Code::Internal,
-            format!("{} {id} makes no body of its own", f.type_name()),
-        )
-        .with("feature", id)),
+        Feature::Sketch(_) | Feature::Boolean(_) | Feature::Fillet(_) | Feature::Chamfer(_) => {
+            Err(Error::new(
+                Code::Internal,
+                format!("{} {id} makes no body of its own", f.type_name()),
+            )
+            .with("feature", id))
+        }
         Feature::Extrude(_) | Feature::Revolve(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} is built from its sketch", f.type_name()),
@@ -969,6 +971,221 @@ fn build_boolean(
     Ok(Made::new(vec![(b.target.clone(), Arc::new(built))]))
 }
 
+/// One group of a fillet or chamfer: what it does to each edge, and the
+/// edges it lists, each with its role in the feature.
+struct Group<'a> {
+    kind: ryukei::blend::BlendKind,
+    edges: Vec<(String, &'a Reference)>,
+}
+
+/// A fillet's or chamfer's groups, each chamfer face resolved in `solid`
+/// as `id` sees it.
+fn groups<'a>(
+    part: &Part,
+    id: &Id,
+    f: &'a Feature,
+    before: &dyn Results,
+) -> Result<Vec<Group<'a>>> {
+    use crate::doc::blend::ChamferForm;
+    use ryukei::blend::{BlendKind, Chamfer};
+    let roles = |i: usize, edges: &'a [Reference]| {
+        edges
+            .iter()
+            .enumerate()
+            .map(|(j, e)| (format!("groups.{i}.edges.{j}"), e))
+            .collect::<Vec<_>>()
+    };
+    match f {
+        Feature::Fillet(fl) => Ok(fl
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(i, g)| Group {
+                kind: BlendKind::Fillet {
+                    radius: g.radius.meters(),
+                },
+                edges: roles(i, &g.edges),
+            })
+            .collect()),
+        Feature::Chamfer(c) => c
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(i, g)| {
+                let face = |r: &Reference| -> Result<Name> {
+                    let role = format!("groups.{i}.face");
+                    let found =
+                        crate::reference::resolve(part, part.order(), id, &role, r, before)?;
+                    match found.1 {
+                        EntityId::Face(_) => Ok(r.name),
+                        e => Err(crate::reference::wrong_kind(
+                            part,
+                            id,
+                            &role,
+                            r,
+                            crate::reference::kind(e),
+                            "a face",
+                        )),
+                    }
+                };
+                let chamfer = match &g.form {
+                    ChamferForm::Equal { d } => Chamfer::Equal {
+                        distance: d.meters(),
+                    },
+                    ChamferForm::Distances { d1, d2, face: on } => Chamfer::Distances {
+                        first: d1.meters(),
+                        second: d2.meters(),
+                        first_face: face(on)?,
+                    },
+                    ChamferForm::DistanceAngle { d, angle, face: on } => Chamfer::DistanceAngle {
+                        distance: d.meters(),
+                        angle: angle.radians(),
+                        face: face(on)?,
+                    },
+                };
+                Ok(Group {
+                    kind: BlendKind::Chamfer(chamfer),
+                    edges: roles(i, &g.edges),
+                })
+            })
+            .collect(),
+        _ => unreachable!("a fillet or a chamfer"),
+    }
+}
+
+/// The edges a fillet or chamfer (feature `id`) blends in `solid`, as
+/// its view of it holds them: each listed edge resolved and, when it
+/// propagates, grown to its tangent chain. An edge in two groups is
+/// `edge_listed_twice`; one reached twice in one group is blended once.
+fn blend_edges(
+    part: &Part,
+    id: &Id,
+    solid: &Id,
+    built: &Built,
+    groups: &[Group],
+    propagate: bool,
+    before: &dyn Results,
+) -> Result<Vec<ryukei::blend::EdgeBlend>> {
+    use ryukei::topo::EdgeId;
+    let body = &built.body;
+    // Each edge blended so far: its group and the role that reached it.
+    let mut seen: BTreeMap<EdgeId, (usize, &str)> = BTreeMap::new();
+    let mut out = Vec::new();
+    for (i, g) in groups.iter().enumerate() {
+        for (role, r) in &g.edges {
+            let found = crate::reference::resolve(part, part.order(), id, role, r, before)?;
+            let EntityId::Edge(e) = found.1 else {
+                return Err(crate::reference::wrong_kind(
+                    part,
+                    id,
+                    role,
+                    r,
+                    crate::reference::kind(found.1),
+                    "an edge",
+                ));
+            };
+            let chain = if propagate {
+                ryukei::blend::tangent_chain(body, e).map_err(|k| {
+                    Error::new(Code::Internal, format!("{id}: {k}")).with("feature", id)
+                })?
+            } else {
+                vec![e]
+            };
+            for x in chain {
+                match seen.get(&x) {
+                    Some((j, _)) if *j == i => {}
+                    Some((j, other)) => {
+                        let name = body.edge(x).expect("a live edge").name;
+                        return Err(Error::new(
+                            Code::EdgeListedTwice,
+                            format!(
+                                "{id}: edge {}/{solid}/{name} is in group {j} (by its {other}) and group {i} (by its {role})",
+                                part.id
+                            ),
+                        )
+                        .with("feature", id)
+                        .with("edge", format!("{}/{solid}/{name}", part.id))
+                        .with("groups", [*j, i])
+                        .with("roles", [*other, role.as_str()]));
+                    }
+                    None => {
+                        seen.insert(x, (i, role.as_str()));
+                        out.push(ryukei::blend::EdgeBlend {
+                            edge: body.edge(x).expect("a live edge").name,
+                            kind: g.kind,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// A fillet or chamfer: its solid as it sees it, with every edge its
+/// groups name, grown along tangent chains, blended in one kernel call.
+fn build_blend(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    f: &Feature,
+    before: &dyn Results,
+) -> Result<Made> {
+    let ty = f.type_name();
+    let (solid, propagate) = match (f.targets().as_slice(), f) {
+        ([one], Feature::Fillet(x)) => ((*one).clone(), x.propagate),
+        ([one], Feature::Chamfer(x)) => ((*one).clone(), x.propagate),
+        (many, _) => {
+            return Err(Error::new(
+                Code::TargetsMixed,
+                format!(
+                    "{ty} {id}: its edges belong to {}; a {ty} acts on one solid, so split it in two",
+                    many.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                ),
+            )
+            .with("feature", id)
+            .with("solids", many));
+        }
+    };
+    let built = target(part, solids, id, &solid, before)?;
+    let groups = groups(part, id, f, before)?;
+    let edges = blend_edges(part, id, &solid, built, &groups, propagate, before)?;
+    let made = ryukei::blend::blend(op_key(&part.id, id), &built.body, &edges).map_err(|e| {
+        Error::new(Code::BlendFailed, format!("{ty} {id}: {e}"))
+            .with("feature", id)
+            .with("solid", &solid)
+            .with("kernel", format!("{e:?}"))
+    })?;
+    // A blend face says which edges (and corner vertices) it took the
+    // place of; what else is new is the feature's; the rest keeps its
+    // origin.
+    let mut replaces: BTreeMap<Name, Vec<String>> = BTreeMap::new();
+    for e in made.1.events() {
+        if let Event::Replaced { old, new } = e {
+            for n in new {
+                replaces.entry(*n).or_default().push(old.to_string());
+            }
+        }
+    }
+    let origins = names(&made.0)
+        .into_iter()
+        .map(|n| {
+            let key = n.to_string();
+            let o = match (replaces.get_mut(&n), built.origins.get(&key)) {
+                (Some(old), _) => {
+                    old.sort();
+                    json!({"feature": id, "replaces": old})
+                }
+                (None, Some(o)) => o.clone(),
+                (None, None) => json!({"feature": id}),
+            };
+            (key, o)
+        })
+        .collect();
+    let built = finish(id, ty, made, origins)?;
+    Ok(Made::new(vec![(solid, Arc::new(built))]))
+}
+
 /// Checks a body the kernel built and hashes it. A broken body is never
 /// reported as a success, in release builds too.
 fn finish(
@@ -1031,6 +1248,9 @@ fn rebuild_with(
             (r, None)
         }
         Feature::Boolean(b) => (build_boolean(part, solids, id, b, before).map(solid), None),
+        Feature::Fillet(_) | Feature::Chamfer(_) => {
+            (build_blend(part, solids, id, f, before).map(solid), None)
+        }
         f => {
             let (r, own) = build_body(part, solids, id, f, before, tool);
             (r.map(solid), own)
@@ -1771,6 +1991,262 @@ mod tests {
                 (o, w) => panic!("{z} {both} {reverse}: {o:?} != {w:?}"),
             }
         }
+    }
+
+    /// The volume a body encloses, meshed to `chord`.
+    fn volume_to(b: &Body, chord: f64) -> f64 {
+        let m = ryukei::mesh::tessellate(b, &ryukei::mesh::MeshParams::new(chord, 0.1)).unwrap();
+        assert!(m.faults.is_empty(), "{:?}", m.faults);
+        ryukei_testkit::mesh::volume_and_area(&m).0
+    }
+
+    /// The name of the edge of `b` whose middle is at `p` (mm).
+    pub(crate) fn edge_at(b: &Body, p: [f64; 3]) -> Name {
+        let p = Point3::new(p[0] * 1e-3, p[1] * 1e-3, p[2] * 1e-3);
+        let e = b
+            .edges()
+            .find(|e| {
+                let ed = b.edge(*e).unwrap();
+                let c = b.curve(ed.curve).unwrap();
+                let mid = c.point((ed.interval[0] + ed.interval[1]) / 2.0);
+                (mid - p).length() < 1e-9
+            })
+            .unwrap_or_else(|| panic!("no edge at {p:?}"));
+        b.edge(e).unwrap().name
+    }
+
+    /// The name of the planar face of `b` at `z` (mm) on top.
+    fn face_at_z(b: &Body, z: f64) -> Name {
+        let f = b
+            .faces()
+            .find(|f| {
+                let bx = ryukei::intersect::face_box(b, *f);
+                (bx.min().z - z * 1e-3).abs() < 1e-9 && (bx.max().z - z * 1e-3).abs() < 1e-9
+            })
+            .unwrap();
+        b.face(f).unwrap().name
+    }
+
+    /// A fillet or chamfer feature from its fields, in millimetres.
+    fn blend(v: Value) -> Feature {
+        let mut v = v;
+        v["format"] = json!(3);
+        v["kind"] = json!("ryucad.feature");
+        Feature::from_json(&v, Unit::Mm, &crate::expr::Env::empty()).unwrap()
+    }
+
+    fn edge(solid: &str, n: Name) -> Value {
+        json!({"feature": solid, "name": n.to_string()})
+    }
+
+    #[test]
+    fn fillets_and_chamfers_round_and_bevel() {
+        use crate::doc::solid::Operation::*;
+        use crate::solid::tests::{boxed, part};
+        let a = rebuild_part(&part(vec![("a", boxed("0", New, &[]))]));
+        let body = &state(&a, "a", "a").body;
+        // The vertical edge at x = y = 1 mm, and the bottom edge along x
+        // at y = 0.
+        let (up, along) = (
+            edge_at(body, [1.0, 1.0, 0.5]),
+            edge_at(body, [0.5, 0.0, 0.0]),
+        );
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            (
+                "f",
+                blend(json!({"type": "fillet",
+                             "groups": [{"radius": "0.2 mm", "edges": [edge("a", up)]}]})),
+            ),
+            (
+                "c",
+                blend(json!({"type": "chamfer",
+                             "groups": [{"form": "equal", "d": "0.1 mm",
+                                         "edges": [edge("a", along)]}]})),
+            ),
+        ]);
+        let r = rebuild_part(&p);
+        assert_eq!(r.failed(), 0, "{:?}", r.features);
+        // A quarter disc's corner off a 1 mm edge; a 0.1 mm triangle off
+        // another.
+        let round = (1.0 - core::f64::consts::FRAC_PI_4) * 0.04e-6 * 1e-3;
+        let bevel = 0.5 * 0.01e-6 * 1e-3;
+        let got = volume_to(&state(&r, "f", "a").body, 1e-7);
+        assert!((got - (1e-9 - round)).abs() < 1e-13, "{got}");
+        let got = volume_to(&state(&r, "c", "a").body, 1e-7);
+        assert!((got - (1e-9 - round - bevel)).abs() < 1e-13, "{got}");
+        // Both are a's chain; the model shows the chamfer's result.
+        let solids = crate::solid::Solids::of(&p);
+        assert_eq!(solids.chain(&id("a")).unwrap(), [id("a"), id("f"), id("c")]);
+        // The fillet's face says which edge it took the place of; the
+        // box's faces keep where they came from.
+        let o = &state(&r, "f", "a").origins;
+        let made: Vec<&Value> = o.values().filter(|o| o["feature"] == "f").collect();
+        // (and the two vertices at its ends).
+        let face = made.iter().find(|o| o.get("replaces").is_some()).unwrap();
+        let replaces = face["replaces"].as_array().unwrap();
+        assert!(replaces.contains(&json!(up.to_string())), "{face}");
+        assert_eq!(replaces.len(), 3, "{face}");
+        assert!(o.values().any(|o| *o == json!({"feature": "a"})));
+        // The filleted edge is gone; the next feature can't name it.
+        assert!(state(&r, "f", "a").body.by_name(up).is_none());
+    }
+
+    #[test]
+    fn edges_grow_along_their_tangent_chains() {
+        use crate::doc::solid::Operation::*;
+        use crate::solid::tests::{boxed, part};
+        let a = rebuild_part(&part(vec![("a", boxed("0", New, &[]))]));
+        let body = &state(&a, "a", "a").body;
+        let ups: Vec<Value> = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]
+            .iter()
+            .map(|[x, y]| edge("a", edge_at(body, [*x, *y, 0.5])))
+            .collect();
+        let rounded = blend(json!({"type": "fillet",
+                                   "groups": [{"radius": "0.2 mm", "edges": ups}]}));
+        let first = rebuild_part(&part(vec![
+            ("a", boxed("0", New, &[])),
+            ("r", rounded.clone()),
+        ]));
+        // The top rim's straight edge along x at y = 0, now tangent to the
+        // rounded corners' arcs.
+        let rim = edge_at(&state(&first, "r", "a").body, [0.5, 0.0, 1.0]);
+        let top = |propagate: bool| {
+            let mut v = json!({"type": "chamfer",
+                               "groups": [{"form": "equal", "d": "0.05 mm",
+                                           "edges": [edge("a", rim)]}]});
+            if !propagate {
+                v["propagate"] = json!(false);
+            }
+            part(vec![
+                ("a", boxed("0", New, &[])),
+                ("r", rounded.clone()),
+                ("t", blend(v)),
+            ])
+        };
+        let r = rebuild_part(&top(true));
+        assert_eq!(r.failed(), 0, "{:?}", r.features);
+        // All eight edges of the rim, arcs included, are bevelled.
+        let o = &state(&r, "t", "a").origins;
+        let replaced: BTreeSet<String> = o
+            .values()
+            .filter(|o| o["feature"] == "t")
+            .filter_map(|o| o.get("replaces"))
+            .map(Value::to_string)
+            .collect();
+        assert_eq!(replaced.len(), 8, "{replaced:?}");
+        // Without propagation the kernel refuses to stop at a tangent edge.
+        let r = rebuild_part(&top(false));
+        let (_, e) = &r.features[2];
+        let e = e.as_ref().unwrap_err();
+        assert_eq!(e.code, Code::BlendFailed, "{e}");
+        assert!(
+            e.details["kernel"]
+                .as_str()
+                .unwrap()
+                .contains("OpenTangentChain")
+        );
+    }
+
+    #[test]
+    fn blends_that_wont_do() {
+        use crate::doc::solid::Operation::*;
+        use crate::solid::tests::{boxed, part};
+        let a = rebuild_part(&part(vec![
+            ("a", boxed("0", New, &[])),
+            ("b", boxed("5", New, &[])),
+        ]));
+        let (ab, bb) = (&state(&a, "a", "a").body, &state(&a, "b", "b").body);
+        let up = edge_at(ab, [1.0, 1.0, 0.5]);
+        let other = edge_at(bb, [6.0, 1.0, 0.5]);
+        let top = face_at_z(ab, 1.0);
+        let fillet = |groups: Value| blend(json!({"type": "fillet", "groups": groups}));
+        // Each after a and b, alone: a failure fails the rest of its
+        // solid's chain.
+        let err = |f: Feature| {
+            let p = part(vec![
+                ("a", boxed("0", New, &[])),
+                ("b", boxed("5", New, &[])),
+                ("j", boxed("5.5", Join, &["b"])),
+                ("x", f),
+            ]);
+            let r = rebuild_part(&p);
+            r.features[3].1.as_ref().unwrap_err().clone()
+        };
+        let e = err(fillet(
+            json!([{"radius": 0.1, "edges": [edge("a", up), edge("b", other)]}]),
+        ));
+        assert_eq!(e.code, Code::TargetsMixed, "{e}");
+        assert_eq!(e.details["solids"], json!(["a", "b"]));
+        let e = err(fillet(json!([{"radius": 0.1, "edges": [edge("a", up)]},
+                                  {"radius": 0.2, "edges": [edge("a", up)]}])));
+        assert_eq!(e.code, Code::EdgeListedTwice, "{e}");
+        assert_eq!(e.details["groups"], json!([0, 1]));
+        assert_eq!(e.details["edge"], format!("p/a/{up}"));
+        let e = err(fillet(json!([{"radius": 0.1, "edges": [edge("a", top)]}])));
+        assert_eq!(
+            (e.code, e.details["role"].as_str()),
+            (Code::ReferenceWrongKind, Some("groups.0.edges.0"))
+        );
+        let e = err(fillet(json!([{"radius": 2, "edges": [edge("a", up)]}])));
+        assert_eq!(e.code, Code::BlendFailed, "{e}");
+        assert!(
+            e.details["kernel"]
+                .as_str()
+                .unwrap()
+                .starts_with("InvalidBlend(")
+        );
+        let e = err(fillet(
+            json!([{"radius": 0.1, "edges": [edge("j", other)]}]),
+        ));
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
+        assert_eq!(e.details["solids"], json!(["b"]));
+    }
+
+    #[test]
+    fn chamfers_by_distances_and_by_angle() {
+        use crate::doc::solid::Operation::*;
+        use crate::solid::tests::{boxed, part};
+        let a = rebuild_part(&part(vec![("a", boxed("0", New, &[]))]));
+        let body = &state(&a, "a", "a").body;
+        // The top edge along x at y = 0, between the top and the front.
+        let rim = edge("a", edge_at(body, [0.5, 0.0, 1.0]));
+        let top = edge("a", face_at_z(body, 1.0));
+        for (form, area) in [
+            (
+                json!({"form": "distances", "d1": "0.1 mm", "d2": "0.3 mm", "face": top}),
+                0.5 * 0.1 * 0.3,
+            ),
+            // 0.2 mm along the top at 45 deg to it: 0.2 mm down the front.
+            (
+                json!({"form": "distance_angle", "d": "0.2 mm", "angle": 45, "face": top}),
+                0.5 * 0.2 * 0.2,
+            ),
+        ] {
+            let mut g = form.clone();
+            g["edges"] = json!([rim]);
+            let p = part(vec![
+                ("a", boxed("0", New, &[])),
+                ("c", blend(json!({"type": "chamfer", "groups": [g]}))),
+            ]);
+            let r = rebuild_part(&p);
+            assert_eq!(r.failed(), 0, "{form}: {:?}", r.features);
+            let got = volume_to(&state(&r, "c", "a").body, 1e-7);
+            let want = 1e-9 - area * 1e-9;
+            assert!((got - want).abs() < 1e-14, "{form}: {got} != {want}");
+        }
+        // A face where a face goes, an edge where it doesn't.
+        let g = json!({"form": "distances", "d1": 0.1, "d2": 0.2, "face": rim, "edges": [rim]});
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("c", blend(json!({"type": "chamfer", "groups": [g]}))),
+        ]);
+        let r = rebuild_part(&p);
+        let e = r.features[1].1.as_ref().unwrap_err();
+        assert_eq!(
+            (e.code, e.details["role"].as_str()),
+            (Code::ReferenceWrongKind, Some("groups.0.face"))
+        );
     }
 
     #[test]

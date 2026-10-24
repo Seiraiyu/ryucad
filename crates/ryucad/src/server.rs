@@ -820,6 +820,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Boolean(b) => b.fields(),
+        Feature::Fillet(_) | Feature::Chamfer(_) => blend_report(part, f),
         Feature::Revolve(r) => {
             let mut v = r.fields();
             if let Angle::Of(q) = &r.angle {
@@ -833,6 +834,45 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
     };
     v["id"] = json!(id);
     v["type"] = json!(f.type_name());
+    v
+}
+
+/// A fillet or chamfer as output reports it: its file's fields, every
+/// size as written and in meters (an angle in radians), every edge and
+/// face as `<part>/<feature>/<name>`.
+fn blend_report(part: &Id, f: &Feature) -> Value {
+    use crate::doc::blend::ChamferForm;
+    let mut v = match f {
+        Feature::Fillet(x) => x.fields(),
+        Feature::Chamfer(x) => x.fields(),
+        _ => unreachable!("a fillet or a chamfer"),
+    };
+    let sizes: Vec<Vec<(&str, &Quantity)>> = match f {
+        Feature::Fillet(x) => x
+            .groups
+            .iter()
+            .map(|g| vec![("radius", &g.radius)])
+            .collect(),
+        Feature::Chamfer(x) => x
+            .groups
+            .iter()
+            .map(|g| match &g.form {
+                ChamferForm::Equal { d } => vec![("d", d)],
+                ChamferForm::Distances { d1, d2, .. } => vec![("d1", d1), ("d2", d2)],
+                ChamferForm::DistanceAngle { d, angle, .. } => vec![("d", d), ("angle", angle)],
+            })
+            .collect(),
+        _ => unreachable!("a fillet or a chamfer"),
+    };
+    for (i, group) in sizes.into_iter().enumerate() {
+        for (k, q) in group {
+            v["groups"][i][k] = q.report();
+        }
+    }
+    for (role, r) in f.references() {
+        let at = format!("/{}", role.replace('.', "/"));
+        *v.pointer_mut(&at).expect("its own reference") = json!(r.text(part));
+    }
     v
 }
 
@@ -1582,6 +1622,10 @@ fn feature_edit(
         Feature::Boolean(b) => {
             given.only("boolean", &BOOLEAN)?;
             Feature::Boolean(boolean_from(Some(&b), &given)?)
+        }
+        f @ (Feature::Fillet(_) | Feature::Chamfer(_)) => {
+            given.only(f.type_name(), &[])?;
+            f
         }
         f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
             let ty = f.type_name();
