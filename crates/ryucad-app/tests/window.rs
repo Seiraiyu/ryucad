@@ -303,6 +303,36 @@ fn orbiting_from_the_background_keeps_the_model_in_view() {
 }
 
 #[test]
+fn the_hover_goes_when_the_pointer_leaves_the_view() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.step();
+    let rect = h.state().opened().view.rect;
+    let over = |h: &mut Harness<'static, App>, e: egui::Event| {
+        h.event(e);
+        h.step();
+        h.step();
+        h.state().opened().view.hover.is_some()
+    };
+    assert!(over(&mut h, egui::Event::PointerMoved(rect.center())));
+    // Out of the window, and over a panel beside the view.
+    assert!(!over(&mut h, egui::Event::PointerGone));
+    assert!(over(&mut h, egui::Event::PointerMoved(rect.center())));
+    let beside = egui::pos2(rect.min.x - 20.0, rect.center().y);
+    assert!(!over(&mut h, egui::Event::PointerMoved(beside)));
+    // Nor is its description left drawn.
+    assert!(
+        h.query_by(|n| n.label().is_some_and(|l| l.contains("face of")))
+            .is_none()
+    );
+}
+
+#[test]
 fn a_trackpad_pans_orbits_and_pinches() {
     let _one = one_at_a_time();
     if !gpu() {
