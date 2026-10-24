@@ -1055,17 +1055,18 @@ fn groups<'a>(
 
 /// The edges a fillet or chamfer (feature `id`) blends in `solid`, as
 /// its view of it holds them: each listed edge resolved and, when it
-/// propagates, grown to its tangent chain. An edge in two groups is
-/// `edge_listed_twice`; one reached twice in one group is blended once.
-fn blend_edges(
+/// propagates, grown to its tangent chain, with the role of the listed
+/// edge that reached it. An edge in two groups is `edge_listed_twice`;
+/// one reached twice in one group is blended once.
+fn blend_edges<'g>(
     part: &Part,
     id: &Id,
     solid: &Id,
     built: &Built,
-    groups: &[Group],
+    groups: &'g [Group],
     propagate: bool,
     before: &dyn Results,
-) -> Result<Vec<ryukei::blend::EdgeBlend>> {
+) -> Result<Vec<(ryukei::blend::EdgeBlend, &'g str)>> {
     use ryukei::topo::EdgeId;
     let body = &built.body;
     // Each edge blended so far: its group and the role that reached it.
@@ -1110,16 +1111,130 @@ fn blend_edges(
                     }
                     None => {
                         seen.insert(x, (i, role.as_str()));
-                        out.push(ryukei::blend::EdgeBlend {
+                        let edge = ryukei::blend::EdgeBlend {
                             edge: body.edge(x).expect("a live edge").name,
                             kind: g.kind,
-                        });
+                        };
+                        out.push((edge, role.as_str()));
                     }
                 }
             }
         }
     }
     Ok(out)
+}
+
+/// The kernel's refusal of a fillet or chamfer: `blend_failed`, with its
+/// `reason` and each entity it names (`entities`, with its `role` in the
+/// refusal): as a reference into the solid as the feature sees it, its
+/// kind, its origin, and for an edge the listed edge whose chain reached
+/// it (`listed`).
+fn blend_error(
+    part: &Part,
+    id: &Id,
+    ty: &str,
+    (solid, built): (&Id, &Built),
+    listed: &[(ryukei::blend::EdgeBlend, &str)],
+    e: ryukei::Error,
+) -> Error {
+    use ryukei::BlendError as B;
+    let entity = |role: &str, n: &Name| -> Value {
+        let mut v = json!({"role": role});
+        match built.body.by_name(*n) {
+            Some(x) => {
+                v["reference"] = json!(format!("{}/{solid}/{n}", part.id));
+                v["kind"] = json!(crate::reference::kind(x));
+                if let Some(o) = built.origins.get(&n.to_string()) {
+                    v["origin"] = o.clone();
+                }
+                if let Some((_, by)) = listed.iter().find(|(b, _)| b.edge == *n) {
+                    v["listed"] = json!(by);
+                }
+            }
+            // A name a staged corner made between its stages.
+            None => v["name"] = json!(n.to_string()),
+        }
+        v
+    };
+    let (reason, msg, entities) = match &e {
+        ryukei::Error::InvalidBlend(b) => match b {
+            B::NoSuchEdge { edge } => (
+                "no_such_edge",
+                "an edge isn't there",
+                vec![entity("edge", edge)],
+            ),
+            B::DuplicateEdge { edge } => (
+                "duplicate_edge",
+                "an edge is named twice",
+                vec![entity("edge", edge)],
+            ),
+            B::BadSize { edge } => (
+                "bad_size",
+                "a size is too small for the kernel's resolution, or an angle out of range",
+                vec![entity("edge", edge)],
+            ),
+            B::NotAFace { edge, face } => (
+                "not_a_face",
+                "the face a chamfer's first distance runs along doesn't bound one of its edges",
+                vec![entity("edge", edge), entity("face", face)],
+            ),
+            B::SmoothEdge { edge } => (
+                "smooth_edge",
+                "an edge's faces meet tangentially: there is nothing to round",
+                vec![entity("edge", edge)],
+            ),
+            B::ConvexityChanges { edge } => (
+                "convexity_changes",
+                "an edge is convex in one place and concave in another",
+                vec![entity("edge", edge)],
+            ),
+            B::OpenTangentChain { blended, open } => (
+                "open_tangent_chain",
+                "a blended edge runs on tangentially into one that isn't: blend the whole chain (propagate)",
+                vec![entity("blended", blended), entity("open", open)],
+            ),
+            B::SizeChangeAlongChain { a, b } => (
+                "size_change_along_chain",
+                "edges that meet tangentially are blended with different sizes",
+                vec![entity("a", a), entity("b", b)],
+            ),
+            B::Overflow { edge, face } => (
+                "overflow",
+                "the blend would run off a face it lies on, or cross another there",
+                vec![entity("edge", edge), entity("face", face)],
+            ),
+            B::RadiusTooLarge { edge } => (
+                "radius_too_large",
+                "the size is too large for the faces or the edge",
+                vec![entity("edge", edge)],
+            ),
+            B::Unsupported { at } => (
+                "unsupported",
+                "a face, edge or vertex the kernel can't blend yet",
+                vec![entity("at", at)],
+            ),
+            B::Uncertain { at } => (
+                "uncertain",
+                "a decision rounding left uncertain",
+                vec![entity("at", at)],
+            ),
+            B::NonManifold { at } => (
+                "non_manifold",
+                "blends would meet only at an edge or a point",
+                vec![entity("at", at)],
+            ),
+        },
+        _ => ("kernel", "the kernel refused it", Vec::new()),
+    };
+    let mut err = Error::new(Code::BlendFailed, format!("{ty} {id}: {msg} ({e})"))
+        .with("feature", id)
+        .with("solid", solid)
+        .with("reason", reason)
+        .with("kernel", format!("{e:?}"));
+    if !entities.is_empty() {
+        err = err.with("entities", entities);
+    }
+    err
 }
 
 /// A fillet or chamfer: its solid as it sees it, with every edge its
@@ -1149,13 +1264,10 @@ fn build_blend(
     };
     let built = target(part, solids, id, &solid, before)?;
     let groups = groups(part, id, f, before)?;
-    let edges = blend_edges(part, id, &solid, built, &groups, propagate, before)?;
-    let made = ryukei::blend::blend(op_key(&part.id, id), &built.body, &edges).map_err(|e| {
-        Error::new(Code::BlendFailed, format!("{ty} {id}: {e}"))
-            .with("feature", id)
-            .with("solid", &solid)
-            .with("kernel", format!("{e:?}"))
-    })?;
+    let listed = blend_edges(part, id, &solid, built, &groups, propagate, before)?;
+    let edges: Vec<ryukei::blend::EdgeBlend> = listed.iter().map(|(e, _)| *e).collect();
+    let made = ryukei::blend::blend(op_key(&part.id, id), &built.body, &edges)
+        .map_err(|e| blend_error(part, id, ty, (&solid, built), &listed, e))?;
     // A blend face says which edges (and corner vertices) it took the
     // place of; what else is new is the feature's; the rest keeps its
     // origin.
@@ -2135,17 +2247,24 @@ mod tests {
             .map(Value::to_string)
             .collect();
         assert_eq!(replaced.len(), 8, "{replaced:?}");
-        // Without propagation the kernel refuses to stop at a tangent edge.
+        // Without propagation the kernel refuses to stop at a tangent edge,
+        // and says which: an arc the fillet made.
         let r = rebuild_part(&top(false));
         let (_, e) = &r.features[2];
         let e = e.as_ref().unwrap_err();
         assert_eq!(e.code, Code::BlendFailed, "{e}");
-        assert!(
-            e.details["kernel"]
-                .as_str()
-                .unwrap()
-                .contains("OpenTangentChain")
+        assert_eq!(e.details["reason"], "open_tangent_chain");
+        let [blended, open] = e.details["entities"].as_array().unwrap().as_slice() else {
+            panic!("{e}")
+        };
+        assert_eq!(blended["reference"], format!("p/a/{rim}"));
+        assert_eq!(blended["listed"], "groups.0.edges.0");
+        assert_eq!(
+            (open["role"].as_str(), open["kind"].as_str()),
+            (Some("open"), Some("edge"))
         );
+        assert_eq!(open["origin"]["feature"], "r");
+        assert!(open.get("listed").is_none());
     }
 
     #[test]
@@ -2196,6 +2315,23 @@ mod tests {
                 .unwrap()
                 .starts_with("InvalidBlend(")
         );
+        // The kernel's reason, with the edge it names in the solid, where
+        // that came from and which listed edge brought it in.
+        // (A ball of 2 mm can't round a 1 mm box's edge: it runs off the
+        // faces either side.)
+        assert_eq!(e.details["reason"], "overflow", "{e}");
+        let [blended, face] = e.details["entities"].as_array().unwrap().as_slice() else {
+            panic!("{e}")
+        };
+        assert_eq!(
+            *blended,
+            json!({"role": "edge", "reference": format!("p/a/{up}"), "kind": "edge",
+                    "origin": {"feature": "a"}, "listed": "groups.0.edges.0"})
+        );
+        assert_eq!(
+            (face["kind"].as_str(), &face["origin"]),
+            (Some("face"), &json!({"feature": "a"}))
+        );
         let e = err(fillet(
             json!([{"radius": 0.1, "edges": [edge("j", other)]}]),
         ));
@@ -2235,6 +2371,22 @@ mod tests {
             let want = 1e-9 - area * 1e-9;
             assert!((got - want).abs() < 1e-14, "{form}: {got} != {want}");
         }
+        // A face that doesn't bound the edge: the kernel says so.
+        let bottom = edge("a", face_at_z(body, 0.0));
+        let g = json!({"form": "distances", "d1": 0.1, "d2": 0.2, "face": bottom, "edges": [rim]});
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("c", blend(json!({"type": "chamfer", "groups": [g]}))),
+        ]);
+        let r = rebuild_part(&p);
+        let e = r.features[1].1.as_ref().unwrap_err();
+        assert_eq!(
+            (e.code, e.details["reason"].as_str()),
+            (Code::BlendFailed, Some("not_a_face"))
+        );
+        let face = format!("p/a/{}", bottom["name"].as_str().unwrap());
+        assert_eq!(e.details["entities"][1]["reference"], face);
+        assert_eq!(e.details["entities"][1]["kind"], "face");
         // A face where a face goes, an edge where it doesn't.
         let g = json!({"form": "distances", "d1": 0.1, "d2": 0.2, "face": rim, "edges": [rim]});
         let p = part(vec![
