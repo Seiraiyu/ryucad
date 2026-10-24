@@ -2002,6 +2002,60 @@ fn renders_a_committed_revision() {
         pixels(&p.direct.join("s.png")),
         pixels(&p.direct.join("w.png"))
     );
+    // A solid only the working files have is new as a whole; a solid only
+    // the revision has is a red ghost.
+    p.ok(&[
+        "feature", "add", "p", "sphere", "--id", "s", "--param", "radius=4", "--origin", "40,0,0",
+    ]);
+    let n = p.ok(&[
+        "render",
+        "--out",
+        "n.png",
+        "--size",
+        "200x120",
+        "--compare",
+        "HEAD",
+    ]);
+    assert_eq!(n["compare"]["rev"], "HEAD");
+    let (_, _, px) = pixels(&p.direct.join("n.png"));
+    assert!(
+        px.chunks(4).any(|q| q[1] > 150 && q[0] < 120 && q[2] < 120),
+        "new green"
+    );
+    let back = p.ok(&[
+        "render",
+        "--out",
+        "r.png",
+        "--size",
+        "200x120",
+        "--rev",
+        "HEAD",
+        "--compare",
+        "working",
+    ]);
+    assert_eq!(back["commit"], head.as_str());
+    // The ghost is translucent: red over the background's grey, its blue
+    // near its green (the compare's orange has little blue).
+    let (_, _, px) = pixels(&p.direct.join("r.png"));
+    assert!(
+        px.chunks(4).any(|q| {
+            let (r, g, b) = (i32::from(q[0]), i32::from(q[1]), i32::from(q[2]));
+            r > g + 20 && b > 120 && (g - b).abs() < 12
+        }),
+        "removed red ghost"
+    );
+    assert_eq!(
+        pixels(&p.direct.join("r.png")),
+        pixels(&p.daemon.join("r.png"))
+    );
+    // A camera given explicitly isn't framed.
+    p.fails(
+        &[
+            "render", "--out", "x.png", "--frame", "HEAD", "--of", "agent",
+        ],
+        "usage",
+        2,
+    );
     p.fails(
         &["render", "--out", "x.png", "--compare", "nowhere"],
         "rev_not_found",
