@@ -1950,8 +1950,6 @@ pub fn settle(slot: &mut Option<Session>, live: &mut Live, root: &Path) {
     });
 }
 
-/// A request's answer, with the commit it read when it named a revision:
-/// in the result, or in a failure's details.
 /// An answer whose shape is an interface: it says its schema.
 fn versioned(r: Result<Value>) -> Result<Value> {
     r.map(|mut v| {
@@ -1960,6 +1958,8 @@ fn versioned(r: Result<Value>) -> Result<Value> {
     })
 }
 
+/// A request's answer, with the commit it read when it named a revision:
+/// in the result, or in a failure's details.
 fn noted(r: Result<Value>, commit: Option<String>) -> Result<Value> {
     let Some(commit) = commit else {
         return r;
