@@ -1951,6 +1951,18 @@ fn renders_a_committed_revision() {
         pixels(&p.direct.join("rev.png")),
         pixels(&p.daemon.join("rev.png"))
     );
+    // Framed together, both renders share one camera, whatever changed.
+    let a = p.ok(&[
+        "render", "--out", "a.png", "--rev", "HEAD", "--frame", "working",
+    ]);
+    let b = p.ok(&["render", "--out", "b.png", "--frame", "HEAD"]);
+    assert_eq!(a["camera"], b["camera"]);
+    assert_ne!(a["camera"], before["camera"]);
+    p.fails(
+        &["render", "--out", "x.png", "--frame", "nowhere"],
+        "rev_not_found",
+        1,
+    );
     p.fails(
         &["render", "--out", "x.png", "--rev", "nowhere"],
         "rev_not_found",

@@ -311,6 +311,10 @@ enum Command {
         no_sketches: bool,
         #[command(flatten)]
         rev: RevArg,
+        /// Frame this revision's model too (repeatable; `working` for the
+        /// working files), so renders of each revision share a camera.
+        #[arg(long = "frame", value_name = "REV", conflicts_with_all = ["of", "eye"])]
+        frame: Vec<String>,
     },
     /// What the merge (or cherry-pick, revert or rebase step) Git is in the
     /// middle of leaves to settle.
@@ -1285,6 +1289,7 @@ fn request(cmd: &Command) -> Option<Request> {
             no_edges,
             no_sketches,
             rev,
+            frame,
         } => Request::Render {
             part: part.clone(),
             camera: camera_arg(eye, target, up, fov, ortho),
@@ -1297,6 +1302,7 @@ fn request(cmd: &Command) -> Option<Request> {
             labels: Some(*labels),
             sketches: Some(!no_sketches),
             rev: rev.rev.clone(),
+            frame: frame.clone(),
         },
         Command::Highlight {
             entities,

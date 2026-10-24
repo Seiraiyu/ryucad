@@ -634,6 +634,10 @@ pub enum Request {
         /// files by default).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
+        /// Frame these revisions' models too (`working` for the working
+        /// files), so renders of each share a camera.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        frame: Vec<String>,
     },
     /// Diagnoses the project folder: every problem, with a stable code.
     #[serde(rename = "doctor")]

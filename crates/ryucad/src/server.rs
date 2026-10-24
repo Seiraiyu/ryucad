@@ -115,6 +115,7 @@ pub fn answer_live(
             labels,
             sketches,
             rev,
+            frame,
         } => {
             let target = participant.as_deref().map(|p| (p, live.as_deref()));
             let shown = match live.as_deref() {
@@ -135,6 +136,7 @@ pub fn answer_live(
                 labels: labels.unwrap_or(false),
                 sketches: sketches.unwrap_or(true),
                 rev,
+                frame,
             };
             render(session, target, shown, ask)
         }
@@ -2161,6 +2163,34 @@ struct RenderAsk {
     labels: bool,
     sketches: bool,
     rev: Option<String>,
+    frame: Vec<String>,
+}
+
+/// Each solid's mesh at a revision, by part and founder, for the parts
+/// given (those the revision has).
+fn solids_at(
+    session: &mut Session,
+    rev: &str,
+    parts: &[Id],
+) -> Result<(Option<String>, BTreeMap<(Id, Id), mesh::Meshed>)> {
+    let (commit, s) = session.at(Some(rev))?;
+    let mut out = BTreeMap::new();
+    for part in parts {
+        if s.project().part(part).is_err() {
+            continue;
+        }
+        let Ok(list) = meshes(s, part, None, mesh::Quality::Normal) else {
+            continue;
+        };
+        for (fid, m) in list {
+            if let Ok(m) = m
+                && m.mesh.mesh.is_ok()
+            {
+                out.insert((part.clone(), fid), m);
+            }
+        }
+    }
+    Ok((commit, out))
 }
 
 /// The parts a render draws: the one asked for, or all of them.
@@ -2186,8 +2216,17 @@ fn render(
 ) -> Result<Answer> {
     use crate::render::{self as r, Geometry, Label, Line, Options, Triangle};
     r::check_size(ask.width, ask.height)?;
+    let parts = render_parts(session.at(ask.rev.as_deref())?.1, ask.part.as_deref())?;
+    // Other revisions' models only widen the framing.
+    let mut extra: Vec<[f64; 3]> = Vec::new();
+    for rev in &ask.frame {
+        for m in solids_at(session, rev, &parts)?.1.values() {
+            if let Ok(mesh) = &m.mesh.mesh {
+                extra.extend(mesh.positions.iter().map(|p| [p.x, p.y, p.z]));
+            }
+        }
+    }
     let (commit, session) = session.at(ask.rev.as_deref())?;
-    let parts = render_parts(session, ask.part.as_deref())?;
     // What to colour, and how: every participant's highlights in their
     // styles, then the request's own as notes.
     let mut marks: BTreeMap<String, (r::Rgb, Option<String>)> = BTreeMap::new();
@@ -2306,11 +2345,12 @@ fn render(
                 .map(StandardView::parse)
                 .transpose()?
                 .unwrap_or(StandardView::Iso);
-            if g.positions.is_empty() {
+            let points: Vec<[f64; 3]> = g.positions.iter().chain(&extra).copied().collect();
+            if points.is_empty() {
                 crate::view::frame([-0.5; 3], [0.5; 3], view, DEFAULT_PROJECTION)
             } else {
                 let aspect = f64::from(ask.width) / f64::from(ask.height);
-                crate::view::frame_points(&g.positions, view, DEFAULT_PROJECTION, aspect)
+                crate::view::frame_points(&points, view, DEFAULT_PROJECTION, aspect)
             }
         }
     };
