@@ -268,3 +268,40 @@ fn refusals_name_their_cause() {
         }))
     );
 }
+
+/// A torus and a cone the property drew (work item #639): each boolean
+/// of the pair is sound and meshes without faults.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_torus_and_a_cone_mesh() {
+    let sa = Spec {
+        kind: 5,
+        a: 1.091689180436402,
+        b: 0.4,
+        axis: (0.7934173986103373, 0.5887877433409116, 0.4233599872174678),
+        angle: 0.6831438557681597,
+        at: (0.09653434897503403, 0.3764130794660872, 0.5995984573443072),
+    };
+    let sb = Spec {
+        kind: 2,
+        a: 0.5646845820134708,
+        b: 0.5119787626174719,
+        axis: (0.8970463648484467, 0.5667061376105614, 0.6042353694013554),
+        angle: 0.6331565792233591,
+        at: (
+            0.037940514823881964,
+            -0.24715793815791573,
+            -0.2895137011468087,
+        ),
+    };
+    let (a, b) = (solid(&sa), solid(&sb));
+    for op in [BooleanOp::Unite, BooleanOp::Intersect, BooleanOp::Subtract] {
+        let r = run(op, &a, &b).unwrap().unwrap();
+        if r.counts().faces > 0 {
+            measured(&r).unwrap_or_else(|e| panic!("{op:?}: {e}"));
+        }
+    }
+}
