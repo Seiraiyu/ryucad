@@ -314,6 +314,60 @@ fn git_follows_a_feature_it_thinks_was_renamed() {
 }
 
 #[test]
+fn a_set_up_clone_merges_a_delete_and_an_add_as_themselves() {
+    // Issue #44: a feature deleted and another added on one side looked
+    // like a rename, so the merge lost the other side's edit and never
+    // saw the two features colliding at one ID.
+    let r = boxed("");
+    r.ryucad(&[
+        "feature", "add", "p", "sphere", "--id", "knob", "--param", "radius=4",
+    ]);
+    r.commit("a knob");
+    // `ryucad git install` turns merge.renames off in the clone.
+    let c = r.clone_as("clone");
+    c.git(&["checkout", "-q", "-b", "feat-b"]);
+    c.ryucad(&[
+        "feature", "add", "p", "box", "--id", "lug", "--param", "x=4", "--param", "y=4", "--param",
+        "z=4",
+    ]);
+    c.ryucad(&["feature", "delete", "p", "knob"]);
+    c.commit("feat-b: a lug for the knob");
+    c.git(&["checkout", "-q", "main"]);
+    c.ryucad(&[
+        "feature",
+        "add",
+        "p",
+        "torus",
+        "--id",
+        "lug",
+        "--param",
+        "major_radius=4",
+        "--param",
+        "minor_radius=1",
+    ]);
+    c.ryucad(&["feature", "edit", "p", "knob", "--param", "radius=5"]);
+    c.commit("main: a lug and a bigger knob");
+    let (code, text) = c.git_status(&["merge", "--no-edit", "feat-b"]);
+    assert_ne!(code, 0, "{text}");
+    assert!(!text.contains("rename"), "{text}");
+    let v = c.ryucad(&["merge", "status"]);
+    let kinds: Vec<(&str, &str)> = v["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["kind"].as_str().unwrap(), c["files"][0].as_str().unwrap()))
+        .collect();
+    assert!(
+        kinds.contains(&("modify_delete", "parts/p/features/knob.json")),
+        "{v}"
+    );
+    assert!(
+        kinds.contains(&("id_collision", "parts/p/features/lug.json")),
+        "{v}"
+    );
+}
+
+#[test]
 fn rebase_and_cherry_pick_merge_through_the_driver() {
     let r = boxed("");
     r.git(&["checkout", "-q", "-b", "theirs"]);

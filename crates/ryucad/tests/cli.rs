@@ -1448,9 +1448,25 @@ fn git_install_registers_the_drivers_and_the_hook() {
     let global = fs::read_to_string(home.join(".gitconfig")).unwrap();
     assert!(global.contains("[diff \"ryucad\"]"), "{global}");
     assert!(global.contains("[merge \"ryucad\"]"), "{global}");
+    // merge.renames stays the clone's: every other repository reads the
+    // global config too.
     let (_, v) = run(&["doctor"]);
-    assert_eq!(codes(&v), ["git_hook_missing", "git_hook_missing"]);
-    // In the repository's own config: the drivers and the hook.
+    assert_eq!(
+        codes(&v),
+        [
+            "git_drivers_missing",
+            "git_hook_missing",
+            "git_hook_missing"
+        ]
+    );
+    let message = v["result"]["issues"][0]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("merge.renames isn't false"),
+        "{message}"
+    );
+    assert!(!global.contains("renames"), "{global}");
+    // In the repository's own config: the drivers, renames off and the
+    // hooks.
     fs::remove_file(home.join(".gitconfig")).unwrap();
     let (code, v) = run(&["git", "install"]);
     assert_eq!(
@@ -1466,6 +1482,7 @@ fn git_install_registers_the_drivers_and_the_hook() {
         local.contains("textconv") && local.contains("merge-driver"),
         "{local}"
     );
+    assert!(local.contains("renames = false"), "{local}");
     let hook = root.join(".git/hooks/pre-merge-commit");
     let script = fs::read_to_string(&hook).unwrap();
     assert_eq!(
