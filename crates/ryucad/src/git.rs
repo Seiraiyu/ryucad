@@ -136,6 +136,24 @@ impl Repo {
         Ok(Some(Repo { repo, prefix }))
     }
 
+    /// The `origin` remote's URL, if the clone has one.
+    pub fn origin_url(&self) -> Option<String> {
+        self.repo
+            .config_snapshot()
+            .string("remote.origin.url")
+            .map(|s| s.to_string())
+    }
+
+    /// The branch checked out (`feature/arm`), or `None` on a detached
+    /// head.
+    pub fn branch(&self) -> Result<Option<String>> {
+        Ok(self
+            .repo
+            .head_name()
+            .map_err(git_error)?
+            .map(|n| n.shorten().to_string()))
+    }
+
     /// The repository itself, for ryupdm.
     pub fn gix(&self) -> &gix::Repository {
         &self.repo
@@ -739,6 +757,29 @@ pub fn release_guard(
     Ok(out)
 }
 
+/// The GitHub owner and repository a remote URL names (https, ssh or
+/// scp-like, with or without `.git`), or `None` for other hosts.
+pub fn github_repo(url: &str) -> Option<(String, String)> {
+    let url = url.trim();
+    let path = [
+        "https://github.com/",
+        "http://github.com/",
+        "ssh://git@github.com/",
+        "git@github.com:",
+    ]
+    .iter()
+    .find_map(|p| url.strip_prefix(p))?;
+    let path = path.trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, repo) = path.split_once('/')?;
+    let ok = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    };
+    (ok(owner) && ok(repo)).then(|| (owner.to_owned(), repo.to_owned()))
+}
+
 /// The repository holding the project at `root`, or `not_a_git_repo`.
 pub fn repo(root: &Path) -> Result<Repo> {
     Repo::open(root)?.ok_or_else(|| no_repo(root))
@@ -773,6 +814,57 @@ pub fn history(root: &Path, files: &Files, part: Option<&str>, limit: usize) -> 
 pub(crate) mod tests {
     use super::*;
     use crate::server::tests::{call, fresh};
+
+    #[test]
+    fn github_remotes() {
+        let want = Some(("acme".to_owned(), "widget".to_owned()));
+        for url in [
+            "https://github.com/acme/widget.git",
+            "https://github.com/acme/widget",
+            "https://github.com/acme/widget/",
+            "git@github.com:acme/widget.git",
+            "ssh://git@github.com/acme/widget.git",
+        ] {
+            assert_eq!(github_repo(url), want, "{url}");
+        }
+        for url in [
+            "https://gitlab.com/acme/widget",
+            "git@github.com:acme",
+            "https://github.com/acme/wid get",
+            "/srv/widget.git",
+        ] {
+            assert_eq!(github_repo(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn origin_and_branch_of_a_clone() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        let repo = Repo::open(dir.path()).unwrap().unwrap();
+        assert_eq!(repo.origin_url(), None);
+        assert_eq!(repo.branch().unwrap().as_deref(), Some("main"));
+        git(&["remote", "add", "origin", "git@github.com:acme/widget.git"]);
+        git(&["checkout", "-q", "-b", "feature/arm"]);
+        let repo = Repo::open(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            repo.origin_url().as_deref(),
+            Some("git@github.com:acme/widget.git")
+        );
+        assert_eq!(repo.branch().unwrap().as_deref(), Some("feature/arm"));
+    }
     use crate::session::Session;
     use std::process::Command;
 

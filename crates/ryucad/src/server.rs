@@ -100,7 +100,7 @@ pub fn answer_live(
             rev,
         } => session.at(rev.as_deref()).and_then(|(commit, s)| {
             let mut a = mesh_binary(s, &part, feature.as_deref(), quality.as_deref())?;
-            a.result = noted(Ok(a.result), commit)?;
+            a.result = versioned(noted(Ok(a.result), commit))?;
             Ok(a)
         }),
         Request::Render {
@@ -114,6 +114,9 @@ pub fn answer_live(
             edges,
             labels,
             sketches,
+            rev,
+            frame,
+            compare,
         } => {
             let target = participant.as_deref().map(|p| (p, live.as_deref()));
             let shown = match live.as_deref() {
@@ -133,6 +136,9 @@ pub fn answer_live(
                 edges: edges.unwrap_or(true),
                 labels: labels.unwrap_or(false),
                 sketches: sketches.unwrap_or(true),
+                rev,
+                frame,
+                compare,
             };
             render(session, target, shown, ask)
         }
@@ -251,7 +257,7 @@ fn dispatch(
             expected_revision.as_deref(),
         ),
         Request::PropsGet { part } => crate::pdm::get(session, &part),
-        Request::ReleaseList { part } => crate::release::list(session, part.as_deref()),
+        Request::ReleaseList { part } => versioned(crate::release::list(session, part.as_deref())),
         Request::ReleaseSync {} => crate::release::sync(session),
         Request::ReleaseCheck { results } => crate::release::check(session, results),
         Request::ReleasePropose {
@@ -348,10 +354,10 @@ fn dispatch(
             rev,
         } => {
             let (commit, s) = session.at(rev.as_deref())?;
-            noted(
+            versioned(noted(
                 inspect(s, &part, feature.as_deref(), entity.as_deref()),
                 commit,
-            )
+            ))
         }
         Request::CheckFormat {} => check_format(session),
         Request::Check {
@@ -372,13 +378,13 @@ fn dispatch(
                 positions,
                 all,
             };
-            diff(
+            versioned(diff(
                 session,
                 from.as_deref().unwrap_or("HEAD"),
                 to.as_deref().unwrap_or("working"),
                 model,
                 &opts,
-            )
+            ))
         }
         Request::SessionHello {
             kind,
@@ -544,10 +550,10 @@ fn dispatch(
             rev,
         } => {
             let (commit, s) = session.at(rev.as_deref())?;
-            noted(
+            versioned(noted(
                 mesh_get(s, &part, feature.as_deref(), quality.as_deref()),
                 commit,
-            )
+            ))
         }
         // A render's answer is bytes: `answer_live` handles it.
         Request::Render { .. } => Err(Error::new(Code::Internal, "render answers with bytes")),
@@ -1958,6 +1964,14 @@ pub fn settle(slot: &mut Option<Session>, live: &mut Live, root: &Path) {
     });
 }
 
+/// An answer whose shape is an interface: it says its schema.
+fn versioned(r: Result<Value>) -> Result<Value> {
+    r.map(|mut v| {
+        v["schema"] = json!(crate::OUTPUT_SCHEMA);
+        v
+    })
+}
+
 /// A request's answer, with the commit it read when it named a revision:
 /// in the result, or in a failure's details.
 fn noted(r: Result<Value>, commit: Option<String>) -> Result<Value> {
@@ -2172,6 +2186,107 @@ struct RenderAsk {
     edges: bool,
     labels: bool,
     sketches: bool,
+    rev: Option<String>,
+    frame: Vec<String>,
+    compare: Option<String>,
+}
+
+/// How a compare paints one rendered solid: wholly new when the other
+/// side doesn't have it, else its faces new or changed by name.
+fn compare_paint(
+    theirs: Option<&mesh::Meshed>,
+    ours: &mesh::Meshed,
+) -> (
+    Option<crate::render::Rgb>,
+    BTreeMap<String, crate::render::Rgb>,
+) {
+    use crate::render as r;
+    let Some(theirs) = theirs else {
+        return (Some(r::COMPARE_NEW), BTreeMap::new());
+    };
+    let mut faces = BTreeMap::new();
+    if theirs.hash != ours.hash {
+        let d = crate::diff::bodies(&theirs.body, &ours.body);
+        for (kind, color) in [("new", r::COMPARE_NEW), ("changed", r::COMPARE_CHANGED)] {
+            for n in d["faces"][kind].as_array().into_iter().flatten() {
+                if let Some(n) = n.as_str() {
+                    faces.insert(n.to_owned(), color);
+                }
+            }
+        }
+    }
+    (None, faces)
+}
+
+/// Adds `m`'s faces to `g` as ghosts: those `gone` says in the removed
+/// colour, the rest in the ghost colour.
+fn ghost(g: &mut crate::render::Geometry, m: &mesh::Meshed, gone: impl Fn(&str) -> bool) {
+    use crate::render as r;
+    let Ok(mesh) = &m.mesh.mesh else { return };
+    let base = g.positions.len() as u32;
+    g.positions
+        .extend(mesh.positions.iter().map(|p| [p.x, p.y, p.z]));
+    for f in &mesh.faces {
+        let name = m.body.face(f.face).expect("live").name.to_string();
+        let color = if gone(&name) {
+            r::COMPARE_REMOVED
+        } else {
+            r::COMPARE_GHOST
+        };
+        for t in &mesh.triangles[f.triangles.start as usize..f.triangles.end as usize] {
+            let c = t.map(|i| mesh.corners[i as usize]);
+            g.ghosts.push(r::Triangle {
+                p: c.map(|c| base + c.position),
+                n: c.map(|c| {
+                    let n = c.normal.get();
+                    [n.x as f32, n.y as f32, n.z as f32]
+                }),
+                color,
+            });
+        }
+    }
+}
+
+/// Solids' meshes by part and founder.
+type SolidMeshes = BTreeMap<(Id, Id), mesh::Meshed>;
+
+/// Each solid's mesh at a revision, by part and founder, for the parts
+/// given (those the revision has), and the commit it names.
+fn solids_at(
+    session: &mut Session,
+    rev: &str,
+    parts: &[Id],
+) -> Result<(Option<String>, SolidMeshes)> {
+    let (commit, s) = session.at(Some(rev))?;
+    let mut out = BTreeMap::new();
+    for part in parts {
+        if s.project().part(part).is_err() {
+            continue;
+        }
+        let Ok(list) = meshes(s, part, None, mesh::Quality::Normal) else {
+            continue;
+        };
+        for (fid, m) in list {
+            if let Ok(m) = m
+                && m.mesh.mesh.is_ok()
+            {
+                out.insert((part.clone(), fid), m);
+            }
+        }
+    }
+    Ok((commit, out))
+}
+
+/// The parts a render draws: the one asked for, or all of them.
+fn render_parts(session: &Session, part: Option<&str>) -> Result<Vec<Id>> {
+    Ok(match part {
+        Some(p) => {
+            let id = part_id(p)?;
+            session.project().part(&id)?;
+            vec![id]
+        }
+        None => session.project().parts.keys().cloned().collect(),
+    })
 }
 
 /// Renders the model. `target` names a participant whose camera to use
@@ -2185,14 +2300,23 @@ fn render(
 ) -> Result<Answer> {
     use crate::render::{self as r, Geometry, Label, Line, Options, Triangle};
     r::check_size(ask.width, ask.height)?;
-    let parts: Vec<Id> = match &ask.part {
-        Some(p) => {
-            let id = part_id(p)?;
-            session.project().part(&id)?;
-            vec![id]
+    let parts = render_parts(session.at(ask.rev.as_deref())?.1, ask.part.as_deref())?;
+    // Other revisions' models only widen the framing.
+    let mut extra: Vec<[f64; 3]> = Vec::new();
+    for rev in &ask.frame {
+        for m in solids_at(session, rev, &parts)?.1.values() {
+            if let Ok(mesh) = &m.mesh.mesh {
+                extra.extend(mesh.positions.iter().map(|p| [p.x, p.y, p.z]));
+            }
         }
-        None => session.project().parts.keys().cloned().collect(),
+    }
+    let other = match &ask.compare {
+        Some(rev) => Some((rev.clone(), solids_at(session, rev, &parts)?)),
+        None => None,
     };
+    // The rendered side's solids, for the ghosts.
+    let mut seen = SolidMeshes::new();
+    let (commit, session) = session.at(ask.rev.as_deref())?;
     // What to colour, and how: every participant's highlights in their
     // styles, then the request's own as notes.
     let mut marks: BTreeMap<String, (r::Rgb, Option<String>)> = BTreeMap::new();
@@ -2216,6 +2340,13 @@ fn render(
         for (fid, m) in meshes(session, part, None, mesh::Quality::Normal)? {
             let Ok(m) = m else { continue };
             let Ok(mesh) = &m.mesh.mesh else { continue };
+            seen.insert((part.clone(), fid.clone()), m.clone());
+            let (whole, faces) = match &other {
+                Some((_, (_, theirs))) => {
+                    compare_paint(theirs.get(&(part.clone(), fid.clone())), &m)
+                }
+                None => (None, BTreeMap::new()),
+            };
             let base = g.positions.len() as u32;
             g.positions
                 .extend(mesh.positions.iter().map(|p| [p.x, p.y, p.z]));
@@ -2236,7 +2367,12 @@ fn render(
             for f in &mesh.faces {
                 let name = m.body.face(f.face).expect("live").name.to_string();
                 let mark = marks.get(&key(name.clone()));
-                let color = mark.map_or(r::SURFACE, |(c, _)| *c);
+                // Highlights over the compare's paint, as in the app.
+                let color = mark
+                    .map(|(c, _)| *c)
+                    .or(whole)
+                    .or_else(|| faces.get(&name).copied())
+                    .unwrap_or(r::SURFACE);
                 for t in &mesh.triangles[f.triangles.start as usize..f.triangles.end as usize] {
                     let c = t.map(|i| mesh.corners[i as usize]);
                     g.triangles.push(Triangle {
@@ -2296,6 +2432,24 @@ fn render(
             sketches(session, part, &marks, ask.labels, &mut g)?;
         }
     }
+    if let Some((_, (_, theirs))) = &other {
+        for (key, t) in theirs {
+            match seen.get(key) {
+                Some(ours) if ours.hash == t.hash => {}
+                Some(ours) => {
+                    let d = crate::diff::bodies(&t.body, &ours.body);
+                    let gone: std::collections::BTreeSet<String> = d["faces"]["gone"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|n| n.as_str().map(str::to_owned))
+                        .collect();
+                    ghost(&mut g, t, |n| gone.contains(n));
+                }
+                None => ghost(&mut g, t, |_| true),
+            }
+        }
+    }
     let camera = match (ask.camera, target, ask.view.as_deref()) {
         (Some(c), _, _) => c.resolve(session.project().manifest.default_unit)?,
         (None, Some((p, live)), _) => {
@@ -2311,11 +2465,12 @@ fn render(
                 .map(StandardView::parse)
                 .transpose()?
                 .unwrap_or(StandardView::Iso);
-            if g.positions.is_empty() {
+            let points: Vec<[f64; 3]> = g.positions.iter().chain(&extra).copied().collect();
+            if points.is_empty() {
                 crate::view::frame([-0.5; 3], [0.5; 3], view, DEFAULT_PROJECTION)
             } else {
                 let aspect = f64::from(ask.width) / f64::from(ask.height);
-                crate::view::frame_points(&g.positions, view, DEFAULT_PROJECTION, aspect)
+                crate::view::frame_points(&points, view, DEFAULT_PROJECTION, aspect)
             }
         }
     };
@@ -2324,8 +2479,14 @@ fn render(
         triad: true,
     };
     let img = r::render(&g, &camera, ask.width, ask.height, options)?;
-    let result =
+    let mut result =
         json!({"part": ask.part, "width": ask.width, "height": ask.height, "camera": camera});
+    if let Some(c) = commit {
+        result["commit"] = json!(c);
+    }
+    if let Some((rev, (commit, _))) = other {
+        result["compare"] = json!({"rev": rev, "commit": commit});
+    }
     Ok(Answer::bytes(result, "image/png", img.png()))
 }
 

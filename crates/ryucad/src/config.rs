@@ -53,6 +53,7 @@ enum Rule {
     Int(i64, i64),
     Paths(usize),
     Object,
+    Url,
 }
 
 struct Key {
@@ -128,6 +129,13 @@ const KEYS: &[Key] = &[
         about: "how often a watched daemon checks the files",
     },
     Key {
+        name: "review.url",
+        scope: Scope::User,
+        rule: Rule::Url,
+        default: || json!("https://review.seiraiyu.com"),
+        about: "the hosted review service `ryucad review` talks to",
+    },
+    Key {
         name: "app.recent_projects",
         scope: Scope::User,
         rule: Rule::Paths(20),
@@ -166,6 +174,7 @@ impl Key {
                 a.len() <= *max && a.iter().all(|p| p.as_str().is_some_and(|s| !s.is_empty()))
             }),
             Rule::Object => v.is_object(),
+            Rule::Url => v.as_str().is_some_and(url_ok),
         };
         if ok {
             return Ok(());
@@ -176,6 +185,7 @@ impl Key {
             Rule::Int(lo, hi) => format!("an integer from {lo} to {hi}"),
             Rule::Paths(max) => format!("a list of at most {max} paths"),
             Rule::Object => "a JSON object".to_owned(),
+            Rule::Url => "an https:// URL (http:// only for this machine)".to_owned(),
         };
         Err(Error::new(
             Code::InvalidSetting,
@@ -184,6 +194,31 @@ impl Key {
         .with("key", self.name)
         .with("value", v))
     }
+}
+
+/// An https URL, or an http one to this machine (for tests and a local
+/// service): a host, no user, no spaces or control characters.
+fn url_ok(s: &str) -> bool {
+    let (secure, rest) = match (s.strip_prefix("https://"), s.strip_prefix("http://")) {
+        (Some(r), _) => (true, r),
+        (_, Some(r)) => (false, r),
+        _ => return false,
+    };
+    let authority = &rest[..rest.find('/').unwrap_or(rest.len())];
+    if authority.is_empty()
+        || authority.contains(['@', '?', '#'])
+        || s.contains(' ')
+        || s.chars().any(char::is_control)
+    {
+        return false;
+    }
+    secure
+        || ["localhost", "127.0.0.1", "[::1]"].iter().any(|h| {
+            authority == *h
+                || authority
+                    .strip_prefix(h)
+                    .is_some_and(|p| p.starts_with(':'))
+        })
 }
 
 /// The folder holding the user's preferences.
@@ -457,6 +492,36 @@ pub fn project_revision(root: &Path) -> Result<String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn review_url_takes_https_or_loopback_http() {
+        let k = key("review.url").unwrap();
+        assert_eq!((k.default)(), json!("https://review.seiraiyu.com"));
+        for ok in [
+            "https://review.seiraiyu.com",
+            "https://x.example/sub",
+            "http://127.0.0.1:8080",
+            "http://localhost",
+            "http://[::1]:9",
+        ] {
+            assert!(k.check(&json!(ok)).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://review.seiraiyu.com",
+            "ftp://x",
+            "https://",
+            "review.seiraiyu.com",
+            "https://a b",
+            "http://localhost.evil.com",
+            "https://u@x",
+        ] {
+            assert_eq!(
+                k.check(&json!(bad)).unwrap_err().code,
+                Code::InvalidSetting,
+                "{bad}"
+            );
+        }
+    }
 
     static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
