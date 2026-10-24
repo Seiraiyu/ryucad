@@ -16,7 +16,10 @@
 //! removed, and its two edges become one on the least-named one's curve,
 //! named as merged from both, used by the faces either side; its
 //! tolerance covers the sliver's width. Slivers are taken in name order,
-//! none sharing an edge, nor two whose other faces would be one face.
+//! none sharing an edge, nor two whose other faces would be one face. Such
+//! a face wider than its tolerance but no wider than the cap is a defect
+//! collapsing would move by more than a tolerance:
+//! [`HealError::SliverTooWide`]. Wider than the cap, it is the model's.
 //! What the joins leave as gaps the tolerances cover (see `gaps`).
 
 use super::names::Names;
@@ -25,6 +28,7 @@ use super::{Edge, Loop, Shape, Vertex};
 use crate::geom::{Curve, Point3};
 use crate::name::{Event, Journal, Name, OpKey, Role};
 use crate::topo::Sense;
+use crate::{Error, HealError};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Samples along each edge of a sliver.
@@ -73,14 +77,19 @@ fn faces_of(s: &Shape) -> Vec<Vec<usize>> {
 
 /// Collapses short edges and slivers of `s` in place. New edges' and
 /// vertices' names are pushed onto `names`; removed faces go from both.
-pub(super) fn collapse(key: OpKey, s: &mut Shape, names: &mut Names) -> Collapsed {
+pub(super) fn collapse(
+    key: OpKey,
+    s: &mut Shape,
+    names: &mut Names,
+    cap: f64,
+) -> Result<Collapsed, Error> {
     let mut out = Collapsed::default();
     edges(key, s, names, &mut out);
-    slivers(key, s, names, &mut out);
+    slivers(key, s, names, cap, &mut out)?;
     out.removed.sort();
     out.vertices.sort();
     out.edges.sort();
-    out
+    Ok(out)
 }
 
 fn edges(key: OpKey, s: &mut Shape, names: &mut Names, out: &mut Collapsed) {
@@ -216,7 +225,13 @@ fn width(s: &Shape, a: &Edge, b: &Edge) -> f64 {
     along(a, b).max(along(b, a))
 }
 
-fn slivers(key: OpKey, s: &mut Shape, names: &mut Names, out: &mut Collapsed) {
+fn slivers(
+    key: OpKey,
+    s: &mut Shape,
+    names: &mut Names,
+    cap: f64,
+    out: &mut Collapsed,
+) -> Result<(), Error> {
     let faces = faces_of(s);
     let mut order: Vec<usize> = (0..s.faces.len()).collect();
     order.sort_by_key(|&k| names.faces[k]);
@@ -255,8 +270,14 @@ fn slivers(key: OpKey, s: &mut Shape, names: &mut Names, out: &mut Collapsed) {
             continue;
         }
         let w = width(s, ea, eb);
-        if w > ea.tolerance.max(eb.tolerance) {
+        if w > cap {
             continue;
+        }
+        if w > ea.tolerance.max(eb.tolerance) {
+            return Err(HealError::SliverTooWide {
+                face: names.faces[k],
+            }
+            .into());
         }
         taken_edges.extend([a, b]);
         taken_faces.extend([fa, fb]);
@@ -324,4 +345,5 @@ fn slivers(key: OpKey, s: &mut Shape, names: &mut Names, out: &mut Collapsed) {
             }
         }
     }
+    Ok(())
 }
