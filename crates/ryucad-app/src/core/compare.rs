@@ -319,6 +319,15 @@ impl Compare {
         }
     }
 
+    /// The other side has no body for `key` at `hash` (a sketch has
+    /// none): there is no ghost to wait for.
+    pub fn no_ghost(&mut self, key: &BodyKey, hash: &str) {
+        if self.wanted.get(key).is_some_and(|h| h == hash) {
+            self.wanted.remove(key);
+            self.generation += 1;
+        }
+    }
+
     /// Keeps a ghost if the compare still wants it at its hash.
     pub fn take_ghost(&mut self, part: &str, body: WireBody) -> bool {
         let key = (part.to_owned(), body.feature.clone());
@@ -465,6 +474,12 @@ mod tests {
         assert!(!c.take_ghost("p", ghost("b", "h0")));
         assert!(!c.take_ghost("p", ghost("n", "h4")));
         c.answered(&key("b"), "h1");
+        // A feature with no body there wants no ghost.
+        assert!(c.wanted.contains_key(&key("c")));
+        c.no_ghost(&key("c"), "h0");
+        assert!(c.wanted.contains_key(&key("c")));
+        c.no_ghost(&key("c"), "h3");
+        assert!(!c.wanted.contains_key(&key("c")));
         // The same diff again keeps the ghost; one where b no longer
         // differs drops it.
         c.take_diff(&diff());
