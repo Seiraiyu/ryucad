@@ -15,19 +15,22 @@
 //!    [`ImportRole`]), before anything changes.
 //! 2. **Sewing.** Edges the file repeats on two faces are joined, and the
 //!    vertices at their ends (see `sew`).
-//! 3. **Uses.** Every edge must then be used twice, once each way: a
-//!    shell that leaves an edge used once is open, one that uses it more
-//!    often is non-manifold.
+//! 3. **Uses.** Every edge must then be used twice: a shell that leaves
+//!    an edge used once is open, one that uses it more often is
+//!    non-manifold.
 //! 4. **Seams and poles.** Seam edges come out of periodic faces, vertex
 //!    loops at poles go, and edges a seam split are joined again (see
 //!    `unseam`).
-//! 5. **Gaps.** Every edge's and vertex's tolerance grows to cover how
+//! 5. **Orientation.** Loops run the way their faces' regions need,
+//!    where the loops alone fix it, and every edge must then be used once
+//!    each way (see `orient`).
+//! 6. **Gaps.** Every edge's and vertex's tolerance grows to cover how
 //!    far it lies from its curves and surfaces, up to the cap (see
 //!    `gaps`).
-//! 6. **Pcurves.** Every use of an edge gets its pcurve on the face:
+//! 7. **Pcurves.** Every use of an edge gets its pcurve on the face:
 //!    [`crate::pcurve::exact`] first, else the file's, if it fits the
 //!    edge.
-//! 7. **Build.** The shape is laid out and built through Euler operators
+//! 8. **Build.** The shape is laid out and built through Euler operators
 //!    ([`crate::layout`]), each solid's voids in its region, and renamed
 //!    with the names of step 1. Tolerances cover the gaps between curves'
 //!    ends and their vertices, and the bounds of approximated geometry.
@@ -40,6 +43,7 @@
 mod build;
 mod gaps;
 mod names;
+mod orient;
 mod pcurves;
 mod seamed;
 mod sew;
@@ -49,7 +53,7 @@ pub use seamed::seamed;
 
 use crate::Error;
 use crate::geom::{Curve, Curve2, Point3, Surface};
-use crate::name::{Journal, Name, OpKey};
+use crate::name::{Event, Journal, Name, OpKey};
 use crate::topo::{Body, Sense};
 
 pub use crate::name::ImportRole;
@@ -167,6 +171,9 @@ pub struct HealReport {
     pub merged: Vec<Name>,
     /// Seam edges removed.
     pub seams: Vec<Name>,
+    /// Faces some of whose loops ran against the region they bound, and
+    /// were reversed.
+    pub reversed: Vec<Name>,
     /// Pole vertices dropped with their loops or seams.
     pub poles: Vec<Name>,
     /// Vertices removed between two edges on one curve, which were joined.
@@ -194,12 +201,18 @@ pub fn heal(
     let sewn = sew::sew(key, &mut shape, &mut names, options.tolerance_cap)?;
     build::uses(&shape, &names)?;
     let unseamed = unseam::unseam(key, &mut shape, &mut names)?;
+    let reversed = orient::loops(&mut shape, &names)?;
+    build::consistent(&shape, &names)?;
     gaps::tolerate(&mut shape, &names, options.tolerance_cap)?;
     let pcurves = pcurves::pcurves(&shape, &names)?;
     let (body, created, mut report) = build::build(key, &shape, &names, &pcurves, options)?;
     let mut journal = sewn.journal;
     journal.append(unseamed.journal);
     journal.append(created);
+    for &f in &reversed {
+        journal.push(Event::Modified(f));
+    }
+    report.reversed = reversed;
     report.sewn = sewn.edges;
     report.merged = sewn.vertices;
     report.seams = unseamed.seams;

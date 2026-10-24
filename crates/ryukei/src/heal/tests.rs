@@ -1,5 +1,5 @@
 use super::*;
-use crate::geom::{Rigid, Vector3};
+use crate::geom::{Curve, Rigid, Surface, Vector3};
 use crate::name::{Event, Role};
 use crate::primitive;
 use crate::topo::{FaceId, ShellId};
@@ -833,4 +833,114 @@ fn sewing_refuses_three_faces_at_an_edge_and_leaves_open_shells_open() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+/// A plate with a round hole through it.
+fn plate() -> Body {
+    use crate::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    let block = primitive::block(OpKey(1), 4.0, 3.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let rod = primitive::cylinder(
+        OpKey(2),
+        0.5,
+        3.0,
+        &Rigid::translation(Vector3::new(1.5, 1.2, -1.0)),
+    )
+    .unwrap()
+    .0;
+    boolean(
+        OpKey(3),
+        BooleanOp::Subtract,
+        &block,
+        &[Tool {
+            key: ToolKey(1),
+            body: &rod,
+            place: Rigid::IDENTITY,
+        }],
+    )
+    .unwrap()
+    .0
+}
+
+/// A face of the shape with two loops, the hole's loop's index, and the
+/// face's index.
+fn holed_face(s: &Shape) -> (usize, usize) {
+    let k = s
+        .faces
+        .iter()
+        .position(|f| f.loops.len() == 2 && matches!(s.surfaces[f.surface], Surface::Plane(_)))
+        .unwrap();
+    // The hole's loop is the one on the circle.
+    let hole = s.faces[k]
+        .loops
+        .iter()
+        .position(|l| match l {
+            Loop::Edges(u) => matches!(s.curves[s.edges[u[0].edge].curve], Curve::Circle(_)),
+            Loop::Vertex(_) => false,
+        })
+        .unwrap();
+    (k, hole)
+}
+
+fn reverse_loop(s: &mut Shape, k: usize, l: usize) {
+    let Loop::Edges(uses) = &mut s.faces[k].loops[l] else {
+        panic!()
+    };
+    uses.reverse();
+    for u in uses {
+        u.sense = u.sense.flipped();
+    }
+}
+
+#[test]
+fn a_loop_run_against_its_face_is_reversed() {
+    let b = plate();
+    let s = plain(&b);
+    let (k, hole) = holed_face(&s);
+    let names = names::names(OpKey(7), &s);
+    for l in [hole, 1 - hole] {
+        let mut t = s.clone();
+        reverse_loop(&mut t, k, l);
+        let (h, journal, report) = heal_ok(&t);
+        assert_eq!(h.counts(), b.counts());
+        assert_eq!(report.reversed, [names.faces[k]]);
+        assert!(journal.events().contains(&Event::Modified(names.faces[k])));
+    }
+    // Loops the file runs the right way are left alone.
+    assert_eq!(heal_ok(&s).2.reversed, []);
+}
+
+#[test]
+fn loops_that_cross_have_no_direction() {
+    use crate::geom::Circle;
+    let b = plate();
+    let mut s = plain(&b);
+    let (k, hole) = holed_face(&s);
+    // The hole's circle moved over the plate's edge: it reads as an outer
+    // loop running clockwise.
+    let Loop::Edges(uses) = &s.faces[k].loops[hole] else {
+        panic!()
+    };
+    let e = uses[0].edge;
+    let Curve::Circle(c) = s.curves[s.edges[e].curve].clone() else {
+        panic!()
+    };
+    let moved = crate::geom::Frame::new(
+        c.frame().origin() + Vector3::new(-1.3, 0.0, 0.0),
+        c.frame().z().get(),
+        c.frame().x().get(),
+    )
+    .unwrap();
+    s.curves
+        .push(Curve::Circle(Circle::new(moved, c.radius()).unwrap()));
+    s.edges[e].curve = s.curves.len() - 1;
+    let names = names::names(OpKey(7), &s);
+    assert_eq!(
+        heal(OpKey(7), &s, &HealOptions::default()).unwrap_err(),
+        HealError::SelfCrossingLoop {
+            face: names.faces[k]
+        }
+        .into()
+    );
 }

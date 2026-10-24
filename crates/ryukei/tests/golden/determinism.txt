@@ -8,7 +8,7 @@ derivatives f798f3a584b8a528
 ellipse d183a46baced650d
 euler 3ba8955bf1ecaddf
 geom 90cad8ca80df54df
-heal 948fbc6c5c1b6cb3
+heal 474ccbfcaaeb364b
 intersections 0de828fe8eecc846
 interval ceed4e3c202ab503
 math 48b722fd5e6bf4a3
