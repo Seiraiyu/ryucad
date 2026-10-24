@@ -1,0 +1,1 @@
+{"format":3,"kind":"ryucad.feature","type":"fillet","propagate":false,"groups":[{"radius":"1 mm","edges":[{"feature":"b","name":"ae6873d4a5069ed284c9bec79f234903"},{"feature":"b","name":"0f5fc96d614ffaa42002d2bb9e59df0b"}]},{"radius":"2 mm","edges":[{"feature":"b","name":"29093b1f0d0673d1959f29e1d508bd92"},{"feature":"b","name":"32e0f6db9e3d07dfcdccda93b2056f0d"}]}]}
