@@ -240,3 +240,41 @@ fn a_part_that_isnt_ready_says_why_before_proposing() {
     assert_eq!(dry["ready"], false);
     assert_eq!(dry["problems"][0]["details"]["property"], "number", "{dry}");
 }
+
+#[test]
+fn a_number_a_merge_duplicated_reaches_the_conflict_panel() {
+    let p = numbered();
+    p.ok(&["part", "create", "q"]);
+    p.ok(&["part", "create", "s"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "two more parts"]);
+    p.git(&["checkout", "-q", "-b", "theirs"]);
+    p.ok(&["props", "set", "q", "number=300"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "theirs: q is 300"]);
+    p.git(&["checkout", "-q", "main"]);
+    p.ok(&["props", "set", "s", "number=300"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "ours: s is 300"]);
+    assert!(p.try_git(&["merge", "--no-commit", "--no-ff", "theirs"]));
+    let mut ws = open(&p);
+    assert!(ws.wait_until(WAIT, |ws| ws.merge.is_some()));
+    let m = ws.merge.as_ref().unwrap();
+    let titles: Vec<String> = m
+        .conflicts()
+        .iter()
+        .map(ryucad_app::core::merge::title)
+        .collect();
+    assert_eq!(
+        titles,
+        ["pdm_broke in q number", "pdm_broke in s number"],
+        "{}",
+        m.status
+    );
+    // Settled in the Part section, as a person would: the merge is clean.
+    ws.show_props(Some("s"));
+    assert!(ws.wait_until(WAIT, |ws| ws.props.is_some()));
+    field(&mut ws, "number").text = "301".into();
+    ws.save_props();
+    assert!(ws.wait_until(WAIT, |ws| ws.merge.as_ref().is_some_and(|m| m.clean())));
+}
