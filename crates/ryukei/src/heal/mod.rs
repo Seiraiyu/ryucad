@@ -13,19 +13,21 @@
 //! 1. **Names.** Every vertex, edge and face of the shape is named from
 //!    the caller's key and a hash of its geometry as read (see
 //!    [`ImportRole`]), before anything changes.
-//! 2. **Uses.** Every edge must be used twice, once each way: a shell
-//!    that leaves an edge used once is open, one that uses it more often
-//!    is non-manifold.
-//! 3. **Seams and poles.** Seam edges come out of periodic faces, vertex
+//! 2. **Sewing.** Edges the file repeats on two faces are joined, and the
+//!    vertices at their ends (see `sew`).
+//! 3. **Uses.** Every edge must then be used twice, once each way: a
+//!    shell that leaves an edge used once is open, one that uses it more
+//!    often is non-manifold.
+//! 4. **Seams and poles.** Seam edges come out of periodic faces, vertex
 //!    loops at poles go, and edges a seam split are joined again (see
 //!    `unseam`).
-//! 4. **Gaps.** Every edge's and vertex's tolerance grows to cover how
+//! 5. **Gaps.** Every edge's and vertex's tolerance grows to cover how
 //!    far it lies from its curves and surfaces, up to the cap (see
 //!    `gaps`).
-//! 5. **Pcurves.** Every use of an edge gets its pcurve on the face:
+//! 6. **Pcurves.** Every use of an edge gets its pcurve on the face:
 //!    [`crate::pcurve::exact`] first, else the file's, if it fits the
 //!    edge.
-//! 6. **Build.** The shape is laid out and built through Euler operators
+//! 7. **Build.** The shape is laid out and built through Euler operators
 //!    ([`crate::layout`]), each solid's voids in its region, and renamed
 //!    with the names of step 1. Tolerances cover the gaps between curves'
 //!    ends and their vertices, and the bounds of approximated geometry.
@@ -40,6 +42,7 @@ mod gaps;
 mod names;
 mod pcurves;
 mod seamed;
+mod sew;
 mod unseam;
 
 pub use seamed::seamed;
@@ -158,6 +161,10 @@ impl Default for HealOptions {
 #[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct HealReport {
+    /// Edges made by sewing two of the file's that were one.
+    pub sewn: Vec<Name>,
+    /// Vertices made by joining the file's at the ends of sewn edges.
+    pub merged: Vec<Name>,
     /// Seam edges removed.
     pub seams: Vec<Name>,
     /// Pole vertices dropped with their loops or seams.
@@ -183,14 +190,18 @@ pub fn heal(
 ) -> Result<(Body, Journal, HealReport), Error> {
     validate(shape)?;
     let mut names = names::names(key, shape);
-    build::uses(shape, &names)?;
     let mut shape = shape.clone();
+    let sewn = sew::sew(key, &mut shape, &mut names, options.tolerance_cap)?;
+    build::uses(&shape, &names)?;
     let unseamed = unseam::unseam(key, &mut shape, &mut names)?;
     gaps::tolerate(&mut shape, &names, options.tolerance_cap)?;
     let pcurves = pcurves::pcurves(&shape, &names)?;
     let (body, created, mut report) = build::build(key, &shape, &names, &pcurves, options)?;
-    let mut journal = unseamed.journal;
+    let mut journal = sewn.journal;
+    journal.append(unseamed.journal);
     journal.append(created);
+    report.sewn = sewn.edges;
+    report.merged = sewn.vertices;
     report.seams = unseamed.seams;
     report.poles = unseamed.poles;
     report.joined = unseamed.joined;
