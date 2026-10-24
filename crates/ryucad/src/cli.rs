@@ -1543,8 +1543,27 @@ fn deliver(cmd: &Command, a: Answer) -> Result<Value> {
     Ok(result)
 }
 
+/// `ryucad --version` (or `-V`) in a command's place is `ryucad version`,
+/// as people and other tools expect; elsewhere it is still a usage error.
+fn version_flag(mut args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].to_str() {
+            Some("-C" | "--as") => i += 2,
+            Some("--pretty" | "--no-daemon") => i += 1,
+            Some(a) if a.starts_with("--as=") || (a.starts_with("-C") && a.len() > 2) => i += 1,
+            Some("--version" | "-V") => {
+                args[i] = "version".into();
+                break;
+            }
+            _ => break,
+        }
+    }
+    args
+}
+
 pub fn main() -> ExitCode {
-    let cli = match Cli::try_parse() {
+    let cli = match Cli::try_parse_from(version_flag(std::env::args_os().collect())) {
         Ok(cli) => cli,
         Err(e) => {
             use clap::error::ErrorKind;

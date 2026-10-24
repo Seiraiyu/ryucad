@@ -130,6 +130,17 @@ fn version_reports_every_component() {
 }
 
 #[test]
+fn version_flags_are_the_version_command() {
+    let p = Pair::new();
+    let want = p.ok(&["version"]);
+    assert_eq!(p.ok(&["--version"]), want);
+    assert_eq!(p.ok(&["-V"]), want);
+    assert_eq!(p.ok(&["--pretty", "--version"]), want);
+    // Only in a command's place: elsewhere it is still a usage error.
+    p.fails(&["part", "--version"], "usage", 2);
+}
+
+#[test]
 fn an_agent_session() {
     let p = Pair::new();
     assert_eq!(p.ok(&["init", "--unit", "mm"])["root"], "<root>");
