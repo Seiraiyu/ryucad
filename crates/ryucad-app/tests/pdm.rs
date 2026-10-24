@@ -137,3 +137,106 @@ fn pdm_is_set_up_from_the_window() {
     assert!(config["project"].is_string());
     assert_eq!(config["configured"], true);
 }
+
+/// The Releases tab of `p`, read.
+fn with_releases(p: &Project) -> Workspace {
+    let mut ws = open(p);
+    ws.load_releases();
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.releases.list.is_some()));
+    ws
+}
+
+fn lines(ws: &Workspace) -> Vec<String> {
+    ws.releases
+        .records("p")
+        .into_iter()
+        .map(ryucad_app::core::releases::record_line)
+        .collect()
+}
+
+#[test]
+fn a_release_is_proposed_synced_and_made_obsolete_from_the_tab() {
+    let p = numbered();
+    let mut ws = with_releases(&p);
+    assert!(ws.releases.in_repository());
+    assert!(lines(&ws).is_empty());
+    // The dialog's dry run: the label it takes, ready.
+    ws.propose_dry("p");
+    assert!(ws.wait_until(WAIT, |ws| ws.releases.proposal.is_some()));
+    let (part, dry) = ws.releases.proposal.clone().unwrap();
+    assert_eq!(
+        (part.as_str(), &dry["label"], &dry["ready"]),
+        ("p", &serde_json::json!("A"), &serde_json::json!(true))
+    );
+    ws.propose("p", Some("first".into()));
+    assert!(ws.wait_until(WAIT, |ws| {
+        !ws.releases.busy && ws.releases.records("p").len() == 1
+    }));
+    assert_eq!(ws.releases.done.as_deref(), Some("wrote releases/p/A.json"));
+    assert!(ws.releases.proposal.is_none());
+    assert!(
+        lines(&ws)[0].starts_with("A release, proposed: first ("),
+        "{:?}",
+        lines(&ws)
+    );
+    // Official on main: its tag is missing until synced.
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "release p A"]);
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle() && ws.releases.to_sync() == [("ryupdm/p/A".to_owned(), "create")]
+    }));
+    assert!(
+        ws.releases
+            .findings_of("p")
+            .iter()
+            .any(|f| f["code"] == "release_tag_missing")
+    );
+    ws.sync_tags();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle() && !ws.releases.busy && ws.releases.to_sync().is_empty()
+    }));
+    assert_eq!(
+        ws.releases.done.as_deref(),
+        Some("tags: 1 created, 0 moved")
+    );
+    assert!(
+        ws.releases.findings_of("p").is_empty(),
+        "{:?}",
+        ws.releases.findings
+    );
+    assert!(
+        lines(&ws)[0].contains(", tag ok: first"),
+        "{:?}",
+        lines(&ws)
+    );
+    // Made obsolete: only its latest official revision can be.
+    assert_eq!(ws.releases.obsoletable("p").as_deref(), Some("A"));
+    ws.obsolete("p", "A", Some("replaced".into()));
+    assert!(ws.wait_until(WAIT, |ws| {
+        !ws.releases.busy && ws.releases.records("p").len() == 2
+    }));
+    assert_eq!(ws.releases.obsoletable("p"), None);
+    assert!(
+        lines(&ws)[1].starts_with("A obsolete, proposed: replaced"),
+        "{:?}",
+        lines(&ws)
+    );
+    // A refusal is said, not lost.
+    ws.obsolete("p", "A", None);
+    assert!(ws.wait_until(WAIT, |ws| ws.releases.error.is_some()));
+    assert_eq!(
+        ws.releases.error.as_ref().unwrap().code,
+        ryucad::error::Code::ReleasePending
+    );
+}
+
+#[test]
+fn a_part_that_isnt_ready_says_why_before_proposing() {
+    let p = Project::new().with_part().committed();
+    let mut ws = with_releases(&p);
+    ws.propose_dry("p");
+    assert!(ws.wait_until(WAIT, |ws| ws.releases.proposal.is_some()));
+    let dry = &ws.releases.proposal.as_ref().unwrap().1;
+    assert_eq!(dry["ready"], false);
+    assert_eq!(dry["problems"][0]["details"]["property"], "number", "{dry}");
+}

@@ -11,6 +11,7 @@ use crate::core::params::Params;
 use crate::core::pdm::States;
 use crate::core::people::{People, Person};
 use crate::core::props::PartProps;
+use crate::core::releases::ReleaseTab;
 use crate::core::settings::Settings;
 use ryucad::client::Daemon;
 use ryucad::error::{Code, Error, Result};
@@ -56,8 +57,14 @@ enum Pending {
     /// The model's solids, read for the faces a feature made, at this
     /// part revision.
     Made(BodyKey, String),
-    /// Every part's release state.
+    /// Every release record and part's release state (`release.list`).
     States,
+    /// The release checks' findings, for the Releases tab.
+    ReleaseCheck,
+    /// A proposal's dry run, for `part`'s Propose dialog.
+    ProposeDry(String),
+    /// A proposal, an obsolete record or a tag sync, from the Releases tab.
+    ReleaseWrite,
     /// ryupdm's settings, and whether the project has an ID yet.
     PdmConfig,
     /// A part's properties for the Part section; after a conflict, with
@@ -127,6 +134,11 @@ impl Made {
     }
 }
 
+/// The findings of a check report.
+fn findings(report: &Value) -> Vec<Value> {
+    report["findings"].as_array().cloned().unwrap_or_default()
+}
+
 /// A camera as a request gives it: points as quantities in meters.
 pub fn camera_arg(c: &Camera) -> CameraArg {
     let q = |x: f64| json!(format!("{x} m"));
@@ -188,6 +200,10 @@ pub struct Workspace {
     /// The Part section's form, for the part it shows (see `show_props`).
     pub props: Option<PartProps>,
     props_part: Option<String>,
+    /// The Releases tab, and whether it was opened (it follows changes
+    /// from then on).
+    pub releases: ReleaseTab,
+    releases_open: bool,
     pub settings: Settings,
     /// The last doctor report, once asked for.
     pub doctor: Option<Value>,
@@ -249,6 +265,8 @@ impl Workspace {
             pdm_config: None,
             props: None,
             props_part: None,
+            releases: ReleaseTab::default(),
+            releases_open: false,
             settings: Settings::default(),
             doctor: None,
             raised: false,
@@ -591,6 +609,68 @@ impl Workspace {
         self.send(req, Pending::PropsSave);
     }
 
+    /// Reads the Releases tab: every record and the release checks; from
+    /// now on they are read again as they change.
+    pub fn load_releases(&mut self) {
+        self.releases_open = true;
+        self.send(Request::ReleaseList { part: None }, Pending::States);
+        let req = Request::ReleaseCheck { results: false };
+        self.send(req, Pending::ReleaseCheck);
+    }
+
+    /// The dry run of proposing `part`, for its Propose dialog: the label
+    /// it takes and every reason it can't yet.
+    pub fn propose_dry(&mut self, part: &str) {
+        self.releases.proposal = None;
+        let req = Request::ReleasePropose {
+            part: part.to_owned(),
+            note: None,
+            expected_revision: None,
+            dry_run: true,
+        };
+        self.send(req, Pending::ProposeDry(part.to_owned()));
+    }
+
+    /// The revision of `part` the window last saw, to guard a write.
+    fn revision_of(&self, part: &str) -> Option<String> {
+        self.model.parts.get(part).map(|p| p.revision.clone())
+    }
+
+    /// Proposes `part`'s next revision (`release.propose`), against the
+    /// revision of it the window last saw.
+    pub fn propose(&mut self, part: &str, note: Option<String>) {
+        let req = Request::ReleasePropose {
+            part: part.to_owned(),
+            note,
+            expected_revision: self.revision_of(part),
+            dry_run: false,
+        };
+        self.release_write(req);
+    }
+
+    /// Makes `part`'s latest official revision, `label`, obsolete.
+    pub fn obsolete(&mut self, part: &str, label: &str, note: Option<String>) {
+        let req = Request::ReleaseObsolete {
+            part: part.to_owned(),
+            label: label.to_owned(),
+            note,
+            expected_revision: self.revision_of(part),
+        };
+        self.release_write(req);
+    }
+
+    /// Creates and moves the local `ryupdm/` tags (`release.sync`).
+    pub fn sync_tags(&mut self) {
+        self.release_write(Request::ReleaseSync {});
+    }
+
+    fn release_write(&mut self, req: Request) {
+        self.releases.busy = true;
+        self.releases.error = None;
+        self.releases.done = None;
+        self.send(req, Pending::ReleaseWrite);
+    }
+
     /// Whether ryupdm is set up: the project has its ID.
     pub fn pdm_ready(&self) -> bool {
         self.pdm_config
@@ -759,6 +839,9 @@ impl Workspace {
         {
             self.read_props(part, None);
         }
+        if self.releases_open {
+            self.load_releases();
+        }
         if let Some((part, sketch, constraint)) = self.dimension_for.clone()
             && self.dimension.is_none()
         {
@@ -838,6 +921,7 @@ impl Workspace {
                 if let Some(p) = &mut self.props {
                     p.saving = false;
                 }
+                self.releases.busy = false;
                 self.model.asked.clear();
                 self.model.sketches_asked.clear();
                 self.compare_waiting = false;
@@ -924,7 +1008,36 @@ impl Workspace {
                     self.ask_diff();
                 }
             }
-            (Pending::States, Ok(a)) => self.states.reset(&a.result),
+            (Pending::States, Ok(a)) => {
+                self.states.reset(&a.result);
+                self.releases.list = Some(a.result);
+            }
+            (Pending::ReleaseCheck, r) => match r {
+                Ok(a) => self.releases.findings = findings(&a.result),
+                // A failing check is still a report.
+                Err(e) if e.code == Code::CheckFailed => {
+                    self.releases.findings = findings(&e.details);
+                }
+                Err(e) => self.releases.error = Some(e),
+            },
+            (Pending::ProposeDry(part), r) => match r {
+                Ok(a) => self.releases.proposal = Some((part, a.result)),
+                Err(e) => self.releases.error = Some(e),
+            },
+            (Pending::ReleaseWrite, r) => {
+                self.releases.busy = false;
+                match r {
+                    Ok(a) => {
+                        self.releases.proposal = None;
+                        self.releases.done = Some(match a.result.get("path") {
+                            Some(p) => format!("wrote {}", p.as_str().unwrap_or_default()),
+                            None => crate::core::releases::synced(&a.result),
+                        });
+                        self.load_releases();
+                    }
+                    Err(e) => self.releases.error = Some(e),
+                }
+            }
             (Pending::PdmConfig, Ok(a)) => {
                 let was = self.pdm_ready();
                 self.pdm_config = Some(a.result);
@@ -1179,6 +1292,11 @@ impl Workspace {
                 }
                 // What the working files differ by changed with them.
                 self.ask_diff();
+                // A proposal may be stale now.
+                if self.releases_open {
+                    let req = Request::ReleaseCheck { results: false };
+                    self.send(req, Pending::ReleaseCheck);
+                }
             }
             "project.changed" => {
                 // The manifest may have its ID now, or ryupdm.json changed.
@@ -1225,7 +1343,12 @@ impl Workspace {
                     _ => None,
                 };
             }
-            "pdm.changed" => self.states.changed(params),
+            "pdm.changed" => {
+                self.states.changed(params);
+                if self.releases_open {
+                    self.load_releases();
+                }
+            }
             "activity.appended" => self.activity.appended(params),
             "app.open" => self.raised = true,
             "participant.changed" => {
