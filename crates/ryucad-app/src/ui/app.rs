@@ -394,12 +394,17 @@ impl Opened {
         } else if ctx.input_mut(|i| i.consume_shortcut(&menu::UNDO)) {
             self.ws.undo(None);
         }
+        // Esc clears the selection and the tree's choice with it.
+        let selected = self.ws.myself().is_some_and(|m| !m.selection.is_empty());
         if !egui::Popup::is_any_open(ctx)
-            && self.ws.myself().is_some_and(|m| !m.selection.is_empty())
+            && (selected || self.view.chosen.is_some())
             && ctx.input_mut(|i| i.consume_shortcut(&menu::CLEAR_SELECTION))
         {
-            self.ws
-                .select(Vec::new(), ryucad::live::SelectMode::Replace);
+            if selected {
+                self.ws
+                    .select(Vec::new(), ryucad::live::SelectMode::Replace);
+            }
+            self.view.unchoose(&mut self.ws);
         }
         None
     }

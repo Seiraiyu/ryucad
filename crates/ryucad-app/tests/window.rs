@@ -128,6 +128,67 @@ fn the_tree_lists_features_and_frames_a_chosen_one() {
 }
 
 #[test]
+fn the_trees_choice_follows_what_is_picked_and_cleared() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    let choose = |h: &mut Harness<'static, App>| {
+        h.get_by_label("boss (cylinder)").click();
+        frames(h, |a| a.opened().view.chosen.is_some());
+    };
+    let chosen = |h: &Harness<'static, App>| h.state().opened().view.chosen.clone();
+    // Esc clears it, even with nothing selected.
+    choose(&mut h);
+    h.key_press(egui::Key::Escape);
+    h.step();
+    assert_eq!(chosen(&h), None);
+    // So does a click on the background.
+    choose(&mut h);
+    h.step();
+    let rect = h.state().opened().view.rect;
+    let corner = rect.min + egui::vec2(5.0, 5.0);
+    h.event(egui::Event::PointerMoved(corner));
+    h.step();
+    assert!(h.state().opened().view.hover.is_none());
+    click(&h, corner);
+    h.step();
+    assert_eq!(chosen(&h), None);
+    // And a click on another feature's solid; one on its own keeps it.
+    choose(&mut h);
+    h.step();
+    let rect = h.state().opened().view.rect;
+    let mut found = std::collections::BTreeMap::new();
+    for i in 1..20 {
+        for j in 1..20 {
+            let at = rect.min
+                + egui::vec2(
+                    rect.width() * i as f32 / 20.0,
+                    rect.height() * j as f32 / 20.0,
+                );
+            h.event(egui::Event::PointerMoved(at));
+            h.step();
+            if let Some(hit) = &h.state().opened().view.hover {
+                let solid = hit.entity.split('/').nth(1).unwrap().to_owned();
+                found.entry(solid).or_insert(at);
+            }
+        }
+    }
+    let (Some(&base), Some(&boss)) = (found.get("base"), found.get("boss")) else {
+        panic!("found only {found:?}");
+    };
+    click(&h, boss);
+    h.step();
+    assert_eq!(chosen(&h), Some(("p".to_owned(), "boss".to_owned())));
+    click(&h, base);
+    h.step();
+    assert_eq!(chosen(&h), None);
+}
+
+#[test]
 fn the_tree_groups_features_by_solid() {
     let _one = one_at_a_time();
     if !gpu() {
