@@ -115,8 +115,17 @@ pub fn write_attributes(root: &Path) -> Result<()> {
 }
 
 /// The repository holding `here`, if any.
+#[cfg(not(test))]
 fn discover(here: &Path) -> Option<gix::Repository> {
     gix::discover(here).ok()
+}
+
+/// The repository holding `here`, if any, reading only its own config:
+/// the user's global config (where the installers put the drivers) and
+/// the system's must not decide what tests see.
+#[cfg(test)]
+fn discover(here: &Path) -> Option<gix::Repository> {
+    gix::discover_opts(here, Default::default(), gix::open::Options::isolated()).ok()
 }
 
 /// How Git, as configured for the repository at `root`, is set up for
