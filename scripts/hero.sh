@@ -381,13 +381,8 @@ for i, p in enumerate(shots):
     d.text((16 + CAP.getbbox("%d/%d  " % (i + 1, len(shots)))[2], 15),
            p.with_suffix(".txt").read_text().strip(), font=CAP, fill=(245, 196, 92))
     stills.append(f)
-# Each still held, then a short fade into the next (and back to the first).
-frames, durations = [], []
-for i, f in enumerate(stills):
-    frames.append(f); durations.append(4200)
-    g = stills[(i + 1) % len(stills)]
-    for k in (1, 2, 3):
-        frames.append(Image.blend(f, g, k / 4)); durations.append(70)
+# Each still held; plain cuts keep the file small.
+frames, durations = stills, [4200] * len(stills)
 sheet = Image.new("RGB", (stills[0].width, stills[0].height * len(stills)))
 for i, f in enumerate(stills):
     sheet.paste(f, (0, stills[0].height * i))
