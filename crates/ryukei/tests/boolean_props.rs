@@ -163,38 +163,97 @@ fn run(op: BooleanOp, a: &Body, b: &Body) -> Result<Option<Body>, TestCaseError>
     }
 }
 
+/// Unite, intersect and subtract `sa` and `sb`: the results are sound and
+/// their volumes keep the set identities.
+fn identities(sa: Spec, sb: Spec) -> Result<(), TestCaseError> {
+    let (a, b) = (solid(&sa), solid(&sb));
+    let (Some(u), Some(i), Some(d)) = (
+        run(BooleanOp::Unite, &a, &b)?,
+        run(BooleanOp::Intersect, &a, &b)?,
+        run(BooleanOp::Subtract, &a, &b)?,
+    ) else {
+        return Ok(());
+    };
+    // The operands' own soundness is the primitives' and sweeps' tests'.
+    let (va, sa) = meshed(&a)?;
+    let (vb, sb) = meshed(&b)?;
+    let (vu, su) = measured(&u)?;
+    let (vi, si) = if i.counts().faces == 0 {
+        (0.0, 0.0)
+    } else {
+        measured(&i)?
+    };
+    let (vd, sd) = if d.counts().faces == 0 {
+        (0.0, 0.0)
+    } else {
+        measured(&d)?
+    };
+    // Each mesh is within the chord of its body: its volume within
+    // area × chord.
+    let slack = |s: f64| s * CHORD;
+    prop_assert!(
+        (vu + vi - va - vb).abs() <= slack(su + si + sa + sb),
+        "{} + {} != {} + {}",
+        vu,
+        vi,
+        va,
+        vb
+    );
+    prop_assert!(
+        (vd - (va - vi)).abs() <= slack(sd + sa + si),
+        "{} != {} - {}",
+        vd,
+        va,
+        vi
+    );
+    Ok(())
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
 
     #[test]
     #[cfg_attr(debug_assertions, ignore = "minutes in a debug build: CI runs it in release")]
     fn set_identities_hold(sa in spec(), sb in spec()) {
-        let (a, b) = (solid(&sa), solid(&sb));
-        let (Some(u), Some(i), Some(d)) = (
-            run(BooleanOp::Unite, &a, &b)?,
-            run(BooleanOp::Intersect, &a, &b)?,
-            run(BooleanOp::Subtract, &a, &b)?,
-        ) else {
-            return Ok(());
-        };
-        // The operands' own soundness is the primitives' and sweeps' tests'.
-        let (va, sa) = meshed(&a)?;
-        let (vb, sb) = meshed(&b)?;
-        let (vu, su) = measured(&u)?;
-        let (vi, si) = if i.counts().faces == 0 { (0.0, 0.0) } else { measured(&i)? };
-        let (vd, sd) = if d.counts().faces == 0 { (0.0, 0.0) } else { measured(&d)? };
-        // Each mesh is within the chord of its body: its volume within
-        // area × chord.
-        let slack = |s: f64| s * CHORD;
-        prop_assert!(
-            (vu + vi - va - vb).abs() <= slack(su + si + sa + sb),
-            "{} + {} != {} + {}", vu, vi, va, vb
-        );
-        prop_assert!(
-            (vd - (va - vi)).abs() <= slack(sd + sa + si),
-            "{} != {} - {}", vd, va, vi
-        );
+        identities(sa, sb)?;
     }
+}
+
+/// Issue #27: a torus and a cone whose boolean the mesher once refused
+/// (`RefinementStalled`), pinned by value since a regression seed means
+/// another case whenever the strategy changes.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_torus_and_a_cone_mesh() {
+    let sa = Spec {
+        kind: 5,
+        a: 1.091689180436402,
+        b: 0.4,
+        axis: (0.7934173986103373, 0.5887877433409116, 0.4233599872174678),
+        angle: 0.6831438557681597,
+        at: (0.09653434897503403, 0.3764130794660872, 0.5995984573443072),
+    };
+    let sb = Spec {
+        kind: 2,
+        a: 0.5646845820134708,
+        b: 0.5119787626174719,
+        axis: (0.8970463648484467, 0.5667061376105614, 0.6042353694013554),
+        angle: 0.6331565792233591,
+        at: (
+            0.037940514823881964,
+            -0.24715793815791573,
+            -0.2895137011468087,
+        ),
+    };
+    // All three build (a refusal would skip the meshing this pins).
+    let (a, b) = (solid(&sa), solid(&sb));
+    for op in [BooleanOp::Unite, BooleanOp::Intersect, BooleanOp::Subtract] {
+        assert!(run(op, &a, &b).unwrap().is_some(), "{op:?}");
+    }
+    identities(sa, sb).unwrap();
 }
 
 #[test]
