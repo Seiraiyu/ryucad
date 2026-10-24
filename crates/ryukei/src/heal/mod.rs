@@ -19,10 +19,13 @@
 //! 3. **Seams and poles.** Seam edges come out of periodic faces, vertex
 //!    loops at poles go, and edges a seam split are joined again (see
 //!    `unseam`).
-//! 4. **Pcurves.** Every use of an edge gets its pcurve on the face:
+//! 4. **Gaps.** Every edge's and vertex's tolerance grows to cover how
+//!    far it lies from its curves and surfaces, up to the cap (see
+//!    `gaps`).
+//! 5. **Pcurves.** Every use of an edge gets its pcurve on the face:
 //!    [`crate::pcurve::exact`] first, else the file's, if it fits the
 //!    edge.
-//! 5. **Build.** The shape is laid out and built through Euler operators
+//! 6. **Build.** The shape is laid out and built through Euler operators
 //!    ([`crate::layout`]), each solid's voids in its region, and renamed
 //!    with the names of step 1. Tolerances cover the gaps between curves'
 //!    ends and their vertices, and the bounds of approximated geometry.
@@ -33,6 +36,7 @@
 //! file must describe it.
 
 mod build;
+mod gaps;
 mod names;
 mod pcurves;
 mod seamed;
@@ -182,6 +186,7 @@ pub fn heal(
     build::uses(shape, &names)?;
     let mut shape = shape.clone();
     let unseamed = unseam::unseam(key, &mut shape, &mut names)?;
+    gaps::tolerate(&mut shape, &names, options.tolerance_cap)?;
     let pcurves = pcurves::pcurves(&shape, &names)?;
     let (body, created, mut report) = build::build(key, &shape, &names, &pcurves, options)?;
     let mut journal = unseamed.journal;
