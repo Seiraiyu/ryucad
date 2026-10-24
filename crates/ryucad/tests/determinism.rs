@@ -785,7 +785,7 @@ fn diff_section(golden: &mut Golden) {
         positions: true,
         ..Default::default()
     };
-    let mut v = ryucad::diff::structural(&before, &after, &opts);
+    let mut v = ryucad::diff::structural(&before, &after, &opts, &Default::default());
     s.str(&ryucad::doc::canonical::to_string(&v));
     ryucad::diff::model(&mut v, &from, &to, &opts);
     s.str(&ryucad::doc::canonical::to_string(&v));
