@@ -185,13 +185,13 @@ enum Command {
         #[arg(long, value_name = "REF", conflicts_with = "eye")]
         fit: Vec<String>,
         /// The eye point, three quantities: 0,-100mm,50mm.
-        #[arg(long, value_name = "X,Y,Z", value_parser = triple, requires_all = ["target", "up"])]
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires_all = ["target", "up"])]
         eye: Option<[String; 3]>,
         /// The point looked at.
-        #[arg(long, value_name = "X,Y,Z", value_parser = triple, requires = "eye")]
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires = "eye")]
         target: Option<[String; 3]>,
         /// The up direction: 0,0,1.
-        #[arg(long, value_name = "X,Y,Z", value_parser = vector, requires = "eye")]
+        #[arg(long, value_name = "X,Y,Z", value_parser = vector, allow_hyphen_values = true, requires = "eye")]
         up: Option<[f64; 3]>,
         /// Perspective with this vertical field of view (45 by default).
         #[arg(long, value_name = "DEGREES", conflicts_with = "ortho")]
@@ -279,11 +279,11 @@ enum Command {
         /// Use this participant's camera.
         #[arg(long = "of", value_name = "PARTICIPANT", conflicts_with = "eye")]
         of: Option<String>,
-        #[arg(long, value_name = "X,Y,Z", value_parser = triple, requires_all = ["target", "up"])]
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires_all = ["target", "up"])]
         eye: Option<[String; 3]>,
-        #[arg(long, value_name = "X,Y,Z", value_parser = triple, requires = "eye")]
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires = "eye")]
         target: Option<[String; 3]>,
-        #[arg(long, value_name = "X,Y,Z", value_parser = vector, requires = "eye")]
+        #[arg(long, value_name = "X,Y,Z", value_parser = vector, allow_hyphen_values = true, requires = "eye")]
         up: Option<[f64; 3]>,
         #[arg(
             long,
@@ -670,12 +670,42 @@ enum ReleaseCmd {
 
 #[derive(Subcommand)]
 enum SketchCmd {
-    /// Apply a batch of edits with one solve, or refuse them all. OPS is a JSON array (or @FILE
-    /// holding one) of {"op": "add", "type": "point", "at": ["0", "10 mm"]}, {"op": "add",
-    /// "type": "line", "start": "p1", "end": "p2"}, {"op": "add", "type": "length", "a": "l1",
-    /// "value": "width"}, {"op": "remove", "id": "c3"}, {"op": "set", "id": "d1", "value":
-    /// "20 mm"} and {"op": "move", "id": "p3", "at": [...]}. With no ops, re-solves and writes
-    /// the positions.
+    /// Apply a batch of edits with one solve, or refuse them all.
+    ///
+    /// OPS is a JSON array (or @FILE holding one) of ops. With no ops, re-solves and writes the
+    /// positions. Quantities are strings with units ("10 mm"), expressions over parameters
+    /// ("width / 2"), or bare numbers in the project's default unit.
+    ///
+    /// Ops:
+    ///   {"op": "add", "type": T, ...}        add an entity or constraint (fields below); "id"
+    ///                                        is optional (p3, l2, a1, ci4, c7, d4 if left out)
+    ///   {"op": "remove", "id": ID}           remove it, and every constraint naming it
+    ///   {"op": "set", "id": ID, "value": Q}  change a dimension's value
+    ///   {"op": "set", "id": ID, "construction": true|false}
+    ///   {"op": "move", "id": ID, "at": [X, Y]}
+    ///                                        move a point (held there for the solve)
+    ///   {"op": "move", "id": ID, "r": Q}     resize a circle
+    ///
+    /// Entities ("construction": true and "projected": "<part>/<feature>/<name>" optional,
+    /// except on points, which take only "projected"):
+    ///   point   "at": [X, Y]
+    ///   line    "start": P, "end": P
+    ///   arc     "center": P, "start": P, "end": P   (counterclockwise from start to end)
+    ///   circle  "center": P, "r": Q    (the file and `sketch get` say r_m: meters, solved)
+    ///
+    /// Constraints name entities in "a", then "b", then "about":
+    ///   one     horizontal, vertical, fix
+    ///   two     coincident, parallel, perpendicular, tangent, equal, midpoint, on, concentric
+    ///   three   symmetric ("a" and "b" about "about")
+    ///
+    /// Dimensions add a "value" (Q; angles in deg or rad, a bare number is degrees):
+    ///   one     length, radius, diameter
+    ///   two     distance, distance_x, distance_y, angle
+    ///
+    /// Example: [{"op": "add", "type": "point", "at": ["0", "10 mm"]},
+    ///           {"op": "add", "type": "line", "start": "p1", "end": "p2"},
+    ///           {"op": "add", "type": "length", "a": "l1", "value": "width"}]
+    #[command(verbatim_doc_comment)]
     Edit {
         part: String,
         sketch: String,
@@ -852,16 +882,18 @@ impl FieldArgs {
     }
 }
 
+// Vectors may start with a minus (`--x -0,1,0`), so they take values that
+// look like flags.
 #[derive(Args)]
 struct PlacementArgs {
     /// The local origin, three quantities: 0,0,10mm.
-    #[arg(long, value_name = "X,Y,Z", value_parser = triple)]
+    #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true)]
     origin: Option<[String; 3]>,
     /// The local z axis: 0,0,1.
-    #[arg(long, value_name = "X,Y,Z", value_parser = vector)]
+    #[arg(long, value_name = "X,Y,Z", value_parser = vector, allow_hyphen_values = true)]
     z: Option<[f64; 3]>,
     /// The local x direction: 1,0,0.
-    #[arg(long, value_name = "X,Y,Z", value_parser = vector)]
+    #[arg(long, value_name = "X,Y,Z", value_parser = vector, allow_hyphen_values = true)]
     x: Option<[f64; 3]>,
 }
 
@@ -1543,7 +1575,24 @@ fn deliver(cmd: &Command, a: Answer) -> Result<Value> {
     Ok(result)
 }
 
+/// Whether the arguments ask only for the version the way most tools take
+/// it (`--version`, `-V`), beside `--pretty`: answered as `ryucad version`.
+fn version_flag(args: &[String]) -> bool {
+    let (flags, rest): (Vec<&String>, Vec<&String>) = args
+        .iter()
+        .skip(1)
+        .partition(|a| *a == "--version" || *a == "-V");
+    !flags.is_empty() && rest.iter().all(|a| *a == "--pretty")
+}
+
 pub fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args_os()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    if version_flag(&args) {
+        let pretty = args.iter().any(|a| a == "--pretty");
+        return finish(Ok(json!(VersionInfo::current())), Vec::new(), pretty);
+    }
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
@@ -1744,6 +1793,13 @@ fn finish(outcome: Result<Value>, warnings: Vec<String>, pretty: bool) -> ExitCo
     } else {
         serde_json::to_string(&doc)
     };
-    println!("{}", s.expect("JSON values always serialize"));
+    // A reader that stops early (`| head`) has what it wanted: a closed
+    // pipe isn't worth a panic, and the exit code still says what happened.
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stdout().lock(),
+        "{}",
+        s.expect("JSON values always serialize")
+    );
     ExitCode::from(code)
 }

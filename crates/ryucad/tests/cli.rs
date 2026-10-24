@@ -792,9 +792,28 @@ fn every_error_code_has_its_exit_code() {
     p.fails(&["feature", "show", "p", "t"], "invalid_document", 1);
     p.write(
         "parts/p/features/t.json",
-        r#"{"conflicts":{"/params/x":{"kind":"value"}},"format":1,"kind":"ryucad.feature"}"#,
+        r#"{"conflicts":{"/params/x":{"kind":"value"}},"format":1,"kind":"ryucad.feature","type":"box"}"#,
     );
     p.fails(&["feature", "show", "p", "t"], "merge_conflict", 1);
+    // It still says what it is, for the tree.
+    let rebuilt = p.fails(&["rebuild"], "rebuild_failed", 1);
+    let listed = p.ok(&["feature", "list", "p"]);
+    for all in [
+        &rebuilt["details"]["parts"][0]["features"],
+        &listed["features"],
+    ] {
+        let t = all
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == "t")
+            .unwrap();
+        assert_eq!(
+            (t["ok"].as_bool(), t["type"].as_str()),
+            (Some(false), Some("box")),
+            "{t}"
+        );
+    }
     p.write(
         "ryucad.json",
         r#"{"default_unit":"mm","format":3,"kind":"ryucad.project"}"#,
@@ -820,6 +839,83 @@ fn pretty_output_is_the_same_document() {
         serde_json::from_str::<Value>(&text).unwrap(),
         serde_json::from_slice::<Value>(&compact.stdout).unwrap()
     );
+}
+
+#[test]
+fn version_flags_are_the_version_command() {
+    let run = |args: &[&str]| {
+        let out = Command::cargo_bin("ryucad")
+            .unwrap()
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}");
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    let v = run(&["version"]);
+    assert_eq!(run(&["--version"]), v);
+    assert_eq!(run(&["-V"]), v);
+    assert_eq!(run(&["--version", "--pretty"]), v);
+    // With anything else it is still a usage error, as before.
+    let out = Command::cargo_bin("ryucad")
+        .unwrap()
+        .args(["part", "list", "--version"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn vectors_may_start_with_a_minus() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    let v = p.ok(&[
+        "feature", "add", "p", "box", "--param", "x=1", "--param", "y=1", "--param", "z=1",
+        "--origin", "-5,0,0", "--x", "-0,1,0", "--z", "0,0,1",
+    ]);
+    assert_eq!(
+        v["feature"]["placement"]["origin"][0]["value"], "-5 mm",
+        "{v}"
+    );
+    assert_eq!(
+        v["feature"]["placement"]["x"],
+        serde_json::json!([0, 1, 0]),
+        "{v}"
+    );
+}
+
+#[test]
+fn sketch_edit_help_lists_every_type() {
+    let out = Command::cargo_bin("ryucad")
+        .unwrap()
+        .args(["sketch", "edit", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8(out.stdout).unwrap();
+    for t in ryucad::doc::sketch::ConstraintType::ALL {
+        assert!(help.contains(t.as_str()), "{}: {help}", t.as_str());
+    }
+    for t in ["point", "line", "arc", "circle", "\"r\": Q"] {
+        assert!(help.contains(t), "{t}: {help}");
+    }
+}
+
+#[test]
+fn a_reader_closing_early_is_no_panic() {
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryucad"))
+        .args(["version", "--pretty"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Closed before the process gets to write: `| head -c 0`.
+    drop(child.stdout.take());
+    let out = child.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("panicked"), "{err}");
+    assert!(out.status.success());
 }
 
 /// Every method in `proto::Request`, read from the variants' `rename`
@@ -1391,9 +1487,25 @@ fn git_install_registers_the_drivers_and_the_hook() {
     let global = fs::read_to_string(home.join(".gitconfig")).unwrap();
     assert!(global.contains("[diff \"ryucad\"]"), "{global}");
     assert!(global.contains("[merge \"ryucad\"]"), "{global}");
+    // merge.renames stays the clone's: every other repository reads the
+    // global config too.
     let (_, v) = run(&["doctor"]);
-    assert_eq!(codes(&v), ["git_hook_missing", "git_hook_missing"]);
-    // In the repository's own config: the drivers and the hook.
+    assert_eq!(
+        codes(&v),
+        [
+            "git_drivers_missing",
+            "git_hook_missing",
+            "git_hook_missing"
+        ]
+    );
+    let message = v["result"]["issues"][0]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("merge.renames isn't false"),
+        "{message}"
+    );
+    assert!(!global.contains("renames"), "{global}");
+    // In the repository's own config: the drivers, renames off and the
+    // hooks.
     fs::remove_file(home.join(".gitconfig")).unwrap();
     let (code, v) = run(&["git", "install"]);
     assert_eq!(
@@ -1409,6 +1521,7 @@ fn git_install_registers_the_drivers_and_the_hook() {
         local.contains("textconv") && local.contains("merge-driver"),
         "{local}"
     );
+    assert!(local.contains("renames = false"), "{local}");
     let hook = root.join(".git/hooks/pre-merge-commit");
     let script = fs::read_to_string(&hook).unwrap();
     assert_eq!(

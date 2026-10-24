@@ -217,7 +217,15 @@ pub fn damaged(ui: &mut egui::Ui, offline: &mut Offline, state: &mut State) -> b
             ));
         }
         // No undo to promise: with no daemon there is no activity log yet.
-        ui.label("Nothing is changed until you choose a repair, and a repair changes only the files in its planned changes. Git has the files as they were committed.");
+        // Said only while there is something left to repair.
+        let left = offline
+            .report
+            .as_ref()
+            .and_then(|r| r["issues"].as_array())
+            .is_some_and(|i| !i.is_empty());
+        if !offline.openable() || left {
+            ui.label("Nothing is changed until you choose a repair, and a repair changes only the files in its planned changes. Git has the files as they were committed.");
+        }
         if let Some(e) = &offline.error {
             ui.colored_label(ui.visuals().error_fg_color, &e.message);
         }

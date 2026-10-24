@@ -740,12 +740,15 @@ pub enum Outcome {
     Text(usize),
 }
 
-/// A file's JSON if ryucad can merge it: UTF-8, canonical, an object with
-/// a `kind`, no conflict record, and no format newer than this build reads.
+/// A file's JSON if ryucad can merge it: UTF-8 JSON, an object with a
+/// `kind`, no conflict record, and no format newer than this build reads.
+/// It needn't be canonical: an agent that writes a file itself (on one
+/// line, say) merges as the CLI's writes do, since the merge compares
+/// values and writes the result canonical.
 fn readable(bytes: &[u8]) -> Option<Value> {
     let text = std::str::from_utf8(bytes).ok()?;
     let v = crate::doc::canonical::parse(text).ok()?;
-    if crate::doc::canonical::to_string(&v) != text || v.get(CONFLICTS).is_some() {
+    if v.get(CONFLICTS).is_some() {
         return None;
     }
     let kind = v.get("kind")?.as_str()?;
@@ -1394,14 +1397,33 @@ mod tests {
     }
 
     #[test]
+    fn json_written_by_hand_merges_by_value() {
+        // Issue #52: one side's file written compactly by an agent, the
+        // other's by the CLI, changing different values.
+        let base = canonical(&feature_json("10 mm", [1, 0, 0]));
+        let ours = serde_json::to_vec(&feature_json("12 mm", [1, 0, 0])).unwrap();
+        let theirs = canonical(&feature_json("10 mm", [0, 1, 0]));
+        let (out, o) = bytes(&base, &ours, &theirs);
+        assert_eq!(o, Outcome::Clean);
+        assert_eq!(out, canonical(&feature_json("12 mm", [0, 1, 0])));
+        // Spaced oddly, with CRLF, on every side.
+        let odd = |v: &[u8]| {
+            String::from_utf8(v.to_vec())
+                .unwrap()
+                .replace(": ", ":  ")
+                .replace('\n', "\r\n")
+                .into_bytes()
+        };
+        let (out2, o) = bytes(&odd(&base), &odd(&ours), &odd(&theirs));
+        assert_eq!((out2, o), (out, Outcome::Clean));
+    }
+
+    #[test]
     fn what_ryucad_cant_read_merges_as_lines() {
         let base = canonical(&feature_json("10 mm", [1, 0, 0]));
         let ours = canonical(&feature_json("12 mm", [1, 0, 0]));
-        // Not canonical, a newer format, another kind, a conflict record,
-        // not JSON: each falls back to lines.
-        let spaced = String::from_utf8(ours.clone())
-            .unwrap()
-            .replace(": ", ":  ");
+        // A newer format, another kind, a conflict record, not JSON: each
+        // falls back to lines.
         let mut newer = feature_json("12 mm", [1, 0, 0]);
         newer["format"] = json!(9);
         let mut other = feature_json("12 mm", [1, 0, 0]);
@@ -1409,7 +1431,6 @@ mod tests {
         let mut conflicted = feature_json("12 mm", [1, 0, 0]);
         conflicted[CONFLICTS] = json!({});
         for theirs in [
-            spaced.into_bytes(),
             canonical(&newer),
             canonical(&other),
             canonical(&conflicted),

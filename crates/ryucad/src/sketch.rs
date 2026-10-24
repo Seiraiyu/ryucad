@@ -610,7 +610,24 @@ fn named(s: &Sketch, o: &Map<String, Value>, i: usize) -> Result<Id> {
 fn only(o: &Map<String, Value>, i: usize, fields: &[&str]) -> Result<()> {
     match o.keys().find(|k| !fields.contains(&k.as_str())) {
         None => Ok(()),
-        Some(k) => Err(op_error(i, k, format!("this op takes no {k}"))),
+        Some(k) => {
+            // The file's names for what an op takes as quantities.
+            let hint = match k.as_str() {
+                "r_m" if fields.contains(&"r") => "; a circle's radius is r",
+                "m" if fields.contains(&"at") => "; a point's position is at",
+                _ => "",
+            };
+            let accepts: Vec<&str> = fields.iter().copied().filter(|f| *f != "op").collect();
+            Err(op_error(
+                i,
+                k,
+                format!(
+                    "this op takes no {k}{hint} (it takes {})",
+                    accepts.join(", ")
+                ),
+            )
+            .with("accepts", accepts))
+        }
     }
 }
 
@@ -730,6 +747,9 @@ fn point_of(
         None => Err(op_error(i, f, format!("a {ty} needs {f}: a point's ID"))),
     }
 }
+
+/// The entity types `add` takes.
+const ENTITIES: [&str; 4] = ["point", "line", "arc", "circle"];
 
 /// Adds an entity or a constraint, and records what it added.
 fn add(
@@ -890,6 +910,22 @@ fn add(
                     "projected",
                     "only a point, line, arc or circle is projected".into(),
                 ));
+            }
+            if ConstraintType::parse(ty).is_err() {
+                let constraints: Vec<&str> =
+                    ConstraintType::ALL.iter().map(|t| t.as_str()).collect();
+                return Err(op_error(
+                    i,
+                    "type",
+                    format!(
+                        "unknown type {ty:?}: an entity ({}) or a constraint ({}); \
+                         `ryucad sketch edit --help` lists their fields",
+                        ENTITIES.join(", "),
+                        constraints.join(", ")
+                    ),
+                )
+                .with("entities", ENTITIES)
+                .with("constraints", constraints));
             }
             let mut c = o.clone();
             c.remove("op");
@@ -1495,6 +1531,20 @@ pub(crate) mod tests {
             }
             assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "{ops}");
         }
+        // A field the file names, and a type nobody knows, say what to use.
+        let e = edit(
+            &mut s,
+            json!([{"op": "add", "type": "circle", "center": "p1", "r_m": 0.01}]),
+        )
+        .unwrap_err();
+        assert!(e.message.contains("a circle's radius is r"), "{e}");
+        assert_eq!(
+            e.details["accepts"],
+            json!(["id", "type", "center", "r", "construction", "projected"])
+        );
+        let e = edit(&mut s, json!([{"op": "add", "type": "glue", "a": "l1"}])).unwrap_err();
+        assert_eq!(e.details["entities"], json!(ENTITIES));
+        assert!(e.message.contains("diameter"), "{e}");
         // The report says what is wrong.
         let e = edit(
             &mut s,

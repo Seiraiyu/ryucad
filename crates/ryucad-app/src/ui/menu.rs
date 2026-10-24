@@ -91,12 +91,13 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened, recent: &[PathBuf]) -> Option<Acti
             }
             if ui
                 .add_enabled(
-                    !selection.is_empty(),
+                    !selection.is_empty() || o.view.chosen.is_some(),
                     item(ui, "Clear selection", &CLEAR_SELECTION),
                 )
                 .clicked()
             {
                 o.ws.select(Vec::new(), SelectMode::Replace);
+                o.view.unchoose(&mut o.ws);
             }
             ui.separator();
             if ui.button("Preferences…").clicked() {
