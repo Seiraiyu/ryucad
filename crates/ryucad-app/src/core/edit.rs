@@ -1,5 +1,6 @@
 //! Editing a feature's parameters and placement, what it does to solids,
-//! an extrude's extent and a boolean's solids: the property panel's form.
+//! an extrude's extent, a boolean's solids, and a fillet's or chamfer's
+//! sizes and edges: the property panel's form.
 //! Values stay as written (quantities with their units). A save is an
 //! ordinary `feature.edit` with the revision the form was read at, so a
 //! human's stale edit fails with `conflict` like an agent's; the form then
@@ -118,6 +119,123 @@ impl ExtentForm {
     }
 }
 
+/// One group of a fillet's or chamfer's edges: its sizes (a fillet's
+/// radius; a chamfer's `d`, `d1`, `d2` or `angle`, as its form takes), its
+/// form and face as read, and its edges. Edges can be removed, not added:
+/// choosing one is an agent's work.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GroupForm {
+    /// Each size by its key in the file, with its field.
+    pub sizes: Vec<(String, Field)>,
+    /// A chamfer's form: `equal`, `distances` or `distance_angle`.
+    pub form: Option<String>,
+    /// The face a chamfer's first distance runs along.
+    pub face: Option<String>,
+    pub edges: Picks,
+}
+
+/// A fillet's or chamfer's groups, and whether it grows its edges along
+/// tangent chains.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlendForm {
+    pub groups: Vec<GroupForm>,
+    pub propagate: Flag,
+}
+
+impl BlendForm {
+    /// From a `feature.show` of a fillet or chamfer.
+    fn from_show(v: &Value) -> BlendForm {
+        let groups: Vec<&Value> = v["groups"].as_array().into_iter().flatten().collect();
+        let many = groups.len() > 1;
+        let groups = groups
+            .into_iter()
+            .enumerate()
+            .map(|(i, g)| {
+                let named = |key: &str| {
+                    if many {
+                        format!("{key} (group {})", i + 1)
+                    } else {
+                        key.to_owned()
+                    }
+                };
+                let sizes = ["radius", "d", "d1", "d2", "angle"]
+                    .into_iter()
+                    .filter(|k| !g[*k].is_null())
+                    .map(|k| (k.to_owned(), Field::new(&named(k), text(&g[k]))))
+                    .collect();
+                let edges = g["edges"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(text)
+                    .collect();
+                GroupForm {
+                    sizes,
+                    form: g["form"].as_str().map(str::to_owned),
+                    face: g["face"].as_str().map(str::to_owned),
+                    edges: Picks::new(&named("edges"), edges),
+                }
+            })
+            .collect();
+        let propagate = v["propagate"] != false;
+        BlendForm {
+            groups,
+            propagate: Flag {
+                name: "propagate".to_owned(),
+                read: propagate,
+                chosen: propagate,
+            },
+        }
+    }
+
+    fn sizes(&self) -> impl Iterator<Item = &Field> {
+        self.groups
+            .iter()
+            .flat_map(|g| g.sizes.iter().map(|(_, f)| f))
+    }
+
+    /// Whether a group's sizes or edges changed: then all of them go.
+    fn groups_dirty(&self) -> bool {
+        self.sizes().any(Field::dirty) || self.groups.iter().any(|g| g.edges.dirty())
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.groups_dirty() || self.propagate.dirty()
+    }
+
+    fn revert(&mut self) {
+        for g in &mut self.groups {
+            for (_, f) in &mut g.sizes {
+                f.text.clone_from(&f.read);
+            }
+            g.edges.chosen.clone_from(&g.edges.read);
+        }
+        self.propagate.chosen = self.propagate.read;
+    }
+
+    /// The groups as `feature.edit` takes them: every one, as typed.
+    fn groups_json(&self) -> Value {
+        let groups: Vec<Value> = self
+            .groups
+            .iter()
+            .map(|g| {
+                let mut v = json!({"edges": g.edges.chosen});
+                for (k, f) in &g.sizes {
+                    v[k] = json!(f.text.trim());
+                }
+                if let Some(form) = &g.form {
+                    v["form"] = json!(form);
+                }
+                if let Some(face) = &g.face {
+                    v["face"] = json!(face);
+                }
+                v
+            })
+            .collect();
+        json!(groups)
+    }
+}
+
 /// A value someone else changed while the form was being edited.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Changed {
@@ -151,6 +269,8 @@ pub struct Form {
     pub op: Option<Choice>,
     pub target: Option<Choice>,
     pub tools: Option<Picks>,
+    /// A fillet's or chamfer's groups.
+    pub blend: Option<BlendForm>,
     /// What changed under a save that conflicted.
     pub changed: Vec<Changed>,
     /// Why the last save failed, other than a conflict.
@@ -210,6 +330,7 @@ impl Form {
             }
         });
         let boolean = ty == "boolean";
+        let blend = matches!(ty.as_str(), "fillet" | "chamfer").then(|| BlendForm::from_show(v));
         Form {
             part: part.to_owned(),
             feature: text(&v["id"]),
@@ -225,6 +346,7 @@ impl Form {
                 .then(|| Choice::new("op", &["unite", "subtract", "intersect"], text(&v["op"]))),
             target: boolean.then(|| Choice::new("target", &[], text(&v["target"]))),
             tools: boolean.then(|| Picks::new("tools", strings(&v["tools"]))),
+            blend,
             ty,
             changed: Vec::new(),
             error: None,
@@ -265,6 +387,7 @@ impl Form {
             .chain(&self.origin)
             .chain(&self.z)
             .chain(&self.x)
+            .chain(self.blend.iter().flat_map(BlendForm::sizes))
     }
 
     /// Whether anything was typed or chosen.
@@ -279,6 +402,7 @@ impl Form {
                 .flatten()
                 .any(Picks::dirty)
             || self.extent.as_ref().is_some_and(ExtentForm::dirty)
+            || self.blend.as_ref().is_some_and(BlendForm::dirty)
     }
 
     /// Everything typed or chosen goes back as it was read.
@@ -306,6 +430,9 @@ impl Form {
             e.length.text.clone_from(&e.length.read);
             e.both.chosen = e.both.read;
         }
+        if let Some(b) = &mut self.blend {
+            b.revert();
+        }
         self.error = None;
     }
 
@@ -330,6 +457,7 @@ impl Form {
             }
             v
         });
+        let blend = self.blend.as_ref();
         FeatureFields {
             operation,
             targets,
@@ -337,6 +465,12 @@ impl Form {
             op: chosen(&self.op),
             target: chosen(&self.target),
             tools: picked(&self.tools),
+            groups: blend
+                .filter(|b| b.groups_dirty())
+                .map(BlendForm::groups_json),
+            propagate: blend
+                .filter(|b| b.propagate.dirty())
+                .map(|b| b.propagate.chosen),
             ..FeatureFields::default()
         }
     }
@@ -413,6 +547,10 @@ impl Form {
             })
             .collect();
         let choices = |f: &Form| -> Vec<(String, String, String)> {
+            let edges = f
+                .blend
+                .iter()
+                .flat_map(|b| b.groups.iter().map(|g| &g.edges));
             [&f.operation, &f.op, &f.target]
                 .into_iter()
                 .flatten()
@@ -421,6 +559,7 @@ impl Form {
                     [&f.targets, &f.tools]
                         .into_iter()
                         .flatten()
+                        .chain(edges)
                         .map(|p| (p.name.clone(), p.read.join(", "), p.chosen.join(", "))),
                 )
                 .collect()
@@ -642,6 +781,82 @@ mod tests {
             Some(vec!["boss".to_owned(), "lug".to_owned()])
         );
         assert_eq!(fields.target, None);
+    }
+
+    #[test]
+    fn a_fillets_sizes_and_edges_are_edited() {
+        let v = json!({"id": "f", "type": "fillet", "revision": "r1", "groups": [
+            {"radius": {"value": "2 mm", "m": 0.002}, "edges": ["p/b/aa", "p/b/bb"]}
+        ]});
+        let mut f = Form::from_show("p", &v);
+        assert!(f.operation.is_none() && !f.placed());
+        let b = f.blend.as_mut().unwrap();
+        assert!(b.propagate.read);
+        let (k, r) = &mut b.groups[0].sizes[0];
+        assert_eq!(
+            (k.as_str(), r.name.as_str(), r.read.as_str()),
+            ("radius", "radius", "2 mm")
+        );
+        assert!(!f.dirty());
+        // A size typed: every group goes, as typed, edges as they are.
+        f.blend.as_mut().unwrap().groups[0].sizes[0].1.text = "3 mm".into();
+        let fields = given(&f);
+        assert_eq!(
+            fields.groups,
+            Some(json!([{"radius": "3 mm", "edges": ["p/b/aa", "p/b/bb"]}]))
+        );
+        assert_eq!(fields.propagate, None);
+        // An edge taken out; propagation off.
+        let b = f.blend.as_mut().unwrap();
+        b.groups[0].edges.toggle("p/b/aa");
+        b.propagate.chosen = false;
+        let fields = given(&f);
+        assert_eq!(fields.groups.unwrap()[0]["edges"], json!(["p/b/bb"]));
+        assert_eq!(fields.propagate, Some(false));
+        f.revert();
+        assert!(!f.dirty());
+        // Changed underneath: the size is listed with what was typed.
+        f.blend.as_mut().unwrap().groups[0].sizes[0].1.text = "3 mm".into();
+        let mut w = v.clone();
+        w["groups"][0]["radius"]["value"] = json!("2.5 mm");
+        w["revision"] = json!("r2");
+        let again = f.reloaded(&w);
+        assert_eq!(
+            again.changed,
+            [Changed {
+                name: "radius".into(),
+                theirs: "2.5 mm".into(),
+                yours: "3 mm".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_chamfers_groups_keep_their_form_and_face() {
+        let v = json!({"id": "c", "type": "chamfer", "revision": "r1", "propagate": false,
+                       "groups": [
+            {"form": "equal", "d": {"value": "1 mm", "m": 0.001}, "edges": ["p/b/aa"]},
+            {"form": "distance_angle", "d": {"value": "0.5 mm", "m": 0.0005},
+             "angle": {"value": "30 deg", "rad": 0.5}, "face": "p/b/ff", "edges": ["p/b/bb"]}
+        ]});
+        let mut f = Form::from_show("p", &v);
+        let b = f.blend.as_mut().unwrap();
+        assert!(!b.propagate.read);
+        let names: Vec<&str> = b.groups[1]
+            .sizes
+            .iter()
+            .map(|(_, f)| f.name.as_str())
+            .collect();
+        assert_eq!(names, ["d (group 2)", "angle (group 2)"]);
+        b.groups[1].sizes[1].1.text = "40 deg".into();
+        assert_eq!(
+            given(&f).groups,
+            Some(json!([
+                {"form": "equal", "d": "1 mm", "edges": ["p/b/aa"]},
+                {"form": "distance_angle", "d": "0.5 mm", "angle": "40 deg", "face": "p/b/ff",
+                 "edges": ["p/b/bb"]}
+            ]))
+        );
     }
 
     #[test]

@@ -587,6 +587,62 @@ fn picks(ui: &mut egui::Ui, p: &mut crate::core::edit::Picks) {
     });
 }
 
+/// The last eight hex digits of a stable name or reference, after what it
+/// is: enough to tell a feature's edges apart.
+fn short(kind: &str, r: &str) -> String {
+    format!("{kind} {}", &r[r.len().saturating_sub(8)..])
+}
+
+/// A fillet's or chamfer's groups: each one's form, sizes and face, and
+/// its edges, each a checkbox to take it out (adding one is an agent's
+/// work); then whether its edges grow along tangent chains.
+fn blend(ui: &mut egui::Ui, b: &mut crate::core::edit::BlendForm) {
+    let many = b.groups.len() > 1;
+    for (i, g) in b.groups.iter_mut().enumerate() {
+        if many {
+            ui.label(egui::RichText::new(format!("group {}", i + 1)).strong());
+        }
+        egui::Grid::new(("blend group", i))
+            .num_columns(2)
+            .show(ui, |ui| {
+                if let Some(form) = &g.form {
+                    ui.label("form");
+                    ui.label(form);
+                    ui.end_row();
+                }
+                for (_, f) in &mut g.sizes {
+                    let name = f.name.clone();
+                    field_row(ui, f, &name);
+                }
+                if let Some(face) = &g.face {
+                    ui.label("face");
+                    ui.monospace(short("face", face)).on_hover_text(face);
+                    ui.end_row();
+                }
+            });
+        let e = &mut g.edges;
+        ui.label(format!(
+            "{}: {} of {}",
+            e.name,
+            e.chosen.len(),
+            e.options.len()
+        ));
+        ui.horizontal_wrapped(|ui| {
+            for o in e.options.clone() {
+                let mut on = e.chosen.contains(&o);
+                if ui
+                    .checkbox(&mut on, short("edge", &o))
+                    .on_hover_text(&o)
+                    .changed()
+                {
+                    e.toggle(&o);
+                }
+            }
+        });
+    }
+    ui.checkbox(&mut b.propagate.chosen, "propagate along tangent chains");
+}
+
 fn field_row(ui: &mut egui::Ui, f: &mut crate::core::edit::Field, label: &str) {
     ui.label(label);
     let edit = egui::TextEdit::singleline(&mut f.text).desired_width(110.0);
@@ -799,6 +855,9 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
             choice_row(ui, c);
         }
     });
+    if let Some(b) = &mut form.blend {
+        blend(ui, b);
+    }
     // What it acts on: none for a new solid.
     let new = form.operation.as_ref().is_some_and(|o| o.chosen == "new");
     for p in [&mut form.targets, &mut form.tools].into_iter().flatten() {

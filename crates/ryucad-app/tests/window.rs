@@ -605,6 +605,55 @@ fn a_parameter_is_edited_in_the_property_panel() {
 }
 
 #[test]
+fn a_fillets_radius_is_edited_in_the_property_panel() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    // The base's vertical edge at x = 20, y = 10 mm.
+    let body = p.ok(&["inspect", "p", "base"])["bodies"][0].clone();
+    let corner = body["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| {
+            let dir = &e["curve"]["dir"];
+            let o = &e["curve"]["origin"];
+            e["curve"]["type"] == "line"
+                && dir[2].as_f64().unwrap().abs() == 1.0
+                && (o[0].as_f64().unwrap() - 0.02).abs() < 1e-12
+                && (o[1].as_f64().unwrap() - 0.01).abs() < 1e-12
+        })
+        .map(|e| format!("p/base/{}", e["name"].as_str().unwrap()))
+        .unwrap();
+    p.ok(&[
+        "feature", "add", "p", "fillet", "--id", "round", "--radius", "1", "--edge", &corner,
+    ]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("round (fillet)").click();
+    frames(&mut h, |a| a.opened().ws.form.is_some());
+    h.step();
+    // Its edge and propagation are shown; its radius is typed over.
+    h.get_by_label(&format!("edge {}", &corner[corner.len() - 8..]));
+    h.get_by_label("propagate along tangent chains");
+    let field = h.get_all_by_value("1 mm").next().unwrap();
+    field.set_text_value_accesskit("1.5 mm");
+    h.step();
+    h.get_by_label("Apply").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
+    });
+    let shown = p.ok(&["feature", "show", "p", "round"]);
+    assert_eq!(shown["groups"][0]["radius"]["value"], "1.5 mm");
+}
+
+#[test]
 fn the_activity_tab_undoes_and_ctrl_z_does_too() {
     let _one = one_at_a_time();
     if !gpu() {
