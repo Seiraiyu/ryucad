@@ -93,7 +93,7 @@ fn reference(v: &Value) -> Option<String> {
 }
 
 /// Every leaf of `v` as `path = value`, objects by key with `.`, arrays of
-/// leaves on one line, other arrays by index.
+/// leaves or of references on one line, other arrays by index.
 fn flatten(path: &str, v: &Value, out: &mut Vec<String>) {
     let at = |key: &str| {
         if path.is_empty() {
@@ -115,6 +115,11 @@ fn flatten(path: &str, v: &Value, out: &mut Vec<String>) {
         }
         Value::Array(a) if a.iter().all(|x| !x.is_object() && !x.is_array()) => {
             let items: Vec<String> = a.iter().map(scalar).collect();
+            out.push(format!("{path} = [{}]", items.join(", ")));
+        }
+        // A fillet's or chamfer's edges, one value as a merge sees them.
+        Value::Array(a) if !a.is_empty() && a.iter().all(|x| reference(x).is_some()) => {
+            let items: Vec<String> = a.iter().filter_map(reference).collect();
             out.push(format!("{path} = [{}]", items.join(", ")));
         }
         Value::Array(a) => {
@@ -953,6 +958,37 @@ mod tests {
              op = subtract\n\
              target = a\n\
              tools = [t, u]\n"
+        );
+        // A fillet's groups by index, each group's edges on one line.
+        let fillet = json!({
+            "format": 3, "kind": "ryucad.feature", "propagate": false, "type": "fillet",
+            "groups": [{"radius": "2 mm", "edges": [{"feature": "a", "name": "00aa"},
+                                                   {"feature": "a", "name": "00bb"}]},
+                       {"radius": "r", "edges": [{"feature": "a", "name": "00cc"}]}],
+        });
+        assert_eq!(
+            text(fillet),
+            "ryucad.feature fillet (format 3)\n\
+             groups.0.edges = [a/00aa, a/00bb]\n\
+             groups.0.radius = 2 mm\n\
+             groups.1.edges = [a/00cc]\n\
+             groups.1.radius = r\n\
+             propagate = false\n"
+        );
+        let chamfer = json!({
+            "format": 3, "kind": "ryucad.feature", "type": "chamfer",
+            "groups": [{"form": "distances", "d1": "1 mm", "d2": "2 mm",
+                        "face": {"feature": "a", "name": "00dd"},
+                        "edges": [{"feature": "a", "name": "00aa"}]}],
+        });
+        assert_eq!(
+            text(chamfer),
+            "ryucad.feature chamfer (format 3)\n\
+             groups.0.d1 = 1 mm\n\
+             groups.0.d2 = 2 mm\n\
+             groups.0.edges = [a/00aa]\n\
+             groups.0.face = a/00dd\n\
+             groups.0.form = distances\n"
         );
     }
 

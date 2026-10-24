@@ -236,7 +236,8 @@ fn transform(
 }
 
 /// `v` with every node `change` gives a new value replaced by it; objects
-/// are walked into, anything else is a leaf.
+/// and arrays (a fillet's groups, their edges) are walked into, anything
+/// else is a leaf.
 fn rewrite(
     v: &Value,
     pointer: &str,
@@ -254,6 +255,12 @@ fn rewrite(
                 })
                 .collect(),
         ),
+        Value::Array(a) => Value::Array(
+            a.iter()
+                .enumerate()
+                .map(|(i, x)| rewrite(x, &format!("{pointer}/{i}"), change))
+                .collect(),
+        ),
         _ => v.clone(),
     }
 }
@@ -264,11 +271,14 @@ fn feature_of<'a>(path: &'a str, part: &str) -> Option<&'a str> {
         .strip_suffix(".json")
 }
 
-/// Theirs' files with `r` applied everywhere: what theirs would have been
-/// had it used the new ID.
-fn renumbered(files: &Files, r: &Rename) -> Files {
+/// Theirs' files with `r` applied everywhere, references' names mapped
+/// through `names`: what theirs would have been had it used the new ID.
+fn renumbered(
+    files: &Files,
+    r: &Rename,
+    names: &BTreeMap<String, BTreeMap<String, String>>,
+) -> Files {
     let part = r.part();
-    let none = BTreeMap::new();
     let mut out = Files::new();
     for (path, b) in files {
         let Some(f) = feature_of(path, part) else {
@@ -279,7 +289,7 @@ fn renumbered(files: &Files, r: &Rename) -> Files {
             out.insert(path.clone(), b.clone());
             continue;
         };
-        let mut v = rewrite(&v, "", &mut |p, n| transform(r, &none, &v, f, p, n));
+        let mut v = rewrite(&v, "", &mut |p, n| transform(r, names, &v, f, p, n));
         let mut path = path.clone();
         match r {
             Rename::Feature { from, to, .. } if f == from => {
@@ -343,8 +353,10 @@ fn bodies(
 
 /// Which name of each of theirs' solids became which under `r`, by the
 /// solid as theirs calls it, across every state of it a reference may
-/// read; `None` when some state's pairing isn't one to one, or a name
-/// would map two ways.
+/// read; `None` when some state's pairing isn't one to one, a name would
+/// map two ways, or a state never builds. A state that reads names of a
+/// renamed one (a fillet's edges) builds once those are mapped: each
+/// round maps what built and builds again with it.
 fn names(
     root: &Path,
     theirs: &Files,
@@ -352,28 +364,41 @@ fn names(
 ) -> Option<BTreeMap<String, BTreeMap<String, String>>> {
     let part = r.part();
     let before = bodies(root, theirs, part)?;
-    let after = bodies(root, &renumbered(theirs, r), part)?;
     let renamed = |f: &String| match r {
         Rename::Feature { from, to, .. } if f == from => to.clone(),
         _ => f.clone(),
     };
     let mut out: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    for ((solid, f), body) in &before {
-        let other = after.get(&(renamed(solid), renamed(f)))?;
-        let map = crate::diff::match_names(body, other)?;
-        let names = out.entry(solid.clone()).or_default();
-        for (a, b) in map {
-            if names.get(&a).is_some_and(|was| *was != b) {
-                return None;
+    loop {
+        let after = bodies(root, &renumbered(theirs, r, &out), part)?;
+        let mut next: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        let mut unbuilt = false;
+        for ((solid, f), body) in &before {
+            let Some(other) = after.get(&(renamed(solid), renamed(f))) else {
+                unbuilt = true;
+                continue;
+            };
+            let map = crate::diff::match_names(body, other)?;
+            let names = next.entry(solid.clone()).or_default();
+            for (a, b) in map {
+                if names.get(&a).is_some_and(|was| *was != b) {
+                    return None;
+                }
+                names.insert(a, b);
             }
-            names.insert(a, b);
         }
+        for m in next.values_mut() {
+            m.retain(|a, b| a != b);
+        }
+        next.retain(|_, m| !m.is_empty());
+        if !unbuilt {
+            return Some(next);
+        }
+        if next == out {
+            return None;
+        }
+        out = next;
     }
-    for m in out.values_mut() {
-        m.retain(|a, b| a != b);
-    }
-    out.retain(|_, m| !m.is_empty());
-    Some(out)
 }
 
 /// The renumbering and its file changes for the collision `c` at
