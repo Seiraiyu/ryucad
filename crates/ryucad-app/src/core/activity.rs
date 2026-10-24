@@ -65,6 +65,11 @@ impl Activity {
             Some("undo") => reverted("undo"),
             Some("redo") => reverted("redo"),
             Some("external") => format!("files changed: {}", touched(e)),
+            // Git refs, not files: release.sync's tags.
+            Some("refs") => format!(
+                "{}: local release tags",
+                e["method"].as_str().unwrap_or("release.sync")
+            ),
             _ => {
                 let method = e["method"].as_str().unwrap_or_default();
                 match touched(e) {
@@ -142,6 +147,7 @@ mod tests {
              "files": [{"path": "ryucad.json", "change": "modified"}]},
             {"seq": 10, "kind": "undo", "target": 7, "files": []},
             {"seq": 11, "kind": "undo", "target": 2, "files": []},
+            {"seq": 12, "kind": "refs", "method": "release.sync", "files": []},
         ]));
         let d: Vec<String> = a.entries.iter().map(|e| a.describe(e)).collect();
         assert_eq!(
@@ -152,6 +158,7 @@ mod tests {
                 "files changed: ryucad.json",
                 "undo of feature.edit p/boss",
                 "undo of an earlier change",
+                "release.sync: local release tags",
             ]
         );
     }
