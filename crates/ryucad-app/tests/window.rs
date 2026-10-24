@@ -24,9 +24,14 @@ fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn window(p: &Project) -> Harness<'static, App> {
+    sized(p, 700.0)
+}
+
+/// A window `height` tall: the right panel's lower sections need room.
+fn sized(p: &Project, height: f32) -> Harness<'static, App> {
     let root = p.root.clone();
     Harness::builder()
-        .with_size(egui::vec2(1000.0, 700.0))
+        .with_size(egui::vec2(1000.0, height))
         .wgpu()
         .build_eframe(move |cc| App::open(&cc.egui_ctx, Some(&root), ryucad()))
 }
@@ -61,6 +66,18 @@ fn frames(h: &mut Harness<'static, App>, done: impl Fn(&App) -> bool) {
         assert!(t.elapsed() < Duration::from_secs(30), "timed out");
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Runs frames until something labelled `label` shows: a dialog takes a
+/// frame or two to appear.
+fn shown(h: &mut Harness<'static, App>, label: &str) {
+    for _ in 0..20 {
+        h.step();
+        if h.query_by_label(label).is_some() {
+            return;
+        }
+    }
+    panic!("{label} never showed");
 }
 
 fn click(h: &Harness<'static, App>, pos: egui::Pos2) {
@@ -1345,4 +1362,135 @@ fn a_merge_conflict_is_settled_from_its_panel() {
     h.step();
     assert!(h.query_by_label("merge in progress").is_none());
     assert!(!h.state().title().contains("in progress"));
+}
+
+#[test]
+fn parts_show_their_release_state_and_a_compare_marks_proposals() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["pdm", "init"]);
+    p.ok(&["props", "set", "p", "number=100"]);
+    let p = p.committed();
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        loaded(a) && a.opened().ws.states.get("p").is_some()
+    });
+    h.step();
+    h.get_by_label("p (in work)");
+    p.ok(&["release", "propose", "p"]);
+    frames(&mut h, |a| {
+        a.opened().ws.states.badge("p").as_deref() == Some("in work, A proposed")
+    });
+    h.step();
+    h.get_by_label("p (in work, A proposed)");
+    // Compared with HEAD, the part is marked with what it proposes, and
+    // its changes listed with a feature's.
+    menu(&mut h, "View", "Compare with HEAD");
+    frames(&mut h, |a| {
+        compared(a)
+            && a.opened()
+                .ws
+                .compare
+                .as_ref()
+                .is_some_and(|c| c.pdm.contains_key("p"))
+    });
+    h.step();
+    h.get_by_label("p (in work, A proposed) [proposes A]");
+    h.get_by_label("base (box)").click();
+    frames(&mut h, |a| a.opened().view.chosen.is_some());
+    h.step();
+    h.get_by_label("Part p");
+    h.get_by_label("state: in work -> in work, A proposed");
+}
+
+#[test]
+fn a_property_is_edited_in_the_part_section_and_pdm_set_up() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = sized(&p, 1200.0);
+    frames(&mut h, |a| {
+        let o = a.opened();
+        loaded(a) && o.ws.props.is_some() && o.ws.pdm_config.is_some()
+    });
+    h.step();
+    h.get_by_label("Properties of p");
+    // No ID yet: PDM is set up from the window.
+    h.get_by_label("Set up PDM").click();
+    frames(&mut h, |a| a.opened().ws.pdm_ready());
+    h.step();
+    assert!(h.query_by_label("Set up PDM").is_none());
+    h.get_by_label("number *").click();
+    let field = h.get_by_label("number *");
+    field.set_text_value_accesskit("100-0042");
+    h.step();
+    h.get_by_label("Apply properties").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .props
+            .as_ref()
+            .is_some_and(|p| !p.saving && !p.dirty() && p.props[0].field.read == "100-0042")
+    });
+    let got = p.ok(&["props", "show", "p"]);
+    assert_eq!(got["properties"][0]["value"], "100-0042");
+}
+
+#[test]
+fn a_release_is_proposed_synced_and_made_obsolete_from_the_releases_tab() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["pdm", "init"]);
+    p.ok(&["props", "set", "p", "number=100"]);
+    let p = p.committed();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("Releases").click();
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.releases.list.is_some()
+    });
+    h.step();
+    h.get_by_label("Releases of p");
+    h.get_by_label("No release records yet");
+    // Propose: the dialog says the label, then the record is written.
+    h.get_by_label("Propose…").click();
+    frames(&mut h, |a| a.opened().ws.releases.proposal.is_some());
+    shown(&mut h, "It will be revision A.");
+    h.get_by_label("Note").click();
+    h.get_by_label("Note").set_text_value_accesskit("first");
+    h.step();
+    h.get_by_label("Propose").click();
+    frames(&mut h, |a| a.opened().ws.releases.records("p").len() == 1);
+    shown(&mut h, "wrote releases/p/A.json");
+    assert!(h.query_by_label("It will be revision A.").is_none());
+    // Official once main holds it; its tag is synced after confirming.
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "release p A"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && !a.opened().ws.releases.to_sync().is_empty()
+    });
+    h.step();
+    h.get_by_label("Sync tags…").click();
+    shown(&mut h, "create ryupdm/p/A");
+    h.get_by_label("Sync").click();
+    frames(&mut h, |a| {
+        let t = &a.opened().ws.releases;
+        a.opened().ws.idle() && !t.busy && t.done.is_some() && t.to_sync().is_empty()
+    });
+    shown(&mut h, "tags: 1 created, 0 moved");
+    // Obsolete, confirmed.
+    h.get_by_label("Obsolete…").click();
+    shown(&mut h, "Make obsolete");
+    h.get_by_label("Make obsolete").click();
+    frames(&mut h, |a| a.opened().ws.releases.records("p").len() == 2);
+    let list = p.ok(&["release", "list", "p"]);
+    assert_eq!(list["records"][1]["kind"], "obsolete");
 }
