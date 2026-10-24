@@ -318,6 +318,8 @@ impl Opened {
                     panels::properties(ui, &mut self.ws);
                     ui.separator();
                     panels::parameters(ui, &mut self.ws, &self.view);
+                    ui.separator();
+                    panels::part_section(ui, &mut self.ws, &self.view);
                 });
             });
         egui::CentralPanel::no_frame().show(ui, |ui| self.view.show(ui, &mut self.ws, gpu));
