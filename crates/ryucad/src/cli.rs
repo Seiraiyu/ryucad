@@ -315,6 +315,10 @@ enum Command {
         /// working files), so renders of each revision share a camera.
         #[arg(long = "frame", value_name = "REV", conflicts_with_all = ["of", "eye"])]
         frame: Vec<String>,
+        /// Paint faces new and changed since this revision, and ghost its
+        /// model with the faces it loses in red.
+        #[arg(long, value_name = "REV")]
+        compare: Option<String>,
     },
     /// What the merge (or cherry-pick, revert or rebase step) Git is in the
     /// middle of leaves to settle.
@@ -1290,6 +1294,7 @@ fn request(cmd: &Command) -> Option<Request> {
             no_sketches,
             rev,
             frame,
+            compare,
         } => Request::Render {
             part: part.clone(),
             camera: camera_arg(eye, target, up, fov, ortho),
@@ -1303,6 +1308,7 @@ fn request(cmd: &Command) -> Option<Request> {
             sketches: Some(!no_sketches),
             rev: rev.rev.clone(),
             frame: frame.clone(),
+            compare: compare.clone(),
         },
         Command::Highlight {
             entities,

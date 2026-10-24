@@ -1963,6 +1963,50 @@ fn renders_a_committed_revision() {
         "rev_not_found",
         1,
     );
+    let c = p.ok(&[
+        "render",
+        "--out",
+        "c.png",
+        "--size",
+        "160x120",
+        "--compare",
+        "HEAD",
+    ]);
+    assert_eq!(
+        c["compare"],
+        serde_json::json!({"rev": "HEAD", "commit": head})
+    );
+    let (_, _, px) = pixels(&p.direct.join("c.png"));
+    // The box's changed faces in the compare's orange.
+    assert!(
+        px.chunks(4).any(|q| q[0] > 200 && q[1] > 120 && q[2] < 90),
+        "changed orange"
+    );
+    assert_eq!(
+        pixels(&p.direct.join("c.png")),
+        pixels(&p.daemon.join("c.png"))
+    );
+    // Against itself, nothing differs: the render is the plain one.
+    let same = p.ok(&[
+        "render",
+        "--out",
+        "s.png",
+        "--size",
+        "160x120",
+        "--compare",
+        "working",
+    ]);
+    let plain = p.ok(&["render", "--out", "w.png", "--size", "160x120"]);
+    assert_eq!(same["camera"], plain["camera"]);
+    assert_eq!(
+        pixels(&p.direct.join("s.png")),
+        pixels(&p.direct.join("w.png"))
+    );
+    p.fails(
+        &["render", "--out", "x.png", "--compare", "nowhere"],
+        "rev_not_found",
+        1,
+    );
     p.fails(
         &["render", "--out", "x.png", "--rev", "nowhere"],
         "rev_not_found",
