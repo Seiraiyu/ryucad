@@ -745,6 +745,20 @@ fn a_damaged_project_is_repaired_then_opened() {
     // It says so.
     h.get_by_label("This project is repaired and ready to open");
     assert!(h.query_by_label("This project needs repair").is_none());
+    // What a repair would change is said only while one is left to make.
+    let left = match &h.state().screen {
+        ryucad_app::ui::app::Screen::Damaged(d) => d.0.report.as_ref().unwrap()["issues"]
+            .as_array()
+            .is_some_and(|i| !i.is_empty()),
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        h.query_by_label(
+            "Nothing is changed until you choose a repair, and a repair changes only the files in its planned changes. Git has the files as they were committed.",
+        )
+        .is_some(),
+        left
+    );
     h.get_by_label("Open project").click();
     frames(&mut h, |a| {
         matches!(a.screen, ryucad_app::ui::app::Screen::Opened(_)) && loaded(a)
