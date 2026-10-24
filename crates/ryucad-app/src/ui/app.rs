@@ -3,6 +3,7 @@
 //! status line), or a damaged project being repaired.
 
 use crate::core::doctor::Offline;
+use crate::core::geometry::{self, Geometry, Tracker};
 use crate::core::link::Wake;
 use crate::core::nav::Navigation;
 use crate::core::workspace::Workspace;
@@ -52,6 +53,11 @@ pub fn open_workspace(root: &Path, daemon: &Daemon, wake: Wake) -> Result<Worksp
     Workspace::open(root, daemon, &name, wake)
 }
 
+/// The window geometry the `app.window` preference holds, if sensible.
+pub fn saved_geometry() -> Option<Geometry> {
+    Geometry::from_value(&ryucad::config::user("app.window"))
+}
+
 /// The `ui.style` preference as the preferences file has it.
 fn user_look() -> Look {
     Look::parse(
@@ -97,6 +103,8 @@ pub struct App {
     pick: bool,
     /// A Ctrl+click (macOS) is down, so its release is a right one too.
     ctrl_click: bool,
+    /// The window's size, saved in `app.window` once it settles.
+    geometry: Tracker,
 }
 
 impl App {
@@ -116,6 +124,7 @@ impl App {
             shown: false,
             pick: false,
             ctrl_click: false,
+            geometry: Tracker::new(saved_geometry()),
         };
         if let Some(dir) = dir {
             app.go(dir);
@@ -410,6 +419,31 @@ impl Opened {
     }
 }
 
+impl App {
+    /// Saves the window's size once it settles, through the open project's
+    /// `config.set` (the start window has no daemon to ask).
+    fn keep_geometry(&mut self, ctx: &egui::Context) {
+        let Screen::Opened(o) = &mut self.screen else {
+            return;
+        };
+        // The viewport rect is the window's inner size in points.
+        let (r, maximized) = ctx.input(|i| (i.viewport_rect(), i.viewport().maximized));
+        let size = [r.width(), r.height()];
+        if let Some(g) = self
+            .geometry
+            .observe(size, maximized.unwrap_or(false), Instant::now())
+        {
+            o.ws.set_config(
+                "app.window",
+                g.into_value(&ryucad::config::user("app.window")),
+            );
+        }
+        if self.geometry.pending() {
+            ctx.request_repaint_after(geometry::SETTLE);
+        }
+    }
+}
+
 impl eframe::App for App {
     /// On macOS, Ctrl+click is a right-click.
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
@@ -426,6 +460,7 @@ impl eframe::App for App {
         }
         let gpu = frame.wgpu_render_state().cloned();
         self.frame(ui, gpu.as_ref());
+        self.keep_geometry(ui.ctx());
         if std::mem::take(&mut self.pick) {
             if let Some(dir) = start::pick_folder(frame) {
                 self.go(&dir);

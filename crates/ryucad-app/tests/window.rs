@@ -189,6 +189,29 @@ fn the_trees_choice_follows_what_is_picked_and_cleared() {
 }
 
 #[test]
+fn the_window_keeps_its_size() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    // Once it has held still, the size goes to `app.window`, from which
+    // the next window opens.
+    let saved = |p: &Project| p.ok(&["config", "get", "app.window"])["value"].clone();
+    let t = Instant::now();
+    while saved(&p)["size"] != serde_json::json!([1000.0, 700.0]) {
+        assert!(t.elapsed() < Duration::from_secs(30), "{}", saved(&p));
+        h.step();
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(saved(&p)["maximized"], false);
+    let g = ryucad_app::ui::app::saved_geometry().unwrap();
+    assert_eq!(g.size, [1000.0, 700.0]);
+}
+
+#[test]
 fn the_tree_groups_features_by_solid() {
     let _one = one_at_a_time();
     if !gpu() {

@@ -51,10 +51,13 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // The size the last window was left at (`app.window`), else 1280×800.
+    let saved = ryucad_app::ui::app::saved_geometry();
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("ryucad")
-            .with_inner_size([1280.0, 800.0]),
+            .with_inner_size(saved.map_or([1280.0, 800.0], |g| g.size))
+            .with_maximized(saved.is_some_and(|g| g.maximized)),
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: platform::wgpu_options(),
         ..Default::default()
