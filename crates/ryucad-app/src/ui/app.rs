@@ -299,7 +299,15 @@ impl Opened {
         egui::Panel::bottom("journal")
             .resizable(true)
             .default_size(240.0)
-            .show(ui, |ui| panels::journal(ui, &mut self.ws, &mut self.tab));
+            .show(ui, |ui| {
+                let part = self
+                    .view
+                    .chosen
+                    .as_ref()
+                    .map(|k| k.0.clone())
+                    .or_else(|| self.ws.model.parts.keys().next().cloned());
+                panels::journal(ui, &mut self.ws, &mut self.tab, part.as_deref());
+            });
         egui::Panel::left("tree")
             .resizable(true)
             .default_size(220.0)
@@ -326,6 +334,7 @@ impl Opened {
         let view = self.view.rect;
         dialogs::settings(&ctx, &mut self.ws, &mut self.dialogs.settings, view);
         dialogs::preferences(&ctx, &mut self.ws, &mut self.dialogs.preferences, view);
+        panels::release_dialogs(&ctx, &mut self.ws, view);
         doctor::dialog(
             &ctx,
             &mut self.ws,

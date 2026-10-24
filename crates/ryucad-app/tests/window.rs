@@ -68,6 +68,18 @@ fn frames(h: &mut Harness<'static, App>, done: impl Fn(&App) -> bool) {
     }
 }
 
+/// Runs frames until something labelled `label` shows: a dialog takes a
+/// frame or two to appear.
+fn shown(h: &mut Harness<'static, App>, label: &str) {
+    for _ in 0..20 {
+        h.step();
+        if h.query_by_label(label).is_some() {
+            return;
+        }
+    }
+    panic!("{label} never showed");
+}
+
 fn click(h: &Harness<'static, App>, pos: egui::Pos2) {
     h.event(egui::Event::PointerMoved(pos));
     for pressed in [true, false] {
@@ -1281,4 +1293,58 @@ fn a_property_is_edited_in_the_part_section_and_pdm_set_up() {
     });
     let got = p.ok(&["props", "show", "p"]);
     assert_eq!(got["properties"][0]["value"], "100-0042");
+}
+
+#[test]
+fn a_release_is_proposed_synced_and_made_obsolete_from_the_releases_tab() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["pdm", "init"]);
+    p.ok(&["props", "set", "p", "number=100"]);
+    let p = p.committed();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("Releases").click();
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.releases.list.is_some()
+    });
+    h.step();
+    h.get_by_label("Releases of p");
+    h.get_by_label("No release records yet");
+    // Propose: the dialog says the label, then the record is written.
+    h.get_by_label("Propose…").click();
+    frames(&mut h, |a| a.opened().ws.releases.proposal.is_some());
+    shown(&mut h, "It will be revision A.");
+    h.get_by_label("Note").click();
+    h.get_by_label("Note").set_text_value_accesskit("first");
+    h.step();
+    h.get_by_label("Propose").click();
+    frames(&mut h, |a| a.opened().ws.releases.records("p").len() == 1);
+    shown(&mut h, "wrote releases/p/A.json");
+    assert!(h.query_by_label("It will be revision A.").is_none());
+    // Official once main holds it; its tag is synced after confirming.
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "release p A"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && !a.opened().ws.releases.to_sync().is_empty()
+    });
+    h.step();
+    h.get_by_label("Sync tags…").click();
+    shown(&mut h, "create ryupdm/p/A");
+    h.get_by_label("Sync").click();
+    frames(&mut h, |a| {
+        let t = &a.opened().ws.releases;
+        a.opened().ws.idle() && !t.busy && t.done.is_some() && t.to_sync().is_empty()
+    });
+    shown(&mut h, "tags: 1 created, 0 moved");
+    // Obsolete, confirmed.
+    h.get_by_label("Obsolete…").click();
+    shown(&mut h, "Make obsolete");
+    h.get_by_label("Make obsolete").click();
+    frames(&mut h, |a| a.opened().ws.releases.records("p").len() == 2);
+    let list = p.ok(&["release", "list", "p"]);
+    assert_eq!(list["records"][1]["kind"], "obsolete");
 }
