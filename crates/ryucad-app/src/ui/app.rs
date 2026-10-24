@@ -103,6 +103,8 @@ pub struct App {
     pick: bool,
     /// A Ctrl+click (macOS) is down, so its release is a right one too.
     ctrl_click: bool,
+    /// The window's inner size, in points, and its scale at the last frame.
+    size: Option<(egui::Vec2, f32)>,
     /// The window's size, saved in `app.window` once it settles.
     geometry: Tracker,
 }
@@ -123,6 +125,7 @@ impl App {
             titled: None,
             shown: false,
             pick: false,
+            size: None,
             ctrl_click: false,
             geometry: Tracker::new(saved_geometry()),
         };
@@ -272,11 +275,14 @@ impl Opened {
         gpu: Option<&eframe::egui_wgpu::RenderState>,
     ) -> Option<menu::Action> {
         let ctx = ui.ctx().clone();
+        // Before the menus draw: an Escape that closes one is theirs.
+        let popup_open = egui::Popup::is_any_open(&ctx);
         self.ws.pump();
         // `ryucad open` asked for this window.
         if std::mem::take(&mut self.ws.raised) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            for c in crate::ui::platform::raise(crate::ui::platform::wayland()) {
+                ctx.send_viewport_cmd(c);
+            }
         }
         self.read_recent();
         self.ws.tick(Instant::now());
@@ -302,7 +308,7 @@ impl Opened {
                 panels::compare_bar(ui, &mut self.ws, &mut self.compare_with);
             });
         }
-        let action = action.or(self.shortcuts(&ctx));
+        let action = action.or(self.shortcuts(&ctx, popup_open));
         egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &self.ws));
         // Room for about ten entries; drag its top edge for more.
         egui::Panel::bottom("journal")
@@ -388,9 +394,10 @@ impl Opened {
     /// Ctrl/Cmd+Z undoes this window's latest change, Shift+Ctrl/Cmd+Z or
     /// Ctrl+Y redoes, and Escape clears the selection; not while a text
     /// field has the keyboard (it has its own), and Escape not while a menu
-    /// or popup is open (it closes those).
+    /// or popup is open (it closes those): `popup_open` says whether one
+    /// was when the frame began, since the menus have closed it by now.
     /// The keyboard shortcuts; returns what they ask of the app.
-    fn shortcuts(&mut self, ctx: &egui::Context) -> Option<menu::Action> {
+    fn shortcuts(&mut self, ctx: &egui::Context, popup_open: bool) -> Option<menu::Action> {
         // Closing works from a text field too, as in any other app.
         if ctx.input_mut(|i| i.consume_shortcut(&menu::CLOSE)) {
             return Some(menu::Action::Close);
@@ -405,7 +412,8 @@ impl Opened {
         }
         // Esc clears the selection and the tree's choice with it.
         let selected = self.ws.myself().is_some_and(|m| !m.selection.is_empty());
-        if !egui::Popup::is_any_open(ctx)
+        if !popup_open
+            && !egui::Popup::is_any_open(ctx)
             && (selected || self.view.chosen.is_some())
             && ctx.input_mut(|i| i.consume_shortcut(&menu::CLEAR_SELECTION))
         {
@@ -420,6 +428,32 @@ impl Opened {
 }
 
 impl App {
+    /// Brings the window back onto its monitor when a change of size left
+    /// it past it ([`crate::ui::platform::keep_on_screen`]).
+    fn keep_on_screen(&mut self, ctx: &egui::Context) {
+        let info = ctx.input(|i| i.viewport().clone());
+        let (Some(inner), Some(outer), Some(monitor)) =
+            (info.inner_rect, info.outer_rect, info.monitor_size)
+        else {
+            return;
+        };
+        let full = info.maximized == Some(true) || info.fullscreen == Some(true);
+        let now = (inner.size(), info.native_pixels_per_point.unwrap_or(1.0));
+        // The first frame has nothing to compare with.
+        let resized = self.size.replace(now).is_some_and(|(size, scale)| {
+            (size - now.0).length() >= 0.5 || (scale - now.1).abs() > 1e-3
+        });
+        if full {
+            return;
+        }
+        if let Some((size, pos)) =
+            crate::ui::platform::keep_on_screen(resized, inner, outer, monitor)
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+        }
+    }
+
     /// Saves the window's size once it settles, through the open project's
     /// `config.set` (the start window has no daemon to ask).
     fn keep_geometry(&mut self, ctx: &egui::Context) {
@@ -456,8 +490,10 @@ impl eframe::App for App {
         // A new window to the front: on Windows it otherwise stays behind
         // whatever was in front when it was started.
         if !std::mem::replace(&mut self.shown, true) {
+            crate::ui::platform::note_display(frame);
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
         }
+        self.keep_on_screen(ui.ctx());
         let gpu = frame.wgpu_render_state().cloned();
         self.frame(ui, gpu.as_ref());
         self.keep_geometry(ui.ctx());

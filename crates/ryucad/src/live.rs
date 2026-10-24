@@ -270,14 +270,42 @@ impl Live {
         gone
     }
 
+    /// Participant `id`, or the one named `id` (`--of agent`, `--of "dana
+    /// (window 1)"`): an ID first, then a name only one participant has.
     pub fn get(&self, id: &str) -> Result<&Participant> {
-        self.participants.get(id).ok_or_else(|| no_participant(id))
+        let id = self.resolve(id)?;
+        Ok(&self.participants[&id])
     }
 
     pub fn get_mut(&mut self, id: &str) -> Result<&mut Participant> {
-        self.participants
-            .get_mut(id)
-            .ok_or_else(|| no_participant(id))
+        let id = self.resolve(id)?;
+        Ok(self.participants.get_mut(&id).expect("just resolved"))
+    }
+
+    fn resolve(&self, id: &str) -> Result<String> {
+        if self.participants.contains_key(id) {
+            return Ok(id.to_owned());
+        }
+        let named: Vec<&Participant> = self
+            .participants
+            .values()
+            .filter(|p| p.name == id)
+            .collect();
+        match named.as_slice() {
+            [] => Err(no_participant(id)),
+            [one] => Ok(one.id.clone()),
+            many => Err(Error::new(
+                Code::AmbiguousParticipant,
+                format!(
+                    "{} participants are named {id}; name one by its ID",
+                    many.len()
+                ),
+            )
+            .with(
+                "participants",
+                many.iter().map(|p| p.to_json()).collect::<Vec<_>>(),
+            )),
+        }
     }
 
     /// The participant a request is about: `id` if given, otherwise the
@@ -507,6 +535,25 @@ mod tests {
         assert_eq!(live.participants().count(), 4);
         let e = live.hello(Kind::Agent, Some(" "), None).unwrap_err();
         assert_eq!(e.code, Code::InvalidParam);
+    }
+
+    #[test]
+    fn participants_are_named_by_id_or_name() {
+        let mut live = Live::new();
+        let a = live.hello(Kind::Agent, None, None).unwrap();
+        let r = live.hello(Kind::Agent, Some("reviewer"), None).unwrap();
+        assert_eq!(live.get("agent").unwrap().id, a);
+        assert_eq!(live.get_mut("reviewer").unwrap().id, r);
+        assert_eq!(live.target(Some("reviewer")).unwrap().unwrap().id, r);
+        assert_eq!(live.get("nobody").unwrap_err().code, Code::NotFound);
+        let h1 = live.hello(Kind::Human, Some("dana"), None).unwrap();
+        let h2 = live.hello(Kind::Human, Some("dana"), None).unwrap();
+        assert_eq!(live.get(&h2).unwrap().id, h2);
+        assert_ne!(h1, h2);
+        assert_eq!(
+            live.get("dana").unwrap_err().code,
+            Code::AmbiguousParticipant
+        );
     }
 
     #[test]

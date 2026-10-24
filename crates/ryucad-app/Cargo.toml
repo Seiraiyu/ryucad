@@ -16,6 +16,11 @@ rfd = "0.17"
 ryucad = { path = "../ryucad" }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 
+# Only for a feature of eframe's winit: on Wayland compositors that leave
+# decorations to the window (GNOME), a title bar that shows the title.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["wayland-csd-adwaita"] }
+
 [dev-dependencies]
 divan = "0.1"
 egui_kittest = { version = "0.37", features = ["eframe", "snapshot", "wgpu"] }

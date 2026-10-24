@@ -6,5 +6,5 @@ Comment=Watch, point at and adjust what agents build
 Exec=@EXEC@ %f
 Terminal=false
 Categories=Graphics;Engineering;
-MimeType=inode/directory;application/x-ryucad-project;
+MimeType=application/x-ryucad-project;
 Keywords=CAD;model;agent;

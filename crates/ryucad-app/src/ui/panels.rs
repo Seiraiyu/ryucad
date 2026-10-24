@@ -98,8 +98,8 @@ fn feature_row(
         Some(e) => r.on_hover_text(message(e)),
         None => r,
     };
-    if r.clicked() {
-        *choose = Some(if chosen { None } else { Some(key) });
+    if let Some(c) = toggle(ui, &r, chosen, key) {
+        *choose = Some(c);
     }
     if !f.uses.is_empty() {
         ui.indent(("uses", &part.id, &f.id), |ui| {
@@ -227,8 +227,9 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                     let chosen = view.chosen.as_ref() == Some(&key);
                     let text = RichText::new(format!("{id} [removed]"))
                         .color(style::color32(style::REMOVED));
-                    if ui.selectable_label(chosen, text).clicked() {
-                        gone = Some(if chosen { None } else { Some(key) });
+                    let r = ui.selectable_label(chosen, text);
+                    if let Some(c) = toggle(ui, &r, chosen, key) {
+                        gone = Some(c);
                     }
                 }
             });
@@ -256,6 +257,33 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
         view.chosen = c;
         ws.open_form(None);
         ws.choose(None);
+    }
+}
+
+/// What a click on a tree row chooses: the row, or with Ctrl/Cmd on the
+/// chosen row nothing. A plain click on the chosen row keeps it, so a
+/// second click never throws away what its form holds.
+fn toggle(
+    ui: &egui::Ui,
+    r: &egui::Response,
+    chosen: bool,
+    key: BodyKey,
+) -> Option<Option<BodyKey>> {
+    if !r.clicked() {
+        return None;
+    }
+    // The release's own modifiers, as egui's clicks are judged at it.
+    let command = ui.input(|i| {
+        i.modifiers.command
+            || i.events.iter().any(|e| {
+                matches!(e, egui::Event::PointerButton { pressed: false, modifiers, .. }
+                    if modifiers.command)
+            })
+    });
+    match (chosen, command) {
+        (true, true) => Some(None),
+        (true, false) => None,
+        (false, _) => Some(Some(key)),
     }
 }
 

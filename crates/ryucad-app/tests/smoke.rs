@@ -53,3 +53,21 @@ fn version_and_a_folder_that_isnt_a_project() {
     assert_eq!(v["error"]["code"], "project_not_found", "{v}");
     assert!(!out.status.success());
 }
+
+#[test]
+fn help_and_unknown_arguments_open_no_window() {
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ryucad-app"))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let out = run(&["--help"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Usage: ryucad-app [DIR]"));
+    for args in [&["--frobnicate"][..], &["a", "b"]] {
+        let out = run(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("Usage:"));
+    }
+}
