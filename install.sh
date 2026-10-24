@@ -119,7 +119,12 @@ register() {
                 sed "s|@BIN@|$1|g" "$2/ryucad.applescript" >"$tmp/ryucad.applescript"
                 rm -rf "$HOME/Applications/ryucad.app"
                 app="$HOME/Applications/ryucad.app"
-                osacompile -o "$app" "$tmp/ryucad.applescript"
+                # osacompile signs what it makes and says so on stderr
+                # ("replacing existing signature"); only real faults show.
+                status=0
+                osacompile -o "$app" "$tmp/ryucad.applescript" 2>"$tmp/osacompile.err" || status=$?
+                grep -v 'replacing existing signature' "$tmp/osacompile.err" >&2 || true
+                [ "$status" -eq 0 ] || die "could not compile the launcher $app"
                 # Offered by Finder (Open With, not the default) for
                 # folders and JSON files: ryucad.json is plain JSON, and
                 # no type can name one file.

@@ -615,6 +615,20 @@ fn picks(ui: &mut egui::Ui, p: &mut crate::core::edit::Picks) {
     });
 }
 
+/// The width of a text field in a grid's column: a grid gives a column
+/// other than its last only the width it had last frame, at least 40
+/// points, so a field there asking for more never gets it (`add_sized`
+/// takes it). A share of the panel, within limits.
+fn field_width(ui: &egui::Ui, share: f32, min: f32, max: f32) -> f32 {
+    (ui.available_width() * share).clamp(min, max)
+}
+
+/// Adds a single line text field `width` wide, in a grid cell or not.
+fn sized(ui: &mut egui::Ui, edit: egui::TextEdit<'_>, width: f32) -> egui::Response {
+    let height = ui.spacing().interact_size.y;
+    ui.add_sized([width, height], edit)
+}
+
 fn field_row(ui: &mut egui::Ui, f: &mut crate::core::edit::Field, label: &str) {
     ui.label(label);
     let edit = egui::TextEdit::singleline(&mut f.text).desired_width(110.0);
@@ -655,11 +669,15 @@ pub fn parameters(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
     if p.params.is_empty() {
         ui.weak("No parameters yet");
     }
+    let (name_w, value_w) = (
+        field_width(ui, 0.3, 70.0, 160.0),
+        field_width(ui, 0.45, 110.0, 280.0),
+    );
     egui::Grid::new("parameters").num_columns(3).show(ui, |ui| {
         for row in &mut p.params {
             let name = ui.label(&row.field.name);
-            let edit = egui::TextEdit::singleline(&mut row.field.text).desired_width(110.0);
-            let r = ui.add(edit).labelled_by(name.id);
+            let edit = egui::TextEdit::singleline(&mut row.field.text);
+            let r = sized(ui, edit, value_w).labelled_by(name.id);
             if row.field.dirty() {
                 r.on_hover_text(format!("was {}", row.field.read));
             }
@@ -678,17 +696,13 @@ pub fn parameters(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
             }
             ui.end_row();
         }
-        let add = egui::TextEdit::singleline(&mut p.new_name)
-            .hint_text("new name")
-            .desired_width(70.0);
-        let named = ui.add(add).on_hover_text("A new parameter's name");
+        let add = egui::TextEdit::singleline(&mut p.new_name).hint_text("new name");
+        let named = sized(ui, add, name_w).on_hover_text("A new parameter's name");
         named.widget_info(|| {
             egui::WidgetInfo::labeled(egui::Role::TextInput, true, "new parameter's name")
         });
-        let value = egui::TextEdit::singleline(&mut p.new_value)
-            .hint_text("value")
-            .desired_width(110.0);
-        let valued = ui.add(value).on_hover_text("A new parameter's expression");
+        let value = egui::TextEdit::singleline(&mut p.new_value).hint_text("value");
+        let valued = sized(ui, value, value_w).on_hover_text("A new parameter's expression");
         valued.widget_info(|| {
             egui::WidgetInfo::labeled(egui::Role::TextInput, true, "new parameter's value")
         });
@@ -1009,6 +1023,10 @@ fn history(ui: &mut egui::Ui, ws: &mut Workspace) {
     if ui.small_button("Refresh").clicked() {
         ws.load_history();
     }
+    // Commits made in a terminal change no project file: while the tab
+    // shows, it reads the history again now and then.
+    let next = ws.history_shown(std::time::Instant::now());
+    ui.ctx().request_repaint_after(next);
     let Some(h) = &ws.history else {
         ui.spinner();
         return;

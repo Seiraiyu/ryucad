@@ -4,6 +4,8 @@
 //! (`RYUCAD_NO_DAEMON=1`) and once through the project's daemon. Both must
 //! give the same JSON and the same exit code.
 
+mod fake_review;
+
 use assert_cmd::Command;
 use serde_json::{Value, json};
 use std::fs;
@@ -127,17 +129,6 @@ fn version_reports_every_component() {
     assert_eq!(r["protocol"], 2);
     assert!(r["target"].as_str().unwrap().contains('-'));
     assert!(!r["commit"].as_str().unwrap().is_empty());
-}
-
-#[test]
-fn version_flags_are_the_version_command() {
-    let p = Pair::new();
-    let want = p.ok(&["version"]);
-    assert_eq!(p.ok(&["--version"]), want);
-    assert_eq!(p.ok(&["-V"]), want);
-    assert_eq!(p.ok(&["--pretty", "--version"]), want);
-    // Only in a command's place: elsewhere it is still a usage error.
-    p.fails(&["part", "--version"], "usage", 2);
 }
 
 #[test]
@@ -803,9 +794,28 @@ fn every_error_code_has_its_exit_code() {
     p.fails(&["feature", "show", "p", "t"], "invalid_document", 1);
     p.write(
         "parts/p/features/t.json",
-        r#"{"conflicts":{"/params/x":{"kind":"value"}},"format":1,"kind":"ryucad.feature"}"#,
+        r#"{"conflicts":{"/params/x":{"kind":"value"}},"format":1,"kind":"ryucad.feature","type":"box"}"#,
     );
     p.fails(&["feature", "show", "p", "t"], "merge_conflict", 1);
+    // It still says what it is, for the tree.
+    let rebuilt = p.fails(&["rebuild"], "rebuild_failed", 1);
+    let listed = p.ok(&["feature", "list", "p"]);
+    for all in [
+        &rebuilt["details"]["parts"][0]["features"],
+        &listed["features"],
+    ] {
+        let t = all
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == "t")
+            .unwrap();
+        assert_eq!(
+            (t["ok"].as_bool(), t["type"].as_str()),
+            (Some(false), Some("box")),
+            "{t}"
+        );
+    }
     p.write(
         "ryucad.json",
         r#"{"default_unit":"mm","format":3,"kind":"ryucad.project"}"#,
@@ -831,6 +841,83 @@ fn pretty_output_is_the_same_document() {
         serde_json::from_str::<Value>(&text).unwrap(),
         serde_json::from_slice::<Value>(&compact.stdout).unwrap()
     );
+}
+
+#[test]
+fn version_flags_are_the_version_command() {
+    let run = |args: &[&str]| {
+        let out = Command::cargo_bin("ryucad")
+            .unwrap()
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}");
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    let v = run(&["version"]);
+    assert_eq!(run(&["--version"]), v);
+    assert_eq!(run(&["-V"]), v);
+    assert_eq!(run(&["--version", "--pretty"]), v);
+    // With anything else it is still a usage error, as before.
+    let out = Command::cargo_bin("ryucad")
+        .unwrap()
+        .args(["part", "list", "--version"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn vectors_may_start_with_a_minus() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    let v = p.ok(&[
+        "feature", "add", "p", "box", "--param", "x=1", "--param", "y=1", "--param", "z=1",
+        "--origin", "-5,0,0", "--x", "-0,1,0", "--z", "0,0,1",
+    ]);
+    assert_eq!(
+        v["feature"]["placement"]["origin"][0]["value"], "-5 mm",
+        "{v}"
+    );
+    assert_eq!(
+        v["feature"]["placement"]["x"],
+        serde_json::json!([0, 1, 0]),
+        "{v}"
+    );
+}
+
+#[test]
+fn sketch_edit_help_lists_every_type() {
+    let out = Command::cargo_bin("ryucad")
+        .unwrap()
+        .args(["sketch", "edit", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8(out.stdout).unwrap();
+    for t in ryucad::doc::sketch::ConstraintType::ALL {
+        assert!(help.contains(t.as_str()), "{}: {help}", t.as_str());
+    }
+    for t in ["point", "line", "arc", "circle", "\"r\": Q"] {
+        assert!(help.contains(t), "{t}: {help}");
+    }
+}
+
+#[test]
+fn a_reader_closing_early_is_no_panic() {
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryucad"))
+        .args(["version", "--pretty"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Closed before the process gets to write: `| head -c 0`.
+    drop(child.stdout.take());
+    let out = child.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("panicked"), "{err}");
+    assert!(out.status.success());
 }
 
 /// Every method in `proto::Request`, read from the variants' `rename`
@@ -1402,9 +1489,25 @@ fn git_install_registers_the_drivers_and_the_hook() {
     let global = fs::read_to_string(home.join(".gitconfig")).unwrap();
     assert!(global.contains("[diff \"ryucad\"]"), "{global}");
     assert!(global.contains("[merge \"ryucad\"]"), "{global}");
+    // merge.renames stays the clone's: every other repository reads the
+    // global config too.
     let (_, v) = run(&["doctor"]);
-    assert_eq!(codes(&v), ["git_hook_missing", "git_hook_missing"]);
-    // In the repository's own config: the drivers and the hook.
+    assert_eq!(
+        codes(&v),
+        [
+            "git_drivers_missing",
+            "git_hook_missing",
+            "git_hook_missing"
+        ]
+    );
+    let message = v["result"]["issues"][0]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("merge.renames isn't false"),
+        "{message}"
+    );
+    assert!(!global.contains("renames"), "{global}");
+    // In the repository's own config: the drivers, renames off and the
+    // hooks.
     fs::remove_file(home.join(".gitconfig")).unwrap();
     let (code, v) = run(&["git", "install"]);
     assert_eq!(
@@ -1420,6 +1523,7 @@ fn git_install_registers_the_drivers_and_the_hook() {
         local.contains("textconv") && local.contains("merge-driver"),
         "{local}"
     );
+    assert!(local.contains("renames = false"), "{local}");
     let hook = root.join(".git/hooks/pre-merge-commit");
     let script = fs::read_to_string(&hook).unwrap();
     assert_eq!(
@@ -1888,4 +1992,413 @@ fn releases_from_the_cli() {
     let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
     assert_eq!(code, 0, "{v}");
     assert!(p.daemon.join("releases/p/A.obsolete.json").exists());
+}
+
+#[test]
+fn pdm_in_diff_and_through_textconv() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=20", "--param",
+        "z=5",
+    ]);
+    p.write(
+        "ryucad.json",
+        "{\n  \"default_unit\": \"mm\",\n  \"format\": 2,\n  \"kind\": \"ryucad.project\",\n  \"project\": \"0123456789abcdef0123456789abcdef\"\n}\n",
+    );
+    p.ok(&["props", "set", "p", "number=100"]);
+    p.git(&["init", "-q", "-b", "main"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "start"]);
+    p.ok(&["release", "propose", "p"]);
+    p.ok(&["props", "set", "p", "name=Pin"]);
+    let v = p.ok(&["diff"]);
+    assert_eq!(
+        v["parts"]["p"]["pdm"],
+        json!({"properties": {"name": {"revising": false, "to": "Pin"}},
+               "records": {"added": [{"label": "A", "kind": "release"}],
+                           "removed": [], "changed": []},
+               "state": {"from": "in work", "to": "in work, A proposed"}})
+    );
+    // Git's own diff reads the record and the properties by value.
+    let root = &p.direct;
+    git(root, &["add", "."]);
+    let bin = assert_cmd::cargo::cargo_bin("ryucad");
+    let bin = bin.to_str().unwrap().replace('\\', "/");
+    let driver = format!("diff.ryucad.textconv='{bin}' git textconv");
+    fs::write(root.join(".gitattributes"), "*.json diff=ryucad\n").unwrap();
+    let diff = git(
+        root,
+        &["-c", &driver, "diff", "--cached", "--no-color", "-U0"],
+    );
+    assert!(diff.contains("\n+name = Pin\n"), "{diff}");
+    assert!(diff.contains("\n+ryupdm.release (format 1)\n"), "{diff}");
+    assert!(diff.contains("\n+released_by = "), "{diff}");
+    assert!(diff.contains("\n+\n+results.b = "), "{diff}");
+}
+
+#[test]
+fn renders_a_committed_revision() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=10", "--param",
+        "z=10",
+    ]);
+    p.git(&["init", "-q", "-b", "main"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "start"]);
+    let head = git(&p.direct, &["rev-parse", "HEAD"]).trim().to_owned();
+    let before = p.ok(&["render", "--out", "head.png", "--size", "160x120"]);
+    p.ok(&["feature", "edit", "p", "b", "--param", "x=30"]);
+    let r = p.ok(&[
+        "render", "--out", "rev.png", "--size", "160x120", "--rev", "HEAD",
+    ]);
+    assert_eq!(r["commit"], head.as_str());
+    assert_eq!(r["camera"], before["camera"]);
+    assert_eq!(
+        pixels(&p.direct.join("rev.png")),
+        pixels(&p.direct.join("head.png"))
+    );
+    assert_eq!(
+        pixels(&p.direct.join("rev.png")),
+        pixels(&p.daemon.join("rev.png"))
+    );
+    // Framed together, both renders share one camera, whatever changed.
+    let a = p.ok(&[
+        "render", "--out", "a.png", "--rev", "HEAD", "--frame", "working",
+    ]);
+    let b = p.ok(&["render", "--out", "b.png", "--frame", "HEAD"]);
+    assert_eq!(a["camera"], b["camera"]);
+    assert_ne!(a["camera"], before["camera"]);
+    p.fails(
+        &["render", "--out", "x.png", "--frame", "nowhere"],
+        "rev_not_found",
+        1,
+    );
+    let c = p.ok(&[
+        "render",
+        "--out",
+        "c.png",
+        "--size",
+        "160x120",
+        "--compare",
+        "HEAD",
+    ]);
+    assert_eq!(
+        c["compare"],
+        serde_json::json!({"rev": "HEAD", "commit": head})
+    );
+    let (_, _, px) = pixels(&p.direct.join("c.png"));
+    // The box's changed faces in the compare's orange.
+    assert!(
+        px.chunks(4).any(|q| q[0] > 200 && q[1] > 120 && q[2] < 90),
+        "changed orange"
+    );
+    assert_eq!(
+        pixels(&p.direct.join("c.png")),
+        pixels(&p.daemon.join("c.png"))
+    );
+    // Against itself, nothing differs: the render is the plain one.
+    let same = p.ok(&[
+        "render",
+        "--out",
+        "s.png",
+        "--size",
+        "160x120",
+        "--compare",
+        "working",
+    ]);
+    let plain = p.ok(&["render", "--out", "w.png", "--size", "160x120"]);
+    assert_eq!(same["camera"], plain["camera"]);
+    assert_eq!(
+        pixels(&p.direct.join("s.png")),
+        pixels(&p.direct.join("w.png"))
+    );
+    // A solid only the working files have is new as a whole; a solid only
+    // the revision has is a red ghost.
+    p.ok(&[
+        "feature", "add", "p", "sphere", "--id", "s", "--param", "radius=4", "--origin", "40,0,0",
+    ]);
+    let n = p.ok(&[
+        "render",
+        "--out",
+        "n.png",
+        "--size",
+        "200x120",
+        "--compare",
+        "HEAD",
+    ]);
+    assert_eq!(n["compare"]["rev"], "HEAD");
+    let (_, _, px) = pixels(&p.direct.join("n.png"));
+    assert!(
+        px.chunks(4).any(|q| q[1] > 150 && q[0] < 120 && q[2] < 120),
+        "new green"
+    );
+    let back = p.ok(&[
+        "render",
+        "--out",
+        "r.png",
+        "--size",
+        "200x120",
+        "--rev",
+        "HEAD",
+        "--compare",
+        "working",
+    ]);
+    assert_eq!(back["commit"], head.as_str());
+    // The ghost is translucent: red over the background's grey, its blue
+    // near its green (the compare's orange has little blue).
+    let (_, _, px) = pixels(&p.direct.join("r.png"));
+    assert!(
+        px.chunks(4).any(|q| {
+            let (r, g, b) = (i32::from(q[0]), i32::from(q[1]), i32::from(q[2]));
+            r > g + 20 && b > 120 && (g - b).abs() < 12
+        }),
+        "removed red ghost"
+    );
+    assert_eq!(
+        pixels(&p.direct.join("r.png")),
+        pixels(&p.daemon.join("r.png"))
+    );
+    // A camera given explicitly isn't framed.
+    p.fails(
+        &[
+            "render", "--out", "x.png", "--frame", "HEAD", "--of", "agent",
+        ],
+        "usage",
+        2,
+    );
+    p.fails(
+        &["render", "--out", "x.png", "--compare", "nowhere"],
+        "rev_not_found",
+        1,
+    );
+    p.fails(
+        &["render", "--out", "x.png", "--rev", "nowhere"],
+        "rev_not_found",
+        1,
+    );
+}
+
+#[test]
+fn outputs_carry_their_schema() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "sphere", "--id", "s", "--param", "radius=1",
+    ]);
+    p.git(&["init", "-q", "-b", "main"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "start"]);
+    for args in [
+        &["diff"][..],
+        &["inspect", "p"],
+        &["mesh", "p"],
+        &["mesh", "p", "--out", "m.bin"],
+        &["release", "list"],
+        &["check"],
+    ] {
+        assert_eq!(p.ok(args)["schema"], 1, "{args:?}");
+    }
+}
+
+#[test]
+fn review_needs_a_github_clone() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        let out = Command::cargo_bin("ryucad")
+            .unwrap()
+            .current_dir(dir.path())
+            .args(args)
+            .env("RYUCAD_REVIEW_TOKEN", "t")
+            .env("RYUCAD_REVIEW_URL", "http://127.0.0.1:9")
+            .output()
+            .unwrap();
+        (
+            out.status.code().unwrap(),
+            serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+        )
+    };
+    let (code, v) = run(&["review", "status"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("not_a_git_repo")),
+        "{v}"
+    );
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    let (code, v) = run(&["review", "status", "3"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("review_no_remote")),
+        "{v}"
+    );
+    git(
+        dir.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/widget.git",
+        ],
+    );
+    let (code, v) = run(&["review", "status", "3"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (4, Some("review_unreachable")),
+        "{v}"
+    );
+    let (code, _) = run(&["review"]);
+    assert_eq!(code, 2);
+}
+
+#[test]
+fn review_against_a_fake_service() {
+    use fake_review::{Fake, json};
+    let thread = serde_json::json!({"id": "t1", "ref": "p/b/0123456789abcdef0123456789abcdef", "state": "open"});
+    let fake = Fake::start(vec![
+        json(
+            "GET",
+            "/api/v1/repos/acme/widget/pulls?branch=feature%2Farm",
+            200,
+            serde_json::json!({"pulls": [{"number": 7}]}),
+        ),
+        json(
+            "GET",
+            "/api/v1/repos/acme/widget/pulls/7",
+            200,
+            serde_json::json!({
+                "checks": {"check": "success", "merge": "action_required"},
+                "renders": [
+                    {"project": "", "part": "p", "side": "before", "url": "/api/v1/artifacts/k1"},
+                    {"project": "models/arm", "part": "p", "side": "after", "url": "/api/v1/artifacts/k2"}]}),
+        ),
+        json(
+            "GET",
+            "/api/v1/repos/acme/widget/pulls/7/threads?state=open",
+            200,
+            serde_json::json!({"threads": [thread]}),
+        ),
+        json(
+            "POST",
+            "/api/v1/repos/acme/widget/pulls/7/threads",
+            201,
+            thread.clone(),
+        ),
+        json(
+            "POST",
+            "/api/v1/threads/t1/resolve",
+            200,
+            serde_json::json!({"id": "t1", "state": "resolved"}),
+        ),
+        json(
+            "POST",
+            "/api/v1/repos/acme/widget/pulls/7/merge-in",
+            409,
+            serde_json::json!({"error": {"code": "head_moved",
+                "message": "the head moved since the merge was checked"}}),
+        ),
+        (
+            "GET",
+            "/api/v1/artifacts/k1".to_owned(),
+            200,
+            "image/png",
+            vec![1],
+        ),
+        (
+            "GET",
+            "/api/v1/artifacts/k2".to_owned(),
+            200,
+            "image/png",
+            vec![2],
+        ),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(
+        dir.path(),
+        &["remote", "add", "origin", "git@github.com:acme/widget.git"],
+    );
+    git(dir.path(), &["checkout", "-q", "-b", "feature/arm"]);
+    let empty = tempfile::tempdir().unwrap();
+    let run = |args: &[&str], token: Option<&str>| {
+        let mut cmd = Command::cargo_bin("ryucad").unwrap();
+        cmd.current_dir(dir.path())
+            .args(args)
+            .env("RYUCAD_REVIEW_URL", &fake.url)
+            .env_remove("RYUCAD_REVIEW_TOKEN")
+            .env_remove("GH_TOKEN")
+            .env_remove("GITHUB_TOKEN")
+            .env("PATH", empty.path());
+        if let Some(t) = token {
+            cmd.env("RYUCAD_REVIEW_TOKEN", t);
+        }
+        let out = cmd.output().unwrap();
+        (
+            out.status.code().unwrap(),
+            serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+        )
+    };
+    let ok = |args: &[&str]| {
+        let (code, v) = run(args, Some("tok"));
+        assert_eq!((code, &v["ok"]), (0, &Value::Bool(true)), "{args:?}: {v}");
+        v["result"].clone()
+    };
+    let s = ok(&["review", "status"]);
+    assert_eq!(
+        (s["repo"].as_str(), s["pull"].as_u64()),
+        (Some("acme/widget"), Some(7))
+    );
+    assert_eq!(s["checks"]["merge"], "action_required");
+    assert_eq!(
+        ok(&["review", "threads", "--open"])["threads"][0]["id"],
+        "t1"
+    );
+    let c = ok(&[
+        "review",
+        "comment",
+        "p/b/0123456789abcdef0123456789abcdef",
+        "too thin here",
+    ]);
+    assert_eq!(c["id"], "t1");
+    assert_eq!(ok(&["review", "resolve", "t1"])["state"], "resolved");
+    let r = ok(&["review", "renders", "7", "--out", "shots"]);
+    assert_eq!(r["files"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        fs::read(dir.path().join("shots/root-p-before.png")).unwrap(),
+        vec![1]
+    );
+    assert_eq!(
+        fs::read(dir.path().join("shots/models_arm-p-after.png")).unwrap(),
+        vec![2]
+    );
+    let (code, v) = run(&["review", "update", "7"], Some("tok"));
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("review_head_moved")),
+        "{v}"
+    );
+    let (code, v) = run(&["review", "status", "7"], None);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("review_unauthenticated")),
+        "{v}"
+    );
+    // Every request carried the token; the comment its reference and text.
+    let seen = fake.seen.lock().unwrap().clone();
+    assert!(
+        seen.iter().all(|s| s.auth.as_deref() == Some("Bearer tok")),
+        "{seen:?}"
+    );
+    let posted = seen
+        .iter()
+        .find(|s| s.path == "/api/v1/repos/acme/widget/pulls/7/threads")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&posted.body).unwrap(),
+        serde_json::json!({"ref": "p/b/0123456789abcdef0123456789abcdef", "body": "too thin here"})
+    );
 }

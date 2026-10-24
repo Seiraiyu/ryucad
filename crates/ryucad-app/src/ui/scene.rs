@@ -204,7 +204,7 @@ pub struct Scene {
 }
 
 /// How opaque a ghost is.
-pub const GHOST_ALPHA: f32 = 0.35;
+pub const GHOST_ALPHA: f32 = ryucad::render::GHOST_ALPHA;
 
 /// Vertices of a body's triangles, relative to `reference`.
 fn face_vertices(

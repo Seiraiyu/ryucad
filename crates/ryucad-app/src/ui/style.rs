@@ -16,13 +16,14 @@ pub const HOVER: Rgb = [0.60, 0.88, 1.0];
 /// The feature chosen in the tree.
 pub const CHOSEN: Rgb = [0.70, 0.80, 0.95];
 
-/// A compare's colours: faces only the working files have, faces on both
-/// sides whose geometry differs, faces only the other side has (in its
-/// ghost), and the rest of the ghost.
-pub const NEW: Rgb = [0.30, 0.72, 0.38];
-pub const CHANGED: Rgb = [0.96, 0.66, 0.18];
-pub const REMOVED: Rgb = [0.90, 0.28, 0.28];
-pub const GHOST: Rgb = [0.55, 0.60, 0.72];
+/// A compare's colours, the same as `ryucad render --compare`'s: faces
+/// only the working files have, faces on both sides whose geometry
+/// differs, faces only the other side has (in its ghost), and the rest of
+/// the ghost.
+pub use ryucad::render::{
+    COMPARE_CHANGED as CHANGED, COMPARE_GHOST as GHOST, COMPARE_NEW as NEW,
+    COMPARE_REMOVED as REMOVED,
+};
 
 /// Colours for other participants, in turn.
 const PALETTE: [Rgb; 6] = [

@@ -209,7 +209,8 @@ pub fn relative(root: &Path, path: &Path) -> String {
 }
 
 /// `merge_conflict` for the file at `at` if its JSON lists merge
-/// conflicts, naming their pointers.
+/// conflicts, naming their pointers, and a feature's `type` where no
+/// conflict is about it, so a failed feature can still say what it is.
 pub fn conflicted(v: &Value, at: &str) -> Option<Error> {
     let listed = v.as_object()?.get(CONFLICTS)?;
     let pointers: Vec<&str> = listed
@@ -221,14 +222,21 @@ pub fn conflicted(v: &Value, at: &str) -> Option<Error> {
     } else {
         format!(" at {}", pointers.join(", "))
     };
-    Some(
-        Error::new(
-            Code::MergeConflict,
-            format!("{at} has unresolved merge conflicts{at_list}; see `ryucad merge status`"),
-        )
-        .with("path", at)
-        .with("pointers", pointers),
+    let ty = v
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|_| v.get("kind").and_then(Value::as_str) == Some("ryucad.feature"))
+        .filter(|_| !pointers.iter().any(|p| p.is_empty() || *p == "/type"));
+    let e = Error::new(
+        Code::MergeConflict,
+        format!("{at} has unresolved merge conflicts{at_list}; see `ryucad merge status`"),
     )
+    .with("path", at)
+    .with("pointers", &pointers);
+    Some(match ty {
+        Some(t) => e.with("type", t),
+        None => e,
+    })
 }
 
 /// `v` without its merge conflicts: the values the merge left in place.
@@ -653,6 +661,18 @@ mod tests {
         assert_eq!(
             e.details["pointers"],
             serde_json::json!(["/params/radius", "/placement/x"])
+        );
+        // Its type is still known, unless the conflict is about it.
+        assert_eq!(e.details["type"], v["type"]);
+        assert!(v["type"].is_string());
+        let mut w = v.clone();
+        w[CONFLICTS]["/type"] = serde_json::json!({"kind": "value"});
+        assert!(
+            conflicted(&w, "a.json")
+                .unwrap()
+                .details
+                .get("type")
+                .is_none()
         );
         assert!(part.features[&id("b")].is_ok());
         // A conflicted manifest fails every part, not the project.

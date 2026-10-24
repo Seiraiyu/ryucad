@@ -1,7 +1,8 @@
 //! `ryucad-app [DIR]`: the desktop app, on the project in `DIR` or on its
-//! start window. `--help` says so, `--version` prints the build; `--smoke
-//! [DIR]` loads the project and draws one frame offscreen, for release
-//! checks. Anything else is a usage error, never a folder.
+//! start window. `--help` says so, `--version` (or `-V`) prints the build in
+//! the CLI's envelope; `--smoke [DIR]` loads the project and draws one frame
+//! offscreen, for release checks. Anything else is a usage error, never a
+//! folder.
 
 // A release build on Windows opens no console window.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
@@ -23,8 +24,13 @@ Options:
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--version") {
-        let v = serde_json::json!(ryucad::proto::VersionInfo::current());
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        // The CLI's envelope, as `ryucad version` prints it.
+        let v = serde_json::json!({
+            "ok": true,
+            "result": ryucad::proto::VersionInfo::current(),
+            "warnings": [],
+        });
         println!("{v}");
         return ExitCode::SUCCESS;
     }
@@ -74,10 +80,13 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // The size the last window was left at (`app.window`), else 1280×800.
+    let saved = ryucad_app::ui::app::saved_geometry();
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("ryucad")
-            .with_inner_size([1280.0, 800.0]),
+            .with_inner_size(saved.map_or([1280.0, 800.0], |g| g.size))
+            .with_maximized(saved.is_some_and(|g| g.maximized)),
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: platform::wgpu_options(),
         ..Default::default()

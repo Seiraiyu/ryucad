@@ -4,9 +4,11 @@
 //! side and changed on the other, one merged as lines), a feature Git took
 //! to be renamed and merged into another, and, from rebuilding both sides
 //! and the merge, what the merge broke that built on either side and the
-//! sketches it left stale. Each conflict has a stable ID, the files and the
-//! parts of the model it concerns, the side that caused it, its choices,
-//! and its planned repairs.
+//! sketches it left stale; and the PDM faults the merge has that neither
+//! side had (`pdm_broke`: duplicate numbers, values the settings refuse,
+//! proposals made stale or out of sequence). Each conflict has a stable
+//! ID, the files and the parts of the model it concerns, the side that
+//! caused it, its choices, and its planned repairs.
 //!
 //! ryucad never touches the index: once a file is settled, `git add` and
 //! the commit are the agent's or the human's.
@@ -21,7 +23,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 /// Every kind of conflict `merge.status` reports. The strings are stable.
-pub const KINDS: [&str; 9] = [
+pub const KINDS: [&str; 10] = [
     "value",
     "delete_edit",
     "order",
@@ -31,6 +33,7 @@ pub const KINDS: [&str; 9] = [
     "merge_broke",
     "sketch_stale",
     "rename_merged",
+    "pdm_broke",
 ];
 
 /// The error for a request that needs a merge when there is none.
@@ -606,6 +609,66 @@ fn stale(
     out
 }
 
+/// What the merge broke in PDM: each fault the merged files have that
+/// neither side had ([`ryupdm::merge::validate`]), blamed on the side
+/// whose change completes it. A property fault takes a value for the
+/// property; a stale or out-of-sequence proposal has the repair
+/// `withdraw`, which deletes its record.
+fn pdm(
+    root: &std::path::Path,
+    working: &crate::activity::Files,
+    ours: &Side,
+    theirs: &Side,
+    base: &Side,
+    releases: &ryupdm::history::Releases,
+) -> Vec<Value> {
+    ryupdm::merge::validate(&base.files, &ours.files, &theirs.files, working, releases)
+        .into_iter()
+        .map(|b| {
+            let mut id = format!("{}#pdm_broke/{}", b.path, b.code);
+            let mut concerns = json!({"part": b.part});
+            if let Some(p) = &b.property {
+                id = format!("{id}/{p}");
+                concerns["property"] = json!(p);
+            }
+            if let Some(l) = &b.label {
+                concerns["label"] = json!(l);
+            }
+            if let Some(others) = b.details.get("parts") {
+                concerns["parts"] = others.clone();
+            }
+            let mut c = conflict(
+                id.clone(),
+                "pdm_broke",
+                b.files.clone(),
+                concerns,
+                b.cause.as_str(),
+                format!("{} (neither side had this)", b.message),
+            );
+            c["error"] = json!({"code": b.code, "message": b.message, "details": b.details});
+            if b.property.is_some() {
+                c["choices"] = json!(["value"]);
+            }
+            if b.withdraw {
+                let repair = crate::doctor::Repair {
+                    id: format!("{id}:withdraw@{}", crate::doctor::basis(root, &b.files)),
+                    summary: format!(
+                        "withdraw the proposal {}: delete it, so the merged part can be proposed again",
+                        b.path
+                    ),
+                    changes: vec![crate::doctor::Change {
+                        path: b.path.clone(),
+                        content: None,
+                    }],
+                    params: Vec::new(),
+                };
+                c["repairs"] = json!([repair.to_json()]);
+            }
+            c
+        })
+        .collect()
+}
+
 /// Whether `path` is a feature file.
 fn is_feature(path: &str) -> bool {
     matches!(about(path), (Some(_), Some(_)))
@@ -800,8 +863,14 @@ fn compute(session: &mut Session) -> Result<Value> {
     let (repo, state) = merging(&root)?;
     let working = session.snapshot();
     let mut conflicts = records(&working);
-    let (more, unstaged) = unmerged(&root, &repo.unmerged()?);
+    let (more, mut unstaged) = unmerged(&root, &repo.unmerged()?);
     conflicts.extend(more);
+    // A file staged and then settled again (a conflict record `git add`ed,
+    // then resolved) is no longer unmerged, but a commit would still take
+    // what the index holds: everything the hook would refuse is listed.
+    unstaged.extend(repo.unstaged(&working)?);
+    unstaged.sort();
+    unstaged.dedup();
     let ours = side(session, Some(&state.ours))?;
     let theirs = side(session, Some(&state.theirs))?;
     let base = side(session, state.base.as_deref())?;
@@ -835,6 +904,10 @@ fn compute(session: &mut Session) -> Result<Value> {
     }
     conflicts.extend(broke);
     conflicts.extend(stale(&root, &now, &ours, &theirs, &base));
+    let releases = crate::release::history(session)
+        .map(|(_, r)| r)
+        .unwrap_or_default();
+    conflicts.extend(pdm(&root, &working, &ours, &theirs, &base, &releases));
     conflicts.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     let commit = |c: Option<&String>| json!({ "commit": c });
     Ok(json!({
@@ -949,6 +1022,38 @@ fn settle_record(
     Ok(())
 }
 
+/// Sets property `name` in the properties file at `path` to `x` in
+/// `files`: `null` clears it, and the file goes with its last property.
+fn set_property(
+    files: &mut crate::activity::Files,
+    path: &str,
+    name: &str,
+    x: Value,
+) -> Result<()> {
+    let mut props = match files.get(path) {
+        None => ryupdm::props::Properties::default(),
+        Some(b) => json_of(b)
+            .and_then(|v| ryupdm::props::Properties::from_json(&v).ok())
+            .ok_or_else(|| {
+                Error::new(Code::ConflictNotFound, format!("{path} isn't readable now"))
+            })?,
+    };
+    if x.is_null() {
+        props.values.remove(name);
+    } else {
+        props.values.insert(name.to_owned(), x);
+    }
+    if props.values.is_empty() {
+        files.remove(path);
+    } else {
+        files.insert(
+            path.to_owned(),
+            crate::doctor::canonical_bytes(&props.to_json()),
+        );
+    }
+    Ok(())
+}
+
 /// Settles a file Git left unmerged with one side's version: written as
 /// that side has it, or deleted where that side deleted it. A feature file
 /// kept is listed where that side lists it; one deleted, unlisted.
@@ -1047,6 +1152,14 @@ pub fn resolve(
                 let pointer = found["pointer"].as_str().unwrap_or_default();
                 let kind = crate::merge::Kind::parse(kind).expect("a record's kind");
                 settle_record(&mut files, &path, pointer, kind, x)?;
+            }
+            ("pdm_broke", "value") if found["concerns"]["property"].is_string() => {
+                let x = r
+                    .value
+                    .clone()
+                    .ok_or_else(|| usage("choice value needs a value".to_owned()))?;
+                let name = found["concerns"]["property"].as_str().unwrap_or_default();
+                set_property(&mut files, &path, name, x)?;
             }
             ("modify_delete" | "merge_unparsed", side @ ("ours" | "theirs")) => {
                 let u = unmerged.get(&path).cloned().unwrap_or_default();
@@ -1335,6 +1448,14 @@ pub(crate) mod tests {
         let v = m.call("merge.status", json!({})).unwrap();
         assert_eq!(v["unstaged"], json!(["parts/p/features/b.json"]));
         assert_eq!(v["conflicts"].as_array().unwrap().len(), 1);
+        // Issue #54: the record added to the index, then settled: no longer
+        // unmerged, but a commit would take the record.
+        let settled = std::fs::read(&b).unwrap();
+        std::fs::write(&b, &text).unwrap();
+        m.git(&["add", "parts/p/features/b.json"]);
+        std::fs::write(&b, &settled).unwrap();
+        let v = m.call("merge.status", json!({})).unwrap();
+        assert_eq!(v["unstaged"], json!(["parts/p/features/b.json"]), "{v}");
     }
 
     #[test]
@@ -1723,10 +1844,14 @@ pub(crate) mod tests {
             json!([{"path": "parts/p/features/t.json", "change": "deleted"}])
         );
         assert!(!m.root().join("parts/p/features/t.json").exists());
-        // Kept looks as Git left it: s waits for `git add`, t for `git rm`.
+        // Kept looks as Git left it: s waits for `git add`, t for `git rm`,
+        // and the list theirs' s was put back in for `git add` too.
         let v = &r["status"];
         assert_eq!(v["conflicts"][0]["id"], s);
-        assert_eq!(v["unstaged"], json!(["parts/p/features/t.json"]));
+        assert_eq!(
+            v["unstaged"],
+            json!(["parts/p/features/t.json", "parts/p/part.json"])
+        );
         m.git(&["add", "-A"]);
         let v = m.call("merge.status", json!({})).unwrap();
         assert_eq!(
@@ -2132,6 +2257,144 @@ pub(crate) mod tests {
         assert_eq!(told(&mut live, &mut m).len(), 1);
         m.git(&["merge", "--abort"]);
         assert_eq!(told(&mut live, &mut m), [json!({"merging": false})]);
+    }
+
+    /// Numbers `part` through the protocol.
+    fn number(m: &mut Merging, part: &str, n: &str) {
+        m.call(
+            "props.set",
+            json!({"part": part, "properties": {"number": n}}),
+        )
+        .unwrap();
+    }
+
+    /// The conflicts of `kind` in a status.
+    fn of_kind<'a>(v: &'a Value, kind: &str) -> Vec<&'a Value> {
+        v["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["kind"] == kind)
+            .collect()
+    }
+
+    #[test]
+    fn a_number_both_sides_gave_is_settled_with_a_value() {
+        let mut m = boxed();
+        m.call("part.create", json!({"part": "q"})).unwrap();
+        // The project's ID first: each branch's first PDM write would give
+        // it one of its own.
+        m.call("pdm.init", json!({})).unwrap();
+        m.commit("a second part, and PDM");
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        number(&mut m, "q", "300");
+        m.commit("theirs: q is 300");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        number(&mut m, "p", "300");
+        m.commit("ours: p is 300");
+        m.merge("theirs");
+        let v = m.call("merge.status", json!({})).unwrap();
+        let c = of_kind(&v, "pdm_broke");
+        let ids: Vec<(&str, &str)> = c
+            .iter()
+            .map(|c| (c["id"].as_str().unwrap(), c["cause"].as_str().unwrap()))
+            .collect();
+        let q = "parts/q/properties.json#pdm_broke/part_number_duplicate/number";
+        assert_eq!(
+            ids,
+            [
+                (
+                    "parts/p/properties.json#pdm_broke/part_number_duplicate/number",
+                    "theirs"
+                ),
+                (q, "ours"),
+            ],
+            "{v}"
+        );
+        assert_eq!(
+            c[1]["concerns"],
+            json!({"part": "q", "property": "number", "parts": ["p"]})
+        );
+        assert_eq!(
+            c[1]["files"],
+            json!(["parts/q/properties.json", "parts/p/properties.json"])
+        );
+        assert_eq!(c[1]["error"]["code"], "part_number_duplicate");
+        assert_eq!(c[1]["choices"], json!(["value"]));
+        assert_eq!(c[1]["repairs"], json!([]));
+        assert_eq!(v["clean"], false);
+        // A person picks q's number; both conflicts go.
+        let r = resolve(&mut m, q, json!({"choice": "value", "value": "301"})).unwrap();
+        assert_eq!(
+            r["changes"],
+            json!([{"path": "parts/q/properties.json", "change": "written"}])
+        );
+        assert_eq!(r["status"]["clean"], true, "{r}");
+        let got = m.call("props.get", json!({"part": "q"})).unwrap();
+        assert_eq!(got["properties"][0]["name"], "number");
+        assert_eq!(got["properties"][0]["value"], "301", "{got}");
+        // Only a property's conflict takes a value.
+        let e = resolve(
+            &mut m,
+            "parts/q/properties.json#nothing",
+            json!({"choice": "value", "value": 1}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ConflictNotFound);
+    }
+
+    #[test]
+    fn a_proposal_the_merge_left_stale_is_withdrawn() {
+        let mut m = boxed();
+        number(&mut m, "p", "100");
+        m.commit("numbered");
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        m.call("release.propose", json!({"part": "p"})).unwrap();
+        m.commit("theirs: propose p A");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        m.call(
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"x": 12}}),
+        )
+        .unwrap();
+        m.commit("ours: longer");
+        m.merge("theirs");
+        let v = m.call("merge.status", json!({})).unwrap();
+        let c = of_kind(&v, "pdm_broke");
+        assert_eq!(c.len(), 1, "{v}");
+        let id = "releases/p/A.json#pdm_broke/release_stale";
+        assert_eq!(c[0]["id"], id);
+        assert_eq!(c[0]["cause"], "ours");
+        assert_eq!(
+            c[0]["files"],
+            json!(["releases/p/A.json", "parts/p/features/b.json"])
+        );
+        assert_eq!(c[0]["concerns"], json!({"part": "p", "label": "A"}));
+        assert_eq!(c[0]["error"]["details"]["changes"], json!(["content"]));
+        assert_eq!(c[0]["choices"], json!([]));
+        let repair = &c[0]["repairs"][0];
+        let rid = repair["id"].as_str().unwrap();
+        assert!(rid.starts_with(&format!("{id}:withdraw@")), "{rid}");
+        assert_eq!(
+            repair["changes"],
+            json!([{"path": "releases/p/A.json", "action": "delete"}])
+        );
+        // A value is no way to settle it.
+        let e = resolve(&mut m, id, json!({"choice": "value", "value": 1})).unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        let r = resolve(&mut m, id, json!({"choice": "repair", "repair": rid})).unwrap();
+        assert_eq!(
+            r["changes"],
+            json!([{"path": "releases/p/A.json", "change": "deleted"}])
+        );
+        assert_eq!(r["status"]["clean"], true, "{r}");
+        // The merged part is proposed again, as it now is.
+        let v = m.call("release.propose", json!({"part": "p"})).unwrap();
+        assert_eq!(v["record"]["label"], "A");
     }
 
     #[test]

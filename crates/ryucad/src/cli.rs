@@ -185,13 +185,13 @@ enum Command {
         #[arg(long, value_name = "REF", conflicts_with = "eye")]
         fit: Vec<String>,
         /// The eye point, three quantities: 0,-100mm,50mm.
-        #[arg(long, value_name = "X,Y,Z", value_parser = triple, requires_all = ["target", "up"])]
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires_all = ["target", "up"])]
         eye: Option<[String; 3]>,
         /// The point looked at.
-        #[arg(long, value_name = "X,Y,Z", value_parser = triple, requires = "eye")]
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires = "eye")]
         target: Option<[String; 3]>,
         /// The up direction: 0,0,1.
-        #[arg(long, value_name = "X,Y,Z", value_parser = vector, requires = "eye")]
+        #[arg(long, value_name = "X,Y,Z", value_parser = vector, allow_hyphen_values = true, requires = "eye")]
         up: Option<[f64; 3]>,
         /// Perspective with this vertical field of view (45 by default).
         #[arg(long, value_name = "DEGREES", conflicts_with = "ortho")]
@@ -279,11 +279,11 @@ enum Command {
         /// Use this participant's camera.
         #[arg(long = "of", value_name = "PARTICIPANT", conflicts_with = "eye")]
         of: Option<String>,
-        #[arg(long, value_name = "X,Y,Z", value_parser = triple, requires_all = ["target", "up"])]
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires_all = ["target", "up"])]
         eye: Option<[String; 3]>,
-        #[arg(long, value_name = "X,Y,Z", value_parser = triple, requires = "eye")]
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires = "eye")]
         target: Option<[String; 3]>,
-        #[arg(long, value_name = "X,Y,Z", value_parser = vector, requires = "eye")]
+        #[arg(long, value_name = "X,Y,Z", value_parser = vector, allow_hyphen_values = true, requires = "eye")]
         up: Option<[f64; 3]>,
         #[arg(
             long,
@@ -309,6 +309,16 @@ enum Command {
         /// Leave out sketches.
         #[arg(long)]
         no_sketches: bool,
+        #[command(flatten)]
+        rev: RevArg,
+        /// Frame this revision's model too (repeatable; `working` for the
+        /// working files), so renders of each revision share a camera.
+        #[arg(long = "frame", value_name = "REV", conflicts_with_all = ["of", "eye"])]
+        frame: Vec<String>,
+        /// Paint faces new and changed since this revision, and ghost its
+        /// model with the faces it loses in red.
+        #[arg(long, value_name = "REV")]
+        compare: Option<String>,
     },
     /// What the merge (or cherry-pick, revert or rebase step) Git is in the
     /// middle of leaves to settle.
@@ -345,6 +355,11 @@ enum Command {
     /// conversion and the merge driver.
     #[command(subcommand)]
     Git(GitCmd),
+    /// The hosted review service for this clone's GitHub pull requests:
+    /// checks, renders, comments pinned to faces and edges, and merging the
+    /// base in. Needs a GitHub token (RYUCAD_REVIEW_TOKEN, GH_TOKEN or gh).
+    #[command(subcommand)]
+    Review(ReviewCmd),
     /// Print the ryucad, ryukei and protocol versions.
     Version,
 }
@@ -398,6 +413,45 @@ enum MergeCmd {
         /// Fail with `conflict` unless the conflict's part is still at this revision.
         #[arg(long = "expect", value_name = "REVISION")]
         expect: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReviewCmd {
+    /// The pull request's checks, findings, changes, merge state and
+    /// renders (the current branch's by default).
+    Status { pr: Option<u64> },
+    /// Comment threads, with each one's entity and whether it is outdated.
+    Threads {
+        pr: Option<u64>,
+        /// Only threads still open.
+        #[arg(long)]
+        open: bool,
+    },
+    /// Open a thread on an entity (<part>/<solid>/<name>).
+    Comment {
+        reference: String,
+        text: String,
+        #[arg(long)]
+        pr: Option<u64>,
+        /// The commit it is about (the PR's head by default).
+        #[arg(long, value_name = "SHA")]
+        commit: Option<String>,
+    },
+    /// Reply to a thread.
+    Reply { thread: String, text: String },
+    /// Mark a thread resolved.
+    Resolve { thread: String },
+    /// Open a resolved thread again.
+    Reopen { thread: String },
+    /// Push the merge of the base into the PR's branch, as the service
+    /// validated it (when GitHub can't merge but ryucad can).
+    Update { pr: Option<u64> },
+    /// Download the pull request's before and after renders.
+    Renders {
+        pr: Option<u64>,
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
     },
 }
 
@@ -670,12 +724,42 @@ enum ReleaseCmd {
 
 #[derive(Subcommand)]
 enum SketchCmd {
-    /// Apply a batch of edits with one solve, or refuse them all. OPS is a JSON array (or @FILE
-    /// holding one) of {"op": "add", "type": "point", "at": ["0", "10 mm"]}, {"op": "add",
-    /// "type": "line", "start": "p1", "end": "p2"}, {"op": "add", "type": "length", "a": "l1",
-    /// "value": "width"}, {"op": "remove", "id": "c3"}, {"op": "set", "id": "d1", "value":
-    /// "20 mm"} and {"op": "move", "id": "p3", "at": [...]}. With no ops, re-solves and writes
-    /// the positions.
+    /// Apply a batch of edits with one solve, or refuse them all.
+    ///
+    /// OPS is a JSON array (or @FILE holding one) of ops. With no ops, re-solves and writes the
+    /// positions. Quantities are strings with units ("10 mm"), expressions over parameters
+    /// ("width / 2"), or bare numbers in the project's default unit.
+    ///
+    /// Ops:
+    ///   {"op": "add", "type": T, ...}        add an entity or constraint (fields below); "id"
+    ///                                        is optional (p3, l2, a1, ci4, c7, d4 if left out)
+    ///   {"op": "remove", "id": ID}           remove it, and every constraint naming it
+    ///   {"op": "set", "id": ID, "value": Q}  change a dimension's value
+    ///   {"op": "set", "id": ID, "construction": true|false}
+    ///   {"op": "move", "id": ID, "at": [X, Y]}
+    ///                                        move a point (held there for the solve)
+    ///   {"op": "move", "id": ID, "r": Q}     resize a circle
+    ///
+    /// Entities ("construction": true and "projected": "<part>/<feature>/<name>" optional,
+    /// except on points, which take only "projected"):
+    ///   point   "at": [X, Y]
+    ///   line    "start": P, "end": P
+    ///   arc     "center": P, "start": P, "end": P   (counterclockwise from start to end)
+    ///   circle  "center": P, "r": Q    (the file and `sketch get` say r_m: meters, solved)
+    ///
+    /// Constraints name entities in "a", then "b", then "about":
+    ///   one     horizontal, vertical, fix
+    ///   two     coincident, parallel, perpendicular, tangent, equal, midpoint, on, concentric
+    ///   three   symmetric ("a" and "b" about "about")
+    ///
+    /// Dimensions add a "value" (Q; angles in deg or rad, a bare number is degrees):
+    ///   one     length, radius, diameter
+    ///   two     distance, distance_x, distance_y, angle
+    ///
+    /// Example: [{"op": "add", "type": "point", "at": ["0", "10 mm"]},
+    ///           {"op": "add", "type": "line", "start": "p1", "end": "p2"},
+    ///           {"op": "add", "type": "length", "a": "l1", "value": "width"}]
+    #[command(verbatim_doc_comment)]
     Edit {
         part: String,
         sketch: String,
@@ -852,16 +936,18 @@ impl FieldArgs {
     }
 }
 
+// Vectors may start with a minus (`--x -0,1,0`), so they take values that
+// look like flags.
 #[derive(Args)]
 struct PlacementArgs {
     /// The local origin, three quantities: 0,0,10mm.
-    #[arg(long, value_name = "X,Y,Z", value_parser = triple)]
+    #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true)]
     origin: Option<[String; 3]>,
     /// The local z axis: 0,0,1.
-    #[arg(long, value_name = "X,Y,Z", value_parser = vector)]
+    #[arg(long, value_name = "X,Y,Z", value_parser = vector, allow_hyphen_values = true)]
     z: Option<[f64; 3]>,
     /// The local x direction: 1,0,0.
-    #[arg(long, value_name = "X,Y,Z", value_parser = vector)]
+    #[arg(long, value_name = "X,Y,Z", value_parser = vector, allow_hyphen_values = true)]
     x: Option<[f64; 3]>,
 }
 
@@ -996,6 +1082,7 @@ fn request(cmd: &Command) -> Option<Request> {
         | Command::Version
         | Command::Daemon(_)
         | Command::Git(_)
+        | Command::Review(_)
         | Command::Watch { .. }
         | Command::Open { .. } => {
             return None;
@@ -1282,6 +1369,9 @@ fn request(cmd: &Command) -> Option<Request> {
             labels,
             no_edges,
             no_sketches,
+            rev,
+            frame,
+            compare,
         } => Request::Render {
             part: part.clone(),
             camera: camera_arg(eye, target, up, fov, ortho),
@@ -1293,6 +1383,9 @@ fn request(cmd: &Command) -> Option<Request> {
             edges: Some(!no_edges),
             labels: Some(*labels),
             sketches: Some(!no_sketches),
+            rev: rev.rev.clone(),
+            frame: frame.clone(),
+            compare: compare.clone(),
         },
         Command::Highlight {
             entities,
@@ -1438,6 +1531,43 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
         }
         Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
         Command::Git(GitCmd::Install { global }) => ryucad::drivers::install(&here, !global),
+        Command::Review(cmd) => {
+            use ryucad::review::Action;
+            let action = match cmd {
+                ReviewCmd::Status { pr } => Action::Status { pr: *pr },
+                ReviewCmd::Threads { pr, open } => Action::Threads {
+                    pr: *pr,
+                    open: *open,
+                },
+                ReviewCmd::Comment {
+                    reference,
+                    text,
+                    pr,
+                    commit,
+                } => Action::Comment {
+                    reference: reference.clone(),
+                    text: text.clone(),
+                    pr: *pr,
+                    commit: commit.clone(),
+                },
+                ReviewCmd::Reply { thread, text } => Action::Reply {
+                    thread: thread.clone(),
+                    text: text.clone(),
+                },
+                ReviewCmd::Resolve { thread } => Action::Resolve {
+                    thread: thread.clone(),
+                },
+                ReviewCmd::Reopen { thread } => Action::Reopen {
+                    thread: thread.clone(),
+                },
+                ReviewCmd::Update { pr } => Action::Update { pr: *pr },
+                ReviewCmd::Renders { pr, out } => Action::Renders {
+                    pr: *pr,
+                    out: here.join(out),
+                },
+            };
+            ryucad::review::run(&here, action)
+        }
         Command::Open { dir } => {
             let dir = dir.as_ref().map_or_else(|| here.clone(), |d| here.join(d));
             let dir = plain(dir.canonicalize().map_err(|e| Error::io(&dir, &e))?);
@@ -1543,27 +1673,25 @@ fn deliver(cmd: &Command, a: Answer) -> Result<Value> {
     Ok(result)
 }
 
-/// `ryucad --version` (or `-V`) in a command's place is `ryucad version`,
-/// as people and other tools expect; elsewhere it is still a usage error.
-fn version_flag(mut args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].to_str() {
-            Some("-C" | "--as") => i += 2,
-            Some("--pretty" | "--no-daemon") => i += 1,
-            Some(a) if a.starts_with("--as=") || (a.starts_with("-C") && a.len() > 2) => i += 1,
-            Some("--version" | "-V") => {
-                args[i] = "version".into();
-                break;
-            }
-            _ => break,
-        }
-    }
-    args
+/// Whether the arguments ask only for the version the way most tools take
+/// it (`--version`, `-V`), beside `--pretty`: answered as `ryucad version`.
+fn version_flag(args: &[String]) -> bool {
+    let (flags, rest): (Vec<&String>, Vec<&String>) = args
+        .iter()
+        .skip(1)
+        .partition(|a| *a == "--version" || *a == "-V");
+    !flags.is_empty() && rest.iter().all(|a| *a == "--pretty")
 }
 
 pub fn main() -> ExitCode {
-    let cli = match Cli::try_parse_from(version_flag(std::env::args_os().collect())) {
+    let args: Vec<String> = std::env::args_os()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    if version_flag(&args) {
+        let pretty = args.iter().any(|a| a == "--pretty");
+        return finish(Ok(json!(VersionInfo::current())), Vec::new(), pretty);
+    }
+    let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
             use clap::error::ErrorKind;
@@ -1763,6 +1891,13 @@ fn finish(outcome: Result<Value>, warnings: Vec<String>, pretty: bool) -> ExitCo
     } else {
         serde_json::to_string(&doc)
     };
-    println!("{}", s.expect("JSON values always serialize"));
+    // A reader that stops early (`| head`) has what it wanted: a closed
+    // pipe isn't worth a panic, and the exit code still says what happened.
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stdout().lock(),
+        "{}",
+        s.expect("JSON values always serialize")
+    );
     ExitCode::from(code)
 }
