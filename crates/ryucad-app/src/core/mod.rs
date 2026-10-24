@@ -12,6 +12,7 @@ pub mod params;
 pub mod pdm;
 pub mod people;
 pub mod pick;
+pub mod props;
 pub mod recent;
 pub mod settings;
 pub mod sketch;
