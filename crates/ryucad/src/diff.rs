@@ -1,9 +1,11 @@
 //! What changed between two versions of a project: [`textconv`] renders
 //! one file as lines for Git's own diff to compare; [`structural`] compares
 //! two versions' files as ryucad reads them, per part, feature, parameter
-//! and sketch entity; [`model`] adds what that did to the rebuilt bodies.
+//! and sketch entity, and what changed in PDM (properties, release records
+//! and release states); [`model`] adds what that did to the rebuilt bodies.
 
 use crate::activity::Files;
+use ryupdm::history::Releases;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -479,6 +481,100 @@ fn parts(files: &Files) -> BTreeMap<String, BTreeSet<String>> {
     out
 }
 
+/// The parts some release record names: folders under `releases/`.
+fn recorded(files: &Files) -> BTreeSet<String> {
+    files
+        .keys()
+        .filter_map(|p| {
+            let mut seg = p.split('/');
+            match (seg.next(), seg.next(), seg.next()) {
+                (Some(crate::doc::project::RELEASES), Some(part), Some(_)) => Some(part.to_owned()),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// What changed in `part`'s PDM from `from` to `to`, `None` when nothing
+/// did: each property changed (`from` and `to` as written, absent sides
+/// left out, and whether the settings make it revising), each record
+/// `added`, `removed` or `changed` (`{label, kind}`), and the part's
+/// release state on each side when they differ, both read against
+/// `releases`, the release branch as it is now.
+fn pdm(from: &Files, to: &Files, part: &str, releases: &Releases) -> Option<Value> {
+    let path = format!("parts/{part}/{}", crate::doc::project::PROPERTIES);
+    let props = |files: &Files| -> Map<String, Value> {
+        let mut o = json_at(files, &path)
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        o.remove("format");
+        o.remove("kind");
+        o
+    };
+    let (pa, pb) = (props(from), props(to));
+    let config = ryupdm::config::Config::read(to)
+        .or_else(|_| ryupdm::config::Config::read(from))
+        .unwrap_or_default();
+    let mut properties = Map::new();
+    for k in pa.keys().chain(pb.keys()).collect::<BTreeSet<_>>() {
+        let (a, b) = (pa.get(k), pb.get(k));
+        if a == b {
+            continue;
+        }
+        let mut c = json!({"revising": config.decl(k).is_some_and(|d| d.revising)});
+        if let Some(a) = a {
+            c["from"] = a.clone();
+        }
+        if let Some(b) = b {
+            c["to"] = b.clone();
+        }
+        properties.insert(k.clone(), c);
+    }
+    let records = |files: &Files| -> BTreeMap<String, (Value, Vec<u8>)> {
+        ryupdm::record::Records::read(files)
+            .unwrap_or_default()
+            .entries
+            .into_iter()
+            .filter(|e| e.part.as_str() == part)
+            .map(|e| {
+                let what = json!({"label": e.label, "kind": e.kind.as_str()});
+                (e.path, (what, e.bytes))
+            })
+            .collect()
+    };
+    let (ra, rb) = (records(from), records(to));
+    let (mut added, mut removed, mut changed) = (Vec::new(), Vec::new(), Vec::new());
+    for path in ra.keys().chain(rb.keys()).collect::<BTreeSet<_>>() {
+        match (ra.get(path), rb.get(path)) {
+            (None, Some((w, _))) => added.push(w.clone()),
+            (Some((w, _)), None) => removed.push(w.clone()),
+            (Some((w, a)), Some((_, b))) if a != b => changed.push(w.clone()),
+            _ => {}
+        }
+    }
+    let state = crate::doc::id::Id::parse(part, "part").ok().and_then(|id| {
+        let a = ryupdm::state::derive(from, &id, releases).text();
+        let b = ryupdm::state::derive(to, &id, releases).text();
+        (a != b).then(|| json!({"from": a, "to": b}))
+    });
+    if properties.is_empty()
+        && added.is_empty()
+        && removed.is_empty()
+        && changed.is_empty()
+        && state.is_none()
+    {
+        return None;
+    }
+    let mut v = json!({
+        "properties": properties,
+        "records": {"added": added, "removed": removed, "changed": changed},
+    });
+    if let Some(s) = state {
+        v["state"] = s;
+    }
+    Some(v)
+}
+
 /// A part's parameters as written, by name.
 fn parameters(files: &Files, part: &str) -> Map<String, Value> {
     json_at(files, &format!("parts/{part}/parameters.json"))
@@ -489,8 +585,12 @@ fn parameters(files: &Files, part: &str) -> Map<String, Value> {
 /// What changed between two versions of a project's files, `from` and
 /// `to`: the manifest, and per part its feature order, its parameters as
 /// written, and each feature by JSON pointer (a sketch by entity and
-/// constraint, its solved positions apart).
-pub fn structural(from: &Files, to: &Files, opts: &Options) -> Value {
+/// constraint, its solved positions apart). A part whose PDM differs has
+/// `pdm` too (see [`pdm`]), its states read against `releases`, the
+/// release branch as read; a change to `ryupdm.json` is `pdm` at the top,
+/// by pointer, as the manifest's is (settings that read with their
+/// defaults filled in, so no file is the defaults).
+pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases) -> Value {
     let mut manifest = Vec::new();
     changes(
         "",
@@ -499,7 +599,13 @@ pub fn structural(from: &Files, to: &Files, opts: &Options) -> Value {
         &mut manifest,
     );
     let (pa, pb) = (parts(from), parts(to));
-    let names: BTreeSet<&String> = pa.keys().chain(pb.keys()).collect();
+    let (ra, rb) = (recorded(from), recorded(to));
+    let names: BTreeSet<&String> = pa
+        .keys()
+        .chain(pb.keys())
+        .chain(ra.iter())
+        .chain(rb.iter())
+        .collect();
     let mut out = Map::new();
     for part in names {
         if opts.part.as_ref().is_some_and(|p| p != part) {
@@ -550,30 +656,57 @@ pub fn structural(from: &Files, to: &Files, opts: &Options) -> Value {
                 _ => {}
             }
         }
-        let prefix = format!("parts/{part}/");
+        let prefixes = [
+            format!("parts/{part}/"),
+            format!("{}/{part}/", crate::doc::project::RELEASES),
+        ];
         let mine = |files: &Files| -> Files {
             files
                 .iter()
-                .filter(|(p, _)| p.starts_with(&prefix))
+                .filter(|(p, _)| prefixes.iter().any(|x| p.starts_with(x.as_str())))
                 .map(|(p, b)| (p.clone(), b.clone()))
                 .collect()
         };
-        let changed_part = mine(from) != mine(to);
-        let st = status(fa.is_some(), fb.is_some(), changed_part);
+        let pdm = pdm(from, to, part, releases);
+        // A part is there with its folder or a record of it.
+        let changed_part = mine(from) != mine(to) || pdm.is_some();
+        let st = status(
+            fa.is_some() || ra.contains(part),
+            fb.is_some() || rb.contains(part),
+            changed_part,
+        );
         if !opts.all && st == "same" {
             continue;
         }
-        out.insert(
-            part.clone(),
-            json!({
-                "status": st,
-                "order": order,
-                "parameters": {"added": added, "removed": removed, "changed": changed},
-                "features": features,
-            }),
-        );
+        let mut v = json!({
+            "status": st,
+            "order": order,
+            "parameters": {"added": added, "removed": removed, "changed": changed},
+            "features": features,
+        });
+        if let Some(p) = pdm {
+            v["pdm"] = p;
+        }
+        out.insert(part.clone(), v);
     }
-    json!({"manifest": {"changes": manifest}, "parts": out})
+    let mut v = json!({"manifest": {"changes": manifest}, "parts": out});
+    // Settings as they read, defaults filled in (no file is the
+    // defaults); as written when they don't read.
+    let settings_of = |files: &Files| match ryupdm::config::Config::read(files) {
+        Ok(c) => Some(c.to_json()),
+        Err(_) => json_at(files, crate::doc::project::PDM_CONFIG),
+    };
+    let mut settings = Vec::new();
+    changes(
+        "",
+        settings_of(from).as_ref(),
+        settings_of(to).as_ref(),
+        &mut settings,
+    );
+    if !settings.is_empty() {
+        v["pdm"] = json!({ "changes": settings });
+    }
+    v
 }
 
 /// A part rebuilt on one side: its features' results in order, and its
@@ -1148,6 +1281,142 @@ mod tests {
         );
     }
 
+    /// A release of `part` as `files` have it.
+    fn release(
+        files: &Files,
+        part: &str,
+        label: &str,
+        supersedes: Option<&str>,
+    ) -> (String, Value) {
+        let id = crate::doc::id::Id::parse(part, "part").unwrap();
+        let config = ryupdm::config::Config::read(files).unwrap();
+        let props = ryupdm::props::read(files, &id).unwrap();
+        let r = ryupdm::record::Record::Release(ryupdm::record::Release {
+            project: crate::doc::id::ProjectId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+            part: id.clone(),
+            label: label.into(),
+            content: ryupdm::content::hash(files, &id).unwrap(),
+            properties: ryupdm::record::revising(&config, &props),
+            results: BTreeMap::new(),
+            built_with: ryupdm::record::BuiltWith {
+                ryucad: "0".into(),
+                ryukei: "0".into(),
+                commit: "c".into(),
+            },
+            released_by: ryupdm::record::ReleasedBy {
+                name: None,
+                email: None,
+                participant: "agent".into(),
+            },
+            supersedes: supersedes.map(str::to_owned),
+            note: None,
+        });
+        (r.path(), r.to_json())
+    }
+
+    #[test]
+    fn a_parts_pdm_changes_are_in_its_block() {
+        let props = |v: Value| {
+            let mut p = json!({"format": 1, "kind": "ryupdm.properties"});
+            for (k, x) in v.as_object().unwrap() {
+                p[k] = x.clone();
+            }
+            p
+        };
+        let common = [
+            (
+                "ryucad.json",
+                json!({"default_unit": "mm", "format": 2, "kind": "ryucad.project",
+                       "project": "0123456789abcdef0123456789abcdef"}),
+            ),
+            (
+                "parts/p/part.json",
+                json!({"features": ["a"], "format": 1, "kind": "ryucad.part"}),
+            ),
+            ("parts/p/features/a.json", box_x("10 mm")),
+            (
+                "parts/q/part.json",
+                json!({"features": [], "format": 1, "kind": "ryucad.part"}),
+            ),
+        ];
+        let mut from = files(&common);
+        from.extend(files(&[(
+            "parts/p/properties.json",
+            props(json!({"number": "100"})),
+        )]));
+        let (a, ra) = release(&from, "p", "A", None);
+        let (qa, rqa) = release(&from, "q", "A", None);
+        from.extend(files(&[(a.as_str(), ra.clone()), (qa.as_str(), rqa)]));
+        let mut to = files(&common);
+        to.extend(files(&[
+            (
+                "parts/p/properties.json",
+                props(json!({"number": "101", "name": "Pin"})),
+            ),
+            (
+                "ryupdm.json",
+                json!({"format": 1, "kind": "ryupdm.config",
+                       "properties": {"finish": {"type": "string"}}}),
+            ),
+        ]));
+        let (b, rb) = release(&to, "p", "B", Some("A"));
+        to.extend(files(&[(a.as_str(), ra), (b.as_str(), rb)]));
+        // p's A is official; q's A, a proposal, is withdrawn.
+        let releases = Releases {
+            official: [(
+                a.clone(),
+                ryupdm::history::Official {
+                    commit: "c0ffee".into(),
+                    blob: gix::ObjectId::null(gix::hash::Kind::Sha1),
+                    shallow: false,
+                },
+            )]
+            .into(),
+            ..Releases::default()
+        };
+        let v = structural(&from, &to, &Options::default(), &releases);
+        assert_eq!(
+            v["parts"]["p"]["pdm"],
+            json!({
+                "properties": {
+                    "name": {"revising": false, "to": "Pin"},
+                    "number": {"from": "100", "revising": true, "to": "101"},
+                },
+                "records": {"added": [{"label": "B", "kind": "release"}],
+                            "removed": [], "changed": []},
+                "state": {"from": "released A", "to": "A modified, B proposed"},
+            })
+        );
+        let q = &v["parts"]["q"];
+        assert_eq!(q["status"], "changed");
+        assert_eq!(
+            q["pdm"],
+            json!({"properties": {},
+                   "records": {"added": [], "removed": [{"label": "A", "kind": "release"}],
+                               "changed": []},
+                   "state": {"from": "in work, A proposed", "to": "in work"}})
+        );
+        // No settings file was the defaults.
+        assert_eq!(
+            v["pdm"]["changes"],
+            json!([{"at": "/properties",
+                    "to": {"finish": {"required": false, "revising": true, "type": "string"}}}])
+        );
+        // A part whose PDM didn't change has no block; nor does a project
+        // whose settings didn't.
+        let v = structural(
+            &to,
+            &to,
+            &Options {
+                all: true,
+                ..Options::default()
+            },
+            &releases,
+        );
+        assert!(v["parts"]["p"].get("pdm").is_none(), "{v}");
+        assert!(v.get("pdm").is_none());
+    }
+
     fn files(list: &[(&str, Value)]) -> Files {
         list.iter()
             .map(|(p, v)| {
@@ -1216,7 +1485,7 @@ mod tests {
             ("parts/q/part.json", part(&[])),
             ("parts/same/part.json", part(&[])),
         ]);
-        let v = structural(&from, &to, &Options::default());
+        let v = structural(&from, &to, &Options::default(), &Releases::default());
         assert_eq!(
             v["manifest"]["changes"],
             json!([{"at": "/default_unit", "from": "mm", "to": "in"}])
@@ -1259,7 +1528,7 @@ mod tests {
             all: true,
             part: Some("p".into()),
         };
-        let v = structural(&from, &to, &opts);
+        let v = structural(&from, &to, &opts, &Releases::default());
         assert_eq!(
             v["parts"]["p"]["features"]["s"]["positions"],
             json!([{"entity": "p1", "field": "m", "from": [0.0, 0.0], "to": [0.0, 0.01]}])
@@ -1272,6 +1541,7 @@ mod tests {
                 all: true,
                 ..Options::default()
             },
+            &Releases::default(),
         );
         assert_eq!(all["parts"]["same"]["status"], "same");
         assert_eq!(
@@ -1281,7 +1551,7 @@ mod tests {
         // A file that doesn't read is no feature to compare.
         let mut broken = to.clone();
         broken.insert("parts/p/features/a.json".into(), b"{ nope".to_vec());
-        let v = structural(&from, &broken, &Options::default());
+        let v = structural(&from, &broken, &Options::default(), &Releases::default());
         assert_eq!(
             v["parts"]["p"]["features"]["a"],
             json!({"status": "changed", "invalid": ["to"]})

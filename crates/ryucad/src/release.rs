@@ -1068,4 +1068,47 @@ pub(crate) mod tests {
         let v = obsolete(&mut s, "B").unwrap();
         assert_eq!(v["path"], "releases/p/B.obsolete.json");
     }
+
+    #[test]
+    fn diff_shows_proposals_and_what_they_do_to_states() {
+        let (dir, mut s) = released_project();
+        let root = dir.path();
+        propose(&mut s).unwrap();
+        let v = call(&mut s, "diff", json!({})).unwrap();
+        assert_eq!(
+            v["parts"]["p"]["pdm"],
+            json!({"properties": {},
+                   "records": {"added": [{"label": "A", "kind": "release"}],
+                               "removed": [], "changed": []},
+                   "state": {"from": "in work", "to": "in work, A proposed"}})
+        );
+        // Official on main, then worked on.
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "release A"]);
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"x": 12}}),
+        )
+        .unwrap();
+        let v = call(&mut s, "diff", json!({})).unwrap();
+        assert_eq!(
+            v["parts"]["p"]["pdm"]["state"],
+            json!({"from": "released A", "to": "A modified"})
+        );
+        assert_eq!(v["parts"]["p"]["pdm"]["properties"], json!({}));
+        assert!(v.get("pdm").is_none());
+        call(
+            &mut s,
+            "pdm.configure",
+            json!({"properties": {"finish": {"type": "string"}}}),
+        )
+        .unwrap();
+        let v = call(&mut s, "diff", json!({})).unwrap();
+        assert_eq!(
+            v["pdm"]["changes"],
+            json!([{"at": "/properties",
+                    "to": {"finish": {"required": false, "revising": true, "type": "string"}}}])
+        );
+    }
 }

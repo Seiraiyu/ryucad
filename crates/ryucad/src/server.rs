@@ -2553,7 +2553,10 @@ pub(crate) fn diff(
     }
     let (a, fa) = files_at(session, from)?;
     let (b, fb) = files_at(session, to)?;
-    let mut v = crate::diff::structural(&fa, &fb, opts);
+    let releases = crate::release::history(session)
+        .map(|(_, r)| r)
+        .unwrap_or_default();
+    let mut v = crate::diff::structural(&fa, &fb, opts, &releases);
     v["from"] = a;
     v["to"] = b;
     if model {
