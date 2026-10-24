@@ -31,9 +31,13 @@
 //!    [`crate::pcurve::exact`] first, else the file's, if it fits the
 //!    edge.
 //! 8. **Build.** The shape is laid out and built through Euler operators
-//!    ([`crate::layout`]), each solid's voids in its region, and renamed
-//!    with the names of step 1. Tolerances cover the gaps between curves'
-//!    ends and their vertices, and the bounds of approximated geometry.
+//!    ([`crate::layout`]), every connected piece a solid of its own, and
+//!    renamed with the names of step 1. Each shell's volume then says
+//!    which way it faces and which encloses which; shells facing the
+//!    wrong way are turned over, cavities go in the solids around them,
+//!    and the body is built again if anything changed (see `shells`).
+//!    Tolerances cover the gaps between curves' ends and their vertices,
+//!    and the bounds of approximated geometry.
 //!    [`crate::check::check`] must then hold.
 //!
 //! Healing knows nothing of any file format: an importer of any kind
@@ -47,6 +51,7 @@ mod orient;
 mod pcurves;
 mod seamed;
 mod sew;
+mod shells;
 mod unseam;
 
 pub use seamed::seamed;
@@ -55,6 +60,7 @@ use crate::Error;
 use crate::geom::{Curve, Curve2, Point3, Surface};
 use crate::name::{Event, Journal, Name, OpKey};
 use crate::topo::{Body, Sense};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub use crate::name::ImportRole;
 
@@ -174,7 +180,8 @@ pub struct HealReport {
     /// Faces some of whose loops ran against the region they bound, and
     /// were reversed.
     pub reversed: Vec<Name>,
-    /// Faces turned over to agree with their neighbours.
+    /// Faces turned over: to agree with their neighbours, or with their
+    /// shell when it faced the wrong way.
     pub turned: Vec<Name>,
     /// Pole vertices dropped with their loops or seams.
     pub poles: Vec<Name>,
@@ -206,8 +213,36 @@ pub fn heal(
     let reversed = orient::loops(&mut shape, &names)?;
     let turned = orient::faces(&mut shape, &names)?;
     gaps::tolerate(&mut shape, &names, options.tolerance_cap)?;
-    let pcurves = pcurves::pcurves(&shape, &names)?;
-    let (body, created, mut report) = build::build(key, &shape, &names, &pcurves, options)?;
+    let mut pcurves = pcurves::pcurves(&shape, &names)?;
+    let first = build::assemble(key, &shape, &names, &pcurves, None)?;
+    let index: BTreeMap<Name, usize> = names
+        .faces
+        .iter()
+        .enumerate()
+        .map(|(k, &n)| (n, k))
+        .collect();
+    let judged = shells::judge(&first, &index)?;
+    let body = if judged.stands() {
+        first
+    } else {
+        for &k in &judged.turn {
+            orient::turn(&mut shape.faces[k]);
+            for list in &mut pcurves[k] {
+                list.reverse();
+            }
+        }
+        build::assemble(key, &shape, &names, &pcurves, Some(&judged.solids))?
+    };
+    let (body, created, mut report) = build::finish(body, &shape, &names, options)?;
+    // A face turned twice, with its neighbours and with its shell, is as
+    // the file had it.
+    let mut turned: BTreeSet<Name> = turned.into_iter().collect();
+    for &k in &judged.turn {
+        if !turned.remove(&names.faces[k]) {
+            turned.insert(names.faces[k]);
+        }
+    }
+    let turned: Vec<Name> = turned.into_iter().collect();
     let mut journal = sewn.journal;
     journal.append(unseamed.journal);
     journal.append(created);

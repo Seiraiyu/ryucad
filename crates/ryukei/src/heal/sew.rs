@@ -20,12 +20,12 @@
 //! the two edges are the same curve over the same interval. Vertices
 //! paired by the edges' ends are joined into classes, each a new vertex at
 //! its least-named member's point, named as merged from all of them.
-//! Shells joined by a sewn edge are one shell, and their solids one solid.
+//! Which faces make a shell is the build's to find out (see `shells`).
 //! What the edges' and vertices' new places leave as gaps the tolerances
 //! cover later (see `gaps`).
 
 use super::names::Names;
-use super::{Edge, Loop, Shape, Shell, Solid, Vertex};
+use super::{Edge, Loop, Shape, Vertex};
 use crate::geom::{Box3, Curve, Point3, Vector3};
 use crate::name::{Event, Journal, Name, OpKey, Role};
 use crate::tol::LINEAR_RESOLUTION;
@@ -330,7 +330,6 @@ pub(super) fn sew(key: OpKey, s: &mut Shape, names: &mut Names, cap: f64) -> Res
             }
         }
     }
-    regroup(s);
     out.edges.sort();
     out.vertices.sort();
     Ok(out)
@@ -339,66 +338,4 @@ pub(super) fn sew(key: OpKey, s: &mut Shape, names: &mut Names, cap: f64) -> Res
 fn sorted(mut x: Vec<Name>) -> Vec<Name> {
     x.sort();
     x
-}
-
-/// Shells sharing an edge made one, in the order of their first faces;
-/// their solids with them.
-fn regroup(s: &mut Shape) {
-    let mut shell_of = vec![0; s.faces.len()];
-    for (k, sh) in s.shells.iter().enumerate() {
-        for &f in &sh.faces {
-            shell_of[f] = k;
-        }
-    }
-    let mut parent: Vec<usize> = (0..s.shells.len()).collect();
-    for list in uses_of(s) {
-        if let [a, b, ..] = list[..] {
-            let (x, y) = (
-                find(&mut parent, shell_of[a.0]),
-                find(&mut parent, shell_of[b.0]),
-            );
-            if x != y {
-                parent[x.max(y)] = x.min(y);
-            }
-        }
-    }
-    let roots: Vec<usize> = (0..s.shells.len()).map(|k| find(&mut parent, k)).collect();
-    if roots.iter().enumerate().all(|(k, &r)| r == k) {
-        return;
-    }
-    let mut index: BTreeMap<usize, usize> = BTreeMap::new();
-    let mut shells: Vec<Shell> = Vec::new();
-    for (k, &r) in roots.iter().enumerate() {
-        let n = *index.entry(r).or_insert_with(|| {
-            shells.push(Shell {
-                faces: Vec::new(),
-                closed: true,
-            });
-            shells.len() - 1
-        });
-        shells[n].faces.extend(s.shells[k].faces.iter().copied());
-        shells[n].closed &= s.shells[k].closed;
-    }
-    // Solids whose shells were joined are one: its outer shells' union,
-    // and every void that isn't one of them.
-    let mut solids: Vec<Solid> = Vec::new();
-    let mut solid_of: BTreeMap<usize, usize> = BTreeMap::new();
-    for so in &s.solids {
-        let outer = index[&roots[so.outer]];
-        let n = *solid_of.entry(outer).or_insert_with(|| {
-            solids.push(Solid {
-                outer,
-                voids: Vec::new(),
-            });
-            solids.len() - 1
-        });
-        for &v in &so.voids {
-            let v = index[&roots[v]];
-            if v != outer && !solids[n].voids.contains(&v) {
-                solids[n].voids.push(v);
-            }
-        }
-    }
-    s.shells = shells;
-    s.solids = solids;
 }

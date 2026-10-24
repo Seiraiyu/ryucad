@@ -27,7 +27,7 @@
 //! way each shell then faces is decided once it is built (see `shells`).
 
 use super::names::Names;
-use super::{Loop, Shape, Use};
+use super::{Face, Loop, Shape, Use};
 use crate::geom::{Point2, Surface};
 use crate::name::Name;
 use crate::predicates::{Sign, orient2d};
@@ -365,18 +365,22 @@ pub(super) fn faces(s: &mut Shape, names: &Names) -> Result<Vec<Name>, Error> {
     }
     let mut turned = Vec::new();
     for (k, t) in turn.iter().enumerate() {
-        if *t != Some(true) {
-            continue;
+        if *t == Some(true) {
+            self::turn(&mut s.faces[k]);
+            turned.push(names.faces[k]);
         }
-        let f = &mut s.faces[k];
-        f.sense = f.sense.flipped();
-        for l in &mut f.loops {
-            if let Loop::Edges(list) = l {
-                reverse(list);
-            }
-        }
-        turned.push(names.faces[k]);
     }
     turned.sort();
     Ok(turned)
+}
+
+/// Turns a face over: its sense and every loop reversed together, so its
+/// region stays.
+pub(super) fn turn(f: &mut Face) {
+    f.sense = f.sense.flipped();
+    for l in &mut f.loops {
+        if let Loop::Edges(list) = l {
+            reverse(list);
+        }
+    }
 }
