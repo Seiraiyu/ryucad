@@ -847,6 +847,22 @@ fn version_flags_are_the_version_command() {
 }
 
 #[test]
+fn sketch_edit_help_lists_every_type() {
+    let out = Command::cargo_bin("ryucad")
+        .unwrap()
+        .args(["sketch", "edit", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8(out.stdout).unwrap();
+    for t in ryucad::doc::sketch::ConstraintType::ALL {
+        assert!(help.contains(t.as_str()), "{}: {help}", t.as_str());
+    }
+    for t in ["point", "line", "arc", "circle", "\"r\": Q"] {
+        assert!(help.contains(t), "{t}: {help}");
+    }
+}
+
+#[test]
 fn a_reader_closing_early_is_no_panic() {
     use std::process::Stdio;
     let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryucad"))

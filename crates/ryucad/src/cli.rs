@@ -670,12 +670,42 @@ enum ReleaseCmd {
 
 #[derive(Subcommand)]
 enum SketchCmd {
-    /// Apply a batch of edits with one solve, or refuse them all. OPS is a JSON array (or @FILE
-    /// holding one) of {"op": "add", "type": "point", "at": ["0", "10 mm"]}, {"op": "add",
-    /// "type": "line", "start": "p1", "end": "p2"}, {"op": "add", "type": "length", "a": "l1",
-    /// "value": "width"}, {"op": "remove", "id": "c3"}, {"op": "set", "id": "d1", "value":
-    /// "20 mm"} and {"op": "move", "id": "p3", "at": [...]}. With no ops, re-solves and writes
-    /// the positions.
+    /// Apply a batch of edits with one solve, or refuse them all.
+    ///
+    /// OPS is a JSON array (or @FILE holding one) of ops. With no ops, re-solves and writes the
+    /// positions. Quantities are strings with units ("10 mm"), expressions over parameters
+    /// ("width / 2"), or bare numbers in the project's default unit.
+    ///
+    /// Ops:
+    ///   {"op": "add", "type": T, ...}        add an entity or constraint (fields below); "id"
+    ///                                        is optional (p3, l2, a1, ci4, c7, d4 if left out)
+    ///   {"op": "remove", "id": ID}           remove it, and every constraint naming it
+    ///   {"op": "set", "id": ID, "value": Q}  change a dimension's value
+    ///   {"op": "set", "id": ID, "construction": true|false}
+    ///   {"op": "move", "id": ID, "at": [X, Y]}
+    ///                                        move a point (held there for the solve)
+    ///   {"op": "move", "id": ID, "r": Q}     resize a circle
+    ///
+    /// Entities ("construction": true and "projected": "<part>/<feature>/<name>" optional,
+    /// except on points, which take only "projected"):
+    ///   point   "at": [X, Y]
+    ///   line    "start": P, "end": P
+    ///   arc     "center": P, "start": P, "end": P   (counterclockwise from start to end)
+    ///   circle  "center": P, "r": Q    (the file and `sketch get` say r_m: meters, solved)
+    ///
+    /// Constraints name entities in "a", then "b", then "about":
+    ///   one     horizontal, vertical, fix
+    ///   two     coincident, parallel, perpendicular, tangent, equal, midpoint, on, concentric
+    ///   three   symmetric ("a" and "b" about "about")
+    ///
+    /// Dimensions add a "value" (Q; angles in deg or rad, a bare number is degrees):
+    ///   one     length, radius, diameter
+    ///   two     distance, distance_x, distance_y, angle
+    ///
+    /// Example: [{"op": "add", "type": "point", "at": ["0", "10 mm"]},
+    ///           {"op": "add", "type": "line", "start": "p1", "end": "p2"},
+    ///           {"op": "add", "type": "length", "a": "l1", "value": "width"}]
+    #[command(verbatim_doc_comment)]
     Edit {
         part: String,
         sketch: String,
