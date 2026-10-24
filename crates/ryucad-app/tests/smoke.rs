@@ -39,7 +39,10 @@ fn version_and_a_folder_that_isnt_a_project() {
         .output()
         .unwrap();
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["ryucad"], env!("CARGO_PKG_VERSION"));
+    // The CLI's envelope, as `ryucad version` prints it.
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["warnings"], serde_json::json!([]));
+    assert_eq!(v["result"]["ryucad"], env!("CARGO_PKG_VERSION"));
     let dir = tempfile::tempdir().unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_ryucad-app"))
         .arg("--smoke")

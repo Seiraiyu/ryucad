@@ -209,6 +209,28 @@ impl View {
         out
     }
 
+    /// Drops the feature chosen in the tree, and the form it opened: the
+    /// tree and the property panel follow what was picked or cleared, so
+    /// they never show a feature nothing points at any more.
+    pub fn unchoose(&mut self, ws: &mut Workspace) {
+        if self.chosen.take().is_some() {
+            self.marked.clear();
+            ws.open_form(None);
+            ws.choose(None);
+        }
+    }
+
+    /// Whether `entity` (`<part>/<solid>/<name>`) lies on the solid that
+    /// shows the feature chosen in the tree.
+    fn on_chosen(&self, ws: &Workspace, entity: &str) -> bool {
+        let Some(k) = &self.chosen else {
+            return false;
+        };
+        let solid = ws.model.solid_of(k).unwrap_or_else(|| k.clone());
+        let mut parts = entity.splitn(3, '/');
+        parts.next() == Some(solid.0.as_str()) && parts.next() == Some(solid.1.as_str())
+    }
+
     /// Frames the whole model, or one body.
     pub fn fit(&mut self, ws: &mut Workspace, body: Option<&BodyKey>) {
         let points = match body {
@@ -554,6 +576,14 @@ impl View {
         let ghost = self.hover.as_ref().is_some_and(|h| h.rev.is_some());
         if response.clicked() && !ghost {
             let add = modifiers.shift || modifiers.ctrl;
+            // Picking something else, or nothing, leaves the tree's choice.
+            let keep = self
+                .hover
+                .as_ref()
+                .is_some_and(|h| add || self.on_chosen(ws, &h.entity));
+            if !keep && !(add && self.hover.is_none()) {
+                self.unchoose(ws);
+            }
             match (&self.hover, add) {
                 (Some(h), false) => ws.select(vec![h.entity.clone()], SelectMode::Replace),
                 (Some(h), true) => {
