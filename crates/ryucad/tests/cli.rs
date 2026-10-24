@@ -4,6 +4,8 @@
 //! (`RYUCAD_NO_DAEMON=1`) and once through the project's daemon. Both must
 //! give the same JSON and the same exit code.
 
+mod fake_review;
+
 use assert_cmd::Command;
 use serde_json::{Value, json};
 use std::fs;
@@ -2138,4 +2140,152 @@ fn review_needs_a_github_clone() {
     );
     let (code, _) = run(&["review"]);
     assert_eq!(code, 2);
+}
+
+#[test]
+fn review_against_a_fake_service() {
+    use fake_review::{Fake, json};
+    let thread = serde_json::json!({"id": "t1", "ref": "p/b/0123456789abcdef0123456789abcdef", "state": "open"});
+    let fake = Fake::start(vec![
+        json(
+            "GET",
+            "/api/v1/repos/acme/widget/pulls?branch=feature%2Farm",
+            200,
+            serde_json::json!({"pulls": [{"number": 7}]}),
+        ),
+        json(
+            "GET",
+            "/api/v1/repos/acme/widget/pulls/7",
+            200,
+            serde_json::json!({
+                "checks": {"check": "success", "merge": "action_required"},
+                "renders": [
+                    {"project": "", "part": "p", "side": "before", "url": "/api/v1/artifacts/k1"},
+                    {"project": "models/arm", "part": "p", "side": "after", "url": "/api/v1/artifacts/k2"}]}),
+        ),
+        json(
+            "GET",
+            "/api/v1/repos/acme/widget/pulls/7/threads?state=open",
+            200,
+            serde_json::json!({"threads": [thread]}),
+        ),
+        json(
+            "POST",
+            "/api/v1/repos/acme/widget/pulls/7/threads",
+            201,
+            thread.clone(),
+        ),
+        json(
+            "POST",
+            "/api/v1/threads/t1/resolve",
+            200,
+            serde_json::json!({"id": "t1", "state": "resolved"}),
+        ),
+        json(
+            "POST",
+            "/api/v1/repos/acme/widget/pulls/7/merge-in",
+            409,
+            serde_json::json!({"error": {"code": "head_moved",
+                "message": "the head moved since the merge was checked"}}),
+        ),
+        (
+            "GET",
+            "/api/v1/artifacts/k1".to_owned(),
+            200,
+            "image/png",
+            vec![1],
+        ),
+        (
+            "GET",
+            "/api/v1/artifacts/k2".to_owned(),
+            200,
+            "image/png",
+            vec![2],
+        ),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(
+        dir.path(),
+        &["remote", "add", "origin", "git@github.com:acme/widget.git"],
+    );
+    git(dir.path(), &["checkout", "-q", "-b", "feature/arm"]);
+    let empty = tempfile::tempdir().unwrap();
+    let run = |args: &[&str], token: Option<&str>| {
+        let mut cmd = Command::cargo_bin("ryucad").unwrap();
+        cmd.current_dir(dir.path())
+            .args(args)
+            .env("RYUCAD_REVIEW_URL", &fake.url)
+            .env_remove("RYUCAD_REVIEW_TOKEN")
+            .env_remove("GH_TOKEN")
+            .env_remove("GITHUB_TOKEN")
+            .env("PATH", empty.path());
+        if let Some(t) = token {
+            cmd.env("RYUCAD_REVIEW_TOKEN", t);
+        }
+        let out = cmd.output().unwrap();
+        (
+            out.status.code().unwrap(),
+            serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+        )
+    };
+    let ok = |args: &[&str]| {
+        let (code, v) = run(args, Some("tok"));
+        assert_eq!((code, &v["ok"]), (0, &Value::Bool(true)), "{args:?}: {v}");
+        v["result"].clone()
+    };
+    let s = ok(&["review", "status"]);
+    assert_eq!(
+        (s["repo"].as_str(), s["pull"].as_u64()),
+        (Some("acme/widget"), Some(7))
+    );
+    assert_eq!(s["checks"]["merge"], "action_required");
+    assert_eq!(
+        ok(&["review", "threads", "--open"])["threads"][0]["id"],
+        "t1"
+    );
+    let c = ok(&[
+        "review",
+        "comment",
+        "p/b/0123456789abcdef0123456789abcdef",
+        "too thin here",
+    ]);
+    assert_eq!(c["id"], "t1");
+    assert_eq!(ok(&["review", "resolve", "t1"])["state"], "resolved");
+    let r = ok(&["review", "renders", "7", "--out", "shots"]);
+    assert_eq!(r["files"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        fs::read(dir.path().join("shots/root-p-before.png")).unwrap(),
+        vec![1]
+    );
+    assert_eq!(
+        fs::read(dir.path().join("shots/models_arm-p-after.png")).unwrap(),
+        vec![2]
+    );
+    let (code, v) = run(&["review", "update", "7"], Some("tok"));
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("review_head_moved")),
+        "{v}"
+    );
+    let (code, v) = run(&["review", "status", "7"], None);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("review_unauthenticated")),
+        "{v}"
+    );
+    // Every request carried the token; the comment its reference and text.
+    let seen = fake.seen.lock().unwrap().clone();
+    assert!(
+        seen.iter().all(|s| s.auth.as_deref() == Some("Bearer tok")),
+        "{seen:?}"
+    );
+    let posted = seen
+        .iter()
+        .find(|s| s.path == "/api/v1/repos/acme/widget/pulls/7/threads")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&posted.body).unwrap(),
+        serde_json::json!({"ref": "p/b/0123456789abcdef0123456789abcdef", "body": "too thin here"})
+    );
 }
