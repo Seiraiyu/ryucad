@@ -170,23 +170,27 @@ fn check_pending(
     Ok(())
 }
 
-/// `release.propose`: writes the record of `part`'s next revision.
-pub fn propose(
-    session: &mut Session,
-    participant: &str,
-    part: &str,
-    note: Option<String>,
-    expected: Option<&str>,
-) -> Result<Value> {
-    let id = part_id(part)?;
-    let (repo, releases) = history(session)?;
-    check_revision(session.project().part(&id)?, expected)?;
+/// What a proposal of a part would write, every check passed: its label,
+/// what it supersedes, and the record's content.
+struct Proposal {
+    label: String,
+    supersedes: Option<String>,
+    content: String,
+    properties: std::collections::BTreeMap<String, Value>,
+    results: std::collections::BTreeMap<String, String>,
+}
+
+/// Every check `release.propose` makes of `part`, in order, and what its
+/// record would hold. Writes nothing.
+fn prepare(session: &mut Session, id: &Id, expected: Option<&str>) -> Result<Proposal> {
+    let (_, releases) = history(session)?;
+    check_revision(session.project().part(id)?, expected)?;
     let files = session.snapshot();
     let config = Config::read(&files)?;
     let records = Records::read(&files)?;
-    let list = ordered(&config, &records, &id)?;
-    check_pending(&releases, &list, &id)?;
-    let problems = readiness(session, &id, &config)?;
+    let list = ordered(&config, &records, id)?;
+    check_pending(&releases, &list, id)?;
+    let problems = readiness(session, id, &config)?;
     if !problems.is_empty() {
         return Err(Error::new(
             Code::ReleaseNotReady,
@@ -199,17 +203,17 @@ pub fn propose(
                     .join("; ")
             ),
         )
-        .with("part", &id)
+        .with("part", id)
         .with("problems", &problems));
     }
     let files = session.snapshot();
-    let s = state::of(&files, &config, &records, &id, &releases);
+    let s = state::of(&files, &config, &records, id, &releases);
     if let Status::Released(label) = &s.status {
         return Err(Error::new(
             Code::NothingToRelease,
             format!("{id} is revision {label} as released: nothing to release"),
         )
-        .with("part", &id)
+        .with("part", id)
         .with("label", label));
     }
     let label = s.next.clone().expect("a known state");
@@ -218,10 +222,10 @@ pub fn propose(
         .rev()
         .find(|(e, _)| e.kind == Kind::Release)
         .map(|(e, _)| e.label.clone());
-    let content = ryupdm::content::hash(&files, &id)?;
-    let props = ryupdm::props::read(&files, &id)?;
+    let content = ryupdm::content::hash(&files, id)?;
+    let props = ryupdm::props::read(&files, id)?;
     let results = session
-        .rebuilt(&id)?
+        .rebuilt(id)?
         .features
         .iter()
         .filter_map(|(fid, r)| {
@@ -229,22 +233,71 @@ pub fn propose(
             Some((fid.to_string(), b.hash.clone()))
         })
         .collect();
+    Ok(Proposal {
+        label,
+        supersedes,
+        content,
+        properties: ryupdm::record::revising(&config, &props),
+        results,
+    })
+}
+
+/// `release.propose`: writes the record of `part`'s next revision. With
+/// `dry_run`, writes nothing and answers the label it would take and
+/// every reason it would be refused (`problems`, each an error as JSON:
+/// `release_not_ready`'s list, or the one refusal), for a person to see
+/// before proposing.
+pub fn propose(
+    session: &mut Session,
+    participant: &str,
+    part: &str,
+    note: Option<String>,
+    expected: Option<&str>,
+    dry_run: bool,
+) -> Result<Value> {
+    let id = part_id(part)?;
+    if dry_run {
+        return match prepare(session, &id, expected) {
+            Ok(p) => Ok(
+                json!({"part": id, "label": p.label, "supersedes": p.supersedes,
+                               "ready": true, "problems": []}),
+            ),
+            // No such part is no proposal to judge.
+            Err(e) if e.code == Code::NotFound => Err(e),
+            Err(e) => {
+                let problems = match e.code {
+                    Code::ReleaseNotReady => e.details["problems"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default(),
+                    _ => vec![json!(e)],
+                };
+                let next = state_of(session, &id)["next"].clone();
+                Ok(
+                    json!({"part": id, "label": next, "supersedes": null, "ready": false,
+                          "problems": problems}),
+                )
+            }
+        };
+    }
+    let p = prepare(session, &id, expected)?;
+    let (repo, _) = history(session)?;
     let project = crate::pdm::ensure_id(session)?;
     let v = VersionInfo::current();
     let record = Record::Release(Release {
         project,
         part: id.clone(),
-        label,
-        content,
-        properties: ryupdm::record::revising(&config, &props),
-        results,
+        label: p.label,
+        content: p.content,
+        properties: p.properties,
+        results: p.results,
         built_with: BuiltWith {
             ryucad: v.ryucad,
             ryukei: v.ryukei,
             commit: v.commit,
         },
         released_by: released_by(&repo, participant),
-        supersedes,
+        supersedes: p.supersedes,
         note,
     });
     write(session, &record)
@@ -660,6 +713,50 @@ pub(crate) mod tests {
             (&v["record"]["label"], &v["record"]["supersedes"]),
             (&json!("B"), &json!("A"))
         );
+    }
+
+    #[test]
+    fn a_dry_run_says_the_label_and_every_reason_and_writes_nothing() {
+        let (dir, mut s) = released_project();
+        let dry = |s: &mut Session| {
+            call(s, "release.propose", json!({"part": "p", "dry_run": true})).unwrap()
+        };
+        let v = dry(&mut s);
+        assert_eq!(
+            v,
+            json!({"part": "p", "label": "A", "supersedes": null, "ready": true,
+                   "problems": []})
+        );
+        assert!(!dir.path().join("releases").exists());
+        // Not ready: every reason, as a proposal would list them.
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "p", "properties": {"number": null}}),
+        )
+        .unwrap();
+        let v = dry(&mut s);
+        assert_eq!((&v["ready"], &v["label"]), (&json!(false), &json!("A")));
+        assert_eq!(v["problems"][0]["code"], "property_invalid");
+        assert_eq!(v["problems"][0]["details"]["missing"], true);
+        // Any other refusal is the one problem.
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "p", "properties": {"number": "100"}}),
+        )
+        .unwrap();
+        propose(&mut s).unwrap();
+        let v = dry(&mut s);
+        assert_eq!(v["problems"][0]["code"], "release_pending", "{v}");
+        assert_eq!(v["label"], "B");
+        let e = call(
+            &mut s,
+            "release.propose",
+            json!({"part": "q", "dry_run": true}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
     }
 
     #[test]

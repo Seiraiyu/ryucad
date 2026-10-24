@@ -85,6 +85,47 @@ impl Merge {
     }
 }
 
+/// A conflict's heading in the panel: its kind and what it concerns, in
+/// the model's terms: `value in base`, `pdm_broke in q number`,
+/// `pdm_broke in p A`.
+pub fn title(c: &Value) -> String {
+    let concerns = &c["concerns"];
+    let kind = c["kind"].as_str().unwrap_or("conflict");
+    let part = concerns["part"].as_str();
+    let what = match (
+        part,
+        concerns["property"].as_str().or(concerns["label"].as_str()),
+    ) {
+        (Some(p), Some(x)) => format!("{p} {x}"),
+        _ => concerns["feature"]
+            .as_str()
+            .or(concerns["parameter"].as_str())
+            .or(c["files"][0].as_str())
+            .or(c["id"].as_str())
+            .unwrap_or_default()
+            .to_owned(),
+    };
+    format!("{kind} in {what}")
+}
+
+/// What a person does about a conflict that has no choice to take, if
+/// anything needs saying: a broken feature is fixed in the model, a PDM
+/// property set in the Part section.
+pub fn hint(c: &Value) -> Option<&'static str> {
+    match (c["kind"].as_str(), c["concerns"]["property"].is_string()) {
+        (Some("merge_broke"), _) => {
+            Some("Fix it in the model; the status is read again as it changes.")
+        }
+        (Some("pdm_broke"), true) => {
+            Some("Set the property in the Part section (or with ryucad merge resolve --value).")
+        }
+        (Some("pdm_broke"), false) => {
+            Some("Take its repair, or change the part so the proposal describes it.")
+        }
+        _ => None,
+    }
+}
+
 /// The `merge.resolve` request settling conflict `c` by `choice` (`ours`,
 /// `theirs` or `repair` with `repair`), guarded by the revisions of the
 /// part it concerns as the window last saw them.
@@ -150,6 +191,28 @@ mod tests {
         assert!(clean.clean());
         let e = Error::new(ryucad::error::Code::MergeUnsupported, "octopus");
         assert!(!Merge::broken(e).clean());
+    }
+
+    #[test]
+    fn conflicts_are_titled_in_the_models_terms() {
+        let s = status();
+        let titles: Vec<String> = s["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(title)
+            .collect();
+        assert_eq!(titles, ["value in b", "merge_broke in s"]);
+        let number = json!({"kind": "pdm_broke", "id": "parts/q/properties.json#pdm_broke/x",
+                            "concerns": {"part": "q", "property": "number", "parts": ["p"]}});
+        assert_eq!(title(&number), "pdm_broke in q number");
+        assert!(hint(&number).unwrap().contains("Part section"));
+        let stale = json!({"kind": "pdm_broke", "concerns": {"part": "p", "label": "A"}});
+        assert_eq!(title(&stale), "pdm_broke in p A");
+        assert!(hint(&stale).unwrap().contains("repair"));
+        assert_eq!(hint(&s["conflicts"][0]), None);
+        let file = json!({"kind": "modify_delete", "concerns": {}, "files": ["ryucad.json"]});
+        assert_eq!(title(&file), "modify_delete in ryucad.json");
     }
 
     #[test]
