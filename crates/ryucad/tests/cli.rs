@@ -866,6 +866,26 @@ fn version_flags_are_the_version_command() {
 }
 
 #[test]
+fn vectors_may_start_with_a_minus() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    let v = p.ok(&[
+        "feature", "add", "p", "box", "--param", "x=1", "--param", "y=1", "--param", "z=1",
+        "--origin", "-5,0,0", "--x", "-0,1,0", "--z", "0,0,1",
+    ]);
+    assert_eq!(
+        v["feature"]["placement"]["origin"][0]["value"], "-5 mm",
+        "{v}"
+    );
+    assert_eq!(
+        v["feature"]["placement"]["x"],
+        serde_json::json!([0, 1, 0]),
+        "{v}"
+    );
+}
+
+#[test]
 fn sketch_edit_help_lists_every_type() {
     let out = Command::cargo_bin("ryucad")
         .unwrap()

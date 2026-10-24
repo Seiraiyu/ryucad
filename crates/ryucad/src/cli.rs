@@ -185,13 +185,13 @@ enum Command {
         #[arg(long, value_name = "REF", conflicts_with = "eye")]
         fit: Vec<String>,
         /// The eye point, three quantities: 0,-100mm,50mm.
-        #[arg(long, value_name = "X,Y,Z", value_parser = triple, requires_all = ["target", "up"])]
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires_all = ["target", "up"])]
         eye: Option<[String; 3]>,
         /// The point looked at.
-        #[arg(long, value_name = "X,Y,Z", value_parser = triple, requires = "eye")]
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires = "eye")]
         target: Option<[String; 3]>,
         /// The up direction: 0,0,1.
-        #[arg(long, value_name = "X,Y,Z", value_parser = vector, requires = "eye")]
+        #[arg(long, value_name = "X,Y,Z", value_parser = vector, allow_hyphen_values = true, requires = "eye")]
         up: Option<[f64; 3]>,
         /// Perspective with this vertical field of view (45 by default).
         #[arg(long, value_name = "DEGREES", conflicts_with = "ortho")]
@@ -279,11 +279,11 @@ enum Command {
         /// Use this participant's camera.
         #[arg(long = "of", value_name = "PARTICIPANT", conflicts_with = "eye")]
         of: Option<String>,
-        #[arg(long, value_name = "X,Y,Z", value_parser = triple, requires_all = ["target", "up"])]
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires_all = ["target", "up"])]
         eye: Option<[String; 3]>,
-        #[arg(long, value_name = "X,Y,Z", value_parser = triple, requires = "eye")]
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires = "eye")]
         target: Option<[String; 3]>,
-        #[arg(long, value_name = "X,Y,Z", value_parser = vector, requires = "eye")]
+        #[arg(long, value_name = "X,Y,Z", value_parser = vector, allow_hyphen_values = true, requires = "eye")]
         up: Option<[f64; 3]>,
         #[arg(
             long,
@@ -882,16 +882,18 @@ impl FieldArgs {
     }
 }
 
+// Vectors may start with a minus (`--x -0,1,0`), so they take values that
+// look like flags.
 #[derive(Args)]
 struct PlacementArgs {
     /// The local origin, three quantities: 0,0,10mm.
-    #[arg(long, value_name = "X,Y,Z", value_parser = triple)]
+    #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true)]
     origin: Option<[String; 3]>,
     /// The local z axis: 0,0,1.
-    #[arg(long, value_name = "X,Y,Z", value_parser = vector)]
+    #[arg(long, value_name = "X,Y,Z", value_parser = vector, allow_hyphen_values = true)]
     z: Option<[f64; 3]>,
     /// The local x direction: 1,0,0.
-    #[arg(long, value_name = "X,Y,Z", value_parser = vector)]
+    #[arg(long, value_name = "X,Y,Z", value_parser = vector, allow_hyphen_values = true)]
     x: Option<[f64; 3]>,
 }
 
