@@ -2090,3 +2090,52 @@ fn outputs_carry_their_schema() {
         assert_eq!(p.ok(args)["schema"], 1, "{args:?}");
     }
 }
+
+#[test]
+fn review_needs_a_github_clone() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        let out = Command::cargo_bin("ryucad")
+            .unwrap()
+            .current_dir(dir.path())
+            .args(args)
+            .env("RYUCAD_REVIEW_TOKEN", "t")
+            .env("RYUCAD_REVIEW_URL", "http://127.0.0.1:9")
+            .output()
+            .unwrap();
+        (
+            out.status.code().unwrap(),
+            serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+        )
+    };
+    let (code, v) = run(&["review", "status"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("not_a_git_repo")),
+        "{v}"
+    );
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    let (code, v) = run(&["review", "status", "3"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("review_no_remote")),
+        "{v}"
+    );
+    git(
+        dir.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/widget.git",
+        ],
+    );
+    let (code, v) = run(&["review", "status", "3"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (4, Some("review_unreachable")),
+        "{v}"
+    );
+    let (code, _) = run(&["review"]);
+    assert_eq!(code, 2);
+}

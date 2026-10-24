@@ -215,6 +215,188 @@ pub fn base_url() -> String {
         })
 }
 
+/// What `ryucad review` was asked to do.
+pub enum Action {
+    Status {
+        pr: Option<u64>,
+    },
+    Threads {
+        pr: Option<u64>,
+        open: bool,
+    },
+    Comment {
+        reference: String,
+        text: String,
+        pr: Option<u64>,
+        commit: Option<String>,
+    },
+    Reply {
+        thread: String,
+        text: String,
+    },
+    Resolve {
+        thread: String,
+    },
+    Reopen {
+        thread: String,
+    },
+    Update {
+        pr: Option<u64>,
+    },
+    Renders {
+        pr: Option<u64>,
+        out: std::path::PathBuf,
+    },
+}
+
+/// Runs `action` for the clone at `here`, asking the service.
+pub fn run(here: &std::path::Path, action: Action) -> Result<Value> {
+    let repo = crate::git::repo(here)?;
+    let origin = repo.origin_url();
+    let (owner, name) = origin
+        .as_deref()
+        .and_then(crate::git::github_repo)
+        .ok_or_else(|| {
+            Error::new(
+                Code::ReviewNoRemote,
+                "the clone's origin remote isn't a GitHub repository",
+            )
+            .with("origin", &origin)
+        })?;
+    let slug = format!("{owner}/{name}");
+    let client = Client::new(&base_url(), &token()?);
+    let pull = |pr: Option<u64>| -> Result<u64> {
+        if let Some(n) = pr {
+            return Ok(n);
+        }
+        let branch = repo.branch()?.ok_or_else(|| {
+            Error::new(
+                Code::InvalidParam,
+                "no branch checked out; name the pull request",
+            )
+        })?;
+        let found = client.get(&format!("/repos/{slug}/pulls?branch={}", escape(&branch)))?;
+        let numbers: Vec<u64> = found["pulls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| p["number"].as_u64())
+            .collect();
+        match numbers[..] {
+            [n] => Ok(n),
+            [] => Err(Error::new(
+                Code::ReviewNotFound,
+                format!("no open pull request has {branch} as its head"),
+            )
+            .with("branch", &branch)),
+            _ => Err(Error::new(
+                Code::InvalidParam,
+                format!("several pull requests have {branch} as their head; name one"),
+            )
+            .with("pulls", &numbers)),
+        }
+    };
+    // Answers say which repository and pull request they are about.
+    let with = |mut v: Value, pr: Option<u64>| {
+        if let Some(o) = v.as_object_mut() {
+            o.insert("repo".into(), json!(slug));
+            if let Some(n) = pr {
+                o.insert("pull".into(), json!(n));
+            }
+        }
+        v
+    };
+    match action {
+        Action::Status { pr } => {
+            let n = pull(pr)?;
+            Ok(with(
+                client.get(&format!("/repos/{slug}/pulls/{n}"))?,
+                Some(n),
+            ))
+        }
+        Action::Threads { pr, open } => {
+            let n = pull(pr)?;
+            let q = if open { "?state=open" } else { "" };
+            Ok(with(
+                client.get(&format!("/repos/{slug}/pulls/{n}/threads{q}"))?,
+                Some(n),
+            ))
+        }
+        Action::Comment {
+            reference,
+            text,
+            pr,
+            commit,
+        } => {
+            let n = pull(pr)?;
+            let mut body = json!({"ref": reference, "body": text});
+            if let Some(c) = commit {
+                body["commit"] = json!(c);
+            }
+            Ok(with(
+                client.post(&format!("/repos/{slug}/pulls/{n}/threads"), &body)?,
+                Some(n),
+            ))
+        }
+        Action::Reply { thread, text } => Ok(with(
+            client.post(
+                &format!("/threads/{}/comments", escape(&thread)),
+                &json!({"body": text}),
+            )?,
+            None,
+        )),
+        Action::Resolve { thread } => Ok(with(
+            client.post(&format!("/threads/{}/resolve", escape(&thread)), &json!({}))?,
+            None,
+        )),
+        Action::Reopen { thread } => Ok(with(
+            client.post(&format!("/threads/{}/reopen", escape(&thread)), &json!({}))?,
+            None,
+        )),
+        Action::Update { pr } => {
+            let n = pull(pr)?;
+            Ok(with(
+                client.post(&format!("/repos/{slug}/pulls/{n}/merge-in"), &json!({}))?,
+                Some(n),
+            ))
+        }
+        Action::Renders { pr, out } => {
+            let n = pull(pr)?;
+            let status = client.get(&format!("/repos/{slug}/pulls/{n}"))?;
+            std::fs::create_dir_all(&out).map_err(|e| Error::io(&out, &e))?;
+            let mut files = Vec::new();
+            for r in status["renders"].as_array().into_iter().flatten() {
+                let (Some(url), Some(part), Some(side)) =
+                    (r["url"].as_str(), r["part"].as_str(), r["side"].as_str())
+                else {
+                    continue;
+                };
+                let project = match r["project"].as_str().unwrap_or("") {
+                    "" | "." => "root".to_owned(),
+                    p => p.replace(['/', '\\'], "_"),
+                };
+                let path = out.join(format!("{project}-{part}-{side}.png"));
+                let bytes = client.download(url)?;
+                std::fs::write(&path, bytes).map_err(|e| Error::io(&path, &e))?;
+                files.push(path);
+            }
+            Ok(json!({"repo": slug, "pull": n, "files": files}))
+        }
+    }
+}
+
+/// Percent-encodes a path segment or query value.
+fn escape(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
