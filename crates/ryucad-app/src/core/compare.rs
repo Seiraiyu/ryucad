@@ -61,6 +61,58 @@ pub enum FaceMark {
     Changed,
 }
 
+/// How a part's PDM differs in a compare: the records it adds, as the
+/// tree marks them (`proposes B`, `obsoletes A`), and one line for each
+/// property and the state.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PdmMark {
+    pub marks: Vec<String>,
+    pub lines: Vec<String>,
+}
+
+impl PdmMark {
+    /// From a part's `pdm` block in a diff.
+    pub fn of(v: &Value) -> PdmMark {
+        let mut m = PdmMark::default();
+        for r in v["records"]["added"].as_array().into_iter().flatten() {
+            let label = r["label"].as_str().unwrap_or("?");
+            m.marks.push(match r["kind"].as_str() {
+                Some("obsolete") => format!("obsoletes {label}"),
+                _ => format!("proposes {label}"),
+            });
+        }
+        for (k, what) in [("removed", "record removed"), ("changed", "record changed")] {
+            for r in v["records"][k].as_array().into_iter().flatten() {
+                m.lines.push(format!(
+                    "{what}: {} {}",
+                    r["label"].as_str().unwrap_or("?"),
+                    r["kind"].as_str().unwrap_or("")
+                ));
+            }
+        }
+        for (name, c) in v["properties"].as_object().into_iter().flatten() {
+            let revising = if c["revising"] == true {
+                " (revising)"
+            } else {
+                ""
+            };
+            m.lines.push(format!(
+                "{name}: {} -> {}{revising}",
+                shown(&c["from"]),
+                shown(&c["to"])
+            ));
+        }
+        if let Some(s) = v.get("state") {
+            m.lines.push(format!(
+                "state: {} -> {}",
+                s["from"].as_str().unwrap_or("?"),
+                s["to"].as_str().unwrap_or("?")
+            ));
+        }
+        m
+    }
+}
+
 /// A compare as the window knows it.
 #[derive(Debug, Default)]
 pub struct Compare {
@@ -76,6 +128,8 @@ pub struct Compare {
     pub features: BTreeMap<BodyKey, Mark>,
     /// Features only the other side has, by part, in the diff's order.
     pub removed: BTreeMap<String, Vec<String>>,
+    /// What differs in each part's PDM, by part (only parts that differ).
+    pub pdm: BTreeMap<String, PdmMark>,
     /// Faces of the working bodies that differ, by body and name (hex).
     pub faces: BTreeMap<BodyKey, BTreeMap<String, FaceMark>>,
     /// Working bodies new as a whole: added, or failing on the other side.
@@ -206,6 +260,7 @@ impl Compare {
         self.error = None;
         self.features.clear();
         self.removed.clear();
+        self.pdm.clear();
         self.faces.clear();
         self.new_bodies.clear();
         self.wanted.clear();
@@ -213,6 +268,9 @@ impl Compare {
         self.gone_bodies.clear();
         let parts = v["parts"].as_object().into_iter().flatten();
         for (part, p) in parts {
+            if p["pdm"].is_object() {
+                self.pdm.insert(part.clone(), PdmMark::of(&p["pdm"]));
+            }
             let moved = strings(&p["order"]["moved"]);
             let features = p["features"].as_object().into_iter().flatten();
             for (id, f) in features {
@@ -412,6 +470,34 @@ mod tests {
 
     fn key(f: &str) -> BodyKey {
         ("p".to_owned(), f.to_owned())
+    }
+
+    #[test]
+    fn a_parts_pdm_is_marked_and_said() {
+        let mut c = Compare::new("HEAD");
+        c.take_diff(&json!({"from": {"commit": "abc"}, "parts": {
+            "p": {"status": "changed", "features": {}, "order": {"moved": []},
+                  "pdm": {"properties": {"number": {"from": "100", "to": "101", "revising": true},
+                                         "name": {"to": "Pin", "revising": false}},
+                          "records": {"added": [{"label": "B", "kind": "release"},
+                                                {"label": "A", "kind": "obsolete"}],
+                                      "removed": [{"label": "C", "kind": "release"}],
+                                      "changed": []},
+                          "state": {"from": "released A", "to": "A modified, B proposed"}}},
+            "q": {"status": "changed", "features": {}, "order": {"moved": []}},
+        }}));
+        let m = &c.pdm["p"];
+        assert_eq!(m.marks, ["proposes B", "obsoletes A"]);
+        assert_eq!(
+            m.lines,
+            [
+                "record removed: C release",
+                "name: (none) -> Pin",
+                "number: 100 -> 101 (revising)",
+                "state: released A -> A modified, B proposed"
+            ]
+        );
+        assert!(!c.pdm.contains_key("q"));
     }
 
     #[test]
