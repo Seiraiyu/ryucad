@@ -1745,3 +1745,81 @@ mod current_tests {
         assert!(v.get("assemblies").is_none());
     }
 }
+
+#[cfg(test)]
+mod doctor_tests {
+    use super::tests::{add_in, face, hinged};
+    use crate::assembly::tests::id;
+    use crate::server::tests::call;
+    use serde_json::{Value, json};
+
+    fn issue<'a>(r: &'a Value, code: &str) -> Option<&'a Value> {
+        r["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["code"] == code)
+    }
+
+    #[test]
+    fn doctor_writes_stale_poses_and_check_finds_unsolved_mates() {
+        let (dir, mut s) = hinged();
+        // Stale: the pin is stored 50 mm off where the hinge holds it.
+        let r = call(&mut s, "doctor", json!({})).unwrap();
+        let stale = issue(&r, "assembly_stale").expect("assembly_stale");
+        assert_eq!(stale["severity"], "warning");
+        assert_eq!(stale["files"], json!(["parts/frame/features/pin.json"]));
+        let repair = stale["repairs"][0]["id"].clone();
+        assert!(
+            repair
+                .as_str()
+                .unwrap()
+                .starts_with("assembly_stale:solve:")
+        );
+        // check reports it through doctor, and passes: it is a warning.
+        let c = call(&mut s, "check", json!({"part": "frame"})).unwrap();
+        assert!(
+            c["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["code"] == "assembly_stale")
+        );
+        call(&mut s, "doctor.repair", json!({"repairs": [repair]})).unwrap();
+        assert!(
+            !s.rebuilt(&id("frame"))
+                .unwrap()
+                .solve
+                .as_ref()
+                .unwrap()
+                .stale()
+        );
+        let r = call(&mut s, "doctor", json!({})).unwrap();
+        assert!(issue(&r, "assembly_stale").is_none());
+        // A second hinge 5 mm along: check fails, naming the mates.
+        let top = face(&mut s, "plate", "slab", [0.0, 0.0, 1.0]);
+        let foot = face(&mut s, "bolt", "shank", [0.0, 0.0, -1.0]);
+        add_in(
+            dir.path(),
+            "frame",
+            "m2",
+            "mate",
+            json!({"form": "revolute",
+                   "a": {"instance": ["base"], "at": {"feature": "slab", "name": top},
+                         "offset": {"origin": ["25 mm", "10 mm", "0 mm"]}},
+                   "b": {"instance": ["pin"], "at": {"feature": "shank", "name": foot},
+                         "offset": {"flip": true}}}),
+        );
+        s.refresh().unwrap();
+        let e = call(&mut s, "check", json!({"part": "frame"})).unwrap_err();
+        let findings = e.details["findings"].as_array().unwrap();
+        let unsolved: Vec<&Value> = findings
+            .iter()
+            .filter(|f| f["code"] == "assembly_unsolved")
+            .collect();
+        assert_eq!(unsolved.len(), 1);
+        assert_eq!(unsolved[0]["mates"], json!(["m1", "m2"]));
+        assert_eq!(unsolved[0]["conflicting"], json!([["m1", "m2"]]));
+        assert!(!findings.iter().any(|f| f["code"] == "feature_failed"));
+    }
+}
