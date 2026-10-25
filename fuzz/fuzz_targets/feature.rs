@@ -14,7 +14,9 @@
 //! assembly `asm` in a project holding that part as `fz` and an assembly
 //! `sub` placing `asm`: it must place its part or give a structured error,
 //! never an internal one, and every occurrence must be finite and sound.
-//! Any panic is a bug.
+//! A mate or an instance pattern is built the same way, after instances
+//! `i1` (free) and `i2` (fixed) of `fz`: what it solves and places must be
+//! finite and sound too. Any panic is a bug.
 
 #![no_main]
 
@@ -108,9 +110,11 @@ fn part(f: Feature) -> Part {
     }
 }
 
-/// Builds instance `f` (as written) in assembly `asm` of a project with
-/// part `fz` (the base) and an assembly `sub` placing `asm`.
-fn assemble(written: &str) {
+/// Builds instance, mate or instance pattern `f` (as written) in assembly
+/// `asm` of a project with part `fz` (the base) and an assembly `sub`
+/// placing `asm`; a mate or a pattern follows instances `i1` (free, 20 mm
+/// up) and `i2` (fixed) of `fz`.
+fn assemble(written: &str, after_instances: bool) {
     use ryucad::assembly::{Rebuild, Store};
     use ryucad::error::{Code, Error};
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -132,7 +136,19 @@ fn assemble(written: &str) {
         serde_json::json!({"features": list, "format": 2, "kind": "ryucad.part",
                            "part_kind": "assembly"})
     };
-    put("parts/asm/part.json", assembly(&["f"]));
+    if after_instances {
+        put("parts/asm/part.json", assembly(&["i1", "i2", "f"]));
+        for (i, z, fixed) in [("i1", 0.02, false), ("i2", 0.0, true)] {
+            put(
+                &format!("parts/asm/features/{i}.json"),
+                serde_json::json!({"format": 4, "kind": "ryucad.feature", "type": "instance",
+                                   "part": "fz", "rev": "working", "fixed": fixed,
+                                   "pose": {"origin_m": [0, 0, z], "z": [0, 0, 1], "x": [1, 0, 0]}}),
+            );
+        }
+    } else {
+        put("parts/asm/part.json", assembly(&["f"]));
+    }
     put(
         "parts/asm/features/f.json",
         canonical::parse(written).unwrap(),
@@ -157,24 +173,37 @@ fn assemble(written: &str) {
         let result = r
             .result(&Id::parse(asm, "part").unwrap())
             .expect("assemblies rebuild");
+        let sound = |p: &ryucad::assembly::Placed| {
+            for o in &p.model.occurrences {
+                let pose = ryucad::assembly::rigid_pose(&o.pose);
+                assert!(
+                    pose.origin_m
+                        .iter()
+                        .chain(&pose.z)
+                        .chain(&pose.x)
+                        .all(|x| x.is_finite())
+                );
+                for sd in &o.solids {
+                    assert!(ryukei::check::check(&sd.built.body).is_empty());
+                }
+            }
+        };
         for (_, out) in &result.features {
             match out {
-                Ok(Output::Instance(p)) => {
-                    for o in &p.model.occurrences {
-                        let pose = ryucad::assembly::rigid_pose(&o.pose);
+                Ok(Output::Instance(p)) => sound(p),
+                Ok(Output::Copies(c)) => c.copies.iter().for_each(|c| sound(&c.placed)),
+                Ok(Output::Mate(m)) => {
+                    for f in [&m.a, &m.b] {
                         assert!(
-                            pose.origin_m
+                            f.rotation
                                 .iter()
-                                .chain(&pose.z)
-                                .chain(&pose.x)
+                                .flatten()
+                                .chain(&f.origin)
                                 .all(|x| x.is_finite())
                         );
-                        for sd in &o.solids {
-                            assert!(ryukei::check::check(&sd.built.body).is_empty());
-                        }
                     }
                 }
-                Ok(_) => panic!("an assembly makes only instances"),
+                Ok(_) => panic!("an assembly makes only instances, mates and copies"),
                 Err(e) => assert_ne!(e.code, Code::Internal, "{e:?}"),
             }
         }
@@ -203,7 +232,11 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(back, f);
     assert_eq!(canonical::to_string(&back.to_json()), written);
     if let Feature::Instance(_) = &f {
-        assemble(&written);
+        assemble(&written, false);
+        return;
+    }
+    if matches!(f, Feature::Mate(_) | Feature::InstancePattern(_)) {
+        assemble(&written, true);
         return;
     }
     let part = part(f);
@@ -243,8 +276,10 @@ fuzz_target!(|data: &[u8]| {
             let again = ryucad::sketch::solve_in(&me, &solved.sketch, &ctx).unwrap();
             assert!(!again.stale);
         }
-        // An instance in a part fails before it builds.
-        Some(Output::Instance(_)) => panic!("an instance built in a part"),
+        // An assembly's feature in a part fails before it builds.
+        Some(Output::Instance(_) | Output::Mate(_) | Output::Copies(_)) => {
+            panic!("an assembly's feature built in a part")
+        }
         None => {}
     }
 });
