@@ -7,6 +7,7 @@ pub mod files;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod fixtures;
+pub mod hole;
 pub mod id;
 pub mod project;
 pub mod reference;

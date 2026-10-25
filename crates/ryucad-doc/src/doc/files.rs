@@ -3,6 +3,7 @@
 //! the file system is [`super::project`]'s business.
 
 use super::blend::{Chamfer, Fillet};
+use super::hole::Hole;
 use super::id::{Id, ProjectId};
 use super::reference::Reference;
 use super::sketch::Sketch;
@@ -72,6 +73,7 @@ pub enum Feature {
     Boolean(Boolean),
     Fillet(Fillet),
     Chamfer(Chamfer),
+    Hole(Hole),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -320,6 +322,10 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
             }
             ("constraints", c) => out.extend(Sketch::expression_strings(c)),
             ("groups", g) => out.extend(super::blend::expression_strings(g)),
+            ("diameter", Value::String(s)) => out.push(s),
+            (k @ ("counterbore" | "countersink" | "depth" | "bottom"), x) => {
+                out.extend(super::hole::expression_strings(k, x));
+            }
             ("extent", Value::Object(e)) => {
                 for (k, x) in e.iter_mut() {
                     if let ("length" | "offset", Value::String(s)) = (k.as_str(), x) {
@@ -346,7 +352,7 @@ pub fn manifest_format(v: &Value) -> u64 {
 
 /// The lowest format that holds a feature's JSON, judged from the JSON
 /// alone, as [`Feature::format`] judges a loaded feature: operations on
-/// solids, booleans, fillets and chamfers are new in format 3, sketches
+/// solids, booleans, fillets, chamfers and holes are new in format 3, sketches
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
@@ -355,7 +361,7 @@ pub fn feature_format(v: &Value) -> u64 {
         || v.get("operation").is_some_and(|o| !new(o))
         || matches!(
             v.get("type").and_then(Value::as_str),
-            Some("boolean" | "fillet" | "chamfer")
+            Some("boolean" | "fillet" | "chamfer" | "hole")
         )
     {
         return 3;
@@ -403,7 +409,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole"),
     )
     .with("type", s)
 }
@@ -419,6 +425,7 @@ impl Feature {
             Feature::Boolean(_) => "boolean",
             Feature::Fillet(_) => "fillet",
             Feature::Chamfer(_) => "chamfer",
+            Feature::Hole(_) => "hole",
         }
     }
 
@@ -432,7 +439,7 @@ impl Feature {
             Feature::Sketch(s) => s.format(),
             // New in format 2.
             Feature::Extrude(_) | Feature::Revolve(_) => 2,
-            Feature::Boolean(_) | Feature::Fillet(_) | Feature::Chamfer(_) => 3,
+            Feature::Boolean(_) | Feature::Fillet(_) | Feature::Chamfer(_) | Feature::Hole(_) => 3,
         }
     }
 
@@ -445,6 +452,7 @@ impl Feature {
             Feature::Boolean(b) => b.fields(),
             Feature::Fillet(f) => f.fields(),
             Feature::Chamfer(c) => c.fields(),
+            Feature::Hole(h) => h.fields(),
         };
         v["format"] = json!(self.format());
         v["kind"] = json!(FEATURE_KIND);
@@ -467,6 +475,7 @@ impl Feature {
             "boolean" => Feature::Boolean(Boolean::from_fields(&mut o)?),
             "fillet" => Feature::Fillet(Fillet::from_fields(&mut o, default, env)?),
             "chamfer" => Feature::Chamfer(Chamfer::from_fields(&mut o, default, env)?),
+            "hole" => Feature::Hole(Hole::from_fields(&mut o, default, env)?),
             _ => {
                 let ty = PrimitiveType::parse(ty).map_err(|e| e.with("pointer", "/type"))?;
                 Feature::Primitive(Primitive::from_fields(ty, &mut o, default, env)?)
@@ -491,19 +500,22 @@ impl Feature {
             Feature::Primitive(p) => Some(&p.combine),
             Feature::Extrude(e) => Some(&e.combine),
             Feature::Revolve(r) => Some(&r.combine),
-            Feature::Sketch(_) | Feature::Boolean(_) | Feature::Fillet(_) | Feature::Chamfer(_) => {
-                None
-            }
+            Feature::Sketch(_)
+            | Feature::Boolean(_)
+            | Feature::Fillet(_)
+            | Feature::Chamfer(_)
+            | Feature::Hole(_) => None,
         }
     }
 
     /// The solids it acts on, by their founders, in the order it names
-    /// them: an operation's targets, a boolean's target then tools, or the
-    /// solids a fillet's or chamfer's references name, each once (one,
-    /// unless the file mixes them).
+    /// them: an operation's or a hole's targets, a boolean's target then
+    /// tools, or the solids a fillet's or chamfer's references name, each
+    /// once (one, unless the file mixes them).
     pub fn targets(&self) -> Vec<&Id> {
         match self {
             Feature::Boolean(b) => b.solids().collect(),
+            Feature::Hole(h) => h.targets.iter().collect(),
             Feature::Fillet(_) | Feature::Chamfer(_) => {
                 let mut out: Vec<&Id> = Vec::new();
                 for (_, r) in self.references() {
@@ -516,6 +528,14 @@ impl Feature {
             f => f
                 .combine()
                 .map_or(Vec::new(), |c| c.targets.iter().collect()),
+        }
+    }
+
+    /// The hole, if it is one.
+    pub fn hole(&self) -> Option<&Hole> {
+        match self {
+            Feature::Hole(h) => Some(h),
+            _ => None,
         }
     }
 
@@ -537,13 +557,14 @@ impl Feature {
 
     /// Its references to other features' faces, edges and vertices, each
     /// with its role in the feature (`plane`, `x`, `target`, `axis`,
-    /// `entities.<id>`, `groups.<i>.edges.<j>`, `groups.<i>.face`), in a
-    /// fixed order.
+    /// `entities.<id>`, `groups.<i>.edges.<j>`, `groups.<i>.face`,
+    /// `depth`), in a fixed order.
     pub fn references(&self) -> Vec<(String, &Reference)> {
         match self {
             Feature::Sketch(s) => s.references(),
             Feature::Fillet(f) => f.references(),
             Feature::Chamfer(c) => c.references(),
+            Feature::Hole(h) => h.references(),
             Feature::Extrude(e) => match &e.extent {
                 super::sweep::Extent::UpTo { target, .. } => vec![("target".to_owned(), target)],
                 _ => Vec::new(),
@@ -556,11 +577,12 @@ impl Feature {
         }
     }
 
-    /// The sketch an extrude or revolve sweeps.
+    /// The sketch an extrude or revolve sweeps, or a hole drills at.
     pub fn swept(&self) -> Option<&Id> {
         match self {
             Feature::Extrude(e) => Some(&e.sketch),
             Feature::Revolve(r) => Some(&r.sketch),
+            Feature::Hole(h) => Some(&h.sketch),
             _ => None,
         }
     }

@@ -23,6 +23,7 @@ pub mod endpoint;
 pub mod entity;
 pub mod git;
 pub mod graph;
+pub mod hole;
 pub mod inspect;
 pub mod live;
 pub mod merge;

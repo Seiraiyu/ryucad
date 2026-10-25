@@ -835,6 +835,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
         }
         Feature::Boolean(b) => b.fields(),
         Feature::Fillet(_) | Feature::Chamfer(_) => blend_report(part, f),
+        Feature::Hole(h) => hole_report(part, h),
         Feature::Revolve(r) => {
             let mut v = r.fields();
             if let Angle::Of(q) = &r.angle {
@@ -886,6 +887,38 @@ fn blend_report(part: &Id, f: &Feature) -> Value {
     for (role, r) in f.references() {
         let at = format!("/{}", role.replace('.', "/"));
         *v.pointer_mut(&at).expect("its own reference") = json!(r.text(part));
+    }
+    v
+}
+
+/// A hole as output reports it: its file's fields, every size as written
+/// and in meters (an angle in radians), an up-to target as
+/// `<part>/<feature>/<name>`.
+fn hole_report(part: &Id, h: &crate::doc::hole::Hole) -> Value {
+    use crate::doc::hole::{Bottom, Depth, HoleForm};
+    let mut v = h.fields();
+    v["diameter"] = h.diameter.report();
+    match &h.form {
+        HoleForm::Simple => {}
+        HoleForm::Counterbore { diameter, depth } => {
+            v["counterbore"] = json!({"diameter": diameter.report(), "depth": depth.report()});
+        }
+        HoleForm::Countersink { diameter, angle } => {
+            v["countersink"] = json!({"diameter": diameter.report(), "angle": angle.report()});
+        }
+    }
+    match &h.depth {
+        Depth::Blind(q) => v["depth"] = json!({"blind": q.report()}),
+        Depth::ThroughAll => {}
+        Depth::UpTo { target, offset } => {
+            v["depth"]["up_to"]["target"] = json!(target.text(part));
+            if let Some(q) = offset {
+                v["depth"]["up_to"]["offset"] = q.report();
+            }
+        }
+    }
+    if let Bottom::Drill(q) = &h.bottom {
+        v["bottom"] = json!({"drill": q.report()});
     }
     v
 }
@@ -1381,7 +1414,7 @@ fn sweep_from(
     Ok(f)
 }
 
-/// The listed features that sweep `sketch`.
+/// The listed features that sweep `sketch` or drill at its points.
 pub(crate) fn sweeps_of(part: &Part, sketch: &Id) -> Vec<Id> {
     part.order()
         .iter()
@@ -1781,6 +1814,10 @@ fn feature_edit(
             given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
             blend_from(ty, Some(&f), &given, &pid, unit, &p.env)?
         }
+        f @ Feature::Hole(_) => {
+            given.only("hole", &[])?;
+            f
+        }
         f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
             let ty = f.type_name();
             given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
@@ -1971,6 +2008,7 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
         .iter()
         .filter_map(|(fid, f)| match f.as_ref().ok()? {
             Feature::Boolean(b) => Some((fid.clone(), (b.op.as_str(), b.tools.clone()))),
+            Feature::Hole(_) => Some((fid.clone(), ("cut", Vec::new()))),
             f => {
                 let c = f.combine().filter(|c| !c.is_new())?;
                 Some((fid.clone(), (c.operation.as_str(), Vec::new())))
