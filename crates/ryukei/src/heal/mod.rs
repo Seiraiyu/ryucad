@@ -24,13 +24,16 @@
 //! 5. **Orientation.** Loops run the way their faces' regions need,
 //!    where the loops alone fix it, and faces are turned over until every
 //!    edge is used once each way (see `orient`).
-//! 6. **Gaps.** Every edge's and vertex's tolerance grows to cover how
+//! 6. **Tightening.** An edge between two analytic or pipe faces that
+//!    strays from them is put on their intersection where a branch runs
+//!    along it (see `tighten`).
+//! 7. **Gaps.** Every edge's and vertex's tolerance grows to cover how
 //!    far it lies from its curves and surfaces, up to the cap (see
 //!    `gaps`).
-//! 7. **Pcurves.** Every use of an edge gets its pcurve on the face:
+//! 8. **Pcurves.** Every use of an edge gets its pcurve on the face:
 //!    [`crate::pcurve::exact`] first, else the file's, if it fits the
 //!    edge.
-//! 8. **Build.** The shape is laid out and built through Euler operators
+//! 9. **Build.** The shape is laid out and built through Euler operators
 //!    ([`crate::layout`]), every connected piece a solid of its own, and
 //!    renamed with the names of step 1. Each shell's volume then says
 //!    which way it faces and which encloses which; shells facing the
@@ -52,6 +55,7 @@ mod pcurves;
 mod seamed;
 mod sew;
 mod shells;
+mod tighten;
 mod unseam;
 
 pub use seamed::seamed;
@@ -183,6 +187,8 @@ pub struct HealReport {
     /// Faces turned over: to agree with their neighbours, or with their
     /// shell when it faced the wrong way.
     pub turned: Vec<Name>,
+    /// Edges put on the intersection of their faces' surfaces.
+    pub tightened: Vec<Name>,
     /// Pole vertices dropped with their loops or seams.
     pub poles: Vec<Name>,
     /// Vertices removed between two edges on one curve, which were joined.
@@ -212,6 +218,7 @@ pub fn heal(
     let unseamed = unseam::unseam(key, &mut shape, &mut names)?;
     let reversed = orient::loops(&mut shape, &names)?;
     let turned = orient::faces(&mut shape, &names)?;
+    let tightened = tighten::tighten(&mut shape, &names, options.tolerance_cap);
     gaps::tolerate(&mut shape, &names, options.tolerance_cap)?;
     let mut pcurves = pcurves::pcurves(&shape, &names)?;
     let first = build::assemble(key, &shape, &names, &pcurves, None)?;
@@ -252,8 +259,12 @@ pub fn heal(
     for &f in &turned {
         journal.push(Event::Modified(f));
     }
+    for &e in &tightened {
+        journal.push(Event::Modified(e));
+    }
     report.reversed = reversed;
     report.turned = turned;
+    report.tightened = tightened;
     report.sewn = sewn.edges;
     report.merged = sewn.vertices;
     report.seams = unseamed.seams;
