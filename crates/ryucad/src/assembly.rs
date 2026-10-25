@@ -30,8 +30,18 @@ pub struct Occurrence {
     pub path: Vec<Id>,
     pub part: Id,
     pub rev: Rev,
-    pub solids: Vec<(Id, Arc<Built>)>,
+    pub solids: Vec<Solid>,
     pub pose: Rigid,
+}
+
+/// A solid of an occurrence's part as the part shows it: its founder, the
+/// feature whose result shows (which sizes its display mesh), and its
+/// body.
+#[derive(Clone, Debug)]
+pub struct Solid {
+    pub founder: Id,
+    pub feature: Arc<Feature>,
+    pub built: Arc<Built>,
 }
 
 /// What an instance of a part places: its occurrences in order, a hash
@@ -89,8 +99,8 @@ impl Model {
         for o in &occurrences {
             let path: Vec<&str> = o.path.iter().map(Id::as_str).collect();
             h.update(format!("{} {} {}\n", path.join("/"), o.part, o.rev.text()).as_bytes());
-            for (s, b) in &o.solids {
-                h.update(format!(" {s} {}\n", b.hash).as_bytes());
+            for s in &o.solids {
+                h.update(format!(" {} {}\n", s.founder, s.built.hash).as_bytes());
             }
             h.update(&pose_bits(&o.pose));
         }
@@ -108,7 +118,14 @@ impl Model {
         let shown = result
             .shown(&solids)
             .into_iter()
-            .filter_map(|s| Some((s.solid.clone(), Arc::clone(s.state?.1))))
+            .filter_map(|s| {
+                let (f, b) = s.state?;
+                Some(Solid {
+                    founder: s.solid.clone(),
+                    feature: Arc::new(part.features.get(f)?.as_ref().ok()?.clone()),
+                    built: Arc::clone(b),
+                })
+            })
             .collect();
         Model::new(vec![Occurrence {
             path: Vec::new(),
@@ -195,7 +212,7 @@ impl Occurrence {
         let solids: Vec<serde_json::Value> = self
             .solids
             .iter()
-            .map(|(s, b)| serde_json::json!({"solid": s, "hash": b.hash}))
+            .map(|s| serde_json::json!({"solid": s.founder, "hash": s.built.hash}))
             .collect();
         serde_json::json!({
             "path": path_text(&self.path),
@@ -824,10 +841,10 @@ pub(crate) mod tests {
             .unwrap()
             .hash()
             .to_owned();
-        assert_eq!(m.occurrences[1].solids[0].1.hash, bolt);
+        assert_eq!(m.occurrences[1].solids[0].built.hash, bolt);
         assert!(Arc::ptr_eq(
-            &m.occurrences[1].solids[0].1,
-            &m.occurrences[2].solids[0].1
+            &m.occurrences[1].solids[0].built,
+            &m.occurrences[2].solids[0].built
         ));
         let result = s.rebuilt(&id("frame")).unwrap();
         assert_eq!(result.failed(), 0);
@@ -1079,7 +1096,7 @@ pub(crate) mod tests {
         let m = s.model(&id("frame"), &Rev::Working).unwrap();
         let (old, new) = (&m.occurrences[0], &m.occurrences[1]);
         assert_eq!(old.rev, Rev::Label("A".into()));
-        assert_ne!(old.solids[0].1.hash, new.solids[0].1.hash);
+        assert_ne!(old.solids[0].built.hash, new.solids[0].built.hash);
         let result = s.rebuilt(&id("frame")).unwrap();
         let placed = result.output(&id("old")).unwrap().instance().unwrap();
         let commit = crate::git::repo(r).unwrap().locate("HEAD").unwrap().0;
@@ -1099,7 +1116,7 @@ pub(crate) mod tests {
                 .output(&id("shank"))
                 .unwrap()
                 .hash(),
-            old.solids[0].1.hash
+            old.solids[0].built.hash
         );
     }
 
@@ -1118,7 +1135,7 @@ pub(crate) mod tests {
             .unwrap()
             .hash()
             .to_owned();
-        assert_eq!(m.occurrences[0].solids[0].1.hash, working);
+        assert_eq!(m.occurrences[0].solids[0].built.hash, working);
         let placed = s
             .rebuilt(&id("frame"))
             .unwrap()

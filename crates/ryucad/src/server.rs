@@ -2889,6 +2889,38 @@ pub fn model_points(session: &mut Session, refs: &[EntityRef]) -> Result<Vec<[f6
         }
     }
     for r in refs {
+        let p = session.project().part(&r.part)?;
+        if part_kind(p) == PartKind::Assembly {
+            let r = r.in_assembly();
+            let model = session.model(&r.part, &crate::doc::assembly::Rev::Working)?;
+            let chosen: Vec<&crate::assembly::Occurrence> = model
+                .occurrences
+                .iter()
+                .filter(|o| match r.is_occurrence() {
+                    true => o.path.starts_with(&r.path),
+                    false => o.path == r.path,
+                })
+                .collect();
+            for o in chosen {
+                let solids: Vec<&crate::assembly::Solid> = o
+                    .solids
+                    .iter()
+                    .filter(|s| r.is_occurrence() || s.founder == r.feature)
+                    .collect();
+                for (s, m) in solids
+                    .iter()
+                    .zip(occurrence_meshes(session, &solids, coarse))
+                {
+                    let Ok(mesh) = &m.mesh else { continue };
+                    let mut placed = |q: &ryukei::geom::Point3| grow(&o.pose.apply_point(*q));
+                    match r.is_occurrence() {
+                        true => mesh.positions.iter().for_each(&mut placed),
+                        false => named_points(&s.built.body, mesh, &r.name, &mut placed),
+                    }
+                }
+            }
+            continue;
+        }
         // A sketch entity shows by its points.
         if let Some(sk) = session
             .rebuilt(&r.part)?
@@ -2904,30 +2936,58 @@ pub fn model_points(session: &mut Session, refs: &[EntityRef]) -> Result<Vec<[f6
         for (_, m) in meshes(session, &r.part, Some(&r.feature), coarse)? {
             let Ok(m) = m else { continue };
             let Ok(mesh) = &m.mesh.mesh else { continue };
-            let body = &m.body;
-            let named = |n: String| n == r.name;
-            for f in &mesh.faces {
-                if named(body.face(f.face).expect("live").name.to_string()) {
-                    for c in &mesh.corners[f.corners.start as usize..f.corners.end as usize] {
-                        grow(&mesh.positions[c.position as usize]);
-                    }
-                }
-            }
-            for e in &mesh.edges {
-                if named(body.edge(e.edge).expect("live").name.to_string()) {
-                    e.positions
-                        .iter()
-                        .for_each(|p| grow(&mesh.positions[*p as usize]));
-                }
-            }
-            for (i, v) in body.vertices().enumerate() {
-                if named(body.vertex(v).expect("live").name.to_string()) {
-                    grow(&mesh.positions[i]);
-                }
-            }
+            named_points(&m.body, mesh, &r.name, &mut grow);
         }
     }
     Ok(points)
+}
+
+/// The mesh points of the face, edge or vertex of `body` named `name`.
+fn named_points(
+    body: &ryukei::topo::Body,
+    mesh: &ryukei::mesh::BodyMesh,
+    name: &str,
+    grow: &mut impl FnMut(&ryukei::geom::Point3),
+) {
+    let named = |n: String| n == name;
+    for f in &mesh.faces {
+        if named(body.face(f.face).expect("live").name.to_string()) {
+            for c in &mesh.corners[f.corners.start as usize..f.corners.end as usize] {
+                grow(&mesh.positions[c.position as usize]);
+            }
+        }
+    }
+    for e in &mesh.edges {
+        if named(body.edge(e.edge).expect("live").name.to_string()) {
+            e.positions
+                .iter()
+                .for_each(|p| grow(&mesh.positions[*p as usize]));
+        }
+    }
+    for (i, v) in body.vertices().enumerate() {
+        if named(body.vertex(v).expect("live").name.to_string()) {
+            grow(&mesh.positions[i]);
+        }
+    }
+}
+
+/// The display meshes of occurrences' solids, in order, each body meshed
+/// once however many occurrences place it.
+pub fn occurrence_meshes(
+    session: &mut Session,
+    solids: &[&crate::assembly::Solid],
+    quality: mesh::Quality,
+) -> Vec<std::sync::Arc<mesh::DisplayMesh>> {
+    let budget = config::user("display.mesh_cache_mib")
+        .as_u64()
+        .unwrap_or(256) as usize
+        * 1024
+        * 1024;
+    let items: Vec<(&Feature, &crate::rebuild::Built)> = solids
+        .iter()
+        .map(|s| (s.feature.as_ref(), s.built.as_ref()))
+        .collect();
+    session.meshes.get_all(&items, quality, budget)
 }
 
 /// A camera from a standard view and/or framing entities. With no view,
