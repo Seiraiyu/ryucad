@@ -1337,3 +1337,86 @@ fn a_sliver_narrower_than_its_tolerance_is_collapsed() {
         |e| matches!(e, Event::Merged { parents, child } if *parents == joined && report.sewn.contains(child))
     ));
 }
+
+#[test]
+fn a_sliver_wider_than_its_tolerance_is_refused() {
+    use crate::geom::{Ellipse, Frame};
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let mut s = plain(&b);
+    let mut by: Vec<(usize, Sense)> = Vec::new();
+    for (k, f) in s.faces.iter().enumerate() {
+        for l in &f.loops {
+            if let Loop::Edges(list) = l
+                && let Some(u) = list.iter().find(|u| u.edge == 0)
+            {
+                by.push((k, u.sense));
+            }
+        }
+    }
+    let [(_, s1), (f2, _)] = by[..] else { panic!() };
+    // An arc in the second face's plane between edge 0's ends, bulging
+    // 5 µm out of the block, used by the second face, and a sliver on
+    // that plane between it and edge 0: coplanar, so nothing tightens it.
+    let n2 = s.surfaces[s.faces[f2].surface].frame().unwrap().z().get();
+    let (a, z) = (
+        s.vertices[s.edges[0].start].point,
+        s.vertices[s.edges[0].end].point,
+    );
+    let half = (z - a) * 0.5;
+    let mid = a + half;
+    let mut u = half.normalize().unwrap().get().cross(n2);
+    if (mid - crate::geom::Point3::new(0.5, 1.0, 1.5)).dot(u) < 0.0 {
+        u = -u;
+    }
+    // Half an ellipse: its major axis the edge, its minor the bulge.
+    let x = (a - mid).normalize().unwrap();
+    let frame = Frame::new(mid, x.get().cross(u), x.get()).unwrap();
+    let arc = Ellipse::new(frame, half.length(), 5e-6).unwrap();
+    let end = std::f64::consts::PI;
+    s.curves.push(Curve::Ellipse(arc));
+    let copy = s.edges.len();
+    s.edges.push(Edge {
+        curve: s.curves.len() - 1,
+        interval: [0.0, end],
+        tolerance: 1e-7,
+        ..s.edges[0]
+    });
+    s.edges[0].tolerance = 1e-7;
+    for l in &mut s.faces[f2].loops {
+        if let Loop::Edges(list) = l {
+            for u in list.iter_mut().filter(|u| u.edge == 0) {
+                u.edge = copy;
+            }
+        }
+    }
+    let sliver = s.faces.len();
+    s.faces.push(Face {
+        loops: vec![Loop::Edges(vec![
+            Use {
+                edge: 0,
+                sense: s1.flipped(),
+                pcurve: None,
+            },
+            Use {
+                edge: copy,
+                sense: s1,
+                pcurve: None,
+            },
+        ])],
+        ..s.faces[f2].clone()
+    });
+    s.shells[0].faces.push(sliver);
+    let names = names::names(OpKey(7), &s);
+    let r = heal(OpKey(7), &s, &HealOptions::default());
+    assert_eq!(
+        r.err(),
+        Some(
+            HealError::SliverTooWide {
+                face: names.faces[sliver]
+            }
+            .into()
+        )
+    );
+}

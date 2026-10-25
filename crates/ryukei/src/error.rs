@@ -73,6 +73,10 @@ pub enum HealError {
     /// A face whose loops run the wrong way where they cross each other,
     /// or one crosses itself, so no direction for them can be read.
     SelfCrossingLoop { face: Name },
+    /// A face whose one loop is two edges between the same vertices,
+    /// narrower than the cap but wider than their tolerances: collapsing
+    /// it would move the shape by more than a tolerance.
+    SliverTooWide { face: Name },
     /// An edge, vertex or face farther from the geometry it should lie
     /// on than its tolerance allows: `gap` is the distance found.
     GapTooLarge { entity: Name, gap: f64 },
@@ -418,6 +422,9 @@ impl fmt::Display for HealError {
             Self::BadDomain { face } => write!(f, "the loops of face {face} bound no region"),
             Self::NoPcurve { edge, face } => write!(f, "edge {edge} has no pcurve on face {face}"),
             Self::SelfCrossingLoop { face } => write!(f, "the loops of face {face} cross"),
+            Self::SliverTooWide { face } => {
+                write!(f, "face {face} is a sliver wider than its tolerance")
+            }
             Self::GapTooLarge { entity, gap } => {
                 write!(f, "{entity} is {gap:e} m from where it should be")
             }

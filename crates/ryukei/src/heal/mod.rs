@@ -230,7 +230,7 @@ pub fn heal(
     let turned = orient::faces(&mut shape, &names)?;
     let tightened = tighten::tighten(&mut shape, &names, options.tolerance_cap);
     gaps::tolerate(&mut shape, &names, options.tolerance_cap)?;
-    let collapsed = collapse::collapse(key, &mut shape, &mut names);
+    let collapsed = collapse::collapse(key, &mut shape, &mut names, options.tolerance_cap)?;
     if !collapsed.removed.is_empty() {
         gaps::tolerate(&mut shape, &names, options.tolerance_cap)?;
     }
