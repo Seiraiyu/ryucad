@@ -2,6 +2,7 @@
 //! parameters and a feature. Each reads from and writes to a JSON value;
 //! the file system is [`super::project`]'s business.
 
+use super::assembly::Instance;
 use super::blend::{Chamfer, Fillet};
 use super::hole::Hole;
 use super::id::{Id, ProjectId};
@@ -28,9 +29,9 @@ pub const PART_FORMAT: u64 = 2;
 pub const MANIFEST_FORMAT: u64 = 2;
 
 /// The newest feature format: 2 adds expressions, sketches and sweeps, 3
-/// operations on solids. A feature is written at the lowest format that
-/// holds it, so one with only literals stays 1.
-pub const FEATURE_FORMAT: u64 = 3;
+/// operations on solids, 4 an assembly's instances. A feature is written
+/// at the lowest format that holds it, so one with only literals stays 1.
+pub const FEATURE_FORMAT: u64 = 4;
 
 pub const PROJECT_KIND: &str = "ryucad.project";
 pub const PART_KIND: &str = "ryucad.part";
@@ -113,6 +114,7 @@ pub enum Feature {
     Chamfer(Chamfer),
     Hole(Hole),
     Pattern(Pattern),
+    Instance(Instance),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -428,11 +430,15 @@ pub fn manifest_format(v: &Value) -> u64 {
 }
 
 /// The lowest format that holds a feature's JSON, judged from the JSON
-/// alone, as [`Feature::format`] judges a loaded feature: operations on
-/// solids, booleans, fillets, chamfers, holes and patterns are new in format 3, sketches
+/// alone, as [`Feature::format`] judges a loaded feature: instances are
+/// new in format 4, operations on solids, booleans, fillets, chamfers,
+/// holes and patterns are new in format 3, sketches
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
+    if v.get("type").and_then(Value::as_str) == Some("instance") {
+        return 4;
+    }
     let new = |o: &Value| o.as_str().is_none_or(|o| o == "new");
     if v.get("targets").is_some()
         || v.get("operation").is_some_and(|o| !new(o))
@@ -486,7 +492,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance"),
     )
     .with("type", s)
 }
@@ -504,6 +510,7 @@ impl Feature {
             Feature::Chamfer(_) => "chamfer",
             Feature::Hole(_) => "hole",
             Feature::Pattern(_) => "pattern",
+            Feature::Instance(_) => "instance",
         }
     }
 
@@ -522,6 +529,7 @@ impl Feature {
             | Feature::Chamfer(_)
             | Feature::Hole(_)
             | Feature::Pattern(_) => 3,
+            Feature::Instance(_) => 4,
         }
     }
 
@@ -536,6 +544,7 @@ impl Feature {
             Feature::Chamfer(c) => c.fields(),
             Feature::Hole(h) => h.fields(),
             Feature::Pattern(p) => p.fields(),
+            Feature::Instance(i) => i.fields(),
         };
         v["format"] = json!(self.format());
         v["kind"] = json!(FEATURE_KIND);
@@ -560,6 +569,7 @@ impl Feature {
             "chamfer" => Feature::Chamfer(Chamfer::from_fields(&mut o, default, env)?),
             "hole" => Feature::Hole(Hole::from_fields(&mut o, default, env)?),
             "pattern" => Feature::Pattern(Pattern::from_fields(&mut o, default, env)?),
+            "instance" => Feature::Instance(Instance::from_fields(&mut o)?),
             _ => {
                 let ty = PrimitiveType::parse(ty).map_err(|e| e.with("pointer", "/type"))?;
                 Feature::Primitive(Primitive::from_fields(ty, &mut o, default, env)?)
@@ -589,7 +599,8 @@ impl Feature {
             | Feature::Fillet(_)
             | Feature::Chamfer(_)
             | Feature::Hole(_)
-            | Feature::Pattern(_) => None,
+            | Feature::Pattern(_)
+            | Feature::Instance(_) => None,
         }
     }
 
@@ -645,6 +656,14 @@ impl Feature {
     pub fn boolean(&self) -> Option<&Boolean> {
         match self {
             Feature::Boolean(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// The instance, if it is one.
+    pub fn instance(&self) -> Option<&Instance> {
+        match self {
+            Feature::Instance(i) => Some(i),
             _ => None,
         }
     }
@@ -1038,7 +1057,7 @@ mod tests {
                 "/placement/origin/1",
             ),
             ("/extra", json!(1), Code::InvalidDocument, "/extra"),
-            ("/format", json!(4), Code::FormatTooNew, ""),
+            ("/format", json!(5), Code::FormatTooNew, ""),
             (
                 "/kind",
                 json!("ryucad.part"),

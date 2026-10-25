@@ -1131,8 +1131,18 @@ fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<
             let committed = head(first)?
                 .and_then(|b| canonical::parse(std::str::from_utf8(&b).ok()?).ok())
                 .and_then(|v| PartFile::from_json(&v).ok());
-            // An assembly comes back as one when the last commit says so.
-            let kind = committed.as_ref().map_or(PartKind::Part, |p| p.kind);
+            // An assembly comes back as one: as the last commit says, else
+            // when every feature file is an instance.
+            let instances = !files.is_empty()
+                && files.iter().all(|f| {
+                    matches!(read(root, &format!("parts/{part}/features/{f}.json")),
+                        Read::Json(v, _) if v["type"] == "instance")
+                });
+            let kind = match &committed {
+                Some(p) => p.kind,
+                None if instances => PartKind::Assembly,
+                None => PartKind::Part,
+            };
             let committed: Vec<String> = committed
                 .map(|p| p.features.iter().map(|f| f.to_string()).collect())
                 .unwrap_or_default();
@@ -1918,6 +1928,31 @@ pub(crate) mod tests {
         assert_eq!(e.code, Code::RepairConflict);
         // Nothing was done.
         assert_eq!(listed(r, "p").unwrap().features.len(), 2);
+    }
+
+    #[test]
+    fn a_lost_assembly_list_comes_back_as_an_assembly() {
+        let dir = healthy();
+        let r = dir.path();
+        w(
+            r,
+            "parts/frame/features/i1.json",
+            &canonical::to_string(&json!({
+                "format": 4, "kind": "ryucad.feature", "type": "instance", "part": "p",
+                "rev": "working",
+                "pose": {"origin_m": [0, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]},
+            })),
+        );
+        let ids = offered(r);
+        let out = fix(
+            r,
+            &[&ids["missing_part_index:recreate:part"]],
+            Params::default(),
+        );
+        assert_eq!(out["skipped"], json!([]), "{out}");
+        let list = listed(r, "frame").unwrap();
+        assert_eq!(list.kind, PartKind::Assembly);
+        assert_eq!(list.features.len(), 1);
     }
 
     #[test]

@@ -194,6 +194,12 @@ pub enum Code {
     /// that runs off a face, a corner or surface it can't build yet. Its
     /// reason and the edges and faces involved are in the details.
     BlendFailed,
+    /// A feature of a kind its part doesn't hold: an instance in a part,
+    /// or a solid, sketch or blend in an assembly.
+    WrongPartKind,
+    /// An assembly that places itself, through instances at any depth.
+    /// The path is in the details.
+    AssemblyCycle,
 }
 
 impl Code {
@@ -306,6 +312,8 @@ mod tests {
         assert_eq!(Code::TargetsMixed.exit_code(), 1);
         assert_eq!(Code::EdgeListedTwice.exit_code(), 1);
         assert_eq!(Code::BlendFailed.exit_code(), 1);
+        assert_eq!(Code::WrongPartKind.exit_code(), 1);
+        assert_eq!(json!(Code::AssemblyCycle), json!("assembly_cycle"));
     }
 
     #[test]

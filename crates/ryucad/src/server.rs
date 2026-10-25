@@ -846,6 +846,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Boolean(b) => b.fields(),
+        Feature::Instance(i) => i.fields(),
         Feature::Fillet(_) | Feature::Chamfer(_) => blend_report(part, f),
         Feature::Hole(h) => hole_report(part, h),
         Feature::Pattern(x) => pattern_report(part, x),
@@ -2152,6 +2153,13 @@ fn feature_edit(
             given.only("sketch", &SKETCH)?;
             s.plane = sketch_plane(Some(&s.plane), &given, &pid, unit, &p.env)?;
             Feature::Sketch(s)
+        }
+        Feature::Instance(_) => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("{fid} is an instance; instances can't be edited yet"),
+            )
+            .with("feature", &fid));
         }
         Feature::Boolean(b) => {
             given.only("boolean", &BOOLEAN)?;

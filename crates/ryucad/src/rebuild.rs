@@ -350,7 +350,8 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::Boolean(_)
         | Feature::Fillet(_)
         | Feature::Chamfer(_)
-        | Feature::Pattern(_) => Err(Error::new(
+        | Feature::Pattern(_)
+        | Feature::Instance(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} makes no body of its own", f.type_name()),
         )
