@@ -369,6 +369,24 @@ fn dispatch(
             expected_revision.as_deref(),
         ),
         Request::AssemblyTree { part } => crate::assembly::tree(session, &part),
+        Request::AssemblySolve { part, moves } => crate::mate::solve_request(
+            session,
+            &part,
+            moves
+                .into_iter()
+                .map(|m| {
+                    (
+                        m.instance,
+                        crate::assembly::Move {
+                            placement: m.placement,
+                            translate: m.translate,
+                            axis: m.axis,
+                            angle: m.angle,
+                        },
+                    )
+                })
+                .collect(),
+        ),
         Request::FeatureShow { part, id } => {
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
             let p = session.project().part(&part)?;
@@ -940,6 +958,26 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
         }
         Feature::Boolean(b) => b.fields(),
         Feature::Instance(i) => i.fields(),
+        Feature::Mate(m) => {
+            let mut v = m.fields();
+            for (side, c) in [("a", &m.a), ("b", &m.b)] {
+                v[side]["text"] = json!(connector_text(part, c));
+            }
+            if let Some(q) = &m.angle {
+                v["angle"] = q.report();
+            }
+            if let Some(q) = &m.distance {
+                v["distance"] = q.report();
+            }
+            v
+        }
+        Feature::InstancePattern(x) => {
+            let mut v = x.fields();
+            for (role, c) in x.connectors() {
+                v[role]["text"] = json!(connector_text(part, c));
+            }
+            v
+        }
         Feature::Fillet(_) | Feature::Chamfer(_) => blend_report(part, f),
         Feature::Hole(h) => hole_report(part, h),
         Feature::Pattern(x) => pattern_report(part, x),
@@ -1237,6 +1275,24 @@ const REVOLVE: [&str; 7] = [
 ];
 const BOOLEAN: [&str; 4] = ["op", "target", "targets", "tools"];
 const INSTANCE: [&str; 4] = ["of", "rev", "placement", "fixed"];
+const MATE: [&str; 7] = [
+    "form", "a", "b", "a_offset", "b_offset", "angle", "distance",
+];
+const INSTANCE_PATTERN: [&str; 13] = [
+    "form",
+    "instances",
+    "direction",
+    "spacing",
+    "count",
+    "direction2",
+    "spacing2",
+    "count2",
+    "reverse",
+    "reverse2",
+    "axis",
+    "angle",
+    "skip",
+];
 const FILLET: [&str; 4] = ["groups", "propagate", "radius", "edges"];
 const CHAMFER: [&str; 9] = [
     "groups",
@@ -1267,6 +1323,229 @@ const PATTERN: [&str; 15] = [
     "skip",
     "targets",
 ];
+
+/// A connector as a file holds it, from its text: an entity of an
+/// occurrence of assembly `asm`, `<asm>/<path>/<solid>/<name>`, or an
+/// occurrence's own frame, `<asm>/<path>`. `param` names the field for
+/// errors.
+fn connector_json(t: &str, asm: &Id, param: &str) -> Result<Value> {
+    let r = EntityRef::parse(t)
+        .map_err(|e| e.with("param", param))?
+        .in_assembly();
+    if r.part != *asm {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!(
+                "{t} is in {}, not assembly {asm}: a connector is on an occurrence of the assembly",
+                r.part
+            ),
+        )
+        .with("param", param));
+    }
+    if r.path.is_empty() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("{t} names no instance: give <assembly>/<instance>[/…]/<solid>/<name>"),
+        )
+        .with("param", param));
+    }
+    let at = if r.is_occurrence() {
+        json!("origin")
+    } else {
+        json!({"feature": r.feature, "name": r.name})
+    };
+    Ok(json!({"instance": r.path, "at": at}))
+}
+
+/// A connector's text, as requests give it.
+pub fn connector_text(asm: &Id, c: &crate::doc::mate::Connector) -> String {
+    let path = c.path().join("/");
+    match &c.at {
+        crate::doc::mate::At::Origin => format!("{asm}/{path}"),
+        crate::doc::mate::At::Entity(r) => format!("{asm}/{path}/{}/{}", r.feature, r.name),
+    }
+}
+
+/// A mate from `current`'s fields (none for a new one) with what was
+/// given laid over them: connectors as text, each keeping its offset
+/// unless one is given (`{}` for none); `angle` or `distance` `""` lets it
+/// go; a new form keeps only the driven values it takes.
+fn mate_from(
+    current: Option<&crate::doc::mate::Mate>,
+    given: &Given,
+    part: &Id,
+    unit: Unit,
+    env: &Env,
+) -> Result<Feature> {
+    use crate::doc::mate::{Form, Mate};
+    let f = &given.fields;
+    let mut v = current.map_or_else(|| json!({}), Mate::fields);
+    let o = v.as_object_mut().expect("an object");
+    match (&f.form, current) {
+        (Some(form), _) => {
+            let Some(form) = Form::parse(form) else {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("{form:?} isn't a mate: fastened, revolute, slider, cylindrical, planar or ball"),
+                )
+                .with("param", "form"));
+            };
+            o.insert("form".into(), json!(form.as_str()));
+            if !form.takes_angle() {
+                o.remove("angle");
+            }
+            if !form.takes_distance() {
+                o.remove("distance");
+            }
+        }
+        (None, None) => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "a mate names its form: fastened, revolute, slider, cylindrical, planar or ball",
+            )
+            .with("param", "form"));
+        }
+        (None, Some(_)) => {}
+    }
+    for (side, text, offset) in [("a", &f.a, &f.a_offset), ("b", &f.b, &f.b_offset)] {
+        if let Some(t) = text {
+            let mut c = connector_json(t, part, side)?;
+            if let Some(off) = o.get(side).and_then(|c| c.get("offset")) {
+                c["offset"] = off.clone();
+            }
+            o.insert(side.into(), c);
+        }
+        if let Some(off) = offset {
+            let Some(c) = o.get_mut(side) else {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("{side}_offset moves connector {side}: give {side} too"),
+                )
+                .with("param", format!("{side}_offset")));
+            };
+            if *off == json!({}) {
+                c.as_object_mut().expect("a connector").remove("offset");
+            } else {
+                c["offset"] = off.clone();
+            }
+        }
+        if !o.contains_key(side) {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("a mate joins two connectors: give {side}"),
+            )
+            .with("param", side));
+        }
+    }
+    for (k, x) in [("angle", &f.angle), ("distance", &f.distance)] {
+        match x {
+            Some(Value::String(t)) if t.is_empty() => {
+                o.remove(k);
+            }
+            Some(x) => {
+                o.insert(k.into(), x.clone());
+            }
+            None => {}
+        }
+    }
+    let mut o = crate::doc::files::Obj::new(&v, "")?;
+    let m = Mate::from_fields(&mut o, unit, env)?;
+    o.finish()?;
+    Ok(Feature::Mate(Box::new(m)))
+}
+
+/// An instance pattern from `current`'s fields (none for a new one, whose
+/// form, left out, is circular with an axis, else linear) with what was
+/// given laid over them, as a part's pattern takes them; directions and
+/// the axis are `x`, `y`, `z` or a connector's text, whose z they take.
+fn instance_pattern_from(
+    current: Option<&crate::doc::mate::InstancePattern>,
+    given: &Given,
+    part: &Id,
+    unit: Unit,
+    env: &Env,
+) -> Result<Feature> {
+    use crate::doc::mate::InstancePattern;
+    let f = &given.fields;
+    let fresh = || json!({"form": if f.axis.is_some() { "circular" } else { "linear" }});
+    let mut v = current.map_or_else(fresh, InstancePattern::fields);
+    let o = v.as_object_mut().expect("an object");
+    const SECOND: [&str; 4] = ["direction2", "spacing2", "count2", "reverse2"];
+    if let Some(form) = &f.form {
+        let takes: &[&str] = match form.as_str() {
+            "linear" => &[
+                "direction",
+                "spacing",
+                "count",
+                "reverse",
+                "direction2",
+                "spacing2",
+                "count2",
+                "reverse2",
+                "skip",
+            ],
+            "circular" => &["axis", "count", "angle", "skip"],
+            _ => &[],
+        };
+        o.retain(|k, _| takes.contains(&k.as_str()) || k == "instances");
+        o.insert("form".into(), json!(form));
+    }
+    if f.direction2.as_deref() == Some("") {
+        o.retain(|k, _| !SECOND.contains(&k.as_str()));
+    }
+    for (k, x) in [
+        ("direction", &f.direction),
+        ("direction2", &f.direction2),
+        ("axis", &f.axis),
+    ] {
+        if let Some(t) = x.as_deref().filter(|t| !t.is_empty()) {
+            let d = if t.contains('/') {
+                connector_json(t, part, k)?
+            } else {
+                json!(t)
+            };
+            o.insert(k.into(), d);
+        }
+    }
+    for (k, x) in [
+        ("spacing", &f.spacing),
+        ("count", &f.count),
+        ("spacing2", &f.spacing2),
+        ("count2", &f.count2),
+        ("angle", &f.angle),
+    ] {
+        if let Some(x) = x {
+            o.insert(k.into(), x.clone());
+        }
+    }
+    for (k, x) in [("reverse", f.reverse), ("reverse2", f.reverse2)] {
+        match x {
+            Some(true) => {
+                o.insert(k.into(), json!(true));
+            }
+            Some(false) => {
+                o.remove(k);
+            }
+            None => {}
+        }
+    }
+    match &f.skip {
+        Some(x) if x == &json!([]) => {
+            o.remove("skip");
+        }
+        Some(x) => {
+            o.insert("skip".into(), x.clone());
+        }
+        None => {}
+    }
+    if let Some(x) = &f.instances {
+        o.insert("instances".into(), json!(x));
+    }
+    let mut o = crate::doc::files::Obj::new(&v, "")?;
+    let p = InstancePattern::from_fields(&mut o, unit, env)?;
+    o.finish()?;
+    Ok(Feature::InstancePattern(Box::new(p)))
+}
 
 /// A pattern from `current`'s fields (none for a new one, whose form,
 /// left out, is what its fields say: a mirror with a plane, circular with
@@ -2256,6 +2535,14 @@ fn feature_add(
             given.only(ty, &INSTANCE)?;
             Feature::Instance(instance_from(None, &given, unit, &env)?)
         }
+        "mate" => {
+            given.only(ty, &MATE)?;
+            mate_from(None, &given, &pid, unit, &env)?
+        }
+        "instance_pattern" => {
+            given.only(ty, &INSTANCE_PATTERN)?;
+            instance_pattern_from(None, &given, &pid, unit, &env)?
+        }
         "fillet" | "chamfer" => {
             given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
             blend_from(ty, None, &given, &pid, unit, &env)?
@@ -2300,6 +2587,9 @@ fn feature_add(
     if f.instance().is_some() {
         check_instance(session, &pid, &list, &fid, &f)?;
     }
+    if !f.connectors().is_empty() || f.instance_pattern().is_some() {
+        crate::mate::check(session, &pid, &list, &fid, &f)?;
+    }
     let p = session.project().part(&pid)?;
     if f.swept().is_some() {
         check_sweep(p, &list, &fid, &f)?;
@@ -2309,8 +2599,20 @@ fn feature_add(
         crate::pattern::check_seeds(&proposed(p, &list, &[(&fid, &f)]), &fid, x)?;
     }
     check_references(session, &pid, &list, &fid, &f)?;
-    let revision = save(session, &pid, &[(&fid, &f)], list)?;
-    Ok(json!({"feature": feature_report(&pid, &fid, &f), "revision": revision}))
+    if crate::assembly::assembles(&f) {
+        let p = session.project().part(&pid)?;
+        let q = proposed(p, &list, &[(&fid, &f)]);
+        crate::mate::refuse_overconstrained(session, q)?;
+    }
+    let assemblies = crate::mate::current(session, &pid)?;
+    save(session, &pid, &[(&fid, &f)], list)?;
+    let assemblies = crate::mate::keep_current(session, &assemblies)?;
+    let revision = &session.project().part(&pid)?.revision;
+    let mut v = json!({"feature": feature_report(&pid, &fid, &f), "revision": revision});
+    if !assemblies.is_empty() {
+        v["assemblies"] = json!(assemblies);
+    }
+    Ok(v)
 }
 
 fn feature_edit(
@@ -2361,6 +2663,14 @@ fn feature_edit(
         Feature::Instance(i) => {
             given.only("instance", &INSTANCE)?;
             Feature::Instance(instance_from(Some(&i), &given, unit, &p.env)?)
+        }
+        Feature::Mate(m) => {
+            given.only("mate", &MATE)?;
+            mate_from(Some(&m), &given, &pid, unit, &p.env)?
+        }
+        Feature::InstancePattern(x) => {
+            given.only("instance_pattern", &INSTANCE_PATTERN)?;
+            instance_pattern_from(Some(&x), &given, &pid, unit, &p.env)?
         }
         Feature::Boolean(b) => {
             given.only("boolean", &BOOLEAN)?;
@@ -2414,6 +2724,9 @@ fn feature_edit(
     if f.instance().is_some() && f != old {
         check_instance(session, &pid, &list, &fid, &f)?;
     }
+    if (!f.connectors().is_empty() || f.instance_pattern().is_some()) && f != old {
+        crate::mate::check(session, &pid, &list, &fid, &f)?;
+    }
     let p = session.project().part(&pid)?;
     check_solids(&proposed(p, &list, &[(&fid, &f)]), &[&fid])?;
     if let Feature::Pattern(x) = &f {
@@ -2430,13 +2743,23 @@ fn feature_edit(
     if f.references() != old.references() || propagates(&f) != propagates(&old) {
         check_references(session, &pid, &list, &fid, &f)?;
     }
+    if crate::assembly::assembles(&f) {
+        let p = session.project().part(&pid)?;
+        let q = proposed(p, &list, &[(&fid, &f)]);
+        crate::mate::refuse_overconstrained(session, q)?;
+    }
     let before = crate::sketch::current(session, &pid)?;
+    let assemblies = crate::mate::current(session, &pid)?;
     save(session, &pid, &[(&fid, &f)], list)?;
     let sketches = crate::sketch::keep_current(session, &pid, &before)?;
+    let assemblies = crate::mate::keep_current(session, &assemblies)?;
     let revision = &session.project().part(&pid)?.revision;
     let mut v = json!({"feature": feature_report(&pid, &fid, &f), "revision": revision});
     if !sketches.is_empty() {
         v["sketches"] = json!(sketches);
+    }
+    if !assemblies.is_empty() {
+        v["assemblies"] = json!(assemblies);
     }
     Ok(v)
 }
@@ -2468,9 +2791,14 @@ fn feature_delete(
     }
     let mut list = order(p)?;
     list.retain(|f| *f != fid);
+    if part_kind(p) == PartKind::Assembly {
+        let q = proposed(p, &list, &[]);
+        crate::mate::refuse_overconstrained(session, q)?;
+    }
+    let assemblies = crate::mate::current(session, &pid)?;
     // The list first: a crash then leaves an unlisted file, never a listed
     // feature with no file.
-    let revision = save(session, &pid, &[], list)?;
+    save(session, &pid, &[], list)?;
     let path = feature_path(session.root(), &pid, &fid);
     match fs::remove_file(&path) {
         Ok(()) => {}
@@ -2478,7 +2806,13 @@ fn feature_delete(
         Err(e) => return Err(Error::io(&path, &e)),
     }
     session.reload()?;
-    Ok(json!({"deleted": fid, "revision": revision}))
+    let assemblies = crate::mate::keep_current(session, &assemblies)?;
+    let revision = &session.project().part(&pid)?.revision;
+    let mut v = json!({"deleted": fid, "revision": revision});
+    if !assemblies.is_empty() {
+        v["assemblies"] = json!(assemblies);
+    }
+    Ok(v)
 }
 
 fn feature_move(
@@ -2595,6 +2929,20 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
             }
         })
         .collect();
+    // A mate's form and connectors, as requests give them, for showing it
+    // whatever it rebuilt to.
+    let mates: BTreeMap<Id, Value> = part
+        .features
+        .iter()
+        .filter_map(|(fid, f)| {
+            let m = f.as_ref().ok()?.mate()?;
+            Some((
+                fid.clone(),
+                json!({"form": m.form.as_str(), "a": connector_text(id, &m.a),
+                       "b": connector_text(id, &m.b)}),
+            ))
+        })
+        .collect();
     let counts = |b: &crate::rebuild::Built| {
         let c = b.body.counts();
         json!({"faces": c.faces, "edges": c.edges, "vertices": c.vertices})
@@ -2623,8 +2971,21 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
                     v
                 }
                 Ok(crate::rebuild::Output::Instance(p)) => {
-                    json!({"id": fid, "type": types.get(fid), "ok": true, "hash": p.hash,
-                           "instance": p.to_json()})
+                    let mut v = json!({"id": fid, "type": types.get(fid), "ok": true,
+                                       "hash": p.hash, "instance": p.to_json()});
+                    // What its mates leave it, when the assembly has any.
+                    if let Some(b) = r.solve.as_ref().and_then(|s| s.instance(fid)) {
+                        v["instance"]["solve"] = crate::mate::body_json(b);
+                    }
+                    v
+                }
+                Ok(crate::rebuild::Output::Mate(m)) => {
+                    json!({"id": fid, "type": types.get(fid), "ok": true, "hash": m.hash,
+                           "mate": m.to_json()})
+                }
+                Ok(crate::rebuild::Output::Copies(c)) => {
+                    json!({"id": fid, "type": types.get(fid), "ok": true, "hash": c.hash,
+                           "copies": c.to_json(fid)})
                 }
                 // A sketch makes no body: its state, not a body hash.
                 Ok(crate::rebuild::Output::Sketch(s)) => {
@@ -2636,6 +2997,14 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
             };
             if let Some(u) = uses.get(fid) {
                 v["uses"] = json!(u);
+            }
+            if let Some(Value::Object(m)) = mates.get(fid) {
+                if !v["mate"].is_object() {
+                    v["mate"] = json!({});
+                }
+                for (k, x) in m {
+                    v["mate"][k] = x.clone();
+                }
             }
             let of = solids.solids_of(fid);
             if !of.is_empty() {
@@ -2670,7 +3039,7 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
         .collect();
     let mut v = json!({"part": id, "revision": revision, "hash": r.hash,
                        "failed": r.failed(), "features": features, "solids": shown});
-    let warnings = r.warnings();
+    let warnings = r.warnings(id);
     // An assembly's model is what its instances place.
     if assembly {
         let occurrences: Vec<Value> = crate::assembly::Model::of_assembly(r)
@@ -2680,6 +3049,9 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
             .collect();
         v["kind"] = json!("assembly");
         v["occurrences"] = json!(occurrences);
+        if let Some(solve) = &r.solve {
+            v["solve"] = solve.to_json();
+        }
     }
     if !warnings.is_empty() {
         v["warnings"] = json!(warnings);

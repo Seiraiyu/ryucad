@@ -571,11 +571,28 @@ impl Workspace {
         }
     }
 
-    /// Reads the faces `key` made, unless it is a sketch: it makes none.
+    /// Reads the faces `key` made, unless it is a sketch: it makes none. A
+    /// mate's are the faces its connectors are on, known already.
     fn ask_made(&mut self, key: BodyKey) {
         let Some(p) = self.model.parts.get(&key.0) else {
             return;
         };
+        if let Some(m) = p.feature(&key.1).and_then(|f| f.mate.as_ref()) {
+            let mut faces: std::collections::BTreeMap<BodyKey, std::collections::BTreeSet<String>> =
+                std::collections::BTreeMap::new();
+            for c in [&m.a, &m.b] {
+                if let Some((body, name)) = crate::core::model::MateInfo::face_of(c) {
+                    faces.entry((key.0.clone(), body)).or_default().insert(name);
+                }
+            }
+            self.made = Some(Made {
+                feature: key.clone(),
+                revision: p.revision.clone(),
+                faces,
+            });
+            self.model.generation += 1;
+            return;
+        }
         if p.feature(&key.1).is_none_or(|f| f.sketch.is_some()) {
             return;
         }

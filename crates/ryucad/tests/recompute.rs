@@ -513,3 +513,171 @@ fn assemblies_recompute_as_from_nothing() {
         }
     }
 }
+
+/// The planar face of `part`'s solid `solid` facing `n`.
+fn face_along(s: &mut Session, part: &str, solid: &str, n: [f64; 3]) -> String {
+    let v = must(s, "inspect", json!({"part": part, "feature": solid}));
+    v["bodies"][0]["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            let z = &f["surface"]["frame"]["z"];
+            let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+            f["surface"]["type"] == "plane"
+                && (0..3).all(|k| (z[k].as_f64().unwrap() * sign - n[k]).abs() < 1e-12)
+        })
+        .map(|f| f["name"].as_str().unwrap().to_owned())
+        .expect("a face along n")
+}
+
+/// A frame with mates: a plate fixed, a bolt on a revolute through its
+/// top, copies of it round the plate's z, and a cap fastened up a copy.
+fn mated() -> (tempfile::TempDir, Session) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "bolt"}));
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "bolt", "type": "cylinder", "id": "shank",
+               "params": {"radius": 3, "height": 17}}),
+    );
+    must(&mut s, "part.create", json!({"part": "plate"}));
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "plate", "type": "box", "id": "slab",
+               "params": {"x": 60, "y": 30, "z": 6}}),
+    );
+    must(
+        &mut s,
+        "part.create",
+        json!({"part": "frame", "kind": "assembly"}),
+    );
+    for (id, of, fixed) in [
+        ("base", "plate", true),
+        ("pin", "bolt", false),
+        ("cap", "bolt", false),
+    ] {
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "instance", "id": id, "of": of, "fixed": fixed}),
+        );
+    }
+    let top = face_along(&mut s, "plate", "slab", [0.0, 0.0, 1.0]);
+    let foot = face_along(&mut s, "bolt", "shank", [0.0, 0.0, -1.0]);
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "frame", "type": "mate", "id": "m1", "form": "revolute",
+               "a": format!("frame/base/slab/{top}"),
+               "a_offset": {"origin": ["20 mm", "10 mm", "0 mm"]},
+               "b": format!("frame/pin/shank/{foot}"), "b_offset": {"flip": true}}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "frame", "type": "instance_pattern", "id": "ring",
+               "instances": ["pin"], "axis": "z", "count": 3, "angle": "360 deg"}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "frame", "type": "mate", "id": "m2", "form": "fastened",
+               "a": "frame/ring:1/pin", "a_offset": {"origin": ["0 mm", "0 mm", "20 mm"]},
+               "b": "frame/cap"}),
+    );
+    (dir, s)
+}
+
+/// One random edit of the mated frame or the parts it places.
+fn mated_edit(g: &mut Lcg, s: &mut Session) {
+    let (method, params) = match g.next_u64() % 6 {
+        0 => (
+            "feature.edit",
+            json!({"part": "plate", "id": "slab", "params": {"z": mm(g, 4, 8)}}),
+        ),
+        1 => (
+            "feature.edit",
+            json!({"part": "frame", "id": "m1",
+                   "a_offset": {"origin": [mm(g, 10, 25), "10 mm", "0 mm"]}}),
+        ),
+        2 => (
+            "feature.edit",
+            json!({"part": "frame", "id": "m1", "angle": format!("{} deg", g.next_u64() % 90)}),
+        ),
+        3 => (
+            "feature.edit",
+            json!({"part": "frame", "id": "ring", "count": 2 + g.next_u64() % 4}),
+        ),
+        4 => (
+            "assembly.move",
+            json!({"part": "frame", "instance": "pin", "axis": [0, 0, 1], "angle": "15 deg"}),
+        ),
+        _ => (
+            "feature.edit",
+            json!({"part": "frame", "id": "m1", "angle": ""}),
+        ),
+    };
+    let _ = call(s, method, params);
+}
+
+/// The mated frame rebuilt from nothing on `threads` threads: its model's
+/// hash and each part's rebuild hash.
+fn mated_full(s: &Session, threads: usize) -> Vec<String> {
+    use ryucad::assembly::{Pins, Rebuild, Store};
+    use ryucad::doc::assembly::Rev;
+    let project = s.project().clone();
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .unwrap()
+        .install(|| {
+            let pins = Pins::new();
+            let mut r = Rebuild::new(&project, &pins, Store::default());
+            let frame = Id::parse("frame", "part").unwrap();
+            let mut out = vec![r.model(&frame, &Rev::Working).unwrap().hash.clone()];
+            for p in ["bolt", "plate", "frame"] {
+                out.push(
+                    r.result(&Id::parse(p, "part").unwrap())
+                        .unwrap()
+                        .hash
+                        .clone(),
+                );
+            }
+            out
+        })
+}
+
+#[test]
+fn mated_assemblies_recompute_as_from_nothing() {
+    use ryucad::doc::assembly::Rev;
+    for seed in [1, 2] {
+        let (_dir, mut s) = mated();
+        let mut g = Lcg::new(seed);
+        for step in 0..20 {
+            mated_edit(&mut g, &mut s);
+            let frame = Id::parse("frame", "part").unwrap();
+            let mut incremental = vec![s.model(&frame, &Rev::Working).unwrap().hash.clone()];
+            for p in ["bolt", "plate", "frame"] {
+                let id = Id::parse(p, "part").unwrap();
+                incremental.push(s.rebuilt(&id).unwrap().hash.clone());
+            }
+            // Writes keep it current.
+            let r = s.rebuilt(&frame).unwrap();
+            assert!(
+                r.solve.as_ref().unwrap().report.converged,
+                "seed {seed}, step {step}"
+            );
+            assert!(
+                !r.solve.as_ref().unwrap().stale(),
+                "seed {seed}, step {step}"
+            );
+            assert_eq!(incremental, mated_full(&s, 1), "seed {seed}, step {step}");
+            assert_eq!(incremental, mated_full(&s, 8), "seed {seed}, step {step}");
+        }
+    }
+}

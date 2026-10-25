@@ -1,109 +1,18 @@
 //! The equations constraints become: a residual that is zero when the
 //! constraint holds, and its gradient. Residuals are written once, over
-//! forward-mode dual numbers, so every Jacobian entry is the exact
-//! derivative of the arithmetic that computes the residual, with no
-//! derivative written by hand.
+//! forward-mode dual numbers ([`crate::core::dual`]), so every Jacobian
+//! entry is the exact derivative of the arithmetic that computes the
+//! residual, with no derivative written by hand.
 //!
 //! Lengths are in the solver's scaled units; residuals of angle-like forms
 //! (parallel, perpendicular, angle) are sines, which at the sketch's size
 //! measure the same as lengths.
 
-use ryukei::math;
-
 /// The most inputs one equation reads.
 pub(crate) const SLOTS: usize = 12;
 
 /// A value and its derivatives with respect to an equation's inputs.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct D {
-    pub v: f64,
-    pub g: [f64; SLOTS],
-}
-
-impl D {
-    pub fn constant(v: f64) -> D {
-        D { v, g: [0.0; SLOTS] }
-    }
-
-    /// Input `slot`, with value `v`.
-    pub fn input(v: f64, slot: usize) -> D {
-        let mut g = [0.0; SLOTS];
-        g[slot] = 1.0;
-        D { v, g }
-    }
-
-    fn map(self, v: f64, dv: f64) -> D {
-        let mut g = self.g;
-        for x in &mut g {
-            *x *= dv;
-        }
-        D { v, g }
-    }
-
-    pub fn sqrt(self) -> D {
-        let v = math::sqrt(self.v);
-        // The derivative where the value is zero has no limit; zero keeps
-        // a degenerate equation from poisoning the step with infinities.
-        let dv = if v > 0.0 { 0.5 / v } else { 0.0 };
-        self.map(v, dv)
-    }
-
-    pub fn scale(self, k: f64) -> D {
-        self.map(self.v * k, k)
-    }
-}
-
-impl std::ops::Add for D {
-    type Output = D;
-    fn add(self, o: D) -> D {
-        let mut g = self.g;
-        for (x, y) in g.iter_mut().zip(o.g) {
-            *x += y;
-        }
-        D { v: self.v + o.v, g }
-    }
-}
-
-impl std::ops::Sub for D {
-    type Output = D;
-    fn sub(self, o: D) -> D {
-        let mut g = self.g;
-        for (x, y) in g.iter_mut().zip(o.g) {
-            *x -= y;
-        }
-        D { v: self.v - o.v, g }
-    }
-}
-
-impl std::ops::Mul for D {
-    type Output = D;
-    fn mul(self, o: D) -> D {
-        let mut g = [0.0; SLOTS];
-        for (k, x) in g.iter_mut().enumerate() {
-            *x = self.g[k] * o.v + self.v * o.g[k];
-        }
-        D { v: self.v * o.v, g }
-    }
-}
-
-impl std::ops::Div for D {
-    type Output = D;
-    fn div(self, o: D) -> D {
-        let v = self.v / o.v;
-        let mut g = [0.0; SLOTS];
-        for (k, x) in g.iter_mut().enumerate() {
-            *x = (self.g[k] - v * o.g[k]) / o.v;
-        }
-        D { v, g }
-    }
-}
-
-impl std::ops::Neg for D {
-    type Output = D;
-    fn neg(self) -> D {
-        self.scale(-1.0)
-    }
-}
+pub(crate) type D = crate::core::dual::D<SLOTS>;
 
 /// Shorter than this (in scaled units) a direction is treated as this
 /// long, so a collapsed line gives a finite residual, not a NaN.
@@ -315,6 +224,7 @@ impl Form {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryukei::math;
     use ryukei_testkit::Lcg;
 
     fn forms() -> Vec<Form> {

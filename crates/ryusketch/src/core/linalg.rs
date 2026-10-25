@@ -10,7 +10,7 @@ use ryukei::math;
 
 /// A dense matrix, row by row.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Mat {
+pub struct Mat {
     pub rows: usize,
     pub cols: usize,
     pub data: Vec<f64>,
@@ -48,7 +48,6 @@ impl Mat {
     }
 
     /// `self * x`.
-    #[cfg(test)]
     pub fn mul_vec(&self, x: &[f64]) -> Vec<f64> {
         (0..self.rows)
             .map(|i| self.row(i).iter().zip(x).map(|(a, b)| a * b).sum())
@@ -97,7 +96,7 @@ impl Mat {
 
 /// Solves `a x = b` for symmetric positive definite `a`; `None` if a pivot
 /// isn't positive.
-pub(crate) fn cholesky_solve(a: &Mat, b: &[f64]) -> Option<Vec<f64>> {
+pub fn cholesky_solve(a: &Mat, b: &[f64]) -> Option<Vec<f64>> {
     let n = a.rows;
     let mut l = Mat::zeros(n, n);
     for i in 0..n {
@@ -138,7 +137,7 @@ pub(crate) fn cholesky_solve(a: &Mat, b: &[f64]) -> Option<Vec<f64>> {
 /// `a P = Q R`, with `P` choosing at each step the remaining column of
 /// largest norm (the lowest index among equals).
 #[derive(Clone, Debug)]
-pub(crate) struct Qr {
+pub struct Qr {
     /// `R`, column by column, in each column's first entries; below them,
     /// what is left of `a`.
     cols: Vec<Vec<f64>>,
@@ -152,14 +151,14 @@ pub(crate) struct Qr {
 /// times the first, stopping at the first that isn't. It works on columns
 /// held one after another in memory, the order Householder steps read
 /// them in.
-pub(crate) fn qr(a: &Mat, tol: f64) -> Qr {
+pub fn qr(a: &Mat, tol: f64) -> Qr {
     qr_against(a, tol, None)
 }
 
 /// [`qr`], with the rank judged against `reference` instead of `R`'s
 /// first entry (the largest column's norm): a piece of a larger matrix is
 /// judged by the whole one's scale.
-pub(crate) fn qr_against(a: &Mat, tol: f64, reference: Option<f64>) -> Qr {
+pub fn qr_against(a: &Mat, tol: f64, reference: Option<f64>) -> Qr {
     let (m, n) = (a.rows, a.cols);
     let mut w: Vec<Vec<f64>> = (0..n)
         .map(|j| (0..m).map(|i| a.at(i, j)).collect())

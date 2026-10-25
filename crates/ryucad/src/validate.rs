@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 /// Every kind of conflict `merge.status` reports. The strings are stable.
-pub const KINDS: [&str; 10] = [
+pub const KINDS: [&str; 11] = [
     "value",
     "delete_edit",
     "order",
@@ -32,6 +32,7 @@ pub const KINDS: [&str; 10] = [
     "merge_unparsed",
     "merge_broke",
     "sketch_stale",
+    "assembly_stale",
     "rename_merged",
     "pdm_broke",
 ];
@@ -250,6 +251,9 @@ struct Built {
     uses: BTreeMap<Id, std::collections::BTreeSet<String>>,
     /// What each instance places: a part, at a revision.
     places: BTreeMap<Id, crate::assembly::Node>,
+    /// An assembly's solve: whether it was stale, and if so (and its mates
+    /// hold) the instances with their solved poses.
+    stale: Option<(bool, Vec<(Id, crate::doc::files::Feature)>)>,
 }
 
 /// A part as a session has it, rebuilt.
@@ -280,7 +284,21 @@ fn built(s: &mut Session) -> Result<BTreeMap<Id, Built>> {
         }
         // A part whose list can't be read builds nothing.
         if p.file.is_ok() {
-            b.results = s.rebuilt(&id)?.features.iter().cloned().collect();
+            let r = s.rebuilt(&id)?.clone();
+            b.results = r.features.iter().cloned().collect();
+            if let Some(solve) = r.solve.clone() {
+                let writes = if solve.stale() && solve.report.converged {
+                    crate::mate::Moved {
+                        result: r,
+                        held: false,
+                        moves: Vec::new(),
+                    }
+                    .writes(&p)
+                } else {
+                    Vec::new()
+                };
+                b.stale = Some((solve.stale(), writes));
+            }
         }
         out.insert(id, b);
     }
@@ -658,6 +676,76 @@ fn stale(
     out
 }
 
+/// The assemblies the merge left stale that were current on the sides
+/// that have them, each with the repair that writes its solved poses.
+fn stale_assemblies(
+    root: &std::path::Path,
+    working: &BTreeMap<Id, Built>,
+    ours: &Side,
+    theirs: &Side,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    for (part, w) in working {
+        let Some((true, writes)) = &w.stale else {
+            continue;
+        };
+        if writes.is_empty() {
+            continue;
+        }
+        let on = |side: &Side| {
+            side.parts
+                .get(part)
+                .and_then(|b| b.stale.as_ref())
+                .map(|s| s.0)
+        };
+        let sides = [("ours", on(ours)), ("theirs", on(theirs))];
+        if sides.iter().any(|(_, s)| *s == Some(true)) {
+            continue;
+        }
+        let current: Vec<&str> = sides
+            .iter()
+            .filter(|(_, s)| *s == Some(false))
+            .map(|(n, _)| *n)
+            .collect();
+        let files: Vec<String> = writes
+            .iter()
+            .map(|(id, _)| format!("parts/{part}/features/{id}.json"))
+            .collect();
+        let cid = format!("parts/{part}/part.json#assembly_stale");
+        let repair = crate::doctor::Repair {
+            id: format!("{cid}:solve@{}", crate::doctor::basis(root, &files)),
+            summary: format!("write the poses {part}'s mates solve to"),
+            changes: writes
+                .iter()
+                .zip(&files)
+                .map(|((_, f), path)| crate::doctor::Change {
+                    path: path.clone(),
+                    content: Some(crate::doctor::canonical_bytes(&f.to_json())),
+                })
+                .collect(),
+            params: Vec::new(),
+        };
+        let mut c = conflict(
+            cid,
+            "assembly_stale",
+            files,
+            json!({"part": part}),
+            "both",
+            format!(
+                "{part}: the merged poses don't satisfy its mates, though they did on {}",
+                if current.is_empty() {
+                    "no side".to_owned()
+                } else {
+                    current.join(" and ")
+                }
+            ),
+        );
+        c["repairs"] = json!([repair.to_json()]);
+        out.push(c);
+    }
+    out
+}
+
 /// What the merge broke in PDM: each fault the merged files have that
 /// neither side had ([`ryupdm::merge::validate`]), blamed on the side
 /// whose change completes it. A property fault takes a value for the
@@ -954,6 +1042,7 @@ fn compute(session: &mut Session) -> Result<Value> {
     }
     conflicts.extend(broke);
     conflicts.extend(stale(&root, &now, &ours, &theirs, &base));
+    conflicts.extend(stale_assemblies(&root, &now, &ours, &theirs));
     let releases = crate::release::history(session)
         .map(|(_, r)| r)
         .unwrap_or_default();

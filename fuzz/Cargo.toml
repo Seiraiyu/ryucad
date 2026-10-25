@@ -12,6 +12,7 @@ libfuzzer-sys = "0.4"
 ryucad = { path = "../crates/ryucad" }
 ryukei = { path = "../crates/ryukei" }
 ryukei-testkit = { path = "../crates/ryukei-testkit" }
+ryumate = { path = "../crates/ryumate" }
 ryupdm = { path = "../crates/ryupdm" }
 ryusketch = { path = "../crates/ryusketch" }
 ryustep = { path = "../crates/ryustep" }
@@ -104,6 +105,13 @@ bench = false
 [[bin]]
 name = "sketch"
 path = "fuzz_targets/sketch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mate"
+path = "fuzz_targets/mate.rs"
 test = false
 doc = false
 bench = false

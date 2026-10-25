@@ -225,6 +225,7 @@ mod tests {
             error: None,
             assembly: false,
             occurrences: Vec::new(),
+            solve: None,
         };
         let parts = [("p".to_owned(), part)].into_iter().collect();
         let m = Merge::of(status());

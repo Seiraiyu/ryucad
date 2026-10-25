@@ -579,7 +579,27 @@ enum AssemblyCmd {
         #[command(flatten)]
         expect: Expect,
     },
-    /// The instances as a tree: parts, revisions, poses, subassemblies.
+    /// Solve the assembly's mates and report, writing nothing: as it is,
+    /// or with an instance moved (as assembly move moves it) and held
+    /// where it is put for a first solve.
+    Solve {
+        part: String,
+        /// An instance to move first.
+        instance: Option<String>,
+        #[command(flatten)]
+        placement: PlacementArgs,
+        /// Three quantities to move it by: 0,0,5mm.
+        #[arg(long, value_name = "VECTOR", value_parser = triple, allow_hyphen_values = true)]
+        translate: Option<[String; 3]>,
+        /// The direction to turn it about (with --angle): 0,0,1.
+        #[arg(long, value_name = "VECTOR", value_parser = vector, allow_hyphen_values = true)]
+        axis: Option<[f64; 3]>,
+        /// How far to turn it (with --axis): 90deg.
+        #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
+        angle: Option<String>,
+    },
+    /// The instances as a tree: parts, revisions, poses, freedom,
+    /// subassemblies.
     Tree { part: String },
 }
 
@@ -599,7 +619,11 @@ enum FeatureCmd {
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
     /// --angle) or mirror (--plane), skipping instances (--skip); or, in an
-    /// assembly, an instance (--of, --rev, --origin, --z, --x, --fixed).
+    /// assembly, an instance (--of, --rev, --origin, --z, --x, --fixed), a mate
+    /// (--form fastened, revolute, slider, cylindrical, planar or ball, --a, --b,
+    /// --a-offset, --b-offset, --angle, --distance) or an instance pattern (--instance,
+    /// --form linear or circular, as a pattern's, its directions and axis x, y, z or a
+    /// connector).
     Add {
         part: String,
         #[arg(value_name = "TYPE")]
@@ -621,7 +645,9 @@ enum FeatureCmd {
     /// Change some of a feature's parameters or placement, a sketch's
     /// plane, what an extrude or revolve sweeps and how far, a fillet's or
     /// chamfer's sizes and edges, a hole's points, form, sizes and depth,
-    /// or a pattern's seeds, form, directions, counts and skips.
+    /// a pattern's seeds, form, directions, counts and skips, an instance's
+    /// revision, pose and fixing, or a mate's form, connectors, offsets and
+    /// driven values.
     Edit {
         part: String,
         id: String,
@@ -1059,6 +1085,34 @@ struct FieldArgs {
     /// Hold an instance where it is when mates are solved (--fixed false to free it).
     #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
     fixed: Option<bool>,
+    /// A mate's first connector: an entity of an occurrence,
+    /// <assembly>/<instance>/.../<solid>/<name> as inspect gives it, or an occurrence's
+    /// own frame, <assembly>/<instance>/...; a pattern's copy is <pattern>:<i>/<seed>.
+    #[arg(long, value_name = "CONNECTOR")]
+    a: Option<String>,
+    /// A mate's second connector, as --a: its frame follows --a's.
+    #[arg(long, value_name = "CONNECTOR")]
+    b: Option<String>,
+    /// --a's offset in its own axes as JSON: {"origin": ["0", "0", "2 mm"], "rotate":
+    /// "90 deg", "flip": true}, any part; {} for none.
+    #[arg(long, value_name = "JSON", value_parser = json_object)]
+    a_offset: Option<Value>,
+    /// --b's offset, as --a-offset.
+    #[arg(long, value_name = "JSON", value_parser = json_object)]
+    b_offset: Option<Value>,
+    /// A slider's, cylindrical or planar mate's distance along --a's z ("" to let it go).
+    #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
+    distance: Option<String>,
+    /// An instance an instance pattern copies; repeat for several.
+    #[arg(long = "instance", value_name = "INSTANCE")]
+    instances: Vec<String>,
+}
+
+fn json_object(s: &str) -> core::result::Result<Value, String> {
+    match serde_json::from_str::<Value>(s) {
+        Ok(v @ Value::Object(_)) => Ok(v),
+        _ => Err("expected a JSON object".to_owned()),
+    }
 }
 
 impl FieldArgs {
@@ -1167,6 +1221,12 @@ impl FieldArgs {
             of: self.of.clone(),
             rev: self.rev.clone(),
             fixed: self.fixed,
+            a: self.a.clone(),
+            b: self.b.clone(),
+            a_offset: self.a_offset.clone(),
+            b_offset: self.b_offset.clone(),
+            distance: self.distance.clone().map(Value::String),
+            instances: (!self.instances.is_empty()).then(|| self.instances.clone()),
         }
     }
 }
@@ -1378,6 +1438,26 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Assembly(AssemblyCmd::Tree { part }) => {
             Request::AssemblyTree { part: part.clone() }
         }
+        Command::Assembly(AssemblyCmd::Solve {
+            part,
+            instance,
+            placement,
+            translate,
+            axis,
+            angle,
+        }) => Request::AssemblySolve {
+            part: part.clone(),
+            moves: instance
+                .iter()
+                .map(|i| ryucad::proto::InstanceMove {
+                    instance: i.clone(),
+                    placement: placement.to_arg(),
+                    translate: translate.clone().map(|t| t.map(Value::String)),
+                    axis: *axis,
+                    angle: angle.clone().map(Value::String),
+                })
+                .collect(),
+        },
         Command::Feature(FeatureCmd::Add {
             part,
             ty,

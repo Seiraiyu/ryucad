@@ -7,7 +7,9 @@
 //! In an assembly an entity is reached through the instances that place
 //! it: `<assembly>/<instance>[/<instance>…]/<solid>/<name>`, and a whole
 //! occurrence (or every occurrence a subassembly's instance places) is
-//! `<assembly>/<instance>[/<instance>…]`.
+//! `<assembly>/<instance>[/<instance>…]`. A path may start at an instance
+//! pattern's copy, `<pattern>:<i>` (`<pattern>:<i>:<j>` past its first
+//! row), followed by the seed it copies.
 
 use crate::doc::id::Id;
 use crate::error::{Code, Error, Result};
@@ -98,11 +100,27 @@ impl EntityRef {
             return Err(bad("expected at least two parts separated by /"));
         }
         let part = Id::parse(segments[0], "part")?;
-        let ids = |xs: &[&str]| -> Result<Vec<Id>> {
-            xs.iter().map(|x| Id::parse(x, "instance")).collect()
+        // An instance, or (first in a path) a pattern's copy.
+        let step = |x: &str| -> Result<Id> {
+            let step = crate::doc::mate::parse_step(x, "").map_err(|mut e| {
+                e.code = Code::InvalidParam;
+                e.with("entity", s)
+            })?;
+            match step {
+                (id, None) => Ok(id),
+                (pattern, Some(index)) => Ok(Id::copy(&pattern, index)),
+            }
         };
+        let ids = |xs: &[&str]| -> Result<Vec<Id>> { xs.iter().map(|x| step(x)).collect() };
         let rest = &segments[1..];
         match rest {
+            // A pattern's copy and its seed: an occurrence.
+            [copy, seed] if copy.contains(':') => Ok(EntityRef {
+                part,
+                path: ids(rest)?,
+                feature: Id::parse(seed, "instance")?,
+                name: String::new(),
+            }),
             // An occurrence: an instance of an assembly.
             [one] => Ok(EntityRef {
                 part,
@@ -355,6 +373,13 @@ mod tests {
             ("a/i1/i2/i3".to_owned(), vec!["i1", "i2", "i3"], true),
             (format!("a/i1/s/{NAME}"), vec!["i1"], false),
             (format!("a/i1/i2/s/{NAME}"), vec!["i1", "i2"], false),
+            // A pattern's copy, then the seed it copies.
+            ("a/ring:2/pin".to_owned(), vec!["ring:2", "pin"], true),
+            (
+                format!("a/ring:2:1/pin/s/{NAME}"),
+                vec!["ring:2:1", "pin"],
+                false,
+            ),
         ] {
             let r = EntityRef::parse(&text).unwrap();
             assert_eq!(
@@ -372,6 +397,17 @@ mod tests {
         let r = r.in_assembly();
         assert_eq!((r.path.len(), r.is_occurrence()), (2, true));
         assert_eq!(r.to_string(), "a/i1/i2");
+        assert_eq!(
+            EntityRef::parse("a/ring:2/pin").unwrap().path[0].copy_of(),
+            Some((Id::parse("ring", "feature").unwrap(), [2, 0]))
+        );
+        for bad in ["a/ring:0/pin", "a/ring:2:0/pin"] {
+            assert_eq!(
+                EntityRef::parse(bad).unwrap_err().code,
+                Code::InvalidParam,
+                "{bad}"
+            );
+        }
         for bad in ["p", &format!("p/b/{}", NAME.to_uppercase()), "p/b/-x"] {
             assert_eq!(
                 EntityRef::parse(bad).unwrap_err().code,

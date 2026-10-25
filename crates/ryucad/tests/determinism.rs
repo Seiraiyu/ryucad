@@ -988,7 +988,7 @@ fn references_section(golden: &mut Golden) {
     let part = Id::parse("rf", "part").unwrap();
     let result = session.rebuilt(&part).unwrap().clone();
     assert_eq!(result.failed(), 0, "{:?}", result.features);
-    assert!(result.warnings().is_empty());
+    assert!(result.warnings(&part).is_empty());
     for (_, o) in &result.features {
         match o.as_ref().unwrap().body() {
             Some(b) => s.str(&b.body.dump()),
@@ -1408,6 +1408,151 @@ fn assemblies_section(golden: &mut Golden) {
     s.str(&format!("{:x}", md(&buf[..info.buffer_size()])));
 }
 
+/// The planar face of `part`'s solid `solid` whose outward normal is `n`.
+fn face_along(s: &mut ryucad::session::Session, part: &str, solid: &str, n: [f64; 3]) -> String {
+    let req = ryucad::proto::Request::from_rpc(
+        "inspect",
+        Some(serde_json::json!({"part": part, "feature": solid})),
+    )
+    .unwrap();
+    let v = ryucad::server::handle(s, req).unwrap();
+    v["bodies"][0]["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            let z = &f["surface"]["frame"]["z"];
+            let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+            f["surface"]["type"] == "plane"
+                && (0..3).all(|k| (z[k].as_f64().unwrap() * sign - n[k]).abs() < 1e-12)
+        })
+        .map(|f| f["name"].as_str().unwrap().to_owned())
+        .expect("a face along n")
+}
+
+/// An assembly of mates, built through the protocol, each write keeping
+/// it current: a plate fixed, a bolt on a revolute through its top driven
+/// to 25°, three copies of it round the plate's z, a cap fastened up the
+/// second copy, and a block on a planar mate on the plate's top.
+fn mated() -> (tempfile::TempDir, ryucad::session::Session) {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    for (part, ty, id, params) in [
+        (
+            "plate",
+            "box",
+            "slab",
+            json!({"x": "93.1 mm", "y": "51.7 mm", "z": "6.3 mm"}),
+        ),
+        (
+            "bolt",
+            "cylinder",
+            "shank",
+            json!({"radius": "3.1 mm", "height": "17.3 mm"}),
+        ),
+        (
+            "block",
+            "box",
+            "cube",
+            json!({"x": "9.7 mm", "y": "11.3 mm", "z": "7.1 mm"}),
+        ),
+    ] {
+        call(&mut s, "part.create", json!({"part": part}));
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": part, "type": ty, "id": id, "params": params}),
+        );
+    }
+    call(
+        &mut s,
+        "part.create",
+        json!({"part": "frame", "kind": "assembly"}),
+    );
+    for (id, of, at, fixed) in [
+        ("base", "plate", ["0 mm", "0 mm", "0 mm"], true),
+        ("pin", "bolt", ["53.3 mm", "-7.1 mm", "11.9 mm"], false),
+        ("cap", "bolt", ["0 mm", "0 mm", "71.3 mm"], false),
+        ("slide", "block", ["-11.3 mm", "4.4 mm", "23.1 mm"], false),
+    ] {
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "instance", "id": id, "of": of, "fixed": fixed,
+                   "placement": {"origin": at}}),
+        );
+    }
+    let top = face_along(&mut s, "plate", "slab", [0.0, 0.0, 1.0]);
+    let foot = face_along(&mut s, "bolt", "shank", [0.0, 0.0, -1.0]);
+    let under = face_along(&mut s, "block", "cube", [0.0, 0.0, -1.0]);
+    let add = |s: &mut ryucad::session::Session, f: serde_json::Value| {
+        let mut f = f;
+        f["part"] = json!("frame");
+        call(s, "feature.add", f);
+    };
+    add(
+        &mut s,
+        json!({"type": "mate", "id": "m1", "form": "revolute", "angle": "25 deg",
+               "a": format!("frame/base/slab/{top}"),
+               "a_offset": {"origin": ["21.7 mm", "13.1 mm", "0 mm"]},
+               "b": format!("frame/pin/shank/{foot}"), "b_offset": {"flip": true}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "instance_pattern", "id": "ring", "instances": ["pin"], "axis": "z",
+               "count": 4, "angle": "360 deg"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "mate", "id": "m2", "form": "fastened", "a": "frame/ring:2/pin",
+               "a_offset": {"origin": ["0 mm", "0 mm", "23.9 mm"], "rotate": "15 deg"},
+               "b": "frame/cap"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "mate", "id": "m3", "form": "planar",
+               "a": format!("frame/base/slab/{top}"), "b": format!("frame/slide/cube/{under}"),
+               "b_offset": {"flip": true}}),
+    );
+    (dir, s)
+}
+
+/// Every occurrence of the mated assembly with its pose's bits, every
+/// instance file as stored (solver state), the solve's report, and the
+/// rebuild's hash.
+fn mates_section(golden: &mut Golden) {
+    use ryucad::doc::assembly::Rev;
+    let mut s = golden.section("mates");
+    let (dir, mut session) = mated();
+    let frame = Id::parse("frame", "part").unwrap();
+    let r = session.rebuilt(&frame).unwrap().clone();
+    assert_eq!(r.failed(), 0, "{:?}", r.features);
+    let solve = r.solve.as_ref().unwrap();
+    assert!(solve.report.converged && !solve.stale());
+    s.str(&solve.to_json().to_string());
+    let model = session.model(&frame, &Rev::Working).unwrap();
+    assert_eq!(model.occurrences.len(), 7);
+    for o in &model.occurrences {
+        s.str(&ryucad::assembly::path_text(&o.path));
+        let p = ryucad::assembly::rigid_pose(&o.pose);
+        for x in p.origin_m.iter().chain(&p.z).chain(&p.x) {
+            s.str(&format!("{:016x}", x.to_bits()));
+        }
+    }
+    for f in ["pin", "cap", "slide"] {
+        let path = dir.path().join(format!("parts/frame/features/{f}.json"));
+        s.str(&std::fs::read_to_string(path).unwrap());
+    }
+    s.str(&model.hash);
+    s.str(&r.hash);
+}
+
 /// A millimetre part of holes and patterns: a plate drilled at a
 /// sketch's points (a counterbore with a drill point, a countersink
 /// through all, a plain blind hole), a grid of the
@@ -1611,5 +1756,6 @@ fn determinism() {
     merge_section(&mut golden);
     pdm_section(&mut golden);
     assemblies_section(&mut golden);
+    mates_section(&mut golden);
     golden.finish();
 }

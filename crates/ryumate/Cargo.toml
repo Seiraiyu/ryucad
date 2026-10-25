@@ -1,0 +1,21 @@
+[package]
+name = "ryumate"
+description = "Deterministic rigid-body mate solver for ryucad assemblies"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Only for `ryukei::math`, so results match on every platform.
+ryukei = { path = "../ryukei" }
+# The solver's core: dual numbers, blocks, steps and the diagnosis.
+ryusketch = { path = "../ryusketch" }
+
+[dev-dependencies]
+divan = "0.1"
+proptest = "1"
+ryukei-testkit = { path = "../ryukei-testkit" }
+
+[[bench]]
+name = "solve"
+harness = false

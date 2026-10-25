@@ -968,6 +968,7 @@ fn every_protocol_method_has_a_command() {
         ("sketch.get", &["sketch", "get"]),
         ("assembly.move", &["assembly", "move"]),
         ("assembly.tree", &["assembly", "tree"]),
+        ("assembly.solve", &["assembly", "solve"]),
         ("rebuild", &["rebuild"]),
         ("inspect", &["inspect"]),
         ("check_format", &["check-format"]),
@@ -2809,4 +2810,125 @@ fn assemblies_from_the_cli() {
         tree["result"]["instances"][0]["pose"]["origin_m"],
         serde_json::json!([0.01, 0, 0])
     );
+}
+
+#[test]
+fn mates_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let params: [(&str, &str, &str, &[&str]); 2] = [
+        ("plate", "box", "slab", &["x=100", "y=50", "z=5"]),
+        ("bolt", "cylinder", "shank", &["radius=3", "height=20"]),
+    ];
+    for (part, ty, id, params) in params {
+        p.ok(&["part", "create", part]);
+        let mut args = vec!["feature", "add", part, ty, "--id", id];
+        for x in params {
+            args.extend(["--param", x]);
+        }
+        p.ok(&args);
+    }
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "base", "--of", "plate", "--fixed",
+    ]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "pin", "--of", "bolt", "--origin", "50,0,0",
+    ]);
+    let face = |part: &str, solid: &str, z: f64| -> String {
+        let v = p.ok(&["inspect", part, solid]);
+        v["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && (f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign - z).abs() < 1e-12
+            })
+            .map(|f| f["name"].as_str().unwrap().to_owned())
+            .unwrap()
+    };
+    let top = format!("frame/base/slab/{}", face("plate", "slab", 1.0));
+    let foot = format!("frame/pin/shank/{}", face("bolt", "shank", -1.0));
+    let added = p.ok(&[
+        "feature",
+        "add",
+        "frame",
+        "mate",
+        "--id",
+        "m1",
+        "--form",
+        "revolute",
+        "--a",
+        &top,
+        "--a-offset",
+        r#"{"origin": ["20 mm", "10 mm", "0 mm"]}"#,
+        "--b",
+        &foot,
+        "--b-offset",
+        r#"{"flip": true}"#,
+    ]);
+    // The write keeps the assembly current: the pin's solved pose stored.
+    assert_eq!(added["assemblies"][0]["moved"], serde_json::json!(["pin"]));
+    let solved = p.ok(&["assembly", "solve", "frame"]);
+    assert_eq!(solved["converged"], true);
+    assert_eq!(solved["solve"]["instances"]["pin"]["dof"], 1);
+    // A turn about the hinge, previewed, then made.
+    let preview = p.ok(&[
+        "assembly", "solve", "frame", "pin", "--axis", "0,0,1", "--angle", "30deg",
+    ]);
+    assert_eq!(preview["held"], true);
+    p.ok(&[
+        "assembly", "move", "frame", "pin", "--axis", "0,0,1", "--angle", "30deg",
+    ]);
+    // Driven: no freedom left; a second hinge elsewhere is refused.
+    p.ok(&["feature", "edit", "frame", "m1", "--angle", "45deg"]);
+    let tree = p.ok(&["assembly", "tree", "frame"]);
+    assert_eq!(tree["instances"][1]["solve"]["dof"], 0);
+    p.fails(
+        &[
+            "feature",
+            "add",
+            "frame",
+            "mate",
+            "--form",
+            "revolute",
+            "--a",
+            &top,
+            "--b",
+            &foot,
+            "--b-offset",
+            r#"{"flip": true}"#,
+        ],
+        "assembly_overconstrained",
+        1,
+    );
+    // Copies round the plate's z, one named by a path.
+    p.ok(&[
+        "feature",
+        "add",
+        "frame",
+        "instance_pattern",
+        "--id",
+        "ring",
+        "--instance",
+        "pin",
+        "--axis",
+        "z",
+        "--count",
+        "4",
+        "--angle",
+        "360deg",
+    ]);
+    let built = p.ok(&["rebuild", "frame"]);
+    assert_eq!(
+        built["parts"][0]["occurrences"].as_array().unwrap().len(),
+        5
+    );
+    let on_copy = foot.replace("frame/pin/", "frame/ring:2/pin/");
+    let one = p.ok(&["inspect", "frame", "--entity", &on_copy]);
+    assert_eq!(one["kind"], "face");
+    p.fails(&["feature", "delete", "frame", "pin"], "has_dependents", 1);
+    p.ok(&["check", "frame"]);
 }

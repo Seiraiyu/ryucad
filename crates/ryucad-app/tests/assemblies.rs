@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{Project, ryucad};
+use common::{Project, mated, ryucad};
 use ryucad_app::core::workspace::Workspace;
 use std::sync::Arc;
 use std::time::Duration;
@@ -119,4 +119,41 @@ fn the_form_edits_an_instance() {
             .and_then(|f| f.instance.as_ref())
             .is_some_and(|i| i.fixed)
     }));
+}
+
+#[test]
+fn the_tree_says_what_mates_leave_and_a_mate_paints_its_faces() {
+    let p = mated();
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle()
+            && ws
+                .part("frame")
+                .is_some_and(|f| f.feature("ring").is_some())
+    }));
+    let frame = ws.part("frame").unwrap();
+    let solve = frame.solve.as_ref().unwrap();
+    assert!(solve.converged && !solve.stale, "{solve:?}");
+    let pin = frame.feature("pin").unwrap().instance.as_ref().unwrap();
+    assert_eq!(pin.solve, Some(("under".to_owned(), 1)));
+    let m = frame.feature("m1").unwrap().mate.as_ref().unwrap();
+    assert_eq!(
+        (m.form.as_str(), m.state.as_deref()),
+        ("revolute", Some("well"))
+    );
+    assert_eq!(
+        frame.feature("ring").unwrap().copies,
+        ["ring:1/pin", "ring:2/pin", "ring:3/pin"]
+    );
+    // The copies are drawn, under the pattern.
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.model
+            .meshes
+            .contains_key(&key("frame", "ring:2/pin/shank"))
+    }));
+    // Chosen, the mate paints the faces its connectors are on.
+    ws.choose(Some(key("frame", "m1")));
+    let made = ws.made.as_ref().expect("the mate's faces");
+    let bodies: Vec<&String> = made.faces.keys().map(|(_, b)| b).collect();
+    assert_eq!(bodies, ["base/slab", "pin/shank"]);
 }

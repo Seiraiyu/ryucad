@@ -1,0 +1,23 @@
+{
+  "a": {
+    "at": "origin",
+    "instance": [
+      "i2"
+    ]
+  },
+  "b": {
+    "at": "origin",
+    "instance": [
+      "i1"
+    ],
+    "offset": {
+      "flip": true,
+      "rotate": "45 deg"
+    }
+  },
+  "distance": "3 mm",
+  "form": "planar",
+  "format": 4,
+  "kind": "ryucad.feature",
+  "type": "mate"
+}

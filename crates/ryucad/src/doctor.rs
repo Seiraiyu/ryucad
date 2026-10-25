@@ -44,7 +44,7 @@ impl Issue {
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 25] = [
+pub const CODES: [(&str, &str); 26] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -60,6 +60,7 @@ pub const CODES: [(&str, &str); 25] = [
     ("format_too_new", "error"),
     ("cloud_sync_folder", "warning"),
     ("sketch_stale", "warning"),
+    ("assembly_stale", "warning"),
     ("gitattributes_missing", "warning"),
     ("git_drivers_missing", "warning"),
     ("merge_conflict", "error"),
@@ -367,10 +368,71 @@ pub fn diagnose(root: &Path) -> Vec<Issue> {
     for part in &part_ids {
         diagnose_part(root, part, unit, &mut issues);
     }
+    diagnose_assemblies(root, &part_ids, &mut issues);
     diagnose_pdm(root, manifest.as_ref(), &part_ids, &mut issues);
     diagnose_releases(root, &mut issues);
     diagnose_git(root, &mut issues);
     issues
+}
+
+/// Each assembly whose stored poses don't hold where its mates do, with
+/// the instance files its repair writes.
+fn diagnose_assemblies(root: &Path, parts: &[&str], issues: &mut Vec<Issue>) {
+    let assembly = |part: &str| {
+        matches!(read(root, &format!("parts/{part}/part.json")),
+            Read::Json(v, _) if v["part_kind"] == "assembly")
+    };
+    let assemblies: Vec<&str> = parts.iter().copied().filter(|p| assembly(p)).collect();
+    if assemblies.is_empty() {
+        return;
+    }
+    let Ok(mut session) = crate::session::Session::open(root) else {
+        return;
+    };
+    for part in assemblies {
+        let Some(writes) = stale_assembly(&mut session, part) else {
+            continue;
+        };
+        let files: Vec<String> = writes.into_iter().map(|(rel, _)| rel).collect();
+        issues.push(issue(
+            "assembly_stale",
+            files,
+            format!("parts/{part}: its stored poses don't satisfy its mates"),
+        ));
+    }
+}
+
+/// The instance files of assembly `part` as they would be with its poses
+/// solved, when its stored poses are stale and its mates hold where they
+/// are solved; `None` otherwise.
+fn stale_assembly(
+    session: &mut crate::session::Session,
+    part: &str,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    let id = Id::parse(part, "part").ok()?;
+    let r = session.rebuilt(&id).ok()?.clone();
+    let solve = r.solve.as_ref()?;
+    if !solve.stale() || !solve.report.converged {
+        return None;
+    }
+    let p = session.project().part(&id).ok()?.clone();
+    let moved = crate::mate::Moved {
+        result: r,
+        held: false,
+        moves: Vec::new(),
+    };
+    Some(
+        moved
+            .writes(&p)
+            .into_iter()
+            .map(|(fid, f)| {
+                (
+                    format!("parts/{part}/features/{fid}.json"),
+                    canonical_bytes(&f.to_json()),
+                )
+            })
+            .collect(),
+    )
 }
 
 /// ryupdm's files: its settings and each part's properties read as they
@@ -1132,11 +1194,13 @@ fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<
                 .and_then(|b| canonical::parse(std::str::from_utf8(&b).ok()?).ok())
                 .and_then(|v| PartFile::from_json(&v).ok());
             // An assembly comes back as one: as the last commit says, else
-            // when every feature file is an instance.
+            // when every feature file is an instance, a mate or an
+            // instance pattern.
             let instances = !files.is_empty()
                 && files.iter().all(|f| {
                     matches!(read(root, &format!("parts/{part}/features/{f}.json")),
-                        Read::Json(v, _) if v["type"] == "instance")
+                        Read::Json(v, _) if matches!(v["type"].as_str(),
+                            Some("instance" | "mate" | "instance_pattern")))
                 });
             let kind = match &committed {
                 Some(p) => p.kind,
@@ -1247,6 +1311,19 @@ fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<
                     id: id("use-copy"),
                     summary: format!("replace {original} with {copy}, then delete the copy"),
                     changes: vec![write(original, bytes), delete(copy)],
+                    params: Vec::new(),
+                });
+            }
+        }
+        "assembly_stale" => {
+            let writes = crate::session::Session::open(root)
+                .ok()
+                .and_then(|mut s| stale_assembly(&mut s, part_of(first)));
+            if let Some(writes) = writes {
+                out.push(Repair {
+                    id: id("solve"),
+                    summary: format!("write the poses parts/{}'s mates solve to", part_of(first)),
+                    changes: writes.into_iter().map(|(rel, b)| write(&rel, b)).collect(),
                     params: Vec::new(),
                 });
             }

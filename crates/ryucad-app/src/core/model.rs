@@ -36,16 +36,70 @@ pub struct Feature {
     pub error: Option<Value>,
     /// What an instance places, when it placed it.
     pub instance: Option<Placed>,
+    /// A mate's form, connectors and state.
+    pub mate: Option<MateInfo>,
+    /// The copies an instance pattern places, by path (`ring:1/pin`).
+    pub copies: Vec<String>,
 }
 
-/// What an instance places: a part at a revision, and whether it is
-/// fixed.
+/// What an instance places: a part at a revision, whether it is fixed,
+/// and what its assembly's mates leave it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Placed {
     pub part: String,
     /// `working`, or `label B`.
     pub rev: String,
     pub fixed: bool,
+    /// Its state in the solve (`well`, `under`, `over`, `failing`) and
+    /// its degrees of freedom, when its assembly has mates.
+    pub solve: Option<(String, u64)>,
+}
+
+/// A mate: its form (`revolute` and so on), its connectors as requests
+/// give them, and its state in the solve when it built (`well`,
+/// `redundant`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MateInfo {
+    pub form: String,
+    pub a: String,
+    pub b: String,
+    pub state: Option<String>,
+}
+
+impl MateInfo {
+    /// The instance path a connector is on: `base`, `ring:2/pin`. The
+    /// connector is `<assembly>/<path>[/<solid>/<name>]`.
+    pub fn path_of(connector: &str) -> String {
+        let segments: Vec<&str> = connector.split('/').skip(1).collect();
+        let entity = segments
+            .last()
+            .is_some_and(|n| n.len() == 32 && n.bytes().all(|b| b.is_ascii_hexdigit()));
+        let keep = if entity {
+            segments.len().saturating_sub(2)
+        } else {
+            segments.len()
+        };
+        segments[..keep].join("/")
+    }
+
+    /// The body key and face name a connector on a face names:
+    /// `(<path>/<solid>, <name>)`; `None` for an occurrence's own frame.
+    pub fn face_of(connector: &str) -> Option<(String, String)> {
+        let segments: Vec<&str> = connector.split('/').skip(1).collect();
+        let (name, rest) = segments.split_last()?;
+        let entity = name.len() == 32 && name.bytes().all(|b| b.is_ascii_hexdigit());
+        (entity && rest.len() >= 2).then(|| (rest.join("/"), (*name).to_owned()))
+    }
+}
+
+/// An assembly's solve, in brief: its state, its freedom, whether it
+/// holds and whether its stored poses are stale.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Solve {
+    pub state: String,
+    pub dof: u64,
+    pub converged: bool,
+    pub stale: bool,
 }
 
 /// An occurrence of an assembly: its instance path, its part, its solids
@@ -96,6 +150,8 @@ pub struct Part {
     pub assembly: bool,
     /// An assembly's occurrences.
     pub occurrences: Vec<Occurrence>,
+    /// An assembly's solve, when it has mates or instance patterns.
+    pub solve: Option<Solve>,
 }
 
 /// Three numbers from JSON.
@@ -207,7 +263,22 @@ impl Part {
                                 None => text(&i["rev"]),
                             },
                             fixed: i["fixed"] == true,
+                            solve: i.get("solve").map(|s| {
+                                (text(&s["state"]), s["dof"].as_u64().unwrap_or_default())
+                            }),
                         }),
+                        mate: f.get("mate").map(|m| MateInfo {
+                            form: text(&m["form"]),
+                            a: text(&m["a"]),
+                            b: text(&m["b"]),
+                            state: m["state"].as_str().map(str::to_owned),
+                        }),
+                        copies: f["copies"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|c| format!("{}/{}", text(&c["copy"]), text(&c["seed"])))
+                            .collect(),
                     })
                     .collect()
             })
@@ -237,7 +308,13 @@ impl Part {
             true => occurrences
                 .iter()
                 .flat_map(|o| {
-                    let top = o.path.split('/').next().unwrap_or_default().to_owned();
+                    // A copy is under the pattern that places it.
+                    let top = o
+                        .path
+                        .split(['/', ':'])
+                        .next()
+                        .unwrap_or_default()
+                        .to_owned();
                     o.solids.iter().map(move |(s, h)| Solid {
                         id: format!("{}/{s}", o.path),
                         features: vec![top.clone()],
@@ -255,6 +332,12 @@ impl Part {
             error: v.get("error").cloned(),
             assembly,
             occurrences,
+            solve: v.get("solve").map(|s| Solve {
+                state: text(&s["state"]),
+                dof: s["dof"].as_u64().unwrap_or_default(),
+                converged: s["converged"] == true,
+                stale: s["stale"] == true,
+            }),
         }
     }
 
@@ -658,6 +741,49 @@ mod tests {
         m.apply_part(&sketched("r4", true));
         assert_eq!(m.clear_sketches(), ["p"]);
         assert_eq!(m.ask_sketches("p").len(), 1);
+    }
+
+    #[test]
+    fn an_assembly_reports_its_mates_freedom_and_copies() {
+        let n = "0123456789abcdef0123456789abcdef";
+        let v = serde_json::json!({
+            "part": "frame", "revision": "r1", "kind": "assembly",
+            "solve": {"state": "under", "dof": 1, "converged": true, "stale": false},
+            "features": [
+                {"id": "pin", "type": "instance", "ok": true, "hash": "x",
+                 "instance": {"part": "bolt", "rev": "working",
+                              "solve": {"state": "under", "dof": 1}}},
+                {"id": "m1", "type": "mate", "ok": true, "hash": "y",
+                 "mate": {"state": "redundant", "form": "revolute",
+                          "a": format!("frame/base/slab/{n}"), "b": "frame/ring:2/pin"}},
+                {"id": "ring", "type": "instance_pattern", "ok": true, "hash": "z",
+                 "copies": [{"copy": "ring:1", "seed": "pin"}, {"copy": "ring:2", "seed": "pin"}]},
+            ],
+            "occurrences": [{"path": "ring:1/pin", "part": "bolt",
+                             "solids": [{"solid": "shank", "hash": "h"}],
+                             "pose": {"origin_m": [0, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}}],
+        });
+        let p = Part::from_report(&v);
+        assert_eq!(
+            p.features[0].instance.as_ref().unwrap().solve,
+            Some(("under".into(), 1))
+        );
+        let m = p.features[1].mate.as_ref().unwrap();
+        assert_eq!(
+            (m.form.as_str(), m.state.as_deref()),
+            ("revolute", Some("redundant"))
+        );
+        assert_eq!(MateInfo::path_of(&m.a), "base");
+        assert_eq!(MateInfo::path_of(&m.b), "ring:2/pin");
+        assert_eq!(
+            MateInfo::face_of(&m.a),
+            Some(("base/slab".into(), n.into()))
+        );
+        assert_eq!(MateInfo::face_of(&m.b), None);
+        assert_eq!(p.features[2].copies, ["ring:1/pin", "ring:2/pin"]);
+        assert_eq!(p.solve.as_ref().unwrap().dof, 1);
+        // A copy's solids are under the pattern that places it.
+        assert_eq!(p.solids[0].features, ["ring"]);
     }
 
     #[test]

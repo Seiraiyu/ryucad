@@ -118,11 +118,16 @@ pub fn set(
     }
     check(session, p, &changed, &file.env())?;
     let before = crate::sketch::current(session, &pid)?;
+    let assemblies = crate::mate::current(session, &pid)?;
     save(session, &pid, &file)?;
     let sketches = crate::sketch::keep_current(session, &pid, &before)?;
+    let assemblies = crate::mate::keep_current(session, &assemblies)?;
     let mut v = list(session, part)?;
     if !sketches.is_empty() {
         v["sketches"] = json!(sketches);
+    }
+    if !assemblies.is_empty() {
+        v["assemblies"] = json!(assemblies);
     }
     Ok(v)
 }

@@ -4240,6 +4240,7 @@ dependencies = [
  "ryucad-doc",
  "ryukei",
  "ryukei-testkit",
+ "ryumate",
  "ryupdm",
  "ryusketch",
  "serde",
@@ -4312,6 +4313,17 @@ dependencies = [
  "num-rational",
  "num-traits",
  "ryukei",
+]
+
+[[package]]
+name = "ryumate"
+version = "0.0.0"
+dependencies = [
+ "divan",
+ "proptest",
+ "ryukei",
+ "ryukei-testkit",
+ "ryusketch",
 ]
 
 [[package]]

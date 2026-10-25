@@ -63,6 +63,21 @@ pub fn textconv(bytes: &[u8]) -> Vec<u8> {
                 }
             }
         }
+        // A mate's or an instance pattern's connectors, one line each: the
+        // instance path, then the entity or `origin`, then any offset.
+        Some("ryucad.feature")
+            if matches!(
+                o.get("type").and_then(Value::as_str),
+                Some("mate" | "instance_pattern")
+            ) =>
+        {
+            for k in ["a", "b", "axis", "direction", "direction2"] {
+                if let Some(c) = rest.get(k).filter(|c| c.get("instance").is_some()).cloned() {
+                    rest.remove(k);
+                    lines.push(format!("{k} = {}", connector(&c)));
+                }
+            }
+        }
         // An instance's revision in words, its pose last: solver state.
         Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("instance") => {
             if let Some(rev) = rest.remove("rev") {
@@ -403,6 +418,38 @@ fn moved(a: &Value, b: &Value) -> Vec<Value> {
             {
                 out.push(json!({"entity": id, "field": k, "from": p, "to": q}));
             }
+        }
+    }
+    out
+}
+
+/// A connector as one line: `base : slab/<name>`, `pin : origin`, then
+/// `offset origin 0 mm, 0 mm, 2 mm rotate 90 deg flip` for what it has.
+fn connector(c: &Value) -> String {
+    let path: Vec<&str> = c["instance"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let at = match &c["at"] {
+        Value::String(s) => s.clone(),
+        r => format!(
+            "{}/{}",
+            r["feature"].as_str().unwrap_or_default(),
+            r["name"].as_str().unwrap_or_default()
+        ),
+    };
+    let mut out = format!("{} : {at}", path.join("/"));
+    if let Some(o) = c.get("offset") {
+        out.push_str(" offset");
+        if let Some(a) = o["origin"].as_array() {
+            let parts: Vec<String> = a.iter().map(scalar).collect();
+            out.push_str(&format!(" origin {}", parts.join(", ")));
+        }
+        if let Some(r) = o.get("rotate") {
+            out.push_str(&format!(" rotate {}", scalar(r)));
+        }
+        if o["flip"] == true {
+            out.push_str(" flip");
         }
     }
     out
@@ -791,6 +838,9 @@ pub struct Built {
     )>,
     /// An assembly's occurrences.
     pub occurrences: Vec<crate::assembly::Occurrence>,
+    /// An assembly's solve, in brief: its state, freedom and whether it
+    /// holds.
+    pub solve: Option<Value>,
 }
 
 impl Built {
@@ -803,6 +853,10 @@ impl Built {
                 true => crate::assembly::Model::of_assembly(r).occurrences,
                 false => Vec::new(),
             },
+            solve: r.solve.as_ref().map(|s| {
+                json!({"state": s.state_str(), "dof": s.report.dof,
+                       "converged": s.report.converged})
+            }),
             features: r.features.clone(),
             solids: r
                 .shown(&solids)
@@ -1170,6 +1224,18 @@ pub fn model(
             }
             p["solids"][id.as_str()] = m;
         }
+        if a.solve != b.solve || (opts.all && a.solve.is_some()) {
+            let p = &mut v["parts"][part.as_str()];
+            if p.is_null() {
+                *p = json!({
+                    "status": "same",
+                    "order": {"added": [], "removed": [], "moved": []},
+                    "parameters": {"added": [], "removed": [], "changed": []},
+                    "features": {},
+                });
+            }
+            p["solve"] = json!({"from": a.solve, "to": b.solve});
+        }
         if let Some(o) = occurrences(a, b, opts.all) {
             let p = &mut v["parts"][part.as_str()];
             if p.is_null() {
@@ -1235,6 +1301,27 @@ mod tests {
 
     fn text(v: Value) -> String {
         String::from_utf8(textconv(crate::doc::canonical::to_string(&v).as_bytes())).unwrap()
+    }
+
+    #[test]
+    fn a_mate_reads_as_text_with_a_connector_a_line() {
+        let n = "0".repeat(32);
+        let v = json!({"format": 4, "kind": "ryucad.feature", "type": "mate", "form": "revolute",
+                       "a": {"instance": ["base"], "at": {"feature": "slab", "name": n},
+                             "offset": {"origin": ["0 mm", "0 mm", "2 mm"], "rotate": "90 deg",
+                                        "flip": true}},
+                       "b": {"instance": ["ring:2", "pin"], "at": "origin"},
+                       "angle": "30 deg"});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature mate (format 4)\n\
+                 a = base : slab/{n} offset origin 0 mm, 0 mm, 2 mm rotate 90 deg flip\n\
+                 angle = 30 deg\n\
+                 b = ring:2/pin : origin\n\
+                 form = revolute\n"
+            )
+        );
     }
 
     #[test]

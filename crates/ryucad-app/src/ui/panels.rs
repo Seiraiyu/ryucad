@@ -17,11 +17,38 @@ pub fn message(e: &serde_json::Value) -> String {
 /// A feature's line in the tree: its ID and type, a sketch's solve state,
 /// and why it failed or how many faces weren't meshed.
 pub fn row_text(f: &crate::core::model::Feature, faults: usize) -> String {
+    use crate::core::model::MateInfo;
     let ty = match (&f.ty, &f.operation, &f.instance) {
-        // An instance says what it places.
+        // An instance says what it places, and what its mates leave it.
         (_, _, Some(i)) => {
-            let fixed = if i.fixed { ", fixed" } else { "" };
-            format!("{} @ {}{fixed}", i.part, i.rev)
+            let freedom = match &i.solve {
+                _ if i.fixed => ", fixed".to_owned(),
+                Some((state, _)) if state == "failing" => ", failing".to_owned(),
+                Some((_, dof)) => format!(", {dof} dof"),
+                None => String::new(),
+            };
+            format!("{} @ {}{freedom}", i.part, i.rev)
+        }
+        // A mate its form and what it joins, and a redundant or
+        // conflicting one says so.
+        _ if f.mate.is_some() => {
+            let m = f.mate.as_ref().expect("a mate");
+            let state = match m.state.as_deref() {
+                Some("redundant" | "conflicting") => {
+                    format!(", {}", m.state.as_deref().unwrap_or_default())
+                }
+                _ => String::new(),
+            };
+            format!(
+                "{}: {} -> {}{state}",
+                m.form,
+                MateInfo::path_of(&m.a),
+                MateInfo::path_of(&m.b)
+            )
+        }
+        // An instance pattern how many copies it places.
+        (Some(t), _, None) if t == "instance_pattern" && f.error.is_none() => {
+            format!("{t}, {} copies", f.copies.len())
         }
         (Some(t), Some(op), None) => format!("{t}, {op}"),
         (Some(t), None, None) => t.clone(),
@@ -46,6 +73,22 @@ pub fn row_text(f: &crate::core::model::Feature, faults: usize) -> String {
         None if faults > 0 => format!("{text}: {faults} unmeshed"),
         None => text,
     }
+}
+
+/// What an assembly's line adds: ` (assembly)`, and when it has mates
+/// its solve: ` (assembly, under, 2 dof)`, `well`, `over`, `unsolved`, and
+/// `stale` while its stored poses don't hold.
+pub fn assembly_text(solve: Option<&crate::core::model::Solve>) -> String {
+    let Some(s) = solve else {
+        return " (assembly)".to_owned();
+    };
+    let state = match (s.converged, s.state.as_str()) {
+        (false, _) => "unsolved".to_owned(),
+        (true, "under") => format!("under, {} dof", s.dof),
+        (true, state) => state.to_owned(),
+    };
+    let stale = if s.stale { ", stale" } else { "" };
+    format!(" (assembly, {state}{stale})")
 }
 
 /// How a feature differs in a compare, after its line in the tree:
@@ -113,9 +156,11 @@ fn feature_row(
     };
     let chosen = view.chosen.as_ref() == Some(&key);
     let r = ui.selectable_label(chosen, text);
-    let r = match &f.error {
-        Some(e) => r.on_hover_text(message(e)),
-        None => r,
+    let r = match (&f.error, &f.mate) {
+        (Some(e), _) => r.on_hover_text(message(e)),
+        // A mate's connectors in full, as an agent would give them.
+        (None, Some(m)) => r.on_hover_text(format!("a = {}\nb = {}", m.a, m.b)),
+        (None, None) => r,
     };
     if let Some(c) = toggle(ui, &r, chosen, key) {
         *choose = Some(c);
@@ -128,6 +173,14 @@ fn feature_row(
     // A subassembly's own instances, as the window knows that assembly.
     if let Some(i) = &f.instance {
         placed(ui, ws, &i.part, &format!("{}/{}", part.id, f.id), 1);
+    }
+    // A pattern's copies, under it.
+    if !f.copies.is_empty() {
+        ui.indent(("copies", &part.id, &f.id), |ui| {
+            for c in &f.copies {
+                ui.weak(c);
+            }
+        });
     }
 }
 
@@ -250,7 +303,7 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
         let badge = state.map(crate::core::pdm::badge);
         let mut text = part_text(&part.id, badge.as_deref(), marks);
         if part.assembly {
-            text.push_str(" (assembly)");
+            text.push_str(&assembly_text(part.solve.as_ref()));
         }
         let title = match &part.error {
             Some(_) => RichText::new(format!("{text} (broken)")).color(ui.visuals().warn_fg_color),
@@ -809,6 +862,54 @@ fn pattern(ui: &mut egui::Ui, p: &mut crate::core::edit::PatternForm) {
     picks(ui, &mut p.seeds);
 }
 
+/// A connector as one short line: its instance path, then its entity's
+/// last name digits or `origin`; the whole text on hover.
+fn connector_text(c: &str) -> String {
+    use crate::core::model::MateInfo;
+    let path = MateInfo::path_of(c);
+    match MateInfo::face_of(c) {
+        Some((_, name)) => format!("{path} : {}", &name[name.len() - 8..]),
+        None if c.split('/').next_back().is_some_and(|n| n.len() == 32) => {
+            format!("{path} : {}", &c[c.len() - 8..])
+        }
+        None => format!("{path} : origin"),
+    }
+}
+
+/// A mate's form, its connectors as read (changing them is an agent's
+/// work), the angle and distance its form may drive, and each
+/// connector's offset.
+fn mate(ui: &mut egui::Ui, m: &mut crate::core::edit::MateForm) {
+    egui::Grid::new("mate").num_columns(2).show(ui, |ui| {
+        choice_row(ui, &mut m.form);
+        for (side, c) in &m.connectors {
+            ui.label(side);
+            ui.monospace(connector_text(c)).on_hover_text(c);
+            ui.end_row();
+        }
+        let (angle, distance) = m.takes();
+        if angle {
+            field_row(ui, &mut m.angle, "angle (empty: free)");
+        }
+        if distance {
+            field_row(ui, &mut m.distance, "distance (empty: free)");
+        }
+    });
+    for (side, o) in [("a", &mut m.a), ("b", &mut m.b)] {
+        ui.collapsing(format!("Offset of {side}"), |ui| {
+            egui::Grid::new(("offset", side))
+                .num_columns(2)
+                .show(ui, |ui| {
+                    for (k, f) in ["x", "y", "z"].iter().zip(o.origin.iter_mut()) {
+                        field_row(ui, f, &format!("along {k}"));
+                    }
+                    field_row(ui, &mut o.rotate, "turn about z");
+                });
+            ui.checkbox(&mut o.flip.chosen, "turned over");
+        });
+    }
+}
+
 /// The width of a text field in a grid's column: a grid gives a column
 /// other than its last only the width it had last frame, at least 40
 /// points, so a field there asking for more never gets it (`add_sized`
@@ -1190,6 +1291,9 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
     }
     if let Some(p) = &mut form.pattern {
         pattern(ui, p);
+    }
+    if let Some(m) = &mut form.mate {
+        mate(ui, m);
     }
     // What it acts on: none for a new solid.
     let new = form.operation.as_ref().is_some_and(|o| o.chosen == "new");
@@ -1649,7 +1753,54 @@ mod tests {
             consumes: Vec::new(),
             error: None,
             instance: None,
+            mate: None,
+            copies: Vec::new(),
         }
+    }
+
+    #[test]
+    fn assembly_features_say_what_their_mates_leave() {
+        use crate::core::model::{MateInfo, Placed, Solve};
+        let mut pin = feature("instance");
+        pin.id = "pin".into();
+        pin.instance = Some(Placed {
+            part: "bolt".into(),
+            rev: "working".into(),
+            fixed: false,
+            solve: Some(("under".into(), 2)),
+        });
+        assert_eq!(row_text(&pin, 0), "pin (bolt @ working, 2 dof)");
+        pin.instance.as_mut().unwrap().fixed = true;
+        assert_eq!(row_text(&pin, 0), "pin (bolt @ working, fixed)");
+        let mut m = feature("mate");
+        m.mate = Some(MateInfo {
+            form: "revolute".into(),
+            a: "frame/base/slab/0123456789abcdef0123456789abcdef".into(),
+            b: "frame/ring:2/pin".into(),
+            state: Some("redundant".into()),
+        });
+        assert_eq!(
+            row_text(&m, 0),
+            "f (revolute: base -> ring:2/pin, redundant)"
+        );
+        let mut ring = feature("instance_pattern");
+        ring.copies = vec!["ring:1/pin".into(), "ring:2/pin".into()];
+        assert_eq!(row_text(&ring, 0), "f (instance_pattern, 2 copies)");
+        let solve = |state: &str, dof, converged, stale| Solve {
+            state: state.into(),
+            dof,
+            converged,
+            stale,
+        };
+        assert_eq!(assembly_text(None), " (assembly)");
+        assert_eq!(
+            assembly_text(Some(&solve("under", 2, true, true))),
+            " (assembly, under, 2 dof, stale)"
+        );
+        assert_eq!(
+            assembly_text(Some(&solve("over", 0, false, false))),
+            " (assembly, unsolved)"
+        );
     }
 
     #[test]

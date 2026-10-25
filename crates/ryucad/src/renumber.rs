@@ -165,6 +165,26 @@ fn transform(
     pointer: &str,
     node: &Value,
 ) -> Option<Value> {
+    // A connector's entity is a solid of the part its instance places,
+    // not of this one: renumbering here touches only its path's first
+    // step, an instance or a pattern's copy (`<pattern>:<i>`).
+    if pointer.ends_with("/at") && is_reference(node) {
+        return None;
+    }
+    if let Rename::Feature { from, to, .. } = r
+        && pointer.ends_with("/instance")
+        && let Some(path) = node.as_array()
+    {
+        let first = path.first()?.as_str()?;
+        let step = match first.split_once(':') {
+            Some((p, copy)) if p == from => format!("{to}:{copy}"),
+            None if first == from => to.clone(),
+            _ => return None,
+        };
+        let mut path = path.clone();
+        path[0] = json!(step);
+        return Some(json!(path));
+    }
     if is_reference(node) {
         let f = node["feature"].as_str()?;
         let n = node["name"].as_str()?;
@@ -185,9 +205,10 @@ fn transform(
     match r {
         Rename::Feature { from, to, .. } => match pointer {
             "/sketch" | "/target" => (node.as_str() == Some(from)).then(|| json!(to)),
-            // The solids an operation or a boolean acts on, and what a
-            // pattern repeats.
-            "/targets" | "/tools" | "/features" => {
+            // The solids an operation or a boolean acts on, what a
+            // pattern repeats, and the instances an instance pattern
+            // copies.
+            "/targets" | "/tools" | "/features" | "/instances" => {
                 let list: Vec<Value> = node
                     .as_array()?
                     .iter()
@@ -552,6 +573,53 @@ mod tests {
         list.iter()
             .map(|(p, v)| ((*p).to_owned(), bytes(v)))
             .collect()
+    }
+
+    #[test]
+    fn a_renumbered_instance_or_pattern_is_renamed_in_connectors_and_patterns() {
+        // Theirs' `pin` collided and is renumbered `pin-1`. Its connectors
+        // and patterns follow; a connector's solid, which is the bolt's,
+        // doesn't, even where it shares the ID.
+        let mate = json!({
+            "format": 4, "kind": "ryucad.feature", "type": "mate", "form": "ball",
+            "a": {"instance": ["pin"], "at": {"feature": "pin", "name": "0".repeat(32)}},
+            "b": {"instance": ["ring:2", "pin"], "at": "origin"},
+        });
+        let ring = json!({
+            "format": 4, "kind": "ryucad.feature", "type": "instance_pattern",
+            "form": "circular", "instances": ["pin", "nut"], "count": "3", "angle": "360 deg",
+            "axis": {"instance": ["pin"], "at": "origin"},
+        });
+        let f = files(&[
+            ("parts/a/features/m1.json", mate),
+            ("parts/a/features/ring.json", ring),
+        ]);
+        let r = Rename::Feature {
+            part: "a".into(),
+            from: "pin".into(),
+            to: "pin-1".into(),
+        };
+        let out = renumbered(&f, &r, &BTreeMap::new());
+        let read = |p: &str| serde_json::from_slice::<Value>(&out[p]).unwrap();
+        let m = read("parts/a/features/m1.json");
+        assert_eq!(m["a"]["instance"], json!(["pin-1"]));
+        assert_eq!(m["a"]["at"]["feature"], "pin");
+        // A copy's seed is the rest of its path: renumbering the pattern
+        // would rename its first step.
+        assert_eq!(m["b"]["instance"], json!(["ring:2", "pin"]));
+        let p = read("parts/a/features/ring.json");
+        assert_eq!(p["instances"], json!(["pin-1", "nut"]));
+        assert_eq!(p["axis"]["instance"], json!(["pin-1"]));
+        let r = Rename::Feature {
+            part: "a".into(),
+            from: "ring".into(),
+            to: "ring-1".into(),
+        };
+        let m = serde_json::from_slice::<Value>(
+            &renumbered(&f, &r, &BTreeMap::new())["parts/a/features/m1.json"],
+        )
+        .unwrap();
+        assert_eq!(m["b"]["instance"], json!(["ring-1:2", "pin"]));
     }
 
     #[test]

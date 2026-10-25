@@ -246,6 +246,29 @@ pub struct FeatureFields {
     /// Whether mates hold an instance where it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fixed: Option<bool>,
+    /// A mate's first connector: an entity of an occurrence,
+    /// `<assembly>/<instance>[/…]/<solid>/<name>`, or an occurrence's own
+    /// frame, `<assembly>/<instance>[/…]`. A path may start at a pattern's
+    /// copy, `<pattern>:<i>/<seed>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a: Option<String>,
+    /// A mate's second connector, as `a`; its frame follows `a`'s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b: Option<String>,
+    /// `a`'s offset in its own axes: `{origin: [x, y, z], rotate, flip}`,
+    /// any part; `{}` for none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a_offset: Option<Value>,
+    /// `b`'s offset, as `a_offset`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b_offset: Option<Value>,
+    /// A slider's, cylindrical's or planar mate's distance along `a`'s z;
+    /// `""` lets it go.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distance: Option<Value>,
+    /// The instances an instance pattern copies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instances: Option<Vec<String>>,
 }
 
 impl FeatureFields {
@@ -269,6 +292,21 @@ pub struct PlacementArg {
     pub z: Option<[f64; 3]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x: Option<[f64; 3]>,
+}
+
+/// How `assembly.solve` moves one instance, as `assembly.move` does.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstanceMove {
+    pub instance: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<PlacementArg>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translate: Option<[Value; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axis: Option<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angle: Option<Value>,
 }
 
 /// How one merge conflict is settled: by one side's value, a value given,
@@ -512,6 +550,15 @@ pub enum Request {
         angle: Option<Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
+    },
+    /// An assembly's mates solved, writing nothing: as it is, or with
+    /// `moves` held where they put instances for a first solve. Each
+    /// instance's pose and the solve's report.
+    #[serde(rename = "assembly.solve")]
+    AssemblySolve {
+        part: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        moves: Vec<InstanceMove>,
     },
     /// An assembly's instances as a tree: each with its part, revision and
     /// how it resolved, its pose in the assembly, and a subassembly's own.

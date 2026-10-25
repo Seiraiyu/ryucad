@@ -1054,13 +1054,18 @@ pub fn edit(
     let changed = solved != s;
     let f = Feature::Sketch(solved);
     let before = current(session, &pid)?;
+    let assemblies = crate::mate::current(session, &pid)?;
     server::save(session, &pid, &[(&fid, &f)], list)?;
     let sketches = keep_current(session, &pid, &before)?;
+    let assemblies = crate::mate::keep_current(session, &assemblies)?;
     let revision = &session.project().part(&pid)?.revision;
     let mut v = json!({"feature": fid, "added": applied.added, "changed": changed,
                        "report": report.to_json(), "revision": revision});
     if !sketches.is_empty() {
         v["sketches"] = json!(sketches);
+    }
+    if !assemblies.is_empty() {
+        v["assemblies"] = json!(assemblies);
     }
     Ok(v)
 }

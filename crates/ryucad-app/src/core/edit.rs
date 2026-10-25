@@ -359,10 +359,13 @@ impl HoleForm {
 
 /// A pattern's spacings, counts and angle, its directions' reversals, its
 /// skips (as JSON: `[2]`, or `[[1, 1]]` with two directions), its seeds,
-/// and its form, directions, axis or plane as read. Seeds can be taken
-/// out, not added.
+/// and its form, directions, axis or plane as read; an instance pattern's
+/// the same, its seeds instances and its directions connectors. Seeds can
+/// be taken out, not added.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PatternForm {
+    /// Whether it is an instance pattern: its seeds are `instances`.
+    pub instances: bool,
     /// `linear`, `circular` or `mirror`.
     pub form: String,
     /// Each size by its key in the file, with its field.
@@ -400,17 +403,23 @@ impl PatternForm {
             Value::Null => "[]".to_owned(),
             x => x.to_string(),
         };
+        // A reference as text; a connector as the text requests give it.
         let refs = ["direction", "direction2", "axis", "plane"]
             .into_iter()
-            .filter_map(|k| Some((k.to_owned(), v[k].as_str()?.to_owned())))
+            .filter_map(|k| {
+                let t = v[k].as_str().or_else(|| v[k]["text"].as_str())?;
+                Some((k.to_owned(), t.to_owned()))
+            })
             .collect();
-        let seeds = v["features"]
+        let instances = v["type"] == "instance_pattern";
+        let seeds = v[if instances { "instances" } else { "features" }]
             .as_array()
             .into_iter()
             .flatten()
             .map(text)
             .collect();
         PatternForm {
+            instances,
             form: text(&v["form"]),
             sizes,
             reverse,
@@ -475,9 +484,173 @@ impl PatternForm {
             out.skip = Some(v);
         }
         if self.seeds.dirty() {
-            out.features = Some(self.seeds.chosen.clone());
+            let seeds = Some(self.seeds.chosen.clone());
+            if self.instances {
+                out.instances = seeds;
+            } else {
+                out.features = seeds;
+            }
         }
         Ok(())
+    }
+}
+
+/// A connector's offset as typed: its origin's three quantities, its
+/// turn about z and whether it is turned over.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OffsetForm {
+    pub origin: [Field; 3],
+    pub rotate: Field,
+    pub flip: Flag,
+}
+
+impl OffsetForm {
+    /// From a connector as `feature.show` gives it; `side` is `a` or `b`.
+    fn from_connector(side: &str, c: &Value) -> OffsetForm {
+        let o = &c["offset"];
+        OffsetForm {
+            origin: [0, 1, 2].map(|i| {
+                Field::new(
+                    &format!("{side} offset {}", ["x", "y", "z"][i]),
+                    text(&o["origin"][i]),
+                )
+            }),
+            rotate: Field::new(&format!("{side} turn"), text(&o["rotate"])),
+            flip: Flag {
+                name: format!("{side} turned over"),
+                read: o["flip"] == true,
+                chosen: o["flip"] == true,
+            },
+        }
+    }
+
+    fn fields(&self) -> impl Iterator<Item = &Field> {
+        self.origin.iter().chain([&self.rotate])
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.fields().any(Field::dirty) || self.flip.dirty()
+    }
+
+    fn revert(&mut self) {
+        for f in self.origin.iter_mut().chain([&mut self.rotate]) {
+            f.text.clone_from(&f.read);
+        }
+        self.flip.chosen = self.flip.read;
+    }
+
+    /// The whole offset as typed, as `feature.edit` takes it: what is
+    /// left empty is left out (`{}`: none).
+    fn json(&self) -> Value {
+        let mut v = json!({});
+        if self.origin.iter().any(|f| !f.text.trim().is_empty()) {
+            let q = |f: &Field| match f.text.trim() {
+                "" => json!("0 mm"),
+                t => json!(t),
+            };
+            v["origin"] = json!(self.origin.each_ref().map(q));
+        }
+        if !self.rotate.text.trim().is_empty() {
+            v["rotate"] = json!(self.rotate.text.trim());
+        }
+        if self.flip.chosen {
+            v["flip"] = json!(true);
+        }
+        v
+    }
+}
+
+/// A mate's form, its driven angle and distance, each connector's offset,
+/// and its connectors as read (shown, never changed here).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MateForm {
+    pub form: Choice,
+    pub angle: Field,
+    pub distance: Field,
+    pub a: OffsetForm,
+    pub b: OffsetForm,
+    /// Each connector by side, as requests give it.
+    pub connectors: Vec<(String, String)>,
+}
+
+impl MateForm {
+    /// From a `feature.show` of a mate.
+    fn from_show(v: &Value) -> MateForm {
+        MateForm {
+            form: Choice::new(
+                "form",
+                &[
+                    "fastened",
+                    "revolute",
+                    "slider",
+                    "cylindrical",
+                    "planar",
+                    "ball",
+                ],
+                text(&v["form"]),
+            ),
+            angle: Field::new("angle", text(&v["angle"])),
+            distance: Field::new("distance", text(&v["distance"])),
+            a: OffsetForm::from_connector("a", &v["a"]),
+            b: OffsetForm::from_connector("b", &v["b"]),
+            connectors: ["a", "b"]
+                .into_iter()
+                .map(|k| (k.to_owned(), text(&v[k]["text"])))
+                .collect(),
+        }
+    }
+
+    /// Whether the chosen form takes a driven angle, and a distance.
+    pub fn takes(&self) -> (bool, bool) {
+        let f = self.form.chosen.as_str();
+        (
+            matches!(f, "revolute" | "cylindrical" | "planar"),
+            matches!(f, "slider" | "cylindrical" | "planar"),
+        )
+    }
+
+    fn fields(&self) -> impl Iterator<Item = &Field> {
+        [&self.angle, &self.distance]
+            .into_iter()
+            .chain(self.a.fields())
+            .chain(self.b.fields())
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.form.dirty()
+            || self.angle.dirty()
+            || self.distance.dirty()
+            || self.a.dirty()
+            || self.b.dirty()
+    }
+
+    fn revert(&mut self) {
+        self.form.chosen.clone_from(&self.form.read);
+        for f in [&mut self.angle, &mut self.distance] {
+            f.text.clone_from(&f.read);
+        }
+        self.a.revert();
+        self.b.revert();
+    }
+
+    /// What changed, as `feature.edit` takes it: an angle or distance
+    /// emptied lets it go, an offset goes whole.
+    fn given(&self, out: &mut FeatureFields) {
+        if self.form.dirty() {
+            out.form = Some(self.form.chosen.clone());
+        }
+        if self.angle.dirty() {
+            out.angle = Some(json!(self.angle.text.trim()));
+        }
+        if self.distance.dirty() {
+            out.distance = Some(json!(self.distance.text.trim()));
+        }
+        if self.a.dirty() {
+            out.a_offset = Some(self.a.json());
+        }
+        if self.b.dirty() {
+            out.b_offset = Some(self.b.json());
+        }
     }
 }
 
@@ -518,8 +691,11 @@ pub struct Form {
     pub blend: Option<BlendForm>,
     /// A hole's sizes, depth and points.
     pub hole: Option<HoleForm>,
-    /// A pattern's spacings, counts, skips and seeds.
+    /// A pattern's or an instance pattern's spacings, counts, skips and
+    /// seeds.
     pub pattern: Option<PatternForm>,
+    /// A mate's form, driven values and offsets.
+    pub mate: Option<MateForm>,
     /// An instance's revision (`working` or a label) and whether it is
     /// fixed; its pose is the placement, its origin in meters.
     pub rev: Option<Choice>,
@@ -594,7 +770,9 @@ impl Form {
         let boolean = ty == "boolean";
         let blend = matches!(ty.as_str(), "fillet" | "chamfer").then(|| BlendForm::from_show(v));
         let hole = (ty == "hole").then(|| HoleForm::from_show(v));
-        let pattern = (ty == "pattern").then(|| PatternForm::from_show(v));
+        let pattern = matches!(ty.as_str(), "pattern" | "instance_pattern")
+            .then(|| PatternForm::from_show(v));
+        let mate = (ty == "mate").then(|| MateForm::from_show(v));
         Form {
             part: part.to_owned(),
             feature: text(&v["id"]),
@@ -613,6 +791,7 @@ impl Form {
             blend,
             hole,
             pattern,
+            mate,
             rev: instance.then(|| {
                 let read = match v["rev"]["label"].as_str() {
                     Some(l) => l.to_owned(),
@@ -684,6 +863,7 @@ impl Form {
             .chain(self.blend.iter().flat_map(BlendForm::sizes))
             .chain(self.hole.iter().flat_map(HoleForm::fields))
             .chain(self.pattern.iter().flat_map(PatternForm::fields))
+            .chain(self.mate.iter().flat_map(MateForm::fields))
     }
 
     /// Whether anything was typed or chosen.
@@ -702,6 +882,7 @@ impl Form {
             || self.blend.as_ref().is_some_and(BlendForm::dirty)
             || self.hole.as_ref().is_some_and(HoleForm::dirty)
             || self.pattern.as_ref().is_some_and(PatternForm::dirty)
+            || self.mate.as_ref().is_some_and(MateForm::dirty)
     }
 
     /// Everything typed or chosen goes back as it was read.
@@ -745,6 +926,9 @@ impl Form {
         }
         if let Some(p) = &mut self.pattern {
             p.revert();
+        }
+        if let Some(m) = &mut self.mate {
+            m.revert();
         }
         self.error = None;
     }
@@ -793,6 +977,9 @@ impl Form {
         }
         if let Some(p) = &self.pattern {
             p.given(&mut out)?;
+        }
+        if let Some(m) = &self.mate {
+            m.given(&mut out);
         }
         Ok(out)
     }
@@ -876,10 +1063,12 @@ impl Form {
                 .chain(f.hole.iter().map(|h| &h.points))
                 .chain(f.pattern.iter().map(|p| &p.seeds));
             let depth = f.hole.as_ref().map(|h| &h.depth);
+            let form = f.mate.as_ref().map(|m| &m.form);
             [&f.operation, &f.op, &f.target, &f.rev]
                 .into_iter()
                 .flatten()
                 .chain(depth)
+                .chain(form)
                 .map(|c| (c.name.clone(), c.read.clone(), c.chosen.clone()))
                 .chain(
                     f.fixed
@@ -1353,6 +1542,68 @@ mod tests {
                 yours: "4 mm".into()
             }]
         );
+    }
+
+    #[test]
+    fn a_mates_drive_and_offsets_are_edited() {
+        let n = "0123456789abcdef0123456789abcdef";
+        let shown = json!({"id": "m1", "type": "mate", "revision": "r1", "form": "cylindrical",
+                           "a": {"instance": ["base"], "at": {"feature": "slab", "name": n},
+                                 "offset": {"origin": ["20 mm", "0 mm", "0 mm"]},
+                                 "text": format!("frame/base/slab/{n}")},
+                           "b": {"instance": ["pin"], "at": "origin", "text": "frame/pin"},
+                           "distance": {"value": "3 mm", "m": 0.003}});
+        let mut f = Form::from_show("frame", &shown);
+        let m = f.mate.as_ref().unwrap();
+        assert_eq!(m.takes(), (true, true));
+        assert_eq!(
+            (m.angle.read.as_str(), m.distance.read.as_str()),
+            ("", "3 mm")
+        );
+        assert_eq!(m.a.origin[0].read, "20 mm");
+        assert_eq!(m.connectors[1], ("b".to_owned(), "frame/pin".to_owned()));
+        // Driven to an angle, the distance let go, b turned over.
+        let m = f.mate.as_mut().unwrap();
+        m.angle.text = "30 deg".into();
+        m.distance.text = String::new();
+        m.b.flip.chosen = true;
+        let g = given(&f);
+        assert_eq!(g.angle, Some(json!("30 deg")));
+        assert_eq!(g.distance, Some(json!("")));
+        assert_eq!(g.b_offset, Some(json!({"flip": true})));
+        assert_eq!((g.a_offset.clone(), g.form.clone()), (None, None));
+        // A's offset goes whole: a part left empty is zero; all emptied,
+        // it is none.
+        let m = f.mate.as_mut().unwrap();
+        m.a.origin[1].text = String::new();
+        m.a.origin[2].text = "2 mm".into();
+        assert_eq!(
+            given(&f).a_offset,
+            Some(json!({"origin": ["20 mm", "0 mm", "2 mm"]}))
+        );
+        let m = f.mate.as_mut().unwrap();
+        for o in &mut m.a.origin {
+            o.text = String::new();
+        }
+        assert_eq!(given(&f).a_offset, Some(json!({})));
+        f.revert();
+        assert!(!f.dirty());
+        let m = f.mate.as_mut().unwrap();
+        m.form.chosen = "ball".into();
+        assert_eq!(m.takes(), (false, false));
+        assert_eq!(given(&f).form.as_deref(), Some("ball"));
+        // An instance pattern's seeds are its instances.
+        let shown = json!({"id": "ring", "type": "instance_pattern", "revision": "r1",
+                           "form": "circular", "instances": ["pin", "nut"], "count": "3",
+                           "angle": "360 deg", "axis": "z"});
+        let mut f = Form::from_show("frame", &shown);
+        let p = f.pattern.as_mut().unwrap();
+        assert!(p.instances);
+        assert_eq!(p.refs, [("axis".to_owned(), "z".to_owned())]);
+        p.seeds.toggle("nut");
+        let g = given(&f);
+        assert_eq!(g.instances, Some(vec!["pin".to_owned()]));
+        assert_eq!(g.features, None);
     }
 
     #[test]

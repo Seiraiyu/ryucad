@@ -162,6 +162,13 @@ fn is_reference(v: &Value) -> bool {
     })
 }
 
+/// Whether `v` is a mate's or an instance pattern's connector, which
+/// merges as one value: `{instance, at, offset?}`.
+pub fn is_connector(v: &Value) -> bool {
+    v.as_object()
+        .is_some_and(|o| o.get("instance").is_some_and(Value::is_array) && o.contains_key("at"))
+}
+
 /// The walk over one file: the conflicts found so far.
 #[derive(Default)]
 pub struct Walk {
@@ -206,7 +213,9 @@ impl Walk {
         if ours == base {
             return theirs.cloned();
         }
-        let split = |v: Option<&Value>| v.is_none_or(|v| v.is_object() && !is_reference(v));
+        let split = |v: Option<&Value>| {
+            v.is_none_or(|v| v.is_object() && !is_reference(v) && !is_connector(v))
+        };
         match (ours, theirs) {
             (Some(o), Some(t))
                 if o.is_object()
@@ -996,6 +1005,41 @@ mod tests {
         let (b, c) = ("1".repeat(32), "2".repeat(32));
         let m = merge(Some(&at(&a)), &at(&b), &at(&c));
         assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/extent/target"]);
+    }
+
+    #[test]
+    fn connectors_are_one_value_and_forms_merge_with_other_edits() {
+        let mate = |offset: &str, angle: &str, form: &str| {
+            json!({
+                "format": 4, "kind": "ryucad.feature", "type": "mate", "form": form,
+                "a": {"instance": ["base"], "at": "origin",
+                      "offset": {"origin": [offset, "0 mm", "0 mm"]}},
+                "b": {"instance": ["pin"], "at": "origin"}, "angle": angle,
+            })
+        };
+        let base = mate("20 mm", "0 deg", "revolute");
+        // An offset on one side, the angle on the other: both stay.
+        let m = merge(
+            Some(&base),
+            &mate("30 mm", "0 deg", "revolute"),
+            &mate("20 mm", "10 deg", "revolute"),
+        );
+        assert!(m.conflicts.is_empty());
+        assert_eq!(m.value, mate("30 mm", "10 deg", "revolute"));
+        // The connector changed both ways: one conflict, the whole
+        // connector.
+        let mut theirs = mate("20 mm", "0 deg", "revolute");
+        theirs["a"]["at"] = json!({"feature": "slab", "name": "0".repeat(32)});
+        let m = merge(Some(&base), &mate("30 mm", "0 deg", "revolute"), &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/a"]);
+        // The form changed on both sides: a conflict at /form.
+        let m = merge(
+            Some(&base),
+            &mate("20 mm", "0 deg", "cylindrical"),
+            &mate("20 mm", "0 deg", "planar"),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/form"]);
+        assert!(is_connector(&base["a"]) && !is_connector(&base));
     }
 
     #[test]

@@ -14,14 +14,17 @@
 //! in conflict from those pieces where they allow it, else from the whole
 //! component as stage 1 did ([`solve_whole`] keeps stage 1 for comparison).
 //!
+//! The solver itself, apart from sketches, is [`core`]: dual numbers, the
+//! decomposition, the steps and the diagnosis, over any system of
+//! equations. ryumate solves assemblies of rigid bodies with it.
+//!
 //! It knows nothing of files, units, parts or bodies: positions are meters,
 //! angles radians, and IDs are opaque. Arithmetic is f64 in a fixed order,
 //! with `ryukei::math` for every function, so a sketch solves to the same
 //! bits on every platform.
 
-mod blocks;
+pub mod core;
 mod equation;
-mod linalg;
 mod loops;
 mod report;
 mod sketch;

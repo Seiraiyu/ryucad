@@ -23,8 +23,9 @@ use rayon::prelude::*;
 use serde_json::{Value, json};
 
 /// Every finding's code and severity: `doctor`'s issues keep their own.
-pub const CODES: [(&str, &str); 7] = [
+pub const CODES: [(&str, &str); 8] = [
     ("feature_failed", "error"),
+    ("assembly_unsolved", "error"),
     ("faces_intersect", "error"),
     ("cannot_check", "warning"),
     ("mesh_faults", "error"),
@@ -240,8 +241,9 @@ pub fn run(
                 findings.push(f);
             }
             match r {
-                // A conflict record is doctor's to report.
-                Err(e) if e.code == Code::MergeConflict => {}
+                // A conflict record is doctor's to report; mates that can't
+                // hold are the assembly's finding, once.
+                Err(e) if e.code == Code::MergeConflict || e.code == Code::AssemblyUnsolved => {}
                 Err(e) => {
                     let mut f = finding("feature_failed", id, fid, e.message.clone());
                     f["error"] = json!(session.explain(id, e.clone()));
@@ -249,12 +251,29 @@ pub fn run(
                 }
                 // A body is checked as its solid shows; a stale sketch is
                 // doctor's to report, with its repair.
-                Ok(Output::Solids(_) | Output::Sketch(_) | Output::Instance(_)) => {}
+                Ok(_) => {}
             }
+        }
+        // An assembly whose mates can't all hold, with the mates that
+        // conflict.
+        if let Some(solve) = fresh.solve.as_ref().filter(|s| !s.report.converged) {
+            let mates: Vec<&Id> = fresh
+                .features
+                .iter()
+                .filter(|(_, r)| matches!(r, Err(e) if e.code == Code::AssemblyUnsolved))
+                .map(|(f, _)| f)
+                .collect();
+            findings.push(json!({
+                "code": "assembly_unsolved", "severity": severity("assembly_unsolved"),
+                "part": id, "mates": mates,
+                "conflicting": solve.to_json()["conflicting"],
+                "message": format!("{id}: its mates can't all hold ({})",
+                    mates.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(", ")),
+            }));
         }
         // An instance of an obsolete release still builds; it is worth a
         // look.
-        for w in fresh.warnings() {
+        for w in fresh.warnings(id) {
             if w["code"] == "instance_obsolete"
                 && let Some(fid) = w["feature"]
                     .as_str()

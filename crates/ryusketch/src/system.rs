@@ -9,6 +9,7 @@
 //! Everything is scaled by a power of two near the sketch's size, which is
 //! exact both ways, so the solver works on numbers near one.
 
+use crate::core::Equations;
 use crate::equation::{Form, Rad};
 use crate::sketch::{Constraint, Entity, Id, Kind, Sketch};
 use ryukei::math;
@@ -60,13 +61,7 @@ pub(crate) struct Fault {
     pub constraints: Vec<Id>,
 }
 
-/// The independent pieces of a system: variables and equations that reach
-/// only each other.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Component {
-    pub vars: Vec<usize>,
-    pub eqs: Vec<usize>,
-}
+pub(crate) use crate::core::Component;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct System {
@@ -797,6 +792,64 @@ impl System {
             }
         }
         d.v
+    }
+}
+
+/// The sketch's equations to the solver's core: a constraint's equations
+/// are its group, an arc's own equation is in every set.
+impl Equations for System {
+    fn reads(&self, eq: usize) -> Vec<usize> {
+        self.eqs[eq]
+            .args
+            .iter()
+            .filter_map(|a| match *a {
+                Scalar::Var(v) => Some(v),
+                Scalar::Const(_) => None,
+            })
+            .collect()
+    }
+
+    fn residual(&self, eq: usize, x: &[f64]) -> f64 {
+        System::residual(self, eq, x)
+    }
+
+    fn misfit(&self, eq: usize, x: &[f64]) -> f64 {
+        System::misfit(self, eq, x)
+    }
+
+    fn gradient(
+        &self,
+        eq: usize,
+        x: &[f64],
+        col: &dyn Fn(usize) -> Option<usize>,
+        row: &mut [f64],
+    ) -> f64 {
+        System::gradient(self, eq, x, col, row)
+    }
+
+    fn partials(&self, eq: usize, x: &[f64]) -> Vec<(usize, f64)> {
+        System::partials(self, eq, x)
+    }
+
+    fn group(&self, eq: usize) -> Option<u32> {
+        match self.eqs[eq].owner {
+            Owner::Constraint(c) => Some(c),
+            Owner::Arc(_) => None,
+        }
+    }
+
+    fn conflict_tol(&self) -> f64 {
+        SOLVE_TOL / self.scale
+    }
+
+    /// A circle's radius can't go below zero: a step that would turn one
+    /// inside out stops it at zero, and the rest of the step stands.
+    fn clamp(&self, var: usize, value: f64) -> f64 {
+        if self.var_owner[var].1 == Coord::R && value < 0.0 {
+            0.0
+        } else {
+            value
+        }
     }
 }
 
