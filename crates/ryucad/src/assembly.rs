@@ -719,6 +719,43 @@ pub fn pins(project: &Project, mut look: impl FnMut(&Id, &str) -> Result<Pinned>
     out
 }
 
+/// The parts that make up the project's model when nothing narrower is
+/// asked for: its one root assembly (one no assembly places) if it has
+/// exactly one, else every part that isn't an assembly, as before
+/// assemblies.
+pub fn shown_parts(project: &Project) -> Vec<Id> {
+    let assemblies: Vec<&Id> = project
+        .parts
+        .iter()
+        .filter(|(_, p)| p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly))
+        .map(|(id, _)| id)
+        .collect();
+    let placed: BTreeSet<&Id> = project
+        .parts
+        .values()
+        .flat_map(|p| {
+            p.features.values().filter_map(|f| match f {
+                Ok(Feature::Instance(i)) => Some(&i.part),
+                _ => None,
+            })
+        })
+        .collect();
+    let roots: Vec<&Id> = assemblies
+        .iter()
+        .copied()
+        .filter(|a| !placed.contains(a))
+        .collect();
+    match roots.as_slice() {
+        [one] => vec![(*one).clone()],
+        _ => project
+            .parts
+            .keys()
+            .filter(|id| !assemblies.contains(id))
+            .cloned()
+            .collect(),
+    }
+}
+
 /// How `assembly.move` moves an instance.
 pub struct Move {
     pub placement: Option<crate::proto::PlacementArg>,
@@ -1789,5 +1826,147 @@ pub(crate) mod tests {
         );
         let e = call(&mut s, "assembly.tree", json!({"part": "bolt"})).unwrap_err();
         assert_eq!(e.code, Code::WrongPartKind);
+    }
+
+    #[test]
+    fn meshes_renders_and_inspect_show_occurrences() {
+        let (dir, mut s) = project();
+        let r = dir.path();
+        place_in(r, "frame", "base", "plate", json!("working"), [0.0; 3]);
+        place_in(
+            r,
+            "frame",
+            "b1",
+            "bolt",
+            json!("working"),
+            [0.01, 0.02, 0.005],
+        );
+        place_in(
+            r,
+            "frame",
+            "b2",
+            "bolt",
+            json!("working"),
+            [0.09, 0.02, 0.005],
+        );
+        s.refresh().unwrap();
+        // Each body once, and where each occurrence puts it.
+        let m = call(
+            &mut s,
+            "mesh.get",
+            json!({"part": "frame", "quality": "coarse"}),
+        )
+        .unwrap();
+        let labels: Vec<&Value> = m["bodies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| &b["feature"])
+            .collect();
+        assert_eq!(labels, [&json!("base/slab"), &json!("b1/shank")]);
+        assert_eq!(m["occurrences"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            m["occurrences"][2]["pose"]["origin_m"],
+            json!([0.09, 0.02, 0.005])
+        );
+        let one = call(
+            &mut s,
+            "mesh.get",
+            json!({"part": "frame", "feature": "b2"}),
+        )
+        .unwrap();
+        assert_eq!(one["bodies"][0]["feature"], "b2/shank");
+        assert_eq!(one["occurrences"].as_array().unwrap().len(), 1);
+        let e = call(
+            &mut s,
+            "mesh.get",
+            json!({"part": "frame", "feature": "b9"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+        // The same as bytes.
+        let req = crate::proto::Request::from_rpc(
+            "mesh.get",
+            Some(json!({"part": "frame", "transfer": "binary", "quality": "coarse"})),
+        )
+        .unwrap();
+        let a = crate::server::handle_safely(&mut Some(s), None, None, r, req).unwrap();
+        let wire = crate::mesh::decode(&a.binary.unwrap()).unwrap();
+        assert_eq!(wire.len(), 2);
+        assert_eq!(wire[1].feature, "b1/shank");
+        assert_eq!(a.result["occurrences"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn an_assembly_renders_and_is_the_model_when_it_is_the_one_root() {
+        use crate::server::tests::render_pixels;
+        let (dir, s) = project();
+        let r = dir.path();
+        place_in(r, "frame", "base", "plate", json!("working"), [0.0; 3]);
+        place_in(
+            r,
+            "frame",
+            "b1",
+            "bolt",
+            json!("working"),
+            [0.05, 0.025, 0.005],
+        );
+        drop(s);
+        let open = || Session::open(r).unwrap();
+        let s = open();
+        assert_eq!(shown_parts(s.project()), [id("frame")]);
+        let small = json!({"width": 64, "height": 48});
+        let mut asked = small.clone();
+        asked["part"] = json!("frame");
+        let frame = render_pixels(r, s, asked);
+        let model = render_pixels(r, open(), small.clone());
+        assert_eq!(frame, model);
+        let mut plate = small;
+        plate["part"] = json!("plate");
+        assert_ne!(frame, render_pixels(r, open(), plate));
+        // Framing the whole model frames the assembly.
+        let mut s = open();
+        let pts = crate::server::model_points(&mut s, &[]).unwrap();
+        assert!(
+            pts.iter().any(|p| p[2] > 0.02),
+            "the bolt stands on the plate"
+        );
+        // With two roots, the model is every part, as before assemblies.
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "other", "kind": "assembly"}),
+        )
+        .unwrap();
+        assert_eq!(shown_parts(s.project()), [id("bolt"), id("plate")]);
+    }
+
+    #[test]
+    fn inspect_lists_occurrences_and_finds_their_entities() {
+        let (dir, mut s) = project();
+        let r = dir.path();
+        place_in(r, "frame", "b1", "bolt", json!("working"), [0.01, 0.0, 0.0]);
+        s.refresh().unwrap();
+        let v = call(&mut s, "inspect", json!({"part": "frame"})).unwrap();
+        let occ = &v["occurrences"][0];
+        assert_eq!((&occ["path"], &occ["part"]), (&json!("b1"), &json!("bolt")));
+        let face = occ["bodies"][0]["faces"][0]["name"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(occ["bodies"][0]["solid"], "shank");
+        let v = call(
+            &mut s,
+            "inspect",
+            json!({"part": "frame", "entity": format!("frame/b1/shank/{face}")}),
+        )
+        .unwrap();
+        assert_eq!(
+            (&v["kind"], &v["occurrence"]),
+            (&json!("face"), &json!("b1"))
+        );
+        // In an assembly an entity is always named in full.
+        let e = call(&mut s, "inspect", json!({"part": "frame", "entity": face})).unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
     }
 }

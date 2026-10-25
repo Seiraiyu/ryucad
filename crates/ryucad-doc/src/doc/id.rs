@@ -67,6 +67,12 @@ impl fmt::Display for Id {
     }
 }
 
+impl AsRef<str> for Id {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
 impl Serialize for Id {
     fn serialize<S: Serializer>(&self, s: S) -> core::result::Result<S::Ok, S::Error> {
         s.serialize_str(&self.0)

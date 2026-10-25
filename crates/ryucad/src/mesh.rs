@@ -345,13 +345,13 @@ impl Writer {
 ///          u32 n, n × (name, str16 kind) faults
 /// name = 16 bytes; str16/str32 = u16/u32 length then UTF-8
 /// ```
-pub fn encode(bodies: &[(crate::doc::id::Id, Result<Meshed>)]) -> Vec<u8> {
+pub fn encode<K: AsRef<str>>(bodies: &[(K, Result<Meshed>)]) -> Vec<u8> {
     let mut w = Writer(Vec::new());
     w.0.extend_from_slice(MAGIC);
     w.u32(VERSION);
     w.len(bodies.len());
     for (id, r) in bodies {
-        w.str16(id.as_str());
+        w.str16(id.as_ref());
         let m = match r {
             Ok(m) => m,
             Err(e) => {
