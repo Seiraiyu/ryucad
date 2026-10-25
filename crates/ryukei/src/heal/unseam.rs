@@ -20,6 +20,15 @@
 //! edge is named from the names of every edge of the file it joins,
 //! sorted, so an edge several seams split is named alike whichever join
 //! comes first. A file's own vertices stay, wherever they are.
+//!
+//! An edge that runs through a pole or apex of a face's surface inside
+//! itself (a meridian bounding a hemisphere, as some writers place a
+//! sphere's frame) has no pcurve on that face, whose parameters jump
+//! there: it is split at each such point (its curve within resolution of
+//! the point, farther than resolution from the edge's ends), with a new
+//! vertex there. The pieces keep its curve, its parameter and its uses'
+//! pcurves, and are named as parts of it ([`Event::Split`]), the vertices
+//! as new ones from it.
 
 use super::names::Names;
 use super::{Edge, Loop, Shape, Use};
@@ -39,6 +48,132 @@ pub(super) struct Unseamed {
     /// Vertices removed between two edges joined into one.
     pub(super) joined: Vec<Name>,
     pub(super) journal: Journal,
+}
+
+/// What splitting edges at poles did, by import name.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct AtPoles {
+    /// The file's edges split.
+    pub(super) split: Vec<Name>,
+    pub(super) journal: Journal,
+}
+
+/// The points of `surface` where a row of its parameters collapses: its
+/// poles and apexes.
+fn pole_points(surface: &crate::geom::Surface) -> Vec<crate::geom::Point3> {
+    let domain = surface.domain();
+    let collapsed = crate::mesh::uv::collapsed_rows(surface);
+    let mut out = Vec::new();
+    for d in 0..2 {
+        for end in 0..2 {
+            if !collapsed[d][end] {
+                continue;
+            }
+            let free = domain[1 - d];
+            let mid = (free[0] + free[1]) / 2.0;
+            out.push(if d == 0 {
+                surface.point(domain[d][end], mid)
+            } else {
+                surface.point(mid, domain[d][end])
+            });
+        }
+    }
+    out
+}
+
+/// Splits every edge of `s` that runs through a pole or apex of one of
+/// its faces' surfaces inside itself (see the module's notes). New
+/// edges' and vertices' names are pushed onto `names`.
+pub(super) fn split_at_poles(key: OpKey, s: &mut Shape, names: &mut Names) -> AtPoles {
+    let mut out = AtPoles::default();
+    // Each edge's cuts: parameters inside it at a pole of a face's surface.
+    let mut cuts: Vec<Vec<f64>> = vec![Vec::new(); s.edges.len()];
+    for f in &s.faces {
+        let points = pole_points(&s.surfaces[f.surface]);
+        if points.is_empty() {
+            continue;
+        }
+        for l in &f.loops {
+            let Loop::Edges(uses) = l else { continue };
+            for u in uses {
+                let e = &s.edges[u.edge];
+                let curve = &s.curves[e.curve];
+                let [t0, t1] = e.interval;
+                for &p in &points {
+                    let foot = curve.project(p);
+                    let t = match curve.period() {
+                        Some(per) => t0 + (foot.param - t0).rem_euclid(per),
+                        None => foot.param,
+                    };
+                    let inside = t0 < t && t < t1;
+                    let away = [e.start, e.end]
+                        .iter()
+                        .all(|&v| s.vertices[v].point.distance(p) > LINEAR_RESOLUTION);
+                    if inside && away && foot.distance <= LINEAR_RESOLUTION {
+                        cuts[u.edge].push(t);
+                    }
+                }
+            }
+        }
+    }
+    for (e, mut ts) in cuts.into_iter().enumerate() {
+        if ts.is_empty() {
+            continue;
+        }
+        ts.sort_by(f64::total_cmp);
+        ts.dedup();
+        let x = s.edges[e];
+        let parent = names.edges[e];
+        let mut stops = vec![(x.interval[0], x.start)];
+        for (i, &t) in ts.iter().enumerate() {
+            s.vertices.push(super::Vertex {
+                point: s.curves[x.curve].point(t),
+                tolerance: 0.0,
+                seam: false,
+            });
+            names.vertices.push(Name::derive(
+                key,
+                Role::NewVertex,
+                &[parent, Name::from_u128(i as u128)],
+            ));
+            stops.push((t, s.vertices.len() - 1));
+        }
+        stops.push((x.interval[1], x.end));
+        let mut pieces = Vec::new();
+        for (i, w) in stops.windows(2).enumerate() {
+            s.edges.push(Edge {
+                interval: [w[0].0, w[1].0],
+                start: w[0].1,
+                end: w[1].1,
+                ..x
+            });
+            pieces.push(s.edges.len() - 1);
+            let part = u8::try_from(i).unwrap_or(u8::MAX);
+            names
+                .edges
+                .push(Name::derive(key, Role::Part(part), &[parent]));
+        }
+        out.split.push(parent);
+        out.journal.push(Event::Split {
+            parent,
+            children: pieces.iter().map(|&p| names.edges[p]).collect(),
+        });
+        for f in &mut s.faces {
+            for l in &mut f.loops {
+                let Loop::Edges(uses) = l else { continue };
+                while let Some(i) = uses.iter().position(|u| u.edge == e) {
+                    let u = uses[i];
+                    let mut run: Vec<Use> = pieces.iter().map(|&p| Use { edge: p, ..u }).collect();
+                    if u.sense == Sense::Reversed {
+                        run.reverse();
+                    }
+                    uses.splice(i..=i, run);
+                }
+            }
+        }
+    }
+    out.split.sort();
+    out
 }
 
 /// The vertex a use starts from and the one it ends at.

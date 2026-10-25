@@ -25,6 +25,7 @@ cxx-build = { version = "1", optional = true }
 divan = "0.1"
 rayon = "1"
 ryukei-testkit = { path = "../ryukei-testkit" }
+ryustep = { path = "../ryustep" }
 
 [[bench]]
 name = "foundations"
@@ -93,3 +94,12 @@ harness = false
 name = "blend_kernels"
 harness = false
 required-features = ["occt", "smlib"]
+
+[[bench]]
+name = "step"
+harness = false
+
+# STEP head to head (design 55, plan 7.D), and the large-assembly race.
+[[test]]
+name = "step"
+required-features = ["occt"]

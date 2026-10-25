@@ -39,7 +39,8 @@ use crate::{ImportError, StepError};
 pub enum Schema {
     /// `CONFIG_CONTROL_DESIGN` (edition 1) or AP203 edition 2.
     Ap203,
-    /// `AUTOMOTIVE_DESIGN`.
+    /// `AUTOMOTIVE_DESIGN`, and its drafts' `AUTOMOTIVE_DESIGN_CC1` and
+    /// `_CC2`.
     Ap214,
     /// `AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF`, any edition.
     Ap242,
@@ -61,7 +62,9 @@ impl Schema {
                 .collect();
             let known = match name.as_str() {
                 "CONFIG_CONTROL_DESIGN" => Some(Schema::Ap203),
-                "AUTOMOTIVE_DESIGN" | "AUTOMOTIVE_DESIGN_CC2" => Some(Schema::Ap214),
+                "AUTOMOTIVE_DESIGN" | "AUTOMOTIVE_DESIGN_CC1" | "AUTOMOTIVE_DESIGN_CC2" => {
+                    Some(Schema::Ap214)
+                }
                 n if n.starts_with("AP203_CONFIGURATION_CONTROLLED_3D_DESIGN") => {
                     Some(Schema::Ap203)
                 }
@@ -504,6 +507,11 @@ pub(crate) mod tests {
             Ok(Schema::Ap242)
         );
         assert_eq!(schema(&["IFC4", "AUTOMOTIVE_DESIGN"]), Ok(Schema::Ap214));
+        // OCCT's own sample files name AP214's first draft.
+        assert_eq!(
+            schema(&["AUTOMOTIVE_DESIGN_CC1 { 1 2 10303 214 -1 1 3  2}"]),
+            Ok(Schema::Ap214)
+        );
         assert_eq!(
             schema(&["IFC4"]),
             Err(StepError::UnknownSchema("IFC4".into()))

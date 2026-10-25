@@ -90,8 +90,39 @@ impl Geo<'_> {
         }
     }
 
-    /// An `AXIS2_PLACEMENT_3D` as a frame. Missing axes are `z` and `x`.
+    /// A point that may be moved along the line through it in direction
+    /// `d` (`across` false) or within the plane through it normal to `d`
+    /// (`across` true), where the file put it outside the size box: moved
+    /// to the foot of the world origin there. A line's origin, a plane's
+    /// or a cylinder's may lie anywhere along it, and writers put some far
+    /// away; a point inside the box is kept bit for bit.
+    fn slid(&self, id: Id, d: UnitVector3, across: bool) -> Result<Point3, ImportError> {
+        match self.point(id) {
+            Err(ImportError::OutsideSizeBox { .. }) => {
+                let c = self.e.point(id, id)?.coords();
+                let l = self.length;
+                let v = Vector3::new(c[0] * l, c[1] * l, c[2] * l);
+                let along = d.get() * v.dot(d.get());
+                let foot = if across { along } else { v - along };
+                Point3::try_new(foot.x, foot.y, foot.z).map_err(|e| invalid(id, e))
+            }
+            other => other,
+        }
+    }
+
+    /// An `AXIS2_PLACEMENT_3D` as a frame. A missing axis is `z`; a
+    /// missing reference direction is `x`, or `y` where the axis is along
+    /// `x` (ISO 10303-42's `first_proj_axis`), or within rounding of it
+    /// (writers round an axis along `x` to a few ulps off it).
     pub(crate) fn frame(&self, id: Id) -> Result<Frame, ImportError> {
+        self.frame_slid(id, None)
+    }
+
+    /// [`Self::frame`], its origin outside the size box moved to the foot
+    /// of the world origin along its `z` axis (`Some(false)`, a
+    /// cylinder's) or in the plane normal to it (`Some(true)`, a plane's;
+    /// see [`Self::slid`]).
+    fn frame_slid(&self, id: Id, slide: Option<bool>) -> Result<Frame, ImportError> {
         let Placement::Axis3d {
             location,
             axis,
@@ -100,17 +131,25 @@ impl Geo<'_> {
         else {
             return Err(crate::schema::wrong(id, "an AXIS2_PLACEMENT_3D"));
         };
-        let origin = self.point(location)?;
         let z = match axis {
             Some(a) => self.unit(a)?,
             None => UnitVector3::Z,
         };
+        let origin = match slide {
+            Some(across) => self.slid(location, z, across)?,
+            None => self.point(location)?,
+        };
         let x = match ref_direction {
             Some(r) => self.unit(r)?,
+            None if z.get().y == 0.0 && z.get().z == 0.0 => UnitVector3::Y,
             None => UnitVector3::X,
         };
         Frame::from_axes(origin, z, x)
             .or_else(|_| Frame::new(origin, z.get(), x.get()))
+            .or_else(|e| match ref_direction {
+                None => Frame::new(origin, z.get(), UnitVector3::Y.get()),
+                Some(_) => Err(e),
+            })
             .map_err(|e| invalid(id, e))
     }
 
@@ -136,11 +175,11 @@ impl Geo<'_> {
         let fail = |e| invalid(id, e);
         match self.e.curve(id, id)? {
             SCurve::Line { point, vector } => {
-                let p = self.point(*point)?;
                 let Entity::Vector { orientation, .. } = self.e.get(id, *vector)? else {
                     return Err(crate::schema::wrong(*vector, "a VECTOR"));
                 };
                 let d = self.unit(*orientation)?;
+                let p = self.slid(*point, d, false)?;
                 Line::from_unit(p, d).map(Curve::Line).map_err(fail)
             }
             SCurve::Circle { position, radius } => {
@@ -353,9 +392,11 @@ impl Geo<'_> {
     pub(crate) fn surface(&self, id: Id) -> Result<Surface, ImportError> {
         let fail = |e| invalid(id, e);
         match self.e.surface(id, id)? {
-            SSurface::Plane { position } => Ok(Surface::Plane(Plane::new(self.frame(*position)?))),
+            SSurface::Plane { position } => Ok(Surface::Plane(Plane::new(
+                self.frame_slid(*position, Some(true))?,
+            ))),
             SSurface::Cylinder { position, radius } => {
-                Cylinder::new(self.frame(*position)?, self.len(*radius))
+                Cylinder::new(self.frame_slid(*position, Some(false))?, self.len(*radius))
                     .map(Surface::Cylinder)
                     .map_err(fail)
             }
@@ -577,6 +618,67 @@ mod tests {
         assert!(
             (f.x().get() - Vector3::new(1.0, 1.0, 0.0).normalize().unwrap().get()).length() < 1e-15
         );
+    }
+
+    #[test]
+    fn a_missing_reference_direction_is_x_unless_the_axis_is_along_it() {
+        let frame = |axis: &str| {
+            let e = entities(&format!(
+                "#1=CARTESIAN_POINT('',(0.,0.,0.));#2=DIRECTION('',({axis}));\
+                 #3=AXIS2_PLACEMENT_3D('',#1,#2,$);"
+            ));
+            geo(&e).frame(3)
+        };
+        let f = frame("0.,0.,1.").unwrap();
+        assert_eq!((f.z(), f.x()), (UnitVector3::Z, UnitVector3::X));
+        // Along x, either way: y, as ISO 10303-42 has it.
+        let f = frame("-1.,-0.,0.").unwrap();
+        assert_eq!(f.x(), UnitVector3::Y);
+        // Within rounding of x, as the NIST test files write it.
+        let f = frame("-1.,1.50895664359E-16,1.53552543619E-16").unwrap();
+        assert!((f.x().get() - UnitVector3::Y.get()).length() < 1e-15);
+        let f = frame("0.0393700787402,-2.41072204557E-018,-0.").unwrap();
+        assert!((f.x().get() - UnitVector3::Y.get()).length() < 1e-15);
+        // Any other axis takes x, projected.
+        let f = frame("1.,0.,1.").unwrap();
+        let x = Vector3::new(1.0, 0.0, -1.0).normalize().unwrap().get();
+        assert!((f.x().get() - x).length() < 1e-15);
+    }
+
+    #[test]
+    fn lines_planes_and_cylinders_written_far_away_are_moved_into_the_box() {
+        // In metres: a line's origin 5 km off along it, a plane's 5 km off
+        // within it, a cylinder's 9 km along its axis.
+        let e = entities(
+            "#1=CARTESIAN_POINT('',(-3000.,4000.,1.));#2=DIRECTION('',(-0.6,0.8,0.));\
+             #3=VECTOR('',#2,1.);#4=LINE('',#1,#3);#5=DIRECTION('',(0.,0.,1.));\
+             #6=AXIS2_PLACEMENT_3D('',#1,#5,$);#7=PLANE('',#6);\
+             #8=CARTESIAN_POINT('',(1.,2.,9000.));#9=AXIS2_PLACEMENT_3D('',#8,#5,$);\
+             #10=CYLINDRICAL_SURFACE('',#9,0.5);",
+        );
+        let g = Geo {
+            e: &e,
+            length: 1.0,
+            angle: 1.0,
+        };
+        let Curve::Line(l) = g.curve(4).unwrap() else {
+            panic!()
+        };
+        // The foot of the world origin on the line.
+        assert!(l.origin().distance(Point3::new(0.0, 0.0, 1.0)) < 1e-12);
+        assert_eq!(l.dir().get(), Vector3::new(-0.6, 0.8, 0.0));
+        let p = g.surface(7).unwrap();
+        assert!(matches!(p, Surface::Plane(_)));
+        assert_eq!(p.frame().unwrap().origin(), Point3::new(0.0, 0.0, 1.0));
+        let c = g.surface(10).unwrap();
+        assert!(matches!(c, Surface::Cylinder(_)));
+        assert_eq!(c.frame().unwrap().origin(), Point3::new(1.0, 2.0, 0.0));
+        // Inside the box, an origin is kept as written.
+        let e = mm("#1=VECTOR('',#92,7.);#2=LINE('',#90,#1);");
+        let Curve::Line(l) = geo(&e).curve(2).unwrap() else {
+            panic!()
+        };
+        assert_eq!(l.origin(), Point3::new(1e-3, 2e-3, 3e-3));
     }
 
     #[test]

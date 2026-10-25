@@ -10,10 +10,13 @@
 //! one body, a solid region each: a part with two lumps stays one body,
 //! as ryukei made it. Representations are read and healed in parallel
 //! and returned in instance order, so the result is the same on any
-//! number of threads.
+//! number of threads; several holding the same items in one context are
+//! read once.
 //!
 //! One bad body never fails the file: each representation's result
-//! stands alone.
+//! stands alone. Healing names entities by their import names; each
+//! body says which instance every name it read came from, so a refusal
+//! can be found in the file.
 //! Only a file that isn't Part 21, has no data section, or follows a
 //! schema this crate doesn't read fails as a whole.
 
@@ -26,8 +29,8 @@ use crate::products::Products;
 use crate::schema::{Entities, Id, Schema};
 use crate::{ImportError, StepError};
 use rayon::prelude::*;
-use ryukei::heal::{HealOptions, HealReport, heal};
-use ryukei::name::{Journal, OpKey};
+use ryukei::heal::{HealOptions, HealReport, heal, import_names};
+use ryukei::name::{Journal, Name, OpKey};
 use ryukei::topo::Body;
 use std::collections::BTreeMap;
 
@@ -65,6 +68,12 @@ pub struct Imported {
     /// reaches.
     pub definition: Option<usize>,
     pub result: Result<(Body, Journal, HealReport), ImportError>,
+    /// The instance every import name of its vertices, edges and faces
+    /// came from: a `VERTEX_POINT`, an `EDGE_CURVE` or a face (a poly
+    /// loop's `CARTESIAN_POINT`s and the `POLY_LOOP` that first gave a
+    /// line edge). Empty when the shape couldn't be read; names healing
+    /// made (sewn edges, joined vertices) are not in it.
+    pub instances: BTreeMap<Name, Id>,
 }
 
 /// A representation's context, the product definition whose shape it
@@ -103,13 +112,34 @@ pub fn read(bytes: &[u8], opts: &ReadOptions) -> Result<Model, StepError> {
             (r, (c, d, items))
         })
         .collect();
-    let bodies = list
+    // Representations holding the same items in the same context (a
+    // part's shape and its copies under other representations) are one
+    // body, read once, under the first of them.
+    let mut first: BTreeMap<(Id, &[Id]), usize> = BTreeMap::new();
+    for (k, (_, (c, _, items))) in list.iter().enumerate() {
+        first.entry((*c, items.as_slice())).or_insert(k);
+    }
+    let read: BTreeMap<usize, Read> = first
+        .values()
+        .copied()
+        .collect::<Vec<usize>>()
         .par_iter()
-        .map(|(representation, (context, definition, items))| Imported {
-            representation: *representation,
-            items: items.clone(),
-            definition: *definition,
-            result: body(&e, items, *representation, *context, opts),
+        .map(|&k| {
+            let (r, (c, _, items)) = &list[k];
+            (k, body(&e, items, *r, *c, opts))
+        })
+        .collect();
+    let bodies = list
+        .iter()
+        .map(|(representation, (context, definition, items))| {
+            let (result, instances) = read[&first[&(*context, items.as_slice())]].clone();
+            Imported {
+                representation: *representation,
+                items: items.clone(),
+                definition: *definition,
+                result,
+                instances,
+            }
         })
         .collect();
     Ok(Model {
@@ -120,22 +150,38 @@ pub fn read(bytes: &[u8], opts: &ReadOptions) -> Result<Model, StepError> {
     })
 }
 
-/// One representation's body.
-fn body(
-    e: &Entities,
-    items: &[Id],
-    representation: Id,
-    context: Id,
-    opts: &ReadOptions,
-) -> Result<(Body, Journal, HealReport), ImportError> {
-    let units = e.units(representation, context)?;
+/// A body read, and the instance each import name came from.
+type Read = (
+    Result<(Body, Journal, HealReport), ImportError>,
+    BTreeMap<Name, Id>,
+);
+
+/// One representation's body, and the instance each import name came
+/// from.
+fn body(e: &Entities, items: &[Id], representation: Id, context: Id, opts: &ReadOptions) -> Read {
+    let units = match e.units(representation, context) {
+        Ok(u) => u,
+        Err(err) => return (Err(err), BTreeMap::new()),
+    };
     let g = geometry::Geo {
         e,
         length: units.length,
         angle: units.angle.unwrap_or(1.0),
     };
-    let shape = topology::shape(&g, items)?;
-    heal(opts.key, &shape, &opts.heal).map_err(|err| match err {
+    let (shape, sources) = match topology::shape(&g, items) {
+        Ok(x) => x,
+        Err(err) => return (Err(err), BTreeMap::new()),
+    };
+    let names = import_names(opts.key, &shape);
+    let instances = [
+        (&names.vertices, &sources.vertices),
+        (&names.edges, &sources.edges),
+        (&names.faces, &sources.faces),
+    ]
+    .into_iter()
+    .flat_map(|(n, s)| n.iter().copied().zip(s.iter().copied()))
+    .collect();
+    let result = heal(opts.key, &shape, &opts.heal).map_err(|err| match err {
         ryukei::Error::InvalidHeal(h) => ImportError::Heal(h),
         ryukei::Error::OutsideSizeBox => ImportError::OutsideSizeBox {
             instance: representation,
@@ -144,5 +190,6 @@ fn body(
             instance: representation,
             error,
         },
-    })
+    });
+    (result, instances)
 }

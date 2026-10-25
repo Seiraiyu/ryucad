@@ -17,7 +17,10 @@
 //! are: what the new curve's ends leave the tolerances cover (see `gaps`).
 //! The file's pcurves for a tightened edge are dropped, so the pcurves
 //! step finds exact ones or fits them. An edge with no such branch keeps
-//! its curve and is tolerated instead.
+//! its curve and is tolerated instead, and so is an edge whose faces are
+//! tangent or nearly so at its middle (their normals within a hundredth
+//! of a radian): there the branch lies far further from the edge than
+//! its gap, or runs tangentially, and tracing it only costs time.
 
 use super::Loop;
 use super::Shape;
@@ -35,6 +38,10 @@ const SAMPLES: usize = 16;
 /// The least cosine between the edge's direction and the branch's at the
 /// edge's middle.
 const ALIGNED: f64 = 0.5;
+
+/// The least sine of the angle between the faces' normals at the edge's
+/// middle for the edge to be tightened.
+const CREASE: f64 = 0.01;
 
 /// A tightened edge: its new curve, interval, whether it now runs the
 /// other way, and how far the branch may be from its surfaces.
@@ -121,6 +128,13 @@ fn tight(s: &Shape, g: usize, faces: [usize; 2], cap: f64) -> Option<Tight> {
     let reach = (2.0 * gap).max(10.0 * LINEAR_RESOLUTION).min(cap);
     let [t0, t1] = e.interval;
     let at = |i: usize| t0 + (t1 - t0) * i as f64 / SAMPLES as f64;
+    let normal = |x: &Surface| {
+        let (u, v) = x.project(curve.point(at(SAMPLES / 2))).param;
+        x.normal(u, v)
+    };
+    if normal(sa)?.get().cross(normal(sb)?.get()).length() < CREASE {
+        return None;
+    }
     let samples: Vec<_> = (0..=SAMPLES).map(|i| curve.point(at(i))).collect();
     let start = s.vertices[e.start].point;
     let end = s.vertices[e.end].point;

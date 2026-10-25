@@ -824,6 +824,219 @@ fn sewing_refuses_three_faces_at_an_edge_and_leaves_open_shells_open() {
     }
 }
 
+/// Splits the use of edge `e` in face `k` of `s` at parameter `t` with a
+/// new vertex there: the face's loop runs the two pieces instead, and the
+/// other face keeps `e` whole. Returns the new vertex and the pieces.
+fn split_use(s: &mut Shape, k: usize, e: usize, t: f64) -> (usize, [usize; 2]) {
+    let x = s.edges[e];
+    let v = s.vertices.len();
+    s.vertices.push(Vertex {
+        point: s.curves[x.curve].point(t),
+        tolerance: 0.0,
+        seam: false,
+    });
+    let a = s.edges.len();
+    s.edges.push(Edge {
+        interval: [x.interval[0], t],
+        end: v,
+        ..x
+    });
+    s.edges.push(Edge {
+        interval: [t, x.interval[1]],
+        start: v,
+        ..x
+    });
+    for l in &mut s.faces[k].loops {
+        let Loop::Edges(list) = l else { continue };
+        let Some(i) = list.iter().position(|u| u.edge == e) else {
+            continue;
+        };
+        let u = list[i];
+        let mut run = vec![Use { edge: a, ..u }, Use { edge: a + 1, ..u }];
+        if u.sense == Sense::Reversed {
+            run.reverse();
+        }
+        list.splice(i..=i, run);
+    }
+    (v, [a, a + 1])
+}
+
+#[test]
+fn a_t_junction_is_split_and_sewn() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &tilted())
+        .unwrap()
+        .0;
+    let mut s = unshared(&plain(&b), 1e-7);
+    // Face 0's copy of its first edge split at a third of the way along:
+    // its neighbour's copy stays whole.
+    let Loop::Edges(list) = &s.faces[0].loops[0] else {
+        panic!("a loop of edges")
+    };
+    let e = list[0].edge;
+    let [t0, t1] = s.edges[e].interval;
+    split_use(&mut s, 0, e, t0 + (t1 - t0) / 3.0);
+    let names = names::names(OpKey(7), &s);
+    let (h, journal, report) = heal_ok(&s);
+    // The neighbour's edge is split there too: one vertex and one edge
+    // more than the block.
+    let (c, d) = (h.counts(), b.counts());
+    assert_eq!(
+        (c.faces, c.edges, c.vertices),
+        (d.faces, d.edges + 1, d.vertices + 1)
+    );
+    assert_eq!(report.split.len(), 1);
+    assert_ne!(report.split[0], names.edges[e]);
+    assert!(journal.events().iter().any(|x| matches!(
+        x,
+        Event::Split { parent, children } if *parent == report.split[0] && children.len() == 2
+    )));
+    assert_eq!(report.sewn.len(), 13);
+}
+
+#[test]
+fn two_t_junctions_in_one_loop_are_split_and_sewn() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &tilted())
+        .unwrap()
+        .0;
+    let p = plain(&b);
+    let mut s = unshared(&p, 1e-7);
+    // The neighbours' copies of face 0's first two edges each split a
+    // third of the way along: face 0 keeps both whole, so its one loop
+    // is split twice.
+    let Loop::Edges(list) = &p.faces[0].loops[0] else {
+        panic!("a loop of edges")
+    };
+    let copies: Vec<(usize, usize)> = list[..2]
+        .iter()
+        .map(|u| {
+            (1..p.faces.len())
+                .find_map(|k| {
+                    let Loop::Edges(other) = &p.faces[k].loops[0] else {
+                        return None;
+                    };
+                    let i = other.iter().position(|w| w.edge == u.edge)?;
+                    let Loop::Edges(copy) = &s.faces[k].loops[0] else {
+                        return None;
+                    };
+                    Some((k, copy[i].edge))
+                })
+                .unwrap()
+        })
+        .collect();
+    for (k, e) in copies {
+        let [t0, t1] = s.edges[e].interval;
+        split_use(&mut s, k, e, t0 + (t1 - t0) / 3.0);
+    }
+    let (h, _, report) = heal_ok(&s);
+    let (c, d) = (h.counts(), b.counts());
+    assert_eq!(
+        (c.faces, c.edges, c.vertices),
+        (d.faces, d.edges + 2, d.vertices + 2)
+    );
+    assert_eq!(report.split.len(), 2);
+}
+
+#[test]
+fn a_t_junction_near_an_end_leaves_its_short_piece_out() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &tilted())
+        .unwrap()
+        .0;
+    let mut s = unshared(&plain(&b), 1e-7);
+    // Face 0's copy of its first edge split 50 nm before its end, the
+    // short piece with no tolerance of its own.
+    let Loop::Edges(list) = &s.faces[0].loops[0] else {
+        panic!("a loop of edges")
+    };
+    let e = list[0].edge;
+    let t1 = s.edges[e].interval[1];
+    let (_, [_, short]) = split_use(&mut s, 0, e, t1 - 5e-8);
+    let names = names::names(OpKey(7), &s);
+    let (h, journal, report) = heal_ok(&s);
+    assert_eq!(h.counts(), b.counts());
+    assert!(report.split.is_empty());
+    assert_eq!(report.collapsed, [names.edges[short]]);
+    assert!(
+        journal
+            .events()
+            .contains(&Event::Deleted(names.edges[short]))
+    );
+}
+
+#[test]
+fn an_edge_through_a_pole_is_split_there() {
+    use crate::geom::{Circle, Frame, Plane, Point3, Sphere};
+    // A hemisphere bounded by a meridian: one closed edge from the north
+    // pole round through the south pole, as some writers frame a sphere.
+    let o = Point3::new(0.0, 0.0, 0.0);
+    let (x, y, z) = (
+        Vector3::new(1.0, 0.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+        Vector3::new(0.0, 0.0, 1.0),
+    );
+    let sphere = Sphere::new(Frame::new(o, z, x).unwrap(), 1.0).unwrap();
+    let plane = Plane::new(Frame::new(o, y * -1.0, x).unwrap());
+    // From (0, 0, 1) at t = 0 through (1, 0, 0) and (0, 0, -1).
+    let circle = Circle::new(Frame::new(o, y, z).unwrap(), 1.0).unwrap();
+    let use_ = |sense| Use {
+        edge: 0,
+        sense,
+        pcurve: None,
+    };
+    let s = Shape {
+        surfaces: vec![Surface::Sphere(sphere), Surface::Plane(plane)],
+        curves: vec![Curve::Circle(circle)],
+        curves2: vec![],
+        vertices: vec![Vertex {
+            point: Point3::new(0.0, 0.0, 1.0),
+            tolerance: 0.0,
+            seam: false,
+        }],
+        edges: vec![Edge {
+            curve: 0,
+            interval: [0.0, core::f64::consts::TAU],
+            start: 0,
+            end: 0,
+            tolerance: 0.0,
+        }],
+        faces: vec![
+            Face {
+                surface: 0,
+                sense: Sense::Forward,
+                loops: vec![Loop::Edges(vec![use_(Sense::Forward)])],
+                tolerance: 0.0,
+            },
+            Face {
+                surface: 1,
+                sense: Sense::Forward,
+                loops: vec![Loop::Edges(vec![use_(Sense::Reversed)])],
+                tolerance: 0.0,
+            },
+        ],
+        shells: vec![Shell {
+            faces: vec![0, 1],
+            closed: true,
+        }],
+        solids: vec![Solid {
+            outer: 0,
+            voids: vec![],
+        }],
+    };
+    let names = names::names(OpKey(7), &s);
+    let (h, journal, report) = heal_ok(&s);
+    let c = h.counts();
+    assert_eq!((c.faces, c.edges, c.vertices), (2, 2, 2));
+    assert_eq!(report.split, [names.edges[0]]);
+    assert!(journal.events().iter().any(|e| matches!(
+        e,
+        Event::Split { parent, children } if *parent == names.edges[0] && children.len() == 2
+    )));
+    // The new vertex is the south pole.
+    assert!(
+        h.vertices()
+            .any(|v| h.vertices[v].point.distance(Point3::new(0.0, 0.0, -1.0)) < 1e-15)
+    );
+}
+
 /// A plate with a round hole through it.
 fn plate() -> Body {
     use crate::boolean::{BooleanOp, Tool, ToolKey, boolean};
@@ -1121,6 +1334,40 @@ fn a_solid_in_a_cavity_is_a_solid_of_its_own() {
         .collect();
     shells.sort();
     assert_eq!(shells, [1, 2]);
+}
+
+#[test]
+fn faces_that_overlap_are_refused() {
+    // Two blocks stacked, one shell each: the top of the lower one lies
+    // on the bottom of the upper one.
+    let lower = primitive::block(OpKey(1), 1.0, 1.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let upper = primitive::block(
+        OpKey(2),
+        1.0,
+        1.0,
+        1.0,
+        &Rigid::translation(Vector3::new(0.0, 0.0, 1.0)),
+    )
+    .unwrap()
+    .0;
+    let s = joined(&plain(&lower), &plain(&upper));
+    assert!(matches!(
+        heal(OpKey(7), &s, &HealOptions::default()),
+        Err(Error::InvalidHeal(HealError::FacesOverlap { .. }))
+    ));
+    // Side by side with a gap, they heal.
+    let apart = primitive::block(
+        OpKey(2),
+        1.0,
+        1.0,
+        1.0,
+        &Rigid::translation(Vector3::new(0.0, 0.0, 1.5)),
+    )
+    .unwrap()
+    .0;
+    heal_ok(&joined(&plain(&lower), &plain(&apart)));
 }
 
 #[test]

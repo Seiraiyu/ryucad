@@ -23,12 +23,25 @@
 //! Which faces make a shell is the build's to find out (see `shells`).
 //! What the edges' and vertices' new places leave as gaps the tolerances
 //! cover later (see `gaps`).
+//!
+//! A T-junction, where one face splits an edge its neighbour leaves
+//! whole, is sewn too. Before pairing, a free edge is split where a free
+//! vertex of another face lies within the cap of it, farther than the
+//! cap from its ends, and an edge of that face runs from the vertex
+//! along it (its other end within the cap of the edge too): the pieces
+//! keep its curve, its parameter and its use's pcurve, and are named as
+//! parts of it after the vertices it was split at ([`Event::Split`]).
+//! After pairing, a free open edge whose two ends were joined (the short
+//! piece of a split within the cap of the neighbour's vertex), no longer
+//! than the cap, is removed from its loop ([`Event::Deleted`]), unless
+//! that would leave the loop with no edges.
 
 use super::names::Names;
-use super::{Edge, Loop, Shape, Vertex};
+use super::{Edge, Loop, Shape, Use, Vertex};
 use crate::geom::{Box3, Curve, Point3, Vector3};
 use crate::name::{Event, Journal, Name, OpKey, Role};
 use crate::tol::LINEAR_RESOLUTION;
+use crate::topo::Sense;
 use crate::{Error, HealError};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -42,6 +55,10 @@ pub(super) struct Sewn {
     pub(super) edges: Vec<Name>,
     /// Vertices made by joining the file's.
     pub(super) vertices: Vec<Name>,
+    /// The file's edges split at T-junctions.
+    pub(super) split: Vec<Name>,
+    /// Free edges whose ends sewing joined, removed.
+    pub(super) removed: Vec<Name>,
     pub(super) journal: Journal,
 }
 
@@ -147,13 +164,135 @@ pub(super) fn find(parent: &mut [usize], mut i: usize) -> usize {
     i
 }
 
+/// The parameter of the foot of `p` on edge `e` and its distance, where
+/// the foot lies inside the edge's interval.
+fn foot(s: &Shape, e: &Edge, p: Point3) -> Option<(f64, f64)> {
+    let curve = &s.curves[e.curve];
+    let [lo, hi] = e.interval;
+    let f = curve.project(p);
+    let t = match curve.period() {
+        Some(per) => lo + (f.param - lo).rem_euclid(per),
+        None => f.param,
+    };
+    (lo < t && t < hi).then_some((t, f.distance))
+}
+
+/// Splits free edges at T-junctions (see the module's notes), recording
+/// what it did in `out`.
+fn split_at_ts(key: OpKey, s: &mut Shape, names: &mut Names, cap: f64, out: &mut Sewn) {
+    let uses = uses_of(s);
+    let free: Vec<usize> = (0..s.edges.len()).filter(|&e| uses[e].len() == 1).collect();
+    if free.len() < 2 {
+        return;
+    }
+    // Each free vertex and the free open edges ending there.
+    let mut at: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for &e in &free {
+        let x = &s.edges[e];
+        if x.start != x.end {
+            at.entry(x.start).or_default().push(e);
+            at.entry(x.end).or_default().push(e);
+        }
+    }
+    let mut by_x: Vec<(f64, usize)> = at.keys().map(|&v| (s.vertices[v].point.x, v)).collect();
+    by_x.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut cuts: Vec<(usize, Vec<(f64, usize)>)> = Vec::new();
+    for &e in &free {
+        let x = s.edges[e];
+        if x.start == x.end {
+            continue;
+        }
+        let face = uses[e][0].0;
+        let reach = s.curves[x.curve].bounds(x.interval).grow(cap);
+        let first = by_x.partition_point(|&(px, _)| px < reach.min().x);
+        let ends = [s.vertices[x.start].point, s.vertices[x.end].point];
+        let mut here: Vec<(f64, usize)> = Vec::new();
+        for &(px, v) in &by_x[first..] {
+            if px > reach.max().x {
+                break;
+            }
+            let p = s.vertices[v].point;
+            if v == x.start || v == x.end || !reach.intersects(&Box3::from_point(p)) {
+                continue;
+            }
+            if ends.iter().any(|q| q.distance(p) <= cap) {
+                continue;
+            }
+            let Some((t, d)) = foot(s, &x, p) else {
+                continue;
+            };
+            if d > cap {
+                continue;
+            }
+            // An edge of another face runs from the vertex along this one.
+            let along = at[&v].iter().any(|&g| {
+                let y = &s.edges[g];
+                let w = if y.start == v { y.end } else { y.start };
+                uses[g][0].0 != face && to_edge(s, &x, s.vertices[w].point) <= cap
+            });
+            if along {
+                here.push((t, v));
+            }
+        }
+        if here.is_empty() {
+            continue;
+        }
+        here.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        here.dedup_by_key(|c| c.1);
+        cuts.push((e, here));
+    }
+    for (e, here) in cuts {
+        let x = s.edges[e];
+        let mut parents = vec![names.edges[e]];
+        parents.extend(here.iter().map(|c| names.vertices[c.1]));
+        let mut stops = vec![(x.interval[0], x.start)];
+        stops.extend(here.iter().copied());
+        stops.push((x.interval[1], x.end));
+        let mut pieces: Vec<usize> = Vec::new();
+        for (i, w) in stops.windows(2).enumerate() {
+            s.edges.push(Edge {
+                interval: [w[0].0, w[1].0],
+                start: w[0].1,
+                end: w[1].1,
+                ..x
+            });
+            pieces.push(s.edges.len() - 1);
+            let part = u8::try_from(i).unwrap_or(u8::MAX);
+            names
+                .edges
+                .push(Name::derive(key, Role::Part(part), &parents));
+        }
+        let children: Vec<Name> = pieces.iter().map(|&p| names.edges[p]).collect();
+        out.split.push(names.edges[e]);
+        out.journal.push(Event::Split {
+            parent: names.edges[e],
+            children,
+        });
+        // Looked up again: an earlier split in this loop moved the uses.
+        let (k, l, _) = uses[e][0];
+        let Loop::Edges(list) = &mut s.faces[k].loops[l] else {
+            unreachable!("an edge's use is in a loop of edges")
+        };
+        let i = list.iter().position(|u| u.edge == e).unwrap();
+        let u = list[i];
+        let mut run: Vec<Use> = pieces.iter().map(|&p| Use { edge: p, ..u }).collect();
+        if u.sense == Sense::Reversed {
+            run.reverse();
+        }
+        list.splice(i..=i, run);
+    }
+    out.split.sort();
+}
+
 /// Sews the free edges of `s` in place. New edges' and vertices' names
 /// are pushed onto `names`.
 pub(super) fn sew(key: OpKey, s: &mut Shape, names: &mut Names, cap: f64) -> Result<Sewn, Error> {
+    let mut out = Sewn::default();
+    split_at_ts(key, s, names, cap, &mut out);
     let uses = uses_of(s);
     let free: Vec<usize> = (0..s.edges.len()).filter(|&e| uses[e].len() == 1).collect();
     if free.is_empty() {
-        return Ok(Sewn::default());
+        return Ok(out);
     }
     // Candidate pairs: boxes grown by the cap, swept along x.
     let boxes: Vec<Box3> = free
@@ -222,7 +361,6 @@ pub(super) fn sew(key: OpKey, s: &mut Shape, names: &mut Names, cap: f64) -> Res
         taken.insert(b);
         chosen.push((a, b, same));
     }
-    let mut out = Sewn::default();
     if chosen.is_empty() {
         return Ok(out);
     }
@@ -319,6 +457,29 @@ pub(super) fn sew(key: OpKey, s: &mut Shape, names: &mut Names, cap: f64) -> Res
             }
         }
     }
+    // Free open edges whose ends were joined, short enough to go.
+    let gone: Vec<usize> = free
+        .iter()
+        .copied()
+        .filter(|&e| {
+            let x = &s.edges[e];
+            !taken.contains(&e)
+                && x.start != x.end
+                && vertex_to[x.start] == vertex_to[x.end]
+                && super::collapse::length(s, x) <= cap
+        })
+        .collect();
+    for e in gone {
+        let (k, l, _) = uses[e][0];
+        let Loop::Edges(list) = &mut s.faces[k].loops[l] else {
+            unreachable!("an edge's use is in a loop of edges")
+        };
+        if list.len() > 1 {
+            list.retain(|u| u.edge != e);
+            out.removed.push(names.edges[e]);
+            out.journal.push(Event::Deleted(names.edges[e]));
+        }
+    }
     for e in &mut s.edges {
         e.start = vertex_to[e.start];
         e.end = vertex_to[e.end];
@@ -332,6 +493,7 @@ pub(super) fn sew(key: OpKey, s: &mut Shape, names: &mut Names, cap: f64) -> Res
     }
     out.edges.sort();
     out.vertices.sort();
+    out.removed.sort();
     Ok(out)
 }
 

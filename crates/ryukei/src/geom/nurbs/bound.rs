@@ -455,9 +455,10 @@ impl Net {
     }
 }
 
-/// Bounds on one Bézier patch over a local box `[s, t]`. As for curves,
-/// the derivative nets are taken over the whole patch before the cut.
-fn patch_piece(patch: &BezierPatch, s: [f64; 2], t: [f64; 2]) -> SurfaceBound {
+/// Bounds on one Bézier patch over a local box `[s, t]`, and on its
+/// first derivatives' lengths `|S_u|` and `|S_v|`. As for curves, the
+/// derivative nets are taken over the whole patch before the cut.
+fn patch_piece(patch: &BezierPatch, s: [f64; 2], t: [f64; 2]) -> (SurfaceBound, [f64; 2]) {
     let [p, q] = patch.degrees;
     let net = Net {
         pts: patch.pts.iter().map(|h| hom(h.p, h.w)).collect(),
@@ -471,13 +472,16 @@ fn patch_piece(patch: &BezierPatch, s: [f64; 2], t: [f64; 2]) -> SurfaceBound {
         rows: net.rows,
         cols: net.cols,
     };
-    let unbounded = SurfaceBound {
-        duu: f64::INFINITY,
-        duv: f64::INFINITY,
-        dvv: f64::INFINITY,
-        turn_u: f64::INFINITY,
-        turn_v: f64::INFINITY,
-    };
+    let unbounded = (
+        SurfaceBound {
+            duu: f64::INFINITY,
+            duv: f64::INFINITY,
+            dvv: f64::INFINITY,
+            turn_u: f64::INFINITY,
+            turn_v: f64::INFINITY,
+        },
+        [f64::INFINITY; 2],
+    );
     let [ru, rv] = patch.range;
     let (Some(iu), Some(iv)) = (
         pt(1.0).checked_div(pt(ru[1]) - pt(ru[0])),
@@ -521,19 +525,33 @@ fn patch_piece(patch: &BezierPatch, s: [f64; 2], t: [f64; 2]) -> SurfaceBound {
             f64::INFINITY
         }
     };
-    SurfaceBound {
-        duu: norm_hi(suu),
-        duv: norm_hi(suv),
-        dvv: norm_hi(svv),
-        turn_u: turn(add3(cross3(suu, sv), cross3(su, suv))),
-        turn_v: turn(add3(cross3(suv, sv), cross3(su, svv))),
-    }
+    (
+        SurfaceBound {
+            duu: norm_hi(suu),
+            duv: norm_hi(suv),
+            dvv: norm_hi(svv),
+            turn_u: turn(add3(cross3(suu, sv), cross3(su, suv))),
+            turn_v: turn(add3(cross3(suv, sv), cross3(su, svv))),
+        },
+        [norm_hi(su), norm_hi(sv)],
+    )
 }
 
 impl NurbsSurface {
     /// Bounds on the derivatives over the part of the box inside the
     /// domain (periodic directions wrap).
-    pub fn derivative_bound(&self, [ru, rv]: [[f64; 2]; 2]) -> SurfaceBound {
+    pub fn derivative_bound(&self, range: [[f64; 2]; 2]) -> SurfaceBound {
+        self.derivative_bounds(range).0
+    }
+
+    /// Bounds on the first derivatives' lengths, `|S_u|` and `|S_v|`,
+    /// over the part of the box inside the domain.
+    pub fn first_bound(&self, range: [[f64; 2]; 2]) -> [f64; 2] {
+        self.derivative_bounds(range).1
+    }
+
+    /// [`Self::derivative_bound`] and [`Self::first_bound`] at once.
+    pub fn derivative_bounds(&self, [ru, rv]: [[f64; 2]; 2]) -> (SurfaceBound, [f64; 2]) {
         let (pu, pv) = self.periods();
         let [du, dv] = self.domain();
         let (cu, cv) = (clip(du, pu, ru), clip(dv, pv, rv));
@@ -544,6 +562,7 @@ impl NurbsSurface {
             turn_u: 0.0,
             turn_v: 0.0,
         };
+        let mut first = [0.0f64; 2];
         for patch in self.patches() {
             for &a in &cu {
                 let Some(s) = local(patch.range[0], a) else {
@@ -553,7 +572,8 @@ impl NurbsSurface {
                     let Some(t) = local(patch.range[1], b) else {
                         continue;
                     };
-                    let x = patch_piece(patch, s, t);
+                    let (x, d) = patch_piece(patch, s, t);
+                    first = [first[0].max(d[0]), first[1].max(d[1])];
                     out = SurfaceBound {
                         duu: out.duu.max(x.duu),
                         duv: out.duv.max(x.duv),
@@ -564,13 +584,38 @@ impl NurbsSurface {
                 }
             }
         }
-        out
+        (out, first)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_bounds_hold() {
+        // A torus's exact rational form: |S_u| and |S_v| at a grid of
+        // points of each box stay within the box's bound.
+        use crate::geom::{Frame, Surface, Torus};
+        let torus = Surface::Torus(Torus::new(Frame::WORLD, 2.0, 0.5).unwrap());
+        let tau = core::f64::consts::TAU;
+        let (n, _) = torus.to_nurbs([[0.0, tau], [0.0, tau]]).unwrap();
+        for i in 0..8 {
+            for j in 0..8 {
+                let (u0, v0) = (tau * f64::from(i) / 8.0, tau * f64::from(j) / 8.0);
+                let b = [[u0, u0 + 0.3], [v0, v0 + 0.5]];
+                let [bu, bv] = n.first_bound(b);
+                for a in 0..=4 {
+                    for c in 0..=4 {
+                        let (u, v) = (u0 + 0.3 * f64::from(a) / 4.0, v0 + 0.5 * f64::from(c) / 4.0);
+                        let e = n.eval(u, v);
+                        assert!(e.du.length() <= bu && e.dv.length() <= bv, "{u} {v}");
+                    }
+                }
+                assert!(bu.is_finite() && bv.is_finite());
+            }
+        }
+    }
 
     #[test]
     fn clipping_ranges() {

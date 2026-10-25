@@ -3,3 +3,5 @@
 *.ps1 text eol=crlf
 # Fuzz seeds are raw bytes: never normalize their line endings.
 fuzz/corpus/** binary
+# The committed STEP corpus is kept byte for byte as published.
+crates/ryustep/tests/corpus/*.stp binary

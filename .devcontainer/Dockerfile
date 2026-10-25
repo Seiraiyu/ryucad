@@ -4,12 +4,13 @@ ARG USERNAME=dev
 
 # OCCT is only for the `occt` comparison in ryukei-bench; the default
 # build never links it. Debian's 7.8 packages put a header the meshing
-# code needs (NCollection_AliasedArray.hxx) in the visualization package.
+# code needs (NCollection_AliasedArray.hxx) in the visualization package;
+# the data exchange package is for reading and writing STEP.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential ca-certificates curl git less pkg-config procps sudo \
+        build-essential ca-certificates curl git less pkg-config procps sudo unzip \
         libocct-foundation-dev libocct-modeling-data-dev libocct-modeling-algorithms-dev \
-        libocct-visualization-dev libtbb-dev \
+        libocct-visualization-dev libocct-data-exchange-dev libtbb-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Mesa's software Vulkan (lavapipe): the container has no GPU, and

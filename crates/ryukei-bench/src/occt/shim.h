@@ -50,5 +50,8 @@ std::unique_ptr<Shape> chamfer(const Shape &s, rust::Slice<const double> edges,
                                rust::Slice<const uint32_t> modes,
                                rust::Slice<const double> sizes,
                                rust::Slice<const double> faces);
+std::unique_ptr<Shape> step_read(rust::Str path, bool fix);
+void step_write(const Shape &s, rust::Str path, bool ap242);
+rust::Vec<double> solid_props(const Shape &s);
 
 } // namespace ryukei_occt

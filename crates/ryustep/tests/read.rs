@@ -145,3 +145,90 @@ fn reading_is_the_same_on_one_thread_and_many() {
     let dump = |m: &Model| m.bodies[0].result.as_ref().unwrap().0.dump();
     assert_eq!(dump(&a), dump(&one));
 }
+
+/// A block 1 by 2 by 3 written as a file, in meters.
+fn block_file() -> String {
+    use ryukei::geom::Rigid;
+    use ryustep::{Product, WriteModel, WriteOptions, write};
+    let b = ryukei::primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let bytes = write(
+        &WriteModel {
+            products: vec![Product {
+                id: "block".into(),
+                name: "block".into(),
+                bodies: vec![b],
+                children: vec![],
+            }],
+        },
+        &WriteOptions::default(),
+    )
+    .unwrap();
+    String::from_utf8(bytes).unwrap()
+}
+
+/// The entity name of instance `id` in `text`.
+fn kind(text: &str, id: u64) -> String {
+    let start = text.find(&format!("\n#{id}=")).unwrap() + format!("\n#{id}=").len();
+    text[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect()
+}
+
+#[test]
+fn refusals_name_the_files_instances() {
+    let text = block_file();
+    // Every import name of a body read comes from a vertex, an edge or a
+    // face of the file.
+    let m = read(text.as_bytes(), &opts()).unwrap();
+    let b = &m.bodies[0];
+    assert_eq!(b.instances.len(), 8 + 12 + 6);
+    let (body, _, _) = b.result.as_ref().unwrap();
+    for e in body.edges() {
+        let id = b.instances[&body.edge(e).unwrap().name];
+        assert_eq!(kind(&text, id), "EDGE_CURVE");
+    }
+    // A face left out of the shell: the free edges it leaves are named
+    // by their EDGE_CURVEs.
+    let at = text.find("CLOSED_SHELL('',(").unwrap() + "CLOSED_SHELL('',(".len();
+    let comma = at + text[at..].find(',').unwrap();
+    let open = format!("{}{}", &text[..at], &text[comma + 1..]);
+    let m = read(open.as_bytes(), &opts()).unwrap();
+    let b = &m.bodies[0];
+    let Err(ImportError::Heal(ryukei::HealError::OpenShell { free_edges })) = &b.result else {
+        panic!("{:?}", b.result)
+    };
+    assert_eq!(free_edges.len(), 4);
+    for n in free_edges {
+        assert_eq!(kind(&open, b.instances[n]), "EDGE_CURVE");
+    }
+}
+
+#[test]
+fn representations_holding_one_solid_read_alike() {
+    // A second representation of the block's solid, in its context.
+    let text = block_file();
+    let id_of = |name: &str| -> u64 {
+        let at = text.find(&format!("={name}(")).unwrap();
+        let start = text[..at].rfind('#').unwrap() + 1;
+        text[start..at].parse().unwrap()
+    };
+    let brep = id_of("MANIFOLD_SOLID_BREP");
+    let rep = text.find("=ADVANCED_BREP_SHAPE_REPRESENTATION(").unwrap();
+    let line_end = rep + text[rep..].find(';').unwrap();
+    let context = &text[text[..line_end].rfind('#').unwrap()..line_end - 1];
+    let end = text.rfind("ENDSEC;").unwrap();
+    let twice = format!(
+        "{}#900000=SHAPE_REPRESENTATION('',(#{brep}),{context});\n{}",
+        &text[..end],
+        &text[end..]
+    );
+    let m = read(twice.as_bytes(), &opts()).unwrap();
+    assert_eq!(m.bodies.len(), 2);
+    let dump = |k: usize| m.bodies[k].result.as_ref().unwrap().0.dump();
+    assert_eq!(dump(0), dump(1));
+    assert_eq!(m.bodies[0].instances, m.bodies[1].instances);
+    assert_eq!(m.bodies[1].representation, 900000);
+}

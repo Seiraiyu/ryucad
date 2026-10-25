@@ -35,10 +35,22 @@ use std::sync::Arc;
 /// taken for a cycle.
 const DEPTH: usize = 64;
 
+/// The instance each vertex, edge and face of a shape came from, by
+/// index: a `VERTEX_POINT` (a poly loop's `CARTESIAN_POINT`), an
+/// `EDGE_CURVE` (the `POLY_LOOP` a line edge was first made for) and a
+/// face.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Sources {
+    pub(crate) vertices: Vec<Id>,
+    pub(crate) edges: Vec<Id>,
+    pub(crate) faces: Vec<Id>,
+}
+
 /// Builds one item's shape, keeping each instance's entry.
 struct Builder<'a, 'g> {
     g: &'a Geo<'g>,
     s: Shape,
+    sources: Sources,
     vertices: BTreeMap<Id, usize>,
     edges: BTreeMap<Id, usize>,
     surfaces: BTreeMap<Id, usize>,
@@ -48,11 +60,12 @@ struct Builder<'a, 'g> {
 }
 
 /// The shape of B-rep items `items`, one representation's: a solid
-/// each, sharing what they share.
-pub(crate) fn shape(g: &Geo, items: &[Id]) -> Result<Shape, ImportError> {
+/// each, sharing what they share, and where its entities came from.
+pub(crate) fn shape(g: &Geo, items: &[Id]) -> Result<(Shape, Sources), ImportError> {
     let mut b = Builder {
         g,
         s: Shape::default(),
+        sources: Sources::default(),
         vertices: BTreeMap::new(),
         edges: BTreeMap::new(),
         surfaces: BTreeMap::new(),
@@ -82,7 +95,7 @@ pub(crate) fn shape(g: &Geo, items: &[Id]) -> Result<Shape, ImportError> {
             _ => return Err(crate::schema::wrong(item, "a B-rep item")),
         }
     }
-    Ok(b.s)
+    Ok((b.s, b.sources))
 }
 
 impl Builder<'_, '_> {
@@ -171,6 +184,7 @@ impl Builder<'_, '_> {
             loops,
             tolerance: 0.0,
         });
+        self.sources.faces.push(id);
         Ok(self.s.faces.len() - 1)
     }
 
@@ -198,6 +212,7 @@ impl Builder<'_, '_> {
             tolerance: 0.0,
             seam,
         });
+        self.sources.vertices.push(id);
         self.vertices.insert(id, self.s.vertices.len() - 1);
         Ok(self.s.vertices.len() - 1)
     }
@@ -252,6 +267,7 @@ impl Builder<'_, '_> {
                         tolerance: 0.0,
                         seam: false,
                     });
+                    self.sources.vertices.push(p);
                     self.points.insert(p, self.s.vertices.len() - 1);
                     self.s.vertices.len() - 1
                 }
@@ -276,6 +292,7 @@ impl Builder<'_, '_> {
                         end: key.1,
                         tolerance: 0.0,
                     });
+                    self.sources.edges.push(id);
                     self.lines.insert(key, self.s.edges.len() - 1);
                     self.s.edges.len() - 1
                 }
@@ -322,6 +339,7 @@ impl Builder<'_, '_> {
             end,
             tolerance: 0.0,
         });
+        self.sources.edges.push(id);
         self.edges.insert(id, self.s.edges.len() - 1);
         Ok((self.s.edges.len() - 1, e.same_sense))
     }

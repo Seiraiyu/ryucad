@@ -1,0 +1,46 @@
+# The pinned corpus: third parties' files, never committed, fetched by
+# scripts/fetch-corpus.sh into a cache (target/corpus, or $RYUCAD_CORPUS)
+# and read by ryukei-bench's `step` test in the devcontainer.
+#
+# fetch <path in the cache> <SHA-256> <URL> [unzip]
+fetch nist-pmi-step-files.zip 8fa78429e6d8d9b0d7681d223b6aa9ec98c3772185c55b1a0e3679b21c181911 https://www.nist.gov/document/nist-pmi-step-files unzip
+fetch occt/linkrods.step 3674e4b01ee0e983c81ed170f0574cda201ad08e0f7b46e05e4f4613400fd5f7 https://raw.githubusercontent.com/Open-Cascade-SAS/OCCT/V7_8_1/data/step/linkrods.step
+fetch occt/screw.step 4b3649a4f5c4f05c7a06a402a91fe2fd7e3cba1615520fbd8c62a62610ad3e69 https://raw.githubusercontent.com/Open-Cascade-SAS/OCCT/V7_8_1/data/step/screw.step
+#
+# heals <bodies healed, at least> <path>: the pass rate, which must not
+# fall. Raise a count when a change heals more.
+heals 1 NIST-PMI-STEP-Files/nist_ctc_01_asme1_ap242-e1.stp
+heals 2 NIST-PMI-STEP-Files/nist_ctc_02_asme1_ap242-e2.stp
+heals 2 NIST-PMI-STEP-Files/nist_ctc_03_asme1_ap242-e2.stp
+heals 1 NIST-PMI-STEP-Files/nist_ctc_04_asme1_ap242-e1.stp
+heals 1 NIST-PMI-STEP-Files/nist_ctc_05_asme1_ap242-e1.stp
+heals 3 NIST-PMI-STEP-Files/nist_ftc_06_asme1_ap242-e2.stp
+heals 1 NIST-PMI-STEP-Files/nist_ftc_07_asme1_ap242-e2.stp
+heals 0 NIST-PMI-STEP-Files/nist_ftc_08_asme1_ap242-e1-tg.stp
+heals 1 NIST-PMI-STEP-Files/nist_ftc_08_asme1_ap242-e2.stp
+heals 1 NIST-PMI-STEP-Files/nist_ftc_09_asme1_ap242-e1.stp
+heals 1 NIST-PMI-STEP-Files/nist_ftc_10_asme1_ap242-e2.stp
+heals 1 NIST-PMI-STEP-Files/nist_ftc_11_asme1_ap242-e2.stp
+heals 1 NIST-PMI-STEP-Files/nist_stc_06_asme1_ap242-e3.stp
+heals 5 NIST-PMI-STEP-Files/nist_stc_07_asme1_ap242-e3.stp
+heals 2 NIST-PMI-STEP-Files/nist_stc_08_asme1_ap242-e3.stp
+heals 1 NIST-PMI-STEP-Files/nist_stc_09_asme1_ap242-e3.stp
+heals 1 NIST-PMI-STEP-Files/nist_stc_10_asme1_ap242-e2.stp
+heals 1 NIST-PMI-STEP-Files/AP203 geometry only/nist_ctc_01_asme1_rd.stp
+heals 2 NIST-PMI-STEP-Files/AP203 geometry only/nist_ctc_02_asme1_rc.stp
+heals 1 NIST-PMI-STEP-Files/AP203 geometry only/nist_ctc_03_asme1_rc.stp
+heals 1 NIST-PMI-STEP-Files/AP203 geometry only/nist_ctc_04_asme1_rd.stp
+heals 2 NIST-PMI-STEP-Files/AP203 geometry only/nist_ctc_05_asme1_rd.stp
+heals 1 NIST-PMI-STEP-Files/AP203 geometry only/nist_ftc_06_asme1_rd.stp
+heals 1 NIST-PMI-STEP-Files/AP203 geometry only/nist_ftc_07_asme1_rd.stp
+heals 1 NIST-PMI-STEP-Files/AP203 geometry only/nist_ftc_08_asme1_rc.stp
+heals 2 NIST-PMI-STEP-Files/AP203 geometry only/nist_ftc_09_asme1_rd.stp
+heals 1 NIST-PMI-STEP-Files/AP203 geometry only/nist_ftc_10_asme1_rb.stp
+heals 1 NIST-PMI-STEP-Files/AP203 geometry only/nist_ftc_11_asme1_rb.stp
+heals 2 NIST-PMI-STEP-Files/AP203 with PMI/nist_ctc_01_asme1_ap203.stp
+heals 1 NIST-PMI-STEP-Files/AP203 with PMI/nist_ctc_02_asme1_ap203.stp
+heals 2 NIST-PMI-STEP-Files/AP203 with PMI/nist_ctc_03_asme1_ap203.stp
+heals 1 NIST-PMI-STEP-Files/AP203 with PMI/nist_ctc_04_asme1_ap203.stp
+heals 2 NIST-PMI-STEP-Files/AP203 with PMI/nist_ctc_05_asme1_ap203.stp
+heals 1 occt/linkrods.step
+heals 0 occt/screw.step

@@ -14,13 +14,14 @@
 //!    the caller's key and a hash of its geometry as read (see
 //!    [`ImportRole`]), before anything changes.
 //! 2. **Sewing.** Edges the file repeats on two faces are joined, and the
-//!    vertices at their ends (see `sew`).
+//!    vertices at their ends, an edge split where it meets a neighbour's
+//!    vertex first (a T-junction; see `sew`).
 //! 3. **Uses.** Every edge must then be used twice: a shell that leaves
 //!    an edge used once is open, one that uses it more often is
 //!    non-manifold.
 //! 4. **Seams and poles.** Seam edges come out of periodic faces, vertex
-//!    loops at poles go, and edges a seam split are joined again (see
-//!    `unseam`).
+//!    loops at poles go, edges a seam split are joined again, and edges
+//!    running through a pole are split there (see `unseam`).
 //! 5. **Orientation.** Loops run the way their faces' regions need,
 //!    where the loops alone fix it, and faces are turned over until every
 //!    edge is used once each way (see `orient`).
@@ -39,7 +40,9 @@
 //!    edge.
 //! 10. **Build.** The shape is laid out and built through Euler operators
 //!     ([`crate::layout`]), every connected piece a solid of its own, and
-//!     renamed with the names of step 1. Each shell's volume then says
+//!     renamed with the names of step 1. Faces on one surface that
+//!     overlap in an area are refused ([`crate::check::check_overlaps`]).
+//!     Each shell's volume then says
 //!     which way it faces and which encloses which; shells facing the
 //!     wrong way are turned over, cavities go in the solids around them,
 //!     and the body is built again if anything changed (see `shells`).
@@ -63,6 +66,7 @@ mod shells;
 mod tighten;
 mod unseam;
 
+pub use names::{Names as ImportNames, names as import_names};
 pub use seamed::seamed;
 
 use crate::Error;
@@ -187,8 +191,12 @@ pub struct HealReport {
     /// across collapsed ones.
     pub merged: Vec<Name>,
     /// Edges shorter than their tolerance and slivers narrower than it,
-    /// removed.
+    /// removed, and free edges whose ends sewing joined.
     pub collapsed: Vec<Name>,
+    /// The file's edges split: where a neighbour's vertex lay on them (a
+    /// T-junction), so their pieces could be sewn, or where they ran
+    /// through a pole or apex of a face's surface.
+    pub split: Vec<Name>,
     /// Seam edges removed.
     pub seams: Vec<Name>,
     /// Faces some of whose loops ran against the region they bound, and
@@ -226,6 +234,7 @@ pub fn heal(
     let sewn = sew::sew(key, &mut shape, &mut names, options.tolerance_cap)?;
     build::uses(&shape, &names)?;
     let unseamed = unseam::unseam(key, &mut shape, &mut names, options.tolerance_cap)?;
+    let at_poles = unseam::split_at_poles(key, &mut shape, &mut names);
     let reversed = orient::loops(&mut shape, &names)?;
     let turned = orient::faces(&mut shape, &names)?;
     let tightened = tighten::tighten(&mut shape, &names, options.tolerance_cap);
@@ -236,6 +245,7 @@ pub fn heal(
     }
     let mut pcurves = pcurves::pcurves(&shape, &names)?;
     let first = build::assemble(key, &shape, &names, &pcurves, None)?;
+    overlaps(&first)?;
     let index: BTreeMap<Name, usize> = names
         .faces
         .iter()
@@ -266,6 +276,7 @@ pub fn heal(
     let turned: Vec<Name> = turned.into_iter().collect();
     let mut journal = sewn.journal;
     journal.append(unseamed.journal);
+    journal.append(at_poles.journal);
     journal.append(collapsed.journal);
     journal.append(created);
     for &f in &reversed {
@@ -284,11 +295,33 @@ pub fn heal(
     report.sewn.sort();
     report.merged = [sewn.vertices, collapsed.vertices].concat();
     report.merged.sort();
-    report.collapsed = collapsed.removed;
+    report.collapsed = [sewn.removed, collapsed.removed].concat();
+    report.collapsed.sort();
+    report.split = [sewn.split, at_poles.split].concat();
+    report.split.sort();
     report.seams = unseamed.seams;
     report.poles = unseamed.poles;
     report.joined = unseamed.joined;
     Ok((body, journal, report))
+}
+
+/// Refuses a body two of whose faces on one surface overlap in an area,
+/// naming the least pair.
+fn overlaps(body: &Body) -> Result<(), Error> {
+    let pair = crate::check::check_overlaps(body)
+        .into_iter()
+        .filter_map(|f| match f {
+            crate::check::Fault::FacesOverlap { a, b } => {
+                let (x, y) = (body.faces[a].name, body.faces[b].name);
+                Some((x.min(y), x.max(y)))
+            }
+            _ => None,
+        })
+        .min();
+    match pair {
+        Some((a, b)) => Err(crate::HealError::FacesOverlap { a, b }.into()),
+        None => Ok(()),
+    }
 }
 
 fn malformed(what: &'static str) -> Error {

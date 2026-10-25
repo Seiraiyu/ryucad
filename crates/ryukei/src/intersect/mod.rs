@@ -32,7 +32,9 @@ pub(crate) use coincide::coincident;
 pub use cs::{CurveHit, Side, curve_surface};
 pub use face::{Contact, FaceMeet, Rim, Stretch, face_box, face_face};
 pub(crate) use face::{shifted, shifts};
-pub(crate) use fit::{fit_along, fit_on, fit_pcurve, fit_pcurve_by, fit_pcurve_within};
+pub(crate) use fit::{
+    fit_along, fit_on, fit_pcurve, fit_pcurve_by, fit_pcurve_within, pcurve_certified,
+};
 pub(crate) use implicit::curve_distance;
 pub use inface::{Place, point_in_face};
 pub use pipe::Cell;
