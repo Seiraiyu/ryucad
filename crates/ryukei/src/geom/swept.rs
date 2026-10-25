@@ -303,6 +303,14 @@ impl Extrusion {
     /// The extrusion moved by a rigid transform; parameters are unchanged.
     /// The view along the direction is turned with it rather than built
     /// again, so this never fails.
+    /// The extrusion reflected by `m`: its curve reflected with its
+    /// parameter kept, along the reflected direction, so parameters are
+    /// unchanged and the natural normal `C' × d` turns against the
+    /// mirrored geometry. The view along the direction is built again.
+    pub(super) fn mirrored(&self, m: &super::Mirror) -> Result<Self, Error> {
+        Self::from_unit(self.curve.mirrored(m)?, m.apply_unit(self.dir))
+    }
+
     pub(super) fn transformed(&self, r: &Rigid) -> Self {
         let flat = match &self.flat {
             Flat::Along { origin } => Flat::Along {
@@ -663,6 +671,20 @@ impl Revolution {
 
     /// The revolution moved by a rigid transform; parameters are
     /// unchanged.
+    /// The revolution reflected by `m`: its curve reflected with its
+    /// parameter kept, in the frame [`super::Mirror::frame_reversed`]
+    /// gives, whose xz plane holds it. The angle `u` runs the other way.
+    pub(super) fn mirrored(&self, m: &super::Mirror) -> Result<Self, Error> {
+        let (frame, curve) = (m.frame_reversed(&self.frame)?, self.curve.mirrored(m)?);
+        let bounds = revolved_box(&frame, &curve.bounds(curve.domain()));
+        Ok(Self {
+            frame,
+            curve,
+            poles: self.poles,
+            bounds,
+        })
+    }
+
     pub(super) fn transformed(&self, r: &Rigid) -> Self {
         let (frame, curve) = (self.frame.transformed(r), self.curve.transformed(r));
         let bounds = revolved_box(&frame, &curve.bounds(curve.domain()));

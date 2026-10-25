@@ -1,8 +1,9 @@
-//! Moving a body.
+//! Moving and mirroring a body.
 
-use super::Body;
+use super::{Body, Curve2Id, FinId};
 use crate::Error;
-use crate::geom::Rigid;
+use crate::geom::{Mirror, ParamFlip, Plane, Rigid, Surface};
+use std::collections::BTreeMap;
 
 impl Body {
     /// A copy moved by `r`: every vertex, curve and surface transformed;
@@ -20,6 +21,95 @@ impl Body {
         }
         for s in b.surfaces.values_mut() {
             *s = s.transformed(r);
+        }
+        if crate::check::outside_size_box(&b) {
+            return Err(Error::OutsideSizeBox);
+        }
+        Ok(b)
+    }
+
+    /// Its mirror image in `plane`: every vertex, curve and surface
+    /// reflected, each curve keeping its parameters ([`Curve::mirrored`])
+    /// and each surface mapping its own as [`Surface::mirrored`] says,
+    /// with every pcurve mapped to match. A reflection turns the faces'
+    /// loops clockwise, so every loop runs the other way, and a face whose
+    /// surface keeps its parameters (a NURBS or an extrusion) takes the
+    /// other sense, so every face still points out of the solid. Names and
+    /// tolerances are unchanged. Fails with `OutsideSizeBox` when anything
+    /// leaves the size box.
+    ///
+    /// [`Curve::mirrored`]: crate::geom::Curve::mirrored
+    pub fn mirrored(&self, plane: &Plane) -> Result<Body, Error> {
+        let m = Mirror::in_plane_of(plane.frame());
+        let mut b = self.clone();
+        for v in b.vertices.values_mut() {
+            v.point = m.apply_point(v.point);
+        }
+        for c in b.curves.values_mut() {
+            *c = c.mirrored(&m)?;
+        }
+        let mut flips: Vec<ParamFlip> = vec![ParamFlip::Kept; b.surfaces.slot_count()];
+        for (id, s) in self.surfaces.live() {
+            let (mirrored, flip): (Surface, ParamFlip) = s.mirrored(&m)?;
+            b.surfaces[id] = mirrored;
+            flips[id.index()] = flip;
+        }
+        // A pcurve shared by faces whose surfaces map alike is mapped
+        // once; one shared across maps is copied for each map but the
+        // first.
+        let mut mapped: BTreeMap<Curve2Id, ParamFlip> = BTreeMap::new();
+        let mut copies: BTreeMap<(Curve2Id, u8), Curve2Id> = BTreeMap::new();
+        let fins: Vec<FinId> = b.fins.live().map(|(f, _)| f).collect();
+        for f in fins {
+            let face = b.loops[b.fins[f].loop_].face;
+            let flip = flips[b.faces[face].surface.index()];
+            let Some(p) = b.fins[f].pcurve else { continue };
+            let kind = match flip {
+                ParamFlip::Kept => 0,
+                ParamFlip::U(_) => 1,
+                ParamFlip::V(_) => 2,
+            };
+            let curve = match mapped.get(&p.curve) {
+                None => {
+                    let c = self.curves2[p.curve].mirrored(flip);
+                    b.curves2[p.curve] = c;
+                    mapped.insert(p.curve, flip);
+                    p.curve
+                }
+                Some(done) if *done == flip => p.curve,
+                Some(_) => *copies.entry((p.curve, kind)).or_insert_with(|| {
+                    let c = self.curves2[p.curve].mirrored(flip);
+                    b.curves2.push(c)
+                }),
+            };
+            if let Some(pc) = b.fins[f].pcurve.as_mut() {
+                pc.curve = curve;
+            }
+        }
+        // Every loop runs the other way: its fins in reverse order, each
+        // against its edge as it ran with it. Each ring of fins round an
+        // edge is reversed too, so the radial order stays consistent.
+        for fin in b.fins.values_mut() {
+            core::mem::swap(&mut fin.next, &mut fin.prev);
+            fin.sense = fin.sense.flipped();
+        }
+        let edges: Vec<_> = b.edges.live().map(|(e, x)| (e, x.fin)).collect();
+        for (_, first) in edges {
+            let mut ring = vec![first];
+            let mut f = self.fins[first].around;
+            while f != first {
+                ring.push(f);
+                f = self.fins[f].around;
+            }
+            for (i, &f) in ring.iter().enumerate() {
+                b.fins[f].around = ring[(i + ring.len() - 1) % ring.len()];
+            }
+        }
+        let faces: Vec<_> = b.faces.live().map(|(f, x)| (f, x.surface)).collect();
+        for (f, s) in faces {
+            if flips[s.index()].flips_normal() {
+                b.faces[f].sense = b.faces[f].sense.flipped();
+            }
         }
         if crate::check::outside_size_box(&b) {
             return Err(Error::OutsideSizeBox);

@@ -5,7 +5,7 @@
 
 use super::curve::check_length;
 use super::ellipse::nearest_on_ellipse;
-use super::{Box2, CurveEval2, NurbsCurve2, Point2, Projection, Vector2, polar_angle};
+use super::{Box2, CurveEval2, NurbsCurve2, ParamFlip, Point2, Projection, Vector2, polar_angle};
 use crate::Error;
 use crate::math;
 use core::f64::consts::TAU;
@@ -286,6 +286,35 @@ impl Curve2 {
             Self::Nurbs2(n) => n.bounds([t0, t1]),
         }
     }
+
+    /// The curve with its parameter plane mapped by `flip`, as a mirrored
+    /// surface maps it ([`super::Surface::mirrored`]). Its own parameter
+    /// is unchanged: a circle or an ellipse whose plane is reflected runs
+    /// the other way round.
+    pub fn mirrored(&self, flip: ParamFlip) -> Self {
+        let f = |p: Point2| flip.apply(p);
+        let v = |d: Vector2| flip.apply_vector(d);
+        let frame = |fr: &Frame2| Frame2 {
+            origin: f(fr.origin),
+            x: v(fr.x),
+            y: v(fr.y),
+        };
+        match self {
+            Self::Line2(l) => Self::Line2(Line2 {
+                origin: f(l.origin),
+                dir: v(l.dir),
+            }),
+            Self::Circle2(c) => Self::Circle2(Circle2 {
+                frame: frame(&c.frame),
+                ..*c
+            }),
+            Self::Ellipse2(e) => Self::Ellipse2(Ellipse2 {
+                frame: frame(&e.frame),
+                ..*e
+            }),
+            Self::Nurbs2(n) => Self::Nurbs2(Arc::new(n.mapped(f))),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -299,6 +328,26 @@ mod tests {
 
     fn close(a: Vector2, b: Vector2) -> bool {
         (a - b).length() <= 1e-14
+    }
+
+    #[test]
+    fn mirrored_pcurves_follow_their_planes() {
+        let f = Frame2::new(Point2::new(1.0, 2.0), Vector2::new(1.0, 0.5), true).unwrap();
+        let circle = Curve2::Circle2(Circle2::new(f, 0.5).unwrap());
+        let nurbs = circle.to_nurbs([0.0, PI]).unwrap().0;
+        for c in [
+            Curve2::Line2(Line2::new(Point2::new(1.0, 0.0), Vector2::new(0.3, 1.0)).unwrap()),
+            circle,
+            Curve2::Ellipse2(Ellipse2::new(f, 2.0, 1.0).unwrap()),
+            Curve2::Nurbs2(Arc::new(nurbs)),
+        ] {
+            for flip in [ParamFlip::Kept, ParamFlip::U(TAU), ParamFlip::V(0.0)] {
+                let r = c.mirrored(flip);
+                for t in [0.1, 1.0, 2.5] {
+                    assert!(near(flip.apply(c.point(t)), r.point(t)), "{c:?} {flip:?}");
+                }
+            }
+        }
     }
 
     #[test]

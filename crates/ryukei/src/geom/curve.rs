@@ -1,6 +1,6 @@
 use super::{
-    Box3, CurveEval, Ellipse, Frame, NurbsCurve, Point3, Projection, Rigid, UnitVector3, Vector3,
-    polar_angle,
+    Box3, CurveEval, Ellipse, Frame, Mirror, NurbsCurve, Point3, Projection, Rigid, UnitVector3,
+    Vector3, polar_angle,
 };
 use crate::Error;
 use crate::math;
@@ -307,6 +307,25 @@ impl Curve {
             Self::Nurbs(n) => Self::Nurbs(Arc::new(n.transformed(r))),
         }
     }
+
+    /// The curve reflected by `m`. Parameters are unchanged: a circle or
+    /// an ellipse takes [`Mirror::frame`], whose angles run as its own
+    /// did. Fails with `OutsideSizeBox` when a frame's origin leaves the
+    /// size box.
+    pub fn mirrored(&self, m: &Mirror) -> Result<Self, Error> {
+        Ok(match self {
+            Self::Line(l) => Self::Line(Line {
+                origin: m.apply_point(l.origin),
+                dir: m.apply_unit(l.dir),
+            }),
+            Self::Circle(c) => Self::Circle(Circle {
+                frame: m.frame(&c.frame)?,
+                radius: c.radius,
+            }),
+            Self::Ellipse(e) => Self::Ellipse(e.mirrored(m)?),
+            Self::Nurbs(n) => Self::Nurbs(Arc::new(n.mapped(|p| m.apply_point(p)))),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -326,6 +345,35 @@ mod tests {
         )
         .unwrap();
         Curve::Circle(Circle::new(f, 2.0).unwrap())
+    }
+
+    #[test]
+    fn mirrors_keep_parameters() {
+        let m = Mirror::new(
+            Point3::new(0.5, -1.0, 2.0),
+            Vector3::new(1.0, 0.3, -0.6).normalize().unwrap(),
+        );
+        let f = Frame::new(
+            Point3::new(1.0, 2.0, 3.0),
+            Vector3::new(0.2, 0.0, 1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap();
+        let circle = Curve::Circle(Circle::new(f, 2.0).unwrap());
+        let nurbs = circle.to_nurbs([0.0, PI]).unwrap().0;
+        for c in [
+            Curve::Line(
+                Line::new(Point3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 1.0)).unwrap(),
+            ),
+            circle,
+            Curve::Ellipse(Ellipse::new(f, 2.0, 1.0).unwrap()),
+            Curve::Nurbs(Arc::new(nurbs)),
+        ] {
+            let r = c.mirrored(&m).unwrap();
+            for t in [0.1, 1.0, 2.5] {
+                assert!(near(m.apply_point(c.point(t)), r.point(t)), "{c:?} at {t}");
+            }
+        }
     }
 
     #[test]
