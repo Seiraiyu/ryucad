@@ -418,8 +418,10 @@ pub fn check(
     }
     let r = session.rebuilt(part)?.clone();
     let scope = Rebuilt(&r);
+    let mut on = Vec::new();
     for (role, c) in f.connectors() {
         let found = resolve(id, role, c, &scope)?;
+        on.push((found.instance.clone(), found.copy.clone()));
         if f.instance_pattern().is_some() && found.copy.is_some() {
             return Err(Error::new(
                 Code::InvalidParam,
@@ -428,6 +430,17 @@ pub fn check(
             .with("feature", id)
             .with("role", role));
         }
+    }
+    if f.mate().is_some() && on[0] == on[1] {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!(
+                "{id}: both its connectors are on {}; a mate joins two instances",
+                on[0].0
+            ),
+        )
+        .with("feature", id)
+        .with("param", "b"));
     }
     Ok(())
 }
@@ -803,6 +816,122 @@ pub fn after_moves(
         .with("conflicting", conflicting));
     }
     Ok(free)
+}
+
+/// The assemblies a write to `part` may leave stale: `part` itself if it
+/// is one, then every assembly that places it at `working`, at any depth,
+/// nearest first.
+fn reached(project: &crate::doc::project::Project, part: &Id) -> Vec<Id> {
+    let assembly = |id: &Id| {
+        project
+            .parts
+            .get(id)
+            .is_some_and(|p| crate::server::part_kind(p) == crate::doc::files::PartKind::Assembly)
+    };
+    let mut out: Vec<Id> = Vec::new();
+    if assembly(part) {
+        out.push(part.clone());
+    }
+    let mut todo = vec![part.clone()];
+    while let Some(child) = todo.pop() {
+        for (id, p) in &project.parts {
+            let places = p.features.values().any(|f| {
+                matches!(f, Ok(Feature::Instance(i))
+                    if i.part == child && i.rev == crate::doc::assembly::Rev::Working)
+            });
+            if places && !out.contains(id) {
+                out.push(id.clone());
+                todo.push(id.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Of the assemblies a write to `part` may reach, those whose stored
+/// poses hold now (or that have nothing to solve): the ones
+/// [`keep_current`] keeps so.
+pub fn current(session: &mut crate::session::Session, part: &Id) -> Result<Vec<Id>> {
+    let mut out = Vec::new();
+    for a in reached(session.project(), part) {
+        // With nothing to solve, its poses are as stored.
+        let held = session
+            .rebuilt(&a)?
+            .solve
+            .as_ref()
+            .is_none_or(|s| s.report.converged && !s.stale());
+        if held {
+            out.push(a);
+        }
+    }
+    Ok(out)
+}
+
+/// After a write: writes the solved poses of each assembly of `before`,
+/// current until then, that the write left stale, in the same change.
+/// One whose mates now fail is left as it was. Each is reported:
+/// `{"part", "ok", "moved"}`, with its error when it failed.
+pub fn keep_current(session: &mut crate::session::Session, before: &[Id]) -> Result<Vec<Value>> {
+    let mut out = Vec::new();
+    for a in before {
+        if !session.project().parts.contains_key(a) {
+            continue;
+        }
+        let r = session.rebuilt(a)?.clone();
+        let Some(solve) = &r.solve else {
+            continue;
+        };
+        if !solve.report.converged {
+            let error = r
+                .features
+                .iter()
+                .find_map(|(_, f)| {
+                    f.as_ref()
+                        .err()
+                        .filter(|e| e.code == Code::AssemblyUnsolved)
+                })
+                .cloned();
+            out.push(json!({"part": a, "ok": false, "error": error}));
+            continue;
+        }
+        if !solve.stale() {
+            continue;
+        }
+        let p = session.project().part(a)?.clone();
+        let moved = Moved {
+            result: r.clone(),
+            held: false,
+            moves: Vec::new(),
+        };
+        let writes = moved.writes(&p);
+        let refs: Vec<(&Id, &Feature)> = writes.iter().map(|(id, f)| (id, f)).collect();
+        crate::server::save(session, a, &refs, crate::server::order(&p)?)?;
+        let ids: Vec<&Id> = writes.iter().map(|(id, _)| id).collect();
+        out.push(json!({"part": a, "ok": true, "moved": ids}));
+    }
+    Ok(out)
+}
+
+/// Refuses a write that would leave assembly `proposed`'s mates unable to
+/// all hold, where they hold now: `assembly_overconstrained`, with the
+/// conflicting mates. One that fails already is left to fail.
+pub fn refuse_overconstrained(session: &mut crate::session::Session, proposed: Part) -> Result<()> {
+    let id = proposed.id.clone();
+    let holds =
+        |r: &crate::rebuild::PartResult| r.solve.as_ref().is_none_or(|s| s.report.converged);
+    if !holds(session.rebuilt(&id)?) {
+        return Ok(());
+    }
+    let r = session.rebuilt_as(proposed)?;
+    match &r.solve {
+        Some(s) if !s.report.converged => Err(Error::new(
+            Code::AssemblyOverconstrained,
+            format!("that would leave {id}'s mates unable to all hold"),
+        )
+        .with("part", &id)
+        .with("conflicting", s.mate_ids(&s.report.conflicting))),
+        _ => Ok(()),
+    }
 }
 
 /// `assembly.solve`: assembly `part` solved as it is, or with `moves`
@@ -1339,7 +1468,16 @@ mod protocol_tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::WrongPartKind);
-        assert!(add(&mut s, json!({"a": good, "b": "frame/base"})).is_ok());
+        // A mate of an instance with itself says nothing.
+        let e = add(&mut s, json!({"a": good, "b": "frame/base"})).unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "instance", "id": "pin", "of": "bolt"}),
+        )
+        .unwrap();
+        assert!(add(&mut s, json!({"a": good, "b": "frame/pin"})).is_ok());
     }
 }
 
@@ -1493,5 +1631,117 @@ mod move_tests {
             (&pin["solve"]["dof"], &pin["solve"]["state"]),
             (&json!(1), &json!("under"))
         );
+    }
+}
+
+#[cfg(test)]
+mod current_tests {
+    use super::tests::face;
+    use crate::assembly::tests::{id, project};
+    use crate::error::Code;
+    use crate::server::tests::call;
+    use serde_json::json;
+
+    /// The plate fixed and the bolt free in `frame`, and the faces a
+    /// revolute stands the bolt on.
+    fn placed() -> (tempfile::TempDir, crate::session::Session, String, String) {
+        let (dir, mut s) = project();
+        let top = face(&mut s, "plate", "slab", [0.0, 0.0, 1.0]);
+        let foot = face(&mut s, "bolt", "shank", [0.0, 0.0, -1.0]);
+        for (inst, of, fixed) in [("base", "plate", true), ("pin", "bolt", false)] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "frame", "type": "instance", "id": inst, "of": of,
+                       "fixed": fixed, "placement": {"origin": ["50 mm", 0, 0]}}),
+            )
+            .unwrap();
+        }
+        (
+            dir,
+            s,
+            format!("frame/base/slab/{top}"),
+            format!("frame/pin/shank/{foot}"),
+        )
+    }
+
+    fn stale(s: &mut crate::session::Session) -> bool {
+        s.rebuilt(&id("frame"))
+            .unwrap()
+            .solve
+            .as_ref()
+            .unwrap()
+            .stale()
+    }
+
+    #[test]
+    fn writes_keep_assemblies_current() {
+        let (_dir, mut s, a, b) = placed();
+        let v = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "mate", "id": "m1", "form": "revolute", "a": a,
+                   "b": b, "a_offset": {"origin": ["20 mm", 0, 0]}, "b_offset": {"flip": true}}),
+        )
+        .unwrap();
+        assert_eq!(
+            v["assemblies"],
+            json!([{"part": "frame", "ok": true, "moved": ["pin"]}])
+        );
+        assert!(!stale(&mut s));
+        let show = call(
+            &mut s,
+            "feature.show",
+            json!({"part": "frame", "id": "pin"}),
+        )
+        .unwrap();
+        let z = show["pose"]["origin_m"][2].as_f64().unwrap();
+        assert!((z - 0.005).abs() < 1e-9, "{z}");
+        // The plate made thicker: the pin follows its top, written.
+        let v = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "plate", "id": "slab", "params": {"z": 8}}),
+        )
+        .unwrap();
+        assert_eq!(v["assemblies"][0]["moved"], json!(["pin"]));
+        assert!(!stale(&mut s));
+        let show = call(
+            &mut s,
+            "feature.show",
+            json!({"part": "frame", "id": "pin"}),
+        )
+        .unwrap();
+        let z = show["pose"]["origin_m"][2].as_f64().unwrap();
+        assert!((z - 0.008).abs() < 1e-9, "{z}");
+        // The offset edited: the pin moves along.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1", "a_offset": {"origin": ["30 mm", 0, 0]}}),
+        )
+        .unwrap();
+        assert!(!stale(&mut s));
+        // A write that would make the mates conflict is refused, and leaves
+        // the files as they were.
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "mate", "id": "m2", "form": "revolute", "a": a,
+                   "b": b, "a_offset": {"origin": ["40 mm", 0, 0]}, "b_offset": {"flip": true}}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::AssemblyOverconstrained);
+        assert_eq!(e.details["conflicting"], json!([["m1", "m2"]]));
+        let list = call(&mut s, "feature.list", json!({"part": "frame"})).unwrap();
+        assert_eq!(list["features"].as_array().unwrap().len(), 3);
+        // Deleting the mate leaves the pin where it is: nothing to solve.
+        let v = call(
+            &mut s,
+            "feature.delete",
+            json!({"part": "frame", "id": "m1"}),
+        )
+        .unwrap();
+        assert!(v.get("assemblies").is_none());
     }
 }

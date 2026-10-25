@@ -2599,8 +2599,20 @@ fn feature_add(
         crate::pattern::check_seeds(&proposed(p, &list, &[(&fid, &f)]), &fid, x)?;
     }
     check_references(session, &pid, &list, &fid, &f)?;
-    let revision = save(session, &pid, &[(&fid, &f)], list)?;
-    Ok(json!({"feature": feature_report(&pid, &fid, &f), "revision": revision}))
+    if crate::assembly::assembles(&f) {
+        let p = session.project().part(&pid)?;
+        let q = proposed(p, &list, &[(&fid, &f)]);
+        crate::mate::refuse_overconstrained(session, q)?;
+    }
+    let assemblies = crate::mate::current(session, &pid)?;
+    save(session, &pid, &[(&fid, &f)], list)?;
+    let assemblies = crate::mate::keep_current(session, &assemblies)?;
+    let revision = &session.project().part(&pid)?.revision;
+    let mut v = json!({"feature": feature_report(&pid, &fid, &f), "revision": revision});
+    if !assemblies.is_empty() {
+        v["assemblies"] = json!(assemblies);
+    }
+    Ok(v)
 }
 
 fn feature_edit(
@@ -2731,13 +2743,23 @@ fn feature_edit(
     if f.references() != old.references() || propagates(&f) != propagates(&old) {
         check_references(session, &pid, &list, &fid, &f)?;
     }
+    if crate::assembly::assembles(&f) {
+        let p = session.project().part(&pid)?;
+        let q = proposed(p, &list, &[(&fid, &f)]);
+        crate::mate::refuse_overconstrained(session, q)?;
+    }
     let before = crate::sketch::current(session, &pid)?;
+    let assemblies = crate::mate::current(session, &pid)?;
     save(session, &pid, &[(&fid, &f)], list)?;
     let sketches = crate::sketch::keep_current(session, &pid, &before)?;
+    let assemblies = crate::mate::keep_current(session, &assemblies)?;
     let revision = &session.project().part(&pid)?.revision;
     let mut v = json!({"feature": feature_report(&pid, &fid, &f), "revision": revision});
     if !sketches.is_empty() {
         v["sketches"] = json!(sketches);
+    }
+    if !assemblies.is_empty() {
+        v["assemblies"] = json!(assemblies);
     }
     Ok(v)
 }
@@ -2769,9 +2791,14 @@ fn feature_delete(
     }
     let mut list = order(p)?;
     list.retain(|f| *f != fid);
+    if part_kind(p) == PartKind::Assembly {
+        let q = proposed(p, &list, &[]);
+        crate::mate::refuse_overconstrained(session, q)?;
+    }
+    let assemblies = crate::mate::current(session, &pid)?;
     // The list first: a crash then leaves an unlisted file, never a listed
     // feature with no file.
-    let revision = save(session, &pid, &[], list)?;
+    save(session, &pid, &[], list)?;
     let path = feature_path(session.root(), &pid, &fid);
     match fs::remove_file(&path) {
         Ok(()) => {}
@@ -2779,7 +2806,13 @@ fn feature_delete(
         Err(e) => return Err(Error::io(&path, &e)),
     }
     session.reload()?;
-    Ok(json!({"deleted": fid, "revision": revision}))
+    let assemblies = crate::mate::keep_current(session, &assemblies)?;
+    let revision = &session.project().part(&pid)?.revision;
+    let mut v = json!({"deleted": fid, "revision": revision});
+    if !assemblies.is_empty() {
+        v["assemblies"] = json!(assemblies);
+    }
+    Ok(v)
 }
 
 fn feature_move(
