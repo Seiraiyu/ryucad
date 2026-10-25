@@ -1,0 +1,23 @@
+# What each body of the committed corpus becomes: file, representation,
+# outcome (ok, or the refusal in snake case), and for a healed body
+# OCCT's volume of its solid in mm³ (STEPControl_Reader and
+# ShapeFix_Shape, its exact B-rep volume).
+#
+# The nist_* files are NIST's MBE PMI test models, AP203 geometry only:
+# public domain, from https://www.nist.gov/document/nist-pmi-step-files.
+# Their MANIFOLD_SURFACE_SHAPE_REPRESENTATIONs are sheets (PMI support
+# geometry), refused as open shells until sheet bodies (phase 9).
+nist_ctc_01_asme1_rd.stp 13 ok 14642823.557384422
+nist_ctc_03_asme1_rc.stp 13 ok 331938.2721181821
+nist_ctc_04_asme1_rd.stp 14149 ok 17519087.703822747
+nist_ctc_04_asme1_rd.stp 14185 open_shell
+nist_ctc_05_asme1_rd.stp 6603 ok 12694921.730095677
+nist_ctc_05_asme1_rd.stp 6604 open_shell
+nist_ctc_05_asme1_rd.stp 6621 ok 12694921.730095677
+nist_ftc_06_asme1_rd.stp 13 ok 3323546.070780539
+nist_ftc_07_asme1_rd.stp 7830 ok 1726247.5791699165
+nist_ftc_08_asme1_rc.stp 7969 ok 503592.1753531928
+nist_ftc_09_asme1_rd.stp 5785 ok 136445.10482466174
+nist_ftc_09_asme1_rd.stp 5801 ok 136445.10482466174
+nist_ftc_10_asme1_rb.stp 6468 ok 188318.0666989932
+nist_ftc_11_asme1_rb.stp 199 ok 5129.38613642268
