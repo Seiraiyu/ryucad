@@ -1,0 +1,1 @@
+{"format":3,"kind":"ryucad.feature","type":"pattern","form":"linear","features":["k"],"direction":"x","spacing":"4 mm","count":"3","direction2":"y","spacing2":"3 mm","count2":"2","reverse2":true,"skip":[[2,1]],"targets":["b"]}
