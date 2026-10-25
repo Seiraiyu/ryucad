@@ -47,7 +47,7 @@ pub(super) struct Collapsed {
 }
 
 /// At least the length of edge `e`.
-fn length(s: &Shape, e: &Edge) -> f64 {
+pub(super) fn length(s: &Shape, e: &Edge) -> f64 {
     let [t0, t1] = e.interval;
     match &s.curves[e.curve] {
         Curve::Line(_) => t1 - t0,

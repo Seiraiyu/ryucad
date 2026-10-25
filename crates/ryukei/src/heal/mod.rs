@@ -14,7 +14,8 @@
 //!    the caller's key and a hash of its geometry as read (see
 //!    [`ImportRole`]), before anything changes.
 //! 2. **Sewing.** Edges the file repeats on two faces are joined, and the
-//!    vertices at their ends (see `sew`).
+//!    vertices at their ends, an edge split where it meets a neighbour's
+//!    vertex first (a T-junction; see `sew`).
 //! 3. **Uses.** Every edge must then be used twice: a shell that leaves
 //!    an edge used once is open, one that uses it more often is
 //!    non-manifold.
@@ -188,10 +189,11 @@ pub struct HealReport {
     /// across collapsed ones.
     pub merged: Vec<Name>,
     /// Edges shorter than their tolerance and slivers narrower than it,
-    /// removed.
+    /// removed, and free edges whose ends sewing joined.
     pub collapsed: Vec<Name>,
-    /// The file's edges split where they ran through a pole or apex of a
-    /// face's surface.
+    /// The file's edges split: where a neighbour's vertex lay on them (a
+    /// T-junction), so their pieces could be sewn, or where they ran
+    /// through a pole or apex of a face's surface.
     pub split: Vec<Name>,
     /// Seam edges removed.
     pub seams: Vec<Name>,
@@ -290,8 +292,10 @@ pub fn heal(
     report.sewn.sort();
     report.merged = [sewn.vertices, collapsed.vertices].concat();
     report.merged.sort();
-    report.collapsed = collapsed.removed;
-    report.split = at_poles.split;
+    report.collapsed = [sewn.removed, collapsed.removed].concat();
+    report.collapsed.sort();
+    report.split = [sewn.split, at_poles.split].concat();
+    report.split.sort();
     report.seams = unseamed.seams;
     report.poles = unseamed.poles;
     report.joined = unseamed.joined;
