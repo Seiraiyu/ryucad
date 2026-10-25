@@ -99,7 +99,8 @@ pub struct FeatureFields {
     /// A sketch's origin plane: `xy`, `yz` or `zx`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plane: Option<String>,
-    /// A planar face to sketch on: `<part>/<feature>/<name>`.
+    /// A planar face to sketch on, or the face a chamfer's first distance
+    /// runs along: `<part>/<feature>/<name>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face: Option<String>,
     /// A sketch on a face: a vertex for its origin (`""` for the default,
@@ -125,7 +126,7 @@ pub struct FeatureFields {
     /// A revolve's axis: a line of its sketch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub axis: Option<String>,
-    /// A revolve's angle, or `"full"`.
+    /// A revolve's angle, or `"full"`; a chamfer's angle to its face.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub angle: Option<Value>,
     /// Revolve half the angle each side of the sketch's plane.
@@ -149,6 +150,36 @@ pub struct FeatureFields {
     /// A boolean's tool solids, which it consumes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
+    /// A fillet's or chamfer's groups, each as a file has it but with its
+    /// edges and face as `<part>/<feature>/<name>` (or `{feature, name}`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Value>,
+    /// Whether a fillet or chamfer grows each edge to its tangent chain
+    /// (true when left out of a new one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub propagate: Option<bool>,
+    /// A fillet's one group: its radius.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<Value>,
+    /// A fillet's or chamfer's one group: its edges, as
+    /// `<part>/<feature>/<name>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edges: Option<Vec<String>>,
+    /// A chamfer's one group: `equal` (the default), `distances` or
+    /// `distance_angle`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form: Option<String>,
+    /// A chamfer's one group: its distance along both faces (`equal`), or
+    /// along `face` (`distance_angle`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub d: Option<Value>,
+    /// A chamfer's one group, by `distances`: its distance along `face`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub d1: Option<Value>,
+    /// A chamfer's one group, by `distances`: its distance along the other
+    /// face.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub d2: Option<Value>,
 }
 
 impl FeatureFields {

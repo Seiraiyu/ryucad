@@ -2,6 +2,7 @@
 //! parameters and a feature. Each reads from and writes to a JSON value;
 //! the file system is [`super::project`]'s business.
 
+use super::blend::{Chamfer, Fillet};
 use super::id::{Id, ProjectId};
 use super::reference::Reference;
 use super::sketch::Sketch;
@@ -69,6 +70,8 @@ pub enum Feature {
     Extrude(Extrude),
     Revolve(Revolve),
     Boolean(Boolean),
+    Fillet(Fillet),
+    Chamfer(Chamfer),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -316,6 +319,7 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
                 }
             }
             ("constraints", c) => out.extend(Sketch::expression_strings(c)),
+            ("groups", g) => out.extend(super::blend::expression_strings(g)),
             ("extent", Value::Object(e)) => {
                 for (k, x) in e.iter_mut() {
                     if let ("length" | "offset", Value::String(s)) = (k.as_str(), x) {
@@ -342,13 +346,17 @@ pub fn manifest_format(v: &Value) -> u64 {
 
 /// The lowest format that holds a feature's JSON, judged from the JSON
 /// alone, as [`Feature::format`] judges a loaded feature: operations on
-/// solids are new in format 3, sketches and sweeps in format 2, and a
-/// primitive needs 2 only for an expression.
+/// solids, booleans, fillets and chamfers are new in format 3, sketches
+/// and sweeps in format 2, and a primitive needs 2 only for an
+/// expression.
 pub fn feature_format(v: &Value) -> u64 {
     let new = |o: &Value| o.as_str().is_none_or(|o| o == "new");
     if v.get("targets").is_some()
         || v.get("operation").is_some_and(|o| !new(o))
-        || v.get("type").and_then(Value::as_str) == Some("boolean")
+        || matches!(
+            v.get("type").and_then(Value::as_str),
+            Some("boolean" | "fillet" | "chamfer")
+        )
     {
         return 3;
     }
@@ -395,7 +403,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer"),
     )
     .with("type", s)
 }
@@ -409,6 +417,8 @@ impl Feature {
             Feature::Extrude(_) => "extrude",
             Feature::Revolve(_) => "revolve",
             Feature::Boolean(_) => "boolean",
+            Feature::Fillet(_) => "fillet",
+            Feature::Chamfer(_) => "chamfer",
         }
     }
 
@@ -422,7 +432,7 @@ impl Feature {
             Feature::Sketch(s) => s.format(),
             // New in format 2.
             Feature::Extrude(_) | Feature::Revolve(_) => 2,
-            Feature::Boolean(_) => 3,
+            Feature::Boolean(_) | Feature::Fillet(_) | Feature::Chamfer(_) => 3,
         }
     }
 
@@ -433,6 +443,8 @@ impl Feature {
             Feature::Extrude(e) => e.fields(),
             Feature::Revolve(r) => r.fields(),
             Feature::Boolean(b) => b.fields(),
+            Feature::Fillet(f) => f.fields(),
+            Feature::Chamfer(c) => c.fields(),
         };
         v["format"] = json!(self.format());
         v["kind"] = json!(FEATURE_KIND);
@@ -453,6 +465,8 @@ impl Feature {
             "extrude" => Feature::Extrude(Extrude::from_fields(&mut o, default, env)?),
             "revolve" => Feature::Revolve(Revolve::from_fields(&mut o, env)?),
             "boolean" => Feature::Boolean(Boolean::from_fields(&mut o)?),
+            "fillet" => Feature::Fillet(Fillet::from_fields(&mut o, default, env)?),
+            "chamfer" => Feature::Chamfer(Chamfer::from_fields(&mut o, default, env)?),
             _ => {
                 let ty = PrimitiveType::parse(ty).map_err(|e| e.with("pointer", "/type"))?;
                 Feature::Primitive(Primitive::from_fields(ty, &mut o, default, env)?)
@@ -477,15 +491,28 @@ impl Feature {
             Feature::Primitive(p) => Some(&p.combine),
             Feature::Extrude(e) => Some(&e.combine),
             Feature::Revolve(r) => Some(&r.combine),
-            Feature::Sketch(_) | Feature::Boolean(_) => None,
+            Feature::Sketch(_) | Feature::Boolean(_) | Feature::Fillet(_) | Feature::Chamfer(_) => {
+                None
+            }
         }
     }
 
     /// The solids it acts on, by their founders, in the order it names
-    /// them: an operation's targets, or a boolean's target then tools.
+    /// them: an operation's targets, a boolean's target then tools, or the
+    /// solids a fillet's or chamfer's references name, each once (one,
+    /// unless the file mixes them).
     pub fn targets(&self) -> Vec<&Id> {
         match self {
             Feature::Boolean(b) => b.solids().collect(),
+            Feature::Fillet(_) | Feature::Chamfer(_) => {
+                let mut out: Vec<&Id> = Vec::new();
+                for (_, r) in self.references() {
+                    if !out.contains(&&r.feature) {
+                        out.push(&r.feature);
+                    }
+                }
+                out
+            }
             f => f
                 .combine()
                 .map_or(Vec::new(), |c| c.targets.iter().collect()),
@@ -510,10 +537,13 @@ impl Feature {
 
     /// Its references to other features' faces, edges and vertices, each
     /// with its role in the feature (`plane`, `x`, `target`, `axis`,
-    /// `entities.<id>`), in a fixed order.
+    /// `entities.<id>`, `groups.<i>.edges.<j>`, `groups.<i>.face`), in a
+    /// fixed order.
     pub fn references(&self) -> Vec<(String, &Reference)> {
         match self {
             Feature::Sketch(s) => s.references(),
+            Feature::Fillet(f) => f.references(),
+            Feature::Chamfer(c) => c.references(),
             Feature::Extrude(e) => match &e.extent {
                 super::sweep::Extent::UpTo { target, .. } => vec![("target".to_owned(), target)],
                 _ => Vec::new(),
@@ -1021,6 +1051,38 @@ mod tests {
         assert_eq!(f.format(), 1);
         assert!(f.to_json().get("operation").is_none());
         assert_eq!(feature_format(&v), 1);
+    }
+
+    #[test]
+    fn blends_are_format_3() {
+        let name = "0123456789abcdef0123456789abcdef";
+        let v = json!({"format": 3, "kind": "ryucad.feature", "type": "fillet",
+                       "groups": [{"radius": "r", "edges": [{"feature": "b", "name": name}]}]});
+        let env = ParametersFile::from_json(&json!({
+            "format": 1, "kind": "ryucad.parameters", "parameters": {"r": "2 mm"}
+        }))
+        .unwrap()
+        .env();
+        let f = Feature::from_json(&v, Unit::Mm, &env).unwrap();
+        assert_eq!((f.type_name(), f.format()), ("fillet", 3));
+        assert_eq!(f.targets(), [&Id::parse("b", "feature").unwrap()]);
+        assert_eq!(f.references()[0].0, "groups.0.edges.0");
+        assert_eq!(f.to_json(), v);
+        assert_eq!(feature_format(&v), 3);
+        assert_eq!(feature_names(&v).into_iter().collect::<Vec<_>>(), ["r"]);
+        let mut w = v.clone();
+        assert!(rename_in_feature(&mut w, "r", "round"));
+        assert_eq!(w["groups"][0]["radius"], "round");
+        // A chamfer's references name its solids once each, faces too.
+        let v = json!({"format": 3, "kind": "ryucad.feature", "type": "chamfer",
+                       "groups": [{"form": "distances", "d1": "1 mm", "d2": "2 mm",
+                                   "face": {"feature": "c", "name": name},
+                                   "edges": [{"feature": "b", "name": name},
+                                             {"feature": "b", "name": name}]}]});
+        let f = Feature::from_json(&v, Unit::Mm, &env).unwrap();
+        let ids: Vec<&str> = f.targets().into_iter().map(Id::as_str).collect();
+        assert_eq!(ids, ["b", "c"]);
+        assert!(f.combine().is_none());
     }
 
     #[test]

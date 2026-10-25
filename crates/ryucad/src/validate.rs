@@ -1621,6 +1621,54 @@ pub(crate) mod tests {
         assert_eq!(c[0]["error"]["details"]["removed_by"], "skim");
     }
 
+    /// The name of the edge of an `inspect` body from `a` to `b` (meters).
+    fn edge_of(body: &Value, a: [f64; 3], b: [f64; 3]) -> String {
+        use crate::sketch::tests::{edge_between, vertex_at};
+        let (a, b) = (vertex_at(body, a), vertex_at(body, b));
+        edge_between(body, &a, &b)
+    }
+
+    #[test]
+    fn a_fillet_whose_edge_the_other_side_took_is_blamed_on_it() {
+        let mut m = boxed();
+        // Theirs rounds the box's top front edge.
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        let v = m.call("inspect", json!({"part": "p"})).unwrap();
+        let front = edge_of(&v["bodies"][0], [0.0, 0.0, 0.005], [0.01, 0.0, 0.005]);
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "fillet", "id": "round", "radius": 1,
+                   "edges": [format!("p/b/{front}")]}),
+        )
+        .unwrap();
+        m.commit("theirs: a rounded edge");
+        // Ours cuts the top millimetre away, and the edge with it.
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "skim", "operation": "cut",
+                   "params": {"x": 30, "y": 30, "z": 2}, "placement": {"origin": [-5, -5, 4]}}),
+        )
+        .unwrap();
+        m.commit("ours: the top skimmed");
+        m.merge("theirs");
+        let v = m.call("merge.status", json!({})).unwrap();
+        let c: Vec<&Value> = v["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["kind"] == "merge_broke")
+            .collect();
+        assert_eq!(c.len(), 1, "{v}");
+        assert_eq!(c[0]["concerns"]["feature"], "round");
+        assert_eq!(c[0]["cause"], "ours", "{v}");
+        assert_eq!(c[0]["error"]["code"], "reference_unresolved");
+        assert_eq!(c[0]["error"]["details"]["role"], "groups.0.edges.0");
+        assert_eq!(c[0]["error"]["details"]["removed_by"], "skim");
+    }
+
     #[test]
     fn a_sketch_the_merge_left_stale_is_solved_by_a_repair() {
         let mut m = boxed();
@@ -2045,6 +2093,58 @@ pub(crate) mod tests {
             (Some("p4"), Some("p6"))
         );
         assert!(s.get("conflicts").is_none());
+    }
+
+    #[test]
+    fn a_solid_added_under_one_id_is_renumbered_with_its_fillet() {
+        let mut m = boxed();
+        let add_box = |m: &mut Merging, x: i32| {
+            m.call(
+                "feature.add",
+                json!({"part": "p", "type": "box", "id": "box-2",
+                       "params": {"x": x, "y": 10, "z": 10},
+                       "placement": {"origin": [40, 0, 0]}}),
+            )
+            .unwrap();
+        };
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        add_box(&mut m, 30);
+        // Theirs rounds its box's vertical edges at x = 70 mm, in two sizes.
+        let v = m.call("inspect", json!({"part": "p"})).unwrap();
+        let body = v["bodies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["solid"] == "box-2")
+            .unwrap()
+            .clone();
+        let near = edge_of(&body, [0.07, 0.0, 0.0], [0.07, 0.0, 0.01]);
+        let far = edge_of(&body, [0.07, 0.01, 0.0], [0.07, 0.01, 0.01]);
+        let groups = json!([{"radius": 2, "edges": [format!("p/box-2/{near}")]},
+                            {"radius": 3, "edges": [format!("p/box-2/{far}")]}]);
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "fillet", "id": "round", "groups": groups}),
+        )
+        .unwrap();
+        m.commit("theirs: a rounded box");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        add_box(&mut m, 5);
+        m.commit("ours: a short box");
+        m.merge("theirs");
+        let r = renumber(&mut m, "parts/p/features/box-2.json#");
+        assert_eq!(r["status"]["clean"], true, "{r}");
+        // The fillet's edges follow theirs' box to its new ID, in both
+        // groups.
+        let show = m
+            .call("feature.show", json!({"part": "p", "id": "round"}))
+            .unwrap();
+        for g in show["groups"].as_array().unwrap() {
+            assert_eq!(g["edges"][0].as_str().unwrap()[..8], *"p/box-1/", "{g}");
+        }
+        m.call("rebuild", json!({"part": "p"})).unwrap();
     }
 
     #[test]

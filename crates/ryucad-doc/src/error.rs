@@ -184,6 +184,16 @@ pub enum Code {
     /// The service failed, or answered with a code this build doesn't know
     /// (in the details as `service_code`).
     ReviewFailed,
+    /// A fillet or chamfer whose edges belong to more than one solid: one
+    /// feature rounds or bevels one solid.
+    TargetsMixed,
+    /// An edge a fillet or chamfer rounds or bevels in two of its groups,
+    /// listed there or reached along a tangent chain.
+    EdgeListedTwice,
+    /// The kernel refused a fillet or chamfer: a radius too large, a blend
+    /// that runs off a face, a corner or surface it can't build yet. Its
+    /// reason and the edges and faces involved are in the details.
+    BlendFailed,
 }
 
 impl Code {
@@ -293,6 +303,9 @@ mod tests {
             json!(Code::ReviewForkNotInstalled),
             json!("review_fork_not_installed")
         );
+        assert_eq!(Code::TargetsMixed.exit_code(), 1);
+        assert_eq!(Code::EdgeListedTwice.exit_code(), 1);
+        assert_eq!(Code::BlendFailed.exit_code(), 1);
     }
 
     #[test]

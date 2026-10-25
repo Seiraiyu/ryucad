@@ -558,6 +558,215 @@ fn solids_are_sound() {
     }
 }
 
+/// The edge of an `inspect` body from the vertex at `a` to the one at `b`
+/// (meters), as a reference into solid `solid` of part `bl`.
+fn edge_between(body: &serde_json::Value, solid: &str, a: [f64; 3], b: [f64; 3]) -> String {
+    let vertex = |p: [f64; 3]| {
+        body["vertices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| (0..3).all(|k| (v["point"][k].as_f64().unwrap() - p[k]).abs() < 1e-9))
+            .map(|v| v["name"].as_str().unwrap().to_owned())
+            .unwrap_or_else(|| panic!("no vertex at {p:?}"))
+    };
+    let (a, b) = (vertex(a), vertex(b));
+    let e = body["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| (e["start"] == a && e["end"] == b) || (e["start"] == b && e["end"] == a))
+        .expect("an edge from a to b");
+    format!("bl/{solid}/{}", e["name"].as_str().unwrap())
+}
+
+/// The circle edge of an `inspect` body of radius `r` about a centre at
+/// `c` (meters), as a reference into solid `solid` of part `bl`.
+fn circle_at(body: &serde_json::Value, solid: &str, c: [f64; 3], r: f64) -> String {
+    let e = body["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| {
+            let o = &e["curve"]["frame"]["origin"];
+            e["curve"]["type"] == "circle"
+                && (e["curve"]["radius"].as_f64().unwrap() - r).abs() < 1e-12
+                && (0..3).all(|k| (o[k].as_f64().unwrap() - c[k]).abs() < 1e-12)
+        })
+        .unwrap_or_else(|| panic!("no circle at {c:?}"));
+    format!("bl/{solid}/{}", e["name"].as_str().unwrap())
+}
+
+/// A millimetre part of blends: a block's vertical edges rounded, a boss
+/// joined to it with its foot filled and its top bevelled at an angle,
+/// the top rim bevelled all round from one edge, a pocket whose walls and
+/// floor are rounded, and a drilled hole countersunk.
+fn blended() -> (tempfile::TempDir, ryucad::session::Session) {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    call(&mut s, "part.create", json!({"part": "bl"}));
+    call(
+        &mut s,
+        "param.set",
+        json!({"part": "bl", "parameters": {"corner": "4.1 mm", "foot": "1.3 mm"}}),
+    );
+    let add = |s: &mut ryucad::session::Session, f: serde_json::Value| {
+        let mut f = f;
+        f["part"] = json!("bl");
+        call(s, "feature.add", f);
+    };
+    let body = |s: &mut ryucad::session::Session, f: &str| {
+        call(s, "inspect", json!({"part": "bl", "feature": f}))["bodies"][0].clone()
+    };
+    let mm = |p: [f64; 3]| p.map(|x| x * 1e-3);
+    add(
+        &mut s,
+        json!({"type": "box", "id": "base", "params": {"x": "40 mm", "y": "30 mm", "z": "10 mm"}}),
+    );
+    let b = body(&mut s, "base");
+    let ups: Vec<String> = [[0.0, 0.0], [40.0, 0.0], [0.0, 30.0], [40.0, 30.0]]
+        .iter()
+        .map(|[x, y]| edge_between(&b, "base", mm([*x, *y, 0.0]), mm([*x, *y, 10.0])))
+        .collect();
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "corners", "radius": "corner", "edges": ups}),
+    );
+    add(
+        &mut s,
+        json!({"type": "cylinder", "id": "boss", "operation": "join",
+               "params": {"radius": "6 mm", "height": "8 mm"},
+               "placement": {"origin": ["20 mm", "15 mm", "10 mm"]}}),
+    );
+    let foot = circle_at(&body(&mut s, "boss"), "base", mm([20.0, 15.0, 10.0]), 6e-3);
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "foot", "radius": "foot", "edges": [foot]}),
+    );
+    let b = body(&mut s, "foot");
+    let rim = edge_between(&b, "base", mm([4.1, 0.0, 10.0]), mm([35.9, 0.0, 10.0]));
+    add(
+        &mut s,
+        json!({"type": "chamfer", "id": "rim", "d": "0.8 mm", "edges": [rim]}),
+    );
+    let lid = body(&mut s, "rim")["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            f["surface"]["type"] == "plane"
+                && (f["surface"]["frame"]["origin"][2].as_f64().unwrap() - 0.018).abs() < 1e-12
+        })
+        .map(|f| format!("bl/base/{}", f["name"].as_str().unwrap()))
+        .expect("the boss's top");
+    let top = circle_at(&body(&mut s, "rim"), "base", mm([20.0, 15.0, 18.0]), 6e-3);
+    add(
+        &mut s,
+        json!({"type": "chamfer", "id": "cap", "form": "distance_angle", "d": "0.7 mm",
+               "angle": "35 deg", "face": lid, "edges": [top]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "box", "id": "pocket", "operation": "cut",
+               "params": {"x": "6 mm", "y": "5 mm", "z": "4 mm"},
+               "placement": {"origin": ["6 mm", "3 mm", "6 mm"]}}),
+    );
+    let p = body(&mut s, "pocket");
+    let walls: Vec<String> = [[6.0, 3.0], [12.0, 3.0], [6.0, 8.0], [12.0, 8.0]]
+        .iter()
+        .map(|[x, y]| edge_between(&p, "base", mm([*x, *y, 6.0]), mm([*x, *y, 10.0])))
+        .collect();
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "walls", "radius": "1 mm", "edges": walls}),
+    );
+    let w = body(&mut s, "walls");
+    let floor = edge_between(&w, "base", mm([7.0, 3.0, 6.0]), mm([11.0, 3.0, 6.0]));
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "floor", "radius": "0.4 mm", "edges": [floor]}),
+    );
+    add(&mut s, json!({"type": "sketch", "id": "holes"}));
+    call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "bl", "sketch": "holes", "ops": [
+            {"op": "add", "type": "point", "at": [32, 22]},
+            {"op": "add", "type": "fix", "a": "p1"},
+            {"op": "add", "type": "circle", "center": "p1", "r": 1.5},
+            {"op": "add", "type": "radius", "a": "ci1", "value": "1.5 mm"}
+        ]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "extrude", "id": "drill", "sketch": "holes", "operation": "cut",
+               "extent": {"type": "through_all"}}),
+    );
+    let mouth = circle_at(
+        &body(&mut s, "drill"),
+        "base",
+        mm([32.0, 22.0, 10.0]),
+        1.5e-3,
+    );
+    add(
+        &mut s,
+        json!({"type": "chamfer", "id": "sink", "d": "0.4 mm", "edges": [mouth]}),
+    );
+    (dir, s)
+}
+
+/// Every state of the blended part's solid bit for bit, the part's hash,
+/// and its mesh.
+fn blends_section(golden: &mut Golden) {
+    let mut s = golden.section("blends");
+    let (_dir, mut session) = blended();
+    let part = Id::parse("bl", "part").unwrap();
+    let result = session.rebuilt(&part).unwrap().clone();
+    assert_eq!(result.failed(), 0, "{:?}", result.features);
+    for (id, o) in &result.features {
+        let o = o.as_ref().unwrap();
+        s.str(id.as_str());
+        for (solid, b) in o.solids() {
+            s.str(solid.as_str());
+            s.str(&b.body.dump());
+        }
+        if o.solids().is_empty() {
+            s.str(o.hash());
+        }
+    }
+    s.str(&result.hash);
+    let meshes =
+        ryucad::server::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
+    assert_eq!(meshes.len(), 1);
+    s.str(&format!("{:x}", md(&ryucad::mesh::encode(&meshes))));
+}
+
+#[test]
+fn blended_solids_are_sound() {
+    let (_dir, mut session) = blended();
+    let part = Id::parse("bl", "part").unwrap();
+    let result = session.rebuilt(&part).unwrap().clone();
+    assert_eq!(result.failed(), 0, "{:?}", result.features);
+    // Every state is a sound body; the one shown meets itself nowhere
+    // (`ryucad check` runs the intersection check, with the mesh).
+    for (f, o) in &result.features {
+        for (_, b) in o.as_ref().unwrap().solids() {
+            assert!(ryukei::check::check(&b.body).is_empty(), "{f}");
+        }
+    }
+    let v = ryucad::server::handle(
+        &mut session,
+        ryucad::proto::Request::from_rpc("check", Some(serde_json::json!({"part": "bl"}))).unwrap(),
+    );
+    assert!(v.is_ok(), "{v:?}");
+}
+
 /// How the swept part's sketch is drawn: `sketch.get` at each quality,
 /// and renders with its dimensions labelled and an entity highlighted.
 fn sketch_drawing_section(golden: &mut Golden) {
@@ -1107,6 +1316,7 @@ fn determinism() {
     sweeps_section(&mut golden);
     references_section(&mut golden);
     solids_section(&mut golden);
+    blends_section(&mut golden);
     sketch_drawing_section(&mut golden);
     diff_section(&mut golden);
     merge_section(&mut golden);

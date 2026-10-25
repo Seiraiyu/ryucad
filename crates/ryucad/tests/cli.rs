@@ -1915,6 +1915,100 @@ fn solids_from_the_cli() {
 }
 
 #[test]
+fn blends_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=20", "--param", "y=10", "--param",
+        "z=5",
+    ]);
+    let body = p.ok(&["inspect", "p", "b"])["bodies"][0].clone();
+    let vertex = |want| named(&body, "vertices", |v| at(&v["point"], want));
+    let edge = |a: [f64; 3], b: [f64; 3]| {
+        let (a, b) = (vertex(a), vertex(b));
+        let n = named(&body, "edges", |e| {
+            (e["start"] == a.as_str() && e["end"] == b.as_str())
+                || (e["start"] == b.as_str() && e["end"] == a.as_str())
+        });
+        format!("p/b/{n}")
+    };
+    let up = edge([0.02, 0.01, 0.0], [0.02, 0.01, 0.005]);
+    let front = edge([0.0, 0.0, 0.005], [0.02, 0.0, 0.005]);
+    let top = named(&body, "faces", |f| {
+        let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+        f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == 1.0
+    });
+    let top = format!("p/b/{top}");
+    let f = p.ok(&[
+        "feature", "add", "p", "fillet", "--id", "f", "--radius", "1", "--edge", &up,
+    ]);
+    assert_eq!(f["feature"]["groups"][0]["edges"], serde_json::json!([up]));
+    p.ok(&[
+        "feature",
+        "edit",
+        "p",
+        "f",
+        "--radius",
+        "2 mm",
+        "--propagate",
+        "false",
+    ]);
+    let show = p.ok(&["feature", "show", "p", "f"]);
+    assert_eq!(show["groups"][0]["radius"]["value"], "2 mm");
+    assert_eq!(show["propagate"], false);
+    let c = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "chamfer",
+        "--id",
+        "c",
+        "--form",
+        "distances",
+        "--d1",
+        "0.5",
+        "--d2",
+        "1",
+        "--face",
+        &top,
+        "--edge",
+        &front,
+    ]);
+    assert_eq!(c["feature"]["groups"][0]["face"], top);
+    p.ok(&["rebuild", "p"]);
+    // Several sizes in one fillet, clear of the others.
+    let bottom = edge([0.0, 0.0, 0.0], [0.02, 0.0, 0.0]);
+    let back = edge([0.0, 0.01, 0.0], [0.0, 0.01, 0.005]);
+    let groups = format!(
+        r#"[{{"radius": "0.4 mm", "edges": ["{bottom}"]}}, {{"radius": "0.5 mm", "edges": ["{back}"]}}]"#
+    );
+    let g = p.ok(&[
+        "feature", "add", "p", "fillet", "--id", "g", "--after", "b", "--groups", &groups,
+    ]);
+    assert_eq!(g["feature"]["groups"][1]["radius"]["value"], "0.5 mm");
+    p.ok(&["rebuild", "p"]);
+    p.fails(
+        &["feature", "edit", "p", "g", "--radius", "2"],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &["feature", "add", "p", "fillet", "--groups", "{}"],
+        "usage",
+        2,
+    );
+    // The corner edge is the fillet's now.
+    let e = p.fails(
+        &["feature", "add", "p", "chamfer", "--d", "1", "--edge", &up],
+        "reference_unresolved",
+        1,
+    );
+    assert_eq!(e["details"]["removed_by"], "f");
+    p.fails(&["feature", "delete", "p", "b"], "has_dependents", 1);
+}
+
+#[test]
 fn releases_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init"]);

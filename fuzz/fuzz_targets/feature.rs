@@ -2,7 +2,8 @@
 //! writes back canonically and reads back equal, or give a structured
 //! error. Loaded, it is built as feature `f` of a part after boxes `b`
 //! and `c` and a rectangle sketch `s`, so its references resolve against
-//! real faces, edges and vertices and its operations act on real solids:
+//! real faces, edges and vertices, its operations act on real solids, and
+//! its fillets and chamfers (seeded with `b`'s edges) round real edges:
 //! building must succeed or give a structured error, every body it leaves
 //! must pass the checks, and a sketch that solves must solve to finite
 //! positions that are current: solving them again, in the same context,
