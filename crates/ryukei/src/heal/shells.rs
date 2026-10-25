@@ -8,8 +8,10 @@
 //! any other is meshed coarsely (a chord of a thousandth of the body's
 //! size), whose volume lies within `4 × chord × area` of the shell's,
 //! the area that of its curved faces (planar faces mesh in their planes):
-//! a sign further than that from zero is certain, else the mesh is made
-//! eight times finer, twice, and then it is [`HealError::Uncertain`].
+//! a sign further than that from zero is certain. Else the mesh is made
+//! finer, to an eighth of its chord or to what the volume it measured
+//! needs if that is finer, up to four times and down to ten resolutions;
+//! then, or past a budget of triangles, it is [`HealError::Uncertain`].
 //!
 //! Which shells are cavities follows from which encloses which. Every
 //! vertex of one shell (a point of its mesh if it has none: a sphere or
@@ -62,8 +64,11 @@ struct Shell {
     positive: bool,
 }
 
-/// Rounds of finer meshes before a sign is uncertain.
-const ROUNDS: usize = 3;
+/// Meshes made before a sign is uncertain.
+const ROUNDS: usize = 5;
+
+/// The most triangles a mesh for a sign may have.
+const BUDGET: u64 = 4_000_000;
 
 /// Ray directions for classifying a point against a mesh: none along an
 /// axis or a diagonal, where models line up.
@@ -125,18 +130,28 @@ pub(super) fn judge(body: &Body, index: &BTreeMap<Name, usize>) -> Result<Judged
                 let m = match &mesh {
                     Some(m) => m,
                     None => {
+                        let params = MeshParams {
+                            max_triangles: BUDGET,
+                            ..MeshParams::new(chord, 0.5)
+                        };
                         mesh = Some(
-                            tessellate(body, &MeshParams::new(chord, 0.5))
+                            tessellate(body, &params)
                                 .map_err(|_| HealError::Uncertain { at: name })?,
                         );
                         mesh.as_ref().expect("made")
                     }
                 };
-                if let Some(s) = mesh_sign(body, m, &faces, chord, name)? {
-                    sign = Some(s);
+                let finer = match mesh_sign(body, m, &faces, chord, name)? {
+                    Ok(s) => {
+                        sign = Some(s);
+                        break;
+                    }
+                    Err(needed) => (chord / 8.0).min(needed),
+                };
+                if finer < 10.0 * LINEAR_RESOLUTION {
                     break;
                 }
-                chord /= 8.0;
+                chord = finer;
                 mesh = None;
             }
             sign.ok_or(HealError::Uncertain { at: name })?
@@ -317,14 +332,15 @@ fn shell_triangles(b: &Body, m: &BodyMesh, faces: &[FaceId]) -> Result<Vec<[Poin
 }
 
 /// The sign of a shell's volume from the mesh, if it is further from zero
-/// than the mesh can be wrong by.
+/// than the mesh can be wrong by, else the chord that would make the
+/// volume measured a sure sign: half what its bound allows.
 fn mesh_sign(
     b: &Body,
     m: &BodyMesh,
     faces: &[FaceId],
     chord: f64,
     name: Name,
-) -> Result<Option<bool>, Error> {
+) -> Result<Result<bool, f64>, Error> {
     let triangles = shell_triangles(b, m, faces).map_err(|at| HealError::Uncertain { at })?;
     let by_face: BTreeMap<FaceId, &crate::mesh::FaceMesh> =
         m.faces.iter().map(|fm| (fm.face, fm)).collect();
@@ -351,7 +367,11 @@ fn mesh_sign(
         })
         .sum();
     let bound = 4.0 * chord * curved * 1.01;
-    Ok((volume.abs() > bound && volume.abs() > 0.0).then_some(volume > 0.0))
+    if volume.abs() > bound && volume.abs() > 0.0 {
+        Ok(Ok(volume > 0.0))
+    } else {
+        Ok(Err(volume.abs() / (8.0 * curved * 1.01)))
+    }
 }
 
 /// Every vertex point of a shell's faces.

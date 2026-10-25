@@ -1,8 +1,9 @@
 //! Seams and poles: what files add to periodic faces, taken away.
 //!
 //! A seam is an edge both of whose uses are on one face, along a
-//! parameter line of a direction the face's surface is periodic in. It
-//! is removed: where both uses are in one loop the loop splits in two
+//! parameter line of a direction the face's surface is periodic in: five
+//! points along it within the cap of the line through the first. It is
+//! removed, so how far off the line it was matters no further: where both uses are in one loop the loop splits in two
 //! (a cylinder's side into its two circles), where they are in two
 //! loops those join. A piece left empty is a point: kept as a lone
 //! vertex at an apex (a cone's tip, where the normal turns round the
@@ -51,14 +52,19 @@ fn ends(s: &Shape, u: &Use) -> (usize, usize) {
 
 /// Removes seams and poles from `s` in place, and joins what seams split.
 /// New edges' names are pushed onto `names.edges`.
-pub(super) fn unseam(key: OpKey, s: &mut Shape, names: &mut Names) -> Result<Unseamed, Error> {
+pub(super) fn unseam(
+    key: OpKey,
+    s: &mut Shape,
+    names: &mut Names,
+    cap: f64,
+) -> Result<Unseamed, Error> {
     let mut out = Unseamed::default();
     // Vertices a removed seam ran to, and points left by empty pieces.
     let mut seam_ends: BTreeSet<usize> = BTreeSet::new();
     let mut empty: Vec<(usize, usize)> = Vec::new();
     for k in 0..s.faces.len() {
         while let Some(e) = seam_in(s, k) {
-            check_seam(s, k, e).map_err(|()| HealError::BadSeam {
+            check_seam(s, k, e, cap).map_err(|()| HealError::BadSeam {
                 face: names.faces[k],
             })?;
             let edge = s.edges[e];
@@ -73,7 +79,7 @@ pub(super) fn unseam(key: OpKey, s: &mut Shape, names: &mut Names) -> Result<Uns
         while l < s.faces[k].loops.len() {
             match s.faces[k].loops[l] {
                 Loop::Vertex(v)
-                    if kind(&s.surfaces[s.faces[k].surface], s.vertices[v].point)
+                    if kind(&s.surfaces[s.faces[k].surface], s.vertices[v].point, cap)
                         == Point::Pole =>
                 {
                     s.faces[k].loops.remove(l);
@@ -93,7 +99,7 @@ pub(super) fn unseam(key: OpKey, s: &mut Shape, names: &mut Names) -> Result<Uns
         }
         let surface = &s.surfaces[s.faces[k].surface];
         // A vertex a writer added to end a seam marks nothing.
-        if !s.vertices[v].seam && kind(surface, s.vertices[v].point) == Point::Apex {
+        if !s.vertices[v].seam && kind(surface, s.vertices[v].point, cap) == Point::Apex {
             kept.insert(v);
             s.faces[k].loops.push(Loop::Vertex(v));
         } else if !out.poles.contains(&names.vertices[v]) {
@@ -133,7 +139,9 @@ enum Point {
     Regular,
 }
 
-fn kind(surface: &crate::geom::Surface, p: crate::geom::Point3) -> Point {
+/// What `p` is, as a point within `reach` of a collapsed row counts as
+/// on it.
+fn kind(surface: &crate::geom::Surface, p: crate::geom::Point3, reach: f64) -> Point {
     let domain = surface.domain();
     let collapsed = crate::mesh::uv::collapsed_rows(surface);
     for d in 0..2 {
@@ -146,7 +154,7 @@ fn kind(surface: &crate::geom::Surface, p: crate::geom::Point3) -> Point {
             } else {
                 surface.point(mid, edge)
             };
-            if !collapsed[d][end] || row.distance(p) > 10.0 * LINEAR_RESOLUTION {
+            if !collapsed[d][end] || row.distance(p) > reach {
                 continue;
             }
             // The normal at four places round the free parameter.
@@ -187,27 +195,32 @@ fn seam_in(s: &Shape, k: usize) -> Option<usize> {
 /// Whether edge `e` lies along a parameter line of a direction face `k`'s
 /// surface is periodic in: its points inside, projected, share that
 /// parameter.
-fn check_seam(s: &Shape, k: usize, e: usize) -> Result<(), ()> {
+fn check_seam(s: &Shape, k: usize, e: usize, cap: f64) -> Result<(), ()> {
     let surface = &s.surfaces[s.faces[k].surface];
     let edge = &s.edges[e];
     let curve = &s.curves[edge.curve];
     let (pu, pv) = surface.periods();
     let [t0, t1] = edge.interval;
-    let params: Vec<[f64; 2]> = (1..6)
-        .map(|i| {
-            let (u, v) = surface
-                .project(curve.point(t0 + (t1 - t0) * i as f64 / 6.0))
-                .param;
+    let points: Vec<_> = (1..6)
+        .map(|i| curve.point(t0 + (t1 - t0) * i as f64 / 6.0))
+        .collect();
+    let params: Vec<[f64; 2]> = points
+        .iter()
+        .map(|&q| {
+            let (u, v) = surface.project(q).param;
             [u, v]
         })
         .collect();
-    let along = |d: usize, p: f64| {
-        params.iter().all(|x| {
-            let d = (x[d] - params[0][d]).rem_euclid(p);
-            d.min(p - d) <= 1e-9 * p
+    // Each point within the cap of the line through the first, in
+    // direction `d` held fixed.
+    let along = |d: usize| {
+        params.iter().zip(&points).all(|(x, &q)| {
+            let mut on = *x;
+            on[d] = params[0][d];
+            surface.point(on[0], on[1]).distance(q) <= cap
         })
     };
-    let ok = pu.is_some_and(|p| along(0, p)) || pv.is_some_and(|p| along(1, p));
+    let ok = pu.is_some() && along(0) || pv.is_some() && along(1);
     if ok { Ok(()) } else { Err(()) }
 }
 

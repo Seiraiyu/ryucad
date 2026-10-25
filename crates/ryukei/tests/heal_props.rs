@@ -163,3 +163,59 @@ fn blends_round_trip() {
         blend(OpKey(9), &case.body, &case.blends).ok().map(|x| x.0)
     });
 }
+
+/// Shapes with a file's faults ([`ryukei_testkit::heal_bytes`]): those
+/// healing must undo come back as the body's faces, edges and vertices
+/// and pass the checker; the rest are refused by name or heal to a body
+/// that checks.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "minutes in a debug build: CI runs it in release"
+)]
+fn faults_heal_or_are_refused() {
+    use ryukei::Error;
+    use ryukei_testkit::heal_bytes::heal_case;
+    let mut tried = 0;
+    let mut mild = 0;
+    let mut failed = Vec::new();
+    for seed in 0..400 {
+        let Some(case) = heal_case(&seeded(seed, 128)) else {
+            continue;
+        };
+        if !meshes(&case.body) {
+            continue;
+        }
+        tried += 1;
+        mild += usize::from(case.mild);
+        match heal(OpKey(9), &case.shape, &HealOptions::default()) {
+            Ok((h, _, _)) => {
+                let faults = check(&h);
+                if !faults.is_empty() {
+                    failed.push(format!("seed {seed}: check {faults:?}"));
+                } else if case.mild && h.counts() != case.body.counts() {
+                    failed.push(format!(
+                        "seed {seed}: counts {:?} != {:?}",
+                        h.counts(),
+                        case.body.counts()
+                    ));
+                }
+            }
+            Err(Error::InvalidHeal(e)) if case.mild => {
+                failed.push(format!(
+                    "seed {seed}: mild refused {e:?} after {:?}",
+                    case.faults
+                ));
+            }
+            Err(Error::InvalidHeal(_)) => {}
+            Err(e) => failed.push(format!("seed {seed}: {e:?}")),
+        }
+    }
+    assert!(tried > 100 && mild > 50, "{tried} tried, {mild} mild");
+    assert!(
+        failed.is_empty(),
+        "{tried} tried, {mild} mild, {} failed\n{}",
+        failed.len(),
+        failed.join("\n")
+    );
+}

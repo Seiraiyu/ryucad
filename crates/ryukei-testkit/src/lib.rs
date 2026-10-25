@@ -10,12 +10,15 @@
 //! - [`boolean_bytes`]: booleans from bytes, for fuzzing and its
 //!   regressions.
 //! - [`blend_bytes`]: blends from bytes, for fuzzing and its regressions.
+//! - [`heal_bytes`]: shapes with a file's faults from bytes, for fuzzing
+//!   healing and its regressions.
 
 pub mod blend_bytes;
 pub mod boolean_bytes;
 pub mod euler_script;
 pub mod exact;
 mod golden;
+pub mod heal_bytes;
 mod lcg;
 pub mod mesh;
 pub mod nurbs;

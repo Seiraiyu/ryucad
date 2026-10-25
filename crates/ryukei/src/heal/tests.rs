@@ -587,10 +587,13 @@ fn gaps_under_the_cap_are_covered_by_tolerances() {
     let EntityId::Edge(e) = built(&h, names.edges[0]) else {
         panic!()
     };
-    // The edge's tolerance covers its vertices, 3 µm from its ends, and
-    // theirs covers them.
+    // The edge's tolerance covers its vertices, 3 µm from its ends, on
+    // top of its own (its pcurves' images end that far from them too),
+    // and theirs covers them; so the body meshes.
     let t = h.edges[e].tolerance.get();
-    assert!((3e-6..=3e-6 * 1.001).contains(&t), "{t}");
+    assert!((3e-6..=3e-6 * 1.001 + 2e-8).contains(&t), "{t}");
+    let m = crate::mesh::tessellate(&h, &crate::mesh::MeshParams::new(1e-2, 0.5)).unwrap();
+    assert_eq!(m.faults, []);
     let ends = [h.edges[e].start, h.edges[e].end];
     for v in ends {
         let tv = h.vertices[v].tolerance.get();
