@@ -268,10 +268,12 @@ fn split_at_ts(key: OpKey, s: &mut Shape, names: &mut Names, cap: f64, out: &mut
             parent: names.edges[e],
             children,
         });
-        let (k, l, i) = uses[e][0];
+        // Looked up again: an earlier split in this loop moved the uses.
+        let (k, l, _) = uses[e][0];
         let Loop::Edges(list) = &mut s.faces[k].loops[l] else {
             unreachable!("an edge's use is in a loop of edges")
         };
+        let i = list.iter().position(|u| u.edge == e).unwrap();
         let u = list[i];
         let mut run: Vec<Use> = pieces.iter().map(|&p| Use { edge: p, ..u }).collect();
         if u.sense == Sense::Reversed {

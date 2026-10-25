@@ -894,6 +894,49 @@ fn a_t_junction_is_split_and_sewn() {
 }
 
 #[test]
+fn two_t_junctions_in_one_loop_are_split_and_sewn() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &tilted())
+        .unwrap()
+        .0;
+    let p = plain(&b);
+    let mut s = unshared(&p, 1e-7);
+    // The neighbours' copies of face 0's first two edges each split a
+    // third of the way along: face 0 keeps both whole, so its one loop
+    // is split twice.
+    let Loop::Edges(list) = &p.faces[0].loops[0] else {
+        panic!("a loop of edges")
+    };
+    let copies: Vec<(usize, usize)> = list[..2]
+        .iter()
+        .map(|u| {
+            (1..p.faces.len())
+                .find_map(|k| {
+                    let Loop::Edges(other) = &p.faces[k].loops[0] else {
+                        return None;
+                    };
+                    let i = other.iter().position(|w| w.edge == u.edge)?;
+                    let Loop::Edges(copy) = &s.faces[k].loops[0] else {
+                        return None;
+                    };
+                    Some((k, copy[i].edge))
+                })
+                .unwrap()
+        })
+        .collect();
+    for (k, e) in copies {
+        let [t0, t1] = s.edges[e].interval;
+        split_use(&mut s, k, e, t0 + (t1 - t0) / 3.0);
+    }
+    let (h, _, report) = heal_ok(&s);
+    let (c, d) = (h.counts(), b.counts());
+    assert_eq!(
+        (c.faces, c.edges, c.vertices),
+        (d.faces, d.edges + 2, d.vertices + 2)
+    );
+    assert_eq!(report.split.len(), 2);
+}
+
+#[test]
 fn a_t_junction_near_an_end_leaves_its_short_piece_out() {
     let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &tilted())
         .unwrap()
