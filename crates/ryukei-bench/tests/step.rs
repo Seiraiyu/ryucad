@@ -8,6 +8,8 @@
 //!   B-rep volume) to within its mesh's error, `4 × chord × area`.
 //! - Files ryustep writes from seeded bodies: OCCT reads a solid per
 //!   lump, of the body's volume.
+//! - The pinned corpus `scripts/fetch-corpus.sh` downloads: no file heals
+//!   fewer bodies than `crates/ryustep/tests/corpus/pinned.txt` records.
 //!
 //! Prints a report (run with `--nocapture`).
 
@@ -230,4 +232,49 @@ fn occt_reads_what_ryustep_writes() {
         bodies.len()
     );
     assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// Where `scripts/fetch-corpus.sh` keeps the pinned corpus.
+fn pinned_dir() -> PathBuf {
+    match std::env::var_os("RYUCAD_CORPUS") {
+        Some(d) => PathBuf::from(d),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/corpus"),
+    }
+}
+
+#[test]
+fn pinned_corpus_heals_no_fewer_bodies() {
+    let listed = std::fs::read_to_string(tests_dir().join("corpus/pinned.txt")).unwrap();
+    let dir = pinned_dir();
+    let mut fell = Vec::new();
+    let (mut total, mut healed) = (0, 0);
+    for line in listed.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // `heals <healed> <path>`, the path the rest of the line.
+        let Some(rest) = line.strip_prefix("heals ") else {
+            continue;
+        };
+        let (want, name) = rest.split_once(' ').unwrap();
+        let want: usize = want.parse().unwrap();
+        let path = dir.join(name);
+        let Ok(bytes) = std::fs::read(&path) else {
+            panic!("{} is missing: run scripts/fetch-corpus.sh", path.display());
+        };
+        let model = read(&bytes, &opts()).unwrap();
+        let got = model.bodies.iter().filter(|b| b.result.is_ok()).count();
+        total += model.bodies.len();
+        healed += got;
+        println!(
+            "heals {got} {name}    ({} bodies, recorded {want})",
+            model.bodies.len()
+        );
+        if got < want {
+            fell.push(format!("{name}: {got} healed, {want} recorded"));
+        }
+    }
+    println!("healed {healed} of {total} bodies");
+    assert!(fell.is_empty(), "{fell:#?}");
 }

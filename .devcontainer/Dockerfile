@@ -8,7 +8,7 @@ ARG USERNAME=dev
 # the data exchange package is for reading and writing STEP.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential ca-certificates curl git less pkg-config procps sudo \
+        build-essential ca-certificates curl git less pkg-config procps sudo unzip \
         libocct-foundation-dev libocct-modeling-data-dev libocct-modeling-algorithms-dev \
         libocct-visualization-dev libocct-data-exchange-dev libtbb-dev \
     && rm -rf /var/lib/apt/lists/*
