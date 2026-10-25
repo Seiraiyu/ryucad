@@ -1290,6 +1290,37 @@ pub(crate) mod tests {
         (dir, s)
     }
 
+    /// Writes release `label` of `part`'s record as its working files
+    /// are, past the release checks.
+    fn write_record(s: &mut Session, part: &str, label: &str) {
+        let content = ryupdm::content::hash(&*s, &id(part)).unwrap();
+        let project = s.project().manifest.project.clone().unwrap();
+        let record = ryupdm::record::Record::Release(ryupdm::record::Release {
+            project,
+            part: id(part),
+            label: label.to_owned(),
+            content,
+            properties: Default::default(),
+            results: Default::default(),
+            built_with: ryupdm::record::BuiltWith {
+                ryucad: "0.0.0".into(),
+                ryukei: "0.0.0".into(),
+                commit: "unknown".into(),
+            },
+            released_by: ryupdm::record::ReleasedBy {
+                name: None,
+                email: None,
+                participant: "test".into(),
+            },
+            supersedes: None,
+            note: None,
+        });
+        let at = s.root().join(record.path());
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        write_json(&at, &record.to_json()).unwrap();
+        s.refresh().unwrap();
+    }
+
     fn feature_error(s: &mut Session, asm: &str, inst: &str) -> Error {
         let result = s.rebuilt(&id(asm)).unwrap();
         let (_, r) = result
@@ -1463,7 +1494,17 @@ pub(crate) mod tests {
             json!({"part": "pair", "properties": {"number": "200"}}),
         )
         .unwrap();
-        call(&mut s, "release.propose", json!({"part": "pair"})).unwrap();
+        // The release rule refuses it now; a record written anyway (an
+        // older build, or by hand) still reads as releases are read.
+        let e = call(&mut s, "release.propose", json!({"part": "pair"})).unwrap_err();
+        assert_eq!(e.code, Code::ReleaseNotReady);
+        let problems = e.details["problems"].as_array().unwrap();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(
+            (&problems[0]["code"], &problems[0]["details"]["instance"]),
+            (&json!("instance_not_released"), &json!("one"))
+        );
+        write_record(&mut s, "pair", "A");
         git(r, &["add", "."]);
         git(r, &["commit", "-q", "-m", "pair A"]);
         place_in(r, "frame", "p", "pair", json!({"label": "A"}), [0.0; 3]);
@@ -2100,5 +2141,63 @@ pub(crate) mod tests {
         );
         // A part has no occurrences to report.
         assert!(v["parts"]["plate"].get("occurrences").is_none());
+    }
+
+    #[test]
+    fn an_assembly_releases_when_every_instance_is_an_official_release() {
+        use crate::git::tests::git;
+        let (dir, mut s) = released();
+        let r = dir.path();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "frame", "properties": {"number": "300"}}),
+        )
+        .unwrap();
+        let problems = |s: &mut Session| -> Vec<Value> {
+            let v = call(
+                s,
+                "release.propose",
+                json!({"part": "frame", "dry_run": true}),
+            )
+            .unwrap();
+            v["problems"].as_array().unwrap().clone()
+        };
+        place_in(r, "frame", "b1", "bolt", json!({"label": "A"}), [0.0; 3]);
+        s.refresh().unwrap();
+        assert_eq!(problems(&mut s), Vec::<Value>::new());
+        // A proposal of the bolt's next revision isn't official yet.
+        call(&mut s, "release.propose", json!({"part": "bolt"})).unwrap();
+        place_in(
+            r,
+            "frame",
+            "b2",
+            "bolt",
+            json!({"label": "B"}),
+            [0.02, 0.0, 0.0],
+        );
+        s.refresh().unwrap();
+        let p = problems(&mut s);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0]["details"]["instance"], "b2");
+        assert!(p[0]["message"].as_str().unwrap().contains("isn't official"));
+        // Committed, B is official. Made obsolete, it is refused again.
+        git(r, &["add", "."]);
+        git(r, &["commit", "-q", "-m", "bolt B"]);
+        s.refresh().unwrap();
+        assert_eq!(problems(&mut s), Vec::<Value>::new());
+        call(
+            &mut s,
+            "release.obsolete",
+            json!({"part": "bolt", "label": "B"}),
+        )
+        .unwrap();
+        git(r, &["add", "."]);
+        git(r, &["commit", "-q", "-m", "B obsolete"]);
+        s.refresh().unwrap();
+        let p = problems(&mut s);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0]["details"]["instance"], "b2");
+        assert!(p[0]["message"].as_str().unwrap().contains("obsolete"));
     }
 }

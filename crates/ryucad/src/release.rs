@@ -175,7 +175,60 @@ fn readiness(session: &mut Session, part: &Id, config: &Config) -> Result<Vec<Va
             }
         }
     }
+    // An assembly releases only releases: every instance, at any depth,
+    // pinned to an official label that isn't obsolete.
+    if p.file
+        .as_ref()
+        .is_ok_and(|f| f.kind == crate::doc::files::PartKind::Assembly)
+    {
+        problems.extend(unreleased(session, &p, &[])?.into_iter().map(|e| json!(e)));
+    }
     Ok(problems)
+}
+
+/// `instance_not_released` for each instance of assembly `p` (reached
+/// through `path`) and below it that a release can't hold: at `working`,
+/// at a label that doesn't resolve or isn't official, or at an obsolete
+/// one.
+fn unreleased(
+    session: &mut Session,
+    p: &crate::doc::project::Part,
+    path: &[Id],
+) -> Result<Vec<Error>> {
+    use crate::doc::assembly::Rev;
+    let mut out = Vec::new();
+    for fid in p.order() {
+        let Some(Ok(crate::doc::files::Feature::Instance(i))) = p.features.get(fid) else {
+            continue;
+        };
+        let mut here = path.to_vec();
+        here.push(fid.clone());
+        let at = crate::assembly::path_text(&here);
+        let refuse = |why: String| {
+            Error::new(Code::InstanceNotReleased, format!("instance {at} {why}"))
+                .with("instance", &at)
+                .with("part", &i.part)
+                .with("rev", i.rev.to_json())
+        };
+        match &i.rev {
+            Rev::Working => out.push(refuse(format!(
+                "places {} as it is (working); pin it to an official release",
+                i.part
+            ))),
+            Rev::Label(l) => match pinned(session, &i.part, l) {
+                Err(e) => out.push(refuse(format!("places {}@{l}: {}", i.part, e.message))),
+                Ok(pin) if pin.pin.commit.is_none() => out.push(refuse(format!(
+                    "places {}@{l}, which isn't official yet",
+                    i.part
+                ))),
+                Ok(pin) if pin.pin.obsolete => {
+                    out.push(refuse(format!("places {}@{l}, which is obsolete", i.part)))
+                }
+                Ok(pin) => out.extend(unreleased(session, &pin.part, &here)?),
+            },
+        }
+    }
+    Ok(out)
 }
 
 /// Writes `record` (giving the project its ID first if it has none), and
