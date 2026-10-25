@@ -140,6 +140,24 @@ fn flatten(path: &str, v: &Value, out: &mut Vec<String>) {
             let items: Vec<String> = a.iter().map(scalar).collect();
             out.push(format!("{path} = [{}]", items.join(", ")));
         }
+        // A two-way pattern's skips, one value as a merge sees them.
+        Value::Array(a)
+            if !a.is_empty()
+                && a.iter().all(|x| {
+                    x.as_array()
+                        .is_some_and(|i| i.iter().all(|y| !y.is_object() && !y.is_array()))
+                }) =>
+        {
+            let items: Vec<String> = a
+                .iter()
+                .map(|x| {
+                    let inner: Vec<String> =
+                        x.as_array().expect("an array").iter().map(scalar).collect();
+                    format!("[{}]", inner.join(", "))
+                })
+                .collect();
+            out.push(format!("{path} = [{}]", items.join(", ")));
+        }
         // A fillet's or chamfer's edges, one value as a merge sees them.
         Value::Array(a) if !a.is_empty() && a.iter().all(|x| reference(x).is_some()) => {
             let items: Vec<String> = a.iter().filter_map(reference).collect();
@@ -1190,6 +1208,52 @@ mod tests {
              groups.0.edges = [a/00aa]\n\
              groups.0.face = a/00dd\n\
              groups.0.form = distances\n"
+        );
+    }
+
+    #[test]
+    fn holes_and_patterns_are_one_line_per_value() {
+        let hole = json!({
+            "format": 3, "kind": "ryucad.feature", "type": "hole", "sketch": "s",
+            "points": ["p1", "p2"], "form": "counterbore", "diameter": "6.6 mm",
+            "counterbore": {"diameter": "11 mm", "depth": "6.8 mm"},
+            "depth": {"up_to": {"target": {"feature": "b", "name": "00aa"}, "offset": "-1 mm"}},
+            "bottom": {"drill": "118 deg"}, "targets": ["b"],
+        });
+        assert_eq!(
+            text(hole),
+            "ryucad.feature hole (format 3)\n\
+             bottom.drill = 118 deg\n\
+             counterbore.depth = 6.8 mm\n\
+             counterbore.diameter = 11 mm\n\
+             depth.up_to.offset = -1 mm\n\
+             depth.up_to.target = b/00aa\n\
+             diameter = 6.6 mm\n\
+             form = counterbore\n\
+             points = [p1, p2]\n\
+             sketch = s\n\
+             targets = [b]\n"
+        );
+        // Skips are one value, however many directions.
+        let pattern = json!({
+            "format": 3, "kind": "ryucad.feature", "type": "pattern", "form": "linear",
+            "features": ["h", "c"], "direction": "x", "spacing": "10 mm", "count": "n",
+            "direction2": {"feature": "b", "name": "00bb"}, "spacing2": "5 mm", "count2": "2",
+            "skip": [[1, 1], [3, 0]], "targets": ["b"],
+        });
+        assert_eq!(
+            text(pattern),
+            "ryucad.feature pattern (format 3)\n\
+             count = n\n\
+             count2 = 2\n\
+             direction = x\n\
+             direction2 = b/00bb\n\
+             features = [h, c]\n\
+             form = linear\n\
+             skip = [[1, 1], [3, 0]]\n\
+             spacing = 10 mm\n\
+             spacing2 = 5 mm\n\
+             targets = [b]\n"
         );
     }
 

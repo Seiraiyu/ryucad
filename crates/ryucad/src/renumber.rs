@@ -1,10 +1,11 @@
 //! The repair for an ID collision: two different things added under one
 //! ID on the two sides of a merge. Ours keeps the ID; theirs' thing takes
 //! the next free one, and every use of it that came from theirs follows: a
-//! feature's file, its place in the part's list, the sweeps of a sketch,
-//! the features that act on a solid it founds, and the references to its
-//! faces; a sketch entity's key, the entities and constraints built on it,
-//! and the sweeps that name it.
+//! feature's file, its place in the part's list, the sweeps and holes of
+//! a sketch, the features that act on a solid it founds, the patterns
+//! that repeat it, and the references to its faces; a sketch entity's
+//! key, the entities and constraints built on it, and the sweeps and
+//! holes that name it.
 //!
 //! Names hash IDs, so renumbering renames what theirs built from it. Which
 //! name became which is found by building theirs as committed and theirs
@@ -184,8 +185,9 @@ fn transform(
     match r {
         Rename::Feature { from, to, .. } => match pointer {
             "/sketch" | "/target" => (node.as_str() == Some(from)).then(|| json!(to)),
-            // The solids an operation or a boolean acts on.
-            "/targets" | "/tools" => {
+            // The solids an operation or a boolean acts on, and what a
+            // pattern repeats.
+            "/targets" | "/tools" | "/features" => {
                 let list: Vec<Value> = node
                     .as_array()?
                     .iter()
@@ -215,7 +217,7 @@ fn transform(
             if sweeps_it && pointer == "/axis" && node.as_str() == Some(from) {
                 return Some(json!(to));
             }
-            if sweeps_it && pointer == "/loops" {
+            if sweeps_it && (pointer == "/loops" || pointer == "/points") {
                 let list: Vec<Value> = node
                     .as_array()?
                     .iter()
