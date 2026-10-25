@@ -686,3 +686,151 @@ fn a_gap_past_the_cap_is_refused_with_its_size() {
     let (h, _, _) = heal(OpKey(7), &s, &wide).unwrap();
     assert_eq!(check::check(&h), []);
 }
+
+/// A shape whose faces each have their own edges and vertices, as a
+/// surface model writes them: face `k`'s copies moved by `nudge` along a
+/// direction of its own.
+fn unshared(s: &Shape, nudge: f64) -> Shape {
+    let mut t = s.clone();
+    t.edges.clear();
+    t.vertices.clear();
+    for k in 0..s.faces.len() {
+        let dir = Vector3::new((k * 7 % 5) as f64 - 2.0, (k * 3 % 5) as f64 - 2.0, 1.0)
+            .normalize()
+            .unwrap();
+        let by = Rigid::translation(dir.get() * nudge);
+        let mut vertices: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut copy = |t: &mut Shape, v: usize| {
+            *vertices.entry(v).or_insert_with(|| {
+                t.vertices.push(Vertex {
+                    point: by.apply_point(s.vertices[v].point),
+                    ..s.vertices[v]
+                });
+                t.vertices.len() - 1
+            })
+        };
+        let mut loops = s.faces[k].loops.clone();
+        for l in &mut loops {
+            match l {
+                Loop::Vertex(v) => *v = copy(&mut t, *v),
+                Loop::Edges(uses) => {
+                    for u in uses {
+                        let e = s.edges[u.edge];
+                        t.curves.push(s.curves[e.curve].transformed(&by));
+                        let (start, end) = (copy(&mut t, e.start), copy(&mut t, e.end));
+                        t.edges.push(Edge {
+                            curve: t.curves.len() - 1,
+                            start,
+                            end,
+                            ..e
+                        });
+                        u.edge = t.edges.len() - 1;
+                        u.pcurve = None;
+                    }
+                }
+            }
+        }
+        t.faces[k].loops = loops;
+    }
+    t
+}
+
+#[test]
+fn faces_with_their_own_edges_are_sewn() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &tilted())
+        .unwrap()
+        .0;
+    let s = unshared(&plain(&b), 2e-7);
+    assert_eq!(s.edges.len(), 24);
+    let (h, journal, report) = heal_ok(&s);
+    assert_eq!(h.counts(), b.counts());
+    assert_eq!((report.sewn.len(), report.merged.len()), (12, 8));
+    // Each sewn edge merges two of the file's, each vertex three.
+    let mut merges: Vec<usize> = journal
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            Event::Merged { parents, child } => {
+                assert!(h.by_name(*child).is_some());
+                Some(parents.len())
+            }
+            _ => None,
+        })
+        .collect();
+    merges.sort();
+    assert_eq!(merges, [vec![2; 12], vec![3; 8]].concat());
+    // The tolerances cover where the copies were.
+    assert!(report.tolerances.iter().all(|t| t.1 <= 1e-6));
+    // A cylinder's rims are closed edges.
+    let c = primitive::cylinder(OpKey(1), 1.0, 2.0, &tilted())
+        .unwrap()
+        .0;
+    let (h, _, report) = heal_ok(&unshared(&plain(&c), 2e-7));
+    assert_eq!(h.counts(), c.counts());
+    assert_eq!(report.sewn.len(), 2);
+}
+
+#[test]
+fn open_shells_sewn_together_are_one_solid() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let mut s = unshared(&plain(&b), 1e-7);
+    // Two open shells of three faces each, as a surface model gives them.
+    s.shells = vec![
+        Shell {
+            faces: vec![0, 1, 2],
+            closed: false,
+        },
+        Shell {
+            faces: vec![3, 4, 5],
+            closed: false,
+        },
+    ];
+    s.solids = vec![
+        Solid {
+            outer: 0,
+            voids: vec![],
+        },
+        Solid {
+            outer: 1,
+            voids: vec![],
+        },
+    ];
+    let (h, _, _) = heal_ok(&s);
+    assert_eq!(h.counts(), b.counts());
+}
+
+#[test]
+fn sewing_refuses_three_faces_at_an_edge_and_leaves_open_shells_open() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let mut s = unshared(&plain(&b), 0.0);
+    // Face 0 twice: its edges have two candidates each that coincide.
+    let mut twin = s.faces[0].clone();
+    for l in &mut twin.loops {
+        if let Loop::Edges(uses) = l {
+            for u in uses {
+                s.edges.push(s.edges[u.edge]);
+                u.edge = s.edges.len() - 1;
+            }
+        }
+    }
+    s.faces.push(twin);
+    s.shells[0].faces.push(s.faces.len() - 1);
+    assert!(matches!(
+        heal(OpKey(7), &s, &HealOptions::default()),
+        Err(Error::InvalidHeal(HealError::NonManifold { .. }))
+    ));
+    // Without a face, its neighbours' copies of its edges stay free.
+    let mut s = unshared(&plain(&b), 1e-7);
+    s.faces.pop();
+    s.shells[0].faces.retain(|&f| f < s.faces.len());
+    match heal(OpKey(7), &s, &HealOptions::default()) {
+        Err(Error::InvalidHeal(HealError::OpenShell { free_edges })) => {
+            assert_eq!(free_edges.len(), 4)
+        }
+        other => panic!("{other:?}"),
+    }
+}
