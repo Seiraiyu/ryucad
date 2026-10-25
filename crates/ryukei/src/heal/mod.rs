@@ -63,6 +63,7 @@ mod shells;
 mod tighten;
 mod unseam;
 
+pub use names::{Names as ImportNames, names as import_names};
 pub use seamed::seamed;
 
 use crate::Error;

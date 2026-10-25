@@ -23,12 +23,14 @@ use crate::name::{ImportRole, Name, OpKey, Role};
 use crate::topo::dump;
 use std::collections::BTreeMap;
 
-/// The import names of a shape's entities, by index.
+/// The import names of a shape's entities, by index: what [`super::heal`]
+/// names them by in its journal and its refusals. Healing names what it
+/// makes (a sewn edge, a joined vertex) afresh, so those are not here.
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct Names {
-    pub(super) vertices: Vec<Name>,
-    pub(super) edges: Vec<Name>,
-    pub(super) faces: Vec<Name>,
+pub struct Names {
+    pub vertices: Vec<Name>,
+    pub edges: Vec<Name>,
+    pub faces: Vec<Name>,
 }
 
 /// SipHash of a text, as a 128-bit hash.
@@ -36,7 +38,9 @@ fn hash(text: &str) -> u128 {
     OpKey::from_bytes(text.as_bytes()).0
 }
 
-pub(super) fn names(key: OpKey, s: &Shape) -> Names {
+/// The import names [`super::heal`] gives the entities of `s` under
+/// `key`, before anything changes.
+pub fn names(key: OpKey, s: &Shape) -> Names {
     let vh: Vec<u128> = s
         .vertices
         .iter()
