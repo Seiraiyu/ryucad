@@ -236,6 +236,16 @@ pub struct FeatureFields {
     /// directions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip: Option<Value>,
+    /// The part an instance places.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub of: Option<String>,
+    /// The revision an instance places: `working` (the default) or a
+    /// release label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+    /// Whether mates hold an instance where it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed: Option<bool>,
 }
 
 impl FeatureFields {

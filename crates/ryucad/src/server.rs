@@ -3,6 +3,7 @@
 
 use crate::activity::{self, EntryKind};
 use crate::config;
+use crate::doc::assembly::{Instance, Pose, Rev};
 use crate::doc::files::{
     Feature, Manifest, PartFile, PartKind, Placement, Primitive, PrimitiveType, number,
 };
@@ -771,6 +772,34 @@ fn part_create(session: &mut Session, part: &str, kind: Option<&str>) -> Result<
 fn part_delete(session: &mut Session, part: &str, expected: Option<&str>) -> Result<Value> {
     let id = part_id(part)?;
     check_revision(session.project().part(&id)?, expected)?;
+    // An assembly placing the part as it is would have nothing to place;
+    // a release it places is read from history.
+    let placed = &id;
+    let users: Vec<String> = session
+        .project()
+        .parts
+        .iter()
+        .flat_map(|(a, p)| {
+            p.order()
+                .iter()
+                .filter_map(move |fid| match p.features.get(fid) {
+                    Some(Ok(Feature::Instance(i)))
+                        if i.part == *placed && i.rev == Rev::Working =>
+                    {
+                        Some(format!("{a}/{fid}"))
+                    }
+                    _ => None,
+                })
+        })
+        .collect();
+    if !users.is_empty() {
+        return Err(Error::new(
+            Code::HasDependents,
+            format!("assemblies place {id}: {}", users.join(", ")),
+        )
+        .with("part", &id)
+        .with("instances", users));
+    }
     let dir = part_dir(session.root(), &id);
     fs::remove_dir_all(&dir).map_err(|e| Error::io(&dir, &e))?;
     session.reload()?;
@@ -1143,6 +1172,7 @@ const REVOLVE: [&str; 7] = [
     "targets",
 ];
 const BOOLEAN: [&str; 4] = ["op", "target", "targets", "tools"];
+const INSTANCE: [&str; 4] = ["of", "rev", "placement", "fixed"];
 const FILLET: [&str; 4] = ["groups", "propagate", "radius", "edges"];
 const CHAMFER: [&str; 9] = [
     "groups",
@@ -1376,6 +1406,105 @@ fn hole_from(
     let h = Hole::from_fields(&mut o, unit, env)?;
     o.finish()?;
     Ok(Feature::Hole(h))
+}
+
+/// An instance: `current`'s fields (none for a new one), with what was
+/// given laid over them. A new instance needs `of`; its revision is
+/// `working` and its pose the assembly's frame unless given. The origin
+/// takes quantities and expressions, held as meters.
+fn instance_from(
+    current: Option<&Instance>,
+    given: &Given,
+    unit: Unit,
+    env: &Env,
+) -> Result<Instance> {
+    let f = &given.fields;
+    let part = match (&f.of, current) {
+        (Some(of), _) => Id::parse(of, "part").map_err(|e| e.with("param", "of"))?,
+        (None, Some(c)) => c.part.clone(),
+        (None, None) => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "an instance names the part it places (of)",
+            )
+            .with("param", "of"));
+        }
+    };
+    let rev = match f.rev.as_deref() {
+        None => current.map_or(Rev::Working, |c| c.rev.clone()),
+        Some("working") => Rev::Working,
+        Some(l) => {
+            Rev::Label(crate::doc::assembly::label_text(l).map_err(|e| e.with("param", "rev"))?)
+        }
+    };
+    let mut pose = current.map_or(Pose::IDENTITY, |c| c.pose);
+    if let Some(arg) = &given.placement {
+        if let Some(origin) = &arg.origin {
+            for (i, v) in origin.iter().enumerate() {
+                let q = Quantity::from_json_in(v, unit, &|n| env.get(n))
+                    .map_err(|e| e.with("pointer", format!("/placement/origin/{i}")))?;
+                if q.dim() != crate::units::Dim::LENGTH {
+                    return Err(Error::new(
+                        Code::UnitMismatch,
+                        format!("an instance's origin is a length, not {}", q.text()),
+                    )
+                    .with("pointer", format!("/placement/origin/{i}")));
+                }
+                pose.origin_m[i] = crate::doc::sketch::clean(q.meters());
+            }
+        }
+        if let Some(z) = arg.z {
+            pose.z = z.map(crate::doc::sketch::clean);
+        }
+        if let Some(x) = arg.x {
+            pose.x = x.map(crate::doc::sketch::clean);
+        }
+    }
+    // Refuse a pose that could never build, before it is written.
+    crate::assembly::pose_rigid(&pose)?;
+    Ok(Instance {
+        part,
+        rev,
+        pose,
+        fixed: f.fixed.unwrap_or(current.is_some_and(|c| c.fixed)),
+    })
+}
+
+/// Refuses instance `id` of assembly `pid`, listed in `list`, if its part
+/// doesn't exist (`not_found`), if placing it would make the assembly
+/// place itself (`assembly_cycle`), or if its label doesn't resolve now
+/// (`label_not_found`, `label_not_official`).
+fn check_instance(
+    session: &mut Session,
+    pid: &Id,
+    list: &[Id],
+    id: &Id,
+    f: &Feature,
+) -> Result<()> {
+    let i = f.instance().expect("an instance");
+    if !session.project().parts.contains_key(&i.part) {
+        return Err(
+            Error::new(Code::NotFound, format!("no part {} to place", i.part))
+                .with("part", &i.part)
+                .with("param", "of"),
+        );
+    }
+    match &i.rev {
+        Rev::Working => {
+            let mut project = session.project().clone();
+            let q = proposed(project.part(pid)?, list, &[(id, f)]);
+            project.parts.insert(pid.clone(), q);
+            let cycles = crate::assembly::Cycles::of(&project, &crate::assembly::Pins::new());
+            let (a, c) = ((pid.clone(), Rev::Working), (i.part.clone(), Rev::Working));
+            if cycles.closes(&a, &c) {
+                return Err(crate::assembly::cycle_error(&cycles, &a, &c).with("feature", id));
+            }
+        }
+        Rev::Label(l) => {
+            crate::release::pinned(session, &i.part, l).map_err(|e| e.with("feature", id))?;
+        }
+    }
+    Ok(())
 }
 
 /// A primitive's operation and targets: `current`'s, with what was
@@ -2059,6 +2188,10 @@ fn feature_add(
             given.only(ty, &BOOLEAN)?;
             Feature::Boolean(boolean_from(None, &given)?)
         }
+        "instance" => {
+            given.only(ty, &INSTANCE)?;
+            Feature::Instance(instance_from(None, &given, unit, &env)?)
+        }
         "fillet" | "chamfer" => {
             given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
             blend_from(ty, None, &given, &pid, unit, &env)?
@@ -2097,6 +2230,13 @@ fn feature_add(
         .with("feature", &fid));
     }
     list.insert(at, fid.clone());
+    if let Some(e) = crate::assembly::kind_error(p, &fid, &f) {
+        return Err(e);
+    }
+    if f.instance().is_some() {
+        check_instance(session, &pid, &list, &fid, &f)?;
+    }
+    let p = session.project().part(&pid)?;
     if f.swept().is_some() {
         check_sweep(p, &list, &fid, &f)?;
     }
@@ -2154,12 +2294,9 @@ fn feature_edit(
             s.plane = sketch_plane(Some(&s.plane), &given, &pid, unit, &p.env)?;
             Feature::Sketch(s)
         }
-        Feature::Instance(_) => {
-            return Err(Error::new(
-                Code::InvalidParam,
-                format!("{fid} is an instance; instances can't be edited yet"),
-            )
-            .with("feature", &fid));
+        Feature::Instance(i) => {
+            given.only("instance", &INSTANCE)?;
+            Feature::Instance(instance_from(Some(&i), &given, unit, &p.env)?)
         }
         Feature::Boolean(b) => {
             given.only("boolean", &BOOLEAN)?;
@@ -2210,6 +2347,10 @@ fn feature_edit(
             .with("features", users));
         }
     }
+    if f.instance().is_some() && f != old {
+        check_instance(session, &pid, &list, &fid, &f)?;
+    }
+    let p = session.project().part(&pid)?;
     check_solids(&proposed(p, &list, &[(&fid, &f)]), &[&fid])?;
     if let Feature::Pattern(x) = &f {
         crate::pattern::check_seeds(&proposed(p, &list, &[(&fid, &f)]), &fid, x)?;

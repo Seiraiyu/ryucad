@@ -555,7 +555,8 @@ enum FeatureCmd {
     /// countersink, --bottom) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
-    /// --angle) or mirror (--plane), skipping instances (--skip).
+    /// --angle) or mirror (--plane), skipping instances (--skip); or, in an
+    /// assembly, an instance (--of, --rev, --origin, --z, --x, --fixed).
     Add {
         part: String,
         #[arg(value_name = "TYPE")]
@@ -1006,6 +1007,15 @@ struct FieldArgs {
     /// Leave no instance out again, when editing.
     #[arg(long, conflicts_with = "skip")]
     no_skip: bool,
+    /// The part an instance places.
+    #[arg(long, value_name = "PART")]
+    of: Option<String>,
+    /// The revision an instance places: working (the default) or a release label.
+    #[arg(long, value_name = "REV")]
+    rev: Option<String>,
+    /// Hold an instance where it is when mates are solved (--fixed false to free it).
+    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
+    fixed: Option<bool>,
 }
 
 impl FieldArgs {
@@ -1111,6 +1121,9 @@ impl FieldArgs {
             } else {
                 (!self.skip.is_empty()).then(|| json!(self.skip))
             },
+            of: self.of.clone(),
+            rev: self.rev.clone(),
+            fixed: self.fixed,
         }
     }
 }

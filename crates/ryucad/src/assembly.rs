@@ -493,7 +493,7 @@ fn node_text((part, rev): &Node) -> String {
 }
 
 /// `assembly_cycle` for an instance of `child` in `assembly`.
-fn cycle_error(cycles: &Cycles, assembly: &Node, child: &Node) -> Error {
+pub fn cycle_error(cycles: &Cycles, assembly: &Node, child: &Node) -> Error {
     let mut path = vec![assembly.clone()];
     path.extend(path_back(&cycles.edges, child, assembly));
     let text: Vec<String> = path.iter().map(node_text).collect();
@@ -1328,5 +1328,132 @@ pub(crate) mod tests {
             .map(|p| &p["part"])
             .collect();
         assert_eq!(parts, [&json!("bolt"), &json!("frame")]);
+    }
+
+    #[test]
+    fn instances_are_added_and_edited_through_the_protocol() {
+        let (dir, mut s) = project();
+        let v = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "instance", "id": "b1", "of": "bolt",
+                   "placement": {"origin": ["10 mm", "2 cm", 0], "z": [0, 0, 1]}}),
+        )
+        .unwrap();
+        assert_eq!(v["feature"]["part"], "bolt");
+        let text =
+            std::fs::read_to_string(dir.path().join("parts/frame/features/b1.json")).unwrap();
+        let file = crate::doc::canonical::parse(&text).unwrap();
+        assert_eq!(file["rev"], "working");
+        assert_eq!(file["pose"]["origin_m"], json!([0.01, 0.02, 0]));
+        assert_eq!(file["format"], 4);
+        // An ID is generated from the type.
+        let v = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "instance", "of": "plate", "fixed": true}),
+        )
+        .unwrap();
+        let generated = v["feature"].clone();
+        assert_eq!(generated["fixed"], true);
+        let list = call(&mut s, "feature.list", json!({"part": "frame"})).unwrap();
+        assert_eq!(list["features"][1]["id"], "instance-1");
+        // An edit lays what is given over what is there.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "b1", "placement": {"origin": [0, 0, "5 mm"]},
+                   "fixed": true}),
+        )
+        .unwrap();
+        let shown = call(&mut s, "feature.show", json!({"part": "frame", "id": "b1"})).unwrap();
+        assert_eq!(shown["pose"]["origin_m"], json!([0, 0, 0.005]));
+        assert_eq!(shown["fixed"], true);
+        assert_eq!(shown["part"], "bolt");
+        let m = s.model(&id("frame"), &Rev::Working).unwrap();
+        assert_eq!(origin(&m.occurrences[0]), [0.0, 0.0, 0.005]);
+    }
+
+    #[test]
+    fn instance_writes_refuse_what_cant_build() {
+        let (_dir, mut s) = project();
+        let add = |s: &mut Session, part: &str, fields: Value| {
+            let mut v = json!({"part": part, "type": "instance"});
+            for (k, x) in fields.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            call(s, "feature.add", v)
+        };
+        let code = |r: Result<Value>| r.unwrap_err().code;
+        assert_eq!(
+            code(add(&mut s, "bolt", json!({"of": "plate"}))),
+            Code::WrongPartKind
+        );
+        assert_eq!(
+            code(call(
+                &mut s,
+                "feature.add",
+                json!({"part": "frame", "type": "box", "params": {"x": 1, "y": 1, "z": 1}}),
+            )),
+            Code::WrongPartKind
+        );
+        assert_eq!(code(add(&mut s, "frame", json!({}))), Code::InvalidParam);
+        assert_eq!(
+            code(add(&mut s, "frame", json!({"of": "nothing"}))),
+            Code::NotFound
+        );
+        assert_eq!(
+            code(add(&mut s, "frame", json!({"of": "frame"}))),
+            Code::AssemblyCycle
+        );
+        assert_eq!(
+            code(add(&mut s, "frame", json!({"of": "bolt", "rev": "Z"}))),
+            Code::LabelNotFound
+        );
+        assert_eq!(
+            code(add(&mut s, "frame", json!({"of": "bolt", "rev": "b"}))),
+            Code::InvalidDocument
+        );
+        assert_eq!(
+            code(add(
+                &mut s,
+                "frame",
+                json!({"of": "bolt", "placement": {"z": [0, 0, 0]}})
+            )),
+            Code::InvalidPlacement
+        );
+        assert_eq!(
+            code(add(
+                &mut s,
+                "frame",
+                json!({"of": "bolt", "placement": {"origin": ["1 deg", 0, 0]}})
+            )),
+            Code::UnitMismatch
+        );
+        assert_eq!(
+            code(add(&mut s, "frame", json!({"of": "bolt", "radius": 2}))),
+            Code::InvalidParam
+        );
+        // A pair placed in the frame can't place the frame.
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "pair", "kind": "assembly"}),
+        )
+        .unwrap();
+        add(&mut s, "frame", json!({"of": "pair", "id": "p1"})).unwrap();
+        let e = add(&mut s, "pair", json!({"of": "frame"})).unwrap_err();
+        assert_eq!(e.code, Code::AssemblyCycle);
+        assert_eq!(e.details["path"], json!(["pair", "frame", "pair"]));
+        // Nothing was written by the refusals.
+        let list = call(&mut s, "feature.list", json!({"part": "frame"})).unwrap();
+        assert_eq!(list["features"].as_array().unwrap().len(), 1);
+        // A placed part can't be deleted; an unplaced one can.
+        let e = call(&mut s, "part.delete", json!({"part": "pair"})).unwrap_err();
+        assert_eq!(
+            (e.code, e.details["instances"].clone()),
+            (Code::HasDependents, json!(["frame/p1"]))
+        );
+        call(&mut s, "part.delete", json!({"part": "plate"})).unwrap();
     }
 }
