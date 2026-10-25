@@ -135,3 +135,10 @@ path = "fuzz_targets/step.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "heal"
+path = "fuzz_targets/heal.rs"
+test = false
+doc = false
+bench = false

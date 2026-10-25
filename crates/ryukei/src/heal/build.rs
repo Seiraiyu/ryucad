@@ -10,9 +10,8 @@ use crate::name::{Event, ImportRole, Journal, Name, OpKey, Role};
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, EntityId, Sense};
 use crate::{Error, HealError, TopologyError};
-use std::collections::BTreeSet;
 
-/// Every edge used twice, once each way.
+/// Every edge used twice.
 pub(super) fn uses(s: &Shape, names: &Names) -> Result<(), Error> {
     let mut senses: Vec<Vec<Sense>> = vec![Vec::new(); s.edges.len()];
     for f in &s.faces {
@@ -32,55 +31,30 @@ pub(super) fn uses(s: &Shape, names: &Names) -> Result<(), Error> {
         free.sort();
         return Err(HealError::OpenShell { free_edges: free }.into());
     }
-    let mut first: Option<HealError> = None;
-    for (e, list) in senses.iter().enumerate() {
-        let fault = if list.len() > 2 {
-            HealError::NonManifold { at: names.edges[e] }
-        } else if list.len() == 2 && list[0] == list[1] {
-            HealError::Misoriented { at: names.edges[e] }
-        } else {
-            continue;
-        };
-        if first.as_ref().is_none_or(|f| key(&fault) < key(f)) {
-            first = Some(fault);
-        }
-    }
-    first.map_or(Ok(()), |f| Err(f.into()))
-}
-
-/// The name a use fault is reported by, for choosing one by name.
-fn key(f: &HealError) -> Name {
-    match f {
-        HealError::NonManifold { at } => *at,
-        HealError::Misoriented { at } => *at,
-        _ => Name::from_u128(0),
-    }
+    let at = (0..s.edges.len())
+        .filter(|&e| senses[e].len() > 2)
+        .map(|e| names.edges[e])
+        .min();
+    at.map_or(Ok(()), |at| Err(HealError::NonManifold { at }.into()))
 }
 
 /// The scaffold names' role: every entity is renamed afterwards.
 const ROLE: Role = Role::Import(ImportRole::Face);
 
-pub(super) fn build(
+/// A solid as the shape's faces: its outer shell's, then each cavity's.
+pub(super) type SolidFaces = (Vec<usize>, Vec<Vec<usize>>);
+
+/// The shape built through Euler operators and renamed with its import
+/// names: each connected piece a solid of its own, or as `solids` says
+/// (an outer shell and its cavities, each the shape's faces). Not yet
+/// checked: see [`finish`].
+pub(super) fn assemble(
     key: OpKey,
     s: &Shape,
     names: &Names,
     pcurves: &Pcurves,
-    options: &HealOptions,
-) -> Result<(Body, Journal, HealReport), Error> {
-    let mut report = HealReport::default();
-    for (k, f) in s.faces.iter().enumerate() {
-        if f.tolerance > options.tolerance_cap {
-            return Err(HealError::GapTooLarge {
-                entity: names.faces[k],
-                gap: f.tolerance,
-            }
-            .into());
-        }
-        if f.tolerance > 0.0 {
-            report.approximated.push((names.faces[k], f.tolerance));
-        }
-    }
-    report.approximated.sort_by_key(|x| x.0);
+    solids: Option<&[SolidFaces]>,
+) -> Result<Body, Error> {
     let order = Order::new(names);
     let layout = lay_out(s, names, &order, pcurves);
     let fail = |e: BuildError| -> Error {
@@ -97,34 +71,30 @@ pub(super) fn build(
         }
     };
     let plan = Plan::new(&layout).map_err(fail)?;
-    // The shells as the shape lists them, outer shells first: each must
-    // be one connected piece.
     // Solids in the order of their outer shells' least face, each with
-    // its voids in the same order.
-    let found: BTreeSet<Vec<usize>> = plan.shells().into_iter().collect();
-    let laid = |sh: usize| -> Vec<usize> {
-        let mut faces: Vec<usize> = s.shells[sh].faces.iter().map(|&f| order.fpos[f]).collect();
-        faces.sort_unstable();
-        faces
+    // its cavities in the same order.
+    let laid = |faces: &[usize]| -> Vec<usize> {
+        let mut x: Vec<usize> = faces.iter().map(|&f| order.fpos[f]).collect();
+        x.sort_unstable();
+        x
     };
-    let mut solids: Vec<(Vec<usize>, Vec<Vec<usize>>)> = s
-        .solids
-        .iter()
-        .map(|so| {
-            let mut voids: Vec<Vec<usize>> = so.voids.iter().map(|&v| laid(v)).collect();
-            voids.sort();
-            (laid(so.outer), voids)
-        })
-        .collect();
-    solids.sort();
+    let mut groups: Vec<SolidFaces> = match solids {
+        None => plan.shells().into_iter().map(|x| (x, Vec::new())).collect(),
+        Some(list) => list
+            .iter()
+            .map(|(outer, voids)| {
+                let mut v: Vec<Vec<usize>> = voids.iter().map(|x| laid(x)).collect();
+                v.sort();
+                (laid(outer), v)
+            })
+            .collect(),
+    };
+    groups.sort();
     let mut shells: Vec<Vec<usize>> = Vec::new();
     let mut outer_of: Vec<Option<usize>> = Vec::new();
-    for (outer, voids) in solids {
+    for (outer, voids) in groups {
         let o = shells.len();
         for (i, faces) in core::iter::once(outer).chain(voids).enumerate() {
-            if !found.contains(&faces) {
-                return Err(super::malformed("a shell's faces are not connected"));
-            }
             shells.push(faces);
             outer_of.push((i > 0).then_some(o));
         }
@@ -142,6 +112,32 @@ pub(super) fn build(
     for (&g, &v) in &built.vertices {
         body.rename(EntityId::Vertex(v), names.vertices[order.vertices[g]]);
     }
+    Ok(body)
+}
+
+/// The built body checked, its tolerances held to the cap, with the
+/// journal of what it created and the report of its tolerances and
+/// approximated faces.
+pub(super) fn finish(
+    body: Body,
+    s: &Shape,
+    names: &Names,
+    options: &HealOptions,
+) -> Result<(Body, Journal, HealReport), Error> {
+    let mut report = HealReport::default();
+    for (k, f) in s.faces.iter().enumerate() {
+        if f.tolerance > options.tolerance_cap {
+            return Err(HealError::GapTooLarge {
+                entity: names.faces[k],
+                gap: f.tolerance,
+            }
+            .into());
+        }
+        if f.tolerance > 0.0 {
+            report.approximated.push((names.faces[k], f.tolerance));
+        }
+    }
+    report.approximated.sort_by_key(|x| x.0);
     let faults = check::check(&body);
     if let Some(f) = faults.first() {
         return Err(fault(&body, f));
@@ -264,7 +260,9 @@ impl Order {
 /// The shape as a layout, in the order of `order`: its geometry as it is,
 /// the pcurves found, tolerances at least the resolution (an edge's and
 /// its vertices' covering the faces they bound and their pcurves'
-/// bounds), each face's loops in the order of the least name on them,
+/// bounds, and an edge's its curve's ends off its vertices on top of
+/// that: a pcurve's image there is as far from the vertex as both
+/// together), each face's loops in the order of the least name on them,
 /// each loop starting at its least-named edge.
 fn lay_out(s: &Shape, names: &Names, order: &Order, pcurves: &Pcurves) -> Layout {
     let mut out = Layout {
@@ -323,6 +321,17 @@ fn lay_out(s: &Shape, names: &Names, order: &Order, pcurves: &Pcurves) -> Layout
             tolerance: vertex_tol[v].max(LINEAR_RESOLUTION),
         })
         .collect();
+    for (g, e) in s.edges.iter().enumerate() {
+        let c = &s.curves[e.curve];
+        let ends = c
+            .point(e.interval[0])
+            .distance(s.vertices[e.start].point)
+            .max(c.point(e.interval[1]).distance(s.vertices[e.end].point));
+        // What layout covers anyway: rounding at the joints.
+        if ends > 1e-12 {
+            edge_tol[g] = edge_tol[g].max(LINEAR_RESOLUTION) + ends * 1.0001 + 1e-12;
+        }
+    }
     out.edges = order
         .edges
         .iter()

@@ -13,37 +13,63 @@
 //! 1. **Names.** Every vertex, edge and face of the shape is named from
 //!    the caller's key and a hash of its geometry as read (see
 //!    [`ImportRole`]), before anything changes.
-//! 2. **Uses.** Every edge must be used twice, once each way: a shell
-//!    that leaves an edge used once is open, one that uses it more often
-//!    is non-manifold.
-//! 3. **Seams and poles.** Seam edges come out of periodic faces, vertex
+//! 2. **Sewing.** Edges the file repeats on two faces are joined, and the
+//!    vertices at their ends (see `sew`).
+//! 3. **Uses.** Every edge must then be used twice: a shell that leaves
+//!    an edge used once is open, one that uses it more often is
+//!    non-manifold.
+//! 4. **Seams and poles.** Seam edges come out of periodic faces, vertex
 //!    loops at poles go, and edges a seam split are joined again (see
 //!    `unseam`).
-//! 4. **Pcurves.** Every use of an edge gets its pcurve on the face:
+//! 5. **Orientation.** Loops run the way their faces' regions need,
+//!    where the loops alone fix it, and faces are turned over until every
+//!    edge is used once each way (see `orient`).
+//! 6. **Tightening.** An edge between two analytic or pipe faces that
+//!    strays from them is put on their intersection where a branch runs
+//!    along it (see `tighten`).
+//! 7. **Gaps.** Every edge's and vertex's tolerance grows to cover how
+//!    far it lies from its curves and surfaces, up to the cap (see
+//!    `gaps`).
+//! 8. **Collapsing.** Edges shorter than their tolerance go, their
+//!    vertices joined, and so do slivers narrower than their edges'
+//!    tolerances, their two edges joined (see `collapse`); the gaps are
+//!    measured again.
+//! 9. **Pcurves.** Every use of an edge gets its pcurve on the face:
 //!    [`crate::pcurve::exact`] first, else the file's, if it fits the
 //!    edge.
-//! 5. **Build.** The shape is laid out and built through Euler operators
-//!    ([`crate::layout`]), each solid's voids in its region, and renamed
-//!    with the names of step 1. Tolerances cover the gaps between curves'
-//!    ends and their vertices, and the bounds of approximated geometry.
-//!    [`crate::check::check`] must then hold.
+//! 10. **Build.** The shape is laid out and built through Euler operators
+//!     ([`crate::layout`]), every connected piece a solid of its own, and
+//!     renamed with the names of step 1. Each shell's volume then says
+//!     which way it faces and which encloses which; shells facing the
+//!     wrong way are turned over, cavities go in the solids around them,
+//!     and the body is built again if anything changed (see `shells`).
+//!     Tolerances cover the gaps between curves' ends and their vertices,
+//!     and the bounds of approximated geometry.
+//!     [`crate::check::check`] must then hold.
 //!
 //! Healing knows nothing of any file format: an importer of any kind
 //! builds the same [`Shape`]. [`seamed`] goes the other way, a body as a
 //! file must describe it.
 
 mod build;
+mod collapse;
+mod gaps;
 mod names;
+mod orient;
 mod pcurves;
 mod seamed;
+mod sew;
+mod shells;
+mod tighten;
 mod unseam;
 
 pub use seamed::seamed;
 
 use crate::Error;
 use crate::geom::{Curve, Curve2, Point3, Surface};
-use crate::name::{Journal, Name, OpKey};
+use crate::name::{Event, Journal, Name, OpKey};
 use crate::topo::{Body, Sense};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub use crate::name::ImportRole;
 
@@ -154,8 +180,25 @@ impl Default for HealOptions {
 #[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct HealReport {
+    /// Edges made by joining two of the file's that were one: sewn, or
+    /// either side of a collapsed sliver.
+    pub sewn: Vec<Name>,
+    /// Vertices made by joining the file's: at the ends of sewn edges, or
+    /// across collapsed ones.
+    pub merged: Vec<Name>,
+    /// Edges shorter than their tolerance and slivers narrower than it,
+    /// removed.
+    pub collapsed: Vec<Name>,
     /// Seam edges removed.
     pub seams: Vec<Name>,
+    /// Faces some of whose loops ran against the region they bound, and
+    /// were reversed.
+    pub reversed: Vec<Name>,
+    /// Faces turned over: to agree with their neighbours, or with their
+    /// shell when it faced the wrong way.
+    pub turned: Vec<Name>,
+    /// Edges put on the intersection of their faces' surfaces.
+    pub tightened: Vec<Name>,
     /// Pole vertices dropped with their loops or seams.
     pub poles: Vec<Name>,
     /// Vertices removed between two edges on one curve, which were joined.
@@ -179,13 +222,69 @@ pub fn heal(
 ) -> Result<(Body, Journal, HealReport), Error> {
     validate(shape)?;
     let mut names = names::names(key, shape);
-    build::uses(shape, &names)?;
     let mut shape = shape.clone();
-    let unseamed = unseam::unseam(key, &mut shape, &mut names)?;
-    let pcurves = pcurves::pcurves(&shape, &names)?;
-    let (body, created, mut report) = build::build(key, &shape, &names, &pcurves, options)?;
-    let mut journal = unseamed.journal;
+    let sewn = sew::sew(key, &mut shape, &mut names, options.tolerance_cap)?;
+    build::uses(&shape, &names)?;
+    let unseamed = unseam::unseam(key, &mut shape, &mut names, options.tolerance_cap)?;
+    let reversed = orient::loops(&mut shape, &names)?;
+    let turned = orient::faces(&mut shape, &names)?;
+    let tightened = tighten::tighten(&mut shape, &names, options.tolerance_cap);
+    gaps::tolerate(&mut shape, &names, options.tolerance_cap)?;
+    let collapsed = collapse::collapse(key, &mut shape, &mut names, options.tolerance_cap)?;
+    if !collapsed.removed.is_empty() {
+        gaps::tolerate(&mut shape, &names, options.tolerance_cap)?;
+    }
+    let mut pcurves = pcurves::pcurves(&shape, &names)?;
+    let first = build::assemble(key, &shape, &names, &pcurves, None)?;
+    let index: BTreeMap<Name, usize> = names
+        .faces
+        .iter()
+        .enumerate()
+        .map(|(k, &n)| (n, k))
+        .collect();
+    let judged = shells::judge(&first, &index)?;
+    let body = if judged.stands() {
+        first
+    } else {
+        for &k in &judged.turn {
+            orient::turn(&mut shape.faces[k]);
+            for list in &mut pcurves[k] {
+                list.reverse();
+            }
+        }
+        build::assemble(key, &shape, &names, &pcurves, Some(&judged.solids))?
+    };
+    let (body, created, mut report) = build::finish(body, &shape, &names, options)?;
+    // A face turned twice, with its neighbours and with its shell, is as
+    // the file had it.
+    let mut turned: BTreeSet<Name> = turned.into_iter().collect();
+    for &k in &judged.turn {
+        if !turned.remove(&names.faces[k]) {
+            turned.insert(names.faces[k]);
+        }
+    }
+    let turned: Vec<Name> = turned.into_iter().collect();
+    let mut journal = sewn.journal;
+    journal.append(unseamed.journal);
+    journal.append(collapsed.journal);
     journal.append(created);
+    for &f in &reversed {
+        journal.push(Event::Modified(f));
+    }
+    for &f in &turned {
+        journal.push(Event::Modified(f));
+    }
+    for &e in &tightened {
+        journal.push(Event::Modified(e));
+    }
+    report.reversed = reversed;
+    report.turned = turned;
+    report.tightened = tightened;
+    report.sewn = [sewn.edges, collapsed.edges].concat();
+    report.sewn.sort();
+    report.merged = [sewn.vertices, collapsed.vertices].concat();
+    report.merged.sort();
+    report.collapsed = collapsed.removed;
     report.seams = unseamed.seams;
     report.poles = unseamed.poles;
     report.joined = unseamed.joined;

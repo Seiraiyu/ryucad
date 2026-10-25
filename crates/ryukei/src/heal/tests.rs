@@ -1,8 +1,8 @@
 use super::*;
-use crate::geom::{Rigid, Vector3};
+use crate::geom::{Curve, Rigid, Surface, Vector3};
 use crate::name::{Event, Role};
 use crate::primitive;
-use crate::topo::{FaceId, ShellId};
+use crate::topo::{FaceId, Sense, ShellId};
 use crate::{HealError, check};
 use std::collections::BTreeMap;
 
@@ -226,25 +226,7 @@ fn turned_and_closed_primitives_heal() {
 
 #[test]
 fn a_cavity_is_built_in_its_solid() {
-    use crate::boolean::{BooleanOp, Tool, ToolKey, boolean};
-    let outer = primitive::block(OpKey(1), 4.0, 4.0, 4.0, &Rigid::IDENTITY)
-        .unwrap()
-        .0;
-    let inner = primitive::sphere(OpKey(2), 1.0, &Rigid::IDENTITY)
-        .unwrap()
-        .0;
-    let hollow = boolean(
-        OpKey(3),
-        BooleanOp::Subtract,
-        &outer,
-        &[Tool {
-            key: ToolKey(1),
-            body: &inner,
-            place: Rigid::translation(Vector3::new(2.0, 2.0, 2.0)),
-        }],
-    )
-    .unwrap()
-    .0;
+    let hollow = hollow();
     assert_eq!(hollow.counts().shells, 2);
     let s = plain(&hollow);
     assert_eq!(s.solids.len(), 1);
@@ -286,13 +268,15 @@ fn a_use_run_the_wrong_way_is_misoriented() {
     let Loop::Edges(uses) = &mut s.faces[0].loops[0] else {
         panic!()
     };
+    // One use of a loop against the rest: no face can be turned to agree.
     uses[0].sense = uses[0].sense.flipped();
-    let e = uses[0].edge;
     let names = names::names(OpKey(7), &s);
-    assert_eq!(
-        heal(OpKey(7), &s, &HealOptions::default()).unwrap_err(),
-        HealError::Misoriented { at: names.edges[e] }.into()
-    );
+    match heal(OpKey(7), &s, &HealOptions::default()) {
+        Err(Error::InvalidHeal(HealError::Misoriented { at })) => {
+            assert!(names.edges.contains(&at))
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]
@@ -558,5 +542,884 @@ fn seams_and_poles_are_reported() {
             .events()
             .iter()
             .any(|e| *e == Event::Deleted(report.seams[0]))
+    );
+}
+
+/// Edge `e` of a shape moved by `by`, onto a curve of its own.
+fn move_edge(s: &mut Shape, e: usize, by: Vector3) {
+    let c = s.curves[s.edges[e].curve].transformed(&Rigid::translation(by));
+    s.curves.push(c);
+    s.edges[e].curve = s.curves.len() - 1;
+}
+
+/// The middle of edge `e`.
+fn middle(s: &Shape, e: usize) -> crate::geom::Point3 {
+    let x = &s.edges[e];
+    s.curves[x.curve].point((x.interval[0] + x.interval[1]) / 2.0)
+}
+
+/// The built entity a name names.
+fn built(b: &Body, n: Name) -> crate::topo::EntityId {
+    b.by_name(n)
+        .unwrap_or_else(|| panic!("{n} is not in the body"))
+}
+
+#[test]
+fn gaps_under_the_cap_are_covered_by_tolerances() {
+    use crate::topo::EntityId;
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let mut s = plain(&b);
+    // Off its faces, away from the block's middle (at right angles to the
+    // edge), by 3 µm, its vertices with it: tightening puts the edge back
+    // on its faces, but its vertices stay where the file put them.
+    let away = (middle(&s, 0) - crate::geom::Point3::new(0.5, 1.0, 1.5))
+        .normalize()
+        .unwrap();
+    move_edge(&mut s, 0, away.get() * 3e-6);
+    for v in [s.edges[0].start, s.edges[0].end] {
+        s.vertices[v].point += away.get() * 3e-6;
+    }
+    let names = names::names(OpKey(7), &s);
+    let (h, _, report) = heal_ok(&s);
+    assert_eq!(report.tightened, [names.edges[0]]);
+    let EntityId::Edge(e) = built(&h, names.edges[0]) else {
+        panic!()
+    };
+    // The edge's tolerance covers its vertices, 3 µm from its ends, on
+    // top of its own (its pcurves' images end that far from them too),
+    // and theirs covers them; so the body meshes.
+    let t = h.edges[e].tolerance.get();
+    assert!((3e-6..=3e-6 * 1.001 + 2e-8).contains(&t), "{t}");
+    let m = crate::mesh::tessellate(&h, &crate::mesh::MeshParams::new(1e-2, 0.5)).unwrap();
+    assert_eq!(m.faults, []);
+    let ends = [h.edges[e].start, h.edges[e].end];
+    for v in ends {
+        let tv = h.vertices[v].tolerance.get();
+        assert!((3e-6..=3e-6 * 1.001).contains(&tv), "{tv}");
+    }
+    for n in [names.edges[0]]
+        .into_iter()
+        .chain(ends.map(|v| h.vertices[v].name))
+    {
+        assert!(report.tolerances.iter().any(|x| x.0 == n));
+    }
+}
+
+#[test]
+fn gaps_on_analytic_surfaces_are_certified_tightly() {
+    use crate::geom::{Circle, Curve};
+    use crate::topo::EntityId;
+    let b = primitive::cylinder(OpKey(1), 1.0, 2.0, &tilted())
+        .unwrap()
+        .0;
+    let mut s = plain(&b);
+    // One rim 2 µm wider than the cylinder.
+    let rim = (0..s.edges.len())
+        .find(|&e| matches!(s.curves[s.edges[e].curve], Curve::Circle(_)))
+        .unwrap();
+    let Curve::Circle(c) = &s.curves[s.edges[rim].curve] else {
+        panic!()
+    };
+    let wider = Circle::new(*c.frame(), c.radius() + 2e-6).unwrap();
+    s.curves.push(Curve::Circle(wider));
+    s.edges[rim].curve = s.curves.len() - 1;
+    // The gap from the cylinder, certified, is the 2 µm.
+    let x = &s.edges[rim];
+    let side = s
+        .surfaces
+        .iter()
+        .find(|f| matches!(f, crate::geom::Surface::Cylinder(_)))
+        .unwrap();
+    let gap = gaps::edge_gap(&s.curves[x.curve], x.interval, side);
+    assert!((2e-6..=2e-6 * 1.01 + 2e-10).contains(&gap), "{gap}");
+    // Healing then puts it back on the cylinder.
+    let names = names::names(OpKey(7), &s);
+    let (h, _, report) = heal_ok(&s);
+    assert_eq!(report.tightened, [names.edges[rim]]);
+    let EntityId::Edge(e) = built(&h, names.edges[rim]) else {
+        panic!()
+    };
+    assert!(h.edges[e].tolerance.get() <= 1e-7);
+}
+
+#[test]
+fn a_gap_past_the_cap_is_refused_with_its_size() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let mut s = plain(&b);
+    let away = (middle(&s, 0) - crate::geom::Point3::new(0.5, 1.0, 1.5))
+        .normalize()
+        .unwrap();
+    move_edge(&mut s, 0, away.get() * 2e-4);
+    let names = names::names(OpKey(7), &s);
+    let e = &s.edges[0];
+    let ours = [
+        names.edges[0],
+        names.vertices[e.start],
+        names.vertices[e.end],
+    ];
+    match heal(OpKey(7), &s, &HealOptions::default()) {
+        Err(Error::InvalidHeal(HealError::GapTooLarge { entity, gap })) => {
+            assert!(ours.contains(&entity));
+            assert!((1e-4..=2e-4 * (1.0 + 1e-9)).contains(&gap), "{gap}");
+        }
+        other => panic!("{other:?}"),
+    }
+    // A larger cap takes it.
+    let wide = HealOptions {
+        tolerance_cap: 1e-3,
+    };
+    let (h, _, _) = heal(OpKey(7), &s, &wide).unwrap();
+    assert_eq!(check::check(&h), []);
+}
+
+/// A shape whose faces each have their own edges and vertices, as a
+/// surface model writes them: face `k`'s copies moved by `nudge` along a
+/// direction of its own.
+fn unshared(s: &Shape, nudge: f64) -> Shape {
+    let mut t = s.clone();
+    t.edges.clear();
+    t.vertices.clear();
+    for k in 0..s.faces.len() {
+        let dir = Vector3::new((k * 7 % 5) as f64 - 2.0, (k * 3 % 5) as f64 - 2.0, 1.0)
+            .normalize()
+            .unwrap();
+        let by = Rigid::translation(dir.get() * nudge);
+        let mut vertices: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut copy = |t: &mut Shape, v: usize| {
+            *vertices.entry(v).or_insert_with(|| {
+                t.vertices.push(Vertex {
+                    point: by.apply_point(s.vertices[v].point),
+                    ..s.vertices[v]
+                });
+                t.vertices.len() - 1
+            })
+        };
+        let mut loops = s.faces[k].loops.clone();
+        for l in &mut loops {
+            match l {
+                Loop::Vertex(v) => *v = copy(&mut t, *v),
+                Loop::Edges(uses) => {
+                    for u in uses {
+                        let e = s.edges[u.edge];
+                        t.curves.push(s.curves[e.curve].transformed(&by));
+                        let (start, end) = (copy(&mut t, e.start), copy(&mut t, e.end));
+                        t.edges.push(Edge {
+                            curve: t.curves.len() - 1,
+                            start,
+                            end,
+                            ..e
+                        });
+                        u.edge = t.edges.len() - 1;
+                        u.pcurve = None;
+                    }
+                }
+            }
+        }
+        t.faces[k].loops = loops;
+    }
+    t
+}
+
+#[test]
+fn faces_with_their_own_edges_are_sewn() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &tilted())
+        .unwrap()
+        .0;
+    let s = unshared(&plain(&b), 2e-7);
+    assert_eq!(s.edges.len(), 24);
+    let (h, journal, report) = heal_ok(&s);
+    assert_eq!(h.counts(), b.counts());
+    assert_eq!((report.sewn.len(), report.merged.len()), (12, 8));
+    // Each sewn edge merges two of the file's, each vertex three.
+    let mut merges: Vec<usize> = journal
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            Event::Merged { parents, child } => {
+                assert!(h.by_name(*child).is_some());
+                Some(parents.len())
+            }
+            _ => None,
+        })
+        .collect();
+    merges.sort();
+    assert_eq!(merges, [vec![2; 12], vec![3; 8]].concat());
+    // The tolerances cover where the copies were.
+    assert!(report.tolerances.iter().all(|t| t.1 <= 1e-6));
+    // A cylinder's rims are closed edges.
+    let c = primitive::cylinder(OpKey(1), 1.0, 2.0, &tilted())
+        .unwrap()
+        .0;
+    let (h, _, report) = heal_ok(&unshared(&plain(&c), 2e-7));
+    assert_eq!(h.counts(), c.counts());
+    assert_eq!(report.sewn.len(), 2);
+}
+
+#[test]
+fn open_shells_sewn_together_are_one_solid() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let mut s = unshared(&plain(&b), 1e-7);
+    // Two open shells of three faces each, as a surface model gives them.
+    s.shells = vec![
+        Shell {
+            faces: vec![0, 1, 2],
+            closed: false,
+        },
+        Shell {
+            faces: vec![3, 4, 5],
+            closed: false,
+        },
+    ];
+    s.solids = vec![
+        Solid {
+            outer: 0,
+            voids: vec![],
+        },
+        Solid {
+            outer: 1,
+            voids: vec![],
+        },
+    ];
+    let (h, _, _) = heal_ok(&s);
+    assert_eq!(h.counts(), b.counts());
+}
+
+#[test]
+fn sewing_refuses_three_faces_at_an_edge_and_leaves_open_shells_open() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let mut s = unshared(&plain(&b), 0.0);
+    // Face 0 twice: its edges have two candidates each that coincide.
+    let mut twin = s.faces[0].clone();
+    for l in &mut twin.loops {
+        if let Loop::Edges(uses) = l {
+            for u in uses {
+                s.edges.push(s.edges[u.edge]);
+                u.edge = s.edges.len() - 1;
+            }
+        }
+    }
+    s.faces.push(twin);
+    s.shells[0].faces.push(s.faces.len() - 1);
+    assert!(matches!(
+        heal(OpKey(7), &s, &HealOptions::default()),
+        Err(Error::InvalidHeal(HealError::NonManifold { .. }))
+    ));
+    // Without a face, its neighbours' copies of its edges stay free.
+    let mut s = unshared(&plain(&b), 1e-7);
+    s.faces.pop();
+    s.shells[0].faces.retain(|&f| f < s.faces.len());
+    match heal(OpKey(7), &s, &HealOptions::default()) {
+        Err(Error::InvalidHeal(HealError::OpenShell { free_edges })) => {
+            assert_eq!(free_edges.len(), 4)
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A plate with a round hole through it.
+fn plate() -> Body {
+    use crate::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    let block = primitive::block(OpKey(1), 4.0, 3.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let rod = primitive::cylinder(
+        OpKey(2),
+        0.5,
+        3.0,
+        &Rigid::translation(Vector3::new(1.5, 1.2, -1.0)),
+    )
+    .unwrap()
+    .0;
+    boolean(
+        OpKey(3),
+        BooleanOp::Subtract,
+        &block,
+        &[Tool {
+            key: ToolKey(1),
+            body: &rod,
+            place: Rigid::IDENTITY,
+        }],
+    )
+    .unwrap()
+    .0
+}
+
+/// A face of the shape with two loops, the hole's loop's index, and the
+/// face's index.
+fn holed_face(s: &Shape) -> (usize, usize) {
+    let k = s
+        .faces
+        .iter()
+        .position(|f| f.loops.len() == 2 && matches!(s.surfaces[f.surface], Surface::Plane(_)))
+        .unwrap();
+    // The hole's loop is the one on the circle.
+    let hole = s.faces[k]
+        .loops
+        .iter()
+        .position(|l| match l {
+            Loop::Edges(u) => matches!(s.curves[s.edges[u[0].edge].curve], Curve::Circle(_)),
+            Loop::Vertex(_) => false,
+        })
+        .unwrap();
+    (k, hole)
+}
+
+fn reverse_loop(s: &mut Shape, k: usize, l: usize) {
+    let Loop::Edges(uses) = &mut s.faces[k].loops[l] else {
+        panic!()
+    };
+    uses.reverse();
+    for u in uses {
+        u.sense = u.sense.flipped();
+    }
+}
+
+#[test]
+fn a_loop_run_against_its_face_is_reversed() {
+    let b = plate();
+    let s = plain(&b);
+    let (k, hole) = holed_face(&s);
+    let names = names::names(OpKey(7), &s);
+    for l in [hole, 1 - hole] {
+        let mut t = s.clone();
+        reverse_loop(&mut t, k, l);
+        let (h, journal, report) = heal_ok(&t);
+        assert_eq!(h.counts(), b.counts());
+        assert_eq!(report.reversed, [names.faces[k]]);
+        assert!(journal.events().contains(&Event::Modified(names.faces[k])));
+    }
+    // Loops the file runs the right way are left alone.
+    assert_eq!(heal_ok(&s).2.reversed, []);
+}
+
+#[test]
+fn loops_that_cross_have_no_direction() {
+    use crate::geom::Circle;
+    let b = plate();
+    let mut s = plain(&b);
+    let (k, hole) = holed_face(&s);
+    // The hole's circle moved over the plate's edge: it reads as an outer
+    // loop running clockwise.
+    let Loop::Edges(uses) = &s.faces[k].loops[hole] else {
+        panic!()
+    };
+    let e = uses[0].edge;
+    let Curve::Circle(c) = s.curves[s.edges[e].curve].clone() else {
+        panic!()
+    };
+    let moved = crate::geom::Frame::new(
+        c.frame().origin() + Vector3::new(-1.3, 0.0, 0.0),
+        c.frame().z().get(),
+        c.frame().x().get(),
+    )
+    .unwrap();
+    s.curves
+        .push(Curve::Circle(Circle::new(moved, c.radius()).unwrap()));
+    s.edges[e].curve = s.curves.len() - 1;
+    let names = names::names(OpKey(7), &s);
+    assert_eq!(
+        heal(OpKey(7), &s, &HealOptions::default()).unwrap_err(),
+        HealError::SelfCrossingLoop {
+            face: names.faces[k]
+        }
+        .into()
+    );
+}
+
+/// Face `k` of a shape turned over: its sense and every loop reversed.
+fn turn_face(s: &mut Shape, k: usize) {
+    s.faces[k].sense = s.faces[k].sense.flipped();
+    for l in 0..s.faces[k].loops.len() {
+        if matches!(s.faces[k].loops[l], Loop::Edges(_)) {
+            reverse_loop(s, k, l);
+        }
+    }
+}
+
+#[test]
+fn faces_against_their_neighbours_are_turned_over() {
+    let b = plate();
+    let s = plain(&b);
+    let names = names::names(OpKey(7), &s);
+    // Every face but the least-named, one at a time.
+    let least = (0..s.faces.len()).min_by_key(|&k| names.faces[k]).unwrap();
+    for k in (0..s.faces.len()).filter(|&k| k != least) {
+        let mut t = s.clone();
+        turn_face(&mut t, k);
+        let names = names::names(OpKey(7), &t);
+        let (h, journal, report) = heal_ok(&t);
+        assert_eq!(h.counts(), b.counts());
+        assert_eq!(report.turned, [names.faces[k]]);
+        assert!(journal.events().contains(&Event::Modified(names.faces[k])));
+    }
+}
+
+/// A block 4 m on a side with a ball of radius 1 cut out of its middle.
+fn hollow() -> Body {
+    use crate::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    let outer = primitive::block(OpKey(1), 4.0, 4.0, 4.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let inner = primitive::sphere(OpKey(2), 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    boolean(
+        OpKey(3),
+        BooleanOp::Subtract,
+        &outer,
+        &[Tool {
+            key: ToolKey(1),
+            body: &inner,
+            place: Rigid::translation(Vector3::new(2.0, 2.0, 2.0)),
+        }],
+    )
+    .unwrap()
+    .0
+}
+
+/// Two shapes as one, each keeping its own shells and solids.
+fn joined(a: &Shape, b: &Shape) -> Shape {
+    let mut s = a.clone();
+    let (ns, nc, nc2) = (s.surfaces.len(), s.curves.len(), s.curves2.len());
+    let (nv, ne, nf, nsh) = (
+        s.vertices.len(),
+        s.edges.len(),
+        s.faces.len(),
+        s.shells.len(),
+    );
+    s.surfaces.extend(b.surfaces.iter().cloned());
+    s.curves.extend(b.curves.iter().cloned());
+    s.curves2.extend(b.curves2.iter().cloned());
+    s.vertices.extend(b.vertices.iter().copied());
+    s.edges.extend(b.edges.iter().map(|e| Edge {
+        curve: e.curve + nc,
+        start: e.start + nv,
+        end: e.end + nv,
+        ..*e
+    }));
+    s.faces.extend(b.faces.iter().map(|f| {
+        Face {
+            surface: f.surface + ns,
+            loops: f
+                .loops
+                .iter()
+                .map(|l| match l {
+                    Loop::Edges(list) => Loop::Edges(
+                        list.iter()
+                            .map(|u| Use {
+                                edge: u.edge + ne,
+                                pcurve: u.pcurve.map(|c| c + nc2),
+                                ..*u
+                            })
+                            .collect(),
+                    ),
+                    Loop::Vertex(v) => Loop::Vertex(v + nv),
+                })
+                .collect(),
+            ..f.clone()
+        }
+    }));
+    s.shells.extend(b.shells.iter().map(|sh| Shell {
+        faces: sh.faces.iter().map(|f| f + nf).collect(),
+        closed: sh.closed,
+    }));
+    s.solids.extend(b.solids.iter().map(|so| Solid {
+        outer: so.outer + nsh,
+        voids: so.voids.iter().map(|v| v + nsh).collect(),
+    }));
+    s
+}
+
+#[test]
+fn a_shell_inside_out_is_turned_over() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &tilted())
+        .unwrap()
+        .0;
+    let mut s = plain(&b);
+    for k in 0..s.faces.len() {
+        turn_face(&mut s, k);
+    }
+    let names = names::names(OpKey(7), &s);
+    let (h, _, report) = heal_ok(&s);
+    assert_eq!(h.counts(), b.counts());
+    let mut all = names.faces.clone();
+    all.sort();
+    assert_eq!(report.turned, all);
+}
+
+#[test]
+fn a_cavity_facing_out_is_turned_into_it() {
+    let b = hollow();
+    let mut s = plain(&b);
+    let ball = (0..s.faces.len())
+        .find(|&k| matches!(s.surfaces[s.faces[k].surface], Surface::Sphere(_)))
+        .unwrap();
+    turn_face(&mut s, ball);
+    let names = names::names(OpKey(7), &s);
+    let (h, _, report) = heal_ok(&s);
+    assert_eq!(h.counts(), b.counts());
+    assert_eq!(report.turned, [names.faces[ball]]);
+}
+
+#[test]
+fn cavities_follow_geometry_not_the_file() {
+    let b = hollow();
+    let s = plain(&b);
+    let solid = s.solids[0].clone();
+    // The cavity named the outer shell, and the shells as two solids.
+    let mut swapped = s.clone();
+    swapped.solids = vec![Solid {
+        outer: solid.voids[0],
+        voids: vec![solid.outer],
+    }];
+    let mut apart = s.clone();
+    apart.solids = vec![
+        Solid {
+            outer: solid.outer,
+            voids: vec![],
+        },
+        Solid {
+            outer: solid.voids[0],
+            voids: vec![],
+        },
+    ];
+    for t in [swapped, apart] {
+        let (h, _, report) = heal_ok(&t);
+        assert_eq!(h.counts(), b.counts());
+        assert_eq!(report.turned, []);
+    }
+}
+
+#[test]
+fn a_solid_in_a_cavity_is_a_solid_of_its_own() {
+    let core = primitive::block(
+        OpKey(4),
+        0.4,
+        0.4,
+        0.4,
+        &Rigid::translation(Vector3::new(1.8, 1.8, 1.8)),
+    )
+    .unwrap()
+    .0;
+    let s = joined(&plain(&hollow()), &plain(&core));
+    let (h, _, _) = heal_ok(&s);
+    // The outer void region, the hollow block and the core.
+    assert_eq!(h.counts().regions, 3);
+    assert_eq!(h.counts().shells, 3);
+    let mut shells: Vec<usize> = h
+        .regions()
+        .skip(1)
+        .map(|r| h.region_shells(r).count())
+        .collect();
+    shells.sort();
+    assert_eq!(shells, [1, 2]);
+}
+
+#[test]
+fn shells_that_cross_are_refused() {
+    let a = primitive::block(OpKey(1), 4.0, 4.0, 4.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let b = primitive::block(
+        OpKey(2),
+        4.0,
+        4.0,
+        4.0,
+        &Rigid::translation(Vector3::new(2.0, 1.5, 1.3)),
+    )
+    .unwrap()
+    .0;
+    let s = joined(&plain(&a), &plain(&b));
+    let r = heal(OpKey(7), &s, &HealOptions::default());
+    assert!(
+        matches!(r, Err(Error::InvalidHeal(HealError::ShellsCross { a, b })) if a < b),
+        "{r:?}"
+    );
+}
+
+#[test]
+fn edges_off_their_faces_are_tightened_onto_them() {
+    use crate::geom::{Circle, Line};
+    use crate::topo::EntityId;
+    let b = plate();
+    let mut s = plain(&b);
+    // The hole's rim 3 µm wide of the bore, and a straight edge 2 µm off
+    // both its planes, its vertices left where they were.
+    let rim = (0..s.edges.len())
+        .find(|&e| matches!(s.curves[s.edges[e].curve], Curve::Circle(_)))
+        .unwrap();
+    let Curve::Circle(c) = s.curves[s.edges[rim].curve].clone() else {
+        panic!()
+    };
+    let true_rim = Curve::Circle(c);
+    s.curves.push(Curve::Circle(
+        Circle::new(*c.frame(), c.radius() + 3e-6).unwrap(),
+    ));
+    s.edges[rim].curve = s.curves.len() - 1;
+    let straight = (0..s.edges.len())
+        .find(|&e| matches!(s.curves[s.edges[e].curve], Curve::Line(_)))
+        .unwrap();
+    let Curve::Line(l) = s.curves[s.edges[straight].curve].clone() else {
+        panic!()
+    };
+    let true_line = Curve::Line(l);
+    let off = l
+        .dir()
+        .get()
+        .cross(Vector3::new(0.3, 0.5, 0.8))
+        .normalize()
+        .unwrap();
+    s.curves.push(Curve::Line(
+        Line::new(l.origin() + off.get() * 2e-6, l.dir().get()).unwrap(),
+    ));
+    s.edges[straight].curve = s.curves.len() - 1;
+    let names = names::names(OpKey(7), &s);
+    let (h, journal, report) = heal_ok(&s);
+    let mut want = vec![names.edges[rim], names.edges[straight]];
+    want.sort();
+    assert_eq!(report.tightened, want);
+    for (g, truth) in [(rim, &true_rim), (straight, &true_line)] {
+        let EntityId::Edge(e) = built(&h, names.edges[g]) else {
+            panic!()
+        };
+        let edge = &h.edges[e];
+        let [t0, t1] = edge.interval;
+        for i in 0..=8 {
+            let p = h.curves[edge.curve].point(t0 + (t1 - t0) * i as f64 / 8.0);
+            assert!(truth.distance(p) <= 1e-9, "{}", truth.distance(p));
+        }
+        assert!(edge.tolerance.get() <= 1e-7, "{}", edge.tolerance.get());
+        assert!(journal.events().contains(&Event::Modified(names.edges[g])));
+    }
+}
+
+#[test]
+fn an_edge_shorter_than_its_tolerance_is_collapsed() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &tilted())
+        .unwrap()
+        .0;
+    let mut s = plain(&b);
+    // Edge 0 cut 50 nm before its end, the short piece with a tolerance
+    // of 100 nm.
+    let e0 = s.edges[0];
+    let cut = e0.interval[1] - 5e-8;
+    let vn = s.vertices.len();
+    s.vertices.push(Vertex {
+        point: s.curves[e0.curve].point(cut),
+        tolerance: 0.0,
+        seam: false,
+    });
+    s.edges[0].interval = [e0.interval[0], cut];
+    s.edges[0].end = vn;
+    let short = s.edges.len();
+    s.edges.push(Edge {
+        interval: [cut, e0.interval[1]],
+        start: vn,
+        tolerance: 1e-7,
+        ..e0
+    });
+    for f in &mut s.faces {
+        for l in &mut f.loops {
+            let Loop::Edges(list) = l else { continue };
+            let Some(i) = list.iter().position(|u| u.edge == 0) else {
+                continue;
+            };
+            let u = list[i];
+            let piece = Use { edge: short, ..u };
+            match u.sense {
+                Sense::Forward => list.insert(i + 1, piece),
+                Sense::Reversed => list.insert(i, piece),
+            }
+        }
+    }
+    let names = names::names(OpKey(7), &s);
+    let (h, journal, report) = heal_ok(&s);
+    assert_eq!(h.counts(), b.counts());
+    assert_eq!(report.collapsed, [names.edges[short]]);
+    assert_eq!(report.merged.len(), 1);
+    assert!(
+        journal
+            .events()
+            .contains(&Event::Deleted(names.edges[short]))
+    );
+    let mut joined = vec![names.vertices[vn], names.vertices[e0.end]];
+    joined.sort();
+    assert!(journal.events().contains(&Event::Merged {
+        parents: joined,
+        child: report.merged[0],
+    }));
+}
+
+#[test]
+fn a_sliver_narrower_than_its_tolerance_is_collapsed() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let mut s = plain(&b);
+    // The faces either side of edge 0, and how the first runs it.
+    let mut by: Vec<(usize, Sense)> = Vec::new();
+    for (k, f) in s.faces.iter().enumerate() {
+        for l in &f.loops {
+            if let Loop::Edges(list) = l
+                && let Some(u) = list.iter().find(|u| u.edge == 0)
+            {
+                by.push((k, u.sense));
+            }
+        }
+    }
+    let [(f1, s1), (f2, _)] = by[..] else {
+        panic!()
+    };
+    // A copy of edge 0 50 nm out in the first face's plane, used by the
+    // second face, and a sliver on the first face's plane between them,
+    // with tolerances of 100 nm.
+    let p1 = &s.surfaces[s.faces[f1].surface];
+    assert!(matches!(p1, Surface::Plane(_)));
+    let Curve::Line(l) = s.curves[s.edges[0].curve] else {
+        panic!()
+    };
+    let n1 = p1.frame().unwrap().z().get();
+    let mut out = l.dir().get().cross(n1);
+    if (s.vertices[s.edges[0].start].point - crate::geom::Point3::new(0.5, 1.0, 1.5)).dot(out) < 0.0
+    {
+        out = -out;
+    }
+    s.curves
+        .push(s.curves[s.edges[0].curve].transformed(&Rigid::translation(out * 5e-8)));
+    let copy = s.edges.len();
+    s.edges.push(Edge {
+        curve: s.curves.len() - 1,
+        tolerance: 1e-7,
+        ..s.edges[0]
+    });
+    s.edges[0].tolerance = 1e-7;
+    for l in &mut s.faces[f2].loops {
+        if let Loop::Edges(list) = l {
+            for u in list.iter_mut().filter(|u| u.edge == 0) {
+                u.edge = copy;
+            }
+        }
+    }
+    let sliver = s.faces.len();
+    s.faces.push(Face {
+        loops: vec![Loop::Edges(vec![
+            Use {
+                edge: 0,
+                sense: s1.flipped(),
+                pcurve: None,
+            },
+            Use {
+                edge: copy,
+                sense: s1,
+                pcurve: None,
+            },
+        ])],
+        ..s.faces[f1].clone()
+    });
+    s.shells[0].faces.push(sliver);
+    let names = names::names(OpKey(7), &s);
+    let (h, journal, report) = heal_ok(&s);
+    assert_eq!(h.counts(), b.counts());
+    assert_eq!(report.collapsed, [names.faces[sliver]]);
+    assert!(
+        journal
+            .events()
+            .contains(&Event::Deleted(names.faces[sliver]))
+    );
+    let mut joined = vec![names.edges[0], names.edges[copy]];
+    joined.sort();
+    assert!(journal.events().iter().any(
+        |e| matches!(e, Event::Merged { parents, child } if *parents == joined && report.sewn.contains(child))
+    ));
+}
+
+#[test]
+fn a_sliver_wider_than_its_tolerance_is_refused() {
+    use crate::geom::{Ellipse, Frame};
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let mut s = plain(&b);
+    let mut by: Vec<(usize, Sense)> = Vec::new();
+    for (k, f) in s.faces.iter().enumerate() {
+        for l in &f.loops {
+            if let Loop::Edges(list) = l
+                && let Some(u) = list.iter().find(|u| u.edge == 0)
+            {
+                by.push((k, u.sense));
+            }
+        }
+    }
+    let [(_, s1), (f2, _)] = by[..] else { panic!() };
+    // An arc in the second face's plane between edge 0's ends, bulging
+    // 5 µm out of the block, used by the second face, and a sliver on
+    // that plane between it and edge 0: coplanar, so nothing tightens it.
+    let n2 = s.surfaces[s.faces[f2].surface].frame().unwrap().z().get();
+    let (a, z) = (
+        s.vertices[s.edges[0].start].point,
+        s.vertices[s.edges[0].end].point,
+    );
+    let half = (z - a) * 0.5;
+    let mid = a + half;
+    let mut u = half.normalize().unwrap().get().cross(n2);
+    if (mid - crate::geom::Point3::new(0.5, 1.0, 1.5)).dot(u) < 0.0 {
+        u = -u;
+    }
+    // Half an ellipse: its major axis the edge, its minor the bulge.
+    let x = (a - mid).normalize().unwrap();
+    let frame = Frame::new(mid, x.get().cross(u), x.get()).unwrap();
+    let arc = Ellipse::new(frame, half.length(), 5e-6).unwrap();
+    let end = std::f64::consts::PI;
+    s.curves.push(Curve::Ellipse(arc));
+    let copy = s.edges.len();
+    s.edges.push(Edge {
+        curve: s.curves.len() - 1,
+        interval: [0.0, end],
+        tolerance: 1e-7,
+        ..s.edges[0]
+    });
+    s.edges[0].tolerance = 1e-7;
+    for l in &mut s.faces[f2].loops {
+        if let Loop::Edges(list) = l {
+            for u in list.iter_mut().filter(|u| u.edge == 0) {
+                u.edge = copy;
+            }
+        }
+    }
+    let sliver = s.faces.len();
+    s.faces.push(Face {
+        loops: vec![Loop::Edges(vec![
+            Use {
+                edge: 0,
+                sense: s1.flipped(),
+                pcurve: None,
+            },
+            Use {
+                edge: copy,
+                sense: s1,
+                pcurve: None,
+            },
+        ])],
+        ..s.faces[f2].clone()
+    });
+    s.shells[0].faces.push(sliver);
+    let names = names::names(OpKey(7), &s);
+    let r = heal(OpKey(7), &s, &HealOptions::default());
+    assert_eq!(
+        r.err(),
+        Some(
+            HealError::SliverTooWide {
+                face: names.faces[sliver]
+            }
+            .into()
+        )
     );
 }

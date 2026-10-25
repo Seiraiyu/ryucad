@@ -107,9 +107,21 @@ fn one(s: &Shape, f: &Face, u: &Use) -> Result<Option<Found>, f64> {
     if gap > 10.0 * tol {
         return Err(gap);
     }
-    Ok(fit_pcurve_within(surface, curve, e.interval, FIT_SAMPLES)
-        .ok()
-        .map(|(c2, bound)| (Curve2::Nurbs2(Arc::new(c2)), [0.0, 1.0], bound)))
+    // An edge may lie its tolerance off the surface. A fit's bound can't
+    // come within less than that, and its spans halve only while it is
+    // under half their target: an edge with a tolerance of its own, or
+    // measurably off the surface, aims at twice the larger of the two,
+    // and its tolerance grows to the bound.
+    let target = if tol > LINEAR_RESOLUTION || gap > LINEAR_RESOLUTION / 4.0 {
+        2.0 * tol.max(gap)
+    } else {
+        LINEAR_RESOLUTION
+    };
+    Ok(
+        fit_pcurve_within(surface, curve, e.interval, target, FIT_SAMPLES)
+            .ok()
+            .map(|(c2, bound)| (Curve2::Nurbs2(Arc::new(c2)), [0.0, 1.0], bound)),
+    )
 }
 
 /// The affine map that makes a file's pcurve fit its edge, if any.
