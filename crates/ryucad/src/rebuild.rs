@@ -49,6 +49,48 @@ pub struct Made {
     /// The body's hash for one solid, else a hash of each solid's founder
     /// and hash: equal hashes, equal results.
     pub hash: String,
+    /// What a join, cut or hole applied, for a pattern to apply again.
+    pub applied: Option<Arc<Applied>>,
+}
+
+/// What a join, cut or hole applied to its targets: its own body, its
+/// operation, and each place it put it (a hole's at each point, with the
+/// point; any other's where it is).
+#[derive(Clone, Debug)]
+pub struct Applied {
+    pub body: Arc<Built>,
+    pub operation: Operation,
+    pub places: Vec<(Option<Id>, Rigid)>,
+    /// BLAKE3 of the body's hash and every place, for what reads it.
+    pub hash: String,
+}
+
+impl Applied {
+    fn new(body: Arc<Built>, operation: Operation, places: Vec<(Option<Id>, Rigid)>) -> Applied {
+        let mut h = blake3::Hasher::new();
+        h.update(body.hash.as_bytes());
+        h.update(operation.as_str().as_bytes());
+        for (p, r) in &places {
+            h.update(p.as_ref().map_or("", Id::as_str).as_bytes());
+            h.update(&[0]);
+            for row in r.rotation_matrix() {
+                for x in row {
+                    h.update(&x.to_bits().to_le_bytes());
+                }
+            }
+            let t = r.translation_part();
+            for x in [t.x, t.y, t.z] {
+                h.update(&x.to_bits().to_le_bytes());
+            }
+        }
+        let hash = h.finalize().to_hex()[..32].to_owned();
+        Applied {
+            body,
+            operation,
+            places,
+            hash,
+        }
+    }
 }
 
 impl Made {
@@ -63,7 +105,11 @@ impl Made {
                 h.finalize().to_hex()[..32].to_owned()
             }
         };
-        Made { solids, hash }
+        Made {
+            solids,
+            hash,
+            applied: None,
+        }
     }
 }
 
@@ -98,6 +144,14 @@ impl Output {
         match self.solids() {
             [(_, b)] => Some(b),
             _ => None,
+        }
+    }
+
+    /// What a join, cut or hole applied, if the feature is one that built.
+    pub fn applied(&self) -> Option<&Applied> {
+        match self {
+            Output::Solids(m) => m.applied.as_deref(),
+            Output::Sketch(_) => None,
         }
     }
 
@@ -292,13 +346,15 @@ pub fn placement(p: &Placement) -> Result<Rigid> {
 pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
     match f {
         Feature::Primitive(p) => build_primitive(part, id, p),
-        Feature::Sketch(_) | Feature::Boolean(_) | Feature::Fillet(_) | Feature::Chamfer(_) => {
-            Err(Error::new(
-                Code::Internal,
-                format!("{} {id} makes no body of its own", f.type_name()),
-            )
-            .with("feature", id))
-        }
+        Feature::Sketch(_)
+        | Feature::Boolean(_)
+        | Feature::Fillet(_)
+        | Feature::Chamfer(_)
+        | Feature::Pattern(_) => Err(Error::new(
+            Code::Internal,
+            format!("{} {id} makes no body of its own", f.type_name()),
+        )
+        .with("feature", id)),
         Feature::Extrude(_) | Feature::Revolve(_) | Feature::Hole(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} is built from its sketch", f.type_name()),
@@ -795,22 +851,29 @@ fn build_body(
         Operation::Intersect => BooleanOp::Intersect,
         Operation::New => unreachable!("a new solid acts on nothing"),
     };
-    let tools: Vec<ToolBody> = match &holes {
+    let places: Vec<(Option<Id>, Rigid)> = match &holes {
         Some((_, (solved, points))) => {
             let origin = solved.frame.apply_point(Point3::ORIGIN);
             points
                 .iter()
-                .map(|(p, at)| ToolBody {
-                    key: crate::hole::point_key(&part.id, id, p),
-                    built: own.as_ref(),
-                    place: Rigid::translation(*at - origin),
-                    name: id,
-                    label: Some(json!({"point": p})),
-                })
+                .map(|(p, at)| (Some(p.clone()), Rigid::translation(*at - origin)))
                 .collect()
         }
-        None => vec![ToolBody::whole(tool_key(&part.id, id), own.as_ref(), id)],
+        None => vec![(None, Rigid::IDENTITY)],
     };
+    let tools: Vec<ToolBody> = places
+        .iter()
+        .map(|(p, place)| match p {
+            Some(p) => ToolBody {
+                key: crate::hole::point_key(&part.id, id, p),
+                built: own.as_ref(),
+                place: *place,
+                name: id,
+                label: Some(json!({"point": p})),
+            },
+            None => ToolBody::whole(tool_key(&part.id, id), own.as_ref(), id),
+        })
+        .collect();
     // The body is kept however applying it goes: moving what it misses
     // needs it again.
     let made: Result<Vec<(Id, Arc<Built>)>> = targets
@@ -820,7 +883,115 @@ fn build_body(
             Ok(((*t).clone(), Arc::new(r)))
         })
         .collect();
-    (made.map(Made::new), Some(own))
+    let applied = Arc::new(Applied::new(Arc::clone(&own), operation, places));
+    let made = made.map(|m| Made {
+        applied: Some(applied),
+        ..Made::new(m)
+    });
+    (made, Some(own))
+}
+
+/// A pattern: its targets as it sees them, with every instance of every
+/// seed's own body, moved, in one kernel call per target. An instance
+/// that changes nothing, or that alone the kernel refuses, is named.
+fn build_pattern(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    p: &crate::doc::pattern::Pattern,
+    before: &dyn Results,
+) -> Result<Made> {
+    use crate::pattern::{Motion, instance_key};
+    let targets: Vec<(&Id, &Built)> = p
+        .targets
+        .iter()
+        .map(|t| Ok((t, target(part, solids, id, t, before)?)))
+        .collect::<Result<_>>()?;
+    let (operation, seeds) = crate::pattern::seeds(part, id, p, before)?;
+    let motions = crate::pattern::motions(part, id, p, before)?;
+    if motions.is_empty() {
+        return Err(Error::new(
+            Code::OperationNoEffect,
+            format!("pattern {id} has no instance but its seeds: every other one is skipped"),
+        )
+        .with("feature", id)
+        .with("pointer", "/skip"));
+    }
+    // A mirror image is a body of its own: each seed's, at each place,
+    // reflected.
+    let mut mirrored: Vec<Built> = Vec::new();
+    for (_, m) in &motions {
+        let Motion::Mirror(plane) = m else { continue };
+        for (seed, a) in &seeds {
+            for (_, place) in &a.places {
+                let body = a
+                    .body
+                    .body
+                    .transformed(place)
+                    .and_then(|b| b.mirrored(plane))
+                    .map_err(|e| {
+                        Error::new(
+                            Code::RebuildFailed,
+                            format!("pattern {id}: the mirror image of {seed} leaves the size box"),
+                        )
+                        .with("feature", id)
+                        .with("seed", *seed)
+                        .with("kernel", format!("{e:?}"))
+                    })?;
+                let journal = a.body.journal.clone();
+                let origins = (*a.body.origins).clone();
+                mirrored.push(finish(id, "pattern", (body, journal), origins)?);
+            }
+        }
+    }
+    let mut images = mirrored.iter();
+    let mut tools: Vec<ToolBody> = Vec::new();
+    for ([i, j], m) in &motions {
+        let instance = if matches!(
+            &p.kind,
+            crate::doc::pattern::Kind::Linear {
+                second: Some(_),
+                ..
+            }
+        ) {
+            json!([i, j])
+        } else {
+            json!([i])
+        };
+        for (seed, a) in &seeds {
+            for (point, place) in &a.places {
+                let mut label = json!({"feature": id, "seed": seed, "instance": instance});
+                if let Some(pt) = point {
+                    label["point"] = json!(pt);
+                }
+                let (built, place) = match m {
+                    Motion::Rigid(r) => (a.body.as_ref(), r.then_after(place)),
+                    Motion::Mirror(_) => {
+                        (images.next().expect("an image per place"), Rigid::IDENTITY)
+                    }
+                };
+                tools.push(ToolBody {
+                    key: instance_key(&part.id, id, seed, point.as_ref(), [*i, *j]),
+                    built,
+                    place,
+                    name: id,
+                    label: Some(label),
+                });
+            }
+        }
+    }
+    let kop = match operation {
+        Operation::Join => BooleanOp::Unite,
+        _ => BooleanOp::Subtract,
+    };
+    let made: Vec<(Id, Arc<Built>)> = targets
+        .par_iter()
+        .map(|(t, b)| {
+            let r = apply(part, id, "pattern", (kop, operation.as_str()), t, b, &tools)?;
+            Ok(((*t).clone(), Arc::new(r)))
+        })
+        .collect::<Result<_>>()?;
+    Ok(Made::new(made))
 }
 
 /// A body a feature applies to a solid: its key, the body and where it
@@ -918,6 +1089,7 @@ fn apply(
         );
         if !left && !changed {
             let which = match &x.label {
+                Some(l) if l.get("instance").is_some() => label_text(l),
                 Some(l) => format!("{} at {}", x.name, label_text(l)),
                 None => x.name.to_string(),
             };
@@ -971,28 +1143,31 @@ fn apply(
     finish(id, ty, (body, journal), origins)
 }
 
-/// A tool's label as text: `p3`, or the fields' values joined.
+/// A tool's label as text: a hole's point (`p3`), or a pattern's
+/// instance (`instance [2] of hole1 at p3`).
 fn label_text(l: &Value) -> String {
-    match l {
-        Value::Object(o) => o
-            .values()
-            .map(|v| match v {
-                Value::String(s) => s.clone(),
-                v => v.to_string(),
-            })
-            .collect::<Vec<_>>()
-            .join(" "),
-        v => v.to_string(),
+    let text = |k: &str| match l.get(k) {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(v) => Some(v.to_string()),
+        None => None,
+    };
+    let point = text("point");
+    match (text("instance"), text("seed")) {
+        (Some(i), Some(s)) => match point {
+            Some(p) => format!("instance {i} of {s} at {p}"),
+            None => format!("instance {i} of {s}"),
+        },
+        _ => point.unwrap_or_default(),
     }
 }
 
 /// The one tool that alone makes the kernel refuse, when there is one:
 /// the tools are halved, keeping a half that still fails, until one is
-/// left. `None` for a single tool, or when no half fails alone (the
-/// tools meet each other badly).
+/// left. A single tool is it; `None` when no half fails alone (the tools
+/// meet each other badly).
 fn culprit(key: OpKey, kop: BooleanOp, target: &Body, tools: &[Tool]) -> Option<usize> {
     if tools.len() < 2 {
-        return None;
+        return (tools.len() == 1).then_some(0);
     }
     let fails =
         |r: core::ops::Range<usize>| ryukei::boolean::boolean(key, kop, target, &tools[r]).is_err();
@@ -1065,6 +1240,7 @@ fn boolean_error(
         e => (e.to_string(), Vec::new(), None),
     };
     let which = match alone.and_then(|x| x.label.as_ref()) {
+        Some(l) if l.get("instance").is_some() => format!(" ({})", label_text(l)),
         Some(l) => format!(" at {}", label_text(l)),
         None => String::new(),
     };
@@ -1536,6 +1712,7 @@ fn rebuild_with(
         Feature::Fillet(_) | Feature::Chamfer(_) => {
             (build_blend(part, solids, id, f, before).map(solid), None)
         }
+        Feature::Pattern(p) => (build_pattern(part, solids, id, p, before).map(solid), None),
         f => {
             let (r, own) = build_body(part, solids, id, f, before, tool);
             (r.map(solid), own)
@@ -1556,7 +1733,22 @@ fn input_hash(
     before: &BTreeMap<Id, Result<Output>>,
 ) -> blake3::Hash {
     let reads = crate::graph::reads(solids, id, f);
-    hash_of(part, id, &f.to_json(), &reads, before)
+    let mut h = hash_of(part, id, &f.to_json(), &reads, before);
+    // A pattern reads its seeds' own bodies and places too.
+    if !f.seeds().is_empty() {
+        let mut x = blake3::Hasher::new();
+        x.update(h.as_bytes());
+        for seed in f.seeds() {
+            if let Some(Ok(o)) = before.get(seed)
+                && let Some(a) = o.applied()
+            {
+                x.update(a.hash.as_bytes());
+            }
+            x.update(&[0]);
+        }
+        h = x.finalize();
+    }
+    h
 }
 
 /// The hash of everything a join, cut or intersect's own body depends

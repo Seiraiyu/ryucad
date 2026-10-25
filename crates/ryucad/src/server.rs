@@ -836,6 +836,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
         Feature::Boolean(b) => b.fields(),
         Feature::Fillet(_) | Feature::Chamfer(_) => blend_report(part, f),
         Feature::Hole(h) => hole_report(part, h),
+        Feature::Pattern(x) => pattern_report(part, x),
         Feature::Revolve(r) => {
             let mut v = r.fields();
             if let Angle::Of(q) = &r.angle {
@@ -919,6 +920,33 @@ fn hole_report(part: &Id, h: &crate::doc::hole::Hole) -> Value {
     }
     if let Bottom::Drill(q) = &h.bottom {
         v["bottom"] = json!({"drill": q.report()});
+    }
+    v
+}
+
+/// A pattern as output reports it: its file's fields, every spacing,
+/// count and angle as written and as a value, every reference as
+/// `<part>/<feature>/<name>`.
+fn pattern_report(part: &Id, x: &crate::doc::pattern::Pattern) -> Value {
+    use crate::doc::pattern::Kind;
+    let mut v = x.fields();
+    match &x.kind {
+        Kind::Linear { first, second } => {
+            v["spacing"] = first.spacing.report();
+            v["count"] = first.count.report();
+            if let Some(r) = second {
+                v["spacing2"] = r.spacing.report();
+                v["count2"] = r.count.report();
+            }
+        }
+        Kind::Circular { count, angle, .. } => {
+            v["count"] = count.report();
+            v["angle"] = angle.report();
+        }
+        Kind::Mirror { .. } => {}
+    }
+    for (role, r) in x.references() {
+        v[role] = json!(r.text(part));
     }
     v
 }
@@ -1955,6 +1983,10 @@ fn feature_edit(
             given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
             blend_from(ty, Some(&f), &given, &pid, unit, &p.env)?
         }
+        f @ Feature::Pattern(_) => {
+            given.only("pattern", &[])?;
+            f
+        }
         Feature::Hole(h) => {
             given.only("hole", &HOLE)?;
             let f = hole_from(Some(&h), &given, &pid, unit, &p.env)?;
@@ -2152,6 +2184,15 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
         .filter_map(|(fid, f)| match f.as_ref().ok()? {
             Feature::Boolean(b) => Some((fid.clone(), (b.op.as_str(), b.tools.clone()))),
             Feature::Hole(_) => Some((fid.clone(), ("cut", Vec::new()))),
+            // A pattern does what its seeds do.
+            Feature::Pattern(x) => {
+                let seed = part.features.get(x.features.first()?)?.as_ref().ok()?;
+                let op = match seed {
+                    Feature::Hole(_) => "cut",
+                    f => f.combine()?.operation.as_str(),
+                };
+                Some((fid.clone(), (op, Vec::new())))
+            }
             f => {
                 let c = f.combine().filter(|c| !c.is_new())?;
                 Some((fid.clone(), (c.operation.as_str(), Vec::new())))

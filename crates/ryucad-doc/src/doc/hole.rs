@@ -182,6 +182,7 @@ fn size(v: &Value, field: Field, env: &Env, at: &str, what: &str) -> Result<Quan
     let si = match field {
         Field::Length(_) => q.meters(),
         Field::Angle => q.radians(),
+        Field::Number => q.number(),
     };
     if si <= 0.0 {
         return Err(bad_size(

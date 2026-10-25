@@ -30,6 +30,7 @@ pub mod merge;
 pub mod mesh;
 pub mod notify;
 pub mod param;
+pub mod pattern;
 pub mod pdm;
 pub mod profile;
 pub mod proto;
