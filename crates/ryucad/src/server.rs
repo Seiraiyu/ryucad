@@ -369,6 +369,24 @@ fn dispatch(
             expected_revision.as_deref(),
         ),
         Request::AssemblyTree { part } => crate::assembly::tree(session, &part),
+        Request::AssemblySolve { part, moves } => crate::mate::solve_request(
+            session,
+            &part,
+            moves
+                .into_iter()
+                .map(|m| {
+                    (
+                        m.instance,
+                        crate::assembly::Move {
+                            placement: m.placement,
+                            translate: m.translate,
+                            axis: m.axis,
+                            angle: m.angle,
+                        },
+                    )
+                })
+                .collect(),
+        ),
         Request::FeatureShow { part, id } => {
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
             let p = session.project().part(&part)?;

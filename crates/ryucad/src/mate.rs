@@ -674,6 +674,196 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
     }))
 }
 
+/// An assembly solved after moves: its rebuild as proposed, whether the
+/// moved instances could be held where they were put, and the moves.
+pub struct Moved {
+    pub result: crate::rebuild::PartResult,
+    pub held: bool,
+    pub moves: Vec<(Id, crate::doc::assembly::Pose)>,
+}
+
+impl Moved {
+    /// Whether the mates hold.
+    pub fn converged(&self) -> bool {
+        self.result
+            .solve
+            .as_ref()
+            .is_none_or(|s| s.report.converged)
+    }
+
+    /// The pose each instance of `p` (the assembly as it is) takes: a
+    /// moved one held where it was put, the rest where the solve put them.
+    pub fn poses(&self, p: &Part) -> BTreeMap<Id, crate::doc::assembly::Pose> {
+        let mut out = BTreeMap::new();
+        for (id, r) in &self.result.features {
+            let Some(placed) = r.as_ref().ok().and_then(|o| o.instance()) else {
+                continue;
+            };
+            let held = self
+                .held
+                .then(|| self.moves.iter().find(|(m, _)| m == id))
+                .flatten();
+            // An instance placed where its file says keeps the file's pose
+            // to the bit: read again, a pose needn't come back the same.
+            let stored = match p.features.get(id) {
+                Some(Ok(Feature::Instance(i))) => Some(i.pose),
+                _ => None,
+            };
+            let pose = match (held, stored) {
+                (Some((_, pose)), _) => *pose,
+                (None, Some(s)) if pose_rigid(&s).is_ok_and(|r| r == placed.pose) => s,
+                (None, _) => doc_pose(&pose(&placed.pose)),
+            };
+            if stored.is_some() {
+                out.insert(id.clone(), pose);
+            }
+        }
+        out
+    }
+
+    /// The instances of `p` whose files change, with their new features:
+    /// each moved one, and each the solve moved, as stored (`fixed` as
+    /// it was).
+    pub fn writes(&self, p: &Part) -> Vec<(Id, Feature)> {
+        let poses = self.poses(p);
+        p.order()
+            .iter()
+            .filter_map(|id| {
+                let Some(Ok(Feature::Instance(i))) = p.features.get(id) else {
+                    return None;
+                };
+                let moved = self.moves.iter().any(|(m, _)| m == id);
+                let pose = *poses.get(id)?;
+                (moved || pose != i.pose).then(|| {
+                    let mut i = i.clone();
+                    i.pose = pose;
+                    (id.clone(), Feature::Instance(i))
+                })
+            })
+            .collect()
+    }
+}
+
+/// Assembly `part` solved with `moves` applied: first with each moved
+/// instance held where it was put (fixed), as `sketch.edit` holds what it
+/// moves, then, if its mates can't hold that way, with them free from
+/// there. Writes nothing. A move that leaves mates unable to hold that
+/// held before is `assembly_overconstrained`.
+pub fn after_moves(
+    session: &mut crate::session::Session,
+    part: &Id,
+    moves: &[(Id, crate::doc::assembly::Pose)],
+) -> Result<Moved> {
+    let p = session.project().part(part)?.clone();
+    let before = session
+        .rebuilt(part)?
+        .solve
+        .as_ref()
+        .is_none_or(|s| s.report.converged);
+    let proposed = |held: bool| -> Result<Part> {
+        let mut q = p.clone();
+        for (id, pose) in moves {
+            let Some(Ok(Feature::Instance(i))) = q.features.get_mut(id) else {
+                return Err(Error::new(
+                    Code::ReferenceWrongKind,
+                    format!("{id} isn't an instance of {part}"),
+                )
+                .with("feature", id));
+            };
+            i.pose = *pose;
+            i.fixed |= held;
+        }
+        Ok(q)
+    };
+    let held = Moved {
+        result: session.rebuilt_as(proposed(true)?)?,
+        held: true,
+        moves: moves.to_vec(),
+    };
+    if held.converged() {
+        return Ok(held);
+    }
+    let free = Moved {
+        result: session.rebuilt_as(proposed(false)?)?,
+        held: false,
+        moves: moves.to_vec(),
+    };
+    if !free.converged() && before {
+        let conflicting = free
+            .result
+            .solve
+            .as_ref()
+            .map(|s| json!(s.mate_ids(&s.report.conflicting)))
+            .unwrap_or(json!([]));
+        return Err(Error::new(
+            Code::AssemblyOverconstrained,
+            format!("moved that way, {part}'s mates can't all hold"),
+        )
+        .with("part", part)
+        .with("conflicting", conflicting));
+    }
+    Ok(free)
+}
+
+/// `assembly.solve`: assembly `part` solved as it is, or with `moves`
+/// (instances and how each moves) held where they are put for a first
+/// solve, writing nothing: each instance's pose, whether the moves were
+/// held, and the solve's report.
+pub fn solve_request(
+    session: &mut crate::session::Session,
+    part: &str,
+    moves: Vec<(String, crate::assembly::Move)>,
+) -> Result<Value> {
+    let pid = crate::server::part_id(part)?;
+    let unit = session.project().manifest.default_unit;
+    let p = session.project().part(&pid)?.clone();
+    if crate::server::part_kind(&p) != crate::doc::files::PartKind::Assembly {
+        return Err(Error::new(
+            Code::WrongPartKind,
+            format!("{pid} is a part, not an assembly"),
+        )
+        .with("part", &pid));
+    }
+    let mut at = Vec::new();
+    for (i, how) in moves {
+        let iid = crate::server::feature_id(&i)?;
+        let inst = crate::assembly::movable(&p, &iid)?;
+        at.push((iid, crate::assembly::move_pose(&inst, how, unit, &p.env)?));
+    }
+    let solved = if at.is_empty() {
+        Moved {
+            result: session.rebuilt(&pid)?.clone(),
+            held: false,
+            moves: Vec::new(),
+        }
+    } else {
+        after_moves(session, &pid, &at)?
+    };
+    let poses: serde_json::Map<String, Value> = solved
+        .poses(&p)
+        .into_iter()
+        .map(|(id, pose)| {
+            let moved = match p.features.get(&id) {
+                Some(Ok(Feature::Instance(i))) => i.pose != pose,
+                _ => false,
+            };
+            (
+                id.to_string(),
+                json!({"pose": pose.to_json(), "moved": moved}),
+            )
+        })
+        .collect();
+    let mut v = json!({"part": pid, "revision": p.revision, "converged": solved.converged(),
+                       "instances": poses});
+    if !at.is_empty() {
+        v["held"] = json!(solved.held);
+    }
+    if let Some(s) = &solved.result.solve {
+        v["solve"] = s.to_json();
+    }
+    Ok(v)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1150,5 +1340,158 @@ mod protocol_tests {
         .unwrap_err();
         assert_eq!(e.code, Code::WrongPartKind);
         assert!(add(&mut s, json!({"a": good, "b": "frame/base"})).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod move_tests {
+    use super::tests::{add_in, hinged, near_pose};
+    use crate::assembly::tests::{id, place_in};
+    use crate::doc::project::feature_path;
+    use crate::error::Code;
+    use crate::server::tests::call;
+    use serde_json::json;
+
+    /// The hinge, stored where it holds, with a cap fastened 20 mm up the
+    /// pin.
+    fn hinged_with_cap() -> (tempfile::TempDir, crate::session::Session) {
+        let (dir, mut s) = hinged();
+        let r = dir.path();
+        place_in(r, "frame", "cap", "bolt", json!("working"), [0.0, 0.0, 0.1]);
+        add_in(
+            r,
+            "frame",
+            "m2",
+            "mate",
+            json!({"form": "fastened",
+                   "a": {"instance": ["pin"], "at": "origin",
+                         "offset": {"origin": ["0 mm", "0 mm", "20 mm"]}},
+                   "b": {"instance": ["cap"], "at": "origin"}}),
+        );
+        s.refresh().unwrap();
+        // Store the solved poses, as a write keeping it current would.
+        let solved = super::after_moves(&mut s, &id("frame"), &[]).unwrap();
+        let p = s.project().part(&id("frame")).unwrap().clone();
+        let writes = solved.writes(&p);
+        let refs: Vec<_> = writes.iter().map(|(i, f)| (i, f)).collect();
+        let list = crate::server::order(&p).unwrap();
+        crate::server::save(&mut s, &id("frame"), &refs, list).unwrap();
+        assert!(
+            !s.rebuilt(&id("frame"))
+                .unwrap()
+                .solve
+                .as_ref()
+                .unwrap()
+                .stale()
+        );
+        (dir, s)
+    }
+
+    #[test]
+    fn solving_reports_and_previews_moves_without_writing() {
+        let (dir, mut s) = hinged_with_cap();
+        let before =
+            std::fs::read_to_string(feature_path(dir.path(), &id("frame"), &id("pin"))).unwrap();
+        let show = call(
+            &mut s,
+            "feature.show",
+            json!({"part": "frame", "id": "cap"}),
+        )
+        .unwrap();
+        let x0: Vec<f64> = (0..3)
+            .map(|k| show["pose"]["x"][k].as_f64().unwrap())
+            .collect();
+        let v = call(&mut s, "assembly.solve", json!({"part": "frame"})).unwrap();
+        assert_eq!(v["converged"], true);
+        assert_eq!(v["solve"]["dof"], 1);
+        assert!(v.get("held").is_none());
+        // Turned about the hinge: free, so held where it is put, and the
+        // cap goes with it.
+        let turn = json!({"part": "frame", "moves": [{"instance": "pin", "axis": [0, 0, 1],
+                                                      "angle": "90 deg"}]});
+        let v = call(&mut s, "assembly.solve", turn).unwrap();
+        assert_eq!((&v["converged"], &v["held"]), (&json!(true), &json!(true)));
+        assert_eq!(v["instances"]["pin"]["moved"], true);
+        assert_eq!(v["instances"]["cap"]["moved"], true);
+        // A quarter turn about z: x to y, y to -x.
+        let x = &v["instances"]["cap"]["pose"]["x"];
+        assert!(
+            (x[0].as_f64().unwrap() + x0[1]).abs() < 1e-9,
+            "{x} from {x0:?}"
+        );
+        assert!(
+            (x[1].as_f64().unwrap() - x0[0]).abs() < 1e-9,
+            "{x} from {x0:?}"
+        );
+        // Lifted off the plate: it can't be held there, so it is solved
+        // free from where it was put, and the hinge pulls it back.
+        let lift = json!({"part": "frame", "moves": [{"instance": "pin",
+                                                      "translate": [0, 0, "1 mm"]}]});
+        let v = call(&mut s, "assembly.solve", lift).unwrap();
+        assert_eq!((&v["converged"], &v["held"]), (&json!(true), &json!(false)));
+        let z = v["instances"]["pin"]["pose"]["origin_m"][2]
+            .as_f64()
+            .unwrap();
+        assert!((z - 0.005).abs() < 1e-9, "{z}");
+        // Nothing was written.
+        let after =
+            std::fs::read_to_string(feature_path(dir.path(), &id("frame"), &id("pin"))).unwrap();
+        assert_eq!(before, after);
+        let e = call(
+            &mut s,
+            "assembly.solve",
+            json!({"part": "frame", "moves": [{"instance": "base", "translate": [1, 0, 0]}]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InstanceFixed);
+    }
+
+    #[test]
+    fn a_move_writes_what_follows_in_one_change() {
+        use crate::live::Live;
+        use crate::server::tests::call_live;
+        let (_dir, mut s) = hinged_with_cap();
+        let show = call(
+            &mut s,
+            "feature.show",
+            json!({"part": "frame", "id": "cap"}),
+        )
+        .unwrap();
+        let x0 = show["pose"]["x"].clone();
+        let mut live = Live::new();
+        let v = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "assembly.move",
+            json!({"part": "frame", "instance": "pin", "axis": [0, 0, 1], "angle": "90 deg"}),
+        )
+        .unwrap();
+        assert_eq!(v["moved"], json!(["pin", "cap"]));
+        assert_eq!(v["held"], true);
+        let r = s.rebuilt(&id("frame")).unwrap();
+        assert!(!r.solve.as_ref().unwrap().stale());
+        near_pose(&mut s, "frame", "cap", [0.02, 0.01, 0.025]);
+        // One change: undone, both are back.
+        call_live(&mut s, &mut live, None, "undo", json!({})).unwrap();
+        let show = call(
+            &mut s,
+            "feature.show",
+            json!({"part": "frame", "id": "cap"}),
+        )
+        .unwrap();
+        assert_eq!(show["pose"]["x"], x0);
+        // The tree says what each instance may still do.
+        let t = call(&mut s, "assembly.tree", json!({"part": "frame"})).unwrap();
+        let pin = t["instances"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == "pin")
+            .unwrap();
+        assert_eq!(
+            (&pin["solve"]["dof"], &pin["solve"]["state"]),
+            (&json!(1), &json!("under"))
+        );
     }
 }

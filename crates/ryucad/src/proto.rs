@@ -294,6 +294,21 @@ pub struct PlacementArg {
     pub x: Option<[f64; 3]>,
 }
 
+/// How `assembly.solve` moves one instance, as `assembly.move` does.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstanceMove {
+    pub instance: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<PlacementArg>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translate: Option<[Value; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axis: Option<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angle: Option<Value>,
+}
+
 /// How one merge conflict is settled: by one side's value, a value given,
 /// or one of its planned repairs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -535,6 +550,15 @@ pub enum Request {
         angle: Option<Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
+    },
+    /// An assembly's mates solved, writing nothing: as it is, or with
+    /// `moves` held where they put instances for a first solve. Each
+    /// instance's pose and the solve's report.
+    #[serde(rename = "assembly.solve")]
+    AssemblySolve {
+        part: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        moves: Vec<InstanceMove>,
     },
     /// An assembly's instances as a tree: each with its part, revision and
     /// how it resolved, its pose in the assembly, and a subassembly's own.

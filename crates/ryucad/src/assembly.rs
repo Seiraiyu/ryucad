@@ -812,56 +812,32 @@ pub struct Move {
     pub angle: Option<serde_json::Value>,
 }
 
-/// `assembly.move`: writes instance `instance` of assembly `part` where
-/// `how` puts it. A fixed instance is `instance_fixed`.
-pub fn moved(
-    session: &mut crate::session::Session,
-    part: &str,
-    instance: &str,
+/// Where `how` puts instance `inst` (in an assembly whose default unit is
+/// `unit` and parameters `env`): a placement first (what it leaves out
+/// stays), then a turn of `angle` about `axis` through its origin, then
+/// `translate`, in the assembly's frame.
+pub fn move_pose(
+    inst: &Instance,
     how: Move,
-    expected: Option<&str>,
-) -> Result<serde_json::Value> {
+    unit: crate::units::Unit,
+    env: &crate::expr::Env,
+) -> Result<Pose> {
     use crate::units::{Field, Quantity};
-    let pid = crate::server::part_id(part)?;
-    let iid = crate::server::feature_id(instance)?;
-    let unit = session.project().manifest.default_unit;
-    let p = session.project().part(&pid)?;
-    crate::server::check_revision(p, expected)?;
-    if crate::server::part_kind(p) != PartKind::Assembly {
-        return Err(Error::new(
-            Code::WrongPartKind,
-            format!("{pid} is a part; only an assembly's instances move"),
-        )
-        .with("part", &pid));
-    }
-    let Feature::Instance(mut inst) = crate::server::feature(p, &iid)?.clone() else {
-        return Err(
-            Error::new(Code::ReferenceWrongKind, format!("{iid} isn't an instance"))
-                .with("feature", &iid),
-        );
-    };
-    if inst.fixed {
-        return Err(Error::new(
-            Code::InstanceFixed,
-            format!("{iid} is fixed where it is; free it with feature.edit (fixed: false)"),
-        )
-        .with("feature", &iid));
-    }
-    let env = p.env.clone();
     let lookup = |n: &str| env.get(n);
+    let mut pose = inst.pose;
     if let Some(arg) = how.placement {
         if let Some(origin) = arg.origin {
             for (i, v) in origin.iter().enumerate() {
                 let q = Quantity::from_json_as(v, Field::Length(unit), &lookup)
                     .map_err(|e| e.with("pointer", format!("/placement/origin/{i}")))?;
-                inst.pose.origin_m[i] = q.meters();
+                pose.origin_m[i] = q.meters();
             }
         }
         if let Some(z) = arg.z {
-            inst.pose.z = z;
+            pose.z = z;
         }
         if let Some(x) = arg.x {
-            inst.pose.x = x;
+            pose.x = x;
         }
     }
     match (how.axis, how.angle) {
@@ -877,10 +853,10 @@ pub fn moved(
                 })?;
             let turn = Rigid::rotation(axis, a.radians());
             let v = |a: [f64; 3]| Vector3::new(a[0], a[1], a[2]);
-            let z = turn.apply_vector(v(inst.pose.z));
-            let x = turn.apply_vector(v(inst.pose.x));
-            inst.pose.z = [z.x, z.y, z.z];
-            inst.pose.x = [x.x, x.y, x.z];
+            let z = turn.apply_vector(v(pose.z));
+            let x = turn.apply_vector(v(pose.x));
+            pose.z = [z.x, z.y, z.z];
+            pose.x = [x.x, x.y, x.z];
         }
         _ => {
             return Err(
@@ -893,27 +869,84 @@ pub fn moved(
         for (i, v) in t.iter().enumerate() {
             let q = Quantity::from_json_as(v, Field::Length(unit), &lookup)
                 .map_err(|e| e.with("pointer", format!("/translate/{i}")))?;
-            inst.pose.origin_m[i] += q.meters();
+            pose.origin_m[i] += q.meters();
         }
     }
     let clean = crate::doc::sketch::clean;
-    inst.pose.origin_m = inst.pose.origin_m.map(clean);
-    inst.pose.z = inst.pose.z.map(clean);
-    inst.pose.x = inst.pose.x.map(clean);
-    pose_rigid(&inst.pose)?;
-    let pose = inst.pose;
-    let list = crate::server::order(p)?;
-    let f = Feature::Instance(inst);
-    let revision = crate::server::save(session, &pid, &[(&iid, &f)], list)?;
+    pose.origin_m = pose.origin_m.map(clean);
+    pose.z = pose.z.map(clean);
+    pose.x = pose.x.map(clean);
+    pose_rigid(&pose)?;
+    Ok(pose)
+}
+
+/// Instance `instance` of assembly `p`, which `assembly.move` and
+/// `assembly.solve` may move: `wrong_part_kind` outside an assembly,
+/// `reference_wrong_kind` for a feature that isn't an instance,
+/// `instance_fixed` for one fixed where it is.
+pub fn movable(p: &Part, iid: &Id) -> Result<Instance> {
+    if crate::server::part_kind(p) != PartKind::Assembly {
+        return Err(Error::new(
+            Code::WrongPartKind,
+            format!("{} is a part; only an assembly's instances move", p.id),
+        )
+        .with("part", &p.id));
+    }
+    let Feature::Instance(inst) = crate::server::feature(p, iid)?.clone() else {
+        return Err(
+            Error::new(Code::ReferenceWrongKind, format!("{iid} isn't an instance"))
+                .with("feature", iid),
+        );
+    };
+    if inst.fixed {
+        return Err(Error::new(
+            Code::InstanceFixed,
+            format!("{iid} is fixed where it is; free it with feature.edit (fixed: false)"),
+        )
+        .with("feature", iid));
+    }
+    Ok(inst)
+}
+
+/// `assembly.move`: moves instance `instance` of assembly `part` where
+/// `how` puts it, and writes the poses its mates then solve to, every
+/// instance that moves in one change (see [`crate::mate::after_moves`]).
+/// A fixed instance is `instance_fixed`.
+pub fn moved(
+    session: &mut crate::session::Session,
+    part: &str,
+    instance: &str,
+    how: Move,
+    expected: Option<&str>,
+) -> Result<serde_json::Value> {
+    let pid = crate::server::part_id(part)?;
+    let iid = crate::server::feature_id(instance)?;
+    let unit = session.project().manifest.default_unit;
+    let p = session.project().part(&pid)?;
+    crate::server::check_revision(p, expected)?;
+    let inst = movable(p, &iid)?;
+    let env = p.env.clone();
+    let pose = move_pose(&inst, how, unit, &env)?;
+    let solved = crate::mate::after_moves(session, &pid, &[(iid.clone(), pose)])?;
+    let writes = solved.writes(session.project().part(&pid)?);
+    let list = crate::server::order(session.project().part(&pid)?)?;
+    let refs: Vec<(&Id, &Feature)> = writes.iter().map(|(id, f)| (id, f)).collect();
+    let revision = crate::server::save(session, &pid, &refs, list)?;
+    let pose = match writes.iter().find(|(id, _)| *id == iid) {
+        Some((_, Feature::Instance(i))) => i.pose,
+        _ => pose,
+    };
+    let moved: Vec<&Id> = writes.iter().map(|(id, _)| id).collect();
     Ok(
         serde_json::json!({"part": pid, "instance": iid, "pose": pose.to_json(),
-                          "revision": revision}),
+                          "moved": moved, "held": solved.held, "revision": revision}),
     )
 }
 
 /// `assembly.tree`: assembly `part`'s instances, each with its part,
 /// revision and how it resolved, whether it is fixed, its pose in the
-/// assembly, a subassembly's instances under it, and why it failed.
+/// assembly, what its mates leave it, a subassembly's instances under it,
+/// and why it failed; and its instance patterns, each with its copies.
 pub fn tree(session: &mut crate::session::Session, part: &str) -> Result<serde_json::Value> {
     let pid = crate::server::part_id(part)?;
     let p = session.project().part(&pid)?.clone();
@@ -940,6 +973,36 @@ fn nodes(
 ) -> Result<Vec<serde_json::Value>> {
     let mut out = Vec::new();
     for (fid, r) in &result.features {
+        // A pattern's copies, each under the pattern with its seed.
+        if let Some(Ok(Feature::InstancePattern(_))) = p.features.get(fid) {
+            let mut v = serde_json::json!({"id": fid, "type": "instance_pattern",
+                                           "ok": r.is_ok()});
+            match r {
+                Err(e) => v["error"] = serde_json::json!(e),
+                Ok(o) => {
+                    let copies: Vec<serde_json::Value> = o
+                        .copies()
+                        .map(|c| c.copies.as_slice())
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|c| {
+                            let mut path = prefix.to_vec();
+                            path.extend([Id::copy(fid, c.index), c.seed.clone()]);
+                            serde_json::json!({
+                                "path": path_text(&path),
+                                "seed": c.seed,
+                                "part": c.placed.part,
+                                "rev": c.placed.rev.to_json(),
+                                "pose": rigid_pose(&at.then_after(&c.placed.pose)).to_json(),
+                            })
+                        })
+                        .collect();
+                    v["copies"] = serde_json::json!(copies);
+                }
+            }
+            out.push(v);
+            continue;
+        }
         let Some(Ok(Feature::Instance(inst))) = p.features.get(fid) else {
             continue;
         };
@@ -949,6 +1012,10 @@ fn nodes(
                                        "rev": inst.rev.to_json(), "ok": r.is_ok()});
         if inst.fixed {
             v["fixed"] = serde_json::json!(true);
+        }
+        // What its assembly's mates leave it.
+        if let Some(b) = result.solve.as_ref().and_then(|s| s.instance(fid)) {
+            v["solve"] = crate::mate::body_json(b);
         }
         match r {
             Err(e) => v["error"] = serde_json::json!(e),

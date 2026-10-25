@@ -239,6 +239,21 @@ impl Session {
         Ok(&self.store.results[part].1)
     }
 
+    /// The rebuild of `part`, a proposed edit of one of the project's
+    /// parts, over this session's results for everything else; kept
+    /// nowhere, so the session is as it was.
+    pub fn rebuilt_as(&mut self, part: Part) -> Result<PartResult> {
+        let pins = self.pins()?;
+        let id = part.id.clone();
+        let mut project = self.project.clone();
+        project.parts.insert(id.clone(), part);
+        let mut store = self.store.clone();
+        // Its revision is the files', which the edit hasn't changed.
+        store.results.remove(&id);
+        let mut r = Rebuild::new(&project, &pins, store);
+        Ok(r.result(&id)?.clone())
+    }
+
     /// The model of `part` at `rev`: what an instance of it places.
     pub fn model(&mut self, part: &Id, rev: &Rev) -> Result<Arc<Model>> {
         let mut out = None;
