@@ -27,9 +27,7 @@ fn feature(ty: PrimitiveType, params: &[(&str, &str)]) -> Feature {
 fn part(features: Vec<(&str, Feature)>) -> Part {
     Part {
         id: id("p"),
-        file: Ok(PartFile {
-            features: features.iter().map(|(f, _)| id(f)).collect(),
-        }),
+        file: Ok(PartFile::new(features.iter().map(|(f, _)| id(f)).collect())),
         parameters: None,
         env: ryucad::expr::Env::empty(),
         uses: Default::default(),

@@ -152,7 +152,7 @@ fn rebuild_section(golden: &mut Golden) {
     }
     let part = Part {
         id: Id::parse("golden", "part").unwrap(),
-        file: Ok(PartFile { features: order }),
+        file: Ok(PartFile::new(order)),
         parameters: None,
         env: ryucad::expr::Env::empty(),
         uses: Default::default(),
@@ -1289,7 +1289,7 @@ fn pdm_section(golden: &mut Golden) {
         }
         files.insert(
             "parts/p/part.json".into(),
-            text(&PartFile { features: order }.to_json()),
+            text(&PartFile::new(order).to_json()),
         );
         if g.next_u64().is_multiple_of(2) {
             let p = json!({"format": 1, "kind": "ryucad.parameters",

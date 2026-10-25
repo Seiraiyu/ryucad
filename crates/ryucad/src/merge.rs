@@ -278,12 +278,13 @@ impl Walk {
 /// model (ryupdm's) are merged by the generic rule at any format.
 pub fn newest(kind: &str) -> Option<u64> {
     use crate::doc::files::{
-        FEATURE_FORMAT, FEATURE_KIND, FORMAT, MANIFEST_FORMAT, PARAMETERS_KIND, PART_KIND,
-        PROJECT_KIND,
+        FEATURE_FORMAT, FEATURE_KIND, FORMAT, MANIFEST_FORMAT, PARAMETERS_KIND, PART_FORMAT,
+        PART_KIND, PROJECT_KIND,
     };
     match kind {
         PROJECT_KIND => Some(MANIFEST_FORMAT),
-        PART_KIND | PARAMETERS_KIND => Some(FORMAT),
+        PART_KIND => Some(PART_FORMAT),
+        PARAMETERS_KIND => Some(FORMAT),
         FEATURE_KIND => Some(FEATURE_FORMAT),
         _ => None,
     }
@@ -329,6 +330,7 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
     let format = match kind.as_str() {
         crate::doc::files::FEATURE_KIND => json!(crate::doc::files::feature_format(&value)),
         crate::doc::files::PROJECT_KIND => json!(crate::doc::files::manifest_format(&value)),
+        crate::doc::files::PART_KIND => json!(crate::doc::files::part_format(&value)),
         _ => {
             let f = |v: &Value| v["format"].as_u64().unwrap_or(1);
             json!(f(ours).max(f(theirs)))
@@ -1176,6 +1178,24 @@ mod tests {
         let bad = json!({"features": ["a", "a"], "format": 1, "kind": "ryucad.part"});
         let m = merge(Some(&part(&["a"])), &bad, &part(&["b"]));
         assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/features"]);
+    }
+
+    #[test]
+    fn a_part_kind_merges_by_key_and_sets_the_format() {
+        let part = |f: &[&str]| json!({"features": f, "format": 1, "kind": "ryucad.part"});
+        let assembly = |f: &[&str]| json!({"features": f, "format": 2, "kind": "ryucad.part", "part_kind": "assembly"});
+        // One side makes it an assembly, the other adds a feature.
+        let m = merge(Some(&part(&["a"])), &assembly(&["a"]), &part(&["a", "b"]));
+        assert!(m.is_clean());
+        assert_eq!(m.value, assembly(&["a", "b"]));
+        // Theirs took it back to a part: format 1 again.
+        let m = merge(
+            Some(&assembly(&["a"])),
+            &assembly(&["a", "b"]),
+            &part(&["a"]),
+        );
+        assert!(m.is_clean());
+        assert_eq!(m.value, part(&["a", "b"]));
     }
 
     /// A sketch on xy with the entities and constraints given.

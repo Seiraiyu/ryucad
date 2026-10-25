@@ -287,8 +287,13 @@ pub enum Request {
     },
     #[serde(rename = "project.info")]
     ProjectInfo {},
+    /// Creates an empty part, or with `kind` `assembly` an assembly.
     #[serde(rename = "part.create")]
-    PartCreate { part: String },
+    PartCreate {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
+    },
     #[serde(rename = "part.delete")]
     PartDelete {
         part: String,
@@ -1045,7 +1050,13 @@ mod tests {
 
     #[test]
     fn only_writers_mutate() {
-        assert!(Request::PartCreate { part: "p".into() }.mutates());
+        assert!(
+            Request::PartCreate {
+                part: "p".into(),
+                kind: None,
+            }
+            .mutates()
+        );
         assert!(
             Request::MergeResolve {
                 resolutions: Vec::new(),

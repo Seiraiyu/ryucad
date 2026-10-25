@@ -3,7 +3,9 @@
 
 use crate::activity::{self, EntryKind};
 use crate::config;
-use crate::doc::files::{Feature, Manifest, PartFile, Placement, Primitive, PrimitiveType, number};
+use crate::doc::files::{
+    Feature, Manifest, PartFile, PartKind, Placement, Primitive, PrimitiveType, number,
+};
 use crate::doc::id::Id;
 use crate::doc::project::{
     MANIFEST, Part, feature_path, parameters_path, part_dir, part_path, write_json,
@@ -178,7 +180,7 @@ fn dispatch(
         )
         .with("path", session.root())),
         Request::ProjectInfo {} => Ok(project_info(session)),
-        Request::PartCreate { part } => part_create(session, &part),
+        Request::PartCreate { part, kind } => part_create(session, &part, kind.as_deref()),
         Request::PartDelete {
             part,
             expected_revision,
@@ -741,8 +743,12 @@ pub(crate) fn check_revision(part: &Part, expected: Option<&str>) -> Result<()> 
     }
 }
 
-fn part_create(session: &mut Session, part: &str) -> Result<Value> {
+fn part_create(session: &mut Session, part: &str, kind: Option<&str>) -> Result<Value> {
     let id = part_id(part)?;
+    let kind = kind
+        .map(PartKind::parse)
+        .transpose()?
+        .unwrap_or(PartKind::Part);
     if session.project().parts.contains_key(&id) {
         return Err(
             Error::new(Code::DuplicateId, format!("part {id} already exists")).with("part", &id),
@@ -751,11 +757,15 @@ fn part_create(session: &mut Session, part: &str) -> Result<Value> {
     crate::pdm::check_not_retired(session.root(), &id)?;
     write_json(
         &part_path(session.root(), &id),
-        &PartFile { features: vec![] }.to_json(),
+        &PartFile {
+            kind,
+            features: vec![],
+        }
+        .to_json(),
     )?;
     session.reload()?;
     let revision = &session.project().part(&id)?.revision;
-    Ok(json!({"part": id, "revision": revision}))
+    Ok(json!({"part": id, "kind": kind.as_str(), "revision": revision}))
 }
 
 fn part_delete(session: &mut Session, part: &str, expected: Option<&str>) -> Result<Value> {
@@ -773,7 +783,9 @@ fn part_list(session: &Session) -> Value {
         .parts
         .values()
         .map(|p| {
-            let mut v = json!({"part": p.id, "features": p.order().len(), "revision": p.revision});
+            let kind = part_kind(p);
+            let mut v = json!({"part": p.id, "kind": kind.as_str(),
+                               "features": p.order().len(), "revision": p.revision});
             if let Err(e) = &p.file {
                 v["error"] = json!(e);
             }
@@ -1061,7 +1073,11 @@ pub(crate) fn save(
     }
     write_json(
         &part_path(session.root(), part),
-        &PartFile { features: order }.to_json(),
+        &PartFile {
+            kind: part_kind(session.project().part(part)?),
+            features: order,
+        }
+        .to_json(),
     )?;
     session.reload()?;
     Ok(session.project().part(part)?.revision.clone())
@@ -1589,9 +1605,16 @@ fn proposed(p: &Part, order: &[Id], writes: &[(&Id, &Feature)]) -> Part {
         q.features.insert((*id).clone(), Ok((*f).clone()));
     }
     q.file = Ok(PartFile {
+        kind: part_kind(p),
         features: order.to_vec(),
     });
     q
+}
+
+/// Whether `part` is an assembly, as its part file says; a part whose
+/// file can't be read is taken for a part.
+pub(crate) fn part_kind(part: &Part) -> PartKind {
+    part.file.as_ref().map_or(PartKind::Part, |f| f.kind)
 }
 
 /// An extrude or revolve from its fields: the current ones (for an edit)
@@ -3455,7 +3478,7 @@ pub(crate) mod tests {
         let list = call(&mut s, "part.list", json!({})).unwrap();
         assert_eq!(
             list["parts"],
-            json!([{"part": "bracket", "features": 0, "revision": rev}])
+            json!([{"part": "bracket", "kind": "part", "features": 0, "revision": rev}])
         );
         let info = call(&mut s, "project.info", json!({})).unwrap();
         assert_eq!(info["parts"], json!(["bracket"]));
@@ -3478,6 +3501,31 @@ pub(crate) mod tests {
         .unwrap();
         let e = call(&mut s, "part.delete", json!({"part": "bracket"})).unwrap_err();
         assert_eq!(e.code, Code::NotFound);
+    }
+
+    #[test]
+    fn assemblies_are_parts_of_their_own_kind() {
+        let (dir, mut s) = fresh();
+        let r = call(
+            &mut s,
+            "part.create",
+            json!({"part": "frame", "kind": "assembly"}),
+        )
+        .unwrap();
+        assert_eq!(r["kind"], "assembly");
+        let text = fs::read_to_string(dir.path().join("parts/frame/part.json")).unwrap();
+        assert!(text.contains("\"part_kind\": \"assembly\""), "{text}");
+        assert!(text.contains("\"format\": 2"), "{text}");
+        let list = call(&mut s, "part.list", json!({})).unwrap();
+        assert_eq!(list["parts"][0]["kind"], "assembly");
+        let e = call(
+            &mut s,
+            "part.create",
+            json!({"part": "x", "kind": "drawing"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        assert!(!dir.path().join("parts/x").exists());
     }
 
     fn ids(v: &Value) -> Vec<&str> {
@@ -4409,10 +4457,7 @@ pub(crate) mod tests {
         .unwrap();
         write_json(
             &root.join("parts/p/part.json"),
-            &PartFile {
-                features: vec![Id::parse("s", "feature").unwrap()],
-            }
-            .to_json(),
+            &PartFile::new(vec![Id::parse("s", "feature").unwrap()]).to_json(),
         )
         .unwrap();
         (dir, s)

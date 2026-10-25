@@ -109,10 +109,24 @@ fn serves_requests_and_shuts_down() {
     let status = ask(&conn, &Request::DaemonStatus {}).unwrap();
     assert_eq!(status["pid"], child.id());
     assert_eq!(status["version"]["protocol"], 2);
-    ask(&conn, &Request::PartCreate { part: "p".into() }).unwrap();
+    ask(
+        &conn,
+        &Request::PartCreate {
+            part: "p".into(),
+            kind: None,
+        },
+    )
+    .unwrap();
     let list = ask(&conn, &Request::PartList {}).unwrap();
     assert_eq!(list["parts"][0]["part"], "p");
-    let e = ask(&conn, &Request::PartCreate { part: "p".into() }).unwrap_err();
+    let e = ask(
+        &conn,
+        &Request::PartCreate {
+            part: "p".into(),
+            kind: None,
+        },
+    )
+    .unwrap_err();
     assert_eq!(e.code, ryucad::error::Code::DuplicateId);
     // Several connections at once are served.
     let other = f.connect().unwrap();

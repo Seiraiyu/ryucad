@@ -19,6 +19,10 @@ use std::collections::BTreeMap;
 /// The format version of the manifest, part and parameters files.
 pub const FORMAT: u64 = 1;
 
+/// The newest part file format: 2 adds `kind`. A part file without one
+/// (a part, not an assembly) stays at 1.
+pub const PART_FORMAT: u64 = 2;
+
 /// The newest manifest format: 2 adds the project's ID. A manifest without
 /// one stays at 1, so older builds still read projects that don't use PDM.
 pub const MANIFEST_FORMAT: u64 = 2;
@@ -41,10 +45,43 @@ pub struct Manifest {
     pub project: Option<ProjectId>,
 }
 
-/// A part's ordered feature list, `parts/<part>/part.json`.
+/// A part's ordered feature list, `parts/<part>/part.json`, and whether
+/// it is an assembly.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PartFile {
+    pub kind: PartKind,
     pub features: Vec<Id>,
+}
+
+/// What a part file describes: a part, whose features make solids, or an
+/// assembly, whose features place other parts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PartKind {
+    #[default]
+    Part,
+    Assembly,
+}
+
+impl PartKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PartKind::Part => "part",
+            PartKind::Assembly => "assembly",
+        }
+    }
+
+    /// `part` or `assembly`.
+    pub fn parse(s: &str) -> Result<PartKind> {
+        match s {
+            "part" => Ok(PartKind::Part),
+            "assembly" => Ok(PartKind::Assembly),
+            _ => Err(Error::new(
+                Code::InvalidParam,
+                format!("unknown part kind {s:?}; known: part, assembly"),
+            )
+            .with("kind", s)),
+        }
+    }
 }
 
 /// A part's named parameters, `parts/<part>/parameters.json`: each an
@@ -222,12 +259,38 @@ impl Manifest {
 }
 
 impl PartFile {
+    /// A part (not an assembly) listing `features`.
+    pub fn new(features: Vec<Id>) -> PartFile {
+        PartFile {
+            kind: PartKind::Part,
+            features,
+        }
+    }
+
     pub fn to_json(&self) -> Value {
-        json!({"features": self.features, "format": FORMAT, "kind": PART_KIND})
+        let mut v = json!({"features": self.features, "format": FORMAT, "kind": PART_KIND});
+        // `kind` names the file kind; a part's own kind is `part_kind`.
+        if self.kind == PartKind::Assembly {
+            v["part_kind"] = json!(self.kind.as_str());
+            v["format"] = json!(PART_FORMAT);
+        }
+        v
     }
 
     pub fn from_json(v: &Value) -> Result<PartFile> {
-        let mut o = header(v, PART_KIND, FORMAT)?;
+        let mut o = header(v, PART_KIND, PART_FORMAT)?;
+        let kind = match o.take_opt("part_kind") {
+            None => PartKind::Part,
+            Some(k) => match k.as_str() {
+                Some("assembly") => PartKind::Assembly,
+                _ => {
+                    return Err(invalid(
+                        "/part_kind",
+                        "part_kind must be \"assembly\", or left out for a part",
+                    ));
+                }
+            },
+        };
         let list = o.take("features")?;
         let items = list
             .as_array()
@@ -249,7 +312,7 @@ impl PartFile {
             features.push(id);
         }
         o.finish()?;
-        Ok(PartFile { features })
+        Ok(PartFile { kind, features })
     }
 }
 
@@ -344,6 +407,15 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
         }
     }
     out
+}
+
+/// The lowest part file format that holds `v`: 2 for an assembly, else 1.
+pub fn part_format(v: &Value) -> u64 {
+    if v.get("part_kind").is_some() {
+        PART_FORMAT
+    } else {
+        FORMAT
+    }
 }
 
 /// The lowest manifest format that holds `v`: 2 with a project ID, else 1.
@@ -876,15 +948,37 @@ mod tests {
 
     #[test]
     fn part_round_trip() {
-        let p = PartFile {
-            features: vec![
-                Id::parse("b", "feature").unwrap(),
-                Id::parse("a", "feature").unwrap(),
-            ],
-        };
+        let p = PartFile::new(vec![
+            Id::parse("b", "feature").unwrap(),
+            Id::parse("a", "feature").unwrap(),
+        ]);
         let v = p.to_json();
         assert_eq!(v["features"], json!(["b", "a"]));
+        assert_eq!(v["format"], 1);
+        assert!(v.get("part_kind").is_none());
+        assert_eq!(part_format(&v), 1);
         assert_eq!(PartFile::from_json(&v).unwrap(), p);
+    }
+
+    #[test]
+    fn assemblies_are_part_format_2() {
+        let p = PartFile {
+            kind: PartKind::Assembly,
+            features: vec![Id::parse("i1", "feature").unwrap()],
+        };
+        let v = p.to_json();
+        assert_eq!(v["part_kind"], "assembly");
+        assert_eq!(v["format"], 2);
+        assert_eq!(part_format(&v), 2);
+        assert_eq!(PartFile::from_json(&v).unwrap(), p);
+        let bad = json!({"features": [], "format": 2, "kind": "ryucad.part", "part_kind": "part"});
+        let e = PartFile::from_json(&bad).unwrap_err();
+        assert_eq!(e.details["pointer"], "/part_kind");
+        let newer = json!({"features": [], "format": 3, "kind": "ryucad.part"});
+        assert_eq!(
+            PartFile::from_json(&newer).unwrap_err().code,
+            Code::FormatTooNew
+        );
     }
 
     #[test]

@@ -578,10 +578,7 @@ mod tests {
         write_json(&root.join(MANIFEST), &Manifest::new(Unit::Mm).to_json()).unwrap();
         write_json(
             &part_path(root, &id("p")),
-            &PartFile {
-                features: vec![id("a")],
-            }
-            .to_json(),
+            &PartFile::new(vec![id("a")]).to_json(),
         )
         .unwrap();
         write_json(&feature_path(root, &id("p"), &id("a")), &sphere("1 mm")).unwrap();
@@ -674,7 +671,7 @@ mod tests {
         let mut s = Session::open(dir.path()).unwrap();
         write_json(
             &part_path(dir.path(), &id("q")),
-            &PartFile { features: vec![] }.to_json(),
+            &PartFile::new(vec![]).to_json(),
         )
         .unwrap();
         assert!(s.refresh().unwrap());
@@ -784,10 +781,7 @@ mod tests {
         let root = dir.path();
         write_json(
             &part_path(root, &id("q")),
-            &PartFile {
-                features: vec![id("a")],
-            }
-            .to_json(),
+            &PartFile::new(vec![id("a")]).to_json(),
         )
         .unwrap();
         write_json(&feature_path(root, &id("q"), &id("a")), &sphere("1 mm")).unwrap();

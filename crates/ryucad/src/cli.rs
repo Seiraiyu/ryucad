@@ -525,8 +525,12 @@ impl ScopeArgs {
 
 #[derive(Subcommand)]
 enum PartCmd {
+    /// Create an empty part, or with --assembly an empty assembly.
     Create {
         part: String,
+        /// An assembly: its features place other parts.
+        #[arg(long)]
+        assembly: bool,
     },
     Delete {
         part: String,
@@ -1289,7 +1293,10 @@ fn request(cmd: &Command) -> Option<Request> {
         | Command::Open { .. } => {
             return None;
         }
-        Command::Part(PartCmd::Create { part }) => Request::PartCreate { part: part.clone() },
+        Command::Part(PartCmd::Create { part, assembly }) => Request::PartCreate {
+            part: part.clone(),
+            kind: assembly.then(|| "assembly".to_owned()),
+        },
         Command::Part(PartCmd::Delete { part, expect }) => Request::PartDelete {
             part: part.clone(),
             expected_revision: expect.revision.clone(),

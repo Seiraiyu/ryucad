@@ -88,9 +88,14 @@ fn part(f: Feature) -> Part {
     features.insert(id("f"), Ok(f));
     Part {
         id: Id::parse("fz", "part").unwrap(),
-        file: Ok(PartFile {
-            features: vec![id("b"), id("c"), id("s"), id("t"), id("k"), id("f")],
-        }),
+        file: Ok(PartFile::new(vec![
+            id("b"),
+            id("c"),
+            id("s"),
+            id("t"),
+            id("k"),
+            id("f"),
+        ])),
         parameters: None,
         env: Env::empty(),
         features,

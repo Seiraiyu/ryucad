@@ -179,7 +179,7 @@ pub(crate) mod tests {
         let order: Vec<Id> = features.iter().map(|(i, _)| id(i)).collect();
         Part {
             id: id("p"),
-            file: Ok(crate::doc::files::PartFile { features: order }),
+            file: Ok(crate::doc::files::PartFile::new(order)),
             parameters: None,
             env: crate::expr::Env::empty(),
             features: features.into_iter().map(|(i, f)| (id(i), Ok(f))).collect(),
