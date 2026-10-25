@@ -10,7 +10,8 @@
 //! one body, a solid region each: a part with two lumps stays one body,
 //! as ryukei made it. Representations are read and healed in parallel
 //! and returned in instance order, so the result is the same on any
-//! number of threads.
+//! number of threads; several holding the same items in one context are
+//! read once.
 //!
 //! One bad body never fails the file: each representation's result
 //! stands alone. Healing names entities by their import names; each
@@ -111,10 +112,27 @@ pub fn read(bytes: &[u8], opts: &ReadOptions) -> Result<Model, StepError> {
             (r, (c, d, items))
         })
         .collect();
-    let bodies = list
+    // Representations holding the same items in the same context (a
+    // part's shape and its copies under other representations) are one
+    // body, read once, under the first of them.
+    let mut first: BTreeMap<(Id, &[Id]), usize> = BTreeMap::new();
+    for (k, (_, (c, _, items))) in list.iter().enumerate() {
+        first.entry((*c, items.as_slice())).or_insert(k);
+    }
+    let read: BTreeMap<usize, Read> = first
+        .values()
+        .copied()
+        .collect::<Vec<usize>>()
         .par_iter()
+        .map(|&k| {
+            let (r, (c, _, items)) = &list[k];
+            (k, body(&e, items, *r, *c, opts))
+        })
+        .collect();
+    let bodies = list
+        .iter()
         .map(|(representation, (context, definition, items))| {
-            let (result, instances) = body(&e, items, *representation, *context, opts);
+            let (result, instances) = read[&first[&(*context, items.as_slice())]].clone();
             Imported {
                 representation: *representation,
                 items: items.clone(),

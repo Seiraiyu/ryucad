@@ -303,3 +303,24 @@ fn the_same_input_gives_the_same_bytes() {
         .install(|| one(b, &o));
     assert_eq!(one(b, &o), one_thread);
 }
+
+#[test]
+fn writing_is_the_same_on_one_thread_and_many() {
+    // Bodies are cut open in parallel and numbered in one fixed walk.
+    let model = WriteModel {
+        products: vec![Product {
+            id: "parts".into(),
+            name: "parts".into(),
+            bodies: primitives(),
+            children: vec![],
+        }],
+    };
+    let o = opts(LengthUnit::Meter);
+    let many = write(&model, &o).unwrap();
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap()
+        .install(|| write(&model, &o).unwrap());
+    assert_eq!(one, many);
+}

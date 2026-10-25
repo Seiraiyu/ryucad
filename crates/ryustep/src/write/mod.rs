@@ -18,6 +18,7 @@ mod body;
 use crate::WriteError;
 use crate::part21::{self, File, Header, Instance, Param, Part, Record};
 use crate::schema::Schema;
+use rayon::prelude::*;
 use ryukei::geom::{Point3, Rigid, Vector3};
 use ryukei::heal::seamed;
 use ryukei::name::Name;
@@ -183,14 +184,21 @@ pub(crate) struct Contexts {
 /// can't be cut open into a region of its surface or a pipe that can't
 /// be approximated within the tolerance.
 pub fn write(model: &WriteModel, opts: &WriteOptions) -> Result<Vec<u8>, WriteError> {
-    // Each body as a file must describe it.
+    // Each body as a file must describe it, in parallel; the first body
+    // that can't be fails, whatever the number of threads.
+    let all: Vec<&Body> = model.products.iter().flat_map(|p| &p.bodies).collect();
+    let mut seamed_all = all
+        .par_iter()
+        .map(|b| seamed(b, opts.pipe_tolerance).map_err(|err| not_representable(b, err)))
+        .collect::<Vec<_>>()
+        .into_iter();
     let shapes: Vec<Vec<ryukei::heal::Shape>> = model
         .products
         .iter()
         .map(|p| {
-            p.bodies
-                .iter()
-                .map(|b| seamed(b, opts.pipe_tolerance).map_err(|err| not_representable(b, err)))
+            seamed_all
+                .by_ref()
+                .take(p.bodies.len())
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<_, _>>()?;

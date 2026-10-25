@@ -205,3 +205,30 @@ fn refusals_name_the_files_instances() {
         assert_eq!(kind(&open, b.instances[n]), "EDGE_CURVE");
     }
 }
+
+#[test]
+fn representations_holding_one_solid_read_alike() {
+    // A second representation of the block's solid, in its context.
+    let text = block_file();
+    let id_of = |name: &str| -> u64 {
+        let at = text.find(&format!("={name}(")).unwrap();
+        let start = text[..at].rfind('#').unwrap() + 1;
+        text[start..at].parse().unwrap()
+    };
+    let brep = id_of("MANIFOLD_SOLID_BREP");
+    let rep = text.find("=ADVANCED_BREP_SHAPE_REPRESENTATION(").unwrap();
+    let line_end = rep + text[rep..].find(';').unwrap();
+    let context = &text[text[..line_end].rfind('#').unwrap()..line_end - 1];
+    let end = text.rfind("ENDSEC;").unwrap();
+    let twice = format!(
+        "{}#900000=SHAPE_REPRESENTATION('',(#{brep}),{context});\n{}",
+        &text[..end],
+        &text[end..]
+    );
+    let m = read(twice.as_bytes(), &opts()).unwrap();
+    assert_eq!(m.bodies.len(), 2);
+    let dump = |k: usize| m.bodies[k].result.as_ref().unwrap().0.dump();
+    assert_eq!(dump(0), dump(1));
+    assert_eq!(m.bodies[0].instances, m.bodies[1].instances);
+    assert_eq!(m.bodies[1].representation, 900000);
+}
