@@ -5,12 +5,16 @@
 //! shell's volume decides: positive when its faces point out of what it
 //! encloses. A shell of planar faces bounded by straight edges is summed
 //! exactly over its faces' fans ([`crate::predicates::volume_sign`]);
-//! any other is meshed coarsely (a chord of a thousandth of the body's
+//! any other is meshed coarsely (a chord of a hundredth of the body's
 //! size), whose volume lies within `4 × chord × area` of the shell's,
 //! the area that of its curved faces (planar faces mesh in their planes):
-//! a sign further than that from zero is certain. Else the mesh is made
-//! finer, to an eighth of its chord or to what the volume it measured
-//! needs if that is finer, up to four times and down to ten resolutions;
+//! a sign further than that from zero is certain. The mesh is as coarse
+//! in angle as the mesher allows (a right angle): the bound needs only
+//! the chord. Else the mesh is made finer, to an eighth of its chord or
+//! to what the volume it measured needs if that is finer (but no finer
+//! than a sixty-fourth: a coarse mesh can measure almost nothing for a
+//! body that encloses plenty), up to four times and down to ten
+//! resolutions;
 //! then, or past a budget of triangles, it is [`HealError::Uncertain`].
 //!
 //! Which shells are cavities follows from which encloses which. Every
@@ -98,7 +102,7 @@ pub(super) fn judge(body: &Body, index: &BTreeMap<Name, usize>) -> Result<Judged
         size = (b.max() - b.min()).length();
     }
     let polygonal = |faces: &[FaceId]| faces.iter().all(|&f| plane_fan(body, f).is_some());
-    let mut chord = (size * 1e-3).max(10.0 * LINEAR_RESOLUTION);
+    let mut chord = (size * 1e-2).max(10.0 * LINEAR_RESOLUTION);
     let mut mesh: Option<BodyMesh> = None;
     let mut shells: Vec<Shell> = Vec::new();
     for &sh in &ids {
@@ -132,7 +136,7 @@ pub(super) fn judge(body: &Body, index: &BTreeMap<Name, usize>) -> Result<Judged
                     None => {
                         let params = MeshParams {
                             max_triangles: BUDGET,
-                            ..MeshParams::new(chord, 0.5)
+                            ..MeshParams::new(chord, core::f64::consts::FRAC_PI_2)
                         };
                         mesh = Some(
                             tessellate(body, &params)
@@ -146,7 +150,7 @@ pub(super) fn judge(body: &Body, index: &BTreeMap<Name, usize>) -> Result<Judged
                         sign = Some(s);
                         break;
                     }
-                    Err(needed) => (chord / 8.0).min(needed),
+                    Err(needed) => (chord / 8.0).min(needed).max(chord / 64.0),
                 };
                 if finer < 10.0 * LINEAR_RESOLUTION {
                     break;
@@ -170,7 +174,7 @@ pub(super) fn judge(body: &Body, index: &BTreeMap<Name, usize>) -> Result<Judged
     if n > 1 {
         let m = match mesh {
             Some(m) => m,
-            None => tessellate(body, &MeshParams::new(chord, 0.5))
+            None => tessellate(body, &MeshParams::new(chord, core::f64::consts::FRAC_PI_2))
                 .map_err(|_| HealError::Uncertain { at: shells[0].name })?,
         };
         let triangles: Vec<Vec<[Point3; 3]>> = shells
