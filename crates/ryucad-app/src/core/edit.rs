@@ -1,6 +1,7 @@
 //! Editing a feature's parameters and placement, what it does to solids,
-//! an extrude's extent, a boolean's solids, and a fillet's or chamfer's
-//! sizes and edges: the property panel's form.
+//! an extrude's extent, a boolean's solids, a fillet's or chamfer's sizes
+//! and edges, a hole's sizes, depth and points, and a pattern's spacings,
+//! counts, skips and seeds: the property panel's form.
 //! Values stay as written (quantities with their units). A save is an
 //! ordinary `feature.edit` with the revision the form was read at, so a
 //! human's stale edit fails with `conflict` like an agent's; the form then
@@ -236,6 +237,249 @@ impl BlendForm {
     }
 }
 
+/// A hole's sizes (its diameter, its counterbore's or countersink's, a
+/// drill point's angle), its depth (blind and its length, through all, or
+/// up to a target, shown), its form as read, and its points. Points can
+/// be taken out, not added; with none left it drills at every point no
+/// curve uses.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HoleForm {
+    /// `simple`, `counterbore` or `countersink`.
+    pub form: String,
+    /// Each size by its place in the file (`diameter`,
+    /// `counterbore.depth`, `bottom.drill`, …), with its field.
+    pub sizes: Vec<(String, Field)>,
+    /// `blind` or `through_all`; `up_to` as read, to keep.
+    pub depth: Choice,
+    pub length: Field,
+    /// An up-to depth's target.
+    pub target: Option<String>,
+    pub points: Picks,
+}
+
+impl HoleForm {
+    /// From a `feature.show` of a hole.
+    fn from_show(v: &Value) -> HoleForm {
+        let mut sizes = vec![(
+            "diameter".to_owned(),
+            Field::new("diameter", text(&v["diameter"])),
+        )];
+        for (group, keys) in [
+            ("counterbore", ["diameter", "depth"]),
+            ("countersink", ["diameter", "angle"]),
+        ] {
+            for k in keys {
+                let x = &v[group][k];
+                if !x.is_null() {
+                    let name = format!("{group} {k}");
+                    sizes.push((format!("{group}.{k}"), Field::new(&name, text(x))));
+                }
+            }
+        }
+        if !v["bottom"]["drill"].is_null() {
+            let read = text(&v["bottom"]["drill"]);
+            sizes.push(("bottom.drill".to_owned(), Field::new("drill point", read)));
+        }
+        let (kind, length) = match &v["depth"] {
+            Value::String(s) => (s.clone(), String::new()),
+            d if !d["blind"].is_null() => ("blind".to_owned(), text(&d["blind"])),
+            _ => ("up_to".to_owned(), String::new()),
+        };
+        let options: &[&str] = if kind == "up_to" {
+            &["blind", "through_all", "up_to"]
+        } else {
+            &["blind", "through_all"]
+        };
+        let points = v["points"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(text)
+            .collect();
+        HoleForm {
+            form: text(&v["form"]),
+            sizes,
+            depth: Choice::new("depth", options, kind),
+            length: Field::new("depth", length),
+            target: v["depth"]["up_to"]["target"].as_str().map(str::to_owned),
+            points: Picks::new("points", points),
+        }
+    }
+
+    fn fields(&self) -> impl Iterator<Item = &Field> {
+        self.sizes.iter().map(|(_, f)| f).chain([&self.length])
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.fields().any(Field::dirty) || self.depth.dirty() || self.points.dirty()
+    }
+
+    fn revert(&mut self) {
+        for (_, f) in &mut self.sizes {
+            f.text.clone_from(&f.read);
+        }
+        self.length.text.clone_from(&self.length.read);
+        self.depth.chosen.clone_from(&self.depth.read);
+        self.points.chosen.clone_from(&self.points.read);
+    }
+
+    /// What changed, as `feature.edit` takes it.
+    fn given(&self, out: &mut FeatureFields) {
+        let typed = |key: &str| {
+            self.sizes
+                .iter()
+                .find(|(k, f)| k == key && f.dirty())
+                .map(|(_, f)| json!(f.text.trim()))
+        };
+        out.diameter = typed("diameter");
+        for (group, keys, slot) in [
+            ("counterbore", ["diameter", "depth"], &mut out.counterbore),
+            ("countersink", ["diameter", "angle"], &mut out.countersink),
+        ] {
+            let m: Map<String, Value> = keys
+                .iter()
+                .filter_map(|k| Some(((*k).to_owned(), typed(&format!("{group}.{k}"))?)))
+                .collect();
+            *slot = (!m.is_empty()).then_some(Value::Object(m));
+        }
+        out.bottom = typed("bottom.drill").map(|a| json!({ "drill": a }));
+        if self.depth.dirty() || self.length.dirty() {
+            out.depth = match self.depth.chosen.as_str() {
+                "blind" => Some(json!({"blind": self.length.text.trim()})),
+                "through_all" => Some(json!("through_all")),
+                _ => None,
+            };
+        }
+        if self.points.dirty() {
+            out.points = Some(self.points.chosen.clone());
+        }
+    }
+}
+
+/// A pattern's spacings, counts and angle, its directions' reversals, its
+/// skips (as JSON: `[2]`, or `[[1, 1]]` with two directions), its seeds,
+/// and its form, directions, axis or plane as read. Seeds can be taken
+/// out, not added.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PatternForm {
+    /// `linear`, `circular` or `mirror`.
+    pub form: String,
+    /// Each size by its key in the file, with its field.
+    pub sizes: Vec<(String, Field)>,
+    pub reverse: Vec<(String, Flag)>,
+    pub skip: Field,
+    /// Its direction, second direction, axis or plane, by key.
+    pub refs: Vec<(String, String)>,
+    pub seeds: Picks,
+}
+
+impl PatternForm {
+    /// From a `feature.show` of a pattern.
+    fn from_show(v: &Value) -> PatternForm {
+        let sizes = ["spacing", "count", "spacing2", "count2", "angle"]
+            .into_iter()
+            .filter(|k| !v[*k].is_null())
+            .map(|k| (k.to_owned(), Field::new(k, text(&v[k]))))
+            .collect();
+        let linear = v["form"] == "linear";
+        let reverse = ["reverse", "reverse2"]
+            .into_iter()
+            .filter(|k| linear && (*k == "reverse" || !v["direction2"].is_null()))
+            .map(|k| {
+                let on = v[k] == true;
+                let flag = Flag {
+                    name: k.to_owned(),
+                    read: on,
+                    chosen: on,
+                };
+                (k.to_owned(), flag)
+            })
+            .collect();
+        let skip = match &v["skip"] {
+            Value::Null => "[]".to_owned(),
+            x => x.to_string(),
+        };
+        let refs = ["direction", "direction2", "axis", "plane"]
+            .into_iter()
+            .filter_map(|k| Some((k.to_owned(), v[k].as_str()?.to_owned())))
+            .collect();
+        let seeds = v["features"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(text)
+            .collect();
+        PatternForm {
+            form: text(&v["form"]),
+            sizes,
+            reverse,
+            skip: Field::new("skip", skip),
+            refs,
+            seeds: Picks::new("seeds", seeds),
+        }
+    }
+
+    fn fields(&self) -> impl Iterator<Item = &Field> {
+        self.sizes.iter().map(|(_, f)| f).chain([&self.skip])
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.fields().any(Field::dirty)
+            || self.reverse.iter().any(|(_, f)| f.dirty())
+            || self.seeds.dirty()
+    }
+
+    fn revert(&mut self) {
+        for (_, f) in &mut self.sizes {
+            f.text.clone_from(&f.read);
+        }
+        for (_, f) in &mut self.reverse {
+            f.chosen = f.read;
+        }
+        self.skip.text.clone_from(&self.skip.read);
+        self.seeds.chosen.clone_from(&self.seeds.read);
+    }
+
+    /// What changed, as `feature.edit` takes it; skips that aren't JSON
+    /// are refused before anything is sent.
+    fn given(&self, out: &mut FeatureFields) -> Result<(), Error> {
+        let typed = |key: &str| {
+            self.sizes
+                .iter()
+                .find(|(k, f)| k == key && f.dirty())
+                .map(|(_, f)| json!(f.text.trim()))
+        };
+        out.spacing = typed("spacing");
+        out.count = typed("count");
+        out.spacing2 = typed("spacing2");
+        out.count2 = typed("count2");
+        out.angle = typed("angle");
+        for (k, f) in &self.reverse {
+            if f.dirty() {
+                match k.as_str() {
+                    "reverse" => out.reverse = Some(f.chosen),
+                    _ => out.reverse2 = Some(f.chosen),
+                }
+            }
+        }
+        if self.skip.dirty() {
+            let t = self.skip.text.trim();
+            let v: Value =
+                serde_json::from_str(if t.is_empty() { "[]" } else { t }).map_err(|_| {
+                    Error::new(
+                        ryucad::error::Code::InvalidParam,
+                        format!("skip is a list of instances, such as [2] or [[1, 1]], not {t:?}"),
+                    )
+                })?;
+            out.skip = Some(v);
+        }
+        if self.seeds.dirty() {
+            out.features = Some(self.seeds.chosen.clone());
+        }
+        Ok(())
+    }
+}
+
 /// A value someone else changed while the form was being edited.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Changed {
@@ -271,6 +515,10 @@ pub struct Form {
     pub tools: Option<Picks>,
     /// A fillet's or chamfer's groups.
     pub blend: Option<BlendForm>,
+    /// A hole's sizes, depth and points.
+    pub hole: Option<HoleForm>,
+    /// A pattern's spacings, counts, skips and seeds.
+    pub pattern: Option<PatternForm>,
     /// What changed under a save that conflicted.
     pub changed: Vec<Changed>,
     /// Why the last save failed, other than a conflict.
@@ -312,7 +560,10 @@ impl Form {
             let read = v["operation"].as_str().unwrap_or("new").to_owned();
             Choice::new("operation", &["new", "join", "cut", "intersect"], read)
         });
-        let targets = acts.then(|| Picks::new("targets", strings(&v["targets"])));
+        // A hole and a pattern act on solids too, always cutting or doing
+        // what their seeds do.
+        let repeats = matches!(ty.as_str(), "hole" | "pattern");
+        let targets = (acts || repeats).then(|| Picks::new("targets", strings(&v["targets"])));
         let extent = (ty == "extrude").then(|| {
             let e = &v["extent"];
             ExtentForm {
@@ -331,6 +582,8 @@ impl Form {
         });
         let boolean = ty == "boolean";
         let blend = matches!(ty.as_str(), "fillet" | "chamfer").then(|| BlendForm::from_show(v));
+        let hole = (ty == "hole").then(|| HoleForm::from_show(v));
+        let pattern = (ty == "pattern").then(|| PatternForm::from_show(v));
         Form {
             part: part.to_owned(),
             feature: text(&v["id"]),
@@ -347,6 +600,8 @@ impl Form {
             target: boolean.then(|| Choice::new("target", &[], text(&v["target"]))),
             tools: boolean.then(|| Picks::new("tools", strings(&v["tools"]))),
             blend,
+            hole,
+            pattern,
             ty,
             changed: Vec::new(),
             error: None,
@@ -388,6 +643,8 @@ impl Form {
             .chain(&self.z)
             .chain(&self.x)
             .chain(self.blend.iter().flat_map(BlendForm::sizes))
+            .chain(self.hole.iter().flat_map(HoleForm::fields))
+            .chain(self.pattern.iter().flat_map(PatternForm::fields))
     }
 
     /// Whether anything was typed or chosen.
@@ -403,6 +660,8 @@ impl Form {
                 .any(Picks::dirty)
             || self.extent.as_ref().is_some_and(ExtentForm::dirty)
             || self.blend.as_ref().is_some_and(BlendForm::dirty)
+            || self.hole.as_ref().is_some_and(HoleForm::dirty)
+            || self.pattern.as_ref().is_some_and(PatternForm::dirty)
     }
 
     /// Everything typed or chosen goes back as it was read.
@@ -433,12 +692,18 @@ impl Form {
         if let Some(b) = &mut self.blend {
             b.revert();
         }
+        if let Some(h) = &mut self.hole {
+            h.revert();
+        }
+        if let Some(p) = &mut self.pattern {
+            p.revert();
+        }
         self.error = None;
     }
 
     /// The fields besides parameters and placement that changed, as
     /// `feature.edit` takes them.
-    fn fields_given(&self) -> FeatureFields {
+    fn fields_given(&self) -> Result<FeatureFields, Error> {
         let chosen =
             |c: &Option<Choice>| c.as_ref().filter(|c| c.dirty()).map(|c| c.chosen.clone());
         let picked = |p: &Option<Picks>| p.as_ref().filter(|p| p.dirty()).map(|p| p.chosen.clone());
@@ -458,7 +723,7 @@ impl Form {
             v
         });
         let blend = self.blend.as_ref();
-        FeatureFields {
+        let mut out = FeatureFields {
             operation,
             targets,
             extent,
@@ -472,7 +737,14 @@ impl Form {
                 .filter(|b| b.propagate.dirty())
                 .map(|b| b.propagate.chosen),
             ..FeatureFields::default()
+        };
+        if let Some(h) = &self.hole {
+            h.given(&mut out);
         }
+        if let Some(p) = &self.pattern {
+            p.given(&mut out)?;
+        }
+        Ok(out)
     }
 
     /// The `feature.edit` that saves what was typed, guarded by the
@@ -517,7 +789,7 @@ impl Form {
             id: self.feature.clone(),
             params,
             placement: moved.then_some(placement),
-            fields: self.fields_given(),
+            fields: self.fields_given()?,
             expected_revision: Some(self.revision.clone()),
         })
     }
@@ -550,10 +822,14 @@ impl Form {
             let edges = f
                 .blend
                 .iter()
-                .flat_map(|b| b.groups.iter().map(|g| &g.edges));
+                .flat_map(|b| b.groups.iter().map(|g| &g.edges))
+                .chain(f.hole.iter().map(|h| &h.points))
+                .chain(f.pattern.iter().map(|p| &p.seeds));
+            let depth = f.hole.as_ref().map(|h| &h.depth);
             [&f.operation, &f.op, &f.target]
                 .into_iter()
                 .flatten()
+                .chain(depth)
                 .map(|c| (c.name.clone(), c.read.clone(), c.chosen.clone()))
                 .chain(
                     [&f.targets, &f.tools]
@@ -857,6 +1133,118 @@ mod tests {
                  "edges": ["p/b/bb"]}
             ]))
         );
+    }
+
+    #[test]
+    fn a_holes_sizes_depth_and_points_are_edited() {
+        let q = |v: &str, m: f64| json!({"value": v, "m": m});
+        let v = json!({"id": "h", "type": "hole", "revision": "r1", "sketch": "s",
+                       "form": "counterbore", "diameter": q("3 mm", 0.003),
+                       "counterbore": {"diameter": q("6 mm", 0.006), "depth": q("2 mm", 0.002)},
+                       "depth": {"blind": q("8 mm", 0.008)},
+                       "bottom": {"drill": {"value": "118 deg", "rad": 2.0}},
+                       "points": ["p1", "p2"], "targets": ["b"]});
+        let mut f = Form::from_show("p", &v);
+        assert!(f.operation.is_none() && f.targets.is_some());
+        let h = f.hole.as_ref().unwrap();
+        let names: Vec<&str> = h.sizes.iter().map(|(_, f)| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "diameter",
+                "counterbore diameter",
+                "counterbore depth",
+                "drill point"
+            ]
+        );
+        assert_eq!(
+            (h.depth.read.as_str(), h.length.read.as_str()),
+            ("blind", "8 mm")
+        );
+        assert!(!f.dirty());
+        // A counterbore's depth, a drill angle and a point taken out: each
+        // goes alone, the counterbore in part.
+        let h = f.hole.as_mut().unwrap();
+        h.sizes[2].1.text = "2.5 mm".into();
+        h.sizes[3].1.text = "120 deg".into();
+        h.points.toggle("p2");
+        let fields = given(&f);
+        assert_eq!(fields.counterbore, Some(json!({"depth": "2.5 mm"})));
+        assert_eq!(fields.bottom, Some(json!({"drill": "120 deg"})));
+        assert_eq!(fields.points, Some(vec!["p1".to_owned()]));
+        assert_eq!((fields.diameter, fields.depth), (None, None));
+        f.revert();
+        // Through all, then blind again at a new length.
+        let h = f.hole.as_mut().unwrap();
+        h.depth.chosen = "through_all".into();
+        assert_eq!(given(&f).depth, Some(json!("through_all")));
+        let h = f.hole.as_mut().unwrap();
+        h.depth.chosen = "blind".into();
+        h.length.text = "9 mm".into();
+        assert_eq!(given(&f).depth, Some(json!({"blind": "9 mm"})));
+        // Up to a target is kept as it is.
+        let mut w = v.clone();
+        w["depth"] = json!({"up_to": {"target": "p/b/ff"}});
+        let f = Form::from_show("p", &w);
+        let h = f.hole.as_ref().unwrap();
+        assert_eq!(
+            (h.depth.read.as_str(), h.target.as_deref()),
+            ("up_to", Some("p/b/ff"))
+        );
+        assert_eq!(given(&f).depth, None);
+    }
+
+    #[test]
+    fn a_patterns_counts_skips_and_seeds_are_edited() {
+        let v = json!({"id": "g", "type": "pattern", "revision": "r1", "form": "linear",
+                       "features": ["h", "k"], "direction": "x",
+                       "spacing": {"value": "8 mm", "m": 0.008}, "count": {"value": "3", "n": 3},
+                       "direction2": "p/b/ee", "spacing2": {"value": "5 mm", "m": 0.005},
+                       "count2": {"value": "n", "n": 2, "expr": true}, "reverse2": true,
+                       "skip": [[2, 1]], "targets": ["b"]});
+        let mut f = Form::from_show("p", &v);
+        let p = f.pattern.as_ref().unwrap();
+        let names: Vec<&str> = p.sizes.iter().map(|(_, f)| f.name.as_str()).collect();
+        assert_eq!(names, ["spacing", "count", "spacing2", "count2"]);
+        assert_eq!(p.skip.read, "[[2,1]]");
+        assert_eq!(
+            p.refs,
+            [
+                ("direction".to_owned(), "x".to_owned()),
+                ("direction2".to_owned(), "p/b/ee".to_owned())
+            ]
+        );
+        assert_eq!(
+            p.reverse
+                .iter()
+                .map(|(k, f)| (k.as_str(), f.read))
+                .collect::<Vec<_>>(),
+            [("reverse", false), ("reverse2", true)]
+        );
+        // A count, the skips, a reversal and a seed taken out.
+        let p = f.pattern.as_mut().unwrap();
+        p.sizes[1].1.text = "4".into();
+        p.skip.text = "[]".into();
+        p.reverse[0].1.chosen = true;
+        p.seeds.toggle("k");
+        let fields = given(&f);
+        assert_eq!(fields.count, Some(json!("4")));
+        assert_eq!(fields.skip, Some(json!([])));
+        assert_eq!((fields.reverse, fields.reverse2), (Some(true), None));
+        assert_eq!(fields.features, Some(vec!["h".to_owned()]));
+        assert_eq!(fields.spacing, None);
+        // Skips that aren't a list are refused before anything is sent.
+        f.pattern.as_mut().unwrap().skip.text = "two".into();
+        assert!(f.request().is_err());
+        // A circular pattern has an angle and no reversals.
+        let w = json!({"id": "c", "type": "pattern", "revision": "r1", "form": "circular",
+                       "features": ["h"], "axis": "z", "count": {"value": "6", "n": 6},
+                       "angle": {"value": "360 deg", "rad": 6.25}, "targets": ["b"]});
+        let f = Form::from_show("p", &w);
+        let p = f.pattern.as_ref().unwrap();
+        assert!(p.reverse.is_empty());
+        assert_eq!(p.sizes[1].1.read, "360 deg");
+        assert_eq!(p.skip.read, "[]");
     }
 
     #[test]

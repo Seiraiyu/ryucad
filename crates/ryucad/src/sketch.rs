@@ -1017,7 +1017,7 @@ pub fn edit(
     let env = p.env.clone();
     let mut s = sketch_of(session, &pid, &fid)?;
     let applied = apply(&mut s, &pid, ops, unit, &env)?;
-    // What sweeps name must stay.
+    // What sweeps and holes name must stay.
     for f in server::sweeps_of(p, &fid) {
         let names = match p.features[&f].as_ref().expect("a loaded sweep") {
             Feature::Extrude(e) => e.loops.clone(),
@@ -1025,7 +1025,8 @@ pub fn edit(
                 RevolveAxis::Line(l) => [r.loops.clone(), vec![l.clone()]].concat(),
                 RevolveAxis::Edge(_) => r.loops.clone(),
             },
-            _ => unreachable!("a sweep"),
+            Feature::Hole(h) => h.points.clone(),
+            _ => unreachable!("a sweep or a hole"),
         };
         if let Some(gone) = names.iter().find(|e| !s.entities.contains_key(*e)) {
             return Err(Error::new(

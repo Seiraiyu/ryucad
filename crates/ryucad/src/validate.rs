@@ -2224,6 +2224,147 @@ pub(crate) mod tests {
         assert_eq!(solids, ["b", "box-2", "box-1"]);
     }
 
+    /// A sketch `s` on box `b`'s top holding points `p1` at (2, 5) and `p2`
+    /// at (5, 15) mm, each fixed.
+    fn spotted(m: &mut Merging) {
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s", "placement": {"origin": [0, 0, 5]}}),
+        )
+        .unwrap();
+        m.call(
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [
+                {"op": "add", "type": "point", "at": [2, 5]},
+                {"op": "add", "type": "fix", "a": "p1"},
+                {"op": "add", "type": "point", "at": [5, 15]},
+                {"op": "add", "type": "fix", "a": "p2"},
+            ]}),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_hole_added_under_one_id_is_renumbered_with_its_pattern() {
+        let mut m = boxed();
+        spotted(&mut m);
+        m.commit("a spotted box");
+        let hole = |m: &mut Merging, point: &str| {
+            m.call(
+                "feature.add",
+                json!({"part": "p", "type": "hole", "sketch": "s", "points": [point],
+                       "diameter": 1, "depth": {"blind": 2}}),
+            )
+            .unwrap()
+        };
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        assert_eq!(hole(&mut m, "p1")["feature"]["id"], "hole-1");
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "pattern", "id": "row", "features": ["hole-1"],
+                   "direction": "x", "spacing": 3, "count": 3}),
+        )
+        .unwrap();
+        m.commit("theirs: a row of holes");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        hole(&mut m, "p2");
+        m.commit("ours: one hole");
+        m.merge("theirs");
+        let r = renumber(&mut m, "parts/p/features/hole-1.json#");
+        assert_eq!(r["status"]["clean"], true, "{r}");
+        // The pattern repeats theirs' hole, by its new ID.
+        let show = m
+            .call("feature.show", json!({"part": "p", "id": "row"}))
+            .unwrap();
+        assert_eq!(show["features"], json!(["hole-2"]));
+        let built = m.call("rebuild", json!({})).unwrap();
+        assert_eq!(built["parts"][0]["failed"], 0, "{built}");
+    }
+
+    #[test]
+    fn a_point_a_hole_drills_at_is_renumbered_with_it() {
+        let mut m = boxed();
+        spotted(&mut m);
+        m.commit("a spotted box");
+        let point = |m: &mut Merging, at: [i32; 2]| {
+            m.call(
+                "sketch.edit",
+                json!({"part": "p", "sketch": "s", "ops": [
+                    {"op": "add", "type": "point", "at": at},
+                ]}),
+            )
+            .unwrap();
+        };
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        point(&mut m, [8, 8]);
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "hole", "id": "h", "sketch": "s", "points": ["p3"],
+                   "diameter": 1, "depth": {"blind": 2}}),
+        )
+        .unwrap();
+        m.commit("theirs: a hole at a new point");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        point(&mut m, [5, 2]);
+        m.commit("ours: another point");
+        m.merge("theirs");
+        let r = renumber(&mut m, "parts/p/features/s.json#/entities/p3");
+        assert_eq!(r["status"]["clean"], true, "{r}");
+        let show = m
+            .call("feature.show", json!({"part": "p", "id": "h"}))
+            .unwrap();
+        assert_eq!(show["points"], json!(["p4"]));
+    }
+
+    #[test]
+    fn a_pattern_the_other_side_left_hanging_is_blamed_on_it() {
+        let mut m = boxed();
+        spotted(&mut m);
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "hole", "id": "h", "sketch": "s", "points": ["p1"],
+                   "diameter": 1, "depth": {"blind": 2}}),
+        )
+        .unwrap();
+        m.commit("a drilled box");
+        // Theirs repeats the hole along x, to x = 8 mm.
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "pattern", "id": "row", "features": ["h"],
+                   "direction": "x", "spacing": 3, "count": 3}),
+        )
+        .unwrap();
+        m.commit("theirs: a row");
+        // Ours makes the box 6 mm long: the last of the row cuts nothing.
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        m.call(
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"x": 6}}),
+        )
+        .unwrap();
+        m.commit("ours: a shorter box");
+        m.merge("theirs");
+        let v = m.call("merge.status", json!({})).unwrap();
+        let c: Vec<&Value> = v["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["kind"] == "merge_broke")
+            .collect();
+        assert_eq!(c.len(), 1, "{v}");
+        assert_eq!(c[0]["concerns"]["feature"], "row");
+        assert_eq!(c[0]["cause"], "ours", "{v}");
+        assert_eq!(c[0]["error"]["code"], "operation_no_effect");
+        assert_eq!(c[0]["error"]["details"]["instance"], json!([2]));
+    }
+
     #[test]
     fn a_feature_added_under_one_id_is_renumbered_with_what_reads_it() {
         let mut m = boxed();

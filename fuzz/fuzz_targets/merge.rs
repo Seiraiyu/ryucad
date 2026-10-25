@@ -1,8 +1,9 @@
 //! Three versions of a file from bytes, merged as the merge driver merges
 //! them. The first byte picks how the rest is read: raw text (three
 //! versions split at `0xff` bytes, so anything at all reaches the driver),
-//! or a base sketch, part list, parameters file, part's properties or
-//! release record and two sides' edits to it, two bytes an edit. Merging must never panic, must give the same
+//! or a base sketch, part list, parameters file, part's properties,
+//! release record or pattern and two sides' edits to it, two bytes an
+//! edit. Merging must never panic, must give the same
 //! bytes twice, must be canonical JSON whose record holds as many conflicts
 //! as it says unless it fell back to lines, and readable files never fall
 //! back. A side that changed nothing gives the other.
@@ -194,6 +195,37 @@ fn edit_record(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// Applies edit `(op, arg)` to a pattern: a seed added or removed, an
+/// instance skipped or not, its count or spacing set. Its seeds and skips
+/// are arrays, one value each.
+fn edit_pattern(v: &mut Value, op: u8, arg: u8) {
+    let toggle = |list: &mut Vec<Value>, x: Value| match list.iter().position(|y| *y == x) {
+        Some(i) => {
+            list.remove(i);
+        }
+        None => list.push(x),
+    };
+    match op % 4 {
+        0 => {
+            let mut l = v["features"].as_array().cloned().unwrap_or_default();
+            toggle(&mut l, json!(format!("h{}", arg % 4)));
+            v["features"] = json!(l);
+        }
+        1 => {
+            let mut l = v["skip"].as_array().cloned().unwrap_or_default();
+            toggle(&mut l, json!(1 + arg % 3));
+            let o = v.as_object_mut().expect("an object");
+            if l.is_empty() {
+                o.remove("skip");
+            } else {
+                o.insert("skip".to_owned(), json!(l));
+            }
+        }
+        2 => v["count"] = json!(format!("{}", 2 + arg % 5)),
+        _ => v["spacing"] = json!(format!("{} mm", 1 + arg % 9)),
+    }
+}
+
 fn text(v: &Value) -> Vec<u8> {
     canonical::to_string(v).into_bytes()
 }
@@ -202,7 +234,7 @@ fuzz_target!(|data: &[u8]| {
     let Some((&mode, rest)) = data.split_first() else {
         return;
     };
-    let (base, ours, theirs, readable) = if mode % 6 == 3 {
+    let (base, ours, theirs, readable) = if mode % 7 == 3 {
         let mut parts = rest.splitn(3, |b| *b == 0xff);
         let (b, o, t) = (
             parts.next().unwrap_or(&[]).to_vec(),
@@ -211,23 +243,27 @@ fuzz_target!(|data: &[u8]| {
         );
         (b, o, t, false)
     } else {
-        let base = match mode % 6 {
+        let base = match mode % 7 {
             0 => sketch(),
             1 => json!({"features": ["a", "b", "c", "d"], "format": 1, "kind": "ryucad.part"}),
             2 => json!({"format": 1, "kind": "ryucad.parameters",
                         "parameters": {"p0": "1 mm", "p1": "p0 * 2"}}),
             4 => json!({"format": 1, "kind": "ryupdm.properties", "name": "P", "number": "100"}),
+            6 => json!({"format": 3, "kind": "ryucad.feature", "type": "pattern", "form": "linear",
+                        "features": ["h0"], "direction": "x", "spacing": "3 mm", "count": "3",
+                        "targets": ["b"]}),
             _ => json!({"built_with": {"commit": "c", "ryucad": "0", "ryukei": "0"},
                         "content": "0".repeat(64), "format": 1, "kind": "ryupdm.release",
                         "label": "A", "part": "p", "project": "0123456789abcdef0123456789abcdef",
                         "properties": {"number": "100"}, "released_by": {"participant": "agent"},
                         "results": {}, "supersedes": null}),
         };
-        let edit = |v: &mut Value, op: u8, arg: u8| match mode % 6 {
+        let edit = |v: &mut Value, op: u8, arg: u8| match mode % 7 {
             0 => edit_sketch(v, op, arg),
             1 => edit_part(v, op, arg),
             2 => edit_parameters(v, op, arg),
             4 => edit_properties(v, op, arg),
+            6 => edit_pattern(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.

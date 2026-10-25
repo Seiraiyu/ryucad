@@ -44,6 +44,17 @@ impl NurbsCurve2 {
         }
     }
 
+    /// The curve with every control point moved by `f`, weights and knots
+    /// kept, so parameters are unchanged. For maps a NURBS commutes with:
+    /// here, reflections of the parameter plane.
+    pub(crate) fn mapped(&self, f: impl Fn(Point2) -> Point2) -> Self {
+        let mut spline = self.spline.clone();
+        for p in spline.points.iter_mut() {
+            *p = f(Point2::ORIGIN + *p).to_vector();
+        }
+        Self::from_spline(spline)
+    }
+
     pub fn knots(&self) -> &KnotVector {
         &self.spline.knots
     }

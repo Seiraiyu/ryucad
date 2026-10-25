@@ -1,9 +1,11 @@
 //! Feature files from bytes. Any text must either load to a feature that
 //! writes back canonically and reads back equal, or give a structured
 //! error. Loaded, it is built as feature `f` of a part after boxes `b`
-//! and `c` and a rectangle sketch `s`, so its references resolve against
-//! real faces, edges and vertices, its operations act on real solids, and
-//! its fillets and chamfers (seeded with `b`'s edges) round real edges:
+//! and `c`, a rectangle sketch `s`, a sketch `t` on `b`'s top with a lone
+//! point and a pocket `k` cut from `b`'s top, so its references resolve
+//! against real faces, edges and vertices, its operations act on real
+//! solids, its fillets and chamfers (seeded with `b`'s edges) round real
+//! edges, its holes drill at `t`'s point and its patterns repeat `k`:
 //! building must succeed or give a structured error, every body it leaves
 //! must pass the checks, and a sketch that solves must solve to finite
 //! positions that are current: solving them again, in the same context,
@@ -27,7 +29,8 @@ fn id(s: &str) -> Id {
     Id::parse(s, "feature").unwrap()
 }
 
-/// The boxes `b` and `c` and the sketch `s` every fuzzed feature follows.
+/// The boxes `b` and `c`, the sketches `s` and `t` and the pocket `k`
+/// every fuzzed feature follows.
 fn base() -> &'static [(Id, Feature)] {
     static BASE: OnceLock<Vec<(Id, Feature)>> = OnceLock::new();
     BASE.get_or_init(|| {
@@ -50,10 +53,26 @@ fn base() -> &'static [(Id, Feature)] {
                     "params": {"x": "8 mm", "y": "8 mm", "z": "8 mm"},
                     "placement": {"origin": ["16 mm", "4 mm", "2 mm"],
                                   "x": [1, 0, 0], "z": [0, 0, 1]}}"#;
+        let t = r#"{"format": 2, "kind": "ryucad.feature", "type": "sketch",
+                    "placement": {"origin": ["0 mm", "0 mm", "5 mm"],
+                                  "x": [1, 0, 0], "z": [0, 0, 1]},
+                    "constraints": {},
+                    "entities": {"p1": {"type": "point", "m": [0.005, 0.005]}}}"#;
+        let k = r#"{"format": 3, "kind": "ryucad.feature", "type": "box",
+                    "params": {"x": "2 mm", "y": "2 mm", "z": "2 mm"},
+                    "placement": {"origin": ["9 mm", "4 mm", "4 mm"],
+                                  "x": [1, 0, 0], "z": [0, 0, 1]},
+                    "operation": "cut", "targets": ["b"]}"#;
         let read = |t: &str| {
             Feature::from_json(&canonical::parse(t).unwrap(), Unit::Mm, &Env::empty()).unwrap()
         };
-        vec![(id("b"), read(b)), (id("c"), read(c)), (id("s"), read(s))]
+        vec![
+            (id("b"), read(b)),
+            (id("c"), read(c)),
+            (id("s"), read(s)),
+            (id("t"), read(t)),
+            (id("k"), read(k)),
+        ]
     })
 }
 
@@ -67,7 +86,7 @@ fn part(f: Feature) -> Part {
     Part {
         id: Id::parse("fz", "part").unwrap(),
         file: Ok(PartFile {
-            features: vec![id("b"), id("c"), id("s"), id("f")],
+            features: vec![id("b"), id("c"), id("s"), id("t"), id("k"), id("f")],
         }),
         parameters: None,
         env: Env::empty(),

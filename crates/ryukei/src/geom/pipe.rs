@@ -406,6 +406,30 @@ impl Pipe {
     }
 
     /// The pipe moved by a rigid transform; parameters are unchanged.
+    /// The pipe reflected by `m`: its spine reflected with its parameter
+    /// kept, about its anchor reflected. The anchor's foot is reflected
+    /// with it, so `e₁` is too, and `e₂ = e₁ × t` turns the other way:
+    /// `θ` becomes `-θ`. The anchor's natural normal is mirrored with it,
+    /// so the spine stays on the same side.
+    pub(super) fn mirrored(&self, m: &super::Mirror) -> Result<Self, Error> {
+        let spine = self.spine.mirrored(m)?;
+        let (anchor, _) = self.anchor.mirrored(m)?;
+        Ok(Self {
+            bounds: spine
+                .bounds(spine.domain())
+                .grow(self.radius * (1.0 + 1e-12)),
+            flat: match &spine {
+                Curve::Ellipse(e) => Some(e.to_nurbs()?),
+                _ => None,
+            },
+            spine,
+            radius: self.radius,
+            anchor,
+            side: self.side,
+            frames: self.frames.iter().map(|_| OnceLock::new()).collect(),
+        })
+    }
+
     pub(super) fn transformed(&self, r: &Rigid) -> Self {
         let spine = self.spine.transformed(r);
         Self {

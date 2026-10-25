@@ -95,6 +95,14 @@ impl Ellipse {
             ..*self
         }
     }
+
+    /// Reflected, its parameter kept (see [`super::Curve::mirrored`]).
+    pub(super) fn mirrored(&self, m: &super::Mirror) -> Result<Self, Error> {
+        Ok(Self {
+            frame: m.frame(&self.frame)?,
+            ..*self
+        })
+    }
 }
 
 /// The nearest point of the ellipse `(x/a)² + (y/b)² = 1`, `a >= b > 0`, to

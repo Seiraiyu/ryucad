@@ -153,6 +153,73 @@ impl Rigid {
     }
 }
 
+/// A reflection in a plane: `p -> p - 2 ((p - o) · n) n`, for a point `o`
+/// of the plane and its unit normal `n`.
+///
+/// It keeps lengths and angles but turns a right-handed frame
+/// left-handed, so a curve or surface it reflects sits in a right-handed
+/// frame of its own: [`Mirror::frame`] keeps angles running as they did,
+/// [`Mirror::frame_reversed`] runs them the other way.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mirror {
+    origin: Point3,
+    normal: UnitVector3,
+}
+
+impl Mirror {
+    /// The reflection in the plane through `origin` normal to `normal`.
+    pub fn new(origin: Point3, normal: UnitVector3) -> Self {
+        Self { origin, normal }
+    }
+
+    /// The reflection in the plane of `frame`'s `x` and `y`.
+    pub fn in_plane_of(frame: &Frame) -> Self {
+        Self::new(frame.origin(), frame.z())
+    }
+
+    pub fn apply_point(&self, p: Point3) -> Point3 {
+        let n = self.normal.get();
+        p - n * (2.0 * (p - self.origin).dot(n))
+    }
+
+    pub fn apply_vector(&self, v: Vector3) -> Vector3 {
+        let n = self.normal.get();
+        v - n * (2.0 * v.dot(n))
+    }
+
+    /// A reflection keeps lengths, so a unit vector stays unit to
+    /// rounding.
+    pub fn apply_unit(&self, u: UnitVector3) -> UnitVector3 {
+        UnitVector3::new_unchecked(self.apply_vector(u.get()))
+    }
+
+    /// The right-handed frame with `frame`'s origin, `x` and `y`
+    /// reflected; its `z` is `frame`'s reflected and reversed. Angles
+    /// about it run as `frame`'s did, so a point at an angle in `frame`
+    /// reflects to the point at the same angle in this one. Fails with
+    /// `OutsideSizeBox` when the reflected origin leaves the size box.
+    pub fn frame(&self, frame: &Frame) -> Result<Frame, Error> {
+        Frame::new(
+            self.apply_point(frame.origin()),
+            -self.apply_vector(frame.z().get()),
+            self.apply_vector(frame.x().get()),
+        )
+    }
+
+    /// The right-handed frame with `frame`'s origin, `x` and `z`
+    /// reflected; its `y` is `frame`'s reflected and reversed, so angles
+    /// about it run the other way: the point at angle `a` in `frame`
+    /// reflects to the point at `-a` in this one, and heights along `z`
+    /// stay as they were. Fails as [`Mirror::frame`] does.
+    pub fn frame_reversed(&self, frame: &Frame) -> Result<Frame, Error> {
+        Frame::new(
+            self.apply_point(frame.origin()),
+            self.apply_vector(frame.z().get()),
+            self.apply_vector(frame.x().get()),
+        )
+    }
+}
+
 /// A general affine map `p -> M p + t`: scaling, mirroring, shear.
 ///
 /// Directions are not preserved in length, so there is no `apply_unit`.

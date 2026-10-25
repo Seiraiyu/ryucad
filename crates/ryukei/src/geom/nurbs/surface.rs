@@ -339,12 +339,18 @@ impl NurbsSurface {
     /// The surface moved by a rigid transform; see
     /// [`super::NurbsCurve::transformed`].
     pub fn transformed(&self, r: &Rigid) -> Self {
+        self.mapped(|p| r.apply_point(p))
+    }
+
+    /// The surface with every control point moved by `f`; see
+    /// [`super::NurbsCurve::mapped`].
+    pub(crate) fn mapped(&self, f: impl Fn(Point3) -> Point3) -> Self {
         Self {
             knots: self.knots.clone(),
             points: self
                 .points
                 .iter()
-                .map(|&p| r.apply_point(Point3::ORIGIN + p).to_vector())
+                .map(|&p| f(Point3::ORIGIN + p).to_vector())
                 .collect(),
             weights: self.weights.clone(),
             patches: OnceLock::new(),

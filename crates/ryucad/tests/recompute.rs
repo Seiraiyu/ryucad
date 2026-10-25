@@ -86,7 +86,8 @@ fn rectangle(w: &str, h: &str, at: [f64; 2]) -> Value {
 /// extruded up to `e`'s top as `f`; a cylinder `c`; a sketch `u` on zx
 /// revolved about the box's bottom edge as `r`; a hole cut through `b`;
 /// a lug united with `c` by a boolean; a fillet of one of `e`'s vertical
-/// edges, and a chamfer of `b`'s top front edge.
+/// edges, and a chamfer of `b`'s top front edge; a sketch `q` on `b`'s
+/// bottom with a point, a hole `drill` there, and a pattern `row` of it.
 fn project() -> (tempfile::TempDir, Session) {
     let dir = tempfile::tempdir().unwrap();
     ryucad::server::init(dir.path(), None).unwrap();
@@ -181,6 +182,27 @@ fn project() -> (tempfile::TempDir, Session) {
         &mut s,
         json!({"type": "chamfer", "id": "bevel", "d": "0.5 mm", "edges": [front]}),
     );
+    // Drilled from below, clear of everything else on b.
+    let under = face(&mut s, "b", [0.0, 0.0, -1.0]);
+    add(&mut s, json!({"type": "sketch", "id": "q", "face": under}));
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": "q", "ops": [
+            {"op": "add", "type": "point", "at": [12, -8]},
+            {"op": "add", "type": "fix", "a": "p1"}
+        ]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "drill", "sketch": "q", "diameter": "1 mm",
+               "depth": {"blind": "1.5 mm"}, "targets": ["b"]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "pattern", "id": "row", "features": ["drill"], "direction": "x",
+               "spacing": "2 mm", "count": 2}),
+    );
     (dir, s)
 }
 
@@ -193,7 +215,7 @@ fn mm(g: &mut Lcg, lo: u64, hi: u64) -> String {
 /// One random edit. Some are refused, or leave a feature failing; both
 /// must rebuild the same way however they are reached.
 fn edit(g: &mut Lcg, s: &mut Session) {
-    let (method, params) = match g.next_u64() % 12 {
+    let (method, params) = match g.next_u64() % 15 {
         0 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
         1 => (
             "param.set",
@@ -232,6 +254,20 @@ fn edit(g: &mut Lcg, s: &mut Session) {
             "feature.edit",
             json!({"id": "bevel", "form": "distances", "d1": mm(g, 1, 2), "d2": "0.5 mm",
                    "face": face(s, "b", [0.0, -1.0, 0.0])}),
+        ),
+        11 => (
+            "feature.edit",
+            json!({"id": "drill", "diameter": mm(g, 1, 2),
+                   "form": if g.next_u64().is_multiple_of(2) { "simple" } else { "countersink" },
+                   "countersink": {"diameter": "2.5 mm", "angle": "90 deg"}}),
+        ),
+        12 => (
+            "feature.edit",
+            json!({"id": "row", "spacing": mm(g, 2, 5), "count": 1 + g.next_u64() % 3}),
+        ),
+        13 => (
+            "feature.edit",
+            json!({"id": "row", "skip": if g.next_u64().is_multiple_of(2) { json!([]) } else { json!([1]) }}),
         ),
         _ => (
             "sketch.edit",
@@ -288,6 +324,6 @@ fn incremental_equals_full() {
             reused += r.features.len() - r.built.len();
         }
         // Edits touch a few features each; most results are reused.
-        assert!(reused > 30 * 11 / 2, "seed {seed}: reused {reused}");
+        assert!(reused > 30 * 14 / 2, "seed {seed}: reused {reused}");
     }
 }

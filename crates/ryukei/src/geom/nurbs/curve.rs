@@ -168,9 +168,16 @@ impl NurbsCurve {
     /// The curve moved by a rigid transform: control points moved, weights
     /// and knots kept, so parameters are unchanged.
     pub fn transformed(&self, r: &Rigid) -> Self {
+        self.mapped(|p| r.apply_point(p))
+    }
+
+    /// The curve with every control point moved by `f`, weights and knots
+    /// kept, so parameters are unchanged. For maps a NURBS commutes with:
+    /// rigid motions and reflections.
+    pub(crate) fn mapped(&self, f: impl Fn(Point3) -> Point3) -> Self {
         let mut spline = self.spline.clone();
         for p in spline.points.iter_mut() {
-            *p = r.apply_point(Point3::ORIGIN + *p).to_vector();
+            *p = f(Point3::ORIGIN + *p).to_vector();
         }
         Self::from_spline(spline)
     }

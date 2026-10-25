@@ -49,6 +49,48 @@ pub struct Made {
     /// The body's hash for one solid, else a hash of each solid's founder
     /// and hash: equal hashes, equal results.
     pub hash: String,
+    /// What a join, cut or hole applied, for a pattern to apply again.
+    pub applied: Option<Arc<Applied>>,
+}
+
+/// What a join, cut or hole applied to its targets: its own body, its
+/// operation, and each place it put it (a hole's at each point, with the
+/// point; any other's where it is).
+#[derive(Clone, Debug)]
+pub struct Applied {
+    pub body: Arc<Built>,
+    pub operation: Operation,
+    pub places: Vec<(Option<Id>, Rigid)>,
+    /// BLAKE3 of the body's hash and every place, for what reads it.
+    pub hash: String,
+}
+
+impl Applied {
+    fn new(body: Arc<Built>, operation: Operation, places: Vec<(Option<Id>, Rigid)>) -> Applied {
+        let mut h = blake3::Hasher::new();
+        h.update(body.hash.as_bytes());
+        h.update(operation.as_str().as_bytes());
+        for (p, r) in &places {
+            h.update(p.as_ref().map_or("", Id::as_str).as_bytes());
+            h.update(&[0]);
+            for row in r.rotation_matrix() {
+                for x in row {
+                    h.update(&x.to_bits().to_le_bytes());
+                }
+            }
+            let t = r.translation_part();
+            for x in [t.x, t.y, t.z] {
+                h.update(&x.to_bits().to_le_bytes());
+            }
+        }
+        let hash = h.finalize().to_hex()[..32].to_owned();
+        Applied {
+            body,
+            operation,
+            places,
+            hash,
+        }
+    }
 }
 
 impl Made {
@@ -63,7 +105,11 @@ impl Made {
                 h.finalize().to_hex()[..32].to_owned()
             }
         };
-        Made { solids, hash }
+        Made {
+            solids,
+            hash,
+            applied: None,
+        }
     }
 }
 
@@ -98,6 +144,14 @@ impl Output {
         match self.solids() {
             [(_, b)] => Some(b),
             _ => None,
+        }
+    }
+
+    /// What a join, cut or hole applied, if the feature is one that built.
+    pub fn applied(&self) -> Option<&Applied> {
+        match self {
+            Output::Solids(m) => m.applied.as_deref(),
+            Output::Sketch(_) => None,
         }
     }
 
@@ -292,14 +346,16 @@ pub fn placement(p: &Placement) -> Result<Rigid> {
 pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
     match f {
         Feature::Primitive(p) => build_primitive(part, id, p),
-        Feature::Sketch(_) | Feature::Boolean(_) | Feature::Fillet(_) | Feature::Chamfer(_) => {
-            Err(Error::new(
-                Code::Internal,
-                format!("{} {id} makes no body of its own", f.type_name()),
-            )
-            .with("feature", id))
-        }
-        Feature::Extrude(_) | Feature::Revolve(_) => Err(Error::new(
+        Feature::Sketch(_)
+        | Feature::Boolean(_)
+        | Feature::Fillet(_)
+        | Feature::Chamfer(_)
+        | Feature::Pattern(_) => Err(Error::new(
+            Code::Internal,
+            format!("{} {id} makes no body of its own", f.type_name()),
+        )
+        .with("feature", id)),
+        Feature::Extrude(_) | Feature::Revolve(_) | Feature::Hole(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} is built from its sketch", f.type_name()),
         )
@@ -361,6 +417,8 @@ fn build_sweep(
                 Extent::Symmetric(q) => (-q.meters() / 2.0, q.meters() / 2.0),
                 Extent::UpTo { target, offset } => {
                     let to = UpTo {
+                        ty: "extrude",
+                        role: "target",
                         target,
                         offset: offset.as_ref(),
                         from: valid.frame().origin(),
@@ -369,7 +427,7 @@ fn build_sweep(
                     (0.0, to.length(part, id, before)?)
                 }
                 Extent::ThroughAll { both } => {
-                    through_all(id, valid.frame().origin(), dir, *both, targets)?
+                    through_all("extrude", id, valid.frame().origin(), dir, *both, targets)?
                 }
             };
             sweep::extrude(key, &valid, dir, start, end)
@@ -396,10 +454,12 @@ fn build_sweep(
     finish(id, ty, made, origins)
 }
 
-/// How far a through-all extrude goes from `from` along `dir`: a margin
-/// past every point of its targets' boxes, both ways if `both`. Fails as
-/// `invalid_extent` when all of them lie behind the sketch's plane.
-fn through_all(
+/// How far a through-all extrude or hole (`ty`) goes from `from` along
+/// `dir`: a margin past every point of its targets' boxes, both ways if
+/// `both`. Fails as `invalid_extent` when all of them lie behind the
+/// sketch's plane.
+pub(crate) fn through_all(
+    ty: &str,
     id: &Id,
     from: Point3,
     dir: Vector3,
@@ -437,7 +497,7 @@ fn through_all(
         return Err(Error::new(
             Code::InvalidExtent,
             format!(
-                "extrude {id}: everything it cuts lies behind the sketch's plane; reverse it, or go through all both ways"
+                "{ty} {id}: everything it cuts lies behind the sketch's plane; reverse it, or go through all both ways"
             ),
         )
         .with("feature", id)
@@ -446,35 +506,39 @@ fn through_all(
     Ok((0.0, hi + margin))
 }
 
-/// An up-to extent, from a point of the sketch's plane along `dir`.
-struct UpTo<'a> {
-    target: &'a Reference,
-    offset: Option<&'a crate::units::Quantity>,
-    from: Point3,
-    dir: Vector3,
+/// An up-to extent of an extrude or a hole (`ty`), from a point of the
+/// sketch's plane along `dir`; `role` is its target's role in the
+/// feature.
+pub(crate) struct UpTo<'a> {
+    pub ty: &'a str,
+    pub role: &'a str,
+    pub target: &'a Reference,
+    pub offset: Option<&'a crate::units::Quantity>,
+    pub from: Point3,
+    pub dir: Vector3,
 }
 
 impl UpTo<'_> {
-    /// How far the extrude reaches: to the target's plane (a planar face
-    /// parallel to the sketch) or its point (a vertex), then the offset.
-    fn length(&self, part: &Part, id: &Id, before: &dyn Results) -> Result<f64> {
+    /// How far it reaches: to the target's plane (a planar face parallel
+    /// to the sketch) or its point (a vertex), then the offset.
+    pub(crate) fn length(&self, part: &Part, id: &Id, before: &dyn Results) -> Result<f64> {
         use crate::reference::{kind, plane, resolve, wrong_kind};
         use ryukei::topo::EntityId;
-        let (t, text) = (self.target, self.target.text(&part.id));
+        let (t, text, role) = (self.target, self.target.text(&part.id), self.role);
         let invalid = |msg: String| {
             Error::new(
                 Code::InvalidExtent,
-                format!("extrude {id}: its target {text} {msg}"),
+                format!("{} {id}: its target {text} {msg}", self.ty),
             )
             .with("feature", id)
-            .with("role", "target")
+            .with("role", role)
             .with("reference", &text)
         };
-        let found = resolve(part, part.order(), id, "target", t, before)?;
+        let found = resolve(part, part.order(), id, role, t, before)?;
         let at = match found.1 {
             EntityId::Vertex(v) => found.0.body.vertex(v).expect("a live vertex").point,
             EntityId::Face(_) => {
-                let (p, n) = plane(part, id, "target", t, found)?;
+                let (p, n) = plane(part, id, role, t, found)?;
                 if n.cross(self.dir).length() > ryukei::tol::ANGULAR_RESOLUTION {
                     return Err(invalid("isn't parallel to the sketch".into()));
                 }
@@ -484,7 +548,7 @@ impl UpTo<'_> {
                 return Err(wrong_kind(
                     part,
                     id,
-                    "target",
+                    role,
                     t,
                     kind(e),
                     "a planar face or a vertex",
@@ -707,8 +771,28 @@ pub fn not_a_solid(part: &Part, solids: &Solids, owner: &Id, role: &str, t: &Id)
     e
 }
 
-/// What a body-making feature leaves: its own body as a new solid, or
-/// its body applied to each solid it targets.
+/// What a feature does to the solids it targets, and which: a body-
+/// making feature's operation and targets, or a hole's, which always
+/// cuts.
+fn operation(f: &Feature) -> (Operation, &[Id]) {
+    match f {
+        Feature::Hole(h) => (Operation::Cut, &h.targets),
+        f => {
+            let c = f.combine().expect("a body-making feature");
+            (c.operation, &c.targets)
+        }
+    }
+}
+
+/// Whether a feature applies a body of its own to solids it targets: a
+/// join, cut or intersect, or a hole.
+pub fn applies(f: &Feature) -> bool {
+    f.hole().is_some() || f.combine().is_some_and(|c| !c.is_new())
+}
+
+/// What a body-making feature or a hole leaves: its own body as a new
+/// solid, or its body applied to each solid it targets (a hole's at each
+/// of its points).
 fn build_body(
     part: &Part,
     solids: &Solids,
@@ -717,11 +801,10 @@ fn build_body(
     before: &dyn Results,
     tool: Option<ToolInput>,
 ) -> (Result<Made>, Option<Arc<Built>>) {
-    let c = f.combine().expect("a body-making feature");
+    let (operation, targets) = operation(f);
     // Its targets first: a cut of a solid that failed is
     // `dependency_failed`, whatever its own body would be.
-    let targets: Result<Vec<(&Id, &Built)>> = c
-        .targets
+    let targets: Result<Vec<(&Id, &Built)>> = targets
         .iter()
         .map(|t| Ok((t, target(part, solids, id, t, before)?)))
         .collect();
@@ -730,10 +813,26 @@ fn build_body(
         Err(e) => return (Err(e), None),
     };
     let bodies: Vec<&Built> = targets.iter().map(|(_, b)| *b).collect();
+    // A hole's points, and where its body sits: each point's tool is its
+    // body moved from there to the point.
+    let holes = match f {
+        Feature::Hole(h) => {
+            let points = sketch_input(part, id, &h.sketch, before)
+                .and_then(|s| Ok((s, crate::hole::points(id, h, s)?)));
+            match points {
+                Ok(p) => Some((h, p)),
+                Err(e) => return (Err(e), None),
+            }
+        }
+        _ => None,
+    };
     let own = match tool {
         Some((h, Some((c, b)))) if *c == h => Ok(Arc::clone(b)),
-        _ => match f {
-            Feature::Primitive(p) => build_primitive(&part.id, id, p),
+        _ => match (f, &holes) {
+            (Feature::Primitive(p), _) => build_primitive(&part.id, id, p),
+            (_, Some((h, (solved, _)))) => {
+                crate::hole::tool(part, id, h, solved, &bodies, before).map(|(b, _)| b)
+            }
             _ => build_sweep(part, id, f, &bodies, before),
         }
         .map(Arc::new),
@@ -742,40 +841,193 @@ fn build_body(
         Ok(own) => own,
         Err(e) => return (Err(e), None),
     };
-    if c.is_new() {
+    if operation == Operation::New {
         return (Ok(Made::new(vec![(id.clone(), own)])), None);
     }
     let ty = f.type_name();
-    let kop = match c.operation {
+    let kop = match operation {
         Operation::Join => BooleanOp::Unite,
         Operation::Cut => BooleanOp::Subtract,
         Operation::Intersect => BooleanOp::Intersect,
         Operation::New => unreachable!("a new solid acts on nothing"),
     };
-    let tool = [ToolBody {
-        key: tool_key(&part.id, id),
-        built: own.as_ref(),
-        name: id,
-    }];
+    let places: Vec<(Option<Id>, Rigid)> = match &holes {
+        Some((_, (solved, points))) => {
+            let origin = solved.frame.apply_point(Point3::ORIGIN);
+            points
+                .iter()
+                .map(|(p, at)| (Some(p.clone()), Rigid::translation(*at - origin)))
+                .collect()
+        }
+        None => vec![(None, Rigid::IDENTITY)],
+    };
+    let tools: Vec<ToolBody> = places
+        .iter()
+        .map(|(p, place)| match p {
+            Some(p) => ToolBody {
+                key: crate::hole::point_key(&part.id, id, p),
+                built: own.as_ref(),
+                place: *place,
+                name: id,
+                label: Some(json!({"point": p})),
+            },
+            None => ToolBody::whole(tool_key(&part.id, id), own.as_ref(), id),
+        })
+        .collect();
     // The body is kept however applying it goes: moving what it misses
     // needs it again.
     let made: Result<Vec<(Id, Arc<Built>)>> = targets
         .par_iter()
         .map(|(t, b)| {
-            let r = apply(part, id, ty, (kop, c.operation.as_str()), t, b, &tool)?;
+            let r = apply(part, id, ty, (kop, operation.as_str()), t, b, &tools)?;
             Ok(((*t).clone(), Arc::new(r)))
         })
         .collect();
-    (made.map(Made::new), Some(own))
+    let applied = Arc::new(Applied::new(Arc::clone(&own), operation, places));
+    let made = made.map(|m| Made {
+        applied: Some(applied),
+        ..Made::new(m)
+    });
+    (made, Some(own))
 }
 
-/// A body a feature applies to a solid: its key, the body, and what to
-/// call it in errors (the feature whose own body it is, or the solid a
-/// `boolean` uses as a tool).
+/// A pattern: its targets as it sees them, with every instance of every
+/// seed's own body, moved, in one kernel call per target. An instance
+/// that changes nothing, or that alone the kernel refuses, is named.
+fn build_pattern(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    p: &crate::doc::pattern::Pattern,
+    before: &dyn Results,
+) -> Result<Made> {
+    use crate::pattern::{Motion, instance_key};
+    let targets: Vec<(&Id, &Built)> = p
+        .targets
+        .iter()
+        .map(|t| Ok((t, target(part, solids, id, t, before)?)))
+        .collect::<Result<_>>()?;
+    let (operation, seeds) = crate::pattern::seeds(part, id, p, before)?;
+    let motions = crate::pattern::motions(part, id, p, before)?;
+    if motions.is_empty() {
+        return Err(Error::new(
+            Code::OperationNoEffect,
+            format!("pattern {id} has no instance but its seeds: every other one is skipped"),
+        )
+        .with("feature", id)
+        .with("pointer", "/skip"));
+    }
+    // A mirror image is a body of its own: each seed's, at each place,
+    // reflected.
+    let mut mirrored: Vec<Built> = Vec::new();
+    for (_, m) in &motions {
+        let Motion::Mirror(plane) = m else { continue };
+        for (seed, a) in &seeds {
+            for (_, place) in &a.places {
+                let body = a
+                    .body
+                    .body
+                    .transformed(place)
+                    .and_then(|b| b.mirrored(plane))
+                    .map_err(|e| {
+                        Error::new(
+                            Code::RebuildFailed,
+                            format!("pattern {id}: the mirror image of {seed} leaves the size box"),
+                        )
+                        .with("feature", id)
+                        .with("seed", *seed)
+                        .with("kernel", format!("{e:?}"))
+                    })?;
+                let journal = a.body.journal.clone();
+                let origins = (*a.body.origins).clone();
+                mirrored.push(finish(id, "pattern", (body, journal), origins)?);
+            }
+        }
+    }
+    let mut images = mirrored.iter();
+    let mut tools: Vec<ToolBody> = Vec::new();
+    for ([i, j], m) in &motions {
+        let instance = if matches!(
+            &p.kind,
+            crate::doc::pattern::Kind::Linear {
+                second: Some(_),
+                ..
+            }
+        ) {
+            json!([i, j])
+        } else {
+            json!([i])
+        };
+        for (seed, a) in &seeds {
+            for (point, place) in &a.places {
+                let mut label = json!({"feature": id, "seed": seed, "instance": instance});
+                if let Some(pt) = point {
+                    label["point"] = json!(pt);
+                }
+                let (built, place) = match m {
+                    Motion::Rigid(r) => (a.body.as_ref(), r.then_after(place)),
+                    Motion::Mirror(_) => {
+                        (images.next().expect("an image per place"), Rigid::IDENTITY)
+                    }
+                };
+                tools.push(ToolBody {
+                    key: instance_key(&part.id, id, seed, point.as_ref(), [*i, *j]),
+                    built,
+                    place,
+                    name: id,
+                    label: Some(label),
+                });
+            }
+        }
+    }
+    let kop = match operation {
+        Operation::Join => BooleanOp::Unite,
+        _ => BooleanOp::Subtract,
+    };
+    let made: Vec<(Id, Arc<Built>)> = targets
+        .par_iter()
+        .map(|(t, b)| {
+            let r = apply(part, id, "pattern", (kop, operation.as_str()), t, b, &tools)?;
+            Ok(((*t).clone(), Arc::new(r)))
+        })
+        .collect::<Result<_>>()?;
+    Ok(Made::new(made))
+}
+
+/// A body a feature applies to a solid: its key, the body and where it
+/// is placed, and what to call it in errors (the feature whose own body
+/// it is, or the solid a `boolean` uses as a tool) with, for one of
+/// several tools of one feature, which (`{"point": …}`): it goes into
+/// the origins of what it leaves.
 struct ToolBody<'a> {
     key: ToolKey,
     built: &'a Built,
+    place: Rigid,
     name: &'a Id,
+    label: Option<Value>,
+}
+
+impl<'a> ToolBody<'a> {
+    /// A feature's or a solid's whole body, where it is.
+    fn whole(key: ToolKey, built: &'a Built, name: &'a Id) -> ToolBody<'a> {
+        ToolBody {
+            key,
+            built,
+            place: Rigid::IDENTITY,
+            name,
+            label: None,
+        }
+    }
+
+    /// Its label's fields added to `v`.
+    fn mark(&self, mut v: Value) -> Value {
+        if let (Some(Value::Object(l)), Value::Object(o)) = (&self.label, &mut v) {
+            for (k, x) in l {
+                o.insert(k.clone(), x.clone());
+            }
+        }
+        v
+    }
 }
 
 /// Unites solid `t` with `tools`, subtracts them from it or intersects
@@ -797,12 +1049,15 @@ fn apply(
         .map(|x| Tool {
             key: x.key,
             body: &x.built.body,
-            place: Rigid::IDENTITY,
+            place: x.place,
         })
         .collect();
+    let key = op_key(&part.id, id);
     let (body, journal) =
-        ryukei::boolean::boolean(op_key(&part.id, id), kop, &target.body, &placed)
-            .map_err(|e| boolean_error(part, id, ty, t, target, tools, e))?;
+        ryukei::boolean::boolean(key, kop, &target.body, &placed).map_err(|e| {
+            let alone = culprit(key, kop, &target.body, &placed).map(|i| &tools[i]);
+            boolean_error(part, id, ty, t, target, tools, alone, e)
+        })?;
     let fail = |code, msg: String| {
         Error::new(code, format!("{ty} {id}: {msg}"))
             .with("feature", id)
@@ -833,11 +1088,22 @@ fn apply(
             |e| matches!(e, Event::Placed { tool, to, .. } if *tool == x.key && kept.contains(to)),
         );
         if !left && !changed {
-            return Err(fail(
+            let which = match &x.label {
+                Some(l) if l.get("instance").is_some() => label_text(l),
+                Some(l) => format!("{} at {}", x.name, label_text(l)),
+                None => x.name.to_string(),
+            };
+            let mut e = fail(
                 Code::OperationNoEffect,
-                format!("the {what} with {} changes nothing of {t}", x.name),
+                format!("the {what} with {which} changes nothing of {t}"),
             )
-            .with("tool", x.name));
+            .with("tool", x.name);
+            if let Some(Value::Object(l)) = &x.label {
+                for (k, v) in l {
+                    e = e.with(k, v);
+                }
+            }
+            return Err(e);
         }
     }
     // Origins: the target's, each tool's under their placed names, and a
@@ -857,7 +1123,7 @@ fn apply(
             && let Some(x) = tools.iter().find(|x| x.key == *tool)
             && let Some(o) = x.built.origins.get(&own.to_string())
         {
-            from.insert(*to, o.clone());
+            from.insert(*to, x.mark(o.clone()));
         }
     }
     for e in journal.events() {
@@ -877,9 +1143,54 @@ fn apply(
     finish(id, ty, (body, journal), origins)
 }
 
-/// The kernel's refusal of a join, cut, intersect or boolean:
+/// A tool's label as text: a hole's point (`p3`), or a pattern's
+/// instance (`instance [2] of hole1 at p3`).
+fn label_text(l: &Value) -> String {
+    let text = |k: &str| match l.get(k) {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(v) => Some(v.to_string()),
+        None => None,
+    };
+    let point = text("point");
+    match (text("instance"), text("seed")) {
+        (Some(i), Some(s)) => match point {
+            Some(p) => format!("instance {i} of {s} at {p}"),
+            None => format!("instance {i} of {s}"),
+        },
+        _ => point.unwrap_or_default(),
+    }
+}
+
+/// The one tool that alone makes the kernel refuse, when there is one:
+/// the tools are halved, keeping a half that still fails, until one is
+/// left. A single tool is it; `None` when no half fails alone (the tools
+/// meet each other badly).
+fn culprit(key: OpKey, kop: BooleanOp, target: &Body, tools: &[Tool]) -> Option<usize> {
+    if tools.len() < 2 {
+        return (tools.len() == 1).then_some(0);
+    }
+    let fails =
+        |r: core::ops::Range<usize>| ryukei::boolean::boolean(key, kop, target, &tools[r]).is_err();
+    let (mut lo, mut hi) = (0, tools.len());
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if fails(lo..mid) {
+            hi = mid;
+        } else if fails(mid..hi) {
+            lo = mid;
+        } else {
+            return None;
+        }
+    }
+    Some(lo)
+}
+
+/// The kernel's refusal of a join, cut, intersect, hole or boolean:
 /// `boolean_failed`, with the faces it names as the target's references
-/// or the tools' entities with their origins.
+/// or the tools' entities with their origins. Where one of several tools
+/// alone is refused (`alone`), the faces are its own and the error says
+/// which it is.
+#[allow(clippy::too_many_arguments)]
 fn boolean_error(
     part: &Part,
     id: &Id,
@@ -887,18 +1198,26 @@ fn boolean_error(
     t: &Id,
     target: &Built,
     tools: &[ToolBody],
+    alone: Option<&ToolBody>,
     e: ryukei::Error,
 ) -> Error {
     let face = |n: &Name| -> Value {
         if target.body.by_name(*n).is_some() {
             return json!({"reference": format!("{}/{t}/{n}", part.id)});
         }
-        let Some(x) = tools.iter().find(|x| x.built.body.by_name(*n).is_some()) else {
+        let found = alone
+            .filter(|x| x.built.body.by_name(*n).is_some())
+            .or_else(|| tools.iter().find(|x| x.built.body.by_name(*n).is_some()));
+        let Some(x) = found else {
             return json!({"name": n.to_string()});
         };
         let mut v = json!({"tool": x.name, "name": n.to_string()});
         if let Some(o) = x.built.origins.get(&n.to_string()) {
-            v["origin"] = o.clone();
+            v["origin"] = if alone.is_some() {
+                x.mark(o.clone())
+            } else {
+                o.clone()
+            };
         }
         v
     };
@@ -920,10 +1239,20 @@ fn boolean_error(
         ),
         e => (e.to_string(), Vec::new(), None),
     };
-    let mut err = Error::new(Code::BooleanFailed, format!("{ty} {id}: {msg}"))
+    let which = match alone.and_then(|x| x.label.as_ref()) {
+        Some(l) if l.get("instance").is_some() => format!(" ({})", label_text(l)),
+        Some(l) => format!(" at {}", label_text(l)),
+        None => String::new(),
+    };
+    let mut err = Error::new(Code::BooleanFailed, format!("{ty} {id}{which}: {msg}"))
         .with("feature", id)
         .with("target", t)
         .with("kernel", format!("{e:?}"));
+    if let Some(Value::Object(l)) = alone.and_then(|x| x.label.as_ref()) {
+        for (k, v) in l {
+            err = err.with(k, v);
+        }
+    }
     if !faces.is_empty() {
         err = err.with("faces", faces);
     }
@@ -952,7 +1281,7 @@ fn build_boolean(
     let tools: Vec<ToolBody> = tools
         .iter()
         .zip(keys)
-        .map(|((name, built), key)| ToolBody { key, built, name })
+        .map(|((name, built), key)| ToolBody::whole(key, built, name))
         .collect();
     let kop = match b.op {
         crate::doc::solid::BooleanOp::Unite => BooleanOp::Unite,
@@ -1320,7 +1649,7 @@ fn build_blend(
 
 /// Checks a body the kernel built and hashes it. A broken body is never
 /// reported as a success, in release builds too.
-fn finish(
+pub(crate) fn finish(
     id: &Id,
     ty: &str,
     (body, journal): (Body, Journal),
@@ -1383,6 +1712,7 @@ fn rebuild_with(
         Feature::Fillet(_) | Feature::Chamfer(_) => {
             (build_blend(part, solids, id, f, before).map(solid), None)
         }
+        Feature::Pattern(p) => (build_pattern(part, solids, id, p, before).map(solid), None),
         f => {
             let (r, own) = build_body(part, solids, id, f, before, tool);
             (r.map(solid), own)
@@ -1403,7 +1733,22 @@ fn input_hash(
     before: &BTreeMap<Id, Result<Output>>,
 ) -> blake3::Hash {
     let reads = crate::graph::reads(solids, id, f);
-    hash_of(part, id, &f.to_json(), &reads, before)
+    let mut h = hash_of(part, id, &f.to_json(), &reads, before);
+    // A pattern reads its seeds' own bodies and places too.
+    if !f.seeds().is_empty() {
+        let mut x = blake3::Hasher::new();
+        x.update(h.as_bytes());
+        for seed in f.seeds() {
+            if let Some(Ok(o)) = before.get(seed)
+                && let Some(a) = o.applied()
+            {
+                x.update(a.hash.as_bytes());
+            }
+            x.update(&[0]);
+        }
+        h = x.finalize();
+    }
+    h
 }
 
 /// The hash of everything a join, cut or intersect's own body depends
@@ -1422,10 +1767,11 @@ fn tool_hash(
         o.remove("operation");
         o.remove("targets");
     }
-    let through = matches!(
-        f,
-        Feature::Extrude(e) if matches!(e.extent, Extent::ThroughAll { .. })
-    );
+    let through = crate::hole::through(f)
+        || matches!(
+            f,
+            Feature::Extrude(e) if matches!(e.extent, Extent::ThroughAll { .. })
+        );
     let named = f
         .swept()
         .into_iter()
@@ -1551,7 +1897,7 @@ pub fn rebuild_part_with(part: &Part, cache: &Cache) -> (PartResult, Cache) {
                     Err(e) => return Step::failed(id, e.clone()),
                 };
                 let h = input_hash(part, &solids, &id, f, &built);
-                let applies = f.combine().is_some_and(|c| !c.is_new());
+                let applies = applies(f);
                 let kept = cache.tools.get(&id);
                 let (result, new, tool) = match cache.features.get(&id) {
                     Some((c, r)) if *c == h => {

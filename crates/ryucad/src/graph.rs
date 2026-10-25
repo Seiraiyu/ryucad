@@ -1,6 +1,7 @@
 //! The dependency graph of a part's features. A feature names features: an
-//! extrude or revolve its sketch, every reference its target's feature,
-//! and an operation its target solids, by their founders. Those must come
+//! extrude, revolve or hole its sketch, a pattern its seeds, every
+//! reference its target's feature, and an operation its target solids, by
+//! their founders. Those must come
 //! earlier in the part's list. What it reads to build is the same, except
 //! that a solid it names is read as its view (see [`crate::solid`]): the
 //! last feature of the solid's chain listed before it. So the graph has
@@ -23,6 +24,7 @@ pub fn inputs(f: &Feature) -> Vec<&Id> {
     let named = f
         .swept()
         .into_iter()
+        .chain(f.seeds())
         .chain(f.references().into_iter().map(|(_, r)| &r.feature))
         .chain(f.targets());
     for id in named {

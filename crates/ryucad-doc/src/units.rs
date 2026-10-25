@@ -206,11 +206,12 @@ pub struct Quantity {
 }
 
 /// What a field holds, and how a bare number in it reads: a length in
-/// the default unit, or an angle in degrees.
+/// the default unit, an angle in degrees, or a plain number (a count).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
     Length(Unit),
     Angle,
+    Number,
 }
 
 impl Field {
@@ -218,6 +219,7 @@ impl Field {
         match self {
             Field::Length(_) => Dim::LENGTH,
             Field::Angle => Dim::ANGLE,
+            Field::Number => Dim::NUMBER,
         }
     }
 
@@ -230,6 +232,8 @@ impl Field {
             (Field::Angle, "" | "deg") => Some((DEG, "deg".to_owned())),
             (Field::Angle, "rad") => Some((1.0, "rad".to_owned())),
             (Field::Angle, _) => None,
+            (Field::Number, "") => Some((1.0, String::new())),
+            (Field::Number, _) => None,
         }
     }
 }
@@ -301,8 +305,14 @@ impl Quantity {
         if !si.is_finite() {
             return Err(bad("too large"));
         }
+        // A plain number has no unit to write.
+        let text = if unit.is_empty() {
+            number.to_owned()
+        } else {
+            format!("{number} {unit}")
+        };
         Ok(Quantity {
-            text: format!("{number} {unit}"),
+            text,
             si,
             literal: true,
             dim,
@@ -348,6 +358,12 @@ impl Quantity {
 
     pub fn radians(&self) -> f64 {
         debug_assert_eq!(self.dim, Dim::ANGLE);
+        self.si
+    }
+
+    /// A plain number's value.
+    pub fn number(&self) -> f64 {
+        debug_assert_eq!(self.dim, Dim::NUMBER);
         self.si
     }
 
@@ -589,6 +605,24 @@ mod tests {
         );
         let x = Quantity::from_json_as(&json!(45), Field::Angle, &no_parameters).unwrap();
         assert_eq!(x.text(), "45 deg");
+    }
+
+    #[test]
+    fn plain_numbers() {
+        let n = |s: &str| Quantity::eval_as(s, Field::Number, &no_parameters);
+        let six = n("6").unwrap();
+        assert_eq!(
+            (six.text(), six.number(), six.dim()),
+            ("6".to_owned(), 6.0, Dim::NUMBER)
+        );
+        assert!(six.is_literal());
+        assert_eq!(six.report(), json!({"value": "6", "n": 6.0}));
+        assert_eq!(n("2 * 3").unwrap().number(), 6.0);
+        let x = Quantity::from_json_as(&json!(4), Field::Number, &no_parameters).unwrap();
+        assert_eq!(x.text(), "4");
+        for (s, code) in [("6 mm", Code::UnitMismatch), ("6 deg", Code::UnitMismatch)] {
+            assert_eq!(n(s).unwrap_err().code, code, "{s}");
+        }
     }
 
     #[test]

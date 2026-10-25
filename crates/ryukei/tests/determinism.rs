@@ -1375,6 +1375,69 @@ fn heal_section(golden: &mut Golden) {
     }
 }
 
+/// Mirror images: the primitives and seeded sweeps, booleans and blends
+/// reflected in an oblique plane, with their meshes.
+fn mirror_section(golden: &mut Golden) {
+    use ryukei::blend::blend;
+    use ryukei::boolean::boolean;
+    use ryukei_testkit::blend_bytes::blend_case;
+    use ryukei_testkit::boolean_bytes::boolean_case;
+    use ryukei_testkit::sweep_bytes::sweep;
+    let mut s = golden.section("mirror");
+    let t = Rigid::rotation(Vector3::new(1.0, 2.0, 0.5).normalize().unwrap(), 0.7);
+    let k = OpKey(1);
+    let mut bodies = vec![
+        primitive::block(k, 1.0, 2.0, 3.0, &t).unwrap().0,
+        primitive::cylinder(k, 1.0, 2.0, &t).unwrap().0,
+        primitive::cone(k, 1.0, 2.0, &t).unwrap().0,
+        primitive::sphere(k, 1.0, &t).unwrap().0,
+        primitive::torus(k, 2.0, 0.5, &t).unwrap().0,
+    ];
+    let bytes = |seed: u64| {
+        let mut g = Lcg::new(seed);
+        (0..96)
+            .map(|_| (g.next_u64() >> 56) as u8)
+            .collect::<Vec<u8>>()
+    };
+    for seed in 0..12 {
+        if let Some((b, _)) = sweep(&bytes(seed)) {
+            bodies.push(b);
+        }
+        if let Some(case) = boolean_case(&bytes(seed))
+            && let Ok((b, _)) = boolean(OpKey(9), case.op, &case.target, &case.tools())
+        {
+            bodies.push(b);
+        }
+        if let Some(case) = blend_case(&bytes(seed))
+            && let Ok((b, _)) = blend(OpKey(9), &case.body, &case.blends)
+        {
+            bodies.push(b);
+        }
+    }
+    let plane = Plane::new(
+        Frame::new(
+            Point3::new(0.3, -0.2, 0.1),
+            Vector3::new(1.0, 0.4, -0.7),
+            Vector3::new(0.0, 1.0, 0.0),
+        )
+        .unwrap(),
+    );
+    for b in &bodies {
+        match b.mirrored(&plane) {
+            Ok(m) => {
+                s.str(&m.dump());
+                if m.counts().faces > 0 {
+                    hash_mesh(
+                        &mut s,
+                        &tessellate(&m, &MeshParams::new(2e-2, 0.5)).unwrap(),
+                    );
+                }
+            }
+            Err(e) => s.str(&format!("{e:?}")),
+        }
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -1403,5 +1466,6 @@ fn determinism() {
     corners_section(&mut golden);
     blend_booleans_section(&mut golden);
     heal_section(&mut golden);
+    mirror_section(&mut golden);
     golden.finish();
 }

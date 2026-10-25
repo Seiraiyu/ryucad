@@ -1,7 +1,7 @@
 use super::curve::{check_length, ring_box};
 use super::{
-    Box3, Frame, Point3, PrincipalCurvatures, Projection, Rigid, SurfaceEval, UnitVector3, Vector3,
-    polar_angle,
+    Box3, Frame, Mirror, Point2, Point3, PrincipalCurvatures, Projection, Rigid, SurfaceEval,
+    UnitVector3, Vector2, Vector3, polar_angle,
 };
 use super::{Curve2, Extrusion, NurbsSurface, Pipe, Revolution};
 use crate::Error;
@@ -31,6 +31,45 @@ pub enum Surface {
     Extrusion(Arc<Extrusion>),
     Revolution(Arc<Revolution>),
     Pipe(Arc<Pipe>),
+}
+
+/// How a mirrored surface ([`Surface::mirrored`]) maps its parameter
+/// plane: the mirrored point of `(u, v)` is the new surface's point at
+/// `apply((u, v))`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ParamFlip {
+    /// `(u, v)` stays `(u, v)`. The natural normal then turns against the
+    /// mirrored geometry, so a face on the surface flips its sense.
+    Kept,
+    /// `u` becomes `at - u`; the natural normal is mirrored with the
+    /// geometry.
+    U(f64),
+    /// `v` becomes `at - v`; likewise.
+    V(f64),
+}
+
+impl ParamFlip {
+    pub fn apply(self, p: Point2) -> Point2 {
+        match self {
+            Self::Kept => p,
+            Self::U(at) => Point2::new(at - p.x, p.y),
+            Self::V(at) => Point2::new(p.x, at - p.y),
+        }
+    }
+
+    /// A direction in the parameter plane, mapped.
+    pub fn apply_vector(self, d: Vector2) -> Vector2 {
+        match self {
+            Self::Kept => d,
+            Self::U(_) => Vector2::new(-d.x, d.y),
+            Self::V(_) => Vector2::new(d.x, -d.y),
+        }
+    }
+
+    /// Whether the natural normal turns against the mirrored geometry's.
+    pub fn flips_normal(self) -> bool {
+        self == Self::Kept
+    }
 }
 
 /// The frame's xy plane: `origin + u x + v y`. The normal is `z`.
@@ -80,6 +119,10 @@ pub struct Torus {
 impl Plane {
     pub fn new(frame: Frame) -> Self {
         Self { frame }
+    }
+
+    pub fn frame(&self) -> &Frame {
+        &self.frame
     }
 }
 
@@ -535,6 +578,41 @@ impl Surface {
         *frame = frame.transformed(r);
         out
     }
+
+    /// The surface reflected by `m`, and how its parameters map. An
+    /// analytic surface takes [`Mirror::frame_reversed`], so its natural
+    /// normal is mirrored with it: a plane's `v` and the others' angle `u`
+    /// run the other way (`u` becomes `2π - u`, staying in its period). A
+    /// revolution does the same and a pipe's angle `v` is negated; a NURBS
+    /// or an extrusion keeps its parameters, its natural normal turning
+    /// against the mirrored geometry. Fails with `OutsideSizeBox` when a
+    /// frame's origin leaves the size box.
+    pub fn mirrored(&self, m: &Mirror) -> Result<(Self, ParamFlip), Error> {
+        let mut out = self.clone();
+        let (frame, flip) = match &mut out {
+            Self::Plane(s) => (&mut s.frame, ParamFlip::V(0.0)),
+            Self::Cylinder(s) => (&mut s.frame, ParamFlip::U(TAU)),
+            Self::Cone(s) => (&mut s.frame, ParamFlip::U(TAU)),
+            Self::Sphere(s) => (&mut s.frame, ParamFlip::U(TAU)),
+            Self::Torus(s) => (&mut s.frame, ParamFlip::U(TAU)),
+            Self::Nurbs(n) => {
+                let n = n.mapped(|p| m.apply_point(p));
+                return Ok((Self::Nurbs(Arc::new(n)), ParamFlip::Kept));
+            }
+            Self::Extrusion(e) => {
+                return Ok((Self::Extrusion(Arc::new(e.mirrored(m)?)), ParamFlip::Kept));
+            }
+            Self::Revolution(r) => {
+                return Ok((
+                    Self::Revolution(Arc::new(r.mirrored(m)?)),
+                    ParamFlip::U(TAU),
+                ));
+            }
+            Self::Pipe(p) => return Ok((Self::Pipe(Arc::new(p.mirrored(m)?)), ParamFlip::V(0.0))),
+        };
+        *frame = m.frame_reversed(frame)?;
+        Ok((out, flip))
+    }
 }
 
 #[cfg(test)]
@@ -565,6 +643,28 @@ mod tests {
 
     fn near(a: Point3, b: Point3) -> bool {
         a.distance(b) <= 1e-14
+    }
+
+    #[test]
+    fn mirrors_map_parameters() {
+        let m = Mirror::new(
+            Point3::new(0.5, -1.0, 2.0),
+            Vector3::new(1.0, 0.3, -0.6).normalize().unwrap(),
+        );
+        let nurbs = all()[3].to_nurbs([[0.0, PI], [-1.0, 1.0]]).unwrap().0;
+        let surfaces = all().into_iter().chain([Surface::Nurbs(Arc::new(nurbs))]);
+        for s in surfaces {
+            let (r, flip) = s.mirrored(&m).unwrap();
+            for (u, v) in [(0.3, 0.2), (2.0, -0.7), (5.5, 0.9)] {
+                let q = flip.apply(Point2::new(u, v));
+                let (p, mp) = (s.point(u, v), r.point(q.x, q.y));
+                assert!(m.apply_point(p).distance(mp) < 1e-12, "{s:?} at {u} {v}");
+                let (n, mn) = (s.normal(u, v).unwrap(), r.normal(q.x, q.y).unwrap());
+                let sign = if flip.flips_normal() { -1.0 } else { 1.0 };
+                let d = m.apply_vector(n.get()) * sign - mn.get();
+                assert!(d.length() < 1e-12, "{s:?}: {flip:?}");
+            }
+        }
     }
 
     fn cone_apex_v(s: &Surface) -> f64 {

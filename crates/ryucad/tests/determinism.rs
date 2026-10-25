@@ -3,8 +3,9 @@
 //! expressions, rebuilt bodies, display meshes, the pixels of renders, and
 //! solved sketches and the bodies swept from them, features that refer
 //! to other features' faces, edges and vertices, solids that features
-//! join, cut and intersect, how sketches are drawn, what diffs say, what
-//! merges make, and the content hashes release records name. After
+//! join, cut and intersect, holes and patterns, how sketches are drawn,
+//! what diffs say, what merges make, and the content hashes release
+//! records name. After
 //! a deliberate change, regenerate with
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
@@ -1300,6 +1301,185 @@ fn pdm_section(golden: &mut Golden) {
     }
 }
 
+/// A millimetre part of holes and patterns: a plate drilled at a
+/// sketch's points (a counterbore with a drill point, a countersink
+/// through all, a plain blind hole), a grid of the
+/// counterbore with an instance skipped, a boss with a bolt circle of
+/// holes about its side, an instance skipped, and a pocket mirrored.
+/// `holes_only` stops after the holes.
+fn drilled(holes_only: bool) -> (tempfile::TempDir, ryucad::session::Session) {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    call(&mut s, "part.create", json!({"part": "hp"}));
+    call(
+        &mut s,
+        "param.set",
+        json!({"part": "hp", "parameters": {"bore": "3.3 mm", "n": "6"}}),
+    );
+    let add = |s: &mut ryucad::session::Session, f: serde_json::Value| {
+        let mut f = f;
+        f["part"] = json!("hp");
+        call(s, "feature.add", f);
+    };
+    add(
+        &mut s,
+        json!({"type": "box", "id": "plate", "params": {"x": "60 mm", "y": "40 mm", "z": "10 mm"},
+               "placement": {"origin": ["-30 mm", "-20 mm", "0 mm"]}}),
+    );
+    let top =
+        call(&mut s, "inspect", json!({"part": "hp", "feature": "plate"}))["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == 1.0
+            })
+            .map(|f| format!("hp/plate/{}", f["name"].as_str().unwrap()))
+            .unwrap();
+    add(
+        &mut s,
+        json!({"type": "sketch", "id": "spots", "face": top}),
+    );
+    call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "hp", "sketch": "spots", "ops": [
+            {"op": "add", "type": "point", "at": [-24, -14]},
+            {"op": "add", "type": "fix", "a": "p1"},
+            {"op": "add", "type": "point", "at": [24, -14]},
+            {"op": "add", "type": "fix", "a": "p2"},
+            {"op": "add", "type": "point", "at": [24, 14]},
+            {"op": "add", "type": "fix", "a": "p3"}
+        ]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "cb", "sketch": "spots", "points": ["p1"],
+               "form": "counterbore", "diameter": "bore",
+               "counterbore": {"diameter": "6 mm", "depth": "3 mm"},
+               "depth": {"blind": "7 mm"}, "bottom": {"drill": "118 deg"}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "cs", "sketch": "spots", "points": ["p2"],
+               "form": "countersink", "diameter": "4 mm",
+               "countersink": {"diameter": "8 mm", "angle": "90 deg"},
+               "depth": "through_all"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "up", "sketch": "spots", "points": ["p3"],
+               "diameter": "2.5 mm", "depth": {"blind": "4 mm"}}),
+    );
+    if holes_only {
+        return (dir, s);
+    }
+    add(
+        &mut s,
+        json!({"type": "pattern", "id": "grid", "features": ["cb"], "direction": "x",
+               "spacing": "8 mm", "count": 3, "direction2": "y", "spacing2": "8 mm",
+               "count2": 2, "skip": [[2, 1]]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "cylinder", "id": "boss", "operation": "join", "targets": ["plate"],
+               "params": {"radius": "5 mm", "height": "4 mm"},
+               "placement": {"origin": ["10 mm", "2 mm", "10 mm"]}}),
+    );
+    call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "hp", "sketch": "spots", "ops": [
+            {"op": "add", "type": "point", "at": [19, 2]},
+            {"op": "add", "type": "fix", "a": "p4"}
+        ]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "bolt", "sketch": "spots", "points": ["p4"],
+               "diameter": "2 mm", "depth": {"blind": "5 mm"}}),
+    );
+    let side =
+        call(&mut s, "inspect", json!({"part": "hp", "feature": "bolt"}))["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                f["surface"]["type"] == "cylinder"
+                    && (f["surface"]["radius"].as_f64().unwrap() - 0.005).abs() < 1e-12
+            })
+            .map(|f| format!("hp/plate/{}", f["name"].as_str().unwrap()))
+            .unwrap();
+    add(
+        &mut s,
+        json!({"type": "pattern", "id": "circle", "features": ["bolt"], "axis": side,
+               "count": "n", "angle": "360 deg", "skip": [3]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "box", "id": "pocket", "operation": "cut", "targets": ["plate"],
+               "params": {"x": "6 mm", "y": "8 mm", "z": "3 mm"},
+               "placement": {"origin": ["-2 mm", "-16 mm", "7 mm"]}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "pattern", "id": "mirror", "features": ["pocket"], "plane": "zx"}),
+    );
+    (dir, s)
+}
+
+/// Every state of a drilled part's solid bit for bit, the part's hash,
+/// and its mesh.
+fn drilled_section(golden: &mut Golden, name: &str, holes_only: bool) {
+    let mut s = golden.section(name);
+    let (_dir, mut session) = drilled(holes_only);
+    let part = Id::parse("hp", "part").unwrap();
+    let result = session.rebuilt(&part).unwrap().clone();
+    assert_eq!(result.failed(), 0, "{:?}", result.features);
+    for (id, o) in &result.features {
+        let o = o.as_ref().unwrap();
+        s.str(id.as_str());
+        for (solid, b) in o.solids() {
+            s.str(solid.as_str());
+            s.str(&b.body.dump());
+        }
+        if o.solids().is_empty() {
+            s.str(o.hash());
+        }
+    }
+    s.str(&result.hash);
+    let meshes =
+        ryucad::server::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
+    assert_eq!(meshes.len(), 1);
+    s.str(&format!("{:x}", md(&ryucad::mesh::encode(&meshes))));
+}
+
+#[test]
+fn drilled_solids_are_sound() {
+    let (_dir, mut session) = drilled(false);
+    let part = Id::parse("hp", "part").unwrap();
+    let result = session.rebuilt(&part).unwrap().clone();
+    assert_eq!(result.failed(), 0, "{:?}", result.features);
+    for (f, o) in &result.features {
+        for (_, b) in o.as_ref().unwrap().solids() {
+            assert!(ryukei::check::check(&b.body).is_empty(), "{f}");
+        }
+    }
+    let v = ryucad::server::handle(
+        &mut session,
+        ryucad::proto::Request::from_rpc("check", Some(serde_json::json!({"part": "hp"}))).unwrap(),
+    );
+    assert!(v.is_ok(), "{v:?}");
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -1317,6 +1497,8 @@ fn determinism() {
     references_section(&mut golden);
     solids_section(&mut golden);
     blends_section(&mut golden);
+    drilled_section(&mut golden, "holes", true);
+    drilled_section(&mut golden, "patterns", false);
     sketch_drawing_section(&mut golden);
     diff_section(&mut golden);
     merge_section(&mut golden);
