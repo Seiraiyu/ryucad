@@ -862,6 +862,54 @@ fn pattern(ui: &mut egui::Ui, p: &mut crate::core::edit::PatternForm) {
     picks(ui, &mut p.seeds);
 }
 
+/// A connector as one short line: its instance path, then its entity's
+/// last name digits or `origin`; the whole text on hover.
+fn connector_text(c: &str) -> String {
+    use crate::core::model::MateInfo;
+    let path = MateInfo::path_of(c);
+    match MateInfo::face_of(c) {
+        Some((_, name)) => format!("{path} : {}", &name[name.len() - 8..]),
+        None if c.split('/').next_back().is_some_and(|n| n.len() == 32) => {
+            format!("{path} : {}", &c[c.len() - 8..])
+        }
+        None => format!("{path} : origin"),
+    }
+}
+
+/// A mate's form, its connectors as read (changing them is an agent's
+/// work), the angle and distance its form may drive, and each
+/// connector's offset.
+fn mate(ui: &mut egui::Ui, m: &mut crate::core::edit::MateForm) {
+    egui::Grid::new("mate").num_columns(2).show(ui, |ui| {
+        choice_row(ui, &mut m.form);
+        for (side, c) in &m.connectors {
+            ui.label(side);
+            ui.monospace(connector_text(c)).on_hover_text(c);
+            ui.end_row();
+        }
+        let (angle, distance) = m.takes();
+        if angle {
+            field_row(ui, &mut m.angle, "angle (empty: free)");
+        }
+        if distance {
+            field_row(ui, &mut m.distance, "distance (empty: free)");
+        }
+    });
+    for (side, o) in [("a", &mut m.a), ("b", &mut m.b)] {
+        ui.collapsing(format!("Offset of {side}"), |ui| {
+            egui::Grid::new(("offset", side))
+                .num_columns(2)
+                .show(ui, |ui| {
+                    for (k, f) in ["x", "y", "z"].iter().zip(o.origin.iter_mut()) {
+                        field_row(ui, f, &format!("along {k}"));
+                    }
+                    field_row(ui, &mut o.rotate, "turn about z");
+                });
+            ui.checkbox(&mut o.flip.chosen, "turned over");
+        });
+    }
+}
+
 /// The width of a text field in a grid's column: a grid gives a column
 /// other than its last only the width it had last frame, at least 40
 /// points, so a field there asking for more never gets it (`add_sized`
@@ -1243,6 +1291,9 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
     }
     if let Some(p) = &mut form.pattern {
         pattern(ui, p);
+    }
+    if let Some(m) = &mut form.mate {
+        mate(ui, m);
     }
     // What it acts on: none for a new solid.
     let new = form.operation.as_ref().is_some_and(|o| o.chosen == "new");

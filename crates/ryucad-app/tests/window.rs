@@ -1743,3 +1743,54 @@ fn an_assembly_lists_its_instances_and_offers_what_to_show() {
     shown(&mut h, "The project's model");
     h.get_by_label("frame (assembly)");
 }
+
+#[test]
+fn a_mates_angle_is_edited_in_the_property_panel() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = common::mated();
+    p.ok(&["feature", "edit", "frame", "m1", "--angle", "30deg"]);
+    let mut h = window(&p);
+    frames(&mut h, |a| match &a.screen {
+        ryucad_app::ui::app::Screen::Opened(o) => {
+            o.ws.idle()
+                && o.ws
+                    .model
+                    .meshes
+                    .contains_key(&("frame".into(), "ring:3/pin/shank".into()))
+        }
+        _ => false,
+    });
+    h.step();
+    // The tree: the assembly's solve, what its mates leave each instance,
+    // the mate and the pattern's copies.
+    h.get_by(|n| {
+        n.label()
+            .is_some_and(|l| l.starts_with("frame") && l.ends_with("(assembly, well)"))
+    });
+    h.get_by_label("pin (bolt @ working, 0 dof)");
+    h.get_by_label("base (plate @ working, fixed)");
+    h.get_by_label("ring (instance_pattern, 3 copies)");
+    h.get_by_label("ring:2/pin");
+    h.get_by_label("m1 (revolute: base -> pin)").click();
+    frames(&mut h, |a| a.opened().ws.form.is_some());
+    h.step();
+    let field = h.get_all_by_value("30 deg").next().unwrap();
+    field.set_text_value_accesskit("45 deg");
+    h.step();
+    h.get_by_label("Apply").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
+    });
+    let shown = p.ok(&["feature", "show", "frame", "m1"]);
+    assert_eq!(shown["angle"]["value"], "45 deg");
+    // The pin turned with it, written.
+    let solved = p.ok(&["assembly", "solve", "frame"]);
+    assert_eq!(solved["solve"]["stale"], false);
+}
