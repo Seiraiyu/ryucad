@@ -16,19 +16,19 @@
 //! for which variables, not whether they are independent at the solution
 //! (two horizontal lines made parallel are dependent only by their
 //! values). The solver still judges ranks numerically, block by block
-//! (see [`crate::report`]).
+//! (see [`super::diagnose`]).
 //!
 //! Everything iterates in index order with explicit stacks, so the same
 //! system decomposes the same way everywhere, at any depth.
 
-use crate::system::{Component, Scalar, System};
+use super::{Component, Equations};
 
 /// A component's pieces, in the order they are solved: `over`, then
 /// `square` in order, then `under`. Each piece's equations read only its
 /// own variables and those of pieces before it; `under`'s read any.
 /// Variables and equations are the system's indices, ascending in each.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Blocks {
+pub struct Blocks {
     /// More equations than the variables they reach.
     pub over: Component,
     /// Square blocks, each solvable once those before it are.
@@ -49,17 +49,14 @@ impl Blocks {
 
 /// The variables (as indices into `comp.vars`) each of `comp`'s equations
 /// reads, ascending, each once.
-fn adjacency(sys: &System, comp: &Component) -> Vec<Vec<usize>> {
+fn adjacency(sys: &impl Equations, comp: &Component) -> Vec<Vec<usize>> {
     comp.eqs
         .iter()
         .map(|&e| {
-            let mut vs: Vec<usize> = sys.eqs[e]
-                .args
-                .iter()
-                .filter_map(|a| match *a {
-                    Scalar::Var(v) => comp.vars.binary_search(&v).ok(),
-                    Scalar::Const(_) => None,
-                })
+            let mut vs: Vec<usize> = sys
+                .reads(e)
+                .into_iter()
+                .filter_map(|v| comp.vars.binary_search(&v).ok())
                 .collect();
             vs.sort_unstable();
             vs.dedup();
@@ -215,7 +212,7 @@ fn strong_components(edges: &[Vec<usize>]) -> Vec<Vec<usize>> {
 }
 
 /// Decomposes `comp` (see the module docs).
-pub(crate) fn decompose(sys: &System, comp: &Component) -> Blocks {
+pub fn decompose(sys: &impl Equations, comp: &Component) -> Blocks {
     let rows = adjacency(sys, comp);
     let ncols = comp.vars.len();
     let mut cols: Vec<Vec<usize>> = vec![Vec::new(); ncols];
@@ -324,6 +321,7 @@ mod tests {
     use super::*;
     use crate::sketch::tests::{line, point, rectangle};
     use crate::sketch::{Constraint as C, Entity, Sketch};
+    use crate::system::{Scalar, System};
 
     fn sizes(b: &Blocks) -> (usize, usize, Vec<usize>, usize, usize) {
         (

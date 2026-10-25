@@ -8,28 +8,18 @@
 //! that say the same thing, redundant if they all hold and conflicting if
 //! they can't.
 //!
-//! Stage 2 reads them from a component's pieces ([`crate::blocks`]) when
-//! they are clean: the over part of full column rank, every square block
-//! of full rank, the under part of full row rank. The Jacobian is then
-//! block triangular with those pieces on its diagonal, so its null space
-//! is the under part's and its left null space the over part's, and each
-//! is read from its piece alone. Ranks are judged against the whole
-//! Jacobian's scale, as stage 1 judges them. A piece that isn't clean
-//! (a dependency only the values show) sends the component back to stage
-//! 1's diagnosis.
+//! Stage 2 reads them from a component's pieces
+//! ([`crate::core::blocks`]) when they are clean, and from the whole
+//! Jacobian when they aren't ([`crate::core::diagnose`] says how). This
+//! module turns what the core reads into the sketch's terms: entities and
+//! their coordinates, and constraints by ID, with the faults the system
+//! found by structure alone.
 
-use crate::blocks::Blocks;
-use crate::linalg::{Mat, qr, qr_against};
+use crate::core::blocks::Blocks;
+use crate::core::diagnose::diagnose as read;
 use crate::sketch::Id;
-use crate::solve::jacobian;
-use crate::system::{Component, Coord, Owner, SOLVE_TOL, System};
+use crate::system::{Coord, Owner, System};
 use std::collections::{BTreeMap, BTreeSet};
-
-/// Diagonal entries of `R` smaller than this, relative to the first, count
-/// as zero.
-const RANK_TOL: f64 = 1e-8;
-/// Entries of a unit null vector smaller than this are not part of it.
-const SUPPORT_TOL: f64 = 1e-6;
 
 /// How well defined a sketch is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,107 +60,6 @@ impl Diagnosis {
     }
 }
 
-/// The largest column and row norms of `comp`'s Jacobian at `x`: what
-/// its pivoted QR and its transpose's take as their scale.
-fn norms(sys: &System, comp: &Component, x: &[f64]) -> (f64, f64) {
-    let mut cols: BTreeMap<usize, f64> = BTreeMap::new();
-    let mut row_max: f64 = 0.0;
-    for &e in &comp.eqs {
-        let mut row = 0.0;
-        for (v, g) in sys.partials(e, x) {
-            if comp.vars.binary_search(&v).is_ok() {
-                *cols.entry(v).or_default() += g * g;
-                row += g * g;
-            }
-        }
-        row_max = row_max.max(row);
-    }
-    let col_max = cols.values().fold(0.0, |m: f64, c| m.max(*c));
-    (ryukei::math::sqrt(col_max), ryukei::math::sqrt(row_max))
-}
-
-/// What one component adds to a diagnosis: its freedom, the variables
-/// that can move, and its dependent sets with whether each conflicts.
-#[derive(Default)]
-struct Part {
-    dof: usize,
-    free: BTreeSet<usize>,
-    sets: Vec<(Vec<Id>, bool)>,
-}
-
-/// The variables of `comp` a null space moves.
-fn support(comp: &Component, null: &[Vec<f64>]) -> BTreeSet<usize> {
-    let mut out = BTreeSet::new();
-    for v in null {
-        for (j, &var) in comp.vars.iter().enumerate() {
-            if v[j].abs() > SUPPORT_TOL {
-                out.insert(var);
-            }
-        }
-    }
-    out
-}
-
-/// A component's dependent sets, each with whether it conflicts.
-fn sets(
-    sys: &System,
-    comp: &Component,
-    jac: &Mat,
-    r: &[f64],
-    ok: bool,
-    scale: Option<f64>,
-) -> Vec<(Vec<Id>, bool)> {
-    let tol = SOLVE_TOL / sys.scale;
-    dependent_sets(sys, comp, jac, scale)
-        .into_iter()
-        .map(|set| {
-            let rows = rows_of(sys, comp, &set);
-            let conflict = !ok && inconsistent(&jac.rows_of(&rows), &pick(r, &rows), tol);
-            (set, conflict)
-        })
-        .collect()
-}
-
-/// Stage 1: a component read from its whole Jacobian.
-fn whole(sys: &System, comp: &Component, x: &[f64], ok: bool) -> Part {
-    let (jac, r) = jacobian(sys, comp, x);
-    let f = qr(&jac, RANK_TOL);
-    Part {
-        dof: comp.vars.len() - f.rank,
-        free: support(comp, &f.null_space()),
-        sets: sets(sys, comp, &jac, &r, ok, None),
-    }
-}
-
-/// Stage 2: a component read from its pieces, when they are clean (see
-/// the module docs); `None` when they aren't.
-fn by_pieces(sys: &System, comp: &Component, b: &Blocks, x: &[f64], ok: bool) -> Option<Part> {
-    let (cols, rows) = norms(sys, comp, x);
-    let factor = |m: &Mat| qr_against(m, RANK_TOL, Some(cols));
-    let mut part = Part::default();
-    if !b.over.eqs.is_empty() {
-        let (jac, r) = jacobian(sys, &b.over, x);
-        if factor(&jac).rank < b.over.vars.len() {
-            return None;
-        }
-        part.sets = sets(sys, &b.over, &jac, &r, ok, Some(rows));
-    }
-    for blk in &b.square {
-        if factor(&jacobian(sys, blk, x).0).rank < blk.vars.len() {
-            return None;
-        }
-    }
-    if !b.under.vars.is_empty() {
-        let f = factor(&jacobian(sys, &b.under, x).0);
-        if f.rank < b.under.eqs.len() {
-            return None;
-        }
-        part.dof = b.under.vars.len() - f.rank;
-        part.free = support(&b.under, &f.null_space());
-    }
-    Some(part)
-}
-
 /// Diagnoses `sys` at the solution `x`; `converged` says, per component,
 /// whether its equations hold, and `pieces` what it was solved in (stage
 /// 2), if anything.
@@ -202,12 +91,9 @@ pub(crate) fn diagnose(
         }
     }
     for ((comp, &ok), blocks) in sys.components.iter().zip(converged).zip(pieces) {
-        let part = blocks
-            .as_ref()
-            .and_then(|b| by_pieces(sys, comp, b, x, ok))
-            .unwrap_or_else(|| whole(sys, comp, x, ok));
+        let part = read(sys, comp, x, ok, blocks.as_ref());
         dof += part.dof;
-        for var in part.free {
+        for var in part.support() {
             let (ids, coord) = &sys.var_owner[var];
             for id in ids {
                 free.entry(*id).or_default().insert(*coord);
@@ -233,116 +119,6 @@ pub(crate) fn diagnose(
         redundant: redundant.into_iter().collect(),
         conflicting: conflicting.into_iter().collect(),
     }
-}
-
-fn pick(r: &[f64], rows: &[usize]) -> Vec<f64> {
-    rows.iter().map(|&i| r[i]).collect()
-}
-
-/// The rows (within the component) of the constraints in `set`, and of
-/// every arc's own equation.
-fn rows_of(sys: &System, comp: &Component, set: &[Id]) -> Vec<usize> {
-    comp.eqs
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| match sys.eqs[**e].owner {
-            Owner::Constraint(c) => set.contains(&c),
-            Owner::Arc(_) => true,
-        })
-        .map(|(i, _)| i)
-        .collect()
-}
-
-/// Whether `rows` of a Jacobian depend on each other.
-fn dependent(m: &Mat) -> bool {
-    qr(m, RANK_TOL).rank < m.rows
-}
-
-/// Whether residuals `r` of dependent rows `m` can't all be zero to first
-/// order: some combination of the rows vanishes while the same combination
-/// of the residuals doesn't.
-fn inconsistent(m: &Mat, r: &[f64], tol: f64) -> bool {
-    qr(&m.transpose(), RANK_TOL).null_space().iter().any(|y| {
-        let s: f64 = y.iter().zip(r).map(|(a, b)| a * b).sum();
-        s.abs() > tol
-    })
-}
-
-/// The reduced echelon form of the span of `vectors` (each over a
-/// component's rows), pivoting from the last row back: one vector per
-/// pivot row, 1 there and 0 at every other pivot. It depends on the span
-/// alone, not on the basis it came in, so stage 1 and stage 2 name the
-/// same sets, and each set is a constraint with the earlier ones it
-/// repeats: `{d1, d9}` for a ninth dimension that says what the first
-/// does.
-fn echelon(mut vectors: Vec<Vec<f64>>) -> Vec<Vec<f64>> {
-    let rows = vectors.first().map_or(0, Vec::len);
-    let mut done = 0;
-    for j in (0..rows).rev() {
-        if done == vectors.len() {
-            break;
-        }
-        // The largest entry at row `j` among the vectors not yet pivoted.
-        let (best, size) = (done..vectors.len())
-            .map(|v| (v, vectors[v][j].abs()))
-            .fold((done, -1.0), |a, b| if b.1 > a.1 { b } else { a });
-        if size <= SUPPORT_TOL {
-            continue;
-        }
-        vectors.swap(done, best);
-        let p = vectors[done][j];
-        for x in &mut vectors[done] {
-            *x /= p;
-        }
-        let pivot = vectors[done].clone();
-        for (v, other) in vectors.iter_mut().enumerate() {
-            let f = other[j];
-            if v != done && f != 0.0 {
-                for (x, q) in other.iter_mut().zip(&pivot) {
-                    *x -= f * q;
-                }
-            }
-        }
-        done += 1;
-    }
-    vectors.truncate(done);
-    vectors
-}
-
-/// Minimal sets of constraints whose rows depend on each other, one per
-/// vector of the left null space's echelon form (its rank judged against
-/// `scale`, the largest row norm of the Jacobian it is part of, if not
-/// `jac` itself), each cut down until removing any of its constraints
-/// makes it independent.
-fn dependent_sets(sys: &System, comp: &Component, jac: &Mat, scale: Option<f64>) -> Vec<Vec<Id>> {
-    let mut out = BTreeSet::new();
-    for y in echelon(qr_against(&jac.transpose(), RANK_TOL, scale).null_space()) {
-        let mut set: Vec<Id> = y
-            .iter()
-            .enumerate()
-            .filter(|(_, w)| w.abs() > SUPPORT_TOL)
-            .filter_map(|(i, _)| match sys.eqs[comp.eqs[i]].owner {
-                Owner::Constraint(c) => Some(c),
-                Owner::Arc(_) => None,
-            })
-            .collect::<BTreeSet<Id>>()
-            .into_iter()
-            .collect();
-        let mut k = 0;
-        while k < set.len() {
-            let mut fewer = set.clone();
-            fewer.remove(k);
-            if dependent(&jac.rows_of(&rows_of(sys, comp, &fewer))) {
-                set = fewer;
-            } else {
-                k += 1;
-            }
-        }
-        if !set.is_empty() {
-            out.insert(set);
-        }
-    }
-    out.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -447,23 +223,6 @@ mod tests {
     }
 
     #[test]
-    fn echelon_forms_depend_on_the_span_alone() {
-        // Two bases of one plane in three rows.
-        let a = vec![vec![1.0, 1.0, 0.0], vec![0.0, 1.0, 1.0]];
-        let b = vec![vec![1.0, 2.0, 1.0], vec![-1.0, 0.0, 1.0]];
-        let (ea, eb) = (super::echelon(a), super::echelon(b));
-        assert_eq!(ea.len(), 2);
-        for (u, w) in ea.iter().zip(&eb) {
-            for (x, y) in u.iter().zip(w) {
-                assert!((x - y).abs() < 1e-12, "{ea:?} vs {eb:?}");
-            }
-        }
-        // Pivots on the last rows: each the later row with the first.
-        assert_eq!(ea[0], [-1.0, 0.0, 1.0]);
-        assert_eq!(ea[1], [1.0, 1.0, 0.0]);
-    }
-
-    #[test]
     fn a_dimension_repeated_is_redundant_with_the_first() {
         // Four lengths of one side: each later one with the first.
         let mut s = dimensioned();
@@ -480,7 +239,8 @@ mod tests {
 
     #[test]
     fn clean_pieces_are_read_alone_and_others_whole() {
-        use crate::blocks::decompose;
+        use crate::core::blocks::decompose;
+        use crate::core::diagnose::{by_pieces, whole};
         use crate::system::System;
         let read = |s: &Sketch| {
             let solved = solve(s).unwrap().sketch;
@@ -492,8 +252,8 @@ mod tests {
                 .unwrap()
                 .clone();
             let b = decompose(&sys, &comp);
-            let pieces = super::by_pieces(&sys, &comp, &b, &sys.vars, true);
-            let whole = super::whole(&sys, &comp, &sys.vars, true);
+            let pieces = by_pieces(&sys, &comp, &b, &sys.vars, true);
+            let whole = whole(&sys, &comp, &sys.vars, true);
             (pieces, whole)
         };
         // Square and clean: read from its pieces, as the whole reads it.
@@ -505,7 +265,7 @@ mod tests {
         s.constraints.remove(&1);
         let (pieces, whole) = read(&s);
         let pieces = pieces.expect("clean");
-        assert_eq!((pieces.dof, &pieces.free), (whole.dof, &whole.free));
+        assert_eq!((pieces.dof, pieces.support()), (whole.dof, whole.support()));
         assert_eq!(pieces.dof, 2);
         // Redundant by structure: the over part's set, as the whole's (the
         // heights of the corners, by the horizontals, the vertical side's
