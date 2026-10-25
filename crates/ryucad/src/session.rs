@@ -346,6 +346,20 @@ impl Session {
         None
     }
 
+    /// Takes what the revisions' sessions have learnt of names, keeping
+    /// what this session knows of a name both saw: a merge's sides built
+    /// names its result has lost.
+    pub(crate) fn learn_from_revisions(&mut self) {
+        for (_, r) in &self.revisions {
+            for (key, names) in &r.known {
+                let known = self.known.entry(key.clone()).or_default();
+                for (name, was) in names {
+                    known.entry(name.clone()).or_insert_with(|| was.clone());
+                }
+            }
+        }
+    }
+
     /// Notes what every name of the part's solids is, by solid.
     fn learn(&mut self, part: &Id, result: &PartResult) {
         let solids = result

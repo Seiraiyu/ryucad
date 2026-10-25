@@ -874,6 +874,7 @@ fn compute(session: &mut Session) -> Result<Value> {
     let ours = side(session, Some(&state.ours))?;
     let theirs = side(session, Some(&state.theirs))?;
     let base = side(session, state.base.as_deref())?;
+    session.learn_from_revisions();
     let renamed = renames(&root, &working, &ours, &theirs, &base);
     // A renamed file's own conflicts go with it: its repairs rewrite it.
     let gone: Vec<String> = renamed
