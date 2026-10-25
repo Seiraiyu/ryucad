@@ -560,3 +560,129 @@ fn seams_and_poles_are_reported() {
             .any(|e| *e == Event::Deleted(report.seams[0]))
     );
 }
+
+/// Edge `e` of a shape moved by `by`, onto a curve of its own.
+fn move_edge(s: &mut Shape, e: usize, by: Vector3) {
+    let c = s.curves[s.edges[e].curve].transformed(&Rigid::translation(by));
+    s.curves.push(c);
+    s.edges[e].curve = s.curves.len() - 1;
+}
+
+/// The middle of edge `e`.
+fn middle(s: &Shape, e: usize) -> crate::geom::Point3 {
+    let x = &s.edges[e];
+    s.curves[x.curve].point((x.interval[0] + x.interval[1]) / 2.0)
+}
+
+/// The built entity a name names.
+fn built(b: &Body, n: Name) -> crate::topo::EntityId {
+    b.by_name(n)
+        .unwrap_or_else(|| panic!("{n} is not in the body"))
+}
+
+#[test]
+fn gaps_under_the_cap_are_covered_by_tolerances() {
+    use crate::topo::EntityId;
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let mut s = plain(&b);
+    // Off its faces, away from the block's middle (at right angles to the
+    // edge), by 3 µm.
+    let away = (middle(&s, 0) - crate::geom::Point3::new(0.5, 1.0, 1.5))
+        .normalize()
+        .unwrap();
+    move_edge(&mut s, 0, away.get() * 3e-6);
+    let names = names::names(OpKey(7), &s);
+    let (h, _, report) = heal_ok(&s);
+    let EntityId::Edge(e) = built(&h, names.edges[0]) else {
+        panic!()
+    };
+    // Its farthest from either face's plane.
+    let gap = h
+        .edge_fins(e)
+        .map(|f| {
+            let face = h.loops[h.fins[f].loop_].face;
+            h.surfaces[h.faces[face].surface].distance(middle(&s, 0))
+        })
+        .fold(0.0, f64::max);
+    // The edge's tolerance also covers its vertices, 3 µm from its ends.
+    let t = h.edges[e].tolerance.get();
+    assert!(
+        gap < 3e-6 && (3e-6..=3e-6 * 1.001).contains(&t),
+        "{t} for {gap}"
+    );
+    for v in [h.edges[e].start, h.edges[e].end] {
+        let tv = h.vertices[v].tolerance.get();
+        assert!((3e-6..=3e-6 * 1.001).contains(&tv), "{tv}");
+    }
+    assert!(report.tolerances.iter().any(|x| x.0 == names.edges[0]));
+    assert_eq!(report.tolerances.len(), 3);
+}
+
+#[test]
+fn gaps_on_analytic_surfaces_are_certified_tightly() {
+    use crate::geom::{Circle, Curve};
+    use crate::topo::EntityId;
+    let b = primitive::cylinder(OpKey(1), 1.0, 2.0, &tilted())
+        .unwrap()
+        .0;
+    let mut s = plain(&b);
+    // One rim 2 µm wider than the cylinder.
+    let rim = (0..s.edges.len())
+        .find(|&e| matches!(s.curves[s.edges[e].curve], Curve::Circle(_)))
+        .unwrap();
+    let Curve::Circle(c) = &s.curves[s.edges[rim].curve] else {
+        panic!()
+    };
+    let wider = Circle::new(*c.frame(), c.radius() + 2e-6).unwrap();
+    s.curves.push(Curve::Circle(wider));
+    s.edges[rim].curve = s.curves.len() - 1;
+    // The gap from the cylinder, certified, is the 2 µm.
+    let x = &s.edges[rim];
+    let side = s
+        .surfaces
+        .iter()
+        .find(|f| matches!(f, crate::geom::Surface::Cylinder(_)))
+        .unwrap();
+    let gap = gaps::edge_gap(&s.curves[x.curve], x.interval, side);
+    assert!((2e-6..=2e-6 * 1.01 + 2e-10).contains(&gap), "{gap}");
+    let names = names::names(OpKey(7), &s);
+    let (h, _, _) = heal_ok(&s);
+    let EntityId::Edge(e) = built(&h, names.edges[rim]) else {
+        panic!()
+    };
+    assert!(h.edges[e].tolerance.get() >= gap);
+}
+
+#[test]
+fn a_gap_past_the_cap_is_refused_with_its_size() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let mut s = plain(&b);
+    let away = (middle(&s, 0) - crate::geom::Point3::new(0.5, 1.0, 1.5))
+        .normalize()
+        .unwrap();
+    move_edge(&mut s, 0, away.get() * 2e-4);
+    let names = names::names(OpKey(7), &s);
+    let e = &s.edges[0];
+    let ours = [
+        names.edges[0],
+        names.vertices[e.start],
+        names.vertices[e.end],
+    ];
+    match heal(OpKey(7), &s, &HealOptions::default()) {
+        Err(Error::InvalidHeal(HealError::GapTooLarge { entity, gap })) => {
+            assert!(ours.contains(&entity));
+            assert!((1e-4..=2e-4 * (1.0 + 1e-9)).contains(&gap), "{gap}");
+        }
+        other => panic!("{other:?}"),
+    }
+    // A larger cap takes it.
+    let wide = HealOptions {
+        tolerance_cap: 1e-3,
+    };
+    let (h, _, _) = heal(OpKey(7), &s, &wide).unwrap();
+    assert_eq!(check::check(&h), []);
+}

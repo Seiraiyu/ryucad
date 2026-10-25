@@ -18,9 +18,9 @@
 use super::SLACK;
 use crate::geom::bernstein::Bernstein;
 use crate::geom::bernstein2::Bernstein2;
-use crate::geom::chain3::Piece3;
+use crate::geom::chain3::{Chain3, Piece3};
 use crate::geom::jet::{self, JVec, Jet, Num};
-use crate::geom::{BezierPatch, Frame, Point3, Surface, Vector3};
+use crate::geom::{BezierPatch, Curve, Frame, Point3, Surface, Vector3};
 use crate::interval::Interval;
 use crate::math;
 use crate::predicates::Sign;
@@ -342,6 +342,51 @@ impl Implicit {
         };
         (d * (1.0 + 1e-12)).next_up() + SLACK
     }
+}
+
+/// A certified bound on how far `curve` over `[t0, t1]` strays from the
+/// analytic `surface`: its Bézier pieces substituted into the implicit
+/// form, each halved until its bound is within `target` (at most twelve
+/// times). `None` for a surface with no implicit form.
+pub(crate) fn curve_distance(
+    curve: &Curve,
+    [t0, t1]: [f64; 2],
+    surface: &Surface,
+    target: f64,
+) -> Option<f64> {
+    let imp = Implicit::of(surface)?;
+    let chain = Chain3::new(curve, t0, t1);
+    let mut worst: f64 = 0.0;
+    for piece in &chain.pieces {
+        let (poly, _) = imp.on_piece(piece);
+        worst = worst.max(piece_bound(&imp, &poly, piece, target, 12));
+    }
+    Some(worst)
+}
+
+/// The bound on one piece, whose polynomial is `poly`, halved down to
+/// `depth` more times. Each part's least control weight bounds its own
+/// weight from below, so halving tightens that too.
+fn piece_bound(imp: &Implicit, poly: &Bernstein, piece: &Piece3, target: f64, depth: u32) -> f64 {
+    let w = piece.pts.iter().map(|h| h.w).fold(f64::INFINITY, f64::min);
+    let wd = (0..imp.degree()).fold(1.0, |a, _| a * w);
+    let mut local = imp.local(piece.pts[0].p);
+    for h in &piece.pts[1..] {
+        let l = imp.local(h.p);
+        for k in 0..3 {
+            local[k] = local[k].hull(l[k]);
+        }
+    }
+    let f_max = (poly.range().mag() / wd).next_up();
+    let bound = imp.distance_bound(f_max, local);
+    if bound <= target || depth == 0 {
+        return bound;
+    }
+    let (p0, p1) = poly.split(0.5);
+    let [c0, c1] = piece.split(0.5);
+    piece_bound(imp, &p0, &c0, target, depth - 1)
+        .max(piece_bound(imp, &p1, &c1, target, depth - 1))
+        .min(bound)
 }
 
 /// `tan α` as an interval, from the cone's own sine and cosine.

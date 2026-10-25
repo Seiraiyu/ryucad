@@ -685,16 +685,19 @@ pub(crate) fn fit_pcurve(
     curve: &Curve,
     range: [f64; 2],
 ) -> Result<(NurbsCurve2, f64), Failure> {
-    fit_pcurve_within(surface, curve, range, MAX_SAMPLES)
+    fit_pcurve_within(surface, curve, range, LINEAR_RESOLUTION, MAX_SAMPLES)
 }
 
-/// [`fit_pcurve`] with at most `max_samples` samples: for an edge from a
-/// file that may lie nowhere near where a fit could certify it, so the
-/// search stops long before [`fit_pcurve`]'s budget.
+/// [`fit_pcurve`] with spans split until their bound is within `target`
+/// (at least resolution) and at most `max_samples` samples: for an edge
+/// from a file, which may lie its tolerance off the surface, or nowhere
+/// near where a fit could certify it, so the search stops long before
+/// [`fit_pcurve`]'s budget.
 pub(crate) fn fit_pcurve_within(
     surface: &Surface,
     curve: &Curve,
     range: [f64; 2],
+    target: f64,
     max_samples: usize,
 ) -> Result<(NurbsCurve2, f64), Failure> {
     let [t0, t1] = range;
@@ -713,7 +716,14 @@ pub(crate) fn fit_pcurve_within(
         let duv = uv_velocity(surface, uv, e.d1).ok_or(Failure::Uncertain)?;
         Ok((t, uv - duv * dt, duv))
     };
-    fit_pcurve_with(surface, curve, range, &at, LINEAR_RESOLUTION, max_samples)
+    fit_pcurve_with(
+        surface,
+        curve,
+        range,
+        &at,
+        target.max(LINEAR_RESOLUTION),
+        max_samples,
+    )
 }
 
 /// [`fit_pcurve`] where the caller knows the parameters on `surface` of
