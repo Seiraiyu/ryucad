@@ -327,3 +327,55 @@ fn incremental_equals_full() {
         assert!(reused > 30 * 14 / 2, "seed {seed}: reused {reused}");
     }
 }
+
+#[test]
+fn an_edit_at_a_long_solids_end_rebuilds_one_feature_and_at_its_founder_the_chain_once() {
+    // A plate and 49 pockets cut along it: one solid of 50 features.
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "box", "id": "b", "params": {"x": 100, "y": 10, "z": 5}}),
+    );
+    for i in 1..50 {
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": format!("c{i}"), "operation": "cut",
+                   "targets": ["b"], "params": {"x": 1, "y": 4, "z": 2},
+                   "placement": {"origin": [2 * i - 1, 3, 4]}}),
+        );
+    }
+    let part = Id::parse("p", "part").unwrap();
+    assert_eq!(s.rebuilt(&part).unwrap().failed(), 0);
+    let ids = |v: &[Id]| v.iter().map(Id::to_string).collect::<Vec<_>>();
+    // The last pocket deeper: it alone is built again, its own body too.
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "c49", "params": {"x": 1, "y": 4, "z": 3}}),
+    );
+    let r = s.rebuilt(&part).unwrap();
+    assert_eq!(r.failed(), 0);
+    assert_eq!(ids(&r.built), ["c49"]);
+    assert_eq!(ids(&r.tools), ["c49"]);
+    // The plate longer: every feature of the chain is built once, and no
+    // pocket's own body is built again.
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "b", "params": {"x": 101, "y": 10, "z": 5}}),
+    );
+    let r = s.rebuilt(&part).unwrap();
+    assert_eq!(r.failed(), 0);
+    let mut all = vec!["b".to_owned()];
+    all.extend((1..50).map(|i| format!("c{i}")));
+    assert_eq!(ids(&r.built), all);
+    assert!(r.tools.is_empty(), "{:?}", r.tools);
+    // Incremental is full.
+    let hash = r.hash.clone();
+    assert_eq!(hash, full(&s, 1).0);
+}

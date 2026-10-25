@@ -144,6 +144,105 @@ fn a_compare_looks_as_it_did() {
     looks_as_it_did(&adapter, &px, "compare");
 }
 
+/// A plate with its vertical edges rounded and a row of four counterbored
+/// holes, patterned from one: what phase 4's solids look like.
+#[test]
+fn a_drilled_part_looks_as_it_did() {
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::named("snapshot");
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "plate", "--param", "x=30", "--param", "y=16",
+        "--param", "z=4",
+    ]);
+    let body = p.ok(&["inspect", "p", "plate"])["bodies"][0].clone();
+    let mut round = vec![
+        "feature", "add", "p", "fillet", "--id", "round", "--radius", "3",
+    ];
+    let edges: Vec<String> = body["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            e["curve"]["type"] == "line" && e["curve"]["dir"][2].as_f64().unwrap().abs() == 1.0
+        })
+        .map(|e| format!("p/plate/{}", e["name"].as_str().unwrap()))
+        .collect();
+    assert_eq!(edges.len(), 4);
+    for e in &edges {
+        round.extend(["--edge", e.as_str()]);
+    }
+    p.ok(&round);
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--origin", "0,0,4",
+    ]);
+    let ops = r#"[{"op": "add", "type": "point", "at": [6, 8]},
+                  {"op": "add", "type": "fix", "a": "p1"}]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "h",
+        "--sketch",
+        "s",
+        "--form",
+        "counterbore",
+        "--diameter",
+        "2.4",
+        "--counterbore-diameter",
+        "4.4",
+        "--counterbore-depth",
+        "1.5",
+        "--depth",
+        "through_all",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "pattern",
+        "--id",
+        "row",
+        "--seed",
+        "h",
+        "--direction",
+        "x",
+        "--spacing",
+        "6",
+        "--count",
+        "4",
+    ]);
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.model.meshes.len() == 1
+        && ws.model.sketches.len() == 1));
+    let picker = Picker::new(&ws.model);
+    let (lo, hi) = picker.bounds().unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Iso, view::DEFAULT_PROJECTION);
+    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.015);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    let list = DrawList {
+        reference: centre,
+        matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        background: theme::BACKGROUND,
+        light: scene::light(&camera),
+        edges: true,
+        faces: &[],
+        overlay: &[],
+    };
+    scene.render(&device, &queue, [W, H], &list);
+    let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
+    looks_as_it_did(&adapter, &px, "solids");
+}
+
 /// Compares `px` with `tests/snapshots/<name>-lavapipe.png` on lavapipe,
 /// or only checks something was drawn on other adapters.
 fn looks_as_it_did(adapter: &eframe::wgpu::Adapter, px: &[u8], name: &str) {

@@ -7,7 +7,8 @@
 //! solids, its fillets and chamfers (seeded with `b`'s edges) round real
 //! edges, its holes drill at `t`'s point and its patterns repeat `k`:
 //! building must succeed or give a structured error, every body it leaves
-//! must pass the checks, and a sketch that solves must solve to finite
+//! must pass the checks, cross or overlap itself nowhere and mesh with no
+//! faults, and a sketch that solves must solve to finite
 //! positions that are current: solving them again, in the same context,
 //! changes nothing. Any panic is a bug.
 
@@ -22,6 +23,8 @@ use ryucad::doc::sketch::Geometry;
 use ryucad::expr::Env;
 use ryucad::rebuild::{Output, rebuild_part};
 use ryucad::units::Unit;
+use ryukei::check::{Fault, check, check_intersections};
+use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
@@ -122,8 +125,23 @@ fuzz_target!(|data: &[u8]| {
     let me = id("f");
     match r.output(&me) {
         Some(Output::Solids(m)) => {
+            let params = MeshParams {
+                max_triangles: 200_000,
+                ..MeshParams::new(2e-4, 0.5)
+            };
             for (_, b) in &m.solids {
-                assert!(ryukei::check::check(&b.body).is_empty());
+                assert_eq!(check(&b.body), []);
+                for fault in check_intersections(&b.body) {
+                    assert!(matches!(fault, Fault::CannotCheck { .. }), "{fault:?}");
+                }
+                match tessellate(&b.body, &params) {
+                    Ok(mesh) => {
+                        assert_eq!(mesh.faults, []);
+                        assert_eq!(check_mesh(&b.body, &mesh), Ok(()));
+                    }
+                    Err(ryukei::Error::MeshTooLarge { .. }) => {}
+                    Err(e) => panic!("unexpected {e:?}"),
+                }
             }
         }
         Some(Output::Sketch(solved)) => {

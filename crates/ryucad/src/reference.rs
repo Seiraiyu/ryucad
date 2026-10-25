@@ -426,6 +426,8 @@ mod tests {
             t["details"]["was"],
             json!({"kind": "face", "from": from_l2})
         );
+        // The extrude made it and makes it no more.
+        assert_eq!(t["details"]["removed_by"], "e");
         // An edit that names it again is refused the same way.
         let e = call(
             &mut s,

@@ -728,3 +728,212 @@ fn the_hook_refuses_what_a_merge_broke_in_pdm_until_it_is_settled() {
     assert_eq!(v["record"]["label"], "A");
     assert_eq!(r.json("parts/s/properties.json")["number"], "301");
 }
+
+/// The ops for a 20 × 10 mm rectangle with its corner at the origin,
+/// every point fixed, as points `p` and lines `l`.
+fn rectangle(p: [&str; 4], l: [&str; 4]) -> Vec<Value> {
+    let at = [[0, 0], [20, 0], [20, 10], [0, 10]];
+    let mut ops = Vec::new();
+    for (id, at) in p.iter().zip(at) {
+        ops.push(json!({"op": "add", "id": id, "type": "point", "at": at}));
+        ops.push(json!({"op": "add", "type": "fix", "a": id}));
+    }
+    for k in 0..4 {
+        ops.push(json!({"op": "add", "id": l[k], "type": "line",
+                        "start": p[k], "end": p[(k + 1) % 4]}));
+    }
+    ops
+}
+
+/// The name of the edge of an `inspect` body between the vertices at `a`
+/// and `b` (meters).
+fn edge_at(body: &Value, a: [f64; 3], b: [f64; 3]) -> String {
+    let at = |p: [f64; 3]| {
+        body["vertices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| (0..3).all(|k| (v["point"][k].as_f64().unwrap() - p[k]).abs() < 1e-9))
+            .map(|v| v["name"].clone())
+            .unwrap_or_else(|| panic!("no vertex at {p:?}"))
+    };
+    let (a, b) = (at(a), at(b));
+    body["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| (e["start"] == a && e["end"] == b) || (e["start"] == b && e["end"] == a))
+        .map(|e| e["name"].as_str().unwrap().to_owned())
+        .expect("an edge from a to b")
+}
+
+/// The spike's base: the rectangle `s` extruded 5 mm as `e`, and a hole
+/// `h` through it from a sketch `t` on its top, committed on `main`.
+fn spike() -> Repo {
+    let r = Repo::new("");
+    r.ryucad(&["part", "create", "p"]);
+    r.ryucad(&["feature", "add", "p", "sketch", "--id", "s"]);
+    let ops = json!(rectangle(
+        ["p1", "p2", "p3", "p4"],
+        ["l1", "l2", "l3", "l4"]
+    ))
+    .to_string();
+    r.ryucad(&["sketch", "edit", "p", "s", &ops]);
+    r.ryucad(&[
+        "feature", "add", "p", "extrude", "--id", "e", "--sketch", "s", "--length", "5",
+    ]);
+    r.ryucad(&[
+        "feature", "add", "p", "sketch", "--id", "t", "--origin", "0,0,5",
+    ]);
+    let ops = r#"[{"op": "add", "type": "point", "at": [4, 6]}, {"op": "add", "type": "fix", "a": "p1"}]"#;
+    r.ryucad(&["sketch", "edit", "p", "t", ops]);
+    r.ryucad(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "h",
+        "--sketch",
+        "t",
+        "--diameter",
+        "3",
+        "--depth",
+        "through_all",
+    ]);
+    r.commit("a drilled block");
+    r
+}
+
+/// Ours (`main`) rounds the vertical edge at the rectangle's corner `p3`
+/// by 1 mm as fillet `f`, and commits; returns that edge's name.
+fn round_the_corner(r: &Repo) -> String {
+    let e = r.ryucad(&["inspect", "p", "e"]);
+    let corner = edge_at(&e["bodies"][0], [0.02, 0.01, 0.0], [0.02, 0.01, 0.005]);
+    r.ryucad(&[
+        "feature",
+        "add",
+        "p",
+        "fillet",
+        "--id",
+        "f",
+        "--radius",
+        "1",
+        "--edge",
+        &format!("p/e/{corner}"),
+    ]);
+    r.commit("ours: the corner rounded");
+    corner
+}
+
+#[test]
+fn a_notch_merged_in_keeps_the_fillet_on_its_corner() {
+    let r = spike();
+    // Theirs notches the rectangle's bottom.
+    r.git(&["checkout", "-q", "-b", "theirs"]);
+    let mut ops = vec![json!({"op": "remove", "id": "l1"})];
+    for (id, at) in [
+        ("p5", [6, 0]),
+        ("p6", [6, 3]),
+        ("p7", [12, 3]),
+        ("p8", [12, 0]),
+    ] {
+        ops.push(json!({"op": "add", "id": id, "type": "point", "at": at}));
+        ops.push(json!({"op": "add", "type": "fix", "a": id}));
+    }
+    for (id, a, b) in [
+        ("l1", "p1", "p5"),
+        ("l5", "p5", "p6"),
+        ("l6", "p6", "p7"),
+        ("l7", "p7", "p8"),
+        ("l8", "p8", "p2"),
+    ] {
+        ops.push(json!({"op": "add", "id": id, "type": "line", "start": a, "end": b}));
+    }
+    r.ryucad(&["sketch", "edit", "p", "s", &json!(ops).to_string()]);
+    r.commit("theirs: a notch");
+    // Ours rounds the corner, against the names before the notch.
+    r.git(&["checkout", "-q", "main"]);
+    let corner = round_the_corner(&r);
+    let fillet = |r: &Repo| {
+        let v = r.ryucad(&["inspect", "p"]);
+        v["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["origin"]["feature"] == "f")
+            .cloned()
+            .expect("the fillet's face")
+    };
+    let before = fillet(&r);
+    r.git(&["merge", "-q", "--no-edit", "theirs"]);
+    // The merge has the notch and the fillet, on the same corner.
+    assert_eq!(
+        r.json("parts/p/features/s.json")["entities"]["l8"]["end"],
+        "p2"
+    );
+    r.ryucad(&["check"]);
+    let e = r.ryucad(&["inspect", "p", "e"]);
+    assert_eq!(
+        edge_at(&e["bodies"][0], [0.02, 0.01, 0.0], [0.02, 0.01, 0.005]),
+        corner
+    );
+    let after = fillet(&r);
+    assert_eq!(after["name"], before["name"]);
+    assert_eq!(after["origin"], before["origin"]);
+    assert_eq!(after["surface"], before["surface"]);
+}
+
+#[test]
+fn a_redraw_merged_in_fails_the_fillet_and_is_blamed() {
+    let r = spike();
+    // Theirs draws the rectangle again, where it was, with new IDs.
+    r.git(&["checkout", "-q", "-b", "theirs"]);
+    let mut ops: Vec<Value> = ["l1", "l2", "l3", "l4", "p1", "p2", "p3", "p4"]
+        .iter()
+        .map(|id| json!({"op": "remove", "id": id}))
+        .collect();
+    ops.extend(rectangle(
+        ["p5", "p6", "p7", "p8"],
+        ["l5", "l6", "l7", "l8"],
+    ));
+    r.ryucad(&["sketch", "edit", "p", "s", &json!(ops).to_string()]);
+    r.commit("theirs: the rectangle drawn again");
+    r.git(&["checkout", "-q", "main"]);
+    let corner = round_the_corner(&r);
+    // Git merges the files cleanly; only rebuilding shows the break.
+    r.git(&["merge", "-q", "--no-commit", "--no-ff", "theirs"]);
+    let v = r.ryucad(&["merge", "status"]);
+    let c: Vec<&Value> = v["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["kind"] == "merge_broke")
+        .collect();
+    assert_eq!(c.len(), 1, "{v}");
+    assert_eq!(c[0]["concerns"]["feature"], "f");
+    assert_eq!(c[0]["cause"], "theirs", "{v}");
+    let e = &c[0]["error"];
+    assert_eq!(e["code"], "reference_unresolved", "{e}");
+    assert_eq!(e["details"]["reference"], format!("p/e/{corner}"));
+    assert_eq!(e["details"]["role"], "groups.0.edges.0");
+    // What the name was, from the sides that built it, and that the
+    // extrude no longer makes it.
+    assert_eq!(
+        e["details"]["was"],
+        json!({"kind": "edge",
+               "from": {"feature": "e", "sketch": "s", "entities": ["l2", "l3"]}})
+    );
+    assert_eq!(e["details"]["removed_by"], "e");
+    // Nothing lands on another edge: the rebuild fails the fillet alone.
+    let (code, v) = r.ryucad_status(&["rebuild", "p"]);
+    assert_eq!(code, 1, "{v}");
+    let failed: Vec<&Value> = v["error"]["details"]["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f.get("error").is_some())
+        .collect();
+    assert_eq!(failed.len(), 1, "{v}");
+    assert_eq!(failed[0]["id"], "f");
+}

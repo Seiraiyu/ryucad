@@ -405,7 +405,6 @@ impl Pipe {
             .expect("a spine has at least one stationary point or end")
     }
 
-    /// The pipe moved by a rigid transform; parameters are unchanged.
     /// The pipe reflected by `m`: its spine reflected with its parameter
     /// kept, about its anchor reflected. The anchor's foot is reflected
     /// with it, so `e₁` is too, and `e₂ = e₁ × t` turns the other way:
@@ -430,6 +429,7 @@ impl Pipe {
         })
     }
 
+    /// The pipe moved by a rigid transform; parameters are unchanged.
     pub(super) fn transformed(&self, r: &Rigid) -> Self {
         let spine = self.spine.transformed(r);
         Self {
