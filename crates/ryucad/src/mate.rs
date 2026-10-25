@@ -352,6 +352,86 @@ fn on(f: &Found, body: &dyn Fn(&Id) -> u32, pattern: &dyn Fn(&Id) -> u32) -> ryu
     ryumate::Connector { on, frame: f.frame }
 }
 
+/// An assembly's rebuild, as connectors are resolved in it when a write
+/// checks them.
+struct Rebuilt<'a>(&'a crate::rebuild::PartResult);
+
+impl Scope for Rebuilt<'_> {
+    fn instance(&self, id: &Id) -> Option<core::result::Result<&Placed, &Error>> {
+        match self
+            .0
+            .features
+            .iter()
+            .find(|(f, _)| f == id)
+            .map(|(_, r)| r)?
+        {
+            Ok(o) => o.instance().map(Ok),
+            Err(e) => Some(Err(e)),
+        }
+    }
+
+    fn places(&self, pattern: &Id, seed: &Id, index: [u32; 2]) -> Option<Result<bool>> {
+        match self
+            .0
+            .features
+            .iter()
+            .find(|(f, _)| f == pattern)
+            .map(|(_, r)| r)?
+        {
+            Ok(o) => {
+                let c = o.copies()?;
+                Some(Ok(c
+                    .copies
+                    .iter()
+                    .any(|c| c.index == index && c.seed == *seed)))
+            }
+            Err(e) => Some(Err(e.clone())),
+        }
+    }
+}
+
+/// Refuses mate or instance pattern `f`, which a write would make feature
+/// `id` of assembly `part` with the list `order`, unless what it names
+/// comes before it and its connectors resolve in the assembly as it
+/// rebuilds now; an instance pattern's seeds must be instances. What the
+/// solve makes of it only rebuild tells.
+pub fn check(
+    session: &mut crate::session::Session,
+    part: &Id,
+    order: &[Id],
+    id: &Id,
+    f: &Feature,
+) -> Result<()> {
+    let p = session.project().part(part)?.clone();
+    crate::graph::check_order(&p, order, id, f)?;
+    if let Some(x) = f.instance_pattern() {
+        for seed in &x.instances {
+            if !matches!(p.features.get(seed), Some(Ok(Feature::Instance(_)))) {
+                return Err(Error::new(
+                    Code::ReferenceWrongKind,
+                    format!("{id} copies {seed}, which isn't an instance"),
+                )
+                .with("feature", id)
+                .with("seed", seed));
+            }
+        }
+    }
+    let r = session.rebuilt(part)?.clone();
+    let scope = Rebuilt(&r);
+    for (role, c) in f.connectors() {
+        let found = resolve(id, role, c, &scope)?;
+        if f.instance_pattern().is_some() && found.copy.is_some() {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("{id}: its {role} is on a pattern's copy; put it on an instance"),
+            )
+            .with("feature", id)
+            .with("role", role));
+        }
+    }
+    Ok(())
+}
+
 /// Settles assembly `part`'s mates and instance patterns over the
 /// instances already placed in `features` (each listed feature's result
 /// by ID), in place: instances get their solved poses, mates and patterns
@@ -678,6 +758,11 @@ pub(crate) mod tests {
         [t.x, t.y, t.z]
     }
 
+    /// Occurrence `path` of `asm` is at `want`.
+    pub(crate) fn near_pose(s: &mut Session, asm: &str, path: &str, want: [f64; 3]) {
+        near(occurrence_origin(s, asm, path), want);
+    }
+
     fn near(a: [f64; 3], b: [f64; 3]) {
         for k in 0..3 {
             assert!((a[k] - b[k]).abs() < 1e-9, "{a:?} vs {b:?}");
@@ -917,5 +1002,153 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::HasDependents);
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::tests::{face, near_pose};
+    use crate::assembly::tests::project;
+    use crate::error::Code;
+    use crate::server::tests::call;
+    use serde_json::json;
+
+    #[test]
+    fn mates_and_patterns_are_added_and_edited_through_the_protocol() {
+        let (_dir, mut s) = project();
+        let top = face(&mut s, "plate", "slab", [0.0, 0.0, 1.0]);
+        let foot = face(&mut s, "bolt", "shank", [0.0, 0.0, -1.0]);
+        for (inst, of, fixed) in [("base", "plate", true), ("pin", "bolt", false)] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "frame", "type": "instance", "id": inst, "of": of,
+                       "fixed": fixed}),
+            )
+            .unwrap();
+        }
+        let a = format!("frame/base/slab/{top}");
+        let b = format!("frame/pin/shank/{foot}");
+        let v = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "mate", "id": "m1", "form": "cylindrical",
+                   "a": a, "b": b, "a_offset": {"origin": ["20 mm", "10 mm", "0 mm"]},
+                   "b_offset": {"flip": true}, "distance": "3 mm"}),
+        )
+        .unwrap();
+        assert_eq!(v["feature"]["a"]["text"], a);
+        assert_eq!(v["feature"]["distance"]["m"], 0.003);
+        near_pose(&mut s, "frame", "pin", [0.02, 0.01, 0.008]);
+        // A new form keeps only what it takes; a connector given again
+        // keeps its offset.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1", "form": "revolute", "a": a, "angle": "30 deg"}),
+        )
+        .unwrap();
+        let show = call(&mut s, "feature.show", json!({"part": "frame", "id": "m1"})).unwrap();
+        assert_eq!(show["form"], "revolute");
+        assert!(show.get("distance").is_none());
+        assert_eq!(
+            show["a"]["offset"]["origin"],
+            json!(["20 mm", "10 mm", "0 mm"])
+        );
+        near_pose(&mut s, "frame", "pin", [0.02, 0.01, 0.005]);
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1", "angle": "", "a_offset": {}}),
+        )
+        .unwrap();
+        let show = call(&mut s, "feature.show", json!({"part": "frame", "id": "m1"})).unwrap();
+        assert!(show.get("angle").is_none() && show["a"].get("offset").is_none());
+        // A pattern of the pin round the plate's z axis.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "instance_pattern", "id": "ring",
+                   "instances": ["pin"], "axis": "z", "count": 3, "angle": "360 deg"}),
+        )
+        .unwrap();
+        let show = call(
+            &mut s,
+            "feature.show",
+            json!({"part": "frame", "id": "ring"}),
+        )
+        .unwrap();
+        assert_eq!(show["form"], "circular");
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "ring", "count": 4, "skip": [2]}),
+        )
+        .unwrap();
+        let r = call(&mut s, "rebuild", json!({"part": "frame"})).unwrap();
+        let ring = r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == "ring")
+            .unwrap()
+            .clone();
+        let copies: Vec<&str> = ring["copies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["copy"].as_str().unwrap())
+            .collect();
+        assert_eq!(copies, ["ring:1", "ring:3"]);
+    }
+
+    #[test]
+    fn mate_writes_refuse_what_cant_resolve() {
+        let (_dir, mut s) = project();
+        let top = face(&mut s, "plate", "slab", [0.0, 0.0, 1.0]);
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "instance", "id": "base", "of": "plate"}),
+        )
+        .unwrap();
+        let add = |s: &mut crate::session::Session, v: serde_json::Value| {
+            let mut req = json!({"part": "frame", "type": "mate", "form": "ball"});
+            for (k, x) in v.as_object().unwrap() {
+                req[k] = x.clone();
+            }
+            call(s, "feature.add", req)
+        };
+        let good = format!("frame/base/slab/{top}");
+        for (v, code) in [
+            (json!({"a": good, "b": "frame/nut"}), Code::NotFound),
+            (json!({"a": good}), Code::InvalidParam),
+            (json!({"a": good, "b": "plate/slab"}), Code::InvalidParam),
+            (
+                json!({"a": "frame/base/slab/0123456789abcdef0123456789abcdef", "b": "frame/base"}),
+                Code::ReferenceUnresolved,
+            ),
+            (
+                json!({"a": good, "b": "frame/base", "angle": "3 deg"}),
+                Code::InvalidDocument,
+            ),
+            (
+                json!({"a": good, "b": "frame/base", "form": "weld"}),
+                Code::InvalidParam,
+            ),
+        ] {
+            let e = add(&mut s, v.clone()).unwrap_err();
+            assert_eq!(e.code, code, "{v}: {e:?}");
+        }
+        // A mate in a part is the wrong kind of feature there.
+        let here = format!("plate/base/slab/{top}");
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "plate", "type": "mate", "form": "ball", "a": here, "b": "plate/base"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::WrongPartKind);
+        assert!(add(&mut s, json!({"a": good, "b": "frame/base"})).is_ok());
     }
 }

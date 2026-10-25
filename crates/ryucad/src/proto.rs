@@ -246,6 +246,29 @@ pub struct FeatureFields {
     /// Whether mates hold an instance where it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fixed: Option<bool>,
+    /// A mate's first connector: an entity of an occurrence,
+    /// `<assembly>/<instance>[/…]/<solid>/<name>`, or an occurrence's own
+    /// frame, `<assembly>/<instance>[/…]`. A path may start at a pattern's
+    /// copy, `<pattern>:<i>/<seed>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a: Option<String>,
+    /// A mate's second connector, as `a`; its frame follows `a`'s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b: Option<String>,
+    /// `a`'s offset in its own axes: `{origin: [x, y, z], rotate, flip}`,
+    /// any part; `{}` for none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a_offset: Option<Value>,
+    /// `b`'s offset, as `a_offset`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b_offset: Option<Value>,
+    /// A slider's, cylindrical's or planar mate's distance along `a`'s z;
+    /// `""` lets it go.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distance: Option<Value>,
+    /// The instances an instance pattern copies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instances: Option<Vec<String>>,
 }
 
 impl FeatureFields {

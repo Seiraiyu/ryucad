@@ -940,8 +940,26 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
         }
         Feature::Boolean(b) => b.fields(),
         Feature::Instance(i) => i.fields(),
-        Feature::Mate(m) => m.fields(),
-        Feature::InstancePattern(x) => x.fields(),
+        Feature::Mate(m) => {
+            let mut v = m.fields();
+            for (side, c) in [("a", &m.a), ("b", &m.b)] {
+                v[side]["text"] = json!(connector_text(part, c));
+            }
+            if let Some(q) = &m.angle {
+                v["angle"] = q.report();
+            }
+            if let Some(q) = &m.distance {
+                v["distance"] = q.report();
+            }
+            v
+        }
+        Feature::InstancePattern(x) => {
+            let mut v = x.fields();
+            for (role, c) in x.connectors() {
+                v[role]["text"] = json!(connector_text(part, c));
+            }
+            v
+        }
         Feature::Fillet(_) | Feature::Chamfer(_) => blend_report(part, f),
         Feature::Hole(h) => hole_report(part, h),
         Feature::Pattern(x) => pattern_report(part, x),
@@ -1239,6 +1257,24 @@ const REVOLVE: [&str; 7] = [
 ];
 const BOOLEAN: [&str; 4] = ["op", "target", "targets", "tools"];
 const INSTANCE: [&str; 4] = ["of", "rev", "placement", "fixed"];
+const MATE: [&str; 7] = [
+    "form", "a", "b", "a_offset", "b_offset", "angle", "distance",
+];
+const INSTANCE_PATTERN: [&str; 13] = [
+    "form",
+    "instances",
+    "direction",
+    "spacing",
+    "count",
+    "direction2",
+    "spacing2",
+    "count2",
+    "reverse",
+    "reverse2",
+    "axis",
+    "angle",
+    "skip",
+];
 const FILLET: [&str; 4] = ["groups", "propagate", "radius", "edges"];
 const CHAMFER: [&str; 9] = [
     "groups",
@@ -1269,6 +1305,229 @@ const PATTERN: [&str; 15] = [
     "skip",
     "targets",
 ];
+
+/// A connector as a file holds it, from its text: an entity of an
+/// occurrence of assembly `asm`, `<asm>/<path>/<solid>/<name>`, or an
+/// occurrence's own frame, `<asm>/<path>`. `param` names the field for
+/// errors.
+fn connector_json(t: &str, asm: &Id, param: &str) -> Result<Value> {
+    let r = EntityRef::parse(t)
+        .map_err(|e| e.with("param", param))?
+        .in_assembly();
+    if r.part != *asm {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!(
+                "{t} is in {}, not assembly {asm}: a connector is on an occurrence of the assembly",
+                r.part
+            ),
+        )
+        .with("param", param));
+    }
+    if r.path.is_empty() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("{t} names no instance: give <assembly>/<instance>[/…]/<solid>/<name>"),
+        )
+        .with("param", param));
+    }
+    let at = if r.is_occurrence() {
+        json!("origin")
+    } else {
+        json!({"feature": r.feature, "name": r.name})
+    };
+    Ok(json!({"instance": r.path, "at": at}))
+}
+
+/// A connector's text, as requests give it.
+pub fn connector_text(asm: &Id, c: &crate::doc::mate::Connector) -> String {
+    let path = c.path().join("/");
+    match &c.at {
+        crate::doc::mate::At::Origin => format!("{asm}/{path}"),
+        crate::doc::mate::At::Entity(r) => format!("{asm}/{path}/{}/{}", r.feature, r.name),
+    }
+}
+
+/// A mate from `current`'s fields (none for a new one) with what was
+/// given laid over them: connectors as text, each keeping its offset
+/// unless one is given (`{}` for none); `angle` or `distance` `""` lets it
+/// go; a new form keeps only the driven values it takes.
+fn mate_from(
+    current: Option<&crate::doc::mate::Mate>,
+    given: &Given,
+    part: &Id,
+    unit: Unit,
+    env: &Env,
+) -> Result<Feature> {
+    use crate::doc::mate::{Form, Mate};
+    let f = &given.fields;
+    let mut v = current.map_or_else(|| json!({}), Mate::fields);
+    let o = v.as_object_mut().expect("an object");
+    match (&f.form, current) {
+        (Some(form), _) => {
+            let Some(form) = Form::parse(form) else {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("{form:?} isn't a mate: fastened, revolute, slider, cylindrical, planar or ball"),
+                )
+                .with("param", "form"));
+            };
+            o.insert("form".into(), json!(form.as_str()));
+            if !form.takes_angle() {
+                o.remove("angle");
+            }
+            if !form.takes_distance() {
+                o.remove("distance");
+            }
+        }
+        (None, None) => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "a mate names its form: fastened, revolute, slider, cylindrical, planar or ball",
+            )
+            .with("param", "form"));
+        }
+        (None, Some(_)) => {}
+    }
+    for (side, text, offset) in [("a", &f.a, &f.a_offset), ("b", &f.b, &f.b_offset)] {
+        if let Some(t) = text {
+            let mut c = connector_json(t, part, side)?;
+            if let Some(off) = o.get(side).and_then(|c| c.get("offset")) {
+                c["offset"] = off.clone();
+            }
+            o.insert(side.into(), c);
+        }
+        if let Some(off) = offset {
+            let Some(c) = o.get_mut(side) else {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("{side}_offset moves connector {side}: give {side} too"),
+                )
+                .with("param", format!("{side}_offset")));
+            };
+            if *off == json!({}) {
+                c.as_object_mut().expect("a connector").remove("offset");
+            } else {
+                c["offset"] = off.clone();
+            }
+        }
+        if !o.contains_key(side) {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("a mate joins two connectors: give {side}"),
+            )
+            .with("param", side));
+        }
+    }
+    for (k, x) in [("angle", &f.angle), ("distance", &f.distance)] {
+        match x {
+            Some(Value::String(t)) if t.is_empty() => {
+                o.remove(k);
+            }
+            Some(x) => {
+                o.insert(k.into(), x.clone());
+            }
+            None => {}
+        }
+    }
+    let mut o = crate::doc::files::Obj::new(&v, "")?;
+    let m = Mate::from_fields(&mut o, unit, env)?;
+    o.finish()?;
+    Ok(Feature::Mate(Box::new(m)))
+}
+
+/// An instance pattern from `current`'s fields (none for a new one, whose
+/// form, left out, is circular with an axis, else linear) with what was
+/// given laid over them, as a part's pattern takes them; directions and
+/// the axis are `x`, `y`, `z` or a connector's text, whose z they take.
+fn instance_pattern_from(
+    current: Option<&crate::doc::mate::InstancePattern>,
+    given: &Given,
+    part: &Id,
+    unit: Unit,
+    env: &Env,
+) -> Result<Feature> {
+    use crate::doc::mate::InstancePattern;
+    let f = &given.fields;
+    let fresh = || json!({"form": if f.axis.is_some() { "circular" } else { "linear" }});
+    let mut v = current.map_or_else(fresh, InstancePattern::fields);
+    let o = v.as_object_mut().expect("an object");
+    const SECOND: [&str; 4] = ["direction2", "spacing2", "count2", "reverse2"];
+    if let Some(form) = &f.form {
+        let takes: &[&str] = match form.as_str() {
+            "linear" => &[
+                "direction",
+                "spacing",
+                "count",
+                "reverse",
+                "direction2",
+                "spacing2",
+                "count2",
+                "reverse2",
+                "skip",
+            ],
+            "circular" => &["axis", "count", "angle", "skip"],
+            _ => &[],
+        };
+        o.retain(|k, _| takes.contains(&k.as_str()) || k == "instances");
+        o.insert("form".into(), json!(form));
+    }
+    if f.direction2.as_deref() == Some("") {
+        o.retain(|k, _| !SECOND.contains(&k.as_str()));
+    }
+    for (k, x) in [
+        ("direction", &f.direction),
+        ("direction2", &f.direction2),
+        ("axis", &f.axis),
+    ] {
+        if let Some(t) = x.as_deref().filter(|t| !t.is_empty()) {
+            let d = if t.contains('/') {
+                connector_json(t, part, k)?
+            } else {
+                json!(t)
+            };
+            o.insert(k.into(), d);
+        }
+    }
+    for (k, x) in [
+        ("spacing", &f.spacing),
+        ("count", &f.count),
+        ("spacing2", &f.spacing2),
+        ("count2", &f.count2),
+        ("angle", &f.angle),
+    ] {
+        if let Some(x) = x {
+            o.insert(k.into(), x.clone());
+        }
+    }
+    for (k, x) in [("reverse", f.reverse), ("reverse2", f.reverse2)] {
+        match x {
+            Some(true) => {
+                o.insert(k.into(), json!(true));
+            }
+            Some(false) => {
+                o.remove(k);
+            }
+            None => {}
+        }
+    }
+    match &f.skip {
+        Some(x) if x == &json!([]) => {
+            o.remove("skip");
+        }
+        Some(x) => {
+            o.insert("skip".into(), x.clone());
+        }
+        None => {}
+    }
+    if let Some(x) = &f.instances {
+        o.insert("instances".into(), json!(x));
+    }
+    let mut o = crate::doc::files::Obj::new(&v, "")?;
+    let p = InstancePattern::from_fields(&mut o, unit, env)?;
+    o.finish()?;
+    Ok(Feature::InstancePattern(Box::new(p)))
+}
 
 /// A pattern from `current`'s fields (none for a new one, whose form,
 /// left out, is what its fields say: a mirror with a plane, circular with
@@ -2258,6 +2517,14 @@ fn feature_add(
             given.only(ty, &INSTANCE)?;
             Feature::Instance(instance_from(None, &given, unit, &env)?)
         }
+        "mate" => {
+            given.only(ty, &MATE)?;
+            mate_from(None, &given, &pid, unit, &env)?
+        }
+        "instance_pattern" => {
+            given.only(ty, &INSTANCE_PATTERN)?;
+            instance_pattern_from(None, &given, &pid, unit, &env)?
+        }
         "fillet" | "chamfer" => {
             given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
             blend_from(ty, None, &given, &pid, unit, &env)?
@@ -2301,6 +2568,9 @@ fn feature_add(
     }
     if f.instance().is_some() {
         check_instance(session, &pid, &list, &fid, &f)?;
+    }
+    if !f.connectors().is_empty() || f.instance_pattern().is_some() {
+        crate::mate::check(session, &pid, &list, &fid, &f)?;
     }
     let p = session.project().part(&pid)?;
     if f.swept().is_some() {
@@ -2364,9 +2634,13 @@ fn feature_edit(
             given.only("instance", &INSTANCE)?;
             Feature::Instance(instance_from(Some(&i), &given, unit, &p.env)?)
         }
-        f @ (Feature::Mate(_) | Feature::InstancePattern(_)) => {
-            given.only(f.type_name(), &[])?;
-            f
+        Feature::Mate(m) => {
+            given.only("mate", &MATE)?;
+            mate_from(Some(&m), &given, &pid, unit, &p.env)?
+        }
+        Feature::InstancePattern(x) => {
+            given.only("instance_pattern", &INSTANCE_PATTERN)?;
+            instance_pattern_from(Some(&x), &given, &pid, unit, &p.env)?
         }
         Feature::Boolean(b) => {
             given.only("boolean", &BOOLEAN)?;
@@ -2419,6 +2693,9 @@ fn feature_edit(
     }
     if f.instance().is_some() && f != old {
         check_instance(session, &pid, &list, &fid, &f)?;
+    }
+    if (!f.connectors().is_empty() || f.instance_pattern().is_some()) && f != old {
+        crate::mate::check(session, &pid, &list, &fid, &f)?;
     }
     let p = session.project().part(&pid)?;
     check_solids(&proposed(p, &list, &[(&fid, &f)]), &[&fid])?;
