@@ -61,8 +61,7 @@ impl Mated {
     pub fn to_json(&self) -> Value {
         json!({
             "state": mate_state(self.state),
-            "a": doc_pose(&self.a).to_json(),
-            "b": doc_pose(&self.b).to_json(),
+            "frames": {"a": doc_pose(&self.a).to_json(), "b": doc_pose(&self.b).to_json()},
         })
     }
 }

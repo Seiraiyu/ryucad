@@ -120,3 +120,125 @@ fn the_form_edits_an_instance() {
             .is_some_and(|i| i.fixed)
     }));
 }
+
+/// The planar face of `part`'s solid `solid` whose outward normal is `z`
+/// along z (`1` up, `-1` down).
+fn face_up(p: &Project, part: &str, solid: &str, z: f64) -> String {
+    let v = p.ok(&["inspect", part, solid]);
+    v["bodies"][0]["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+            f["surface"]["type"] == "plane"
+                && (f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign - z).abs() < 1e-12
+        })
+        .map(|f| f["name"].as_str().unwrap().to_owned())
+        .unwrap()
+}
+
+/// A plate fixed in `frame` and a bolt stood on its top by revolute `m1`,
+/// with three copies of the bolt round the plate's z (`ring`).
+fn mated() -> Project {
+    let p = Project::new();
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&[
+        "feature", "add", "plate", "box", "--id", "slab", "--param", "x=100", "--param", "y=50",
+        "--param", "z=5",
+    ]);
+    p.ok(&["part", "create", "bolt"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bolt",
+        "cylinder",
+        "--id",
+        "shank",
+        "--param",
+        "radius=3",
+        "--param",
+        "height=20",
+    ]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "base", "--of", "plate", "--fixed",
+    ]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "pin", "--of", "bolt", "--origin", "50,0,0",
+    ]);
+    let top = format!("frame/base/slab/{}", face_up(&p, "plate", "slab", 1.0));
+    let foot = format!("frame/pin/shank/{}", face_up(&p, "bolt", "shank", -1.0));
+    p.ok(&[
+        "feature",
+        "add",
+        "frame",
+        "mate",
+        "--id",
+        "m1",
+        "--form",
+        "revolute",
+        "--a",
+        &top,
+        "--a-offset",
+        r#"{"origin": ["20 mm", "10 mm", "0 mm"]}"#,
+        "--b",
+        &foot,
+        "--b-offset",
+        r#"{"flip": true}"#,
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "frame",
+        "instance_pattern",
+        "--id",
+        "ring",
+        "--instance",
+        "pin",
+        "--axis",
+        "z",
+        "--count",
+        "4",
+        "--angle",
+        "360deg",
+    ]);
+    p
+}
+
+#[test]
+fn the_tree_says_what_mates_leave_and_a_mate_paints_its_faces() {
+    let p = mated();
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle()
+            && ws
+                .part("frame")
+                .is_some_and(|f| f.feature("ring").is_some())
+    }));
+    let frame = ws.part("frame").unwrap();
+    let solve = frame.solve.as_ref().unwrap();
+    assert!(solve.converged && !solve.stale, "{solve:?}");
+    let pin = frame.feature("pin").unwrap().instance.as_ref().unwrap();
+    assert_eq!(pin.solve, Some(("under".to_owned(), 1)));
+    let m = frame.feature("m1").unwrap().mate.as_ref().unwrap();
+    assert_eq!(
+        (m.form.as_str(), m.state.as_deref()),
+        ("revolute", Some("well"))
+    );
+    assert_eq!(
+        frame.feature("ring").unwrap().copies,
+        ["ring:1/pin", "ring:2/pin", "ring:3/pin"]
+    );
+    // The copies are drawn, under the pattern.
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.model
+            .meshes
+            .contains_key(&key("frame", "ring:2/pin/shank"))
+    }));
+    // Chosen, the mate paints the faces its connectors are on.
+    ws.choose(Some(key("frame", "m1")));
+    let made = ws.made.as_ref().expect("the mate's faces");
+    let bodies: Vec<&String> = made.faces.keys().map(|(_, b)| b).collect();
+    assert_eq!(bodies, ["base/slab", "pin/shank"]);
+}

@@ -2929,6 +2929,20 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
             }
         })
         .collect();
+    // A mate's form and connectors, as requests give them, for showing it
+    // whatever it rebuilt to.
+    let mates: BTreeMap<Id, Value> = part
+        .features
+        .iter()
+        .filter_map(|(fid, f)| {
+            let m = f.as_ref().ok()?.mate()?;
+            Some((
+                fid.clone(),
+                json!({"form": m.form.as_str(), "a": connector_text(id, &m.a),
+                       "b": connector_text(id, &m.b)}),
+            ))
+        })
+        .collect();
     let counts = |b: &crate::rebuild::Built| {
         let c = b.body.counts();
         json!({"faces": c.faces, "edges": c.edges, "vertices": c.vertices})
@@ -2983,6 +2997,14 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
             };
             if let Some(u) = uses.get(fid) {
                 v["uses"] = json!(u);
+            }
+            if let Some(Value::Object(m)) = mates.get(fid) {
+                if !v["mate"].is_object() {
+                    v["mate"] = json!({});
+                }
+                for (k, x) in m {
+                    v["mate"][k] = x.clone();
+                }
             }
             let of = solids.solids_of(fid);
             if !of.is_empty() {
