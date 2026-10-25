@@ -269,6 +269,7 @@ fn direction(
                 .with("feature", owner)
                 .with("role", role));
             }
+            frame_ok(owner, role, &f.frame)?;
             Ok(ryumate::Direction::Connector(ryumate::Connector {
                 on: ryumate::On::Body(body(&f.instance)),
                 frame: f.frame,
@@ -297,6 +298,7 @@ fn pattern(
             .with("seed", seed));
         }
     }
+    pattern_values(id, p)?;
     let spacing = |w: &crate::doc::mate::Way| {
         let s = w.spacing.meters();
         if w.reverse { -s } else { s }
@@ -389,6 +391,91 @@ impl Scope for Rebuilt<'_> {
     }
 }
 
+/// Refuses a connector `role` of feature `id` whose frame `ryumate` can't
+/// take: its origin, in its instance's coordinates (offsets and the
+/// occurrences a path goes through included), past the size box.
+fn frame_ok(id: &Id, role: &str, frame: &ryumate::Pose) -> Result<()> {
+    let half = ryukei::tol::SIZE_BOX_HALF;
+    if frame.origin.iter().all(|x| x.abs() <= half) {
+        return Ok(());
+    }
+    Err(Error::new(
+        Code::InvalidParam,
+        format!("{id}: its {role} lies outside the size box (±{half} m) of its instance"),
+    )
+    .with("feature", id)
+    .with("param", role)
+    .with("origin_m", frame.origin.to_vec()))
+}
+
+/// Refuses length `param` of feature `id`, `v` meters, that the solver
+/// can't drive: not finite or past [`ryumate::MAX_LENGTH`].
+fn length_ok(id: &Id, param: &str, v: f64) -> Result<()> {
+    if v.is_finite() && v.abs() <= ryumate::MAX_LENGTH {
+        return Ok(());
+    }
+    Err(Error::new(
+        Code::InvalidParam,
+        format!(
+            "{id}: its {param} must be finite and at most {} m",
+            ryumate::MAX_LENGTH
+        ),
+    )
+    .with("feature", id)
+    .with("param", param))
+}
+
+/// Refuses angle `param` of feature `id` that isn't finite.
+fn angle_ok(id: &Id, param: &str, a: f64) -> Result<()> {
+    if a.is_finite() {
+        return Ok(());
+    }
+    Err(Error::new(
+        Code::InvalidParam,
+        format!("{id}: its {param} isn't finite"),
+    )
+    .with("feature", id)
+    .with("param", param))
+}
+
+/// Refuses mate `id`'s values the solver can't take, as `ryumate`'s
+/// validation would: its distance and angle.
+fn mate_values(id: &Id, m: &Mate) -> Result<()> {
+    if let Some(d) = &m.distance {
+        length_ok(id, "distance", d.meters())?;
+    }
+    if let Some(a) = &m.angle {
+        angle_ok(id, "angle", a.radians())?;
+    }
+    Ok(())
+}
+
+/// Refuses instance pattern `id`'s values the solver can't take: its
+/// spacings and angle.
+fn pattern_values(id: &Id, p: &InstancePattern) -> Result<()> {
+    match &p.form {
+        PatternForm::Linear { first, second } => {
+            length_ok(id, "spacing", first.spacing.meters())?;
+            if let Some(w) = second {
+                length_ok(id, "spacing2", w.spacing.meters())?;
+            }
+        }
+        PatternForm::Circular { angle, .. } => angle_ok(id, "angle", angle.radians())?,
+    }
+    Ok(())
+}
+
+/// The error for feature `id` when the solve would put `what` (an
+/// instance, or a copy of a pattern's seed) where it can't be placed,
+/// which `e` says: outside the size box.
+fn outside(id: &Id, what: String, e: &Error) -> Error {
+    Error::new(
+        Code::InvalidParam,
+        format!("{id}: the solve would put {what} where it can't be placed: {e}"),
+    )
+    .with("feature", id)
+}
+
 /// Refuses mate or instance pattern `f`, which a write would make feature
 /// `id` of assembly `part` with the list `order`, unless what it names
 /// comes before it and its connectors resolve in the assembly as it
@@ -415,11 +502,18 @@ pub fn check(
             }
         }
     }
+    if let Some(m) = f.mate() {
+        mate_values(id, m)?;
+    }
+    if let Some(x) = f.instance_pattern() {
+        pattern_values(id, x)?;
+    }
     let r = session.rebuilt(part)?.clone();
     let scope = Rebuilt(&r);
     let mut on = Vec::new();
     for (role, c) in f.connectors() {
         let found = resolve(id, role, c, &scope)?;
+        frame_ok(id, role, &found.frame)?;
         on.push((found.instance.clone(), found.copy.clone()));
         if f.instance_pattern().is_some() && found.copy.is_some() {
             return Err(Error::new(
@@ -530,8 +624,11 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
             let r = (|| -> Result<(u32, [Found; 2])> {
                 // What it names comes before it; what it is, resolving says.
                 crate::graph::check_order(part, order, id, feature(id))?;
+                mate_values(id, m)?;
                 let a = resolve(id, "a", &m.a, &scope)?;
                 let b = resolve(id, "b", &m.b, &scope)?;
+                frame_ok(id, "a", &a.frame)?;
+                frame_ok(id, "b", &b.frame)?;
                 let k = solved_mates.len() as u32;
                 Ok((k, [a, b]))
             })();
@@ -549,36 +646,53 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
             mated.insert(id.clone(), r);
         }
     }
-    let solved = match ryumate::solve(&asm) {
+    let mut solved = match ryumate::solve(&asm) {
         Ok(s) => s,
         Err(e) => {
-            // Connectors' frames are orthonormal and inside the size box
-            // by construction; a refusal is ryucad's fault.
-            for id in &solved_mates {
-                features.insert(
-                    id.clone(),
-                    Err(
-                        Error::new(Code::Internal, format!("{id}: the solver refused it: {e}"))
-                            .with("feature", id),
-                    ),
-                );
+            // Every value a file or a path sets was checked above, feature
+            // by feature, so a refusal is ryucad's fault. What the solve
+            // would have settled fails with it; the rest keeps its own
+            // error.
+            let refused = |id: &Id| {
+                Error::new(
+                    Code::Internal,
+                    format!("{id}: the solver refused the assembly: {e}"),
+                )
+                .with("feature", id)
+            };
+            for (id, r) in mated {
+                let out: Result<Output> = r.and_then(|_| Err(refused(&id)));
+                features.insert(id, out);
+            }
+            for (id, r) in patterns {
+                let out: Result<Output> = r.and_then(|_| Err(refused(&id)));
+                features.insert(id, out);
             }
             return None;
         }
     };
-    let report = &solved.report;
-    // Instances: solved poses, but where their mates fail, as stored.
+    // Instances: solved poses, but where their mates fail, as stored. One
+    // the solve would put where it can't be placed stays as stored and
+    // fails, with its mates.
     let mut moved = Vec::new();
+    let mut unplaced: BTreeMap<u32, Error> = BTreeMap::new();
     let mut at = asm.clone();
     for (k, id) in instances.iter().enumerate() {
         let k = k as u32;
-        let failing = report.bodies[&k].state == ryumate::BodyState::Failing;
+        let failing = solved.report.bodies[&k].state == ryumate::BodyState::Failing;
         let new = solved.poses[&k];
         if failing || new == asm.bodies[&k].pose {
             continue;
         }
-        let Ok(rigid) = pose_rigid(&doc_pose(&new)) else {
-            continue;
+        let rigid = match pose_rigid(&doc_pose(&new)) {
+            Ok(r) => r,
+            Err(e) => {
+                solved.report.bodies.get_mut(&k).expect("a body").state =
+                    ryumate::BodyState::Failing;
+                solved.report.converged = false;
+                unplaced.insert(k, e);
+                continue;
+            }
         };
         let old = features[id]
             .as_ref()
@@ -592,6 +706,68 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
         features.insert(id.clone(), Ok(Output::Instance(Arc::new(p))));
         moved.push(id.clone());
     }
+    let report = &solved.report;
+    // Every copy a pattern places or a mate names, where the bodies now
+    // are, in one call.
+    let mut wanted: Vec<(u32, u32, [u32; 2])> = Vec::new();
+    for (id, r) in &patterns {
+        if let Ok(r) = r {
+            let k = pattern_of(id);
+            for index in &r.copies {
+                for seed in &r.seeds {
+                    wanted.push((k, body_of(seed), *index));
+                }
+            }
+        }
+    }
+    for m in asm.mates.values() {
+        for c in [&m.a, &m.b] {
+            if let ryumate::On::Copy {
+                pattern,
+                seed,
+                index,
+            } = c.on
+            {
+                wanted.push((pattern, seed, index));
+            }
+        }
+    }
+    wanted.sort_unstable();
+    wanted.dedup();
+    let copy_at: BTreeMap<(u32, u32, [u32; 2]), ryumate::Pose> = wanted
+        .iter()
+        .copied()
+        .zip(ryumate::copy_poses(&at, &wanted))
+        .collect();
+    // What a mate's connector is on, by name, if the solve put it where it
+    // can't be placed.
+    let unplaceable = |c: &ryumate::Connector| -> Option<(String, Error)> {
+        match c.on {
+            ryumate::On::Body(b) => unplaced
+                .get(&b)
+                .map(|e| (instances[b as usize].to_string(), e.clone())),
+            ryumate::On::Copy {
+                pattern,
+                seed,
+                index,
+            } => {
+                if let Some(e) = unplaced.get(&seed) {
+                    return Some((instances[seed as usize].to_string(), e.clone()));
+                }
+                pose_rigid(&doc_pose(&copy_at[&(pattern, seed, index)]))
+                    .err()
+                    .map(|e| {
+                        (
+                            format!(
+                                "copy {index:?} of {} in {}",
+                                instances[seed as usize], pattern_ids[pattern as usize]
+                            ),
+                            e,
+                        )
+                    })
+            }
+        }
+    };
     // Mates: their state, and their frames where the bodies now are.
     let frame_at = |c: &ryumate::Connector| -> ryumate::Pose {
         match c.on {
@@ -600,7 +776,7 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
                 pattern,
                 seed,
                 index,
-            } => ryumate::copy_poses(&at, &[(pattern, seed, index)])[0].then_after(&c.frame),
+            } => copy_at[&(pattern, seed, index)].then_after(&c.frame),
         }
     };
     let conflicting = |m: u32| -> Vec<Vec<&Id>> {
@@ -615,11 +791,15 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
         let out = r.map(|(k, _)| {
             let state = report.mates[&k];
             let m = &asm.mates[&k];
-            (k, state, frame_at(&m.a), frame_at(&m.b))
+            let off = unplaceable(&m.a).or_else(|| unplaceable(&m.b));
+            (k, state, off, frame_at(&m.a), frame_at(&m.b))
         });
         let out = match out {
             Err(e) => Err(e),
-            Ok((k, ryumate::MateState::Conflicting | ryumate::MateState::Failing, _, _)) => {
+            Ok((_, _, Some((what, e)), _, _)) => {
+                Err(outside(&id, what.clone(), &e).with("unplaced", what))
+            }
+            Ok((k, ryumate::MateState::Conflicting | ryumate::MateState::Failing, _, _, _)) => {
                 let sets = conflicting(k);
                 let msg = if sets.is_empty() {
                     format!("{id}: the solver couldn't make it hold with the mates beside it")
@@ -631,7 +811,7 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
                     .with("part", &part.id)
                     .with("conflicting", sets))
             }
-            Ok((_, state, a, b)) => {
+            Ok((_, state, None, a, b)) => {
                 let mut h = blake3::Hasher::new();
                 h.update(mate_state(state).as_bytes());
                 hash_pose(&mut h, &a);
@@ -646,22 +826,26 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
         };
         features.insert(id, out);
     }
-    // Patterns: their copies where the seeds now are.
+    // Patterns: their copies where the seeds now are; a copy that can't be
+    // placed there fails its pattern, naming it.
     for (id, r) in patterns {
-        let out = r.map(|r| {
+        let out = r.and_then(|r| {
             let k = pattern_of(&id);
             let mut copies = Vec::new();
             let mut h = blake3::Hasher::new();
             for index in &r.copies {
                 for seed in &r.seeds {
-                    let b = body_of(seed);
-                    let p = ryumate::copy_poses(&at, &[(k, b, *index)])[0];
+                    let p = copy_at[&(k, body_of(seed), *index)];
                     let seed_placed = features[seed]
                         .as_ref()
                         .ok()
                         .and_then(|o| o.instance())
                         .expect("a seed placed");
-                    let rigid = pose_rigid(&doc_pose(&p)).unwrap_or(seed_placed.pose);
+                    let rigid = pose_rigid(&doc_pose(&p)).map_err(|e| {
+                        outside(&id, format!("copy {index:?} of {seed}"), &e)
+                            .with("copy", index)
+                            .with("seed", seed)
+                    })?;
                     let placed = placed_at(seed_placed, rigid);
                     h.update(format!("{index:?} {seed} {}\n", placed.hash).as_bytes());
                     copies.push(Copy {
@@ -671,10 +855,10 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
                     });
                 }
             }
-            Output::Copies(Arc::new(Copies {
+            Ok(Output::Copies(Arc::new(Copies {
                 copies,
                 hash: h.finalize().to_hex()[..32].to_owned(),
-            }))
+            })))
         });
         features.insert(id, out);
     }
@@ -1242,6 +1426,169 @@ pub(crate) mod tests {
         );
     }
 
+    /// Feature `fid`'s result in `asm`'s rebuild.
+    fn result_of(s: &mut Session, asm: &str, fid: &str) -> Result<Output> {
+        let r = s.rebuilt(&id(asm)).unwrap().clone();
+        r.features
+            .iter()
+            .find(|(f, _)| f.as_str() == fid)
+            .unwrap_or_else(|| panic!("no feature {fid}"))
+            .1
+            .clone()
+    }
+
+    /// Feature `fid` of `asm` failed with `code`, its details holding
+    /// `want`'s keys.
+    fn fails_with(s: &mut Session, asm: &str, fid: &str, code: Code, want: Value) {
+        let e = result_of(s, asm, fid).expect_err(fid);
+        assert_eq!(e.code, code, "{fid}: {e:?}");
+        assert_eq!(e.details["feature"], fid, "{e:?}");
+        for (k, v) in want.as_object().unwrap() {
+            assert_eq!(&e.details[k], v, "{fid}'s {k}: {e:?}");
+        }
+    }
+
+    /// Mate `fid` of `asm` built, in state `state`.
+    fn mate_is(s: &mut Session, asm: &str, fid: &str, state: ryumate::MateState) {
+        match result_of(s, asm, fid) {
+            Ok(Output::Mate(m)) => assert_eq!(m.state, state, "{fid}"),
+            other => panic!("{fid}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_value_the_solver_cant_take_fails_its_own_feature_alone() {
+        let (dir, mut s) = hinged();
+        let r = dir.path();
+        // A connector offset past the size box, a distance past the
+        // longest a mate drives, and a pattern spaced past it.
+        add_in(
+            r,
+            "frame",
+            "far",
+            "mate",
+            json!({"form": "planar",
+                   "a": {"instance": ["base"], "at": "origin",
+                         "offset": {"origin": ["600000 mm", "0 mm", "0 mm"]}},
+                   "b": {"instance": ["pin"], "at": "origin"}}),
+        );
+        add_in(
+            r,
+            "frame",
+            "long",
+            "mate",
+            json!({"form": "planar", "distance": "2000 m",
+                   "a": {"instance": ["base"], "at": "origin"},
+                   "b": {"instance": ["pin"], "at": "origin"}}),
+        );
+        add_in(
+            r,
+            "frame",
+            "row",
+            "instance_pattern",
+            json!({"form": "linear", "instances": ["pin"], "direction": "x",
+                   "spacing": "2000 m", "count": 2}),
+        );
+        s.refresh().unwrap();
+        fails_with(
+            &mut s,
+            "frame",
+            "far",
+            Code::InvalidParam,
+            json!({"param": "a"}),
+        );
+        fails_with(
+            &mut s,
+            "frame",
+            "long",
+            Code::InvalidParam,
+            json!({"param": "distance"}),
+        );
+        fails_with(
+            &mut s,
+            "frame",
+            "row",
+            Code::InvalidParam,
+            json!({"param": "spacing"}),
+        );
+        // The rest solves as before.
+        mate_is(&mut s, "frame", "m1", ryumate::MateState::Well);
+        near_pose(&mut s, "frame", "pin", [0.02, 0.01, 0.005]);
+    }
+
+    #[test]
+    fn copies_and_instances_the_solve_puts_past_the_size_box_fail() {
+        let (dir, mut s) = hinged();
+        let r = dir.path();
+        // Copies 200 m apart along x: the fourth would be 600 m out.
+        add_in(
+            r,
+            "frame",
+            "row",
+            "instance_pattern",
+            json!({"form": "linear", "instances": ["pin"], "direction": "x",
+                   "spacing": "200000 mm", "count": 4}),
+        );
+        s.refresh().unwrap();
+        fails_with(
+            &mut s,
+            "frame",
+            "row",
+            Code::InvalidParam,
+            json!({"copy": [3, 0], "seed": "pin"}),
+        );
+        mate_is(&mut s, "frame", "m1", ryumate::MateState::Well);
+        // A mate on a copy that can be placed is fine; one on a copy that
+        // can't fails, naming it.
+        add_in(
+            r,
+            "frame",
+            "ring",
+            "instance_pattern",
+            json!({"form": "linear", "instances": ["base"], "direction": "x",
+                   "spacing": "200000 mm", "count": 4}),
+        );
+        place_in(r, "frame", "cap", "bolt", json!("working"), [0.0, 0.0, 0.1]);
+        add_in(
+            r,
+            "frame",
+            "m2",
+            "mate",
+            json!({"form": "fastened",
+                   "a": {"instance": ["ring:3", "base"], "at": "origin"},
+                   "b": {"instance": ["cap"], "at": "origin"}}),
+        );
+        s.refresh().unwrap();
+        let e = result_of(&mut s, "frame", "m2").unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam, "{e:?}");
+        assert_eq!(
+            e.details["unplaced"], "copy [3, 0] of base in ring",
+            "{e:?}"
+        );
+        near_pose(&mut s, "frame", "cap", [0.0, 0.0, 0.1]);
+        // A fastened mate that puts the pin 900 m out, with frames each
+        // inside the box: the pin stays where it was, failing, and so does
+        // its mate.
+        let m1 = feature_path(r, &id("frame"), &id("m1"));
+        let mut v = crate::doc::canonical::parse(&std::fs::read_to_string(&m1).unwrap()).unwrap();
+        v["form"] = json!("fastened");
+        v["a"] = json!({"instance": ["base"], "at": "origin",
+                        "offset": {"origin": ["450 m", "0 m", "0 m"]}});
+        v["b"] = json!({"instance": ["pin"], "at": "origin",
+                        "offset": {"origin": ["-450 m", "0 m", "0 m"]}});
+        write_json(&m1, &v).unwrap();
+        s.refresh().unwrap();
+        let e = result_of(&mut s, "frame", "m1").unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam, "{e:?}");
+        assert_eq!(e.details["unplaced"], "pin", "{e:?}");
+        near_pose(&mut s, "frame", "pin", [0.05, 0.0, 0.0]);
+        let built = s.rebuilt(&id("frame")).unwrap().clone();
+        let solve = built.solve.as_ref().expect("a solve");
+        assert!(!solve.report.converged);
+        assert!(!solve.moved.contains(&id("pin")));
+        assert_eq!(solve.to_json()["instances"]["pin"]["state"], "failing");
+    }
+
     #[test]
     fn patterns_place_copies_that_mates_can_name() {
         let (dir, mut s) = hinged();
@@ -1477,6 +1824,27 @@ mod protocol_tests {
         )
         .unwrap();
         assert!(add(&mut s, json!({"a": good, "b": "frame/pin"})).is_ok());
+        // Values the solver can't take are refused when written.
+        for (v, param) in [
+            (
+                json!({"a": good, "b": "frame/pin",
+                       "a_offset": {"origin": ["600000 mm", "0 mm", "0 mm"]}}),
+                "a",
+            ),
+            (
+                json!({"a": good, "b": "frame/pin", "form": "planar", "distance": "2000 m"}),
+                "distance",
+            ),
+            (
+                json!({"type": "instance_pattern", "form": "linear", "instances": ["pin"],
+                       "direction": "x", "spacing": "2000 m", "count": 2}),
+                "spacing",
+            ),
+        ] {
+            let e = add(&mut s, v.clone()).unwrap_err();
+            assert_eq!(e.code, Code::InvalidParam, "{v}: {e:?}");
+            assert_eq!(e.details["param"], param, "{v}: {e:?}");
+        }
     }
 }
 
