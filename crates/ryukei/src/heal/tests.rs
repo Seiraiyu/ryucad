@@ -824,6 +824,81 @@ fn sewing_refuses_three_faces_at_an_edge_and_leaves_open_shells_open() {
     }
 }
 
+#[test]
+fn an_edge_through_a_pole_is_split_there() {
+    use crate::geom::{Circle, Frame, Plane, Point3, Sphere};
+    // A hemisphere bounded by a meridian: one closed edge from the north
+    // pole round through the south pole, as some writers frame a sphere.
+    let o = Point3::new(0.0, 0.0, 0.0);
+    let (x, y, z) = (
+        Vector3::new(1.0, 0.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+        Vector3::new(0.0, 0.0, 1.0),
+    );
+    let sphere = Sphere::new(Frame::new(o, z, x).unwrap(), 1.0).unwrap();
+    let plane = Plane::new(Frame::new(o, y * -1.0, x).unwrap());
+    // From (0, 0, 1) at t = 0 through (1, 0, 0) and (0, 0, -1).
+    let circle = Circle::new(Frame::new(o, y, z).unwrap(), 1.0).unwrap();
+    let use_ = |sense| Use {
+        edge: 0,
+        sense,
+        pcurve: None,
+    };
+    let s = Shape {
+        surfaces: vec![Surface::Sphere(sphere), Surface::Plane(plane)],
+        curves: vec![Curve::Circle(circle)],
+        curves2: vec![],
+        vertices: vec![Vertex {
+            point: Point3::new(0.0, 0.0, 1.0),
+            tolerance: 0.0,
+            seam: false,
+        }],
+        edges: vec![Edge {
+            curve: 0,
+            interval: [0.0, core::f64::consts::TAU],
+            start: 0,
+            end: 0,
+            tolerance: 0.0,
+        }],
+        faces: vec![
+            Face {
+                surface: 0,
+                sense: Sense::Forward,
+                loops: vec![Loop::Edges(vec![use_(Sense::Forward)])],
+                tolerance: 0.0,
+            },
+            Face {
+                surface: 1,
+                sense: Sense::Forward,
+                loops: vec![Loop::Edges(vec![use_(Sense::Reversed)])],
+                tolerance: 0.0,
+            },
+        ],
+        shells: vec![Shell {
+            faces: vec![0, 1],
+            closed: true,
+        }],
+        solids: vec![Solid {
+            outer: 0,
+            voids: vec![],
+        }],
+    };
+    let names = names::names(OpKey(7), &s);
+    let (h, journal, report) = heal_ok(&s);
+    let c = h.counts();
+    assert_eq!((c.faces, c.edges, c.vertices), (2, 2, 2));
+    assert_eq!(report.split, [names.edges[0]]);
+    assert!(journal.events().iter().any(|e| matches!(
+        e,
+        Event::Split { parent, children } if *parent == names.edges[0] && children.len() == 2
+    )));
+    // The new vertex is the south pole.
+    assert!(
+        h.vertices()
+            .any(|v| h.vertices[v].point.distance(Point3::new(0.0, 0.0, -1.0)) < 1e-15)
+    );
+}
+
 /// A plate with a round hole through it.
 fn plate() -> Body {
     use crate::boolean::{BooleanOp, Tool, ToolKey, boolean};

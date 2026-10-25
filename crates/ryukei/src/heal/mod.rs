@@ -19,8 +19,8 @@
 //!    an edge used once is open, one that uses it more often is
 //!    non-manifold.
 //! 4. **Seams and poles.** Seam edges come out of periodic faces, vertex
-//!    loops at poles go, and edges a seam split are joined again (see
-//!    `unseam`).
+//!    loops at poles go, edges a seam split are joined again, and edges
+//!    running through a pole are split there (see `unseam`).
 //! 5. **Orientation.** Loops run the way their faces' regions need,
 //!    where the loops alone fix it, and faces are turned over until every
 //!    edge is used once each way (see `orient`).
@@ -190,6 +190,9 @@ pub struct HealReport {
     /// Edges shorter than their tolerance and slivers narrower than it,
     /// removed.
     pub collapsed: Vec<Name>,
+    /// The file's edges split where they ran through a pole or apex of a
+    /// face's surface.
+    pub split: Vec<Name>,
     /// Seam edges removed.
     pub seams: Vec<Name>,
     /// Faces some of whose loops ran against the region they bound, and
@@ -227,6 +230,7 @@ pub fn heal(
     let sewn = sew::sew(key, &mut shape, &mut names, options.tolerance_cap)?;
     build::uses(&shape, &names)?;
     let unseamed = unseam::unseam(key, &mut shape, &mut names, options.tolerance_cap)?;
+    let at_poles = unseam::split_at_poles(key, &mut shape, &mut names);
     let reversed = orient::loops(&mut shape, &names)?;
     let turned = orient::faces(&mut shape, &names)?;
     let tightened = tighten::tighten(&mut shape, &names, options.tolerance_cap);
@@ -267,6 +271,7 @@ pub fn heal(
     let turned: Vec<Name> = turned.into_iter().collect();
     let mut journal = sewn.journal;
     journal.append(unseamed.journal);
+    journal.append(at_poles.journal);
     journal.append(collapsed.journal);
     journal.append(created);
     for &f in &reversed {
@@ -286,6 +291,7 @@ pub fn heal(
     report.merged = [sewn.vertices, collapsed.vertices].concat();
     report.merged.sort();
     report.collapsed = collapsed.removed;
+    report.split = at_poles.split;
     report.seams = unseamed.seams;
     report.poles = unseamed.poles;
     report.joined = unseamed.joined;
