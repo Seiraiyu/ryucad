@@ -1268,6 +1268,16 @@ impl Workspace {
                     if let Some(p) = self.model.parts.get(&part) {
                         form.offer(&p.founders());
                     }
+                    // An instance may take its part's latest release.
+                    let placed = a.result["part"].as_str().unwrap_or_default();
+                    if let Some(l) = self
+                        .states
+                        .by_part
+                        .get(placed)
+                        .and_then(|s| s["label"].as_str())
+                    {
+                        form.offer_revs(&[l.to_owned()]);
+                    }
                     self.form = Some(form);
                 }
             }

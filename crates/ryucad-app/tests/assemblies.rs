@@ -88,3 +88,35 @@ fn the_window_draws_an_assembly_where_it_places_its_parts() {
                 .is_some_and(|m| (m.mesh.as_ref().unwrap().origin[1] - 0.01).abs() < 1e-9)
     }));
 }
+
+#[test]
+fn the_form_edits_an_instance() {
+    let p = assembled();
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.part("frame").is_some()));
+    ws.open_form(Some(key("frame", "b2")));
+    assert!(ws.wait_until(WAIT, |ws| ws.form.is_some()));
+    let f = ws.form.as_mut().unwrap();
+    assert_eq!(f.ty, "instance");
+    assert_eq!(f.origin[0].read, "0.04 m");
+    assert_eq!(f.rev.as_ref().unwrap().read, "working");
+    f.origin[1].text = "15 mm".into();
+    f.fixed.as_mut().unwrap().chosen = true;
+    ws.save_form();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.form.as_ref().is_some_and(|f| !f.saving && !f.dirty())
+    }));
+    let shown = p.ok(&["feature", "show", "frame", "b2"]);
+    assert_eq!(
+        shown["pose"]["origin_m"],
+        serde_json::json!([0.04, 0.015, 0])
+    );
+    assert_eq!(shown["fixed"], true);
+    // The tree says so.
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.part("frame")
+            .and_then(|p| p.feature("b2"))
+            .and_then(|f| f.instance.as_ref())
+            .is_some_and(|i| i.fixed)
+    }));
+}

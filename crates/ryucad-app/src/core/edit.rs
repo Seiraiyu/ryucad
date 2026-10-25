@@ -1,7 +1,8 @@
 //! Editing a feature's parameters and placement, what it does to solids,
 //! an extrude's extent, a boolean's solids, a fillet's or chamfer's sizes
-//! and edges, a hole's sizes, depth and points, and a pattern's spacings,
-//! counts, skips and seeds: the property panel's form.
+//! and edges, a hole's sizes, depth and points, a pattern's spacings,
+//! counts, skips and seeds, and an instance's revision, pose and whether
+//! it is fixed: the property panel's form.
 //! Values stay as written (quantities with their units). A save is an
 //! ordinary `feature.edit` with the revision the form was read at, so a
 //! human's stale edit fails with `conflict` like an agent's; the form then
@@ -519,6 +520,10 @@ pub struct Form {
     pub hole: Option<HoleForm>,
     /// A pattern's spacings, counts, skips and seeds.
     pub pattern: Option<PatternForm>,
+    /// An instance's revision (`working` or a label) and whether it is
+    /// fixed; its pose is the placement, its origin in meters.
+    pub rev: Option<Choice>,
+    pub fixed: Option<Flag>,
     /// What changed under a save that conflicted.
     pub changed: Vec<Changed>,
     /// Why the last save failed, other than a conflict.
@@ -550,8 +555,14 @@ impl Form {
             .flatten()
             .map(|(k, q)| Field::new(k, text(q)))
             .collect();
-        let p = &v["placement"];
         let ty = text(&v["type"]);
+        let instance = ty == "instance";
+        // An instance's pose is its placement, the origin in meters.
+        let pose = instance.then(|| {
+            let o = |i: usize| format!("{} m", v["pose"]["origin_m"][i]);
+            json!({"origin": [o(0), o(1), o(2)], "z": v["pose"]["z"], "x": v["pose"]["x"]})
+        });
+        let p = pose.as_ref().unwrap_or(&v["placement"]);
         let strings =
             |v: &Value| -> Vec<String> { v.as_array().into_iter().flatten().map(text).collect() };
         let acts = matches!(ty.as_str(), "extrude" | "revolve")
@@ -602,6 +613,22 @@ impl Form {
             blend,
             hole,
             pattern,
+            rev: instance.then(|| {
+                let read = match v["rev"]["label"].as_str() {
+                    Some(l) => l.to_owned(),
+                    None => "working".to_owned(),
+                };
+                let mut c = Choice::new("rev", &["working"], read.clone());
+                if read != "working" {
+                    c.options.push(read);
+                }
+                c
+            }),
+            fixed: instance.then(|| Flag {
+                name: "fixed".to_owned(),
+                read: v["fixed"] == true,
+                chosen: v["fixed"] == true,
+            }),
             ty,
             changed: Vec::new(),
             error: None,
@@ -631,6 +658,18 @@ impl Form {
         }
     }
 
+    /// Offers release `labels` of an instance's part, besides `working`
+    /// and the one it reads.
+    pub fn offer_revs(&mut self, labels: &[String]) {
+        if let Some(r) = &mut self.rev {
+            for l in labels {
+                if !r.options.contains(l) {
+                    r.options.push(l.clone());
+                }
+            }
+        }
+    }
+
     /// Whether the feature has a placement to edit.
     pub fn placed(&self) -> bool {
         self.origin.iter().any(|f| !f.read.is_empty())
@@ -650,10 +689,11 @@ impl Form {
     /// Whether anything was typed or chosen.
     pub fn dirty(&self) -> bool {
         self.fields().any(Field::dirty)
-            || [&self.operation, &self.op, &self.target]
+            || [&self.operation, &self.op, &self.target, &self.rev]
                 .into_iter()
                 .flatten()
                 .any(Choice::dirty)
+            || self.fixed.as_ref().is_some_and(Flag::dirty)
             || [&self.targets, &self.tools]
                 .into_iter()
                 .flatten()
@@ -675,11 +715,19 @@ impl Form {
         {
             f.text.clone_from(&f.read);
         }
-        for c in [&mut self.operation, &mut self.op, &mut self.target]
-            .into_iter()
-            .flatten()
+        for c in [
+            &mut self.operation,
+            &mut self.op,
+            &mut self.target,
+            &mut self.rev,
+        ]
+        .into_iter()
+        .flatten()
         {
             c.chosen.clone_from(&c.read);
+        }
+        if let Some(f) = &mut self.fixed {
+            f.chosen = f.read;
         }
         for p in [&mut self.targets, &mut self.tools].into_iter().flatten() {
             p.chosen.clone_from(&p.read);
@@ -736,6 +784,8 @@ impl Form {
             propagate: blend
                 .filter(|b| b.propagate.dirty())
                 .map(|b| b.propagate.chosen),
+            rev: chosen(&self.rev),
+            fixed: self.fixed.as_ref().filter(|f| f.dirty()).map(|f| f.chosen),
             ..FeatureFields::default()
         };
         if let Some(h) = &self.hole {
@@ -826,11 +876,16 @@ impl Form {
                 .chain(f.hole.iter().map(|h| &h.points))
                 .chain(f.pattern.iter().map(|p| &p.seeds));
             let depth = f.hole.as_ref().map(|h| &h.depth);
-            [&f.operation, &f.op, &f.target]
+            [&f.operation, &f.op, &f.target, &f.rev]
                 .into_iter()
                 .flatten()
                 .chain(depth)
                 .map(|c| (c.name.clone(), c.read.clone(), c.chosen.clone()))
+                .chain(
+                    f.fixed
+                        .iter()
+                        .map(|x| (x.name.clone(), x.read.to_string(), x.chosen.to_string())),
+                )
                 .chain(
                     [&f.targets, &f.tools]
                         .into_iter()
@@ -1298,5 +1353,43 @@ mod tests {
                 yours: "4 mm".into()
             }]
         );
+    }
+
+    #[test]
+    fn an_instance_edits_its_revision_pose_and_fixing() {
+        let v = json!({"id": "b1", "type": "instance", "revision": "r1", "part": "bolt",
+                       "rev": "working",
+                       "pose": {"origin_m": [0.01, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}});
+        let mut f = Form::from_show("frame", &v);
+        assert!(f.placed());
+        assert_eq!(f.origin[0].read, "0.01 m");
+        assert_eq!(f.rev.as_ref().unwrap().options, ["working"]);
+        f.offer_revs(&["A".into(), "B".into()]);
+        assert_eq!(f.rev.as_ref().unwrap().options, ["working", "A", "B"]);
+        assert!(!f.dirty());
+        f.rev.as_mut().unwrap().chosen = "B".into();
+        f.fixed.as_mut().unwrap().chosen = true;
+        f.origin[1].text = "5 mm".into();
+        assert!(f.dirty());
+        let Request::FeatureEdit {
+            fields, placement, ..
+        } = f.request().unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (fields.rev.as_deref(), fields.fixed),
+            (Some("B"), Some(true))
+        );
+        assert_eq!(placement.unwrap().origin.unwrap()[1], json!("5 mm"));
+        f.revert();
+        assert!(!f.dirty());
+        // A label read keeps its option.
+        let mut v = v;
+        v["rev"] = json!({"label": "A"});
+        v["fixed"] = json!(true);
+        let f = Form::from_show("frame", &v);
+        assert_eq!(f.rev.as_ref().unwrap().read, "A");
+        assert!(f.fixed.as_ref().unwrap().read);
     }
 }

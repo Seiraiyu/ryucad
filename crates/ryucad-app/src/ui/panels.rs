@@ -1165,11 +1165,21 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
                 ui.end_row();
             }
         }
-        for c in [&mut form.operation, &mut form.op, &mut form.target]
-            .into_iter()
-            .flatten()
+        for c in [
+            &mut form.operation,
+            &mut form.op,
+            &mut form.target,
+            &mut form.rev,
+        ]
+        .into_iter()
+        .flatten()
         {
             choice_row(ui, c);
+        }
+        if let Some(f) = &mut form.fixed {
+            ui.label("");
+            ui.checkbox(&mut f.chosen, "fixed where it is");
+            ui.end_row();
         }
     });
     if let Some(b) = &mut form.blend {
