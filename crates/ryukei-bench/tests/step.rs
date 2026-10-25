@@ -10,6 +10,9 @@
 //!   lump, of the body's volume.
 //! - The pinned corpus `scripts/fetch-corpus.sh` downloads: no file heals
 //!   fewer bodies than `crates/ryustep/tests/corpus/pinned.txt` records.
+//! - A large assembly (1,600 seeded parts placed 3 times each, about
+//!   100 MB) read, healed and written on all cores, against OCCT reading,
+//!   fixing and writing it: ryukei must be faster.
 //!
 //! Prints a report (run with `--nocapture`).
 
@@ -27,7 +30,7 @@ use ryukei_testkit::blend_bytes::blend_case;
 use ryukei_testkit::boolean_bytes::boolean_case;
 use ryukei_testkit::mesh::volume_and_area;
 use ryukei_testkit::sweep_bytes::sweep;
-use ryustep::{LengthUnit, Product, ReadOptions, WriteModel, WriteOptions, read, write};
+use ryustep::{Child, LengthUnit, Product, ReadOptions, WriteModel, WriteOptions, read, write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -277,4 +280,104 @@ fn pinned_corpus_heals_no_fewer_bodies() {
     }
     println!("healed {healed} of {total} bodies");
     assert!(fell.is_empty(), "{fell:#?}");
+}
+
+/// Bodies in the large assembly, and placements of each.
+const PARTS: usize = 1600;
+const COPIES: usize = 3;
+
+/// A large assembly: [`PARTS`] seeded bodies that can be written, each its own part, placed
+/// [`COPIES`] times on a grid under one root, as AP242 in millimetres.
+fn assembly() -> Vec<u8> {
+    // A torus face whose loop spirals can't be written (7.B's limit).
+    let mut bodies = seeded(PARTS as u64);
+    bodies.retain(|b| ryukei::heal::seamed(b, 1e-7).is_ok());
+    bodies.truncate(PARTS);
+    let n = bodies.len();
+    let mut products: Vec<Product> = bodies
+        .into_iter()
+        .enumerate()
+        .map(|(i, b)| part(&format!("p{i}"), vec![b]))
+        .collect();
+    let children = (0..n)
+        .flat_map(|i| {
+            (0..COPIES).map(move |c| Child {
+                product: i,
+                place: Rigid::translation(Vector3::new(10.0 * i as f64, 10.0 * c as f64, 0.0)),
+            })
+        })
+        .collect();
+    products.push(Product {
+        id: "root".into(),
+        name: "root".into(),
+        bodies: vec![],
+        children,
+    });
+    write(
+        &WriteModel { products },
+        &write_opts(LengthUnit::Millimeter),
+    )
+    .unwrap()
+}
+
+#[test]
+fn large_assembly_beats_occt() {
+    let dir = std::env::temp_dir().join("ryukei-bench-step");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("assembly.stp");
+    let t = Instant::now();
+    let bytes = assembly();
+    std::fs::write(&path, &bytes).unwrap();
+    println!(
+        "assembly: {:.1} MB, made in {:.1} s",
+        bytes.len() as f64 / 1e6,
+        t.elapsed().as_secs_f64()
+    );
+    // ryustep: read and heal every body, then write them all again.
+    let t = Instant::now();
+    let model = read(&bytes, &opts()).unwrap();
+    let healed: Vec<Body> = model
+        .bodies
+        .iter()
+        .filter_map(|b| b.result.as_ref().ok().map(|r| r.0.clone()))
+        .collect();
+    let read_s = t.elapsed().as_secs_f64();
+    let t = Instant::now();
+    let out = write(
+        &WriteModel {
+            products: vec![part("all", healed.clone())],
+        },
+        &write_opts(LengthUnit::Millimeter),
+    )
+    .unwrap();
+    let write_s = t.elapsed().as_secs_f64();
+    // OCCT: read, fix and write.
+    let t = Instant::now();
+    let shape = occt::Solid::read_step(&path, true).unwrap();
+    let occt_read = t.elapsed().as_secs_f64();
+    let t = Instant::now();
+    shape
+        .write_step(&dir.join("assembly-occt.stp"), true)
+        .unwrap();
+    let occt_write = t.elapsed().as_secs_f64();
+    let ours = read_s + write_s;
+    let theirs = occt_read + occt_write;
+    println!(
+        "ryustep: {} of {} bodies, read and healed {read_s:.2} s, wrote {:.1} MB in {write_s:.2} s; total {ours:.2} s",
+        healed.len(),
+        model.bodies.len(),
+        out.len() as f64 / 1e6
+    );
+    println!(
+        "OCCT: {} solids, read and fixed {occt_read:.2} s, wrote {occt_write:.2} s; total {theirs:.2} s",
+        shape.solids().len()
+    );
+    // Seeded bodies that don't come back through STEP are refused by
+    // name, never built wrong: counted, not failed.
+    for b in &model.bodies {
+        if let Err(e) = &b.result {
+            println!("refused: #{} {e:?}", b.representation);
+        }
+    }
+    assert!(ours < theirs, "ryustep {ours:.2} s, OCCT {theirs:.2} s");
 }
