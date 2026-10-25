@@ -226,16 +226,24 @@ impl Session {
             .is_some_and(|(rev, _)| *rev == p.revision);
         if !fresh {
             let empty = Cache::new();
-            let (mut result, cache) = rebuild_part_with(p, self.cache.get(part).unwrap_or(&empty));
+            let (result, cache) = rebuild_part_with(p, self.cache.get(part).unwrap_or(&empty));
             self.cache.insert(part.clone(), cache);
             let revision = p.revision.clone();
-            for (_, r) in &mut result.features {
-                if let Err(e) = r {
-                    *e = self.explain(part, e.clone());
-                }
-            }
             self.learn(part, &result);
             self.results.insert(part.clone(), (revision, result));
+            // Explained against this rebuild, not the one before: which
+            // feature took a name away is read from these results.
+            let explained: Vec<(usize, Error)> = self.results[part]
+                .1
+                .features
+                .iter()
+                .enumerate()
+                .filter_map(|(i, (_, r))| Some((i, self.explain(part, r.as_ref().err()?.clone()))))
+                .collect();
+            let result = &mut self.results.get_mut(part).expect("just put").1;
+            for (i, e) in explained {
+                result.features[i].1 = Err(e);
+            }
         }
         Ok(&self.results[part].1)
     }
@@ -248,7 +256,10 @@ impl Session {
 
     /// Adds to `reference_unresolved` what its name was when it last
     /// resolved (`was`: `{kind, from}`), if this session saw it, and
-    /// which feature of its solid's chain took it away (`removed_by`).
+    /// which feature of its solid's chain took it away (`removed_by`):
+    /// one that dropped it after the feature before it had it, or the
+    /// feature that made it (`was.from.feature`) when that one no longer
+    /// does (its sketch drawn again with new IDs).
     pub fn explain(&self, part: &Id, e: Error) -> Error {
         let order = self
             .project
@@ -283,11 +294,14 @@ impl Session {
         let reader = e.details["feature"]
             .as_str()
             .and_then(|f| Id::parse(f, "feature").ok());
+        let maker = was
+            .and_then(|w| w["from"]["feature"].as_str())
+            .and_then(|f| Id::parse(f, "feature").ok());
         let removed = dependency
             .zip(name.and_then(crate::doc::reference::parse_name))
             .zip(reader)
             .and_then(|((solid, name), reader)| {
-                self.removed_by(part, order, &solid, name, &reader)
+                self.removed_by(part, order, &solid, name, &reader, maker.as_ref())
             });
         if let Some(by) = removed {
             e.details["removed_by"] = serde_json::json!(by);
@@ -296,8 +310,8 @@ impl Session {
     }
 
     /// The feature of `solid`'s chain, before `reader`, that left the
-    /// solid without `name` after the one before it had it, in the cached
-    /// rebuild.
+    /// solid without `name` after the one before it had it, or `maker`
+    /// itself when its own result lacks it, in the cached rebuild.
     fn removed_by(
         &self,
         part: &Id,
@@ -305,6 +319,7 @@ impl Session {
         solid: &Id,
         name: ryukei::name::Name,
         reader: &Id,
+        maker: Option<&Id>,
     ) -> Option<Id> {
         let p = self.project.parts.get(part)?;
         let result = &self.results.get(part)?.1;
@@ -321,7 +336,7 @@ impl Session {
         for f in chain {
             match has(f) {
                 Some(true) => had = true,
-                Some(false) if had => return Some(f.clone()),
+                Some(false) if had || maker == Some(f) => return Some(f.clone()),
                 _ => {}
             }
             if f == last {
