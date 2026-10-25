@@ -295,6 +295,77 @@ fn pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &dyn Target, target: f
     go(s, p, c, [0.0, 1.0], target, MAX_HALVINGS)
 }
 
+/// Spans a line pcurve is certified over (see [`pcurve_certified`]).
+const LINE_SPANS: usize = 16;
+
+/// A certified bound on how far `surface` takes the pcurve `c2`, at its
+/// parameter `map[0] + map[1] t`, from `curve` over `range`: a line over
+/// [`LINE_SPANS`] equal spans, a polynomial spline over its Bézier pieces,
+/// each halved where its bound is looser than `target`; it stops at the
+/// first span past `target`. `None` for a pcurve of another kind (a
+/// conic, a rational spline), or on a surface with no bound on its first
+/// derivatives (a swept surface). A pcurve checked only at samples can
+/// pass between them (a file's approximation, an iso-line under an edge
+/// whose parameter isn't affine in the line's); this bounds it
+/// everywhere.
+pub(crate) fn pcurve_certified(
+    surface: &Surface,
+    curve: &Curve,
+    [t0, t1]: [f64; 2],
+    c2: &Curve2,
+    map: [f64; 2],
+    target: f64,
+) -> Option<f64> {
+    if matches!(surface, Surface::Extrusion(_) | Surface::Revolution(_)) {
+        return None;
+    }
+    // Each span: a polynomial piece over local [0, 1] and the stretch of
+    // the edge it runs along, increasing.
+    let mut spans: Vec<(BezierCurve<Vector2>, [f64; 2])> = Vec::new();
+    match c2 {
+        Curve2::Line2(line) => {
+            let uv = |t: f64| c2.point(map[0] + map[1] * t).to_vector();
+            let d = line.dir() * map[1];
+            for i in 0..LINE_SPANS {
+                let a = t0 + (t1 - t0) * i as f64 / LINE_SPANS as f64;
+                let b = t0 + (t1 - t0) * (i + 1) as f64 / LINE_SPANS as f64;
+                spans.push((piece(hermite(uv(a), d, uv(b), d, b - a), [a, b]), [a, b]));
+            }
+        }
+        Curve2::Nurbs2(n) if n.weights().iter().all(|&w| w == 1.0) && map[1] != 0.0 => {
+            for p in n.pieces() {
+                // The edge's parameters at the piece's ends, increasing.
+                let [sa, sb] = p.range;
+                let (ta, tb) = ((sa - map[0]) / map[1], (sb - map[0]) / map[1]);
+                let (lo, hi) = (ta.min(tb).max(t0), ta.max(tb).min(t1));
+                if lo >= hi {
+                    continue;
+                }
+                let mut q = p.clone();
+                let (mut qa, mut qb) = (ta, tb);
+                if tb < ta {
+                    q.pts.reverse();
+                    (qa, qb) = (tb, ta);
+                }
+                let (x0, x1) = ((lo - qa) / (qb - qa), (hi - qa) / (qb - qa));
+                let mut part = sub(&q, x0.max(0.0), x1.min(1.0));
+                part.range = [lo, hi];
+                spans.push((part, [lo, hi]));
+            }
+        }
+        _ => return None,
+    }
+    let mut worst = 0.0f64;
+    for (span, t) in &spans {
+        let along = CurveTarget { curve, t: *t };
+        worst = worst.max(pcurve_bound(surface, span, &along, target));
+        if worst > target {
+            break;
+        }
+    }
+    Some(worst)
+}
+
 /// A certified bound on the distance of a span from a surface, halving
 /// it where the bound is too loose.
 fn surface_bound(imp: &Implicit, span: &Piece3, target: f64, depth: u32) -> f64 {
