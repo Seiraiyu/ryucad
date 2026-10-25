@@ -226,25 +226,7 @@ fn turned_and_closed_primitives_heal() {
 
 #[test]
 fn a_cavity_is_built_in_its_solid() {
-    use crate::boolean::{BooleanOp, Tool, ToolKey, boolean};
-    let outer = primitive::block(OpKey(1), 4.0, 4.0, 4.0, &Rigid::IDENTITY)
-        .unwrap()
-        .0;
-    let inner = primitive::sphere(OpKey(2), 1.0, &Rigid::IDENTITY)
-        .unwrap()
-        .0;
-    let hollow = boolean(
-        OpKey(3),
-        BooleanOp::Subtract,
-        &outer,
-        &[Tool {
-            key: ToolKey(1),
-            body: &inner,
-            place: Rigid::translation(Vector3::new(2.0, 2.0, 2.0)),
-        }],
-    )
-    .unwrap()
-    .0;
+    let hollow = hollow();
     assert_eq!(hollow.counts().shells, 2);
     let s = plain(&hollow);
     assert_eq!(s.solids.len(), 1);
@@ -973,4 +955,187 @@ fn faces_against_their_neighbours_are_turned_over() {
         assert_eq!(report.turned, [names.faces[k]]);
         assert!(journal.events().contains(&Event::Modified(names.faces[k])));
     }
+}
+
+/// A block 4 m on a side with a ball of radius 1 cut out of its middle.
+fn hollow() -> Body {
+    use crate::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    let outer = primitive::block(OpKey(1), 4.0, 4.0, 4.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let inner = primitive::sphere(OpKey(2), 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    boolean(
+        OpKey(3),
+        BooleanOp::Subtract,
+        &outer,
+        &[Tool {
+            key: ToolKey(1),
+            body: &inner,
+            place: Rigid::translation(Vector3::new(2.0, 2.0, 2.0)),
+        }],
+    )
+    .unwrap()
+    .0
+}
+
+/// Two shapes as one, each keeping its own shells and solids.
+fn joined(a: &Shape, b: &Shape) -> Shape {
+    let mut s = a.clone();
+    let (ns, nc, nc2) = (s.surfaces.len(), s.curves.len(), s.curves2.len());
+    let (nv, ne, nf, nsh) = (
+        s.vertices.len(),
+        s.edges.len(),
+        s.faces.len(),
+        s.shells.len(),
+    );
+    s.surfaces.extend(b.surfaces.iter().cloned());
+    s.curves.extend(b.curves.iter().cloned());
+    s.curves2.extend(b.curves2.iter().cloned());
+    s.vertices.extend(b.vertices.iter().copied());
+    s.edges.extend(b.edges.iter().map(|e| Edge {
+        curve: e.curve + nc,
+        start: e.start + nv,
+        end: e.end + nv,
+        ..*e
+    }));
+    s.faces.extend(b.faces.iter().map(|f| {
+        Face {
+            surface: f.surface + ns,
+            loops: f
+                .loops
+                .iter()
+                .map(|l| match l {
+                    Loop::Edges(list) => Loop::Edges(
+                        list.iter()
+                            .map(|u| Use {
+                                edge: u.edge + ne,
+                                pcurve: u.pcurve.map(|c| c + nc2),
+                                ..*u
+                            })
+                            .collect(),
+                    ),
+                    Loop::Vertex(v) => Loop::Vertex(v + nv),
+                })
+                .collect(),
+            ..f.clone()
+        }
+    }));
+    s.shells.extend(b.shells.iter().map(|sh| Shell {
+        faces: sh.faces.iter().map(|f| f + nf).collect(),
+        closed: sh.closed,
+    }));
+    s.solids.extend(b.solids.iter().map(|so| Solid {
+        outer: so.outer + nsh,
+        voids: so.voids.iter().map(|v| v + nsh).collect(),
+    }));
+    s
+}
+
+#[test]
+fn a_shell_inside_out_is_turned_over() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &tilted())
+        .unwrap()
+        .0;
+    let mut s = plain(&b);
+    for k in 0..s.faces.len() {
+        turn_face(&mut s, k);
+    }
+    let names = names::names(OpKey(7), &s);
+    let (h, _, report) = heal_ok(&s);
+    assert_eq!(h.counts(), b.counts());
+    let mut all = names.faces.clone();
+    all.sort();
+    assert_eq!(report.turned, all);
+}
+
+#[test]
+fn a_cavity_facing_out_is_turned_into_it() {
+    let b = hollow();
+    let mut s = plain(&b);
+    let ball = (0..s.faces.len())
+        .find(|&k| matches!(s.surfaces[s.faces[k].surface], Surface::Sphere(_)))
+        .unwrap();
+    turn_face(&mut s, ball);
+    let names = names::names(OpKey(7), &s);
+    let (h, _, report) = heal_ok(&s);
+    assert_eq!(h.counts(), b.counts());
+    assert_eq!(report.turned, [names.faces[ball]]);
+}
+
+#[test]
+fn cavities_follow_geometry_not_the_file() {
+    let b = hollow();
+    let s = plain(&b);
+    let solid = s.solids[0].clone();
+    // The cavity named the outer shell, and the shells as two solids.
+    let mut swapped = s.clone();
+    swapped.solids = vec![Solid {
+        outer: solid.voids[0],
+        voids: vec![solid.outer],
+    }];
+    let mut apart = s.clone();
+    apart.solids = vec![
+        Solid {
+            outer: solid.outer,
+            voids: vec![],
+        },
+        Solid {
+            outer: solid.voids[0],
+            voids: vec![],
+        },
+    ];
+    for t in [swapped, apart] {
+        let (h, _, report) = heal_ok(&t);
+        assert_eq!(h.counts(), b.counts());
+        assert_eq!(report.turned, []);
+    }
+}
+
+#[test]
+fn a_solid_in_a_cavity_is_a_solid_of_its_own() {
+    let core = primitive::block(
+        OpKey(4),
+        0.4,
+        0.4,
+        0.4,
+        &Rigid::translation(Vector3::new(1.8, 1.8, 1.8)),
+    )
+    .unwrap()
+    .0;
+    let s = joined(&plain(&hollow()), &plain(&core));
+    let (h, _, _) = heal_ok(&s);
+    // The outer void region, the hollow block and the core.
+    assert_eq!(h.counts().regions, 3);
+    assert_eq!(h.counts().shells, 3);
+    let mut shells: Vec<usize> = h
+        .regions()
+        .skip(1)
+        .map(|r| h.region_shells(r).count())
+        .collect();
+    shells.sort();
+    assert_eq!(shells, [1, 2]);
+}
+
+#[test]
+fn shells_that_cross_are_refused() {
+    let a = primitive::block(OpKey(1), 4.0, 4.0, 4.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let b = primitive::block(
+        OpKey(2),
+        4.0,
+        4.0,
+        4.0,
+        &Rigid::translation(Vector3::new(2.0, 1.5, 1.3)),
+    )
+    .unwrap()
+    .0;
+    let s = joined(&plain(&a), &plain(&b));
+    let r = heal(OpKey(7), &s, &HealOptions::default());
+    assert!(
+        matches!(r, Err(Error::InvalidHeal(HealError::ShellsCross { a, b })) if a < b),
+        "{r:?}"
+    );
 }
