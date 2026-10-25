@@ -4315,6 +4315,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryumate"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "ryukei",
+ "ryukei-testkit",
+ "ryusketch",
+]
+
+[[package]]
 name = "ryupdm"
 version = "0.0.0"
 dependencies = [
