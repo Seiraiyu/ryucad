@@ -548,7 +548,10 @@ enum FeatureCmd {
     /// fillet (--radius, --edge) or chamfer (--form, --d, --d1, --d2, --angle,
     /// --face, --edge) of a solid's edges, or several sizes (--groups); or a
     /// hole (--sketch, --point, --diameter, --depth, --form counterbore or
-    /// countersink, --bottom) cut from solids (--target).
+    /// countersink, --bottom) cut from solids (--target); or a pattern of
+    /// joins, cuts and holes (--seed): --form linear (--direction,
+    /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
+    /// --angle) or mirror (--plane), skipping instances (--skip).
     Add {
         part: String,
         #[arg(value_name = "TYPE")]
@@ -569,7 +572,8 @@ enum FeatureCmd {
     },
     /// Change some of a feature's parameters or placement, a sketch's
     /// plane, what an extrude or revolve sweeps and how far, a fillet's or
-    /// chamfer's sizes and edges, or a hole's points, form, sizes and depth.
+    /// chamfer's sizes and edges, a hole's points, form, sizes and depth,
+    /// or a pattern's seeds, form, directions, counts and skips.
     Edit {
         part: String,
         id: String,
@@ -837,7 +841,8 @@ struct ParamArgs {
 
 #[derive(Args)]
 struct FieldArgs {
-    /// A sketch's plane: xy, yz or zx.
+    /// A sketch's plane: xy, yz or zx. A mirror pattern's: those, or a planar face
+    /// <part>/<feature>/<name>.
     #[arg(long)]
     plane: Option<String>,
     /// A planar face to sketch on, or the face a chamfer's first distance runs along:
@@ -877,12 +882,14 @@ struct FieldArgs {
     /// How much further than --up-to's target to go (negative stops short).
     #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
     offset: Option<String>,
-    /// Extrude against the sketch's normal (or --reverse false).
+    /// Extrude against the sketch's normal, or a linear pattern against its direction
+    /// (or --reverse false).
     #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
     reverse: Option<bool>,
     /// A revolve's axis: a line of its sketch, or a straight edge in the sketch's plane
-    /// (<part>/<feature>/<name>).
-    #[arg(long, value_name = "LINE")]
+    /// (<part>/<feature>/<name>). A circular pattern's: x, y, z, or a straight or
+    /// circular edge or a cylindrical or conical face.
+    #[arg(long, value_name = "AXIS")]
     axis: Option<String>,
     /// A revolve's angle: 90, "90 deg", or full; a chamfer's angle to its face
     /// (distance_angle).
@@ -963,6 +970,38 @@ struct FieldArgs {
     /// A hole's bottom: flat (the default), or a drill point's included angle: 118.
     #[arg(long, value_name = "BOTTOM")]
     bottom: Option<String>,
+    /// A join, cut or hole a pattern repeats; repeat for several.
+    #[arg(long = "seed", value_name = "FEATURE")]
+    seeds: Vec<String>,
+    /// A linear pattern's direction: x, y, z, or a straight edge or planar face
+    /// <part>/<feature>/<name>.
+    #[arg(long, value_name = "DIRECTION")]
+    direction: Option<String>,
+    /// A linear pattern's spacing.
+    #[arg(long, value_name = "QUANTITY")]
+    spacing: Option<String>,
+    /// A pattern's count along its direction or round its axis, the seed's included.
+    #[arg(long, value_name = "EXPRESSION")]
+    count: Option<String>,
+    /// A linear pattern's second direction, as --direction ("" for none).
+    #[arg(long, value_name = "DIRECTION")]
+    direction2: Option<String>,
+    /// A linear pattern's spacing along its second direction.
+    #[arg(long, value_name = "QUANTITY")]
+    spacing2: Option<String>,
+    /// A linear pattern's count along its second direction.
+    #[arg(long, value_name = "EXPRESSION")]
+    count2: Option<String>,
+    /// A linear pattern against its second direction (or --reverse2 false).
+    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
+    reverse2: Option<bool>,
+    /// An instance a pattern leaves out: i, or i,j with two directions; repeat for
+    /// several.
+    #[arg(long = "skip", value_name = "INDEX", value_parser = instance)]
+    skip: Vec<Value>,
+    /// Leave no instance out again, when editing.
+    #[arg(long, conflicts_with = "skip")]
+    no_skip: bool,
 }
 
 impl FieldArgs {
@@ -1055,6 +1094,19 @@ impl FieldArgs {
                 "flat" => json!("flat"),
                 b => json!({ "drill": b }),
             }),
+            features: (!self.seeds.is_empty()).then(|| self.seeds.clone()),
+            direction: self.direction.clone(),
+            spacing: self.spacing.clone().map(Value::String),
+            count: self.count.clone().map(Value::String),
+            direction2: self.direction2.clone(),
+            spacing2: self.spacing2.clone().map(Value::String),
+            count2: self.count2.clone().map(Value::String),
+            reverse2: self.reverse2,
+            skip: if self.no_skip {
+                Some(json!([]))
+            } else {
+                (!self.skip.is_empty()).then(|| json!(self.skip))
+            },
         }
     }
 }
@@ -1171,6 +1223,19 @@ fn triple(s: &str) -> core::result::Result<[String; 3], String> {
     parts
         .try_into()
         .map_err(|_| "expected three values: X,Y,Z".to_owned())
+}
+
+/// A pattern instance's index: `i`, or `i,j` along two directions.
+fn instance(s: &str) -> core::result::Result<Value, String> {
+    let n = |x: &str| {
+        x.trim()
+            .parse::<u32>()
+            .map_err(|_| format!("{x:?} is not an instance's index"))
+    };
+    match s.split_once(',') {
+        Some((i, j)) => Ok(json!([n(i)?, n(j)?])),
+        None => Ok(json!(n(s)?)),
+    }
 }
 
 fn vector(s: &str) -> core::result::Result<[f64; 3], String> {

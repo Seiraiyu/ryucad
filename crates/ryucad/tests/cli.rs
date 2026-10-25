@@ -2611,3 +2611,110 @@ fn holes_from_the_cli() {
     );
     p.fails(&["feature", "delete", "p", "s"], "has_dependents", 1);
 }
+
+#[test]
+fn patterns_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=20", "--param", "y=10", "--param",
+        "z=5", "--origin", "-10,-5,0",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--origin", "0,0,5",
+    ]);
+    let ops = r#"[
+        {"op": "add", "type": "point", "at": [3, 2]},
+        {"op": "add", "type": "fix", "a": "p1"}
+    ]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "h",
+        "--sketch",
+        "s",
+        "--diameter",
+        "1",
+        "--depth",
+        "2",
+    ]);
+    // Three along x, then a second row along -y, one skipped.
+    let pat = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "pattern",
+        "--id",
+        "pat",
+        "--seed",
+        "h",
+        "--direction",
+        "x",
+        "--spacing",
+        "2",
+        "--count",
+        "3",
+    ]);
+    assert_eq!(pat["feature"]["targets"], serde_json::json!(["b"]));
+    assert_eq!(pat["feature"]["count"]["n"], 3.0);
+    p.ok(&["rebuild", "p"]);
+    p.ok(&[
+        "feature",
+        "edit",
+        "p",
+        "pat",
+        "--direction2",
+        "y",
+        "--spacing2",
+        "2",
+        "--count2",
+        "2",
+        "--reverse2",
+        "--skip",
+        "2,1",
+    ]);
+    let show = p.ok(&["feature", "show", "p", "pat"]);
+    assert_eq!(show["skip"], serde_json::json!([[2, 1]]));
+    assert_eq!(show["reverse2"], true);
+    p.ok(&["rebuild", "p"]);
+    // Round the z axis, then its mirror image in the yz plane.
+    p.ok(&[
+        "feature",
+        "edit",
+        "p",
+        "pat",
+        "--form",
+        "circular",
+        "--axis",
+        "z",
+        "--count",
+        "4",
+        "--angle",
+        "360",
+        "--no-skip",
+    ]);
+    let show = p.ok(&["feature", "show", "p", "pat"]);
+    assert_eq!(show["axis"], "z");
+    assert!(show.get("skip").is_none() && show.get("direction").is_none());
+    p.ok(&["rebuild", "p"]);
+    p.ok(&[
+        "feature", "edit", "p", "pat", "--form", "mirror", "--plane", "yz",
+    ]);
+    p.ok(&["rebuild", "p"]);
+    p.fails(
+        &["feature", "edit", "p", "pat", "--skip", "1"],
+        "invalid_document",
+        1,
+    );
+    p.fails(
+        &["feature", "edit", "p", "pat", "--seed", "b"],
+        "reference_wrong_kind",
+        1,
+    );
+    p.fails(&["feature", "delete", "p", "h"], "has_dependents", 1);
+}

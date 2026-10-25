@@ -1139,6 +1139,138 @@ const CHAMFER: [&str; 9] = [
     "edges",
 ];
 
+const PATTERN: [&str; 15] = [
+    "form",
+    "features",
+    "direction",
+    "spacing",
+    "count",
+    "direction2",
+    "spacing2",
+    "count2",
+    "reverse",
+    "reverse2",
+    "axis",
+    "angle",
+    "plane",
+    "skip",
+    "targets",
+];
+
+/// A pattern from `current`'s fields (none for a new one, whose form,
+/// left out, is what its fields say: a mirror with a plane, circular with
+/// an axis, else linear) with what was given laid over them. A new form
+/// keeps only the fields it takes; references (a direction, an axis, a
+/// plane) are given as text and kept as a file holds them; `direction2`
+/// `""` drops the second direction, and no skips, or false, is the
+/// default.
+fn pattern_from(
+    current: Option<&crate::doc::pattern::Pattern>,
+    given: &Given,
+    part: &Id,
+    unit: Unit,
+    env: &Env,
+) -> Result<Feature> {
+    use crate::doc::pattern::Pattern;
+    let f = &given.fields;
+    let fresh = || {
+        let form = match (&f.plane, &f.axis) {
+            (Some(_), _) => "mirror",
+            (None, Some(_)) => "circular",
+            _ => "linear",
+        };
+        json!({ "form": form })
+    };
+    let mut v = current.map_or_else(fresh, Pattern::fields);
+    let o = v.as_object_mut().expect("an object");
+    const SECOND: [&str; 4] = ["direction2", "spacing2", "count2", "reverse2"];
+    if let Some(form) = &f.form {
+        let takes: &[&str] = match form.as_str() {
+            "linear" => &[
+                "direction",
+                "spacing",
+                "count",
+                "reverse",
+                "direction2",
+                "spacing2",
+                "count2",
+                "reverse2",
+                "skip",
+            ],
+            "circular" => &["axis", "count", "angle", "skip"],
+            _ => &[],
+        };
+        o.retain(|k, _| {
+            takes.contains(&k.as_str()) || ["features", "targets"].contains(&k.as_str())
+        });
+        o.insert("form".into(), json!(form));
+    }
+    // A reference given as text; an origin axis or plane as its name.
+    let entity = |t: &str, at: &str| -> Result<Value> {
+        if t.contains('/') {
+            Ok(Reference::parse(t, part)
+                .map_err(|e| e.with("pointer", at))?
+                .to_json())
+        } else {
+            Ok(json!(t))
+        }
+    };
+    if f.direction2.as_deref() == Some("") {
+        o.retain(|k, _| !SECOND.contains(&k.as_str()));
+    }
+    for (k, x) in [
+        ("direction", &f.direction),
+        ("direction2", &f.direction2),
+        ("axis", &f.axis),
+        ("plane", &f.plane),
+    ] {
+        if let Some(t) = x.as_deref().filter(|t| !t.is_empty()) {
+            o.insert(k.into(), entity(t, &format!("/{k}"))?);
+        }
+    }
+    for (k, x) in [
+        ("spacing", &f.spacing),
+        ("count", &f.count),
+        ("spacing2", &f.spacing2),
+        ("count2", &f.count2),
+        ("angle", &f.angle),
+    ] {
+        if let Some(x) = x {
+            o.insert(k.into(), x.clone());
+        }
+    }
+    for (k, x) in [("reverse", f.reverse), ("reverse2", f.reverse2)] {
+        match x {
+            Some(true) => {
+                o.insert(k.into(), json!(true));
+            }
+            Some(false) => {
+                o.remove(k);
+            }
+            None => {}
+        }
+    }
+    match &f.skip {
+        Some(x) if x == &json!([]) => {
+            o.remove("skip");
+        }
+        Some(x) => {
+            o.insert("skip".into(), x.clone());
+        }
+        None => {}
+    }
+    if let Some(x) = &f.features {
+        o.insert("features".into(), json!(x));
+    }
+    if let Some(t) = &f.targets {
+        o.insert("targets".into(), json!(t));
+    }
+    let mut o = crate::doc::files::Obj::new(&v, "")?;
+    let p = Pattern::from_fields(&mut o, unit, env)?;
+    o.finish()?;
+    Ok(Feature::Pattern(p))
+}
+
 const HOLE: [&str; 9] = [
     "sketch",
     "points",
@@ -1782,6 +1914,12 @@ fn check_resolved(
             }
             _ => Ok(()),
         },
+        // What its directions, axis and plane are; where the instances
+        // land only rebuild can tell.
+        Feature::Pattern(x) => {
+            let q = proposed(p, order, &[(id, f)]);
+            crate::pattern::motions(&q, id, x, results).map(|_| ())
+        }
         // Edges of one solid, a face where a face goes, no edge twice; what
         // the kernel makes of them only rebuild can tell.
         Feature::Fillet(_) | Feature::Chamfer(_) => {
@@ -1843,6 +1981,17 @@ fn feature_add(
     let mut list = order(p)?;
     let env = p.env.clone();
     let at = insert_at(&list, position)?;
+    // A pattern with no targets acts on its first seed's.
+    if ty == "pattern" && given.fields.targets.is_none() {
+        let seed = given.fields.features.as_ref().and_then(|s| s.first());
+        let theirs = seed
+            .and_then(|s| Id::parse(s, "feature").ok())
+            .and_then(|s| p.features.get(&s).cloned())
+            .and_then(|f| f.ok());
+        if let Some(f) = theirs.filter(|f| !f.targets().is_empty()) {
+            given.fields.targets = Some(f.targets().iter().map(|t| t.to_string()).collect());
+        }
+    }
     // A join, cut, intersect or hole with no targets acts on the part's
     // one solid; the file names it all the same.
     let acts = ty == "hole"
@@ -1894,6 +2043,10 @@ fn feature_add(
             given.only(ty, &HOLE)?;
             hole_from(None, &given, &pid, unit, &env)?
         }
+        "pattern" => {
+            given.only(ty, &PATTERN)?;
+            pattern_from(None, &given, &pid, unit, &env)?
+        }
         _ => {
             let ty = PrimitiveType::parse(ty)?;
             given.only(ty.as_str(), &PRIMITIVE)?;
@@ -1924,6 +2077,9 @@ fn feature_add(
         check_sweep(p, &list, &fid, &f)?;
     }
     check_solids(&proposed(p, &list, &[(&fid, &f)]), &[&fid])?;
+    if let Feature::Pattern(x) = &f {
+        crate::pattern::check_seeds(&proposed(p, &list, &[(&fid, &f)]), &fid, x)?;
+    }
     check_references(session, &pid, &list, &fid, &f)?;
     let revision = save(session, &pid, &[(&fid, &f)], list)?;
     Ok(json!({"feature": feature_report(&pid, &fid, &f), "revision": revision}))
@@ -1983,9 +2139,9 @@ fn feature_edit(
             given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
             blend_from(ty, Some(&f), &given, &pid, unit, &p.env)?
         }
-        f @ Feature::Pattern(_) => {
-            given.only("pattern", &[])?;
-            f
+        Feature::Pattern(x) => {
+            given.only("pattern", &PATTERN)?;
+            pattern_from(Some(&x), &given, &pid, unit, &p.env)?
         }
         Feature::Hole(h) => {
             given.only("hole", &HOLE)?;
@@ -2024,6 +2180,9 @@ fn feature_edit(
         }
     }
     check_solids(&proposed(p, &list, &[(&fid, &f)]), &[&fid])?;
+    if let Feature::Pattern(x) = &f {
+        crate::pattern::check_seeds(&proposed(p, &list, &[(&fid, &f)]), &fid, x)?;
+    }
     // References already there were checked when they were written; a
     // fillet or chamfer that now grows its edges, or stops, may reach an
     // edge twice.
@@ -3940,6 +4099,124 @@ pub(crate) mod tests {
         assert_eq!(
             (e.code, &e.details["param"]),
             (Code::InvalidParam, &json!("targets"))
+        );
+    }
+
+    #[test]
+    fn patterns_through_the_protocol() {
+        use crate::sketch::tests::{face_along, vertex_at};
+        let (dir, mut s) = crate::hole::tests::drilled();
+        let body = call(&mut s, "inspect", json!({"part": "p", "feature": "b"})).unwrap()["bodies"]
+            [0]
+        .clone();
+        let add = |s: &mut Session, f: Value| {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(s, "feature.add", f)
+        };
+        let edit = |s: &mut Session, f: Value| {
+            let mut f = f;
+            f["part"] = json!("p");
+            f["id"] = json!("pat");
+            call(s, "feature.edit", f)
+        };
+        let file = |dir: &tempfile::TempDir| -> Value {
+            serde_json::from_str(
+                &std::fs::read_to_string(dir.path().join("parts/p/features/pat.json")).unwrap(),
+            )
+            .unwrap()
+        };
+        add(
+            &mut s,
+            json!({"type": "hole", "id": "h", "sketch": "s", "points": ["p1"],
+                   "diameter": 2, "depth": {"blind": 3}}),
+        )
+        .unwrap();
+        // A pattern acts on its seeds' targets when it names none.
+        let r = add(
+            &mut s,
+            json!({"type": "pattern", "id": "pat", "features": ["h"], "direction": "x",
+                   "spacing": 3, "count": 3}),
+        )
+        .unwrap();
+        let f = &r["feature"];
+        assert_eq!(f["targets"], json!(["b"]));
+        assert_eq!(f["count"], json!({"value": "3", "n": 3.0}));
+        assert_eq!(f["spacing"], json!({"value": "3 mm", "m": 0.003}));
+        assert_eq!(
+            (&file(&dir)["form"], &file(&dir)["format"]),
+            (&json!("linear"), &json!(3))
+        );
+        // A second direction, a skip, then none of either again.
+        let r = edit(
+            &mut s,
+            json!({"direction2": "y", "spacing2": 3, "count2": 2, "reverse2": true,
+                   "skip": [[1, 1]]}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["skip"], json!([[1, 1]]));
+        assert_eq!(r["feature"]["reverse2"], true);
+        call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let e = edit(&mut s, json!({"direction2": ""})).unwrap_err();
+        assert_eq!(e.details["pointer"], "/skip/0", "{e}");
+        let r = edit(&mut s, json!({"direction2": "", "skip": []})).unwrap();
+        assert!(r["feature"].get("direction2").is_none() && r["feature"].get("skip").is_none());
+        // A new form keeps only what it takes: round the z axis, then a
+        // mirror in the box's top face, given as text.
+        let r = edit(
+            &mut s,
+            json!({"form": "circular", "axis": "z", "count": 4, "angle": 90}),
+        )
+        .unwrap();
+        assert!(r["feature"].get("direction").is_none());
+        assert_eq!(r["feature"]["angle"]["value"], "90 deg");
+        assert_eq!(r["feature"]["features"], json!(["h"]));
+        let top = format!("p/b/{}", face_along(&body, [0.0, 0.0, 1.0]));
+        let r = edit(&mut s, json!({"form": "mirror", "plane": top})).unwrap();
+        assert_eq!(r["feature"]["plane"], top);
+        assert!(r["feature"].get("count").is_none());
+        assert_eq!(file(&dir)["plane"]["feature"], "b");
+        // What can be judged now is refused before anything is written.
+        let vertex = format!("p/b/{}", vertex_at(&body, [0.0, 0.0, 0.0]));
+        for (f, code) in [
+            (json!({"features": ["b"]}), Code::ReferenceWrongKind),
+            (json!({"plane": vertex}), Code::ReferenceWrongKind),
+            (json!({"features": ["nope"]}), Code::NotFound),
+            (json!({"radius": 1}), Code::InvalidParam),
+            (
+                json!({"form": "linear", "direction": "w", "spacing": 1, "count": 2}),
+                Code::InvalidDocument,
+            ),
+        ] {
+            let e = edit(&mut s, f.clone()).unwrap_err();
+            assert_eq!(e.code, code, "{f}: {e}");
+        }
+        // A new pattern's form, left out, is what its fields say.
+        let r = add(
+            &mut s,
+            json!({"type": "pattern", "id": "turn", "features": ["h"], "axis": "z",
+                   "count": 2, "angle": 90}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["form"], "circular");
+        call(&mut s, "feature.delete", json!({"part": "p", "id": "turn"})).unwrap();
+        // A seed acting elsewhere than the pattern does.
+        add(
+            &mut s,
+            json!({"type": "box", "id": "o", "params": {"x": 1, "y": 1, "z": 1},
+                   "placement": {"origin": [30, 0, 0]}, "first": true}),
+        )
+        .unwrap();
+        let e = edit(&mut s, json!({"targets": ["o"]})).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["pointer"]),
+            (Code::InvalidParam, &json!("/targets"))
+        );
+        // Its seeds stay while it repeats them.
+        let e = call(&mut s, "feature.delete", json!({"part": "p", "id": "h"})).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["features"]),
+            (Code::HasDependents, &json!(["pat"]))
         );
     }
 

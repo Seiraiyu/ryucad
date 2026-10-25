@@ -61,36 +61,35 @@ pub enum Motion {
     Mirror(Plane),
 }
 
-/// The seeds' own bodies as the pattern reads them, with the operation
-/// they share. A seed must be a join or a cut (a hole is a cut), and all
-/// of them must act alike on the pattern's targets.
-pub fn seeds<'a>(
-    part: &Part,
-    id: &Id,
-    p: &'a Pattern,
-    before: &'a dyn Results,
-) -> Result<(Operation, Vec<(&'a Id, &'a Applied)>)> {
-    let mut out: Vec<(&Id, &Applied)> = Vec::new();
+/// The operation a pattern's seeds share, judged from their files: each
+/// must be a join or a cut (a hole is a cut), all alike, acting on the
+/// pattern's targets.
+pub fn check_seeds(part: &Part, id: &Id, p: &Pattern) -> Result<Operation> {
     let mut op: Option<Operation> = None;
     for (k, seed) in p.features.iter().enumerate() {
         let at = format!("/features/{k}");
-        let out_of = crate::graph::input(part, id, seed, before)?;
-        let ty = part.features[seed]
-            .as_ref()
-            .map_or("feature", Feature::type_name);
-        let applied = out_of
-            .applied()
-            .filter(|a| matches!(a.operation, Operation::Join | Operation::Cut));
-        let Some(applied) = applied else {
+        let f = match part.features.get(seed) {
+            Some(Ok(f)) => f,
+            // Its file's fault, or its absence, is the order check's.
+            _ => continue,
+        };
+        let own = match f {
+            Feature::Hole(_) => Some(Operation::Cut),
+            f => f.combine().map(|c| c.operation),
+        };
+        let Some(own) = own.filter(|o| matches!(o, Operation::Join | Operation::Cut)) else {
             return Err(Error::new(
                 Code::ReferenceWrongKind,
-                format!("pattern {id}: its seed {seed} is a {ty} that joins or cuts nothing; a pattern repeats joins, cuts and holes"),
+                format!(
+                    "pattern {id}: its seed {seed} is a {} that joins or cuts nothing; a pattern repeats joins, cuts and holes",
+                    f.type_name()
+                ),
             )
             .with("feature", id)
             .with("seed", seed)
             .with("pointer", at));
         };
-        if op.is_some_and(|o| o != applied.operation) {
+        if op.is_some_and(|o| o != own) {
             return Err(Error::new(
                 Code::InvalidParam,
                 format!("pattern {id}: its seeds join and cut; give each its own pattern"),
@@ -99,11 +98,8 @@ pub fn seeds<'a>(
             .with("seed", seed)
             .with("pointer", at));
         }
-        op = Some(applied.operation);
-        let theirs: Vec<&Id> = part.features[seed]
-            .as_ref()
-            .map(Feature::targets)
-            .unwrap_or_default();
+        op = Some(own);
+        let theirs = f.targets();
         let same = theirs.len() == p.targets.len() && theirs.iter().all(|t| p.targets.contains(t));
         if !same {
             return Err(Error::new(
@@ -118,9 +114,28 @@ pub fn seeds<'a>(
             .with("seed", seed)
             .with("pointer", "/targets"));
         }
+    }
+    Ok(op.unwrap_or(Operation::Cut))
+}
+
+/// The seeds' own bodies as the pattern reads them, from their results,
+/// with the operation they share ([`check_seeds`]).
+pub fn seeds<'a>(
+    part: &Part,
+    id: &Id,
+    p: &'a Pattern,
+    before: &'a dyn Results,
+) -> Result<(Operation, Vec<(&'a Id, &'a Applied)>)> {
+    let op = check_seeds(part, id, p)?;
+    let mut out: Vec<(&Id, &Applied)> = Vec::new();
+    for seed in &p.features {
+        let built = crate::graph::input(part, id, seed, before)?;
+        let applied = built
+            .applied()
+            .expect("a join, cut or hole that built applied its body");
         out.push((seed, applied));
     }
-    Ok((op.expect("a pattern has seeds"), out))
+    Ok((op, out))
 }
 
 fn join<'a>(ids: impl Iterator<Item = &'a Id>) -> String {

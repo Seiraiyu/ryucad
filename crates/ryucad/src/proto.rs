@@ -96,7 +96,8 @@ pub struct Position {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeatureFields {
-    /// A sketch's origin plane: `xy`, `yz` or `zx`.
+    /// A sketch's origin plane: `xy`, `yz` or `zx`; a mirror pattern's,
+    /// or a planar face as `<part>/<feature>/<name>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plane: Option<String>,
     /// A planar face to sketch on, or the face a chamfer's first distance
@@ -120,10 +121,13 @@ pub struct FeatureFields {
     /// An extrude's extent: `{"type": "blind" | "symmetric", "length"}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extent: Option<Value>,
-    /// Extrude against the sketch's normal.
+    /// Extrude against the sketch's normal; a linear pattern against its
+    /// direction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
-    /// A revolve's axis: a line of its sketch.
+    /// A revolve's axis: a line of its sketch, or a straight edge as
+    /// `<part>/<feature>/<name>`. A circular pattern's: `x`, `y`, `z`, or
+    /// an edge or face as `<part>/<feature>/<name>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub axis: Option<String>,
     /// A revolve's angle, or `"full"`; a chamfer's angle to its face.
@@ -202,6 +206,36 @@ pub struct FeatureFields {
     /// A hole's bottom: `"flat"` (the default) or `{"drill": angle}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bottom: Option<Value>,
+    /// The joins, cuts and holes a pattern repeats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<Vec<String>>,
+    /// A linear pattern's direction: `x`, `y`, `z`, or a straight edge or
+    /// planar face as `<part>/<feature>/<name>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+    /// A linear pattern's spacing along its direction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spacing: Option<Value>,
+    /// How many instances a pattern has along its direction or round its
+    /// axis, the seed's included.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<Value>,
+    /// A linear pattern's second direction, as `direction`; `""` for none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction2: Option<String>,
+    /// A linear pattern's spacing along its second direction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spacing2: Option<Value>,
+    /// How many instances along a linear pattern's second direction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count2: Option<Value>,
+    /// A linear pattern against its second direction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverse2: Option<bool>,
+    /// The instances a pattern leaves out: `i`, or `[i, j]` with two
+    /// directions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip: Option<Value>,
 }
 
 impl FeatureFields {
