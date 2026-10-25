@@ -702,6 +702,81 @@ fn blend(ui: &mut egui::Ui, b: &mut crate::core::edit::BlendForm) {
     ui.checkbox(&mut b.propagate.chosen, "propagate along tangent chains");
 }
 
+/// A hole's form as read, its sizes, its depth (blind with its length,
+/// through all, or up to its target, shown), and its points, each a
+/// checkbox to take it out (adding one is an agent's work).
+fn hole(ui: &mut egui::Ui, h: &mut crate::core::edit::HoleForm) {
+    egui::Grid::new("hole").num_columns(2).show(ui, |ui| {
+        ui.label("form");
+        ui.label(&h.form);
+        ui.end_row();
+        for (_, f) in &mut h.sizes {
+            let name = f.name.clone();
+            field_row(ui, f, &name);
+        }
+        choice_row(ui, &mut h.depth);
+        match h.depth.chosen.as_str() {
+            "blind" => field_row(ui, &mut h.length, "depth"),
+            "up_to" => {
+                ui.label("up to");
+                let t = h.target.clone().unwrap_or_default();
+                ui.monospace(short("face", &t)).on_hover_text(&t);
+                ui.end_row();
+            }
+            _ => {}
+        }
+    });
+    let p = &mut h.points;
+    if p.chosen.is_empty() {
+        ui.label("points: every point no curve uses");
+    } else {
+        ui.label(format!("{}: {}", p.name, p.chosen.join(", ")));
+    }
+    ui.horizontal_wrapped(|ui| {
+        for o in p.options.clone() {
+            let mut on = p.chosen.contains(&o);
+            if ui.checkbox(&mut on, &o).changed() {
+                p.toggle(&o);
+            }
+        }
+    });
+}
+
+/// A pattern's form, directions, axis or plane as read, its spacings,
+/// counts and angle, whether it runs against its directions, its skips
+/// as typed, and its seeds, each a checkbox to take it out.
+fn pattern(ui: &mut egui::Ui, p: &mut crate::core::edit::PatternForm) {
+    egui::Grid::new("pattern").num_columns(2).show(ui, |ui| {
+        ui.label("form");
+        ui.label(&p.form);
+        ui.end_row();
+        for (k, r) in &p.refs {
+            ui.label(k);
+            if r.contains('/') {
+                ui.monospace(short("entity", r)).on_hover_text(r);
+            } else {
+                ui.label(r);
+            }
+            ui.end_row();
+        }
+        for (_, f) in &mut p.sizes {
+            let name = f.name.clone();
+            field_row(ui, f, &name);
+        }
+        if p.form != "mirror" {
+            field_row(ui, &mut p.skip, "skip");
+        }
+    });
+    for (k, f) in &mut p.reverse {
+        let label = match k.as_str() {
+            "reverse" => "against the direction",
+            _ => "against the second direction",
+        };
+        ui.checkbox(&mut f.chosen, label);
+    }
+    picks(ui, &mut p.seeds);
+}
+
 /// The width of a text field in a grid's column: a grid gives a column
 /// other than its last only the width it had last frame, at least 40
 /// points, so a field there asking for more never gets it (`add_sized`
@@ -1067,6 +1142,12 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
     });
     if let Some(b) = &mut form.blend {
         blend(ui, b);
+    }
+    if let Some(h) = &mut form.hole {
+        hole(ui, h);
+    }
+    if let Some(p) = &mut form.pattern {
+        pattern(ui, p);
     }
     // What it acts on: none for a new solid.
     let new = form.operation.as_ref().is_some_and(|o| o.chosen == "new");

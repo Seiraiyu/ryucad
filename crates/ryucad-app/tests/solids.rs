@@ -1,7 +1,8 @@
 //! Solids in the window against a real daemon: one mesh per solid as the
 //! model shows it, features grouped under the solids they act on, a
 //! chosen feature painted by the faces it made, and the form editing what
-//! a feature acts on and a fillet's sizes and edges.
+//! a feature acts on, a fillet's sizes and edges, and a hole's and a
+//! pattern's sizes, counts and skips.
 
 mod common;
 
@@ -209,5 +210,92 @@ fn a_fillet_is_painted_and_its_form_edits_it() {
         ws.made
             .as_ref()
             .is_some_and(|m| m.faces.get(&key("base")).is_some_and(|f| f.len() == 1))
+    }));
+}
+
+#[test]
+fn a_pattern_of_holes_is_painted_and_its_forms_edit_it() {
+    let p = Project::new().with_part();
+    // Holes from the base's top at (14, 3) mm, repeated along y.
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--origin", "0,0,5",
+    ]);
+    let ops = r#"[{"op": "add", "type": "point", "at": [14, 3]},
+                  {"op": "add", "type": "fix", "a": "p1"}]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "h",
+        "--sketch",
+        "s",
+        "--target",
+        "base",
+        "--diameter",
+        "1",
+        "--depth",
+        "2",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "pattern",
+        "--id",
+        "row",
+        "--seed",
+        "h",
+        "--direction",
+        "y",
+        "--spacing",
+        "2",
+        "--count",
+        "3",
+    ]);
+    let mut ws = open(&p);
+    let part = ws.part("p").unwrap();
+    let base = part.solids.iter().find(|s| s.id == "base").unwrap();
+    assert_eq!(base.features, ["base", "h", "row"]);
+    // Choosing the pattern paints what its two instances made: a wall
+    // and a floor each.
+    ws.choose(Some(key("row")));
+    assert!(ws.wait_until(WAIT, |ws| ws.made.is_some()));
+    assert_eq!(ws.made.as_ref().unwrap().faces[&key("base")].len(), 4);
+    // The hole's form: a person makes it wider.
+    ws.open_form(Some(key("h")));
+    assert!(ws.wait_until(WAIT, |ws| ws.form.is_some()));
+    let h = ws.form.as_mut().unwrap().hole.as_mut().unwrap();
+    assert_eq!(h.sizes[0].1.read, "1 mm");
+    h.sizes[0].1.text = "1.2 mm".into();
+    ws.save_form();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.form.as_ref().is_some_and(|f| !f.saving && !f.dirty())
+    }));
+    assert_eq!(
+        p.ok(&["feature", "show", "p", "h"])["diameter"]["value"],
+        "1.2 mm"
+    );
+    // The pattern's: one more, and the middle one skipped.
+    ws.open_form(Some(key("row")));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.form.as_ref().is_some_and(|f| f.feature == "row")
+    }));
+    let r = ws.form.as_mut().unwrap().pattern.as_mut().unwrap();
+    r.sizes[1].1.text = "4".into();
+    r.skip.text = "[2]".into();
+    ws.save_form();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.form.as_ref().is_some_and(|f| !f.saving && !f.dirty())
+    }));
+    let shown = p.ok(&["feature", "show", "p", "row"]);
+    assert_eq!(shown["count"]["value"], "4");
+    assert_eq!(shown["skip"], serde_json::json!([2]));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.made
+            .as_ref()
+            .is_some_and(|m| m.faces.get(&key("base")).is_some_and(|f| f.len() == 4))
     }));
 }

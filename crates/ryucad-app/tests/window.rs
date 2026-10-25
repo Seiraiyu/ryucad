@@ -803,6 +803,74 @@ fn a_fillets_radius_is_edited_in_the_property_panel() {
 }
 
 #[test]
+fn a_patterns_count_is_edited_in_the_property_panel() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--origin", "0,0,5",
+    ]);
+    let ops = r#"[{"op": "add", "type": "point", "at": [14, 3]},
+                  {"op": "add", "type": "fix", "a": "p1"}]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "h",
+        "--sketch",
+        "s",
+        "--target",
+        "base",
+        "--diameter",
+        "1",
+        "--depth",
+        "2",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "pattern",
+        "--id",
+        "row",
+        "--seed",
+        "h",
+        "--direction",
+        "y",
+        "--spacing",
+        "2",
+        "--count",
+        "3",
+    ]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("row (pattern, cut)").click();
+    frames(&mut h, |a| a.opened().ws.form.is_some());
+    h.step();
+    // Its seed and reversal are shown; its count is typed over.
+    h.get_by_label("h");
+    h.get_by_label("against the direction");
+    let field = h.get_all_by_value("3").next().unwrap();
+    field.set_text_value_accesskit("4");
+    h.step();
+    h.get_by_label("Apply").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
+    });
+    let shown = p.ok(&["feature", "show", "p", "row"]);
+    assert_eq!(shown["count"]["value"], "4");
+}
+
+#[test]
 fn the_activity_tab_undoes_and_ctrl_z_does_too() {
     let _one = one_at_a_time();
     if !gpu() {
