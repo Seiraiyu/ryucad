@@ -937,3 +937,125 @@ fn a_redraw_merged_in_fails_the_fillet_and_is_blamed() {
     assert_eq!(failed.len(), 1, "{v}");
     assert_eq!(failed[0]["id"], "f");
 }
+
+/// The planar face of solid `solid` of `part` whose outward normal is `n`.
+fn face_along(r: &Repo, part: &str, solid: &str, n: [f64; 3]) -> String {
+    let v = r.ryucad(&["inspect", part, solid]);
+    v["bodies"][0]["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            let z = &f["surface"]["frame"]["z"];
+            let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+            f["surface"]["type"] == "plane"
+                && (0..3).all(|k| (z[k].as_f64().unwrap() * sign - n[k]).abs() < 1e-12)
+        })
+        .map(|f| f["name"].as_str().unwrap().to_owned())
+        .expect("a face along n")
+}
+
+/// An assembly `frame`: a plate fixed, and a bolt stood on its top by a
+/// revolute 20 mm along, its pose solved and stored.
+fn hinged() -> Repo {
+    let r = Repo::new("");
+    r.ryucad(&["part", "create", "plate"]);
+    r.ryucad(&[
+        "feature", "add", "plate", "box", "--id", "slab", "--param", "x=100", "--param", "y=50",
+        "--param", "z=5",
+    ]);
+    r.ryucad(&["part", "create", "bolt"]);
+    r.ryucad(&[
+        "feature",
+        "add",
+        "bolt",
+        "cylinder",
+        "--id",
+        "shank",
+        "--param",
+        "radius=3",
+        "--param",
+        "height=20",
+    ]);
+    r.ryucad(&["part", "create", "frame", "--assembly"]);
+    r.ryucad(&[
+        "feature", "add", "frame", "instance", "--id", "base", "--of", "plate", "--fixed",
+    ]);
+    r.ryucad(&[
+        "feature", "add", "frame", "instance", "--id", "pin", "--of", "bolt", "--origin",
+        "50mm,0,0",
+    ]);
+    let top = face_along(&r, "plate", "slab", [0.0, 0.0, 1.0]);
+    let foot = face_along(&r, "bolt", "shank", [0.0, 0.0, -1.0]);
+    let v = r.ryucad(&[
+        "feature",
+        "add",
+        "frame",
+        "mate",
+        "--id",
+        "m1",
+        "--form",
+        "revolute",
+        "--a",
+        &format!("frame/base/slab/{top}"),
+        "--a-offset",
+        r#"{"origin": ["20 mm", "0 mm", "0 mm"]}"#,
+        "--b",
+        &format!("frame/pin/shank/{foot}"),
+        "--b-offset",
+        r#"{"flip": true}"#,
+    ]);
+    assert_eq!(v["assemblies"][0]["moved"], json!(["pin"]), "{v}");
+    r.commit("a hinge");
+    r
+}
+
+#[test]
+fn a_merge_that_leaves_an_assembly_stale_says_so_and_repairs_it() {
+    let r = hinged();
+    // Theirs moves the hinge along; ours makes the plate thicker. Each
+    // keeps the assembly current: the pin's pose is written both ways.
+    r.git(&["checkout", "-q", "-b", "theirs"]);
+    r.ryucad(&[
+        "feature",
+        "edit",
+        "frame",
+        "m1",
+        "--a-offset",
+        r#"{"origin": ["30 mm", "0 mm", "0 mm"]}"#,
+    ]);
+    r.commit("theirs: the hinge moved along");
+    r.git(&["checkout", "-q", "main"]);
+    r.ryucad(&["feature", "edit", "plate", "slab", "--param", "z=8"]);
+    r.commit("ours: a thicker plate");
+    // The pin's pose merges as solver state, ours: not where theirs'
+    // hinge holds it.
+    r.git(&["merge", "-q", "--no-commit", "--no-ff", "theirs"]);
+    let v = r.ryucad(&["merge", "status"]);
+    let c: Vec<&Value> = v["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["kind"] == "assembly_stale")
+        .collect();
+    assert_eq!(c.len(), 1, "{v}");
+    assert_eq!(c[0]["files"], json!(["parts/frame/features/pin.json"]));
+    let id = c[0]["id"].as_str().unwrap().to_owned();
+    let repair = c[0]["repairs"][0]["id"].as_str().unwrap().to_owned();
+    r.ryucad(&["merge", "resolve", &id, "--repair", &repair]);
+    let pin = r.json("parts/frame/features/pin.json");
+    let o = &pin["pose"]["origin_m"];
+    assert!((o[0].as_f64().unwrap() - 0.03).abs() < 1e-9, "{o}");
+    assert!((o[2].as_f64().unwrap() - 0.008).abs() < 1e-9, "{o}");
+    r.git(&["add", "-A"]);
+    let v = r.ryucad(&["merge", "status"]);
+    assert!(
+        !v["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["kind"] == "assembly_stale"),
+        "{v}"
+    );
+    r.ryucad(&["check"]);
+}

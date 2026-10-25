@@ -1823,3 +1823,36 @@ mod doctor_tests {
         assert!(!findings.iter().any(|f| f["code"] == "feature_failed"));
     }
 }
+
+#[cfg(test)]
+mod diff_tests {
+    use super::tests::hinged;
+    use crate::server::tests::call;
+    use serde_json::json;
+
+    #[test]
+    fn a_model_diff_says_how_the_solve_changed() {
+        use crate::git::tests::git;
+        let (dir, mut s) = hinged();
+        let r = dir.path();
+        git(r, &["init", "-q", "-b", "main"]);
+        git(r, &["add", "-A"]);
+        git(r, &["commit", "-q", "-m", "a hinge"]);
+        // Driven to an angle, the pin can't turn any more.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1", "angle": "30 deg"}),
+        )
+        .unwrap();
+        let d = call(&mut s, "diff", json!({"model": true})).unwrap();
+        let f = &d["parts"]["frame"];
+        assert_eq!(f["features"]["m1"]["status"], "changed");
+        assert_eq!(
+            f["solve"],
+            json!({"from": {"state": "under", "dof": 1, "converged": true},
+                   "to": {"state": "well", "dof": 0, "converged": true}})
+        );
+        assert_eq!(f["occurrences"]["moved"], json!(["pin"]));
+    }
+}
