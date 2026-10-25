@@ -209,6 +209,8 @@ pub enum Code {
     /// at a release label, or (releasing an assembly) at `working`, at a
     /// label that isn't official, or at an obsolete one.
     InstanceNotReleased,
+    /// A move of an instance that is fixed where it is.
+    InstanceFixed,
 }
 
 impl Code {

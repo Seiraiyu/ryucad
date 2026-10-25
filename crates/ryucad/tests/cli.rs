@@ -966,6 +966,8 @@ fn every_protocol_method_has_a_command() {
         ("sketch.edit", &["sketch", "edit"]),
         ("sketch.solve", &["sketch", "solve"]),
         ("sketch.get", &["sketch", "get"]),
+        ("assembly.move", &["assembly", "move"]),
+        ("assembly.tree", &["assembly", "tree"]),
         ("rebuild", &["rebuild"]),
         ("inspect", &["inspect"]),
         ("check_format", &["check-format"]),

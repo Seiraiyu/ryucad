@@ -495,6 +495,28 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quality: Option<String>,
     },
+    /// Moves an instance of an assembly: to the pose `placement` gives
+    /// (what it leaves out stays), then by `translate` and a turn of
+    /// `angle` about `axis` through its origin, in the assembly's frame.
+    #[serde(rename = "assembly.move")]
+    AssemblyMove {
+        part: String,
+        instance: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placement: Option<PlacementArg>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        translate: Option<[Value; 3]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        axis: Option<[f64; 3]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        angle: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// An assembly's instances as a tree: each with its part, revision and
+    /// how it resolved, its pose in the assembly, and a subassembly's own.
+    #[serde(rename = "assembly.tree")]
+    AssemblyTree { part: String },
     #[serde(rename = "rebuild")]
     Rebuild {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -829,6 +851,7 @@ impl Request {
                 | Request::ReleaseObsolete { .. }
                 | Request::ReleaseSync { .. }
                 | Request::SketchEdit { .. }
+                | Request::AssemblyMove { .. }
                 | Request::Undo { .. }
                 | Request::Redo { .. }
                 | Request::DoctorRepair { .. }

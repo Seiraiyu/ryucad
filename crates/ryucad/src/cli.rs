@@ -77,6 +77,9 @@ enum Command {
     /// dimensions between them.
     #[command(subcommand)]
     Sketch(SketchCmd),
+    /// Move an assembly's instances, or show its tree of instances.
+    #[command(subcommand)]
+    Assembly(AssemblyCmd),
     /// Rebuild one part, or all of them.
     Rebuild {
         part: Option<String>,
@@ -538,6 +541,34 @@ enum PartCmd {
         expect: Expect,
     },
     List,
+}
+
+// Parsed once per run; the size difference costs nothing.
+#[allow(clippy::large_enum_variant)]
+#[derive(Subcommand)]
+enum AssemblyCmd {
+    /// Move an instance: to a pose (--origin, --z, --x; what is left out
+    /// stays), then by --translate and a turn of --angle about --axis
+    /// through its origin, in the assembly's frame.
+    Move {
+        part: String,
+        instance: String,
+        #[command(flatten)]
+        placement: PlacementArgs,
+        /// Three quantities to move it by: 0,0,5mm.
+        #[arg(long, value_name = "VECTOR", value_parser = triple, allow_hyphen_values = true)]
+        translate: Option<[String; 3]>,
+        /// The direction to turn it about (with --angle): 0,0,1.
+        #[arg(long, value_name = "VECTOR", value_parser = vector, allow_hyphen_values = true)]
+        axis: Option<[f64; 3]>,
+        /// How far to turn it (with --axis): 90deg.
+        #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
+        angle: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// The instances as a tree: parts, revisions, poses, subassemblies.
+    Tree { part: String },
 }
 
 #[derive(Subcommand)]
@@ -1315,6 +1346,26 @@ fn request(cmd: &Command) -> Option<Request> {
             expected_revision: expect.revision.clone(),
         },
         Command::Part(PartCmd::List) => Request::PartList {},
+        Command::Assembly(AssemblyCmd::Move {
+            part,
+            instance,
+            placement,
+            translate,
+            axis,
+            angle,
+            expect,
+        }) => Request::AssemblyMove {
+            part: part.clone(),
+            instance: instance.clone(),
+            placement: placement.to_arg(),
+            translate: translate.clone().map(|t| t.map(Value::String)),
+            axis: *axis,
+            angle: angle.clone().map(Value::String),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Assembly(AssemblyCmd::Tree { part }) => {
+            Request::AssemblyTree { part: part.clone() }
+        }
         Command::Feature(FeatureCmd::Add {
             part,
             ty,

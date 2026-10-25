@@ -337,6 +337,27 @@ fn dispatch(
             };
             crate::sketch::get(session, &part, &sketch, quality)
         }
+        Request::AssemblyMove {
+            part,
+            instance,
+            placement,
+            translate,
+            axis,
+            angle,
+            expected_revision,
+        } => crate::assembly::moved(
+            session,
+            &part,
+            &instance,
+            crate::assembly::Move {
+                placement,
+                translate,
+                axis,
+                angle,
+            },
+            expected_revision.as_deref(),
+        ),
+        Request::AssemblyTree { part } => crate::assembly::tree(session, &part),
         Request::FeatureShow { part, id } => {
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
             let p = session.project().part(&part)?;

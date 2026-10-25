@@ -719,6 +719,190 @@ pub fn pins(project: &Project, mut look: impl FnMut(&Id, &str) -> Result<Pinned>
     out
 }
 
+/// How `assembly.move` moves an instance.
+pub struct Move {
+    pub placement: Option<crate::proto::PlacementArg>,
+    pub translate: Option<[serde_json::Value; 3]>,
+    pub axis: Option<[f64; 3]>,
+    pub angle: Option<serde_json::Value>,
+}
+
+/// `assembly.move`: writes instance `instance` of assembly `part` where
+/// `how` puts it. A fixed instance is `instance_fixed`.
+pub fn moved(
+    session: &mut crate::session::Session,
+    part: &str,
+    instance: &str,
+    how: Move,
+    expected: Option<&str>,
+) -> Result<serde_json::Value> {
+    use crate::units::{Field, Quantity};
+    let pid = crate::server::part_id(part)?;
+    let iid = crate::server::feature_id(instance)?;
+    let unit = session.project().manifest.default_unit;
+    let p = session.project().part(&pid)?;
+    crate::server::check_revision(p, expected)?;
+    if crate::server::part_kind(p) != PartKind::Assembly {
+        return Err(Error::new(
+            Code::WrongPartKind,
+            format!("{pid} is a part; only an assembly's instances move"),
+        )
+        .with("part", &pid));
+    }
+    let Feature::Instance(mut inst) = crate::server::feature(p, &iid)?.clone() else {
+        return Err(
+            Error::new(Code::ReferenceWrongKind, format!("{iid} isn't an instance"))
+                .with("feature", &iid),
+        );
+    };
+    if inst.fixed {
+        return Err(Error::new(
+            Code::InstanceFixed,
+            format!("{iid} is fixed where it is; free it with feature.edit (fixed: false)"),
+        )
+        .with("feature", &iid));
+    }
+    let env = p.env.clone();
+    let lookup = |n: &str| env.get(n);
+    if let Some(arg) = how.placement {
+        if let Some(origin) = arg.origin {
+            for (i, v) in origin.iter().enumerate() {
+                let q = Quantity::from_json_as(v, Field::Length(unit), &lookup)
+                    .map_err(|e| e.with("pointer", format!("/placement/origin/{i}")))?;
+                inst.pose.origin_m[i] = q.meters();
+            }
+        }
+        if let Some(z) = arg.z {
+            inst.pose.z = z;
+        }
+        if let Some(x) = arg.x {
+            inst.pose.x = x;
+        }
+    }
+    match (how.axis, how.angle) {
+        (None, None) => {}
+        (Some(axis), Some(angle)) => {
+            let a = Quantity::from_json_as(&angle, Field::Angle, &lookup)
+                .map_err(|e| e.with("param", "angle"))?;
+            let axis = Vector3::new(axis[0], axis[1], axis[2])
+                .normalize()
+                .ok_or_else(|| {
+                    Error::new(Code::InvalidParam, "the axis has no direction")
+                        .with("param", "axis")
+                })?;
+            let turn = Rigid::rotation(axis, a.radians());
+            let v = |a: [f64; 3]| Vector3::new(a[0], a[1], a[2]);
+            let z = turn.apply_vector(v(inst.pose.z));
+            let x = turn.apply_vector(v(inst.pose.x));
+            inst.pose.z = [z.x, z.y, z.z];
+            inst.pose.x = [x.x, x.y, x.z];
+        }
+        _ => {
+            return Err(
+                Error::new(Code::InvalidParam, "a turn needs both an axis and an angle")
+                    .with("param", "angle"),
+            );
+        }
+    }
+    if let Some(t) = how.translate {
+        for (i, v) in t.iter().enumerate() {
+            let q = Quantity::from_json_as(v, Field::Length(unit), &lookup)
+                .map_err(|e| e.with("pointer", format!("/translate/{i}")))?;
+            inst.pose.origin_m[i] += q.meters();
+        }
+    }
+    let clean = crate::doc::sketch::clean;
+    inst.pose.origin_m = inst.pose.origin_m.map(clean);
+    inst.pose.z = inst.pose.z.map(clean);
+    inst.pose.x = inst.pose.x.map(clean);
+    pose_rigid(&inst.pose)?;
+    let pose = inst.pose;
+    let list = crate::server::order(p)?;
+    let f = Feature::Instance(inst);
+    let revision = crate::server::save(session, &pid, &[(&iid, &f)], list)?;
+    Ok(
+        serde_json::json!({"part": pid, "instance": iid, "pose": pose.to_json(),
+                          "revision": revision}),
+    )
+}
+
+/// `assembly.tree`: assembly `part`'s instances, each with its part,
+/// revision and how it resolved, whether it is fixed, its pose in the
+/// assembly, a subassembly's instances under it, and why it failed.
+pub fn tree(session: &mut crate::session::Session, part: &str) -> Result<serde_json::Value> {
+    let pid = crate::server::part_id(part)?;
+    let p = session.project().part(&pid)?.clone();
+    if crate::server::part_kind(&p) != PartKind::Assembly {
+        return Err(Error::new(
+            Code::WrongPartKind,
+            format!("{pid} is a part, not an assembly"),
+        )
+        .with("part", &pid));
+    }
+    let result = session.rebuilt(&pid)?.clone();
+    let instances = nodes(session, &p, &result, &Rigid::IDENTITY, &[])?;
+    Ok(serde_json::json!({"part": pid, "revision": p.revision, "instances": instances}))
+}
+
+/// The tree under `p`, rebuilt as `result`, placed at `at` with its
+/// instances' paths starting with `prefix`.
+fn nodes(
+    session: &mut crate::session::Session,
+    p: &Part,
+    result: &PartResult,
+    at: &Rigid,
+    prefix: &[Id],
+) -> Result<Vec<serde_json::Value>> {
+    let mut out = Vec::new();
+    for (fid, r) in &result.features {
+        let Some(Ok(Feature::Instance(inst))) = p.features.get(fid) else {
+            continue;
+        };
+        let mut path = prefix.to_vec();
+        path.push(fid.clone());
+        let mut v = serde_json::json!({"id": fid, "path": path_text(&path), "part": inst.part,
+                                       "rev": inst.rev.to_json(), "ok": r.is_ok()});
+        if inst.fixed {
+            v["fixed"] = serde_json::json!(true);
+        }
+        match r {
+            Err(e) => v["error"] = serde_json::json!(e),
+            Ok(o) => {
+                let placed = o.instance().expect("an instance places");
+                let here = at.then_after(&placed.pose);
+                v["pose"] = rigid_pose(&here).to_json();
+                if let Some(pin) = &placed.model.pin {
+                    v["pin"] = pin.to_json();
+                }
+                // A subassembly's own instances, as its revision has them.
+                let child = match &inst.rev {
+                    Rev::Working => session.project().part(&inst.part).ok().cloned(),
+                    Rev::Label(l) => crate::release::pinned(session, &inst.part, l)
+                        .ok()
+                        .map(|x| x.part),
+                };
+                if let Some(c) =
+                    child.filter(|c| c.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly))
+                {
+                    let r = match &inst.rev {
+                        Rev::Working => session.rebuilt(&inst.part)?.clone(),
+                        Rev::Label(l) => {
+                            match session.store.pinned.get(&(inst.part.clone(), l.clone())) {
+                                Some((_, r)) => r.clone(),
+                                None => continue,
+                            }
+                        }
+                    };
+                    v["kind"] = serde_json::json!("assembly");
+                    v["instances"] = serde_json::json!(nodes(session, &c, &r, &here, &path)?);
+                }
+            }
+        }
+        out.push(v);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1472,5 +1656,138 @@ pub(crate) mod tests {
             (Code::HasDependents, json!(["frame/p1"]))
         );
         call(&mut s, "part.delete", json!({"part": "plate"})).unwrap();
+    }
+
+    #[test]
+    fn instances_move_and_moves_undo() {
+        use crate::live::Live;
+        use crate::server::tests::call_live;
+        let (_dir, mut s) = project();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "instance", "id": "b1", "of": "bolt"}),
+        )
+        .unwrap();
+        let mut live = Live::new();
+        let v = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "assembly.move",
+            json!({"part": "frame", "instance": "b1", "placement": {"origin": ["10 mm", 0, 0]},
+                   "translate": [0, "5 mm", 0]}),
+        )
+        .unwrap();
+        assert_eq!(v["pose"]["origin_m"], json!([0.01, 0.005, 0]));
+        // A turn about its own origin, in the assembly's frame.
+        let v = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "assembly.move",
+            json!({"part": "frame", "instance": "b1", "axis": [0, 0, 1], "angle": "90 deg"}),
+        )
+        .unwrap();
+        assert_eq!(v["pose"]["origin_m"], json!([0.01, 0.005, 0]));
+        let x: Vec<f64> = v["pose"]["x"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_f64().unwrap())
+            .collect();
+        assert!(x[0].abs() < 1e-15 && (x[1] - 1.0).abs() < 1e-15, "{x:?}");
+        let m = s.model(&id("frame"), &Rev::Working).unwrap();
+        assert_eq!(origin(&m.occurrences[0]), [0.01, 0.005, 0.0]);
+        // Undone, it is back where the translation left it.
+        call_live(&mut s, &mut live, None, "undo", json!({})).unwrap();
+        let shown = call(&mut s, "feature.show", json!({"part": "frame", "id": "b1"})).unwrap();
+        assert_eq!(shown["pose"]["x"], json!([1, 0, 0]));
+        // Refusals.
+        let mv = |s: &mut Session, v: Value| call(s, "assembly.move", v).unwrap_err().code;
+        assert_eq!(
+            mv(
+                &mut s,
+                json!({"part": "frame", "instance": "b1", "axis": [0, 0, 1]})
+            ),
+            Code::InvalidParam
+        );
+        assert_eq!(
+            mv(
+                &mut s,
+                json!({"part": "frame", "instance": "b1", "expected_revision": "x"})
+            ),
+            Code::Conflict
+        );
+        assert_eq!(
+            mv(&mut s, json!({"part": "bolt", "instance": "shank"})),
+            Code::WrongPartKind
+        );
+        assert_eq!(
+            mv(&mut s, json!({"part": "frame", "instance": "nope"})),
+            Code::NotFound
+        );
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "b1", "fixed": true}),
+        )
+        .unwrap();
+        assert_eq!(
+            mv(
+                &mut s,
+                json!({"part": "frame", "instance": "b1", "translate": [1, 0, 0]})
+            ),
+            Code::InstanceFixed
+        );
+    }
+
+    #[test]
+    fn the_tree_nests_subassemblies_and_says_what_failed() {
+        let (dir, mut s) = released();
+        let r = dir.path();
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "pair", "kind": "assembly"}),
+        )
+        .unwrap();
+        place_in(
+            r,
+            "pair",
+            "left",
+            "bolt",
+            json!({"label": "A"}),
+            [-0.01, 0.0, 0.0],
+        );
+        place_in(
+            r,
+            "pair",
+            "right",
+            "bolt",
+            json!("working"),
+            [0.01, 0.0, 0.0],
+        );
+        place_in(r, "frame", "p1", "pair", json!("working"), [0.05, 0.0, 0.0]);
+        place_in(r, "frame", "z", "bolt", json!({"label": "Z"}), [0.0; 3]);
+        s.refresh().unwrap();
+        let t = call(&mut s, "assembly.tree", json!({"part": "frame"})).unwrap();
+        let p1 = &t["instances"][0];
+        assert_eq!(
+            (&p1["kind"], &p1["path"]),
+            (&json!("assembly"), &json!("p1"))
+        );
+        let left = &p1["instances"][0];
+        assert_eq!(left["path"], "p1/left");
+        assert_eq!(left["pin"]["official"], true);
+        assert_eq!(left["pose"]["origin_m"], json!([0.04, 0, 0]));
+        assert!(left.get("instances").is_none());
+        let z = &t["instances"][1];
+        assert_eq!(
+            (&z["ok"], &z["error"]["code"]),
+            (&json!(false), &json!("label_not_found"))
+        );
+        let e = call(&mut s, "assembly.tree", json!({"part": "bolt"})).unwrap_err();
+        assert_eq!(e.code, Code::WrongPartKind);
     }
 }
