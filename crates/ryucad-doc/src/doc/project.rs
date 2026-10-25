@@ -562,10 +562,7 @@ mod tests {
         let p = id("p");
         write_json(
             &part_path(root, &p),
-            &PartFile {
-                features: vec![id("a"), id("b")],
-            }
-            .to_json(),
+            &PartFile::new(vec![id("a"), id("b")]).to_json(),
         )
         .unwrap();
         for (f, r) in [("a", "1"), ("b", "2")] {
@@ -776,11 +773,7 @@ mod tests {
         same(&project);
         // New parts either side of it, with strays of their own.
         for q in ["a", "q"] {
-            write_json(
-                &part_path(root, &id(q)),
-                &PartFile { features: vec![] }.to_json(),
-            )
-            .unwrap();
+            write_json(&part_path(root, &id(q)), &PartFile::new(vec![]).to_json()).unwrap();
             fs::write(root.join(format!("parts/{q}/x.txt")), "x").unwrap();
             let changed = [format!("parts/{q}/part.json"), format!("parts/{q}/x.txt")];
             project.reload(&changed).unwrap();

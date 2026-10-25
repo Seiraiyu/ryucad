@@ -236,6 +236,16 @@ pub struct FeatureFields {
     /// directions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip: Option<Value>,
+    /// The part an instance places.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub of: Option<String>,
+    /// The revision an instance places: `working` (the default) or a
+    /// release label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+    /// Whether mates hold an instance where it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed: Option<bool>,
 }
 
 impl FeatureFields {
@@ -287,8 +297,13 @@ pub enum Request {
     },
     #[serde(rename = "project.info")]
     ProjectInfo {},
+    /// Creates an empty part, or with `kind` `assembly` an assembly.
     #[serde(rename = "part.create")]
-    PartCreate { part: String },
+    PartCreate {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
+    },
     #[serde(rename = "part.delete")]
     PartDelete {
         part: String,
@@ -480,6 +495,28 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quality: Option<String>,
     },
+    /// Moves an instance of an assembly: to the pose `placement` gives
+    /// (what it leaves out stays), then by `translate` and a turn of
+    /// `angle` about `axis` through its origin, in the assembly's frame.
+    #[serde(rename = "assembly.move")]
+    AssemblyMove {
+        part: String,
+        instance: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placement: Option<PlacementArg>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        translate: Option<[Value; 3]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        axis: Option<[f64; 3]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        angle: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// An assembly's instances as a tree: each with its part, revision and
+    /// how it resolved, its pose in the assembly, and a subassembly's own.
+    #[serde(rename = "assembly.tree")]
+    AssemblyTree { part: String },
     #[serde(rename = "rebuild")]
     Rebuild {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -609,6 +646,18 @@ pub enum Request {
         rev: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         off: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    /// What a participant's window shows: with `part`, that part or
+    /// assembly; with `project`, the project's model; with neither, what it
+    /// shows now. `participant`, else the one human, else the caller.
+    #[serde(rename = "view.focus")]
+    ViewFocus {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        project: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         participant: Option<String>,
     },
@@ -814,6 +863,7 @@ impl Request {
                 | Request::ReleaseObsolete { .. }
                 | Request::ReleaseSync { .. }
                 | Request::SketchEdit { .. }
+                | Request::AssemblyMove { .. }
                 | Request::Undo { .. }
                 | Request::Redo { .. }
                 | Request::DoctorRepair { .. }
@@ -1045,7 +1095,13 @@ mod tests {
 
     #[test]
     fn only_writers_mutate() {
-        assert!(Request::PartCreate { part: "p".into() }.mutates());
+        assert!(
+            Request::PartCreate {
+                part: "p".into(),
+                kind: None,
+            }
+            .mutates()
+        );
         assert!(
             Request::MergeResolve {
                 resolutions: Vec::new(),

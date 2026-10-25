@@ -77,6 +77,9 @@ enum Command {
     /// dimensions between them.
     #[command(subcommand)]
     Sketch(SketchCmd),
+    /// Move an assembly's instances, or show its tree of instances.
+    #[command(subcommand)]
+    Assembly(AssemblyCmd),
     /// Rebuild one part, or all of them.
     Rebuild {
         part: Option<String>,
@@ -224,6 +227,18 @@ enum Command {
         /// Stop comparing.
         #[arg(long)]
         off: bool,
+        #[arg(long = "of", value_name = "PARTICIPANT")]
+        of: Option<String>,
+    },
+    /// Show a part or assembly in a participant's window (the one human's,
+    /// else the caller's), or the project's model with --project; with
+    /// neither, say what it shows.
+    Focus {
+        #[arg(value_name = "PART", conflicts_with = "project")]
+        part: Option<String>,
+        /// Show the project's model: its one root assembly, else every part.
+        #[arg(long)]
+        project: bool,
         #[arg(long = "of", value_name = "PARTICIPANT")]
         of: Option<String>,
     },
@@ -525,8 +540,12 @@ impl ScopeArgs {
 
 #[derive(Subcommand)]
 enum PartCmd {
+    /// Create an empty part, or with --assembly an empty assembly.
     Create {
         part: String,
+        /// An assembly: its features place other parts.
+        #[arg(long)]
+        assembly: bool,
     },
     Delete {
         part: String,
@@ -534,6 +553,34 @@ enum PartCmd {
         expect: Expect,
     },
     List,
+}
+
+// Parsed once per run; the size difference costs nothing.
+#[allow(clippy::large_enum_variant)]
+#[derive(Subcommand)]
+enum AssemblyCmd {
+    /// Move an instance: to a pose (--origin, --z, --x; what is left out
+    /// stays), then by --translate and a turn of --angle about --axis
+    /// through its origin, in the assembly's frame.
+    Move {
+        part: String,
+        instance: String,
+        #[command(flatten)]
+        placement: PlacementArgs,
+        /// Three quantities to move it by: 0,0,5mm.
+        #[arg(long, value_name = "VECTOR", value_parser = triple, allow_hyphen_values = true)]
+        translate: Option<[String; 3]>,
+        /// The direction to turn it about (with --angle): 0,0,1.
+        #[arg(long, value_name = "VECTOR", value_parser = vector, allow_hyphen_values = true)]
+        axis: Option<[f64; 3]>,
+        /// How far to turn it (with --axis): 90deg.
+        #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
+        angle: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// The instances as a tree: parts, revisions, poses, subassemblies.
+    Tree { part: String },
 }
 
 #[derive(Subcommand)]
@@ -551,7 +598,8 @@ enum FeatureCmd {
     /// countersink, --bottom) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
-    /// --angle) or mirror (--plane), skipping instances (--skip).
+    /// --angle) or mirror (--plane), skipping instances (--skip); or, in an
+    /// assembly, an instance (--of, --rev, --origin, --z, --x, --fixed).
     Add {
         part: String,
         #[arg(value_name = "TYPE")]
@@ -1002,6 +1050,15 @@ struct FieldArgs {
     /// Leave no instance out again, when editing.
     #[arg(long, conflicts_with = "skip")]
     no_skip: bool,
+    /// The part an instance places.
+    #[arg(long, value_name = "PART")]
+    of: Option<String>,
+    /// The revision an instance places: working (the default) or a release label.
+    #[arg(long, value_name = "REV")]
+    rev: Option<String>,
+    /// Hold an instance where it is when mates are solved (--fixed false to free it).
+    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
+    fixed: Option<bool>,
 }
 
 impl FieldArgs {
@@ -1107,6 +1164,9 @@ impl FieldArgs {
             } else {
                 (!self.skip.is_empty()).then(|| json!(self.skip))
             },
+            of: self.of.clone(),
+            rev: self.rev.clone(),
+            fixed: self.fixed,
         }
     }
 }
@@ -1289,12 +1349,35 @@ fn request(cmd: &Command) -> Option<Request> {
         | Command::Open { .. } => {
             return None;
         }
-        Command::Part(PartCmd::Create { part }) => Request::PartCreate { part: part.clone() },
+        Command::Part(PartCmd::Create { part, assembly }) => Request::PartCreate {
+            part: part.clone(),
+            kind: assembly.then(|| "assembly".to_owned()),
+        },
         Command::Part(PartCmd::Delete { part, expect }) => Request::PartDelete {
             part: part.clone(),
             expected_revision: expect.revision.clone(),
         },
         Command::Part(PartCmd::List) => Request::PartList {},
+        Command::Assembly(AssemblyCmd::Move {
+            part,
+            instance,
+            placement,
+            translate,
+            axis,
+            angle,
+            expect,
+        }) => Request::AssemblyMove {
+            part: part.clone(),
+            instance: instance.clone(),
+            placement: placement.to_arg(),
+            translate: translate.clone().map(|t| t.map(Value::String)),
+            axis: *axis,
+            angle: angle.clone().map(Value::String),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Assembly(AssemblyCmd::Tree { part }) => {
+            Request::AssemblyTree { part: part.clone() }
+        }
         Command::Feature(FeatureCmd::Add {
             part,
             ty,
@@ -1617,6 +1700,11 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Compare { rev, off, of } => Request::CompareSet {
             rev: rev.clone(),
             off: *off,
+            participant: of.clone(),
+        },
+        Command::Focus { part, project, of } => Request::ViewFocus {
+            part: part.clone(),
+            project: *project,
             participant: of.clone(),
         },
         Command::Activity { limit, before } => Request::ActivityLog {

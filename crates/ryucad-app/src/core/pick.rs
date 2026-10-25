@@ -187,8 +187,7 @@ impl Picker {
     /// drawn).
     pub fn of(model: &Model, sketches: bool) -> Picker {
         let bodies: Vec<Body> = model
-            .meshes
-            .iter()
+            .drawn()
             .filter_map(|(key, b)| {
                 let m = mesh(b)?;
                 let (lo, hi) = bounds((0..m.positions.len()).map(|i| at(m, i as u32)))
@@ -623,6 +622,11 @@ mod tests {
             faults: Vec::new(),
         };
         let mut model = Model::default();
+        // The part is in the model, so the window shows it.
+        model.parts.insert(
+            "p".into(),
+            crate::core::model::Part::from_report(&serde_json::json!({"part": "p"})),
+        );
         let body = WireBody {
             feature: "f".into(),
             hash: "h".into(),

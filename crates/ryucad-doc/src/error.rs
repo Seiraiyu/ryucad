@@ -194,6 +194,23 @@ pub enum Code {
     /// that runs off a face, a corner or surface it can't build yet. Its
     /// reason and the edges and faces involved are in the details.
     BlendFailed,
+    /// A feature of a kind its part doesn't hold: an instance in a part,
+    /// or a solid, sketch or blend in an assembly.
+    WrongPartKind,
+    /// An assembly that places itself, through instances at any depth.
+    /// The path is in the details.
+    AssemblyCycle,
+    /// An instance names a release label its part has no record of.
+    LabelNotFound,
+    /// An instance names a release that isn't official yet, and whose
+    /// proposed record doesn't describe the part's files as they are.
+    LabelNotOfficial,
+    /// An instance a release can't hold: at `working` inside a part read
+    /// at a release label, or (releasing an assembly) at `working`, at a
+    /// label that isn't official, or at an obsolete one.
+    InstanceNotReleased,
+    /// A move of an instance that is fixed where it is.
+    InstanceFixed,
 }
 
 impl Code {
@@ -306,6 +323,13 @@ mod tests {
         assert_eq!(Code::TargetsMixed.exit_code(), 1);
         assert_eq!(Code::EdgeListedTwice.exit_code(), 1);
         assert_eq!(Code::BlendFailed.exit_code(), 1);
+        assert_eq!(Code::WrongPartKind.exit_code(), 1);
+        assert_eq!(json!(Code::AssemblyCycle), json!("assembly_cycle"));
+        assert_eq!(Code::LabelNotOfficial.exit_code(), 1);
+        assert_eq!(
+            json!(Code::InstanceNotReleased),
+            json!("instance_not_released")
+        );
     }
 
     #[test]

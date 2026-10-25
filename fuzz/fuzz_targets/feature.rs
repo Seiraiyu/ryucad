@@ -10,7 +10,11 @@
 //! must pass the checks, cross or overlap itself nowhere and mesh with no
 //! faults, and a sketch that solves must solve to finite
 //! positions that are current: solving them again, in the same context,
-//! changes nothing. Any panic is a bug.
+//! changes nothing. An instance is built instead as feature `f` of an
+//! assembly `asm` in a project holding that part as `fz` and an assembly
+//! `sub` placing `asm`: it must place its part or give a structured error,
+//! never an internal one, and every occurrence must be finite and sound.
+//! Any panic is a bug.
 
 #![no_main]
 
@@ -88,14 +92,92 @@ fn part(f: Feature) -> Part {
     features.insert(id("f"), Ok(f));
     Part {
         id: Id::parse("fz", "part").unwrap(),
-        file: Ok(PartFile {
-            features: vec![id("b"), id("c"), id("s"), id("t"), id("k"), id("f")],
-        }),
+        file: Ok(PartFile::new(vec![
+            id("b"),
+            id("c"),
+            id("s"),
+            id("t"),
+            id("k"),
+            id("f"),
+        ])),
         parameters: None,
         env: Env::empty(),
         features,
         uses: BTreeMap::new(),
         revision: String::new(),
+    }
+}
+
+/// Builds instance `f` (as written) in assembly `asm` of a project with
+/// part `fz` (the base) and an assembly `sub` placing `asm`.
+fn assemble(written: &str) {
+    use ryucad::assembly::{Rebuild, Store};
+    use ryucad::error::{Code, Error};
+    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut put = |path: &str, v: serde_json::Value| {
+        files.insert(path.to_owned(), canonical::to_string(&v).into_bytes());
+    };
+    put(
+        "ryucad.json",
+        serde_json::json!({"default_unit": "mm", "format": 1, "kind": "ryucad.project"}),
+    );
+    put(
+        "parts/fz/part.json",
+        PartFile::new(base().iter().map(|(i, _)| i.clone()).collect()).to_json(),
+    );
+    for (i, f) in base() {
+        put(&format!("parts/fz/features/{i}.json"), f.to_json());
+    }
+    let assembly = |list: &[&str]| {
+        serde_json::json!({"features": list, "format": 2, "kind": "ryucad.part",
+                           "part_kind": "assembly"})
+    };
+    put("parts/asm/part.json", assembly(&["f"]));
+    put(
+        "parts/asm/features/f.json",
+        canonical::parse(written).unwrap(),
+    );
+    put("parts/sub/part.json", assembly(&["a"]));
+    put(
+        "parts/sub/features/a.json",
+        serde_json::json!({"format": 4, "kind": "ryucad.feature", "type": "instance",
+                           "part": "asm", "rev": "working",
+                           "pose": {"origin_m": [0, 0, 0.01], "z": [0, 0, 1], "x": [1, 0, 0]}}),
+    );
+    let project = ryucad::doc::project::Project::load_from(std::path::Path::new("/fz"), &files)
+        .expect("the project loads");
+    let pins = ryucad::assembly::pins(&project, |part, label| {
+        Err(Error::new(
+            Code::LabelNotFound,
+            format!("{part} has no {label}"),
+        ))
+    });
+    let mut r = Rebuild::new(&project, &pins, Store::default());
+    for asm in ["asm", "sub"] {
+        let result = r
+            .result(&Id::parse(asm, "part").unwrap())
+            .expect("assemblies rebuild");
+        for (_, out) in &result.features {
+            match out {
+                Ok(Output::Instance(p)) => {
+                    for o in &p.model.occurrences {
+                        let pose = ryucad::assembly::rigid_pose(&o.pose);
+                        assert!(
+                            pose.origin_m
+                                .iter()
+                                .chain(&pose.z)
+                                .chain(&pose.x)
+                                .all(|x| x.is_finite())
+                        );
+                        for sd in &o.solids {
+                            assert!(ryukei::check::check(&sd.built.body).is_empty());
+                        }
+                    }
+                }
+                Ok(_) => panic!("an assembly makes only instances"),
+                Err(e) => assert_ne!(e.code, Code::Internal, "{e:?}"),
+            }
+        }
     }
 }
 
@@ -120,6 +202,10 @@ fuzz_target!(|data: &[u8]| {
     .unwrap();
     assert_eq!(back, f);
     assert_eq!(canonical::to_string(&back.to_json()), written);
+    if let Feature::Instance(_) = &f {
+        assemble(&written);
+        return;
+    }
     let part = part(f);
     let r = rebuild_part(&part);
     let me = id("f");
@@ -157,6 +243,8 @@ fuzz_target!(|data: &[u8]| {
             let again = ryucad::sketch::solve_in(&me, &solved.sketch, &ctx).unwrap();
             assert!(!again.stale);
         }
+        // An instance in a part fails before it builds.
+        Some(Output::Instance(_)) => panic!("an instance built in a part"),
         None => {}
     }
 });

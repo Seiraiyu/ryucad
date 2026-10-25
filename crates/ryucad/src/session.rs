@@ -14,10 +14,12 @@
 //! so only what differs is rebuilt.
 
 use crate::activity::Files;
+use crate::assembly::{Model, Pins, Rebuild, Store};
+use crate::doc::assembly::Rev;
 use crate::doc::id::Id;
-use crate::doc::project::Project;
+use crate::doc::project::{Part, Project};
 use crate::error::{Error, Result};
-use crate::rebuild::{Cache, PartResult, rebuild_part_with};
+use crate::rebuild::PartResult;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
@@ -43,10 +45,13 @@ pub struct Session {
     project: Project,
     stamps: BTreeMap<PathBuf, Stamp>,
     stamped_at: SystemTime,
-    results: BTreeMap<Id, (String, PartResult)>,
-    /// Each part's results by feature, keyed by their inputs' hash: a
-    /// rebuild reuses every feature whose inputs haven't changed.
-    cache: BTreeMap<Id, Cache>,
+    /// Each part's rebuild, and its results by feature keyed by their
+    /// inputs' hash, so a rebuild reuses every feature whose inputs haven't
+    /// changed; the same for parts read at release labels.
+    pub(crate) store: Store,
+    /// Parts as release labels have them, loaded from the commit where
+    /// each record became official, by part and commit.
+    pinned_parts: BTreeMap<(Id, String), Part>,
     /// What each name of a feature's body was, by part and feature, from
     /// every build this session has seen: its kind and, for a sweep, where
     /// it came from. Names are only added, so a reference whose name has
@@ -77,8 +82,8 @@ impl Session {
             project: Project::load(root)?,
             stamps: BTreeMap::new(),
             stamped_at: SystemTime::now(),
-            results: BTreeMap::new(),
-            cache: BTreeMap::new(),
+            store: Store::default(),
+            pinned_parts: BTreeMap::new(),
             known: BTreeMap::new(),
             meshes: crate::mesh::Cache::default(),
             frozen: false,
@@ -112,8 +117,13 @@ impl Session {
             project,
             stamps,
             stamped_at: SystemTime::now(),
-            results: BTreeMap::new(),
-            cache: from.cache.clone(),
+            store: Store {
+                results: BTreeMap::new(),
+                caches: from.store.caches.clone(),
+                pinned: from.store.pinned.clone(),
+                pinned_caches: from.store.pinned_caches.clone(),
+            },
+            pinned_parts: from.pinned_parts.clone(),
             known: from.known.clone(),
             meshes: crate::mesh::Cache::default(),
             frozen: true,
@@ -180,9 +190,12 @@ impl Session {
             let paths: Vec<String> = changes.iter().map(|(p, _)| p.clone()).collect();
             self.project.reload(&paths)?;
             let live = &self.project.parts;
-            self.results
-                .retain(|id, (rev, _)| live.get(id).is_some_and(|p| &p.revision == rev));
-            self.cache.retain(|id, _| live.contains_key(id));
+            // An assembly's key is its revision, then its children's.
+            self.store.results.retain(|id, (key, _)| {
+                live.get(id)
+                    .is_some_and(|p| key.split('+').next() == Some(p.revision.as_str()))
+            });
+            self.store.caches.retain(|id, _| live.contains_key(id));
         }
         Ok(changes)
     }
@@ -217,41 +230,108 @@ impl Session {
         h.finalize().to_hex().to_string()
     }
 
-    /// The rebuild of `part`, from the cache when its files haven't changed.
+    /// The rebuild of `part`, from the cache when nothing it reads has
+    /// changed: its files and, for an assembly, the models of what it
+    /// places, rebuilt first.
     pub fn rebuilt(&mut self, part: &Id) -> Result<&PartResult> {
-        let p = self.project.part(part)?;
-        let fresh = self
-            .results
-            .get(part)
-            .is_some_and(|(rev, _)| *rev == p.revision);
-        if !fresh {
-            let empty = Cache::new();
-            let (result, cache) = rebuild_part_with(p, self.cache.get(part).unwrap_or(&empty));
-            self.cache.insert(part.clone(), cache);
-            let revision = p.revision.clone();
-            self.learn(part, &result);
-            self.results.insert(part.clone(), (revision, result));
+        self.project.part(part)?;
+        self.rebuild(|r| r.result(part).map(|_| ()))?;
+        Ok(&self.store.results[part].1)
+    }
+
+    /// The model of `part` at `rev`: what an instance of it places.
+    pub fn model(&mut self, part: &Id, rev: &Rev) -> Result<Arc<Model>> {
+        let mut out = None;
+        self.rebuild(|r| {
+            out = Some(r.model(part, rev));
+            Ok(())
+        })?;
+        out.expect("asked")
+    }
+
+    /// Runs `f` over an [`assembly::Rebuild`](crate::assembly::Rebuild)
+    /// holding this session's results and caches, and keeps what it
+    /// built: each part it rebuilt with its errors explained and its names
+    /// learnt.
+    fn rebuild(&mut self, f: impl FnOnce(&mut Rebuild) -> Result<()>) -> Result<()> {
+        let pins = self.pins()?;
+        let store = std::mem::take(&mut self.store);
+        let mut r = Rebuild::new(&self.project, &pins, store);
+        let out = f(&mut r);
+        let fresh = std::mem::take(&mut r.fresh);
+        self.store = r.store;
+        for id in fresh {
+            let (key, result) = self.store.results.remove(&id).expect("rebuilt");
+            self.learn(&id, &result);
+            self.store.results.insert(id.clone(), (key, result));
             // Explained against this rebuild, not the one before: which
             // feature took a name away is read from these results.
-            let explained: Vec<(usize, Error)> = self.results[part]
+            let explained: Vec<(usize, Error)> = self.store.results[&id]
                 .1
                 .features
                 .iter()
                 .enumerate()
-                .filter_map(|(i, (_, r))| Some((i, self.explain(part, r.as_ref().err()?.clone()))))
+                .filter_map(|(i, (_, r))| Some((i, self.explain(&id, r.as_ref().err()?.clone()))))
                 .collect();
-            let result = &mut self.results.get_mut(part).expect("just put").1;
+            let result = &mut self.store.results.get_mut(&id).expect("just put").1;
             for (i, e) in explained {
                 result.features[i].1 = Err(e);
             }
         }
-        Ok(&self.results[part].1)
+        out
+    }
+
+    /// Every release label the project's instances reach, looked up.
+    pub(crate) fn pins(&mut self) -> Result<Pins> {
+        let mut labels = false;
+        for p in self.project.parts.values() {
+            labels |= p.features.values().any(|f| {
+                matches!(f, Ok(crate::doc::files::Feature::Instance(i)) if i.rev != Rev::Working)
+            });
+        }
+        if !labels {
+            return Ok(Pins::new());
+        }
+        let project = self.project.clone();
+        Ok(crate::assembly::pins(&project, |part, label| {
+            crate::release::pinned(self, part, label)
+        }))
+    }
+
+    /// `part` as the project's files at `commit` have it, loaded once.
+    pub(crate) fn pinned_part(
+        &mut self,
+        repo: &crate::git::Repo,
+        part: &Id,
+        commit: &str,
+    ) -> Result<Part> {
+        let at = (part.clone(), commit.to_owned());
+        if let Some(p) = self.pinned_parts.get(&at) {
+            return Ok(p.clone());
+        }
+        let mine = format!("parts/{part}/");
+        let files: Files = repo
+            .files(commit)?
+            .into_iter()
+            .filter(|(path, _)| path == crate::doc::project::MANIFEST || path.starts_with(&mine))
+            .collect();
+        let mut project = Project::load_from(self.root(), &files)?;
+        let p = project.parts.remove(part).ok_or_else(|| {
+            Error::new(
+                crate::error::Code::NotFound,
+                format!("{part} isn't in the project at {commit}"),
+            )
+            .with("part", part)
+            .with("commit", commit)
+        })?;
+        self.pinned_parts.insert(at, p.clone());
+        Ok(p)
     }
 
     /// The cached rebuild of `part`, to make it wrong in tests.
     #[cfg(test)]
     pub(crate) fn cached_mut(&mut self, part: &Id) -> Option<&mut PartResult> {
-        self.results.get_mut(part).map(|(_, r)| r)
+        self.store.results.get_mut(part).map(|(_, r)| r)
     }
 
     /// Adds to `reference_unresolved` what its name was when it last
@@ -322,7 +402,7 @@ impl Session {
         maker: Option<&Id>,
     ) -> Option<Id> {
         let p = self.project.parts.get(part)?;
-        let result = &self.results.get(part)?.1;
+        let result = &self.store.results.get(part)?.1;
         let solids = crate::solid::Solids::of_order(p, order);
         let last = solids.view(solid, reader)?;
         let chain = solids.chain(solid)?;
@@ -578,10 +658,7 @@ mod tests {
         write_json(&root.join(MANIFEST), &Manifest::new(Unit::Mm).to_json()).unwrap();
         write_json(
             &part_path(root, &id("p")),
-            &PartFile {
-                features: vec![id("a")],
-            }
-            .to_json(),
+            &PartFile::new(vec![id("a")]).to_json(),
         )
         .unwrap();
         write_json(&feature_path(root, &id("p"), &id("a")), &sphere("1 mm")).unwrap();
@@ -674,7 +751,7 @@ mod tests {
         let mut s = Session::open(dir.path()).unwrap();
         write_json(
             &part_path(dir.path(), &id("q")),
-            &PartFile { features: vec![] }.to_json(),
+            &PartFile::new(vec![]).to_json(),
         )
         .unwrap();
         assert!(s.refresh().unwrap());
@@ -784,10 +861,7 @@ mod tests {
         let root = dir.path();
         write_json(
             &part_path(root, &id("q")),
-            &PartFile {
-                features: vec![id("a")],
-            }
-            .to_json(),
+            &PartFile::new(vec![id("a")]).to_json(),
         )
         .unwrap();
         write_json(&feature_path(root, &id("q"), &id("a")), &sphere("1 mm")).unwrap();

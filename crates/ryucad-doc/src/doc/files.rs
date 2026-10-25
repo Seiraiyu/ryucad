@@ -2,6 +2,7 @@
 //! parameters and a feature. Each reads from and writes to a JSON value;
 //! the file system is [`super::project`]'s business.
 
+use super::assembly::Instance;
 use super::blend::{Chamfer, Fillet};
 use super::hole::Hole;
 use super::id::{Id, ProjectId};
@@ -19,14 +20,18 @@ use std::collections::BTreeMap;
 /// The format version of the manifest, part and parameters files.
 pub const FORMAT: u64 = 1;
 
+/// The newest part file format: 2 adds `kind`. A part file without one
+/// (a part, not an assembly) stays at 1.
+pub const PART_FORMAT: u64 = 2;
+
 /// The newest manifest format: 2 adds the project's ID. A manifest without
 /// one stays at 1, so older builds still read projects that don't use PDM.
 pub const MANIFEST_FORMAT: u64 = 2;
 
 /// The newest feature format: 2 adds expressions, sketches and sweeps, 3
-/// operations on solids. A feature is written at the lowest format that
-/// holds it, so one with only literals stays 1.
-pub const FEATURE_FORMAT: u64 = 3;
+/// operations on solids, 4 an assembly's instances. A feature is written
+/// at the lowest format that holds it, so one with only literals stays 1.
+pub const FEATURE_FORMAT: u64 = 4;
 
 pub const PROJECT_KIND: &str = "ryucad.project";
 pub const PART_KIND: &str = "ryucad.part";
@@ -41,10 +46,43 @@ pub struct Manifest {
     pub project: Option<ProjectId>,
 }
 
-/// A part's ordered feature list, `parts/<part>/part.json`.
+/// A part's ordered feature list, `parts/<part>/part.json`, and whether
+/// it is an assembly.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PartFile {
+    pub kind: PartKind,
     pub features: Vec<Id>,
+}
+
+/// What a part file describes: a part, whose features make solids, or an
+/// assembly, whose features place other parts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PartKind {
+    #[default]
+    Part,
+    Assembly,
+}
+
+impl PartKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PartKind::Part => "part",
+            PartKind::Assembly => "assembly",
+        }
+    }
+
+    /// `part` or `assembly`.
+    pub fn parse(s: &str) -> Result<PartKind> {
+        match s {
+            "part" => Ok(PartKind::Part),
+            "assembly" => Ok(PartKind::Assembly),
+            _ => Err(Error::new(
+                Code::InvalidParam,
+                format!("unknown part kind {s:?}; known: part, assembly"),
+            )
+            .with("kind", s)),
+        }
+    }
 }
 
 /// A part's named parameters, `parts/<part>/parameters.json`: each an
@@ -76,6 +114,7 @@ pub enum Feature {
     Chamfer(Chamfer),
     Hole(Hole),
     Pattern(Pattern),
+    Instance(Instance),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -222,12 +261,38 @@ impl Manifest {
 }
 
 impl PartFile {
+    /// A part (not an assembly) listing `features`.
+    pub fn new(features: Vec<Id>) -> PartFile {
+        PartFile {
+            kind: PartKind::Part,
+            features,
+        }
+    }
+
     pub fn to_json(&self) -> Value {
-        json!({"features": self.features, "format": FORMAT, "kind": PART_KIND})
+        let mut v = json!({"features": self.features, "format": FORMAT, "kind": PART_KIND});
+        // `kind` names the file kind; a part's own kind is `part_kind`.
+        if self.kind == PartKind::Assembly {
+            v["part_kind"] = json!(self.kind.as_str());
+            v["format"] = json!(PART_FORMAT);
+        }
+        v
     }
 
     pub fn from_json(v: &Value) -> Result<PartFile> {
-        let mut o = header(v, PART_KIND, FORMAT)?;
+        let mut o = header(v, PART_KIND, PART_FORMAT)?;
+        let kind = match o.take_opt("part_kind") {
+            None => PartKind::Part,
+            Some(k) => match k.as_str() {
+                Some("assembly") => PartKind::Assembly,
+                _ => {
+                    return Err(invalid(
+                        "/part_kind",
+                        "part_kind must be \"assembly\", or left out for a part",
+                    ));
+                }
+            },
+        };
         let list = o.take("features")?;
         let items = list
             .as_array()
@@ -249,7 +314,7 @@ impl PartFile {
             features.push(id);
         }
         o.finish()?;
-        Ok(PartFile { features })
+        Ok(PartFile { kind, features })
     }
 }
 
@@ -346,6 +411,15 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
     out
 }
 
+/// The lowest part file format that holds `v`: 2 for an assembly, else 1.
+pub fn part_format(v: &Value) -> u64 {
+    if v.get("part_kind").is_some() {
+        PART_FORMAT
+    } else {
+        FORMAT
+    }
+}
+
 /// The lowest manifest format that holds `v`: 2 with a project ID, else 1.
 pub fn manifest_format(v: &Value) -> u64 {
     if v.get("project").is_some() {
@@ -356,11 +430,15 @@ pub fn manifest_format(v: &Value) -> u64 {
 }
 
 /// The lowest format that holds a feature's JSON, judged from the JSON
-/// alone, as [`Feature::format`] judges a loaded feature: operations on
-/// solids, booleans, fillets, chamfers, holes and patterns are new in format 3, sketches
+/// alone, as [`Feature::format`] judges a loaded feature: instances are
+/// new in format 4, operations on solids, booleans, fillets, chamfers,
+/// holes and patterns are new in format 3, sketches
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
+    if v.get("type").and_then(Value::as_str) == Some("instance") {
+        return 4;
+    }
     let new = |o: &Value| o.as_str().is_none_or(|o| o == "new");
     if v.get("targets").is_some()
         || v.get("operation").is_some_and(|o| !new(o))
@@ -414,7 +492,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance"),
     )
     .with("type", s)
 }
@@ -432,6 +510,7 @@ impl Feature {
             Feature::Chamfer(_) => "chamfer",
             Feature::Hole(_) => "hole",
             Feature::Pattern(_) => "pattern",
+            Feature::Instance(_) => "instance",
         }
     }
 
@@ -450,6 +529,7 @@ impl Feature {
             | Feature::Chamfer(_)
             | Feature::Hole(_)
             | Feature::Pattern(_) => 3,
+            Feature::Instance(_) => 4,
         }
     }
 
@@ -464,6 +544,7 @@ impl Feature {
             Feature::Chamfer(c) => c.fields(),
             Feature::Hole(h) => h.fields(),
             Feature::Pattern(p) => p.fields(),
+            Feature::Instance(i) => i.fields(),
         };
         v["format"] = json!(self.format());
         v["kind"] = json!(FEATURE_KIND);
@@ -488,6 +569,7 @@ impl Feature {
             "chamfer" => Feature::Chamfer(Chamfer::from_fields(&mut o, default, env)?),
             "hole" => Feature::Hole(Hole::from_fields(&mut o, default, env)?),
             "pattern" => Feature::Pattern(Pattern::from_fields(&mut o, default, env)?),
+            "instance" => Feature::Instance(Instance::from_fields(&mut o)?),
             _ => {
                 let ty = PrimitiveType::parse(ty).map_err(|e| e.with("pointer", "/type"))?;
                 Feature::Primitive(Primitive::from_fields(ty, &mut o, default, env)?)
@@ -517,7 +599,8 @@ impl Feature {
             | Feature::Fillet(_)
             | Feature::Chamfer(_)
             | Feature::Hole(_)
-            | Feature::Pattern(_) => None,
+            | Feature::Pattern(_)
+            | Feature::Instance(_) => None,
         }
     }
 
@@ -573,6 +656,14 @@ impl Feature {
     pub fn boolean(&self) -> Option<&Boolean> {
         match self {
             Feature::Boolean(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// The instance, if it is one.
+    pub fn instance(&self) -> Option<&Instance> {
+        match self {
+            Feature::Instance(i) => Some(i),
             _ => None,
         }
     }
@@ -876,15 +967,37 @@ mod tests {
 
     #[test]
     fn part_round_trip() {
-        let p = PartFile {
-            features: vec![
-                Id::parse("b", "feature").unwrap(),
-                Id::parse("a", "feature").unwrap(),
-            ],
-        };
+        let p = PartFile::new(vec![
+            Id::parse("b", "feature").unwrap(),
+            Id::parse("a", "feature").unwrap(),
+        ]);
         let v = p.to_json();
         assert_eq!(v["features"], json!(["b", "a"]));
+        assert_eq!(v["format"], 1);
+        assert!(v.get("part_kind").is_none());
+        assert_eq!(part_format(&v), 1);
         assert_eq!(PartFile::from_json(&v).unwrap(), p);
+    }
+
+    #[test]
+    fn assemblies_are_part_format_2() {
+        let p = PartFile {
+            kind: PartKind::Assembly,
+            features: vec![Id::parse("i1", "feature").unwrap()],
+        };
+        let v = p.to_json();
+        assert_eq!(v["part_kind"], "assembly");
+        assert_eq!(v["format"], 2);
+        assert_eq!(part_format(&v), 2);
+        assert_eq!(PartFile::from_json(&v).unwrap(), p);
+        let bad = json!({"features": [], "format": 2, "kind": "ryucad.part", "part_kind": "part"});
+        let e = PartFile::from_json(&bad).unwrap_err();
+        assert_eq!(e.details["pointer"], "/part_kind");
+        let newer = json!({"features": [], "format": 3, "kind": "ryucad.part"});
+        assert_eq!(
+            PartFile::from_json(&newer).unwrap_err().code,
+            Code::FormatTooNew
+        );
     }
 
     #[test]
@@ -944,7 +1057,7 @@ mod tests {
                 "/placement/origin/1",
             ),
             ("/extra", json!(1), Code::InvalidDocument, "/extra"),
-            ("/format", json!(4), Code::FormatTooNew, ""),
+            ("/format", json!(5), Code::FormatTooNew, ""),
             (
                 "/kind",
                 json!("ryucad.part"),

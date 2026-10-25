@@ -14,21 +14,23 @@
 //! schema; changing or removing one is. A hosted job can run `ryucad check
 //! --against <base>` and gate on the exit code and the findings.
 
+use crate::assembly::{Rebuild, Store};
 use crate::doc::id::Id;
 use crate::error::{Code, Error, Result};
-use crate::rebuild::{Built, Output, rebuild_part};
+use crate::rebuild::{Built, Output};
 use crate::session::Session;
 use rayon::prelude::*;
 use serde_json::{Value, json};
 
 /// Every finding's code and severity: `doctor`'s issues keep their own.
-pub const CODES: [(&str, &str); 6] = [
+pub const CODES: [(&str, &str); 7] = [
     ("feature_failed", "error"),
     ("faces_intersect", "error"),
     ("cannot_check", "warning"),
     ("mesh_faults", "error"),
     ("cache_mismatch", "error"),
     ("unmerged_path", "error"),
+    ("instance_obsolete", "warning"),
 ];
 
 fn severity(code: &str) -> &'static str {
@@ -203,10 +205,13 @@ pub fn run(
             .filter(|f| one.as_ref().is_none_or(|p| f["part"] == p.as_str())),
     );
     let mut parts = Vec::new();
+    // From nothing: no cache, so the files alone decide.
+    let project = session.project().clone();
+    let pins = session.pins()?;
+    let mut from_nothing = Rebuild::new(&project, &pins, Store::default());
     for id in &ids {
-        let p = session.project().part(id)?.clone();
-        // From nothing: no cache, so the files alone decide.
-        let fresh = rebuild_part(&p);
+        let p = project.part(id)?.clone();
+        let fresh = from_nothing.result(id)?.clone();
         let cached = session.rebuilt(id)?.clone();
         let mut features = Vec::new();
         let mut bodies = Vec::new();
@@ -244,7 +249,25 @@ pub fn run(
                 }
                 // A body is checked as its solid shows; a stale sketch is
                 // doctor's to report, with its repair.
-                Ok(Output::Solids(_) | Output::Sketch(_)) => {}
+                Ok(Output::Solids(_) | Output::Sketch(_) | Output::Instance(_)) => {}
+            }
+        }
+        // An instance of an obsolete release still builds; it is worth a
+        // look.
+        for w in fresh.warnings() {
+            if w["code"] == "instance_obsolete"
+                && let Some(fid) = w["feature"]
+                    .as_str()
+                    .and_then(|f| Id::parse(f, "feature").ok())
+            {
+                let mut f = finding(
+                    "instance_obsolete",
+                    id,
+                    &fid,
+                    w["message"].as_str().unwrap_or_default().to_owned(),
+                );
+                f["rev"] = w["rev"].clone();
+                findings.push(f);
             }
         }
         // Each solid as the model shows it, by founder, and the feature

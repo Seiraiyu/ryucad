@@ -9,7 +9,7 @@
 //! part, when the project loads.
 
 use crate::doc::canonical;
-use crate::doc::files::{Feature, Manifest, ParametersFile, PartFile};
+use crate::doc::files::{Feature, Manifest, ParametersFile, PartFile, PartKind};
 use crate::doc::id::Id;
 use crate::doc::id::ProjectId;
 use crate::doc::project::{MANIFEST, PDM_CONFIG, Project, write_atomic};
@@ -991,10 +991,10 @@ pub(crate) fn canonical_bytes(v: &Value) -> Vec<u8> {
     canonical::to_string(v).into_bytes()
 }
 
-/// The feature list in `parts/<part>/part.json`, if it can be read.
-fn listed(root: &Path, part: &str) -> Option<Vec<Id>> {
+/// `parts/<part>/part.json`, if it can be read.
+fn listed(root: &Path, part: &str) -> Option<PartFile> {
     match read(root, &format!("parts/{part}/part.json")) {
-        Read::Json(v, _) => PartFile::from_json(&v).ok().map(|p| p.features),
+        Read::Json(v, _) => PartFile::from_json(&v).ok(),
         _ => None,
     }
 }
@@ -1008,12 +1008,13 @@ fn feature_files(root: &Path, part: &str) -> Vec<String> {
         .collect()
 }
 
-fn index_with(features: &[String]) -> Result<Vec<u8>> {
+/// A part file of `kind` listing `features`.
+fn index_with(kind: PartKind, features: &[String]) -> Result<Vec<u8>> {
     let features = features
         .iter()
         .map(|f| Id::parse(f, "feature"))
         .collect::<Result<Vec<_>>>()?;
-    Ok(canonical_bytes(&PartFile { features }.to_json()))
+    Ok(canonical_bytes(&PartFile { kind, features }.to_json()))
 }
 
 /// `parts/<part>/...` → `<part>`.
@@ -1127,9 +1128,22 @@ fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<
         "missing_part_index" => {
             let part = part_of(first);
             let files = feature_files(root, part);
-            let committed: Vec<String> = head(first)?
+            let committed = head(first)?
                 .and_then(|b| canonical::parse(std::str::from_utf8(&b).ok()?).ok())
-                .and_then(|v| PartFile::from_json(&v).ok())
+                .and_then(|v| PartFile::from_json(&v).ok());
+            // An assembly comes back as one: as the last commit says, else
+            // when every feature file is an instance.
+            let instances = !files.is_empty()
+                && files.iter().all(|f| {
+                    matches!(read(root, &format!("parts/{part}/features/{f}.json")),
+                        Read::Json(v, _) if v["type"] == "instance")
+                });
+            let kind = match &committed {
+                Some(p) => p.kind,
+                None if instances => PartKind::Assembly,
+                None => PartKind::Part,
+            };
+            let committed: Vec<String> = committed
                 .map(|p| p.features.iter().map(|f| f.to_string()).collect())
                 .unwrap_or_default();
             let mut order: Vec<String> = committed
@@ -1153,7 +1167,7 @@ fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<
                 } else {
                     format!("write {first}; the feature order can't be recovered, so give it as order=a,b,…")
                 },
-                changes: vec![write(first, index_with(&order)?)],
+                changes: vec![write(first, index_with(kind, &order)?)],
                 params: vec![Param {
                     name: "order",
                     required: !known,
@@ -1165,6 +1179,7 @@ fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<
             let (part, fid) = (part_of(first), stem_of(first));
             if let Some(list) = listed(root, part) {
                 let kept: Vec<String> = list
+                    .features
                     .iter()
                     .filter(|f| f.as_str() != fid)
                     .map(|f| f.to_string())
@@ -1172,7 +1187,7 @@ fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<
                 out.push(Repair {
                     id: id("remove"),
                     summary: format!("take {fid} out of parts/{part}/part.json"),
-                    changes: vec![write(&i.files[1], index_with(&kept)?)],
+                    changes: vec![write(&i.files[1], index_with(list.kind, &kept)?)],
                     params: Vec::new(),
                 });
             }
@@ -1188,12 +1203,12 @@ fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<
         "orphan_feature" => {
             let (part, fid) = (part_of(first), stem_of(first));
             if let Some(list) = listed(root, part) {
-                let mut all: Vec<String> = list.iter().map(|f| f.to_string()).collect();
+                let mut all: Vec<String> = list.features.iter().map(|f| f.to_string()).collect();
                 all.push(fid.to_owned());
                 out.push(Repair {
                     id: id("adopt"),
                     summary: format!("list {fid} last in parts/{part}/part.json"),
-                    changes: vec![write(&i.files[1], index_with(&all)?)],
+                    changes: vec![write(&i.files[1], index_with(list.kind, &all)?)],
                     params: Vec::new(),
                 });
             }
@@ -1886,7 +1901,7 @@ pub(crate) mod tests {
         );
         assert_eq!(out["skipped"], json!([]));
         assert_eq!(out["report"]["healthy"], true, "{out}");
-        let list = listed(r, "p").unwrap();
+        let list = listed(r, "p").unwrap().features;
         assert_eq!(
             list.iter().map(Id::as_str).collect::<Vec<_>>(),
             ["a", "b", "c"]
@@ -1912,7 +1927,32 @@ pub(crate) mod tests {
         .unwrap_err();
         assert_eq!(e.code, Code::RepairConflict);
         // Nothing was done.
-        assert_eq!(listed(r, "p").unwrap().len(), 2);
+        assert_eq!(listed(r, "p").unwrap().features.len(), 2);
+    }
+
+    #[test]
+    fn a_lost_assembly_list_comes_back_as_an_assembly() {
+        let dir = healthy();
+        let r = dir.path();
+        w(
+            r,
+            "parts/frame/features/i1.json",
+            &canonical::to_string(&json!({
+                "format": 4, "kind": "ryucad.feature", "type": "instance", "part": "p",
+                "rev": "working",
+                "pose": {"origin_m": [0, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]},
+            })),
+        );
+        let ids = offered(r);
+        let out = fix(
+            r,
+            &[&ids["missing_part_index:recreate:part"]],
+            Params::default(),
+        );
+        assert_eq!(out["skipped"], json!([]), "{out}");
+        let list = listed(r, "frame").unwrap();
+        assert_eq!(list.kind, PartKind::Assembly);
+        assert_eq!(list.features.len(), 1);
     }
 
     #[test]
@@ -1946,7 +1986,7 @@ pub(crate) mod tests {
             params,
         );
         assert_eq!(out["report"]["healthy"], true, "{out}");
-        let list = listed(r, "p").unwrap();
+        let list = listed(r, "p").unwrap().features;
         assert_eq!(list.iter().map(Id::as_str).collect::<Vec<_>>(), ["b", "a"]);
         let m = fs::read_to_string(r.join(MANIFEST)).unwrap();
         assert!(m.contains("\"in\""));
@@ -2102,7 +2142,10 @@ pub(crate) mod tests {
         );
         assert_eq!(out["report"]["healthy"], true);
         let list = listed(r, "p").unwrap();
-        assert_eq!(list.iter().map(Id::as_str).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(
+            list.features.iter().map(Id::as_str).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
         // Removing a listed feature that's gone is the other way.
         fs::remove_file(r.join("parts/p/features/a.json")).unwrap();
         let ids = offered(r);
@@ -2111,7 +2154,7 @@ pub(crate) mod tests {
             &[&ids["listed_feature_missing:remove:a"]],
             Params::default(),
         );
-        assert_eq!(listed(r, "p").unwrap().len(), 1);
+        assert_eq!(listed(r, "p").unwrap().features.len(), 1);
     }
 
     #[test]

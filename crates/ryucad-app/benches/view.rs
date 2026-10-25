@@ -23,7 +23,14 @@ fn encoded() -> Vec<u8> {
     let dir = tempfile::tempdir().unwrap();
     init(dir.path(), None).unwrap();
     let mut s = Session::open(dir.path()).unwrap();
-    handle(&mut s, Request::PartCreate { part: "p".into() }).unwrap();
+    handle(
+        &mut s,
+        Request::PartCreate {
+            part: "p".into(),
+            kind: None,
+        },
+    )
+    .unwrap();
     let kinds = [
         ("box", json!({"x": 10, "y": 20, "z": 30})),
         ("cylinder", json!({"radius": 5, "height": 10})),

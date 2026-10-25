@@ -11,6 +11,7 @@
 //! local `ryupdm/<part>/<label>` tags to match the records, and never
 //! pushes, deletes a tag or touches any other ref.
 
+use crate::assembly::{Pin, Pinned};
 use crate::doc::id::Id;
 use crate::doc::project::write_json;
 use crate::error::{Code, Error, Result};
@@ -51,6 +52,65 @@ pub(crate) fn history(session: &mut Session) -> Result<(crate::git::Repo, Releas
     let releases = Releases::read(repo.gix(), repo.prefix(), &config)?;
     session.releases = Some((key, releases.clone()));
     Ok((repo, releases))
+}
+
+/// `part` as release `label` has it, for an instance: the files where its
+/// record became official, else the working files when the proposed
+/// record describes them. `label_not_found` without a record,
+/// `label_not_official` otherwise; a record that can't be read gives its
+/// own error.
+pub(crate) fn pinned(session: &mut Session, part: &Id, label: &str) -> Result<Pinned> {
+    let path = ryupdm::record::path(part, label, Kind::Release);
+    let records = ryupdm::record::Records::read(&*session)?;
+    let Some(entry) = records.at(&path) else {
+        return Err(Error::new(
+            Code::LabelNotFound,
+            format!("{part} has no release {label}: {path} doesn't exist"),
+        )
+        .with("part", part)
+        .with("label", label));
+    };
+    let record = entry.record.clone()?;
+    let content = record
+        .release()
+        .map(|r| r.content.clone())
+        .unwrap_or_default();
+    let obsolete = records
+        .at(&ryupdm::record::path(part, label, Kind::Obsolete))
+        .is_some();
+    match history(session) {
+        Ok((repo, releases)) => {
+            if let Some(o) = releases.official.get(&path) {
+                let p = session.pinned_part(&repo, part, &o.commit)?;
+                return Ok(Pinned {
+                    part: p,
+                    pin: Pin {
+                        commit: Some(o.commit.clone()),
+                        obsolete,
+                    },
+                });
+            }
+        }
+        Err(e) if e.code == Code::NotAGitRepo => {}
+        Err(e) => return Err(e),
+    }
+    if ryupdm::content::hash(&*session, part).is_ok_and(|h| h == content) {
+        return Ok(Pinned {
+            part: session.project().part(part)?.clone(),
+            pin: Pin {
+                commit: None,
+                obsolete,
+            },
+        });
+    }
+    Err(Error::new(
+        Code::LabelNotOfficial,
+        format!(
+            "{part}'s release {label} isn't official yet, and {part} has changed since it was proposed"
+        ),
+    )
+    .with("part", part)
+    .with("label", label))
 }
 
 /// Who is writing a record: Git's author identity, and the participant.
@@ -115,7 +175,60 @@ fn readiness(session: &mut Session, part: &Id, config: &Config) -> Result<Vec<Va
             }
         }
     }
+    // An assembly releases only releases: every instance, at any depth,
+    // pinned to an official label that isn't obsolete.
+    if p.file
+        .as_ref()
+        .is_ok_and(|f| f.kind == crate::doc::files::PartKind::Assembly)
+    {
+        problems.extend(unreleased(session, &p, &[])?.into_iter().map(|e| json!(e)));
+    }
     Ok(problems)
+}
+
+/// `instance_not_released` for each instance of assembly `p` (reached
+/// through `path`) and below it that a release can't hold: at `working`,
+/// at a label that doesn't resolve or isn't official, or at an obsolete
+/// one.
+fn unreleased(
+    session: &mut Session,
+    p: &crate::doc::project::Part,
+    path: &[Id],
+) -> Result<Vec<Error>> {
+    use crate::doc::assembly::Rev;
+    let mut out = Vec::new();
+    for fid in p.order() {
+        let Some(Ok(crate::doc::files::Feature::Instance(i))) = p.features.get(fid) else {
+            continue;
+        };
+        let mut here = path.to_vec();
+        here.push(fid.clone());
+        let at = crate::assembly::path_text(&here);
+        let refuse = |why: String| {
+            Error::new(Code::InstanceNotReleased, format!("instance {at} {why}"))
+                .with("instance", &at)
+                .with("part", &i.part)
+                .with("rev", i.rev.to_json())
+        };
+        match &i.rev {
+            Rev::Working => out.push(refuse(format!(
+                "places {} as it is (working); pin it to an official release",
+                i.part
+            ))),
+            Rev::Label(l) => match pinned(session, &i.part, l) {
+                Err(e) => out.push(refuse(format!("places {}@{l}: {}", i.part, e.message))),
+                Ok(pin) if pin.pin.commit.is_none() => out.push(refuse(format!(
+                    "places {}@{l}, which isn't official yet",
+                    i.part
+                ))),
+                Ok(pin) if pin.pin.obsolete => {
+                    out.push(refuse(format!("places {}@{l}, which is obsolete", i.part)))
+                }
+                Ok(pin) => out.extend(unreleased(session, &pin.part, &here)?),
+            },
+        }
+    }
+    Ok(out)
 }
 
 /// Writes `record` (giving the project its ID first if it has none), and

@@ -1687,3 +1687,59 @@ fn a_release_is_proposed_synced_and_made_obsolete_from_the_releases_tab() {
     let list = p.ok(&["release", "list", "p"]);
     assert_eq!(list["records"][1]["kind"], "obsolete");
 }
+
+#[test]
+fn an_assembly_lists_its_instances_and_offers_what_to_show() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new();
+    p.ok(&["part", "create", "bolt"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bolt",
+        "cylinder",
+        "--id",
+        "shank",
+        "--param",
+        "radius=3",
+        "--param",
+        "height=20",
+    ]);
+    p.ok(&["part", "create", "pair", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "pair", "instance", "--id", "left", "--of", "bolt",
+    ]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "p1", "--of", "pair", "--fixed",
+    ]);
+    let mut h = window(&p);
+    frames(&mut h, |a| match &a.screen {
+        ryucad_app::ui::app::Screen::Opened(o) => {
+            o.ws.idle()
+                && o.ws
+                    .model
+                    .meshes
+                    .contains_key(&("frame".into(), "p1/left/shank".into()))
+        }
+        _ => false,
+    });
+    h.step();
+    h.get_by(|n| {
+        n.label()
+            .is_some_and(|l| l.starts_with("frame") && l.ends_with("(assembly)"))
+    });
+    h.get_by_label("p1 (pair @ working, fixed)");
+    // The pair's own instance, under the one that places it.
+    let under = h.get_all_by_label("left (bolt @ working)").count();
+    assert_eq!(under, 2, "in the frame, and in the pair itself");
+    // View > Show offers the project's model and each part.
+    h.get_by_label("View").click();
+    shown(&mut h, "Show");
+    h.get_by_label("Show").click();
+    shown(&mut h, "The project's model");
+    h.get_by_label("frame (assembly)");
+}

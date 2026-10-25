@@ -143,6 +143,34 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened, recent: &[PathBuf]) -> Option<Acti
             if ui.selectable_label(sketches, "Sketches").clicked() {
                 o.ws.set_config("display.sketches", json!(!sketches));
             }
+            ui.menu_button("Show", |ui| {
+                let focus = o.ws.model.focus.clone();
+                if ui
+                    .selectable_label(focus.is_none(), "The project's model")
+                    .clicked()
+                {
+                    o.ws.set_focus(None);
+                }
+                let parts: Vec<(String, bool)> =
+                    o.ws.model
+                        .parts
+                        .values()
+                        .map(|p| (p.id.clone(), p.assembly))
+                        .collect();
+                for (id, assembly) in parts {
+                    let label = if assembly {
+                        format!("{id} (assembly)")
+                    } else {
+                        id.clone()
+                    };
+                    if ui
+                        .selectable_label(focus.as_deref() == Some(&id), label)
+                        .clicked()
+                    {
+                        o.ws.set_focus(Some(id));
+                    }
+                }
+            });
             ui.separator();
             let rev = o.ws.compare.as_ref().map(|c| c.rev.clone());
             if ui

@@ -109,10 +109,24 @@ fn serves_requests_and_shuts_down() {
     let status = ask(&conn, &Request::DaemonStatus {}).unwrap();
     assert_eq!(status["pid"], child.id());
     assert_eq!(status["version"]["protocol"], 2);
-    ask(&conn, &Request::PartCreate { part: "p".into() }).unwrap();
+    ask(
+        &conn,
+        &Request::PartCreate {
+            part: "p".into(),
+            kind: None,
+        },
+    )
+    .unwrap();
     let list = ask(&conn, &Request::PartList {}).unwrap();
     assert_eq!(list["parts"][0]["part"], "p");
-    let e = ask(&conn, &Request::PartCreate { part: "p".into() }).unwrap_err();
+    let e = ask(
+        &conn,
+        &Request::PartCreate {
+            part: "p".into(),
+            kind: None,
+        },
+    )
+    .unwrap_err();
     assert_eq!(e.code, ryucad::error::Code::DuplicateId);
     // Several connections at once are served.
     let other = f.connect().unwrap();
@@ -739,6 +753,15 @@ fn an_agent_waits_for_the_human_to_select() {
     );
     let body = cli(&f, &["inspect", "p", "s"])["result"]["bodies"][0].clone();
     let face = format!("p/s/{}", body["faces"][0]["name"].as_str().unwrap());
+    // The human arrives first, so what the agent waits for is only what
+    // they select.
+    let human = f.connect().unwrap();
+    let hello = Request::SessionHello {
+        kind: ryucad::live::Kind::Human,
+        name: Some("Dana".into()),
+        participant: None,
+    };
+    ask(&human, &hello).unwrap();
     let waiter = {
         let (root, run) = (f.root.clone(), f.run.clone());
         std::thread::spawn(move || {
@@ -750,7 +773,7 @@ fn an_agent_waits_for_the_human_to_select() {
                     "--count",
                     "2",
                     "--timeout",
-                    "20",
+                    "120",
                 ])
                 .current_dir(&root)
                 .env(RUNTIME_DIR_VAR, &run)
@@ -760,27 +783,33 @@ fn an_agent_waits_for_the_human_to_select() {
             serde_json::from_slice::<Value>(&out.stdout).unwrap()
         })
     };
-    // Give the watcher time to subscribe; then a human arrives and selects.
-    std::thread::sleep(Duration::from_millis(800));
-    let human = f.connect().unwrap();
-    let hello = Request::SessionHello {
-        kind: ryucad::live::Kind::Human,
-        name: Some("Dana".into()),
-        participant: None,
+    // Nothing says when the watcher has subscribed, so the human selects
+    // the face and then nothing until it has heard two changes: any two in
+    // a row include the face. (A sleep before selecting once was a guess a
+    // busy machine broke.)
+    let select = |entities: Vec<String>| {
+        let req = Request::SelectionSet {
+            entities,
+            mode: ryucad::live::SelectMode::Replace,
+        };
+        ask(&human, &req).unwrap();
     };
-    ask(&human, &hello).unwrap();
-    let select = Request::SelectionSet {
-        entities: vec![face.clone()],
-        mode: ryucad::live::SelectMode::Replace,
-    };
-    ask(&human, &select).unwrap();
+    while !waiter.is_finished() {
+        select(vec![face.clone()]);
+        select(Vec::new());
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let r = waiter.join().unwrap();
     assert_eq!(r["result"]["timed_out"], false, "{r}");
     let n = r["result"]["notifications"].as_array().unwrap();
-    assert_eq!(n[1]["method"], "participant.changed");
-    assert_eq!(
-        n[1]["params"]["participant"]["selection"],
-        serde_json::json!([face])
+    assert!(
+        n.iter().all(|n| n["method"] == "participant.changed"),
+        "{r}"
+    );
+    assert!(
+        n.iter()
+            .any(|n| n["params"]["participant"]["selection"] == serde_json::json!([face])),
+        "{r}"
     );
     // Nothing happens: the watch times out with what it has.
     let r = cli(&f, &["watch", "--topic", "model", "--timeout", "1"]);

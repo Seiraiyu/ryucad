@@ -17,10 +17,15 @@ pub fn message(e: &serde_json::Value) -> String {
 /// A feature's line in the tree: its ID and type, a sketch's solve state,
 /// and why it failed or how many faces weren't meshed.
 pub fn row_text(f: &crate::core::model::Feature, faults: usize) -> String {
-    let ty = match (&f.ty, &f.operation) {
-        (Some(t), Some(op)) => format!("{t}, {op}"),
-        (Some(t), None) => t.clone(),
-        (None, _) => "?".to_owned(),
+    let ty = match (&f.ty, &f.operation, &f.instance) {
+        // An instance says what it places.
+        (_, _, Some(i)) => {
+            let fixed = if i.fixed { ", fixed" } else { "" };
+            format!("{} @ {}{fixed}", i.part, i.rev)
+        }
+        (Some(t), Some(op), None) => format!("{t}, {op}"),
+        (Some(t), None, None) => t.clone(),
+        (None, _, None) => "?".to_owned(),
     };
     let kind = match &f.sketch {
         Some(s) if s.state == "under" => format!("{ty}, under, {} dof", s.dof),
@@ -120,6 +125,30 @@ fn feature_row(
             ui.weak(format!("uses {}", f.uses.join(", ")));
         });
     }
+    // A subassembly's own instances, as the window knows that assembly.
+    if let Some(i) = &f.instance {
+        placed(ui, ws, &i.part, &format!("{}/{}", part.id, f.id), 1);
+    }
+}
+
+/// The instances of assembly `id` (placed at `at`), under the instance
+/// that places it, to any depth: read-only lines.
+fn placed(ui: &mut egui::Ui, ws: &Workspace, id: &str, at: &str, depth: usize) {
+    let Some(sub) = ws.model.parts.get(id).filter(|p| p.assembly) else {
+        return;
+    };
+    // A cycle fails its instances; this only guards the drawing.
+    if depth > 16 {
+        return;
+    }
+    ui.indent(("placed", at), |ui| {
+        for f in &sub.features {
+            ui.weak(row_text(f, 0));
+            if let Some(i) = &f.instance {
+                placed(ui, ws, &i.part, &format!("{at}/{}", f.id), depth + 1);
+            }
+        }
+    });
 }
 
 /// A solid in the tree: its founder, its state and mesh faults, and its
@@ -219,7 +248,10 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             .map_or(&[][..], |m| m.marks.as_slice());
         let state = ws.states.get(&part.id);
         let badge = state.map(crate::core::pdm::badge);
-        let text = part_text(&part.id, badge.as_deref(), marks);
+        let mut text = part_text(&part.id, badge.as_deref(), marks);
+        if part.assembly {
+            text.push_str(" (assembly)");
+        }
         let title = match &part.error {
             Some(_) => RichText::new(format!("{text} (broken)")).color(ui.visuals().warn_fg_color),
             None if !marks.is_empty() => RichText::new(text).color(style::color32(style::NEW)),
@@ -1133,11 +1165,21 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
                 ui.end_row();
             }
         }
-        for c in [&mut form.operation, &mut form.op, &mut form.target]
-            .into_iter()
-            .flatten()
+        for c in [
+            &mut form.operation,
+            &mut form.op,
+            &mut form.target,
+            &mut form.rev,
+        ]
+        .into_iter()
+        .flatten()
         {
             choice_row(ui, c);
+        }
+        if let Some(f) = &mut form.fixed {
+            ui.label("");
+            ui.checkbox(&mut f.chosen, "fixed where it is");
+            ui.end_row();
         }
     });
     if let Some(b) = &mut form.blend {
@@ -1606,6 +1648,7 @@ mod tests {
             solids: Vec::new(),
             consumes: Vec::new(),
             error: None,
+            instance: None,
         }
     }
 

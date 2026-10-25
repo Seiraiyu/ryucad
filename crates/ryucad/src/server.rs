@@ -3,7 +3,10 @@
 
 use crate::activity::{self, EntryKind};
 use crate::config;
-use crate::doc::files::{Feature, Manifest, PartFile, Placement, Primitive, PrimitiveType, number};
+use crate::doc::assembly::{Instance, Pose, Rev};
+use crate::doc::files::{
+    Feature, Manifest, PartFile, PartKind, Placement, Primitive, PrimitiveType, number,
+};
 use crate::doc::id::Id;
 use crate::doc::project::{
     MANIFEST, Part, feature_path, parameters_path, part_dir, part_path, write_json,
@@ -119,6 +122,17 @@ pub fn answer_live(
             compare,
         } => {
             let target = participant.as_deref().map(|p| (p, live.as_deref()));
+            // A participant's render shows what their window shows.
+            let part = part.or_else(|| {
+                let l = live.as_deref()?;
+                Some(
+                    l.get(participant.as_deref()?)
+                        .ok()?
+                        .focus
+                        .as_ref()?
+                        .to_string(),
+                )
+            });
             let shown = match live.as_deref() {
                 Some(l) => l
                     .participants()
@@ -178,7 +192,7 @@ fn dispatch(
         )
         .with("path", session.root())),
         Request::ProjectInfo {} => Ok(project_info(session)),
-        Request::PartCreate { part } => part_create(session, &part),
+        Request::PartCreate { part, kind } => part_create(session, &part, kind.as_deref()),
         Request::PartDelete {
             part,
             expected_revision,
@@ -334,6 +348,27 @@ fn dispatch(
             };
             crate::sketch::get(session, &part, &sketch, quality)
         }
+        Request::AssemblyMove {
+            part,
+            instance,
+            placement,
+            translate,
+            axis,
+            angle,
+            expected_revision,
+        } => crate::assembly::moved(
+            session,
+            &part,
+            &instance,
+            crate::assembly::Move {
+                placement,
+                translate,
+                axis,
+                angle,
+            },
+            expected_revision.as_deref(),
+        ),
+        Request::AssemblyTree { part } => crate::assembly::tree(session, &part),
         Request::FeatureShow { part, id } => {
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
             let p = session.project().part(&part)?;
@@ -518,6 +553,38 @@ fn dispatch(
             live.set_compare(&id, rev.clone())?;
             let compare = rev.map(|rev| json!({"rev": rev, "commit": commit}));
             Ok(json!({"participant": id, "compare": compare}))
+        }
+        Request::ViewFocus {
+            part,
+            project,
+            participant,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("view.focus"))?;
+            let part = match (part, project) {
+                (Some(p), false) => {
+                    let id = part_id(&p)?;
+                    session.project().part(&id)?;
+                    Some(Some(id))
+                }
+                (None, true) => Some(None),
+                (None, false) => None,
+                (Some(_), true) => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        "give a part to show, or project, not both",
+                    ));
+                }
+            };
+            let id = live.compare_target(participant.as_deref(), me)?;
+            if let Some(focus) = part {
+                live.set_focus(&id, focus)?;
+            }
+            let focus = live.get(&id)?.focus.clone();
+            let shows = match &focus {
+                Some(p) => vec![p.clone()],
+                None => crate::assembly::shown_parts(session.project()),
+            };
+            Ok(json!({"participant": id, "focus": focus, "shows": shows}))
         }
         Request::HighlightSet {
             entities,
@@ -741,8 +808,12 @@ pub(crate) fn check_revision(part: &Part, expected: Option<&str>) -> Result<()> 
     }
 }
 
-fn part_create(session: &mut Session, part: &str) -> Result<Value> {
+fn part_create(session: &mut Session, part: &str, kind: Option<&str>) -> Result<Value> {
     let id = part_id(part)?;
+    let kind = kind
+        .map(PartKind::parse)
+        .transpose()?
+        .unwrap_or(PartKind::Part);
     if session.project().parts.contains_key(&id) {
         return Err(
             Error::new(Code::DuplicateId, format!("part {id} already exists")).with("part", &id),
@@ -751,16 +822,48 @@ fn part_create(session: &mut Session, part: &str) -> Result<Value> {
     crate::pdm::check_not_retired(session.root(), &id)?;
     write_json(
         &part_path(session.root(), &id),
-        &PartFile { features: vec![] }.to_json(),
+        &PartFile {
+            kind,
+            features: vec![],
+        }
+        .to_json(),
     )?;
     session.reload()?;
     let revision = &session.project().part(&id)?.revision;
-    Ok(json!({"part": id, "revision": revision}))
+    Ok(json!({"part": id, "kind": kind.as_str(), "revision": revision}))
 }
 
 fn part_delete(session: &mut Session, part: &str, expected: Option<&str>) -> Result<Value> {
     let id = part_id(part)?;
     check_revision(session.project().part(&id)?, expected)?;
+    // An assembly placing the part as it is would have nothing to place;
+    // a release it places is read from history.
+    let placed = &id;
+    let users: Vec<String> = session
+        .project()
+        .parts
+        .iter()
+        .flat_map(|(a, p)| {
+            p.order()
+                .iter()
+                .filter_map(move |fid| match p.features.get(fid) {
+                    Some(Ok(Feature::Instance(i)))
+                        if i.part == *placed && i.rev == Rev::Working =>
+                    {
+                        Some(format!("{a}/{fid}"))
+                    }
+                    _ => None,
+                })
+        })
+        .collect();
+    if !users.is_empty() {
+        return Err(Error::new(
+            Code::HasDependents,
+            format!("assemblies place {id}: {}", users.join(", ")),
+        )
+        .with("part", &id)
+        .with("instances", users));
+    }
     let dir = part_dir(session.root(), &id);
     fs::remove_dir_all(&dir).map_err(|e| Error::io(&dir, &e))?;
     session.reload()?;
@@ -773,7 +876,9 @@ fn part_list(session: &Session) -> Value {
         .parts
         .values()
         .map(|p| {
-            let mut v = json!({"part": p.id, "features": p.order().len(), "revision": p.revision});
+            let kind = part_kind(p);
+            let mut v = json!({"part": p.id, "kind": kind.as_str(),
+                               "features": p.order().len(), "revision": p.revision});
             if let Err(e) = &p.file {
                 v["error"] = json!(e);
             }
@@ -834,6 +939,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Boolean(b) => b.fields(),
+        Feature::Instance(i) => i.fields(),
         Feature::Fillet(_) | Feature::Chamfer(_) => blend_report(part, f),
         Feature::Hole(h) => hole_report(part, h),
         Feature::Pattern(x) => pattern_report(part, x),
@@ -1061,7 +1167,11 @@ pub(crate) fn save(
     }
     write_json(
         &part_path(session.root(), part),
-        &PartFile { features: order }.to_json(),
+        &PartFile {
+            kind: part_kind(session.project().part(part)?),
+            features: order,
+        }
+        .to_json(),
     )?;
     session.reload()?;
     Ok(session.project().part(part)?.revision.clone())
@@ -1126,6 +1236,7 @@ const REVOLVE: [&str; 7] = [
     "targets",
 ];
 const BOOLEAN: [&str; 4] = ["op", "target", "targets", "tools"];
+const INSTANCE: [&str; 4] = ["of", "rev", "placement", "fixed"];
 const FILLET: [&str; 4] = ["groups", "propagate", "radius", "edges"];
 const CHAMFER: [&str; 9] = [
     "groups",
@@ -1361,6 +1472,105 @@ fn hole_from(
     Ok(Feature::Hole(h))
 }
 
+/// An instance: `current`'s fields (none for a new one), with what was
+/// given laid over them. A new instance needs `of`; its revision is
+/// `working` and its pose the assembly's frame unless given. The origin
+/// takes quantities and expressions, held as meters.
+fn instance_from(
+    current: Option<&Instance>,
+    given: &Given,
+    unit: Unit,
+    env: &Env,
+) -> Result<Instance> {
+    let f = &given.fields;
+    let part = match (&f.of, current) {
+        (Some(of), _) => Id::parse(of, "part").map_err(|e| e.with("param", "of"))?,
+        (None, Some(c)) => c.part.clone(),
+        (None, None) => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "an instance names the part it places (of)",
+            )
+            .with("param", "of"));
+        }
+    };
+    let rev = match f.rev.as_deref() {
+        None => current.map_or(Rev::Working, |c| c.rev.clone()),
+        Some("working") => Rev::Working,
+        Some(l) => {
+            Rev::Label(crate::doc::assembly::label_text(l).map_err(|e| e.with("param", "rev"))?)
+        }
+    };
+    let mut pose = current.map_or(Pose::IDENTITY, |c| c.pose);
+    if let Some(arg) = &given.placement {
+        if let Some(origin) = &arg.origin {
+            for (i, v) in origin.iter().enumerate() {
+                let q = Quantity::from_json_in(v, unit, &|n| env.get(n))
+                    .map_err(|e| e.with("pointer", format!("/placement/origin/{i}")))?;
+                if q.dim() != crate::units::Dim::LENGTH {
+                    return Err(Error::new(
+                        Code::UnitMismatch,
+                        format!("an instance's origin is a length, not {}", q.text()),
+                    )
+                    .with("pointer", format!("/placement/origin/{i}")));
+                }
+                pose.origin_m[i] = crate::doc::sketch::clean(q.meters());
+            }
+        }
+        if let Some(z) = arg.z {
+            pose.z = z.map(crate::doc::sketch::clean);
+        }
+        if let Some(x) = arg.x {
+            pose.x = x.map(crate::doc::sketch::clean);
+        }
+    }
+    // Refuse a pose that could never build, before it is written.
+    crate::assembly::pose_rigid(&pose)?;
+    Ok(Instance {
+        part,
+        rev,
+        pose,
+        fixed: f.fixed.unwrap_or(current.is_some_and(|c| c.fixed)),
+    })
+}
+
+/// Refuses instance `id` of assembly `pid`, listed in `list`, if its part
+/// doesn't exist (`not_found`), if placing it would make the assembly
+/// place itself (`assembly_cycle`), or if its label doesn't resolve now
+/// (`label_not_found`, `label_not_official`).
+fn check_instance(
+    session: &mut Session,
+    pid: &Id,
+    list: &[Id],
+    id: &Id,
+    f: &Feature,
+) -> Result<()> {
+    let i = f.instance().expect("an instance");
+    if !session.project().parts.contains_key(&i.part) {
+        return Err(
+            Error::new(Code::NotFound, format!("no part {} to place", i.part))
+                .with("part", &i.part)
+                .with("param", "of"),
+        );
+    }
+    match &i.rev {
+        Rev::Working => {
+            let mut project = session.project().clone();
+            let q = proposed(project.part(pid)?, list, &[(id, f)]);
+            project.parts.insert(pid.clone(), q);
+            let cycles = crate::assembly::Cycles::of(&project, &crate::assembly::Pins::new());
+            let (a, c) = ((pid.clone(), Rev::Working), (i.part.clone(), Rev::Working));
+            if cycles.closes(&a, &c) {
+                return Err(crate::assembly::cycle_error(&cycles, &a, &c).with("feature", id));
+            }
+        }
+        Rev::Label(l) => {
+            crate::release::pinned(session, &i.part, l).map_err(|e| e.with("feature", id))?;
+        }
+    }
+    Ok(())
+}
+
 /// A primitive's operation and targets: `current`'s, with what was
 /// given laid over them (`new` drops the targets).
 fn combine_from(current: &Combine, given: &Given) -> Result<Combine> {
@@ -1589,9 +1799,16 @@ fn proposed(p: &Part, order: &[Id], writes: &[(&Id, &Feature)]) -> Part {
         q.features.insert((*id).clone(), Ok((*f).clone()));
     }
     q.file = Ok(PartFile {
+        kind: part_kind(p),
         features: order.to_vec(),
     });
     q
+}
+
+/// Whether `part` is an assembly, as its part file says; a part whose
+/// file can't be read is taken for a part.
+pub(crate) fn part_kind(part: &Part) -> PartKind {
+    part.file.as_ref().map_or(PartKind::Part, |f| f.kind)
 }
 
 /// An extrude or revolve from its fields: the current ones (for an edit)
@@ -2035,6 +2252,10 @@ fn feature_add(
             given.only(ty, &BOOLEAN)?;
             Feature::Boolean(boolean_from(None, &given)?)
         }
+        "instance" => {
+            given.only(ty, &INSTANCE)?;
+            Feature::Instance(instance_from(None, &given, unit, &env)?)
+        }
         "fillet" | "chamfer" => {
             given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
             blend_from(ty, None, &given, &pid, unit, &env)?
@@ -2073,6 +2294,13 @@ fn feature_add(
         .with("feature", &fid));
     }
     list.insert(at, fid.clone());
+    if let Some(e) = crate::assembly::kind_error(p, &fid, &f) {
+        return Err(e);
+    }
+    if f.instance().is_some() {
+        check_instance(session, &pid, &list, &fid, &f)?;
+    }
+    let p = session.project().part(&pid)?;
     if f.swept().is_some() {
         check_sweep(p, &list, &fid, &f)?;
     }
@@ -2130,6 +2358,10 @@ fn feature_edit(
             s.plane = sketch_plane(Some(&s.plane), &given, &pid, unit, &p.env)?;
             Feature::Sketch(s)
         }
+        Feature::Instance(i) => {
+            given.only("instance", &INSTANCE)?;
+            Feature::Instance(instance_from(Some(&i), &given, unit, &p.env)?)
+        }
         Feature::Boolean(b) => {
             given.only("boolean", &BOOLEAN)?;
             Feature::Boolean(boolean_from(Some(&b), &given)?)
@@ -2179,6 +2411,10 @@ fn feature_edit(
             .with("features", users));
         }
     }
+    if f.instance().is_some() && f != old {
+        check_instance(session, &pid, &list, &fid, &f)?;
+    }
+    let p = session.project().part(&pid)?;
     check_solids(&proposed(p, &list, &[(&fid, &f)]), &[&fid])?;
     if let Feature::Pattern(x) = &f {
         crate::pattern::check_seeds(&proposed(p, &list, &[(&fid, &f)]), &fid, x)?;
@@ -2312,6 +2548,7 @@ fn feature_list(session: &Session, part: &str) -> Result<Value> {
 fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
     let part = session.project().part(id)?;
     let revision = part.revision.clone();
+    let assembly = part_kind(part) == PartKind::Assembly;
     let solids = Solids::of(part);
     // A feature that doesn't load may still say what it is: a conflict
     // record's type where the merge left it alone.
@@ -2385,6 +2622,10 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
                     }
                     v
                 }
+                Ok(crate::rebuild::Output::Instance(p)) => {
+                    json!({"id": fid, "type": types.get(fid), "ok": true, "hash": p.hash,
+                           "instance": p.to_json()})
+                }
                 // A sketch makes no body: its state, not a body hash.
                 Ok(crate::rebuild::Output::Sketch(s)) => {
                     json!({"id": fid, "type": types.get(fid), "ok": true,
@@ -2430,6 +2671,16 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
     let mut v = json!({"part": id, "revision": revision, "hash": r.hash,
                        "failed": r.failed(), "features": features, "solids": shown});
     let warnings = r.warnings();
+    // An assembly's model is what its instances place.
+    if assembly {
+        let occurrences: Vec<Value> = crate::assembly::Model::of_assembly(r)
+            .occurrences
+            .iter()
+            .map(crate::assembly::Occurrence::to_json)
+            .collect();
+        v["kind"] = json!("assembly");
+        v["occurrences"] = json!(occurrences);
+    }
     if !warnings.is_empty() {
         v["warnings"] = json!(warnings);
     }
@@ -2485,7 +2736,7 @@ pub fn publish(live: &mut Live, session: &mut Session) {
         live.seen.pdm = None;
     }
     let p = session.project();
-    let revisions: BTreeMap<Id, String> = p
+    let mut revisions: BTreeMap<Id, String> = p
         .parts
         .iter()
         .map(|(id, part)| (id.clone(), part.revision.clone()))
@@ -2493,6 +2744,20 @@ pub fn publish(live: &mut Live, session: &mut Session) {
     if !watched {
         live.seen.parts = revisions;
         return;
+    }
+    // An assembly changes when what it places does, its files or not: its
+    // rebuild's hash says so.
+    let assemblies: Vec<Id> = p
+        .parts
+        .iter()
+        .filter(|(_, part)| part_kind(part) == PartKind::Assembly)
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in assemblies {
+        if let Ok(r) = session.rebuilt(&id) {
+            let key = format!("{}+{}", revisions[&id], r.hash);
+            revisions.insert(id, key);
+        }
     }
     let mut parts = Vec::new();
     for (id, rev) in &revisions {
@@ -2677,9 +2942,20 @@ pub fn model_points(session: &mut Session, refs: &[EntityRef]) -> Result<Vec<[f6
     let mut points = Vec::new();
     let mut grow = |p: &ryukei::geom::Point3| points.push([p.x, p.y, p.z]);
     let coarse = mesh::Quality::Coarse;
+    // The whole model: each part shown, an assembly as all its
+    // occurrences (an occurrence reference with no path).
+    let mut asked = refs.to_vec();
     if refs.is_empty() {
-        let parts: Vec<Id> = session.project().parts.keys().cloned().collect();
-        for part in parts {
+        for part in crate::assembly::shown_parts(session.project()) {
+            if part_kind(session.project().part(&part)?) == PartKind::Assembly {
+                asked.push(EntityRef {
+                    feature: part.clone(),
+                    part,
+                    path: Vec::new(),
+                    name: String::new(),
+                });
+                continue;
+            }
             for (_, m) in meshes(session, &part, None, coarse)? {
                 if let Ok(Ok(mesh)) = m.as_ref().map(|m| m.mesh.mesh.as_ref()) {
                     mesh.positions.iter().for_each(&mut grow);
@@ -2687,7 +2963,39 @@ pub fn model_points(session: &mut Session, refs: &[EntityRef]) -> Result<Vec<[f6
             }
         }
     }
-    for r in refs {
+    for r in &asked {
+        let p = session.project().part(&r.part)?;
+        if part_kind(p) == PartKind::Assembly {
+            let r = r.in_assembly();
+            let model = session.model(&r.part, &crate::doc::assembly::Rev::Working)?;
+            let chosen: Vec<&crate::assembly::Occurrence> = model
+                .occurrences
+                .iter()
+                .filter(|o| match r.is_occurrence() {
+                    true => o.path.starts_with(&r.path),
+                    false => o.path == r.path,
+                })
+                .collect();
+            for o in chosen {
+                let solids: Vec<&crate::assembly::Solid> = o
+                    .solids
+                    .iter()
+                    .filter(|s| r.is_occurrence() || s.founder == r.feature)
+                    .collect();
+                for (s, m) in solids
+                    .iter()
+                    .zip(occurrence_meshes(session, &solids, coarse))
+                {
+                    let Ok(mesh) = &m.mesh else { continue };
+                    let mut placed = |q: &ryukei::geom::Point3| grow(&o.pose.apply_point(*q));
+                    match r.is_occurrence() {
+                        true => mesh.positions.iter().for_each(&mut placed),
+                        false => named_points(&s.built.body, mesh, &r.name, &mut placed),
+                    }
+                }
+            }
+            continue;
+        }
         // A sketch entity shows by its points.
         if let Some(sk) = session
             .rebuilt(&r.part)?
@@ -2703,30 +3011,58 @@ pub fn model_points(session: &mut Session, refs: &[EntityRef]) -> Result<Vec<[f6
         for (_, m) in meshes(session, &r.part, Some(&r.feature), coarse)? {
             let Ok(m) = m else { continue };
             let Ok(mesh) = &m.mesh.mesh else { continue };
-            let body = &m.body;
-            let named = |n: String| n == r.name;
-            for f in &mesh.faces {
-                if named(body.face(f.face).expect("live").name.to_string()) {
-                    for c in &mesh.corners[f.corners.start as usize..f.corners.end as usize] {
-                        grow(&mesh.positions[c.position as usize]);
-                    }
-                }
-            }
-            for e in &mesh.edges {
-                if named(body.edge(e.edge).expect("live").name.to_string()) {
-                    e.positions
-                        .iter()
-                        .for_each(|p| grow(&mesh.positions[*p as usize]));
-                }
-            }
-            for (i, v) in body.vertices().enumerate() {
-                if named(body.vertex(v).expect("live").name.to_string()) {
-                    grow(&mesh.positions[i]);
-                }
-            }
+            named_points(&m.body, mesh, &r.name, &mut grow);
         }
     }
     Ok(points)
+}
+
+/// The mesh points of the face, edge or vertex of `body` named `name`.
+fn named_points(
+    body: &ryukei::topo::Body,
+    mesh: &ryukei::mesh::BodyMesh,
+    name: &str,
+    grow: &mut impl FnMut(&ryukei::geom::Point3),
+) {
+    let named = |n: String| n == name;
+    for f in &mesh.faces {
+        if named(body.face(f.face).expect("live").name.to_string()) {
+            for c in &mesh.corners[f.corners.start as usize..f.corners.end as usize] {
+                grow(&mesh.positions[c.position as usize]);
+            }
+        }
+    }
+    for e in &mesh.edges {
+        if named(body.edge(e.edge).expect("live").name.to_string()) {
+            e.positions
+                .iter()
+                .for_each(|p| grow(&mesh.positions[*p as usize]));
+        }
+    }
+    for (i, v) in body.vertices().enumerate() {
+        if named(body.vertex(v).expect("live").name.to_string()) {
+            grow(&mesh.positions[i]);
+        }
+    }
+}
+
+/// The display meshes of occurrences' solids, in order, each body meshed
+/// once however many occurrences place it.
+pub fn occurrence_meshes(
+    session: &mut Session,
+    solids: &[&crate::assembly::Solid],
+    quality: mesh::Quality,
+) -> Vec<std::sync::Arc<mesh::DisplayMesh>> {
+    let budget = config::user("display.mesh_cache_mib")
+        .as_u64()
+        .unwrap_or(256) as usize
+        * 1024
+        * 1024;
+    let items: Vec<(&Feature, &crate::rebuild::Built)> = solids
+        .iter()
+        .map(|s| (s.feature.as_ref(), s.built.as_ref()))
+        .collect();
+    session.meshes.get_all(&items, quality, budget)
 }
 
 /// A camera from a standard view and/or framing entities. With no view,
@@ -2857,7 +3193,8 @@ fn solids_at(
     Ok((commit, out))
 }
 
-/// The parts a render draws: the one asked for, or all of them.
+/// The parts a render draws: the one asked for, or the project's model
+/// ([`crate::assembly::shown_parts`]).
 fn render_parts(session: &Session, part: Option<&str>) -> Result<Vec<Id>> {
     Ok(match part {
         Some(p) => {
@@ -2865,7 +3202,7 @@ fn render_parts(session: &Session, part: Option<&str>) -> Result<Vec<Id>> {
             session.project().part(&id)?;
             vec![id]
         }
-        None => session.project().parts.keys().cloned().collect(),
+        None => crate::assembly::shown_parts(session.project()),
     })
 }
 
@@ -2878,7 +3215,7 @@ fn render(
     shown: Vec<live::Highlight>,
     ask: RenderAsk,
 ) -> Result<Answer> {
-    use crate::render::{self as r, Geometry, Label, Line, Options, Triangle};
+    use crate::render::{self as r, Geometry, Options};
     r::check_size(ask.width, ask.height)?;
     let parts = render_parts(session.at(ask.rev.as_deref())?.1, ask.part.as_deref())?;
     // Other revisions' models only widen the framing.
@@ -2917,9 +3254,37 @@ fn render(
     // Renders don't follow anyone's display quality, so they compare
     // across machines.
     for part in &parts {
+        // An assembly draws its occurrences where its instances put them.
+        if part_kind(session.project().part(part)?) == PartKind::Assembly {
+            let model = session.model(part, &crate::doc::assembly::Rev::Working)?;
+            for o in &model.occurrences {
+                let solids: Vec<&crate::assembly::Solid> = o.solids.iter().collect();
+                let made = occurrence_meshes(session, &solids, mesh::Quality::Normal);
+                for (s, m) in solids.iter().zip(made) {
+                    let m = mesh::Meshed {
+                        body: s.built.body.clone(),
+                        hash: s.built.hash.clone(),
+                        mesh: m,
+                    };
+                    let path = crate::assembly::path_text(&o.path);
+                    draw_body(
+                        &mut g,
+                        &m,
+                        &o.pose,
+                        &format!("{part}/{path}/{}", s.founder),
+                        &marks,
+                        (None, &BTreeMap::new()),
+                        (ask.labels, ask.edges),
+                    );
+                }
+            }
+            continue;
+        }
         for (fid, m) in meshes(session, part, None, mesh::Quality::Normal)? {
             let Ok(m) = m else { continue };
-            let Ok(mesh) = &m.mesh.mesh else { continue };
+            if m.mesh.mesh.is_err() {
+                continue;
+            }
             seen.insert((part.clone(), fid.clone()), m.clone());
             let (whole, faces) = match &other {
                 Some((_, (_, theirs))) => {
@@ -2927,86 +3292,15 @@ fn render(
                 }
                 None => (None, BTreeMap::new()),
             };
-            let base = g.positions.len() as u32;
-            g.positions
-                .extend(mesh.positions.iter().map(|p| [p.x, p.y, p.z]));
-            let key = |name: String| format!("{part}/{fid}/{name}");
-            let mut label = |name: &str, text: &Option<String>, pts: &[u32]| {
-                if !ask.labels || pts.is_empty() {
-                    return;
-                }
-                let n = pts.len() as f64;
-                let mut at = [0.0; 3];
-                for p in pts {
-                    let q = mesh.positions[*p as usize];
-                    at = [at[0] + q.x / n, at[1] + q.y / n, at[2] + q.z / n];
-                }
-                let text = text.clone().unwrap_or_else(|| name[..8].to_owned());
-                g.labels.push(Label { at, text });
-            };
-            for f in &mesh.faces {
-                let name = m.body.face(f.face).expect("live").name.to_string();
-                let mark = marks.get(&key(name.clone()));
-                // Highlights over the compare's paint, as in the app.
-                let color = mark
-                    .map(|(c, _)| *c)
-                    .or(whole)
-                    .or_else(|| faces.get(&name).copied())
-                    .unwrap_or(r::SURFACE);
-                for t in &mesh.triangles[f.triangles.start as usize..f.triangles.end as usize] {
-                    let c = t.map(|i| mesh.corners[i as usize]);
-                    g.triangles.push(Triangle {
-                        p: c.map(|c| base + c.position),
-                        n: c.map(|c| {
-                            let n = c.normal.get();
-                            [n.x as f32, n.y as f32, n.z as f32]
-                        }),
-                        color,
-                    });
-                }
-                if let Some((_, text)) = mark {
-                    let pts: Vec<u32> = mesh.corners
-                        [f.corners.start as usize..f.corners.end as usize]
-                        .iter()
-                        .map(|c| c.position)
-                        .collect();
-                    label(&name, text, &pts);
-                }
-            }
-            for e in &mesh.edges {
-                let name = m.body.edge(e.edge).expect("live").name.to_string();
-                let points: Vec<u32> = e.positions.iter().map(|p| base + p).collect();
-                match marks.get(&key(name.clone())) {
-                    Some((color, text)) => {
-                        label(&name, text, &e.positions);
-                        g.lines.push(Line {
-                            points,
-                            color: *color,
-                            width: 3.0,
-                            dash: false,
-                        });
-                    }
-                    None if ask.edges => g.lines.push(Line {
-                        points,
-                        color: r::EDGE,
-                        width: 1.0,
-                        dash: false,
-                    }),
-                    None => {}
-                }
-            }
-            for (i, v) in m.body.vertices().enumerate() {
-                let name = m.body.vertex(v).expect("live").name.to_string();
-                if let Some((color, text)) = marks.get(&key(name.clone())) {
-                    label(&name, text, &[i as u32]);
-                    g.lines.push(Line {
-                        points: vec![base + i as u32],
-                        color: *color,
-                        width: 7.0,
-                        dash: false,
-                    });
-                }
-            }
+            draw_body(
+                &mut g,
+                &m,
+                &ryukei::geom::Rigid::IDENTITY,
+                &format!("{part}/{fid}"),
+                &marks,
+                (whole, &faces),
+                (ask.labels, ask.edges),
+            );
         }
         if ask.sketches {
             sketches(session, part, &marks, ask.labels, &mut g)?;
@@ -3068,6 +3362,113 @@ fn render(
         result["compare"] = json!({"rev": rev, "commit": commit});
     }
     Ok(Answer::bytes(result, "image/png", img.png()))
+}
+
+/// Draws one body into a render's geometry where `pose` puts it: its
+/// faces in their marks' or paint's colours, its edges, and its marked
+/// vertices, labelled when asked. Marks are keyed by `prefix/<name>`.
+fn draw_body(
+    g: &mut crate::render::Geometry,
+    m: &mesh::Meshed,
+    pose: &ryukei::geom::Rigid,
+    prefix: &str,
+    marks: &BTreeMap<String, (crate::render::Rgb, Option<String>)>,
+    (whole, faces): (
+        Option<crate::render::Rgb>,
+        &BTreeMap<String, crate::render::Rgb>,
+    ),
+    (labels, edges): (bool, bool),
+) {
+    use crate::render::{self as r, Label, Line, Triangle};
+    let Ok(mesh) = &m.mesh.mesh else { return };
+    // A part's own bodies stay exactly as meshed.
+    let moved = *pose != ryukei::geom::Rigid::IDENTITY;
+    let positions: Vec<ryukei::geom::Point3> = mesh
+        .positions
+        .iter()
+        .map(|p| if moved { pose.apply_point(*p) } else { *p })
+        .collect();
+    let base = g.positions.len() as u32;
+    g.positions
+        .extend(positions.iter().map(|p| [p.x, p.y, p.z]));
+    let key = |name: String| format!("{prefix}/{name}");
+    let label =
+        |g: &mut crate::render::Geometry, name: &str, text: &Option<String>, pts: &[u32]| {
+            if !labels || pts.is_empty() {
+                return;
+            }
+            let n = pts.len() as f64;
+            let mut at = [0.0; 3];
+            for p in pts {
+                let q = positions[*p as usize];
+                at = [at[0] + q.x / n, at[1] + q.y / n, at[2] + q.z / n];
+            }
+            let text = text.clone().unwrap_or_else(|| name[..8].to_owned());
+            g.labels.push(Label { at, text });
+        };
+    for f in &mesh.faces {
+        let name = m.body.face(f.face).expect("live").name.to_string();
+        let mark = marks.get(&key(name.clone()));
+        // Highlights over the compare's paint, as in the app.
+        let color = mark
+            .map(|(c, _)| *c)
+            .or(whole)
+            .or_else(|| faces.get(&name).copied())
+            .unwrap_or(r::SURFACE);
+        for t in &mesh.triangles[f.triangles.start as usize..f.triangles.end as usize] {
+            let c = t.map(|i| mesh.corners[i as usize]);
+            g.triangles.push(Triangle {
+                p: c.map(|c| base + c.position),
+                n: c.map(|c| {
+                    let n = c.normal.get();
+                    let n = if moved { pose.apply_vector(n) } else { n };
+                    [n.x as f32, n.y as f32, n.z as f32]
+                }),
+                color,
+            });
+        }
+        if let Some((_, text)) = mark {
+            let pts: Vec<u32> = mesh.corners[f.corners.start as usize..f.corners.end as usize]
+                .iter()
+                .map(|c| c.position)
+                .collect();
+            label(g, &name, text, &pts);
+        }
+    }
+    for e in &mesh.edges {
+        let name = m.body.edge(e.edge).expect("live").name.to_string();
+        let points: Vec<u32> = e.positions.iter().map(|p| base + p).collect();
+        match marks.get(&key(name.clone())) {
+            Some((color, text)) => {
+                label(g, &name, text, &e.positions);
+                g.lines.push(Line {
+                    points,
+                    color: *color,
+                    width: 3.0,
+                    dash: false,
+                });
+            }
+            None if edges => g.lines.push(Line {
+                points,
+                color: r::EDGE,
+                width: 1.0,
+                dash: false,
+            }),
+            None => {}
+        }
+    }
+    for (i, v) in m.body.vertices().enumerate() {
+        let name = m.body.vertex(v).expect("live").name.to_string();
+        if let Some((color, text)) = marks.get(&key(name.clone())) {
+            label(g, &name, text, &[i as u32]);
+            g.lines.push(Line {
+                points: vec![base + i as u32],
+                color: *color,
+                width: 7.0,
+                dash: false,
+            });
+        }
+    }
 }
 
 /// Draws `part`'s sketches into `g`: curves in their solve states'
@@ -3139,12 +3540,83 @@ fn mesh_args(
     Ok((part_id(part)?, only.map(feature_id).transpose()?, quality))
 }
 
+/// Display meshes, each with its label.
+type Labelled = Vec<(String, Result<mesh::Meshed>)>;
+
+/// An assembly's display meshes: each body its occurrences place, once,
+/// labelled by the first occurrence that places it (`<path>/<solid>`), or
+/// only the occurrence at path `only`; and the occurrences chosen, which
+/// say where each body goes.
+fn assembly_meshes(
+    session: &mut Session,
+    pid: &Id,
+    only: Option<&str>,
+    quality: mesh::Quality,
+) -> Result<(Labelled, Vec<Value>)> {
+    let model = session.model(pid, &crate::doc::assembly::Rev::Working)?;
+    let chosen: Vec<&crate::assembly::Occurrence> = model
+        .occurrences
+        .iter()
+        .filter(|o| only.is_none_or(|p| crate::assembly::path_text(&o.path) == p))
+        .collect();
+    if let Some(p) = only
+        && chosen.is_empty()
+    {
+        return Err(Error::new(
+            Code::NotFound,
+            format!("no occurrence {p} in assembly {pid}"),
+        )
+        .with("part", pid)
+        .with("occurrence", p));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut solids: Vec<(String, &crate::assembly::Solid)> = Vec::new();
+    for o in &chosen {
+        for s in &o.solids {
+            if seen.insert(s.built.hash.clone()) {
+                let path = crate::assembly::path_text(&o.path);
+                solids.push((format!("{path}/{}", s.founder), s));
+            }
+        }
+    }
+    let refs: Vec<&crate::assembly::Solid> = solids.iter().map(|(_, s)| *s).collect();
+    let made = occurrence_meshes(session, &refs, quality);
+    let bodies = solids
+        .into_iter()
+        .zip(made)
+        .map(|((label, s), m)| {
+            let m = mesh::Meshed {
+                body: s.built.body.clone(),
+                hash: s.built.hash.clone(),
+                mesh: m,
+            };
+            (label, Ok(m))
+        })
+        .collect();
+    let occurrences = chosen.iter().map(|o| o.to_json()).collect();
+    Ok((bodies, occurrences))
+}
+
+/// Whether `part` is an assembly.
+fn is_assembly(session: &Session, part: &str) -> bool {
+    part_id(part)
+        .ok()
+        .and_then(|id| session.project().parts.get(&id).map(part_kind))
+        == Some(PartKind::Assembly)
+}
+
 fn mesh_binary(
     session: &mut Session,
     part: &str,
     only: Option<&str>,
     quality: Option<&str>,
 ) -> Result<Answer> {
+    if is_assembly(session, part) {
+        let (pid, _, quality) = mesh_args(part, None, quality)?;
+        let (bodies, occurrences) = assembly_meshes(session, &pid, only, quality)?;
+        let result = json!({"part": pid, "quality": quality.as_str(), "occurrences": occurrences});
+        return Ok(Answer::bytes(result, mesh::ENCODING, mesh::encode(&bodies)));
+    }
     let (pid, only, quality) = mesh_args(part, only, quality)?;
     let bodies = meshes(session, &pid, only.as_ref(), quality)?;
     let result = json!({"part": pid, "quality": quality.as_str()});
@@ -3157,6 +3629,24 @@ fn mesh_get(
     only: Option<&str>,
     quality: Option<&str>,
 ) -> Result<Value> {
+    if is_assembly(session, part) {
+        let (pid, _, quality) = mesh_args(part, None, quality)?;
+        let (bodies, occurrences) = assembly_meshes(session, &pid, only, quality)?;
+        let bodies: Vec<Value> = bodies
+            .into_iter()
+            .filter_map(|(label, m)| {
+                let m = m.ok()?;
+                let mut v = mesh::to_json(&m.body, &m.mesh);
+                v["feature"] = json!(label);
+                v["hash"] = json!(m.hash);
+                Some(v)
+            })
+            .collect();
+        return Ok(
+            json!({"part": pid, "quality": quality.as_str(), "bodies": bodies,
+                         "occurrences": occurrences}),
+        );
+    }
     let (pid, only, quality) = mesh_args(part, only, quality)?;
     let bodies: Vec<Value> = meshes(session, &pid, only.as_ref(), quality)?
         .into_iter()
@@ -3175,12 +3665,95 @@ fn mesh_get(
     Ok(json!({"part": pid, "quality": quality.as_str(), "bodies": bodies}))
 }
 
+/// `inspect` of an assembly: each occurrence (or the one at path `only`)
+/// with its part, revision and pose and each solid's body by stable name;
+/// with `entity`, a full reference, just that entity.
+fn inspect_assembly(
+    session: &mut Session,
+    pid: &Id,
+    only: Option<&str>,
+    entity: Option<&str>,
+) -> Result<Value> {
+    let model = session.model(pid, &crate::doc::assembly::Rev::Working)?;
+    let chosen: Vec<&crate::assembly::Occurrence> = model
+        .occurrences
+        .iter()
+        .filter(|o| only.is_none_or(|p| crate::assembly::path_text(&o.path) == p))
+        .collect();
+    if let Some(p) = only
+        && chosen.is_empty()
+    {
+        return Err(Error::new(
+            Code::NotFound,
+            format!("no occurrence {p} in assembly {pid}"),
+        )
+        .with("part", pid)
+        .with("occurrence", p));
+    }
+    if let Some(given) = entity {
+        let r = EntityRef::parse(given)?.in_assembly();
+        if r.part != *pid || r.is_occurrence() {
+            return Err(Error::new(
+                Code::NotFound,
+                format!("{given} isn't an entity of an occurrence of {pid}"),
+            )
+            .with("entity", given));
+        }
+        for o in &chosen {
+            if o.path != r.path {
+                continue;
+            }
+            for sd in o.solids.iter().filter(|sd| sd.founder == r.feature) {
+                let b = crate::inspect::body(&sd.feature, &sd.built);
+                for (list, kind) in [("faces", "face"), ("edges", "edge"), ("vertices", "vertex")] {
+                    if let Some(e) = b[list]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .find(|e| e["name"] == r.name.as_str())
+                    {
+                        return Ok(json!({"occurrence": crate::assembly::path_text(&o.path),
+                                         "part": o.part, "solid": sd.founder,
+                                         "kind": kind, "entity": e}));
+                    }
+                }
+            }
+        }
+        return Err(Error::new(
+            Code::NotFound,
+            format!("no entity {given} in assembly {pid}"),
+        )
+        .with("entity", given));
+    }
+    let occurrences: Vec<Value> = chosen
+        .iter()
+        .map(|o| {
+            let bodies: Vec<Value> = o
+                .solids
+                .iter()
+                .map(|sd| {
+                    let mut v = crate::inspect::body(&sd.feature, &sd.built);
+                    v["solid"] = json!(sd.founder);
+                    v
+                })
+                .collect();
+            let mut v = o.to_json();
+            v["bodies"] = json!(bodies);
+            v
+        })
+        .collect();
+    Ok(json!({"part": pid, "occurrences": occurrences}))
+}
+
 fn inspect(
     session: &mut Session,
     part: &str,
     only: Option<&str>,
     entity: Option<&str>,
 ) -> Result<Value> {
+    if is_assembly(session, part) {
+        return inspect_assembly(session, &part_id(part)?, only, entity);
+    }
     let pid = part_id(part)?;
     let only = only.map(feature_id).transpose()?;
     if let Some(f) = &only {
@@ -3455,7 +4028,7 @@ pub(crate) mod tests {
         let list = call(&mut s, "part.list", json!({})).unwrap();
         assert_eq!(
             list["parts"],
-            json!([{"part": "bracket", "features": 0, "revision": rev}])
+            json!([{"part": "bracket", "kind": "part", "features": 0, "revision": rev}])
         );
         let info = call(&mut s, "project.info", json!({})).unwrap();
         assert_eq!(info["parts"], json!(["bracket"]));
@@ -3478,6 +4051,31 @@ pub(crate) mod tests {
         .unwrap();
         let e = call(&mut s, "part.delete", json!({"part": "bracket"})).unwrap_err();
         assert_eq!(e.code, Code::NotFound);
+    }
+
+    #[test]
+    fn assemblies_are_parts_of_their_own_kind() {
+        let (dir, mut s) = fresh();
+        let r = call(
+            &mut s,
+            "part.create",
+            json!({"part": "frame", "kind": "assembly"}),
+        )
+        .unwrap();
+        assert_eq!(r["kind"], "assembly");
+        let text = fs::read_to_string(dir.path().join("parts/frame/part.json")).unwrap();
+        assert!(text.contains("\"part_kind\": \"assembly\""), "{text}");
+        assert!(text.contains("\"format\": 2"), "{text}");
+        let list = call(&mut s, "part.list", json!({})).unwrap();
+        assert_eq!(list["parts"][0]["kind"], "assembly");
+        let e = call(
+            &mut s,
+            "part.create",
+            json!({"part": "x", "kind": "drawing"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        assert!(!dir.path().join("parts/x").exists());
     }
 
     fn ids(v: &Value) -> Vec<&str> {
@@ -4409,10 +5007,7 @@ pub(crate) mod tests {
         .unwrap();
         write_json(
             &root.join("parts/p/part.json"),
-            &PartFile {
-                features: vec![Id::parse("s", "feature").unwrap()],
-            }
-            .to_json(),
+            &PartFile::new(vec![Id::parse("s", "feature").unwrap()]).to_json(),
         )
         .unwrap();
         (dir, s)
@@ -5038,7 +5633,7 @@ pub(crate) mod tests {
         assert_eq!(
             r["session"]["participants"],
             json!([{"id": id, "kind": "human", "name": "Dana", "status": null, "selection": [],
-                    "camera": null, "highlights": [], "compare": null}])
+                    "camera": null, "highlights": [], "compare": null, "focus": null}])
         );
         let list = call_live(&mut s, &mut live, Some(&id), "participant.list", json!({})).unwrap();
         assert_eq!(list, r["session"]);
@@ -5401,7 +5996,7 @@ pub(crate) mod tests {
     }
 
     /// The notifications queued for `sub` so far, as (method, params).
-    fn drain(sub: &crate::notify::Subscriber) -> Vec<(String, Value)> {
+    pub(crate) fn drain(sub: &crate::notify::Subscriber) -> Vec<(String, Value)> {
         let mut out = Vec::new();
         // `next` blocks when empty, so close a clone's view by sending a
         // marker first.

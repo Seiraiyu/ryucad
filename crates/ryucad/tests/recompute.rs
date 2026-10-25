@@ -379,3 +379,137 @@ fn an_edit_at_a_long_solids_end_rebuilds_one_feature_and_at_its_founder_the_chai
     let hash = r.hash.clone();
     assert_eq!(hash, full(&s, 1).0);
 }
+
+/// A frame placing a pair of bolts twice and a plate.
+fn assembled() -> (tempfile::TempDir, Session) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "bolt"}));
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "bolt", "type": "cylinder", "id": "shank",
+               "params": {"radius": 3, "height": 17}}),
+    );
+    must(&mut s, "part.create", json!({"part": "plate"}));
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "plate", "type": "box", "id": "slab",
+               "params": {"x": 60, "y": 30, "z": 6}}),
+    );
+    for a in ["pair", "frame"] {
+        must(
+            &mut s,
+            "part.create",
+            json!({"part": a, "kind": "assembly"}),
+        );
+    }
+    for (id, x) in [("left", -8), ("right", 8)] {
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "pair", "type": "instance", "id": id, "of": "bolt",
+                   "placement": {"origin": [x, 0, 0]}}),
+        );
+    }
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "frame", "type": "instance", "id": "base", "of": "plate"}),
+    );
+    for (id, x) in [("p1", 15), ("p2", 45)] {
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "instance", "id": id, "of": "pair",
+                   "placement": {"origin": [x, 15, 6]}}),
+        );
+    }
+    (dir, s)
+}
+
+/// One random edit of the assembled project's parts or instances.
+fn assembly_edit(g: &mut Lcg, s: &mut Session) {
+    let (method, params) = match g.next_u64() % 6 {
+        0 => (
+            "feature.edit",
+            json!({"part": "bolt", "id": "shank", "params": {"radius": mm(g, 2, 4)}}),
+        ),
+        1 => (
+            "feature.edit",
+            json!({"part": "plate", "id": "slab", "params": {"z": mm(g, 4, 8)}}),
+        ),
+        2 => (
+            "assembly.move",
+            json!({"part": "frame", "instance": "p2", "translate": [mm(g, 0, 2), 0, 0]}),
+        ),
+        3 => (
+            "assembly.move",
+            json!({"part": "pair", "instance": "left", "axis": [0, 0, 1], "angle": "15 deg"}),
+        ),
+        4 => (
+            "feature.add",
+            json!({"part": "frame", "type": "instance", "id": "extra", "of": "bolt",
+                   "placement": {"origin": [mm(g, 1, 50), 5, 6]}}),
+        ),
+        _ => ("feature.delete", json!({"part": "frame", "id": "extra"})),
+    };
+    let _ = call(s, method, params);
+}
+
+/// The frame rebuilt from nothing on `threads` threads: its model's hash
+/// and each part's rebuild hash.
+fn assembly_full(s: &Session, threads: usize) -> Vec<String> {
+    use ryucad::assembly::{Pins, Rebuild, Store};
+    use ryucad::doc::assembly::Rev;
+    let project = s.project().clone();
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .unwrap()
+        .install(|| {
+            let pins = Pins::new();
+            let mut r = Rebuild::new(&project, &pins, Store::default());
+            let frame = Id::parse("frame", "part").unwrap();
+            let mut out = vec![r.model(&frame, &Rev::Working).unwrap().hash.clone()];
+            for p in ["bolt", "plate", "pair", "frame"] {
+                out.push(
+                    r.result(&Id::parse(p, "part").unwrap())
+                        .unwrap()
+                        .hash
+                        .clone(),
+                );
+            }
+            out
+        })
+}
+
+#[test]
+fn assemblies_recompute_as_from_nothing() {
+    use ryucad::doc::assembly::Rev;
+    for seed in [1, 2] {
+        let (_dir, mut s) = assembled();
+        let mut g = Lcg::new(seed);
+        for step in 0..20 {
+            assembly_edit(&mut g, &mut s);
+            let frame = Id::parse("frame", "part").unwrap();
+            let mut incremental = vec![s.model(&frame, &Rev::Working).unwrap().hash.clone()];
+            for p in ["bolt", "plate", "pair", "frame"] {
+                let id = Id::parse(p, "part").unwrap();
+                incremental.push(s.rebuilt(&id).unwrap().hash.clone());
+            }
+            assert_eq!(
+                incremental,
+                assembly_full(&s, 1),
+                "seed {seed}, step {step}"
+            );
+            assert_eq!(
+                incremental,
+                assembly_full(&s, 8),
+                "seed {seed}, step {step}"
+            );
+        }
+    }
+}

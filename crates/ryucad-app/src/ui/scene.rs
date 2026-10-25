@@ -420,10 +420,11 @@ impl Scene {
             self.ghosts_at = u64::MAX;
             self.reference = reference;
         }
+        let drawn: BTreeMap<&BodyKey, &Arc<WireBody>> = model.drawn().collect();
         self.bodies
-            .retain(|k, b| model.meshes.get(k).is_some_and(|m| m.hash == b.hash));
+            .retain(|k, b| drawn.get(k).is_some_and(|m| m.hash == b.hash));
         let surface = linear(theme::SURFACE);
-        for (key, body) in &model.meshes {
+        for (key, body) in drawn {
             if self.bodies.contains_key(key) {
                 continue;
             }
