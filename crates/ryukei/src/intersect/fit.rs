@@ -122,6 +122,10 @@ pub(crate) fn first_bound(s: &Surface, [ru, rv]: [[f64; 2]; 2]) -> (f64, f64) {
         Surface::Sphere(c) => (c.radius() * cos_abs_max(rv), c.radius()),
         Surface::Torus(t) => (t.major() + t.minor() * cos_range(rv).1, t.minor()),
         Surface::Pipe(p) => return p.first_bound([ru, rv]),
+        Surface::Nurbs(n) => {
+            let [du, dv] = n.first_bound([ru, rv]);
+            (du, dv)
+        }
         _ => (f64::INFINITY, f64::INFINITY),
     };
     (su * k, sv * k)
@@ -254,8 +258,14 @@ fn pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &dyn Target, target: f
         let part = sub(p, x0, x1);
         let (lo, hi) = part.hull();
         let ranges = [[lo.x, hi.x], [lo.y, hi.y]];
-        let second = s.derivative_bound(ranges);
-        let (su, sv) = first_bound(s, ranges);
+        let (second, (su, sv)) = match s {
+            // One pass over the patches gives both.
+            Surface::Nurbs(n) => {
+                let (second, [du, dv]) = n.derivative_bounds(ranges);
+                (second, (du, dv))
+            }
+            _ => (s.derivative_bound(ranges), first_bound(s, ranges)),
+        };
         let w = x1 - x0;
         let (d1, d2) = derivative_hulls(&part);
         let (u1, v1) = (d1[0] / w, d1[1] / w);
@@ -1240,6 +1250,32 @@ mod tests {
         // Once round the cylinder: the pcurve winds a whole period in u.
         let (a, b) = (pc.point(0.0), pc.point(core::f64::consts::TAU));
         assert!(((b.x - a.x).abs() - core::f64::consts::TAU).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_pcurve_on_a_spline_surface() {
+        // The same ellipse on the cylinder's exact rational form: the fit
+        // is certified through the spline's first derivatives.
+        let cyl = Surface::Cylinder(Cylinder::new(Frame::WORLD, 1.0).unwrap());
+        let (n, _) = cyl
+            .to_nurbs([[0.0, core::f64::consts::TAU], [-2.0, 2.0]])
+            .unwrap();
+        let spline = Surface::Nurbs(std::sync::Arc::new(n));
+        let f = Frame::new(
+            Point3::ORIGIN,
+            Vector3::new(0.0, 0.6, 1.0),
+            Vector3::new(0.0, 1.0, -0.6),
+        )
+        .unwrap();
+        let cz = 1.0 / Vector3::new(0.0, 0.6, 1.0).length();
+        let e = Curve::Ellipse(Ellipse::new(f, 1.0 / cz, 1.0).unwrap());
+        let (pc, tol) = fit_pcurve(&spline, &e, [0.5, 2.5]).unwrap();
+        assert!(tol <= 10.0 * LINEAR_RESOLUTION);
+        for k in 0..=500 {
+            let t = 0.5 + 2.0 * f64::from(k) / 500.0;
+            let q = pc.point(t);
+            assert!(spline.point(q.x, q.y).distance(e.point(t)) <= tol);
+        }
     }
 
     #[test]
