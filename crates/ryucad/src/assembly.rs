@@ -34,13 +34,54 @@ pub struct Occurrence {
     pub pose: Rigid,
 }
 
-/// What an instance of a part places: its occurrences in order, and a
-/// hash of them: equal hashes, equal models.
+/// What an instance of a part places: its occurrences in order, a hash
+/// of them (equal hashes, equal models), and for a part read at a release
+/// label, how the label resolved.
 #[derive(Clone, Debug)]
 pub struct Model {
     pub occurrences: Vec<Occurrence>,
     pub hash: String,
+    pub pin: Option<Pin>,
 }
+
+/// How a release label resolved: at the commit where its record became
+/// official, or (`commit: None`) to the working files, which its proposed
+/// record describes. `obsolete` when an obsolete record names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pin {
+    pub commit: Option<String>,
+    pub obsolete: bool,
+}
+
+impl Pin {
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut v = match &self.commit {
+            Some(c) => serde_json::json!({"official": true, "commit": c}),
+            None => serde_json::json!({"official": false, "proposed": true}),
+        };
+        if self.obsolete {
+            v["obsolete"] = serde_json::json!(true);
+        }
+        v
+    }
+}
+
+/// A part as a release label has it: its files where the record became
+/// official (or the working files, for a proposal that describes them),
+/// loaded, and how the label resolved.
+#[derive(Clone, Debug)]
+pub struct Pinned {
+    pub part: Part,
+    pub pin: Pin,
+}
+
+/// Every release label the project's instances reach, at any depth, by
+/// part and label: the part as the label has it, or why it can't be read
+/// (`label_not_found`, `label_not_official`).
+pub type Pins = BTreeMap<(Id, String), Result<Arc<Pinned>>>;
+
+/// A part at a revision: what an instance names.
+pub type Node = (Id, Rev);
 
 impl Model {
     fn new(occurrences: Vec<Occurrence>) -> Model {
@@ -56,6 +97,7 @@ impl Model {
         Model {
             occurrences,
             hash: h.finalize().to_hex()[..32].to_owned(),
+            pin: None,
         }
     }
 
@@ -129,6 +171,18 @@ pub struct Placed {
     pub hash: String,
 }
 
+/// `instance_obsolete`: instance `id` places a release an obsolete record
+/// names.
+pub fn obsolete_warning(id: &Id, p: &Placed) -> serde_json::Value {
+    serde_json::json!({
+        "code": "instance_obsolete",
+        "feature": id,
+        "part": p.part,
+        "rev": p.rev.to_json(),
+        "message": format!("instance {id} places {} at {}, which is obsolete", p.part, p.rev.text()),
+    })
+}
+
 /// The rigid placement of a pose: its frame, `x` made perpendicular to
 /// `z`. Axes with no direction, or parallel ones, and an origin outside
 /// the size box are `invalid_placement`.
@@ -157,7 +211,17 @@ pub fn place(id: &Id, inst: &Instance, children: &Children) -> Result<Placed> {
     let pose = pose_rigid(&inst.pose).map_err(|e| e.with("feature", id))?;
     let model = match children.get(&(inst.part.clone(), inst.rev.clone())) {
         Some(Ok(m)) => Arc::clone(m),
-        Some(Err(e)) if e.code == Code::AssemblyCycle || e.code == Code::NotFound => {
+        // Why the part couldn't be placed at all is the instance's fault.
+        Some(Err(e))
+            if matches!(
+                e.code,
+                Code::AssemblyCycle
+                    | Code::NotFound
+                    | Code::LabelNotFound
+                    | Code::LabelNotOfficial
+                    | Code::InstanceNotReleased
+            ) =>
+        {
             return Err(e.clone().with("feature", id));
         }
         Some(Err(e)) => {
@@ -216,38 +280,52 @@ pub fn kind_error(part: &Part, id: &Id, f: &Feature) -> Option<Error> {
     )
 }
 
-/// The project's assemblies and what their listed instances place at
-/// `working`, by assembly: the edges cycles are found on.
-fn edges(project: &Project) -> BTreeMap<Id, BTreeSet<Id>> {
+/// What each part at a revision places, by node: a part's listed
+/// instances at `working` and in releases the pins hold. An instance at
+/// `working` inside a release reads nothing (it is
+/// `instance_not_released`). These are the edges cycles are found on.
+fn edges(project: &Project, pins: &Pins) -> BTreeMap<Node, BTreeSet<Node>> {
+    let instances = |p: &Part, inside_release: bool| -> BTreeSet<Node> {
+        p.order()
+            .iter()
+            .filter_map(|fid| match p.features.get(fid) {
+                Some(Ok(Feature::Instance(i))) if !(inside_release && i.rev == Rev::Working) => {
+                    Some((i.part.clone(), i.rev.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    };
     let mut out = BTreeMap::new();
     for (id, p) in &project.parts {
-        let mut to = BTreeSet::new();
-        for fid in p.order() {
-            if let Some(Ok(Feature::Instance(i))) = p.features.get(fid)
-                && i.rev == Rev::Working
-            {
-                to.insert(i.part.clone());
-            }
-        }
+        let to = instances(p, false);
         if !to.is_empty() {
-            out.insert(id.clone(), to);
+            out.insert((id.clone(), Rev::Working), to);
+        }
+    }
+    for ((id, label), pinned) in pins {
+        if let Ok(pinned) = pinned {
+            let to = instances(&pinned.part, true);
+            if !to.is_empty() {
+                out.insert((id.clone(), Rev::Label(label.clone())), to);
+            }
         }
     }
     out
 }
 
-/// The parts on a cycle of instances at `working`, each with the cycle
-/// through it as a path of parts, starting and ending with it: Tarjan's
-/// strongly connected components over [`edges`]. An instance of part `b`
-/// in assembly `a` closes a cycle when both are in one component.
+/// The parts at revisions that lie on a cycle of instances: Tarjan's
+/// strongly connected components over [`edges`]. An instance of `b` in
+/// `a` closes a cycle when both are in one component.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Cycles {
-    component: BTreeMap<Id, usize>,
+    edges: BTreeMap<Node, BTreeSet<Node>>,
+    component: BTreeMap<Node, usize>,
 }
 
 impl Cycles {
-    pub fn of(project: &Project) -> Cycles {
-        let edges = edges(project);
+    pub fn of(project: &Project, pins: &Pins) -> Cycles {
+        let edges = edges(project, pins);
         let mut t = Tarjan {
             edges: &edges,
             index: BTreeMap::new(),
@@ -270,34 +348,34 @@ impl Cycles {
             *sizes.entry(*c).or_default() += 1;
         }
         component.retain(|v, c| sizes[c] > 1 || edges.get(v).is_some_and(|to| to.contains(v)));
-        Cycles { component }
+        Cycles { edges, component }
     }
 
     /// Whether an instance of `child` in `assembly` closes a cycle.
-    pub fn closes(&self, assembly: &Id, child: &Id) -> bool {
+    pub fn closes(&self, assembly: &Node, child: &Node) -> bool {
         matches!((self.component.get(assembly), self.component.get(child)), (Some(a), Some(b)) if a == b)
     }
 }
 
 struct Tarjan<'a> {
-    edges: &'a BTreeMap<Id, BTreeSet<Id>>,
-    index: BTreeMap<Id, usize>,
-    low: BTreeMap<Id, usize>,
-    stack: Vec<Id>,
-    on: BTreeSet<Id>,
+    edges: &'a BTreeMap<Node, BTreeSet<Node>>,
+    index: BTreeMap<Node, usize>,
+    low: BTreeMap<Node, usize>,
+    stack: Vec<Node>,
+    on: BTreeSet<Node>,
     next: usize,
-    component: BTreeMap<Id, usize>,
+    component: BTreeMap<Node, usize>,
     components: usize,
 }
 
 impl Tarjan<'_> {
-    fn visit(&mut self, v: &Id) {
+    fn visit(&mut self, v: &Node) {
         self.index.insert(v.clone(), self.next);
         self.low.insert(v.clone(), self.next);
         self.next += 1;
         self.stack.push(v.clone());
         self.on.insert(v.clone());
-        let to: Vec<Id> = self
+        let to: Vec<Node> = self
             .edges
             .get(v)
             .map(|t| t.iter().cloned().collect())
@@ -326,11 +404,10 @@ impl Tarjan<'_> {
     }
 }
 
-/// The path of parts from `from` back to `to` through instances at
-/// `working`, for the message: the shortest, the first by ID at each step.
-fn path_back(project: &Project, from: &Id, to: &Id) -> Vec<Id> {
-    let edges = edges(project);
-    let mut prev: BTreeMap<Id, Id> = BTreeMap::new();
+/// The path from `from` back to `to` through instances, for the
+/// message: the shortest, the first in order at each step.
+fn path_back(edges: &BTreeMap<Node, BTreeSet<Node>>, from: &Node, to: &Node) -> Vec<Node> {
+    let mut prev: BTreeMap<Node, Node> = BTreeMap::new();
     let mut queue = std::collections::VecDeque::from([from.clone()]);
     let mut seen = BTreeSet::from([from.clone()]);
     while let Some(v) = queue.pop_front() {
@@ -354,47 +431,76 @@ fn path_back(project: &Project, from: &Id, to: &Id) -> Vec<Id> {
     path
 }
 
+/// A node as people read it: `frame`, or `bolt@B` at a label.
+fn node_text((part, rev): &Node) -> String {
+    match rev {
+        Rev::Working => part.to_string(),
+        Rev::Label(l) => format!("{part}@{l}"),
+    }
+}
+
 /// `assembly_cycle` for an instance of `child` in `assembly`.
-pub fn cycle_error(project: &Project, assembly: &Id, child: &Id) -> Error {
+fn cycle_error(cycles: &Cycles, assembly: &Node, child: &Node) -> Error {
     let mut path = vec![assembly.clone()];
-    path.extend(path_back(project, child, assembly));
-    let text: Vec<&str> = path.iter().map(Id::as_str).collect();
+    path.extend(path_back(&cycles.edges, child, assembly));
+    let text: Vec<String> = path.iter().map(node_text).collect();
+    let (a, c) = (node_text(assembly), node_text(child));
     Error::new(
         Code::AssemblyCycle,
         format!(
-            "{assembly} places {child}, which places {assembly} again: {}",
+            "{a} places {c}, which places {a} again: {}",
             text.join(" > ")
         ),
     )
-    .with("part", assembly)
+    .with("part", &assembly.0)
+    .with("child", &child.0)
+    .with("path", &text)
+}
+
+/// `instance_not_released` for an instance at `working` inside a part
+/// read at a release label.
+fn working_in_release(node: &Node, child: &Id) -> Error {
+    Error::new(
+        Code::InstanceNotReleased,
+        format!(
+            "{} places {child} as it is now (working), and a release can only place releases",
+            node_text(node)
+        ),
+    )
+    .with("part", &node.0)
     .with("child", child)
-    .with("path", &path)
+}
+
+/// What a session keeps between rebuilds: each part's rebuild by a key of
+/// everything it read (its revision, and for an assembly its children's
+/// models) and its feature cache, the same for parts read at release
+/// labels, by part and label.
+#[derive(Clone, Debug, Default)]
+pub struct Store {
+    pub results: BTreeMap<Id, (String, PartResult)>,
+    pub caches: BTreeMap<Id, Cache>,
+    pub pinned: BTreeMap<(Id, String), (String, PartResult)>,
+    pub pinned_caches: BTreeMap<(Id, String), Cache>,
 }
 
 /// Rebuilds parts and the assemblies over them, a part before every
-/// assembly that places it, reusing what `results` and `caches` hold:
-/// each part's rebuild by a key of everything it read (its revision, and
-/// for an assembly its children's models), and each part's feature
-/// cache. `fresh` lists, in order, the parts it rebuilt.
+/// assembly that places it, reusing what its [`Store`] holds. `fresh`
+/// lists, in order, the parts at `working` it rebuilt.
 pub struct Rebuild<'p> {
     project: &'p Project,
+    pins: &'p Pins,
     cycles: Cycles,
-    pub results: BTreeMap<Id, (String, PartResult)>,
-    pub caches: BTreeMap<Id, Cache>,
+    pub store: Store,
     pub fresh: Vec<Id>,
 }
 
 impl<'p> Rebuild<'p> {
-    pub fn new(
-        project: &'p Project,
-        results: BTreeMap<Id, (String, PartResult)>,
-        caches: BTreeMap<Id, Cache>,
-    ) -> Rebuild<'p> {
+    pub fn new(project: &'p Project, pins: &'p Pins, store: Store) -> Rebuild<'p> {
         Rebuild {
             project,
-            cycles: Cycles::of(project),
-            results,
-            caches,
+            pins,
+            cycles: Cycles::of(project, pins),
+            store,
             fresh: Vec::new(),
         }
     }
@@ -402,48 +508,71 @@ impl<'p> Rebuild<'p> {
     /// The rebuild of `part`, and of every part it places first.
     pub fn result(&mut self, part: &Id) -> Result<&PartResult> {
         let p = self.project.part(part)?;
-        let mut key = p.revision.clone();
-        let mut children = Children::new();
-        if p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly) {
-            for fid in p.order() {
-                let Some(Ok(Feature::Instance(i))) = p.features.get(fid) else {
-                    continue;
-                };
-                let at = (i.part.clone(), i.rev.clone());
-                if children.contains_key(&at) {
-                    continue;
-                }
-                let m = self.child(part, &i.part, &i.rev);
-                children.insert(at, m);
-            }
-            let mut h = blake3::Hasher::new();
-            for ((c, rev), m) in &children {
-                let what = match m {
-                    Ok(m) => m.hash.clone(),
-                    Err(e) => serde_json::to_string(&e.code).expect("codes serialize"),
-                };
-                h.update(format!("{c} {} {what}\n", rev.text()).as_bytes());
-            }
-            key = format!("{key}+{}", &h.finalize().to_hex()[..32]);
-        }
-        let fresh = self.results.get(part).is_some_and(|(k, _)| *k == key);
+        let (key, children) = self.children(p, &Rev::Working);
+        let fresh = self.store.results.get(part).is_some_and(|(k, _)| *k == key);
         if !fresh {
             let empty = Cache::new();
-            let cache = self.caches.get(part).unwrap_or(&empty);
+            let cache = self.store.caches.get(part).unwrap_or(&empty);
             let (result, cache) = rebuild_part_in(p, cache, &children);
-            self.caches.insert(part.clone(), cache);
-            self.results.insert(part.clone(), (key, result));
+            self.store.caches.insert(part.clone(), cache);
+            self.store.results.insert(part.clone(), (key, result));
             self.fresh.push(part.clone());
         }
-        Ok(&self.results[part].1)
+        Ok(&self.store.results[part].1)
     }
 
-    /// The model an instance in `assembly` places of `part` at `rev`.
-    fn child(&mut self, assembly: &Id, part: &Id, rev: &Rev) -> Result<Arc<Model>> {
-        if *rev == Rev::Working && self.cycles.closes(assembly, part) {
-            return Err(cycle_error(self.project, assembly, part));
+    /// The rebuild of `part` as release `label` has it.
+    fn pinned_result(&mut self, part: &Id, label: &str, pinned: &Pinned) -> &PartResult {
+        let at = (part.clone(), label.to_owned());
+        let (key, children) = self.children(&pinned.part, &Rev::Label(label.to_owned()));
+        let fresh = self.store.pinned.get(&at).is_some_and(|(k, _)| *k == key);
+        if !fresh {
+            let empty = Cache::new();
+            let cache = self.store.pinned_caches.get(&at).unwrap_or(&empty);
+            let (result, cache) = rebuild_part_in(&pinned.part, cache, &children);
+            self.store.pinned_caches.insert(at.clone(), cache);
+            self.store.pinned.insert(at.clone(), (key, result));
         }
-        self.model(part, rev)
+        &self.store.pinned[&at].1
+    }
+
+    /// The models what `p` (`part` at `rev`) places, by part and
+    /// revision, each found first, and the key of its rebuild: its files'
+    /// revision and those models' hashes.
+    fn children(&mut self, p: &Part, rev: &Rev) -> (String, Children) {
+        let mut key = p.revision.clone();
+        let mut children = Children::new();
+        if !p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly) {
+            return (key, children);
+        }
+        let node = (p.id.clone(), rev.clone());
+        for fid in p.order() {
+            let Some(Ok(Feature::Instance(i))) = p.features.get(fid) else {
+                continue;
+            };
+            let at = (i.part.clone(), i.rev.clone());
+            if children.contains_key(&at) {
+                continue;
+            }
+            let m = if *rev != Rev::Working && i.rev == Rev::Working {
+                Err(working_in_release(&node, &i.part))
+            } else if self.cycles.closes(&node, &at) {
+                Err(cycle_error(&self.cycles, &node, &at))
+            } else {
+                self.model(&i.part, &i.rev)
+            };
+            children.insert(at, m);
+        }
+        let mut h = blake3::Hasher::new();
+        for ((c, crev), m) in &children {
+            let what = match m {
+                Ok(m) => format!("{} {:?}", m.hash, m.pin),
+                Err(e) => serde_json::to_string(&e.code).expect("codes serialize"),
+            };
+            h.update(format!("{c} {} {what}\n", crev.text()).as_bytes());
+        }
+        key = format!("{key}+{}", &h.finalize().to_hex()[..32]);
+        (key, children)
     }
 
     /// The model of `part` at `rev`: what an instance of it places.
@@ -454,21 +583,70 @@ impl<'p> Rebuild<'p> {
                     Error::new(Code::NotFound, format!("no part {part} to place"))
                         .with("part", part)
                 })?;
-                let assembly = p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly);
                 let result = self.result(part)?;
-                Ok(Arc::new(if assembly {
-                    Model::of_assembly(result)
-                } else {
-                    Model::of_part(p, rev, result)
-                }))
+                Ok(Arc::new(model_of(p, rev, result)))
             }
-            Rev::Label(l) => Err(
-                Error::new(Code::NotFound, format!("{part} has no release {l}"))
-                    .with("part", part)
-                    .with("label", l),
-            ),
+            Rev::Label(l) => {
+                let pinned = match self.pins.get(&(part.clone(), l.clone())) {
+                    Some(Ok(p)) => Arc::clone(p),
+                    Some(Err(e)) => return Err(e.clone()),
+                    None => {
+                        return Err(Error::new(
+                            Code::Internal,
+                            format!("{part}@{l} wasn't looked up before the rebuild"),
+                        ));
+                    }
+                };
+                let result = self.pinned_result(part, l, &pinned);
+                let mut m = model_of(&pinned.part, rev, result);
+                m.pin = Some(pinned.pin.clone());
+                Ok(Arc::new(m))
+            }
         }
     }
+}
+
+/// The model of `p` at `rev` from its rebuild.
+fn model_of(p: &Part, rev: &Rev, result: &PartResult) -> Model {
+    if p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly) {
+        Model::of_assembly(result)
+    } else {
+        Model::of_part(p, rev, result)
+    }
+}
+
+/// Every release label `project`'s instances reach, at any depth, each
+/// looked up by `look` once: what [`Rebuild`] reads labels from.
+pub fn pins(project: &Project, mut look: impl FnMut(&Id, &str) -> Result<Pinned>) -> Pins {
+    let mut out = Pins::new();
+    let mut todo: Vec<(Id, String)> = Vec::new();
+    let labels = |p: &Part| -> Vec<(Id, String)> {
+        p.order()
+            .iter()
+            .filter_map(|fid| match p.features.get(fid) {
+                Some(Ok(Feature::Instance(Instance {
+                    part,
+                    rev: Rev::Label(l),
+                    ..
+                }))) => Some((part.clone(), l.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+    for p in project.parts.values() {
+        todo.extend(labels(p));
+    }
+    while let Some(at) = todo.pop() {
+        if out.contains_key(&at) {
+            continue;
+        }
+        let r = look(&at.0, &at.1).map(Arc::new);
+        if let Ok(p) = &r {
+            todo.extend(labels(&p.part));
+        }
+        out.insert(at, r);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -793,5 +971,213 @@ pub(crate) mod tests {
         assert_ne!(after.hash, before.hash);
         // Only the instance of the bolt is placed again.
         assert_eq!(after.built, [id("b1")]);
+    }
+
+    /// [`project`] in a repository on `main`, the bolt numbered, released
+    /// as A and committed, then made thicker: A and the working bolt
+    /// differ.
+    pub(crate) fn released() -> (tempfile::TempDir, Session) {
+        use crate::git::tests::git;
+        let (dir, mut s) = project();
+        let r = dir.path();
+        git(r, &["init", "-q", "-b", "main"]);
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "bolt", "properties": {"number": "100"}}),
+        )
+        .unwrap();
+        call(&mut s, "release.propose", json!({"part": "bolt"})).unwrap();
+        git(r, &["add", "."]);
+        git(r, &["commit", "-q", "-m", "bolt A"]);
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "bolt", "id": "shank", "params": {"radius": 4}}),
+        )
+        .unwrap();
+        (dir, s)
+    }
+
+    fn feature_error(s: &mut Session, asm: &str, inst: &str) -> Error {
+        let result = s.rebuilt(&id(asm)).unwrap();
+        let (_, r) = result
+            .features
+            .iter()
+            .find(|(f, _)| *f == id(inst))
+            .unwrap();
+        r.clone().unwrap_err()
+    }
+
+    #[test]
+    fn a_label_places_the_release_as_it_became_official() {
+        let (dir, mut s) = released();
+        let r = dir.path();
+        place_in(r, "frame", "old", "bolt", json!({"label": "A"}), [0.0; 3]);
+        place_in(
+            r,
+            "frame",
+            "new",
+            "bolt",
+            json!("working"),
+            [0.02, 0.0, 0.0],
+        );
+        s.refresh().unwrap();
+        let m = s.model(&id("frame"), &Rev::Working).unwrap();
+        let (old, new) = (&m.occurrences[0], &m.occurrences[1]);
+        assert_eq!(old.rev, Rev::Label("A".into()));
+        assert_ne!(old.solids[0].1.hash, new.solids[0].1.hash);
+        let result = s.rebuilt(&id("frame")).unwrap();
+        let placed = result.output(&id("old")).unwrap().instance().unwrap();
+        let commit = crate::git::repo(r).unwrap().locate("HEAD").unwrap().0;
+        assert_eq!(
+            placed.model.pin,
+            Some(Pin {
+                commit: Some(commit),
+                obsolete: false
+            })
+        );
+        assert!(result.warnings().is_empty());
+        // A's body is the bolt's as it was released.
+        let a = crate::release::pinned(&mut s, &id("bolt"), "A").unwrap();
+        assert_eq!(a.part.revision.len(), 32);
+        assert_eq!(
+            crate::rebuild::rebuild_part(&a.part)
+                .output(&id("shank"))
+                .unwrap()
+                .hash(),
+            old.solids[0].1.hash
+        );
+    }
+
+    #[test]
+    fn a_proposal_places_the_working_files_while_it_describes_them() {
+        let (dir, mut s) = released();
+        let r = dir.path();
+        call(&mut s, "release.propose", json!({"part": "bolt"})).unwrap();
+        place_in(r, "frame", "b", "bolt", json!({"label": "B"}), [0.0; 3]);
+        s.refresh().unwrap();
+        let m = s.model(&id("frame"), &Rev::Working).unwrap();
+        let working = s
+            .rebuilt(&id("bolt"))
+            .unwrap()
+            .output(&id("shank"))
+            .unwrap()
+            .hash()
+            .to_owned();
+        assert_eq!(m.occurrences[0].solids[0].1.hash, working);
+        let placed = s
+            .rebuilt(&id("frame"))
+            .unwrap()
+            .output(&id("b"))
+            .unwrap()
+            .instance()
+            .unwrap()
+            .clone();
+        assert_eq!(placed.model.pin.as_ref().unwrap().commit, None);
+        // Changed since: B no longer says what the bolt is.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "bolt", "id": "shank", "params": {"radius": 5}}),
+        )
+        .unwrap();
+        let e = feature_error(&mut s, "frame", "b");
+        assert_eq!(
+            (e.code, e.details["label"].clone()),
+            (Code::LabelNotOfficial, json!("B"))
+        );
+    }
+
+    #[test]
+    fn a_label_without_a_record_fails_its_instance() {
+        let (dir, mut s) = released();
+        place_in(
+            dir.path(),
+            "frame",
+            "z",
+            "bolt",
+            json!({"label": "Z"}),
+            [0.0; 3],
+        );
+        s.refresh().unwrap();
+        let e = feature_error(&mut s, "frame", "z");
+        assert_eq!(
+            (e.code, e.details["feature"].clone()),
+            (Code::LabelNotFound, json!("z"))
+        );
+    }
+
+    #[test]
+    fn an_obsolete_label_still_places_with_a_warning() {
+        use crate::git::tests::git;
+        let (dir, mut s) = released();
+        let r = dir.path();
+        call(
+            &mut s,
+            "release.obsolete",
+            json!({"part": "bolt", "label": "A"}),
+        )
+        .unwrap();
+        git(r, &["add", "."]);
+        git(r, &["commit", "-q", "-m", "A is obsolete"]);
+        place_in(r, "frame", "old", "bolt", json!({"label": "A"}), [0.0; 3]);
+        s.refresh().unwrap();
+        let result = s.rebuilt(&id("frame")).unwrap();
+        assert_eq!(result.failed(), 0);
+        let w = result.warnings();
+        assert_eq!(w.len(), 1);
+        assert_eq!(
+            (&w[0]["code"], &w[0]["feature"]),
+            (&json!("instance_obsolete"), &json!("old"))
+        );
+    }
+
+    #[test]
+    fn a_release_places_only_releases() {
+        use crate::git::tests::git;
+        let (dir, mut s) = released();
+        let r = dir.path();
+        // A pair that places the bolt as it is, released anyway.
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "pair", "kind": "assembly"}),
+        )
+        .unwrap();
+        place_in(r, "pair", "one", "bolt", json!("working"), [0.0; 3]);
+        place_in(
+            r,
+            "pair",
+            "two",
+            "bolt",
+            json!({"label": "A"}),
+            [0.01, 0.0, 0.0],
+        );
+        s.refresh().unwrap();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "pair", "properties": {"number": "200"}}),
+        )
+        .unwrap();
+        call(&mut s, "release.propose", json!({"part": "pair"})).unwrap();
+        git(r, &["add", "."]);
+        git(r, &["commit", "-q", "-m", "pair A"]);
+        place_in(r, "frame", "p", "pair", json!({"label": "A"}), [0.0; 3]);
+        s.refresh().unwrap();
+        let m = s.model(&id("frame"), &Rev::Working).unwrap();
+        // Only the released bolt is placed; the working one fails in the
+        // pair as released.
+        assert_eq!(paths(&m), ["p/two bolt"]);
+        let pinned = s
+            .store
+            .pinned
+            .get(&(id("pair"), "A".to_owned()))
+            .unwrap()
+            .1
+            .clone();
+        let e = pinned.features[0].1.clone().unwrap_err();
+        assert_eq!(e.code, Code::InstanceNotReleased);
     }
 }

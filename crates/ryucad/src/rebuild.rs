@@ -290,13 +290,20 @@ impl PartResult {
     }
 
     /// `sketch_stale` for each sketch rebuilt from positions solved in
-    /// memory.
+    /// memory, and `instance_obsolete` for each instance of an obsolete
+    /// release.
     pub fn warnings(&self) -> Vec<serde_json::Value> {
         self.features
             .iter()
             .filter_map(|(id, r)| {
-                let s = r.as_ref().ok()?.sketch()?;
-                s.stale.then(|| crate::sketch::stale_warning(id))
+                let o = r.as_ref().ok()?;
+                if let Some(s) = o.sketch() {
+                    return s.stale.then(|| crate::sketch::stale_warning(id));
+                }
+                let p = o.instance()?;
+                let pin = p.model.pin.as_ref()?;
+                pin.obsolete
+                    .then(|| crate::assembly::obsolete_warning(id, p))
             })
             .collect()
     }

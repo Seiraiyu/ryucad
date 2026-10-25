@@ -14,14 +14,13 @@
 //! schema; changing or removing one is. A hosted job can run `ryucad check
 //! --against <base>` and gate on the exit code and the findings.
 
-use crate::assembly::Rebuild;
+use crate::assembly::{Rebuild, Store};
 use crate::doc::id::Id;
 use crate::error::{Code, Error, Result};
 use crate::rebuild::{Built, Output};
 use crate::session::Session;
 use rayon::prelude::*;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
 
 /// Every finding's code and severity: `doctor`'s issues keep their own.
 pub const CODES: [(&str, &str); 6] = [
@@ -207,7 +206,8 @@ pub fn run(
     let mut parts = Vec::new();
     // From nothing: no cache, so the files alone decide.
     let project = session.project().clone();
-    let mut from_nothing = Rebuild::new(&project, BTreeMap::new(), BTreeMap::new());
+    let pins = session.pins()?;
+    let mut from_nothing = Rebuild::new(&project, &pins, Store::default());
     for id in &ids {
         let p = project.part(id)?.clone();
         let fresh = from_nothing.result(id)?.clone();

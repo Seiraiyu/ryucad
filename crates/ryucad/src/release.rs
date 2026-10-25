@@ -11,6 +11,7 @@
 //! local `ryupdm/<part>/<label>` tags to match the records, and never
 //! pushes, deletes a tag or touches any other ref.
 
+use crate::assembly::{Pin, Pinned};
 use crate::doc::id::Id;
 use crate::doc::project::write_json;
 use crate::error::{Code, Error, Result};
@@ -51,6 +52,65 @@ pub(crate) fn history(session: &mut Session) -> Result<(crate::git::Repo, Releas
     let releases = Releases::read(repo.gix(), repo.prefix(), &config)?;
     session.releases = Some((key, releases.clone()));
     Ok((repo, releases))
+}
+
+/// `part` as release `label` has it, for an instance: the files where its
+/// record became official, else the working files when the proposed
+/// record describes them. `label_not_found` without a record,
+/// `label_not_official` otherwise; a record that can't be read gives its
+/// own error.
+pub(crate) fn pinned(session: &mut Session, part: &Id, label: &str) -> Result<Pinned> {
+    let path = ryupdm::record::path(part, label, Kind::Release);
+    let records = ryupdm::record::Records::read(&*session)?;
+    let Some(entry) = records.at(&path) else {
+        return Err(Error::new(
+            Code::LabelNotFound,
+            format!("{part} has no release {label}: {path} doesn't exist"),
+        )
+        .with("part", part)
+        .with("label", label));
+    };
+    let record = entry.record.clone()?;
+    let content = record
+        .release()
+        .map(|r| r.content.clone())
+        .unwrap_or_default();
+    let obsolete = records
+        .at(&ryupdm::record::path(part, label, Kind::Obsolete))
+        .is_some();
+    match history(session) {
+        Ok((repo, releases)) => {
+            if let Some(o) = releases.official.get(&path) {
+                let p = session.pinned_part(&repo, part, &o.commit)?;
+                return Ok(Pinned {
+                    part: p,
+                    pin: Pin {
+                        commit: Some(o.commit.clone()),
+                        obsolete,
+                    },
+                });
+            }
+        }
+        Err(e) if e.code == Code::NotAGitRepo => {}
+        Err(e) => return Err(e),
+    }
+    if ryupdm::content::hash(&*session, part).is_ok_and(|h| h == content) {
+        return Ok(Pinned {
+            part: session.project().part(part)?.clone(),
+            pin: Pin {
+                commit: None,
+                obsolete,
+            },
+        });
+    }
+    Err(Error::new(
+        Code::LabelNotOfficial,
+        format!(
+            "{part}'s release {label} isn't official yet, and {part} has changed since it was proposed"
+        ),
+    )
+    .with("part", part)
+    .with("label", label))
 }
 
 /// Who is writing a record: Git's author identity, and the participant.
