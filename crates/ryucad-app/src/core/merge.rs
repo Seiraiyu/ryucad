@@ -223,6 +223,8 @@ mod tests {
             features: Vec::new(),
             solids: Vec::new(),
             error: None,
+            assembly: false,
+            occurrences: Vec::new(),
         };
         let parts = [("p".to_owned(), part)].into_iter().collect();
         let m = Merge::of(status());

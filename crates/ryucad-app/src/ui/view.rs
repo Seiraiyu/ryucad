@@ -12,9 +12,11 @@ use crate::ui::style::{self, Rgb};
 use eframe::egui::{self, PointerButton, Sense};
 use eframe::{egui_wgpu, wgpu};
 use ryucad::live::SelectMode;
+use ryucad::mesh::WireBody;
 use ryucad::sketch_view::ConstraintState;
 use ryucad::view::{self, StandardView};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// What the window's viewport keeps between frames.
 pub struct View {
@@ -184,9 +186,11 @@ impl View {
     fn framing_points(&mut self, ws: &Workspace) -> Vec<[f64; 3]> {
         let c = &self.nav.camera;
         let (back, up) = (unit(sub(c.eye, c.target)), unit(c.up));
-        self.framers.retain(|k, _| ws.model.meshes.contains_key(k));
+        let drawn: Vec<(&BodyKey, &Arc<WireBody>)> = ws.model.drawn().collect();
+        self.framers
+            .retain(|k, _| drawn.iter().any(|(d, _)| *d == k));
         let mut out = Vec::new();
-        for (key, body) in &ws.model.meshes {
+        for (key, body) in drawn {
             let kept = self.framers.get(key).is_some_and(|f| {
                 f.hash == body.hash && same_way(f.back, back) && same_way(f.up, up)
             });

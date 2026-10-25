@@ -443,6 +443,27 @@ impl Workspace {
         self.send(req, Pending::Quiet);
     }
 
+    /// Shows `part` in this window, or (with `None`) the project's model,
+    /// through `view.focus`: the window follows when the session says so,
+    /// as it does when an agent sets it.
+    pub fn set_focus(&mut self, part: Option<String>) {
+        let req = Request::ViewFocus {
+            project: part.is_none(),
+            part,
+            participant: Some(self.link.participant.clone()),
+        };
+        self.send(req, Pending::Quiet);
+    }
+
+    /// Shows what this window's participant's focus says.
+    fn follow_focus(&mut self) {
+        let want = self.myself().and_then(|m| m.focus.clone());
+        if self.model.focus != want {
+            self.model.focus = want;
+            self.model.generation += 1;
+        }
+    }
+
     /// Starts, changes or ends the compare to match this window's
     /// participant.
     fn follow_compare(&mut self) {
@@ -1075,6 +1096,7 @@ impl Workspace {
             (Pending::People, Ok(a)) => {
                 self.people.reset(&a.result["participants"]);
                 self.follow_compare();
+                self.follow_focus();
             }
             (Pending::Compare(n), r) => {
                 if n == self.compare_asked {
@@ -1444,6 +1466,7 @@ impl Workspace {
             "participant.changed" => {
                 self.people.changed(params);
                 self.follow_compare();
+                self.follow_focus();
                 // Following someone who left ends.
                 if self
                     .following
@@ -1537,9 +1560,15 @@ impl Workspace {
     fn fetch(&mut self, bodies: Vec<BodyKey>) {
         for (key, hash) in self.model.ask(bodies) {
             self.fetched += 1;
+            // An assembly's bodies come by occurrence.
+            let assembly = self.model.parts.get(&key.0).is_some_and(|p| p.assembly);
+            let feature = match key.1.rsplit_once('/') {
+                Some((path, _)) if assembly => path.to_owned(),
+                _ => key.1.clone(),
+            };
             let req = Request::MeshGet {
                 part: key.0.clone(),
-                feature: Some(key.1.clone()),
+                feature: Some(feature),
                 quality: None,
                 transfer: Some(Transfer::Binary),
                 rev: None,

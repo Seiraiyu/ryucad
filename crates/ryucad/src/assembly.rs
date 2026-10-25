@@ -182,6 +182,8 @@ fn pose_bits(r: &Rigid) -> Vec<u8> {
 pub struct Placed {
     pub part: Id,
     pub rev: Rev,
+    /// Whether mates hold it where it is.
+    pub fixed: bool,
     pub pose: Rigid,
     pub model: Arc<Model>,
     /// A hash of the revision, the pose's bits and the model's hash.
@@ -236,6 +238,9 @@ impl Placed {
         });
         if let Some(pin) = &self.model.pin {
             v["pin"] = pin.to_json();
+        }
+        if self.fixed {
+            v["fixed"] = serde_json::json!(true);
         }
         v
     }
@@ -312,12 +317,13 @@ pub fn place(id: &Id, inst: &Instance, children: &Children) -> Result<Placed> {
         }
     };
     let mut h = blake3::Hasher::new();
-    h.update(format!("{} {}\n", inst.part, inst.rev.text()).as_bytes());
+    h.update(format!("{} {} {}\n", inst.part, inst.rev.text(), inst.fixed).as_bytes());
     h.update(&pose_bits(&pose));
     h.update(model.hash.as_bytes());
     Ok(Placed {
         part: inst.part.clone(),
         rev: inst.rev.clone(),
+        fixed: inst.fixed,
         pose,
         model,
         hash: h.finalize().to_hex()[..32].to_owned(),
