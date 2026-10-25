@@ -12,6 +12,7 @@ pub use ryucad_doc::{doc, error, expr, units};
 pub const OUTPUT_SCHEMA: u64 = 1;
 
 pub mod activity;
+pub mod assembly;
 pub mod check;
 pub mod client;
 pub mod config;

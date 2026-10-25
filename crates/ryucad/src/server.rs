@@ -2416,6 +2416,11 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
                     }
                     v
                 }
+                Ok(crate::rebuild::Output::Instance(p)) => {
+                    json!({"id": fid, "type": types.get(fid), "ok": true, "hash": p.hash,
+                           "instance": {"part": p.part, "rev": p.rev.to_json(),
+                                        "occurrences": p.model.occurrences.len()}})
+                }
                 // A sketch makes no body: its state, not a body hash.
                 Ok(crate::rebuild::Output::Sketch(s)) => {
                     json!({"id": fid, "type": types.get(fid), "ok": true,

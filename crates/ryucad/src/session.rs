@@ -14,10 +14,12 @@
 //! so only what differs is rebuilt.
 
 use crate::activity::Files;
+use crate::assembly::{Model, Rebuild};
+use crate::doc::assembly::Rev;
 use crate::doc::id::Id;
 use crate::doc::project::Project;
 use crate::error::{Error, Result};
-use crate::rebuild::{Cache, PartResult, rebuild_part_with};
+use crate::rebuild::{Cache, PartResult};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
@@ -217,35 +219,55 @@ impl Session {
         h.finalize().to_hex().to_string()
     }
 
-    /// The rebuild of `part`, from the cache when its files haven't changed.
+    /// The rebuild of `part`, from the cache when nothing it reads has
+    /// changed: its files and, for an assembly, the models of what it
+    /// places, rebuilt first.
     pub fn rebuilt(&mut self, part: &Id) -> Result<&PartResult> {
-        let p = self.project.part(part)?;
-        let fresh = self
-            .results
-            .get(part)
-            .is_some_and(|(rev, _)| *rev == p.revision);
-        if !fresh {
-            let empty = Cache::new();
-            let (result, cache) = rebuild_part_with(p, self.cache.get(part).unwrap_or(&empty));
-            self.cache.insert(part.clone(), cache);
-            let revision = p.revision.clone();
-            self.learn(part, &result);
-            self.results.insert(part.clone(), (revision, result));
+        self.project.part(part)?;
+        self.rebuild(|r| r.result(part).map(|_| ()))?;
+        Ok(&self.results[part].1)
+    }
+
+    /// The model of `part` at `rev`: what an instance of it places.
+    pub fn model(&mut self, part: &Id, rev: &Rev) -> Result<Arc<Model>> {
+        let mut out = None;
+        self.rebuild(|r| {
+            out = Some(r.model(part, rev));
+            Ok(())
+        })?;
+        out.expect("asked")
+    }
+
+    /// Runs `f` over an [`assembly::Rebuild`](crate::assembly::Rebuild)
+    /// holding this session's results and caches, and keeps what it
+    /// built: each part it rebuilt with its errors explained and its names
+    /// learnt.
+    fn rebuild(&mut self, f: impl FnOnce(&mut Rebuild) -> Result<()>) -> Result<()> {
+        let results = std::mem::take(&mut self.results);
+        let caches = std::mem::take(&mut self.cache);
+        let mut r = Rebuild::new(&self.project, results, caches);
+        let out = f(&mut r);
+        let fresh = std::mem::take(&mut r.fresh);
+        (self.results, self.cache) = (r.results, r.caches);
+        for id in fresh {
+            let (key, result) = self.results.remove(&id).expect("rebuilt");
+            self.learn(&id, &result);
+            self.results.insert(id.clone(), (key, result));
             // Explained against this rebuild, not the one before: which
             // feature took a name away is read from these results.
-            let explained: Vec<(usize, Error)> = self.results[part]
+            let explained: Vec<(usize, Error)> = self.results[&id]
                 .1
                 .features
                 .iter()
                 .enumerate()
-                .filter_map(|(i, (_, r))| Some((i, self.explain(part, r.as_ref().err()?.clone()))))
+                .filter_map(|(i, (_, r))| Some((i, self.explain(&id, r.as_ref().err()?.clone()))))
                 .collect();
-            let result = &mut self.results.get_mut(part).expect("just put").1;
+            let result = &mut self.results.get_mut(&id).expect("just put").1;
             for (i, e) in explained {
                 result.features[i].1 = Err(e);
             }
         }
-        Ok(&self.results[part].1)
+        out
     }
 
     /// The cached rebuild of `part`, to make it wrong in tests.

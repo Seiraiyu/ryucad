@@ -14,12 +14,14 @@
 //! schema; changing or removing one is. A hosted job can run `ryucad check
 //! --against <base>` and gate on the exit code and the findings.
 
+use crate::assembly::Rebuild;
 use crate::doc::id::Id;
 use crate::error::{Code, Error, Result};
-use crate::rebuild::{Built, Output, rebuild_part};
+use crate::rebuild::{Built, Output};
 use crate::session::Session;
 use rayon::prelude::*;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 /// Every finding's code and severity: `doctor`'s issues keep their own.
 pub const CODES: [(&str, &str); 6] = [
@@ -203,10 +205,12 @@ pub fn run(
             .filter(|f| one.as_ref().is_none_or(|p| f["part"] == p.as_str())),
     );
     let mut parts = Vec::new();
+    // From nothing: no cache, so the files alone decide.
+    let project = session.project().clone();
+    let mut from_nothing = Rebuild::new(&project, BTreeMap::new(), BTreeMap::new());
     for id in &ids {
-        let p = session.project().part(id)?.clone();
-        // From nothing: no cache, so the files alone decide.
-        let fresh = rebuild_part(&p);
+        let p = project.part(id)?.clone();
+        let fresh = from_nothing.result(id)?.clone();
         let cached = session.rebuilt(id)?.clone();
         let mut features = Vec::new();
         let mut bodies = Vec::new();
@@ -244,7 +248,7 @@ pub fn run(
                 }
                 // A body is checked as its solid shows; a stale sketch is
                 // doctor's to report, with its repair.
-                Ok(Output::Solids(_) | Output::Sketch(_)) => {}
+                Ok(Output::Solids(_) | Output::Sketch(_) | Output::Instance(_)) => {}
             }
         }
         // Each solid as the model shows it, by founder, and the feature

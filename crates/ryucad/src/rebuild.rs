@@ -113,12 +113,13 @@ impl Made {
     }
 }
 
-/// What a feature rebuilds to: solids, or a solved sketch. Shared, so a
-/// cached result costs nothing to reuse.
+/// What a feature rebuilds to: solids, a solved sketch, or a placed
+/// instance. Shared, so a cached result costs nothing to reuse.
 #[derive(Clone, Debug)]
 pub enum Output {
     Solids(Arc<Made>),
     Sketch(Arc<Solved>),
+    Instance(Arc<crate::assembly::Placed>),
 }
 
 impl Output {
@@ -127,7 +128,7 @@ impl Output {
     pub fn solids(&self) -> &[(Id, Arc<Built>)] {
         match self {
             Output::Solids(m) => &m.solids,
-            Output::Sketch(_) => &[],
+            Output::Sketch(_) | Output::Instance(_) => &[],
         }
     }
 
@@ -151,7 +152,7 @@ impl Output {
     pub fn applied(&self) -> Option<&Applied> {
         match self {
             Output::Solids(m) => m.applied.as_deref(),
-            Output::Sketch(_) => None,
+            Output::Sketch(_) | Output::Instance(_) => None,
         }
     }
 
@@ -159,7 +160,7 @@ impl Output {
     pub fn sketch(&self) -> Option<&Solved> {
         match self {
             Output::Sketch(s) => Some(s),
-            Output::Solids(_) => None,
+            Output::Solids(_) | Output::Instance(_) => None,
         }
     }
 
@@ -168,6 +169,15 @@ impl Output {
         match self {
             Output::Solids(m) => &m.hash,
             Output::Sketch(s) => &s.hash,
+            Output::Instance(p) => &p.hash,
+        }
+    }
+
+    /// The placed instance, if the feature is one.
+    pub fn instance(&self) -> Option<&crate::assembly::Placed> {
+        match self {
+            Output::Instance(p) => Some(p),
+            Output::Solids(_) | Output::Sketch(_) => None,
         }
     }
 }
@@ -1714,6 +1724,13 @@ fn rebuild_with(
             (build_blend(part, solids, id, f, before).map(solid), None)
         }
         Feature::Pattern(p) => (build_pattern(part, solids, id, p, before).map(solid), None),
+        // Its part's model comes from outside the part: see
+        // [`rebuild_part_in`].
+        Feature::Instance(i) => {
+            let r = crate::assembly::place(id, i, &crate::assembly::Children::new())
+                .map(|p| Output::Instance(Arc::new(p)));
+            (r, None)
+        }
         f => {
             let (r, own) = build_body(part, solids, id, f, before, tool);
             (r.map(solid), own)
@@ -1874,6 +1891,16 @@ pub fn rebuild_part(part: &Part) -> PartResult {
 /// part's cache as it now stands. The result is the same, bit for bit,
 /// whatever the cache holds.
 pub fn rebuild_part_with(part: &Part, cache: &Cache) -> (PartResult, Cache) {
+    rebuild_part_in(part, cache, &crate::assembly::Children::new())
+}
+
+/// [`rebuild_part_with`] for a part whose instances place the models in
+/// `children` (see [`crate::assembly::Rebuild`]).
+pub fn rebuild_part_in(
+    part: &Part,
+    cache: &Cache,
+    children: &crate::assembly::Children,
+) -> (PartResult, Cache) {
     let depths = crate::graph::depths(part);
     let solids = crate::solid::Solids::of(part);
     let mut built: BTreeMap<Id, Result<Output>> = BTreeMap::new();
@@ -1897,7 +1924,36 @@ pub fn rebuild_part_with(part: &Part, cache: &Cache) -> (PartResult, Cache) {
                     Ok(f) => f,
                     Err(e) => return Step::failed(id, e.clone()),
                 };
+                if let Some(e) = crate::assembly::kind_error(part, &id, f) {
+                    return Step::failed(id, e);
+                }
                 let h = input_hash(part, &solids, &id, f, &built);
+                if let Some(inst) = f.instance() {
+                    // What it reads is its part's model, from outside the
+                    // part: the model's hash keys it.
+                    let model = children
+                        .get(&(inst.part.clone(), inst.rev.clone()))
+                        .map(|m| m.as_ref().map(|m| m.hash.clone()).map_err(|e| e.code));
+                    let mut k = blake3::Hasher::new();
+                    k.update(h.as_bytes());
+                    k.update(format!("{model:?}").as_bytes());
+                    let h = k.finalize();
+                    let (result, new) = match cache.features.get(&id) {
+                        Some((c, r)) if *c == h => (r.clone(), false),
+                        _ => (
+                            crate::assembly::place(&id, inst, children)
+                                .map(|p| Output::Instance(Arc::new(p))),
+                            true,
+                        ),
+                    };
+                    return Step {
+                        id,
+                        hash: Some(h),
+                        result,
+                        new,
+                        tool: None,
+                    };
+                }
                 let applies = applies(f);
                 let kept = cache.tools.get(&id);
                 let (result, new, tool) = match cache.features.get(&id) {
