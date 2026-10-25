@@ -1418,6 +1418,17 @@ pub(crate) mod tests {
         assert_eq!(result.failed(), 0);
         let w = result.warnings();
         assert_eq!(w.len(), 1);
+        // check says so, as a warning: it still passes.
+        let v = call(&mut s, "check", json!({"part": "frame"})).unwrap();
+        let f: Vec<&Value> = v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["code"] == "instance_obsolete")
+            .collect();
+        assert_eq!((f.len(), &f[0]["severity"]), (1, &json!("warning")));
+        let result = s.rebuilt(&id("frame")).unwrap();
+        let w = result.warnings();
         assert_eq!(
             (&w[0]["code"], &w[0]["feature"]),
             (&json!("instance_obsolete"), &json!("old"))

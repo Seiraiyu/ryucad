@@ -248,6 +248,8 @@ struct Built {
     results: BTreeMap<Id, Result<Output>>,
     inputs: BTreeMap<Id, Vec<Id>>,
     uses: BTreeMap<Id, std::collections::BTreeSet<String>>,
+    /// What each instance places: a part, at a revision.
+    places: BTreeMap<Id, crate::assembly::Node>,
 }
 
 /// A part as a session has it, rebuilt.
@@ -262,6 +264,10 @@ fn built(s: &mut Session) -> Result<BTreeMap<Id, Built>> {
         };
         let solids = crate::solid::Solids::of(&p);
         for (fid, f) in &p.features {
+            if let Ok(crate::doc::files::Feature::Instance(i)) = f {
+                b.places
+                    .insert(fid.clone(), (i.part.clone(), i.rev.clone()));
+            }
             if let Ok(f) = f {
                 b.inputs.insert(
                     fid.clone(),
@@ -358,6 +364,7 @@ fn touched(
     part: &Id,
     reads: &[Id],
     uses: &std::collections::BTreeSet<String>,
+    placed: &std::collections::BTreeSet<crate::assembly::Node>,
     side: &Side,
     base: &Side,
 ) -> Vec<String> {
@@ -365,6 +372,28 @@ fn touched(
     let differs = |path: &str| side.files.get(path) != base.files.get(path);
     if differs(crate::doc::project::MANIFEST) {
         out.push(crate::doc::project::MANIFEST.to_owned());
+    }
+    // What its instances place: a part's files as they are, or a
+    // release's record.
+    for (child, rev) in placed {
+        match rev {
+            crate::doc::assembly::Rev::Working => {
+                let dir = format!("parts/{child}/");
+                let paths: std::collections::BTreeSet<&String> = side
+                    .files
+                    .keys()
+                    .chain(base.files.keys())
+                    .filter(|p| p.starts_with(&dir))
+                    .collect();
+                out.extend(paths.into_iter().filter(|p| differs(p)).cloned());
+            }
+            crate::doc::assembly::Rev::Label(l) => {
+                let path = format!("releases/{child}/{l}.json");
+                if differs(&path) {
+                    out.push(path);
+                }
+            }
+        }
     }
     for f in reads {
         let path = format!("parts/{part}/features/{f}.json");
@@ -406,11 +435,31 @@ fn blame(
         .flatten()
         .cloned()
         .collect();
+    // The parts its instances place, and theirs, at any depth, on any
+    // side.
+    let mut placed = std::collections::BTreeSet::new();
+    let mut todo: Vec<crate::assembly::Node> = reads
+        .iter()
+        .flat_map(|f| graphs.into_iter().filter_map(move |s| s.places.get(f)))
+        .cloned()
+        .collect();
+    while let Some(n) = todo.pop() {
+        if !placed.insert(n.clone()) {
+            continue;
+        }
+        if n.1 == crate::doc::assembly::Rev::Working {
+            for side in [ours, theirs, base] {
+                if let Some(b) = side.parts.get(&n.0) {
+                    todo.extend(b.places.values().cloned());
+                }
+            }
+        }
+    }
     let mut causes = Vec::new();
     let mut files = Vec::new();
     for (on, other, other_side) in [("ours", "theirs", theirs), ("theirs", "ours", ours)] {
         if built_on.contains(&on) {
-            let t = touched(part, &reads, &uses, other_side, base);
+            let t = touched(part, &reads, &uses, &placed, other_side, base);
             if !t.is_empty() {
                 causes.push(other);
                 files.extend(t);
@@ -1570,6 +1619,51 @@ pub(crate) mod tests {
         assert_eq!(c[0]["files"], json!(["parts/p/features/s.json"]));
         assert_eq!(c[0]["error"]["code"], "dependency_failed");
         assert_eq!(v["clean"], false);
+    }
+
+    #[test]
+    fn a_merge_that_closes_a_cycle_of_instances_blames_the_other_side() {
+        let mut m = boxed();
+        for a in ["frame", "sub"] {
+            m.call("part.create", json!({"part": a, "kind": "assembly"}))
+                .unwrap();
+        }
+        m.commit("two assemblies");
+        // Theirs places the frame in the sub; ours, the sub in the frame.
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        m.call(
+            "feature.add",
+            json!({"part": "sub", "type": "instance", "id": "j", "of": "frame"}),
+        )
+        .unwrap();
+        m.commit("theirs: the frame in the sub");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        m.call(
+            "feature.add",
+            json!({"part": "frame", "type": "instance", "id": "i", "of": "sub"}),
+        )
+        .unwrap();
+        m.commit("ours: the sub in the frame");
+        m.merge("theirs");
+        let v = m.call("merge.status", json!({})).unwrap();
+        let c: Vec<&Value> = v["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["kind"] == "merge_broke")
+            .collect();
+        assert_eq!(c.len(), 2, "{v}");
+        assert_eq!(c[0]["id"], "parts/frame/features/i.json#merge_broke");
+        assert_eq!(c[0]["cause"], "theirs");
+        assert_eq!(c[0]["error"]["code"], "assembly_cycle");
+        assert_eq!(
+            c[0]["files"],
+            json!(["parts/sub/features/j.json", "parts/sub/part.json"])
+        );
+        assert_eq!(c[1]["id"], "parts/sub/features/j.json#merge_broke");
+        assert_eq!(c[1]["cause"], "ours");
     }
 
     #[test]

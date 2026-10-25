@@ -361,11 +361,39 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
     };
     match base {
         Some(b) if same_type && ty(b) == Some(json!("sketch")) => sketch(walk, b, ours, theirs),
+        Some(b) if same_type && ty(b) == Some(json!("instance")) => instance(walk, b, ours, theirs),
         Some(b) if same_type => walk
             .value("", Some(b), Some(ours), Some(theirs))
             .unwrap_or_else(|| ours.clone()),
         _ => walk.whole(base, ours, theirs),
     }
+}
+
+/// An instance: per key, but its revision is one value, and its pose is
+/// solver state: the side that moved it, ours if both, never a conflict.
+fn instance(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Value {
+    let obj = |v: &Value| v.as_object().cloned().unwrap_or_default();
+    let (b, o, t) = (obj(base), obj(ours), obj(theirs));
+    let mut out = walk.object("", &b, &o, &t, &["pose", "rev"]);
+    let (rb, ro, rt) = (b.get("rev"), o.get("rev"), t.get("rev"));
+    let rev = if ro == rt || rt == rb {
+        ro.cloned()
+    } else if ro == rb {
+        rt.cloned()
+    } else {
+        walk.conflict("/rev", Kind::Value, rb, ro, rt)
+    };
+    if let Some(rev) = rev {
+        out.insert("rev".to_owned(), rev);
+    }
+    let pose = match o.get("pose") == b.get("pose") {
+        true => t.get("pose"),
+        false => o.get("pose"),
+    };
+    if let Some(pose) = pose.or(o.get("pose")) {
+        out.insert("pose".to_owned(), pose.clone());
+    }
+    Value::Object(out)
 }
 
 /// The fields of a sketch entity or constraint that name another entity.
@@ -1517,5 +1545,39 @@ mod tests {
                    "project": "ab".repeat(16)})
         );
         assert!(readable(&crate::doc::canonical::to_string(&with_id).into_bytes()).is_some());
+    }
+
+    #[test]
+    fn an_instances_pose_never_conflicts_and_its_revision_is_one_value() {
+        let inst = |rev: Value, x: f64, fixed: bool| {
+            json!({"format": 4, "kind": "ryucad.feature", "type": "instance", "part": "bolt",
+                   "rev": rev, "fixed": fixed,
+                   "pose": {"origin_m": [x, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}})
+        };
+        let base = inst(json!("working"), 0.0, false);
+        // Both moved it: ours. Theirs fixed it: that merges.
+        let m = merge(
+            Some(&base),
+            &inst(json!("working"), 0.01, false),
+            &inst(json!("working"), 0.02, true),
+        );
+        assert!(m.is_clean());
+        assert_eq!(m.value, inst(json!("working"), 0.01, true));
+        // Only theirs moved it: theirs.
+        let m = merge(Some(&base), &base, &inst(json!("working"), 0.02, false));
+        assert_eq!(m.value["pose"]["origin_m"], json!([0.02, 0, 0]));
+        // Pinned to two different labels: one conflict at /rev, ours in place.
+        let m = merge(
+            Some(&base),
+            &inst(json!({"label": "A"}), 0.0, false),
+            &inst(json!({"label": "B"}), 0.0, false),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/rev"]);
+        assert_eq!(m.value["rev"], json!({"label": "A"}));
+        // A label on one side, working left on the other: the label.
+        let m = merge(Some(&base), &base, &inst(json!({"label": "B"}), 0.0, false));
+        assert!(m.is_clean());
+        assert_eq!(m.value["rev"], json!({"label": "B"}));
+        assert_eq!(m.value["format"], 4);
     }
 }
