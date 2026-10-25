@@ -2021,4 +2021,73 @@ pub(crate) mod tests {
             Code::NoLiveSession
         );
     }
+
+    #[test]
+    fn an_instance_reads_as_text_with_its_pose_last() {
+        let v = json!({"format": 4, "kind": "ryucad.feature", "type": "instance", "part": "bolt",
+                       "rev": {"label": "B"}, "fixed": true,
+                       "pose": {"origin_m": [0.01, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}});
+        let text = crate::diff::textconv(crate::doc::canonical::to_string(&v).as_bytes());
+        assert_eq!(
+            String::from_utf8(text).unwrap(),
+            "ryucad.feature instance (format 4)\n\
+             fixed = true\n\
+             part = bolt\n\
+             rev = label B\n\
+             \n\
+             pose.origin_m = [0.01, 0, 0]\n\
+             pose.x = [1, 0, 0]\n\
+             pose.z = [0, 0, 1]\n"
+        );
+    }
+
+    #[test]
+    fn a_diff_summarises_poses_and_says_what_occurrences_did() {
+        use crate::git::tests::git;
+        let (dir, mut s) = project();
+        let r = dir.path();
+        git(r, &["init", "-q", "-b", "main"]);
+        place_in(r, "frame", "base", "plate", json!("working"), [0.0; 3]);
+        place_in(r, "frame", "b1", "bolt", json!("working"), [0.01, 0.0, 0.0]);
+        place_in(r, "frame", "b2", "bolt", json!("working"), [0.02, 0.0, 0.0]);
+        git(r, &["add", "."]);
+        git(r, &["commit", "-q", "-m", "frame"]);
+        s.refresh().unwrap();
+        call(
+            &mut s,
+            "assembly.move",
+            json!({"part": "frame", "instance": "b1", "translate": ["1 mm", 0, 0]}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.delete",
+            json!({"part": "frame", "id": "b2"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "plate", "id": "slab", "params": {"z": 6}}),
+        )
+        .unwrap();
+        let v = call(&mut s, "diff", json!({"part": "frame"})).unwrap();
+        let b1 = &v["parts"]["frame"]["features"]["b1"];
+        assert_eq!(
+            (&b1["status"], &b1["pose"], &b1["changes"]),
+            (&json!("changed"), &json!("changed"), &json!([]))
+        );
+        let v = call(&mut s, "diff", json!({"part": "frame", "positions": true})).unwrap();
+        let pose = &v["parts"]["frame"]["features"]["b1"]["pose"];
+        assert_eq!(pose[0]["field"], "origin_m");
+        assert_eq!(pose[0]["to"], json!([0.011, 0, 0]));
+        let v = call(&mut s, "diff", json!({"model": true})).unwrap();
+        let occ = &v["parts"]["frame"]["occurrences"];
+        assert_eq!(
+            occ,
+            &json!({"added": [], "removed": ["b2"], "moved": ["b1"], "changed": ["base"]})
+        );
+        // A part has no occurrences to report.
+        assert!(v["parts"]["plate"].get("occurrences").is_none());
+    }
 }

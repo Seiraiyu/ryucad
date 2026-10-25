@@ -63,6 +63,23 @@ pub fn textconv(bytes: &[u8]) -> Vec<u8> {
                 }
             }
         }
+        // An instance's revision in words, its pose last: solver state.
+        Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("instance") => {
+            if let Some(rev) = rest.remove("rev") {
+                let rev = match rev.get("label").and_then(Value::as_str) {
+                    Some(l) => format!("label {l}"),
+                    None => scalar(&rev),
+                };
+                lines.push(format!("rev = {rev}"));
+            }
+            if let Some(Value::Object(pose)) = rest.remove("pose") {
+                for (k, x) in &pose {
+                    let mut flat = Vec::new();
+                    flatten(&format!("pose.{k}"), x, &mut flat);
+                    last.extend(flat);
+                }
+            }
+        }
         Some(ryupdm::config::KIND) => {
             if let Some(Value::Object(decls)) = rest.remove("properties") {
                 for (name, d) in &decls {
@@ -401,6 +418,33 @@ fn feature(a: Option<&Value>, b: Option<&Value>, opts: &Options) -> Value {
         return out;
     }
     let sketch = |v: &Value| v["type"] == "sketch";
+    let instance = |v: &Value| v["type"] == "instance";
+    if instance(a) && instance(b) {
+        // A pose is solver state, summarised as a sketch's positions are.
+        let mut moved = Vec::new();
+        for k in ["origin_m", "z", "x"] {
+            let (p, q) = (&a["pose"][k], &b["pose"][k]);
+            if p != q {
+                moved.push(json!({"field": k, "from": p, "to": q}));
+            }
+        }
+        out["pose"] = if opts.positions {
+            json!(moved)
+        } else {
+            json!(if moved.is_empty() { "same" } else { "changed" })
+        };
+        let rest = |v: &Value| {
+            let mut v = v.clone();
+            v.as_object_mut()
+                .expect("an instance is an object")
+                .remove("pose");
+            v
+        };
+        let mut c = Vec::new();
+        changes("", Some(&rest(a)), Some(&rest(b)), &mut c);
+        out["changes"] = json!(c);
+        return out;
+    }
     if sketch(a) && sketch(b) {
         let (ea, eb) = (&a["entities"], &b["entities"]);
         out["entities"] = members(ea, eb, &["m", "r_m"]);
@@ -745,13 +789,20 @@ pub struct Built {
         crate::doc::id::Id,
         Option<std::sync::Arc<crate::rebuild::Built>>,
     )>,
+    /// An assembly's occurrences.
+    pub occurrences: Vec<crate::assembly::Occurrence>,
 }
 
 impl Built {
     /// A part's rebuild, with its solids as `part`'s list makes them.
     pub fn of(part: &crate::doc::project::Part, r: &crate::rebuild::PartResult) -> Built {
         let solids = crate::solid::Solids::of(part);
+        let assembly = crate::server::part_kind(part) == crate::doc::files::PartKind::Assembly;
         Built {
+            occurrences: match assembly {
+                true => crate::assembly::Model::of_assembly(r).occurrences,
+                false => Vec::new(),
+            },
             features: r.features.clone(),
             solids: r
                 .shown(&solids)
@@ -1119,7 +1170,61 @@ pub fn model(
             }
             p["solids"][id.as_str()] = m;
         }
+        if let Some(o) = occurrences(a, b, opts.all) {
+            let p = &mut v["parts"][part.as_str()];
+            if p.is_null() {
+                *p = json!({
+                    "status": "same",
+                    "order": {"added": [], "removed": [], "moved": []},
+                    "parameters": {"added": [], "removed": [], "changed": []},
+                    "features": {},
+                });
+            }
+            p["occurrences"] = o;
+        }
     }
+}
+
+/// An assembly's occurrences on each side, by path: `added`, `removed`,
+/// `moved` (its pose differs) and `changed` (its part's solids differ);
+/// `None` when nothing differs, unless `all`.
+fn occurrences(a: &Built, b: &Built, all: bool) -> Option<Value> {
+    use crate::assembly::{Occurrence, path_text};
+    if a.occurrences.is_empty() && b.occurrences.is_empty() {
+        return None;
+    }
+    let by_path = |side: &'_ Built| -> BTreeMap<String, Occurrence> {
+        side.occurrences
+            .iter()
+            .map(|o| (path_text(&o.path), o.clone()))
+            .collect()
+    };
+    let (x, y) = (by_path(a), by_path(b));
+    let added: Vec<&String> = y.keys().filter(|k| !x.contains_key(*k)).collect();
+    let removed: Vec<&String> = x.keys().filter(|k| !y.contains_key(*k)).collect();
+    let both: Vec<(&String, &Occurrence, &Occurrence)> = x
+        .iter()
+        .filter_map(|(k, o)| Some((k, o, y.get(k)?)))
+        .collect();
+    let moved: Vec<&String> = both
+        .iter()
+        .filter(|(_, p, q)| p.pose != q.pose)
+        .map(|(k, _, _)| *k)
+        .collect();
+    let hashes = |o: &Occurrence| -> Vec<String> {
+        o.solids
+            .iter()
+            .map(|s| format!("{} {}", s.founder, s.built.hash))
+            .collect()
+    };
+    let changed: Vec<&String> = both
+        .iter()
+        .filter(|(_, p, q)| hashes(p) != hashes(q) || p.rev != q.rev)
+        .map(|(k, _, _)| *k)
+        .collect();
+    let same = added.is_empty() && removed.is_empty() && moved.is_empty() && changed.is_empty();
+    (!same || all)
+        .then(|| json!({"added": added, "removed": removed, "moved": moved, "changed": changed}))
 }
 
 #[cfg(test)]
