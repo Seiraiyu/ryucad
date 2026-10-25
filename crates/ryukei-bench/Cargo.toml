@@ -95,6 +95,10 @@ name = "blend_kernels"
 harness = false
 required-features = ["occt", "smlib"]
 
+[[bench]]
+name = "step"
+harness = false
+
 # STEP head to head (design 55, plan 7.D), and the large-assembly race.
 [[test]]
 name = "step"
