@@ -249,12 +249,12 @@ pub fn run(
                 }
                 // A body is checked as its solid shows; a stale sketch is
                 // doctor's to report, with its repair.
-                Ok(Output::Solids(_) | Output::Sketch(_) | Output::Instance(_)) => {}
+                Ok(_) => {}
             }
         }
         // An instance of an obsolete release still builds; it is worth a
         // look.
-        for w in fresh.warnings() {
+        for w in fresh.warnings(id) {
             if w["code"] == "instance_obsolete"
                 && let Some(fid) = w["feature"]
                     .as_str()

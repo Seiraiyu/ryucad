@@ -141,12 +141,9 @@ impl Model {
     /// pose.
     pub fn of_assembly(result: &PartResult) -> Model {
         let mut out = Vec::new();
-        for (id, r) in &result.features {
-            let Ok(Output::Instance(placed)) = r else {
-                continue;
-            };
+        let mut place = |prefix: Vec<Id>, placed: &Placed| {
             for o in &placed.model.occurrences {
-                let mut path = vec![id.clone()];
+                let mut path = prefix.clone();
                 path.extend(o.path.iter().cloned());
                 out.push(Occurrence {
                     path,
@@ -155,6 +152,21 @@ impl Model {
                     solids: o.solids.clone(),
                     pose: placed.pose.then_after(&o.pose),
                 });
+            }
+        };
+        for (id, r) in &result.features {
+            match r {
+                Ok(Output::Instance(placed)) => place(vec![id.clone()], placed),
+                // A copy is reached as `<pattern>:<i>/<seed>`.
+                Ok(Output::Copies(c)) => {
+                    for copy in &c.copies {
+                        place(
+                            vec![Id::copy(id, copy.index), copy.seed.clone()],
+                            &copy.placed,
+                        );
+                    }
+                }
+                _ => {}
             }
         }
         Model::new(out)
@@ -316,17 +328,13 @@ pub fn place(id: &Id, inst: &Instance, children: &Children) -> Result<Placed> {
             .with("feature", id));
         }
     };
-    let mut h = blake3::Hasher::new();
-    h.update(format!("{} {} {}\n", inst.part, inst.rev.text(), inst.fixed).as_bytes());
-    h.update(&pose_bits(&pose));
-    h.update(model.hash.as_bytes());
     Ok(Placed {
         part: inst.part.clone(),
         rev: inst.rev.clone(),
         fixed: inst.fixed,
         pose,
+        hash: placed_hash(&inst.part, &inst.rev, inst.fixed, &pose, &model),
         model,
-        hash: h.finalize().to_hex()[..32].to_owned(),
     })
 }
 
@@ -337,6 +345,25 @@ pub fn assembles(f: &Feature) -> bool {
         f,
         Feature::Instance(_) | Feature::Mate(_) | Feature::InstancePattern(_)
     )
+}
+
+/// `p` placed at `pose` instead, its hash made again.
+pub fn placed_at(p: &Placed, pose: Rigid) -> Placed {
+    Placed {
+        pose,
+        hash: placed_hash(&p.part, &p.rev, p.fixed, &pose, &p.model),
+        ..p.clone()
+    }
+}
+
+/// An instance's hash: its revision, whether it is fixed, its pose's bits
+/// and its model's hash.
+fn placed_hash(part: &Id, rev: &Rev, fixed: bool, pose: &Rigid, model: &Model) -> String {
+    let mut h = blake3::Hasher::new();
+    h.update(format!("{part} {} {fixed}\n", rev.text()).as_bytes());
+    h.update(&pose_bits(pose));
+    h.update(model.hash.as_bytes());
+    h.finalize().to_hex()[..32].to_owned()
 }
 
 /// `wrong_part_kind` for a feature its part doesn't hold: an instance, a
@@ -1380,7 +1407,7 @@ pub(crate) mod tests {
                 obsolete: false
             })
         );
-        assert!(result.warnings().is_empty());
+        assert!(result.warnings(&id("frame")).is_empty());
         // A's body is the bolt's as it was released.
         let a = crate::release::pinned(&mut s, &id("bolt"), "A").unwrap();
         assert_eq!(a.part.revision.len(), 32);
@@ -1468,7 +1495,7 @@ pub(crate) mod tests {
         s.refresh().unwrap();
         let result = s.rebuilt(&id("frame")).unwrap();
         assert_eq!(result.failed(), 0);
-        let w = result.warnings();
+        let w = result.warnings(&id("frame"));
         assert_eq!(w.len(), 1);
         // check says so, as a warning: it still passes.
         let v = call(&mut s, "check", json!({"part": "frame"})).unwrap();
@@ -1480,7 +1507,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!((f.len(), &f[0]["severity"]), (1, &json!("warning")));
         let result = s.rebuilt(&id("frame")).unwrap();
-        let w = result.warnings();
+        let w = result.warnings(&id("frame"));
         assert_eq!(
             (&w[0]["code"], &w[0]["feature"]),
             (&json!("instance_obsolete"), &json!("old"))

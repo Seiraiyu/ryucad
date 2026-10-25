@@ -28,6 +28,7 @@ pub mod graph;
 pub mod hole;
 pub mod inspect;
 pub mod live;
+pub mod mate;
 pub mod merge;
 pub mod mesh;
 pub mod notify;

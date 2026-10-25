@@ -59,6 +59,23 @@ impl Id {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The step of an instance path that reaches copy `index` of instance
+    /// pattern `pattern`: `<pattern>:<i>`, or `<pattern>:<i>:<j>` past its
+    /// first row. Not an ID a file may name a feature by.
+    pub fn copy(pattern: &Id, index: [u32; 2]) -> Id {
+        Id(super::mate::step_text(pattern, Some(index)))
+    }
+
+    /// The pattern and index of a step [`Id::copy`] made.
+    pub fn copy_of(&self) -> Option<(Id, [u32; 2])> {
+        if !self.0.contains(':') {
+            return None;
+        }
+        super::mate::parse_step(&self.0, "")
+            .ok()
+            .and_then(|(id, c)| Some((id, c?)))
+    }
 }
 
 impl fmt::Display for Id {
@@ -106,6 +123,23 @@ impl ProjectId {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// The step of an instance path that reaches copy `index` of instance
+    /// pattern `pattern`: `<pattern>:<i>`, or `<pattern>:<i>:<j>` past its
+    /// first row. Not an ID a file may name a feature by.
+    pub fn copy(pattern: &Id, index: [u32; 2]) -> Id {
+        Id(super::mate::step_text(pattern, Some(index)))
+    }
+
+    /// The pattern and index of a step [`Id::copy`] made.
+    pub fn copy_of(&self) -> Option<(Id, [u32; 2])> {
+        if !self.0.contains(':') {
+            return None;
+        }
+        super::mate::parse_step(&self.0, "")
+            .ok()
+            .and_then(|(id, c)| Some((id, c?)))
     }
 }
 

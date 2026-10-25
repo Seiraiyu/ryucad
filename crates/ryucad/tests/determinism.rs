@@ -988,7 +988,7 @@ fn references_section(golden: &mut Golden) {
     let part = Id::parse("rf", "part").unwrap();
     let result = session.rebuilt(&part).unwrap().clone();
     assert_eq!(result.failed(), 0, "{:?}", result.features);
-    assert!(result.warnings().is_empty());
+    assert!(result.warnings(&part).is_empty());
     for (_, o) in &result.features {
         match o.as_ref().unwrap().body() {
             Some(b) => s.str(&b.body.dump()),

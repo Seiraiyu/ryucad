@@ -2629,8 +2629,21 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
                     v
                 }
                 Ok(crate::rebuild::Output::Instance(p)) => {
-                    json!({"id": fid, "type": types.get(fid), "ok": true, "hash": p.hash,
-                           "instance": p.to_json()})
+                    let mut v = json!({"id": fid, "type": types.get(fid), "ok": true,
+                                       "hash": p.hash, "instance": p.to_json()});
+                    // What its mates leave it, when the assembly has any.
+                    if let Some(b) = r.solve.as_ref().and_then(|s| s.instance(fid)) {
+                        v["instance"]["solve"] = crate::mate::body_json(b);
+                    }
+                    v
+                }
+                Ok(crate::rebuild::Output::Mate(m)) => {
+                    json!({"id": fid, "type": types.get(fid), "ok": true, "hash": m.hash,
+                           "mate": m.to_json()})
+                }
+                Ok(crate::rebuild::Output::Copies(c)) => {
+                    json!({"id": fid, "type": types.get(fid), "ok": true, "hash": c.hash,
+                           "copies": c.to_json(fid)})
                 }
                 // A sketch makes no body: its state, not a body hash.
                 Ok(crate::rebuild::Output::Sketch(s)) => {
@@ -2676,7 +2689,7 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
         .collect();
     let mut v = json!({"part": id, "revision": revision, "hash": r.hash,
                        "failed": r.failed(), "features": features, "solids": shown});
-    let warnings = r.warnings();
+    let warnings = r.warnings(id);
     // An assembly's model is what its instances place.
     if assembly {
         let occurrences: Vec<Value> = crate::assembly::Model::of_assembly(r)
@@ -2686,6 +2699,9 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
             .collect();
         v["kind"] = json!("assembly");
         v["occurrences"] = json!(occurrences);
+        if let Some(solve) = &r.solve {
+            v["solve"] = solve.to_json();
+        }
     }
     if !warnings.is_empty() {
         v["warnings"] = json!(warnings);

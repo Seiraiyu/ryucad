@@ -113,13 +113,16 @@ impl Made {
     }
 }
 
-/// What a feature rebuilds to: solids, a solved sketch, or a placed
-/// instance. Shared, so a cached result costs nothing to reuse.
+/// What a feature rebuilds to: solids, a solved sketch, a placed
+/// instance, a mate as solved, or an instance pattern's copies. Shared,
+/// so a cached result costs nothing to reuse.
 #[derive(Clone, Debug)]
 pub enum Output {
     Solids(Arc<Made>),
     Sketch(Arc<Solved>),
     Instance(Arc<crate::assembly::Placed>),
+    Mate(Arc<crate::mate::Mated>),
+    Copies(Arc<crate::mate::Copies>),
 }
 
 impl Output {
@@ -128,7 +131,7 @@ impl Output {
     pub fn solids(&self) -> &[(Id, Arc<Built>)] {
         match self {
             Output::Solids(m) => &m.solids,
-            Output::Sketch(_) | Output::Instance(_) => &[],
+            Output::Sketch(_) | Output::Instance(_) | Output::Mate(_) | Output::Copies(_) => &[],
         }
     }
 
@@ -152,7 +155,7 @@ impl Output {
     pub fn applied(&self) -> Option<&Applied> {
         match self {
             Output::Solids(m) => m.applied.as_deref(),
-            Output::Sketch(_) | Output::Instance(_) => None,
+            _ => None,
         }
     }
 
@@ -160,7 +163,7 @@ impl Output {
     pub fn sketch(&self) -> Option<&Solved> {
         match self {
             Output::Sketch(s) => Some(s),
-            Output::Solids(_) | Output::Instance(_) => None,
+            _ => None,
         }
     }
 
@@ -170,6 +173,8 @@ impl Output {
             Output::Solids(m) => &m.hash,
             Output::Sketch(s) => &s.hash,
             Output::Instance(p) => &p.hash,
+            Output::Mate(m) => &m.hash,
+            Output::Copies(c) => &c.hash,
         }
     }
 
@@ -177,7 +182,23 @@ impl Output {
     pub fn instance(&self) -> Option<&crate::assembly::Placed> {
         match self {
             Output::Instance(p) => Some(p),
-            Output::Solids(_) | Output::Sketch(_) => None,
+            _ => None,
+        }
+    }
+
+    /// The mate as solved, if the feature is one.
+    pub fn mate(&self) -> Option<&crate::mate::Mated> {
+        match self {
+            Output::Mate(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// The copies an instance pattern places, if the feature is one.
+    pub fn copies(&self) -> Option<&crate::mate::Copies> {
+        match self {
+            Output::Copies(c) => Some(c),
+            _ => None,
         }
     }
 }
@@ -212,6 +233,9 @@ pub struct PartResult {
     /// The joins, cuts and intersects whose own bodies this rebuild built,
     /// in feature order; the others' came from the cache.
     pub tools: Vec<Id>,
+    /// An assembly's solve of its mates and instance patterns, if it has
+    /// any.
+    pub solve: Option<Arc<crate::mate::Solve>>,
 }
 
 /// What a rebuild keeps for the next: each feature's result by the hash
@@ -290,9 +314,15 @@ impl PartResult {
     }
 
     /// `sketch_stale` for each sketch rebuilt from positions solved in
-    /// memory, and `instance_obsolete` for each instance of an obsolete
-    /// release.
-    pub fn warnings(&self) -> Vec<serde_json::Value> {
+    /// memory, `instance_obsolete` for each instance of an obsolete
+    /// release, and `assembly_stale` (naming `part`) for an assembly
+    /// rebuilt from poses solved in memory.
+    pub fn warnings(&self, part: &Id) -> Vec<serde_json::Value> {
+        let stale = self
+            .solve
+            .as_ref()
+            .filter(|s| s.stale())
+            .map(|s| crate::mate::stale_warning(part, &s.moved));
         self.features
             .iter()
             .filter_map(|(id, r)| {
@@ -305,6 +335,7 @@ impl PartResult {
                 pin.obsolete
                     .then(|| crate::assembly::obsolete_warning(id, p))
             })
+            .chain(stale)
             .collect()
     }
 }
@@ -1945,6 +1976,13 @@ pub fn rebuild_part_in(
                 if let Some(e) = crate::assembly::kind_error(part, &id, f) {
                     return Step::failed(id, e);
                 }
+                // Settled with the whole assembly, after its instances.
+                if f.mate().is_some() || f.instance_pattern().is_some() {
+                    return Step::failed(
+                        id.clone(),
+                        Error::new(Code::Internal, format!("{id} is settled after the loop")),
+                    );
+                }
                 let h = input_hash(part, &solids, &id, f, &built);
                 if let Some(inst) = f.instance() {
                     // What it reads is its part's model, from outside the
@@ -2014,6 +2052,7 @@ pub fn rebuild_part_in(
             built.insert(id, step.result);
         }
     }
+    let solve = crate::mate::settle(part, &mut built);
     let features: Vec<(Id, Result<Output>)> = part
         .order()
         .iter()
@@ -2044,6 +2083,7 @@ pub fn rebuild_part_in(
         hash: h.finalize().to_hex()[..32].to_owned(),
         built,
         tools,
+        solve,
     };
     (result, fresh)
 }
