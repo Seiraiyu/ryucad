@@ -24,6 +24,10 @@
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <Interface_Static.hxx>
+#include <STEPControl_Reader.hxx>
+#include <STEPControl_Writer.hxx>
+#include <ShapeFix_Shape.hxx>
 #include <Standard_Failure.hxx>
 #include <GProp_GProps.hxx>
 #include <Poly_Triangulation.hxx>
@@ -388,6 +392,64 @@ std::unique_ptr<Shape> chamfer(const Shape &s, rust::Slice<const double> edges,
     throw std::runtime_error(std::string("BRepFilletAPI_MakeChamfer: ") +
                              e.GetMessageString());
   }
+}
+
+// Every root of the STEP file at `path`, as one shape, through
+// STEPControl_Reader, then ShapeFix_Shape if `fix`.
+std::unique_ptr<Shape> step_read(rust::Str path, bool fix) {
+  try {
+    STEPControl_Reader reader;
+    std::string p(path);
+    if (reader.ReadFile(p.c_str()) != IFSelect_RetDone) {
+      throw std::runtime_error("STEPControl_Reader could not read " + p);
+    }
+    reader.TransferRoots();
+    TopoDS_Shape shape = reader.OneShape();
+    if (fix) {
+      ShapeFix_Shape fixer(shape);
+      fixer.Perform();
+      shape = fixer.Shape();
+    }
+    return wrap(shape);
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(std::string("STEPControl_Reader: ") +
+                             e.GetMessageString());
+  }
+}
+
+// The shape written to `path` as AP242 (or AP214) through
+// STEPControl_Writer.
+void step_write(const Shape &s, rust::Str path, bool ap242) {
+  try {
+    Interface_Static::SetCVal("write.step.schema", ap242 ? "AP242DIS" : "AP214IS");
+    STEPControl_Writer writer;
+    if (writer.Transfer(s.shape, STEPControl_AsIs) != IFSelect_RetDone) {
+      throw std::runtime_error("STEPControl_Writer could not transfer");
+    }
+    std::string p(path);
+    if (writer.Write(p.c_str()) != IFSelect_RetDone) {
+      throw std::runtime_error("STEPControl_Writer could not write " + p);
+    }
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(std::string("STEPControl_Writer: ") +
+                             e.GetMessageString());
+  }
+}
+
+// Each solid of the shape, in OCCT's order: volume, area, face count.
+rust::Vec<double> solid_props(const Shape &s) {
+  rust::Vec<double> out;
+  for (TopExp_Explorer x(s.shape, TopAbs_SOLID); x.More(); x.Next()) {
+    GProp_GProps v, a;
+    BRepGProp::VolumeProperties(x.Current(), v);
+    BRepGProp::SurfaceProperties(x.Current(), a);
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(x.Current(), TopAbs_FACE, faces);
+    out.push_back(v.Mass());
+    out.push_back(a.Mass());
+    out.push_back(double(faces.Extent()));
+  }
+  return out;
 }
 
 } // namespace ryukei_occt

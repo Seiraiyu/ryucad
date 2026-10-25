@@ -4301,6 +4301,7 @@ dependencies = [
  "rayon",
  "ryukei",
  "ryukei-testkit",
+ "ryustep",
 ]
 
 [[package]]

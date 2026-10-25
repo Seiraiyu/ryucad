@@ -66,6 +66,9 @@ mod ffi {
             sizes: &[f64],
             faces: &[f64],
         ) -> Result<UniquePtr<Shape>>;
+        fn step_read(path: &str, fix: bool) -> Result<UniquePtr<Shape>>;
+        fn step_write(s: &Shape, path: &str, ap242: bool) -> Result<()>;
+        fn solid_props(s: &Shape) -> Vec<f64>;
     }
 }
 
@@ -228,6 +231,42 @@ impl Solid {
     pub fn distance(&self, p: Point3) -> f64 {
         ffi::distance(&self.0, p.x, p.y, p.z)
     }
+
+    /// Every root of the STEP file at `path` as one shape, read by
+    /// `STEPControl_Reader` and, if `fix`, healed by `ShapeFix_Shape`, in
+    /// the file's units as OCCT converts them (millimetres). OCCT's
+    /// failure as text.
+    pub fn read_step(path: &std::path::Path, fix: bool) -> Result<Self, String> {
+        ffi::step_read(&path.to_string_lossy(), fix)
+            .map(Self)
+            .map_err(|e| e.to_string())
+    }
+
+    /// The shape written to `path` by `STEPControl_Writer`, as AP242 or
+    /// else AP214, in millimetres.
+    pub fn write_step(&self, path: &std::path::Path, ap242: bool) -> Result<(), String> {
+        ffi::step_write(&self.0, &path.to_string_lossy(), ap242).map_err(|e| e.to_string())
+    }
+
+    /// Each solid's volume, area and face count, in OCCT's order.
+    pub fn solids(&self) -> Vec<SolidProps> {
+        ffi::solid_props(&self.0)
+            .chunks(3)
+            .map(|c| SolidProps {
+                volume: c[0],
+                area: c[1],
+                faces: c[2] as u32,
+            })
+            .collect()
+    }
+}
+
+/// A solid's measures, as [`Solid::solids`] gives them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SolidProps {
+    pub volume: f64,
+    pub area: f64,
+    pub faces: u32,
 }
 
 impl OcctMesh {

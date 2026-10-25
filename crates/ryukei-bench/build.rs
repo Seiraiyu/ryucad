@@ -40,6 +40,10 @@ fn occt() {
         "TKBO",
         "TKMesh",
         "TKFillet",
+        "TKShHealing",
+        "TKXSBase",
+        "TKDE",
+        "TKDESTEP",
     ] {
         println!("cargo:rustc-link-lib={lib}");
     }
