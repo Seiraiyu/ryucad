@@ -4318,6 +4318,7 @@ dependencies = [
 name = "ryumate"
 version = "0.0.0"
 dependencies = [
+ "divan",
  "proptest",
  "ryukei",
  "ryukei-testkit",

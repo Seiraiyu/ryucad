@@ -12,5 +12,10 @@ ryukei = { path = "../ryukei" }
 ryusketch = { path = "../ryusketch" }
 
 [dev-dependencies]
+divan = "0.1"
 proptest = "1"
 ryukei-testkit = { path = "../ryukei-testkit" }
+
+[[bench]]
+name = "solve"
+harness = false
