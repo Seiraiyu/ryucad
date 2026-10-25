@@ -16,6 +16,7 @@ pub mod assembly;
 pub mod check;
 pub mod client;
 pub mod config;
+pub mod connector;
 pub mod daemon;
 pub mod diff;
 pub mod doctor;
