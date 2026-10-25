@@ -1230,6 +1230,77 @@ fn on_screen(h: &Harness<'static, App>, p: [f64; 3]) -> egui::Pos2 {
 }
 
 #[test]
+fn a_click_on_a_cut_face_selects_it() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    // A pocket 6 × 4 × 2 mm cut into the base's top.
+    let p = Project::new().with_part();
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "box",
+        "--id",
+        "pocket",
+        "--operation",
+        "cut",
+        "--target",
+        "base",
+        "--param",
+        "x=6",
+        "--param",
+        "y=4",
+        "--param",
+        "z=2",
+        "--origin",
+        "10,3,3",
+    ]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    // Looking down into the pocket, framed: its floor fills the view.
+    if let ryucad_app::ui::app::Screen::Opened(o) = &mut h.state_mut().screen {
+        o.view.nav.camera = ryucad::view::frame(
+            [0.009, 0.002, 0.003],
+            [0.017, 0.008, 0.005],
+            ryucad::view::StandardView::Top,
+            ryucad::view::DEFAULT_PROJECTION,
+        );
+    }
+    h.run_steps(2);
+    // The middle of the pocket's floor: a face of the base the cut made.
+    let at = on_screen(&h, [0.013, 0.005, 0.003]);
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    let hover = h.state().opened().view.hover.clone().unwrap();
+    assert_eq!(hover.kind.as_str(), "face");
+    let name = hover.entity.strip_prefix("p/base/").unwrap().to_owned();
+    let floor = p.ok(&["inspect", "p"])["bodies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["faces"].as_array().unwrap().clone())
+        .find(|f| f["name"] == name)
+        .unwrap();
+    assert_eq!(floor["origin"], serde_json::json!({"feature": "pocket"}));
+    let z = floor["surface"]["frame"]["origin"][2].as_f64().unwrap();
+    assert!((z - 0.003).abs() < 1e-12, "{floor}");
+    click(&h, at);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection == [hover.entity.clone()])
+            && a.opened().ws.idle()
+    });
+    assert_eq!(
+        p.ok(&["selection"])["selection"],
+        serde_json::json!([hover.entity])
+    );
+}
+
+#[test]
 fn a_click_on_a_sketch_line_selects_it() {
     let _one = one_at_a_time();
     if !gpu() {
