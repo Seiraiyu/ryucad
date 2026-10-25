@@ -211,6 +211,15 @@ pub enum Code {
     InstanceNotReleased,
     /// A move of an instance that is fixed where it is.
     InstanceFixed,
+    /// A connector on an entity no frame is defined from: a NURBS or
+    /// swept face, an ellipse or a spline edge.
+    ConnectorUnsupported,
+    /// An assembly whose mates can't all hold. The conflicting mates are
+    /// in the details.
+    AssemblyUnsolved,
+    /// A write that would leave an assembly's mates unable to all hold.
+    /// The conflicting mates are in the details.
+    AssemblyOverconstrained,
 }
 
 impl Code {
@@ -329,6 +338,15 @@ mod tests {
         assert_eq!(
             json!(Code::InstanceNotReleased),
             json!("instance_not_released")
+        );
+        assert_eq!(
+            json!(Code::ConnectorUnsupported),
+            json!("connector_unsupported")
+        );
+        assert_eq!(Code::AssemblyUnsolved.exit_code(), 1);
+        assert_eq!(
+            json!(Code::AssemblyOverconstrained),
+            json!("assembly_overconstrained")
         );
     }
 

@@ -1132,11 +1132,13 @@ fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<
                 .and_then(|b| canonical::parse(std::str::from_utf8(&b).ok()?).ok())
                 .and_then(|v| PartFile::from_json(&v).ok());
             // An assembly comes back as one: as the last commit says, else
-            // when every feature file is an instance.
+            // when every feature file is an instance, a mate or an
+            // instance pattern.
             let instances = !files.is_empty()
                 && files.iter().all(|f| {
                     matches!(read(root, &format!("parts/{part}/features/{f}.json")),
-                        Read::Json(v, _) if v["type"] == "instance")
+                        Read::Json(v, _) if matches!(v["type"].as_str(),
+                            Some("instance" | "mate" | "instance_pattern")))
                 });
             let kind = match &committed {
                 Some(p) => p.kind,

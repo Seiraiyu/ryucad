@@ -330,18 +330,33 @@ pub fn place(id: &Id, inst: &Instance, children: &Children) -> Result<Placed> {
     })
 }
 
-/// `wrong_part_kind` for a feature its part doesn't hold: an instance in
-/// a part, or anything but an instance in an assembly.
+/// Whether `f` is an assembly's feature: an instance, a mate or an
+/// instance pattern.
+pub fn assembles(f: &Feature) -> bool {
+    matches!(
+        f,
+        Feature::Instance(_) | Feature::Mate(_) | Feature::InstancePattern(_)
+    )
+}
+
+/// `wrong_part_kind` for a feature its part doesn't hold: an instance, a
+/// mate or an instance pattern in a part, or anything else in an
+/// assembly.
 pub fn kind_error(part: &Part, id: &Id, f: &Feature) -> Option<Error> {
     let kind = part.file.as_ref().map_or(PartKind::Part, |p| p.kind);
-    let instance = f.instance().is_some();
-    let why = match (kind, instance) {
+    let why = match (kind, assembles(f)) {
         (PartKind::Part, true) => format!(
-            "{id} is an instance, and {} is a part: only assemblies place parts",
+            "{id} is {} {}, and {} is a part: only assemblies place parts",
+            if f.type_name() == "instance" {
+                "an"
+            } else {
+                "a"
+            },
+            f.type_name(),
             part.id
         ),
         (PartKind::Assembly, false) => format!(
-            "{id} is a {}, and {} is an assembly: assemblies hold only instances",
+            "{id} is a {}, and {} is an assembly: assemblies hold only instances, mates and instance patterns",
             f.type_name(),
             part.id
         ),

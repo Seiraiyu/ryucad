@@ -368,7 +368,9 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::Fillet(_)
         | Feature::Chamfer(_)
         | Feature::Pattern(_)
-        | Feature::Instance(_) => Err(Error::new(
+        | Feature::Instance(_)
+        | Feature::Mate(_)
+        | Feature::InstancePattern(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} makes no body of its own", f.type_name()),
         )
@@ -1738,6 +1740,15 @@ fn rebuild_with(
                 .map(|p| Output::Instance(Arc::new(p)));
             (r, None)
         }
+        // Solved with the whole assembly, over what its instances place.
+        Feature::Mate(_) | Feature::InstancePattern(_) => (
+            Err(Error::new(
+                Code::Internal,
+                format!("{} {id} is solved with its assembly", f.type_name()),
+            )
+            .with("feature", id)),
+            None,
+        ),
         f => {
             let (r, own) = build_body(part, solids, id, f, before, tool);
             (r.map(solid), own)

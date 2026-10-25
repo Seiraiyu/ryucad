@@ -940,6 +940,8 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
         }
         Feature::Boolean(b) => b.fields(),
         Feature::Instance(i) => i.fields(),
+        Feature::Mate(m) => m.fields(),
+        Feature::InstancePattern(x) => x.fields(),
         Feature::Fillet(_) | Feature::Chamfer(_) => blend_report(part, f),
         Feature::Hole(h) => hole_report(part, h),
         Feature::Pattern(x) => pattern_report(part, x),
@@ -2361,6 +2363,10 @@ fn feature_edit(
         Feature::Instance(i) => {
             given.only("instance", &INSTANCE)?;
             Feature::Instance(instance_from(Some(&i), &given, unit, &p.env)?)
+        }
+        f @ (Feature::Mate(_) | Feature::InstancePattern(_)) => {
+            given.only(f.type_name(), &[])?;
+            f
         }
         Feature::Boolean(b) => {
             given.only("boolean", &BOOLEAN)?;

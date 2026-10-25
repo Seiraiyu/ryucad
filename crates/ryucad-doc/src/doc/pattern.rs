@@ -184,7 +184,7 @@ fn bad(at: &str, msg: &str, q: &Quantity) -> Error {
 }
 
 /// A count: a whole number, at least one.
-fn count(v: &Value, env: &Env, at: &str) -> Result<Quantity> {
+pub(crate) fn count(v: &Value, env: &Env, at: &str) -> Result<Quantity> {
     let q = Quantity::from_json_as(v, Field::Number, &|n| env.get(n))
         .map_err(|e| e.with("pointer", at))?;
     let n = q.number();
@@ -199,7 +199,7 @@ fn count(v: &Value, env: &Env, at: &str) -> Result<Quantity> {
 }
 
 /// A spacing: a length greater than zero.
-fn spacing(v: &Value, default: Unit, env: &Env, at: &str) -> Result<Quantity> {
+pub(crate) fn spacing(v: &Value, default: Unit, env: &Env, at: &str) -> Result<Quantity> {
     let q =
         Quantity::from_json_in(v, default, &|n| env.get(n)).map_err(|e| e.with("pointer", at))?;
     if q.meters() <= 0.0 {
@@ -209,7 +209,7 @@ fn spacing(v: &Value, default: Unit, env: &Env, at: &str) -> Result<Quantity> {
 }
 
 /// Reads an optional `true`/`false` field, false when left out.
-fn flag(o: &mut Obj, key: &str) -> Result<bool> {
+pub(crate) fn flag(o: &mut Obj, key: &str) -> Result<bool> {
     match o.take_opt(key) {
         None => Ok(false),
         Some(Value::Bool(b)) => Ok(b),
@@ -345,7 +345,23 @@ impl Pattern {
         let features = targets_from_json(&o.take("features")?, "/features")?;
         let skip = match o.take_opt("skip") {
             None => Vec::new(),
-            Some(v) => skip_from_json(&v, &kind)?,
+            // A mirror has nothing to skip.
+            Some(_) if matches!(kind, Kind::Mirror { .. }) => {
+                return Err(invalid(
+                    "/skip",
+                    "a mirror has one instance, and nothing to skip",
+                ));
+            }
+            Some(v) => {
+                let two = matches!(
+                    kind,
+                    Kind::Linear {
+                        second: Some(_),
+                        ..
+                    }
+                );
+                skip_from_json(&v, kind.counts(), two)?
+            }
         };
         let targets = targets_from_json(&o.take("targets")?, "/targets")?;
         Ok(Pattern {
@@ -394,27 +410,13 @@ impl Pattern {
     }
 }
 
-/// Reads `skip`: instance indices, each `i` (one way) or `[i, j]` (two
-/// directions), within the counts, each once, never the seed's. A mirror
-/// has nothing to skip.
-fn skip_from_json(v: &Value, kind: &Kind) -> Result<Vec<Instance>> {
-    if matches!(kind, Kind::Mirror { .. }) {
-        return Err(invalid(
-            "/skip",
-            "a mirror has one instance, and nothing to skip",
-        ));
-    }
-    let two = matches!(
-        kind,
-        Kind::Linear {
-            second: Some(_),
-            ..
-        }
-    );
+/// Reads `skip`: instance indices, each `i` (one way) or `[i, j]` (`two`
+/// directions), within `counts`, each once, never the seed's.
+pub(crate) fn skip_from_json(v: &Value, counts: [u32; 2], two: bool) -> Result<Vec<Instance>> {
     let a = v
         .as_array()
         .ok_or_else(|| invalid("/skip", "skip is an array of instance indices"))?;
-    let [n, m] = kind.counts();
+    let [n, m] = counts;
     let index = |x: &Value| x.as_u64().and_then(|i| u32::try_from(i).ok());
     let mut out: Vec<Instance> = Vec::with_capacity(a.len());
     for (k, x) in a.iter().enumerate() {
