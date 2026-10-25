@@ -171,6 +171,59 @@ pub struct Placed {
     pub hash: String,
 }
 
+/// The pose of a rigid placement: where it takes the origin and its z
+/// and x axes.
+pub fn rigid_pose(r: &Rigid) -> Pose {
+    let m = r.rotation_matrix();
+    let t = r.translation_part();
+    Pose {
+        origin_m: [t.x, t.y, t.z],
+        z: [m[0][2], m[1][2], m[2][2]],
+        x: [m[0][0], m[1][0], m[2][0]],
+    }
+}
+
+/// An instance path as references write it: its IDs joined by `/`.
+pub fn path_text(path: &[Id]) -> String {
+    path.iter().map(Id::as_str).collect::<Vec<_>>().join("/")
+}
+
+impl Occurrence {
+    /// How reports give it: its path, part and revision, its solids by
+    /// founder with their hashes, and its pose.
+    pub fn to_json(&self) -> serde_json::Value {
+        let solids: Vec<serde_json::Value> = self
+            .solids
+            .iter()
+            .map(|(s, b)| serde_json::json!({"solid": s, "hash": b.hash}))
+            .collect();
+        serde_json::json!({
+            "path": path_text(&self.path),
+            "part": self.part,
+            "rev": self.rev.to_json(),
+            "solids": solids,
+            "pose": rigid_pose(&self.pose).to_json(),
+        })
+    }
+}
+
+impl Placed {
+    /// How a rebuild report gives an instance: its part, revision (and how
+    /// a label resolved), pose and how many occurrences it places.
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut v = serde_json::json!({
+            "part": self.part,
+            "rev": self.rev.to_json(),
+            "pose": rigid_pose(&self.pose).to_json(),
+            "occurrences": self.model.occurrences.len(),
+        });
+        if let Some(pin) = &self.model.pin {
+            v["pin"] = pin.to_json();
+        }
+        v
+    }
+}
+
 /// `instance_obsolete`: instance `id` places a release an obsolete record
 /// names.
 pub fn obsolete_warning(id: &Id, p: &Placed) -> serde_json::Value {
@@ -1179,5 +1232,101 @@ pub(crate) mod tests {
             .clone();
         let e = pinned.features[0].1.clone().unwrap_err();
         assert_eq!(e.code, Code::InstanceNotReleased);
+    }
+
+    #[test]
+    fn a_rebuild_reports_an_assemblys_instances_and_occurrences() {
+        let (dir, mut s) = released();
+        let r = dir.path();
+        place_in(r, "frame", "base", "plate", json!("working"), [0.0; 3]);
+        place_in(
+            r,
+            "frame",
+            "b1",
+            "bolt",
+            json!({"label": "A"}),
+            [0.01, 0.02, 0.005],
+        );
+        s.refresh().unwrap();
+        let v = call(&mut s, "rebuild", json!({"part": "frame"})).unwrap();
+        let part = &v["parts"][0];
+        assert_eq!(part["kind"], "assembly");
+        assert_eq!(part["solids"], json!([]));
+        let b1 = &part["features"][1];
+        assert_eq!(
+            (&b1["id"], &b1["type"], &b1["ok"]),
+            (&json!("b1"), &json!("instance"), &json!(true))
+        );
+        assert_eq!(b1["instance"]["part"], "bolt");
+        assert_eq!(b1["instance"]["rev"], json!({"label": "A"}));
+        assert_eq!(b1["instance"]["pin"]["official"], true);
+        assert_eq!(
+            b1["instance"]["pose"]["origin_m"],
+            json!([0.01, 0.02, 0.005])
+        );
+        assert_eq!(b1["instance"]["occurrences"], 1);
+        let occ = part["occurrences"].as_array().unwrap();
+        assert_eq!(occ.len(), 2);
+        assert_eq!(
+            (&occ[1]["path"], &occ[1]["part"]),
+            (&json!("b1"), &json!("bolt"))
+        );
+        assert_eq!(occ[1]["solids"][0]["solid"], "shank");
+        assert_eq!(
+            occ[1]["pose"],
+            json!({"origin_m": [0.01, 0.02, 0.005], "z": [0, 0, 1], "x": [1, 0, 0]})
+        );
+        // A part's report is as it was.
+        let v = call(&mut s, "rebuild", json!({"part": "bolt"})).unwrap();
+        assert!(v["parts"][0].get("kind").is_none());
+        assert!(v["parts"][0].get("occurrences").is_none());
+        // A failing instance fails the rebuild, with every status.
+        place_in(r, "frame", "z", "bolt", json!({"label": "Z"}), [0.0; 3]);
+        s.refresh().unwrap();
+        let e = call(&mut s, "rebuild", json!({"part": "frame"})).unwrap_err();
+        assert_eq!(e.code, Code::RebuildFailed);
+        assert_eq!(
+            e.details["parts"][0]["features"][2]["error"]["code"],
+            "label_not_found"
+        );
+    }
+
+    #[test]
+    fn subscribers_hear_an_assembly_change_with_its_parts() {
+        use crate::live::Live;
+        use crate::notify::Topic;
+        use crate::server::tests::{call_live, drain};
+        let (dir, s) = project();
+        place_in(
+            dir.path(),
+            "frame",
+            "b1",
+            "bolt",
+            json!("working"),
+            [0.0; 3],
+        );
+        let mut live = Live::new();
+        let mut slot = Some(s);
+        crate::server::settle(&mut slot, &mut live, dir.path());
+        let sub = live.hub.subscribe("p-x", &[Topic::Model]);
+        let mut s = slot.take().unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.edit",
+            json!({"part": "bolt", "id": "shank", "params": {"radius": 4}}),
+        )
+        .unwrap();
+        live.hub.send(Topic::Model, "marker", &json!({}));
+        let got = drain(&sub);
+        assert_eq!(got.len(), 1);
+        let parts: Vec<&Value> = got[0].1["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| &p["part"])
+            .collect();
+        assert_eq!(parts, [&json!("bolt"), &json!("frame")]);
     }
 }

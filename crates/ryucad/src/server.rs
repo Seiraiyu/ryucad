@@ -2343,6 +2343,7 @@ fn feature_list(session: &Session, part: &str) -> Result<Value> {
 fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
     let part = session.project().part(id)?;
     let revision = part.revision.clone();
+    let assembly = part_kind(part) == PartKind::Assembly;
     let solids = Solids::of(part);
     // A feature that doesn't load may still say what it is: a conflict
     // record's type where the merge left it alone.
@@ -2418,8 +2419,7 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
                 }
                 Ok(crate::rebuild::Output::Instance(p)) => {
                     json!({"id": fid, "type": types.get(fid), "ok": true, "hash": p.hash,
-                           "instance": {"part": p.part, "rev": p.rev.to_json(),
-                                        "occurrences": p.model.occurrences.len()}})
+                           "instance": p.to_json()})
                 }
                 // A sketch makes no body: its state, not a body hash.
                 Ok(crate::rebuild::Output::Sketch(s)) => {
@@ -2466,6 +2466,16 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
     let mut v = json!({"part": id, "revision": revision, "hash": r.hash,
                        "failed": r.failed(), "features": features, "solids": shown});
     let warnings = r.warnings();
+    // An assembly's model is what its instances place.
+    if assembly {
+        let occurrences: Vec<Value> = crate::assembly::Model::of_assembly(r)
+            .occurrences
+            .iter()
+            .map(crate::assembly::Occurrence::to_json)
+            .collect();
+        v["kind"] = json!("assembly");
+        v["occurrences"] = json!(occurrences);
+    }
     if !warnings.is_empty() {
         v["warnings"] = json!(warnings);
     }
@@ -2521,7 +2531,7 @@ pub fn publish(live: &mut Live, session: &mut Session) {
         live.seen.pdm = None;
     }
     let p = session.project();
-    let revisions: BTreeMap<Id, String> = p
+    let mut revisions: BTreeMap<Id, String> = p
         .parts
         .iter()
         .map(|(id, part)| (id.clone(), part.revision.clone()))
@@ -2529,6 +2539,20 @@ pub fn publish(live: &mut Live, session: &mut Session) {
     if !watched {
         live.seen.parts = revisions;
         return;
+    }
+    // An assembly changes when what it places does, its files or not: its
+    // rebuild's hash says so.
+    let assemblies: Vec<Id> = p
+        .parts
+        .iter()
+        .filter(|(_, part)| part_kind(part) == PartKind::Assembly)
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in assemblies {
+        if let Ok(r) = session.rebuilt(&id) {
+            let key = format!("{}+{}", revisions[&id], r.hash);
+            revisions.insert(id, key);
+        }
     }
     let mut parts = Vec::new();
     for (id, rev) in &revisions {
@@ -5459,7 +5483,7 @@ pub(crate) mod tests {
     }
 
     /// The notifications queued for `sub` so far, as (method, params).
-    fn drain(sub: &crate::notify::Subscriber) -> Vec<(String, Value)> {
+    pub(crate) fn drain(sub: &crate::notify::Subscriber) -> Vec<(String, Value)> {
         let mut out = Vec::new();
         // `next` blocks when empty, so close a clone's view by sending a
         // marker first.
