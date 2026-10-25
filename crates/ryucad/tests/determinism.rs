@@ -4,8 +4,8 @@
 //! solved sketches and the bodies swept from them, features that refer
 //! to other features' faces, edges and vertices, solids that features
 //! join, cut and intersect, holes and patterns, how sketches are drawn,
-//! what diffs say, what merges make, and the content hashes release
-//! records name. After
+//! what diffs say, what merges make, the content hashes release records
+//! name, and where assemblies place their parts. After
 //! a deliberate change, regenerate with
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
@@ -1301,6 +1301,113 @@ fn pdm_section(golden: &mut Golden) {
     }
 }
 
+/// A project of parts and assemblies: a pair of bolts, placed twice in a
+/// frame, one turned, with a plate.
+fn assembled() -> (tempfile::TempDir, ryucad::session::Session) {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    call(&mut s, "part.create", json!({"part": "bolt"}));
+    call(
+        &mut s,
+        "feature.add",
+        json!({"part": "bolt", "type": "cylinder", "id": "shank",
+               "params": {"radius": "3.1 mm", "height": "17.3 mm"}}),
+    );
+    call(
+        &mut s,
+        "feature.add",
+        json!({"part": "bolt", "type": "cylinder", "id": "head", "operation": "join",
+               "params": {"radius": "5.2 mm", "height": "4.1 mm"},
+               "placement": {"origin": [0, 0, "17.3 mm"]}}),
+    );
+    call(&mut s, "part.create", json!({"part": "plate"}));
+    call(
+        &mut s,
+        "feature.add",
+        json!({"part": "plate", "type": "box", "id": "slab",
+               "params": {"x": "61.7 mm", "y": "33.1 mm", "z": "6.3 mm"}}),
+    );
+    for (a, _) in [("pair", 0), ("frame", 1)] {
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": a, "kind": "assembly"}),
+        );
+    }
+    for (id, x) in [("left", "-7.9 mm"), ("right", "7.9 mm")] {
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "pair", "type": "instance", "id": id, "of": "bolt",
+                   "placement": {"origin": [x, 0, 0]}}),
+        );
+    }
+    call(
+        &mut s,
+        "feature.add",
+        json!({"part": "frame", "type": "instance", "id": "base", "of": "plate", "fixed": true}),
+    );
+    for (id, x) in [("p1", "15.4 mm"), ("p2", "46.3 mm")] {
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "instance", "id": id, "of": "pair",
+                   "placement": {"origin": [x, "16.55 mm", "6.3 mm"]}}),
+        );
+    }
+    call(
+        &mut s,
+        "assembly.move",
+        json!({"part": "frame", "instance": "p2", "axis": [0, 0, 1], "angle": "37.3 deg"}),
+    );
+    (dir, s)
+}
+
+/// Every occurrence of the frame: its path, part, solids' bodies and the
+/// bits of its pose; the model's and each part's rebuild hashes; and the
+/// pixels of a render of the frame.
+fn assemblies_section(golden: &mut Golden) {
+    use ryucad::doc::assembly::Rev;
+    let mut s = golden.section("assemblies");
+    let (dir, mut session) = assembled();
+    let frame = Id::parse("frame", "part").unwrap();
+    let model = session.model(&frame, &Rev::Working).unwrap();
+    assert_eq!(model.occurrences.len(), 5);
+    for o in &model.occurrences {
+        s.str(&ryucad::assembly::path_text(&o.path));
+        s.str(o.part.as_str());
+        for sd in &o.solids {
+            s.str(sd.founder.as_str());
+            s.str(&sd.built.hash);
+        }
+        let p = ryucad::assembly::rigid_pose(&o.pose);
+        for x in p.origin_m.iter().chain(&p.z).chain(&p.x) {
+            s.str(&format!("{:016x}", x.to_bits()));
+        }
+    }
+    s.str(&model.hash);
+    for part in ["bolt", "plate", "pair", "frame"] {
+        let id = Id::parse(part, "part").unwrap();
+        s.str(&session.rebuilt(&id).unwrap().hash);
+    }
+    let params = serde_json::json!({"part": "frame", "width": 320, "height": 240});
+    let req = ryucad::proto::Request::from_rpc("render", Some(params)).unwrap();
+    let a = ryucad::server::handle_safely(&mut Some(session), None, None, dir.path(), req).unwrap();
+    let png = a.binary.unwrap();
+    let mut r = png::Decoder::new(std::io::Cursor::new(png))
+        .read_info()
+        .unwrap();
+    let mut buf = vec![0; r.output_buffer_size().unwrap()];
+    let info = r.next_frame(&mut buf).unwrap();
+    s.str(&format!("{:x}", md(&buf[..info.buffer_size()])));
+}
+
 /// A millimetre part of holes and patterns: a plate drilled at a
 /// sketch's points (a counterbore with a drill point, a countersink
 /// through all, a plain blind hole), a grid of the
@@ -1503,5 +1610,6 @@ fn determinism() {
     diff_section(&mut golden);
     merge_section(&mut golden);
     pdm_section(&mut golden);
+    assemblies_section(&mut golden);
     golden.finish();
 }

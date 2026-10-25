@@ -2721,3 +2721,92 @@ fn patterns_from_the_cli() {
     );
     p.fails(&["feature", "delete", "p", "h"], "has_dependents", 1);
 }
+
+#[test]
+fn assemblies_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "bolt"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bolt",
+        "cylinder",
+        "--id",
+        "shank",
+        "--param",
+        "radius=3",
+        "--param",
+        "height=20",
+    ]);
+    let made = p.ok(&["part", "create", "frame", "--assembly"]);
+    assert_eq!(made["kind"], "assembly");
+    let added = p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b1", "--of", "bolt", "--origin", "10,0,0",
+    ]);
+    assert_eq!(added["feature"]["part"], "bolt");
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b2", "--of", "bolt", "--fixed",
+    ]);
+    // A part takes no instance, an assembly no solid.
+    p.fails(
+        &["feature", "add", "bolt", "instance", "--of", "bolt"],
+        "wrong_part_kind",
+        1,
+    );
+    p.fails(
+        &["feature", "add", "frame", "instance", "--of", "frame"],
+        "assembly_cycle",
+        1,
+    );
+    let moved = p.ok(&[
+        "assembly",
+        "move",
+        "frame",
+        "b1",
+        "--translate",
+        "0,5mm,0",
+        "--axis",
+        "0,0,1",
+        "--angle",
+        "90deg",
+    ]);
+    assert_eq!(
+        moved["pose"]["origin_m"],
+        serde_json::json!([0.01, 0.005, 0])
+    );
+    p.fails(
+        &["assembly", "move", "frame", "b2", "--translate", "1,0,0"],
+        "instance_fixed",
+        1,
+    );
+    let tree = p.ok(&["assembly", "tree", "frame"]);
+    assert_eq!(tree["instances"][0]["path"], "b1");
+    assert_eq!(tree["instances"][1]["fixed"], true);
+    let built = p.ok(&["rebuild", "frame"]);
+    assert_eq!(
+        built["parts"][0]["occurrences"].as_array().unwrap().len(),
+        2
+    );
+    let shown = p.ok(&["inspect", "frame", "b1"]);
+    let face = shown["occurrences"][0]["bodies"][0]["faces"][0]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let one = p.ok(&[
+        "inspect",
+        "frame",
+        "--entity",
+        &format!("frame/b1/shank/{face}"),
+    ]);
+    assert_eq!(one["kind"], "face");
+    p.fails(&["part", "delete", "bolt"], "has_dependents", 1);
+    // Undone through the daemon (undo needs one), the move is gone there.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, tree) = p.run_in(&p.daemon, "", &["assembly", "tree", "frame"]);
+    assert_eq!(
+        tree["result"]["instances"][0]["pose"]["origin_m"],
+        serde_json::json!([0.01, 0, 0])
+    );
+}
