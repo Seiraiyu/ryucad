@@ -22,8 +22,8 @@
 //!    loops at poles go, and edges a seam split are joined again (see
 //!    `unseam`).
 //! 5. **Orientation.** Loops run the way their faces' regions need,
-//!    where the loops alone fix it, and every edge must then be used once
-//!    each way (see `orient`).
+//!    where the loops alone fix it, and faces are turned over until every
+//!    edge is used once each way (see `orient`).
 //! 6. **Gaps.** Every edge's and vertex's tolerance grows to cover how
 //!    far it lies from its curves and surfaces, up to the cap (see
 //!    `gaps`).
@@ -174,6 +174,8 @@ pub struct HealReport {
     /// Faces some of whose loops ran against the region they bound, and
     /// were reversed.
     pub reversed: Vec<Name>,
+    /// Faces turned over to agree with their neighbours.
+    pub turned: Vec<Name>,
     /// Pole vertices dropped with their loops or seams.
     pub poles: Vec<Name>,
     /// Vertices removed between two edges on one curve, which were joined.
@@ -202,7 +204,7 @@ pub fn heal(
     build::uses(&shape, &names)?;
     let unseamed = unseam::unseam(key, &mut shape, &mut names)?;
     let reversed = orient::loops(&mut shape, &names)?;
-    build::consistent(&shape, &names)?;
+    let turned = orient::faces(&mut shape, &names)?;
     gaps::tolerate(&mut shape, &names, options.tolerance_cap)?;
     let pcurves = pcurves::pcurves(&shape, &names)?;
     let (body, created, mut report) = build::build(key, &shape, &names, &pcurves, options)?;
@@ -212,7 +214,11 @@ pub fn heal(
     for &f in &reversed {
         journal.push(Event::Modified(f));
     }
+    for &f in &turned {
+        journal.push(Event::Modified(f));
+    }
     report.reversed = reversed;
+    report.turned = turned;
     report.sewn = sewn.edges;
     report.merged = sewn.vertices;
     report.seams = unseamed.seams;
