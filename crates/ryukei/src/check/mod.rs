@@ -18,7 +18,7 @@ mod intersect;
 mod topology;
 
 pub(crate) use geometry::outside_size_box;
-pub use intersect::check_intersections;
+pub use intersect::{check_intersections, check_overlaps};
 
 use crate::name::Name;
 use crate::topo::{Body, EdgeId, EntityId, FaceId, FinId, LoopId, RegionId, ShellId, VertexId};

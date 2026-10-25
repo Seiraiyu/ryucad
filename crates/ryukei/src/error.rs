@@ -60,6 +60,8 @@ pub enum HealError {
     /// Two shells that cross each other, each partly inside the other,
     /// so neither encloses the other: named by a face of each, sorted.
     ShellsCross { a: Name, b: Name },
+    /// Two faces on one surface that overlap in an area, sorted.
+    FacesOverlap { a: Name, b: Name },
     /// An edge one face uses twice that isn't a seam: a whole parameter
     /// line where the face's surface wraps.
     BadSeam { face: Name },
@@ -418,6 +420,7 @@ impl fmt::Display for HealError {
             Self::NonManifold { at } => write!(f, "faces meet in more than one fan at {at}"),
             Self::Misoriented { at } => write!(f, "{at} is oriented against its neighbours"),
             Self::ShellsCross { a, b } => write!(f, "the shells of {a} and {b} cross"),
+            Self::FacesOverlap { a, b } => write!(f, "faces {a} and {b} overlap"),
             Self::BadSeam { face } => write!(f, "face {face} uses an edge twice off a seam"),
             Self::BadDomain { face } => write!(f, "the loops of face {face} bound no region"),
             Self::NoPcurve { edge, face } => write!(f, "edge {edge} has no pcurve on face {face}"),

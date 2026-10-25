@@ -22,11 +22,23 @@
 //! apart outside a strip round their shared edges as wide as that reach
 //! allows a tangent wedge, `sqrt(2 × size × reach)` ([`face_beside`]), or
 //! reported as [`Fault::CannotCheck`].
+//!
+//! [`check_overlaps`] is the part of the check that finds
+//! [`Fault::FacesOverlap`] alone: only pairs on coincident surfaces are
+//! intersected, which is cheap enough to run on every import.
+//!
+//! Faces on one surface whose boundaries lie on each other's all round
+//! (two solids stacked face to face) leave no rim inside either; for
+//! both checks a point inside one (the first of a grid over its pcurves'
+//! parameter box that the face holds) inside the other is an overlap,
+//! since on a closed surface two faces with one boundary may be each
+//! other's complement.
 
 use super::Fault;
 use crate::geom::{Curve, Frame, Plane, Point3, Surface};
 use crate::intersect::broad::BoxTree;
-use crate::intersect::{FaceMeet, Place, face_beside, face_box, face_face};
+use crate::intersect::coincide::coincident;
+use crate::intersect::{FaceMeet, Place, face_beside, face_box, face_face, point_in_face};
 use crate::topo::{Body, EdgeId, FaceId, VertexId};
 use rayon::prelude::*;
 
@@ -46,6 +58,90 @@ pub fn check_intersections(body: &Body) -> Vec<Fault> {
         .collect()
 }
 
+/// Faces on coincident surfaces that overlap in an area, by pair in face
+/// order: the [`Fault::FacesOverlap`] faults [`check_intersections`]
+/// finds, intersecting no other pair. For a body that passes
+/// [`super::check_topology`].
+pub fn check_overlaps(body: &Body) -> Vec<Fault> {
+    let faces: Vec<FaceId> = body.faces().collect();
+    let boxes: Vec<_> = faces
+        .iter()
+        .enumerate()
+        .map(|(i, &f)| (face_box(body, f).grow(slack(body, f)), i))
+        .collect();
+    let surface = |f: FaceId| &body.surfaces[body.faces[f].surface];
+    let pairs: Vec<(usize, usize)> = BoxTree::new(boxes)
+        .self_pairs()
+        .into_iter()
+        .filter(|&(i, j)| coincident(surface(faces[i]), surface(faces[j])).is_some())
+        .collect();
+    pairs
+        .par_iter()
+        .filter_map(|&(i, j)| {
+            let (a, b) = (faces[i], faces[j]);
+            match face_face((body, a), (body, b)) {
+                Ok(meet @ FaceMeet::Coincident { .. }) => overlap(body, a, b, &meet),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Whether two faces on one surface overlap in an area: a rim inside the
+/// other face, or neither has a boundary, or a point inside one lies
+/// inside the other.
+fn overlap(body: &Body, a: FaceId, b: FaceId, meet: &FaceMeet) -> Option<Fault> {
+    fault(a, b, meet).or_else(|| {
+        (inside_other(body, a, b) || inside_other(body, b, a))
+            .then_some(Fault::FacesOverlap { a, b })
+    })
+}
+
+/// Points of a grid in each direction over a face's parameter box when
+/// looking for a point inside it.
+const PROBES: usize = 16;
+
+/// Whether a point inside face `a` (the first of a grid over its
+/// pcurves' parameter box that it holds) lies inside face `b`, on a
+/// coincident surface.
+fn inside_other(body: &Body, a: FaceId, b: FaceId) -> bool {
+    let mut lo = [f64::INFINITY; 2];
+    let mut hi = [f64::NEG_INFINITY; 2];
+    for l in body.face_loops(a) {
+        for fin in body.loop_fins(l) {
+            let e = &body.edges[body.fins[fin].edge];
+            for k in 0..=16 {
+                let t = e.interval[0] + (e.interval[1] - e.interval[0]) * k as f64 / 16.0;
+                if let Some(q) = body.fin_uv(fin, t) {
+                    lo = [lo[0].min(q.x), lo[1].min(q.y)];
+                    hi = [hi[0].max(q.x), hi[1].max(q.y)];
+                }
+            }
+        }
+    }
+    if !(lo[0] < hi[0] && lo[1] < hi[1]) {
+        return false;
+    }
+    let (sa, sb) = (
+        &body.surfaces[body.faces[a].surface],
+        &body.surfaces[body.faces[b].surface],
+    );
+    for i in 0..PROBES {
+        for j in 0..PROBES {
+            let uv = crate::geom::Point2::new(
+                lo[0] + (hi[0] - lo[0]) * (i as f64 + 0.5) / PROBES as f64,
+                lo[1] + (hi[1] - lo[1]) * (j as f64 + 0.5) / PROBES as f64,
+            );
+            if point_in_face(body, a, uv) != Ok(Place::Inside) {
+                continue;
+            }
+            let (u, v) = sb.project(sa.point(uv.x, uv.y)).param;
+            return point_in_face(body, b, crate::geom::Point2::new(u, v)) == Ok(Place::Inside);
+        }
+    }
+    false
+}
+
 /// The fault two faces of a body make, if any.
 fn pair(body: &Body, a: FaceId, b: FaceId) -> Option<Fault> {
     // Faces tangent along an edge they share can't be traced there: they
@@ -56,6 +152,7 @@ fn pair(body: &Body, a: FaceId, b: FaceId) -> Option<Fault> {
         return None;
     }
     match face_face((body, a), (body, b)) {
+        Ok(meet @ FaceMeet::Coincident { .. }) => overlap(body, a, b, &meet),
         Ok(meet) => fault(a, b, &prune(body, a, b, meet)),
         // Faces crossing at an edge they share where it can't be traced (a
         // pipe cut off at its spine's end), or touching at vertices they

@@ -1294,6 +1294,40 @@ fn a_solid_in_a_cavity_is_a_solid_of_its_own() {
 }
 
 #[test]
+fn faces_that_overlap_are_refused() {
+    // Two blocks stacked, one shell each: the top of the lower one lies
+    // on the bottom of the upper one.
+    let lower = primitive::block(OpKey(1), 1.0, 1.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let upper = primitive::block(
+        OpKey(2),
+        1.0,
+        1.0,
+        1.0,
+        &Rigid::translation(Vector3::new(0.0, 0.0, 1.0)),
+    )
+    .unwrap()
+    .0;
+    let s = joined(&plain(&lower), &plain(&upper));
+    assert!(matches!(
+        heal(OpKey(7), &s, &HealOptions::default()),
+        Err(Error::InvalidHeal(HealError::FacesOverlap { .. }))
+    ));
+    // Side by side with a gap, they heal.
+    let apart = primitive::block(
+        OpKey(2),
+        1.0,
+        1.0,
+        1.0,
+        &Rigid::translation(Vector3::new(0.0, 0.0, 1.5)),
+    )
+    .unwrap()
+    .0;
+    heal_ok(&joined(&plain(&lower), &plain(&apart)));
+}
+
+#[test]
 fn shells_that_cross_are_refused() {
     let a = primitive::block(OpKey(1), 4.0, 4.0, 4.0, &Rigid::IDENTITY)
         .unwrap()

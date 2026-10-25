@@ -40,7 +40,9 @@
 //!    edge.
 //! 10. **Build.** The shape is laid out and built through Euler operators
 //!     ([`crate::layout`]), every connected piece a solid of its own, and
-//!     renamed with the names of step 1. Each shell's volume then says
+//!     renamed with the names of step 1. Faces on one surface that
+//!     overlap in an area are refused ([`crate::check::check_overlaps`]).
+//!     Each shell's volume then says
 //!     which way it faces and which encloses which; shells facing the
 //!     wrong way are turned over, cavities go in the solids around them,
 //!     and the body is built again if anything changed (see `shells`).
@@ -243,6 +245,7 @@ pub fn heal(
     }
     let mut pcurves = pcurves::pcurves(&shape, &names)?;
     let first = build::assemble(key, &shape, &names, &pcurves, None)?;
+    overlaps(&first)?;
     let index: BTreeMap<Name, usize> = names
         .faces
         .iter()
@@ -300,6 +303,25 @@ pub fn heal(
     report.poles = unseamed.poles;
     report.joined = unseamed.joined;
     Ok((body, journal, report))
+}
+
+/// Refuses a body two of whose faces on one surface overlap in an area,
+/// naming the least pair.
+fn overlaps(body: &Body) -> Result<(), Error> {
+    let pair = crate::check::check_overlaps(body)
+        .into_iter()
+        .filter_map(|f| match f {
+            crate::check::Fault::FacesOverlap { a, b } => {
+                let (x, y) = (body.faces[a].name, body.faces[b].name);
+                Some((x.min(y), x.max(y)))
+            }
+            _ => None,
+        })
+        .min();
+    match pair {
+        Some((a, b)) => Err(crate::HealError::FacesOverlap { a, b }.into()),
+        None => Ok(()),
+    }
 }
 
 fn malformed(what: &'static str) -> Error {
