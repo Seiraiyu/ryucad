@@ -12,7 +12,7 @@ use crate::topo::{Body, EntityId, Sense};
 use crate::{Error, HealError, TopologyError};
 use std::collections::BTreeSet;
 
-/// Every edge used twice, once each way.
+/// Every edge used twice.
 pub(super) fn uses(s: &Shape, names: &Names) -> Result<(), Error> {
     let mut senses: Vec<Vec<Sense>> = vec![Vec::new(); s.edges.len()];
     for f in &s.faces {
@@ -32,29 +32,30 @@ pub(super) fn uses(s: &Shape, names: &Names) -> Result<(), Error> {
         free.sort();
         return Err(HealError::OpenShell { free_edges: free }.into());
     }
-    let mut first: Option<HealError> = None;
-    for (e, list) in senses.iter().enumerate() {
-        let fault = if list.len() > 2 {
-            HealError::NonManifold { at: names.edges[e] }
-        } else if list.len() == 2 && list[0] == list[1] {
-            HealError::Misoriented { at: names.edges[e] }
-        } else {
-            continue;
-        };
-        if first.as_ref().is_none_or(|f| key(&fault) < key(f)) {
-            first = Some(fault);
-        }
-    }
-    first.map_or(Ok(()), |f| Err(f.into()))
+    let at = (0..s.edges.len())
+        .filter(|&e| senses[e].len() > 2)
+        .map(|e| names.edges[e])
+        .min();
+    at.map_or(Ok(()), |at| Err(HealError::NonManifold { at }.into()))
 }
 
-/// The name a use fault is reported by, for choosing one by name.
-fn key(f: &HealError) -> Name {
-    match f {
-        HealError::NonManifold { at } => *at,
-        HealError::Misoriented { at } => *at,
-        _ => Name::from_u128(0),
+/// Every edge used once each way: else the least-named edge that isn't.
+pub(super) fn consistent(s: &Shape, names: &Names) -> Result<(), Error> {
+    let mut senses: Vec<Vec<Sense>> = vec![Vec::new(); s.edges.len()];
+    for f in &s.faces {
+        for l in &f.loops {
+            if let Loop::Edges(list) = l {
+                for u in list {
+                    senses[u.edge].push(u.sense);
+                }
+            }
+        }
     }
+    let at = (0..s.edges.len())
+        .filter(|&e| senses[e].len() == 2 && senses[e][0] == senses[e][1])
+        .map(|e| names.edges[e])
+        .min();
+    at.map_or(Ok(()), |at| Err(HealError::Misoriented { at }.into()))
 }
 
 /// The scaffold names' role: every entity is renamed afterwards.
