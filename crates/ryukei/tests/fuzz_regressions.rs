@@ -1,13 +1,17 @@
 //! Inputs the `sweep` fuzz target found while the self-intersection check
 //! was being made robust, and the `boolean` target while booleans were,
 //! replayed: each sweep must come out sound, and not cross or overlap
-//! itself; each boolean must also mesh without faults.
+//! itself; each boolean must also mesh without faults. The `heal` target's
+//! finds must heal into a body that checks, and their mild faults back
+//! into the body they were written from.
 
 use ryukei::boolean::boolean;
 use ryukei::check::{Fault, check, check_intersections};
+use ryukei::heal::{HealOptions, heal};
 use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::name::OpKey;
 use ryukei_testkit::boolean_bytes::boolean_case;
+use ryukei_testkit::heal_bytes::heal_case;
 use ryukei_testkit::sweep_bytes::sweep;
 
 fn bytes(hex: &str) -> Vec<u8> {
@@ -26,6 +30,17 @@ fn boolean_sound(hex: &str) {
     let m = tessellate(&body, &MeshParams::new(1e-2, 0.5)).unwrap();
     assert_eq!(m.faults, []);
     assert_eq!(check_mesh(&body, &m), Ok(()));
+}
+
+/// A shape from the bytes, which must heal into a body that checks, the
+/// body it was written from where its faults are mild.
+fn heals(hex: &str) {
+    let case = heal_case(&bytes(hex)).expect("a shape");
+    let (body, _, _) = heal(OpKey(0x4ea1), &case.shape, &HealOptions::default()).unwrap();
+    assert_eq!(check(&body), []);
+    if case.mild {
+        assert_eq!(body.counts(), case.body.counts());
+    }
 }
 
 fn sound(hex: &str) {
@@ -138,4 +153,17 @@ fn a_hemisphere_cut_through_both_poles() {
 #[test]
 fn a_hemisphere_through_one_pole_across_the_seam() {
     boolean_sound("0f0000005d000000000a000026000000000400002400000000000000000a00");
+}
+
+/// A cylinder, a cone's frustum and a ball written with no faults: a
+/// vertex of the cylinder lies in the plane of the frustum's base, so
+/// every ray from it was taken as grazing that face's triangles, and
+/// which shell held which was uncertain.
+#[test]
+fn a_vertex_in_the_plane_of_another_shells_face() {
+    heals(concat!(
+        "08fc383430366131323038303166663166356133383838356238383133643137393266",
+        "396438336262330000000000000000343532326530316537313032623732",
+        "00f7",
+    ));
 }

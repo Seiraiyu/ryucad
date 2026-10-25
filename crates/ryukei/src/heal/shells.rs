@@ -407,8 +407,14 @@ fn classify(triangles: &[[Point3; 3]], bounds: &Box3, p: Point3, band: f64) -> O
         let mut crossings = 0usize;
         for &[a, b, c] in triangles {
             let (sp, sq) = (orient3d(a, b, c, p), orient3d(a, b, c, q));
-            if sp == Sign::Zero || sq == Sign::Zero {
+            if sq == Sign::Zero {
                 continue 'rays;
+            }
+            if sp == Sign::Zero {
+                // `p` lies in the triangle's plane, further than `band`
+                // from it: the ray meets that plane only at `p`, outside
+                // the triangle (a vertex in a planar face's plane).
+                continue;
             }
             if sp == sq {
                 continue;

@@ -153,7 +153,11 @@ pub fn heal_case(data: &[u8]) -> Option<HealCase> {
                     continue;
                 };
                 let faces: Vec<usize> = uses_of(s, e).iter().map(|u| u.0).collect();
-                if x.start == x.end
+                // An edge copied for its second face is used once: split,
+                // its copy would end at a vertex the copy doesn't have (a
+                // T-junction, which sewing doesn't undo).
+                if faces.len() != 2
+                    || x.start == x.end
                     || x.interval[1] - x.interval[0] <= 4.0 * d
                     || faces.windows(2).any(|w| w[0] == w[1])
                 {
