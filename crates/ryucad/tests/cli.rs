@@ -2501,3 +2501,113 @@ fn review_against_a_fake_service() {
         serde_json::json!({"ref": "p/b/0123456789abcdef0123456789abcdef", "body": "too thin here"})
     );
 }
+
+#[test]
+fn holes_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=20", "--param", "y=10", "--param",
+        "z=5",
+    ]);
+    // A sketch on the box's top with two points to drill at.
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--origin", "0,0,5",
+    ]);
+    let ops = r#"[
+        {"op": "add", "type": "point", "at": [5, 5]},
+        {"op": "add", "type": "fix", "a": "p1"},
+        {"op": "add", "type": "point", "at": [15, 5]},
+        {"op": "add", "type": "fix", "a": "p2"}
+    ]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    let h = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "h",
+        "--sketch",
+        "s",
+        "--form",
+        "counterbore",
+        "--diameter",
+        "3",
+        "--counterbore-diameter",
+        "6",
+        "--counterbore-depth",
+        "1",
+        "--depth",
+        "3",
+        "--bottom",
+        "118",
+    ]);
+    let f = &h["feature"];
+    assert_eq!(f["targets"], serde_json::json!(["b"]));
+    assert_eq!(f["counterbore"]["depth"]["value"], "1 mm");
+    assert_eq!(f["bottom"]["drill"]["value"], "118 deg");
+    assert!(f.get("points").is_none());
+    p.ok(&["rebuild", "p"]);
+    // Countersunk, through everything, at one point.
+    p.ok(&[
+        "feature",
+        "edit",
+        "p",
+        "h",
+        "--form",
+        "countersink",
+        "--countersink-diameter",
+        "6",
+        "--countersink-angle",
+        "90",
+        "--depth",
+        "through_all",
+        "--bottom",
+        "flat",
+        "--point",
+        "p2",
+    ]);
+    let show = p.ok(&["feature", "show", "p", "h"]);
+    assert_eq!(show["points"], serde_json::json!(["p2"]));
+    assert_eq!(show["depth"], "through_all");
+    assert!(show.get("counterbore").is_none() && show.get("bottom").is_none());
+    p.ok(&["rebuild", "p"]);
+    // A drill point only ends a blind hole.
+    p.fails(
+        &["feature", "edit", "p", "h", "--bottom", "118"],
+        "invalid_extent",
+        1,
+    );
+    // Up to the bottom face, stopping 1 mm short; then every point again.
+    let body = p.ok(&["inspect", "p", "b"])["bodies"][0].clone();
+    let bottom = named(&body, "faces", |f| {
+        let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+        f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == -1.0
+    });
+    let bottom = format!("p/b/{bottom}");
+    p.ok(&[
+        "feature",
+        "edit",
+        "p",
+        "h",
+        "--depth",
+        "up_to",
+        "--up-to",
+        &bottom,
+        "--offset",
+        "-1",
+        "--all-points",
+    ]);
+    let show = p.ok(&["feature", "show", "p", "h"]);
+    assert_eq!(show["depth"]["up_to"]["target"], bottom);
+    assert!(show.get("points").is_none());
+    p.ok(&["rebuild", "p"]);
+    p.fails(
+        &["feature", "edit", "p", "h", "--point", "p9"],
+        "not_found",
+        1,
+    );
+    p.fails(&["feature", "delete", "p", "s"], "has_dependents", 1);
+}

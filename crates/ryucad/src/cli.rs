@@ -544,9 +544,11 @@ enum FeatureCmd {
     /// placement; xy by default), an extrude (--sketch, --length) or a
     /// revolve (--sketch, --axis, --angle), each a solid of its own or,
     /// with --operation, joined to, cut from or intersected with others
-    /// (--target); a boolean (--op, --target, --tool) of whole solids; or a
+    /// (--target); a boolean (--op, --target, --tool) of whole solids; a
     /// fillet (--radius, --edge) or chamfer (--form, --d, --d1, --d2, --angle,
-    /// --face, --edge) of a solid's edges, or several sizes (--groups).
+    /// --face, --edge) of a solid's edges, or several sizes (--groups); or a
+    /// hole (--sketch, --point, --diameter, --depth, --form counterbore or
+    /// countersink, --bottom) cut from solids (--target).
     Add {
         part: String,
         #[arg(value_name = "TYPE")]
@@ -566,8 +568,8 @@ enum FeatureCmd {
         expect: Expect,
     },
     /// Change some of a feature's parameters or placement, a sketch's
-    /// plane, what an extrude or revolve sweeps and how far, or a fillet's
-    /// or chamfer's sizes and edges.
+    /// plane, what an extrude or revolve sweeps and how far, a fillet's or
+    /// chamfer's sizes and edges, or a hole's points, form, sizes and depth.
     Edit {
         part: String,
         id: String,
@@ -848,7 +850,7 @@ struct FieldArgs {
     /// A sketch on a face: a straight edge for its x ("" for the part's x, projected).
     #[arg(long, value_name = "REFERENCE")]
     face_x: Option<String>,
-    /// The sketch an extrude or revolve sweeps.
+    /// The sketch an extrude or revolve sweeps, or a hole drills at.
     #[arg(long)]
     sketch: Option<String>,
     /// An entity on a loop to sweep; repeat for several. Every closed loop when left out.
@@ -868,7 +870,8 @@ struct FieldArgs {
     /// Through all, each way from the sketch's plane (or --both false).
     #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
     both: Option<bool>,
-    /// Extrude up to a planar face parallel to the sketch, or a vertex: <part>/<feature>/<name>.
+    /// Extrude (or, with --depth up_to, drill) up to a planar face parallel to the sketch,
+    /// or a vertex: <part>/<feature>/<name>.
     #[arg(long, value_name = "REFERENCE")]
     up_to: Option<String>,
     /// How much further than --up-to's target to go (negative stops short).
@@ -910,7 +913,8 @@ struct FieldArgs {
     #[arg(long = "edge", value_name = "REFERENCE")]
     edges: Vec<String>,
     /// A chamfer's form: equal (--d, the default), distances (--d1 along --face, --d2
-    /// along the other face) or distance_angle (--d along --face, at --angle to it).
+    /// along the other face) or distance_angle (--d along --face, at --angle to it). A
+    /// hole's: simple (the default), counterbore or countersink.
     #[arg(long)]
     form: Option<String>,
     /// A chamfer's distance: along both faces, or along --face.
@@ -930,6 +934,35 @@ struct FieldArgs {
     /// size: [{"radius": "2 mm", "edges": ["<part>/<solid>/<name>"]}, ...].
     #[arg(long, value_name = "JSON", value_parser = groups)]
     groups: Option<Groups>,
+    /// A point of its sketch a hole drills at; repeat for several. Every point no curve
+    /// uses when left out.
+    #[arg(long = "point", value_name = "POINT")]
+    points: Vec<String>,
+    /// Drill at every point no curve uses again, when editing.
+    #[arg(long, conflicts_with = "points")]
+    all_points: bool,
+    /// A hole's diameter.
+    #[arg(long, value_name = "QUANTITY")]
+    diameter: Option<String>,
+    /// A counterbore's diameter.
+    #[arg(long, value_name = "QUANTITY")]
+    counterbore_diameter: Option<String>,
+    /// A counterbore's depth.
+    #[arg(long, value_name = "QUANTITY")]
+    counterbore_depth: Option<String>,
+    /// A countersink's diameter at the hole's mouth.
+    #[arg(long, value_name = "QUANTITY")]
+    countersink_diameter: Option<String>,
+    /// A countersink's included angle: 90, "82 deg".
+    #[arg(long, value_name = "ANGLE")]
+    countersink_angle: Option<String>,
+    /// A hole's depth: a length (blind, to the drill point's shoulder), through_all, or
+    /// up_to (--up-to, --offset).
+    #[arg(long, value_name = "DEPTH")]
+    depth: Option<String>,
+    /// A hole's bottom: flat (the default), or a drill point's included angle: 118.
+    #[arg(long, value_name = "BOTTOM")]
+    bottom: Option<String>,
 }
 
 impl FieldArgs {
@@ -941,13 +974,36 @@ impl FieldArgs {
         if let Some(l) = &self.length {
             extent.insert("length".into(), json!(l));
         }
-        if let Some(t) = &self.up_to {
+        // An up-to target and offset are a hole's when its depth says so.
+        let drills = self.depth.as_deref() == Some("up_to");
+        if let Some(t) = self.up_to.as_ref().filter(|_| !drills) {
             extent.insert("type".into(), json!("up_to"));
             extent.insert("target".into(), json!(t));
         }
-        if let Some(o) = &self.offset {
+        if let Some(o) = self.offset.as_ref().filter(|_| !drills) {
             extent.insert("offset".into(), json!(o));
         }
+        let depth = self.depth.as_deref().map(|d| match d {
+            "through_all" => json!("through_all"),
+            "up_to" => {
+                let mut up = Map::new();
+                if let Some(t) = &self.up_to {
+                    up.insert("target".into(), json!(t));
+                }
+                if let Some(o) = &self.offset {
+                    up.insert("offset".into(), json!(o));
+                }
+                json!({ "up_to": up })
+            }
+            d => json!({ "blind": d }),
+        });
+        let part = |a: (&str, &Option<String>), b: (&str, &Option<String>)| {
+            let m: Map<String, Value> = [a, b]
+                .into_iter()
+                .filter_map(|(k, v)| Some((k.to_owned(), json!(v.as_ref()?))))
+                .collect();
+            (!m.is_empty()).then_some(Value::Object(m))
+        };
         if let Some(b) = self.both {
             extent.insert("both".into(), json!(b));
         }
@@ -980,6 +1036,25 @@ impl FieldArgs {
             d: self.d.clone().map(Value::String),
             d1: self.d1.clone().map(Value::String),
             d2: self.d2.clone().map(Value::String),
+            points: if self.all_points {
+                Some(Vec::new())
+            } else {
+                (!self.points.is_empty()).then(|| self.points.clone())
+            },
+            diameter: self.diameter.clone().map(Value::String),
+            counterbore: part(
+                ("diameter", &self.counterbore_diameter),
+                ("depth", &self.counterbore_depth),
+            ),
+            countersink: part(
+                ("diameter", &self.countersink_diameter),
+                ("angle", &self.countersink_angle),
+            ),
+            depth,
+            bottom: self.bottom.as_deref().map(|b| match b {
+                "flat" => json!("flat"),
+                b => json!({ "drill": b }),
+            }),
         }
     }
 }

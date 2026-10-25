@@ -1111,6 +1111,96 @@ const CHAMFER: [&str; 9] = [
     "edges",
 ];
 
+const HOLE: [&str; 9] = [
+    "sketch",
+    "points",
+    "form",
+    "diameter",
+    "counterbore",
+    "countersink",
+    "depth",
+    "bottom",
+    "targets",
+];
+
+/// A hole from `current`'s fields (none for a new one, which is simple)
+/// with what was given laid over them. A counterbore or countersink given
+/// in part keeps the rest; a new form keeps only its own; an up-to target
+/// is given as text and kept as a file holds it; no points is every point
+/// and a flat bottom the default, so neither is written.
+fn hole_from(
+    current: Option<&crate::doc::hole::Hole>,
+    given: &Given,
+    part: &Id,
+    unit: Unit,
+    env: &Env,
+) -> Result<Feature> {
+    use crate::doc::hole::Hole;
+    let mut v = current.map_or_else(|| json!({"form": "simple"}), Hole::fields);
+    let o = v.as_object_mut().expect("an object");
+    let f = &given.fields;
+    if let Some(form) = &f.form {
+        o.insert("form".into(), json!(form));
+        for k in ["counterbore", "countersink"] {
+            if form != k {
+                o.remove(k);
+            }
+        }
+    }
+    for (k, x) in [
+        ("counterbore", &f.counterbore),
+        ("countersink", &f.countersink),
+    ] {
+        match (o.get_mut(k), x) {
+            (Some(Value::Object(old)), Some(Value::Object(new))) => old.extend(new.clone()),
+            (_, Some(x)) => {
+                o.insert(k.into(), x.clone());
+            }
+            (_, None) => {}
+        }
+    }
+    if let Some(s) = &f.sketch {
+        o.insert("sketch".into(), json!(s));
+    }
+    match &f.points {
+        Some(p) if p.is_empty() => {
+            o.remove("points");
+        }
+        Some(p) => {
+            o.insert("points".into(), json!(p));
+        }
+        None => {}
+    }
+    if let Some(d) = &f.diameter {
+        o.insert("diameter".into(), d.clone());
+    }
+    if let Some(d) = &f.depth {
+        let mut d = d.clone();
+        if let Some(Value::String(t)) = d.pointer("/up_to/target") {
+            let r =
+                Reference::parse(t, part).map_err(|e| e.with("pointer", "/depth/up_to/target"))?;
+            d["up_to"]["target"] = r.to_json();
+        }
+        o.insert("depth".into(), d);
+    }
+    match &f.bottom {
+        Some(b) if b == "flat" => {
+            o.remove("bottom");
+        }
+        Some(b) => {
+            o.insert("bottom".into(), b.clone());
+        }
+        None => {}
+    }
+    if let Some(t) = &f.targets {
+        o.insert("targets".into(), json!(t));
+    }
+    let mut o = crate::doc::files::Obj::new(&v, "")?;
+    let h = Hole::from_fields(&mut o, unit, env)?;
+    o.finish()?;
+    Ok(Feature::Hole(h))
+}
+
 /// A primitive's operation and targets: `current`'s, with what was
 /// given laid over them (`new` drops the targets).
 fn combine_from(current: &Combine, given: &Given) -> Result<Combine> {
@@ -1429,15 +1519,42 @@ pub(crate) fn sweeps_of(part: &Part, sketch: &Id) -> Vec<Id> {
         .collect()
 }
 
-/// Refuses a sweep that names what isn't there: its sketch must be a
-/// sketch listed before it in `order`, with the entities it names, and its
-/// axis a line. Whether the loops make a profile only rebuild can tell.
+/// Refuses a sweep or a hole that names what isn't there: its sketch must
+/// be a sketch listed before it in `order`, with the entities it names,
+/// its axis a line and a hole's points points. Whether the loops make a
+/// profile only rebuild can tell.
 fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
     let sketch = f.swept().expect("a sweep");
     check_sketch(part, order, id, sketch)?;
     let Some(Ok(Feature::Sketch(sk))) = part.features.get(sketch) else {
         return Ok(());
     };
+    // A hole's points must be points of its sketch; whether it has any
+    // to drill when it lists none only rebuild can tell.
+    if let Feature::Hole(h) = f {
+        for (i, e) in h.points.iter().enumerate() {
+            match sk.entities.get(e).map(|x| &x.geometry) {
+                None => {
+                    return Err(
+                        Error::new(Code::NotFound, format!("sketch {sketch} has no {e}"))
+                            .with("sketch", sketch)
+                            .with("entity", e)
+                            .with("pointer", format!("/points/{i}")),
+                    );
+                }
+                Some(crate::doc::sketch::Geometry::Point { .. }) => {}
+                Some(g) => {
+                    return Err(Error::new(
+                        Code::ReferenceWrongKind,
+                        format!("a hole drills at points; {e} is a {}", g.type_name()),
+                    )
+                    .with("entity", e)
+                    .with("pointer", format!("/points/{i}")));
+                }
+            }
+        }
+        return Ok(());
+    }
     let (loops, axis) = match f {
         Feature::Extrude(e) => (&e.loops, None),
         Feature::Revolve(r) => match &r.axis {
@@ -1628,24 +1745,12 @@ fn check_resolved(
         Feature::Sketch(s) => crate::sketch::context(p, order, id, s, results).map(|_| ()),
         // What the target is; how far it is only rebuild can tell.
         Feature::Extrude(e) => match &e.extent {
-            Extent::UpTo { target, .. } => {
-                use crate::reference::{kind, resolve, wrong_kind};
-                use ryukei::topo::EntityId;
-                let found = resolve(p, order, id, "target", target, results)?;
-                match found.1 {
-                    EntityId::Vertex(_) => Ok(()),
-                    EntityId::Face(_) => {
-                        crate::reference::plane(p, id, "target", target, found).map(|_| ())
-                    }
-                    e => Err(wrong_kind(
-                        p,
-                        id,
-                        "target",
-                        target,
-                        kind(e),
-                        "a planar face or a vertex",
-                    )),
-                }
+            Extent::UpTo { target, .. } => check_up_to(p, order, id, "target", target, results),
+            _ => Ok(()),
+        },
+        Feature::Hole(h) => match &h.depth {
+            crate::doc::hole::Depth::UpTo { target, .. } => {
+                check_up_to(p, order, id, "depth", target, results)
             }
             _ => Ok(()),
         },
@@ -1667,6 +1772,33 @@ fn check_resolved(
     }
 }
 
+/// Refuses an up-to target (`role` in feature `id`) that isn't a planar
+/// face or a vertex now.
+fn check_up_to(
+    p: &Part,
+    order: &[Id],
+    id: &Id,
+    role: &str,
+    target: &Reference,
+    results: &crate::rebuild::PartResult,
+) -> Result<()> {
+    use crate::reference::{kind, resolve, wrong_kind};
+    use ryukei::topo::EntityId;
+    let found = resolve(p, order, id, role, target, results)?;
+    match found.1 {
+        EntityId::Vertex(_) => Ok(()),
+        EntityId::Face(_) => crate::reference::plane(p, id, role, target, found).map(|_| ()),
+        e => Err(wrong_kind(
+            p,
+            id,
+            role,
+            target,
+            kind(e),
+            "a planar face or a vertex",
+        )),
+    }
+}
+
 fn feature_add(
     session: &mut Session,
     part: &str,
@@ -1683,13 +1815,14 @@ fn feature_add(
     let mut list = order(p)?;
     let env = p.env.clone();
     let at = insert_at(&list, position)?;
-    // A join, cut or intersect with no targets acts on the part's one
-    // solid; the file names it all the same.
-    let acts = given
-        .fields
-        .operation
-        .as_deref()
-        .is_some_and(|o| o != "new");
+    // A join, cut, intersect or hole with no targets acts on the part's
+    // one solid; the file names it all the same.
+    let acts = ty == "hole"
+        || given
+            .fields
+            .operation
+            .as_deref()
+            .is_some_and(|o| o != "new");
     if acts && given.fields.targets.is_none() {
         let before = solids_before(p, &list, at);
         match before.as_slice() {
@@ -1699,7 +1832,11 @@ fn feature_add(
                     Code::InvalidParam,
                     format!(
                         "a {} names the solids it acts on (targets): the part has {} before it",
-                        given.fields.operation.as_deref().unwrap_or_default(),
+                        if ty == "hole" {
+                            "hole"
+                        } else {
+                            given.fields.operation.as_deref().unwrap_or_default()
+                        },
                         before.len()
                     ),
                 )
@@ -1724,6 +1861,10 @@ fn feature_add(
         "fillet" | "chamfer" => {
             given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
             blend_from(ty, None, &given, &pid, unit, &env)?
+        }
+        "hole" => {
+            given.only(ty, &HOLE)?;
+            hole_from(None, &given, &pid, unit, &env)?
         }
         _ => {
             let ty = PrimitiveType::parse(ty)?;
@@ -1814,8 +1955,10 @@ fn feature_edit(
             given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
             blend_from(ty, Some(&f), &given, &pid, unit, &p.env)?
         }
-        f @ Feature::Hole(_) => {
-            given.only("hole", &[])?;
+        Feature::Hole(h) => {
+            given.only("hole", &HOLE)?;
+            let f = hole_from(Some(&h), &given, &pid, unit, &p.env)?;
+            check_sweep(p, &list, &fid, &f)?;
             f
         }
         f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
@@ -3619,6 +3762,144 @@ pub(crate) mod tests {
         let e = call(&mut s, "feature.delete", json!({"part": "p", "id": "b"})).unwrap_err();
         assert_eq!(e.code, Code::HasDependents);
         assert_eq!(e.details["features"], json!(["f", "c"]));
+    }
+
+    #[test]
+    fn holes_through_the_protocol() {
+        use crate::sketch::tests::{edge_between, face_along, vertex_at};
+        let (dir, mut s) = crate::hole::tests::drilled();
+        let body = call(&mut s, "inspect", json!({"part": "p", "feature": "b"})).unwrap()["bodies"]
+            [0]
+        .clone();
+        let add = |s: &mut Session, f: Value| {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(s, "feature.add", f)
+        };
+        let edit = |s: &mut Session, f: Value| {
+            let mut f = f;
+            f["part"] = json!("p");
+            f["id"] = json!("h");
+            call(s, "feature.edit", f)
+        };
+        // A hole cuts the part's one solid when it names none; the file
+        // names it all the same, and writes no defaults.
+        let r = add(
+            &mut s,
+            json!({"type": "hole", "id": "h", "sketch": "s", "points": ["p1"],
+                   "diameter": 4, "depth": {"blind": 3}}),
+        )
+        .unwrap();
+        let h = &r["feature"];
+        assert_eq!(h["targets"], json!(["b"]));
+        assert_eq!(h["diameter"], json!({"value": "4 mm", "m": 0.004}));
+        assert_eq!(h["depth"], json!({"blind": {"value": "3 mm", "m": 0.003}}));
+        let file: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("parts/p/features/h.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            (&file["format"], &file["form"], &file["points"]),
+            (&json!(3), &json!("simple"), &json!(["p1"]))
+        );
+        assert!(file.get("bottom").is_none());
+        // A counterbore needs its own fields; given in part, it keeps the
+        // rest; a new form drops what it doesn't take.
+        let e = edit(&mut s, json!({"form": "counterbore"})).unwrap_err();
+        assert_eq!(e.details["pointer"], "/counterbore", "{e}");
+        let r = edit(
+            &mut s,
+            json!({"form": "counterbore", "counterbore": {"diameter": 8, "depth": 1}}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["counterbore"]["diameter"]["value"], "8 mm");
+        let r = edit(&mut s, json!({"counterbore": {"depth": 2}})).unwrap();
+        let c = &r["feature"]["counterbore"];
+        assert_eq!(
+            (&c["diameter"]["value"], &c["depth"]["value"]),
+            (&json!("8 mm"), &json!("2 mm"))
+        );
+        let r = edit(&mut s, json!({"form": "simple"})).unwrap();
+        assert!(r["feature"].get("counterbore").is_none());
+        // A drill point, then flat again; every free point, then p1 again.
+        let r = edit(&mut s, json!({"bottom": {"drill": 118}})).unwrap();
+        assert_eq!(r["feature"]["bottom"]["drill"]["value"], "118 deg");
+        let r = edit(&mut s, json!({"bottom": "flat", "points": []})).unwrap();
+        assert!(r["feature"].get("bottom").is_none() && r["feature"].get("points").is_none());
+        // Up to the box's bottom face, given as text and kept as a file
+        // holds it.
+        let bottom = format!("p/b/{}", face_along(&body, [0.0, 0.0, -1.0]));
+        let r = edit(
+            &mut s,
+            json!({"points": ["p1"], "depth": {"up_to": {"target": bottom, "offset": "-1"}}}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["depth"]["up_to"]["target"], bottom);
+        assert_eq!(r["feature"]["depth"]["up_to"]["offset"]["value"], "-1 mm");
+        let file: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("parts/p/features/h.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(file["depth"]["up_to"]["target"]["feature"], "b");
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        assert!(
+            r["parts"][0]["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|f| f["ok"] == true),
+            "{r}"
+        );
+        // What can be judged now is refused before anything is written.
+        let edge = {
+            let (a, b) = (
+                vertex_at(&body, [0.0, 0.0, 0.0]),
+                vertex_at(&body, [0.02, 0.0, 0.0]),
+            );
+            format!("p/b/{}", edge_between(&body, &a, &b))
+        };
+        for (f, code) in [
+            (
+                json!({"depth": {"up_to": {"target": edge}}}),
+                Code::ReferenceWrongKind,
+            ),
+            (json!({"points": ["p9"]}), Code::NotFound),
+            (json!({"points": ["l1"]}), Code::ReferenceWrongKind),
+            (json!({"sketch": "b"}), Code::ReferenceWrongKind),
+            (json!({"radius": 1}), Code::InvalidParam),
+        ] {
+            let e = edit(&mut s, f.clone()).unwrap_err();
+            assert_eq!(e.code, code, "{f}: {e}");
+        }
+        // What it drills at, and its sketch, stay while it does.
+        let e = call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [{"op": "remove", "id": "p1"}]}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["features"]),
+            (Code::HasDependents, &json!(["h"]))
+        );
+        let e = call(&mut s, "feature.delete", json!({"part": "p", "id": "s"})).unwrap_err();
+        assert_eq!(e.code, Code::HasDependents);
+        // With two solids a hole names its targets.
+        add(
+            &mut s,
+            json!({"type": "box", "id": "o", "params": {"x": 1, "y": 1, "z": 1},
+                   "placement": {"origin": [30, 0, 0]}}),
+        )
+        .unwrap();
+        let e = add(
+            &mut s,
+            json!({"type": "hole", "sketch": "s", "diameter": 1, "depth": "through_all"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["param"]),
+            (Code::InvalidParam, &json!("targets"))
+        );
     }
 
     #[test]

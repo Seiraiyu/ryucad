@@ -111,7 +111,7 @@ pub struct FeatureFields {
     /// default, the part's `x` projected onto the face).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face_x: Option<String>,
-    /// The sketch an extrude or revolve sweeps.
+    /// The sketch an extrude or revolve sweeps, or a hole drills at.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sketch: Option<String>,
     /// An entity on each loop to sweep; empty means every closed loop.
@@ -166,7 +166,8 @@ pub struct FeatureFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edges: Option<Vec<String>>,
     /// A chamfer's one group: `equal` (the default), `distances` or
-    /// `distance_angle`.
+    /// `distance_angle`. A hole's: `simple` (the default), `counterbore`
+    /// or `countersink`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub form: Option<String>,
     /// A chamfer's one group: its distance along both faces (`equal`), or
@@ -180,6 +181,27 @@ pub struct FeatureFields {
     /// face.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub d2: Option<Value>,
+    /// The points of its sketch a hole drills at; empty means every point
+    /// no curve uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub points: Option<Vec<String>>,
+    /// A hole's diameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diameter: Option<Value>,
+    /// A counterbored hole's counterbore, `{diameter, depth}`, or either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counterbore: Option<Value>,
+    /// A countersunk hole's countersink, `{diameter, angle}`, or either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub countersink: Option<Value>,
+    /// A hole's depth: `{"blind": length}`, `"through_all"`, or
+    /// `{"up_to": {target, offset}}` with its target as
+    /// `<part>/<feature>/<name>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<Value>,
+    /// A hole's bottom: `"flat"` (the default) or `{"drill": angle}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<Value>,
 }
 
 impl FeatureFields {
