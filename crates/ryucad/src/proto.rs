@@ -649,6 +649,18 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         participant: Option<String>,
     },
+    /// What a participant's window shows: with `part`, that part or
+    /// assembly; with `project`, the project's model; with neither, what it
+    /// shows now. `participant`, else the one human, else the caller.
+    #[serde(rename = "view.focus")]
+    ViewFocus {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        project: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
     /// Highlights entities for everyone to see, replacing the caller's
     /// highlight of the same style and label.
     #[serde(rename = "highlight.set")]

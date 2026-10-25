@@ -80,6 +80,9 @@ pub struct Participant {
     /// against, as it was given (`HEAD`, a branch, a commit); `None` when
     /// it isn't comparing.
     pub compare: Option<String>,
+    /// The part or assembly the participant's window shows; `None` for
+    /// the project's model ([`crate::assembly::shown_parts`]).
+    pub focus: Option<crate::doc::id::Id>,
     connections: usize,
     last_seen: Instant,
 }
@@ -95,6 +98,7 @@ impl Participant {
             "camera": self.camera,
             "highlights": self.highlights,
             "compare": self.compare.as_ref().map(|rev| json!({ "rev": rev })),
+            "focus": self.focus,
         })
     }
 }
@@ -214,6 +218,7 @@ impl Live {
                 camera: None,
                 highlights: Vec::new(),
                 compare: None,
+                focus: None,
                 connections: 0,
                 last_seen: Instant::now(),
             },
@@ -421,6 +426,13 @@ impl Live {
             Some(h) => Ok(h.id.clone()),
             None => Ok(self.caller(me)),
         }
+    }
+
+    /// Sets what participant `id`'s window shows: a part or assembly, or
+    /// (with `None`) the project's model.
+    pub fn set_focus(&mut self, id: &str, part: Option<crate::doc::id::Id>) -> Result<()> {
+        self.get_mut(id)?.focus = part;
+        Ok(())
     }
 
     /// Sets participant `id`'s status; an empty text clears it.

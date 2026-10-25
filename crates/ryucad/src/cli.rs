@@ -230,6 +230,18 @@ enum Command {
         #[arg(long = "of", value_name = "PARTICIPANT")]
         of: Option<String>,
     },
+    /// Show a part or assembly in a participant's window (the one human's,
+    /// else the caller's), or the project's model with --project; with
+    /// neither, say what it shows.
+    Focus {
+        #[arg(value_name = "PART", conflicts_with = "project")]
+        part: Option<String>,
+        /// Show the project's model: its one root assembly, else every part.
+        #[arg(long)]
+        project: bool,
+        #[arg(long = "of", value_name = "PARTICIPANT")]
+        of: Option<String>,
+    },
     /// Wait for notifications from the project's daemon: what humans
     /// select, the model changing, and so on.
     Watch {
@@ -1688,6 +1700,11 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Compare { rev, off, of } => Request::CompareSet {
             rev: rev.clone(),
             off: *off,
+            participant: of.clone(),
+        },
+        Command::Focus { part, project, of } => Request::ViewFocus {
+            part: part.clone(),
+            project: *project,
             participant: of.clone(),
         },
         Command::Activity { limit, before } => Request::ActivityLog {

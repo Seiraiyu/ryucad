@@ -1969,4 +1969,56 @@ pub(crate) mod tests {
         let e = call(&mut s, "inspect", json!({"part": "frame", "entity": face})).unwrap_err();
         assert_eq!(e.code, Code::InvalidParam);
     }
+
+    #[test]
+    fn a_focus_says_what_a_window_shows() {
+        use crate::live::{Kind, Live};
+        use crate::server::tests::call_live;
+        let (dir, mut s) = project();
+        place_in(
+            dir.path(),
+            "frame",
+            "b1",
+            "bolt",
+            json!("working"),
+            [0.0; 3],
+        );
+        s.refresh().unwrap();
+        let mut live = Live::new();
+        let focus =
+            |s: &mut Session, live: &mut Live, v: Value| call_live(s, live, None, "view.focus", v);
+        // Nobody focused: the project's model, its one root.
+        let v = focus(&mut s, &mut live, json!({})).unwrap();
+        assert_eq!(
+            (&v["focus"], &v["shows"]),
+            (&Value::Null, &json!(["frame"]))
+        );
+        // An agent shows the human a part.
+        let human = live.hello(Kind::Human, Some("ann"), None).unwrap();
+        let v = focus(&mut s, &mut live, json!({"part": "bolt"})).unwrap();
+        assert_eq!(
+            (&v["participant"], &v["focus"]),
+            (&json!(human), &json!("bolt"))
+        );
+        assert_eq!(live.get(&human).unwrap().to_json()["focus"], "bolt");
+        let v = focus(&mut s, &mut live, json!({"project": true})).unwrap();
+        assert_eq!(v["focus"], Value::Null);
+        let code = |r: Result<Value>| r.unwrap_err().code;
+        assert_eq!(
+            code(focus(&mut s, &mut live, json!({"part": "nothing"}))),
+            Code::NotFound
+        );
+        assert_eq!(
+            code(focus(
+                &mut s,
+                &mut live,
+                json!({"part": "bolt", "project": true})
+            )),
+            Code::Usage
+        );
+        assert_eq!(
+            code(call(&mut s, "view.focus", json!({}))),
+            Code::NoLiveSession
+        );
+    }
 }

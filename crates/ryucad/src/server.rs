@@ -122,6 +122,17 @@ pub fn answer_live(
             compare,
         } => {
             let target = participant.as_deref().map(|p| (p, live.as_deref()));
+            // A participant's render shows what their window shows.
+            let part = part.or_else(|| {
+                let l = live.as_deref()?;
+                Some(
+                    l.get(participant.as_deref()?)
+                        .ok()?
+                        .focus
+                        .as_ref()?
+                        .to_string(),
+                )
+            });
             let shown = match live.as_deref() {
                 Some(l) => l
                     .participants()
@@ -542,6 +553,38 @@ fn dispatch(
             live.set_compare(&id, rev.clone())?;
             let compare = rev.map(|rev| json!({"rev": rev, "commit": commit}));
             Ok(json!({"participant": id, "compare": compare}))
+        }
+        Request::ViewFocus {
+            part,
+            project,
+            participant,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("view.focus"))?;
+            let part = match (part, project) {
+                (Some(p), false) => {
+                    let id = part_id(&p)?;
+                    session.project().part(&id)?;
+                    Some(Some(id))
+                }
+                (None, true) => Some(None),
+                (None, false) => None,
+                (Some(_), true) => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        "give a part to show, or project, not both",
+                    ));
+                }
+            };
+            let id = live.compare_target(participant.as_deref(), me)?;
+            if let Some(focus) = part {
+                live.set_focus(&id, focus)?;
+            }
+            let focus = live.get(&id)?.focus.clone();
+            let shows = match &focus {
+                Some(p) => vec![p.clone()],
+                None => crate::assembly::shown_parts(session.project()),
+            };
+            Ok(json!({"participant": id, "focus": focus, "shows": shows}))
         }
         Request::HighlightSet {
             entities,
@@ -5590,7 +5633,7 @@ pub(crate) mod tests {
         assert_eq!(
             r["session"]["participants"],
             json!([{"id": id, "kind": "human", "name": "Dana", "status": null, "selection": [],
-                    "camera": null, "highlights": [], "compare": null}])
+                    "camera": null, "highlights": [], "compare": null, "focus": null}])
         );
         let list = call_live(&mut s, &mut live, Some(&id), "participant.list", json!({})).unwrap();
         assert_eq!(list, r["session"]);
