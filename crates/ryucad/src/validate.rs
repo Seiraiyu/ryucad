@@ -1853,6 +1853,95 @@ pub(crate) mod tests {
         assert_eq!(c[0]["error"]["details"]["removed_by"], "skim");
     }
 
+    /// Issue #87: a parameter conflict fails a feature of a solid's chain
+    /// (its founder, or a join on it); what follows it in the chain fails
+    /// through it, and the conflict is the only thing to settle.
+    #[test]
+    fn what_fails_through_a_conflicted_feature_is_left_to_its_conflict() {
+        for (param, failed) in [("w", "b"), ("r", "j")] {
+            let mut m = boxed();
+            m.call(
+                "param.set",
+                json!({"part": "p", "parameters": {param: "3 mm"}}),
+            )
+            .unwrap();
+            // Only the conflicted feature reads the parameter.
+            let read = |f: &str| if f == failed { json!(param) } else { json!(2) };
+            m.call(
+                "feature.edit",
+                json!({"part": "p", "id": "b", "params": {"z": read("b")}}),
+            )
+            .unwrap();
+            m.call(
+                "feature.add",
+                json!({"part": "p", "type": "cylinder", "id": "j", "operation": "join",
+                       "params": {"radius": read("j"), "height": 3},
+                       "placement": {"origin": [5, 10, 1]}}),
+            )
+            .unwrap();
+            let v = m.call("inspect", json!({"part": "p"})).unwrap();
+            let front = edge_of(&v["bodies"][0], [0.0, 0.0, 0.0], [0.01, 0.0, 0.0]);
+            m.call(
+                "feature.add",
+                json!({"part": "p", "type": "fillet", "id": "round", "radius": 1,
+                       "edges": [format!("p/b/{front}")]}),
+            )
+            .unwrap();
+            m.call(
+                "feature.add",
+                json!({"part": "p", "type": "cylinder", "id": "c", "operation": "cut",
+                       "params": {"radius": 1, "height": 10},
+                       "placement": {"origin": [5, 15, -2]}}),
+            )
+            .unwrap();
+            m.commit("a parametric part");
+            m.git(&["checkout", "-q", "-b", "theirs"]);
+            m.session.reload().unwrap();
+            m.call(
+                "param.set",
+                json!({"part": "p", "parameters": {param: "2.5 mm"}}),
+            )
+            .unwrap();
+            m.commit("theirs");
+            m.git(&["checkout", "-q", "main"]);
+            m.session.reload().unwrap();
+            m.call(
+                "param.set",
+                json!({"part": "p", "parameters": {param: "3.5 mm"}}),
+            )
+            .unwrap();
+            m.commit("ours");
+            m.merge("theirs");
+            let v = m.call("merge.status", json!({})).unwrap();
+            let ids: Vec<&str> = v["conflicts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["id"].as_str().unwrap())
+                .collect();
+            let only = format!("parts/p/parameters.json#/parameters/{param}");
+            assert_eq!(ids, [only.as_str()], "{v}");
+            let r = m.call("rebuild", json!({"part": "p"})).unwrap_err().details;
+            let codes: Vec<(&str, Option<&str>)> = r["parts"][0]["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| (f["id"].as_str().unwrap(), f["error"]["code"].as_str()))
+                .collect();
+            let through = Some("dependency_failed");
+            let want = if failed == "b" {
+                [("b", Some("merge_conflict")), ("j", through)]
+            } else {
+                [("b", None), ("j", Some("merge_conflict"))]
+            };
+            let want: Vec<_> = want
+                .into_iter()
+                .chain([("round", through), ("c", through)])
+                .collect();
+            assert_eq!(codes, want, "{r}");
+        }
+    }
+
     #[test]
     fn a_sketch_the_merge_left_stale_is_solved_by_a_repair() {
         let mut m = boxed();

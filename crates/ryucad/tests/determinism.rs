@@ -156,6 +156,7 @@ fn rebuild_section(golden: &mut Golden) {
         parameters: None,
         env: ryucad::expr::Env::empty(),
         uses: Default::default(),
+        acts: Default::default(),
         features,
         revision: String::new(),
     };

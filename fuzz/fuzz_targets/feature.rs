@@ -106,6 +106,7 @@ fn part(f: Feature) -> Part {
         env: Env::empty(),
         features,
         uses: BTreeMap::new(),
+        acts: BTreeMap::new(),
         revision: String::new(),
     }
 }
