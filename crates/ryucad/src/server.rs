@@ -384,6 +384,9 @@ fn dispatch(
             expected_revision.as_deref(),
         ),
         Request::AssemblyTree { part } => crate::assembly::tree(session, &part),
+        Request::Interference { part, instances } => {
+            crate::interference::run(session, &part, &instances)
+        }
         Request::AssemblySolve {
             part,
             moves,

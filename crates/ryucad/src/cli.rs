@@ -114,6 +114,16 @@ enum Command {
         #[arg(long)]
         results: bool,
     },
+    /// Which instances of an assembly overlap: each pair of solids that
+    /// share a volume, with its box, its volume (estimated from a mesh)
+    /// and the faces it touches. Faces that only touch are clear.
+    Interference {
+        part: String,
+        /// Only pairs with a side under this instance path (s1/b2,
+        /// holes:2/bolt); repeat for more.
+        #[arg(long = "instance", value_name = "PATH")]
+        instances: Vec<String>,
+    },
     /// What changed between two revisions: features, parameters and sketch
     /// entities, and with --model what that did to the bodies.
     Diff {
@@ -1698,6 +1708,10 @@ fn request(cmd: &Command) -> Option<Request> {
             rev: rev.rev.clone(),
         },
         Command::CheckFormat => Request::CheckFormat {},
+        Command::Interference { part, instances } => Request::Interference {
+            part: part.clone(),
+            instances: instances.clone(),
+        },
         Command::Check {
             part,
             against,

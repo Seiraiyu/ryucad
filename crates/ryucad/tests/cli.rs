@@ -971,6 +971,7 @@ fn every_protocol_method_has_a_command() {
         ("assembly.move", &["assembly", "move"]),
         ("assembly.tree", &["assembly", "tree"]),
         ("assembly.solve", &["assembly", "solve"]),
+        ("interference", &["interference"]),
         ("rebuild", &["rebuild"]),
         ("inspect", &["inspect"]),
         ("check_format", &["check-format"]),
@@ -2851,6 +2852,64 @@ fn assemblies_from_the_cli() {
         tree["result"]["instances"][0]["pose"]["origin_m"],
         serde_json::json!([0.01, 0, 0])
     );
+}
+
+#[test]
+fn interference_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "bolt"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bolt",
+        "cylinder",
+        "--id",
+        "shank",
+        "--param",
+        "radius=3",
+        "--param",
+        "height=20",
+    ]);
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&[
+        "feature", "add", "plate", "box", "--id", "slab", "--param", "x=100", "--param", "y=50",
+        "--param", "z=5",
+    ]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "p1", "--of", "plate",
+    ]);
+    // Through the plate, standing on it, and away from it.
+    for (id, at) in [("b1", "10,10,0"), ("b2", "30,10,5"), ("b3", "500,0,0")] {
+        p.ok(&[
+            "feature", "add", "frame", "instance", "--id", id, "--of", "bolt", "--origin", at,
+        ]);
+    }
+    let all = p.ok(&["interference", "frame"]);
+    assert_eq!(
+        (&all["pairs"], &all["clear"]),
+        (&json!(2), &json!(1)),
+        "{all}"
+    );
+    let i = &all["interferences"][0];
+    assert_eq!(
+        (&i["a"], &i["b"]),
+        (&json!("frame/p1/slab"), &json!("frame/b1/shank"))
+    );
+    let v = i["volume_m3"].as_f64().unwrap();
+    assert!((v - std::f64::consts::PI * 45e-9).abs() < 1e-3 * v, "{v}");
+    let one = p.ok(&["interference", "frame", "--instance", "b2"]);
+    assert_eq!(
+        (&one["pairs"], &one["interferences"]),
+        (&json!(1), &json!([]))
+    );
+    p.fails(
+        &["interference", "frame", "--instance", "b9"],
+        "not_found",
+        1,
+    );
+    p.fails(&["interference", "bolt"], "wrong_part_kind", 1);
 }
 
 #[test]
