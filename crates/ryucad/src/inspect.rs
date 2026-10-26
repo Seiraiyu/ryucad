@@ -423,9 +423,9 @@ mod tests {
                 }
             }
         }
-        // The bottom, merged from the box's and the boss's, names the
-        // join that merged it; the boss's foot circle on the box's top is
-        // the join's too.
+        // The bottom is the box's, split at the boss's flush foot and
+        // merged back whole, so it keeps the box's name and origin (#89,
+        // 4cfd7cf); the boss's foot circle on the box's top is the join's.
         let v = call(&mut s, "inspect", json!({"part": "p", "feature": "boss"})).unwrap();
         let b = &v["bodies"][0];
         let bottom = b["faces"]
@@ -434,7 +434,7 @@ mod tests {
             .iter()
             .find(|f| f["surface"]["type"] == "plane" && f["surface"]["frame"]["z"][2] == -1.0)
             .unwrap();
-        assert_eq!(bottom["origin"], json!({"feature": "boss"}));
+        assert_eq!(bottom["origin"], json!({"feature": "b"}));
         let foot = b["edges"]
             .as_array()
             .unwrap()
