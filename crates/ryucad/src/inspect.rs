@@ -3,8 +3,9 @@
 
 use crate::doc::files::{Feature, PrimitiveType};
 use crate::rebuild::{Built, placement};
-use ryukei::geom::{Curve, Frame, Point3, Surface};
-use ryukei::topo::{Body, Sense};
+use ryukei::geom::{Box3, Curve, Frame, Point2, Point3, Surface, Vector3};
+use ryukei::intersect::Place;
+use ryukei::topo::{Body, FaceId, Sense};
 use serde_json::{Value, json};
 
 fn point(p: Point3) -> Value {
@@ -98,8 +99,141 @@ pub fn bounds(f: &Feature, body: &Body) -> Value {
     }
 }
 
-/// The box around a body's faces; `None` for an empty body.
+/// The box around a body's faces, exact for analytic ones: their edges'
+/// boxes (an arc's to its extremes), their loops' lone vertices, and the
+/// points of a sphere or torus where it bulges furthest along an axis,
+/// where they lie on the face. Any other face adds its kernel box, which
+/// holds it. `None` for an empty body.
 pub fn body_extent(body: &Body) -> Option<([f64; 3], [f64; 3])> {
+    let b = body
+        .faces()
+        .map(|f| face_extent(body, f))
+        .reduce(|a, b| a.union(&b))?;
+    let (lo, hi) = (b.min(), b.max());
+    Some(([lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z]))
+}
+
+/// One face's box for [`body_extent`].
+fn face_extent(body: &Body, face: FaceId) -> Box3 {
+    let loose = || ryukei::intersect::face_box(body, face);
+    let f = body.face(face).expect("live face");
+    let surface = body.surface(f.surface).expect("live surface");
+    if !matches!(
+        surface,
+        Surface::Plane(_)
+            | Surface::Cylinder(_)
+            | Surface::Cone(_)
+            | Surface::Sphere(_)
+            | Surface::Torus(_)
+    ) {
+        return loose();
+    }
+    let mut out: Option<Box3> = None;
+    let mut add = |b: Box3| out = Some(out.map_or(b, |o| o.union(&b)));
+    for l in body.face_loops(face) {
+        if let Some(v) = body.loop_(l).expect("live loop").vertex {
+            let p = body.vertex(v).expect("live vertex").point;
+            add(Box3::new(p, p));
+        }
+        for fin in body.loop_fins(l) {
+            let e = body
+                .edge(body.fin(fin).expect("live fin").edge)
+                .expect("live edge");
+            add(curve_extent(
+                body.curve(e.curve).expect("live curve"),
+                e.interval,
+            ));
+        }
+    }
+    // A plane, cylinder or cone is flat along its rulings, so its extremes
+    // reach its boundary. A sphere or torus may bulge inside its loops.
+    for p in bulges(surface) {
+        let (u, v) = surface.project(p).param;
+        match ryukei::intersect::point_in_face(body, face, Point2::new(u, v)) {
+            Ok(Place::Outside) => {}
+            Ok(_) => add(Box3::new(p, p)),
+            Err(_) => return loose(),
+        }
+    }
+    out.unwrap_or_else(loose)
+}
+
+/// The box around a curve over `[t0, t1]`: a line's ends, a circle's or
+/// an ellipse's ends and the extremes it passes; a spline's hull.
+fn curve_extent(c: &Curve, [t0, t1]: [f64; 2]) -> Box3 {
+    match c {
+        Curve::Circle(_) | Curve::Ellipse(_) => {
+            // c(t) = m + a cos t + b sin t.
+            use core::f64::consts::{PI, TAU};
+            let m = c.point(0.0).lerp(c.point(PI), 0.5);
+            let (a, b) = (c.point(0.0) - m, c.point(PI / 2.0) - m);
+            let mut out =
+                Box3::new(c.point(t0), c.point(t0)).union(&Box3::new(c.point(t1), c.point(t1)));
+            for (ak, bk) in [(a.x, b.x), (a.y, b.y), (a.z, b.z)] {
+                let t = ryukei::math::atan2(bk, ak);
+                for t in [t, t + PI] {
+                    // The first turn of t at or after t0.
+                    let t = t0 + (t - t0).rem_euclid(TAU);
+                    if t <= t1 {
+                        let p = c.point(t);
+                        out = out.union(&Box3::new(p, p));
+                    }
+                }
+            }
+            out
+        }
+        _ => c.bounds([t0, t1]),
+    }
+}
+
+/// Where a sphere or a torus is furthest out along each axis, either way:
+/// the points its normal is parallel to the axis at (a torus's along its
+/// own axis are circles: a point of each).
+fn bulges(s: &Surface) -> Vec<Point3> {
+    let axes = [
+        Vector3::new(1.0, 0.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+        Vector3::new(0.0, 0.0, 1.0),
+    ];
+    let Some(f) = s.frame() else {
+        return Vec::new();
+    };
+    match s {
+        Surface::Sphere(x) => {
+            let (o, r) = (f.origin(), x.radius());
+            axes.iter().flat_map(|k| [o + *k * r, o - *k * r]).collect()
+        }
+        Surface::Torus(x) => {
+            let (o, big, r) = (f.origin(), x.major(), x.minor());
+            let (fx, fy, fz) = (f.x().get(), f.y().get(), f.z().get());
+            let mut out = Vec::new();
+            for k in axes {
+                let a = k.dot(fz);
+                let p = fx * k.dot(fx) + fy * k.dot(fy);
+                let n = p.length();
+                if n < 1e-12 {
+                    for s in [1.0, -1.0] {
+                        out.push(o + fx * big + fz * (s * r));
+                    }
+                    continue;
+                }
+                for s in [1.0, -1.0] {
+                    for c in [1.0, -1.0] {
+                        let w = p * (s * c / n);
+                        out.push(o + w * (big + r * c * n) + fz * (r * s * a));
+                    }
+                }
+            }
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The box around a body's faces' kernel boxes, which may hold a whole
+/// circle where a face has only part of it; `None` for an empty body.
+/// Cheap, for sizing a display mesh.
+pub fn loose_extent(body: &Body) -> Option<([f64; 3], [f64; 3])> {
     let b = body
         .faces()
         .map(|f| ryukei::intersect::face_box(body, f))
@@ -221,5 +355,92 @@ mod tests {
         assert_eq!(v["faces"][0]["surface"]["type"], "torus");
         assert_eq!(v["faces"][0]["surface"]["major_radius"], 3.0);
         assert_eq!(v["bounds"]["max"], json!([4.0, 4.0, 1.0]));
+    }
+
+    #[test]
+    fn bounds_hold_the_body_not_its_surfaces() {
+        use crate::server::tests::call;
+        // A half-round notch in the y = 0 face (#97): nothing lies below
+        // y = 0, and the bottom is at z = 0 exactly.
+        let (_dir, mut s, _) = crate::sketch::tests::with_box();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "cylinder", "id": "c",
+                   "params": {"radius": 2, "height": 20},
+                   "placement": {"origin": [10, 0, -5]}, "operation": "cut"}),
+        )
+        .unwrap();
+        let v = call(&mut s, "inspect", json!({"part": "p"})).unwrap();
+        let b = &v["bodies"][0]["bounds"];
+        assert_eq!(b["min"], json!([0.0, 0.0, 0.0]), "{b}");
+        assert_eq!(b["max"], json!([0.02, 0.01, 0.005]), "{b}");
+        // A boss over the y = 10 face reaches its whole circle there,
+        // within the chord.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "cylinder", "id": "boss",
+                   "params": {"radius": 3, "height": 8},
+                   "placement": {"origin": [4, 9, 0]}, "operation": "join"}),
+        )
+        .unwrap();
+        let v = call(&mut s, "inspect", json!({"part": "p"})).unwrap();
+        let b = &v["bodies"][0]["bounds"];
+        let at = |k: &str, i: usize| b[k][i].as_f64().unwrap();
+        assert_eq!(b["min"], json!([0.0, 0.0, 0.0]), "{b}");
+        assert_eq!((at("max", 0), at("max", 2)), (0.02, 0.008), "{b}");
+        let y = at("max", 1);
+        assert!(y <= 0.012 && y > 0.012 - 1e-5, "{b}");
+    }
+
+    #[test]
+    fn every_entity_a_boolean_leaves_has_an_origin() {
+        use crate::server::tests::call;
+        // #86: a boss joined flush with the box's bottom, then a bore cut
+        // through both.
+        let (_dir, mut s, _) = crate::sketch::tests::with_box();
+        for (id, r, h, origin, op) in [
+            ("boss", 3, 8, [10, 5, 0], "join"),
+            ("bore", 1, 20, [10, 5, -5], "cut"),
+        ] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "p", "type": "cylinder", "id": id,
+                       "params": {"radius": r, "height": h},
+                       "placement": {"origin": origin}, "operation": op}),
+            )
+            .unwrap();
+        }
+        for f in ["boss", "bore"] {
+            let v = call(&mut s, "inspect", json!({"part": "p", "feature": f})).unwrap();
+            let b = &v["bodies"][0];
+            for list in ["faces", "edges", "vertices"] {
+                for e in b[list].as_array().unwrap() {
+                    let o = &e["origin"]["feature"];
+                    assert!(o.is_string(), "{f}: {list} {} has no origin", e["name"]);
+                }
+            }
+        }
+        // The bottom, merged from the box's and the boss's, names the
+        // join that merged it; the boss's foot circle on the box's top is
+        // the join's too.
+        let v = call(&mut s, "inspect", json!({"part": "p", "feature": "boss"})).unwrap();
+        let b = &v["bodies"][0];
+        let bottom = b["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["surface"]["type"] == "plane" && f["surface"]["frame"]["z"][2] == -1.0)
+            .unwrap();
+        assert_eq!(bottom["origin"], json!({"feature": "boss"}));
+        let foot = b["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["curve"]["type"] == "circle" && e["curve"]["frame"]["origin"][2] == 0.005)
+            .unwrap();
+        assert_eq!(foot["origin"], json!({"feature": "boss"}));
     }
 }

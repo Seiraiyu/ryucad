@@ -545,14 +545,20 @@ pub(crate) fn through_all(
         return Ok((lo.min(0.0) - margin, hi.max(0.0) + margin));
     }
     if hi <= ryukei::tol::LINEAR_RESOLUTION {
+        let (why, pointer) = if ty == "hole" {
+            (
+                "a hole drills against its sketch's normal; put the sketch on the face it enters, or turn the sketch over",
+                "/depth",
+            )
+        } else {
+            ("reverse it, or go through all both ways", "/extent")
+        };
         return Err(Error::new(
             Code::InvalidExtent,
-            format!(
-                "{ty} {id}: everything it cuts lies behind the sketch's plane; reverse it, or go through all both ways"
-            ),
+            format!("{ty} {id}: everything it would cut lies behind the sketch's plane; {why}"),
         )
         .with("feature", id)
-        .with("pointer", "/extent"));
+        .with("pointer", pointer));
     }
     Ok((0.0, hi + margin))
 }
@@ -1157,8 +1163,11 @@ fn apply(
             return Err(e);
         }
     }
-    // Origins: the target's, each tool's under their placed names, and a
-    // split entity's for each of its pieces.
+    // Origins: the target's, each tool's under their placed names, a
+    // split entity's for each of its pieces, merged entities' where they
+    // all agree, and this feature's for everything else it made: the
+    // edges and vertices where faces cross, and merges of entities from
+    // different features.
     let mut from: BTreeMap<Name, Value> = BTreeMap::new();
     for (n, o) in target.origins.iter() {
         if let Some(n) = crate::doc::reference::parse_name(n) {
@@ -1177,19 +1186,31 @@ fn apply(
             from.insert(*to, x.mark(o.clone()));
         }
     }
+    let own = json!({"feature": id});
     for e in journal.events() {
-        if let Event::Split { parent, children } = e
-            && let Some(o) = from.get(parent).cloned()
-        {
-            for c in children {
-                from.entry(*c).or_insert_with(|| o.clone());
+        match e {
+            Event::Split { parent, children } => {
+                if let Some(o) = from.get(parent).cloned() {
+                    for c in children {
+                        from.entry(*c).or_insert_with(|| o.clone());
+                    }
+                }
             }
+            Event::Merged { parents, child } => {
+                let mut theirs = parents.iter().map(|p| from.get(p));
+                let first = theirs.next().flatten().cloned();
+                let o = match first {
+                    Some(o) if theirs.all(|x| x == Some(&o)) => o,
+                    _ => own.clone(),
+                };
+                from.insert(*child, o);
+            }
+            _ => {}
         }
     }
-    let origins = from
-        .into_iter()
-        .filter(|(n, _)| kept.contains(n))
-        .map(|(n, o)| (n.to_string(), o))
+    let origins = kept
+        .iter()
+        .map(|n| (n.to_string(), from.get(n).unwrap_or(&own).clone()))
         .collect();
     finish(id, ty, (body, journal), origins)
 }

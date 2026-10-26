@@ -195,7 +195,7 @@ impl Cache {
 
 /// The diagonal of the feature's bounding box.
 fn diagonal(f: &Feature, body: &Body) -> f64 {
-    match crate::inspect::extent(f).or_else(|| crate::inspect::body_extent(body)) {
+    match crate::inspect::extent(f).or_else(|| crate::inspect::loose_extent(body)) {
         Some((lo, hi)) => {
             let d = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
             (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()

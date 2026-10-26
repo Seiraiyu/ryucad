@@ -644,6 +644,10 @@ pub struct Applied {
 pub fn apply(s: &mut Sketch, part: &Id, ops: &[Value], unit: Unit, env: &Env) -> Result<Applied> {
     let mut added = Vec::new();
     let mut moved = Vec::new();
+    // Every entity the sketch has held during the batch, and the op that
+    // added each curve, so a point that was never there is `not_found`.
+    let mut seen: BTreeSet<Id> = s.entities.keys().cloned().collect();
+    let mut adds: BTreeMap<Id, usize> = BTreeMap::new();
     for (i, op) in ops.iter().enumerate() {
         let o = op.as_object().ok_or_else(|| {
             op_error(
@@ -692,15 +696,34 @@ pub fn apply(s: &mut Sketch, part: &Id, ops: &[Value], unit: Unit, env: &Env) ->
             }
             _ => return Err(op_error(i, "op", "op is add, remove, set or move".into())),
         }
+        for id in s.entities.keys() {
+            if seen.insert(id.clone()) {
+                adds.insert(id.clone(), i);
+            }
+        }
     }
     // A curve can't outlive the points it is built on.
     for (id, e) in &s.entities {
-        if let Some((_, p)) = e
+        if let Some((field, p)) = e
             .geometry
             .points()
             .into_iter()
             .find(|(_, p)| !s.entities.contains_key(*p))
         {
+            if !seen.contains(p) {
+                let at = adds.get(id).map_or_else(
+                    || format!("/entities/{id}/{field}"),
+                    |i| format!("/ops/{i}/{field}"),
+                );
+                return Err(Error::new(
+                    Code::NotFound,
+                    format!(
+                        "{id}'s {field} {p} isn't a point of the sketch; add it first, or leave a projected curve's points out"
+                    ),
+                )
+                .with("entity", p)
+                .with("pointer", at));
+            }
             return Err(Error::new(
                 Code::HasDependents,
                 format!("{p} is gone but {id} is built on it; remove {id} too"),
@@ -1294,6 +1317,32 @@ pub(crate) mod tests {
             Feature::Sketch(s) => s,
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn a_curve_on_a_point_never_there_is_not_found() {
+        let env = Env::new(&BTreeMap::new());
+        let line = json!({"op": "add", "type": "line", "id": "l9", "start": "p1", "end": "p99"});
+        let e = apply(&mut rectangle(), &id("p"), &[line], Unit::Mm, &env).unwrap_err();
+        assert_eq!(e.code, Code::NotFound, "{e:?}");
+        assert_eq!(e.details["pointer"], "/ops/0/end");
+        assert_eq!(e.details["entity"], "p99");
+        let circle = json!({"op": "add", "type": "circle", "center": "p9", "r": "3 mm"});
+        let e = apply(&mut rectangle(), &id("p"), &[circle], Unit::Mm, &env).unwrap_err();
+        assert_eq!(e.code, Code::NotFound, "{e:?}");
+        assert_eq!(e.details["pointer"], "/ops/0/center");
+        // A point that was there and is removed is still has_dependents,
+        // and so is one an earlier op added and a later one removed.
+        let remove = json!({"op": "remove", "id": "p1"});
+        let e = apply(&mut rectangle(), &id("p"), &[remove], Unit::Mm, &env).unwrap_err();
+        assert_eq!(e.code, Code::HasDependents, "{e:?}");
+        let ops = [
+            json!({"op": "add", "type": "point", "id": "p50", "at": [0, 0]}),
+            json!({"op": "add", "type": "line", "id": "l50", "start": "p50", "end": "p1"}),
+            json!({"op": "remove", "id": "p50"}),
+        ];
+        let e = apply(&mut rectangle(), &id("p"), &ops, Unit::Mm, &env).unwrap_err();
+        assert_eq!(e.code, Code::HasDependents, "{e:?}");
     }
 
     #[test]

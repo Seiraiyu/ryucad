@@ -507,6 +507,27 @@ pub(crate) mod tests {
             (Code::InvalidExtent, Some("/counterbore/depth")),
             "{e}"
         );
+        // Through all from a sketch on the box's bottom: a hole drills
+        // against its sketch's normal, so the refusal says what a hole can
+        // do about it (#92).
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "s", "placement": {"origin": [0, 0, 0]}}),
+        )
+        .unwrap();
+        put(
+            &mut s,
+            "h",
+            json!({"points": ["p1"], "form": "simple", "diameter": 2, "depth": "through_all"}),
+        );
+        let e = after(&mut s, "h").unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].as_str()),
+            (Code::InvalidExtent, Some("/depth")),
+            "{e}"
+        );
+        assert!(!e.message.contains("reverse"), "{e}");
     }
 
     #[test]

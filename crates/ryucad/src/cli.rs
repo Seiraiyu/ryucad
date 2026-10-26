@@ -966,7 +966,8 @@ struct FieldArgs {
     #[arg(long, value_name = "AXIS")]
     axis: Option<String>,
     /// A revolve's angle: 90, "90 deg", or full; a chamfer's angle to its face
-    /// (distance_angle).
+    /// (distance_angle). A circular pattern's span, which it needs: 360 spaces --count
+    /// evenly round a whole turn, less spans the first instance to the last.
     #[arg(long)]
     angle: Option<String>,
     /// Revolve half the angle each side of the sketch's plane (or --symmetric false).

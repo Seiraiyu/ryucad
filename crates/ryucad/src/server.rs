@@ -1655,6 +1655,39 @@ fn pattern_from(
     if let Some(t) = &f.targets {
         o.insert("targets".into(), json!(t));
     }
+    // What the form needs and nothing gave it.
+    let needs: &[(&str, &str)] = match o.get("form").and_then(Value::as_str) {
+        Some("linear") => &[
+            (
+                "direction",
+                "an origin axis, a straight edge or a planar face",
+            ),
+            ("spacing", "the distance between instances"),
+            ("count", "how many instances, the seed's included"),
+        ],
+        Some("circular") => &[
+            (
+                "axis",
+                "an origin axis, a straight or circular edge, or a cylindrical or conical face",
+            ),
+            ("count", "how many instances, the seed's included"),
+            (
+                "angle",
+                "the span: 360 deg spaces the count evenly round a whole turn, less spans first to last",
+            ),
+        ],
+        Some("mirror") => &[("plane", "an origin plane or a planar face")],
+        _ => &[],
+    };
+    let form = o.get("form").and_then(Value::as_str).unwrap_or_default();
+    if let Some((k, what)) = needs.iter().find(|(k, _)| !o.contains_key(*k)) {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("a {form} pattern needs {k}: {what}"),
+        )
+        .with("param", *k)
+        .with("pointer", format!("/{k}")));
+    }
     let mut o = crate::doc::files::Obj::new(&v, "")?;
     let p = Pattern::from_fields(&mut o, unit, env)?;
     o.finish()?;
@@ -2461,6 +2494,26 @@ fn check_up_to(
     }
 }
 
+/// Every feature type `feature.add` makes.
+const FEATURE_TYPES: [&str; 16] = [
+    "box",
+    "cylinder",
+    "cone",
+    "sphere",
+    "torus",
+    "sketch",
+    "extrude",
+    "revolve",
+    "boolean",
+    "fillet",
+    "chamfer",
+    "hole",
+    "pattern",
+    "instance",
+    "mate",
+    "instance_pattern",
+];
+
 fn feature_add(
     session: &mut Session,
     part: &str,
@@ -2477,6 +2530,16 @@ fn feature_add(
     let mut list = order(p)?;
     let env = p.env.clone();
     let at = insert_at(&list, position)?;
+    // A feature its part can't hold is refused before its fields are read.
+    if FEATURE_TYPES.contains(&ty) {
+        let fid = match id {
+            Some(id) => feature_id(id)?,
+            None => Id::generate(ty, |s| p.features.keys().any(|f| f.as_str() == s)),
+        };
+        if let Some(e) = crate::assembly::kind_error_of(p, &fid, ty) {
+            return Err(e);
+        }
+    }
     // A pattern with no targets acts on its first seed's.
     if ty == "pattern" && given.fields.targets.is_none() {
         let seed = given.fields.features.as_ref().and_then(|s| s.first());
@@ -2484,8 +2547,34 @@ fn feature_add(
             .and_then(|s| Id::parse(s, "feature").ok())
             .and_then(|s| p.features.get(&s).cloned())
             .and_then(|f| f.ok());
-        if let Some(f) = theirs.filter(|f| !f.targets().is_empty()) {
-            given.fields.targets = Some(f.targets().iter().map(|t| t.to_string()).collect());
+        match (seed, theirs) {
+            (_, Some(f)) if !f.targets().is_empty() => {
+                given.fields.targets = Some(f.targets().iter().map(|t| t.to_string()).collect());
+            }
+            // Its seed's own fault says what's wrong with it.
+            (Some(seed), Some(f)) => {
+                return Err(Error::new(
+                    Code::ReferenceWrongKind,
+                    format!(
+                        "{}its seed {seed} is a {} that joins or cuts nothing; a pattern repeats joins, cuts and holes",
+                        id.map(|i| format!("pattern {i}: ")).unwrap_or_default(),
+                        f.type_name()
+                    ),
+                )
+                .with("seed", seed)
+                .with("pointer", "/features/0"));
+            }
+            (Some(seed), None)
+                if Id::parse(seed, "feature").is_ok_and(|s| !p.features.contains_key(&s)) =>
+            {
+                return Err(Error::new(
+                    Code::NotFound,
+                    format!("a pattern's seed {seed} isn't a feature of part {pid}"),
+                )
+                .with("seed", seed)
+                .with("pointer", "/features/0"));
+            }
+            _ => {}
         }
     }
     // A join, cut, intersect or hole with no targets acts on the part's
@@ -5160,6 +5249,41 @@ pub(crate) mod tests {
         ] {
             let e = edit(&mut s, f.clone()).unwrap_err();
             assert_eq!(e.code, code, "{f}: {e}");
+        }
+        // A new pattern whose seed can't give it targets says why (#102).
+        for (seed, code) in [("nope", Code::NotFound), ("b", Code::ReferenceWrongKind)] {
+            let e = add(
+                &mut s,
+                json!({"type": "pattern", "id": "bad", "features": [seed], "direction": "x",
+                       "spacing": 3, "count": 3}),
+            )
+            .unwrap_err();
+            assert_eq!(
+                (e.code, &e.details["seed"], &e.details["pointer"]),
+                (code, &json!(seed), &json!("/features/0")),
+                "{seed}: {e}"
+            );
+        }
+        // What a form needs and wasn't given is a parameter to give (#98).
+        for (f, param) in [
+            (json!({"axis": "z", "count": 4}), "angle"),
+            (json!({"axis": "z", "angle": 90}), "count"),
+            (
+                json!({"form": "linear", "spacing": 3, "count": 3}),
+                "direction",
+            ),
+            (json!({"direction": "x", "count": 3}), "spacing"),
+            (json!({"form": "mirror"}), "plane"),
+        ] {
+            let mut f = f;
+            f["type"] = json!("pattern");
+            f["features"] = json!(["h"]);
+            let e = add(&mut s, f.clone()).unwrap_err();
+            assert_eq!(
+                (e.code, &e.details["param"]),
+                (Code::InvalidParam, &json!(param)),
+                "{f}: {e}"
+            );
         }
         // A new pattern's form, left out, is what its fields say.
         let r = add(
