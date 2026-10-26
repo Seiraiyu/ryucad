@@ -461,10 +461,11 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
         view.marked.clear();
         ws.open_form(view.chosen.clone());
         ws.choose(view.chosen.clone());
-        // A sketch frames itself; anything else its solid.
+        // A sketch frames itself, an instance everything it places,
+        // anything else its solid.
         if let Some(k) = view.chosen.clone() {
-            let body = ws.model.solid_of(&k).unwrap_or(k);
-            view.fit(ws, Some(&body));
+            let bodies = ws.model.framed(&k);
+            view.fit_all(ws, &bodies);
         }
     }
     if let Some(c) = gone {

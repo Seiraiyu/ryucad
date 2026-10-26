@@ -261,6 +261,16 @@ impl View {
         }
     }
 
+    /// Frames `bodies` together.
+    pub fn fit_all(&mut self, ws: &mut Workspace, bodies: &[BodyKey]) {
+        let picker = self.picker(ws);
+        let points: Vec<[f64; 3]> = bodies.iter().flat_map(|b| picker.points(Some(b))).collect();
+        if !points.is_empty() {
+            self.nav.fit(&points, self.aspect());
+            self.moved(ws);
+        }
+    }
+
     /// Frames the given entities.
     pub fn fit_entities(&mut self, ws: &mut Workspace, entities: &[String]) {
         let points = self.picker(ws).points_of(entities);
