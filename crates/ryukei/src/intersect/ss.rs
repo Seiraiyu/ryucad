@@ -4,8 +4,9 @@
 //! ([`super::ss_exact`]) gets exact curves; any other analytic pair is
 //! traced ([`super::ss_trace`]) and fitted ([`super::fit`]), and any other
 //! surface (a pipe, a NURBS, a swept surface) and an analytic one are
-//! traced in the first's parameter plane ([`super::sheet_trace`]). Every
-//! branch
+//! traced in the first's parameter plane ([`super::sheet_trace`]), and
+//! two surfaces with neither form in their four parameters together
+//! ([`super::general`]). Every branch
 //! comes with its pcurve on each surface: an exact one where
 //! [`crate::pcurve::exact`] finds it, otherwise one fitted by the curve's
 //! parameter with a certified bound, which the branch's tolerance covers.
@@ -15,6 +16,7 @@
 use super::Failure;
 use super::coincide::coincident;
 use super::fit::{fit_branch, fit_pcurve};
+use super::general;
 use super::implicit::Implicit;
 use super::sheet_trace;
 use super::ss_exact;
@@ -70,15 +72,15 @@ pub(crate) struct Raw {
 /// are returned whole.
 ///
 /// A pipe, a NURBS or a swept surface and an analytic one are traced in
-/// the first's parameter plane, as [`pipe_surface`] traces a pipe.
+/// the first's parameter plane, as [`pipe_surface`] traces a pipe; two
+/// surfaces with no implicit form in their four parameters together.
 ///
-/// Fails with `Unsupported` unless at least one surface is analytic, and
-/// with `Uncertain` where a branch's topology, a singular point or a fit
-/// could not be certified.
+/// Fails with `Uncertain` where a branch's topology, a singular point or
+/// a fit could not be certified.
 pub fn surface_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
     match (Implicit::of(a).is_some(), Implicit::of(b).is_some()) {
         (true, true) => {}
-        (false, false) => return Err(Failure::Unsupported),
+        (false, false) => return general_surface(a, b, region),
         _ => return sheet_surface(a, b, region),
     }
     if let Some(same) = coincident(a, b) {
@@ -191,6 +193,22 @@ fn sheet_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, 
     }
     let mut points = topo.points;
     let branches = fitted(&chains, [sheet, other], swapped, &mut points)?;
+    Ok(SurfaceHit::Meet { branches, points })
+}
+
+/// Where two surfaces with no implicit form meet inside `region`: traced
+/// in their four parameters ([`super::general`]), cut where branches pass
+/// a pole of either, and fitted with a pcurve on each.
+fn general_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
+    let topo = general::trace(a, b, region)?;
+    let mut chains = topo.branches;
+    for pole in poles(a).into_iter().chain(poles(b)) {
+        if a.distance(pole) <= LINEAR_RESOLUTION && b.distance(pole) <= LINEAR_RESOLUTION {
+            chains = cut_at(chains, pole);
+        }
+    }
+    let mut points = topo.points;
+    let branches = fitted(&chains, [a, b], false, &mut points)?;
     Ok(SurfaceHit::Meet { branches, points })
 }
 

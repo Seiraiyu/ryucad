@@ -172,3 +172,14 @@ proptest! {
         agrees(&spline_of(&a), &b)?;
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(24))]
+
+    /// Two splines, traced in their four parameters.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "slow in a debug build: CI runs it in release")]
+    fn spline_pairs_agree_with_sampling(a in analytic(), b in analytic()) {
+        agrees(&spline_of(&a), &spline_of(&b))?;
+    }
+}

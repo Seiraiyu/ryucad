@@ -5,11 +5,12 @@
 //! arithmetic and exact predicates. Coincidence and tangency are decided
 //! by explicit tolerance rules, and what stays uncertain is reported as
 //! [`Failure::Uncertain`], never guessed. The analytic surfaces (plane,
-//! cylinder, cone, sphere, torus) are intersected with each other, and
-//! any other surface (a pipe, a NURBS, a swept surface) with any of them
-//! in its own parameters against their implicit forms; a curve meets any
-//! surface. Faces that touch along a curve are certified apart beside it
-//! instead ([`beside`]).
+//! cylinder, cone, sphere, torus) are intersected with each other by
+//! their implicit forms, any other surface (a pipe, a NURBS, a swept
+//! surface) with any of them in its own parameters, and any two others in
+//! both their parameters together; a curve meets any surface. Faces that
+//! touch along a curve are certified apart beside it instead
+//! ([`beside`]).
 
 mod beside;
 pub(crate) mod broad;
@@ -18,6 +19,7 @@ pub(crate) mod coincide;
 mod cs;
 mod face;
 mod fit;
+mod general;
 mod implicit;
 mod inface;
 mod pipe;
@@ -56,8 +58,7 @@ pub(crate) const SLACK: f64 = 1e-10;
 /// Why an intersection could not be computed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Failure {
-    /// A surface with no implicit form (a NURBS or a swept surface) that
-    /// might meet the other geometry.
+    /// Geometry no intersector covers.
     Unsupported,
     /// A root, an ordering or a classification that stayed uncertain
     /// after escalation.
