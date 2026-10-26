@@ -308,6 +308,64 @@ mod tests {
     }
 
     #[test]
+    fn a_long_dimensioned_polygon_is_read_in_pieces() {
+        // The benchmark's polygon of 1,000 entities, its sides about a
+        // 80th of its size: each side's angle to the next reads the
+        // points before it a hundred times as strongly as its length
+        // does, yet the pieces stay clear of the coupling bound and are
+        // read alone, not whole (a second, not milliseconds).
+        use crate::core::blocks::decompose;
+        use crate::core::diagnose::{WHOLE_LIMIT, by_pieces};
+        use crate::system::System;
+        use ryukei::math;
+        let n = 500;
+        let step = 2.0 * std::f64::consts::PI / n as f64;
+        let pts: Vec<[f64; 2]> = (0..n)
+            .map(|k| {
+                let t = step * k as f64;
+                let r = 1.0 - 0.3 * ((k * 7919) % 100) as f64 / 100.0;
+                [r * math::cos(t), r * math::sin(t)]
+            })
+            .collect();
+        let mut s = Sketch::default();
+        for (k, p) in pts.iter().enumerate() {
+            s.entities.insert(k as u32 + 1, point(p[0], p[1]));
+        }
+        let side = |k: usize| 100_000 + k as u32;
+        for k in 0..n {
+            s.entities
+                .insert(side(k), line(k as u32 + 1, ((k + 1) % n) as u32 + 1));
+        }
+        let turn = |a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]| {
+            let (u, w) = ([b[0] - a[0], b[1] - a[1]], [d[0] - c[0], d[1] - c[1]]);
+            math::atan2(u[0] * w[1] - u[1] * w[0], u[0] * w[0] + u[1] * w[1])
+        };
+        let mut c = 0..;
+        let mut add = |s: &mut Sketch, k: C| {
+            s.constraints.insert(c.next().unwrap(), k);
+        };
+        add(&mut s, C::Fix(1));
+        for k in 0..n {
+            let (a, b) = (pts[k], pts[(k + 1) % n]);
+            add(
+                &mut s,
+                C::Length(side(k), math::hypot(b[0] - a[0], b[1] - a[1])),
+            );
+        }
+        for k in 0..n - 3 {
+            let v = turn(pts[k], pts[k + 1], pts[k + 1], pts[k + 2]);
+            add(&mut s, C::Angle(side(k), side(k + 1), v));
+        }
+        let solved = solve(&s).unwrap();
+        assert_eq!((solved.report.dof, solved.report.state), (1, State::Under));
+        let sys = System::new(&solved.sketch);
+        let comp = sys.components.iter().max_by_key(|c| c.eqs.len()).unwrap();
+        assert!(comp.vars.len() <= WHOLE_LIMIT, "{}", comp.vars.len());
+        let b = decompose(&sys, comp);
+        assert!(by_pieces(&sys, comp, &b, &sys.vars, true).is_some());
+    }
+
+    #[test]
     fn coincident_ends_hold_no_degrees_of_freedom_twice() {
         // Two lines joined end to end: 3 points, 6 freedoms.
         let mut s = Sketch::default();
