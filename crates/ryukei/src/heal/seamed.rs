@@ -475,6 +475,8 @@ fn unwrap(x: f64, near: f64, period: Option<f64>) -> f64 {
 fn loops(cut: &Cut, k: usize, periods: (Option<f64>, Option<f64>)) -> Vec<Info> {
     let period = [periods.0, periods.1];
     let forward = cut.s.faces[k].sense == crate::topo::Sense::Forward;
+    let surface = &cut.s.surfaces[cut.s.faces[k].surface];
+    let (domain, collapsed) = (surface.domain(), collapsed_rows(surface));
     let mut out = Vec::new();
     for (l, lp) in cut.s.faces[k].loops.iter().enumerate() {
         let n = match lp {
@@ -501,7 +503,21 @@ fn loops(cut: &Cut, k: usize, periods: (Option<f64>, Option<f64>)) -> Vec<Info> 
             }
         }
         let (first, last) = (x[0], x[x.len() - 1]);
+        // Across a pole the free parameter's jump is free, so a loop
+        // through a pole winds round neither direction it could (a lune
+        // between two meridians, or a sphere's hemisphere bounded by one
+        // circle through both poles): as the mesher reads it.
+        let through_pole: [bool; 2] = core::array::from_fn(|d| {
+            let o = 1 - d;
+            x.iter().any(|q| {
+                (0..2).any(|e| {
+                    let at = domain[o][e];
+                    collapsed[o][e] && (q[o] - at).abs() <= 1e-9 * at.abs().max(1.0)
+                })
+            })
+        });
         let wind: [i64; 2] = core::array::from_fn(|d| match period[d] {
+            Some(_) if through_pole[d] => 0,
             Some(p) => ((last[d] - first[d]) / p).round() as i64,
             None => 0,
         });
