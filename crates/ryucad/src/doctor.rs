@@ -12,7 +12,7 @@ use crate::doc::canonical;
 use crate::doc::files::{Feature, Manifest, ParametersFile, PartFile, PartKind};
 use crate::doc::id::Id;
 use crate::doc::id::ProjectId;
-use crate::doc::project::{MANIFEST, PDM_CONFIG, Project, write_atomic};
+use crate::doc::project::{IMPORTS, MANIFEST, PDM_CONFIG, Project, write_atomic};
 use crate::doc::source::Folder;
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
@@ -44,7 +44,7 @@ impl Issue {
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 26] = [
+pub const CODES: [(&str, &str); 30] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -71,7 +71,15 @@ pub const CODES: [(&str, &str); 26] = [
     ("part_number_invalid", "error"),
     ("part_number_duplicate", "error"),
     ("project_id_missing", "warning"),
+    ("import_file_missing", "error"),
+    ("import_file_changed", "error"),
+    ("import_unused", "warning"),
+    ("import_large", "warning"),
 ];
+
+/// The size past which an imported file is `import_large`: Git keeps
+/// every version of it whole.
+pub const LARGE_IMPORT: u64 = 100 * 1024 * 1024;
 
 fn issue(code: &'static str, files: Vec<String>, message: String) -> Issue {
     let severity = CODES
@@ -369,10 +377,106 @@ pub fn diagnose(root: &Path) -> Vec<Issue> {
         diagnose_part(root, part, unit, &mut issues);
     }
     diagnose_assemblies(root, &part_ids, &mut issues);
+    diagnose_imports(root, &part_ids, unit, &mut issues);
     diagnose_pdm(root, manifest.as_ref(), &part_ids, &mut issues);
     diagnose_releases(root, &mut issues);
     diagnose_git(root, &mut issues);
     issues
+}
+
+/// The files under `imports/` and the import features that read them: a
+/// name that isn't `<id>.step` is unknown; a listed import whose file is
+/// missing, or isn't the bytes it was written against, is an error; a
+/// file no listed import reads is unused; one past [`LARGE_IMPORT`] is
+/// large.
+fn diagnose_imports(root: &Path, parts: &[&str], unit: Unit, issues: &mut Vec<Issue>) {
+    use crate::doc::import::is_import_path;
+    let entries = names(&root.join(IMPORTS));
+    classify(
+        root,
+        IMPORTS,
+        &entries,
+        |n, d| !d && is_import_path(&format!("{IMPORTS}/{n}")),
+        &[],
+        issues,
+    );
+    // Each file's readers: the feature files, with the hash they name.
+    let mut readers: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for part in parts {
+        let Some(list) = listed(root, part) else {
+            continue;
+        };
+        for fid in &list.features {
+            let rel = format!("parts/{part}/features/{fid}.json");
+            let Read::Json(v, _) = read(root, &rel) else {
+                continue;
+            };
+            if v.get("type").and_then(Value::as_str) != Some("import") {
+                continue;
+            }
+            if let Ok(Feature::Import(i)) = Feature::from_json(&v, unit, &Env::empty()) {
+                readers
+                    .entry(i.file.path)
+                    .or_default()
+                    .push((rel, i.file.blake3));
+            }
+        }
+    }
+    for (path, by) in &readers {
+        let features: Vec<String> = by.iter().map(|(f, _)| f.clone()).collect();
+        let Ok(bytes) = fs::read(root.join(path)) else {
+            issues.push(issue(
+                "import_file_missing",
+                [features.clone(), vec![path.clone()]].concat(),
+                format!(
+                    "{path} is missing, and {} import{} it: restore it from Git or import the file again",
+                    features.join(", "),
+                    if features.len() == 1 { "s" } else { "" }
+                ),
+            ));
+            continue;
+        };
+        let now = blake3::hash(&bytes).to_hex().to_string();
+        let changed: Vec<String> = by
+            .iter()
+            .filter(|(_, h)| *h != now)
+            .map(|(f, _)| f.clone())
+            .collect();
+        if !changed.is_empty() {
+            issues.push(issue(
+                "import_file_changed",
+                [changed.clone(), vec![path.clone()]].concat(),
+                format!(
+                    "{path} isn't the file {} imported (replaced by hand?): import it again to take its new bytes, or restore it from Git",
+                    changed.join(", ")
+                ),
+            ));
+        }
+    }
+    for (name, is_dir) in &entries {
+        let path = format!("{IMPORTS}/{name}");
+        if *is_dir || !is_import_path(&path) {
+            continue;
+        }
+        if !readers.contains_key(&path) {
+            issues.push(issue(
+                "import_unused",
+                vec![path.clone()],
+                format!("no import feature reads {path}"),
+            ));
+        }
+        let size = fs::metadata(root.join(&path)).map_or(0, |m| m.len());
+        if size > LARGE_IMPORT {
+            issues.push(issue(
+                "import_large",
+                vec![path.clone()],
+                format!(
+                    "{path} is {} MB: Git keeps every version of it whole, in every clone",
+                    size / (1024 * 1024)
+                ),
+            ));
+        }
+    }
 }
 
 /// Each assembly whose stored poses don't hold where its mates do, with
@@ -606,7 +710,7 @@ fn diagnose_git(root: &Path, issues: &mut Vec<Issue>) {
         return;
     };
     let text = fs::read_to_string(root.join(ATTRIBUTES)).unwrap_or_default();
-    let missing = crate::drivers::missing(&text);
+    let missing = crate::drivers::missing_for(&text, crate::drivers::has_imports(root));
     if !missing.is_empty() {
         issues.push(issue(
             "gitattributes_missing",
@@ -1145,7 +1249,11 @@ fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<
             out.push(Repair {
                 id: id("write"),
                 summary: format!("add ryucad's lines to {first}, keeping the rest"),
-                changes: vec![write(first, crate::drivers::with_lines(&text).into_bytes())],
+                changes: vec![write(
+                    first,
+                    crate::drivers::with_lines_for(&text, crate::drivers::has_imports(root))
+                        .into_bytes(),
+                )],
                 params: Vec::new(),
             });
         }
@@ -1264,6 +1372,12 @@ fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<
                 });
             }
         }
+        "import_unused" => out.push(Repair {
+            id: id("delete"),
+            summary: format!("delete {first}, which nothing reads (Git's history keeps it)"),
+            changes: vec![delete(first)],
+            params: Vec::new(),
+        }),
         "orphan_feature" => {
             let (part, fid) = (part_of(first), stem_of(first));
             if let Some(list) = listed(root, part) {
@@ -1538,6 +1652,64 @@ pub(crate) mod tests {
             "sync_conflict_copy",
             vec!["parts/p/parameters (1).json".to_owned(), params.to_owned()]
         )));
+    }
+
+    #[test]
+    fn imported_files_are_checked_against_their_readers() {
+        let dir = healthy();
+        let r = dir.path();
+        let bytes = crate::import::tests::occt("box_ap214.stp");
+        let hash = blake3::hash(&bytes).to_hex().to_string();
+        let i = "parts/p/features/i.json";
+        let feature = |h: &str| {
+            canonical::to_string(
+                &json!({"body": 0, "file": {"blake3": h, "path": "imports/box.step"},
+                                         "format": 5, "kind": "ryucad.feature", "type": "import"}),
+            )
+        };
+        w(r, i, &feature(&hash));
+        w(
+            r,
+            "parts/p/part.json",
+            &canonical::to_string(&json!({"features": ["a", "b", "i"], "format": 1,
+                                          "kind": "ryucad.part"})),
+        );
+        let path = "imports/box.step".to_owned();
+        assert_eq!(
+            codes(r),
+            [("import_file_missing", vec![i.to_owned(), path.clone()])]
+        );
+        assert!(offered(r).is_empty());
+        fs::create_dir_all(r.join("imports")).unwrap();
+        fs::write(r.join(&path), &bytes).unwrap();
+        assert_eq!(codes(r), []);
+        // Replaced by hand.
+        fs::write(r.join(&path), b"ISO-10303-21;").unwrap();
+        assert_eq!(
+            codes(r),
+            [("import_file_changed", vec![i.to_owned(), path.clone()])]
+        );
+        fs::write(r.join(&path), &bytes).unwrap();
+        // A file nothing reads, and names that aren't imports'.
+        fs::write(r.join("imports/old.step"), b"x").unwrap();
+        fs::write(r.join("imports/Notes.txt"), b"x").unwrap();
+        assert_eq!(
+            codes(r),
+            [
+                ("unknown_file", vec!["imports/Notes.txt".to_owned()]),
+                ("import_unused", vec!["imports/old.step".to_owned()]),
+            ]
+        );
+        let repairs = offered(r);
+        let delete = repairs
+            .keys()
+            .find(|k| k.starts_with("import_unused:delete:"))
+            .unwrap()
+            .clone();
+        fix(r, &[&repairs[&delete]], Params::default());
+        assert!(!r.join("imports/old.step").exists());
+        fs::remove_file(r.join("imports/Notes.txt")).unwrap();
+        assert_eq!(codes(r), []);
     }
 
     #[test]
