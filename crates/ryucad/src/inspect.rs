@@ -393,4 +393,54 @@ mod tests {
         let y = at("max", 1);
         assert!(y <= 0.012 && y > 0.012 - 1e-5, "{b}");
     }
+
+    #[test]
+    fn every_entity_a_boolean_leaves_has_an_origin() {
+        use crate::server::tests::call;
+        // #86: a boss joined flush with the box's bottom, then a bore cut
+        // through both.
+        let (_dir, mut s, _) = crate::sketch::tests::with_box();
+        for (id, r, h, origin, op) in [
+            ("boss", 3, 8, [10, 5, 0], "join"),
+            ("bore", 1, 20, [10, 5, -5], "cut"),
+        ] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "p", "type": "cylinder", "id": id,
+                       "params": {"radius": r, "height": h},
+                       "placement": {"origin": origin}, "operation": op}),
+            )
+            .unwrap();
+        }
+        for f in ["boss", "bore"] {
+            let v = call(&mut s, "inspect", json!({"part": "p", "feature": f})).unwrap();
+            let b = &v["bodies"][0];
+            for list in ["faces", "edges", "vertices"] {
+                for e in b[list].as_array().unwrap() {
+                    let o = &e["origin"]["feature"];
+                    assert!(o.is_string(), "{f}: {list} {} has no origin", e["name"]);
+                }
+            }
+        }
+        // The bottom, merged from the box's and the boss's, names the
+        // join that merged it; the boss's foot circle on the box's top is
+        // the join's too.
+        let v = call(&mut s, "inspect", json!({"part": "p", "feature": "boss"})).unwrap();
+        let b = &v["bodies"][0];
+        let bottom = b["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["surface"]["type"] == "plane" && f["surface"]["frame"]["z"][2] == -1.0)
+            .unwrap();
+        assert_eq!(bottom["origin"], json!({"feature": "boss"}));
+        let foot = b["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["curve"]["type"] == "circle" && e["curve"]["frame"]["origin"][2] == 0.005)
+            .unwrap();
+        assert_eq!(foot["origin"], json!({"feature": "boss"}));
+    }
 }
