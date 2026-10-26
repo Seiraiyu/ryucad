@@ -12,6 +12,7 @@
 
 mod beside;
 pub(crate) mod broad;
+mod cells;
 pub(crate) mod coincide;
 mod cs;
 mod face;
@@ -21,6 +22,7 @@ mod inface;
 mod pipe;
 mod pipe_cs;
 mod pipe_trace;
+mod sheet_cs;
 mod solid;
 mod ss;
 mod ss_exact;
