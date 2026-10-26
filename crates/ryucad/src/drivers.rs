@@ -27,14 +27,16 @@ use std::path::{Path, PathBuf};
 /// relative to the project folder.
 pub use crate::doc::project::ATTRIBUTES;
 
-/// The lines ryucad needs in it: its own files and ryupdm's. `eol=lf`
-/// keeps them canonical in every checkout: Git for Windows would otherwise
-/// check them out with CRLF.
-pub const LINES: [&str; 4] = [
+/// The lines ryucad needs in it: its own files and ryupdm's, and the
+/// attributes file itself, which ryucad writes too. `eol=lf` keeps them
+/// canonical in every checkout: Git for Windows would otherwise check them
+/// out with CRLF.
+pub const LINES: [&str; 5] = [
     "ryucad.json merge=ryucad diff=ryucad text eol=lf",
     "ryupdm.json merge=ryucad diff=ryucad text eol=lf",
     "parts/**/*.json merge=ryucad diff=ryucad text eol=lf",
     "releases/**/*.json merge=ryucad diff=ryucad text eol=lf",
+    ".gitattributes text eol=lf",
 ];
 
 /// Lines an earlier ryucad wrote, which [`LINES`] replace.
@@ -356,7 +358,7 @@ mod tests {
         let theirs = "*.png binary";
         let both = with_lines(theirs);
         assert!(both.starts_with("*.png binary\n# ryucad"), "{both}");
-        assert_eq!(both.lines().count(), 6);
+        assert_eq!(both.lines().count(), 7);
         // One line already there, written by hand with spaces.
         let one = with_lines("  ryucad.json merge=ryucad diff=ryucad text eol=lf  \n");
         assert_eq!(missing(&one), Vec::<&str>::new());
@@ -399,6 +401,27 @@ mod tests {
         ] {
             assert_eq!(std::fs::read_to_string(r.join(f)).unwrap(), text, "{f}");
         }
+        // Issue #101: the attributes file itself too, or every `git add`
+        // after ryucad writes it warns that LF will become CRLF.
+        let attributes = std::fs::read_to_string(r.join(ATTRIBUTES)).unwrap();
+        std::fs::remove_file(r.join(ATTRIBUTES)).unwrap();
+        git(&["checkout", "--", "."]);
+        let back = std::fs::read_to_string(r.join(ATTRIBUTES)).unwrap();
+        assert_eq!(back, attributes);
+        assert!(!back.contains('\r'));
+    }
+
+    #[test]
+    fn a_file_without_its_own_line_gets_it_in_lf() {
+        // Issue #101: what an earlier ryucad wrote, checked out with CRLF.
+        let before: String = LINES[..4].iter().map(|l| format!("{l}\r\n")).collect();
+        let before = format!("*.png binary\r\n{HEADER}\r\n{before}");
+        assert_eq!(missing(&before), [".gitattributes text eol=lf"]);
+        let after = with_lines(&before);
+        assert_eq!(
+            after,
+            format!("*.png binary\n{HEADER}\n{}\n", LINES.join("\n"))
+        );
     }
 
     #[test]
