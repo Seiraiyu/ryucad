@@ -23,5 +23,6 @@ pub use curve::NurbsCurve;
 pub use curve2::NurbsCurve2;
 pub(crate) use eval::Coords;
 pub use knots::{KnotVector, MAX_DEGREE};
+pub(crate) use project::creases;
 pub(crate) use refine::Hom;
 pub use surface::{Direction, NurbsSurface};

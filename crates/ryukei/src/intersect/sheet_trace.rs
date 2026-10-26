@@ -1,29 +1,32 @@
-//! Traced pipe–analytic intersections: certified branch topology in the
-//! pipe's parameter plane.
+//! Traced intersections of any surface with an analytic one: certified
+//! branch topology in the first surface's parameter plane.
 //!
-//! The method is [`super::ss_trace`]'s, on the pipe's own parameters
+//! The method is [`super::ss_trace`]'s, on the surface's own parameters
 //! rather than a patch's, with `F = f ∘ P` (see [`super::pipe`]) in place
-//! of a polynomial: the plane, `θ` once round and `s` over the spine's
-//! domain, is cut into a grid of cells (the spine's pieces, at most a 32nd
-//! of its domain, by sixteenths of a turn), cells whose points can't
-//! reach the region are dropped, and each cell is subdivided until it is
-//! excluded (`F` of one certified sign), regular (`F_s` or `F_θ` of one
-//! sign, so the curve is a graph) or singular (small, and neither).
-//! Crossings of cell sides are solved once per piece of a line, the lines
-//! where `θ` (and `s` on a closed spine) wraps counting as one, and paired
-//! into arcs in each regular cell; arcs joined at shared crossings make
-//! branches. A cluster of singular cells must hold exactly one critical
-//! point of `F` (Krawczyk's test on its gradient, with the Hessian's
-//! enclosure) on the curve: there branches meet, or with none, the
-//! surfaces touch at a point. Where a crossing falls on a cell's corner
-//! the trace is tried again with the grid turned in `θ`.
+//! of a polynomial: `P` is the surface over jets ([`Sheet`]), `f` the
+//! analytic surface's implicit form. The plane is cut into a grid of
+//! cells (a pipe's spine pieces, at most a 32nd of its domain, by
+//! sixteenths of a turn; another surface's pieces one way and the other
+//! likewise, a periodic direction in sixteenths, an unbounded one over
+//! the range the region reaches), cells whose points can't reach the
+//! region are dropped, and each cell is subdivided until it is excluded
+//! (`F` of one certified sign), regular (`F_s` or `F_θ` of one sign, so
+//! the curve is a graph) or singular (small, and neither). Crossings of
+//! cell sides are solved once per piece of a line, the lines where a
+//! periodic direction wraps counting as one, and paired into arcs in
+//! each regular cell; arcs joined at shared crossings make branches. A
+//! cluster of singular cells must hold exactly one critical point of `F`
+//! (Krawczyk's test on its gradient, with the Hessian's enclosure) on the
+//! curve: there branches meet, or with none, the surfaces touch at a
+//! point. Where a crossing falls on a cell's corner the trace is tried
+//! again with the grid shifted.
 
 use super::Failure;
 use super::implicit::Implicit;
 use super::pipe::{Cell, Field, Line, signed};
 use super::ss_trace::{Topology, Traced};
 use crate::geom::sheet::Sheet;
-use crate::geom::{Box3, Pipe, Point3, Surface};
+use crate::geom::{Box3, Curve, Point3, Surface, Vector3};
 use crate::interval::Interval;
 use crate::tol::LINEAR_RESOLUTION;
 use core::f64::consts::{PI, TAU};
@@ -49,14 +52,19 @@ const MAX_SINGULAR: usize = 1 << 12;
 /// cuts between its pieces' ends about a clamped one).
 const SHIFTS: [(f64, f64); 3] = [(0.0, 0.0), (0.071_3, 0.137), (0.183_9, 0.311)];
 
-/// The topology of where a pipe meets an analytic surface inside
-/// `region`. Fails with `Unsupported` for a surface with no implicit
-/// form, and `Uncertain` where a crossing, a singular point or a pairing
-/// can't be certified (a tangency along a curve among them).
-pub(crate) fn trace(pipe: &Pipe, other: &Surface, region: &Box3) -> Result<Topology, Failure> {
+/// The topology of where `surface` (any but an analytic one: a pipe, a
+/// NURBS, a swept surface) meets the analytic `other` inside `region`.
+/// Fails with `Unsupported` for an `other` with no implicit form, and
+/// `Uncertain` where a crossing, a singular point or a pairing can't be
+/// certified (a tangency along a curve among them).
+pub(crate) fn trace(
+    surface: &Surface,
+    other: &Surface,
+    region: &Box3,
+) -> Result<Topology, Failure> {
     let imp = Implicit::of(other).ok_or(Failure::Unsupported)?;
     for shift in SHIFTS {
-        let mut tracer = Tracer::new(pipe, &imp, region, shift);
+        let mut tracer = Tracer::new(surface, &imp, region, shift);
         let result = tracer.run();
         if tracer.singular > MAX_SINGULAR {
             return Err(Failure::Uncertain);
@@ -74,6 +82,141 @@ pub(crate) fn trace(pipe: &Pipe, other: &Surface, region: &Box3) -> Result<Topol
         }
     }
     Err(Failure::Uncertain)
+}
+
+/// A direction of the grid: its cuts, and where it wraps, if it does.
+struct Axis {
+    cuts: Vec<f64>,
+    wrap: Option<(f64, f64)>,
+}
+
+/// One period from `start`, cut into `n` equal parts.
+fn turn(start: f64, period: f64, n: u32) -> Axis {
+    let cuts: Vec<f64> = (0..=n)
+        .map(|k| {
+            if k == n {
+                start + period
+            } else {
+                start + period * f64::from(k) / f64::from(n)
+            }
+        })
+        .collect();
+    Axis {
+        wrap: Some((cuts[0], cuts[cuts.len() - 1])),
+        cuts,
+    }
+}
+
+/// `breaks` (increasing, first and last the ends) with each stretch between
+/// two cut into parts at most `most` long, at least two, the inner cuts
+/// moved by `along` of a part.
+fn spans(breaks: &[f64], most: f64, along: f64) -> Axis {
+    let mut cuts = vec![breaks[0]];
+    for w in breaks.windows(2) {
+        let n = ((w[1] - w[0]) / most).ceil().max(2.0) as usize;
+        for i in 1..n {
+            cuts.push(w[0] + (w[1] - w[0]) * (i as f64 - 0.5 + along) / n as f64);
+        }
+        cuts.push(w[1]);
+    }
+    Axis { cuts, wrap: None }
+}
+
+/// Where a curve's pieces meet in its domain, ends included.
+fn breaks(c: &Curve) -> Vec<f64> {
+    let [d0, d1] = c.domain();
+    let mut out: Vec<f64> = match c {
+        Curve::Nurbs(n) => n.pieces().iter().map(|p| p.range[0]).chain([d1]).collect(),
+        _ => vec![d0, d1],
+    };
+    out.dedup();
+    out
+}
+
+/// The least and greatest of `p · w` over a box's corners.
+fn reach(b: &Box3, w: Vector3) -> [f64; 2] {
+    b.corners()
+        .iter()
+        .fold([f64::INFINITY, f64::NEG_INFINITY], |[lo, hi], p| {
+            let x = p.to_vector().dot(w);
+            [lo.min(x), hi.max(x)]
+        })
+}
+
+/// One direction of a non-pipe surface's grid: a periodic one in
+/// sixteenths (at least one cut per piece) from a start moved by
+/// `shift`, a bounded one by its pieces, cut as a pipe's spine is.
+fn axis(period: Option<f64>, domain: [f64; 2], pieces: &[f64], (shift, along): (f64, f64)) -> Axis {
+    match period {
+        Some(p) => {
+            let n = (pieces.len().saturating_sub(1) as u32).max(16);
+            turn(domain[0] + p * shift / TAU, p, n)
+        }
+        None => spans(pieces, (domain[1] - domain[0]) / 32.0, along),
+    }
+}
+
+/// The grid of a surface's parameter plane near `region`, moved by
+/// `shift`; `None` where a direction can't be bounded.
+fn grid(s: &Surface, region: &Box3, (shift, along): (f64, f64)) -> Option<[Axis; 2]> {
+    match s {
+        Surface::Pipe(pipe) => {
+            let [d0, d1] = pipe.spine().domain();
+            let most = (d1 - d0) / 32.0;
+            let su = if pipe.spine().period().is_some() {
+                // The whole grid moved along the closed spine.
+                turn(d0 + most * along, d1 - d0, 32)
+            } else {
+                spans(&breaks(pipe.spine()), most, along)
+            };
+            Some([su, turn(-PI + shift, TAU, 16)])
+        }
+        Surface::Nurbs(n) => {
+            let [du, dv] = n.domain();
+            let (pu, pv) = n.periods();
+            let mut us: Vec<f64> = n
+                .patches()
+                .iter()
+                .map(|p| p.range[0][0])
+                .chain([du[1]])
+                .collect();
+            let mut vs: Vec<f64> = n
+                .patches()
+                .iter()
+                .map(|p| p.range[1][0])
+                .chain([dv[1]])
+                .collect();
+            for x in [&mut us, &mut vs] {
+                x.sort_by(f64::total_cmp);
+                x.dedup();
+            }
+            Some([
+                axis(pu, du, &us, (shift, along)),
+                axis(pv, dv, &vs, (shift, along)),
+            ])
+        }
+        Surface::Extrusion(e) => {
+            let c = e.curve();
+            let d = e.dir().get();
+            let (cb, rb) = (reach(&c.bounds(c.domain()), d), reach(region, d));
+            let v = [rb[0] - cb[1], rb[1] - cb[0]];
+            if v[0] >= v[1] || v[0].is_nan() || v[1].is_nan() {
+                return None;
+            }
+            Some([
+                axis(c.period(), c.domain(), &breaks(c), (shift, along)),
+                spans(&v, (v[1] - v[0]) / 32.0, along),
+            ])
+        }
+        Surface::Revolution(r) => {
+            let c = r.curve();
+            Some([
+                turn(shift, TAU, 16),
+                axis(c.period(), c.domain(), &breaks(c), (shift, along)),
+            ])
+        }
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -119,9 +262,10 @@ struct Side {
 struct Tracer<'a> {
     field: Field<'a>,
     region: Box3,
-    /// The grid's first lines and the last ones, which wrap onto them.
+    /// Where each direction's grid wraps: its first line and the last,
+    /// which is the same line a period on.
     s_wrap: Option<(f64, f64)>,
-    t_wrap: (f64, f64),
+    t_wrap: Option<(f64, f64)>,
     s_cuts: Vec<f64>,
     t_cuts: Vec<f64>,
     leaves: Vec<Leaf>,
@@ -129,67 +273,44 @@ struct Tracer<'a> {
     singular: usize,
     crossings: Vec<Crossing>,
     pieces: BTreeMap<(LineKey, u64, u64), Vec<usize>>,
+    /// No grid could be laid over the surface near the region.
+    ungridded: bool,
 }
 
 impl<'a> Tracer<'a> {
-    fn new(pipe: &'a Pipe, imp: &'a Implicit, region: &Box3, (shift, along): (f64, f64)) -> Self {
-        let [d0, d1] = pipe.spine().domain();
-        let most = (d1 - d0) / 32.0;
-        let periodic = pipe.spine().period().is_some();
-        let s_cuts = if periodic {
-            // The whole grid moved along the closed spine.
-            let start = d0 + most * along;
-            (0..=32)
-                .map(|k| {
-                    if k == 32 {
-                        start + (d1 - d0)
-                    } else {
-                        start + (d1 - d0) * f64::from(k) / 32.0
-                    }
-                })
-                .collect()
-        } else {
-            let mut breaks: Vec<f64> = match pipe.spine() {
-                crate::geom::Curve::Nurbs(n) => {
-                    n.pieces().iter().map(|p| p.range[0]).chain([d1]).collect()
-                }
-                _ => vec![d0, d1],
-            };
-            breaks.dedup();
-            let mut cuts = vec![breaks[0]];
-            for w in breaks.windows(2) {
-                let n = ((w[1] - w[0]) / most).ceil().max(2.0) as usize;
-                for i in 1..n {
-                    cuts.push(w[0] + (w[1] - w[0]) * (i as f64 - 0.5 + along) / n as f64);
-                }
-                cuts.push(w[1]);
-            }
-            cuts
+    fn new(surface: &'a Surface, imp: &'a Implicit, region: &Box3, shift: (f64, f64)) -> Self {
+        let (axes, ungridded) = match grid(surface, region, shift) {
+            Some(a) => (a, false),
+            None => (
+                [
+                    Axis {
+                        cuts: Vec::new(),
+                        wrap: None,
+                    },
+                    Axis {
+                        cuts: Vec::new(),
+                        wrap: None,
+                    },
+                ],
+                true,
+            ),
         };
-        let start = -PI + shift;
-        let t_cuts: Vec<f64> = (0..=16)
-            .map(|k| {
-                if k == 16 {
-                    start + TAU
-                } else {
-                    start + TAU * f64::from(k) / 16.0
-                }
-            })
-            .collect();
+        let [su, tu] = axes;
         Self {
             field: Field {
-                sheet: Sheet::Pipe(pipe),
+                sheet: Sheet::of(surface),
                 imp,
             },
             region: region.grow(LINEAR_RESOLUTION),
-            s_wrap: periodic.then(|| (s_cuts[0], s_cuts[s_cuts.len() - 1])),
-            t_wrap: (start, start + TAU),
-            s_cuts,
-            t_cuts,
+            s_wrap: su.wrap,
+            t_wrap: tu.wrap,
+            s_cuts: su.cuts,
+            t_cuts: tu.cuts,
             leaves: Vec::new(),
             singular: 0,
             crossings: Vec::new(),
             pieces: BTreeMap::new(),
+            ungridded,
         }
     }
 
@@ -200,13 +321,18 @@ impl<'a> Tracer<'a> {
                 Some((a, b)) if x == b => a,
                 _ => x,
             },
-            Dir::T if x == self.t_wrap.1 => self.t_wrap.0,
-            Dir::T => x,
+            Dir::T => match self.t_wrap {
+                Some((a, b)) if x == b => a,
+                _ => x,
+            },
         };
         (dir, x.to_bits())
     }
 
     fn run(&mut self) -> Result<Topology, Failure> {
+        if self.ungridded {
+            return Err(Failure::Uncertain);
+        }
         let (sc, tc) = (self.s_cuts.clone(), self.t_cuts.clone());
         for s in sc.windows(2) {
             for t in tc.windows(2) {
@@ -220,7 +346,7 @@ impl<'a> Tracer<'a> {
         self.link(arcs)
     }
 
-    /// Whether the pipe over a cell may reach the region.
+    /// Whether the surface over a cell may reach the region.
     fn reaches(&self, cell: Cell) -> bool {
         let Some(p) = self.field.sheet.jet_box(cell) else {
             return true;

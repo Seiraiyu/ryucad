@@ -18,7 +18,9 @@
 //! A pipe has no implicit form: its side of a branch is sampled through
 //! its distance from its spine, and its distance from a span is certified
 //! by the pcurve's bound alone (the span is within that of the pipe's
-//! points along the pcurve).
+//! points along the pcurve). Any other surface with no implicit form (a
+//! NURBS, a swept surface) is read the same way, through its signed
+//! distance from its foot.
 //!
 //! A span whose bound exceeds [`LINEAR_RESOLUTION`] gets a new sample in
 //! its middle, put on both surfaces by Newton's method, until every span
@@ -28,14 +30,17 @@
 //! way, by the curve's own parameter.
 
 use super::implicit::Implicit;
+use super::sheet_cs::norm_hi;
 use super::ss_trace::Traced;
 use super::{Failure, SLACK};
 use crate::geom::chain3::Piece3;
+use crate::geom::sheet::Sheet;
 use crate::geom::{
     BezierCurve, Curve, Curve2, Hom, KnotVector, NurbsCurve, NurbsCurve2, Pipe, Point2, Point3,
     Surface, Vector2, Vector3,
 };
 use crate::geom::{cos_abs_max, cos_range};
+use crate::interval::Interval;
 use crate::math;
 use crate::tol::LINEAR_RESOLUTION;
 
@@ -93,6 +98,45 @@ fn uv_near(s: &Surface, p: Point3, near: Option<Point2>) -> Point2 {
     }
 }
 
+/// A foot of `p` on `s` near `near`, by Gauss-Newton steps on `|p - S|`
+/// kept inside a bounded domain: a local stand-in for projection where a
+/// global one is costly (a NURBS) and a neighbouring sample's parameters
+/// are known. `None` where the steps don't settle.
+fn local_foot(s: &Surface, p: Point3, near: Point2) -> Option<Point2> {
+    let [du, dv] = s.domain();
+    let (pu, pv) = s.periods();
+    let keep = |x: f64, d: [f64; 2], period: Option<f64>| {
+        if period.is_some() {
+            x
+        } else {
+            x.clamp(d[0], d[1])
+        }
+    };
+    let (mut u, mut v) = (near.x, near.y);
+    for _ in 0..20 {
+        let e = s.eval(u, v);
+        let w = p - e.point;
+        let (g11, g12, g22) = (e.du.dot(e.du), e.du.dot(e.dv), e.dv.dot(e.dv));
+        let det = g11 * g22 - g12 * g12;
+        if !(det > 0.0 && det.is_finite()) {
+            return None;
+        }
+        let (r1, r2) = (e.du.dot(w), e.dv.dot(w));
+        let (a, b) = ((g22 * r1 - g12 * r2) / det, (g11 * r2 - g12 * r1) / det);
+        let (nu, nv) = (keep(u + a, du, pu), keep(v + b, dv, pv));
+        if !(nu.is_finite() && nv.is_finite()) {
+            return None;
+        }
+        let done =
+            (nu - u).abs() <= 1e-15 * (1.0 + u.abs()) && (nv - v).abs() <= 1e-15 * (1.0 + v.abs());
+        (u, v) = (nu, nv);
+        if done {
+            return Some(Point2::new(u, v));
+        }
+    }
+    Some(Point2::new(u, v))
+}
+
 /// The parameter velocity on `s` at `uv` of a curve with velocity `d`:
 /// the least-squares solution of `S_u du + S_v dv = d`. `None` where the
 /// partials are dependent (a pole, an apex).
@@ -126,7 +170,11 @@ pub(crate) fn first_bound(s: &Surface, [ru, rv]: [[f64; 2]; 2]) -> (f64, f64) {
             let [du, dv] = n.first_bound([ru, rv]);
             (du, dv)
         }
-        _ => (f64::INFINITY, f64::INFINITY),
+        // A swept surface's from its enclosures over jets.
+        _ => match Sheet::of(s).jet_box([ru, rv]) {
+            Some(p) => (norm_hi(p.map(|j| j.d[0])), norm_hi(p.map(|j| j.d[1]))),
+            None => (f64::INFINITY, f64::INFINITY),
+        },
     };
     (su * k, sv * k)
 }
@@ -220,7 +268,10 @@ impl Target for SpanTarget<'_> {
     }
 
     fn second(&self, x0: f64, x1: f64) -> f64 {
-        second_hull(&sub(self.0, x0, x1))
+        // The part's hull is by its own parameter, which runs 1 / (x1 -
+        // x0) times as fast as the span's.
+        let w = x1 - x0;
+        second_hull(&sub(self.0, x0, x1)) / (w * w)
     }
 }
 
@@ -293,6 +344,99 @@ fn pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &dyn Target, target: f
         go(s, p, c, [x0, m], target, depth - 1).max(go(s, p, c, [m, x1], target, depth - 1))
     }
     go(s, p, c, [0.0, 1.0], target, MAX_HALVINGS)
+}
+
+/// The box of a polynomial piece's `k`-th derivative's control points
+/// over its local `[0, 1]`, divided by `w^k` (the derivative by a
+/// parameter `w` times as long): its least and greatest corners.
+fn derivative_hull<V: crate::geom::Coords>(p: &BezierCurve<V>, k: usize, w: f64) -> (V, V) {
+    let mut q: Vec<V> = p.pts.iter().map(|h| h.p).collect();
+    for _ in 0..k {
+        let n = (q.len() - 1) as f64;
+        q = q.windows(2).map(|x| (x[1] - x[0]) * n).collect();
+    }
+    if q.is_empty() {
+        return (V::ZERO, V::ZERO);
+    }
+    let scale = (0..k).fold(1.0, |acc, _| acc * w);
+    let (lo, hi) = q
+        .iter()
+        .fold((q[0], q[0]), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    (lo / scale, hi / scale)
+}
+
+/// An interval from a least and a greatest value, widened by a part in
+/// 10¹² for the rounding that made them.
+fn widened(lo: f64, hi: f64) -> Interval {
+    let pad = 1e-12 * lo.abs().max(hi.abs());
+    Interval::new(lo - pad, hi + pad).expect("ordered")
+}
+
+/// A certified bound on `|S(P(x)) - C(x)|` over a span for a surface read
+/// over jets, halving it where the bound is too loose: as
+/// [`pcurve_bound`], but with `g'' = d²S(P)/dx² - C''` enclosed as a
+/// vector, so the surface's and the curve's second derivatives cancel
+/// where the fit follows the surface and a span needs few halvings.
+fn sheet_pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &Piece3, target: f64) -> f64 {
+    fn go(
+        s: &Surface,
+        sheet: &Sheet,
+        p: &BezierCurve<Vector2>,
+        c: &Piece3,
+        [x0, x1]: [f64; 2],
+        target: f64,
+        depth: u32,
+    ) -> f64 {
+        let part = sub(p, x0, x1);
+        let cpart = sub(c, x0, x1);
+        let w = x1 - x0;
+        let (lo, hi) = part.hull();
+        let Some(jets) = sheet.jet_box([[lo.x, hi.x], [lo.y, hi.y]]) else {
+            return f64::INFINITY;
+        };
+        let (a1, b1) = derivative_hull(&part, 1, w);
+        let (a2, b2) = derivative_hull(&part, 2, w);
+        let (ac, bc) = derivative_hull(&cpart, 2, w);
+        let (u1, v1) = (widened(a1.x, b1.x), widened(a1.y, b1.y));
+        let d2 = [widened(a2.x, b2.x), widened(a2.y, b2.y)];
+        let c2 = [
+            widened(ac.x, bc.x),
+            widened(ac.y, bc.y),
+            widened(ac.z, bc.z),
+        ];
+        let two = Interval::point(2.0);
+        let g2: [Interval; 3] = core::array::from_fn(|k| {
+            jets[k].h[0] * u1.square()
+                + two * jets[k].h[1] * u1 * v1
+                + jets[k].h[2] * v1.square()
+                + jets[k].d[0] * d2[0]
+                + jets[k].d[1] * d2[1]
+                - c2[k]
+        });
+        let m2 = super::sheet_cs::norm_hi(g2);
+        let m = (x0 + x1) / 2.0;
+        let (q, dq) = eval(p, m);
+        let e = s.eval(q.x, q.y);
+        let (cp, cd) = eval(c, m);
+        let g = (e.point.to_vector() - cp).length();
+        let dg = (e.du * dq.x + e.dv * dq.y - cd).length();
+        let r = w / 2.0;
+        let bound = (g + dg * r + m2 * r * r / 2.0) * (1.0 + 1e-9) + SLACK;
+        if bound <= target || depth == 0 || g > target / 2.0 {
+            return bound;
+        }
+        go(s, sheet, p, c, [x0, m], target, depth - 1).max(go(
+            s,
+            sheet,
+            p,
+            c,
+            [m, x1],
+            target,
+            depth - 1,
+        ))
+    }
+    let sheet = Sheet::of(s);
+    go(s, &sheet, p, c, [0.0, 1.0], target, MAX_HALVINGS)
 }
 
 /// Spans a line pcurve is certified over (see [`pcurve_certified`]).
@@ -393,24 +537,28 @@ fn surface_bound(imp: &Implicit, span: &Piece3, target: f64, depth: u32) -> f64 
 }
 
 /// How a fit reads one surface of a branch: an analytic surface by its
-/// implicit form, a pipe by its distance from its spine.
+/// implicit form, a pipe by its distance from its spine, any other by its
+/// signed distance from its foot.
 enum Side<'a> {
     Implicit(Implicit),
     Pipe(&'a Pipe),
+    Param(&'a Surface),
 }
 
 impl<'a> Side<'a> {
-    fn of(s: &'a Surface) -> Option<Self> {
+    fn of(s: &'a Surface) -> Self {
         match s {
-            Surface::Pipe(p) => Some(Self::Pipe(p)),
-            _ => Implicit::of(s).map(Self::Implicit),
+            Surface::Pipe(p) => Self::Pipe(p),
+            _ => Implicit::of(s).map_or(Self::Param(s), Self::Implicit),
         }
     }
 
     /// A function vanishing on the surface and its gradient, in floating
     /// point: for Newton's method and directions, never for a decision.
-    /// A pipe's is the distance from its spine less its radius.
-    fn eval_grad(&self, p: Point3) -> (f64, Vector3) {
+    /// A pipe's is the distance from its spine less its radius; any other
+    /// surface's its signed distance from its foot, found near `hint`
+    /// when one is given.
+    fn eval_grad(&self, p: Point3, hint: Option<Point2>) -> (f64, Vector3) {
         match self {
             Self::Implicit(imp) => imp.eval_grad(p),
             Self::Pipe(pipe) => {
@@ -422,17 +570,24 @@ impl<'a> Side<'a> {
                 }
                 (len - pipe.radius(), d / len)
             }
+            Self::Param(s) => {
+                let (u, v) = match hint.and_then(|h| local_foot(s, p, h)) {
+                    Some(f) => (f.x, f.y),
+                    None => s.project(p).param,
+                };
+                let e = s.eval(u, v);
+                match e.du.cross(e.dv).normalize() {
+                    Some(n) => ((p - e.point).dot(n.get()), n.get()),
+                    None => ((p - e.point).length(), Vector3::ZERO),
+                }
+            }
         }
     }
 }
 
-/// Fits a traced branch where surfaces `a` and `b` meet, each analytic
-/// or a pipe.
+/// Fits a traced branch where surfaces `a` and `b` meet.
 pub(crate) fn fit_branch(surfaces: [&Surface; 2], traced: &Traced) -> Result<Fitted, Failure> {
-    let imps = [
-        Side::of(surfaces[0]).ok_or(Failure::Unsupported)?,
-        Side::of(surfaces[1]).ok_or(Failure::Unsupported)?,
-    ];
+    let imps = [Side::of(surfaces[0]), Side::of(surfaces[1])];
     let branch = Branch { surfaces, imps };
     let mut points = traced.points.clone();
     if traced.closed {
@@ -493,6 +648,34 @@ struct Branch<'a> {
 }
 
 impl Branch<'_> {
+    /// The parameters on surface `k` of a point on it, unwrapped next to
+    /// `near`: a surface read through its foot takes a local foot near
+    /// the neighbouring sample's parameters, others projection.
+    fn uv_near(&self, k: usize, p: Point3, near: Option<Point2>) -> Point2 {
+        let s = self.surfaces[k];
+        if let (Side::Param(_), Some(n)) = (&self.imps[k], near)
+            && let Some(f) = local_foot(s, p, n)
+        {
+            return f;
+        }
+        uv_near(s, p, near)
+    }
+
+    /// Whether `x` is farther than resolution from surface `k`: a surface
+    /// read through its foot is near enough when its point at a local
+    /// foot is (that bounds the distance from above), others by their
+    /// distance.
+    fn off(&self, k: usize, x: Point3, near: Point2) -> bool {
+        let s = self.surfaces[k];
+        if let Side::Param(_) = &self.imps[k]
+            && let Some(f) = local_foot(s, x, near)
+            && s.point(f.x, f.y).distance(x) <= LINEAR_RESOLUTION
+        {
+            return false;
+        }
+        s.distance(x) > LINEAR_RESOLUTION
+    }
+
     /// Samples at the traced points, with tangents along the chain.
     fn initial(&self, points: &[Point3]) -> Result<Vec<Sample>, Failure> {
         // Points a hair apart (a crossing on a cell's corner seen from
@@ -569,8 +752,8 @@ impl Branch<'_> {
         near: Option<[Point2; 2]>,
         inward: Option<Vector3>,
     ) -> Result<Sample, Failure> {
-        let (_, ga) = self.imps[0].eval_grad(p);
-        let (_, gb) = self.imps[1].eval_grad(p);
+        let (_, ga) = self.imps[0].eval_grad(p, near.map(|n| n[0]));
+        let (_, gb) = self.imps[1].eval_grad(p, near.map(|n| n[1]));
         let cross = ga.cross(gb);
         let d = match cross.normalize() {
             Some(t) if cross.length() > 1e-8 * ga.length() * gb.length() => {
@@ -582,7 +765,7 @@ impl Branch<'_> {
         let mut uv = [Point2::ORIGIN; 2];
         let mut duv = [Vector2::ZERO; 2];
         for k in 0..2 {
-            uv[k] = uv_near(self.surfaces[k], p, near.map(|n| n[k]));
+            uv[k] = self.uv_near(k, p, near.map(|n| n[k]));
             match uv_velocity(self.surfaces[k], uv[k], d) {
                 Some(v) => duv[k] = v,
                 None => {
@@ -590,7 +773,7 @@ impl Branch<'_> {
                     let sign = if dir.dot(d) >= 0.0 { 1.0 } else { -1.0 };
                     let eps = 1e-7 * (1.0 + p.to_vector().length());
                     let q = p + d * (sign * eps);
-                    let uq = uv_near(self.surfaces[k], q, near.map(|n| n[k]));
+                    let uq = self.uv_near(k, q, near.map(|n| n[k]));
                     let v = uv_velocity(self.surfaces[k], uq, d).ok_or(Failure::Uncertain)?;
                     uv[k] = uq - v * (sign * eps);
                     duv[k] = v;
@@ -636,8 +819,8 @@ impl Branch<'_> {
         let start = x;
         let along = chord.normalize().ok_or(Failure::Uncertain)?.get();
         for _ in 0..50 {
-            let (fa, ga) = self.imps[0].eval_grad(x);
-            let (fb, gb) = self.imps[1].eval_grad(x);
+            let (fa, ga) = self.imps[0].eval_grad(x, Some(a.uv[0]));
+            let (fb, gb) = self.imps[1].eval_grad(x, Some(a.uv[1]));
             let fc = along.dot(x - start);
             // Solve [ga; gb; along] dx = -(fa, fb, fc).
             let rows = [ga, gb, along];
@@ -655,9 +838,7 @@ impl Branch<'_> {
                 break;
             }
         }
-        if self.surfaces[0].distance(x) > LINEAR_RESOLUTION
-            || self.surfaces[1].distance(x) > LINEAR_RESOLUTION
-        {
+        if (0..2).any(|k| self.off(k, x, a.uv[k])) {
             return Err(Failure::Uncertain);
         }
         self.sample(x, chord, Some(a.uv), None)
@@ -673,8 +854,8 @@ impl Branch<'_> {
         let mut way = None;
         for w in samples.windows(2) {
             let chord = w[1].p - w[0].p;
-            let (_, ga) = self.imps[0].eval_grad(w[0].p);
-            let (_, gb) = self.imps[1].eval_grad(w[0].p);
+            let (_, ga) = self.imps[0].eval_grad(w[0].p, Some(w[0].uv[0]));
+            let (_, gb) = self.imps[1].eval_grad(w[0].p, Some(w[0].uv[1]));
             let x = ga.cross(gb).dot(chord);
             if x.abs() <= 1e-6 * ga.length() * gb.length() * chord.length() {
                 continue;
@@ -710,12 +891,10 @@ impl Branch<'_> {
                 ),
                 [a.s, b.s],
             );
-            worst = worst.max(pcurve_bound(
-                self.surfaces[k],
-                &p2,
-                &SpanTarget(&span),
-                LINEAR_RESOLUTION,
-            ));
+            worst = worst.max(match self.imps[k] {
+                Side::Param(s) => sheet_pcurve_bound(s, &p2, &span, LINEAR_RESOLUTION),
+                _ => pcurve_bound(self.surfaces[k], &p2, &SpanTarget(&span), LINEAR_RESOLUTION),
+            });
         }
         worst
     }
@@ -1204,6 +1383,25 @@ mod tests {
     }
 
     #[test]
+    fn a_span_bounds_its_second_derivative_by_its_own_parameter() {
+        // C(x) = (x³, 0, 0): C'' = 6x, at most 6 over [0.5, 1] whatever
+        // part is bounded.
+        let span = piece(
+            [
+                Vector3::ZERO,
+                Vector3::ZERO,
+                Vector3::ZERO,
+                Vector3::new(1.0, 0.0, 0.0),
+            ],
+            [0.0, 1.0],
+        );
+        let t = SpanTarget(&span);
+        assert!(t.second(0.5, 1.0) >= 6.0 * (1.0 - 1e-12));
+        assert!(t.second(0.0, 1.0) >= 6.0 * (1.0 - 1e-12));
+        assert!(t.second(0.75, 0.875) >= 5.25 * (1.0 - 1e-12));
+    }
+
+    #[test]
     fn branches_on_pipes() {
         // The plane x = 1.5 across the tube rolling on a plane: one loop,
         // fitted with the pipe's side certified through its pcurve.
@@ -1220,7 +1418,12 @@ mod tests {
             Point3::new(-10.0, -10.0, -10.0),
             Point3::new(10.0, 10.0, 10.0),
         );
-        let topo = super::super::pipe_trace::trace(&pipe, &plane, &region).unwrap();
+        let topo = super::super::sheet_trace::trace(
+            &Surface::Pipe(std::sync::Arc::new(pipe.clone())),
+            &plane,
+            &region,
+        )
+        .unwrap();
         let ps = Surface::Pipe(std::sync::Arc::new(pipe));
         let f = fit_branch([&ps, &plane], &topo.branches[0]).unwrap();
         assert!(f.tolerance <= 10.0 * LINEAR_RESOLUTION);

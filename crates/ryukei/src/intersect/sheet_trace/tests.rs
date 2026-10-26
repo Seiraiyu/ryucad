@@ -1,6 +1,10 @@
 use super::*;
 use crate::geom::pipe::tests::{R, on_plane, round_cylinder};
-use crate::geom::{Cone, Cylinder, Frame, Plane, Sphere, Surface, Vector3};
+use crate::geom::{Cone, Cylinder, Frame, Pipe, Plane, Sphere, Surface, Vector3};
+
+fn sheet(p: &Pipe) -> Surface {
+    Surface::Pipe(std::sync::Arc::new(p.clone()))
+}
 
 fn region() -> Box3 {
     Box3::new(
@@ -66,7 +70,7 @@ fn a_plane_across_the_tube() {
     // The plane x = 1.5 cuts the tube on the plane in one loop round it.
     let pipe = on_plane();
     let p = plane(Point3::new(1.5, 0.0, 0.0), Vector3::new(1.0, 0.0, 0.0));
-    let topo = trace(&pipe, &p, &region()).unwrap();
+    let topo = trace(&sheet(&pipe), &p, &region()).unwrap();
     assert_eq!(topo.branches.len(), 1);
     assert!(topo.branches[0].closed);
     assert!(topo.points.is_empty());
@@ -79,7 +83,7 @@ fn a_plane_along_the_tube() {
     // sides, from end to end.
     let pipe = on_plane();
     let p = plane(Point3::new(0.0, 0.0, R), Vector3::new(0.0, 0.0, 1.0));
-    let topo = trace(&pipe, &p, &region()).unwrap();
+    let topo = trace(&sheet(&pipe), &p, &region()).unwrap();
     assert_eq!(topo.branches.len(), 2);
     assert!(topo.branches.iter().all(|b| !b.closed));
     sound(&pipe, &p, &topo);
@@ -123,14 +127,14 @@ fn spheres_cylinders_and_cones() {
             .unwrap(),
         ),
     ] {
-        let topo = trace(&pipe, &other, &region()).unwrap();
+        let topo = trace(&sheet(&pipe), &other, &region()).unwrap();
         assert!(!topo.branches.is_empty(), "{other:?}");
         sound(&pipe, &other, &topo);
     }
     // Round a cylinder, a plane across the closed tube.
     let tube = round_cylinder();
     let p = plane(Point3::new(0.0, 0.0, 0.0), Vector3::new(1.0, 0.0, 0.0));
-    let topo = trace(&tube, &p, &region()).unwrap();
+    let topo = trace(&sheet(&tube), &p, &region()).unwrap();
     assert_eq!(topo.branches.len(), 2, "{topo:?}");
     sound(&tube, &p, &topo);
 }
@@ -156,7 +160,7 @@ fn a_touching_sphere_meets_at_a_point() {
         )
         .unwrap(),
     );
-    let topo = trace(&pipe, &sphere, &region()).unwrap();
+    let topo = trace(&sheet(&pipe), &sphere, &region()).unwrap();
     assert!(topo.branches.is_empty(), "{topo:?}");
     assert_eq!(topo.points.len(), 1);
     assert!(topo.points[0].distance(at) <= 1e-6, "{:?}", topo.points[0]);
@@ -167,18 +171,71 @@ fn tangency_along_a_curve_is_uncertain() {
     // The anchor plane touches the tube along its whole contact line.
     let pipe = on_plane();
     let p = plane(Point3::ORIGIN, Vector3::new(0.0, 0.0, 1.0));
-    assert_eq!(trace(&pipe, &p, &region()).err(), Some(Failure::Uncertain));
+    assert_eq!(
+        trace(&sheet(&pipe), &p, &region()).err(),
+        Some(Failure::Uncertain)
+    );
 }
 
 #[test]
 fn far_apart_and_out_of_the_region() {
     let pipe = on_plane();
     let p = plane(Point3::new(0.0, 0.0, 5.0), Vector3::new(0.0, 0.0, 1.0));
-    let topo = trace(&pipe, &p, &region()).unwrap();
+    let topo = trace(&sheet(&pipe), &p, &region()).unwrap();
     assert!(topo.branches.is_empty() && topo.points.is_empty());
     // A region away from the pipe sees nothing of a plane that cuts it.
     let across = plane(Point3::new(1.5, 0.0, 0.0), Vector3::new(1.0, 0.0, 0.0));
     let away = Box3::new(Point3::new(5.0, 5.0, 5.0), Point3::new(6.0, 6.0, 6.0));
-    let topo = trace(&pipe, &across, &away).unwrap();
+    let topo = trace(&sheet(&pipe), &across, &away).unwrap();
     assert!(topo.branches.is_empty());
+}
+
+#[test]
+fn splines_and_swept_surfaces() {
+    use crate::geom::{Circle, Curve, Extrusion, Revolution, Torus};
+    use core::f64::consts::TAU;
+    use std::sync::Arc;
+    // A NURBS circle extruded, cut by a tilted plane: one loop.
+    let f = Frame::new(
+        Point3::new(0.1, -0.2, 0.0),
+        Vector3::new(0.0, 0.0, 1.0),
+        Vector3::new(1.0, 0.0, 0.0),
+    )
+    .unwrap();
+    let (nc, _) = Circle::new(f, 0.7).unwrap().to_nurbs().unwrap();
+    let ext = Surface::Extrusion(Arc::new(
+        Extrusion::new(Curve::Nurbs(Arc::new(nc)), Vector3::new(0.0, 0.1, 1.0)).unwrap(),
+    ));
+    let p = plane(Point3::new(0.0, 0.0, 0.3), Vector3::new(0.2, 0.1, 1.0));
+    let topo = trace(&ext, &p, &region()).unwrap();
+    assert_eq!(topo.branches.len(), 1, "{topo:?}");
+    assert!(topo.branches[0].closed);
+    // A revolution of an off-axis circle (a torus) and the same torus's
+    // exact NURBS, each cut by a plane through the axis: two loops.
+    let meridian = Frame::new(
+        Point3::new(1.2, 0.0, 0.0),
+        Vector3::new(0.0, -1.0, 0.0),
+        Vector3::new(1.0, 0.0, 0.0),
+    )
+    .unwrap();
+    let rev = Surface::Revolution(Arc::new(
+        Revolution::new(
+            Frame::WORLD,
+            Curve::Circle(Circle::new(meridian, 0.4).unwrap()),
+        )
+        .unwrap(),
+    ));
+    let torus = Surface::Torus(Torus::new(Frame::WORLD, 1.2, 0.4).unwrap());
+    let (nt, _) = torus.to_nurbs([[0.0, TAU], [0.0, TAU]]).unwrap();
+    let through = plane(Point3::ORIGIN, Vector3::new(0.3, 1.0, 0.0));
+    for s in [rev, Surface::Nurbs(Arc::new(nt))] {
+        let topo = trace(&s, &through, &region()).unwrap();
+        assert_eq!(topo.branches.len(), 2, "{s:?}: {topo:?}");
+        for b in &topo.branches {
+            assert!(b.closed);
+            for &q in &b.points {
+                assert!(s.distance(q) <= 1e-9 && through.distance(q) <= 1e-9);
+            }
+        }
+    }
 }

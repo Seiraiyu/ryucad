@@ -105,6 +105,61 @@ proptest! {
     }
 }
 
+/// An analytic surface's exact NURBS form over a box of its parameters
+/// holding the part near the origin (one nappe of a cone, a sphere short
+/// of its poles).
+fn spline_of(s: &Surface) -> Surface {
+    let tau = core::f64::consts::TAU;
+    let range = match s {
+        Surface::Plane(_) => [[-4.0, 4.0], [-4.0, 4.0]],
+        Surface::Cone(k) => [[0.0, tau], [k.apex_v() + 0.05, k.apex_v() + 6.0]],
+        Surface::Sphere(_) => [[0.0, tau], [-1.5, 1.5]],
+        Surface::Torus(_) => [[0.0, tau], [0.0, tau]],
+        _ => [[0.0, tau], [-4.0, 4.0]],
+    };
+    let (n, _) = s.to_nurbs(range).unwrap();
+    Surface::Nurbs(std::sync::Arc::new(n))
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    /// A curve meets an analytic surface's exact NURBS form where it meets
+    /// the surface, by the subdivision there and the implicit form here.
+    #[test]
+    fn hits_on_exact_splines_agree(s in surface(), (c, range) in curve()) {
+        let n = spline_of(&s);
+        let want = curve_surface(&c, range, &s, LINEAR_RESOLUTION).unwrap();
+        // Only hits the spline covers, apart from each other, compare.
+        let ts: Vec<f64> = want
+            .iter()
+            .map(|h| match h {
+                CurveHit::Point { t, .. } => *t,
+                CurveHit::On { t } => t[0],
+            })
+            .collect();
+        let covered = want.iter().all(|h| match h {
+            CurveHit::Point { point, .. } => n.distance(*point) <= 1e-9,
+            CurveHit::On { .. } => false,
+        });
+        let apart = ts.windows(2).all(|w| c.point(w[0]).distance(c.point(w[1])) > 1e-4);
+        prop_assume!(covered && apart);
+        let got = curve_surface(&c, range, &n, LINEAR_RESOLUTION);
+        prop_assert!(got.is_ok(), "{:?}", got);
+        let got = got.unwrap();
+        prop_assert_eq!(got.len(), want.len(), "{:?} vs {:?}", got, want);
+        for (g, w) in got.iter().zip(&want) {
+            let (CurveHit::Point { t: tg, before: bg, after: ag, .. },
+                 CurveHit::Point { t: tw, before: bw, after: aw, .. }) = (g, w) else {
+                prop_assert!(false, "{:?} vs {:?}", got, want);
+                unreachable!()
+            };
+            prop_assert!(c.point(*tg).distance(c.point(*tw)) <= 1e-6, "{:?} vs {:?}", got, want);
+            prop_assert_eq!((bg, ag), (bw, aw), "{:?} vs {:?}", got, want);
+        }
+    }
+}
+
 /// A surface of each kind about `axis`'s frame, offset along it.
 fn about(axis: Frame, kind: usize, r: f64, a: f64, shift: f64) -> Surface {
     let f = Frame::new(

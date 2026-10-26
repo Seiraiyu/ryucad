@@ -38,7 +38,9 @@ use super::Fault;
 use crate::geom::{Curve, Frame, Plane, Point3, Surface};
 use crate::intersect::broad::BoxTree;
 use crate::intersect::coincide::coincident;
-use crate::intersect::{FaceMeet, Place, face_beside, face_box, face_face, point_in_face};
+use crate::intersect::{
+    FaceMeet, Place, face_beside, face_box, face_face, face_face_within, point_in_face,
+};
 use crate::topo::{Body, EdgeId, FaceId, VertexId};
 use rayon::prelude::*;
 
@@ -151,7 +153,20 @@ fn pair(body: &Body, a: FaceId, b: FaceId) -> Option<Fault> {
     if tangent && apart_beside(body, a, b, &shared) {
         return None;
     }
-    match face_face((body, a), (body, b)) {
+    // Faces touching at a vertex they share touch at a corner of both
+    // boxes, where the region's sides cut the trace: again with the
+    // region reaching an eighth of the smaller face's size past it.
+    let meet = face_face((body, a), (body, b)).or_else(|e| {
+        if shared_vertices(body, a, b).is_empty() {
+            return Err(e);
+        }
+        let size = |f: FaceId| {
+            let x = face_box(body, f);
+            (x.max() - x.min()).length()
+        };
+        face_face_within((body, a), (body, b), size(a).min(size(b)) / 8.0)
+    });
+    match meet {
         Ok(meet @ FaceMeet::Coincident { .. }) => overlap(body, a, b, &meet),
         Ok(meet) => fault(a, b, &prune(body, a, b, meet)),
         // Faces crossing at an edge they share where it can't be traced (a
@@ -242,11 +257,8 @@ fn apart_beside(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId]) -> bool {
     }
 }
 
-/// Whether two faces sharing vertices but no edge, which may touch at
-/// those vertices as tangent wedges do, are certified apart outside the
-/// balls round them as wide as the reach allows a tangent wedge
-/// ([`face_beside`]), one face keeping off the other's surface there.
-fn apart_at_vertices(body: &Body, a: FaceId, b: FaceId) -> bool {
+/// The vertices two faces both have, each once.
+fn shared_vertices(body: &Body, a: FaceId, b: FaceId) -> Vec<VertexId> {
     let vertices = |f: FaceId| -> Vec<VertexId> {
         body.face_loops(f)
             .flat_map(|l| {
@@ -260,6 +272,15 @@ fn apart_at_vertices(body: &Body, a: FaceId, b: FaceId) -> bool {
     let mut shared: Vec<VertexId> = vertices(a).into_iter().filter(|v| vb.contains(v)).collect();
     shared.sort();
     shared.dedup();
+    shared
+}
+
+/// Whether two faces sharing vertices but no edge, which may touch at
+/// those vertices as tangent wedges do, are certified apart outside the
+/// balls round them as wide as the reach allows a tangent wedge
+/// ([`face_beside`]), one face keeping off the other's surface there.
+fn apart_at_vertices(body: &Body, a: FaceId, b: FaceId) -> bool {
+    let shared = shared_vertices(body, a, b);
     if shared.is_empty() {
         return false;
     }
