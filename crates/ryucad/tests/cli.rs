@@ -55,7 +55,8 @@ impl Pair {
             .env("RYUCAD_RUNTIME_DIR", &self.run)
             .env("RYUCAD_IDLE_TIMEOUT", "60")
             .env("RYUCAD_CONFIG_DIR", self.run.with_file_name("config"))
-            .env("RYUCAD_CACHE_DIR", self.run.with_file_name("cache"));
+            // Each project its own disk cache, as two machines would have.
+            .env("RYUCAD_CACHE_DIR", root.with_extension("cache"));
         if root == self.direct {
             cmd.env("RYUCAD_NO_DAEMON", "1");
         }
@@ -999,6 +1000,8 @@ fn every_protocol_method_has_a_command() {
         ("render", &["render"]),
         ("doctor", &["doctor"]),
         ("doctor.repair", &["doctor"]),
+        ("cache.stats", &["cache", "stats"]),
+        ("cache.clear", &["cache", "clear"]),
         ("config.get", &["config", "get"]),
         ("config.set", &["config", "set"]),
         ("redo", &["redo"]),
@@ -1018,6 +1021,40 @@ fn every_protocol_method_has_a_command() {
             .unwrap();
         assert!(out.status.success(), "ryucad {args:?} --help");
     }
+}
+
+#[test]
+fn the_disk_cache_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    let empty = p.ok(&["cache", "stats"]);
+    assert_eq!(
+        (&empty["enabled"], &empty["entries"]),
+        (&json!(true), &json!(0))
+    );
+    assert_eq!(empty["max_bytes"], 10u64 << 30);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=20", "--param",
+        "z=5",
+    ]);
+    p.ok(&["rebuild"]);
+    p.ok(&["mesh", "p"]);
+    let s = p.ok(&["cache", "stats"]);
+    assert_eq!(s["kinds"]["features"]["entries"], 1, "{s}");
+    assert_eq!(s["kinds"]["meshes"]["entries"], 1, "{s}");
+    assert_eq!(s["kinds"]["tools"]["entries"], 0, "{s}");
+    let c = p.ok(&["cache", "clear"]);
+    assert_eq!(c["removed"]["entries"], 2, "{c}");
+    assert_eq!(c["entries"], 0);
+    // The bound is a preference; setting it trims.
+    p.ok(&["config", "set", "cache.max_bytes", "67108864"]);
+    assert_eq!(p.ok(&["cache", "stats"])["max_bytes"], 67108864);
+    p.fails(
+        &["config", "set", "cache.max_bytes", "10"],
+        "invalid_setting",
+        1,
+    );
 }
 
 #[test]

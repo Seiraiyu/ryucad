@@ -268,6 +268,10 @@ enum Command {
     /// user preferences.
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// The disk cache of results and meshes, shared by every project on
+    /// this machine.
+    #[command(subcommand)]
+    Cache(CacheCmd),
     /// Display meshes of a part's bodies, by stable name.
     Mesh {
         part: String,
@@ -494,6 +498,14 @@ enum GitCmd {
         #[arg(long)]
         global: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum CacheCmd {
+    /// What the cache holds: entries and bytes, all and by kind.
+    Stats,
+    /// Remove every entry. What they held is rebuilt when next asked for.
+    Clear,
 }
 
 #[derive(Subcommand)]
@@ -1792,6 +1804,8 @@ fn request(cmd: &Command) -> Option<Request> {
             limit: Some(*limit),
             before: *before,
         },
+        Command::Cache(CacheCmd::Stats) => Request::CacheStats {},
+        Command::Cache(CacheCmd::Clear) => Request::CacheClear {},
         Command::Config(ConfigCmd::Get { key, scope }) => Request::ConfigGet {
             key: key.clone(),
             scope: scope.get(),

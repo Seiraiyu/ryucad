@@ -763,6 +763,13 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// What the disk cache of results and meshes holds: its folder, its
+    /// bound, and its entries and bytes, all and by kind.
+    #[serde(rename = "cache.stats")]
+    CacheStats {},
+    /// Empties the disk cache; answers what it removed.
+    #[serde(rename = "cache.clear")]
+    CacheClear {},
     /// The project's Git commits (or a part's), and what is uncommitted.
     #[serde(rename = "history.log")]
     HistoryLog {

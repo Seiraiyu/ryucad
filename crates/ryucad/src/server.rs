@@ -670,6 +670,12 @@ fn dispatch(
                 limit.unwrap_or(50),
             )
         }
+        Request::CacheStats {} => Ok(cache_stats(session.disk().map(|d| d.as_ref()), None)),
+        Request::CacheClear {} => {
+            let disk = session.disk().map(|d| d.as_ref());
+            let removed = disk.map(crate::cache::Disk::clear).unwrap_or_default();
+            Ok(cache_stats(disk, Some(removed)))
+        }
         Request::ConfigGet { key, scope } => {
             let scope = scope.as_deref().map(config::Scope::parse).transpose()?;
             let mut v = config::get(
@@ -704,6 +710,16 @@ fn dispatch(
                 }
                 config::Scope::User => config::set_user(&key, value)?,
             };
+            if key == "cache.max_bytes"
+                && let Some(d) = session.disk()
+            {
+                d.set_max_bytes(
+                    v["value"]
+                        .as_u64()
+                        .unwrap_or(crate::cache::DEFAULT_MAX_BYTES),
+                );
+                d.trim_in_background();
+            }
             if let Some(live) = live {
                 if key == "daemon.poll_ms" {
                     live.poll_ms = v["value"].as_u64().unwrap_or(250);
@@ -766,9 +782,14 @@ fn guarded<T>(
 ) -> Result<T> {
     let session = match slot {
         Some(s) => s,
-        None => slot.insert(
-            Session::open(root)?.with_disk(crate::cache::Disk::for_user().map(std::sync::Arc::new)),
-        ),
+        None => {
+            // A daemon's first request trims what earlier ones left.
+            let disk = crate::cache::Disk::for_user().map(std::sync::Arc::new);
+            if let Some(d) = &disk {
+                d.trim_in_background();
+            }
+            slot.insert(Session::open(root)?.with_disk(disk))
+        }
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(session))) {
         Ok(r) => r,
@@ -782,6 +803,29 @@ fn guarded<T>(
             Err(Error::new(Code::Internal, format!("internal error: {msg}")).with("panic", msg))
         }
     }
+}
+
+/// `cache.stats`' answer, and `cache.clear`'s with what it `removed`:
+/// whether there is a disk cache, its folder and bound, and what it holds.
+fn cache_stats(disk: Option<&crate::cache::Disk>, removed: Option<crate::cache::Stats>) -> Value {
+    let mut v = match disk {
+        Some(d) => {
+            let mut v = d.stats().to_json();
+            v["enabled"] = json!(true);
+            v["folder"] = json!(d.root());
+            v["max_bytes"] = json!(d.max_bytes());
+            v
+        }
+        None => {
+            let mut v = crate::cache::Stats::default().to_json();
+            v["enabled"] = json!(false);
+            v
+        }
+    };
+    if let Some(r) = removed {
+        v["removed"] = r.to_json();
+    }
+    v
 }
 
 fn project_info(session: &Session) -> Value {
