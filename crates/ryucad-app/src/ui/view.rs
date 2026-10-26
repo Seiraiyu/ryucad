@@ -18,6 +18,9 @@ use ryucad::view::{self, StandardView};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// A mate frame's name (`a` or `b`) and where its origin is.
+pub type FrameName = (String, [f64; 3]);
+
 /// What the window's viewport keeps between frames.
 pub struct View {
     pub nav: Nav,
@@ -314,6 +317,8 @@ impl View {
         if let Some(h) = &self.hover {
             wanted.push((h.entity.clone(), style::HOVER));
         }
+        // A mate chosen in the tree: its connectors' frames.
+        let (frame_lines, _) = self.mate_frames(ws);
         let chosen = self.chosen.clone();
         let chosen_sketch = chosen
             .as_ref()
@@ -356,7 +361,7 @@ impl View {
                 }
             }
         }
-        let mut lines = Vec::new();
+        let mut lines = frame_lines;
         // A sketch chosen in the tree: all of it.
         if let Some(d) = chosen_sketch {
             let c = style::CHOSEN;
@@ -371,6 +376,41 @@ impl View {
             }
         }
         (faces, lines)
+    }
+
+    /// The frames of the mate chosen in the tree, as both its connectors
+    /// sit in the assembly as solved: each frame's x, y and z axes as
+    /// lines from its origin, a tenth of the model's size long, and its
+    /// name (`a` or `b`) at its origin.
+    pub fn mate_frames(&mut self, ws: &Workspace) -> (Vec<(Place, Rgb)>, Vec<FrameName>) {
+        let frames = self.chosen.as_ref().and_then(|k| {
+            ws.model
+                .parts
+                .get(&k.0)?
+                .feature(&k.1)?
+                .mate
+                .as_ref()?
+                .frames
+        });
+        let Some(frames) = frames else {
+            return (Vec::new(), Vec::new());
+        };
+        let length = self
+            .bounds(ws)
+            .map_or(0.01, |(lo, hi)| {
+                let d = [0, 1, 2].map(|k| hi[k] - lo[k]);
+                (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() / 10.0
+            })
+            .max(1e-3);
+        let mut lines = Vec::new();
+        let mut names = Vec::new();
+        for (name, f) in ["a", "b"].iter().zip(frames) {
+            for (end, c) in f.axes(length).into_iter().zip(style::AXES) {
+                lines.push((Place::Edge(vec![f.origin, end]), c));
+            }
+            names.push(((*name).to_owned(), f.origin));
+        }
+        (lines, names)
     }
 
     /// Highlight labels and where they go: the middle of what each
@@ -750,6 +790,18 @@ impl View {
         }
         if self.sketches {
             self.dimension_labels(ui, ws, rect, &pr);
+        }
+        let (_, frame_names) = self.mate_frames(ws);
+        for (name, at) in frame_names {
+            if let Some(s) = to_screen(at).filter(|s| rect.contains(*s)) {
+                painter.text(
+                    s + egui::vec2(6.0, -6.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    name,
+                    egui::FontId::proportional(13.0),
+                    style::color32(style::CHOSEN),
+                );
+            }
         }
         for (i, (text, at, c)) in self.labels(ws).into_iter().enumerate() {
             let Some(s) = to_screen(at).filter(|s| rect.contains(*s)) else {

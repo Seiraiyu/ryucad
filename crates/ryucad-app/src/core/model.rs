@@ -59,14 +59,15 @@ pub struct Placed {
 }
 
 /// A mate: its form (`revolute` and so on), its connectors as requests
-/// give them, and its state in the solve when it built (`well`,
-/// `redundant`).
+/// give them, its state in the solve when it built (`well`,
+/// `redundant`), and both connectors' frames in the assembly as solved.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MateInfo {
     pub form: String,
     pub a: String,
     pub b: String,
     pub state: Option<String>,
+    pub frames: Option<[Pose; 2]>,
 }
 
 impl MateInfo {
@@ -149,6 +150,12 @@ impl Pose {
     pub fn apply(&self, p: [f64; 3]) -> [f64; 3] {
         let t = self.turn(p);
         [0, 1, 2].map(|k| t[k] + self.origin[k])
+    }
+
+    /// The ends of its x, y and z axes drawn `length` long from its
+    /// origin.
+    pub fn axes(&self, length: f64) -> [[f64; 3]; 3] {
+        [self.x, self.y, self.z].map(|a| [0, 1, 2].map(|k| self.origin[k] + a[k] * length))
     }
 
     /// A direction in the model's frame, in the part's.
@@ -284,6 +291,16 @@ impl Part {
                             a: text(&m["a"]),
                             b: text(&m["b"]),
                             state: m["state"].as_str().map(str::to_owned),
+                            frames: m.get("frames").map(|f| {
+                                let pose = |p: &Value| {
+                                    Pose::of(
+                                        triple(&p["origin_m"]),
+                                        triple(&p["z"]),
+                                        triple(&p["x"]),
+                                    )
+                                };
+                                [pose(&f["a"]), pose(&f["b"])]
+                            }),
                         }),
                         copies: f["copies"]
                             .as_array()
@@ -974,7 +991,9 @@ mod tests {
                               "solve": {"state": "under", "dof": 1}}},
                 {"id": "m1", "type": "mate", "ok": true, "hash": "y",
                  "mate": {"state": "redundant", "form": "revolute",
-                          "a": format!("frame/base/slab/{n}"), "b": "frame/ring:2/pin"}},
+                          "a": format!("frame/base/slab/{n}"), "b": "frame/ring:2/pin",
+                          "frames": {"a": {"origin_m": [0.02, 0.01, 0.005], "z": [0, 0, 1], "x": [1, 0, 0]},
+                                     "b": {"origin_m": [0.02, 0.01, 0.005], "z": [0, 0, -1], "x": [0, 1, 0]}}}},
                 {"id": "ring", "type": "instance_pattern", "ok": true, "hash": "z",
                  "copies": [{"copy": "ring:1", "seed": "pin"}, {"copy": "ring:2", "seed": "pin"}]},
             ],
@@ -999,6 +1018,14 @@ mod tests {
             Some(("base/slab".into(), n.into()))
         );
         assert_eq!(MateInfo::face_of(&m.b), None);
+        // Both connectors' frames as solved; b turned over.
+        let [fa, fb] = m.frames.unwrap();
+        assert_eq!(fa.origin, [0.02, 0.01, 0.005]);
+        assert_eq!(fb.z, [0.0, 0.0, -1.0]);
+        assert_eq!(fb.y, [1.0, 0.0, 0.0], "z × x");
+        let axes = fa.axes(0.01);
+        assert_eq!(axes[0], [0.03, 0.01, 0.005]);
+        assert_eq!(axes[2], [0.02, 0.01, 0.015]);
         assert_eq!(p.features[2].copies, ["ring:1/pin", "ring:2/pin"]);
         assert_eq!(p.solve.as_ref().unwrap().dof, 1);
         // A copy's solids are under the pattern that places it.

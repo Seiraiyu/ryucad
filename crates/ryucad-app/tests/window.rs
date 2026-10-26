@@ -1789,6 +1789,28 @@ fn a_mates_angle_is_edited_in_the_property_panel() {
     h.get_by_label("ring:2/pin");
     h.get_by_label("m1 (revolute: base -> pin)").click();
     frames(&mut h, |a| a.opened().ws.form.is_some());
+    // Chosen, the mate draws both its connectors' frames: three axes each,
+    // from where the report says they are.
+    let (lines, names) = {
+        let o = h.state_mut().opened_mut();
+        o.view.mate_frames(&o.ws)
+    };
+    assert_eq!(lines.len(), 6);
+    assert_eq!(
+        names.iter().map(|n| n.0.as_str()).collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    let report = p.ok(&["rebuild", "frame"]);
+    let m1 = report["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "m1")
+        .unwrap()
+        .clone();
+    let origin = |v: &serde_json::Value| [0, 1, 2].map(|k| v[k].as_f64().unwrap());
+    assert_eq!(names[0].1, origin(&m1["mate"]["frames"]["a"]["origin_m"]));
+    assert_eq!(names[1].1, origin(&m1["mate"]["frames"]["b"]["origin_m"]));
     h.step();
     let field = h.get_all_by_value("30 deg").next().unwrap();
     field.set_text_value_accesskit("45 deg");

@@ -1889,6 +1889,7 @@ mod tests {
             a: "frame/base/slab/0123456789abcdef0123456789abcdef".into(),
             b: "frame/ring:2/pin".into(),
             state: Some("redundant".into()),
+            frames: None,
         });
         assert_eq!(
             row_text(&m, 0),
