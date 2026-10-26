@@ -2461,6 +2461,26 @@ fn check_up_to(
     }
 }
 
+/// Every feature type `feature.add` makes.
+const FEATURE_TYPES: [&str; 16] = [
+    "box",
+    "cylinder",
+    "cone",
+    "sphere",
+    "torus",
+    "sketch",
+    "extrude",
+    "revolve",
+    "boolean",
+    "fillet",
+    "chamfer",
+    "hole",
+    "pattern",
+    "instance",
+    "mate",
+    "instance_pattern",
+];
+
 fn feature_add(
     session: &mut Session,
     part: &str,
@@ -2477,6 +2497,16 @@ fn feature_add(
     let mut list = order(p)?;
     let env = p.env.clone();
     let at = insert_at(&list, position)?;
+    // A feature its part can't hold is refused before its fields are read.
+    if FEATURE_TYPES.contains(&ty) {
+        let fid = match id {
+            Some(id) => feature_id(id)?,
+            None => Id::generate(ty, |s| p.features.keys().any(|f| f.as_str() == s)),
+        };
+        if let Some(e) = crate::assembly::kind_error_of(p, &fid, ty) {
+            return Err(e);
+        }
+    }
     // A pattern with no targets acts on its first seed's.
     if ty == "pattern" && given.fields.targets.is_none() {
         let seed = given.fields.features.as_ref().and_then(|s| s.first());

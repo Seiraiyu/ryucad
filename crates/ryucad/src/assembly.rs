@@ -370,21 +370,22 @@ fn placed_hash(part: &Id, rev: &Rev, fixed: bool, pose: &Rigid, model: &Model) -
 /// mate or an instance pattern in a part, or anything else in an
 /// assembly.
 pub fn kind_error(part: &Part, id: &Id, f: &Feature) -> Option<Error> {
+    kind_error_of(part, id, f.type_name())
+}
+
+/// [`kind_error`] by a feature's type name, so a write can refuse a
+/// feature its part doesn't hold before reading its fields.
+pub fn kind_error_of(part: &Part, id: &Id, ty: &str) -> Option<Error> {
     let kind = part.file.as_ref().map_or(PartKind::Part, |p| p.kind);
-    let why = match (kind, assembles(f)) {
+    let assembles = matches!(ty, "instance" | "mate" | "instance_pattern");
+    let why = match (kind, assembles) {
         (PartKind::Part, true) => format!(
-            "{id} is {} {}, and {} is a part: only assemblies place parts",
-            if f.type_name() == "instance" {
-                "an"
-            } else {
-                "a"
-            },
-            f.type_name(),
+            "{id} is {} {ty}, and {} is a part: only assemblies place parts",
+            if ty == "instance" { "an" } else { "a" },
             part.id
         ),
         (PartKind::Assembly, false) => format!(
-            "{id} is a {}, and {} is an assembly: assemblies hold only instances, mates and instance patterns",
-            f.type_name(),
+            "{id} is a {ty}, and {} is an assembly: assemblies hold only instances, mates and instance patterns",
             part.id
         ),
         _ => return None,
@@ -394,7 +395,7 @@ pub fn kind_error(part: &Part, id: &Id, f: &Feature) -> Option<Error> {
             .with("part", &part.id)
             .with("feature", id)
             .with("kind", kind.as_str())
-            .with("type", f.type_name()),
+            .with("type", ty),
     )
 }
 
@@ -1802,6 +1803,11 @@ pub(crate) mod tests {
             )),
             Code::WrongPartKind
         );
+        // The part's kind is judged before the feature's own fields (#94).
+        for (part, ty) in [("frame", "box"), ("frame", "sketch"), ("bolt", "mate")] {
+            let e = call(&mut s, "feature.add", json!({"part": part, "type": ty})).unwrap_err();
+            assert_eq!(e.code, Code::WrongPartKind, "{ty} in {part}: {e:?}");
+        }
         assert_eq!(code(add(&mut s, "frame", json!({}))), Code::InvalidParam);
         assert_eq!(
             code(add(&mut s, "frame", json!({"of": "nothing"}))),
