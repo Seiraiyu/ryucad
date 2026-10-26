@@ -197,6 +197,19 @@ pub fn run(
             }
         }
     }
+    // A modify/delete kept and added while the merged list still leaves it
+    // out (issue #90): unmerged for ryucad, though not for Git's index.
+    for c in crate::validate::kept_unlisted_now(session)? {
+        let mine = ids.iter().any(|id| c["concerns"]["part"] == id.as_str());
+        if mine {
+            findings.push(json!({
+                "code": "unmerged_path", "severity": severity("unmerged_path"),
+                "files": c["files"], "part": c["concerns"]["part"],
+                "feature": c["concerns"]["feature"],
+                "message": format!("{}: settle it with `ryucad merge resolve {} --ours|--theirs`", c["message"].as_str().unwrap_or_default(), c["id"].as_str().unwrap_or_default()),
+            }));
+        }
+    }
     // A part's release findings belong to it, whether or not the part is
     // still there.
     let one = part.map(crate::server::part_id).transpose()?;
