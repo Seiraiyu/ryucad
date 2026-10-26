@@ -57,6 +57,17 @@ const MAX_LEAVES: usize = 1 << 18;
 pub(crate) struct Topology {
     pub(crate) branches: Vec<Traced>,
     pub(crate) points: Vec<Point3>,
+    /// Curves along which the surfaces touch (only the general tracer
+    /// finds them).
+    pub(crate) tangents: Vec<TangentTrace>,
+}
+
+/// A curve along which two surfaces touch, traced in both surfaces'
+/// parameters `[u, v, s, t]`, in order along it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TangentTrace {
+    pub(crate) params: Vec<[f64; 4]>,
+    pub(crate) closed: bool,
 }
 
 /// One branch: points along it in order, the first and last at its ends

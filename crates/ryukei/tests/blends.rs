@@ -530,24 +530,9 @@ fn holes_of(spec: &[(f64, f64, f64)]) -> Body {
         .0
 }
 
-/// Faults of the self-intersection check other than two pipe faces
-/// meeting tangentially along an edge (a fillet rolling on an earlier
-/// pipe fillet), which neither surface's implicit form can separate
-/// (phase 8).
+/// Faults of the self-intersection check.
 fn faults_but_pipe_rails(b: &Body) -> Vec<ryukei::check::Fault> {
-    use ryukei::geom::Surface;
-    let pipe = |f| {
-        matches!(
-            b.surface(b.face(f).unwrap().surface),
-            Some(Surface::Pipe(_))
-        )
-    };
     check_intersections(b)
-        .into_iter()
-        .filter(
-            |f| !matches!(f, ryukei::check::Fault::CannotCheck { a, b } if pipe(*a) && pipe(*b)),
-        )
-        .collect()
 }
 
 #[test]

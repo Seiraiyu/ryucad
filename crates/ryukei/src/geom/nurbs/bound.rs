@@ -455,10 +455,12 @@ impl Net {
     }
 }
 
-/// Bounds on one Bézier patch over a local box `[s, t]`, and on its
-/// first derivatives' lengths `|S_u|` and `|S_v|`. As for curves, the
-/// derivative nets are taken over the whole patch before the cut.
-fn patch_piece(patch: &BezierPatch, s: [f64; 2], t: [f64; 2]) -> (SurfaceBound, [f64; 2]) {
+/// Enclosures of one Bézier patch's point and its first and second
+/// derivatives over a local box `[s, t]`: `[S, Su, Sv, Suu, Suv, Svv]`,
+/// the point relative to the returned centre. As for curves, the
+/// derivative nets are taken over the whole patch before the cut. `None`
+/// where the patch's parameter ranges can't be inverted.
+fn patch_jets(patch: &BezierPatch, s: [f64; 2], t: [f64; 2]) -> Option<(Vector3, [V3; 6])> {
     let [p, q] = patch.degrees;
     let net = Net {
         pts: patch.pts.iter().map(|h| hom(h.p, h.w)).collect(),
@@ -472,23 +474,9 @@ fn patch_piece(patch: &BezierPatch, s: [f64; 2], t: [f64; 2]) -> (SurfaceBound, 
         rows: net.rows,
         cols: net.cols,
     };
-    let unbounded = (
-        SurfaceBound {
-            duu: f64::INFINITY,
-            duv: f64::INFINITY,
-            dvv: f64::INFINITY,
-            turn_u: f64::INFINITY,
-            turn_v: f64::INFINITY,
-        },
-        [f64::INFINITY; 2],
-    );
     let [ru, rv] = patch.range;
-    let (Some(iu), Some(iv)) = (
-        pt(1.0).checked_div(pt(ru[1]) - pt(ru[0])),
-        pt(1.0).checked_div(pt(rv[1]) - pt(rv[0])),
-    ) else {
-        return unbounded;
-    };
+    let iu = pt(1.0).checked_div(pt(ru[1]) - pt(ru[0]))?;
+    let iv = pt(1.0).checked_div(pt(rv[1]) - pt(rv[0]))?;
     let (fp, fq) = (p as f64, q as f64);
     let nu = whole.diff_u(pt(fp) * iu);
     let nv = whole.diff_v(pt(fq) * iv);
@@ -513,6 +501,24 @@ fn patch_piece(patch: &BezierPatch, s: [f64; 2], t: [f64; 2]) -> (SurfaceBound, 
         ),
         w,
     );
+    Some((at, [c, su, sv, suu, suv, svv]))
+}
+
+/// Bounds on one Bézier patch over a local box `[s, t]`, and on its
+/// first derivatives' lengths `|S_u|` and `|S_v|`.
+fn patch_piece(patch: &BezierPatch, s: [f64; 2], t: [f64; 2]) -> (SurfaceBound, [f64; 2]) {
+    let Some((_, [_, su, sv, suu, suv, svv])) = patch_jets(patch, s, t) else {
+        return (
+            SurfaceBound {
+                duu: f64::INFINITY,
+                duv: f64::INFINITY,
+                dvv: f64::INFINITY,
+                turn_u: f64::INFINITY,
+                turn_v: f64::INFINITY,
+            },
+            [f64::INFINITY; 2],
+        );
+    };
     // The unit normal n = N / |N| turns at most |N_u| / |N| along u, with
     // N_u = Suu × Sv + Su × Suv (and likewise along v).
     let n_min = norm_lo(cross3(su, sv));
@@ -585,6 +591,47 @@ impl NurbsSurface {
             }
         }
         (out, first)
+    }
+
+    /// Enclosures of the point and its first and second derivatives at
+    /// every parameter of the box, `[S, Su, Sv, Suu, Suv, Svv]`, clipped
+    /// to the domain (periodic directions wrap): the hull of each Bézier
+    /// patch's enclosures over the part of the box it holds. Unbounded
+    /// where a patch's ranges can't be inverted.
+    pub(crate) fn jet_box(&self, [ru, rv]: [[f64; 2]; 2]) -> [V3; 6] {
+        let (pu, pv) = self.periods();
+        let [du, dv] = self.domain();
+        let (cu, cv) = (clip(du, pu, ru), clip(dv, pv, rv));
+        let all = Iv::new(f64::NEG_INFINITY, f64::INFINITY).expect("ordered");
+        let mut out: Option<[V3; 6]> = None;
+        for patch in self.patches() {
+            for &a in &cu {
+                let Some(s) = local(patch.range[0], a) else {
+                    continue;
+                };
+                for &b in &cv {
+                    let Some(t) = local(patch.range[1], b) else {
+                        continue;
+                    };
+                    let j = match patch_jets(patch, s, t) {
+                        Some((at, mut j)) => {
+                            j[0] = add3(j[0], [pt(at.x), pt(at.y), pt(at.z)]);
+                            j
+                        }
+                        None => [[all; 3]; 6],
+                    };
+                    out = Some(match out {
+                        None => j,
+                        Some(o) => core::array::from_fn(|k| hull3(o[k], j[k])),
+                    });
+                }
+            }
+        }
+        out.unwrap_or_else(|| {
+            let u = ru[0].clamp(du[0], du[1]);
+            let v = rv[0].clamp(dv[0], dv[1]);
+            self.jet_box([[u, u], [v, v]])
+        })
     }
 }
 

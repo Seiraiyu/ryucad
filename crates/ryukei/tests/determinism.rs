@@ -899,6 +899,179 @@ fn intersections_section(golden: &mut Golden) {
     }
 }
 
+/// Intersections where a surface has no implicit form: curves against
+/// splines and swept surfaces, splines against analytic surfaces and each
+/// other, coincidence, and the self-intersection check of a swept body.
+fn general_section(golden: &mut Golden) {
+    use ryukei::geom::{Extrusion, Revolution};
+    use ryukei::intersect::{CurveHit, SurfaceHit, curve_surface, surface_surface};
+    use std::sync::Arc;
+    let mut s = golden.section("general");
+    let f = |o: (f64, f64, f64), z: (f64, f64, f64)| {
+        Frame::new(
+            Point3::new(o.0, o.1, o.2),
+            Vector3::new(z.0, z.1, z.2),
+            Vector3::new(1.0, 0.2, 0.1),
+        )
+        .unwrap()
+    };
+    let tau = core::f64::consts::TAU;
+    let z = (0.0, 0.0, 1.0);
+    let spline =
+        |s: Surface, range: [[f64; 2]; 2]| Surface::Nurbs(Arc::new(s.to_nurbs(range).unwrap().0));
+    let circle = Circle::new(f((0.2, 0.1, 0.0), (0.1, 0.0, 1.0)), 0.8).unwrap();
+    let meridian = Frame::new(
+        Point3::new(1.5, 0.0, 0.0),
+        Vector3::new(0.0, -1.0, 0.0),
+        Vector3::new(1.0, 0.0, 0.0),
+    )
+    .unwrap();
+    let surfaces = [
+        spline(
+            Surface::Plane(Plane::new(f((0.0, 0.0, 0.3), (0.2, 0.1, 1.0)))),
+            [[-2.0, 2.0], [-2.0, 2.0]],
+        ),
+        spline(
+            Surface::Cylinder(Cylinder::new(f((0.0, 0.0, 0.0), z), 1.0).unwrap()),
+            [[0.0, tau], [-2.0, 2.0]],
+        ),
+        spline(
+            Surface::Sphere(Sphere::new(f((1.2, 0.0, 0.0), z), 1.0).unwrap()),
+            [[0.0, tau], [-1.4, 1.4]],
+        ),
+        Surface::Extrusion(Arc::new(
+            Extrusion::new(
+                Curve::Nurbs(Arc::new(circle.to_nurbs().unwrap().0)),
+                Vector3::new(0.1, 0.2, 1.0),
+            )
+            .unwrap(),
+        )),
+        Surface::Revolution(Arc::new(
+            Revolution::new(
+                Frame::WORLD,
+                Curve::Circle(Circle::new(meridian, 0.5).unwrap()),
+            )
+            .unwrap(),
+        )),
+    ];
+    let mut g = Lcg::new(0x6765_6e65);
+    for surface in &surfaces {
+        for _ in 0..6 {
+            let o = Point3::new(
+                g.next_f64(-2.0, 2.0),
+                g.next_f64(-2.0, 2.0),
+                g.next_f64(-2.0, 2.0),
+            );
+            let d = Vector3::new(
+                g.next_f64(-1.0, 1.0),
+                g.next_f64(-1.0, 1.0),
+                g.next_f64(-1.0, 1.0),
+            );
+            let Ok(line) = Line::new(o, d) else { continue };
+            match curve_surface(&Curve::Line(line), [-5.0, 5.0], surface, 1e-8) {
+                Err(_) => s.u64(99),
+                Ok(hits) => {
+                    for h in hits {
+                        match h {
+                            CurveHit::Point { t, point, .. } => {
+                                s.f64(t);
+                                s.f64(point.x);
+                            }
+                            CurveHit::On { t } => {
+                                s.f64(t[0]);
+                                s.f64(t[1]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let analytic = [
+        Surface::Plane(Plane::new(f((0.0, 0.2, 0.0), (1.0, 0.3, 0.2)))),
+        Surface::Cylinder(Cylinder::new(f((0.0, 0.3, 0.0), (1.0, 0.0, 0.0)), 0.6).unwrap()),
+        Surface::Sphere(Sphere::new(f((0.0, 0.0, 1.5), z), 2.0).unwrap()),
+    ];
+    let region = Box3::new(Point3::new(-6.0, -6.0, -6.0), Point3::new(6.0, 6.0, 6.0));
+    let mut pairs: Vec<(&Surface, &Surface)> = Vec::new();
+    for a in &surfaces {
+        pairs.push((a, &analytic[0]));
+    }
+    pairs.push((&surfaces[1], &analytic[1]));
+    pairs.push((&surfaces[2], &analytic[2]));
+    pairs.push((&surfaces[0], &surfaces[1]));
+    pairs.push((&surfaces[1], &surfaces[2]));
+    pairs.push((&surfaces[3], &surfaces[0]));
+    pairs.push((&surfaces[4], &surfaces[0]));
+    for (a, b) in pairs {
+        match surface_surface(a, b, &region) {
+            Err(_) => s.u64(99),
+            Ok(SurfaceHit::Coincident { same }) => s.u64(u64::from(same)),
+            Ok(SurfaceHit::Meet { branches, points }) => {
+                for br in branches {
+                    s.f64(br.tolerance);
+                    s.u64(u64::from(br.tangent));
+                    for k in 0..=8 {
+                        let t = br.range[0] + (br.range[1] - br.range[0]) * f64::from(k) / 8.0;
+                        let p = br.curve.point(t);
+                        for x in [p.x, p.y, p.z] {
+                            s.f64(x);
+                        }
+                        for (c2, map) in &br.pcurves {
+                            let q = c2.point(map[0] + map[1] * t);
+                            s.f64(q.x);
+                            s.f64(q.y);
+                        }
+                    }
+                }
+                for p in points {
+                    s.f64(p.x);
+                }
+            }
+        }
+    }
+    // Coincident: a spline and its analytic surface, a part of it.
+    let cyl = Surface::Cylinder(Cylinder::new(f((0.0, 0.0, 0.0), z), 1.0).unwrap());
+    let part = spline(cyl.clone(), [[0.0, tau], [-0.5, 0.7]]);
+    for (a, b) in [(&surfaces[1], &cyl), (&part, &surfaces[1])] {
+        match surface_surface(a, b, &region) {
+            Ok(SurfaceHit::Coincident { same }) => s.u64(u64::from(same)),
+            _ => s.u64(99),
+        }
+    }
+    // The self-intersection check of a periodic cubic blob extruded, its
+    // side an extrusion meeting its planar caps.
+    let n = 8;
+    let pts: Vec<Point2> = (0..n)
+        .map(|i| {
+            let (sn, cs) = ryukei::math::sin_cos(tau * f64::from(i) / f64::from(n));
+            let k = [1.0, 0.8, 1.1, 0.9][i as usize % 4];
+            Point2::new(k * cs, k * sn)
+        })
+        .collect();
+    let knots: Vec<f64> = (0..=n).map(f64::from).collect();
+    let kv = ryukei::geom::KnotVector::periodic(3, &knots, &vec![1; n as usize + 1]).unwrap();
+    let blob = Curve2::Nurbs2(Arc::new(
+        ryukei::geom::NurbsCurve2::new(kv, pts, None).unwrap(),
+    ));
+    let profile = ValidProfile::new(Profile {
+        frame: Frame::WORLD,
+        loops: vec![Loop {
+            key: LoopKey(1),
+            segments: vec![Segment {
+                key: SegmentKey(1),
+                curve: blob,
+                t0: 0.0,
+                t1: f64::from(n),
+            }],
+        }],
+    })
+    .unwrap();
+    let (body, _) =
+        ryukei::sweep::extrude(OpKey(4), &profile, Vector3::new(0.0, 0.2, 1.0), 0.0, 1.0).unwrap();
+    s.u64(ryukei::check::check_intersections(&body).len() as u64);
+}
+
 fn booleans_section(golden: &mut Golden) {
     use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
     let mut s = golden.section("booleans");
@@ -1511,6 +1684,7 @@ fn determinism() {
     meshes_section(&mut golden);
     sweeps_section(&mut golden);
     intersections_section(&mut golden);
+    general_section(&mut golden);
     booleans_section(&mut golden);
     pipes_section(&mut golden);
     blends_section(&mut golden);

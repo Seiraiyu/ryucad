@@ -13,13 +13,11 @@
 //! in the first face's parameter plane ([`crossings`]), and the pieces
 //! inside or along the other face are the rims of the overlap.
 //!
-//! A pipe face meets an analytic face as an analytic one does
-//! ([`surface_surface`] and [`curve_surface`] take pipes). Any other face
-//! on a surface that is not analytic may take part only if it is
-//! certified apart from the other face: the analytic surface's implicit
-//! form must have one certified sign on every Bézier patch of the other
-//! surface inside the region. Otherwise (two pipes among them) the pair
-//! is [`Failure::Unsupported`].
+//! Faces on any surfaces meet the same way ([`surface_surface`] and
+//! [`curve_surface`] take every surface). A NURBS or swept face and an
+//! analytic one whose implicit form has one certified sign on every
+//! Bézier patch of the first's exact NURBS form inside the region are
+//! apart without a trace.
 
 use super::Failure;
 use super::cs::{CurveHit, curve_surface};
@@ -100,22 +98,44 @@ impl FaceMeet {
 
 /// How face `a.1` of body `a.0` and face `b.1` of body `b.0` meet.
 pub fn face_face(a: (&Body, FaceId), b: (&Body, FaceId)) -> Result<FaceMeet, Failure> {
+    face_face_within(a, b, 0.0)
+}
+
+/// [`face_face`] with both faces' boxes grown by `margin` more before
+/// they are overlapped into the region the surfaces are intersected in.
+/// Faces touching at a vertex they share touch at a corner of both boxes,
+/// so the region's sides (and the patches cut to them) pass through the
+/// touch, where no crossing can be certified; a region reaching well
+/// past it leaves the touch inside a cell, where it is settled as a
+/// point. The stretches are the same: each is placed in both faces.
+pub(crate) fn face_face_within(
+    a: (&Body, FaceId),
+    b: (&Body, FaceId),
+    margin: f64,
+) -> Result<FaceMeet, Failure> {
     let faces = [a, b];
     let sa = surface_of(a)?;
     let sb = surface_of(b)?;
     let slack = max_tolerance(a).max(max_tolerance(b));
     let (ba, bb) = (face_box(a.0, a.1), face_box(b.0, b.1));
-    let Some(region) = overlap(&ba, &bb, slack) else {
+    let Some(region) = overlap(&ba, &bb, slack + margin) else {
         return Ok(FaceMeet::apart());
     };
+    // A NURBS or swept face certified apart from an analytic surface by
+    // the signs of its patches is apart at once, without a trace.
     let pipe = |s: &Surface| matches!(s, Surface::Pipe(_));
     match (Implicit::of(sa), Implicit::of(sb)) {
-        (Some(_), Some(_)) => {}
-        (Some(_), None) if pipe(sb) => {}
-        (None, Some(_)) if pipe(sa) => {}
-        (Some(i), None) => return certified_apart(&i, b, &region),
-        (None, Some(i)) => return certified_apart(&i, a, &region),
-        (None, None) => return Err(Failure::Unsupported),
+        (Some(i), None) if !pipe(sb) => {
+            if let Ok(apart) = certified_apart(&i, b, &region) {
+                return Ok(apart);
+            }
+        }
+        (None, Some(i)) if !pipe(sa) => {
+            if let Ok(apart) = certified_apart(&i, a, &region) {
+                return Ok(apart);
+            }
+        }
+        _ => {}
     }
     let (branches, points) = match surface_surface(sa, sb, &region)? {
         SurfaceHit::Coincident { same } => return coincident(faces, [sa, sb], same),
@@ -477,10 +497,13 @@ fn coincident(
             let (c2, map) =
                 match crate::pcurve::exact(plane, curve, edge.interval, edge.tolerance.get()) {
                     Some(p) => p,
-                    None => {
-                        let (n, _) = fit_pcurve(plane, curve, edge.interval)?;
-                        (Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0])
-                    }
+                    None => match fit_pcurve(plane, curve, edge.interval) {
+                        Ok((n, _)) => (Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0]),
+                        // An edge of a face on this very surface, too far
+                        // off it to fit (a tolerant edge read from a file),
+                        // has its own pcurve here.
+                        Err(err) => own_pcurve(body, face, e, surfaces[k] == plane).ok_or(err)?,
+                    },
                 };
             chains[k].push((e, c2, map, edge.interval));
         }
@@ -535,6 +558,19 @@ fn coincident(
         }
     }
     Ok(FaceMeet::Coincident { same, rims, whole })
+}
+
+/// The pcurve a fin of `edge` in `face` has, when the face's surface is
+/// the one wanted (`same`).
+fn own_pcurve(body: &Body, face: FaceId, edge: EdgeId, same: bool) -> Option<(Curve2, [f64; 2])> {
+    if !same {
+        return None;
+    }
+    body.edge_fins(edge).find_map(|fin| {
+        let f = &body.fins[fin];
+        let pc = f.pcurve?;
+        (body.loops[f.loop_].face == face).then(|| (body.curves2[pc.curve].clone(), pc.map))
+    })
 }
 
 /// The shifts by whole periods that bring curve `b` near curve `a` in the
@@ -899,7 +935,8 @@ mod tests {
                 "{g:?}"
             );
         }
-        // One cutting through it: unsupported.
+        // One cutting through it: its faces across the blob meet the side
+        // in stretches on both.
         let (through, _) = primitive::block(
             OpKey(3),
             1.0,
@@ -908,10 +945,19 @@ mod tests {
             &Rigid::translation(Vector3::new(0.5, -0.5, 0.25)),
         )
         .unwrap();
-        assert!(
-            faces_of(&through)
-                .into_iter()
-                .any(|g| face_face((&body, side), (&through, g)) == Err(Failure::Unsupported))
-        );
+        let mut met = 0;
+        for g in faces_of(&through) {
+            let FaceMeet::Meet { stretches, .. } = face_face((&body, side), (&through, g)).unwrap()
+            else {
+                panic!("coincident")
+            };
+            for st in &stretches {
+                let p = st.curve.point((st.range[0] + st.range[1]) / 2.0);
+                let s = &body.surfaces[body.faces[side].surface];
+                assert!(s.distance(p) <= st.tolerance);
+            }
+            met += stretches.len();
+        }
+        assert!(met >= 2, "{met}");
     }
 }

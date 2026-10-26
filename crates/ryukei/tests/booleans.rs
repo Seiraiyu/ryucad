@@ -458,3 +458,58 @@ fn refusals_name_the_same_faces_on_any_number_of_threads() {
         assert_eq!(refusal(threads), first, "on {threads} threads");
     }
 }
+
+/// A face on a swept surface takes part in a boolean only where it is
+/// apart from every face of the other operand: splitting it is phase
+/// 8.C's.
+#[test]
+fn a_swept_face_takes_part_only_apart() {
+    use ryukei::BooleanError;
+    use ryukei::Error;
+    use ryukei::geom::{Curve2, KnotVector, NurbsCurve2, Point2};
+    use ryukei::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
+    use std::sync::Arc;
+    // A blob: a periodic cubic round the origin, extruded 1 up.
+    let n: u32 = 8;
+    let pts: Vec<Point2> = (0..n)
+        .map(|i| {
+            let (s, c) = ryukei::math::sin_cos(2.0 * PI * f64::from(i) / f64::from(n));
+            let k = [1.0, 0.8, 1.1, 0.9][i as usize % 4];
+            Point2::new(k * c, k * s)
+        })
+        .collect();
+    let knots: Vec<f64> = (0..=n).map(f64::from).collect();
+    let kv = KnotVector::periodic(3, &knots, &vec![1; n as usize + 1]).unwrap();
+    let blob = Curve2::Nurbs2(Arc::new(NurbsCurve2::new(kv, pts, None).unwrap()));
+    let profile = ValidProfile::new(Profile {
+        frame: Frame::WORLD,
+        loops: vec![Loop {
+            key: LoopKey(1),
+            segments: vec![Segment {
+                key: SegmentKey(1),
+                curve: blob,
+                t0: 0.0,
+                t1: f64::from(n),
+            }],
+        }],
+    })
+    .unwrap();
+    let (body, _) = extrude(OpKey(1), &profile, Vector3::new(0.0, 0.0, 1.0), 0.0, 1.0).unwrap();
+    // A block cutting through its side: refused, naming the side.
+    let (through, _) = primitive::block(OpKey(2), 1.0, 1.0, 0.5, &at(0.5, -0.5, 0.25)).unwrap();
+    let tool = Tool {
+        key: ToolKey(1),
+        body: &through,
+        place: Rigid::IDENTITY,
+    };
+    let err = boolean(OpKey(3), BooleanOp::Subtract, &body, &[tool]).unwrap_err();
+    assert!(
+        matches!(err, Error::InvalidBoolean(BooleanError::Unsupported { .. })),
+        "{err:?}"
+    );
+    // A block inside it, its box reaching the side's, which only the
+    // planar caps meet: cut.
+    let (inside, _) = primitive::block(OpKey(4), 0.6, 0.6, 2.0, &at(-0.3, -0.3, -0.5)).unwrap();
+    let r = run(BooleanOp::Subtract, &body, &[(&inside, Rigid::IDENTITY)]);
+    assert!((volume(&body) - volume(&r) - 0.36).abs() <= 1e-3);
+}

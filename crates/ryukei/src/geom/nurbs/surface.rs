@@ -81,6 +81,33 @@ impl NurbsSurface {
         Point3::ORIGIN + self.points[i * self.counts()[1] + j]
     }
 
+    /// The points where a clamped boundary row collapses (a pole): each
+    /// boundary row of control points all within
+    /// [`crate::tol::LINEAR_RESOLUTION`] of its first, which the row's
+    /// whole edge of the surface then is too.
+    pub(crate) fn collapsed_rows(&self) -> Vec<Point3> {
+        let [nu, nv] = self.counts();
+        let (pu, pv) = self.periods();
+        let mut rows: Vec<Vec<Point3>> = Vec::new();
+        if pu.is_none() {
+            for i in [0, nu - 1] {
+                rows.push((0..nv).map(|j| self.control_point(i, j)).collect());
+            }
+        }
+        if pv.is_none() {
+            for j in [0, nv - 1] {
+                rows.push((0..nu).map(|i| self.control_point(i, j)).collect());
+            }
+        }
+        rows.into_iter()
+            .filter(|r| {
+                r.iter()
+                    .all(|p| p.distance(r[0]) <= crate::tol::LINEAR_RESOLUTION)
+            })
+            .map(|r| r[0])
+            .collect()
+    }
+
     /// Every control point, row-major.
     pub fn control_points(&self) -> impl ExactSizeIterator<Item = Point3> + '_ {
         self.points.iter().map(|&v| Point3::ORIGIN + v)

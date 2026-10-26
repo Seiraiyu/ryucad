@@ -265,8 +265,10 @@ fn an_oblique_rim_is_a_ruled_band() {
         blend(K, &b, &[chamfer(n, angle)]).unwrap_err(),
         Error::InvalidBlend(BlendError::Unsupported { at: n })
     );
-    // Half the rim: a ruled chamfer that would end on the cut face, which
-    // can't be intersected with it yet.
+    // Half the rim: a ruled chamfer that would end on the cut face. The
+    // band's end ruling lies along that face, within the rails' fit, so
+    // their meeting can't be certified (phase 8.D extends the band past
+    // its end).
     let half = primitive::block(
         OpKey(4),
         3.0,
@@ -290,7 +292,10 @@ fn an_oblique_rim_is_a_ruled_band() {
         .unwrap();
     let err = blend(K, &h, &[equal(h.edge(arc).unwrap().name, 0.1)]).unwrap_err();
     assert!(
-        matches!(err, Error::InvalidBlend(BlendError::Unsupported { .. })),
+        matches!(
+            err,
+            Error::InvalidBlend(BlendError::Unsupported { .. } | BlendError::Uncertain { .. })
+        ),
         "{err:?}"
     );
 }

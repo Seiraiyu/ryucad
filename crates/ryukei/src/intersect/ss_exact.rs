@@ -790,24 +790,40 @@ impl Conic {
             // the other nappe.
             let (a, b) = (at(first), at(k - 1));
             runs.push([
-                self.widen(a, (u0 - a).max(-step)),
-                self.widen(b, (u1 - b).min(step)),
+                self.widen(a, (u0 - a).max(-step), out),
+                self.widen(b, (u1 - b).min(step), out),
             ]);
         }
         runs
     }
 
-    /// `u + step`, or as far towards it as keeps the point in the size
-    /// box.
-    fn widen(&self, u: f64, step: f64) -> f64 {
-        let mut s = step;
-        for _ in 0..60 {
-            if in_size_box(self.point(u + s)) {
-                return u + s;
-            }
-            s /= 2.0;
+    /// `u + step`, from a point `u` in the region, or where the curve
+    /// between leaves the region inside the size box. Near an asymptote
+    /// the curve can run from the region past the size box within one
+    /// halving of the step, so the place is found by bisection: halving
+    /// alone could stop at a point still in the region, and the stretch
+    /// out to the region's edge would be lost.
+    fn widen(&self, u: f64, step: f64, out: &Out) -> f64 {
+        if in_size_box(self.point(u + step)) {
+            return u + step;
         }
-        u
+        // `lo` is in the region, `hi` past the size box.
+        let (mut lo, mut hi) = (0.0, step);
+        for _ in 0..100 {
+            let m = (lo + hi) / 2.0;
+            if m == lo || m == hi {
+                break;
+            }
+            let p = self.point(u + m);
+            if !in_size_box(p) {
+                hi = m;
+            } else if out.inside(p) {
+                lo = m;
+            } else {
+                return u + m;
+            }
+        }
+        u + lo
     }
 
     /// The curve over `[u0, u1]` as a rational quadratic NURBS whose knots
@@ -1068,6 +1084,61 @@ mod tests {
         let far = [br.range[0], br.range[1]].map(|t| br.curve.point(t));
         assert!(far.iter().all(|p| p.distance(apex) > 2.0), "{far:?}");
         assert!(far[0].x * far[1].x < 0.0, "{far:?}");
+    }
+
+    #[test]
+    fn a_section_leaving_the_region_near_its_asymptotes_reaches_its_edge() {
+        // Issue #83: both ends of this hyperbola's branch run from the
+        // region past the size box between two samples, and were cut off
+        // at the last point inside the region, well short of its edge.
+        let k = Surface::Cone(
+            Cone::new(
+                Frame::new(
+                    Point3::new(1.300359150670767, -0.999426280633521, 0.3169023804174567),
+                    Vector3::new(0.7098371937016634, 0.6453026276142131, 0.2823396487069071),
+                    Vector3::new(
+                        -0.2089149934758285,
+                        -0.18992156995174145,
+                        0.9593145067015615,
+                    ),
+                )
+                .unwrap(),
+                1.4311496567037358,
+                0.7546077875651969,
+            )
+            .unwrap(),
+        );
+        let p = Surface::Plane(Plane::new(
+            Frame::new(
+                Point3::new(1.2401609189828136, 1.8753245513674017, 1.4035241060352492),
+                Vector3::new(
+                    -0.6244782213249651,
+                    -0.13784259638188215,
+                    0.7687823942530875,
+                ),
+                Vector3::new(
+                    -0.08690932297520886,
+                    0.9904541476629303,
+                    0.10699229391544654,
+                ),
+            )
+            .unwrap(),
+        ));
+        let edge = 20.0;
+        let region = Box3::new(
+            Point3::new(-edge, -edge, -edge),
+            Point3::new(edge, edge, edge),
+        );
+        let SurfaceHit::Meet { branches, .. } = surface_surface(&k, &p, &region).unwrap() else {
+            panic!("coincident")
+        };
+        assert_eq!(branches.len(), 1);
+        let br = &branches[0];
+        for t in br.range {
+            let q = br.curve.point(t);
+            let reach = q.x.abs().max(q.y.abs()).max(q.z.abs());
+            assert!(reach >= edge, "{q:?}");
+        }
     }
 
     #[test]

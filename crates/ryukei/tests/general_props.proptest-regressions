@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 69a634689ecb421d1d7c6a228f2e259b597f25cd525ef3bfce88ee96547674b7 # a spline cone cut short of the loop where it meets a cylinder: sampling took sides beyond its edge

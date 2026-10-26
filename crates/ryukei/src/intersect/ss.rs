@@ -2,9 +2,11 @@
 //!
 //! A coincident pair is reported as such; a pair with a closed form
 //! ([`super::ss_exact`]) gets exact curves; any other analytic pair is
-//! traced ([`super::ss_trace`]) and fitted ([`super::fit`]), and a pipe
-//! and an analytic surface are traced in the pipe's parameter plane
-//! ([`super::pipe_trace`]). Every branch
+//! traced ([`super::ss_trace`]) and fitted ([`super::fit`]), and any other
+//! surface (a pipe, a NURBS, a swept surface) and an analytic one are
+//! traced in the first's parameter plane ([`super::sheet_trace`]), and
+//! two surfaces with neither form in their four parameters together
+//! ([`super::general`]). Every branch
 //! comes with its pcurve on each surface: an exact one where
 //! [`crate::pcurve::exact`] finds it, otherwise one fitted by the curve's
 //! parameter with a certified bound, which the branch's tolerance covers.
@@ -13,12 +15,13 @@
 
 use super::Failure;
 use super::coincide::coincident;
-use super::fit::{fit_branch, fit_pcurve};
+use super::fit::{fit_along, fit_branch, fit_pcurve, fit_pcurve_within};
+use super::general;
 use super::implicit::Implicit;
-use super::pipe_trace;
+use super::sheet_trace;
 use super::ss_exact;
-use super::ss_trace::{Traced, rank, trace};
-use crate::geom::{Box3, Curve, Curve2, Point3, Surface};
+use super::ss_trace::{TangentTrace, Traced, rank, trace};
+use crate::geom::{Box3, Curve, Curve2, KnotVector, NurbsCurve2, Point2, Point3, Surface, Vector2};
 use crate::tol::LINEAR_RESOLUTION;
 use std::sync::Arc;
 
@@ -68,20 +71,27 @@ pub(crate) struct Raw {
 /// the region where they are unbounded, and closed curves that meet it
 /// are returned whole.
 ///
-/// A pipe and an analytic surface are met by [`pipe_surface`].
+/// A pipe, a NURBS or a swept surface and an analytic one are traced in
+/// the first's parameter plane, as [`pipe_surface`] traces a pipe; two
+/// surfaces with no implicit form in their four parameters together.
 ///
-/// Fails with `Unsupported` unless both surfaces are analytic or one is a
-/// pipe and the other analytic, and with `Uncertain` where a branch's
-/// topology, a singular point or a fit could not be certified.
+/// Fails with `Uncertain` where a branch's topology, a singular point or
+/// a fit could not be certified.
 pub fn surface_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
-    if matches!(a, Surface::Pipe(_)) || matches!(b, Surface::Pipe(_)) {
-        return pipe_surface(a, b, region);
-    }
-    if Implicit::of(a).is_none() || Implicit::of(b).is_none() {
-        return Err(Failure::Unsupported);
-    }
     if let Some(same) = coincident(a, b) {
         return Ok(SurfaceHit::Coincident { same });
+    }
+    match (Implicit::of(a).is_some(), Implicit::of(b).is_some()) {
+        (true, true) => {}
+        (false, false) => return general_surface(a, b, region),
+        // A tangency along a curve, which no trace in one surface's
+        // parameters can follow, the general path traces.
+        _ => {
+            return sheet_surface(a, b, region).or_else(|e| match e {
+                Failure::Uncertain => general_surface(a, b, region),
+                e => Err(e),
+            });
+        }
     }
     if let Some((raws, mut points)) = ss_exact::exact(a, b, region) {
         let mut branches = Vec::new();
@@ -157,27 +167,122 @@ fn fitted(
 /// Where a pipe meets an analytic surface inside `region`: one of `a`
 /// and `b` must be a pipe and the other analytic (else `Unsupported`).
 /// The branches are traced in the pipe's parameter plane (see
-/// [`super::pipe_trace`]), cut where they pass a pole or an apex of the
+/// [`super::sheet_trace`]), cut where they pass a pole or an apex of the
 /// analytic surface, and fitted with a pcurve on each, in the order the
 /// surfaces were given. A tangency along a curve (a fillet against its
 /// own support) is `Uncertain`.
 pub fn pipe_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
-    let (pipe, other, swapped) = match (a, b) {
-        (Surface::Pipe(p), o) if Implicit::of(o).is_some() => (p, o, false),
-        (o, Surface::Pipe(p)) if Implicit::of(o).is_some() => (p, o, true),
+    match (a, b) {
+        (Surface::Pipe(_), o) | (o, Surface::Pipe(_)) if Implicit::of(o).is_some() => {
+            sheet_surface(a, b, region)
+        }
+        _ => Err(Failure::Unsupported),
+    }
+}
+
+/// Where a surface with no implicit form (a pipe, a NURBS, a swept
+/// surface) meets an analytic one inside `region`, one of each in either
+/// order (else `Unsupported`): traced in the first's parameter plane,
+/// cut where branches pass a pole or an apex of either surface, and
+/// fitted with a pcurve on each, in the order the surfaces were given.
+fn sheet_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
+    let (sheet, other, swapped) = match (Implicit::of(a).is_some(), Implicit::of(b).is_some()) {
+        (false, true) => (a, b, false),
+        (true, false) => (b, a, true),
         _ => return Err(Failure::Unsupported),
     };
-    let ps = if swapped { b } else { a };
-    let topo = pipe_trace::trace(pipe, other, region)?;
+    let topo = sheet_trace::trace(sheet, other, region)?;
     let mut chains = topo.branches;
-    for pole in poles(other) {
-        if ps.distance(pole) <= LINEAR_RESOLUTION && other.distance(pole) <= LINEAR_RESOLUTION {
+    for pole in poles(other).into_iter().chain(poles(sheet)) {
+        if sheet.distance(pole) <= LINEAR_RESOLUTION && other.distance(pole) <= LINEAR_RESOLUTION {
             chains = cut_at(chains, pole);
         }
     }
     let mut points = topo.points;
-    let branches = fitted(&chains, [ps, other], swapped, &mut points)?;
+    let branches = fitted(&chains, [sheet, other], swapped, &mut points)?;
     Ok(SurfaceHit::Meet { branches, points })
+}
+
+/// Where two surfaces with no implicit form meet inside `region`: traced
+/// in their four parameters ([`super::general`]), cut where branches pass
+/// a pole of either, and fitted with a pcurve on each.
+fn general_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
+    let topo = general::trace(a, b, region)?;
+    let mut chains = topo.branches;
+    for pole in poles(a).into_iter().chain(poles(b)) {
+        if a.distance(pole) <= LINEAR_RESOLUTION && b.distance(pole) <= LINEAR_RESOLUTION {
+            chains = cut_at(chains, pole);
+        }
+    }
+    let mut points = topo.points;
+    let mut branches = fitted(&chains, [a, b], false, &mut points)?;
+    for t in &topo.tangents {
+        branches.push(tangent_branch(t, [a, b])?);
+    }
+    Ok(SurfaceHit::Meet { branches, points })
+}
+
+/// A curve along which two surfaces touch, as a branch: a smooth pcurve
+/// on the first through the traced parameters (cubic Hermite by chord
+/// length, tangents by central differences), the first surface along it
+/// fitted with a certified bound ([`fit_along`]), and its pcurve on the
+/// second fitted by projection with a bound up to the touch rule's reach
+/// (`100 ×` [`LINEAR_RESOLUTION`]), which also bounds the distance
+/// between them there. The branch is tangent, its tolerance the larger
+/// bound.
+fn tangent_branch(t: &TangentTrace, [a, b]: [&Surface; 2]) -> Result<Branch, Failure> {
+    let uv: Vec<Point2> = t.params.iter().map(|x| Point2::new(x[0], x[1])).collect();
+    let pts: Vec<Point3> = uv.iter().map(|q| a.point(q.x, q.y)).collect();
+    let n = uv.len();
+    let mut s = vec![0.0];
+    for w in pts.windows(2) {
+        s.push(s[s.len() - 1] + w[0].distance(w[1]));
+    }
+    if n < 2 || s[n - 1] <= LINEAR_RESOLUTION {
+        return Err(Failure::Uncertain);
+    }
+    let d: Vec<Vector2> = (0..n)
+        .map(|i| {
+            let (lo, hi) = match (i, t.closed) {
+                (0, false) => (0, 1),
+                (i, false) if i == n - 1 => (n - 2, n - 1),
+                (i, _) => (i.saturating_sub(1), (i + 1).min(n - 1)),
+            };
+            (uv[hi] - uv[lo]) / (s[hi] - s[lo])
+        })
+        .collect();
+    let mut ctrl = vec![uv[0]];
+    for i in 0..n - 1 {
+        let h = s[i + 1] - s[i];
+        ctrl.push(uv[i] + d[i] * (h / 3.0));
+        ctrl.push(uv[i + 1] - d[i + 1] * (h / 3.0));
+        ctrl.push(uv[i + 1]);
+    }
+    let mut mults = vec![3; n];
+    mults[0] = 4;
+    mults[n - 1] = 4;
+    let kv = KnotVector::clamped(3, &s, &mults).map_err(|_| Failure::Uncertain)?;
+    let pc = NurbsCurve2::new(kv, ctrl, None).map_err(|_| Failure::Uncertain)?;
+    let lifted = fit_along(
+        a,
+        &Curve2::Nurbs2(Arc::new(pc)),
+        [0.0, 1.0],
+        [0.0, s[n - 1]],
+    )?;
+    let curve = Curve::Nurbs(Arc::new(lifted.curve));
+    let range = curve.domain();
+    let (pb, bound) = fit_pcurve_within(b, &curve, range, 100.0 * LINEAR_RESOLUTION, 20_000)?;
+    let identity = [0.0, 1.0];
+    Ok(Branch {
+        curve,
+        range,
+        tangent: true,
+        tolerance: lifted.tolerance.max(bound),
+        pcurves: [
+            (Curve2::Nurbs2(Arc::new(lifted.pcurve)), identity),
+            (Curve2::Nurbs2(Arc::new(pb)), identity),
+        ],
+    })
 }
 
 /// Traced branches with the one that passes `pole` (a point of both
@@ -246,7 +351,8 @@ fn cut_at(chains: Vec<Traced>, pole: Point3) -> Vec<Traced> {
 }
 
 /// The points where a surface's parameterization collapses: a sphere's
-/// poles, a cone's apex.
+/// poles, a cone's apex, a revolution's poles (its curve's ends on the
+/// axis), a NURBS's collapsed boundary rows.
 fn poles(s: &Surface) -> Vec<Point3> {
     match s {
         Surface::Sphere(sp) => {
@@ -258,6 +364,16 @@ fn poles(s: &Surface) -> Vec<Point3> {
             let f = s.frame().expect("an analytic surface");
             vec![f.origin() + f.z().get() * c.apex_v()]
         }
+        Surface::Revolution(r) => {
+            let [d0, d1] = r.curve().domain();
+            [d0, d1]
+                .into_iter()
+                .zip(r.poles())
+                .filter(|&(_, pole)| pole)
+                .map(|(t, _)| r.curve().point(t))
+                .collect()
+        }
+        Surface::Nurbs(n) => n.collapsed_rows(),
         _ => Vec::new(),
     }
 }

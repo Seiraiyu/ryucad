@@ -255,9 +255,26 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
         .par_iter()
         .map(|&(i, j)| {
             let (a, b) = (faces[i], faces[j]);
-            face_face((&ops[a.op], a.face), (&ops[b.op], b.face))
-                .map(|meet| Pair { a, b, meet })
-                .map_err(|e| fail(e, a, b))
+            let meet = face_face((&ops[a.op], a.face), (&ops[b.op], b.face))
+                .map_err(|e| fail(e, a, b))?;
+            // Booleans take faces on other surfaces (NURBS, swept
+            // surfaces, pipes against each other) only where they are
+            // apart from everything: splitting them is phase 8.C's.
+            let pipe = |f: FaceRef| {
+                matches!(
+                    ops[f.op].surfaces[ops[f.op].faces[f.face].surface],
+                    crate::geom::Surface::Pipe(_)
+                )
+            };
+            let taken = (analytic(ops, a) && analytic(ops, b)) && !(pipe(a) && pipe(b));
+            let apart = matches!(
+                &meet,
+                FaceMeet::Meet { stretches, contacts } if stretches.is_empty() && contacts.is_empty()
+            );
+            if !taken && !apart {
+                return Err(Fail::Unsupported(a, b));
+            }
+            Ok(Pair { a, b, meet })
         })
         // The first failure in order, not the first a thread found.
         .collect::<Vec<_>>()

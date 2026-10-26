@@ -53,10 +53,12 @@ pub enum CurveHit {
 /// certified within it of the surface touches it, and hits closer than it
 /// to each other are one.
 ///
-/// A pipe is met by [`super::curve_pipe`], by the same rules.
+/// A pipe is met by [`super::curve_pipe`], and any other surface with no
+/// implicit form (a NURBS, an extrusion, a revolution) by certified
+/// subdivision of the curve's and the surface's parameters, by the same
+/// rules.
 ///
-/// Fails with `Unsupported` for any other surface with no implicit form,
-/// and `Uncertain` where rounding leaves a stretch that is neither
+/// Fails with `Uncertain` where rounding leaves a stretch that is neither
 /// certified apart from the surface nor within the tolerance of it.
 pub fn curve_surface(
     curve: &Curve,
@@ -67,7 +69,9 @@ pub fn curve_surface(
     if let Surface::Pipe(_) = surface {
         return super::pipe_cs::curve_pipe(curve, [t0, t1], surface, tolerance);
     }
-    let imp = Implicit::of(surface).ok_or(Failure::Unsupported)?;
+    let Some(imp) = Implicit::of(surface) else {
+        return super::sheet_cs::curve_sheet(curve, [t0, t1], surface, tolerance);
+    };
     let tolerance = tolerance.max(LINEAR_RESOLUTION);
     let chain = Chain3::new(curve, t0, t1);
     let ctx = Context {
@@ -666,13 +670,13 @@ mod tests {
     }
 
     #[test]
-    fn a_nurbs_surface_is_unsupported() {
+    fn a_nurbs_surface_is_met_by_subdivision() {
         let plane = Surface::Plane(Plane::new(Frame::WORLD));
         let (n, _) = plane.to_nurbs([[0.0, 1.0], [0.0, 1.0]]).unwrap();
-        let l = line((0.0, 0.0, -1.0), (0.0, 0.0, 1.0));
-        assert_eq!(
-            curve_surface(&l, [0.0, 2.0], &Surface::Nurbs(Arc::new(n)), TOL),
-            Err(Failure::Unsupported)
-        );
+        let l = line((0.5, 0.5, -1.0), (0.0, 0.0, 1.0));
+        let p = points(&curve_surface(&l, [0.0, 2.0], &Surface::Nurbs(Arc::new(n)), TOL).unwrap());
+        assert_eq!(p.len(), 1);
+        assert!((p[0].0 - 1.0).abs() <= 1e-12);
+        assert_eq!((p[0].1, p[0].2), (Negative, Positive));
     }
 }
