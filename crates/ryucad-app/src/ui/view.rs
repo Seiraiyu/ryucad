@@ -222,7 +222,7 @@ impl View {
         }
         // Sketches are few points: all of them.
         if self.sketches {
-            out.extend(ws.model.sketches.values().flat_map(|d| d.points()));
+            out.extend(ws.model.drawn_sketches().flat_map(|(_, d)| d.points()));
         }
         out
     }
@@ -448,8 +448,7 @@ impl View {
         let mut chosen = None;
         let drawings: Vec<_> = ws
             .model
-            .sketches
-            .iter()
+            .drawn_sketches()
             .map(|(k, d)| (k.clone(), std::sync::Arc::clone(d)))
             .collect();
         for (key, d) in drawings {
@@ -870,7 +869,7 @@ impl View {
         let overlay = if self.sketches {
             let size = [f64::from(px[0]), f64::from(px[1])];
             crate::core::sketch::overlay(
-                ws.model.sketches.values().map(|d| &**d),
+                ws.model.drawn_sketches().map(|(_, d)| &**d),
                 pr,
                 size,
                 f64::from(ppp),

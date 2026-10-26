@@ -326,8 +326,7 @@ impl Picker {
             .collect();
         let sketches: Vec<(BodyKey, Arc<Drawing>)> = if sketches {
             model
-                .sketches
-                .iter()
+                .drawn_sketches()
                 .map(|(k, d)| (k.clone(), Arc::clone(d)))
                 .collect()
         } else {

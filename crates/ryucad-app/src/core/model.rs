@@ -804,6 +804,16 @@ impl Model {
         }
     }
 
+    /// The drawings of the sketches the window shows: those of the parts
+    /// it shows. An assembly holds none, so its view shows none, as a
+    /// render of it doesn't (issue #95).
+    pub fn drawn_sketches(&self) -> impl Iterator<Item = (&BodyKey, &Arc<Drawing>)> {
+        let shown = self.shown();
+        self.sketches
+            .iter()
+            .filter(move |(k, _)| shown.contains(&k.0.as_str()))
+    }
+
     /// What hiding `key`'s body hides, as `visibility.set` names it: its
     /// occurrence in an assembly (`<asm>/<path>`), else its solid
     /// (`<part>/<solid>`).
@@ -977,6 +987,38 @@ mod tests {
         m.apply_part(&sketched("r4", true));
         assert_eq!(m.clear_sketches(), ["p"]);
         assert_eq!(m.ask_sketches("p").len(), 1);
+    }
+
+    #[test]
+    fn only_the_shown_parts_sketches_are_drawn() {
+        let part = |id: &str| {
+            let mut v = sketched("r1", true);
+            v["part"] = json!(id);
+            v
+        };
+        let mut m = Model::default();
+        for id in ["p", "q"] {
+            m.apply_part(&part(id));
+            let key = (id.to_owned(), "s".to_owned());
+            assert!(m.take_sketch(&key, drawing("r1")));
+        }
+        let drawn =
+            |m: &Model| -> Vec<String> { m.drawn_sketches().map(|(k, _)| k.0.clone()).collect() };
+        assert_eq!(drawn(&m), ["p", "q"]);
+        m.focus = Some("q".to_owned());
+        assert_eq!(drawn(&m), ["q"]);
+        // The project's model is its one root assembly, which holds no
+        // sketch: none is drawn, wherever its parts are placed.
+        m.focus = None;
+        m.apply_part(
+            &json!({"part": "asm", "revision": "r", "kind": "assembly", "features": [
+            {"id": "a", "type": "instance", "ok": true, "hash": "x",
+             "instance": {"part": "p", "rev": "working"}},
+            {"id": "b", "type": "instance", "ok": true, "hash": "y",
+             "instance": {"part": "q", "rev": "working"}}]}),
+        );
+        assert_eq!(m.shown(), ["asm"]);
+        assert_eq!(drawn(&m), Vec::<String>::new());
     }
 
     #[test]
