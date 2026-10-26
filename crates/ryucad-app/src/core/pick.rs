@@ -310,6 +310,12 @@ impl Picker {
         Picker::of_bodies(model, model.drawn(), sketches)
     }
 
+    /// What the window hides of the parts it shows, to pick what is
+    /// hidden under the mouse (Shift+Tab shows it again).
+    pub fn of_hidden(model: &Model) -> Picker {
+        Picker::of_bodies(model, model.hidden_drawn(), false)
+    }
+
     fn of_bodies<'a>(
         model: &'a Model,
         drawn: impl Iterator<Item = (&'a BodyKey, &'a Arc<WireBody>, Pose)>,
@@ -510,6 +516,30 @@ impl Picker {
         let corners = self.bodies.iter().flat_map(|b| [b.lo, b.hi]);
         let sketched = self.sketches.iter().flat_map(|(_, d)| d.points());
         bounds(corners.chain(sketched))
+    }
+
+    /// Every body a face of which is under the pixel `px` of a viewport
+    /// `size` pixels big, in body order: what Shift+Tab shows again.
+    pub fn bodies_under(&self, pr: &Projector, size: [f64; 2], px: [f64; 2]) -> Vec<BodyKey> {
+        let ndc = [2.0 * px[0] / size[0] - 1.0, 1.0 - 2.0 * px[1] / size[1]];
+        let (o, d) = pr.ray(ndc);
+        let mut hit = Vec::new();
+        self.tree.along(o, d, |i| {
+            let b = &self.bodies[i];
+            let (o, d) = (b.pose.unapply(o), b.pose.unturn(d));
+            let m = b.mesh();
+            let any = m.triangles.iter().any(|t| {
+                let tri = t.map(|c| at(m, m.corners[c as usize].0));
+                ray_triangle(o, d, tri).is_some()
+            });
+            if any {
+                hit.push(i);
+            }
+        });
+        hit.sort_unstable();
+        hit.into_iter()
+            .map(|i| self.bodies[i].key.clone())
+            .collect()
     }
 
     /// The nearest face along the ray `o + t d`: its `t`, name and body.
@@ -733,6 +763,85 @@ impl Picker {
 mod tests {
     use super::*;
     use ryucad::mesh::WireFace;
+
+    /// A 1 cm cube at the origin: six faces of two triangles.
+    fn cube_mesh() -> WireMesh {
+        let p = |i: u32| [0, 1, 2].map(|k| if i >> k & 1 == 1 { 0.01f32 } else { 0.0 });
+        let faces: [([f32; 3], [u32; 4]); 6] = [
+            ([-1.0, 0.0, 0.0], [0, 4, 6, 2]),
+            ([1.0, 0.0, 0.0], [1, 3, 7, 5]),
+            ([0.0, -1.0, 0.0], [0, 1, 5, 4]),
+            ([0.0, 1.0, 0.0], [2, 6, 7, 3]),
+            ([0.0, 0.0, -1.0], [0, 2, 3, 1]),
+            ([0.0, 0.0, 1.0], [4, 5, 7, 6]),
+        ];
+        let mut m = WireMesh {
+            origin: [0.0; 3],
+            chord: 0.0,
+            angle: 0.0,
+            positions: (0..8).map(p).collect(),
+            corners: Vec::new(),
+            triangles: Vec::new(),
+            faces: Vec::new(),
+            edges: Vec::new(),
+            vertices: Vec::new(),
+            faults: Vec::new(),
+        };
+        for (i, (n, c)) in faces.iter().enumerate() {
+            let (base, t) = (m.corners.len() as u32, m.triangles.len() as u32);
+            m.corners.extend(c.iter().map(|&k| (k, *n)));
+            m.triangles.push([base, base + 1, base + 2]);
+            m.triangles.push([base, base + 2, base + 3]);
+            m.faces.push(WireFace {
+                name: [i as u8; 16],
+                corners: (base, base + 4),
+                triangles: (t, t + 2),
+            });
+        }
+        m
+    }
+
+    #[test]
+    fn what_is_hidden_under_the_mouse_is_found() {
+        use serde_json::json;
+        let occurrences: Vec<serde_json::Value> = [0.0, 0.04]
+            .iter()
+            .enumerate()
+            .map(|(i, x)| {
+                json!({"path": format!("c{i}"), "part": "cube",
+                       "solids": [{"solid": "s", "hash": "h"}],
+                       "pose": {"origin_m": [x, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}})
+            })
+            .collect();
+        let mut model = Model::default();
+        let want = model.apply_part(&json!({"part": "row", "revision": "r", "kind": "assembly",
+            "features": [], "solids": [], "occurrences": occurrences}));
+        model.ask(want);
+        let body = WireBody {
+            feature: "c0/s".into(),
+            hash: "h".into(),
+            mesh: Ok(cube_mesh()),
+        };
+        assert!(model.take_mesh("row", body));
+        let camera = view::frame(
+            [0.0; 3],
+            [0.05, 0.01, 0.01],
+            StandardView::Top,
+            view::DEFAULT_PROJECTION,
+        );
+        let pr = Projector::new(&camera, 1.0, [0.025, 0.005, 0.005], 0.03);
+        let size = [400.0, 400.0];
+        let n = pr.ndc([0.045, 0.005, 0.01]).unwrap();
+        let px = [(n[0] + 1.0) / 2.0 * size[0], (1.0 - n[1]) / 2.0 * size[1]];
+        assert_eq!(Picker::new(&model).bodies_under(&pr, size, px).len(), 1);
+        model.hidden.insert("row/c1".into());
+        assert_eq!(
+            Picker::new(&model).bodies_under(&pr, size, px),
+            Vec::<BodyKey>::new()
+        );
+        let under = Picker::of_hidden(&model).bodies_under(&pr, size, px);
+        assert_eq!(under, [("row".to_owned(), "c1/s".to_owned())]);
+    }
 
     #[test]
     fn the_tree_visits_what_every_box_test_would() {

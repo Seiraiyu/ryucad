@@ -473,13 +473,43 @@ impl Workspace {
         self.send(req, Pending::Quiet);
     }
 
-    /// Shows what this window's participant's focus says.
+    /// Shows what this window's participant's focus says, and hides what
+    /// its hidden set says.
     fn follow_focus(&mut self) {
         let want = self.myself().and_then(|m| m.focus.clone());
         if self.model.focus != want {
             self.model.focus = want;
             self.model.generation += 1;
         }
+        let hidden: std::collections::BTreeSet<String> = self
+            .myself()
+            .map(|m| m.hidden.iter().cloned().collect())
+            .unwrap_or_default();
+        if self.model.hidden != hidden {
+            self.model.hidden = hidden;
+            self.model.generation += 1;
+        }
+    }
+
+    /// Changes what this window hides (`visibility.set`): everything
+    /// shown first with `all`, then everything else in their parts hidden
+    /// for `isolate`, then `show`, then `hide`. An agent can do the same
+    /// to this window.
+    pub fn set_visibility(
+        &mut self,
+        hide: Vec<String>,
+        show: Vec<String>,
+        isolate: Vec<String>,
+        all: bool,
+    ) {
+        let req = Request::VisibilitySet {
+            hide,
+            show,
+            isolate,
+            all,
+            participant: Some(self.link.participant.clone()),
+        };
+        self.send(req, Pending::Quiet);
     }
 
     /// Starts, changes or ends the compare to match this window's

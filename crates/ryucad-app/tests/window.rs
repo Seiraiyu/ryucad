@@ -1807,3 +1807,133 @@ fn a_mates_angle_is_edited_in_the_property_panel() {
     let solved = p.ok(&["assembly", "solve", "frame"]);
     assert_eq!(solved["solve"]["stale"], false);
 }
+
+/// A bolt, and an assembly `frame` placing it twice, 40 mm apart.
+fn two_bolts() -> Project {
+    let p = Project::new();
+    p.ok(&["part", "create", "bolt"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bolt",
+        "cylinder",
+        "--id",
+        "shank",
+        "--param",
+        "radius=3",
+        "--param",
+        "height=20",
+    ]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b1", "--of", "bolt", "--fixed",
+    ]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b2", "--of", "bolt", "--origin", "40,0,0",
+    ]);
+    p
+}
+
+/// Runs frames until both bolts are drawn.
+fn both_bolts(h: &mut Harness<'static, App>) {
+    frames(h, |a| match &a.screen {
+        ryucad_app::ui::app::Screen::Opened(o) => {
+            o.ws.idle()
+                && ["b1/shank", "b2/shank"].iter().all(|k| {
+                    o.ws.model
+                        .meshes
+                        .contains_key(&("frame".into(), (*k).into()))
+                })
+        }
+        _ => false,
+    });
+    h.step();
+}
+
+/// A point of the view over `feature`'s body, found by moving the
+/// pointer across the view.
+fn over_body(h: &mut Harness<'static, App>, feature: &str) -> egui::Pos2 {
+    let rect = h.state().opened().view.rect;
+    for j in 1..16 {
+        for i in 1..24 {
+            let at = egui::pos2(
+                rect.min.x + rect.width() * i as f32 / 24.0,
+                rect.min.y + rect.height() * j as f32 / 16.0,
+            );
+            h.event(egui::Event::PointerMoved(at));
+            h.step();
+            if h.state()
+                .opened()
+                .view
+                .hover
+                .as_ref()
+                .is_some_and(|x| x.feature == feature)
+            {
+                return at;
+            }
+        }
+    }
+    panic!("{feature} isn't in view");
+}
+
+fn hidden(app: &App) -> Vec<String> {
+    app.opened().ws.model.hidden.iter().cloned().collect()
+}
+
+#[test]
+fn occurrences_hide_and_show_with_tab_and_the_tree() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = two_bolts();
+    let mut h = window(&p);
+    both_bolts(&mut h);
+    // Tab hides the bolt under the mouse: the session hears of it, and
+    // it is no longer drawn or picked.
+    let at = over_body(&mut h, "b2/shank");
+    h.key_press(egui::Key::Tab);
+    frames(&mut h, |a| hidden(a) == ["frame/b2"]);
+    let me = h.state().opened().ws.me().to_owned();
+    let people = p.ok(&["participants"]);
+    let mine = people["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == me.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(mine["hidden"], serde_json::json!(["frame/b2"]));
+    assert_eq!(h.state().opened().ws.model.drawn().count(), 1);
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    h.step();
+    assert!(
+        h.state()
+            .opened()
+            .view
+            .hover
+            .as_ref()
+            .is_none_or(|x| x.feature != "b2/shank")
+    );
+    // The tree says so; Shift+Tab over where it was shows it again.
+    h.get_by_label("Show frame/b2");
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+    frames(&mut h, |a| hidden(a).is_empty());
+    // The tree's checkbox hides and shows; Ctrl+Shift+Tab shows all.
+    h.get_by_label("Show frame/b1").click();
+    frames(&mut h, |a| hidden(a) == ["frame/b1"]);
+    h.get_by_label("Show frame/b1").click();
+    frames(&mut h, |a| hidden(a).is_empty());
+    p.ok(&["hide", "frame/b1", "frame/b2"]);
+    frames(&mut h, |a| hidden(a).len() == 2);
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    h.key_press_modifiers(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        egui::Key::Tab,
+    );
+    frames(&mut h, |a| hidden(a).is_empty());
+}

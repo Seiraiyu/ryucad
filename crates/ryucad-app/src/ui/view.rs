@@ -612,6 +612,52 @@ impl View {
         if response.secondary_clicked() {
             self.menu = self.hover.clone();
         }
+        // Visibility, with SolidWorks' keys: Tab hides the occurrence (or
+        // solid) under the mouse, Shift+Tab shows those hidden under it,
+        // Ctrl+Shift+Tab shows everything.
+        // Typing in a field keeps its keys.
+        if response.hovered() && !ui.ctx().text_edit_focused() {
+            let (all, show, hide) = ui.input_mut(|i| {
+                let both = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+                (
+                    i.consume_key(both, egui::Key::Tab),
+                    i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Tab),
+                )
+            });
+            if all || show || hide {
+                // egui would move keyboard focus to the next control.
+                ui.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+            }
+            let at = response.hover_pos().map(local);
+            if all {
+                ws.set_visibility(Vec::new(), Vec::new(), Vec::new(), true);
+            } else if show && let Some(p) = at {
+                // Every hidden body the ray meets, and what picking would
+                // find there (an edge or vertex within reach of the mouse).
+                let hidden = Picker::of_hidden(&ws.model);
+                let mut under = hidden.bodies_under(&pr, size, p);
+                under.extend(
+                    hidden
+                        .pick(&pr, size, p)
+                        .map(|h| (h.part.clone(), h.feature.clone())),
+                );
+                let mut leaves: Vec<String> = under.iter().map(|k| ws.model.leaf(k)).collect();
+                leaves.sort();
+                leaves.dedup();
+                if !leaves.is_empty() {
+                    ws.set_visibility(Vec::new(), leaves, Vec::new(), false);
+                }
+            } else if hide
+                && let Some(h) = self.hover.as_ref().filter(|h| {
+                    h.rev.is_none() && matches!(h.kind, ryucad::entity::Target::Body(_))
+                })
+            {
+                let leaf = ws.model.leaf(&(h.part.clone(), h.feature.clone()));
+                ws.set_visibility(vec![leaf], Vec::new(), Vec::new(), false);
+                self.hover = None;
+            }
+        }
         // Drawing: what is in view, each at its level of detail, the
         // levels not here yet fetched nearest first.
         let (faces, lines) = self.painted(ws);

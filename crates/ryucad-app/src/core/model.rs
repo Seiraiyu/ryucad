@@ -424,6 +424,9 @@ pub struct Model {
     /// The part or assembly the window shows, as its participant's focus
     /// says; `None` for the project's model.
     pub focus: Option<String>,
+    /// What the window hides, as its participant's hidden set says:
+    /// occurrences (`<asm>/<path>`) and solids (`<part>/<solid>`).
+    pub hidden: std::collections::BTreeSet<String>,
     /// Bumped whenever anything here changes, so views know to redraw.
     pub generation: u64,
 }
@@ -726,13 +729,61 @@ impl Model {
         }
     }
 
+    /// What hiding `key`'s body hides, as `visibility.set` names it: its
+    /// occurrence in an assembly (`<asm>/<path>`), else its solid
+    /// (`<part>/<solid>`).
+    pub fn leaf(&self, key: &BodyKey) -> String {
+        let assembly = self.parts.get(&key.0).is_some_and(|p| p.assembly);
+        match key.1.rsplit_once('/') {
+            Some((path, _)) if assembly => format!("{}/{path}", key.0),
+            _ => format!("{}/{}", key.0, key.1),
+        }
+    }
+
+    /// Whether everything `reference` reaches is hidden: an assembly's
+    /// occurrences under an instance path (`<asm>/<path>`), or a part's
+    /// solid (`<part>/<solid>`). `false` when it reaches nothing.
+    pub fn all_hidden(&self, reference: &str) -> bool {
+        let Some((part, rest)) = reference.split_once('/') else {
+            return false;
+        };
+        let Some(p) = self.parts.get(part) else {
+            return false;
+        };
+        if !p.assembly {
+            return self.hidden.contains(reference);
+        }
+        let mut leaves = p
+            .occurrences
+            .iter()
+            .filter(|o| o.path == rest || o.path.starts_with(&format!("{rest}/")))
+            .map(|o| format!("{part}/{}", o.path))
+            .peekable();
+        leaves.peek().is_some() && leaves.all(|l| self.hidden.contains(&l))
+    }
+
+    /// Whether `key`'s body is hidden.
+    pub fn is_hidden(&self, key: &BodyKey) -> bool {
+        !self.hidden.is_empty() && self.hidden.contains(&self.leaf(key))
+    }
+
     /// The meshes the window draws, each where it is: those of the parts
-    /// it shows.
+    /// it shows, less what it hides.
     pub fn drawn(&self) -> impl Iterator<Item = (&BodyKey, &Arc<WireBody>, Pose)> {
+        self.shown_meshes(false)
+    }
+
+    /// The meshes of the parts the window shows that it hides: what
+    /// Shift+Tab may show again.
+    pub fn hidden_drawn(&self) -> impl Iterator<Item = (&BodyKey, &Arc<WireBody>, Pose)> {
+        self.shown_meshes(true)
+    }
+
+    fn shown_meshes(&self, hidden: bool) -> impl Iterator<Item = (&BodyKey, &Arc<WireBody>, Pose)> {
         let shown = self.shown();
         self.meshes
             .iter()
-            .filter(move |(k, _)| shown.contains(&k.0.as_str()))
+            .filter(move |(k, _)| shown.contains(&k.0.as_str()) && self.is_hidden(k) == hidden)
             .map(|(k, m)| (k, m, self.pose(k)))
     }
 
