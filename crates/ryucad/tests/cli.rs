@@ -1433,6 +1433,7 @@ fn git_install_registers_the_drivers_and_the_hook() {
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_CONFIG_GLOBAL")
             .env("RYUCAD_NO_DAEMON", "1")
             .env("RYUCAD_CONFIG_DIR", dir.path().join("config"))
             .output()

@@ -235,6 +235,88 @@ fn unmerged(
     (conflicts, unstaged)
 }
 
+/// The features a part's `part.json` lists in `files`, if it reads.
+fn listed(files: &crate::activity::Files, part: &str) -> Option<Vec<String>> {
+    let v = json_of(files.get(&format!("parts/{part}/part.json"))?)?;
+    serde_json::from_value(v["features"].clone()).ok()
+}
+
+/// Feature files deleted on one side and changed on the other that were
+/// kept and staged (`git add`, as Git suggests), so no longer unmerged,
+/// while the merged list took the deletion (issue #90): the change the
+/// keeping side made would be lost. Each is still a `modify_delete` until
+/// its part lists it or the file goes; settling it on the keeping side
+/// lists it where that side does.
+pub(crate) fn kept_unlisted(
+    working: &crate::activity::Files,
+    paths: &BTreeMap<String, Unmerged>,
+    [ours, theirs, base]: [&crate::activity::Files; 3],
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    for path in working.keys() {
+        let (Some(part), Some(feature)) = about(path) else {
+            continue;
+        };
+        if paths.contains_key(path) || !base.contains_key(path) {
+            continue;
+        }
+        let Some(list) = listed(working, part) else {
+            continue;
+        };
+        if list.iter().any(|f| f == feature) {
+            continue;
+        }
+        let (by, kept) = match (ours.contains_key(path), theirs.contains_key(path)) {
+            (false, true) => ("ours", theirs),
+            (true, false) => ("theirs", ours),
+            _ => continue,
+        };
+        if !listed(kept, part).is_some_and(|l| l.iter().any(|f| f == feature)) {
+            continue;
+        }
+        let mut x = conflict(
+            format!("{path}#"),
+            "modify_delete",
+            vec![path.clone(), format!("parts/{part}/part.json")],
+            json!({"part": part, "feature": feature}),
+            "both",
+            format!(
+                "{path} was deleted by {by} and changed by the other side; it was kept, but parts/{part}/part.json doesn't list it, so the model leaves it out (settle it to list it where the side that changed it does, or to delete it)"
+            ),
+        );
+        x["deleted_by"] = json!(by);
+        for (k, side) in [("base", base), ("ours", ours), ("theirs", theirs)] {
+            if let Some(s) = shown(side.get(path)) {
+                x[k] = s;
+            }
+        }
+        x["choices"] = json!(["ours", "theirs"]);
+        out.push(x);
+    }
+    out
+}
+
+/// [`kept_unlisted`] for the merge the session's repository is in (none
+/// outside one): for `check`, which rebuilds no sides.
+pub fn kept_unlisted_now(session: &Session) -> Result<Vec<Value>> {
+    let Some(repo) = Repo::open(session.root())? else {
+        return Ok(Vec::new());
+    };
+    let Some(state) = repo.merge_state()? else {
+        return Ok(Vec::new());
+    };
+    let files = |c: Option<&String>| -> Result<crate::activity::Files> {
+        c.map_or(Ok(Default::default()), |c| repo.files(c))
+    };
+    let (ours, theirs) = (files(Some(&state.ours))?, files(Some(&state.theirs))?);
+    let base = files(state.base.as_ref())?;
+    Ok(kept_unlisted(
+        &session.snapshot(),
+        &repo.unmerged()?,
+        [&ours, &theirs, &base],
+    ))
+}
+
 /// One side of a merge, rebuilt: its files, and each part's features by
 /// ID with what they built and what they read.
 struct Side {
@@ -1000,7 +1082,8 @@ fn compute(session: &mut Session) -> Result<Value> {
     let (repo, state) = merging(&root)?;
     let working = session.snapshot();
     let mut conflicts = records(&working);
-    let (more, mut unstaged) = unmerged(&root, &repo.unmerged()?);
+    let paths = repo.unmerged()?;
+    let (more, mut unstaged) = unmerged(&root, &paths);
     conflicts.extend(more);
     // A file staged and then settled again (a conflict record `git add`ed,
     // then resolved) is no longer unmerged, but a commit would still take
@@ -1011,6 +1094,11 @@ fn compute(session: &mut Session) -> Result<Value> {
     let ours = side(session, Some(&state.ours))?;
     let theirs = side(session, Some(&state.theirs))?;
     let base = side(session, state.base.as_deref())?;
+    conflicts.extend(kept_unlisted(
+        &working,
+        &paths,
+        [&ours.files, &theirs.files, &base.files],
+    ));
     session.learn_from_revisions();
     let renamed = renames(&root, &working, &ours, &theirs, &base);
     // A renamed file's own conflicts go with it: its repairs rewrite it.
@@ -1301,14 +1389,20 @@ pub fn resolve(
                 set_property(&mut files, &path, name, x)?;
             }
             ("modify_delete" | "merge_unparsed", side @ ("ours" | "theirs")) => {
-                let u = unmerged.get(&path).cloned().unwrap_or_default();
                 let commit = if side == "ours" {
                     &state.ours
                 } else {
                     &state.theirs
                 };
                 let side_files = repo.files(commit)?;
-                let bytes = if side == "ours" { u.ours } else { u.theirs };
+                let bytes = match unmerged.get(&path) {
+                    Some(u) if side == "ours" => u.ours.clone(),
+                    Some(u) => u.theirs.clone(),
+                    // Kept and staged: the file as it is now, unless the
+                    // side chosen deleted it.
+                    None if found["deleted_by"] == side => None,
+                    None => files.get(&path).cloned(),
+                };
                 settle_unmerged(&mut files, &path, bytes.as_ref(), &side_files);
             }
             (_, "repair") => {
@@ -1392,7 +1486,7 @@ pub(crate) mod tests {
 
     /// Runs git, which may fail (a merge that stops for conflicts).
     pub(crate) fn try_git(dir: &Path, args: &[&str]) -> bool {
-        std::process::Command::new("git")
+        crate::git::tests::git_command()
             .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
             .args(["-c", "commit.gpgsign=false"])
             .args(args)
@@ -1851,6 +1945,166 @@ pub(crate) mod tests {
         assert_eq!(c[0]["error"]["code"], "reference_unresolved");
         assert_eq!(c[0]["error"]["details"]["role"], "groups.0.edges.0");
         assert_eq!(c[0]["error"]["details"]["removed_by"], "skim");
+    }
+
+    /// Issue #87: a parameter conflict fails a feature of a solid's chain
+    /// (its founder, or a join on it); what follows it in the chain fails
+    /// through it, and the conflict is the only thing to settle.
+    #[test]
+    fn what_fails_through_a_conflicted_feature_is_left_to_its_conflict() {
+        for (param, failed) in [("w", "b"), ("r", "j")] {
+            let mut m = boxed();
+            m.call(
+                "param.set",
+                json!({"part": "p", "parameters": {param: "3 mm"}}),
+            )
+            .unwrap();
+            // Only the conflicted feature reads the parameter.
+            let read = |f: &str| if f == failed { json!(param) } else { json!(2) };
+            m.call(
+                "feature.edit",
+                json!({"part": "p", "id": "b", "params": {"z": read("b")}}),
+            )
+            .unwrap();
+            m.call(
+                "feature.add",
+                json!({"part": "p", "type": "cylinder", "id": "j", "operation": "join",
+                       "params": {"radius": read("j"), "height": 3},
+                       "placement": {"origin": [5, 10, 1]}}),
+            )
+            .unwrap();
+            let v = m.call("inspect", json!({"part": "p"})).unwrap();
+            let front = edge_of(&v["bodies"][0], [0.0, 0.0, 0.0], [0.01, 0.0, 0.0]);
+            m.call(
+                "feature.add",
+                json!({"part": "p", "type": "fillet", "id": "round", "radius": 1,
+                       "edges": [format!("p/b/{front}")]}),
+            )
+            .unwrap();
+            m.call(
+                "feature.add",
+                json!({"part": "p", "type": "cylinder", "id": "c", "operation": "cut",
+                       "params": {"radius": 1, "height": 10},
+                       "placement": {"origin": [5, 15, -2]}}),
+            )
+            .unwrap();
+            m.commit("a parametric part");
+            m.git(&["checkout", "-q", "-b", "theirs"]);
+            m.session.reload().unwrap();
+            m.call(
+                "param.set",
+                json!({"part": "p", "parameters": {param: "2.5 mm"}}),
+            )
+            .unwrap();
+            m.commit("theirs");
+            m.git(&["checkout", "-q", "main"]);
+            m.session.reload().unwrap();
+            m.call(
+                "param.set",
+                json!({"part": "p", "parameters": {param: "3.5 mm"}}),
+            )
+            .unwrap();
+            m.commit("ours");
+            m.merge("theirs");
+            let v = m.call("merge.status", json!({})).unwrap();
+            let ids: Vec<&str> = v["conflicts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["id"].as_str().unwrap())
+                .collect();
+            let only = format!("parts/p/parameters.json#/parameters/{param}");
+            assert_eq!(ids, [only.as_str()], "{v}");
+            let r = m.call("rebuild", json!({"part": "p"})).unwrap_err().details;
+            let codes: Vec<(&str, Option<&str>)> = r["parts"][0]["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| (f["id"].as_str().unwrap(), f["error"]["code"].as_str()))
+                .collect();
+            let through = Some("dependency_failed");
+            let want = if failed == "b" {
+                [("b", Some("merge_conflict")), ("j", through)]
+            } else {
+                [("b", None), ("j", Some("merge_conflict"))]
+            };
+            let want: Vec<_> = want
+                .into_iter()
+                .chain([("round", through), ("c", through)])
+                .collect();
+            assert_eq!(codes, want, "{r}");
+        }
+    }
+
+    /// Issue #90: a modify/delete kept with `git add` is no longer unmerged,
+    /// but the merged list took the deletion; until the list holds it again
+    /// (or the file goes) it is still a conflict, and settling it lists it.
+    #[test]
+    fn a_kept_modify_delete_staged_unlisted_is_still_a_conflict() {
+        let mut m = boxed();
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "id": "s", "params": {"radius": 1}}),
+        )
+        .unwrap();
+        m.commit("a sphere");
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        m.call("feature.delete", json!({"part": "p", "id": "s"}))
+            .unwrap();
+        m.commit("theirs: no sphere");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        m.call(
+            "feature.edit",
+            json!({"part": "p", "id": "s", "params": {"radius": 2}}),
+        )
+        .unwrap();
+        m.commit("ours: a bigger sphere");
+        m.merge("theirs");
+        let id = "parts/p/features/s.json#";
+        // Kept as Git left it (ours' version) and added, the usual Git way.
+        m.git(&["add", "-A"]);
+        m.session.reload().unwrap();
+        let v = m.call("merge.status", json!({})).unwrap();
+        assert_eq!(v["clean"], false, "{v}");
+        let c = &v["conflicts"][0];
+        assert_eq!(c["id"], id, "{v}");
+        assert_eq!(c["kind"], "modify_delete");
+        assert_eq!(c["deleted_by"], "theirs");
+        assert_eq!(c["choices"], json!(["ours", "theirs"]));
+        // `check` fails on it too, as on a path Git left unmerged.
+        let e = m.call("check", json!({})).unwrap_err();
+        let unmerged: Vec<&Value> = e.details["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["code"] == "unmerged_path")
+            .collect();
+        assert_eq!(unmerged.len(), 1, "{e:?}");
+        assert_eq!(unmerged[0]["files"][0], "parts/p/features/s.json");
+        m.call(
+            "merge.resolve",
+            json!({"resolutions": [{"conflict": id, "choice": "ours"}]}),
+        )
+        .unwrap();
+        let list = m.call("feature.list", json!({"part": "p"})).unwrap();
+        let ids: Vec<&str> = list["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["b", "s"], "{list}");
+        let shown = m
+            .call("feature.show", json!({"part": "p", "id": "s"}))
+            .unwrap();
+        assert_eq!(shown["params"]["radius"]["value"], "2 mm", "{shown}");
+        m.git(&["add", "-A"]);
+        let v = m.call("merge.status", json!({})).unwrap();
+        assert_eq!(v["clean"], true, "{v}");
+        let v = m.call("check", json!({})).unwrap();
+        assert_eq!(v["passed"], true, "{v}");
     }
 
     #[test]
