@@ -1486,7 +1486,7 @@ pub(crate) mod tests {
 
     /// Runs git, which may fail (a merge that stops for conflicts).
     pub(crate) fn try_git(dir: &Path, args: &[&str]) -> bool {
-        std::process::Command::new("git")
+        crate::git::tests::git_command()
             .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
             .args(["-c", "commit.gpgsign=false"])
             .args(args)
