@@ -443,6 +443,28 @@ impl Model {
         wanted
     }
 
+    /// Where `feature` of `part` comes from, for people: its type
+    /// (`box`); for an assembly's solid (`<path>/<solid>`), the part its
+    /// occurrence places and its founder's type there (`plate, box`).
+    /// Empty when the window doesn't know.
+    pub fn source(&self, part: &str, feature: &str) -> String {
+        let Some(p) = self.parts.get(part) else {
+            return String::new();
+        };
+        let ty = |p: &Part, f: &str| p.feature(f).and_then(|f| f.ty.clone());
+        if !p.assembly {
+            return ty(p, feature).unwrap_or_default();
+        }
+        let Some((o, _)) = p.occurrence(feature) else {
+            return String::new();
+        };
+        let solid = feature.rsplit_once('/').map_or(feature, |(_, s)| s);
+        match self.parts.get(&o.part).and_then(|q| ty(q, solid)) {
+            Some(t) => format!("{}, {t}", o.part),
+            None => o.part.clone(),
+        }
+    }
+
     /// The bodies of `keys` not already asked for at their current hash,
     /// with that hash, now noted as asked for.
     pub fn ask(&mut self, keys: Vec<BodyKey>) -> Vec<(BodyKey, String)> {
@@ -836,6 +858,13 @@ mod tests {
         assert_eq!(want.len(), 2);
         assert_eq!(frame.solids[1].id, "b2/s");
         assert_eq!(frame.solids[1].features, ["b2"]);
+        // #96: an occurrence's solid says the part placed and its type.
+        let mut bolt = report(&[("s", Some("1"))]);
+        bolt["part"] = json!("bolt");
+        m.apply_part(&bolt);
+        assert_eq!(m.source("frame", "b2/s"), "bolt, box");
+        assert_eq!(m.source("p", "s"), "box");
+        assert_eq!(m.source("frame", "b9/s"), "");
         assert_eq!(
             m.solid_of(&("frame".into(), "b2".into())),
             Some(("frame".into(), "b2/s".into()))

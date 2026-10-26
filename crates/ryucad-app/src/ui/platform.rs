@@ -5,7 +5,7 @@
 
 use eframe::{egui_wgpu, wgpu};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// The window draws with a software adapter: it works, slowly.
 static SOFTWARE: AtomicBool = AtomicBool::new(false);
@@ -199,15 +199,60 @@ pub fn pick(candidates: &[Candidate]) -> Option<usize> {
         .min_by_key(|&i| rank(&candidates[i]))
 }
 
+/// Whether `adapter` really draws, tried before the window's device is
+/// made: a surface it gives a configuration for, and a device of its own
+/// that makes and writes a buffer without an error. Where nothing can draw
+/// (Windows' session 0) an adapter may say it supports the surface and
+/// still give a device whose buffers are invalid, and wgpu panics when
+/// the window's first frame uses them (#85).
+pub fn draws(adapter: &wgpu::Adapter, surface: Option<&wgpu::Surface<'_>>) -> bool {
+    if surface.is_some_and(|s| s.get_default_config(adapter, 1, 1).is_none()) {
+        return false;
+    }
+    let Ok((device, queue)) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("ryucad probe"),
+        ..Default::default()
+    })) else {
+        return false;
+    };
+    let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("ryucad probe"),
+        size: 16,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&buffer, 0, &[0; 16]);
+    queue.submit([]);
+    // Popped innermost first, both whatever the first says.
+    let internal = pollster::block_on(internal.pop());
+    let validation = pollster::block_on(validation.pop());
+    internal.is_none() && validation.is_none()
+}
+
 /// Picks an adapter for the window or a headless scene, noting a software
-/// one.
+/// one. For the window, one that doesn't really draw ([`draws`]) is passed
+/// over.
 pub fn choose(
     adapters: &[wgpu::Adapter],
     surface: Option<&wgpu::Surface<'_>>,
 ) -> Result<wgpu::Adapter, String> {
-    let candidates: Vec<Candidate> = adapters.iter().map(|a| Candidate::of(a, surface)).collect();
-    let Some(i) = pick(&candidates) else {
-        return Err(NO_ADAPTER.to_owned());
+    let mut candidates: Vec<Candidate> =
+        adapters.iter().map(|a| Candidate::of(a, surface)).collect();
+    let i = loop {
+        let Some(i) = pick(&candidates) else {
+            return Err(NO_ADAPTER.to_owned());
+        };
+        if surface.is_none() || draws(&adapters[i], surface) {
+            break i;
+        }
+        let info = adapters[i].get_info();
+        eprintln!(
+            "ryucad-app: passing over {} ({:?}): it can't draw the window",
+            info.name, info.backend
+        );
+        candidates[i].usable = false;
     };
     let a = &adapters[i];
     if candidates[i].software {
@@ -239,9 +284,13 @@ pub fn x_modifiers(keep_xim: bool) -> Option<&'static str> {
     (!keep_xim).then_some("@im=none")
 }
 
-/// Shows an error that stops the app, natively, and on stderr.
+/// Shows an error that stops the app, on stderr, and natively where
+/// someone can see it ([`interactive`]).
 pub fn fatal(title: &str, message: &str) {
     eprintln!("ryucad-app: {message}");
+    if !interactive() {
+        return;
+    }
     rfd::MessageDialog::new()
         .set_level(rfd::MessageLevel::Error)
         .set_title(title)
@@ -249,11 +298,72 @@ pub fn fatal(title: &str, message: &str) {
         .show();
 }
 
+/// Whether someone can answer a dialog. Not in a Windows window station
+/// that isn't visible (session 0, where services and SSH shells run),
+/// where a dialog would wait for ever for a click nobody can make.
+pub fn interactive() -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::StationsAndDesktops::{
+            GetProcessWindowStation, GetUserObjectInformationW, UOI_FLAGS, USEROBJECTFLAGS,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::WSF_VISIBLE;
+        let mut flags = USEROBJECTFLAGS {
+            fInherit: 0,
+            fReserved: 0,
+            dwFlags: 0,
+        };
+        let mut needed = 0;
+        // SAFETY: the station's handle needs no closing, and `flags` is
+        // the size given.
+        let ok = unsafe {
+            GetUserObjectInformationW(
+                GetProcessWindowStation(),
+                UOI_FLAGS,
+                (&raw mut flags).cast(),
+                std::mem::size_of::<USEROBJECTFLAGS>() as u32,
+                &mut needed,
+            )
+        };
+        // When it can't be told, as before: a dialog.
+        ok == 0 || flags.dwFlags & WSF_VISIBLE as u32 != 0
+    }
+    #[cfg(not(windows))]
+    true
+}
+
+/// Frames the window has drawn ([`note_frame`]).
+static FRAMES: AtomicU32 = AtomicU32::new(0);
+
+/// Notes a frame of the window, before it is drawn.
+pub fn note_frame() {
+    FRAMES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Whether a panic is wgpu refusing the window before it has drawn its
+/// first frame (`frames` counts frames begun): a surface or a device that
+/// can't draw it, such as Windows' session 0 gives, not a fault of ours.
+/// The last resort, for what [`draws`] didn't catch: wgpu panics on such
+/// errors, and some backends only report them when the first frame is
+/// drawn.
+pub fn cant_draw(message: &str, frames: u32) -> bool {
+    frames < 2 && message.starts_with("wgpu error")
+}
+
 /// On a panic, writes a crash report to the runtime log folder before the
 /// app exits. The daemon, the session and the files are not touched.
 pub fn crash_reports() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        if let Some(m) = info.payload_as_str()
+            && cant_draw(m, FRAMES.load(Ordering::Relaxed))
+        {
+            fatal(
+                "ryucad can't draw its window",
+                &format!("{m}\n\n{NO_ADAPTER}"),
+            );
+            std::process::exit(1);
+        }
         let at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
@@ -421,6 +531,21 @@ mod pick_tests {
         );
         assert_eq!(pick(&[c(false, true, false)]), None);
         assert_eq!(pick(&[]), None);
+    }
+
+    #[test]
+    fn wgpu_refusing_the_first_frame_is_no_adapter() {
+        // #85: Windows' session 0, by backend.
+        let vulkan = "wgpu error: Validation Error\n\nCaused by:\n  In Queue::write_buffer\n    \
+                      Buffer with 'scene uniforms' label is invalid";
+        let dx12 = "wgpu error: Validation Error\n\nCaused by:\n  Invalid surface";
+        for frames in [0, 1] {
+            assert!(cant_draw(vulkan, frames));
+            assert!(cant_draw(dx12, frames));
+        }
+        // Once a frame has drawn, it's a fault: a crash report.
+        assert!(!cant_draw(vulkan, 2));
+        assert!(!cant_draw("index out of bounds", 0));
     }
 
     #[test]

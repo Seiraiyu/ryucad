@@ -24,6 +24,10 @@ winit = { version = "0.30", default-features = false, features = ["wayland-csd-a
 # all-Rust connection winit's X11 backend already builds.
 x11rb = { version = "0.13", default-features = false }
 
+# Whether a dialog can be seen (not in session 0's window station).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_StationsAndDesktops", "Win32_UI_WindowsAndMessaging"] }
+
 [dev-dependencies]
 divan = "0.1"
 egui_kittest = { version = "0.37", features = ["eframe", "snapshot", "wgpu"] }

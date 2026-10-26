@@ -278,3 +278,23 @@ fn a_number_a_merge_duplicated_reaches_the_conflict_panel() {
     ws.save_props();
     assert!(ws.wait_until(WAIT, |ws| ws.merge.as_ref().is_some_and(|m| m.clean())));
 }
+
+#[test]
+fn typing_right_after_setting_up_pdm_is_kept() {
+    // #73: the properties read again after `pdm.init` replaced the form.
+    let p = Project::new().with_part();
+    let mut ws = with_props(&p);
+    assert!(ws.wait_until(WAIT, |ws| ws.pdm_config.is_some()));
+    ws.pdm_init();
+    // Typed before the answer, and the read after it, land.
+    field(&mut ws, "number").text = "100".into();
+    assert!(ws.wait_until(WAIT, |ws| ws.pdm_ready() && ws.idle()));
+    assert_eq!(field(&mut ws, "number").text, "100");
+    ws.save_props();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.props
+            .as_ref()
+            .is_some_and(|p| !p.saving && !p.dirty() && p.props[0].field.read == "100")
+    }));
+    assert_eq!(number_on_disk(&p), "100");
+}

@@ -156,13 +156,70 @@ fn strings(v: &Value) -> Vec<String> {
         .collect()
 }
 
-/// A value in a change line: strings as they are, the rest as JSON, and
-/// nothing as `(none)`.
+/// A value in a change line: strings as they are, a reference to an
+/// entity as its feature and the end of its name (`ex1/23ab0b16`, as the
+/// edge checkboxes say it), the rest as JSON, and nothing as `(none)`.
 fn shown(v: &Value) -> String {
     match v {
         Value::Null => "(none)".to_owned(),
         Value::String(s) => s.clone(),
-        v => v.to_string(),
+        v => match reference(v) {
+            Some((feature, name)) => {
+                let end = name.len().saturating_sub(8);
+                format!("{feature}/{}", name.get(end..).unwrap_or(name))
+            }
+            None => v.to_string(),
+        },
+    }
+}
+
+/// A reference (`{feature, name}`) as its two strings.
+fn reference(v: &Value) -> Option<(&str, &str)> {
+    let o = v.as_object()?;
+    if o.len() != 2 {
+        return None;
+    }
+    Some((o.get("feature")?.as_str()?, o.get("name")?.as_str()?))
+}
+
+/// One change as lines: a change inside objects or arrays (a fillet's
+/// `groups`, which a diff gives whole) as each value that differs, by
+/// its pointer below `at` (`/groups/0/radius: 3 mm -> 4 mm`); anything
+/// else, and references, whole.
+fn changed(at: &str, from: &Value, to: &Value, out: &mut Vec<String>) {
+    if from == to {
+        return;
+    }
+    let whole = |out: &mut Vec<String>| out.push(format!("{at}: {} -> {}", shown(from), shown(to)));
+    if reference(from).is_some() || reference(to).is_some() {
+        return whole(out);
+    }
+    match (from, to) {
+        (Value::Object(a), Value::Object(b)) => {
+            let keys: std::collections::BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+            for k in keys {
+                let null = Value::Null;
+                let key = k.replace('~', "~0").replace('/', "~1");
+                changed(
+                    &format!("{at}/{key}"),
+                    a.get(k).unwrap_or(&null),
+                    b.get(k).unwrap_or(&null),
+                    out,
+                );
+            }
+        }
+        (Value::Array(a), Value::Array(b)) => {
+            for i in 0..a.len().max(b.len()) {
+                let null = Value::Null;
+                changed(
+                    &format!("{at}/{i}"),
+                    a.get(i).unwrap_or(&null),
+                    b.get(i).unwrap_or(&null),
+                    out,
+                );
+            }
+        }
+        _ => whole(out),
     }
 }
 
@@ -189,12 +246,8 @@ fn result(v: &Value) -> String {
 fn lines(f: &Value) -> Vec<String> {
     let mut out = Vec::new();
     for c in f["changes"].as_array().into_iter().flatten() {
-        out.push(format!(
-            "{}: {} -> {}",
-            c["at"].as_str().unwrap_or(""),
-            shown(&c["from"]),
-            shown(&c["to"])
-        ));
+        let at = c["at"].as_str().unwrap_or("");
+        changed(at, &c["from"], &c["to"], &mut out);
     }
     for side in strings(&f["invalid"]) {
         let at = if side == "from" { "there" } else { "here" };
@@ -470,6 +523,32 @@ mod tests {
 
     fn key(f: &str) -> BodyKey {
         ("p".to_owned(), f.to_owned())
+    }
+
+    #[test]
+    fn a_fillets_groups_change_by_the_values_that_differ() {
+        // #103: a radius change showed both `groups` arrays whole.
+        let edge = |n: char| json!({"feature": "ex1", "name": format!("{}23ab0b16", hex(n).get(..24).unwrap())});
+        let from = json!([{"radius": "3 mm", "edges": [edge('a'), edge('b')]}]);
+        let mut to = from.clone();
+        to[0]["radius"] = json!("4 mm");
+        let f = json!({"changes": [{"at": "/groups", "from": from, "to": to}]});
+        assert_eq!(lines(&f), ["/groups/0/radius: 3 mm -> 4 mm"]);
+        // An edge more, a group fewer: the values added and removed.
+        let mut more = from.clone();
+        more[0]["edges"].as_array_mut().unwrap().push(edge('c'));
+        let f = json!({"changes": [{"at": "/groups", "from": from, "to": more}]});
+        assert_eq!(lines(&f), ["/groups/0/edges/2: (none) -> ex1/23ab0b16"]);
+        let f = json!({"changes": [{"at": "/groups", "from": from, "to": []}]});
+        assert_eq!(
+            lines(&f),
+            [
+                r#"/groups/0: {"edges":[{"feature":"ex1","name":"aaaaaaaaaaaaaaaaaaaaaaaa23ab0b16"},{"feature":"ex1","name":"bbbbbbbbbbbbbbbbbbbbbbbb23ab0b16"}],"radius":"3 mm"} -> (none)"#
+            ]
+        );
+        // A reference changes whole.
+        let f = json!({"changes": [{"at": "/face", "from": edge('a'), "to": null}]});
+        assert_eq!(lines(&f), ["/face: ex1/23ab0b16 -> (none)"]);
     }
 
     #[test]

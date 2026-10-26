@@ -913,10 +913,14 @@ impl Workspace {
             self.following = None;
         }
         self.load();
-        // A new session knows nothing of this window's compare either.
+        // A new session knows nothing of this window's compare or focus
+        // either.
         if let Some(rev) = self.compare.as_ref().map(|c| c.rev.clone()) {
             self.set_compare(Some(rev));
             self.ask_diff();
+        }
+        if let Some(part) = self.model.focus.clone() {
+            self.set_focus(Some(part));
         }
         // A new daemon may see damage, and commits, the old one didn't.
         self.rediagnose();
@@ -1176,9 +1180,12 @@ impl Workspace {
             }
             (Pending::Props(part, before), Ok(a)) => {
                 if self.props_part.as_deref() == Some(part.as_str()) {
-                    self.props = Some(match before {
-                        Some(b) => b.reloaded(&a.result),
-                        None => PartProps::from_get(&a.result),
+                    self.props = Some(match (before, &self.props) {
+                        (Some(b), _) => b.reloaded(&a.result),
+                        // Read again under someone typing (after Set up
+                        // PDM): what they typed stays.
+                        (None, Some(p)) if p.part == part => p.refreshed(&a.result),
+                        (None, _) => PartProps::from_get(&a.result),
                     });
                 }
             }

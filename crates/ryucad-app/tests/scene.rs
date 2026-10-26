@@ -281,3 +281,12 @@ fn a_compare_ghosts_what_is_gone() {
     scene.sync_ghosts(&device, None);
     assert_eq!(at(&draw(&mut scene)), plain);
 }
+
+#[test]
+fn an_adapter_that_draws_passes_the_probe() {
+    // #85: the window passes over adapters whose devices can't draw.
+    let Some((adapter, _, _)) = gpu() else {
+        return;
+    };
+    assert!(ryucad_app::ui::platform::draws(&adapter, None));
+}
