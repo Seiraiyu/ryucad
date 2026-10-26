@@ -331,3 +331,41 @@ fn an_octant_off_a_ball_whatever_its_seam() {
         near(volume(&i), want / 7.0);
     }
 }
+
+#[test]
+fn a_rim_touching_a_bore_at_a_point_is_refused() {
+    // Issue #88: a block bored along x (radius 3), then cut by a pin
+    // (radius 1) standing on the bore's middle plane, its bottom rim
+    // touching the bore at one point. The voids would meet at that point
+    // alone: the cut must be refused, as when the pin's wall touches.
+    let block = primitive::block(OpKey(1), 20.0, 30.0, 10.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let along_x = Rigid::from_frame(
+        &Frame::new(
+            Point3::new(-10.0, 15.0, 4.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        )
+        .unwrap(),
+    );
+    let rod = primitive::cylinder(OpKey(2), 3.0, 40.0, &along_x)
+        .unwrap()
+        .0;
+    let bored = run(BooleanOp::Subtract, &block, &[(&rod, Rigid::IDENTITY)]);
+    for (h, z) in [(6.0, 4.0), (8.0, 2.0)] {
+        let pin = primitive::cylinder(OpKey(3), 1.0, h, &at(10.0, 19.0, z))
+            .unwrap()
+            .0;
+        let tools = [Tool {
+            key: ToolKey(1),
+            body: &pin,
+            place: Rigid::IDENTITY,
+        }];
+        match boolean(OpKey(100), BooleanOp::Subtract, &bored, &tools) {
+            Err(ryukei::Error::InvalidBoolean(_)) => {}
+            Err(e) => panic!("pin at {z}: {e:?}"),
+            Ok((r, _)) => panic!("pin at {z}: built, crossing {:?}", check_intersections(&r)),
+        }
+    }
+}
