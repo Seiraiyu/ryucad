@@ -14,7 +14,7 @@
 use super::Fail;
 use super::table::{GeId, GvId};
 use crate::euler;
-use crate::geom::{Curve, Surface};
+use crate::geom::{Curve, Point2, Surface};
 use crate::name::OpKey;
 use crate::tol::{LINEAR_RESOLUTION, Tolerance};
 use crate::topo::{Body, EdgeId, FaceId, Pcurve, Sense, VertexId};
@@ -234,7 +234,7 @@ fn onto(body: &mut Body, e1: EdgeId, e2: EdgeId) -> Result<bool, Fail> {
 /// False, with nothing changed, when they don't.
 fn share_pcurves(body: &mut Body, e1: EdgeId, e2: EdgeId) -> Result<bool, Fail> {
     if partners_agree(body, e1, e2) {
-        return Ok(true);
+        return Ok(in_domain(body, e2));
     }
     let y = body.edge(e2).expect("live").clone();
     let curve = body.curve(y.curve).expect("live").clone();
@@ -264,6 +264,7 @@ fn share_pcurves(body: &mut Body, e1: EdgeId, e2: EdgeId) -> Result<bool, Fail> 
             let q = c2.point(s);
             s >= d0 - 1e-12
                 && s <= d1 + 1e-12
+                && within(surface, q)
                 && surface.point(q.x, q.y).distance(curve.point(t)) <= y.tolerance.get()
         });
         if !fits {
@@ -275,6 +276,44 @@ fn share_pcurves(body: &mut Body, e1: EdgeId, e2: EdgeId) -> Result<bool, Fail> 
         euler::set_pcurve(body, g, Some(pc)).map_err(|_| Fail::Inconsistent)?;
     }
     Ok(partners_agree(body, e1, e2))
+}
+
+/// Whether `q` lies in a surface's domain in each direction that isn't
+/// periodic. A pcurve run on past a sphere's pole still maps onto the
+/// sphere (over the pole, half a turn round), but no face's parameter
+/// plane holds it: two edges either side of a pole can't be joined.
+fn within(surface: &Surface, q: Point2) -> bool {
+    let domain = surface.domain();
+    let (pu, pv) = surface.periods();
+    [(q.x, domain[0], pu), (q.y, domain[1], pv)]
+        .into_iter()
+        .all(|(x, [lo, hi], period)| {
+            period.is_some() || {
+                let slack = 1e-12 * lo.abs().max(hi.abs()).clamp(1.0, 1e6);
+                x >= lo - slack && x <= hi + slack
+            }
+        })
+}
+
+/// Whether every fin of `e` keeps its pcurve within its face's surface's
+/// domain (see [`within`]) all along.
+fn in_domain(body: &Body, e: EdgeId) -> bool {
+    let x = body.edge(e).expect("live");
+    body.edge_fins(e).all(|g| {
+        let fin = body.fin(g).expect("live");
+        let Some(pc) = fin.pcurve else {
+            return true;
+        };
+        let face = body.loop_(fin.loop_).expect("live").face;
+        let surface = body
+            .surface(body.face(face).expect("live").surface)
+            .expect("live");
+        let c2 = body.curve2(pc.curve).expect("live");
+        (0..=8).all(|k| {
+            let t = x.interval[0] + (x.interval[1] - x.interval[0]) * f64::from(k) / 8.0;
+            within(surface, c2.point(pc.param(t)))
+        })
+    })
 }
 
 /// Whether every fin of `e2` has a fin of `e1` beside it with the same

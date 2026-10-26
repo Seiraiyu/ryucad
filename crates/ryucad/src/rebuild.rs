@@ -2433,6 +2433,41 @@ mod tests {
     }
 
     #[test]
+    fn balls_trimmed_through_their_poles_mesh() {
+        use crate::doc::files::PrimitiveType::{Box, Sphere};
+        use crate::doc::solid::Operation::*;
+        use crate::solid::tests::part;
+        use ryukei::mesh::{MeshParams, check_mesh, tessellate};
+        // Issue #78: the feature fuzz target's two finds, after its box:
+        // a ball whose axis lies in the box's y = 0 face, and one whose
+        // pole touches the box's top. Checked as the target checks them.
+        let block = [("x", "20"), ("y", "10"), ("z", "5")];
+        for (origin, z) in [
+            (["5", "0", "2"], [5.0, 0.0, 1.0]),
+            (["9", "5", "1"], [0.0, 0.0, 1.0]),
+        ] {
+            let mut ball = primitive(Sphere, &[("radius", "4")], origin, Intersect, &["b"]);
+            if let Feature::Primitive(p) = &mut ball {
+                p.placement.z = z;
+            }
+            let p = part(vec![
+                ("b", primitive(Box, &block, ["0", "0", "0"], New, &[])),
+                ("f", ball),
+            ]);
+            let r = rebuild_part(&p);
+            let body = &state(&r, "f", "b").body;
+            assert_eq!(ryukei::check::check(body), []);
+            let params = MeshParams {
+                max_triangles: 200_000,
+                ..MeshParams::new(2e-4, 0.5)
+            };
+            let mesh = tessellate(body, &params).unwrap();
+            assert_eq!(mesh.faults, [], "{origin:?}");
+            assert_eq!(check_mesh(body, &mesh), Ok(()));
+        }
+    }
+
+    #[test]
     fn booleans_combine_whole_solids() {
         use crate::doc::solid::BooleanOp::{Intersect, Subtract, Unite};
         use crate::doc::solid::Operation::*;
