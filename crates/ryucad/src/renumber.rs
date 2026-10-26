@@ -3,7 +3,8 @@
 //! the next free one, and every use of it that came from theirs follows: a
 //! feature's file, its place in the part's list, the sweeps and holes of
 //! a sketch, the features that act on a solid it founds, the patterns
-//! that repeat it, and the references to its faces; a sketch entity's
+//! that repeat it, and the references to its faces, the connectors of
+//! assemblies that place its part included; a sketch entity's
 //! key, the entities and constraints built on it, and the sweeps and
 //! holes that name it.
 //!
@@ -288,6 +289,29 @@ fn rewrite(
     }
 }
 
+/// The part a connector's instance path, from assembly `asm`, ends in, as
+/// `files` have it, when every instance along it places its part at
+/// `working`: a label reads a release's files, which no merge renumbers.
+/// A copy (`<pattern>:<i>`) is followed by its seed.
+fn path_part(files: &Files, asm: &str, path: &[Value]) -> Option<String> {
+    let mut part = asm.to_owned();
+    let mut steps = path.iter().map(Value::as_str);
+    while let Some(step) = steps.next() {
+        let step = step?;
+        let inst = if step.contains(':') {
+            steps.next()??
+        } else {
+            step
+        };
+        let v = json_of(files, &format!("parts/{part}/features/{inst}.json"))?;
+        if v["type"] != "instance" || v["rev"] != "working" {
+            return None;
+        }
+        part = v["part"].as_str()?.to_owned();
+    }
+    Some(part)
+}
+
 /// The feature a file of the part is, if it is one.
 fn feature_of<'a>(path: &'a str, part: &str) -> Option<&'a str> {
     path.strip_prefix(&format!("parts/{part}/features/"))?
@@ -464,6 +488,53 @@ pub fn plan(
         });
         if new != v {
             files.insert(p.clone(), bytes(&new));
+        }
+    }
+    // Connectors in other parts' files that theirs aimed at what it built
+    // (issue #1145): an assembly's, whose instance path reaches this part
+    // at `working`, naming the renumbered solid.
+    if let Rename::Feature { from, to, .. } = &r {
+        for (p, b) in working {
+            let Some((asm, _)) = p
+                .strip_prefix("parts/")
+                .and_then(|x| x.split_once("/features/"))
+            else {
+                continue;
+            };
+            let (Ok(v), Some(t), o) = (
+                serde_json::from_slice::<Value>(b),
+                json_of(theirs, p),
+                json_of(ours, p),
+            ) else {
+                continue;
+            };
+            if asm == part {
+                continue;
+            }
+            let new = rewrite(&v, "", &mut |pt, n| {
+                let at = pt.strip_suffix("/at")?;
+                if !is_reference(n) || n["feature"].as_str() != Some(from) {
+                    return None;
+                }
+                let connector = t.pointer(at)?;
+                let mine = o.as_ref().and_then(|o| o.pointer(at));
+                if v.pointer(at) != Some(connector) || mine == Some(connector) {
+                    return None;
+                }
+                let path = connector["instance"].as_array()?;
+                if path_part(theirs, asm, path)? != part {
+                    return None;
+                }
+                let name = n["name"].as_str()?;
+                let name = names
+                    .get(from)
+                    .and_then(|m| m.get(name))
+                    .map_or(name, String::as_str);
+                Some(json!({"feature": to, "name": name}))
+            });
+            if new != v {
+                files.insert(p.clone(), bytes(&new));
+            }
         }
     }
     match &r {
