@@ -1135,9 +1135,35 @@ fn apply(
         _ => false,
     });
     for x in tools {
-        let left = journal.events().iter().any(
-            |e| matches!(e, Event::Placed { tool, to, .. } if *tool == x.key && kept.contains(to)),
-        );
+        // What is left of a tool may be pieces of its faces or edges, or
+        // merged into others: its names are followed through the journal.
+        let mut own: BTreeSet<Name> = journal
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                Event::Placed { tool, to, .. } if *tool == x.key => Some(*to),
+                _ => None,
+            })
+            .collect();
+        // The journal lists merges before the splits they merge pieces of.
+        loop {
+            let before = own.len();
+            for e in journal.events() {
+                match e {
+                    Event::Split { parent, children } if own.contains(parent) => {
+                        own.extend(children.iter().copied())
+                    }
+                    Event::Merged { parents, child } if parents.iter().any(|p| own.contains(p)) => {
+                        own.insert(*child);
+                    }
+                    _ => {}
+                }
+            }
+            if own.len() == before {
+                break;
+            }
+        }
+        let left = own.iter().any(|n| kept.contains(n));
         if !left && !changed {
             let which = match &x.label {
                 Some(l) if l.get("instance").is_some() => label_text(l),
@@ -2362,6 +2388,30 @@ mod tests {
                 targets: targets.iter().map(|t| id(t)).collect(),
             },
         })
+    }
+
+    #[test]
+    fn an_intersect_that_clips_corners_changes_its_target() {
+        use crate::doc::files::PrimitiveType::{Box, Cylinder};
+        use crate::doc::solid::Operation::*;
+        use crate::solid::tests::part;
+        // Issue #84: a cylinder that only clips the block's corners trims
+        // every face it meets, splitting none.
+        let block = [("x", "80"), ("y", "40"), ("z", "12")];
+        let tool = [("radius", "42"), ("height", "12")];
+        let p = part(vec![
+            (
+                "base",
+                primitive(Box, &block, ["-40", "-20", "0"], New, &[]),
+            ),
+            (
+                "trim",
+                primitive(Cylinder, &tool, ["0", "0", "0"], Intersect, &["base"]),
+            ),
+        ]);
+        let r = rebuild_part(&p);
+        let v = volume(&state(&r, "trim", "base").body);
+        assert!(v < 80e-3 * 40e-3 * 12e-3 * 0.999, "{v}");
     }
 
     #[test]
