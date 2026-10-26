@@ -32,6 +32,8 @@ enum Pending {
     Rebuild(String),
     /// A body's mesh, asked for at this hash.
     Mesh(BodyKey, String),
+    /// A body's mesh at another level of detail.
+    Level(String, ryucad::mesh::Quality),
     /// A sketch's drawing, asked for at this part revision.
     Sketch(BodyKey, String),
     People,
@@ -1288,6 +1290,7 @@ impl Workspace {
             // which also brings the project revision up to date.
             (Pending::Config, Ok(a)) if a.result.get("settings").is_some() => {
                 self.settings.reset(&a.result);
+                self.model.base = self.display_quality();
             }
             (Pending::Config, Ok(_)) => self.load_settings(),
             (Pending::Form(part, id, before), Ok(a)) => {
@@ -1422,6 +1425,23 @@ impl Workspace {
                     self.model.generation += 1;
                 }
             }
+            (Pending::Level(hash, level), a) => {
+                let bodies = match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
+                    Ok(Some(Ok(bodies))) => bodies,
+                    Ok(Some(Err(e))) | Err(e) => {
+                        self.fail(e);
+                        Vec::new()
+                    }
+                    Ok(None) => Vec::new(),
+                };
+                let mut taken = false;
+                for b in bodies.into_iter().filter(|b| b.hash == hash) {
+                    taken |= self.model.take_level(b, level);
+                }
+                if !taken {
+                    self.model.levels_asked.remove(&(hash, level));
+                }
+            }
             (Pending::Mesh(key, hash), a) => {
                 self.model.answered(&key, &hash);
                 match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
@@ -1481,6 +1501,7 @@ impl Workspace {
             "config.changed" => {
                 self.settings.changed(params);
                 if params["key"] == "display.quality" {
+                    self.model.base = self.display_quality();
                     let all = self.model.clear_meshes();
                     self.fetch(all);
                     for part in self.model.clear_sketches() {
@@ -1625,6 +1646,33 @@ impl Workspace {
                 rev: None,
             };
             self.send(req, Pending::Mesh(key, hash));
+        }
+    }
+
+    /// The user's display quality, as the settings say.
+    fn display_quality(&self) -> ryucad::mesh::Quality {
+        ryucad::mesh::Quality::parse(self.settings.text("display.quality", "normal"))
+            .unwrap_or_default()
+    }
+
+    /// Fetches bodies' meshes at the levels of detail the view wants,
+    /// in the order given (nearest first), each body and level once.
+    pub fn fetch_levels(&mut self, wanted: Vec<(BodyKey, ryucad::mesh::Quality)>) {
+        for (key, hash, level) in self.model.ask_levels(wanted) {
+            self.fetched += 1;
+            let assembly = self.model.parts.get(&key.0).is_some_and(|p| p.assembly);
+            let feature = match key.1.rsplit_once('/') {
+                Some((path, _)) if assembly => path.to_owned(),
+                _ => key.1.clone(),
+            };
+            let req = Request::MeshGet {
+                part: key.0.clone(),
+                feature: Some(feature),
+                quality: Some(level.as_str().to_owned()),
+                transfer: Some(Transfer::Binary),
+                rev: None,
+            };
+            self.send(req, Pending::Level(hash, level));
         }
     }
 

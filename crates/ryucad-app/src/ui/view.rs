@@ -61,6 +61,7 @@ pub struct View {
 /// (`view::framing_points`): a few hundred of its mesh's thousands.
 struct Framers {
     hash: String,
+    pose: crate::core::model::Pose,
     /// The direction, unit back (towards the eye) and up.
     back: [f64; 3],
     up: [f64; 3],
@@ -186,18 +187,23 @@ impl View {
     fn framing_points(&mut self, ws: &Workspace) -> Vec<[f64; 3]> {
         let c = &self.nav.camera;
         let (back, up) = (unit(sub(c.eye, c.target)), unit(c.up));
-        let drawn: Vec<(&BodyKey, &Arc<WireBody>)> = ws.model.drawn().collect();
+        let drawn: Vec<(&BodyKey, &Arc<WireBody>, crate::core::model::Pose)> =
+            ws.model.drawn().collect();
         self.framers
-            .retain(|k, _| drawn.iter().any(|(d, _)| *d == k));
+            .retain(|k, _| drawn.iter().any(|(d, ..)| *d == k));
         let mut out = Vec::new();
-        for (key, body) in drawn {
+        for (key, body, pose) in drawn {
             let kept = self.framers.get(key).is_some_and(|f| {
-                f.hash == body.hash && same_way(f.back, back) && same_way(f.up, up)
+                f.hash == body.hash
+                    && f.pose == pose
+                    && same_way(f.back, back)
+                    && same_way(f.up, up)
             });
             if !kept {
                 let points = self.picker(ws).points(Some(key));
                 let framers = Framers {
                     hash: body.hash.clone(),
+                    pose,
                     back,
                     up,
                     points: view::framing_points(&points, back, up),
@@ -606,10 +612,14 @@ impl View {
         if response.secondary_clicked() {
             self.menu = self.hover.clone();
         }
-        // Drawing.
+        // Drawing: what is in view, each at its level of detail, the
+        // levels not here yet fetched nearest first.
         let (faces, lines) = self.painted(ws);
+        let height = f64::from(rect.height() * ui.ctx().pixels_per_point());
+        let (drawn, wanted) = crate::core::lod::choose(&ws.model, self.picker(ws), &pr, height);
+        ws.fetch_levels(wanted);
         match gpu {
-            Some(rs) => self.draw(ui, ws, rs, rect, &pr, &faces),
+            Some(rs) => self.draw(ui, ws, rs, rect, &pr, (&faces, &drawn)),
             None => {
                 ui.painter().text(
                     rect.center(),
@@ -701,7 +711,7 @@ impl View {
         rs: &egui_wgpu::RenderState,
         rect: egui::Rect,
         pr: &Projector,
-        faces: &[PaintedFace],
+        (faces, drawn): (&[PaintedFace], &[crate::core::lod::Drawn]),
     ) {
         let ppp = ui.ctx().pixels_per_point();
         let px = [
@@ -712,7 +722,7 @@ impl View {
         let scene = self
             .scene
             .get_or_insert_with(|| Scene::new(&rs.device, &rs.adapter));
-        scene.sync(&rs.device, &ws.model, reference);
+        scene.sync_drawn(&rs.device, drawn, reference);
         scene.sync_ghosts(&rs.device, ws.compare.as_ref());
         let overlay = if self.sketches {
             let size = [f64::from(px[0]), f64::from(px[1])];

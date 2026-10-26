@@ -3,11 +3,12 @@
 //! built from the daemon's reports and never from the files.
 //!
 //! An assembly's solids are its occurrences' solids, keyed
-//! `<path>/<solid>` (as entity references name them), each mesh moved
-//! where its occurrence is when it comes.
+//! `<path>/<solid>` (as entity references name them). A mesh is kept in
+//! its part's frame and shared by every occurrence of its body, each
+//! drawn at its own [`Pose`]: a thousand bolts are one mesh.
 
 use crate::core::sketch::Drawing;
-use ryucad::mesh::WireBody;
+use ryucad::mesh::{Quality, WireBody};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -102,6 +103,64 @@ pub struct Solve {
     pub stale: bool,
 }
 
+/// A rigid placement: where a part's origin and axes sit in the model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pose {
+    pub origin: [f64; 3],
+    pub x: [f64; 3],
+    pub y: [f64; 3],
+    pub z: [f64; 3],
+}
+
+impl Pose {
+    pub const IDENTITY: Pose = Pose {
+        origin: [0.0; 3],
+        x: [1.0, 0.0, 0.0],
+        y: [0.0, 1.0, 0.0],
+        z: [0.0, 0.0, 1.0],
+    };
+
+    /// The pose with its origin at `origin`, its z along `z` and its x
+    /// along `x` made perpendicular to it, as the daemon builds poses.
+    pub fn of(origin: [f64; 3], z: [f64; 3], x: [f64; 3]) -> Pose {
+        let unit = |a: [f64; 3]| {
+            let n = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+            [a[0] / n, a[1] / n, a[2] / n]
+        };
+        let z = unit(z);
+        let d = x[0] * z[0] + x[1] * z[1] + x[2] * z[2];
+        let x = unit([x[0] - d * z[0], x[1] - d * z[1], x[2] - d * z[2]]);
+        let y = [
+            z[1] * x[2] - z[2] * x[1],
+            z[2] * x[0] - z[0] * x[2],
+            z[0] * x[1] - z[1] * x[0],
+        ];
+        Pose { origin, x, y, z }
+    }
+
+    /// A direction in the part's frame, in the model's.
+    pub fn turn(&self, v: [f64; 3]) -> [f64; 3] {
+        [0, 1, 2].map(|k| self.x[k] * v[0] + self.y[k] * v[1] + self.z[k] * v[2])
+    }
+
+    /// A point in the part's frame, in the model's.
+    pub fn apply(&self, p: [f64; 3]) -> [f64; 3] {
+        let t = self.turn(p);
+        [0, 1, 2].map(|k| t[k] + self.origin[k])
+    }
+
+    /// A direction in the model's frame, in the part's.
+    pub fn unturn(&self, v: [f64; 3]) -> [f64; 3] {
+        let dot = |a: [f64; 3]| a[0] * v[0] + a[1] * v[1] + a[2] * v[2];
+        [dot(self.x), dot(self.y), dot(self.z)]
+    }
+
+    /// A point in the model's frame, in the part's.
+    pub fn unapply(&self, p: [f64; 3]) -> [f64; 3] {
+        self.unturn([0, 1, 2].map(|k| p[k] - self.origin[k]))
+    }
+}
+
 /// An occurrence of an assembly: its instance path, its part, its solids
 /// by founder with their body hashes, and its pose.
 #[derive(Clone, Debug, PartialEq)]
@@ -177,61 +236,9 @@ impl Occurrence {
         }
     }
 
-    /// The hash a mesh of one of its bodies, moved where it is, is kept
-    /// by: the body's and the pose's together, so a move fetches again.
-    fn placed_hash(&self, body: &str) -> String {
-        let pose: Vec<String> = self
-            .origin
-            .iter()
-            .chain(&self.z)
-            .chain(&self.x)
-            .map(|x| format!("{:x}", x.to_bits()))
-            .collect();
-        format!("{body}@{}", pose.join(","))
-    }
-
-    /// `m` moved from its part's frame to where the occurrence is.
-    fn place(&self, m: &mut ryucad::mesh::WireMesh) {
-        let unit = |a: [f64; 3]| {
-            let n = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
-            [a[0] / n, a[1] / n, a[2] / n]
-        };
-        let z = unit(self.z);
-        // x made perpendicular to z, as poses are built.
-        let d = self.x[0] * z[0] + self.x[1] * z[1] + self.x[2] * z[2];
-        let x = unit([
-            self.x[0] - d * z[0],
-            self.x[1] - d * z[1],
-            self.x[2] - d * z[2],
-        ]);
-        let y = [
-            z[1] * x[2] - z[2] * x[1],
-            z[2] * x[0] - z[0] * x[2],
-            z[0] * x[1] - z[1] * x[0],
-        ];
-        let turn = |v: [f64; 3]| {
-            [
-                x[0] * v[0] + y[0] * v[1] + z[0] * v[2],
-                x[1] * v[0] + y[1] * v[1] + z[1] * v[2],
-                x[2] * v[0] + y[2] * v[1] + z[2] * v[2],
-            ]
-        };
-        let o = turn(m.origin);
-        m.origin = [
-            o[0] + self.origin[0],
-            o[1] + self.origin[1],
-            o[2] + self.origin[2],
-        ];
-        let f = |v: [f32; 3]| {
-            let t = turn([f64::from(v[0]), f64::from(v[1]), f64::from(v[2])]);
-            [t[0] as f32, t[1] as f32, t[2] as f32]
-        };
-        for p in &mut m.positions {
-            *p = f(*p);
-        }
-        for c in &mut m.corners {
-            c.1 = f(c.1);
-        }
+    /// Where it is.
+    pub fn pose(&self) -> Pose {
+        Pose::of(self.origin, self.z, self.x)
     }
 }
 
@@ -302,7 +309,7 @@ impl Part {
             .map(Occurrence::from_json)
             .collect();
         // An assembly's solids are its occurrences': each under the
-        // instance that places it, by its placed hash.
+        // instance that places it, by its body's hash.
         let solids = match assembly {
             false => solids,
             true => occurrences
@@ -318,7 +325,7 @@ impl Part {
                     o.solids.iter().map(move |(s, h)| Solid {
                         id: format!("{}/{s}", o.path),
                         features: vec![top.clone()],
-                        hash: Some(o.placed_hash(h)),
+                        hash: Some(h.clone()),
                         error: None,
                     })
                 })
@@ -395,11 +402,19 @@ pub type BodyKey = (String, String);
 pub struct Model {
     pub default_unit: String,
     pub parts: BTreeMap<String, Part>,
-    /// Display meshes by part and solid, each for the body hash it says.
+    /// Display meshes by part and solid, each for the body hash it says,
+    /// in its part's frame: occurrences of one body share one.
     pub meshes: BTreeMap<BodyKey, Arc<WireBody>>,
     /// Meshes asked for and not yet answered, by the body hash they were
     /// asked for at: a burst of changes asks for each body once.
     pub asked: BTreeMap<BodyKey, String>,
+    /// The user's display quality: the level `meshes` are at.
+    pub base: Quality,
+    /// Bodies' meshes at the other levels of detail, by body hash and
+    /// level (see [`crate::core::lod`]).
+    pub levels: BTreeMap<(String, Quality), Arc<WireBody>>,
+    /// Levels asked for and not yet answered.
+    pub levels_asked: std::collections::BTreeSet<(String, Quality)>,
     /// How sketches are drawn, by part and feature, each for the part
     /// revision it says.
     pub sketches: BTreeMap<BodyKey, Arc<Drawing>>,
@@ -420,13 +435,17 @@ impl Model {
     pub fn apply_part(&mut self, report: &Value) -> Vec<BodyKey> {
         let part = Part::from_report(report);
         let id = part.id.clone();
-        // Meshes of solids that are gone, or changed, go.
+        // Meshes of solids that are gone, or changed, go, and other levels
+        // of bodies nothing shows any more.
         self.meshes.retain(|(p, s), m| {
             *p != id
                 || part
                     .solid(s)
                     .is_some_and(|s| s.hash.as_deref() == Some(&m.hash))
         });
+        let kept: std::collections::BTreeSet<&String> =
+            self.meshes.values().map(|m| &m.hash).collect();
+        self.levels.retain(|(h, _), _| kept.contains(h));
         // Drawings of sketches that are gone, or failed, go; the others
         // stay drawn until their new drawing comes.
         self.sketches
@@ -465,20 +484,30 @@ impl Model {
         }
     }
 
-    /// The bodies of `keys` not already asked for at their current hash,
-    /// with that hash, now noted as asked for.
+    /// The body hash `key` shows now.
+    fn hash_of(&self, key: &BodyKey) -> Option<String> {
+        self.parts
+            .get(&key.0)
+            .and_then(|p| p.solid(&key.1))
+            .and_then(|s| s.hash.clone())
+    }
+
+    /// The bodies of `keys` to fetch, with their hashes, now noted as
+    /// asked for: each body once, however many keys show it. A key whose
+    /// body is already here (another occurrence of it) takes that mesh,
+    /// and one whose body is asked for under another key waits for it.
     pub fn ask(&mut self, keys: Vec<BodyKey>) -> Vec<(BodyKey, String)> {
         let mut out = Vec::new();
         for key in keys {
-            let Some(hash) = self
-                .parts
-                .get(&key.0)
-                .and_then(|p| p.solid(&key.1))
-                .and_then(|s| s.hash.clone())
-            else {
+            let Some(hash) = self.hash_of(&key) else {
                 continue;
             };
-            if self.asked.get(&key) != Some(&hash) {
+            if let Some(m) = self.meshes.values().find(|m| m.hash == hash).cloned() {
+                self.meshes.insert(key, m);
+                self.generation += 1;
+                continue;
+            }
+            if !self.asked.values().any(|h| *h == hash) {
                 self.asked.insert(key.clone(), hash.clone());
                 out.push((key, hash));
             }
@@ -559,22 +588,9 @@ impl Model {
         self.generation += 1;
     }
 
-    /// Keeps a fetched mesh if its body is still the current one; an
-    /// assembly's moved where its occurrence is.
+    /// Keeps a fetched mesh if its body is still the current one, for
+    /// every key that shows that body: the occurrences of it.
     pub fn take_mesh(&mut self, part: &str, body: WireBody) -> bool {
-        let mut body = body;
-        if let Some(p) = self.parts.get(part).filter(|p| p.assembly) {
-            let Some((o, hash)) = p.occurrence(&body.feature) else {
-                return false;
-            };
-            if *hash != body.hash {
-                return false;
-            }
-            if let Ok(m) = &mut body.mesh {
-                o.place(m);
-            }
-            body.hash = o.placed_hash(hash);
-        }
         let current = self
             .parts
             .get(part)
@@ -583,16 +599,86 @@ impl Model {
         if current != Some(&body.hash) {
             return false;
         }
-        let key = (part.to_owned(), body.feature.clone());
-        self.meshes.insert(key, Arc::new(body));
+        let body = Arc::new(body);
+        let showing: Vec<BodyKey> = self
+            .parts
+            .values()
+            .flat_map(|p| {
+                p.solids
+                    .iter()
+                    .filter(|s| s.hash.as_deref() == Some(&body.hash))
+                    .map(|s| (p.id.clone(), s.id.clone()))
+            })
+            .collect();
+        for key in showing {
+            self.meshes.insert(key, Arc::clone(&body));
+        }
         self.generation += 1;
         true
+    }
+
+    /// `key`'s mesh at `level`, if the window has it.
+    pub fn mesh_at(&self, key: &BodyKey, level: Quality) -> Option<Arc<WireBody>> {
+        let base = self.meshes.get(key)?;
+        if level == self.base {
+            return Some(Arc::clone(base));
+        }
+        self.levels.get(&(base.hash.clone(), level)).cloned()
+    }
+
+    /// The levels of `wanted` to fetch, each body's once, now noted as
+    /// asked for, in the order given.
+    pub fn ask_levels(
+        &mut self,
+        wanted: Vec<(BodyKey, Quality)>,
+    ) -> Vec<(BodyKey, String, Quality)> {
+        let mut out = Vec::new();
+        for (key, level) in wanted {
+            let Some(hash) = self.meshes.get(&key).map(|m| m.hash.clone()) else {
+                continue;
+            };
+            let at = (hash.clone(), level);
+            if level == self.base
+                || self.levels.contains_key(&at)
+                || self.levels_asked.contains(&at)
+            {
+                continue;
+            }
+            self.levels_asked.insert(at);
+            out.push((key, hash, level));
+        }
+        out
+    }
+
+    /// A fetched level came, or never will: keeps it if its body is one
+    /// the window still has.
+    pub fn take_level(&mut self, body: WireBody, level: Quality) -> bool {
+        let at = (body.hash.clone(), level);
+        self.levels_asked.remove(&at);
+        if !self.meshes.values().any(|m| m.hash == body.hash) || body.mesh.is_err() {
+            return false;
+        }
+        self.levels.insert(at, Arc::new(body));
+        self.generation += 1;
+        true
+    }
+
+    /// Where `key`'s body is drawn: its occurrence's pose in an assembly,
+    /// else where its part puts it.
+    pub fn pose(&self, key: &BodyKey) -> Pose {
+        self.parts
+            .get(&key.0)
+            .filter(|p| p.assembly)
+            .and_then(|p| p.occurrence(&key.1))
+            .map_or(Pose::IDENTITY, |(o, _)| o.pose())
     }
 
     /// Drops every mesh: the display quality changed.
     pub fn clear_meshes(&mut self) -> Vec<BodyKey> {
         self.meshes.clear();
         self.asked.clear();
+        self.levels.clear();
+        self.levels_asked.clear();
         self.generation += 1;
         self.parts
             .values()
@@ -640,12 +726,14 @@ impl Model {
         }
     }
 
-    /// The meshes the window draws: those of the parts it shows.
-    pub fn drawn(&self) -> impl Iterator<Item = (&BodyKey, &Arc<WireBody>)> {
+    /// The meshes the window draws, each where it is: those of the parts
+    /// it shows.
+    pub fn drawn(&self) -> impl Iterator<Item = (&BodyKey, &Arc<WireBody>, Pose)> {
         let shown = self.shown();
         self.meshes
             .iter()
             .filter(move |(k, _)| shown.contains(&k.0.as_str()))
+            .map(|(k, m)| (k, m, self.pose(k)))
     }
 
     /// The solid a feature shows in: its own, or the first the model
@@ -869,8 +957,9 @@ mod tests {
             m.solid_of(&("frame".into(), "b2".into())),
             Some(("frame".into(), "b2/s".into()))
         );
-        // A mesh comes in the part's frame and is moved where b2 is: turned
-        // a quarter about z and 1 m along x.
+        // A mesh comes in the part's frame, and every key showing its
+        // body shares it; b2 draws it turned a quarter about z and 1 m
+        // along x.
         let mesh = ryucad::mesh::WireMesh {
             origin: [0.5, 0.0, 0.0],
             chord: 0.0,
@@ -888,28 +977,36 @@ mod tests {
             hash: "1".into(),
             mesh: Ok(mesh),
         };
+        // Asked for once, for all three keys showing body 1.
+        assert_eq!(m.ask(want).len(), 1);
         assert!(m.take_mesh("frame", wire.clone()));
-        let placed = m.meshes[&("frame".to_owned(), "b2/s".to_owned())]
-            .mesh
-            .as_ref()
-            .unwrap()
-            .clone();
-        assert_eq!(placed.origin, [1.0, 0.5, 0.0]);
-        assert_eq!(placed.positions[0], [0.0, 1.0, 0.0]);
-        assert_eq!(placed.corners[0].1, [0.0, 1.0, 0.0]);
+        let key = |p: &str, s: &str| (p.to_owned(), s.to_owned());
+        let shared = &m.meshes[&key("frame", "b2/s")];
+        assert!(Arc::ptr_eq(shared, &m.meshes[&key("frame", "b1/s")]));
+        assert!(Arc::ptr_eq(shared, &m.meshes[&key("p", "s")]));
+        assert_eq!(shared.mesh.as_ref().unwrap().origin, [0.5, 0.0, 0.0]);
+        let pose = m.pose(&key("frame", "b2/s"));
+        assert_eq!(pose.apply([1.5, 0.0, 0.0]), [1.0, 1.5, 0.0]);
+        assert_eq!(pose.turn([1.0, 0.0, 0.0]), [0.0, 1.0, 0.0]);
+        assert_eq!(pose.unapply([1.0, 1.5, 0.0]), [1.5, 0.0, 0.0]);
+        assert_eq!(m.pose(&key("p", "s")), Pose::IDENTITY);
         // A stale body is refused.
         let mut stale = wire;
         stale.hash = "0".into();
         assert!(!m.take_mesh("frame", stale));
+        // A move keeps the mesh: only the pose changes.
+        let mut moved = assembly();
+        moved["occurrences"][1]["pose"]["origin_m"] = json!([2, 0, 0]);
+        assert!(m.apply_part(&moved).is_empty());
+        assert_eq!(m.pose(&key("frame", "b2/s")).origin, [2.0, 0.0, 0.0]);
         // The frame is the one root, so it is drawn and the bolt isn't; a
         // focus shows the bolt.
-        m.take_mesh("p", body("s", "1"));
         assert_eq!(m.shown(), ["frame"]);
-        assert_eq!(m.drawn().count(), 1);
+        assert_eq!(m.drawn().count(), 2);
         m.focus = Some("p".into());
         assert_eq!(m.shown(), ["p"]);
         assert_eq!(
-            m.drawn().map(|(k, _)| k.1.clone()).collect::<Vec<_>>(),
+            m.drawn().map(|(k, ..)| k.1.clone()).collect::<Vec<_>>(),
             ["s"]
         );
     }

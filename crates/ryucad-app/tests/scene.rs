@@ -290,3 +290,118 @@ fn an_adapter_that_draws_passes_the_probe() {
     };
     assert!(ryucad_app::ui::platform::draws(&adapter, None));
 }
+
+/// A cube of side `s` with its corner at the origin, as a display mesh:
+/// six faces of two triangles, each corner with its face's normal.
+fn cube(s: f32) -> ryucad::mesh::WireMesh {
+    use ryucad::mesh::{WireFace, WireMesh};
+    let p = |i: u32| {
+        let b = |k: u32| if i >> k & 1 == 1 { s } else { 0.0 };
+        [b(0), b(1), b(2)]
+    };
+    // Each face: its normal and its corners counterclockwise from outside.
+    let faces: [([f32; 3], [u32; 4]); 6] = [
+        ([-1.0, 0.0, 0.0], [0, 4, 6, 2]),
+        ([1.0, 0.0, 0.0], [1, 3, 7, 5]),
+        ([0.0, -1.0, 0.0], [0, 1, 5, 4]),
+        ([0.0, 1.0, 0.0], [2, 6, 7, 3]),
+        ([0.0, 0.0, -1.0], [0, 2, 3, 1]),
+        ([0.0, 0.0, 1.0], [4, 5, 7, 6]),
+    ];
+    let mut m = WireMesh {
+        origin: [0.0; 3],
+        chord: 0.0,
+        angle: 0.0,
+        positions: (0..8).map(p).collect(),
+        corners: Vec::new(),
+        triangles: Vec::new(),
+        faces: Vec::new(),
+        edges: Vec::new(),
+        vertices: Vec::new(),
+        faults: Vec::new(),
+    };
+    for (i, (n, c)) in faces.iter().enumerate() {
+        let base = m.corners.len() as u32;
+        let t = m.triangles.len() as u32;
+        m.corners.extend(c.iter().map(|&k| (k, *n)));
+        m.triangles.push([base, base + 1, base + 2]);
+        m.triangles.push([base, base + 2, base + 3]);
+        m.faces.push(WireFace {
+            name: [i as u8; 16],
+            corners: (base, base + 4),
+            triangles: (t, t + 2),
+        });
+    }
+    m
+}
+
+#[test]
+fn a_thousand_occurrences_are_one_mesh() {
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    use ryucad_app::core::model::Model;
+    use serde_json::json;
+    // A 40 × 25 grid of 1 cm cubes, 2 cm apart.
+    let occurrences: Vec<serde_json::Value> = (0..1000)
+        .map(|i| {
+            let (x, y) = (f64::from(i % 40) * 0.02, f64::from(i / 40) * 0.02);
+            json!({"path": format!("c{i}"), "part": "cube",
+                   "solids": [{"solid": "s", "hash": "h"}],
+                   "pose": {"origin_m": [x, y, 0], "z": [0, 0, 1], "x": [1, 0, 0]}})
+        })
+        .collect();
+    let mut model = Model::default();
+    let want = model.apply_part(&json!({"part": "grid", "revision": "r", "kind": "assembly",
+        "features": [], "solids": [], "occurrences": occurrences}));
+    assert_eq!(want.len(), 1000);
+    assert_eq!(model.ask(want).len(), 1, "one body, asked for once");
+    let body = ryucad::mesh::WireBody {
+        feature: "c0/s".into(),
+        hash: "h".into(),
+        mesh: Ok(cube(0.01)),
+    };
+    assert!(model.take_mesh("grid", body));
+    assert_eq!(model.drawn().count(), 1000);
+    let picker = Picker::new(&model);
+    let (lo, hi) = picker.bounds().unwrap();
+    assert_eq!(hi.map(|x| (x * 1e6).round() / 1e6), [0.79, 0.49, 0.01]);
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Top, view::DEFAULT_PROJECTION);
+    let pr = Projector::new(&camera, 1.0, centre, 1.0);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &model, centre);
+    assert_eq!(
+        scene.counts(),
+        (1, 1000),
+        "one mesh on the GPU, drawn 1000 times"
+    );
+    let size = 400u32;
+    let list = DrawList {
+        reference: centre,
+        matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        light: scene::light(&camera),
+        edges: true,
+        faces: &[],
+        background: theme::BACKGROUND,
+        overlay: &[],
+    };
+    scene.render(&device, &queue, [size, size], &list);
+    let px = scene.read_pixels(&device, &queue).unwrap().2;
+    // Seen from above, the cubes cover about a quarter of the grid's box.
+    let lit = px
+        .chunks(4)
+        .filter(|c| !close(&c[..3], srgb(theme::BACKGROUND), 8))
+        .count();
+    let grid = (size * size) as f64 * (0.49 / 0.79);
+    let share = lit as f64 / grid;
+    assert!((0.15..0.4).contains(&share), "{share}");
+    // Picking finds the cube under a pixel, by its occurrence: the top
+    // of the 42nd (second row, second column).
+    let n = pr.ndc([0.025, 0.025, 0.01]).unwrap();
+    let at = [(n[0] + 1.0) / 2.0, (1.0 - n[1]) / 2.0].map(|x| x * f64::from(size));
+    let hit = picker.pick(&pr, [f64::from(size); 2], at).unwrap();
+    assert_eq!((hit.part.as_str(), hit.feature.as_str()), ("grid", "c41/s"));
+    assert!((hit.point[2] - 0.01).abs() < 1e-9, "{:?}", hit.point);
+}
