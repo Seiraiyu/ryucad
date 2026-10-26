@@ -137,6 +137,53 @@ fn mark_colour(m: &Mark) -> style::Rgb {
 
 /// One feature's line in the tree: its status, how a compare marks it,
 /// and under it what it reads. Clicking it chooses it, or unchooses it.
+/// What a tree row asks of the window's visibility: by the reference
+/// `visibility.set` takes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Seen {
+    Hide(String),
+    Show(String),
+    Isolate(String),
+    All,
+}
+
+/// A checkbox that shows or hides what `reference` reaches, named for
+/// screen readers as `Show <reference>`.
+fn visibility_box(ui: &mut egui::Ui, ws: &Workspace, reference: &str, act: &mut Option<Seen>) {
+    let mut shown = !ws.model.all_hidden(reference);
+    let label = format!("Show {reference}");
+    let r = ui.add(egui::Checkbox::without_text(&mut shown));
+    r.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, shown, &label));
+    let r = r.on_hover_text(if shown {
+        "Shown: click to hide (Tab in the view)"
+    } else {
+        "Hidden: click to show (Shift+Tab in the view)"
+    });
+    if r.changed() {
+        *act = Some(if shown {
+            Seen::Show(reference.to_owned())
+        } else {
+            Seen::Hide(reference.to_owned())
+        });
+    }
+}
+
+/// The context menu of a row that can be hidden: isolating it, and
+/// showing everything again.
+fn visibility_menu(r: &egui::Response, reference: &str, act: &mut Option<Seen>) {
+    r.context_menu(|ui| {
+        if ui.button("Isolate").clicked() {
+            *act = Some(Seen::Isolate(reference.to_owned()));
+            ui.close();
+        }
+        if ui.button("Show everything").clicked() {
+            *act = Some(Seen::All);
+            ui.close();
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
 fn feature_row(
     ui: &mut egui::Ui,
     ws: &Workspace,
@@ -144,6 +191,7 @@ fn feature_row(
     part: &Part,
     f: &crate::core::model::Feature,
     choose: &mut Option<Option<BodyKey>>,
+    act: &mut Option<Seen>,
 ) {
     let key = (part.id.clone(), f.id.clone());
     let mark = ws.compare.as_ref().and_then(|c| {
@@ -155,7 +203,21 @@ fn feature_row(
         None => RichText::new(row_text(f, 0)),
     };
     let chosen = view.chosen.as_ref() == Some(&key);
-    let r = ui.selectable_label(chosen, text);
+    // An instance can be hidden and isolated.
+    let reference = format!("{}/{}", part.id, f.id);
+    let hideable = part.assembly && f.instance.is_some();
+    let r = if hideable {
+        let r = ui
+            .horizontal(|ui| {
+                visibility_box(ui, ws, &reference, act);
+                ui.selectable_label(chosen, text)
+            })
+            .inner;
+        visibility_menu(&r, &reference, act);
+        r
+    } else {
+        ui.selectable_label(chosen, text)
+    };
     let r = match (&f.error, &f.mate) {
         (Some(e), _) => r.on_hover_text(message(e)),
         // A mate's connectors in full, as an agent would give them.
@@ -174,11 +236,18 @@ fn feature_row(
     if let Some(i) = &f.instance {
         placed(ui, ws, &i.part, &format!("{}/{}", part.id, f.id), 1);
     }
-    // A pattern's copies, under it.
+    // A pattern's copies, under it, each to hide or isolate.
     if !f.copies.is_empty() {
         ui.indent(("copies", &part.id, &f.id), |ui| {
             for c in &f.copies {
-                ui.weak(c);
+                let reference = format!("{}/{c}", part.id);
+                let r = ui
+                    .horizontal(|ui| {
+                        visibility_box(ui, ws, &reference, act);
+                        ui.weak(c)
+                    })
+                    .inner;
+                visibility_menu(&r, &reference, act);
             }
         });
     }
@@ -206,6 +275,7 @@ fn placed(ui: &mut egui::Ui, ws: &Workspace, id: &str, at: &str, depth: usize) {
 
 /// A solid in the tree: its founder, its state and mesh faults, and its
 /// chain of features in order; a boolean's consumed tools under it.
+#[allow(clippy::too_many_arguments)]
 fn solid_group(
     ui: &mut egui::Ui,
     ws: &Workspace,
@@ -214,6 +284,7 @@ fn solid_group(
     solid: &str,
     tool: bool,
     choose: &mut Option<Option<BodyKey>>,
+    act: &mut Option<Seen>,
 ) {
     let shown = part.solid(solid);
     let faults = ws
@@ -235,6 +306,11 @@ fn solid_group(
     } else if faults > 0 {
         title.push_str(&format!(": {faults} unmeshed"));
     }
+    let reference = format!("{}/{solid}", part.id);
+    let hidden = ws.model.all_hidden(&reference);
+    if hidden {
+        title.push_str(" (hidden)");
+    }
     let header = egui::CollapsingHeader::new(RichText::new(title).strong())
         .id_salt(("solid", &part.id, solid))
         .default_open(!tool)
@@ -244,14 +320,36 @@ fn solid_group(
                 .iter()
                 .filter(|f| f.solids.iter().any(|s| s == solid));
             for f in chain {
-                feature_row(ui, ws, view, part, f, choose);
+                feature_row(ui, ws, view, part, f, choose, act);
                 for t in &f.consumes {
                     ui.indent(("tools", &part.id, &f.id, t), |ui| {
-                        solid_group(ui, ws, view, part, t, true, choose);
+                        solid_group(ui, ws, view, part, t, true, choose, act);
                     });
                 }
             }
         });
+    // A solid shown can be hidden or isolated, a hidden one shown.
+    if !tool {
+        header.header_response.context_menu(|ui| {
+            let (label, seen) = if hidden {
+                ("Show", Seen::Show(reference.clone()))
+            } else {
+                ("Hide", Seen::Hide(reference.clone()))
+            };
+            if ui.button(label).clicked() {
+                *act = Some(seen);
+                ui.close();
+            }
+            if ui.button("Isolate").clicked() {
+                *act = Some(Seen::Isolate(reference.clone()));
+                ui.close();
+            }
+            if ui.button("Show everything").clicked() {
+                *act = Some(Seen::All);
+                ui.close();
+            }
+        });
+    }
     if faults > 0 {
         header.header_response.on_hover_text(format!(
             "{faults} face(s) couldn't be meshed: the kernel left them out"
@@ -273,6 +371,7 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
         ui.weak("No parts yet");
     }
     let mut choose = None;
+    let mut act = None;
     // A feature only a compare's other side has: chosen for its changes,
     // with no form and nothing to frame.
     let mut gone = None;
@@ -317,12 +416,12 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                 for f in &part.features {
                     match f.solids.as_slice() {
                         // A sketch, or a file that doesn't load.
-                        [] => feature_row(ui, ws, view, part, f, &mut choose),
+                        [] => feature_row(ui, ws, view, part, f, &mut choose, &mut act),
                         // A solid shows where its founder is listed; what
                         // acts on solids shows in them, a consumed solid
                         // under its boolean.
                         [s] if *s == f.id && f.operation.is_none() && part.solid(s).is_some() => {
-                            solid_group(ui, ws, view, part, s, false, &mut choose);
+                            solid_group(ui, ws, view, part, s, false, &mut choose, &mut act);
                         }
                         _ => {}
                     }
@@ -372,6 +471,13 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
         view.chosen = c;
         ws.open_form(None);
         ws.choose(None);
+    }
+    match act {
+        Some(Seen::Hide(r)) => ws.set_visibility(vec![r], Vec::new(), Vec::new(), false),
+        Some(Seen::Show(r)) => ws.set_visibility(Vec::new(), vec![r], Vec::new(), false),
+        Some(Seen::Isolate(r)) => ws.set_visibility(Vec::new(), Vec::new(), vec![r], false),
+        Some(Seen::All) => ws.set_visibility(Vec::new(), Vec::new(), Vec::new(), true),
+        None => {}
     }
 }
 
@@ -692,6 +798,10 @@ pub fn status(ui: &mut egui::Ui, ws: &Workspace) {
         if let Some(m) = &ws.merge {
             ui.separator();
             ui.colored_label(ui.visuals().warn_fg_color, m.summary());
+        }
+        if let Some(n) = &ws.drag_note {
+            ui.separator();
+            ui.colored_label(ui.visuals().warn_fg_color, n);
         }
         if let Some(e) = ws.shown_error(std::time::Instant::now()) {
             ui.separator();
@@ -1768,6 +1878,7 @@ mod tests {
             rev: "working".into(),
             fixed: false,
             solve: Some(("under".into(), 2)),
+            pose: None,
         });
         assert_eq!(row_text(&pin, 0), "pin (bolt @ working, 2 dof)");
         pin.instance.as_mut().unwrap().fixed = true;
@@ -1778,6 +1889,7 @@ mod tests {
             a: "frame/base/slab/0123456789abcdef0123456789abcdef".into(),
             b: "frame/ring:2/pin".into(),
             state: Some("redundant".into()),
+            frames: None,
         });
         assert_eq!(
             row_text(&m, 0),

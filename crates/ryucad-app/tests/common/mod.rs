@@ -34,6 +34,7 @@ fn shared() -> &'static Path {
         unsafe {
             std::env::set_var("RYUCAD_RUNTIME_DIR", &run);
             std::env::set_var("RYUCAD_CONFIG_DIR", dir.join("config"));
+            std::env::set_var("RYUCAD_CACHE_DIR", dir.join("cache"));
             std::env::set_var("RYUCAD_IDLE_TIMEOUT", "120");
         }
         dir

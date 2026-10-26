@@ -6,6 +6,7 @@ pub mod doctor;
 pub mod edit;
 pub mod geometry;
 pub mod link;
+pub mod lod;
 pub mod merge;
 pub mod model;
 pub mod nav;

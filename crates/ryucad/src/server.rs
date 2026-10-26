@@ -120,8 +120,22 @@ pub fn answer_live(
             rev,
             frame,
             compare,
+            hidden,
         } => {
             let target = participant.as_deref().map(|p| (p, live.as_deref()));
+            // What the participant's window hides, else the caller's.
+            let hidden = match hidden {
+                Some(refs) => crate::visibility::reach_all(session, &refs)?,
+                None => live
+                    .as_deref()
+                    .and_then(|l| {
+                        let who = participant
+                            .as_deref()
+                            .unwrap_or(me.unwrap_or(live::DEFAULT_AGENT));
+                        Some(l.get(who).ok()?.hidden.clone())
+                    })
+                    .unwrap_or_default(),
+            };
             // A participant's render shows what their window shows.
             let part = part.or_else(|| {
                 let l = live.as_deref()?;
@@ -153,6 +167,7 @@ pub fn answer_live(
                 rev,
                 frame,
                 compare,
+                hidden,
             };
             render(session, target, shown, ask)
         }
@@ -369,7 +384,11 @@ fn dispatch(
             expected_revision.as_deref(),
         ),
         Request::AssemblyTree { part } => crate::assembly::tree(session, &part),
-        Request::AssemblySolve { part, moves } => crate::mate::solve_request(
+        Request::AssemblySolve {
+            part,
+            moves,
+            component,
+        } => crate::mate::solve_request(
             session,
             &part,
             moves
@@ -386,6 +405,7 @@ fn dispatch(
                     )
                 })
                 .collect(),
+            component,
         ),
         Request::FeatureShow { part, id } => {
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
@@ -604,6 +624,25 @@ fn dispatch(
             };
             Ok(json!({"participant": id, "focus": focus, "shows": shows}))
         }
+        Request::VisibilitySet {
+            hide,
+            show,
+            isolate,
+            all,
+            participant,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("visibility.set"))?;
+            let id = live.compare_target(participant.as_deref(), me)?;
+            let change = crate::visibility::Change {
+                all,
+                isolate,
+                show,
+                hide,
+            };
+            let hidden = crate::visibility::apply(session, &live.get(&id)?.hidden, &change)?;
+            live.set_hidden(&id, hidden)?;
+            Ok(json!({"participant": id, "hidden": live.get(&id)?.hidden}))
+        }
         Request::HighlightSet {
             entities,
             style,
@@ -670,6 +709,12 @@ fn dispatch(
                 limit.unwrap_or(50),
             )
         }
+        Request::CacheStats {} => Ok(cache_stats(session.disk().map(|d| d.as_ref()), None)),
+        Request::CacheClear {} => {
+            let disk = session.disk().map(|d| d.as_ref());
+            let removed = disk.map(crate::cache::Disk::clear).unwrap_or_default();
+            Ok(cache_stats(disk, Some(removed)))
+        }
         Request::ConfigGet { key, scope } => {
             let scope = scope.as_deref().map(config::Scope::parse).transpose()?;
             let mut v = config::get(
@@ -704,6 +749,16 @@ fn dispatch(
                 }
                 config::Scope::User => config::set_user(&key, value)?,
             };
+            if key == "cache.max_bytes"
+                && let Some(d) = session.disk()
+            {
+                d.set_max_bytes(
+                    v["value"]
+                        .as_u64()
+                        .unwrap_or(crate::cache::DEFAULT_MAX_BYTES),
+                );
+                d.trim_in_background();
+            }
             if let Some(live) = live {
                 if key == "daemon.poll_ms" {
                     live.poll_ms = v["value"].as_u64().unwrap_or(250);
@@ -766,7 +821,14 @@ fn guarded<T>(
 ) -> Result<T> {
     let session = match slot {
         Some(s) => s,
-        None => slot.insert(Session::open(root)?),
+        None => {
+            // A daemon's first request trims what earlier ones left.
+            let disk = crate::cache::Disk::for_user().map(std::sync::Arc::new);
+            if let Some(d) = &disk {
+                d.trim_in_background();
+            }
+            slot.insert(Session::open(root)?.with_disk(disk))
+        }
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(session))) {
         Ok(r) => r,
@@ -780,6 +842,29 @@ fn guarded<T>(
             Err(Error::new(Code::Internal, format!("internal error: {msg}")).with("panic", msg))
         }
     }
+}
+
+/// `cache.stats`' answer, and `cache.clear`'s with what it `removed`:
+/// whether there is a disk cache, its folder and bound, and what it holds.
+fn cache_stats(disk: Option<&crate::cache::Disk>, removed: Option<crate::cache::Stats>) -> Value {
+    let mut v = match disk {
+        Some(d) => {
+            let mut v = d.stats().to_json();
+            v["enabled"] = json!(true);
+            v["folder"] = json!(d.root());
+            v["max_bytes"] = json!(d.max_bytes());
+            v
+        }
+        None => {
+            let mut v = crate::cache::Stats::default().to_json();
+            v["enabled"] = json!(false);
+            v
+        }
+    };
+    if let Some(r) = removed {
+        v["removed"] = r.to_json();
+    }
+    v
 }
 
 fn project_info(session: &Session) -> Value {
@@ -3566,6 +3651,8 @@ struct RenderAsk {
     rev: Option<String>,
     frame: Vec<String>,
     compare: Option<String>,
+    /// What to leave out: occurrences and solids, at the leaves.
+    hidden: std::collections::BTreeSet<String>,
 }
 
 /// How a compare paints one rendered solid: wholly new when the other
@@ -3719,6 +3806,10 @@ fn render(
         if part_kind(session.project().part(part)?) == PartKind::Assembly {
             let model = session.model(part, &crate::doc::assembly::Rev::Working)?;
             for o in &model.occurrences {
+                let path = crate::assembly::path_text(&o.path);
+                if ask.hidden.contains(&format!("{part}/{path}")) {
+                    continue;
+                }
                 let solids: Vec<&crate::assembly::Solid> = o.solids.iter().collect();
                 let made = occurrence_meshes(session, &solids, mesh::Quality::Normal);
                 for (s, m) in solids.iter().zip(made) {
@@ -3727,7 +3818,6 @@ fn render(
                         hash: s.built.hash.clone(),
                         mesh: m,
                     };
-                    let path = crate::assembly::path_text(&o.path);
                     draw_body(
                         &mut g,
                         &m,
@@ -3743,7 +3833,7 @@ fn render(
         }
         for (fid, m) in meshes(session, part, None, mesh::Quality::Normal)? {
             let Ok(m) = m else { continue };
-            if m.mesh.mesh.is_err() {
+            if m.mesh.mesh.is_err() || ask.hidden.contains(&format!("{part}/{fid}")) {
                 continue;
             }
             seen.insert((part.clone(), fid.clone()), m.clone());
@@ -6129,7 +6219,7 @@ pub(crate) mod tests {
         assert_eq!(
             r["session"]["participants"],
             json!([{"id": id, "kind": "human", "name": "Dana", "status": null, "selection": [],
-                    "camera": null, "highlights": [], "compare": null, "focus": null}])
+                    "camera": null, "highlights": [], "compare": null, "focus": null, "hidden": []}])
         );
         let list = call_live(&mut s, &mut live, Some(&id), "participant.list", json!({})).unwrap();
         assert_eq!(list, r["session"]);

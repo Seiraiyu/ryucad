@@ -121,6 +121,7 @@ impl Repo {
             .env_remove("GIT_CONFIG_GLOBAL")
             .env("RYUCAD_NO_DAEMON", "1")
             .env("RYUCAD_CONFIG_DIR", self.dir.path().join("config"))
+            .env("RYUCAD_CACHE_DIR", self.dir.path().join("cache"))
             .output()
             .unwrap();
         let v: Value = serde_json::from_slice(&out.stdout)

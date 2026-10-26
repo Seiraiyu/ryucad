@@ -53,19 +53,19 @@ fn the_window_draws_an_assembly_where_it_places_its_parts() {
     let frame = ws.part("frame").unwrap();
     assert!(frame.assembly);
     assert_eq!(frame.features[1].instance.as_ref().unwrap().part, "bolt");
-    // The second bolt is 40 mm along x from the first.
-    let origin = |k: &str| {
-        ws.model.meshes[&key("frame", k)]
-            .mesh
-            .as_ref()
-            .unwrap()
-            .origin
-    };
-    let (a, b) = (origin("b1/shank"), origin("b2/shank"));
+    // One mesh for both bolts, fetched once; the second drawn 40 mm along
+    // x from the first.
+    assert!(Arc::ptr_eq(
+        &ws.model.meshes[&key("frame", "b1/shank")],
+        &ws.model.meshes[&key("frame", "b2/shank")]
+    ));
+    let at = |k: &str| ws.model.pose(&key("frame", k)).origin;
+    let (a, b) = (at("b1/shank"), at("b2/shank"));
     assert!((b[0] - a[0] - 0.04).abs() < 1e-9, "{a:?} {b:?}");
+    let fetched = ws.fetched;
     // The frame is the one root: it is what the window draws.
     assert_eq!(ws.model.shown(), ["frame"]);
-    let drawn: Vec<_> = ws.model.drawn().map(|(k, _)| k.clone()).collect();
+    let drawn: Vec<_> = ws.model.drawn().map(|(k, ..)| k.clone()).collect();
     assert_eq!(drawn, [key("frame", "b1/shank"), key("frame", "b2/shank")]);
     // An agent shows the human the bolt alone.
     p.ok(&["focus", "bolt"]);
@@ -73,20 +73,21 @@ fn the_window_draws_an_assembly_where_it_places_its_parts() {
     assert!(ws.wait_until(WAIT, |ws| {
         ws.model.meshes.contains_key(&key("bolt", "shank"))
     }));
-    let drawn: Vec<_> = ws.model.drawn().map(|(k, _)| k.clone()).collect();
+    let drawn: Vec<_> = ws.model.drawn().map(|(k, ..)| k.clone()).collect();
     assert_eq!(drawn, [key("bolt", "shank")]);
-    // A move fetches the moved bolt again, where it is now.
+    assert_eq!(
+        ws.fetched, fetched,
+        "the bolt's own mesh is the same body's"
+    );
+    // A move fetches nothing: the bolt is drawn where it is now.
     ws.set_focus(None);
     p.ok(&["assembly", "move", "frame", "b2", "--translate", "0,10,0"]);
     assert!(ws.wait_until(WAIT, |ws| {
         ws.idle()
             && ws.model.focus.is_none()
-            && ws
-                .model
-                .meshes
-                .get(&key("frame", "b2/shank"))
-                .is_some_and(|m| (m.mesh.as_ref().unwrap().origin[1] - 0.01).abs() < 1e-9)
+            && (ws.model.pose(&key("frame", "b2/shank")).origin[1] - 0.01).abs() < 1e-9
     }));
+    assert_eq!(ws.fetched, fetched);
 }
 
 #[test]

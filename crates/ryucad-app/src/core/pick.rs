@@ -1,5 +1,7 @@
 //! Picking: which face, edge or vertex, or sketch point or curve, is
-//! under the mouse. Faces are hit by a ray cast against their triangles;
+//! under the mouse. Faces are hit by a ray cast against their triangles,
+//! through a box tree of the occurrences drawn and then each one's mesh
+//! in its own frame;
 //! edges, vertices and sketch entities by their distance on screen, so a
 //! thin edge can be picked without pixel-perfect aim. Within reach, a
 //! vertex or sketch point wins over an edge or sketch curve, and those
@@ -8,7 +10,7 @@
 //! nothing of the model is nearer.
 
 use crate::core::compare::Compare;
-use crate::core::model::{BodyKey, Model};
+use crate::core::model::{BodyKey, Model, Pose};
 use crate::core::nav::Projector;
 use crate::core::sketch::Drawing;
 use ryucad::entity::{EntityKind, Target};
@@ -36,12 +38,43 @@ pub struct Hit {
     pub rev: Option<String>,
 }
 
-/// A body ready for picking: its mesh and the box around it.
+/// A body ready for picking: its mesh in its part's frame, where it is,
+/// and the box around it there.
 struct Body {
     key: BodyKey,
     mesh: Arc<WireBody>,
+    pose: Pose,
     lo: [f64; 3],
     hi: [f64; 3],
+}
+
+impl Body {
+    /// `mesh` at `pose`, with the box around it.
+    fn new(key: BodyKey, mesh: Arc<WireBody>, pose: Pose) -> Option<Body> {
+        let m = mesh_of(&mesh)?;
+        let (lo, hi) =
+            bounds((0..m.positions.len()).map(|i| at(m, i as u32))).unwrap_or(([0.0; 3], [0.0; 3]));
+        // The box around the local box's corners, where they are.
+        let corners = (0..8)
+            .map(|c| pose.apply([0, 1, 2].map(|k| if c >> k & 1 == 0 { lo[k] } else { hi[k] })));
+        let (lo, hi) = bounds(corners).expect("eight corners");
+        Some(Body {
+            key,
+            mesh,
+            pose,
+            lo,
+            hi,
+        })
+    }
+
+    fn mesh(&self) -> &WireMesh {
+        mesh_of(&self.mesh).expect("only meshed bodies")
+    }
+
+    /// Position `i` of the mesh, where the body is.
+    fn at(&self, i: u32) -> [f64; 3] {
+        self.pose.apply(at(self.mesh(), i))
+    }
 }
 
 /// Where an entity is in the picker: a body's face, edge or vertex by its
@@ -54,11 +87,99 @@ enum Slot {
     Dot(usize, usize),
 }
 
+/// A box tree over bodies: each node holds the box around its bodies,
+/// split at the middle body along its box's longest side, down to a few
+/// bodies a leaf. A ray visits only the bodies whose boxes it meets.
+#[derive(Debug, Default)]
+struct Tree {
+    nodes: Vec<Node>,
+}
+
+#[derive(Debug)]
+struct Node {
+    lo: [f64; 3],
+    hi: [f64; 3],
+    /// The bodies of a leaf, or the two children of a split.
+    kind: NodeKind,
+}
+
+#[derive(Debug)]
+enum NodeKind {
+    Leaf(Vec<usize>),
+    Split(usize, usize),
+}
+
+/// Bodies per leaf at most.
+const LEAF: usize = 4;
+
+impl Tree {
+    /// The tree over boxes `boxes`, by their indices.
+    fn new(boxes: &[([f64; 3], [f64; 3])]) -> Tree {
+        let mut t = Tree::default();
+        if !boxes.is_empty() {
+            t.build(boxes, (0..boxes.len()).collect());
+        }
+        t
+    }
+
+    /// Adds the node over `ids`; returns its index.
+    fn build(&mut self, boxes: &[([f64; 3], [f64; 3])], mut ids: Vec<usize>) -> usize {
+        let (lo, hi) = bounds(ids.iter().flat_map(|&i| [boxes[i].0, boxes[i].1]))
+            .expect("a node holds a body");
+        let at = self.nodes.len();
+        if ids.len() <= LEAF {
+            self.nodes.push(Node {
+                lo,
+                hi,
+                kind: NodeKind::Leaf(ids),
+            });
+            return at;
+        }
+        let axis = (0..3)
+            .max_by(|a, b| (hi[*a] - lo[*a]).total_cmp(&(hi[*b] - lo[*b])))
+            .expect("three axes");
+        let mid = |i: &usize| boxes[*i].0[axis] + boxes[*i].1[axis];
+        ids.sort_by(|a, b| mid(a).total_cmp(&mid(b)).then(a.cmp(b)));
+        let right = ids.split_off(ids.len() / 2);
+        self.nodes.push(Node {
+            lo,
+            hi,
+            kind: NodeKind::Leaf(Vec::new()),
+        });
+        let l = self.build(boxes, ids);
+        let r = self.build(boxes, right);
+        self.nodes[at].kind = NodeKind::Split(l, r);
+        at
+    }
+
+    /// The bodies of every leaf whose box the ray `o + t d` (`t >= 0`)
+    /// meets, each once: every body whose own box it meets is among them.
+    fn along(&self, o: [f64; 3], d: [f64; 3], mut visit: impl FnMut(usize)) {
+        let mut stack = if self.nodes.is_empty() {
+            vec![]
+        } else {
+            vec![0]
+        };
+        while let Some(n) = stack.pop() {
+            let node = &self.nodes[n];
+            if !ray_box(o, d, node.lo, node.hi) {
+                continue;
+            }
+            match &node.kind {
+                NodeKind::Leaf(ids) => ids.iter().for_each(|&i| visit(i)),
+                NodeKind::Split(l, r) => stack.extend([*r, *l]),
+            }
+        }
+    }
+}
+
 /// The model's meshes and sketches prepared for picking. Rebuild it when
 /// the model's generation changes.
 pub struct Picker {
     pub generation: u64,
     bodies: Vec<Body>,
+    /// A box tree over `bodies`.
+    tree: Tree,
     sketches: Vec<(BodyKey, Arc<Drawing>)>,
     /// Every entity reference, and where it is.
     index: HashMap<String, Slot>,
@@ -80,7 +201,7 @@ pub enum Place {
     Vertex([f64; 3]),
 }
 
-fn mesh(b: &WireBody) -> Option<&WireMesh> {
+fn mesh_of(b: &WireBody) -> Option<&WireMesh> {
     b.mesh.as_ref().ok()
 }
 
@@ -186,19 +307,22 @@ impl Picker {
     /// The model's meshes, and its sketches if `sketches` (they are
     /// drawn).
     pub fn of(model: &Model, sketches: bool) -> Picker {
-        let bodies: Vec<Body> = model
-            .drawn()
-            .filter_map(|(key, b)| {
-                let m = mesh(b)?;
-                let (lo, hi) = bounds((0..m.positions.len()).map(|i| at(m, i as u32)))
-                    .unwrap_or(([0.0; 3], [0.0; 3]));
-                Some(Body {
-                    key: key.clone(),
-                    mesh: Arc::clone(b),
-                    lo,
-                    hi,
-                })
-            })
+        Picker::of_bodies(model, model.drawn(), sketches)
+    }
+
+    /// What the window hides of the parts it shows, to pick what is
+    /// hidden under the mouse (Shift+Tab shows it again).
+    pub fn of_hidden(model: &Model) -> Picker {
+        Picker::of_bodies(model, model.hidden_drawn(), false)
+    }
+
+    fn of_bodies<'a>(
+        model: &'a Model,
+        drawn: impl Iterator<Item = (&'a BodyKey, &'a Arc<WireBody>, Pose)>,
+        sketches: bool,
+    ) -> Picker {
+        let bodies: Vec<Body> = drawn
+            .filter_map(|(key, b, pose)| Body::new(key.clone(), Arc::clone(b), pose))
             .collect();
         let sketches: Vec<(BodyKey, Arc<Drawing>)> = if sketches {
             model
@@ -211,7 +335,7 @@ impl Picker {
         };
         let mut index = HashMap::new();
         for (i, b) in bodies.iter().enumerate() {
-            let m = mesh(&b.mesh).expect("only meshed bodies");
+            let m = b.mesh();
             let named = |n: &[u8; 16]| format!("{}/{}/{}", b.key.0, b.key.1, name_hex(n));
             for (j, f) in m.faces.iter().enumerate() {
                 index.insert(named(&f.name), Slot::Body(i, EntityKind::Face, j));
@@ -232,8 +356,10 @@ impl Picker {
                 index.insert(named(&p.entity), Slot::Dot(i, j));
             }
         }
+        let boxes: Vec<([f64; 3], [f64; 3])> = bodies.iter().map(|b| (b.lo, b.hi)).collect();
         Picker {
             generation: model.generation,
+            tree: Tree::new(&boxes),
             bodies,
             sketches,
             index,
@@ -247,21 +373,14 @@ impl Picker {
     pub fn with_compare(mut self, compare: Option<&Compare>) -> Picker {
         let Some(c) = compare else { return self };
         for (key, b) in &c.ghosts {
-            let Some(m) = mesh(b) else { continue };
+            let Some(m) = mesh_of(b) else { continue };
             let gone: Vec<usize> = (0..m.faces.len())
                 .filter(|i| c.is_gone(key, &name_hex(&m.faces[*i].name)))
                 .collect();
             if gone.is_empty() {
                 continue;
             }
-            let (lo, hi) = bounds((0..m.positions.len()).map(|i| at(m, i as u32)))
-                .unwrap_or(([0.0; 3], [0.0; 3]));
-            let body = Body {
-                key: key.clone(),
-                mesh: Arc::clone(b),
-                lo,
-                hi,
-            };
+            let body = Body::new(key.clone(), Arc::clone(b), Pose::IDENTITY).expect("meshed");
             self.ghosts.push((body, gone));
         }
         self.ghost_rev = Some(c.rev.clone());
@@ -276,10 +395,10 @@ impl Picker {
             if !ray_box(o, d, b.lo, b.hi) {
                 continue;
             }
-            let m = mesh(&b.mesh).expect("only meshed ghosts");
+            let m = b.mesh();
             for f in gone.iter().map(|i| &m.faces[*i]) {
                 for t in &m.triangles[f.triangles.0 as usize..f.triangles.1 as usize] {
-                    let tri = t.map(|c| at(m, m.corners[c as usize].0));
+                    let tri = t.map(|c| b.at(m.corners[c as usize].0));
                     if let Some(t) = ray_triangle(o, d, tri)
                         && face.as_ref().is_none_or(|(best, ..)| t < *best)
                     {
@@ -296,17 +415,18 @@ impl Picker {
     fn slot_points(&self, slot: Slot) -> Vec<[f64; 3]> {
         match slot {
             Slot::Body(i, kind, j) => {
-                let m = mesh(&self.bodies[i].mesh).expect("only meshed bodies");
+                let b = &self.bodies[i];
+                let m = b.mesh();
                 match kind {
                     EntityKind::Face => {
                         let f = &m.faces[j];
                         m.corners[f.corners.0 as usize..f.corners.1 as usize]
                             .iter()
-                            .map(|c| at(m, c.0))
+                            .map(|c| b.at(c.0))
                             .collect()
                     }
-                    EntityKind::Edge => m.edges[j].1.iter().map(|p| at(m, *p)).collect(),
-                    EntityKind::Vertex => vec![at(m, m.vertices[j].1)],
+                    EntityKind::Edge => m.edges[j].1.iter().map(|p| b.at(*p)).collect(),
+                    EntityKind::Vertex => vec![b.at(m.vertices[j].1)],
                 }
             }
             Slot::Curve(i, j) => self.sketches[i].1.curves[j].points.clone(),
@@ -348,8 +468,7 @@ impl Picker {
             .iter()
             .filter(|b| body.is_none_or(|k| &b.key == k))
         {
-            let m = mesh(&b.mesh).expect("only meshed bodies");
-            out.extend((0..m.positions.len()).map(|i| at(m, i as u32)));
+            out.extend((0..b.mesh().positions.len()).map(|i| b.at(i as u32)));
         }
         for (_, d) in self
             .sketches
@@ -381,8 +500,7 @@ impl Picker {
         self.bodies
             .iter()
             .find(|b| &b.key == key)
-            .and_then(|b| mesh(&b.mesh))
-            .map_or(0, |m| m.faces.len())
+            .map_or(0, |b| b.mesh().faces.len())
     }
 
     /// The box around one body, or one sketch.
@@ -400,26 +518,78 @@ impl Picker {
         bounds(corners.chain(sketched))
     }
 
-    /// The nearest face along the ray `o + t d`: its `t`, name and body.
-    fn face_along(&self, o: [f64; 3], d: [f64; 3]) -> Option<(f64, String, BodyKey)> {
-        let mut face: Option<(f64, String, BodyKey)> = None;
-        for b in &self.bodies {
-            if !ray_box(o, d, b.lo, b.hi) {
-                continue;
+    /// Every body a face of which is under the pixel `px` of a viewport
+    /// `size` pixels big, in body order: what Shift+Tab shows again.
+    pub fn bodies_under(&self, pr: &Projector, size: [f64; 2], px: [f64; 2]) -> Vec<BodyKey> {
+        let ndc = [2.0 * px[0] / size[0] - 1.0, 1.0 - 2.0 * px[1] / size[1]];
+        let (o, d) = pr.ray(ndc);
+        let mut hit = Vec::new();
+        self.tree.along(o, d, |i| {
+            let b = &self.bodies[i];
+            let (o, d) = (b.pose.unapply(o), b.pose.unturn(d));
+            let m = b.mesh();
+            let any = m.triangles.iter().any(|t| {
+                let tri = t.map(|c| at(m, m.corners[c as usize].0));
+                ray_triangle(o, d, tri).is_some()
+            });
+            if any {
+                hit.push(i);
             }
-            let m = mesh(&b.mesh).expect("only meshed bodies");
+        });
+        hit.sort_unstable();
+        hit.into_iter()
+            .map(|i| self.bodies[i].key.clone())
+            .collect()
+    }
+
+    /// The nearest face along the ray `o + t d`: its `t`, name and body.
+    /// Each body is hit in its own frame, the ray taken there: a rigid
+    /// move keeps `t`.
+    fn face_along(&self, o: [f64; 3], d: [f64; 3]) -> Option<(f64, String, BodyKey)> {
+        let mut face: Option<(f64, String, BodyKey, usize)> = None;
+        self.tree.along(o, d, |i| {
+            let b = &self.bodies[i];
+            if !ray_box(o, d, b.lo, b.hi) {
+                return;
+            }
+            let (o, d) = (b.pose.unapply(o), b.pose.unturn(d));
+            let m = b.mesh();
             for f in &m.faces {
                 for t in &m.triangles[f.triangles.0 as usize..f.triangles.1 as usize] {
                     let tri = t.map(|c| at(m, m.corners[c as usize].0));
+                    // The nearest, and among equals the first body: the
+                    // tree's order mustn't choose.
                     if let Some(t) = ray_triangle(o, d, tri)
-                        && face.as_ref().is_none_or(|(best, ..)| t < *best)
+                        && face
+                            .as_ref()
+                            .is_none_or(|(best, .., j)| t < *best || (t == *best && i < *j))
                     {
-                        face = Some((t, name_hex(&f.name), b.key.clone()));
+                        face = Some((t, name_hex(&f.name), b.key.clone(), i));
                     }
                 }
             }
+        });
+        face.map(|(t, n, k, _)| (t, n, k))
+    }
+
+    /// Whether the mouse at `px` is within reach of what body `b` may
+    /// show on screen: its box's corners, projected, grown by the reach.
+    /// A box partly behind the eye is always.
+    fn within_reach(b: &Body, screen: impl Fn([f64; 3]) -> Option<[f64; 2]>, px: [f64; 2]) -> bool {
+        let mut lo = [f64::INFINITY; 2];
+        let mut hi = [f64::NEG_INFINITY; 2];
+        for c in 0..8 {
+            let p = [0, 1, 2].map(|k| if c >> k & 1 == 0 { b.lo[k] } else { b.hi[k] });
+            let Some(s) = screen(p) else {
+                return true;
+            };
+            for k in 0..2 {
+                lo[k] = lo[k].min(s[k]);
+                hi[k] = hi[k].max(s[k]);
+            }
         }
-        face
+        let r = VERTEX_REACH.max(EDGE_REACH);
+        (0..2).all(|k| px[k] >= lo[k] - r && px[k] <= hi[k] + r)
     }
 
     /// Whether a face hides `p` from the eye (or it is behind the eye):
@@ -515,14 +685,17 @@ impl Picker {
         let mut points: Vec<(Near, [f64; 2])> = Vec::new();
         let mut curves: Vec<(Near, [f64; 2])> = Vec::new();
         for b in &self.bodies {
-            let m = mesh(&b.mesh).expect("only meshed bodies");
+            if !Picker::within_reach(b, screen, px) {
+                continue;
+            }
+            let m = b.mesh();
             let vertex = Target::Body(EntityKind::Vertex);
             for (name, i) in &m.vertices {
-                points.extend(point_near(at(m, *i), name_hex(name), &b.key, vertex));
+                points.extend(point_near(b.at(*i), name_hex(name), &b.key, vertex));
             }
             let edge = Target::Body(EntityKind::Edge);
             for (name, ps) in &m.edges {
-                let ps: Vec<[f64; 3]> = ps.iter().map(|p| at(m, *p)).collect();
+                let ps: Vec<[f64; 3]> = ps.iter().map(|p| b.at(*p)).collect();
                 curves.extend(curve_near(&ps, &name_hex(name), &b.key, edge));
             }
         }
@@ -590,6 +763,130 @@ impl Picker {
 mod tests {
     use super::*;
     use ryucad::mesh::WireFace;
+
+    /// A 1 cm cube at the origin: six faces of two triangles.
+    fn cube_mesh() -> WireMesh {
+        let p = |i: u32| [0, 1, 2].map(|k| if i >> k & 1 == 1 { 0.01f32 } else { 0.0 });
+        let faces: [([f32; 3], [u32; 4]); 6] = [
+            ([-1.0, 0.0, 0.0], [0, 4, 6, 2]),
+            ([1.0, 0.0, 0.0], [1, 3, 7, 5]),
+            ([0.0, -1.0, 0.0], [0, 1, 5, 4]),
+            ([0.0, 1.0, 0.0], [2, 6, 7, 3]),
+            ([0.0, 0.0, -1.0], [0, 2, 3, 1]),
+            ([0.0, 0.0, 1.0], [4, 5, 7, 6]),
+        ];
+        let mut m = WireMesh {
+            origin: [0.0; 3],
+            chord: 0.0,
+            angle: 0.0,
+            positions: (0..8).map(p).collect(),
+            corners: Vec::new(),
+            triangles: Vec::new(),
+            faces: Vec::new(),
+            edges: Vec::new(),
+            vertices: Vec::new(),
+            faults: Vec::new(),
+        };
+        for (i, (n, c)) in faces.iter().enumerate() {
+            let (base, t) = (m.corners.len() as u32, m.triangles.len() as u32);
+            m.corners.extend(c.iter().map(|&k| (k, *n)));
+            m.triangles.push([base, base + 1, base + 2]);
+            m.triangles.push([base, base + 2, base + 3]);
+            m.faces.push(WireFace {
+                name: [i as u8; 16],
+                corners: (base, base + 4),
+                triangles: (t, t + 2),
+            });
+        }
+        m
+    }
+
+    #[test]
+    fn what_is_hidden_under_the_mouse_is_found() {
+        use serde_json::json;
+        let occurrences: Vec<serde_json::Value> = [0.0, 0.04]
+            .iter()
+            .enumerate()
+            .map(|(i, x)| {
+                json!({"path": format!("c{i}"), "part": "cube",
+                       "solids": [{"solid": "s", "hash": "h"}],
+                       "pose": {"origin_m": [x, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}})
+            })
+            .collect();
+        let mut model = Model::default();
+        let want = model.apply_part(&json!({"part": "row", "revision": "r", "kind": "assembly",
+            "features": [], "solids": [], "occurrences": occurrences}));
+        model.ask(want);
+        let body = WireBody {
+            feature: "c0/s".into(),
+            hash: "h".into(),
+            mesh: Ok(cube_mesh()),
+        };
+        assert!(model.take_mesh("row", body));
+        let camera = view::frame(
+            [0.0; 3],
+            [0.05, 0.01, 0.01],
+            StandardView::Top,
+            view::DEFAULT_PROJECTION,
+        );
+        let pr = Projector::new(&camera, 1.0, [0.025, 0.005, 0.005], 0.03);
+        let size = [400.0, 400.0];
+        let n = pr.ndc([0.045, 0.005, 0.01]).unwrap();
+        let px = [(n[0] + 1.0) / 2.0 * size[0], (1.0 - n[1]) / 2.0 * size[1]];
+        assert_eq!(Picker::new(&model).bodies_under(&pr, size, px).len(), 1);
+        model.hidden.insert("row/c1".into());
+        assert_eq!(
+            Picker::new(&model).bodies_under(&pr, size, px),
+            Vec::<BodyKey>::new()
+        );
+        let under = Picker::of_hidden(&model).bodies_under(&pr, size, px);
+        assert_eq!(under, [("row".to_owned(), "c1/s".to_owned())]);
+    }
+
+    #[test]
+    fn the_tree_visits_what_every_box_test_would() {
+        // A 20 × 20 × 3 grid of unit boxes, every other one along x.
+        let boxes: Vec<([f64; 3], [f64; 3])> = (0..1200)
+            .map(|i| {
+                let p = [
+                    f64::from(i % 20) * 2.0,
+                    f64::from(i / 20 % 20),
+                    f64::from(i / 400),
+                ];
+                (p, [p[0] + 1.0, p[1] + 1.0, p[2] + 1.0])
+            })
+            .collect();
+        let tree = Tree::new(&boxes);
+        // A fixed sequence (Knuth's MMIX constants).
+        let mut state = 7u64;
+        let mut r = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for _ in 0..200 {
+            let o = [r() * 50.0 - 5.0, r() * 30.0 - 5.0, r() * 10.0 - 3.0];
+            let d = [r() - 0.5, r() - 0.5, r() - 0.5];
+            let mut seen = Vec::new();
+            tree.along(o, d, |i| seen.push(i));
+            seen.sort_unstable();
+            let visited = seen.len();
+            seen.dedup();
+            assert_eq!(seen.len(), visited, "each once");
+            seen.retain(|i| ray_box(o, d, boxes[*i].0, boxes[*i].1));
+            let all: Vec<usize> = (0..boxes.len())
+                .filter(|i| ray_box(o, d, boxes[*i].0, boxes[*i].1))
+                .collect();
+            assert_eq!(seen, all);
+            assert!(
+                visited <= all.len() + 4 * LEAF * 40,
+                "{visited} for {}",
+                all.len()
+            );
+        }
+        assert!(Tree::new(&[]).nodes.is_empty());
+    }
     use ryucad::view::{self, StandardView};
 
     /// A unit square face in the plane z = 0 (two triangles), its four
