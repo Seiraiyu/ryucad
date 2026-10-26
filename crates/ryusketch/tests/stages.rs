@@ -157,3 +157,113 @@ fn redundancy_by_value_is_found_by_both_stages() {
     assert_eq!(two.report.state, State::Over);
     assert_eq!(two.report.redundant, [vec![3, 4, 5]]);
 }
+
+/// Found by fuzzing (the `sketch` target, 2026-10-22 to 2026-10-26):
+/// sketches whose solve leaves a line microns long under a point's
+/// distance from it, or an arc's centre far off its ends. Solved again,
+/// both stages must say the same of where stage 2 left them.
+#[test]
+fn coupled_and_tilted_sketches_report_alike() {
+    use Constraint as C;
+    let point = |x: f64, y: f64, fixed: bool| Entity::Point { at: [x, y], fixed };
+    let line = |a, b, construction| Entity::Line { a, b, construction };
+    let arc = |center, start, end, construction| Entity::Arc {
+        center,
+        start,
+        end,
+        construction,
+    };
+    let circle = |center, r| Entity::Circle {
+        center,
+        r,
+        fixed: true,
+        construction: false,
+    };
+    let sketch = |points: &[(f64, f64, bool)], curves: Vec<Entity>, cs: Vec<C>| {
+        let mut s = Sketch::default();
+        for (id, &(x, y, fixed)) in points.iter().enumerate() {
+            s.entities.insert(id as u32, point(x, y, fixed));
+        }
+        for (id, e) in curves.into_iter().enumerate() {
+            s.entities.insert(100 + id as u32, e);
+        }
+        for (id, c) in cs.into_iter().enumerate() {
+            s.constraints.insert(id as u32, c);
+        }
+        s
+    };
+    let (m, f) = (-0.7607843137254902, false);
+    // A vertical line shrunk to under a micron, a point on it.
+    let a = sketch(
+        &[
+            (m, m, f),
+            (2.0, 2.0, f),
+            (-0.5098039215686274, m, f),
+            (m, m, f),
+            (-0.6823529411764706, m, f),
+            (0.7450980392156863, 2.0, f),
+            (m, 0.776470588235294, f),
+            (m, 2.0, f),
+            (2.0, 2.0, f),
+        ],
+        vec![line(1, 8, f), circle(8, 0.3686274509803922), line(7, 1, f)],
+        vec![
+            C::On(6, 100),
+            C::Vertical(100),
+            C::Fix(7),
+            C::Fix(3),
+            C::Midpoint(4, 102),
+            C::Fix(3),
+            C::Midpoint(7, 102),
+        ],
+    );
+    // The same with a distance from a line 80 microns long.
+    let b = sketch(
+        &[
+            (m, m, f),
+            (2.0, 2.0, f),
+            (-0.5098039215686274, m, f),
+            (m, m, f),
+            (-0.6823529411764706, m, f),
+            (m, m, f),
+            (0.776470588235294, 0.7450980392156863, f),
+            (1.937254901960784, 2.0, f),
+            (2.0, 2.0, f),
+        ],
+        vec![line(1, 8, f), circle(8, 0.3686274509803922), line(7, 1, f)],
+        vec![
+            C::Distance(6, 100, 1.2705882352941176),
+            C::Vertical(102),
+            C::Fix(7),
+            C::Fix(3),
+            C::Midpoint(4, 102),
+            C::Fix(3),
+            C::Midpoint(4, 100),
+        ],
+    );
+    // An arc tangent to a fixed line, its centre driven 85 m away.
+    let c = sketch(
+        &[
+            (1.6235294117647059, -0.9490196078431372, f),
+            (1.607843137254902, -1.9843137254901961, true),
+            (-2.0, -2.0, true),
+            (-2.0, -2.0, true),
+            (-2.0, -2.0, f),
+            (0.3999999999999999, -1.9372549019607843, true),
+            (-2.0, 0.3999999999999999, f),
+        ],
+        vec![
+            arc(4, 3, 1, f),
+            line(5, 2, true),
+            arc(3, 6, 5, f),
+            arc(5, 4, 0, true),
+        ],
+        vec![C::Tangent(100, 101)],
+    );
+    for s in [a, b, c] {
+        let solved = solve(&s).unwrap();
+        assert!(solved.report.converged);
+        let (two, one) = both(&solved.sketch).unwrap();
+        assert!(!two.report.changed && !one.report.changed);
+    }
+}
