@@ -326,9 +326,19 @@ fn run(
     keep: &dyn Fn(Cell) -> bool,
     stop: bool,
 ) -> Result<[bool; 2], Failure> {
-    let (Some(sheet), Some(imp)) = (Sheet::of(surface), Implicit::of(other)) else {
+    let face_kind = matches!(
+        surface,
+        Surface::Plane(_)
+            | Surface::Cylinder(_)
+            | Surface::Cone(_)
+            | Surface::Sphere(_)
+            | Surface::Torus(_)
+            | Surface::Pipe(_)
+    );
+    let Some(imp) = Implicit::of(other).filter(|_| face_kind) else {
         return Err(Failure::Unsupported);
     };
+    let sheet = Sheet::of(surface);
     let field = Field { sheet, imp: &imp };
     let (lu, lv) = first_bound(surface, cell);
     let w = [strip / lu, strip / lv];
