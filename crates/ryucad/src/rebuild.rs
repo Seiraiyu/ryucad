@@ -1141,9 +1141,35 @@ fn apply(
         _ => false,
     });
     for x in tools {
-        let left = journal.events().iter().any(
-            |e| matches!(e, Event::Placed { tool, to, .. } if *tool == x.key && kept.contains(to)),
-        );
+        // What is left of a tool may be pieces of its faces or edges, or
+        // merged into others: its names are followed through the journal.
+        let mut own: BTreeSet<Name> = journal
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                Event::Placed { tool, to, .. } if *tool == x.key => Some(*to),
+                _ => None,
+            })
+            .collect();
+        // The journal lists merges before the splits they merge pieces of.
+        loop {
+            let before = own.len();
+            for e in journal.events() {
+                match e {
+                    Event::Split { parent, children } if own.contains(parent) => {
+                        own.extend(children.iter().copied())
+                    }
+                    Event::Merged { parents, child } if parents.iter().any(|p| own.contains(p)) => {
+                        own.insert(*child);
+                    }
+                    _ => {}
+                }
+            }
+            if own.len() == before {
+                break;
+            }
+        }
+        let left = own.iter().any(|n| kept.contains(n));
         if !left && !changed {
             let which = match &x.label {
                 Some(l) if l.get("instance").is_some() => label_text(l),
@@ -2356,6 +2382,110 @@ mod tests {
             (e.code, e.details["dependency"].as_str()),
             (Code::DependencyFailed, Some("miss"))
         );
+    }
+
+    /// A primitive of type `ty` with `params` (mm) at `origin` (mm).
+    fn primitive(
+        ty: crate::doc::files::PrimitiveType,
+        params: &[(&str, &str)],
+        origin: [&str; 3],
+        operation: crate::doc::solid::Operation,
+        targets: &[&str],
+    ) -> Feature {
+        use crate::doc::files::Primitive;
+        use crate::doc::solid::Combine;
+        let q = |s: &str| Quantity::parse(s, Unit::Mm).unwrap();
+        let mut placement = crate::doc::files::Placement::identity(Unit::Mm);
+        placement.origin = origin.map(q);
+        Feature::Primitive(Primitive {
+            ty,
+            params: params
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), q(v)))
+                .collect(),
+            placement,
+            combine: Combine {
+                operation,
+                targets: targets.iter().map(|t| id(t)).collect(),
+            },
+        })
+    }
+
+    #[test]
+    fn an_intersect_that_clips_corners_changes_its_target() {
+        use crate::doc::files::PrimitiveType::{Box, Cylinder};
+        use crate::doc::solid::Operation::*;
+        use crate::solid::tests::part;
+        // Issue #84: a cylinder that only clips the block's corners trims
+        // every face it meets, splitting none.
+        let block = [("x", "80"), ("y", "40"), ("z", "12")];
+        let tool = [("radius", "42"), ("height", "12")];
+        let p = part(vec![
+            (
+                "base",
+                primitive(Box, &block, ["-40", "-20", "0"], New, &[]),
+            ),
+            (
+                "trim",
+                primitive(Cylinder, &tool, ["0", "0", "0"], Intersect, &["base"]),
+            ),
+        ]);
+        let r = rebuild_part(&p);
+        let v = volume(&state(&r, "trim", "base").body);
+        assert!(v < 80e-3 * 40e-3 * 12e-3 * 0.999, "{v}");
+    }
+
+    #[test]
+    fn a_cut_touching_flush_from_outside_changes_nothing() {
+        use crate::doc::files::PrimitiveType::Box;
+        use crate::doc::solid::Operation::*;
+        use crate::solid::tests::part;
+        // Issue #89: a cube under another, touching it flush.
+        let cube = [("x", "10"), ("y", "10"), ("z", "10")];
+        let small = [("x", "4"), ("y", "4"), ("z", "4")];
+        let p = part(vec![
+            ("a", primitive(Box, &cube, ["0", "0", "0"], New, &[])),
+            ("t", primitive(Box, &small, ["3", "3", "-4"], Cut, &["a"])),
+        ]);
+        let r = rebuild_part(&p);
+        let (_, t) = r.features.iter().find(|(i, _)| *i == id("t")).unwrap();
+        let e = t.as_ref().unwrap_err();
+        assert_eq!(e.code, Code::OperationNoEffect, "{e}");
+    }
+
+    #[test]
+    fn balls_trimmed_through_their_poles_mesh() {
+        use crate::doc::files::PrimitiveType::{Box, Sphere};
+        use crate::doc::solid::Operation::*;
+        use crate::solid::tests::part;
+        use ryukei::mesh::{MeshParams, check_mesh, tessellate};
+        // Issue #78: the feature fuzz target's two finds, after its box:
+        // a ball whose axis lies in the box's y = 0 face, and one whose
+        // pole touches the box's top. Checked as the target checks them.
+        let block = [("x", "20"), ("y", "10"), ("z", "5")];
+        for (origin, z) in [
+            (["5", "0", "2"], [5.0, 0.0, 1.0]),
+            (["9", "5", "1"], [0.0, 0.0, 1.0]),
+        ] {
+            let mut ball = primitive(Sphere, &[("radius", "4")], origin, Intersect, &["b"]);
+            if let Feature::Primitive(p) = &mut ball {
+                p.placement.z = z;
+            }
+            let p = part(vec![
+                ("b", primitive(Box, &block, ["0", "0", "0"], New, &[])),
+                ("f", ball),
+            ]);
+            let r = rebuild_part(&p);
+            let body = &state(&r, "f", "b").body;
+            assert_eq!(ryukei::check::check(body), []);
+            let params = MeshParams {
+                max_triangles: 200_000,
+                ..MeshParams::new(2e-4, 0.5)
+            };
+            let mesh = tessellate(body, &params).unwrap();
+            assert_eq!(mesh.faults, [], "{origin:?}");
+            assert_eq!(check_mesh(body, &mesh), Ok(()));
+        }
     }
 
     #[test]

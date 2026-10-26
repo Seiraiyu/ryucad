@@ -162,7 +162,10 @@ pub fn face_face(a: (&Body, FaceId), b: (&Body, FaceId)) -> Result<FaceMeet, Fai
             .filter(|&&c| br.curve.distance(c) <= reach)
             .map(|&c| {
                 let t = br.curve.project(c).param;
-                match period {
+                // A branch of a periodic curve may run past the period's
+                // end (one cut at a sphere's poles): its cuts there project
+                // a period back.
+                match br.curve.period() {
                     Some(p) => r0 + (t - r0).rem_euclid(p),
                     None => t,
                 }

@@ -277,3 +277,127 @@ fn faces_on_one_surface_merge() {
     let c = long.counts();
     assert_eq!((c.faces, c.edges, c.vertices), (3, 2, 2));
 }
+
+#[test]
+fn a_box_cornered_on_a_sphere_s_centre() {
+    // Issue #106: a box whose corner sits on a sphere's centre, one edge
+    // along the sphere's polar axis, so both poles lie on its boundary.
+    // The cut came back as the target unchanged.
+    let cube = primitive::block(OpKey(1), 2.0, 2.0, 2.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let ball = primitive::sphere(OpKey(2), 1.2, &at(1.0, 1.0, 1.0))
+        .unwrap()
+        .0;
+    let corner = primitive::block(OpKey(3), 2.0, 2.0, 2.0, &at(1.0, 1.0, 1.0))
+        .unwrap()
+        .0;
+    let lens = run(BooleanOp::Intersect, &cube, &[(&ball, Rigid::IDENTITY)]);
+    let v = volume(&lens);
+    let r = run(BooleanOp::Subtract, &lens, &[(&corner, Rigid::IDENTITY)]);
+    near(volume(&r), v * 7.0 / 8.0);
+    let r = run(BooleanOp::Subtract, &ball, &[(&corner, Rigid::IDENTITY)]);
+    near(volume(&r), 4.0 / 3.0 * PI * (1.2 * 1.2 * 1.2) * 7.0 / 8.0);
+}
+
+#[test]
+fn an_octant_off_a_ball_whatever_its_seam() {
+    // Issue #106 again: the box's faces through the ball's poles meet it
+    // in half circles cut at the poles, whose parameters run past the end
+    // of the period wherever the seam lies between them. Turning the ball
+    // about its axis, or laying the axis along another of the box's
+    // edges, moves the seam round the cuts.
+    let corner = primitive::block(OpKey(3), 2.0, 2.0, 2.0, &at(1.0, 1.0, 1.0))
+        .unwrap()
+        .0;
+    let want = 4.0 / 3.0 * PI * (1.2 * 1.2 * 1.2) * 7.0 / 8.0;
+    let c = Point3::new(1.0, 1.0, 1.0);
+    let unit = |x: f64, y: f64, z: f64| Vector3::new(x, y, z);
+    let mut frames = Vec::new();
+    for deg in [30.0, 90.0, 135.0, 200.0, 300.0] {
+        let a = deg * PI / 180.0;
+        let x = unit(ryukei::math::cos(a), ryukei::math::sin(a), 0.0);
+        frames.push(Frame::new(c, unit(0.0, 0.0, 1.0), x).unwrap());
+    }
+    frames.push(Frame::new(c, unit(1.0, 0.0, 0.0), unit(0.0, 1.0, 0.0)).unwrap());
+    frames.push(Frame::new(c, unit(0.0, -1.0, 0.0), unit(0.0, 0.0, -1.0)).unwrap());
+    for f in frames {
+        let ball = primitive::sphere(OpKey(2), 1.2, &Rigid::from_frame(&f))
+            .unwrap()
+            .0;
+        let r = run(BooleanOp::Subtract, &ball, &[(&corner, Rigid::IDENTITY)]);
+        near(volume(&r), want);
+        let i = run(BooleanOp::Intersect, &ball, &[(&corner, Rigid::IDENTITY)]);
+        near(volume(&i), want / 7.0);
+    }
+}
+
+#[test]
+fn a_rim_touching_a_bore_at_a_point_is_refused() {
+    // Issue #88: a block bored along x (radius 3), then cut by a pin
+    // (radius 1) standing on the bore's middle plane, its bottom rim
+    // touching the bore at one point. The voids would meet at that point
+    // alone: the cut must be refused, as when the pin's wall touches.
+    let block = primitive::block(OpKey(1), 20.0, 30.0, 10.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let along_x = Rigid::from_frame(
+        &Frame::new(
+            Point3::new(-10.0, 15.0, 4.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        )
+        .unwrap(),
+    );
+    let rod = primitive::cylinder(OpKey(2), 3.0, 40.0, &along_x)
+        .unwrap()
+        .0;
+    let bored = run(BooleanOp::Subtract, &block, &[(&rod, Rigid::IDENTITY)]);
+    for (h, z) in [(6.0, 4.0), (8.0, 2.0)] {
+        let pin = primitive::cylinder(OpKey(3), 1.0, h, &at(10.0, 19.0, z))
+            .unwrap()
+            .0;
+        let tools = [Tool {
+            key: ToolKey(1),
+            body: &pin,
+            place: Rigid::IDENTITY,
+        }];
+        match boolean(OpKey(100), BooleanOp::Subtract, &bored, &tools) {
+            Err(ryukei::Error::InvalidBoolean(_)) => {}
+            Err(e) => panic!("pin at {z}: {e:?}"),
+            Ok((r, _)) => panic!("pin at {z}: built, crossing {:?}", check_intersections(&r)),
+        }
+    }
+}
+
+#[test]
+fn a_ball_trimmed_through_its_poles_meshes() {
+    // Issue #78, found by ryucad's feature fuzz target in millimetres: a
+    // box cut by a ball whose pole lies on one of its faces, either the
+    // face through the ball's centre and along its axis (a loop through
+    // both poles) or the top touching the ball at its pole. Joining the
+    // edges either side of a pole ran a pcurve past it, and the ball's
+    // face was left out of the mesh as BadDomain.
+    for s in [1.0, 1e-3] {
+        let block = primitive::block(OpKey(1), 20.0 * s, 10.0 * s, 5.0 * s, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let tilted = Rigid::from_frame(
+            &Frame::new(
+                Point3::new(5.0 * s, 0.0, 2.0 * s),
+                Vector3::new(5.0, 0.0, 1.0),
+                Vector3::new(1.0, 0.0, 0.0),
+            )
+            .unwrap(),
+        );
+        let cube = s * s * s;
+        let ball = primitive::sphere(OpKey(2), 4.0 * s, &tilted).unwrap().0;
+        let r = run(BooleanOp::Intersect, &block, &[(&ball, Rigid::IDENTITY)]);
+        near(volume_at(&r, s) / cube, 205.0 * PI / 6.0);
+        let ball = primitive::sphere(OpKey(2), 4.0 * s, &at(9.0 * s, 5.0 * s, s))
+            .unwrap()
+            .0;
+        let r = run(BooleanOp::Intersect, &block, &[(&ball, Rigid::IDENTITY)]);
+        near(volume_at(&r, s) / cube, 175.0 * PI / 3.0);
+    }
+}

@@ -703,14 +703,20 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
                         }
                     }
                 }
+                // A contact is a point of each face it is inside, even
+                // where it lies on the other's edge (a rim touching a
+                // face): the faces meet there, and nowhere near.
                 for (k, ct) in contacts.iter().enumerate() {
-                    if ct.places == [Place::Inside; 2] {
+                    if ct.places.contains(&Place::Inside) {
                         let g = cands
                             .iter()
                             .position(|c| matches!(c, Cand::Contact { pair, index } if *pair == pi && *index == k))
                             .map(|i| gv_of[i])
                             .expect("a contact candidate");
-                        for f in [p.a, p.b] {
+                        for (f, place) in [p.a, p.b].into_iter().zip(ct.places) {
+                            if place != Place::Inside {
+                                continue;
+                            }
                             let w = table.faces.get_mut(&f).expect("work");
                             if !w.nodes.contains(&g) {
                                 w.nodes.push(g);
