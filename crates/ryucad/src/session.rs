@@ -59,6 +59,8 @@ pub struct Session {
     known: BTreeMap<(Id, Id), BTreeMap<String, Value>>,
     /// Display meshes of rebuilt bodies.
     pub meshes: crate::mesh::Cache,
+    /// What intersecting pairs of placed solids found, for `interference`.
+    pub interference: crate::interference::Cache,
     /// A revision's session: its files never change, and it never reads
     /// the disk.
     frozen: bool,
@@ -86,6 +88,7 @@ impl Session {
             pinned_parts: BTreeMap::new(),
             known: BTreeMap::new(),
             meshes: crate::mesh::Cache::default(),
+            interference: crate::interference::Cache::default(),
             frozen: false,
             revisions: Vec::new(),
             merge_status: None,
@@ -140,6 +143,7 @@ impl Session {
             pinned_parts: from.pinned_parts.clone(),
             known: from.known.clone(),
             meshes: crate::mesh::Cache::with_disk(from.store.disk.clone()),
+            interference: from.interference.clone(),
             frozen: true,
             revisions: Vec::new(),
             merge_status: None,
