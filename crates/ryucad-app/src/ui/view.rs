@@ -55,6 +55,10 @@ pub struct View {
     finger_pivot: Option<[f64; 3]>,
     /// What the context menu was opened on.
     menu: Option<Hit>,
+    /// An instance being dragged: its assembly, the instance, and the
+    /// point grabbed, which follows the pointer across the plane through
+    /// it facing the camera.
+    grab: Option<(String, String, [f64; 3])>,
 }
 
 /// A body's points that frame it from one direction
@@ -131,6 +135,7 @@ impl View {
             pivot: None,
             finger_pivot: None,
             menu: None,
+            grab: None,
         }
     }
 
@@ -527,8 +532,45 @@ impl View {
             // pointer has moved a little, maybe onto the model.
             let pressed = ui.input(|i| i.pointer.press_origin());
             self.pivot = pivot(self, ws, pressed.or(response.interact_pointer_pos()));
+            // A left-drag on an assembly's instance moves it, where the
+            // left button doesn't navigate (in ryucad's own style, with
+            // Ctrl/Cmd); one that can't move says why.
+            let moves = buttons.primary
+                && (self.nav.style != crate::core::nav::Navigation::Ryucad || modifiers.ctrl);
+            let on = pressed
+                .and_then(|p| self.picker(ws).pick(&pr, size, local(p)))
+                .filter(|h| h.rev.is_none() && matches!(h.kind, ryucad::entity::Target::Body(_)));
+            if moves && let Some(h) = on {
+                let key = (h.part.clone(), h.feature.clone());
+                match ws.model.movable(&key) {
+                    Ok((part, instance)) if ws.model.parts[&part].assembly => {
+                        ws.drag_note = None;
+                        self.grab = Some((part, instance, h.point));
+                    }
+                    Ok(_) => {}
+                    Err(why) if ws.model.parts.get(&h.part).is_some_and(|p| p.assembly) => {
+                        ws.drag_note = Some(why);
+                    }
+                    Err(_) => {}
+                }
+            }
         }
-        if response.dragged() {
+        if response.dragged()
+            && let Some((part, instance, grabbed)) = self.grab.clone()
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            // Across the plane through the point grabbed, facing the eye.
+            let (_, _, f) = pr.camera.basis();
+            let l = local(p);
+            let (o, d) = pr.ray([2.0 * l[0] / size[0] - 1.0, 1.0 - 2.0 * l[1] / size[1]]);
+            let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+            let along = dot(d, f);
+            if along.abs() > 1e-9 {
+                let t = dot(sub(grabbed, o), f) / along;
+                let q = [0, 1, 2].map(|k| o[k] + d[k] * t);
+                ws.drag_to(&part, &instance, sub(q, grabbed));
+            }
+        } else if response.dragged() {
             let g = self.nav.style.gesture(buttons, modifiers);
             if g != Gesture::None {
                 let d = response.drag_delta();
@@ -536,6 +578,9 @@ impl View {
                     .drag(g, [d.x, d.y], rect.height().max(1.0), self.pivot);
                 self.moved(ws);
             }
+        }
+        if response.drag_stopped() && self.grab.take().is_some() {
+            ws.drop_drag();
         }
         // Two fingers on a trackpad pan, or with Shift orbit; a wheel (and
         // a pinch) zooms.

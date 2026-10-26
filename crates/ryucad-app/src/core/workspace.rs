@@ -79,8 +79,27 @@ enum Pending {
     Doctor,
     /// What the disk cache holds (`cache.stats` or `cache.clear`).
     Cache,
+    /// A drag's preview solve (`assembly.solve`), for this assembly.
+    DragSolve(String),
+    /// A drag's move, written (`assembly.move`).
+    DragMove(String),
     /// Only a failure matters.
     Quiet,
+}
+
+/// How often a drag asks the daemon to solve at most.
+pub const DRAG_EVERY: Duration = Duration::from_millis(50);
+
+/// An instance being dragged: its assembly, how far it has been moved
+/// from where it was, when the last preview was asked for and whether
+/// its answer is awaited.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Drag {
+    pub part: String,
+    pub instance: String,
+    pub translate: [f64; 3],
+    asked: Option<(Instant, [f64; 3])>,
+    waiting: bool,
 }
 
 /// How often the window's camera is shared at most while it moves: often
@@ -141,6 +160,11 @@ impl Made {
             faces,
         }
     }
+}
+
+/// A translation as a request takes it: quantities in meters.
+fn meters(t: [f64; 3]) -> [Value; 3] {
+    t.map(|x| json!(format!("{x} m")))
 }
 
 /// The findings of a check report.
@@ -224,6 +248,10 @@ pub struct Workspace {
     /// What the disk cache held when last asked (`cache.stats`), for the
     /// Preferences window.
     pub cache: Option<Value>,
+    /// The instance being dragged, if any.
+    pub drag: Option<Drag>,
+    /// Why the last drag moved nothing, for the status line.
+    pub drag_note: Option<String>,
     /// Whether a report is on its way, and whether the project changed
     /// meanwhile, so the badges need another.
     doctor_waiting: bool,
@@ -294,6 +322,8 @@ impl Workspace {
             settings: Settings::default(),
             doctor: None,
             cache: None,
+            drag: None,
+            drag_note: None,
             doctor_waiting: false,
             doctor_again: false,
             raised: false,
@@ -376,6 +406,90 @@ impl Workspace {
     /// outlive the damage they show (a conflict record settled, say): at
     /// most one report on its way, and one more after it if the project
     /// changed meanwhile. Nothing until the window first asked.
+    /// Moves the instance being dragged (starting a drag of `instance` of
+    /// assembly `part` if none is) by `translate` from where it was: the
+    /// daemon solves the rest, held there for a first solve, at most every
+    /// [`DRAG_EVERY`], and the window draws where it puts them.
+    pub fn drag_to(&mut self, part: &str, instance: &str, translate: [f64; 3]) {
+        let same = self
+            .drag
+            .as_ref()
+            .is_some_and(|d| d.part == part && d.instance == instance);
+        if !same {
+            self.drag = Some(Drag {
+                part: part.to_owned(),
+                instance: instance.to_owned(),
+                translate,
+                asked: None,
+                waiting: false,
+            });
+        }
+        let d = self.drag.as_mut().expect("just set");
+        d.translate = translate;
+        let due = d.asked.is_none_or(|(at, _)| at.elapsed() >= DRAG_EVERY);
+        if !d.waiting && due {
+            self.ask_drag();
+        }
+    }
+
+    fn ask_drag(&mut self) {
+        let Some(d) = self.drag.as_mut() else { return };
+        d.asked = Some((Instant::now(), d.translate));
+        d.waiting = true;
+        let req = Request::AssemblySolve {
+            part: d.part.clone(),
+            moves: vec![ryucad::proto::InstanceMove {
+                instance: d.instance.clone(),
+                translate: Some(meters(d.translate)),
+                ..Default::default()
+            }],
+        };
+        let part = d.part.clone();
+        self.send(req, Pending::DragSolve(part));
+    }
+
+    /// Takes a preview solve's poses: each instance it moved, drawn there.
+    fn preview_poses(&mut self, part: &str, result: &Value) {
+        let Some(instances) = result["instances"].as_object() else {
+            return;
+        };
+        let triple = |v: &Value| [0, 1, 2].map(|k| v[k].as_f64().unwrap_or_default());
+        for (id, i) in instances {
+            let p = &i["pose"];
+            let pose = crate::core::model::Pose::of(
+                triple(&p["origin_m"]),
+                triple(&p["z"]),
+                triple(&p["x"]),
+            );
+            self.model
+                .preview
+                .insert((part.to_owned(), id.clone()), pose);
+        }
+        self.model.generation += 1;
+    }
+
+    /// Ends a drag, writing where it left the instance with one
+    /// `assembly.move` (logged and undoable, as an agent's), against the
+    /// assembly's revision as the window last saw it.
+    pub fn drop_drag(&mut self) {
+        let Some(d) = self.drag.take() else { return };
+        if d.translate == [0.0; 3] {
+            self.model.preview.retain(|(p, _), _| *p != d.part);
+            return;
+        }
+        let revision = self.model.parts.get(&d.part).map(|p| p.revision.clone());
+        let req = Request::AssemblyMove {
+            part: d.part.clone(),
+            instance: d.instance.clone(),
+            placement: None,
+            translate: Some(meters(d.translate)),
+            axis: None,
+            angle: None,
+            expected_revision: revision,
+        };
+        self.send(req, Pending::DragMove(d.part));
+    }
+
     /// Asks what the disk cache holds.
     pub fn read_cache(&mut self) {
         self.send(Request::CacheStats {}, Pending::Cache);
@@ -1313,6 +1427,30 @@ impl Workspace {
                 self.fail(e);
             }
             (Pending::Cache, Ok(a)) => self.cache = Some(a.result),
+            (Pending::DragSolve(part), a) => {
+                let mut again = false;
+                if let Some(d) = self.drag.as_mut().filter(|d| d.part == part) {
+                    d.waiting = false;
+                    again = d.asked.is_some_and(|(_, t)| t != d.translate);
+                }
+                match a {
+                    // Only while it is still dragged: a late answer after
+                    // the drop would undo the written move's look.
+                    Ok(a) if self.drag.is_some() => self.preview_poses(&part, &a.result),
+                    Ok(_) => {}
+                    Err(e) => self.fail(e),
+                }
+                if again {
+                    self.ask_drag();
+                }
+            }
+            (Pending::DragMove(part), a) => {
+                if let Err(e) = a {
+                    self.model.preview.retain(|(p, _), _| *p != part);
+                    self.model.generation += 1;
+                    self.fail(e);
+                }
+            }
             (Pending::Doctor, Ok(a)) => {
                 self.doctor = Some(crate::core::doctor::report_of(&a.result))
             }

@@ -54,6 +54,8 @@ pub struct Placed {
     /// Its state in the solve (`well`, `under`, `over`, `failing`) and
     /// its degrees of freedom, when its assembly has mates.
     pub solve: Option<(String, u64)>,
+    /// Where it is in its assembly.
+    pub pose: Option<Pose>,
 }
 
 /// A mate: its form (`revolute` and so on), its connectors as requests
@@ -273,6 +275,9 @@ impl Part {
                             solve: i.get("solve").map(|s| {
                                 (text(&s["state"]), s["dof"].as_u64().unwrap_or_default())
                             }),
+                            pose: i.get("pose").map(|p| {
+                                Pose::of(triple(&p["origin_m"]), triple(&p["z"]), triple(&p["x"]))
+                            }),
                         }),
                         mate: f.get("mate").map(|m| MateInfo {
                             form: text(&m["form"]),
@@ -424,6 +429,10 @@ pub struct Model {
     /// The part or assembly the window shows, as its participant's focus
     /// says; `None` for the project's model.
     pub focus: Option<String>,
+    /// Instances being dragged, by assembly and instance: where the last
+    /// `assembly.solve` put them, drawn there until the move is written
+    /// and the assembly's next report says where they are.
+    pub preview: BTreeMap<(String, String), Pose>,
     /// What the window hides, as its participant's hidden set says:
     /// occurrences (`<asm>/<path>`) and solids (`<part>/<solid>`).
     pub hidden: std::collections::BTreeSet<String>,
@@ -438,6 +447,8 @@ impl Model {
     pub fn apply_part(&mut self, report: &Value) -> Vec<BodyKey> {
         let part = Part::from_report(report);
         let id = part.id.clone();
+        // The report says where everything is now.
+        self.preview.retain(|(a, _), _| *a != id);
         // Meshes of solids that are gone, or changed, go, and other levels
         // of bodies nothing shows any more.
         self.meshes.retain(|(p, s), m| {
@@ -666,14 +677,61 @@ impl Model {
         true
     }
 
-    /// Where `key`'s body is drawn: its occurrence's pose in an assembly,
-    /// else where its part puts it.
+    /// Where `key`'s body is drawn: its occurrence's pose in an assembly
+    /// (moved with its instance while it is dragged), else where its part
+    /// puts it.
     pub fn pose(&self, key: &BodyKey) -> Pose {
-        self.parts
+        let Some(p) = self.parts.get(&key.0).filter(|p| p.assembly) else {
+            return Pose::IDENTITY;
+        };
+        let Some((o, _)) = p.occurrence(&key.1) else {
+            return Pose::IDENTITY;
+        };
+        let at = o.pose();
+        let instance = o.path.split('/').next().unwrap_or_default();
+        let dragged = self.preview.get(&(p.id.clone(), instance.to_owned()));
+        let was = p
+            .feature(instance)
+            .and_then(|f| f.instance.as_ref())
+            .and_then(|i| i.pose);
+        match (dragged, was) {
+            // Where the occurrence is relative to its instance stays.
+            (Some(now), Some(was)) => Pose {
+                origin: now.apply(was.unapply(at.origin)),
+                x: now.turn(was.unturn(at.x)),
+                y: now.turn(was.unturn(at.y)),
+                z: now.turn(was.unturn(at.z)),
+            },
+            _ => at,
+        }
+    }
+
+    /// The assembly and instance a drag on `key`'s body moves, or why it
+    /// can't: a part isn't placed, a pattern's copy moves with its seed,
+    /// a fixed instance and one its mates hold all round don't move.
+    pub fn movable(&self, key: &BodyKey) -> Result<(String, String), String> {
+        let p = self
+            .parts
             .get(&key.0)
             .filter(|p| p.assembly)
-            .and_then(|p| p.occurrence(&key.1))
-            .map_or(Pose::IDENTITY, |(o, _)| o.pose())
+            .ok_or_else(|| format!("{} is a part: only an assembly's instances move", key.0))?;
+        let instance = key.1.split('/').next().unwrap_or_default();
+        if instance.contains(':') {
+            return Err(format!(
+                "{instance} is a pattern's copy: it moves with its seed"
+            ));
+        }
+        let placed = p
+            .feature(instance)
+            .and_then(|f| f.instance.as_ref())
+            .ok_or_else(|| format!("{instance} isn't an instance of {}", p.id))?;
+        if placed.fixed {
+            return Err(format!("{instance} is fixed"));
+        }
+        if placed.solve.as_ref().is_some_and(|(_, dof)| *dof == 0) {
+            return Err(format!("{instance} has no freedom left: its mates hold it"));
+        }
+        Ok((p.id.clone(), instance.to_owned()))
     }
 
     /// Drops every mesh: the display quality changed.
@@ -1060,5 +1118,37 @@ mod tests {
             m.drawn().map(|(k, ..)| k.1.clone()).collect::<Vec<_>>(),
             ["s"]
         );
+    }
+
+    #[test]
+    fn a_drag_moves_what_its_instance_places_and_says_what_cant_move() {
+        let mut m = Model::default();
+        let mut a = assembly();
+        // b2 free, with a pose of its own; a copy of it under a pattern.
+        a["features"][1]["instance"]["pose"] =
+            json!({"origin_m": [1, 0, 0], "z": [0, 0, 1], "x": [0, 1, 0]});
+        a["occurrences"].as_array_mut().unwrap().push(
+            json!({"path": "ring:1/b2", "part": "bolt", "solids": [{"solid": "s", "hash": "1"}],
+                         "pose": {"origin_m": [3, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}}),
+        );
+        m.apply_part(&a);
+        let key = |s: &str| ("frame".to_owned(), s.to_owned());
+        assert_eq!(m.movable(&key("b2/s")), Ok(("frame".into(), "b2".into())));
+        assert_eq!(m.movable(&key("b1/s")).unwrap_err(), "b1 is fixed");
+        assert!(m.movable(&key("ring:1/b2/s")).unwrap_err().contains("copy"));
+        assert!(m.movable(&("p".into(), "s".into())).is_err());
+        // Dragged 2 m along y: its occurrence goes with it, turned as it was.
+        m.preview.insert(
+            ("frame".into(), "b2".into()),
+            Pose::of([1.0, 2.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]),
+        );
+        let p = m.pose(&key("b2/s"));
+        assert_eq!(p.origin, [1.0, 2.0, 0.0]);
+        assert_eq!(p.x, [0.0, 1.0, 0.0]);
+        assert_eq!(m.pose(&key("b1/s")).origin, [0.0; 3], "others stay");
+        // Its assembly's next report ends the preview.
+        m.apply_part(&a);
+        assert!(m.preview.is_empty());
+        assert_eq!(m.pose(&key("b2/s")).origin, [1.0, 0.0, 0.0]);
     }
 }

@@ -1937,3 +1937,89 @@ fn occurrences_hide_and_show_with_tab_and_the_tree() {
     );
     frames(&mut h, |a| hidden(a).is_empty());
 }
+
+#[test]
+fn a_free_instance_is_dragged_and_written_once() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = two_bolts();
+    // Where the left button doesn't navigate, a left-drag moves.
+    p.ok(&["config", "set", "ui.navigation", "solidworks"]);
+    let mut h = window(&p);
+    both_bolts(&mut h);
+    frames(&mut h, |a| {
+        a.opened().view.nav.style == ryucad_app::core::nav::Navigation::Solidworks
+    });
+    let moves = |p: &Project| {
+        p.ok(&["activity"])["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["method"] == "assembly.move")
+            .count()
+    };
+    let before = moves(&p);
+    let press = |h: &Harness<'static, App>, pos: egui::Pos2, pressed: bool| {
+        h.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    };
+    // The fixed bolt doesn't move, and the status line says why.
+    let fixed = over_body(&mut h, "b1/shank");
+    press(&h, fixed, true);
+    for i in 1..=5 {
+        h.event(egui::Event::PointerMoved(
+            fixed + egui::vec2(8.0 * i as f32, 0.0),
+        ));
+        h.step();
+    }
+    press(&h, fixed + egui::vec2(40.0, 0.0), false);
+    h.step();
+    assert_eq!(
+        h.state().opened().ws.drag_note.as_deref(),
+        Some("b1 is fixed")
+    );
+    // The free one follows the pointer, previewed by solves, and one move
+    // is written when it is let go.
+    let at = over_body(&mut h, "b2/shank");
+    press(&h, at, true);
+    for i in 1..=10 {
+        h.event(egui::Event::PointerMoved(
+            at + egui::vec2(6.0 * i as f32, 0.0),
+        ));
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    frames(&mut h, |a| !a.opened().ws.model.preview.is_empty());
+    press(&h, at + egui::vec2(60.0, 0.0), false);
+    frames(&mut h, |a| {
+        a.opened().ws.drag.is_none() && a.opened().ws.idle()
+    });
+    let t = Instant::now();
+    while moves(&p) == before {
+        assert!(t.elapsed() < Duration::from_secs(30), "no move written");
+        h.step();
+    }
+    assert_eq!(moves(&p), before + 1, "one write for the whole drag");
+    let shown = p.ok(&["feature", "show", "frame", "b2"]);
+    let x = shown["pose"]["origin_m"][0].as_f64().unwrap();
+    assert!(x > 0.04 + 1e-4, "moved along x: {x}");
+    // Undone like any other change.
+    let entries = p.ok(&["activity"])["entries"].clone();
+    let seq = entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|e| e["method"] == "assembly.move")
+        .unwrap()["seq"]
+        .to_string();
+    p.ok(&["undo", "--entry", &seq]);
+    let back = p.ok(&["feature", "show", "frame", "b2"]);
+    assert_eq!(back["pose"]["origin_m"][0], 0.04);
+    p.ok(&["config", "set", "ui.navigation", "ryucad"]);
+}

@@ -799,6 +799,10 @@ pub fn status(ui: &mut egui::Ui, ws: &Workspace) {
             ui.separator();
             ui.colored_label(ui.visuals().warn_fg_color, m.summary());
         }
+        if let Some(n) = &ws.drag_note {
+            ui.separator();
+            ui.colored_label(ui.visuals().warn_fg_color, n);
+        }
         if let Some(e) = ws.shown_error(std::time::Instant::now()) {
             ui.separator();
             ui.colored_label(ui.visuals().error_fg_color, &e.message);
@@ -1874,6 +1878,7 @@ mod tests {
             rev: "working".into(),
             fixed: false,
             solve: Some(("under".into(), 2)),
+            pose: None,
         });
         assert_eq!(row_text(&pin, 0), "pin (bolt @ working, 2 dof)");
         pin.instance.as_mut().unwrap().fixed = true;
