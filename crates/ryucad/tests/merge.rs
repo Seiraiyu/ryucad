@@ -313,11 +313,43 @@ fn git_follows_a_feature_it_thinks_was_renamed() {
     );
 }
 
+/// Git's version, as `(major, minor)`: `git version 2.50.1 (Apple
+/// Git-155)` and `git version 2.56.0.windows.2` alike.
+fn git_version() -> (u32, u32) {
+    let out = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let number = text.split_whitespace().nth(2).unwrap_or_default();
+    let mut parts = number.split('.').map(|p| p.parse().unwrap_or(0));
+    (parts.next().unwrap_or(0), parts.next().unwrap_or(0))
+}
+
+#[test]
+fn git_versions_read_as_numbers() {
+    assert!(git_version() >= (2, 0), "{:?}", git_version());
+}
+
 #[test]
 fn a_set_up_clone_merges_a_delete_and_an_add_as_themselves() {
     // Issue #44: a feature deleted and another added on one side looked
     // like a rename, so the merge lost the other side's edit and never
     // saw the two features colliding at one ID.
+    //
+    // Issue #75: Git before 2.50 ignores `merge.renames=false`, which is
+    // all `ryucad git install` can do about it, and reports the rename;
+    // there this passes with a note. CI (which sets `CI`) runs a newer Git
+    // and must not skip it.
+    let v = git_version();
+    if v < (2, 50) {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "Git {v:?} ignores merge.renames=false; CI needs Git 2.50 or newer"
+        );
+        eprintln!("note: Git {v:?} ignores merge.renames=false (2.50 honours it); skipped");
+        return;
+    }
     let r = boxed("");
     r.ryucad(&[
         "feature", "add", "p", "sphere", "--id", "knob", "--param", "radius=4",
