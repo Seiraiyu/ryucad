@@ -913,10 +913,14 @@ impl Workspace {
             self.following = None;
         }
         self.load();
-        // A new session knows nothing of this window's compare either.
+        // A new session knows nothing of this window's compare or focus
+        // either.
         if let Some(rev) = self.compare.as_ref().map(|c| c.rev.clone()) {
             self.set_compare(Some(rev));
             self.ask_diff();
+        }
+        if let Some(part) = self.model.focus.clone() {
+            self.set_focus(Some(part));
         }
         // A new daemon may see damage, and commits, the old one didn't.
         self.rediagnose();

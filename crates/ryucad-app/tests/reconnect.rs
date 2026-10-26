@@ -104,3 +104,26 @@ fn panels_asked_for_while_the_daemon_went_come_back() {
     assert!(!params.saving);
     assert!(params.dirty());
 }
+
+#[test]
+fn a_reconnected_window_keeps_its_focus() {
+    // #100: the window showed the project's model again.
+    let p = Project::new().with_part();
+    p.ok(&["part", "create", "q"]);
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    frames(&mut ws, |ws| ws.idle() && ws.part("q").is_some());
+    ws.set_focus(Some("p".into()));
+    frames(&mut ws, |ws| ws.model.focus.as_deref() == Some("p"));
+    p.ok(&["daemon", "stop"]);
+    frames(&mut ws, |ws| ws.lost);
+    frames(&mut ws, |ws| {
+        !ws.lost
+            && ws.idle()
+            && ws
+                .people
+                .get(ws.me())
+                .is_some_and(|m| m.focus.as_deref() == Some("p"))
+    });
+    assert_eq!(ws.model.focus.as_deref(), Some("p"));
+    assert_eq!(p.ok(&["focus"])["focus"], "p");
+}
