@@ -2919,6 +2919,27 @@ fn mates_from_the_cli() {
         "assembly", "solve", "frame", "pin", "--axis", "0,0,1", "--angle", "30deg",
     ]);
     assert_eq!(preview["held"], true);
+    // As a drag previews it: only what the pin's mates reach, the fixed
+    // plate left out, the pin where the whole solve puts it.
+    let part = p.ok(&[
+        "assembly",
+        "solve",
+        "frame",
+        "pin",
+        "--axis",
+        "0,0,1",
+        "--angle",
+        "30deg",
+        "--component",
+    ]);
+    assert_eq!(part["component"], true);
+    let ids: Vec<&String> = part["instances"].as_object().unwrap().keys().collect();
+    assert_eq!(ids, ["pin"]);
+    assert_eq!(
+        part["instances"]["pin"]["pose"],
+        preview["instances"]["pin"]["pose"]
+    );
+    p.fails(&["assembly", "solve", "frame", "--component"], "usage", 2);
     p.ok(&[
         "assembly", "move", "frame", "pin", "--axis", "0,0,1", "--angle", "30deg",
     ]);

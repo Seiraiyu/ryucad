@@ -443,6 +443,7 @@ impl Workspace {
                 translate: Some(meters(d.translate)),
                 ..Default::default()
             }],
+            component: true,
         };
         let part = d.part.clone();
         self.send(req, Pending::DragSolve(part));

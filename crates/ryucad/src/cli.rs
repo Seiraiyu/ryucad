@@ -638,6 +638,10 @@ enum AssemblyCmd {
         /// How far to turn it (with --axis): 90deg.
         #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
         angle: Option<String>,
+        /// Solve only what the instance's mates reach, from the poses the
+        /// assembly's rebuild has, as a drag's preview does.
+        #[arg(long, requires = "instance")]
+        component: bool,
     },
     /// The instances as a tree: parts, revisions, poses, freedom,
     /// subassemblies.
@@ -1487,8 +1491,10 @@ fn request(cmd: &Command) -> Option<Request> {
             translate,
             axis,
             angle,
+            component,
         }) => Request::AssemblySolve {
             part: part.clone(),
+            component: *component,
             moves: instance
                 .iter()
                 .map(|i| ryucad::proto::InstanceMove {

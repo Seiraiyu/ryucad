@@ -384,7 +384,11 @@ fn dispatch(
             expected_revision.as_deref(),
         ),
         Request::AssemblyTree { part } => crate::assembly::tree(session, &part),
-        Request::AssemblySolve { part, moves } => crate::mate::solve_request(
+        Request::AssemblySolve {
+            part,
+            moves,
+            component,
+        } => crate::mate::solve_request(
             session,
             &part,
             moves
@@ -401,6 +405,7 @@ fn dispatch(
                     )
                 })
                 .collect(),
+            component,
         ),
         Request::FeatureShow { part, id } => {
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);

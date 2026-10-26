@@ -553,12 +553,16 @@ pub enum Request {
     },
     /// An assembly's mates solved, writing nothing: as it is, or with
     /// `moves` held where they put instances for a first solve. Each
-    /// instance's pose and the solve's report.
+    /// instance's pose and the solve's report. With `component`, only
+    /// what the moved instances' mates reach is solved and answered, from
+    /// the poses the assembly's rebuild has (a drag's preview).
     #[serde(rename = "assembly.solve")]
     AssemblySolve {
         part: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         moves: Vec<InstanceMove>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        component: bool,
     },
     /// An assembly's instances as a tree: each with its part, revision and
     /// how it resolved, its pose in the assembly, and a subassembly's own.
