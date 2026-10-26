@@ -49,6 +49,7 @@ impl Fixture {
             .current_dir(&self.root)
             .env(RUNTIME_DIR_VAR, &self.run)
             .env("RYUCAD_CONFIG_DIR", self.run.with_file_name("config"))
+            .env("RYUCAD_CACHE_DIR", self.run.with_file_name("cache"))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -145,6 +146,7 @@ fn one_daemon_per_project() {
         .current_dir(&f.root)
         .env(RUNTIME_DIR_VAR, &f.run)
         .env("RYUCAD_CONFIG_DIR", f.run.with_file_name("config"))
+        .env("RYUCAD_CACHE_DIR", f.run.with_file_name("cache"))
         .output()
         .unwrap();
     let v: Value = serde_json::from_slice(&second.stdout).unwrap();
@@ -185,6 +187,7 @@ fn cli(f: &Fixture, args: &[&str]) -> Value {
         .current_dir(&f.root)
         .env(RUNTIME_DIR_VAR, &f.run)
         .env("RYUCAD_CONFIG_DIR", f.run.with_file_name("config"))
+        .env("RYUCAD_CACHE_DIR", f.run.with_file_name("cache"))
         .env("RYUCAD_IDLE_TIMEOUT", "60")
         .output()
         .unwrap();
@@ -198,6 +201,7 @@ fn cli_with_app(f: &Fixture, app: &Path, args: &[&str]) -> (Value, Option<i32>) 
         .current_dir(&f.root)
         .env(RUNTIME_DIR_VAR, &f.run)
         .env("RYUCAD_CONFIG_DIR", f.run.with_file_name("config"))
+        .env("RYUCAD_CACHE_DIR", f.run.with_file_name("cache"))
         .env("RYUCAD_IDLE_TIMEOUT", "60")
         .env(ryucad::client::APP_VAR, app)
         .output()
@@ -312,7 +316,10 @@ fn another_program_connects_as_a_human() {
     assert!(ryucad::proto::VersionInfo::current().same_build(&serde_json::json!(daemon.version)));
     let (mut requests, mut notes) = with_env(&f.run, || {
         // SAFETY: under with_env's lock, like the runtime folder.
-        unsafe { std::env::set_var("RYUCAD_CONFIG_DIR", f.run.with_file_name("config")) };
+        unsafe {
+            std::env::set_var("RYUCAD_CONFIG_DIR", f.run.with_file_name("config"));
+            std::env::set_var("RYUCAD_CACHE_DIR", f.run.with_file_name("cache"));
+        };
         (
             daemon.connect(&f.root).unwrap(),
             daemon.connect(&f.root).unwrap(),
@@ -778,6 +785,7 @@ fn an_agent_waits_for_the_human_to_select() {
                 .current_dir(&root)
                 .env(RUNTIME_DIR_VAR, &run)
                 .env("RYUCAD_CONFIG_DIR", run.with_file_name("config"))
+                .env("RYUCAD_CACHE_DIR", run.with_file_name("cache"))
                 .output()
                 .unwrap();
             serde_json::from_slice::<Value>(&out.stdout).unwrap()
@@ -927,6 +935,7 @@ fn the_runtime_folder_doesnt_follow_tmpdir() {
             .env_remove("XDG_RUNTIME_DIR")
             .env("TMPDIR", tmp)
             .env("RYUCAD_CONFIG_DIR", f.run.with_file_name("config"))
+            .env("RYUCAD_CACHE_DIR", f.run.with_file_name("cache"))
             .env("RYUCAD_IDLE_TIMEOUT", "30")
             .output()
             .unwrap();

@@ -54,7 +54,8 @@ impl Pair {
             .args(args)
             .env("RYUCAD_RUNTIME_DIR", &self.run)
             .env("RYUCAD_IDLE_TIMEOUT", "60")
-            .env("RYUCAD_CONFIG_DIR", self.run.with_file_name("config"));
+            .env("RYUCAD_CONFIG_DIR", self.run.with_file_name("config"))
+            .env("RYUCAD_CACHE_DIR", self.run.with_file_name("cache"));
         if root == self.direct {
             cmd.env("RYUCAD_NO_DAEMON", "1");
         }
@@ -1435,6 +1436,7 @@ fn git_install_registers_the_drivers_and_the_hook() {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("RYUCAD_NO_DAEMON", "1")
             .env("RYUCAD_CONFIG_DIR", dir.path().join("config"))
+            .env("RYUCAD_CACHE_DIR", dir.path().join("cache"))
             .output()
             .unwrap();
         let v: Value = serde_json::from_slice(&out.stdout).unwrap();

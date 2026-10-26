@@ -766,7 +766,9 @@ fn guarded<T>(
 ) -> Result<T> {
     let session = match slot {
         Some(s) => s,
-        None => slot.insert(Session::open(root)?),
+        None => slot.insert(
+            Session::open(root)?.with_disk(crate::cache::Disk::for_user().map(std::sync::Arc::new)),
+        ),
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(session))) {
         Ok(r) => r,

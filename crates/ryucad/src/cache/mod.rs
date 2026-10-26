@@ -16,6 +16,8 @@
 //! (a full disk) is skipped with one warning; the cache can never change a
 //! result, only how soon it comes.
 
+pub mod results;
+
 use crate::error::{Code, Error, Result};
 use serde_json::{Value, json};
 use std::fs;
@@ -170,7 +172,11 @@ impl Disk {
 
     /// The user's cache, for this build, bounded by `cache.max_bytes`;
     /// `None` when there is no cache folder or executable to name it by.
+    /// This crate's own tests use one only where they name its folder.
     pub fn for_user() -> Option<Disk> {
+        if cfg!(test) && std::env::var_os(CACHE_DIR_VAR).is_none() {
+            return None;
+        }
         let disk = Disk::open(cache_dir().ok()?, build_identity()?);
         disk.set_max_bytes(max_bytes_preference());
         Some(disk)
