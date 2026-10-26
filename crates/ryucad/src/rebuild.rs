@@ -545,14 +545,20 @@ pub(crate) fn through_all(
         return Ok((lo.min(0.0) - margin, hi.max(0.0) + margin));
     }
     if hi <= ryukei::tol::LINEAR_RESOLUTION {
+        let (why, pointer) = if ty == "hole" {
+            (
+                "a hole drills against its sketch's normal; put the sketch on the face it enters, or turn the sketch over",
+                "/depth",
+            )
+        } else {
+            ("reverse it, or go through all both ways", "/extent")
+        };
         return Err(Error::new(
             Code::InvalidExtent,
-            format!(
-                "{ty} {id}: everything it cuts lies behind the sketch's plane; reverse it, or go through all both ways"
-            ),
+            format!("{ty} {id}: everything it would cut lies behind the sketch's plane; {why}"),
         )
         .with("feature", id)
-        .with("pointer", "/extent"));
+        .with("pointer", pointer));
     }
     Ok((0.0, hi + margin))
 }
