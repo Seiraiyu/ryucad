@@ -47,6 +47,9 @@ pub(crate) fn classify(
     let on: Vec<BTreeMap<usize, Class>> = pieces
         .par_iter()
         .map(|p| coincident(ops, table, p))
+        // The first failure in order, not the first a thread found.
+        .collect::<Vec<_>>()
+        .into_iter()
         .collect::<Result<_, _>>()?;
     // One ray cast per group and other operand.
     let mut members: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -60,6 +63,9 @@ pub(crate) fn classify(
             let classes = group_classes(ops, table, pieces, &on, &boxes, list)?;
             Ok(list.iter().map(|&i| (i, classes.clone())).collect())
         })
+        // The first failure in order, not the first a thread found.
+        .collect::<Vec<_>>()
+        .into_iter()
         .collect::<Result<_, Fail>>()?;
     let mut out = vec![Vec::new(); pieces.len()];
     for (i, classes) in found.into_iter().flatten() {

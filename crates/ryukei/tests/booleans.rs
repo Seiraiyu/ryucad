@@ -401,3 +401,60 @@ fn a_ball_trimmed_through_its_poles_meshes() {
         near(volume_at(&r, s) / cube, 175.0 * PI / 3.0);
     }
 }
+
+/// A refusal names the same faces however the work is scheduled: the
+/// boolean's parallel steps keep the first failure in their own order, not
+/// whichever thread fails first. The `feature` fuzz target's interference
+/// found it: a 20 × 10 × 5 mm block with a 2 mm pocket in its top edge,
+/// against itself placed as a revolute mate at 12° leaves it, is `Uncertain`
+/// at more than one pair of faces.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "minutes in a debug build: CI runs it in release"
+)]
+fn refusals_name_the_same_faces_on_any_number_of_threads() {
+    use ryukei::geom::UnitVector3;
+    let mm = 1e-3;
+    let block = primitive::block(OpKey(1), 20.0 * mm, 10.0 * mm, 5.0 * mm, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let pocket = primitive::block(
+        OpKey(2),
+        2.0 * mm,
+        2.0 * mm,
+        2.0 * mm,
+        &at(9.0 * mm, 4.0 * mm, 4.0 * mm),
+    )
+    .unwrap()
+    .0;
+    let b = run(BooleanOp::Subtract, &block, &[(&pocket, Rigid::IDENTITY)]);
+    let turn = |deg: f64| Rigid::rotation(UnitVector3::Z, deg * PI / 180.0);
+    let shift = |x: f64| at(x, 0.0, 0.0);
+    let turned = shift(5.0 * mm).then_after(&turn(12.0)).inverse();
+    let refusal = |threads: usize| {
+        let tools = [Tool {
+            key: ToolKey(7),
+            body: &b,
+            place: turned,
+        }];
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| boolean(OpKey(8), BooleanOp::Intersect, &b, &tools))
+            .map(|_| ())
+            .expect_err("refused")
+    };
+    let first = refusal(1);
+    assert!(
+        matches!(
+            first,
+            ryukei::Error::InvalidBoolean(ryukei::BooleanError::Uncertain { .. })
+        ),
+        "{first:?}"
+    );
+    for threads in [1, 8, 1, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8] {
+        assert_eq!(refusal(threads), first, "on {threads} threads");
+    }
+}

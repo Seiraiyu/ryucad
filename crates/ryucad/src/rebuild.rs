@@ -1051,6 +1051,9 @@ fn build_pattern(
             let r = apply(part, id, "pattern", (kop, operation.as_str()), t, b, &tools)?;
             Ok(((*t).clone(), Arc::new(r)))
         })
+        // The first failure in order, not the first a thread found.
+        .collect::<Vec<_>>()
+        .into_iter()
         .collect::<Result<_>>()?;
     Ok(Made::new(made))
 }

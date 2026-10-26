@@ -1,0 +1,26 @@
+{
+  "a": {
+    "at": "origin",
+    "instance": [
+      "i2"
+    ],
+    "offset": {
+      "origin": [
+        "5 mm",
+        "0 mm",
+        "0 mm"
+      ]
+    }
+  },
+  "angle": "12 deg",
+  "b": {
+    "at": "origin",
+    "instance": [
+      "i1"
+    ]
+  },
+  "form": "revolute",
+  "format": 4,
+  "kind": "ryucad.feature",
+  "type": "mate"
+}
