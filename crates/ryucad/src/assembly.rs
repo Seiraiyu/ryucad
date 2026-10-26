@@ -1528,6 +1528,61 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_label_follows_the_release_branch_as_it_moves() {
+        use crate::git::tests::git;
+        let (dir, mut s) = released();
+        let r = dir.path();
+        // B proposed and placed, in one session, as a daemon keeps it.
+        call(&mut s, "release.propose", json!({"part": "bolt"})).unwrap();
+        place_in(r, "frame", "b", "bolt", json!({"label": "B"}), [0.0; 3]);
+        s.refresh().unwrap();
+        let pin = |s: &mut Session| -> (Option<Pin>, Vec<Value>) {
+            let result = s.rebuilt(&id("frame")).unwrap().clone();
+            let placed = result.output(&id("b")).unwrap().instance().unwrap();
+            (placed.model.pin.clone(), result.warnings(&id("frame")))
+        };
+        assert_eq!(
+            pin(&mut s).0,
+            Some(Pin {
+                commit: None,
+                obsolete: false
+            })
+        );
+        // Committed on the release branch: official from that commit,
+        // though no file the session reads changed (issue #105).
+        git(r, &["add", "."]);
+        git(r, &["commit", "-q", "-m", "bolt B"]);
+        let commit = crate::git::repo(r).unwrap().locate("HEAD").unwrap().0;
+        s.refresh().unwrap();
+        assert_eq!(
+            pin(&mut s).0,
+            Some(Pin {
+                commit: Some(commit.clone()),
+                obsolete: false
+            })
+        );
+        // Made obsolete and committed: the warning comes.
+        call(
+            &mut s,
+            "release.obsolete",
+            json!({"part": "bolt", "label": "B"}),
+        )
+        .unwrap();
+        git(r, &["add", "."]);
+        git(r, &["commit", "-q", "-m", "B is obsolete"]);
+        s.refresh().unwrap();
+        let (p, w) = pin(&mut s);
+        assert_eq!(
+            p,
+            Some(Pin {
+                commit: Some(commit),
+                obsolete: true
+            })
+        );
+        assert_eq!(w[0]["code"], "instance_obsolete", "{w:?}");
+    }
+
+    #[test]
     fn a_label_without_a_record_fails_its_instance() {
         let (dir, mut s) = released();
         place_in(
