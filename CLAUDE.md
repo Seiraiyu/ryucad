@@ -64,7 +64,7 @@ sh scripts/test-install.sh target/release/ryucad          # install.sh against a
 sh scripts/smoke.sh target/release/ryucad target/release/ryucad-app   # an agent session, then the app's offscreen frame
 ```
 
-Releases are cut by pushing a tag `vX.Y.Z` (or `vX.Y.Z-pre`, published as a prerelease). The version comes from the tag, never from a file: the workspace version in the repo stays `0.0.0`, and `.github/workflows/release.yml` stamps the tag's version in (`scripts/stamp-version.sh`), builds, tests and publishes, then tests the installers against the new release. Pushing a tag publishes: only the owner does it, or asks for it.
+Releases are cut by pushing a tag `vX.Y.Z` (or `vX.Y.Z-pre`, published as a prerelease). The version comes from the tag, never from a file: the workspace version in the repo stays `0.0.0`, and `.github/workflows/release.yml` stamps the tag's version in (`scripts/stamp-version.sh`), builds, tests and publishes, then tests the installers against the new release. Pushing a tag publishes, so it follows the release roadmaps (`release` for this repo, `service-release` for ryupdm-service; design 116): each version is cut when its product phase is done, as a pre-release (`vX.Y.0-pre.N`, pushed by the stage's agent), e2e on Mac, Linux and Windows, a burn-down PR, then the release tag (`vX.Y.0`), which only the coxswain pushes, or the owner. No other tags.
 
 Development happens on a headless Linux VM using the devcontainer, driven by the `devcontainer` CLI rather than VS Code:
 
