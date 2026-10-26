@@ -88,18 +88,18 @@ impl Default for View {
 }
 
 /// An entity's kind and where it comes from, for people: "face of boss
-/// (cylinder)", or for a face picked in a compare's ghost, "face of boss
+/// (cylinder)", of an assembly's occurrence "face of p/base (plate, box)",
+/// or for a face picked in a compare's ghost, "face of boss
 /// at HEAD, gone".
 pub fn describe(ws: &Workspace, hit: &Hit) -> String {
     if let Some(rev) = &hit.rev {
         return format!("{} of {} at {rev}, gone", hit.kind.as_str(), hit.feature);
     }
-    let ty = ws
-        .part(&hit.part)
-        .and_then(|p| p.feature(&hit.feature))
-        .and_then(|f| f.ty.clone())
-        .unwrap_or_default();
-    format!("{} of {} ({ty})", hit.kind.as_str(), hit.feature)
+    let from = ws.model.source(&hit.part, &hit.feature);
+    if from.is_empty() {
+        return format!("{} of {}", hit.kind.as_str(), hit.feature);
+    }
+    format!("{} of {} ({from})", hit.kind.as_str(), hit.feature)
 }
 
 impl View {
