@@ -1655,6 +1655,39 @@ fn pattern_from(
     if let Some(t) = &f.targets {
         o.insert("targets".into(), json!(t));
     }
+    // What the form needs and nothing gave it.
+    let needs: &[(&str, &str)] = match o.get("form").and_then(Value::as_str) {
+        Some("linear") => &[
+            (
+                "direction",
+                "an origin axis, a straight edge or a planar face",
+            ),
+            ("spacing", "the distance between instances"),
+            ("count", "how many instances, the seed's included"),
+        ],
+        Some("circular") => &[
+            (
+                "axis",
+                "an origin axis, a straight or circular edge, or a cylindrical or conical face",
+            ),
+            ("count", "how many instances, the seed's included"),
+            (
+                "angle",
+                "the span: 360 deg spaces the count evenly round a whole turn, less spans first to last",
+            ),
+        ],
+        Some("mirror") => &[("plane", "an origin plane or a planar face")],
+        _ => &[],
+    };
+    let form = o.get("form").and_then(Value::as_str).unwrap_or_default();
+    if let Some((k, what)) = needs.iter().find(|(k, _)| !o.contains_key(*k)) {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("a {form} pattern needs {k}: {what}"),
+        )
+        .with("param", *k)
+        .with("pointer", format!("/{k}")));
+    }
     let mut o = crate::doc::files::Obj::new(&v, "")?;
     let p = Pattern::from_fields(&mut o, unit, env)?;
     o.finish()?;
@@ -5229,6 +5262,27 @@ pub(crate) mod tests {
                 (e.code, &e.details["seed"], &e.details["pointer"]),
                 (code, &json!(seed), &json!("/features/0")),
                 "{seed}: {e}"
+            );
+        }
+        // What a form needs and wasn't given is a parameter to give (#98).
+        for (f, param) in [
+            (json!({"axis": "z", "count": 4}), "angle"),
+            (json!({"axis": "z", "angle": 90}), "count"),
+            (
+                json!({"form": "linear", "spacing": 3, "count": 3}),
+                "direction",
+            ),
+            (json!({"direction": "x", "count": 3}), "spacing"),
+            (json!({"form": "mirror"}), "plane"),
+        ] {
+            let mut f = f;
+            f["type"] = json!("pattern");
+            f["features"] = json!(["h"]);
+            let e = add(&mut s, f.clone()).unwrap_err();
+            assert_eq!(
+                (e.code, &e.details["param"]),
+                (Code::InvalidParam, &json!(param)),
+                "{f}: {e}"
             );
         }
         // A new pattern's form, left out, is what its fields say.
