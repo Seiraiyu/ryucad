@@ -209,3 +209,140 @@ fn walk(root: &Path) -> Vec<std::path::PathBuf> {
     out.sort();
     out
 }
+
+/// `ryucad <args>` from `root` through its daemon, with `cache` as the
+/// disk cache and `run` holding the daemons' sockets: the parsed answer.
+fn cli(root: &Path, run: &Path, cache: &Path, args: &[&str]) -> Value {
+    let out = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryucad"))
+        .args(args)
+        .current_dir(root)
+        .env("RYUCAD_RUNTIME_DIR", run)
+        .env("RYUCAD_CONFIG_DIR", run.with_file_name("config"))
+        .env("RYUCAD_CACHE_DIR", cache)
+        .env("RYUCAD_IDLE_TIMEOUT", "60")
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|_| panic!("{args:?}: {}", String::from_utf8_lossy(&out.stderr)));
+    assert_eq!(v["ok"], true, "{args:?}: {v}");
+    v["result"].clone()
+}
+
+/// A project at `root` with part `p`: a plate and a cylinder cut from it
+/// (a feature entry each, the cut's own body a tool entry).
+fn plate(root: &Path, run: &Path, cache: &Path) {
+    std::fs::create_dir_all(root).unwrap();
+    let c = |args: &[&str]| cli(root, run, cache, args);
+    c(&["init"]);
+    c(&["part", "create", "p"]);
+    c(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=20", "--param", "y=10", "--param",
+        "z=5",
+    ]);
+    c(&[
+        "feature",
+        "add",
+        "p",
+        "cylinder",
+        "--id",
+        "c",
+        "--operation",
+        "cut",
+        "--target",
+        "b",
+        "--param",
+        "radius=2",
+        "--param",
+        "height=20",
+        "--origin",
+        "5,5,-5",
+    ]);
+}
+
+/// The time each entry was last read or written, by path.
+fn times(cache: &Path) -> std::collections::BTreeMap<std::path::PathBuf, std::time::SystemTime> {
+    walk(cache)
+        .into_iter()
+        .map(|p| {
+            let t = std::fs::metadata(&p).unwrap().modified().unwrap();
+            (p, t)
+        })
+        .collect()
+}
+
+#[test]
+fn two_daemons_share_one_disk_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let (run, cache) = (dir.path().join("run"), dir.path().join("cache"));
+    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+    plate(&a, &run, &cache);
+    plate(&b, &run, &cache);
+    // The first daemon builds and meshes the part, filling the cache.
+    let built = cli(&a, &run, &cache, &["rebuild", "p"]);
+    cli(&a, &run, &cache, &["mesh", "p"]);
+    let filled = cli(&a, &run, &cache, &["cache", "stats"]);
+    let kinds = |s: &Value| {
+        ["features", "tools", "meshes"].map(|k| s["kinds"][k]["entries"].as_u64().unwrap())
+    };
+    assert_eq!(kinds(&filled), [2, 1, 1], "{filled}");
+    // Their times put back an hour, so a read shows.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    for p in times(&cache).keys() {
+        let f = std::fs::File::options().write(true).open(p).unwrap();
+        f.set_modified(old).unwrap();
+    }
+    // The second daemon, over another project with the same part, reads
+    // them rather than writing its own: the same entries, all read, and
+    // the same results.
+    let again = cli(&b, &run, &cache, &["rebuild", "p"]);
+    cli(&b, &run, &cache, &["mesh", "p"]);
+    assert_eq!(again["parts"][0]["hash"], built["parts"][0]["hash"]);
+    let shared = cli(&b, &run, &cache, &["cache", "stats"]);
+    assert_eq!(kinds(&shared), [2, 1, 1], "nothing new written: {shared}");
+    let read = times(&cache)
+        .into_iter()
+        .filter(|(p, t)| *t > old && !p.to_string_lossy().contains("/tools/"))
+        .count();
+    // The cut's own body is read only when what it cuts changes.
+    assert_eq!(read, 3, "both features and the mesh were read");
+    for root in [&a, &b] {
+        cli(root, &run, &cache, &["daemon", "stop"]);
+    }
+}
+
+#[test]
+fn daemons_writing_at_once_leave_sound_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let (run, cache) = (dir.path().join("run"), dir.path().join("cache"));
+    let roots: Vec<std::path::PathBuf> = (0..4).map(|i| dir.path().join(format!("p{i}"))).collect();
+    // Each project made with a cache of its own, so nothing is written to
+    // the shared one before the race.
+    for r in &roots {
+        plate(r, &run, &dir.path().join("setup"));
+        cli(r, &run, &dir.path().join("setup"), &["daemon", "stop"]);
+    }
+    let answers: Vec<Value> = std::thread::scope(|s| {
+        let jobs: Vec<_> = roots
+            .iter()
+            .map(|r| {
+                let (run, cache) = (&run, &cache);
+                s.spawn(move || {
+                    let v = cli(r, run, cache, &["rebuild", "p"]);
+                    cli(r, run, cache, &["mesh", "p"]);
+                    v
+                })
+            })
+            .collect();
+        jobs.into_iter().map(|j| j.join().unwrap()).collect()
+    });
+    for a in &answers {
+        assert_eq!(a["parts"][0]["hash"], answers[0]["parts"][0]["hash"]);
+    }
+    // One entry per result, every one sound, whichever daemon won.
+    let disk = Disk::open(&cache, [0; 32]);
+    assert_eq!(disk.check(), (4, 0));
+    assert_eq!(disk.stats().entries, 4);
+    for r in &roots {
+        cli(r, &run, &cache, &["daemon", "stop"]);
+    }
+}

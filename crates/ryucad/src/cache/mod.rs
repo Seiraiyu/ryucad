@@ -317,6 +317,20 @@ impl Disk {
         s
     }
 
+    /// How many entries are sound (their header, length and hash hold)
+    /// and how many aren't, whatever build wrote them: what several
+    /// daemons writing at once must leave.
+    pub fn check(&self) -> (u64, u64) {
+        let (mut sound, mut corrupt) = (0, 0);
+        for (_, path, _, _) in self.entries() {
+            match fs::read(&path).ok().as_deref().and_then(payload) {
+                Some(_) => sound += 1,
+                None => corrupt += 1,
+            }
+        }
+        (sound, corrupt)
+    }
+
     /// Removes every entry; returns what was removed.
     pub fn clear(&self) -> Stats {
         let before = self.stats();
@@ -537,6 +551,32 @@ mod tests {
         assert_eq!(d.stats().entries, 1);
         assert!(!old.exists());
         assert!(new.exists());
+    }
+
+    #[test]
+    fn writers_at_once_leave_one_sound_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    let d = disk(dir.path());
+                    for _ in 0..20 {
+                        d.put(Kind::Feature, b"same", &payload);
+                        let read = d.get(Kind::Feature, b"same");
+                        assert!(read.is_none_or(|r| r == payload), "a whole entry or none");
+                    }
+                });
+            }
+        });
+        let d = disk(dir.path());
+        assert_eq!(d.check(), (1, 0), "one entry, sound, no writer's file left");
+        assert_eq!(d.get(Kind::Feature, b"same").unwrap(), payload);
+        let path = d.path(Kind::Feature, &d.key(Kind::Feature, b"same"));
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[MAGIC.len()] ^= 1;
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(d.check(), (0, 1));
     }
 
     #[test]
