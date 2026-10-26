@@ -1,5 +1,5 @@
-//! Faces beside each other: which side of an analytic surface a face
-//! lies on, away from the curves where the two touch.
+//! Faces beside each other: which side of a surface a face lies on, or
+//! that it keeps off it, away from the curves where the two touch.
 //!
 //! Where two faces meet tangentially along an edge they share (a fillet
 //! and the face it rolls on, along its rail; two blends across a section)
@@ -10,7 +10,10 @@
 //! everywhere except a strip round the touching curves. `F = f ∘ P` is
 //! enclosed over cells of the face's parameter box (see
 //! [`super::pipe::Field`]), halved where it can't be signed, and a cell
-//! wholly within the strip is left out.
+//! wholly within the strip is left out. A surface with no implicit form
+//! has no side to be on: each cell is certified apart from it instead,
+//! every cell of it near the face's cell excluded from that cell as pairs
+//! are in a trace ([`super::general::apart`]).
 
 use super::Failure;
 use super::fit::first_bound;
@@ -27,15 +30,22 @@ use std::collections::VecDeque;
 /// The most cells [`beside`] may examine.
 const CELLS: usize = 1 << 15;
 
+/// The most cells of another surface with no implicit form [`beside`] may
+/// examine, in all, while certifying parts apart from it.
+const APART_CELLS: usize = 1 << 20;
+
 /// The deepest [`beside`] halves a cell, one parameter at a time.
 const DEPTH: u32 = 64;
 
-/// How many pieces each touching curve's pcurve is cut into.
+/// How many pieces each touching curve's pcurve is cut into first.
 const PIECES: u32 = 256;
 
-/// Which side of the analytic surface `other` a face of `surface` (an
-/// analytic surface or a pipe) lies on, away from curves where the two
-/// touch.
+/// How many times each first piece may be halved, where it lies across
+/// both parameters wider than half the strip.
+const PIECE_DEPTH: u32 = 8;
+
+/// Which side of the surface `other` a face of `surface` lies on, away
+/// from curves where the two touch.
 ///
 /// `cell` is the face's box in `surface`'s parameter plane, and each of
 /// `rails` a touching curve's pcurve on `surface` over its parameter
@@ -43,8 +53,9 @@ const PIECES: u32 = 256;
 /// model space) of a rail is left out; on the rest, `F = f ∘ P` must have
 /// one certified sign. With `Lu` and `Lv` bounds on `|P_u|` and `|P_v|`
 /// over the box (closed forms, a pipe's from its frame along the spine),
-/// a part is within the strip when the rail's pieces (256
-/// of them, by their boxes) whose every `v` lies within `strip / Lv` of
+/// a part is within the strip when the rail's pieces (256 of them, each
+/// halved while its box is wider across both parameters than half the
+/// strip there, by their boxes) whose every `v` lies within `strip / Lv` of
 /// every `v` of the part cover its `u` range between them: at every `u`
 /// of the part a rail passes (each piece is continuous) at a `v` the
 /// part's points are within `Lv |Δv| ≤ strip` of; or the same with `u`
@@ -55,11 +66,11 @@ const PIECES: u32 = 256;
 ///
 /// `Ok(Some(sign))` is that sign (`Positive` on the side `other`'s
 /// implicit form is positive: outside a cylinder, sphere or torus), or
-/// `Zero` when the whole box is within the strip; `Ok(None)` when parts
-/// of both signs are certified, so the face crosses `other` away from
-/// the strip. Fails with `Unsupported` unless `surface` is analytic or a
-/// pipe and `other` analytic, and `Uncertain` where a part can't be
-/// signed.
+/// `Zero` when the whole box is within the strip, or when `other` has no
+/// implicit form and every part is certified apart from it; `Ok(None)`
+/// when parts of both signs are certified, so the face crosses `other`
+/// away from the strip. Fails with `Uncertain` where a part can't be
+/// signed or certified apart.
 pub fn beside(
     surface: &Surface,
     other: &Surface,
@@ -278,7 +289,8 @@ fn meets(
         || meets(curve, [m, r1], cell, (pu, pv), depth - 1)
 }
 
-/// The boxes of `n` pieces of each curve over its range, moved by whole
+/// The boxes of `n` pieces of each curve over its range, each halved
+/// while it is wider than half of `w` across both parameters, moved by whole
 /// periods along each periodic direction to every place they meet
 /// `cell` (pcurves unwrap across seams, so a curve may lie any number of
 /// periods from the face's box).
@@ -287,6 +299,7 @@ fn pieces_of(
     n: u32,
     (pu, pv): (Option<f64>, Option<f64>),
     cell: Cell,
+    w: [f64; 2],
 ) -> Vec<Cell> {
     let shifts = |p: Option<f64>, [lo, hi]: [f64; 2], [c0, c1]: [f64; 2]| -> Vec<f64> {
         match p {
@@ -300,10 +313,29 @@ fn pieces_of(
     };
     let mut out = Vec::new();
     for &(c, [r0, r1]) in curves {
-        for i in 0..n {
-            let at = |k: u32| r0 + (r1 - r0) * f64::from(k) / f64::from(n);
-            let bx = piece_box(c, [at(i), at(i + 1)]);
+        let mut stack: Vec<([f64; 2], u32)> = (0..n)
+            .rev()
+            .map(|i| {
+                let at = |k: u32| r0 + (r1 - r0) * f64::from(k) / f64::from(n);
+                ([at(i), at(i + 1)], 0)
+            })
+            .collect();
+        while let Some(([a, b], depth)) = stack.pop() {
+            let bx = piece_box(c, [a, b]);
             let (x, y) = ([bx.min().x, bx.max().x], [bx.min().y, bx.max().y]);
+            // A piece wider across both directions than half the strip
+            // can't cover a part beside it either way: it is halved, up
+            // to [`PIECE_DEPTH`] times.
+            let wide = w[0] > 0.0
+                && w[1] > 0.0
+                && (x[1] - x[0]) > w[0] / 2.0
+                && (y[1] - y[0]) > w[1] / 2.0;
+            let m = (a + b) / 2.0;
+            if wide && depth < PIECE_DEPTH && a < m && m < b {
+                stack.push(([m, b], depth + 1));
+                stack.push(([a, m], depth + 1));
+                continue;
+            }
             for du in shifts(pu, x, cell[0]) {
                 for dv in shifts(pv, y, cell[1]) {
                     out.push([[x[0] + du, x[1] + du], [y[0] + dv, y[1] + dv]]);
@@ -326,23 +358,12 @@ fn run(
     keep: &dyn Fn(Cell) -> bool,
     stop: bool,
 ) -> Result<[bool; 2], Failure> {
-    let face_kind = matches!(
-        surface,
-        Surface::Plane(_)
-            | Surface::Cylinder(_)
-            | Surface::Cone(_)
-            | Surface::Sphere(_)
-            | Surface::Torus(_)
-            | Surface::Pipe(_)
-    );
-    let Some(imp) = Implicit::of(other).filter(|_| face_kind) else {
-        return Err(Failure::Unsupported);
-    };
+    let imp = Implicit::of(other);
     let sheet = Sheet::of(surface);
-    let field = Field { sheet, imp: &imp };
+    let field = imp.as_ref().map(|imp| Field { sheet, imp });
     let (lu, lv) = first_bound(surface, cell);
     let w = [strip / lu, strip / lv];
-    let pieces = pieces_of(rails, PIECES, surface.periods(), cell);
+    let pieces = pieces_of(rails, PIECES, surface.periods(), cell, w);
     // A part near a rail's end, which coverage along it can't reach.
     let ends: Vec<Point3> = rails
         .iter()
@@ -362,6 +383,15 @@ fn run(
     };
     let within =
         |c: Cell| covered(&pieces, c, 0, w[1]) || covered(&pieces, c, 1, w[0]) || near_end(c);
+    // A surface with no implicit form has no side to be on: every part is
+    // certified apart from it instead.
+    if field.is_none() {
+        let skip = |c: Cell| within(c) || !keep(c);
+        return match super::general::apart(surface, cell, other, &skip, APART_CELLS) {
+            Some(true) => Ok([false, false]),
+            _ => Err(Failure::Uncertain),
+        };
+    }
     // Breadth first, so that where the face crosses `other`, both signs
     // turn up at coarse parts, before the parts along the crossing (which
     // never sign) use up the budget.
@@ -373,7 +403,7 @@ fn run(
         if within(c) || !keep(c) {
             continue;
         }
-        let e = field.enclose(c);
+        let e = field.as_ref().and_then(|f| f.enclose(c));
         if let Some(e) = e
             && signed(e.v)
         {
@@ -478,10 +508,50 @@ mod tests {
             beside(&ps, &plane, whole, &rails, 0.0),
             Err(Failure::Uncertain)
         );
-        // Only an analytic surface's implicit form separates.
+    }
+
+    /// A plane beside a tube, which has no implicit form: certified apart
+    /// part by part (slow in a debug build).
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "slow in a debug build: run it in release")]
+    fn a_plane_beside_a_tube() {
+        let rail =
+            Curve2::Line2(Line2::new(Point2::new(0.0, 0.0), Vector2::new(1.0, 0.0)).unwrap());
+        let ps = Surface::Pipe(Arc::new(on_plane()));
+        let plane = Surface::Plane(Plane::new(Frame::WORLD));
+        let whole = [[0.0, 2.0], [-PI, PI]];
+        let rails = [(&rail, [-0.1, 2.1])];
+        // A tube along a straight spine keeps the plane off it outside a
+        // strip round its contact line, the plane's line y = 0: the tube
+        // has no side, but every part of the plane away from the strip is
+        // certified apart from it.
+        let straight = crate::geom::NurbsCurve::new(
+            crate::geom::KnotVector::clamped(3, &[0.0, 1.0, 2.0], &[4, 1, 4]).unwrap(),
+            (0..5)
+                .map(|i| Point3::new(f64::from(i), 0.0, crate::geom::pipe::tests::R))
+                .collect(),
+            None,
+        )
+        .unwrap();
+        let tube = Surface::Pipe(Arc::new(
+            crate::geom::Pipe::new(
+                crate::geom::Curve::Nurbs(Arc::new(straight)),
+                crate::geom::pipe::tests::R,
+                plane.clone(),
+            )
+            .unwrap(),
+        ));
+        let line = Curve2::Line2(Line2::new(Point2::ORIGIN, Vector2::new(1.0, 0.0)).unwrap());
+        let face = [[0.2, 3.8], [-1.0, 1.5]];
+        assert_eq!(
+            beside(&plane, &tube, face, &[(&line, [0.0, 4.0])], 1e-2),
+            Ok(Some(Sign::Zero))
+        );
+        // Round the line y = 0, the curved tube's touch outside the strip
+        // can't be.
         assert_eq!(
             beside(&plane, &ps, whole, &rails, 1e-3),
-            Err(Failure::Unsupported)
+            Err(Failure::Uncertain)
         );
     }
 

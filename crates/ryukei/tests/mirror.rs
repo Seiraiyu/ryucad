@@ -58,19 +58,9 @@ fn yz() -> Plane {
     )
 }
 
-/// The faults of the self-intersection check, but for pairs it can't
-/// check because neither surface has an implicit form.
+/// The faults of the self-intersection check.
 fn crossings(b: &Body) -> Vec<Fault> {
-    let implicit = |f| {
-        !matches!(
-            b.surface(b.face(f).unwrap().surface),
-            Some(Surface::Nurbs(_) | Surface::Extrusion(_) | Surface::Revolution(_))
-        )
-    };
     check_intersections(b)
-        .into_iter()
-        .filter(|f| !matches!(f, Fault::CannotCheck { a, b } if !implicit(*a) || !implicit(*b)))
-        .collect()
 }
 
 /// Mirrors `b` in `plane` and checks the image: sound, the same volume

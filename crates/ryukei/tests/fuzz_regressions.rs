@@ -6,7 +6,7 @@
 //! into the body they were written from.
 
 use ryukei::boolean::boolean;
-use ryukei::check::{Fault, check, check_intersections};
+use ryukei::check::{check, check_intersections};
 use ryukei::heal::{HealOptions, heal};
 use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::name::OpKey;
@@ -46,9 +46,7 @@ fn heals(hex: &str) {
 fn sound(hex: &str) {
     let (body, _) = sweep(&bytes(hex)).expect("a body");
     assert_eq!(check(&body), []);
-    for fault in check_intersections(&body) {
-        assert!(matches!(fault, Fault::CannotCheck { .. }), "{fault:?}");
-    }
+    assert_eq!(check_intersections(&body), []);
 }
 
 /// A slot turned part way: its lines touch the swept arcs' tori at their vertices, in contacts only rounding can place.

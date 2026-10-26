@@ -13,13 +13,11 @@
 //! in the first face's parameter plane ([`crossings`]), and the pieces
 //! inside or along the other face are the rims of the overlap.
 //!
-//! A pipe face meets an analytic face as an analytic one does
-//! ([`surface_surface`] and [`curve_surface`] take pipes). Any other face
-//! on a surface that is not analytic may take part only if it is
-//! certified apart from the other face: the analytic surface's implicit
-//! form must have one certified sign on every Bézier patch of the other
-//! surface inside the region. Otherwise (two pipes among them) the pair
-//! is [`Failure::Unsupported`].
+//! Faces on any surfaces meet the same way ([`surface_surface`] and
+//! [`curve_surface`] take every surface). A NURBS or swept face and an
+//! analytic one whose implicit form has one certified sign on every
+//! Bézier patch of the first's exact NURBS form inside the region are
+//! apart without a trace.
 
 use super::Failure;
 use super::cs::{CurveHit, curve_surface};
@@ -108,14 +106,21 @@ pub fn face_face(a: (&Body, FaceId), b: (&Body, FaceId)) -> Result<FaceMeet, Fai
     let Some(region) = overlap(&ba, &bb, slack) else {
         return Ok(FaceMeet::apart());
     };
+    // A NURBS or swept face certified apart from an analytic surface by
+    // the signs of its patches is apart at once, without a trace.
     let pipe = |s: &Surface| matches!(s, Surface::Pipe(_));
     match (Implicit::of(sa), Implicit::of(sb)) {
-        (Some(_), Some(_)) => {}
-        (Some(_), None) if pipe(sb) => {}
-        (None, Some(_)) if pipe(sa) => {}
-        (Some(i), None) => return certified_apart(&i, b, &region),
-        (None, Some(i)) => return certified_apart(&i, a, &region),
-        (None, None) => return Err(Failure::Unsupported),
+        (Some(i), None) if !pipe(sb) => {
+            if let Ok(apart) = certified_apart(&i, b, &region) {
+                return Ok(apart);
+            }
+        }
+        (None, Some(i)) if !pipe(sa) => {
+            if let Ok(apart) = certified_apart(&i, a, &region) {
+                return Ok(apart);
+            }
+        }
+        _ => {}
     }
     let (branches, points) = match surface_surface(sa, sb, &region)? {
         SurfaceHit::Coincident { same } => return coincident(faces, [sa, sb], same),
@@ -899,7 +904,8 @@ mod tests {
                 "{g:?}"
             );
         }
-        // One cutting through it: unsupported.
+        // One cutting through it: its faces across the blob meet the side
+        // in stretches on both.
         let (through, _) = primitive::block(
             OpKey(3),
             1.0,
@@ -908,10 +914,19 @@ mod tests {
             &Rigid::translation(Vector3::new(0.5, -0.5, 0.25)),
         )
         .unwrap();
-        assert!(
-            faces_of(&through)
-                .into_iter()
-                .any(|g| face_face((&body, side), (&through, g)) == Err(Failure::Unsupported))
-        );
+        let mut met = 0;
+        for g in faces_of(&through) {
+            let FaceMeet::Meet { stretches, .. } = face_face((&body, side), (&through, g)).unwrap()
+            else {
+                panic!("coincident")
+            };
+            for st in &stretches {
+                let p = st.curve.point((st.range[0] + st.range[1]) / 2.0);
+                let s = &body.surfaces[body.faces[side].surface];
+                assert!(s.distance(p) <= st.tolerance);
+            }
+            met += stretches.len();
+        }
+        assert!(met >= 2, "{met}");
     }
 }

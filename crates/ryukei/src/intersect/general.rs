@@ -49,6 +49,7 @@ use crate::geom::{Box3, Point3, Surface};
 use crate::interval::Interval;
 use crate::tol::LINEAR_RESOLUTION;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 type Iv = Interval;
 
@@ -131,6 +132,215 @@ fn mid_normal(q: &JVec<Iv>) -> Option<[Iv; 3]> {
 /// `n · v` for a direction and an interval vector.
 fn along(n: [Iv; 3], v: IVec3) -> Iv {
     n[0] * v[0] + n[1] * v[1] + n[2] * v[2]
+}
+
+/// A cell of a surface with its enclosures: its jets over the cell and
+/// at its middle, the box of its points, and its normal at the middle.
+struct Enc {
+    cell: Cell,
+    over: JVec<Iv>,
+    mid: JVec<Iv>,
+    bx: Box3,
+    normal: Option<[Iv; 3]>,
+}
+
+impl Enc {
+    fn new(sheet: &Sheet, cell: Cell) -> Option<Self> {
+        let over = sheet.jet_box(cell)?;
+        let m = cell.map(|[a, b]| (a + b) / 2.0);
+        let mid = sheet.jet_box(m.map(|x| [x, x]))?;
+        Some(Self {
+            cell,
+            bx: point_box(&over).grow(SLACK),
+            normal: mid_normal(&mid),
+            over,
+            mid,
+        })
+    }
+}
+
+/// Whether two cells are certified apart: their boxes miss, or a
+/// component of `E = A - B`, or `n · E` along either surface's normal at
+/// its cell's middle (where its own spread is least), has one certified
+/// sign by the mean value form about the cells' middles.
+fn excluded(a: &Enc, b: &Enc) -> bool {
+    if !a.bx.intersects(&b.bx) {
+        return true;
+    }
+    let w = |c: Cell, k: usize| {
+        let m = (c[k][0] + c[k][1]) / 2.0;
+        Iv::new(c[k][0] - m, c[k][1] - m)
+    };
+    let (Some(du), Some(dv), Some(ds), Some(dt)) =
+        (w(a.cell, 0), w(a.cell, 1), w(b.cell, 0), w(b.cell, 1))
+    else {
+        return false;
+    };
+    let (pa, pb, qa, qb) = (&a.over, &b.over, &a.mid, &b.mid);
+    let along_axes = (0..3).any(|k| {
+        let direct = pa[k].v - pb[k].v;
+        let lin = (qa[k].v - qb[k].v) + pa[k].d[0] * du + pa[k].d[1] * dv
+            - pb[k].d[0] * ds
+            - pb[k].d[1] * dt;
+        signed(meet(direct, lin))
+    });
+    if along_axes {
+        return true;
+    }
+    let value = |p: &JVec<Iv>| -> IVec3 { [p[0].v, p[1].v, p[2].v] };
+    [a.normal, b.normal].into_iter().flatten().any(|n| {
+        let lin = along(n, value(qa)) - along(n, value(qb))
+            + along(n, partial(pa, 0)) * du
+            + along(n, partial(pa, 1)) * dv
+            - along(n, partial(pb, 0)) * ds
+            - along(n, partial(pb, 1)) * dt;
+        signed(lin)
+    })
+}
+
+/// The most times [`apart`] splits a pair.
+const APART_DEPTH: u32 = 64;
+
+/// The box of a surface's points over a cell: the union of its
+/// enclosures over the cell's quarters, quartered again where there is
+/// none (a pipe's frame over too long a stretch), up to `depth` times.
+fn enclosure_box(sheet: &Sheet, cell: Cell, depth: u32) -> Option<Box3> {
+    if let Some(p) = sheet.jet_box(cell) {
+        return Some(point_box(&p));
+    }
+    if depth == 0 {
+        return None;
+    }
+    let mid = |[a, b]: [f64; 2]| (a + b) / 2.0;
+    let (mu, mv) = (mid(cell[0]), mid(cell[1]));
+    let mut out: Option<Box3> = None;
+    for u in [[cell[0][0], mu], [mu, cell[0][1]]] {
+        for v in [[cell[1][0], mv], [mv, cell[1][1]]] {
+            let b = enclosure_box(sheet, [u, v], depth - 1)?;
+            out = Some(match out {
+                Some(o) => o.union(&b),
+                None => b,
+            });
+        }
+    }
+    out
+}
+
+/// A part of a cell in [`apart`], how many times it was halved, and the
+/// other surface's cells it isn't yet certified apart from, each with how
+/// many times it was halved.
+type Part = (Cell, u32, Vec<(Rc<Enc>, u32)>);
+
+/// Whether surface `a` over `cell` and surface `b` are certified apart,
+/// leaving out parts of `a`'s cell that `skip` rules out. Each part of
+/// `a`'s cell carries the cells of `b` it isn't yet certified apart from
+/// (first, `b`'s cells near the whole cell), which its halves inherit:
+/// a part with none left is certified, one skipped is dropped, and
+/// otherwise whichever spreads further is halved, the part or its cells of
+/// `b`, so `b` is split only where some part of `a` needs it.
+/// `Some(false)` when a part or a cell has been halved [`APART_DEPTH`]
+/// times, `None` when `budget` (pairs tested) runs out.
+pub(crate) fn apart(
+    a: &Surface,
+    cell: Cell,
+    b: &Surface,
+    skip: &dyn Fn(Cell) -> bool,
+    mut budget: usize,
+) -> Option<bool> {
+    let sheets = [Sheet::of(a), Sheet::of(b)];
+    let Some(near) = enclosure_box(&sheets[0], cell, 12) else {
+        return Some(false);
+    };
+    let near = near.grow(SLACK);
+    let spread = |p: &JVec<Iv>, c: Cell| -> (usize, f64) {
+        (0..2)
+            .map(|d| {
+                let w = c[d][1] - c[d][0];
+                (d, crate::intersect::sheet_cs::norm_hi(partial(p, d)) * w)
+            })
+            .fold((0, -1.0), |best, x| if x.1 > best.1 { x } else { best })
+    };
+    let halves = |c: Cell, d: usize| -> Option<[Cell; 2]> {
+        let [lo, hi] = c[d];
+        let m = (lo + hi) / 2.0;
+        if m <= lo || m >= hi {
+            return None;
+        }
+        let (mut x, mut y) = (c, c);
+        x[d] = [lo, m];
+        y[d] = [m, hi];
+        Some([x, y])
+    };
+    let enclose = |k: usize, c: Cell| Enc::new(&sheets[k], c);
+    let Some(firsts) = cells(b, &near)
+        .into_iter()
+        .map(|c| enclose(1, c).map(|e| (Rc::new(e), 0)))
+        .collect::<Option<Vec<(Rc<Enc>, u32)>>>()
+    else {
+        return Some(false);
+    };
+    let mut stack: Vec<Part> = vec![(cell, 0, firsts)];
+    while let Some((part, depth, others)) = stack.pop() {
+        if skip(part) {
+            continue;
+        }
+        let Some(ea) = enclose(0, part) else {
+            // No enclosure over the part (a pipe's frame over too long a
+            // stretch): halve it along its wider parameter.
+            if depth >= APART_DEPTH {
+                return Some(false);
+            }
+            let d = usize::from(part[1][1] - part[1][0] > part[0][1] - part[0][0]);
+            let [x, y] = halves(part, d)?;
+            stack.push((x, depth + 1, others.clone()));
+            stack.push((y, depth + 1, others));
+            continue;
+        };
+        // The cells of `b` this part isn't certified apart from.
+        let mut left: Vec<(Rc<Enc>, u32)> = Vec::new();
+        for (eb, db) in others {
+            budget = budget.checked_sub(1)?;
+            if !excluded(&ea, &eb) {
+                left.push((eb, db));
+            }
+        }
+        if left.is_empty() {
+            continue;
+        }
+        let (da, sa) = spread(&ea.over, part);
+        let widest = left
+            .iter()
+            .map(|(e, _)| spread(&e.over, e.cell).1)
+            .fold(0.0, f64::max);
+        if sa >= widest {
+            if depth >= APART_DEPTH {
+                return Some(false);
+            }
+            let [x, y] = halves(part, da)?;
+            stack.push((x, depth + 1, left.clone()));
+            stack.push((y, depth + 1, left));
+        } else {
+            let mut split = Vec::with_capacity(2 * left.len());
+            for (e, d) in left {
+                if d >= APART_DEPTH {
+                    return Some(false);
+                }
+                let (dd, _) = spread(&e.over, e.cell);
+                let Some(hs) = halves(e.cell, dd) else {
+                    return Some(false);
+                };
+                for h in hs {
+                    // A cell with no enclosure can't be excluded.
+                    let Some(e) = enclose(1, h) else {
+                        return Some(false);
+                    };
+                    split.push((Rc::new(e), d + 1));
+                }
+            }
+            stack.push((part, depth, split));
+        }
+    }
+    Some(true)
 }
 
 /// The topology of where `a` and `b` meet inside `region`, traced in
@@ -346,50 +556,22 @@ impl<'a> Tracer<'a> {
         self.split_pair(cells, depth)
     }
 
-    /// Whether a component of `E` has one certified sign over the pair,
-    /// by the mean value form about its middle.
     fn excluded(&self, cells: [Cell; 2], pa: &JVec<Iv>, pb: &JVec<Iv>) -> bool {
-        let mid = |c: Cell| c.map(|[a, b]| (a + b) / 2.0);
-        let (ma, mb) = (mid(cells[0]), mid(cells[1]));
-        let (Some(qa), Some(qb)) = (
-            self.sheets[0].jet_box(ma.map(|x| [x, x])),
-            self.sheets[1].jet_box(mb.map(|x| [x, x])),
-        ) else {
-            return false;
-        };
-        let w = |c: Cell, m: [f64; 2], k: usize| Iv::new(c[k][0] - m[k], c[k][1] - m[k]);
-        let (Some(du), Some(dv), Some(ds), Some(dt)) = (
-            w(cells[0], ma, 0),
-            w(cells[0], ma, 1),
-            w(cells[1], mb, 0),
-            w(cells[1], mb, 1),
-        ) else {
-            return false;
-        };
-        let along_axes = (0..3).any(|k| {
-            let direct = pa[k].v - pb[k].v;
-            let lin = (qa[k].v - qb[k].v) + pa[k].d[0] * du + pa[k].d[1] * dv
-                - pb[k].d[0] * ds
-                - pb[k].d[1] * dt;
-            signed(meet(direct, lin))
-        });
-        if along_axes {
-            return true;
-        }
-        // Along each surface's normal at its cell's middle, where its own
-        // spread is least: `n · (A - B)` by the mean value form.
-        let value = |p: &JVec<Iv>| -> IVec3 { [p[0].v, p[1].v, p[2].v] };
-        [mid_normal(&qa), mid_normal(&qb)]
-            .into_iter()
-            .flatten()
-            .any(|n| {
-                let lin = along(n, value(&qa)) - along(n, value(&qb))
-                    + along(n, partial(pa, 0)) * du
-                    + along(n, partial(pa, 1)) * dv
-                    - along(n, partial(pb, 0)) * ds
-                    - along(n, partial(pb, 1)) * dt;
-                signed(lin)
+        let enc = |k: usize, p: &JVec<Iv>| {
+            let m = cells[k].map(|[a, b]| (a + b) / 2.0);
+            let mid = self.sheets[k].jet_box(m.map(|x| [x, x]))?;
+            Some(Enc {
+                cell: cells[k],
+                bx: point_box(p).grow(SLACK),
+                normal: mid_normal(&mid),
+                over: *p,
+                mid,
             })
+        };
+        match (enc(0, pa), enc(1, pb)) {
+            (Some(a), Some(b)) => excluded(&a, &b),
+            _ => false,
+        }
     }
 
     /// The crossings on a simple leaf's faces, recorded and matched with
