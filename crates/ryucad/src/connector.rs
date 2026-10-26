@@ -39,14 +39,14 @@ pub fn pose(r: &Rigid) -> Pose {
 }
 
 /// A solved pose as a file holds it: its origin and its z and x axes,
-/// `-0` written as `0`.
+/// `-0` written as `0` and the axes snapped ([`DocPose::snapped`]).
 pub fn doc_pose(p: &Pose) -> DocPose {
-    let clean = crate::doc::sketch::clean;
     DocPose {
-        origin_m: p.origin.map(clean),
-        z: p.axis(2).map(clean),
-        x: p.axis(0).map(clean),
+        origin_m: p.origin,
+        z: p.axis(2),
+        x: p.axis(0),
     }
+    .snapped()
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {

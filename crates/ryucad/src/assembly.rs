@@ -875,10 +875,8 @@ pub fn move_pose(
             pose.origin_m[i] += q.meters();
         }
     }
-    let clean = crate::doc::sketch::clean;
-    pose.origin_m = pose.origin_m.map(clean);
-    pose.z = pose.z.map(clean);
-    pose.x = pose.x.map(clean);
+    // A quarter turn leaves 6.1e-17 where 0 is meant (issue #108).
+    let pose = pose.snapped();
     pose_rigid(&pose)?;
     Ok(pose)
 }
@@ -1902,13 +1900,10 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(v["pose"]["origin_m"], json!([0.01, 0.005, 0]));
-        let x: Vec<f64> = v["pose"]["x"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|x| x.as_f64().unwrap())
-            .collect();
-        assert!(x[0].abs() < 1e-15 && (x[1] - 1.0).abs() < 1e-15, "{x:?}");
+        // Exactly, not 6.1e-17 off (issue #108).
+        assert_eq!(v["pose"]["x"], json!([0, 1, 0]));
+        let shown = call(&mut s, "feature.show", json!({"part": "frame", "id": "b1"})).unwrap();
+        assert_eq!(shown["pose"]["x"], json!([0, 1, 0]));
         let m = s.model(&id("frame"), &Rev::Working).unwrap();
         assert_eq!(origin(&m.occurrences[0]), [0.01, 0.005, 0.0]);
         // Undone, it is back where the translation left it.
