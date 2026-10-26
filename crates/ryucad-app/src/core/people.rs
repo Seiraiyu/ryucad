@@ -31,6 +31,9 @@ pub struct Person {
     /// The part or assembly their window shows; `None` for the project's
     /// model.
     pub focus: Option<String>,
+    /// What their window hides: occurrences (`<asm>/<path>`) and solids
+    /// (`<part>/<solid>`).
+    pub hidden: Vec<String>,
 }
 
 fn strings(v: &Value) -> Vec<String> {
@@ -73,6 +76,7 @@ impl Person {
             highlights,
             compare: v["compare"]["rev"].as_str().map(str::to_owned),
             focus: v["focus"].as_str().map(str::to_owned),
+            hidden: strings(&v["hidden"]),
         })
     }
 }

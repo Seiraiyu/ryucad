@@ -39,6 +39,10 @@ pub enum Error {
     /// A shape that can't be healed into a body: see
     /// [`crate::heal::heal`].
     InvalidHeal(HealError),
+    /// Bytes [`crate::codec`] can't decode: another format or version,
+    /// cut short, corrupted, or describing a body that breaks the
+    /// structural checks. `what` says which.
+    InvalidEncoding { what: &'static str },
 }
 
 /// Why a shape couldn't be healed into a body. Entities are named by
@@ -254,6 +258,7 @@ impl fmt::Display for Error {
             Self::InvalidBoolean(b) => write!(f, "invalid boolean: {b}"),
             Self::InvalidBlend(b) => write!(f, "invalid blend: {b}"),
             Self::InvalidHeal(h) => write!(f, "can't heal: {h}"),
+            Self::InvalidEncoding { what } => write!(f, "invalid encoding: {what}"),
         }
     }
 }

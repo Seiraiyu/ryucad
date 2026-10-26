@@ -593,13 +593,14 @@ fn working_in_release(node: &Node, child: &Id) -> Error {
 /// What a session keeps between rebuilds: each part's rebuild by a key of
 /// everything it read (its revision, and for an assembly its children's
 /// models) and its feature cache, the same for parts read at release
-/// labels, by part and label.
+/// labels, by part and label, and the disk cache beneath them, if any.
 #[derive(Clone, Debug, Default)]
 pub struct Store {
     pub results: BTreeMap<Id, (String, PartResult)>,
     pub caches: BTreeMap<Id, Cache>,
     pub pinned: BTreeMap<(Id, String), (String, PartResult)>,
     pub pinned_caches: BTreeMap<(Id, String), Cache>,
+    pub disk: Option<Arc<crate::cache::Disk>>,
 }
 
 /// Rebuilds parts and the assemblies over them, a part before every
@@ -632,7 +633,7 @@ impl<'p> Rebuild<'p> {
         if !fresh {
             let empty = Cache::new();
             let cache = self.store.caches.get(part).unwrap_or(&empty);
-            let (result, cache) = rebuild_part_in(p, cache, &children);
+            let (result, cache) = rebuild_part_in(p, cache, &children, self.store.disk.as_deref());
             self.store.caches.insert(part.clone(), cache);
             self.store.results.insert(part.clone(), (key, result));
             self.fresh.push(part.clone());
@@ -648,7 +649,8 @@ impl<'p> Rebuild<'p> {
         if !fresh {
             let empty = Cache::new();
             let cache = self.store.pinned_caches.get(&at).unwrap_or(&empty);
-            let (result, cache) = rebuild_part_in(&pinned.part, cache, &children);
+            let (result, cache) =
+                rebuild_part_in(&pinned.part, cache, &children, self.store.disk.as_deref());
             self.store.pinned_caches.insert(at.clone(), cache);
             self.store.pinned.insert(at.clone(), (key, result));
         }

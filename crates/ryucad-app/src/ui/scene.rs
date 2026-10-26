@@ -1,16 +1,20 @@
 //! The 3D view on the GPU: shaded faces and B-rep edges, drawn with wgpu
 //! into a texture of the scene's own (with depth and multisampling), which
 //! the window shows as an image and tests read back. Each body's mesh is
-//! uploaded once per body hash; selections, highlights and hover paint
-//! over faces from a small buffer built every frame, so moving the mouse
-//! never uploads the model again.
+//! uploaded once per body hash, in its part's frame, and drawn by GPU
+//! instancing: one draw per body with a buffer of the poses of every
+//! occurrence showing it, relative to the scene's reference point, so a
+//! thousand bolts are one mesh. Selections, highlights and hover paint
+//! over faces from a small buffer built every frame, drawn at their
+//! occurrences' poses, so moving the mouse never uploads the model again.
 
 use crate::core::compare::Compare;
-use crate::core::model::{BodyKey, Model};
+use crate::core::lod::Drawn;
+use crate::core::model::{BodyKey, Model, Pose};
 use crate::core::nav::Mat4;
 use eframe::wgpu;
 use eframe::wgpu::util::DeviceExt;
-use ryucad::mesh::{WireBody, WireMesh};
+use ryucad::mesh::{Quality, WireBody, WireMesh};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -53,6 +57,40 @@ struct Vertex {
     color: [f32; 4],
 }
 
+/// Where one occurrence of a body is drawn: the matrix from its mesh's
+/// coordinates (relative to the mesh's origin) to the scene's (relative to
+/// its reference point), by columns.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Instance {
+    pub columns: [[f32; 4]; 4],
+}
+
+impl Instance {
+    /// No turn, no move: what is already in the scene's coordinates.
+    pub const IDENTITY: Instance = Instance {
+        columns: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    };
+
+    /// A mesh whose positions are relative to `origin`, at `pose`, in a
+    /// scene relative to `reference`. The translation is worked in f64
+    /// and only the difference rounded to f32, so far from the world's
+    /// origin positions stay precise.
+    pub fn of(pose: &Pose, origin: [f64; 3], reference: [f64; 3]) -> Instance {
+        let at = pose.apply(origin);
+        let t = [0, 1, 2].map(|k| (at[k] - reference[k]) as f32);
+        let c = |v: [f64; 3]| [v[0] as f32, v[1] as f32, v[2] as f32, 0.0];
+        Instance {
+            columns: [c(pose.x), c(pose.y), c(pose.z), [t[0], t[1], t[2], 1.0]],
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
@@ -73,6 +111,18 @@ struct VIn {
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
+    @location(3) m0: vec4<f32>,
+    @location(4) m1: vec4<f32>,
+    @location(5) m2: vec4<f32>,
+    @location(6) m3: vec4<f32>,
+}
+
+fn placed(v: VIn) -> vec4<f32> {
+    return mat4x4<f32>(v.m0, v.m1, v.m2, v.m3) * vec4<f32>(v.pos, 1.0);
+}
+
+fn turned(v: VIn) -> vec3<f32> {
+    return (mat4x4<f32>(v.m0, v.m1, v.m2, v.m3) * vec4<f32>(v.normal, 0.0)).xyz;
 }
 struct VOut {
     @builtin(position) clip: vec4<f32>,
@@ -82,8 +132,8 @@ struct VOut {
 
 @vertex fn vs_face(v: VIn) -> VOut {
     var o: VOut;
-    o.clip = u.matrix * vec4<f32>(v.pos, 1.0);
-    o.normal = v.normal;
+    o.clip = u.matrix * placed(v);
+    o.normal = turned(v);
     o.color = v.color;
     return o;
 }
@@ -97,7 +147,7 @@ struct VOut {
 
 @vertex fn vs_line(v: VIn) -> VOut {
     var o: VOut;
-    let c = u.matrix * vec4<f32>(v.pos, 1.0);
+    let c = u.matrix * placed(v);
     // In front of the faces the edges bound, by a fraction of their
     // distance: a fixed step in depth would be meters far back in a
     // perspective view and pull hidden edges through solids. In
@@ -109,7 +159,7 @@ struct VOut {
     } else {
         o.clip = vec4<f32>(c.xy, max(c.z - e * c.w, 0.0), c.w);
     }
-    o.normal = v.normal;
+    o.normal = turned(v);
     o.color = v.color;
     return o;
 }
@@ -120,7 +170,7 @@ struct VOut {
 
 @vertex fn vs_ghost(v: VIn) -> VOut {
     var o: VOut;
-    let c = u.matrix * vec4<f32>(v.pos, 1.0);
+    let c = u.matrix * placed(v);
     // Behind the model's faces by the fraction edges are in front of
     // them, along its sight line: where a ghost face and a face of the
     // model lie in one plane, triangulated differently, the model shows
@@ -131,15 +181,19 @@ struct VOut {
     } else {
         o.clip = vec4<f32>(c.xy, min(c.z - e * c.w, c.w), c.w);
     }
-    o.normal = v.normal;
+    o.normal = turned(v);
     o.color = v.color;
     return o;
 }
 "#;
 
-/// A body on the GPU.
+/// An occurrence placed for this frame: its key, its body and level,
+/// where it goes, and its mesh at the user's display quality.
+type Placed = (BodyKey, (String, Quality), Instance, Arc<WireBody>);
+
+/// A body on the GPU: its mesh in its part's frame, relative to the
+/// mesh's own origin.
 struct GpuBody {
-    hash: String,
     mesh: Arc<WireBody>,
     faces: wgpu::Buffer,
     face_count: u32,
@@ -195,7 +249,13 @@ pub struct Scene {
     bind: wgpu::BindGroup,
     samples: u32,
     reference: [f64; 3],
-    bodies: BTreeMap<BodyKey, GpuBody>,
+    /// Bodies by hash and level of detail, each uploaded once.
+    bodies: BTreeMap<(String, Quality), GpuBody>,
+    /// This frame's occurrences: each drawn key, its body and level,
+    /// where it goes, and its mesh at the user's display quality.
+    placed: Vec<Placed>,
+    /// One identity instance, for what is drawn where it is.
+    identity: wgpu::Buffer,
     /// A compare's ghosts, coloured for the compare generation they were
     /// uploaded at.
     ghosts: BTreeMap<BodyKey, GpuBody>,
@@ -206,14 +266,14 @@ pub struct Scene {
 /// How opaque a ghost is.
 pub const GHOST_ALPHA: f32 = ryucad::render::GHOST_ALPHA;
 
-/// Vertices of a body's triangles, relative to `reference`.
+/// Vertices of a body's triangles, moved by `offset`: none for a mesh
+/// drawn at its instances, or from its origin to the scene's reference.
 fn face_vertices(
     m: &WireMesh,
-    reference: [f64; 3],
+    offset: [f32; 3],
     tris: &[[u32; 3]],
     color: [f32; 4],
 ) -> Vec<Vertex> {
-    let offset = [0, 1, 2].map(|k| (m.origin[k] - reference[k]) as f32);
     let mut out = Vec::with_capacity(tris.len() * 3);
     for t in tris {
         for c in t {
@@ -229,8 +289,7 @@ fn face_vertices(
     out
 }
 
-fn edge_vertices(m: &WireMesh, reference: [f64; 3]) -> Vec<Vertex> {
-    let offset = [0, 1, 2].map(|k| (m.origin[k] - reference[k]) as f32);
+fn edge_vertices(m: &WireMesh, offset: [f32; 3]) -> Vec<Vertex> {
     let color = linear(theme::EDGE);
     let mut out = Vec::new();
     for (_, ps) in &m.edges {
@@ -246,6 +305,23 @@ fn edge_vertices(m: &WireMesh, reference: [f64; 3]) -> Vec<Vertex> {
         }
     }
     out
+}
+
+fn instances(device: &wgpu::Device, label: &str, v: &[Instance]) -> wgpu::Buffer {
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents: bytemuck::cast_slice(if v.is_empty() {
+            &[Instance::IDENTITY]
+        } else {
+            v
+        }),
+        usage: wgpu::BufferUsages::VERTEX,
+    })
+}
+
+/// From a mesh's origin to the scene's reference point.
+fn offset(m: &WireMesh, reference: [f64; 3]) -> [f32; 3] {
+    [0, 1, 2].map(|k| (m.origin[k] - reference[k]) as f32)
 }
 
 fn buffer(device: &wgpu::Device, label: &str, v: &[Vertex]) -> wgpu::Buffer {
@@ -322,11 +398,18 @@ impl Scene {
                     module: &shader,
                     entry_point: Some(entry.0),
                     compilation_options: Default::default(),
-                    buffers: &[Some(wgpu::VertexBufferLayout {
-                        array_stride: size_of::<Vertex>() as u64,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4],
-                    })],
+                    buffers: &[
+                        Some(wgpu::VertexBufferLayout {
+                            array_stride: size_of::<Vertex>() as u64,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4],
+                        }),
+                        Some(wgpu::VertexBufferLayout {
+                            array_stride: size_of::<Instance>() as u64,
+                            step_mode: wgpu::VertexStepMode::Instance,
+                            attributes: &wgpu::vertex_attr_array![3 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4],
+                        }),
+                    ],
                 },
                 primitive: wgpu::PrimitiveState {
                     topology,
@@ -405,36 +488,56 @@ impl Scene {
             samples,
             reference: [0.0; 3],
             bodies: BTreeMap::new(),
+            placed: Vec::new(),
+            identity: instances(device, "identity", &[Instance::IDENTITY]),
             ghosts: BTreeMap::new(),
             ghosts_at: u64::MAX,
             target: None,
         }
     }
 
-    /// Uploads bodies whose mesh changed and drops those that are gone.
-    /// A new `reference` uploads everything.
+    /// Draws everything the model draws, at the user's display quality,
+    /// culling nothing: [`Scene::sync_drawn`] of all of it.
     pub fn sync(&mut self, device: &wgpu::Device, model: &Model, reference: [f64; 3]) {
+        let all: Vec<Drawn> = model
+            .drawn()
+            .map(|(key, mesh, pose)| Drawn {
+                key: key.clone(),
+                mesh: Arc::clone(mesh),
+                level: model.base,
+                base: Arc::clone(mesh),
+                pose,
+            })
+            .collect();
+        self.sync_drawn(device, &all, reference);
+    }
+
+    /// Uploads the bodies of `drawn` (at their levels) that aren't on the
+    /// GPU yet, drops those no longer drawn, and places every occurrence
+    /// for this frame. A new `reference` uploads the ghosts again.
+    pub fn sync_drawn(&mut self, device: &wgpu::Device, drawn: &[Drawn], reference: [f64; 3]) {
         if reference != self.reference {
-            self.bodies.clear();
             self.ghosts.clear();
             self.ghosts_at = u64::MAX;
             self.reference = reference;
         }
-        let drawn: BTreeMap<&BodyKey, &Arc<WireBody>> = model.drawn().collect();
-        self.bodies
-            .retain(|k, b| drawn.get(k).is_some_and(|m| m.hash == b.hash));
+        self.placed.clear();
         let surface = linear(theme::SURFACE);
-        for (key, body) in drawn {
-            if self.bodies.contains_key(key) {
+        for d in drawn {
+            let (key, body) = (&d.key, &d.mesh);
+            let Ok(m) = &body.mesh else { continue };
+            let at = (body.hash.clone(), d.level);
+            let inst = Instance::of(&d.pose, m.origin, reference);
+            self.placed
+                .push((key.clone(), at.clone(), inst, Arc::clone(&d.base)));
+            if self.bodies.contains_key(&at) {
                 continue;
             }
-            let Ok(m) = &body.mesh else { continue };
-            let faces = face_vertices(m, reference, &m.triangles, surface);
-            let edges = edge_vertices(m, reference);
+            let faces = face_vertices(m, [0.0; 3], &m.triangles, surface);
+            let edges = edge_vertices(m, [0.0; 3]);
             self.bodies.insert(
-                key.clone(),
+                at,
                 GpuBody {
-                    hash: body.hash.clone(),
                     mesh: Arc::clone(body),
                     faces: buffer(device, "faces", &faces),
                     face_count: faces.len() as u32,
@@ -443,6 +546,15 @@ impl Scene {
                 },
             );
         }
+        let kept: std::collections::BTreeSet<&(String, Quality)> =
+            self.placed.iter().map(|(_, at, ..)| at).collect();
+        self.bodies.retain(|at, _| kept.contains(at));
+    }
+
+    /// How many bodies are on the GPU, and how many occurrences of them
+    /// this frame draws.
+    pub fn counts(&self) -> (usize, usize) {
+        (self.bodies.len(), self.placed.len())
     }
 
     /// Uploads a compare's ghosts, each face translucent in the ghost
@@ -476,12 +588,11 @@ impl Scene {
                 let tris = &m.triangles[f.triangles.0 as usize..f.triangles.1 as usize];
                 let name = ryucad::mesh::name_hex(&f.name);
                 let color = if c.is_gone(key, &name) { gone } else { ghost };
-                faces.extend(face_vertices(m, self.reference, tris, color));
+                faces.extend(face_vertices(m, offset(m, self.reference), tris, color));
             }
             self.ghosts.insert(
                 key.clone(),
                 GpuBody {
-                    hash: body.hash.clone(),
                     mesh: Arc::clone(body),
                     faces: buffer(device, "ghost", &faces),
                     face_count: faces.len() as u32,
@@ -557,20 +668,63 @@ impl Scene {
             flags: [1e-3, list.perspective[0], list.perspective[1], 0.0],
         };
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&u));
-        // The painted faces, all in one buffer.
+        self.target(device, size);
+        // Every occurrence of a body together, in one instance buffer.
+        let mut order: Vec<usize> = (0..self.placed.len()).collect();
+        order.sort_by(|a, b| self.placed[*a].1.cmp(&self.placed[*b].1));
+        let mut runs: Vec<(&GpuBody, core::ops::Range<u32>)> = Vec::new();
+        let mut all = Vec::with_capacity(order.len());
+        for i in order {
+            let (_, at, inst, _) = &self.placed[i];
+            let Some(b) = self.bodies.get(at) else {
+                continue;
+            };
+            let n = all.len() as u32;
+            match runs.last_mut() {
+                Some((last, r)) if Arc::ptr_eq(&last.mesh, &b.mesh) => r.end = n + 1,
+                _ => runs.push((b, n..n + 1)),
+            }
+            all.push(*inst);
+        }
+        let placed = instances(device, "occurrences", &all);
+        // The painted faces, all in one buffer, each drawn at its
+        // occurrence: the same positions and matrix as the face itself, so
+        // the same depths.
         let mut painted = Vec::new();
+        let mut paint_runs: Vec<(core::ops::Range<u32>, u32)> = Vec::new();
+        let mut paint_at = Vec::new();
         for (key, face, color) in list.faces {
-            let Some(b) = self.bodies.get(key) else {
+            let Some((_, at, inst, base)) = self.placed.iter().find(|(k, ..)| k == key) else {
+                continue;
+            };
+            let Some(b) = self.bodies.get(at) else {
                 continue;
             };
             let Ok(m) = &b.mesh.mesh else { continue };
-            let Some(f) = m.faces.get(*face) else {
+            // Faces are counted in the base mesh; the level drawn may
+            // leave out another faulted face, so find it by name.
+            let f = match &base.mesh {
+                Ok(bm) if !Arc::ptr_eq(base, &b.mesh) => bm
+                    .faces
+                    .get(*face)
+                    .and_then(|bf| m.faces.iter().find(|f| f.name == bf.name)),
+                _ => m.faces.get(*face),
+            };
+            let Some(f) = f else {
                 continue;
             };
             let tris = &m.triangles[f.triangles.0 as usize..f.triangles.1 as usize];
-            painted.extend(face_vertices(m, self.reference, tris, *color));
+            let start = painted.len() as u32;
+            painted.extend(face_vertices(m, [0.0; 3], tris, *color));
+            paint_runs.push((start..painted.len() as u32, paint_at.len() as u32));
+            paint_at.push(*inst);
         }
-        let paint = (!painted.is_empty()).then(|| buffer(device, "painted", &painted));
+        let paint = (!painted.is_empty()).then(|| {
+            (
+                buffer(device, "painted", &painted),
+                instances(device, "painted at", &paint_at),
+            )
+        });
         let marks: Vec<Vertex> = list
             .overlay
             .iter()
@@ -581,7 +735,6 @@ impl Scene {
             })
             .collect();
         let marked = (!marks.is_empty()).then(|| buffer(device, "marks", &marks));
-        self.target(device, size);
         let t = self.target.as_ref().expect("made above");
         let mut enc = device.create_command_encoder(&Default::default());
         {
@@ -620,22 +773,28 @@ impl Scene {
             });
             pass.set_bind_group(0, &self.bind, &[]);
             pass.set_pipeline(&self.faces);
-            for b in self.bodies.values() {
+            pass.set_vertex_buffer(1, placed.slice(..));
+            for (b, r) in &runs {
                 pass.set_vertex_buffer(0, b.faces.slice(..));
-                pass.draw(0..b.face_count, 0..1);
+                pass.draw(0..b.face_count, r.clone());
             }
-            if let Some(p) = &paint {
+            if let Some((p, at)) = &paint {
                 pass.set_pipeline(&self.paint);
                 pass.set_vertex_buffer(0, p.slice(..));
-                pass.draw(0..painted.len() as u32, 0..1);
+                pass.set_vertex_buffer(1, at.slice(..));
+                for (r, i) in &paint_runs {
+                    pass.draw(r.clone(), *i..*i + 1);
+                }
             }
             if list.edges {
                 pass.set_pipeline(&self.lines);
-                for b in self.bodies.values() {
+                pass.set_vertex_buffer(1, placed.slice(..));
+                for (b, r) in &runs {
                     pass.set_vertex_buffer(0, b.edges.slice(..));
-                    pass.draw(0..b.edge_count, 0..1);
+                    pass.draw(0..b.edge_count, r.clone());
                 }
             }
+            pass.set_vertex_buffer(1, self.identity.slice(..));
             if !self.ghosts.is_empty() {
                 pass.set_pipeline(&self.ghost);
                 for b in self.ghosts.values() {

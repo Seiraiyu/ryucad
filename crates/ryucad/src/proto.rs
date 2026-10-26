@@ -553,12 +553,16 @@ pub enum Request {
     },
     /// An assembly's mates solved, writing nothing: as it is, or with
     /// `moves` held where they put instances for a first solve. Each
-    /// instance's pose and the solve's report.
+    /// instance's pose and the solve's report. With `component`, only
+    /// what the moved instances' mates reach is solved and answered, from
+    /// the poses the assembly's rebuild has (a drag's preview).
     #[serde(rename = "assembly.solve")]
     AssemblySolve {
         part: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         moves: Vec<InstanceMove>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        component: bool,
     },
     /// An assembly's instances as a tree: each with its part, revision and
     /// how it resolved, its pose in the assembly, and a subassembly's own.
@@ -708,6 +712,24 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         participant: Option<String>,
     },
+    /// Changes what a participant's window hides (`participant`, else the
+    /// one human, else the caller): everything shown first with `all`,
+    /// then everything else in their parts hidden for `isolate`, then
+    /// `show`, then `hide`. References name parts, occurrences (at any
+    /// depth, a subassembly's reaching all under it) or a part's solids.
+    #[serde(rename = "visibility.set")]
+    VisibilitySet {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        hide: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        show: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        isolate: Vec<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
     /// Highlights entities for everyone to see, replacing the caller's
     /// highlight of the same style and label.
     #[serde(rename = "highlight.set")]
@@ -763,6 +785,13 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// What the disk cache of results and meshes holds: its folder, its
+    /// bound, and its entries and bytes, all and by kind.
+    #[serde(rename = "cache.stats")]
+    CacheStats {},
+    /// Empties the disk cache; answers what it removed.
+    #[serde(rename = "cache.clear")]
+    CacheClear {},
     /// The project's Git commits (or a part's), and what is uncommitted.
     #[serde(rename = "history.log")]
     HistoryLog {
@@ -831,6 +860,10 @@ pub enum Request {
         /// and ghost what it had, as the app's compare view does.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         compare: Option<String>,
+        /// Leave these out (parts, occurrences, solids); the participant's
+        /// hidden set by default, else the caller's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hidden: Option<Vec<String>>,
     },
     /// Diagnoses the project folder: every problem, with a stable code.
     #[serde(rename = "doctor")]

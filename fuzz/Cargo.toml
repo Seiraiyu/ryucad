@@ -157,3 +157,10 @@ path = "fuzz_targets/heal.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "codec"
+path = "fuzz_targets/codec.rs"
+test = false
+doc = false
+bench = false

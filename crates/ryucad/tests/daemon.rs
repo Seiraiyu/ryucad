@@ -49,6 +49,7 @@ impl Fixture {
             .current_dir(&self.root)
             .env(RUNTIME_DIR_VAR, &self.run)
             .env("RYUCAD_CONFIG_DIR", self.run.with_file_name("config"))
+            .env("RYUCAD_CACHE_DIR", self.run.with_file_name("cache"))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -145,6 +146,7 @@ fn one_daemon_per_project() {
         .current_dir(&f.root)
         .env(RUNTIME_DIR_VAR, &f.run)
         .env("RYUCAD_CONFIG_DIR", f.run.with_file_name("config"))
+        .env("RYUCAD_CACHE_DIR", f.run.with_file_name("cache"))
         .output()
         .unwrap();
     let v: Value = serde_json::from_slice(&second.stdout).unwrap();
@@ -185,6 +187,7 @@ fn cli(f: &Fixture, args: &[&str]) -> Value {
         .current_dir(&f.root)
         .env(RUNTIME_DIR_VAR, &f.run)
         .env("RYUCAD_CONFIG_DIR", f.run.with_file_name("config"))
+        .env("RYUCAD_CACHE_DIR", f.run.with_file_name("cache"))
         .env("RYUCAD_IDLE_TIMEOUT", "60")
         .output()
         .unwrap();
@@ -198,6 +201,7 @@ fn cli_with_app(f: &Fixture, app: &Path, args: &[&str]) -> (Value, Option<i32>) 
         .current_dir(&f.root)
         .env(RUNTIME_DIR_VAR, &f.run)
         .env("RYUCAD_CONFIG_DIR", f.run.with_file_name("config"))
+        .env("RYUCAD_CACHE_DIR", f.run.with_file_name("cache"))
         .env("RYUCAD_IDLE_TIMEOUT", "60")
         .env(ryucad::client::APP_VAR, app)
         .output()
@@ -312,7 +316,10 @@ fn another_program_connects_as_a_human() {
     assert!(ryucad::proto::VersionInfo::current().same_build(&serde_json::json!(daemon.version)));
     let (mut requests, mut notes) = with_env(&f.run, || {
         // SAFETY: under with_env's lock, like the runtime folder.
-        unsafe { std::env::set_var("RYUCAD_CONFIG_DIR", f.run.with_file_name("config")) };
+        unsafe {
+            std::env::set_var("RYUCAD_CONFIG_DIR", f.run.with_file_name("config"));
+            std::env::set_var("RYUCAD_CACHE_DIR", f.run.with_file_name("cache"));
+        };
         (
             daemon.connect(&f.root).unwrap(),
             daemon.connect(&f.root).unwrap(),
@@ -551,6 +558,71 @@ fn an_agent_puts_the_watching_human_into_a_compare() {
     cli(&f, &["daemon", "stop"]);
 }
 
+#[test]
+fn an_agent_hides_and_shows_what_the_human_sees() {
+    let f = fixture();
+    cli(&f, &["part", "create", "bolt"]);
+    cli(
+        &f,
+        &[
+            "feature",
+            "add",
+            "bolt",
+            "cylinder",
+            "--id",
+            "shank",
+            "--param",
+            "radius=2",
+            "--param",
+            "height=10",
+        ],
+    );
+    cli(&f, &["part", "create", "pair", "--assembly"]);
+    for (id, x) in [("a", "0"), ("b", "20")] {
+        let origin = format!("{x},0,0");
+        cli(
+            &f,
+            &[
+                "feature", "add", "pair", "instance", "--id", id, "--of", "bolt", "--origin",
+                &origin,
+            ],
+        );
+    }
+    let w = Watch::new(&f, &["participants"]);
+    let r = cli(&f, &["hide", "pair/a"]);
+    assert_eq!(r["result"]["participant"], w.me.as_str(), "{r}");
+    assert_eq!(r["result"]["hidden"], serde_json::json!(["pair/a"]));
+    let p = w.next("participant.changed");
+    assert_eq!(p["participant"]["hidden"], serde_json::json!(["pair/a"]));
+    let r = cli(&f, &["isolate", "pair/a"]);
+    assert_eq!(r["result"]["hidden"], serde_json::json!(["pair/b"]));
+    let r = cli(&f, &["show", "--all"]);
+    assert_eq!(r["result"]["hidden"], serde_json::json!([]));
+    let r = cli(&f, &["hide", "pair/c"]);
+    assert_eq!(r["error"]["code"], "not_found");
+    let r = cli(&f, &["show"]);
+    assert_eq!(r["error"]["code"], "usage");
+    let r = cli(&f, &["--no-daemon", "hide", "pair/a"]);
+    assert_eq!(r["error"]["code"], "no_live_session");
+    // A render can leave things out without anyone's window.
+    let out = f.run.with_file_name("hidden.png");
+    let out = out.to_str().unwrap();
+    let r = cli(
+        &f,
+        &[
+            "--no-daemon",
+            "render",
+            "pair",
+            "--hidden",
+            "pair/b",
+            "--out",
+            out,
+        ],
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    cli(&f, &["daemon", "stop"]);
+}
+
 /// A human attached and subscribed: notifications arrive on `rx`.
 struct Watch {
     me: String,
@@ -778,6 +850,7 @@ fn an_agent_waits_for_the_human_to_select() {
                 .current_dir(&root)
                 .env(RUNTIME_DIR_VAR, &run)
                 .env("RYUCAD_CONFIG_DIR", run.with_file_name("config"))
+                .env("RYUCAD_CACHE_DIR", run.with_file_name("cache"))
                 .output()
                 .unwrap();
             serde_json::from_slice::<Value>(&out.stdout).unwrap()
@@ -927,6 +1000,7 @@ fn the_runtime_folder_doesnt_follow_tmpdir() {
             .env_remove("XDG_RUNTIME_DIR")
             .env("TMPDIR", tmp)
             .env("RYUCAD_CONFIG_DIR", f.run.with_file_name("config"))
+            .env("RYUCAD_CACHE_DIR", f.run.with_file_name("cache"))
             .env("RYUCAD_IDLE_TIMEOUT", "30")
             .output()
             .unwrap();

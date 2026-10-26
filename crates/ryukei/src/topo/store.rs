@@ -78,6 +78,19 @@ impl<I: Id, T> Arena<I, T> {
     pub(crate) fn values_mut(&mut self) -> impl Iterator<Item = &mut T> + '_ {
         self.slots.iter_mut().flatten()
     }
+
+    /// Every slot, tombstones included, for the codec.
+    pub(crate) fn slots(&self) -> &[Option<T>] {
+        &self.slots
+    }
+
+    /// An arena holding exactly these slots, for the codec.
+    pub(crate) fn from_slots(slots: Vec<Option<T>>) -> Self {
+        Self {
+            slots,
+            _id: PhantomData,
+        }
+    }
 }
 
 /// Kernel code indexes only IDs it knows are live; a dead one is a kernel

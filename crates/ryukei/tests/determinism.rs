@@ -1611,6 +1611,57 @@ fn mirror_section(golden: &mut Golden) {
     }
 }
 
+/// The body codec: the encodings of the primitives and of seeded sweeps,
+/// booleans and blends, of the journals that made them, and of the
+/// primitives' meshes.
+fn codec_section(golden: &mut Golden) {
+    use ryukei::blend::blend;
+    use ryukei::boolean::boolean;
+    use ryukei::codec::{encode_body, encode_journal, encode_mesh};
+    use ryukei_testkit::blend_bytes::blend_case;
+    use ryukei_testkit::boolean_bytes::boolean_case;
+    use ryukei_testkit::sweep_bytes::sweep;
+    let mut s = golden.section("codec");
+    let t = Rigid::rotation(Vector3::new(1.0, 2.0, 0.5).normalize().unwrap(), 0.7);
+    let k = OpKey(1);
+    let mut made = vec![
+        primitive::block(k, 1.0, 2.0, 3.0, &t).unwrap(),
+        primitive::cylinder(k, 1.0, 2.0, &t).unwrap(),
+        primitive::cone(k, 1.0, 2.0, &t).unwrap(),
+        primitive::sphere(k, 1.0, &t).unwrap(),
+        primitive::torus(k, 2.0, 0.5, &t).unwrap(),
+    ];
+    let bytes = |seed: u64| {
+        let mut g = Lcg::new(seed);
+        (0..96)
+            .map(|_| (g.next_u64() >> 56) as u8)
+            .collect::<Vec<u8>>()
+    };
+    for seed in 0..12 {
+        if let Some((b, _)) = sweep(&bytes(seed)) {
+            made.push((b, ryukei::name::Journal::new()));
+        }
+        if let Some(case) = boolean_case(&bytes(seed))
+            && let Ok(r) = boolean(OpKey(9), case.op, &case.target, &case.tools())
+        {
+            made.push(r);
+        }
+        if let Some(case) = blend_case(&bytes(seed))
+            && let Ok(r) = blend(OpKey(9), &case.body, &case.blends)
+        {
+            made.push(r);
+        }
+    }
+    for (b, j) in &made {
+        s.bytes(&encode_body(b));
+        s.bytes(&encode_journal(j));
+    }
+    for (b, _) in &made[..5] {
+        let m = tessellate(b, &MeshParams::new(2e-2, 0.5)).unwrap();
+        s.bytes(&encode_mesh(&m));
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -1641,5 +1692,6 @@ fn determinism() {
     blend_booleans_section(&mut golden);
     heal_section(&mut golden);
     mirror_section(&mut golden);
+    codec_section(&mut golden);
     golden.finish();
 }

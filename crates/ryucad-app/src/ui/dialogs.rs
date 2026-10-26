@@ -175,5 +175,35 @@ pub fn preferences(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, vie
                         (50, 5000),
                     );
                 });
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Disk cache");
+                ui.weak(cache_text(ws.cache.as_ref()));
+                let enabled = ws.cache.as_ref().is_some_and(|c| c["enabled"] == true);
+                if ui
+                    .add_enabled(enabled, egui::Button::new("Clear cache"))
+                    .on_hover_text("Results and meshes every project on this machine reuses; anything cleared is rebuilt when next needed")
+                    .clicked()
+                {
+                    ws.clear_cache();
+                }
+            });
         });
+}
+
+/// What the disk cache holds, as the Preferences window says it.
+pub fn cache_text(stats: Option<&serde_json::Value>) -> String {
+    let Some(s) = stats else {
+        return "reading…".to_owned();
+    };
+    if s["enabled"] != true {
+        return "none on this machine".to_owned();
+    }
+    let mib = |b: &serde_json::Value| b.as_u64().unwrap_or_default() as f64 / f64::from(1 << 20);
+    format!(
+        "{} entries, {:.1} MiB of {:.0} MiB",
+        s["entries"].as_u64().unwrap_or_default(),
+        mib(&s["bytes"]),
+        mib(&s["max_bytes"])
+    )
 }

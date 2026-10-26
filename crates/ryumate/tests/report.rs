@@ -296,3 +296,82 @@ fn a_linear_pattern_in_two_directions_places_its_grid() {
     assert!(s.report.converged);
     assert!(same(s.poses[&2].origin, [0.0, -0.02, 0.0], 1e-10));
 }
+
+/// Two arms hinged on the base, one carrying a lid on a ball, the other
+/// alone; a bolt circle on the base, a washer fastened to its second copy;
+/// every free body nudged off where its mates hold.
+fn two_groups() -> Assembly {
+    let mut asm = bolt_circle();
+    let off = |x: f64, y: f64| Pose {
+        origin: [x, y, 0.0],
+        ..Pose::IDENTITY
+    };
+    let hinge = |a, b, at: Pose| Mate {
+        kind: revolute(),
+        a: on(a, at),
+        b: on(b, Pose::IDENTITY),
+    };
+    asm.bodies.insert(3, free(off(0.101, 0.002)));
+    asm.bodies.insert(4, free(off(0.152, 0.001)));
+    asm.bodies.insert(5, free(off(-0.098, 0.003)));
+    asm.bodies.insert(6, free(off(0.0, 0.2)));
+    asm.mates.insert(10, hinge(1, 3, off(0.1, 0.0)));
+    asm.mates.insert(
+        11,
+        Mate {
+            kind: Kind::Ball,
+            a: on(3, off(0.05, 0.0)),
+            b: on(4, Pose::IDENTITY),
+        },
+    );
+    asm.mates.insert(12, hinge(1, 5, off(-0.1, 0.0)));
+    asm.mates.insert(
+        13,
+        Mate {
+            kind: Kind::Fastened,
+            a: Connector {
+                on: copy(2),
+                frame: Pose::IDENTITY,
+            },
+            b: on(6, Pose::IDENTITY),
+        },
+    );
+    asm
+}
+
+#[test]
+fn a_component_solves_as_the_whole_does() {
+    let asm = two_groups();
+    let whole = solve(&asm).unwrap();
+    assert!(whole.report.converged);
+    // The lid's arm: the lid and the base (a constant), not the other
+    // arm, the bolt or the washer.
+    let c = asm.component(&[3]);
+    assert_eq!(c.bodies.keys().copied().collect::<Vec<_>>(), [1, 3, 4]);
+    assert_eq!(c.mates.keys().copied().collect::<Vec<_>>(), [10, 11]);
+    assert!(c.patterns.is_empty());
+    let part = solve(&c).unwrap();
+    assert!(part.report.converged);
+    for b in [3, 4] {
+        assert_eq!(part.poses[&b], whole.poses[&b], "body {b}");
+    }
+    // The washer reaches the bolt through its copy, and the base the
+    // pattern turns about.
+    let c = asm.component(&[6]);
+    assert_eq!(c.bodies.keys().copied().collect::<Vec<_>>(), [1, 2, 6]);
+    assert_eq!(c.patterns.keys().copied().collect::<Vec<_>>(), [20]);
+    let part = solve(&c).unwrap();
+    for b in [2, 6] {
+        assert_eq!(part.poses[&b], whole.poses[&b], "body {b}");
+    }
+    // From the base, fixed as it is, everything mated to it; two bodies
+    // in different components give both.
+    assert_eq!(asm.component(&[1]).bodies.len(), 6);
+    let c = asm.component(&[4, 5]);
+    assert_eq!(c.bodies.keys().copied().collect::<Vec<_>>(), [1, 3, 4, 5]);
+    // A body nothing mates is alone.
+    let mut lone = asm.clone();
+    lone.bodies.insert(7, free(Pose::IDENTITY));
+    assert_eq!(lone.component(&[7]).bodies.len(), 1);
+    assert!(lone.component(&[7]).mates.is_empty());
+}

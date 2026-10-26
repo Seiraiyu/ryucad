@@ -230,6 +230,31 @@ enum Command {
         #[arg(long = "of", value_name = "PARTICIPANT")]
         of: Option<String>,
     },
+    /// Hide occurrences or solids in a participant's window (the one
+    /// human's, else the caller's): parts, instances at any depth, or a
+    /// part's solids.
+    Hide {
+        #[arg(value_name = "REF", required = true)]
+        refs: Vec<String>,
+        #[arg(long = "of", value_name = "PARTICIPANT")]
+        of: Option<String>,
+    },
+    /// Show hidden occurrences or solids again, or everything with --all.
+    Show {
+        #[arg(value_name = "REF", required_unless_present = "all")]
+        refs: Vec<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long = "of", value_name = "PARTICIPANT")]
+        of: Option<String>,
+    },
+    /// Hide everything else in the same parts and assemblies.
+    Isolate {
+        #[arg(value_name = "REF", required = true)]
+        refs: Vec<String>,
+        #[arg(long = "of", value_name = "PARTICIPANT")]
+        of: Option<String>,
+    },
     /// Show a part or assembly in a participant's window (the one human's,
     /// else the caller's), or the project's model with --project; with
     /// neither, say what it shows.
@@ -268,6 +293,10 @@ enum Command {
     /// user preferences.
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// The disk cache of results and meshes, shared by every project on
+    /// this machine.
+    #[command(subcommand)]
+    Cache(CacheCmd),
     /// Display meshes of a part's bodies, by stable name.
     Mesh {
         part: String,
@@ -334,6 +363,10 @@ enum Command {
         /// model with the faces it loses in red.
         #[arg(long, value_name = "REV")]
         compare: Option<String>,
+        /// Leave out a part, an occurrence or a solid (repeatable); by
+        /// default what the participant's (or the caller's) window hides.
+        #[arg(long = "hidden", value_name = "REF")]
+        hidden: Vec<String>,
     },
     /// What the merge (or cherry-pick, revert or rebase step) Git is in the
     /// middle of leaves to settle.
@@ -497,6 +530,14 @@ enum GitCmd {
 }
 
 #[derive(Subcommand)]
+enum CacheCmd {
+    /// What the cache holds: entries and bytes, all and by kind.
+    Stats,
+    /// Remove every entry. What they held is rebuilt when next asked for.
+    Clear,
+}
+
+#[derive(Subcommand)]
 enum ConfigCmd {
     /// One setting, or every setting.
     Get {
@@ -597,6 +638,10 @@ enum AssemblyCmd {
         /// How far to turn it (with --axis): 90deg.
         #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
         angle: Option<String>,
+        /// Solve only what the instance's mates reach, from the poses the
+        /// assembly's rebuild has, as a drag's preview does.
+        #[arg(long, requires = "instance")]
+        component: bool,
     },
     /// The instances as a tree: parts, revisions, poses, freedom,
     /// subassemblies.
@@ -1446,8 +1491,10 @@ fn request(cmd: &Command) -> Option<Request> {
             translate,
             axis,
             angle,
+            component,
         }) => Request::AssemblySolve {
             part: part.clone(),
+            component: *component,
             moves: instance
                 .iter()
                 .map(|i| ryucad::proto::InstanceMove {
@@ -1744,6 +1791,7 @@ fn request(cmd: &Command) -> Option<Request> {
             rev,
             frame,
             compare,
+            hidden,
         } => Request::Render {
             part: part.clone(),
             camera: camera_arg(eye, target, up, fov, ortho),
@@ -1758,6 +1806,7 @@ fn request(cmd: &Command) -> Option<Request> {
             rev: rev.rev.clone(),
             frame: frame.clone(),
             compare: compare.clone(),
+            hidden: (!hidden.is_empty()).then(|| hidden.clone()),
         },
         Command::Highlight {
             entities,
@@ -1783,6 +1832,27 @@ fn request(cmd: &Command) -> Option<Request> {
             off: *off,
             participant: of.clone(),
         },
+        Command::Hide { refs, of } => Request::VisibilitySet {
+            hide: refs.clone(),
+            show: Vec::new(),
+            isolate: Vec::new(),
+            all: false,
+            participant: of.clone(),
+        },
+        Command::Show { refs, all, of } => Request::VisibilitySet {
+            hide: Vec::new(),
+            show: refs.clone(),
+            isolate: Vec::new(),
+            all: *all,
+            participant: of.clone(),
+        },
+        Command::Isolate { refs, of } => Request::VisibilitySet {
+            hide: Vec::new(),
+            show: Vec::new(),
+            isolate: refs.clone(),
+            all: false,
+            participant: of.clone(),
+        },
         Command::Focus { part, project, of } => Request::ViewFocus {
             part: part.clone(),
             project: *project,
@@ -1792,6 +1862,8 @@ fn request(cmd: &Command) -> Option<Request> {
             limit: Some(*limit),
             before: *before,
         },
+        Command::Cache(CacheCmd::Stats) => Request::CacheStats {},
+        Command::Cache(CacheCmd::Clear) => Request::CacheClear {},
         Command::Config(ConfigCmd::Get { key, scope }) => Request::ConfigGet {
             key: key.clone(),
             scope: scope.get(),

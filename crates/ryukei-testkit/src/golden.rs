@@ -32,7 +32,8 @@ impl Section<'_> {
         self.bytes(s.as_bytes());
     }
 
-    fn bytes(&mut self, bytes: &[u8]) {
+    /// Raw bytes, such as a body's encoding.
+    pub fn bytes(&mut self, bytes: &[u8]) {
         for &byte in bytes {
             *self.hash ^= u64::from(byte);
             *self.hash = self.hash.wrapping_mul(FNV_PRIME);

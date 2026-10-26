@@ -96,6 +96,19 @@ impl Session {
         Ok(s)
     }
 
+    /// The session with `disk` beneath its caches: results it doesn't
+    /// hold are read from it, and what it builds is written to it.
+    pub fn with_disk(mut self, disk: Option<Arc<crate::cache::Disk>>) -> Session {
+        self.meshes.disk = disk.clone();
+        self.store.disk = disk;
+        self
+    }
+
+    /// The disk cache beneath this session's, if any.
+    pub fn disk(&self) -> Option<&Arc<crate::cache::Disk>> {
+        self.store.disk.as_ref()
+    }
+
     /// A session over `files`, the project as a revision has it, starting
     /// from what `from` has built and learnt.
     fn frozen(from: &Session, files: Files) -> Result<Session> {
@@ -122,10 +135,11 @@ impl Session {
                 caches: from.store.caches.clone(),
                 pinned: from.store.pinned.clone(),
                 pinned_caches: from.store.pinned_caches.clone(),
+                disk: from.store.disk.clone(),
             },
             pinned_parts: from.pinned_parts.clone(),
             known: from.known.clone(),
-            meshes: crate::mesh::Cache::default(),
+            meshes: crate::mesh::Cache::with_disk(from.store.disk.clone()),
             frozen: true,
             revisions: Vec::new(),
             merge_status: None,

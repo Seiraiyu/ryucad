@@ -274,6 +274,43 @@ impl Projector {
         2.0 * hh * depth / height
     }
 
+    /// Whether any of the box `lo`..`hi` may be in view: `false` only
+    /// when all of it lies beyond one side of the view, or behind the eye.
+    /// The depth range is made around the model, so it culls nothing.
+    pub fn sees_box(&self, lo: [f64; 3], hi: [f64; 3]) -> bool {
+        let (r, u, f) = self.camera.basis();
+        let (hw, hh) = self.half();
+        let perspective = matches!(self.camera.projection, Projection::Perspective { .. });
+        // Each corner's offsets past the four sides (positive is outside)
+        // and in front of the eye.
+        let mut inside = [false; 5];
+        for c in 0..8 {
+            let p = [0, 1, 2].map(|k| if c >> k & 1 == 0 { lo[k] } else { hi[k] });
+            let rel = sub(p, self.camera.eye);
+            let (x, y, z) = (dot(rel, r), dot(rel, u), dot(rel, f));
+            let s = if perspective { z } else { 1.0 };
+            let sides = [x - hw * s, -x - hw * s, y - hh * s, -y - hh * s];
+            for (i, d) in sides.iter().enumerate() {
+                inside[i] |= *d <= 0.0;
+            }
+            inside[4] |= !perspective || z > 0.0;
+        }
+        inside.iter().all(|x| *x)
+    }
+
+    /// How many pixels the box's diagonal spans at its middle, on a
+    /// viewport `height` pixels high: what chooses its level of detail.
+    pub fn box_pixels(&self, lo: [f64; 3], hi: [f64; 3], height: f64) -> f64 {
+        let d = sub(hi, lo);
+        let middle = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+        let px = self.pixel(middle, height);
+        if px > 0.0 {
+            dot(d, d).sqrt() / px
+        } else {
+            f64::INFINITY
+        }
+    }
+
     /// The ray through a point in normalized device coordinates: its
     /// origin and unit direction.
     pub fn ray(&self, ndc: [f64; 2]) -> ([f64; 3], [f64; 3]) {
