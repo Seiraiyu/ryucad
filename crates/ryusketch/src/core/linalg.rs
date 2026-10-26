@@ -219,6 +219,29 @@ pub fn qr_against(a: &Mat, tol: f64, reference: Option<f64>) -> Qr {
 }
 
 impl Qr {
+    /// The size of `R`'s `k`th diagonal entry; they never grow along the
+    /// diagonal, so the last that counts for the rank is the smallest.
+    pub fn diagonal(&self, k: usize) -> f64 {
+        self.cols[k][k].abs()
+    }
+
+    /// The factorization with its rank decided elsewhere: at most `rank`,
+    /// and never past a diagonal entry that is zero.
+    pub fn with_rank(mut self, rank: usize) -> Qr {
+        let nonzero = (0..self.rank_bound())
+            .take_while(|&k| self.cols[k][k] != 0.0)
+            .count();
+        self.rank = rank.min(nonzero);
+        self
+    }
+
+    /// How many diagonal entries `R` has.
+    fn rank_bound(&self) -> usize {
+        self.cols
+            .first()
+            .map_or(0, |c| c.len().min(self.cols.len()))
+    }
+
     /// A basis of `{x : a x = 0}` (as far as the rank says), each vector of
     /// unit length, in the order of the columns `P` put last.
     pub fn null_space(&self) -> Vec<Vec<f64>> {
