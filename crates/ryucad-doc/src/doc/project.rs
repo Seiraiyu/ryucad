@@ -8,6 +8,7 @@
 //! parts/<part>/properties.json      (optional: ryupdm's properties)
 //! parts/<part>/features/<feature>.json
 //! releases/<part>/<label>.json      (ryupdm's release records)
+//! imports/<file>.step               (STEP files import features read)
 //! ```
 //!
 //! ryupdm's files are read and checked by ryupdm; here they are only
@@ -30,6 +31,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub const MANIFEST: &str = "ryucad.json";
 
@@ -44,6 +46,27 @@ pub const PDM_CONFIG: &str = "ryupdm.json";
 /// ryucad builds reads it.
 pub const RELEASES: &str = "releases";
 
+/// The folder of the STEP files the project's import features read,
+/// beside the manifest.
+pub const IMPORTS: &str = "imports";
+
+/// A file under `imports/`, as read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportFile {
+    pub bytes: Arc<[u8]>,
+    /// BLAKE3 of the bytes, 64 lowercase hex digits: what an import
+    /// feature names it by.
+    pub blake3: String,
+}
+
+impl ImportFile {
+    pub fn new(bytes: impl Into<Arc<[u8]>>) -> ImportFile {
+        let bytes = bytes.into();
+        let blake3 = blake3::hash(&bytes).to_hex().to_string();
+        ImportFile { bytes, blake3 }
+    }
+}
+
 /// The files at the project's root that a session tracks.
 pub const ROOT_FILES: [&str; 3] = [MANIFEST, ATTRIBUTES, PDM_CONFIG];
 
@@ -56,8 +79,10 @@ pub struct Project {
     pub root: PathBuf,
     pub manifest: Manifest,
     pub parts: BTreeMap<Id, Part>,
-    /// Entries under `parts/` that don't belong there, as paths relative to
-    /// the root.
+    /// The files under `imports/`, by path relative to the root.
+    pub imports: BTreeMap<String, ImportFile>,
+    /// Entries under `parts/` and `imports/` that don't belong there, as
+    /// paths relative to the root.
     pub unknown: Vec<String>,
     /// Why every part fails when the manifest holds merge conflicts: the
     /// manifest's other values are ours' as the merge left them.
@@ -83,9 +108,14 @@ pub struct Part {
     /// What each feature file that reads as JSON but doesn't load would do
     /// to the part's solids, read from its text.
     pub acts: BTreeMap<Id, super::files::Acts>,
-    /// A hash of the bytes of `ryucad.json`, `part.json`, `parameters.json`
-    /// and the listed feature files in order: it changes whenever anything
-    /// that defines the part does.
+    /// The files under `imports/` its listed import features read, by
+    /// path, as they are (one a feature names but the project doesn't
+    /// have isn't here).
+    pub imports: BTreeMap<String, ImportFile>,
+    /// A hash of the bytes of `ryucad.json`, `part.json`, `parameters.json`,
+    /// the listed feature files in order and the hashes of the files their
+    /// imports read: it changes whenever anything that defines the part
+    /// does.
     pub revision: String,
 }
 
@@ -302,8 +332,9 @@ impl Project {
                 .clone()
                 .unwrap_or_else(|| e.with("path", MANIFEST))
         })?;
-        let mut parts = BTreeMap::new();
         let mut unknown = Vec::new();
+        let imports = load_imports(src, &mut unknown)?;
+        let mut parts = BTreeMap::new();
         for (name, kind) in src.list("parts")? {
             match Id::parse(&name, "part") {
                 Ok(id) if kind == Kind::Dir => {
@@ -312,6 +343,7 @@ impl Project {
                         &manifest,
                         manifest_fault.as_ref(),
                         &manifest_bytes,
+                        &imports,
                         id.clone(),
                         &mut unknown,
                     )?;
@@ -324,6 +356,7 @@ impl Project {
             root: root.to_path_buf(),
             manifest,
             parts,
+            imports,
             unknown,
             manifest_fault,
             manifest_bytes,
@@ -337,7 +370,24 @@ impl Project {
     /// would.
     pub fn reload(&mut self, changed: &[String]) -> Result<()> {
         let mut ids = BTreeSet::new();
+        let mut imported = BTreeSet::new();
         for path in changed {
+            // An imported file defines the parts whose features read it.
+            if path.starts_with(&format!("{IMPORTS}/"))
+                && super::import::is_import_path(path)
+                && !self.unknown.contains(path)
+            {
+                match Folder(&self.root).read(path)? {
+                    Some(bytes) => {
+                        self.imports.insert(path.clone(), ImportFile::new(bytes));
+                    }
+                    None => {
+                        self.imports.remove(path);
+                    }
+                }
+                imported.insert(path.as_str());
+                continue;
+            }
             let mut parts = path.split('/');
             let in_part = match (parts.next(), parts.next(), parts.next()) {
                 (Some("parts"), Some(name), Some(_)) => Id::parse(name, "part").ok(),
@@ -359,6 +409,15 @@ impl Project {
                 }
             };
         }
+        for (id, part) in &self.parts {
+            let reads = |f: &Feature| {
+                f.import()
+                    .is_some_and(|i| imported.contains(i.file.path.as_str()))
+            };
+            if part.features.values().flatten().any(reads) {
+                ids.insert(id.clone());
+            }
+        }
         for id in ids {
             // A part's own entries sit together, where its name sorts.
             let mine = format!("parts/{id}/");
@@ -375,6 +434,7 @@ impl Project {
                     &self.manifest,
                     self.manifest_fault.as_ref(),
                     &self.manifest_bytes,
+                    &self.imports,
                     id.clone(),
                     &mut unknown,
                 )?;
@@ -394,11 +454,30 @@ impl Project {
     }
 }
 
+/// The files under `imports/`, by path; anything else there is unknown.
+fn load_imports(
+    src: &dyn Source,
+    unknown: &mut Vec<String>,
+) -> Result<BTreeMap<String, ImportFile>> {
+    let mut out = BTreeMap::new();
+    for (name, kind) in src.list(IMPORTS)? {
+        let at = join(IMPORTS, &name);
+        match src.read(&at)? {
+            Some(bytes) if kind == Kind::File && super::import::is_import_path(&at) => {
+                out.insert(at, ImportFile::new(bytes));
+            }
+            _ => unknown.push(at),
+        }
+    }
+    Ok(out)
+}
+
 fn load_part(
     src: &dyn Source,
     manifest: &Manifest,
     manifest_fault: Option<&Error>,
     manifest_bytes: &[u8],
+    imports: &BTreeMap<String, ImportFile>,
     id: Id,
     unknown: &mut Vec<String>,
 ) -> Result<Part> {
@@ -484,6 +563,25 @@ fn load_part(
             }
         }
     }
+    // The files the listed imports read, as they are: a feature names its
+    // file only by the hash it was written against, and a file replaced
+    // by hand must rebuild the part. Tagged, so a part with no import
+    // hashes as before.
+    let mut read = BTreeMap::new();
+    if let Ok(f) = &file {
+        for fid in &f.features {
+            if let Some(Ok(Feature::Import(i))) = features.get(fid) {
+                let found = imports.get(&i.file.path);
+                if let Some(found) = found {
+                    read.insert(i.file.path.clone(), found.clone());
+                }
+                let now = found.map_or("missing", |f| f.blake3.as_str());
+                piece(&mut hasher, IMPORTS.as_bytes());
+                piece(&mut hasher, i.file.path.as_bytes());
+                piece(&mut hasher, now.as_bytes());
+            }
+        }
+    }
     // ryupdm's properties: their bytes as they are, tagged like the
     // parameters, so a part without them hashes as before. Reading them is
     // ryupdm's business.
@@ -508,6 +606,7 @@ fn load_part(
         features,
         uses,
         acts,
+        imports: read,
         revision,
     })
 }
@@ -861,6 +960,101 @@ mod tests {
         assert_eq!(rev(), r2);
         let project = Project::load(root).unwrap();
         assert!(project.unknown.is_empty(), "{:?}", project.unknown);
+    }
+
+    /// Lists an import feature `i` of `imports/bracket.step` as written
+    /// against `bytes` in part `p`, after `a` and `b`.
+    fn with_import(root: &Path, bytes: &[u8]) {
+        let p = id("p");
+        write_json(
+            &part_path(root, &p),
+            &PartFile::new(vec![id("a"), id("b"), id("i")]).to_json(),
+        )
+        .unwrap();
+        let v = serde_json::json!({
+            "body": 0,
+            "file": {"blake3": ImportFile::new(bytes.to_vec()).blake3, "path": "imports/bracket.step"},
+            "format": 5,
+            "kind": "ryucad.feature",
+            "type": "import",
+        });
+        write_json(&feature_path(root, &p, &id("i")), &v).unwrap();
+    }
+
+    #[test]
+    fn imported_files_load_and_define_the_parts_that_read_them() {
+        let dir = sample();
+        let root = dir.path();
+        let rev = || {
+            Project::load(root).unwrap().parts[&id("p")]
+                .revision
+                .clone()
+        };
+        let r0 = rev();
+        // A file nothing reads defines no part.
+        fs::create_dir_all(root.join(IMPORTS)).unwrap();
+        fs::write(root.join("imports/other.step"), "x").unwrap();
+        assert_eq!(rev(), r0);
+        with_import(root, b"ISO-10303-21;");
+        let r1 = rev();
+        assert_ne!(r1, r0);
+        // The file arrives, then changes by hand: the feature's bytes
+        // stay, the part's revision moves each time.
+        fs::write(root.join("imports/bracket.step"), "ISO-10303-21;").unwrap();
+        let r2 = rev();
+        assert_ne!(r2, r1);
+        fs::write(root.join("imports/bracket.step"), "ISO-10303-21; ").unwrap();
+        let r3 = rev();
+        assert_ne!(r3, r2);
+        let project = Project::load(root).unwrap();
+        let f = &project.imports["imports/bracket.step"];
+        assert_eq!(&*f.bytes, b"ISO-10303-21; ");
+        assert_eq!(
+            f.blake3,
+            blake3::hash(b"ISO-10303-21; ").to_hex().to_string()
+        );
+        assert_eq!(project.imports.len(), 2);
+        // What isn't imports/<id>.step is unknown.
+        fs::write(root.join("imports/Upper.step"), "x").unwrap();
+        fs::write(root.join("imports/a.stp"), "x").unwrap();
+        fs::create_dir_all(root.join("imports/sub")).unwrap();
+        let project = Project::load(root).unwrap();
+        assert_eq!(
+            project.unknown,
+            ["imports/Upper.step", "imports/a.stp", "imports/sub"]
+        );
+        assert_eq!(project.imports.len(), 2);
+        assert_eq!(rev(), r3);
+    }
+
+    #[test]
+    fn reloading_an_imported_file_reloads_the_parts_that_read_it() {
+        let dir = sample();
+        let root = dir.path();
+        with_import(root, b"one");
+        fs::create_dir_all(root.join(IMPORTS)).unwrap();
+        fs::write(root.join("imports/bracket.step"), "one").unwrap();
+        let mut project = Project::load(root).unwrap();
+        let same = |project: &Project| {
+            assert_eq!(
+                format!("{project:?}"),
+                format!("{:?}", Project::load(root).unwrap())
+            );
+        };
+        for (path, bytes) in [
+            ("imports/bracket.step", Some("two")),
+            ("imports/other.step", Some("x")),
+            ("imports/bracket.step", None),
+            ("imports/Bad.step", Some("x")),
+            ("imports/Bad.step", None),
+        ] {
+            match bytes {
+                Some(b) => fs::write(root.join(path), b).unwrap(),
+                None => fs::remove_file(root.join(path)).unwrap(),
+            }
+            project.reload(&[path.into()]).unwrap();
+            same(&project);
+        }
     }
 
     #[test]

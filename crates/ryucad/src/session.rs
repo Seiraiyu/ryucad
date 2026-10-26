@@ -596,8 +596,8 @@ impl crate::doc::source::Source for Session {
 
 /// The files a project's state depends on: the manifest, the attributes
 /// that register ryucad with Git, ryupdm's settings, everything under
-/// `parts/` two and three levels down, and ryupdm's release records, two
-/// levels under `releases/`.
+/// `parts/` two and three levels down, ryupdm's release records, two
+/// levels under `releases/`, and the files under `imports/`.
 pub fn files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(listed(root)?.into_iter().map(|(p, _)| p).collect())
 }
@@ -632,6 +632,8 @@ fn listed(root: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
             out.extend(read_dir(&part)?.into_iter().filter(|(_, m)| m.is_file()));
         }
     }
+    let imports = root.join(crate::doc::project::IMPORTS);
+    out.extend(read_dir(&imports)?.into_iter().filter(|(_, m)| m.is_file()));
     Ok(out)
 }
 

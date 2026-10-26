@@ -220,6 +220,22 @@ pub enum Code {
     /// A write that would leave an assembly's mates unable to all hold.
     /// The conflicting mates are in the details.
     AssemblyOverconstrained,
+    /// An import feature names a file under `imports/` that isn't there.
+    ImportFileMissing,
+    /// An import feature's file isn't the bytes it was written against:
+    /// its BLAKE3 differs from the one the feature holds.
+    ImportFileChanged,
+    /// A file ryustep refuses as a whole: not STEP, a syntax error, a
+    /// schema it doesn't read. ryustep's reason is in the details.
+    StepUnreadable,
+    /// An import feature names a product its file doesn't have. The
+    /// file's products are in the details.
+    ImportProductMissing,
+    /// An import feature names a body its product doesn't have.
+    ImportBodyMissing,
+    /// A body of an imported file that can't be read or healed. Its
+    /// reason and the STEP instances involved are in the details.
+    ImportFailed,
 }
 
 impl Code {
