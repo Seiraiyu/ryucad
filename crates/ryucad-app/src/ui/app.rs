@@ -183,6 +183,14 @@ impl App {
         }
     }
 
+    /// The open project, to change. Panics if there is none: for tests.
+    pub fn opened_mut(&mut self) -> &mut Opened {
+        match &mut self.screen {
+            Screen::Opened(o) => o,
+            _ => panic!("no project is open"),
+        }
+    }
+
     /// The window's title: the project, and a merge in progress.
     pub fn title(&self) -> String {
         let name = |root: &Path| {

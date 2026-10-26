@@ -5,6 +5,7 @@
 //! solid, or joins its body to, cuts it from or intersects it with each
 //! solid it targets, as its view of that solid ([`crate::solid`]) left it.
 
+use crate::cache::{Disk, Kind};
 use crate::doc::files::{Feature, Placement, Primitive, PrimitiveType};
 use crate::doc::id::Id;
 use crate::doc::project::Part;
@@ -233,6 +234,9 @@ pub struct PartResult {
     /// The joins, cuts and intersects whose own bodies this rebuild built,
     /// in feature order; the others' came from the cache.
     pub tools: Vec<Id>,
+    /// The features whose results came from the disk cache, in feature
+    /// order (see [`crate::cache`]).
+    pub disk: Vec<Id>,
     /// An assembly's solve of its mates and instance patterns, if it has
     /// any.
     pub solve: Option<Arc<crate::mate::Solve>>,
@@ -1962,6 +1966,8 @@ struct Step {
     result: Result<Output>,
     new: bool,
     tool: Option<(blake3::Hash, Arc<Built>, bool)>,
+    /// Whether the result came from the disk cache.
+    disk: bool,
 }
 
 impl Step {
@@ -1972,7 +1978,58 @@ impl Step {
             result: Err(e),
             new: false,
             tool: None,
+            disk: false,
         }
+    }
+}
+
+/// A body-making feature's result from the disk cache, by the hash of
+/// its inputs. An entry that doesn't decode is removed.
+fn from_disk(disk: &Disk, h: &blake3::Hash) -> Option<Output> {
+    let bytes = disk.get(Kind::Feature, h.as_bytes())?;
+    match crate::cache::results::decode_made(&bytes) {
+        Some(m) => Some(Output::Solids(Arc::new(m))),
+        None => {
+            disk.discard(Kind::Feature, h.as_bytes());
+            None
+        }
+    }
+}
+
+/// A join, cut or intersect's own body from the disk cache, by the hash
+/// of its own inputs.
+fn tool_from_disk(disk: &Disk, th: &blake3::Hash) -> Option<(blake3::Hash, Arc<Built>)> {
+    let bytes = disk.get(Kind::Tool, th.as_bytes())?;
+    match crate::cache::results::decode_built(&bytes) {
+        Some(b) => Some((*th, Arc::new(b))),
+        None => {
+            disk.discard(Kind::Tool, th.as_bytes());
+            None
+        }
+    }
+}
+
+/// Writes what a feature built to the disk cache: its solids by the hash
+/// of its inputs, and a tool's own body, when built now, by its own.
+fn to_disk(
+    disk: &Disk,
+    h: &blake3::Hash,
+    r: &Result<Output>,
+    tool: Option<&(blake3::Hash, Arc<Built>, bool)>,
+) {
+    if let Ok(Output::Solids(m)) = r {
+        disk.put(
+            Kind::Feature,
+            h.as_bytes(),
+            &crate::cache::results::encode_made(m),
+        );
+    }
+    if let Some((th, b, true)) = tool {
+        disk.put(
+            Kind::Tool,
+            th.as_bytes(),
+            &crate::cache::results::encode_built(b),
+        );
     }
 }
 
@@ -1987,15 +2044,18 @@ pub fn rebuild_part(part: &Part) -> PartResult {
 /// part's cache as it now stands. The result is the same, bit for bit,
 /// whatever the cache holds.
 pub fn rebuild_part_with(part: &Part, cache: &Cache) -> (PartResult, Cache) {
-    rebuild_part_in(part, cache, &crate::assembly::Children::new())
+    rebuild_part_in(part, cache, &crate::assembly::Children::new(), None)
 }
 
 /// [`rebuild_part_with`] for a part whose instances place the models in
-/// `children` (see [`crate::assembly::Rebuild`]).
+/// `children` (see [`crate::assembly::Rebuild`]), with `disk` beneath
+/// `cache`: a body-making feature `cache` doesn't hold is read from it if
+/// it can be, and what is built is written to it.
 pub fn rebuild_part_in(
     part: &Part,
     cache: &Cache,
     children: &crate::assembly::Children,
+    disk: Option<&Disk>,
 ) -> (PartResult, Cache) {
     let depths = crate::graph::depths(part);
     let solids = crate::solid::Solids::of(part);
@@ -2003,6 +2063,7 @@ pub fn rebuild_part_in(
     let mut fresh = Cache::new();
     let mut made = Vec::new();
     let mut tools_made = Vec::new();
+    let mut read = Vec::new();
     for depth in 0.. {
         let now: Vec<&Id> = part
             .order()
@@ -2055,23 +2116,52 @@ pub fn rebuild_part_in(
                         result,
                         new,
                         tool: None,
+                        disk: false,
                     };
                 }
                 let applies = applies(f);
                 let kept = cache.tools.get(&id);
-                let (result, new, tool) = match cache.features.get(&id) {
-                    Some((c, r)) if *c == h => {
+                let on_disk = || match (disk, f) {
+                    (Some(d), f) if f.sketch().is_none() => from_disk(d, &h),
+                    _ => None,
+                };
+                let memory = cache.features.get(&id).filter(|(c, _)| *c == h);
+                let (result, new, tool, from) = match memory {
+                    Some((_, r)) => {
                         let tool = kept.map(|(th, b)| (*th, Arc::clone(b), false));
-                        (r.clone(), false, tool)
+                        (r.clone(), false, tool, false)
                     }
-                    _ if applies => {
-                        let th = tool_hash(part, &solids, &id, f, &built);
-                        let (r, own) =
-                            rebuild_with(part, &solids, &id, f, &built, Some((th, kept)));
-                        let fresh = !kept.is_some_and(|(c, _)| *c == th);
-                        (r, true, own.map(|b| (th, b, fresh)))
-                    }
-                    _ => (rebuild_feature(part, &solids, &id, f, &built), true, None),
+                    None => match on_disk() {
+                        Some(o) => {
+                            let tool = kept.map(|(th, b)| (*th, Arc::clone(b), false));
+                            (Ok(o), false, tool, true)
+                        }
+                        None if applies => {
+                            let th = tool_hash(part, &solids, &id, f, &built);
+                            let stored = match kept {
+                                Some(k) if k.0 == th => None,
+                                _ => disk.and_then(|d| tool_from_disk(d, &th)),
+                            };
+                            let kept = stored.as_ref().or(kept);
+                            let (r, own) =
+                                rebuild_with(part, &solids, &id, f, &built, Some((th, kept)));
+                            let fresh = !kept.is_some_and(|(c, _)| *c == th);
+                            let tool = own.map(|b| (th, b, fresh));
+                            if let Some(d) = disk {
+                                to_disk(d, &h, &r, tool.as_ref());
+                            }
+                            (r, true, tool, false)
+                        }
+                        None => {
+                            let r = rebuild_feature(part, &solids, &id, f, &built);
+                            if let Some(d) = disk
+                                && f.sketch().is_none()
+                            {
+                                to_disk(d, &h, &r, None);
+                            }
+                            (r, true, None, false)
+                        }
+                    },
                 };
                 Step {
                     id,
@@ -2079,6 +2169,7 @@ pub fn rebuild_part_in(
                     result,
                     new,
                     tool,
+                    disk: from,
                 }
             })
             .collect();
@@ -2086,6 +2177,9 @@ pub fn rebuild_part_in(
             let id = step.id;
             if step.new {
                 made.push(id.clone());
+            }
+            if step.disk {
+                read.push(id.clone());
             }
             if let Some((th, b, built)) = step.tool {
                 if built {
@@ -2125,11 +2219,18 @@ pub fn rebuild_part_in(
         .filter(|id| tools_made.contains(id))
         .cloned()
         .collect();
+    let disk = part
+        .order()
+        .iter()
+        .filter(|id| read.contains(id))
+        .cloned()
+        .collect();
     let result = PartResult {
         features,
         hash: h.finalize().to_hex()[..32].to_owned(),
         built,
         tools,
+        disk,
         solve,
     };
     (result, fresh)

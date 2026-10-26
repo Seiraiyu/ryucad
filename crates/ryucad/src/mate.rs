@@ -94,6 +94,9 @@ pub struct Solve {
     pub mates: Vec<Id>,
     /// The instances solved off their stored poses.
     pub moved: Vec<Id>,
+    /// What was solved, with each body where the rebuild placed it: what
+    /// a preview of a drag solves again, in part ([`component_request`]).
+    pub asm: ryumate::Assembly,
 }
 
 impl Solve {
@@ -867,6 +870,7 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
         instances,
         mates: solved_mates,
         moved,
+        asm: at,
     }))
 }
 
@@ -1120,11 +1124,13 @@ pub fn refuse_overconstrained(session: &mut crate::session::Session, proposed: P
 /// `assembly.solve`: assembly `part` solved as it is, or with `moves`
 /// (instances and how each moves) held where they are put for a first
 /// solve, writing nothing: each instance's pose, whether the moves were
-/// held, and the solve's report.
+/// held, and the solve's report. With `component`, only what the moved
+/// instances' mates reach ([`component_request`]).
 pub fn solve_request(
     session: &mut crate::session::Session,
     part: &str,
     moves: Vec<(String, crate::assembly::Move)>,
+    component: bool,
 ) -> Result<Value> {
     let pid = crate::server::part_id(part)?;
     let unit = session.project().manifest.default_unit;
@@ -1141,6 +1147,18 @@ pub fn solve_request(
         let iid = crate::server::feature_id(&i)?;
         let inst = crate::assembly::movable(&p, &iid)?;
         at.push((iid, crate::assembly::move_pose(&inst, how, unit, &p.env)?));
+    }
+    if component {
+        if at.is_empty() {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "component solves what moved instances reach: name a move",
+            )
+            .with("pointer", "/component"));
+        }
+        if let Some(v) = component_request(session, &p, &at)? {
+            return Ok(v);
+        }
     }
     let solved = if at.is_empty() {
         Moved {
@@ -1174,6 +1192,106 @@ pub fn solve_request(
         v["solve"] = s.to_json();
     }
     Ok(v)
+}
+
+/// `assembly.solve` with `component`: the moved instances placed where
+/// `moves` put them in what the assembly's last solve settled
+/// ([`Solve::asm`]), and only what their mates reach solved again
+/// (`ryumate::Assembly::component`), held where they were put and, if that
+/// can't hold, free from there; no rebuild. Moves whose instances lie in
+/// different components solve each of them. The answer is
+/// [`solve_request`]'s for those instances alone (the fixed ones they
+/// reach left out), with `component: true`. `None` when the assembly has
+/// nothing settled to start from (no mates, or a moved instance that
+/// didn't place): the whole request answers then.
+fn component_request(
+    session: &mut crate::session::Session,
+    p: &Part,
+    moves: &[(Id, crate::doc::assembly::Pose)],
+) -> Result<Option<Value>> {
+    let r = session.rebuilt(&p.id)?.clone();
+    let Some(s) = r.solve.as_deref() else {
+        return Ok(None);
+    };
+    let mut roots = Vec::new();
+    let mut asm = s.asm.clone();
+    for (id, pose) in moves {
+        let Some(k) = s.instances.iter().position(|i| i == id) else {
+            return Ok(None);
+        };
+        let k = k as u32;
+        asm.bodies.get_mut(&k).expect("a body").pose = crate::connector::pose(&pose_rigid(pose)?);
+        roots.push(k);
+    }
+    let solve = |held: bool| -> Result<ryumate::Solved> {
+        let mut a = asm.clone();
+        for k in &roots {
+            a.bodies.get_mut(k).expect("a body").fixed |= held;
+        }
+        ryumate::solve(&a.component(&roots)).map_err(|e| {
+            Error::new(
+                Code::Internal,
+                format!("{}: the solver refused a component: {e}", p.id),
+            )
+        })
+    };
+    let mut held = true;
+    let mut solved = solve(true)?;
+    if !solved.report.converged {
+        held = false;
+        solved = solve(false)?;
+    }
+    let sub = Solve {
+        report: solved.report.clone(),
+        instances: s.instances.clone(),
+        mates: s.mates.clone(),
+        moved: Vec::new(),
+        asm: asm.component(&roots),
+    };
+    if !solved.report.converged && s.report.converged {
+        return Err(Error::new(
+            Code::AssemblyOverconstrained,
+            format!("moved that way, {}'s mates can't all hold", p.id),
+        )
+        .with("part", &p.id)
+        .with("conflicting", sub.mate_ids(&solved.report.conflicting)));
+    }
+    let mut instances = serde_json::Map::new();
+    for (k, new) in &solved.poses {
+        let body = &sub.asm.bodies[k];
+        if body.fixed && !roots.contains(k) {
+            continue;
+        }
+        let id = &s.instances[*k as usize];
+        let Some(Ok(Feature::Instance(stored))) = p.features.get(id) else {
+            continue;
+        };
+        let moved = moves.iter().find(|(m, _)| m == id);
+        // As [`Moved::poses`]: a held move where it was put, one that
+        // didn't move as its file says when the rebuild placed it there.
+        let pose = match moved {
+            Some((_, pose)) if held => *pose,
+            _ if *new == s.asm.bodies[k].pose
+                && pose_rigid(&stored.pose).is_ok_and(|r| crate::connector::pose(&r) == *new) =>
+            {
+                stored.pose
+            }
+            _ => doc_pose(new),
+        };
+        instances.insert(
+            id.to_string(),
+            json!({"pose": pose.to_json(), "moved": pose != stored.pose}),
+        );
+    }
+    Ok(Some(json!({
+        "part": p.id,
+        "revision": p.revision,
+        "converged": solved.report.converged,
+        "held": held,
+        "component": true,
+        "instances": instances,
+        "solve": sub.to_json(),
+    })))
 }
 
 #[cfg(test)]
@@ -1850,7 +1968,7 @@ mod protocol_tests {
 
 #[cfg(test)]
 mod move_tests {
-    use super::tests::{add_in, hinged, near_pose};
+    use super::tests::{add_in, face, hinged, near_pose};
     use crate::assembly::tests::{id, place_in};
     use crate::doc::project::feature_path;
     use crate::error::Code;
@@ -1949,6 +2067,113 @@ mod move_tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::InstanceFixed);
+    }
+
+    /// [`hinged_with_cap`] with a second bolt, `arm`, on its own hinge on
+    /// the plate, poses stored solved.
+    fn two_hinges() -> (tempfile::TempDir, crate::session::Session) {
+        let (dir, mut s) = hinged_with_cap();
+        let top = face(&mut s, "plate", "slab", [0.0, 0.0, 1.0]);
+        let foot = face(&mut s, "bolt", "shank", [0.0, 0.0, -1.0]);
+        let r = dir.path();
+        place_in(
+            r,
+            "frame",
+            "arm",
+            "bolt",
+            json!("working"),
+            [-0.05, 0.0, 0.0],
+        );
+        add_in(
+            r,
+            "frame",
+            "m3",
+            "mate",
+            json!({"form": "revolute",
+                   "a": {"instance": ["base"], "at": {"feature": "slab", "name": top},
+                         "offset": {"origin": ["-20 mm", "10 mm", "0 mm"]}},
+                   "b": {"instance": ["arm"], "at": {"feature": "shank", "name": foot},
+                         "offset": {"flip": true}}}),
+        );
+        s.refresh().unwrap();
+        let solved = super::after_moves(&mut s, &id("frame"), &[]).unwrap();
+        let p = s.project().part(&id("frame")).unwrap().clone();
+        let writes = solved.writes(&p);
+        let refs: Vec<_> = writes.iter().map(|(i, f)| (i, f)).collect();
+        let list = crate::server::order(&p).unwrap();
+        crate::server::save(&mut s, &id("frame"), &refs, list).unwrap();
+        (dir, s)
+    }
+
+    #[test]
+    fn a_component_previews_what_the_moved_instance_reaches() {
+        let (_dir, mut s) = two_hinges();
+        let keys = |v: &serde_json::Value| -> Vec<String> {
+            v["instances"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect()
+        };
+        let close = |a: &serde_json::Value, b: &serde_json::Value| {
+            for f in ["origin_m", "z", "x"] {
+                for k in 0..3 {
+                    let (x, y) = (a[f][k].as_f64().unwrap(), b[f][k].as_f64().unwrap());
+                    assert!((x - y).abs() < 1e-9, "{f}: {a} against {b}");
+                }
+            }
+        };
+        let turn = json!([{"instance": "pin", "axis": [0, 0, 1], "angle": "90 deg"}]);
+        let lift = json!([{"instance": "pin", "translate": [0, 0, "1 mm"]}]);
+        for (moves, held) in [(turn, true), (lift, false)] {
+            let whole = call(
+                &mut s,
+                "assembly.solve",
+                json!({"part": "frame", "moves": moves}),
+            )
+            .unwrap();
+            let part = call(
+                &mut s,
+                "assembly.solve",
+                json!({"part": "frame", "moves": moves, "component": true}),
+            )
+            .unwrap();
+            assert_eq!(part["component"], true);
+            assert_eq!(
+                (&part["converged"], &part["held"]),
+                (&json!(true), &json!(held))
+            );
+            // The pin and the cap fastened to it: not the fixed plate, nor
+            // the arm on its own hinge.
+            assert_eq!(keys(&part), ["cap", "pin"]);
+            assert_eq!(keys(&whole), ["arm", "base", "cap", "pin"]);
+            for i in ["cap", "pin"] {
+                close(
+                    &part["instances"][i]["pose"],
+                    &whole["instances"][i]["pose"],
+                );
+                assert_eq!(part["instances"][i]["moved"], true);
+            }
+            // Held, the pin is a constant; free, it turns on its hinge.
+            // The arm's turn is the whole's alone.
+            let dof = whole["solve"]["dof"].as_u64().unwrap();
+            assert_eq!(part["solve"]["dof"], json!(dof - 1));
+            assert_eq!(part["solve"]["dof"], json!(u64::from(!held)));
+        }
+        // Moves in both components solve both.
+        let both = json!({"part": "frame", "component": true, "moves": [
+            {"instance": "pin", "axis": [0, 0, 1], "angle": "10 deg"},
+            {"instance": "arm", "axis": [0, 0, 1], "angle": "20 deg"}]});
+        let v = call(&mut s, "assembly.solve", both).unwrap();
+        assert_eq!(keys(&v), ["arm", "cap", "pin"]);
+        let e = call(
+            &mut s,
+            "assembly.solve",
+            json!({"part": "frame", "component": true}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
     }
 
     #[test]

@@ -868,9 +868,22 @@ pub(crate) mod tests {
     use crate::session::Session;
     use std::process::Command;
 
+    /// `git`, reading neither the user's config nor the system's: where
+    /// the installers registered ryucad's drivers, or Git for Windows set
+    /// `core.autocrlf`, tests would merge and check out otherwise.
+    pub(crate) fn git_command() -> Command {
+        let mut git = Command::new("git");
+        git.env(
+            "GIT_CONFIG_GLOBAL",
+            std::env::temp_dir().join("ryucad-no-gitconfig"),
+        )
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+        git
+    }
+
     /// Runs git in `dir` with a fixed identity.
     pub(crate) fn git(dir: &Path, args: &[&str]) {
-        let st = Command::new("git")
+        let st = git_command()
             .args([
                 "-c",
                 "user.name=Test",
@@ -1128,7 +1141,7 @@ pub(crate) mod tests {
 
     /// Runs git, which may fail.
     fn try_git(dir: &Path, args: &[&str]) -> bool {
-        Command::new("git")
+        git_command()
             .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
             .args(["-c", "commit.gpgsign=false"])
             .args(args)

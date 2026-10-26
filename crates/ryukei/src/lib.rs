@@ -6,6 +6,7 @@
 pub mod blend;
 pub mod boolean;
 pub mod check;
+pub mod codec;
 mod error;
 pub mod euler;
 pub mod geom;

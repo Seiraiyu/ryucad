@@ -80,6 +80,9 @@ pub struct Part {
     /// The parameters each feature file names, read from its text, so it
     /// is known even for a feature that doesn't evaluate.
     pub uses: BTreeMap<Id, BTreeSet<String>>,
+    /// What each feature file that reads as JSON but doesn't load would do
+    /// to the part's solids, read from its text.
+    pub acts: BTreeMap<Id, super::files::Acts>,
     /// A hash of the bytes of `ryucad.json`, `part.json`, `parameters.json`
     /// and the listed feature files in order: it changes whenever anything
     /// that defines the part does.
@@ -440,6 +443,7 @@ fn load_part(
     };
     let mut features = BTreeMap::new();
     let mut uses = BTreeMap::new();
+    let mut acts = BTreeMap::new();
     let mut bytes_of = BTreeMap::new();
     let features_dir = join(&dir, "features");
     for (name, kind) in src.list(&features_dir)? {
@@ -452,8 +456,10 @@ fn load_part(
                 let feature = read_json(src, &at).and_then(|(bytes, v)| {
                     bytes_of.insert(fid.clone(), bytes);
                     uses.insert(fid.clone(), super::files::feature_names(&v));
-                    Feature::from_json(&v, manifest.default_unit, &env)
-                        .map_err(|e| e.with("path", &at))
+                    Feature::from_json(&v, manifest.default_unit, &env).map_err(|e| {
+                        acts.insert(fid.clone(), super::files::feature_acts(&v));
+                        e.with("path", &at)
+                    })
                 });
                 features.insert(fid, feature);
             }
@@ -501,6 +507,7 @@ fn load_part(
         env,
         features,
         uses,
+        acts,
         revision,
     })
 }

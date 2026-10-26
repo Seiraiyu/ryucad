@@ -1,7 +1,8 @@
 //! Display meshes. The daemon tessellates each body with parameters
 //! derived from its size and the display quality, and caches the result by
-//! body hash, so editing one feature re-meshes one body. Agents get JSON;
-//! the app can ask for a compact binary form.
+//! body hash, so editing one feature re-meshes one body; beneath that, the
+//! disk cache keeps them by body hash and parameters ([`crate::cache`]).
+//! Agents get JSON; the app can ask for a compact binary form.
 
 use crate::doc::files::Feature;
 use crate::error::{Code, Error, Result};
@@ -12,9 +13,10 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Quality {
     Coarse,
+    #[default]
     Normal,
     Fine,
 }
@@ -107,15 +109,24 @@ pub struct Meshed {
 }
 
 /// Meshes by body hash and quality, least recently used first out when
-/// the cache passes its budget.
+/// the cache passes its budget, and the disk cache beneath them, if any.
 #[derive(Debug, Default)]
 pub struct Cache {
     entries: BTreeMap<(String, Quality), (u64, Arc<DisplayMesh>)>,
     clock: u64,
     bytes: usize,
+    pub disk: Option<Arc<crate::cache::Disk>>,
 }
 
 impl Cache {
+    /// An empty cache over `disk`.
+    pub fn with_disk(disk: Option<Arc<crate::cache::Disk>>) -> Cache {
+        Cache {
+            disk,
+            ..Cache::default()
+        }
+    }
+
     /// The mesh of `built` (feature `f`), made if needed. `budget` is in
     /// bytes.
     pub fn get(
@@ -141,9 +152,10 @@ impl Cache {
             .iter()
             .filter(|(_, b)| !self.entries.contains_key(&(b.hash.clone(), quality)))
             .collect();
+        let disk = self.disk.as_deref();
         let made: Vec<(String, Arc<DisplayMesh>)> = missing
             .par_iter()
-            .map(|(f, b)| (b.hash.clone(), Arc::new(make(f, &b.body, quality))))
+            .map(|(f, b)| (b.hash.clone(), Arc::new(make(disk, f, b, quality))))
             .collect();
         let mut fresh: BTreeMap<String, Arc<DisplayMesh>> = BTreeMap::new();
         for (hash, m) in made {
@@ -204,12 +216,49 @@ fn diagonal(f: &Feature, body: &Body) -> f64 {
     }
 }
 
-fn make(f: &Feature, body: &Body, quality: Quality) -> DisplayMesh {
-    let params = quality.params(diagonal(f, body));
-    let mesh = ryukei::mesh::tessellate(body, &params).map_err(|e| {
+/// The disk cache's key for a mesh of the body hashed `hash` made with
+/// `params`.
+fn disk_input(hash: &str, params: &MeshParams) -> Vec<u8> {
+    let mut v = hash.as_bytes().to_vec();
+    v.push(0);
+    for x in [params.chord, params.angle, params.max_edge.unwrap_or(-1.0)] {
+        v.extend_from_slice(&x.to_bits().to_le_bytes());
+    }
+    v.extend_from_slice(&params.max_triangles.to_le_bytes());
+    v
+}
+
+/// The mesh of `built` at `quality`: from `disk` if it holds it, else
+/// made, and written to `disk` when it meshed.
+fn make(
+    disk: Option<&crate::cache::Disk>,
+    f: &Feature,
+    built: &Built,
+    quality: Quality,
+) -> DisplayMesh {
+    use crate::cache::Kind;
+    let params = quality.params(diagonal(f, &built.body));
+    let input = disk_input(&built.hash, &params);
+    if let Some(d) = disk
+        && let Some(bytes) = d.get(Kind::Mesh, &input)
+    {
+        match ryukei::codec::decode_mesh(&bytes) {
+            Ok(m) => {
+                return DisplayMesh {
+                    params,
+                    mesh: Ok(m),
+                };
+            }
+            Err(_) => d.discard(Kind::Mesh, &input),
+        }
+    }
+    let mesh = ryukei::mesh::tessellate(&built.body, &params).map_err(|e| {
         Error::new(Code::MeshFailed, format!("can't mesh the body: {e}"))
             .with("kernel", format!("{e:?}"))
     });
+    if let (Some(d), Ok(m)) = (disk, &mesh) {
+        d.put(Kind::Mesh, &input, &ryukei::codec::encode_mesh(m));
+    }
     DisplayMesh { params, mesh }
 }
 
@@ -755,6 +804,26 @@ mod tests {
     }
 
     #[test]
+    fn meshes_come_from_the_disk_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = Arc::new(crate::cache::Disk::open(dir.path(), [5; 32]));
+        let (f, b) = sphere("10 mm");
+        let mut first = Cache::with_disk(Some(Arc::clone(&disk)));
+        let made = first.get(&f, &b, Quality::Normal, usize::MAX);
+        assert_eq!(disk.stats().kinds[2].1, 1, "one mesh written");
+        let mut second = Cache::with_disk(Some(Arc::clone(&disk)));
+        let read = second.get(&f, &b, Quality::Normal, usize::MAX);
+        assert_eq!(read.mesh.as_ref().unwrap(), made.mesh.as_ref().unwrap());
+        assert_eq!(read.params, made.params);
+        // Another quality is another entry; a cleared cache makes it again.
+        second.get(&f, &b, Quality::Coarse, usize::MAX);
+        assert_eq!(disk.stats().kinds[2].1, 2);
+        disk.clear();
+        let again = Cache::default().get(&f, &b, Quality::Normal, usize::MAX);
+        assert_eq!(again.mesh.as_ref().unwrap(), made.mesh.as_ref().unwrap());
+    }
+
+    #[test]
     fn json_names_every_face_edge_and_vertex() {
         let f = Feature::Primitive(Primitive {
             ty: PrimitiveType::Cylinder,
@@ -771,7 +840,7 @@ mod tests {
         });
         let id = Id::parse("c", "feature").unwrap();
         let b = build_feature(&id, &id, &f).unwrap();
-        let m = make(&f, &b.body, Quality::Coarse);
+        let m = make(None, &f, &b, Quality::Coarse);
         let v = to_json(&b.body, &m);
         assert_eq!(v["ok"], true);
         let c = b.body.counts();

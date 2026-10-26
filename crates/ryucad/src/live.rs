@@ -83,6 +83,9 @@ pub struct Participant {
     /// The part or assembly the participant's window shows; `None` for
     /// the project's model ([`crate::assembly::shown_parts`]).
     pub focus: Option<crate::doc::id::Id>,
+    /// What the participant's window hides: occurrences and solids, as
+    /// [`crate::visibility::leaves`] writes them.
+    pub hidden: std::collections::BTreeSet<String>,
     connections: usize,
     last_seen: Instant,
 }
@@ -99,6 +102,7 @@ impl Participant {
             "highlights": self.highlights,
             "compare": self.compare.as_ref().map(|rev| json!({ "rev": rev })),
             "focus": self.focus,
+            "hidden": self.hidden,
         })
     }
 }
@@ -219,6 +223,7 @@ impl Live {
                 highlights: Vec::new(),
                 compare: None,
                 focus: None,
+                hidden: std::collections::BTreeSet::new(),
                 connections: 0,
                 last_seen: Instant::now(),
             },
@@ -432,6 +437,16 @@ impl Live {
     /// (with `None`) the project's model.
     pub fn set_focus(&mut self, id: &str, part: Option<crate::doc::id::Id>) -> Result<()> {
         self.get_mut(id)?.focus = part;
+        Ok(())
+    }
+
+    /// Sets what participant `id`'s window hides.
+    pub fn set_hidden(
+        &mut self,
+        id: &str,
+        hidden: std::collections::BTreeSet<String>,
+    ) -> Result<()> {
+        self.get_mut(id)?.hidden = hidden;
         Ok(())
     }
 

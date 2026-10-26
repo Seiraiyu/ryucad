@@ -15,6 +15,8 @@ pub const SELECTED: Rgb = [0.10, 0.75, 0.90];
 pub const HOVER: Rgb = [0.60, 0.88, 1.0];
 /// The feature chosen in the tree.
 pub const CHOSEN: Rgb = [0.70, 0.80, 0.95];
+/// A frame's x, y and z axes, as CAD draws them: red, green, blue.
+pub const AXES: [Rgb; 3] = [[0.85, 0.20, 0.20], [0.20, 0.65, 0.25], [0.20, 0.40, 0.90]];
 
 /// A compare's colours, the same as `ryucad render --compare`'s: faces
 /// only the working files have, faces on both sides whose geometry

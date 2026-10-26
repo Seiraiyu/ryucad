@@ -19,6 +19,30 @@ fn open(p: &Project) -> Workspace {
 }
 
 #[test]
+fn the_disk_cache_is_shown_and_cleared() {
+    let p = Project::new().with_part();
+    let mut ws = open(&p);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.model.meshes.len() == 2));
+    ws.read_cache();
+    assert!(ws.wait_until(WAIT, |ws| ws.cache.is_some()));
+    let held = ws.cache.clone().unwrap();
+    assert_eq!(held["enabled"], true);
+    assert_eq!(held["kinds"]["features"]["entries"], 2, "{held}");
+    assert_eq!(held["kinds"]["meshes"]["entries"], 2, "{held}");
+    assert!(
+        ryucad_app::ui::dialogs::cache_text(Some(&held)).starts_with("4 entries, "),
+        "{held}"
+    );
+    ws.clear_cache();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.cache.as_ref().is_some_and(|c| c["entries"] == 0)
+    }));
+    assert_eq!(ws.cache.as_ref().unwrap()["removed"]["entries"], 4);
+    assert_eq!(p.ok(&["cache", "stats"])["entries"], 0);
+    assert_eq!(ryucad_app::ui::dialogs::cache_text(None), "reading…");
+}
+
+#[test]
 fn preferences_go_both_ways() {
     let p = Project::new();
     let mut ws = open(&p);
