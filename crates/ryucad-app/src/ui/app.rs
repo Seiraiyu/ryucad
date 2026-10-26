@@ -500,6 +500,7 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        crate::ui::platform::note_frame();
         // A new window to the front: on Windows it otherwise stays behind
         // whatever was in front when it was started.
         if !std::mem::replace(&mut self.shown, true) {

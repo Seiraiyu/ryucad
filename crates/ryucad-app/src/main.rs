@@ -99,10 +99,14 @@ fn main() -> ExitCode {
     match run {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            platform::fatal(
-                "ryucad can't draw its window",
-                &format!("{e}\n\n{}", platform::NO_ADAPTER),
-            );
+            // Our adapter choice's refusal already says it.
+            let e = e.to_string();
+            let message = if e.contains(platform::NO_ADAPTER) {
+                e
+            } else {
+                format!("{e}\n\n{}", platform::NO_ADAPTER)
+            };
+            platform::fatal("ryucad can't draw its window", &message);
             ExitCode::FAILURE
         }
     }
