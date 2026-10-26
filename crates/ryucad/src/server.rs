@@ -1046,6 +1046,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
         }
         Feature::Boolean(b) => b.fields(),
         Feature::Instance(i) => i.fields(),
+        Feature::Import(i) => i.fields(),
         Feature::Mate(m) => {
             let mut v = m.fields();
             for (side, c) in [("a", &m.a), ("b", &m.b)] {
@@ -2205,6 +2206,18 @@ fn proposed(p: &Part, order: &[Id], writes: &[(&Id, &Feature)]) -> Part {
     q
 }
 
+/// `invalid_param` for `feature.add` or `feature.edit` of an import:
+/// its file, product and body come from the file, through `import`.
+fn import_not_written_here(how: &str) -> Error {
+    Error::new(
+        Code::InvalidParam,
+        format!(
+            "an import can't be {how}ed with feature.{how}: import a STEP file with `import` (`--into` adds its bodies to a part)"
+        ),
+    )
+    .with("type", "import")
+}
+
 /// Whether `part` is an assembly, as its part file says; a part whose
 /// file can't be read is taken for a part.
 pub(crate) fn part_kind(part: &Part) -> PartKind {
@@ -2732,6 +2745,7 @@ fn feature_add(
             given.only(ty, &PATTERN)?;
             pattern_from(None, &given, &pid, unit, &env)?
         }
+        "import" => return Err(import_not_written_here("add")),
         _ => {
             let ty = PrimitiveType::parse(ty)?;
             given.only(ty.as_str(), &PRIMITIVE)?;
@@ -2868,6 +2882,7 @@ fn feature_edit(
             check_sweep(p, &list, &fid, &f)?;
             f
         }
+        Feature::Import(_) => return Err(import_not_written_here("edit").with("feature", &fid)),
         f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
             let ty = f.type_name();
             given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
@@ -3133,6 +3148,11 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
                 Ok(o @ crate::rebuild::Output::Solids(_)) => {
                     let mut v = json!({"id": fid, "type": types.get(fid), "ok": true,
                                        "hash": o.hash()});
+                    if let crate::rebuild::Output::Solids(m) = o
+                        && let Some(i) = &m.import
+                    {
+                        v["import"] = i.as_ref().clone();
+                    }
                     match o.body() {
                         Some(b) => v["counts"] = counts(b),
                         None => {
