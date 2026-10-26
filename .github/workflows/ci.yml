@@ -39,7 +39,8 @@ jobs:
       # property tests fit every branch, blends on pipes and ruled
       # chamfers fit their rails, corners mesh many blended boxes, and
       # heal and STEP round trip tests write and heal hundreds of seeded
-      # bodies, and ryucad's bar times a 1,000-hole pattern against
+      # bodies, the committed STEP files' bodies are self-intersection
+      # checked, and ryucad's bar times a 1,000-hole pattern against
       # ryukei's own boolean:
       # minutes in a debug build, so they are ignored there and run in
       # release.
@@ -56,6 +57,7 @@ jobs:
       - run: cargo test -p ryukei --release --test heal_props
       - run: cargo test -p ryukei --release --test mirror
       - run: cargo test -p ryustep --release --test round_trip_props
+      - run: cargo test -p ryustep --release --test checks
       - run: cargo test -p ryucad --release --test bar -- --nocapture
       - if: failure()
         name: the viewport as drawn, if it no longer matches its snapshot
