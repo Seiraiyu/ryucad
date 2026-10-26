@@ -266,10 +266,7 @@ pub(crate) fn kept_unlisted(
         if list.iter().any(|f| f == feature) {
             continue;
         }
-        let (by, kept) = match (
-            ours.contains_key(path),
-            theirs.contains_key(path),
-        ) {
+        let (by, kept) = match (ours.contains_key(path), theirs.contains_key(path)) {
             (false, true) => ("ours", theirs),
             (true, false) => ("theirs", ours),
             _ => continue,
