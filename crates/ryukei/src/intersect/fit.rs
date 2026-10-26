@@ -268,7 +268,10 @@ impl Target for SpanTarget<'_> {
     }
 
     fn second(&self, x0: f64, x1: f64) -> f64 {
-        second_hull(&sub(self.0, x0, x1))
+        // The part's hull is by its own parameter, which runs 1 / (x1 -
+        // x0) times as fast as the span's.
+        let w = x1 - x0;
+        second_hull(&sub(self.0, x0, x1)) / (w * w)
     }
 }
 
@@ -1377,6 +1380,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_span_bounds_its_second_derivative_by_its_own_parameter() {
+        // C(x) = (x³, 0, 0): C'' = 6x, at most 6 over [0.5, 1] whatever
+        // part is bounded.
+        let span = piece(
+            [
+                Vector3::ZERO,
+                Vector3::ZERO,
+                Vector3::ZERO,
+                Vector3::new(1.0, 0.0, 0.0),
+            ],
+            [0.0, 1.0],
+        );
+        let t = SpanTarget(&span);
+        assert!(t.second(0.5, 1.0) >= 6.0 * (1.0 - 1e-12));
+        assert!(t.second(0.0, 1.0) >= 6.0 * (1.0 - 1e-12));
+        assert!(t.second(0.75, 0.875) >= 5.25 * (1.0 - 1e-12));
     }
 
     #[test]
