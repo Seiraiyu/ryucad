@@ -5,10 +5,11 @@
 //! arithmetic and exact predicates. Coincidence and tangency are decided
 //! by explicit tolerance rules, and what stays uncertain is reported as
 //! [`Failure::Uncertain`], never guessed. The analytic surfaces (plane,
-//! cylinder, cone, sphere, torus) are intersected with each other, and a
-//! pipe with any of them ([`pipe_surface`]); a surface with no implicit
-//! form is otherwise [`Failure::Unsupported`]. Faces that touch along a
-//! curve are certified apart beside it instead ([`beside`]).
+//! cylinder, cone, sphere, torus) are intersected with each other, and
+//! any other surface (a pipe, a NURBS, a swept surface) with any of them
+//! in its own parameters against their implicit forms; a curve meets any
+//! surface. Faces that touch along a curve are certified apart beside it
+//! instead ([`beside`]).
 
 mod beside;
 pub(crate) mod broad;
@@ -21,8 +22,8 @@ mod implicit;
 mod inface;
 mod pipe;
 mod pipe_cs;
-mod pipe_trace;
 mod sheet_cs;
+mod sheet_trace;
 mod solid;
 mod ss;
 mod ss_exact;

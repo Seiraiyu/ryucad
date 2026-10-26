@@ -18,7 +18,9 @@
 //! A pipe has no implicit form: its side of a branch is sampled through
 //! its distance from its spine, and its distance from a span is certified
 //! by the pcurve's bound alone (the span is within that of the pipe's
-//! points along the pcurve).
+//! points along the pcurve). Any other surface with no implicit form (a
+//! NURBS, a swept surface) is read the same way, through its signed
+//! distance from its foot.
 //!
 //! A span whose bound exceeds [`LINEAR_RESOLUTION`] gets a new sample in
 //! its middle, put on both surfaces by Newton's method, until every span
@@ -28,9 +30,11 @@
 //! way, by the curve's own parameter.
 
 use super::implicit::Implicit;
+use super::sheet_cs::norm_hi;
 use super::ss_trace::Traced;
 use super::{Failure, SLACK};
 use crate::geom::chain3::Piece3;
+use crate::geom::sheet::Sheet;
 use crate::geom::{
     BezierCurve, Curve, Curve2, Hom, KnotVector, NurbsCurve, NurbsCurve2, Pipe, Point2, Point3,
     Surface, Vector2, Vector3,
@@ -126,7 +130,11 @@ pub(crate) fn first_bound(s: &Surface, [ru, rv]: [[f64; 2]; 2]) -> (f64, f64) {
             let [du, dv] = n.first_bound([ru, rv]);
             (du, dv)
         }
-        _ => (f64::INFINITY, f64::INFINITY),
+        // A swept surface's from its enclosures over jets.
+        _ => match Sheet::of(s).jet_box([ru, rv]) {
+            Some(p) => (norm_hi(p.map(|j| j.d[0])), norm_hi(p.map(|j| j.d[1]))),
+            None => (f64::INFINITY, f64::INFINITY),
+        },
     };
     (su * k, sv * k)
 }
@@ -393,17 +401,19 @@ fn surface_bound(imp: &Implicit, span: &Piece3, target: f64, depth: u32) -> f64 
 }
 
 /// How a fit reads one surface of a branch: an analytic surface by its
-/// implicit form, a pipe by its distance from its spine.
+/// implicit form, a pipe by its distance from its spine, any other by its
+/// signed distance from its foot.
 enum Side<'a> {
     Implicit(Implicit),
     Pipe(&'a Pipe),
+    Param(&'a Surface),
 }
 
 impl<'a> Side<'a> {
-    fn of(s: &'a Surface) -> Option<Self> {
+    fn of(s: &'a Surface) -> Self {
         match s {
-            Surface::Pipe(p) => Some(Self::Pipe(p)),
-            _ => Implicit::of(s).map(Self::Implicit),
+            Surface::Pipe(p) => Self::Pipe(p),
+            _ => Implicit::of(s).map_or(Self::Param(s), Self::Implicit),
         }
     }
 
@@ -422,17 +432,21 @@ impl<'a> Side<'a> {
                 }
                 (len - pipe.radius(), d / len)
             }
+            Self::Param(s) => {
+                let (u, v) = s.project(p).param;
+                let e = s.eval(u, v);
+                match e.du.cross(e.dv).normalize() {
+                    Some(n) => ((p - e.point).dot(n.get()), n.get()),
+                    None => ((p - e.point).length(), Vector3::ZERO),
+                }
+            }
         }
     }
 }
 
-/// Fits a traced branch where surfaces `a` and `b` meet, each analytic
-/// or a pipe.
+/// Fits a traced branch where surfaces `a` and `b` meet.
 pub(crate) fn fit_branch(surfaces: [&Surface; 2], traced: &Traced) -> Result<Fitted, Failure> {
-    let imps = [
-        Side::of(surfaces[0]).ok_or(Failure::Unsupported)?,
-        Side::of(surfaces[1]).ok_or(Failure::Unsupported)?,
-    ];
+    let imps = [Side::of(surfaces[0]), Side::of(surfaces[1])];
     let branch = Branch { surfaces, imps };
     let mut points = traced.points.clone();
     if traced.closed {
@@ -1220,7 +1234,12 @@ mod tests {
             Point3::new(-10.0, -10.0, -10.0),
             Point3::new(10.0, 10.0, 10.0),
         );
-        let topo = super::super::pipe_trace::trace(&pipe, &plane, &region).unwrap();
+        let topo = super::super::sheet_trace::trace(
+            &Surface::Pipe(std::sync::Arc::new(pipe.clone())),
+            &plane,
+            &region,
+        )
+        .unwrap();
         let ps = Surface::Pipe(std::sync::Arc::new(pipe));
         let f = fit_branch([&ps, &plane], &topo.branches[0]).unwrap();
         assert!(f.tolerance <= 10.0 * LINEAR_RESOLUTION);
