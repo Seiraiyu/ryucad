@@ -473,6 +473,65 @@ pub fn feature_format(v: &Value) -> u64 {
     if literal { 1 } else { 2 }
 }
 
+/// What a feature does to its part's solids, read from its JSON alone, so
+/// a feature that doesn't load (a merge conflict, a parameter that doesn't
+/// evaluate) still holds its place in its solids' chains: what follows it
+/// there fails through it, as it would if it had loaded and failed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Acts {
+    /// Whether it founds a solid of its own.
+    pub founds: bool,
+    /// The solids whose chains it joins.
+    pub acts_on: Vec<Id>,
+    /// The solids a boolean consumes.
+    pub consumes: Vec<Id>,
+}
+
+/// [`Acts`] from a feature's JSON, as [`Feature::targets`] and
+/// [`Feature::combine`] read a loaded one. Names that aren't IDs are left
+/// out.
+pub fn feature_acts(v: &Value) -> Acts {
+    let ids = |v: Option<&Value>| -> Vec<Id> {
+        let one = |v: &Value| v.as_str().and_then(|s| Id::parse(s, "feature").ok());
+        match v {
+            Some(Value::Array(a)) => a.iter().filter_map(one).collect(),
+            Some(v) => one(v).into_iter().collect(),
+            None => Vec::new(),
+        }
+    };
+    let mut out = Acts::default();
+    match v.get("type").and_then(Value::as_str) {
+        Some("box" | "cylinder" | "cone" | "sphere" | "torus" | "extrude" | "revolve") => {
+            if v.get("operation")
+                .is_none_or(|o| o.as_str().is_none_or(|o| o == "new"))
+            {
+                out.founds = true;
+            } else {
+                out.acts_on = ids(v.get("targets"));
+            }
+        }
+        Some("boolean") => {
+            out.acts_on = ids(v.get("target"));
+            out.consumes = ids(v.get("tools"));
+        }
+        Some("hole" | "pattern") => out.acts_on = ids(v.get("targets")),
+        Some("fillet" | "chamfer") => {
+            let groups = v.get("groups").and_then(Value::as_array);
+            for g in groups.into_iter().flatten() {
+                let edges = g.get("edges").and_then(Value::as_array);
+                let named = edges.into_iter().flatten().chain(g.get("face"));
+                for id in named.flat_map(|r| ids(r.get("feature"))) {
+                    if !out.acts_on.contains(&id) {
+                        out.acts_on.push(id);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 /// The parameters a feature's JSON names, read from its text alone, so a
 /// feature that doesn't evaluate still says what it reads.
 pub fn feature_names(v: &Value) -> std::collections::BTreeSet<String> {
@@ -972,6 +1031,24 @@ fn vector(v: &Value, at: &str) -> Result<[f64; 3]> {
 mod tests {
     use super::*;
     use crate::doc::canonical;
+
+    #[test]
+    fn what_a_feature_does_to_solids_is_read_from_its_text() {
+        use serde_json::json;
+        let id = |s: &str| Id::parse(s, "feature").unwrap();
+        let acts = |v: Value| feature_acts(&v);
+        assert!(acts(json!({"type": "box", "params": {"x": "w"}})).founds);
+        assert!(acts(json!({"type": "extrude", "operation": "new"})).founds);
+        let cut = acts(json!({"type": "cylinder", "operation": "cut", "targets": ["b", "C"]}));
+        assert_eq!((cut.founds, cut.acts_on), (false, vec![id("b")]));
+        let b = acts(json!({"type": "boolean", "target": "a", "tools": ["t"]}));
+        assert_eq!((b.acts_on, b.consumes), (vec![id("a")], vec![id("t")]));
+        let f = acts(json!({"type": "chamfer", "groups": [
+            {"edges": [{"feature": "a", "name": "x"}, {"feature": "a", "name": "y"}],
+             "face": {"feature": "b", "name": "z"}}]}));
+        assert_eq!(f.acts_on, [id("a"), id("b")]);
+        assert_eq!(acts(json!({"type": "sketch"})), Acts::default());
+    }
 
     /// The primitive a feature holds.
     fn prim(f: &Feature) -> &Primitive {

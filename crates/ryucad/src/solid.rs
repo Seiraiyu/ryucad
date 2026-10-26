@@ -31,7 +31,8 @@ impl Solids {
     }
 
     /// The solids of `order`, a list of the part's features. A feature
-    /// whose file doesn't load acts on nothing; one naming a solid founded
+    /// whose file doesn't load acts as its text says (nothing, if it
+    /// isn't JSON); one naming a solid founded
     /// after it doesn't join that chain (building it says why).
     pub fn of_order(part: &Part, order: &[Id]) -> Solids {
         let at: BTreeMap<Id, usize> = order
@@ -43,19 +44,31 @@ impl Solids {
         let mut founders: Vec<Id> = Vec::new();
         let mut consumed: BTreeMap<Id, Id> = BTreeMap::new();
         for id in order {
-            let Some(Ok(f)) = part.features.get(id) else {
-                continue;
-            };
-            if f.combine().is_some_and(|c| c.is_new()) {
+            // A feature that doesn't load acts as its text says, so what
+            // follows it in a chain reads it and fails through it.
+            let (founds, acts_on, consumes): (bool, Vec<&Id>, Vec<&Id>) =
+                match part.features.get(id) {
+                    Some(Ok(f)) => match f.boolean() {
+                        _ if f.combine().is_some_and(|c| c.is_new()) => (true, vec![], vec![]),
+                        Some(b) => (false, vec![&b.target], b.tools.iter().collect()),
+                        None => (false, f.targets(), Vec::new()),
+                    },
+                    Some(Err(_)) => match part.acts.get(id) {
+                        Some(a) => (
+                            a.founds,
+                            a.acts_on.iter().collect(),
+                            a.consumes.iter().collect(),
+                        ),
+                        None => continue,
+                    },
+                    None => continue,
+                };
+            if founds {
                 chains.insert(id.clone(), vec![id.clone()]);
                 founders.push(id.clone());
                 continue;
             }
             // A solid joins the chain of what acts on it, until consumed.
-            let (acts_on, consumes) = match f.boolean() {
-                Some(b) => (vec![&b.target], b.tools.iter().collect()),
-                None => (f.targets(), Vec::new()),
-            };
             for t in acts_on {
                 if !consumed.contains_key(t)
                     && let Some(chain) = chains.get_mut(t)
@@ -184,6 +197,7 @@ pub(crate) mod tests {
             env: crate::expr::Env::empty(),
             features: features.into_iter().map(|(i, f)| (id(i), Ok(f))).collect(),
             uses: BTreeMap::<Id, BTreeSet<String>>::new(),
+            acts: BTreeMap::new(),
             revision: String::new(),
         }
     }
