@@ -1,8 +1,8 @@
-//! The body codec from bytes. Raw input, and an encoded body or journal
-//! with the input's bytes written over part of it, must be refused with
-//! [`Error::InvalidEncoding`], or decode to a body that passes the
-//! structural checks and whose encoding decodes to the same body and
-//! encoding again (input may list names out of order, or write `-0` in a
+//! The body codec from bytes. Raw input, and an encoded body, journal or
+//! mesh with the input's bytes written over part of it, must be refused
+//! with [`Error::InvalidEncoding`], or decode to what encodes and decodes
+//! again to the same thing: a body that passes the structural checks, a
+//! journal, a mesh (input may list names out of order, or write `-0` in a
 //! control point, which a body holds as `0`). Any panic, and any other
 //! error, is a bug.
 
@@ -11,11 +11,14 @@
 use libfuzzer_sys::fuzz_target;
 use ryukei::Error;
 use ryukei::check::check_topology;
-use ryukei::codec::{decode_body, decode_journal, encode_body, encode_journal};
-use ryukei::geom::Rigid;
+use ryukei::codec::{
+    decode_body, decode_journal, decode_mesh, encode_body, encode_journal, encode_mesh,
+};
+use ryukei::geom::{Rigid, Vector3};
+use ryukei::mesh::{MeshParams, tessellate};
 use ryukei::name::OpKey;
 use ryukei::primitive;
-use ryukei_testkit::blend_bytes::body;
+use std::sync::OnceLock;
 
 fn body_bytes(data: &[u8]) {
     match decode_body(data) {
@@ -37,6 +40,35 @@ fn journal_bytes(data: &[u8]) {
         Err(Error::InvalidEncoding { .. }) => {}
         Err(e) => panic!("unexpected {e:?}"),
     }
+}
+
+fn mesh_bytes(data: &[u8]) {
+    match decode_mesh(data) {
+        Ok(m) => assert_eq!(decode_mesh(&encode_mesh(&m)).unwrap(), m),
+        Err(Error::InvalidEncoding { .. }) => {}
+        Err(e) => panic!("unexpected {e:?}"),
+    }
+}
+
+/// Encodings of a block, a torus and a sphere turned off the axes, the
+/// journals that made them and their meshes, made once.
+fn bases() -> &'static [(Vec<u8>, Vec<u8>, Vec<u8>)] {
+    static BASES: OnceLock<Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>> = OnceLock::new();
+    BASES.get_or_init(|| {
+        let t = Rigid::rotation(Vector3::new(1.0, 2.0, 0.5).normalize().unwrap(), 0.7);
+        [
+            primitive::block(OpKey(1), 1.0, 2.0, 3.0, &t),
+            primitive::torus(OpKey(1), 2.0, 0.5, &t),
+            primitive::sphere(OpKey(1), 1.0, &t),
+        ]
+        .into_iter()
+        .map(|r| {
+            let (b, j) = r.unwrap();
+            let m = tessellate(&b, &MeshParams::new(0.1, 0.8)).unwrap();
+            (encode_body(&b), encode_journal(&j), encode_mesh(&m))
+        })
+        .collect()
+    })
 }
 
 /// `base` with `patch` written over it from the offset its first two
@@ -61,25 +93,14 @@ fn mutated(base: &[u8], data: &[u8]) -> Vec<u8> {
 fuzz_target!(|data: &[u8]| {
     body_bytes(data);
     journal_bytes(data);
+    mesh_bytes(data);
     let Some((&mode, rest)) = data.split_first() else {
         return;
     };
-    let base = match mode % 3 {
-        0 => primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
-            .map(|(b, j)| (encode_body(&b), encode_journal(&j)))
-            .unwrap(),
-        1 => primitive::torus(OpKey(1), 2.0, 0.5, &Rigid::IDENTITY)
-            .map(|(b, j)| (encode_body(&b), encode_journal(&j)))
-            .unwrap(),
-        _ => match body(rest) {
-            Some((b, tail)) => {
-                let bytes = encode_body(&b);
-                body_bytes(&mutated(&bytes, tail));
-                return;
-            }
-            None => return,
-        },
-    };
-    body_bytes(&mutated(&base.0, rest));
-    journal_bytes(&mutated(&base.1, rest));
+    let (b, j, m) = &bases()[usize::from(mode) % 3];
+    match mode / 3 % 3 {
+        0 => body_bytes(&mutated(b, rest)),
+        1 => journal_bytes(&mutated(j, rest)),
+        _ => mesh_bytes(&mutated(m, rest)),
+    }
 });

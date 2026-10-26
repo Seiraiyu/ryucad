@@ -253,3 +253,61 @@ fn journals_round_trip_every_event() {
     assert!(decode_journal(&encode_body(&tetrahedron())).is_err());
     assert!(decode_body(&bytes).is_err());
 }
+
+#[test]
+fn meshes_round_trip_and_bad_ones_are_refused() {
+    use crate::mesh::{MeshParams, tessellate};
+    let t = Rigid::rotation(Vector3::new(1.0, 2.0, 0.5).normalize().unwrap(), 0.7);
+    for b in [
+        primitive::torus(OpKey(1), 2.0, 0.5, &t).unwrap().0,
+        primitive::cone(OpKey(1), 1.0, 2.0, &t).unwrap().0,
+        Body::new(),
+    ] {
+        let m = tessellate(&b, &MeshParams::new(2e-2, 0.5)).unwrap();
+        let bytes = encode_mesh(&m);
+        assert!(bytes.starts_with(MESH_MAGIC));
+        assert_eq!(decode_mesh(&bytes).unwrap(), m);
+        assert_eq!(encode_mesh(&decode_mesh(&bytes).unwrap()), bytes);
+        for n in (0..bytes.len()).step_by(5) {
+            assert!(decode_mesh(&bytes[..n]).is_err(), "{n}");
+        }
+    }
+    let mut m = tessellate(&tetrahedron(), &MeshParams::new(2e-2, 0.5)).unwrap();
+    m.faults.push(FaceFault {
+        face: crate::topo::FaceId::from_index(1),
+        kind: MeshFaultKind::BoundaryNotResolved {
+            edge: crate::topo::EdgeId::from_index(2),
+        },
+    });
+    assert_eq!(decode_mesh(&encode_mesh(&m)).unwrap(), m);
+    m.triangles.push([0, 0, m.corners.len() as u32]);
+    assert_eq!(
+        decode_mesh(&encode_mesh(&m)).unwrap_err(),
+        Error::InvalidEncoding {
+            what: "a triangle past the corners"
+        }
+    );
+    assert!(decode_mesh(&encode_body(&tetrahedron())).is_err());
+}
+
+#[test]
+fn rigid_motions_round_trip_and_others_are_refused() {
+    let a = Rigid::rotation(Vector3::new(1.0, 2.0, 0.5).normalize().unwrap(), 0.7);
+    let b = Rigid::translation(Vector3::new(0.1, -0.2, 0.3)).then_after(&a);
+    for r in [Rigid::IDENTITY, a, b, b.then_after(&b).then_after(&a)] {
+        let bytes = encode_rigid(&r);
+        let d = decode_rigid(&bytes).unwrap();
+        assert_eq!(d, r);
+        assert_eq!(encode_rigid(&d), bytes);
+    }
+    let mut bytes = encode_rigid(&a);
+    assert!(decode_rigid(&bytes[..95]).is_err());
+    bytes[0..8].copy_from_slice(&2.0f64.to_bits().to_le_bytes());
+    assert!(decode_rigid(&bytes).is_err(), "not orthonormal");
+    let mut flipped = encode_rigid(&Rigid::IDENTITY);
+    flipped[64..72].copy_from_slice(&(-1.0f64).to_bits().to_le_bytes());
+    assert!(decode_rigid(&flipped).is_err(), "a reflection");
+    let mut nan = encode_rigid(&Rigid::IDENTITY);
+    nan[88..96].copy_from_slice(&f64::NAN.to_bits().to_le_bytes());
+    assert!(decode_rigid(&nan).is_err());
+}

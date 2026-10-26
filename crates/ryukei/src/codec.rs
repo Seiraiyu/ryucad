@@ -8,8 +8,12 @@
 //! body shares what the encoded one did. `decode_body(&encode_body(b))`
 //! dumps exactly as `b` does.
 //!
+//! [`encode_mesh`] writes a [`BodyMesh`] the same way, for a cache of
+//! display meshes beside the bodies they mesh, and [`encode_rigid`] a
+//! [`Rigid`] motion, for callers that keep where they placed a body.
+//!
 //! The format starts with `ryukei.body.1` (`ryukei.journal.1` for a
-//! [`Journal`]); integers are little-endian, counts `u32`, an absent ID
+//! [`Journal`], `ryukei.mesh.1` for a mesh); integers are little-endian, counts `u32`, an absent ID
 //! `u32::MAX`. A format change bumps the version, and bytes of another
 //! version are refused, so a cache entry written by another kernel simply
 //! misses. Decoding checks lengths, tags, the geometry's own constructors
@@ -21,8 +25,9 @@ use crate::check::check_topology;
 use crate::geom::{
     Circle, Circle2, Cone, Curve, Curve2, Cylinder, Ellipse, Ellipse2, Extrusion, Frame, Frame2,
     KnotVector, Line, Line2, NurbsCurve, NurbsCurve2, NurbsSurface, Pipe, Plane, Point2, Point3,
-    Revolution, Sphere, Surface, Torus, UnitVector3, Vector2, Vector3,
+    Revolution, Rigid, Sphere, Surface, Torus, UnitVector3, Vector2, Vector3,
 };
+use crate::mesh::{BodyMesh, Corner, EdgePolyline, FaceFault, FaceMesh, MeshFaultKind};
 use crate::name::{Event, Journal, Name, ToolKey};
 use crate::tol::Tolerance;
 use crate::topo::{
@@ -35,6 +40,8 @@ use std::sync::Arc;
 pub const BODY_MAGIC: &[u8] = b"ryukei.body.1";
 /// The first bytes of an encoded journal.
 pub const JOURNAL_MAGIC: &[u8] = b"ryukei.journal.1";
+/// The first bytes of an encoded mesh.
+pub const MESH_MAGIC: &[u8] = b"ryukei.mesh.1";
 
 fn invalid(what: &'static str) -> Error {
     Error::InvalidEncoding { what }
@@ -1021,6 +1028,189 @@ pub fn decode_journal(bytes: &[u8]) -> Result<Journal, Error> {
     }
     r.end()?;
     Ok(journal)
+}
+
+/// `mesh` as bytes: every array in order, floats by their bits.
+pub fn encode_mesh(mesh: &BodyMesh) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.out.extend_from_slice(MESH_MAGIC);
+    w.len(mesh.positions.len());
+    for &p in &mesh.positions {
+        w.point(p);
+    }
+    w.len(mesh.corners.len());
+    for c in &mesh.corners {
+        w.u32(c.position);
+        w.point2(c.uv);
+        w.vector(c.normal.get());
+    }
+    w.len(mesh.triangles.len());
+    for t in &mesh.triangles {
+        for &i in t {
+            w.u32(i);
+        }
+    }
+    w.len(mesh.faces.len());
+    for f in &mesh.faces {
+        w.id(f.face);
+        w.u32(f.corners.start);
+        w.u32(f.corners.end);
+        w.u32(f.triangles.start);
+        w.u32(f.triangles.end);
+    }
+    w.len(mesh.edges.len());
+    for e in &mesh.edges {
+        w.id(e.edge);
+        w.len(e.positions.len());
+        for (&p, &t) in e.positions.iter().zip(&e.params) {
+            w.u32(p);
+            w.f64(t);
+        }
+    }
+    w.len(mesh.faults.len());
+    for f in &mesh.faults {
+        w.id(f.face);
+        match f.kind {
+            MeshFaultKind::EdgeOffSurface { edge } => {
+                w.u8(0);
+                w.id(edge);
+            }
+            MeshFaultKind::BadDomain => w.u8(1),
+            MeshFaultKind::RefinementStalled => w.u8(2),
+            MeshFaultKind::BoundaryNotResolved { edge } => {
+                w.u8(3);
+                w.id(edge);
+            }
+        }
+    }
+    w.out
+}
+
+/// The mesh `bytes` encode. Fails with [`Error::InvalidEncoding`] for
+/// bytes [`encode_mesh`] didn't write, or an index out of range.
+pub fn decode_mesh(bytes: &[u8]) -> Result<BodyMesh, Error> {
+    let mut r = Reader::new(bytes);
+    r.magic(MESH_MAGIC)?;
+    let positions = (0..r.count(24)?)
+        .map(|_| r.point())
+        .collect::<R<Vec<_>>>()?;
+    let np = positions.len() as u32;
+    let mut corners = Vec::new();
+    for _ in 0..r.count(44)? {
+        let position = r.u32()?;
+        if position >= np {
+            return Err(invalid("a corner past the positions"));
+        }
+        corners.push(Corner {
+            position,
+            uv: r.point2()?,
+            normal: r.unit()?,
+        });
+    }
+    let nc = corners.len() as u32;
+    let mut triangles = Vec::new();
+    for _ in 0..r.count(12)? {
+        let t = [r.u32()?, r.u32()?, r.u32()?];
+        if t.iter().any(|&i| i >= nc) {
+            return Err(invalid("a triangle past the corners"));
+        }
+        triangles.push(t);
+    }
+    let nt = triangles.len() as u32;
+    let mut faces = Vec::new();
+    for _ in 0..r.count(20)? {
+        let face = r.id()?;
+        let corners = r.u32()?..r.u32()?;
+        let tris = r.u32()?..r.u32()?;
+        if corners.start > corners.end || corners.end > nc || tris.start > tris.end || tris.end > nt
+        {
+            return Err(invalid("a face's range past its arrays"));
+        }
+        faces.push(FaceMesh {
+            face,
+            corners,
+            triangles: tris,
+        });
+    }
+    let mut edges = Vec::new();
+    for _ in 0..r.count(8)? {
+        let edge = r.id()?;
+        let n = r.count(12)?;
+        let (mut ps, mut ts) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        for _ in 0..n {
+            let p = r.u32()?;
+            if p >= np {
+                return Err(invalid("an edge sample past the positions"));
+            }
+            ps.push(p);
+            ts.push(r.finite()?);
+        }
+        edges.push(EdgePolyline {
+            edge,
+            positions: ps,
+            params: ts,
+        });
+    }
+    let mut faults = Vec::new();
+    for _ in 0..r.count(5)? {
+        let face = r.id()?;
+        let kind = match r.u8()? {
+            0 => MeshFaultKind::EdgeOffSurface { edge: r.id()? },
+            1 => MeshFaultKind::BadDomain,
+            2 => MeshFaultKind::RefinementStalled,
+            3 => MeshFaultKind::BoundaryNotResolved { edge: r.id()? },
+            _ => return Err(invalid("an unknown mesh fault")),
+        };
+        faults.push(FaceFault { face, kind });
+    }
+    r.end()?;
+    Ok(BodyMesh {
+        positions,
+        corners,
+        triangles,
+        faces,
+        edges,
+        faults,
+    })
+}
+
+/// A rigid motion's bits: its rotation matrix row by row, then its
+/// translation, each float little-endian.
+pub fn encode_rigid(r: &Rigid) -> [u8; 96] {
+    let mut out = [0; 96];
+    let t = r.translation_part();
+    let xs = r
+        .rotation_matrix()
+        .into_iter()
+        .flatten()
+        .chain([t.x, t.y, t.z]);
+    for (chunk, x) in out.as_chunks_mut::<8>().0.iter_mut().zip(xs) {
+        chunk.copy_from_slice(&x.to_bits().to_le_bytes());
+    }
+    out
+}
+
+/// The rigid motion `bytes` encode, bit for bit. Fails with
+/// [`Error::InvalidEncoding`] unless there are 96 bytes, every float is
+/// finite, and the matrix is a rotation (orthonormal within `1e-9`,
+/// determinant positive).
+pub fn decode_rigid(bytes: &[u8]) -> Result<Rigid, Error> {
+    let mut r = Reader::new(bytes);
+    let mut rot = [[0.0; 3]; 3];
+    for row in &mut rot {
+        for x in row.iter_mut() {
+            *x = r.finite()?;
+        }
+    }
+    let t = r.vector()?;
+    r.end()?;
+    let m = Rigid::from_parts(rot, t);
+    let row = |i: usize| Vector3::new(rot[i][0], rot[i][1], rot[i][2]);
+    let det = row(0).cross(row(1)).dot(row(2));
+    if m.orthonormality_error() > 1e-9 || det <= 0.0 {
+        return Err(invalid("a matrix that isn't a rotation"));
+    }
+    Ok(m)
 }
 
 #[cfg(test)]

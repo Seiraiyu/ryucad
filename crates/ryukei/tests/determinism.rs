@@ -1439,11 +1439,12 @@ fn mirror_section(golden: &mut Golden) {
 }
 
 /// The body codec: the encodings of the primitives and of seeded sweeps,
-/// booleans and blends, and of the journals that made them.
+/// booleans and blends, of the journals that made them, and of the
+/// primitives' meshes.
 fn codec_section(golden: &mut Golden) {
     use ryukei::blend::blend;
     use ryukei::boolean::boolean;
-    use ryukei::codec::{encode_body, encode_journal};
+    use ryukei::codec::{encode_body, encode_journal, encode_mesh};
     use ryukei_testkit::blend_bytes::blend_case;
     use ryukei_testkit::boolean_bytes::boolean_case;
     use ryukei_testkit::sweep_bytes::sweep;
@@ -1481,6 +1482,10 @@ fn codec_section(golden: &mut Golden) {
     for (b, j) in &made {
         s.bytes(&encode_body(b));
         s.bytes(&encode_journal(j));
+    }
+    for (b, _) in &made[..5] {
+        let m = tessellate(b, &MeshParams::new(2e-2, 0.5)).unwrap();
+        s.bytes(&encode_mesh(&m));
     }
 }
 
