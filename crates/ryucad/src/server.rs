@@ -2514,8 +2514,34 @@ fn feature_add(
             .and_then(|s| Id::parse(s, "feature").ok())
             .and_then(|s| p.features.get(&s).cloned())
             .and_then(|f| f.ok());
-        if let Some(f) = theirs.filter(|f| !f.targets().is_empty()) {
-            given.fields.targets = Some(f.targets().iter().map(|t| t.to_string()).collect());
+        match (seed, theirs) {
+            (_, Some(f)) if !f.targets().is_empty() => {
+                given.fields.targets = Some(f.targets().iter().map(|t| t.to_string()).collect());
+            }
+            // Its seed's own fault says what's wrong with it.
+            (Some(seed), Some(f)) => {
+                return Err(Error::new(
+                    Code::ReferenceWrongKind,
+                    format!(
+                        "{}its seed {seed} is a {} that joins or cuts nothing; a pattern repeats joins, cuts and holes",
+                        id.map(|i| format!("pattern {i}: ")).unwrap_or_default(),
+                        f.type_name()
+                    ),
+                )
+                .with("seed", seed)
+                .with("pointer", "/features/0"));
+            }
+            (Some(seed), None)
+                if Id::parse(seed, "feature").is_ok_and(|s| !p.features.contains_key(&s)) =>
+            {
+                return Err(Error::new(
+                    Code::NotFound,
+                    format!("a pattern's seed {seed} isn't a feature of part {pid}"),
+                )
+                .with("seed", seed)
+                .with("pointer", "/features/0"));
+            }
+            _ => {}
         }
     }
     // A join, cut, intersect or hole with no targets acts on the part's
@@ -5190,6 +5216,20 @@ pub(crate) mod tests {
         ] {
             let e = edit(&mut s, f.clone()).unwrap_err();
             assert_eq!(e.code, code, "{f}: {e}");
+        }
+        // A new pattern whose seed can't give it targets says why (#102).
+        for (seed, code) in [("nope", Code::NotFound), ("b", Code::ReferenceWrongKind)] {
+            let e = add(
+                &mut s,
+                json!({"type": "pattern", "id": "bad", "features": [seed], "direction": "x",
+                       "spacing": 3, "count": 3}),
+            )
+            .unwrap_err();
+            assert_eq!(
+                (e.code, &e.details["seed"], &e.details["pointer"]),
+                (code, &json!(seed), &json!("/features/0")),
+                "{seed}: {e}"
+            );
         }
         // A new pattern's form, left out, is what its fields say.
         let r = add(
