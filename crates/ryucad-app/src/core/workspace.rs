@@ -75,6 +75,8 @@ enum Pending {
     Merge,
     Resolve,
     Doctor,
+    /// What the disk cache holds (`cache.stats` or `cache.clear`).
+    Cache,
     /// Only a failure matters.
     Quiet,
 }
@@ -217,6 +219,9 @@ pub struct Workspace {
     pub settings: Settings,
     /// The last doctor report, once asked for.
     pub doctor: Option<Value>,
+    /// What the disk cache held when last asked (`cache.stats`), for the
+    /// Preferences window.
+    pub cache: Option<Value>,
     /// Whether a report is on its way, and whether the project changed
     /// meanwhile, so the badges need another.
     doctor_waiting: bool,
@@ -286,6 +291,7 @@ impl Workspace {
             releases_open: false,
             settings: Settings::default(),
             doctor: None,
+            cache: None,
             doctor_waiting: false,
             doctor_again: false,
             raised: false,
@@ -368,6 +374,16 @@ impl Workspace {
     /// outlive the damage they show (a conflict record settled, say): at
     /// most one report on its way, and one more after it if the project
     /// changed meanwhile. Nothing until the window first asked.
+    /// Asks what the disk cache holds.
+    pub fn read_cache(&mut self) {
+        self.send(Request::CacheStats {}, Pending::Cache);
+    }
+
+    /// Empties the disk cache; the answer says what it holds now.
+    pub fn clear_cache(&mut self) {
+        self.send(Request::CacheClear {}, Pending::Cache);
+    }
+
     fn rediagnose(&mut self) {
         if self.doctor_waiting {
             self.doctor_again = true;
@@ -1264,6 +1280,7 @@ impl Workspace {
                 self.history = Some(json!({"error": e.message}));
                 self.fail(e);
             }
+            (Pending::Cache, Ok(a)) => self.cache = Some(a.result),
             (Pending::Doctor, Ok(a)) => {
                 self.doctor = Some(crate::core::doctor::report_of(&a.result))
             }

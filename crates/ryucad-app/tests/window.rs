@@ -953,6 +953,19 @@ fn preferences_change_the_window_whoever_sets_them() {
         a.opened().dialogs.preferences && !a.opened().ws.settings.all.is_empty()
     });
     h.step();
+    // It says what the disk cache holds, and clears it.
+    frames(&mut h, |a| a.opened().ws.cache.is_some());
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Clear cache")
+        .click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .cache
+            .as_ref()
+            .is_some_and(|c| c["removed"].is_object())
+    });
+    assert_eq!(p.ok(&["cache", "stats"])["entries"], 0);
     let edges = h.state().opened().view.edges;
     h.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Draw edges")
         .click();
