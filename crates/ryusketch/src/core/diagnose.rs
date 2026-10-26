@@ -17,7 +17,16 @@
 //! space the over part's, and each is read from its piece alone. Ranks
 //! are judged against the whole Jacobian's scale, as [`whole`] judges
 //! them. A piece that isn't clean (a dependency only the values show)
-//! sends the component back to [`whole`].
+//! sends the component back to [`whole`], and so, in a component small
+//! enough to read whole ([`WHOLE_LIMIT`]), do clean pieces whose
+//! coupling could make the whole nearly singular where none of them is:
+//! a point's distance from a line a few microns long reads that line's
+//! ends a million times as strongly as the point, and the whole Jacobian
+//! finds the line's own constraints dependent on the distance.
+//!
+//! Each reading decides a rank once: the left null space has as many
+//! vectors as the rows less the rank the null space was read with, so the
+//! freedom and the dependent sets never disagree about it.
 
 use super::blocks::Blocks;
 use super::linalg::{Mat, qr, qr_against};
@@ -30,6 +39,19 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const RANK_TOL: f64 = 1e-8;
 /// Entries of a unit null vector smaller than this are not part of it.
 pub const SUPPORT_TOL: f64 = 1e-6;
+/// How far, in multiples of [`RANK_TOL`] times the whole Jacobian's
+/// scale, a bound on the smallest singular value of each pair of coupled
+/// pieces must keep clear of it for the pieces to be read alone.
+pub const COUPLING_MARGIN: f64 = 10.0;
+/// Components of at most this many variables whose pieces are coupled too
+/// strongly to be read alone are read whole. Larger ones keep their
+/// pieces' reading: reading them whole costs what stage 1 does (about a
+/// second at a thousand variables, growing with the cube), and the bound
+/// is loose on long chains (a polygon of 10,000 entities clears it only
+/// 26 times over). So a larger component keeps the pieces' reading
+/// however strongly they are coupled, and in rare degenerate sketches its
+/// diagnosis may differ from stage 1's.
+pub const WHOLE_LIMIT: usize = 1000;
 
 /// What one component's diagnosis found.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -75,36 +97,33 @@ pub fn diagnose(
         .unwrap_or_else(|| whole(sys, comp, x, ok))
 }
 
-/// The largest column and row norms of `comp`'s Jacobian at `x`: what
-/// its pivoted QR and its transpose's take as their scale.
-fn norms(sys: &impl Equations, comp: &Component, x: &[f64]) -> (f64, f64) {
+/// The largest column norm of `comp`'s Jacobian at `x`: what its pivoted
+/// QR takes as its scale.
+fn norms(sys: &impl Equations, comp: &Component, x: &[f64]) -> f64 {
     let mut cols: BTreeMap<usize, f64> = BTreeMap::new();
-    let mut row_max: f64 = 0.0;
     for &e in &comp.eqs {
-        let mut row = 0.0;
         for (v, g) in sys.partials(e, x) {
             if comp.vars.binary_search(&v).is_ok() {
                 *cols.entry(v).or_default() += g * g;
-                row += g * g;
             }
         }
-        row_max = row_max.max(row);
     }
     let col_max = cols.values().fold(0.0, |m: f64, c| m.max(*c));
-    (ryukei::math::sqrt(col_max), ryukei::math::sqrt(row_max))
+    ryukei::math::sqrt(col_max)
 }
 
-/// A component's dependent sets, each with whether it conflicts.
+/// A component's dependent sets, each with whether it conflicts, from a
+/// Jacobian `jac` of rank `rank`.
 fn sets(
     sys: &impl Equations,
     comp: &Component,
     jac: &Mat,
     r: &[f64],
     ok: bool,
-    scale: Option<f64>,
+    rank: usize,
 ) -> Vec<(Vec<u32>, bool)> {
     let tol = sys.conflict_tol();
-    dependent_sets(sys, comp, jac, scale)
+    dependent_sets(sys, comp, jac, rank)
         .into_iter()
         .map(|set| {
             let rows = rows_of(sys, comp, &set);
@@ -122,7 +141,7 @@ pub fn whole(sys: &impl Equations, comp: &Component, x: &[f64], ok: bool) -> Par
         dof: comp.vars.len() - f.rank,
         vars: comp.vars.clone(),
         null: f.null_space(),
-        sets: sets(sys, comp, &jac, &r, ok, None),
+        sets: sets(sys, comp, &jac, &r, ok, f.rank),
     }
 }
 
@@ -135,31 +154,94 @@ pub fn by_pieces(
     x: &[f64],
     ok: bool,
 ) -> Option<Part> {
-    let (cols, rows) = norms(sys, comp, x);
+    let cols = norms(sys, comp, x);
     let factor = |m: &Mat| qr_against(m, RANK_TOL, Some(cols));
     let mut part = Part::default();
+    // Each piece with rows and columns, and the smallest diagonal entry of
+    // its `R` that counts for its rank.
+    let mut floors: Vec<(&Component, f64)> = Vec::new();
     if !b.over.eqs.is_empty() {
         let (jac, r) = jacobian(sys, &b.over, x);
-        if factor(&jac).rank < b.over.vars.len() {
+        let f = factor(&jac);
+        let n = b.over.vars.len();
+        if f.rank < n {
             return None;
         }
-        part.sets = sets(sys, &b.over, &jac, &r, ok, Some(rows));
+        if n > 0 {
+            floors.push((&b.over, f.diagonal(n - 1)));
+        }
+        part.sets = sets(sys, &b.over, &jac, &r, ok, n);
     }
     for blk in &b.square {
-        if factor(&jacobian(sys, blk, x).0).rank < blk.vars.len() {
+        let f = factor(&jacobian(sys, blk, x).0);
+        let n = blk.vars.len();
+        if f.rank < n {
             return None;
+        }
+        if n > 0 {
+            floors.push((blk, f.diagonal(n - 1)));
         }
     }
     if !b.under.vars.is_empty() {
         let f = factor(&jacobian(sys, &b.under, x).0);
-        if f.rank < b.under.eqs.len() {
+        let m = b.under.eqs.len();
+        if f.rank < m {
             return None;
+        }
+        if m > 0 {
+            floors.push((&b.under, f.diagonal(m - 1)));
         }
         part.dof = b.under.vars.len() - f.rank;
         part.vars = b.under.vars.clone();
         part.null = f.null_space();
     }
+    if comp.vars.len() <= WHOLE_LIMIT && !coupled_well(sys, comp, &floors, x, cols) {
+        return None;
+    }
     Some(part)
+}
+
+/// Whether pieces that are each clean stay so together. A piece's rows
+/// also read the columns of pieces before it; for one piece `D_i` with
+/// smallest singular value about `a_i` (its `floor`) reading a piece
+/// `D_j`'s columns through `B_ij`, the two together keep a smallest
+/// singular value of at least `a_i a_j / (a_i + a_j + |B_ij|)`. Every
+/// coupled pair must keep that clear of the whole's rank tolerance by
+/// [`COUPLING_MARGIN`]; a longer chain of strong couplings isn't bounded.
+fn coupled_well(
+    sys: &impl Equations,
+    comp: &Component,
+    floors: &[(&Component, f64)],
+    x: &[f64],
+    cols: f64,
+) -> bool {
+    // The piece of each of the component's variables.
+    let mut piece = vec![usize::MAX; comp.vars.len()];
+    for (i, (p, _)) in floors.iter().enumerate() {
+        for v in &p.vars {
+            if let Ok(k) = comp.vars.binary_search(v) {
+                piece[k] = i;
+            }
+        }
+    }
+    let mut coupling: BTreeMap<(usize, usize), f64> = BTreeMap::new();
+    for (i, (p, _)) in floors.iter().enumerate() {
+        for &e in &p.eqs {
+            for (v, g) in sys.partials(e, x) {
+                if let Ok(k) = comp.vars.binary_search(&v) {
+                    let j = piece[k];
+                    if j != i && j != usize::MAX {
+                        *coupling.entry((i, j)).or_default() += g * g;
+                    }
+                }
+            }
+        }
+    }
+    let tol = RANK_TOL * COUPLING_MARGIN * cols;
+    coupling.into_iter().all(|((i, j), b2)| {
+        let (a, c) = (floors[i].1, floors[j].1);
+        a * c > tol * (a + c + ryukei::math::sqrt(b2))
+    })
 }
 
 fn pick(r: &[f64], rows: &[usize]) -> Vec<f64> {
@@ -234,18 +316,12 @@ pub fn echelon(mut vectors: Vec<Vec<f64>>) -> Vec<Vec<f64>> {
 }
 
 /// Minimal sets of groups whose rows depend on each other, one per vector
-/// of the left null space's echelon form (its rank judged against
-/// `scale`, the largest row norm of the Jacobian it is part of, if not
-/// `jac` itself), each cut down until removing any of its groups makes it
-/// independent.
-fn dependent_sets(
-    sys: &impl Equations,
-    comp: &Component,
-    jac: &Mat,
-    scale: Option<f64>,
-) -> Vec<Vec<u32>> {
+/// of the left null space's echelon form (as many as `jac`'s rows less
+/// `rank`, the rank its null space was read with), each cut down until
+/// removing any of its groups makes it independent.
+fn dependent_sets(sys: &impl Equations, comp: &Component, jac: &Mat, rank: usize) -> Vec<Vec<u32>> {
     let mut out = BTreeSet::new();
-    for y in echelon(qr_against(&jac.transpose(), RANK_TOL, scale).null_space()) {
+    for y in echelon(qr(&jac.transpose(), 0.0).with_rank(rank).null_space()) {
         let mut set: Vec<u32> = y
             .iter()
             .enumerate()
