@@ -76,19 +76,46 @@ pub struct Imported {
     pub instances: BTreeMap<Name, Id>,
 }
 
-/// A representation's context, the product definition whose shape it
-/// is, and its B-rep items.
-type Holder = (Id, Option<usize>, Vec<Id>);
+/// A representation holding B-rep items: what [`Opened::body`] reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Held {
+    /// The representation's instance number.
+    pub representation: Id,
+    /// Its context, which gives its units.
+    pub context: Id,
+    /// The product definition whose shape it is, as an index into
+    /// `products.definitions`; `None` for a representation no product
+    /// reaches.
+    pub definition: Option<usize>,
+    /// Its B-rep items' instance numbers, ascending.
+    pub items: Vec<Id>,
+}
 
-/// Reads every body and the product tree of the STEP file `bytes`.
-pub fn read(bytes: &[u8], opts: &ReadOptions) -> Result<Model, StepError> {
+/// A file parsed and decoded, with its product tree and every
+/// representation holding B-rep items, each to be read on its own under
+/// a key of the caller's: what [`read`] does for every body at once.
+pub struct Opened {
+    pub header: Header,
+    pub schema: Schema,
+    pub products: Products,
+    /// One per representation holding B-rep items, in instance order.
+    pub held: Vec<Held>,
+    /// For each of `held`, the first that holds the same items in the
+    /// same context: the one whose body it is.
+    first: Vec<usize>,
+    entities: Entities,
+}
+
+/// Parses and decodes the STEP file `bytes` and reads its product tree,
+/// reading no bodies yet.
+pub fn open(bytes: &[u8]) -> Result<Opened, StepError> {
     let file = part21::parse(bytes)?;
     let schema = Schema::of(&file.header)?;
-    let e = Entities::decode(&file);
-    let products = Products::build(&e);
+    let entities = Entities::decode(&file);
+    let products = Products::build(&entities);
     // Every representation holding B-rep items, once, with its context,
     // definition and items.
-    let mut reps: BTreeMap<Id, Holder> = BTreeMap::new();
+    let mut reps: BTreeMap<Id, Held> = BTreeMap::new();
     let shapes = products
         .definitions
         .iter()
@@ -99,53 +126,92 @@ pub fn read(bytes: &[u8], opts: &ReadOptions) -> Result<Model, StepError> {
         if s.breps.is_empty() {
             continue;
         }
-        let entry = reps
-            .entry(s.representation)
-            .or_insert((s.context, definition, Vec::new()));
-        entry.2.extend(&s.breps);
+        let entry = reps.entry(s.representation).or_insert(Held {
+            representation: s.representation,
+            context: s.context,
+            definition,
+            items: Vec::new(),
+        });
+        entry.items.extend(&s.breps);
     }
-    let list: Vec<(Id, Holder)> = reps
-        .into_iter()
-        .map(|(r, (c, d, mut items))| {
-            items.sort_unstable();
-            items.dedup();
-            (r, (c, d, items))
+    let held: Vec<Held> = reps
+        .into_values()
+        .map(|mut h| {
+            h.items.sort_unstable();
+            h.items.dedup();
+            h
         })
         .collect();
     // Representations holding the same items in the same context (a
     // part's shape and its copies under other representations) are one
     // body, read once, under the first of them.
-    let mut first: BTreeMap<(Id, &[Id]), usize> = BTreeMap::new();
-    for (k, (_, (c, _, items))) in list.iter().enumerate() {
-        first.entry((*c, items.as_slice())).or_insert(k);
-    }
-    let read: BTreeMap<usize, Read> = first
-        .values()
-        .copied()
-        .collect::<Vec<usize>>()
-        .par_iter()
-        .map(|&k| {
-            let (r, (c, _, items)) = &list[k];
-            (k, body(&e, items, *r, *c, opts))
-        })
-        .collect();
-    let bodies = list
+    let mut firsts: BTreeMap<(Id, &[Id]), usize> = BTreeMap::new();
+    let first = held
         .iter()
-        .map(|(representation, (context, definition, items))| {
-            let (result, instances) = read[&first[&(*context, items.as_slice())]].clone();
-            Imported {
-                representation: *representation,
-                items: items.clone(),
-                definition: *definition,
-                result,
-                instances,
-            }
-        })
+        .enumerate()
+        .map(|(k, h)| *firsts.entry((h.context, h.items.as_slice())).or_insert(k))
         .collect();
-    Ok(Model {
+    Ok(Opened {
         header: file.header,
         schema,
         products,
+        held,
+        first,
+        entities,
+    })
+}
+
+impl Opened {
+    /// The body of `held[k]`, read under `opts`: the same as [`read`]
+    /// gives it.
+    pub fn body(&self, k: usize, opts: &ReadOptions) -> Imported {
+        let (result, instances) = self.read(self.first[k], opts);
+        self.imported(k, result, instances)
+    }
+
+    /// What reading `held[k]` gives, before it is labelled.
+    fn read(&self, k: usize, opts: &ReadOptions) -> Read {
+        let h = &self.held[k];
+        body(&self.entities, &h.items, h.representation, h.context, opts)
+    }
+
+    fn imported(
+        &self,
+        k: usize,
+        result: Result<(Body, Journal, HealReport), ImportError>,
+        instances: BTreeMap<Name, Id>,
+    ) -> Imported {
+        let h = &self.held[k];
+        Imported {
+            representation: h.representation,
+            items: h.items.clone(),
+            definition: h.definition,
+            result,
+            instances,
+        }
+    }
+}
+
+/// Reads every body and the product tree of the STEP file `bytes`.
+pub fn read(bytes: &[u8], opts: &ReadOptions) -> Result<Model, StepError> {
+    let opened = open(bytes)?;
+    let mut firsts: Vec<usize> = opened.first.clone();
+    firsts.sort_unstable();
+    firsts.dedup();
+    let read: BTreeMap<usize, Read> = firsts
+        .par_iter()
+        .map(|&k| (k, opened.read(k, opts)))
+        .collect();
+    let bodies = (0..opened.held.len())
+        .map(|k| {
+            let (result, instances) = read[&opened.first[k]].clone();
+            opened.imported(k, result, instances)
+        })
+        .collect();
+    Ok(Model {
+        header: opened.header,
+        schema: opened.schema,
+        products: opened.products,
         bodies,
     })
 }

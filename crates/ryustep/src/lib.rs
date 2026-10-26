@@ -19,5 +19,5 @@ pub mod schema;
 pub mod write;
 
 pub use error::{ImportError, StepError, WriteError};
-pub use read::{Imported, Model, ReadOptions, read};
+pub use read::{Held, Imported, Model, Opened, ReadOptions, open, read};
 pub use write::{Child, LengthUnit, Product, WriteModel, WriteOptions, write};
