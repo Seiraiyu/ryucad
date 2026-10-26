@@ -4,6 +4,7 @@
 use crate::core::activity::{Activity, LOADED};
 use crate::core::compare::Compare;
 use crate::core::edit::{DimForm, Form};
+use crate::core::interference::Interference;
 use crate::core::link::{Event, Link, Wake};
 use crate::core::merge::Merge;
 use crate::core::model::{BodyKey, Model, Part};
@@ -77,6 +78,8 @@ enum Pending {
     Merge,
     Resolve,
     Doctor,
+    /// An assembly's interference (`interference`).
+    Interference(String),
     /// What the disk cache holds (`cache.stats` or `cache.clear`).
     Cache,
     /// A drag's preview solve (`assembly.solve`), for this assembly.
@@ -245,6 +248,9 @@ pub struct Workspace {
     pub settings: Settings,
     /// The last doctor report, once asked for.
     pub doctor: Option<Value>,
+    /// The shown assembly's interference, once asked for (Tools > Check
+    /// interference); asked again as the assembly changes.
+    pub interference: Option<Interference>,
     /// What the disk cache held when last asked (`cache.stats`), for the
     /// Preferences window.
     pub cache: Option<Value>,
@@ -321,6 +327,7 @@ impl Workspace {
             releases_open: false,
             settings: Settings::default(),
             doctor: None,
+            interference: None,
             cache: None,
             drag: None,
             drag_note: None,
@@ -394,6 +401,30 @@ impl Workspace {
     /// Redoes an undo, or this window's latest undo.
     pub fn redo(&mut self, entry: Option<u64>) {
         self.send(Request::Redo { entry }, Pending::Quiet);
+    }
+
+    /// The assembly the window shows, if it shows exactly one.
+    pub fn shown_assembly(&self) -> Option<String> {
+        match self.model.shown().as_slice() {
+            [one] if self.model.parts.get(*one).is_some_and(|p| p.assembly) => {
+                Some((*one).to_owned())
+            }
+            _ => None,
+        }
+    }
+
+    /// Finds which instances of the shown assembly interfere
+    /// (`interference`); nothing when it shows none.
+    pub fn check_interference(&mut self) {
+        let Some(part) = self.shown_assembly() else {
+            return;
+        };
+        self.interference = Some(Interference::asked(&part));
+        let req = Request::Interference {
+            part: part.clone(),
+            instances: Vec::new(),
+        };
+        self.send(req, Pending::Interference(part));
     }
 
     /// Diagnoses the project (`doctor`).
@@ -1460,6 +1491,16 @@ impl Workspace {
                     self.fail(e);
                 }
             }
+            (Pending::Interference(part), a) => {
+                let Some(i) = self.interference.as_mut().filter(|i| i.part == part) else {
+                    return;
+                };
+                match a {
+                    Ok(a) => i.take(&a.result),
+                    Err(e) => i.failed(e),
+                }
+                self.model.generation += 1;
+            }
             (Pending::Doctor, Ok(a)) => {
                 self.doctor = Some(crate::core::doctor::report_of(&a.result))
             }
@@ -1735,6 +1776,14 @@ impl Workspace {
     }
 
     fn part_changed(&mut self, report: &Value) {
+        // Interference found for this assembly is found again.
+        if self
+            .interference
+            .as_ref()
+            .is_some_and(|i| report["part"] == i.part.as_str())
+        {
+            self.check_interference();
+        }
         // A form nobody is typing in follows the files.
         if let Some(f) = &self.form
             && report["part"] == f.part.as_str()

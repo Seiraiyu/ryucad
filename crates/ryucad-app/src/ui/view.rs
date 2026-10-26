@@ -371,6 +371,15 @@ impl View {
                 }
             }
         }
+        // Interference found: the faces each pair's shared volume touches.
+        if let Some(i) = &ws.interference {
+            let removed = linear(style::REMOVED);
+            for r in i.faces() {
+                if let Some(Place::Face(k, f)) = picker.place(r) {
+                    faces.push((k, f, removed));
+                }
+            }
+        }
         let mut lines = frame_lines;
         // A sketch chosen in the tree: all of it.
         if let Some(d) = chosen_sketch {

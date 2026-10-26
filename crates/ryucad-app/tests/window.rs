@@ -1758,6 +1758,64 @@ fn an_assembly_lists_its_instances_and_offers_what_to_show() {
 }
 
 #[test]
+fn tools_check_interference_lists_and_paints_the_pairs() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = two_bolts();
+    // A third bolt into the first.
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b3", "--of", "bolt", "--origin", "4,0,0",
+    ]);
+    let mut h = window(&p);
+    both_bolts(&mut h);
+    h.get_by_label("Tools").click();
+    shown(&mut h, "Check interference");
+    h.get_by_label("Check interference").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .interference
+            .as_ref()
+            .is_some_and(|i| i.loaded)
+    });
+    // A new window is laid out a frame or two after it opens.
+    let row = |h: &Harness<'static, App>| {
+        // A label's text is its value, on the label and its text run.
+        h.query_all_by(|n| {
+            [n.label(), n.value()]
+                .into_iter()
+                .flatten()
+                .any(|l| l.starts_with("b1/shank and b3/shank: "))
+        })
+        .next()
+        .is_some()
+    };
+    for _ in 0..20 {
+        if row(&h) {
+            break;
+        }
+        h.step();
+    }
+    assert!(
+        row(&h),
+        "no row for the pair (dialog open: {}): {:?}",
+        h.state().opened().dialogs.interference,
+        h.state().opened().ws.interference
+    );
+    // Its faces are painted, and Show frames them.
+    let before = h.state().opened().view.nav.camera.clone();
+    h.get_by_label("Show").click();
+    for _ in 0..4 {
+        h.step();
+    }
+    assert_ne!(h.state().opened().view.nav.camera, before);
+    let i = h.state().opened().ws.interference.clone().unwrap();
+    assert!(i.faces().count() >= 2, "{i:?}");
+}
+
+#[test]
 fn choosing_a_subassembly_frames_everything_it_places() {
     let _one = one_at_a_time();
     if !gpu() {

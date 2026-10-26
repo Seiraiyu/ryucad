@@ -5,6 +5,7 @@ pub mod compare;
 pub mod doctor;
 pub mod edit;
 pub mod geometry;
+pub mod interference;
 pub mod link;
 pub mod lod;
 pub mod merge;
