@@ -674,10 +674,18 @@ impl Workspace {
     fn fetch_ghosts(&mut self) {
         let Some(c) = &mut self.compare else { return };
         let rev = c.commit.clone().unwrap_or_else(|| c.rev.clone());
-        for (key, hash) in c.ask() {
+        let asked: Vec<(BodyKey, String, String)> = c
+            .ask()
+            .into_iter()
+            .map(|(key, hash)| {
+                let feature = c.ghost_request(&key);
+                (key, hash, feature)
+            })
+            .collect();
+        for (key, hash, feature) in asked {
             let req = Request::MeshGet {
                 part: key.0.clone(),
-                feature: Some(key.1.clone()),
+                feature: Some(feature),
                 quality: None,
                 transfer: Some(Transfer::Binary),
                 rev: Some(rev.clone()),

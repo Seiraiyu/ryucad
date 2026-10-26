@@ -229,7 +229,7 @@ fn triple(v: &Value) -> [f64; 3] {
 }
 
 impl Occurrence {
-    fn from_json(v: &Value) -> Occurrence {
+    pub fn from_json(v: &Value) -> Occurrence {
         Occurrence {
             path: text(&v["path"]),
             part: text(&v["part"]),

@@ -1253,7 +1253,12 @@ pub fn model(
 
 /// An assembly's occurrences on each side, by path: `added`, `removed`,
 /// `moved` (its pose differs) and `changed` (its part's solids differ);
-/// `None` when nothing differs, unless `all`.
+/// each of those with both its `sides` as [`crate::assembly::Occurrence`]
+/// reports them (`null` where it is absent), and, for a solid on both
+/// sides whose body differs, what differs in it (`bodies`, by
+/// `<path>/<solid>`, as `body` is for a part's solid): what a compare
+/// paints and ghosts (issue #109). `None` when nothing differs, unless
+/// `all`.
 fn occurrences(a: &Built, b: &Built, all: bool) -> Option<Value> {
     use crate::assembly::{Occurrence, path_text};
     if a.occurrences.is_empty() && b.occurrences.is_empty() {
@@ -1289,8 +1294,40 @@ fn occurrences(a: &Built, b: &Built, all: bool) -> Option<Value> {
         .map(|(k, _, _)| *k)
         .collect();
     let same = added.is_empty() && removed.is_empty() && moved.is_empty() && changed.is_empty();
-    (!same || all)
-        .then(|| json!({"added": added, "removed": removed, "moved": moved, "changed": changed}))
+    if same && !all {
+        return None;
+    }
+    let mut sides = serde_json::Map::new();
+    let mut differ = serde_json::Map::new();
+    let listed: BTreeSet<&String> = added
+        .iter()
+        .chain(&removed)
+        .chain(&moved)
+        .chain(&changed)
+        .copied()
+        .collect();
+    for path in listed {
+        let (p, q) = (x.get(path), y.get(path));
+        let side = |o: Option<&Occurrence>| o.map_or(Value::Null, Occurrence::to_json);
+        sides.insert(path.clone(), json!({"from": side(p), "to": side(q)}));
+        let (Some(p), Some(q)) = (p, q) else {
+            continue;
+        };
+        for s in &q.solids {
+            if let Some(was) = p.solids.iter().find(|w| w.founder == s.founder)
+                && was.built.hash != s.built.hash
+            {
+                differ.insert(
+                    format!("{path}/{}", s.founder),
+                    bodies(&was.built.body, &s.built.body),
+                );
+            }
+        }
+    }
+    Some(
+        json!({"added": added, "removed": removed, "moved": moved, "changed": changed,
+                "sides": sides, "bodies": differ}),
+    )
 }
 
 #[cfg(test)]

@@ -2308,10 +2308,34 @@ pub(crate) mod tests {
         assert_eq!(pose[0]["to"], json!([0.011, 0, 0]));
         let v = call(&mut s, "diff", json!({"model": true})).unwrap();
         let occ = &v["parts"]["frame"]["occurrences"];
+        let lists = |k: &str| occ[k].clone();
         assert_eq!(
-            occ,
-            &json!({"added": [], "removed": ["b2"], "moved": ["b1"], "changed": ["base"]})
+            [
+                lists("added"),
+                lists("removed"),
+                lists("moved"),
+                lists("changed")
+            ],
+            [json!([]), json!(["b2"]), json!(["b1"]), json!(["base"])]
         );
+        // Each with its sides, as a compare paints and ghosts them.
+        assert_eq!(occ["sides"]["b2"]["to"], Value::Null);
+        assert_eq!(occ["sides"]["b2"]["from"]["part"], "bolt");
+        assert_eq!(
+            occ["sides"]["b1"]["to"]["pose"]["origin_m"],
+            json!([0.011, 0, 0])
+        );
+        assert_ne!(
+            occ["sides"]["base"]["from"]["solids"][0]["hash"],
+            occ["sides"]["base"]["to"]["solids"][0]["hash"]
+        );
+        // The plate thicker: its top moved, its sides grew.
+        let body = &occ["bodies"]["base/slab"];
+        assert!(
+            !body["faces"]["changed"].as_array().unwrap().is_empty(),
+            "{body}"
+        );
+        assert_eq!(occ["bodies"].as_object().unwrap().len(), 1);
         // A part has no occurrences to report.
         assert!(v["parts"]["plate"].get("occurrences").is_none());
     }
