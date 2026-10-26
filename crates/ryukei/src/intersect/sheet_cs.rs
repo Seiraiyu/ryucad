@@ -33,7 +33,7 @@ use super::cells::cells;
 use super::cs::{CurveHit, Side};
 use crate::geom::bound2::IVec3;
 use crate::geom::sheet::Sheet;
-use crate::geom::{Curve, Point3, Surface};
+use crate::geom::{Curve, Point3, Surface, creases};
 use crate::interval::Interval;
 use crate::predicates::Sign;
 use crate::tol::LINEAR_RESOLUTION;
@@ -156,6 +156,8 @@ pub(crate) fn curve_sheet(
         sheet: Sheet::of(surface),
         range: [t0, t1],
         tolerance,
+        kinks: kinks(curve),
+        lines: crease_lines(surface),
     };
     let near = curve.bounds([t0, t1]).grow(tolerance);
     let mut found = Vec::new();
@@ -166,8 +168,12 @@ pub(crate) fn curve_sheet(
             s.search([ts, u, v], 0, &mut budget, &mut found)?;
         }
     }
-    // An end within tolerance of the surface touches it.
-    for t in [t0, t1] {
+    // An end within tolerance of the surface touches it, and so does a
+    // kink: the curve's nearest point may be one, where its distance has
+    // no turning point for the near-miss search to find.
+    let kinked = between(&s.kinks, t0, t1).unwrap_or_default();
+    let ends = [t0, t1].into_iter().chain(kinked);
+    for t in ends {
         if s.path_bound([t, t], None) <= tolerance {
             found.push(Candidate {
                 t: [t, t],
@@ -203,6 +209,50 @@ struct Path {
     second: (f64, f64),
 }
 
+impl Path {
+    /// The path's parameters `(u, v)` at offsets `d` from its middle.
+    fn over(&self, d: Iv) -> (Iv, Iv) {
+        let p = Iv::point;
+        let half = p(0.5) * d.square();
+        let ((um, vm), (da, db), (da2, db2)) = (self.uv, self.first, self.second);
+        (
+            p(um) + p(da) * d + p(da2) * half,
+            p(vm) + p(db) * d + p(db2) * half,
+        )
+    }
+
+    /// The path's parameters `(u, v)` over offsets from `d0` to `d1`,
+    /// tightly: each is a quadratic, so its range is reached at the ends
+    /// or at its turning point.
+    fn range(&self, d0: f64, d1: f64) -> (Iv, Iv) {
+        let at = |d: f64| self.over(Iv::point(d));
+        let hull = |a: Iv, b: Iv| Iv::new(a.lo().min(b.lo()), a.hi().max(b.hi())).unwrap_or(a);
+        let ((da, db), (da2, db2)) = (self.first, self.second);
+        // Turning points inside the offsets, of `u` and of `v`.
+        let turn = |rate: f64, curve: f64| {
+            let d = -rate / curve;
+            (curve != 0.0 && d > d0 && d < d1).then_some(d)
+        };
+        let (a, b) = (at(d0), at(d1));
+        let mut u = hull(a.0, b.0);
+        let mut v = hull(a.1, b.1);
+        if let Some(d) = turn(da, da2) {
+            u = hull(u, at(d).0);
+        }
+        if let Some(d) = turn(db, db2) {
+            v = hull(v, at(d).1);
+        }
+        (u, v)
+    }
+
+    /// The path's rates `(u', v')` at offsets `d` from its middle.
+    fn rate(&self, d: Iv) -> (Iv, Iv) {
+        let p = Iv::point;
+        let ((da, db), (da2, db2)) = (self.first, self.second);
+        (p(da) + p(da2) * d, p(db) + p(db2) * d)
+    }
+}
+
 /// Enclosures of `E`, its Jacobian, and `C' · (S_u × S_v)`, over a box.
 struct Enc {
     e: [Iv; 3],
@@ -216,6 +266,102 @@ struct Search<'a> {
     sheet: Sheet<'a>,
     range: [f64; 2],
     tolerance: f64,
+    /// Where the curve may kink.
+    kinks: Kinks,
+    /// Where the surface may crease, along `u` and along `v`.
+    lines: [Kinks; 2],
+}
+
+/// Parameters where a spline's first derivative may jump (its knots of
+/// multiplicity `degree`), repeated every period if it has one.
+type Kinks = (Vec<f64>, Option<f64>);
+
+/// Where a curve may kink.
+fn kinks(curve: &Curve) -> Kinks {
+    match curve {
+        Curve::Nurbs(n) => (creases(n.knots()), n.period()),
+        _ => (Vec::new(), None),
+    }
+}
+
+/// Where a surface may crease along each parameter: a spline's knot
+/// lines, and a swept surface's along its curve's kinks.
+fn crease_lines(surface: &Surface) -> [Kinks; 2] {
+    let none = || (Vec::new(), None);
+    match surface {
+        Surface::Nurbs(n) => {
+            let [ku, kv] = n.knots();
+            let (pu, pv) = n.periods();
+            [(creases(ku), pu), (creases(kv), pv)]
+        }
+        Surface::Extrusion(e) => [kinks(e.curve()), none()],
+        Surface::Revolution(r) => [none(), kinks(r.curve())],
+        _ => [none(), none()],
+    }
+}
+
+/// The most kinks a stretch may hold before it is given up on.
+const MAX_KINKS: f64 = 64.0;
+
+/// How many periods from a kink can still be counted one by one.
+const PERIODS: f64 = 4_503_599_627_370_496.0; // 2⁵²
+
+/// The kinks strictly between `lo` and `hi`, in order; `None` where there
+/// are more than [`MAX_KINKS`] periods' worth (a path across a periodic
+/// direction many times over, or bounds too wide to count).
+fn between((ks, period): &Kinks, lo: f64, hi: f64) -> Option<Vec<f64>> {
+    let mut out = Vec::new();
+    for &k in ks {
+        match *period {
+            Some(p) if p > 0.0 => {
+                let first = ((lo - k) / p).floor();
+                let last = ((hi - k) / p).ceil();
+                // Past 2⁵² periods from the kink, whole periods can't be
+                // counted in floats (`n + 1` may equal `n`).
+                if !(last - first <= MAX_KINKS && first.abs() < PERIODS && last.abs() < PERIODS) {
+                    return None;
+                }
+                let count = (last - first) as u32;
+                for i in 0..=count {
+                    let x = k + (first + f64::from(i)) * p;
+                    if x > lo && x < hi {
+                        out.push(x);
+                    }
+                }
+            }
+            _ => {
+                if k > lo && k < hi {
+                    out.push(k);
+                }
+            }
+        }
+    }
+    out.sort_by(f64::total_cmp);
+    out.dedup();
+    Some(out)
+}
+
+/// The roots of `c0 + c1 x + c2 x²` with `|x| <= h`.
+fn roots(c0: f64, c1: f64, c2: f64, h: f64) -> Vec<f64> {
+    let mut out = Vec::new();
+    if c2 == 0.0 {
+        if c1 != 0.0 {
+            out.push(-c0 / c1);
+        }
+    } else {
+        let disc = c1 * c1 - 4.0 * c2 * c0;
+        if disc >= 0.0 {
+            let q = -0.5 * (c1 + c1.signum() * crate::math::sqrt(disc));
+            if q != 0.0 {
+                out.push(q / c2);
+                out.push(c0 / q);
+            } else {
+                out.push(0.0);
+            }
+        }
+    }
+    out.retain(|x| x.is_finite() && x.abs() <= h);
+    out
 }
 
 impl Search<'_> {
@@ -229,7 +375,13 @@ impl Search<'_> {
                 t0 + (t1 - t0) * f64::from(k) / 16.0
             }
         };
-        (0..16).map(|i| [at(i), at(i + 1)]).collect()
+        // Also cut at the curve's kinks, where no box may straddle a
+        // jump in its first derivative.
+        let mut cuts: Vec<f64> = (0..=16).map(at).collect();
+        cuts.extend(between(&self.kinks, t0, t1).unwrap_or_default());
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup();
+        cuts.windows(2).map(|w| [w[0], w[1]]).collect()
     }
 
     /// The enclosures over a box, without the mean value form.
@@ -252,9 +404,9 @@ impl Search<'_> {
         let m: [f64; 3] = cell.map(|[a, b]| (a + b) / 2.0);
         let at = self.raw(m.map(|x| [x, x]))?;
         let d: [Iv; 3] = [
-            Iv::new(cell[0][0] - m[0], cell[0][1] - m[0])?,
-            Iv::new(cell[1][0] - m[1], cell[1][1] - m[1])?,
-            Iv::new(cell[2][0] - m[2], cell[2][1] - m[2])?,
+            Iv::new(cell[0][0], cell[0][1])? - Iv::point(m[0]),
+            Iv::new(cell[1][0], cell[1][1])? - Iv::point(m[1]),
+            Iv::new(cell[2][0], cell[2][1])? - Iv::point(m[2]),
         ];
         for k in 0..3 {
             let lin = at.e[k] + out.jac[k][0] * d[0] + out.jac[k][1] * d[1] + out.jac[k][2] * d[2];
@@ -273,13 +425,18 @@ impl Search<'_> {
         *budget = budget.checked_sub(1).ok_or(Failure::Uncertain)?;
         let enc = self.enclose(cell);
         if let Some(c) = &enc {
-            if c.e.iter().any(|&x| signed(x)) {
+            // No point of the box is within the tolerance of the surface.
+            let tol = self.tolerance;
+            if c.e.iter().any(|&x| x.lo() > tol || x.hi() < -tol) {
                 return Ok(());
             }
             let m: [f64; 3] = cell.map(|[a, b]| (a + b) / 2.0);
+            let mut no_zero = c.e.iter().any(|&x| signed(x));
             if let Some(at) = self.raw(m.map(|x| [x, x])) {
+                if self.far_along_normal(cell, c, &at) {
+                    return Ok(());
+                }
                 match krawczyk3(at.e, c.jac, cell) {
-                    Some(false) => return Ok(()),
                     Some(true) if signed(c.slope) => {
                         let t = self.root(cell);
                         out.push(Candidate {
@@ -288,8 +445,17 @@ impl Search<'_> {
                         });
                         return Ok(());
                     }
+                    Some(false) => no_zero = true,
                     _ => {}
                 }
+            }
+            // With no exact zero, the box can still hold a near miss: the
+            // curve coming within the tolerance without reaching the
+            // surface. As for an analytic surface, a near miss is the
+            // turning point of the curve's distance, where `G` vanishes
+            // (see [`Self::tangency`]); a box holding none is out.
+            if no_zero && self.near_miss(cell, out)? {
+                return Ok(());
             }
             let mid = (
                 (cell[1][0] + cell[1][1]) / 2.0,
@@ -326,6 +492,144 @@ impl Search<'_> {
             self.search(c, depth + 1, budget, out)?;
         }
         Ok(())
+    }
+
+    /// Whether `E` over a box is certified longer than the tolerance by
+    /// its component along the surface's normal at the box's middle (any
+    /// direction bounds a vector's length from below), by the mean value
+    /// form about the middle: tighter than the coordinates' components
+    /// where the curve runs beside the surface.
+    fn far_along_normal(&self, cell: Box3p, c: &Enc, at: &Enc) -> bool {
+        let (mu, mv) = (
+            (cell[1][0] + cell[1][1]) / 2.0,
+            (cell[2][0] + cell[2][1]) / 2.0,
+        );
+        let j = self.sheet.jets_at(mu, mv);
+        let su = j.map(|x| x.d[0]);
+        let sv = j.map(|x| x.d[1]);
+        let n = [
+            su[1] * sv[2] - su[2] * sv[1],
+            su[2] * sv[0] - su[0] * sv[2],
+            su[0] * sv[1] - su[1] * sv[0],
+        ];
+        if !n.iter().all(|x| x.is_finite()) {
+            return false;
+        }
+        let p = Iv::point;
+        let m: [f64; 3] = cell.map(|[a, b]| (a + b) / 2.0);
+        let mut along = (0..3).fold(p(0.0), |acc, k| acc + p(n[k]) * at.e[k]);
+        for (col, &[lo, hi]) in cell.iter().enumerate() {
+            let Some(d) = Iv::new(lo, hi).map(|x| x - p(m[col])) else {
+                return false;
+            };
+            let slope = (0..3).fold(p(0.0), |acc, k| acc + p(n[k]) * c.jac[k][col]);
+            along = along + slope * d;
+        }
+        let size = norm_hi(n.map(p));
+        let least = along.lo().max(-along.hi());
+        size.is_finite() && least > (p(self.tolerance) * p(size)).hi()
+    }
+
+    /// Whether a box with no exact zero of `E` is settled: out when `G`
+    /// (the tangency system) has no root in it, a touch when it has
+    /// exactly one and the curve there is certified within the
+    /// tolerance. `false` leaves it to be halved.
+    fn near_miss(&self, cell: Box3p, out: &mut Vec<Candidate>) -> Result<bool, Failure> {
+        let Some((g, jac)) = self.tangency(cell) else {
+            return Ok(false);
+        };
+        if g.iter().any(|&x| signed(x)) {
+            return Ok(true);
+        }
+        let m: [f64; 3] = cell.map(|[a, b]| (a + b) / 2.0);
+        let decided = match self.tangency(m.map(|x| [x, x])) {
+            Some((at, _)) => krawczyk3(at, jac, cell),
+            None => None,
+        };
+        match decided {
+            Some(false) => Ok(true),
+            Some(true) => {
+                let x = self.tangency_root(cell);
+                let c = self.curve.jet_box([x[0], x[0]]);
+                let Some(s) = self.sheet.jet_box([[x[1], x[1]], [x[2], x[2]]]) else {
+                    return Err(Failure::Uncertain);
+                };
+                let e: IVec3 = core::array::from_fn(|k| c[0][k] - s[k].v);
+                // The least each component can be: past the tolerance in
+                // any, the curve stays farther from the surface.
+                let least = |x: &Iv| (x.lo().max(0.0)).max(-x.hi());
+                if norm_hi(e) + super::SLACK <= self.tolerance {
+                    out.push(Candidate {
+                        t: [x[0], x[0]],
+                        simple: None,
+                    });
+                    Ok(true)
+                } else if e.iter().map(least).fold(0.0, f64::max) > self.tolerance {
+                    Ok(true)
+                } else {
+                    Err(Failure::Uncertain)
+                }
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// `G = ((C - S) · S_u, (C - S) · S_v, C' · (S_u × S_v))` and its
+    /// Jacobian over a box. `G` vanishes where the curve runs along the
+    /// surface's tangent plane at a foot of its point: a turning point of
+    /// its signed distance (the squared distance's system would have a
+    /// degenerate root where the curve touches the surface).
+    fn tangency(&self, b: Box3p) -> Option<([Iv; 3], [[Iv; 3]; 3])> {
+        let cv = self.curve.jet_box(b[0]);
+        let p = self.sheet.jet_box([b[1], b[2]])?;
+        let w: IVec3 = core::array::from_fn(|k| cv[0][k] - p[k].v);
+        let su: IVec3 = core::array::from_fn(|k| p[k].d[0]);
+        let sv: IVec3 = core::array::from_fn(|k| p[k].d[1]);
+        let suu: IVec3 = core::array::from_fn(|k| p[k].h[0]);
+        let suv: IVec3 = core::array::from_fn(|k| p[k].h[1]);
+        let svv: IVec3 = core::array::from_fn(|k| p[k].h[2]);
+        let (c1, c2) = (cv[1], cv[2]);
+        let n = cross(su, sv);
+        let nu: IVec3 = core::array::from_fn(|k| cross(suu, sv)[k] + cross(su, suv)[k]);
+        let nv: IVec3 = core::array::from_fn(|k| cross(suv, sv)[k] + cross(su, svv)[k]);
+        Some((
+            [dot(w, su), dot(w, sv), dot(c1, n)],
+            [
+                [
+                    dot(c1, su),
+                    dot(w, suu) - dot(su, su),
+                    dot(w, suv) - dot(sv, su),
+                ],
+                [
+                    dot(c1, sv),
+                    dot(w, suv) - dot(su, sv),
+                    dot(w, svv) - dot(sv, sv),
+                ],
+                [dot(c2, n), dot(c1, nu), dot(c1, nv)],
+            ],
+        ))
+    }
+
+    /// The root of `G` in a box certified to hold one, by Newton's method
+    /// from its middle, kept inside the box.
+    fn tangency_root(&self, cell: Box3p) -> [f64; 3] {
+        let mut x: [f64; 3] = cell.map(|[a, b]| (a + b) / 2.0);
+        for _ in 0..40 {
+            let Some((g, jac)) = self.tangency(x.map(|v| [v, v])) else {
+                break;
+            };
+            let mid = |v: Iv| (v.lo() + v.hi()) / 2.0;
+            let Some(dx) = solve3(jac.map(|r| r.map(mid)), g.map(mid)) else {
+                break;
+            };
+            let next: [f64; 3] =
+                core::array::from_fn(|k| (x[k] - dx[k]).clamp(cell[k][0], cell[k][1]));
+            if next == x {
+                break;
+            }
+            x = next;
+        }
+        x
     }
 
     /// The solution in a box certified to hold one, by Newton's method on
@@ -445,36 +749,7 @@ impl Search<'_> {
         let pad = |x: f64, k: f64| k.abs() * reach + 1e-9 * (1.0 + x.abs()) + reach;
         let (hu, hv) = (pad(um, da), pad(vm, db));
         let cell = [rt, [um - hu, um + hu], [vm - hv, vm + hv]];
-        let enclose = |b: Box3p| -> Option<([Iv; 3], [[Iv; 3]; 3])> {
-            let cv = self.curve.jet_box(b[0]);
-            let p = self.sheet.jet_box([b[1], b[2]])?;
-            let w: IVec3 = core::array::from_fn(|k| cv[0][k] - p[k].v);
-            let su: IVec3 = core::array::from_fn(|k| p[k].d[0]);
-            let sv: IVec3 = core::array::from_fn(|k| p[k].d[1]);
-            let suu: IVec3 = core::array::from_fn(|k| p[k].h[0]);
-            let suv: IVec3 = core::array::from_fn(|k| p[k].h[1]);
-            let svv: IVec3 = core::array::from_fn(|k| p[k].h[2]);
-            let (c1, c2) = (cv[1], cv[2]);
-            let n = cross(su, sv);
-            let nu: IVec3 = core::array::from_fn(|k| cross(suu, sv)[k] + cross(su, suv)[k]);
-            let nv: IVec3 = core::array::from_fn(|k| cross(suv, sv)[k] + cross(su, svv)[k]);
-            Some((
-                [dot(w, su), dot(w, sv), dot(c1, n)],
-                [
-                    [
-                        dot(c1, su),
-                        dot(w, suu) - dot(su, su),
-                        dot(w, suv) - dot(sv, su),
-                    ],
-                    [
-                        dot(c1, sv),
-                        dot(w, suv) - dot(su, sv),
-                        dot(w, svv) - dot(sv, sv),
-                    ],
-                    [dot(c2, n), dot(c1, nu), dot(c1, nv)],
-                ],
-            ))
-        };
+        let enclose = |b: Box3p| self.tangency(b);
         let mut stack = vec![(cell, 0u32)];
         let mut found = None;
         // A stretch lying on the surface has `G = 0` all along it and no
@@ -517,6 +792,14 @@ impl Search<'_> {
     /// notes), the foot found near `near` or else by projection; infinite
     /// where the path leaves a bounded domain or the surface has no
     /// tangent plane at the foot.
+    ///
+    /// The Taylor bound needs `g` to have a continuous first derivative,
+    /// which it lacks at a kink of the curve or where the path crosses a
+    /// crease line of the surface (an exact circle's double knots are
+    /// such lines). The stretch is cut there: each piece takes its own
+    /// Taylor bound about its middle, and a crossing of a crease line,
+    /// whose place is only known to rounding, is covered by a short gap
+    /// bounded by `g`'s value and its slope over the gap.
     fn path_bound(&self, [a, b]: [f64; 2], near: Option<(f64, f64)>) -> f64 {
         let tm = (a + b) / 2.0;
         let h = (b - a) / 2.0;
@@ -526,15 +809,7 @@ impl Search<'_> {
         let Some(delta) = Iv::new(-h, h) else {
             return f64::INFINITY;
         };
-        let p = Iv::point;
-        let ((um, vm), (da, db), (da2, db2)) = (path.uv, path.first, path.second);
-        // The path's parameters and their rates over the stretch.
-        let half = p(0.5) * delta.square();
-        let (us, vs) = (
-            p(um) + p(da) * delta + p(da2) * half,
-            p(vm) + p(db) * delta + p(db2) * half,
-        );
-        let (u1, v1) = (p(da) + p(da2) * delta, p(db) + p(db2) * delta);
+        let (us, vs) = path.over(delta);
         let [du, dv] = self.surface.domain();
         let (pu, pv) = self.surface.periods();
         let inside = |x: Iv, d: [f64; 2], period: Option<f64>| {
@@ -543,28 +818,162 @@ impl Search<'_> {
         if !(inside(us, du, pu) && inside(vs, dv, pv)) {
             return f64::INFINITY;
         }
-        let (Some(pt), Some(over)) = (
-            self.sheet.jet_box([[um, um], [vm, vm]]),
-            self.sheet.jet_box([[us.lo(), us.hi()], [vs.lo(), vs.hi()]]),
-        ) else {
+        // Where the path crosses a crease line.
+        let ((um, vm), (da, db), (da2, db2)) = (path.uv, path.first, path.second);
+        let mut crossings = Vec::new();
+        for (lines, c0, c1, c2, range) in [
+            (&self.lines[0], um, da, da2 / 2.0, us),
+            (&self.lines[1], vm, db, db2 / 2.0, vs),
+        ] {
+            let Some(ks) = between(lines, range.lo(), range.hi()) else {
+                return f64::INFINITY;
+            };
+            for k in ks {
+                crossings.extend(roots(c0 - k, c1, c2, h).into_iter().map(|x| tm + x));
+            }
+        }
+        crossings.sort_by(f64::total_cmp);
+        let Some(kinks) = between(&self.kinks, a, b) else {
             return f64::INFINITY;
         };
-        let c0 = self.curve.jet_box([tm, tm]);
-        let cr = self.curve.jet_box([a, b]);
-        let (ia, ib) = (p(da), p(db));
-        // g = C - S(u(t), v(t)): g(t₀), g'(t₀), and g'' over the stretch.
-        let g0: IVec3 = core::array::from_fn(|k| c0[0][k] - pt[k].v);
-        let g1: IVec3 = core::array::from_fn(|k| c0[1][k] - pt[k].d[0] * ia - pt[k].d[1] * ib);
+        // Gaps about the crossings, widened until no piece's path box
+        // reaches across a crease line.
+        let mut gap = (b - a) / 1_099_511_627_776.0; // 2⁻⁴⁰ of the stretch
+        for _ in 0..34 {
+            if let Some(bound) = self.pieces(&path, tm, [a, b], &crossings, &kinks, gap) {
+                return bound + super::SLACK;
+            }
+            if crossings.is_empty() {
+                break;
+            }
+            gap *= 2.0;
+        }
+        f64::INFINITY
+    }
+
+    /// The bound over `[a, b]` cut at `kinks` and about `crossings` by
+    /// gaps of half-width `gap`; `None` where a piece's path box still
+    /// reaches across a crease line.
+    fn pieces(
+        &self,
+        path: &Path,
+        tm: f64,
+        [a, b]: [f64; 2],
+        crossings: &[f64],
+        kinks: &[f64],
+        gap: f64,
+    ) -> Option<f64> {
+        // The gaps, merged where they overlap.
+        let mut gaps: Vec<[f64; 2]> = Vec::new();
+        for &s in crossings {
+            let g = [(s - gap).max(a), (s + gap).min(b)];
+            match gaps.last_mut() {
+                Some(last) if g[0] <= last[1] => last[1] = last[1].max(g[1]),
+                _ => gaps.push(g),
+            }
+        }
+        // The smooth pieces between them, cut at the curve's kinks.
+        let mut smooth = Vec::new();
+        let mut from = a;
+        for g in gaps.iter().chain(core::iter::once(&[b, b])) {
+            if g[0] >= from {
+                let mut p = from;
+                for &k in kinks.iter().filter(|&&k| k > from && k < g[0]) {
+                    smooth.push([p, k]);
+                    p = k;
+                }
+                smooth.push([p, g[0]]);
+            }
+            from = from.max(g[1]);
+        }
+        let mut worst: f64 = 0.0;
+        for piece in smooth {
+            worst = worst.max(self.taylor(path, tm, piece)?);
+        }
+        for g in gaps {
+            worst = worst.max(self.slope_bound(path, tm, g));
+        }
+        Some(worst)
+    }
+
+    /// The Taylor bound on `g` over a piece where it is twice
+    /// differentiable, about the piece's middle; `None` where the piece's
+    /// path box reaches across a crease line.
+    fn taylor(&self, path: &Path, tm: f64, [p, q]: [f64; 2]) -> Option<f64> {
+        let pt = Iv::point;
+        let pm = (p + q) / 2.0;
+        let hp = (q - p) / 2.0;
+        // About the stretch's own middle (a single piece), exactly as the
+        // offsets `[-h, h]`.
+        let dm = pt(pm) - pt(tm);
+        let dr = if pm == tm {
+            Iv::new(-hp, hp)?
+        } else {
+            Iv::new(p, q)? - pt(tm)
+        };
+        let (um, vm) = path.over(dm);
+        let (ur, vr) = path.over(dr);
+        // The piece's path, tightly, must keep to one side of every
+        // crease line (it may end on one).
+        let (tu, tv) = path.range(dr.lo(), dr.hi());
+        let across =
+            |x: Iv, lines: &Kinks| between(lines, x.lo(), x.hi()).is_none_or(|k| !k.is_empty());
+        if across(tu, &self.lines[0]) || across(tv, &self.lines[1]) {
+            return None;
+        }
+        let at = self
+            .sheet
+            .jet_box([[um.lo(), um.hi()], [vm.lo(), vm.hi()]])?;
+        let over = self
+            .sheet
+            .jet_box([[ur.lo(), ur.hi()], [vr.lo(), vr.hi()]])?;
+        let (u1m, v1m) = path.rate(dm);
+        let (u1, v1) = path.rate(dr);
+        let (da2, db2) = path.second;
+        let c0 = self.curve.jet_box([pm, pm]);
+        let cr = self.curve.jet_box([p, q]);
+        // g = C - S(u(t), v(t)): g at the middle, g' there, and g'' over
+        // the piece.
+        let g0: IVec3 = core::array::from_fn(|k| c0[0][k] - at[k].v);
+        let g1: IVec3 = core::array::from_fn(|k| c0[1][k] - at[k].d[0] * u1m - at[k].d[1] * v1m);
         let g2: IVec3 = core::array::from_fn(|k| {
             cr[2][k]
                 - (over[k].h[0] * u1 * u1
-                    + p(2.0) * over[k].h[1] * u1 * v1
+                    + pt(2.0) * over[k].h[1] * u1 * v1
                     + over[k].h[2] * v1 * v1
-                    + over[k].d[0] * p(da2)
-                    + over[k].d[1] * p(db2))
+                    + over[k].d[0] * pt(da2)
+                    + over[k].d[1] * pt(db2))
         });
-        let bound = p(norm_hi(g0)) + p(norm_hi(g1)) * p(h) + p(0.5) * p(norm_hi(g2)) * p(h) * p(h);
-        bound.hi() + super::SLACK
+        let bound = pt(norm_hi(g0))
+            + pt(norm_hi(g1)) * pt(hp)
+            + pt(0.5) * pt(norm_hi(g2)) * pt(hp) * pt(hp);
+        Some(bound.hi())
+    }
+
+    /// A bound on `g` over a short gap where it may have a kink: its value
+    /// at the middle plus its slope over the gap (`g` is continuous, and
+    /// its one-sided derivatives lie in the enclosure over both sides)
+    /// times the half-width.
+    fn slope_bound(&self, path: &Path, tm: f64, [p, q]: [f64; 2]) -> f64 {
+        let pt = Iv::point;
+        let pm = (p + q) / 2.0;
+        let (Some(dr), dm) = (Iv::new(p, q).map(|x| x - pt(tm)), pt(pm) - pt(tm)) else {
+            return f64::INFINITY;
+        };
+        let (um, vm) = path.over(dm);
+        let (ur, vr) = path.over(dr);
+        let (Some(at), Some(over)) = (
+            self.sheet.jet_box([[um.lo(), um.hi()], [vm.lo(), vm.hi()]]),
+            self.sheet.jet_box([[ur.lo(), ur.hi()], [vr.lo(), vr.hi()]]),
+        ) else {
+            return f64::INFINITY;
+        };
+        let (u1, v1) = path.rate(dr);
+        let c0 = self.curve.jet_box([pm, pm]);
+        let cr = self.curve.jet_box([p, q]);
+        let g0: IVec3 = core::array::from_fn(|k| c0[0][k] - at[k].v);
+        let g1: IVec3 = core::array::from_fn(|k| cr[1][k] - over[k].d[0] * u1 - over[k].d[1] * v1);
+        (pt(norm_hi(g0)) + pt(norm_hi(g1)) * pt((q - p) / 2.0)).hi()
     }
 
     /// Whether the curve over `[a, b]` is certified within the tolerance

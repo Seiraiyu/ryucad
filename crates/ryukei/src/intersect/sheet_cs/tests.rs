@@ -245,3 +245,204 @@ fn krawczyk_counts_solutions() {
         Some([1.0, 0.5, 3.0])
     );
 }
+
+#[test]
+fn a_near_miss_within_the_tolerance_touches() {
+    // A circle whose lowest point passes half a tolerance above the
+    // plane: the analytic plane reports a touch, and so must its exact
+    // NURBS form (a box whose enclosure of `E` has a certified sign, or
+    // holds no exact zero, may still hold a point within the tolerance).
+    let plane = Surface::Plane(Plane::new(Frame::WORLD));
+    let n = as_nurbs(&plane, [[-1.0, 1.0], [-1.0, 1.0]]);
+    let c = Curve::Circle(
+        Circle::new(
+            Frame::new(
+                Point3::new(0.0, 0.0, 0.5 + 5e-9),
+                Vector3::new(0.0, 1.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+            )
+            .unwrap(),
+            0.5,
+        )
+        .unwrap(),
+    );
+    let want = curve_surface(&c, [0.5, 2.5], &plane, TOL).unwrap();
+    assert!(
+        matches!(
+            want[..],
+            [CurveHit::Point {
+                before: Side::Positive,
+                after: Side::Positive,
+                ..
+            }]
+        ),
+        "{want:?}"
+    );
+    same(
+        &curve_surface(&c, [0.5, 2.5], &n, TOL).unwrap(),
+        &want,
+        1e-3,
+    );
+}
+
+#[test]
+fn a_kinked_polyline_is_on_a_spline_plane_only_up_to_its_kink() {
+    // A degree 1 spline along the plane to t = 0.3, then up off it: the
+    // stretch on the plane ends at the kink, where the first derivative
+    // jumps, however the subdivision cuts the parameter.
+    let plane = Surface::Plane(Plane::new(Frame::WORLD));
+    let n = as_nurbs(&plane, [[-1.0, 1.0], [-1.0, 1.0]]);
+    let knots = crate::geom::KnotVector::clamped(1, &[0.0, 0.3, 1.0], &[2, 1, 2]).unwrap();
+    let poly = Curve::Nurbs(Arc::new(
+        crate::geom::NurbsCurve::new(
+            knots,
+            vec![
+                Point3::new(-0.5, 0.1, 0.0),
+                Point3::new(0.1, 0.1, 0.0),
+                Point3::new(0.1, 0.1, 0.7),
+            ],
+            None,
+        )
+        .unwrap(),
+    ));
+    for s in [&plane, &n] {
+        let got = curve_surface(&poly, [0.0, 1.0], s, TOL).unwrap();
+        assert_eq!(got.len(), 1, "{got:?}");
+        let CurveHit::On { t } = got[0] else {
+            panic!("{got:?}")
+        };
+        assert_eq!(t[0], 0.0);
+        // It may run on past the kink as far as the curve stays within the
+        // tolerance (a hundredth of a micron up the second segment).
+        assert!((t[1] - 0.3).abs() <= 2.0 * TOL, "{got:?}");
+        // Every point of the stretch is within the tolerance of the plane.
+        for k in 0..=64 {
+            let p = poly.point(t[0] + (t[1] - t[0]) * f64::from(k) / 64.0);
+            assert!(p.z.abs() <= TOL, "{got:?} at {p:?}");
+        }
+    }
+}
+
+#[test]
+fn a_kink_within_the_tolerance_touches() {
+    // A degree 1 spline dipping to a vertex half a tolerance above the
+    // plane and back up: its nearest point is the kink, where the
+    // distance has no turning point.
+    let plane = Surface::Plane(Plane::new(Frame::WORLD));
+    let n = as_nurbs(&plane, [[-1.0, 1.0], [-1.0, 1.0]]);
+    let knots = crate::geom::KnotVector::clamped(1, &[0.0, 0.5, 1.0], &[2, 1, 2]).unwrap();
+    let vee = Curve::Nurbs(Arc::new(
+        crate::geom::NurbsCurve::new(
+            knots,
+            vec![
+                Point3::new(-0.5, 0.1, 0.3),
+                Point3::new(0.0, 0.1, 5e-9),
+                Point3::new(0.5, 0.1, 0.3),
+            ],
+            None,
+        )
+        .unwrap(),
+    ));
+    let got = curve_surface(&vee, [0.0, 1.0], &n, TOL).unwrap();
+    assert!(
+        matches!(
+            got[..],
+            [CurveHit::Point {
+                before: Side::Positive,
+                after: Side::Positive,
+                ..
+            }]
+        ),
+        "{got:?}"
+    );
+}
+
+/// `f`'s result, or a failure if it takes longer than `secs` seconds (a
+/// loop that never ends fails the test instead of hanging the run).
+fn within<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(secs))
+        .expect("finished in time")
+}
+
+#[test]
+fn kinks_past_counting_are_given_up_on() {
+    // A few periods' worth are listed.
+    assert_eq!(
+        between(&(vec![0.25], Some(1.0)), -1.0, 2.0),
+        Some(vec![-0.75, 0.25, 1.25])
+    );
+    // Far more than `MAX_KINKS` periods.
+    assert_eq!(
+        within(10, || between(&(vec![0.25], Some(1.0)), -1e6, 1e6)),
+        None
+    );
+    // A range of a few periods (under `MAX_KINKS`) past 2⁵³ of them,
+    // where `n + 1` can equal `n`.
+    assert_eq!(
+        within(10, || between(&(vec![0.25], Some(1.0)), 1e17, 1e17 + 32.0)),
+        None
+    );
+    assert_eq!(
+        within(10, || between(
+            &(vec![0.25], Some(1.0)),
+            -1e17 - 32.0,
+            -1e17
+        )),
+        None
+    );
+    // Bounds that aren't finite.
+    assert_eq!(
+        between(&(vec![0.25], Some(1.0)), f64::NEG_INFINITY, 0.0),
+        None
+    );
+    assert_eq!(between(&(vec![0.25], Some(1.0)), f64::NAN, 0.0), None);
+}
+
+#[test]
+fn a_path_across_countless_crease_lines_is_uncertain_not_endless() {
+    // A circle lying on a cylinder, against crease lines 1e-15 radians
+    // apart round its axis: every stretch the search can reach crosses
+    // more than `MAX_KINKS` of them, so no path can be bounded, no contact
+    // is ever certified, and the search ends uncertain at its depth
+    // limit.
+    let got = within(60, || {
+        let f = frame();
+        let cyl = Surface::Cylinder(Cylinder::new(f, 0.7).unwrap());
+        let round = Curve::Circle(
+            Circle::new(
+                Frame::new(f.origin() + f.z().get() * 0.3, f.z().get(), f.x().get()).unwrap(),
+                0.7,
+            )
+            .unwrap(),
+        );
+        let s = Search {
+            curve: &round,
+            surface: &cyl,
+            sheet: Sheet::of(&cyl),
+            range: [0.0, 1.0],
+            tolerance: TOL,
+            kinks: (Vec::new(), None),
+            lines: [(vec![0.0], Some(1e-15)), (Vec::new(), None)],
+        };
+        let bound = s.path_bound([0.25, 0.5], None);
+        let near = round.bounds([0.0, 1.0]).grow(TOL);
+        let mut found = Vec::new();
+        let mut budget = MAX_BOXES;
+        let mut result = Ok(());
+        'all: for ts in s.t_cells() {
+            for &[u, v] in &cells(&cyl, &near) {
+                result = s.search([ts, u, v], 0, &mut budget, &mut found);
+                if result.is_err() {
+                    break 'all;
+                }
+            }
+        }
+        (bound, result)
+    });
+    assert_eq!(got.0, f64::INFINITY);
+    assert_eq!(got.1, Err(Failure::Uncertain));
+}

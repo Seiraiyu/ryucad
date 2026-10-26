@@ -1,5 +1,5 @@
 use super::*;
-use crate::geom::{Cylinder, Frame, Plane, Sphere, Vector3};
+use crate::geom::{Curve, Cylinder, Frame, Plane, Sphere, Vector3};
 use crate::intersect::{SurfaceHit, surface_surface};
 use core::f64::consts::TAU;
 use std::sync::Arc;
@@ -137,4 +137,38 @@ fn coincident_surfaces_are_said_to_be() {
             "{x:?} {y:?}"
         );
     }
+}
+
+#[test]
+fn an_extrusion_taller_than_the_region_is_traced_to_its_edge() {
+    // An extruded ellipse (unbounded along its direction, so its first
+    // cells end where the region does) against a steep spline plane that
+    // reaches past the region: both branches leave through the cells'
+    // cut-off ends, which lie on the region's faces.
+    let ellipse =
+        crate::geom::Ellipse::new(frame((0.0, 0.0, 0.0), (0.0, 0.0, 1.0)), 0.8, 0.5).unwrap();
+    let a = Surface::Extrusion(Arc::new(
+        crate::geom::Extrusion::new(Curve::Ellipse(ellipse), Vector3::new(0.0, 0.0, 1.0)).unwrap(),
+    ));
+    let b = spline(
+        &Surface::Plane(Plane::new(frame((0.3, 0.0, 0.0), (1.0, 0.1, 0.2)))),
+        [[-4.0, 4.0], [-4.0, 4.0]],
+    );
+    let region = Box3::new(Point3::new(-2.0, -2.0, -1.0), Point3::new(2.0, 2.0, 1.0));
+    let topo = trace(&a, &b, &region).unwrap();
+    assert_eq!(topo.branches.len(), 2, "{topo:?}");
+    for br in &topo.branches {
+        assert!(!br.closed);
+        // Each runs from the region's floor to its ceiling.
+        let z = |p: &Point3| p.z;
+        let (lo, hi) = br
+            .points
+            .iter()
+            .map(z)
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), x| {
+                (l.min(x), h.max(x))
+            });
+        assert!(lo <= -1.0 + 1e-6 && hi >= 1.0 - 1e-6, "{lo} {hi}");
+    }
+    on_both(&a, &b, &topo);
 }

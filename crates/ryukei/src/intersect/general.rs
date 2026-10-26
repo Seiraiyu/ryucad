@@ -178,7 +178,8 @@ fn excluded(a: &Enc, b: &Enc) -> bool {
     }
     let w = |c: Cell, k: usize| {
         let m = (c[k][0] + c[k][1]) / 2.0;
-        Iv::new(c[k][0] - m, c[k][1] - m)
+        // Rounded outward: the offsets are subtracted in intervals.
+        Iv::new(c[k][0], c[k][1]).map(|x| x - Iv::point(m))
     };
     let (Some(du), Some(dv), Some(ds), Some(dt)) =
         (w(a.cell, 0), w(a.cell, 1), w(b.cell, 0), w(b.cell, 1))
@@ -786,11 +787,21 @@ impl<'a> Tracer<'a> {
             s.periods().1
         };
         let on_edge = periodic.is_none() && (at == d[0] || at == d[1]);
+        on_edge || self.leaves(c.point)
+    }
+
+    /// Whether a point is outside the region or on its boundary (within
+    /// [`SLACK`]): an unbounded direction's first cells end exactly where
+    /// the region does, so a branch leaving through such a cell's end
+    /// crosses it on the region's face, not strictly beyond it.
+    fn leaves(&self, p: Point3) -> bool {
         let (lo, hi) = (self.region.min(), self.region.max());
-        let p = c.point;
-        let outside =
-            p.x < lo.x || p.x > hi.x || p.y < lo.y || p.y > hi.y || p.z < lo.z || p.z > hi.z;
-        on_edge || outside
+        p.x < lo.x + SLACK
+            || p.x > hi.x - SLACK
+            || p.y < lo.y + SLACK
+            || p.y > hi.y - SLACK
+            || p.z < lo.z + SLACK
+            || p.z > hi.z - SLACK
     }
 
     /// Whether the closed box of a leaf holds the four parameters `x`, a
@@ -1132,15 +1143,7 @@ impl<'a> Tracer<'a> {
                     pts.push(end);
                     return Ok((pts, false));
                 }
-                let p = self.sheets[0].point(y[0], y[1]);
-                let (lo, hi) = (self.region.min(), self.region.max());
-                let out = p.x < lo.x
-                    || p.x > hi.x
-                    || p.y < lo.y
-                    || p.y > hi.y
-                    || p.z < lo.z
-                    || p.z > hi.z;
-                if out {
+                if self.leaves(self.sheets[0].point(y[0], y[1])) {
                     pts.push(y);
                     return Ok((pts, false));
                 }
@@ -1302,7 +1305,7 @@ impl Face<'_> {
         if let (Some((e0, jac)), Some((em, _))) = (&enc, &at) {
             let mut e = *e0;
             let d: Option<Vec<Iv>> = (0..3)
-                .map(|k| Iv::new(x[k][0] - m[k], x[k][1] - m[k]))
+                .map(|k| Iv::new(x[k][0], x[k][1]).map(|v| v - Iv::point(m[k])))
                 .collect();
             if let Some(d) = d {
                 for k in 0..3 {
