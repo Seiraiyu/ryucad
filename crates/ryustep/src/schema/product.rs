@@ -11,9 +11,15 @@ pub(super) fn simple(id: Id, name: &str, params: &[Param]) -> Option<Result<Enti
     Some(match name {
         "PRODUCT" => (|| {
             let mut a = Args::new(id, params, 4)?;
+            let id = a.string()?;
+            let name = a.string()?;
+            // A description that isn't a string is no description: it
+            // names nothing the tree needs.
+            let description = a.string().unwrap_or_default();
             Ok(Entity::Product {
-                id: a.string()?,
-                name: a.string()?,
+                id,
+                name,
+                description,
             })
         })(),
         "PRODUCT_DEFINITION_FORMATION" => formation(id, params, 3),
@@ -117,7 +123,8 @@ mod tests {
             get(7),
             Entity::Product {
                 id: "block".into(),
-                name: "Block".into()
+                name: "Block".into(),
+                description: "".into()
             }
         );
         assert_eq!(get(11), Entity::Formation { product: 7 });

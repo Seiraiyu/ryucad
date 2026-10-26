@@ -206,10 +206,12 @@ pub enum Entity {
         unit: Id,
         name: Box<str>,
     },
-    /// `PRODUCT`: its identifier (often a part number) and name.
+    /// `PRODUCT`: its identifier (often a part number), name and
+    /// description (empty when unset).
     Product {
         id: Box<str>,
         name: Box<str>,
+        description: Box<str>,
     },
     /// `PRODUCT_DEFINITION_FORMATION` (a version of a product), with or
     /// without a specified source.
