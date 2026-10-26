@@ -133,7 +133,15 @@ pub fn boolean(
     };
     merge::merge(&mut body, &mut sources, &keep_lone, &mut keys).map_err(named)?;
     let tool_keys: Vec<ToolKey> = tools.iter().map(|t| t.key).collect();
-    let journal = names::name(key, &ops, &tool_keys, &table, &kept, &mut body, &sources);
+    let journal = names::name(
+        key,
+        &ops,
+        &tool_keys,
+        &table,
+        (&pieces, &kept),
+        &mut body,
+        &sources,
+    );
     if cfg!(debug_assertions) {
         let faults = crate::check::check(&body);
         assert!(

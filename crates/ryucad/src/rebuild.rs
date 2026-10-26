@@ -2337,6 +2337,51 @@ mod tests {
         );
     }
 
+    /// A primitive of type `ty` with `params` (mm) at `origin` (mm).
+    fn primitive(
+        ty: crate::doc::files::PrimitiveType,
+        params: &[(&str, &str)],
+        origin: [&str; 3],
+        operation: crate::doc::solid::Operation,
+        targets: &[&str],
+    ) -> Feature {
+        use crate::doc::files::Primitive;
+        use crate::doc::solid::Combine;
+        let q = |s: &str| Quantity::parse(s, Unit::Mm).unwrap();
+        let mut placement = crate::doc::files::Placement::identity(Unit::Mm);
+        placement.origin = origin.map(q);
+        Feature::Primitive(Primitive {
+            ty,
+            params: params
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), q(v)))
+                .collect(),
+            placement,
+            combine: Combine {
+                operation,
+                targets: targets.iter().map(|t| id(t)).collect(),
+            },
+        })
+    }
+
+    #[test]
+    fn a_cut_touching_flush_from_outside_changes_nothing() {
+        use crate::doc::files::PrimitiveType::Box;
+        use crate::doc::solid::Operation::*;
+        use crate::solid::tests::part;
+        // Issue #89: a cube under another, touching it flush.
+        let cube = [("x", "10"), ("y", "10"), ("z", "10")];
+        let small = [("x", "4"), ("y", "4"), ("z", "4")];
+        let p = part(vec![
+            ("a", primitive(Box, &cube, ["0", "0", "0"], New, &[])),
+            ("t", primitive(Box, &small, ["3", "3", "-4"], Cut, &["a"])),
+        ]);
+        let r = rebuild_part(&p);
+        let (_, t) = r.features.iter().find(|(i, _)| *i == id("t")).unwrap();
+        let e = t.as_ref().unwrap_err();
+        assert_eq!(e.code, Code::OperationNoEffect, "{e}");
+    }
+
     #[test]
     fn booleans_combine_whole_solids() {
         use crate::doc::solid::BooleanOp::{Intersect, Subtract, Unite};

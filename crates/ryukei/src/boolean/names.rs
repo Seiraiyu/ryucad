@@ -19,7 +19,10 @@
 //!   `(key, IntersectionVertex, [faces...])`, the faces meeting there,
 //!   sorted;
 //! - faces and edges merged afterwards are `(key, Merged, [names...])`,
-//!   the merged names sorted.
+//!   the merged names sorted, except that an operand face or edge split
+//!   into pieces that are all kept and merged back into one is whole
+//!   again, and keeps its operand name (a tool touching a face flush
+//!   from outside leaves it as it was).
 //!
 //! Names that would still collide get an ordinal, counted in the order
 //! the pieces or edges were made, as a last parent. Names depend on the
@@ -36,16 +39,18 @@ use super::build::Kept;
 use super::merge::Sources;
 use super::table::{Boundary, GeId, GvId, Member, Table};
 use crate::name::{BooleanRole, Event, Journal, Name, OpKey, Role, ToolKey};
+use crate::split::Piece;
 use crate::topo::{Body, EdgeId, EntityId, FaceId, VertexId};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Names every face, edge and vertex of `body` and returns the journal.
+/// Names every face, edge and vertex of `body` and returns the journal:
+/// `pieces` are every operand face's pieces, `kept` those the result kept.
 pub(crate) fn name(
     key: OpKey,
     ops: &[Body],
     tools: &[ToolKey],
     table: &Table,
-    kept: &[Kept],
+    (pieces, kept): (&[Piece], &[Kept]),
     body: &mut Body,
     sources: &Sources,
 ) -> Journal {
@@ -97,10 +102,34 @@ pub(crate) fn name(
     for (k, kf) in kept.iter().enumerate() {
         pieces_of.entry(kf.piece.face).or_default().push(k);
     }
+    // Operand faces split and merged back whole: every piece kept, and
+    // all of them, and nothing else, in one result face.
+    let mut split_into: BTreeMap<FaceRef, usize> = BTreeMap::new();
+    for p in pieces {
+        *split_into.entry(p.face).or_default() += 1;
+    }
+    let whole: BTreeSet<FaceRef> = sources
+        .faces
+        .values()
+        .filter_map(|ks| {
+            let f = kept[ks[0]].piece.face;
+            (ks.len() > 1
+                && ks.iter().all(|&k| kept[k].piece.face == f)
+                && ks.len() == split_into[&f]
+                && pieces_of[&f].len() == ks.len())
+            .then_some(f)
+        })
+        .collect();
     // Each kept piece's name.
     let mut piece_name: Vec<Name> = vec![Name::from_u128(0); kept.len()];
     let mut parents_seen: BTreeMap<Vec<Name>, usize> = BTreeMap::new();
     for (f, list) in &pieces_of {
+        if whole.contains(f) {
+            for &k in list {
+                piece_name[k] = face_name(*f);
+            }
+            continue;
+        }
         if list.len() == 1 {
             piece_name[list[0]] = face_name(*f);
             continue;
@@ -132,7 +161,7 @@ pub(crate) fn name(
     let faces: Vec<(FaceId, Vec<usize>)> =
         sources.faces.iter().map(|(f, v)| (*f, v.clone())).collect();
     for (f, ks) in &faces {
-        let n = if ks.len() == 1 {
+        let n = if ks.len() == 1 || whole.contains(&kept[ks[0]].piece.face) {
             piece_name[ks[0]]
         } else {
             let mut ps: Vec<Name> = ks.iter().map(|&k| piece_name[k]).collect();
@@ -152,6 +181,11 @@ pub(crate) fn name(
             let n = face_name(r);
             match pieces_of.get(&r).map(Vec::len) {
                 None | Some(0) => journal.push(Event::Deleted(n)),
+                Some(_) if whole.contains(&r) => {
+                    if kept[pieces_of[&r][0]].reversed {
+                        journal.push(Event::Modified(n));
+                    }
+                }
                 Some(1) => {
                     let k = pieces_of[&r][0];
                     let changed = kept[k].reversed || kept[k].piece.loops != table.faces[&r].loops;
@@ -179,6 +213,26 @@ pub(crate) fn name(
             kept_of_edge.entry((e.op, e.edge)).or_default().push(g);
         }
     }
+    // Operand edges cut and merged back whole, likewise.
+    let mut cut_into: BTreeMap<(usize, EdgeId), BTreeSet<GeId>> = BTreeMap::new();
+    for (g, ge) in table.edges.iter().enumerate() {
+        if let Member::Edge(e) = ge.members[0] {
+            cut_into.entry((e.op, e.edge)).or_default().insert(g);
+        }
+    }
+    let whole_edge = |gs: &[GeId]| -> Option<(usize, EdgeId)> {
+        let Member::Edge(e) = table.edges[gs[0]].members[0] else {
+            return None;
+        };
+        let all = &cut_into[&(e.op, e.edge)];
+        (gs.len() > 1 && gs.len() == all.len() && gs.iter().all(|g| all.contains(g)))
+            .then_some((e.op, e.edge))
+    };
+    let rejoined: BTreeSet<(usize, EdgeId)> = sources
+        .edges
+        .values()
+        .filter_map(|gs| whole_edge(gs))
+        .collect();
     let mut ge_name: BTreeMap<GeId, Name> = BTreeMap::new();
     let mut by_pair: BTreeMap<(FaceRef, FaceRef), usize> = BTreeMap::new();
     let mut by_cut: BTreeMap<Vec<Name>, usize> = BTreeMap::new();
@@ -187,7 +241,7 @@ pub(crate) fn name(
         let n = match ge.members[0] {
             Member::Edge(e) => {
                 let own = placed[&(e.op, EntityId::Edge(e.edge))];
-                if kept_of_edge[&(e.op, e.edge)].len() == 1 {
+                if kept_of_edge[&(e.op, e.edge)].len() == 1 || rejoined.contains(&(e.op, e.edge)) {
                     own
                 } else {
                     let mut cutters: BTreeSet<Name> = BTreeSet::new();
@@ -232,7 +286,9 @@ pub(crate) fn name(
         sources.edges.iter().map(|(e, v)| (*e, v.clone())).collect();
     let mut result_edges: BTreeSet<Name> = BTreeSet::new();
     for (e, gs) in &edges {
-        let n = if gs.len() == 1 {
+        let n = if let Some((op, x)) = whole_edge(gs) {
+            placed[&(op, EntityId::Edge(x))]
+        } else if gs.len() == 1 {
             ge_name[&gs[0]]
         } else {
             let mut ps: Vec<Name> = gs.iter().map(|g| ge_name[g]).collect();
@@ -254,6 +310,7 @@ pub(crate) fn name(
                         journal.push(Event::Deleted(n));
                     }
                 }
+                Some(_) if rejoined.contains(&(op, edge)) => {}
                 Some(1) => {
                     if result_edges.contains(&n) {
                         let g = kept_of_edge[&(op, edge)][0];

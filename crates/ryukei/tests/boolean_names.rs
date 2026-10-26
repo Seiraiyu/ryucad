@@ -156,3 +156,39 @@ fn the_journal_accounts_for_every_name() {
     }
     assert!(!gone.is_empty());
 }
+
+#[test]
+fn a_face_touched_flush_from_outside_keeps_its_name() {
+    // Issue #89: a block under another, its top flush with the other's
+    // bottom. The bottom is split where the tool's top lies on it and the
+    // pieces merged back: it is the face it was, under its own name, and
+    // the journal says nothing happened to it.
+    let a = primitive::block(OpKey(1), 10.0, 10.0, 10.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let t = primitive::block(OpKey(2), 4.0, 4.0, 4.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let tools = [Tool {
+        key: ToolKey(1),
+        body: &t,
+        place: at(3.0, 3.0, -4.0),
+    }];
+    let (b, journal) = boolean(OpKey(9), BooleanOp::Subtract, &a, &tools).unwrap();
+    let faces = |x: &Body| -> BTreeSet<Name> {
+        x.faces()
+            .map(|f| x.name_of(EntityId::Face(f)).unwrap())
+            .collect()
+    };
+    let (before, after) = (faces(&a), faces(&b));
+    assert_eq!(before, after);
+    for e in journal.events() {
+        let touched = match e {
+            Event::Split { parent, .. } => before.contains(parent),
+            Event::Merged { parents, .. } => parents.iter().any(|p| before.contains(p)),
+            Event::Modified(n) | Event::Deleted(n) => before.contains(n),
+            _ => false,
+        };
+        assert!(!touched, "{e:?}");
+    }
+}
