@@ -147,6 +147,38 @@ impl PartProps {
         }
     }
 
+    /// The form read again while it may be typed in: the new values, but
+    /// what was typed stays where the value under it is as it was read;
+    /// where it changed (and not to what was typed, as a save does), the
+    /// new value shows and the change is listed, as after a conflict.
+    pub fn refreshed(&self, v: &Value) -> PartProps {
+        let mut fresh = PartProps::from_get(v);
+        for p in &mut fresh.props {
+            let Some(mine) = self
+                .props
+                .iter()
+                .find(|m| m.field.name == p.field.name && m.field.dirty())
+            else {
+                continue;
+            };
+            let yours = mine.field.text.trim();
+            if mine.field.read == p.field.read {
+                p.field.text = mine.field.text.clone();
+            } else if yours != p.field.read {
+                fresh.changed.push(Changed {
+                    name: p.field.name.clone(),
+                    theirs: if p.field.read.is_empty() {
+                        "(not set)".to_owned()
+                    } else {
+                        p.field.read.clone()
+                    },
+                    yours: yours.to_owned(),
+                });
+            }
+        }
+        fresh
+    }
+
     /// The form read again after a conflict: the new values, with what
     /// changed under what was typed listed.
     pub fn reloaded(&self, v: &Value) -> PartProps {
@@ -278,5 +310,32 @@ mod tests {
             }]
         );
         assert_eq!(again.props[0].field.text, "200");
+    }
+
+    #[test]
+    fn a_form_read_again_keeps_what_was_typed() {
+        // #73: read again after Set up PDM, while someone types.
+        let mut f = PartProps::from_get(&got("100", "r1"));
+        f.props[0].field.text = "101".into();
+        f.props[1].field.text = "A bracket".into();
+        let mut faults = got("100", "r1");
+        faults["properties"][3]["faults"] = json!([]);
+        let again = f.refreshed(&faults);
+        assert_eq!(again.props[0].field.text, "101");
+        assert_eq!(again.props[1].field.text, "A bracket");
+        assert!(again.props[3].faults.is_empty() && again.changed.is_empty());
+        // A value changed under the typing shows, and says so.
+        let again = f.refreshed(&got("200", "r2"));
+        assert_eq!(again.props[0].field.text, "200");
+        assert_eq!(again.changed[0].theirs, "200");
+        // Saved: nothing typed is left, nothing is listed.
+        let again = f.refreshed(&got("101", "r2"));
+        assert!(!again.props[0].field.dirty() && again.changed.is_empty());
+        // Nothing typed: as read.
+        let fresh = PartProps::from_get(&got("100", "r1"));
+        assert_eq!(
+            fresh.refreshed(&got("200", "r2")),
+            PartProps::from_get(&got("200", "r2"))
+        );
     }
 }

@@ -1180,9 +1180,12 @@ impl Workspace {
             }
             (Pending::Props(part, before), Ok(a)) => {
                 if self.props_part.as_deref() == Some(part.as_str()) {
-                    self.props = Some(match before {
-                        Some(b) => b.reloaded(&a.result),
-                        None => PartProps::from_get(&a.result),
+                    self.props = Some(match (before, &self.props) {
+                        (Some(b), _) => b.reloaded(&a.result),
+                        // Read again under someone typing (after Set up
+                        // PDM): what they typed stays.
+                        (None, Some(p)) if p.part == part => p.refreshed(&a.result),
+                        (None, _) => PartProps::from_get(&a.result),
                     });
                 }
             }
