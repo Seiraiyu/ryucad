@@ -120,8 +120,22 @@ pub fn answer_live(
             rev,
             frame,
             compare,
+            hidden,
         } => {
             let target = participant.as_deref().map(|p| (p, live.as_deref()));
+            // What the participant's window hides, else the caller's.
+            let hidden = match hidden {
+                Some(refs) => crate::visibility::reach_all(session, &refs)?,
+                None => live
+                    .as_deref()
+                    .and_then(|l| {
+                        let who = participant
+                            .as_deref()
+                            .unwrap_or(me.unwrap_or(live::DEFAULT_AGENT));
+                        Some(l.get(who).ok()?.hidden.clone())
+                    })
+                    .unwrap_or_default(),
+            };
             // A participant's render shows what their window shows.
             let part = part.or_else(|| {
                 let l = live.as_deref()?;
@@ -153,6 +167,7 @@ pub fn answer_live(
                 rev,
                 frame,
                 compare,
+                hidden,
             };
             render(session, target, shown, ask)
         }
@@ -603,6 +618,25 @@ fn dispatch(
                 None => crate::assembly::shown_parts(session.project()),
             };
             Ok(json!({"participant": id, "focus": focus, "shows": shows}))
+        }
+        Request::VisibilitySet {
+            hide,
+            show,
+            isolate,
+            all,
+            participant,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("visibility.set"))?;
+            let id = live.compare_target(participant.as_deref(), me)?;
+            let change = crate::visibility::Change {
+                all,
+                isolate,
+                show,
+                hide,
+            };
+            let hidden = crate::visibility::apply(session, &live.get(&id)?.hidden, &change)?;
+            live.set_hidden(&id, hidden)?;
+            Ok(json!({"participant": id, "hidden": live.get(&id)?.hidden}))
         }
         Request::HighlightSet {
             entities,
@@ -3612,6 +3646,8 @@ struct RenderAsk {
     rev: Option<String>,
     frame: Vec<String>,
     compare: Option<String>,
+    /// What to leave out: occurrences and solids, at the leaves.
+    hidden: std::collections::BTreeSet<String>,
 }
 
 /// How a compare paints one rendered solid: wholly new when the other
@@ -3765,6 +3801,10 @@ fn render(
         if part_kind(session.project().part(part)?) == PartKind::Assembly {
             let model = session.model(part, &crate::doc::assembly::Rev::Working)?;
             for o in &model.occurrences {
+                let path = crate::assembly::path_text(&o.path);
+                if ask.hidden.contains(&format!("{part}/{path}")) {
+                    continue;
+                }
                 let solids: Vec<&crate::assembly::Solid> = o.solids.iter().collect();
                 let made = occurrence_meshes(session, &solids, mesh::Quality::Normal);
                 for (s, m) in solids.iter().zip(made) {
@@ -3773,7 +3813,6 @@ fn render(
                         hash: s.built.hash.clone(),
                         mesh: m,
                     };
-                    let path = crate::assembly::path_text(&o.path);
                     draw_body(
                         &mut g,
                         &m,
@@ -3789,7 +3828,7 @@ fn render(
         }
         for (fid, m) in meshes(session, part, None, mesh::Quality::Normal)? {
             let Ok(m) = m else { continue };
-            if m.mesh.mesh.is_err() {
+            if m.mesh.mesh.is_err() || ask.hidden.contains(&format!("{part}/{fid}")) {
                 continue;
             }
             seen.insert((part.clone(), fid.clone()), m.clone());
@@ -6175,7 +6214,7 @@ pub(crate) mod tests {
         assert_eq!(
             r["session"]["participants"],
             json!([{"id": id, "kind": "human", "name": "Dana", "status": null, "selection": [],
-                    "camera": null, "highlights": [], "compare": null, "focus": null}])
+                    "camera": null, "highlights": [], "compare": null, "focus": null, "hidden": []}])
         );
         let list = call_live(&mut s, &mut live, Some(&id), "participant.list", json!({})).unwrap();
         assert_eq!(list, r["session"]);

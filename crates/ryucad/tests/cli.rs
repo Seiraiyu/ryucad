@@ -990,6 +990,7 @@ fn every_protocol_method_has_a_command() {
         ("compare.get", &["compare"]),
         ("compare.set", &["compare"]),
         ("view.focus", &["focus"]),
+        ("visibility.set", &["hide"]),
         ("highlight.set", &["highlight"]),
         ("highlight.clear", &["highlight"]),
         ("activity.set", &["status"]),

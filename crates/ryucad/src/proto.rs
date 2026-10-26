@@ -708,6 +708,24 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         participant: Option<String>,
     },
+    /// Changes what a participant's window hides (`participant`, else the
+    /// one human, else the caller): everything shown first with `all`,
+    /// then everything else in their parts hidden for `isolate`, then
+    /// `show`, then `hide`. References name parts, occurrences (at any
+    /// depth, a subassembly's reaching all under it) or a part's solids.
+    #[serde(rename = "visibility.set")]
+    VisibilitySet {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        hide: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        show: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        isolate: Vec<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
     /// Highlights entities for everyone to see, replacing the caller's
     /// highlight of the same style and label.
     #[serde(rename = "highlight.set")]
@@ -838,6 +856,10 @@ pub enum Request {
         /// and ghost what it had, as the app's compare view does.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         compare: Option<String>,
+        /// Leave these out (parts, occurrences, solids); the participant's
+        /// hidden set by default, else the caller's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hidden: Option<Vec<String>>,
     },
     /// Diagnoses the project folder: every problem, with a stable code.
     #[serde(rename = "doctor")]

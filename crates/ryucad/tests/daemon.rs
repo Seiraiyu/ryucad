@@ -558,6 +558,71 @@ fn an_agent_puts_the_watching_human_into_a_compare() {
     cli(&f, &["daemon", "stop"]);
 }
 
+#[test]
+fn an_agent_hides_and_shows_what_the_human_sees() {
+    let f = fixture();
+    cli(&f, &["part", "create", "bolt"]);
+    cli(
+        &f,
+        &[
+            "feature",
+            "add",
+            "bolt",
+            "cylinder",
+            "--id",
+            "shank",
+            "--param",
+            "radius=2",
+            "--param",
+            "height=10",
+        ],
+    );
+    cli(&f, &["part", "create", "pair", "--assembly"]);
+    for (id, x) in [("a", "0"), ("b", "20")] {
+        let origin = format!("{x},0,0");
+        cli(
+            &f,
+            &[
+                "feature", "add", "pair", "instance", "--id", id, "--of", "bolt", "--origin",
+                &origin,
+            ],
+        );
+    }
+    let w = Watch::new(&f, &["participants"]);
+    let r = cli(&f, &["hide", "pair/a"]);
+    assert_eq!(r["result"]["participant"], w.me.as_str(), "{r}");
+    assert_eq!(r["result"]["hidden"], serde_json::json!(["pair/a"]));
+    let p = w.next("participant.changed");
+    assert_eq!(p["participant"]["hidden"], serde_json::json!(["pair/a"]));
+    let r = cli(&f, &["isolate", "pair/a"]);
+    assert_eq!(r["result"]["hidden"], serde_json::json!(["pair/b"]));
+    let r = cli(&f, &["show", "--all"]);
+    assert_eq!(r["result"]["hidden"], serde_json::json!([]));
+    let r = cli(&f, &["hide", "pair/c"]);
+    assert_eq!(r["error"]["code"], "not_found");
+    let r = cli(&f, &["show"]);
+    assert_eq!(r["error"]["code"], "usage");
+    let r = cli(&f, &["--no-daemon", "hide", "pair/a"]);
+    assert_eq!(r["error"]["code"], "no_live_session");
+    // A render can leave things out without anyone's window.
+    let out = f.run.with_file_name("hidden.png");
+    let out = out.to_str().unwrap();
+    let r = cli(
+        &f,
+        &[
+            "--no-daemon",
+            "render",
+            "pair",
+            "--hidden",
+            "pair/b",
+            "--out",
+            out,
+        ],
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    cli(&f, &["daemon", "stop"]);
+}
+
 /// A human attached and subscribed: notifications arrive on `rx`.
 struct Watch {
     me: String,

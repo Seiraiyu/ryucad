@@ -230,6 +230,31 @@ enum Command {
         #[arg(long = "of", value_name = "PARTICIPANT")]
         of: Option<String>,
     },
+    /// Hide occurrences or solids in a participant's window (the one
+    /// human's, else the caller's): parts, instances at any depth, or a
+    /// part's solids.
+    Hide {
+        #[arg(value_name = "REF", required = true)]
+        refs: Vec<String>,
+        #[arg(long = "of", value_name = "PARTICIPANT")]
+        of: Option<String>,
+    },
+    /// Show hidden occurrences or solids again, or everything with --all.
+    Show {
+        #[arg(value_name = "REF", required_unless_present = "all")]
+        refs: Vec<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long = "of", value_name = "PARTICIPANT")]
+        of: Option<String>,
+    },
+    /// Hide everything else in the same parts and assemblies.
+    Isolate {
+        #[arg(value_name = "REF", required = true)]
+        refs: Vec<String>,
+        #[arg(long = "of", value_name = "PARTICIPANT")]
+        of: Option<String>,
+    },
     /// Show a part or assembly in a participant's window (the one human's,
     /// else the caller's), or the project's model with --project; with
     /// neither, say what it shows.
@@ -338,6 +363,10 @@ enum Command {
         /// model with the faces it loses in red.
         #[arg(long, value_name = "REV")]
         compare: Option<String>,
+        /// Leave out a part, an occurrence or a solid (repeatable); by
+        /// default what the participant's (or the caller's) window hides.
+        #[arg(long = "hidden", value_name = "REF")]
+        hidden: Vec<String>,
     },
     /// What the merge (or cherry-pick, revert or rebase step) Git is in the
     /// middle of leaves to settle.
@@ -1756,6 +1785,7 @@ fn request(cmd: &Command) -> Option<Request> {
             rev,
             frame,
             compare,
+            hidden,
         } => Request::Render {
             part: part.clone(),
             camera: camera_arg(eye, target, up, fov, ortho),
@@ -1770,6 +1800,7 @@ fn request(cmd: &Command) -> Option<Request> {
             rev: rev.rev.clone(),
             frame: frame.clone(),
             compare: compare.clone(),
+            hidden: (!hidden.is_empty()).then(|| hidden.clone()),
         },
         Command::Highlight {
             entities,
@@ -1793,6 +1824,27 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Compare { rev, off, of } => Request::CompareSet {
             rev: rev.clone(),
             off: *off,
+            participant: of.clone(),
+        },
+        Command::Hide { refs, of } => Request::VisibilitySet {
+            hide: refs.clone(),
+            show: Vec::new(),
+            isolate: Vec::new(),
+            all: false,
+            participant: of.clone(),
+        },
+        Command::Show { refs, all, of } => Request::VisibilitySet {
+            hide: Vec::new(),
+            show: refs.clone(),
+            isolate: Vec::new(),
+            all: *all,
+            participant: of.clone(),
+        },
+        Command::Isolate { refs, of } => Request::VisibilitySet {
+            hide: Vec::new(),
+            show: Vec::new(),
+            isolate: refs.clone(),
+            all: false,
             participant: of.clone(),
         },
         Command::Focus { part, project, of } => Request::ViewFocus {
