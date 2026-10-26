@@ -15,13 +15,13 @@
 
 use super::Failure;
 use super::coincide::coincident;
-use super::fit::{fit_branch, fit_pcurve};
+use super::fit::{fit_along, fit_branch, fit_pcurve, fit_pcurve_within};
 use super::general;
 use super::implicit::Implicit;
 use super::sheet_trace;
 use super::ss_exact;
-use super::ss_trace::{Traced, rank, trace};
-use crate::geom::{Box3, Curve, Curve2, Point3, Surface};
+use super::ss_trace::{TangentTrace, Traced, rank, trace};
+use crate::geom::{Box3, Curve, Curve2, KnotVector, NurbsCurve2, Point2, Point3, Surface, Vector2};
 use crate::tol::LINEAR_RESOLUTION;
 use std::sync::Arc;
 
@@ -84,7 +84,14 @@ pub fn surface_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<Surfac
     match (Implicit::of(a).is_some(), Implicit::of(b).is_some()) {
         (true, true) => {}
         (false, false) => return general_surface(a, b, region),
-        _ => return sheet_surface(a, b, region),
+        // A tangency along a curve, which no trace in one surface's
+        // parameters can follow, the general path traces.
+        _ => {
+            return sheet_surface(a, b, region).or_else(|e| match e {
+                Failure::Uncertain => general_surface(a, b, region),
+                e => Err(e),
+            });
+        }
     }
     if let Some((raws, mut points)) = ss_exact::exact(a, b, region) {
         let mut branches = Vec::new();
@@ -208,8 +215,74 @@ fn general_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit
         }
     }
     let mut points = topo.points;
-    let branches = fitted(&chains, [a, b], false, &mut points)?;
+    let mut branches = fitted(&chains, [a, b], false, &mut points)?;
+    for t in &topo.tangents {
+        branches.push(tangent_branch(t, [a, b])?);
+    }
     Ok(SurfaceHit::Meet { branches, points })
+}
+
+/// A curve along which two surfaces touch, as a branch: a smooth pcurve
+/// on the first through the traced parameters (cubic Hermite by chord
+/// length, tangents by central differences), the first surface along it
+/// fitted with a certified bound ([`fit_along`]), and its pcurve on the
+/// second fitted by projection with a bound up to the touch rule's reach
+/// (`100 ×` [`LINEAR_RESOLUTION`]), which also bounds the distance
+/// between them there. The branch is tangent, its tolerance the larger
+/// bound.
+fn tangent_branch(t: &TangentTrace, [a, b]: [&Surface; 2]) -> Result<Branch, Failure> {
+    let uv: Vec<Point2> = t.params.iter().map(|x| Point2::new(x[0], x[1])).collect();
+    let pts: Vec<Point3> = uv.iter().map(|q| a.point(q.x, q.y)).collect();
+    let n = uv.len();
+    let mut s = vec![0.0];
+    for w in pts.windows(2) {
+        s.push(s[s.len() - 1] + w[0].distance(w[1]));
+    }
+    if n < 2 || s[n - 1] <= LINEAR_RESOLUTION {
+        return Err(Failure::Uncertain);
+    }
+    let d: Vec<Vector2> = (0..n)
+        .map(|i| {
+            let (lo, hi) = match (i, t.closed) {
+                (0, false) => (0, 1),
+                (i, false) if i == n - 1 => (n - 2, n - 1),
+                (i, _) => (i.saturating_sub(1), (i + 1).min(n - 1)),
+            };
+            (uv[hi] - uv[lo]) / (s[hi] - s[lo])
+        })
+        .collect();
+    let mut ctrl = vec![uv[0]];
+    for i in 0..n - 1 {
+        let h = s[i + 1] - s[i];
+        ctrl.push(uv[i] + d[i] * (h / 3.0));
+        ctrl.push(uv[i + 1] - d[i + 1] * (h / 3.0));
+        ctrl.push(uv[i + 1]);
+    }
+    let mut mults = vec![3; n];
+    mults[0] = 4;
+    mults[n - 1] = 4;
+    let kv = KnotVector::clamped(3, &s, &mults).map_err(|_| Failure::Uncertain)?;
+    let pc = NurbsCurve2::new(kv, ctrl, None).map_err(|_| Failure::Uncertain)?;
+    let lifted = fit_along(
+        a,
+        &Curve2::Nurbs2(Arc::new(pc)),
+        [0.0, 1.0],
+        [0.0, s[n - 1]],
+    )?;
+    let curve = Curve::Nurbs(Arc::new(lifted.curve));
+    let range = curve.domain();
+    let (pb, bound) = fit_pcurve_within(b, &curve, range, 100.0 * LINEAR_RESOLUTION, 20_000)?;
+    let identity = [0.0, 1.0];
+    Ok(Branch {
+        curve,
+        range,
+        tangent: true,
+        tolerance: lifted.tolerance.max(bound),
+        pcurves: [
+            (Curve2::Nurbs2(Arc::new(lifted.pcurve)), identity),
+            (Curve2::Nurbs2(Arc::new(pb)), identity),
+        ],
+    })
 }
 
 /// Traced branches with the one that passes `pole` (a point of both

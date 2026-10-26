@@ -183,3 +183,79 @@ proptest! {
         agrees(&spline_of(&a), &spline_of(&b))?;
     }
 }
+
+fn spline(s: &Surface, range: [[f64; 2]; 2]) -> Surface {
+    let (n, _) = s.to_nurbs(range).unwrap();
+    Surface::Nurbs(Arc::new(n))
+}
+
+/// Splines touching along a curve: one tangent branch, within the touch
+/// rule's reach of both, along the curve.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn surfaces_touching_along_a_curve() {
+    let tau = core::f64::consts::TAU;
+    let region = Box3::new(Point3::new(-5.0, -5.0, -5.0), Point3::new(5.0, 5.0, 5.0));
+    // A cylinder of radius 0.5 along x resting on a plane: they touch
+    // along the line y = 0 on the plane.
+    let plane = spline(
+        &Surface::Plane(Plane::new(Frame::WORLD)),
+        [[-2.0, 2.0], [-2.0, 2.0]],
+    );
+    let axis = Frame::new(
+        Point3::new(0.0, 0.0, 0.5),
+        Vector3::new(1.0, 0.0, 0.0),
+        Vector3::new(0.0, 0.0, -1.0),
+    )
+    .unwrap();
+    let cyl = spline(
+        &Surface::Cylinder(Cylinder::new(axis, 0.5).unwrap()),
+        [[0.0, tau], [-1.5, 1.5]],
+    );
+    let SurfaceHit::Meet { branches, points } = surface_surface(&plane, &cyl, &region).unwrap()
+    else {
+        panic!("coincident")
+    };
+    assert!(points.is_empty(), "{points:?}");
+    assert_eq!(branches.len(), 1, "{branches:?}");
+    let br = &branches[0];
+    assert!(br.tangent && br.tolerance <= 1e-6, "{}", br.tolerance);
+    let ends = br.range.map(|t| br.curve.point(t));
+    assert!((ends[0].x - ends[1].x).abs() > 2.99, "{ends:?}");
+    for k in 0..=16 {
+        let t = br.range[0] + (br.range[1] - br.range[0]) * f64::from(k) / 16.0;
+        let p = br.curve.point(t);
+        assert!(p.y.abs() <= 1e-6 && p.z.abs() <= 1e-6, "{p:?}");
+        for (s, (c2, map)) in [&plane, &cyl].into_iter().zip(&br.pcurves) {
+            let q = c2.point(map[0] + map[1] * t);
+            assert!(s.point(q.x, q.y).distance(p) <= br.tolerance);
+        }
+    }
+    // A sphere inside a cylinder of its radius: along its equator.
+    let ball = spline(
+        &Surface::Sphere(Sphere::new(Frame::WORLD, 0.5).unwrap()),
+        [[0.0, tau], [-1.4, 1.4]],
+    );
+    let tube = spline(
+        &Surface::Cylinder(Cylinder::new(Frame::WORLD, 0.5).unwrap()),
+        [[0.0, tau], [-1.0, 1.0]],
+    );
+    let SurfaceHit::Meet { branches, .. } = surface_surface(&ball, &tube, &region).unwrap() else {
+        panic!("coincident")
+    };
+    assert_eq!(branches.len(), 1, "{branches:?}");
+    let br = &branches[0];
+    assert!(br.tangent);
+    for k in 0..=8 {
+        let p = br
+            .curve
+            .point(br.range[0] + (br.range[1] - br.range[0]) * f64::from(k) / 8.0);
+        assert!(
+            p.z.abs() <= 1e-6 && (ryukei::math::hypot(p.x, p.y) - 0.5).abs() <= 1e-6,
+            "{p:?}"
+        );
+    }
+}

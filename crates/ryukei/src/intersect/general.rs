@@ -40,7 +40,7 @@
 use super::cells::cells;
 use super::pipe::Cell;
 use super::sheet_cs::krawczyk3;
-use super::ss_trace::{Topology, Traced};
+use super::ss_trace::{TangentTrace, Topology, Traced};
 use super::{Failure, SLACK};
 use crate::geom::bound2::IVec3;
 use crate::geom::jet::JVec;
@@ -77,6 +77,15 @@ const FACE_BOXES: usize = 1 << 14;
 /// How many rounds of splitting pairs with too many crossings a trace
 /// may take.
 const MAX_ROUNDS: usize = 12;
+
+/// How many times a pair is split before one where the surfaces may be
+/// tangent is tested for a point of tangency, and kept whole if it holds
+/// one: a curve along which they touch would leave singular pairs all
+/// along it at [`MAX_DEPTH`].
+const TANGENT_DEPTH: u32 = 20;
+
+/// The touch rule's reach: surfaces within it of each other touch.
+const REACH: f64 = 100.0 * LINEAR_RESOLUTION;
 
 fn signed(x: Iv) -> bool {
     x.lo() > 0.0 || x.hi() < 0.0
@@ -358,6 +367,78 @@ pub(crate) fn trace(a: &Surface, b: &Surface, region: &Box3) -> Result<Topology,
     Err(Failure::Uncertain)
 }
 
+/// How a cluster of singular pairs is settled.
+#[derive(Clone, Debug)]
+enum Settled {
+    /// One point where the surfaces touch (or where branches meet).
+    Point(Point3),
+    /// A curve along which they touch.
+    Curve(TangentTrace),
+}
+
+/// The most steps a march along a tangent curve may take.
+const MARCH_STEPS: usize = 1 << 16;
+
+/// A polyline's segments by the cubes of a grid they reach, for finding
+/// those near a point.
+struct Segments {
+    size: f64,
+    cubes: BTreeMap<[i64; 3], Vec<[Point3; 2]>>,
+}
+
+impl Segments {
+    /// The segments of `line` in cubes of side `size`: each in every cube
+    /// its box meets.
+    fn new(line: &[Point3], size: f64) -> Self {
+        let mut cubes: BTreeMap<[i64; 3], Vec<[Point3; 2]>> = BTreeMap::new();
+        let cube = |p: Point3| [p.x, p.y, p.z].map(|x| (x / size).floor() as i64);
+        let pairs: Vec<[Point3; 2]> = if line.len() == 1 {
+            vec![[line[0], line[0]]]
+        } else {
+            line.windows(2).map(|w| [w[0], w[1]]).collect()
+        };
+        for seg in pairs {
+            let (a, b) = (cube(seg[0]), cube(seg[1]));
+            for x in a[0].min(b[0])..=a[0].max(b[0]) {
+                for y in a[1].min(b[1])..=a[1].max(b[1]) {
+                    for z in a[2].min(b[2])..=a[2].max(b[2]) {
+                        cubes.entry([x, y, z]).or_default().push(seg);
+                    }
+                }
+            }
+        }
+        Self { size, cubes }
+    }
+
+    /// Whether a segment passes within `reach` (at most the cubes' side)
+    /// of `p`: those in the cubes round its own.
+    fn within(&self, p: Point3, reach: f64) -> bool {
+        let c = [p.x, p.y, p.z].map(|x| (x / self.size).floor() as i64);
+        for x in c[0] - 1..=c[0] + 1 {
+            for y in c[1] - 1..=c[1] + 1 {
+                for z in c[2] - 1..=c[2] + 1 {
+                    let Some(segs) = self.cubes.get(&[x, y, z]) else {
+                        continue;
+                    };
+                    for &[a, b] in segs {
+                        let d = b - a;
+                        let len2 = d.length_squared();
+                        let t = if len2 > 0.0 {
+                            ((p - a).dot(d) / len2).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        };
+                        if (a + d * t).distance(p) <= reach {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
     Simple,
@@ -541,7 +622,7 @@ impl<'a> Tracer<'a> {
             });
             return Ok(());
         }
-        if depth >= MAX_DEPTH {
+        if depth >= MAX_DEPTH || (depth >= TANGENT_DEPTH && self.near_tangency(cells)) {
             self.singular += 1;
             if self.singular > MAX_SINGULAR {
                 return Err(Failure::Uncertain);
@@ -554,6 +635,31 @@ impl<'a> Tracer<'a> {
             return Ok(());
         }
         self.split_pair(cells, depth)
+    }
+
+    /// Whether a pair holds a point where the surfaces are tangent and
+    /// within the touch rule's reach of each other: Gauss-Newton steps on
+    /// the tangency system from its middle come to rest inside it (grown
+    /// by a quarter). Only the place to stop splitting depends on it.
+    fn near_tangency(&self, cells: [Cell; 2]) -> bool {
+        let tan = Tangency {
+            sheets: self.sheets,
+        };
+        let x0 = [
+            (cells[0][0][0] + cells[0][0][1]) / 2.0,
+            (cells[0][1][0] + cells[0][1][1]) / 2.0,
+            (cells[1][0][0] + cells[1][0][1]) / 2.0,
+            (cells[1][1][0] + cells[1][1][1]) / 2.0,
+        ];
+        let Some(x) = tan.settle(x0) else {
+            return false;
+        };
+        let inside = (0..4).all(|k| {
+            let [lo, hi] = cells[k / 2][k % 2];
+            let q = (hi - lo) / 4.0;
+            x[k] >= lo - q && x[k] <= hi + q
+        });
+        inside && tan.gap(x) <= REACH
     }
 
     fn excluded(&self, cells: [Cell; 2], pa: &JVec<Iv>, pb: &JVec<Iv>) -> bool {
@@ -742,6 +848,11 @@ impl<'a> Tracer<'a> {
                     .any(|&l| self.holds(&self.leaves[l], x.params))
             });
             match cl {
+                // A transversal branch can't be told from the curve it
+                // would leave.
+                Some(k) if matches!(clusters[k].1, Settled::Curve(_)) => {
+                    return Err(Failure::Uncertain);
+                }
                 Some(k) => {
                     at_cluster.insert(c, k);
                 }
@@ -779,12 +890,16 @@ impl<'a> Tracer<'a> {
             }
             let (chain, _) = walk(c, next[c][0], &mut used);
             let mut points: Vec<Point3> = chain.iter().map(|&i| self.crossings[i].point).collect();
-            if let Some(&k) = at_cluster.get(&chain[0]) {
-                points.insert(0, clusters[k].1);
+            if let Some(&k) = at_cluster.get(&chain[0])
+                && let Settled::Point(p) = clusters[k].1
+            {
+                points.insert(0, p);
                 touched[k] = true;
             }
-            if let Some(&k) = at_cluster.get(chain.last().expect("a chain has a start")) {
-                points.push(clusters[k].1);
+            if let Some(&k) = at_cluster.get(chain.last().expect("a chain has a start"))
+                && let Settled::Point(p) = clusters[k].1
+            {
+                points.push(p);
                 touched[k] = true;
             }
             out.branches.push(Traced {
@@ -803,17 +918,21 @@ impl<'a> Tracer<'a> {
             let points = chain.iter().map(|&i| self.crossings[i].point).collect();
             out.branches.push(Traced { points, closed });
         }
-        for (k, (_, p)) in clusters.iter().enumerate() {
-            if !touched[k] {
-                out.points.push(*p);
+        for (k, (_, settled)) in clusters.into_iter().enumerate() {
+            match settled {
+                Settled::Point(p) if !touched[k] => out.points.push(p),
+                Settled::Point(_) => {}
+                Settled::Curve(c) => out.tangents.push(c),
             }
         }
         Ok(out)
     }
 
-    /// The singular leaves grouped by touching, each group with its one
-    /// certified point of tangency on both surfaces.
-    fn clusters(&self) -> Result<Vec<(Vec<usize>, Point3)>, Failure> {
+    /// The singular leaves grouped by touching (a periodic direction's
+    /// cells a period apart touching too), each group settled: one
+    /// certified point of tangency where the surfaces touch, else a curve
+    /// along which they touch.
+    fn clusters(&self) -> Result<Vec<(Vec<usize>, Settled)>, Failure> {
         let singular: Vec<usize> = (0..self.leaves.len())
             .filter(|&i| {
                 self.leaves[i].kind == Kind::Singular && !self.leaves[i].cells[0][0][0].is_nan()
@@ -827,11 +946,17 @@ impl<'a> Tracer<'a> {
             }
             i
         }
+        let periods = self.surfaces.map(|s| s.periods());
         let touch = |x: &Leaf, y: &Leaf| {
             (0..2).all(|k| {
                 (0..2).all(|d| {
                     let (a, b) = (x.cells[k][d], y.cells[k][d]);
-                    a[0] <= b[1] && b[0] <= a[1]
+                    let p = if d == 0 { periods[k].0 } else { periods[k].1 };
+                    let shifts: &[f64] = match p {
+                        Some(p) => &[-p, 0.0, p],
+                        None => &[0.0],
+                    };
+                    shifts.iter().any(|&o| a[0] <= b[1] + o && b[0] + o <= a[1])
                 })
             })
         };
@@ -851,10 +976,214 @@ impl<'a> Tracer<'a> {
         members
             .into_values()
             .map(|m| {
-                let p = self.tangency(&m)?;
-                Ok((m, p))
+                let settled = match self.tangency(&m) {
+                    Ok(p) => Settled::Point(p),
+                    Err(_) => Settled::Curve(self.tangent_curve(&m)?),
+                };
+                Ok((m, settled))
             })
             .collect()
+    }
+
+    /// The curve along which the surfaces touch through a cluster: from a
+    /// point of tangency in it, marched both ways along the null direction
+    /// of the tangency system ([`Self::march`]) until it closes, leaves a
+    /// domain's edge or the region; every point within the touch rule's
+    /// reach. Every part of the cluster's cells of the first surface
+    /// outside a strip round the curve, `sqrt(2 × size × reach)` wide, must
+    /// be certified apart from the second surface ([`apart`]), so all
+    /// they share there is the curve.
+    fn tangent_curve(&self, members: &[usize]) -> Result<TangentTrace, Failure> {
+        let tan = Tangency {
+            sheets: self.sheets,
+        };
+        let inside = |x: [f64; 4]| members.iter().any(|&i| self.holds(&self.leaves[i], x));
+        let seed = members
+            .iter()
+            .find_map(|&i| {
+                let c = self.leaves[i].cells;
+                let mid = |k: usize, d: usize| (c[k][d][0] + c[k][d][1]) / 2.0;
+                tan.settle([mid(0, 0), mid(0, 1), mid(1, 0), mid(1, 1)])
+                    .filter(|&x| inside(x) && tan.gap(x) <= REACH)
+            })
+            .ok_or(Failure::Uncertain)?;
+        // The size of the cluster's part of the first surface.
+        let mut size_box: Option<Box3> = None;
+        for &i in members {
+            let b = enclosure_box(&self.sheets[0], self.leaves[i].cells[0], 8)
+                .ok_or(Failure::Uncertain)?;
+            size_box = Some(match size_box {
+                Some(o) => o.union(&b),
+                None => b,
+            });
+        }
+        let size_box = size_box.ok_or(Failure::Uncertain)?;
+        let size = (size_box.max() - size_box.min()).length();
+        let strip = crate::math::sqrt(2.0 * size * REACH);
+        let step = strip / 2.0;
+        let (forward, closed) = self.march(&tan, seed, 1.0, step, &inside)?;
+        let params = if closed {
+            forward
+        } else {
+            let (mut back, _) = self.march(&tan, seed, -1.0, step, &inside)?;
+            back.reverse();
+            back.pop();
+            back.extend(forward);
+            back
+        };
+        if params.len() < 2 {
+            return Err(Failure::Uncertain);
+        }
+        // Every part of the cluster's cells of the first surface outside
+        // the strip apart from the second surface.
+        let polyline: Vec<Point3> = params
+            .iter()
+            .map(|x| self.sheets[0].point(x[0], x[1]))
+            .collect();
+        let index = Segments::new(&polyline, strip);
+        let cells: Vec<Cell> = members.iter().map(|&i| self.leaves[i].cells[0]).collect();
+        let (pu, pv) = self.surfaces[0].periods();
+        let meets = |part: Cell, c: &Cell| {
+            let hit = |a: [f64; 2], b: [f64; 2], p: Option<f64>| {
+                let shifts: &[f64] = match p {
+                    Some(p) => &[-p, 0.0, p],
+                    None => &[0.0],
+                };
+                shifts.iter().any(|&o| a[0] <= b[1] + o && b[0] + o <= a[1])
+            };
+            hit(part[0], c[0], pu) && hit(part[1], c[1], pv)
+        };
+        // Parts within the strip, or meeting none of the cluster's cells
+        // (their pairs were settled apart or simple), are left out.
+        let skip = |part: Cell| -> bool {
+            if !cells.iter().any(|c| meets(part, c)) {
+                return true;
+            }
+            let Some(p) = self.sheets[0].jet_box(part) else {
+                return false;
+            };
+            let b = point_box(&p);
+            let c = b.min() + (b.max() - b.min()) * 0.5;
+            let half = (b.max() - b.min()).length() / 2.0;
+            half <= strip && index.within(c, strip - half)
+        };
+        let mut hull = cells[0];
+        for c in &cells {
+            for d in 0..2 {
+                hull[d] = [hull[d][0].min(c[d][0]), hull[d][1].max(c[d][1])];
+            }
+        }
+        if apart(self.surfaces[0], hull, self.surfaces[1], &skip, 1 << 22) != Some(true) {
+            return Err(Failure::Uncertain);
+        }
+        Ok(TangentTrace { params, closed })
+    }
+
+    /// Marches from `x0` along the null direction of the tangency system,
+    /// `sign` choosing the way, in steps of about `step` in model space:
+    /// each predicted point corrected by Newton's method on three of the
+    /// four equations with the parameter the curve moves fastest in held,
+    /// and within the touch rule's reach. Stops where the curve closes
+    /// (`true`), or leaves the cluster (`inside`) at a bounded surface's
+    /// domain edge (the last point put on it) or outside the region;
+    /// leaving the cluster anywhere else is `Uncertain`.
+    fn march(
+        &self,
+        tan: &Tangency,
+        x0: [f64; 4],
+        sign: f64,
+        step: f64,
+        inside: &dyn Fn([f64; 4]) -> bool,
+    ) -> Result<(Vec<[f64; 4]>, bool), Failure> {
+        let mut pts = vec![x0];
+        let mut x = x0;
+        let mut way: Option<[f64; 4]> = None;
+        let start = self.sheets[0].point(x0[0], x0[1]);
+        for _ in 0..MARCH_STEPS {
+            let mut n = tan.null(x).ok_or(Failure::Uncertain)?;
+            let flip = match way {
+                None => sign < 0.0,
+                Some(w) => (0..4).map(|k| n[k] * w[k]).sum::<f64>() < 0.0,
+            };
+            if flip {
+                n = n.map(|v| -v);
+            }
+            way = Some(n);
+            let held = (0..4)
+                .max_by(|&a, &b| n[a].abs().total_cmp(&n[b].abs()))
+                .expect("four parameters");
+            let here = self.sheets[0].point(x[0], x[1]);
+            let mut h = step;
+            let y = loop {
+                let pred: [f64; 4] = core::array::from_fn(|k| x[k] + h * n[k]);
+                if let Some(y) = tan.correct(pred, held)
+                    && tan.gap(y) <= REACH
+                    && self.sheets[0].point(y[0], y[1]).distance(here) <= 2.0 * h
+                {
+                    break y;
+                }
+                h /= 2.0;
+                if h < step / 1024.0 {
+                    return Err(Failure::Uncertain);
+                }
+            };
+            if !inside(y) {
+                if let Some(end) = self.edge_end(tan, x, y) {
+                    pts.push(end);
+                    return Ok((pts, false));
+                }
+                let p = self.sheets[0].point(y[0], y[1]);
+                let (lo, hi) = (self.region.min(), self.region.max());
+                let out = p.x < lo.x
+                    || p.x > hi.x
+                    || p.y < lo.y
+                    || p.y > hi.y
+                    || p.z < lo.z
+                    || p.z > hi.z;
+                if out {
+                    pts.push(y);
+                    return Ok((pts, false));
+                }
+                return Err(Failure::Uncertain);
+            }
+            if pts.len() > 3 && self.sheets[0].point(y[0], y[1]).distance(start) <= 1.5 * h {
+                return Ok((pts, true));
+            }
+            pts.push(y);
+            x = y;
+        }
+        Err(Failure::Uncertain)
+    }
+
+    /// Where the curve from `x` (inside both domains) to `y` leaves a
+    /// bounded surface's domain: the parameter that runs out held at the
+    /// domain's edge and the point corrected onto the curve there. `None`
+    /// when `y` is inside both domains.
+    fn edge_end(&self, tan: &Tangency, x: [f64; 4], y: [f64; 4]) -> Option<[f64; 4]> {
+        for k in 0..4 {
+            let s = self.surfaces[k / 2];
+            let d = s.domain()[k % 2];
+            let p = if k % 2 == 0 {
+                s.periods().0
+            } else {
+                s.periods().1
+            };
+            if p.is_some() {
+                continue;
+            }
+            let edge = if y[k] < d[0] {
+                d[0]
+            } else if y[k] > d[1] {
+                d[1]
+            } else {
+                continue;
+            };
+            let f = (edge - x[k]) / (y[k] - x[k]);
+            let mut pred: [f64; 4] = core::array::from_fn(|j| x[j] + f * (y[j] - x[j]));
+            pred[k] = edge;
+            return tan.correct(pred, k);
+        }
+        None
     }
 
     /// The one point of tangency in a cluster of leaves, where the
@@ -1090,6 +1419,118 @@ impl Tangency<'_> {
             [dot(n, auv), dot(n, avv), dot(ns, av), dot(nt, av)],
         ];
         Some((f, jac))
+    }
+
+    /// The system and its Jacobian at a point, in floating point.
+    fn at(&self, x: [f64; 4]) -> Option<([f64; 4], [[f64; 4]; 4])> {
+        let (f, jac) = self.enclose(x.map(|v| [v, v]))?;
+        let mid = |v: Iv| (v.lo() + v.hi()) / 2.0;
+        Some((f.map(mid), jac.map(|r| r.map(mid))))
+    }
+
+    /// The surfaces' distance at a point of their parameters.
+    fn gap(&self, x: [f64; 4]) -> f64 {
+        self.sheets[0]
+            .point(x[0], x[1])
+            .distance(self.sheets[1].point(x[2], x[3]))
+    }
+
+    /// Damped Gauss-Newton steps on the system from `x`, which may have
+    /// no isolated root (a curve of tangency): `None` where they don't
+    /// settle.
+    fn settle(&self, mut x: [f64; 4]) -> Option<[f64; 4]> {
+        for _ in 0..60 {
+            let (f, j) = self.at(x)?;
+            // (JᵀJ + μ I) dx = -Jᵀ f.
+            let mut m = [[0.0; 4]; 4];
+            let mut r = [0.0; 4];
+            for a in 0..4 {
+                for b in 0..4 {
+                    m[a][b] = (0..4).map(|k| j[k][a] * j[k][b]).sum();
+                }
+                r[a] = -(0..4).map(|k| j[k][a] * f[k]).sum::<f64>();
+            }
+            let mu = 1e-12 * (0..4).map(|a| m[a][a]).fold(0.0, f64::max);
+            for (a, row) in m.iter_mut().enumerate() {
+                row[a] += mu;
+            }
+            let dx = solve4(m, r)?;
+            let next: [f64; 4] = core::array::from_fn(|k| x[k] + dx[k]);
+            if next.iter().any(|v| !v.is_finite()) {
+                return None;
+            }
+            let small = (0..4).all(|k| dx[k].abs() <= 1e-14 * (1.0 + x[k].abs()));
+            x = next;
+            if small {
+                return Some(x);
+            }
+        }
+        Some(x)
+    }
+
+    /// The direction the curve of tangency runs at `x`: the null vector of
+    /// the system's Jacobian (by inverse iteration on `JᵀJ`), scaled to
+    /// unit speed of the first surface's point.
+    fn null(&self, x: [f64; 4]) -> Option<[f64; 4]> {
+        let (_, j) = self.at(x)?;
+        let mut m = [[0.0; 4]; 4];
+        for a in 0..4 {
+            for b in 0..4 {
+                m[a][b] = (0..4).map(|k| j[k][a] * j[k][b]).sum();
+            }
+        }
+        let scale = (0..4).map(|a| m[a][a]).fold(0.0, f64::max);
+        for (a, row) in m.iter_mut().enumerate() {
+            row[a] += 1e-12 * scale;
+        }
+        let mut v = [0.5; 4];
+        for _ in 0..4 {
+            let w = solve4(m, v)?;
+            let len = crate::math::sqrt(w.iter().map(|x| x * x).sum());
+            if !(len > 0.0 && len.is_finite()) {
+                return None;
+            }
+            v = w.map(|x| x / len);
+        }
+        let ja = self.sheets[0].jets_at(x[0], x[1]);
+        let speed = |k: usize| ja[k].d[0] * v[0] + ja[k].d[1] * v[1];
+        let s = crate::math::sqrt((0..3).map(|k| speed(k) * speed(k)).sum());
+        (s > 0.0 && s.is_finite()).then(|| v.map(|x| x / s))
+    }
+
+    /// Newton's method from `x` on three of the system's four equations
+    /// (those whose Jacobian without column `held` is best conditioned)
+    /// with parameter `held` fixed: `None` where it doesn't converge.
+    fn correct(&self, mut x: [f64; 4], held: usize) -> Option<[f64; 4]> {
+        let free: Vec<usize> = (0..4).filter(|&k| k != held).collect();
+        let det3 = |a: [[f64; 3]; 3]| {
+            a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
+                - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
+                + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0])
+        };
+        for _ in 0..30 {
+            let (f, j) = self.at(x)?;
+            let rows = (0..4)
+                .map(|drop| {
+                    let r: Vec<usize> = (0..4).filter(|&k| k != drop).collect();
+                    let m: [[f64; 3]; 3] =
+                        core::array::from_fn(|a| core::array::from_fn(|b| j[r[a]][free[b]]));
+                    (r, m)
+                })
+                .max_by(|a, b| det3(a.1).abs().total_cmp(&det3(b.1).abs()))?;
+            let rhs: [f64; 3] = core::array::from_fn(|a| f[rows.0[a]]);
+            let dx = super::sheet_cs::solve3(rows.1, rhs)?;
+            for (a, &k) in free.iter().enumerate() {
+                x[k] -= dx[a];
+            }
+            if x.iter().any(|v| !v.is_finite()) {
+                return None;
+            }
+            if (0..3).all(|a| dx[a].abs() <= 1e-14 * (1.0 + x[free[a]].abs())) {
+                return Some(x);
+            }
+        }
+        None
     }
 
     /// True when a box holds no root of the system outside `avoid`.
