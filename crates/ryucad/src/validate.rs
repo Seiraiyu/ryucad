@@ -2586,6 +2586,83 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_solid_added_under_one_id_is_renumbered_in_connectors_that_name_it() {
+        let mut m = boxed();
+        m.call("part.create", json!({"part": "asm", "kind": "assembly"}))
+            .unwrap();
+        for (i, at) in [("x", 0), ("y", 100)] {
+            m.call(
+                "feature.add",
+                json!({"part": "asm", "type": "instance", "id": i, "of": "p",
+                       "fixed": i == "x", "placement": {"origin": [at, 0, 0]}}),
+            )
+            .unwrap();
+        }
+        m.commit("two boxes placed");
+        let add_box = |m: &mut Merging, x: i32| {
+            m.call(
+                "feature.add",
+                json!({"part": "p", "type": "box", "id": "box-2",
+                       "params": {"x": x, "y": 10, "z": 10},
+                       "placement": {"origin": [40, 0, 0]}}),
+            )
+            .unwrap();
+        };
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        add_box(&mut m, 30);
+        // Theirs stands y's origin on the top of x's new box.
+        let v = m.call("inspect", json!({"part": "p"})).unwrap();
+        let top = v["bodies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["solid"] == "box-2")
+            .unwrap()["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                f["surface"]["frame"]["origin"][2]
+                    .as_f64()
+                    .is_some_and(|z| z > 0.0099)
+            })
+            .map(|f| f["name"].as_str().unwrap().to_owned())
+            .expect("a face at z = 10 mm");
+        m.call(
+            "feature.add",
+            json!({"part": "asm", "type": "mate", "id": "on", "form": "ball",
+                   "a": format!("asm/x/box-2/{top}"), "b": "asm/y"}),
+        )
+        .unwrap();
+        m.commit("theirs: y on x's new box");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        add_box(&mut m, 5);
+        m.commit("ours: a short box");
+        m.merge("theirs");
+        let r = renumber(&mut m, "parts/p/features/box-2.json#");
+        assert_eq!(r["status"]["clean"], true, "{r}");
+        // The connector follows theirs' box to its new ID, under the
+        // name its top has there (issue #1145).
+        let mate: Value = serde_json::from_str(
+            &std::fs::read_to_string(m.root().join("parts/asm/features/on.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(mate["a"]["at"]["feature"], "box-1", "{mate}");
+        assert_ne!(mate["a"]["at"]["name"], json!(top));
+        let built = m.call("rebuild", json!({"part": "asm"})).unwrap();
+        let on = built["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == "on")
+            .unwrap()
+            .clone();
+        assert_eq!(on["ok"], true, "{on}");
+    }
+
+    #[test]
     fn a_solid_added_under_one_id_is_renumbered_with_what_acts_on_it() {
         let mut m = boxed();
         let add_box = |m: &mut Merging, x: i32| {

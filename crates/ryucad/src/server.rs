@@ -384,6 +384,9 @@ fn dispatch(
             expected_revision.as_deref(),
         ),
         Request::AssemblyTree { part } => crate::assembly::tree(session, &part),
+        Request::Interference { part, instances } => {
+            crate::interference::run(session, &part, &instances)
+        }
         Request::AssemblySolve {
             part,
             moves,
@@ -3292,7 +3295,8 @@ pub fn publish(live: &mut Live, session: &mut Session) {
         return;
     }
     // An assembly changes when what it places does, its files or not: its
-    // rebuild's hash says so.
+    // rebuild's hash says so, and its labels' pins, which move with the
+    // release branch and not with any file (issue #105).
     let assemblies: Vec<Id> = p
         .parts
         .iter()
@@ -3301,7 +3305,13 @@ pub fn publish(live: &mut Live, session: &mut Session) {
         .collect();
     for id in assemblies {
         if let Ok(r) = session.rebuilt(&id) {
-            let key = format!("{}+{}", revisions[&id], r.hash);
+            let pins: Vec<String> = r
+                .features
+                .iter()
+                .filter_map(|(_, o)| o.as_ref().ok()?.instance()?.model.pin.as_ref())
+                .map(|p| format!("{p:?}"))
+                .collect();
+            let key = format!("{}+{}+{}", revisions[&id], r.hash, pins.join(","));
             revisions.insert(id, key);
         }
     }
@@ -6904,6 +6914,52 @@ pub(crate) mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn a_label_made_official_is_news() {
+        use crate::assembly::tests::{place_in, released};
+        use crate::git::tests::git;
+        let (dir, mut s) = released();
+        let r = dir.path();
+        call(&mut s, "release.propose", json!({"part": "bolt"})).unwrap();
+        place_in(r, "frame", "b", "bolt", json!({"label": "B"}), [0.0; 3]);
+        let mut live = Live::new();
+        let mut slot = Some(s);
+        settle(&mut slot, &mut live, r);
+        let sub = live.hub.subscribe("p-x", &[Topic::Model]);
+        let mark = |live: &mut Live| live.hub.send(Topic::Model, "marker", &json!({}));
+        // The first watched tick keys assemblies by their results; the
+        // next has nothing to say.
+        tick(&mut slot, &mut live, r);
+        mark(&mut live);
+        drain(&sub);
+        tick(&mut slot, &mut live, r);
+        mark(&mut live);
+        assert!(drain(&sub).is_empty());
+        // No file the session reads changes; the release branch does.
+        git(r, &["add", "."]);
+        git(r, &["commit", "-q", "-m", "bolt B"]);
+        tick(&mut slot, &mut live, r);
+        mark(&mut live);
+        let got = drain(&sub);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].0, "model.changed");
+        let frame = got[0].1["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["part"] == "frame")
+            .unwrap()
+            .clone();
+        let b = frame["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == "b")
+            .unwrap()
+            .clone();
+        assert_eq!(b["instance"]["pin"]["official"], true, "{b}");
     }
 
     #[test]

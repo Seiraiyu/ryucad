@@ -875,10 +875,8 @@ pub fn move_pose(
             pose.origin_m[i] += q.meters();
         }
     }
-    let clean = crate::doc::sketch::clean;
-    pose.origin_m = pose.origin_m.map(clean);
-    pose.z = pose.z.map(clean);
-    pose.x = pose.x.map(clean);
+    // A quarter turn leaves 6.1e-17 where 0 is meant (issue #108).
+    let pose = pose.snapped();
     pose_rigid(&pose)?;
     Ok(pose)
 }
@@ -1530,6 +1528,61 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_label_follows_the_release_branch_as_it_moves() {
+        use crate::git::tests::git;
+        let (dir, mut s) = released();
+        let r = dir.path();
+        // B proposed and placed, in one session, as a daemon keeps it.
+        call(&mut s, "release.propose", json!({"part": "bolt"})).unwrap();
+        place_in(r, "frame", "b", "bolt", json!({"label": "B"}), [0.0; 3]);
+        s.refresh().unwrap();
+        let pin = |s: &mut Session| -> (Option<Pin>, Vec<Value>) {
+            let result = s.rebuilt(&id("frame")).unwrap().clone();
+            let placed = result.output(&id("b")).unwrap().instance().unwrap();
+            (placed.model.pin.clone(), result.warnings(&id("frame")))
+        };
+        assert_eq!(
+            pin(&mut s).0,
+            Some(Pin {
+                commit: None,
+                obsolete: false
+            })
+        );
+        // Committed on the release branch: official from that commit,
+        // though no file the session reads changed (issue #105).
+        git(r, &["add", "."]);
+        git(r, &["commit", "-q", "-m", "bolt B"]);
+        let commit = crate::git::repo(r).unwrap().locate("HEAD").unwrap().0;
+        s.refresh().unwrap();
+        assert_eq!(
+            pin(&mut s).0,
+            Some(Pin {
+                commit: Some(commit.clone()),
+                obsolete: false
+            })
+        );
+        // Made obsolete and committed: the warning comes.
+        call(
+            &mut s,
+            "release.obsolete",
+            json!({"part": "bolt", "label": "B"}),
+        )
+        .unwrap();
+        git(r, &["add", "."]);
+        git(r, &["commit", "-q", "-m", "B is obsolete"]);
+        s.refresh().unwrap();
+        let (p, w) = pin(&mut s);
+        assert_eq!(
+            p,
+            Some(Pin {
+                commit: Some(commit),
+                obsolete: true
+            })
+        );
+        assert_eq!(w[0]["code"], "instance_obsolete", "{w:?}");
+    }
+
+    #[test]
     fn a_label_without_a_record_fails_its_instance() {
         let (dir, mut s) = released();
         place_in(
@@ -1902,13 +1955,10 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(v["pose"]["origin_m"], json!([0.01, 0.005, 0]));
-        let x: Vec<f64> = v["pose"]["x"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|x| x.as_f64().unwrap())
-            .collect();
-        assert!(x[0].abs() < 1e-15 && (x[1] - 1.0).abs() < 1e-15, "{x:?}");
+        // Exactly, not 6.1e-17 off (issue #108).
+        assert_eq!(v["pose"]["x"], json!([0, 1, 0]));
+        let shown = call(&mut s, "feature.show", json!({"part": "frame", "id": "b1"})).unwrap();
+        assert_eq!(shown["pose"]["x"], json!([0, 1, 0]));
         let m = s.model(&id("frame"), &Rev::Working).unwrap();
         assert_eq!(origin(&m.occurrences[0]), [0.01, 0.005, 0.0]);
         // Undone, it is back where the translation left it.
@@ -2258,10 +2308,34 @@ pub(crate) mod tests {
         assert_eq!(pose[0]["to"], json!([0.011, 0, 0]));
         let v = call(&mut s, "diff", json!({"model": true})).unwrap();
         let occ = &v["parts"]["frame"]["occurrences"];
+        let lists = |k: &str| occ[k].clone();
         assert_eq!(
-            occ,
-            &json!({"added": [], "removed": ["b2"], "moved": ["b1"], "changed": ["base"]})
+            [
+                lists("added"),
+                lists("removed"),
+                lists("moved"),
+                lists("changed")
+            ],
+            [json!([]), json!(["b2"]), json!(["b1"]), json!(["base"])]
         );
+        // Each with its sides, as a compare paints and ghosts them.
+        assert_eq!(occ["sides"]["b2"]["to"], Value::Null);
+        assert_eq!(occ["sides"]["b2"]["from"]["part"], "bolt");
+        assert_eq!(
+            occ["sides"]["b1"]["to"]["pose"]["origin_m"],
+            json!([0.011, 0, 0])
+        );
+        assert_ne!(
+            occ["sides"]["base"]["from"]["solids"][0]["hash"],
+            occ["sides"]["base"]["to"]["solids"][0]["hash"]
+        );
+        // The plate thicker: its top moved, its sides grew.
+        let body = &occ["bodies"]["base/slab"];
+        assert!(
+            !body["faces"]["changed"].as_array().unwrap().is_empty(),
+            "{body}"
+        );
+        assert_eq!(occ["bodies"].as_object().unwrap().len(), 1);
         // A part has no occurrences to report.
         assert!(v["parts"]["plate"].get("occurrences").is_none());
     }

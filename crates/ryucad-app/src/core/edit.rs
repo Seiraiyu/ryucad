@@ -718,6 +718,22 @@ fn text(v: &Value) -> String {
     }
 }
 
+/// A pose's number as the form shows it: to 12 decimals (a picometre,
+/// a millionth of a microradian), trailing zeros dropped, so a field
+/// never hides an exponent (`6.123233995736766e-17` reads `0`; issue
+/// #108).
+fn pose_number(v: &Value) -> String {
+    let Some(x) = v.as_f64() else {
+        return text(v);
+    };
+    let s = format!("{x:.12}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    match s {
+        "-0" | "" => "0".to_owned(),
+        s => s.to_owned(),
+    }
+}
+
 fn triple(names: [&str; 3], v: &Value) -> [Field; 3] {
     [0, 1, 2].map(|i| Field::new(names[i], text(&v[i])))
 }
@@ -735,8 +751,10 @@ impl Form {
         let instance = ty == "instance";
         // An instance's pose is its placement, the origin in meters.
         let pose = instance.then(|| {
-            let o = |i: usize| format!("{} m", v["pose"]["origin_m"][i]);
-            json!({"origin": [o(0), o(1), o(2)], "z": v["pose"]["z"], "x": v["pose"]["x"]})
+            let p = &v["pose"];
+            let o = |i: usize| format!("{} m", pose_number(&p["origin_m"][i]));
+            let axis = |a: &Value| -> Vec<String> { (0..3).map(|i| pose_number(&a[i])).collect() };
+            json!({"origin": [o(0), o(1), o(2)], "z": axis(&p["z"]), "x": axis(&p["x"])})
         });
         let p = pose.as_ref().unwrap_or(&v["placement"]);
         let strings =
@@ -1642,5 +1660,18 @@ mod tests {
         let f = Form::from_show("frame", &v);
         assert_eq!(f.rev.as_ref().unwrap().read, "A");
         assert!(f.fixed.as_ref().unwrap().read);
+    }
+
+    #[test]
+    fn a_pose_reads_without_its_rounding() {
+        let v = json!({"id": "b1", "type": "instance", "revision": "r1", "part": "bolt",
+                       "rev": "working",
+                       "pose": {"origin_m": [0.026000000000000002, -0.0125, 0],
+                                "z": [0, 0, 1], "x": [6.123233995736766e-17, 1, -1e-13]}});
+        let f = Form::from_show("frame", &v);
+        let read = |fs: &[Field; 3]| fs.clone().map(|f| f.read);
+        assert_eq!(read(&f.origin), ["0.026 m", "-0.0125 m", "0 m"]);
+        assert_eq!(read(&f.z), ["0", "0", "1"]);
+        assert_eq!(read(&f.x), ["0", "1", "0"]);
     }
 }

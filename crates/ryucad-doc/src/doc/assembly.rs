@@ -84,6 +84,22 @@ pub struct Pose {
     pub x: [f64; 3],
 }
 
+/// How far from 0 or ±1 an axis's component may be and still be written
+/// as that: a few units in the last place of 1, which is what turning an
+/// axis by a quarter turn leaves (`cos(π/2)` is about `6.1e-17`).
+const SNAP: f64 = 4.0 * f64::EPSILON;
+
+/// An axis's component as a pose is written: within rounding of 0 or ±1
+/// it is that exactly (issue #108), and `-0` is `0` as for any position.
+pub fn snap_axis(x: f64) -> f64 {
+    for to in [0.0, 1.0, -1.0] {
+        if (x - to).abs() <= SNAP {
+            return to;
+        }
+    }
+    clean(x)
+}
+
 impl Pose {
     /// The assembly's own frame.
     pub const IDENTITY: Pose = Pose {
@@ -91,6 +107,16 @@ impl Pose {
         z: [0.0, 0.0, 1.0],
         x: [1.0, 0.0, 0.0],
     };
+
+    /// The pose as it is written: its axes' components snapped
+    /// ([`snap_axis`]), its origin's `-0` made `0`.
+    pub fn snapped(self) -> Pose {
+        Pose {
+            origin_m: self.origin_m.map(clean),
+            z: self.z.map(snap_axis),
+            x: self.x.map(snap_axis),
+        }
+    }
 
     pub fn to_json(&self) -> Value {
         json!({
@@ -239,5 +265,21 @@ mod tests {
         let mut v = instance(json!("working"));
         v["fixed"] = json!(1);
         assert_eq!(read(v).unwrap_err().details["pointer"], "/fixed");
+    }
+
+    #[test]
+    fn axes_within_rounding_of_0_or_1_are_written_as_that() {
+        let p = Pose {
+            origin_m: [0.026000000000000002, -0.0, 1e-17],
+            z: [0.0, -1.0 + 2.0 * f64::EPSILON, 6.123233995736766e-17],
+            x: [-6.123233995736766e-17, 0.9999999999999999, 1e-9],
+        };
+        let q = p.snapped();
+        // Origins are positions: kept as they are, `-0` aside.
+        assert_eq!(q.origin_m, [0.026000000000000002, 0.0, 1e-17]);
+        assert_eq!(q.z, [0.0, -1.0, 0.0]);
+        assert_eq!(q.x, [0.0, 1.0, 1e-9]);
+        assert_eq!(q.z[0].to_bits(), 0.0f64.to_bits());
+        assert_eq!(Pose::IDENTITY.snapped(), Pose::IDENTITY);
     }
 }

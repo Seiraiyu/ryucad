@@ -568,6 +568,15 @@ pub enum Request {
     /// how it resolved, its pose in the assembly, and a subassembly's own.
     #[serde(rename = "assembly.tree")]
     AssemblyTree { part: String },
+    /// Which solids of an assembly's occurrences overlap: every pair whose
+    /// boxes do, or those with a side under `instances` (instance paths
+    /// under the assembly, as `s1/b2` or `holes:2/bolt`).
+    #[serde(rename = "interference")]
+    Interference {
+        part: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        instances: Vec<String>,
+    },
     #[serde(rename = "rebuild")]
     Rebuild {
         #[serde(default, skip_serializing_if = "Option::is_none")]

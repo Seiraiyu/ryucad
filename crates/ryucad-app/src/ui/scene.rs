@@ -289,6 +289,19 @@ fn face_vertices(
     out
 }
 
+/// Vertices made relative to `reference` in their part's frame, moved to
+/// `pose`: worked in f64, so a ghost far from the reference stays
+/// precise.
+fn place(vs: &mut [Vertex], pose: &Pose, reference: [f64; 3]) {
+    for v in vs {
+        let local = [0, 1, 2].map(|k| f64::from(v.pos[k]) + reference[k]);
+        let w = pose.apply(local);
+        v.pos = [0, 1, 2].map(|k| (w[k] - reference[k]) as f32);
+        let n = pose.turn(v.normal.map(f64::from));
+        v.normal = n.map(|x| x as f32);
+    }
+}
+
 fn edge_vertices(m: &WireMesh, offset: [f32; 3]) -> Vec<Vertex> {
     let color = linear(theme::EDGE);
     let mut out = Vec::new();
@@ -583,12 +596,17 @@ impl Scene {
         );
         for (key, body) in &c.ghosts {
             let Ok(m) = &body.mesh else { continue };
+            let pose = c.ghost_pose(key);
             let mut faces = Vec::new();
             for f in &m.faces {
                 let tris = &m.triangles[f.triangles.0 as usize..f.triangles.1 as usize];
                 let name = ryucad::mesh::name_hex(&f.name);
                 let color = if c.is_gone(key, &name) { gone } else { ghost };
                 faces.extend(face_vertices(m, offset(m, self.reference), tris, color));
+            }
+            // An occurrence's ghost where it was (issue #109).
+            if pose != Pose::IDENTITY {
+                place(&mut faces, &pose, self.reference);
             }
             self.ghosts.insert(
                 key.clone(),

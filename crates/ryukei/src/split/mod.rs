@@ -47,6 +47,9 @@ pub(crate) fn split_all(ops: &[Body], table: &Table) -> Result<Vec<Piece>, Fail>
     let found: Vec<Vec<Piece>> = faces
         .par_iter()
         .map(|&f| split(ops, table, f))
+        // The first failure in order, not the first a thread found.
+        .collect::<Vec<_>>()
+        .into_iter()
         .collect::<Result<_, _>>()?;
     Ok(found.into_iter().flatten().collect())
 }

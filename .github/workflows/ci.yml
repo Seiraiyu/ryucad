@@ -41,7 +41,8 @@ jobs:
       # heal and STEP round trip tests write and heal hundreds of seeded
       # bodies, the committed STEP files' bodies are self-intersection
       # checked, and ryucad's bar times a 1,000-hole pattern against
-      # ryukei's own boolean:
+      # ryukei's own boolean, and its assembly bars time 1,000 mates and a
+      # cold daemon over a warm disk cache:
       # minutes in a debug build, so they are ignored there and run in
       # release.
       - run: cargo test -p ryukei --release --test boolean_props
@@ -59,6 +60,7 @@ jobs:
       - run: cargo test -p ryustep --release --test round_trip_props
       - run: cargo test -p ryustep --release --test checks
       - run: cargo test -p ryucad --release --test bar -- --nocapture
+      - run: cargo test -p ryucad --release --test assembly_bar -- --nocapture
       - if: failure()
         name: the viewport as drawn, if it no longer matches its snapshot
         uses: actions/upload-artifact@v4

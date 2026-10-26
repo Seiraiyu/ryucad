@@ -8,9 +8,11 @@
 //! coloured new or changed, and the other side's solid is ghosted with
 //! the faces it loses in the removed colour. Unchanged solids are the same
 //! on both sides, so a ghost of them would only fight the model for its
-//! pixels.
+//! pixels. An assembly's occurrences take part the same way, solid by
+//! solid: painted where their bodies differ, ghosted where they were when
+//! they moved, changed or went (issue #109).
 
-use crate::core::model::BodyKey;
+use crate::core::model::{BodyKey, Occurrence, Pose};
 use ryucad::error::Error;
 use ryucad::mesh::WireBody;
 use serde_json::Value;
@@ -142,6 +144,9 @@ pub struct Compare {
     pub gone_bodies: BTreeSet<BodyKey>,
     /// The ghosts' meshes, each for the hash it says.
     pub ghosts: BTreeMap<BodyKey, Arc<WireBody>>,
+    /// Where an assembly's ghosts were: each occurrence's solid at the
+    /// other side's pose. A part's ghosts are where their part is.
+    pub ghost_poses: BTreeMap<BodyKey, Pose>,
     /// Ghosts asked for and not yet answered, by hash.
     pub asked: BTreeMap<BodyKey, String>,
     /// Bumped whenever anything here changes, so views know to redraw.
@@ -319,6 +324,7 @@ impl Compare {
         self.wanted.clear();
         self.gone.clear();
         self.gone_bodies.clear();
+        self.ghost_poses.clear();
         let parts = v["parts"].as_object().into_iter().flatten();
         for (part, p) in parts {
             if p["pdm"].is_object() {
@@ -393,6 +399,61 @@ impl Compare {
                     }
                 }
             }
+            // An assembly's occurrences, by path: each solid painted as
+            // its body differs, and ghosted where it was when it moved,
+            // changed or went.
+            let occurrences = &p["occurrences"];
+            let sides = occurrences["sides"].as_object().into_iter().flatten();
+            for (path, s) in sides {
+                let side = |v: &Value| (!v.is_null()).then(|| Occurrence::from_json(v));
+                let (from, to) = (side(&s["from"]), side(&s["to"]));
+                let key = |solid: &str| (part.clone(), format!("{path}/{solid}"));
+                let hash_in = |o: &Option<Occurrence>, solid: &str| {
+                    o.as_ref()?
+                        .solids
+                        .iter()
+                        .find(|(s, _)| s == solid)
+                        .map(|(_, h)| h.clone())
+                };
+                for (solid, hash) in to.iter().flat_map(|o| o.solids.iter()) {
+                    let k = key(solid);
+                    let b = &occurrences["bodies"][&k.1];
+                    match hash_in(&from, solid) {
+                        None => {
+                            self.new_bodies.insert(k);
+                        }
+                        Some(was) if was != *hash && b.is_object() => {
+                            let faces = self.faces.entry(k.clone()).or_default();
+                            for n in strings(&b["faces"]["new"]) {
+                                faces.insert(n, FaceMark::New);
+                            }
+                            for n in strings(&b["faces"]["changed"]) {
+                                faces.insert(n, FaceMark::Changed);
+                            }
+                            let gone: BTreeSet<String> =
+                                strings(&b["faces"]["gone"]).into_iter().collect();
+                            if !gone.is_empty() {
+                                self.gone.insert(k, gone);
+                            }
+                        }
+                        Some(_) => {}
+                    }
+                }
+                let Some(was) = &from else { continue };
+                let moved = to.as_ref().is_none_or(|o| o.pose() != was.pose());
+                for (solid, hash) in &was.solids {
+                    let k = key(solid);
+                    let now = hash_in(&to, solid);
+                    if now.as_ref() == Some(hash) && !moved {
+                        continue;
+                    }
+                    if now.is_none() {
+                        self.gone_bodies.insert(k.clone());
+                    }
+                    self.wanted.insert(k.clone(), hash.clone());
+                    self.ghost_poses.insert(k, was.pose());
+                }
+            }
         }
         let wanted = &self.wanted;
         self.ghosts
@@ -448,6 +509,22 @@ impl Compare {
         self.ghosts.insert(key, Arc::new(body));
         self.generation += 1;
         true
+    }
+
+    /// Where `key`'s ghost is drawn: an occurrence's where it was, else
+    /// where its part is.
+    pub fn ghost_pose(&self, key: &BodyKey) -> Pose {
+        self.ghost_poses.get(key).copied().unwrap_or(Pose::IDENTITY)
+    }
+
+    /// What `mesh.get` is asked for to draw `key`'s ghost: an assembly's
+    /// occurrence by its path (`<path>/<solid>` less its solid, whose
+    /// body comes labelled `<path>/<solid>`), else the feature itself.
+    pub fn ghost_request(&self, key: &BodyKey) -> String {
+        match key.1.rsplit_once('/') {
+            Some((path, _)) if self.ghost_poses.contains_key(key) => path.to_owned(),
+            _ => key.1.clone(),
+        }
     }
 
     /// Drops every ghost: the display quality changed.
@@ -549,6 +626,51 @@ mod tests {
         // A reference changes whole.
         let f = json!({"changes": [{"at": "/face", "from": edge('a'), "to": null}]});
         assert_eq!(lines(&f), ["/face: ex1/23ab0b16 -> (none)"]);
+    }
+
+    #[test]
+    fn an_assemblys_occurrences_are_painted_and_ghosted_where_they_were() {
+        let occ = |path: &str, hash: &str, x: f64| {
+            json!({"path": path, "part": "bolt", "rev": "working",
+                   "solids": [{"solid": "shank", "hash": hash}],
+                   "pose": {"origin_m": [x, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}})
+        };
+        let body = json!({"faces": {"new": [], "changed": [hex('b')], "gone": [hex('c')]}});
+        let mut c = Compare::new("HEAD");
+        c.take_diff(&json!({"from": {"commit": "c0ffee"}, "parts": {"top": {
+            "status": "same", "features": {}, "order": {"moved": []},
+            "occurrences": {
+                "added": ["s3/b1"], "removed": ["s2/b1"], "moved": ["s1/b1"],
+                "changed": ["s1/b2"],
+                "sides": {
+                    "s1/b1": {"from": occ("s1/b1", "h", 0.0), "to": occ("s1/b1", "h", 0.005)},
+                    "s1/b2": {"from": occ("s1/b2", "h", 0.08), "to": occ("s1/b2", "g", 0.08)},
+                    "s2/b1": {"from": occ("s2/b1", "h", 0.2), "to": null},
+                    "s3/b1": {"from": null, "to": occ("s3/b1", "h", 0.3)}},
+                "bodies": {"s1/b2/shank": body}}}}}));
+        let k = |p: &str| ("top".to_owned(), format!("{p}/shank"));
+        // Painted: the changed bolt's faces, the added one whole.
+        assert_eq!(
+            c.faces[&k("s1/b2")].get(&hex('b')),
+            Some(&FaceMark::Changed)
+        );
+        assert!(c.new_bodies.contains(&k("s3/b1")));
+        assert!(!c.faces.contains_key(&k("s1/b1")), "only moved");
+        // Ghosted where they were: moved, changed and gone; not the new.
+        for (p, x) in [("s1/b1", 0.0), ("s1/b2", 0.08), ("s2/b1", 0.2)] {
+            assert_eq!(c.wanted[&k(p)], "h");
+            assert_eq!(c.ghost_pose(&k(p)).origin, [x, 0.0, 0.0]);
+            assert_eq!(c.ghost_request(&k(p)), p);
+        }
+        assert!(!c.wanted.contains_key(&k("s3/b1")));
+        assert!(c.is_gone(&k("s2/b1"), &hex('a')));
+        assert!(c.is_gone(&k("s1/b2"), &hex('c')));
+        assert!(!c.is_gone(&k("s1/b1"), &hex('c')));
+        // A part's ghost is asked for by its solid, where it is.
+        let mut p = Compare::new("HEAD");
+        p.take_diff(&diff());
+        assert_eq!(p.ghost_request(&key("b")), "b");
+        assert_eq!(p.ghost_pose(&key("b")), Pose::IDENTITY);
     }
 
     #[test]

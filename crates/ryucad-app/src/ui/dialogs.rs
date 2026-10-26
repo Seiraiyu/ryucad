@@ -207,3 +207,62 @@ pub fn cache_text(stats: Option<&serde_json::Value>) -> String {
         mib(&s["max_bytes"])
     )
 }
+
+/// Tools > Check interference: the pairs of the shown assembly's solids
+/// that share a volume, each with a Show button (the pair's touched
+/// faces, to frame), how many only touch, and those that couldn't be
+/// checked. Returns the faces to frame when Show is pressed.
+pub fn interference(
+    ctx: &egui::Context,
+    ws: &mut Workspace,
+    open: &mut bool,
+    view: egui::Rect,
+) -> Option<Vec<String>> {
+    let mut show = None;
+    let mut again = false;
+    window("Interference", view)
+        .open(open)
+        .default_width(420.0)
+        .show(ctx, |ui| {
+            let Some(i) = &ws.interference else {
+                ui.label("Show an assembly, then check it.");
+                return;
+            };
+            ui.label(format!("Assembly {}", i.part));
+            again = ui.button("Check again").clicked();
+            ui.separator();
+            if !i.loaded {
+                ui.spinner();
+                return;
+            }
+            if let Some(e) = &i.error {
+                ui.colored_label(ui.visuals().error_fg_color, &e.message);
+                return;
+            }
+            if i.pairs.is_empty() {
+                ui.label("No instances interfere.");
+            }
+            for p in &i.pairs {
+                ui.horizontal(|ui| {
+                    ui.label(p.label(&i.part));
+                    if ui.small_button("Show").clicked() {
+                        show = Some(p.faces.clone());
+                    }
+                });
+            }
+            if i.touching > 0 {
+                ui.label(format!("{} pair(s) only touch.", i.touching));
+            }
+            for (a, b) in &i.unchecked {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!("{a} and {b} couldn't be checked"),
+                );
+            }
+            ui.weak("Volumes are estimated from meshes.");
+        });
+    if again {
+        ws.check_interference();
+    }
+    show
+}

@@ -276,6 +276,9 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
             }
             Ok(Pair { a, b, meet })
         })
+        // The first failure in order, not the first a thread found.
+        .collect::<Vec<_>>()
+        .into_iter()
         .collect::<Result<_, _>>()?;
     // Edges against other operands' faces.
     let edges: Vec<EdgeRef> = ops
@@ -305,6 +308,9 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
     let found: Vec<(Vec<Hit>, Vec<OnHit>)> = edge_faces
         .par_iter()
         .map(|&(i, j)| edge_hits(ops, edges[i], faces[j]))
+        // The first failure in order, not the first a thread found.
+        .collect::<Vec<_>>()
+        .into_iter()
         .collect::<Result<_, _>>()?;
     let mut hits = Vec::new();
     let mut ons = Vec::new();
@@ -334,6 +340,9 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
     let touches: Vec<Touch> = vert_faces
         .par_iter()
         .map(|&(i, j)| touch(ops, verts[i], faces[j]))
+        // The first failure in order, not the first a thread found.
+        .collect::<Vec<_>>()
+        .into_iter()
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .flatten()
@@ -789,6 +798,9 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
             };
             point_in_face(fb, f.face, Point2::new(u, v)).map_err(|e| fail(e, own, f))
         })
+        // The first failure in order, not the first a thread found.
+        .collect::<Vec<_>>()
+        .into_iter()
         .collect::<Result<_, _>>()?;
     for ((q, f), place) in jobs.into_iter().zip(placed) {
         if place == Place::Inside {
@@ -1033,6 +1045,9 @@ fn triple_points(
             }
             Ok(out)
         })
+        // The first failure in order, not the first a thread found.
+        .collect::<Vec<_>>()
+        .into_iter()
         .collect::<Result<_, _>>()?;
     Ok(found.into_iter().flatten().collect())
 }
@@ -1502,6 +1517,9 @@ fn pcurves(ops: &[Body], pairs: &[Pair], table: &mut Table) -> Result<(), Fail> 
     let found: Vec<((Curve2, [f64; 2]), f64)> = uses
         .par_iter()
         .map(|&(g, f)| pcurve_of(ops, pairs, &table.edges[g], f))
+        // The first failure in order, not the first a thread found.
+        .collect::<Vec<_>>()
+        .into_iter()
         .collect::<Result<_, _>>()?;
     for ((g, f), (pc, tol)) in uses.into_iter().zip(found) {
         let ge = &mut table.edges[g];

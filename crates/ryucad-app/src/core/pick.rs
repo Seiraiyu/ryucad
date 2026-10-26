@@ -326,8 +326,7 @@ impl Picker {
             .collect();
         let sketches: Vec<(BodyKey, Arc<Drawing>)> = if sketches {
             model
-                .sketches
-                .iter()
+                .drawn_sketches()
                 .map(|(k, d)| (k.clone(), Arc::clone(d)))
                 .collect()
         } else {
@@ -380,7 +379,7 @@ impl Picker {
             if gone.is_empty() {
                 continue;
             }
-            let body = Body::new(key.clone(), Arc::clone(b), Pose::IDENTITY).expect("meshed");
+            let body = Body::new(key.clone(), Arc::clone(b), c.ghost_pose(key)).expect("meshed");
             self.ghosts.push((body, gone));
         }
         self.ghost_rev = Some(c.rev.clone());

@@ -1051,6 +1051,9 @@ fn build_pattern(
             let r = apply(part, id, "pattern", (kop, operation.as_str()), t, b, &tools)?;
             Ok(((*t).clone(), Arc::new(r)))
         })
+        // The first failure in order, not the first a thread found.
+        .collect::<Vec<_>>()
+        .into_iter()
         .collect::<Result<_>>()?;
     Ok(Made::new(made))
 }
@@ -2094,10 +2097,16 @@ pub fn rebuild_part_in(
                 let h = input_hash(part, &solids, &id, f, &built);
                 if let Some(inst) = f.instance() {
                     // What it reads is its part's model, from outside the
-                    // part: the model's hash keys it.
+                    // part: the model's hash keys it, and for a label how
+                    // it resolved, which moves with the release branch
+                    // and not with any file (issue #105).
                     let model = children
                         .get(&(inst.part.clone(), inst.rev.clone()))
-                        .map(|m| m.as_ref().map(|m| m.hash.clone()).map_err(|e| e.code));
+                        .map(|m| {
+                            m.as_ref()
+                                .map(|m| (m.hash.clone(), m.pin.clone()))
+                                .map_err(|e| e.code)
+                        });
                     let mut k = blake3::Hasher::new();
                     k.update(h.as_bytes());
                     k.update(format!("{model:?}").as_bytes());

@@ -28,6 +28,7 @@ pub mod git;
 pub mod graph;
 pub mod hole;
 pub mod inspect;
+pub mod interference;
 pub mod live;
 pub mod mate;
 pub mod merge;

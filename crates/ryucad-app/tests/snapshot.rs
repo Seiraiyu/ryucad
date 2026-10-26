@@ -243,6 +243,136 @@ fn a_drilled_part_looks_as_it_did() {
     looks_as_it_did(&adapter, &px, "solids");
 }
 
+/// An assembly: a plate fixed, a bolt on it and a circular pattern of
+/// five more about the plate's middle, drawn as the window draws them:
+/// one mesh per body, each occurrence at its level of detail.
+#[test]
+fn an_assembly_with_a_pattern_looks_as_it_did() {
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::named("snapshot");
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "box",
+        "--id",
+        "slab",
+        "--param",
+        "x=40",
+        "--param",
+        "y=40",
+        "--param",
+        "z=4",
+        "--origin",
+        "-20,-20,0",
+    ]);
+    p.ok(&["part", "create", "bolt"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bolt",
+        "cylinder",
+        "--id",
+        "shank",
+        "--param",
+        "radius=1.5",
+        "--param",
+        "height=8",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bolt",
+        "cylinder",
+        "--id",
+        "head",
+        "--operation",
+        "join",
+        "--target",
+        "shank",
+        "--param",
+        "radius=2.5",
+        "--param",
+        "height=1.5",
+        "--origin",
+        "0,0,8",
+    ]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "base", "--of", "plate", "--fixed",
+    ]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "seed", "--of", "bolt", "--origin", "12,0,4",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "frame",
+        "instance_pattern",
+        "--id",
+        "ring",
+        "--form",
+        "circular",
+        "--instance",
+        "seed",
+        "--axis",
+        "z",
+        "--count",
+        "6",
+        "--angle",
+        "360",
+    ]);
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.model.drawn().count() == 7));
+    let picker = Picker::new(&ws.model);
+    let (lo, hi) = picker.bounds().unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Iso, view::DEFAULT_PROJECTION);
+    // The depth range holds the model's bounding sphere.
+    let radius = (0..3)
+        .map(|k| (hi[k] - lo[k]) * (hi[k] - lo[k]))
+        .sum::<f64>()
+        .sqrt()
+        / 2.0;
+    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, radius);
+    // Each occurrence's level, fetched as the window fetches it.
+    let mut drawn = Vec::new();
+    for _ in 0..20 {
+        let (d, wanted) = ryucad_app::core::lod::choose(&ws.model, &picker, &pr, f64::from(H));
+        drawn = d;
+        if wanted.is_empty() {
+            break;
+        }
+        ws.fetch_levels(wanted);
+        assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()));
+    }
+    assert_eq!(drawn.len(), 7);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync_drawn(&device, &drawn, centre);
+    // Two bodies, each uploaded once per level its occurrences are drawn
+    // at; seven occurrences.
+    let (meshes, occurrences) = scene.counts();
+    assert_eq!(occurrences, 7);
+    assert!((2..=6).contains(&meshes), "{meshes} meshes on the GPU");
+    let list = DrawList {
+        reference: centre,
+        matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        background: theme::BACKGROUND,
+        light: scene::light(&camera),
+        edges: true,
+        faces: &[],
+        overlay: &[],
+    };
+    scene.render(&device, &queue, [W, H], &list);
+    let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
+    looks_as_it_did(&adapter, &px, "assembly");
+}
+
 /// Compares `px` with `tests/snapshots/<name>-lavapipe.png` on lavapipe,
 /// or only checks something was drawn on other adapters.
 fn looks_as_it_did(adapter: &eframe::wgpu::Adapter, px: &[u8], name: &str) {

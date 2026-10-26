@@ -23,7 +23,7 @@ use rayon::prelude::*;
 use serde_json::{Value, json};
 
 /// Every finding's code and severity: `doctor`'s issues keep their own.
-pub const CODES: [(&str, &str); 8] = [
+pub const CODES: [(&str, &str); 9] = [
     ("feature_failed", "error"),
     ("assembly_unsolved", "error"),
     ("faces_intersect", "error"),
@@ -32,6 +32,7 @@ pub const CODES: [(&str, &str); 8] = [
     ("cache_mismatch", "error"),
     ("unmerged_path", "error"),
     ("instance_obsolete", "warning"),
+    ("instances_interfere", "warning"),
 ];
 
 fn severity(code: &str) -> &'static str {
@@ -300,6 +301,31 @@ pub fn run(
                 );
                 f["rev"] = w["rev"].clone();
                 findings.push(f);
+            }
+        }
+        // Instances that share a volume: a warning, since a press fit is
+        // meant; pairs ryukei can't intersect can't be checked.
+        if crate::server::part_kind(&p) == crate::doc::files::PartKind::Assembly
+            && let Ok(model) = from_nothing.model(id, &crate::doc::assembly::Rev::Working)
+        {
+            let mut cache = crate::interference::Cache::default();
+            let found = crate::interference::find(id, &model, &[], &mut cache)?;
+            for i in found["interferences"].as_array().into_iter().flatten() {
+                findings.push(json!({
+                    "code": "instances_interfere", "severity": severity("instances_interfere"),
+                    "part": id, "a": i["a"], "b": i["b"], "volume_m3": i["volume_m3"],
+                    "box": i["box"],
+                    "message": format!("{} and {} share about {:.3e} m³", i["a"].as_str().unwrap_or_default(),
+                        i["b"].as_str().unwrap_or_default(), i["volume_m3"].as_f64().unwrap_or_default()),
+                }));
+            }
+            let unchecked = found["unchecked"].as_array().cloned().unwrap_or_default();
+            if !unchecked.is_empty() {
+                findings.push(json!({
+                    "code": "cannot_check", "severity": severity("cannot_check"), "part": id,
+                    "pairs": unchecked,
+                    "message": format!("{id}: {} pair(s) of instances could not be checked for interference", unchecked.len()),
+                }));
             }
         }
         // Each solid as the model shows it, by founder, and the feature
@@ -588,6 +614,63 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|f| f["code"] == "release_modified")
+        );
+    }
+
+    #[test]
+    fn interfering_instances_are_a_warning() {
+        use crate::assembly::tests::place_in;
+        let (dir, mut s) = crate::assembly::tests::project();
+        place_in(
+            dir.path(),
+            "frame",
+            "p1",
+            "plate",
+            json!("working"),
+            [0.0; 3],
+        );
+        place_in(
+            dir.path(),
+            "frame",
+            "b1",
+            "bolt",
+            json!("working"),
+            [0.01, 0.01, 0.0],
+        );
+        place_in(
+            dir.path(),
+            "frame",
+            "b2",
+            "bolt",
+            json!("working"),
+            [0.03, 0.01, 0.005],
+        );
+        s.refresh().unwrap();
+        let v = run(&mut s, None, None, false).unwrap();
+        let found: Vec<&Value> = v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["code"] == "instances_interfere")
+            .collect();
+        assert_eq!(found.len(), 1, "{v}");
+        assert_eq!(
+            (&found[0]["a"], &found[0]["b"], &found[0]["severity"]),
+            (
+                &json!("frame/p1/slab"),
+                &json!("frame/b1/shank"),
+                &json!("warning")
+            )
+        );
+        assert!(v["passed"].as_bool().unwrap(), "{v}");
+        // One part checked alone isn't an assembly's.
+        let v = run(&mut s, Some("bolt"), None, false).unwrap();
+        assert!(
+            !v["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["code"] == "instances_interfere")
         );
     }
 

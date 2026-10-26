@@ -365,6 +365,11 @@ impl Opened {
             &mut self.doctor,
             view,
         );
+        if let Some(faces) =
+            dialogs::interference(&ctx, &mut self.ws, &mut self.dialogs.interference, view)
+        {
+            self.view.fit_entities(&mut self.ws, &faces);
+        }
         action
     }
 

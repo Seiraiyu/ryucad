@@ -49,6 +49,10 @@ tempfile = "3"
 name = "session"
 harness = false
 
+[[bench]]
+name = "assembly"
+harness = false
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

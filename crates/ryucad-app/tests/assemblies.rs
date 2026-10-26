@@ -158,3 +158,31 @@ fn the_tree_says_what_mates_leave_and_a_mate_paints_its_faces() {
     let bodies: Vec<&String> = made.faces.keys().map(|(_, b)| b).collect();
     assert_eq!(bodies, ["base/slab", "pin/shank"]);
 }
+
+#[test]
+fn the_window_finds_which_instances_interfere_and_follows_edits() {
+    let p = assembled();
+    // A third bolt 4 mm from the first: their shanks, 3 mm in radius,
+    // overlap.
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b3", "--of", "bolt", "--origin", "4,0,0",
+    ]);
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()
+        && ws.model.meshes.contains_key(&key("frame", "b3/shank"))));
+    assert_eq!(ws.shown_assembly().as_deref(), Some("frame"));
+    ws.check_interference();
+    let loaded = |ws: &Workspace| ws.idle() && ws.interference.as_ref().is_some_and(|i| i.loaded);
+    assert!(ws.wait_until(WAIT, loaded));
+    let i = ws.interference.as_ref().unwrap();
+    assert_eq!(i.pairs.len(), 1, "{i:?}");
+    assert_eq!(
+        (i.pairs[0].a.as_str(), i.pairs[0].b.as_str()),
+        ("frame/b1/shank", "frame/b3/shank")
+    );
+    assert!(i.faces().all(|f| f.starts_with("frame/b")));
+    // Moved clear, it is checked again and found clear.
+    p.ok(&["assembly", "move", "frame", "b3", "--translate", "20mm,0,0"]);
+    assert!(ws.wait_until(WAIT, |ws| loaded(ws)
+        && ws.interference.as_ref().is_some_and(|i| i.pairs.is_empty())));
+}

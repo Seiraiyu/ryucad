@@ -2,11 +2,12 @@
 //! them. The first byte picks how the rest is read: raw text (three
 //! versions split at `0xff` bytes, so anything at all reaches the driver),
 //! or a base sketch, part list, parameters file, part's properties,
-//! release record or pattern and two sides' edits to it, two bytes an
-//! edit. Merging must never panic, must give the same
+//! release record, pattern, instance or mate and two sides' edits to it,
+//! two bytes an edit. Merging must never panic, must give the same
 //! bytes twice, must be canonical JSON whose record holds as many conflicts
 //! as it says unless it fell back to lines, and readable files never fall
-//! back. A side that changed nothing gives the other.
+//! back. A side that changed nothing gives the other, and an instance's
+//! pose never conflicts: it is solver state.
 
 #![no_main]
 
@@ -226,6 +227,43 @@ fn edit_pattern(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// Applies edit `(op, arg)` to an instance: its pose moved or turned (as
+/// a solver would write it), its revision or its fixing changed.
+fn edit_instance(v: &mut Value, op: u8, arg: u8) {
+    let x = f64::from(arg) * 1e-3;
+    match op % 4 {
+        0 => v["pose"]["origin_m"][usize::from(arg % 3)] = json!(x),
+        1 => {
+            let (c, s) = (1.0 - x * x / 2.0, x);
+            v["pose"]["x"] = json!([c, s, 0]);
+        }
+        2 => {
+            v["rev"] = match arg % 3 {
+                0 => json!("working"),
+                n => json!({"label": if n == 1 { "A" } else { "B" }}),
+            }
+        }
+        _ => v["fixed"] = json!(arg % 2 == 1),
+    }
+}
+
+/// Applies edit `(op, arg)` to a mate: a connector aimed elsewhere or
+/// offset, its form or its angle changed. A connector is one value.
+fn edit_mate(v: &mut Value, op: u8, arg: u8) {
+    let side = if arg & 1 == 0 { "a" } else { "b" };
+    match op % 4 {
+        0 => {
+            v[side]["at"] = match arg % 3 {
+                0 => json!("origin"),
+                n => json!({"feature": "slab", "name": format!("{n}").repeat(32)}),
+            }
+        }
+        1 => v[side]["offset"] = json!({"origin": ["0 mm", "0 mm", format!("{} mm", arg % 7)]}),
+        2 => v["form"] = json!(["fastened", "revolute", "slider", "ball"][usize::from(arg % 4)]),
+        _ => v["angle"] = json!(format!("{} deg", arg % 90)),
+    }
+}
+
 fn text(v: &Value) -> Vec<u8> {
     canonical::to_string(v).into_bytes()
 }
@@ -234,7 +272,7 @@ fuzz_target!(|data: &[u8]| {
     let Some((&mode, rest)) = data.split_first() else {
         return;
     };
-    let (base, ours, theirs, readable) = if mode % 7 == 3 {
+    let (base, ours, theirs, readable) = if mode % 9 == 3 {
         let mut parts = rest.splitn(3, |b| *b == 0xff);
         let (b, o, t) = (
             parts.next().unwrap_or(&[]).to_vec(),
@@ -243,7 +281,7 @@ fuzz_target!(|data: &[u8]| {
         );
         (b, o, t, false)
     } else {
-        let base = match mode % 7 {
+        let base = match mode % 9 {
             0 => sketch(),
             1 => json!({"features": ["a", "b", "c", "d"], "format": 1, "kind": "ryucad.part"}),
             2 => json!({"format": 1, "kind": "ryucad.parameters",
@@ -252,18 +290,26 @@ fuzz_target!(|data: &[u8]| {
             6 => json!({"format": 3, "kind": "ryucad.feature", "type": "pattern", "form": "linear",
                         "features": ["h0"], "direction": "x", "spacing": "3 mm", "count": "3",
                         "targets": ["b"]}),
+            7 => json!({"format": 4, "kind": "ryucad.feature", "type": "instance", "part": "bolt",
+                        "rev": "working",
+                        "pose": {"origin_m": [0, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}}),
+            8 => json!({"format": 4, "kind": "ryucad.feature", "type": "mate", "form": "revolute",
+                        "a": {"instance": ["base"], "at": "origin"},
+                        "b": {"instance": ["pin"], "at": "origin"}}),
             _ => json!({"built_with": {"commit": "c", "ryucad": "0", "ryukei": "0"},
                         "content": "0".repeat(64), "format": 1, "kind": "ryupdm.release",
                         "label": "A", "part": "p", "project": "0123456789abcdef0123456789abcdef",
                         "properties": {"number": "100"}, "released_by": {"participant": "agent"},
                         "results": {}, "supersedes": null}),
         };
-        let edit = |v: &mut Value, op: u8, arg: u8| match mode % 7 {
+        let edit = |v: &mut Value, op: u8, arg: u8| match mode % 9 {
             0 => edit_sketch(v, op, arg),
             1 => edit_part(v, op, arg),
             2 => edit_parameters(v, op, arg),
             4 => edit_properties(v, op, arg),
             6 => edit_pattern(v, op, arg),
+            7 => edit_instance(v, op, arg),
+            8 => edit_mate(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
@@ -279,6 +325,19 @@ fuzz_target!(|data: &[u8]| {
         // A side that changed nothing gives the other.
         let (out, outcome) = bytes(&text(&base), &text(&base), &text(&theirs));
         assert_eq!((out, outcome), (text(&theirs), Outcome::Clean));
+        // Poses are solver state: moved on both sides, no conflict.
+        if mode % 9 == 7 {
+            let (_, outcome) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            if let Outcome::Conflicts(_) = outcome {
+                let v: Value =
+                    serde_json::from_slice(&bytes(&text(&base), &text(&ours), &text(&theirs)).0)
+                        .expect("JSON");
+                assert!(
+                    record(&v).keys().all(|k| !k.starts_with("/pose")),
+                    "a pose conflicted: {v}"
+                );
+            }
+        }
         (text(&base), text(&ours), text(&theirs), true)
     };
     let (out, outcome) = bytes(&base, &ours, &theirs);

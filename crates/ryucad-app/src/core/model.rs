@@ -229,7 +229,7 @@ fn triple(v: &Value) -> [f64; 3] {
 }
 
 impl Occurrence {
-    fn from_json(v: &Value) -> Occurrence {
+    pub fn from_json(v: &Value) -> Occurrence {
         Occurrence {
             path: text(&v["path"]),
             part: text(&v["part"]),
@@ -804,6 +804,16 @@ impl Model {
         }
     }
 
+    /// The drawings of the sketches the window shows: those of the parts
+    /// it shows. An assembly holds none, so its view shows none, as a
+    /// render of it doesn't (issue #95).
+    pub fn drawn_sketches(&self) -> impl Iterator<Item = (&BodyKey, &Arc<Drawing>)> {
+        let shown = self.shown();
+        self.sketches
+            .iter()
+            .filter(move |(k, _)| shown.contains(&k.0.as_str()))
+    }
+
     /// What hiding `key`'s body hides, as `visibility.set` names it: its
     /// occurrence in an assembly (`<asm>/<path>`), else its solid
     /// (`<part>/<solid>`).
@@ -860,6 +870,26 @@ impl Model {
             .iter()
             .filter(move |(k, _)| shown.contains(&k.0.as_str()) && self.is_hidden(k) == hidden)
             .map(|(k, m)| (k, m, self.pose(k)))
+    }
+
+    /// The bodies choosing `key` frames: in an assembly, every solid of
+    /// every occurrence under the instance (or pattern) it names, at any
+    /// depth (issue #107); else the solid it shows in, or itself (a
+    /// sketch).
+    pub fn framed(&self, key: &BodyKey) -> Vec<BodyKey> {
+        if let Some(p) = self.parts.get(&key.0).filter(|p| p.assembly) {
+            let (path, copy) = (format!("{}/", key.1), format!("{}:", key.1));
+            let under: Vec<BodyKey> = p
+                .solids
+                .iter()
+                .filter(|s| s.id.starts_with(&path) || s.id.starts_with(&copy))
+                .map(|s| (key.0.clone(), s.id.clone()))
+                .collect();
+            if !under.is_empty() {
+                return under;
+            }
+        }
+        vec![self.solid_of(key).unwrap_or_else(|| key.clone())]
     }
 
     /// The solid a feature shows in: its own, or the first the model
@@ -977,6 +1007,69 @@ mod tests {
         m.apply_part(&sketched("r4", true));
         assert_eq!(m.clear_sketches(), ["p"]);
         assert_eq!(m.ask_sketches("p").len(), 1);
+    }
+
+    #[test]
+    fn choosing_an_instance_frames_everything_it_places() {
+        let occurrence = |path: &str| {
+            json!({"path": path, "part": "bolt", "solids": [{"solid": "shank", "hash": "h"}],
+                   "pose": {"origin_m": [0, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}})
+        };
+        let mut m = Model::default();
+        m.apply_part(&json!({"part": "top", "revision": "r", "kind": "assembly",
+            "features": [{"id": "s1", "type": "instance", "ok": true, "hash": "x",
+                          "instance": {"part": "sub", "rev": "working"}}],
+            "occurrences": [occurrence("s1/b1"), occurrence("s1/b2"), occurrence("s10/b1"),
+                            occurrence("row:1/s1/b1")]}));
+        let keys = |m: &Model, f: &str| -> Vec<String> {
+            m.framed(&("top".to_owned(), f.to_owned()))
+                .into_iter()
+                .map(|k| k.1)
+                .collect()
+        };
+        assert_eq!(keys(&m, "s1"), ["s1/b1/shank", "s1/b2/shank"]);
+        assert_eq!(keys(&m, "s1/b2"), ["s1/b2/shank"]);
+        assert_eq!(keys(&m, "row"), ["row:1/s1/b1/shank"]);
+        // A part's feature frames the solid it shows in.
+        m.apply_part(&json!({"part": "bolt", "revision": "r", "features": [
+            {"id": "shank", "type": "cylinder", "ok": true, "hash": "1"}],
+            "solids": [{"solid": "shank", "features": ["shank"], "hash": "1"}]}));
+        assert_eq!(
+            m.framed(&("bolt".to_owned(), "shank".to_owned())),
+            [("bolt".to_owned(), "shank".to_owned())]
+        );
+    }
+
+    #[test]
+    fn only_the_shown_parts_sketches_are_drawn() {
+        let part = |id: &str| {
+            let mut v = sketched("r1", true);
+            v["part"] = json!(id);
+            v
+        };
+        let mut m = Model::default();
+        for id in ["p", "q"] {
+            m.apply_part(&part(id));
+            let key = (id.to_owned(), "s".to_owned());
+            assert!(m.take_sketch(&key, drawing("r1")));
+        }
+        let drawn =
+            |m: &Model| -> Vec<String> { m.drawn_sketches().map(|(k, _)| k.0.clone()).collect() };
+        assert_eq!(drawn(&m), ["p", "q"]);
+        m.focus = Some("q".to_owned());
+        assert_eq!(drawn(&m), ["q"]);
+        // The project's model is its one root assembly, which holds no
+        // sketch: none is drawn, wherever its parts are placed.
+        m.focus = None;
+        m.apply_part(
+            &json!({"part": "asm", "revision": "r", "kind": "assembly", "features": [
+            {"id": "a", "type": "instance", "ok": true, "hash": "x",
+             "instance": {"part": "p", "rev": "working"}},
+            {"id": "b", "type": "instance", "ok": true, "hash": "y",
+             "instance": {"part": "q", "rev": "working"}}]}),
+        );
+        assert_eq!(m.shown(), ["asm"]);
+        assert_eq!(drawn(&m), Vec::<String>::new());
     }
 
     #[test]

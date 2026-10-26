@@ -133,3 +133,50 @@ fn a_proposal_and_property_changes_show_in_a_compare() {
         ]
     );
 }
+
+#[test]
+fn an_assemblys_occurrences_are_painted_and_ghosted_where_they_were() {
+    // Two bolts placed in `frame`, committed; then one moved and the
+    // bolt's head made bigger, so both differ (issue #109).
+    let p = Project::new();
+    p.ok(&["part", "create", "bolt"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bolt",
+        "cylinder",
+        "--id",
+        "shank",
+        "--param",
+        "radius=3",
+        "--param",
+        "height=20",
+    ]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b1", "--of", "bolt", "--fixed",
+    ]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b2", "--of", "bolt", "--origin", "40,0,0",
+    ]);
+    let p = p.committed();
+    p.ok(&["assembly", "move", "frame", "b2", "--translate", "0,10mm,0"]);
+    p.ok(&["feature", "edit", "bolt", "shank", "--param", "radius=4"]);
+    p.ok(&["focus", "frame"]);
+    let mut ws = open(&p);
+    let k = |s: &str| ("frame".to_owned(), format!("{s}/shank"));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()
+        && ws.model.meshes.contains_key(&k("b1"))));
+    p.ok(&["compare", "HEAD"]);
+    assert!(ws.wait_until(WAIT, ghosted));
+    let c = ws.compare.as_ref().unwrap();
+    // Both bolts' faces differ, and both are ghosted: b1 where it is, b2
+    // where it was, 10 mm off.
+    for b in ["b1", "b2"] {
+        assert!(!c.faces[&k(b)].is_empty(), "{b}: {:?}", c.faces);
+        assert!(c.ghosts.contains_key(&k(b)), "{b}: {:?}", c.ghosts.keys());
+    }
+    assert_eq!(c.ghost_pose(&k("b1")).origin, [0.0; 3]);
+    assert_eq!(c.ghost_pose(&k("b2")).origin, [0.04, 0.0, 0.0]);
+    assert_ne!(c.ghosts[&k("b2")].hash, ws.model.meshes[&k("b2")].hash);
+}

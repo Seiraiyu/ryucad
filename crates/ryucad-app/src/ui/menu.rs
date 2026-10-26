@@ -13,6 +13,7 @@ pub struct Dialogs {
     pub settings: bool,
     pub preferences: bool,
     pub doctor: bool,
+    pub interference: bool,
 }
 
 /// What a menu asks of the app rather than of the open project.
@@ -191,6 +192,17 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened, recent: &[PathBuf]) -> Option<Acti
                 .clicked()
             {
                 o.ws.set_compare(None);
+            }
+        });
+        ui.menu_button("Tools", |ui| {
+            let shown = o.ws.shown_assembly().is_some();
+            if ui
+                .add_enabled(shown, egui::Button::new("Check interference"))
+                .on_disabled_hover_text("Show an assembly first (View > Show)")
+                .clicked()
+            {
+                o.ws.check_interference();
+                o.dialogs.interference = true;
             }
         });
         ui.menu_button("Project", |ui| {

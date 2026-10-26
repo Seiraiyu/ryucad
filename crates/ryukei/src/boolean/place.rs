@@ -16,6 +16,9 @@ pub(super) fn operands(target: &Body, tools: &[Tool]) -> Result<Vec<Body>, Error
                 .transformed(&t.place)
                 .map_err(|_| Error::from(BooleanError::OutsideSizeBox { tool: t.key }))
         })
+        // The first failure in order, not the first a thread found.
+        .collect::<Vec<_>>()
+        .into_iter()
         .collect::<Result<_, _>>()?;
     let mut ops = Vec::with_capacity(tools.len() + 1);
     ops.push(target.clone());
