@@ -78,13 +78,13 @@ pub(crate) struct Raw {
 /// Fails with `Uncertain` where a branch's topology, a singular point or
 /// a fit could not be certified.
 pub fn surface_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
+    if let Some(same) = coincident(a, b) {
+        return Ok(SurfaceHit::Coincident { same });
+    }
     match (Implicit::of(a).is_some(), Implicit::of(b).is_some()) {
         (true, true) => {}
         (false, false) => return general_surface(a, b, region),
         _ => return sheet_surface(a, b, region),
-    }
-    if let Some(same) = coincident(a, b) {
-        return Ok(SurfaceHit::Coincident { same });
     }
     if let Some((raws, mut points)) = ss_exact::exact(a, b, region) {
         let mut branches = Vec::new();

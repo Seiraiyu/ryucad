@@ -123,3 +123,18 @@ fn small_systems() {
     let away = [[1.0, 1.2]; 4];
     assert_eq!(krawczyk4(f([1.1; 4]), jac, away), Some(false));
 }
+
+#[test]
+fn coincident_surfaces_are_said_to_be() {
+    let cyl =
+        Surface::Cylinder(Cylinder::new(frame((0.0, 0.0, 0.0), (0.0, 0.0, 1.0)), 0.7).unwrap());
+    let a = spline(&cyl, [[0.0, TAU], [-2.0, 2.0]]);
+    let b = spline(&cyl, [[0.5, 2.0], [-1.0, 1.0]]);
+    for (x, y) in [(&a, &cyl), (&cyl, &a), (&a, &b), (&b, &a)] {
+        assert_eq!(
+            surface_surface(x, y, &region()),
+            Ok(SurfaceHit::Coincident { same: true }),
+            "{x:?} {y:?}"
+        );
+    }
+}
