@@ -1409,6 +1409,63 @@ fn assemblies_section(golden: &mut Golden) {
     s.str(&format!("{:x}", md(&buf[..info.buffer_size()])));
 }
 
+/// [`assembled`]'s frame, with one more bolt sunk into the plate and
+/// leaning into the first pair, and the interference report on one
+/// thread and on four: every pair's paths, the bits of its volume and
+/// box, and the faces it touches; the pairs that touch or can't be
+/// checked.
+fn interference_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("interference");
+    let (_dir, mut session) = assembled();
+    let req = ryucad::proto::Request::from_rpc(
+        "feature.add",
+        Some(
+            json!({"part": "frame", "type": "instance", "id": "sunk", "of": "bolt",
+                    "placement": {"origin": ["11.3 mm", "13.7 mm", "2.9 mm"],
+                                  "z": [0.21, -0.13, 1], "x": [1, 0, 0]}}),
+        ),
+    )
+    .unwrap();
+    ryucad::server::handle(&mut session, req).unwrap();
+    let mut reports = Vec::new();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let mut fresh = ryucad::session::Session::open(session.root()).unwrap();
+        let v = pool.install(|| ryucad::interference::run(&mut fresh, "frame", &[]).unwrap());
+        reports.push(v);
+    }
+    assert_eq!(reports[0], reports[1], "one thread and four");
+    let v = &reports[0];
+    let found = v["interferences"].as_array().unwrap();
+    assert!(found.len() >= 2, "{v}");
+    for i in found {
+        s.str(i["a"].as_str().unwrap());
+        s.str(i["b"].as_str().unwrap());
+        s.str(&format!(
+            "{:016x}",
+            i["volume_m3"].as_f64().unwrap().to_bits()
+        ));
+        for k in ["min_m", "max_m"] {
+            for x in i["box"][k].as_array().unwrap() {
+                s.str(&format!("{:016x}", x.as_f64().unwrap().to_bits()));
+            }
+        }
+        for side in ["a", "b"] {
+            for f in i["faces"][side].as_array().unwrap() {
+                s.str(f.as_str().unwrap());
+            }
+        }
+    }
+    for k in ["touching", "unchecked"] {
+        s.str(&v[k].to_string());
+    }
+    s.str(&v["pairs"].to_string());
+}
+
 /// The planar face of `part`'s solid `solid` whose outward normal is `n`.
 fn face_along(s: &mut ryucad::session::Session, part: &str, solid: &str, n: [f64; 3]) -> String {
     let req = ryucad::proto::Request::from_rpc(
@@ -1758,5 +1815,6 @@ fn determinism() {
     pdm_section(&mut golden);
     assemblies_section(&mut golden);
     mates_section(&mut golden);
+    interference_section(&mut golden);
     golden.finish();
 }
