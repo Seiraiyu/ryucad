@@ -47,6 +47,24 @@ impl Frame2 {
         Ok(Self { origin, x, y })
     }
 
+    /// A frame whose `x` already has unit length as closely as the
+    /// kernel's own do (`|x · x - 1| <= 1e-12`), kept bit for bit, so a
+    /// frame the codec wrote reads back the same ([`Frame2::new`] would
+    /// divide by a length a few ulps off 1). `None` otherwise, or for a
+    /// coordinate that isn't finite.
+    pub(crate) fn exact(origin: Point2, x: Vector2, ccw: bool) -> Option<Self> {
+        let finite = [origin.x, origin.y, x.x, x.y].iter().all(|c| c.is_finite());
+        if !finite || (x.length_squared() - 1.0).abs() > 1e-12 {
+            return None;
+        }
+        let y = if ccw {
+            Vector2::new(-x.y, x.x)
+        } else {
+            Vector2::new(x.y, -x.x)
+        };
+        Some(Self { origin, x, y })
+    }
+
     pub fn origin(&self) -> Point2 {
         self.origin
     }
@@ -97,6 +115,13 @@ impl Line2 {
     pub fn new(origin: Point2, dir: Vector2) -> Result<Self, Error> {
         let f = Frame2::new(origin, dir, true)?;
         Ok(Self { origin, dir: f.x() })
+    }
+
+    /// A line along a direction that is already unit, kept bit for bit
+    /// (see [`Frame2::exact`]).
+    pub(crate) fn exact(origin: Point2, dir: Vector2) -> Option<Self> {
+        let f = Frame2::exact(origin, dir, true)?;
+        Some(Self { origin, dir: f.x })
     }
 
     /// The line from `a` towards `b`; `b` is at `t = a.distance(b)`.

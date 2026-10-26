@@ -340,6 +340,78 @@ impl Assembly {
         }
     }
 
+    /// What solving moves together with `bodies`: every body reached from
+    /// them through mates, passing through free bodies only (a fixed one
+    /// is a constant and joins nothing, though `bodies` themselves pass
+    /// whatever they are), with a copy reaching its seed and the bodies its
+    /// pattern's directions are on; the mates reached, the patterns they
+    /// name, and those patterns' other seeds, fixed. Each component is
+    /// solved apart from the others, so solving this gives its free bodies
+    /// the poses solving the whole assembly does.
+    pub fn component(&self, bodies: &[Id]) -> Assembly {
+        use std::collections::BTreeSet;
+        let reads = |on: &On| match *on {
+            On::Copy { pattern, seed, .. } if !self.patterns.contains_key(&pattern) => vec![seed],
+            _ => self.bodies_of(on),
+        };
+        let mut by_body: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
+        for (m, mate) in &self.mates {
+            for b in reads(&mate.a.on).into_iter().chain(reads(&mate.b.on)) {
+                by_body.entry(b).or_default().push(*m);
+            }
+        }
+        let mut reached: BTreeSet<Id> = BTreeSet::new();
+        let mut mates: BTreeSet<Id> = BTreeSet::new();
+        let mut todo: Vec<Id> = Vec::new();
+        for b in bodies {
+            if self.bodies.contains_key(b) && reached.insert(*b) {
+                todo.push(*b);
+            }
+        }
+        while let Some(b) = todo.pop() {
+            for m in by_body.get(&b).into_iter().flatten() {
+                if !mates.insert(*m) {
+                    continue;
+                }
+                let mate = &self.mates[m];
+                for x in reads(&mate.a.on).into_iter().chain(reads(&mate.b.on)) {
+                    let Some(body) = self.bodies.get(&x) else {
+                        continue;
+                    };
+                    if reached.insert(x) && !body.fixed {
+                        todo.push(x);
+                    }
+                }
+            }
+        }
+        let mut out = Assembly::default();
+        for m in &mates {
+            let mate = self.mates[m];
+            for c in [mate.a, mate.b] {
+                if let On::Copy { pattern, .. } = c.on
+                    && let Some(p) = self.patterns.get(&pattern)
+                {
+                    out.patterns.insert(pattern, p.clone());
+                }
+            }
+            out.mates.insert(*m, mate);
+        }
+        for b in &reached {
+            out.bodies.insert(*b, self.bodies[b]);
+        }
+        for p in out.patterns.values() {
+            for s in &p.seeds {
+                if let Some(body) = self.bodies.get(s) {
+                    out.bodies.entry(*s).or_insert(Body {
+                        fixed: true,
+                        ..*body
+                    });
+                }
+            }
+        }
+        out
+    }
+
     /// The bodies `on` moves with: a body itself, or a copy's seed and
     /// the bodies its pattern's directions are on.
     pub(crate) fn bodies_of(&self, on: &On) -> Vec<Id> {

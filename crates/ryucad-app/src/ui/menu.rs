@@ -102,6 +102,7 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened, recent: &[PathBuf]) -> Option<Acti
             ui.separator();
             if ui.button("Preferences…").clicked() {
                 o.dialogs.preferences = true;
+                o.ws.read_cache();
             }
         });
         ui.menu_button("View", |ui| {

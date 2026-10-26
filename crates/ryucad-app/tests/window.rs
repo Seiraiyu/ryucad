@@ -953,6 +953,19 @@ fn preferences_change_the_window_whoever_sets_them() {
         a.opened().dialogs.preferences && !a.opened().ws.settings.all.is_empty()
     });
     h.step();
+    // It says what the disk cache holds, and clears it.
+    frames(&mut h, |a| a.opened().ws.cache.is_some());
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Clear cache")
+        .click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .cache
+            .as_ref()
+            .is_some_and(|c| c["removed"].is_object())
+    });
+    assert_eq!(p.ok(&["cache", "stats"])["entries"], 0);
     let edges = h.state().opened().view.edges;
     h.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Draw edges")
         .click();
@@ -1776,6 +1789,28 @@ fn a_mates_angle_is_edited_in_the_property_panel() {
     h.get_by_label("ring:2/pin");
     h.get_by_label("m1 (revolute: base -> pin)").click();
     frames(&mut h, |a| a.opened().ws.form.is_some());
+    // Chosen, the mate draws both its connectors' frames: three axes each,
+    // from where the report says they are.
+    let (lines, names) = {
+        let o = h.state_mut().opened_mut();
+        o.view.mate_frames(&o.ws)
+    };
+    assert_eq!(lines.len(), 6);
+    assert_eq!(
+        names.iter().map(|n| n.0.as_str()).collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    let report = p.ok(&["rebuild", "frame"]);
+    let m1 = report["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "m1")
+        .unwrap()
+        .clone();
+    let origin = |v: &serde_json::Value| [0, 1, 2].map(|k| v[k].as_f64().unwrap());
+    assert_eq!(names[0].1, origin(&m1["mate"]["frames"]["a"]["origin_m"]));
+    assert_eq!(names[1].1, origin(&m1["mate"]["frames"]["b"]["origin_m"]));
     h.step();
     let field = h.get_all_by_value("30 deg").next().unwrap();
     field.set_text_value_accesskit("45 deg");
@@ -1793,4 +1828,220 @@ fn a_mates_angle_is_edited_in_the_property_panel() {
     // The pin turned with it, written.
     let solved = p.ok(&["assembly", "solve", "frame"]);
     assert_eq!(solved["solve"]["stale"], false);
+}
+
+/// A bolt, and an assembly `frame` placing it twice, 40 mm apart.
+fn two_bolts() -> Project {
+    let p = Project::new();
+    p.ok(&["part", "create", "bolt"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bolt",
+        "cylinder",
+        "--id",
+        "shank",
+        "--param",
+        "radius=3",
+        "--param",
+        "height=20",
+    ]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b1", "--of", "bolt", "--fixed",
+    ]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b2", "--of", "bolt", "--origin", "40,0,0",
+    ]);
+    p
+}
+
+/// Runs frames until both bolts are drawn.
+fn both_bolts(h: &mut Harness<'static, App>) {
+    frames(h, |a| match &a.screen {
+        ryucad_app::ui::app::Screen::Opened(o) => {
+            o.ws.idle()
+                && ["b1/shank", "b2/shank"].iter().all(|k| {
+                    o.ws.model
+                        .meshes
+                        .contains_key(&("frame".into(), (*k).into()))
+                })
+        }
+        _ => false,
+    });
+    h.step();
+}
+
+/// A point of the view over `feature`'s body, found by moving the
+/// pointer across the view.
+fn over_body(h: &mut Harness<'static, App>, feature: &str) -> egui::Pos2 {
+    let rect = h.state().opened().view.rect;
+    for j in 1..16 {
+        for i in 1..24 {
+            let at = egui::pos2(
+                rect.min.x + rect.width() * i as f32 / 24.0,
+                rect.min.y + rect.height() * j as f32 / 16.0,
+            );
+            h.event(egui::Event::PointerMoved(at));
+            h.step();
+            if h.state()
+                .opened()
+                .view
+                .hover
+                .as_ref()
+                .is_some_and(|x| x.feature == feature)
+            {
+                return at;
+            }
+        }
+    }
+    panic!("{feature} isn't in view");
+}
+
+fn hidden(app: &App) -> Vec<String> {
+    app.opened().ws.model.hidden.iter().cloned().collect()
+}
+
+#[test]
+fn occurrences_hide_and_show_with_tab_and_the_tree() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = two_bolts();
+    let mut h = window(&p);
+    both_bolts(&mut h);
+    // Tab hides the bolt under the mouse: the session hears of it, and
+    // it is no longer drawn or picked.
+    let at = over_body(&mut h, "b2/shank");
+    h.key_press(egui::Key::Tab);
+    frames(&mut h, |a| hidden(a) == ["frame/b2"]);
+    let me = h.state().opened().ws.me().to_owned();
+    let people = p.ok(&["participants"]);
+    let mine = people["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == me.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(mine["hidden"], serde_json::json!(["frame/b2"]));
+    assert_eq!(h.state().opened().ws.model.drawn().count(), 1);
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    h.step();
+    assert!(
+        h.state()
+            .opened()
+            .view
+            .hover
+            .as_ref()
+            .is_none_or(|x| x.feature != "b2/shank")
+    );
+    // The tree says so; Shift+Tab over where it was shows it again.
+    h.get_by_label("Show frame/b2");
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+    frames(&mut h, |a| hidden(a).is_empty());
+    // The tree's checkbox hides and shows; Ctrl+Shift+Tab shows all.
+    h.get_by_label("Show frame/b1").click();
+    frames(&mut h, |a| hidden(a) == ["frame/b1"]);
+    h.get_by_label("Show frame/b1").click();
+    frames(&mut h, |a| hidden(a).is_empty());
+    p.ok(&["hide", "frame/b1", "frame/b2"]);
+    frames(&mut h, |a| hidden(a).len() == 2);
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    h.key_press_modifiers(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        egui::Key::Tab,
+    );
+    frames(&mut h, |a| hidden(a).is_empty());
+}
+
+#[test]
+fn a_free_instance_is_dragged_and_written_once() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = two_bolts();
+    // Where the left button doesn't navigate, a left-drag moves.
+    p.ok(&["config", "set", "ui.navigation", "solidworks"]);
+    let mut h = window(&p);
+    both_bolts(&mut h);
+    frames(&mut h, |a| {
+        a.opened().view.nav.style == ryucad_app::core::nav::Navigation::Solidworks
+    });
+    let moves = |p: &Project| {
+        p.ok(&["activity"])["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["method"] == "assembly.move")
+            .count()
+    };
+    let before = moves(&p);
+    let press = |h: &Harness<'static, App>, pos: egui::Pos2, pressed: bool| {
+        h.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    };
+    // The fixed bolt doesn't move, and the status line says why.
+    let fixed = over_body(&mut h, "b1/shank");
+    press(&h, fixed, true);
+    for i in 1..=5 {
+        h.event(egui::Event::PointerMoved(
+            fixed + egui::vec2(8.0 * i as f32, 0.0),
+        ));
+        h.step();
+    }
+    press(&h, fixed + egui::vec2(40.0, 0.0), false);
+    h.step();
+    assert_eq!(
+        h.state().opened().ws.drag_note.as_deref(),
+        Some("b1 is fixed")
+    );
+    // The free one follows the pointer, previewed by solves, and one move
+    // is written when it is let go.
+    let at = over_body(&mut h, "b2/shank");
+    press(&h, at, true);
+    for i in 1..=10 {
+        h.event(egui::Event::PointerMoved(
+            at + egui::vec2(6.0 * i as f32, 0.0),
+        ));
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    frames(&mut h, |a| !a.opened().ws.model.preview.is_empty());
+    press(&h, at + egui::vec2(60.0, 0.0), false);
+    frames(&mut h, |a| {
+        a.opened().ws.drag.is_none() && a.opened().ws.idle()
+    });
+    let t = Instant::now();
+    while moves(&p) == before {
+        assert!(t.elapsed() < Duration::from_secs(30), "no move written");
+        h.step();
+    }
+    assert_eq!(moves(&p), before + 1, "one write for the whole drag");
+    let shown = p.ok(&["feature", "show", "frame", "b2"]);
+    let x = shown["pose"]["origin_m"][0].as_f64().unwrap();
+    assert!(x > 0.04 + 1e-4, "moved along x: {x}");
+    // Undone like any other change.
+    let entries = p.ok(&["activity"])["entries"].clone();
+    let seq = entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|e| e["method"] == "assembly.move")
+        .unwrap()["seq"]
+        .to_string();
+    p.ok(&["undo", "--entry", &seq]);
+    let back = p.ok(&["feature", "show", "frame", "b2"]);
+    assert_eq!(back["pose"]["origin_m"][0], 0.04);
+    p.ok(&["config", "set", "ui.navigation", "ryucad"]);
 }

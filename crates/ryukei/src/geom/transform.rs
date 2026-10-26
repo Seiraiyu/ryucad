@@ -87,6 +87,12 @@ impl Rigid {
         }
     }
 
+    /// A motion from its rotation matrix and translation as they are, for
+    /// the codec, which has checked the matrix.
+    pub(crate) fn from_parts(rot: [[f64; 3]; 3], trans: Vector3) -> Self {
+        Self { rot, trans }
+    }
+
     pub fn rotation_matrix(&self) -> [[f64; 3]; 3] {
         self.rot
     }

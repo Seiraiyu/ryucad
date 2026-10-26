@@ -13,6 +13,7 @@ pub const OUTPUT_SCHEMA: u64 = 1;
 
 pub mod activity;
 pub mod assembly;
+pub mod cache;
 pub mod check;
 pub mod client;
 pub mod config;
@@ -50,3 +51,4 @@ pub mod sketch_view;
 pub mod solid;
 pub mod validate;
 pub mod view;
+pub mod visibility;

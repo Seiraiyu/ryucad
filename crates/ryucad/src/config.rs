@@ -122,6 +122,13 @@ const KEYS: &[Key] = &[
         about: "the daemon's memory for display meshes",
     },
     Key {
+        name: "cache.max_bytes",
+        scope: Scope::User,
+        rule: Rule::Int(1 << 26, 1 << 44),
+        default: || json!(crate::cache::DEFAULT_MAX_BYTES),
+        about: "how much the disk cache of results and meshes may hold",
+    },
+    Key {
         name: "daemon.poll_ms",
         scope: Scope::User,
         rule: Rule::Int(50, 5000),

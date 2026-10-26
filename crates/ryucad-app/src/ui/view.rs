@@ -18,6 +18,9 @@ use ryucad::view::{self, StandardView};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// A mate frame's name (`a` or `b`) and where its origin is.
+pub type FrameName = (String, [f64; 3]);
+
 /// What the window's viewport keeps between frames.
 pub struct View {
     pub nav: Nav,
@@ -55,12 +58,17 @@ pub struct View {
     finger_pivot: Option<[f64; 3]>,
     /// What the context menu was opened on.
     menu: Option<Hit>,
+    /// An instance being dragged: its assembly, the instance, and the
+    /// point grabbed, which follows the pointer across the plane through
+    /// it facing the camera.
+    grab: Option<(String, String, [f64; 3])>,
 }
 
 /// A body's points that frame it from one direction
 /// (`view::framing_points`): a few hundred of its mesh's thousands.
 struct Framers {
     hash: String,
+    pose: crate::core::model::Pose,
     /// The direction, unit back (towards the eye) and up.
     back: [f64; 3],
     up: [f64; 3],
@@ -130,6 +138,7 @@ impl View {
             pivot: None,
             finger_pivot: None,
             menu: None,
+            grab: None,
         }
     }
 
@@ -186,18 +195,23 @@ impl View {
     fn framing_points(&mut self, ws: &Workspace) -> Vec<[f64; 3]> {
         let c = &self.nav.camera;
         let (back, up) = (unit(sub(c.eye, c.target)), unit(c.up));
-        let drawn: Vec<(&BodyKey, &Arc<WireBody>)> = ws.model.drawn().collect();
+        let drawn: Vec<(&BodyKey, &Arc<WireBody>, crate::core::model::Pose)> =
+            ws.model.drawn().collect();
         self.framers
-            .retain(|k, _| drawn.iter().any(|(d, _)| *d == k));
+            .retain(|k, _| drawn.iter().any(|(d, ..)| *d == k));
         let mut out = Vec::new();
-        for (key, body) in drawn {
+        for (key, body, pose) in drawn {
             let kept = self.framers.get(key).is_some_and(|f| {
-                f.hash == body.hash && same_way(f.back, back) && same_way(f.up, up)
+                f.hash == body.hash
+                    && f.pose == pose
+                    && same_way(f.back, back)
+                    && same_way(f.up, up)
             });
             if !kept {
                 let points = self.picker(ws).points(Some(key));
                 let framers = Framers {
                     hash: body.hash.clone(),
+                    pose,
                     back,
                     up,
                     points: view::framing_points(&points, back, up),
@@ -303,6 +317,8 @@ impl View {
         if let Some(h) = &self.hover {
             wanted.push((h.entity.clone(), style::HOVER));
         }
+        // A mate chosen in the tree: its connectors' frames.
+        let (frame_lines, _) = self.mate_frames(ws);
         let chosen = self.chosen.clone();
         let chosen_sketch = chosen
             .as_ref()
@@ -345,7 +361,7 @@ impl View {
                 }
             }
         }
-        let mut lines = Vec::new();
+        let mut lines = frame_lines;
         // A sketch chosen in the tree: all of it.
         if let Some(d) = chosen_sketch {
             let c = style::CHOSEN;
@@ -360,6 +376,41 @@ impl View {
             }
         }
         (faces, lines)
+    }
+
+    /// The frames of the mate chosen in the tree, as both its connectors
+    /// sit in the assembly as solved: each frame's x, y and z axes as
+    /// lines from its origin, a tenth of the model's size long, and its
+    /// name (`a` or `b`) at its origin.
+    pub fn mate_frames(&mut self, ws: &Workspace) -> (Vec<(Place, Rgb)>, Vec<FrameName>) {
+        let frames = self.chosen.as_ref().and_then(|k| {
+            ws.model
+                .parts
+                .get(&k.0)?
+                .feature(&k.1)?
+                .mate
+                .as_ref()?
+                .frames
+        });
+        let Some(frames) = frames else {
+            return (Vec::new(), Vec::new());
+        };
+        let length = self
+            .bounds(ws)
+            .map_or(0.01, |(lo, hi)| {
+                let d = [0, 1, 2].map(|k| hi[k] - lo[k]);
+                (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() / 10.0
+            })
+            .max(1e-3);
+        let mut lines = Vec::new();
+        let mut names = Vec::new();
+        for (name, f) in ["a", "b"].iter().zip(frames) {
+            for (end, c) in f.axes(length).into_iter().zip(style::AXES) {
+                lines.push((Place::Edge(vec![f.origin, end]), c));
+            }
+            names.push(((*name).to_owned(), f.origin));
+        }
+        (lines, names)
     }
 
     /// Highlight labels and where they go: the middle of what each
@@ -521,8 +572,45 @@ impl View {
             // pointer has moved a little, maybe onto the model.
             let pressed = ui.input(|i| i.pointer.press_origin());
             self.pivot = pivot(self, ws, pressed.or(response.interact_pointer_pos()));
+            // A left-drag on an assembly's instance moves it, where the
+            // left button doesn't navigate (in ryucad's own style, with
+            // Ctrl/Cmd); one that can't move says why.
+            let moves = buttons.primary
+                && (self.nav.style != crate::core::nav::Navigation::Ryucad || modifiers.ctrl);
+            let on = pressed
+                .and_then(|p| self.picker(ws).pick(&pr, size, local(p)))
+                .filter(|h| h.rev.is_none() && matches!(h.kind, ryucad::entity::Target::Body(_)));
+            if moves && let Some(h) = on {
+                let key = (h.part.clone(), h.feature.clone());
+                match ws.model.movable(&key) {
+                    Ok((part, instance)) if ws.model.parts[&part].assembly => {
+                        ws.drag_note = None;
+                        self.grab = Some((part, instance, h.point));
+                    }
+                    Ok(_) => {}
+                    Err(why) if ws.model.parts.get(&h.part).is_some_and(|p| p.assembly) => {
+                        ws.drag_note = Some(why);
+                    }
+                    Err(_) => {}
+                }
+            }
         }
-        if response.dragged() {
+        if response.dragged()
+            && let Some((part, instance, grabbed)) = self.grab.clone()
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            // Across the plane through the point grabbed, facing the eye.
+            let (_, _, f) = pr.camera.basis();
+            let l = local(p);
+            let (o, d) = pr.ray([2.0 * l[0] / size[0] - 1.0, 1.0 - 2.0 * l[1] / size[1]]);
+            let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+            let along = dot(d, f);
+            if along.abs() > 1e-9 {
+                let t = dot(sub(grabbed, o), f) / along;
+                let q = [0, 1, 2].map(|k| o[k] + d[k] * t);
+                ws.drag_to(&part, &instance, sub(q, grabbed));
+            }
+        } else if response.dragged() {
             let g = self.nav.style.gesture(buttons, modifiers);
             if g != Gesture::None {
                 let d = response.drag_delta();
@@ -530,6 +618,9 @@ impl View {
                     .drag(g, [d.x, d.y], rect.height().max(1.0), self.pivot);
                 self.moved(ws);
             }
+        }
+        if response.drag_stopped() && self.grab.take().is_some() {
+            ws.drop_drag();
         }
         // Two fingers on a trackpad pan, or with Shift orbit; a wheel (and
         // a pinch) zooms.
@@ -606,10 +697,60 @@ impl View {
         if response.secondary_clicked() {
             self.menu = self.hover.clone();
         }
-        // Drawing.
+        // Visibility, with SolidWorks' keys: Tab hides the occurrence (or
+        // solid) under the mouse, Shift+Tab shows those hidden under it,
+        // Ctrl+Shift+Tab shows everything.
+        // Typing in a field keeps its keys.
+        if response.hovered() && !ui.ctx().text_edit_focused() {
+            let (all, show, hide) = ui.input_mut(|i| {
+                let both = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+                (
+                    i.consume_key(both, egui::Key::Tab),
+                    i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Tab),
+                )
+            });
+            if all || show || hide {
+                // egui would move keyboard focus to the next control.
+                ui.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+            }
+            let at = response.hover_pos().map(local);
+            if all {
+                ws.set_visibility(Vec::new(), Vec::new(), Vec::new(), true);
+            } else if show && let Some(p) = at {
+                // Every hidden body the ray meets, and what picking would
+                // find there (an edge or vertex within reach of the mouse).
+                let hidden = Picker::of_hidden(&ws.model);
+                let mut under = hidden.bodies_under(&pr, size, p);
+                under.extend(
+                    hidden
+                        .pick(&pr, size, p)
+                        .map(|h| (h.part.clone(), h.feature.clone())),
+                );
+                let mut leaves: Vec<String> = under.iter().map(|k| ws.model.leaf(k)).collect();
+                leaves.sort();
+                leaves.dedup();
+                if !leaves.is_empty() {
+                    ws.set_visibility(Vec::new(), leaves, Vec::new(), false);
+                }
+            } else if hide
+                && let Some(h) = self.hover.as_ref().filter(|h| {
+                    h.rev.is_none() && matches!(h.kind, ryucad::entity::Target::Body(_))
+                })
+            {
+                let leaf = ws.model.leaf(&(h.part.clone(), h.feature.clone()));
+                ws.set_visibility(vec![leaf], Vec::new(), Vec::new(), false);
+                self.hover = None;
+            }
+        }
+        // Drawing: what is in view, each at its level of detail, the
+        // levels not here yet fetched nearest first.
         let (faces, lines) = self.painted(ws);
+        let height = f64::from(rect.height() * ui.ctx().pixels_per_point());
+        let (drawn, wanted) = crate::core::lod::choose(&ws.model, self.picker(ws), &pr, height);
+        ws.fetch_levels(wanted);
         match gpu {
-            Some(rs) => self.draw(ui, ws, rs, rect, &pr, &faces),
+            Some(rs) => self.draw(ui, ws, rs, rect, &pr, (&faces, &drawn)),
             None => {
                 ui.painter().text(
                     rect.center(),
@@ -649,6 +790,18 @@ impl View {
         }
         if self.sketches {
             self.dimension_labels(ui, ws, rect, &pr);
+        }
+        let (_, frame_names) = self.mate_frames(ws);
+        for (name, at) in frame_names {
+            if let Some(s) = to_screen(at).filter(|s| rect.contains(*s)) {
+                painter.text(
+                    s + egui::vec2(6.0, -6.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    name,
+                    egui::FontId::proportional(13.0),
+                    style::color32(style::CHOSEN),
+                );
+            }
         }
         for (i, (text, at, c)) in self.labels(ws).into_iter().enumerate() {
             let Some(s) = to_screen(at).filter(|s| rect.contains(*s)) else {
@@ -701,7 +854,7 @@ impl View {
         rs: &egui_wgpu::RenderState,
         rect: egui::Rect,
         pr: &Projector,
-        faces: &[PaintedFace],
+        (faces, drawn): (&[PaintedFace], &[crate::core::lod::Drawn]),
     ) {
         let ppp = ui.ctx().pixels_per_point();
         let px = [
@@ -712,7 +865,7 @@ impl View {
         let scene = self
             .scene
             .get_or_insert_with(|| Scene::new(&rs.device, &rs.adapter));
-        scene.sync(&rs.device, &ws.model, reference);
+        scene.sync_drawn(&rs.device, drawn, reference);
         scene.sync_ghosts(&rs.device, ws.compare.as_ref());
         let overlay = if self.sketches {
             let size = [f64::from(px[0]), f64::from(px[1])];
