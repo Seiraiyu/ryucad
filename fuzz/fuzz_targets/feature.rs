@@ -16,7 +16,9 @@
 //! never an internal one, and every occurrence must be finite and sound.
 //! A mate or an instance pattern is built the same way, after instances
 //! `i1` (free) and `i2` (fixed) of `fz`: what it solves and places must be
-//! finite and sound too. Any panic is a bug.
+//! finite and sound too. Each assembly's interference is found, and
+//! found again with nothing cached: the same report, every volume and
+//! box finite. Any panic is a bug.
 
 #![no_main]
 
@@ -206,6 +208,30 @@ fn assemble(written: &str, after_instances: bool) {
                 }
                 Ok(_) => panic!("an assembly makes only instances, mates and copies"),
                 Err(e) => assert_ne!(e.code, Code::Internal, "{e:?}"),
+            }
+        }
+        let part = Id::parse(asm, "part").unwrap();
+        let model = r
+            .model(&part, &ryucad::doc::assembly::Rev::Working)
+            .expect("its model");
+        let found = |cache: &mut ryucad::interference::Cache| {
+            ryucad::interference::find(&part, &model, &[], cache).expect("interference")
+        };
+        let mut cache = ryucad::interference::Cache::default();
+        let v = found(&mut cache);
+        assert_eq!(found(&mut cache), v, "from what it cached");
+        assert_eq!(found(&mut Default::default()), v, "from nothing");
+        for i in v["interferences"].as_array().unwrap() {
+            assert!(i["volume_m3"].as_f64().is_some_and(f64::is_finite), "{i}");
+            for k in ["min_m", "max_m"] {
+                assert!(
+                    i["box"][k]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|x| x.as_f64().is_some_and(f64::is_finite)),
+                    "{i}"
+                );
             }
         }
     }
