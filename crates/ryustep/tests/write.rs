@@ -324,3 +324,148 @@ fn writing_is_the_same_on_one_thread_and_many() {
         .install(|| write(&model, &o).unwrap());
     assert_eq!(one, many);
 }
+
+/// The volume a body's mesh encloses.
+fn volume(b: &Body) -> f64 {
+    let m = ryukei::mesh::tessellate(b, &ryukei::mesh::MeshParams::new(1e-3, 0.4)).unwrap();
+    assert!(m.faults.is_empty(), "{:?}", m.faults);
+    ryukei_testkit::mesh::volume_and_area(&m).0
+}
+
+/// Sweeps along paths come back with their sweep faces as NURBS within
+/// the pipe tolerance, and lofts with their skins as written: the same
+/// volume, checked.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn swept_and_lofted_bodies_come_back() {
+    use core::f64::consts::TAU;
+    use ryukei::geom::{
+        Circle2, Curve, Curve2, Frame, Frame2, KnotVector, Line2, NurbsCurve, Point2, Point3,
+        Surface,
+    };
+    use ryukei::sweep::{
+        AlongOptions, LoftOptions, Loop, LoopKey, Path, PathSegment, Profile, Segment, SegmentKey,
+        ValidProfile, along, loft,
+    };
+    use std::sync::Arc;
+    let square = |first: u128, s: f64| {
+        let h = s / 2.0;
+        let pts = [(-h, -h), (h, -h), (h, h), (-h, h)];
+        Loop {
+            key: LoopKey(1),
+            segments: (0..4)
+                .map(|i| {
+                    let (p, q) = (pts[i], pts[(i + 1) % 4]);
+                    let (p, q) = (Point2::new(p.0, p.1), Point2::new(q.0, q.1));
+                    Segment {
+                        key: SegmentKey(first + i as u128),
+                        curve: Curve2::Line2(Line2::through(p, q).unwrap()),
+                        t0: 0.0,
+                        t1: p.distance(q),
+                    }
+                })
+                .collect(),
+        }
+    };
+    let ring = |r: f64| {
+        let f = Frame2::new(
+            Point2::new(0.0, 0.0),
+            ryukei::geom::Vector2::new(1.0, 0.0),
+            true,
+        )
+        .unwrap();
+        Loop {
+            key: LoopKey(1),
+            segments: vec![Segment {
+                key: SegmentKey(9),
+                curve: Curve2::Circle2(Circle2::new(f, r).unwrap()),
+                t0: 0.0,
+                t1: TAU,
+            }],
+        }
+    };
+    let section = |origin: Point3, z: Vector3, x: Vector3, l: Loop| {
+        ValidProfile::new(Profile {
+            frame: Frame::new(origin, z, x).unwrap(),
+            loops: vec![l],
+        })
+        .unwrap()
+    };
+    // A bar along a wavy spline, a tube round a closed one, a frustum.
+    let k = KnotVector::clamped(3, &[0.0, 1.0, 2.0], &[4, 1, 4]).unwrap();
+    let wavy = NurbsCurve::new(
+        k,
+        vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(2.0, 1.0, 0.5),
+            Point3::new(3.0, 0.5, 1.5),
+            Point3::new(4.0, 0.0, 2.0),
+        ],
+        None,
+    )
+    .unwrap();
+    let path = |c: NurbsCurve, range: [f64; 2]| Path {
+        segments: vec![PathSegment {
+            key: SegmentKey(100),
+            curve: Curve::Nurbs(Arc::new(c)),
+            range,
+        }],
+    };
+    let x = Vector3::new(1.0, 0.0, 0.0);
+    let y = Vector3::new(0.0, 1.0, 0.0);
+    let z = Vector3::new(0.0, 0.0, 1.0);
+    let (bar, _) = along(
+        OpKey(1),
+        &section(Point3::ORIGIN, x, y, square(10, 0.3)),
+        &path(wavy, [0.0, 2.0]),
+        &AlongOptions::default(),
+    )
+    .unwrap();
+    let k = KnotVector::periodic(3, &[0.0, 1.0, 2.0, 3.0, 4.0], &[1; 5]).unwrap();
+    let loop_ = NurbsCurve::new(
+        k,
+        vec![
+            Point3::new(-4.0, 0.0, 0.0),
+            Point3::new(0.0, -4.0, 0.0),
+            Point3::new(4.0, 0.0, 2.0),
+            Point3::new(0.0, 5.0, 1.0),
+        ],
+        None,
+    )
+    .unwrap();
+    let (p0, t0) = (loop_.point(0.0), loop_.eval(0.0).d1);
+    let (tube, _) = along(
+        OpKey(2),
+        &section(p0, t0, z.cross(t0), ring(0.2)),
+        &path(loop_, [0.0, 4.0]),
+        &AlongOptions::default(),
+    )
+    .unwrap();
+    let (frustum, _) = loft(
+        OpKey(3),
+        &[
+            section(Point3::ORIGIN, z, x, square(10, 2.0)),
+            section(Point3::new(0.0, 0.0, 1.0), z, x, square(20, 1.0)),
+        ],
+        &LoftOptions::default(),
+    )
+    .unwrap();
+    // The tube is written, its face a NURBS periodic both ways; reading
+    // it back needs a spline face with no loops, which healing can't
+    // build until plan 8.C.
+    assert!(!one(&tube, &opts(LengthUnit::Meter)).is_empty());
+    for b in [bar, frustum] {
+        let read = back(&one(&b, &opts(LengthUnit::Meter)));
+        assert_eq!(read.faces().count(), b.faces().count());
+        assert!(read.faces().all(|f| !matches!(
+            read.surface(read.face(f).unwrap().surface),
+            Some(Surface::Sweep(_))
+        )));
+        let (v, w) = (volume(&b), volume(&read));
+        assert!((v - w).abs() <= 1e-3 * v, "{v} against {w}");
+    }
+}
