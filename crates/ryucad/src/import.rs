@@ -23,9 +23,11 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 mod plan;
+mod update;
 
 use plan::Planned;
 pub use plan::Writes;
+pub use update::usage_warnings;
 
 /// How many bytes of source the opened files kept may hold together.
 pub const OPENED_BYTES: usize = 1 << 30;
@@ -363,6 +365,8 @@ pub struct Ask {
     pub dry_run: bool,
     /// The project's revision, or with `into` that part's.
     pub expected: Option<String>,
+    /// A file under `imports/` that `path`'s bytes replace: re-import.
+    pub update: Option<String>,
 }
 
 /// A schema as files and people name it.
@@ -416,6 +420,9 @@ pub fn free(base: &Id, taken: impl Fn(&str) -> bool) -> Id {
 pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> {
     use crate::doc::import::FileRef;
     use crate::doc::project::{IMPORTS, PDM_CONFIG};
+    if ask.update.is_some() {
+        return reimport(session, ask);
+    }
     let root = session.root().to_path_buf();
     let source = {
         let p = std::path::Path::new(&ask.path);
@@ -524,6 +531,156 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
     session.reload()?;
     let parts = parts_report(session, &opened, &plan)?;
     Ok(answer(head, &opened, parts, warnings, false))
+}
+
+/// `import --update <stored> <file>`: `file`'s bytes replace the stored
+/// file, and the parts and assemblies made of it follow, in one change
+/// (see [`update`]). The answer lists what changed, the products the file
+/// no longer has, instances kept because something reads them, and the
+/// features that would build now and won't after, found by rebuilding
+/// the planned files before anything is written.
+pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value> {
+    use crate::doc::import::FileRef;
+    use crate::doc::project::PDM_CONFIG;
+    let target = ask.update.clone().expect("an update");
+    if ask.part.is_some() || ask.into.is_some() || ask.product.is_some() {
+        return Err(Error::new(
+            Code::Usage,
+            "an update replaces a file the project holds: part, into and product don't apply",
+        ));
+    }
+    let root = session.root().to_path_buf();
+    crate::config::check_project_revision(&root, ask.expected.as_deref())?;
+    let Some(old) = session.project().imports.get(&target).cloned() else {
+        return Err(Error::new(
+            Code::NotFound,
+            format!("{target} isn't a file the project has imported"),
+        )
+        .with("path", &target));
+    };
+    let source = {
+        let p = std::path::Path::new(&ask.path);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            root.join(p)
+        }
+    };
+    let bytes = std::fs::read(&source).map_err(|e| Error::io(&source, &e))?;
+    let file = ImportFile::new(bytes);
+    let opened = opened(&file).map_err(|e| unreadable(&ask.path, &e))?;
+    let file_ref = FileRef {
+        path: target.clone(),
+        blake3: file.blake3.clone(),
+    };
+    let project = session.project();
+    let stem = std::path::Path::new(&target)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let taken = |s: &str| {
+        Id::parse(s, "part").is_ok_and(|id| {
+            project.parts.contains_key(&id) || crate::pdm::check_not_retired(&root, &id).is_err()
+        })
+    };
+    let fresh = plan::Fresh {
+        opened: &opened,
+        file: &file_ref,
+        stem: &stem,
+        part: None,
+        taken: &taken,
+        pdm: root.join(PDM_CONFIG).is_file(),
+    };
+    let u = update::plan(project, &opened, &file_ref, &fresh)?;
+    let mut writes = plan::writes(project, &u.planned)?;
+    if old.blake3 != file.blake3 {
+        writes.insert(target.clone(), Some(file.bytes.to_vec()));
+    }
+    let mut warnings = mapped_warnings(&opened, &ask.path);
+    warnings.extend(u.warnings.iter().cloned());
+    for (a, i) in &u.kept {
+        warnings.push(format!(
+            "import_usage_missing: {a}/{i}'s usage is gone from {target}, but a mate or pattern reads it, so it stays"
+        ));
+    }
+    // What builds now and wouldn't after, from the files as they would be.
+    let now = failing(session)?;
+    let mut proposed = session.proposed(&writes)?;
+    let after = failing(&mut proposed)?;
+    let newly: Vec<Value> = after
+        .into_iter()
+        .filter(|(k, _)| !now.contains_key(k))
+        .map(|((part, feature), e)| json!({"part": part, "feature": feature, "error": e}))
+        .collect();
+    let head = json!({"path": target, "blake3": file.blake3, "from": old.blake3,
+                      "schema": schema_name(opened.schema)});
+    let extra = |mut v: Value, assemblies: Option<Vec<Value>>| {
+        v["update"] = json!(true);
+        let vanished: Vec<Value> = u
+            .vanished
+            .iter()
+            .map(|(r, parts)| json!({"product": product_json(r), "parts": parts}))
+            .collect();
+        if !vanished.is_empty() {
+            v["vanished"] = json!(vanished);
+        }
+        if !u.kept.is_empty() {
+            let kept: Vec<Value> = u
+                .kept
+                .iter()
+                .map(|(a, i)| json!({"part": a, "instance": i}))
+                .collect();
+            v["kept"] = json!(kept);
+        }
+        if !newly.is_empty() {
+            v["failing"] = json!(newly);
+        }
+        if let Some(a) = assemblies.filter(|a| !a.is_empty()) {
+            v["assemblies"] = json!(a);
+        }
+        v
+    };
+    if ask.dry_run {
+        let parts = parts_report(&mut proposed, &opened, &u.planned)?;
+        return Ok(extra(answer(head, &opened, parts, warnings, true), None));
+    }
+    // Assemblies kept current until now stay so: the moves this writes
+    // are solved again in the same change.
+    let mut current = Vec::new();
+    for pl in u.planned.iter().filter(|pl| !pl.new) {
+        for a in crate::mate::current(session, &pl.part)? {
+            if !current.contains(&a) {
+                current.push(a);
+            }
+        }
+    }
+    if u.planned.iter().any(|pl| !pl.properties.is_empty()) {
+        crate::pdm::ensure_id(session)?;
+    }
+    plan::apply(&root, &writes)?;
+    session.reload()?;
+    let assemblies = crate::mate::keep_current(session, &current)?;
+    let parts = parts_report(session, &opened, &u.planned)?;
+    Ok(extra(
+        answer(head, &opened, parts, warnings, false),
+        Some(assemblies),
+    ))
+}
+
+/// Every feature of every part that fails in `s`, with its error, by part
+/// and feature.
+fn failing(s: &mut crate::session::Session) -> Result<BTreeMap<(Id, Id), Value>> {
+    let ids: Vec<Id> = s.project().parts.keys().cloned().collect();
+    s.rebuild_parts(&ids)?;
+    let mut out = BTreeMap::new();
+    for id in ids {
+        for (f, r) in &s.rebuilt(&id)?.features {
+            if let Err(e) = r {
+                out.insert((id.clone(), f.clone()), json!(e));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The plan of `import --into PART`: one product's bodies (`product` when
@@ -1350,19 +1507,32 @@ pub(crate) mod tests {
     /// product uses: two roots. Every usage of the sub-assembly's and the
     /// frame's has the id `1`.
     pub(crate) fn frame_file() -> Vec<u8> {
+        frame_version(1)
+    }
+
+    /// [`frame_file`] (`version` 1), or its second version: the plate
+    /// 2 mm thicker and everything on it raised with it, the pin on the
+    /// frame moved 10 mm along x, the sub-assembly's second pin gone and a
+    /// third (`3`) added, the loose block gone and a new block (`N-1`).
+    pub(crate) fn frame_version(version: u32) -> Vec<u8> {
         use ryukei::geom::{Rigid, Vector3};
         use ryukei::name::OpKey;
         use ryukei::primitive;
         use ryustep::{Child, Product};
         let at = |x: f64, y: f64, z: f64| Rigid::translation(Vector3::new(x, y, z));
         let k = OpKey(1);
-        let plate = primitive::block(k, 0.1, 0.1, 0.01, &Rigid::IDENTITY)
+        let (thick, pin_x) = if version == 1 {
+            (0.01, 0.05)
+        } else {
+            (0.012, 0.06)
+        };
+        let plate = primitive::block(k, 0.1, 0.1, thick, &Rigid::IDENTITY)
             .unwrap()
             .0;
         let pin = primitive::cylinder(k, 0.002, 0.02, &Rigid::IDENTITY)
             .unwrap()
             .0;
-        let loose = primitive::block(k, 0.01, 0.01, 0.01, &Rigid::IDENTITY)
+        let block = primitive::block(k, 0.01, 0.01, 0.01, &Rigid::IDENTITY)
             .unwrap()
             .0;
         let product = |id: &str, name: &str, bodies, children| Product {
@@ -1370,6 +1540,34 @@ pub(crate) mod tests {
             name: name.into(),
             bodies,
             children,
+        };
+        let sub = if version == 1 {
+            vec![
+                Child {
+                    product: 2,
+                    place: at(0.01, 0.0, 0.0),
+                },
+                Child {
+                    product: 2,
+                    place: at(0.02, 0.0, 0.0),
+                },
+            ]
+        } else {
+            vec![
+                Child {
+                    product: 2,
+                    place: at(0.01, 0.0, 0.0),
+                },
+                Child {
+                    product: 2,
+                    place: at(0.03, 0.0, 0.0),
+                },
+            ]
+        };
+        let last = if version == 1 {
+            ("L-1", "Loose")
+        } else {
+            ("N-1", "New")
         };
         let bytes = written(vec![
             product(
@@ -1379,37 +1577,36 @@ pub(crate) mod tests {
                 vec![
                     Child {
                         product: 1,
-                        place: at(0.0, 0.0, 0.01),
+                        place: at(0.0, 0.0, thick),
                     },
                     Child {
                         product: 2,
-                        place: at(0.05, 0.05, 0.01),
+                        place: at(pin_x, 0.05, thick),
                     },
                 ],
             ),
-            product(
-                "S-1",
-                "Sub",
-                vec![],
-                vec![
-                    Child {
-                        product: 2,
-                        place: at(0.01, 0.0, 0.0),
-                    },
-                    Child {
-                        product: 2,
-                        place: at(0.02, 0.0, 0.0),
-                    },
-                ],
-            ),
+            product("S-1", "Sub", vec![], sub),
             product("P-1", "Pin", vec![pin], vec![]),
-            product("L-1", "Loose", vec![loose], vec![]),
+            product(last.0, last.1, vec![block], vec![]),
         ]);
         let text = String::from_utf8(bytes).unwrap();
-        let same = text.replace(
-            "NEXT_ASSEMBLY_USAGE_OCCURRENCE('2'",
-            "NEXT_ASSEMBLY_USAGE_OCCURRENCE('1'",
-        );
+        // Usage ids: the first version's all `1`; the second's sub-assembly
+        // uses `1` and then `3`.
+        let same = if version == 1 {
+            text.replace(
+                "NEXT_ASSEMBLY_USAGE_OCCURRENCE('2'",
+                "NEXT_ASSEMBLY_USAGE_OCCURRENCE('1'",
+            )
+        } else {
+            let sub = text.rfind("NEXT_ASSEMBLY_USAGE_OCCURRENCE('2'").unwrap();
+            let mut t = text.clone();
+            t.replace_range(sub..sub + 34, "NEXT_ASSEMBLY_USAGE_OCCURRENCE('3'");
+            t.replacen(
+                "NEXT_ASSEMBLY_USAGE_OCCURRENCE('2'",
+                "NEXT_ASSEMBLY_USAGE_OCCURRENCE('1'",
+                1,
+            )
+        };
         assert_ne!(same, text);
         same.into_bytes()
     }

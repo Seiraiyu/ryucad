@@ -81,13 +81,18 @@ enum Command {
     #[command(subcommand)]
     Assembly(AssemblyCmd),
     /// Import a STEP file: store it in the project (imports/) and make a part of each
-    /// product's bodies, or add one product's bodies to a part with --into.
+    /// product's bodies and an assembly of each product's children, add one product's
+    /// bodies to a part with --into, or replace a file imported before with --update.
     Import {
         /// The STEP file (.step or .stp).
         file: std::path::PathBuf,
-        /// The part to make, when the file makes one.
+        /// The part or assembly to make of the file's one root.
         #[arg(long)]
         part: Option<String>,
+        /// Replace this imported file (imports/<name>.step) with the file's bytes, and
+        /// update what was made of it.
+        #[arg(long, value_name = "IMPORTED")]
+        update: Option<String>,
         /// Add the bodies to this part instead of making parts.
         #[arg(long, value_name = "PART")]
         into: Option<String>,
@@ -1715,6 +1720,7 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Import {
             file,
             part,
+            update,
             into,
             product,
             dry_run,
@@ -1730,6 +1736,7 @@ fn request(cmd: &Command) -> Option<Request> {
             product: product.clone(),
             dry_run: *dry_run,
             expected_revision: expect.revision.clone(),
+            update: update.clone(),
         },
         Command::Rebuild { part, rev } => Request::Rebuild {
             part: part.clone(),

@@ -191,7 +191,6 @@ impl Fresh<'_> {
     /// then the bodies no product reaches.
     pub fn plan(&self) -> Result<Vec<Planned>> {
         let opened = self.opened;
-        let defs = &opened.products.definitions;
         let makes = makes(opened);
         let unplaced = bodies(opened, None) > 0;
         let mut roots: Vec<Option<usize>> = opened
@@ -223,6 +222,22 @@ impl Fresh<'_> {
             )
             .with("param", "part"));
         }
+        self.make(&BTreeMap::new(), unplaced, &roots)
+    }
+
+    /// The parts and assemblies of every definition that makes something
+    /// but those `known` gives parts already (their parts are only placed),
+    /// and with `unplaced` one of the bodies no product reaches. `roots`
+    /// are the file's, for `--part`.
+    pub fn make(
+        &self,
+        known: &BTreeMap<usize, Id>,
+        unplaced: bool,
+        roots: &[Option<usize>],
+    ) -> Result<Vec<Planned>> {
+        let opened = self.opened;
+        let defs = &opened.products.definitions;
+        let makes = makes(opened);
         // IDs first: an assembly's instances name its children's parts.
         let mut taken: Vec<String> = Vec::new();
         let mut take = |base: Id, named: bool| -> Id {
@@ -234,12 +249,20 @@ impl Fresh<'_> {
             taken.push(id.to_string());
             id
         };
-        let named = |k: Option<usize>| self.part.clone().filter(|_| roots == [k]);
+        let named = |k: Option<usize>| {
+            self.part
+                .clone()
+                .filter(|_| roots.len() == 1 && roots[0] == k)
+        };
         let fallback =
             || id_from(self.stem).unwrap_or_else(|| Id::parse("part", "part").expect("an ID"));
         let mut part_of: Vec<Option<Id>> = vec![None; defs.len()];
         let mut own_of: Vec<Option<Id>> = vec![None; defs.len()];
         for k in (0..defs.len()).filter(|&k| makes[k]) {
+            if let Some(id) = known.get(&k) {
+                part_of[k] = Some(id.clone());
+                continue;
+            }
             let id = match named(Some(k)) {
                 Some(p) => take(p, true),
                 None => {
@@ -261,7 +284,7 @@ impl Fresh<'_> {
             None => take(fallback(), false),
         });
         let mut out = Vec::new();
-        for k in (0..defs.len()).filter(|&k| makes[k]) {
+        for k in (0..defs.len()).filter(|&k| makes[k] && !known.contains_key(&k)) {
             let id = part_of[k].clone().expect("named");
             let product = product_of(opened, k);
             if is_assembly(opened, &makes, k) {
