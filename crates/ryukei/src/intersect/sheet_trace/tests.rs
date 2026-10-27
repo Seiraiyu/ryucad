@@ -280,3 +280,25 @@ fn planes_through_a_spline_sphere_s_poles() {
     .unwrap();
     assert_eq!((near.branches.len(), near.points.len()), (1, 0));
 }
+
+/// The plane of a sphere's equator cuts its spline form along a knot
+/// line: one branch, traced on the grid that doesn't keep the breaks.
+#[test]
+fn a_plane_along_a_spline_sphere_s_knot_line() {
+    let ball = Surface::Sphere(Sphere::new(Frame::WORLD, 1.0).unwrap());
+    let (n, _) = ball
+        .to_nurbs([
+            [0.0, TAU],
+            [-core::f64::consts::FRAC_PI_2, core::f64::consts::FRAC_PI_2],
+        ])
+        .unwrap();
+    let spline = Surface::Nurbs(std::sync::Arc::new(n));
+    let topo = trace(
+        &spline,
+        &plane(Point3::ORIGIN, Vector3::new(0.0, 0.0, 1.0)),
+        &region(),
+    )
+    .unwrap();
+    assert_eq!((topo.branches.len(), topo.points.len()), (1, 0));
+    assert!(topo.branches[0].closed);
+}

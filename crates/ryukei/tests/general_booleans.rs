@@ -288,3 +288,28 @@ fn a_spline_ball_halved_through_its_poles() {
         half,
     );
 }
+
+/// A block cornered at a spline ball's centre: its faces cut the ball
+/// along its equator, a knot line of its spline form, and its edges
+/// meet the ball on the seam and through the poles.
+#[test]
+fn an_octant_off_a_spline_ball() {
+    let ball = nurbs(
+        primitive::sphere(OpKey(3), 1.0, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+    );
+    let block = primitive::block(OpKey(7), 2.0, 3.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let octant = PI / 6.0;
+    let place = Rigid::IDENTITY;
+    near(
+        volume(&run(BooleanOp::Intersect, &ball, &block, place)),
+        octant,
+    );
+    near(
+        volume(&run(BooleanOp::Subtract, &ball, &block, place)),
+        4.0 / 3.0 * PI - octant,
+    );
+}

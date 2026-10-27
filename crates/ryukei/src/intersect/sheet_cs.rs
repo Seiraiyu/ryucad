@@ -29,7 +29,7 @@
 //! signs of `(q - S) · (S_u × S_v)` at the foot of a point beside the hit.
 
 use super::Failure;
-use super::cells::cells;
+use super::cells::cells_off;
 use super::cs::{CurveHit, Side};
 use crate::geom::bound2::IVec3;
 use crate::geom::sheet::Sheet;
@@ -162,13 +162,24 @@ pub(crate) fn curve_sheet(
     let near = curve.bounds([t0, t1]).grow(tolerance);
     let zones = pole_zones(curve, [t0, t1], surface, &near);
     let mut found = Vec::new();
-    let mut budget = MAX_BOXES;
-    let uv = outside_zones(cells(surface, &near), &zones);
-    for ts in s.t_cells() {
-        for &[u, v] in &uv {
-            s.search([ts, u, v], 0, &mut budget, &mut found)?;
+    let mut result = Err(Failure::Uncertain);
+    for shift in SHIFTS {
+        found.clear();
+        let mut budget = MAX_BOXES;
+        let uv = outside_zones(cells_off(surface, &near, shift), &zones);
+        result = (|| {
+            for ts in s.t_cells(shift) {
+                for &[u, v] in &uv {
+                    s.search([ts, u, v], 0, &mut budget, &mut found)?;
+                }
+            }
+            Ok(())
+        })();
+        if !matches!(result, Err(Failure::Uncertain)) {
+            break;
         }
     }
+    result?;
     // A curve through a pole meets the surface there, by the touch rule.
     for z in &zones {
         found.push(Candidate {
@@ -198,6 +209,13 @@ pub(crate) fn curve_sheet(
     }
     Ok(out)
 }
+
+/// How the first cells are cut on each attempt ([`cells_off`], and the
+/// curve's interval likewise): a crossing on the line where a period
+/// starts (a curve symmetric about the surface's seam), on a knot line,
+/// or on a sixteenth of the curve's interval, is inside a cell once they
+/// move.
+const SHIFTS: [f64; 3] = [0.0, 0.137, 0.311];
 
 /// The touch rule's reach: points this close to each other are one.
 const REACH: f64 = 100.0 * LINEAR_RESOLUTION;
@@ -473,14 +491,17 @@ fn roots(c0: f64, c1: f64, c2: f64, h: f64) -> Vec<f64> {
 }
 
 impl Search<'_> {
-    /// The first cuts of the curve's interval: sixteenths.
-    fn t_cells(&self) -> Vec<[f64; 2]> {
+    /// The first cuts of the curve's interval: sixteenths, the inner ones
+    /// moved on by `shift` of one.
+    fn t_cells(&self, shift: f64) -> Vec<[f64; 2]> {
         let [t0, t1] = self.range;
         let at = |k: u32| {
             if k == 16 {
                 t1
+            } else if k == 0 {
+                t0
             } else {
-                t0 + (t1 - t0) * f64::from(k) / 16.0
+                t0 + (t1 - t0) * (f64::from(k) + shift) / 16.0
             }
         };
         // Also cut at the curve's kinks, where no box may straddle a

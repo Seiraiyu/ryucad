@@ -105,6 +105,53 @@ pub(crate) fn enclosure(s: &Surface, rect: [[f64; 2]; 2]) -> Option<Box3> {
     out
 }
 
+/// [`cells`] cut afresh when `shift` (in `(0, 1)`) isn't 0: each
+/// direction in as many equal parts as its own cells (at least four),
+/// moved by `shift` of a part, so no side lies where a piece of the
+/// surface meets the next. A curve along such a line (a plane through a
+/// spline sphere's equator, a knot line) lies on the side of every first
+/// cell beside it, where no crossing can be isolated; cut so, it lies
+/// inside one. Enclosures over a cell reaching across pieces are still
+/// certified. With `shift` 0, [`cells`] itself.
+pub(crate) fn cells_off(s: &Surface, near: &Box3, shift: f64) -> Vec<Cell> {
+    let natural = cells(s, near);
+    if shift == 0.0 || natural.is_empty() {
+        return natural;
+    }
+    let (pu, pv) = s.periods();
+    let periods = [pu, pv];
+    let mut axes: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+    for k in 0..2 {
+        let mut parts: Vec<[f64; 2]> = natural.iter().map(|c| c[k]).collect();
+        parts.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+        parts.dedup();
+        let lo = parts.iter().map(|r| r[0]).fold(f64::INFINITY, f64::min);
+        let hi = parts.iter().map(|r| r[1]).fold(f64::NEG_INFINITY, f64::max);
+        let n = parts.len().max(4);
+        let at = |i: f64| lo + (hi - lo) * i / n as f64;
+        axes[k] = match periods[k] {
+            // A whole period, moved on.
+            Some(p) if hi - lo >= p * (1.0 - 1e-12) => (0..=n)
+                .map(|i| lo + p * (i as f64 + shift) / n as f64)
+                .collect(),
+            _ => core::iter::once(lo)
+                .chain((0..n).map(|i| at(i as f64 + shift)))
+                .chain(core::iter::once(hi))
+                .collect(),
+        };
+        axes[k].dedup();
+    }
+    let out = axes[0]
+        .windows(2)
+        .flat_map(|u| {
+            axes[1]
+                .windows(2)
+                .map(move |v| [[u[0], u[1]], [v[0], v[1]]])
+        })
+        .collect();
+    reaching(s, out, near)
+}
+
 /// The least and greatest of `p · w` over a box's corners.
 fn span(b: &Box3, w: Vector3) -> [f64; 2] {
     b.corners()
