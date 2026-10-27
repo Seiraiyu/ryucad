@@ -1705,6 +1705,7 @@ dependencies = [
  "serde",
  "serde_json",
  "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

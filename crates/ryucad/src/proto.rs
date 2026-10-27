@@ -959,6 +959,16 @@ impl Request {
     }
 }
 
+impl ryu_session::client::Call for Request {
+    fn method(&self) -> String {
+        Request::method(self)
+    }
+
+    fn params(&self) -> Value {
+        Request::params(self)
+    }
+}
+
 /// One JSON-RPC request line.
 pub fn rpc_request(id: u64, req: &Request) -> String {
     ryu_session::rpc::request_line(id, &req.method(), req.params())
