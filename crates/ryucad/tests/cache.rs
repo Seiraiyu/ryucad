@@ -346,3 +346,46 @@ fn daemons_writing_at_once_leave_sound_entries() {
         cli(r, &run, &cache, &["daemon", "stop"]);
     }
 }
+
+/// Two parts with the same box: each body is named for its own part and
+/// feature, though their inputs are alike, so neither may be the other's
+/// from the disk.
+#[test]
+fn alike_features_of_different_parts_keep_their_own_names() {
+    let (dir, cache) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    init(dir.path(), None).unwrap();
+    let mut s = open(dir.path(), cache.path());
+    for (part, f) in [("p", "b"), ("q", "b"), ("q", "c")] {
+        if !s.project().parts.contains_key(&id(part)) {
+            must(&mut s, "part.create", json!({"part": part}));
+        }
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": part, "type": "box", "id": f, "params": {"x": 1, "y": 2, "z": 3}}),
+        );
+    }
+    let v = must(&mut s, "check", json!({}));
+    assert_eq!(v["passed"], true, "{v}");
+    let hash = |s: &mut Session, part: &str, f: &str| {
+        let v = must(s, "rebuild", json!({"part": part}));
+        v["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == f)
+            .unwrap()["hash"]
+            .clone()
+    };
+    let (pb, qb, qc) = (
+        hash(&mut s, "p", "b"),
+        hash(&mut s, "q", "b"),
+        hash(&mut s, "q", "c"),
+    );
+    assert_ne!(pb, qb);
+    assert_ne!(qb, qc);
+    // A cold session over the warm cache agrees.
+    let mut cold = open(dir.path(), cache.path());
+    assert_eq!(hash(&mut cold, "q", "c"), qc);
+    assert_eq!(hash(&mut cold, "q", "b"), qb);
+}
