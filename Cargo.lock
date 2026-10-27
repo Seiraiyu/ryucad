@@ -4219,6 +4219,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-doc"
+version = "0.0.0"
+dependencies = [
+ "ryu-math",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "ryu-math"
 version = "0.0.0"
 dependencies = [
@@ -4284,6 +4294,7 @@ name = "ryucad-doc"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "ryu-doc",
  "ryukei",
  "ryusketch",
  "serde",

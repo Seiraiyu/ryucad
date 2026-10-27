@@ -64,7 +64,7 @@ impl Id {
     /// pattern `pattern`: `<pattern>:<i>`, or `<pattern>:<i>:<j>` past its
     /// first row. Not an ID a file may name a feature by.
     pub fn copy(pattern: &Id, index: [u32; 2]) -> Id {
-        Id(super::mate::step_text(pattern, Some(index)))
+        Id(step_text(pattern, Some(index)))
     }
 
     /// The pattern and index of a step [`Id::copy`] made.
@@ -72,7 +72,7 @@ impl Id {
         if !self.0.contains(':') {
             return None;
         }
-        super::mate::parse_step(&self.0, "")
+        parse_step(&self.0, "")
             .ok()
             .and_then(|(id, c)| Some((id, c?)))
     }
@@ -129,7 +129,7 @@ impl ProjectId {
     /// pattern `pattern`: `<pattern>:<i>`, or `<pattern>:<i>:<j>` past its
     /// first row. Not an ID a file may name a feature by.
     pub fn copy(pattern: &Id, index: [u32; 2]) -> Id {
-        Id(super::mate::step_text(pattern, Some(index)))
+        Id(step_text(pattern, Some(index)))
     }
 
     /// The pattern and index of a step [`Id::copy`] made.
@@ -137,7 +137,7 @@ impl ProjectId {
         if !self.0.contains(':') {
             return None;
         }
-        super::mate::parse_step(&self.0, "")
+        parse_step(&self.0, "")
             .ok()
             .and_then(|(id, c)| Some((id, c?)))
     }
@@ -153,6 +153,48 @@ impl Serialize for ProjectId {
     fn serialize<S: Serializer>(&self, s: S) -> core::result::Result<S::Ok, S::Error> {
         s.serialize_str(&self.0)
     }
+}
+
+/// One step of an instance path as text: an instance's ID, or a copy
+/// `<pattern>:<i>` (`<pattern>:<i>:<j>` past the first row).
+pub fn step_text(id: &Id, copy: Option<[u32; 2]>) -> String {
+    match copy {
+        None => id.to_string(),
+        Some([i, 0]) => format!("{id}:{i}"),
+        Some([i, j]) => format!("{id}:{i}:{j}"),
+    }
+}
+
+/// Reads one step of an instance path: an ID, or a copy's.
+pub fn parse_step(s: &str, at: &str) -> Result<(Id, Option<[u32; 2]>)> {
+    let mut parts = s.split(':');
+    let head = parts.next().unwrap_or_default();
+    let id = Id::parse(head, "instance").map_err(|e| e.with("pointer", at))?;
+    let rest: Vec<&str> = parts.collect();
+    if rest.is_empty() {
+        return Ok((id, None));
+    }
+    let index = |t: &str| t.parse::<u32>().ok().filter(|_| !t.starts_with('+'));
+    let copy = match rest.as_slice() {
+        [i] => index(i).map(|i| [i, 0]),
+        [i, j] => index(i).zip(index(j)).map(|(i, j)| [i, j]),
+        _ => None,
+    };
+    match copy {
+        Some([0, 0]) => Err(invalid_step(
+            at,
+            "copy 0 of a pattern is its seed: name the seed",
+        )),
+        Some(c) if step_text(&id, Some(c)) == s => Ok((id, Some(c))),
+        _ => Err(invalid_step(
+            at,
+            "a pattern's copy is <pattern>:<i>, or <pattern>:<i>:<j> past its first row",
+        )),
+    }
+}
+
+fn invalid_step(at: &str, msg: &str) -> Error {
+    Error::new(Code::InvalidDocument, msg).with("pointer", at)
 }
 
 #[cfg(test)]

@@ -87,7 +87,8 @@ The product targets Windows, macOS, and Linux natively, not just WSL. CI (`.gith
 - `crates/ryukei`: the B-rep geometry kernel (library).
 - `crates/ryusketch`: the 2D constraint solver for sketches (library), and `ryusketch::core`, the solver apart from sketches. It depends on `ryukei` only for `math`.
 - `crates/ryumate`: the rigid-body mate solver for assemblies (library), over `ryusketch::core`. It depends on `ryukei` only for `math`, and never reads files, documents or sessions.
-- `crates/ryucad-doc`: ryucad's file format (`doc`, `units`, `expr`, `error`), split out so ryupdm can read projects; `ryucad` re-exports each under its old path.
+- `crates/ryu-doc`: what every ryu product's files are written in (library): canonical JSON, IDs and project IDs, sources, units, expressions, and the error type with every product's codes. It depends only on `ryu-math`, `serde` and `serde_json`.
+- `crates/ryucad-doc`: ryucad's file format (`doc`, `units`, `expr`, `error`), split out so ryupdm can read projects; `ryucad` re-exports each under its old path. `units`, `expr`, `error` and `doc`'s `canonical`, `id` and `source` are `ryu-doc`'s, re-exported here.
 - `crates/ryupdm`: local product data management (library): the PDM settings, part properties, revision labels, release records, the release branch's history and tags, part states, the release checks, the commit guard and merge validation. It reads projects through `ryucad-doc` and Git through `gix`, and never calls the kernel, a session or the app.
 - `crates/ryustep`: STEP files (library): Part 21 exchange structures, the AP203/AP214/AP242 entities, units and the product tree, and bodies read and written. `tests/data/occt` holds files OCCT wrote, with the `gen.cpp` that made them; `tests/corpus` holds public domain NIST test models, byte for byte, with `manifest.txt` and the pinned corpus's `pinned.txt`.
 - `crates/ryucad`: the application layer and binary.

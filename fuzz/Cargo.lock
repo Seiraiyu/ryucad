@@ -1679,6 +1679,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "ryu-doc"
+version = "0.0.0"
+dependencies = [
+ "ryu-math",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ryu-math"
 version = "0.0.0"
 dependencies = [
@@ -1716,6 +1725,7 @@ name = "ryucad-doc"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "ryu-doc",
  "ryukei",
  "ryusketch",
  "serde",
