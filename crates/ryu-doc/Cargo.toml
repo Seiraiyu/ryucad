@@ -1,0 +1,16 @@
+[package]
+name = "ryu-doc"
+description = "What every ryu product's files are written in: canonical JSON, IDs, sources, units, expressions and the one error type"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+ryu-math = { path = "../ryu-math" }
+serde = { version = "1", features = ["derive"] }
+# Correctly rounded float parsing: without it, a number read back can be
+# one ulp off what was written.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dev-dependencies]
+tempfile = "3"

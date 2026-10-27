@@ -4,19 +4,29 @@
 //! preference, kept in the OS config folder. Both have a fixed schema, and
 //! every key can be read and set by agents as well as the app.
 
-use crate::doc::canonical;
-use crate::doc::project::write_atomic;
+use crate::Cad;
 use crate::error::{Code, Error, Result};
 use crate::units::Unit;
+use ryu_session::prefs::{self, Schema};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 
-/// Overrides the config folder (tests, and anyone who wants another).
-pub const CONFIG_DIR_VAR: &str = "RYUCAD_CONFIG_DIR";
+pub use ryu_session::prefs::PREFERENCES;
 
-pub const PREFERENCES: &str = "preferences.json";
-const KIND: &str = "ryucad.preferences";
-const FORMAT: u64 = 1;
+/// Overrides the config folder (tests, and anyone who wants another).
+pub const CONFIG_DIR_VAR: &str = Cad::CONFIG_DIR_VAR;
+
+impl Schema for Cad {
+    const CONFIG_DIR_VAR: &'static str = "RYUCAD_CONFIG_DIR";
+
+    fn accepts(name: &str, value: &Value) -> bool {
+        key(name).is_ok_and(|k| k.scope == Scope::User && k.check(value).is_ok())
+    }
+
+    fn default_of(name: &str) -> Option<Value> {
+        key(name).ok().map(|k| (k.default)())
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -230,99 +240,17 @@ fn url_ok(s: &str) -> bool {
 
 /// The folder holding the user's preferences.
 pub fn config_dir() -> Result<PathBuf> {
-    if let Some(d) = std::env::var_os(CONFIG_DIR_VAR) {
-        return Ok(PathBuf::from(d));
-    }
-    let env = |k: &str| {
-        std::env::var_os(k)
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-    };
-    let none = || Error::new(Code::Io, "can't find the user's config folder");
-    if cfg!(windows) {
-        return env("APPDATA").map(|d| d.join("ryucad")).ok_or_else(none);
-    }
-    let home = env("HOME");
-    if cfg!(target_os = "macos") {
-        return home
-            .map(|h| h.join("Library/Application Support/ryucad"))
-            .ok_or_else(none);
-    }
-    env("XDG_CONFIG_HOME")
-        .or_else(|| home.map(|h| h.join(".config")))
-        .map(|d| d.join("ryucad"))
-        .ok_or_else(none)
+    prefs::config_dir::<Cad>()
 }
 
 /// The user's preferences as stored: only the keys set, and why the file
 /// couldn't be used, if it couldn't.
-pub struct Preferences {
-    pub path: PathBuf,
-    pub values: Map<String, Value>,
-    pub problem: Option<String>,
-}
-
-impl Preferences {
-    /// Reads the preferences. A missing file is no preferences; a file
-    /// that can't be used is reported and treated the same, never thrown
-    /// away.
-    pub fn load() -> Result<Preferences> {
-        let path = config_dir()?.join(PREFERENCES);
-        let (values, problem) = match std::fs::read_to_string(&path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Map::new(), None),
-            Err(e) => (Map::new(), Some(format!("{}: {e}", path.display()))),
-            Ok(text) => match parse(&text) {
-                Ok(values) => (values, None),
-                Err(why) => (
-                    Map::new(),
-                    Some(format!("{}: {why}; using defaults", path.display())),
-                ),
-            },
-        };
-        Ok(Preferences {
-            path,
-            values,
-            problem,
-        })
-    }
-
-    /// Sets a key and writes the file. A file that couldn't be used is
-    /// kept as `preferences.json.bak` first.
-    pub fn set(&mut self, name: &str, value: Value) -> Result<()> {
-        if self.problem.is_some() && self.path.is_file() {
-            let bak = self.path.with_extension("json.bak");
-            std::fs::rename(&self.path, &bak).map_err(|e| Error::io(&self.path, &e))?;
-            self.problem = None;
-        }
-        // A preference set to its default is no longer one.
-        if key(name).is_ok_and(|k| (k.default)() == value) {
-            self.values.remove(name);
-        } else {
-            self.values.insert(name.to_owned(), value);
-        }
-        let doc = json!({"format": FORMAT, "kind": KIND, "values": self.values});
-        write_atomic(&self.path, canonical::to_string(&doc))
-    }
-}
+pub type Preferences = prefs::Preferences<Cad>;
 
 /// The `values` of a preferences file, keeping only known keys with valid
 /// values.
 pub fn parse(text: &str) -> core::result::Result<Map<String, Value>, String> {
-    let v = canonical::parse(text).map_err(|e| e.message)?;
-    if v["kind"] != KIND {
-        return Err(format!("not a {KIND} file"));
-    }
-    match v["format"].as_u64() {
-        Some(f) if f > FORMAT => return Err(format!("format {f} is newer than this ryucad")),
-        Some(_) => {}
-        None => return Err("no format".to_owned()),
-    }
-    let values = v["values"].as_object().ok_or("no values")?;
-    Ok(values
-        .iter()
-        .filter(|(k, v)| key(k).is_ok_and(|k| k.scope == Scope::User && k.check(v).is_ok()))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect())
+    prefs::parse::<Cad>(text)
 }
 
 /// One setting as reported: its value, scope, and whether it is the
@@ -401,23 +329,9 @@ pub fn set_user(name: &str, value: Value) -> Result<Value> {
 }
 
 /// Runs a read-modify-write of the preferences holding their lock: the
-/// daemons of every project share the file, and without it one daemon's
-/// write can lose another's. The lock is a file of its own, so replacing
-/// `preferences.json` (a rename) never drops it.
+/// daemons of every project share the file.
 fn locked<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
-    let dir = config_dir()?;
-    std::fs::create_dir_all(&dir).map_err(|e| Error::io(&dir, &e))?;
-    let path = dir.join("preferences.lock");
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .map_err(|e| Error::io(&path, &e))?;
-    file.lock().map_err(|e| Error::io(&path, &e))?;
-    let r = f();
-    let _ = file.unlock();
-    r
+    prefs::locked::<Cad, T>(f)
 }
 
 /// Puts the project at `root` first among the recent projects: a human
@@ -499,6 +413,7 @@ pub fn project_revision(root: &Path) -> Result<String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::doc::canonical;
 
     #[test]
     fn review_url_takes_https_or_loopback_http() {

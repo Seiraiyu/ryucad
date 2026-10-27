@@ -122,43 +122,7 @@ impl Offset {
     }
 }
 
-/// One step of an instance path as text: an instance's ID, or a copy
-/// `<pattern>:<i>` (`<pattern>:<i>:<j>` past the first row).
-pub fn step_text(id: &Id, copy: Option<[u32; 2]>) -> String {
-    match copy {
-        None => id.to_string(),
-        Some([i, 0]) => format!("{id}:{i}"),
-        Some([i, j]) => format!("{id}:{i}:{j}"),
-    }
-}
-
-/// Reads one step of an instance path: an ID, or a copy's.
-pub fn parse_step(s: &str, at: &str) -> Result<(Id, Option<[u32; 2]>)> {
-    let mut parts = s.split(':');
-    let head = parts.next().unwrap_or_default();
-    let id = Id::parse(head, "instance").map_err(|e| e.with("pointer", at))?;
-    let rest: Vec<&str> = parts.collect();
-    if rest.is_empty() {
-        return Ok((id, None));
-    }
-    let index = |t: &str| t.parse::<u32>().ok().filter(|_| !t.starts_with('+'));
-    let copy = match rest.as_slice() {
-        [i] => index(i).map(|i| [i, 0]),
-        [i, j] => index(i).zip(index(j)).map(|(i, j)| [i, j]),
-        _ => None,
-    };
-    match copy {
-        Some([0, 0]) => Err(invalid(
-            at,
-            "copy 0 of a pattern is its seed: name the seed",
-        )),
-        Some(c) if step_text(&id, Some(c)) == s => Ok((id, Some(c))),
-        _ => Err(invalid(
-            at,
-            "a pattern's copy is <pattern>:<i>, or <pattern>:<i>:<j> past its first row",
-        )),
-    }
-}
+pub use super::id::{parse_step, step_text};
 
 impl Connector {
     /// The instance path as a file writes it.

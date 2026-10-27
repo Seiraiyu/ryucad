@@ -3,13 +3,11 @@
 
 pub mod assembly;
 pub mod blend;
-pub mod canonical;
 pub mod files;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod fixtures;
 pub mod hole;
-pub mod id;
 pub mod import;
 pub mod mate;
 pub mod pattern;
@@ -17,5 +15,6 @@ pub mod project;
 pub mod reference;
 pub mod sketch;
 pub mod solid;
-pub mod source;
 pub mod sweep;
+
+pub use ryu_doc::{canonical, id, source};

@@ -6,9 +6,9 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
-libm = "0.2"
 num-bigint = "0.4"
 rayon = "1"
+ryu-math = { path = "../ryu-math" }
 
 [dev-dependencies]
 proptest = "1"

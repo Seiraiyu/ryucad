@@ -5,7 +5,8 @@
 use crate::error::{Error, Result};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 /// What an entry of a folder is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +113,50 @@ impl Source for BTreeMap<String, Vec<u8>> {
     fn read(&self, path: &str) -> Result<Option<Vec<u8>>> {
         Ok(self.get(path).cloned())
     }
+}
+
+/// Writes `contents` to `path` so that readers see the old file or the new
+/// one, never a mix: a temporary file in the same folder, then a rename.
+pub fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    let dir = path.parent().expect("a file path has a parent");
+    fs::create_dir_all(dir).map_err(|e| Error::io(dir, &e))?;
+    let name = path.file_name().expect("a file path has a name");
+    let tmp = dir.join(format!(".{}.tmp", name.to_string_lossy()));
+    let write = || -> std::io::Result<()> {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(contents.as_ref())?;
+        f.sync_all()?;
+        fs::rename(&tmp, path)
+    };
+    write().map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        Error::io(path, &e)
+    })
+}
+
+/// `path` relative to `root`, with `/` on every platform.
+pub fn relative(root: &Path, path: &Path) -> String {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// On Windows `canonicalize` gives a verbatim path (`\\?\C:\…`). Agents see
+/// the ordinary `C:\…` form, which is what `init` reports too. UNC paths and
+/// paths too long for the ordinary form stay verbatim.
+pub fn plain(p: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(rest) = p.to_str().and_then(|s| s.strip_prefix(r"\\?\"))
+            && rest.as_bytes().get(1) == Some(&b':')
+            && rest.len() < 260
+        {
+            return PathBuf::from(rest);
+        }
+    }
+    p
 }
 
 #[cfg(test)]

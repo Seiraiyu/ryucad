@@ -4219,6 +4219,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-doc"
+version = "0.0.0"
+dependencies = [
+ "ryu-math",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "ryu-math"
+version = "0.0.0"
+dependencies = [
+ "libm",
+ "proptest",
+]
+
+[[package]]
+name = "ryu-session"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "interprocess",
+ "libc",
+ "ryu-doc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "widestring",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "ryucad"
 version = "0.0.0"
 dependencies = [
@@ -4237,6 +4270,7 @@ dependencies = [
  "png",
  "proptest",
  "rayon",
+ "ryu-session",
  "ryucad-doc",
  "ryukei",
  "ryukei-testkit",
@@ -4276,6 +4310,7 @@ name = "ryucad-doc"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "ryu-doc",
  "ryukei",
  "ryusketch",
  "serde",
@@ -4287,10 +4322,10 @@ dependencies = [
 name = "ryukei"
 version = "0.0.0"
 dependencies = [
- "libm",
  "num-bigint",
  "proptest",
  "rayon",
+ "ryu-math",
  "ryukei-testkit",
 ]
 

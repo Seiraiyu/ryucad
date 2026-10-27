@@ -9,7 +9,7 @@
 
 use crate::error::{Code, Error, Result};
 use crate::units::{Dim, UNIT_NAMES, literal_unit};
-use ryukei::math;
+use ryu_math as math;
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,7 +19,7 @@ use std::fmt::Write as _;
 /// overflow the stack.
 const MAX_DEPTH: usize = 64;
 
-/// The functions an expression may call, from `ryukei::math`.
+/// The functions an expression may call, from `ryu-math` (`ryukei::math`).
 pub const FUNCTIONS: [&str; 14] = [
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sqrt", "abs", "min", "max", "floor",
     "ceil", "round",
@@ -263,7 +263,7 @@ impl Expr {
     }
 
     /// The value, with `lookup` giving each parameter's. Evaluation is f64
-    /// in a fixed order, with `ryukei::math` for every function, so it gives
+    /// in a fixed order, with `ryu-math` for every function, so it gives
     /// the same bits on every platform. A result that isn't finite (a
     /// division by zero, `asin(2)`) is `invalid_quantity`; mixing kinds is
     /// `unit_mismatch`, naming the subexpression `at` fault.

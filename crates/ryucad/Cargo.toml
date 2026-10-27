@@ -16,6 +16,7 @@ png = "0.18"
 # An 8×8 bitmap font for labels in renders.
 font8x8 = { version = "0.3", default-features = false }
 rayon = "1"
+ryu-session = { path = "../ryu-session" }
 ryucad-doc = { path = "../ryucad-doc" }
 ryukei = { path = "../ryukei" }
 ryumate = { path = "../ryumate" }
