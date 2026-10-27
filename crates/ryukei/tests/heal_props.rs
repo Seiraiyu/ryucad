@@ -219,3 +219,53 @@ fn faults_heal_or_are_refused() {
         failed.join("\n")
     );
 }
+
+/// A plate's bore and faces in NURBS form, written with its rim moved
+/// 2 µm off both: healing puts the rim back on the spline faces' meeting
+/// (a closed branch the general intersector traces, started at the rim's
+/// vertex), with the branch's own pcurves, so its tolerance falls back to
+/// the branch's.
+#[test]
+fn spline_edges_are_tightened() {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey};
+    use ryukei::geom::{Rigid, Vector3};
+    use ryukei::primitive;
+    let plate = primitive::block(OpKey(1), 4.0, 4.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let rod = primitive::cylinder(OpKey(2), 0.5, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let tool = Tool {
+        key: ToolKey(1),
+        body: &rod,
+        place: Rigid::translation(Vector3::new(2.0, 2.0, -1.0)),
+    };
+    let mut holed = boolean(OpKey(3), BooleanOp::Subtract, &plate, &[tool])
+        .unwrap()
+        .0;
+    ryukei_testkit::nurbs::convert_body(&mut holed).unwrap();
+    let mut s = seamed(&holed, 1e-6).unwrap();
+    let mut moved = 0;
+    for e in 0..s.edges.len() {
+        let c = &s.curves[s.edges[e].curve];
+        let [t0, t1] = s.edges[e].interval;
+        let p = c.point((t0 + t1) / 2.0);
+        let r = ryukei::math::hypot(p.x - 2.0, p.y - 2.0);
+        if (r - 0.5).abs() < 1e-6 && (p.z - 1.0).abs() < 1e-6 {
+            let shifted = c.transformed(&Rigid::translation(Vector3::new(2e-6, 1e-6, 0.0)));
+            s.curves.push(shifted);
+            s.edges[e].curve = s.curves.len() - 1;
+            moved += 1;
+        }
+    }
+    assert_eq!(moved, 1);
+    let (h, _, report) = heal(OpKey(7), &s, &HealOptions::default()).unwrap();
+    assert_eq!(report.tightened.len(), 1);
+    assert_eq!(check(&h), []);
+    let worst = h
+        .edges()
+        .map(|e| h.edge(e).unwrap().tolerance.get())
+        .fold(0.0, f64::max);
+    assert!(worst <= 1e-7, "{worst}");
+}
