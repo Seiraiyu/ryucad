@@ -272,14 +272,28 @@ fn revert(project: &dyn Project, files: &[FileChange]) -> Result<Vec<FileChange>
     }
     // Content files, then the files that list them, then deletions: a
     // crash part way leaves at worst an unlisted file, as any write does.
-    let mut order: Vec<&FileChange> = files.iter().collect();
-    order.sort_by_key(|f| (f.before.is_none(), project.is_index(&f.path)));
-    for f in order {
-        let path = project.root().join(&f.path);
-        match &f.before {
-            Some(bytes) => write_atomic(&path, bytes)?,
-            None => project.remove(&path)?,
-        }
+    // The files of each step are written side by side: each waits on its
+    // disk, and undoing an import writes thousands.
+    let root = project.root();
+    let index: Vec<bool> = files.iter().map(|f| project.is_index(&f.path)).collect();
+    for lists in [false, true] {
+        use rayon::prelude::*;
+        let written: Vec<Result<()>> = files
+            .par_iter()
+            .zip(&index)
+            .filter(|(_, i)| **i == lists)
+            .filter_map(|(f, _)| Some(write_atomic(&root.join(&f.path), f.before.as_ref()?)))
+            .collect();
+        written.into_iter().collect::<Result<()>>()?;
+    }
+    let mut gone: Vec<(&FileChange, bool)> = files
+        .iter()
+        .zip(index)
+        .filter(|(f, _)| f.before.is_none())
+        .collect();
+    gone.sort_by_key(|(_, i)| *i);
+    for (f, _) in gone {
+        project.remove(&root.join(&f.path))?;
     }
     Ok(files
         .iter()

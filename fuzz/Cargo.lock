@@ -1701,6 +1701,7 @@ dependencies = [
  "blake3",
  "interprocess",
  "libc",
+ "rayon",
  "ryu-doc",
  "serde",
  "serde_json",
