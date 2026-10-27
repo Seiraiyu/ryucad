@@ -9,7 +9,8 @@
 //! one with more bodies gains import features for them where a part holds
 //! all its old ones. A new product makes a part as importing does, where
 //! the file was imported whole before (not only `--into` a part, and not
-//! the same bytes again). A
+//! the same bytes again); otherwise new products are warned of
+//! (`import_products_skipped`). A
 //! vanished product's features keep their product, take the new hash and
 //! fail `import_product_missing`.
 //!
@@ -38,7 +39,8 @@ pub struct Update {
     /// Instances kept though their usage vanished, because a mate or
     /// pattern reads them: `(assembly, instance)`.
     pub kept: Vec<(Id, Id)>,
-    /// `import_kind_changed` for each part whose product has children now.
+    /// `import_kind_changed` for each part whose product has children now,
+    /// and `import_products_skipped` for new products nothing makes.
     pub warnings: Vec<String>,
 }
 
@@ -136,9 +138,13 @@ pub fn plan(
     // An assembly file imported whole leaves imported instances; a flat one
     // founds a part for every product it has bodies of, so one whose
     // products aren't all in parts it founded was taken `--into` a part
-    // (an empty one, perhaps). Left over: a flat file with several roots
-    // whose one product was taken `--into` an empty part reads as a whole
-    // import of a file with that one root.
+    // (an empty one, perhaps). A flat file whose new version is an
+    // assembly file left no instances: it was whole where two of its
+    // products are each in a part it founded, since `--into` takes one.
+    // Left over: a flat file with several roots whose one product was
+    // taken `--into` an empty part reads as a whole import of a file with
+    // that one root, and a flat file of one root that gains an assembly
+    // reads as `--into`; what that skips is warned of.
     let founded = |p: &Id| {
         project.parts.get(p).is_some_and(|x| {
             x.order().first().is_some_and(|f| {
@@ -150,20 +156,24 @@ pub fn plan(
         .iter()
         .any(|(_, _, i)| i.file.blake3 == file.blake3);
     let assembly_file = (0..defs.len()).any(|k| plan::is_assembly(opened, &makes, k));
+    let groups: BTreeSet<&Option<ProductRef>> =
+        features.iter().map(|(_, _, i)| &i.product).collect();
+    let in_founded = |g: &Option<ProductRef>| {
+        features
+            .iter()
+            .any(|(p, _, i)| &i.product == g && founded(p))
+    };
     let whole = !same_bytes
         && if !instances.is_empty() {
             true
         } else if assembly_file {
-            false
+            groups
+                .iter()
+                .filter(|g| g.is_some() && in_founded(g))
+                .count()
+                >= 2
         } else {
-            let groups: BTreeSet<&Option<ProductRef>> =
-                features.iter().map(|(_, _, i)| &i.product).collect();
-            !groups.is_empty()
-                && groups.iter().all(|g| {
-                    features
-                        .iter()
-                        .any(|(p, _, i)| &i.product == *g && founded(p))
-                })
+            !groups.is_empty() && groups.iter().all(|g| in_founded(g))
         };
     let had_unplaced = features.iter().any(|(_, _, i)| i.product.is_none());
     let unplaced = plan::bodies(opened, None) > 0 && !had_unplaced;
@@ -181,6 +191,22 @@ pub fn plan(
     }
     let mut planned: BTreeMap<Id, Planned> = BTreeMap::new();
     let mut warnings = Vec::new();
+    // Products of a new version that nothing matched and nothing makes.
+    if !whole && !same_bytes {
+        let skipped: Vec<String> = (0..defs.len())
+            .filter(|k| makes[*k] && !known.contains_key(k))
+            .map(|k| format!("{:?}", &*defs[k].product_id))
+            .collect();
+        if !skipped.is_empty() {
+            warnings.push(format!(
+                "import_products_skipped: product{} {} of {path} {} no part, since the file doesn't read as imported whole: import {} --into a part, or delete the file's parts and import it again",
+                if skipped.len() == 1 { "" } else { "s" },
+                skipped.join(", "),
+                if skipped.len() == 1 { "has" } else { "have" },
+                if skipped.len() == 1 { "it" } else { "them" },
+            ));
+        }
+    }
     let entry =
         |planned: &mut BTreeMap<Id, Planned>, part: &Id, kind: PartKind, k: Option<usize>| {
             planned.entry(part.clone()).or_insert_with(|| Planned {
@@ -746,18 +772,104 @@ mod tests {
 
     /// Two roots, `A-1` and `B-1`, a block each: a flat file.
     fn two_roots() -> Vec<u8> {
-        use ryukei::geom::Rigid;
+        roots(&["A-1", "B-1"], false)
+    }
+
+    /// A block for each of `ids`, roots of a flat file, or with `assembly`
+    /// an assembly `X-1` placing each once.
+    fn roots(ids: &[&str], assembly: bool) -> Vec<u8> {
+        use ryukei::geom::{Rigid, Vector3};
         let block =
             ryukei::primitive::block(ryukei::name::OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY)
                 .unwrap()
                 .0;
-        let product = |id: &str| ryustep::Product {
+        let product = |id: &str, bodies, children| ryustep::Product {
             id: id.into(),
             name: id.into(),
-            bodies: vec![block.clone()],
-            children: vec![],
+            bodies,
+            children,
         };
-        crate::import::tests::written(vec![product("A-1"), product("B-1")])
+        let mut products: Vec<ryustep::Product> = ids
+            .iter()
+            .map(|id| product(id, vec![block.clone()], vec![]))
+            .collect();
+        if assembly {
+            let children = (0..ids.len())
+                .map(|n| ryustep::Child {
+                    product: n,
+                    place: Rigid::translation(Vector3::new(0.02 * n as f64, 0.0, 0.0)),
+                })
+                .collect();
+            products.push(product("X-1", vec![], children));
+        }
+        crate::import::tests::written(products)
+    }
+
+    /// The parts `v`'s answer created, with their kinds.
+    fn created(v: &Value) -> Vec<(String, String)> {
+        v["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["created"] == true)
+            .map(|p| {
+                (
+                    p["part"].as_str().unwrap().to_owned(),
+                    p["kind"].as_str().unwrap_or("part").to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    /// The `import_products_skipped` warnings of `v`'s answer.
+    fn skipped(v: &Value) -> Vec<String> {
+        v["warnings"]
+            .as_array()
+            .map(|w| {
+                w.iter()
+                    .filter_map(|w| w.as_str())
+                    .filter(|w| w.starts_with("import_products_skipped"))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_flat_file_imported_whole_makes_the_assembly_its_new_version_adds() {
+        let (_src, path) = outside(&two_roots());
+        let (dir, mut s) = fresh();
+        call(&mut s, "import", json!({"path": path})).unwrap();
+        let v = update(&mut s, &roots(&["A-1", "B-1"], true), json!({})).unwrap();
+        assert_eq!(created(&v), [("x-1".into(), "assembly".into())], "{v}");
+        assert!(skipped(&v).is_empty(), "{v}");
+        let x = listed(dir.path(), "x-1");
+        let placed: Vec<&Value> = x.iter().map(|(_, f)| &f["part"]).collect();
+        assert_eq!(placed, [&json!("a-1"), &json!("b-1")]);
+    }
+
+    #[test]
+    fn products_an_update_makes_no_part_for_are_warned_of() {
+        // A flat file of one root imported whole reads as `--into` once it
+        // gains an assembly (the limit): the assembly is named.
+        let (_src, path) = outside(&roots(&["A-1"], false));
+        let (_dir, mut s) = fresh();
+        call(&mut s, "import", json!({"path": path})).unwrap();
+        let v = update(&mut s, &roots(&["A-1"], true), json!({"dry_run": true})).unwrap();
+        assert!(created(&v).is_empty(), "{v}");
+        let w = skipped(&v);
+        assert_eq!(w.len(), 1, "{v}");
+        assert!(w[0].contains("\"X-1\""), "{w:?}");
+        // One product of an assembly file taken `--into` a part: a new
+        // version names the others; the same bytes again say nothing.
+        let asm = occt("assembly.stp");
+        let (_dir, mut s) = fresh();
+        into(&mut s, &asm, "p", false, 0);
+        let v = update(&mut s, &asm, json!({"dry_run": true})).unwrap();
+        assert!(skipped(&v).is_empty(), "{v}");
+        let v = update(&mut s, &touched(&asm), json!({"dry_run": true})).unwrap();
+        assert!(created(&v).is_empty(), "{v}");
+        assert_eq!(skipped(&v).len(), 1, "{v}");
     }
 
     #[test]
