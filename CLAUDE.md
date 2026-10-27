@@ -84,6 +84,7 @@ The product targets Windows, macOS, and Linux natively, not just WSL. CI (`.gith
 
 ## Layout
 
+- `crates/ryu-math`: deterministic scalar math (library): `libm` and `sqrt`, the same bits everywhere. `ryukei` re-exports it as `ryukei::math`, which kernel code uses.
 - `crates/ryukei`: the B-rep geometry kernel (library).
 - `crates/ryusketch`: the 2D constraint solver for sketches (library), and `ryusketch::core`, the solver apart from sketches. It depends on `ryukei` only for `math`.
 - `crates/ryumate`: the rigid-body mate solver for assemblies (library), over `ryusketch::core`. It depends on `ryukei` only for `math`, and never reads files, documents or sessions.

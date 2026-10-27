@@ -1679,6 +1679,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "ryu-math"
+version = "0.0.0"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "ryucad"
 version = "0.0.0"
 dependencies = [
@@ -1719,9 +1726,9 @@ dependencies = [
 name = "ryukei"
 version = "0.0.0"
 dependencies = [
- "libm",
  "num-bigint",
  "rayon",
+ "ryu-math",
 ]
 
 [[package]]
