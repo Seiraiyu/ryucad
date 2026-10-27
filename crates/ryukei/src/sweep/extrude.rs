@@ -47,7 +47,7 @@ pub fn extrude(
 }
 
 /// An extrude's motion: along a unit direction from `start` to `end`.
-struct Straight {
+pub(super) struct Straight {
     dir: UnitVector3,
     start: f64,
     end: f64,
@@ -57,7 +57,7 @@ struct Straight {
 }
 
 impl Straight {
-    fn new(frame: &Frame, dir: Vector3, start: f64, end: f64) -> Result<Self, Error> {
+    pub(super) fn new(frame: &Frame, dir: Vector3, start: f64, end: f64) -> Result<Self, Error> {
         Vector3::try_new(dir.x, dir.y, dir.z)?;
         if !(start.is_finite() && end.is_finite()) {
             return Err(Error::NonFinite);

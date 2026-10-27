@@ -110,6 +110,15 @@ pub enum SweepRole {
     EndVertex,
     Vertex,
     Apex,
+    /// A stand-in for a path segment's key (see [`crate::sweep::along`]).
+    PathSegment,
+    /// The edge where a profile segment's sides along two path segments
+    /// meet; its parents are the two sides, in path order.
+    Section,
+    /// A profile vertex where two path segments meet; its parents are the
+    /// segments before and after the profile vertex, then the path
+    /// segments before and after the joint.
+    JointVertex,
 }
 
 /// The entities of a boolean (see [`crate::boolean`]).
@@ -219,6 +228,9 @@ impl fmt::Display for Role {
                 SweepRole::EndVertex => "end-vertex",
                 SweepRole::Vertex => "sweep-vertex",
                 SweepRole::Apex => "apex",
+                SweepRole::PathSegment => "path-segment",
+                SweepRole::Section => "section",
+                SweepRole::JointVertex => "joint-vertex",
             }),
             Self::Boolean(r) => f.write_str(match r {
                 BooleanRole::Tool => "tool",
@@ -401,6 +413,9 @@ mod tests {
             SweepRole::EndVertex,
             SweepRole::Vertex,
             SweepRole::Apex,
+            SweepRole::PathSegment,
+            SweepRole::Section,
+            SweepRole::JointVertex,
         ] {
             roles.push(Role::Sweep(r));
         }

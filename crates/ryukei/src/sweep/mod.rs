@@ -6,20 +6,20 @@
 //! touching, certified) and nests its loops into lumps with holes.
 //! [`extrude`] and [`revolve`] sweep it into a solid per lump.
 
+mod along;
 mod area;
 mod build;
 mod capped;
 mod extrude;
 mod names;
 mod nest;
-// Checked paths are used by `along`, from a later commit on.
-#[allow(dead_code)]
 mod path;
 mod place;
 mod profile;
 mod revolve;
 mod separate;
 
+pub use along::{AlongOptions, along};
 pub use extrude::extrude;
 pub use path::{Path, PathSegment};
 pub use profile::{Loop, LoopKey, Lump, Profile, Segment, SegmentKey, ValidLoop, ValidProfile};
