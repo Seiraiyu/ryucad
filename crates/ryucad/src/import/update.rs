@@ -8,7 +8,8 @@
 //! features take the new hash (and its product's new name or ordinal);
 //! one with more bodies gains import features for them where a part holds
 //! all its old ones. A new product makes a part as importing does, where
-//! the file was imported whole before (not only `--into` a part). A
+//! the file was imported whole before (not only `--into` a part, and not
+//! the same bytes again). A
 //! vanished product's features keep their product, take the new hash and
 //! fail `import_product_missing`.
 //!
@@ -130,8 +131,14 @@ pub fn plan(
         }
     }
     // New products make parts only where the file was imported whole
-    // before: an assembly it made, or a part it founded. A file only ever
-    // imported `--into` a part makes none.
+    // before. A file only ever imported `--into` a part makes none, nor do
+    // the same bytes again: a whole import of them made everything already.
+    // An assembly file imported whole leaves imported instances; a flat one
+    // founds a part for every product it has bodies of, so one whose
+    // products aren't all in parts it founded was taken `--into` a part
+    // (an empty one, perhaps). Left over: a flat file with several roots
+    // whose one product was taken `--into` an empty part reads as a whole
+    // import of a file with that one root.
     let founded = |p: &Id| {
         project.parts.get(p).is_some_and(|x| {
             x.order().first().is_some_and(|f| {
@@ -139,7 +146,25 @@ pub fn plan(
             })
         })
     };
-    let whole = !instances.is_empty() || features.iter().any(|(p, _, _)| founded(p));
+    let same_bytes = features
+        .iter()
+        .any(|(_, _, i)| i.file.blake3 == file.blake3);
+    let assembly_file = (0..defs.len()).any(|k| plan::is_assembly(opened, &makes, k));
+    let whole = !same_bytes
+        && if !instances.is_empty() {
+            true
+        } else if assembly_file {
+            false
+        } else {
+            let groups: BTreeSet<&Option<ProductRef>> =
+                features.iter().map(|(_, _, i)| &i.product).collect();
+            !groups.is_empty()
+                && groups.iter().all(|g| {
+                    features
+                        .iter()
+                        .any(|(p, _, i)| &i.product == *g && founded(p))
+                })
+        };
     let had_unplaced = features.iter().any(|(_, _, i)| i.product.is_none());
     let unplaced = plan::bodies(opened, None) > 0 && !had_unplaced;
     let made = if whole {
@@ -654,40 +679,113 @@ mod tests {
         assert_eq!(bytes(&s), was);
     }
 
+    /// `bytes` with text after the end, which readers ignore: the same
+    /// file under another hash.
+    fn touched(bytes: &[u8]) -> Vec<u8> {
+        let mut b = bytes.to_vec();
+        b.extend_from_slice(b"\n/* again */\n");
+        b
+    }
+
+    /// Updates of `imports/frame.step` to `bytes` and to them touched, each
+    /// a dry run and then written, that plan and write no parts.
+    fn updates_make_nothing(
+        dir: &tempfile::TempDir,
+        s: &mut crate::session::Session,
+        bytes: &[u8],
+    ) {
+        let created = |v: &Value| {
+            let parts = v["parts"].as_array().unwrap();
+            parts.iter().filter(|p| p["created"] == true).count()
+        };
+        for b in [bytes.to_vec(), touched(bytes)] {
+            let before = crate::session::files(dir.path()).unwrap();
+            let v = update(s, &b, json!({"dry_run": true})).unwrap();
+            assert_eq!(created(&v), 0, "{v}");
+            assert_eq!(crate::session::files(dir.path()).unwrap(), before);
+            let v = update(s, &b, json!({})).unwrap();
+            assert_eq!(created(&v), 0, "{v}");
+            let parts = |files: Vec<std::path::PathBuf>| -> Vec<std::path::PathBuf> {
+                files
+                    .into_iter()
+                    .filter(|f| f.ends_with("part.json"))
+                    .collect()
+            };
+            assert_eq!(
+                parts(crate::session::files(dir.path()).unwrap()),
+                parts(before)
+            );
+        }
+    }
+
+    /// The first product of `bytes` (imported as `frame.step`) taken
+    /// `--into` part `p`, with a box first unless `empty`.
+    fn into(s: &mut crate::session::Session, bytes: &[u8], p: &str, empty: bool, product: usize) {
+        let (_src, path) = outside(bytes);
+        call(s, "part.create", json!({"part": p})).unwrap();
+        if !empty {
+            call(
+                s,
+                "feature.add",
+                json!({"part": p, "type": "box", "id": "body", "params": {"x": 1, "y": 1, "z": 1}}),
+            )
+            .unwrap();
+        }
+        let e = call(s, "import", json!({"path": path, "into": p})).unwrap_err();
+        let one = e.details["products"][product]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        call(
+            s,
+            "import",
+            json!({"path": path, "into": p, "product": one}),
+        )
+        .unwrap();
+    }
+
+    /// Two roots, `A-1` and `B-1`, a block each: a flat file.
+    fn two_roots() -> Vec<u8> {
+        use ryukei::geom::Rigid;
+        let block =
+            ryukei::primitive::block(ryukei::name::OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY)
+                .unwrap()
+                .0;
+        let product = |id: &str| ryustep::Product {
+            id: id.into(),
+            name: id.into(),
+            bodies: vec![block.clone()],
+            children: vec![],
+        };
+        crate::import::tests::written(vec![product("A-1"), product("B-1")])
+    }
+
     #[test]
     fn a_file_only_imported_into_a_part_makes_no_parts() {
-        // One product's bodies added to a part; the rest of the file left.
-        let (_src, path) = outside(&occt("assembly.stp"));
+        // One product's bodies of an assembly file added to a part; the
+        // rest of the file left.
+        let asm = occt("assembly.stp");
         let (dir, mut s) = fresh();
-        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
-        call(
-            &mut s,
-            "feature.add",
-            json!({"part": "p", "type": "box", "id": "body", "params": {"x": 1, "y": 1, "z": 1}}),
-        )
-        .unwrap();
-        let e = call(&mut s, "import", json!({"path": path, "into": "p"})).unwrap_err();
-        let one = e.details["products"][0]["id"].as_str().unwrap().to_owned();
-        call(
-            &mut s,
-            "import",
-            json!({"path": path, "into": "p", "product": one}),
-        )
-        .unwrap();
+        into(&mut s, &asm, "p", false, 0);
+        updates_make_nothing(&dir, &mut s, &asm);
+        // The same into a part of its own, made empty for it.
+        let (dir, mut s) = fresh();
+        into(&mut s, &asm, "p", true, 0);
+        updates_make_nothing(&dir, &mut s, &asm);
+        // A flat file's roots, one into an empty part and one into a part
+        // with a box: not a whole import, which founds a part for each.
+        let flat = two_roots();
+        let (dir, mut s) = fresh();
+        into(&mut s, &flat, "p", true, 0);
+        into(&mut s, &flat, "q", false, 1);
+        updates_make_nothing(&dir, &mut s, &flat);
+        // One root into an empty part: the same bytes make nothing; a new
+        // version reads as a whole import of a file of that one root (the
+        // limit).
+        let (dir, mut s) = fresh();
+        into(&mut s, &flat, "p", true, 0);
         let before = crate::session::files(dir.path()).unwrap();
-        let v = call(
-            &mut s,
-            "import",
-            json!({"path": path, "update": "imports/frame.step", "dry_run": true}),
-        )
-        .unwrap();
-        assert_eq!(v["parts"], json!([]), "{v}");
-        let v = call(
-            &mut s,
-            "import",
-            json!({"path": path, "update": "imports/frame.step"}),
-        )
-        .unwrap();
+        let v = update(&mut s, &flat, json!({"dry_run": true})).unwrap();
         assert_eq!(v["parts"], json!([]), "{v}");
         assert_eq!(crate::session::files(dir.path()).unwrap(), before);
     }
