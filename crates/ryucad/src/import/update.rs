@@ -650,6 +650,41 @@ mod tests {
     }
 
     #[test]
+    fn a_file_replaced_by_hand_is_taken_by_doctors_repair() {
+        let (dir, mut s) = imported();
+        let root = dir.path();
+        std::fs::write(root.join("imports/frame.step"), frame_version(2)).unwrap();
+        s.reload().unwrap();
+        let v = call(&mut s, "doctor", json!({})).unwrap();
+        let issue = v["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["code"] == "import_file_changed")
+            .unwrap()
+            .clone();
+        let repair = issue["repairs"][0]["id"].as_str().unwrap().to_owned();
+        assert!(
+            repair.starts_with("import_file_changed:import_update:"),
+            "{repair}"
+        );
+        call(&mut s, "doctor.repair", json!({"repairs": [repair]})).unwrap();
+        // As an update to those bytes leaves it.
+        let sub = listed(root, "s-1");
+        let ids: Vec<&str> = sub.iter().map(|(f, _)| f.as_str()).collect();
+        assert_eq!(ids, ["1", "3"]);
+        assert!(root.join("parts/n-1/part.json").is_file());
+        let v = call(&mut s, "doctor", json!({})).unwrap();
+        let codes: Vec<&str> = v["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["code"].as_str().unwrap())
+            .collect();
+        assert!(!codes.contains(&"import_file_changed"), "{v}");
+    }
+
+    #[test]
     fn names_of_unchanged_geometry_survive_and_references_to_the_rest_fail() {
         // The box imported, a fillet on a bottom edge and one on a top
         // edge; then the box made taller.

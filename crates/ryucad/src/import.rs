@@ -667,6 +667,44 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
     ))
 }
 
+/// What `import --update` writes when the bytes already at `path` (a
+/// file replaced by hand) are the new version: `doctor`'s `import_update`
+/// repair. `None` when they aren't a STEP file this build reads.
+pub fn update_in_place(root: &std::path::Path, path: &str) -> Result<Option<Writes>> {
+    use crate::doc::import::FileRef;
+    use crate::doc::project::{PDM_CONFIG, Project};
+    let project = Project::load(root)?;
+    let Some(file) = project.imports.get(path) else {
+        return Ok(None);
+    };
+    let Ok(opened) = opened(file) else {
+        return Ok(None);
+    };
+    let file_ref = FileRef {
+        path: path.to_owned(),
+        blake3: file.blake3.clone(),
+    };
+    let stem = std::path::Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let taken = |s: &str| {
+        Id::parse(s, "part").is_ok_and(|id| {
+            project.parts.contains_key(&id) || crate::pdm::check_not_retired(root, &id).is_err()
+        })
+    };
+    let fresh = plan::Fresh {
+        opened: &opened,
+        file: &file_ref,
+        stem: &stem,
+        part: None,
+        taken: &taken,
+        pdm: root.join(PDM_CONFIG).is_file(),
+    };
+    let u = update::plan(&project, &opened, &file_ref, &fresh)?;
+    Ok(Some(plan::writes(&project, &u.planned)?))
+}
+
 /// Every feature of every part that fails in `s`, with its error, by part
 /// and feature.
 fn failing(s: &mut crate::session::Session) -> Result<BTreeMap<(Id, Id), Value>> {
