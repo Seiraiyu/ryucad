@@ -3,8 +3,8 @@
 
 mod frame;
 
-pub(crate) use frame::Carry;
 pub use frame::FrameLaw;
+pub(crate) use frame::{Carry, turned};
 
 use super::bound2::IVec3;
 use super::jet::{self, JVec, Jet, Num};

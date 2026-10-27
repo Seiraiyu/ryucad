@@ -19,7 +19,7 @@ use super::names::Namer;
 use super::path::{PathSegment, ValidPath};
 use super::revolve::Turn;
 use super::{Lump, Path, Segment, SweepError, ValidLoop, ValidProfile, place};
-use crate::geom::path_sweep::Carry;
+use crate::geom::path_sweep::{Carry, turned};
 use crate::geom::{
     Axis, Circle, Curve, Curve2, Ellipse, Frame, FrameLaw, Line, Point2, Point3, Rigid, Surface,
     Sweep, Vector3,
@@ -28,7 +28,10 @@ use crate::name::{Journal, Name, OpKey, SweepRole};
 use crate::tol::{ANGULAR_RESOLUTION, LINEAR_RESOLUTION, Tolerance};
 use crate::topo::{Body, EntityId, FaceId, Sense};
 use crate::{Error, check};
+use core::f64::consts::TAU;
 use std::sync::Arc;
+
+mod closed;
 
 /// How a sweep along a path carries its profile: by `law`, turning by
 /// `twist` radians about the path from start to end and growing by
@@ -60,15 +63,20 @@ impl Default for AlongOptions {
 /// (`ProfileAlongPath`), and it is scaled about the point where the
 /// path's start meets its plane along its normal. Refusals, in order: the
 /// path's (`EmptyPath`, `BadPathSegment`, `PathNotG1`); a twist that isn't
-/// finite (`NonFinite`); a scale that isn't positive (`BadScale`); a
-/// closed path, which comes with the next commit (`NotClosing`); then
+/// finite (`NonFinite`); a scale that isn't positive (`BadScale`); on a
+/// closed path, a twist that isn't a whole number of turns or a scale
+/// other than 1 (`NotClosing`); then
 /// `ProfileAlongPath`; then for each path segment in order a frame law
 /// undefined along it (`FrameUndefined`) or a profile that would fold
 /// (`PathTooCurved`); then, once the body is built, two faces that meet
 /// away from their shared edges (`SelfIntersecting`) or whose meeting
 /// can't be certified (`Uncertain`), the first pair in face order.
 ///
-/// Faces: a side per profile segment and path segment, a cap at each end.
+/// Faces: a side per profile segment and path segment, and a cap at each
+/// end of an open path. Round a closed path there are no caps: each loop
+/// of the profile sweeps a tube, a lump's outer loop its solid's outer
+/// shell and each hole a cavity, and a minimal frame's turn round the
+/// path is twisted away, spread over it like the twist.
 /// Names come from `key` and the caller's keys ([`SweepRole`]): a side
 /// from its profile segment and its path segment, a section between two
 /// legs' sides from both sides, a lateral from the profile segments
@@ -90,7 +98,12 @@ pub fn along(
         return Err(SweepError::BadScale.into());
     }
     if path.closed {
-        return Err(SweepError::NotClosing.into());
+        // The profile must come back to itself: whole turns of twist, and
+        // no scale.
+        let turns = (opts.twist / TAU).round();
+        if opts.scale != 1.0 || (opts.twist - turns * TAU).abs() > ANGULAR_RESOLUTION {
+            return Err(SweepError::NotClosing.into());
+        }
     }
     let first = &path.segments[0];
     let t0 = first
@@ -108,7 +121,21 @@ pub fn along(
     // plane along its normal.
     let c0 = first.curve.point(first.range[0]);
     let o = c0 - frame.z().get() * frame.to_local(c0).z;
-    let legs = legs(profile, &path, opts, o)?;
+    let mut legs = legs(profile, &path, opts, o)?;
+    if path.closed {
+        // Round a closed path a minimal frame comes back turned: that
+        // turn is taken away by twisting the other way, spread over the
+        // path like the twist asked for.
+        let (start, end) = (legs[0].start.axes, legs[legs.len() - 1].end.axes);
+        let spin = turned(start, end);
+        if spin != 0.0 {
+            let twisted = AlongOptions {
+                twist: opts.twist - spin,
+                ..*opts
+            };
+            legs = self::legs(profile, &path, &twisted, o)?;
+        }
+    }
     let mut b = Body::new();
     let mut keys = Keys::new(key);
     let namer = Namer::new("along", key);
@@ -120,7 +147,11 @@ pub fn along(
         law: opts.law,
     };
     for lump in profile.lumps() {
-        carried.sweep(&mut b, &mut keys, &namer, lump)?;
+        if path.closed {
+            carried.sweep_closed(&mut b, &mut keys, &namer, lump)?;
+        } else {
+            carried.sweep(&mut b, &mut keys, &namer, lump)?;
+        }
     }
     let journal = namer.finish(&mut b)?;
     self_check(&b)?;
