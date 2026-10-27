@@ -589,8 +589,13 @@ impl Search<'_> {
             // `E` within the tolerance over the whole box: every point of
             // the curve over its stretch has one of the surface that close
             // (where a path can't be followed, at a corner of the domain).
+            // Only at a bounded edge of the domain: elsewhere a curve lying
+            // on the surface whose path can't be bounded would take every
+            // box beside it this way, and end uncertain only once the
+            // budget runs out.
             let bound = tol / 3f64.sqrt();
-            if c.e.iter().all(|&x| x.lo() >= -bound && x.hi() <= bound) {
+            if self.at_domain_edge(cell) && c.e.iter().all(|&x| x.lo() >= -bound && x.hi() <= bound)
+            {
                 out.push(Candidate {
                     t: cell[0],
                     simple: None,
@@ -632,6 +637,19 @@ impl Search<'_> {
             self.search(c, depth + 1, budget, out)?;
         }
         Ok(())
+    }
+
+    /// Whether a box's surface parameters reach a bounded edge of the
+    /// surface's domain (a direction that isn't periodic).
+    fn at_domain_edge(&self, cell: Box3p) -> bool {
+        let domain = self.surface.domain();
+        let (pu, pv) = self.surface.periods();
+        [(1, pu), (2, pv)].into_iter().any(|(k, period)| {
+            let d = domain[k - 1];
+            period.is_none()
+                && ((d[0].is_finite() && cell[k][0] <= d[0])
+                    || (d[1].is_finite() && cell[k][1] >= d[1]))
+        })
     }
 
     /// Whether `E` over a box is certified longer than the tolerance by
