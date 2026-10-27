@@ -12,6 +12,7 @@ pub mod endpoint;
 pub mod fresh;
 pub mod live;
 pub mod notify;
+pub mod prefs;
 pub mod rpc;
 
 use serde::Serialize;
