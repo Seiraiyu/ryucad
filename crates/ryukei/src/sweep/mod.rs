@@ -6,18 +6,24 @@
 //! touching, certified) and nests its loops into lumps with holes.
 //! [`extrude`] and [`revolve`] sweep it into a solid per lump.
 
+mod along;
 mod area;
 mod build;
 mod capped;
 mod extrude;
+mod loft;
 mod names;
 mod nest;
+mod path;
 mod place;
 mod profile;
 mod revolve;
 mod separate;
 
+pub use along::{AlongOptions, along};
 pub use extrude::extrude;
+pub use loft::{LoftOptions, Tangent, loft};
+pub use path::{Path, PathSegment};
 pub use profile::{Loop, LoopKey, Lump, Profile, Segment, SegmentKey, ValidLoop, ValidProfile};
 pub use revolve::revolve;
 

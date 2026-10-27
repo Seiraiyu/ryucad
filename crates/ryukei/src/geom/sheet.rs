@@ -12,9 +12,14 @@
 
 use super::bound2::{IVec3, trig_box};
 use super::jet::{self, JVec, Jet, Num};
-use super::{Extrusion, NurbsSurface, Pipe, Point3, Revolution, Surface, SurfaceEval, Vector3};
+use super::{
+    Extrusion, NurbsSurface, Pipe, Point3, Revolution, Surface, SurfaceEval, Sweep, Vector3,
+};
 use crate::interval::Interval;
 use crate::math;
+
+mod nearest;
+pub(crate) use nearest::{krawczyk2, nearest};
 
 /// A surface over jets.
 #[derive(Clone, Copy, Debug)]
@@ -24,6 +29,7 @@ pub(crate) enum Sheet<'a> {
     Nurbs(&'a NurbsSurface),
     Extrusion(&'a Extrusion),
     Revolution(&'a Revolution),
+    Sweep(&'a Sweep),
 }
 
 /// Jets from a value and its derivatives, one per coordinate:
@@ -55,6 +61,7 @@ impl<'a> Sheet<'a> {
             Surface::Nurbs(n) => Self::Nurbs(n),
             Surface::Extrusion(e) => Self::Extrusion(e),
             Surface::Revolution(r) => Self::Revolution(r),
+            Surface::Sweep(w) => Self::Sweep(w),
             Surface::Plane(_)
             | Surface::Cylinder(_)
             | Surface::Cone(_)
@@ -93,6 +100,7 @@ impl<'a> Sheet<'a> {
                 let c = r.curve().jet_box(rv);
                 Some(revolved(r, c, trig_box(ru)))
             }
+            Self::Sweep(w) => w.jet_box([ru, rv]),
         }
     }
 
@@ -115,6 +123,7 @@ impl<'a> Sheet<'a> {
             Self::Nurbs(n) => from_eval(&n.eval(u, v)),
             Self::Extrusion(e) => from_eval(&e.eval(u, v)),
             Self::Revolution(r) => from_eval(&r.eval(u, v)),
+            Self::Sweep(w) => w.jets_at(u, v),
         }
     }
 
@@ -125,6 +134,7 @@ impl<'a> Sheet<'a> {
             Self::Nurbs(n) => n.point(u, v),
             Self::Extrusion(e) => e.point(u, v),
             Self::Revolution(r) => r.point(u, v),
+            Self::Sweep(w) => w.point(u, v),
         }
     }
 }

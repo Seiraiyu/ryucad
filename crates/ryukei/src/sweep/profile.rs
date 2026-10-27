@@ -168,6 +168,14 @@ impl ValidProfile {
         &self.frame
     }
 
+    /// The same profile with its frame moved by `r`.
+    pub(super) fn moved(&self, r: &crate::geom::Rigid) -> Self {
+        Self {
+            frame: self.frame.transformed(r),
+            lumps: self.lumps.clone(),
+        }
+    }
+
     /// The lumps, in the order of their outer loops in the input.
     pub fn lumps(&self) -> &[Lump] {
         &self.lumps

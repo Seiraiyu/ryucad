@@ -27,6 +27,17 @@ impl Namer {
         )
     }
 
+    /// The stand-in for a path segment's key.
+    pub(crate) fn path_segment(&self, b: &mut Body, key: u128) -> Name {
+        let caller = [Name::from_u128(key)];
+        b.derive_name(
+            self.kind,
+            self.key,
+            Role::Sweep(SweepRole::PathSegment),
+            &caller,
+        )
+    }
+
     /// The stand-in for a loop's key.
     pub(crate) fn loop_(&self, b: &mut Body, key: u128) -> Name {
         let caller = [Name::from_u128(key)];

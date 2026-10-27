@@ -124,6 +124,25 @@ pub(crate) fn surface(s: &Surface) -> String {
             curve(p.spine()),
             surface(p.anchor())
         ),
+        Surface::Sweep(w) => {
+            let law = match w.law() {
+                crate::geom::FrameLaw::Minimal => "minimal".to_owned(),
+                crate::geom::FrameLaw::Binormal(b) => {
+                    let b = b.get();
+                    format!("binormal={},{},{}", bits(b.x), bits(b.y), bits(b.z))
+                }
+            };
+            format!(
+                "sweep profile={} over={} path={} over={} start=({}) {law} twist={} scale={}",
+                curve(w.profile()),
+                floats(&w.profile_range()),
+                curve(w.path()),
+                floats(&w.path_range()),
+                frame(w.start()),
+                bits(w.twist()),
+                bits(w.scale())
+            )
+        }
     }
 }
 

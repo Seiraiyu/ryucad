@@ -41,6 +41,54 @@ pub struct SurfaceBound {
     pub turn_v: f64,
 }
 
+/// No bound at all: for a box over which nothing can be enclosed.
+pub(crate) const INFINITE_BOUND: SurfaceBound = SurfaceBound {
+    duu: f64::INFINITY,
+    duv: f64::INFINITY,
+    dvv: f64::INFINITY,
+    turn_u: f64::INFINITY,
+    turn_v: f64::INFINITY,
+};
+
+/// Bounds from enclosures of a surface's jets over a box: the second
+/// derivatives' lengths, and the unit normal's turning rates, `|N_u| <=
+/// |(S_u × S_v)_u| / |S_u × S_v|` and likewise along `v` (a unit vector
+/// `w / |w|` turns no faster than `|w'| / |w|`). Infinite turning where
+/// `S_u × S_v` may vanish.
+pub(crate) fn from_jets(q: &super::jet::JVec<Interval>) -> SurfaceBound {
+    let part = |f: &dyn Fn(&super::jet::Jet<Interval>) -> Interval| -> IVec3 {
+        [f(&q[0]), f(&q[1]), f(&q[2])]
+    };
+    let cross = |a: IVec3, b: IVec3| -> IVec3 {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let add = |a: IVec3, b: IVec3| -> IVec3 { core::array::from_fn(|k| a[k] + b[k]) };
+    let square = |a: IVec3| a[0].square() + a[1].square() + a[2].square();
+    let hi = |a: IVec3| math::sqrt(square(a).hi()) * SLACK;
+    let (su, sv) = (part(&|j| j.d[0]), part(&|j| j.d[1]));
+    let (suu, suv, svv) = (part(&|j| j.h[0]), part(&|j| j.h[1]), part(&|j| j.h[2]));
+    let n = cross(su, sv);
+    let low = square(n).lo();
+    let turn = |w: IVec3| {
+        if low > 0.0 {
+            hi(w) / (math::sqrt(low) / SLACK)
+        } else {
+            f64::INFINITY
+        }
+    };
+    SurfaceBound {
+        duu: hi(suu),
+        duv: hi(suv),
+        dvv: hi(svv),
+        turn_u: turn(add(cross(suu, sv), cross(su, suv))),
+        turn_v: turn(add(cross(suv, sv), cross(su, svv))),
+    }
+}
+
 /// The least and greatest of `cos` over `[a, b]`.
 pub(crate) fn cos_range([a, b]: [f64; 2]) -> (f64, f64) {
     if !(a.is_finite() && b.is_finite()) {
@@ -261,6 +309,7 @@ impl Surface {
             Self::Extrusion(e) => e.derivative_bound([ru, rv]),
             Self::Revolution(r) => r.derivative_bound([ru, rv]),
             Self::Pipe(p) => p.derivative_bound([ru, rv]),
+            Self::Sweep(s) => s.derivative_bound([ru, rv]),
         }
     }
 }

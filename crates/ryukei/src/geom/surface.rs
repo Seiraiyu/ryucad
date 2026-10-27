@@ -3,7 +3,7 @@ use super::{
     Box3, Frame, Mirror, Point2, Point3, PrincipalCurvatures, Projection, Rigid, SurfaceEval,
     UnitVector3, Vector2, Vector3, polar_angle,
 };
-use super::{Curve2, Extrusion, NurbsSurface, Pipe, Revolution};
+use super::{Curve2, Extrusion, NurbsSurface, Pipe, Revolution, Sweep};
 use crate::Error;
 use crate::math;
 use crate::tol::ANGULAR_RESOLUTION;
@@ -31,6 +31,7 @@ pub enum Surface {
     Extrusion(Arc<Extrusion>),
     Revolution(Arc<Revolution>),
     Pipe(Arc<Pipe>),
+    Sweep(Arc<Sweep>),
 }
 
 /// How a mirrored surface ([`Surface::mirrored`]) maps its parameter
@@ -221,7 +222,11 @@ impl Surface {
             Self::Cone(s) => Some(&s.frame),
             Self::Sphere(s) => Some(&s.frame),
             Self::Torus(s) => Some(&s.frame),
-            Self::Nurbs(_) | Self::Extrusion(_) | Self::Revolution(_) | Self::Pipe(_) => None,
+            Self::Nurbs(_)
+            | Self::Extrusion(_)
+            | Self::Revolution(_)
+            | Self::Pipe(_)
+            | Self::Sweep(_) => None,
         }
     }
 
@@ -249,6 +254,7 @@ impl Surface {
             Self::Extrusion(e) => e.point(u, v),
             Self::Revolution(r) => r.point(u, v),
             Self::Pipe(p) => p.point(u, v),
+            Self::Sweep(s) => s.point(u, v),
         }
     }
 
@@ -320,6 +326,7 @@ impl Surface {
             Self::Extrusion(e) => e.eval(u, v),
             Self::Revolution(r) => r.eval(u, v),
             Self::Pipe(p) => p.eval(u, v),
+            Self::Sweep(s) => s.eval(u, v),
         }
     }
 
@@ -343,6 +350,7 @@ impl Surface {
             Self::Extrusion(e) => return e.surface_normal(u),
             Self::Revolution(r) => return r.surface_normal(u, v),
             Self::Pipe(p) => return p.normal(u, v),
+            Self::Sweep(s) => return s.normal(u, v),
             Self::Plane(s) => s.frame.z(),
             Self::Cylinder(s) => UnitVector3::new_unchecked(s.frame.radial(u)),
             Self::Cone(s) => {
@@ -382,6 +390,7 @@ impl Surface {
             Self::Extrusion(e) => e.domain(),
             Self::Revolution(r) => r.domain(),
             Self::Pipe(p) => p.domain(),
+            Self::Sweep(s) => s.domain(),
         }
     }
 
@@ -395,6 +404,7 @@ impl Surface {
             Self::Extrusion(e) => (e.curve().period(), None),
             Self::Revolution(r) => (Some(TAU), r.curve().period()),
             Self::Pipe(p) => p.periods(),
+            Self::Sweep(s) => s.periods(),
         }
     }
 
@@ -410,6 +420,7 @@ impl Surface {
             Self::Torus(_) => Some(1),
             Self::Revolution(r) => r.closed_genus(),
             Self::Pipe(p) => p.closed_genus(),
+            Self::Sweep(s) => s.closed_genus(),
             Self::Plane(_)
             | Self::Cylinder(_)
             | Self::Cone(_)
@@ -454,6 +465,7 @@ impl Surface {
             Self::Extrusion(e) => e.project(p).distance,
             Self::Revolution(r) => r.project(p).distance,
             Self::Pipe(s) => s.project(p).distance,
+            Self::Sweep(s) => s.project(p).distance,
         }
     }
 
@@ -469,6 +481,7 @@ impl Surface {
             Self::Extrusion(e) => return e.project(p),
             Self::Revolution(r) => return r.project(p),
             Self::Pipe(s) => return s.project(p),
+            Self::Sweep(s) => return s.project(p),
             Self::Plane(Plane { frame })
             | Self::Cylinder(Cylinder { frame, .. })
             | Self::Cone(Cone { frame, .. })
@@ -500,6 +513,7 @@ impl Surface {
             Self::Nurbs(n) => n.bounds(),
             Self::Revolution(r) => r.bounds(),
             Self::Pipe(p) => p.bounds(),
+            Self::Sweep(s) => s.bounds(),
         }
     }
 
@@ -518,9 +532,11 @@ impl Surface {
             }
             Self::Sphere(_) => (u, math::atan2(q.z, rho)),
             Self::Torus(s) => (u, polar_angle(q.z, rho - s.major)),
-            Self::Nurbs(_) | Self::Extrusion(_) | Self::Revolution(_) | Self::Pipe(_) => {
-                self.project(p).param
-            }
+            Self::Nurbs(_)
+            | Self::Extrusion(_)
+            | Self::Revolution(_)
+            | Self::Pipe(_)
+            | Self::Sweep(_) => self.project(p).param,
         }
     }
 
@@ -557,7 +573,9 @@ impl Surface {
                 Cone::new(f, s.radius + d * s.cos, s.half_angle).map(Self::Cone)
             }
             Self::Pipe(p) => p.offset(d).map(|p| Self::Pipe(Arc::new(p))),
-            Self::Nurbs(_) | Self::Extrusion(_) | Self::Revolution(_) => return None,
+            Self::Nurbs(_) | Self::Extrusion(_) | Self::Revolution(_) | Self::Sweep(_) => {
+                return None;
+            }
         })
     }
 
@@ -574,6 +592,7 @@ impl Surface {
             Self::Extrusion(e) => return Self::Extrusion(Arc::new(e.transformed(r))),
             Self::Revolution(s) => return Self::Revolution(Arc::new(s.transformed(r))),
             Self::Pipe(p) => return Self::Pipe(Arc::new(p.transformed(r))),
+            Self::Sweep(s) => return Self::Sweep(Arc::new(s.transformed(r))),
         };
         *frame = frame.transformed(r);
         out
@@ -609,6 +628,7 @@ impl Surface {
                 ));
             }
             Self::Pipe(p) => return Ok((Self::Pipe(Arc::new(p.mirrored(m)?)), ParamFlip::V(0.0))),
+            Self::Sweep(s) => return Ok((Self::Sweep(Arc::new(s.mirrored(m)?)), ParamFlip::Kept)),
         };
         *frame = m.frame_reversed(frame)?;
         Ok((out, flip))

@@ -2,7 +2,7 @@
 //! capped sweep, built, and named.
 
 use super::build::{
-    self, Keys, LoopBuilt, LoopPlan, LumpBuilt, LumpPlan, SegmentPlan, Span, VertexPlan,
+    self, Keys, LoopBuilt, LoopPlan, LumpBuilt, LumpPlan, Ring, SegmentPlan, Span, VertexPlan,
 };
 use super::names::Namer;
 use super::place;
@@ -54,26 +54,26 @@ impl Layout {
 }
 
 /// The loops of a lump: the outer loop, then the holes.
-fn loops(lump: &Lump) -> impl Iterator<Item = &ValidLoop> {
+pub(super) fn loops(lump: &Lump) -> impl Iterator<Item = &ValidLoop> {
     core::iter::once(&lump.outer).chain(&lump.holes)
 }
 
 /// A loop of one closed segment.
-fn closed(lp: &ValidLoop) -> bool {
+pub(super) fn closed(lp: &ValidLoop) -> bool {
     lp.segments.len() == 1
 }
 
 /// Whether a closed loop's curve, by increasing parameter, runs
 /// counterclockwise about the profile's normal. The loop itself runs
 /// counterclockwise when it is an outer loop.
-fn curve_ccw(lp: &ValidLoop, outer: bool) -> bool {
+pub(super) fn curve_ccw(lp: &ValidLoop, outer: bool) -> bool {
     let s = &lp.segments[0];
     (s.t1 > s.t0) == outer
 }
 
 /// The profile plane's outward direction from a segment: its right, as
 /// the loop runs (the region is on the left of every loop).
-fn outward(frame: &Frame, s: &Segment) -> (Point3, Vector3) {
+pub(super) fn outward(frame: &Frame, s: &Segment) -> (Point3, Vector3) {
     let mut t = 0.5;
     loop {
         let at = s.t0 + (s.t1 - s.t0) * t;
@@ -100,7 +100,7 @@ pub(crate) fn sense_of(surface: &Surface, frame: &Frame, s: &Segment) -> Sense {
 
 /// A cap's plane: the profile's plane moved by `at`, facing `outward`
 /// times the profile's normal.
-fn cap(frame: &Frame, at: &Rigid, outward: f64) -> Result<Surface, Error> {
+pub(super) fn cap(frame: &Frame, at: &Rigid, outward: f64) -> Result<Surface, Error> {
     let moved = frame.transformed(at);
     let z = moved.z().get() * outward;
     let f = Frame::new(moved.origin(), z, moved.x().get())?;
@@ -143,6 +143,7 @@ pub(crate) fn plan(
         let fwd = outer == (sign > 0.0);
         forward.push(fwd);
         let n = lp.segments.len();
+        let (mut near_spans, mut points) = (Vec::with_capacity(n), Vec::with_capacity(n));
         let mut segments = Vec::with_capacity(n);
         let mut vertices = Vec::with_capacity(n);
         for k in 0..n {
@@ -168,7 +169,8 @@ pub(crate) fn plan(
             } else {
                 near
             };
-            segments.push(SegmentPlan { near, far, side });
+            near_spans.push(near);
+            segments.push(SegmentPlan { far, side });
             let i = if fwd { k } else { (n - k) % n };
             let p = lp.vertices[i];
             let at = place::point(frame, p);
@@ -177,16 +179,17 @@ pub(crate) fn plan(
             } else {
                 Some(span(b, motion.lateral(frame, p, !near_is_start)?))
             };
+            points.push(near_at.apply_point(at));
             vertices.push(VertexPlan {
-                near: near_at.apply_point(at),
                 far: far_at.apply_point(at),
                 lateral,
             });
         }
         let ccw = closed(lp) && curve_ccw(lp, outer) == (sign > 0.0);
         plans.push(LoopPlan {
-            segments,
-            vertices,
+            near: near_spans,
+            points,
+            rings: vec![Ring { segments, vertices }],
             closed: closed(lp),
             ccw,
         });
@@ -236,13 +239,17 @@ fn tolerances(b: &mut Body, lump: &Lump, layout: &Layout, built: &LumpBuilt) -> 
         let n = lp.segments.len();
         for k in 0..m.near_vertices.len() {
             let tol = Tolerance::new(lp.tolerances[layout.vertex(l, k, n)])?;
-            for v in [m.near_vertices[k], m.far_vertices[k]] {
+            let vertices = core::iter::once(m.near_vertices[k])
+                .chain(m.rings.iter().map(|r| r.far_vertices[k]));
+            for v in vertices {
                 if b.vertices[v].tolerance.get() < tol.get() {
                     b.vertices[v].tolerance = tol;
                 }
             }
-            if let Some(e) = m.laterals[k] {
-                b.edges[e].tolerance = tol;
+            for r in &m.rings {
+                if let Some(e) = r.laterals[k] {
+                    b.edges[e].tolerance = tol;
+                }
             }
         }
     }
@@ -301,9 +308,10 @@ fn name_loop(
     caps: [Name; 2],
     vertex_roles: [SweepRole; 2],
 ) {
+    let (ring, (far, far_vertices)) = (&m.rings[0], m.far());
     for k in 0..n {
         let seg = segs[layout.segment(l, k, n)];
-        match m.sides[k] {
+        match ring.sides[k] {
             Some(face) => {
                 let side = namer.name(b, EntityId::Face(face), SweepRole::Side, &[seg]);
                 namer.name(
@@ -314,7 +322,7 @@ fn name_loop(
                 );
                 namer.name(
                     b,
-                    EntityId::Edge(m.far[k]),
+                    EntityId::Edge(far[k]),
                     SweepRole::CapEdge,
                     &[caps[1], side],
                 );
@@ -324,14 +332,13 @@ fn name_loop(
             }
         }
     }
-    for k in 0..m.near_vertices.len() {
+    for (k, (&near, &far)) in m.near_vertices.iter().zip(far_vertices).enumerate() {
         // The profile vertex between the loop's segments i - 1 and i.
         let i = layout.vertex(l, k, n);
         let pair = [segs[(i + n - 1) % n], segs[i]];
-        if let Some(e) = m.laterals[k] {
+        if let Some(e) = ring.laterals[k] {
             namer.name(b, EntityId::Edge(e), SweepRole::Lateral, &pair);
         }
-        let (near, far) = (m.near_vertices[k], m.far_vertices[k]);
         if near == far {
             namer.name(b, EntityId::Vertex(near), SweepRole::Vertex, &pair);
         } else {

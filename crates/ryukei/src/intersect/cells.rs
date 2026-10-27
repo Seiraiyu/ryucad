@@ -31,6 +31,7 @@ pub(crate) fn cells(s: &Surface, near: &Box3) -> Vec<Cell> {
         }
         Surface::Revolution(r) => (parts([0.0, TAU], 8), pieces(r.curve())),
         Surface::Pipe(p) => (pieces(p.spine()), parts(dv, 8)),
+        Surface::Sweep(w) => return reaching(s, w.cells(), near),
         _ => {
             let f = s.frame().expect("an analytic surface");
             let o = f.origin().to_vector();

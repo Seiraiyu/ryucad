@@ -196,10 +196,17 @@ fn shared_edges(body: &Body, a: FaceId, b: FaceId) -> Vec<EdgeId> {
     out
 }
 
-/// Whether two faces meet tangentially along an edge they share: their
-/// surfaces' normals are parallel, within a millionth of a radian, at
-/// the middle of one of them. This only chooses how the pair is checked; both
-/// ways are certified.
+/// How far apart two faces' normals may be at an edge they share for them
+/// to be certified apart beside it before being traced: a hundredth of a
+/// radian. Surfaces meeting at a crease that slight (a sweep twisted
+/// across a joint where its path's curvature jumps) are as hard to trace
+/// as tangent ones, and as easy to keep apart.
+const NEARLY_TANGENT: f64 = 1e-2;
+
+/// Whether two faces meet tangentially, or nearly, along an edge they
+/// share: their surfaces' normals are parallel, within
+/// [`NEARLY_TANGENT`], at the middle of one of them. This only chooses how
+/// the pair is checked; both ways are certified.
 fn tangent(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId]) -> bool {
     shared.iter().any(|&e| {
         let x = &body.edges[e];
@@ -210,7 +217,7 @@ fn tangent(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId]) -> bool {
             s.normal(u, v)
         };
         match (normal(a), normal(b)) {
-            (Some(na), Some(nb)) => na.get().cross(nb.get()).length() <= 1e-6,
+            (Some(na), Some(nb)) => na.get().cross(nb.get()).length() <= NEARLY_TANGENT,
             _ => false,
         }
     })

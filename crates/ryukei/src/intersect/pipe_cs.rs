@@ -28,6 +28,7 @@
 use super::Failure;
 use super::cs::{CurveHit, Side};
 use crate::geom::bound2::IVec3;
+use crate::geom::sheet::krawczyk2 as krawczyk;
 use crate::geom::{Curve, Pipe, Point3, Surface};
 use crate::interval::Interval;
 use crate::predicates::Sign;
@@ -117,45 +118,6 @@ struct Candidate {
     t: [f64; 2],
     s: [f64; 2],
     simple: Option<bool>,
-}
-
-/// Krawczyk's test for a zero of two functions over a cell, from their
-/// values at its middle and their Jacobian over it: `Some(true)` for
-/// exactly one, `Some(false)` for none, `None` undecided.
-fn krawczyk(at: [Iv; 2], jac: [[Iv; 2]; 2], cell: [[f64; 2]; 2]) -> Option<bool> {
-    let p = Iv::point;
-    let mid = |x: Iv| (x.lo() + x.hi()) / 2.0;
-    let [[t0, t1], [s0, s1]] = cell;
-    let m = jac.map(|r| r.map(mid));
-    let det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
-    if det == 0.0 || !det.is_finite() {
-        return None;
-    }
-    let y = [
-        [m[1][1] / det, -m[0][1] / det],
-        [-m[1][0] / det, m[0][0] / det],
-    ];
-    let x = [(t0 + t1) / 2.0, (s0 + s1) / 2.0];
-    let boxes = [Iv::new(t0, t1)? - p(x[0]), Iv::new(s0, s1)? - p(x[1])];
-    let (mut inside, mut apart) = (true, false);
-    for row in 0..2 {
-        let mut k = p(x[row]) - (p(y[row][0]) * at[0] + p(y[row][1]) * at[1]);
-        for (col, &b) in boxes.iter().enumerate() {
-            let ident = if row == col { 1.0 } else { 0.0 };
-            let e = p(ident) - (p(y[row][0]) * jac[0][col] + p(y[row][1]) * jac[1][col]);
-            k = k + e * b;
-        }
-        let [lo, hi] = cell[row];
-        inside &= k.lo() > lo && k.hi() < hi;
-        apart |= k.hi() < lo || k.lo() > hi;
-    }
-    if apart {
-        Some(false)
-    } else if inside {
-        Some(true)
-    } else {
-        None
-    }
 }
 
 /// Enclosures of `E`, its Jacobian, and of `|c'|` from below, over a

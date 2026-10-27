@@ -13,6 +13,7 @@ mod project;
 mod project_surface;
 mod refine;
 mod ruled;
+pub(crate) mod skin;
 mod surface;
 
 pub use basis::Basis;

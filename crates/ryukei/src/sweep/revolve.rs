@@ -67,7 +67,7 @@ enum Contact {
 }
 
 /// A revolve's motion, and the axis in the profile's plane.
-struct Turn {
+pub(super) struct Turn {
     /// The axis in model space, moved into the profile's plane.
     origin: Point3,
     dir: UnitVector3,
@@ -87,7 +87,12 @@ struct Turn {
 }
 
 impl Turn {
-    fn new(profile: &ValidProfile, axis: Axis, start: f64, end: f64) -> Result<Self, Error> {
+    pub(super) fn new(
+        profile: &ValidProfile,
+        axis: Axis,
+        start: f64,
+        end: f64,
+    ) -> Result<Self, Error> {
         if !(start.is_finite() && end.is_finite()) {
             return Err(Error::NonFinite);
         }

@@ -27,8 +27,11 @@ pub enum Error {
     /// A sweep profile that is not a valid planar region: see
     /// [`crate::sweep::ValidProfile::new`].
     InvalidProfile(ProfileError),
-    /// Extrude or revolve parameters that don't fit the profile.
+    /// Extrude or revolve parameters that don't fit the profile, or a path
+    /// a profile can't be swept along.
     InvalidSweep(SweepError),
+    /// Sections that can't be lofted: see [`crate::sweep::loft`].
+    InvalidLoft(LoftError),
     /// An edge with no exact pcurve on a face it bounds: see
     /// [`crate::pcurve::exact`].
     NoPcurve { edge: EdgeId, face: FaceId },
@@ -249,6 +252,7 @@ impl fmt::Display for Error {
             }
             Self::InvalidProfile(p) => write!(f, "invalid profile: {p}"),
             Self::InvalidSweep(e) => write!(f, "invalid sweep: {e}"),
+            Self::InvalidLoft(e) => write!(f, "invalid loft: {e}"),
             Self::NoPcurve { edge, face } => write!(
                 f,
                 "edge {} has no exact pcurve on face {}",
@@ -302,8 +306,9 @@ impl fmt::Display for ProfileError {
     }
 }
 
-/// Why an extrude or a revolve refused its parameters. Segments and loops
-/// are named by the caller's keys.
+/// Why an extrude, a revolve or a sweep along a path refused its
+/// parameters. Segments and loops are named by the caller's keys (a
+/// path's segments by theirs), faces by their names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SweepError {
     /// An extrude direction within [`crate::tol::ANGULAR_RESOLUTION`] of
@@ -325,6 +330,117 @@ pub enum SweepError {
     PinchedOnAxis { segment: SegmentKey },
     /// The swept solid would leave the size box.
     OutsideSizeBox,
+    /// A sweep along a path with no segments.
+    EmptyPath,
+    /// A path segment that can't be swept along: its range is empty or
+    /// runs backwards, leaves a clamped curve's domain or is longer than
+    /// a period; it is shorter than resolution; its key is the key of an
+    /// earlier one; it is a whole period in a path of more than one
+    /// segment; or it is a closed path's one clamped curve, which can't
+    /// be made periodic.
+    BadPathSegment { segment: SegmentKey },
+    /// The joint before `at` (or, at the first segment, a closed path's
+    /// last) where segments don't meet within resolution, or meet at an
+    /// angle more than [`crate::tol::ANGULAR_RESOLUTION`].
+    PathNotG1 { at: SegmentKey },
+    /// A profile whose plane is within
+    /// [`crate::tol::ANGULAR_RESOLUTION`] of the path's start tangent.
+    ProfileAlongPath,
+    /// A frame law undefined somewhere along `segment`: a binormal
+    /// direction the path's tangent runs along.
+    FrameUndefined { segment: SegmentKey },
+    /// The profile can't be swept along `segment` without folding: it
+    /// reaches past the path's centre of curvature, or the sweep can't be
+    /// certified regular.
+    PathTooCurved { segment: SegmentKey },
+    /// A scale that isn't a positive number.
+    BadScale,
+    /// A twist that isn't a whole number of turns, or a scale other than
+    /// 1, on a closed path: the profile wouldn't come back to itself.
+    NotClosing,
+    /// Two faces of the swept body that meet away from their shared
+    /// edges: the path brings the body back into itself.
+    SelfIntersecting { faces: [Name; 2] },
+    /// Two faces of the swept body whose meeting can't be certified, so
+    /// the body can't be checked: refused rather than guessed.
+    Uncertain { faces: [Name; 2] },
+}
+
+/// Why sections couldn't be lofted. Sections are numbered from 0, loops
+/// and segments named by the caller's keys (a segment by the first
+/// section's), faces by their names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoftError {
+    /// Fewer than two sections, or than three round a closed loft.
+    TooFewSections,
+    /// A section whose lumps and loops don't match the first's: a loop
+    /// the first has that it lacks, or one in another lump or role.
+    LoopMismatch { section: usize, loop_: LoopKey },
+    /// A section whose loop has another number of segments than the
+    /// first's.
+    SegmentCountMismatch { section: usize, loop_: LoopKey },
+    /// A section in the plane of the one before it, or facing the other
+    /// way from it.
+    BadSection { section: usize },
+    /// An end tangent that isn't finite and positive, points along its
+    /// section's plane, or is given for a closed loft.
+    BadTangent,
+    /// The skin's weights would fall to zero or below between sections.
+    BadWeights { loop_: LoopKey, segment: SegmentKey },
+    /// A closed loft of a loop of one closed curve: a face with no edges
+    /// on a spline, which no checker can bound yet.
+    ClosedTube { loop_: LoopKey },
+    /// Two faces of the lofted body that meet away from their shared
+    /// edges.
+    SelfIntersecting { faces: [Name; 2] },
+    /// Two faces of the lofted body whose meeting can't be certified.
+    Uncertain { faces: [Name; 2] },
+}
+
+impl fmt::Display for LoftError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooFewSections => f.write_str("too few sections"),
+            Self::LoopMismatch { section, loop_ } => {
+                write!(f, "section {section} doesn't match loop {:#x}", loop_.0)
+            }
+            Self::SegmentCountMismatch { section, loop_ } => write!(
+                f,
+                "section {section} has another number of segments in loop {:#x}",
+                loop_.0
+            ),
+            Self::BadSection { section } => {
+                write!(
+                    f,
+                    "section {section} lies in the plane before or faces back"
+                )
+            }
+            Self::BadTangent => f.write_str("an end tangent can't be used"),
+            Self::BadWeights { loop_, segment } => write!(
+                f,
+                "the skin's weights fall to zero along segment {:#x} of loop {:#x}",
+                segment.0, loop_.0
+            ),
+            Self::ClosedTube { loop_ } => {
+                write!(f, "loop {:#x} would loft into a closed tube", loop_.0)
+            }
+            Self::SelfIntersecting { faces: [a, b] } => {
+                write!(f, "faces {a} and {b} of the loft meet")
+            }
+            Self::Uncertain { faces: [a, b] } => {
+                write!(
+                    f,
+                    "where faces {a} and {b} of the loft meet could not be certified"
+                )
+            }
+        }
+    }
+}
+
+impl From<LoftError> for Error {
+    fn from(e: LoftError) -> Self {
+        Self::InvalidLoft(e)
+    }
 }
 
 impl fmt::Display for SweepError {
@@ -350,6 +466,33 @@ impl fmt::Display for SweepError {
                 )
             }
             Self::OutsideSizeBox => f.write_str("the sweep leaves the size box"),
+            Self::EmptyPath => f.write_str("the path has no segments"),
+            Self::BadPathSegment { segment } => {
+                write!(f, "path segment {:#x} can't be swept along", segment.0)
+            }
+            Self::PathNotG1 { at } => {
+                write!(f, "the path isn't smooth at the joint before {:#x}", at.0)
+            }
+            Self::ProfileAlongPath => f.write_str("the profile's plane runs along the path"),
+            Self::FrameUndefined { segment } => {
+                write!(f, "the frame law is undefined along {:#x}", segment.0)
+            }
+            Self::PathTooCurved { segment } => {
+                write!(f, "the profile would fold along {:#x}", segment.0)
+            }
+            Self::BadScale => f.write_str("the scale isn't positive"),
+            Self::NotClosing => {
+                f.write_str("the twist or scale doesn't bring the profile round a closed path")
+            }
+            Self::SelfIntersecting { faces: [a, b] } => {
+                write!(f, "faces {a} and {b} of the sweep meet")
+            }
+            Self::Uncertain { faces: [a, b] } => {
+                write!(
+                    f,
+                    "where faces {a} and {b} of the sweep meet could not be certified"
+                )
+            }
         }
     }
 }
