@@ -530,11 +530,9 @@ fn swept_and_lofted_bodies_come_back() {
         &LoftOptions::default(),
     )
     .unwrap();
-    // The tube is written, its face a NURBS periodic both ways; reading
-    // it back needs a spline face with no loops, which healing can't
-    // build until plan 8.C.
-    assert!(!one(&tube, &opts(LengthUnit::Meter)).is_empty());
-    for b in [bar, frustum] {
+    // The tube comes back as one face with no loops on a NURBS periodic
+    // both ways.
+    for b in [tube, bar, frustum] {
         let read = back(&one(&b, &opts(LengthUnit::Meter)));
         assert_eq!(read.faces().count(), b.faces().count());
         assert!(read.faces().all(|f| !matches!(

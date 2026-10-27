@@ -387,9 +387,6 @@ pub enum LoftError {
     BadTangent,
     /// The skin's weights would fall to zero or below between sections.
     BadWeights { loop_: LoopKey, segment: SegmentKey },
-    /// A closed loft of a loop of one closed curve: a face with no edges
-    /// on a spline, which no checker can bound yet.
-    ClosedTube { loop_: LoopKey },
     /// Two faces of the lofted body that meet away from their shared
     /// edges.
     SelfIntersecting { faces: [Name; 2] },
@@ -421,9 +418,6 @@ impl fmt::Display for LoftError {
                 "the skin's weights fall to zero along segment {:#x} of loop {:#x}",
                 segment.0, loop_.0
             ),
-            Self::ClosedTube { loop_ } => {
-                write!(f, "loop {:#x} would loft into a closed tube", loop_.0)
-            }
             Self::SelfIntersecting { faces: [a, b] } => {
                 write!(f, "faces {a} and {b} of the loft meet")
             }
