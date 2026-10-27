@@ -24,7 +24,7 @@ use super::cs::{CurveHit, curve_surface};
 use super::fit::fit_pcurve;
 use super::implicit::Implicit;
 use super::inface::{Place, point_in_face, point_in_face_near};
-use super::ss::{SurfaceHit, surface_surface};
+use super::ss::SurfaceHit;
 use crate::geom::intersect2::{Meet2, crossings};
 use crate::geom::{
     Box3, Circle, Circle2, Curve, Curve2, Ellipse2, Frame, Frame2, Line2, NurbsCurve2, Point2,
@@ -137,13 +137,22 @@ pub(crate) fn face_face_within(
         }
         _ => {}
     }
-    let hit = match surface_surface(sa, sb, &region) {
+    let hit = match super::ss::meet(sa, sb, &region, false) {
         // A trace can fail where the surfaces meet only outside the faces
         // (sides of one loft or sweep along their shared edge, which these
         // pieces of them no longer reach): faces certified apart over
-        // their own parameter boxes are apart.
-        Err(Failure::Uncertain) if super::beside::faces_apart(a, b, FACES_APART) => {
-            return Ok(FaceMeet::apart());
+        // their own parameter boxes are apart. Else, unless they meet along
+        // an edge or at a vertex they share (which the self-intersection
+        // check settles by `beside`), the surfaces carried past their
+        // domain edges are traced: a curve along one lies inside then.
+        Err(Failure::Uncertain) => {
+            if super::beside::faces_apart(a, b, FACES_APART) {
+                return Ok(FaceMeet::apart());
+            }
+            if sharing(a, b) {
+                return Err(Failure::Uncertain);
+            }
+            super::ss::meet(sa, sb, &region, true)?
         }
         other => other?,
     };
@@ -309,6 +318,21 @@ fn max_tolerance((body, face): (&Body, FaceId)) -> f64 {
             .max(body.vertices[edge.end].tolerance.get());
     }
     t
+}
+
+/// Whether two faces of one body share an edge or a vertex.
+fn sharing(a: (&Body, FaceId), b: (&Body, FaceId)) -> bool {
+    if !core::ptr::eq(a.0, b.0) {
+        return false;
+    }
+    let (ea, eb) = (edges(a), edges(b));
+    let ends = |es: &[EdgeId]| -> Vec<crate::topo::VertexId> {
+        es.iter()
+            .flat_map(|&e| [a.0.edges[e].start, a.0.edges[e].end])
+            .collect()
+    };
+    let va = ends(&ea);
+    ea.iter().any(|e| eb.contains(e)) || ends(&eb).iter().any(|v| va.contains(v))
 }
 
 /// A face's edges, each once, in loop order.

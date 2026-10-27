@@ -371,3 +371,109 @@ fn a_twisted_bar_through_a_torus() {
     let moved = torus.transformed(&place).unwrap();
     near(volume(&u) + volume(&i), volume(&bar) + volume(&moved));
 }
+
+/// A lofted frustum standing on a block, and sunk into it: its sides
+/// meet the block's top along their bottom sections, on their domain
+/// edges, where only the surfaces carried past their edges let the curve
+/// be traced.
+#[test]
+fn a_loft_standing_on_a_block() {
+    let (frustum, _) = loft(
+        OpKey(5),
+        &[
+            section(0.0, 0.0, square(10, 1.0)),
+            section(1.0, 0.3, square(20, 0.5)),
+        ],
+        &LoftOptions::default(),
+    )
+    .unwrap();
+    let block = primitive::block(OpKey(7), 2.0, 2.0, 1.0, &at(-1.0, -1.0, -1.0))
+        .unwrap()
+        .0;
+    let stood = run(BooleanOp::Unite, &block, &frustum, Rigid::IDENTITY);
+    near(volume(&stood), 4.0 + volume(&frustum));
+    let sunk = run(BooleanOp::Subtract, &block, &frustum, at(0.0, 0.0, -1.0));
+    near(volume(&sunk), 4.0 - volume(&frustum));
+}
+
+/// A square lofted to the same square turned 0.6 rad, cut by a block
+/// askew: pieces of neighbouring sides each keep part of the lateral
+/// between them, on both surfaces' domain edges, where only the surfaces
+/// carried past their edges let the curve be traced.
+#[test]
+fn a_twisted_loft_and_a_block_askew() {
+    let (a, b) = (0.797_453_677_911_375_4, 0.483_536_715_344_304_2);
+    let (loft_body, _) = loft(
+        OpKey(3),
+        &[
+            section(-b / 2.0, 0.0, square(10, a)),
+            section(b / 2.0, 0.6, square(20, a)),
+        ],
+        &LoftOptions::default(),
+    )
+    .unwrap();
+    let (c, d) = (1.161_879_922_437_770_3, 1.130_013_553_782_176_7);
+    let block = primitive::block(OpKey(2), c, d, 0.9, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let axis = Vector3::new(
+        -0.846_562_957_283_940_8,
+        0.658_569_882_747_791_5,
+        0.807_144_353_050_930_7,
+    )
+    .normalize()
+    .unwrap();
+    let place = at(
+        0.116_947_906_318_439_21,
+        0.137_386_562_224_437_35,
+        -0.239_626_038_190_942_3,
+    )
+    .then_after(&Rigid::rotation(axis, 1.509_225_504_905_252))
+    .then_after(&at(-c / 2.0, -d / 2.0, -0.45));
+    let u = run(BooleanOp::Unite, &loft_body, &block, place);
+    let i = run(BooleanOp::Intersect, &loft_body, &block, place);
+    let s = run(BooleanOp::Subtract, &loft_body, &block, place);
+    let (vu, vi, vs) = (volume(&u), volume(&i), volume(&s));
+    near(vs + vi, volume(&loft_body));
+    near(vu, vs + c * d * 0.9);
+}
+
+/// Neighbouring sides of a twisted loft meet along their lateral, which
+/// lies on both surfaces' domain edges: one branch, traced on the
+/// surfaces carried past them.
+#[test]
+fn neighbouring_loft_sides_meet_along_their_lateral() {
+    use ryukei::geom::Surface;
+    use ryukei::intersect::{SurfaceHit, face_box, surface_surface};
+    let (b, _) = loft(
+        OpKey(3),
+        &[
+            section(-0.5, 0.0, square(10, 1.0)),
+            section(0.5, 0.6, square(20, 1.0)),
+        ],
+        &LoftOptions::default(),
+    )
+    .unwrap();
+    let sides: Vec<_> = b
+        .faces()
+        .filter(|&f| {
+            matches!(
+                b.surface(b.face(f).unwrap().surface).unwrap(),
+                Surface::Nurbs(_)
+            )
+        })
+        .collect();
+    assert_eq!(sides.len(), 4);
+    for k in 0..4 {
+        let (fa, fb) = (sides[k], sides[(k + 1) % 4]);
+        let (sa, sb) = (
+            b.surface(b.face(fa).unwrap().surface).unwrap(),
+            b.surface(b.face(fb).unwrap().surface).unwrap(),
+        );
+        let region = face_box(&b, fa).union(&face_box(&b, fb)).grow(0.1);
+        let Ok(SurfaceHit::Meet { branches, .. }) = surface_surface(sa, sb, &region) else {
+            panic!("sides {k} and {}", (k + 1) % 4);
+        };
+        assert_eq!(branches.len(), 1);
+    }
+}
