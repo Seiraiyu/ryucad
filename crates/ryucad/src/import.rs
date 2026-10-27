@@ -1296,6 +1296,99 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn revisions_read_their_own_imported_bytes_and_diff_them() {
+        use crate::git::tests::git;
+        use crate::server::tests::call;
+        let (dir, mut s) = with_import(&occt("box_ap214.stp"), Some(("part 2", "part 2")));
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "a box"]);
+        let head = rebuild(&mut s)["hash"].clone();
+        // The file replaced by a taller box, and the feature with it, as
+        // importing it again will (plan 6.B).
+        let text = String::from_utf8(occt("box_ap214.stp")).unwrap();
+        let taller = text
+            .replace(",30.))", ",40.))")
+            .replace("(30.,0.)", "(40.,0.)");
+        std::fs::write(root.join("imports/f.step"), &taller).unwrap();
+        let path = root.join("parts/p/features/i.json");
+        let (old, new) = (
+            ImportFile::new(text.into_bytes()).blake3,
+            ImportFile::new(taller.into_bytes()).blake3,
+        );
+        let feature = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, feature.replace(&old, &new)).unwrap();
+        let v = call(&mut s, "diff", json!({})).unwrap();
+        assert_eq!(
+            v["imports"],
+            json!([{"path": "imports/f.step", "status": "changed", "from": old, "to": new}])
+        );
+        assert_eq!(
+            v["parts"]["p"]["features"]["i"]["changes"],
+            json!([{"at": "/file/blake3", "from": old, "to": new}])
+        );
+        let v = call(&mut s, "diff", json!({"model": true})).unwrap();
+        // What moved is new; the bottom, its four edges and its corners
+        // keep their names.
+        let body = &v["parts"]["p"]["features"]["i"]["model"]["body"];
+        let count = |kind: &str, how: &str| body[kind][how].as_array().map_or(0, Vec::len);
+        assert_eq!(
+            (count("faces", "new"), count("faces", "gone")),
+            (5, 5),
+            "{body}"
+        );
+        assert_eq!(
+            (count("edges", "new"), count("edges", "gone")),
+            (8, 8),
+            "{body}"
+        );
+        assert_eq!(
+            (count("vertices", "new"), count("vertices", "gone")),
+            (4, 4),
+            "{body}"
+        );
+        // HEAD still builds from HEAD's bytes.
+        let at = call(&mut s, "rebuild", json!({"part": "p", "rev": "HEAD"})).unwrap();
+        assert_eq!(at["parts"][0]["hash"], head);
+        assert_ne!(rebuild(&mut s)["hash"], head);
+    }
+
+    #[test]
+    fn check_finds_what_doctor_and_rebuild_find_of_imports() {
+        use crate::server::tests::call;
+        let (dir, mut s) = with_import(&occt("box_ap214.stp"), Some(("part 2", "part 2")));
+        let root = dir.path();
+        crate::drivers::write_attributes(root).unwrap();
+        s.reload().unwrap();
+        let v = call(&mut s, "check", json!({})).unwrap();
+        assert_eq!(
+            (&v["passed"], &v["findings"]),
+            (&json!(true), &json!([])),
+            "{v}"
+        );
+        std::fs::write(root.join("imports/f.step"), b"ISO-10303-21;").unwrap();
+        let e = call(&mut s, "check", json!({})).unwrap_err();
+        assert_eq!(e.code, Code::CheckFailed);
+        let codes: Vec<(&str, &str)> = e.details["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| {
+                (
+                    f["code"].as_str().unwrap(),
+                    f["source"].as_str().unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert!(
+            codes.contains(&("import_file_changed", "doctor")),
+            "{codes:?}"
+        );
+        assert!(codes.contains(&("feature_failed", "")), "{codes:?}");
+    }
+
+    #[test]
     fn failures_say_why_and_where() {
         let e = ImportError::DanglingReference {
             instance: 4,
