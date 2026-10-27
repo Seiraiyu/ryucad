@@ -30,6 +30,8 @@ pub enum Error {
     /// Extrude or revolve parameters that don't fit the profile, or a path
     /// a profile can't be swept along.
     InvalidSweep(SweepError),
+    /// Sections that can't be lofted: see [`crate::sweep::loft`].
+    InvalidLoft(LoftError),
     /// An edge with no exact pcurve on a face it bounds: see
     /// [`crate::pcurve::exact`].
     NoPcurve { edge: EdgeId, face: FaceId },
@@ -250,6 +252,7 @@ impl fmt::Display for Error {
             }
             Self::InvalidProfile(p) => write!(f, "invalid profile: {p}"),
             Self::InvalidSweep(e) => write!(f, "invalid sweep: {e}"),
+            Self::InvalidLoft(e) => write!(f, "invalid loft: {e}"),
             Self::NoPcurve { edge, face } => write!(
                 f,
                 "edge {} has no exact pcurve on face {}",
@@ -361,6 +364,83 @@ pub enum SweepError {
     /// Two faces of the swept body whose meeting can't be certified, so
     /// the body can't be checked: refused rather than guessed.
     Uncertain { faces: [Name; 2] },
+}
+
+/// Why sections couldn't be lofted. Sections are numbered from 0, loops
+/// and segments named by the caller's keys (a segment by the first
+/// section's), faces by their names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoftError {
+    /// Fewer than two sections, or than three round a closed loft.
+    TooFewSections,
+    /// A section whose lumps and loops don't match the first's: a loop
+    /// the first has that it lacks, or one in another lump or role.
+    LoopMismatch { section: usize, loop_: LoopKey },
+    /// A section whose loop has another number of segments than the
+    /// first's.
+    SegmentCountMismatch { section: usize, loop_: LoopKey },
+    /// A section in the plane of the one before it, or facing the other
+    /// way from it.
+    BadSection { section: usize },
+    /// An end tangent that isn't finite and positive, points along its
+    /// section's plane, or is given for a closed loft.
+    BadTangent,
+    /// The skin's weights would fall to zero or below between sections.
+    BadWeights { loop_: LoopKey, segment: SegmentKey },
+    /// A closed loft of a loop of one closed curve: a face with no edges
+    /// on a spline, which no checker can bound yet.
+    ClosedTube { loop_: LoopKey },
+    /// Two faces of the lofted body that meet away from their shared
+    /// edges.
+    SelfIntersecting { faces: [Name; 2] },
+    /// Two faces of the lofted body whose meeting can't be certified.
+    Uncertain { faces: [Name; 2] },
+}
+
+impl fmt::Display for LoftError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooFewSections => f.write_str("too few sections"),
+            Self::LoopMismatch { section, loop_ } => {
+                write!(f, "section {section} doesn't match loop {:#x}", loop_.0)
+            }
+            Self::SegmentCountMismatch { section, loop_ } => write!(
+                f,
+                "section {section} has another number of segments in loop {:#x}",
+                loop_.0
+            ),
+            Self::BadSection { section } => {
+                write!(
+                    f,
+                    "section {section} lies in the plane before or faces back"
+                )
+            }
+            Self::BadTangent => f.write_str("an end tangent can't be used"),
+            Self::BadWeights { loop_, segment } => write!(
+                f,
+                "the skin's weights fall to zero along segment {:#x} of loop {:#x}",
+                segment.0, loop_.0
+            ),
+            Self::ClosedTube { loop_ } => {
+                write!(f, "loop {:#x} would loft into a closed tube", loop_.0)
+            }
+            Self::SelfIntersecting { faces: [a, b] } => {
+                write!(f, "faces {a} and {b} of the loft meet")
+            }
+            Self::Uncertain { faces: [a, b] } => {
+                write!(
+                    f,
+                    "where faces {a} and {b} of the loft meet could not be certified"
+                )
+            }
+        }
+    }
+}
+
+impl From<LoftError> for Error {
+    fn from(e: LoftError) -> Self {
+        Self::InvalidLoft(e)
+    }
 }
 
 impl fmt::Display for SweepError {
