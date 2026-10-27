@@ -3094,3 +3094,68 @@ fn imports_from_the_cli() {
     p.fails(&["import", "../junk.step"], "step_unreadable", 1);
     p.fails(&["feature", "add", "block", "import"], "invalid_param", 1);
 }
+
+#[test]
+fn imported_assemblies_and_updates_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let occt = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data/occt");
+    let beside = p.direct.parent().unwrap();
+    let text = fs::read_to_string(occt.join("assembly.stp")).unwrap();
+    fs::write(beside.join("asm.stp"), &text).unwrap();
+    // XDE's assembly: a block placed twice and a pin.
+    let made = p.ok(&["import", "../asm.stp"]);
+    let parts: Vec<(&str, &str)> = made["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| (x["part"].as_str().unwrap(), x["kind"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        parts,
+        [("assembly", "assembly"), ("block", "part"), ("pin", "part")]
+    );
+    let tree = p.ok(&["assembly", "tree", "assembly"]);
+    assert_eq!(tree["instances"].as_array().unwrap().len(), 3, "{tree}");
+    // The pin moved 10 mm in a new version: a dry run says so and writes
+    // nothing; the update moves it.
+    let moved = text.replace(
+        "#24 = CARTESIAN_POINT('',(0.,50.,0.));",
+        "#24 = CARTESIAN_POINT('',(0.,60.,0.));",
+    );
+    assert_ne!(moved, text);
+    fs::write(beside.join("asm2.stp"), &moved).unwrap();
+    let dry = p.ok(&[
+        "import",
+        "../asm2.stp",
+        "--update",
+        "imports/asm.step",
+        "--dry-run",
+    ]);
+    assert_eq!(
+        (&dry["update"], &dry["dry_run"]),
+        (&json!(true), &json!(true))
+    );
+    let pose = |p: &Pair| {
+        let v = p.ok(&["feature", "show", "assembly", "3"]);
+        v["pose"]["origin_m"].clone()
+    };
+    assert_eq!(pose(&p), json!([0, 0.05, 0]));
+    p.ok(&["import", "../asm2.stp", "--update", "imports/asm.step"]);
+    assert_eq!(pose(&p), json!([0, 0.06, 0]));
+    // Undone through the daemon (undo needs one), in one step: the bytes,
+    // the hashes and the pose.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["feature", "show", "assembly", "3"]);
+    assert_eq!(v["result"]["pose"]["origin_m"], json!([0, 0.05, 0]));
+    assert_eq!(
+        fs::read_to_string(p.daemon.join("imports/asm.step")).unwrap(),
+        text
+    );
+    p.fails(
+        &["import", "../asm2.stp", "--update", "imports/nothing.step"],
+        "not_found",
+        1,
+    );
+}
