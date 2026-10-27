@@ -1578,16 +1578,19 @@ pub(crate) mod tests {
             name: name.into(),
             bodies,
             children,
+            ..Default::default()
         };
         let sub = if version == 1 {
             vec![
                 Child {
                     product: 2,
                     place: at(0.01, 0.0, 0.0),
+                    id: String::new(),
                 },
                 Child {
                     product: 2,
                     place: at(0.02, 0.0, 0.0),
+                    id: String::new(),
                 },
             ]
         } else {
@@ -1595,10 +1598,12 @@ pub(crate) mod tests {
                 Child {
                     product: 2,
                     place: at(0.01, 0.0, 0.0),
+                    id: String::new(),
                 },
                 Child {
                     product: 2,
                     place: at(0.03, 0.0, 0.0),
+                    id: String::new(),
                 },
             ]
         };
@@ -1616,10 +1621,12 @@ pub(crate) mod tests {
                     Child {
                         product: 1,
                         place: at(0.0, 0.0, thick),
+                        id: String::new(),
                     },
                     Child {
                         product: 2,
                         place: at(pin_x, 0.05, thick),
+                        id: String::new(),
                     },
                 ],
             ),

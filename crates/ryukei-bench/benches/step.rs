@@ -61,6 +61,7 @@ fn model(bodies: Vec<Body>) -> WriteModel {
                 name: format!("p{i}"),
                 bodies: vec![b],
                 children: vec![],
+                ..Default::default()
             })
             .collect(),
     }

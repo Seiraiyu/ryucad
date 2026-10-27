@@ -191,6 +191,7 @@ fn part(id: &str, bodies: Vec<Body>) -> Product {
         name: id.into(),
         bodies,
         children: vec![],
+        ..Default::default()
     }
 }
 
@@ -304,6 +305,7 @@ fn assembly() -> Vec<u8> {
             (0..COPIES).map(move |c| Child {
                 product: i,
                 place: Rigid::translation(Vector3::new(10.0 * i as f64, 10.0 * c as f64, 0.0)),
+                id: String::new(),
             })
         })
         .collect();
@@ -312,6 +314,7 @@ fn assembly() -> Vec<u8> {
         name: "root".into(),
         bodies: vec![],
         children,
+        ..Default::default()
     });
     write(
         &WriteModel { products },

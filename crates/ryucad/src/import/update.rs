@@ -794,6 +794,7 @@ mod tests {
             name: id.into(),
             bodies,
             children,
+            ..Default::default()
         };
         let mut products: Vec<ryustep::Product> = ids
             .iter()
@@ -804,6 +805,7 @@ mod tests {
                 .map(|n| ryustep::Child {
                     product: n,
                     place: Rigid::translation(Vector3::new(0.02 * n as f64, 0.0, 0.0)),
+                    id: String::new(),
                 })
                 .collect();
             products.push(product("X-1", vec![], children));

@@ -160,6 +160,7 @@ fn block_file() -> String {
                 name: "block".into(),
                 bodies: vec![b],
                 children: vec![],
+                ..Default::default()
             }],
         },
         &WriteOptions::default(),
