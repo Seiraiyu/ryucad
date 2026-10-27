@@ -434,6 +434,7 @@ fn dispatch(
             product,
             dry_run,
             expected_revision,
+            update,
         } => crate::import::import(
             session,
             crate::import::Ask {
@@ -443,6 +444,7 @@ fn dispatch(
                 product,
                 dry_run,
                 expected: expected_revision,
+                update,
             },
         ),
         Request::Rebuild { part, rev } => {
@@ -3162,6 +3164,12 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
         let c = b.body.counts();
         json!({"faces": c.faces, "edges": c.edges, "vertices": c.vertices})
     };
+    // Instances an update kept though their usage left the file.
+    let kept = if assembly {
+        crate::import::usage_warnings(session.project(), id)
+    } else {
+        Vec::new()
+    };
     let r = session.rebuilt(id)?;
     let features: Vec<Value> = r
         .features
@@ -3259,8 +3267,9 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
         .collect();
     let mut v = json!({"part": id, "revision": revision, "hash": r.hash,
                        "failed": r.failed(), "features": features, "solids": shown});
-    let warnings = r.warnings(id);
+    let mut warnings = r.warnings(id);
     // An assembly's model is what its instances place.
+    warnings.extend(kept);
     if assembly {
         let occurrences: Vec<Value> = crate::assembly::Model::of_assembly(r)
             .occurrences
