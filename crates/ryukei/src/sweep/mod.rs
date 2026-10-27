@@ -12,12 +12,16 @@ mod capped;
 mod extrude;
 mod names;
 mod nest;
+// Checked paths are used by `along`, from a later commit on.
+#[allow(dead_code)]
+mod path;
 mod place;
 mod profile;
 mod revolve;
 mod separate;
 
 pub use extrude::extrude;
+pub use path::{Path, PathSegment};
 pub use profile::{Loop, LoopKey, Lump, Profile, Segment, SegmentKey, ValidLoop, ValidProfile};
 pub use revolve::revolve;
 
