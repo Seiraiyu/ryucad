@@ -4352,6 +4352,7 @@ dependencies = [
  "num-bigint",
  "num-rational",
  "num-traits",
+ "rayon",
  "ryukei",
 ]
 
