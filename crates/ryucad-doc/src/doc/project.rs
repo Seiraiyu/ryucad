@@ -218,14 +218,7 @@ pub fn feature_path(root: &Path, part: &Id, feature: &Id) -> PathBuf {
         .join(format!("{feature}.json"))
 }
 
-/// `path` relative to `root`, with `/` on every platform.
-pub fn relative(root: &Path, path: &Path) -> String {
-    let rel = path.strip_prefix(root).unwrap_or(path);
-    rel.components()
-        .map(|c| c.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
-}
+pub use crate::doc::source::relative;
 
 /// `merge_conflict` for the file at `at` if its JSON lists merge
 /// conflicts, naming their pointers, and a feature's `type` where no

@@ -114,6 +114,15 @@ impl Source for BTreeMap<String, Vec<u8>> {
     }
 }
 
+/// `path` relative to `root`, with `/` on every platform.
+pub fn relative(root: &Path, path: &Path) -> String {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// On Windows `canonicalize` gives a verbatim path (`\\?\C:\…`). Agents see
 /// the ordinary `C:\…` form, which is what `init` reports too. UNC paths and
 /// paths too long for the ordinary form stay verbatim.
