@@ -11,6 +11,16 @@ pub use ryucad_doc::{doc, error, expr, units};
 /// the hosted review service among them, read these.
 pub const OUTPUT_SCHEMA: u64 = 1;
 
+/// ryucad as a product of `ryu-session`: its daemons, clients and live
+/// sessions are that crate's, named for ryucad by this marker
+/// ([`endpoint::Endpoint`] is `ryu_session::endpoint::Endpoint<Cad>`).
+pub struct Cad;
+
+impl ryu_session::Product for Cad {
+    const NAME: &'static str = "ryucad";
+    const RUNTIME_DIR_VAR: &'static str = "RYUCAD_RUNTIME_DIR";
+}
+
 pub mod activity;
 pub mod assembly;
 pub mod cache;

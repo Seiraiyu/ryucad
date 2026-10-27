@@ -135,21 +135,7 @@ impl Part {
     }
 }
 
-/// On Windows `canonicalize` gives a verbatim path (`\\?\C:\…`). Agents see
-/// the ordinary `C:\…` form, which is what `init` reports too. UNC paths and
-/// paths too long for the ordinary form stay verbatim.
-pub fn plain(p: PathBuf) -> PathBuf {
-    #[cfg(windows)]
-    {
-        if let Some(rest) = p.to_str().and_then(|s| s.strip_prefix(r"\\?\"))
-            && rest.as_bytes().get(1) == Some(&b':')
-            && rest.len() < 260
-        {
-            return PathBuf::from(rest);
-        }
-    }
-    p
-}
+pub use crate::doc::source::plain;
 
 /// The nearest folder at or above `start` that holds a `ryucad.json`. A
 /// folder that has lost its manifest but still has parts is

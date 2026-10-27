@@ -1,0 +1,23 @@
+[package]
+name = "ryu-session"
+description = "What a ryu product's session daemon shares: endpoints, the daemon loop and its clients, notifications, participants, the activity log and undo, preferences and freshness"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Rust only: no C or assembly to build on any platform.
+blake3 = { version = "1", features = ["pure"] }
+interprocess = "2"
+ryu-doc = { path = "../ryu-doc" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+widestring = "1"

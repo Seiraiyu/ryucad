@@ -36,39 +36,7 @@ impl VersionInfo {
     }
 }
 
-/// What a request answers: its JSON result and, for some requests, raw
-/// bytes sent right after the response line. A result with bytes says so
-/// in `binary: {encoding, length}`.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Answer {
-    pub result: Value,
-    pub binary: Option<Vec<u8>>,
-}
-
-impl Answer {
-    pub fn json(result: Value) -> Answer {
-        Answer {
-            result,
-            binary: None,
-        }
-    }
-
-    pub fn bytes(mut result: Value, encoding: &str, bytes: Vec<u8>) -> Answer {
-        result["binary"] = json!({"encoding": encoding, "length": bytes.len()});
-        Answer {
-            result,
-            binary: Some(bytes),
-        }
-    }
-
-    /// How many bytes follow a response line with this result.
-    pub fn announced(result: &Value) -> Option<usize> {
-        result
-            .pointer("/binary/length")?
-            .as_u64()
-            .map(|n| n as usize)
-    }
-}
+pub use ryu_session::rpc::{Answer, RPC_ERROR, parse_rpc_response, rpc_response};
 
 /// How a request wants bulk data: in the JSON, or as bytes after it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1011,67 +979,18 @@ impl Request {
     }
 }
 
-/// The JSON-RPC error code that carries every ryucad error; the ryucad code
-/// and details are in `data`.
-pub const RPC_ERROR: i64 = -32000;
-
 /// One JSON-RPC request line.
 pub fn rpc_request(id: u64, req: &Request) -> String {
-    let mut v = json!({"jsonrpc": "2.0", "id": id, "method": req.method()});
-    let params = req.params();
-    if !params.is_null() {
-        v["params"] = params;
-    }
-    v.to_string()
+    ryu_session::rpc::request_line(id, &req.method(), req.params())
 }
 
 /// Parses one JSON-RPC request line into its id and request.
 pub fn parse_rpc_request(line: &str) -> (Value, Result<Request>) {
-    let v: Value = match serde_json::from_str(line) {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                Value::Null,
-                Err(Error::new(Code::InvalidJson, format!("bad request: {e}"))),
-            );
-        }
-    };
-    let id = v.get("id").cloned().unwrap_or(Value::Null);
-    let method = match v.get("method").and_then(Value::as_str) {
-        Some(m) if v.get("jsonrpc") == Some(&json!("2.0")) => m,
-        _ => {
-            let e = Error::new(Code::Usage, "not a JSON-RPC 2.0 request");
-            return (id, Err(e));
-        }
-    };
-    (id, Request::from_rpc(method, v.get("params").cloned()))
-}
-
-/// One JSON-RPC response line.
-pub fn rpc_response(id: Value, result: &Result<Value>) -> String {
-    match result {
-        Ok(r) => json!({"jsonrpc": "2.0", "id": id, "result": r}),
-        Err(e) => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {"code": RPC_ERROR, "message": e.message, "data": e},
-        }),
-    }
-    .to_string()
-}
-
-/// Parses one JSON-RPC response line back into a result.
-pub fn parse_rpc_response(line: &str) -> Result<Value> {
-    let bad = |why: &str| Error::new(Code::Daemon, format!("bad response from the daemon: {why}"));
-    let mut v: Value = serde_json::from_str(line).map_err(|e| bad(&e.to_string()))?;
-    if let Some(r) = v.get_mut("result") {
-        return Ok(r.take());
-    }
-    let data = v
-        .pointer_mut("/error/data")
-        .map(Value::take)
-        .ok_or_else(|| bad("no result or error"))?;
-    Err(serde_json::from_value(data).map_err(|e| bad(&e.to_string()))?)
+    let (id, call) = ryu_session::rpc::parse_request_line(line);
+    (
+        id,
+        call.and_then(|(method, params)| Request::from_rpc(&method, params)),
+    )
 }
 
 #[cfg(test)]
