@@ -358,7 +358,21 @@ fn ready<P: Serve>(root: &Path, endpoint: &Endpoint<P>, daemon: &Daemon<P>) -> R
             .call(&daemon_status())
             .map_err(unavailable)?
             .map_err(unavailable)?;
-        if P::same_build(&daemon.version, &status["version"]) {
+        let version = &status["version"];
+        // Another product's daemon is never replaced: it isn't this
+        // one's to stop.
+        if version.get(P::NAME).is_none() {
+            return Err(Error::new(
+                Code::Daemon,
+                format!(
+                    "daemon unavailable: the daemon at {} isn't {}'s",
+                    endpoint.address,
+                    P::NAME
+                ),
+            )
+            .with("version", version));
+        }
+        if P::same_build(&daemon.version, version) {
             return Ok(conn);
         }
         // Another build's daemon (an upgrade, say): replace it, once.
@@ -518,6 +532,87 @@ pub fn stop_all<P: Serve>() -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::Test;
+    use interprocess::local_socket::ListenerOptions;
+    use std::sync::Mutex;
+
+    /// A daemon on `endpoint` that answers `daemon.status` with `version`
+    /// and notes every method it is asked.
+    fn fake_daemon(endpoint: &Endpoint<Test>, version: Value) -> Arc<Mutex<Vec<String>>> {
+        let listener = ListenerOptions::new()
+            .name(endpoint.name().unwrap())
+            .create_sync()
+            .unwrap();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let noted = Arc::clone(&asked);
+        std::thread::spawn(move || {
+            for conn in listener.incoming().flatten() {
+                let mut reader = BufReader::new(&conn);
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|n| n > 0) {
+                    let v: Value = serde_json::from_str(&line).unwrap();
+                    noted
+                        .lock()
+                        .unwrap()
+                        .push(v["method"].as_str().unwrap().to_owned());
+                    let answer =
+                        json!({"jsonrpc": "2.0", "id": v["id"], "result": {"version": version}});
+                    let mut w = &conn;
+                    w.write_all(format!("{answer}\n").as_bytes()).unwrap();
+                    line.clear();
+                }
+            }
+        });
+        asked
+    }
+
+    /// An endpoint in `dir` of its own, without the runtime folder (whose
+    /// variable another test of this binary sets).
+    fn endpoint_in(dir: &Path, name: &str) -> Endpoint<Test> {
+        #[cfg(unix)]
+        let address = dir
+            .join(format!("{name}.sock"))
+            .to_string_lossy()
+            .into_owned();
+        #[cfg(windows)]
+        let address = format!("ryutest-client-{name}-{}", std::process::id());
+        Endpoint {
+            address,
+            log: dir.join(format!("{name}.log")),
+            product: std::marker::PhantomData,
+        }
+    }
+
+    fn this_build(dir: &Path) -> Daemon<Test> {
+        Daemon {
+            exe: dir.join("no-such-binary"),
+            version: Test::version(),
+        }
+    }
+
+    #[test]
+    fn another_products_daemon_is_refused_never_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let endpoint = endpoint_in(dir.path(), "other");
+        let asked = fake_daemon(&endpoint, json!({"ryuother": "0.0.0", "protocol": 1}));
+        let e = match ready(dir.path(), &endpoint, &this_build(dir.path())) {
+            Ok(_) => panic!("connected to another product's daemon"),
+            Err(e) => e,
+        };
+        assert_eq!(e.code, Code::Daemon);
+        assert!(e.message.contains("isn't ryutest's"), "{}", e.message);
+        // Asked who it is, and nothing else: it was never told to stop.
+        assert_eq!(*asked.lock().unwrap(), ["daemon.status"]);
+    }
+
+    #[test]
+    fn the_same_products_daemon_is_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let endpoint = endpoint_in(dir.path(), "same");
+        let asked = fake_daemon(&endpoint, Test::version());
+        assert!(ready(dir.path(), &endpoint, &this_build(dir.path())).is_ok());
+        assert_eq!(*asked.lock().unwrap(), ["daemon.status"]);
+    }
 
     #[test]
     fn basic_requests_travel_as_products_have_always_sent_them() {

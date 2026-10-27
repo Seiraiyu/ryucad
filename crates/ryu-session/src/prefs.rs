@@ -161,18 +161,6 @@ mod tests {
     use super::*;
     use crate::testing::Test;
 
-    impl Schema for Test {
-        const CONFIG_DIR_VAR: &'static str = "RYUTEST_CONFIG_DIR";
-
-        fn accepts(name: &str, value: &Value) -> bool {
-            name == "display.quality" && value.is_string()
-        }
-
-        fn default_of(name: &str) -> Option<Value> {
-            (name == "display.quality").then(|| json!("normal"))
-        }
-    }
-
     #[test]
     fn preferences_keep_what_isnt_their_default() {
         let dir = tempfile::tempdir().unwrap();

@@ -139,6 +139,13 @@ mod tests {
     }
 
     #[test]
+    fn a_version_names_ryucad_so_other_products_clients_refuse_its_daemon() {
+        let v = json!(VersionInfo::current());
+        assert!(v.get(<Cad as ryu_session::Product>::NAME).is_some());
+        assert!(v.get("ryueda").is_none());
+    }
+
+    #[test]
     fn programs_are_found_beside_this_one() {
         let exe = std::env::current_exe().unwrap();
         let stem = exe.file_stem().unwrap().to_str().unwrap();
