@@ -38,6 +38,8 @@ enum Pending {
     /// A sketch's drawing, asked for at this part revision.
     Sketch(BodyKey, String),
     People,
+    /// This window's own `visibility.set`.
+    Hidden,
     /// A feature read for the form: its part and ID; after a conflict,
     /// with the form as it was when the save failed.
     Form(String, String, Option<Box<Form>>),
@@ -256,6 +258,10 @@ pub struct Workspace {
     pub cache: Option<Value>,
     /// The instance being dragged, if any.
     pub drag: Option<Drag>,
+    /// Tests only: notifications are dropped as they arrive, as if lost,
+    /// to see what the window does from its answers alone.
+    #[doc(hidden)]
+    pub deaf: bool,
     /// Why the last drag moved nothing, for the status line.
     pub drag_note: Option<String>,
     /// Whether a report is on its way, and whether the project changed
@@ -335,6 +341,7 @@ impl Workspace {
             interference: None,
             cache: None,
             drag: None,
+            deaf: false,
             drag_note: None,
             doctor_waiting: false,
             doctor_again: false,
@@ -660,7 +667,7 @@ impl Workspace {
             all,
             participant: Some(self.link.participant.clone()),
         };
-        self.send(req, Pending::Quiet);
+        self.send(req, Pending::Hidden);
     }
 
     /// Starts, changes or ends the compare to match this window's
@@ -1208,6 +1215,7 @@ impl Workspace {
 
     fn handle(&mut self, e: Event) {
         match e {
+            Event::Note { .. } if self.deaf => {}
             Event::Answer { ticket, answer } => {
                 if let Some(why) = self.pending.remove(&ticket) {
                     self.answered(why, answer);
@@ -1464,6 +1472,21 @@ impl Workspace {
                 }
             }
             (Pending::Quiet, Ok(_)) => {}
+            // Drawn as its own request answers, not only when the
+            // notification comes (#143).
+            (Pending::Hidden, Ok(a)) => {
+                let me = self.link.participant.clone();
+                if let Some(p) = self.people.all.get_mut(&me) {
+                    p.hidden = a.result["hidden"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|s| s.as_str().map(str::to_owned))
+                        .collect();
+                    self.people.generation += 1;
+                }
+                self.follow_focus();
+            }
             (Pending::Activity, Ok(a)) => self.activity.reset(&a.result["entries"]),
             (Pending::History, Ok(a)) => self.history = Some(a.result),
             // Said in the tab, not left spinning.
