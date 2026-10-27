@@ -54,6 +54,21 @@ impl NurbsCurve {
         &self.spline.knots
     }
 
+    /// The same curve carried on past its clamped domain's ends by
+    /// `margins` (exactly its end pieces' polynomials; see
+    /// [`super::NurbsSurface::extended`]). `None` for a periodic curve, or
+    /// where an extrapolated weight isn't positive.
+    pub(crate) fn extended(&self, margins: [f64; 2]) -> Option<Self> {
+        let kv = &self.spline.knots;
+        if kv.is_periodic() {
+            return None;
+        }
+        let p = kv.degree();
+        let (flat, hom) = super::refine::clamp(kv, &self.spline.hom());
+        let (flat, hom) = super::refine::extend_flat(&flat, p, &hom, margins)?;
+        Some(Self::from_spline(Spline::from_flat(p, &flat, &hom)))
+    }
+
     pub fn degree(&self) -> usize {
         self.spline.knots.degree()
     }
