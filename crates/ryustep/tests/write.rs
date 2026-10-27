@@ -222,6 +222,19 @@ fn an_assembly_keeps_its_tree() {
     assert_eq!(&*root.name, "assembly");
     assert_eq!(root.children.len(), 3);
     assert!(root.children.iter().all(|c| c.transform.is_some()));
+    // Each child where it was put, read back in meters.
+    let o = ryustep::open(&bytes).unwrap();
+    for (k, c) in model.products[0].children.iter().enumerate() {
+        let r = o.placement(p.roots[0], k).unwrap();
+        let (a, b) = (r.rotation_matrix(), c.place.rotation_matrix());
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!((a[i][j] - b[i][j]).abs() < 1e-15, "{k}: {a:?} {b:?}");
+            }
+        }
+        let d = r.translation_part() - c.place.translation_part();
+        assert!(d.length() < 1e-15, "{k}: {d:?}");
+    }
     assert_eq!(m.bodies.len(), 2);
     assert!(
         m.bodies

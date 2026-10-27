@@ -265,3 +265,62 @@ fn bodies_opened_one_at_a_time_read_as_read_reads_them() {
     assert!(near(volume(a), volume(b)));
     assert_ne!(a.dump(), b.dump());
 }
+
+/// Where each usage puts its child, as a point and the image of x.
+fn placed(o: &ryustep::Opened, parent: usize) -> Vec<([f64; 3], [f64; 3])> {
+    use ryukei::geom::{Point3, Vector3};
+    (0..o.products.definitions[parent].children.len())
+        .map(|k| {
+            let r = o.placement(parent, k).unwrap();
+            let p = r.apply_point(Point3::ORIGIN);
+            let x = r.apply_vector(Vector3::new(1.0, 0.0, 0.0));
+            (
+                [p.x, p.y, p.z].map(|c| (c * 1e12).round() / 1e12),
+                [x.x, x.y, x.z].map(|c| (c * 1e12).round() / 1e12),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn usages_are_placed_in_meters() {
+    // XDE's assembly: the block at its origin and 100 mm along x, the
+    // pin 50 mm along y, turned a quarter about z.
+    let bytes = file("assembly.stp");
+    let o = open(&bytes).unwrap();
+    assert_eq!(
+        placed(&o, 0),
+        [
+            ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            ([0.1, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            ([0.0, 0.05, 0.0], [0.0, 1.0, 0.0]),
+        ]
+    );
+    // The second block placed by an operator instead, the same way, and
+    // related the other way round: the operator is then inverted.
+    let text = String::from_utf8(bytes).unwrap();
+    let operator = text.replace(
+        "#384 = ITEM_DEFINED_TRANSFORMATION('','',#11,#19);",
+        "#384 = CARTESIAN_TRANSFORMATION_OPERATOR_3D('',$,$,#900,$,$);\n\
+         #900 = CARTESIAN_POINT('',(100.,0.,0.));",
+    );
+    assert_ne!(operator, text);
+    let o = open(operator.as_bytes()).unwrap();
+    assert_eq!(placed(&o, 0)[1], ([0.1, 0.0, 0.0], [1.0, 0.0, 0.0]));
+    let swapped = operator.replace(
+        "#383 = ( REPRESENTATION_RELATIONSHIP('','',#40,#10)",
+        "#383 = ( REPRESENTATION_RELATIONSHIP('','',#10,#40)",
+    );
+    let o = open(swapped.as_bytes()).unwrap();
+    assert_eq!(placed(&o, 0)[1], ([-0.1, 0.0, 0.0], [1.0, 0.0, 0.0]));
+    // A scale isn't a placement.
+    let scaled = operator.replace(
+        "CARTESIAN_TRANSFORMATION_OPERATOR_3D('',$,$,#900,$,$)",
+        "CARTESIAN_TRANSFORMATION_OPERATOR_3D('',$,$,#900,2.,$)",
+    );
+    let o = open(scaled.as_bytes()).unwrap();
+    assert!(matches!(
+        o.placement(0, 1),
+        Err(ImportError::Malformed { instance: 384, .. })
+    ));
+}
