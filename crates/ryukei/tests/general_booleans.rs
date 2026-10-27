@@ -207,3 +207,60 @@ fn a_spline_block_and_a_block_askew() {
     let i = run(BooleanOp::Intersect, &spline, &block, place);
     near(volume(&u) + volume(&i), a * b * 0.9 + c * d * 0.9);
 }
+
+/// A spline meridian from the axis round to the axis, turned about z: a
+/// surface of revolution with a pole at each end.
+fn spline_revolution(r: f64, h: f64) -> Body {
+    use ryukei::geom::{Axis, KnotVector, NurbsCurve2};
+    use ryukei::sweep::revolve;
+    use std::sync::Arc;
+    let kv = KnotVector::clamped(3, &[0.0, 1.0], &[4, 4]).unwrap();
+    let pts = vec![
+        Point2::new(0.0, -h),
+        Point2::new(r * 1.3, -h),
+        Point2::new(r * 0.9, h),
+        Point2::new(0.0, h),
+    ];
+    let meridian = Curve2::Nurbs2(Arc::new(NurbsCurve2::new(kv, pts, None).unwrap()));
+    let back = Curve2::Line2(Line2::through(Point2::new(0.0, h), Point2::new(0.0, -h)).unwrap());
+    let profile = ValidProfile::new(Profile {
+        frame: Frame::new(
+            Point3::ORIGIN,
+            Vector3::new(0.0, -1.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap(),
+        loops: vec![Loop {
+            key: LoopKey(1),
+            segments: vec![seg(1, meridian, 0.0, 1.0), seg(2, back, 0.0, 2.0 * h)],
+        }],
+    })
+    .unwrap();
+    let axis = Axis::new(Point3::ORIGIN, Vector3::new(0.0, 0.0, 1.0)).unwrap();
+    revolve(OpKey(8), &profile, axis, 0.0, TAU).unwrap().0
+}
+
+/// A cap off a spline ball and off a spline revolution: the piece left
+/// round the pole closes there, as on a sphere.
+#[test]
+fn caps_round_spline_poles() {
+    let ball = nurbs(
+        primitive::sphere(OpKey(3), 1.0, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+    );
+    let block = primitive::block(OpKey(7), 2.0, 3.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let place = at(-1.0, -1.5, 0.5);
+    let cap = run(BooleanOp::Intersect, &ball, &block, place);
+    let rest = run(BooleanOp::Subtract, &ball, &block, place);
+    let want = PI * 0.25 * (3.0 - 0.5) / 3.0;
+    near(volume(&cap), want);
+    near(volume(&rest), 4.0 / 3.0 * PI - want);
+    let rev = spline_revolution(0.8, 0.6);
+    let place = at(-1.0, -1.5, 0.3);
+    let cap = run(BooleanOp::Intersect, &rev, &block, place);
+    let rest = run(BooleanOp::Subtract, &rev, &block, place);
+    near(volume(&cap) + volume(&rest), volume(&rev));
+}
