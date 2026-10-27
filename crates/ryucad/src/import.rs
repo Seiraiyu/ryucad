@@ -518,6 +518,9 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
         let pid = crate::server::part_id(into)?;
         let p = project.part(&pid)?;
         crate::server::check_revision(p, ask.expected.as_deref())?;
+        // A list that doesn't load (a conflict record, a newer format)
+        // would be written over with only the import's features.
+        crate::server::order(p)?;
         if crate::server::part_kind(p) == PartKind::Assembly {
             return Err(Error::new(
                 Code::WrongPartKind,
@@ -1219,6 +1222,32 @@ pub(crate) mod tests {
         // part names the part only when the file makes one.
         let e = import_call(&mut s, json!({"path": path, "part": "x"})).unwrap_err();
         assert_eq!(e.code, Code::InvalidParam);
+    }
+
+    #[test]
+    fn into_a_part_whose_list_doesnt_load_is_refused_with_its_error() {
+        let (_src, path) = outside("box_ap214.stp");
+        let (dir, mut s) = crate::server::tests::fresh();
+        crate::server::tests::call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        crate::server::tests::call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "body", "params": {"x": 1, "y": 1, "z": 1}}),
+        )
+        .unwrap();
+        let list = crate::doc::project::part_path(dir.path(), &Id::parse("p", "part").unwrap());
+        let broken = b"{\"features\": [\"body\"\n";
+        std::fs::write(&list, broken).unwrap();
+        let add = crate::server::tests::call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "other", "params": {"x": 1, "y": 1, "z": 1}}),
+        )
+        .unwrap_err();
+        let e = import_call(&mut s, json!({"path": path, "into": "p"})).unwrap_err();
+        assert_eq!(e.code, add.code, "{e:?}");
+        assert_eq!(std::fs::read(&list).unwrap(), broken);
+        assert!(!dir.path().join("imports").exists());
     }
 
     #[test]
