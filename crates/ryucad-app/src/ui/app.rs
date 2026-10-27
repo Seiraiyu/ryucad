@@ -370,6 +370,10 @@ impl Opened {
         {
             self.view.fit_entities(&mut self.ws, &faces);
         }
+        // Closing the dialog ends what it paints (#138).
+        if !self.dialogs.interference {
+            self.ws.interference = None;
+        }
         action
     }
 

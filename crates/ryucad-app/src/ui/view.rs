@@ -371,8 +371,9 @@ impl View {
                 }
             }
         }
-        // Interference found: the faces each pair's shared volume touches.
-        if let Some(i) = &ws.interference {
+        // Interference found: the faces each pair's shared volume touches,
+        // but not over a compare, whose red means removed (#138).
+        if let Some(i) = ws.interference.as_ref().filter(|_| ws.compare.is_none()) {
             let removed = linear(style::REMOVED);
             for r in i.faces() {
                 if let Some(Place::Face(k, f)) = picker.place(r) {

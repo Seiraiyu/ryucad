@@ -1813,6 +1813,10 @@ fn tools_check_interference_lists_and_paints_the_pairs() {
     assert_ne!(h.state().opened().view.nav.camera, before);
     let i = h.state().opened().ws.interference.clone().unwrap();
     assert!(i.faces().count() >= 2, "{i:?}");
+    // Closing the dialog ends the paint (#138).
+    h.state_mut().opened_mut().dialogs.interference = false;
+    h.step();
+    assert!(h.state().opened().ws.interference.is_none());
 }
 
 #[test]
