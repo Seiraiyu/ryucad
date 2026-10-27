@@ -3840,7 +3840,7 @@ fn occurrences_at(session: &mut Session, rev: &str, part: &Id) -> Result<Occurre
                 hash: sol.built.hash.clone(),
                 mesh: m,
             };
-            out.insert((path.clone(), sol.founder.clone()), (o.pose.clone(), m));
+            out.insert((path.clone(), sol.founder.clone()), (o.pose, m));
         }
     }
     Ok(out)
@@ -3947,7 +3947,7 @@ fn render(
                         (whole, &faces),
                         (ask.labels, ask.edges),
                     );
-                    seen_occurrences.insert((part.clone(), key.0, key.1), (o.pose.clone(), m));
+                    seen_occurrences.insert((part.clone(), key.0, key.1), (o.pose, m));
                 }
             }
             continue;
