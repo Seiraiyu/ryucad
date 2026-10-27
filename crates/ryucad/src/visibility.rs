@@ -364,4 +364,30 @@ mod tests {
         let b = ask(None, "render", empty);
         assert_eq!(a.binary, b.binary, "nothing left to draw either way");
     }
+
+    #[test]
+    fn an_agents_render_leaves_out_what_its_hide_hid_for_the_human() {
+        use crate::live::{Kind, Live};
+        let (dir, s) = project();
+        let r = dir.path();
+        drop(s);
+        let small = json!({"part": "frame", "width": 64, "height": 48});
+        let mut without = small.clone();
+        without["hidden"] = json!(["frame/p1"]);
+        let mut live = Live::new();
+        let human = live.hello(Kind::Human, Some("ann"), None).unwrap();
+        let mut slot = Some(Session::open(r).unwrap());
+        let mut ask = |me: Option<&str>, m: &str, v: serde_json::Value| {
+            let req = crate::proto::Request::from_rpc(m, Some(v)).unwrap();
+            crate::server::handle_safely(&mut slot, Some(&mut live), me, r, req).unwrap()
+        };
+        let all = ask(None, "render", small.clone()).binary;
+        let want = ask(None, "render", without).binary;
+        assert_ne!(all, want);
+        // #137: with a window open, the agent's hide goes to its human...
+        let v = ask(None, "visibility.set", json!({"hide": ["frame/p1"]}));
+        assert_eq!(v.result["participant"], human.as_str());
+        // ...and the agent's next render leaves out what it hid.
+        assert_eq!(ask(None, "render", small).binary, want);
+    }
 }

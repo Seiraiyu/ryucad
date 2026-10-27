@@ -2341,6 +2341,55 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_compare_render_paints_and_ghosts_an_assemblys_occurrences() {
+        use crate::git::tests::git;
+        use crate::server::tests::render_pixels;
+        let (dir, mut s) = project();
+        let r = dir.path();
+        git(r, &["init", "-q", "-b", "main"]);
+        place_in(r, "frame", "base", "plate", json!("working"), [0.0; 3]);
+        place_in(r, "frame", "b1", "bolt", json!("working"), [0.01, 0.0, 0.0]);
+        git(r, &["add", "."]);
+        git(r, &["commit", "-q", "-m", "frame"]);
+        s.refresh().unwrap();
+        let small = json!({"part": "frame", "width": 96, "height": 72});
+        let mut compared = small.clone();
+        compared["compare"] = json!("HEAD");
+        let open = || Session::open(r).unwrap();
+        // Nothing changed: a compare draws what a plain render does.
+        assert_eq!(
+            render_pixels(r, open(), compared.clone()),
+            render_pixels(r, open(), small.clone())
+        );
+        // #135: a placed part's body changed, so its occurrence is painted.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "plate", "id": "slab", "params": {"z": 6}}),
+        )
+        .unwrap();
+        drop(s);
+        assert_ne!(
+            render_pixels(r, open(), compared.clone()),
+            render_pixels(r, open(), small.clone())
+        );
+        // Only moved: its ghost is drawn where it was.
+        git(r, &["commit", "-qam", "thicker"]);
+        let mut s = open();
+        call(
+            &mut s,
+            "assembly.move",
+            json!({"part": "frame", "instance": "b1", "translate": ["5 mm", 0, 0]}),
+        )
+        .unwrap();
+        drop(s);
+        assert_ne!(
+            render_pixels(r, open(), compared),
+            render_pixels(r, open(), small)
+        );
+    }
+
+    #[test]
     fn an_assembly_releases_when_every_instance_is_an_official_release() {
         use crate::git::tests::git;
         let (dir, mut s) = released();
