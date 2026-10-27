@@ -433,6 +433,20 @@ impl Live {
         }
     }
 
+    /// The participant whose hidden set a render leaves out by default:
+    /// `id` if given, else the one human (whose set an agent's
+    /// `visibility.set` changes; issue #137), else the caller `me`, as
+    /// also when several humans are attached.
+    pub fn view_target(&mut self, id: Option<&str>, me: Option<&str>) -> Result<String> {
+        if let Some(id) = id {
+            return Ok(self.get(id)?.id.clone());
+        }
+        match self.target(None) {
+            Ok(Some(h)) => Ok(h.id.clone()),
+            _ => Ok(self.caller(me)),
+        }
+    }
+
     /// Sets what participant `id`'s window shows: a part or assembly, or
     /// (with `None`) the project's model.
     pub fn set_focus(&mut self, id: &str, part: Option<crate::doc::id::Id>) -> Result<()> {

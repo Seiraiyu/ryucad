@@ -122,20 +122,19 @@ pub fn answer_live(
             compare,
             hidden,
         } => {
-            let target = participant.as_deref().map(|p| (p, live.as_deref()));
-            // What the participant's window hides, else the caller's.
+            // What the participant's window hides, else the one human's
+            // (where an agent's `hide` went), else the caller's.
             let hidden = match hidden {
                 Some(refs) => crate::visibility::reach_all(session, &refs)?,
-                None => live
-                    .as_deref()
-                    .and_then(|l| {
-                        let who = participant
-                            .as_deref()
-                            .unwrap_or(me.unwrap_or(live::DEFAULT_AGENT));
-                        Some(l.get(who).ok()?.hidden.clone())
-                    })
-                    .unwrap_or_default(),
+                None => match live.as_deref_mut() {
+                    Some(l) => {
+                        let who = l.view_target(participant.as_deref(), me)?;
+                        l.get(&who)?.hidden.clone()
+                    }
+                    None => Default::default(),
+                },
             };
+            let target = participant.as_deref().map(|p| (p, live.as_deref()));
             // A participant's render shows what their window shows.
             let part = part.or_else(|| {
                 let l = live.as_deref()?;

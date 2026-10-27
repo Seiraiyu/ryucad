@@ -395,7 +395,8 @@ enum Command {
         #[arg(long, value_name = "REV")]
         compare: Option<String>,
         /// Leave out a part, an occurrence or a solid (repeatable); by
-        /// default what the participant's (or the caller's) window hides.
+        /// default what `--of`'s window hides, else the one human's
+        /// (where `hide` goes), else the caller's.
         #[arg(long = "hidden", value_name = "REF")]
         hidden: Vec<String>,
     },
