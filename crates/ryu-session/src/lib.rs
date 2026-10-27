@@ -60,7 +60,9 @@ pub trait Serve: Product + prefs::Schema {
     /// Every request the daemon answers.
     type Request: client::Call + Send;
     /// What `version` reports: a CLI and a daemon talk only when it says
-    /// they are the same build.
+    /// they are the same build. Its JSON holds a key named after the
+    /// product (ryucad's `ryucad`), which is how a client tells another
+    /// product's daemon, which it never replaces.
     type Version: Clone + PartialEq + std::fmt::Debug + Serialize + serde::de::DeserializeOwned;
 
     /// This binary's version.
@@ -139,5 +141,82 @@ pub(crate) mod testing {
         fn view_json(view: &Option<String>, into: &mut Map<String, Value>) {
             into.insert("camera".into(), json!(view));
         }
+    }
+
+    impl crate::prefs::Schema for Test {
+        const CONFIG_DIR_VAR: &'static str = "RYUTEST_CONFIG_DIR";
+
+        fn accepts(name: &str, value: &Value) -> bool {
+            name == "display.quality" && value.is_string()
+        }
+
+        fn default_of(name: &str) -> Option<Value> {
+            (name == "display.quality").then(|| json!("normal"))
+        }
+    }
+
+    /// A request of the test product: any method and params.
+    pub struct Request(pub String, pub Value);
+
+    impl crate::client::Call for Request {
+        fn method(&self) -> String {
+            self.0.clone()
+        }
+
+        fn params(&self) -> Value {
+            self.1.clone()
+        }
+    }
+
+    impl crate::Serve for Test {
+        const MANIFEST: &'static str = "ryutest.json";
+        const IDLE_VAR: &'static str = "RYUTEST_IDLE_TIMEOUT";
+        type Session = ();
+        type Request = Request;
+        type Version = Value;
+
+        fn version() -> Value {
+            json!({"ryutest": "0.0.0", "protocol": 1})
+        }
+
+        fn same_build(me: &Value, other: &Value) -> bool {
+            me == other
+        }
+
+        fn parse(method: &str, params: Option<Value>) -> ryu_doc::error::Result<Request> {
+            Ok(Request(method.to_owned(), params.unwrap_or(Value::Null)))
+        }
+
+        fn control(req: &Request) -> crate::daemon::Control {
+            use crate::daemon::Control;
+            match req.0.as_str() {
+                "daemon.status" => Control::Status,
+                "daemon.shutdown" => Control::Shutdown,
+                "subscribe" => Control::Subscribe(Vec::new()),
+                "session.hello" => Control::Hello { window: false },
+                _ => Control::Request,
+            }
+        }
+
+        fn handle(
+            _: &mut Option<()>,
+            live: &mut crate::live::Live<Test>,
+            _: Option<&str>,
+            _: &std::path::Path,
+            req: Request,
+        ) -> ryu_doc::error::Result<crate::rpc::Answer> {
+            let id = live.hello(crate::live::Kind::Agent, None, None)?;
+            Ok(crate::rpc::Answer::json(
+                json!({"method": req.0, "participant": id}),
+            ))
+        }
+
+        fn settle(_: &mut Option<()>, _: &mut crate::live::Live<Test>, _: &std::path::Path) {}
+
+        fn poll_ms() -> u64 {
+            250
+        }
+
+        fn window_opened(_: &std::path::Path) {}
     }
 }

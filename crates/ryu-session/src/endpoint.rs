@@ -15,7 +15,7 @@ pub struct Endpoint<P> {
     pub address: String,
     /// The daemon's log file.
     pub log: PathBuf,
-    product: PhantomData<fn() -> P>,
+    pub(crate) product: PhantomData<fn() -> P>,
 }
 
 impl<P> Clone for Endpoint<P> {
