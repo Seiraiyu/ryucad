@@ -225,7 +225,9 @@ impl<P: Product> Endpoint<P> {
         out.sort_by(|a, b| a.address.cmp(&b.address));
         Ok(out)
     }
+}
 
+impl<P> Endpoint<P> {
     /// The name to bind or connect to.
     pub fn name(&self) -> io::Result<Name<'_>> {
         use interprocess::local_socket::prelude::*;

@@ -8,6 +8,8 @@
 //! the product's, behind the trait.
 
 pub mod activity;
+pub mod client;
+pub mod daemon;
 pub mod endpoint;
 pub mod fresh;
 pub mod live;
@@ -41,6 +43,56 @@ pub trait Product: Sized + Send + Sync + 'static {
     /// Adds a participant's view to its JSON, beside `id`, `kind`, `name`,
     /// `status`, `selection` and `highlights`.
     fn view_json(view: &Self::View, into: &mut Map<String, Value>);
+}
+
+/// A product whose daemon these modules run: its requests, its session
+/// and how it answers them.
+pub trait Serve: Product + prefs::Schema {
+    /// The project's manifest (`ryucad.json`): a daemon whose project has
+    /// lost it stops.
+    const MANIFEST: &'static str;
+    /// Seconds of idle time for daemons the CLI starts (tests shorten it):
+    /// `RYUCAD_IDLE_TIMEOUT`.
+    const IDLE_VAR: &'static str;
+    /// What a daemon keeps of the project between requests, opened on its
+    /// first.
+    type Session: Send;
+    /// Every request the daemon answers.
+    type Request: client::Call + Send;
+    /// What `version` reports: a CLI and a daemon talk only when it says
+    /// they are the same build.
+    type Version: Clone + PartialEq + std::fmt::Debug + Serialize + serde::de::DeserializeOwned;
+
+    /// This binary's version.
+    fn version() -> Self::Version;
+    /// Whether `other` (a `version` object as JSON) is `me`'s build. A
+    /// version of another product never is.
+    fn same_build(me: &Self::Version, other: &Value) -> bool;
+    /// Reads a request from its JSON-RPC method and params.
+    fn parse(method: &str, params: Option<Value>) -> ryu_doc::error::Result<Self::Request>;
+    /// What the loop does with `req` before handing it on.
+    fn control(req: &Self::Request) -> daemon::Control;
+    /// Answers a request, opening the session in `session` if it isn't
+    /// yet. A panic inside is the product's to catch.
+    fn handle(
+        session: &mut Option<Self::Session>,
+        live: &mut live::Live<Self>,
+        me: Option<&str>,
+        root: &std::path::Path,
+        req: Self::Request,
+    ) -> ryu_doc::error::Result<rpc::Answer>;
+    /// Brings the session and what subscribers know up to date with the
+    /// files: before a subscription, and while anyone watches.
+    fn settle(
+        session: &mut Option<Self::Session>,
+        live: &mut live::Live<Self>,
+        root: &std::path::Path,
+    );
+    /// How often a watched daemon checks the files, in milliseconds.
+    fn poll_ms() -> u64;
+    /// A new app window said hello: ryucad puts the project first among
+    /// the recent ones.
+    fn window_opened(root: &std::path::Path);
 }
 
 /// A product for this crate's tests.
