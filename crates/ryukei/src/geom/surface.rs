@@ -421,11 +421,8 @@ impl Surface {
             Self::Revolution(r) => r.closed_genus(),
             Self::Pipe(p) => p.closed_genus(),
             Self::Sweep(s) => s.closed_genus(),
-            Self::Plane(_)
-            | Self::Cylinder(_)
-            | Self::Cone(_)
-            | Self::Nurbs(_)
-            | Self::Extrusion(_) => None,
+            Self::Nurbs(n) => n.closed_genus(),
+            Self::Plane(_) | Self::Cylinder(_) | Self::Cone(_) | Self::Extrusion(_) => None,
         }
     }
 
@@ -809,7 +806,9 @@ mod tests {
         );
         assert_eq!(s.domain(), n.domain());
         assert_eq!(s.periods(), n.periods());
-        assert_eq!(s.closed_genus(), None);
+        // Periodic one way with both ends of the other collapsed: a
+        // sphere's topology.
+        assert_eq!(s.closed_genus(), Some(0));
         let p = Point3::new(5.0, 1.0, -2.0);
         assert_eq!(s.project(p), n.project(p));
         assert_eq!(s.distance(p), n.distance(p));

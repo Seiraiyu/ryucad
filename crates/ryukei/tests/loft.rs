@@ -283,19 +283,39 @@ fn refusals() {
         ..opts
     };
     assert_eq!(refusal(loft(K, &two, &sideways)), LoftError::BadTangent);
-    // A closed loft of circles would be a tube with no edges.
-    let rings: Vec<ValidProfile> = (0..3)
+}
+
+/// Circles round the z axis loft into a tube: one face with no edges, on
+/// a spline closed both ways, about the volume of the torus they trace.
+#[test]
+fn a_closed_loft_of_circles_is_a_tube() {
+    let sections: Vec<ValidProfile> = (0..4)
         .map(|k| {
-            at(
-                f64::from(k),
-                vec![circle(1, 10 + k as u128, (0.0, 0.0), 0.5)],
-            )
+            let a = TAU * f64::from(k) / 4.0;
+            let (s, c) = ryukei::math::sin_cos(a);
+            ValidProfile::new(Profile {
+                frame: Frame::new(
+                    Point3::new(3.0 * c, 3.0 * s, 0.0),
+                    Vector3::new(-s, c, 0.0),
+                    Vector3::new(c, s, 0.0),
+                )
+                .unwrap(),
+                loops: vec![circle(1, 10 * (k as u128 + 1), (0.0, 0.0), 0.5)],
+            })
+            .unwrap()
         })
         .collect();
-    assert!(matches!(
-        refusal(loft(K, &rings, &closed)),
-        LoftError::ClosedTube { .. } | LoftError::SelfIntersecting { .. }
-    ));
+    let opts = LoftOptions {
+        closed: true,
+        ..LoftOptions::default()
+    };
+    let (b, _) = loft(K, &sections, &opts).unwrap();
+    let c = b.counts();
+    assert_eq!((c.faces, c.edges, c.vertices), (1, 0, 0));
+    assert_eq!(kinds(&b), ["nurbs"]);
+    let v = volume(&b);
+    // About the torus's: the skin swings a little outside the circle.
+    assert!(close(v, TAU * 3.0 * PI * 0.25, 0.1), "{v}");
 }
 
 /// Resizing and moving sections renames nothing.

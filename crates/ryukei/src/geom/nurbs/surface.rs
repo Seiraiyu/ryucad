@@ -108,6 +108,25 @@ impl NurbsSurface {
             .collect()
     }
 
+    /// The genus of the closed surface the spline is, if it closes up:
+    /// 1 periodic both ways (a torus's topology), 0 periodic one way with
+    /// both ends of the other collapsed to poles (a sphere's).
+    pub(crate) fn closed_genus(&self) -> Option<u32> {
+        let [nu, nv] = self.counts();
+        let row = |pts: Vec<Point3>| {
+            pts.iter()
+                .all(|p| p.distance(pts[0]) <= crate::tol::LINEAR_RESOLUTION)
+        };
+        let u_row = |i: usize| row((0..nv).map(|j| self.control_point(i, j)).collect());
+        let v_row = |j: usize| row((0..nu).map(|i| self.control_point(i, j)).collect());
+        match self.periods() {
+            (Some(_), Some(_)) => Some(1),
+            (Some(_), None) if v_row(0) && v_row(nv - 1) => Some(0),
+            (None, Some(_)) if u_row(0) && u_row(nu - 1) => Some(0),
+            _ => None,
+        }
+    }
+
     /// Every control point, row-major.
     pub fn control_points(&self) -> impl ExactSizeIterator<Item = Point3> + '_ {
         self.points.iter().map(|&v| Point3::ORIGIN + v)
