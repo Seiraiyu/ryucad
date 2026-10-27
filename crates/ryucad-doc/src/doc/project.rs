@@ -29,7 +29,6 @@ use crate::expr::Env;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -590,24 +589,7 @@ fn load_part(
     })
 }
 
-/// Writes `contents` to `path` so that readers see the old file or the new
-/// one, never a mix: a temporary file in the same folder, then a rename.
-pub fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
-    let dir = path.parent().expect("a file path has a parent");
-    fs::create_dir_all(dir).map_err(|e| Error::io(dir, &e))?;
-    let name = path.file_name().expect("a file path has a name");
-    let tmp = dir.join(format!(".{}.tmp", name.to_string_lossy()));
-    let write = || -> std::io::Result<()> {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(contents.as_ref())?;
-        f.sync_all()?;
-        fs::rename(&tmp, path)
-    };
-    write().map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        Error::io(path, &e)
-    })
-}
+pub use crate::doc::source::write_atomic;
 
 /// Deletes a project file, then the folders above it that are left empty,
 /// up to `parts/`.

@@ -5,6 +5,7 @@
 use crate::error::{Error, Result};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// What an entry of a folder is.
@@ -112,6 +113,25 @@ impl Source for BTreeMap<String, Vec<u8>> {
     fn read(&self, path: &str) -> Result<Option<Vec<u8>>> {
         Ok(self.get(path).cloned())
     }
+}
+
+/// Writes `contents` to `path` so that readers see the old file or the new
+/// one, never a mix: a temporary file in the same folder, then a rename.
+pub fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    let dir = path.parent().expect("a file path has a parent");
+    fs::create_dir_all(dir).map_err(|e| Error::io(dir, &e))?;
+    let name = path.file_name().expect("a file path has a name");
+    let tmp = dir.join(format!(".{}.tmp", name.to_string_lossy()));
+    let write = || -> std::io::Result<()> {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(contents.as_ref())?;
+        f.sync_all()?;
+        fs::rename(&tmp, path)
+    };
+    write().map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        Error::io(path, &e)
+    })
 }
 
 /// `path` relative to `root`, with `/` on every platform.
