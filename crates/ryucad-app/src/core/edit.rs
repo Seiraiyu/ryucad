@@ -777,7 +777,11 @@ impl Form {
         let pose = instance.then(|| {
             let p = &v["pose"];
             let o = |i: usize| match p["origin_m"][i].as_f64() {
-                Some(m) => format!("{} {}", decimals(m / unit.factor(), places(unit)), unit.as_str()),
+                Some(m) => format!(
+                    "{} {}",
+                    decimals(m / unit.factor(), places(unit)),
+                    unit.as_str()
+                ),
                 None => text(&p["origin_m"][i]),
             };
             let axis = |a: &Value| -> Vec<String> { (0..3).map(|i| pose_number(&a[i])).collect() };
