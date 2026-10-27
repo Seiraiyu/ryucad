@@ -624,8 +624,11 @@ fn coincident(
     let loopless =
         |(b, f): (&Body, FaceId)| b.face_loops(f).all(|l| b.loops[l].first_fin.is_none());
     let whole = loopless(faces[0]) && loopless(faces[1]);
-    // Every fin of both faces in the first face's parameter plane.
-    let plane = surfaces[0];
+    // Every fin of both faces in the parameter plane of a surface holding
+    // both (the first face's, unless the second's or a plane both lie on
+    // reaches further).
+    let common = super::coincide::common(surfaces[0], surfaces[1]);
+    let plane = &common;
     let mut chains: [Vec<Edge2>; 2] = [Vec::new(), Vec::new()];
     for (k, &(body, face)) in faces.iter().enumerate() {
         for e in edges((body, face)) {

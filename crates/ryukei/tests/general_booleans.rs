@@ -477,3 +477,26 @@ fn neighbouring_loft_sides_meet_along_their_lateral() {
         assert_eq!(branches.len(), 1);
     }
 }
+
+/// Spline blocks flush with a spline block and with a block, side by side
+/// and offset: their coplanar faces are coincident (two flat splines on
+/// one plane), their edges met as the lines they are, and faces either
+/// side of an edge merge onto a surface holding both.
+#[test]
+fn flush_spline_blocks_unite() {
+    let unit = |k| {
+        primitive::block(OpKey(k), 1.0, 1.0, 1.0, &Rigid::IDENTITY)
+            .unwrap()
+            .0
+    };
+    let a = nurbs(unit(1));
+    for (tool, place, faces, want) in [
+        (nurbs(unit(2)), at(1.0, 0.0, 0.0), 6, 2.0),
+        (unit(2), at(1.0, 0.0, 0.0), 6, 2.0),
+        (nurbs(unit(2)), at(1.0, 0.5, 0.0), 10, 2.0),
+    ] {
+        let u = run(BooleanOp::Unite, &a, &tool, place);
+        assert_eq!(u.counts().faces, faces);
+        near(volume(&u), want);
+    }
+}
