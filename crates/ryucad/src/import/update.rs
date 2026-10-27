@@ -7,7 +7,8 @@
 //! by name, each in order among equals. A matched product's import
 //! features take the new hash (and its product's new name or ordinal);
 //! one with more bodies gains import features for them where a part holds
-//! all its old ones. A new product makes a part as importing does. A
+//! all its old ones. A new product makes a part as importing does, where
+//! the file was imported whole before (not only `--into` a part). A
 //! vanished product's features keep their product, take the new hash and
 //! fail `import_product_missing`.
 //!
@@ -128,9 +129,24 @@ pub fn plan(
             def_of_part.entry(p.clone()).or_insert(k);
         }
     }
+    // New products make parts only where the file was imported whole
+    // before: an assembly it made, or a part it founded. A file only ever
+    // imported `--into` a part makes none.
+    let founded = |p: &Id| {
+        project.parts.get(p).is_some_and(|x| {
+            x.order().first().is_some_and(|f| {
+                matches!(x.features.get(f), Some(Ok(Feature::Import(i))) if i.file.path == path)
+            })
+        })
+    };
+    let whole = !instances.is_empty() || features.iter().any(|(p, _, _)| founded(p));
     let had_unplaced = features.iter().any(|(_, _, i)| i.product.is_none());
     let unplaced = plan::bodies(opened, None) > 0 && !had_unplaced;
-    let made = fresh.make(&known, unplaced, &[])?;
+    let made = if whole {
+        fresh.make(&known, unplaced, &[])?
+    } else {
+        Vec::new()
+    };
     // Every definition's part, made or known: what a new usage places.
     let mut part_of: BTreeMap<usize, Id> = known.clone();
     for pl in &made {
@@ -402,6 +418,34 @@ pub fn plan(
     })
 }
 
+/// The definition of `opened` (the file at `path`) that `part` is: the
+/// product its instances from that file belong to, else its import
+/// features', as an update reads it.
+fn definition_of(project: &Project, part: &Id, path: &str, opened: &Opened) -> Option<usize> {
+    let p = project.parts.get(part)?;
+    let products = || {
+        p.order()
+            .iter()
+            .filter_map(|f| p.features.get(f)?.as_ref().ok())
+    };
+    let r = products()
+        .find_map(|f| match f {
+            Feature::Instance(i) => i
+                .import
+                .as_ref()
+                .filter(|u| u.file == path)
+                .map(|u| &u.product),
+            _ => None,
+        })
+        .or_else(|| {
+            products().find_map(|f| match f {
+                Feature::Import(i) if i.file.path == path => i.product.as_ref(),
+                _ => None,
+            })
+        })?;
+    (0..opened.products.definitions.len()).find(|&k| plan::product_of(opened, k) == *r)
+}
+
 /// `import_usage_missing` for each instance of assembly `part` an import
 /// made whose usage its file no longer has: kept by an update because a
 /// mate or pattern reads it.
@@ -422,13 +466,14 @@ pub fn usage_warnings(project: &Project, part: &Id) -> Vec<Value> {
         };
         let defs = &opened.products.definitions;
         let k = (0..defs.len()).find(|&k| plan::product_of(&opened, k) == u.product);
+        let child = definition_of(project, &i.part, &u.file, &opened);
         let found = k.is_some_and(|k| match &u.usage {
             None => plan::bodies(&opened, Some(k)) > 0,
-            Some(id) => defs[k]
-                .children
-                .iter()
-                .enumerate()
-                .any(|(n, o)| *o.id == **id && plan::usage_ordinal(&opened, k, n) == u.ordinal),
+            Some(id) => defs[k].children.iter().enumerate().any(|(n, o)| {
+                *o.id == **id
+                    && child == Some(o.definition)
+                    && plan::usage_ordinal(&opened, k, n) == u.ordinal
+            }),
         });
         if !found {
             let usage = u.usage.as_deref().unwrap_or("its own bodies");
@@ -607,6 +652,70 @@ mod tests {
         );
         assert_eq!(crate::session::files(dir.path()).unwrap(), before);
         assert_eq!(bytes(&s), was);
+    }
+
+    #[test]
+    fn a_file_only_imported_into_a_part_makes_no_parts() {
+        // One product's bodies added to a part; the rest of the file left.
+        let (_src, path) = outside(&occt("assembly.stp"));
+        let (dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "body", "params": {"x": 1, "y": 1, "z": 1}}),
+        )
+        .unwrap();
+        let e = call(&mut s, "import", json!({"path": path, "into": "p"})).unwrap_err();
+        let one = e.details["products"][0]["id"].as_str().unwrap().to_owned();
+        call(
+            &mut s,
+            "import",
+            json!({"path": path, "into": "p", "product": one}),
+        )
+        .unwrap();
+        let before = crate::session::files(dir.path()).unwrap();
+        let v = call(
+            &mut s,
+            "import",
+            json!({"path": path, "update": "imports/frame.step", "dry_run": true}),
+        )
+        .unwrap();
+        assert_eq!(v["parts"], json!([]), "{v}");
+        let v = call(
+            &mut s,
+            "import",
+            json!({"path": path, "update": "imports/frame.step"}),
+        )
+        .unwrap();
+        assert_eq!(v["parts"], json!([]), "{v}");
+        assert_eq!(crate::session::files(dir.path()).unwrap(), before);
+    }
+
+    #[test]
+    fn an_instance_placing_another_part_than_its_usage_is_warned_of() {
+        // The sub-assembly's first pin made by hand to place the loose
+        // block: its usage's id and ordinal are still the file's, its
+        // child isn't.
+        let (dir, mut s) = imported();
+        let file = dir.path().join("parts/s-1/features/1.json");
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("\"part\": \"p-1\""), "{text}");
+        std::fs::write(
+            &file,
+            text.replace("\"part\": \"p-1\"", "\"part\": \"l-1\""),
+        )
+        .unwrap();
+        s.reload().unwrap();
+        let r = call(&mut s, "rebuild", json!({"part": "s-1"})).unwrap();
+        let warned: Vec<&Value> = r["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|w| w["code"] == "import_usage_missing")
+            .map(|w| &w["feature"])
+            .collect();
+        assert_eq!(warned, [&json!("1")], "{r}");
     }
 
     #[test]
