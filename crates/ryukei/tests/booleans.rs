@@ -459,13 +459,12 @@ fn refusals_name_the_same_faces_on_any_number_of_threads() {
     }
 }
 
-/// A face on a swept surface takes part in a boolean only where it is
-/// apart from every face of the other operand: splitting it is phase
-/// 8.C's.
+/// A face on a swept surface takes part in a boolean like any other: a
+/// block through a spline blob's side cuts it, and what the cut takes and
+/// what it leaves make up the blob. A block inside it, which only the
+/// planar caps meet, cuts its exact volume out.
 #[test]
-fn a_swept_face_takes_part_only_apart() {
-    use ryukei::BooleanError;
-    use ryukei::Error;
+fn a_swept_face_takes_part() {
     use ryukei::geom::{Curve2, KnotVector, NurbsCurve2, Point2};
     use ryukei::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
     use std::sync::Arc;
@@ -495,20 +494,10 @@ fn a_swept_face_takes_part_only_apart() {
     })
     .unwrap();
     let (body, _) = extrude(OpKey(1), &profile, Vector3::new(0.0, 0.0, 1.0), 0.0, 1.0).unwrap();
-    // A block cutting through its side: refused, naming the side.
     let (through, _) = primitive::block(OpKey(2), 1.0, 1.0, 0.5, &at(0.5, -0.5, 0.25)).unwrap();
-    let tool = Tool {
-        key: ToolKey(1),
-        body: &through,
-        place: Rigid::IDENTITY,
-    };
-    let err = boolean(OpKey(3), BooleanOp::Subtract, &body, &[tool]).unwrap_err();
-    assert!(
-        matches!(err, Error::InvalidBoolean(BooleanError::Unsupported { .. })),
-        "{err:?}"
-    );
-    // A block inside it, its box reaching the side's, which only the
-    // planar caps meet: cut.
+    let cut = run(BooleanOp::Subtract, &body, &[(&through, Rigid::IDENTITY)]);
+    let kept = run(BooleanOp::Intersect, &body, &[(&through, Rigid::IDENTITY)]);
+    near(volume(&cut) + volume(&kept), volume(&body));
     let (inside, _) = primitive::block(OpKey(4), 0.6, 0.6, 2.0, &at(-0.3, -0.3, -0.5)).unwrap();
     let r = run(BooleanOp::Subtract, &body, &[(&inside, Rigid::IDENTITY)]);
     assert!((volume(&body) - volume(&r) - 0.36).abs() <= 1e-3);

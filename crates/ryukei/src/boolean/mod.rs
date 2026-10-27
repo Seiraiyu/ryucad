@@ -16,11 +16,11 @@
 //! which, and the journal says what happened to every operand's
 //! ([`names`]).
 //!
-//! Only faces on analytic surfaces (planes, cylinders, cones, spheres and
-//! tori) may meet; a face on any other surface takes part only where it
-//! is certified apart from every face it might meet. Coincident and
-//! tangent contact are handled by explicit rules; whatever stays uncertain
-//! is refused with [`BooleanError::Uncertain`], never guessed.
+//! Faces on any surface take part: analytic ones, pipes, NURBS, swept
+//! surfaces and sweeps along paths. Coincident and tangent contact are
+//! handled by explicit rules; whatever stays uncertain is refused with
+//! [`BooleanError::Uncertain`], never guessed, and a pair of surfaces no
+//! intersector takes with [`BooleanError::Unsupported`].
 
 pub(crate) mod build;
 pub(crate) mod classify;
@@ -65,9 +65,9 @@ pub struct Tool<'a> {
 ///
 /// The inputs must be solids that pass [`crate::check::check`] (debug
 /// builds assert it). Fails with [`Error::InvalidBoolean`] for duplicate
-/// tool keys, a tool placed outside the size box, faces that may meet on
-/// a surface that isn't analytic, a result that would be non-manifold, or
-/// anything that stays uncertain.
+/// tool keys, a tool placed outside the size box, faces on surfaces no
+/// intersector takes, a result that would be non-manifold, or anything
+/// that stays uncertain.
 pub fn boolean(
     key: OpKey,
     op: BooleanOp,
@@ -203,7 +203,7 @@ pub(crate) struct VertexRef {
 /// them.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Fail {
-    /// Two faces that may meet, one not on an analytic surface.
+    /// Two faces that may meet on surfaces no intersector takes.
     Unsupported(FaceRef, FaceRef),
     /// An intersection, ordering or classification that stayed uncertain.
     Uncertain(FaceRef, FaceRef),

@@ -101,7 +101,7 @@ pub enum BooleanError {
     DuplicateToolKey { key: ToolKey },
     /// A placed tool leaves the size box.
     OutsideSizeBox { tool: ToolKey },
-    /// Two faces that may meet, one not on an analytic surface.
+    /// Two faces that may meet on surfaces no intersector takes.
     Unsupported { a: Name, b: Name },
     /// The result would have an edge with more than two faces, or a
     /// vertex where faces meet in more than one fan: bodies touching along
@@ -506,7 +506,7 @@ impl fmt::Display for BooleanError {
             }
             Self::Unsupported { a, b } => write!(
                 f,
-                "faces {a} and {b} may meet and one is not on an analytic surface"
+                "faces {a} and {b} may meet on surfaces no intersector takes"
             ),
             Self::NonManifold { at, faces } => write!(
                 f,
