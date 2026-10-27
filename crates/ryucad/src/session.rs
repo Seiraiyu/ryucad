@@ -20,31 +20,19 @@ use crate::doc::id::Id;
 use crate::doc::project::{Part, Project};
 use crate::error::{Error, Result};
 use crate::rebuild::PartResult;
+use ryu_session::fresh::{Stamps, read_dir};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
-
-/// A modification time this close to when it was read may be followed by
-/// another write in the same timestamp tick, so it isn't trusted.
-const RACY: Duration = Duration::from_secs(2);
 
 /// How many revisions a session keeps loaded beside the working files.
 pub const REVISIONS: usize = 4;
 
-#[derive(Clone, Debug, PartialEq)]
-struct Stamp {
-    modified: Option<SystemTime>,
-    len: u64,
-    bytes: Arc<[u8]>,
-}
-
 pub struct Session {
     project: Project,
-    stamps: BTreeMap<PathBuf, Stamp>,
-    stamped_at: SystemTime,
+    stamps: Stamps,
     /// Each part's rebuild, and its results by feature keyed by their
     /// inputs' hash, so a rebuild reuses every feature whose inputs haven't
     /// changed; the same for parts read at release labels.
@@ -82,8 +70,7 @@ impl Session {
     pub fn open(root: &Path) -> Result<Session> {
         let mut s = Session {
             project: Project::load(root)?,
-            stamps: BTreeMap::new(),
-            stamped_at: SystemTime::now(),
+            stamps: Stamps::default(),
             store: Store::default(),
             pinned_parts: BTreeMap::new(),
             known: BTreeMap::new(),
@@ -117,22 +104,10 @@ impl Session {
     fn frozen(from: &Session, files: Files) -> Result<Session> {
         let root = from.root().to_path_buf();
         let project = Project::load_from(&root, &files)?;
-        let stamps = files
-            .into_iter()
-            .map(|(rel, bytes)| {
-                let path = rel.split('/').fold(root.clone(), |p, s| p.join(s));
-                let stamp = Stamp {
-                    modified: None,
-                    len: bytes.len() as u64,
-                    bytes: bytes.into(),
-                };
-                (path, stamp)
-            })
-            .collect();
+        let stamps = Stamps::frozen(&root, files);
         Ok(Session {
             project,
             stamps,
-            stamped_at: SystemTime::now(),
             store: Store {
                 results: BTreeMap::new(),
                 caches: from.store.caches.clone(),
@@ -228,24 +203,12 @@ impl Session {
     /// Every file the project's state depends on, as last read: what the
     /// activity log keeps of a change.
     pub fn snapshot(&self) -> Files {
-        let root = self.root();
-        self.stamps
-            .iter()
-            .map(|(p, s)| (crate::doc::project::relative(root, p), s.bytes.to_vec()))
-            .collect()
+        self.stamps.snapshot(self.root())
     }
 
     /// A hash of every file the project's state depends on, as last read.
     pub fn digest(&self) -> String {
-        let mut h = blake3::Hasher::new();
-        for (path, s) in &self.stamps {
-            let p = path.to_string_lossy();
-            h.update(&(p.len() as u64).to_le_bytes());
-            h.update(p.as_bytes());
-            h.update(&(s.bytes.len() as u64).to_le_bytes());
-            h.update(&s.bytes);
-        }
-        h.finalize().to_hex().to_string()
+        self.stamps.digest()
     }
 
     /// The rebuild of `part`, from the cache when nothing it reads has
@@ -632,46 +595,8 @@ impl Session {
     /// changed, sorted.
     fn scan(&mut self) -> Result<Vec<(String, &'static str)>> {
         let files = listed(self.root())?;
-        let trusted_before = self.stamped_at.checked_sub(RACY);
-        let mut changes = Vec::new();
-        let mut stamps = BTreeMap::new();
-        for (path, meta) in files {
-            let (modified, len) = (meta.modified().ok(), meta.len());
-            let old = self.stamps.get(&path);
-            let trusted = match (old, modified, trusted_before) {
-                (Some(o), Some(m), Some(t)) => o.modified == Some(m) && o.len == len && m < t,
-                _ => false,
-            };
-            let stamp = match old {
-                Some(o) if trusted => o.clone(),
-                _ => {
-                    let bytes = fs::read(&path).map_err(|e| Error::io(&path, &e))?;
-                    Stamp {
-                        modified,
-                        len,
-                        bytes: bytes.into(),
-                    }
-                }
-            };
-            match old {
-                None => changes.push((path.clone(), "created")),
-                Some(o) if o.bytes != stamp.bytes => changes.push((path.clone(), "modified")),
-                Some(_) => {}
-            }
-            stamps.insert(path, stamp);
-        }
-        for path in self.stamps.keys().filter(|p| !stamps.contains_key(*p)) {
-            changes.push((path.clone(), "deleted"));
-        }
-        self.stamped_at = SystemTime::now();
-        self.stamps = stamps;
         let root = self.project.root.clone();
-        let mut changes: Vec<(String, &'static str)> = changes
-            .into_iter()
-            .map(|(p, c)| (crate::doc::project::relative(&root, &p), c))
-            .collect();
-        changes.sort();
-        Ok(changes)
+        self.stamps.scan(&root, files)
     }
 }
 
@@ -685,7 +610,7 @@ impl crate::doc::source::Source for Session {
             .filter(|s| !s.is_empty())
             .fold(self.root().to_path_buf(), |p, s| p.join(s));
         let mut out: Vec<(String, Kind)> = Vec::new();
-        for path in self.stamps.range(at.clone()..).map(|(p, _)| p) {
+        for path in self.stamps.paths_from(&at) {
             let Ok(rest) = path.strip_prefix(&at) else {
                 break;
             };
@@ -712,7 +637,7 @@ impl crate::doc::source::Source for Session {
             .split('/')
             .filter(|s| !s.is_empty())
             .fold(self.root().to_path_buf(), |p, s| p.join(s));
-        Ok(self.stamps.get(&path).map(|s| s.bytes.to_vec()))
+        Ok(self.stamps.bytes(&path).map(<[u8]>::to_vec))
     }
 }
 
@@ -756,33 +681,6 @@ fn listed(root: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
     }
     let imports = root.join(crate::doc::project::IMPORTS);
     out.extend(read_dir(&imports)?.into_iter().filter(|(_, m)| m.is_file()));
-    Ok(out)
-}
-
-/// Each entry in `dir` with its metadata, following symlinks; empty when
-/// `dir` doesn't exist. An entry gone by the time it is looked at is left
-/// out.
-fn read_dir(dir: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(Error::io(dir, &e)),
-    };
-    let mut out = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|e| Error::io(dir, &e))?;
-        let path = entry.path();
-        let meta = match entry.file_type() {
-            Ok(t) if t.is_symlink() => fs::metadata(&path),
-            Ok(_) => entry.metadata(),
-            Err(e) => Err(e),
-        };
-        match meta {
-            Ok(m) => out.push((path, m)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(Error::io(&path, &e)),
-        }
-    }
     Ok(out)
 }
 

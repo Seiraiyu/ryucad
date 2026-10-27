@@ -8,6 +8,7 @@
 //! the product's, behind the trait.
 
 pub mod endpoint;
+pub mod fresh;
 pub mod notify;
 pub mod rpc;
 
