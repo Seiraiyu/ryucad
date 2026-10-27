@@ -9,6 +9,7 @@ repository.workspace = true
 # Rust only: no C or assembly to build on any platform.
 blake3 = { version = "1", features = ["pure"] }
 interprocess = "2"
+rayon = "1"
 ryu-doc = { path = "../ryu-doc" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
