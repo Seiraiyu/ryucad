@@ -59,6 +59,7 @@ jobs:
       - run: cargo test -p ryukei --release --test along
       - run: cargo test -p ryukei --release --test loft
       - run: cargo test -p ryustep --release --test round_trip_props
+      - run: cargo test -p ryustep --release --test write
       - run: cargo test -p ryustep --release --test checks
       - run: cargo test -p ryucad --release --test bar -- --nocapture
       - if: failure()

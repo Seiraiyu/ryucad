@@ -23,7 +23,9 @@
 //!
 //! A pipe face becomes a NURBS within `pipe_tolerance`
 //! ([`crate::geom::Pipe::to_nurbs_within`], periodic along a closed spine
-//! it wraps), its bound the face's tolerance. Pcurves go with each use
+//! it wraps), its bound the face's tolerance; so does a sweep face
+//! ([`crate::geom::Sweep::to_nurbs_within`], periodic along a closed path
+//! it wraps). Pcurves go with each use
 //! where they run on the edge's own parameter; seams get theirs, iso
 //! lines on the same parameter.
 
@@ -65,6 +67,7 @@ pub fn seamed(body: &Body, pipe_tolerance: f64) -> Result<Shape, Error> {
     order.sort_by_key(|&k| names[k]);
     for &k in &order {
         pipe_to_nurbs(&mut cut, k, pipe_tolerance)?;
+        sweep_to_nurbs(&mut cut, k, pipe_tolerance)?;
     }
     for &k in &order {
         seam(&mut cut, k)?;
@@ -380,6 +383,81 @@ fn pipe_to_nurbs(cut: &mut Cut, k: usize, tolerance: f64) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// A sweep face's surface replaced by a NURBS within `tolerance` over the
+/// stretch of path the face covers, and all of its profile: periodic
+/// along the path where the face wraps a closed one, and round a closed
+/// profile as the profile's own NURBS is. Its uses lose their pcurves, as
+/// a pipe face's do.
+fn sweep_to_nurbs(cut: &mut Cut, k: usize, tolerance: f64) -> Result<(), Error> {
+    let Surface::Sweep(sweep) = &cut.s.surfaces[cut.s.faces[k].surface] else {
+        return Ok(());
+    };
+    let sweep = sweep.clone();
+    let periods = sweep.periods();
+    let [d0, d1] = sweep.path_range();
+    let info = loops(cut, k, periods);
+    let (lo, hi) = info
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |a, l| {
+            (a.0.min(l.extent[1][0]), a.1.max(l.extent[1][1]))
+        });
+    let wraps = info.iter().any(|l| l.wind[1] != 0) || info.iter().all(|l| l.hole);
+    let range = match periods.1 {
+        Some(p) if wraps || hi - lo >= p => {
+            let s0 = if lo.is_finite() { lo } else { d0 };
+            [s0, s0 + p]
+        }
+        _ => {
+            let m = 1e-6 * (hi - lo).max(LINEAR_RESOLUTION);
+            [(lo - m).max(d0), (hi + m).min(d1)]
+        }
+    };
+    let (mut n, _, bound) = sweep.to_nurbs_within(range, tolerance)?;
+    if let Some(p) = periods.1
+        && range[1] - range[0] == p
+    {
+        n = periodic_along_v(&n)?;
+    }
+    cut.s.surfaces.push(Surface::Nurbs(Arc::new(n)));
+    let face = &mut cut.s.faces[k];
+    face.surface = cut.s.surfaces.len() - 1;
+    face.tolerance = bound;
+    for l in &mut face.loops {
+        if let Loop::Edges(uses) = l {
+            for u in uses {
+                u.pcurve = None;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// As [`periodic_along_u`], along `v`: a sweep's NURBS round a closed path
+/// over one period.
+fn periodic_along_v(n: &NurbsSurface) -> Result<NurbsSurface, Error> {
+    let [ku, kv] = n.knots();
+    let mut mults = kv.mults().to_vec();
+    let inner = mults[1..mults.len() - 1]
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(kv.degree());
+    let last = mults.len() - 1;
+    mults[0] = inner;
+    mults[last] = inner;
+    let periodic = KnotVector::periodic(kv.degree(), kv.knots(), &mults)?;
+    let [nu, nv] = n.counts();
+    let keep = periodic.control_count();
+    let points: Vec<Point3> = (0..nu)
+        .flat_map(|i| (0..keep).map(move |j| (i, j)))
+        .map(|(i, j)| n.control_point(i, j))
+        .collect();
+    let weights: Vec<f64> = (0..nu)
+        .flat_map(|i| (0..keep).map(move |j| n.weights()[i * nv + j]))
+        .collect();
+    NurbsSurface::new([ku.clone(), periodic], points, Some(weights))
 }
 
 /// A clamped NURBS whose first and last rows along `u` are one section
