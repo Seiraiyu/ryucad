@@ -54,26 +54,26 @@ impl Layout {
 }
 
 /// The loops of a lump: the outer loop, then the holes.
-fn loops(lump: &Lump) -> impl Iterator<Item = &ValidLoop> {
+pub(super) fn loops(lump: &Lump) -> impl Iterator<Item = &ValidLoop> {
     core::iter::once(&lump.outer).chain(&lump.holes)
 }
 
 /// A loop of one closed segment.
-fn closed(lp: &ValidLoop) -> bool {
+pub(super) fn closed(lp: &ValidLoop) -> bool {
     lp.segments.len() == 1
 }
 
 /// Whether a closed loop's curve, by increasing parameter, runs
 /// counterclockwise about the profile's normal. The loop itself runs
 /// counterclockwise when it is an outer loop.
-fn curve_ccw(lp: &ValidLoop, outer: bool) -> bool {
+pub(super) fn curve_ccw(lp: &ValidLoop, outer: bool) -> bool {
     let s = &lp.segments[0];
     (s.t1 > s.t0) == outer
 }
 
 /// The profile plane's outward direction from a segment: its right, as
 /// the loop runs (the region is on the left of every loop).
-fn outward(frame: &Frame, s: &Segment) -> (Point3, Vector3) {
+pub(super) fn outward(frame: &Frame, s: &Segment) -> (Point3, Vector3) {
     let mut t = 0.5;
     loop {
         let at = s.t0 + (s.t1 - s.t0) * t;
@@ -100,7 +100,7 @@ pub(crate) fn sense_of(surface: &Surface, frame: &Frame, s: &Segment) -> Sense {
 
 /// A cap's plane: the profile's plane moved by `at`, facing `outward`
 /// times the profile's normal.
-fn cap(frame: &Frame, at: &Rigid, outward: f64) -> Result<Surface, Error> {
+pub(super) fn cap(frame: &Frame, at: &Rigid, outward: f64) -> Result<Surface, Error> {
     let moved = frame.transformed(at);
     let z = moved.z().get() * outward;
     let f = Frame::new(moved.origin(), z, moved.x().get())?;

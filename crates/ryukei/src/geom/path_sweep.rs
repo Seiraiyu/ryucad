@@ -514,6 +514,29 @@ impl Sweep {
         Ok((surface, [reparam, Reparam::Identity], worst))
     }
 
+    /// The curve the profile's point at `u` sweeps over `[s0, s1]` of the
+    /// path (a lateral edge), as a cubic spline in `s` within `tolerance`
+    /// (at least [`crate::tol::LINEAR_RESOLUTION`]) of `P(u, s)` at every
+    /// `s`, and the certified bound: as [`Sweep::to_nurbs_within`] fits a
+    /// control point, so its pcurve is the iso line at `u`. Fails like it.
+    pub(crate) fn rail(
+        &self,
+        u: f64,
+        [s0, s1]: [f64; 2],
+        tolerance: f64,
+    ) -> Result<(super::NurbsCurve, f64), Error> {
+        let tolerance = tolerance.max(crate::tol::LINEAR_RESOLUTION);
+        let [d0, d1] = self.carry.range();
+        if !(s0 < s1 && d0 <= s0 && s1 <= d1) {
+            return Err(Error::Degenerate);
+        }
+        let (along, rows, worst) =
+            self.fit_carried(&[self.profile.point(u)], [s0, s1], tolerance)?;
+        let mut rows = rows;
+        let curve = super::NurbsCurve::new(along, rows.remove(0), None)?;
+        Ok((curve, worst))
+    }
+
     /// Cubic Hermite splines in `s` over `[s0, s1]` through the points
     /// `pts` carried along (see [`Sweep::to_nurbs_within`]): the knots,
     /// each point's control points, and the worst certified bound, within
