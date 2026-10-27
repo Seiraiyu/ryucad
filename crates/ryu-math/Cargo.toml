@@ -1,0 +1,12 @@
+[package]
+name = "ryu-math"
+description = "Deterministic scalar math shared by ryukei and the file formats: the same bits on every platform"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+libm = "0.2"
+
+[dev-dependencies]
+proptest = "1"

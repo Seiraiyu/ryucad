@@ -66,77 +66,125 @@ impl fmt::Display for Unit {
     }
 }
 
-/// What a value measures, as powers of length and angle: a length is
-/// `{length: 1, angle: 0}`, an area `{2, 0}`, a plain number `{0, 0}`.
+/// What a value measures, as powers of length and angle and, for
+/// electrical quantities, of mass, time and current (the SI base units
+/// they are made of): a length is `{length: 1}`, an area `{length: 2}`, a
+/// plain number all zeros, a volt `{length: 2, mass: 1, time: -3,
+/// current: -1}`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Dim {
     pub length: i8,
     pub angle: i8,
+    pub mass: i8,
+    pub time: i8,
+    pub current: i8,
 }
 
 impl Dim {
-    pub const NUMBER: Dim = Dim {
-        length: 0,
-        angle: 0,
-    };
-    pub const LENGTH: Dim = Dim {
-        length: 1,
-        angle: 0,
-    };
-    pub const ANGLE: Dim = Dim {
-        length: 0,
-        angle: 1,
-    };
+    pub const NUMBER: Dim = Dim::of([0, 0, 0, 0, 0]);
+    pub const LENGTH: Dim = Dim::of([1, 0, 0, 0, 0]);
+    pub const ANGLE: Dim = Dim::of([0, 1, 0, 0, 0]);
+    pub const TIME: Dim = Dim::of([0, 0, 0, 1, 0]);
+    pub const FREQUENCY: Dim = Dim::of([0, 0, 0, -1, 0]);
+    pub const CURRENT: Dim = Dim::of([0, 0, 0, 0, 1]);
+    pub const VOLTAGE: Dim = Dim::of([2, 0, 1, -3, -1]);
+    pub const RESISTANCE: Dim = Dim::of([2, 0, 1, -3, -2]);
+    pub const CAPACITANCE: Dim = Dim::of([-2, 0, -1, 4, 2]);
+    pub const INDUCTANCE: Dim = Dim::of([2, 0, 1, -2, -2]);
+    pub const POWER: Dim = Dim::of([2, 0, 1, -3, 0]);
+
+    /// The electrical dimensions by name, and the symbol of their SI unit.
+    pub const ELECTRICAL: [(&'static str, Dim, &'static str); 8] = [
+        ("voltage", Dim::VOLTAGE, "V"),
+        ("current", Dim::CURRENT, "A"),
+        ("resistance", Dim::RESISTANCE, "Ohm"),
+        ("capacitance", Dim::CAPACITANCE, "F"),
+        ("inductance", Dim::INDUCTANCE, "H"),
+        ("frequency", Dim::FREQUENCY, "Hz"),
+        ("power", Dim::POWER, "W"),
+        ("time", Dim::TIME, "s"),
+    ];
+
+    /// The dimension with these powers of length, angle, mass, time and
+    /// current.
+    pub const fn of([length, angle, mass, time, current]: [i8; 5]) -> Dim {
+        Dim {
+            length,
+            angle,
+            mass,
+            time,
+            current,
+        }
+    }
+
+    fn powers(self) -> [i32; 5] {
+        [
+            self.length as i32,
+            self.angle as i32,
+            self.mass as i32,
+            self.time as i32,
+            self.current as i32,
+        ]
+    }
 
     /// The dimension of a product; `None` past the powers anyone needs.
     pub fn times(self, o: Dim) -> Option<Dim> {
-        Dim::new(
-            self.length as i32 + o.length as i32,
-            self.angle as i32 + o.angle as i32,
-        )
+        let (a, b) = (self.powers(), o.powers());
+        Dim::new(std::array::from_fn(|i| a[i] + b[i]))
     }
 
     /// The dimension of a quotient.
     pub fn per(self, o: Dim) -> Option<Dim> {
-        Dim::new(
-            self.length as i32 - o.length as i32,
-            self.angle as i32 - o.angle as i32,
-        )
+        let (a, b) = (self.powers(), o.powers());
+        Dim::new(std::array::from_fn(|i| a[i] - b[i]))
     }
 
     /// The dimension of `self` to the power `n`.
     pub fn pow(self, n: i32) -> Option<Dim> {
-        Dim::new(self.length as i32 * n, self.angle as i32 * n)
+        let a = self.powers();
+        Dim::new(std::array::from_fn(|i| a[i] * n))
     }
 
     /// The square root's dimension, when every power is even.
     pub fn sqrt(self) -> Option<Dim> {
-        (self.length % 2 == 0 && self.angle % 2 == 0).then_some(Dim {
-            length: self.length / 2,
-            angle: self.angle / 2,
-        })
+        let a = self.powers();
+        a.iter()
+            .all(|p| p % 2 == 0)
+            .then(|| Dim::new(std::array::from_fn(|i| a[i] / 2)))
+            .flatten()
     }
 
-    fn new(length: i32, angle: i32) -> Option<Dim> {
+    fn new(powers: [i32; 5]) -> Option<Dim> {
         const MAX: i32 = 16;
-        (length.abs() <= MAX && angle.abs() <= MAX).then_some(Dim {
-            length: length as i8,
-            angle: angle as i8,
-        })
+        powers
+            .iter()
+            .all(|p| p.abs() <= MAX)
+            .then(|| Dim::of(powers.map(|p| p as i8)))
     }
 
     /// How people read it: `length`, `angle`, `number`, `length^2`,
-    /// `length*angle^-1`.
+    /// `length*angle^-1`; an electrical dimension by its name (`voltage`),
+    /// and any other product of powers in the order length, angle, mass,
+    /// time, current (`mass*time^-2`).
     pub fn name(self) -> String {
+        if let Some((name, _, _)) = Dim::ELECTRICAL.iter().find(|(_, d, _)| *d == self) {
+            return (*name).to_owned();
+        }
         let part = |name: &str, p: i8| match p {
             0 => None,
             1 => Some(name.to_owned()),
             p => Some(format!("{name}^{p}")),
         };
-        let parts: Vec<String> = [part("length", self.length), part("angle", self.angle)]
-            .into_iter()
-            .flatten()
-            .collect();
+        let parts: Vec<String> = [
+            part("length", self.length),
+            part("angle", self.angle),
+            part("mass", self.mass),
+            part("time", self.time),
+            part("current", self.current),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         if parts.is_empty() {
             "number".to_owned()
         } else {
@@ -144,7 +192,9 @@ impl Dim {
         }
     }
 
-    /// The dimension [`Dim::name`] writes as `s`.
+    /// The dimension [`Dim::name`] writes as `s`, for the powers of length
+    /// and angle ryucad's and ryupdm's files name; electrical dimensions
+    /// aren't read here (see [`Quantity::electrical`]).
     pub fn parse(s: &str) -> Option<Dim> {
         if s == "number" {
             return Some(Dim::NUMBER);
@@ -162,7 +212,7 @@ impl Dim {
                 _ => return None,
             }
         }
-        Dim::new(length.unwrap_or(0), angle.unwrap_or(0))
+        Dim::new([length.unwrap_or(0), angle.unwrap_or(0), 0, 0, 0])
     }
 
     /// The key output gives the SI value under: `m`, `rad`, `n`, or `si`
@@ -188,6 +238,41 @@ pub fn literal_unit(s: &str) -> Option<(f64, Dim)> {
         "rad" => Some((1.0, Dim::ANGLE)),
         _ => Unit::parse(s).map(|u| (u.factor(), Dim::LENGTH)),
     }
+}
+
+/// The SI prefixes an electrical unit may carry, and their factors as the
+/// f64s nearest the exact decimals. `u`, `µ` (U+00B5) and `μ` (U+03BC)
+/// are all micro; output writes `u`.
+const PREFIXES: [(&str, f64); 10] = [
+    ("p", 1e-12),
+    ("n", 1e-9),
+    ("u", 1e-6),
+    ("\u{b5}", 1e-6),
+    ("\u{3bc}", 1e-6),
+    ("m", 1e-3),
+    ("", 1.0),
+    ("k", 1e3),
+    ("M", 1e6),
+    ("G", 1e9),
+];
+
+/// The unit of an electrical literal of dimension `dim`: its factor to SI
+/// and how output writes it (`nF`, `kOhm`, `uA`). The ohm is `Ohm`, `ohm`,
+/// `Ω` (U+03A9) or `Ω` (U+2126), written `Ohm`.
+fn electrical_unit(dim: Dim, s: &str) -> Option<(f64, String)> {
+    let (_, _, symbol) = Dim::ELECTRICAL.iter().find(|(_, d, _)| *d == dim)?;
+    let spellings: &[&str] = if *symbol == "Ohm" {
+        &["Ohm", "ohm", "\u{3a9}", "\u{2126}"]
+    } else {
+        &[symbol]
+    };
+    PREFIXES.iter().find_map(|(prefix, factor)| {
+        let rest = s.strip_prefix(prefix)?;
+        spellings.contains(&rest).then(|| {
+            let prefix = if *factor == 1e-6 { "u" } else { prefix };
+            (*factor, format!("{prefix}{symbol}"))
+        })
+    })
 }
 
 /// Every unit name, for messages and reserved names.
@@ -317,6 +402,43 @@ impl Quantity {
             literal: true,
             dim,
         })
+    }
+
+    /// An electrical quantity of dimension `dim` (one of
+    /// [`Dim::ELECTRICAL`]'s): a literal `<number> <unit>` with an SI
+    /// prefix (`3.3 V`, `100nF`, `4.7 kOhm`, `20 mA`), its text written
+    /// with the unit's canonical spelling. There is no default unit, and
+    /// no expression: electrical units are never names in expressions, so
+    /// no parameter name is reserved by them.
+    pub fn electrical(s: &str, dim: Dim) -> Result<Quantity> {
+        let t = s.trim();
+        let end = number_len(t);
+        let (number, rest) = t.split_at(end);
+        let unit = (end > 0)
+            .then(|| electrical_unit(dim, rest.trim_start()))
+            .flatten();
+        match unit {
+            Some(unit) => Quantity::literal(s, number, unit, dim),
+            None => Err(Error::new(
+                Code::InvalidQuantity,
+                format!(
+                    "bad quantity {s:?}: expected a {} such as {}",
+                    dim.name(),
+                    match Dim::ELECTRICAL.iter().find(|(_, d, _)| *d == dim) {
+                        Some((_, _, symbol)) => format!("\"1 {symbol}\""),
+                        None => "a number with its unit".to_owned(),
+                    }
+                ),
+            )
+            .with("value", s)
+            .with("kind", dim.name())),
+        }
+    }
+
+    /// An electrical quantity's value in SI units (volts, amperes, ohms,
+    /// farads, henries, hertz, watts or seconds).
+    pub fn si(&self) -> f64 {
+        self.si
     }
 
     /// A quantity from JSON: a string as [`parse`](Self::parse), or a bare
@@ -450,7 +572,7 @@ mod tests {
     #[test]
     fn dimensions_read_back_their_names() {
         for (l, a) in [(0, 0), (1, 0), (0, 1), (2, 0), (3, 0), (1, -1), (-2, 3)] {
-            let d = Dim::new(l, a).unwrap();
+            let d = Dim::new([l, a, 0, 0, 0]).unwrap();
             assert_eq!(Dim::parse(&d.name()), Some(d), "{}", d.name());
         }
         for bad in [
@@ -464,6 +586,79 @@ mod tests {
         ] {
             assert_eq!(Dim::parse(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn electrical_dimensions_are_named_and_never_parsed() {
+        for (name, d, _) in Dim::ELECTRICAL {
+            assert_eq!(d.name(), name);
+            assert_eq!(Dim::parse(name), None, "{name}");
+        }
+        assert_eq!(Dim::VOLTAGE.per(Dim::CURRENT), Some(Dim::RESISTANCE));
+        assert_eq!(Dim::VOLTAGE.times(Dim::CURRENT), Some(Dim::POWER));
+        assert_eq!(
+            Dim::RESISTANCE.times(Dim::CAPACITANCE),
+            Some(Dim::TIME),
+            "an RC constant is a time"
+        );
+        assert_eq!(Dim::of([0, 0, 1, -2, 0]).name(), "mass*time^-2");
+        assert_eq!(
+            Dim::LENGTH.times(Dim::ANGLE).unwrap().name(),
+            "length*angle"
+        );
+        assert_eq!(Dim::POWER.sqrt(), None);
+    }
+
+    #[test]
+    fn electrical_literals() {
+        for (s, d, text, si) in [
+            ("3.3 V", Dim::VOLTAGE, "3.3 V", 3.3),
+            ("100nF", Dim::CAPACITANCE, "100 nF", 100.0 * 1e-9),
+            ("4.7 kOhm", Dim::RESISTANCE, "4.7 kOhm", 4.7 * 1e3),
+            ("4.7 kohm", Dim::RESISTANCE, "4.7 kOhm", 4.7 * 1e3),
+            ("10 \u{3a9}", Dim::RESISTANCE, "10 Ohm", 10.0),
+            ("10 \u{2126}", Dim::RESISTANCE, "10 Ohm", 10.0),
+            ("20 mA", Dim::CURRENT, "20 mA", 20.0 * 1e-3),
+            ("2.2 \u{b5}H", Dim::INDUCTANCE, "2.2 uH", 2.2 * 1e-6),
+            ("2.2 \u{3bc}H", Dim::INDUCTANCE, "2.2 uH", 2.2 * 1e-6),
+            ("8 MHz", Dim::FREQUENCY, "8 MHz", 8.0 * 1e6),
+            ("1.5 W", Dim::POWER, "1.5 W", 1.5),
+            ("10 ns", Dim::TIME, "10 ns", 10.0 * 1e-9),
+            ("90 Ohm", Dim::RESISTANCE, "90 Ohm", 90.0),
+        ] {
+            let q = Quantity::electrical(s, d).unwrap();
+            assert_eq!(q.text(), text, "{s}");
+            assert_eq!(q.si(), si, "{s}");
+            assert_eq!(q.dim(), d, "{s}");
+            assert_eq!(q.report(), json!({"value": text, "si": si}), "{s}");
+        }
+        for (s, d) in [
+            ("3.3", Dim::VOLTAGE),
+            ("3.3 A", Dim::VOLTAGE),
+            ("3.3 mm", Dim::VOLTAGE),
+            ("1 kF", Dim::LENGTH),
+            ("2 * 1.65 V", Dim::VOLTAGE),
+            ("V", Dim::VOLTAGE),
+            ("1 TOhm", Dim::RESISTANCE),
+        ] {
+            let e = Quantity::electrical(s, d).unwrap_err();
+            assert_eq!(e.code, Code::InvalidQuantity, "{s}");
+        }
+    }
+
+    #[test]
+    fn electrical_units_reserve_no_parameter_names() {
+        // Expressions read only ryucad's units, so a parameter called `s`
+        // or `ms` still reads as before.
+        let lookup = |name: &str| match name {
+            "s" | "ms" | "ohm" => Ok(Val::new(0.002, Dim::LENGTH)),
+            _ => no_parameters(name),
+        };
+        for name in ["s", "ms", "ohm"] {
+            let q = Quantity::eval(&format!("2 * {name}"), Unit::Mm, &lookup).unwrap();
+            assert_eq!(q.meters(), 0.004, "{name}");
+        }
+        assert_eq!(UNIT_NAMES.len(), 8);
     }
 
     fn q(s: &str) -> Quantity {

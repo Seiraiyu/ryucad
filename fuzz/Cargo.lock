@@ -1679,6 +1679,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "ryu-doc"
+version = "0.0.0"
+dependencies = [
+ "ryu-math",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ryu-math"
+version = "0.0.0"
+dependencies = [
+ "libm",
+]
+
+[[package]]
+name = "ryu-session"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "interprocess",
+ "libc",
+ "ryu-doc",
+ "serde",
+ "serde_json",
+ "widestring",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "ryucad"
 version = "0.0.0"
 dependencies = [
@@ -1691,6 +1721,7 @@ dependencies = [
  "mimalloc",
  "png",
  "rayon",
+ "ryu-session",
  "ryucad-doc",
  "ryukei",
  "ryumate",
@@ -1709,6 +1740,7 @@ name = "ryucad-doc"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "ryu-doc",
  "ryukei",
  "ryusketch",
  "serde",
@@ -1719,9 +1751,9 @@ dependencies = [
 name = "ryukei"
 version = "0.0.0"
 dependencies = [
- "libm",
  "num-bigint",
  "rayon",
+ "ryu-math",
 ]
 
 [[package]]

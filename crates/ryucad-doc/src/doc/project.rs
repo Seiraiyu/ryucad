@@ -29,7 +29,6 @@ use crate::expr::Env;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -135,21 +134,7 @@ impl Part {
     }
 }
 
-/// On Windows `canonicalize` gives a verbatim path (`\\?\C:\…`). Agents see
-/// the ordinary `C:\…` form, which is what `init` reports too. UNC paths and
-/// paths too long for the ordinary form stay verbatim.
-pub fn plain(p: PathBuf) -> PathBuf {
-    #[cfg(windows)]
-    {
-        if let Some(rest) = p.to_str().and_then(|s| s.strip_prefix(r"\\?\"))
-            && rest.as_bytes().get(1) == Some(&b':')
-            && rest.len() < 260
-        {
-            return PathBuf::from(rest);
-        }
-    }
-    p
-}
+pub use crate::doc::source::plain;
 
 /// The nearest folder at or above `start` that holds a `ryucad.json`. A
 /// folder that has lost its manifest but still has parts is
@@ -232,14 +217,7 @@ pub fn feature_path(root: &Path, part: &Id, feature: &Id) -> PathBuf {
         .join(format!("{feature}.json"))
 }
 
-/// `path` relative to `root`, with `/` on every platform.
-pub fn relative(root: &Path, path: &Path) -> String {
-    let rel = path.strip_prefix(root).unwrap_or(path);
-    rel.components()
-        .map(|c| c.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
-}
+pub use crate::doc::source::relative;
 
 /// `merge_conflict` for the file at `at` if its JSON lists merge
 /// conflicts, naming their pointers, and a feature's `type` where no
@@ -611,24 +589,7 @@ fn load_part(
     })
 }
 
-/// Writes `contents` to `path` so that readers see the old file or the new
-/// one, never a mix: a temporary file in the same folder, then a rename.
-pub fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
-    let dir = path.parent().expect("a file path has a parent");
-    fs::create_dir_all(dir).map_err(|e| Error::io(dir, &e))?;
-    let name = path.file_name().expect("a file path has a name");
-    let tmp = dir.join(format!(".{}.tmp", name.to_string_lossy()));
-    let write = || -> std::io::Result<()> {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(contents.as_ref())?;
-        f.sync_all()?;
-        fs::rename(&tmp, path)
-    };
-    write().map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        Error::io(path, &e)
-    })
-}
+pub use crate::doc::source::write_atomic;
 
 /// Deletes a project file, then the folders above it that are left empty,
 /// up to `parts/`.
