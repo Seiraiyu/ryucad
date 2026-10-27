@@ -4504,6 +4504,15 @@ pub(crate) fn diff(
         let from = rebuilt_at(session, from)?;
         let to = rebuilt_at(session, to)?;
         crate::diff::model(&mut v, &from, &to, opts);
+        // Each imported file that differs, by product.
+        if let Some(Value::Array(files)) = v.get_mut("imports") {
+            for f in files {
+                let path = f["path"].as_str().unwrap_or_default().to_owned();
+                let (a, b) = (fa.get(&path), fb.get(&path));
+                f["products"] =
+                    crate::import::products_diff(&path, a.map(Vec::as_slice), b.map(Vec::as_slice));
+            }
+        }
     }
     Ok(v)
 }
