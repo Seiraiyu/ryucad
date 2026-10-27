@@ -99,7 +99,7 @@ fn the_form_edits_an_instance() {
     assert!(ws.wait_until(WAIT, |ws| ws.form.is_some()));
     let f = ws.form.as_mut().unwrap();
     assert_eq!(f.ty, "instance");
-    assert_eq!(f.origin[0].read, "0.04 m");
+    assert_eq!(f.origin[0].read, "40 mm");
     assert_eq!(f.rev.as_ref().unwrap().read, "working");
     f.origin[1].text = "15 mm".into();
     f.fixed.as_mut().unwrap().chosen = true;

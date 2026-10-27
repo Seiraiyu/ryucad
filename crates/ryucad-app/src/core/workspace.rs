@@ -289,6 +289,11 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// The project's default unit, for forms.
+    fn unit(&self) -> ryucad::units::Unit {
+        ryucad::units::Unit::parse(&self.model.default_unit).unwrap_or(ryucad::units::Unit::Mm)
+    }
+
     /// Opens the project at `root` (canonical) as the human `name`, and
     /// starts loading it.
     pub fn open(root: &Path, daemon: &Daemon, name: &str, wake: Wake) -> Result<Workspace> {
@@ -1525,7 +1530,7 @@ impl Workspace {
                 if wanted {
                     let mut form = match before {
                         Some(b) => b.reloaded(&a.result),
-                        None => Form::from_show(&part, &a.result),
+                        None => Form::from_show_in(&part, &a.result, self.unit()),
                     };
                     if let Some(p) = self.model.parts.get(&part) {
                         form.offer(&p.founders());
@@ -1608,7 +1613,7 @@ impl Workspace {
                 if let Some(f) = &self.form {
                     let mut v = a.result["feature"].clone();
                     v["revision"] = a.result["revision"].clone();
-                    self.form = Some(Form::from_show(&f.part, &v));
+                    self.form = Some(Form::from_show_in(&f.part, &v, self.unit()));
                 }
             }
             (Pending::Save, Err(e)) => {

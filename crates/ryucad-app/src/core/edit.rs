@@ -10,6 +10,7 @@
 
 use ryucad::error::Error;
 use ryucad::proto::{FeatureFields, PlacementArg, Request};
+use ryucad::units::Unit;
 use serde_json::{Map, Value, json};
 
 /// One editable value: its name, as read, and as typed.
@@ -672,6 +673,8 @@ pub struct Form {
     pub ty: String,
     /// The part revision the values were read at.
     pub revision: String,
+    /// The unit origins are shown in: the project's default.
+    pub unit: Unit,
     pub params: Vec<Field>,
     /// The origin's three quantities, then the z and x axes' six numbers.
     pub origin: [Field; 3],
@@ -697,7 +700,7 @@ pub struct Form {
     /// A mate's form, driven values and offsets.
     pub mate: Option<MateForm>,
     /// An instance's revision (`working` or a label) and whether it is
-    /// fixed; its pose is the placement, its origin in meters.
+    /// fixed; its pose is the placement, its origin in [`Form::unit`].
     pub rev: Option<Choice>,
     pub fixed: Option<Flag>,
     /// What changed under a save that conflicted.
@@ -718,19 +721,34 @@ fn text(v: &Value) -> String {
     }
 }
 
-/// A pose's number as the form shows it: to 12 decimals (a picometre,
-/// a millionth of a microradian), trailing zeros dropped, so a field
-/// never hides an exponent (`6.123233995736766e-17` reads `0`; issue
-/// #108).
-fn pose_number(v: &Value) -> String {
-    let Some(x) = v.as_f64() else {
-        return text(v);
-    };
-    let s = format!("{x:.12}");
+/// `x` to `places` decimals, trailing zeros dropped, so a field never
+/// hides an exponent (`6.123233995736766e-17` reads `0`; issue #108).
+fn decimals(x: f64, places: usize) -> String {
+    let s = format!("{x:.places$}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     match s {
         "-0" | "" => "0".to_owned(),
         s => s.to_owned(),
+    }
+}
+
+/// A pose's axis component as the form shows it: to 12 decimals (a
+/// millionth of a microradian).
+fn pose_number(v: &Value) -> String {
+    match v.as_f64() {
+        Some(x) => decimals(x, 12),
+        None => text(v),
+    }
+}
+
+/// Decimals that show a length in `unit` to a picometre.
+fn places(unit: Unit) -> usize {
+    match unit {
+        Unit::M => 12,
+        Unit::Cm => 10,
+        Unit::Mm => 9,
+        Unit::Um => 6,
+        Unit::In | Unit::Ft => 11,
     }
 }
 
@@ -739,8 +757,13 @@ fn triple(names: [&str; 3], v: &Value) -> [Field; 3] {
 }
 
 impl Form {
-    /// The form for a `feature.show` answer.
+    /// The form for a `feature.show` answer, origins in meters.
     pub fn from_show(part: &str, v: &Value) -> Form {
+        Form::from_show_in(part, v, Unit::M)
+    }
+
+    /// The form for a `feature.show` answer, origins in `unit`.
+    pub fn from_show_in(part: &str, v: &Value, unit: Unit) -> Form {
         let params = v["params"]
             .as_object()
             .into_iter()
@@ -749,10 +772,14 @@ impl Form {
             .collect();
         let ty = text(&v["type"]);
         let instance = ty == "instance";
-        // An instance's pose is its placement, the origin in meters.
+        // An instance's pose is its placement, the origin in the
+        // project's unit (issue #108).
         let pose = instance.then(|| {
             let p = &v["pose"];
-            let o = |i: usize| format!("{} m", pose_number(&p["origin_m"][i]));
+            let o = |i: usize| match p["origin_m"][i].as_f64() {
+                Some(m) => format!("{} {}", decimals(m / unit.factor(), places(unit)), unit.as_str()),
+                None => text(&p["origin_m"][i]),
+            };
             let axis = |a: &Value| -> Vec<String> { (0..3).map(|i| pose_number(&a[i])).collect() };
             json!({"origin": [o(0), o(1), o(2)], "z": axis(&p["z"]), "x": axis(&p["x"])})
         });
@@ -795,6 +822,7 @@ impl Form {
             part: part.to_owned(),
             feature: text(&v["id"]),
             revision: text(&v["revision"]),
+            unit,
             params,
             origin: triple(["origin x", "origin y", "origin z"], &p["origin"]),
             z: triple(["z x", "z y", "z z"], &p["z"]),
@@ -1052,7 +1080,7 @@ impl Form {
     /// The form read again after a conflict: the new values, with what
     /// changed under what was typed listed.
     pub fn reloaded(&self, v: &Value) -> Form {
-        let mut fresh = Form::from_show(&self.part, v);
+        let mut fresh = Form::from_show_in(&self.part, v, self.unit);
         // What was offered stays offered.
         let offered: Vec<String> = [&self.targets, &self.tools]
             .into_iter()
@@ -1673,5 +1701,21 @@ mod tests {
         assert_eq!(read(&f.origin), ["0.026 m", "-0.0125 m", "0 m"]);
         assert_eq!(read(&f.z), ["0", "0", "1"]);
         assert_eq!(read(&f.x), ["0", "1", "0"]);
+    }
+
+    #[test]
+    fn a_pose_reads_in_the_projects_unit() {
+        use ryucad::units::Unit;
+        // #108: a millimetre project shows its origins in millimetres.
+        let v = json!({"id": "b1", "type": "instance", "revision": "r1", "part": "bolt",
+                       "rev": "working",
+                       "pose": {"origin_m": [0.05, 0.008000000000003199, -0.0125],
+                                "z": [0, 0, 1], "x": [1, 0, 0]}});
+        let f = Form::from_show_in("frame", &v, Unit::Mm);
+        let read = |fs: &[Field; 3]| fs.clone().map(|f| f.read);
+        assert_eq!(read(&f.origin), ["50 mm", "8 mm", "-12.5 mm"]);
+        assert!(!f.dirty());
+        // Read again after a conflict, it stays in millimetres.
+        assert_eq!(read(&f.reloaded(&v).origin), ["50 mm", "8 mm", "-12.5 mm"]);
     }
 }
