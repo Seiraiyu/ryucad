@@ -191,7 +191,8 @@ pub fn plan(
     }
     let mut planned: BTreeMap<Id, Planned> = BTreeMap::new();
     let mut warnings = Vec::new();
-    // Products of a new version that nothing matched and nothing makes.
+    // Products of a new version that nothing matched and nothing makes,
+    // and bodies no product reaches that no feature held before.
     if !whole && !same_bytes {
         let skipped: Vec<String> = (0..defs.len())
             .filter(|k| makes[*k] && !known.contains_key(k))
@@ -204,6 +205,11 @@ pub fn plan(
                 skipped.join(", "),
                 if skipped.len() == 1 { "has" } else { "have" },
                 if skipped.len() == 1 { "it" } else { "them" },
+            ));
+        }
+        if unplaced {
+            warnings.push(format!(
+                "import_products_skipped: the bodies no product reaches in {path} have no part, since the file doesn't read as imported whole: delete the file's parts and import it again"
             ));
         }
     }
@@ -870,6 +876,26 @@ mod tests {
         let v = update(&mut s, &touched(&asm), json!({"dry_run": true})).unwrap();
         assert!(created(&v).is_empty(), "{v}");
         assert_eq!(skipped(&v).len(), 1, "{v}");
+    }
+
+    #[test]
+    fn bodies_no_product_reaches_an_update_makes_no_part_for_are_warned_of() {
+        // `A-1` taken `--into` a part; the new version's `B-1` loses its
+        // shape's link to its product, so its block is reached by none.
+        let (_dir, mut s) = fresh();
+        into(&mut s, &two_roots(), "p", false, 0);
+        let text = String::from_utf8(two_roots()).unwrap();
+        let link = text
+            .lines()
+            .filter(|l| l.contains("SHAPE_DEFINITION_REPRESENTATION("))
+            .nth(1)
+            .unwrap();
+        let bytes = text.replacen(&format!("{link}\n"), "", 1).into_bytes();
+        let v = update(&mut s, &bytes, json!({"dry_run": true})).unwrap();
+        assert!(created(&v).is_empty(), "{v}");
+        let w = skipped(&v);
+        assert_eq!(w.len(), 1, "{v}");
+        assert!(w[0].contains("bodies no product reaches"), "{w:?}");
     }
 
     #[test]
