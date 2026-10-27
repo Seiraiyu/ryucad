@@ -446,6 +446,115 @@ pub fn usage_warnings(project: &Project, part: &Id) -> Vec<Value> {
     out
 }
 
+/// One version of a file's products, each with what makes it what it is:
+/// the hashes of its bodies healed under one key for the file, and its
+/// usages (id, child, ordinal and pose bits); `None` is the bodies no
+/// product reaches.
+fn signatures(
+    path: &str,
+    opened: &Opened,
+) -> BTreeMap<Option<ProductRef>, (Vec<String>, Vec<String>)> {
+    use rayon::prelude::*;
+    let key = ryukei::name::OpKey::from_bytes(format!("ryucad.diff.import\0{path}").as_bytes());
+    let opts = ryustep::ReadOptions {
+        key,
+        heal: Default::default(),
+    };
+    let hashes: Vec<String> = (0..opened.held.len())
+        .into_par_iter()
+        .map(|k| match opened.body(k, &opts).result {
+            Ok((b, _, _)) => blake3::hash(b.dump().as_bytes()).to_hex()[..32].to_owned(),
+            Err(e) => format!("failed: {e}"),
+        })
+        .collect();
+    let defs = &opened.products.definitions;
+    let mut out = BTreeMap::new();
+    let groups = (0..defs.len()).map(Some).chain([None]);
+    for g in groups {
+        let bodies: Vec<String> = opened
+            .held
+            .iter()
+            .zip(&hashes)
+            .filter(|(h, _)| h.definition == g)
+            .map(|(_, x)| x.clone())
+            .collect();
+        let usages: Vec<String> = match g {
+            None => Vec::new(),
+            Some(k) => defs[k]
+                .children
+                .iter()
+                .enumerate()
+                .map(|(n, o)| {
+                    let pose = match opened.placement(k, n) {
+                        Ok(r) => format!("{:?}", crate::assembly::rigid_pose(&r)),
+                        Err(e) => e.to_string(),
+                    };
+                    let child = plan::product_of(opened, o.definition);
+                    format!(
+                        "{} {child:?} {} {pose}",
+                        o.id,
+                        plan::usage_ordinal(opened, k, n)
+                    )
+                })
+                .collect(),
+        };
+        if g.is_none() && bodies.is_empty() {
+            continue;
+        }
+        out.insert(g.map(|k| plan::product_of(opened, k)), (bodies, usages));
+    }
+    out
+}
+
+/// What changed between two versions of the imported file at `path`, by
+/// product, matched as an update matches them: `added`, `removed`, and
+/// `changed` with whether its bodies and its usages did. A side that isn't
+/// there, or isn't a STEP file this build reads, has no products.
+pub fn products_diff(path: &str, from: Option<&[u8]>, to: Option<&[u8]>) -> Value {
+    let read = |b: Option<&[u8]>| {
+        let file = crate::doc::project::ImportFile::new(b?.to_vec());
+        let opened = super::opened(&file).ok()?;
+        Some((signatures(path, &opened), opened))
+    };
+    let (a, b) = (read(from), read(to));
+    let empty = BTreeMap::new();
+    let sa = a.as_ref().map_or(&empty, |(s, _)| s);
+    let sb = b.as_ref().map_or(&empty, |(s, _)| s);
+    let product = |r: &Option<ProductRef>| r.as_ref().map_or(Value::Null, super::product_json);
+    // Products as an update would match them; the bodies no product
+    // reaches with each other.
+    let olds: BTreeSet<ProductRef> = sa.keys().flatten().cloned().collect();
+    let matched: BTreeMap<ProductRef, ProductRef> = match &b {
+        Some((_, opened)) => match_products(opened, &olds)
+            .into_iter()
+            .map(|(r, k)| (r, plan::product_of(opened, k)))
+            .collect(),
+        None => BTreeMap::new(),
+    };
+    let to_of = |r: &Option<ProductRef>| match r {
+        Some(r) => matched.get(r).cloned().map(Some),
+        None => sb.contains_key(&None).then_some(None),
+    };
+    let (mut added, mut removed, mut changed) = (Vec::new(), Vec::new(), Vec::new());
+    for (r, (bodies, usages)) in sa {
+        match to_of(r) {
+            None => removed.push(product(r)),
+            Some(t) => {
+                let (tb, tu) = &sb[&t];
+                if tb != bodies || tu != usages || t != *r {
+                    changed.push(json!({"product": product(&t), "from": product(r),
+                                        "bodies": tb != bodies, "usages": tu != usages}));
+                }
+            }
+        }
+    }
+    let reached: BTreeSet<Option<ProductRef>> = sa.keys().filter_map(to_of).collect();
+    for r in sb.keys().filter(|r| !reached.contains(*r)) {
+        added.push(product(r));
+    }
+    json!({"added": added, "removed": removed, "changed": changed})
+}
+
 #[cfg(test)]
 mod tests {
     use crate::error::Code;
@@ -647,6 +756,41 @@ mod tests {
             frame_version(1)
         );
         assert_eq!(s.snapshot(), before);
+    }
+
+    #[test]
+    fn a_model_diff_says_which_products_changed() {
+        use crate::git::tests::git;
+        let (dir, mut s) = imported();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "frame 1"]);
+        update(&mut s, &frame_version(2), json!({})).unwrap();
+        let v = call(&mut s, "diff", json!({"model": true})).unwrap();
+        let file = &v["imports"][0];
+        assert_eq!(file["path"], "imports/frame.step");
+        let products = &file["products"];
+        assert_eq!(products["added"], json!([{"id": "N-1", "name": "New"}]));
+        assert_eq!(products["removed"], json!([{"id": "L-1", "name": "Loose"}]));
+        let changed: Vec<(&str, bool, bool)> = products["changed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["product"]["id"].as_str().unwrap(),
+                    c["bodies"] == true,
+                    c["usages"] == true,
+                )
+            })
+            .collect();
+        // The frame's plate and its placements; the sub-assembly's pins;
+        // the pin itself is as it was.
+        assert_eq!(changed, [("F-1", true, true), ("S-1", false, true)]);
+        // Without the model, the hashes only.
+        let v = call(&mut s, "diff", json!({})).unwrap();
+        assert!(v["imports"][0].get("products").is_none());
     }
 
     #[test]

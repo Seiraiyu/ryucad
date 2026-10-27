@@ -27,7 +27,7 @@ mod update;
 
 use plan::Planned;
 pub use plan::Writes;
-pub use update::usage_warnings;
+pub use update::{products_diff, usage_warnings};
 
 /// How many bytes of source the opened files kept may hold together.
 pub const OPENED_BYTES: usize = 1 << 30;
