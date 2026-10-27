@@ -95,7 +95,7 @@ pub(super) fn judge(body: &Body, index: &BTreeMap<Name, usize>) -> Result<Judged
     let mut size = 0.0f64;
     let mut all: Option<Box3> = None;
     for f in body.faces() {
-        let b = crate::intersect::face_box(body, f);
+        let b = crate::intersect::coarse_box(body, f);
         all = Some(all.map_or(b, |a| a.union(&b)));
     }
     if let Some(b) = all {
@@ -114,7 +114,7 @@ pub(super) fn judge(body: &Body, index: &BTreeMap<Name, usize>) -> Result<Judged
             .expect("a shell has faces");
         let bounds = faces
             .iter()
-            .map(|&f| crate::intersect::face_box(body, f))
+            .map(|&f| crate::intersect::coarse_box(body, f))
             .reduce(|a, b| a.union(&b))
             .expect("faces");
         let tolerance = shell_tolerance(body, &faces);

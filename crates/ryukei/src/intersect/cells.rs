@@ -72,6 +72,39 @@ pub(crate) fn cells(s: &Surface, near: &Box3) -> Vec<Cell> {
     reaching(s, out, near)
 }
 
+/// A box holding the part of a NURBS, revolution or sweep over `rect`
+/// of its parameters: the hull of its enclosures over its own cells cut
+/// to `rect`. `None` for other surfaces, or where an enclosure fails.
+pub(crate) fn enclosure(s: &Surface, rect: [[f64; 2]; 2]) -> Option<Box3> {
+    let natural: Vec<Cell> = match s {
+        Surface::Nurbs(n) => n.patches().iter().map(|p| p.range).collect(),
+        Surface::Revolution(r) => {
+            let (us, vs) = (parts([0.0, TAU], 8), pieces(r.curve()));
+            us.iter()
+                .flat_map(|&u| vs.iter().map(move |&v| [u, v]))
+                .collect()
+        }
+        Surface::Sweep(w) => w.cells(),
+        _ => return None,
+    };
+    let sheet = Sheet::of(s);
+    let mut out: Option<Box3> = None;
+    for c in natural {
+        let cut: [[f64; 2]; 2] =
+            core::array::from_fn(|k| [c[k][0].max(rect[k][0]), c[k][1].min(rect[k][1])]);
+        if cut[0][0] > cut[0][1] || cut[1][0] > cut[1][1] {
+            continue;
+        }
+        let p = sheet.jet_box(cut)?;
+        let b = Box3::new(
+            Point3::new(p[0].v.lo(), p[1].v.lo(), p[2].v.lo()),
+            Point3::new(p[0].v.hi(), p[1].v.hi(), p[2].v.hi()),
+        );
+        out = Some(out.map_or(b, |o| o.union(&b)));
+    }
+    out
+}
+
 /// The least and greatest of `p · w` over a box's corners.
 fn span(b: &Box3, w: Vector3) -> [f64; 2] {
     b.corners()

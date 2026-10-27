@@ -35,6 +35,7 @@ pub use beside::beside;
 pub(crate) use beside::face_beside;
 pub(crate) use coincide::coincident;
 pub use cs::{CurveHit, Side, curve_surface};
+pub(crate) use face::coarse_box;
 pub use face::{Contact, FaceMeet, Rim, Stretch, face_box, face_face};
 pub(crate) use face::{face_face_within, shifted, shifts};
 pub(crate) use fit::{

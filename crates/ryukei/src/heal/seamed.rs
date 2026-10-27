@@ -268,7 +268,7 @@ fn copy(b: &Body) -> Cut {
         for sh in b.region_shells(r).collect::<Vec<ShellId>>() {
             let size = b
                 .shell_faces(sh)
-                .map(|f| crate::intersect::face_box(b, f))
+                .map(|f| crate::intersect::coarse_box(b, f))
                 .reduce(|x, y| x.union(&y))
                 .map_or(0.0, |x| (x.max() - x.min()).length());
             shells.push((size, s.shells.len()));
