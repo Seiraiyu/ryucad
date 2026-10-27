@@ -1662,6 +1662,269 @@ fn codec_section(golden: &mut Golden) {
     }
 }
 
+/// A loop of keyed lines through `pts` (`x, y` pairs) and a circle.
+fn keyed_loops(pts: &[(f64, f64)], circle: Option<(f64, f64, f64)>) -> Vec<Loop> {
+    let n = pts.len();
+    let mut out = vec![Loop {
+        key: LoopKey(1),
+        segments: (0..n)
+            .map(|i| {
+                let (p, q) = (pts[i], pts[(i + 1) % n]);
+                let (p, q) = (Point2::new(p.0, p.1), Point2::new(q.0, q.1));
+                Segment {
+                    key: SegmentKey(10 + i as u128),
+                    curve: Curve2::Line2(Line2::through(p, q).unwrap()),
+                    t0: 0.0,
+                    t1: p.distance(q),
+                }
+            })
+            .collect(),
+    }];
+    if let Some((x, y, r)) = circle {
+        let f = Frame2::new(Point2::new(x, y), Vector2::new(1.0, 0.0), true).unwrap();
+        out.push(Loop {
+            key: LoopKey(2),
+            segments: vec![Segment {
+                key: SegmentKey(50),
+                curve: Curve2::Circle2(Circle2::new(f, r).unwrap()),
+                t0: 0.0,
+                t1: core::f64::consts::TAU,
+            }],
+        });
+    }
+    out
+}
+
+fn square_pts(h: f64) -> Vec<(f64, f64)> {
+    vec![(-h, -h), (h, -h), (h, h), (-h, h)]
+}
+
+/// Hashes a body, the names its journal creates and its mesh.
+fn hash_body(
+    s: &mut ryukei_testkit::Section<'_>,
+    body: &ryukei::topo::Body,
+    journal: &ryukei::name::Journal,
+) {
+    s.str(&body.dump());
+    for e in journal.events() {
+        if let Event::Created(n) = e {
+            s.u64(n.to_u128() as u64);
+            s.u64((n.to_u128() >> 64) as u64);
+        }
+    }
+    hash_mesh(s, &tessellate(body, &MeshParams::new(2e-2, 0.5)).unwrap());
+}
+
+/// Sweeps along paths: the sweep surface's points, derivatives, frames
+/// and NURBS forms, and bodies along open and closed paths of lines,
+/// arcs and splines.
+fn sweeps_along_section(golden: &mut Golden) {
+    use ryukei::geom::{FrameLaw, KnotVector, NurbsCurve, Sweep, UnitVector3};
+    use ryukei::sweep::{AlongOptions, Path, PathSegment, along};
+    use std::sync::Arc;
+    let mut s = golden.section("sweeps_along");
+    let key = OpKey(0x616c_6f6e);
+    let k = KnotVector::clamped(3, &[0.0, 1.0, 2.0], &[4, 1, 4]).unwrap();
+    let wavy = Curve::Nurbs(Arc::new(
+        NurbsCurve::new(
+            k,
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(2.0, 1.0, 0.5),
+                Point3::new(3.0, 0.5, 1.5),
+                Point3::new(4.0, 0.0, 2.0),
+            ],
+            None,
+        )
+        .unwrap(),
+    ));
+    let across = Frame::new(
+        Point3::ORIGIN,
+        Vector3::new(1.0, 0.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+    )
+    .unwrap();
+    let z = UnitVector3::exact(Vector3::new(0.0, 0.0, 1.0)).unwrap();
+    // The surface alone, by each law.
+    for law in [FrameLaw::Minimal, FrameLaw::Binormal(z)] {
+        let arc = Curve::Circle(Circle::new(across, 0.2).unwrap());
+        let w = Sweep::new(
+            (arc, [0.3, 2.5]),
+            (wavy.clone(), [0.0, 2.0]),
+            across,
+            law,
+            0.7,
+            1.5,
+        )
+        .unwrap();
+        for i in 0..=6 {
+            for j in 0..=8 {
+                let (u, t) = (0.3 + 2.2 * f64::from(i) / 6.0, 2.0 * f64::from(j) / 8.0);
+                let e = Surface::Sweep(Arc::new(w.clone())).eval(u, t);
+                for v in [e.point.to_vector(), e.du, e.dv, e.duu, e.duv, e.dvv] {
+                    s.f64(v.x);
+                    s.f64(v.y);
+                    s.f64(v.z);
+                }
+            }
+        }
+        let foot = Surface::Sweep(Arc::new(w.clone())).project(Point3::new(1.5, 0.7, 0.9));
+        s.f64(foot.param.0);
+        s.f64(foot.param.1);
+        let (n, _, bound) = w.to_nurbs_within([0.0, 2.0], 1e-6).unwrap();
+        s.f64(bound);
+        for p in n.control_points() {
+            s.f64(p.x);
+            s.f64(p.y);
+            s.f64(p.z);
+        }
+    }
+    // Bodies: a bar round a bend of lines and an arc; a twisted, growing
+    // tube along the spline, and one upright; a tube round a closed
+    // rounded rectangle.
+    let line = |from: Point3, dir: Vector3| Curve::Line(Line::new(from, dir).unwrap());
+    let part = |key: u128, curve: Curve, range: [f64; 2]| PathSegment {
+        key: SegmentKey(key),
+        curve,
+        range,
+    };
+    let quarter = |key: u128, c: (f64, f64), r: f64, a: f64| {
+        let f = Frame::new(
+            Point3::new(c.0, c.1, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap();
+        part(
+            key,
+            Curve::Circle(Circle::new(f, r).unwrap()),
+            [a, a + core::f64::consts::FRAC_PI_2],
+        )
+    };
+    let x = Vector3::new(1.0, 0.0, 0.0);
+    let y = Vector3::new(0.0, 1.0, 0.0);
+    let bend = Path {
+        segments: vec![
+            part(1, line(Point3::ORIGIN, x), [0.0, 2.0]),
+            quarter(2, (2.0, 1.0), 1.0, -core::f64::consts::FRAC_PI_2),
+            part(3, line(Point3::new(3.0, 1.0, 0.0), y), [0.0, 2.0]),
+        ],
+    };
+    let rectangle = Path {
+        segments: vec![
+            part(1, line(Point3::ORIGIN, x), [0.0, 2.0]),
+            quarter(2, (2.0, 0.5), 0.5, -core::f64::consts::FRAC_PI_2),
+            part(3, line(Point3::new(2.5, 0.5, 0.0), y), [0.0, 3.0]),
+            quarter(4, (2.0, 3.5), 0.5, 0.0),
+            part(5, line(Point3::new(2.0, 4.0, 0.0), -x), [0.0, 2.0]),
+            quarter(6, (0.0, 3.5), 0.5, core::f64::consts::FRAC_PI_2),
+            part(7, line(Point3::new(-0.5, 3.5, 0.0), -y), [0.0, 3.0]),
+            quarter(8, (0.0, 0.5), 0.5, core::f64::consts::PI),
+        ],
+    };
+    let spline = Path {
+        segments: vec![part(1, wavy, [0.0, 2.0])],
+    };
+    let profile = |loops: Vec<Loop>| {
+        ValidProfile::new(Profile {
+            frame: across,
+            loops,
+        })
+        .unwrap()
+    };
+    let bar = profile(keyed_loops(&square_pts(0.2), None));
+    let tube = profile(vec![keyed_loops(&[], Some((0.0, 0.0, 0.12))).remove(1)]);
+    let plain = AlongOptions::default();
+    let twisted = AlongOptions {
+        twist: 0.5,
+        scale: 1.3,
+        ..plain
+    };
+    let upright = AlongOptions {
+        law: FrameLaw::Binormal(z),
+        ..plain
+    };
+    for (p, path, opts) in [
+        (&bar, &bend, plain),
+        (&tube, &spline, twisted),
+        (&tube, &spline, upright),
+        (&tube, &rectangle, plain),
+    ] {
+        let (body, journal) = along(key, p, path, &opts).unwrap();
+        hash_body(&mut s, &body, &journal);
+    }
+}
+
+/// Lofts: a frustum, a frustum with a hole and end tangents, and a ring.
+fn lofts_section(golden: &mut Golden) {
+    use ryukei::geom::UnitVector3;
+    use ryukei::sweep::{LoftOptions, Tangent, loft};
+    let mut s = golden.section("lofts");
+    let key = OpKey(0x6c6f_6674);
+    let at = |frame: Frame, loops: Vec<Loop>| ValidProfile::new(Profile { frame, loops }).unwrap();
+    let level = |h: f64| {
+        Frame::new(
+            Point3::new(0.0, 0.0, h),
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap()
+    };
+    let z = UnitVector3::exact(Vector3::new(0.0, 0.0, 1.0)).unwrap();
+    let frustum = [
+        at(level(0.0), keyed_loops(&square_pts(1.0), None)),
+        at(level(1.0), keyed_loops(&square_pts(0.5), None)),
+    ];
+    let holed = [
+        at(
+            level(0.0),
+            keyed_loops(&square_pts(1.0), Some((0.0, 0.0, 0.3))),
+        ),
+        at(
+            level(0.6),
+            keyed_loops(&square_pts(0.8), Some((0.1, 0.0, 0.25))),
+        ),
+        at(
+            level(1.5),
+            keyed_loops(&square_pts(0.6), Some((0.0, 0.0, 0.2))),
+        ),
+    ];
+    let ring: Vec<ValidProfile> = (0..4)
+        .map(|k| {
+            let (sa, ca) = math::sin_cos(core::f64::consts::TAU * f64::from(k) / 4.0);
+            let f = Frame::new(
+                Point3::new(3.0 * ca, 3.0 * sa, 0.0),
+                Vector3::new(-sa, ca, 0.0),
+                Vector3::new(ca, sa, 0.0),
+            )
+            .unwrap();
+            at(f, keyed_loops(&square_pts(0.5), None))
+        })
+        .collect();
+    let tangent = Some(Tangent {
+        direction: z,
+        weight: 1.0,
+    });
+    let ends = LoftOptions {
+        closed: false,
+        start: tangent,
+        end: tangent,
+    };
+    let closed = LoftOptions {
+        closed: true,
+        ..LoftOptions::default()
+    };
+    for (sections, opts) in [
+        (&frustum[..], LoftOptions::default()),
+        (&holed[..], ends),
+        (&ring[..], closed),
+    ] {
+        let (body, journal) = loft(key, sections, &opts).unwrap();
+        hash_body(&mut s, &body, &journal);
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -1683,6 +1946,8 @@ fn determinism() {
     euler_section(&mut golden);
     meshes_section(&mut golden);
     sweeps_section(&mut golden);
+    sweeps_along_section(&mut golden);
+    lofts_section(&mut golden);
     intersections_section(&mut golden);
     general_section(&mut golden);
     booleans_section(&mut golden);
