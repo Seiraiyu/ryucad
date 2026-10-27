@@ -255,15 +255,24 @@ main() {
                     [ -f "$rc" ] && rcs="$rcs $rc"
                 done
                 command -v zsh >/dev/null 2>&1 && rcs="$rcs ${ZDOTDIR:-$HOME}/.zshenv"
+                wrote=
                 for rc in $rcs; do
-                    grep -qF "$MARKER" "$rc" 2>/dev/null || printf '\n%s\n%s\n' "$MARKER" "$line" >>"$rc"
+                    if ! grep -qF "$MARKER" "$rc" 2>/dev/null; then
+                        printf '\n%s\n%s\n' "$MARKER" "$line" >>"$rc"
+                        wrote=1
+                    fi
                 done
                 fish="$HOME/.config/fish/conf.d"
                 if [ -d "$HOME/.config/fish" ]; then
+                    [ -f "$fish/ryucad.fish" ] || wrote=1
                     mkdir -p "$fish"
                     printf '%s\nfish_add_path "%s"\n' "$MARKER" "$bin" >"$fish/ryucad.fish"
                 fi
-                say "added $bin to PATH in your shell profile; open a new shell or run: $line"
+                if [ -n "$wrote" ]; then
+                    say "added $bin to PATH in your shell profile; open a new shell or run: $line"
+                else
+                    say "$bin is in your shell profile but not this shell's PATH; open a new shell or run: $line"
+                fi
             fi
             ;;
     esac
