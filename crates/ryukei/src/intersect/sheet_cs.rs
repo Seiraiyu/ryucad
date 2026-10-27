@@ -586,6 +586,17 @@ impl Search<'_> {
             if no_zero && self.near_miss(cell, out)? {
                 return Ok(());
             }
+            // `E` within the tolerance over the whole box: every point of
+            // the curve over its stretch has one of the surface that close
+            // (where a path can't be followed, at a corner of the domain).
+            let bound = tol / 3f64.sqrt();
+            if c.e.iter().all(|&x| x.lo() >= -bound && x.hi() <= bound) {
+                out.push(Candidate {
+                    t: cell[0],
+                    simple: None,
+                });
+                return Ok(());
+            }
             let mid = (
                 (cell[1][0] + cell[1][1]) / 2.0,
                 (cell[2][0] + cell[2][1]) / 2.0,

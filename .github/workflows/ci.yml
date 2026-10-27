@@ -47,6 +47,7 @@ jobs:
       # release.
       - run: cargo test -p ryukei --release --test boolean_props
       - run: cargo test -p ryukei --release --test booleans
+      - run: cargo test -p ryukei --release --test general_booleans
       - run: cargo test -p ryukei --release --test pipe_props
       - run: cargo test -p ryukei --release --test general_props
       - run: cargo test -p ryukei --release --test blends
