@@ -18,7 +18,7 @@ mod eval;
 mod frame;
 pub(crate) mod intersect2;
 pub(crate) mod jet;
-mod nurbs;
+pub(crate) mod nurbs;
 pub(crate) mod path_sweep;
 pub(crate) mod pipe;
 mod point;

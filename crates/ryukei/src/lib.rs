@@ -26,7 +26,8 @@ pub mod tol;
 pub mod topo;
 
 pub use error::{
-    BlendError, BooleanError, Error, HealError, NurbsError, ProfileError, SweepError, TopologyError,
+    BlendError, BooleanError, Error, HealError, LoftError, NurbsError, ProfileError, SweepError,
+    TopologyError,
 };
 
 /// This kernel's version, for ryucad's `version` report and cache keys.

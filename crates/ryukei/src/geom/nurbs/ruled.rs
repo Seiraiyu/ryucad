@@ -12,7 +12,7 @@ use crate::geom::{Point3, Vector3};
 /// homogeneous coordinates: `Q_i = Σ_j binom(p, j) binom(q - p, i - j) /
 /// binom(q, i) P_j`. Every interior break gets multiplicity `q`, so the
 /// spline is the same curve, piece by piece.
-fn elevated(c: &NurbsCurve, q: usize) -> (Vec<f64>, Vec<Hom<Vector3>>) {
+pub(super) fn elevated(c: &NurbsCurve, q: usize) -> (Vec<f64>, Vec<Hom<Vector3>>) {
     let p = c.degree();
     let k = q - p;
     let pieces = c.pieces();

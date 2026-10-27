@@ -11,6 +11,7 @@ mod area;
 mod build;
 mod capped;
 mod extrude;
+mod loft;
 mod names;
 mod nest;
 mod path;
@@ -21,6 +22,7 @@ mod separate;
 
 pub use along::{AlongOptions, along};
 pub use extrude::extrude;
+pub use loft::{LoftOptions, Tangent, loft};
 pub use path::{Path, PathSegment};
 pub use profile::{Loop, LoopKey, Lump, Profile, Segment, SegmentKey, ValidLoop, ValidProfile};
 pub use revolve::revolve;
