@@ -100,6 +100,28 @@ pub fn snap_axis(x: f64) -> f64 {
     clean(x)
 }
 
+/// An origin's component as a pose is written: the shortest decimal
+/// within a few units in its last place, so a sum of typed lengths
+/// (`45 mm + 5 mm` is `0.049999999999999996` m) or a length typed in
+/// millimetres reads as typed (issue #108); `-0` is `0`. Rust formats
+/// and parses floats exactly, so this is the same on every platform.
+pub fn snap_origin(x: f64) -> f64 {
+    let x = clean(x);
+    if x == 0.0 || !x.is_finite() {
+        return x;
+    }
+    let reach = SNAP * x.abs();
+    for digits in 0..17 {
+        let short: f64 = format!("{x:.digits$e}")
+            .parse()
+            .expect("a float's own text reads back");
+        if (short - x).abs() <= reach {
+            return short;
+        }
+    }
+    x
+}
+
 impl Pose {
     /// The assembly's own frame.
     pub const IDENTITY: Pose = Pose {
@@ -109,10 +131,11 @@ impl Pose {
     };
 
     /// The pose as it is written: its axes' components snapped
-    /// ([`snap_axis`]), its origin's `-0` made `0`.
+    /// ([`snap_axis`]), its origin's at their shortest decimal
+    /// ([`snap_origin`]).
     pub fn snapped(self) -> Pose {
         Pose {
-            origin_m: self.origin_m.map(clean),
+            origin_m: self.origin_m.map(snap_origin),
             z: self.z.map(snap_axis),
             x: self.x.map(snap_axis),
         }
@@ -209,6 +232,22 @@ mod tests {
         Feature::from_json(&v, Unit::Mm, &Env::empty())
     }
 
+    #[test]
+    fn an_origin_is_written_at_its_shortest_decimal() {
+        // #108: 45 mm + 5 mm, and 26 mm in meters.
+        let p = Pose {
+            origin_m: [0.045 + 0.005, 0.026000000000000002, -0.0],
+            ..Pose::IDENTITY
+        }
+        .snapped();
+        assert_eq!(p.origin_m, [0.05, 0.026, 0.0]);
+        assert!(p.origin_m[2].is_sign_positive());
+        // A solve's real offset stays off 8 mm (only its last ulp goes to
+        // the shorter neighbour), and a third stays as it is.
+        assert_eq!(snap_origin(0.008000000000003199), 0.0080000000000032);
+        assert_eq!(snap_origin(1.0 / 3.0).to_bits(), (1.0f64 / 3.0).to_bits());
+    }
+
     fn instance(rev: Value) -> Value {
         json!({"format": 4, "kind": "ryucad.feature", "type": "instance", "part": "bracket",
                "rev": rev, "pose": {"origin_m": [0.01, 0, -0.0], "z": [0, 0, 1], "x": [1, 0, 0]}})
@@ -275,8 +314,8 @@ mod tests {
             x: [-6.123233995736766e-17, 0.9999999999999999, 1e-9],
         };
         let q = p.snapped();
-        // Origins are positions: kept as they are, `-0` aside.
-        assert_eq!(q.origin_m, [0.026000000000000002, 0.0, 1e-17]);
+        // Origins are positions: at their shortest decimal, `-0` as `0`.
+        assert_eq!(q.origin_m, [0.026, 0.0, 1e-17]);
         assert_eq!(q.z, [0.0, -1.0, 0.0]);
         assert_eq!(q.x, [0.0, 1.0, 1e-9]);
         assert_eq!(q.z[0].to_bits(), 0.0f64.to_bits());
