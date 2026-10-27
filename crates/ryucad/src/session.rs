@@ -349,12 +349,49 @@ impl Session {
         Ok(())
     }
 
+    /// `part` at `rev` as rebuilt, every part it places first: its files,
+    /// its rebuild, and for a release label how the label resolved. A
+    /// label no instance places is looked up too.
+    pub fn node(
+        &mut self,
+        part: &Id,
+        rev: &Rev,
+    ) -> Result<(Part, PartResult, Option<crate::assembly::Pin>)> {
+        let extra = match rev {
+            Rev::Working => Vec::new(),
+            Rev::Label(l) => vec![(part.clone(), l.clone())],
+        };
+        let mut out = None;
+        self.rebuild_with(extra, |r| {
+            out = Some(r.node(part, rev));
+            Ok(())
+        })?;
+        out.expect("asked")
+    }
+
     /// Runs `f` over an [`assembly::Rebuild`](crate::assembly::Rebuild)
     /// holding this session's results and caches, and keeps what it
     /// built: each part it rebuilt with its errors explained and its names
     /// learnt.
     fn rebuild(&mut self, f: impl FnOnce(&mut Rebuild) -> Result<()>) -> Result<()> {
-        let pins = self.pins()?;
+        self.rebuild_with(Vec::new(), f)
+    }
+
+    /// [`Session::rebuild`], with the release labels `extra` looked up
+    /// beside those the project's instances reach.
+    fn rebuild_with(
+        &mut self,
+        extra: Vec<(Id, String)>,
+        f: impl FnOnce(&mut Rebuild) -> Result<()>,
+    ) -> Result<()> {
+        let pins = if extra.is_empty() {
+            self.pins()?
+        } else {
+            let project = self.project.clone();
+            crate::assembly::pins_from(&project, extra, |part, label| {
+                crate::release::pinned(self, part, label)
+            })
+        };
         let store = std::mem::take(&mut self.store);
         let mut r = Rebuild::new(&self.project, &pins, store);
         let out = f(&mut r);

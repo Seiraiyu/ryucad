@@ -973,6 +973,7 @@ fn every_protocol_method_has_a_command() {
         ("assembly.solve", &["assembly", "solve"]),
         ("interference", &["interference"]),
         ("import", &["import"]),
+        ("export", &["export"]),
         ("rebuild", &["rebuild"]),
         ("inspect", &["inspect"]),
         ("check_format", &["check-format"]),
