@@ -363,8 +363,6 @@ fn hull(a: JVec<Interval>, b: JVec<Interval>) -> JVec<Interval> {
 /// angle of `to`'s first axis in `from`'s first two. A closed path's
 /// frame closes when the frame at its end is turned by a whole number of
 /// turns from the one at its start.
-// Used by sweeps round closed paths, from a later commit on.
-#[allow(dead_code)]
 pub(crate) fn turned(from: [Vector3; 3], to: [Vector3; 3]) -> f64 {
     math::atan2(to[0].dot(from[1]), to[0].dot(from[0]))
 }

@@ -499,3 +499,172 @@ fn names_survive_edits() {
     let (c, _) = along(K, &p, &bent(2.0), &twisted).unwrap();
     assert_eq!(names(&c), all);
 }
+
+/// A rectangle 2 by 3 with corners rounded to radius 0.5,
+/// counterclockwise in the xy plane from the origin, `10 + π` long.
+fn rounded_rectangle() -> Path {
+    let x = Vector3::new(1.0, 0.0, 0.0);
+    let y = Vector3::new(0.0, 1.0, 0.0);
+    let quarter = |key: u128, c: (f64, f64), a: f64| {
+        let f = Frame::new(Point3::new(c.0, c.1, 0.0), Vector3::new(0.0, 0.0, 1.0), x).unwrap();
+        part(
+            key,
+            Curve::Circle(Circle::new(f, 0.5).unwrap()),
+            [a, a + FRAC_PI_2],
+        )
+    };
+    Path {
+        segments: vec![
+            part(1, line(Point3::ORIGIN, x), [0.0, 2.0]),
+            quarter(2, (2.0, 0.5), -FRAC_PI_2),
+            part(3, line(Point3::new(2.5, 0.5, 0.0), y), [0.0, 3.0]),
+            quarter(4, (2.0, 3.5), 0.0),
+            part(5, line(Point3::new(2.0, 4.0, 0.0), -x), [0.0, 2.0]),
+            quarter(6, (0.0, 3.5), FRAC_PI_2),
+            part(7, line(Point3::new(-0.5, 3.5, 0.0), -y), [0.0, 3.0]),
+            quarter(8, (0.0, 0.5), PI),
+        ],
+    }
+}
+
+/// A crooked closed spline, and its length.
+fn crooked() -> (Path, f64) {
+    let k = KnotVector::periodic(3, &[0.0, 1.0, 2.0, 3.0, 4.0], &[1, 1, 1, 1, 1]).unwrap();
+    let pts = vec![
+        Point3::new(-4.0, 0.0, 0.0),
+        Point3::new(0.0, -4.0, 0.0),
+        Point3::new(4.0, 0.0, 2.0),
+        Point3::new(0.0, 5.0, 1.0),
+    ];
+    let n = NurbsCurve::new(k, pts, None).unwrap();
+    let mut len = 0.0;
+    let steps = 40_000;
+    for i in 0..steps {
+        let (a, b) = (
+            4.0 * f64::from(i) / f64::from(steps),
+            4.0 * f64::from(i + 1) / f64::from(steps),
+        );
+        len += n.point(a).distance(n.point(b));
+    }
+    let path = Path {
+        segments: vec![part(1, Curve::Nurbs(Arc::new(n)), [0.0, 4.0])],
+    };
+    (path, len)
+}
+
+/// A profile across a path's start.
+fn across_start(path: &Path, loops: Vec<Loop>) -> ValidProfile {
+    let s = &path.segments[0];
+    let p = s.curve.point(s.range[0]);
+    let t = s.curve.eval(s.range[0]).d1;
+    let up = if t.z.abs() < 0.9 {
+        Vector3::new(0.0, 0.0, 1.0)
+    } else {
+        Vector3::new(1.0, 0.0, 0.0)
+    };
+    ValidProfile::new(Profile {
+        frame: Frame::new(p, t, up.cross(t)).unwrap(),
+        loops,
+    })
+    .unwrap()
+}
+
+/// Round a rounded rectangle, tubes and bars close up: the sides are the
+/// analytic ones, there are no caps, and the volume is the profile's area
+/// times the path's length.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn round_a_closed_path() {
+    let path = rounded_rectangle();
+    let len = 10.0 + PI;
+    let opts = AlongOptions::default();
+    let tube = across_start(&path, vec![circle(1, 1, (0.0, 0.0), 0.3)]);
+    let (b, _) = along(K, &tube, &path, &opts).unwrap();
+    assert_eq!(b.faces().count(), 8);
+    let v = volume(&b);
+    assert!(close(v, PI * 0.09 * len, 2e-3), "{v}");
+    let bar = across_start(&path, vec![square(0.4)]);
+    let (b, _) = along(K, &bar, &path, &opts).unwrap();
+    assert_eq!(b.faces().count(), 32);
+    let v = volume(&b);
+    assert!(close(v, 0.16 * len, 2e-3), "{v}");
+}
+
+/// A hollow bar round a closed path: the hole is a cavity.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_closed_path_round_a_hole_makes_a_cavity() {
+    let path = rounded_rectangle();
+    let p = across_start(&path, vec![square(0.4), circle(2, 50, (0.0, 0.0), 0.1)]);
+    let (b, _) = along(K, &p, &path, &AlongOptions::default()).unwrap();
+    assert_eq!(b.shells().count(), 2);
+    let v = volume(&b);
+    assert!(close(v, (0.16 - PI * 0.01) * (10.0 + PI), 2e-3), "{v}");
+}
+
+/// Round a whole circle a bar is a revolve's ring; round a crooked spline,
+/// a tube is one face with no edges and a bar four bands, the frame
+/// twisted back by its turn round the loop.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn round_one_closed_curve() {
+    let f = Frame::new(
+        Point3::new(0.0, 2.0, 0.0),
+        Vector3::new(0.0, 0.0, 1.0),
+        Vector3::new(0.0, -1.0, 0.0),
+    )
+    .unwrap();
+    let ring = Path {
+        segments: vec![part(
+            1,
+            Curve::Circle(Circle::new(f, 2.0).unwrap()),
+            [0.0, TAU],
+        )],
+    };
+    let opts = AlongOptions::default();
+    let (b, _) = along(K, &across_start(&ring, vec![square(0.4)]), &ring, &opts).unwrap();
+    assert_eq!(b.faces().count(), 4);
+    assert!(close(volume(&b), 0.16 * TAU * 2.0, 2e-3));
+    let (path, len) = crooked();
+    let (b, _) = along(
+        K,
+        &across_start(&path, vec![circle(1, 1, (0.0, 0.0), 0.2)]),
+        &path,
+        &opts,
+    )
+    .unwrap();
+    assert_eq!((b.faces().count(), b.edges().count()), (1, 0));
+    let v = volume(&b);
+    assert!(close(v, PI * 0.04 * len, 2e-3), "{v}");
+    let (b, _) = along(K, &across_start(&path, vec![square(0.3)]), &path, &opts).unwrap();
+    assert_eq!(b.faces().count(), 4);
+    let v = volume(&b);
+    assert!(close(v, 0.09 * len, 2e-3), "{v}");
+}
+
+#[test]
+fn closed_paths_need_whole_turns_and_no_scale() {
+    let path = rounded_rectangle();
+    let p = across_start(&path, vec![circle(1, 1, (0.0, 0.0), 0.3)]);
+    for opts in [
+        AlongOptions {
+            twist: 1.0,
+            ..AlongOptions::default()
+        },
+        AlongOptions {
+            scale: 1.5,
+            ..AlongOptions::default()
+        },
+    ] {
+        assert_eq!(refusal(along(K, &p, &path, &opts)), SweepError::NotClosing);
+    }
+}

@@ -17,7 +17,7 @@
 //! run counterclockwise about it (see [`LoopPlan`]).
 
 use crate::Error;
-use crate::euler::{Corner, kfmrh, kvr, mef, mev, mvfs, mvr, mvs, set_surface};
+use crate::euler::{Corner, kfmrh, kvr, mef, mekr, mev, mvfs, mvr, mvs, set_surface};
 use crate::geom::Point3;
 use crate::name::{Name, OpKey, Role, SweepRole};
 use crate::topo::{
@@ -460,6 +460,113 @@ fn hole_through(
     }
     kfmrh(b, keys.next(), far_cap, disc)?;
     Ok(built)
+}
+
+/// Builds one loop of a sweep round a closed path, of several segments
+/// along several stretches, as a shell of its own: a new solid region's
+/// outer shell (`region` `None`), or a void shell in `region`. The plan's
+/// near edges and points are the section where the path closes, and its
+/// last stretch's far edges and points are not built: that stretch ends
+/// where the first starts. Returns the region and what the loop became
+/// (the last stretch's far edges and vertices are the near ones).
+///
+/// The sweep is built as a capped one up to the last stretch: a lamina at
+/// the closing section, its twin swept through every stretch but the
+/// last. The last stretch closes the tube: KFMRH makes the lamina's other
+/// face a ring of the face left at the far end, MEKR joins that ring to
+/// the face's loop by the first lateral, and MEF cuts off each side by
+/// its lateral, from the last back to the second; what is left is the
+/// first side.
+pub(crate) fn closed_ring(
+    b: &mut Body,
+    keys: &mut Keys,
+    plan: &LoopPlan,
+    region: Option<RegionId>,
+) -> Result<(RegionId, LoopBuilt), Error> {
+    let n = plan.near.len();
+    let k = plan.rings.len();
+    debug_assert!(
+        n >= 2 && k >= 2,
+        "rings of one segment or one stretch are turned"
+    );
+    let first = plan.rings[0].segments[0].side.ok_or(Error::Degenerate)?.0;
+    let (region, _, loop_, vertex) = start_shell(b, keys, region, plan.points[0], first)?;
+    let mut built = LoopBuilt::default();
+    let (path_fins, closing) = path(b, keys, Corner::Lone(loop_), vertex, plan, &mut built)?;
+    let near = closing.faces[1];
+    let mut face = closing.faces[0];
+    let mut fins = path_fins.clone();
+    fins.push(closing.fins[0]);
+    for (r, ring) in plan.rings[..k - 1].iter().enumerate() {
+        let (prev_edges, prev_vertices) = built.before(r);
+        let (prev_edges, prev_vertices) = (prev_edges.to_vec(), prev_vertices.to_vec());
+        let (rest, top, made) = sweep_path(
+            b,
+            keys,
+            face,
+            &fins,
+            ring,
+            true,
+            &prev_edges,
+            &prev_vertices,
+        )?;
+        (face, fins) = (rest, top);
+        built.rings.push(made);
+    }
+    // The lamina's other face, the closing section, against the path:
+    // its fin starting at each vertex runs against the near edge before.
+    let mut near_fins = vec![closing.fins[1]];
+    for f in &path_fins {
+        near_fins.push(b.fin(*f).map(|f| f.around).ok_or_else(crate::euler::dead)?);
+    }
+    kfmrh(b, keys.next(), face, near)?;
+    let last = &plan.rings[k - 1];
+    let mut ring = RingBuilt {
+        sides: vec![None; n],
+        far: built.near.clone(),
+        far_vertices: built.near_vertices.clone(),
+        laterals: vec![None; n],
+    };
+    let lateral = |i: usize| last.vertices[i].lateral.ok_or(Error::Degenerate);
+    let s0 = lateral(0)?;
+    let joined = mekr(
+        b,
+        keys.next(),
+        Corner::Before(fins[0]),
+        Corner::Before(near_fins[0]),
+        s0.curve,
+        s0.interval,
+    )?
+    .0;
+    ring.laterals[0] = Some(joined.edge);
+    let mut rest = face;
+    for i in (1..n).rev() {
+        let s = lateral(i)?;
+        let made = mef(
+            b,
+            keys.next(),
+            Corner::Before(fins[i]),
+            Corner::Before(near_fins[i]),
+            s.curve,
+            s.interval,
+        )?
+        .0;
+        // Against the new edge is the side of segment i, from vertex i to
+        // i + 1; along it, the rest of the tube's last stretch.
+        ring.sides[i] = Some(made.faces[1]);
+        ring.laterals[i] = Some(made.edge);
+        rest = made.faces[0];
+    }
+    ring.sides[0] = Some(rest);
+    built.rings.push(ring);
+    for (r, rb) in plan.rings.iter().zip(&built.rings) {
+        for (s, side) in r.segments.iter().zip(&rb.sides) {
+            if let (Some((surface, sense)), Some(face)) = (s.side, *side) {
+                set_surface(b, face, surface, sense)?;
+            }
+        }
+    }
+    Ok((region, built))
 }
 
 /// One segment of a full revolve, in loop order from an axis contact (or
