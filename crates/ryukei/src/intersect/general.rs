@@ -255,6 +255,20 @@ pub(crate) fn apart(
     cell: Cell,
     b: &Surface,
     skip: &dyn Fn(Cell) -> bool,
+    budget: usize,
+) -> Option<bool> {
+    apart_within(a, cell, b, None, skip, &|_| false, budget)
+}
+
+/// [`apart`] against `b` over its cell `within` only, when given,
+/// leaving out cells of `b` that `skip_b` rules out.
+pub(crate) fn apart_within(
+    a: &Surface,
+    cell: Cell,
+    b: &Surface,
+    within: Option<Cell>,
+    skip: &dyn Fn(Cell) -> bool,
+    skip_b: &dyn Fn(Cell) -> bool,
     mut budget: usize,
 ) -> Option<bool> {
     let sheets = [Sheet::of(a), Sheet::of(b)];
@@ -282,8 +296,15 @@ pub(crate) fn apart(
         Some([x, y])
     };
     let enclose = |k: usize, c: Cell| Enc::new(&sheets[k], c);
+    let clip = |c: Cell| -> Option<Cell> {
+        let Some(w) = within else { return Some(c) };
+        let out: Cell = core::array::from_fn(|k| [c[k][0].max(w[k][0]), c[k][1].min(w[k][1])]);
+        (out[0][0] < out[0][1] && out[1][0] < out[1][1]).then_some(out)
+    };
     let Some(firsts) = cells(b, &near)
         .into_iter()
+        .filter_map(clip)
+        .filter(|&c| !skip_b(c))
         .map(|c| enclose(1, c).map(|e| (Rc::new(e), 0)))
         .collect::<Option<Vec<(Rc<Enc>, u32)>>>()
     else {
@@ -340,6 +361,9 @@ pub(crate) fn apart(
                     return Some(false);
                 };
                 for h in hs {
+                    if skip_b(h) {
+                        continue;
+                    }
                     // A cell with no enclosure can't be excluded.
                     let Some(e) = enclose(1, h) else {
                         return Some(false);

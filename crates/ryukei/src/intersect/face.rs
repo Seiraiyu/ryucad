@@ -137,10 +137,24 @@ pub(crate) fn face_face_within(
         }
         _ => {}
     }
-    let (branches, points) = match surface_surface(sa, sb, &region)? {
+    let hit = match surface_surface(sa, sb, &region) {
+        // A trace can fail where the surfaces meet only outside the faces
+        // (sides of one loft or sweep along their shared edge, which these
+        // pieces of them no longer reach): faces certified apart over
+        // their own parameter boxes are apart.
+        Err(Failure::Uncertain) if super::beside::faces_apart(a, b, FACES_APART) => {
+            return Ok(FaceMeet::apart());
+        }
+        other => other?,
+    };
+    let (branches, points) = match hit {
         SurfaceHit::Coincident { same } => return coincident(faces, [sa, sb], same),
         SurfaceHit::Meet { branches, points } => (branches, points),
     };
+    // Surfaces that don't meet in the region: nothing for edges to cut.
+    if branches.is_empty() && points.is_empty() {
+        return Ok(FaceMeet::apart());
+    }
     // Where each face's edges meet the other's surface. An edge both faces
     // use lies on both surfaces (the body is sound): only its ends cut.
     let mut cuts: Vec<Point3> = Vec::new();
@@ -428,6 +442,10 @@ pub(crate) fn coarse_box(body: &Body, face: FaceId) -> Box3 {
     }
     out.unwrap_or_else(|| surface.bounds())
 }
+
+/// The most pairs of parts [`super::beside::faces_apart`] tests when a
+/// trace fails.
+const FACES_APART: usize = 1 << 16;
 
 /// [`face_box`] for a face on a NURBS, revolution or sweep: the surface's
 /// enclosure over the face's parameter box, grown by the largest of its

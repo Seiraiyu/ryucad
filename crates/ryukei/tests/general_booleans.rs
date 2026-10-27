@@ -313,3 +313,61 @@ fn an_octant_off_a_spline_ball() {
         4.0 / 3.0 * PI - octant,
     );
 }
+
+/// A square bar along a spline, twisted a turn and a half.
+fn twisted_bar(s: f64, rise: f64) -> Body {
+    use ryukei::geom::{Curve, KnotVector, NurbsCurve};
+    use ryukei::sweep::{AlongOptions, Path, PathSegment, along};
+    use std::sync::Arc;
+    let k = KnotVector::clamped(3, &[0.0, 1.0, 2.0], &[4, 1, 4]).unwrap();
+    let pts = vec![
+        Point3::new(-s, 0.0, -0.2),
+        Point3::new(-s / 2.0, 0.0, -0.2),
+        Point3::new(0.0, rise, 0.0),
+        Point3::new(s / 2.0, 0.2, 0.4),
+        Point3::new(s, 0.0, 0.5),
+    ];
+    let path = Path {
+        segments: vec![PathSegment {
+            key: SegmentKey(1),
+            curve: Curve::Nurbs(Arc::new(NurbsCurve::new(k, pts, None).unwrap())),
+            range: [0.0, 2.0],
+        }],
+    };
+    let profile = ValidProfile::new(Profile {
+        frame: Frame::new(
+            Point3::new(-s, 0.0, -0.2),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        )
+        .unwrap(),
+        loops: vec![square(10, 0.24)],
+    })
+    .unwrap();
+    let opts = AlongOptions {
+        twist: 1.5,
+        ..AlongOptions::default()
+    };
+    along(OpKey(4), &profile, &path, &opts).unwrap().0
+}
+
+/// A twisted bar through a torus: pieces of its sides that no longer
+/// share the rail they ran along are certified apart over their own
+/// parameter boxes, where tracing their whole surfaces fails along it.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_twisted_bar_through_a_torus() {
+    let bar = twisted_bar(1.340_971_818_279_063_6, 0.283_061_962_530_500_75);
+    let torus = primitive::torus(OpKey(5), 0.647_620_361_691_491_2, 0.25, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let x = Vector3::new(1.0, 0.0, 0.0).normalize().unwrap();
+    let place = at(-0.75, 0.25, -0.75).then_after(&Rigid::rotation(x, 1.5 * PI));
+    let u = run(BooleanOp::Unite, &bar, &torus, place);
+    let i = run(BooleanOp::Intersect, &bar, &torus, place);
+    let moved = torus.transformed(&place).unwrap();
+    near(volume(&u) + volume(&i), volume(&bar) + volume(&moved));
+}
