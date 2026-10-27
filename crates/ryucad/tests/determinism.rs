@@ -5,8 +5,8 @@
 //! to other features' faces, edges and vertices, solids that features
 //! join, cut and intersect, holes and patterns, how sketches are drawn,
 //! what diffs say, what merges make, the content hashes release records
-//! name, where assemblies place their parts, and the bytes of exported
-//! STEP files. After
+//! name, where assemblies place their parts, the bodies and names of
+//! imported STEP files, and the bytes of exported STEP files. After
 //! a deliberate change, regenerate with
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
@@ -1505,6 +1505,70 @@ fn exports_section(golden: &mut Golden) {
     }
 }
 
+/// Files OCCT wrote (ryustep's `tests/data/occt`), each imported into one
+/// project: every import feature's body, names and all, and where the
+/// assembly file's assembly places its parts, built on one thread and on
+/// four.
+fn imports_section(golden: &mut Golden) {
+    use ryucad::doc::assembly::Rev;
+    let mut s = golden.section("imports");
+    let files = [
+        "box_ap214.stp",
+        "cylinder.stp",
+        "torus.stp",
+        "plate_hole.stp",
+        "nurbs_cylinder.stp",
+        "spline_revolve.stp",
+        "assembly.stp",
+    ];
+    let mut runs = Vec::new();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        ryucad::server::init(dir.path(), None).unwrap();
+        let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+        let mut out = Vec::new();
+        for f in files {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../ryustep/tests/data/occt")
+                .join(f);
+            let params = serde_json::json!({"path": path});
+            let req = ryucad::proto::Request::from_rpc("import", Some(params)).unwrap();
+            pool.install(|| ryucad::server::handle(&mut session, req))
+                .unwrap_or_else(|e| panic!("{f}: {e}"));
+        }
+        let parts: Vec<Id> = session.project().parts.keys().cloned().collect();
+        for part in &parts {
+            let r = pool.install(|| session.rebuilt(part).unwrap().clone());
+            assert_eq!(r.failed(), 0, "{part}: {:?}", r.features);
+            out.push(part.to_string());
+            for (id, o) in &r.features {
+                out.push(id.to_string());
+                for (solid, b) in o.as_ref().unwrap().solids() {
+                    out.push(solid.to_string());
+                    out.push(b.body.dump());
+                }
+            }
+            let model = session.model(part, &Rev::Working).unwrap();
+            for o in &model.occurrences {
+                out.push(ryucad::assembly::path_text(&o.path));
+                let p = ryucad::assembly::rigid_pose(&o.pose);
+                for x in p.origin_m.iter().chain(&p.z).chain(&p.x) {
+                    out.push(format!("{:016x}", x.to_bits()));
+                }
+            }
+        }
+        runs.push(out);
+    }
+    assert_eq!(runs[0], runs[1], "one thread and four");
+    for x in &runs[0] {
+        s.str(x);
+    }
+}
+
 /// The planar face of `part`'s solid `solid` whose outward normal is `n`.
 fn face_along(s: &mut ryucad::session::Session, part: &str, solid: &str, n: [f64; 3]) -> String {
     let req = ryucad::proto::Request::from_rpc(
@@ -1855,6 +1919,7 @@ fn determinism() {
     assemblies_section(&mut golden);
     mates_section(&mut golden);
     interference_section(&mut golden);
+    imports_section(&mut golden);
     exports_section(&mut golden);
     golden.finish();
 }
