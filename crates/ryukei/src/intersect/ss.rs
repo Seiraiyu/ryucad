@@ -75,10 +75,17 @@ pub(crate) struct Raw {
 /// the first's parameter plane, as [`pipe_surface`] traces a pipe; two
 /// surfaces with no implicit form in their four parameters together.
 ///
+/// Where the trace is uncertain the surfaces are carried past their
+/// bounded domain edges ([`extended`]) and what is found there is clipped
+/// back to their domains, so no branch leaves either surface.
+///
 /// Fails with `Uncertain` where a branch's topology, a singular point or
 /// a fit could not be certified.
 pub fn surface_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
-    meet(a, b, region, true)
+    meet(a, b, region, false).or_else(|e| match e {
+        Failure::Uncertain => carried(a, b, region).map(|hit| within_domains(hit, [a, b])),
+        e => Err(e),
+    })
 }
 
 /// [`surface_surface`], trying the surfaces carried past their bounded
@@ -104,14 +111,7 @@ pub(crate) fn meet(
                 // crossing can be certified: on the surfaces carried past
                 // their edges, by different fractions so their carried
                 // edges don't end together, it lies inside.
-                Failure::Uncertain if extend => {
-                    match (extended(a, 16.0), extended(b, 32.0 / 3.0)) {
-                        (None, None) => Err(e),
-                        (ea, eb) => {
-                            traced_any(ea.as_ref().unwrap_or(a), eb.as_ref().unwrap_or(b), region)
-                        }
-                    }
-                }
+                Failure::Uncertain if extend => carried(a, b, region),
                 e => Err(e),
             });
         }
@@ -145,6 +145,172 @@ pub(crate) fn meet(
     let mut points = topo.points;
     let branches = fitted(&chains, order, swapped, &mut points)?;
     Ok(SurfaceHit::Meet { branches, points })
+}
+
+/// Where two surfaces meet, one at least with no implicit form, on the
+/// surfaces carried past their bounded domain edges, by different
+/// fractions so their carried edges don't end together. `Uncertain` when
+/// both have implicit forms or neither has such an edge. What is found
+/// may run past the surfaces' domains ([`within_domains`] clips it).
+fn carried(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
+    if Implicit::of(a).is_some() && Implicit::of(b).is_some() {
+        return Err(Failure::Uncertain);
+    }
+    match (extended(a, 16.0), extended(b, 32.0 / 3.0)) {
+        (None, None) => Err(Failure::Uncertain),
+        (ea, eb) => traced_any(ea.as_ref().unwrap_or(a), eb.as_ref().unwrap_or(b), region),
+    }
+}
+
+/// What [`carried`] found, cut back to the surfaces themselves: each
+/// branch to the stretches whose pcurves lie in both surfaces' domains (a
+/// carried surface keeps its parameters over its own domain), a stretch
+/// shorter than ten tolerances a point; points within resolution of both.
+fn within_domains(hit: SurfaceHit, surfaces: [&Surface; 2]) -> SurfaceHit {
+    let SurfaceHit::Meet {
+        branches,
+        mut points,
+    } = hit
+    else {
+        return hit;
+    };
+    points.retain(|&p| {
+        surfaces
+            .iter()
+            .all(|s| s.distance(p) <= 2.0 * LINEAR_RESOLUTION)
+    });
+    let mut out = Vec::with_capacity(branches.len());
+    for br in branches {
+        let runs = inside_runs(&br, surfaces);
+        if runs.len() == 1 && runs[0] == br.range {
+            out.push(br);
+            continue;
+        }
+        for range in runs {
+            let ends = range.map(|t| br.curve.point(t));
+            let b = br.curve.bounds(range);
+            if b.min().distance(b.max()) < 10.0 * br.tolerance {
+                points.push(ends[0]);
+                continue;
+            }
+            out.push(Branch {
+                range,
+                ..br.clone()
+            });
+        }
+    }
+    SurfaceHit::Meet {
+        branches: out,
+        points,
+    }
+}
+
+/// How finely [`inside_runs`] cuts a branch's range: halvings at most,
+/// and parts at most.
+const CLIP_DEPTH: u32 = 48;
+const CLIP_PARTS: usize = 4096;
+
+/// The stretches of a branch's range over which its pcurve on each
+/// surface lies in that surface's domain (periodic directions aside, each
+/// domain widened by a billionth), in order: parts certified in or out by
+/// the pcurves' bounds, the rest halved, down to [`CLIP_DEPTH`] halvings or
+/// past [`CLIP_PARTS`] parts, where the middle decides. A closed branch's
+/// runs across its start are one.
+fn inside_runs(br: &Branch, surfaces: [&Surface; 2]) -> Vec<[f64; 2]> {
+    // Each domain widened by a billionth of its width: a pcurve along a
+    // domain edge (where carrying the surfaces on is needed at all) lies
+    // on it within rounding, and is inside.
+    let widened = |d: [f64; 2]| {
+        let w = d[1] - d[0];
+        let e = 1e-9 * if w.is_finite() { w.max(1.0) } else { 1.0 };
+        [d[0] - e, d[1] + e]
+    };
+    let limits: [_; 2] = core::array::from_fn(|k| {
+        let [du, dv] = surfaces[k].domain();
+        ([widened(du), widened(dv)], surfaces[k].periods())
+    });
+    let box_of = |k: usize, [t0, t1]: [f64; 2]| {
+        let (c, [m0, m1]) = &br.pcurves[k];
+        let (s0, s1) = (m0 + m1 * t0, m0 + m1 * t1);
+        let r = [s0.min(s1), s0.max(s1)];
+        let b = match c {
+            Curve2::Nurbs2(n) => n.clipped_bounds(r),
+            c => c.bounds(r),
+        };
+        // Cutting pieces rounds: grow by a little more than it can.
+        let (lo, hi) = (b.min(), b.max());
+        let g = 1e-12 * lo.distance(hi).max(1.0);
+        [lo.x - g, lo.y - g, hi.x + g, hi.y + g]
+    };
+    // `Some(true)` all inside, `Some(false)` all outside (in some
+    // direction), `None` undecided.
+    let judge = |range: [f64; 2]| -> Option<bool> {
+        let mut inside = true;
+        for (k, &([du, dv], (pu, pv))) in limits.iter().enumerate() {
+            let [ulo, vlo, uhi, vhi] = box_of(k, range);
+            for (lo, hi, d, period) in [(ulo, uhi, du, pu), (vlo, vhi, dv, pv)] {
+                if period.is_some() {
+                    continue;
+                }
+                if hi < d[0] || lo > d[1] {
+                    return Some(false);
+                }
+                if lo < d[0] || hi > d[1] {
+                    inside = false;
+                }
+            }
+        }
+        inside.then_some(true)
+    };
+    let at_middle = |[a, b]: [f64; 2]| -> bool {
+        let t = (a + b) / 2.0;
+        (0..2).all(|k| {
+            let ([du, dv], (pu, pv)) = limits[k];
+            let (c, [m0, m1]) = &br.pcurves[k];
+            let p = c.point(m0 + m1 * t);
+            (pu.is_some() || (p.x >= du[0] && p.x <= du[1]))
+                && (pv.is_some() || (p.y >= dv[0] && p.y <= dv[1]))
+        })
+    };
+    let mut kept: Vec<[f64; 2]> = Vec::new();
+    let mut stack = vec![(br.range, 0u32)];
+    let mut parts = 0;
+    // Depth first, the lower half first: kept parts come in order.
+    while let Some((r, depth)) = stack.pop() {
+        parts += 1;
+        let keep = match judge(r) {
+            Some(x) => x,
+            None if depth >= CLIP_DEPTH || parts > CLIP_PARTS => at_middle(r),
+            None => {
+                let m = (r[0] + r[1]) / 2.0;
+                if m <= r[0] || m >= r[1] {
+                    at_middle(r)
+                } else {
+                    stack.push(([m, r[1]], depth + 1));
+                    stack.push(([r[0], m], depth + 1));
+                    continue;
+                }
+            }
+        };
+        if keep {
+            match kept.last_mut() {
+                Some(last) if last[1] == r[0] => last[1] = r[1],
+                _ => kept.push(r),
+            }
+        }
+    }
+    // A closed branch: the run ending at its end goes on into the one at
+    // its start.
+    if kept.len() > 1
+        && br.curve.period().is_some()
+        && kept[0][0] == br.range[0]
+        && kept[kept.len() - 1][1] == br.range[1]
+    {
+        let first = kept.remove(0);
+        let last = kept.last_mut().expect("two runs");
+        last[1] += first[1] - first[0];
+    }
+    kept
 }
 
 /// Where two surfaces meet, one at least with no implicit form: the
@@ -621,4 +787,65 @@ fn with_pcurves(raw: Raw, surfaces: [&Surface; 2]) -> Result<Branch, Failure> {
         tolerance,
         pcurves: [p0, p1],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::{Frame, Plane, Vector3};
+
+    /// A gently curved spline patch over `[0, 1]²` in x and y, and the
+    /// plane `x = 1` through its domain edge `u = 1`: the curve where they
+    /// meet lies along that edge, where the trace can't isolate it, so the
+    /// patch is carried past its edges, beyond the corners too.
+    fn patch_and_edge_plane() -> (Surface, Surface) {
+        let k = KnotVector::clamped(2, &[0.0, 1.0], &[3, 3]).unwrap();
+        let mut points = Vec::new();
+        for i in 0..3 {
+            for j in 0..3 {
+                let (x, y) = (f64::from(i) / 2.0, f64::from(j) / 2.0);
+                let z = if j == 1 { 0.1 } else { 0.0 };
+                points.push(Point3::new(x, y, z));
+            }
+        }
+        let patch = crate::geom::NurbsSurface::new([k.clone(), k], points, None).unwrap();
+        let frame = Frame::new(
+            Point3::new(1.0, 0.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        )
+        .unwrap();
+        (
+            Surface::Nurbs(Arc::new(patch)),
+            Surface::Plane(Plane::new(frame)),
+        )
+    }
+
+    #[test]
+    fn branches_never_leave_either_surface() {
+        let (patch, plane) = patch_and_edge_plane();
+        let region = Box3::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(2.0, 2.0, 1.0));
+        for (a, b, k) in [(&patch, &plane, 0), (&plane, &patch, 1)] {
+            let Ok(SurfaceHit::Meet { branches, .. }) = surface_surface(a, b, &region) else {
+                panic!("the patch and the plane meet");
+            };
+            assert!(!branches.is_empty());
+            for br in &branches {
+                let (c, [m0, m1]) = &br.pcurves[k];
+                for i in 0..=64 {
+                    let t = br.range[0] + (br.range[1] - br.range[0]) * f64::from(i) / 64.0;
+                    let p = c.point(m0 + m1 * t);
+                    // In the domain, but for the clip's slack (a billionth
+                    // of it): within resolution on this unit patch.
+                    let r = LINEAR_RESOLUTION;
+                    for x in [p.x, p.y] {
+                        assert!((-r..=1.0 + r).contains(&x), "({}, {}) at {t}", p.x, p.y);
+                    }
+                }
+                // Along the whole edge, not short of it.
+                let ends = [br.range[0], br.range[1]].map(|t| c.point(m0 + m1 * t).y);
+                assert!(ends.iter().any(|&y| y < 1e-6) && ends.iter().any(|&y| y > 1.0 - 1e-6));
+            }
+        }
+    }
 }
