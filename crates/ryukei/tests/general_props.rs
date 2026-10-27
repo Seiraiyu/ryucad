@@ -6,8 +6,11 @@
 //! second reference. Release only: minutes in a debug build.
 
 use proptest::prelude::*;
-use ryukei::geom::{Box3, Cone, Cylinder, Frame, Plane, Point3, Sphere, Surface, Torus, Vector3};
-use ryukei::intersect::{Branch, Side, SurfaceHit, surface_surface};
+use ryukei::geom::{
+    Box3, Cone, Cylinder, Direction, Frame, Plane, Point3, Sphere, Surface, Torus, UnitVector3,
+    Vector3,
+};
+use ryukei::intersect::{Branch, Failure, Side, SurfaceHit, surface_surface};
 use std::sync::Arc;
 
 fn unit() -> impl Strategy<Value = Vector3> {
@@ -46,7 +49,15 @@ fn spline_of(s: &Surface) -> Surface {
         Surface::Torus(_) => [[0.0, tau], [0.0, tau]],
         _ => [[0.0, tau], [-4.0, 4.0]],
     };
-    let (n, _) = s.to_nurbs(range).unwrap();
+    let (mut n, [_, rv]) = s.to_nurbs(range).unwrap();
+    // A sphere's `v` converts whole, poles and all: cut them off. A
+    // surface passing a spline's pole within tens of microns is a limit
+    // (`passing_a_spline_pole_is_uncertain`), not what this samples.
+    if let Surface::Sphere(_) = s {
+        let [v0, v1] = range[1].map(|v| rv.to_nurbs(v));
+        n = n.split(Direction::V, v1).unwrap().0;
+        n = n.split(Direction::V, v0).unwrap().1;
+    }
     Surface::Nurbs(Arc::new(n))
 }
 
@@ -258,4 +269,52 @@ fn surfaces_touching_along_a_curve() {
             "{p:?}"
         );
     }
+}
+
+/// A limit, pinned: a spline cone passing 15 µm from a pole of a spline
+/// sphere (its `v` converted whole) is `Uncertain`. In the four-parameter
+/// trace a pole's cells have no normal (`B_s × B_t` vanishes along a
+/// collapsed row), so none is simple, and the tangency system is
+/// degenerate there. Found by `spline_pairs_agree_with_sampling` on
+/// macos-latest (CI run 40418433312) before its spheres stopped short of
+/// their poles. When the trace handles poles (issue #128), this should
+/// meet.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn passing_a_spline_pole_is_uncertain() {
+    let tau = core::f64::consts::TAU;
+    let unit = |x, y, z| UnitVector3::exact(Vector3::new(x, y, z)).unwrap();
+    let cone = Frame::from_axes(
+        Point3::new(1.8320710486777743, -1.7513363077239754, -1.508676459436074),
+        unit(-0.1664148424245527, 0.6807227608150997, -0.7133881293721391),
+        unit(
+            -0.15464301548726556,
+            -0.7325411407615743,
+            -0.662924592131516,
+        ),
+    )
+    .unwrap();
+    let cone = Cone::new(cone, 1.041812376422121, 0.7418606317016863).unwrap();
+    let ball = Frame::from_axes(
+        Point3::new(1.3213431565366103, -1.0632248787847285, -1.1177160827182717),
+        unit(0.9567357986130439, 0.1556135058373798, -0.24584761225861207),
+        unit(-0.1507170440917043, 0.9878180180584882, 0.03872900488341388),
+    )
+    .unwrap();
+    let ball = Sphere::new(ball, 1.8321002391416865).unwrap();
+    let apex = cone.apex_v();
+    let a = spline(
+        &Surface::Cone(cone),
+        [[0.0, tau], [apex + 0.05, apex + 6.0]],
+    );
+    let b = spline(&Surface::Sphere(ball), [[0.0, tau], [-1.5, 1.5]]);
+    let region = Box3::new(
+        Point3::new(-20.0, -20.0, -20.0),
+        Point3::new(20.0, 20.0, 20.0),
+    );
+    let hit = surface_surface(&a, &b, &region);
+    assert!(matches!(hit, Err(Failure::Uncertain)), "{hit:?}");
 }
