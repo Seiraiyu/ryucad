@@ -265,7 +265,7 @@ impl Surface {
                 Ok((s, [r, Reparam::Identity]))
             }
             // A pipe about a curved spine has no exact rational form.
-            Self::Pipe(_) => Err(Error::Degenerate),
+            Self::Pipe(_) | Self::Sweep(_) => Err(Error::Degenerate),
             Self::Revolution(s) => {
                 let (c, r) = s.curve().to_nurbs([v0, v1])?;
                 let f = s.frame();

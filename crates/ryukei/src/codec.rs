@@ -24,8 +24,8 @@ use crate::Error;
 use crate::check::check_topology;
 use crate::geom::{
     Circle, Circle2, Cone, Curve, Curve2, Cylinder, Ellipse, Ellipse2, Extrusion, Frame, Frame2,
-    KnotVector, Line, Line2, NurbsCurve, NurbsCurve2, NurbsSurface, Pipe, Plane, Point2, Point3,
-    Revolution, Rigid, Sphere, Surface, Torus, UnitVector3, Vector2, Vector3,
+    FrameLaw, KnotVector, Line, Line2, NurbsCurve, NurbsCurve2, NurbsSurface, Pipe, Plane, Point2,
+    Point3, Revolution, Rigid, Sphere, Surface, Sweep, Torus, UnitVector3, Vector2, Vector3,
 };
 use crate::mesh::{BodyMesh, Corner, EdgePolyline, FaceFault, FaceMesh, MeshFaultKind};
 use crate::name::{Event, Journal, Name, ToolKey};
@@ -58,6 +58,7 @@ struct Writer {
     extrusions: HashMap<usize, u32>,
     revolutions: HashMap<usize, u32>,
     pipes: HashMap<usize, u32>,
+    sweeps: HashMap<usize, u32>,
 }
 
 impl Writer {
@@ -334,6 +335,29 @@ impl Writer {
                     },
                 );
             }
+            Surface::Sweep(sw) => {
+                self.u8(9);
+                self.shared(
+                    sw,
+                    |w| &mut w.sweeps,
+                    |w, sw| {
+                        w.curve(sw.profile());
+                        w.floats(&sw.profile_range());
+                        w.curve(sw.path());
+                        w.floats(&sw.path_range());
+                        w.frame(sw.start());
+                        match sw.law() {
+                            FrameLaw::Minimal => w.u8(0),
+                            FrameLaw::Binormal(b) => {
+                                w.u8(1);
+                                w.vector(b.get());
+                            }
+                        }
+                        w.f64(sw.twist());
+                        w.f64(sw.scale());
+                    },
+                );
+            }
         }
     }
 
@@ -458,6 +482,7 @@ struct Reader<'a> {
     extrusions: Vec<Arc<Extrusion>>,
     revolutions: Vec<Arc<Revolution>>,
     pipes: Vec<Arc<Pipe>>,
+    sweeps: Vec<Arc<Sweep>>,
 }
 
 type R<T> = Result<T, Error>;
@@ -472,6 +497,7 @@ impl<'a> Reader<'a> {
             extrusions: Vec::new(),
             revolutions: Vec::new(),
             pipes: Vec::new(),
+            sweeps: Vec::new(),
         }
     }
 
@@ -798,6 +824,23 @@ impl<'a> Reader<'a> {
                         return Err(invalid("a pipe anchored on a surface that isn't analytic"));
                     }
                     Pipe::new(spine, radius, anchor).map_err(bad)
+                },
+            )?),
+            9 => Surface::Sweep(self.shared(
+                |r| &mut r.sweeps,
+                |r| {
+                    let profile = r.curve()?;
+                    let pr = [r.finite()?, r.finite()?];
+                    let path = r.curve()?;
+                    let sr = [r.finite()?, r.finite()?];
+                    let start = r.frame()?;
+                    let law = match r.u8()? {
+                        0 => FrameLaw::Minimal,
+                        1 => FrameLaw::Binormal(r.unit()?),
+                        _ => return Err(invalid("an unknown frame law")),
+                    };
+                    let (twist, scale) = (r.finite()?, r.finite()?);
+                    Sweep::new((profile, pr), (path, sr), start, law, twist, scale).map_err(bad)
                 },
             )?),
             _ => return Err(invalid("an unknown surface kind")),
