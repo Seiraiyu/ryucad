@@ -6,9 +6,15 @@
 //! product at its solved pose, and each instance pattern's copies at
 //! theirs, subassemblies products of their own; a part placed at two
 //! revisions is two products. A product's identifier is its PDM number,
-//! else its part ID; its name the `name` property, else its ID; its
-//! description the `description` property; its revision the release label
-//! it is exported at. A usage's identifier is its instance's ID.
+//! else the one product its import features (or, for an assembly, its
+//! imported instances) all name, else its part ID; its name the `name`
+//! property, else that product's name, else its ID; its description the
+//! `description` property; its revision the release label it is exported
+//! at. An imported assembly's instance of its own bodies (an import with
+//! no usage, at the origin) writes them as the assembly's own bodies, and
+//! a usage's identifier is the file's where an import made the instance,
+//! else the instance's ID: a file exported as it was imported comes back
+//! with its products and usages, so the import matches the export.
 //!
 //! The bytes are the same for the same model and options: the header's
 //! file name and time stamp are the caller's, the time stamp else the
@@ -17,9 +23,10 @@
 //! from the session's results each time and never cached.
 
 use crate::assembly::{Model, Pin};
-use crate::doc::assembly::Rev;
-use crate::doc::files::PartKind;
+use crate::doc::assembly::{Pose, Rev};
+use crate::doc::files::{Feature, PartKind};
 use crate::doc::id::Id;
+use crate::doc::import::ProductRef;
 use crate::doc::project::Part;
 use crate::error::{Code, Error, Result};
 use crate::proto::Answer;
@@ -30,7 +37,7 @@ use ryupdm::props::Properties;
 use ryustep::schema::Schema;
 use ryustep::{Child, LengthUnit, Product, WriteError, WriteModel, WriteOptions};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// What `export` asks for: the part, the revision (`working`, a Git
 /// revision, or `label:<L>`), `ap242` or `ap214`, `mm` or `m`, and the
@@ -204,7 +211,7 @@ impl Walk {
         self.model.products.push(Product::default());
         self.owners.push(Vec::new());
         let props = properties(s, part, rev, self.pin.as_ref().filter(|_| k == 0));
-        let (id, name, description) = identity(part, &props);
+        let (id, name, description) = identity(part, &p, &props);
         let mut bodies = Vec::new();
         let mut owners = Vec::new();
         let mut children = Vec::new();
@@ -212,11 +219,29 @@ impl Walk {
             for (fid, r) in &result.features {
                 match r {
                     Ok(Output::Instance(placed)) => {
+                        let import = match p.features.get(fid) {
+                            Some(Ok(Feature::Instance(i))) => i.import.clone(),
+                            _ => None,
+                        };
+                        let own = import.as_ref().is_some_and(|u| u.usage.is_none())
+                            && crate::assembly::rigid_pose(&placed.pose) == Pose::IDENTITY;
+                        if own {
+                            let (cp, cr) = self.node(s, &placed.part, &placed.rev)?;
+                            if !cp.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly) {
+                                let (b, o) = solids(&cp, &placed.rev, &cr);
+                                bodies.extend(b);
+                                owners.extend(o);
+                                continue;
+                            }
+                        }
                         let product = self.product(s, &placed.part, &placed.rev)?;
+                        let id = import
+                            .and_then(|u| u.usage)
+                            .unwrap_or_else(|| fid.to_string());
                         children.push(Child {
                             product,
                             place: placed.pose,
-                            id: fid.to_string(),
+                            id,
                         });
                     }
                     Ok(Output::Copies(c)) => {
@@ -298,9 +323,34 @@ fn solids(p: &Part, rev: &Rev, result: &PartResult) -> (Vec<Body>, Vec<(Id, Id)>
         .unzip()
 }
 
+/// The product an imported part or assembly came from: the one product
+/// every import feature of a part names, or every imported instance of
+/// an assembly is used in.
+fn imported(p: &Part) -> Option<ProductRef> {
+    let mut named: BTreeSet<Option<ProductRef>> = BTreeSet::new();
+    for fid in p.order() {
+        match p.features.get(fid) {
+            Some(Ok(Feature::Import(i))) => {
+                named.insert(i.product.clone());
+            }
+            Some(Ok(Feature::Instance(i))) => {
+                if let Some(u) = &i.import {
+                    named.insert(Some(u.product.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+    match named.len() {
+        1 => named.into_iter().next().flatten(),
+        _ => None,
+    }
+}
+
 /// A product's identifier, name and description: the PDM number, name
-/// and description, else the part's ID.
-fn identity(part: &Id, props: &Properties) -> (String, String, String) {
+/// and description, else the imported product's identifier and name, else
+/// the part's ID.
+fn identity(part: &Id, p: &Part, props: &Properties) -> (String, String, String) {
     let text = |key: &str| {
         props
             .values
@@ -309,8 +359,13 @@ fn identity(part: &Id, props: &Properties) -> (String, String, String) {
             .filter(|v| !v.trim().is_empty())
             .map(str::to_owned)
     };
-    let id = text("number").unwrap_or_else(|| part.to_string());
-    let name = text("name").unwrap_or_else(|| part.to_string());
+    let from = imported(p);
+    let id = text("number")
+        .or_else(|| from.as_ref().map(|f| f.id.clone()))
+        .unwrap_or_else(|| part.to_string());
+    let name = text("name")
+        .or_else(|| from.as_ref().map(|f| f.name.clone()))
+        .unwrap_or_else(|| part.to_string());
     (id, name, text("description").unwrap_or_default())
 }
 
@@ -641,6 +696,183 @@ pub(crate) mod tests {
         let (v, bytes) = exported(&mut s, json!({"part": "bolt", "schema": "ap214"})).unwrap();
         assert_eq!(v["schema"], "ap214");
         assert_eq!(opened(&bytes).schema, Schema::Ap214);
+    }
+
+    /// A frame (`F-1`) with a plate of its own, a sub-assembly (`S-1`) of
+    /// two pins (`P-1`) and one pin more, every usage `1`: one root.
+    fn frame() -> Vec<u8> {
+        use ryukei::geom::{Rigid, Vector3};
+        use ryukei::name::OpKey;
+        use ryukei::primitive;
+        let at = |x: f64, y: f64, z: f64| Rigid::translation(Vector3::new(x, y, z));
+        let k = OpKey(1);
+        let plate = primitive::block(k, 0.1, 0.1, 0.01, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let pin = primitive::cylinder(k, 0.002, 0.02, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let product = |id: &str, name: &str, bodies, children| Product {
+            id: id.into(),
+            name: name.into(),
+            bodies,
+            children,
+            ..Default::default()
+        };
+        let child = |product, place| Child {
+            product,
+            place,
+            id: "1".into(),
+        };
+        crate::import::tests::written(vec![
+            product(
+                "F-1",
+                "Frame",
+                vec![plate],
+                vec![child(1, at(0.0, 0.0, 0.01)), child(2, at(0.05, 0.05, 0.01))],
+            ),
+            product(
+                "S-1",
+                "Sub",
+                vec![],
+                vec![child(2, at(0.01, 0.0, 0.0)), child(2, at(0.02, 0.0, 0.0))],
+            ),
+            product("P-1", "Pin", vec![pin], vec![]),
+        ])
+    }
+
+    /// `bytes` written to `name` outside any project.
+    fn outside(bytes: &[u8], name: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        (dir, path.to_string_lossy().into_owned())
+    }
+
+    /// Each definition's product, own bodies, and usages (id, child's
+    /// product, the placement's bits), in definition order.
+    #[allow(clippy::type_complexity)]
+    fn tree(bytes: &[u8]) -> Vec<(String, usize, Vec<(String, String, Vec<u64>)>)> {
+        let o = opened(bytes);
+        let defs = &o.products.definitions;
+        (0..defs.len())
+            .map(|k| {
+                let d = &defs[k];
+                let bodies = o.held.iter().filter(|h| h.definition == Some(k)).count();
+                let usages = d
+                    .children
+                    .iter()
+                    .enumerate()
+                    .map(|(n, c)| {
+                        let r = o.placement(k, n).unwrap();
+                        let t = r.translation_part();
+                        let bits = r
+                            .rotation_matrix()
+                            .iter()
+                            .flatten()
+                            .chain([t.x, t.y, t.z].iter())
+                            .map(|x| x.to_bits())
+                            .collect();
+                        (
+                            c.id.to_string(),
+                            defs[c.definition].product_id.to_string(),
+                            bits,
+                        )
+                    })
+                    .collect();
+                (format!("{} {}", d.product_id, d.name), bodies, usages)
+            })
+            .collect()
+    }
+
+    /// Every face, edge and vertex name of every part's solids, by part.
+    fn names(s: &mut Session) -> BTreeMap<String, BTreeSet<String>> {
+        let parts: Vec<Id> = s.project().parts.keys().cloned().collect();
+        let mut out = BTreeMap::new();
+        for p in parts {
+            let v = call(s, "inspect", json!({"part": p})).unwrap();
+            let mut set = BTreeSet::new();
+            for b in v["bodies"].as_array().into_iter().flatten() {
+                for kind in ["faces", "edges", "vertices"] {
+                    for e in b[kind].as_array().into_iter().flatten() {
+                        set.insert(e["name"].as_str().unwrap().to_owned());
+                    }
+                }
+            }
+            out.insert(p.to_string(), set);
+        }
+        out
+    }
+
+    #[test]
+    fn an_imported_file_exports_as_it_came() {
+        let original = frame();
+        let (_src, path) = outside(&original, "frame.step");
+        let (dir, mut s) = fresh();
+        call(&mut s, "import", json!({"path": path})).unwrap();
+        // f-1 places its plate's part (f-1-body), s-1 and p-1. Exported
+        // with the header the file had, it is the file, byte for byte.
+        let export = |s: &mut Session, time_stamp: &str| {
+            let params = json!({"part": "f-1", "unit": "m", "time_stamp": time_stamp,
+                                "file_name": "frame.step"});
+            exported(s, params).unwrap().1
+        };
+        assert_eq!(export(&mut s, "2026-10-27T00:00:00"), original);
+        // At another time, the same products, bodies and usages, each
+        // where it was: the plate is the frame's own body again, not a part
+        // placed in it.
+        let bytes = export(&mut s, "2026-10-28T00:00:00");
+        assert_eq!(tree(&bytes), tree(&original));
+        // Updating the import with the export changes nothing but the
+        // file's hash, and renames nothing.
+        let before = crate::session::files(dir.path()).unwrap();
+        let read = |p: &std::path::Path| std::fs::read(p).unwrap();
+        let old: BTreeMap<_, _> = before.iter().map(|p| (p.clone(), read(p))).collect();
+        let names_before = names(&mut s);
+        let (_out, out) = outside(&bytes, "export.step");
+        let v = call(
+            &mut s,
+            "import",
+            json!({"path": out, "update": "imports/frame.step"}),
+        )
+        .unwrap();
+        assert_ne!(v["file"]["blake3"], v["file"]["from"]);
+        for key in ["vanished", "kept", "failing"] {
+            assert!(v.get(key).is_none(), "{key}: {v}");
+        }
+        let after = crate::session::files(dir.path()).unwrap();
+        assert_eq!(after, before);
+        for p in &after {
+            let (a, b) = (&old[p], read(p));
+            if *a == b || p.ends_with("frame.step") {
+                continue;
+            }
+            // An import feature, only its file's hash new.
+            let mut a: Value = serde_json::from_slice(a).unwrap();
+            let b: Value = serde_json::from_slice(&b).unwrap();
+            assert_eq!(a["type"], "import", "{}", p.display());
+            a["file"]["blake3"] = b["file"]["blake3"].clone();
+            assert_eq!(a, b, "{}", p.display());
+        }
+        assert_eq!(names(&mut s), names_before);
+        // Imported into another project, it makes the same parts.
+        let (_dir2, mut s2) = fresh();
+        let v = call(&mut s2, "import", json!({"path": out})).unwrap();
+        let made: Vec<(&Value, &Value)> = v["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| (&p["part"], &p["kind"]))
+            .collect();
+        assert_eq!(
+            made,
+            [
+                (&json!("f-1"), &json!("assembly")),
+                (&json!("f-1-body"), &json!("part")),
+                (&json!("s-1"), &json!("assembly")),
+                (&json!("p-1"), &json!("part")),
+            ]
+        );
     }
 
     #[test]
