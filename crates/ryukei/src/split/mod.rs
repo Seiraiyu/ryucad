@@ -27,7 +27,7 @@ use crate::boolean::{FaceRef, Fail};
 use crate::geom::bernstein::{Bernstein, Root};
 use crate::geom::chain2::Chain2;
 use crate::geom::winding2::winding;
-use crate::geom::{Curve2, Point2, Surface, Vector2, Vector3};
+use crate::geom::{Curve2, Point2, Point3, Surface, Vector2, Vector3};
 use crate::interval::Interval;
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, Sense};
@@ -192,7 +192,12 @@ struct Arrangement<'a> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Node {
     Point,
-    Pole { sign: f64 },
+    /// `free` is the parameter running along the pole's line: `u` (0)
+    /// at a collapsed end of `v`, `v` (1) at one of `u`.
+    Pole {
+        sign: f64,
+        free: usize,
+    },
 }
 
 impl Arrangement<'_> {
@@ -209,6 +214,7 @@ impl Arrangement<'_> {
                         // The outward normal at the pole is along `sign z`.
                         return Node::Pole {
                             sign: -sign * self.sigma,
+                            free: 0,
                         };
                     }
                 }
@@ -219,13 +225,92 @@ impl Arrangement<'_> {
                 let apex = f.origin() + f.z().get() * c.apex_v();
                 if apex.distance(v.point) <= reach {
                     // The outward normal at the apex is along `-z`.
-                    Node::Pole { sign: self.sigma }
+                    Node::Pole {
+                        sign: self.sigma,
+                        free: 0,
+                    }
                 } else {
                     Node::Point
                 }
             }
-            _ => Node::Point,
+            _ => self.collapsed_pole(v.point, reach),
         }
+    }
+
+    /// A collapsed row of a spline or swept surface (a pole, or an apex)
+    /// within `reach` of `p`: its free parameter, and which way along it
+    /// clockwise turns about the face's outward normal go, read from how
+    /// the row's neighbours circle it about the normal there.
+    fn collapsed_pole(&self, p: Point3, reach: f64) -> Node {
+        let rows = crate::mesh::uv::collapsed_rows(self.surface);
+        let domain = self.surface.domain();
+        for k in 0..2 {
+            for e in 0..2 {
+                if !rows[k][e] {
+                    continue;
+                }
+                let free = 1 - k;
+                let [f0, f1] = domain[free];
+                let at = |f: f64, x: f64| {
+                    if k == 1 {
+                        self.surface.point(f, x)
+                    } else {
+                        self.surface.point(x, f)
+                    }
+                };
+                let edge = domain[k][e];
+                let pole = at(f0, edge);
+                if pole.distance(p) > reach {
+                    continue;
+                }
+                // Points a little inside the row, a quarter of the free
+                // parameter apart: their turn about the normal there.
+                let inside = edge + (domain[k][1 - e] - edge) * 1e-3;
+                let q: Vec<Vector3> = (0..4)
+                    .map(|i| at(f0 + (f1 - f0) * f64::from(i) / 4.0, inside) - pole)
+                    .collect();
+                let mut turn = Vector3::ZERO;
+                for i in 0..4 {
+                    turn += q[i].cross(q[(i + 1) % 4]);
+                }
+                let Some(n) = self.pole_normal(k, e) else {
+                    return Node::Point;
+                };
+                let c = turn.dot(n);
+                if c == 0.0 {
+                    return Node::Point;
+                }
+                // Turning with increasing `free` is counterclockwise
+                // about the outward normal when `c` is positive.
+                return Node::Pole {
+                    sign: if c > 0.0 { -1.0 } else { 1.0 },
+                    free,
+                };
+            }
+        }
+        Node::Point
+    }
+
+    /// The outward normal turns are measured about at collapsed row
+    /// `(k, e)`: the surface's limit normal there, else (at an apex) the
+    /// mean of the normals a little inside it.
+    fn pole_normal(&self, k: usize, e: usize) -> Option<Vector3> {
+        let domain = self.surface.domain();
+        let free = 1 - k;
+        let [f0, f1] = domain[free];
+        let uv = |f: f64, x: f64| if k == 1 { (f, x) } else { (x, f) };
+        let edge = domain[k][e];
+        let (u, v) = uv(f0, edge);
+        if let Some(n) = self.surface.normal(u, v) {
+            return Some(n.get() * self.sigma);
+        }
+        let inside = edge + (domain[k][1 - e] - edge) * 1e-3;
+        let mut sum = Vector3::ZERO;
+        for i in 0..4 {
+            let (u, v) = uv(f0 + (f1 - f0) * f64::from(i) / 4.0, inside);
+            sum += self.surface.normal(u, v)?.get();
+        }
+        sum.normalize().map(|n| n.get() * self.sigma)
     }
 
     /// The normal turns are measured about at a dart's end: the face's
@@ -239,6 +324,18 @@ impl Arrangement<'_> {
         match (self.node(g), self.surface) {
             (Node::Pole { .. }, Surface::Cone(_)) => {
                 Some(self.surface.frame()?.z().get() * -self.sigma)
+            }
+            (Node::Pole { free, .. }, Surface::Nurbs(_) | Surface::Revolution(_)) => {
+                let rows = crate::mesh::uv::collapsed_rows(self.surface);
+                let k = 1 - free;
+                let domain = self.surface.domain();
+                let x = if free == 0 { uv.y } else { uv.x };
+                let e = if (x - domain[k][0]).abs() <= (x - domain[k][1]).abs() {
+                    0
+                } else {
+                    1
+                };
+                rows[k][e].then(|| self.pole_normal(k, e)).flatten()
             }
             _ => None,
         }
@@ -434,7 +531,32 @@ impl Arrangement<'_> {
         };
         match self.node(prev.to) {
             Node::Point => Vector2::new(snap(end.x - start.x, pu), snap(end.y - start.y, pv)),
-            Node::Pole { sign } => {
+            Node::Pole { sign, free }
+                if !matches!(self.surface, Surface::Sphere(_) | Surface::Cone(_)) =>
+            {
+                // Along the pole's line by the free parameter: the way
+                // clockwise turns go, less than a whole period unless the
+                // way out is the way back.
+                let (period, gap_end, gap_start) = if free == 0 {
+                    (pu, end.x, start.x)
+                } else {
+                    (pv, end.y, start.y)
+                };
+                let Some(per) = period else {
+                    return Vector2::new(snap(end.x - start.x, pu), snap(end.y - start.y, pv));
+                };
+                let mut d = (sign * (gap_start - gap_end)).rem_euclid(per);
+                if d == 0.0 {
+                    d = per;
+                }
+                let along = gap_end + sign * d - gap_start;
+                if free == 0 {
+                    Vector2::new(along, snap(end.y - start.y, pv))
+                } else {
+                    Vector2::new(snap(end.x - start.x, pu), along)
+                }
+            }
+            Node::Pole { sign, .. } => {
                 let n = self.normal(prev, 1).unwrap_or(Vector3::new(0.0, 0.0, 1.0));
                 let back = self.direction(prev, 1, n);
                 let out = self.direction(next, 0, n);
@@ -590,23 +712,35 @@ impl Arrangement<'_> {
             let v = &self.table.vertices[g];
             let (u, w) = self.surface.project(v.point).param;
             let mut p = Point2::new(u, w);
-            if matches!(self.node(g), Node::Pole { .. }) {
+            if let Node::Pole { free, .. } = self.node(g) {
                 // A pole or an apex: a point just inside the face's side,
-                // on a line of u clear of every vertex.
-                let [_, [v0, v1]] = self.surface.domain();
+                // on a line of the free parameter clear of every vertex.
+                let k = 1 - free;
+                let domain = self.surface.domain();
+                let [x0, x1] = domain[k];
+                let (pu, pv) = self.surface.periods();
                 let all: Vec<usize> = (0..lifted.len()).collect();
-                let u = match self.surface.periods().0 {
-                    Some(per) => self.across(&lifted, &all, false, per).unwrap_or(u),
-                    None => u,
+                let (f, x) = if free == 0 { (u, w) } else { (w, u) };
+                let f = match if free == 0 { pu } else { pv } {
+                    Some(per) => self.across(&lifted, &all, free == 1, per).unwrap_or(f),
+                    None => f,
                 };
-                p = Point2::new(
-                    u,
-                    if (w - v0).abs() < (w - v1).abs() {
-                        w + 1e-6
+                let step = 1e-6
+                    * if matches!(self.surface, Surface::Sphere(_) | Surface::Cone(_)) {
+                        1.0
                     } else {
-                        w - 1e-6
-                    },
-                );
+                        x1 - x0
+                    };
+                let x = if (x - x0).abs() < (x - x1).abs() {
+                    x + step
+                } else {
+                    x - step
+                };
+                p = if free == 0 {
+                    Point2::new(f, x)
+                } else {
+                    Point2::new(x, f)
+                };
             }
             let k = place(p, &[])?;
             pieces[k].loops.push(Boundary::Lone(g));
@@ -671,7 +805,7 @@ impl Arrangement<'_> {
                 (true, Some(_)) => return None,
                 (true, None) => {
                     // Up to the top end, if the surface closes there.
-                    if !self.closes_at(true) {
+                    if !self.closes_at(true, swap) {
                         return None;
                     }
                     out.push(vec![c]);
@@ -679,7 +813,7 @@ impl Arrangement<'_> {
                 }
                 (false, _) => {
                     // A top with nothing below it: down to the bottom end.
-                    if !self.closes_at(false) {
+                    if !self.closes_at(false, swap) {
                         return None;
                     }
                     out.push(vec![c]);
@@ -699,11 +833,16 @@ impl Arrangement<'_> {
 
     /// Whether the surface closes up at its top (`true`) or bottom end of
     /// `v`: a sphere at both poles, a cone at its apex.
-    fn closes_at(&self, top: bool) -> bool {
+    /// (`swap`: the end of `u`, where the bands run round `v`.) A spline
+    /// or swept surface closes where that row collapses.
+    fn closes_at(&self, top: bool, swap: bool) -> bool {
         match self.surface {
             Surface::Sphere(_) => true,
             Surface::Cone(_) => !top,
-            _ => false,
+            _ => {
+                let rows = crate::mesh::uv::collapsed_rows(self.surface);
+                rows[usize::from(!swap)][usize::from(top)]
+            }
         }
     }
 
