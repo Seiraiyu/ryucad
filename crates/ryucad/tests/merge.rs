@@ -1094,3 +1094,135 @@ fn a_merge_that_leaves_an_assembly_stale_says_so_and_repairs_it() {
     );
     r.ryucad(&["check"]);
 }
+
+/// OCCT's box, `h` mm tall, written in the test's folder as an agent
+/// would have it.
+fn box_step(r: &Repo, h: u32) -> String {
+    let path = format!(
+        "{}/../ryustep/tests/data/occt/box_ap214.stp",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let text = fs::read_to_string(path)
+        .unwrap()
+        .replace(",30.))", &format!(",{h}.))"))
+        .replace("(30.,0.)", &format!("({h}.,0.)"));
+    let at = r.dir.path().join(format!("box{h}.step"));
+    fs::write(&at, text).unwrap();
+    at.to_str().unwrap().to_owned()
+}
+
+const BOX_STEP: &str = "imports/box30.step";
+const BOX_IMPORT: &str = "parts/b/features/body.json";
+
+/// The box imported on `main`, then imported again 50 mm tall on
+/// `theirs` and 40 mm tall on `main`, and `theirs` merged in.
+fn reimported_both_ways() -> Repo {
+    let r = Repo::new("");
+    r.ryucad(&["import", &box_step(&r, 30), "--part", "b"]);
+    r.commit("a box");
+    r.git(&["checkout", "-q", "-b", "theirs"]);
+    r.ryucad(&["import", &box_step(&r, 50), "--update", BOX_STEP]);
+    r.commit("50 mm");
+    r.git(&["checkout", "-q", "main"]);
+    r.ryucad(&["import", &box_step(&r, 40), "--update", BOX_STEP]);
+    r.commit("40 mm");
+    let (code, out) = r.git_status(&["merge", "--no-edit", "theirs"]);
+    assert_eq!(code, 1, "{out}");
+    r
+}
+
+/// `merge status`'s conflicts, by ID, with their kinds.
+fn conflicts(r: &Repo) -> Vec<(String, String)> {
+    let v = r.ryucad(&["merge", "status"]);
+    v["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["id"].as_str().unwrap().to_owned(),
+                c["kind"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn two_reimports_conflict_on_bytes_and_hashes_and_settle_either_way() {
+    for side in ["--ours", "--theirs"] {
+        let r = reimported_both_ways();
+        // Git leaves the bytes unmerged; the driver, the hash.
+        let porcelain = r.git(&["status", "--porcelain"]);
+        assert!(porcelain.contains(&format!("UU {BOX_STEP}")), "{porcelain}");
+        let mut found = conflicts(&r);
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                (format!("{BOX_STEP}#"), "merge_unparsed".to_owned()),
+                (format!("{BOX_IMPORT}#/file/blake3"), "value".to_owned()),
+            ]
+        );
+        let v = r.ryucad(&["merge", "status"]);
+        let bytes = v["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == format!("{BOX_STEP}#"))
+            .unwrap()
+            .clone();
+        assert!(bytes["ours"]["blake3"].is_string(), "{bytes}");
+        // The bytes one way and the hash the other: the merge broke the
+        // import, and says so.
+        let other = if side == "--ours" {
+            "--theirs"
+        } else {
+            "--ours"
+        };
+        r.ryucad(&["merge", "resolve", &format!("{BOX_STEP}#"), other]);
+        r.ryucad(&[
+            "merge",
+            "resolve",
+            &format!("{BOX_IMPORT}#/file/blake3"),
+            side,
+        ]);
+        let broke: Vec<(String, String)> = conflicts(&r)
+            .into_iter()
+            .filter(|(_, k)| k == "merge_broke")
+            .collect();
+        assert_eq!(
+            broke,
+            [(
+                format!("{BOX_IMPORT}#merge_broke"),
+                "merge_broke".to_owned()
+            )],
+            "{side}"
+        );
+        let v = r.ryucad(&["merge", "status"]);
+        let c = v["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["kind"] == "merge_broke")
+            .unwrap()
+            .clone();
+        assert_eq!(c["error"]["code"], "import_file_changed", "{c}");
+        // Both sides changed the bytes it reads.
+        assert_eq!(c["cause"], "both", "{c}");
+        assert!(
+            c["files"].as_array().unwrap().contains(&json!(BOX_STEP)),
+            "{c}"
+        );
+        // The bytes the same way as the hash: settled.
+        r.git(&["checkout", side, "--", BOX_STEP]);
+        r.git(&["add", "-A"]);
+        assert_eq!(conflicts(&r), [], "{side}");
+        let built = r.ryucad(&["rebuild", "b"]);
+        assert_eq!(built["parts"][0]["failed"], 0, "{side}: {built}");
+        let want = blake3::hash(&fs::read(r.root.join(BOX_STEP)).unwrap())
+            .to_hex()
+            .to_string();
+        assert_eq!(r.json(BOX_IMPORT)["file"]["blake3"], want, "{side}");
+        r.git(&["commit", "-q", "--no-edit"]);
+    }
+}

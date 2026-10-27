@@ -433,6 +433,7 @@ fn dispatch(
             product,
             dry_run,
             expected_revision,
+            update,
         } => crate::import::import(
             session,
             crate::import::Ask {
@@ -442,6 +443,7 @@ fn dispatch(
                 product,
                 dry_run,
                 expected: expected_revision,
+                update,
             },
         ),
         Request::Rebuild { part, rev } => {
@@ -1944,11 +1946,16 @@ fn instance_from(
     }
     // Refuse a pose that could never build, before it is written.
     crate::assembly::pose_rigid(&pose)?;
+    // Which use of an imported product it is, while it places that part.
+    let import = current
+        .filter(|c| c.part == part)
+        .and_then(|c| c.import.clone());
     Ok(Instance {
         part,
         rev,
         pose,
         fixed: f.fixed.unwrap_or(current.is_some_and(|c| c.fixed)),
+        import,
     })
 }
 
@@ -3156,6 +3163,12 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
         let c = b.body.counts();
         json!({"faces": c.faces, "edges": c.edges, "vertices": c.vertices})
     };
+    // Instances an update kept though their usage left the file.
+    let kept = if assembly {
+        crate::import::usage_warnings(session.project(), id)
+    } else {
+        Vec::new()
+    };
     let r = session.rebuilt(id)?;
     let features: Vec<Value> = r
         .features
@@ -3253,8 +3266,9 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
         .collect();
     let mut v = json!({"part": id, "revision": revision, "hash": r.hash,
                        "failed": r.failed(), "features": features, "solids": shown});
-    let warnings = r.warnings(id);
+    let mut warnings = r.warnings(id);
     // An assembly's model is what its instances place.
+    warnings.extend(kept);
     if assembly {
         let occurrences: Vec<Value> = crate::assembly::Model::of_assembly(r)
             .occurrences
@@ -4577,6 +4591,15 @@ pub(crate) fn diff(
         let from = rebuilt_at(session, from)?;
         let to = rebuilt_at(session, to)?;
         crate::diff::model(&mut v, &from, &to, opts);
+        // Each imported file that differs, by product.
+        if let Some(Value::Array(files)) = v.get_mut("imports") {
+            for f in files {
+                let path = f["path"].as_str().unwrap_or_default().to_owned();
+                let (a, b) = (fa.get(&path), fb.get(&path));
+                f["products"] =
+                    crate::import::products_diff(&path, a.map(Vec::as_slice), b.map(Vec::as_slice));
+            }
+        }
     }
     Ok(v)
 }

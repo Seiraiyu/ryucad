@@ -8,6 +8,7 @@
 
 use super::files::{Obj, invalid, number};
 use super::id::Id;
+use super::import::{ProductRef, count, import_path};
 use super::sketch::clean;
 use crate::error::Result;
 use serde_json::{Value, json};
@@ -176,23 +177,85 @@ impl Pose {
 }
 
 /// An `instance` feature: `part` at `rev`, placed by `pose`; `fixed`
-/// holds it where it is when mates are solved.
+/// holds it where it is when mates are solved. `import` says which use of
+/// a STEP file's product it is, when an import made it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Instance {
     pub part: Id,
     pub rev: Rev,
     pub pose: Pose,
     pub fixed: bool,
+    pub import: Option<ImportUsage>,
+}
+
+/// The use of a product an imported instance is: the file under
+/// `imports/` (its path: a new version of the file leaves the instance
+/// as it is unless its placement moved), the product it is used in (the
+/// assembly's own), and the `NEXT_ASSEMBLY_USAGE_OCCURRENCE` by its id and
+/// its place among that product's usages of the same child with that id.
+/// No usage is the instance placing the product's own bodies, in a part
+/// of their own, at its origin.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ImportUsage {
+    pub file: String,
+    pub product: ProductRef,
+    pub usage: Option<String>,
+    pub ordinal: u32,
+}
+
+impl ImportUsage {
+    pub fn to_json(&self) -> Value {
+        let mut v = json!({"file": self.file, "product": self.product.to_json()});
+        if let Some(u) = &self.usage {
+            v["usage"] = json!(u);
+            if self.ordinal != 0 {
+                v["ordinal"] = json!(self.ordinal);
+            }
+        }
+        v
+    }
+
+    /// `{file, product, usage?, ordinal?}` at `/import`.
+    pub fn from_json(v: &Value) -> Result<ImportUsage> {
+        let mut o = Obj::new(v, "/import")?;
+        let file = import_path(&o.take("file")?, "/import/file")?;
+        let product = ProductRef::from_json(&o.take("product")?, "/import/product")?;
+        let usage = match o.take_opt("usage") {
+            None => None,
+            Some(Value::String(u)) => Some(u),
+            Some(_) => return Err(invalid("/import/usage", "import.usage is a string")),
+        };
+        let ordinal = match o.take_opt("ordinal") {
+            None => 0,
+            Some(_) if usage.is_none() => {
+                return Err(invalid(
+                    "/import/ordinal",
+                    "import.ordinal counts usages: it needs import.usage",
+                ));
+            }
+            Some(n) => count(&n, "/import/ordinal")?,
+        };
+        o.finish()?;
+        Ok(ImportUsage {
+            file,
+            product,
+            usage,
+            ordinal,
+        })
+    }
 }
 
 impl Instance {
     /// Its fields in a feature file, besides the header; `fixed` is
-    /// written only when true.
+    /// written only when true, `import` only when an import made it.
     pub fn fields(&self) -> Value {
         let mut v = json!({"part": self.part, "pose": self.pose.to_json(),
                            "rev": self.rev.to_json()});
         if self.fixed {
             v["fixed"] = json!(true);
+        }
+        if let Some(i) = &self.import {
+            v["import"] = i.to_json();
         }
         v
     }
@@ -211,11 +274,16 @@ impl Instance {
             Some(Value::Bool(b)) => b,
             Some(_) => return Err(invalid("/fixed", "fixed is true or false")),
         };
+        let import = match o.take_opt("import") {
+            None => None,
+            Some(v) => Some(ImportUsage::from_json(&v)?),
+        };
         Ok(Instance {
             part,
             rev,
             pose,
             fixed,
+            import,
         })
     }
 }
@@ -280,6 +348,60 @@ mod tests {
         fixed["fixed"] = json!(true);
         let f = read(fixed.clone()).unwrap();
         assert_eq!(f.to_json()["fixed"], true);
+    }
+
+    #[test]
+    fn imported_instances_say_which_usage_they_are() {
+        let mut v = instance(json!("working"));
+        v["pose"]["origin_m"][2] = json!(0);
+        v["fixed"] = json!(true);
+        v["format"] = json!(5);
+        v["import"] = json!({"file": "imports/asm.step", "product": {"id": "A-1", "name": "Frame"},
+                             "usage": "NAUO7", "ordinal": 2});
+        let f = read(v.clone()).unwrap();
+        let Feature::Instance(i) = &f else {
+            panic!("an instance")
+        };
+        let u = i.import.as_ref().unwrap();
+        assert_eq!(
+            (u.file.as_str(), u.usage.as_deref(), u.ordinal),
+            ("imports/asm.step", Some("NAUO7"), 2)
+        );
+        assert_eq!(u.product.id, "A-1");
+        assert_eq!(f.to_json(), v);
+        assert_eq!((f.format(), feature_format(&v)), (5, 5));
+        // The product's own bodies: no usage, and so no ordinal.
+        v["import"] = json!({"file": "imports/asm.step", "product": {"id": "A-1", "name": "Frame", "ordinal": 1}});
+        let f = read(v.clone()).unwrap();
+        assert_eq!(f.to_json(), v);
+        for (import, pointer) in [
+            (
+                json!({"file": "imports/asm.stp", "product": {"id": "", "name": ""}}),
+                "/import/file",
+            ),
+            (json!({"file": "imports/a.step"}), "/import/product"),
+            (
+                json!({"file": "imports/a.step", "product": {"id": "", "name": ""}, "usage": 3}),
+                "/import/usage",
+            ),
+            (
+                json!({"file": "imports/a.step", "product": {"id": "", "name": ""}, "ordinal": 1}),
+                "/import/ordinal",
+            ),
+            (
+                json!({"file": "imports/a.step", "product": {"id": "", "name": ""}, "usage": "1", "ordinal": -1}),
+                "/import/ordinal",
+            ),
+            (
+                json!({"file": "imports/a.step", "product": {"id": "", "name": ""}, "x": 1}),
+                "/import/x",
+            ),
+        ] {
+            v["import"] = import.clone();
+            let e = read(v.clone()).unwrap_err();
+            assert_eq!(e.code, Code::InvalidDocument, "{import}");
+            assert_eq!(e.details["pointer"], pointer, "{import}");
+        }
     }
 
     #[test]
