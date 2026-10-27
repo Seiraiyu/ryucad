@@ -35,38 +35,46 @@ pub(crate) struct Span {
 /// A surface and the sense a face takes on it.
 pub(crate) type Sided = (SurfaceId, Sense);
 
-/// One segment of a capped loop, in path order.
+/// One segment of a stretch of a capped loop, in path order: its edge at
+/// the stretch's far end, running along the path, and the side it sweeps.
+/// A segment on a revolve's axis has no side, and its far edge is not
+/// built: the edge before it serves both ends.
 #[derive(Clone, Debug)]
 pub(crate) struct SegmentPlan {
-    /// The segment's edge on the near cap and on the far cap, both running
-    /// along the path. A segment on a revolve's axis has one edge, shared
-    /// by the caps, and no side.
-    pub near: Span,
     pub far: Span,
     pub side: Option<Sided>,
 }
 
-/// One profile vertex of a capped loop, in path order.
+/// One profile vertex of a stretch of a capped loop, in path order: its
+/// point at the stretch's far end, and the lateral edge to it; `None` for
+/// a vertex on a revolve's axis, where the two points are one, and for the
+/// vertex of a closed segment, whose side has no seam.
 #[derive(Clone, Debug)]
 pub(crate) struct VertexPlan {
-    pub near: Point3,
     pub far: Point3,
-    /// The lateral edge from the near point to the far one; `None` for a
-    /// vertex on a revolve's axis, where the two points are one, and for
-    /// the vertex of a closed segment, whose side has no seam.
     pub lateral: Option<Span>,
 }
 
-/// A loop of a capped sweep. Segment `i` runs from vertex `i` to vertex
-/// `i + 1` (cyclically).
+/// One stretch of a capped sweep, from one section to the next: an
+/// extrude's or a revolve's only one, or a sweep along a path's segment.
+#[derive(Clone, Debug)]
+pub(crate) struct Ring {
+    pub segments: Vec<SegmentPlan>,
+    pub vertices: Vec<VertexPlan>,
+}
+
+/// A loop of a capped sweep: each segment's edge on the near cap and each
+/// vertex's point there, then its stretches to the far cap, in order.
+/// Segment `i` runs from vertex `i` to vertex `i + 1` (cyclically).
 ///
 /// The path of an outer loop or a hole of several segments runs
 /// counterclockwise about `u`. A loop of one closed segment instead says
 /// which way its curve runs: `ccw` when counterclockwise about `u`.
 #[derive(Clone, Debug)]
 pub(crate) struct LoopPlan {
-    pub segments: Vec<SegmentPlan>,
-    pub vertices: Vec<VertexPlan>,
+    pub near: Vec<Span>,
+    pub points: Vec<Point3>,
+    pub rings: Vec<Ring>,
     pub closed: bool,
     pub ccw: bool,
 }
@@ -82,15 +90,40 @@ pub(crate) struct LumpPlan {
     pub far_cap: Sided,
 }
 
-/// What a capped loop became, by segment and by vertex in path order.
+/// What one stretch of a capped loop became, by segment and by vertex in
+/// path order: the sides, the edges and vertices at its far end (the far
+/// cap's, for the last), and the laterals.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct LoopBuilt {
+pub(crate) struct RingBuilt {
     pub sides: Vec<Option<FaceId>>,
-    pub near: Vec<EdgeId>,
     pub far: Vec<EdgeId>,
-    pub near_vertices: Vec<VertexId>,
     pub far_vertices: Vec<VertexId>,
     pub laterals: Vec<Option<EdgeId>>,
+}
+
+/// What a capped loop became: its edges and vertices on the near cap, and
+/// each stretch.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LoopBuilt {
+    pub near: Vec<EdgeId>,
+    pub near_vertices: Vec<VertexId>,
+    pub rings: Vec<RingBuilt>,
+}
+
+impl LoopBuilt {
+    /// The edges and vertices a stretch starts from: the near cap's, or
+    /// the previous stretch's far ones.
+    fn before(&self, r: usize) -> (&[EdgeId], &[VertexId]) {
+        match r.checked_sub(1) {
+            None => (&self.near, &self.near_vertices),
+            Some(q) => (&self.rings[q].far, &self.rings[q].far_vertices),
+        }
+    }
+
+    /// The edges and vertices on the far cap.
+    pub(crate) fn far(&self) -> (&[EdgeId], &[VertexId]) {
+        self.before(self.rings.len())
+    }
 }
 
 /// What a capped lump became.
@@ -127,15 +160,15 @@ impl Keys {
 /// Builds one capped lump into `b`, as a new solid region.
 pub(crate) fn capped(b: &mut Body, keys: &mut Keys, plan: &LumpPlan) -> Result<LumpBuilt, Error> {
     let outer = &plan.outer;
-    let start = outer.vertices[0].near;
+    let start = outer.points[0];
     let m = mvfs(b, keys.next(), start, plan.near_cap.0)?.0;
     let mut built = LoopBuilt::default();
     // The lamina: the near cap, and its twin to sweep.
     let (near_cap, twin, twin_fins) = if outer.closed {
         debug_assert!(outer.ccw, "the caller picks the near cap");
         let lone = Corner::Lone(m.loop_);
-        let s = &outer.segments[0];
-        let made = mef(b, keys.next(), lone, lone, s.near.curve, s.near.interval)?.0;
+        let s = &outer.near[0];
+        let made = mef(b, keys.next(), lone, lone, s.curve, s.interval)?.0;
         built.near.push(made.edge);
         built.near_vertices.push(m.vertex);
         // The old face keeps the fin against the edge: clockwise about u.
@@ -148,11 +181,31 @@ pub(crate) fn capped(b: &mut Body, keys: &mut Keys, plan: &LumpPlan) -> Result<L
         // about u: the twin. Against it is the near cap.
         (closing.faces[1], closing.faces[0], fins)
     };
-    let far_cap = if outer.closed {
-        sweep_closed(b, keys, twin, outer, &mut built)?
-    } else {
-        sweep_path(b, keys, twin, &twin_fins, outer, true, &mut built)?
-    };
+    let (mut face, mut fins) = (twin, twin_fins);
+    for (r, ring) in outer.rings.iter().enumerate() {
+        let made = if outer.closed {
+            let (rest, made) = sweep_closed(b, keys, face, ring)?;
+            face = rest;
+            made
+        } else {
+            let (prev_edges, prev_vertices) = built.before(r);
+            let (prev_edges, prev_vertices) = (prev_edges.to_vec(), prev_vertices.to_vec());
+            let (rest, top, made) = sweep_path(
+                b,
+                keys,
+                face,
+                &fins,
+                ring,
+                true,
+                &prev_edges,
+                &prev_vertices,
+            )?;
+            (face, fins) = (rest, top);
+            made
+        };
+        built.rings.push(made);
+    }
+    let far_cap = face;
     let mut holes = Vec::new();
     for hole in &plan.holes {
         holes.push(hole_through(b, keys, near_cap, far_cap, hole)?);
@@ -160,9 +213,11 @@ pub(crate) fn capped(b: &mut Body, keys: &mut Keys, plan: &LumpPlan) -> Result<L
     set_surface(b, near_cap, plan.near_cap.0, plan.near_cap.1)?;
     set_surface(b, far_cap, plan.far_cap.0, plan.far_cap.1)?;
     for (lp, made) in core::iter::once((outer, &built)).chain(plan.holes.iter().zip(&holes)) {
-        for (s, side) in lp.segments.iter().zip(&made.sides) {
-            if let (Some((surface, sense)), Some(face)) = (s.side, *side) {
-                set_surface(b, face, surface, sense)?;
+        for (ring, rb) in lp.rings.iter().zip(&made.rings) {
+            for (s, side) in ring.segments.iter().zip(&rb.sides) {
+                if let (Some((surface, sense)), Some(face)) = (s.side, *side) {
+                    set_surface(b, face, surface, sense)?;
+                }
             }
         }
     }
@@ -185,20 +240,20 @@ fn path(
     lp: &LoopPlan,
     built: &mut LoopBuilt,
 ) -> Result<(Vec<FinId>, crate::euler::Mef), Error> {
-    let n = lp.segments.len();
+    let n = lp.near.len();
     built.near_vertices.push(first);
     let mut at = from;
     let mut fins = Vec::with_capacity(n);
     for i in 0..n - 1 {
-        let s = &lp.segments[i].near;
-        let p = lp.vertices[i + 1].near;
+        let s = &lp.near[i];
+        let p = lp.points[i + 1];
         let made = mev(b, keys.next(), at, p, s.curve, s.interval)?.0;
         built.near.push(made.edge);
         built.near_vertices.push(made.vertex);
         fins.push(made.fins[0]);
         at = Corner::Before(made.fins[1]);
     }
-    let s = &lp.segments[n - 1].near;
+    let s = &lp.near[n - 1];
     let to = match fins.first() {
         Some(&f) => Corner::Before(f),
         None => from,
@@ -208,25 +263,31 @@ fn path(
     Ok((fins, closing))
 }
 
-/// Sweeps `face`, which holds a loop of several segments, from the near
-/// cap to the far one. `fins[i]` is the face's fin starting at vertex `i`.
-/// When `along`, the face's loop runs the path's way (the outer loop's
-/// twin); otherwise it runs backwards (a hole's disc). Each top edge runs
-/// along the path, from vertex `i` to `i + 1`. What is left of `face` is
-/// the far cap, or a hole's far disc, which is returned.
+/// Sweeps `face`, which holds a loop of several segments, across one
+/// stretch. `fins[i]` is the face's fin starting at vertex `i`, and
+/// `prev_edges` and `prev_vertices` are the loop's edges and vertices
+/// where the stretch starts. When `along`, the face's loop runs the path's
+/// way (the outer loop's twin); otherwise it runs backwards (a hole's
+/// disc). Each top edge runs along the path, from vertex `i` to `i + 1`.
+/// Returns what is left of `face` (the next stretch's face, the far cap,
+/// or a hole's far disc), its fins starting at each vertex, and what the
+/// stretch became.
+#[allow(clippy::too_many_arguments)]
 fn sweep_path(
     b: &mut Body,
     keys: &mut Keys,
     face: FaceId,
     fins: &[FinId],
-    lp: &LoopPlan,
+    ring: &Ring,
     along: bool,
-    built: &mut LoopBuilt,
-) -> Result<FaceId, Error> {
-    let n = lp.segments.len();
+    prev_edges: &[EdgeId],
+    prev_vertices: &[VertexId],
+) -> Result<(FaceId, Vec<FinId>, RingBuilt), Error> {
+    let n = ring.segments.len();
+    let mut built = RingBuilt::default();
     // The fin of the face's loop that starts at each far vertex.
     let mut top = fins.to_vec();
-    for (i, v) in lp.vertices.iter().enumerate() {
+    for (i, v) in ring.vertices.iter().enumerate() {
         match &v.lateral {
             Some(s) => {
                 let made = mev(
@@ -243,16 +304,16 @@ fn sweep_path(
                 top[i] = made.fins[1];
             }
             None => {
-                built.far_vertices.push(built.near_vertices[i]);
+                built.far_vertices.push(prev_vertices[i]);
                 built.laterals.push(None);
             }
         }
     }
-    built.far = built.near.clone();
+    built.far = prev_edges.to_vec();
     built.sides = vec![None; n];
     let mut rest = face;
     for i in 0..n {
-        let s = &lp.segments[i];
+        let s = &ring.segments[i];
         if s.side.is_none() {
             continue;
         }
@@ -274,29 +335,31 @@ fn sweep_path(
         }
         built.far[i] = made.edge;
     }
-    Ok(rest)
+    Ok((rest, top, built))
 }
 
-/// Sweeps `face`, whose loop is the near edge of a closed segment, to the
-/// far cap: a lone far vertex closed into the far edge by MEF. The face
-/// keeps the far edge's fin against it and becomes the side; the new face
-/// along the edge is returned (the far cap, or a hole's far disc).
+/// Sweeps `face`, whose loop is the edge of a closed segment where the
+/// stretch starts, across it: a lone far vertex closed into the far edge
+/// by MEF. The face keeps the far edge's fin against it and becomes the
+/// side; the new face along the edge is returned (the next stretch's
+/// face, the far cap, or a hole's far disc) with what the stretch became.
 fn sweep_closed(
     b: &mut Body,
     keys: &mut Keys,
     face: FaceId,
-    lp: &LoopPlan,
-    built: &mut LoopBuilt,
-) -> Result<FaceId, Error> {
-    let s = &lp.segments[0];
-    let r = mvr(b, keys.next(), face, lp.vertices[0].far)?.0;
+    ring: &Ring,
+) -> Result<(FaceId, RingBuilt), Error> {
+    let s = &ring.segments[0];
+    let r = mvr(b, keys.next(), face, ring.vertices[0].far)?.0;
     let lone = Corner::Lone(r.loop_);
     let made = mef(b, keys.next(), lone, lone, s.far.curve, s.far.interval)?.0;
-    built.far.push(made.edge);
-    built.far_vertices.push(r.vertex);
-    built.laterals.push(None);
-    built.sides.push(Some(made.faces[1]));
-    Ok(made.faces[0])
+    let built = RingBuilt {
+        far: vec![made.edge],
+        far_vertices: vec![r.vertex],
+        laterals: vec![None],
+        sides: vec![Some(made.faces[1])],
+    };
+    Ok((made.faces[0], built))
 }
 
 /// A hole through a capped lump: its near loop inside the near cap, its
@@ -313,44 +376,63 @@ fn hole_through(
 ) -> Result<LoopBuilt, Error> {
     let mut built = LoopBuilt::default();
     if lp.closed {
-        let s = &lp.segments[0];
-        let v = &lp.vertices[0];
-        // The edge on the cap the hole starts from, and on the other.
-        let (start_cap, end_cap, first, second, p, q) = if lp.ccw {
-            (far_cap, near_cap, s.far, s.near, v.far, v.near)
+        // The loop's edges and points from the near cap to the far one,
+        // made from the cap the hole starts from.
+        let mut spans = vec![lp.near[0]];
+        let mut points = vec![lp.points[0]];
+        for ring in &lp.rings {
+            spans.push(ring.segments[0].far);
+            points.push(ring.vertices[0].far);
+        }
+        let (start_cap, end_cap) = if lp.ccw {
+            spans.reverse();
+            points.reverse();
+            (far_cap, near_cap)
         } else {
-            (near_cap, far_cap, s.near, s.far, v.near, v.far)
+            (near_cap, far_cap)
         };
-        let r = mvr(b, keys.next(), start_cap, p)?.0;
+        let r = mvr(b, keys.next(), start_cap, points[0])?.0;
         let lone = Corner::Lone(r.loop_);
+        let first = &spans[0];
         let made = mef(b, keys.next(), lone, lone, first.curve, first.interval)?.0;
         // The cap keeps the fin against the edge; the disc inside is new.
-        let disc = made.faces[0];
-        let r2 = mvr(b, keys.next(), disc, q)?.0;
-        let lone = Corner::Lone(r2.loop_);
-        let made2 = mef(b, keys.next(), lone, lone, second.curve, second.interval)?.0;
-        kfmrh(b, keys.next(), end_cap, made2.faces[0])?;
-        let (near, far, nv, fv) = if lp.ccw {
-            (made2.edge, made.edge, r2.vertex, r.vertex)
-        } else {
-            (made.edge, made2.edge, r.vertex, r2.vertex)
-        };
-        built.near.push(near);
-        built.far.push(far);
-        built.near_vertices.push(nv);
-        built.far_vertices.push(fv);
-        built.laterals.push(None);
-        built.sides.push(Some(made2.faces[1]));
+        let mut disc = made.faces[0];
+        let (mut edges, mut vertices, mut sides) = (vec![made.edge], vec![r.vertex], Vec::new());
+        for (span, &p) in spans.iter().zip(&points).skip(1) {
+            let r = mvr(b, keys.next(), disc, p)?.0;
+            let lone = Corner::Lone(r.loop_);
+            let made = mef(b, keys.next(), lone, lone, span.curve, span.interval)?.0;
+            edges.push(made.edge);
+            vertices.push(r.vertex);
+            sides.push(made.faces[1]);
+            disc = made.faces[0];
+        }
+        kfmrh(b, keys.next(), end_cap, disc)?;
+        if lp.ccw {
+            edges.reverse();
+            vertices.reverse();
+            sides.reverse();
+        }
+        built.near.push(edges[0]);
+        built.near_vertices.push(vertices[0]);
+        for k in 0..lp.rings.len() {
+            built.rings.push(RingBuilt {
+                sides: vec![Some(sides[k])],
+                far: vec![edges[k + 1]],
+                far_vertices: vec![vertices[k + 1]],
+                laterals: vec![None],
+            });
+        }
         return Ok(built);
     }
-    let r = mvr(b, keys.next(), near_cap, lp.vertices[0].near)?.0;
+    let r = mvr(b, keys.next(), near_cap, lp.points[0])?.0;
     let (path_fins, closing) = path(b, keys, Corner::Lone(r.loop_), r.vertex, lp, &mut built)?;
     // The cap keeps the path's way round (its first fin is the path's);
     // the disc against the closing edge runs backwards: its fin at vertex
     // i is the return fin of the MEV that reached i, or at vertex 0 the
     // closing edge's own.
-    let disc = closing.faces[1];
-    let n = lp.segments.len();
+    let mut disc = closing.faces[1];
+    let n = lp.near.len();
     let mut fins = Vec::with_capacity(n);
     fins.push(closing.fins[1]);
     for i in 1..n {
@@ -360,8 +442,23 @@ fn hole_through(
             .ok_or_else(crate::euler::dead)?;
         fins.push(back);
     }
-    let far_disc = sweep_path(b, keys, disc, &fins, lp, false, &mut built)?;
-    kfmrh(b, keys.next(), far_cap, far_disc)?;
+    for (r, ring) in lp.rings.iter().enumerate() {
+        let (prev_edges, prev_vertices) = built.before(r);
+        let (prev_edges, prev_vertices) = (prev_edges.to_vec(), prev_vertices.to_vec());
+        let (rest, top, made) = sweep_path(
+            b,
+            keys,
+            disc,
+            &fins,
+            ring,
+            false,
+            &prev_edges,
+            &prev_vertices,
+        )?;
+        (disc, fins) = (rest, top);
+        built.rings.push(made);
+    }
+    kfmrh(b, keys.next(), far_cap, disc)?;
     Ok(built)
 }
 
@@ -568,29 +665,45 @@ mod tests {
     /// counterclockwise about +z; the solid is on the left of the path for
     /// an outer loop and on its right for a hole.
     fn prism_loop(b: &mut Body, pts: &[(f64, f64)], h: f64, hole: bool) -> LoopPlan {
+        prism_in(b, pts, h, hole, 1)
+    }
+
+    /// As [`prism_loop`], in `stages` stretches of equal height, each a
+    /// side face of its own.
+    fn prism_in(b: &mut Body, pts: &[(f64, f64)], h: f64, hole: bool, stages: usize) -> LoopPlan {
         let n = pts.len();
         let at = |i: usize, z: f64| Point3::new(pts[i % n].0, pts[i % n].1, z);
-        let mut segments = Vec::new();
-        let mut vertices = Vec::new();
+        let z = |k: usize| h * k as f64 / stages as f64;
+        let mut near = Vec::new();
+        let mut points = Vec::new();
         for i in 0..n {
-            let (p, q) = (at(i, 0.0), at(i + 1, 0.0));
-            let d = q - p;
-            let right = Vector3::new(d.y, -d.x, 0.0);
-            let out = if hole { -right } else { right };
-            segments.push(SegmentPlan {
-                near: span(b, p, q),
-                far: span(b, at(i, h), at(i + 1, h)),
-                side: Some(plane(b, p, out)),
-            });
-            vertices.push(VertexPlan {
-                near: p,
-                far: at(i, h),
-                lateral: Some(span(b, p, at(i, h))),
-            });
+            near.push(span(b, at(i, 0.0), at(i + 1, 0.0)));
+            points.push(at(i, 0.0));
+        }
+        let mut rings = Vec::new();
+        for k in 1..=stages {
+            let mut segments = Vec::new();
+            let mut vertices = Vec::new();
+            for i in 0..n {
+                let (p, q) = (at(i, 0.0), at(i + 1, 0.0));
+                let d = q - p;
+                let right = Vector3::new(d.y, -d.x, 0.0);
+                let out = if hole { -right } else { right };
+                segments.push(SegmentPlan {
+                    far: span(b, at(i, z(k)), at(i + 1, z(k))),
+                    side: Some(plane(b, p, out)),
+                });
+                vertices.push(VertexPlan {
+                    far: at(i, z(k)),
+                    lateral: Some(span(b, at(i, z(k - 1)), at(i, z(k)))),
+                });
+            }
+            rings.push(Ring { segments, vertices });
         }
         LoopPlan {
-            segments,
-            vertices,
+            near,
+            points,
+            rings,
             closed: false,
             ccw: true,
         }
@@ -627,7 +740,7 @@ mod tests {
         assert_eq!(check(&b), []);
         let c = b.counts();
         assert_eq!((c.vertices, c.edges, c.faces), (8, 12, 6));
-        assert_eq!(made.outer.sides.iter().flatten().count(), 4);
+        assert_eq!(made.outer.rings[0].sides.iter().flatten().count(), 4);
         assert_ne!(made.near_cap, made.far_cap);
     }
 
@@ -689,6 +802,11 @@ mod tests {
     /// A circle of radius `r` about the z axis at (x, 0), extruded from 0
     /// to 1, its curve running counterclockwise about +z or not.
     fn disc_loop(b: &mut Body, x: f64, r: f64, ccw: bool, hole: bool) -> LoopPlan {
+        disc_in(b, x, r, ccw, hole, 1)
+    }
+
+    /// As [`disc_loop`], in `stages` stretches of equal height.
+    fn disc_in(b: &mut Body, x: f64, r: f64, ccw: bool, hole: bool, stages: usize) -> LoopPlan {
         let at = |z: f64| Point3::new(x, 0.0, z);
         let cyl = Cylinder::new(
             Frame::new(
@@ -706,17 +824,24 @@ mod tests {
             Sense::Forward
         };
         let start = Point3::new(x + r, 0.0, 0.0);
+        let z = |k: usize| k as f64 / stages as f64;
+        let mut rings = Vec::new();
+        for k in 1..=stages {
+            rings.push(Ring {
+                segments: vec![SegmentPlan {
+                    far: circle_span(b, at(z(k)), r, ccw),
+                    side: Some((b.add_surface(Surface::Cylinder(cyl)), sense)),
+                }],
+                vertices: vec![VertexPlan {
+                    far: start + Vector3::new(0.0, 0.0, z(k)),
+                    lateral: None,
+                }],
+            });
+        }
         LoopPlan {
-            segments: vec![SegmentPlan {
-                near: circle_span(b, at(0.0), r, ccw),
-                far: circle_span(b, at(1.0), r, ccw),
-                side: Some((b.add_surface(Surface::Cylinder(cyl)), sense)),
-            }],
-            vertices: vec![VertexPlan {
-                near: start,
-                far: start + Vector3::new(0.0, 0.0, 1.0),
-                lateral: None,
-            }],
+            near: vec![circle_span(b, at(0.0), r, ccw)],
+            points: vec![start],
+            rings,
             closed: true,
             ccw,
         }
@@ -748,6 +873,44 @@ mod tests {
         capped(&mut b, &mut Keys::new(OpKey(5)), &plan).unwrap();
         let exact = PI * 9.0 - 2.0 * PI * 0.25 - 1.0;
         assert!((volume(&b) - exact).abs() < 0.05, "{}", volume(&b));
+    }
+
+    /// A prism and a cylinder, each with holes of both kinds, built in
+    /// three stretches: every stretch's sides are faces of their own, and
+    /// the volumes are the one-stretch ones.
+    #[test]
+    fn stretches_between_the_caps() {
+        let mut b = Body::new();
+        let (near_cap, far_cap) = caps(&mut b);
+        let outer = prism_in(&mut b, &square(-3.0, -3.0, 6.0), 1.0, false, 3);
+        let holes = vec![
+            prism_in(&mut b, &square(-2.0, 1.0, 1.0), 1.0, true, 3),
+            disc_in(&mut b, 1.5, 0.5, true, true, 3),
+            disc_in(&mut b, -1.5, 0.5, false, true, 3),
+        ];
+        let plan = LumpPlan {
+            outer,
+            holes,
+            near_cap,
+            far_cap,
+        };
+        let made = capped(&mut b, &mut Keys::new(OpKey(5)), &plan).unwrap();
+        assert_eq!(made.outer.rings.len(), 3);
+        assert_eq!(made.holes[1].rings[2].sides.len(), 1);
+        // 2 caps, 3 × (4 + 4 + 1 + 1) sides.
+        assert_eq!(b.counts().faces, 2 + 3 * 10);
+        let exact = 36.0 - 1.0 - 2.0 * PI * 0.25;
+        assert!((volume(&b) - exact).abs() < 0.05, "{}", volume(&b));
+        let mut b = Body::new();
+        let (near_cap, far_cap) = caps(&mut b);
+        let plan = LumpPlan {
+            outer: disc_in(&mut b, 0.0, 3.0, true, false, 2),
+            holes: vec![prism_in(&mut b, &square(-0.5, 1.0, 1.0), 1.0, true, 2)],
+            near_cap,
+            far_cap,
+        };
+        capped(&mut b, &mut Keys::new(OpKey(5)), &plan).unwrap();
+        assert!((volume(&b) - (9.0 * PI - 1.0)).abs() < 0.05);
     }
 
     /// A full turn about the z axis of the profile with corners `pts` in
