@@ -973,6 +973,7 @@ fn every_protocol_method_has_a_command() {
         ("assembly.solve", &["assembly", "solve"]),
         ("interference", &["interference"]),
         ("import", &["import"]),
+        ("export", &["export"]),
         ("rebuild", &["rebuild"]),
         ("inspect", &["inspect"]),
         ("check_format", &["check-format"]),
@@ -3093,6 +3094,64 @@ fn imports_from_the_cli() {
     p.ok(&["check", "block"]);
     p.fails(&["import", "../junk.step"], "step_unreadable", 1);
     p.fails(&["feature", "add", "block", "import"], "invalid_param", 1);
+}
+
+#[test]
+fn exports_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=20", "--param",
+        "z=5",
+    ]);
+    let stamp = "2026-10-27T00:00:00";
+    let v = p.ok(&["export", "p", "--out", "out/p.step", "--time-stamp", stamp]);
+    assert_eq!(v["out"], "out/p.step");
+    assert_eq!(
+        (&v["schema"], &v["unit"], &v["file_name"], &v["time_stamp"]),
+        (
+            &json!("ap242"),
+            &json!("mm"),
+            &json!("p.step"),
+            &json!(stamp)
+        )
+    );
+    assert_eq!(v["products"][0]["product"], "p");
+    // The same bytes in process and through the daemon, written whole.
+    let direct = fs::read(p.direct.join("out/p.step")).unwrap();
+    assert_eq!(direct, fs::read(p.daemon.join("out/p.step")).unwrap());
+    assert!(direct.starts_with(b"ISO-10303-21;"));
+    assert!(!p.direct.join("out/.p.step.tmp").exists());
+    let v = p.ok(&[
+        "export",
+        "p",
+        "--out",
+        "out/p214.step",
+        "--schema",
+        "ap214",
+        "--unit",
+        "m",
+        "--time-stamp",
+        stamp,
+    ]);
+    assert_eq!((&v["schema"], &v["unit"]), (&json!("ap214"), &json!("m")));
+    // What it wrote imports again: the box's six faces.
+    p.ok(&["import", "out/p.step", "--part", "q"]);
+    let built = p.ok(&["rebuild", "q"]);
+    assert_eq!(built["parts"][0]["features"][0]["counts"]["faces"], 6);
+    p.fails(&["export", "nope", "--out", "out/x.step"], "not_found", 1);
+    p.fails(
+        &["export", "p", "--out", "out/x.step", "--schema", "ap203"],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &["export", "p", "--out", "out/x.step", "--rev", "HEAD"],
+        "not_a_git_repo",
+        1,
+    );
+    assert!(!p.direct.join("out/x.step").exists());
 }
 
 #[test]

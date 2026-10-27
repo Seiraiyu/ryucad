@@ -602,6 +602,26 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         update: Option<String>,
     },
+    /// Writes a part or an assembly as a STEP file, sent as bytes after
+    /// the answer: at the working files, a Git revision `rev`, or a
+    /// release `label:<L>`; `ap242` (default) or `ap214`; in `mm`
+    /// (default) or `m`. The header's `file_name` and `time_stamp` are the
+    /// caller's; the time stamp is else the commit's time when exporting a
+    /// commit, else now.
+    #[serde(rename = "export")]
+    Export {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unit: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        time_stamp: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_name: Option<String>,
+    },
     #[serde(rename = "rebuild")]
     Rebuild {
         #[serde(default, skip_serializing_if = "Option::is_none")]

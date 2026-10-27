@@ -8,6 +8,9 @@
 //!   B-rep volume) to within its mesh's error, `4 × chord × area`.
 //! - Files ryustep writes from seeded bodies: OCCT reads a solid per
 //!   lump, of the body's volume.
+//! - Files ryucad exports (design 120, plan 6.C): parts and an assembly
+//!   of a project, each read by OCCT as a solid per lump and occurrence,
+//!   of the volumes ryucad's solids have.
 //! - The pinned corpus `scripts/fetch-corpus.sh` downloads: no file heals
 //!   fewer bodies than `crates/ryustep/tests/corpus/pinned.txt` records.
 //! - A large assembly (1,600 seeded parts placed 3 times each, about
@@ -191,6 +194,7 @@ fn part(id: &str, bodies: Vec<Body>) -> Product {
         name: id.into(),
         bodies,
         children: vec![],
+        ..Default::default()
     }
 }
 
@@ -234,6 +238,107 @@ fn occt_reads_what_ryustep_writes() {
         "OCCT read {read_back} of {} bodies ryustep wrote",
         bodies.len()
     );
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// A project of a plate drilled through, a pin, a part of a block and a
+/// ball (two solids), and an assembly placing the plate, two pins and the
+/// two-solid part, one pin turned.
+fn exported_project() -> (tempfile::TempDir, ryucad::session::Session) {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    let mut call = |m: &str, p: serde_json::Value| {
+        let req = ryucad::proto::Request::from_rpc(m, Some(p)).unwrap();
+        ryucad::server::handle(&mut s, req).unwrap_or_else(|e| panic!("{m}: {e}"));
+    };
+    call("part.create", json!({"part": "plate"}));
+    call(
+        "feature.add",
+        json!({"part": "plate", "type": "box", "id": "slab",
+               "params": {"x": 60, "y": 40, "z": 8}}),
+    );
+    call(
+        "feature.add",
+        json!({"part": "plate", "type": "cylinder", "id": "bore", "operation": "cut",
+               "targets": ["slab"], "params": {"radius": 4, "height": 20},
+               "placement": {"origin": [20, 20, -5]}}),
+    );
+    call("part.create", json!({"part": "pin"}));
+    call(
+        "feature.add",
+        json!({"part": "pin", "type": "cylinder", "id": "shank",
+               "params": {"radius": 3.9, "height": 30}}),
+    );
+    call("part.create", json!({"part": "pair"}));
+    call(
+        "feature.add",
+        json!({"part": "pair", "type": "box", "id": "cube", "params": {"x": 10, "y": 10, "z": 10}}),
+    );
+    call(
+        "feature.add",
+        json!({"part": "pair", "type": "sphere", "id": "ball", "params": {"radius": 5},
+               "placement": {"origin": [30, 0, 0]}}),
+    );
+    call("part.create", json!({"part": "frame", "kind": "assembly"}));
+    for (id, of, origin) in [
+        ("base", "plate", json!([0, 0, 0])),
+        ("p1", "pin", json!([20, 20, -10])),
+        ("p2", "pin", json!([45, 20, 8])),
+        ("two", "pair", json!([0, 60, 0])),
+    ] {
+        call(
+            "feature.add",
+            json!({"part": "frame", "type": "instance", "id": id, "of": of,
+                   "placement": {"origin": origin}}),
+        );
+    }
+    call(
+        "assembly.move",
+        json!({"part": "frame", "instance": "p2", "axis": [1, 0, 0], "angle": "30 deg"}),
+    );
+    (dir, s)
+}
+
+#[test]
+fn occt_reads_what_ryucad_exports() {
+    use ryucad::doc::assembly::Rev;
+    let (dir, mut s) = exported_project();
+    let mut wrong = Vec::new();
+    for (part, schema, unit, solids) in [
+        ("plate", "ap242", "mm", 1),
+        ("pin", "ap214", "m", 1),
+        ("pair", "ap242", "m", 2),
+        ("frame", "ap242", "mm", 5),
+        ("frame", "ap214", "m", 5),
+    ] {
+        let id = ryucad::doc::id::Id::parse(part, "part").unwrap();
+        // What ryucad's solids hold, each occurrence once.
+        let model = s.model(&id, &Rev::Working).unwrap();
+        let (mut v, mut bound) = (0.0, 0.0);
+        for o in &model.occurrences {
+            for sd in &o.solids {
+                let (bv, _, bb) = measure(&sd.built.body).unwrap();
+                v += bv;
+                bound += bb;
+            }
+        }
+        let params = serde_json::json!({"part": part, "schema": schema, "unit": unit,
+                                        "time_stamp": "2026-10-27T00:00:00"});
+        let req = ryucad::proto::Request::from_rpc("export", Some(params)).unwrap();
+        let a = ryucad::server::answer_live(&mut s, None, None, req).unwrap();
+        let path = dir.path().join(format!("{part}-{schema}-{unit}.stp"));
+        std::fs::write(&path, a.binary.unwrap()).unwrap();
+        match occt::Solid::read_step(&path, false).map(|x| x.solids()) {
+            Ok(x) if x.len() == solids && agree(v, bound, x.iter().map(|y| y.volume).sum()) => {
+                println!("{part} {schema} {unit}: {} solids, {v:.3} mm³", x.len())
+            }
+            other => wrong.push(format!(
+                "{part} {schema} {unit}: {v:.3} mm³, OCCT {other:?}"
+            )),
+        }
+    }
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
@@ -304,6 +409,7 @@ fn assembly() -> Vec<u8> {
             (0..COPIES).map(move |c| Child {
                 product: i,
                 place: Rigid::translation(Vector3::new(10.0 * i as f64, 10.0 * c as f64, 0.0)),
+                id: String::new(),
             })
         })
         .collect();
@@ -312,6 +418,7 @@ fn assembly() -> Vec<u8> {
         name: "root".into(),
         bodies: vec![],
         children,
+        ..Default::default()
     });
     write(
         &WriteModel { products },

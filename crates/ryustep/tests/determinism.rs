@@ -103,6 +103,7 @@ fn written(golden: &mut Golden) {
                         name: "part".into(),
                         bodies: vec![b.clone()],
                         children: vec![],
+                        ..Default::default()
                     }],
                 },
                 &WriteOptions {

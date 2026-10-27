@@ -27,6 +27,7 @@ fn write_one(b: &Body) -> Result<Vec<u8>, String> {
                 name: "part".into(),
                 bodies: vec![b.clone()],
                 children: vec![],
+                ..Default::default()
             }],
         },
         &WriteOptions {

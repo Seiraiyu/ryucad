@@ -27,6 +27,7 @@ fn one(b: &Body, o: &WriteOptions) -> Vec<u8> {
                 name: "part".into(),
                 bodies: vec![b.clone()],
                 children: vec![],
+                ..Default::default()
             }],
         },
         o,
@@ -178,10 +179,12 @@ fn an_assembly_keeps_its_tree() {
                     Child {
                         product: 1,
                         place: Rigid::IDENTITY,
+                        id: String::new(),
                     },
                     Child {
                         product: 1,
                         place: Rigid::translation(Vector3::new(5.0, 0.0, 0.0)),
+                        id: String::new(),
                     },
                     Child {
                         product: 2,
@@ -189,20 +192,24 @@ fn an_assembly_keeps_its_tree() {
                             Vector3::new(0.0, 0.0, 1.0).normalize().unwrap(),
                             1.0,
                         ),
+                        id: String::new(),
                     },
                 ],
+                ..Default::default()
             },
             Product {
                 id: "block".into(),
                 name: "block".into(),
                 bodies: vec![block],
                 children: vec![],
+                ..Default::default()
             },
             Product {
                 id: "pin".into(),
                 name: "pin".into(),
                 bodies: vec![pin],
                 children: vec![],
+                ..Default::default()
             },
         ],
     };
@@ -245,6 +252,60 @@ fn an_assembly_keeps_its_tree() {
 }
 
 #[test]
+fn products_keep_their_descriptions_revisions_and_usage_ids() {
+    // Two uses of one block with ids of their own, then one with none,
+    // which takes its place among its parent's.
+    let block = primitives()[0].clone();
+    let child = |place: Rigid, id: &str| Child {
+        product: 1,
+        place,
+        id: id.into(),
+    };
+    let model = WriteModel {
+        products: vec![
+            Product {
+                id: "ASM-1".into(),
+                name: "Frame".into(),
+                description: "A welded frame".into(),
+                revision: "B".into(),
+                bodies: vec![],
+                children: vec![
+                    child(Rigid::IDENTITY, "left"),
+                    child(Rigid::translation(Vector3::new(5.0, 0.0, 0.0)), "s1"),
+                    child(Rigid::translation(Vector3::new(9.0, 0.0, 0.0)), ""),
+                ],
+            },
+            Product {
+                id: "BLK-1".into(),
+                name: "Block".into(),
+                bodies: vec![block],
+                ..Default::default()
+            },
+        ],
+    };
+    let bytes = write(&model, &opts(LengthUnit::Millimeter)).unwrap();
+    let p = ryustep::open(&bytes).unwrap().products;
+    assert!(p.faults.is_empty(), "{:?}", p.faults);
+    let root = &p.definitions[p.roots[0]];
+    assert_eq!(
+        (
+            &*root.product_id,
+            &*root.name,
+            &*root.description,
+            &*root.revision
+        ),
+        ("ASM-1", "Frame", "A welded frame", "B")
+    );
+    let ids: Vec<&str> = root.children.iter().map(|c| &*c.id).collect();
+    assert_eq!(ids, ["left", "s1", "3"]);
+    let block = &p.definitions[root.children[0].definition];
+    assert_eq!(
+        (&*block.product_id, &*block.description, &*block.revision),
+        ("BLK-1", "", "")
+    );
+}
+
+#[test]
 fn bodies_and_lumps_come_back_as_they_were() {
     use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
     // Two lumps: a block with a slab cut through its middle.
@@ -281,6 +342,7 @@ fn bodies_and_lumps_come_back_as_they_were() {
             name: "p".into(),
             bodies: vec![two.clone(), primitives()[4].clone()],
             children: vec![],
+            ..Default::default()
         }],
     };
     let m = read(
@@ -326,6 +388,7 @@ fn writing_is_the_same_on_one_thread_and_many() {
             name: "parts".into(),
             bodies: primitives(),
             children: vec![],
+            ..Default::default()
         }],
     };
     let o = opts(LengthUnit::Meter);

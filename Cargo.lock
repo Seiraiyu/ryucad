@@ -4302,9 +4302,12 @@ dependencies = [
  "cxx-build",
  "divan",
  "rayon",
+ "ryucad",
  "ryukei",
  "ryukei-testkit",
  "ryustep",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

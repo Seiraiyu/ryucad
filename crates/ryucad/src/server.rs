@@ -170,6 +170,24 @@ pub fn answer_live(
             };
             render(session, target, shown, ask)
         }
+        Request::Export {
+            part,
+            rev,
+            schema,
+            unit,
+            time_stamp,
+            file_name,
+        } => crate::export::export(
+            session,
+            crate::export::Ask {
+                part,
+                rev,
+                schema,
+                unit,
+                time_stamp,
+                file_name,
+            },
+        ),
         req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
     };
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
@@ -711,6 +729,7 @@ fn dispatch(
         }
         // A render's answer is bytes: `answer_live` handles it.
         Request::Render { .. } => Err(Error::new(Code::Internal, "render answers with bytes")),
+        Request::Export { .. } => Err(Error::new(Code::Internal, "export answers with bytes")),
         Request::Doctor {} => crate::doctor::report(session.root()),
         Request::DoctorRepair { repairs, params } => {
             let params = crate::doctor::Params::from_json(&params)?;

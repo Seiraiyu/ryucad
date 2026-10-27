@@ -236,6 +236,12 @@ pub enum Code {
     /// A body of an imported file that can't be read or healed. Its
     /// reason and the STEP instances involved are in the details.
     ImportFailed,
+    /// An export of a part or assembly some feature of which fails, at
+    /// any depth. The failing features are in the details.
+    ExportFailed,
+    /// An export of a body STEP can't describe: a face that can't be cut
+    /// open along seams. The face is in the details.
+    ExportUnrepresentable,
 }
 
 impl Code {
@@ -307,11 +313,18 @@ mod tests {
     fn codes_serialize_as_snake_case() {
         assert_eq!(json!(Code::FormatTooNew), json!("format_too_new"));
         assert_eq!(json!(Code::InvalidJson), json!("invalid_json"));
+        assert_eq!(json!(Code::ExportFailed), json!("export_failed"));
+        assert_eq!(
+            json!(Code::ExportUnrepresentable),
+            json!("export_unrepresentable")
+        );
     }
 
     #[test]
     fn exit_codes() {
         assert_eq!(Code::InvalidParam.exit_code(), 1);
+        assert_eq!(Code::ExportFailed.exit_code(), 1);
+        assert_eq!(Code::ExportUnrepresentable.exit_code(), 1);
         assert_eq!(Code::Conflict.exit_code(), 1);
         assert_eq!(Code::Usage.exit_code(), 2);
         assert_eq!(Code::ProjectNotFound.exit_code(), 3);

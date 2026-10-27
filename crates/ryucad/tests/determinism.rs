@@ -5,7 +5,8 @@
 //! to other features' faces, edges and vertices, solids that features
 //! join, cut and intersect, holes and patterns, how sketches are drawn,
 //! what diffs say, what merges make, the content hashes release records
-//! name, and where assemblies place their parts. After
+//! name, where assemblies place their parts, and the bytes of exported
+//! STEP files. After
 //! a deliberate change, regenerate with
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
@@ -1467,6 +1468,38 @@ fn interference_section(golden: &mut Golden) {
     s.str(&v["pairs"].to_string());
 }
 
+/// [`assembled`]'s frame (a pair of bolts placed twice, one turned),
+/// [`blended`]'s part and [`swept`]'s, each exported as AP242 in
+/// millimetres and AP214 in meters, on one thread and on four: the files'
+/// digests.
+fn exports_section(golden: &mut Golden) {
+    type Fixture = fn() -> (tempfile::TempDir, ryucad::session::Session);
+    let mut s = golden.section("exports");
+    let fixtures: [(Fixture, &str); 3] = [(assembled, "frame"), (blended, "bl"), (swept, "sw")];
+    for (make, part) in fixtures {
+        let (_dir, mut session) = make();
+        for (schema, unit) in [("ap242", "mm"), ("ap214", "m")] {
+            let mut files = Vec::new();
+            for threads in [1, 4] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                let params = serde_json::json!({"part": part, "schema": schema, "unit": unit,
+                                                "time_stamp": "2026-10-27T00:00:00",
+                                                "file_name": format!("{part}.step")});
+                let req = ryucad::proto::Request::from_rpc("export", Some(params)).unwrap();
+                let a = pool
+                    .install(|| ryucad::server::answer_live(&mut session, None, None, req))
+                    .unwrap_or_else(|e| panic!("{part} {schema}: {e}"));
+                files.push(a.binary.unwrap());
+            }
+            assert_eq!(files[0], files[1], "{part} {schema}: one thread and four");
+            s.str(&format!("{:x}", md(&files[0])));
+        }
+    }
+}
+
 /// The planar face of `part`'s solid `solid` whose outward normal is `n`.
 fn face_along(s: &mut ryucad::session::Session, part: &str, solid: &str, n: [f64; 3]) -> String {
     let req = ryucad::proto::Request::from_rpc(
@@ -1817,5 +1850,6 @@ fn determinism() {
     assemblies_section(&mut golden);
     mates_section(&mut golden);
     interference_section(&mut golden);
+    exports_section(&mut golden);
     golden.finish();
 }
