@@ -820,7 +820,43 @@ pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases)
     if !settings.is_empty() {
         v["pdm"] = json!({ "changes": settings });
     }
+    let imports = imports(from, to);
+    if !imports.is_empty() {
+        v["imports"] = json!(imports);
+    }
     v
+}
+
+/// The files under `imports/` that differ, each with how and its BLAKE3
+/// on each side it is on: what import features name them by.
+fn imports(from: &Files, to: &Files) -> Vec<Value> {
+    let prefix = format!("{}/", crate::doc::project::IMPORTS);
+    let under = |files: &Files| -> BTreeMap<String, String> {
+        files
+            .iter()
+            .filter(|(p, _)| p.starts_with(&prefix))
+            .map(|(p, b)| (p.clone(), blake3::hash(b).to_hex().to_string()))
+            .collect()
+    };
+    let (a, b) = (under(from), under(to));
+    let paths: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+    paths
+        .into_iter()
+        .filter_map(|p| {
+            let (f, t) = (a.get(p), b.get(p));
+            if f == t {
+                return None;
+            }
+            let mut v = json!({"path": p, "status": status(f.is_some(), t.is_some(), true)});
+            if let Some(f) = f {
+                v["from"] = json!(f);
+            }
+            if let Some(t) = t {
+                v["to"] = json!(t);
+            }
+            Some(v)
+        })
+        .collect()
 }
 
 /// A part rebuilt on one side: its features' results in order, and its
@@ -1359,6 +1395,68 @@ mod tests {
                  form = revolute\n"
             )
         );
+    }
+
+    #[test]
+    fn an_import_reads_as_its_file_product_and_body() {
+        let h = "ab".repeat(32);
+        let v = json!({"body": 1, "file": {"blake3": h, "path": "imports/bracket.step"},
+                       "format": 5, "kind": "ryucad.feature", "type": "import",
+                       "product": {"id": "BRK-100", "name": "Bracket"}});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature import (format 5)\n\
+                 body = 1\n\
+                 file.blake3 = {h}\n\
+                 file.path = imports/bracket.step\n\
+                 product.id = BRK-100\n\
+                 product.name = Bracket\n"
+            )
+        );
+        // A STEP file itself is never JSON: it comes back as it is.
+        let step = b"ISO-10303-21;\nHEADER;\n";
+        assert_eq!(textconv(step), step);
+    }
+
+    #[test]
+    fn imported_files_that_differ_are_listed_with_their_hashes() {
+        let files = |pairs: &[(&str, &str)]| -> Files {
+            pairs
+                .iter()
+                .map(|(p, b)| ((*p).to_owned(), b.as_bytes().to_vec()))
+                .collect()
+        };
+        let base = [("ryucad.json", "{}")];
+        let from = files(&[
+            base[0],
+            ("imports/a.step", "one"),
+            ("imports/b.step", "same"),
+        ]);
+        let to = files(&[
+            base[0],
+            ("imports/a.step", "two"),
+            ("imports/b.step", "same"),
+            ("imports/c.step", "new"),
+        ]);
+        let hash = |s: &str| blake3::hash(s.as_bytes()).to_hex().to_string();
+        let v = structural(&from, &to, &Options::default(), &Releases::default());
+        assert_eq!(
+            v["imports"],
+            json!([
+                {"path": "imports/a.step", "status": "changed", "from": hash("one"), "to": hash("two")},
+                {"path": "imports/c.step", "status": "added", "to": hash("new")},
+            ])
+        );
+        let v = structural(&to, &from, &Options::default(), &Releases::default());
+        assert_eq!(
+            v["imports"][1],
+            json!({"path": "imports/c.step", "status": "removed",
+                                            "from": hash("new")})
+        );
+        // Nothing differs: no key at all, as before imports.
+        let v = structural(&from, &from, &Options::default(), &Releases::default());
+        assert!(v.get("imports").is_none());
     }
 
     #[test]
