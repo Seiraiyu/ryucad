@@ -18,7 +18,7 @@ use crate::doc::sweep::{Angle, Extent, Extrude, Revolve, RevolveAxis};
 use crate::entity::{self, EntityRef};
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
-use crate::live::{self, Live, SelectMode};
+use crate::live::{self, CadLive, Live, SelectMode};
 use crate::mesh;
 use crate::notify::Topic;
 use crate::param;
@@ -129,7 +129,7 @@ pub fn answer_live(
                 None => match live.as_deref_mut() {
                     Some(l) => {
                         let who = l.view_target(participant.as_deref(), me)?;
-                        l.get(&who)?.hidden.clone()
+                        l.get(&who)?.view.hidden.clone()
                     }
                     None => Default::default(),
                 },
@@ -141,6 +141,7 @@ pub fn answer_live(
                 Some(
                     l.get(participant.as_deref()?)
                         .ok()?
+                        .view
                         .focus
                         .as_ref()?
                         .to_string(),
@@ -555,7 +556,7 @@ fn dispatch(
                 None => None,
             };
             Ok(match target {
-                Some(p) => json!({"participant": p.id, "camera": p.camera}),
+                Some(p) => json!({"participant": p.id, "camera": p.view.camera}),
                 None => json!({"participant": null, "camera": null}),
             })
         }
@@ -571,11 +572,11 @@ fn dispatch(
                 }
                 Some(c) => c.resolve(session.project().manifest.default_unit)?,
                 None => {
-                    let current = live.get(&id)?.camera.clone();
+                    let current = live.get(&id)?.view.camera.clone();
                     framed(session, current.as_ref(), view.as_deref(), &fit)?
                 }
             };
-            live.get_mut(&id)?.camera = Some(camera.clone());
+            live.get_mut(&id)?.view.camera = Some(camera.clone());
             Ok(json!({"participant": id, "camera": camera}))
         }
         Request::CompareGet { participant } => {
@@ -586,7 +587,7 @@ fn dispatch(
             let Some(p) = target else {
                 return Ok(json!({"participant": null, "compare": null}));
             };
-            let (id, rev) = (p.id.clone(), p.compare.clone());
+            let (id, rev) = (p.id.clone(), p.view.compare.clone());
             // The commit the revision names now; none if it no longer
             // names one.
             let compare = rev.map(|rev| {
@@ -657,7 +658,7 @@ fn dispatch(
             if let Some(focus) = part {
                 live.set_focus(&id, focus)?;
             }
-            let focus = live.get(&id)?.focus.clone();
+            let focus = live.get(&id)?.view.focus.clone();
             let shows = match &focus {
                 Some(p) => vec![p.clone()],
                 None => crate::assembly::shown_parts(session.project()),
@@ -679,9 +680,9 @@ fn dispatch(
                 show,
                 hide,
             };
-            let hidden = crate::visibility::apply(session, &live.get(&id)?.hidden, &change)?;
+            let hidden = crate::visibility::apply(session, &live.get(&id)?.view.hidden, &change)?;
             live.set_hidden(&id, hidden)?;
-            Ok(json!({"participant": id, "hidden": live.get(&id)?.hidden}))
+            Ok(json!({"participant": id, "hidden": live.get(&id)?.view.hidden}))
         }
         Request::HighlightSet {
             entities,
@@ -4048,7 +4049,7 @@ fn render(
         (None, Some((p, live)), _) => {
             let live =
                 live.ok_or_else(|| live::no_live_session("render with a participant's camera"))?;
-            live.get(p)?.camera.clone().ok_or_else(|| {
+            live.get(p)?.view.camera.clone().ok_or_else(|| {
                 Error::new(Code::InvalidParam, format!("participant {p} has no camera"))
                     .with("participant", p)
             })?

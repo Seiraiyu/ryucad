@@ -246,12 +246,7 @@ impl<P: Product> Endpoint<P> {
 mod tests {
     use super::*;
 
-    struct Test;
-
-    impl Product for Test {
-        const NAME: &'static str = "ryutest";
-        const RUNTIME_DIR_VAR: &'static str = "RYUTEST_ENDPOINT_RUNTIME_DIR";
-    }
+    use crate::testing::Test;
 
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]

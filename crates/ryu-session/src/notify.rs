@@ -193,32 +193,7 @@ fn known<T: Topics>() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::Deserialize;
-
-    /// A product's topics, as ryucad's were when these tests were written.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    enum Topic {
-        Model,
-        Project,
-        Participants,
-        Activity,
-        Merge,
-        Pdm,
-    }
-
-    impl Topics for Topic {
-        const ALL: &'static [Topic] = &[
-            Topic::Model,
-            Topic::Project,
-            Topic::Participants,
-            Topic::Activity,
-            Topic::Merge,
-            Topic::Pdm,
-        ];
-        const PARTICIPANTS: Topic = Topic::Participants;
-        const ACTIVITY: Topic = Topic::Activity;
-    }
+    use crate::testing::Topic;
 
     #[test]
     fn subscribers_get_their_topics_in_order() {

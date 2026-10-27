@@ -19,6 +19,21 @@ pub struct Cad;
 impl ryu_session::Product for Cad {
     const NAME: &'static str = "ryucad";
     const RUNTIME_DIR_VAR: &'static str = "RYUCAD_RUNTIME_DIR";
+    type Target = entity::EntityRef;
+    type View = live::View;
+    type Seen = live::Seen;
+    type Topic = notify::Topic;
+
+    fn view_json(view: &live::View, into: &mut serde_json::Map<String, serde_json::Value>) {
+        use serde_json::json;
+        into.insert("camera".into(), json!(view.camera));
+        into.insert(
+            "compare".into(),
+            json!(view.compare.as_ref().map(|rev| json!({ "rev": rev }))),
+        );
+        into.insert("focus".into(), json!(view.focus));
+        into.insert("hidden".into(), json!(view.hidden));
+    }
 }
 
 pub mod activity;
