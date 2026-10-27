@@ -8,6 +8,7 @@
 //! the product's, behind the trait.
 
 pub mod endpoint;
+pub mod notify;
 pub mod rpc;
 
 /// A product built on these sessions: its name and the variables that
