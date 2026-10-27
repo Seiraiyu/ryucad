@@ -427,6 +427,24 @@ fn dispatch(
             Code::Usage,
             "only a running daemon answers daemon requests",
         )),
+        Request::Import {
+            path,
+            part,
+            into,
+            product,
+            dry_run,
+            expected_revision,
+        } => crate::import::import(
+            session,
+            crate::import::Ask {
+                path,
+                part,
+                into,
+                product,
+                dry_run,
+                expected: expected_revision,
+            },
+        ),
         Request::Rebuild { part, rev } => {
             let (commit, s) = session.at(rev.as_deref())?;
             noted(rebuild(s, part.as_deref()), commit)

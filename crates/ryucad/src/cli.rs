@@ -80,6 +80,26 @@ enum Command {
     /// Move an assembly's instances, or show its tree of instances.
     #[command(subcommand)]
     Assembly(AssemblyCmd),
+    /// Import a STEP file: store it in the project (imports/) and make a part of each
+    /// product's bodies, or add one product's bodies to a part with --into.
+    Import {
+        /// The STEP file (.step or .stp).
+        file: std::path::PathBuf,
+        /// The part to make, when the file makes one.
+        #[arg(long)]
+        part: Option<String>,
+        /// Add the bodies to this part instead of making parts.
+        #[arg(long, value_name = "PART")]
+        into: Option<String>,
+        /// With --into, the product whose bodies to add: its id, else its name.
+        #[arg(long)]
+        product: Option<String>,
+        /// Write nothing: say what it would store and make, and how each body heals.
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
     /// Rebuild one part, or all of them.
     Rebuild {
         part: Option<String>,
@@ -1692,6 +1712,25 @@ fn request(cmd: &Command) -> Option<Request> {
             sketch: sketch.clone(),
             quality: quality.clone(),
         },
+        Command::Import {
+            file,
+            part,
+            into,
+            product,
+            dry_run,
+            expect,
+        } => Request::Import {
+            // The daemon's folder isn't the caller's.
+            path: std::path::absolute(file)
+                .unwrap_or_else(|_| file.clone())
+                .to_string_lossy()
+                .into_owned(),
+            part: part.clone(),
+            into: into.clone(),
+            product: product.clone(),
+            dry_run: *dry_run,
+            expected_revision: expect.revision.clone(),
+        },
         Command::Rebuild { part, rev } => Request::Rebuild {
             part: part.clone(),
             rev: rev.rev.clone(),
@@ -2098,7 +2137,10 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
 fn lift(cmd: &Command, mut result: Value, warnings: &mut Vec<String>) -> Value {
     if !matches!(
         cmd,
-        Command::History { .. } | Command::Config(ConfigCmd::Get { .. }) | Command::Rebuild { .. }
+        Command::History { .. }
+            | Command::Config(ConfigCmd::Get { .. })
+            | Command::Rebuild { .. }
+            | Command::Import { .. }
     ) {
         return result;
     }
