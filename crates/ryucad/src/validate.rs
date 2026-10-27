@@ -212,6 +212,38 @@ fn unmerged(
                     unstaged.push(path.clone());
                     continue;
                 }
+                // An imported file is binary to Git: it merges neither by
+                // value nor as lines. Settled, it is either side's bytes.
+                _ if crate::doc::import::is_import_path(path) => {
+                    let hash = |b: &Option<Vec<u8>>| {
+                        b.as_ref()
+                            .map(|b| json!(blake3::hash(b).to_hex().to_string()))
+                    };
+                    // Theirs taken is settled; ours looks as Git left it,
+                    // so it stays a conflict until it is staged.
+                    if file.is_some() && file == u.theirs && u.theirs != u.ours {
+                        unstaged.push(path.clone());
+                        continue;
+                    }
+                    let mut x = conflict(
+                        format!("{path}#"),
+                        "merge_unparsed",
+                        vec![path.clone()],
+                        concerns,
+                        "both",
+                        format!(
+                            "{path} is an imported STEP file, which Git doesn't merge: take one side's bytes, and import the other version again (`import --update`) if it needs both; the import features' hashes must match the bytes taken"
+                        ),
+                    );
+                    for (k, side) in [("base", &u.base), ("ours", &u.ours), ("theirs", &u.theirs)] {
+                        if let Some(h) = hash(side) {
+                            x[k] = json!({"blake3": h});
+                        }
+                    }
+                    x["choices"] = json!(["ours", "theirs"]);
+                    conflicts.push(x);
+                    continue;
+                }
                 _ => conflict(
                     format!("{path}#"),
                     "merge_unparsed",
@@ -498,7 +530,19 @@ fn touched(
     for f in reads {
         let path = format!("parts/{part}/features/{f}.json");
         if differs(&path) {
-            out.push(path);
+            out.push(path.clone());
+        }
+        // The file an import feature reads, as either names it.
+        for files in [&side.files, &base.files] {
+            let Some(v) = files.get(&path).and_then(|b| json_of(b)) else {
+                continue;
+            };
+            if let Some(file) = v["file"]["path"].as_str().filter(|_| v["type"] == "import")
+                && differs(file)
+                && !out.iter().any(|o| o == file)
+            {
+                out.push(file.to_owned());
+            }
         }
     }
     let params = format!("parts/{part}/parameters.json");

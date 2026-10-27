@@ -80,7 +80,7 @@ impl Geo<'_> {
 
     /// A direction of unit length: kept bit for bit when it already is,
     /// else normalized.
-    fn unit(&self, id: Id) -> Result<UnitVector3, ImportError> {
+    pub(crate) fn unit(&self, id: Id) -> Result<UnitVector3, ImportError> {
         let v = self.vector(id)?;
         match UnitVector3::exact(v) {
             Some(u) => Ok(u),

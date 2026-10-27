@@ -579,9 +579,11 @@ pub enum Request {
     },
     /// Imports a STEP file the daemon can read (absolute, or relative to
     /// the project): stores it under `imports/` and makes a part of each
-    /// product's bodies (`part` names it when there is one), or with
-    /// `into` adds one product's bodies to a part. `dry_run` answers the
-    /// plan, writing nothing.
+    /// product's bodies and an assembly of each product's children
+    /// (`part` names the file's one root), or with `into` adds one
+    /// product's bodies to a part. With `update`, the file's bytes
+    /// replace that imported file and what was made of it follows.
+    /// `dry_run` answers the plan, writing nothing.
     #[serde(rename = "import")]
     Import {
         path: String,
@@ -596,6 +598,9 @@ pub enum Request {
         /// The project's revision, or with `into` that part's.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
+        /// A file under `imports/` to replace: re-import.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        update: Option<String>,
     },
     #[serde(rename = "rebuild")]
     Rebuild {

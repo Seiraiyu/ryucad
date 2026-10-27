@@ -84,6 +84,9 @@ pub struct Occurrence {
     pub definition: usize,
     /// Where the child goes; `None` if the file says nothing (in place).
     pub transform: Option<Transform>,
+    /// The representations `transform` relates, the child's first: their
+    /// contexts give its units. `None` with no transform.
+    pub representations: Option<[Id; 2]>,
 }
 
 /// How a child is placed in its parent.
@@ -376,9 +379,12 @@ fn occurrence(
         })
     };
     let (p, c) = (definition(*parent)?, definition(*child)?);
-    let transform = match relationship {
-        None => None,
-        Some(rel) => transform(e, rel, &groups[p], &groups[c])?,
+    let (transform, representations) = match relationship {
+        None => (None, None),
+        Some(rel) => match transform(e, rel, &groups[p], &groups[c])? {
+            Some((t, reps)) => (Some(t), Some(reps)),
+            None => (None, None),
+        },
     };
     Ok((
         p,
@@ -388,23 +394,25 @@ fn occurrence(
             name: name.clone(),
             definition: c,
             transform,
+            representations,
         },
     ))
 }
 
-/// The transformation relationship `rel` gives, oriented child to parent.
+/// The transformation relationship `rel` gives, oriented child to parent,
+/// with the representations it relates, the child's first.
 fn transform(
     e: &Entities,
     rel: Id,
     parent: &BTreeSet<Id>,
     child: &BTreeSet<Id>,
-) -> Result<Option<Transform>, ImportError> {
-    let (rep_1, t) = match e.get(rel, rel)? {
+) -> Result<Option<(Transform, [Id; 2])>, ImportError> {
+    let (rep_1, rep_2, t) = match e.get(rel, rel)? {
         Entity::RepresentationRelationship {
             rep_1,
+            rep_2,
             transformation,
-            ..
-        } => (*rep_1, *transformation),
+        } => (*rep_1, *rep_2, *transformation),
         _ => {
             return Err(ImportError::WrongEntity {
                 instance: rel,
@@ -418,27 +426,37 @@ fn transform(
     // rep_1 is the child's by AP214's recommended practice; some writers
     // relate them the other way.
     let inverse = parent.contains(&rep_1) && !child.contains(&rep_1);
-    match e.get(rel, t)? {
-        Entity::ItemTransformation { item_1, item_2 } => Ok(Some(if inverse {
-            Transform::Items {
-                child: *item_2,
-                parent: *item_1,
+    let reps = if inverse {
+        [rep_2, rep_1]
+    } else {
+        [rep_1, rep_2]
+    };
+    let t = match e.get(rel, t)? {
+        Entity::ItemTransformation { item_1, item_2 } => {
+            if inverse {
+                Transform::Items {
+                    child: *item_2,
+                    parent: *item_1,
+                }
+            } else {
+                Transform::Items {
+                    child: *item_1,
+                    parent: *item_2,
+                }
             }
-        } else {
-            Transform::Items {
-                child: *item_1,
-                parent: *item_2,
-            }
-        })),
-        Entity::Operator { .. } => Ok(Some(Transform::Operator {
+        }
+        Entity::Operator { .. } => Transform::Operator {
             operator: t,
             inverse,
-        })),
-        _ => Err(ImportError::WrongEntity {
-            instance: t,
-            expected: "a transformation",
-        }),
-    }
+        },
+        _ => {
+            return Err(ImportError::WrongEntity {
+                instance: t,
+                expected: "a transformation",
+            });
+        }
+    };
+    Ok(Some((t, reps)))
 }
 
 /// Representations with B-rep or mapped items that no definition's shape

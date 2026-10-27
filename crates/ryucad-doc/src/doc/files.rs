@@ -449,7 +449,9 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
-    if v.get("type").and_then(Value::as_str) == Some("import") {
+    if v.get("type").and_then(Value::as_str) == Some("import")
+        || (v.get("type").and_then(Value::as_str) == Some("instance") && v.get("import").is_some())
+    {
         return 5;
     }
     if matches!(
@@ -611,6 +613,8 @@ impl Feature {
             | Feature::Chamfer(_)
             | Feature::Hole(_)
             | Feature::Pattern(_) => 3,
+            // An imported instance says so in format 5.
+            Feature::Instance(i) if i.import.is_some() => 5,
             Feature::Instance(_) | Feature::Mate(_) | Feature::InstancePattern(_) => 4,
             Feature::Import(_) => 5,
         }

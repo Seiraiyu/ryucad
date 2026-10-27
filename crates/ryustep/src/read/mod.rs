@@ -25,10 +25,11 @@ mod spline;
 mod topology;
 
 use crate::part21::{self, Header};
-use crate::products::Products;
-use crate::schema::{Entities, Id, Schema};
+use crate::products::{Products, Transform};
+use crate::schema::{Entities, Entity, Id, Schema};
 use crate::{ImportError, StepError};
 use rayon::prelude::*;
+use ryukei::geom::{Frame, Rigid, UnitVector3};
 use ryukei::heal::{HealOptions, HealReport, heal, import_names};
 use ryukei::name::{Journal, Name, OpKey};
 use ryukei::topo::Body;
@@ -167,6 +168,79 @@ impl Opened {
     pub fn body(&self, k: usize, opts: &ReadOptions) -> Imported {
         let (result, instances) = self.read(self.first[k], opts);
         self.imported(k, result, instances)
+    }
+
+    /// Where `products.definitions[parent].children[k]` puts its child:
+    /// the rigid motion taking the child's coordinates into its parent's,
+    /// in meters, each placement read in its own representation's units.
+    /// The identity where the file says nothing. An operator's `axis2` is
+    /// ignored (its frame is right-handed from `axis3` and `axis1`), and
+    /// a scale other than 1 is `Malformed`: an assembly places its parts
+    /// rigidly.
+    pub fn placement(&self, parent: usize, k: usize) -> Result<Rigid, ImportError> {
+        let o = &self.products.definitions[parent].children[k];
+        let (Some(t), Some([child, onto])) = (o.transform, o.representations) else {
+            return Ok(Rigid::IDENTITY);
+        };
+        let geo = |rep: Id| -> Result<geometry::Geo<'_>, ImportError> {
+            let context = match self.entities.get(o.instance, rep)? {
+                Entity::Representation { context, .. } => *context,
+                _ => return Err(crate::schema::wrong(rep, "a representation")),
+            };
+            let units = self.entities.units(rep, context)?;
+            Ok(geometry::Geo {
+                e: &self.entities,
+                length: units.length,
+                angle: units.angle.unwrap_or(1.0),
+            })
+        };
+        match t {
+            Transform::Items {
+                child: c,
+                parent: p,
+            } => {
+                let from = Rigid::from_frame(&geo(child)?.frame(c)?);
+                let to = Rigid::from_frame(&geo(onto)?.frame(p)?);
+                Ok(to.then_after(&from.inverse()))
+            }
+            Transform::Operator { operator, inverse } => {
+                let Entity::Operator {
+                    axis1,
+                    origin,
+                    scale,
+                    axis3,
+                    ..
+                } = *self.entities.get(o.instance, operator)?
+                else {
+                    return Err(crate::schema::wrong(operator, "a transformation operator"));
+                };
+                if scale.is_some_and(|s| s != 1.0) {
+                    return Err(ImportError::Malformed {
+                        instance: operator,
+                        attribute: 4,
+                        what: "a scale other than 1: an assembly places its parts rigidly",
+                    });
+                }
+                // The operator's origin is in the units of the space it
+                // maps into.
+                let g = geo(if inverse { child } else { onto })?;
+                let z = match axis3 {
+                    Some(a) => g.unit(a)?,
+                    None => UnitVector3::Z,
+                };
+                let x = match axis1 {
+                    Some(a) => g.unit(a)?,
+                    None if z.get().y == 0.0 && z.get().z == 0.0 => UnitVector3::Y,
+                    None => UnitVector3::X,
+                };
+                let at = g.point(origin)?;
+                let frame = Frame::from_axes(at, z, x)
+                    .or_else(|_| Frame::new(at, z.get(), x.get()))
+                    .map_err(|e| geometry::invalid(operator, e))?;
+                let r = Rigid::from_frame(&frame);
+                Ok(if inverse { r.inverse() } else { r })
+            }
+        }
     }
 
     /// What reading `held[k]` gives, before it is labelled.
