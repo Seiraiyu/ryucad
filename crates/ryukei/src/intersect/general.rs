@@ -37,7 +37,7 @@
 //! not), on both surfaces: there branches meet, or with none, the surfaces
 //! touch at a point. Anything else is [`Failure::Uncertain`].
 
-use super::cells::cells;
+use super::cells::{cells, cells_off};
 use super::pipe::Cell;
 use super::sheet_cs::krawczyk3;
 use super::ss_trace::{TangentTrace, Topology, Traced};
@@ -358,8 +358,9 @@ pub(crate) fn apart(
 /// tangency or a pairing can't be certified (a tangency along a curve
 /// among them).
 pub(crate) fn trace(a: &Surface, b: &Surface, region: &Box3) -> Result<Topology, Failure> {
-    for split in SPLITS {
+    for (attempt, split) in SPLITS.into_iter().enumerate() {
         let mut tracer = Tracer::new([a, b], region, split);
+        tracer.shift = CELL_SHIFTS[attempt];
         match tracer.run() {
             Err(Failure::Uncertain) if tracer.singular <= MAX_SINGULAR => continue,
             other => return other,
@@ -478,11 +479,17 @@ struct Tracer<'a> {
     sheets: [Sheet<'a>; 2],
     region: Box3,
     split: f64,
+    /// How the first cells are cut ([`cells_off`]).
+    shift: f64,
     leaves: Vec<Leaf>,
     singular: usize,
     crossings: Vec<Crossing>,
     planes: BTreeMap<Plane, Vec<usize>>,
 }
+
+/// The first cells' shift on each attempt: the surfaces' own pieces
+/// twice (with two of [`SPLITS`]), then cut off them.
+const CELL_SHIFTS: [f64; 3] = [0.0, 0.0, 0.293];
 
 impl<'a> Tracer<'a> {
     fn new(surfaces: [&'a Surface; 2], region: &Box3, split: f64) -> Self {
@@ -491,6 +498,7 @@ impl<'a> Tracer<'a> {
             sheets: surfaces.map(Sheet::of),
             region: region.grow(LINEAR_RESOLUTION),
             split,
+            shift: 0.0,
             leaves: Vec::new(),
             singular: 0,
             crossings: Vec::new(),
@@ -500,8 +508,17 @@ impl<'a> Tracer<'a> {
 
     fn run(&mut self) -> Result<Topology, Failure> {
         let firsts = [
-            cells(self.surfaces[0], &self.region),
-            cells(self.surfaces[1], &self.region),
+            cells_off(self.surfaces[0], &self.region, self.shift),
+            // The second moved differently, as it is split differently.
+            cells_off(
+                self.surfaces[1],
+                &self.region,
+                if self.shift > 0.0 {
+                    1.0 - self.shift
+                } else {
+                    0.0
+                },
+            ),
         ];
         // The first pairs: cells whose enclosures meet.
         let boxes: Vec<Vec<Option<Box3>>> = (0..2)
@@ -582,7 +599,16 @@ impl<'a> Tracer<'a> {
         }
         let (k, d, _) = best;
         let [lo, hi] = cells[k][d];
-        let m = lo + (hi - lo) * self.split;
+        // On the attempt off the surfaces' pieces the second surface is
+        // split elsewhere too: surfaces sharing a parameter (sides of one
+        // sweep, along its path) would otherwise put their cells' sides
+        // together where the curve crosses.
+        let fraction = if k == 1 && self.shift > 0.0 {
+            1.0 - self.split
+        } else {
+            self.split
+        };
+        let m = lo + (hi - lo) * fraction;
         if m <= lo || m >= hi {
             return Err(Failure::Uncertain);
         }

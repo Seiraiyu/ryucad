@@ -190,6 +190,12 @@ fn grid(s: &Surface, region: &Box3, (shift, along): (f64, f64)) -> Option<[Axis;
                 x.sort_by(f64::total_cmp);
                 x.dedup();
             }
+            // Tried again (the grid moved), the pieces' breaks aren't
+            // kept: a curve along one (a knot line) lies inside a cell.
+            if along != 0.0 {
+                us = vec![du[0], du[1]];
+                vs = vec![dv[0], dv[1]];
+            }
             Some([
                 axis(pu, du, &us, (shift, along)),
                 axis(pv, dv, &vs, (shift, along)),
