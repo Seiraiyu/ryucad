@@ -179,7 +179,7 @@ pub(crate) fn end_curve(
             // The arc crosses the spline's start: move the start to the
             // middle of the other arc.
             let (os, oe) = arcs[1];
-            b = super::seam::reseamed(b, wrap((os + oe) / 2.0));
+            b = crate::intersect::reseamed(b, wrap((os + oe) / 2.0));
             (s, e) = arc_ends(&b, from, to, 10.0 * tol).ok_or(EndFail::Uncertain)?;
         }
         let mut out = EndCurve {
