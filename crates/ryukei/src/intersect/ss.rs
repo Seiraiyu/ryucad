@@ -338,7 +338,9 @@ fn cut_at(chains: Vec<Traced>, pole: Point3) -> Vec<Traced> {
             let mut second = vec![pole];
             second.extend_from_slice(&c.points[i + 1..]);
             for part in [first, second] {
-                if part.len() >= 2 {
+                // A branch already ending at the pole (a pole's zone in
+                // the trace ends it there) leaves nothing on that side.
+                if part.len() >= 2 && part.iter().any(|&p| p != pole) {
                     out.push(Traced {
                         points: part,
                         closed: false,
