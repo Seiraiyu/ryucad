@@ -2013,14 +2013,28 @@ impl Step {
     }
 }
 
+/// What the disk cache keys feature `id` of `part`'s result by: the hash
+/// of its inputs, and the part and feature, whose IDs name everything it
+/// makes (an alike feature elsewhere makes the same shape under other
+/// names). Length-prefixed, so no two keys run together.
+fn disk_input(h: &blake3::Hash, part: &Id, id: &Id) -> Vec<u8> {
+    let mut out = h.as_bytes().to_vec();
+    for s in [part.as_str(), id.as_str()] {
+        out.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        out.extend_from_slice(s.as_bytes());
+    }
+    out
+}
+
 /// A body-making feature's result from the disk cache, by the hash of
 /// its inputs. An entry that doesn't decode is removed.
-fn from_disk(disk: &Disk, h: &blake3::Hash) -> Option<Output> {
-    let bytes = disk.get(Kind::Feature, h.as_bytes())?;
+fn from_disk(disk: &Disk, h: &blake3::Hash, part: &Id, id: &Id) -> Option<Output> {
+    let input = disk_input(h, part, id);
+    let bytes = disk.get(Kind::Feature, &input)?;
     match crate::cache::results::decode_made(&bytes) {
         Some(m) => Some(Output::Solids(Arc::new(m))),
         None => {
-            disk.discard(Kind::Feature, h.as_bytes());
+            disk.discard(Kind::Feature, &input);
             None
         }
     }
@@ -2028,21 +2042,29 @@ fn from_disk(disk: &Disk, h: &blake3::Hash) -> Option<Output> {
 
 /// A join, cut or intersect's own body from the disk cache, by the hash
 /// of its own inputs.
-fn tool_from_disk(disk: &Disk, th: &blake3::Hash) -> Option<(blake3::Hash, Arc<Built>)> {
-    let bytes = disk.get(Kind::Tool, th.as_bytes())?;
+fn tool_from_disk(
+    disk: &Disk,
+    th: &blake3::Hash,
+    part: &Id,
+    id: &Id,
+) -> Option<(blake3::Hash, Arc<Built>)> {
+    let input = disk_input(th, part, id);
+    let bytes = disk.get(Kind::Tool, &input)?;
     match crate::cache::results::decode_built(&bytes) {
         Some(b) => Some((*th, Arc::new(b))),
         None => {
-            disk.discard(Kind::Tool, th.as_bytes());
+            disk.discard(Kind::Tool, &input);
             None
         }
     }
 }
 
-/// Writes what a feature built to the disk cache: its solids by the hash
-/// of its inputs, and a tool's own body, when built now, by its own.
+/// Writes what feature `id` of `part` built to the disk cache: its solids
+/// by the hash of its inputs, and a tool's own body, when built now, by
+/// its own.
 fn to_disk(
     disk: &Disk,
+    (part, id): (&Id, &Id),
     h: &blake3::Hash,
     r: &Result<Output>,
     tool: Option<&(blake3::Hash, Arc<Built>, bool)>,
@@ -2050,14 +2072,14 @@ fn to_disk(
     if let Ok(Output::Solids(m)) = r {
         disk.put(
             Kind::Feature,
-            h.as_bytes(),
+            &disk_input(h, part, id),
             &crate::cache::results::encode_made(m),
         );
     }
     if let Some((th, b, true)) = tool {
         disk.put(
             Kind::Tool,
-            th.as_bytes(),
+            &disk_input(th, part, id),
             &crate::cache::results::encode_built(b),
         );
     }
@@ -2158,7 +2180,7 @@ pub fn rebuild_part_in(
                 let applies = applies(f);
                 let kept = cache.tools.get(&id);
                 let on_disk = || match (disk, f) {
-                    (Some(d), f) if f.sketch().is_none() => from_disk(d, &h),
+                    (Some(d), f) if f.sketch().is_none() => from_disk(d, &h, &part.id, &id),
                     _ => None,
                 };
                 let memory = cache.features.get(&id).filter(|(c, _)| *c == h);
@@ -2176,7 +2198,7 @@ pub fn rebuild_part_in(
                             let th = tool_hash(part, &solids, &id, f, &built);
                             let stored = match kept {
                                 Some(k) if k.0 == th => None,
-                                _ => disk.and_then(|d| tool_from_disk(d, &th)),
+                                _ => disk.and_then(|d| tool_from_disk(d, &th, &part.id, &id)),
                             };
                             let kept = stored.as_ref().or(kept);
                             let (r, own) =
@@ -2184,7 +2206,7 @@ pub fn rebuild_part_in(
                             let fresh = !kept.is_some_and(|(c, _)| *c == th);
                             let tool = own.map(|b| (th, b, fresh));
                             if let Some(d) = disk {
-                                to_disk(d, &h, &r, tool.as_ref());
+                                to_disk(d, (&part.id, &id), &h, &r, tool.as_ref());
                             }
                             (r, true, tool, false)
                         }
@@ -2193,7 +2215,7 @@ pub fn rebuild_part_in(
                             if let Some(d) = disk
                                 && f.sketch().is_none()
                             {
-                                to_disk(d, &h, &r, None);
+                                to_disk(d, (&part.id, &id), &h, &r, None);
                             }
                             (r, true, None, false)
                         }
