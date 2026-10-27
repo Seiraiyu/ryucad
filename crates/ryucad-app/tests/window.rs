@@ -2101,6 +2101,20 @@ fn occurrences_hide_and_show_with_tab_and_the_tree() {
     h.step();
     tab(&mut h, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT);
     frames(&mut h, |a| hidden(a).is_empty());
+    // Ctrl+Shift+Tab as macOS sends it, Ctrl not being Command there (#142).
+    p.ok(&["hide", "frame/b1"]);
+    frames(&mut h, |a| hidden(a).len() == 1);
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    tab(
+        &mut h,
+        egui::Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Default::default()
+        },
+    );
+    frames(&mut h, |a| hidden(a).is_empty());
 }
 
 #[test]

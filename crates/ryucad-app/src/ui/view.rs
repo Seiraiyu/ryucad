@@ -766,7 +766,9 @@ impl View {
         let tabs = std::mem::take(&mut self.tabs);
         self.hovered = response.hovered();
         if response.hovered() && !ui.ctx().text_edit_focused() {
-            let all = tabs.iter().any(|m| m.shift && m.command && !m.alt);
+            // Ctrl+Shift+Tab everywhere; Cmd+Shift+Tab too, though macOS
+            // keeps it for switching apps (#142).
+            let all = tabs.iter().any(|m| m.shift && (m.ctrl || m.command) && !m.alt);
             let show = tabs.iter().any(|m| m.shift_only());
             let hide = tabs.iter().any(|m| !m.any());
             let at = response.hover_pos().map(local);
