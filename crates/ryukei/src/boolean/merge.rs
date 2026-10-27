@@ -375,6 +375,23 @@ fn partners_agree(body: &Body, e1: EdgeId, e2: EdgeId) -> bool {
     })
 }
 
+/// A pcurve for an edge that lies measurably off its new face's surface (a
+/// tolerant edge read from a file, its face merged into one on a
+/// coincident surface): fitted at twice the larger of its tolerance and
+/// how far off it is, as healing fits one.
+fn tolerant_fit(
+    surface: &Surface,
+    curve: &Curve,
+    edge: &crate::topo::Edge,
+) -> Result<(crate::geom::NurbsCurve2, f64), crate::intersect::Failure> {
+    let [t0, t1] = edge.interval;
+    let gap = (0..=16)
+        .map(|i| surface.distance(curve.point(t0 + (t1 - t0) * f64::from(i) / 16.0)))
+        .fold(0.0, f64::max);
+    let target = 2.0 * edge.tolerance.get().max(gap);
+    crate::intersect::fit_pcurve_within(surface, curve, edge.interval, target, 512)
+}
+
 /// Gives every fin without a pcurve an exact one, or a fitted one whose
 /// bound the edge's tolerance then covers.
 fn fill(body: &mut Body) -> Result<(), Fail> {
@@ -397,6 +414,7 @@ fn fill(body: &mut Body) -> Result<(), Fail> {
                 Some(x) => x,
                 None => {
                     let (n, bound) = crate::intersect::fit_pcurve(&surface, &curve, edge.interval)
+                        .or_else(|_| tolerant_fit(&surface, &curve, &edge))
                         .map_err(|_| Fail::Inconsistent)?;
                     if bound > edge.tolerance.get() {
                         let t = Tolerance::new(bound.max(LINEAR_RESOLUTION))
