@@ -1925,6 +1925,157 @@ fn lofts_section(golden: &mut Golden) {
     }
 }
 
+/// Booleans and healing on every surface: spline forms of primitives
+/// drilled, halved through poles, cut along knot lines and flush with
+/// each other; lofts drilled, standing on a block and closed round on
+/// themselves; a spline rim tightened.
+fn general_booleans_section(golden: &mut Golden) {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::heal::{HealOptions, heal, seamed};
+    use ryukei::sweep::{LoftOptions, loft};
+    let mut s = golden.section("general_booleans");
+    let spline = |mut b: ryukei::topo::Body| {
+        nurbs::convert_body(&mut b).unwrap();
+        b
+    };
+    let at = |x: f64, y: f64, z: f64| Rigid::translation(Vector3::new(x, y, z));
+    let run = |op, target: &ryukei::topo::Body, tool: &ryukei::topo::Body, place: Rigid| {
+        let tools = [Tool {
+            key: ToolKey(1),
+            body: tool,
+            place,
+        }];
+        boolean(OpKey(0x6765_6e62), op, target, &tools).unwrap()
+    };
+    let square = |h: f64, first: u128, side: f64, turn: f64| {
+        let (sn, cs) = math::sin_cos(turn);
+        let d = side / 2.0;
+        let pts = [(-d, -d), (d, -d), (d, d), (-d, d)];
+        let segments = (0..4)
+            .map(|i| {
+                let (p, q) = (pts[i], pts[(i + 1) % 4]);
+                let (p, q) = (Point2::new(p.0, p.1), Point2::new(q.0, q.1));
+                Segment {
+                    key: SegmentKey(first + i as u128),
+                    curve: Curve2::Line2(Line2::through(p, q).unwrap()),
+                    t0: 0.0,
+                    t1: p.distance(q),
+                }
+            })
+            .collect();
+        ValidProfile::new(Profile {
+            frame: Frame::new(
+                Point3::new(0.0, 0.0, h),
+                Vector3::new(0.0, 0.0, 1.0),
+                Vector3::new(cs, sn, 0.0),
+            )
+            .unwrap(),
+            loops: vec![Loop {
+                key: LoopKey(1),
+                segments,
+            }],
+        })
+        .unwrap()
+    };
+    let plate = primitive::block(OpKey(1), 4.0, 4.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let rod = primitive::cylinder(OpKey(2), 0.5, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let ball = spline(
+        primitive::sphere(OpKey(3), 1.0, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+    );
+    let block = primitive::block(OpKey(7), 2.0, 3.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let (frustum, _) = loft(
+        OpKey(5),
+        &[square(0.0, 10, 1.0, 0.0), square(1.0, 20, 0.5, 0.3)],
+        &LoftOptions::default(),
+    )
+    .unwrap();
+    let base = primitive::block(OpKey(8), 2.0, 2.0, 1.0, &at(-1.0, -1.0, -1.0))
+        .unwrap()
+        .0;
+    let unit = |k| {
+        primitive::block(OpKey(k), 1.0, 1.0, 1.0, &Rigid::IDENTITY)
+            .unwrap()
+            .0
+    };
+    let cases = [
+        (
+            BooleanOp::Subtract,
+            spline(plate.clone()),
+            spline(rod.clone()),
+            at(2.0, 2.0, -1.0),
+        ),
+        (
+            BooleanOp::Intersect,
+            ball.clone(),
+            block.clone(),
+            at(0.0, -1.5, -1.5),
+        ),
+        (
+            BooleanOp::Subtract,
+            ball.clone(),
+            block.clone(),
+            Rigid::IDENTITY,
+        ),
+        (BooleanOp::Unite, base, frustum, Rigid::IDENTITY),
+        (
+            BooleanOp::Unite,
+            spline(unit(1)),
+            spline(unit(2)),
+            at(1.0, 0.5, 0.0),
+        ),
+    ];
+    for (op, target, tool, place) in &cases {
+        let (body, journal) = run(*op, target, tool, *place);
+        hash_body(&mut s, &body, &journal);
+    }
+    // A closed loft of circles: one face with no loops.
+    let rings: Vec<ValidProfile> = (0..4)
+        .map(|k| {
+            let a = core::f64::consts::TAU * f64::from(k) / 4.0;
+            let (sn, cs) = math::sin_cos(a);
+            ValidProfile::new(Profile {
+                frame: Frame::new(
+                    Point3::new(3.0 * cs, 3.0 * sn, 0.0),
+                    Vector3::new(-sn, cs, 0.0),
+                    Vector3::new(cs, sn, 0.0),
+                )
+                .unwrap(),
+                loops: keyed_loops(&[], Some((0.0, 0.0, 0.5))).split_off(1),
+            })
+            .unwrap()
+        })
+        .collect();
+    let opts = LoftOptions {
+        closed: true,
+        ..LoftOptions::default()
+    };
+    let (tube, journal) = loft(OpKey(9), &rings, &opts).unwrap();
+    hash_body(&mut s, &tube, &journal);
+    // A spline plate's rim moved 2 µm off its faces and tightened back.
+    let (holed, _) = run(BooleanOp::Subtract, &plate, &rod, at(2.0, 2.0, -1.0));
+    let mut shape = seamed(&spline(holed), 1e-6).unwrap();
+    for e in 0..shape.edges.len() {
+        let c = &shape.curves[shape.edges[e].curve];
+        let [t0, t1] = shape.edges[e].interval;
+        let p = c.point((t0 + t1) / 2.0);
+        if (math::hypot(p.x - 2.0, p.y - 2.0) - 0.5).abs() < 1e-6 && (p.z - 1.0).abs() < 1e-6 {
+            let moved = c.transformed(&at(2e-6, 1e-6, 0.0));
+            shape.curves.push(moved);
+            shape.edges[e].curve = shape.curves.len() - 1;
+        }
+    }
+    let (healed, journal, _) = heal(OpKey(10), &shape, &HealOptions::default()).unwrap();
+    hash_body(&mut s, &healed, &journal);
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -1958,5 +2109,6 @@ fn determinism() {
     heal_section(&mut golden);
     mirror_section(&mut golden);
     codec_section(&mut golden);
+    general_booleans_section(&mut golden);
     golden.finish();
 }
