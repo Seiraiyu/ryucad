@@ -16,7 +16,8 @@ fn round_trip(b: &Body) -> Body {
 }
 
 /// A tetrahedron carrying every kind of curve, surface and pcurve, some
-/// NURBS shared by several entries and by a swept surface.
+/// NURBS shared by several entries and by a swept surface, and a sweep
+/// shared by two.
 fn every_kind() -> Body {
     let mut b = tetrahedron();
     let f = Frame::new(
@@ -53,6 +54,12 @@ fn every_kind() -> Body {
     let r = Revolution::new(Frame::WORLD, tube).unwrap();
     b.add_surface(Surface::Revolution(Arc::new(r)));
     b.add_surface(Surface::Pipe(Arc::new(on_plane())));
+    let sweep = Arc::new(crate::geom::path_sweep::tests::straight());
+    b.add_surface(Surface::Sweep(sweep.clone()));
+    b.add_surface(Surface::Sweep(sweep));
+    b.add_surface(Surface::Sweep(Arc::new(
+        crate::geom::path_sweep::tests::level(),
+    )));
     let f2 = Frame2::new(Point2::new(1.0, 2.0), Vector2::new(1.0, 0.3), false).unwrap();
     b.add_curve2(Curve2::Line2(
         Line2::new(Point2::new(0.0, 0.5), Vector2::new(0.3, 1.0)).unwrap(),
