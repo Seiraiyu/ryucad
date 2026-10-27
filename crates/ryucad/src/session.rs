@@ -276,40 +276,10 @@ impl Session {
     /// keeping each as [`Session::rebuilt`] would: an import of many parts
     /// heals their bodies in parallel.
     pub fn rebuild_parts(&mut self, parts: &[Id]) -> Result<()> {
-        use crate::doc::files::PartKind;
-        use rayon::prelude::*;
-        let todo: Vec<&Part> = parts
-            .iter()
-            .filter_map(|id| self.project.parts.get(id))
-            .filter(|p| !p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly))
-            .filter(|p| {
-                !self
-                    .store
-                    .results
-                    .get(&p.id)
-                    .is_some_and(|(k, _)| *k == p.revision)
-            })
-            .collect();
-        let empty = crate::rebuild::Cache::new();
-        let disk = self.store.disk.as_deref();
-        let built: Vec<(Id, PartResult, crate::rebuild::Cache)> = todo
-            .par_iter()
-            .map(|p| {
-                let cache = self.store.caches.get(&p.id).unwrap_or(&empty);
-                let children = crate::assembly::Children::new();
-                let (r, c) = crate::rebuild::rebuild_part_in(p, cache, &children, disk);
-                (p.id.clone(), r, c)
-            })
-            .collect();
-        let mut fresh = Vec::new();
-        for (id, r, c) in built {
-            let key = self.project.part(&id)?.revision.clone();
-            self.store.caches.insert(id.clone(), c);
-            self.store.results.insert(id.clone(), (key, r));
-            fresh.push(id);
-        }
-        self.keep_fresh(fresh);
-        Ok(())
+        self.rebuild(|r| {
+            r.build_parts(parts);
+            Ok(())
+        })
     }
 
     /// `part` at `rev` as rebuilt, every part it places first: its files,
@@ -330,6 +300,47 @@ impl Session {
             Ok(())
         })?;
         out.expect("asked")
+    }
+
+    /// [`Session::node`] for `part` at `rev` and for every part and
+    /// revision it places, at any depth, all in one rebuild: what an
+    /// export of an assembly of thousands of parts walks.
+    #[allow(clippy::type_complexity)]
+    pub fn nodes(
+        &mut self,
+        part: &Id,
+        rev: &Rev,
+    ) -> Result<BTreeMap<(Id, Rev), (Part, PartResult, Option<crate::assembly::Pin>)>> {
+        let extra = match rev {
+            Rev::Working => Vec::new(),
+            Rev::Label(l) => vec![(part.clone(), l.clone())],
+        };
+        let mut out = BTreeMap::new();
+        self.rebuild_with(extra, |r| {
+            let mut todo = vec![(part.clone(), rev.clone())];
+            while let Some(at) = todo.pop() {
+                if out.contains_key(&at) {
+                    continue;
+                }
+                let node = r.node(&at.0, &at.1)?;
+                for (_, f) in &node.1.features {
+                    match f {
+                        Ok(crate::rebuild::Output::Instance(p)) => {
+                            todo.push((p.part.clone(), p.rev.clone()));
+                        }
+                        Ok(crate::rebuild::Output::Copies(c)) => todo.extend(
+                            c.copies
+                                .iter()
+                                .map(|c| (c.placed.part.clone(), c.placed.rev.clone())),
+                        ),
+                        _ => {}
+                    }
+                }
+                out.insert(at, node);
+            }
+            Ok(())
+        })?;
+        Ok(out)
     }
 
     /// Runs `f` over an [`assembly::Rebuild`](crate::assembly::Rebuild)
