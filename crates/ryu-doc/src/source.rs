@@ -5,7 +5,7 @@
 use crate::error::{Error, Result};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// What an entry of a folder is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +112,22 @@ impl Source for BTreeMap<String, Vec<u8>> {
     fn read(&self, path: &str) -> Result<Option<Vec<u8>>> {
         Ok(self.get(path).cloned())
     }
+}
+
+/// On Windows `canonicalize` gives a verbatim path (`\\?\C:\…`). Agents see
+/// the ordinary `C:\…` form, which is what `init` reports too. UNC paths and
+/// paths too long for the ordinary form stay verbatim.
+pub fn plain(p: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(rest) = p.to_str().and_then(|s| s.strip_prefix(r"\\?\"))
+            && rest.as_bytes().get(1) == Some(&b':')
+            && rest.len() < 260
+        {
+            return PathBuf::from(rest);
+        }
+    }
+    p
 }
 
 #[cfg(test)]

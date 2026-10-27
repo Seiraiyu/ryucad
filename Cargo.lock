@@ -4237,6 +4237,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-session"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "interprocess",
+ "libc",
+ "ryu-doc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "widestring",
+]
+
+[[package]]
 name = "ryucad"
 version = "0.0.0"
 dependencies = [
@@ -4255,6 +4269,7 @@ dependencies = [
  "png",
  "proptest",
  "rayon",
+ "ryu-session",
  "ryucad-doc",
  "ryukei",
  "ryukei-testkit",
