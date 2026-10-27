@@ -1945,11 +1945,16 @@ fn instance_from(
     }
     // Refuse a pose that could never build, before it is written.
     crate::assembly::pose_rigid(&pose)?;
+    // Which use of an imported product it is, while it places that part.
+    let import = current
+        .filter(|c| c.part == part)
+        .and_then(|c| c.import.clone());
     Ok(Instance {
         part,
         rev,
         pose,
         fixed: f.fixed.unwrap_or(current.is_some_and(|c| c.fixed)),
+        import,
     })
 }
 
