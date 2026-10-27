@@ -48,7 +48,7 @@ pub struct Feature {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Placed {
     pub part: String,
-    /// `working`, or `label B`.
+    /// `working`, `label B`, or `label B obsolete` when its record is.
     pub rev: String,
     pub fixed: bool,
     /// Its state in the solve (`well`, `under`, `over`, `failing`) and
@@ -275,6 +275,9 @@ impl Part {
                         instance: f.get("instance").map(|i| Placed {
                             part: text(&i["part"]),
                             rev: match i["rev"]["label"].as_str() {
+                                Some(l) if i["pin"]["obsolete"] == true => {
+                                    format!("label {l} obsolete")
+                                }
                                 Some(l) => format!("label {l}"),
                                 None => text(&i["rev"]),
                             },
@@ -1161,6 +1164,20 @@ mod tests {
                     "pose": {"origin_m": [0, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}},
                    {"path": "b2", "part": "bolt", "solids": [{"solid": "s", "hash": "1"}],
                     "pose": {"origin_m": [1, 0, 0], "z": [0, 0, 1], "x": [0, 1, 0]}}]})
+    }
+
+    #[test]
+    fn an_instance_pinned_to_an_obsolete_label_says_so() {
+        // #140: the rebuild report's pin says the label is obsolete.
+        let mut v = assembly();
+        v["features"][1]["instance"]["pin"] = json!({"official": true, "obsolete": true});
+        let mut m = Model::default();
+        m.apply_part(&report(&[("s", Some("1"))]));
+        m.apply_part(&v);
+        let b2 = &m.parts["frame"].features[1];
+        assert_eq!(b2.instance.as_ref().unwrap().rev, "label B obsolete");
+        let row = crate::ui::panels::row_text(b2, 0);
+        assert!(row.contains("bolt @ label B obsolete"), "{row}");
     }
 
     #[test]
