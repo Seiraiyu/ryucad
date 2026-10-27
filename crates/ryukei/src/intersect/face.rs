@@ -323,9 +323,26 @@ fn overlap(a: &Box3, b: &Box3, slack: f64) -> Option<Box3> {
 /// or a cone's between the circles at the extremes of its loops' axial
 /// parameter; an extrusion's between its curve moved to those extremes; a
 /// pipe's within its radius of its spine over the stretch its loops span
-/// (on a clamped spine);
-/// any other surface's face inside the surface's own box.
+/// (on a clamped spine); a NURBS's, revolution's or sweep's inside its
+/// surface's enclosure over the face's parameter box ([`face_rect`]),
+/// grown by its edges' tolerances; any other surface's face inside the
+/// surface's own box.
 pub fn face_box(body: &Body, face: FaceId) -> Box3 {
+    let surface = &body.surfaces[body.faces[face].surface];
+    if matches!(
+        surface,
+        Surface::Nurbs(_) | Surface::Revolution(_) | Surface::Sweep(_)
+    ) && let Some(b) = spline_box(body, face)
+    {
+        return b;
+    }
+    coarse_box(body, face)
+}
+
+/// [`face_box`] as it was before spline and swept faces had boxes of
+/// their own: their surfaces' boxes. Healing sizes the meshes it judges
+/// shells by from it, so what it makes doesn't change with the boxes.
+pub(crate) fn coarse_box(body: &Body, face: FaceId) -> Box3 {
     let surface = &body.surfaces[body.faces[face].surface];
     let mut out: Option<Box3> = None;
     let add = |b: Box3, out: &mut Option<Box3>| {
@@ -410,6 +427,84 @@ pub fn face_box(body: &Body, face: FaceId) -> Box3 {
         out = Some(out.map_or(b, |o| o.union(&b)));
     }
     out.unwrap_or_else(|| surface.bounds())
+}
+
+/// [`face_box`] for a face on a NURBS, revolution or sweep: the surface's
+/// enclosure over the face's parameter box, grown by the largest of its
+/// edges' tolerances (its boundary may stray that far) and a hair of its
+/// size (the pieces were cut in floating point). `None` where the face
+/// has no parameter box or the surface no enclosure over it.
+fn spline_box(body: &Body, face: FaceId) -> Option<Box3> {
+    let surface = &body.surfaces[body.faces[face].surface];
+    let rect = face_rect(body, face)?;
+    let b = super::cells::enclosure(surface, rect)?;
+    let reach = edges((body, face))
+        .iter()
+        .map(|&e| body.edges[e].tolerance.get())
+        .fold(0.0, f64::max);
+    let size = (b.max() - b.min()).length();
+    Some(b.grow(reach + 1e-12 * size + 1e-15))
+}
+
+/// The box of parameters a face lies over: its pcurves' (each over its
+/// range, its pieces cut to it), its lone vertices' feet, the whole of a
+/// periodic direction, and on to a collapsed end of the other direction
+/// where one is periodic (a face round a pole reaches it without an
+/// edge), inside the domain. `None` for a fin with no pcurve, a face with
+/// no loops, or a direction with no bound.
+pub(crate) fn face_rect(body: &Body, face: FaceId) -> Option<[[f64; 2]; 2]> {
+    let surface = &body.surfaces[body.faces[face].surface];
+    let mut tight = [[f64::INFINITY, f64::NEG_INFINITY]; 2];
+    let mut take = |x: [f64; 2], y: [f64; 2]| {
+        tight[0] = [tight[0][0].min(x[0]), tight[0][1].max(x[1])];
+        tight[1] = [tight[1][0].min(y[0]), tight[1][1].max(y[1])];
+    };
+    for l in body.face_loops(face) {
+        if let Some(v) = body.loops[l].vertex {
+            let (pu, pv) = surface.project(body.vertices[v].point).param;
+            take([pu, pu], [pv, pv]);
+        }
+        for fin in body.loop_fins(l) {
+            let fi = &body.fins[fin];
+            let pc = fi.pcurve?;
+            let [s0, s1] = body.edges[fi.edge].interval.map(|t| pc.param(t));
+            let range = [s0.min(s1), s0.max(s1)];
+            let c2 = &body.curves2[pc.curve];
+            let b = match c2 {
+                Curve2::Nurbs2(n) => n.clipped_bounds(range),
+                _ => c2.bounds(range),
+            };
+            take([b.min().x, b.max().x], [b.min().y, b.max().y]);
+        }
+    }
+    if tight[0][0] > tight[0][1] || tight[1][0] > tight[1][1] {
+        return None;
+    }
+    let domain = surface.domain();
+    let (pu, pv) = surface.periods();
+    let periods = [pu, pv];
+    let rows = crate::mesh::uv::collapsed_rows(surface);
+    let mut rect = [[0.0; 2]; 2];
+    for k in 0..2 {
+        rect[k] = if periods[k].is_some() {
+            domain[k]
+        } else {
+            let mut r = tight[k];
+            if periods[1 - k].is_some() {
+                if rows[k][0] {
+                    r[0] = domain[k][0];
+                }
+                if rows[k][1] {
+                    r[1] = domain[k][1];
+                }
+            }
+            [r[0].max(domain[k][0]), r[1].min(domain[k][1])]
+        };
+        if !(rect[k][0].is_finite() && rect[k][1].is_finite()) || rect[k][0] > rect[k][1] {
+            return None;
+        }
+    }
+    Some(rect)
 }
 
 /// A face on a surface with no implicit form, certified apart from an

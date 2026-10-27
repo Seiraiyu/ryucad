@@ -172,3 +172,38 @@ fn lofts_cut() {
     let kept = run(BooleanOp::Intersect, &cone, &block, place);
     near(volume(&cut) + volume(&kept), PI / 3.0 * (1.0 + 0.25 + 0.5));
 }
+
+/// A spline block and a block turned askew: pieces of the spline block's
+/// bottom and side, which no longer meet, take boxes of their own, not
+/// their whole surfaces' (whose sides would meet along a line neither
+/// piece reaches).
+#[test]
+fn a_spline_block_and_a_block_askew() {
+    let (a, b) = (0.978_264_102_398_909_7, 0.405_740_067_958_108_63);
+    let spline = nurbs(
+        primitive::block(OpKey(1), a, b, 0.9, &at(-a / 2.0, -b / 2.0, -0.45))
+            .unwrap()
+            .0,
+    );
+    let (c, d) = (0.719_139_516_023_649_6, 0.784_001_133_238_684_9);
+    let axis = Vector3::new(
+        -0.097_472_403_793_364_97,
+        0.810_614_511_018_428,
+        0.277_315_428_202_596_25,
+    )
+    .normalize()
+    .unwrap();
+    let place = at(
+        0.444_509_347_737_580_33,
+        0.105_675_578_460_901_14,
+        -0.342_216_763_768_183_83,
+    )
+    .then_after(&Rigid::rotation(axis, 1.851_300_189_756_587))
+    .then_after(&at(-c / 2.0, -d / 2.0, -0.45));
+    let block = primitive::block(OpKey(2), c, d, 0.9, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let u = run(BooleanOp::Unite, &spline, &block, place);
+    let i = run(BooleanOp::Intersect, &spline, &block, place);
+    near(volume(&u) + volume(&i), a * b * 0.9 + c * d * 0.9);
+}
