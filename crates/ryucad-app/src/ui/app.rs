@@ -370,6 +370,10 @@ impl Opened {
         {
             self.view.fit_entities(&mut self.ws, &faces);
         }
+        // Closing the dialog ends what it paints (#138).
+        if !self.dialogs.interference {
+            self.ws.interference = None;
+        }
         action
     }
 
@@ -505,10 +509,14 @@ impl App {
 }
 
 impl eframe::App for App {
-    /// On macOS, Ctrl+click is a right-click.
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+    /// On macOS, Ctrl+click is a right-click; Tab over the viewport is the
+    /// view's, not egui's focus key.
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         if cfg!(target_os = "macos") {
             crate::ui::platform::ctrl_click_as_secondary(&mut raw.events, &mut self.ctrl_click);
+        }
+        if let Screen::Opened(o) = &mut self.screen {
+            o.view.take_tabs(ctx, &mut raw.events);
         }
     }
 

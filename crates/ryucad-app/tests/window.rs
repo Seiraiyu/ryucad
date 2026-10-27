@@ -1813,6 +1813,10 @@ fn tools_check_interference_lists_and_paints_the_pairs() {
     assert_ne!(h.state().opened().view.nav.camera, before);
     let i = h.state().opened().ws.interference.clone().unwrap();
     assert!(i.faces().count() >= 2, "{i:?}");
+    // Closing the dialog ends the paint (#138).
+    h.state_mut().opened_mut().dialogs.interference = false;
+    h.step();
+    assert!(h.state().opened().ws.interference.is_none());
 }
 
 #[test]
@@ -2020,6 +2024,27 @@ fn hidden(app: &App) -> Vec<String> {
     app.opened().ws.model.hidden.iter().cloned().collect()
 }
 
+/// Presses Tab with `modifiers` as the window gets it: through the app's
+/// input hook, which takes Tab over the viewport away from egui (#136).
+fn tab(h: &mut Harness<'static, App>, modifiers: egui::Modifiers) {
+    let ctx = h.ctx.clone();
+    let mut raw = egui::RawInput::default();
+    for pressed in [true, false] {
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        });
+    }
+    eframe::App::raw_input_hook(h.state_mut(), &ctx, &mut raw);
+    for e in raw.events {
+        h.event(e);
+    }
+    h.step();
+}
+
 #[test]
 fn occurrences_hide_and_show_with_tab_and_the_tree() {
     let _one = one_at_a_time();
@@ -2032,8 +2057,11 @@ fn occurrences_hide_and_show_with_tab_and_the_tree() {
     // Tab hides the bolt under the mouse: the session hears of it, and
     // it is no longer drawn or picked.
     let at = over_body(&mut h, "b2/shank");
-    h.key_press(egui::Key::Tab);
+    let focus = h.ctx.memory(|m| m.focused());
+    tab(&mut h, egui::Modifiers::NONE);
     frames(&mut h, |a| hidden(a) == ["frame/b2"]);
+    // Keyboard focus stays where it was (#136).
+    assert_eq!(h.ctx.memory(|m| m.focused()), focus);
     let me = h.state().opened().ws.me().to_owned();
     let people = p.ok(&["participants"]);
     let mine = people["participants"]
@@ -2060,7 +2088,7 @@ fn occurrences_hide_and_show_with_tab_and_the_tree() {
     h.get_by_label("Show frame/b2");
     h.event(egui::Event::PointerMoved(at));
     h.step();
-    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+    tab(&mut h, egui::Modifiers::SHIFT);
     frames(&mut h, |a| hidden(a).is_empty());
     // The tree's checkbox hides and shows; Ctrl+Shift+Tab shows all.
     h.get_by_label("Show frame/b1").click();
@@ -2071,9 +2099,20 @@ fn occurrences_hide_and_show_with_tab_and_the_tree() {
     frames(&mut h, |a| hidden(a).len() == 2);
     h.event(egui::Event::PointerMoved(at));
     h.step();
-    h.key_press_modifiers(
-        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-        egui::Key::Tab,
+    tab(&mut h, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT);
+    frames(&mut h, |a| hidden(a).is_empty());
+    // Ctrl+Shift+Tab as macOS sends it, Ctrl not being Command there (#142).
+    p.ok(&["hide", "frame/b1"]);
+    frames(&mut h, |a| hidden(a).len() == 1);
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    tab(
+        &mut h,
+        egui::Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Default::default()
+        },
     );
     frames(&mut h, |a| hidden(a).is_empty());
 }

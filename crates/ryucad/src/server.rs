@@ -122,20 +122,19 @@ pub fn answer_live(
             compare,
             hidden,
         } => {
-            let target = participant.as_deref().map(|p| (p, live.as_deref()));
-            // What the participant's window hides, else the caller's.
+            // What the participant's window hides, else the one human's
+            // (where an agent's `hide` went), else the caller's.
             let hidden = match hidden {
                 Some(refs) => crate::visibility::reach_all(session, &refs)?,
-                None => live
-                    .as_deref()
-                    .and_then(|l| {
-                        let who = participant
-                            .as_deref()
-                            .unwrap_or(me.unwrap_or(live::DEFAULT_AGENT));
-                        Some(l.get(who).ok()?.hidden.clone())
-                    })
-                    .unwrap_or_default(),
+                None => match live.as_deref_mut() {
+                    Some(l) => {
+                        let who = l.view_target(participant.as_deref(), me)?;
+                        l.get(&who)?.hidden.clone()
+                    }
+                    None => Default::default(),
+                },
             };
+            let target = participant.as_deref().map(|p| (p, live.as_deref()));
             // A participant's render shows what their window shows.
             let part = part.or_else(|| {
                 let l = live.as_deref()?;
@@ -3763,14 +3762,22 @@ fn compare_paint(
     (None, faces)
 }
 
-/// Adds `m`'s faces to `g` as ghosts: those `gone` says in the removed
-/// colour, the rest in the ghost colour.
-fn ghost(g: &mut crate::render::Geometry, m: &mesh::Meshed, gone: impl Fn(&str) -> bool) {
+/// Adds `m`'s faces to `g` as ghosts, where `pose` puts them: those
+/// `gone` says in the removed colour, the rest in the ghost colour.
+fn ghost(
+    g: &mut crate::render::Geometry,
+    m: &mesh::Meshed,
+    pose: &ryukei::geom::Rigid,
+    gone: impl Fn(&str) -> bool,
+) {
     use crate::render as r;
     let Ok(mesh) = &m.mesh.mesh else { return };
+    let moved = *pose != ryukei::geom::Rigid::IDENTITY;
     let base = g.positions.len() as u32;
-    g.positions
-        .extend(mesh.positions.iter().map(|p| [p.x, p.y, p.z]));
+    g.positions.extend(mesh.positions.iter().map(|p| {
+        let p = if moved { pose.apply_point(*p) } else { *p };
+        [p.x, p.y, p.z]
+    }));
     for f in &mesh.faces {
         let name = m.body.face(f.face).expect("live").name.to_string();
         let color = if gone(&name) {
@@ -3784,12 +3791,24 @@ fn ghost(g: &mut crate::render::Geometry, m: &mesh::Meshed, gone: impl Fn(&str) 
                 p: c.map(|c| base + c.position),
                 n: c.map(|c| {
                     let n = c.normal.get();
+                    let n = if moved { pose.apply_vector(n) } else { n };
                     [n.x as f32, n.y as f32, n.z as f32]
                 }),
                 color,
             });
         }
     }
+}
+
+/// The names of the faces `theirs` has and `ours` doesn't.
+fn gone_faces(theirs: &mesh::Meshed, ours: &mesh::Meshed) -> std::collections::BTreeSet<String> {
+    let d = crate::diff::bodies(&theirs.body, &ours.body);
+    d["faces"]["gone"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|n| n.as_str().map(str::to_owned))
+        .collect()
 }
 
 /// Solids' meshes by part and founder.
@@ -3820,6 +3839,44 @@ fn solids_at(
         }
     }
     Ok((commit, out))
+}
+
+/// An assembly's occurrences' solids at a revision, by occurrence path
+/// and founder: where each is and its mesh.
+type OccurrenceMeshes = BTreeMap<(String, Id), (ryukei::geom::Rigid, mesh::Meshed)>;
+
+/// [`OccurrenceMeshes`] of `part` at `rev`: empty where the revision has
+/// no such assembly or it doesn't build.
+fn occurrences_at(session: &mut Session, rev: &str, part: &Id) -> Result<OccurrenceMeshes> {
+    let (_, s) = session.at(Some(rev))?;
+    let mut out = BTreeMap::new();
+    let assembly = s
+        .project()
+        .part(part)
+        .is_ok_and(|p| part_kind(p) == PartKind::Assembly);
+    if !assembly {
+        return Ok(out);
+    }
+    let Ok(model) = s.model(part, &crate::doc::assembly::Rev::Working) else {
+        return Ok(out);
+    };
+    for o in &model.occurrences {
+        let path = crate::assembly::path_text(&o.path);
+        let solids: Vec<&crate::assembly::Solid> = o.solids.iter().collect();
+        let made = occurrence_meshes(s, &solids, mesh::Quality::Normal);
+        for (sol, m) in solids.iter().zip(made) {
+            if m.mesh.is_err() {
+                continue;
+            }
+            let m = mesh::Meshed {
+                body: sol.built.body.clone(),
+                hash: sol.built.hash.clone(),
+                mesh: m,
+            };
+            out.insert((path.clone(), sol.founder.clone()), (o.pose, m));
+        }
+    }
+    Ok(out)
 }
 
 /// The parts a render draws: the one asked for, or the project's model
@@ -3860,6 +3917,16 @@ fn render(
         Some(rev) => Some((rev.clone(), solids_at(session, rev, &parts)?)),
         None => None,
     };
+    // A compare's assemblies: the other side's occurrences, and this
+    // side's as they are drawn, to paint and ghost them (issue #135).
+    let mut theirs_occurrences: BTreeMap<Id, OccurrenceMeshes> = BTreeMap::new();
+    if let Some(rev) = &ask.compare {
+        for part in &parts {
+            theirs_occurrences.insert(part.clone(), occurrences_at(session, rev, part)?);
+        }
+    }
+    let mut seen_occurrences: BTreeMap<(Id, String, Id), (ryukei::geom::Rigid, mesh::Meshed)> =
+        BTreeMap::new();
     // The rendered side's solids, for the ghosts.
     let mut seen = SolidMeshes::new();
     let (commit, session) = session.at(ask.rev.as_deref())?;
@@ -3899,15 +3966,21 @@ fn render(
                         hash: s.built.hash.clone(),
                         mesh: m,
                     };
+                    let key = (path.clone(), s.founder.clone());
+                    let (whole, faces) = match theirs_occurrences.get(part) {
+                        Some(theirs) => compare_paint(theirs.get(&key).map(|(_, t)| t), &m),
+                        None => (None, BTreeMap::new()),
+                    };
                     draw_body(
                         &mut g,
                         &m,
                         &o.pose,
                         &format!("{part}/{path}/{}", s.founder),
                         &marks,
-                        (None, &BTreeMap::new()),
+                        (whole, &faces),
                         (ask.labels, ask.edges),
                     );
+                    seen_occurrences.insert((part.clone(), key.0, key.1), (o.pose, m));
                 }
             }
             continue;
@@ -3943,16 +4016,30 @@ fn render(
             match seen.get(key) {
                 Some(ours) if ours.hash == t.hash => {}
                 Some(ours) => {
-                    let d = crate::diff::bodies(&t.body, &ours.body);
-                    let gone: std::collections::BTreeSet<String> = d["faces"]["gone"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|n| n.as_str().map(str::to_owned))
-                        .collect();
-                    ghost(&mut g, t, |n| gone.contains(n));
+                    let gone = gone_faces(t, ours);
+                    ghost(&mut g, t, &ryukei::geom::Rigid::IDENTITY, |n| {
+                        gone.contains(n)
+                    });
                 }
-                None => ghost(&mut g, t, |_| true),
+                None => ghost(&mut g, t, &ryukei::geom::Rigid::IDENTITY, |_| true),
+            }
+        }
+    }
+    for (part, theirs) in &theirs_occurrences {
+        for ((path, founder), (pose, t)) in theirs {
+            // What this render leaves out leaves no ghost either.
+            if ask.hidden.contains(&format!("{part}/{path}")) {
+                continue;
+            }
+            match seen_occurrences.get(&(part.clone(), path.clone(), founder.clone())) {
+                Some((p, ours)) if ours.hash == t.hash && p == pose => {}
+                // Only moved: all of it where it was.
+                Some((_, ours)) if ours.hash == t.hash => ghost(&mut g, t, pose, |_| false),
+                Some((_, ours)) => {
+                    let gone = gone_faces(t, ours);
+                    ghost(&mut g, t, pose, |n| gone.contains(n));
+                }
+                None => ghost(&mut g, t, pose, |_| true),
             }
         }
     }

@@ -87,6 +87,7 @@ run fresh "$good"
 check "fresh install succeeds" '[ "$status" -eq 0 ]'
 check "binary installed" '[ -x "$work/home-fresh/.ryucad/bin/ryucad" ]'
 check "reports the installed version" 'grep -q "\"ryucad\":" "$work/out"'
+check "a fresh install says it added the PATH line" 'grep -q "added .*/.ryucad/bin to PATH in your shell profile" "$work/out"'
 check ".profile gets the PATH line" '[ "$(markers "$work/home-fresh/.profile")" = 1 ]'
 check ".bashrc gets the PATH line" '[ "$(markers "$work/home-fresh/.bashrc")" = 1 ]'
 check ".bash_profile is not created" '[ ! -e "$work/home-fresh/.bash_profile" ]'
@@ -102,6 +103,7 @@ fi
 run fresh "$good"
 check "reinstall succeeds" '[ "$status" -eq 0 ]'
 check "reinstall adds no second PATH line" '[ "$(markers "$work/home-fresh/.profile")" = 1 ]'
+check "a reinstall says the profile has the line already" 'grep -q "/.ryucad/bin is in your shell profile but not this shell'"'"'s PATH" "$work/out" && ! grep -q "added .* to PATH" "$work/out"'
 
 # The desktop app and what lets the desktop open projects in it.
 check "app installed" '[ -x "$work/home-fresh/.ryucad/bin/ryucad-app" ]'

@@ -99,7 +99,7 @@ fn the_form_edits_an_instance() {
     assert!(ws.wait_until(WAIT, |ws| ws.form.is_some()));
     let f = ws.form.as_mut().unwrap();
     assert_eq!(f.ty, "instance");
-    assert_eq!(f.origin[0].read, "0.04 m");
+    assert_eq!(f.origin[0].read, "40 mm");
     assert_eq!(f.rev.as_ref().unwrap().read, "working");
     f.origin[1].text = "15 mm".into();
     f.fixed.as_mut().unwrap().chosen = true;
@@ -185,4 +185,17 @@ fn the_window_finds_which_instances_interfere_and_follows_edits() {
     p.ok(&["assembly", "move", "frame", "b3", "--translate", "20mm,0,0"]);
     assert!(ws.wait_until(WAIT, |ws| loaded(ws)
         && ws.interference.as_ref().is_some_and(|i| i.pairs.is_empty())));
+}
+
+#[test]
+fn the_window_hides_as_its_own_request_answers() {
+    let p = assembled();
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.part("frame").is_some()));
+    // #143: with the notification lost, the answer alone hides it.
+    ws.deaf = true;
+    ws.set_visibility(vec!["frame/b2".into()], Vec::new(), Vec::new(), false);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()));
+    let hidden: Vec<String> = ws.model.hidden.iter().cloned().collect();
+    assert_eq!(hidden, ["frame/b2"]);
 }

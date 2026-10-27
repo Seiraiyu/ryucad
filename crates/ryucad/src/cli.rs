@@ -209,7 +209,8 @@ enum Command {
     /// Open a project (this folder by default) in the desktop app, or
     /// bring its open windows to the front.
     Open {
-        #[arg(value_name = "DIR")]
+        /// The folder to open: this one (or `-C`'s) by default.
+        #[arg(id = "folder", value_name = "DIR")]
         dir: Option<PathBuf>,
     },
     /// List the humans and agents attached to the project's session.
@@ -421,7 +422,8 @@ enum Command {
         #[arg(long, value_name = "REV")]
         compare: Option<String>,
         /// Leave out a part, an occurrence or a solid (repeatable); by
-        /// default what the participant's (or the caller's) window hides.
+        /// default what `--of`'s window hides, else the one human's
+        /// (where `hide` goes), else the caller's.
         #[arg(long = "hidden", value_name = "REF")]
         hidden: Vec<String>,
     },
@@ -2456,4 +2458,20 @@ fn finish(outcome: Result<Value>, warnings: Vec<String>, pretty: bool) -> ExitCo
         s.expect("JSON values always serialize")
     );
     ExitCode::from(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_keeps_c_apart_from_its_folder() {
+        // #139: both were clap's argument `dir`, so each filled the other.
+        let cli = Cli::try_parse_from(["ryucad", "-C", "project", "open"]).unwrap();
+        assert_eq!(cli.dir, Some(PathBuf::from("project")));
+        assert!(matches!(&cli.command, Command::Open { dir: None }));
+        let cli = Cli::try_parse_from(["ryucad", "-C", "project", "open", "."]).unwrap();
+        assert_eq!(cli.dir, Some(PathBuf::from("project")));
+        assert!(matches!(&cli.command, Command::Open { dir: Some(d) } if d == &PathBuf::from(".")));
+    }
 }
