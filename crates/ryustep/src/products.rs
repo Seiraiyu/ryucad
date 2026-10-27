@@ -39,9 +39,10 @@ pub struct Products {
 pub struct Definition {
     /// The `PRODUCT_DEFINITION`'s instance number.
     pub instance: Id,
-    /// The `PRODUCT`'s identifier and name.
+    /// The `PRODUCT`'s identifier, name and description.
     pub product_id: Box<str>,
     pub name: Box<str>,
+    pub description: Box<str>,
     /// Its representations that hold B-rep or mapped items.
     pub shapes: Vec<Shape>,
     /// Where it uses other definitions.
@@ -171,11 +172,11 @@ impl Products {
             }
         }
         for (k, &d) in s.definitions.iter().enumerate() {
-            let (product_id, name) = match product_of(e, d) {
+            let (product_id, name, description) = match product_of(e, d) {
                 Ok(names) => names,
                 Err(f) => {
                     p.faults.push(f);
-                    ("".into(), "".into())
+                    ("".into(), "".into(), "".into())
                 }
             };
             let mut shapes = Vec::new();
@@ -190,6 +191,7 @@ impl Products {
                 instance: d,
                 product_id,
                 name,
+                description,
                 shapes,
                 children: Vec::new(),
             });
@@ -265,8 +267,11 @@ impl Products {
     }
 }
 
-/// A definition's product identifier and name.
-fn product_of(e: &Entities, d: Id) -> Result<(Box<str>, Box<str>), ImportError> {
+/// A product's identifier, name and description.
+type ProductNames = (Box<str>, Box<str>, Box<str>);
+
+/// A definition's product identifier, name and description.
+fn product_of(e: &Entities, d: Id) -> Result<ProductNames, ImportError> {
     let Entity::Definition { formation, .. } = e.get(d, d)? else {
         unreachable!("a definition")
     };
@@ -280,7 +285,11 @@ fn product_of(e: &Entities, d: Id) -> Result<(Box<str>, Box<str>), ImportError> 
         }
     };
     match e.get(*formation, product)? {
-        Entity::Product { id, name } => Ok((id.clone(), name.clone())),
+        Entity::Product {
+            id,
+            name,
+            description,
+        } => Ok((id.clone(), name.clone(), description.clone())),
         _ => Err(ImportError::WrongEntity {
             instance: product,
             expected: "a PRODUCT",
@@ -492,7 +501,7 @@ mod tests {
     fn part(d: Id, rep: Id, brep: Id) -> String {
         format!(
             "#{d}=PRODUCT_DEFINITION('design','',#{f},$);#{f}=PRODUCT_DEFINITION_FORMATION('','',#{p});\
-             #{p}=PRODUCT('p{d}','Part {d}','',());#{s}=PRODUCT_DEFINITION_SHAPE('','',#{d});\
+             #{p}=PRODUCT('p{d}','Part {d}','about {d}',());#{s}=PRODUCT_DEFINITION_SHAPE('','',#{d});\
              #{r}=SHAPE_DEFINITION_REPRESENTATION(#{s},#{rep});\
              #{rep}=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#8,#{brep}),#9);\
              #{brep}=MANIFOLD_SOLID_BREP('',#7);",
@@ -527,8 +536,8 @@ mod tests {
         assert_eq!(p.roots, [0]);
         let d = &p.definitions[0];
         assert_eq!(
-            (d.instance, &*d.product_id, &*d.name),
-            (100, "p100", "Part 100")
+            (d.instance, &*d.product_id, &*d.name, &*d.description),
+            (100, "p100", "Part 100", "about 100")
         );
         assert_eq!(
             d.shapes,

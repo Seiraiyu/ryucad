@@ -109,6 +109,7 @@ fn part(f: Feature) -> Part {
         features,
         uses: BTreeMap::new(),
         acts: BTreeMap::new(),
+        imports: BTreeMap::new(),
         revision: String::new(),
     }
 }
