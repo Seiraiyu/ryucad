@@ -58,6 +58,52 @@ fn is_blake3(s: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+impl ProductRef {
+    /// `{id, name}`, with `ordinal` when it isn't 0.
+    pub fn to_json(&self) -> Value {
+        let mut v = json!({"id": self.id, "name": self.name});
+        if self.ordinal != 0 {
+            v["ordinal"] = json!(self.ordinal);
+        }
+        v
+    }
+
+    /// `{id, name, ordinal?}`; `at` is its JSON pointer.
+    pub fn from_json(p: &Value, at: &str) -> Result<ProductRef> {
+        let mut po = Obj::new(p, at)?;
+        let text = |po: &mut Obj, key: &str| -> Result<String> {
+            po.take(key)?.as_str().map(str::to_owned).ok_or_else(|| {
+                invalid(
+                    &format!("{at}/{key}"),
+                    &format!("product.{key} must be a string"),
+                )
+            })
+        };
+        let id = text(&mut po, "id")?;
+        let name = text(&mut po, "name")?;
+        let ordinal = match po.take_opt("ordinal") {
+            None => 0,
+            Some(n) => count(&n, &format!("{at}/ordinal"))?,
+        };
+        po.finish()?;
+        Ok(ProductRef { id, name, ordinal })
+    }
+}
+
+/// An imported file's path as a feature names it, checked; `at` is its
+/// JSON pointer.
+pub fn import_path(v: &Value, at: &str) -> Result<String> {
+    v.as_str()
+        .filter(|p| is_import_path(p))
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            invalid(
+                at,
+                "file.path must be imports/<id>.step, the ID 1 to 63 of a-z, 0-9, _ and -",
+            )
+        })
+}
+
 impl Import {
     /// Its fields in a feature file, besides the header.
     pub fn fields(&self) -> Value {
@@ -66,10 +112,7 @@ impl Import {
             "file": {"blake3": self.file.blake3, "path": self.file.path},
         });
         if let Some(p) = &self.product {
-            v["product"] = json!({"id": p.id, "name": p.name});
-            if p.ordinal != 0 {
-                v["product"]["ordinal"] = json!(p.ordinal);
-            }
+            v["product"] = p.to_json();
         }
         v
     }
@@ -78,17 +121,7 @@ impl Import {
     pub fn from_fields(o: &mut Obj) -> Result<Import> {
         let file = o.take("file")?;
         let mut f = Obj::new(&file, "/file")?;
-        let path = f.take("path")?;
-        let path = path
-            .as_str()
-            .filter(|p| is_import_path(p))
-            .ok_or_else(|| {
-                invalid(
-                    "/file/path",
-                    "file.path must be imports/<id>.step, the ID 1 to 63 of a-z, 0-9, _ and -",
-                )
-            })?
-            .to_owned();
+        let path = import_path(&f.take("path")?, "/file/path")?;
         let blake3 = f.take("blake3")?;
         let blake3 = blake3
             .as_str()
@@ -103,25 +136,7 @@ impl Import {
         f.finish()?;
         let product = match o.take_opt("product") {
             None => None,
-            Some(p) => {
-                let mut po = Obj::new(&p, "/product")?;
-                let text = |po: &mut Obj, key: &str| -> Result<String> {
-                    po.take(key)?.as_str().map(str::to_owned).ok_or_else(|| {
-                        invalid(
-                            &format!("/product/{key}"),
-                            &format!("product.{key} must be a string"),
-                        )
-                    })
-                };
-                let id = text(&mut po, "id")?;
-                let name = text(&mut po, "name")?;
-                let ordinal = match po.take_opt("ordinal") {
-                    None => 0,
-                    Some(n) => count(&n, "/product/ordinal")?,
-                };
-                po.finish()?;
-                Some(ProductRef { id, name, ordinal })
-            }
+            Some(p) => Some(ProductRef::from_json(&p, "/product")?),
         };
         let body = count(&o.take("body")?, "/body")?;
         Ok(Import {
@@ -133,7 +148,7 @@ impl Import {
 }
 
 /// A whole number from 0 to 2³² − 1.
-fn count(v: &Value, at: &str) -> Result<u32> {
+pub(crate) fn count(v: &Value, at: &str) -> Result<u32> {
     v.as_u64()
         .and_then(|n| u32::try_from(n).ok())
         .ok_or_else(|| invalid(at, "must be a whole number from 0"))
