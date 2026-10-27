@@ -24,6 +24,7 @@ fn through_step(b: &Body) -> Body {
                 name: "part".into(),
                 bodies: vec![b.clone()],
                 children: vec![],
+                ..Default::default()
             }],
         },
         &WriteOptions {
