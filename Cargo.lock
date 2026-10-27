@@ -4219,6 +4219,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-math"
+version = "0.0.0"
+dependencies = [
+ "libm",
+ "proptest",
+]
+
+[[package]]
 name = "ryucad"
 version = "0.0.0"
 dependencies = [
@@ -4287,10 +4295,10 @@ dependencies = [
 name = "ryukei"
 version = "0.0.0"
 dependencies = [
- "libm",
  "num-bigint",
  "proptest",
  "rayon",
+ "ryu-math",
  "ryukei-testkit",
 ]
 
