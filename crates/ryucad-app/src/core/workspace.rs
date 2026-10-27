@@ -84,6 +84,12 @@ enum Pending {
     Interference(String),
     /// What the disk cache holds (`cache.stats` or `cache.clear`).
     Cache,
+    /// An import's dry run, for the file at this path.
+    ImportPlan(String),
+    /// An import or update of the file at this path, written.
+    Import(String),
+    /// An export's bytes, to write at this path.
+    Export(PathBuf),
     /// A drag's preview solve (`assembly.solve`), for this assembly.
     DragSolve(String),
     /// A drag's move, written (`assembly.move`).
@@ -256,6 +262,10 @@ pub struct Workspace {
     /// What the disk cache held when last asked (`cache.stats`), for the
     /// Preferences window.
     pub cache: Option<Value>,
+    /// File > Import STEP… or Update import…, while open.
+    pub import: Option<crate::core::step::Import>,
+    /// File > Export STEP…, while open.
+    pub export: Option<crate::core::step::Export>,
     /// The instance being dragged, if any.
     pub drag: Option<Drag>,
     /// Tests only: notifications are dropped as they arrive, as if lost,
@@ -340,6 +350,8 @@ impl Workspace {
             doctor: None,
             interference: None,
             cache: None,
+            import: None,
+            export: None,
             drag: None,
             deaf: false,
             drag_note: None,
@@ -532,6 +544,56 @@ impl Workspace {
             expected_revision: revision,
         };
         self.send(req, Pending::DragMove(d.part));
+    }
+
+    /// Asks what importing the open import's file would do: `import` as
+    /// a dry run, an update's when it replaces a file the project holds.
+    pub fn plan_import(&mut self) {
+        let Some(i) = self.import.as_mut() else {
+            return;
+        };
+        let path = i.path.trim().to_owned();
+        if path.is_empty() {
+            return;
+        }
+        i.waiting = true;
+        i.error = None;
+        i.done = None;
+        let req = import_request(&path, i.update.clone(), true);
+        self.send(req, Pending::ImportPlan(path));
+    }
+
+    /// Imports the open import's file, as its plan said: the same
+    /// `import` an agent sends, one logged, undoable change.
+    pub fn run_import(&mut self) {
+        let Some(i) = self.import.as_mut() else {
+            return;
+        };
+        let path = i.path.trim().to_owned();
+        i.waiting = true;
+        i.error = None;
+        let req = import_request(&path, i.update.clone(), false);
+        self.send(req, Pending::Import(path));
+    }
+
+    /// Exports the open export's part, writing the bytes where it says.
+    pub fn run_export(&mut self) {
+        let Some(e) = self.export.as_mut() else {
+            return;
+        };
+        let path = absolute(e.path.trim());
+        e.waiting = true;
+        e.error = None;
+        e.done = None;
+        let req = Request::Export {
+            part: e.part.clone(),
+            rev: None,
+            schema: Some(e.schema.clone()),
+            unit: Some(e.unit.clone()),
+            time_stamp: None,
+            file_name: path.file_name().map(|n| n.to_string_lossy().into_owned()),
+        };
+        self.send(req, Pending::Export(path));
     }
 
     /// Asks what the disk cache holds.
@@ -1495,6 +1557,48 @@ impl Workspace {
                 self.fail(e);
             }
             (Pending::Cache, Ok(a)) => self.cache = Some(a.result),
+            // Only the dialog for that file takes an answer: one opened
+            // since asks again.
+            (Pending::ImportPlan(path), a) => {
+                let Some(i) = self.import.as_mut().filter(|i| i.path.trim() == path) else {
+                    return;
+                };
+                i.waiting = false;
+                match a {
+                    Ok(a) => i.plan = Some((path, crate::core::step::Plan::from_answer(&a.result))),
+                    Err(e) => i.error = Some(e),
+                }
+            }
+            (Pending::Import(path), a) => {
+                let Some(i) = self.import.as_mut().filter(|i| i.path.trim() == path) else {
+                    return;
+                };
+                i.waiting = false;
+                match a {
+                    Ok(a) => {
+                        i.done = Some(crate::core::step::Plan::from_answer(&a.result));
+                        i.plan = None;
+                    }
+                    Err(e) => i.error = Some(e),
+                }
+            }
+            (Pending::Export(path), a) => {
+                let Some(e) = self.export.as_mut() else {
+                    return;
+                };
+                e.waiting = false;
+                let written = a.and_then(|a| {
+                    let bytes = a.binary.ok_or_else(|| {
+                        Error::new(Code::Internal, "the export came without its bytes")
+                    })?;
+                    ryucad::doc::project::write_atomic(&path, &bytes)?;
+                    Ok(bytes.len())
+                });
+                match written {
+                    Ok(n) => e.done = Some((path.display().to_string(), n)),
+                    Err(err) => e.error = Some(err),
+                }
+            }
             (Pending::DragSolve(part), a) => {
                 let mut again = false;
                 if let Some(d) = self.drag.as_mut().filter(|d| d.part == part) {
@@ -1934,4 +2038,24 @@ impl Workspace {
     pub fn part(&self, id: &str) -> Option<&Part> {
         self.model.parts.get(id)
     }
+}
+
+/// An `import` of the file at `path`, replacing `update` when given; a
+/// dry run plans without writing.
+fn import_request(path: &str, update: Option<String>, dry_run: bool) -> Request {
+    Request::Import {
+        path: absolute(path).display().to_string(),
+        part: None,
+        into: None,
+        product: None,
+        dry_run,
+        expected_revision: None,
+        update,
+    }
+}
+
+/// `path` made absolute against the app's own folder: the daemon reads a
+/// relative path against the project's.
+fn absolute(path: &str) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path))
 }
