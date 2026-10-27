@@ -61,7 +61,16 @@ pub(crate) fn merge(
                 continue;
             }
             let (keep, gone) = (fa.min(fb), fa.max(fb));
+            // The merged face goes on a surface holding both faces: the
+            // kept face's, the other's, or the plane two flat splines lie
+            // on; two splines that only overlap stay apart.
+            let Some(onto) = merged_surface(body, keep, gone) else {
+                continue;
+            };
             euler::kef(body, keys(), e).map_err(topo)?;
+            if let Some((surface, sense)) = onto {
+                euler::set_surface(body, keep, surface, sense).map_err(topo)?;
+            }
             let moved = sources.faces.remove(&gone).unwrap_or_default();
             sources.faces.entry(keep).or_default().extend(moved);
             sources.edges.remove(&e);
@@ -154,6 +163,42 @@ pub(crate) fn merge(
         sources.vertices.remove(&v);
     }
     fill(body)
+}
+
+/// Where the face `keep` goes when `gone` merges into it: `Some(None)` on
+/// its own surface, `Some(Some((surface, sense)))` onto another (with the
+/// sense that keeps its outward normal), `None` when no surface holds
+/// both.
+fn merged_surface(
+    body: &mut Body,
+    keep: FaceId,
+    gone: FaceId,
+) -> Option<Option<(crate::topo::SurfaceId, crate::topo::Sense)>> {
+    let (fk, fg) = (
+        body.face(keep).expect("live").clone(),
+        body.face(gone).expect("live").clone(),
+    );
+    if fk.surface == fg.surface {
+        return Some(None);
+    }
+    let (sk, sg) = (
+        body.surface(fk.surface).expect("live").clone(),
+        body.surface(fg.surface).expect("live").clone(),
+    );
+    match crate::intersect::covering(&sk, &sg) {
+        Some(true) => Some(None),
+        Some(false) => Some(Some((fg.surface, fg.sense))),
+        None => {
+            let plane = crate::intersect::common(&sk, &sg);
+            if !matches!(plane, Surface::Plane(_)) {
+                return None;
+            }
+            let same = crate::intersect::coincident(&sk, &plane)?;
+            let sense = if same { fk.sense } else { fk.sense.flipped() };
+            let id = body.add_surface(plane);
+            Some(Some((id, sense)))
+        }
+    }
 }
 
 /// Whether two faces lie on one surface with outward normals that agree.
