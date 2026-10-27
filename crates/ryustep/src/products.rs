@@ -43,6 +43,9 @@ pub struct Definition {
     pub product_id: Box<str>,
     pub name: Box<str>,
     pub description: Box<str>,
+    /// Its `PRODUCT_DEFINITION_FORMATION`'s identifier: the revision,
+    /// where the writer gave one (empty when unset).
+    pub revision: Box<str>,
     /// Its representations that hold B-rep or mapped items.
     pub shapes: Vec<Shape>,
     /// Where it uses other definitions.
@@ -175,11 +178,11 @@ impl Products {
             }
         }
         for (k, &d) in s.definitions.iter().enumerate() {
-            let (product_id, name, description) = match product_of(e, d) {
+            let (product_id, name, description, revision) = match product_of(e, d) {
                 Ok(names) => names,
                 Err(f) => {
                     p.faults.push(f);
-                    ("".into(), "".into(), "".into())
+                    ("".into(), "".into(), "".into(), "".into())
                 }
             };
             let mut shapes = Vec::new();
@@ -195,6 +198,7 @@ impl Products {
                 product_id,
                 name,
                 description,
+                revision,
                 shapes,
                 children: Vec::new(),
             });
@@ -270,16 +274,18 @@ impl Products {
     }
 }
 
-/// A product's identifier, name and description.
-type ProductNames = (Box<str>, Box<str>, Box<str>);
+/// A product's identifier, name and description, and its version's
+/// identifier.
+type ProductNames = (Box<str>, Box<str>, Box<str>, Box<str>);
 
-/// A definition's product identifier, name and description.
+/// A definition's product identifier, name and description, and its
+/// formation's identifier.
 fn product_of(e: &Entities, d: Id) -> Result<ProductNames, ImportError> {
     let Entity::Definition { formation, .. } = e.get(d, d)? else {
         unreachable!("a definition")
     };
-    let product = match e.get(d, *formation)? {
-        Entity::Formation { product } => *product,
+    let (revision, product) = match e.get(d, *formation)? {
+        Entity::Formation { id, product } => (id.clone(), *product),
         _ => {
             return Err(ImportError::WrongEntity {
                 instance: *formation,
@@ -292,7 +298,7 @@ fn product_of(e: &Entities, d: Id) -> Result<ProductNames, ImportError> {
             id,
             name,
             description,
-        } => Ok((id.clone(), name.clone(), description.clone())),
+        } => Ok((id.clone(), name.clone(), description.clone(), revision)),
         _ => Err(ImportError::WrongEntity {
             instance: product,
             expected: "a PRODUCT",

@@ -24,23 +24,28 @@ use ryukei::heal::seamed;
 use ryukei::name::Name;
 use ryukei::topo::Body;
 
-/// A product to write: its identifier and name, its bodies, and where
-/// it uses other products.
+/// A product to write: its identifier, name and description, its
+/// revision (the `PRODUCT_DEFINITION_FORMATION`'s identifier; empty for
+/// none), its bodies, and where it uses other products.
 #[derive(Clone, Debug, Default)]
 pub struct Product {
     pub id: String,
     pub name: String,
+    pub description: String,
+    pub revision: String,
     pub bodies: Vec<Body>,
     pub children: Vec<Child>,
 }
 
 /// One use of a product in another, placed by a rigid motion of its
-/// frame into its parent's.
-#[derive(Clone, Copy, Debug)]
+/// frame into its parent's. `id` is the `NEXT_ASSEMBLY_USAGE_OCCURRENCE`'s
+/// identifier; empty, it is the use's place among its parent's, from 1.
+#[derive(Clone, Debug)]
 pub struct Child {
     /// Index into the model's products.
     pub product: usize,
     pub place: Rigid,
+    pub id: String,
 }
 
 /// What to write.
@@ -222,11 +227,11 @@ pub fn write(model: &WriteModel, opts: &WriteOptions) -> Result<Vec<u8>, WriteEr
     for (k, p) in model.products.iter().enumerate() {
         let product = out.add(
             "PRODUCT",
-            vec![s(&p.id), s(&p.name), s(""), refs([cx.product])],
+            vec![s(&p.id), s(&p.name), s(&p.description), refs([cx.product])],
         );
         let formation = out.add(
             "PRODUCT_DEFINITION_FORMATION",
-            vec![s(""), s(""), r(product)],
+            vec![s(&p.revision), s(""), r(product)],
         );
         let definition = out.add(
             "PRODUCT_DEFINITION",
@@ -294,10 +299,14 @@ pub fn write(model: &WriteModel, opts: &WriteOptions) -> Result<Vec<u8>, WriteEr
         for (n, c) in p.children.iter().enumerate() {
             let (parent_def, parent_rep, _, ref axes) = defs[k];
             let (child_def, child_rep, child_origin, _) = defs[c.product];
+            let id = match c.id.as_str() {
+                "" => format!("{}", n + 1),
+                id => id.to_owned(),
+            };
             let usage = out.add(
                 "NEXT_ASSEMBLY_USAGE_OCCURRENCE",
                 vec![
-                    s(&format!("{}", n + 1)),
+                    s(&id),
                     s(""),
                     s(""),
                     r(parent_def),

@@ -68,9 +68,12 @@ pub(super) fn simple(id: Id, name: &str, params: &[Param]) -> Option<Result<Enti
 /// subtype with `make_or_buy` after it.
 fn formation(id: Id, params: &[Param], count: usize) -> Result<Entity, ImportError> {
     let mut a = Args::new(id, params, count)?;
+    let formation_id = a.string()?;
     a.skip();
-    a.skip();
-    Ok(Entity::Formation { product: a.id()? })
+    Ok(Entity::Formation {
+        id: formation_id,
+        product: a.id()?,
+    })
 }
 
 /// `PRODUCT_DEFINITION(id, description, formation, frame_of_reference)`,
@@ -118,7 +121,13 @@ mod tests {
                 formation: 6
             }
         );
-        assert_eq!(get(6), Entity::Formation { product: 7 });
+        assert_eq!(
+            get(6),
+            Entity::Formation {
+                id: "".into(),
+                product: 7
+            }
+        );
         assert_eq!(
             get(7),
             Entity::Product {
@@ -127,7 +136,13 @@ mod tests {
                 description: "".into()
             }
         );
-        assert_eq!(get(11), Entity::Formation { product: 7 });
+        assert_eq!(
+            get(11),
+            Entity::Formation {
+                id: "".into(),
+                product: 7
+            }
+        );
         assert_eq!(
             get(12),
             Entity::Usage {

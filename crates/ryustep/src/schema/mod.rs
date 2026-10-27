@@ -214,8 +214,10 @@ pub enum Entity {
         description: Box<str>,
     },
     /// `PRODUCT_DEFINITION_FORMATION` (a version of a product), with or
-    /// without a specified source.
+    /// without a specified source: its identifier (a revision, where
+    /// writers give one) and its product.
     Formation {
+        id: Box<str>,
         product: Id,
     },
     /// `PRODUCT_DEFINITION` (a view of a version), with or without
