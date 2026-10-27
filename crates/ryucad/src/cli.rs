@@ -105,6 +105,28 @@ enum Command {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Write a part or an assembly as a STEP file: as the working files have it, as a
+    /// Git revision has it (--rev), or as a release (--rev label:<L>).
+    Export {
+        part: String,
+        /// The STEP file to write; its name goes in the file's header.
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+        /// ap242 (the default) or ap214.
+        #[arg(long)]
+        schema: Option<String>,
+        /// The length unit: mm (the default) or m.
+        #[arg(long)]
+        unit: Option<String>,
+        /// The header's time stamp; by default the commit's time when exporting a
+        /// commit, else now.
+        #[arg(long, value_name = "T")]
+        time_stamp: Option<String>,
+        /// Read the project as this Git revision has it (main, HEAD~2, a hash), or
+        /// label:<L> for the part's release L.
+        #[arg(long, value_name = "REV")]
+        rev: Option<String>,
+    },
     /// Rebuild one part, or all of them.
     Rebuild {
         part: Option<String>,
@@ -1738,6 +1760,21 @@ fn request(cmd: &Command) -> Option<Request> {
             expected_revision: expect.revision.clone(),
             update: update.clone(),
         },
+        Command::Export {
+            part,
+            out,
+            schema,
+            unit,
+            time_stamp,
+            rev,
+        } => Request::Export {
+            part: part.clone(),
+            rev: rev.clone(),
+            schema: schema.clone(),
+            unit: unit.clone(),
+            time_stamp: time_stamp.clone(),
+            file_name: out.file_name().map(|n| n.to_string_lossy().into_owned()),
+        },
         Command::Rebuild { part, rev } => Request::Rebuild {
             part: part.clone(),
             rev: rev.rev.clone(),
@@ -2171,6 +2208,13 @@ fn deliver(cmd: &Command, a: Answer) -> Result<Value> {
         return Ok(a.result);
     };
     let out = match cmd {
+        // A file another tool reads is never seen half written.
+        Command::Export { out, .. } => {
+            ryucad::doc::project::write_atomic(out, &bytes)?;
+            let mut result = a.result;
+            result["out"] = json!(out);
+            return Ok(result);
+        }
         Command::Mesh { out: Some(o), .. } | Command::Render { out: o, .. } => o,
         _ => {
             return Err(Error::new(

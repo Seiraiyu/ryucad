@@ -727,6 +727,32 @@ impl<'p> Rebuild<'p> {
     }
 }
 
+impl Rebuild<'_> {
+    /// `part` at `rev` as rebuilt, every part it places first: its files,
+    /// its rebuild, and for a release label how the label resolved.
+    pub fn node(&mut self, part: &Id, rev: &Rev) -> Result<(Part, PartResult, Option<Pin>)> {
+        let model = self.model(part, rev)?;
+        Ok(match rev {
+            Rev::Working => (
+                self.project.part(part)?.clone(),
+                self.store.results[part].1.clone(),
+                None,
+            ),
+            Rev::Label(l) => {
+                let at = (part.clone(), l.clone());
+                let Some(Ok(pinned)) = self.pins.get(&at) else {
+                    unreachable!("the model was found")
+                };
+                (
+                    pinned.part.clone(),
+                    self.store.pinned[&at].1.clone(),
+                    model.pin.clone(),
+                )
+            }
+        })
+    }
+}
+
 /// The model of `p` at `rev` from its rebuild.
 fn model_of(p: &Part, rev: &Rev, result: &PartResult) -> Model {
     if p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly) {
@@ -738,9 +764,17 @@ fn model_of(p: &Part, rev: &Rev, result: &PartResult) -> Model {
 
 /// Every release label `project`'s instances reach, at any depth, each
 /// looked up by `look` once: what [`Rebuild`] reads labels from.
-pub fn pins(project: &Project, mut look: impl FnMut(&Id, &str) -> Result<Pinned>) -> Pins {
+pub fn pins(project: &Project, look: impl FnMut(&Id, &str) -> Result<Pinned>) -> Pins {
+    pins_from(project, Vec::new(), look)
+}
+
+/// [`pins`], with the labels in `todo` too, and every label they reach.
+pub fn pins_from(
+    project: &Project,
+    mut todo: Vec<(Id, String)>,
+    mut look: impl FnMut(&Id, &str) -> Result<Pinned>,
+) -> Pins {
     let mut out = Pins::new();
-    let mut todo: Vec<(Id, String)> = Vec::new();
     let labels = |p: &Part| -> Vec<(Id, String)> {
         p.order()
             .iter()

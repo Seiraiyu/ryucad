@@ -350,6 +350,12 @@ impl Repo {
             .map_err(|e| not_found(e.to_string()))
     }
 
+    /// When the commit `rev` names was made: its committer's time, in
+    /// seconds since the Unix epoch.
+    pub fn commit_time(&self, rev: &str) -> Result<i64> {
+        Ok(self.commit(rev)?.time().map_err(git_error)?.seconds)
+    }
+
     /// The commit `rev` names and the project folder's tree in it (empty
     /// when the commit has no such folder), both in hex.
     pub fn locate(&self, rev: &str) -> Result<(String, String)> {

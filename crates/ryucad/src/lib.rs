@@ -24,6 +24,7 @@ pub mod doctor;
 pub mod drivers;
 pub mod endpoint;
 pub mod entity;
+pub mod export;
 pub mod git;
 pub mod graph;
 pub mod hole;
