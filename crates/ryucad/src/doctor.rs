@@ -1372,6 +1372,23 @@ fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<
                 });
             }
         }
+        "import_file_changed" => {
+            let path = i.files.last().expect("the imported file");
+            if let Some(writes) = crate::import::update_in_place(root, path)? {
+                let changes = writes
+                    .into_iter()
+                    .map(|(path, content)| Change { path, content })
+                    .collect();
+                out.push(Repair {
+                    id: id("import_update"),
+                    summary: format!(
+                        "take {path} as it is now, as `import --update` would: its import features read its BLAKE3, and the parts and instances made of it follow its products and usages"
+                    ),
+                    changes,
+                    params: Vec::new(),
+                });
+            }
+        }
         "import_unused" => out.push(Repair {
             id: id("delete"),
             summary: format!("delete {first}, which nothing reads (Git's history keeps it)"),
