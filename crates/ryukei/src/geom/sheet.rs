@@ -16,6 +16,13 @@ use super::{Extrusion, NurbsSurface, Pipe, Point3, Revolution, Surface, SurfaceE
 use crate::interval::Interval;
 use crate::math;
 
+// `nearest` is used by the sweep surface, from the next commit on.
+#[allow(dead_code)]
+mod nearest;
+pub(crate) use nearest::krawczyk2;
+#[allow(unused_imports)]
+pub(crate) use nearest::nearest;
+
 /// A surface over jets.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Sheet<'a> {
