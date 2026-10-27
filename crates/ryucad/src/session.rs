@@ -416,10 +416,22 @@ impl Session {
             return Ok(p.clone());
         }
         let mine = format!("parts/{part}/");
-        let files: Files = repo
-            .files(commit)?
+        let all = repo.files(commit)?;
+        // The imported files its import features name, with its own.
+        let named: std::collections::BTreeSet<String> = all
+            .iter()
+            .filter(|(path, _)| path.starts_with(&mine))
+            .filter_map(|(_, bytes)| serde_json::from_slice::<Value>(bytes).ok())
+            .filter(|v| v["type"] == "import")
+            .filter_map(|v| v["file"]["path"].as_str().map(str::to_owned))
+            .collect();
+        let files: Files = all
             .into_iter()
-            .filter(|(path, _)| path == crate::doc::project::MANIFEST || path.starts_with(&mine))
+            .filter(|(path, _)| {
+                path == crate::doc::project::MANIFEST
+                    || path.starts_with(&mine)
+                    || named.contains(path)
+            })
             .collect();
         let mut project = Project::load_from(self.root(), &files)?;
         let p = project.parts.remove(part).ok_or_else(|| {
