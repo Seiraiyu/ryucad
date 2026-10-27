@@ -9,5 +9,6 @@ pub mod platform;
 pub mod scene;
 pub mod smoke;
 pub mod start;
+pub mod step;
 pub mod style;
 pub mod view;
