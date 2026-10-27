@@ -19,20 +19,12 @@
 //!
 //! Prints a report (run with `--nocapture`).
 
-use rayon::prelude::*;
-use ryukei::blend::blend;
-use ryukei::boolean::boolean;
 use ryukei::geom::{Rigid, Vector3};
 use ryukei::mesh::{MeshParams, tessellate};
 use ryukei::name::OpKey;
-use ryukei::primitive;
 use ryukei::topo::Body;
 use ryukei_bench::occt;
-use ryukei_testkit::Lcg;
-use ryukei_testkit::blend_bytes::blend_case;
-use ryukei_testkit::boolean_bytes::boolean_case;
 use ryukei_testkit::mesh::volume_and_area;
-use ryukei_testkit::sweep_bytes::sweep;
 use ryustep::{Child, LengthUnit, Product, ReadOptions, WriteModel, WriteOptions, read, write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -144,48 +136,10 @@ fn corpus_agrees_with_occt() {
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
-/// The primitives and seeded sweeps, booleans and blends, as the
-/// determinism tests make them.
+/// The race's bodies (design 55's): the primitives, then the sweeps,
+/// booleans and blends seeds make (`ryukei_testkit::race`).
 fn seeded(seeds: u64) -> Vec<Body> {
-    let t = Rigid::rotation(Vector3::new(1.0, 2.0, 0.5).normalize().unwrap(), 0.7);
-    let k = OpKey(1);
-    let mut out = vec![
-        primitive::block(k, 1.0, 2.0, 3.0, &t).unwrap().0,
-        primitive::cylinder(k, 1.0, 2.0, &t).unwrap().0,
-        primitive::cone(k, 1.0, 2.0, &t).unwrap().0,
-        primitive::sphere(k, 1.0, &t).unwrap().0,
-        primitive::torus(k, 2.0, 0.5, &t).unwrap().0,
-    ];
-    let bytes = |seed: u64| {
-        let mut g = Lcg::new(seed);
-        (0..96)
-            .map(|_| (g.next_u64() >> 56) as u8)
-            .collect::<Vec<u8>>()
-    };
-    // Each seed's bodies made in parallel, kept in seed order.
-    let made: Vec<Vec<Body>> = (0..seeds)
-        .into_par_iter()
-        .map(|seed| {
-            let mut here = Vec::new();
-            if let Some((b, _)) = sweep(&bytes(seed)) {
-                here.push(b);
-            }
-            if let Some(case) = boolean_case(&bytes(seed))
-                && let Ok((b, _)) = boolean(OpKey(9), case.op, &case.target, &case.tools())
-            {
-                here.push(b);
-            }
-            if let Some(case) = blend_case(&bytes(seed))
-                && let Ok((b, _)) = blend(OpKey(9), &case.body, &case.blends)
-            {
-                here.push(b);
-            }
-            here
-        })
-        .collect();
-    out.extend(made.into_iter().flatten());
-    out.retain(|b| b.faces().next().is_some());
-    out
+    ryukei_testkit::race::bodies(seeds)
 }
 
 fn part(id: &str, bodies: Vec<Body>) -> Product {
