@@ -7,12 +7,14 @@
 //! - [`nurbs`]: seeded random NURBS curves and surfaces.
 //! - [`mesh`]: a NURBS-topped block, and measures of meshes.
 //! - [`sweep_bytes`]: sweeps from bytes, for fuzzing and its regressions.
+//! - [`along_bytes`]: sweeps along paths and lofts from bytes, likewise.
 //! - [`boolean_bytes`]: booleans from bytes, for fuzzing and its
 //!   regressions.
 //! - [`blend_bytes`]: blends from bytes, for fuzzing and its regressions.
 //! - [`heal_bytes`]: shapes with a file's faults from bytes, for fuzzing
 //!   healing and its regressions.
 
+pub mod along_bytes;
 pub mod blend_bytes;
 pub mod boolean_bytes;
 pub mod euler_script;

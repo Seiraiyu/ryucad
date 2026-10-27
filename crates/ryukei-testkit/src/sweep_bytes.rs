@@ -40,7 +40,7 @@ fn arc(key: u128, c: Point2, r: f64, a0: f64, a1: f64) -> Option<Segment> {
 /// One loop from bytes, keyed from `key`, and its smallest dimension, or
 /// `None` when its own geometry can't be built (a degenerate line or
 /// circle).
-fn shape(b: &mut Bytes, key: u128) -> Option<(Loop, f64)> {
+pub(crate) fn shape(b: &mut Bytes, key: u128) -> Option<(Loop, f64)> {
     let c = Point2::new(b.range(-3.0, 3.0), b.range(-3.0, 3.0));
     let s = b.range(0.01, 2.0);
     let mut small = s;
