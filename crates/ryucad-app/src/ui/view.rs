@@ -37,6 +37,11 @@ pub struct View {
     pub hover: Option<Hit>,
     /// Where the viewport was last drawn, in points.
     pub rect: egui::Rect,
+    /// The viewport was under the pointer when last drawn.
+    hovered: bool,
+    /// Tab presses taken from the frame's input over the viewport, by
+    /// their modifiers ([`View::take_tabs`]).
+    tabs: Vec<egui::Modifiers>,
     picker: Option<Picker>,
     /// The model generation and whether sketches were shown, when the
     /// picker was made.
@@ -111,6 +116,41 @@ pub fn describe(ws: &Workspace, hit: &Hit) -> String {
 }
 
 impl View {
+    /// Takes Tab presses over the viewport out of a frame's input before
+    /// egui sees them, so they hide and show (in [`View::show`]) rather
+    /// than move keyboard focus through the menu bar (issue #136). A text
+    /// field being typed in keeps its keys.
+    pub fn take_tabs(&mut self, ctx: &egui::Context, events: &mut Vec<egui::Event>) {
+        if !self.hovered || ctx.text_edit_focused() {
+            return;
+        }
+        let rect = self.rect;
+        let mut at = ctx.input(|i| i.pointer.latest_pos());
+        let tabs = &mut self.tabs;
+        events.retain(|e| match e {
+            egui::Event::PointerMoved(p) => {
+                at = Some(*p);
+                true
+            }
+            egui::Event::PointerGone => {
+                at = None;
+                true
+            }
+            egui::Event::Key {
+                key: egui::Key::Tab,
+                pressed,
+                modifiers,
+                ..
+            } if at.is_some_and(|p| rect.contains(p)) => {
+                if *pressed {
+                    tabs.push(*modifiers);
+                }
+                false
+            }
+            _ => true,
+        });
+    }
+
     pub fn new() -> View {
         let camera = view::frame(
             [-0.05; 3],
@@ -127,6 +167,8 @@ impl View {
             marked: Vec::new(),
             hover: None,
             rect: egui::Rect::NOTHING,
+            hovered: false,
+            tabs: Vec::new(),
             picker: None,
             picked_at: (0, true),
             reference: None,
@@ -718,21 +760,15 @@ impl View {
         }
         // Visibility, with SolidWorks' keys: Tab hides the occurrence (or
         // solid) under the mouse, Shift+Tab shows those hidden under it,
-        // Ctrl+Shift+Tab shows everything.
+        // Ctrl+Shift+Tab shows everything. The keys come from `take_tabs`,
+        // which took them before egui could move focus with them.
         // Typing in a field keeps its keys.
+        let tabs = std::mem::take(&mut self.tabs);
+        self.hovered = response.hovered();
         if response.hovered() && !ui.ctx().text_edit_focused() {
-            let (all, show, hide) = ui.input_mut(|i| {
-                let both = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
-                (
-                    i.consume_key(both, egui::Key::Tab),
-                    i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab),
-                    i.consume_key(egui::Modifiers::NONE, egui::Key::Tab),
-                )
-            });
-            if all || show || hide {
-                // egui would move keyboard focus to the next control.
-                ui.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
-            }
+            let all = tabs.iter().any(|m| m.shift && m.command && !m.alt);
+            let show = tabs.iter().any(|m| m.shift_only());
+            let hide = tabs.iter().any(|m| !m.any());
             let at = response.hover_pos().map(local);
             if all {
                 ws.set_visibility(Vec::new(), Vec::new(), Vec::new(), true);
