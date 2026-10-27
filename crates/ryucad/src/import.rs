@@ -1569,6 +1569,57 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_label_places_the_imported_part_as_its_commit_had_the_file() {
+        use crate::git::tests::git;
+        use crate::server::tests::call;
+        let bytes = occt("box_ap214.stp");
+        let (dir, mut s) = with_import(&bytes, Some(("part 2", "part 2")));
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "p", "properties": {"number": "100"}}),
+        )
+        .unwrap();
+        call(&mut s, "release.propose", json!({"part": "p"})).unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "p A"]);
+        let released = rebuild(&mut s)["solids"][0]["hash"].clone();
+        // A taller box since, the feature written against it.
+        let text = String::from_utf8(bytes).unwrap();
+        let taller = text
+            .replace(",30.))", ",40.))")
+            .replace("(30.,0.)", "(40.,0.)");
+        std::fs::write(root.join("imports/f.step"), &taller).unwrap();
+        let path = root.join("parts/p/features/i.json");
+        let (old, new) = (
+            ImportFile::new(text.into_bytes()).blake3,
+            ImportFile::new(taller.into_bytes()).blake3,
+        );
+        let feature = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, feature.replace(&old, &new)).unwrap();
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "frame", "kind": "assembly"}),
+        )
+        .unwrap();
+        crate::assembly::tests::place_in(root, "frame", "a", "p", json!({"label": "A"}), [0.0; 3]);
+        s.refresh().unwrap();
+        let r = call(&mut s, "rebuild", json!({"part": "frame"})).unwrap();
+        assert_eq!(r["parts"][0]["failed"], 0, "{r}");
+        let m = s
+            .model(
+                &Id::parse("frame", "part").unwrap(),
+                &crate::doc::assembly::Rev::Working,
+            )
+            .unwrap();
+        assert_eq!(json!(m.occurrences[0].solids[0].built.hash), released);
+        assert_ne!(rebuild(&mut s)["solids"][0]["hash"], released);
+    }
+
+    #[test]
     fn failures_say_why_and_where() {
         let e = ImportError::DanglingReference {
             instance: 4,
