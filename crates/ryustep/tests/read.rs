@@ -7,7 +7,7 @@ use ryukei::check::check;
 use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::name::OpKey;
 use ryukei::topo::Body;
-use ryustep::{ImportError, Model, ReadOptions, read};
+use ryustep::{ImportError, Model, ReadOptions, open, read};
 
 fn file(name: &str) -> Vec<u8> {
     let path = format!("{}/tests/data/occt/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -231,4 +231,37 @@ fn representations_holding_one_solid_read_alike() {
     assert_eq!(dump(0), dump(1));
     assert_eq!(m.bodies[0].instances, m.bodies[1].instances);
     assert_eq!(m.bodies[1].representation, 900000);
+}
+
+#[test]
+fn bodies_opened_one_at_a_time_read_as_read_reads_them() {
+    for name in ["assembly.stp", "plate_hole.stp", "spline_revolve.stp"] {
+        let bytes = file(name);
+        let m = read(&bytes, &opts()).unwrap();
+        let o = open(&bytes).unwrap();
+        assert_eq!(o.products, m.products, "{name}");
+        assert_eq!(o.held.len(), m.bodies.len(), "{name}");
+        for (k, b) in m.bodies.iter().enumerate() {
+            let one = o.body(k, &opts());
+            assert_eq!(one.representation, b.representation, "{name}");
+            assert_eq!(one.definition, b.definition, "{name}");
+            assert_eq!(one.items, b.items, "{name}");
+            assert_eq!(one.instances, b.instances, "{name}");
+            let dump = |i: &ryustep::Imported| i.result.as_ref().unwrap().0.dump();
+            assert_eq!(dump(&one), dump(b), "{name}");
+        }
+    }
+    // Another key names everything differently (and so lays the body
+    // out in another order: healing builds in the order of the names),
+    // and builds the same shape.
+    let o = open(&file("plate_hole.stp")).unwrap();
+    let other = ReadOptions {
+        key: OpKey(8),
+        ..opts()
+    };
+    let (a, b) = (o.body(0, &opts()), o.body(0, &other));
+    let (a, b) = (&a.result.unwrap().0, &b.result.unwrap().0);
+    assert_eq!(a.counts(), b.counts());
+    assert!(near(volume(a), volume(b)));
+    assert_ne!(a.dump(), b.dump());
 }

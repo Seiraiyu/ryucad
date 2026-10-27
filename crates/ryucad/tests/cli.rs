@@ -972,6 +972,7 @@ fn every_protocol_method_has_a_command() {
         ("assembly.tree", &["assembly", "tree"]),
         ("assembly.solve", &["assembly", "solve"]),
         ("interference", &["interference"]),
+        ("import", &["import"]),
         ("rebuild", &["rebuild"]),
         ("inspect", &["inspect"]),
         ("check_format", &["check-format"]),
@@ -3052,4 +3053,44 @@ fn mates_from_the_cli() {
     assert_eq!(one["kind"], "face");
     p.fails(&["feature", "delete", "frame", "pin"], "has_dependents", 1);
     p.ok(&["check", "frame"]);
+}
+
+#[test]
+fn imports_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    // Beside both projects, named as an agent would from inside one.
+    let occt = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data/occt");
+    let beside = p.direct.parent().unwrap();
+    fs::copy(occt.join("box_ap214.stp"), beside.join("box.stp")).unwrap();
+    fs::write(beside.join("junk.step"), "not step").unwrap();
+    let dry = p.ok(&["import", "../box.stp", "--dry-run"]);
+    assert_eq!(dry["dry_run"], true);
+    assert_eq!(dry["parts"][0]["features"][0]["ok"], true, "{dry}");
+    assert!(!p.direct.join("imports").exists());
+    let made = p.ok(&["import", "../box.stp", "--part", "block"]);
+    assert_eq!(made["file"]["path"], "imports/box.step");
+    assert_eq!(made["parts"][0]["part"], "block");
+    let built = p.ok(&["rebuild", "block"]);
+    assert_eq!(built["parts"][0]["features"][0]["type"], "import");
+    assert_eq!(built["parts"][0]["features"][0]["counts"]["faces"], 6);
+    // A fillet on an imported edge, by its stable name.
+    let body = p.ok(&["inspect", "block", "body"]);
+    let edge = body["bodies"][0]["edges"][0]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    p.ok(&[
+        "feature",
+        "add",
+        "block",
+        "fillet",
+        "--radius",
+        "1",
+        "--edge",
+        &format!("block/body/{edge}"),
+    ]);
+    p.ok(&["check", "block"]);
+    p.fails(&["import", "../junk.step"], "step_unreadable", 1);
+    p.fails(&["feature", "add", "block", "import"], "invalid_param", 1);
 }

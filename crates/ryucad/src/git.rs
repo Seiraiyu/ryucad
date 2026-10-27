@@ -32,7 +32,8 @@ pub struct Revision {
     /// files. Empty when the commit has no such folder.
     pub tree: String,
     /// The manifest, its Git attributes, ryupdm's settings and everything
-    /// under `parts/` and `releases/`, by path relative to the project.
+    /// under `parts/`, `releases/` and `imports/`, by path relative to the
+    /// project.
     pub files: Files,
 }
 
@@ -209,7 +210,7 @@ impl Repo {
 
     /// The project's files in a commit's tree, by path relative to the
     /// project: the files at its root a session tracks and everything
-    /// under `parts/` and `releases/`.
+    /// under `parts/`, `releases/` and `imports/`.
     fn project_blobs(&self, tree: &gix::Tree<'_>) -> Result<BTreeMap<String, gix::ObjectId>> {
         let mut out = BTreeMap::new();
         for name in crate::doc::project::ROOT_FILES {
@@ -217,7 +218,11 @@ impl Repo {
                 out.insert(name.to_owned(), id);
             }
         }
-        for dir in ["parts", crate::doc::project::RELEASES] {
+        for dir in [
+            "parts",
+            crate::doc::project::RELEASES,
+            crate::doc::project::IMPORTS,
+        ] {
             if let Some(id) = self.entry(tree, &format!("{}{dir}", self.prefix))? {
                 self.blobs(id, &format!("{dir}/"), &mut out)?;
             }
@@ -589,8 +594,8 @@ impl Repo {
 
 /// Whether `rel` (relative to a project) is one of the files its state
 /// depends on, as `session::files` lists them: the files at its root,
-/// files two and three levels under `parts/`, and files two levels under
-/// `releases/`.
+/// files two and three levels under `parts/`, files two levels under
+/// `releases/`, and files under `imports/`.
 fn project_file(rel: &str) -> bool {
     if crate::doc::project::ROOT_FILES.contains(&rel) {
         return true;
@@ -599,6 +604,7 @@ fn project_file(rel: &str) -> bool {
     match parts.next() {
         Some("parts") => matches!(parts.count(), 2 | 3),
         Some(crate::doc::project::RELEASES) => parts.count() == 2,
+        Some(crate::doc::project::IMPORTS) => parts.count() == 1,
         _ => false,
     }
 }

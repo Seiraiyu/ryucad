@@ -73,18 +73,41 @@ pub const HOOKS: [&str; 2] = ["pre-merge-commit", "pre-commit"];
 /// The line that marks a hook as ryucad's.
 const HOOK_HEADER: &str = "# ryucad: refuse a merge commit while a ryucad project's merge is unresolved (`ryucad git install`)";
 
+/// The line a project needs once it imports STEP files: Git must keep
+/// their bytes exactly (no line endings converted, no line merges, no text
+/// diffs), since import features name them by their hash.
+pub const IMPORT_LINE: &str = "imports/** binary";
+
 /// The lines of [`LINES`] that `text` doesn't have.
 pub fn missing(text: &str) -> Vec<&'static str> {
+    missing_for(text, false)
+}
+
+/// The lines of [`LINES`], and with `imports` [`IMPORT_LINE`], that
+/// `text` doesn't have.
+pub fn missing_for(text: &str, imports: bool) -> Vec<&'static str> {
     LINES
         .into_iter()
+        .chain(imports.then_some(IMPORT_LINE))
         .filter(|l| !text.lines().any(|t| t.trim() == *l))
         .collect()
+}
+
+/// Whether the project at `root` holds a file under `imports/`.
+pub fn has_imports(root: &Path) -> bool {
+    std::fs::read_dir(root.join(crate::doc::project::IMPORTS))
+        .is_ok_and(|mut d| d.any(|e| e.is_ok_and(|e| e.path().is_file())))
 }
 
 /// `text` (the attributes file as it is, or empty) with every missing line
 /// added at its end, and the lines an earlier ryucad wrote taken out.
 pub fn with_lines(text: &str) -> String {
-    let lines = missing(text);
+    with_lines_for(text, false)
+}
+
+/// [`with_lines`], with [`IMPORT_LINE`] too when `imports`.
+pub fn with_lines_for(text: &str, imports: bool) -> String {
+    let lines = missing_for(text, imports);
     if lines.is_empty() {
         return text.to_owned();
     }
@@ -107,8 +130,9 @@ pub fn with_lines(text: &str) -> String {
     out
 }
 
-/// Writes the project's attributes file with ryucad's lines, keeping
-/// whatever else it holds. Writes nothing when they are all there.
+/// Writes the project's attributes file with ryucad's lines (and the
+/// imports' when it has any), keeping whatever else it holds. Writes
+/// nothing when they are all there.
 pub fn write_attributes(root: &Path) -> Result<()> {
     let path = root.join(ATTRIBUTES);
     let text = match std::fs::read_to_string(&path) {
@@ -116,7 +140,7 @@ pub fn write_attributes(root: &Path) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(Error::io(&path, &e)),
     };
-    let new = with_lines(&text);
+    let new = with_lines_for(&text, has_imports(root));
     if new != text {
         crate::doc::project::write_atomic(&path, new)?;
     }
@@ -363,6 +387,29 @@ mod tests {
         let one = with_lines("  ryucad.json merge=ryucad diff=ryucad text eol=lf  \n");
         assert_eq!(missing(&one), Vec::<&str>::new());
         assert_eq!(one.matches("ryucad.json").count(), 1);
+        // A project that imports also keeps its STEP files' bytes.
+        assert_eq!(missing_for(&ours, true), [IMPORT_LINE]);
+        let with = with_lines_for(&ours, true);
+        assert!(with.ends_with("imports/** binary\n"), "{with}");
+        assert!(missing_for(&with, true).is_empty());
+        assert_eq!(with_lines_for(&with, true), with);
+    }
+
+    #[test]
+    fn imported_files_are_written_down_once_there_are_any() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_attributes(root).unwrap();
+        let text = std::fs::read_to_string(root.join(ATTRIBUTES)).unwrap();
+        assert!(!text.contains(IMPORT_LINE));
+        assert!(!has_imports(root));
+        std::fs::create_dir_all(root.join("imports")).unwrap();
+        assert!(!has_imports(root));
+        std::fs::write(root.join("imports/a.step"), "x").unwrap();
+        assert!(has_imports(root));
+        write_attributes(root).unwrap();
+        let text = std::fs::read_to_string(root.join(ATTRIBUTES)).unwrap();
+        assert_eq!(text.matches(IMPORT_LINE).count(), 1);
     }
 
     #[test]

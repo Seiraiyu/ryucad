@@ -52,6 +52,9 @@ pub struct Made {
     pub hash: String,
     /// What a join, cut or hole applied, for a pattern to apply again.
     pub applied: Option<Arc<Applied>>,
+    /// An import's report: its file, product and what healing did (see
+    /// [`crate::import::report`]).
+    pub import: Option<Arc<Value>>,
 }
 
 /// What a join, cut or hole applied to its targets: its own body, its
@@ -110,6 +113,7 @@ impl Made {
             solids,
             hash,
             applied: None,
+            import: None,
         }
     }
 }
@@ -413,6 +417,11 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         Feature::Extrude(_) | Feature::Revolve(_) | Feature::Hole(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} is built from its sketch", f.type_name()),
+        )
+        .with("feature", id)),
+        Feature::Import(_) => Err(Error::new(
+            Code::Internal,
+            format!("import {id} is built from its file"),
         )
         .with("feature", id)),
     }
@@ -754,7 +763,7 @@ fn build_primitive(part: &Id, id: &Id, f: &Primitive) -> Result<Built> {
 }
 
 /// The names of a body's faces, edges and vertices.
-fn names(b: &Body) -> BTreeSet<Name> {
+pub(crate) fn names(b: &Body) -> BTreeSet<Name> {
     let faces = b.faces().map(EntityId::Face);
     let edges = b.edges().map(EntityId::Edge);
     let vertices = b.vertices().map(EntityId::Vertex);
@@ -1818,6 +1827,15 @@ fn rebuild_with(
             (build_blend(part, solids, id, f, before).map(solid), None)
         }
         Feature::Pattern(p) => (build_pattern(part, solids, id, p, before).map(solid), None),
+        Feature::Import(i) => {
+            let r = crate::import::build(part, id, i).map(|(b, report)| {
+                solid(Made {
+                    import: Some(Arc::new(report)),
+                    ..Made::new(vec![(id.clone(), Arc::new(b))])
+                })
+            });
+            (r, None)
+        }
         // Its part's model comes from outside the part: see
         // [`rebuild_part_in`].
         Feature::Instance(i) => {
@@ -1855,6 +1873,15 @@ fn input_hash(
 ) -> blake3::Hash {
     let reads = crate::graph::reads(solids, id, f);
     let mut h = hash_of(part, id, &f.to_json(), &reads, before);
+    // An import reads its file as it is, which its feature names only by
+    // the hash it was written against.
+    if let Some(i) = f.import() {
+        let mut x = blake3::Hasher::new();
+        x.update(h.as_bytes());
+        let now = part.imports.get(&i.file.path);
+        x.update(now.map_or("missing", |f| f.blake3.as_str()).as_bytes());
+        h = x.finalize();
+    }
     // A pattern reads its seeds' own bodies and places too.
     if !f.seeds().is_empty() {
         let mut x = blake3::Hasher::new();

@@ -64,6 +64,7 @@ jobs:
       - run: cargo test -p ryustep --release --test checks
       - run: cargo test -p ryucad --release --test bar -- --nocapture
       - run: cargo test -p ryucad --release --test assembly_bar -- --nocapture
+      - run: cargo test -p ryucad --release --test step
       - if: failure()
         name: the viewport as drawn, if it no longer matches its snapshot
         uses: actions/upload-artifact@v4

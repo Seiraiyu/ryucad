@@ -198,6 +198,7 @@ pub(crate) mod tests {
             features: features.into_iter().map(|(i, f)| (id(i), Ok(f))).collect(),
             uses: BTreeMap::<Id, BTreeSet<String>>::new(),
             acts: BTreeMap::new(),
+            imports: BTreeMap::new(),
             revision: String::new(),
         }
     }

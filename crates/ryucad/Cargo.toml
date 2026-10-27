@@ -20,6 +20,7 @@ ryucad-doc = { path = "../ryucad-doc" }
 ryukei = { path = "../ryukei" }
 ryumate = { path = "../ryumate" }
 ryupdm = { path = "../ryupdm" }
+ryustep = { path = "../ryustep" }
 ryusketch = { path = "../ryusketch" }
 serde = { version = "1", features = ["derive"] }
 # Correctly rounded float parsing: without it, a number read back can be

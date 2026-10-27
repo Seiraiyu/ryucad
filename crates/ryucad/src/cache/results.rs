@@ -4,7 +4,7 @@
 //!
 //! A body-making feature's entry is its [`Made`]: each solid's founder
 //! and [`Built`] (the body, the journal, the origins as JSON, the hash),
-//! the hash, and what it applied, if anything. A tool's entry is its own
+//! the hash, what it applied, if anything, and an import's report. A tool's entry is its own
 //! body's `Built`. Integers are little-endian, byte strings length-first.
 //! Anything that doesn't read back exactly is `None`: a miss.
 
@@ -133,6 +133,13 @@ pub fn encode_made(m: &Made) -> Vec<u8> {
             w.str(&a.hash);
         }
     }
+    match &m.import {
+        None => w.flag(false),
+        Some(v) => {
+            w.flag(true);
+            w.bytes(&serde_json::to_vec(v.as_ref()).expect("JSON values serialize"));
+        }
+    }
     w.0
 }
 
@@ -166,11 +173,17 @@ pub fn decode_made(bytes: &[u8]) -> Option<Made> {
     } else {
         None
     };
+    let import = if r.flag()? {
+        Some(Arc::new(serde_json::from_slice(r.bytes()?).ok()?))
+    } else {
+        None
+    };
     r.end()?;
     Some(Made {
         solids,
         hash,
         applied,
+        import,
     })
 }
 

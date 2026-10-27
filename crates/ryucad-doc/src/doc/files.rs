@@ -6,6 +6,7 @@ use super::assembly::Instance;
 use super::blend::{Chamfer, Fillet};
 use super::hole::Hole;
 use super::id::{Id, ProjectId};
+use super::import::Import;
 use super::mate::{InstancePattern, Mate};
 use super::pattern::Pattern;
 use super::reference::Reference;
@@ -31,9 +32,9 @@ pub const MANIFEST_FORMAT: u64 = 2;
 
 /// The newest feature format: 2 adds expressions, sketches and sweeps, 3
 /// operations on solids, 4 an assembly's instances, mates and instance
-/// patterns. A feature is written
+/// patterns, 5 imports. A feature is written
 /// at the lowest format that holds it, so one with only literals stays 1.
-pub const FEATURE_FORMAT: u64 = 4;
+pub const FEATURE_FORMAT: u64 = 5;
 
 pub const PROJECT_KIND: &str = "ryucad.project";
 pub const PART_KIND: &str = "ryucad.part";
@@ -104,6 +105,9 @@ pub enum PrimitiveType {
     Torus,
 }
 
+/// What a feature that always founds its own solid does with its body.
+static NEW: Combine = Combine::NEW;
+
 /// A feature, `parts/<part>/features/<id>.json`: its `type` says which.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Feature {
@@ -119,6 +123,7 @@ pub enum Feature {
     Instance(Instance),
     Mate(Box<Mate>),
     InstancePattern(Box<InstancePattern>),
+    Import(Import),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -438,12 +443,15 @@ pub fn manifest_format(v: &Value) -> u64 {
 }
 
 /// The lowest format that holds a feature's JSON, judged from the JSON
-/// alone, as [`Feature::format`] judges a loaded feature: instances, mates
-/// and instance patterns are new in format 4, operations on solids, booleans, fillets, chamfers,
+/// alone, as [`Feature::format`] judges a loaded feature: imports are new
+/// in format 5, instances, mates and instance patterns in format 4, operations on solids, booleans, fillets, chamfers,
 /// holes and patterns are new in format 3, sketches
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
+    if v.get("type").and_then(Value::as_str) == Some("import") {
+        return 5;
+    }
     if matches!(
         v.get("type").and_then(Value::as_str),
         Some("instance" | "mate" | "instance_pattern")
@@ -501,6 +509,7 @@ pub fn feature_acts(v: &Value) -> Acts {
     };
     let mut out = Acts::default();
     match v.get("type").and_then(Value::as_str) {
+        Some("import") => out.founds = true,
         Some("box" | "cylinder" | "cone" | "sphere" | "torus" | "extrude" | "revolve") => {
             if v.get("operation")
                 .is_none_or(|o| o.as_str().is_none_or(|o| o == "new"))
@@ -562,7 +571,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import"),
     )
     .with("type", s)
 }
@@ -583,6 +592,7 @@ impl Feature {
             Feature::Instance(_) => "instance",
             Feature::Mate(_) => "mate",
             Feature::InstancePattern(_) => "instance_pattern",
+            Feature::Import(_) => "import",
         }
     }
 
@@ -602,6 +612,7 @@ impl Feature {
             | Feature::Hole(_)
             | Feature::Pattern(_) => 3,
             Feature::Instance(_) | Feature::Mate(_) | Feature::InstancePattern(_) => 4,
+            Feature::Import(_) => 5,
         }
     }
 
@@ -619,6 +630,7 @@ impl Feature {
             Feature::Instance(i) => i.fields(),
             Feature::Mate(m) => m.fields(),
             Feature::InstancePattern(p) => p.fields(),
+            Feature::Import(i) => i.fields(),
         };
         v["format"] = json!(self.format());
         v["kind"] = json!(FEATURE_KIND);
@@ -644,6 +656,7 @@ impl Feature {
             "hole" => Feature::Hole(Hole::from_fields(&mut o, default, env)?),
             "pattern" => Feature::Pattern(Pattern::from_fields(&mut o, default, env)?),
             "instance" => Feature::Instance(Instance::from_fields(&mut o)?),
+            "import" => Feature::Import(Import::from_fields(&mut o)?),
             "mate" => Feature::Mate(Box::new(Mate::from_fields(&mut o, default, env)?)),
             "instance_pattern" => Feature::InstancePattern(Box::new(InstancePattern::from_fields(
                 &mut o, default, env,
@@ -672,6 +685,8 @@ impl Feature {
             Feature::Primitive(p) => Some(&p.combine),
             Feature::Extrude(e) => Some(&e.combine),
             Feature::Revolve(r) => Some(&r.combine),
+            // An import always founds its own solid.
+            Feature::Import(_) => Some(&NEW),
             Feature::Sketch(_)
             | Feature::Boolean(_)
             | Feature::Fillet(_)
@@ -765,6 +780,14 @@ impl Feature {
     pub fn boolean(&self) -> Option<&Boolean> {
         match self {
             Feature::Boolean(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// The import, if it is one.
+    pub fn import(&self) -> Option<&Import> {
+        match self {
+            Feature::Import(i) => Some(i),
             _ => None,
         }
     }
@@ -1184,7 +1207,7 @@ mod tests {
                 "/placement/origin/1",
             ),
             ("/extra", json!(1), Code::InvalidDocument, "/extra"),
-            ("/format", json!(5), Code::FormatTooNew, ""),
+            ("/format", json!(6), Code::FormatTooNew, ""),
             (
                 "/kind",
                 json!("ryucad.part"),
