@@ -282,6 +282,73 @@ impl Session {
         out.expect("asked")
     }
 
+    /// A session over the project's files with `writes` laid over them
+    /// (bytes, or `None` for a file deleted), starting from what this one
+    /// has built and learnt: what a write would leave, rebuilt without
+    /// writing anything.
+    pub(crate) fn proposed(&self, writes: &BTreeMap<String, Option<Vec<u8>>>) -> Result<Session> {
+        let mut files = self.snapshot();
+        for (path, bytes) in writes {
+            match bytes {
+                Some(b) => files.insert(path.clone(), b.clone()),
+                None => files.remove(path),
+            };
+        }
+        let mut s = Session::frozen(self, files)?;
+        // Its parts' results are this session's while their revisions
+        // are.
+        for (id, (key, r)) in &self.store.results {
+            if s.project
+                .parts
+                .get(id)
+                .is_some_and(|p| key.split('+').next() == Some(&p.revision))
+            {
+                s.store.results.insert(id.clone(), (key.clone(), r.clone()));
+            }
+        }
+        Ok(s)
+    }
+
+    /// Rebuilds those of `parts` that aren't assemblies side by side,
+    /// keeping each as [`Session::rebuilt`] would: an import of many parts
+    /// heals their bodies in parallel.
+    pub fn rebuild_parts(&mut self, parts: &[Id]) -> Result<()> {
+        use crate::doc::files::PartKind;
+        use rayon::prelude::*;
+        let todo: Vec<&Part> = parts
+            .iter()
+            .filter_map(|id| self.project.parts.get(id))
+            .filter(|p| !p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly))
+            .filter(|p| {
+                !self
+                    .store
+                    .results
+                    .get(&p.id)
+                    .is_some_and(|(k, _)| *k == p.revision)
+            })
+            .collect();
+        let empty = crate::rebuild::Cache::new();
+        let disk = self.store.disk.as_deref();
+        let built: Vec<(Id, PartResult, crate::rebuild::Cache)> = todo
+            .par_iter()
+            .map(|p| {
+                let cache = self.store.caches.get(&p.id).unwrap_or(&empty);
+                let children = crate::assembly::Children::new();
+                let (r, c) = crate::rebuild::rebuild_part_in(p, cache, &children, disk);
+                (p.id.clone(), r, c)
+            })
+            .collect();
+        let mut fresh = Vec::new();
+        for (id, r, c) in built {
+            let key = self.project.part(&id)?.revision.clone();
+            self.store.caches.insert(id.clone(), c);
+            self.store.results.insert(id.clone(), (key, r));
+            fresh.push(id);
+        }
+        self.keep_fresh(fresh);
+        Ok(())
+    }
+
     /// Runs `f` over an [`assembly::Rebuild`](crate::assembly::Rebuild)
     /// holding this session's results and caches, and keeps what it
     /// built: each part it rebuilt with its errors explained and its names
@@ -293,6 +360,13 @@ impl Session {
         let out = f(&mut r);
         let fresh = std::mem::take(&mut r.fresh);
         self.store = r.store;
+        self.keep_fresh(fresh);
+        out
+    }
+
+    /// Learns the names of the parts just rebuilt, and explains their
+    /// failures against these results.
+    fn keep_fresh(&mut self, fresh: Vec<Id>) {
         for id in fresh {
             let (key, result) = self.store.results.remove(&id).expect("rebuilt");
             self.learn(&id, &result);
@@ -311,7 +385,6 @@ impl Session {
                 result.features[i].1 = Err(e);
             }
         }
-        out
     }
 
     /// Every release label the project's instances reach, looked up.
