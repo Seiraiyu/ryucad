@@ -146,7 +146,11 @@ impl<P: Product> Default for Live<P> {
             next: 0,
             hub: Hub::default(),
             seen: P::Seen::default(),
-            log: crate::activity::Log::default(),
+            log: crate::activity::Log::with_budgets(
+                crate::activity::MAX_BYTES,
+                crate::activity::MAX_BULKY_BYTES,
+                P::BULKY,
+            ),
             poll_ms: 0,
         }
     }

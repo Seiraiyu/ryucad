@@ -4635,7 +4635,7 @@ pub(crate) fn diff(
                 let path = f["path"].as_str().unwrap_or_default().to_owned();
                 let (a, b) = (fa.get(&path), fb.get(&path));
                 f["products"] =
-                    crate::import::products_diff(&path, a.map(Vec::as_slice), b.map(Vec::as_slice));
+                    crate::import::products_diff(&path, a.map(|x| &x[..]), b.map(|x| &x[..]));
             }
         }
     }

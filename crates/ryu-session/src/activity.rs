@@ -2,6 +2,13 @@
 //! newest last, with who made it. For its own changes it keeps each
 //! touched file's content before and after, which is what undo restores.
 //! It lives in the daemon's memory only; Git is the durable history.
+//!
+//! Contents are shared, never copied: a snapshot holds the session's own
+//! bytes, and an undo's entry the entry it undoes. Each distinct content
+//! counts once against its budget: [`MAX_BYTES`] for the project's text
+//! files, [`MAX_BULKY_BYTES`] for those under the product's bulky folders
+//! ([`crate::Product::BULKY`]: ryucad's imported STEP files), so changing
+//! one large file never pushes every other change out.
 
 use crate::Product;
 use crate::live::Live;
@@ -10,16 +17,19 @@ use ryu_doc::error::{Code, Error, Result};
 use ryu_doc::source::write_atomic;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub use crate::fresh::Files;
+pub use crate::fresh::{Bytes, Files};
 
 /// The most entries kept.
 pub const MAX_ENTRIES: usize = 1000;
-/// The most file content kept, before and after together.
+/// The most file content kept, before and after together, outside the
+/// product's bulky folders.
 pub const MAX_BYTES: usize = 64 * 1024 * 1024;
+/// The most content kept of files in the product's bulky folders.
+pub const MAX_BULKY_BYTES: usize = 1 << 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -43,8 +53,8 @@ pub enum EntryKind {
 pub struct FileChange {
     /// Relative to the project root, with `/`.
     pub path: String,
-    pub before: Option<Vec<u8>>,
-    pub after: Option<Vec<u8>>,
+    pub before: Option<Bytes>,
+    pub after: Option<Bytes>,
 }
 
 impl FileChange {
@@ -56,8 +66,16 @@ impl FileChange {
         }
     }
 
-    fn size(&self) -> usize {
-        self.before.as_ref().map_or(0, Vec::len) + self.after.as_ref().map_or(0, Vec::len)
+    /// Its contents, and whether they are in one of `bulky`'s folders.
+    fn contents<'a>(
+        &'a self,
+        bulky: &'a [&'a str],
+    ) -> impl Iterator<Item = (&'a Bytes, bool)> + 'a {
+        let big = bulky.iter().any(|b| self.path.starts_with(b));
+        [&self.before, &self.after]
+            .into_iter()
+            .flatten()
+            .map(move |b| (b, big))
     }
 }
 
@@ -104,10 +122,6 @@ impl Entry {
             "files": files,
         })
     }
-
-    fn size(&self) -> usize {
-        self.files.iter().map(FileChange::size).sum()
-    }
 }
 
 /// The files that differ between two snapshots.
@@ -124,11 +138,26 @@ pub fn diff(before: &Files, after: &Files) -> Vec<FileChange> {
         .collect()
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Log {
     entries: VecDeque<Entry>,
     next: u64,
+    /// The budgets: [`MAX_BYTES`] and [`MAX_BULKY_BYTES`] but in tests.
+    budgets: (usize, usize),
+    /// The folders whose files count as bulky (`imports/`).
+    bulky: &'static [&'static str],
+    /// How many times the entries hold each distinct content, by its
+    /// address (held, it can't move or be freed).
+    held: BTreeMap<usize, usize>,
+    /// What the distinct contents come to: the project's, the bulky.
     bytes: usize,
+    bulky_bytes: usize,
+}
+
+impl Default for Log {
+    fn default() -> Log {
+        Log::with_budgets(MAX_BYTES, MAX_BULKY_BYTES, &[])
+    }
 }
 
 fn now_ms() -> u64 {
@@ -138,6 +167,20 @@ fn now_ms() -> u64 {
 }
 
 impl Log {
+    /// A log keeping at most `bytes` of the project's files' contents and
+    /// `bulky_bytes` of those in `bulky`'s folders (`imports/`).
+    pub fn with_budgets(bytes: usize, bulky_bytes: usize, bulky: &'static [&'static str]) -> Log {
+        Log {
+            entries: VecDeque::new(),
+            next: 0,
+            budgets: (bytes, bulky_bytes),
+            bulky,
+            held: BTreeMap::new(),
+            bytes: 0,
+            bulky_bytes: 0,
+        }
+    }
+
     /// Appends an entry and returns its sequence number. The oldest
     /// entries go when the log is over its limits.
     #[allow(clippy::too_many_arguments)]
@@ -164,14 +207,54 @@ impl Log {
             files,
             seen,
         };
-        self.bytes += e.size();
+        self.hold(&e, true);
         self.entries.push_back(e);
-        while self.entries.len() > MAX_ENTRIES || (self.bytes > MAX_BYTES && self.entries.len() > 1)
+        while self.entries.len() > MAX_ENTRIES
+            || ((self.bytes > self.budgets.0 || self.bulky_bytes > self.budgets.1)
+                && self.entries.len() > 1)
         {
             let old = self.entries.pop_front().expect("not empty");
-            self.bytes -= old.size();
+            self.hold(&old, false);
         }
         self.entries.back().expect("just pushed")
+    }
+
+    /// Counts `e`'s contents in (`add`) or out: each distinct content
+    /// once, however many entries hold it.
+    fn hold(&mut self, e: &Entry, add: bool) {
+        let bulky = self.bulky;
+        for (b, big) in e.files.iter().flat_map(|f| f.contents(bulky)) {
+            let key = b.as_ptr() as usize;
+            let change = if add {
+                let n = self.held.entry(key).or_insert(0);
+                *n += 1;
+                (*n == 1).then_some(b.len() as isize)
+            } else {
+                let Some(n) = self.held.get_mut(&key) else {
+                    continue;
+                };
+                *n -= 1;
+                let last = *n == 0;
+                if last {
+                    self.held.remove(&key);
+                }
+                last.then_some(-(b.len() as isize))
+            };
+            if let Some(d) = change {
+                let total = if big {
+                    &mut self.bulky_bytes
+                } else {
+                    &mut self.bytes
+                };
+                *total = total.wrapping_add_signed(d);
+            }
+        }
+    }
+
+    /// What the entries' distinct contents come to: the project's files'
+    /// and the bulky files'.
+    pub fn held_bytes(&self) -> (usize, usize) {
+        (self.bytes, self.bulky_bytes)
     }
 
     pub fn get(&self, seq: u64) -> Option<&Entry> {
@@ -379,11 +462,12 @@ pub fn undo<P: Product>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn files(pairs: &[(&str, &str)]) -> Files {
         pairs
             .iter()
-            .map(|(p, c)| (p.to_string(), c.as_bytes().to_vec()))
+            .map(|(p, c)| (p.to_string(), c.as_bytes().into()))
             .collect()
     }
 
@@ -424,7 +508,7 @@ mod tests {
         let big = FileChange {
             path: "x".into(),
             before: None,
-            after: Some(vec![0; MAX_BYTES + 1]),
+            after: Some(vec![0; MAX_BYTES + 1].into()),
         };
         log.append(
             EntryKind::Change,
@@ -436,5 +520,52 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(log.entries().count(), 1);
+    }
+
+    fn change(log: &mut Log, kind: EntryKind, files: Vec<FileChange>) -> u64 {
+        log.append(kind, Value::Null, "m", Value::Null, None, files, Vec::new())
+            .seq
+    }
+
+    #[test]
+    fn bulky_files_have_a_budget_of_their_own_and_count_once() {
+        let mut log = Log::with_budgets(100, 1000, &["imports/"]);
+        let small = FileChange {
+            path: "parts/p/features/f.json".into(),
+            before: None,
+            after: Some(b"{}".as_slice().into()),
+        };
+        let first = change(&mut log, EntryKind::Change, vec![small]);
+        // A re-import of a 400-byte file holds 800 bytes: past the
+        // project's budget, not the bulky files'.
+        let (old, new): (Bytes, Bytes) = (vec![1; 400].into(), vec![2; 400].into());
+        let update = FileChange {
+            path: "imports/big.step".into(),
+            before: Some(Arc::clone(&old)),
+            after: Some(Arc::clone(&new)),
+        };
+        change(&mut log, EntryKind::Change, vec![update.clone()]);
+        assert_eq!(log.entries().next().unwrap().seq, first, "kept");
+        assert_eq!(log.held_bytes(), (2, 800));
+        // Its undo holds the same contents the other way round: nothing
+        // more.
+        let undone = FileChange {
+            path: update.path.clone(),
+            before: update.after.clone(),
+            after: update.before.clone(),
+        };
+        change(&mut log, EntryKind::Undo, vec![undone]);
+        assert_eq!(log.held_bytes(), (2, 800));
+        // Past the bulky files' budget the oldest entries go: the change
+        // and its undo share their contents, so they go together.
+        let more = FileChange {
+            path: "imports/other.step".into(),
+            before: None,
+            after: Some(vec![3; 300].into()),
+        };
+        let last = change(&mut log, EntryKind::Change, vec![more]);
+        let left: Vec<u64> = log.entries().map(|e| e.seq).collect();
+        assert_eq!(left, [last]);
+        assert_eq!(log.held_bytes(), (0, 300));
     }
 }

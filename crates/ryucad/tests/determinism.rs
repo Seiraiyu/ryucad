@@ -1190,7 +1190,7 @@ fn merge_section(golden: &mut Golden) {
     // the sketch follows theirs' box by the face's new name.
     let files = |list: &[(&str, serde_json::Value)]| -> ryucad::activity::Files {
         list.iter()
-            .map(|(p, v)| ((*p).to_owned(), text(v)))
+            .map(|(p, v)| ((*p).to_owned(), text(v).into()))
             .collect()
     };
     let manifest = json!({"default_unit": "mm", "format": 1, "kind": "ryucad.project"});
@@ -1235,7 +1235,10 @@ fn merge_section(golden: &mut Golden) {
     ]);
     let mut working = theirs.clone();
     let m = ryucad::merge::merge(None, &boxed("5 mm"), &boxed("30 mm"));
-    working.insert("parts/p/features/box-2.json".into(), text(&m.to_json()));
+    working.insert(
+        "parts/p/features/box-2.json".into(),
+        text(&m.to_json()).into(),
+    );
     let c = &m.conflicts[""];
     let (r, changes) = ryucad::renumber::plan(
         root,
@@ -1260,7 +1263,9 @@ fn merge_section(golden: &mut Golden) {
 fn pdm_section(golden: &mut Golden) {
     use serde_json::json;
     let mut s = golden.section("pdm");
-    let text = |v: &serde_json::Value| ryucad::doc::canonical::to_string(v).into_bytes();
+    let text = |v: &serde_json::Value| -> ryucad::activity::Bytes {
+        ryucad::doc::canonical::to_string(v).into_bytes().into()
+    };
     let mut g = Lcg::new(0x7064_6d30);
     for _ in 0..64 {
         let unit = unit(&mut g);

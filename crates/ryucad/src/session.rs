@@ -253,7 +253,7 @@ impl Session {
         let mut files = self.snapshot();
         for (path, bytes) in writes {
             match bytes {
-                Some(b) => files.insert(path.clone(), b.clone()),
+                Some(b) => files.insert(path.clone(), b.as_slice().into()),
                 None => files.remove(path),
             };
         }
@@ -650,6 +650,14 @@ impl crate::doc::source::Source for Session {
             .fold(self.root().to_path_buf(), |p, s| p.join(s));
         Ok(self.stamps.bytes(&path).map(<[u8]>::to_vec))
     }
+
+    fn read_shared(&self, rel: &str) -> Result<Option<Arc<[u8]>>> {
+        let path = rel
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .fold(self.root().to_path_buf(), |p, s| p.join(s));
+        Ok(self.stamps.shared(&path))
+    }
 }
 
 /// The files a project's state depends on: the manifest, the attributes
@@ -739,6 +747,24 @@ mod tests {
             .primitive()
             .unwrap()
             .meters("radius")
+    }
+
+    #[test]
+    fn snapshots_and_dry_runs_share_what_they_dont_change() {
+        let bytes = crate::import::tests::occt("box_ap214.stp");
+        let (_dir, s) = crate::import::tests::with_import(&bytes, Some(("part 2", "part 2")));
+        let path = "imports/f.step";
+        let snap = s.snapshot();
+        assert!(Arc::ptr_eq(&snap[path], &s.snapshot()[path]), "not copied");
+        // A dry run over one changed feature file holds the very bytes.
+        let writes = BTreeMap::from([("parts/p/features/x.json".to_owned(), Some(b"{}".to_vec()))]);
+        let proposed = s.proposed(&writes).unwrap();
+        assert!(Arc::ptr_eq(&snap[path], &proposed.snapshot()[path]));
+        let file = &proposed.project().imports[path];
+        assert!(
+            Arc::ptr_eq(&snap[path], &file.bytes),
+            "loaded without a copy"
+        );
     }
 
     #[test]
@@ -942,7 +968,7 @@ mod tests {
         write_json(&feature_path(root, &id("p"), &id("a")), &sphere("5 mm")).unwrap();
         s.reload().unwrap();
         assert_eq!(
-            s.snapshot()["parts/p/features/a.json"],
+            s.snapshot()["parts/p/features/a.json"][..],
             fs::read(feature_path(root, &id("p"), &id("a"))).unwrap()
         );
         assert_eq!(s.snapshot(), crate::activity::snapshot(root).unwrap());
