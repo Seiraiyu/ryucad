@@ -264,3 +264,27 @@ fn caps_round_spline_poles() {
     let rest = run(BooleanOp::Subtract, &rev, &block, place);
     near(volume(&cap) + volume(&rest), volume(&rev));
 }
+
+/// A spline ball halved through both its poles: the plane meets the
+/// collapsed rows, where every crossing beside them is at the pole.
+#[test]
+fn a_spline_ball_halved_through_its_poles() {
+    let ball = nurbs(
+        primitive::sphere(OpKey(3), 1.0, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+    );
+    let block = primitive::block(OpKey(7), 2.0, 3.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let place = at(0.0, -1.5, -1.5);
+    let half = 2.0 / 3.0 * PI;
+    near(
+        volume(&run(BooleanOp::Intersect, &ball, &block, place)),
+        half,
+    );
+    near(
+        volume(&run(BooleanOp::Subtract, &ball, &block, place)),
+        half,
+    );
+}
