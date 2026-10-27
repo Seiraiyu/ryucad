@@ -577,6 +577,26 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         instances: Vec<String>,
     },
+    /// Imports a STEP file the daemon can read (absolute, or relative to
+    /// the project): stores it under `imports/` and makes a part of each
+    /// product's bodies (`part` names it when there is one), or with
+    /// `into` adds one product's bodies to a part. `dry_run` answers the
+    /// plan, writing nothing.
+    #[serde(rename = "import")]
+    Import {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        into: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        product: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
+        /// The project's revision, or with `into` that part's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     #[serde(rename = "rebuild")]
     Rebuild {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -949,6 +969,7 @@ impl Request {
                 | Request::PdmConfigure { .. }
                 | Request::PropsSet { .. }
                 | Request::ReleasePropose { dry_run: false, .. }
+                | Request::Import { dry_run: false, .. }
                 | Request::ReleaseObsolete { .. }
                 | Request::ReleaseSync { .. }
                 | Request::SketchEdit { .. }

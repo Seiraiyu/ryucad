@@ -343,6 +343,510 @@ fn failure(e: &ImportError) -> (String, Vec<u64>, Vec<Name>) {
     }
 }
 
+/// What `import` was asked to do.
+#[derive(Clone, Debug, Default)]
+pub struct Ask {
+    /// The file to import, as the daemon can read it: absolute, or
+    /// relative to the project's root.
+    pub path: String,
+    /// The part to make, when the file makes one.
+    pub part: Option<String>,
+    /// A part to add one product's bodies to, instead of making parts.
+    pub into: Option<String>,
+    /// With `into`, the product: its id, else its name.
+    pub product: Option<String>,
+    pub dry_run: bool,
+    /// The project's revision, or with `into` that part's.
+    pub expected: Option<String>,
+}
+
+/// One part an import makes or adds to: its ID, whether it is new, the
+/// product its bodies come from, and its import features.
+#[derive(Clone, Debug)]
+struct Planned {
+    part: Id,
+    new: bool,
+    /// The definition whose bodies these are; `None` for those no
+    /// product reaches.
+    definition: Option<usize>,
+    features: Vec<(Id, Import)>,
+    /// What its properties file gets, when the project uses PDM.
+    properties: BTreeMap<String, Value>,
+}
+
+/// A schema as files and people name it.
+pub fn schema_name(s: ryustep::schema::Schema) -> &'static str {
+    match s {
+        ryustep::schema::Schema::Ap203 => "AP203",
+        ryustep::schema::Schema::Ap214 => "AP214",
+        ryustep::schema::Schema::Ap242 => "AP242",
+    }
+}
+
+/// `<s>` as an ID: lower case, any run of other characters as one `-`,
+/// at most 63 long; `None` when nothing (or a name Windows reserves) is
+/// left.
+pub fn id_from(s: &str) -> Option<Id> {
+    let mut out = String::new();
+    for c in s.chars() {
+        let c = c.to_ascii_lowercase();
+        if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' {
+            out.push(c);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches(['-', '_']);
+    let cut = &trimmed[..trimmed.len().min(63)];
+    Id::parse(cut.trim_end_matches(['-', '_']), "part").ok()
+}
+
+/// `base`, else `base-2`, `base-3`, … (cut to fit), the first `taken`
+/// refuses.
+pub fn free(base: &Id, taken: impl Fn(&str) -> bool) -> Id {
+    if !taken(base.as_str()) {
+        return base.clone();
+    }
+    (2u64..)
+        .find_map(|n| {
+            let tail = format!("-{n}");
+            let head = &base.as_str()[..base.as_str().len().min(63 - tail.len())];
+            let id = Id::parse(
+                &format!("{}{tail}", head.trim_end_matches(['-', '_'])),
+                "part",
+            )
+            .ok()?;
+            (!taken(id.as_str())).then_some(id)
+        })
+        .expect("some n is free")
+}
+
+/// `import`: plans every file change and, unless `dry_run`, makes them.
+pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> {
+    use crate::doc::files::{Feature, PartFile, PartKind};
+    use crate::doc::import::FileRef;
+    use crate::doc::project::{
+        IMPORTS, PDM_CONFIG, feature_path, part_path, write_atomic, write_json,
+    };
+    let root = session.root().to_path_buf();
+    let source = {
+        let p = std::path::Path::new(&ask.path);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            root.join(p)
+        }
+    };
+    let bytes = std::fs::read(&source).map_err(|e| Error::io(&source, &e))?;
+    let file = ImportFile::new(bytes);
+    let opened = opened(&file).map_err(|e| unreadable(&ask.path, &e))?;
+    // Where it goes: where the same bytes already are, else a free name.
+    let project = session.project();
+    let (stored, reused) = match project
+        .imports
+        .iter()
+        .find(|(_, f)| f.blake3 == file.blake3)
+    {
+        Some((p, _)) => (p.clone(), true),
+        None => {
+            let stem = source.file_stem().map(|s| s.to_string_lossy().into_owned());
+            let base = stem
+                .as_deref()
+                .and_then(id_from)
+                .unwrap_or_else(|| Id::parse("step", "file").expect("an ID"));
+            let id = free(&base, |s| {
+                project.imports.contains_key(&format!("{IMPORTS}/{s}.step"))
+                    || root.join(format!("{IMPORTS}/{s}.step")).exists()
+            });
+            (format!("{IMPORTS}/{id}.step"), false)
+        }
+    };
+    let file_ref = FileRef {
+        path: stored.clone(),
+        blake3: file.blake3.clone(),
+    };
+    let defs = &opened.products.definitions;
+    // Each group of bodies: a product's, then those no product reaches.
+    let mut groups: Vec<Option<usize>> = (0..defs.len())
+        .filter(|k| opened.held.iter().any(|h| h.definition == Some(*k)))
+        .map(Some)
+        .collect();
+    if opened.held.iter().any(|h| h.definition.is_none()) {
+        groups.push(None);
+    }
+    if groups.is_empty() {
+        return Err(Error::new(
+            Code::ImportBodyMissing,
+            format!("{} holds no solid to import", ask.path),
+        )
+        .with("path", &ask.path));
+    }
+    let product_of = |k: Option<usize>| -> Option<ProductRef> {
+        let d = &defs[k?];
+        let ordinal = defs[..k?]
+            .iter()
+            .filter(|e| e.product_id == d.product_id && e.name == d.name)
+            .count();
+        Some(ProductRef {
+            id: d.product_id.to_string(),
+            name: d.name.to_string(),
+            ordinal: ordinal as u32,
+        })
+    };
+    let bodies = |k: Option<usize>| opened.held.iter().filter(|h| h.definition == k).count();
+    let pdm = root.join(PDM_CONFIG).is_file();
+    let properties = |k: Option<usize>| -> BTreeMap<String, Value> {
+        let mut out = BTreeMap::new();
+        if let (true, Some(k)) = (pdm, k) {
+            let d = &defs[k];
+            for (key, v) in [("name", &d.name), ("description", &d.description)] {
+                if !v.trim().is_empty() {
+                    out.insert(key.to_owned(), json!(&**v));
+                }
+            }
+        }
+        out
+    };
+    let mut plan: Vec<Planned> = Vec::new();
+    if let Some(into) = &ask.into {
+        if ask.part.is_some() {
+            return Err(Error::new(
+                Code::Usage,
+                "give a part to make or one to add to (into), not both",
+            ));
+        }
+        let pid = crate::server::part_id(into)?;
+        let p = project.part(&pid)?;
+        crate::server::check_revision(p, ask.expected.as_deref())?;
+        if crate::server::part_kind(p) == PartKind::Assembly {
+            return Err(Error::new(
+                Code::WrongPartKind,
+                format!("{pid} is an assembly: imported bodies go into a part"),
+            )
+            .with("part", &pid));
+        }
+        let listed = |k: &Option<usize>| match k {
+            Some(k) => json!({"id": &*defs[*k].product_id, "name": &*defs[*k].name}),
+            None => json!(null),
+        };
+        let k = match &ask.product {
+            Some(want) => {
+                let by_id: Vec<Option<usize>> = groups
+                    .iter()
+                    .copied()
+                    .filter(|k| k.is_some_and(|k| *defs[k].product_id == **want))
+                    .collect();
+                let by_name: Vec<Option<usize>> = groups
+                    .iter()
+                    .copied()
+                    .filter(|k| k.is_some_and(|k| *defs[k].name == **want))
+                    .collect();
+                match (by_id.as_slice(), by_name.as_slice()) {
+                    ([k], _) | ([], [k]) => *k,
+                    _ => {
+                        return Err(Error::new(
+                            Code::InvalidParam,
+                            format!(
+                                "{} has {} products {want:?} names; name one by its id",
+                                ask.path,
+                                by_id.len().max(by_name.len())
+                            ),
+                        )
+                        .with("param", "product")
+                        .with("products", groups.iter().map(listed).collect::<Vec<_>>()));
+                    }
+                }
+            }
+            None => match groups.as_slice() {
+                [k] => *k,
+                _ => {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        format!(
+                            "{} holds bodies of {} products: name the one to add with product",
+                            ask.path,
+                            groups.len()
+                        ),
+                    )
+                    .with("param", "product")
+                    .with("products", groups.iter().map(listed).collect::<Vec<_>>()));
+                }
+            },
+        };
+        let mut taken: Vec<String> = p.features.keys().map(|f| f.to_string()).collect();
+        let mut features = Vec::new();
+        for body in 0..bodies(k) {
+            let base = Id::parse("body", "feature").expect("an ID");
+            let fid = free(&base, |s| taken.iter().any(|t| t == s));
+            taken.push(fid.to_string());
+            features.push((
+                fid,
+                Import {
+                    file: file_ref.clone(),
+                    product: product_of(k),
+                    body: body as u32,
+                },
+            ));
+        }
+        plan.push(Planned {
+            part: pid,
+            new: false,
+            definition: k,
+            features,
+            properties: BTreeMap::new(),
+        });
+    } else {
+        crate::config::check_project_revision(&root, ask.expected.as_deref())?;
+        if ask.part.is_some() && groups.len() != 1 {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "{} makes {} parts: part names one, so leave it out",
+                    ask.path,
+                    groups.len()
+                ),
+            )
+            .with("param", "part"));
+        }
+        let stem = std::path::Path::new(&stored)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut taken: Vec<String> = project.parts.keys().map(|p| p.to_string()).collect();
+        let retired = |s: &str| {
+            Id::parse(s, "part").is_ok_and(|id| crate::pdm::check_not_retired(&root, &id).is_err())
+        };
+        for k in &groups {
+            let pid = match &ask.part {
+                Some(p) => {
+                    let pid = crate::server::part_id(p)?;
+                    if taken.iter().any(|t| *t == pid.as_str()) {
+                        return Err(Error::new(
+                            Code::DuplicateId,
+                            format!("part {pid} already exists"),
+                        )
+                        .with("part", &pid));
+                    }
+                    crate::pdm::check_not_retired(&root, &pid)?;
+                    pid
+                }
+                None => {
+                    let named = k.and_then(|k| {
+                        id_from(&defs[k].product_id).or_else(|| id_from(&defs[k].name))
+                    });
+                    let base = named
+                        .or_else(|| id_from(&stem))
+                        .unwrap_or_else(|| Id::parse("part", "part").expect("an ID"));
+                    free(&base, |s| taken.iter().any(|t| t == s) || retired(s))
+                }
+            };
+            taken.push(pid.to_string());
+            let features = (0..bodies(*k))
+                .map(|body| {
+                    let base = Id::parse("body", "feature").expect("an ID");
+                    let fid = if body == 0 {
+                        base
+                    } else {
+                        Id::parse(&format!("body-{}", body + 1), "feature").expect("an ID")
+                    };
+                    (
+                        fid,
+                        Import {
+                            file: file_ref.clone(),
+                            product: product_of(*k),
+                            body: body as u32,
+                        },
+                    )
+                })
+                .collect();
+            plan.push(Planned {
+                part: pid,
+                new: true,
+                definition: *k,
+                features,
+                properties: properties(*k),
+            });
+        }
+    }
+    let mut warnings: Vec<String> = Vec::new();
+    let mapped = defs
+        .iter()
+        .filter(|d| d.shapes.iter().any(|s| !s.mapped.is_empty()))
+        .count();
+    if mapped > 0 {
+        warnings.push(format!(
+            "import_mapped_skipped: {mapped} product(s) of {} place shapes by mapped items, which aren't imported yet",
+            ask.path
+        ));
+    }
+    // Each part as it would be, in memory: what the answer reports, and
+    // for a dry run all it does.
+    let proposed: Vec<Part> = plan
+        .iter()
+        .map(|pl| {
+            let mut part = match project.parts.get(&pl.part) {
+                Some(p) if !pl.new => p.clone(),
+                _ => Part {
+                    id: pl.part.clone(),
+                    file: Ok(PartFile::new(Vec::new())),
+                    parameters: None,
+                    env: crate::expr::Env::empty(),
+                    features: BTreeMap::new(),
+                    uses: BTreeMap::new(),
+                    acts: BTreeMap::new(),
+                    imports: BTreeMap::new(),
+                    revision: String::new(),
+                },
+            };
+            let mut order = part.order().to_vec();
+            for (fid, i) in &pl.features {
+                order.push(fid.clone());
+                part.features
+                    .insert(fid.clone(), Ok(Feature::Import(i.clone())));
+            }
+            part.file = Ok(PartFile::new(order));
+            part.imports.insert(stored.clone(), file.clone());
+            part
+        })
+        .collect();
+    let report = |s: &mut crate::session::Session, written: bool| -> Result<Vec<Value>> {
+        use rayon::prelude::*;
+        let results: Vec<crate::rebuild::PartResult> = if written {
+            plan.iter()
+                .map(|pl| s.rebuilt(&pl.part).cloned())
+                .collect::<Result<_>>()?
+        } else {
+            proposed
+                .par_iter()
+                .map(crate::rebuild::rebuild_part)
+                .collect()
+        };
+        Ok(plan
+            .iter()
+            .zip(results)
+            .map(|(pl, r)| {
+                let features: Vec<Value> = pl
+                    .features
+                    .iter()
+                    .map(|(fid, i)| {
+                        let mut v = json!({"id": fid, "body": i.body});
+                        match r.features.iter().find(|(f, _)| f == fid).map(|(_, o)| o) {
+                            Some(Ok(crate::rebuild::Output::Solids(m))) => {
+                                v["ok"] = json!(true);
+                                v["hash"] = json!(m.hash);
+                                if let Some(b) = m.solids.first() {
+                                    let c = b.1.body.counts();
+                                    v["counts"] = json!({"faces": c.faces, "edges": c.edges,
+                                                         "vertices": c.vertices});
+                                }
+                                if let Some(x) = &m.import {
+                                    v["heal"] = x["heal"].clone();
+                                }
+                            }
+                            Some(Err(e)) => {
+                                v["ok"] = json!(false);
+                                v["error"] = json!(e);
+                            }
+                            _ => {}
+                        }
+                        v
+                    })
+                    .collect();
+                let mut v = json!({"part": pl.part, "created": pl.new, "features": features});
+                if let Some(p) = product_of(pl.definition) {
+                    v["product"] = product_json(&p);
+                }
+                if !pl.properties.is_empty() {
+                    v["properties"] = json!(pl.properties);
+                }
+                v
+            })
+            .collect())
+    };
+    let answer = |parts: Vec<Value>, warnings: Vec<String>| {
+        let failed: Vec<String> = parts
+            .iter()
+            .flat_map(|p| {
+                p["features"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|f| f["ok"] == false)
+                    .map(move |f| {
+                        format!(
+                            "import_failed: {}/{} doesn't build: {}",
+                            p["part"].as_str().unwrap_or_default(),
+                            f["id"].as_str().unwrap_or_default(),
+                            f["error"]["message"].as_str().unwrap_or_default()
+                        )
+                    })
+            })
+            .collect();
+        let mut v = json!({
+            "file": {"path": stored, "blake3": file.blake3, "reused": reused,
+                     "schema": schema_name(opened.schema)},
+            "parts": parts,
+            "dry_run": ask.dry_run,
+        });
+        let faults: Vec<String> = opened
+            .products
+            .faults
+            .iter()
+            .map(|f| f.to_string())
+            .collect();
+        if !faults.is_empty() {
+            v["faults"] = json!(faults);
+        }
+        let warnings: Vec<String> = warnings.into_iter().chain(failed).collect();
+        if !warnings.is_empty() {
+            v["warnings"] = json!(warnings);
+        }
+        v
+    };
+    if ask.dry_run {
+        let parts = report(session, false)?;
+        return Ok(answer(parts, warnings));
+    }
+    // The writes: the file, then each part's features, list and
+    // properties; Git's attributes keep the file's bytes.
+    if !reused {
+        write_atomic(&root.join(&stored), &*file.bytes)?;
+    }
+    crate::drivers::write_attributes(&root)?;
+    if plan.iter().any(|pl| !pl.properties.is_empty()) {
+        crate::pdm::ensure_id(session)?;
+    }
+    for (pl, part) in plan.iter().zip(&proposed) {
+        for (fid, i) in &pl.features {
+            write_json(
+                &feature_path(&root, &pl.part, fid),
+                &Feature::Import(i.clone()).to_json(),
+            )?;
+        }
+        let kind = crate::server::part_kind(part);
+        write_json(
+            &part_path(&root, &pl.part),
+            &PartFile {
+                kind,
+                features: part.order().to_vec(),
+            }
+            .to_json(),
+        )?;
+        if !pl.properties.is_empty() {
+            let props = ryupdm::props::Properties {
+                values: pl.properties.clone(),
+            };
+            write_json(
+                &crate::doc::project::properties_path(&root, &pl.part),
+                &props.to_json(),
+            )?;
+        }
+    }
+    session.reload()?;
+    let parts = report(session, true)?;
+    Ok(answer(parts, warnings))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -577,6 +1081,218 @@ pub(crate) mod tests {
             .filter(|(n, _)| after.iter().any(|(m, _)| m == n))
             .count();
         assert_eq!(kept, 1);
+    }
+
+    /// `file` from ryustep's OCCT files, copied where an agent would have
+    /// it: outside the project.
+    fn outside(name: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        std::fs::write(&path, occt(name)).unwrap();
+        (dir, path.to_string_lossy().into_owned())
+    }
+
+    fn import_call(s: &mut crate::session::Session, params: Value) -> Result<Value> {
+        crate::server::tests::call(s, "import", params)
+    }
+
+    #[test]
+    fn importing_stores_the_file_and_makes_a_part_of_each_product() {
+        let (_src, path) = outside("box_ap214.stp");
+        let (dir, mut s) = crate::server::tests::fresh();
+        let root = dir.path();
+        let v = import_call(&mut s, json!({"path": path})).unwrap();
+        assert_eq!(v["file"]["path"], "imports/box_ap214.step");
+        assert_eq!(v["file"]["reused"], false);
+        assert_eq!(v["dry_run"], false);
+        let part = &v["parts"][0];
+        assert_eq!(part["part"], "part-2");
+        assert_eq!(part["created"], true);
+        assert_eq!(part["product"], json!({"id": "part 2", "name": "part 2"}));
+        assert!(part.get("properties").is_none());
+        let f = &part["features"][0];
+        assert_eq!((&f["id"], &f["ok"]), (&json!("body"), &json!(true)), "{v}");
+        assert_eq!(f["counts"]["faces"], 6);
+        assert_eq!(f["heal"]["sewn"], 0);
+        assert_eq!(
+            std::fs::read(root.join("imports/box_ap214.step")).unwrap(),
+            occt("box_ap214.stp")
+        );
+        let attributes = std::fs::read_to_string(root.join(".gitattributes")).unwrap();
+        assert!(
+            attributes.contains(crate::drivers::IMPORT_LINE),
+            "{attributes}"
+        );
+        let r = crate::server::tests::call(&mut s, "rebuild", json!({"part": "part-2"})).unwrap();
+        assert_eq!(r["parts"][0]["features"][0]["type"], "import");
+        // The same bytes again: stored once, another part.
+        let v = import_call(&mut s, json!({"path": path})).unwrap();
+        assert_eq!(
+            v["file"],
+            json!({"path": "imports/box_ap214.step", "reused": true,
+                                     "blake3": v["file"]["blake3"], "schema": "AP214"})
+        );
+        assert_eq!(v["parts"][0]["part"], "part-2-2");
+        // Named, and refused where the name is taken.
+        let v = import_call(&mut s, json!({"path": path, "part": "block"})).unwrap();
+        assert_eq!(v["parts"][0]["part"], "block");
+        let e = import_call(&mut s, json!({"path": path, "part": "block"})).unwrap_err();
+        assert_eq!(e.code, Code::DuplicateId);
+        // Nothing to say about the project being healthy afterwards.
+        assert_eq!(crate::doctor::diagnose(root), []);
+    }
+
+    #[test]
+    fn a_dry_run_writes_nothing_and_says_how_each_body_heals() {
+        let (_src, path) = outside("plate_hole.stp");
+        let (dir, mut s) = crate::server::tests::fresh();
+        let root = dir.path();
+        let before = crate::session::files(root).unwrap();
+        let v = import_call(&mut s, json!({"path": path, "dry_run": true})).unwrap();
+        assert_eq!(v["dry_run"], true);
+        assert_eq!(v["parts"][0]["features"][0]["ok"], true, "{v}");
+        assert_eq!(crate::session::files(root).unwrap(), before);
+        assert!(!root.join("imports").exists());
+        // What isn't STEP is refused before anything is written.
+        let junk = root.join("../junk.step");
+        std::fs::write(&junk, "hello").unwrap();
+        let e = import_call(&mut s, json!({"path": junk})).unwrap_err();
+        assert_eq!(e.code, Code::StepUnreadable);
+        assert_eq!(crate::session::files(root).unwrap(), before);
+        let e = import_call(&mut s, json!({"path": "/nowhere/at/all.step"})).unwrap_err();
+        assert_eq!(e.code, Code::Io);
+        // A stale project revision is a conflict.
+        let e = import_call(&mut s, json!({"path": path, "expected_revision": "0"})).unwrap_err();
+        assert_eq!(e.code, Code::Conflict);
+    }
+
+    #[test]
+    fn into_adds_one_products_bodies_to_a_part() {
+        let (_src, path) = outside("assembly.stp");
+        let (_box_src, box_path) = outside("box_ap214.stp");
+        let (_dir, mut s) = crate::server::tests::fresh();
+        crate::server::tests::call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        crate::server::tests::call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "body", "params": {"x": 1, "y": 1, "z": 1}}),
+        )
+        .unwrap();
+        // The assembly file holds several products' bodies: name one.
+        let e = import_call(&mut s, json!({"path": path, "into": "p"})).unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        let products = e.details["products"].as_array().unwrap().clone();
+        assert!(products.len() > 1, "{e:?}");
+        let one = products[0]["id"].as_str().unwrap().to_owned();
+        let v = import_call(&mut s, json!({"path": path, "into": "p", "product": one})).unwrap();
+        let part = &v["parts"][0];
+        assert_eq!(
+            (&part["part"], &part["created"]),
+            (&json!("p"), &json!(false))
+        );
+        // `body` is the box's, so the import's is the next free.
+        assert_eq!(part["features"][0]["id"], "body-2", "{v}");
+        let list =
+            crate::server::tests::call(&mut s, "feature.list", json!({"part": "p"})).unwrap();
+        let ids: Vec<&str> = list["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["body", "body-2"]);
+        // An assembly takes no bodies; neither part and into together.
+        crate::server::tests::call(
+            &mut s,
+            "part.create",
+            json!({"part": "a", "kind": "assembly"}),
+        )
+        .unwrap();
+        let e = import_call(&mut s, json!({"path": box_path, "into": "a"})).unwrap_err();
+        assert_eq!(e.code, Code::WrongPartKind);
+        let e =
+            import_call(&mut s, json!({"path": box_path, "into": "p", "part": "q"})).unwrap_err();
+        assert_eq!(e.code, Code::Usage);
+        // A file of one product needs no product named.
+        let v = import_call(&mut s, json!({"path": box_path, "into": "p"})).unwrap();
+        assert_eq!(v["parts"][0]["features"][0]["id"], "body-3");
+        // part names the part only when the file makes one.
+        let e = import_call(&mut s, json!({"path": path, "part": "x"})).unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+    }
+
+    #[test]
+    fn a_body_that_cant_be_healed_still_gets_its_part() {
+        // OCCT's sheet offset from a spline: ryustep refuses it.
+        let (_src, path) = outside("offset_sheet.stp");
+        let (_dir, mut s) = crate::server::tests::fresh();
+        let v = import_call(&mut s, json!({"path": path})).unwrap();
+        let f = &v["parts"][0]["features"][0];
+        assert_eq!(f["ok"], false, "{v}");
+        assert_eq!(f["error"]["code"], "import_failed");
+        let reason = f["error"]["details"]["reason"].as_str().unwrap();
+        assert!(!reason.is_empty());
+        let warnings = v["warnings"].as_array().unwrap();
+        assert!(
+            warnings[0].as_str().unwrap().starts_with("import_failed: "),
+            "{v}"
+        );
+    }
+
+    #[test]
+    fn a_project_using_pdm_gets_names_and_descriptions() {
+        let (_src, path) = outside("box_ap214.stp");
+        let (dir, mut s) = crate::server::tests::fresh();
+        crate::server::tests::call(&mut s, "pdm.init", json!({})).unwrap();
+        let v = import_call(&mut s, json!({"path": path})).unwrap();
+        assert_eq!(v["parts"][0]["properties"], json!({"name": "part 2"}));
+        let props =
+            crate::server::tests::call(&mut s, "props.get", json!({"part": "part-2"})).unwrap();
+        let name = props["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "name")
+            .unwrap()["value"]
+            .clone();
+        assert_eq!(name, "part 2");
+        assert!(dir.path().join("parts/part-2/properties.json").is_file());
+    }
+
+    #[test]
+    fn an_import_is_one_change_undone_whole() {
+        use crate::live::Live;
+        use crate::server::tests::call_live;
+        let (_src, path) = outside("box_ap214.stp");
+        let (dir, mut s) = crate::server::tests::fresh();
+        let root = dir.path();
+        let before = crate::session::files(root).unwrap();
+        let mut live = Live::new();
+        call_live(&mut s, &mut live, None, "import", json!({"path": path})).unwrap();
+        let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
+        let entry = &log["entries"][0];
+        assert_eq!(entry["method"], "import", "{log}");
+        let files: Vec<&str> = entry["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            files,
+            [
+                ".gitattributes",
+                "imports/box_ap214.step",
+                "parts/part-2/features/body.json",
+                "parts/part-2/part.json"
+            ]
+        );
+        call_live(&mut s, &mut live, None, "undo", json!({})).unwrap();
+        assert!(!root.join("imports/box_ap214.step").exists());
+        assert!(!root.join("parts/part-2/part.json").exists());
+        let mut after = crate::session::files(root).unwrap();
+        after.retain(|p| before.contains(p));
+        assert_eq!(after, before);
     }
 
     #[test]
