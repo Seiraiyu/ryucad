@@ -3376,6 +3376,26 @@ fn mesh_exports_from_the_cli() {
         p.fails(args, "invalid_param", 1);
     }
     assert!(!p.direct.join("x.stl").exists() && !p.direct.join("x.step").exists());
+    // 3MF by extension, in metres, its creation date the time stamp.
+    let v = p.ok(&[
+        "export",
+        "p",
+        "--out",
+        "p.3mf",
+        "--unit",
+        "m",
+        "--time-stamp",
+        "2026-10-28T00:00:00",
+    ]);
+    assert_eq!((&v["format"], &v["unit"]), (&json!("3mf"), &json!("m")));
+    let bytes = fs::read(p.direct.join("p.3mf")).unwrap();
+    assert_eq!(bytes, fs::read(p.daemon.join("p.3mf")).unwrap());
+    assert!(bytes.starts_with(b"PK\x03\x04"));
+    p.fails(
+        &["export", "p", "--out", "x.3mf", "--ascii"],
+        "invalid_param",
+        1,
+    );
 }
 
 #[test]

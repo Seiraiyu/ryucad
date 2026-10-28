@@ -117,15 +117,17 @@ pub struct Ask {
 pub enum Format {
     Step,
     Stl,
+    ThreeMf,
 }
 
 impl Format {
-    pub const ALL: [Format; 2] = [Format::Step, Format::Stl];
+    pub const ALL: [Format; 3] = [Format::Step, Format::Stl, Format::ThreeMf];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Format::Step => "step",
             Format::Stl => "stl",
+            Format::ThreeMf => "3mf",
         }
     }
 
@@ -134,12 +136,13 @@ impl Format {
     }
 
     /// The format a file name's extension names, in any case: `.step` or
-    /// `.stp`, `.stl`.
+    /// `.stp`, `.stl`, `.3mf`.
     pub fn of_path(path: &str) -> Option<Format> {
         let ext = std::path::Path::new(path).extension()?.to_str()?;
         match ext.to_ascii_lowercase().as_str() {
             "step" | "stp" => Some(Format::Step),
             "stl" => Some(Format::Stl),
+            "3mf" => Some(Format::ThreeMf),
             _ => None,
         }
     }
@@ -158,6 +161,10 @@ enum Options {
         unit: ryuformats::Unit,
         mesh: MeshOptions,
         ascii: bool,
+    },
+    ThreeMf {
+        unit: ryuformats::Unit,
+        mesh: MeshOptions,
     },
 }
 
@@ -198,8 +205,11 @@ impl Options {
                     unit_name,
                 })
             }
-            Format::Stl => {
+            Format::Stl | Format::ThreeMf => {
                 not_for("schema", ask.schema.is_some())?;
+                if format == Format::ThreeMf {
+                    not_for("ascii", ask.ascii)?;
+                }
                 let unit = ryuformats::Unit::parse(unit)
                     .ok_or_else(|| invalid("unit", unit, "mm, cm or m"))?;
                 let mesh = MeshOptions::read(
@@ -208,10 +218,13 @@ impl Options {
                     ask.max_edge.as_deref(),
                     default,
                 )?;
-                Ok(Options::Stl {
-                    unit,
-                    mesh,
-                    ascii: ask.ascii,
+                Ok(match format {
+                    Format::Stl => Options::Stl {
+                        unit,
+                        mesh,
+                        ascii: ask.ascii,
+                    },
+                    _ => Options::ThreeMf { unit, mesh },
                 })
             }
         }
@@ -446,6 +459,30 @@ pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
             };
             deliver(result, out.as_deref(), "stl", |w| {
                 ryuformats::stl::write(&scene, &opts, w)
+            })
+        }
+        Options::ThreeMf { unit, mesh } => {
+            let scene = meshed(s, &walk.scene, &mesh)?;
+            triangles(&mut result, &scene);
+            result["unit"] = json!(unit.as_str());
+            result["mesh"] = mesh.report();
+            result["time_stamp"] = json!(time_stamp);
+            let mut metadata = vec![
+                ("Title".to_owned(), scene.products[0].name.clone()),
+                (
+                    "Application".to_owned(),
+                    format!("ryucad {}", env!("CARGO_PKG_VERSION")),
+                ),
+                ("CreationDate".to_owned(), time_stamp),
+                ("ryucad:chord".to_owned(), mesh.chord.text()),
+                ("ryucad:angle".to_owned(), mesh.angle.text()),
+            ];
+            if let Some(e) = &mesh.max_edge {
+                metadata.push(("ryucad:max_edge".to_owned(), e.text()));
+            }
+            let opts = ryuformats::threemf::ThreeMf { unit, metadata };
+            deliver(result, out.as_deref(), "3mf", |w| {
+                ryuformats::threemf::write(&scene, &opts, w)
             })
         }
     }
@@ -1471,6 +1508,100 @@ pub(crate) mod tests {
                 "solid frame/row:1/shank",
                 "solid frame/row:2/shank"
             ]
+        );
+    }
+
+    /// A 3MF package's model.
+    fn model_of(bytes: &[u8]) -> String {
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut model = String::new();
+        std::io::Read::read_to_string(&mut z.by_name("3D/3dmodel.model").unwrap(), &mut model)
+            .unwrap();
+        model
+    }
+
+    #[test]
+    fn an_assembly_exports_as_3mf_objects() {
+        let (dir, mut s) = project();
+        let r = dir.path();
+        place_in(r, "frame", "base", "plate", json!("working"), [0.0; 3]);
+        place_in(
+            r,
+            "frame",
+            "b1",
+            "bolt",
+            json!("working"),
+            [0.01, 0.0, 0.005],
+        );
+        place_in(
+            r,
+            "frame",
+            "b2",
+            "bolt",
+            json!("working"),
+            [0.03, 0.0, 0.005],
+        );
+        s.refresh().unwrap();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "bolt", "properties": {"number": "B-6", "name": "Bolt"}}),
+        )
+        .unwrap();
+        let stamp = "2026-10-28T00:00:00";
+        let (v, bytes) = exported(
+            &mut s,
+            json!({"part": "frame", "format": "3mf", "chord": "0.05 mm", "time_stamp": stamp}),
+        )
+        .unwrap();
+        assert_eq!(
+            (&v["format"], &v["unit"], &v["time_stamp"]),
+            (&json!("3mf"), &json!("mm"), &json!(stamp))
+        );
+        let model = model_of(&bytes);
+        assert!(model.contains("<model unit=\"millimeter\""), "{model}");
+        for meta in [
+            "<metadata name=\"Title\">frame</metadata>",
+            "<metadata name=\"CreationDate\">2026-10-28T00:00:00</metadata>",
+            "<metadata name=\"ryucad:chord\">0.05 mm</metadata>",
+            "<metadata name=\"ryucad:angle\">15 deg</metadata>",
+        ] {
+            assert!(model.contains(meta), "{meta}");
+        }
+        // The plate, the bolt once (its PDM number and name), then the
+        // frame placing the bolt twice, 20 mm apart.
+        let objects: Vec<&str> = model
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("<object"))
+            .collect();
+        assert_eq!(
+            objects,
+            [
+                "<object id=\"1\" type=\"model\" name=\"plate\" partnumber=\"plate\">",
+                "<object id=\"2\" type=\"model\" name=\"Bolt\" partnumber=\"B-6\">",
+                "<object id=\"3\" type=\"model\" name=\"frame\" partnumber=\"frame\">",
+            ]
+        );
+        assert!(
+            model.contains("<component objectid=\"2\" transform=\"1 0 0 0 1 0 0 0 1 30 0 5\"/>")
+        );
+        assert!(model.contains("<item objectid=\"3\"/>"));
+        // The same model and options, the same bytes.
+        let (_, again) = exported(
+            &mut s,
+            json!({"part": "frame", "format": "3mf", "chord": "0.05 mm", "time_stamp": stamp}),
+        )
+        .unwrap();
+        assert_eq!(again, bytes);
+        let e = answered(
+            &mut s,
+            json!({"part": "frame", "format": "3mf", "ascii": true}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["param"]),
+            (Code::InvalidParam, &json!("ascii"))
         );
     }
 
