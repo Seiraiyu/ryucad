@@ -87,6 +87,9 @@ pub struct Session {
     /// Counts the times the files changed: what subscribers were told is
     /// still news while it hasn't moved.
     epoch: u64,
+    /// The project's cycles of assemblies, by the epoch and the pins they
+    /// were found from.
+    cycles: Option<(u64, String, Arc<crate::assembly::Cycles>)>,
 }
 
 /// A daemon's watch of its project, or why it has none, and what it
@@ -119,6 +122,7 @@ impl Session {
             structure: ryupdm::structure::Cache::new(),
             watching: None,
             epoch: 0,
+            cycles: None,
         };
         s.scan()?;
         Ok(s)
@@ -266,6 +270,7 @@ impl Session {
             structure: from.structure.clone(),
             watching: None,
             epoch: 0,
+            cycles: None,
         })
     }
 
@@ -562,8 +567,24 @@ impl Session {
                 crate::release::pinned(self, part, label)
             })
         };
+        // Found again only when the files or the labels' pins move.
+        let key: String = pins
+            .iter()
+            .map(|((part, label), p)| match p {
+                Ok(p) => format!("{part}@{label}:{:?};", p.pin.commit),
+                Err(e) => format!("{part}@{label}:{:?};", e.code),
+            })
+            .collect();
+        let cycles = match &self.cycles {
+            Some((epoch, k, c)) if *epoch == self.epoch && *k == key => Arc::clone(c),
+            _ => {
+                let c = Arc::new(crate::assembly::Cycles::of(&self.project, &pins));
+                self.cycles = Some((self.epoch, key, Arc::clone(&c)));
+                c
+            }
+        };
         let store = std::mem::take(&mut self.store);
-        let mut r = Rebuild::new(&self.project, &pins, store);
+        let mut r = Rebuild::with_cycles(&self.project, &pins, store, cycles);
         let out = f(&mut r);
         let fresh = std::mem::take(&mut r.fresh);
         let learned = std::mem::take(&mut r.learned);

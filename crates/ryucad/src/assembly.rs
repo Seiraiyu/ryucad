@@ -683,7 +683,7 @@ pub(crate) fn is_leaf(project: &Project, id: &Id) -> bool {
 pub struct Rebuild<'p> {
     project: &'p Project,
     pins: &'p Pins,
-    cycles: Cycles,
+    cycles: Arc<Cycles>,
     pub store: Store,
     pub fresh: Vec<Id>,
     /// What the names of fresh parts whose rebuilds the budget let go
@@ -693,10 +693,22 @@ pub struct Rebuild<'p> {
 
 impl<'p> Rebuild<'p> {
     pub fn new(project: &'p Project, pins: &'p Pins, store: Store) -> Rebuild<'p> {
+        Rebuild::with_cycles(project, pins, store, Arc::new(Cycles::of(project, pins)))
+    }
+
+    /// [`Rebuild::new`] with the project's cycles already found (from the
+    /// same project and pins): finding them walks every part, about
+    /// 20 ms at 10,000 parts, and a session's requests rebuild often.
+    pub fn with_cycles(
+        project: &'p Project,
+        pins: &'p Pins,
+        store: Store,
+        cycles: Arc<Cycles>,
+    ) -> Rebuild<'p> {
         Rebuild {
             project,
             pins,
-            cycles: Cycles::of(project, pins),
+            cycles,
             store,
             fresh: Vec::new(),
             learned: Vec::new(),
