@@ -4439,6 +4439,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryuformats"
+version = "0.0.0"
+dependencies = [
+ "ryukei",
+]
+
+[[package]]
 name = "ryukei"
 version = "0.0.0"
 dependencies = [

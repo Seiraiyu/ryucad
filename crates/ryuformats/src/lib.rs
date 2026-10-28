@@ -1,0 +1,15 @@
+//! The file formats ryucad writes besides STEP: STL now, 3MF and USD
+//! after it. Every writer takes a [`scene::Scene`] (products of solids'
+//! meshes, placed in each other) and streams its bytes into an
+//! [`std::io::Write`]; the same scene and options give the same bytes on
+//! every platform.
+//!
+//! This crate is ryukei's neighbour, as `ryustep` is: it depends on the
+//! kernel for meshes and motions, never on ryucad, `ryustep` or C++, and
+//! the kernel never depends on it. Nothing here reads a file back: these
+//! formats are written, never read (STEP is how B-rep comes in).
+
+pub mod scene;
+pub mod text;
+
+pub use scene::{Child, Placed, Product, Scene, Solid, Unit};

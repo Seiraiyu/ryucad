@@ -1,0 +1,9 @@
+[package]
+name = "ryuformats"
+description = "Mesh and scene file formats written from ryukei bodies: STL and 3MF"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+ryukei = { path = "../ryukei" }
