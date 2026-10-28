@@ -1,0 +1,53 @@
+## Board model and shapes (decided in ryudfm phase 0)
+
+The design is document 213 in the Coxswain planning project `ryucad-ryukei`; this is its plan 0.A.
+
+- **Crate.** `ryu-board` is product-neutral. It depends on `ryu-math` and `rayon` only, and `tests/deps.rs` holds it to that. It knows no ODB++, project or session, and ryueda and ryudfm both build on it. Its `testing` feature holds a seeded generator, golden hashes, seeded symbols and features, and checks on shapes.
+- **Numbers.**
+  - `geom::Nm` is `i64` nanometres within ±2^40 (`COORD_LIMIT`). `Mdeg` is integer millidegrees in `[0, 360000)`, counterclockwise, with y up.
+  - `geom::decimal` reads decimal text exactly, with no floating point (`nm`, `mdeg`, `millionths`). Finer digits round half to even, and `Exact` says by how much.
+  - An odd size puts its extra nanometre on the positive side (`span`). A radius from an odd diameter rounds half to even (`half`).
+- **Arcs.**
+  - Arcs are centre form. The radius is the centre's distance to `start`, and the arc ends where the ray through `end` meets that circle. An end in `start`'s direction makes a full circle.
+  - `Arc::through` makes an arc from three points (ryueda's form), with its centre rounded.
+  - An arc's box includes the axis extremes it sweeps, decided exactly in `i128`.
+- **Placement.**
+  - `Place` scales (in millionths), mirrors x, turns counterclockwise and then moves, in that order. Right angles are exact. Other angles go through `ryu_math::sin_cos`, rounding each coordinate half to even.
+  - ODB++ turns clockwise and then mirrors x. That is the same as mirroring and then turning counterclockwise by the same angle. So an `orient_def` angle `a` is `Mdeg::new(a)` when mirrored and `Mdeg::from_clockwise(a)` when not.
+- **Symbols.**
+  - `StandardSymbol` covers every ODB++ 8.1 standard symbol design 213 lists. It adds `sr_ths` and `oblong_ths`, which the specification also has, and ryueda's trapezoid.
+  - ryueda's `roundrect` and `chamfered` pads are rectangles with `Corners`. Rounded and chamfered corners may mix on one pad, as KiCad's may.
+  - `StandardSymbol::parse` reads mils from inch files and microns from millimetre files. Only rectangles take `xc`, because the specification defines no chamfered donut or thermal.
+  - The 8.x stencil symbols (`hplate`, `rhplate`, `fhplate`, `radhplate`, `dshape`, `cross`, `dogbone`, `dpack`) aren't read. Their geometry is given only in figures, and `dpack`'s formula is printed garbled. A name that isn't read is no symbol, so the reader reports it as unknown.
+  - Where the specification's text is silent, the geometry follows its Appendix A figures. Butterflies fill quadrants 2 and 4. The half oval is flat on the left. The triangle's apex points up, centred in its box. `s_thr` is the line thermal. Rounded thermals round only their outside.
+- **Shapes.**
+  - `shape::Shape` holds parts in drawing order, and parts are never merged. Each part has a polarity and is one of three things:
+    - a `Region`;
+    - a `Stroke`: a path and a round or square pen, kept where the outline isn't a simple region (a pen at least as wide as the radius, ends that reach each other, a square pen on an arc);
+    - a `Swept` path: a line drawn with a symbol that isn't round or square.
+  - Rings keep their width round corners: a rounded donut's inside is rounded by what is left of the outer radius.
+  - The ellipse is made of arcs, each through three points of it, within 10 nm (`approximate`). These are not true biarcs; the tangent mismatch is inside the same bound.
+- **Thermals.** Gaps are channels `gap` wide, centred on rays at `angle + k × 360°/spokes` from +x.
+  - Squared pieces end on the channels' sides.
+  - Rounded pieces are the ring's middle line drawn with a round pen as wide as the ring, ending where the pen clears the channel.
+  - Open-cornered thermals (`s_tho`, `rc_tho`) take 1, 2, 4 or 8 gaps at multiples of 45°. They cut the sides square, half the gap either side of a side's middle. At a corner, the ring's corner square is left open, or half the gap from the corner if that is more.
+  - Not confirmed by the specification's text, only by its figures: the rounded ends, the open corners, and the moiré's layout (the outermost ring reaches half the line length, and each next ring is `ring_width + ring_gap` further in).
+- **Text.**
+  - A text's shape is its font's strokes. Each character is scaled from the font's box to the character size. The `k`th character is moved along by `k × (font width + offset)`, scaled the same way.
+  - Strokes are drawn with the text's line width and placed by its placement. The reader works out the line width: ODB++'s width factor is in units of 12 mils.
+  - Missing characters are gaps, and they are listed.
+  - How ODB++ fonts anchor their glyphs is checked against real boards in 0.B.
+- **The model.**
+  - `model::Board` holds the matrix's layers and the steps. Each step holds each layer's `Features`: its symbol table and its features as written, by index.
+  - It also holds the `Library` of user symbols and fonts, the drills, the stackup, the capabilities, and `Notice`s: faults and warnings, coded by whoever produced the board.
+  - User symbol cycles are found when the library is made. They fail the features that use them (`ShapeError::SymbolCycle`, naming the chain).
+  - References are `<step>/<layer>/<index>`, `<step>/comp/<refdes>` and `<step>/net/<name>`.
+- **Lazy and parallel.**
+  - Each feature's shape, and each table symbol's shape, is built on first use and kept in a `OnceLock` in its table.
+  - `Board::layer_shapes` builds one layer's shapes in parallel. `build_shapes` builds several layers side by side.
+  - Shapes are the same bits on any number of threads.
+- **Testing.**
+  - Each module has unit tests.
+  - `tests/props.rs` checks 2,000 seeded symbols and 3,000 seeded features: closed, simple, counterclockwise outside, inside their boxes, and alike on one thread and eight.
+  - `tests/determinism.rs` checks `tests/golden/board.txt` in the `cpu-levels` job. Regenerate it with `UPDATE_GOLDEN=1 cargo test -p ryu-board --test determinism`.
+  - `cargo bench -p ryu-board` times shapes of seeded symbols, text and a seeded layer.
