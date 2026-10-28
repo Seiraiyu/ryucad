@@ -13,3 +13,7 @@ test-group = "window"
 [profile.ci]
 # Report every failure, not just the first.
 fail-fast = false
+# A test still running after a minute is named as slow; after five it is
+# killed and fails by name, so a hung test can't eat the job (the slowest
+# take under two minutes on a runner).
+slow-timeout = { period = "60s", terminate-after = 5 }
