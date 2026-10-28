@@ -6,6 +6,9 @@
 //! exact predicates rely on.
 
 pub mod decimal;
+mod edge;
+
+pub use edge::{Arc, Dir, Edge, Segment};
 
 /// Integer nanometres.
 pub type Nm = i64;
