@@ -1416,6 +1416,75 @@ fn assemblies_section(golden: &mut Golden) {
     s.str(&format!("{:x}", md(&buf[..info.buffer_size()])));
 }
 
+/// Measurement over the assembled frame: the mass properties of a bolt,
+/// the plate and the whole frame in steel and brass, the frame's
+/// clearances, and the distance and angle between two occurrences, each
+/// answer whole on one thread and on four.
+fn measure_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("measure");
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    let (_dir, mut session) = assembled();
+    call(
+        &mut session,
+        "materials.set",
+        json!({"name": "steel", "density": "7850 kg/m^3", "default": true}),
+    );
+    call(
+        &mut session,
+        "materials.set",
+        json!({"name": "brass", "density": "8.5 g/cm^3"}),
+    );
+    std::fs::write(
+        session.root().join("parts/bolt/properties.json"),
+        ryucad::doc::canonical::to_string(
+            &json!({"format": 1, "kind": "ryupdm.properties", "material": "brass"}),
+        ),
+    )
+    .unwrap();
+    let mut answers = Vec::new();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let mut fresh = ryucad::session::Session::open(session.root()).unwrap();
+        let got = pool.install(|| {
+            let mut out = Vec::new();
+            for of in ["bolt", "plate", "frame", "frame/p2"] {
+                out.push(call(&mut fresh, "mass", json!({"of": of})));
+            }
+            out.push(call(
+                &mut fresh,
+                "clearance",
+                json!({"part": "frame", "below": "50 mm"}),
+            ));
+            out.push(call(
+                &mut fresh,
+                "measure",
+                json!({"entities": ["frame/p1/left", "frame/p2/right"]}),
+            ));
+            out.push(call(
+                &mut fresh,
+                "measure",
+                json!({"entities": ["bolt/shank"]}),
+            ));
+            out
+        });
+        answers.push(got);
+    }
+    assert_eq!(answers[0], answers[1], "one thread and four");
+    assert!(answers[0][2]["mass"]["kg"].as_f64().unwrap() > 0.0);
+    for v in &answers[0] {
+        let mut v = v.clone();
+        v.as_object_mut().unwrap().remove("revision");
+        s.str(&ryucad::doc::canonical::to_string(&v));
+    }
+}
+
 /// [`assembled`]'s frame, with one more bolt sunk into the plate and
 /// leaning into the first pair, and the interference report on one
 /// thread and on four: every pair's paths, the bits of its volume and
@@ -1919,6 +1988,7 @@ fn determinism() {
     assemblies_section(&mut golden);
     mates_section(&mut golden);
     interference_section(&mut golden);
+    measure_section(&mut golden);
     imports_section(&mut golden);
     exports_section(&mut golden);
     golden.finish();
