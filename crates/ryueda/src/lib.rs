@@ -11,6 +11,7 @@ pub use ryu_doc::{canonical, error, id, source, units};
 pub mod coord;
 pub mod doc;
 pub mod fault;
+pub mod footprint;
 pub mod name;
 pub mod notify;
 pub mod proto;

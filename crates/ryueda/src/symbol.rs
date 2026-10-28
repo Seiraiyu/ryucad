@@ -229,7 +229,7 @@ pub fn pin_number_ok(n: &str) -> bool {
 }
 
 /// Twice the signed area of the triangle `a b c`: zero when collinear.
-fn cross(a: Point, b: Point, c: Point) -> i128 {
+pub(crate) fn cross(a: Point, b: Point, c: Point) -> i128 {
     let d = |p: Point, q: Point| [i128::from(q[0] - p[0]), i128::from(q[1] - p[1])];
     let (u, v) = (d(a, b), d(a, c));
     u[0] * v[1] - u[1] * v[0]
