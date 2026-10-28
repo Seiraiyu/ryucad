@@ -280,6 +280,9 @@ pub fn revisions(p: &Project) -> BTreeMap<String, Value> {
         })
         .collect();
     out.insert("project".into(), json!(p.revision));
+    for (id, b) in &p.conn.blocks {
+        out.insert(format!("block/{id}"), json!(b.revision));
+    }
     out
 }
 
@@ -313,6 +316,13 @@ fn info(p: &Project) -> Value {
         "default_unit": p.manifest.default_unit,
         "revision": p.revision,
         "libraries": libraries,
+        "designs": p.conn.designs.keys().collect::<Vec<_>>(),
+        "blocks": p
+            .conn
+            .blocks
+            .iter()
+            .map(|(id, b)| (id.to_string(), json!(b.revision)))
+            .collect::<Map<String, Value>>(),
         "version": VersionInfo::current(),
     })
 }
