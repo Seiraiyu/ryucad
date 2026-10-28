@@ -8,7 +8,9 @@
 //! 8 and 16 points a side are tried in turn until two agree within the
 //! tolerance on every moment.
 //!
-//! The bound comes from the mesh: the true surface lies within the chord
+//! The quadrature runs over a coarse mesh's triangles (its orders, not
+//! the triangles' size, make it accurate); the bound comes from a fine
+//! certified mesh: the true surface lies within the chord
 //! (plus the edge tolerances) of the triangles, so the volume enclosed by
 //! the mesh, worked out exactly from its tetrahedra, is within
 //! `2 × chord × curved area` of the body's; first moments within that
@@ -39,8 +41,9 @@ pub struct MassOptions {
     /// The relative agreement two quadrature orders must reach.
     pub tolerance: f64,
     /// The mesh chord the bound is certified at, in meters: by default a
-    /// hundred-thousandth of the body's size (at least
-    /// `10 × LINEAR_RESOLUTION`).
+    /// ten-thousandth of the body's size (at least
+    /// `10 × LINEAR_RESOLUTION`). A finer chord tightens the bound, not
+    /// the value, at the cost of a finer mesh.
     pub chord: Option<f64>,
 }
 
@@ -76,7 +79,11 @@ pub struct MassProperties {
 
 /// The most the normal may turn across a triangle of the mesh the bound
 /// uses, in radians: areas are bounded to `1 / cos` of it.
-const ANGLE: f64 = 0.02;
+const ANGLE: f64 = 0.05;
+
+/// The normal turn of the coarse mesh the quadrature runs over: the rules'
+/// orders, not the triangles' size, make it accurate.
+const COARSE_ANGLE: f64 = 0.3;
 
 /// What one face (or the whole body) adds up to, about a reference point:
 /// area, volume, first moments `∫x`, and second moments `∫x²`, `∫y²`,
@@ -144,10 +151,13 @@ impl Moments {
 /// parameters at both.
 type Sides = HashMap<(u32, u32), Vec<(EdgeId, f64, f64)>>;
 
-/// A body's mesh, ready for integration.
+/// A body's meshes, ready for integration: a coarse one whose parameter
+/// triangles the quadrature runs over, and the fine certified one the
+/// bound comes from.
 struct Meshed<'a> {
     body: &'a Body,
     mesh: BodyMesh,
+    coarse: BodyMesh,
     chord: f64,
     origin: Point3,
     reach: f64,
@@ -165,14 +175,21 @@ impl<'a> Meshed<'a> {
             .ok_or(MeasureError::NotAnEntity)?;
         let size = (bbox.max() - bbox.min()).length();
         let chord = chord.unwrap_or(size * 1e-5).max(10.0 * LINEAR_RESOLUTION);
-        let params = MeshParams::new(chord, ANGLE);
-        let mesh = tessellate(body, &params).map_err(|e| match e {
-            Error::MeshTooLarge { .. } => Error::from(MeasureError::Unsupported),
-            e => e,
-        })?;
-        if !mesh.faults.is_empty() {
-            return Err(MeasureError::Unsupported.into());
-        }
+        let meshed = |params: MeshParams| -> Result<BodyMesh, Error> {
+            let mesh = tessellate(body, &params).map_err(|e| match e {
+                Error::MeshTooLarge { .. } => Error::from(MeasureError::Unsupported),
+                e => e,
+            })?;
+            if !mesh.faults.is_empty() {
+                return Err(MeasureError::Unsupported.into());
+            }
+            Ok(mesh)
+        };
+        let mesh = meshed(MeshParams::new(chord, ANGLE))?;
+        let coarse = meshed(MeshParams::new(
+            (size * 1e-3).max(10.0 * LINEAR_RESOLUTION),
+            COARSE_ANGLE,
+        ))?;
         let mid = bbox.min().lerp(bbox.max(), 0.5);
         let origin = Point3::new(mid.x, mid.y, mid.z);
         let reach = mesh
@@ -182,7 +199,7 @@ impl<'a> Meshed<'a> {
             .fold(0.0, f64::max)
             + chord;
         let mut sides = Sides::new();
-        for e in &mesh.edges {
+        for e in &coarse.edges {
             for k in 1..e.positions.len() {
                 let (a, b) = (e.positions[k - 1], e.positions[k]);
                 let (ta, tb) = (e.params[k - 1], e.params[k]);
@@ -193,6 +210,7 @@ impl<'a> Meshed<'a> {
         Ok(Self {
             body,
             mesh,
+            coarse,
             chord,
             origin,
             reach,
@@ -209,7 +227,8 @@ impl<'a> Meshed<'a> {
         self.chord + edges.chain(vertices).fold(0.0, f64::max)
     }
 
-    /// One face's moments at a rule of `n` points a side, and the same of
+    /// One face's moments at a rule of `n` points a side over the coarse
+    /// mesh's triangles (`fm` is the coarse mesh's), and the same of
     /// the integrands' absolute values.
     fn face(&self, fm: &FaceMesh, n: usize) -> (Moments, Moments) {
         let b = self.body;
@@ -224,8 +243,8 @@ impl<'a> Meshed<'a> {
             let n = e.du.cross(e.dv);
             Moments::at(e.point - self.origin, n * sign, n.length())
         };
-        let corners = &self.mesh.corners;
-        let tris = &self.mesh.triangles[fm.triangles.start as usize..fm.triangles.end as usize];
+        let corners = &self.coarse.corners;
+        let tris = &self.coarse.triangles[fm.triangles.start as usize..fm.triangles.end as usize];
         let (mut sum, mut abs) = (Moments::default(), Moments::default());
         let mut count: HashMap<(u32, u32), u32> = HashMap::new();
         for t in tris {
@@ -286,7 +305,7 @@ impl<'a> Meshed<'a> {
             return (sum, abs);
         }
         let domain = surface.domain();
-        let corners = &self.mesh.corners;
+        let corners = &self.coarse.corners;
         // Which collapsed row a corner lies on, if any.
         let row = |c: u32| {
             let uv = corners[c as usize].uv;
@@ -357,7 +376,7 @@ impl<'a> Meshed<'a> {
         h: &impl Fn(Point2) -> Moments,
     ) -> Option<(Moments, Moments)> {
         let b = self.body;
-        let (ci, cj) = (self.mesh.corners[i as usize], self.mesh.corners[j as usize]);
+        let (ci, cj) = (self.coarse.corners[i as usize], self.coarse.corners[j as usize]);
         let candidates = self.sides.get(&(ci.position, cj.position))?;
         let (pc, ta, tb) = candidates.iter().find_map(|&(e, ta, tb)| {
             b.edge_fins(e)
@@ -499,14 +518,15 @@ fn comp(v: Vector3, k: usize) -> f64 {
 pub(crate) fn face_properties(body: &Body, f: FaceId, rel: f64) -> Result<Properties, Error> {
     let face = body.face(f).ok_or(MeasureError::NotAnEntity)?;
     let m = Meshed::new(body, None)?;
-    let fm = m
-        .mesh
-        .faces
-        .iter()
-        .find(|fm| fm.face == f)
-        .ok_or(MeasureError::Unsupported)?;
-    let q = m.converged(fm, rel);
-    let mesh = m.mesh_face(fm);
+    let find = |mesh: &BodyMesh| {
+        mesh.faces
+            .iter()
+            .find(|fm| fm.face == f)
+            .cloned()
+            .ok_or(MeasureError::Unsupported)
+    };
+    let q = m.converged(&find(&m.coarse)?, rel);
+    let mesh = m.mesh_face(&find(&m.mesh)?);
     let bound = area_bound(&m, f, q.area, mesh.area);
     let sign = |n: UnitVector3| match face.sense {
         Sense::Forward => n,
@@ -579,11 +599,13 @@ fn area_bound(m: &Meshed<'_>, f: FaceId, q: f64, mesh: f64) -> f64 {
 /// faces don't all mesh.
 pub fn mass(body: &Body, density: f64, opts: &MassOptions) -> Result<MassProperties, Error> {
     let m = Meshed::new(body, opts.chord)?;
+    // Both meshes hold every face (neither has faults), in face order.
     let per_face: Vec<(FaceId, Moments, Moments)> = m
-        .mesh
+        .coarse
         .faces
         .par_iter()
-        .map(|fm| (fm.face, m.converged(fm, opts.tolerance), m.mesh_face(fm)))
+        .zip(m.mesh.faces.par_iter())
+        .map(|(c, f)| (f.face, m.converged(c, opts.tolerance), m.mesh_face(f)))
         .collect();
     let (mut q, mut mesh) = (Moments::default(), Moments::default());
     let (mut curved_area, mut area_bound_sum) = (0.0, 0.0);
