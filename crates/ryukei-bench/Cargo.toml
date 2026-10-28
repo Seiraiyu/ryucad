@@ -30,6 +30,7 @@ rayon = "1"
 # Projects exported by ryucad, for OCCT to read (the `step` test).
 ryucad = { path = "../ryucad" }
 ryukei-testkit = { path = "../ryukei-testkit" }
+ryuformats = { path = "../ryuformats" }
 ryustep = { path = "../ryustep" }
 serde_json = "1"
 tempfile = "3"
@@ -110,3 +111,8 @@ harness = false
 [[test]]
 name = "step"
 required-features = ["occt"]
+
+# STL and 3MF read by OCCT and lib3mf (design 193, plan 8.A).
+[[test]]
+name = "formats"
+required-features = ["occt", "formats"]
