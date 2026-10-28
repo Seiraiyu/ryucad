@@ -23,8 +23,9 @@ impl ryu_session::notify::Topics for Topic {
 }
 
 /// What subscribers were last told: the project's revision and each
-/// library's, by alias. `None` until the first telling.
+/// library's (`null` for one that can't be used), by `project` and
+/// `lib/<alias>`. `None` until the first telling.
 #[derive(Debug, Default)]
 pub struct Seen {
-    pub revisions: Option<BTreeMap<String, String>>,
+    pub revisions: Option<BTreeMap<String, serde_json::Value>>,
 }
