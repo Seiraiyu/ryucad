@@ -625,6 +625,44 @@ impl<'p> Rebuild<'p> {
         }
     }
 
+    /// Builds those of `parts` that place nothing and aren't built at
+    /// their revisions yet side by side, keeping each as [`Rebuild::result`]
+    /// would: the parts an assembly places, an imported file's hundreds
+    /// among them, heal in parallel. Each is the same bits on any number
+    /// of threads, so the order they finish in changes nothing.
+    pub fn build_parts(&mut self, parts: &[Id]) {
+        use rayon::prelude::*;
+        let todo: BTreeMap<&Id, &Part> = parts
+            .iter()
+            .filter_map(|id| self.project.parts.get(id))
+            .filter(|p| !p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly))
+            .filter(|p| {
+                !self
+                    .store
+                    .results
+                    .get(&p.id)
+                    .is_some_and(|(k, _)| *k == p.revision)
+            })
+            .map(|p| (&p.id, p))
+            .collect();
+        let empty = Cache::new();
+        let (caches, disk) = (&self.store.caches, self.store.disk.as_deref());
+        let built: Vec<(Id, PartResult, Cache)> = todo
+            .into_par_iter()
+            .map(|(id, p)| {
+                let cache = caches.get(id).unwrap_or(&empty);
+                let (r, c) = rebuild_part_in(p, cache, &Children::new(), disk);
+                (id.clone(), r, c)
+            })
+            .collect();
+        for (id, r, c) in built {
+            let key = self.project.parts[&id].revision.clone();
+            self.store.caches.insert(id.clone(), c);
+            self.store.results.insert(id.clone(), (key, r));
+            self.fresh.push(id);
+        }
+    }
+
     /// The rebuild of `part`, and of every part it places first.
     pub fn result(&mut self, part: &Id) -> Result<&PartResult> {
         let p = self.project.part(part)?;
@@ -667,6 +705,18 @@ impl<'p> Rebuild<'p> {
             return (key, children);
         }
         let node = (p.id.clone(), rev.clone());
+        // The parts it places as they are now, built side by side first.
+        if *rev == Rev::Working {
+            let placed: Vec<Id> = p
+                .order()
+                .iter()
+                .filter_map(|fid| match p.features.get(fid) {
+                    Some(Ok(Feature::Instance(i))) if i.rev == Rev::Working => Some(i.part.clone()),
+                    _ => None,
+                })
+                .collect();
+            self.build_parts(&placed);
+        }
         for fid in p.order() {
             let Some(Ok(Feature::Instance(i))) = p.features.get(fid) else {
                 continue;
@@ -981,7 +1031,8 @@ pub fn moved(
 /// `assembly.tree`: assembly `part`'s instances, each with its part,
 /// revision and how it resolved, whether it is fixed, its pose in the
 /// assembly, what its mates leave it, a subassembly's instances under it,
-/// and why it failed; and its instance patterns, each with its copies.
+/// and why it failed; its instance patterns, each with its copies; and
+/// `failing`, every feature of it that doesn't build.
 pub fn tree(session: &mut crate::session::Session, part: &str) -> Result<serde_json::Value> {
     let pid = crate::server::part_id(part)?;
     let p = session.project().part(&pid)?.clone();
@@ -994,7 +1045,23 @@ pub fn tree(session: &mut crate::session::Session, part: &str) -> Result<serde_j
     }
     let result = session.rebuilt(&pid)?.clone();
     let instances = nodes(session, &p, &result, &Rigid::IDENTITY, &[])?;
-    Ok(serde_json::json!({"part": pid, "revision": p.revision, "instances": instances}))
+    let mut v = serde_json::json!({"part": pid, "revision": p.revision, "instances": instances});
+    // Every feature of the assembly that fails, mates included, which the
+    // tree doesn't list (issue #123: its instances may place while a mate
+    // holding them fails).
+    let failing: Vec<serde_json::Value> = result
+        .features
+        .iter()
+        .filter_map(|(fid, r)| {
+            let e = r.as_ref().err()?;
+            let ty = p.features.get(fid)?.as_ref().ok().map(Feature::type_name);
+            Some(serde_json::json!({"id": fid, "type": ty, "error": e}))
+        })
+        .collect();
+    if !failing.is_empty() {
+        v["failing"] = serde_json::json!(failing);
+    }
+    Ok(v)
 }
 
 /// The tree under `p`, rebuilt as `result`, placed at `at` with its
@@ -1099,6 +1166,55 @@ pub(crate) mod tests {
     use crate::session::Session;
     use serde_json::{Value, json};
     use std::path::Path;
+
+    #[test]
+    fn an_assemblys_parts_build_side_by_side_to_the_same_results() {
+        let (dir, mut s) = fresh();
+        for (p, x) in [("a", 1), ("b", 2), ("c", 3)] {
+            call(&mut s, "part.create", json!({"part": p})).unwrap();
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": p, "type": "box", "id": "x", "params": {"x": x, "y": 2, "z": 3}}),
+            )
+            .unwrap();
+        }
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "asm", "kind": "assembly"}),
+        )
+        .unwrap();
+        for p in ["a", "b", "c"] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "asm", "type": "instance", "id": format!("i{p}"), "of": p}),
+            )
+            .unwrap();
+        }
+        // From nothing, on one thread and on four: the assembly builds its
+        // parts first, each once, to the same results.
+        let built = |threads| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let mut t = Session::open(dir.path()).unwrap();
+            let asm = Id::parse("asm", "part").unwrap();
+            let hash = pool.install(|| t.rebuilt(&asm).unwrap().hash.clone());
+            let parts: Vec<String> = ["a", "b", "c"]
+                .iter()
+                .map(|p| {
+                    let r = t.rebuilt(&Id::parse(p, "part").unwrap()).unwrap();
+                    assert_eq!(r.built.len(), 1, "{p} built once");
+                    r.hash.clone()
+                })
+                .collect();
+            (hash, parts)
+        };
+        assert_eq!(built(1), built(4));
+    }
 
     pub(crate) fn id(s: &str) -> Id {
         Id::parse(s, "feature").unwrap()

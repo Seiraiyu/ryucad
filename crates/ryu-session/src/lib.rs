@@ -40,6 +40,10 @@ pub trait Product: Sized + Send + Sync + 'static {
     type Seen: Default + std::fmt::Debug + Send + Sync;
     /// What a subscription can ask for.
     type Topic: notify::Topics + std::fmt::Debug;
+    /// The folders (relative, ending in `/`) whose files the activity log
+    /// counts against its bulky budget, not the project's: ryucad's
+    /// `imports/`, STEP files of a hundred megabytes.
+    const BULKY: &'static [&'static str] = &[];
     /// Adds a participant's view to its JSON, beside `id`, `kind`, `name`,
     /// `status`, `selection` and `highlights`.
     fn view_json(view: &Self::View, into: &mut Map<String, Value>);

@@ -72,6 +72,86 @@ pub(crate) fn cells(s: &Surface, near: &Box3) -> Vec<Cell> {
     reaching(s, out, near)
 }
 
+/// A box holding the part of a NURBS, revolution or sweep over `rect`
+/// of its parameters: the hull of its enclosures over its own cells cut
+/// to `rect`. `None` for other surfaces, or where an enclosure fails.
+pub(crate) fn enclosure(s: &Surface, rect: [[f64; 2]; 2]) -> Option<Box3> {
+    let natural: Vec<Cell> = match s {
+        Surface::Nurbs(n) => n.patches().iter().map(|p| p.range).collect(),
+        Surface::Revolution(r) => {
+            let (us, vs) = (parts([0.0, TAU], 8), pieces(r.curve()));
+            us.iter()
+                .flat_map(|&u| vs.iter().map(move |&v| [u, v]))
+                .collect()
+        }
+        Surface::Sweep(w) => w.cells(),
+        _ => return None,
+    };
+    let sheet = Sheet::of(s);
+    let mut out: Option<Box3> = None;
+    for c in natural {
+        let cut: [[f64; 2]; 2] =
+            core::array::from_fn(|k| [c[k][0].max(rect[k][0]), c[k][1].min(rect[k][1])]);
+        if cut[0][0] > cut[0][1] || cut[1][0] > cut[1][1] {
+            continue;
+        }
+        let p = sheet.jet_box(cut)?;
+        let b = Box3::new(
+            Point3::new(p[0].v.lo(), p[1].v.lo(), p[2].v.lo()),
+            Point3::new(p[0].v.hi(), p[1].v.hi(), p[2].v.hi()),
+        );
+        out = Some(out.map_or(b, |o| o.union(&b)));
+    }
+    out
+}
+
+/// [`cells`] cut afresh when `shift` (in `(0, 1)`) isn't 0: each
+/// direction in as many equal parts as its own cells (at least four),
+/// moved by `shift` of a part, so no side lies where a piece of the
+/// surface meets the next. A curve along such a line (a plane through a
+/// spline sphere's equator, a knot line) lies on the side of every first
+/// cell beside it, where no crossing can be isolated; cut so, it lies
+/// inside one. Enclosures over a cell reaching across pieces are still
+/// certified. With `shift` 0, [`cells`] itself.
+pub(crate) fn cells_off(s: &Surface, near: &Box3, shift: f64) -> Vec<Cell> {
+    let natural = cells(s, near);
+    if shift == 0.0 || natural.is_empty() {
+        return natural;
+    }
+    let (pu, pv) = s.periods();
+    let periods = [pu, pv];
+    let mut axes: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+    for k in 0..2 {
+        let mut parts: Vec<[f64; 2]> = natural.iter().map(|c| c[k]).collect();
+        parts.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+        parts.dedup();
+        let lo = parts.iter().map(|r| r[0]).fold(f64::INFINITY, f64::min);
+        let hi = parts.iter().map(|r| r[1]).fold(f64::NEG_INFINITY, f64::max);
+        let n = parts.len().max(4);
+        let at = |i: f64| lo + (hi - lo) * i / n as f64;
+        axes[k] = match periods[k] {
+            // A whole period, moved on.
+            Some(p) if hi - lo >= p * (1.0 - 1e-12) => (0..=n)
+                .map(|i| lo + p * (i as f64 + shift) / n as f64)
+                .collect(),
+            _ => core::iter::once(lo)
+                .chain((0..n).map(|i| at(i as f64 + shift)))
+                .chain(core::iter::once(hi))
+                .collect(),
+        };
+        axes[k].dedup();
+    }
+    let out = axes[0]
+        .windows(2)
+        .flat_map(|u| {
+            axes[1]
+                .windows(2)
+                .map(move |v| [[u[0], u[1]], [v[0], v[1]]])
+        })
+        .collect();
+    reaching(s, out, near)
+}
+
 /// The least and greatest of `p · w` over a box's corners.
 fn span(b: &Box3, w: Vector3) -> [f64; 2] {
     b.corners()

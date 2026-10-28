@@ -2,7 +2,10 @@
 //! writes back canonically and reads back equal, or give a structured
 //! error. Loaded, it is built as feature `f` of a part after boxes `b`
 //! and `c`, a rectangle sketch `s`, a sketch `t` on `b`'s top with a lone
-//! point and a pocket `k` cut from `b`'s top, so its references resolve
+//! point, a pocket `k` cut from `b`'s top and an import `m` of a seeded
+//! body ryustep wrote (`imports/seeded.step`, products `s0` to `s7`,
+//! which an import `f` may select too; assemblies place the part without
+//! it), so its references resolve
 //! against real faces, edges and vertices, its operations act on real
 //! solids, its fillets and chamfers (seeded with `b`'s edges) round real
 //! edges, its holes drill at `t`'s point and its patterns repeat `k`:
@@ -87,12 +90,49 @@ fn base() -> &'static [(Id, Feature)] {
     })
 }
 
-/// Part `fz`: the base, then `f`.
+/// The file the imports read: eight race bodies (the five primitives,
+/// then seeded sweeps, booleans and blends) ryustep wrote, each its own
+/// product `s<i>`, at a fixed time stamp so its BLAKE3 never changes.
+fn seeded() -> &'static ryucad::doc::project::ImportFile {
+    static FILE: OnceLock<ryucad::doc::project::ImportFile> = OnceLock::new();
+    FILE.get_or_init(|| {
+        let products = ryukei_testkit::race::writable(8)
+            .into_iter()
+            .enumerate()
+            .map(|(i, b)| ryustep::Product {
+                id: format!("s{i}"),
+                name: format!("s{i}"),
+                bodies: vec![b],
+                ..Default::default()
+            })
+            .collect();
+        let opts = ryustep::WriteOptions {
+            time_stamp: "2026-10-27T00:00:00".into(),
+            ..Default::default()
+        };
+        let bytes = ryustep::write(&ryustep::WriteModel { products }, &opts).unwrap();
+        ryucad::doc::project::ImportFile::new(bytes)
+    })
+}
+
+/// The import `m` of `s1`'s body (a cylinder) a part's `f` follows.
+fn import_m() -> Feature {
+    let m = format!(
+        r#"{{"format": 5, "kind": "ryucad.feature", "type": "import", "body": 0,
+             "file": {{"path": "imports/seeded.step", "blake3": "{}"}},
+             "product": {{"id": "s1", "name": "s1"}}}}"#,
+        seeded().blake3
+    );
+    Feature::from_json(&canonical::parse(&m).unwrap(), Unit::Mm, &Env::empty()).unwrap()
+}
+
+/// Part `fz`: the base, the import `m`, then `f`.
 fn part(f: Feature) -> Part {
     let mut features: BTreeMap<Id, ryucad::error::Result<Feature>> = base()
         .iter()
         .map(|(i, x)| (i.clone(), Ok(x.clone())))
         .collect();
+    features.insert(id("m"), Ok(import_m()));
     features.insert(id("f"), Ok(f));
     Part {
         id: Id::parse("fz", "part").unwrap(),
@@ -102,6 +142,7 @@ fn part(f: Feature) -> Part {
             id("s"),
             id("t"),
             id("k"),
+            id("m"),
             id("f"),
         ])),
         parameters: None,
@@ -109,7 +150,7 @@ fn part(f: Feature) -> Part {
         features,
         uses: BTreeMap::new(),
         acts: BTreeMap::new(),
-        imports: BTreeMap::new(),
+        imports: BTreeMap::from([("imports/seeded.step".to_owned(), seeded().clone())]),
         revision: String::new(),
     }
 }

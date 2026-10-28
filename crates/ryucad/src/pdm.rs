@@ -228,7 +228,7 @@ pub fn configure(session: &mut Session, change: Change, expected: Option<&str>) 
     }
     files.insert(
         PDM_CONFIG.to_owned(),
-        canonical::to_string(&c.to_json()).into_bytes(),
+        canonical::to_string(&c.to_json()).into_bytes().into(),
     );
     let added = added_faults(session, &files);
     if let (false, Some(first)) = (change.force, added.first()) {
@@ -318,7 +318,10 @@ pub fn set(
     let at = props::path(&id);
     match file.values.is_empty() {
         true => files.remove(&at),
-        false => files.insert(at, canonical::to_string(&file.to_json()).into_bytes()),
+        false => files.insert(
+            at,
+            canonical::to_string(&file.to_json()).into_bytes().into(),
+        ),
     };
     // A duplicate number is reported on both parts: say it of this one.
     let added = added_faults(session, &files);
@@ -496,6 +499,7 @@ mod tests {
                 "material",
                 "uom",
                 "make_buy",
+                "amount",
                 "coated",
                 "count"
             ]

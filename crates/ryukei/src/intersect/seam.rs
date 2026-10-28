@@ -1,14 +1,15 @@
 //! Moving the seam of a closed branch.
 //!
 //! A traced intersection that closes up (a pipe cut all round, the
-//! spine of a small fillet round a pipe's end) is fitted as a clamped
-//! spline that starts and ends at the same point, somewhere the tracer
-//! chose. A blend that needs a stretch across that point gets it by
-//! moving the start: the spline is cut there and its two pieces joined
-//! the other way round, the second's parameters a period on. Its pcurves
-//! move with it, the second piece shifted by however far the pcurve
-//! winds in the surface's parameters over the period (round a pipe, a
-//! turn in its angle).
+//! spine of a small fillet round a pipe's end, an edge round a spline
+//! bore that healing tightens) is fitted as a clamped spline that starts
+//! and ends at the same point, somewhere the tracer chose. A blend that
+//! needs a stretch across that point, or a closed edge that must start at
+//! its vertex, gets it by moving the start: the spline is cut there and
+//! its two pieces joined the other way round, the second's parameters a
+//! period on. Its pcurves move with it, the second piece shifted by
+//! however far the pcurve winds in the surface's parameters over the
+//! period (round a pipe, a turn in its angle).
 
 use crate::geom::{Curve, Curve2, KnotVector, NurbsCurve, NurbsCurve2, Point2, Point3, Vector2};
 use crate::intersect::Branch;

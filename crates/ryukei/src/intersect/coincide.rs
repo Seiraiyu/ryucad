@@ -32,7 +32,9 @@
 //!   and both given the knots of either, have equal degrees, weights in
 //!   one ratio and control points within resolution of each other (their
 //!   points at the same parameters then are too), or where one is such a
-//!   part of the other, cut where the first's corners project.
+//!   part of the other, cut where the first's corners project;
+//! - two flat NURBS (every control point within half the resolution of a
+//!   plane) on one plane.
 //!
 //! Anything else is not coincident: overlapping surfaces the rules don't
 //! name are left to the intersectors, which can't separate them and say
@@ -100,7 +102,8 @@ fn general(a: &Surface, b: &Surface) -> Option<bool> {
     if let (Surface::Nurbs(x), Surface::Nurbs(y)) = (a, b) {
         return splines(x, y)
             .or_else(|| part_of(x, y))
-            .or_else(|| part_of(y, x));
+            .or_else(|| part_of(y, x))
+            .or_else(|| on_one_plane(x, y));
     }
     let (s, other) = match (Implicit::of(a).is_some(), Implicit::of(b).is_some()) {
         (false, true) => (a, b),
@@ -140,6 +143,88 @@ fn general(a: &Surface, b: &Surface) -> Option<bool> {
     let (ou, ov) = other.project(s.point(u, v)).param;
     let m = other.normal(ou, ov)?;
     Some(n.dot(m) > 0.0)
+}
+
+/// The plane a NURBS lies on: the one through its control net's corner
+/// with the normal its diagonals give, when every control point lies
+/// within half the resolution of it (the patches, their weights positive,
+/// then lie within it too). `None` for a spline that isn't flat.
+pub(crate) fn planar(n: &NurbsSurface) -> Option<Surface> {
+    let [nu, nv] = n.counts();
+    let c = [
+        n.control_point(0, 0),
+        n.control_point(nu - 1, 0),
+        n.control_point(0, nv - 1),
+        n.control_point(nu - 1, nv - 1),
+    ];
+    let normal = (c[3] - c[0]).cross(c[2] - c[1]).normalize()?;
+    let along = (c[1] - c[0])
+        .normalize()
+        .or_else(|| (c[3] - c[0]).normalize())?;
+    let frame = Frame::new(c[0], normal.get(), along.get()).ok()?;
+    let flat = n
+        .control_points()
+        .all(|p| (p - c[0]).dot(normal.get()).abs() <= LINEAR_RESOLUTION / 2.0);
+    flat.then(|| Surface::Plane(crate::geom::Plane::new(frame)))
+}
+
+/// Two flat NURBS on one plane, neither a part of the other (faces of
+/// blocks side by side in spline form): `same` from their natural
+/// normals at their middles.
+fn on_one_plane(x: &NurbsSurface, y: &NurbsSurface) -> Option<bool> {
+    let (px, py) = (planar(x)?, planar(y)?);
+    coincident(&px, &py)?;
+    let mid = |n: &NurbsSurface| {
+        let [du, dv] = n.domain();
+        n.normal((du[0] + du[1]) / 2.0, (dv[0] + dv[1]) / 2.0)
+    };
+    Some(mid(x)?.dot(mid(y)?) > 0.0)
+}
+
+/// Of two coincident surfaces, one whose domain holds everything on the
+/// other: `Some(true)` for `a`, `Some(false)` for `b`, else `None` (two
+/// splines overlapping, neither a part of the other).
+pub(crate) fn covering(a: &Surface, b: &Surface) -> Option<bool> {
+    if a == b || Implicit::of(a).is_some() {
+        return Some(true);
+    }
+    if Implicit::of(b).is_some() {
+        return Some(false);
+    }
+    match (a, b) {
+        (Surface::Nurbs(x), Surface::Nurbs(y)) => {
+            if part_of(y, x).is_some() {
+                Some(true)
+            } else if part_of(x, y).is_some() {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// A surface coincident with both of two coincident surfaces whose
+/// parameter plane holds both their faces: an analytic one if either is
+/// (unbounded, or closed), else the plane two flat splines lie on, else
+/// the spline the other is a part of, else the first.
+pub(crate) fn common(a: &Surface, b: &Surface) -> Surface {
+    if Implicit::of(a).is_some() {
+        return a.clone();
+    }
+    if Implicit::of(b).is_some() {
+        return b.clone();
+    }
+    if let (Surface::Nurbs(x), Surface::Nurbs(y)) = (a, b) {
+        if let Some(p) = planar(x).filter(|_| planar(y).is_some()) {
+            return p;
+        }
+        if part_of(x, y).is_some() {
+            return b.clone();
+        }
+    }
+    a.clone()
 }
 
 /// Whether every Bézier patch of a NURBS is certified within resolution of
@@ -479,6 +564,30 @@ mod tests {
             coincident(&spline(&plane, [[-1.0, 1.0], [-1.0, 1.0]]), &flipped),
             Some(false)
         );
+    }
+
+    /// Two flat splines on one plane, overlapping without either being a
+    /// part of the other, are coincident, and their common surface is
+    /// that plane; one spline off the plane by twice the resolution isn't.
+    #[test]
+    fn flat_splines_on_one_plane() {
+        let z = (0.2, 0.1, 1.0);
+        let plane = Surface::Plane(Plane::new(frame((0.0, 0.0, 1.0), z)));
+        let a = spline(&plane, [[-1.0, 1.0], [-1.0, 1.0]]);
+        let b = spline(&plane, [[0.5, 2.5], [-0.5, 1.5]]);
+        assert_eq!(coincident(&a, &b), Some(true));
+        assert_eq!(covering(&a, &b), None);
+        let c = common(&a, &b);
+        assert!(matches!(c, Surface::Plane(_)));
+        assert_eq!(coincident(&c, &plane), Some(true));
+        let off = Surface::Plane(Plane::new(frame((0.0, 0.0, 1.0 + 2e-8), z)));
+        assert_eq!(
+            coincident(&a, &spline(&off, [[0.5, 2.5], [-0.5, 1.5]])),
+            None
+        );
+        // An analytic surface covers its splines; a spline covers its parts.
+        assert_eq!(covering(&plane, &b), Some(true));
+        assert_eq!(covering(&b, &plane), Some(false));
     }
 
     #[test]

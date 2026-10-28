@@ -2202,3 +2202,103 @@ fn a_free_instance_is_dragged_and_written_once() {
     assert_eq!(back["pose"]["origin_m"][0], 0.04);
     p.ok(&["config", "set", "ui.navigation", "ryucad"]);
 }
+
+fn occt(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../ryustep/tests/data/occt")
+        .join(name)
+}
+
+/// Types `text` into the field labelled `label`.
+fn type_into(h: &mut Harness<'static, App>, label: &str, text: &str) {
+    h.get_by_label(label).click();
+    h.step();
+    h.get_by_label(label).type_text(text);
+    h.step();
+}
+
+#[test]
+fn file_import_step_plans_then_imports() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new();
+    let mut h = window(&p);
+    frames(&mut h, |a| a.opened().ws.idle());
+    menu(&mut h, "File", "Import STEP…");
+    shown(&mut h, "STEP file");
+    type_into(
+        &mut h,
+        "STEP file",
+        &occt("box_ap214.stp").display().to_string(),
+    );
+    h.get_by_label("Plan").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .import
+            .as_ref()
+            .is_some_and(|i| i.current().is_some())
+    });
+    shown(&mut h, "part-2 (new part, product part 2)");
+    assert!(!p.root.join("imports").exists(), "a plan writes nothing");
+    h.get_by_label("Import").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .part("part-2")
+            .and_then(|p| p.feature("body"))
+            .is_some_and(|f| f.import.is_some())
+    });
+    shown(&mut h, "body (import: box_ap214.step / part 2)");
+    // Chosen, the import offers its update, for its own file.
+    h.get_by_label("body (import: box_ap214.step / part 2)")
+        .click();
+    frames(&mut h, |a| a.opened().view.chosen.is_some());
+    h.get_by_label("Close").click();
+    h.step();
+    menu(&mut h, "File", "Update import…");
+    shown(&mut h, "Update import");
+    assert_eq!(
+        h.state()
+            .opened()
+            .ws
+            .import
+            .as_ref()
+            .unwrap()
+            .update
+            .as_deref(),
+        Some("imports/box_ap214.step")
+    );
+}
+
+#[test]
+fn file_export_step_writes_the_shown_part() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    menu(&mut h, "File", "Export STEP…");
+    shown(&mut h, "Save as");
+    let out = tempfile::tempdir().unwrap();
+    let path = out.path().join("p.step");
+    type_into(&mut h, "Save as", &path.display().to_string());
+    h.get_by_label("Export").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .export
+            .as_ref()
+            .is_some_and(|e| e.done.is_some() || e.error.is_some())
+    });
+    let e = h.state().opened().ws.export.clone().unwrap();
+    assert!(e.error.is_none(), "{:?}", e.error);
+    assert_eq!(e.part, "p");
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(bytes.starts_with(b"ISO-10303-21;"));
+    assert_eq!(e.done.unwrap().1, bytes.len());
+}

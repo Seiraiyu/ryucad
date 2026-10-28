@@ -3,7 +3,10 @@
 //! records that read must write back to themselves; properties must read
 //! back as written and be judged against the settings without panicking;
 //! a record's labels must read the same in every scheme they belong to.
-//! Any panic is a bug.
+//! The text is also an `amount` against every unit of measure: one that
+//! reads is a positive number and judges a part counted in that unit
+//! sound, written at format 2 and read back as written. Any panic is a
+//! bug.
 
 #![no_main]
 
@@ -11,9 +14,9 @@ use libfuzzer_sys::fuzz_target;
 use ryucad::doc::canonical;
 use ryucad::doc::id::Id;
 use ryucad::units::Unit;
-use ryupdm::config::{Config, Scheme};
+use ryupdm::config::{Config, Scheme, UOMS};
 use ryupdm::label;
-use ryupdm::props::{Properties, check, coerce, fits};
+use ryupdm::props::{Properties, amount, check, coerce, fits, missing};
 use ryupdm::record::{Kind, Record};
 
 /// Settings with one property of every type, to judge properties against.
@@ -29,6 +32,7 @@ fuzz_target!(|data: &[u8]| {
     let Ok(text) = std::str::from_utf8(data) else {
         return;
     };
+    amounts(text);
     let Ok(v) = canonical::parse(text) else {
         return;
     };
@@ -74,3 +78,30 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 });
+
+/// `text` as the `amount` of a part counted in each unit of measure.
+fn amounts(text: &str) {
+    let settings = Config::from_json(&canonical::parse(SETTINGS).unwrap()).unwrap();
+    let part = Id::parse("p", "part").unwrap();
+    for uom in UOMS {
+        let read = amount(text, uom);
+        if let Ok(x) = read {
+            assert!(x.is_finite() && x > 0.0, "{text:?} in {uom}: {x}");
+        }
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("uom".to_owned(), serde_json::json!(uom));
+        values.insert("amount".to_owned(), serde_json::json!(text));
+        let p = Properties { values };
+        let v = p.to_json();
+        assert_eq!(v["format"], 2);
+        assert_eq!(Properties::from_json(&v).unwrap(), p);
+        let faults = check(&settings, Unit::Mm, &part, &p);
+        let judged = faults.iter().any(|e| e.details["property"] == "amount");
+        // Judged unsound when it isn't one line of text, or not an amount.
+        let decl = settings.decl("amount").unwrap();
+        let bad = fits(&decl, &serde_json::json!(text), Unit::Mm).is_some() || read.is_err();
+        assert_eq!(judged, bad, "{text:?} in {uom}: {faults:?}");
+        // With an amount, only the number is missing to release.
+        assert_eq!(missing(&settings, &p), ["number"]);
+    }
+}

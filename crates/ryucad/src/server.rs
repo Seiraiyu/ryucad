@@ -304,6 +304,31 @@ fn dispatch(
             expected_revision.as_deref(),
         ),
         Request::PropsGet { part } => crate::pdm::get(session, &part),
+        Request::BomGet {
+            part,
+            rev,
+            flat,
+            depth,
+            format,
+        } => crate::bom::get(
+            session,
+            &crate::bom::Ask {
+                part: part.as_deref(),
+                rev: rev.as_deref(),
+                flat,
+                depth,
+                format: format.as_deref(),
+            },
+        ),
+        Request::BomDiff { part, from, to } => {
+            crate::bom::diff(session, part.as_deref(), from.as_deref(), to.as_deref())
+        }
+        Request::BomWhereUsed {
+            part,
+            label,
+            working,
+            direct,
+        } => crate::bom::where_used(session, &part, label.as_deref(), working, direct),
         Request::ReleaseList { part } => versioned(crate::release::list(session, part.as_deref())),
         Request::ReleaseSync {} => crate::release::sync(session),
         Request::ReleaseCheck { results } => crate::release::check(session, results),
@@ -3194,16 +3219,17 @@ fn feature_move(
     Ok(json!({"features": list, "revision": revision}))
 }
 
+/// `feature.list`: each feature as listed, `ok` when it builds (issue
+/// #123: a file that loads may still fail to build), with the rebuild's
+/// error where it doesn't and `blocked` where only a feature it needs
+/// failed. A part that can't be rebuilt at all lists what loads.
 fn feature_list(session: &mut Session, part: &str) -> Result<Value> {
     let pid = part_id(part)?;
-    // Whether each feature built, not only whether its file loads (#123):
-    // the session's rebuild, cached. A part that can't be rebuilt at all
-    // (a cycle through its assemblies) still lists what its files say.
-    let built: BTreeMap<Id, Error> = match session.rebuilt(&pid) {
+    let built: BTreeMap<Id, std::result::Result<(), Error>> = match session.rebuilt(&pid) {
         Ok(r) => r
             .features
             .iter()
-            .filter_map(|(fid, b)| Some((fid.clone(), b.as_ref().err()?.clone())))
+            .map(|(id, o)| (id.clone(), o.as_ref().map(|_| ()).map_err(Error::clone)))
             .collect(),
         Err(_) => BTreeMap::new(),
     };
@@ -3212,10 +3238,14 @@ fn feature_list(session: &mut Session, part: &str) -> Result<Value> {
         .iter()
         .map(|id| match feature(p, id) {
             Ok(f) => {
-                let mut v = match built.get(id) {
-                    Some(e) => json!({"id": id, "type": f.type_name(), "ok": false, "error": e}),
-                    None => json!({"id": id, "type": f.type_name(), "ok": true}),
-                };
+                let mut v = json!({"id": id, "type": f.type_name(), "ok": true});
+                if let Some(Err(e)) = built.get(id) {
+                    v["ok"] = json!(false);
+                    v["error"] = json!(e);
+                    if e.code == Code::DependencyFailed {
+                        v["blocked"] = json!(true);
+                    }
+                }
                 let uses = crate::graph::inputs(f);
                 if !uses.is_empty() {
                     v["uses"] = json!(uses);
@@ -3304,6 +3334,16 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
         let c = b.body.counts();
         json!({"faces": c.faces, "edges": c.edges, "vertices": c.vertices})
     };
+    // An import's file, hash, product and body, as written: shown
+    // whether it built or not.
+    let imports: BTreeMap<Id, Value> = part
+        .features
+        .iter()
+        .filter_map(|(fid, f)| match f.as_ref().ok()? {
+            Feature::Import(i) => Some((fid.clone(), crate::import::written(i))),
+            _ => None,
+        })
+        .collect();
     // Instances an update kept though their usage left the file.
     let kept = if assembly {
         crate::import::usage_warnings(session.project(), id)
@@ -3365,6 +3405,14 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
             };
             if let Some(u) = uses.get(fid) {
                 v["uses"] = json!(u);
+            }
+            if let Some(Value::Object(m)) = imports.get(fid) {
+                if !v["import"].is_object() {
+                    v["import"] = json!({});
+                }
+                for (k, x) in m {
+                    v["import"][k] = x.clone();
+                }
             }
             if let Some(Value::Object(m)) = mates.get(fid) {
                 if !v["mate"].is_object() {
@@ -4730,7 +4778,7 @@ pub(crate) fn diff(
                 let path = f["path"].as_str().unwrap_or_default().to_owned();
                 let (a, b) = (fa.get(&path), fb.get(&path));
                 f["products"] =
-                    crate::import::products_diff(&path, a.map(Vec::as_slice), b.map(Vec::as_slice));
+                    crate::import::products_diff(&path, a.map(|x| &x[..]), b.map(|x| &x[..]));
             }
         }
     }
@@ -5131,38 +5179,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn features_that_fail_to_build_are_listed_failed() {
-        // #123: a feature whose file loads but doesn't build isn't ok, and
-        // what reads it fails with it.
-        let (_dir, mut s) = fresh();
-        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
-        let add = |s: &mut Session, f: Value| {
-            let mut f = f;
-            f["part"] = json!("p");
-            call(s, "feature.add", f).unwrap();
-        };
-        let unit = |id: &str, x: i32| {
-            json!({"type": "box", "id": id, "params": {"x": 10, "y": 10, "z": 10},
-                   "placement": {"origin": [x, 0, 0]}})
-        };
-        add(&mut s, unit("a", 0));
-        let mut miss = unit("c", 50);
-        miss["operation"] = json!("cut");
-        add(&mut s, miss);
-        let mut after = unit("d", 5);
-        after["operation"] = json!("join");
-        add(&mut s, after);
-        let list = call(&mut s, "feature.list", json!({"part": "p"})).unwrap();
-        let f = &list["features"];
-        assert_eq!(f[0]["ok"], true);
-        assert_eq!(f[1]["ok"], false, "{list}");
-        assert_eq!(f[1]["type"], "box");
-        assert_eq!(f[1]["error"]["code"], "operation_no_effect");
-        assert_eq!(f[2]["ok"], false);
-        assert_eq!(f[2]["error"]["code"], "dependency_failed");
-    }
-
-    #[test]
     fn broken_features_are_listed_with_their_error() {
         let (dir, mut s) = with_part();
         call(
@@ -5184,6 +5200,50 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::InvalidJson);
+    }
+
+    #[test]
+    fn features_that_fail_to_build_are_listed_failed() {
+        // Issue #123: a file that loads but doesn't build was listed ok.
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        let unit = |id: &str, x: i32| {
+            json!({"part": "p", "type": "box", "id": id, "params": {"x": 10, "y": 10, "z": 10},
+                   "placement": {"origin": [x, 0, 0]}})
+        };
+        call(&mut s, "feature.add", unit("a", 0)).unwrap();
+        // A cut far from the box takes nothing: its file loads, but it
+        // fails to build.
+        let mut cut = unit("c", 100);
+        cut["operation"] = json!("cut");
+        call(&mut s, "feature.add", cut).unwrap();
+        // One after it on the same solid is blocked by it.
+        let mut d = unit("d", 5);
+        d["operation"] = json!("cut");
+        call(&mut s, "feature.add", d).unwrap();
+        let list = call(&mut s, "feature.list", json!({"part": "p"})).unwrap();
+        let f = &list["features"];
+        assert_eq!(f[0]["ok"], true);
+        assert_eq!(f[1]["ok"], false);
+        assert_eq!(f[1]["error"]["code"], "operation_no_effect");
+        assert!(f[1].get("blocked").is_none());
+        assert_eq!(f[2]["ok"], false);
+        assert_eq!(f[2]["blocked"], true);
+        // Moved onto the box, it builds.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "c", "placement": {"origin": [5, 5, 0]}}),
+        )
+        .unwrap();
+        let list = call(&mut s, "feature.list", json!({"part": "p"})).unwrap();
+        assert!(
+            list["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|f| f["ok"] == true)
+        );
     }
 
     #[test]

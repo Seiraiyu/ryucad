@@ -70,7 +70,20 @@ pub fn curve_surface(
         return super::pipe_cs::curve_pipe(curve, [t0, t1], surface, tolerance);
     }
     let Some(imp) = Implicit::of(surface) else {
-        return super::sheet_cs::curve_sheet(curve, [t0, t1], surface, tolerance);
+        return super::sheet_cs::curve_sheet(curve, [t0, t1], surface, tolerance).or_else(|e| {
+            // A curve along a bounded surface's domain edge lies on the
+            // side of every cell beside it: on the surface carried past
+            // its edges it lies inside. What is found there must lie on
+            // the surface itself.
+            let Failure::Uncertain = e else {
+                return Err(e);
+            };
+            let Some(ext) = super::ss::extended(surface, 16.0) else {
+                return Err(e);
+            };
+            let hits = super::sheet_cs::curve_sheet(curve, [t0, t1], &ext, tolerance)?;
+            on_surface(curve, surface, tolerance.max(LINEAR_RESOLUTION), hits)
+        });
     };
     let tolerance = tolerance.max(LINEAR_RESOLUTION);
     let chain = Chain3::new(curve, t0, t1);
@@ -104,6 +117,46 @@ pub fn curve_surface(
         let lo = if k == 0 { t0 } else { merged[k - 1].t[1] };
         let hi = merged.get(k + 1).map_or(t1, |n| n.t[0]);
         out.push(ctx.classify(c, [lo, hi])?);
+    }
+    Ok(out)
+}
+
+/// The hits found on a spline carried on past its domain that lie on the
+/// spline itself, within `tolerance` of it; one farther off by less than
+/// twice that can't be decided (`Uncertain`). A stretch on it must hold
+/// at both ends and its middle.
+fn on_surface(
+    curve: &Curve,
+    surface: &Surface,
+    tolerance: f64,
+    hits: Vec<CurveHit>,
+) -> Result<Vec<CurveHit>, Failure> {
+    let on = |p: Point3| -> Result<bool, Failure> {
+        let d = surface.distance(p);
+        if d <= tolerance {
+            Ok(true)
+        } else if d > 2.0 * tolerance {
+            Ok(false)
+        } else {
+            Err(Failure::Uncertain)
+        }
+    };
+    let mut out = Vec::with_capacity(hits.len());
+    for h in hits {
+        let keep = match h {
+            CurveHit::Point { point, .. } => on(point)?,
+            CurveHit::On { t: [a, b] } => {
+                let ends = [a, (a + b) / 2.0, b].map(|t| on(curve.point(t)));
+                match ends {
+                    [Ok(true), Ok(true), Ok(true)] => true,
+                    [Ok(false), Ok(false), Ok(false)] => false,
+                    _ => return Err(Failure::Uncertain),
+                }
+            }
+        };
+        if keep {
+            out.push(h);
+        }
     }
     Ok(out)
 }

@@ -1701,6 +1701,7 @@ dependencies = [
  "blake3",
  "interprocess",
  "libc",
+ "rayon",
  "ryu-doc",
  "serde",
  "serde_json",
@@ -1762,6 +1763,7 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "ryucad",
+ "ryucad-doc",
  "ryukei",
  "ryukei-testkit",
  "ryumate",
@@ -1778,6 +1780,7 @@ dependencies = [
  "num-bigint",
  "num-rational",
  "num-traits",
+ "rayon",
  "ryukei",
 ]
 

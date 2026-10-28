@@ -134,7 +134,7 @@ fn json_of(bytes: &[u8]) -> Option<Value> {
 
 /// A side's version of a file, as a conflict shows it: its JSON, or its
 /// text when it isn't JSON; `None` when the side has no file.
-fn shown(bytes: Option<&Vec<u8>>) -> Option<Value> {
+fn shown(bytes: Option<&[u8]>) -> Option<Value> {
     let b = bytes?;
     Some(json_of(b).unwrap_or_else(|| Value::String(String::from_utf8_lossy(b).into_owned())))
 }
@@ -257,7 +257,7 @@ fn unmerged(
             }
         };
         for (k, side) in [("base", &u.base), ("ours", &u.ours), ("theirs", &u.theirs)] {
-            if let Some(s) = shown(side.as_ref()) {
+            if let Some(s) = shown(side.as_deref()) {
                 x[k] = s;
             }
         }
@@ -318,7 +318,7 @@ pub(crate) fn kept_unlisted(
         );
         x["deleted_by"] = json!(by);
         for (k, side) in [("base", base), ("ours", ours), ("theirs", theirs)] {
-            if let Some(s) = shown(side.get(path)) {
+            if let Some(s) = shown(side.get(path).map(|b| &b[..])) {
                 x[k] = s;
             }
         }
@@ -976,7 +976,7 @@ fn renames(
                         } else {
                             (changed, added)
                         };
-                        crate::merge::bytes(qb, o, t).0 == *merged
+                        crate::merge::bytes(qb, o, t).0[..] == merged[..]
                     }
             });
             let Some((q, _)) = from else { continue };
@@ -1289,7 +1289,7 @@ fn settle_record(
         conflicts: record,
     }
     .to_json();
-    files.insert(path.to_owned(), crate::doctor::canonical_bytes(&v));
+    files.insert(path.to_owned(), crate::doctor::canonical_bytes(&v).into());
     Ok(())
 }
 
@@ -1319,7 +1319,7 @@ fn set_property(
     } else {
         files.insert(
             path.to_owned(),
-            crate::doctor::canonical_bytes(&props.to_json()),
+            crate::doctor::canonical_bytes(&props.to_json()).into(),
         );
     }
     Ok(())
@@ -1331,7 +1331,7 @@ fn set_property(
 fn settle_unmerged(
     files: &mut crate::activity::Files,
     path: &str,
-    side: Option<&Vec<u8>>,
+    side: Option<&crate::activity::Bytes>,
     side_files: &crate::activity::Files,
 ) {
     match side {
@@ -1367,7 +1367,7 @@ fn settle_unmerged(
         _ => return,
     }
     v["features"] = json!(list);
-    files.insert(index, crate::doctor::canonical_bytes(&v));
+    files.insert(index, crate::doctor::canonical_bytes(&v).into());
 }
 
 /// `merge.resolve`: settles each conflict as asked, in order, and writes
@@ -1440,8 +1440,8 @@ pub fn resolve(
                 };
                 let side_files = repo.files(commit)?;
                 let bytes = match unmerged.get(&path) {
-                    Some(u) if side == "ours" => u.ours.clone(),
-                    Some(u) => u.theirs.clone(),
+                    Some(u) if side == "ours" => u.ours.clone().map(Into::into),
+                    Some(u) => u.theirs.clone().map(Into::into),
                     // Kept and staged: the file as it is now, unless the
                     // side chosen deleted it.
                     None if found["deleted_by"] == side => None,
@@ -1470,7 +1470,7 @@ pub fn resolve(
                     let p = c["path"].as_str().unwrap_or_default().to_owned();
                     match c["content"].as_str() {
                         Some(text) => {
-                            files.insert(p, text.as_bytes().to_vec());
+                            files.insert(p, text.as_bytes().into());
                         }
                         None => {
                             files.remove(&p);

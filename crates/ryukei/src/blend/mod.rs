@@ -35,7 +35,6 @@ mod names;
 mod overflow;
 mod plan;
 mod rail;
-mod seam;
 mod spec;
 mod spine;
 mod stage;

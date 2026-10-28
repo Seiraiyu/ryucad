@@ -63,6 +63,8 @@ pub struct Session {
     /// Bodies of released content as this build rebuilds them, by content
     /// hash, for `release_result_changed`.
     pub(crate) release_results: BTreeMap<String, BTreeMap<String, String>>,
+    /// Parts read at commits for BOMs and where-used, by commit and part.
+    pub(crate) structure: ryupdm::structure::Cache,
 }
 
 impl Session {
@@ -81,6 +83,7 @@ impl Session {
             merge_status: None,
             releases: None,
             release_results: BTreeMap::new(),
+            structure: ryupdm::structure::Cache::new(),
         };
         s.scan()?;
         Ok(s)
@@ -124,6 +127,7 @@ impl Session {
             merge_status: None,
             releases: None,
             release_results: BTreeMap::new(),
+            structure: from.structure.clone(),
         })
     }
 
@@ -257,7 +261,7 @@ impl Session {
         let mut files = self.snapshot();
         for (path, bytes) in writes {
             match bytes {
-                Some(b) => files.insert(path.clone(), b.clone()),
+                Some(b) => files.insert(path.clone(), b.as_slice().into()),
                 None => files.remove(path),
             };
         }
@@ -280,40 +284,10 @@ impl Session {
     /// keeping each as [`Session::rebuilt`] would: an import of many parts
     /// heals their bodies in parallel.
     pub fn rebuild_parts(&mut self, parts: &[Id]) -> Result<()> {
-        use crate::doc::files::PartKind;
-        use rayon::prelude::*;
-        let todo: Vec<&Part> = parts
-            .iter()
-            .filter_map(|id| self.project.parts.get(id))
-            .filter(|p| !p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly))
-            .filter(|p| {
-                !self
-                    .store
-                    .results
-                    .get(&p.id)
-                    .is_some_and(|(k, _)| *k == p.revision)
-            })
-            .collect();
-        let empty = crate::rebuild::Cache::new();
-        let disk = self.store.disk.as_deref();
-        let built: Vec<(Id, PartResult, crate::rebuild::Cache)> = todo
-            .par_iter()
-            .map(|p| {
-                let cache = self.store.caches.get(&p.id).unwrap_or(&empty);
-                let children = crate::assembly::Children::new();
-                let (r, c) = crate::rebuild::rebuild_part_in(p, cache, &children, disk);
-                (p.id.clone(), r, c)
-            })
-            .collect();
-        let mut fresh = Vec::new();
-        for (id, r, c) in built {
-            let key = self.project.part(&id)?.revision.clone();
-            self.store.caches.insert(id.clone(), c);
-            self.store.results.insert(id.clone(), (key, r));
-            fresh.push(id);
-        }
-        self.keep_fresh(fresh);
-        Ok(())
+        self.rebuild(|r| {
+            r.build_parts(parts);
+            Ok(())
+        })
     }
 
     /// `part` at `rev` as rebuilt, every part it places first: its files,
@@ -334,6 +308,47 @@ impl Session {
             Ok(())
         })?;
         out.expect("asked")
+    }
+
+    /// [`Session::node`] for `part` at `rev` and for every part and
+    /// revision it places, at any depth, all in one rebuild: what an
+    /// export of an assembly of thousands of parts walks.
+    #[allow(clippy::type_complexity)]
+    pub fn nodes(
+        &mut self,
+        part: &Id,
+        rev: &Rev,
+    ) -> Result<BTreeMap<(Id, Rev), (Part, PartResult, Option<crate::assembly::Pin>)>> {
+        let extra = match rev {
+            Rev::Working => Vec::new(),
+            Rev::Label(l) => vec![(part.clone(), l.clone())],
+        };
+        let mut out = BTreeMap::new();
+        self.rebuild_with(extra, |r| {
+            let mut todo = vec![(part.clone(), rev.clone())];
+            while let Some(at) = todo.pop() {
+                if out.contains_key(&at) {
+                    continue;
+                }
+                let node = r.node(&at.0, &at.1)?;
+                for (_, f) in &node.1.features {
+                    match f {
+                        Ok(crate::rebuild::Output::Instance(p)) => {
+                            todo.push((p.part.clone(), p.rev.clone()));
+                        }
+                        Ok(crate::rebuild::Output::Copies(c)) => todo.extend(
+                            c.copies
+                                .iter()
+                                .map(|c| (c.placed.part.clone(), c.placed.rev.clone())),
+                        ),
+                        _ => {}
+                    }
+                }
+                out.insert(at, node);
+            }
+            Ok(())
+        })?;
+        Ok(out)
     }
 
     /// Runs `f` over an [`assembly::Rebuild`](crate::assembly::Rebuild)
@@ -669,6 +684,14 @@ impl crate::doc::source::Source for Session {
             .fold(self.root().to_path_buf(), |p, s| p.join(s));
         Ok(self.stamps.bytes(&path).map(<[u8]>::to_vec))
     }
+
+    fn read_shared(&self, rel: &str) -> Result<Option<Arc<[u8]>>> {
+        let path = rel
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .fold(self.root().to_path_buf(), |p, s| p.join(s));
+        Ok(self.stamps.shared(&path))
+    }
 }
 
 /// The files a project's state depends on: the manifest, the attributes
@@ -758,6 +781,24 @@ mod tests {
             .primitive()
             .unwrap()
             .meters("radius")
+    }
+
+    #[test]
+    fn snapshots_and_dry_runs_share_what_they_dont_change() {
+        let bytes = crate::import::tests::occt("box_ap214.stp");
+        let (_dir, s) = crate::import::tests::with_import(&bytes, Some(("part 2", "part 2")));
+        let path = "imports/f.step";
+        let snap = s.snapshot();
+        assert!(Arc::ptr_eq(&snap[path], &s.snapshot()[path]), "not copied");
+        // A dry run over one changed feature file holds the very bytes.
+        let writes = BTreeMap::from([("parts/p/features/x.json".to_owned(), Some(b"{}".to_vec()))]);
+        let proposed = s.proposed(&writes).unwrap();
+        assert!(Arc::ptr_eq(&snap[path], &proposed.snapshot()[path]));
+        let file = &proposed.project().imports[path];
+        assert!(
+            Arc::ptr_eq(&snap[path], &file.bytes),
+            "loaded without a copy"
+        );
     }
 
     #[test]
@@ -989,7 +1030,7 @@ mod tests {
         write_json(&feature_path(root, &id("p"), &id("a")), &sphere("5 mm")).unwrap();
         s.reload().unwrap();
         assert_eq!(
-            s.snapshot()["parts/p/features/a.json"],
+            s.snapshot()["parts/p/features/a.json"][..],
             fs::read(feature_path(root, &id("p"), &id("a"))).unwrap()
         );
         assert_eq!(s.snapshot(), crate::activity::snapshot(root).unwrap());

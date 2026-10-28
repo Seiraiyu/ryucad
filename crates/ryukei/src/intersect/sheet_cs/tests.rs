@@ -433,8 +433,8 @@ fn a_path_across_countless_crease_lines_is_uncertain_not_endless() {
         let mut found = Vec::new();
         let mut budget = MAX_BOXES;
         let mut result = Ok(());
-        'all: for ts in s.t_cells() {
-            for &[u, v] in &cells(&cyl, &near) {
+        'all: for ts in s.t_cells(0.0) {
+            for &[u, v] in &super::super::cells::cells(&cyl, &near) {
                 result = s.search([ts, u, v], 0, &mut budget, &mut found);
                 if result.is_err() {
                     break 'all;
@@ -445,4 +445,49 @@ fn a_path_across_countless_crease_lines_is_uncertain_not_endless() {
     });
     assert_eq!(got.0, f64::INFINITY);
     assert_eq!(got.1, Err(Failure::Uncertain));
+}
+
+/// Lines through a pole of a sphere's spline form meet it there; the
+/// axis through both poles twice, the side read off the limit normal.
+#[test]
+fn lines_through_a_spline_sphere_s_poles() {
+    let ball = Surface::Sphere(Sphere::new(Frame::WORLD, 1.0).unwrap());
+    let spline = as_nurbs(
+        &ball,
+        [
+            [0.0, TAU],
+            [-core::f64::consts::FRAC_PI_2, core::f64::consts::FRAC_PI_2],
+        ],
+    );
+    let axis = line((0.0, 0.0, -2.0), (0.0, 0.0, 1.0));
+    let hits = curve_surface(&axis, [0.0, 4.0], &spline, TOL).unwrap();
+    let want = curve_surface(&axis, [0.0, 4.0], &ball, TOL).unwrap();
+    same(&hits, &want, 1e-6);
+    let tilted = line((0.0, 0.0, 1.0), (0.3, 0.1, 1.0));
+    let hits = curve_surface(&tilted, [-3.0, 3.0], &spline, TOL).unwrap();
+    let want = curve_surface(&tilted, [-3.0, 3.0], &ball, TOL).unwrap();
+    same(&hits, &want, 1e-6);
+}
+
+/// A line crossing a sphere's spline form exactly on its seam, and one
+/// along its equator's plane through a knot line: found on the attempt
+/// whose cells are cut off the surface's pieces.
+#[test]
+fn lines_on_seams_and_knot_lines() {
+    let ball = Surface::Sphere(Sphere::new(Frame::WORLD, 1.0).unwrap());
+    let spline = as_nurbs(
+        &ball,
+        [
+            [0.0, TAU],
+            [-core::f64::consts::FRAC_PI_2, core::f64::consts::FRAC_PI_2],
+        ],
+    );
+    for c in [
+        line((0.1, 0.0, -2.0), (0.0, 0.0, 1.0)),
+        line((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)),
+    ] {
+        let hits = curve_surface(&c, [0.0, 4.0], &spline, TOL).unwrap();
+        let want = curve_surface(&c, [0.0, 4.0], &ball, TOL).unwrap();
+        same(&hits, &want, 1e-6);
+    }
 }

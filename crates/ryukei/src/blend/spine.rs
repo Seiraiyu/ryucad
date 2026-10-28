@@ -107,7 +107,7 @@ pub(crate) fn spine(body: &Body, spec: &Spec, radius: f64) -> Result<Spine, Erro
     // A closed branch fitted as a clamped spline starts opposite the ball
     // at the edge's middle, so the blend takes one stretch of it.
     let [r0, r1] = b.range;
-    let b = super::seam::reseamed(b, r0 + (mid - r0 + (r1 - r0) / 2.0).rem_euclid(r1 - r0));
+    let b = crate::intersect::reseamed(b, r0 + (mid - r0 + (r1 - r0) / 2.0).rem_euclid(r1 - r0));
     let mid = if mid < b.range[0] {
         mid + (r1 - r0)
     } else {

@@ -6,9 +6,11 @@
 pub use ryucad_doc::{doc, error, expr, units};
 
 /// The version of the shape of the JSON that `check`, `diff`, `inspect`,
-/// `release list` and `mesh` give (`"schema"` in each). Adding a field or
-/// a code doesn't change it; changing or removing one does. Other tools,
-/// the hosted review service among them, read these.
+/// `release list` and `mesh` give (`"schema"` in each); `bom`, `bom diff`
+/// and `where-used` give ryupdm's ([`ryupdm::bom::SCHEMA`]), by the same
+/// rule. Adding a field or a code doesn't change it; changing or removing
+/// one does. Other tools, the hosted review service among them, read
+/// these.
 pub const OUTPUT_SCHEMA: u64 = 1;
 
 /// ryucad as a product of `ryu-session`: its daemons, clients and live
@@ -19,6 +21,8 @@ pub struct Cad;
 impl ryu_session::Product for Cad {
     const NAME: &'static str = "ryucad";
     const RUNTIME_DIR_VAR: &'static str = "RYUCAD_RUNTIME_DIR";
+    /// Imported STEP files: a re-import holds both versions.
+    const BULKY: &'static [&'static str] = &["imports/"];
     type Target = entity::EntityRef;
     type View = live::View;
     type Seen = live::Seen;
@@ -38,6 +42,7 @@ impl ryu_session::Product for Cad {
 
 pub mod activity;
 pub mod assembly;
+pub mod bom;
 pub mod cache;
 pub mod check;
 pub mod client;

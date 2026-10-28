@@ -12,7 +12,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 pub use ryu_session::activity::{
-    Entry, EntryKind, FileChange, Files, Log, MAX_BYTES, MAX_ENTRIES, diff, record, record_external,
+    Bytes, Entry, EntryKind, FileChange, Files, Log, MAX_BULKY_BYTES, MAX_BYTES, MAX_ENTRIES, diff,
+    record, record_external,
 };
 
 /// Reads every file the project's state depends on.
@@ -21,7 +22,7 @@ pub fn snapshot(root: &Path) -> Result<Files> {
         .into_iter()
         .map(|path| {
             let bytes = std::fs::read(&path).map_err(|e| crate::error::Error::io(&path, &e))?;
-            Ok((crate::doc::project::relative(root, &path), bytes))
+            Ok((crate::doc::project::relative(root, &path), bytes.into()))
         })
         .collect()
 }

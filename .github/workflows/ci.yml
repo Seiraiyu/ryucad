@@ -72,6 +72,8 @@ jobs:
       # release.
       - run: cargo test -p ryukei --release --test boolean_props
       - run: cargo test -p ryukei --release --test booleans
+      - run: cargo test -p ryukei --release --test general_booleans
+      - run: cargo test -p ryukei --release --test general_boolean_props
       - run: cargo test -p ryukei --release --test pipe_props
       - run: cargo test -p ryukei --release --test general_props
       - run: cargo test -p ryukei --release --test blends
@@ -86,9 +88,12 @@ jobs:
       - run: cargo test -p ryukei --release --test loft
       - run: cargo test -p ryustep --release --test round_trip_props
       - run: cargo test -p ryustep --release --test write
+      - run: cargo test -p ryustep --release --test drill
       - run: cargo test -p ryustep --release --test checks
       - run: cargo test -p ryucad --release --test bar -- --nocapture
       - run: cargo test -p ryucad --release --test assembly_bar -- --nocapture
+      - run: cargo test -p ryupdm --release --test api -- --nocapture
+      - run: cargo test -p ryucad --release --test step_bar -- --nocapture
       - run: cargo test -p ryucad --release --test step
       - run: cargo bench --workspace --no-run
 

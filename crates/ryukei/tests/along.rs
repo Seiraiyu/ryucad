@@ -714,3 +714,63 @@ fn closed_paths_need_whole_turns_and_no_scale() {
         assert_eq!(refusal(along(K, &p, &path, &opts)), SweepError::NotClosing);
     }
 }
+
+/// A sweep moved anywhere meshes as it did where it was made: its
+/// bounds in axes it lies askew to are looser, and the mesher's estimate
+/// halves the cells it would otherwise refuse the mesh over. This tube,
+/// turned so, was once estimated at 7 × 10⁷ triangles against 6 × 10³.
+#[test]
+fn a_moved_sweep_meshes_as_it_was() {
+    use ryukei::geom::Rigid;
+    let s = 1.034_525_452_114_363_9;
+    let k = KnotVector::clamped(3, &[0.0, 1.0, 2.0], &[4, 1, 4]).unwrap();
+    let pts = vec![
+        Point3::new(-s, 0.0, -0.2),
+        Point3::new(-s / 2.0, 0.0, -0.2),
+        Point3::new(0.0, 0.451_282_741_343_790_65, 0.0),
+        Point3::new(s / 2.0, 0.2, 0.4),
+        Point3::new(s, 0.0, 0.5),
+    ];
+    let path = Path {
+        segments: vec![part(
+            1,
+            Curve::Nurbs(Arc::new(NurbsCurve::new(k, pts, None).unwrap())),
+            [0.0, 2.0],
+        )],
+    };
+    let start = ValidProfile::new(Profile {
+        frame: Frame::new(
+            Point3::new(-s, 0.0, -0.2),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        )
+        .unwrap(),
+        loops: vec![circle(1, 1, (0.0, 0.0), 0.15)],
+    })
+    .unwrap();
+    let (tube, _) = along(K, &start, &path, &AlongOptions::default()).unwrap();
+    let params = MeshParams::new(1e-2, 0.3);
+    let here = tessellate(&tube, &params).unwrap();
+    let axis = Vector3::new(
+        0.649_630_727_172_793_2,
+        0.587_694_000_248_602_9,
+        0.755_507_613_145_529_2,
+    );
+    let place = Rigid::translation(Vector3::new(
+        0.585_285_370_217_062_6,
+        -0.059_118_452_082_203_12,
+        -0.799_841_173_833_175_8,
+    ))
+    .then_after(&Rigid::rotation(
+        axis.normalize().unwrap(),
+        1.752_589_502_558_485,
+    ));
+    let moved = tube.transformed(&place).unwrap();
+    let m = tessellate(&moved, &params).unwrap();
+    assert!(m.faults.is_empty(), "{:?}", m.faults);
+    let (a, b) = (
+        here.welded_triangles().count(),
+        m.welded_triangles().count(),
+    );
+    assert!(b <= 2 * a && a <= 2 * b, "{a} against {b}");
+}

@@ -9,8 +9,8 @@
 //!
 //! The report is versioned (`schema`, [`ryupdm::check::SCHEMA`]): each
 //! finding is `{code, severity, source, part?, feature?, label?, message,
-//! details?}` plus what its code adds, `source` being `doctor`, `release`
-//! or absent for ryucad's own. Adding a field or a code is not a new
+//! details?}` plus what its code adds, `source` being `doctor`, `release`,
+//! `bom` or absent for ryucad's own. Adding a field or a code is not a new
 //! schema; changing or removing one is. A hosted job can run `ryucad check
 //! --against <base>` and gate on the exit code and the findings.
 
@@ -216,6 +216,12 @@ pub fn run(
     let one = part.map(crate::server::part_id).transpose()?;
     findings.extend(
         crate::release::findings(session, results)?
+            .into_iter()
+            .filter(|f| one.as_ref().is_none_or(|p| f["part"] == p.as_str())),
+    );
+    // What makes a BOM unsound, read from the files: each assembly's own.
+    findings.extend(
+        crate::bom::findings(session)?
             .into_iter()
             .filter(|f| one.as_ref().is_none_or(|p| f["part"] == p.as_str())),
     );

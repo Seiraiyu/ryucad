@@ -24,6 +24,7 @@ mod implicit;
 mod inface;
 mod pipe;
 mod pipe_cs;
+mod seam;
 mod sheet_cs;
 mod sheet_trace;
 mod solid;
@@ -33,8 +34,9 @@ mod ss_trace;
 
 pub use beside::beside;
 pub(crate) use beside::face_beside;
-pub(crate) use coincide::coincident;
+pub(crate) use coincide::{coincident, common, covering};
 pub use cs::{CurveHit, Side, curve_surface};
+pub(crate) use face::coarse_box;
 pub use face::{Contact, FaceMeet, Rim, Stretch, face_box, face_face};
 pub(crate) use face::{face_face_within, shifted, shifts};
 pub(crate) use fit::{
@@ -44,6 +46,7 @@ pub(crate) use implicit::curve_distance;
 pub use inface::{Place, point_in_face};
 pub use pipe::Cell;
 pub use pipe_cs::curve_pipe;
+pub(crate) use seam::reseamed;
 pub(crate) use solid::point_in_faces;
 pub use solid::{Inclusion, point_in_body};
 pub use ss::{Branch, SurfaceHit, pipe_surface, surface_surface};

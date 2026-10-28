@@ -181,17 +181,6 @@ pub enum Code {
     ReviewLimitExceeded,
     /// A comment named an entity reference the service can't read.
     ReviewReferenceInvalid,
-    /// The login isn't on the service's beta allow-list.
-    ReviewNotInBeta,
-    /// The service refused the request as malformed (a body or parameter
-    /// it can't read).
-    ReviewInvalidRequest,
-    /// The service couldn't reach GitHub to answer; try again later.
-    ReviewGithubUnreachable,
-    /// Merge in can't run for this pull request: it is closed, has no
-    /// project, failed, conflicts (settle the merge locally) or is up to
-    /// date. The service's reason is in the details as `service.reason`.
-    ReviewMergeUnavailable,
     /// The service failed, or answered with a code this build doesn't know
     /// (in the details as `service_code`).
     ReviewFailed,
@@ -253,6 +242,16 @@ pub enum Code {
     /// An export of a body STEP can't describe: a face that can't be cut
     /// open along seams. The face is in the details.
     ExportUnrepresentable,
+    /// The review service's beta doesn't take this account or repository.
+    ReviewNotInBeta,
+    /// The review service refused a request as malformed.
+    ReviewInvalidRequest,
+    /// The review service can't merge the pull request's base in: it is
+    /// closed, holds no project, failed, conflicts (settle it locally) or
+    /// is up to date. Its reason is in the details (`service.reason`).
+    ReviewMergeUnavailable,
+    /// The review service couldn't reach GitHub.
+    ReviewGithubUnreachable,
 }
 
 impl Code {

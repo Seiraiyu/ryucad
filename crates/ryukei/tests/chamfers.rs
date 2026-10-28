@@ -265,10 +265,10 @@ fn an_oblique_rim_is_a_ruled_band() {
         blend(K, &b, &[chamfer(n, angle)]).unwrap_err(),
         Error::InvalidBlend(BlendError::Unsupported { at: n })
     );
-    // Half the rim: a ruled chamfer that would end on the cut face. The
-    // band's end ruling lies along that face, within the rails' fit, so
-    // their meeting can't be certified (phase 8.D extends the band past
-    // its end).
+    // Half the rim: a ruled chamfer ending on the cut face. The band's
+    // end ruling lies along that face, where it meets the rails' fits;
+    // with the intersectors' cells cut off the pieces it is certified.
+    // About half the triangle comes off.
     let half = primitive::block(
         OpKey(4),
         3.0,
@@ -290,13 +290,13 @@ fn an_oblique_rim_is_a_ruled_band() {
         .edges()
         .find(|&e| matches!(h.curve(h.edge(e).unwrap().curve), Some(Curve::Ellipse(_))))
         .unwrap();
-    let err = blend(K, &h, &[equal(h.edge(arc).unwrap().name, 0.1)]).unwrap_err();
+    let (r, _) = blend(K, &h, &[equal(h.edge(arc).unwrap().name, 0.1)]).unwrap();
+    assert_eq!(faces_on(&r, |s| matches!(s, Surface::Nurbs(_))), 1);
+    assert_eq!(ryukei::check::check_intersections(&r), []);
+    let (before, after) = (volume(&h, 1e-4), volume(&r, 1e-4));
     assert!(
-        matches!(
-            err,
-            Error::InvalidBlend(BlendError::Unsupported { .. } | BlendError::Uncertain { .. })
-        ),
-        "{err:?}"
+        after < before - 0.45 * tri && after > before - 0.6 * tri,
+        "{before} {after}"
     );
 }
 
