@@ -116,3 +116,13 @@ pub fn blend_case(data: &[u8]) -> Option<BlendCase> {
         .collect();
     Some(BlendCase { body, blends })
 }
+
+/// [`blend_case`] on the body with every curve and surface its exact NURBS
+/// form ([`crate::nurbs::convert_body`]): the same blends on spline faces,
+/// which their analytic forms' results describe. `None` likewise, or
+/// where the body can't be converted.
+pub fn spline_case(data: &[u8]) -> Option<BlendCase> {
+    let mut case = blend_case(data)?;
+    crate::nurbs::convert_body(&mut case.body).ok()?;
+    Some(case)
+}
