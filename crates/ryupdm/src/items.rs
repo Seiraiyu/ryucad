@@ -9,7 +9,9 @@
 use ryucad_doc::doc::files::{Feature, Items, MAX_ITEM, PartKind};
 use ryucad_doc::doc::id::Id;
 use ryucad_doc::doc::project::Part;
+use ryucad_doc::doc::source::{Kind, Source};
 use ryucad_doc::error::{Code, Error, Result};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The parts the features `order` lists place, each once, in the order
@@ -256,6 +258,105 @@ pub fn compacted(items: &Items, placed: &[Id]) -> Items {
         .collect()
 }
 
+/// An item number a merge made shared: each side gave it to a different
+/// part of one assembly, and the merge, taking items per key, kept both.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Collision {
+    pub assembly: Id,
+    pub item: u32,
+    /// The parts sharing it, by ID.
+    pub parts: Vec<Id>,
+    /// Theirs' part: the one the repair renumbers.
+    pub theirs: Id,
+    /// The number the repair gives it.
+    pub to: u32,
+    /// The assembly's `part.json` repaired: every collision in it
+    /// settled, so its repairs agree whichever is taken.
+    pub repaired: Value,
+}
+
+/// An assembly's `part.json` as JSON, and its items, read as they are
+/// (a merge's file may hold a conflict record).
+fn read_items(src: &dyn Source, path: &str) -> Option<(Value, BTreeMap<String, u64>)> {
+    let bytes = src.read(path).ok()??;
+    let v: Value = serde_json::from_slice(&bytes).ok()?;
+    let items = v["items"]
+        .as_object()
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, n)| Some((k.clone(), n.as_u64()?)))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some((v, items))
+}
+
+/// The item numbers the merged files `merged` share between parts that
+/// neither `ours` nor `theirs` shared: in each, theirs' part (the one
+/// theirs numbered so and ours didn't) takes the next free number.
+pub fn collisions(ours: &dyn Source, theirs: &dyn Source, merged: &dyn Source) -> Vec<Collision> {
+    let mut out = Vec::new();
+    for (name, kind) in merged.list("parts").unwrap_or_default() {
+        let Ok(assembly) = Id::parse(&name, "part") else {
+            continue;
+        };
+        if kind != Kind::Dir {
+            continue;
+        }
+        let path = format!("parts/{name}/part.json");
+        let Some((mut file, items)) = read_items(merged, &path) else {
+            continue;
+        };
+        let side = |src: &dyn Source| read_items(src, &path).map(|(_, i)| i).unwrap_or_default();
+        let (o, t) = (side(ours), side(theirs));
+        let mut by: BTreeMap<u64, Vec<&String>> = BTreeMap::new();
+        for (p, n) in &items {
+            by.entry(*n).or_default().push(p);
+        }
+        let shared =
+            |side: &BTreeMap<String, u64>, n: u64| side.values().filter(|m| **m == n).count() > 1;
+        let mut found = Vec::new();
+        let mut top = items.values().copied().max().unwrap_or(0);
+        for (n, parts) in by {
+            if parts.len() < 2 || shared(&o, n) || shared(&t, n) {
+                continue;
+            }
+            let Some(their) = parts
+                .iter()
+                .rev()
+                .find(|p| t.get(**p) == Some(&n) && o.get(**p) != Some(&n))
+            else {
+                continue;
+            };
+            top += 1;
+            file["items"][their.as_str()] = json!(top);
+            let ids: Vec<Id> = parts
+                .iter()
+                .filter_map(|p| Id::parse(p, "part").ok())
+                .collect();
+            let (Ok(their), Ok(n), Ok(to)) = (
+                Id::parse(their, "part"),
+                u32::try_from(n),
+                u32::try_from(top),
+            ) else {
+                continue;
+            };
+            found.push((n, ids, their, to));
+        }
+        for (item, parts, their, to) in found {
+            out.push(Collision {
+                assembly: assembly.clone(),
+                item,
+                parts,
+                theirs: their,
+                to,
+                repaired: file.clone(),
+            });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +477,56 @@ mod tests {
         f.insert("parts/frame/features/x.json".into(), b"{".to_vec());
         let p = Project::load_from(Path::new(""), &f).unwrap();
         assert!(faults(&id("frame"), p.part(&id("frame")).unwrap()).is_empty());
+    }
+
+    #[test]
+    fn a_number_each_side_gave_another_part_is_a_collision() {
+        use ryucad_doc::doc::canonical;
+        let asm = |items: serde_json::Value| {
+            let v = json!({"features": [], "format": 3, "items": items,
+                           "kind": "ryucad.part", "part_kind": "assembly"});
+            let mut f = std::collections::BTreeMap::new();
+            f.insert(
+                "parts/frame/part.json".to_owned(),
+                canonical::to_string(&v).into_bytes(),
+            );
+            f
+        };
+        let ours = asm(json!({"plate": 1, "bolt": 2, "pin": 3}));
+        let theirs = asm(json!({"plate": 1, "nut": 2, "washer": 3}));
+        let merged = asm(json!({"plate": 1, "bolt": 2, "nut": 2, "pin": 3, "washer": 3}));
+        let c = collisions(&ours, &theirs, &merged);
+        let got: Vec<(u32, Vec<&str>, &str, u32)> = c
+            .iter()
+            .map(|c| {
+                (
+                    c.item,
+                    c.parts.iter().map(Id::as_str).collect(),
+                    c.theirs.as_str(),
+                    c.to,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (2, vec!["bolt", "nut"], "nut", 4),
+                (3, vec!["pin", "washer"], "washer", 5)
+            ]
+        );
+        // Either repair settles both, so taking one then the other agrees.
+        assert_eq!(c[0].repaired, c[1].repaired);
+        assert_eq!(
+            c[0].repaired["items"],
+            json!({"plate": 1, "bolt": 2, "nut": 4, "pin": 3, "washer": 5})
+        );
+        // A number a side already shared is no fault of the merge's.
+        let ours = asm(json!({"bolt": 2, "nut": 2}));
+        assert!(
+            collisions(&ours, &theirs, &merged)
+                .iter()
+                .all(|c| c.item != 2)
+        );
     }
 
     #[test]

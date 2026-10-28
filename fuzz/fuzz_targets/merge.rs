@@ -8,8 +8,9 @@
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
-//! conflicts (it is solver state), and two sides re-importing different
-//! bytes conflict on the file's hash.
+//! conflicts (it is solver state), an assembly's item numbers conflict
+//! only part by part, and two sides re-importing different bytes conflict
+//! on the file's hash.
 
 #![no_main]
 
@@ -123,11 +124,26 @@ fn edit_sketch(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
-/// Applies edit `(op, arg)` to a part list.
+/// Applies edit `(op, arg)` to an assembly's part list: its features, or
+/// its item numbers (a part numbered, or its number taken away).
 fn edit_part(v: &mut Value, op: u8, arg: u8) {
     let mut list: Vec<String> = serde_json::from_value(v["features"].clone()).unwrap_or_default();
     let at = |n: usize| if n == 0 { 0 } else { arg as usize % n };
-    match op % 3 {
+    let part = format!("q{}", arg % 6);
+    match op % 5 {
+        3 => {
+            v["items"][part.as_str()] = json!(1 + arg % 4);
+            return;
+        }
+        4 => {
+            if let Some(items) = v["items"].as_object_mut() {
+                items.remove(&part);
+            }
+            return;
+        }
+        _ => {}
+    }
+    match op % 5 {
         0 if !list.is_empty() => {
             let i = at(list.len());
             list.remove(i);
@@ -333,7 +349,8 @@ fuzz_target!(|data: &[u8]| {
     } else {
         let base = match kind {
             0 => sketch(),
-            1 => json!({"features": ["a", "b", "c", "d"], "format": 1, "kind": "ryucad.part"}),
+            1 => json!({"features": ["a", "b", "c", "d"], "format": 3, "kind": "ryucad.part",
+                        "part_kind": "assembly", "items": {"q0": 1, "q1": 2}}),
             2 => json!({"format": 1, "kind": "ryucad.parameters",
                         "parameters": {"p0": "1 mm", "p1": "p0 * 2"}}),
             4 => json!({"format": 1, "kind": "ryupdm.properties", "name": "P", "number": "100"}),
@@ -386,6 +403,14 @@ fuzz_target!(|data: &[u8]| {
         // A side that changed nothing gives the other.
         let (out, outcome) = bytes(&text(&base), &text(&base), &text(&theirs));
         assert_eq!((out, outcome), (text(&theirs), Outcome::Clean));
+        // Item numbers merge per part: a conflict is only ever at one.
+        if kind == 1 {
+            let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            for k in record(&v).keys().filter(|k| k.starts_with("/items")) {
+                assert!(k.len() > "/items/".len(), "items conflicted whole: {v}");
+            }
+        }
         // Poses are solver state: moved on both sides, no conflict.
         if kind == 7 || kind == 10 {
             let (_, outcome) = bytes(&text(&base), &text(&ours), &text(&theirs));
