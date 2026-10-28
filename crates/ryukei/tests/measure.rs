@@ -6,7 +6,7 @@
 
 use ryukei::blend::{BlendKind, EdgeBlend, blend};
 use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
-use ryukei::geom::{Point3, Rigid, Vector3};
+use ryukei::geom::{Point3, Rigid, Surface, Vector3};
 use ryukei::measure::{
     DistanceOptions, EdgeShape, Entity, FaceShape, MassOptions, MassProperties, Properties, Value,
     distance, mass, properties,
@@ -294,4 +294,56 @@ fn refusals() {
         .map(|_| ()),
         Err(Error::InvalidMeasure(MeasureError::NotAnEntity))
     );
+}
+
+/// A face is measured from a solid by its own points: a block's face far
+/// from a small block holding one of its other vertices is 0.9 away, not
+/// touching (review of #165).
+#[test]
+fn a_face_far_from_a_body_holding_another_vertex() {
+    let (a, _) = primitive::block(OpKey(1), 1.0, 1.0, 1.0, &Rigid::IDENTITY).unwrap();
+    let v0 = a.vertices().next().unwrap();
+    let p = a.vertex(v0).unwrap().point;
+    let place = Rigid::translation(Vector3::new(p.x - 0.1, p.y - 0.1, p.z - 0.1));
+    let (b, _) = primitive::block(OpKey(2), 0.2, 0.2, 0.2, &place).unwrap();
+    let far = a
+        .faces()
+        .find(|&f| {
+            let Surface::Plane(pl) = a.surface(a.face(f).unwrap().surface).unwrap() else {
+                return false;
+            };
+            ((p - pl.frame().origin()).dot(pl.frame().z().get())).abs() > 0.5
+        })
+        .unwrap();
+    let d = distance(
+        (&a, Entity::Face(far), &Rigid::IDENTITY),
+        (&b, Entity::Body, &Rigid::IDENTITY),
+        &DistanceOptions::default(),
+    )
+    .unwrap();
+    near(d.distance, 0.9, 1e-3);
+}
+
+/// Coincident faces with no boundary meet at a point of both: two balls
+/// in one place, away from the origin.
+#[test]
+fn coincident_balls_meet_on_their_surface() {
+    let (a, _) = primitive::sphere(OpKey(1), 0.5, &at(3.0, 0.0, 0.0)).unwrap();
+    let (b, _) = primitive::sphere(OpKey(2), 0.5, &at(3.0, 0.0, 0.0)).unwrap();
+    let fa = a.faces().next().unwrap();
+    let fb = b.faces().next().unwrap();
+    let d = distance(
+        (&a, Entity::Face(fa), &Rigid::IDENTITY),
+        (&b, Entity::Face(fb), &Rigid::IDENTITY),
+        &DistanceOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(d.distance, Value::Exact(0.0), "{d:?}");
+    let centre = Point3::new(3.0, 0.0, 0.0);
+    for q in d.points {
+        assert!(
+            ((q - centre).length() - 0.5).abs() < 1e-9,
+            "{q:?} is off the balls"
+        );
+    }
 }

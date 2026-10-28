@@ -41,7 +41,7 @@ pub struct MassOptions {
     /// The relative agreement two quadrature orders must reach.
     pub tolerance: f64,
     /// The mesh chord the bound is certified at, in meters: by default a
-    /// ten-thousandth of the body's size (at least
+    /// hundred-thousandth of the body's size (at least
     /// `10 × LINEAR_RESOLUTION`). A finer chord tightens the bound, not
     /// the value, at the cost of a finer mesh.
     pub chord: Option<f64>,

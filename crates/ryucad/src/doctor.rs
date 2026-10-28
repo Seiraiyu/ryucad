@@ -581,9 +581,6 @@ fn stale_assembly(
     )
 }
 
-/// ryupdm's files: its settings and each part's properties read as they
-/// should, the properties fit the settings, and a project that uses PDM
-/// has its ID.
 /// The material library: a file that doesn't read, and, when it reads,
 /// each part whose PDM `material` property names no material of it
 /// (`material_unknown`: its mass properties would have no density).
@@ -623,6 +620,9 @@ fn diagnose_materials(root: &Path, parts: &[&str], issues: &mut Vec<Issue>) {
     }
 }
 
+/// ryupdm's files: its settings and each part's properties read as they
+/// should, the properties fit the settings, and a project that uses PDM
+/// has its ID.
 fn diagnose_pdm(root: &Path, manifest: Option<&Manifest>, parts: &[&str], issues: &mut Vec<Issue>) {
     let config_ok = match read(root, PDM_CONFIG) {
         Read::Missing => true,

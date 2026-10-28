@@ -293,11 +293,34 @@ impl<'a> Side<'a> {
                 let t = 0.5 * (edge.interval[0] + edge.interval[1]);
                 Some(self.world(b.curves[edge.curve].point(t)))
             }
-            _ => mesh
+            // A corner of the face's own triangles: the body's first
+            // position need not lie on this face.
+            Entity::Face(f) => mesh.and_then(|m| face_point(m, f)).map(|p| self.world(p)),
+            Entity::Body => mesh
                 .and_then(|m| m.positions.first())
                 .map(|&p| self.world(p)),
         }
     }
+}
+
+/// A point of face `f`: a corner of its own triangles in `mesh`.
+fn face_point(mesh: &BodyMesh, f: FaceId) -> Option<Point3> {
+    let fm = mesh.faces.iter().find(|fm| fm.face == f)?;
+    let corner = mesh.corners.get(fm.corners.start as usize)?;
+    mesh.positions.get(corner.position as usize).copied()
+}
+
+/// A point of the surface: the middle of its domain, a finite end where
+/// a direction is open one way, else 0.
+fn surface_point(s: &Surface) -> Point3 {
+    let mid = |[lo, hi]: [f64; 2]| match (lo.is_finite(), hi.is_finite()) {
+        (true, true) => 0.5 * (lo + hi),
+        (true, false) => lo,
+        (false, true) => hi,
+        (false, false) => 0.0,
+    };
+    let [u, v] = s.domain();
+    s.point(mid(u), mid(v))
 }
 
 fn barycentric(p: Point3, t: &[Point3; 3]) -> [f64; 3] {
@@ -586,12 +609,9 @@ fn meets(a: &Side<'_>, b: &Side<'_>, upper: f64, mid: Point3) -> Result<Option<P
                     let p = match meet {
                         FaceMeet::Coincident { rims, whole, .. } => {
                             if whole {
-                                Some(
-                                    a.body
-                                        .vertices()
-                                        .next()
-                                        .map_or(Point3::ORIGIN, |v| a.body.vertices[v].point),
-                                )
+                                // Neither face has a boundary, so every
+                                // point of `fa`'s surface is on both.
+                                Some(surface_point(&a.body.surfaces[a.body.faces[fa].surface]))
                             } else {
                                 rims.first().map(|r| {
                                     let body = if r.of == 0 { a.body } else { &moved };
