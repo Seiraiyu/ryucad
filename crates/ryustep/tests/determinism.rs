@@ -113,7 +113,9 @@ fn written(golden: &mut Golden) {
                 },
             )
             .unwrap();
-            s.str(std::str::from_utf8(&bytes).unwrap());
+            s.str(&ryukei_testkit::unversioned(
+                std::str::from_utf8(&bytes).unwrap(),
+            ));
             record(&mut s, &read(&bytes, &opts()).unwrap());
         }
     }

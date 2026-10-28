@@ -976,6 +976,12 @@ fn every_protocol_method_has_a_command() {
         ("assembly.tree", &["assembly", "tree"]),
         ("assembly.solve", &["assembly", "solve"]),
         ("interference", &["interference"]),
+        ("measure", &["measure"]),
+        ("mass", &["mass"]),
+        ("clearance", &["clearance"]),
+        ("materials.list", &["materials", "list"]),
+        ("materials.set", &["materials", "set"]),
+        ("materials.delete", &["materials", "delete"]),
         ("import", &["import"]),
         ("export", &["export"]),
         ("rebuild", &["rebuild"]),
@@ -2861,6 +2867,119 @@ fn assemblies_from_the_cli() {
 }
 
 #[test]
+fn measure_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=20", "--param",
+        "z=30",
+    ]);
+    let body = p.ok(&["inspect", "p"])["bodies"][0].clone();
+    let face = |k: usize| format!("p/b/{}", body["faces"][k]["name"].as_str().unwrap());
+    let one = p.ok(&["measure", &face(0)]);
+    assert_eq!(one["kind"], "face", "{one}");
+    assert!(one["area"]["m2"].as_f64().unwrap() > 0.0);
+    let two = p.ok(&["measure", &face(0), &face(1)]);
+    assert!(two["distance"]["m"].is_number(), "{two}");
+    let solid = p.ok(&["measure", "p/b"]);
+    assert_eq!(solid["volume"]["value"], "6000 mm^3", "{solid}");
+    p.fails(&["measure", "p/nothing"], "not_found", 1);
+    let (code, _) = p.both_from("", &["measure"]);
+    assert_eq!(code, 2);
+}
+
+#[test]
+fn materials_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "bracket"]);
+    let set = p.ok(&[
+        "materials",
+        "set",
+        "steel",
+        "--density",
+        "7850 kg/m^3",
+        "--default",
+    ]);
+    assert_eq!(set["created"], true, "{set}");
+    let rev = set["project_revision"].as_str().unwrap().to_owned();
+    p.ok(&[
+        "materials",
+        "set",
+        "aluminium 6061",
+        "--density",
+        "2.7 g/cm^3",
+        "--colour",
+        "#b8bcc2",
+        "--expect",
+        &rev,
+    ]);
+    p.fails(
+        &[
+            "materials",
+            "set",
+            "brass",
+            "--density",
+            "8.5 g/cm^3",
+            "--expect",
+            &rev,
+        ],
+        "conflict",
+        1,
+    );
+    p.fails(
+        &["materials", "set", "brass", "--density", "8.5"],
+        "invalid_quantity",
+        1,
+    );
+    // As an agent would write it: `props set` would give each project an
+    // ID of its own, and the two answers would differ.
+    p.write(
+        "parts/bracket/properties.json",
+        &ryucad::doc::canonical::to_string(&json!({
+            "format": 1, "kind": "ryupdm.properties", "material": "aluminium 6061"
+        })),
+    );
+    let list = p.ok(&["materials", "list"]);
+    assert_eq!(list["default"], "steel", "{list}");
+    assert_eq!(list["materials"][0]["parts"], json!(["bracket"]), "{list}");
+    p.fails(
+        &["materials", "delete", "aluminium 6061"],
+        "has_dependents",
+        1,
+    );
+    // The bracket's mass at aluminium's density; with no material and no
+    // default a part gives its geometry and a warning.
+    p.ok(&[
+        "feature", "add", "bracket", "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+        "--param", "z=10",
+    ]);
+    let m = p.ok(&["mass", "bracket"]);
+    assert_eq!(m["mass"]["value"], "0.0027 kg", "{m}");
+    assert_eq!(m["parts"][0]["material"], "aluminium 6061");
+    p.ok(&["part", "create", "loose"]);
+    p.ok(&[
+        "feature", "add", "loose", "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+        "--param", "z=10",
+    ]);
+    p.ok(&["materials", "delete", "steel"]);
+    assert_eq!(p.ok(&["materials", "list"])["default"], json!(null));
+    let (code, v) = p.both_from("", &["mass", "loose"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(
+        v["warnings"][0].as_str().unwrap().contains("no material"),
+        "{v}"
+    );
+    assert!(v["result"].get("mass").is_none(), "{v}");
+    // In a session, the delete is one undoable change.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!((code, &v["ok"]), (0, &json!(true)), "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["materials", "list"]);
+    assert_eq!(v["result"]["default"], "steel", "{v}");
+}
+
+#[test]
 fn interference_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
@@ -2916,6 +3035,15 @@ fn interference_from_the_cli() {
         1,
     );
     p.fails(&["interference", "bolt"], "wrong_part_kind", 1);
+    // The same assembly's clearances: b2 stands on the plate (0), b3 is
+    // half a metre away (only within a reach that long).
+    let c = p.ok(&["clearance", "frame", "--below", "1000"]);
+    let list = c["clearances"].as_array().unwrap();
+    assert_eq!(list[0]["distance"]["m"], json!(0.0), "{c}");
+    assert!(list.iter().any(|x| x["b"] == "frame/b3/shank"), "{c}");
+    let near = p.ok(&["clearance", "frame", "--instance", "b3"]);
+    assert_eq!(near["clearances"], json!([]), "{near}");
+    p.fails(&["clearance", "bolt"], "wrong_part_kind", 1);
 }
 
 #[test]

@@ -333,7 +333,13 @@ impl Opened {
                     .as_ref()
                     .map(|k| k.0.clone())
                     .or_else(|| self.ws.model.parts.keys().next().cloned());
-                panels::journal(ui, &mut self.ws, &mut self.tab, part.as_deref());
+                panels::journal(
+                    ui,
+                    &mut self.ws,
+                    &mut self.view,
+                    &mut self.tab,
+                    part.as_deref(),
+                );
             });
         egui::Panel::left("tree")
             .resizable(true)
@@ -355,6 +361,8 @@ impl Opened {
                     panels::parameters(ui, &mut self.ws, &self.view);
                     ui.separator();
                     panels::part_section(ui, &mut self.ws, &self.view);
+                    ui.separator();
+                    crate::ui::bom::where_used(ui, &mut self.ws, &self.view);
                 });
             });
         egui::CentralPanel::no_frame().show(ui, |ui| self.view.show(ui, &mut self.ws, gpu));
@@ -374,11 +382,25 @@ impl Opened {
         {
             self.view.fit_entities(&mut self.ws, &faces);
         }
+        dialogs::measure(&ctx, &mut self.ws, view);
+        dialogs::mass(&ctx, &mut self.ws, &mut self.dialogs.mass, view);
+        if let Some(points) =
+            dialogs::clearance(&ctx, &mut self.ws, &mut self.dialogs.clearance, view)
+        {
+            self.view.fit_points(&mut self.ws, &points);
+        }
         crate::ui::step::import(&ctx, &mut self.ws, &mut self.browse, view);
         crate::ui::step::export(&ctx, &mut self.ws, &mut self.browse, view);
+        crate::ui::bom::export(&ctx, &mut self.ws, &mut self.browse, view);
         // Closing the dialog ends what it paints (#138).
         if !self.dialogs.interference {
             self.ws.interference = None;
+        }
+        if !self.dialogs.mass {
+            self.ws.mass = None;
+        }
+        if !self.dialogs.clearance {
+            self.ws.clearance = None;
         }
         action
     }
@@ -443,6 +465,15 @@ impl Opened {
             self.ws.redo(None);
         } else if ctx.input_mut(|i| i.consume_shortcut(&menu::UNDO)) {
             self.ws.undo(None);
+        }
+        // Esc leaves the Measure tool first.
+        if !popup_open
+            && !egui::Popup::is_any_open(ctx)
+            && self.ws.measure.on
+            && ctx.input_mut(|i| i.consume_shortcut(&menu::CLEAR_SELECTION))
+        {
+            self.ws.measure.set(false);
+            return None;
         }
         // Esc clears the selection and the tree's choice with it.
         let selected = self.ws.myself().is_some_and(|m| !m.selection.is_empty());
@@ -561,6 +592,11 @@ impl eframe::App for App {
                     }
                     Browse::Save => {
                         if let Some(e) = &mut o.ws.export {
+                            e.path = path;
+                        }
+                    }
+                    Browse::SaveCsv => {
+                        if let Some(e) = &mut o.ws.bom_export {
                             e.path = path;
                         }
                     }

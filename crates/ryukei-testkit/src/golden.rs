@@ -4,6 +4,20 @@ use std::path::{Path, PathBuf};
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
+/// A STEP file's text with the writer's version in its header (`'ryustep
+/// <version>'`) written as a development build's, `0.0.0`. Releases stamp
+/// their own version in, and golden hashes must hold for every build of
+/// one commit.
+pub fn unversioned(step: &str) -> String {
+    let stamped = format!("'ryustep {}'", ryukei::VERSION);
+    assert_eq!(
+        step.matches(&stamped).count(),
+        1,
+        "one version in the header"
+    );
+    step.replacen(&stamped, "'ryustep 0.0.0'", 1)
+}
+
 /// Hashes the exact bits of f64 outputs per named section and checks them
 /// against a committed file of `name hash` lines.
 ///

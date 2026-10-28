@@ -45,7 +45,7 @@ impl Issue {
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 33] = [
+pub const CODES: [(&str, &str); 34] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -79,6 +79,7 @@ pub const CODES: [(&str, &str); 33] = [
     ("bom_item_missing", "warning"),
     ("bom_item_duplicate", "error"),
     ("bom_item_unused", "warning"),
+    ("material_unknown", "warning"),
 ];
 
 /// The size past which an imported file is `import_large`: Git keeps
@@ -440,6 +441,7 @@ fn diagnose_in(builds: &mut Builds) -> Vec<Issue> {
     diagnose_items(&mut issues, root);
     diagnose_imports(root, &part_ids, unit, &mut issues);
     diagnose_pdm(root, manifest.as_ref(), &part_ids, &mut issues);
+    diagnose_materials(root, &part_ids, &mut issues);
     diagnose_releases(root, &mut issues);
     diagnose_git(root, &mut issues);
     issues
@@ -621,6 +623,45 @@ fn stale_assembly(session: &mut Session, part: &str) -> Option<Vec<(String, Vec<
     )
 }
 
+/// The material library: a file that doesn't read, and, when it reads,
+/// each part whose PDM `material` property names no material of it
+/// (`material_unknown`: its mass properties would have no density).
+fn diagnose_materials(root: &Path, parts: &[&str], issues: &mut Vec<Issue>) {
+    use crate::doc::materials::{MATERIALS, Materials};
+    let library = match read(root, MATERIALS) {
+        Read::Missing => return,
+        Read::Bad(i) => return issues.push(i),
+        Read::Json(v, canonical) => match Materials::from_json(&v) {
+            Ok(m) => {
+                if !canonical {
+                    issues.push(non_canonical(MATERIALS));
+                }
+                m
+            }
+            Err(e) => return issues.push(document_issue(MATERIALS, &e)),
+        },
+    };
+    for part in parts {
+        let Ok(id) = Id::parse(part, "part") else {
+            continue;
+        };
+        let Ok(props) = ryupdm::props::read(&Folder(root), &id) else {
+            continue;
+        };
+        if let Some(name) = props.values.get("material").and_then(Value::as_str)
+            && !library.materials.contains_key(name)
+        {
+            issues.push(issue(
+                "material_unknown",
+                vec![format!("parts/{part}/properties.json"), MATERIALS.to_owned()],
+                format!(
+                    "part {part}'s material {name:?} isn't in {MATERIALS}: add it with `ryucad materials set`, or change the part's material"
+                ),
+            ));
+        }
+    }
+}
+
 /// ryupdm's files: its settings and each part's properties read as they
 /// should, the properties fit the settings, and a project that uses PDM
 /// has its ID.
@@ -791,16 +832,34 @@ fn diagnose_git(root: &Path, issues: &mut Vec<Issue>) {
     let Some(setup) = crate::drivers::setup(root) else {
         return;
     };
-    let text = fs::read_to_string(root.join(ATTRIBUTES)).unwrap_or_default();
-    let missing = crate::drivers::missing_for(&text, crate::drivers::has_imports(root));
+    let text = fs::read_to_string(root.join(ATTRIBUTES));
+    let missing = crate::drivers::missing_for(
+        text.as_deref().unwrap_or_default(),
+        crate::drivers::has_imports(root),
+    );
     if !missing.is_empty() {
+        // Each line whole and quoted: a line's pattern may be a file name
+        // (`.gitattributes text eol=lf`), which read bare looked like the
+        // message naming the file twice (issue #163).
+        let what = if text.is_err() {
+            format!("there is no {ATTRIBUTES}")
+        } else {
+            let quoted: Vec<String> = missing.iter().map(|l| format!("\"{l}\"")).collect();
+            match quoted.split_last() {
+                Some((last, [])) => format!("{ATTRIBUTES} lacks the line {last}"),
+                Some((last, rest)) => {
+                    format!(
+                        "{ATTRIBUTES} lacks the lines {} and {last}",
+                        rest.join(", ")
+                    )
+                }
+                None => unreachable!(),
+            }
+        };
         issues.push(issue(
             "gitattributes_missing",
             vec![ATTRIBUTES.to_owned()],
-            format!(
-                "{ATTRIBUTES} lacks {}: Git won't read or merge the project's files through ryucad",
-                missing.join(" and ")
-            ),
+            format!("{what}: Git won't read or merge the project's files through ryucad"),
         ));
     }
     if !setup.missing.is_empty() {
@@ -2204,6 +2263,52 @@ pub(crate) mod tests {
         assert_eq!(report(r).unwrap()["errors"], 2);
     }
 
+    #[test]
+    fn materials_are_read_and_parts_judged() {
+        let dir = healthy();
+        let r = dir.path();
+        let mut s = crate::session::Session::open(r).unwrap();
+        let material = |s: &mut crate::session::Session, m: &str| {
+            call(
+                s,
+                "props.set",
+                json!({"part": "p", "properties": {"material": m}}),
+            )
+            .unwrap();
+        };
+        // No library: nothing to judge a material by.
+        material(&mut s, "brass");
+        assert!(codes(r).is_empty(), "{:?}", codes(r));
+        let library = json!({"format": 1, "kind": "ryucad.materials",
+                             "materials": {"steel": {"density": "7850 kg/m^3"}}});
+        w(r, "materials.json", &canonical::to_string(&library));
+        let both = vec![
+            "parts/p/properties.json".to_owned(),
+            "materials.json".to_owned(),
+        ];
+        assert_eq!(codes(r), [("material_unknown", both)]);
+        material(&mut s, "steel");
+        assert!(codes(r).is_empty(), "{:?}", codes(r));
+        w(
+            r,
+            "materials.json",
+            "{\"format\": 1, \"kind\": \"ryucad.materials\"}",
+        );
+        assert_eq!(
+            codes(r),
+            [("invalid_document", vec!["materials.json".to_owned()])]
+        );
+        w(
+            r,
+            "materials.json",
+            &serde_json::to_string(&library).unwrap(),
+        );
+        assert_eq!(
+            codes(r),
+            [("non_canonical", vec!["materials.json".to_owned()])]
+        );
+    }
+
     /// A release record of `part`'s `label`, as ryupdm writes one.
     fn record(part: &str, label: &str) -> Value {
         json!({"built_with": {"commit": "c", "ryucad": "0", "ryukei": "0"},
@@ -2560,6 +2665,51 @@ pub(crate) mod tests {
         let text = fs::read_to_string(r.join(crate::drivers::ATTRIBUTES)).unwrap();
         assert!(text.starts_with("*.png binary\n# ryucad"), "{text}");
         assert!(!text.contains("\nryucad.json diff=ryucad\n"), "{text}");
+    }
+
+    /// Issue #163: the message names the lines missing, each whole and
+    /// quoted, or says there is no file.
+    #[test]
+    fn the_attributes_message_names_what_is_missing() {
+        let dir = healthy();
+        let r = dir.path();
+        in_repo(r);
+        let message = |r: &Path| {
+            let v = report(r).unwrap();
+            assert_eq!(v["issues"][0]["code"], "gitattributes_missing", "{v}");
+            v["issues"][0]["message"].as_str().unwrap().to_owned()
+        };
+        let why = ": Git won't read or merge the project's files through ryucad";
+        fs::remove_file(r.join(crate::drivers::ATTRIBUTES)).unwrap();
+        assert_eq!(message(r), format!("there is no .gitattributes{why}"));
+        // Every line but one.
+        let all = crate::drivers::with_lines("");
+        w(
+            r,
+            crate::drivers::ATTRIBUTES,
+            &all.replace(".gitattributes text eol=lf\n", ""),
+        );
+        assert_eq!(
+            message(r),
+            format!(".gitattributes lacks the line \".gitattributes text eol=lf\"{why}")
+        );
+        // An earlier ryucad's lines: every line is missing.
+        w(
+            r,
+            crate::drivers::ATTRIBUTES,
+            "ryucad.json diff=ryucad\nparts/**/*.json diff=ryucad\n",
+        );
+        let quoted: Vec<String> = crate::drivers::LINES
+            .iter()
+            .map(|l| format!("\"{l}\""))
+            .collect();
+        assert_eq!(
+            message(r),
+            format!(
+                ".gitattributes lacks the lines {}, {}, {}, {} and {}{why}",
+                quoted[0], quoted[1], quoted[2], quoted[3], quoted[4]
+            )
+        );
     }
 
     #[test]

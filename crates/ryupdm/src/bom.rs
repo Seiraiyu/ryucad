@@ -567,6 +567,15 @@ fn csv_line(level: &str, item: &str, row: &Row, count: u64, custom: &[String]) -
     out
 }
 
+/// The CSV's columns, in its order: [`CSV_COLUMNS`], then each declared
+/// custom property in the order the settings give them. `bom.get`
+/// answers them, so a table shows what the CSV holds.
+pub fn columns(config: &crate::config::Config) -> Vec<String> {
+    let mut h: Vec<String> = CSV_COLUMNS.iter().map(|c| (*c).to_owned()).collect();
+    h.extend(custom(config));
+    h
+}
+
 fn csv_header(custom: &[String]) -> String {
     let mut h: Vec<String> = CSV_COLUMNS.iter().map(|c| (*c).to_owned()).collect();
     h.extend(custom.iter().cloned());
