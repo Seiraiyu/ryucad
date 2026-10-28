@@ -175,6 +175,16 @@ enum Command {
         #[arg(long = "instance", value_name = "PATH")]
         instances: Vec<String>,
     },
+    /// Measure one entity (its point, length or area and shape; a solid's or occurrence's
+    /// volume and area) or two (their distance and nearest points, and their angle where
+    /// both have directions): <part>/<solid>/<name>, <part>/<solid>,
+    /// <assembly>/<instance>/…/<solid>/<name> or <assembly>/<instance>/….
+    Measure {
+        #[arg(num_args = 1..=2, required = true, value_name = "ENTITY")]
+        entities: Vec<String>,
+        #[command(flatten)]
+        rev: RevArg,
+    },
     /// What changed between two revisions: features, parameters and sketch
     /// entities, and with --model what that did to the bodies.
     Diff {
@@ -1844,6 +1854,10 @@ fn request(cmd: &Command) -> Option<Request> {
             rev: rev.rev.clone(),
         },
         Command::CheckFormat => Request::CheckFormat {},
+        Command::Measure { entities, rev } => Request::Measure {
+            entities: entities.clone(),
+            rev: rev.rev.clone(),
+        },
         Command::Interference { part, instances } => Request::Interference {
             part: part.clone(),
             instances: instances.clone(),

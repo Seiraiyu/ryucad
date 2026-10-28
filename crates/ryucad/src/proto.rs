@@ -545,6 +545,18 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         instances: Vec<String>,
     },
+    /// Measures one entity (its properties: a point, a length, an area
+    /// and its shape; a solid's or an occurrence's volume and area) or two
+    /// (the distance between them with the nearest points, and the angle
+    /// where both have directions), at the working files or a Git
+    /// revision `rev`. Values are in meters and radians, and as the
+    /// project's default unit writes them, each `exact` or with its bound.
+    #[serde(rename = "measure")]
+    Measure {
+        entities: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     /// The material library: each material's density and colour, the
     /// parts that name it, the default, and the project's revision.
     #[serde(rename = "materials.list")]
