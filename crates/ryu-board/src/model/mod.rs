@@ -12,7 +12,10 @@ pub use refs::{Ref, RefError};
 
 use std::collections::BTreeMap;
 
+use rayon::prelude::*;
+
 use crate::geom::{Mdeg, Nm, Point, Region};
+use crate::shape::{Shape, ShapeError, feature_shape};
 
 /// Where a board came from, as its files say.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -325,6 +328,33 @@ impl Board {
             HoleClass::Buried
         })
     }
+
+    /// Feature `index`'s shape on `layer` of `step`, built on first use.
+    pub fn feature_shape(
+        &self,
+        step: usize,
+        layer: usize,
+        index: usize,
+    ) -> &Result<Shape, ShapeError> {
+        feature_shape(&self.steps[step].layers[layer], index, &self.library)
+    }
+
+    /// Every feature's shape on `layer` of `step`, in drawing order, built
+    /// in parallel where they aren't yet.
+    pub fn layer_shapes(&self, step: usize, layer: usize) -> Vec<&Result<Shape, ShapeError>> {
+        let features = &self.steps[step].layers[layer];
+        (0..features.features().len())
+            .into_par_iter()
+            .map(|i| feature_shape(features, i, &self.library))
+            .collect()
+    }
+
+    /// Builds the shapes of several layers at once, side by side.
+    pub fn build_shapes(&self, step: usize, layers: &[usize]) {
+        layers.par_iter().for_each(|&l| {
+            self.layer_shapes(step, l);
+        });
+    }
 }
 
 #[cfg(test)]
@@ -412,5 +442,22 @@ mod tests {
         assert_eq!(b.hole_class(&d(6)), Some(HoleClass::Buried));
         assert_eq!(b.hole_class(&d(0)), None);
         assert_eq!((b.step("pcb"), b.layer("bot")), (Some(0), Some(3)));
+    }
+
+    #[test]
+    fn shapes_are_built_only_where_asked() {
+        let b = board();
+        assert!(b.feature_shape(0, 1, 2).is_ok());
+        let built = |l: usize| {
+            b.steps[0].layers[l]
+                .shapes
+                .iter()
+                .filter(|s| s.get().is_some())
+                .count()
+        };
+        assert_eq!((built(0), built(1)), (0, 1));
+        b.build_shapes(0, &[0, 2]);
+        assert_eq!((built(0), built(1), built(2), built(3)), (3, 1, 3, 0));
+        assert_eq!(b.layer_shapes(0, 3).len(), 3);
     }
 }
