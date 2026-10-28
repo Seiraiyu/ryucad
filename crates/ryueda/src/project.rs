@@ -70,8 +70,20 @@ impl Manifest {
         }
     }
 
+    /// Reads a manifest. An alias named `self` is refused: it would stand
+    /// in for the project's own library, so writes would land in another
+    /// project, outside the activity log.
     pub fn read(bytes: &[u8]) -> Result<Manifest> {
-        doc::read(bytes, MANIFEST, KIND, FORMAT)
+        let m: Manifest = doc::read(bytes, MANIFEST, KIND, FORMAT)?;
+        if m.libraries.keys().any(|a| a.as_str() == SELF) {
+            return Err(Error::new(
+                Code::InvalidDocument,
+                format!("{MANIFEST}: no library may be named {SELF}, the project's own"),
+            )
+            .with("path", MANIFEST)
+            .with("pointer", format!("/libraries/{SELF}")));
+        }
+        Ok(m)
     }
 
     pub fn to_text(&self) -> String {
@@ -260,12 +272,14 @@ impl Project {
         }
     }
 
-    /// The library a reference from a file in library `from` reaches. A
+    /// The library a reference from a file in library `from` reaches: its
+    /// own when it names none or `self` (as its own project reads it). A
     /// library project's files name only their own library.
     fn reached(&self, from: &str, r: &LibRef) -> Result<&Library> {
-        let to = r.library.as_ref().map_or(from, Id::as_str);
+        let named = r.library.as_ref().map(Id::as_str).filter(|l| *l != SELF);
+        let to = named.unwrap_or(from);
         let nested = from != SELF || self.manifest.project_kind == ProjectKind::Library;
-        if nested && r.library.is_some() && to != SELF {
+        if nested && named.is_some() {
             return Err(Error::new(
                 Code::LibraryNested,
                 format!("a library project's files name only their own library, not {to}"),
@@ -604,6 +618,56 @@ pub(crate) mod tests {
         assert_eq!(
             nested.faults[0].error.details["path"],
             "../passives/library/components/nested.json"
+        );
+    }
+
+    /// `self` in a library project's file is that file's own library, as
+    /// the library project reads it, never the library of a project that
+    /// names it by an alias.
+    #[test]
+    fn self_in_an_aliased_library_is_its_own() {
+        let dir = repo();
+        let board = dir.path().join("board");
+        manifest(&board, ProjectKind::Design, &[("passives", "../passives")]);
+        // The board's own library has a symbol `r` but no footprint, so
+        // reaching it instead of the library project's would be `not_found`.
+        let drawing = r#"{"format": 1, "kind": "ryueda.symbol", "name": "R"}"#;
+        write_atomic(&board.join("library/symbols/r.json"), drawing).unwrap();
+        let c = r#"{"format": 1, "kind": "ryueda.libcomp", "prefix": "R", "symbol": {"library": "self", "id": "r"},
+            "footprints": [{"footprint": {"library": "self", "id": "r_0402_1005metric"}}]}"#;
+        let path = dir.path().join("passives/library/components/explicit.json");
+        write_atomic(&path, c).unwrap();
+        let alone = Project::load(&dir.path().join("passives")).unwrap();
+        let p = Project::load(&board).unwrap();
+        let id = Id::parse("explicit", "c").unwrap();
+        let faults = |p: &Project, alias: &str| {
+            p.library(alias).unwrap().components[&id]
+                .faults
+                .iter()
+                .map(|f| f.error.code)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(faults(&alone, SELF), faults(&p, "passives"));
+        assert!(
+            !faults(&p, "passives").contains(&Code::NotFound),
+            "{:?}",
+            faults(&p, "passives")
+        );
+    }
+
+    #[test]
+    fn manifests_name_no_alias_self() {
+        let mut m = Manifest::new(pid(7), Unit::Mm, ProjectKind::Design);
+        m.libraries.insert(
+            Id::parse(SELF, "alias").unwrap(),
+            Alias {
+                path: "../passives".into(),
+            },
+        );
+        let e = Manifest::read(m.to_text().as_bytes()).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["pointer"]),
+            (Code::InvalidDocument, &serde_json::json!("/libraries/self"))
         );
     }
 

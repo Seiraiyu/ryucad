@@ -427,6 +427,31 @@ impl Pair {
     }
 }
 
+/// A manifest written by hand with an alias named `self` would put the
+/// library project in the project's own library's place, so writes would
+/// land there, outside the activity log: it is refused, and nothing is
+/// written anywhere.
+#[test]
+fn an_alias_named_self_is_refused() {
+    let p = Pair::projects();
+    for top in [&p.direct, &p.daemon] {
+        let path = top.join("board/ryueda.json");
+        let mut m: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let libs = m["libraries"].as_object_mut().unwrap();
+        let alias = libs.remove("passives").unwrap();
+        libs.insert("self".into(), alias);
+        fs::write(&path, serde_json::to_string_pretty(&m).unwrap() + "\n").unwrap();
+    }
+    let (_, v) = p.both_in("board", &["symbol", "create", "R", "--ops", RESISTOR]);
+    assert_eq!(v["error"]["code"], "invalid_document", "{v}");
+    assert_eq!(v["error"]["details"]["pointer"], "/libraries/self", "{v}");
+    for top in [&p.direct, &p.daemon] {
+        for d in ["board", "passives"] {
+            assert!(!top.join(d).join("library/symbols").exists(), "{d}");
+        }
+    }
+}
+
 /// A two-pin resistor drawn as a box, as ops.
 const RESISTOR: &str = r#"[
     {"op": "add", "pin": "1", "type": "passive", "at": ["0", "3.81"], "side": "down", "length": "1.27 mm"},
