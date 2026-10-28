@@ -9,3 +9,5 @@ pub mod geom;
 pub mod model;
 pub mod shape;
 pub mod symbol;
+#[cfg(feature = "testing")]
+pub mod testing;
