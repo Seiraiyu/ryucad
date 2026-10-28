@@ -17,6 +17,7 @@
 //! faults of the part: it still rebuilds, but can't be released.
 
 use crate::config::{Config, Decl, Type};
+use ryucad_doc::doc::assembly::snap_origin;
 use ryucad_doc::doc::files::header;
 use ryucad_doc::doc::id::Id;
 use ryucad_doc::doc::project::{PROPERTIES, Project};
@@ -28,7 +29,8 @@ use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
 pub const KIND: &str = "ryupdm.properties";
-pub const FORMAT: u64 = 1;
+/// The newest format: 2 adds `amount`. A file without one stays at 1.
+pub const FORMAT: u64 = 2;
 
 /// A part's properties as written.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -43,7 +45,12 @@ impl Properties {
             .iter()
             .map(|(k, x)| (k.clone(), x.clone()))
             .collect();
-        v.insert("format".to_owned(), json!(FORMAT));
+        let format = if self.values.contains_key("amount") {
+            FORMAT
+        } else {
+            1
+        };
+        v.insert("format".to_owned(), json!(format));
         v.insert("kind".to_owned(), json!(KIND));
         Value::Object(v)
     }
@@ -65,6 +72,79 @@ impl Properties {
     /// The part number, when it is set to a string.
     pub fn number(&self) -> Option<&str> {
         self.values.get("number").and_then(Value::as_str)
+    }
+
+    /// The unit of measure it is counted in: `each` unless set.
+    pub fn uom(&self) -> &str {
+        self.values
+            .get("uom")
+            .and_then(Value::as_str)
+            .unwrap_or("each")
+    }
+}
+
+/// The units an `amount` may be written in for each unit of measure, with
+/// their size in that unit of measure. A bare number is in the unit of
+/// measure itself.
+const AMOUNT_UNITS: [(&str, &[(&str, f64)]); 5] = [
+    (
+        "m",
+        &[("m", 1.0), ("cm", 0.01), ("mm", 0.001), ("um", 1e-6), ("in", 0.0254), ("ft", 0.3048)],
+    ),
+    (
+        "m2",
+        &[("m2", 1.0), ("cm2", 1e-4), ("mm2", 1e-6), ("in2", 0.00064516), ("ft2", 0.09290304)],
+    ),
+    (
+        "m3",
+        &[
+            ("m3", 1.0),
+            ("l", 1e-3),
+            ("ml", 1e-6),
+            ("cm3", 1e-6),
+            ("mm3", 1e-9),
+            ("in3", 1.6387064e-5),
+            ("ft3", 0.028316846592),
+        ],
+    ),
+    (
+        "l",
+        &[("l", 1.0), ("ml", 1e-3), ("m3", 1e3), ("cm3", 1e-3), ("mm3", 1e-6)],
+    ),
+    ("kg", &[("kg", 1.0), ("g", 1e-3), ("lb", 0.45359237)]),
+];
+
+/// An `amount` as a number in `uom`: `"600 mm"` with `uom` `m` is 0.6.
+/// A positive decimal number, then optionally a unit `uom` takes (a space
+/// between them or not); else why not.
+pub fn amount(text: &str, uom: &str) -> std::result::Result<f64, String> {
+    let Some((_, units)) = AMOUNT_UNITS.iter().find(|(u, _)| *u == uom) else {
+        return Err(format!(
+            "a part counted {uom} has no amount: amount is for parts counted in m, m2, m3, l or kg"
+        ));
+    };
+    let t = text.trim();
+    let split = t
+        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-'))
+        .unwrap_or(t.len());
+    let (number, unit) = (t[..split].trim(), t[split..].trim());
+    let names: Vec<&str> = units.iter().map(|(n, _)| *n).collect();
+    let factor = if unit.is_empty() {
+        1.0
+    } else {
+        units
+            .iter()
+            .find(|(n, _)| *n == unit)
+            .map(|(_, f)| *f)
+            .ok_or_else(|| format!("{unit:?} isn't a unit of {uom}: use {}", names.join(", ")))?
+    };
+    match number.parse::<f64>() {
+        // At its shortest decimal within rounding: `600 mm` is 0.6 m.
+        Ok(x) if x.is_finite() && x > 0.0 => Ok(snap_origin(x * factor)),
+        _ => Err(format!(
+            "expected a positive amount of {uom}, such as \"2.5 {}\"",
+            names[0]
+        )),
     }
 }
 
@@ -194,6 +274,19 @@ pub fn check(config: &Config, unit: Unit, part: &Id, props: &Properties) -> Vec<
             );
             continue;
         }
+        if name == "amount"
+            && let Some(text) = value.as_str()
+            && let Err(why) = amount(text, props.uom())
+        {
+            faults.push(
+                Error::new(Code::PropertyInvalid, format!("part {part}: amount: {why}"))
+                    .with("part", part)
+                    .with("property", name)
+                    .with("pointer", &at)
+                    .with("value", value),
+            );
+            continue;
+        }
         if name == "number"
             && let (Some(p), Some(n)) = (&config.pattern, value.as_str())
             && !p.matches(n)
@@ -215,6 +308,22 @@ pub fn check(config: &Config, unit: Unit, part: &Id, props: &Properties) -> Vec<
         }
     }
     faults
+}
+
+/// The properties `props` lacks that a release needs: each required one
+/// under `config`, then `amount` for a part counted in anything but
+/// `each`.
+pub fn missing(config: &Config, props: &Properties) -> Vec<String> {
+    let mut out: Vec<String> = config
+        .decls()
+        .into_iter()
+        .filter(|(name, decl)| decl.required && !props.values.contains_key(name))
+        .map(|(name, _)| name)
+        .collect();
+    if props.uom() != "each" && !props.values.contains_key("amount") {
+        out.push("amount".to_owned());
+    }
+    out
 }
 
 /// `part_number_duplicate` for each part whose number another part has
@@ -384,7 +493,7 @@ mod tests {
             Code::InvalidDocument
         );
         assert_eq!(
-            Properties::from_json(&json!({"format": 2, "kind": KIND}))
+            Properties::from_json(&json!({"format": 3, "kind": KIND}))
                 .unwrap_err()
                 .code,
             Code::FormatTooNew
@@ -551,5 +660,34 @@ mod tests {
         assert_eq!(pdm.faults()[0].code, Code::InvalidJson);
         assert_eq!(pdm.faults().len(), 1);
         assert_eq!(pdm.parts[&id("b")].file, Ok(Properties::default()));
+    }
+
+    #[test]
+    fn an_amount_is_how_much_of_its_unit_of_measure_one_occurrence_uses() {
+        assert_eq!(amount("600 mm", "m"), Ok(0.6));
+        assert_eq!(amount("0.6", "m"), Ok(0.6));
+        assert_eq!(amount("2in", "m"), Ok(0.0508));
+        assert_eq!(amount("250 ml", "l"), Ok(0.25));
+        assert_eq!(amount("5 l", "m3"), Ok(0.005));
+        assert_eq!(amount("12 g", "kg"), Ok(0.012));
+        assert!(amount("12 g", "m").unwrap_err().contains("isn't a unit of m"));
+        assert!(amount("-1 m", "m").unwrap_err().contains("positive"));
+        assert!(amount("1", "each").unwrap_err().contains("counted each"));
+        let config = Config::default();
+        let p = |v: Value| Properties::from_json(&v).unwrap();
+        let tube = p(json!({"format": 2, "kind": KIND, "uom": "m", "amount": "600 mm"}));
+        assert!(check(&config, Unit::Mm, &id("t"), &tube).is_empty());
+        assert_eq!(tube.to_json()["format"], 2);
+        // On a part counted each, or in the wrong unit: invalid.
+        let each = p(json!({"format": 2, "kind": KIND, "amount": "600 mm"}));
+        let faults = check(&config, Unit::Mm, &id("t"), &each);
+        assert_eq!(faults[0].code, Code::PropertyInvalid);
+        assert_eq!(faults[0].details["property"], "amount");
+        // Without one, the file stays at format 1; a part counted in m
+        // needs one to release.
+        let bare = p(json!({"format": 1, "kind": KIND, "uom": "m"}));
+        assert_eq!(bare.to_json()["format"], 1);
+        assert_eq!(missing(&config, &bare), ["number", "amount"]);
+        assert_eq!(missing(&config, &tube), ["number"]);
     }
 }
