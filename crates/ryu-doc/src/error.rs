@@ -181,6 +181,17 @@ pub enum Code {
     ReviewLimitExceeded,
     /// A comment named an entity reference the service can't read.
     ReviewReferenceInvalid,
+    /// The login isn't on the service's beta allow-list.
+    ReviewNotInBeta,
+    /// The service refused the request as malformed (a body or parameter
+    /// it can't read).
+    ReviewInvalidRequest,
+    /// The service couldn't reach GitHub to answer; try again later.
+    ReviewGithubUnreachable,
+    /// Merge in can't run for this pull request: it is closed, has no
+    /// project, failed, conflicts (settle the merge locally) or is up to
+    /// date. The service's reason is in the details as `service.reason`.
+    ReviewMergeUnavailable,
     /// The service failed, or answered with a code this build doesn't know
     /// (in the details as `service_code`).
     ReviewFailed,
@@ -256,6 +267,7 @@ impl Code {
             | Code::Internal
             | Code::AppNotInstalled
             | Code::ReviewUnreachable
+            | Code::ReviewGithubUnreachable
             | Code::ReviewFailed => 4,
             _ => 1,
         }
@@ -354,6 +366,14 @@ mod tests {
         assert_eq!(Code::ReviewHeadMoved.exit_code(), 1);
         assert_eq!(Code::ReviewUnreachable.exit_code(), 4);
         assert_eq!(Code::ReviewFailed.exit_code(), 4);
+        assert_eq!(Code::ReviewGithubUnreachable.exit_code(), 4);
+        assert_eq!(Code::ReviewMergeUnavailable.exit_code(), 1);
+        assert_eq!(Code::ReviewNotInBeta.exit_code(), 1);
+        assert_eq!(Code::ReviewInvalidRequest.exit_code(), 1);
+        assert_eq!(
+            json!(Code::ReviewGithubUnreachable),
+            json!("review_github_unreachable")
+        );
         assert_eq!(
             json!(Code::ReviewForkNotInstalled),
             json!("review_fork_not_installed")

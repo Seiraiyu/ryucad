@@ -148,6 +148,10 @@ pub fn refusal(status: u16, body: &Value) -> Error {
         "fork_not_installed" => Code::ReviewForkNotInstalled,
         "limit_exceeded" => Code::ReviewLimitExceeded,
         "reference_invalid" => Code::ReviewReferenceInvalid,
+        "not_in_beta" => Code::ReviewNotInBeta,
+        "invalid_request" => Code::ReviewInvalidRequest,
+        "github_unreachable" => Code::ReviewGithubUnreachable,
+        "merge_unavailable" => Code::ReviewMergeUnavailable,
         _ if status == 401 => Code::ReviewUnauthenticated,
         _ if status == 404 => Code::ReviewNotFound,
         _ => Code::ReviewFailed,
@@ -436,6 +440,16 @@ mod tests {
         let r = |s, c: &str| refusal(s, &json!({"error": {"code": c, "message": "m"}})).code;
         assert_eq!(r(403, "forbidden"), Code::ReviewForbidden);
         assert_eq!(r(400, "reference_invalid"), Code::ReviewReferenceInvalid);
+        assert_eq!(r(403, "not_in_beta"), Code::ReviewNotInBeta);
+        assert_eq!(r(400, "invalid_request"), Code::ReviewInvalidRequest);
+        assert_eq!(r(502, "github_unreachable"), Code::ReviewGithubUnreachable);
+        assert_eq!(r(409, "merge_unavailable"), Code::ReviewMergeUnavailable);
+        let e = refusal(
+            409,
+            &json!({"error": {"code": "merge_unavailable", "message": "m",
+                "details": {"reason": "conflicts"}}}),
+        );
+        assert_eq!(e.details["service"]["reason"], "conflicts");
         assert_eq!(r(409, "someday_new"), Code::ReviewFailed);
         assert_eq!(
             refusal(502, &Value::Null).message,

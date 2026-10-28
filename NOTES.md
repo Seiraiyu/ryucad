@@ -7,3 +7,8 @@
   features after it read `dependency_failed`. Cost: a cold `--no-daemon` list now
   rebuilds the part. The issue's `feature edit` warning and `assembly tree`
   notes were left for later.
+- Lap 2: the `burn` label now exists. #151: `ryucad review` maps the service's
+  `not_in_beta`, `invalid_request`, `merge_unavailable` (exit 1) and
+  `github_unreachable` (exit 4) to `review_*` codes of their own. Codes were
+  added beside the other review codes in `ryu-doc`'s enum (serialized by name,
+  so order doesn't matter).
