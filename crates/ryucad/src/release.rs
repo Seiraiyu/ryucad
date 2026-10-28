@@ -129,18 +129,16 @@ fn readiness(session: &mut Session, part: &Id, config: &Config) -> Result<Vec<Va
         Err(e) => problems.push(json!(e)),
         Ok(props) => {
             problems.extend(pp.faults.iter().map(|e| json!(e)));
-            for (name, decl) in config.decls() {
-                if decl.required && !props.values.contains_key(&name) {
-                    problems.push(json!(
-                        Error::new(
-                            Code::PropertyInvalid,
-                            format!("part {part}: {name} is required to release"),
-                        )
-                        .with("part", part)
-                        .with("property", &name)
-                        .with("missing", true)
-                    ));
-                }
+            for name in ryupdm::props::missing(config, props) {
+                problems.push(json!(
+                    Error::new(
+                        Code::PropertyInvalid,
+                        format!("part {part}: {name} is required to release"),
+                    )
+                    .with("part", part)
+                    .with("property", &name)
+                    .with("missing", true)
+                ));
             }
         }
     }
