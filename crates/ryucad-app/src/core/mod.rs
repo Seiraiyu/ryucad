@@ -8,6 +8,7 @@ pub mod geometry;
 pub mod interference;
 pub mod link;
 pub mod lod;
+pub mod measure;
 pub mod merge;
 pub mod model;
 pub mod nav;

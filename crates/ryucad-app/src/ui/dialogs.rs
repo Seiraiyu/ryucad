@@ -266,3 +266,160 @@ pub fn interference(
     }
     show
 }
+
+/// A panel's lines: label, then value, in a grid.
+fn line_grid(ui: &mut egui::Ui, id: &str, lines: &[(String, String)]) {
+    egui::Grid::new(id)
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            for (label, value) in lines {
+                ui.label(label);
+                ui.label(value);
+                ui.end_row();
+            }
+        });
+}
+
+/// Tools > Measure, while on: what the picks measured, with Copy. Esc or
+/// closing it leaves the tool.
+pub fn measure(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
+    let mut open = ws.measure.on;
+    if !open {
+        return;
+    }
+    let mut copy = None;
+    window("Measure", view)
+        .open(&mut open)
+        .default_width(360.0)
+        .show(ctx, |ui| {
+            let t = &ws.measure;
+            if t.picks.is_empty() {
+                ui.label("Pick a face, edge or vertex: its properties. Pick a second: the distance and angle between them.");
+                return;
+            }
+            for p in &t.picks {
+                ui.monospace(p);
+            }
+            ui.separator();
+            if let Some(e) = &t.error {
+                ui.colored_label(ui.visuals().error_fg_color, &e.message);
+                return;
+            }
+            let Some(r) = &t.reading else {
+                ui.spinner();
+                return;
+            };
+            line_grid(ui, "measure lines", &r.lines);
+            if ui.button("Copy").clicked() {
+                copy = Some(t.text());
+            }
+        });
+    if let Some(text) = copy {
+        ctx.copy_text(text);
+    }
+    if !open {
+        ws.measure.set(false);
+    }
+}
+
+/// Tools > Mass properties: the weighed solid, part or assembly's values,
+/// each part's material and mass, and the warnings. Weigh again takes
+/// the selection (or what is shown) anew.
+pub fn mass(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, view: egui::Rect) {
+    let mut again = None;
+    window("Mass properties", view)
+        .open(open)
+        .default_width(380.0)
+        .show(ctx, |ui| {
+            let Some(m) = &ws.mass else {
+                ui.label("Select a solid, or show a part or assembly.");
+                return;
+            };
+            ui.label(format!("Of {}", m.of));
+            if ui.button("Weigh again").clicked() {
+                again = ws.mass_target();
+            }
+            ui.separator();
+            if !m.loaded {
+                ui.spinner();
+                return;
+            }
+            if let Some(e) = &m.error {
+                ui.colored_label(ui.visuals().error_fg_color, &e.message);
+                return;
+            }
+            line_grid(ui, "mass lines", &m.lines);
+            if !m.parts.is_empty() {
+                ui.separator();
+                line_grid(ui, "mass parts", &m.parts);
+            }
+            for w in &m.warnings {
+                ui.colored_label(ui.visuals().warn_fg_color, w);
+            }
+            ui.weak("Materials and their densities are in materials.json: ryucad materials set.");
+        });
+    if let Some(of) = again {
+        ws.weigh(&of);
+    }
+}
+
+/// Tools > Clearance: the shown assembly's pairs of solids, closest
+/// first, each with a Show button (both nearest points, to frame); those
+/// that couldn't be measured. Returns the points to frame when Show is
+/// pressed.
+pub fn clearance(
+    ctx: &egui::Context,
+    ws: &mut Workspace,
+    open: &mut bool,
+    view: egui::Rect,
+) -> Option<Vec<[f64; 3]>> {
+    let mut show = None;
+    let mut again = false;
+    window("Clearance", view)
+        .open(open)
+        .default_width(440.0)
+        .show(ctx, |ui| {
+            let Some(c) = &mut ws.clearance else {
+                ui.label("Show an assembly, then measure its clearance.");
+                return;
+            };
+            ui.label(format!("Assembly {}", c.part));
+            again = ui.button("Measure again").clicked();
+            ui.separator();
+            if !c.loaded {
+                ui.spinner();
+                return;
+            }
+            if let Some(e) = &c.error {
+                ui.colored_label(ui.visuals().error_fg_color, &e.message);
+                return;
+            }
+            if c.gaps.is_empty() {
+                ui.label("No instances come within a hundredth of the assembly's size.");
+            }
+            for (k, g) in c.gaps.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(g.label(&c.part));
+                    if ui.small_button("Show").clicked() {
+                        show = Some((k, g.points.to_vec()));
+                    }
+                });
+            }
+            for (a, b) in &c.unchecked {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!("{a} and {b} couldn't be measured"),
+                );
+            }
+            ui.weak("Pairs at 0 touch or interfere: Tools > Check interference says which.");
+        });
+    if again {
+        ws.check_clearance();
+    }
+    let (k, points) = show?;
+    if let Some(c) = &mut ws.clearance {
+        c.shown = Some(k);
+    }
+    Some(points)
+}

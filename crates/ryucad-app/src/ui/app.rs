@@ -374,11 +374,24 @@ impl Opened {
         {
             self.view.fit_entities(&mut self.ws, &faces);
         }
+        dialogs::measure(&ctx, &mut self.ws, view);
+        dialogs::mass(&ctx, &mut self.ws, &mut self.dialogs.mass, view);
+        if let Some(points) =
+            dialogs::clearance(&ctx, &mut self.ws, &mut self.dialogs.clearance, view)
+        {
+            self.view.fit_points(&mut self.ws, &points);
+        }
         crate::ui::step::import(&ctx, &mut self.ws, &mut self.browse, view);
         crate::ui::step::export(&ctx, &mut self.ws, &mut self.browse, view);
         // Closing the dialog ends what it paints (#138).
         if !self.dialogs.interference {
             self.ws.interference = None;
+        }
+        if !self.dialogs.mass {
+            self.ws.mass = None;
+        }
+        if !self.dialogs.clearance {
+            self.ws.clearance = None;
         }
         action
     }
@@ -443,6 +456,15 @@ impl Opened {
             self.ws.redo(None);
         } else if ctx.input_mut(|i| i.consume_shortcut(&menu::UNDO)) {
             self.ws.undo(None);
+        }
+        // Esc leaves the Measure tool first.
+        if !popup_open
+            && !egui::Popup::is_any_open(ctx)
+            && self.ws.measure.on
+            && ctx.input_mut(|i| i.consume_shortcut(&menu::CLEAR_SELECTION))
+        {
+            self.ws.measure.set(false);
+            return None;
         }
         // Esc clears the selection and the tree's choice with it.
         let selected = self.ws.myself().is_some_and(|m| !m.selection.is_empty());

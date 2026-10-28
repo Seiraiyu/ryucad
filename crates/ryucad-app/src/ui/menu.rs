@@ -14,6 +14,8 @@ pub struct Dialogs {
     pub preferences: bool,
     pub doctor: bool,
     pub interference: bool,
+    pub mass: bool,
+    pub clearance: bool,
 }
 
 /// What a menu asks of the app rather than of the open project.
@@ -229,7 +231,30 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened, recent: &[PathBuf]) -> Option<Acti
             }
         });
         ui.menu_button("Tools", |ui| {
+            let mut on = o.ws.measure.on;
+            if ui.checkbox(&mut on, "Measure").clicked() {
+                o.ws.measure.set(on);
+            }
+            let target = o.ws.mass_target();
+            if ui
+                .add_enabled(target.is_some(), egui::Button::new("Mass properties"))
+                .on_disabled_hover_text("Show one part or assembly, or select a solid")
+                .clicked()
+                && let Some(of) = target
+            {
+                o.ws.weigh(&of);
+                o.dialogs.mass = true;
+            }
+            ui.separator();
             let shown = o.ws.shown_assembly().is_some();
+            if ui
+                .add_enabled(shown, egui::Button::new("Clearance"))
+                .on_disabled_hover_text("Show an assembly first (View > Show)")
+                .clicked()
+            {
+                o.ws.check_clearance();
+                o.dialogs.clearance = true;
+            }
             if ui
                 .add_enabled(shown, egui::Button::new("Check interference"))
                 .on_disabled_hover_text("Show an assembly first (View > Show)")
