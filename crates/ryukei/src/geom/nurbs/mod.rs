@@ -15,6 +15,7 @@ mod refine;
 mod ruled;
 pub(crate) mod skin;
 mod surface;
+pub(crate) mod third;
 
 pub use basis::Basis;
 pub(crate) use bezier::{BezierCurve, BezierPatch};

@@ -14,7 +14,7 @@
 
 mod beside;
 pub(crate) mod broad;
-mod cells;
+pub(crate) mod cells;
 pub(crate) mod coincide;
 mod cs;
 mod face;
