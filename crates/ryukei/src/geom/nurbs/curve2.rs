@@ -179,6 +179,31 @@ impl NurbsCurve2 {
         })
     }
 
+    /// The box of the control hulls of the pieces over `[t0, t1]`, each
+    /// cut to it: tighter than [`Self::bounds`], which takes whole pieces,
+    /// though cutting rounds (callers grow it).
+    pub(crate) fn clipped_bounds(&self, [t0, t1]: [f64; 2]) -> Box2 {
+        let ranges = match self.period() {
+            Some(period) if t1 - t0 < period => {
+                let a = self.spline.knots.wrap(t0);
+                let b = a + (t1 - t0);
+                vec![[a, b], [a - period, b - period]]
+            }
+            Some(_) => vec![self.domain()],
+            None => vec![[t0, t1]],
+        };
+        let boxed = |p: &BezierCurve<Vector2>| {
+            let (lo, hi) = p.hull();
+            Box2::new(Point2::ORIGIN + lo, Point2::ORIGIN + hi)
+        };
+        self.pieces()
+            .iter()
+            .flat_map(|p| ranges.iter().filter_map(|&r| p.clipped(r)))
+            .map(|p| boxed(&p))
+            .reduce(|x, y| x.union(&y))
+            .unwrap_or_else(|| self.bounds([t0, t1]))
+    }
+
     /// See [`super::NurbsCurve::project`].
     pub fn project(&self, p: Point2) -> Projection<f64, Point2> {
         let feet = self.spline.minima(self.pieces(), p.to_vector(), true);
@@ -353,5 +378,23 @@ mod tests {
         let over = n.part([0.5, 0.5 + TAU + 2e-15]).unwrap();
         let [a, b] = over.domain();
         assert!(b - a <= TAU);
+    }
+
+    /// A piece's hull over part of its range is the hull of that part,
+    /// not of the whole piece.
+    #[test]
+    fn clipped_bounds_hold_the_part_only() {
+        let c = quarter();
+        let whole = c.bounds([0.0, 0.25]);
+        assert_eq!(whole.max(), Point2::new(1.0, 1.0));
+        let part = c.clipped_bounds([0.0, 0.25]);
+        let end = c.point(0.25);
+        assert!(part.max().y < 0.6 && part.max().y >= end.y - 1e-15);
+        assert!(part.min().x >= end.x - 1e-15);
+        for i in 0..=16 {
+            let p = c.point(0.25 * f64::from(i) / 16.0);
+            assert!(p.x >= part.min().x - 1e-15 && p.x <= part.max().x + 1e-15);
+            assert!(p.y >= part.min().y - 1e-15 && p.y <= part.max().y + 1e-15);
+        }
     }
 }

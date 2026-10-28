@@ -4,7 +4,7 @@ use super::KnotVector;
 use super::bezier::{BezierPatch, patches};
 use super::eval::check_weights;
 use super::project::nearest;
-use super::refine::{Hom, check_split, clamp, refine_flat, split_at};
+use super::refine::{Hom, check_split, clamp, extend_flat, refine_flat, split_at};
 use crate::geom::{
     Box3, Point3, PrincipalCurvatures, Projection, Rigid, SurfaceEval, UnitVector3, Vector3,
 };
@@ -106,6 +106,25 @@ impl NurbsSurface {
             })
             .map(|r| r[0])
             .collect()
+    }
+
+    /// The genus of the closed surface the spline is, if it closes up:
+    /// 1 periodic both ways (a torus's topology), 0 periodic one way with
+    /// both ends of the other collapsed to poles (a sphere's).
+    pub(crate) fn closed_genus(&self) -> Option<u32> {
+        let [nu, nv] = self.counts();
+        let row = |pts: Vec<Point3>| {
+            pts.iter()
+                .all(|p| p.distance(pts[0]) <= crate::tol::LINEAR_RESOLUTION)
+        };
+        let u_row = |i: usize| row((0..nv).map(|j| self.control_point(i, j)).collect());
+        let v_row = |j: usize| row((0..nu).map(|i| self.control_point(i, j)).collect());
+        match self.periods() {
+            (Some(_), Some(_)) => Some(1),
+            (Some(_), None) if v_row(0) && v_row(nv - 1) => Some(0),
+            (None, Some(_)) if u_row(0) && u_row(nu - 1) => Some(0),
+            _ => None,
+        }
     }
 
     /// Every control point, row-major.
@@ -361,6 +380,28 @@ impl NurbsSurface {
             self.with_lines(dir, &halves[0][k].0, &lines)
         };
         Ok((half(0), half(1)))
+    }
+
+    /// The same surface carried on past each clamped end of its domain
+    /// along `dir` by `margins` (exactly its end pieces' polynomials,
+    /// extrapolated; the same surface over its own domain). `None` for a
+    /// periodic direction, or where an extrapolated weight isn't positive.
+    pub(crate) fn extended(&self, dir: Direction, margins: [f64; 2]) -> Option<Self> {
+        let kv = &self.knots[dir as usize];
+        if kv.is_periodic() {
+            return None;
+        }
+        let p = kv.degree();
+        let lines = self
+            .lines(dir)
+            .iter()
+            .map(|l| {
+                let (flat, hom) = clamp(kv, l);
+                extend_flat(&flat, p, &hom, margins)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let new: Vec<_> = lines.iter().map(|(_, h)| h.clone()).collect();
+        Some(self.with_lines(dir, &lines[0].0, &new))
     }
 
     /// The surface moved by a rigid transform; see

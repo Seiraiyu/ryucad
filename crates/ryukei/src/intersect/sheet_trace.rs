@@ -190,6 +190,12 @@ fn grid(s: &Surface, region: &Box3, (shift, along): (f64, f64)) -> Option<[Axis;
                 x.sort_by(f64::total_cmp);
                 x.dedup();
             }
+            // Tried again (the grid moved), the pieces' breaks aren't
+            // kept: a curve along one (a knot line) lies inside a cell.
+            if along != 0.0 {
+                us = vec![du[0], du[1]];
+                vs = vec![dv[0], dv[1]];
+            }
             Some([
                 axis(pu, du, &us, (shift, along)),
                 axis(pv, dv, &vs, (shift, along)),
@@ -219,6 +225,88 @@ fn grid(s: &Surface, region: &Box3, (shift, along): (f64, f64)) -> Option<[Axis;
     }
 }
 
+/// The zones of `surface`'s collapsed rows that the implicit surface
+/// passes within [`REACH`] of, inside the region, each with its side cut
+/// into the grid. A zone starts as a quarter of the first span beside its
+/// row and is halved (60 times at most) until the surface's enclosure over
+/// it lies within half the reach of the pole.
+fn zones(surface: &Surface, imp: &Implicit, region: &Box3, cuts: [&mut Vec<f64>; 2]) -> Vec<Zone> {
+    let rows = crate::mesh::uv::collapsed_rows(surface);
+    let domain = surface.domain();
+    let sheet = Sheet::of(surface);
+    let mut out = Vec::new();
+    let mut cuts = cuts;
+    for k in 0..2 {
+        for e in 0..2 {
+            if !rows[k][e] || cuts[k].len() < 2 {
+                continue;
+            }
+            let edge = domain[k][e];
+            let free = domain[1 - k];
+            let at = |x: f64| {
+                if k == 0 {
+                    surface.point(edge, x)
+                } else {
+                    surface.point(x, edge)
+                }
+            };
+            let pole = at(free[0]);
+            if !region.grow(REACH).intersects(&Box3::new(pole, pole)) {
+                continue;
+            }
+            let f = imp.value_at(pole).mag();
+            if imp.distance_bound(f, imp.local(pole.to_vector())) > REACH {
+                continue;
+            }
+            let c = &cuts[k];
+            let first = if e == 0 {
+                c[1] - c[0]
+            } else {
+                c[c.len() - 1] - c[c.len() - 2]
+            };
+            let mut w = first / 4.0;
+            let mut found = None;
+            for _ in 0..60 {
+                let strip = if e == 0 {
+                    [edge, edge + w]
+                } else {
+                    [edge - w, edge]
+                };
+                let cell = if k == 0 { [strip, free] } else { [free, strip] };
+                if let Some(p) = sheet.jet_box(cell) {
+                    let lo = Point3::new(p[0].v.lo(), p[1].v.lo(), p[2].v.lo());
+                    let hi = Point3::new(p[0].v.hi(), p[1].v.hi(), p[2].v.hi());
+                    let far = Box3::new(lo, hi)
+                        .corners()
+                        .iter()
+                        .map(|q| q.distance(pole))
+                        .fold(0.0, f64::max);
+                    if far <= REACH / 2.0 {
+                        found = Some(strip);
+                        break;
+                    }
+                }
+                w /= 2.0;
+            }
+            let Some(range) = found else {
+                continue;
+            };
+            let side = if e == 0 { range[1] } else { range[0] };
+            let c = &mut cuts[k];
+            if !c.contains(&side) {
+                c.push(side);
+                c.sort_by(f64::total_cmp);
+            }
+            out.push(Zone {
+                dir: k,
+                range,
+                pole,
+            });
+        }
+    }
+    out
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Dir {
     /// `s` held, `θ` runs.
@@ -232,8 +320,30 @@ type LineKey = (Dir, u64);
 
 #[derive(Clone, Copy, Debug)]
 enum Kind {
-    Regular { s_graph: bool },
+    Regular {
+        s_graph: bool,
+    },
     Singular,
+    /// Inside a pole's zone (see [`Zone`]).
+    Pole(usize),
+}
+
+/// The touch rule's reach: points this close to each other are one.
+const REACH: f64 = 100.0 * LINEAR_RESOLUTION;
+
+/// The strip of the parameter plane beside a collapsed row (a pole or an
+/// apex) the other surface passes within [`REACH`] of: every point of the
+/// surface over it lies within half the reach of the pole, so whatever of
+/// the curve enters it reaches the pole by the touch rule. Its cells are
+/// never subdivided (`F` vanishes all along the row, where no crossing
+/// can be certified); a crossing on its side is where a branch ends, at
+/// the pole.
+#[derive(Clone, Copy, Debug)]
+struct Zone {
+    /// The direction the row collapses: 0 for an end of `s`, 1 of `θ`.
+    dir: usize,
+    range: [f64; 2],
+    pole: Point3,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -275,6 +385,7 @@ struct Tracer<'a> {
     pieces: BTreeMap<(LineKey, u64, u64), Vec<usize>>,
     /// No grid could be laid over the surface near the region.
     ungridded: bool,
+    zones: Vec<Zone>,
 }
 
 impl<'a> Tracer<'a> {
@@ -295,7 +406,12 @@ impl<'a> Tracer<'a> {
                 true,
             ),
         };
-        let [su, tu] = axes;
+        let [mut su, mut tu] = axes;
+        let zones = if ungridded {
+            Vec::new()
+        } else {
+            zones(surface, imp, region, [&mut su.cuts, &mut tu.cuts])
+        };
         Self {
             field: Field {
                 sheet: Sheet::of(surface),
@@ -311,6 +427,7 @@ impl<'a> Tracer<'a> {
             crossings: Vec::new(),
             pieces: BTreeMap::new(),
             ungridded,
+            zones,
         }
     }
 
@@ -359,6 +476,17 @@ impl<'a> Tracer<'a> {
     }
 
     fn subdivide(&mut self, cell: Cell, depth: u32) -> Result<(), Failure> {
+        if let Some(z) = self
+            .zones
+            .iter()
+            .position(|z| cell[z.dir][0] >= z.range[0] && cell[z.dir][1] <= z.range[1])
+        {
+            self.leaves.push(Leaf {
+                cell,
+                kind: Kind::Pole(z),
+            });
+            return Ok(());
+        }
         let [[s0, s1], [t0, t1]] = cell;
         let split = |me: &mut Self| -> Result<(), Failure> {
             let ms = s0 + (s1 - s0) * SPLIT;
@@ -621,13 +749,23 @@ impl<'a> Tracer<'a> {
             let r = root(&mut group, x);
             members.entry(r).or_default().push(leaf);
         }
-        members
+        let mut out: Vec<(Vec<usize>, Point3)> = members
             .into_values()
             .map(|m| {
                 let p = self.critical(&m)?;
                 Ok((m, p))
             })
-            .collect()
+            .collect::<Result<_, Failure>>()?;
+        // Each pole's zone is settled at the pole.
+        for (zi, z) in self.zones.iter().enumerate() {
+            let m: Vec<usize> = (0..self.leaves.len())
+                .filter(|&i| matches!(self.leaves[i].kind, Kind::Pole(k) if k == zi))
+                .collect();
+            if !m.is_empty() {
+                out.push((m, z.pole));
+            }
+        }
+        Ok(out)
     }
 
     /// The one critical point of `F` in a cluster of leaves, on the curve.

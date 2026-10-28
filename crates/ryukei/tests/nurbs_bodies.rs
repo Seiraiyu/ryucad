@@ -3,7 +3,7 @@
 //! an ellipse, pass the checker.
 
 use proptest::prelude::*;
-use ryukei::check::{Fault, check};
+use ryukei::check::check;
 use ryukei::euler::{self, Corner};
 use ryukei::geom::{Curve, Ellipse, Frame, Plane, Point3, Rigid, Surface, Vector3};
 use ryukei::name::OpKey;
@@ -72,12 +72,18 @@ fn an_ellipse_edge_on_a_plane() {
     assert_eq!(check(&b), []);
 }
 
+/// A sphere's NURBS form closes up, so its one face needs no loops; a
+/// torus's too, closed both ways.
 #[test]
-fn closed_nurbs_surfaces_cannot_be_loopless() {
-    let (mut b, _) = primitive::sphere(OpKey(9), 1.0, &Rigid::IDENTITY).unwrap();
-    convert_body(&mut b).unwrap();
-    let f = b.faces().next().unwrap();
-    assert_eq!(check(&b), [Fault::Loopless { face: f }]);
+fn closed_nurbs_surfaces_may_be_loopless() {
+    for (mut b, _) in [
+        primitive::sphere(OpKey(9), 1.0, &Rigid::IDENTITY).unwrap(),
+        primitive::torus(OpKey(9), 2.0, 0.5, &Rigid::IDENTITY).unwrap(),
+    ] {
+        convert_body(&mut b).unwrap();
+        assert!(all_nurbs(&b));
+        assert_eq!(check(&b), []);
+    }
 }
 
 fn placement() -> impl Strategy<Value = Rigid> {

@@ -75,20 +75,43 @@ pub(crate) struct Raw {
 /// the first's parameter plane, as [`pipe_surface`] traces a pipe; two
 /// surfaces with no implicit form in their four parameters together.
 ///
+/// Where the trace is uncertain the surfaces are carried past their
+/// bounded domain edges ([`extended`]) and what is found there is clipped
+/// back to their domains, so no branch leaves either surface.
+///
 /// Fails with `Uncertain` where a branch's topology, a singular point or
 /// a fit could not be certified.
 pub fn surface_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
+    meet(a, b, region, false).or_else(|e| match e {
+        Failure::Uncertain => carried(a, b, region).map(|hit| within_domains(hit, [a, b])),
+        e => Err(e),
+    })
+}
+
+/// [`surface_surface`], trying the surfaces carried past their bounded
+/// domain edges only with `extend`: [`super::face_face`] first certifies
+/// faces apart, which is cheap, and never extends faces sharing an edge,
+/// which the self-intersection check settles by [`super::beside`].
+pub(crate) fn meet(
+    a: &Surface,
+    b: &Surface,
+    region: &Box3,
+    extend: bool,
+) -> Result<SurfaceHit, Failure> {
     if let Some(same) = coincident(a, b) {
         return Ok(SurfaceHit::Coincident { same });
     }
     match (Implicit::of(a).is_some(), Implicit::of(b).is_some()) {
         (true, true) => {}
-        (false, false) => return general_surface(a, b, region),
-        // A tangency along a curve, which no trace in one surface's
-        // parameters can follow, the general path traces.
         _ => {
-            return sheet_surface(a, b, region).or_else(|e| match e {
-                Failure::Uncertain => general_surface(a, b, region),
+            return traced_any(a, b, region).or_else(|e| match e {
+                // A curve along a bounded surface's domain edge (loft sides
+                // meeting at their lateral, a side standing on a plane)
+                // lies on the side of every cell beside it, where no
+                // crossing can be certified: on the surfaces carried past
+                // their edges, by different fractions so their carried
+                // edges don't end together, it lies inside.
+                Failure::Uncertain if extend => carried(a, b, region),
                 e => Err(e),
             });
         }
@@ -122,6 +145,296 @@ pub fn surface_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<Surfac
     let mut points = topo.points;
     let branches = fitted(&chains, order, swapped, &mut points)?;
     Ok(SurfaceHit::Meet { branches, points })
+}
+
+/// Where two surfaces meet, one at least with no implicit form, on the
+/// surfaces carried past their bounded domain edges, by different
+/// fractions so their carried edges don't end together. `Uncertain` when
+/// both have implicit forms or neither has such an edge. What is found
+/// may run past the surfaces' domains ([`within_domains`] clips it).
+fn carried(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
+    if Implicit::of(a).is_some() && Implicit::of(b).is_some() {
+        return Err(Failure::Uncertain);
+    }
+    match (extended(a, 16.0), extended(b, 32.0 / 3.0)) {
+        (None, None) => Err(Failure::Uncertain),
+        (ea, eb) => traced_any(ea.as_ref().unwrap_or(a), eb.as_ref().unwrap_or(b), region),
+    }
+}
+
+/// What [`carried`] found, cut back to the surfaces themselves: each
+/// branch to the stretches whose pcurves lie in both surfaces' domains (a
+/// carried surface keeps its parameters over its own domain), a stretch
+/// shorter than ten tolerances a point; points within resolution of both.
+fn within_domains(hit: SurfaceHit, surfaces: [&Surface; 2]) -> SurfaceHit {
+    let SurfaceHit::Meet {
+        branches,
+        mut points,
+    } = hit
+    else {
+        return hit;
+    };
+    points.retain(|&p| {
+        surfaces
+            .iter()
+            .all(|s| s.distance(p) <= 2.0 * LINEAR_RESOLUTION)
+    });
+    let mut out = Vec::with_capacity(branches.len());
+    for br in branches {
+        let runs = inside_runs(&br, surfaces);
+        if runs.len() == 1 && runs[0] == br.range {
+            out.push(br);
+            continue;
+        }
+        for range in runs {
+            let ends = range.map(|t| br.curve.point(t));
+            let b = br.curve.bounds(range);
+            if b.min().distance(b.max()) < 10.0 * br.tolerance {
+                points.push(ends[0]);
+                continue;
+            }
+            out.push(Branch {
+                range,
+                ..br.clone()
+            });
+        }
+    }
+    SurfaceHit::Meet {
+        branches: out,
+        points,
+    }
+}
+
+/// How finely [`inside_runs`] cuts a branch's range: halvings at most,
+/// and parts at most.
+const CLIP_DEPTH: u32 = 48;
+const CLIP_PARTS: usize = 4096;
+
+/// The stretches of a branch's range over which its pcurve on each
+/// surface lies in that surface's domain (periodic directions aside, each
+/// domain widened by a billionth), in order: parts certified in or out by
+/// the pcurves' bounds, the rest halved, down to [`CLIP_DEPTH`] halvings or
+/// past [`CLIP_PARTS`] parts, where the middle decides. A closed branch's
+/// runs across its start are one.
+fn inside_runs(br: &Branch, surfaces: [&Surface; 2]) -> Vec<[f64; 2]> {
+    // Each domain widened by a billionth of its width: a pcurve along a
+    // domain edge (where carrying the surfaces on is needed at all) lies
+    // on it within rounding, and is inside.
+    let widened = |d: [f64; 2]| {
+        let w = d[1] - d[0];
+        let e = 1e-9 * if w.is_finite() { w.max(1.0) } else { 1.0 };
+        [d[0] - e, d[1] + e]
+    };
+    let limits: [_; 2] = core::array::from_fn(|k| {
+        let [du, dv] = surfaces[k].domain();
+        ([widened(du), widened(dv)], surfaces[k].periods())
+    });
+    let box_of = |k: usize, [t0, t1]: [f64; 2]| {
+        let (c, [m0, m1]) = &br.pcurves[k];
+        let (s0, s1) = (m0 + m1 * t0, m0 + m1 * t1);
+        let r = [s0.min(s1), s0.max(s1)];
+        let b = match c {
+            Curve2::Nurbs2(n) => n.clipped_bounds(r),
+            c => c.bounds(r),
+        };
+        // Cutting pieces rounds: grow by a little more than it can.
+        let (lo, hi) = (b.min(), b.max());
+        let g = 1e-12 * lo.distance(hi).max(1.0);
+        [lo.x - g, lo.y - g, hi.x + g, hi.y + g]
+    };
+    // `Some(true)` all inside, `Some(false)` all outside (in some
+    // direction), `None` undecided.
+    let judge = |range: [f64; 2]| -> Option<bool> {
+        let mut inside = true;
+        for (k, &([du, dv], (pu, pv))) in limits.iter().enumerate() {
+            let [ulo, vlo, uhi, vhi] = box_of(k, range);
+            for (lo, hi, d, period) in [(ulo, uhi, du, pu), (vlo, vhi, dv, pv)] {
+                if period.is_some() {
+                    continue;
+                }
+                if hi < d[0] || lo > d[1] {
+                    return Some(false);
+                }
+                if lo < d[0] || hi > d[1] {
+                    inside = false;
+                }
+            }
+        }
+        inside.then_some(true)
+    };
+    let at_middle = |[a, b]: [f64; 2]| -> bool {
+        let t = (a + b) / 2.0;
+        (0..2).all(|k| {
+            let ([du, dv], (pu, pv)) = limits[k];
+            let (c, [m0, m1]) = &br.pcurves[k];
+            let p = c.point(m0 + m1 * t);
+            (pu.is_some() || (p.x >= du[0] && p.x <= du[1]))
+                && (pv.is_some() || (p.y >= dv[0] && p.y <= dv[1]))
+        })
+    };
+    let mut kept: Vec<[f64; 2]> = Vec::new();
+    let mut stack = vec![(br.range, 0u32)];
+    let mut parts = 0;
+    // Depth first, the lower half first: kept parts come in order.
+    while let Some((r, depth)) = stack.pop() {
+        parts += 1;
+        let keep = match judge(r) {
+            Some(x) => x,
+            None if depth >= CLIP_DEPTH || parts > CLIP_PARTS => at_middle(r),
+            None => {
+                let m = (r[0] + r[1]) / 2.0;
+                if m <= r[0] || m >= r[1] {
+                    at_middle(r)
+                } else {
+                    stack.push(([m, r[1]], depth + 1));
+                    stack.push(([r[0], m], depth + 1));
+                    continue;
+                }
+            }
+        };
+        if keep {
+            match kept.last_mut() {
+                Some(last) if last[1] == r[0] => last[1] = r[1],
+                _ => kept.push(r),
+            }
+        }
+    }
+    // A closed branch: the run ending at its end goes on into the one at
+    // its start.
+    if kept.len() > 1
+        && br.curve.period().is_some()
+        && kept[0][0] == br.range[0]
+        && kept[kept.len() - 1][1] == br.range[1]
+    {
+        let first = kept.remove(0);
+        let last = kept.last_mut().expect("two runs");
+        last[1] += first[1] - first[0];
+    }
+    kept
+}
+
+/// Where two surfaces meet, one at least with no implicit form: the
+/// general path for two such, else the trace in the other's parameters
+/// against the implicit form, falling back on the general path (which
+/// traces a tangency along a curve the other can't follow).
+fn traced_any(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
+    match (Implicit::of(a).is_some(), Implicit::of(b).is_some()) {
+        (false, false) => general_surface(a, b, region),
+        _ => sheet_surface(a, b, region).or_else(|e| match e {
+            Failure::Uncertain => general_surface(a, b, region),
+            e => Err(e),
+        }),
+    }
+}
+
+/// A surface carried past its bounded domain edges, exactly: the same
+/// surface over its own domain, so what is found on it there is found on
+/// the surface. A NURBS past each clamped end that doesn't collapse, by
+/// its end pieces' width over `part` ([`crate::geom::NurbsSurface::extended`]); a sweep
+/// along its profile by the profile's range over `part` (its path can't
+/// be carried on without changing its frame); an extrusion along its
+/// curve, a revolution along its curve short of the axis. `None` for an
+/// analytic surface or a pipe, or one with no such edge.
+pub(super) fn extended(s: &Surface, part: f64) -> Option<Surface> {
+    let n = match s {
+        Surface::Nurbs(n) => n,
+        Surface::Sweep(w) => {
+            let r = w.profile_range();
+            let m = (r[1] - r[0]) / part;
+            let (curve, range) = extended_curve(w.profile(), r, [m, m])?;
+            let swept = crate::geom::Sweep::new(
+                (curve, range),
+                (w.path().clone(), w.path_range()),
+                *w.start(),
+                w.law(),
+                w.twist(),
+                w.scale(),
+            )
+            .ok()?;
+            return Some(Surface::Sweep(Arc::new(swept)));
+        }
+        Surface::Extrusion(e) => {
+            let r = e.curve().domain();
+            if !(r[0].is_finite() && r[1].is_finite()) || e.curve().period().is_some() {
+                return None;
+            }
+            let m = (r[1] - r[0]) / part;
+            let (curve, _) = extended_curve(e.curve(), r, [m, m])?;
+            let out = crate::geom::Extrusion::from_unit(curve, e.dir()).ok()?;
+            return Some(Surface::Extrusion(Arc::new(out)));
+        }
+        Surface::Revolution(rv) => {
+            let r = rv.curve().domain();
+            if rv.curve().period().is_some() {
+                return None;
+            }
+            let poles = rv.poles();
+            let w = (r[1] - r[0]) / part;
+            let m = [
+                if poles[0] { 0.0 } else { w },
+                if poles[1] { 0.0 } else { w },
+            ];
+            if m == [0.0, 0.0] {
+                return None;
+            }
+            let (curve, _) = extended_curve(rv.curve(), r, m)?;
+            let out = crate::geom::Revolution::new(*rv.frame(), curve).ok()?;
+            return Some(Surface::Revolution(Arc::new(out)));
+        }
+        _ => return None,
+    };
+    let rows = crate::mesh::uv::collapsed_rows(s);
+    let mut out = (**n).clone();
+    let mut changed = false;
+    for (k, dir) in [crate::geom::Direction::U, crate::geom::Direction::V]
+        .into_iter()
+        .enumerate()
+    {
+        let kv = &out.knots()[k];
+        if kv.is_periodic() {
+            continue;
+        }
+        let [d0, d1] = kv.domain();
+        let mut distinct: Vec<f64> = kv.flat().to_vec();
+        distinct.dedup();
+        let first = distinct.get(1).copied().unwrap_or(d1) - d0;
+        let last = d1 - distinct[distinct.len().saturating_sub(2)];
+        let margins = [
+            if rows[k][0] { 0.0 } else { first / part },
+            if rows[k][1] { 0.0 } else { last / part },
+        ];
+        if margins == [0.0, 0.0] {
+            continue;
+        }
+        if let Some(e) = out.extended(dir, margins) {
+            out = e;
+            changed = true;
+        }
+    }
+    changed.then(|| Surface::Nurbs(Arc::new(out)))
+}
+
+/// `curve` over `range` carried on by `margins` past either end: a line
+/// as it is, a conic over a longer arc while it is shorter than a turn, a
+/// clamped spline past its domain ([`crate::geom::NurbsCurve::extended`]) where the
+/// range reaches it.
+fn extended_curve(curve: &Curve, range: [f64; 2], m: [f64; 2]) -> Option<(Curve, [f64; 2])> {
+    let r = [range[0] - m[0], range[1] + m[1]];
+    match curve {
+        Curve::Line(_) => Some((curve.clone(), r)),
+        Curve::Nurbs(n) if n.period().is_none() => {
+            let [d0, d1] = n.domain();
+            let past = [(d0 - r[0]).max(0.0), (r[1] - d1).max(0.0)];
+            if past == [0.0, 0.0] {
+                return Some((curve.clone(), r));
+            }
+            Some((Curve::Nurbs(Arc::new(n.extended(past)?)), r))
+        }
+        _ => match curve.period() {
+            Some(p) if r[1] - r[0] < p => Some((curve.clone(), r)),
+            _ => None,
+        },
+    }
 }
 
 /// Traced branches fitted with their pcurves on the surfaces in `order`,
@@ -338,7 +651,9 @@ fn cut_at(chains: Vec<Traced>, pole: Point3) -> Vec<Traced> {
             let mut second = vec![pole];
             second.extend_from_slice(&c.points[i + 1..]);
             for part in [first, second] {
-                if part.len() >= 2 {
+                // A branch already ending at the pole (a pole's zone in
+                // the trace ends it there) leaves nothing on that side.
+                if part.len() >= 2 && part.iter().any(|&p| p != pole) {
                     out.push(Traced {
                         points: part,
                         closed: false,
@@ -472,4 +787,65 @@ fn with_pcurves(raw: Raw, surfaces: [&Surface; 2]) -> Result<Branch, Failure> {
         tolerance,
         pcurves: [p0, p1],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::{Frame, Plane, Vector3};
+
+    /// A gently curved spline patch over `[0, 1]²` in x and y, and the
+    /// plane `x = 1` through its domain edge `u = 1`: the curve where they
+    /// meet lies along that edge, where the trace can't isolate it, so the
+    /// patch is carried past its edges, beyond the corners too.
+    fn patch_and_edge_plane() -> (Surface, Surface) {
+        let k = KnotVector::clamped(2, &[0.0, 1.0], &[3, 3]).unwrap();
+        let mut points = Vec::new();
+        for i in 0..3 {
+            for j in 0..3 {
+                let (x, y) = (f64::from(i) / 2.0, f64::from(j) / 2.0);
+                let z = if j == 1 { 0.1 } else { 0.0 };
+                points.push(Point3::new(x, y, z));
+            }
+        }
+        let patch = crate::geom::NurbsSurface::new([k.clone(), k], points, None).unwrap();
+        let frame = Frame::new(
+            Point3::new(1.0, 0.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        )
+        .unwrap();
+        (
+            Surface::Nurbs(Arc::new(patch)),
+            Surface::Plane(Plane::new(frame)),
+        )
+    }
+
+    #[test]
+    fn branches_never_leave_either_surface() {
+        let (patch, plane) = patch_and_edge_plane();
+        let region = Box3::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(2.0, 2.0, 1.0));
+        for (a, b, k) in [(&patch, &plane, 0), (&plane, &patch, 1)] {
+            let Ok(SurfaceHit::Meet { branches, .. }) = surface_surface(a, b, &region) else {
+                panic!("the patch and the plane meet");
+            };
+            assert!(!branches.is_empty());
+            for br in &branches {
+                let (c, [m0, m1]) = &br.pcurves[k];
+                for i in 0..=64 {
+                    let t = br.range[0] + (br.range[1] - br.range[0]) * f64::from(i) / 64.0;
+                    let p = c.point(m0 + m1 * t);
+                    // In the domain, but for the clip's slack (a billionth
+                    // of it): within resolution on this unit patch.
+                    let r = LINEAR_RESOLUTION;
+                    for x in [p.x, p.y] {
+                        assert!((-r..=1.0 + r).contains(&x), "({}, {}) at {t}", p.x, p.y);
+                    }
+                }
+                // Along the whole edge, not short of it.
+                let ends = [br.range[0], br.range[1]].map(|t| c.point(m0 + m1 * t).y);
+                assert!(ends.iter().any(|&y| y < 1e-6) && ends.iter().any(|&y| y > 1.0 - 1e-6));
+            }
+        }
+    }
 }

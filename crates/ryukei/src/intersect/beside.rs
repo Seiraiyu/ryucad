@@ -136,14 +136,7 @@ pub(crate) fn face_beside(
     }
     let points: Vec<Point3> = vertices.iter().map(|&v| body.vertices[v].point).collect();
     let (pu, pv) = surface.periods();
-    let keep = |c: Cell| {
-        let crossed = boundary
-            .iter()
-            .any(|&(curve, range)| meets(curve, range, c, (pu, pv), BOUNDARY_DEPTH));
-        let [[u0, u1], [v0, v1]] = c;
-        let middle = Point2::new((u0 + u1) / 2.0, (v0 + v1) / 2.0);
-        crossed || !matches!(point_in_face(body, face, middle), Ok(Place::Outside))
-    };
+    let keep = |c: Cell| !outside(body, face, &boundary, (pu, pv), c);
     run(
         surface,
         other,
@@ -153,6 +146,65 @@ pub(crate) fn face_beside(
         &keep,
         false,
     )
+}
+
+/// Whether a part of a face's parameter plane is certified outside the
+/// face: its boundary (`boundary`, each fin's pcurve over its range)
+/// doesn't pass through the part, and the part's middle is outside it.
+fn outside(
+    body: &Body,
+    face: FaceId,
+    boundary: &[(&Curve2, [f64; 2])],
+    periods: (Option<f64>, Option<f64>),
+    c: Cell,
+) -> bool {
+    let crossed = boundary
+        .iter()
+        .any(|&(curve, range)| meets(curve, range, c, periods, BOUNDARY_DEPTH));
+    let [[u0, u1], [v0, v1]] = c;
+    let middle = Point2::new((u0 + u1) / 2.0, (v0 + v1) / 2.0);
+    !crossed && matches!(point_in_face(body, face, middle), Ok(Place::Outside))
+}
+
+/// The boundary of a face for [`outside`]: each fin's pcurve over its
+/// range; `None` where a fin has none.
+fn boundary_of(body: &Body, face: FaceId) -> Option<Vec<(&Curve2, [f64; 2])>> {
+    let mut out = Vec::new();
+    for l in body.face_loops(face) {
+        for fin in body.loop_fins(l) {
+            let pc = body.fins[fin].pcurve?;
+            let [s0, s1] = body.edges[body.fins[fin].edge]
+                .interval
+                .map(|t| pc.param(t));
+            out.push((&body.curves2[pc.curve], [s0.min(s1), s0.max(s1)]));
+        }
+    }
+    Some(out)
+}
+
+/// Whether two faces are certified apart: the first's surface over its
+/// face's parameter box against the second's over its own, leaving out
+/// parts of either certified outside its face ([`outside`]). `budget`
+/// pairs of parts at most.
+pub(crate) fn faces_apart(
+    (ba, fa): (&Body, FaceId),
+    (bb, fb): (&Body, FaceId),
+    budget: usize,
+) -> bool {
+    let (Some(ra), Some(rb)) = (
+        super::face::face_rect(ba, fa),
+        super::face::face_rect(bb, fb),
+    ) else {
+        return false;
+    };
+    let (Some(wa), Some(wb)) = (boundary_of(ba, fa), boundary_of(bb, fb)) else {
+        return false;
+    };
+    let sa = &ba.surfaces[ba.faces[fa].surface];
+    let sb = &bb.surfaces[bb.faces[fb].surface];
+    let skip_a = |c: Cell| outside(ba, fa, &wa, sa.periods(), c);
+    let skip_b = |c: Cell| outside(bb, fb, &wb, sb.periods(), c);
+    super::general::apart_within(sa, ra, sb, Some(rb), &skip_a, &skip_b, budget) == Some(true)
 }
 
 /// A face's box in its surface's parameter plane: its pcurves', or the
