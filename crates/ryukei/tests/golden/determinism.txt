@@ -20,10 +20,12 @@ measure 14321cc1a1c75aa5
 meshes db1febfd53c37ddd
 mirror 359dd0582fe894ea
 nurbs_bodies 8827a1ca1af0b551
+offsets 29d933b5fb65d402
 pcurves 793fa833add523b0
 pipes 1e51550373b2b0bd
 predicates 582c63309c4c6f67
 primitives d1d75bf1aae07f71
 projection 5cabf36eda0e3960
+spline_blends 82d5d4a09ceda170
 sweeps ebce4136cbf5929f
 sweeps_along 192ad053af1f10cb

@@ -2175,6 +2175,250 @@ fn measure_section(golden: &mut Golden) {
     }
 }
 
+/// Offset surfaces of a spline, an extrusion and a revolution: points and
+/// derivatives at a grid, feet of points near them and their derivative
+/// bounds; and a pipe on a rail.
+fn offsets_section(golden: &mut Golden) {
+    use ryukei::geom::{Extrusion, KnotVector, NurbsCurve, NurbsSurface, Offset, Pipe, Revolution};
+    use std::sync::Arc;
+    let mut s = golden.section("offsets");
+    let ku = KnotVector::clamped(3, &[0.0, 0.4, 1.0], &[4, 1, 4]).unwrap();
+    let kv = KnotVector::clamped(3, &[0.0, 0.3, 0.7, 1.0], &[4, 1, 1, 4]).unwrap();
+    let mut pts = Vec::new();
+    let mut w = Vec::new();
+    for i in 0..5 {
+        for j in 0..6 {
+            let (x, y) = (f64::from(i) * 0.5, f64::from(j) * 0.4);
+            pts.push(Point3::new(
+                x,
+                y,
+                0.3 * math::sin(x * 1.3) * math::cos(y + 0.2),
+            ));
+            w.push(1.0 + 0.3 * f64::from((i + 2 * j) % 3));
+        }
+    }
+    let wavy = Surface::Nurbs(Arc::new(NurbsSurface::new([ku, kv], pts, Some(w)).unwrap()));
+    let tilted = Frame::new(
+        Point3::new(0.3, -0.2, 0.5),
+        Vector3::new(1.0, 0.4, 0.2),
+        Vector3::new(0.0, 1.0, 0.0),
+    )
+    .unwrap();
+    let (circle, _) = Circle::new(tilted, 0.8).unwrap().to_nurbs().unwrap();
+    let extrusion = Surface::Extrusion(Arc::new(
+        Extrusion::new(Curve::Nurbs(Arc::new(circle)), Vector3::new(1.0, 0.5, 0.3)).unwrap(),
+    ));
+    let meridian = Frame::new(
+        Point3::new(2.0, 0.0, 0.3),
+        Vector3::new(0.0, 1.0, 0.0),
+        Vector3::new(1.0, 0.0, 0.0),
+    )
+    .unwrap();
+    let ring = Circle::new(meridian, 0.5).unwrap();
+    let revolution = Surface::Revolution(Arc::new(
+        Revolution::new(Frame::WORLD, Curve::Circle(ring)).unwrap(),
+    ));
+    let cases = [
+        (wavy, [[0.0, 1.0], [0.0, 1.0]], 0.2),
+        (extrusion, [[0.5, 4.0], [-1.0, 1.0]], -0.5),
+        (
+            revolution,
+            [[0.0, core::f64::consts::TAU], [0.0, core::f64::consts::TAU]],
+            0.2,
+        ),
+    ];
+    let mut g = Lcg::new(0x6f66_6673);
+    for (base, cell, d) in &cases {
+        let o = Surface::Offset(Arc::new(Offset::new(base.clone(), *d, *cell).unwrap()));
+        for _ in 0..16 {
+            let u = g.next_f64(cell[0][0], cell[0][1]);
+            let v = g.next_f64(cell[1][0], cell[1][1]);
+            let e = o.eval(u, v);
+            for x in [e.point.to_vector(), e.du, e.dv, e.duu, e.duv, e.dvv] {
+                for c in x.to_array() {
+                    s.f64(c);
+                }
+            }
+            let n = o.normal(u, v).unwrap().get();
+            let f = o.project(e.point + n * 0.01);
+            s.f64(f.param.0);
+            s.f64(f.param.1);
+            s.f64(f.distance);
+        }
+        let b = o.derivative_bound(*cell);
+        for x in [b.duu, b.duv, b.dvv, b.turn_u, b.turn_v] {
+            s.f64(x);
+        }
+    }
+    // A pipe on a rail: the plane as a spline, the rail the spine's shadow.
+    let k = KnotVector::clamped(3, &[0.0, 1.0, 2.0], &[4, 1, 4]).unwrap();
+    let r = 0.25;
+    let xy = [(0.0, 0.0), (1.0, 1.0), (2.0, -0.5), (3.0, 0.5), (4.0, 0.0)];
+    let spine = NurbsCurve::new(
+        k.clone(),
+        xy.iter().map(|&(x, y)| Point3::new(x, y, r)).collect(),
+        None,
+    )
+    .unwrap();
+    let shadow = ryukei::geom::NurbsCurve2::new(
+        k,
+        xy.iter().map(|&(x, y)| Point2::new(x, y)).collect(),
+        None,
+    )
+    .unwrap();
+    let (flat, _) = Surface::Plane(Plane::new(Frame::WORLD))
+        .to_nurbs([[-1.0, 5.0], [-2.0, 2.0]])
+        .unwrap();
+    let pipe = Pipe::on_rail(
+        Curve::Nurbs(Arc::new(spine)),
+        r,
+        Surface::Nurbs(Arc::new(flat)),
+        Curve2::Nurbs2(Arc::new(shadow)),
+        [0.0, 1.0],
+    )
+    .unwrap();
+    for _ in 0..32 {
+        let (u, v) = (g.next_f64(0.0, 2.0), g.next_f64(-3.0, 3.0));
+        let e = Surface::Pipe(Arc::new(pipe.clone())).eval(u, v);
+        for x in [e.point.to_vector(), e.du, e.dv, e.duu] {
+            for c in x.to_array() {
+                s.f64(c);
+            }
+        }
+    }
+}
+
+/// Blends on spline faces: a box's edge, every edge of a box (ball
+/// corners), its top rim filleted and chamfered, a cylinder's rim, an
+/// extruded spline circle's rim, and a twisted loft's laterals filleted
+/// and chamfered.
+fn spline_blends_section(golden: &mut Golden) {
+    use ryukei::blend::{BlendKind, Chamfer, EdgeBlend, blend};
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::sweep::{LoftOptions, loft};
+    let mut s = golden.section("spline_blends");
+    let key = OpKey(0x7370_626c);
+    let spline = |mut b: ryukei::topo::Body| {
+        nurbs::convert_body(&mut b).unwrap();
+        b
+    };
+    let edge = |k: OpKey, a: FaceRole, b: FaceRole| {
+        let mut f = [
+            Name::derive(k, Role::Face(a), &[]),
+            Name::derive(k, Role::Face(b), &[]),
+        ];
+        f.sort();
+        Name::derive(k, Role::Edge, &f)
+    };
+    let fillet = |e: Name, radius: f64| EdgeBlend {
+        edge: e,
+        kind: BlendKind::Fillet { radius },
+    };
+    let chamfer = |e: Name, distance: f64| EdgeBlend {
+        edge: e,
+        kind: BlendKind::Chamfer(Chamfer::Equal { distance }),
+    };
+    let k = OpKey(1);
+    let bx = spline(
+        primitive::block(k, 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+    );
+    use FaceRole::*;
+    let all: Vec<Name> = [
+        (PlusX, PlusY),
+        (PlusX, MinusY),
+        (MinusX, PlusY),
+        (MinusX, MinusY),
+        (PlusX, PlusZ),
+        (PlusX, MinusZ),
+        (MinusX, PlusZ),
+        (MinusX, MinusZ),
+        (PlusY, PlusZ),
+        (PlusY, MinusZ),
+        (MinusY, PlusZ),
+        (MinusY, MinusZ),
+    ]
+    .iter()
+    .map(|&(a, b)| edge(k, a, b))
+    .collect();
+    let top: Vec<Name> = [PlusX, MinusX, PlusY, MinusY]
+        .iter()
+        .map(|&f| edge(k, f, PlusZ))
+        .collect();
+    let cyl = spline(
+        primitive::cylinder(OpKey(2), 1.0, 1.0, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+    );
+    let rim = cyl.edge(cyl.edges().next().unwrap()).unwrap().name;
+    let mut cases: Vec<(ryukei::topo::Body, Vec<EdgeBlend>)> = vec![
+        (bx.clone(), vec![fillet(edge(k, PlusX, PlusZ), 0.25)]),
+        (bx.clone(), all.iter().map(|&e| fillet(e, 0.25)).collect()),
+        (bx.clone(), top.iter().map(|&e| fillet(e, 0.15)).collect()),
+        (bx.clone(), top.iter().map(|&e| chamfer(e, 0.15)).collect()),
+        (cyl.clone(), vec![fillet(rim, 0.2)]),
+        (cyl, vec![chamfer(rim, 0.2)]),
+    ];
+    // A twisted loft: its sides are curved splines.
+    let square = |h: f64, turn: f64| {
+        let (sn, cs) = math::sin_cos(turn);
+        let pts = [(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)];
+        let segments = (0..4)
+            .map(|i| {
+                let (p, q) = (pts[i], pts[(i + 1) % 4]);
+                let (p, q) = (Point2::new(p.0, p.1), Point2::new(q.0, q.1));
+                Segment {
+                    key: SegmentKey(10 + i as u128),
+                    curve: Curve2::Line2(Line2::through(p, q).unwrap()),
+                    t0: 0.0,
+                    t1: p.distance(q),
+                }
+            })
+            .collect();
+        ValidProfile::new(Profile {
+            frame: Frame::new(
+                Point3::new(0.0, 0.0, h),
+                Vector3::new(0.0, 0.0, 1.0),
+                Vector3::new(cs, sn, 0.0),
+            )
+            .unwrap(),
+            loops: vec![Loop {
+                key: LoopKey(1),
+                segments,
+            }],
+        })
+        .unwrap()
+    };
+    let (twisted, _) = loft(
+        OpKey(5),
+        &[square(0.0, 0.0), square(1.0, core::f64::consts::PI / 6.0)],
+        &LoftOptions::default(),
+    )
+    .unwrap();
+    let laterals: Vec<Name> = twisted
+        .edges()
+        .filter(|&e| {
+            let ed = twisted.edge(e).unwrap();
+            let z = [ed.start, ed.end].map(|v| twisted.vertex(v).unwrap().point.z);
+            (z[0] - z[1]).abs() > 0.5
+        })
+        .map(|e| twisted.edge(e).unwrap().name)
+        .collect();
+    cases.push((
+        twisted.clone(),
+        laterals.iter().map(|&e| fillet(e, 0.05)).collect(),
+    ));
+    cases.push((
+        twisted,
+        laterals.iter().map(|&e| chamfer(e, 0.05)).collect(),
+    ));
+    for (body, blends) in &cases {
+        let (b, journal) = blend(key, body, blends).unwrap();
+        hash_body(&mut s, &b, &journal);
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -2210,5 +2454,7 @@ fn determinism() {
     codec_section(&mut golden);
     general_booleans_section(&mut golden);
     measure_section(&mut golden);
+    offsets_section(&mut golden);
+    spline_blends_section(&mut golden);
     golden.finish();
 }
