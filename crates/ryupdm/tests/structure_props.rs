@@ -170,3 +170,35 @@ fn where_used_counts_what_the_flat_bom_counts() {
         }
     }
 }
+
+#[test]
+fn every_placed_part_has_its_item_number_in_the_bom() {
+    for seed in 0..200 {
+        let s = structure(&bytes(seed));
+        let project = Project::load_from(Path::new(""), &s.files).unwrap();
+        let mut cache = Cache::new();
+        let mut r = Reader::new(&s.files, &project, None, None, &mut cache);
+        for (a, children) in &s.assemblies {
+            let row = tree(&mut r, &id(a), &Rev::Working, Some(1)).unwrap();
+            assert!(ryupdm::bom::findings(&row).is_empty(), "seed {seed}");
+            // Numbered 1, 2, … in the order the generator placed them.
+            let mut want: Vec<&str> = Vec::new();
+            for (c, _) in children {
+                if !want.contains(&c.as_str()) {
+                    want.push(c);
+                }
+            }
+            let got: Vec<(String, Option<u32>)> = row
+                .children
+                .iter()
+                .map(|c| (c.part.to_string(), c.item))
+                .collect();
+            let want: Vec<(String, Option<u32>)> = want
+                .iter()
+                .zip(1..)
+                .map(|(c, n)| ((*c).to_owned(), Some(n)))
+                .collect();
+            assert_eq!(got, want, "seed {seed}: {a}");
+        }
+    }
+}

@@ -6,7 +6,9 @@
 //! A leaf is a part, or an assembly bought whole (`make_buy: buy`), whose
 //! children the indented BOM still lists, marked `bought`, but the flat
 //! BOM doesn't sum: you buy the motor, not its screws. A part counted in
-//! anything but `each` is quantified by its `amount` per occurrence.
+//! anything but `each` is quantified by its `amount` per occurrence. A
+//! row's item number is the one its parent's `part.json` gives its part
+//! ([`crate::items`]).
 
 use crate::config::Scheme;
 use crate::label;
@@ -33,6 +35,9 @@ pub struct Row {
     pub count: u64,
     /// The instances and copies that place it, as paths in the parent.
     pub instances: Vec<String>,
+    /// Its item number in its parent: none for the root, or where the
+    /// parent gives its part none.
+    pub item: Option<u32>,
     /// Its files, or why they can't be read.
     pub node: Result<Arc<Node>>,
     /// It lies inside an assembly bought whole.
@@ -96,6 +101,7 @@ pub fn tree(reader: &mut Reader, part: &Id, rev: &Rev, depth: Option<usize>) -> 
         rev: rev.clone(),
         count: 1,
         instances: Vec::new(),
+        item: None,
         node: Ok(node),
         bought: false,
         children: Vec::new(),
@@ -128,6 +134,12 @@ fn expand(
         return;
     }
     let node = row.node.as_ref().expect("an assembly reads").clone();
+    let items = node
+        .part
+        .file
+        .as_ref()
+        .map(|f| f.items.clone())
+        .unwrap_or_default();
     let (occ, problems) = occurrences(&node.part);
     row.problems = problems
         .into_iter()
@@ -178,6 +190,7 @@ fn expand(
             rev: rev.clone(),
             count: instances.len() as u64,
             instances,
+            item: items.get(&part).copied(),
             node,
             bought,
             children: Vec::new(),
@@ -197,6 +210,20 @@ fn expand(
     }
 }
 
+/// An item number a leaf has in one assembly at one revision.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ItemOf {
+    pub assembly: Id,
+    pub rev: Rev,
+    pub item: u32,
+}
+
+impl ItemOf {
+    pub fn to_json(&self) -> Value {
+        json!({"assembly": self.assembly, "rev": self.rev.to_json(), "item": self.item})
+    }
+}
+
 /// One row of a flat BOM: a leaf, at a revision, with its total.
 #[derive(Clone, Debug)]
 pub struct Flat {
@@ -205,6 +232,8 @@ pub struct Flat {
     pub row: Row,
     /// How many occurrences every path from the root makes.
     pub total: u64,
+    /// Its item number in each assembly that places it, as first met.
+    pub items: Vec<ItemOf>,
 }
 
 /// Where a revision sorts: `working` first, then labels in `scheme`'s
@@ -222,29 +251,46 @@ pub fn rev_order(scheme: Scheme, rev: &Rev) -> (u8, u64, String) {
 /// without one last), then part, then revision in `config`'s label order.
 pub fn flat(root: &Row, config: &crate::config::Config) -> Vec<Flat> {
     let mut out: Vec<Flat> = Vec::new();
-    fn walk(row: &Row, times: u64, out: &mut Vec<Flat>) {
+    fn walk(row: &Row, parent: Option<&Row>, times: u64, out: &mut Vec<Flat>) {
         if row.is_leaf() {
             let total = times * row.count;
-            match out
-                .iter_mut()
-                .find(|f| f.row.part == row.part && f.row.rev == row.rev)
+            let at = match out
+                .iter()
+                .position(|f| f.row.part == row.part && f.row.rev == row.rev)
             {
-                Some(f) => f.total += total,
-                None => out.push(Flat {
-                    row: Row {
-                        children: Vec::new(),
-                        ..row.clone()
-                    },
-                    total,
-                }),
+                Some(i) => {
+                    out[i].total += total;
+                    i
+                }
+                None => {
+                    out.push(Flat {
+                        row: Row {
+                            children: Vec::new(),
+                            ..row.clone()
+                        },
+                        total,
+                        items: Vec::new(),
+                    });
+                    out.len() - 1
+                }
+            };
+            if let (Some(p), Some(item)) = (parent, row.item) {
+                let of = ItemOf {
+                    assembly: p.part.clone(),
+                    rev: p.rev.clone(),
+                    item,
+                };
+                if !out[at].items.contains(&of) {
+                    out[at].items.push(of);
+                }
             }
             return;
         }
         for c in &row.children {
-            walk(c, times * row.count, out);
+            walk(c, Some(row), times * row.count, out);
         }
     }
-    walk(root, 1, &mut out);
+    walk(root, None, 1, &mut out);
     let number = |f: &Flat| {
         f.row
             .node
@@ -277,8 +323,11 @@ pub fn quantity(row: &Row, count: u64) -> Value {
 
 /// What makes the BOM under `root` unsound, as `check` findings: a part
 /// counted in anything but `each` with no `amount` (`bom_amount_missing`),
-/// and an assembly placing one part at two revisions
-/// (`bom_mixed_revisions`). Each once, in the order the walk meets them.
+/// an assembly placing one part at two revisions (`bom_mixed_revisions`),
+/// and an assembly read as it is (`working`) whose item numbers are
+/// missing, shared or unused (`bom_item_missing`, `bom_item_duplicate`,
+/// `bom_item_unused`: [`crate::items::faults`]; a release's numbers are
+/// what it released). Each once, in the order the walk meets them.
 pub fn findings(root: &Row) -> Vec<Value> {
     let mut out = Vec::new();
     let mut seen = Vec::new();
@@ -292,6 +341,28 @@ pub fn findings(root: &Row) -> Vec<Value> {
                     "part": row.part, "rev": row.rev.to_json(),
                     "message": format!("{} is counted in {} but has no amount, so a BOM can only count it: set its amount (how much one use takes)", row.part, row.uom()),
                 }));
+            }
+        }
+        if row.rev == Rev::Working
+            && let Ok(n) = &row.node
+        {
+            let key = format!("items\0{}", row.part);
+            if !seen.contains(&key) {
+                seen.push(key);
+                for e in crate::items::faults(&row.part, &n.part) {
+                    let severity = match e.code {
+                        Code::BomItemDuplicate => "error",
+                        _ => "warning",
+                    };
+                    let mut f = json!({
+                        "code": e.code, "severity": severity, "source": "bom",
+                        "part": row.part, "parts": e.details["parts"], "message": e.message,
+                    });
+                    if let Some(n) = e.details.get("item") {
+                        f["item"] = n.clone();
+                    }
+                    out.push(f);
+                }
             }
         }
         let mut revs: BTreeMap<&Id, Vec<&Rev>> = BTreeMap::new();
@@ -382,6 +453,9 @@ pub fn row_json(row: &Row, states: &BTreeMap<Id, Value>) -> Value {
     let mut v = about(row);
     v["quantity"] = quantity(row, row.count);
     v["instances"] = json!(row.instances);
+    if let Some(n) = row.item {
+        v["item"] = json!(n);
+    }
     if row.rev == Rev::Working
         && let Some(s) = states.get(&row.part)
     {
@@ -403,6 +477,7 @@ pub fn row_json(row: &Row, states: &BTreeMap<Id, Value>) -> Value {
 pub fn flat_json(f: &Flat, states: &BTreeMap<Id, Value>) -> Value {
     let mut v = about(&f.row);
     v["quantity"] = quantity(&f.row, f.total);
+    v["items"] = f.items.iter().map(ItemOf::to_json).collect();
     if f.row.rev == Rev::Working
         && let Some(s) = states.get(&f.row.part)
     {
@@ -446,7 +521,7 @@ fn custom(config: &crate::config::Config) -> Vec<String> {
         .collect()
 }
 
-fn csv_line(level: &str, row: &Row, count: u64, custom: &[String]) -> String {
+fn csv_line(level: &str, item: &str, row: &Row, count: u64, custom: &[String]) -> String {
     let props = row
         .node
         .as_ref()
@@ -471,7 +546,7 @@ fn csv_line(level: &str, row: &Row, count: u64, custom: &[String]) -> String {
     };
     let mut fields = vec![
         level.to_owned(),
-        String::new(),
+        item.to_owned(),
         text("number"),
         text("name"),
         row.part.to_string(),
@@ -501,18 +576,22 @@ fn csv_header(custom: &[String]) -> String {
 }
 
 /// The indented BOM under `root` as CSV: a header, then every row below
-/// the root in order, its `level` its place (`1`, `1.2`, `1.2.1`).
+/// the root in order, its `level` the path of item numbers down to it
+/// (`1`, `1.2`, `1.2.1`), a row's place among its siblings where it has
+/// no item number.
 pub fn csv_tree(root: &Row, config: &crate::config::Config) -> String {
     let custom = custom(config);
     let mut out = csv_header(&custom);
     fn walk(row: &Row, at: &str, custom: &[String], out: &mut String) {
         for (i, c) in row.children.iter().enumerate() {
+            let step = c.item.map_or(i as u64 + 1, u64::from);
             let level = if at.is_empty() {
-                format!("{}", i + 1)
+                format!("{step}")
             } else {
-                format!("{at}.{}", i + 1)
+                format!("{at}.{step}")
             };
-            out.push_str(&csv_line(&level, c, c.count, custom));
+            let item = c.item.map(|n| n.to_string()).unwrap_or_default();
+            out.push_str(&csv_line(&level, &item, c, c.count, custom));
             walk(c, &level, custom, out);
         }
     }
@@ -520,21 +599,43 @@ pub fn csv_tree(root: &Row, config: &crate::config::Config) -> String {
     out
 }
 
-/// The flat BOM as CSV: a header, then each row, `level` left empty.
+/// The flat BOM as CSV: a header, then each row, `level` left empty and
+/// `item` its distinct item numbers in the order first met, joined by `;`
+/// (a leaf placed by several assemblies may have several).
 pub fn csv_flat(rows: &[Flat], config: &crate::config::Config) -> String {
     let custom = custom(config);
     let mut out = csv_header(&custom);
     for f in rows {
-        out.push_str(&csv_line("", &f.row, f.total, &custom));
+        let mut items: Vec<String> = Vec::new();
+        for i in &f.items {
+            let n = i.item.to_string();
+            if !items.contains(&n) {
+                items.push(n);
+            }
+        }
+        out.push_str(&csv_line("", &items.join(";"), &f.row, f.total, &custom));
     }
     out
 }
 
-/// One side of a comparison: a row with the count it is compared by.
+/// One side of a comparison: a row with the count it is compared by, and
+/// for a flat row its item numbers (a tree row's is its own `item`).
 #[derive(Clone, Copy)]
 struct Side<'a> {
     row: &'a Row,
     count: u64,
+    items: Option<&'a [ItemOf]>,
+}
+
+impl Side<'_> {
+    /// Its item numbers as output gives them: `items` for a flat row,
+    /// `item` for a tree row.
+    fn numbers(&self) -> (&'static str, Value) {
+        match self.items {
+            Some(items) => ("items", items.iter().map(ItemOf::to_json).collect()),
+            None => ("item", json!(self.row.item)),
+        }
+    }
 }
 
 /// Pairs rows by part: per part, equal revisions first, then the rest in
@@ -599,6 +700,11 @@ fn change(a: Side, b: Side, config: &crate::config::Config) -> Option<Value> {
         v["quantity"] = json!({"from": qa, "to": qb});
         changed = true;
     }
+    let ((key, na), (_, nb)) = (a.numbers(), b.numbers());
+    if na != nb {
+        v[key] = json!({"from": na, "to": nb});
+        changed = true;
+    }
     let (pa, pb) = (properties(a.row), properties(b.row));
     let mut props = serde_json::Map::new();
     for k in pa.keys().chain(pb.keys()) {
@@ -621,6 +727,10 @@ fn compare(from: Vec<Side>, to: Vec<Side>, config: &crate::config::Config) -> Va
     let whole = |s: &Side| {
         let mut v = about(s.row);
         v["quantity"] = quantity(s.row, s.count);
+        let (key, n) = s.numbers();
+        if !n.is_null() {
+            v[key] = n;
+        }
         v
     };
     json!({
@@ -635,6 +745,7 @@ fn sides(f: &[Flat]) -> Vec<Side<'_>> {
         .map(|f| Side {
             row: &f.row,
             count: f.total,
+            items: Some(&f.items),
         })
         .collect()
 }
@@ -645,6 +756,7 @@ fn kids(r: &Row) -> Vec<Side<'_>> {
         .map(|c| Side {
             row: c,
             count: c.count,
+            items: None,
         })
         .collect()
 }
@@ -721,7 +833,8 @@ pub(crate) mod tests {
     use std::path::Path;
 
     /// `frame` places a plate, two `sub`s (an instance and a copy), two
-    /// tubes and a bought motor; `sub` places two bolts, the motor one.
+    /// tubes and a bought motor; `sub` places two bolts, the motor one;
+    /// each numbers its parts in the order it places them.
     pub(crate) fn frame() -> BTreeMap<String, Vec<u8>> {
         let w = || json!("working");
         let mut f = files(&[
@@ -771,7 +884,24 @@ pub(crate) mod tests {
             json!({"number": "300", "uom": "m", "amount": "600 mm"}),
         );
         props("motor", json!({"number": "400", "make_buy": "buy"}));
+        // Numbered as writes would number them.
+        with_items(
+            &mut f,
+            "frame",
+            json!({"plate": 1, "sub": 2, "tube": 3, "motor": 4}),
+        );
+        with_items(&mut f, "sub", json!({"bolt": 1}));
+        with_items(&mut f, "motor", json!({"bolt": 1}));
         f
+    }
+
+    /// `f` with assembly `asm`'s item numbers set to `items`.
+    pub(crate) fn with_items(f: &mut BTreeMap<String, Vec<u8>>, asm: &str, items: Value) {
+        let path = format!("parts/{asm}/part.json");
+        let mut list: Value = serde_json::from_slice(&f[&path]).unwrap();
+        list["items"] = items;
+        list["format"] = json!(3);
+        f.insert(path, canonical::to_string(&list).into_bytes());
     }
 
     pub(crate) fn read(f: &BTreeMap<String, Vec<u8>>, part: &str, depth: Option<usize>) -> Row {
@@ -850,7 +980,8 @@ pub(crate) mod tests {
             "parts/frame/part.json".into(),
             canonical::to_string(
                 &json!({"features": ["base", "s", "row", "t1", "t2", "m", "ghost"],
-                "format": 2, "kind": "ryucad.part", "part_kind": "assembly"}),
+                "format": 3, "kind": "ryucad.part", "part_kind": "assembly",
+                "items": {"plate": 1, "sub": 2, "tube": 3, "motor": 4, "ghost": 5}}),
             )
             .into_bytes(),
         );
@@ -908,16 +1039,16 @@ pub(crate) mod tests {
         );
         assert_eq!(
             lines[1],
-            "1,,200,\"Plate, \"\"thick\"\"\",plate,working,1,each,make,,,anodized"
+            "1,1,200,\"Plate, \"\"thick\"\"\",plate,working,1,each,make,,,anodized"
         );
-        assert_eq!(lines[2], "2,,,,sub,working,2,each,make,,,");
-        assert_eq!(lines[3], "2.1,,100,Bolt,bolt,working,2,each,buy,,,");
-        assert_eq!(lines[4], "3,,300,,tube,working,1.2,m,make,,,");
+        assert_eq!(lines[2], "2,2,,,sub,working,2,each,make,,,");
+        assert_eq!(lines[3], "2.1,1,100,Bolt,bolt,working,2,each,buy,,,");
+        assert_eq!(lines[4], "3,3,300,,tube,working,1.2,m,make,,,");
         assert_eq!(lines.len(), 7);
         let flat = csv_flat(&flat(&root, &config), &config);
         assert_eq!(
             flat.lines().nth(1),
-            Some(",,100,Bolt,bolt,working,4,each,buy,,,")
+            Some(",1,100,Bolt,bolt,working,4,each,buy,,,")
         );
         assert!(csv.ends_with('\n') && !csv.contains('\r'));
     }
@@ -942,8 +1073,8 @@ pub(crate) mod tests {
         put("parts/sub/features/b3.json", b3);
         put(
             "parts/sub/part.json",
-            json!({"features": ["b1", "b2", "b3"], "format": 2, "kind": "ryucad.part",
-                   "part_kind": "assembly"}),
+            json!({"features": ["b1", "b2", "b3"], "format": 3, "kind": "ryucad.part",
+                   "part_kind": "assembly", "items": {"bolt": 1}}),
         );
         put(
             "parts/plate/properties.json",
@@ -952,8 +1083,9 @@ pub(crate) mod tests {
         );
         put(
             "parts/frame/part.json",
-            json!({"features": ["base", "s", "row", "m"], "format": 2,
-                   "kind": "ryucad.part", "part_kind": "assembly"}),
+            json!({"features": ["base", "s", "row", "m"], "format": 3,
+                   "kind": "ryucad.part", "part_kind": "assembly",
+                   "items": {"plate": 1, "sub": 2, "motor": 4}}),
         );
         let after = read(&b, "frame", None);
         let d = diff(Some(&before), Some(&after), &config);
@@ -1048,5 +1180,92 @@ pub(crate) mod tests {
             rev_order(Scheme::Letters, &Rev::Label("B".into()))
                 < rev_order(Scheme::Letters, &Rev::Label("AA".into()))
         );
+    }
+
+    #[test]
+    fn rows_carry_their_item_numbers_into_json_csv_and_diffs() {
+        let mut f = frame();
+        // Numbers that aren't the rows' places; the motor has none.
+        with_items(&mut f, "frame", json!({"plate": 10, "sub": 20, "tube": 30}));
+        with_items(&mut f, "sub", json!({"bolt": 5}));
+        with_items(&mut f, "motor", json!({"bolt": 7}));
+        let config = crate::config::Config::default();
+        let root = read(&f, "frame", None);
+        let v = row_json(&root, &BTreeMap::new());
+        assert!(v.get("item").is_none());
+        assert_eq!(v["children"][1]["item"], 20);
+        assert!(v["children"][3].get("item").is_none());
+        let csv = csv_tree(&root, &config);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(
+            lines[1],
+            "10,10,200,Plate,plate,working,1,each,make,6061-T6,"
+        );
+        assert_eq!(lines[3], "20.5,5,100,Bolt,bolt,working,2,each,buy,,");
+        // The motor, fourth and unnumbered, keeps its place; its bolt has 7.
+        assert_eq!(lines[5], "4,,400,,motor,working,1,each,buy,,");
+        assert_eq!(lines[6], "4.7,7,100,Bolt,bolt,working,1,each,buy,,");
+        // Flat: the bolt is 5 in sub, which the motor (bought) hides.
+        let rows = flat(&root, &config);
+        let bolt = flat_json(&rows[0], &BTreeMap::new());
+        assert_eq!(
+            bolt["items"],
+            json!([{"assembly": "sub", "rev": "working", "item": 5}])
+        );
+        assert_eq!(
+            csv_flat(&rows, &config).lines().nth(1),
+            Some(",5,100,Bolt,bolt,working,4,each,buy,,")
+        );
+        // Renumbered: the diff says which number each row had.
+        let mut g = f.clone();
+        with_items(&mut g, "frame", json!({"plate": 11, "sub": 20, "tube": 30}));
+        with_items(&mut g, "sub", json!({"bolt": 6}));
+        let d = diff(Some(&root), Some(&read(&g, "frame", None)), &config);
+        assert_eq!(d["summary"]["changed"], 2, "{d}");
+        assert_eq!(
+            d["flat"]["changed"][0]["items"],
+            json!({"from": [{"assembly": "sub", "rev": "working", "item": 5}],
+                   "to": [{"assembly": "sub", "rev": "working", "item": 6}]})
+        );
+        assert_eq!(
+            d["flat"]["changed"][1]["items"]["to"],
+            json!([{"assembly": "frame", "rev": "working", "item": 11}])
+        );
+        let tree = &d["tree"];
+        assert_eq!(tree[0]["part"], "frame");
+        assert_eq!(
+            tree[0]["children"]["changed"][0]["item"],
+            json!({"from": 10, "to": 11})
+        );
+        assert_eq!(
+            tree[1]["children"]["changed"][0]["item"],
+            json!({"from": 5, "to": 6})
+        );
+    }
+
+    #[test]
+    fn a_working_assemblys_item_faults_are_findings() {
+        let mut f = frame();
+        with_items(
+            &mut f,
+            "frame",
+            json!({"plate": 1, "sub": 1, "tube": 2, "gone": 9}),
+        );
+        with_items(&mut f, "sub", json!({"bolt": 1}));
+        let root = read(&f, "frame", None);
+        let found: Vec<(Value, Value, Value)> = findings(&root)
+            .iter()
+            .map(|f| (f["code"].clone(), f["part"].clone(), f["severity"].clone()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (json!("bom_item_missing"), json!("frame"), json!("warning")),
+                (json!("bom_item_duplicate"), json!("frame"), json!("error")),
+                (json!("bom_item_unused"), json!("frame"), json!("warning")),
+            ]
+        );
+        assert_eq!(findings(&root)[1]["item"], 1);
+        assert_eq!(findings(&root)[0]["parts"], json!(["motor"]));
     }
 }

@@ -359,7 +359,7 @@ mod tests {
             csv["csv"]
                 .as_str()
                 .unwrap()
-                .contains("\n,,100,,p,A,3,each,make,,\n")
+                .contains("\n,1,100,,p,A,3,each,make,,\n")
         );
         let head = call(&mut s, "bom.get", json!({"rev": "HEAD"})).unwrap();
         assert_eq!(head["tree"]["children"][0]["quantity"]["count"], 2);
