@@ -109,6 +109,7 @@ jobs:
       - run: cargo test -p ryucad --release --test step_bar -- --nocapture
       - run: cargo test -p ryucad --release --test step
       - run: cargo test -p ryueda --release --test bar -- --nocapture
+      - run: cargo test -p ryucad-app --release --test lazy -- --nocapture
       - run: cargo bench --workspace --no-run
 
   kicad-corpus:
