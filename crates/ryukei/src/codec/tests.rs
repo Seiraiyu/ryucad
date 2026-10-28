@@ -54,6 +54,12 @@ fn every_kind() -> Body {
     let r = Revolution::new(Frame::WORLD, tube).unwrap();
     b.add_surface(Surface::Revolution(Arc::new(r)));
     b.add_surface(Surface::Pipe(Arc::new(on_plane())));
+    b.add_surface(Surface::Pipe(Arc::new(
+        crate::geom::pipe::tests::on_spline_plane(),
+    )));
+    b.add_surface(Surface::Pipe(Arc::new(
+        crate::geom::pipe::tests::round_extrusion(),
+    )));
     let sweep = Arc::new(crate::geom::path_sweep::tests::straight());
     b.add_surface(Surface::Sweep(sweep.clone()));
     b.add_surface(Surface::Sweep(sweep));
