@@ -2,11 +2,12 @@ name: CI
 
 # The fast checks every pull request must pass, in under 10 minutes on
 # every platform: fmt, clippy, a build, the unit tests and the golden
-# hashes everywhere, and every test that isn't ignored on Linux x64. The
-# rest (debug builds of every test on every platform, the release suites,
-# CPU levels, the devcontainer, the installers) is full.yml's, run by hand
-# and before every release. Pushes to main run these checks too, which
-# keeps the caches pull requests start from warm.
+# hashes everywhere, and every test that isn't ignored on Linux x64, split
+# over parallel jobs. The rest (debug builds of every test on every
+# platform, the release suites, CPU levels, the devcontainer, the
+# installers) is full.yml's, run by hand and before every release. Pushes
+# to main run these checks too, which keeps the caches pull requests start
+# from warm.
 on:
   push:
     branches: [main]
@@ -19,59 +20,147 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Windows links its many test binaries with the toolchain's lld, which is
+  # much faster than MSVC's link.exe.
+  CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld
 
 jobs:
   fmt:
     name: fmt
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
       - run: cargo fmt --all --check
 
-  test:
-    name: ${{ matrix.os }}
+  clippy:
+    name: clippy on ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Every test that isn't ignored, the doctests too.
-          - os: ubuntu-latest
-            tests: --workspace
-          # The unit tests and the golden hashes.
-          - os: ubuntu-24.04-arm
-            tests: --workspace --lib --bins --test determinism
-          - os: macos-latest
-            tests: --workspace --lib --bins --test determinism
-          - os: windows-latest
-            tests: --workspace --lib --bins --test determinism
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
+          # Runners of two image versions hash their environment apart
+          # and miss each other's caches; the toolchain is pinned by
+          # rust-toolchain.toml, which the key covers anyway.
+          add-rust-environment-hash-key: false
+          # Its linker isn't in the key, and dependencies built with
+          # another would be rebuilt every run and never saved again.
+          key: ${{ runner.os == 'Windows' && 'rust-lld' || '' }}
+          shared-key: clippy
           # Pull requests read main's caches; only main saves them, so
           # they aren't evicted by one cache per pull request.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'cox/ryucad-fast-ci-2-XS5P5T4M' }}
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    # Linux x64 runs every test that isn't ignored: the window tests (one
+    # at a time, .config/nextest.toml) in a job of their own, the rest in
+    # partitions beside it, the doctests in another. The other platforms
+    # run the unit tests and the golden hashes, Windows (whose build alone
+    # takes six minutes warm) in partitions too.
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubuntu-latest (1/3)
+            os: ubuntu-latest
+            tests: --workspace -E 'not binary(window)' --partition hash:1/3
+            prebuilt: 1
+            save: true
+          - name: ubuntu-latest (2/3)
+            os: ubuntu-latest
+            tests: --workspace -E 'not binary(window)' --partition hash:2/3
+            prebuilt: 1
+          - name: ubuntu-latest (3/3)
+            os: ubuntu-latest
+            tests: --workspace -E 'not binary(window)' --partition hash:3/3
+            prebuilt: 1
+          - name: ubuntu-latest (window tests)
+            os: ubuntu-latest
+            tests: -p ryucad-app --test window
+          - name: ubuntu-24.04-arm
+            os: ubuntu-24.04-arm
+            tests: --workspace --lib --bins --test determinism
+            save: true
+          - name: macos-latest
+            os: macos-latest
+            tests: --workspace --lib --bins --test determinism
+            save: true
+          - name: windows-latest (1/3)
+            os: windows-latest
+            tests: --workspace --lib --bins --test determinism --partition hash:1/3
+            save: true
+          - name: windows-latest (2/3)
+            os: windows-latest
+            tests: --workspace --lib --bins --test determinism --partition hash:2/3
+          - name: windows-latest (3/3)
+            os: windows-latest
+            tests: --workspace --lib --bins --test determinism --partition hash:3/3
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Runners of two image versions hash their environment apart
+          # and miss each other's caches; the toolchain is pinned by
+          # rust-toolchain.toml, which the key covers anyway.
+          add-rust-environment-hash-key: false
+          # Its linker isn't in the key, and dependencies built with
+          # another would be rebuilt every run and never saved again.
+          key: ${{ runner.os == 'Windows' && 'rust-lld' || '' }}
+          # One cache per platform, which Linux x64's jobs share and its
+          # first saves; only main saves.
+          shared-key: test
+          save-if: ${{ (github.ref == 'refs/heads/main' || github.head_ref == 'cox/ryucad-fast-ci-2-XS5P5T4M') && matrix.save == true }}
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
       - if: matrix.os == 'ubuntu-latest'
         name: a software graphics adapter (lavapipe) for ryucad-app's tests
         run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
-      - run: cargo clippy --workspace --all-targets -- -D warnings
       # The ci profile (Cargo.toml): optimized a little, no debug info.
       - run: cargo nextest run --cargo-profile ci --profile ci ${{ matrix.tests }}
         env:
           # Linux has lavapipe, so the app's drawing tests must run there.
           RYUCAD_REQUIRE_GPU: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}
-      - if: matrix.os == 'ubuntu-latest'
-        run: cargo test --profile ci --workspace --doc
+          # The workspace's tests build ryucad's binary, so the app's tests
+          # needn't build it again (tests/common/mod.rs).
+          RYUCAD_TEST_PREBUILT: ${{ matrix.prebuilt }}
       - if: failure()
         name: the viewport as drawn, if it no longer matches its snapshot
         uses: actions/upload-artifact@v4
         with:
-          name: viewport-${{ matrix.os }}
+          name: viewport-${{ strategy.job-index }}
           path: crates/ryucad-app/tests/snapshots/*.new.png
           if-no-files-found: ignore
+
+  doc:
+    name: doctests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Runners of two image versions hash their environment apart
+          # and miss each other's caches; the toolchain is pinned by
+          # rust-toolchain.toml, which the key covers anyway.
+          add-rust-environment-hash-key: false
+          # Its linker isn't in the key, and dependencies built with
+          # another would be rebuilt every run and never saved again.
+          key: ${{ runner.os == 'Windows' && 'rust-lld' || '' }}
+          shared-key: test
+          save-if: false
+      - run: cargo test --profile ci --workspace --doc
