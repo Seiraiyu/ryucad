@@ -155,3 +155,54 @@ fn a_cold_daemon_over_a_warm_cache_answers_within_two_seconds() {
     );
     assert!(warm < 2000.0 * slack(), "warm: {warm:.0} ms");
 }
+
+/// The best of five runs of `f` on `s`, in milliseconds, and its last
+/// answer.
+fn best_ms(s: &mut Session, f: impl Fn(&mut Session) -> Value) -> (f64, Value) {
+    let mut fastest = f64::INFINITY;
+    let mut out = Value::Null;
+    for _ in 0..5 {
+        let t = Instant::now();
+        out = f(s);
+        fastest = fastest.min(t.elapsed().as_secs_f64() * 1e3);
+    }
+    (fastest, out)
+}
+
+/// Design 180's bars: the assembly's flat BOM, and where a pin is used,
+/// each in under 50 ms, read from its 2,021 files with nothing rebuilt
+/// (the methods themselves: a request's freshness check over the files
+/// is design 72's).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
+fn a_thousand_pins_give_their_bom_and_where_used_within_fifty_ms() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = project(dir.path());
+    let (bom, v) = best_ms(&mut s, |s| {
+        let ask = ryucad::bom::Ask {
+            part: Some("asm"),
+            rev: None,
+            flat: true,
+            depth: None,
+            format: None,
+        };
+        ryucad::bom::get(s, &ask).unwrap()
+    });
+    let total: u64 = v["flat"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["quantity"]["count"].as_u64().unwrap())
+        .sum();
+    assert_eq!(total, 1001);
+    let (used, v) = best_ms(&mut s, |s| {
+        ryucad::bom::where_used(s, "pin0", None, false, false).unwrap()
+    });
+    assert_eq!(v["working"][0]["assembly"], "asm");
+    println!(
+        "BOM of 1,001 occurrences of 20 parts, on {}: flat {bom:.1} ms, where-used {used:.1} ms",
+        machine()
+    );
+    assert!(bom < 50.0 * slack(), "{bom} ms");
+    assert!(used < 50.0 * slack(), "{used} ms");
+}

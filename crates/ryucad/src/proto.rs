@@ -446,6 +446,51 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         dry_run: bool,
     },
+    /// An assembly's bill of materials, from its files alone: indented, or
+    /// flat (every leaf with its total), as JSON or CSV, at the working
+    /// files, a Git revision or `label:<L>`.
+    #[serde(rename = "bom.get")]
+    BomGet {
+        /// The part or assembly; the project's one root assembly if left out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        flat: bool,
+        /// Levels below the root to list (the indented BOM only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        depth: Option<usize>,
+        /// `json` (the default) or `csv`, which adds the CSV as `csv`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
+    },
+    /// What changed in a BOM between two revisions (`HEAD` and `working`
+    /// by default).
+    #[serde(rename = "bom.diff")]
+    BomDiff {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+    },
+    /// Every assembly that uses a part, in the working files and in every
+    /// official release.
+    #[serde(rename = "bom.where_used")]
+    BomWhereUsed {
+        part: String,
+        /// Only uses of this release label.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        /// Only uses at `working`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        working: bool,
+        /// Only assemblies that place it themselves.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        direct: bool,
+    },
     /// Release records (or one part's), where each became official, their
     /// tags, and each part's state.
     #[serde(rename = "release.list")]

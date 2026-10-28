@@ -220,6 +220,35 @@ pub fn files(repo: &gix::Repository, rev: &str, prefix: &str) -> Result<BTreeMap
         .collect()
 }
 
+/// The files of the project's part `part` in the commit `rev` names,
+/// with the files at the project's root (the manifest and ryupdm's
+/// settings): what reading that one part needs, without the rest.
+pub fn part_files(
+    repo: &gix::Repository,
+    rev: &str,
+    prefix: &str,
+    part: &Id,
+) -> Result<BTreeMap<String, Vec<u8>>> {
+    let commit = repo.find_commit(commit_of(repo, rev)?).map_err(git_error)?;
+    let tree = commit.tree_id().map_err(git_error)?.detach();
+    let mut ids = BTreeMap::new();
+    for name in ROOT_FILES {
+        if let Some(id) = entry(repo, tree, prefix, name)? {
+            ids.insert(name.to_owned(), id);
+        }
+    }
+    let dir = format!("parts/{part}");
+    if let Some(id) = entry(repo, tree, prefix, &dir)? {
+        blobs(repo, id, &format!("{dir}/"), &mut ids)?;
+    }
+    ids.into_iter()
+        .map(|(path, id)| {
+            let data = repo.find_object(id).map_err(git_error)?.data.clone();
+            Ok((path, data))
+        })
+        .collect()
+}
+
 /// The release branch: `origin/<name>` if the repository has it, else the
 /// local branch, else `None`.
 pub fn branch(repo: &gix::Repository, name: &str) -> Result<Option<Branch>> {

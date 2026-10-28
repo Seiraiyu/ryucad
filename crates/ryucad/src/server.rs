@@ -304,6 +304,31 @@ fn dispatch(
             expected_revision.as_deref(),
         ),
         Request::PropsGet { part } => crate::pdm::get(session, &part),
+        Request::BomGet {
+            part,
+            rev,
+            flat,
+            depth,
+            format,
+        } => crate::bom::get(
+            session,
+            &crate::bom::Ask {
+                part: part.as_deref(),
+                rev: rev.as_deref(),
+                flat,
+                depth,
+                format: format.as_deref(),
+            },
+        ),
+        Request::BomDiff { part, from, to } => {
+            crate::bom::diff(session, part.as_deref(), from.as_deref(), to.as_deref())
+        }
+        Request::BomWhereUsed {
+            part,
+            label,
+            working,
+            direct,
+        } => crate::bom::where_used(session, &part, label.as_deref(), working, direct),
         Request::ReleaseList { part } => versioned(crate::release::list(session, part.as_deref())),
         Request::ReleaseSync {} => crate::release::sync(session),
         Request::ReleaseCheck { results } => crate::release::check(session, results),

@@ -67,6 +67,8 @@ pub struct Session {
     /// Bodies of released content as this build rebuilds them, by content
     /// hash, for `release_result_changed`.
     pub(crate) release_results: BTreeMap<String, BTreeMap<String, String>>,
+    /// Parts read at commits for BOMs and where-used, by commit and part.
+    pub(crate) structure: ryupdm::structure::Cache,
 }
 
 impl Session {
@@ -87,6 +89,7 @@ impl Session {
             merge_status: None,
             releases: None,
             release_results: BTreeMap::new(),
+            structure: ryupdm::structure::Cache::new(),
         };
         s.scan()?;
         Ok(s)
@@ -132,6 +135,7 @@ impl Session {
             merge_status: None,
             releases: None,
             release_results: BTreeMap::new(),
+            structure: from.structure.clone(),
         })
     }
 

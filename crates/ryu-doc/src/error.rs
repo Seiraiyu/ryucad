@@ -242,6 +242,16 @@ pub enum Code {
     /// An export of a body STEP can't describe: a face that can't be cut
     /// open along seams. The face is in the details.
     ExportUnrepresentable,
+    /// The review service's beta doesn't take this account or repository.
+    ReviewNotInBeta,
+    /// The review service refused a request as malformed.
+    ReviewInvalidRequest,
+    /// The review service can't merge the pull request's base in: it is
+    /// closed, holds no project, failed, conflicts (settle it locally) or
+    /// is up to date. Its reason is in the details (`service.reason`).
+    ReviewMergeUnavailable,
+    /// The review service couldn't reach GitHub.
+    ReviewGithubUnreachable,
     /// A measure ryukei refuses: an entity it doesn't apply to, geometry
     /// it doesn't cover, or a result it can't certify. The reason
     /// (`not_an_entity`, `unsupported`, `uncertain`) and the entities are
@@ -261,6 +271,7 @@ impl Code {
             | Code::Internal
             | Code::AppNotInstalled
             | Code::ReviewUnreachable
+            | Code::ReviewGithubUnreachable
             | Code::ReviewFailed => 4,
             _ => 1,
         }
@@ -361,6 +372,8 @@ mod tests {
         assert_eq!(Code::ReviewHeadMoved.exit_code(), 1);
         assert_eq!(Code::ReviewUnreachable.exit_code(), 4);
         assert_eq!(Code::ReviewFailed.exit_code(), 4);
+        assert_eq!(Code::ReviewMergeUnavailable.exit_code(), 1);
+        assert_eq!(Code::ReviewGithubUnreachable.exit_code(), 4);
         assert_eq!(
             json!(Code::ReviewForkNotInstalled),
             json!("review_fork_not_installed")

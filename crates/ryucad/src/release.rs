@@ -23,6 +23,7 @@ use ryupdm::history::Releases;
 use ryupdm::props::Pdm;
 use ryupdm::record::{BuiltWith, Kind, Obsolete, Record, Records, Release, ReleasedBy};
 use ryupdm::state::{self, Status};
+use ryupdm::structure::At;
 use serde_json::{Value, json};
 
 /// What the release branch as read depends on: the branch's name and
@@ -60,57 +61,25 @@ pub(crate) fn history(session: &mut Session) -> Result<(crate::git::Repo, Releas
 /// `label_not_official` otherwise; a record that can't be read gives its
 /// own error.
 pub(crate) fn pinned(session: &mut Session, part: &Id, label: &str) -> Result<Pinned> {
-    let path = ryupdm::record::path(part, label, Kind::Release);
-    let records = ryupdm::record::Records::read(&*session)?;
-    let Some(entry) = records.at(&path) else {
-        return Err(Error::new(
-            Code::LabelNotFound,
-            format!("{part} has no release {label}: {path} doesn't exist"),
-        )
-        .with("part", part)
-        .with("label", label));
-    };
-    let record = entry.record.clone()?;
-    let content = record
-        .release()
-        .map(|r| r.content.clone())
-        .unwrap_or_default();
-    let obsolete = records
-        .at(&ryupdm::record::path(part, label, Kind::Obsolete))
-        .is_some();
-    match history(session) {
-        Ok((repo, releases)) => {
-            if let Some(o) = releases.official.get(&path) {
-                let p = session.pinned_part(&repo, part, &o.commit)?;
-                return Ok(Pinned {
-                    part: p,
-                    pin: Pin {
-                        commit: Some(o.commit.clone()),
-                        obsolete,
-                    },
-                });
-            }
-        }
-        Err(e) if e.code == Code::NotAGitRepo => {}
+    let found = ryupdm::structure::lookup(&*session, part, label)?;
+    let history = match history(session) {
+        Ok(h) => Some(h),
+        Err(e) if e.code == Code::NotAGitRepo => None,
         Err(e) => return Err(e),
-    }
-    if ryupdm::content::hash(&*session, part).is_ok_and(|h| h == content) {
-        return Ok(Pinned {
-            part: session.project().part(part)?.clone(),
-            pin: Pin {
-                commit: None,
-                obsolete,
-            },
-        });
-    }
-    Err(Error::new(
-        Code::LabelNotOfficial,
-        format!(
-            "{part}'s release {label} isn't official yet, and {part} has changed since it was proposed"
-        ),
-    )
-    .with("part", part)
-    .with("label", label))
+    };
+    let releases = history.as_ref().map(|(_, r)| r);
+    let pin = ryupdm::structure::pin(&*session, &found, releases, part, label)?;
+    let (part, commit) = match (pin.at, history) {
+        (At::Commit(c), Some((repo, _))) => (session.pinned_part(&repo, part, &c)?, Some(c)),
+        _ => (session.project().part(part)?.clone(), None),
+    };
+    Ok(Pinned {
+        part,
+        pin: Pin {
+            commit,
+            obsolete: pin.obsolete,
+        },
+    })
 }
 
 /// Who is writing a record: Git's author identity, and the participant.
@@ -160,18 +129,16 @@ fn readiness(session: &mut Session, part: &Id, config: &Config) -> Result<Vec<Va
         Err(e) => problems.push(json!(e)),
         Ok(props) => {
             problems.extend(pp.faults.iter().map(|e| json!(e)));
-            for (name, decl) in config.decls() {
-                if decl.required && !props.values.contains_key(&name) {
-                    problems.push(json!(
-                        Error::new(
-                            Code::PropertyInvalid,
-                            format!("part {part}: {name} is required to release"),
-                        )
-                        .with("part", part)
-                        .with("property", &name)
-                        .with("missing", true)
-                    ));
-                }
+            for name in ryupdm::props::missing(config, props) {
+                problems.push(json!(
+                    Error::new(
+                        Code::PropertyInvalid,
+                        format!("part {part}: {name} is required to release"),
+                    )
+                    .with("part", part)
+                    .with("property", &name)
+                    .with("missing", true)
+                ));
             }
         }
     }

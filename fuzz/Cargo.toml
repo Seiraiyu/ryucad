@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 ryucad = { path = "../crates/ryucad" }
+ryucad-doc = { path = "../crates/ryucad-doc", features = ["test-support"] }
 ryukei = { path = "../crates/ryukei" }
 ryukei-testkit = { path = "../crates/ryukei-testkit" }
 ryumate = { path = "../crates/ryumate" }
@@ -133,6 +134,13 @@ bench = false
 [[bin]]
 name = "merge"
 path = "fuzz_targets/merge.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "structure"
+path = "fuzz_targets/structure.rs"
 test = false
 doc = false
 bench = false
