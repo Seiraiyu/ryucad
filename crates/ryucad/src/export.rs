@@ -30,14 +30,61 @@ use crate::doc::import::ProductRef;
 use crate::doc::project::Part;
 use crate::error::{Code, Error, Result};
 use crate::proto::Answer;
-use crate::rebuild::{Output, PartResult};
+use crate::rebuild::{Built, Output, PartResult};
 use crate::session::Session;
+use ryukei::geom::Rigid;
 use ryukei::topo::Body;
 use ryupdm::props::Properties;
 use ryustep::schema::Schema;
-use ryustep::{Child, LengthUnit, Product, WriteError, WriteModel, WriteOptions};
+use ryustep::{LengthUnit, WriteError, WriteModel, WriteOptions};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+/// What an export writes, whatever the format: the product exported
+/// first, then every product it places, in the order a depth-first walk
+/// meets them, each once.
+#[derive(Clone, Debug, Default)]
+pub struct Scene {
+    pub products: Vec<Product>,
+}
+
+/// A part at a revision, as an export describes it: its identifier, name,
+/// description and revision (the release label it is read at, else
+/// empty), its own solids in model order, and what it places.
+#[derive(Clone, Debug)]
+pub struct Product {
+    pub part: Id,
+    pub rev: Rev,
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub revision: String,
+    pub solids: Vec<Solid>,
+    pub children: Vec<Child>,
+}
+
+/// A solid a product holds: the part that shows it (an imported
+/// assembly's own bodies are its body part's), its founder and its body.
+#[derive(Clone, Debug)]
+pub struct Solid {
+    pub part: Id,
+    pub founder: Id,
+    pub built: Arc<Built>,
+}
+
+/// One placing of a product in another: by a rigid motion of its frame
+/// into its parent's, in meters. `usage` is the identifier STEP writes
+/// (the file's where an import made the instance, else the instance's
+/// ID); `instance` is the step it adds to an occurrence's path, the
+/// instance's ID or a copy's `<pattern>:<i>`.
+#[derive(Clone, Debug)]
+pub struct Child {
+    pub product: usize,
+    pub place: Rigid,
+    pub usage: String,
+    pub instance: String,
+}
 
 /// What `export` asks for: the part, the revision (`working`, a Git
 /// revision, or `label:<L>`), `ap242` or `ap214`, `mm` or `m`, and the
@@ -116,19 +163,18 @@ pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
         time_stamp,
         ..WriteOptions::default()
     };
-    let bytes = ryustep::write(&walk.model, &opts).map_err(|e| walk.unwritable(e))?;
+    let bytes = ryustep::write(&step_model(&walk.scene), &opts).map_err(|e| walk.unwritable(e))?;
     let products: Vec<Value> = walk
-        .model
+        .scene
         .products
         .iter()
-        .zip(&walk.nodes)
-        .map(|(p, (part, rev))| {
+        .map(|p| {
             let mut v = json!({
                 "product": p.id,
                 "name": p.name,
-                "part": part,
-                "rev": rev.to_json(),
-                "bodies": p.bodies.len(),
+                "part": p.part,
+                "rev": p.rev.to_json(),
+                "bodies": p.solids.len(),
                 "children": p.children.len(),
             });
             if !p.revision.is_empty() {
@@ -160,16 +206,38 @@ fn invalid(param: &str, value: &str, expected: &str) -> Error {
     .with("param", param)
 }
 
-/// The model being written, walked from the part exported.
+/// STEP's model of a scene: each product's solids as its bodies, each
+/// child's usage as its identifier.
+fn step_model(scene: &Scene) -> WriteModel {
+    let products = scene
+        .products
+        .iter()
+        .map(|p| ryustep::Product {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            description: p.description.clone(),
+            revision: p.revision.clone(),
+            bodies: p.solids.iter().map(|s| s.built.body.clone()).collect(),
+            children: p
+                .children
+                .iter()
+                .map(|c| ryustep::Child {
+                    product: c.product,
+                    place: c.place,
+                    id: c.usage.clone(),
+                })
+                .collect(),
+        })
+        .collect();
+    WriteModel { products }
+}
+
+/// The scene being built, walked from the part exported.
 #[derive(Default)]
 struct Walk {
-    model: WriteModel,
-    /// Each product's part and revision, by index.
-    nodes: Vec<(Id, Rev)>,
+    scene: Scene,
     /// Each product's index, by part and revision.
     index: BTreeMap<(Id, Rev), usize>,
-    /// Each product's bodies' parts and solids, for refusals.
-    owners: Vec<Vec<(Id, Id)>>,
     /// Failing features, by part, revision and feature.
     failing: BTreeMap<(Id, String, Id), Value>,
     /// How the part exported resolved, at a release label.
@@ -187,7 +255,7 @@ impl Walk {
             Some(n) => n.clone(),
             None => s.node(part, rev)?,
         };
-        if self.nodes.is_empty() && self.pin.is_none() {
+        if self.scene.products.is_empty() && self.pin.is_none() {
             self.pin = pin;
         }
         for (fid, r) in &result.features {
@@ -215,15 +283,25 @@ impl Walk {
             return Ok(k);
         }
         let (p, result) = self.node(s, part, rev)?;
-        let k = self.model.products.len();
+        let k = self.scene.products.len();
         self.index.insert((part.clone(), rev.clone()), k);
-        self.nodes.push((part.clone(), rev.clone()));
-        self.model.products.push(Product::default());
-        self.owners.push(Vec::new());
         let props = properties(s, part, rev, self.pin.as_ref().filter(|_| k == 0));
         let (id, name, description) = identity(part, &p, &props);
-        let mut bodies = Vec::new();
-        let mut owners = Vec::new();
+        let revision = match rev {
+            Rev::Label(l) => l.clone(),
+            Rev::Working => String::new(),
+        };
+        self.scene.products.push(Product {
+            part: part.clone(),
+            rev: rev.clone(),
+            id,
+            name,
+            description,
+            revision,
+            solids: Vec::new(),
+            children: Vec::new(),
+        });
+        let mut mine = Vec::new();
         let mut children = Vec::new();
         if p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly) {
             for (fid, r) in &result.features {
@@ -238,29 +316,30 @@ impl Walk {
                         if own {
                             let (cp, cr) = self.node(s, &placed.part, &placed.rev)?;
                             if !cp.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly) {
-                                let (b, o) = solids(&cp, &placed.rev, &cr);
-                                bodies.extend(b);
-                                owners.extend(o);
+                                mine.extend(solids(&cp, &placed.rev, &cr));
                                 continue;
                             }
                         }
                         let product = self.product(s, &placed.part, &placed.rev)?;
-                        let id = import
+                        let usage = import
                             .and_then(|u| u.usage)
                             .unwrap_or_else(|| fid.to_string());
                         children.push(Child {
                             product,
                             place: placed.pose,
-                            id,
+                            usage,
+                            instance: fid.to_string(),
                         });
                     }
                     Ok(Output::Copies(c)) => {
                         for copy in &c.copies {
                             let product = self.product(s, &copy.placed.part, &copy.placed.rev)?;
+                            let id = Id::copy(fid, copy.index).to_string();
                             children.push(Child {
                                 product,
                                 place: copy.placed.pose,
-                                id: Id::copy(fid, copy.index).to_string(),
+                                usage: id.clone(),
+                                instance: id,
                             });
                         }
                     }
@@ -268,23 +347,11 @@ impl Walk {
                 }
             }
         } else {
-            let (b, o) = solids(&p, rev, &result);
-            bodies = b;
-            owners = o;
+            mine = solids(&p, rev, &result);
         }
-        let revision = match rev {
-            Rev::Label(l) => l.clone(),
-            Rev::Working => String::new(),
-        };
-        self.model.products[k] = Product {
-            id,
-            name,
-            description,
-            revision,
-            bodies,
-            children,
-        };
-        self.owners[k] = owners;
+        let made = &mut self.scene.products[k];
+        made.solids = mine;
+        made.children = children;
         Ok(k)
     }
 
@@ -302,17 +369,16 @@ impl Walk {
         )
         .with("face", face.to_string());
         let owner = self
-            .model
+            .scene
             .products
             .iter()
-            .zip(&self.owners)
-            .flat_map(|(p, o)| p.bodies.iter().zip(o))
-            .find(|(b, _)| has_face(b, face));
-        if let Some((_, (part, solid))) = owner {
+            .flat_map(|p| &p.solids)
+            .find(|s| has_face(&s.built.body, face));
+        if let Some(Solid { part, founder, .. }) = owner {
             err = err
                 .with("part", part)
-                .with("solid", solid)
-                .with("entity", format!("{part}/{solid}/{face}"));
+                .with("solid", founder)
+                .with("entity", format!("{part}/{founder}/{face}"));
         }
         err
     }
@@ -322,15 +388,18 @@ fn has_face(b: &Body, name: ryukei::name::Name) -> bool {
     b.faces().any(|f| b.face(f).expect("live").name == name)
 }
 
-/// A part's solids as it shows them, in model order, with their parts and
-/// founders.
-fn solids(p: &Part, rev: &Rev, result: &PartResult) -> (Vec<Body>, Vec<(Id, Id)>) {
+/// A part's solids as it shows them, in model order.
+fn solids(p: &Part, rev: &Rev, result: &PartResult) -> Vec<Solid> {
     let m = Model::of_part(p, rev, result);
     m.occurrences
         .into_iter()
         .flat_map(|o| o.solids)
-        .map(|s| (s.built.body.clone(), (p.id.clone(), s.founder)))
-        .unzip()
+        .map(|s| Solid {
+            part: p.id.clone(),
+            founder: s.founder,
+            built: s.built,
+        })
+        .collect()
 }
 
 /// The product an imported part or assembly came from: the one product
@@ -722,14 +791,14 @@ pub(crate) mod tests {
         let pin = primitive::cylinder(k, 0.002, 0.02, &Rigid::IDENTITY)
             .unwrap()
             .0;
-        let product = |id: &str, name: &str, bodies, children| Product {
+        let product = |id: &str, name: &str, bodies, children| ryustep::Product {
             id: id.into(),
             name: name.into(),
             bodies,
             children,
             ..Default::default()
         };
-        let child = |product, place| Child {
+        let child = |product, place| ryustep::Child {
             product,
             place,
             id: "1".into(),
@@ -891,7 +960,7 @@ pub(crate) mod tests {
         let bolt = Id::parse("bolt", "part").unwrap();
         let mut walk = Walk::default();
         walk.product(&mut s, &bolt, &Rev::Working).unwrap();
-        let body = &walk.model.products[0].bodies[0];
+        let body = &walk.scene.products[0].solids[0].built.body;
         let face = body.face(body.faces().next().unwrap()).unwrap().name;
         let e = walk.unwritable(WriteError::NotRepresentable { face });
         assert_eq!(e.code, Code::ExportUnrepresentable);
