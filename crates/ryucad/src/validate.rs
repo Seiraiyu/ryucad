@@ -6,7 +6,8 @@
 //! and the merge, what the merge broke that built on either side and the
 //! sketches it left stale; and the PDM faults the merge has that neither
 //! side had (`pdm_broke`: duplicate numbers, values the settings refuse,
-//! proposals made stale or out of sequence). Each conflict has a stable
+//! proposals made stale or out of sequence), and item numbers each side
+//! gave another part of one assembly (`item_collision`). Each conflict has a stable
 //! ID, the files and the parts of the model it concerns, the side that
 //! caused it, its choices, and its planned repairs.
 //!
@@ -23,7 +24,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 /// Every kind of conflict `merge.status` reports. The strings are stable.
-pub const KINDS: [&str; 11] = [
+pub const KINDS: [&str; 12] = [
     "value",
     "delete_edit",
     "order",
@@ -35,6 +36,7 @@ pub const KINDS: [&str; 11] = [
     "assembly_stale",
     "rename_merged",
     "pdm_broke",
+    "item_collision",
 ];
 
 /// The error for a request that needs a merge when there is none.
@@ -932,6 +934,54 @@ fn pdm(
         .collect()
 }
 
+/// Item numbers the merge made shared: each side gave one number to a
+/// different part of an assembly, and the merge kept both
+/// ([`ryupdm::items::collisions`]). Blamed on both, with the repair
+/// `renumber`: theirs' part takes the next free number.
+fn item_collisions(
+    root: &std::path::Path,
+    working: &crate::activity::Files,
+    ours: &Side,
+    theirs: &Side,
+) -> Vec<Value> {
+    ryupdm::items::collisions(&ours.files, &theirs.files, working)
+        .into_iter()
+        .map(|x| {
+            let path = format!("parts/{}/part.json", x.assembly);
+            let id = format!("{path}#item_collision/{}", x.item);
+            let files = vec![path.clone()];
+            let names: Vec<&str> = x.parts.iter().map(Id::as_str).collect();
+            let mut c = conflict(
+                id.clone(),
+                "item_collision",
+                files.clone(),
+                json!({"part": x.assembly, "parts": x.parts, "item": x.item}),
+                "both",
+                format!(
+                    "{}: item {} names {} after the merge: each side gave it to another part",
+                    x.assembly,
+                    x.item,
+                    names.join(" and ")
+                ),
+            );
+            let repair = crate::doctor::Repair {
+                id: format!("{id}:renumber@{}", crate::doctor::basis(root, &files)),
+                summary: format!(
+                    "give {} (theirs) item {}, the next free number",
+                    x.theirs, x.to
+                ),
+                changes: vec![crate::doctor::Change {
+                    path,
+                    content: Some(crate::doctor::canonical_bytes(&x.repaired)),
+                }],
+                params: Vec::new(),
+            };
+            c["repairs"] = json!([repair.to_json()]);
+            c
+        })
+        .collect()
+}
+
 /// Whether `path` is a feature file.
 fn is_feature(path: &str) -> bool {
     matches!(about(path), (Some(_), Some(_)))
@@ -1179,6 +1229,7 @@ fn compute(session: &mut Session) -> Result<Value> {
         .map(|(_, r)| r)
         .unwrap_or_default();
     conflicts.extend(pdm(&root, &working, &ours, &theirs, &base, &releases));
+    conflicts.extend(item_collisions(&root, &working, &ours, &theirs));
     conflicts.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     let commit = |c: Option<&String>| json!({ "commit": c });
     Ok(json!({
@@ -3143,6 +3194,64 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::ConflictNotFound);
+    }
+
+    #[test]
+    fn parts_each_side_numbered_alike_are_renumbered_by_the_repair() {
+        let mut m = boxed();
+        for p in ["bolt", "nut"] {
+            m.call("part.create", json!({"part": p})).unwrap();
+            m.call(
+                "feature.add",
+                json!({"part": p, "type": "box", "id": "b", "params": {"x": 1, "y": 1, "z": 1}}),
+            )
+            .unwrap();
+        }
+        m.call("part.create", json!({"part": "frame", "kind": "assembly"}))
+            .unwrap();
+        let place = |m: &mut Merging, inst: &str, of: &str| {
+            m.call(
+                "feature.add",
+                json!({"part": "frame", "type": "instance", "id": inst, "of": of}),
+            )
+            .unwrap();
+        };
+        place(&mut m, "base", "p");
+        m.commit("a frame");
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        place(&mut m, "n1", "nut");
+        m.commit("theirs: a nut");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        place(&mut m, "b1", "bolt");
+        m.commit("ours: a bolt");
+        m.merge("theirs");
+        let items = |m: &Merging| {
+            let v: Value = serde_json::from_str(
+                &std::fs::read_to_string(m.root().join("parts/frame/part.json")).unwrap(),
+            )
+            .unwrap();
+            v["items"].clone()
+        };
+        assert_eq!(items(&m), json!({"p": 1, "bolt": 2, "nut": 2}));
+        let v = m.call("merge.status", json!({})).unwrap();
+        let c = of_kind(&v, "item_collision");
+        assert_eq!(c.len(), 1, "{v}");
+        assert_eq!(c[0]["id"], "parts/frame/part.json#item_collision/2");
+        assert_eq!(
+            (&c[0]["cause"], &c[0]["concerns"]["parts"]),
+            (&json!("both"), &json!(["bolt", "nut"]))
+        );
+        let repair = c[0]["repairs"][0]["id"].as_str().unwrap().to_owned();
+        m.call(
+            "merge.resolve",
+            json!({"resolutions": [{"conflict": c[0]["id"], "choice": "repair", "repair": repair}]}),
+        )
+        .unwrap();
+        assert_eq!(items(&m), json!({"p": 1, "bolt": 2, "nut": 3}));
+        let v = m.call("merge.status", json!({})).unwrap();
+        assert!(of_kind(&v, "item_collision").is_empty(), "{v}");
     }
 
     #[test]

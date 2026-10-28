@@ -1270,6 +1270,44 @@ mod tests {
         assert_eq!(m.value, part(&["a", "b"]));
     }
 
+    #[test]
+    fn item_numbers_merge_per_part_at_format_3() {
+        let asm = |f: &[&str], items: Value| {
+            let mut v = json!({"features": f, "format": 2, "kind": "ryucad.part",
+                               "part_kind": "assembly"});
+            if items.as_object().is_some_and(|o| !o.is_empty()) {
+                v["items"] = items;
+                v["format"] = json!(3);
+            }
+            v
+        };
+        let base = asm(&["a"], json!({"plate": 1}));
+        // Each side adds a part: both numbers kept, even if they collide
+        // (merge status reports that); the base's stays.
+        let m = merge(
+            Some(&base),
+            &asm(&["a", "b"], json!({"plate": 1, "bolt": 2})),
+            &asm(&["a", "c"], json!({"plate": 1, "nut": 2})),
+        );
+        assert!(m.is_clean());
+        assert_eq!(m.value["items"], json!({"plate": 1, "bolt": 2, "nut": 2}));
+        assert_eq!(m.value["format"], 3);
+        // One part numbered differently on each side is a conflict at its key.
+        let m = merge(
+            Some(&base),
+            &asm(&["a"], json!({"plate": 4})),
+            &asm(&["a"], json!({"plate": 5})),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/items/plate"]);
+        // Items gone on one side: format 2 again.
+        let m = merge(Some(&base), &asm(&["a"], json!({})), &base);
+        assert!(m.is_clean());
+        assert_eq!(
+            (m.value.get("items"), &m.value["format"]),
+            (None, &json!(2))
+        );
+    }
+
     /// A sketch on xy with the entities and constraints given.
     fn sketch_json(entities: Value, constraints: Value) -> Value {
         json!({"format": 2, "kind": "ryucad.feature", "type": "sketch", "plane": "xy",
