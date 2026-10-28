@@ -51,6 +51,8 @@ pub struct Session {
     pub interference: crate::interference::Cache,
     /// Mass properties worked out, for `mass`.
     pub mass: crate::mass::Cache,
+    /// Distances between placed solids, for `clearance`.
+    pub clearance: crate::clearance::Cache,
     /// A revision's session: its files never change, and it never reads
     /// the disk.
     frozen: bool,
@@ -79,6 +81,7 @@ impl Session {
             meshes: crate::mesh::Cache::default(),
             interference: crate::interference::Cache::default(),
             mass: crate::mass::Cache::default(),
+            clearance: crate::clearance::Cache::default(),
             frozen: false,
             revisions: Vec::new(),
             merge_status: None,
@@ -123,6 +126,7 @@ impl Session {
             meshes: crate::mesh::Cache::with_disk(from.store.disk.clone()),
             interference: from.interference.clone(),
             mass: from.mass.clone(),
+            clearance: from.clearance.clone(),
             frozen: true,
             revisions: Vec::new(),
             merge_status: None,

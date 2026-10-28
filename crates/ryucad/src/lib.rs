@@ -42,6 +42,7 @@ pub mod activity;
 pub mod assembly;
 pub mod cache;
 pub mod check;
+pub mod clearance;
 pub mod client;
 pub mod config;
 pub mod connector;
