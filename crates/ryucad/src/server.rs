@@ -994,7 +994,7 @@ fn part_create(session: &mut Session, part: &str, kind: Option<&str>) -> Result<
         &part_path(session.root(), &id),
         &PartFile {
             kind,
-            features: vec![],
+            ..PartFile::default()
         }
         .to_json(),
     )?;
@@ -1356,11 +1356,14 @@ pub(crate) fn save(
     for (id, f) in writes {
         write_json(&feature_path(session.root(), part, id), &f.to_json())?;
     }
+    let p = session.project().part(part)?;
+    let items = p.file.as_ref().map(|f| f.items.clone()).unwrap_or_default();
     write_json(
         &part_path(session.root(), part),
         &PartFile {
-            kind: part_kind(session.project().part(part)?),
+            kind: part_kind(p),
             features: order,
+            items,
         }
         .to_json(),
     )?;
@@ -2271,6 +2274,7 @@ fn proposed(p: &Part, order: &[Id], writes: &[(&Id, &Feature)]) -> Part {
     q.file = Ok(PartFile {
         kind: part_kind(p),
         features: order.to_vec(),
+        items: p.file.as_ref().map(|f| f.items.clone()).unwrap_or_default(),
     });
     q
 }

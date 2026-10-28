@@ -1462,6 +1462,7 @@ pub(crate) mod tests {
             &PartFile {
                 kind: PartKind::Assembly,
                 features: vec![id("cube")],
+                ..PartFile::default()
             }
             .to_json(),
         )
