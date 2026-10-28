@@ -121,7 +121,53 @@ impl Camera {
     }
 }
 
+impl From<&crate::doc::views::ViewFile> for Camera {
+    /// A named view's camera, bit for bit.
+    fn from(v: &crate::doc::views::ViewFile) -> Camera {
+        use crate::doc::views::ViewProjection;
+        Camera {
+            eye: v.eye_m,
+            target: v.target_m,
+            up: v.up,
+            projection: match v.projection {
+                ViewProjection::Perspective { fov_deg } => Projection::Perspective { fov_deg },
+                ViewProjection::Orthographic { height_m } => {
+                    Projection::Orthographic { height: height_m }
+                }
+            },
+        }
+    }
+}
+
+impl Camera {
+    /// The camera as a named view's file holds it.
+    pub fn to_view_file(&self) -> crate::doc::views::ViewFile {
+        use crate::doc::views::{ViewFile, ViewProjection};
+        ViewFile {
+            eye_m: self.eye,
+            target_m: self.target,
+            up: self.up,
+            projection: match self.projection {
+                Projection::Perspective { fov_deg } => ViewProjection::Perspective { fov_deg },
+                Projection::Orthographic { height } => {
+                    ViewProjection::Orthographic { height_m: height }
+                }
+            },
+        }
+    }
+}
+
 /// A named direction to look from. Z is up.
+///
+/// The six faces, twelve edges and eight corners of the navigation cube
+/// give 26 directions: an edge or a corner is `Cube`, the direction from
+/// the target towards the eye with each component -1, 0 or 1 (two or
+/// three of them not 0), named by its faces in the order front or back,
+/// top or bottom, left or right (`front_top_right`). Front looks along
+/// +y, top along -z. `iso` is `front_top_right` by another name;
+/// `dimetric` is ISO 5456-3's (x and z drawn alike, y at half their
+/// scale), `trimetric` a front-heavy view drawing each axis at its own
+/// scale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StandardView {
     Front,

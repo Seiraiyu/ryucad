@@ -826,6 +826,44 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         fit: Vec<String>,
     },
+    /// The named views of `part`, or of every part, with each listed
+    /// part's revision.
+    #[serde(rename = "view.list")]
+    ViewList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+    },
+    /// Saves a named view of `part`: `camera`, else `participant`'s
+    /// camera, else the one human's, else the caller's. An existing view
+    /// of that ID is replaced.
+    #[serde(rename = "view.save")]
+    ViewSave {
+        part: String,
+        view: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        camera: Option<CameraArg>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Deletes a named view of `part`.
+    #[serde(rename = "view.delete")]
+    ViewDelete {
+        part: String,
+        view: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Renames a named view of `part`.
+    #[serde(rename = "view.rename")]
+    ViewRename {
+        part: String,
+        from: String,
+        to: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// What a participant (`participant`, or the one human) compares the
     /// working files against, with the commit that revision names now.
     #[serde(rename = "compare.get")]
@@ -1086,6 +1124,9 @@ impl Request {
                 | Request::BomRenumber { .. }
                 | Request::MaterialsSet { .. }
                 | Request::MaterialsDelete { .. }
+                | Request::ViewSave { .. }
+                | Request::ViewDelete { .. }
+                | Request::ViewRename { .. }
                 | Request::ReleasePropose { dry_run: false, .. }
                 | Request::Import { dry_run: false, .. }
                 | Request::ReleaseObsolete { .. }

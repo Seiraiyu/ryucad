@@ -646,6 +646,41 @@ fn dispatch(
             live.get_mut(&id)?.view.camera = Some(camera.clone());
             Ok(json!({"participant": id, "camera": camera}))
         }
+        Request::ViewList { part } => crate::views::list(session, part.as_deref()),
+        Request::ViewSave {
+            part,
+            view,
+            camera,
+            participant,
+            expected_revision,
+        } => {
+            let camera = match camera {
+                Some(c) => c.resolve(session.project().manifest.default_unit)?,
+                None => {
+                    let live = live.ok_or_else(|| live::no_live_session("view.save"))?;
+                    let who = live.compare_target(participant.as_deref(), me)?;
+                    live.get(&who)?.view.camera.clone().ok_or_else(|| {
+                        Error::new(
+                            Code::InvalidParam,
+                            format!("participant {who} has no camera to save"),
+                        )
+                        .with("participant", &who)
+                    })?
+                }
+            };
+            crate::views::save(session, &part, &view, &camera, expected_revision.as_deref())
+        }
+        Request::ViewDelete {
+            part,
+            view,
+            expected_revision,
+        } => crate::views::delete(session, &part, &view, expected_revision.as_deref()),
+        Request::ViewRename {
+            part,
+            from,
+            to,
+            expected_revision,
+        } => crate::views::rename(session, &part, &from, &to, expected_revision.as_deref()),
         Request::CompareGet { participant } => {
             let target = match &live {
                 Some(l) => l.target(participant.as_deref())?,
