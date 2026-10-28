@@ -557,6 +557,19 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
+    /// The minimum distance between pairs of an assembly's solids in
+    /// different occurrences whose boxes come within `below` (a length;
+    /// by default a hundredth of the assembly's diagonal), closest first,
+    /// with the nearest points; with `instances`, the pairs with a side
+    /// under those instance paths. Pairs at 0 touch or interfere.
+    #[serde(rename = "clearance")]
+    Clearance {
+        part: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        instances: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        below: Option<String>,
+    },
     /// Mass properties of a part or an assembly (its ID), a solid
     /// (`<part>/<solid>`) or an occurrence (`<asm>/<path>`): volume, area,
     /// centre of mass and, where every part has a material with a

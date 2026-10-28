@@ -974,6 +974,7 @@ fn every_protocol_method_has_a_command() {
         ("interference", &["interference"]),
         ("measure", &["measure"]),
         ("mass", &["mass"]),
+        ("clearance", &["clearance"]),
         ("materials.list", &["materials", "list"]),
         ("materials.set", &["materials", "set"]),
         ("materials.delete", &["materials", "delete"]),
@@ -3030,6 +3031,15 @@ fn interference_from_the_cli() {
         1,
     );
     p.fails(&["interference", "bolt"], "wrong_part_kind", 1);
+    // The same assembly's clearances: b2 stands on the plate (0), b3 is
+    // half a metre away (only within a reach that long).
+    let c = p.ok(&["clearance", "frame", "--below", "1000"]);
+    let list = c["clearances"].as_array().unwrap();
+    assert_eq!(list[0]["distance"]["m"], json!(0.0), "{c}");
+    assert!(list.iter().any(|x| x["b"] == "frame/b3/shank"), "{c}");
+    let near = p.ok(&["clearance", "frame", "--instance", "b3"]);
+    assert_eq!(near["clearances"], json!([]), "{near}");
+    p.fails(&["clearance", "bolt"], "wrong_part_kind", 1);
 }
 
 #[test]

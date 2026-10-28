@@ -408,6 +408,11 @@ fn dispatch(
         Request::Measure { entities, rev } => {
             crate::measure::run(session, &entities, rev.as_deref())
         }
+        Request::Clearance {
+            part,
+            instances,
+            below,
+        } => crate::clearance::run(session, &part, &instances, below.as_deref()),
         Request::Mass { of, tolerance, rev } => {
             crate::mass::run(session, &of, tolerance, rev.as_deref())
         }

@@ -144,8 +144,13 @@ pub fn failed(e: ryukei::Error, entities: &[&str]) -> Error {
 /// digits, shortest.
 pub fn number(x: f64) -> String {
     let r: f64 = format!("{x:.9e}").parse().unwrap_or(x);
-    let r = if r == 0.0 { 0.0 } else { r };
-    format!("{r}")
+    if r == 0.0 {
+        "0".to_owned()
+    } else if r.abs() < 1e-6 || r.abs() >= 1e15 {
+        format!("{r:e}")
+    } else {
+        format!("{r}")
+    }
 }
 
 /// What a measured value is: its SI key and how the default unit writes
@@ -205,9 +210,12 @@ pub fn value(v: Measured, kind: Kind, unit: Unit) -> Value {
 pub fn point(p: Point3, unit: Unit) -> Value {
     let f = unit.factor();
     let u = unit.as_str();
+    // Rounding's dust beside the point's size is written as 0.
+    let size = p.x.abs().max(p.y.abs()).max(p.z.abs());
+    let c = |x: f64| number(if x.abs() <= 1e-12 * size { 0.0 } else { x / f });
     json!({
         "m": [p.x, p.y, p.z],
-        "value": format!("({} {u}, {} {u}, {} {u})", number(p.x / f), number(p.y / f), number(p.z / f)),
+        "value": format!("({} {u}, {} {u}, {} {u})", c(p.x), c(p.y), c(p.z)),
     })
 }
 
@@ -413,6 +421,7 @@ pub fn run(session: &mut Session, entities: &[String], rev: Option<&str>) -> Res
 
 #[cfg(test)]
 mod tests {
+    use super::number;
     use crate::assembly::tests::{place_in, project};
     use crate::error::Code;
     use crate::server::tests::{call, fresh};
@@ -521,6 +530,15 @@ mod tests {
         );
         assert_eq!(v["kinds"], json!(["occurrence", "occurrence"]));
         assert!(v.get("angle").is_none());
+    }
+
+    #[test]
+    fn numbers_are_written_to_ten_digits() {
+        assert_eq!(number(0.1 + 0.2), "0.3");
+        assert_eq!(number(-0.0), "0");
+        assert_eq!(number(12.5), "12.5");
+        assert_eq!(number(5.551115123125783e-16), "5.551115123e-16");
+        assert_eq!(number(2.0e20), "2e20");
     }
 
     #[test]

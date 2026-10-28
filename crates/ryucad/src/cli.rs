@@ -185,6 +185,19 @@ enum Command {
         #[command(flatten)]
         rev: RevArg,
     },
+    /// How far apart an assembly's instances are: the minimum distance between each pair
+    /// of solids whose boxes come within --below (a hundredth of the assembly's diagonal
+    /// by default), closest first, with the nearest points. Pairs at 0 touch or interfere.
+    Clearance {
+        part: String,
+        /// Only pairs with a side under this instance path (s1/b2, holes:2/bolt); repeat
+        /// for more.
+        #[arg(long = "instance", value_name = "PATH")]
+        instances: Vec<String>,
+        /// Pairs whose boxes come within this length (5 mm).
+        #[arg(long, value_name = "LENGTH")]
+        below: Option<String>,
+    },
     /// Mass properties of a part or assembly, a solid (<part>/<solid>) or an occurrence
     /// (<assembly>/<instance>/…): volume, area, centre of mass, and where every part has a
     /// material in materials.json, mass and inertia.
@@ -1865,6 +1878,15 @@ fn request(cmd: &Command) -> Option<Request> {
             rev: rev.rev.clone(),
         },
         Command::CheckFormat => Request::CheckFormat {},
+        Command::Clearance {
+            part,
+            instances,
+            below,
+        } => Request::Clearance {
+            part: part.clone(),
+            instances: instances.clone(),
+            below: below.clone(),
+        },
         Command::Mass { of, tolerance, rev } => Request::Mass {
             of: of.clone(),
             tolerance: *tolerance,
