@@ -2420,7 +2420,7 @@ fn where_used_shows_an_assembly() {
         return;
     }
     let p = framed_bolts();
-    let mut h = sized(&p, 1200.0);
+    let mut h = window(&p);
     frames(&mut h, bolts_drawn);
     // The bolt chosen in the tree: the Part section says where it is used.
     h.get_by_label("shank (cylinder)").click();
@@ -2433,6 +2433,17 @@ fn where_used_shows_an_assembly() {
     });
     shown(&mut h, "Where bolt is used");
     h.get_by_label("frame (2)");
+    // A click lands where the button is drawn, so the panel must have
+    // settled with it in view: the chosen feature's form arrives on its
+    // own and pushes the section down, past the window's foot where text
+    // runs taller (Windows' software adapter).
+    frames(&mut h, |a| a.opened().ws.idle());
+    h.get_by_label("Show frame").scroll_to_me();
+    for _ in 0..30 {
+        h.step();
+    }
+    let r = h.get_by_label("Show frame").rect();
+    assert!(r.bottom() <= 700.0, "Show frame is out of view at {r:?}");
     h.get_by_label("Show frame").click();
     frames(&mut h, |a| {
         a.opened().ws.model.focus.as_deref() == Some("frame")
