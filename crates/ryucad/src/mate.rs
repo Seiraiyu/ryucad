@@ -2353,6 +2353,19 @@ mod doctor_tests {
             .find(|i| i["code"] == code)
     }
 
+    /// A daemon's doctor reads the session's rebuilds (issue #125: it
+    /// rebuilt every assembly cold), and says what a cold doctor says.
+    #[test]
+    fn doctor_in_a_session_reuses_its_rebuilds() {
+        let (dir, mut s) = hinged();
+        let before = s.rebuilt(&id("frame")).unwrap().solve.clone().unwrap();
+        let live = call(&mut s, "doctor", json!({})).unwrap();
+        assert!(issue(&live, "assembly_stale").is_some());
+        assert_eq!(live, crate::doctor::report(dir.path()).unwrap());
+        let after = s.rebuilt(&id("frame")).unwrap().solve.clone().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&before, &after));
+    }
+
     #[test]
     fn doctor_writes_stale_poses_and_check_finds_unsolved_mates() {
         let (dir, mut s) = hinged();

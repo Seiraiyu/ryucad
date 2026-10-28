@@ -45,3 +45,14 @@
   spheres short of their poles, and 240 random spline pairs passed.
   Determinism golden hashes unchanged. Rows collapsed only within
   resolution (not bit for bit) are still the old path.
+- Lap 6: #125. A daemon's `doctor` now rebuilds through its own session
+  (`doctor::Builds::live`), which `answer_live` has refreshed, so the
+  assembly check reuses the cached rebuild instead of a cold
+  `Session::open` per call. Without a daemon, one session is opened on
+  first need and shared by every check and repair plan (it was opened
+  twice for a stale assembly). `doctor.repair` still plans cold, since
+  each repair changes the files. `check` still diagnoses cold on purpose.
+  The app already coalesces doctor requests while one is waiting
+  (`doctor_again`), so no debounce was added; doctor still runs on the
+  request path, now at the cost of the checks alone. Not timed on the
+  issue's gearbox (not in the repo).

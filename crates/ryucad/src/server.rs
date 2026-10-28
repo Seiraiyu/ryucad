@@ -731,7 +731,11 @@ fn dispatch(
         // A render's answer is bytes: `answer_live` handles it.
         Request::Render { .. } => Err(Error::new(Code::Internal, "render answers with bytes")),
         Request::Export { .. } => Err(Error::new(Code::Internal, "export answers with bytes")),
-        Request::Doctor {} => crate::doctor::report(session.root()),
+        // The session is current: doctor reuses its rebuilds (#125).
+        Request::Doctor {} => {
+            let root = session.root().to_owned();
+            crate::doctor::report_in(&mut crate::doctor::Builds::live(&root, session))
+        }
         Request::DoctorRepair { repairs, params } => {
             let params = crate::doctor::Params::from_json(&params)?;
             let r = crate::doctor::repair(session.root(), &repairs, &params)?;
