@@ -93,6 +93,7 @@ jobs:
       - run: cargo test -p ryukei --release --test corners
       - run: cargo test -p ryukei --release --test corner_props
       - run: cargo test -p ryukei --release --test blend_booleans
+      - run: cargo test -p ryukei --release --test spline_blends
       - run: cargo test -p ryukei --release --test heal_props
       - run: cargo test -p ryukei --release --test mirror
       - run: cargo test -p ryukei --release --test along

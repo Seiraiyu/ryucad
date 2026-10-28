@@ -46,6 +46,26 @@ use crate::{BlendError, Error, TopologyError};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Where two surfaces meet. Two pipes not at all (`Unsupported`: their
+/// tangent crossings at corners and trims are a limit). A pipe on an
+/// analytic anchor (an earlier fillet's) against anything by the pipe's
+/// own tracer, as blends always have. Any other pair (a pipe on a rail, a
+/// spline, a swept surface or an offset) by
+/// [`crate::intersect::surface_surface`].
+fn meet(
+    a: &crate::geom::Surface,
+    b: &crate::geom::Surface,
+    region: &crate::geom::Box3,
+) -> Result<crate::intersect::SurfaceHit, crate::intersect::Failure> {
+    use crate::geom::Surface;
+    let footed = |s: &Surface| matches!(s, Surface::Pipe(p) if p.rail().is_none());
+    match (a, b) {
+        (Surface::Pipe(_), Surface::Pipe(_)) => Err(crate::intersect::Failure::Unsupported),
+        _ if footed(a) || footed(b) => crate::intersect::pipe_surface(a, b, region),
+        _ => crate::intersect::surface_surface(a, b, region),
+    }
+}
+
 /// What a blend does to one edge.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BlendKind {

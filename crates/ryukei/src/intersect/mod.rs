@@ -38,7 +38,7 @@ pub(crate) use coincide::{coincident, common, covering};
 pub use cs::{CurveHit, Side, curve_surface};
 pub(crate) use face::coarse_box;
 pub use face::{Contact, FaceMeet, Rim, Stretch, face_box, face_face};
-pub(crate) use face::{face_face_within, shifted, shifts};
+pub(crate) use face::{face_face_within, face_rect, shifted, shifts};
 pub(crate) use fit::{
     fit_along, fit_on, fit_pcurve, fit_pcurve_by, fit_pcurve_within, pcurve_certified,
 };
@@ -49,6 +49,7 @@ pub use pipe_cs::curve_pipe;
 pub(crate) use seam::reseamed;
 pub(crate) use solid::point_in_faces;
 pub use solid::{Inclusion, point_in_body};
+pub(crate) use ss::carried_by;
 pub use ss::{Branch, SurfaceHit, pipe_surface, surface_surface};
 
 /// Rounding slack added to every certified distance: the surfaces and

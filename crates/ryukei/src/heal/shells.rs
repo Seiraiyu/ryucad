@@ -337,7 +337,8 @@ fn shell_triangles(b: &Body, m: &BodyMesh, faces: &[FaceId]) -> Result<Vec<[Poin
 
 /// The sign of a shell's volume from the mesh, if it is further from zero
 /// than the mesh can be wrong by, else the chord that would make the
-/// volume measured a sure sign: half what its bound allows.
+/// volume measured a sure sign (half what its bound allows), or an
+/// eighth of this one where a face of the shell has no mesh.
 fn mesh_sign(
     b: &Body,
     m: &BodyMesh,
@@ -345,7 +346,11 @@ fn mesh_sign(
     chord: f64,
     name: Name,
 ) -> Result<Result<bool, f64>, Error> {
-    let triangles = shell_triangles(b, m, faces).map_err(|at| HealError::Uncertain { at })?;
+    // A face the mesher couldn't mesh at this chord (a thin band can stall
+    // when coarse) asks for a finer one, as an unsure volume does.
+    let Ok(triangles) = shell_triangles(b, m, faces) else {
+        return Ok(Err(chord / 8.0));
+    };
     let by_face: BTreeMap<FaceId, &crate::mesh::FaceMesh> =
         m.faces.iter().map(|fm| (fm.face, fm)).collect();
     let mut curved = 0.0;

@@ -11,6 +11,7 @@
 
 use crate::geom::jet::{JVec, Jet};
 use crate::geom::pipe::anchor_normal;
+use crate::geom::sheet::Sheet;
 use crate::geom::{Surface, UnitVector3, Vector3};
 use crate::interval::Interval;
 use crate::tol::ANGULAR_RESOLUTION;
@@ -213,21 +214,38 @@ impl<'a> Side<'a> {
 
     /// An enclosure of the outward normal over the edge's parameters `r`,
     /// whose points `p` enclose: an analytic surface's from the points, a
-    /// pipe's from its pcurve's parameters. `None` where it can't be
-    /// certified.
+    /// pipe's from its pcurve's parameters, any other surface's as `S_u ×
+    /// S_v` normalized, from its enclosures over the box its pcurve covers
+    /// there. `None` where it can't be certified.
     fn normal_box(&self, r: [f64; 2], p: IVec3) -> Option<IVec3> {
+        let uv_box = || {
+            let pc = self.body.fins[self.fin].pcurve?;
+            let (a, b) = (pc.param(r[0]), pc.param(r[1]));
+            let bx = self.body.curves2[pc.curve].bounds([a.min(b), a.max(b)]);
+            let (lo, hi) = (bx.min(), bx.max());
+            Some([[lo.x, hi.x], [lo.y, hi.y]])
+        };
         let n = match self.surface {
             Surface::Pipe(pipe) => {
-                let pc = self.body.fins[self.fin].pcurve?;
-                let (a, b) = (pc.param(r[0]), pc.param(r[1]));
-                let bx = self.body.curves2[pc.curve].bounds([a.min(b), a.max(b)]);
-                let (lo, hi) = (bx.min(), bx.max());
-                let [_, n] = pipe.jet_box([[lo.x, hi.x], [lo.y, hi.y]])?;
+                let [_, n] = pipe.jet_box(uv_box()?)?;
                 n.map(|j| j.v)
             }
-            s => {
+            s if s.frame().is_some() => {
                 let c: JVec<Interval> = p.map(Jet::constant);
                 anchor_normal(s, c)?.map(|j| j.v)
+            }
+            s => {
+                let q = Sheet::of(s).jet_box(uv_box()?)?;
+                let w = cross(q.map(|j| j.d[0]), q.map(|j| j.d[1]));
+                let len = dot(w, w).sqrt()?;
+                if len.lo() <= 0.0 {
+                    return None;
+                }
+                let mut n = w;
+                for x in &mut n {
+                    *x = x.checked_div(len)?;
+                }
+                n
             }
         };
         Some(n.map(|x| x * Interval::point(self.sign)))

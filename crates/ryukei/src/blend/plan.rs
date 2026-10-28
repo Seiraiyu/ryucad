@@ -561,20 +561,26 @@ fn fillet_partial(
     let rail_side = chain.rail_side(specs, k);
     let sides = [rail_side, 1 - rail_side];
     let faces = sides.map(|i| spec.faces[i]);
-    let surfaces = faces.map(|f| body.surfaces[body.faces[f].surface].clone());
+    let surfaces = sides.map(|i| s.supports[i].clone());
     let span = match s.curve.period() {
         Some(p) if !closed => [s.mid - p / 2.0, s.mid + p / 2.0],
         _ => s.range,
     };
     let mut rails = Vec::with_capacity(2);
     for side in 0..2 {
-        let r = rail(&s, &surfaces[side], sides[side], span).map_err(|f| {
+        let fail = |f| -> Error {
             let at = spec.name;
             match f {
                 Failure::Unsupported => BlendError::Unsupported { at },
                 Failure::Uncertain => BlendError::Uncertain { at },
             }
-        })?;
+            .into()
+        };
+        let mut r = rail(&s, &surfaces[side], sides[side], span).map_err(fail)?;
+        let own = &body.surfaces[body.faces[faces[side]].surface];
+        if own != &surfaces[side] && super::spine::twin(own).is_some() {
+            r = super::rail::onto(r, own, span).map_err(fail)?;
+        }
         rails.push(r);
     }
     let (start, end) = if closed {
@@ -660,19 +666,16 @@ pub(crate) fn fillet_face(
     let surfaces = part
         .faces
         .map(|f| body.surfaces[body.faces[f].surface].clone());
-    let feet = [0, 1].map(|i| {
-        let mut both = [&surfaces[0], &surfaces[1]];
-        if part.sides[0] == 1 {
-            both.swap(0, 1);
-        }
-        spine.foot(both, i, spine.mid)
-    });
-    let anchor = if surfaces[0].frame().is_some() {
-        &surfaces[0]
-    } else {
-        &surfaces[1]
-    };
-    fillet_surface(spine, anchor, range, feet).map_err(|f| {
+    let feet = [0, 1].map(|i| spine.foot(i, spine.mid));
+    // An analytic face anchors a pipe on its foot; failing that, the
+    // first face anchors it on its rail.
+    let j = usize::from(surfaces[0].frame().is_none() && surfaces[1].frame().is_some());
+    let k = spine
+        .faces
+        .iter()
+        .position(|&f| f == part.faces[j])
+        .expect("a fillet's face is one of its spine's");
+    fillet_surface(spine, (&spine.supports[k], k), range, feet).map_err(|f| {
         match f {
             SurfaceFail::TooLarge => BlendError::RadiusTooLarge { edge: name },
             SurfaceFail::Unsupported => BlendError::Unsupported { at: name },
@@ -709,15 +712,11 @@ fn fillet_joint(
     let surfaces = a
         .faces
         .map(|f| body.surfaces[body.faces[f].surface].clone());
-    let mut both = [&surfaces[0], &surfaces[1]];
-    if a.sides[0] == 1 {
-        both.swap(0, 1);
-    }
     let (sa, sb) = (
         a.spine.as_ref().ok_or_else(uncertain)?,
         b.spine.as_ref().ok_or_else(uncertain)?,
     );
-    let foot = |t: f64, side: usize| sa.foot(both, a.sides[side], t);
+    let foot = |t: f64, side: usize| sa.foot(a.sides[side], t);
     let other = &surfaces[1];
     // The foot's signed distance from the smooth edge, across the face.
     let across = |t: f64| -> Option<f64> {

@@ -707,9 +707,38 @@ impl Pipe {
     /// box: the spine's derivatives over `s` and `cos θ`, `sin θ` over
     /// `θ`. `None` where the frame can't be certified over the box.
     pub(crate) fn jet_box(&self, [rs, rt]: [[f64; 2]; 2]) -> Option<[JVec<Interval>; 2]> {
-        let d = self.spine.jet_box(rs);
         let (cos, sin) = trig_box(rt);
-        self.jets(d, self.rail_box(rs)?, cos, sin)
+        let over = |rs: [f64; 2]| {
+            let d = self.spine.jet_box(rs);
+            self.jets(d, self.rail_box(rs)?, cos, sin)
+        };
+        let whole = over(rs);
+        if whole.is_some() || self.rail.is_none() {
+            return whole;
+        }
+        // On a rail the frame over a long stretch may not be certified
+        // whole: the hull of its halves', halved up to RAIL_DEPTH times.
+        let mut out: Option<[JVec<Interval>; 2]> = None;
+        let mut stack = vec![(rs, 0u32)];
+        while let Some((r, depth)) = stack.pop() {
+            match over(r) {
+                Some(q) => {
+                    out = Some(match out {
+                        None => q,
+                        Some(o) => core::array::from_fn(|i| {
+                            core::array::from_fn(|k| hull_jet(o[i][k], q[i][k]))
+                        }),
+                    });
+                }
+                None if depth < RAIL_DEPTH => {
+                    let m = (r[0] + r[1]) / 2.0;
+                    stack.push(([r[0], m], depth + 1));
+                    stack.push(([m, r[1]], depth + 1));
+                }
+                None => return None,
+            }
+        }
+        out
     }
 
     /// Bounds over a parameter box, from the frame's enclosures over the
@@ -983,6 +1012,19 @@ impl Pipe {
             e1dd: e1.map(|j| j.h[0]),
             e2dd: e2.map(|j| j.h[0]),
         })
+    }
+}
+
+/// How many times [`Pipe::jet_box`] halves a stretch of a rail pipe's
+/// spine whose frame it can't enclose whole.
+const RAIL_DEPTH: u32 = 6;
+
+/// The hull of two jets' enclosures.
+fn hull_jet(a: Jet<Interval>, b: Jet<Interval>) -> Jet<Interval> {
+    Jet {
+        v: a.v.hull(b.v),
+        d: core::array::from_fn(|i| a.d[i].hull(b.d[i])),
+        h: core::array::from_fn(|i| a.h[i].hull(b.h[i])),
     }
 }
 
