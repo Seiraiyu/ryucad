@@ -114,6 +114,12 @@ enum Pending {
     DragSolve(String),
     /// A drag's move, written (`assembly.move`).
     DragMove(String),
+    /// A part's named views (`view.list`).
+    Views(String),
+    /// A named view of a part, saved (`view.save`).
+    ViewSaved(String),
+    /// A camera normal to a face (`camera.set` with `normal_to`).
+    NormalTo,
     /// Only a failure matters.
     Quiet,
 }
@@ -305,6 +311,12 @@ pub struct Workspace {
     pub export: Option<crate::core::step::Export>,
     /// The instance being dragged, if any.
     pub drag: Option<Drag>,
+    /// The named views of the part the window shows, for the cube's menu
+    /// and the view selector.
+    pub views: crate::core::views::NamedViews,
+    /// A camera normal to a face, come from the daemon, for the view to
+    /// turn to.
+    pub looked: Option<Camera>,
     /// Tests only: notifications are dropped as they arrive, as if lost,
     /// to see what the window does from its answers alone.
     #[doc(hidden)]
@@ -400,6 +412,8 @@ impl Workspace {
             import: None,
             export: None,
             drag: None,
+            views: Default::default(),
+            looked: None,
             deaf: false,
             drag_note: None,
             doctor_waiting: false,
@@ -496,6 +510,64 @@ impl Workspace {
             instances: Vec::new(),
         };
         self.send(req, Pending::Interference(part));
+    }
+
+    /// The part whose named views the window offers: the one it shows.
+    pub fn views_part(&self) -> Option<String> {
+        match self.model.shown().as_slice() {
+            [one] => Some((*one).to_owned()),
+            _ => None,
+        }
+    }
+
+    /// Reads the named views of the part shown, when that changed.
+    fn follow_views(&mut self) {
+        let part = self.views_part();
+        if part != self.views.part {
+            self.views = crate::core::views::NamedViews {
+                part,
+                ..Default::default()
+            };
+            self.read_views();
+        }
+    }
+
+    fn read_views(&mut self) {
+        if let Some(p) = self.views.part.clone() {
+            let req = Request::ViewList {
+                part: Some(p.clone()),
+            };
+            self.send(req, Pending::Views(p));
+        }
+    }
+
+    /// Saves `camera` as named view `id` of the part shown (`view.save`).
+    pub fn save_view(&mut self, id: &str, camera: &Camera) {
+        let Some(part) = self.views.part.clone() else {
+            return;
+        };
+        self.views.error = None;
+        let req = Request::ViewSave {
+            part: part.clone(),
+            view: id.to_owned(),
+            camera: Some(camera_arg(camera)),
+            participant: None,
+            expected_revision: None,
+        };
+        self.send(req, Pending::ViewSaved(part));
+    }
+
+    /// Asks the daemon for a camera normal to `face` (its geometry is the
+    /// daemon's); the answer lands in `looked`.
+    pub fn look_normal_to(&mut self, face: &str) {
+        let req = Request::CameraSet {
+            camera: None,
+            view: None,
+            fit: Vec::new(),
+            normal_to: Some(face.to_owned()),
+            part: None,
+        };
+        self.send(req, Pending::NormalTo);
     }
 
     /// Takes a pick of the Measure tool and measures what it now holds.
@@ -1381,6 +1453,7 @@ impl Workspace {
             self.reconnect(now);
             return;
         }
+        self.follow_views();
         let ready = self
             .camera_sent
             .is_none_or(|t| now.saturating_duration_since(t) >= CAMERA_EVERY);
@@ -1962,6 +2035,25 @@ impl Workspace {
                     self.fail(e);
                 }
             }
+            (Pending::Views(part), Ok(a)) => {
+                if self.views.part.as_deref() == Some(part.as_str()) {
+                    self.views = crate::core::views::NamedViews::of(&part, &a.result);
+                }
+            }
+            (Pending::ViewSaved(part), a) => match a {
+                Ok(_) => {
+                    if self.views.part.as_deref() == Some(part.as_str()) {
+                        self.read_views();
+                    }
+                }
+                Err(e) => {
+                    self.views.error = Some(e.clone());
+                    self.fail(e);
+                }
+            },
+            (Pending::NormalTo, Ok(a)) => {
+                self.looked = serde_json::from_value(a.result["camera"].clone()).ok();
+            }
             (Pending::Measure(picks), a) => {
                 match a {
                     Ok(a) => self.measure.take(&picks, &a.result),
@@ -2293,6 +2385,15 @@ impl Workspace {
     }
 
     fn part_changed(&mut self, report: &Value) {
+        // Its named views may have changed with it.
+        if self
+            .views
+            .part
+            .as_deref()
+            .is_some_and(|p| report["part"] == p)
+        {
+            self.read_views();
+        }
         // Interference found for this assembly is found again.
         if self
             .interference

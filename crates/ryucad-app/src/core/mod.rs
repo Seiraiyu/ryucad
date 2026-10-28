@@ -25,5 +25,6 @@ pub mod releases;
 pub mod settings;
 pub mod sketch;
 pub mod step;
+pub mod views;
 pub mod where_used;
 pub mod workspace;
