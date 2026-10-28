@@ -102,3 +102,13 @@
   `462ebcb5` (the same point as the issue) and passes from `d5c6d3fb`.
   Pinned by value (`a_plane_cone_section_misses_nothing`, exact frames),
   since a proptest seed only replays while the strategy is unchanged.
+- Lap 9: #77. Profiled the flush case (macOS `sample`, davids-m4's Apple
+  M4, release, one thread): 80% was `classify::coincident`. The table
+  pairs the target's top face with each of the n tool caps, so each of
+  the ~n pieces of the top face ran `point_in_face` on all n caps: n²
+  ray casts. Each coincident face is now boxed once (grown by twice its
+  boundary's tolerance), and a partner whose box doesn't hold the
+  piece's point is skipped (it could only be `Outside`). 1,000 holes:
+  ryukei 0.53 s flush against 0.50 s out of both faces (was 5.0 s
+  against 0.55 s); ryucad's bar 0.56 s. The bar's bound went from 12× to
+  2×. Golden hashes unchanged; boolean tests and boolean_props pass.
