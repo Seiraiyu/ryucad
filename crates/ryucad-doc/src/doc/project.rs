@@ -8,6 +8,7 @@
 //! parts/<part>/parameters.json      (optional)
 //! parts/<part>/properties.json      (optional: ryupdm's properties)
 //! parts/<part>/features/<feature>.json
+//! parts/<part>/views/<view>.json     (optional: named views)
 //! releases/<part>/<label>.json      (ryupdm's release records)
 //! imports/<file>.step               (STEP files import features read)
 //! ```
@@ -117,10 +118,13 @@ pub struct Part {
     /// path, as they are (one a feature names but the project doesn't
     /// have isn't here).
     pub imports: BTreeMap<String, ImportFile>,
+    /// Its named views, by ID, or why each can't be used. Nothing a
+    /// rebuild makes reads them.
+    pub views: BTreeMap<Id, Result<super::views::ViewFile>>,
     /// A hash of the bytes of `ryucad.json`, `part.json`, `parameters.json`,
-    /// the listed feature files in order and the hashes of the files their
-    /// imports read: it changes whenever anything that defines the part
-    /// does.
+    /// the listed feature files in order, the hashes of the files their
+    /// imports read, ryupdm's properties and the named views: it changes
+    /// whenever anything that defines the part does.
     pub revision: String,
 }
 
@@ -493,6 +497,7 @@ fn load_part(
     for (name, kind) in src.list(&dir)? {
         match name.as_str() {
             "part.json" | "features" => {}
+            super::views::VIEWS if kind == Kind::Dir => {}
             PARAMETERS => has_parameters = kind == Kind::File,
             PROPERTIES => has_properties = kind == Kind::File,
             _ => unknown.push(join(&dir, &name)),
@@ -586,6 +591,33 @@ fn load_part(
             piece(&mut hasher, &bytes);
         }
     }
+    // Named views, by ID: tagged, so a part without them hashes as
+    // before.
+    let mut views = BTreeMap::new();
+    let mut tagged = false;
+    let views_dir = join(&dir, super::views::VIEWS);
+    for (name, kind) in src.list(&views_dir)? {
+        let at = join(&views_dir, &name);
+        let vid = name
+            .strip_suffix(".json")
+            .and_then(|stem| Id::parse(stem, "view").ok());
+        match vid {
+            Some(vid) if kind == Kind::File => {
+                let view = read_json(src, &at).and_then(|(bytes, v)| {
+                    if !tagged {
+                        piece(&mut hasher, super::views::VIEWS.as_bytes());
+                        tagged = true;
+                    }
+                    piece(&mut hasher, vid.as_str().as_bytes());
+                    piece(&mut hasher, &bytes);
+                    super::views::check_id(vid.as_str())?;
+                    super::views::ViewFile::from_json(&v)
+                });
+                views.insert(vid, view.map_err(|e| e.with("path", &at)));
+            }
+            _ => unknown.push(at),
+        }
+    }
     let revision = hasher.finalize().to_hex()[..32].to_owned();
     // A conflicted manifest leaves no part usable.
     let file = match manifest_fault {
@@ -601,6 +633,7 @@ fn load_part(
         uses,
         acts,
         imports: read,
+        views,
         revision,
     })
 }
@@ -1054,6 +1087,62 @@ mod tests {
         fs::write(properties_path(root, &id("p")), "{}").unwrap();
         project.reload(&["parts/p/properties.json".into()]).unwrap();
         assert_ne!(project.parts[&id("p")].revision, rev);
+    }
+
+    #[test]
+    fn named_views_load_with_their_part_and_count_in_its_revision() {
+        use super::super::views::{ViewFile, ViewProjection};
+        let dir = sample();
+        let root = dir.path();
+        let p = id("p");
+        let before = Project::load(root).unwrap();
+        let rev = before.parts[&p].revision.clone();
+        assert!(before.parts[&p].views.is_empty());
+        let views = part_dir(root, &p).join("views");
+        fs::create_dir_all(&views).unwrap();
+        let view = ViewFile {
+            eye_m: [0.1, -0.1, 0.1],
+            target_m: [0.0; 3],
+            up: [0.0, 0.0, 1.0],
+            projection: ViewProjection::Orthographic { height_m: 0.05 },
+        };
+        write_json(&views.join("detail.json"), &view.to_json()).unwrap();
+        let mut project = Project::load(root).unwrap();
+        let part = &project.parts[&p];
+        assert_eq!(part.views[&id("detail")].as_ref().unwrap(), &view);
+        assert_ne!(part.revision, rev);
+        assert!(project.unknown.is_empty(), "{:?}", project.unknown);
+        let with_one = part.revision.clone();
+        // A view that doesn't read, or takes a standard name, fails in its
+        // place; anything else there is unknown.
+        fs::write(
+            views.join("front.json"),
+            canonical::to_string(&view.to_json()),
+        )
+        .unwrap();
+        fs::write(views.join("broken.json"), "{").unwrap();
+        fs::write(views.join("notes.txt"), "").unwrap();
+        project
+            .reload(&[
+                "parts/p/views/front.json".into(),
+                "parts/p/views/broken.json".into(),
+                "parts/p/views/notes.txt".into(),
+            ])
+            .unwrap();
+        let part = &project.parts[&p];
+        assert_eq!(
+            part.views[&id("front")].as_ref().unwrap_err().code,
+            Code::InvalidId
+        );
+        let broken = part.views[&id("broken")].as_ref().unwrap_err();
+        assert_eq!(
+            (broken.code, broken.details["path"].as_str()),
+            (Code::InvalidJson, Some("parts/p/views/broken.json"))
+        );
+        assert_eq!(project.unknown, ["parts/p/views/notes.txt"]);
+        assert_ne!(part.revision, with_one);
+        // Nothing else of the part changes.
+        assert_eq!(part.order(), before.parts[&p].order());
     }
 
     #[test]
