@@ -166,13 +166,7 @@ fn trim(
     // The trim curve: the branch of the surfaces' intersection through q.
     let reach = parts[0].reach.max(parts[1].reach);
     let region = Box3::new(q, vp).grow(2.0 * reach);
-    let hit = match (&surfaces[0], &surfaces[1]) {
-        (Surface::Pipe(_), Surface::Pipe(_)) => return Err(unsupported()),
-        (Surface::Pipe(_), _) | (_, Surface::Pipe(_)) => {
-            intersect::pipe_surface(&surfaces[0], &surfaces[1], &region)
-        }
-        _ => intersect::surface_surface(&surfaces[0], &surfaces[1], &region),
-    };
+    let hit = super::meet(&surfaces[0], &surfaces[1], &region);
     let branches = match hit {
         Ok(SurfaceHit::Meet { branches, .. }) => branches,
         Ok(SurfaceHit::Coincident { .. }) | Err(Failure::Unsupported) => {

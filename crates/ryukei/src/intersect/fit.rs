@@ -1249,28 +1249,50 @@ pub(crate) fn fit_along(
     unreachable!("the loop returns")
 }
 
+/// A certified bound on how far a Hermite span from `a` to `b` (points
+/// with their derivatives by the span's parameter over `range`) strays
+/// from a surface with no implicit form: the ends' feet on it, their
+/// parameter velocities, the Hermite pcurve between them and its pcurve
+/// bound against the span. Infinite where a velocity has no solution (a
+/// pole).
+fn span_bound(
+    s: &Surface,
+    (pa, da): (Point3, Vector3),
+    (pb, db): (Point3, Vector3),
+    range: [f64; 2],
+    span: &Piece3,
+) -> f64 {
+    let ua = uv_near(s, pa, None);
+    let ub = uv_near(s, pb, Some(ua));
+    let (Some(va), Some(vb)) = (uv_velocity(s, ua, da), uv_velocity(s, ub, db)) else {
+        return f64::INFINITY;
+    };
+    let h = range[1] - range[0];
+    let p2 = piece(hermite(ua.to_vector(), va, ub.to_vector(), vb, h), range);
+    pcurve_bound(s, &p2, &SpanTarget(span), LINEAR_RESOLUTION)
+}
+
 /// Two curves, each on its surface, through the points `at` gives over
 /// `[t0, t1]`, each point with its derivative by `t`, fitted on shared
 /// knots: cubic Hermite spans in `t`, each certified within its bound of
 /// its surface through the surface's implicit form ([`surface_bound`]),
+/// or for a surface with none through a pcurve: the Hermite span in its
+/// parameters between the ends' feet, by their parameter velocities, and
+/// its pcurve bound against the span ([`pcurve_bound`]),
 /// split (in both curves) until both bounds are within
 /// [`LINEAR_RESOLUTION`] and both spans' middles are within it of the
 /// points `at` gives there (sampled: that keeps the fit near the given
 /// points, the bound makes it an edge). A chamfer's rails are the points
 /// at its setbacks in each section of its edge, and sharing knots makes
 /// the ruled surface between them simple. Returns the curves and their
-/// worst bounds; `Unsupported` for a surface with no implicit form,
-/// `Uncertain` where `at` fails or a fit can't get within
+/// worst bounds; `Uncertain` where `at` fails or a fit can't get within
 /// `10 × LINEAR_RESOLUTION`.
 pub(crate) fn fit_on(
     surfaces: [&Surface; 2],
     [t0, t1]: [f64; 2],
     at: &dyn Fn(f64) -> Option<[(Point3, Vector3); 2]>,
 ) -> Result<([NurbsCurve; 2], [f64; 2]), Failure> {
-    let imps = [
-        Implicit::of(surfaces[0]).ok_or(Failure::Unsupported)?,
-        Implicit::of(surfaces[1]).ok_or(Failure::Unsupported)?,
-    ];
+    let imps = [Implicit::of(surfaces[0]), Implicit::of(surfaces[1])];
     type S = (f64, [(Point3, Vector3); 2]);
     let sample = |t: f64| -> Result<S, Failure> { Ok((t, at(t).ok_or(Failure::Uncertain)?)) };
     let n = 8;
@@ -1296,7 +1318,10 @@ pub(crate) fn fit_on(
             if let Some(m) = mid {
                 drift |= (Point3::ORIGIN + q).distance(m[k].0) > LINEAR_RESOLUTION;
             }
-            *bound = surface_bound(&imps[k], &sp, LINEAR_RESOLUTION, MAX_HALVINGS);
+            *bound = match &imps[k] {
+                Some(imp) => surface_bound(imp, &sp, LINEAR_RESOLUTION, MAX_HALVINGS),
+                None => span_bound(surfaces[k], a.1[k], b.1[k], [a.0, b.0], &sp),
+            };
         }
         (out, drift)
     };

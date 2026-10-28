@@ -250,6 +250,15 @@ pub(crate) fn check(
                 let range = e.interval.map(|t| pc.param(t));
                 let c2 = &body.curves2[pc.curve];
                 let reach = 10.0 * (it.tolerance + e.tolerance.get());
+                // A curve ending tangentially on an edge (an end curve on
+                // its end face, where the ball touches the face beside it)
+                // meets it at a point rounding moves along the tangent by
+                // up to `sqrt(2 × size × reach)`: the touch rule's wedge.
+                let size = {
+                    let b = it.bounds();
+                    b.min().distance(b.max())
+                };
+                let wedge = reach.max(crate::math::sqrt(2.0 * size * reach));
                 for p in meets(body, face, (it.pcurve.0, it.range2()), (c2, range))
                     .or_else(|| {
                         // Rounding can't settle a tangent touch where the
@@ -260,7 +269,7 @@ pub(crate) fn check(
                     })
                     .ok_or(BlendError::Uncertain { at: it.edge })?
                 {
-                    let at_end = it.ends().iter().any(|q| q.distance(p) <= reach);
+                    let at_end = it.ends().iter().any(|q| q.distance(p) <= wedge);
                     if !(at_end && it.allowed.contains(&g)) {
                         return Err(overflow(it));
                     }

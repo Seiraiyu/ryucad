@@ -36,8 +36,9 @@ use crate::{Error, HealError};
 use rayon::prelude::*;
 use std::sync::Arc;
 
-/// The most samples a fitted pcurve may take: an edge needing more is no
-/// edge a file means, and searching further only costs time.
+/// The most samples a fitted pcurve may take, but for a spline edge of
+/// more than a quarter as many pieces: an edge needing more is no edge a
+/// file means, and searching further only costs time.
 const FIT_SAMPLES: usize = 512;
 
 /// A use's pcurve: a curve, the affine map from the edge's parameter to
@@ -131,7 +132,14 @@ fn one(s: &Shape, f: &Face, u: &Use) -> Result<Option<Found>, f64> {
     } else {
         LINEAR_RESOLUTION
     };
-    let r = fit_pcurve_within(surface, curve, e.interval, target, FIT_SAMPLES);
+    // A spline edge of many pieces (a blend's rail fitted on a spline
+    // face) needs about as many samples: four a piece, if that is more.
+    let pieces = match curve {
+        Curve::Nurbs(n) => n.pieces().len(),
+        _ => 0,
+    };
+    let samples = FIT_SAMPLES.max(4 * pieces);
+    let r = fit_pcurve_within(surface, curve, e.interval, target, samples);
     Ok(r.ok()
         .map(|(c2, bound)| (Curve2::Nurbs2(Arc::new(c2)), [0.0, 1.0], bound)))
 }

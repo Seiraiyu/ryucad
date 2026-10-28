@@ -132,13 +132,7 @@ pub(crate) fn end_curve(
     let region = Box3::new(from, to)
         .union(&Box3::from_point(vertex))
         .grow(reach);
-    let hit = match (blend, end) {
-        (Surface::Pipe(_), Surface::Pipe(_)) => return Err(EndFail::Unsupported),
-        (Surface::Pipe(_), _) | (_, Surface::Pipe(_)) => {
-            intersect::pipe_surface(blend, end, &region)?
-        }
-        _ => intersect::surface_surface(blend, end, &region)?,
-    };
+    let hit = super::meet(blend, end, &region)?;
     let SurfaceHit::Meet { branches, .. } = hit else {
         return Err(EndFail::Uncertain);
     };
@@ -278,8 +272,8 @@ mod tests {
             .faces
             .map(|f| b.surface(b.face(f).unwrap().surface).unwrap().clone());
         let rails = [0, 1].map(|k| rail(&s, &surfaces[k], k, s.range).unwrap());
-        let feet = [0, 1].map(|k| s.foot([&surfaces[0], &surfaces[1]], k, s.mid));
-        let (blend, _) = fillet_surface(&s, &surfaces[0], s.range, feet).unwrap();
+        let feet = [0, 1].map(|k| s.foot(k, s.mid));
+        let (blend, _) = fillet_surface(&s, (&surfaces[0], 0), s.range, feet).unwrap();
         for (v, class) in c.vertices.iter().zip(&c.classes) {
             let Class::End { face, cuts } = *class else {
                 panic!()
