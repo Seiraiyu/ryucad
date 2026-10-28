@@ -98,11 +98,13 @@ pub fn answer_live(
         Request::MeshGet {
             part,
             feature,
+            features,
             quality,
             transfer: Some(Transfer::Binary),
             rev,
         } => session.at(rev.as_deref()).and_then(|(commit, s)| {
-            let mut a = mesh_binary(s, &part, feature.as_deref(), quality.as_deref())?;
+            let only = wanted(feature.as_deref(), &features);
+            let mut a = mesh_binary(s, &part, only.as_ref(), quality.as_deref())?;
             a.result = versioned(noted(Ok(a.result), commit))?;
             Ok(a)
         }),
@@ -789,13 +791,15 @@ fn dispatch(
         Request::MeshGet {
             part,
             feature,
+            features,
             quality,
             transfer: _,
             rev,
         } => {
             let (commit, s) = session.at(rev.as_deref())?;
+            let only = wanted(feature.as_deref(), &features);
             versioned(noted(
-                mesh_get(s, &part, feature.as_deref(), quality.as_deref()),
+                mesh_get(s, &part, only.as_ref(), quality.as_deref()),
                 commit,
             ))
         }
@@ -943,6 +947,7 @@ pub fn prepare(
     let Request::MeshGet {
         part,
         feature,
+        features,
         quality,
         rev,
         ..
@@ -950,12 +955,13 @@ pub fn prepare(
     else {
         return None;
     };
+    let only = wanted(feature.as_deref(), features);
     if rev.as_deref().is_some_and(|r| r != "working") {
         return None;
     }
     let session = slot.as_mut()?;
     let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        mesh_pending(session, part, feature.as_deref(), quality.as_deref())
+        mesh_pending(session, part, only.as_ref(), quality.as_deref())
     }));
     let pending = match found {
         Ok(p) => p?,
@@ -977,7 +983,7 @@ pub fn prepare(
 fn mesh_pending(
     session: &mut Session,
     part: &str,
-    only: Option<&str>,
+    only: Option<&BTreeSet<String>>,
     quality: Option<&str>,
 ) -> Option<mesh::Pending> {
     let (quality, items): (_, Vec<(Feature, crate::rebuild::Built)>) = if is_assembly(session, part)
@@ -986,16 +992,22 @@ fn mesh_pending(
         let model = session
             .model(&pid, &crate::doc::assembly::Rev::Working)
             .ok()?;
+        // Each body once, before anything is copied: a root places
+        // 100,000 occurrences of 10,000 bodies.
+        let mut seen = BTreeSet::new();
         let items = model
             .occurrences
             .iter()
-            .filter(|o| only.is_none_or(|p| crate::assembly::path_text(&o.path) == p))
+            .filter(|o| only.is_none_or(|w| w.contains(&crate::assembly::path_text(&o.path))))
             .flat_map(|o| &o.solids)
+            .filter(|s| seen.insert(s.built.hash.clone()))
+            .filter(|s| !session.meshes.has(&s.built.hash, quality))
             .map(|s| (s.feature.as_ref().clone(), s.built.as_ref().clone()))
             .collect();
         (quality, items)
     } else {
-        let (pid, only, quality) = mesh_args(part, only, quality).ok()?;
+        let one = one_of(only).ok()?;
+        let (pid, only, quality) = mesh_args(part, one, quality).ok()?;
         let p = session.project().part(&pid).ok()?;
         let solids = Solids::of(p);
         let features: BTreeMap<Id, Feature> = p
@@ -4516,6 +4528,31 @@ fn mesh_args(
     Ok((part_id(part)?, only.map(feature_id).transpose()?, quality))
 }
 
+/// What a `mesh.get` asks for: a solid or occurrence (`feature`), several
+/// of an assembly's occurrences (`features`), or (`None`) everything.
+fn wanted(feature: Option<&str>, features: &[String]) -> Option<BTreeSet<String>> {
+    let all: BTreeSet<String> = feature
+        .map(str::to_owned)
+        .into_iter()
+        .chain(features.iter().cloned())
+        .collect();
+    (!all.is_empty()).then_some(all)
+}
+
+/// The one solid a part's `mesh.get` names, if any: several are an
+/// assembly's occurrences only.
+fn one_of(only: Option<&BTreeSet<String>>) -> Result<Option<&str>> {
+    match only.map(|w| w.iter().collect::<Vec<_>>()).as_deref() {
+        None => Ok(None),
+        Some([one]) => Ok(Some(one.as_str())),
+        Some(_) => Err(Error::new(
+            Code::InvalidParam,
+            "features names several of an assembly's occurrences; a part's solid is feature",
+        )
+        .with("pointer", "/features")),
+    }
+}
+
 /// Display meshes, each with its label.
 type Labelled = Vec<(String, Result<mesh::Meshed>)>;
 
@@ -4526,18 +4563,22 @@ type Labelled = Vec<(String, Result<mesh::Meshed>)>;
 fn assembly_meshes(
     session: &mut Session,
     pid: &Id,
-    only: Option<&str>,
+    only: Option<&BTreeSet<String>>,
     quality: mesh::Quality,
 ) -> Result<(Labelled, Vec<Value>)> {
     let model = session.model(pid, &crate::doc::assembly::Rev::Working)?;
+    let mut found = BTreeSet::new();
     let chosen: Vec<&crate::assembly::Occurrence> = model
         .occurrences
         .iter()
-        .filter(|o| only.is_none_or(|p| crate::assembly::path_text(&o.path) == p))
+        .filter(|o| {
+            only.is_none_or(|w| {
+                let path = crate::assembly::path_text(&o.path);
+                w.contains(&path) && found.insert(path)
+            })
+        })
         .collect();
-    if let Some(p) = only
-        && chosen.is_empty()
-    {
+    if let Some(p) = only.and_then(|w| w.iter().find(|p| !found.contains(*p))) {
         return Err(Error::new(
             Code::NotFound,
             format!("no occurrence {p} in assembly {pid}"),
@@ -4584,7 +4625,7 @@ fn is_assembly(session: &Session, part: &str) -> bool {
 fn mesh_binary(
     session: &mut Session,
     part: &str,
-    only: Option<&str>,
+    only: Option<&BTreeSet<String>>,
     quality: Option<&str>,
 ) -> Result<Answer> {
     if is_assembly(session, part) {
@@ -4593,7 +4634,7 @@ fn mesh_binary(
         let result = json!({"part": pid, "quality": quality.as_str(), "occurrences": occurrences});
         return Ok(Answer::bytes(result, mesh::ENCODING, mesh::encode(&bodies)));
     }
-    let (pid, only, quality) = mesh_args(part, only, quality)?;
+    let (pid, only, quality) = mesh_args(part, one_of(only)?, quality)?;
     let bodies = meshes(session, &pid, only.as_ref(), quality)?;
     let result = json!({"part": pid, "quality": quality.as_str()});
     Ok(Answer::bytes(result, mesh::ENCODING, mesh::encode(&bodies)))
@@ -4602,7 +4643,7 @@ fn mesh_binary(
 fn mesh_get(
     session: &mut Session,
     part: &str,
-    only: Option<&str>,
+    only: Option<&BTreeSet<String>>,
     quality: Option<&str>,
 ) -> Result<Value> {
     if is_assembly(session, part) {
@@ -4623,7 +4664,7 @@ fn mesh_get(
                          "occurrences": occurrences}),
         );
     }
-    let (pid, only, quality) = mesh_args(part, only, quality)?;
+    let (pid, only, quality) = mesh_args(part, one_of(only)?, quality)?;
     let bodies: Vec<Value> = meshes(session, &pid, only.as_ref(), quality)?
         .into_iter()
         .map(|(id, r)| match r {

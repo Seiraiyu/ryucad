@@ -421,6 +421,10 @@ enum Command {
     Mesh {
         part: String,
         feature: Option<String>,
+        /// An occurrence of an assembly (its path) to mesh; repeat for
+        /// several, meshed side by side.
+        #[arg(long = "occurrence", value_name = "PATH")]
+        occurrences: Vec<String>,
         /// coarse, normal or fine (the user's display quality by default).
         #[arg(long)]
         quality: Option<String>,
@@ -2217,12 +2221,14 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Mesh {
             part,
             feature,
+            occurrences,
             quality,
             out,
             rev,
         } => Request::MeshGet {
             part: part.clone(),
             feature: feature.clone(),
+            features: occurrences.clone(),
             quality: quality.clone(),
             transfer: out.as_ref().map(|_| Transfer::Binary),
             rev: rev.rev.clone(),

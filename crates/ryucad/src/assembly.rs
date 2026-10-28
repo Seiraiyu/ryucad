@@ -2782,6 +2782,26 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::NotFound);
+        // Several at once: each body once, every occurrence asked for.
+        let some = json!({"part": "frame", "features": ["b2", "base"]});
+        let some = call(&mut s, "mesh.get", some).unwrap();
+        let labels: Vec<&Value> = some["bodies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| &b["feature"])
+            .collect();
+        assert_eq!(labels, [&json!("base/slab"), &json!("b2/shank")]);
+        assert_eq!(some["occurrences"].as_array().unwrap().len(), 2);
+        let bad = json!({"part": "frame", "features": ["b2", "b9"]});
+        let e = call(&mut s, "mesh.get", bad).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["occurrence"]),
+            (Code::NotFound, &json!("b9"))
+        );
+        let bad = json!({"part": "bolt", "features": ["shank", "x"]});
+        let e = call(&mut s, "mesh.get", bad).unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
         // The same as bytes.
         let req = crate::proto::Request::from_rpc(
             "mesh.get",
