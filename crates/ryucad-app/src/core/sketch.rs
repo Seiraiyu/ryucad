@@ -412,6 +412,31 @@ mod tests {
     }
 
     #[test]
+    fn the_origin_is_three_axes_and_three_dashed_planes() {
+        // From above, 20 mm axes: x and y show as bands, z is end on (no
+        // length on screen, so no band); the xy plane's square shows dashed,
+        // the others edge on.
+        let o = origin(&top(), [100.0, 100.0], 1.0, 0.02);
+        let of = |c: [f32; 3]| o.iter().filter(|x| x.1 == c).count();
+        assert_eq!(of(ryucad::render::AXIS_X), 6);
+        assert_eq!(of(ryucad::render::AXIS_Y), 6);
+        assert_eq!(of(ryucad::render::AXIS_Z), 0);
+        let planes = of(ryucad::render::ORIGIN_PLANE);
+        assert!(planes > 6 && planes % 6 == 0, "{planes}");
+        // The x axis runs 20 mm from the origin.
+        let xs: Vec<f64> = o
+            .iter()
+            .filter(|x| x.1 == ryucad::render::AXIS_X)
+            .map(|x| x.0[0])
+            .collect();
+        let (lo, hi) = (
+            xs.iter().copied().fold(f64::INFINITY, f64::min),
+            xs.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        );
+        assert!(lo.abs() < 1e-12 && (hi - 0.02).abs() < 1e-12, "{lo} {hi}");
+    }
+
+    #[test]
     fn construction_curves_are_dashed() {
         let (size, mut phase) = ([100.0, 100.0], 0.0);
         let d = dashed([0.0, 0.0], [25.0, 0.0], [6.0, 4.0], size, 1.0, &mut phase);

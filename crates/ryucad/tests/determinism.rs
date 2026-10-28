@@ -6,7 +6,8 @@
 //! join, cut and intersect, holes and patterns, how sketches are drawn,
 //! what diffs say, what merges make, the content hashes release records
 //! name, where assemblies place their parts, the bodies and names of
-//! imported STEP files, and the bytes of exported STEP files. After
+//! imported STEP files, the bytes of exported STEP files, and cameras:
+//! the cube's views, named views and views normal to faces. After
 //! a deliberate change, regenerate with
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
