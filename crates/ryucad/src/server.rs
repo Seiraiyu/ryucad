@@ -3088,13 +3088,28 @@ fn feature_move(
     Ok(json!({"features": list, "revision": revision}))
 }
 
-fn feature_list(session: &Session, part: &str) -> Result<Value> {
-    let p = session.project().part(&part_id(part)?)?;
+fn feature_list(session: &mut Session, part: &str) -> Result<Value> {
+    let pid = part_id(part)?;
+    // Whether each feature built, not only whether its file loads (#123):
+    // the session's rebuild, cached. A part that can't be rebuilt at all
+    // (a cycle through its assemblies) still lists what its files say.
+    let built: BTreeMap<Id, Error> = match session.rebuilt(&pid) {
+        Ok(r) => r
+            .features
+            .iter()
+            .filter_map(|(fid, b)| Some((fid.clone(), b.as_ref().err()?.clone())))
+            .collect(),
+        Err(_) => BTreeMap::new(),
+    };
+    let p = session.project().part(&pid)?;
     let features: Vec<Value> = order(p)?
         .iter()
         .map(|id| match feature(p, id) {
             Ok(f) => {
-                let mut v = json!({"id": id, "type": f.type_name(), "ok": true});
+                let mut v = match built.get(id) {
+                    Some(e) => json!({"id": id, "type": f.type_name(), "ok": false, "error": e}),
+                    None => json!({"id": id, "type": f.type_name(), "ok": true}),
+                };
                 let uses = crate::graph::inputs(f);
                 if !uses.is_empty() {
                     v["uses"] = json!(uses);
@@ -5015,6 +5030,38 @@ pub(crate) mod tests {
         assert_eq!(e.code, Code::Conflict);
         let show = call(&mut s, "feature.show", json!({"part": "p", "id": "a"})).unwrap();
         assert_eq!(show["params"]["radius"]["value"], "2 mm");
+    }
+
+    #[test]
+    fn features_that_fail_to_build_are_listed_failed() {
+        // #123: a feature whose file loads but doesn't build isn't ok, and
+        // what reads it fails with it.
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        let add = |s: &mut Session, f: Value| {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(s, "feature.add", f).unwrap();
+        };
+        let unit = |id: &str, x: i32| {
+            json!({"type": "box", "id": id, "params": {"x": 10, "y": 10, "z": 10},
+                   "placement": {"origin": [x, 0, 0]}})
+        };
+        add(&mut s, unit("a", 0));
+        let mut miss = unit("c", 50);
+        miss["operation"] = json!("cut");
+        add(&mut s, miss);
+        let mut after = unit("d", 5);
+        after["operation"] = json!("join");
+        add(&mut s, after);
+        let list = call(&mut s, "feature.list", json!({"part": "p"})).unwrap();
+        let f = &list["features"];
+        assert_eq!(f[0]["ok"], true);
+        assert_eq!(f[1]["ok"], false, "{list}");
+        assert_eq!(f[1]["type"], "box");
+        assert_eq!(f[1]["error"]["code"], "operation_no_effect");
+        assert_eq!(f[2]["ok"], false);
+        assert_eq!(f[2]["error"]["code"], "dependency_failed");
     }
 
     #[test]
