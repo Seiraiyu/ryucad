@@ -1,4 +1,6 @@
-//! Blends from bytes ([`ryukei_testkit::blend_bytes`]). Every result must
+//! Blends from bytes ([`ryukei_testkit::blend_bytes`]): an odd first byte
+//! takes the rest as a case on spline faces (`spline_case`), an even one
+//! as a case on the body as it is made (`blend_case`). Every result must
 //! be a typed refusal ([`Error::InvalidBlend`]), or a body that passes the
 //! checker, doesn't cross or overlap itself, and meshes with no faults.
 //! Any panic, and any other error, is a bug.
@@ -11,10 +13,18 @@ use ryukei::blend::blend;
 use ryukei::check::{Fault, check, check_intersections};
 use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::name::OpKey;
-use ryukei_testkit::blend_bytes::blend_case;
+use ryukei_testkit::blend_bytes::{blend_case, spline_case};
 
 fuzz_target!(|data: &[u8]| {
-    let Some(case) = blend_case(data) else {
+    let Some((&first, rest)) = data.split_first() else {
+        return;
+    };
+    let case = if first % 2 == 1 {
+        spline_case(rest)
+    } else {
+        blend_case(rest)
+    };
+    let Some(case) = case else {
         return;
     };
     let body = match blend(OpKey(0xb1e), &case.body, &case.blends) {
