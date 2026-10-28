@@ -56,6 +56,9 @@ pub struct BomTab {
     pub roots: Vec<String>,
     /// Why the last reading failed.
     pub error: Option<Error>,
+    /// The line chosen, by its occurrences: they are this window's
+    /// selection.
+    pub chosen: Option<Vec<String>>,
 }
 
 /// A JSON value as a cell shows it: text as written, nothing for null.

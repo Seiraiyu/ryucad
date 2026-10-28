@@ -2302,3 +2302,84 @@ fn file_export_step_writes_the_shown_part() {
     assert!(bytes.starts_with(b"ISO-10303-21;"));
     assert_eq!(e.done.unwrap().1, bytes.len());
 }
+
+/// A bolt (a cylinder) and a frame placing it twice, and a nut once.
+fn framed_bolts() -> Project {
+    let p = Project::new();
+    p.ok(&["part", "create", "bolt"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bolt",
+        "cylinder",
+        "--id",
+        "shank",
+        "--param",
+        "radius=3",
+        "--param",
+        "height=20",
+    ]);
+    p.ok(&["part", "create", "nut"]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    for (id, of, at) in [
+        ("b1", "bolt", "0,0,0"),
+        ("b2", "bolt", "40,0,0"),
+        ("n1", "nut", "0,0,0"),
+    ] {
+        p.ok(&[
+            "feature", "add", "frame", "instance", "--id", id, "--of", of, "--origin", at,
+        ]);
+    }
+    p
+}
+
+fn bolts_drawn(a: &App) -> bool {
+    match &a.screen {
+        ryucad_app::ui::app::Screen::Opened(o) => {
+            o.ws.idle()
+                && o.ws
+                    .model
+                    .meshes
+                    .contains_key(&("frame".into(), "b2/shank".into()))
+        }
+        _ => false,
+    }
+}
+
+/// Opens the BOM tab of a window on `framed_bolts`, read.
+fn bom_tab(p: &Project) -> Harness<'static, App> {
+    let mut h = window(p);
+    frames(&mut h, bolts_drawn);
+    h.get_by_label("BOM").click();
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.bom.root.is_some()
+    });
+    shown(&mut h, "BOM of frame");
+    h
+}
+
+#[test]
+fn the_bom_tab_chooses_a_line_and_goes_flat() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = framed_bolts();
+    let mut h = bom_tab(&p);
+    // Choosing a line selects its occurrences and frames them.
+    let before = h.state().opened().view.nav.camera.clone();
+    h.get_by_label("BOM line 1: bolt").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection == ["frame/b1", "frame/b2"])
+    });
+    assert_ne!(h.state().opened().view.nav.camera, before);
+    // Flat: one line per part.
+    h.get_by_label("Flat").click();
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && !a.opened().ws.bom.flat_lines.is_empty()
+    });
+    shown(&mut h, "BOM line: bolt working");
+}
