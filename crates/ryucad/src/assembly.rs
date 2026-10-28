@@ -601,6 +601,80 @@ pub struct Store {
     pub pinned: BTreeMap<(Id, String), (String, PartResult)>,
     pub pinned_caches: BTreeMap<(Id, String), Cache>,
     pub disk: Option<Arc<crate::cache::Disk>>,
+    /// Each part's model at `working` (not an assembly's), by the
+    /// revision it was built from: what assemblies place, kept when the
+    /// budget lets the part's rebuild go.
+    pub models: BTreeMap<Id, (String, Arc<Model>)>,
+    /// What each part's rebuild was, by the key it was built from: its
+    /// hash and how many features failed, kept when the rebuild goes.
+    pub summaries: BTreeMap<Id, (String, String, usize)>,
+    pub budget: crate::budget::Budget,
+}
+
+impl Store {
+    /// Notes `part`'s rebuild `result`, built from `key`, for the budget
+    /// and the part's summary.
+    fn noted(&mut self, project: &Project, part: &Id, key: &str) {
+        let Some((_, r)) = self.results.get(part) else {
+            return;
+        };
+        self.summaries
+            .insert(part.clone(), (key.to_owned(), r.hash.clone(), r.failed()));
+        self.budget.touch(part);
+        if !self.budget.on() {
+            return;
+        }
+        let Some(p) = project.parts.get(part) else {
+            return;
+        };
+        let solids = crate::solid::Solids::of(p);
+        let shown: Vec<&crate::rebuild::Built> = r
+            .shown(&solids)
+            .into_iter()
+            .filter_map(|s| s.state.map(|(_, b)| b.as_ref()))
+            .collect();
+        let empty = Cache::new();
+        let cache = self.caches.get(part).unwrap_or(&empty);
+        self.budget.measure(part, r, cache, &shown);
+    }
+
+    /// What the budget counts: the rebuilds of parts that aren't
+    /// assemblies and the shown bodies of those whose rebuilds went, and
+    /// `extra`.
+    pub fn held(&self, project: &Project, extra: u64) -> u64 {
+        let leaves = self.results.keys().filter(|id| is_leaf(project, id));
+        self.budget.total(leaves, self.models.keys(), extra)
+    }
+
+    /// Lets go of parts' rebuilds, least recently used first, until what
+    /// is held (with `extra`) is within the budget; returns the parts let
+    /// go.
+    pub fn trim(&mut self, project: &Project, extra: u64) -> Vec<Id> {
+        if !self.budget.on() {
+            return Vec::new();
+        }
+        let held = self.held(project, extra);
+        let leaves: Vec<Id> = self
+            .results
+            .keys()
+            .filter(|id| is_leaf(project, id))
+            .cloned()
+            .collect();
+        let gone = self.budget.evict(leaves.into_iter(), held);
+        for id in &gone {
+            self.results.remove(id);
+            self.caches.remove(id);
+        }
+        gone
+    }
+}
+
+/// Whether `id` is a part of `project` that isn't an assembly.
+pub(crate) fn is_leaf(project: &Project, id: &Id) -> bool {
+    project
+        .parts
+        .get(id)
+        .is_some_and(|p| !p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly))
 }
 
 /// Rebuilds parts and the assemblies over them, a part before every
@@ -612,6 +686,9 @@ pub struct Rebuild<'p> {
     cycles: Cycles,
     pub store: Store,
     pub fresh: Vec<Id>,
+    /// What the names of fresh parts whose rebuilds the budget let go
+    /// were, learnt before they went (see [`crate::session::names_of`]).
+    pub learned: Vec<crate::session::Name>,
 }
 
 impl<'p> Rebuild<'p> {
@@ -622,6 +699,44 @@ impl<'p> Rebuild<'p> {
             cycles: Cycles::of(project, pins),
             store,
             fresh: Vec::new(),
+            learned: Vec::new(),
+        }
+    }
+
+    /// Whether `part`'s model at `working` is kept at its revision.
+    fn has_model(&self, part: &Id) -> bool {
+        let rev = self.project.parts.get(part).map(|p| &p.revision);
+        self.store
+            .models
+            .get(part)
+            .is_some_and(|(k, _)| Some(k) == rev)
+    }
+
+    /// Lets go of parts' rebuilds past the budget, learning the names of
+    /// the fresh ones first.
+    fn trim(&mut self) {
+        if !self.store.budget.on() {
+            return;
+        }
+        let held = self.store.held(self.project, 0);
+        if held <= self.store.budget.max {
+            return;
+        }
+        let leaves: Vec<Id> = self
+            .store
+            .results
+            .keys()
+            .filter(|id| is_leaf(self.project, id))
+            .cloned()
+            .collect();
+        for id in self.store.budget.evict(leaves.into_iter(), held) {
+            if let Some(i) = self.fresh.iter().position(|f| *f == id) {
+                self.fresh.remove(i);
+                let (_, r) = &self.store.results[&id];
+                self.learned.extend(crate::session::names_of(&id, r));
+            }
+            self.store.results.remove(&id);
+            self.store.caches.remove(&id);
         }
     }
 
@@ -663,7 +778,8 @@ impl<'p> Rebuild<'p> {
         for (id, r, c) in built {
             let key = self.project.parts[&id].revision.clone();
             self.store.caches.insert(id.clone(), c);
-            self.store.results.insert(id.clone(), (key, r));
+            self.store.results.insert(id.clone(), (key.clone(), r));
+            self.store.noted(self.project, &id, &key);
             self.fresh.push(id);
         }
     }
@@ -673,12 +789,17 @@ impl<'p> Rebuild<'p> {
         let p = self.project.part(part)?;
         let (key, children) = self.children(p, &Rev::Working);
         let fresh = self.store.results.get(part).is_some_and(|(k, _)| *k == key);
-        if !fresh {
+        if fresh {
+            self.store.budget.touch(part);
+        } else {
             let empty = Cache::new();
             let cache = self.store.caches.get(part).unwrap_or(&empty);
             let (result, cache) = rebuild_part_in(p, cache, &children, self.store.disk.as_deref());
             self.store.caches.insert(part.clone(), cache);
-            self.store.results.insert(part.clone(), (key, result));
+            self.store
+                .results
+                .insert(part.clone(), (key.clone(), result));
+            self.store.noted(self.project, part, &key);
             self.fresh.push(part.clone());
         }
         Ok(&self.store.results[part].1)
@@ -719,6 +840,7 @@ impl<'p> Rebuild<'p> {
                     Some(Ok(Feature::Instance(i))) if i.rev == Rev::Working => Some(i.part.clone()),
                     _ => None,
                 })
+                .filter(|id| !self.has_model(id))
                 .collect();
             self.build_parts(&placed);
         }
@@ -748,6 +870,9 @@ impl<'p> Rebuild<'p> {
             h.update(format!("{c} {} {what}\n", crev.text()).as_bytes());
         }
         key = format!("{key}+{}", &h.finalize().to_hex()[..32]);
+        // What it places is in its models now: their parts' rebuilds may
+        // go, past the budget.
+        self.trim();
         (key, children)
     }
 
@@ -759,8 +884,24 @@ impl<'p> Rebuild<'p> {
                     Error::new(Code::NotFound, format!("no part {part} to place"))
                         .with("part", part)
                 })?;
-                let result = self.result(part)?;
-                Ok(Arc::new(model_of(p, rev, result)))
+                // A part's model needs only its revision; an assembly's,
+                // what it places too (its rebuild's key). A root of
+                // 100,000 occurrences isn't gathered again per request.
+                if is_leaf(self.project, part) && self.has_model(part) {
+                    self.store.budget.touch(part);
+                    return Ok(Arc::clone(&self.store.models[part].1));
+                }
+                self.result(part)?;
+                let (key, result) = &self.store.results[part];
+                if let Some((k, m)) = self.store.models.get(part)
+                    && k == key
+                {
+                    return Ok(Arc::clone(m));
+                }
+                let m = Arc::new(model_of(p, rev, result));
+                let at = (key.clone(), Arc::clone(&m));
+                self.store.models.insert(part.clone(), at);
+                Ok(m)
             }
             Rev::Label(l) => {
                 let pinned = match self.pins.get(&(part.clone(), l.clone())) {
@@ -790,7 +931,7 @@ impl Rebuild<'_> {
         Ok(match rev {
             Rev::Working => (
                 self.project.part(part)?.clone(),
-                self.store.results[part].1.clone(),
+                self.result(part)?.clone(),
                 None,
             ),
             Rev::Label(l) => {
@@ -2052,6 +2193,53 @@ pub(crate) mod tests {
         // A rebuild still gives them.
         let v = call(&mut s, "rebuild", json!({"part": "frame"})).unwrap();
         assert_eq!(v["parts"][0]["occurrences"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_budget_lets_parts_rebuilds_go_and_they_come_back_the_same() {
+        let (dir, s) = project();
+        place_in(
+            dir.path(),
+            "frame",
+            "b1",
+            "bolt",
+            json!("working"),
+            [0.0; 3],
+        );
+        let at = [0.1, 0.0, 0.0];
+        place_in(dir.path(), "frame", "p1", "plate", json!("working"), at);
+        // Nothing fits in a byte.
+        let mut s = s.with_budget(1);
+        s.refresh().unwrap();
+        let frame = id("frame");
+        let hash = s.rebuilt(&frame).unwrap().hash.clone();
+        let bolt = s.rebuilt(&id("bolt")).unwrap().hash.clone();
+        s.trim();
+        let st = s.budget_status();
+        assert_eq!(st["parts_held"], 0, "{st}");
+        assert!(st["evictions"].as_u64().unwrap() >= 2, "{st}");
+        // What the frame shows is kept however small the budget, and said.
+        assert_eq!(st["code"], "memory_budget_too_small", "{st}");
+        assert!(st["held_bytes"].as_u64().unwrap() > 0, "{st}");
+        // The frame answers from its parts' models: nothing comes back.
+        assert_eq!(s.rebuilt(&frame).unwrap().hash, hash);
+        assert_eq!(s.budget_status()["parts_held"], 0);
+        assert_eq!(
+            s.summary(&id("bolt")).map(|(h, f)| (h.to_owned(), f)),
+            Some((bolt.clone(), 0))
+        );
+        // A part asked for comes back, the same bits, and stays until the
+        // request answers.
+        assert_eq!(s.rebuilt(&id("bolt")).unwrap().hash, bolt);
+        assert_eq!(s.budget_status()["parts_held"], 1);
+        s.trim();
+        assert_eq!(s.budget_status()["parts_held"], 0);
+        // A budget that fits it all lets nothing go.
+        let mut s = Session::open(dir.path()).unwrap().with_budget(1 << 30);
+        s.rebuilt(&frame).unwrap();
+        s.trim();
+        assert_eq!(s.budget_status()["parts_held"], 2);
+        assert_eq!(s.budget_status()["evictions"], 0);
     }
 
     #[test]

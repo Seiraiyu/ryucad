@@ -167,6 +167,14 @@ const KEYS: &[Key] = &[
         about: "how often a watched daemon checks the files",
     },
     Key {
+        name: "session.max_memory",
+        scope: Scope::User,
+        rule: Rule::Int(1 << 29, 1 << 44),
+        default: || json!(crate::budget::default_max()),
+        about: "how many bytes of parts' rebuilds and display meshes a daemon holds between \
+                requests (a quarter of the machine's memory, at most 8 GiB, by default)",
+    },
+    Key {
         name: "daemon.rescan_s",
         scope: Scope::User,
         rule: Rule::Int(5, 3600),

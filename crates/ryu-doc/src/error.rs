@@ -386,6 +386,10 @@ pub enum Code {
     /// (a filesystem without them, a watch limit reached), so it checks
     /// every file on every request. Why is in the details.
     WatchUnavailable,
+    /// A warning: what a daemon must hold in memory (the bodies its
+    /// assemblies show, and display meshes) is more than
+    /// `session.max_memory`, so it holds more than its budget.
+    MemoryBudgetTooSmall,
 }
 
 impl Code {
@@ -494,6 +498,10 @@ mod tests {
         assert_eq!(Code::LibraryNested.exit_code(), 1);
         assert_eq!(Code::PinWithoutPad.exit_code(), 1);
         assert_eq!(json!(Code::WatchUnavailable), json!("watch_unavailable"));
+        assert_eq!(
+            json!(Code::MemoryBudgetTooSmall),
+            json!("memory_budget_too_small")
+        );
     }
 
     #[test]

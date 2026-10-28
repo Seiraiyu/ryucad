@@ -174,6 +174,9 @@ fn the_benchmark_project_measured() {
         rayon::current_num_threads(),
     );
     say(&format!("generated in {:.1} s", t.elapsed().as_secs_f64()));
+    // Design 192's bar: the daemon within a budget of 4 GiB.
+    let max = (4u64 << 30).to_string();
+    run.ok(&["config", "set", "session.max_memory", &max, "--no-daemon"]);
     // A daemon over an empty cache builds everything.
     let (cold, first) = run.ok(&["rebuild", "root"]);
     say(&format!(
@@ -253,5 +256,10 @@ fn the_benchmark_project_measured() {
     let (again, _) = run.ok(&["interference", "root"]);
     say(&format!("interference after one move: {again:.1} s"));
     say(&format!("peak memory: {:.0} MiB", run.peak_mib()));
+    let (_, status) = run.ok(&["daemon", "status"]);
+    say(&format!(
+        "the daemon's session: {}",
+        status["result"]["session"]
+    ));
     run.ok(&["daemon", "stop"]);
 }
