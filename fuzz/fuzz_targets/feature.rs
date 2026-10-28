@@ -19,9 +19,10 @@
 //! never an internal one, and every occurrence must be finite and sound.
 //! A mate or an instance pattern is built the same way, after instances
 //! `i1` (free) and `i2` (fixed) of `fz`: what it solves and places must be
-//! finite and sound too. Each assembly's interference is found, and
-//! found again with nothing cached: the same report, every volume and
-//! box finite. Any panic is a bug.
+//! finite and sound too. Each assembly's interference and clearances are
+//! found, and found again with nothing cached: the same reports, every
+//! volume, box and distance finite, and a pair sharing a volume 0 apart.
+//! Any panic is a bug.
 
 #![no_main]
 
@@ -263,6 +264,26 @@ fn assemble(written: &str, after_instances: bool) {
         let v = found(&mut cache);
         assert_eq!(found(&mut cache), v, "from what it cached");
         assert_eq!(found(&mut Default::default()), v, "from nothing");
+        // Clearances likewise, each a finite distance with its bound, and
+        // a pair interference finds sharing a volume at 0 when measured.
+        let unit = ryucad::units::Unit::Mm;
+        let near = |cache: &mut ryucad::clearance::Cache| {
+            ryucad::clearance::find(&part, &model, &[], None, unit, cache).expect("clearance")
+        };
+        let mut cache = ryucad::clearance::Cache::default();
+        let c = near(&mut cache);
+        assert_eq!(near(&mut cache), c, "from what it cached");
+        assert_eq!(near(&mut Default::default()), c, "from nothing");
+        for x in c["clearances"].as_array().unwrap() {
+            let d = &x["distance"];
+            assert!(d["m"].as_f64().is_some_and(|m| m.is_finite() && m >= 0.0), "{x}");
+            let shared = v["interferences"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|i| i["a"] == x["a"] && i["b"] == x["b"]);
+            assert!(!shared || d["m"] == 0.0, "an interference {x} apart");
+        }
         for i in v["interferences"].as_array().unwrap() {
             assert!(i["volume_m3"].as_f64().is_some_and(f64::is_finite), "{i}");
             for k in ["min_m", "max_m"] {

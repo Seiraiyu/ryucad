@@ -2076,6 +2076,105 @@ fn general_booleans_section(golden: &mut Golden) {
     hash_body(&mut s, &healed, &journal);
 }
 
+/// Measurement: entity properties, distances, angles and mass
+/// properties, value and bound bits, on one thread and four.
+fn measure_section(golden: &mut Golden) {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::measure::{
+        DistanceOptions, Entity, MassOptions, Properties, Value, angle, distance, mass, properties,
+    };
+    let mut s = golden.section("measure");
+    let value = |s: &mut ryukei_testkit::Section<'_>, v: Value| {
+        s.f64(v.value());
+        s.f64(v.bound());
+    };
+    let at = |x: f64, y: f64, z: f64| Rigid::translation(Vector3::new(x, y, z));
+    let plate = primitive::block(OpKey(1), 4.0, 4.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let rod = primitive::cylinder(OpKey(2), 0.5, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let holed = boolean(
+        OpKey(3),
+        BooleanOp::Subtract,
+        &plate,
+        &[Tool {
+            key: ToolKey(1),
+            body: &rod,
+            place: at(2.0, 2.0, -1.0),
+        }],
+    )
+    .unwrap()
+    .0;
+    let ball = primitive::sphere(OpKey(4), 0.5, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let work = || {
+        let mut out: Vec<Value> = Vec::new();
+        let mut points: Vec<Point3> = Vec::new();
+        for b in [&plate, &rod, &holed, &ball] {
+            let m = mass(b, 7850.0, &MassOptions::default()).unwrap();
+            out.extend([m.volume, m.area, m.mass]);
+            points.push(m.centre);
+            out.push(Value::Bounded {
+                value: m.centre_bound,
+                bound: m.inertia_bound,
+            });
+            for row in m.inertia {
+                out.extend(row.map(Value::Exact));
+            }
+            out.extend(m.principal_moments.map(Value::Exact));
+        }
+        for e in holed.edges() {
+            if let Properties::Edge { length, .. } = properties(&holed, Entity::Edge(e)).unwrap() {
+                out.push(length);
+            }
+        }
+        for f in rod.faces() {
+            if let Properties::Face { area, .. } = properties(&rod, Entity::Face(f)).unwrap() {
+                out.push(area);
+            }
+        }
+        for place in [at(1.3, 0.2, 0.4), at(0.6, 0.6, 1.4)] {
+            let d = distance(
+                (&ball, Entity::Body, &Rigid::IDENTITY),
+                (&holed, Entity::Body, &place),
+                &DistanceOptions::default(),
+            )
+            .unwrap();
+            out.push(d.distance);
+            points.extend(d.points);
+        }
+        let f = holed.faces().next().unwrap();
+        let g = holed.faces().nth(1).unwrap();
+        let turn = Rigid::rotation(Vector3::new(0.0, 0.0, 1.0).normalize().unwrap(), 0.7);
+        if let Ok(a) = angle(
+            (&holed, Entity::Face(f), &Rigid::IDENTITY),
+            (&holed, Entity::Face(g), &turn),
+        ) {
+            out.extend([a.angle, a.supplement]);
+        }
+        (out, points)
+    };
+    let pool = |n| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .unwrap()
+    };
+    let one = pool(1).install(work);
+    assert_eq!(one, pool(4).install(work));
+    for v in one.0 {
+        value(&mut s, v);
+    }
+    for p in one.1 {
+        for x in p.to_array() {
+            s.f64(x);
+        }
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -2110,5 +2209,6 @@ fn determinism() {
     mirror_section(&mut golden);
     codec_section(&mut golden);
     general_booleans_section(&mut golden);
+    measure_section(&mut golden);
     golden.finish();
 }

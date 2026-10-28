@@ -1,6 +1,7 @@
 //! The window: a thin view over `core`.
 
 pub mod app;
+pub mod bom;
 pub mod dialogs;
 pub mod doctor;
 pub mod menu;
