@@ -1695,6 +1695,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-part21"
+version = "0.0.0"
+dependencies = [
+ "rayon",
+]
+
+[[package]]
 name = "ryu-session"
 version = "0.0.0"
 dependencies = [
@@ -1817,6 +1824,7 @@ name = "ryustep"
 version = "0.0.0"
 dependencies = [
  "rayon",
+ "ryu-part21",
  "ryukei",
 ]
 

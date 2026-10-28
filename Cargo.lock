@@ -4247,6 +4247,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-part21"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "rayon",
+]
+
+[[package]]
 name = "ryu-session"
 version = "0.0.0"
 dependencies = [
@@ -4324,6 +4332,24 @@ dependencies = [
  "ryu-doc",
  "ryukei",
  "ryusketch",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "ryueda"
+version = "0.0.0"
+dependencies = [
+ "assert_cmd",
+ "blake3",
+ "clap",
+ "getrandom 0.3.4",
+ "mimalloc",
+ "rayon",
+ "ryu-doc",
+ "ryu-part21",
+ "ryu-session",
  "serde",
  "serde_json",
  "tempfile",
@@ -4408,6 +4434,7 @@ version = "0.0.0"
 dependencies = [
  "proptest",
  "rayon",
+ "ryu-part21",
  "ryukei",
  "ryukei-testkit",
 ]
