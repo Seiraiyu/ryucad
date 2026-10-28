@@ -731,7 +731,7 @@ fn dispatch(
         // A render's answer is bytes: `answer_live` handles it.
         Request::Render { .. } => Err(Error::new(Code::Internal, "render answers with bytes")),
         Request::Export { .. } => Err(Error::new(Code::Internal, "export answers with bytes")),
-        Request::Doctor {} => crate::doctor::report(session.root()),
+        Request::Doctor {} => crate::doctor::report_in(session),
         Request::DoctorRepair { repairs, params } => {
             let params = crate::doctor::Params::from_json(&params)?;
             let r = crate::doctor::repair(session.root(), &repairs, &params)?;
@@ -3088,13 +3088,33 @@ fn feature_move(
     Ok(json!({"features": list, "revision": revision}))
 }
 
-fn feature_list(session: &Session, part: &str) -> Result<Value> {
-    let p = session.project().part(&part_id(part)?)?;
+/// `feature.list`: each feature as listed, `ok` when it builds (issue
+/// #123: a file that loads may still fail to build), with the rebuild's
+/// error where it doesn't and `blocked` where only a feature it needs
+/// failed. A part that can't be rebuilt at all lists what loads.
+fn feature_list(session: &mut Session, part: &str) -> Result<Value> {
+    let pid = part_id(part)?;
+    let built: BTreeMap<Id, std::result::Result<(), Error>> = match session.rebuilt(&pid) {
+        Ok(r) => r
+            .features
+            .iter()
+            .map(|(id, o)| (id.clone(), o.as_ref().map(|_| ()).map_err(Error::clone)))
+            .collect(),
+        Err(_) => BTreeMap::new(),
+    };
+    let p = session.project().part(&pid)?;
     let features: Vec<Value> = order(p)?
         .iter()
         .map(|id| match feature(p, id) {
             Ok(f) => {
                 let mut v = json!({"id": id, "type": f.type_name(), "ok": true});
+                if let Some(Err(e)) = built.get(id) {
+                    v["ok"] = json!(false);
+                    v["error"] = json!(e);
+                    if e.code == Code::DependencyFailed {
+                        v["blocked"] = json!(true);
+                    }
+                }
                 let uses = crate::graph::inputs(f);
                 if !uses.is_empty() {
                     v["uses"] = json!(uses);
@@ -5039,6 +5059,50 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::InvalidJson);
+    }
+
+    #[test]
+    fn features_that_fail_to_build_are_listed_failed() {
+        // Issue #123: a file that loads but doesn't build was listed ok.
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        let unit = |id: &str, x: i32| {
+            json!({"part": "p", "type": "box", "id": id, "params": {"x": 10, "y": 10, "z": 10},
+                   "placement": {"origin": [x, 0, 0]}})
+        };
+        call(&mut s, "feature.add", unit("a", 0)).unwrap();
+        // A cut far from the box takes nothing: its file loads, but it
+        // fails to build.
+        let mut cut = unit("c", 100);
+        cut["operation"] = json!("cut");
+        call(&mut s, "feature.add", cut).unwrap();
+        // One after it on the same solid is blocked by it.
+        let mut d = unit("d", 5);
+        d["operation"] = json!("cut");
+        call(&mut s, "feature.add", d).unwrap();
+        let list = call(&mut s, "feature.list", json!({"part": "p"})).unwrap();
+        let f = &list["features"];
+        assert_eq!(f[0]["ok"], true);
+        assert_eq!(f[1]["ok"], false);
+        assert_eq!(f[1]["error"]["code"], "operation_no_effect");
+        assert!(f[1].get("blocked").is_none());
+        assert_eq!(f[2]["ok"], false);
+        assert_eq!(f[2]["blocked"], true);
+        // Moved onto the box, it builds.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "c", "placement": {"origin": [5, 5, 0]}}),
+        )
+        .unwrap();
+        let list = call(&mut s, "feature.list", json!({"part": "p"})).unwrap();
+        assert!(
+            list["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|f| f["ok"] == true)
+        );
     }
 
     #[test]

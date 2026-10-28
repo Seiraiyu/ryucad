@@ -317,8 +317,43 @@ fn classify(
     }
 }
 
+/// Where doctor rebuilds assemblies: the daemon's session, warm and
+/// current (issue #125: a fresh one rebuilt every assembly cold, twice,
+/// on every diagnosis), else one opened on first use and kept for the
+/// diagnosis and its repairs' planning.
+pub struct Rebuilds<'a> {
+    root: &'a Path,
+    given: Option<&'a mut crate::session::Session>,
+    own: Option<Option<crate::session::Session>>,
+}
+
+impl<'a> Rebuilds<'a> {
+    pub fn new(root: &'a Path, given: Option<&'a mut crate::session::Session>) -> Self {
+        Self {
+            root,
+            given,
+            own: None,
+        }
+    }
+
+    fn session(&mut self) -> Option<&mut crate::session::Session> {
+        if let Some(s) = self.given.as_deref_mut() {
+            return Some(s);
+        }
+        let root = self.root;
+        self.own
+            .get_or_insert_with(|| crate::session::Session::open(root).ok())
+            .as_mut()
+    }
+}
+
 /// Every issue in the project at `root`, in a fixed order.
 pub fn diagnose(root: &Path) -> Vec<Issue> {
+    diagnose_in(root, &mut Rebuilds::new(root, None))
+}
+
+/// [`diagnose`], rebuilding assemblies in `rebuilds`.
+fn diagnose_in(root: &Path, rebuilds: &mut Rebuilds) -> Vec<Issue> {
     let mut issues = Vec::new();
     if let Some(name) = cloud_folder(root) {
         issues.push(issue(
@@ -376,7 +411,7 @@ pub fn diagnose(root: &Path) -> Vec<Issue> {
     for part in &part_ids {
         diagnose_part(root, part, unit, &mut issues);
     }
-    diagnose_assemblies(root, &part_ids, &mut issues);
+    diagnose_assemblies(root, &part_ids, rebuilds, &mut issues);
     diagnose_imports(root, &part_ids, unit, &mut issues);
     diagnose_pdm(root, manifest.as_ref(), &part_ids, &mut issues);
     diagnose_releases(root, &mut issues);
@@ -481,7 +516,12 @@ fn diagnose_imports(root: &Path, parts: &[&str], unit: Unit, issues: &mut Vec<Is
 
 /// Each assembly whose stored poses don't hold where its mates do, with
 /// the instance files its repair writes.
-fn diagnose_assemblies(root: &Path, parts: &[&str], issues: &mut Vec<Issue>) {
+fn diagnose_assemblies(
+    root: &Path,
+    parts: &[&str],
+    rebuilds: &mut Rebuilds,
+    issues: &mut Vec<Issue>,
+) {
     let assembly = |part: &str| {
         matches!(read(root, &format!("parts/{part}/part.json")),
             Read::Json(v, _) if v["part_kind"] == "assembly")
@@ -490,11 +530,11 @@ fn diagnose_assemblies(root: &Path, parts: &[&str], issues: &mut Vec<Issue>) {
     if assemblies.is_empty() {
         return;
     }
-    let Ok(mut session) = crate::session::Session::open(root) else {
+    let Some(session) = rebuilds.session() else {
         return;
     };
     for part in assemblies {
-        let Some(writes) = stale_assembly(&mut session, part) else {
+        let Some(writes) = stale_assembly(session, part) else {
             continue;
         };
         let files: Vec<String> = writes.into_iter().map(|(rel, _)| rel).collect();
@@ -1197,7 +1237,13 @@ fn stem_of(rel: &str) -> &str {
 }
 
 /// The repairs for an issue, planned against the files as they are.
-fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<Vec<Repair>> {
+fn plan(
+    root: &Path,
+    i: &Issue,
+    repo: Option<&Repo>,
+    params: &Params,
+    rebuilds: &mut Rebuilds,
+) -> Result<Vec<Repair>> {
     // What `ryucad git install` sets up in the clone (the drivers, renames
     // off, the hooks), except a hooks folder the user chose, which ryucad
     // never writes to.
@@ -1447,9 +1493,9 @@ fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<
             }
         }
         "assembly_stale" => {
-            let writes = crate::session::Session::open(root)
-                .ok()
-                .and_then(|mut s| stale_assembly(&mut s, part_of(first)));
+            let writes = rebuilds
+                .session()
+                .and_then(|s| stale_assembly(s, part_of(first)));
             if let Some(writes) = writes {
                 out.push(Repair {
                     id: id("solve"),
@@ -1486,11 +1532,20 @@ fn plan(root: &Path, i: &Issue, repo: Option<&Repo>, params: &Params) -> Result<
 
 /// Every issue with its repairs.
 fn planned(root: &Path, params: &Params) -> Result<Vec<(Issue, Vec<Repair>)>> {
+    planned_in(root, params, &mut Rebuilds::new(root, None))
+}
+
+/// [`planned`], rebuilding assemblies in `rebuilds`.
+fn planned_in(
+    root: &Path,
+    params: &Params,
+    rebuilds: &mut Rebuilds,
+) -> Result<Vec<(Issue, Vec<Repair>)>> {
     let repo = Repo::open(root)?;
-    diagnose(root)
+    diagnose_in(root, rebuilds)
         .into_iter()
         .map(|i| {
-            let r = plan(root, &i, repo.as_ref(), params)?;
+            let r = plan(root, &i, repo.as_ref(), params, rebuilds)?;
             Ok((i, r))
         })
         .collect()
@@ -1517,6 +1572,18 @@ fn summary(issues: &[(Issue, Vec<Repair>)]) -> Value {
 /// `doctor`: every issue and how to repair it. Writes nothing.
 pub fn report(root: &Path) -> Result<Value> {
     Ok(summary(&planned(root, &Params::default())?))
+}
+
+/// [`report`] in a daemon: its session, current with the files, rebuilds
+/// assemblies from what it has already built.
+pub fn report_in(session: &mut crate::session::Session) -> Result<Value> {
+    let root = session.root().to_path_buf();
+    let mut rebuilds = Rebuilds::new(&root, Some(session));
+    Ok(summary(&planned_in(
+        &root,
+        &Params::default(),
+        &mut rebuilds,
+    )?))
 }
 
 /// `doctor.repair`: applies the named repairs, in order. Every one must be

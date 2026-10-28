@@ -2358,6 +2358,9 @@ mod doctor_tests {
         let (dir, mut s) = hinged();
         // Stale: the pin is stored 50 mm off where the hinge holds it.
         let r = call(&mut s, "doctor", json!({})).unwrap();
+        // The daemon's doctor rebuilds in its own session (issue #125), and
+        // finds what a fresh one does.
+        assert_eq!(r, crate::doctor::report(dir.path()).unwrap());
         let stale = issue(&r, "assembly_stale").expect("assembly_stale");
         assert_eq!(stale["severity"], "warning");
         assert_eq!(stale["files"], json!(["parts/frame/features/pin.json"]));
@@ -2413,6 +2416,24 @@ mod doctor_tests {
         assert_eq!(unsolved[0]["mates"], json!(["m1", "m2"]));
         assert_eq!(unsolved[0]["conflicting"], json!([["m1", "m2"]]));
         assert!(!findings.iter().any(|f| f["code"] == "feature_failed"));
+        // The tree places both instances, and says which mates fail
+        // (issue #123).
+        let t = call(&mut s, "assembly.tree", json!({"part": "frame"})).unwrap();
+        let failing: Vec<&Value> = t["failing"].as_array().unwrap().iter().collect();
+        assert_eq!(
+            failing.iter().map(|f| &f["id"]).collect::<Vec<_>>(),
+            [&json!("m1"), &json!("m2")]
+        );
+        assert_eq!(failing[0]["type"], "mate");
+        assert_eq!(failing[0]["error"]["code"], "assembly_unsolved");
+        let list = call(&mut s, "feature.list", json!({"part": "frame"})).unwrap();
+        let ok: Vec<(&Value, &Value)> = list["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| (&f["id"], &f["ok"]))
+            .collect();
+        assert!(ok.contains(&(&json!("m2"), &json!(false))));
     }
 }
 
