@@ -945,6 +945,28 @@ impl Model {
         vec![self.solid_of(key).unwrap_or_else(|| key.clone())]
     }
 
+    /// The bodies of the occurrences an occurrence reference names
+    /// (`<asm>/<path>`): every solid of every occurrence at that path or
+    /// under it. Nothing for any other reference, so a selection holding
+    /// one paints and frames what it places (a BOM line's occurrences).
+    pub fn occurrence_bodies(&self, reference: &str) -> Vec<BodyKey> {
+        let Some((asm, path)) = reference.split_once('/') else {
+            return Vec::new();
+        };
+        let Some(p) = self.parts.get(asm).filter(|p| p.assembly) else {
+            return Vec::new();
+        };
+        let reaches = |o: &Occurrence| o.path == path || o.path.starts_with(&format!("{path}/"));
+        p.solids
+            .iter()
+            .filter(|s| {
+                s.id.rsplit_once('/')
+                    .is_some_and(|(at, _)| p.occurrences.iter().any(|o| o.path == at && reaches(o)))
+            })
+            .map(|s| (asm.to_owned(), s.id.clone()))
+            .collect()
+    }
+
     /// The solid a feature shows in: its own, or the first the model
     /// shows of those it acts on.
     pub fn solid_of(&self, key: &BodyKey) -> Option<BodyKey> {
@@ -1083,6 +1105,14 @@ mod tests {
         assert_eq!(keys(&m, "s1"), ["s1/b1/shank", "s1/b2/shank"]);
         assert_eq!(keys(&m, "s1/b2"), ["s1/b2/shank"]);
         assert_eq!(keys(&m, "row"), ["row:1/s1/b1/shank"]);
+        // An occurrence reference reaches the same bodies, by whole steps
+        // only, and a face or a part reaches none.
+        let reached =
+            |r: &str| -> Vec<String> { m.occurrence_bodies(r).into_iter().map(|k| k.1).collect() };
+        assert_eq!(reached("top/s1"), ["s1/b1/shank", "s1/b2/shank"]);
+        assert_eq!(reached("top/row:1/s1/b1"), ["row:1/s1/b1/shank"]);
+        assert!(reached("top/row").is_empty());
+        assert!(reached("top/s1/b1/shank/0123").is_empty());
         // A part's feature frames the solid it shows in.
         m.apply_part(&json!({"part": "bolt", "revision": "r", "features": [
             {"id": "shank", "type": "cylinder", "ok": true, "hash": "1"}],
