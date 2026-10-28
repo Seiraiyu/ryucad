@@ -446,7 +446,9 @@ enum Command {
         /// The PNG to write.
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
-        /// front, back, left, right, top, bottom or iso.
+        /// A standard view (front, back, left, right, top, bottom, an edge or corner of the
+        /// cube such as front_top_right, iso, dimetric or trimetric), or a named view of the
+        /// part rendered.
         #[arg(long, conflicts_with_all = ["of", "eye"])]
         view: Option<String>,
         /// Use this participant's camera.
@@ -497,6 +499,9 @@ enum Command {
         /// (where `hide` goes), else the caller's.
         #[arg(long = "hidden", value_name = "REF")]
         hidden: Vec<String>,
+        /// Draw the origin's axes and planes.
+        #[arg(long)]
+        origin: bool,
     },
     /// What the merge (or cherry-pick, revert or rebase step) Git is in the
     /// middle of leaves to settle.
@@ -2132,6 +2137,7 @@ fn request(cmd: &Command) -> Option<Request> {
             frame,
             compare,
             hidden,
+            origin,
         } => Request::Render {
             part: part.clone(),
             camera: camera_arg(eye, target, up, fov, ortho),
@@ -2147,6 +2153,7 @@ fn request(cmd: &Command) -> Option<Request> {
             frame: frame.clone(),
             compare: compare.clone(),
             hidden: (!hidden.is_empty()).then(|| hidden.clone()),
+            origin: *origin,
         },
         Command::Highlight {
             entities,

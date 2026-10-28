@@ -121,6 +121,7 @@ pub fn answer_live(
             frame,
             compare,
             hidden,
+            origin,
         } => {
             // What the participant's window hides, else the one human's
             // (where an agent's `hide` went), else the caller's.
@@ -168,6 +169,7 @@ pub fn answer_live(
                 frame,
                 compare,
                 hidden,
+                origin,
             };
             render(session, target, shown, ask)
         }
@@ -4116,6 +4118,8 @@ struct RenderAsk {
     compare: Option<String>,
     /// What to leave out: occurrences and solids, at the leaves.
     hidden: std::collections::BTreeSet<String>,
+    /// Draw the origin's axes and planes.
+    origin: bool,
 }
 
 /// How a compare paints one rendered solid: wholly new when the other
@@ -4426,6 +4430,9 @@ fn render(
             }
         }
     }
+    if ask.origin {
+        g.add_origin();
+    }
     let camera = match (ask.camera, target, ask.view.as_deref()) {
         (Some(c), _, _) => c.resolve(session.project().manifest.default_unit)?,
         (None, Some((p, live)), _) => {
@@ -4435,6 +4442,14 @@ fn render(
                 Error::new(Code::InvalidParam, format!("participant {p} has no camera"))
                     .with("participant", p)
             })?
+        }
+        // A named view of the rendered part, as saved.
+        (None, None, Some(v)) if StandardView::named(v).is_none() => {
+            let part = match parts.as_slice() {
+                [one] => Some(one),
+                _ => None,
+            };
+            crate::views::named(session, part, v)?
         }
         (None, None, view) => {
             let view = view
@@ -7094,6 +7109,35 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::Usage);
+        // A render restores the named view too, and draws the origin.
+        let size = |v: Value| {
+            let mut v = v;
+            v["width"] = json!(320);
+            v["height"] = json!(240);
+            v
+        };
+        let named = render_pixels(dir.path(), s, size(json!({"view": "detail"})));
+        let s = Session::open(dir.path()).unwrap();
+        let again = render_pixels(dir.path(), s, size(json!({"camera": camera})));
+        assert_eq!(named, again);
+        let s = Session::open(dir.path()).unwrap();
+        let with_origin = render_pixels(
+            dir.path(),
+            s,
+            size(json!({"view": "detail", "origin": true})),
+        );
+        assert_ne!(with_origin, named);
+        let red = |px: &[[u8; 3]]| {
+            px.iter()
+                .filter(|p| p[0] > 150 && p[1] < 90 && p[2] < 90)
+                .count()
+        };
+        assert!(
+            red(&with_origin) > red(&named),
+            "the x axis is drawn red: {} against {}",
+            red(&with_origin),
+            red(&named)
+        );
     }
 
     #[test]

@@ -1007,7 +1007,8 @@ pub enum Request {
     },
     /// Draws a part (or the whole project) to a PNG, sent as bytes after
     /// the answer. The view is `camera`, a participant's camera, a standard
-    /// `view`, or iso framing the model. `rev` renders a Git revision;
+    /// `view` or a named view of the rendered part, or iso framing the
+    /// model. `origin` draws the origin's axes and planes. `rev` renders a Git revision;
     /// `compare` paints what changed since a revision and ghosts it;
     /// `frame` widens the framing to other revisions.
     #[serde(rename = "render")]
@@ -1053,6 +1054,9 @@ pub enum Request {
         /// hidden set by default, else the caller's.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hidden: Option<Vec<String>>,
+        /// Draw the origin's axes and planes (default false).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        origin: bool,
     },
     /// Diagnoses the project folder: every problem, with a stable code.
     #[serde(rename = "doctor")]
