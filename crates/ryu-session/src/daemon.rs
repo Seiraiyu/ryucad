@@ -202,13 +202,31 @@ fn stop<P: Serve>(state: &State<P>, why: &str) -> ! {
 }
 
 fn status<P: Serve>(state: &State<P>) -> Value {
-    json!({
+    let mut v = json!({
         "pid": std::process::id(),
         "root": state.root,
         "uptime_s": state.started.elapsed().as_secs(),
         "idle_timeout_s": state.idle.as_secs(),
         "version": P::version(),
-    })
+    });
+    // What the session says of itself, unless a request holds it: status
+    // never waits.
+    let core = match state.core.try_lock() {
+        Ok(core) => Some(core),
+        Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    };
+    match core.as_ref().map(|c| c.session.as_ref()) {
+        Some(Some(s)) => {
+            let extra = P::status(s);
+            if !extra.is_null() {
+                v["session"] = extra;
+            }
+        }
+        Some(None) => {}
+        None => v["busy"] = json!(true),
+    }
+    v
 }
 
 /// A client connection. Answers and notifications are written whole under

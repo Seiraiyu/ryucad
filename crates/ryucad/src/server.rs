@@ -924,7 +924,8 @@ pub fn handle_safely(
     root: &Path,
     req: Request,
 ) -> Result<Answer> {
-    guarded(slot, root, |s| answer_live(s, live, me, req))
+    let watch = live.is_some();
+    guarded(slot, root, watch, |s| answer_live(s, live, me, req))
 }
 
 /// The display meshes a `mesh.get` of the working files needs that the
@@ -1026,6 +1027,7 @@ fn mesh_budget() -> usize {
 fn guarded<T>(
     slot: &mut Option<Session>,
     root: &Path,
+    watch: bool,
     f: impl FnOnce(&mut Session) -> Result<T>,
 ) -> Result<T> {
     let session = match slot {
@@ -1036,7 +1038,16 @@ fn guarded<T>(
             if let Some(d) = &disk {
                 d.trim_in_background();
             }
-            slot.insert(Session::open(root)?.with_disk(disk))
+            let mut s = Session::open(root)?.with_disk(disk);
+            // A daemon's session lives on: file events narrow its checks,
+            // its markers beside its log.
+            if watch {
+                let markers = crate::endpoint::Endpoint::for_project(root)?
+                    .log
+                    .with_extension("watch");
+                s = s.with_watch(&markers);
+            }
+            slot.insert(s)
         }
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(session))) {
@@ -3647,7 +3658,7 @@ pub fn tick(slot: &mut Option<Session>, live: &mut Live, root: &Path) {
 /// Brings the session and what subscribers know up to date with the
 /// files.
 pub fn settle(slot: &mut Option<Session>, live: &mut Live, root: &Path) {
-    let _ = guarded(slot, root, |s| {
+    let _ = guarded(slot, root, true, |s| {
         let before = live.snapshot();
         let external = s.refresh_changes()?;
         if !external.is_empty() {
@@ -6602,7 +6613,7 @@ pub(crate) mod tests {
         assert!(slot.is_some());
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        let e = guarded::<Value>(&mut slot, dir.path(), |_| panic!("boom")).unwrap_err();
+        let e = guarded::<Value>(&mut slot, dir.path(), false, |_| panic!("boom")).unwrap_err();
         std::panic::set_hook(prev);
         assert_eq!(
             (e.code, e.details["panic"].as_str()),

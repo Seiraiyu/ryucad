@@ -8,6 +8,12 @@
 //! so the activity log's snapshots cost no reading. Rebuilds are cached by
 //! part revision, so only parts whose files changed are rebuilt.
 //!
+//! A daemon's session watches the folder ([`Session::with_watch`]): file
+//! events name what may have changed, and only those paths are checked,
+//! with every file checked at the start, when events overflow or fail,
+//! and every `daemon.rescan_s` as a safety net. A folder that can't be
+//! watched is checked whole on every request, as before.
+//!
 //! A request may name a Git revision instead of the working files: the
 //! session then answers from a frozen session over that revision's files,
 //! one of the few it keeps, which starts from the working files' results,
@@ -20,12 +26,18 @@ use crate::doc::id::Id;
 use crate::doc::project::{Part, Project};
 use crate::error::{Error, Result};
 use crate::rebuild::PartResult;
-use ryu_session::fresh::{Stamps, read_dir};
+use ryu_session::fresh::{Changes, Stamps, Watch, WatchStats, read_dir};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// Set, a daemon doesn't watch its folder and checks every file on every
+/// request (tests compare both ways; a filesystem whose events lie can be
+/// told).
+pub const NO_WATCH_VAR: &str = "RYUCAD_NO_WATCH";
 
 /// How many revisions a session keeps loaded beside the working files.
 pub const REVISIONS: usize = 4;
@@ -69,6 +81,18 @@ pub struct Session {
     pub(crate) release_results: BTreeMap<String, BTreeMap<String, String>>,
     /// Parts read at commits for BOMs and where-used, by commit and part.
     pub(crate) structure: ryupdm::structure::Cache,
+    /// A daemon's watch of the folder: `None` checks every file on
+    /// every request.
+    watching: Option<Watching>,
+}
+
+/// A daemon's watch of its project, or why it has none, and what it
+/// counted.
+struct Watching {
+    watch: std::result::Result<Watch, String>,
+    last_full: Instant,
+    every: Duration,
+    stats: WatchStats,
 }
 
 impl Session {
@@ -90,9 +114,50 @@ impl Session {
             releases: None,
             release_results: BTreeMap::new(),
             structure: ryupdm::structure::Cache::new(),
+            watching: None,
         };
         s.scan()?;
         Ok(s)
+    }
+
+    /// The session, watching its folder for file events, with its markers
+    /// in `markers` (outside the project): what a daemon's session does.
+    /// A folder that can't be watched is checked whole on every request,
+    /// and the reason (`watch_unavailable`) is logged and given in
+    /// `daemon status`.
+    pub fn with_watch(self, markers: &Path) -> Session {
+        let watch = match std::env::var_os(NO_WATCH_VAR) {
+            Some(_) => Err(format!("{NO_WATCH_VAR} is set")),
+            None => Watch::start(self.root(), markers, tracked),
+        };
+        self.watched(watch)
+    }
+
+    /// The session with `watch`, or why it has none.
+    fn watched(mut self, watch: std::result::Result<Watch, String>) -> Session {
+        if let Err(why) = &watch {
+            eprintln!(
+                "ryucad: watch_unavailable: can't watch {} ({why}); checking every file on \
+                 every request",
+                self.root().display()
+            );
+        }
+        let every = crate::config::user("daemon.rescan_s")
+            .as_u64()
+            .map_or(ryu_session::fresh::RESCAN, Duration::from_secs);
+        self.watching = Some(Watching {
+            watch,
+            last_full: Instant::now(),
+            every,
+            stats: WatchStats::default(),
+        });
+        self
+    }
+
+    /// The watch's state for `daemon status`, if this session watches.
+    pub fn watch_status(&self) -> Option<Value> {
+        let w = self.watching.as_ref()?;
+        Some(w.stats.to_json(w.watch.as_ref().err().map(String::as_str)))
     }
 
     /// The session with `disk` beneath its caches: results it doesn't
@@ -136,6 +201,7 @@ impl Session {
             releases: None,
             release_results: BTreeMap::new(),
             structure: from.structure.clone(),
+            watching: None,
         })
     }
 
@@ -617,14 +683,75 @@ impl Session {
         }
     }
 
-    /// Checks every file against its stamp, reading only those whose size
-    /// or time moved or whose time is too recent to trust. Returns what
+    /// Checks the files against their stamps, reading only those whose
+    /// size or time moved or whose time is too recent to trust: those file
+    /// events named when the session watches (every file when they can't
+    /// say, and every `daemon.rescan_s`), else every file. Returns what
     /// changed, sorted.
     fn scan(&mut self) -> Result<Vec<(String, &'static str)>> {
-        let files = listed(self.root())?;
         let root = self.project.root.clone();
-        self.stamps.scan(&root, files)
+        let Some(Watching {
+            watch: Ok(watch),
+            last_full,
+            every,
+            stats,
+        }) = &mut self.watching
+        else {
+            return self.stamps.scan(&root, listed(&root)?);
+        };
+        let named = match watch.changes() {
+            Changes::All(why) => {
+                stats.full += 1;
+                stats.last_full = Some(why);
+                *last_full = Instant::now();
+                return self.stamps.scan(&root, listed(&root)?);
+            }
+            Changes::Paths(p) => p,
+        };
+        stats.narrowed += 1;
+        let mut files = Vec::new();
+        let mut under = Vec::new();
+        for rel in &named {
+            files.extend(listed_at(&root, rel)?);
+            under.push(rel.split('/').fold(root.clone(), |p, s| p.join(s)));
+        }
+        let mut changes = self.stamps.scan_under(&root, files, &under)?;
+        if last_full.elapsed() >= *every {
+            // The safety net: what events missed, which a platform whose
+            // events lie would show here, not as stale answers.
+            *last_full = Instant::now();
+            stats.full += 1;
+            stats.last_full = Some("the time came to check every file");
+            let missed = self.stamps.scan(&root, listed(&root)?)?;
+            if !missed.is_empty() {
+                if stats.missed == 0 {
+                    eprintln!(
+                        "ryucad: file events missed {} change(s) in {}, first {}; a full \
+                         check found them",
+                        missed.len(),
+                        root.display(),
+                        missed[0].0
+                    );
+                }
+                stats.missed += missed.len() as u64;
+                changes.extend(missed);
+                changes.sort();
+                changes.dedup();
+            }
+        }
+        Ok(changes)
     }
+}
+
+/// Whether an event's path (relative, with `/`) can matter to a project's
+/// state: the root files, and anything under `parts/`, `releases/` and
+/// `imports/` ([`listed`] decides which files there do).
+fn tracked(rel: &str) -> bool {
+    let first = rel.split('/').next().unwrap_or_default();
+    crate::doc::project::ROOT_FILES.contains(&rel)
+        || first == "parts"
+        || first == crate::doc::project::RELEASES
+        || first == crate::doc::project::IMPORTS
 }
 
 /// The project's folders as they are on disk, and its files' bytes as
@@ -723,26 +850,85 @@ fn listed(root: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
             out.push((path, m));
         }
     }
-    for (part, m) in read_dir(&root.join("parts"))? {
-        if m.is_dir() {
-            for (entry, m) in read_dir(&part)? {
-                if m.is_dir() {
-                    out.extend(read_dir(&entry)?.into_iter().filter(|(_, m)| m.is_file()));
-                } else if m.is_file() {
-                    out.push((entry, m));
-                }
-            }
-        }
-    }
-    let releases = root.join(crate::doc::project::RELEASES);
-    for (part, m) in read_dir(&releases)? {
-        if m.is_dir() {
-            out.extend(read_dir(&part)?.into_iter().filter(|(_, m)| m.is_file()));
-        }
-    }
-    let imports = root.join(crate::doc::project::IMPORTS);
-    out.extend(read_dir(&imports)?.into_iter().filter(|(_, m)| m.is_file()));
+    out.extend(parts_in(&root.join("parts"))?);
+    out.extend(releases_in(&root.join(crate::doc::project::RELEASES))?);
+    out.extend(files_in(&root.join(crate::doc::project::IMPORTS))?);
     Ok(out)
+}
+
+/// The files directly in `dir`.
+fn files_in(dir: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
+    Ok(read_dir(dir)?
+        .into_iter()
+        .filter(|(_, m)| m.is_file())
+        .collect())
+}
+
+/// The files of every part in `parts/`.
+fn parts_in(dir: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
+    let mut out = Vec::new();
+    for (part, m) in read_dir(dir)? {
+        if m.is_dir() {
+            out.extend(part_in(&part)?);
+        }
+    }
+    Ok(out)
+}
+
+/// A part's files: those in its folder and in the folders in it.
+fn part_in(dir: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
+    let mut out = Vec::new();
+    for (entry, m) in read_dir(dir)? {
+        if m.is_dir() {
+            out.extend(files_in(&entry)?);
+        } else if m.is_file() {
+            out.push((entry, m));
+        }
+    }
+    Ok(out)
+}
+
+/// The release records in `releases/`, a folder per part.
+fn releases_in(dir: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
+    let mut out = Vec::new();
+    for (part, m) in read_dir(dir)? {
+        if m.is_dir() {
+            out.extend(files_in(&part)?);
+        }
+    }
+    Ok(out)
+}
+
+/// The files [`listed`] gives at or under `rel` (relative, with `/`: a
+/// path a file event named, a file or a folder, there or gone).
+fn listed_at(root: &Path, rel: &str) -> Result<Vec<(PathBuf, fs::Metadata)>> {
+    use crate::doc::project::{IMPORTS, RELEASES, ROOT_FILES};
+    let steps: Vec<&str> = rel.split('/').collect();
+    let path = steps.iter().fold(root.to_path_buf(), |p, s| p.join(s));
+    let meta = fs::metadata(&path).ok();
+    let (file, dir) = (
+        meta.as_ref().is_some_and(fs::Metadata::is_file),
+        meta.as_ref().is_some_and(fs::Metadata::is_dir),
+    );
+    let one = || {
+        Ok(meta
+            .clone()
+            .map(|m| vec![(path.clone(), m)])
+            .unwrap_or_default())
+    };
+    match steps.as_slice() {
+        [name] if ROOT_FILES.contains(name) && file => one(),
+        ["parts"] => parts_in(&path),
+        ["parts", _] if dir => part_in(&path),
+        ["parts", _, _] if dir => files_in(&path),
+        ["parts", _, _] | ["parts", _, _, _] if file => one(),
+        [r] if *r == RELEASES => releases_in(&path),
+        [r, _] if *r == RELEASES && dir => files_in(&path),
+        [r, _, _] if *r == RELEASES && file => one(),
+        [i] if *i == IMPORTS => files_in(&path),
+        [i, _] if *i == IMPORTS && file => one(),
+        _ => Ok(Vec::new()),
+    }
 }
 
 #[cfg(test)]
@@ -825,39 +1011,88 @@ mod tests {
         assert!(!s.refresh().unwrap());
     }
 
+    /// Changes every kind of file a project has, and some it doesn't, and
+    /// what a session should say changed.
+    fn change_everything(root: &Path) -> Vec<(String, &'static str)> {
+        write_json(&feature_path(root, &id("p"), &id("a")), &sphere("2 mm")).unwrap();
+        write_json(&feature_path(root, &id("p"), &id("b")), &sphere("1 mm")).unwrap();
+        fs::remove_file(root.join("parts/p/part.json")).unwrap();
+        fs::write(root.join("ryupdm.json"), "{}").unwrap();
+        fs::write(root.join("parts/p/properties.json"), "{}").unwrap();
+        // Release records, two levels down; nothing else under releases/.
+        fs::create_dir_all(root.join("releases/p/deeper")).unwrap();
+        fs::write(root.join("releases/p/A.json"), "{}").unwrap();
+        fs::write(root.join("releases/p/deeper/x.json"), "{}").unwrap();
+        fs::write(root.join("releases/top.json"), "{}").unwrap();
+        fs::write(root.join("notes.txt"), "not the project's").unwrap();
+        vec![
+            ("parts/p/features/a.json".to_owned(), "modified"),
+            ("parts/p/features/b.json".to_owned(), "created"),
+            ("parts/p/part.json".to_owned(), "deleted"),
+            ("parts/p/properties.json".to_owned(), "created"),
+            ("releases/p/A.json".to_owned(), "created"),
+            ("ryupdm.json".to_owned(), "created"),
+        ]
+    }
+
+    #[test]
+    fn a_watched_session_sees_what_a_scan_does() {
+        let dir = project();
+        let marks = tempfile::tempdir().unwrap();
+        let mut s = Session::open(dir.path())
+            .unwrap()
+            .with_watch(&marks.path().join("m"));
+        // The first check is whole, as the watch just started.
+        assert!(s.refresh_changes().unwrap().is_empty());
+        let want = change_everything(dir.path());
+        assert_eq!(s.refresh_changes().unwrap(), want);
+        let path = feature_path(dir.path(), &id("p"), &id("a"));
+        for k in 0..50 {
+            write_json(&path, &sphere(&format!("{} mm", 3 + k))).unwrap();
+            assert_eq!(
+                s.refresh_changes().unwrap(),
+                [("parts/p/features/a.json".to_owned(), "modified")],
+                "{k}"
+            );
+            assert_eq!(radius(&mut s), (3 + k) as f64 * 1e-3);
+        }
+        // A part folder gone and back, as a checkout swaps it.
+        let part = dir.path().join("parts/p");
+        let kept = tempfile::tempdir().unwrap();
+        fs::rename(&part, kept.path().join("p")).unwrap();
+        let gone = s.refresh_changes().unwrap();
+        assert!(gone.iter().all(|(_, c)| *c == "deleted"), "{gone:?}");
+        fs::rename(kept.path().join("p"), &part).unwrap();
+        let back = s.refresh_changes().unwrap();
+        assert_eq!(back.len(), gone.len(), "{back:?}");
+        let w = s.watch_status().unwrap();
+        assert_eq!(
+            (w["watching"].clone(), w["full_checks"].clone()),
+            (json!(true), json!(1))
+        );
+        assert_eq!(w["missed"], 0);
+        assert!(w["narrowed_checks"].as_u64().unwrap() >= 53, "{w}");
+    }
+
+    #[test]
+    fn a_session_told_not_to_watch_checks_every_file() {
+        let dir = project();
+        let mut s = Session::open(dir.path())
+            .unwrap()
+            .watched(Err(format!("{NO_WATCH_VAR} is set")));
+        let want = change_everything(dir.path());
+        assert_eq!(s.refresh_changes().unwrap(), want);
+        let w = s.watch_status().unwrap();
+        assert_eq!(w["watching"], false);
+        assert_eq!(w["unavailable"], "RYUCAD_NO_WATCH is set");
+    }
+
     #[test]
     fn says_which_files_changed() {
         let dir = project();
         let mut s = Session::open(dir.path()).unwrap();
-        write_json(
-            &feature_path(dir.path(), &id("p"), &id("a")),
-            &sphere("2 mm"),
-        )
-        .unwrap();
-        write_json(
-            &feature_path(dir.path(), &id("p"), &id("b")),
-            &sphere("1 mm"),
-        )
-        .unwrap();
-        fs::remove_file(dir.path().join("parts/p/part.json")).unwrap();
-        fs::write(dir.path().join("ryupdm.json"), "{}").unwrap();
-        fs::write(dir.path().join("parts/p/properties.json"), "{}").unwrap();
-        // Release records, two levels down; nothing else under releases/.
-        fs::create_dir_all(dir.path().join("releases/p/deeper")).unwrap();
-        fs::write(dir.path().join("releases/p/A.json"), "{}").unwrap();
-        fs::write(dir.path().join("releases/p/deeper/x.json"), "{}").unwrap();
-        fs::write(dir.path().join("releases/top.json"), "{}").unwrap();
-        assert_eq!(
-            s.refresh_changes().unwrap(),
-            [
-                ("parts/p/features/a.json".to_owned(), "modified"),
-                ("parts/p/features/b.json".to_owned(), "created"),
-                ("parts/p/part.json".to_owned(), "deleted"),
-                ("parts/p/properties.json".to_owned(), "created"),
-                ("releases/p/A.json".to_owned(), "created"),
-                ("ryupdm.json".to_owned(), "created"),
-            ]
-        );
+        let want = change_everything(dir.path());
+        assert_eq!(s.refresh_changes().unwrap(), want);
         assert!(s.snapshot().contains_key("releases/p/A.json"));
         // Read in place, the session lists and reads as its snapshot does.
         use crate::doc::source::Source;

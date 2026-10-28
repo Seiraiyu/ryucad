@@ -146,6 +146,13 @@ const KEYS: &[Key] = &[
         about: "how often a watched daemon checks the files",
     },
     Key {
+        name: "daemon.rescan_s",
+        scope: Scope::User,
+        rule: Rule::Int(5, 3600),
+        default: || json!(60),
+        about: "how often a daemon checks every file, though file events say what changed",
+    },
+    Key {
         name: "review.url",
         scope: Scope::User,
         rule: Rule::Url,

@@ -263,6 +263,10 @@ pub enum Code {
     /// (`not_an_entity`, `unsupported`, `uncertain`) and the entities are
     /// in the details.
     MeasureFailed,
+    /// A warning: a daemon can't watch its project folder for file events
+    /// (a filesystem without them, a watch limit reached), so it checks
+    /// every file on every request. Why is in the details.
+    WatchUnavailable,
 }
 
 impl Code {
@@ -344,6 +348,7 @@ mod tests {
         assert_eq!(json!(Code::BomItemDuplicate), json!("bom_item_duplicate"));
         assert_eq!(json!(Code::BomItemUnused), json!("bom_item_unused"));
         assert_eq!(json!(Code::MeasureFailed), json!("measure_failed"));
+        assert_eq!(json!(Code::WatchUnavailable), json!("watch_unavailable"));
     }
 
     #[test]

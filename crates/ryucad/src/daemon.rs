@@ -76,6 +76,10 @@ impl ryu_session::Serve for Cad {
         crate::server::prepare(session, req)
     }
 
+    fn status(session: &Session) -> Value {
+        serde_json::json!({ "watch": session.watch_status() })
+    }
+
     fn settle(session: &mut Option<Session>, live: &mut Live, root: &Path) {
         crate::server::settle(session, live, root)
     }
