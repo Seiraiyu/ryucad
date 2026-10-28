@@ -175,6 +175,65 @@ fn lerp(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
     [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * t)
 }
 
+/// Bands `width` points wide along polylines in model space, as `pr`
+/// sees them on a viewport `size` pixels big (`scale` pixels to a point),
+/// each `(points, colour, dashed)`: triangles added to `out`, drawn with
+/// depth like edges.
+pub fn bands<'a>(
+    lines: impl IntoIterator<Item = (&'a [[f64; 3]], [f32; 3], bool)>,
+    pr: &Projector,
+    size: [f64; 2],
+    scale: f64,
+    width: f64,
+    out: &mut Vec<Corner>,
+) {
+    let (right, up, _) = pr.camera.basis();
+    let screen = |p: [f64; 3]| {
+        pr.ndc(p)
+            .map(|n| [(n[0] + 1.0) / 2.0 * size[0], (1.0 - n[1]) / 2.0 * size[1]])
+    };
+    // A model offset `k` pixels along screen direction `d` (y down) at `p`.
+    let offset = |p: [f64; 3], d: [f64; 2], k: f64| {
+        let m = pr.pixel(p, size[1]) * k;
+        [0, 1, 2].map(|i| (d[0] * right[i] - d[1] * up[i]) * m)
+    };
+    let add = |p: [f64; 3], o: [f64; 3], sign: f64| [0, 1, 2].map(|i| p[i] + sign * o[i]);
+    let half = width * scale / 2.0;
+    let [on, off] = DASH.map(|d| d * scale);
+    for (points, color, dash) in lines {
+        let mut phase = 0.0;
+        for w in points.windows(2) {
+            let (Some(sa), Some(sb)) = (screen(w[0]), screen(w[1])) else {
+                continue;
+            };
+            let (dx, dy) = (sb[0] - sa[0], sb[1] - sa[1]);
+            let len = (dx * dx + dy * dy).sqrt();
+            if len == 0.0 {
+                continue;
+            }
+            let n = [-dy / len, dx / len];
+            let pieces = if dash {
+                dashed(sa, sb, [on, off], size, half + 1.0, &mut phase)
+            } else {
+                vec![(0.0, 1.0)]
+            };
+            for (t0, t1) in pieces {
+                let (a, b) = (lerp(w[0], w[1], t0), lerp(w[0], w[1], t1));
+                let (oa, ob) = (offset(a, n, half), offset(b, n, half));
+                let c = [
+                    add(a, oa, 1.0),
+                    add(b, ob, 1.0),
+                    add(b, ob, -1.0),
+                    add(a, oa, -1.0),
+                ];
+                for i in [0, 1, 2, 0, 2, 3] {
+                    out.push((c[i], color));
+                }
+            }
+        }
+    }
+}
+
 /// What sketches add to the scene as `pr` sees it on a viewport `size`
 /// pixels big (`scale` pixels to a point): triangles in model space, each
 /// curve a band [`CURVE_WIDTH`] wide in its state's colour (construction
@@ -187,73 +246,76 @@ pub fn overlay<'a>(
     scale: f64,
 ) -> Vec<Corner> {
     let (right, up, _) = pr.camera.basis();
-    let screen = |p: [f64; 3]| {
-        pr.ndc(p)
-            .map(|n| [(n[0] + 1.0) / 2.0 * size[0], (1.0 - n[1]) / 2.0 * size[1]])
-    };
     // A model offset `k` pixels along screen direction `d` (y down) at `p`.
     let offset = |p: [f64; 3], d: [f64; 2], k: f64| {
         let m = pr.pixel(p, size[1]) * k;
         [0, 1, 2].map(|i| (d[0] * right[i] - d[1] * up[i]) * m)
     };
-    let add = |p: [f64; 3], o: [f64; 3], sign: f64| [0, 1, 2].map(|i| p[i] + sign * o[i]);
     let mut out = Vec::new();
-    let mut quad = |c: [[f64; 3]; 4], color: [f32; 3]| {
-        for i in [0, 1, 2, 0, 2, 3] {
-            out.push((c[i], color));
-        }
-    };
-    let half = CURVE_WIDTH * scale / 2.0;
-    let [on, off] = DASH.map(|d| d * scale);
     for d in drawings {
-        for c in &d.curves {
-            let color = ryucad::render::sketch_color(c.state);
-            let mut phase = 0.0;
-            for w in c.points.windows(2) {
-                let (Some(sa), Some(sb)) = (screen(w[0]), screen(w[1])) else {
-                    continue;
-                };
-                let (dx, dy) = (sb[0] - sa[0], sb[1] - sa[1]);
-                let len = (dx * dx + dy * dy).sqrt();
-                if len == 0.0 {
-                    continue;
-                }
-                let n = [-dy / len, dx / len];
-                let pieces = if c.construction {
-                    dashed(sa, sb, [on, off], size, half + 1.0, &mut phase)
-                } else {
-                    vec![(0.0, 1.0)]
-                };
-                for (t0, t1) in pieces {
-                    let (a, b) = (lerp(w[0], w[1], t0), lerp(w[0], w[1], t1));
-                    let (oa, ob) = (offset(a, n, half), offset(b, n, half));
-                    quad(
-                        [
-                            add(a, oa, 1.0),
-                            add(b, ob, 1.0),
-                            add(b, ob, -1.0),
-                            add(a, oa, -1.0),
-                        ],
-                        color,
-                    );
-                }
-            }
-        }
+        bands(
+            d.curves.iter().map(|c| {
+                (
+                    c.points.as_slice(),
+                    ryucad::render::sketch_color(c.state),
+                    c.construction,
+                )
+            }),
+            pr,
+            size,
+            scale,
+            CURVE_WIDTH,
+            &mut out,
+        );
         let r = DOT_SIZE * scale / 2.0;
         for p in &d.dots {
             let color = ryucad::render::sketch_color(p.state);
             let (x, y) = (offset(p.at, [1.0, 0.0], r), offset(p.at, [0.0, 1.0], r));
             let corner = |sx: f64, sy: f64| [0, 1, 2].map(|i| p.at[i] + sx * x[i] + sy * y[i]);
-            quad(
-                [
-                    corner(-1.0, -1.0),
-                    corner(1.0, -1.0),
-                    corner(1.0, 1.0),
-                    corner(-1.0, 1.0),
-                ],
-                color,
-            );
+            let c = [
+                corner(-1.0, -1.0),
+                corner(1.0, -1.0),
+                corner(1.0, 1.0),
+                corner(-1.0, 1.0),
+            ];
+            for i in [0, 1, 2, 0, 2, 3] {
+                out.push((c[i], color));
+            }
         }
+    }
+    out
+}
+
+/// The origin's axes and planes as bands in the scene (`display.origin`):
+/// `size` long, the axes [`CURVE_WIDTH`] wide in the triad's colours, the
+/// planes dashed and half as wide, as `ryucad render --origin` draws them.
+pub fn origin(pr: &Projector, size: [f64; 2], scale: f64, length: f64) -> Vec<Corner> {
+    let (positions, lines) = ryucad::render::origin_lines(length);
+    let polylines: Vec<(Vec<[f64; 3]>, [f32; 3], bool)> = lines
+        .into_iter()
+        .map(|(idx, color, dash)| {
+            (
+                idx.into_iter().map(|i| positions[i as usize]).collect(),
+                color,
+                dash,
+            )
+        })
+        .collect();
+    let mut out = Vec::new();
+    for (points, color, dash) in &polylines {
+        let width = if *dash {
+            CURVE_WIDTH / 2.0
+        } else {
+            CURVE_WIDTH
+        };
+        bands(
+            [(points.as_slice(), *color, *dash)],
+            pr,
+            size,
+            scale,
+            width,
+            &mut out,
+        );
     }
     out
 }

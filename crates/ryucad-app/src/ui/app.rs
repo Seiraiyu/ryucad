@@ -445,6 +445,36 @@ impl Opened {
         };
         self.view.edges = on("display.edges");
         self.view.sketches = on("display.sketches");
+        self.view.cube = on("display.nav_cube");
+        self.view.triad = on("display.triad");
+        self.view.origin = self
+            .ws
+            .settings
+            .get("display.origin")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+    }
+
+    /// Runs a command of the navigation style's preset.
+    fn run(&mut self, ctx: &egui::Context, c: crate::core::keymap::Command) {
+        use crate::core::keymap::Command;
+        match c {
+            Command::View(v) => self.view.standard(&mut self.ws, v),
+            Command::NormalTo => self.view.normal_to(&mut self.ws),
+            Command::Fit => self.view.fit(&mut self.ws, None),
+            // At the pointer, over the viewport; Space again closes it.
+            Command::Selector => {
+                let at = ctx.input(|i| i.pointer.latest_pos());
+                match at.filter(|p| self.view.rect.contains(*p)) {
+                    Some(p) => self.view.toggle_selector(p),
+                    None => self.view.selector = None,
+                }
+            }
+            Command::Measure => {
+                let on = !self.ws.measure.on;
+                self.ws.measure.set(on);
+            }
+        }
     }
 
     /// Ctrl/Cmd+Z undoes this window's latest change, Shift+Ctrl/Cmd+Z or
@@ -465,6 +495,19 @@ impl Opened {
             self.ws.redo(None);
         } else if ctx.input_mut(|i| i.consume_shortcut(&menu::UNDO)) {
             self.ws.undo(None);
+        }
+        // Esc closes the view selector first.
+        if self.view.selector.is_some()
+            && ctx.input_mut(|i| i.consume_shortcut(&menu::CLEAR_SELECTION))
+        {
+            self.view.selector = None;
+            return None;
+        }
+        // The view and measure commands, by the navigation style's preset.
+        for b in crate::core::keymap::preset(self.view.nav.style) {
+            if ctx.input_mut(|i| crate::core::keymap::consume(i, &b.shortcut)) {
+                self.run(ctx, b.command);
+            }
         }
         // Esc leaves the Measure tool first.
         if !popup_open

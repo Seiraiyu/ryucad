@@ -179,11 +179,11 @@ impl Cube {
         out
     }
 
-    /// The menu button: a square below the cube, min and max corners.
+    /// The menu button below the cube, min and max corners.
     pub fn menu(&self) -> ([f32; 2], [f32; 2]) {
         let [cx, cy] = self.centre;
         let y = cy + self.half * 1.75 + 12.0;
-        ([cx + self.half, y - 7.0], [cx + self.half + 14.0, y + 7.0])
+        ([cx + 12.0, y - 8.0], [cx + 52.0, y + 8.0])
     }
 
     /// The box the whole widget takes, min and max corners: picking in
@@ -191,7 +191,11 @@ impl Cube {
     pub fn bounds(&self) -> ([f32; 2], [f32; 2]) {
         let reach = self.half * 1.75 + 20.0;
         let [cx, cy] = self.centre;
-        ([cx - reach, cy - reach], [cx + reach, cy + reach])
+        let (_, menu) = self.menu();
+        (
+            [cx - reach, cy - reach],
+            [(cx + reach).max(menu[0]), (cy + reach).max(menu[1])],
+        )
     }
 
     /// What `at` (in points) is over, if anything of the widget.

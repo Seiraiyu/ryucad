@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod bom;
+pub mod cube;
 pub mod dialogs;
 pub mod doctor;
 pub mod menu;
