@@ -161,6 +161,30 @@ enum Command {
         #[arg(long)]
         results: bool,
     },
+    /// An assembly's bill of materials, from its files alone: indented (each
+    /// assembly's children with how many it places), or flat (every part
+    /// with its total), as JSON or CSV; `bom diff` compares two revisions.
+    #[command(args_conflicts_with_subcommands = true)]
+    Bom {
+        #[command(subcommand)]
+        cmd: Option<BomCmd>,
+        #[command(flatten)]
+        show: BomShow,
+    },
+    /// Every assembly that uses a part: in the working files, and in every
+    /// official release of an assembly.
+    WhereUsed {
+        part: String,
+        /// Only uses of this release of the part.
+        #[arg(long)]
+        label: Option<String>,
+        /// Only uses of the part as it is (working).
+        #[arg(long, conflicts_with = "label")]
+        working: bool,
+        /// Only assemblies that place it themselves.
+        #[arg(long)]
+        direct: bool,
+    },
     /// Which instances of an assembly overlap: each pair of solids that
     /// share a volume, with its box, its volume (estimated from a mesh)
     /// and the faces it touches. Faces that only touch are clear.
@@ -986,6 +1010,43 @@ struct Ops(Vec<Value>);
 struct Groups(Value);
 
 #[derive(Args)]
+struct BomShow {
+    /// The part or assembly: the project's one root assembly if left out.
+    part: Option<String>,
+    /// A Git revision (main, HEAD~2, a hash), or label:<L> for the part's
+    /// release L: the working files by default.
+    #[arg(long, value_name = "REV")]
+    rev: Option<String>,
+    /// Every part with its total, instead of the indented tree.
+    #[arg(long)]
+    flat: bool,
+    /// List this many levels below the part (the indented BOM).
+    #[arg(long, value_name = "N")]
+    depth: Option<usize>,
+    /// json (the default) or csv.
+    #[arg(long)]
+    format: Option<String>,
+    /// Write the CSV to this file (implies --format csv).
+    #[arg(long, value_name = "FILE")]
+    out: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum BomCmd {
+    /// What changed in a BOM between two revisions: parts added, removed
+    /// and changed (quantity, revision, properties), and where.
+    Diff {
+        part: Option<String>,
+        /// The revision to compare from: HEAD by default.
+        #[arg(long, value_name = "REV")]
+        from: Option<String>,
+        /// The revision to compare to: working by default.
+        #[arg(long, value_name = "REV")]
+        to: Option<String>,
+    },
+}
+
+#[derive(Args)]
 struct RevArg {
     /// Read the project as this Git revision has it (main, HEAD~2, a hash)
     /// instead of the working files.
@@ -1793,6 +1854,35 @@ fn request(cmd: &Command) -> Option<Request> {
             rev: rev.rev.clone(),
         },
         Command::CheckFormat => Request::CheckFormat {},
+        Command::Bom {
+            cmd: Some(BomCmd::Diff { part, from, to }),
+            ..
+        } => Request::BomDiff {
+            part: part.clone(),
+            from: from.clone(),
+            to: to.clone(),
+        },
+        Command::Bom { cmd: None, show } => Request::BomGet {
+            part: show.part.clone(),
+            rev: show.rev.clone(),
+            flat: show.flat,
+            depth: show.depth,
+            format: show
+                .format
+                .clone()
+                .or_else(|| show.out.as_ref().map(|_| "csv".to_owned())),
+        },
+        Command::WhereUsed {
+            part,
+            label,
+            working,
+            direct,
+        } => Request::BomWhereUsed {
+            part: part.clone(),
+            label: label.clone(),
+            working: *working,
+            direct: *direct,
+        },
         Command::Interference { part, instances } => Request::Interference {
             part: part.clone(),
             instances: instances.clone(),
@@ -2207,7 +2297,7 @@ fn lift(cmd: &Command, mut result: Value, warnings: &mut Vec<String>) -> Value {
 /// `--out` file.
 fn deliver(cmd: &Command, a: Answer) -> Result<Value> {
     let Some(bytes) = a.binary else {
-        return Ok(a.result);
+        return written(cmd, a.result);
     };
     let out = match cmd {
         // A file another tool reads is never seen half written.
@@ -2228,6 +2318,31 @@ fn deliver(cmd: &Command, a: Answer) -> Result<Value> {
     std::fs::write(out, bytes).map_err(|e| Error::io(out, &e))?;
     let mut result = a.result;
     result["out"] = json!(out);
+    Ok(result)
+}
+
+/// The result to print, once text a command writes to its `--out` file
+/// (a BOM's CSV) is written there, atomically.
+fn written(cmd: &Command, mut result: Value) -> Result<Value> {
+    if let Command::Bom {
+        cmd: None,
+        show: BomShow { out: Some(out), .. },
+    } = cmd
+    {
+        let csv = result
+            .as_object_mut()
+            .and_then(|o| o.remove("csv"))
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .ok_or_else(|| {
+                Error::new(
+                    Code::InvalidParam,
+                    "--out writes CSV: leave out --format or give csv",
+                )
+                .with("param", "format")
+            })?;
+        ryucad::doc::project::write_atomic(out, csv)?;
+        result["out"] = json!(out);
+    }
     Ok(result)
 }
 

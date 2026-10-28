@@ -1,0 +1,423 @@
+//! Product structure through the protocol: `bom.get`, an assembly's
+//! indented or flat BOM (JSON or CSV) at the working files, a Git
+//! revision or a release label; `bom.diff`, what changed in it between two
+//! revisions; and `bom.where_used`, the assemblies that use a part now and
+//! in every official release. ryupdm reads them from the files alone
+//! ([`ryupdm::bom`], [`ryupdm::where_used`]); nothing is rebuilt.
+
+use crate::doc::assembly::Rev;
+use crate::doc::files::PartKind;
+use crate::doc::id::Id;
+use crate::doc::project::Project;
+use crate::error::{Code, Error, Result};
+use crate::server::part_id;
+use crate::session::Session;
+use ryupdm::bom::{self, Row};
+use ryupdm::config::Config;
+use ryupdm::structure::{Reader, Repo};
+use serde_json::{Value, json};
+use std::collections::BTreeMap;
+
+/// What a reader reads besides the files: the commit, the project, the
+/// settings and each working part's state.
+struct Ground {
+    commit: Option<String>,
+    config: Config,
+    states: BTreeMap<Id, Value>,
+}
+
+/// Runs `f` with a reader over the project at `rev` (`working` or none
+/// for the working files, else a Git revision), labels resolved against
+/// the release branch as it is (none outside a repository).
+fn reading<T>(
+    session: &mut Session,
+    rev: Option<&str>,
+    f: impl FnOnce(&mut Reader, &Ground) -> Result<T>,
+) -> Result<(Option<String>, T)> {
+    let (commit, s) = session.at(rev)?;
+    let history = match crate::release::history(s) {
+        Ok(h) => Some(h),
+        Err(e) if e.code == Code::NotAGitRepo => None,
+        Err(e) => return Err(e),
+    };
+    let mut cache = std::mem::take(&mut s.structure);
+    let out = {
+        // The files as the session last read them, uncopied.
+        let s: &Session = s;
+        let releases = history.as_ref().map(|(_, r)| r);
+        let ground = Ground {
+            commit: commit.clone(),
+            config: Config::read(s).unwrap_or_default(),
+            states: ryupdm::state::derive_all(s, &releases.cloned().unwrap_or_default())
+                .into_iter()
+                .map(|(p, st)| (p, st.to_json()))
+                .collect(),
+        };
+        let repo = history.as_ref().map(|(r, _)| Repo {
+            git: r.gix(),
+            prefix: r.prefix(),
+        });
+        let mut reader = Reader::new(s, s.project(), repo, releases, &mut cache);
+        f(&mut reader, &ground)
+    };
+    s.structure = cache;
+    Ok((commit, out?))
+}
+
+/// The part a BOM is of: the one asked for, else the project's one root
+/// assembly (one no assembly places); several or none is `invalid_param`
+/// naming them.
+fn root(project: &Project, part: Option<&str>) -> Result<Id> {
+    if let Some(p) = part {
+        let id = part_id(p)?;
+        project.part(&id)?;
+        return Ok(id);
+    }
+    let is_assembly = |id: &Id| {
+        project.parts[id]
+            .file
+            .as_ref()
+            .is_ok_and(|f| f.kind == PartKind::Assembly)
+    };
+    let placed: Vec<&Id> = project
+        .parts
+        .values()
+        .flat_map(|p| p.features.values())
+        .filter_map(|f| match f {
+            Ok(crate::doc::files::Feature::Instance(i)) => Some(&i.part),
+            _ => None,
+        })
+        .collect();
+    let roots: Vec<&Id> = project
+        .parts
+        .keys()
+        .filter(|id| is_assembly(id) && !placed.contains(id))
+        .collect();
+    match roots.as_slice() {
+        [one] => Ok((*one).clone()),
+        _ => Err(Error::new(
+            Code::InvalidParam,
+            "the project has no one root assembly: name the part whose BOM you want",
+        )
+        .with("param", "part")
+        .with("roots", roots)),
+    }
+}
+
+/// `label:<L>` as a release label; anything else is a revision of the
+/// project's files.
+fn label_of(rev: Option<&str>) -> Option<Rev> {
+    rev.and_then(|r| r.strip_prefix("label:"))
+        .map(|l| Rev::Label(l.to_owned()))
+}
+
+/// How `bom.get` gives a BOM.
+pub struct Ask<'a> {
+    pub part: Option<&'a str>,
+    pub rev: Option<&'a str>,
+    pub flat: bool,
+    pub depth: Option<usize>,
+    /// `json` (the default) or `csv`.
+    pub format: Option<&'a str>,
+}
+
+/// `bom.get`: `{schema, root, rev, commit?, tree | flat, csv?, problems,
+/// findings}`.
+pub fn get(session: &mut Session, ask: &Ask) -> Result<Value> {
+    let csv = match ask.format.unwrap_or("json") {
+        "json" => false,
+        "csv" => true,
+        other => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("format is json or csv, not {other:?}"),
+            )
+            .with("param", "format"));
+        }
+    };
+    let label = label_of(ask.rev);
+    let files_rev = if label.is_some() { None } else { ask.rev };
+    let (_, v) = reading(session, files_rev, |reader, g| {
+        let part = root(reader.project, ask.part)?;
+        let rev = label.clone().unwrap_or(Rev::Working);
+        let whole = bom::tree(reader, &part, &rev, None)?;
+        let mut v = json!({
+            "schema": bom::SCHEMA,
+            "root": part,
+            "rev": ask.rev.unwrap_or("working"),
+            "problems": bom::problems(&whole),
+            "findings": bom::findings(&whole),
+        });
+        if ask.flat {
+            let rows = bom::flat(&whole);
+            v["flat"] = rows.iter().map(|f| bom::flat_json(f, &g.states)).collect();
+            if csv {
+                v["csv"] = json!(bom::csv_flat(&rows, &g.config));
+            }
+        } else {
+            let shown = match ask.depth {
+                None => whole,
+                Some(d) => bom::tree(reader, &part, &rev, Some(d))?,
+            };
+            v["tree"] = bom::row_json(&shown, &g.states);
+            if csv {
+                v["csv"] = json!(bom::csv_tree(&shown, &g.config));
+            }
+        }
+        if let Some(c) = &g.commit {
+            v["commit"] = json!(c);
+        }
+        Ok(v)
+    })?;
+    Ok(v)
+}
+
+/// The whole BOM of `part` at `rev` (or `None` when the part isn't
+/// there), with the commit read and the settings there.
+fn side(
+    session: &mut Session,
+    part: &Id,
+    rev: &str,
+) -> Result<(Option<String>, Option<Row>, Config)> {
+    let label = label_of(Some(rev));
+    let files_rev = if label.is_some() { None } else { Some(rev) };
+    let (commit, (row, config)) = reading(session, files_rev, |reader, g| {
+        let rev = label.clone().unwrap_or(Rev::Working);
+        let row = match bom::tree(reader, part, &rev, None) {
+            Ok(r) => Some(r),
+            Err(e) if e.code == Code::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        Ok((row, g.config.clone()))
+    })?;
+    Ok((commit, row, config))
+}
+
+/// `bom.diff`: the BOM of `part` (else the working files' one root
+/// assembly) from `from` (`HEAD` by default) to `to` (`working`).
+pub fn diff(
+    session: &mut Session,
+    part: Option<&str>,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> Result<Value> {
+    let (from, to) = (from.unwrap_or("HEAD"), to.unwrap_or("working"));
+    let part = match part {
+        Some(p) => part_id(p)?,
+        None => root(session.project(), None)?,
+    };
+    let (ca, a, _) = side(session, &part, from)?;
+    let (cb, b, config) = side(session, &part, to)?;
+    if a.is_none() && b.is_none() {
+        return Err(Error::new(
+            Code::NotFound,
+            format!("{part} is in neither {from} nor {to}"),
+        )
+        .with("part", &part));
+    }
+    let mut v = bom::diff(a.as_ref(), b.as_ref(), &config);
+    v["schema"] = json!(bom::SCHEMA);
+    v["root"] = json!(part);
+    v["from"] = json!({"rev": from, "commit": ca});
+    v["to"] = json!({"rev": to, "commit": cb});
+    Ok(v)
+}
+
+/// `bom.where_used`: where `part` is used, at any revision, or only at
+/// release `label`, or only `working`.
+pub fn where_used(
+    session: &mut Session,
+    part: &str,
+    label: Option<&str>,
+    working: bool,
+    direct: bool,
+) -> Result<Value> {
+    let rev = match (label, working) {
+        (Some(_), true) => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "ask for a label or for working, not both",
+            )
+            .with("param", "label"));
+        }
+        (Some(l), false) => Some(Rev::Label(crate::doc::assembly::label_text(l)?)),
+        (None, true) => Some(Rev::Working),
+        (None, false) => None,
+    };
+    let q = ryupdm::where_used::Query {
+        part: part_id(part)?,
+        rev,
+        direct,
+    };
+    let (_, v) = reading(session, None, |reader, g| {
+        Ok(ryupdm::where_used::where_used(reader, &q, &g.config))
+    })?;
+    Ok(v)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::git::tests::git;
+    use crate::release::tests::released_project;
+    use crate::server::tests::call;
+    use crate::session::Session;
+    use serde_json::{Value, json};
+
+    /// `p` released as A and committed; assembly `asm` places two of
+    /// `p@A` and one bought `kit` (two tubes counted in metres).
+    fn assembly() -> (tempfile::TempDir, Session) {
+        let (dir, mut s) = released_project();
+        let root = dir.path();
+        call(&mut s, "release.propose", json!({"part": "p"})).unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "release p A"]);
+        for (part, kind) in [("asm", "assembly"), ("kit", "assembly"), ("tube", "part")] {
+            call(&mut s, "part.create", json!({"part": part, "kind": kind})).unwrap();
+        }
+        let add = |s: &mut Session, asm: &str, id: &str, of: &str, rev: Value| {
+            call(
+                s,
+                "feature.add",
+                json!({"part": asm, "type": "instance", "id": id, "of": of, "rev": rev}),
+            )
+            .unwrap();
+        };
+        add(&mut s, "asm", "p1", "p", json!("A"));
+        add(&mut s, "asm", "p2", "p", json!("A"));
+        add(&mut s, "asm", "k", "kit", json!("working"));
+        add(&mut s, "kit", "t1", "tube", json!("working"));
+        add(&mut s, "kit", "t2", "tube", json!("working"));
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "tube", "properties": {"uom": "m", "amount": "250 mm"}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "kit", "properties": {"make_buy": "buy", "name": "Tube kit"}}),
+        )
+        .unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "asm"]);
+        (dir, s)
+    }
+
+    #[test]
+    fn a_bom_is_read_from_the_files_at_any_revision() {
+        let (dir, mut s) = assembly();
+        let v = call(&mut s, "bom.get", json!({})).unwrap();
+        assert_eq!((&v["schema"], &v["root"]), (&json!(1), &json!("asm")));
+        let kids = v["tree"]["children"].as_array().unwrap();
+        assert_eq!(kids[0]["quantity"], json!({"count": 2, "uom": "each"}));
+        assert_eq!(kids[0]["rev"], json!({"label": "A"}));
+        assert_eq!(kids[0]["properties"]["number"], "100");
+        assert!(kids[0]["commit"].is_string());
+        assert_eq!(kids[1]["children"][0]["quantity"]["text"], "0.5 m");
+        assert_eq!(kids[1]["children"][0]["bought"], true);
+        let flat = call(&mut s, "bom.get", json!({"flat": true})).unwrap();
+        let rows: Vec<(&Value, &Value)> = flat["flat"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (&r["part"], &r["quantity"]["count"]))
+            .collect();
+        assert_eq!(rows, [(&json!("p"), &json!(2)), (&json!("kit"), &json!(1))]);
+        // CSV, and the working files moved on from HEAD.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "asm", "type": "instance", "id": "p3", "of": "p",
+                   "rev": "A"}),
+        )
+        .unwrap();
+        let csv = call(&mut s, "bom.get", json!({"flat": true, "format": "csv"})).unwrap();
+        assert!(
+            csv["csv"]
+                .as_str()
+                .unwrap()
+                .contains("\n,,100,,p,A,3,each,make,,\n")
+        );
+        let head = call(&mut s, "bom.get", json!({"rev": "HEAD"})).unwrap();
+        assert_eq!(head["tree"]["children"][0]["quantity"]["count"], 2);
+        assert_eq!(head["commit"].as_str().unwrap().len(), 40);
+        let at = call(&mut s, "bom.get", json!({"part": "p", "rev": "label:A"})).unwrap();
+        assert_eq!(at["tree"]["rev"], json!({"label": "A"}));
+        // Which root: several assemblies nothing places is a question.
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "other", "kind": "assembly"}),
+        )
+        .unwrap();
+        let e = call(&mut s, "bom.get", json!({})).unwrap_err();
+        assert_eq!(e.code, crate::error::Code::InvalidParam);
+        assert_eq!(e.details["roots"], json!(["asm", "other"]));
+        let e = call(&mut s, "bom.get", json!({"part": "asm", "format": "xml"})).unwrap_err();
+        assert_eq!(e.details["param"], "format");
+        drop(dir);
+    }
+
+    #[test]
+    fn a_diff_says_what_the_working_files_changed() {
+        let (_dir, mut s) = assembly();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "asm", "type": "instance", "id": "p3", "of": "p",
+                   "rev": "A"}),
+        )
+        .unwrap();
+        let v = call(&mut s, "bom.diff", json!({})).unwrap();
+        assert_eq!(
+            v["summary"],
+            json!({"added": 0, "removed": 0, "changed": 1})
+        );
+        assert_eq!(v["flat"]["changed"][0]["quantity"]["to"]["count"], 3);
+        assert_eq!(v["from"]["rev"], "HEAD");
+        assert!(v["from"]["commit"].is_string());
+        assert_eq!(v["to"], json!({"rev": "working", "commit": null}));
+        let e = call(&mut s, "bom.diff", json!({"part": "nope"})).unwrap_err();
+        assert_eq!(e.code, crate::error::Code::NotFound);
+    }
+
+    #[test]
+    fn where_used_finds_working_and_released_assemblies() {
+        let (dir, mut s) = assembly();
+        let root = dir.path();
+        let v = call(&mut s, "bom.where_used", json!({"part": "p"})).unwrap();
+        assert_eq!(v["working"][0]["assembly"], "asm");
+        assert_eq!(v["working"][0]["count"], 2);
+        assert_eq!(v["released"], json!([]));
+        // asm released and official (its kit taken out: a release holds
+        // only releases): found there too, at its commit.
+        call(&mut s, "feature.delete", json!({"part": "asm", "id": "k"})).unwrap();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "asm", "properties": {"number": "900"}}),
+        )
+        .unwrap();
+        call(&mut s, "release.propose", json!({"part": "asm"})).unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "release asm A"]);
+        let v = call(&mut s, "bom.where_used", json!({"part": "p", "label": "A"})).unwrap();
+        assert_eq!(v["released"][0]["label"], "A");
+        assert_eq!(v["released"][0]["state"], "released");
+        let v = call(
+            &mut s,
+            "bom.where_used",
+            json!({"part": "p", "working": true}),
+        )
+        .unwrap();
+        assert_eq!((&v["working"], &v["released"]), (&json!([]), &json!([])));
+        let e = call(
+            &mut s,
+            "bom.where_used",
+            json!({"part": "p", "working": true, "label": "A"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, crate::error::Code::InvalidParam);
+    }
+}
