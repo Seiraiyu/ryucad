@@ -10,6 +10,7 @@ pub use ryu_doc::{canonical, error, id, source, units};
 
 pub mod activity;
 pub mod client;
+pub mod conn;
 pub mod coord;
 pub mod daemon;
 pub mod doc;
