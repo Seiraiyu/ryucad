@@ -1240,6 +1240,12 @@ pub(crate) mod tests {
         )
         .unwrap();
         list.features.push(id(inst));
+        // Numbered as a write through the protocol would number it (a
+        // part, which places nothing, numbers nothing).
+        if list.kind == PartKind::Assembly && !list.items.contains_key(&id(part)) {
+            let n = ryupdm::items::next(&list.items);
+            list.items.insert(id(part), n);
+        }
         write_json(&p, &list.to_json()).unwrap();
     }
 
@@ -2072,6 +2078,77 @@ pub(crate) mod tests {
             (Code::HasDependents, json!(["frame/p1"]))
         );
         call(&mut s, "part.delete", json!({"part": "plate"})).unwrap();
+    }
+
+    #[test]
+    fn writes_give_and_take_item_numbers() {
+        use crate::live::Live;
+        use crate::server::tests::call_live;
+        let (_dir, mut s) = project();
+        call(&mut s, "part.create", json!({"part": "nut"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "nut", "type": "box", "id": "b",
+                   "params": {"x": 5, "y": 5, "z": 3}}),
+        )
+        .unwrap();
+        let mut live = Live::new();
+        let items = |s: &Session| {
+            let f = s
+                .project()
+                .part(&id("frame"))
+                .unwrap()
+                .file
+                .clone()
+                .unwrap();
+            json!(f.items)
+        };
+        let mut w = |s: &mut Session, method: &str, params: Value| {
+            call_live(s, &mut live, None, method, params).unwrap();
+        };
+        let add = |of: &str, inst: &str| json!({"part": "frame", "type": "instance", "id": inst, "of": of});
+        w(&mut s, "feature.add", add("plate", "base"));
+        w(&mut s, "feature.add", add("bolt", "b1"));
+        w(&mut s, "feature.add", add("bolt", "b2"));
+        assert_eq!(items(&s), json!({"plate": 1, "bolt": 2}));
+        // A pattern of bolts places bolts already numbered.
+        w(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "instance_pattern", "id": "row",
+                   "instances": ["b1"], "direction": "x", "spacing": "10 mm", "count": 3}),
+        );
+        w(
+            &mut s,
+            "feature.move",
+            json!({"part": "frame", "id": "base", "after": "b2"}),
+        );
+        assert_eq!(items(&s), json!({"plate": 1, "bolt": 2}));
+        // The bolt keeps its number while any instance places it.
+        w(
+            &mut s,
+            "feature.delete",
+            json!({"part": "frame", "id": "row"}),
+        );
+        w(
+            &mut s,
+            "feature.delete",
+            json!({"part": "frame", "id": "b1"}),
+        );
+        assert_eq!(items(&s), json!({"plate": 1, "bolt": 2}));
+        // An instance turned into a nut: the nut takes 3, never the bolt's 2.
+        w(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "b2", "of": "nut"}),
+        );
+        assert_eq!(items(&s), json!({"plate": 1, "nut": 3}));
+        // Each write's numbers are undone with it.
+        w(&mut s, "undo", json!({}));
+        assert_eq!(items(&s), json!({"plate": 1, "bolt": 2}));
+        let text = std::fs::read_to_string(part_path(s.root(), &id("frame"))).unwrap();
+        assert!(text.contains("\"format\": 3"), "{text}");
     }
 
     #[test]

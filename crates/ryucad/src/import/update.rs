@@ -1019,6 +1019,15 @@ mod tests {
     fn a_new_version_moves_adds_and_removes_what_the_import_made() {
         let (dir, mut s) = imported();
         let root = dir.path();
+        let items = |part: &str| {
+            let text = std::fs::read_to_string(root.join(format!("parts/{part}/part.json")));
+            serde_json::from_str::<Value>(&text.unwrap()).unwrap()["items"].clone()
+        };
+        let numbered = (items("f-1"), items("s-1"));
+        assert!(
+            numbered.0.is_object() && numbered.1.is_object(),
+            "{numbered:?}"
+        );
         // A dry run first: it says everything and writes nothing.
         let before = s.snapshot();
         let dry = update(&mut s, &frame_version(2), json!({"dry_run": true})).unwrap();
@@ -1042,6 +1051,8 @@ mod tests {
         assert_eq!(ids, ["1", "3"]);
         assert_eq!(sub[1].1["pose"]["origin_m"], json!([0.03, 0, 0]));
         assert_eq!(sub[1].1["import"]["usage"], "3");
+        // A usage replaced by another of the same part moves no number.
+        assert_eq!((items("f-1"), items("s-1")), numbered);
         // Every import feature reads the new bytes.
         for part in ["f-1-body", "p-1", "l-1"] {
             assert_eq!(listed(root, part)[0].1["file"]["blake3"], new, "{part}");

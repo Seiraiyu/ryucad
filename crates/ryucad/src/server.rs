@@ -1356,8 +1356,16 @@ pub(crate) fn save(
     for (id, f) in writes {
         write_json(&feature_path(session.root(), part, id), &f.to_json())?;
     }
+    // A part the write makes the assembly place takes the next item number;
+    // one it no longer places loses its own.
     let p = session.project().part(part)?;
     let items = p.file.as_ref().map(|f| f.items.clone()).unwrap_or_default();
+    let after =
+        ryupdm::items::placed_by(&order, |fid| match writes.iter().find(|(w, _)| *w == fid) {
+            Some((_, f)) => Some(*f),
+            None => p.features.get(fid)?.as_ref().ok(),
+        });
+    let items = ryupdm::items::assigned(&items, &ryupdm::items::placed(p), &after);
     write_json(
         &part_path(session.root(), part),
         &PartFile {
