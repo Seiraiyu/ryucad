@@ -146,17 +146,28 @@ impl Source for BTreeMap<String, Arc<[u8]>> {
 /// Writes `contents` to `path` so that readers see the old file or the new
 /// one, never a mix: a temporary file in the same folder, then a rename.
 pub fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    write_atomic_with(path, |f| f.write_all(contents.as_ref()))
+}
+
+/// [`write_atomic`] for contents `write` streams into the temporary file,
+/// so they never have to be held whole: synced and renamed into place
+/// once `write` succeeds, removed if it fails. Gives what `write` gave.
+pub fn write_atomic_with<T>(
+    path: &Path,
+    write: impl FnOnce(&mut fs::File) -> std::io::Result<T>,
+) -> Result<T> {
     let dir = path.parent().expect("a file path has a parent");
     fs::create_dir_all(dir).map_err(|e| Error::io(dir, &e))?;
     let name = path.file_name().expect("a file path has a name");
     let tmp = dir.join(format!(".{}.tmp", name.to_string_lossy()));
-    let write = || -> std::io::Result<()> {
+    let run = || -> std::io::Result<T> {
         let mut f = fs::File::create(&tmp)?;
-        f.write_all(contents.as_ref())?;
+        let made = write(&mut f)?;
         f.sync_all()?;
-        fs::rename(&tmp, path)
+        fs::rename(&tmp, path)?;
+        Ok(made)
     };
-    write().map_err(|e| {
+    run().map_err(|e| {
         let _ = fs::remove_file(&tmp);
         Error::io(path, &e)
     })
@@ -190,6 +201,33 @@ pub fn plain(p: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streamed_writes_land_whole_or_not_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.bin");
+        let n = write_atomic_with(&path, |f| {
+            for k in 0..4u8 {
+                f.write_all(&[k; 3])?;
+            }
+            Ok(12)
+        })
+        .unwrap();
+        assert_eq!(n, 12);
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3]
+        );
+        // A write that fails part way leaves the old file and no temporary.
+        let e = write_atomic_with(&path, |f| {
+            f.write_all(b"half")?;
+            Err::<(), _>(std::io::Error::other("stopped"))
+        })
+        .unwrap_err();
+        assert_eq!(e.code, crate::error::Code::Io);
+        assert_eq!(fs::read(&path).unwrap().len(), 12);
+        assert!(!dir.path().join(".out.bin.tmp").exists());
+    }
 
     #[test]
     fn files_in_memory_list_as_folders() {
