@@ -3273,6 +3273,33 @@ fn boms_from_the_cli() {
          1,1,100,\"Bolt, M4\",bolt,working,2,each,make,,\n\
          2,2,300,,tube,working,0.6,m,make,,\n"
     );
+    // Item numbers: set together, refused when they would clash, compacted,
+    // and each change undone whole.
+    let v = p.ok(&["bom", "renumber", "frame", "bolt=5", "tube=1"]);
+    assert_eq!(v["items"], json!({"bolt": 5, "tube": 1}));
+    let v = p.ok(&["bom", "--format", "csv"]);
+    assert!(v["csv"].as_str().unwrap().contains("\n5,5,100,"), "{v}");
+    p.fails(
+        &["bom", "renumber", "frame", "bolt=1"],
+        "bom_item_duplicate",
+        1,
+    );
+    p.fails(&["bom", "renumber", "frame", "nut=3"], "not_found", 1);
+    p.fails(&["bom", "renumber", "frame", "bolt=x"], "invalid_param", 1);
+    p.fails(&["bom", "renumber", "bolt", "bolt=1"], "wrong_part_kind", 1);
+    p.fails(
+        &["bom", "renumber", "frame", "--compact", "bolt=1"],
+        "usage",
+        2,
+    );
+    let v = p.ok(&["bom", "renumber", "frame", "--compact"]);
+    assert_eq!(v["items"], json!({"tube": 1, "bolt": 2}));
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let list: Value =
+        serde_json::from_str(&fs::read_to_string(p.daemon.join("parts/frame/part.json")).unwrap())
+            .unwrap();
+    assert_eq!(list["items"], json!({"bolt": 5, "tube": 1}));
     let v = p.ok(&["where-used", "bolt", "--direct"]);
     assert_eq!(v["working"][0]["count"], 2);
     p.fails(&["bom", "diff"], "not_a_git_repo", 1);
