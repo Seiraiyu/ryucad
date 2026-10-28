@@ -405,6 +405,9 @@ fn dispatch(
         Request::Interference { part, instances } => {
             crate::interference::run(session, &part, &instances)
         }
+        Request::Measure { entities, rev } => {
+            crate::measure::run(session, &entities, rev.as_deref())
+        }
         Request::MaterialsList {} => crate::materials::list(session),
         Request::MaterialsSet {
             name,

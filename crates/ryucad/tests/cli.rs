@@ -972,6 +972,7 @@ fn every_protocol_method_has_a_command() {
         ("assembly.tree", &["assembly", "tree"]),
         ("assembly.solve", &["assembly", "solve"]),
         ("interference", &["interference"]),
+        ("measure", &["measure"]),
         ("materials.list", &["materials", "list"]),
         ("materials.set", &["materials", "set"]),
         ("materials.delete", &["materials", "delete"]),
@@ -2857,6 +2858,29 @@ fn assemblies_from_the_cli() {
         tree["result"]["instances"][0]["pose"]["origin_m"],
         serde_json::json!([0.01, 0, 0])
     );
+}
+
+#[test]
+fn measure_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=20", "--param",
+        "z=30",
+    ]);
+    let body = p.ok(&["inspect", "p"])["bodies"][0].clone();
+    let face = |k: usize| format!("p/b/{}", body["faces"][k]["name"].as_str().unwrap());
+    let one = p.ok(&["measure", &face(0)]);
+    assert_eq!(one["kind"], "face", "{one}");
+    assert!(one["area"]["m2"].as_f64().unwrap() > 0.0);
+    let two = p.ok(&["measure", &face(0), &face(1)]);
+    assert!(two["distance"]["m"].is_number(), "{two}");
+    let solid = p.ok(&["measure", "p/b"]);
+    assert_eq!(solid["volume"]["value"], "6000 mm^3", "{solid}");
+    p.fails(&["measure", "p/nothing"], "not_found", 1);
+    let (code, _) = p.both_from("", &["measure"]);
+    assert_eq!(code, 2);
 }
 
 #[test]

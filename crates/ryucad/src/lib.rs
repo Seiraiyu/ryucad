@@ -61,6 +61,7 @@ pub mod interference;
 pub mod live;
 pub mod mate;
 pub mod materials;
+pub mod measure;
 pub mod merge;
 pub mod mesh;
 pub mod notify;
