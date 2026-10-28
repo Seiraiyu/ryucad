@@ -1,0 +1,15 @@
+# cargo nextest runs each test in a process of its own (PR CI, ci.yml).
+
+[test-groups]
+# The app's window tests draw one at a time (lavapipe crashes when they
+# draw in parallel); in one process a lock serializes them, across
+# processes this group does.
+window = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "package(ryucad-app) & binary(window)"
+test-group = "window"
+
+[profile.ci]
+# Report every failure, not just the first.
+fail-fast = false
