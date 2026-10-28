@@ -803,6 +803,9 @@ impl<'p> Rebuild<'p> {
             })
             .map(|p| (&p.id, p))
             .collect();
+        // Their imported files first, on this thread: see
+        // `import::opened`.
+        crate::import::open_ahead(todo.values().flat_map(|p| p.imports.values()));
         let empty = Cache::new();
         let (caches, disk) = (&self.store.caches, self.store.disk.as_deref());
         let built: Vec<(Id, PartResult, Cache)> = todo
