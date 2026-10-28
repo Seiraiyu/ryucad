@@ -84,6 +84,9 @@ pub struct Session {
     /// A daemon's watch of the folder: `None` checks every file on
     /// every request.
     watching: Option<Watching>,
+    /// Counts the times the files changed: what subscribers were told is
+    /// still news while it hasn't moved.
+    epoch: u64,
 }
 
 /// A daemon's watch of its project, or why it has none, and what it
@@ -115,6 +118,7 @@ impl Session {
             release_results: BTreeMap::new(),
             structure: ryupdm::structure::Cache::new(),
             watching: None,
+            epoch: 0,
         };
         s.scan()?;
         Ok(s)
@@ -202,6 +206,7 @@ impl Session {
             release_results: BTreeMap::new(),
             structure: from.structure.clone(),
             watching: None,
+            epoch: 0,
         })
     }
 
@@ -258,6 +263,7 @@ impl Session {
         }
         let changes = self.scan()?;
         if !changes.is_empty() {
+            self.epoch += 1;
             let paths: Vec<String> = changes.iter().map(|(p, _)| p.clone()).collect();
             let held = Held {
                 root: &self.project.root.clone(),
@@ -273,6 +279,44 @@ impl Session {
             self.store.caches.retain(|id, _| live.contains_key(id));
         }
         Ok(changes)
+    }
+
+    /// How many times the files have changed under this session.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Each assembly's key for subscribers, for those that build: its
+    /// revision, its rebuild's hash and the pins of the labels it places,
+    /// all from one rebuild.
+    pub(crate) fn assembly_keys(&mut self) -> BTreeMap<Id, String> {
+        let assemblies: Vec<Id> = self
+            .project
+            .parts
+            .iter()
+            .filter(|(_, p)| {
+                p.file
+                    .as_ref()
+                    .is_ok_and(|f| f.kind == crate::doc::files::PartKind::Assembly)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut out = BTreeMap::new();
+        let _ = self.rebuild(|r| {
+            for id in assemblies {
+                let rev = r.project().parts[&id].revision.clone();
+                let Ok(res) = r.result(&id) else { continue };
+                let pins: Vec<String> = res
+                    .features
+                    .iter()
+                    .filter_map(|(_, o)| o.as_ref().ok()?.instance()?.model.pin.as_ref())
+                    .map(|p| format!("{p:?}"))
+                    .collect();
+                out.insert(id.clone(), format!("{rev}+{}+{}", res.hash, pins.join(",")));
+            }
+            Ok(())
+        });
+        out
     }
 
     /// Takes in what this session just wrote. Every write goes through here

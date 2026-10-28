@@ -3392,7 +3392,7 @@ fn feature_list(session: &mut Session, part: &str) -> Result<Value> {
 
 /// A part's rebuild as agents and subscribers see it: each feature's
 /// status, hash and counts.
-fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
+fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Value> {
     let part = session.project().part(id)?;
     let revision = part.revision.clone();
     let assembly = part_kind(part) == PartKind::Assembly;
@@ -3585,13 +3585,17 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
     // An assembly's model is what its instances place.
     warnings.extend(kept);
     if assembly {
-        let occurrences: Vec<Value> = crate::assembly::Model::of_assembly(r)
-            .occurrences
-            .iter()
-            .map(crate::assembly::Occurrence::to_json)
-            .collect();
+        let model = crate::assembly::Model::of_assembly(r);
         v["kind"] = json!("assembly");
-        v["occurrences"] = json!(occurrences);
+        v["occurrence_count"] = json!(model.occurrences.len());
+        if occurrences {
+            let all: Vec<Value> = model
+                .occurrences
+                .iter()
+                .map(crate::assembly::Occurrence::to_json)
+                .collect();
+            v["occurrences"] = json!(all);
+        }
         if let Some(solve) = &r.solve {
             v["solve"] = solve.to_json();
         }
@@ -3630,64 +3634,68 @@ pub fn publish(live: &mut Live, session: &mut Session) {
         live.hub.send(Topic::Merge, "merge.changed", &params);
     }
     live.seen.merge = merge;
-    // Release states: from records, parts and the release branch's refs,
-    // read only while someone watches. The first reading after a
-    // subscription is what it starts from.
-    if watched {
-        let now = crate::release::summary(session);
-        if let Some(seen) = &live.seen.pdm {
-            let changed: Vec<&Value> = now
-                .iter()
-                .filter(|(id, v)| seen.get(*id) != Some(*v))
-                .map(|(_, v)| v)
-                .collect();
-            if !changed.is_empty() {
-                live.hub
-                    .send(Topic::Pdm, "pdm.changed", &json!({"parts": changed}));
-            }
-        }
-        live.seen.pdm = Some(now);
-    } else {
+    if !watched {
+        // Noted only: a subscriber hears of what changes from now on.
         live.seen.pdm = None;
+        live.seen.at = None;
+        live.seen.parts = session
+            .project()
+            .parts
+            .iter()
+            .map(|(id, part)| (id.clone(), part.revision.clone()))
+            .collect();
+        return;
     }
-    let p = session.project();
-    let mut revisions: BTreeMap<Id, String> = p
+    // Release states and parts move with the files and the release
+    // branch's refs, and with nothing else: while neither has, a request
+    // has nothing to tell (issue #25: this ran over every part and
+    // assembly on every request a window was attached for).
+    let at = (session.epoch(), crate::release::refs(session));
+    if live.seen.at.as_ref() == Some(&at) {
+        return;
+    }
+    live.seen.at = Some(at);
+    // Release states: from records, parts and the release branch's refs.
+    // The first reading after a subscription is what it starts from.
+    let now = crate::release::summary(session);
+    if let Some(seen) = &live.seen.pdm {
+        let changed: Vec<&Value> = now
+            .iter()
+            .filter(|(id, v)| seen.get(*id) != Some(*v))
+            .map(|(_, v)| v)
+            .collect();
+        if !changed.is_empty() {
+            live.hub
+                .send(Topic::Pdm, "pdm.changed", &json!({"parts": changed}));
+        }
+    }
+    live.seen.pdm = Some(now);
+    let mut revisions: BTreeMap<Id, String> = session
+        .project()
         .parts
         .iter()
         .map(|(id, part)| (id.clone(), part.revision.clone()))
         .collect();
-    if !watched {
-        live.seen.parts = revisions;
-        return;
-    }
     // An assembly changes when what it places does, its files or not: its
     // rebuild's hash says so, and its labels' pins, which move with the
     // release branch and not with any file (issue #105).
-    let assemblies: Vec<Id> = p
-        .parts
-        .iter()
-        .filter(|(_, part)| part_kind(part) == PartKind::Assembly)
-        .map(|(id, _)| id.clone())
-        .collect();
-    for id in assemblies {
-        if let Ok(r) = session.rebuilt(&id) {
-            let pins: Vec<String> = r
-                .features
-                .iter()
-                .filter_map(|(_, o)| o.as_ref().ok()?.instance()?.model.pin.as_ref())
-                .map(|p| format!("{p:?}"))
-                .collect();
-            let key = format!("{}+{}+{}", revisions[&id], r.hash, pins.join(","));
-            revisions.insert(id, key);
-        }
-    }
+    revisions.extend(session.assembly_keys());
     let mut parts = Vec::new();
     for (id, rev) in &revisions {
-        if live.seen.parts.get(id) == Some(rev) {
-            continue;
+        match live.seen.parts.get(id) {
+            Some(was) if was == rev => continue,
+            // Noted while nobody watched, from its files alone, which
+            // haven't changed: what it places changing before the
+            // subscription isn't news.
+            Some(was) if !was.contains('+') && rev.split('+').next() == Some(was.as_str()) => {
+                continue;
+            }
+            _ => {}
         }
+        // An assembly's occurrences aren't sent: a window asks for those
+        // of the assembly it shows.
         let mut report =
-            part_report(session, id).unwrap_or_else(|e| json!({"part": id, "error": e}));
+            part_report(session, id, false).unwrap_or_else(|e| json!({"part": id, "error": e}));
         if let Ok(Err(e)) = session.project().part(id).map(|p| &p.file) {
             report["error"] = json!(e);
         }
@@ -3773,7 +3781,7 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
     for id in ids {
         // A part whose list can't be read can't be rebuilt.
         order(session.project().part(&id)?)?;
-        let mut report = part_report(session, &id)?;
+        let mut report = part_report(session, &id, true)?;
         failed += report["failed"].as_u64().unwrap_or(0) as usize;
         if let Some(Value::Array(w)) = report.as_object_mut().and_then(|o| o.remove("warnings")) {
             warnings.extend(w);
