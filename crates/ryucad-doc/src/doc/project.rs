@@ -3,6 +3,7 @@
 //! ```text
 //! ryucad.json
 //! ryupdm.json                       (optional: ryupdm's settings)
+//! materials.json                    (optional: the material library)
 //! parts/<part>/part.json
 //! parts/<part>/parameters.json      (optional)
 //! parts/<part>/properties.json      (optional: ryupdm's properties)
@@ -67,7 +68,12 @@ impl ImportFile {
 }
 
 /// The files at the project's root that a session tracks.
-pub const ROOT_FILES: [&str; 3] = [MANIFEST, ATTRIBUTES, PDM_CONFIG];
+pub const ROOT_FILES: [&str; 4] = [
+    MANIFEST,
+    ATTRIBUTES,
+    PDM_CONFIG,
+    super::materials::MATERIALS,
+];
 
 /// The key under which a file a merge couldn't settle lists its conflicts,
 /// by JSON pointer. No file kind uses it otherwise.
@@ -374,9 +380,11 @@ impl Project {
             match in_part {
                 Some(id) => ids.insert(id),
                 // Git's attributes, ryupdm's settings and its release
-                // records define nothing ryucad builds.
+                // records, and the material library, define nothing
+                // ryucad builds.
                 None if path == ATTRIBUTES
                     || path == PDM_CONFIG
+                    || path == super::materials::MATERIALS
                     || path.starts_with(&format!("{RELEASES}/")) =>
                 {
                     continue;
@@ -1029,6 +1037,12 @@ mod tests {
         fs::write(root.join(PDM_CONFIG), "{}").unwrap();
         project.reload(&[PDM_CONFIG.into()]).unwrap();
         assert_eq!(project.parts[&id("p")].revision, rev);
+        fs::write(root.join(super::super::materials::MATERIALS), "{}").unwrap();
+        project
+            .reload(&[super::super::materials::MATERIALS.into()])
+            .unwrap();
+        assert_eq!(project.parts[&id("p")].revision, rev);
+        assert!(project.unknown.is_empty());
         fs::write(properties_path(root, &id("p")), "{}").unwrap();
         project.reload(&["parts/p/properties.json".into()]).unwrap();
         assert_ne!(project.parts[&id("p")].revision, rev);

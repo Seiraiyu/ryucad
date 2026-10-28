@@ -50,7 +50,10 @@ fn volumes_add_up_through_unions_and_intersections() {
     let mut checked = 0;
     for k in 0..24u128 {
         let (a, b) = (solid(&mut g, 2 * k + 1), solid(&mut g, 2 * k + 2));
-        let (Ok(u), Ok(i)) = (op(BooleanOp::Unite, &a, &b), op(BooleanOp::Intersect, &a, &b)) else {
+        let (Ok(u), Ok(i)) = (
+            op(BooleanOp::Unite, &a, &b),
+            op(BooleanOp::Intersect, &a, &b),
+        ) else {
             continue;
         };
         if i.faces().next().is_none() {
@@ -59,13 +62,25 @@ fn volumes_add_up_through_unions_and_intersections() {
         let [ma, mb, mu, mi] = [&a, &b, &u, &i].map(weigh);
         let lhs = ma.volume.value() + mb.volume.value();
         let rhs = mu.volume.value() + mi.volume.value();
-        let bound = [&ma, &mb, &mu, &mi].iter().map(|m| m.volume.bound()).sum::<f64>();
-        assert!((lhs - rhs).abs() <= bound, "case {k}: {lhs} against {rhs} ± {bound}");
+        let bound = [&ma, &mb, &mu, &mi]
+            .iter()
+            .map(|m| m.volume.bound())
+            .sum::<f64>();
+        assert!(
+            (lhs - rhs).abs() <= bound,
+            "case {k}: {lhs} against {rhs} ± {bound}"
+        );
         // The quadrature is far better than its bound.
-        assert!((lhs - rhs).abs() <= 1e-7 * lhs, "case {k}: {lhs} against {rhs}");
+        assert!(
+            (lhs - rhs).abs() <= 1e-7 * lhs,
+            "case {k}: {lhs} against {rhs}"
+        );
         let first = |m: &MassProperties| m.centre.to_vector() * m.volume.value();
         let d = first(&ma) + first(&mb) - first(&mu) - first(&mi);
-        assert!(d.length() <= 1e-7 * lhs, "case {k}: first moments differ by {d:?}");
+        assert!(
+            d.length() <= 1e-7 * lhs,
+            "case {k}: first moments differ by {d:?}"
+        );
         checked += 1;
     }
     assert!(checked >= 12, "only {checked} cases built");

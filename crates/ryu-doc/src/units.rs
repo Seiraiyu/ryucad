@@ -92,6 +92,16 @@ impl Dim {
     pub const CAPACITANCE: Dim = Dim::of([-2, 0, -1, 4, 2]);
     pub const INDUCTANCE: Dim = Dim::of([2, 0, 1, -2, -2]);
     pub const POWER: Dim = Dim::of([2, 0, 1, -3, 0]);
+    pub const MASS: Dim = Dim::of([0, 0, 1, 0, 0]);
+    pub const DENSITY: Dim = Dim::of([-3, 0, 1, 0, 0]);
+
+    /// Mass and density by name, and the symbol output writes their SI
+    /// unit with. Like the electrical ones, they are read only by
+    /// [`Quantity::density`], never in expressions.
+    pub const MECHANICAL: [(&'static str, Dim, &'static str); 2] = [
+        ("mass", Dim::MASS, "kg"),
+        ("density", Dim::DENSITY, "kg/m^3"),
+    ];
 
     /// The electrical dimensions by name, and the symbol of their SI unit.
     pub const ELECTRICAL: [(&'static str, Dim, &'static str); 8] = [
@@ -167,7 +177,11 @@ impl Dim {
     /// and any other product of powers in the order length, angle, mass,
     /// time, current (`mass*time^-2`).
     pub fn name(self) -> String {
-        if let Some((name, _, _)) = Dim::ELECTRICAL.iter().find(|(_, d, _)| *d == self) {
+        if let Some((name, _, _)) = Dim::ELECTRICAL
+            .iter()
+            .chain(&Dim::MECHANICAL)
+            .find(|(_, d, _)| *d == self)
+        {
             return (*name).to_owned();
         }
         let part = |name: &str, p: i8| match p {
@@ -435,6 +449,40 @@ impl Quantity {
         }
     }
 
+    /// A density: a literal `<number> kg/m^3` or `<number> g/cm^3`
+    /// (`7850 kg/m^3`, `7.85 g/cm^3`), kept as written with the unit's
+    /// spelling; its SI value is in kg/m³. No default unit, no expression.
+    pub fn density(s: &str) -> Result<Quantity> {
+        let t = s.trim();
+        let end = number_len(t);
+        let (number, rest) = t.split_at(end);
+        let unit = match rest.trim_start() {
+            "kg/m^3" => Some((1.0, "kg/m^3".to_owned())),
+            "g/cm^3" => Some((1000.0, "g/cm^3".to_owned())),
+            _ => None,
+        };
+        match unit.filter(|_| end > 0) {
+            Some(unit) => {
+                let q = Quantity::literal(s, number, unit, Dim::DENSITY)?;
+                if q.si > 0.0 {
+                    Ok(q)
+                } else {
+                    Err(Error::new(
+                        Code::InvalidQuantity,
+                        format!("bad quantity {s:?}: a density must be positive"),
+                    )
+                    .with("value", s))
+                }
+            }
+            None => Err(Error::new(
+                Code::InvalidQuantity,
+                format!("bad quantity {s:?}: expected a density such as \"7850 kg/m^3\" or \"7.85 g/cm^3\""),
+            )
+            .with("value", s)
+            .with("kind", "density")),
+        }
+    }
+
     /// An electrical quantity's value in SI units (volts, amperes, ohms,
     /// farads, henries, hertz, watts or seconds).
     pub fn si(&self) -> f64 {
@@ -643,6 +691,28 @@ mod tests {
         ] {
             let e = Quantity::electrical(s, d).unwrap_err();
             assert_eq!(e.code, Code::InvalidQuantity, "{s}");
+        }
+    }
+
+    #[test]
+    fn densities() {
+        let q = Quantity::density("7850 kg/m^3").unwrap();
+        assert_eq!((q.text().as_str(), q.si()), ("7850 kg/m^3", 7850.0));
+        let q = Quantity::density(" 7.85  g/cm^3").unwrap();
+        assert_eq!((q.text().as_str(), q.si()), ("7.85 g/cm^3", 7850.0));
+        assert_eq!(Dim::DENSITY.name(), "density");
+        assert_eq!(Dim::MASS.name(), "mass");
+        assert_eq!(Dim::parse("density"), None);
+        for bad in [
+            "7850",
+            "kg/m^3",
+            "7850 kg",
+            "0 kg/m^3",
+            "-1 g/cm^3",
+            "7850 kg/m3",
+        ] {
+            let e = Quantity::density(bad).unwrap_err();
+            assert_eq!(e.code, Code::InvalidQuantity, "{bad}");
         }
     }
 

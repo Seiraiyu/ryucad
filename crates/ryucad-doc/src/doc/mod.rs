@@ -10,6 +10,7 @@ pub mod fixtures;
 pub mod hole;
 pub mod import;
 pub mod mate;
+pub mod materials;
 pub mod pattern;
 pub mod project;
 pub mod reference;
