@@ -1,0 +1,8 @@
+
+## Clearance (decided in ryucad phase 10)
+
+The design is document 198 in the Coxswain planning project `ryucad-ryukei`; this is its phase 2, plan 10.A.
+
+- **Clearance.** `clearance` (`ryucad clearance <asm> [--instance <path>…] [--below <length>]`, `crate::clearance`): every pair of solids of different occurrences whose boxes come within `below` (a length in the default unit; by default a hundredth of the assembly's diagonal), from interference's sweep along x grown by it, measured by `ryukei::measure::distance` with the second placed in the first's frame; closest first, each with its distance and both nearest points in the assembly's frame. A pair at `Exact(0)` is `contact` (touching or interfering: `interference` says which); a refusal leaves the pair `unchecked` with ryukei's error. Results are kept by the session by both bodies' hashes and the bits of the relative pose (`Session::clearance`, interference's key). `wrong_part_kind` for a part, `not_found` for an instance path that places nothing, `invalid_param` for a negative reach.
+- **Assembly mass.** `mass` of an assembly or an occurrence adds every occurrence's solids at its pose, each part at its own material's density (see Measure, mass and materials in `ryucad-session.md`).
+- **Testing.** `clearance.rs` unit tests (a bolt standing on a plate at 0, one 10 mm off, the default reach, a longer one, narrowing by instance, the cache), `mass.rs`'s assembly test, `tests/cli.rs`'s interference scenario, the `measure` golden section, and the `feature` fuzz target finding clearances from its cache and from nothing on every assembly it builds, a pair sharing a volume at 0.
