@@ -1720,6 +1720,18 @@ pub(crate) mod tests {
             "{r}"
         );
         assert_eq!(crate::doctor::diagnose(root), []);
+        // Its BOM: the block twice, the pin once.
+        let bom = crate::server::tests::call(&mut s, "bom.get", json!({})).unwrap();
+        let rows: Vec<(&Value, &Value)> = bom["tree"]["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (&r["part"], &r["quantity"]["count"]))
+            .collect();
+        assert_eq!(
+            rows,
+            [(&json!("block"), &json!(2)), (&json!("pin"), &json!(1))]
+        );
         // Imported again, it is parts of its own: an import shares only
         // within itself.
         let v = import_call(&mut s, json!({"path": path})).unwrap();
