@@ -4,6 +4,8 @@
 
 mod build;
 mod ellipse;
+#[allow(dead_code)] // Its first user is thermals, task 18.
+mod ring;
 mod stroke;
 mod symbols;
 
