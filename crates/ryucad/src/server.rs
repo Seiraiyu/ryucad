@@ -29,7 +29,7 @@ use crate::solid::Solids;
 use crate::units::{Quantity, Unit};
 use crate::view::{Camera, DEFAULT_PROJECTION, StandardView};
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -2779,7 +2779,10 @@ fn feature_add(
     if FEATURE_TYPES.contains(&ty) {
         let fid = match id {
             Some(id) => feature_id(id)?,
-            None => Id::generate(ty, |s| p.features.keys().any(|f| f.as_str() == s)),
+            None => {
+                let taken: BTreeSet<&str> = p.features.keys().map(Id::as_str).collect();
+                Id::generate(ty, |s| taken.contains(s))
+            }
         };
         if let Some(e) = crate::assembly::kind_error_of(p, &fid, ty) {
             return Err(e);
@@ -2904,9 +2907,12 @@ fn feature_add(
     };
     let fid = match id {
         Some(id) => feature_id(id)?,
-        None => Id::generate(f.type_name(), |s| {
-            p.features.keys().any(|f| f.as_str() == s)
-        }),
+        None => {
+            // A set, not a scan per candidate: in a list of thousands the
+            // first free number is thousands of candidates in (issue #25).
+            let taken: BTreeSet<&str> = p.features.keys().map(Id::as_str).collect();
+            Id::generate(f.type_name(), |s| taken.contains(s))
+        }
     };
     if p.features.contains_key(&fid) {
         return Err(Error::new(

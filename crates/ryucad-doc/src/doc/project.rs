@@ -347,6 +347,14 @@ impl Project {
     /// outside a part changed. Leaves the project as [`Project::load`]
     /// would.
     pub fn reload(&mut self, changed: &[String]) -> Result<()> {
+        let root = self.root.clone();
+        self.reload_from(&Folder(&root), changed)
+    }
+
+    /// [`Project::reload`], reading through `src`, which must hold the
+    /// project's files as they are now: a session reads the bytes it has
+    /// just checked, rather than every file of a changed part again.
+    pub fn reload_from(&mut self, src: &dyn Source, changed: &[String]) -> Result<()> {
         let mut ids = BTreeSet::new();
         let mut imported = BTreeSet::new();
         for path in changed {
@@ -355,7 +363,7 @@ impl Project {
                 && super::import::is_import_path(path)
                 && !self.unknown.contains(path)
             {
-                match Folder(&self.root).read(path)? {
+                match src.read(path)? {
                     Some(bytes) => {
                         self.imports.insert(path.clone(), ImportFile::new(bytes));
                     }
@@ -382,7 +390,7 @@ impl Project {
                     continue;
                 }
                 None => {
-                    *self = Project::load(&self.root)?;
+                    *self = Project::load_from(&self.root, src)?;
                     return Ok(());
                 }
             };
@@ -408,7 +416,7 @@ impl Project {
             if part_dir(&self.root, &id).is_dir() {
                 let mut unknown = Vec::new();
                 let part = load_part(
-                    &Folder(&self.root),
+                    src,
                     &self.manifest,
                     self.manifest_fault.as_ref(),
                     &self.manifest_bytes,
