@@ -119,6 +119,9 @@ pub struct Made {
     /// An import's report: its file, product and what healing did (see
     /// [`crate::import::report`]).
     pub import: Option<Arc<Value>>,
+    /// Its disk cache entry's size, once written or read: what the
+    /// memory budget counts it by.
+    pub encoded: std::sync::OnceLock<u64>,
 }
 
 /// What a join, cut or hole applied to its targets: its own body, its
@@ -178,6 +181,7 @@ impl Made {
             hash,
             applied: None,
             import: None,
+            encoded: Default::default(),
         }
     }
 }
@@ -2096,7 +2100,10 @@ fn from_disk(disk: &Disk, h: &blake3::Hash, part: &Id, id: &Id) -> Option<Output
     let input = disk_input(h, part, id);
     let bytes = disk.get(Kind::Feature, &input)?;
     match crate::cache::results::decode_made(&bytes) {
-        Some(m) => Some(Output::Solids(Arc::new(m))),
+        Some(m) => {
+            let _ = m.encoded.set(bytes.len() as u64);
+            Some(Output::Solids(Arc::new(m)))
+        }
         None => {
             disk.discard(Kind::Feature, &input);
             None
@@ -2134,11 +2141,9 @@ fn to_disk(
     tool: Option<&(blake3::Hash, Arc<Built>, bool)>,
 ) {
     if let Ok(Output::Solids(m)) = r {
-        disk.put(
-            Kind::Feature,
-            &disk_input(h, part, id),
-            &crate::cache::results::encode_made(m),
-        );
+        let bytes = crate::cache::results::encode_made(m);
+        let _ = m.encoded.set(bytes.len() as u64);
+        disk.put(Kind::Feature, &disk_input(h, part, id), &bytes);
     }
     if let Some((th, b, true)) = tool {
         disk.put(

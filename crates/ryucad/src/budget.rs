@@ -1,8 +1,10 @@
 //! A daemon's memory budget (`session.max_memory`): how much of parts'
 //! rebuilds it holds, least recently used first out.
 //!
-//! What a part's rebuild holds is counted by its bodies' and journals'
-//! encoded sizes (the codec's lengths, measured once per body). Past the
+//! What a part's rebuild holds is counted by its results' encoded sizes
+//! (their disk cache entries', else the codec's lengths, measured once
+//! per body) times [`RESIDENT`]: a body takes about three times its
+//! encoding in memory. Past the
 //! budget, whole parts' rebuilds go (their features' results and their
 //! caches), least recently used first, but never what an assembly's model
 //! shows of them: each placed part's model (the solids it shows), which
@@ -14,9 +16,14 @@
 //! until it answers.
 
 use crate::doc::id::Id;
-use crate::rebuild::{Built, Cache, PartResult};
+use crate::rebuild::{Built, Cache, Made, Output, PartResult};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
+
+/// What a result takes in memory for each byte of its encoding, as
+/// measured over design 192's benchmark project: 1.9 GB of encoded bodies
+/// held in 5.2 GB, once origins and names shared their values.
+pub const RESIDENT: u64 = 3;
 
 /// The default budget: a quarter of the machine's memory, from 512 MiB to
 /// 8 GiB (512 MiB where the machine doesn't say).
@@ -95,12 +102,30 @@ pub struct Budget {
     pub evictions: u64,
     /// Whether what must be held has passed the budget, and been warned of.
     pub too_small: bool,
+    /// What is held, once worked out, until something changes it: a
+    /// request that builds nothing doesn't count 10,000 parts again.
+    held_now: std::cell::Cell<Option<u64>>,
 }
 
 impl Budget {
     /// Whether there is a budget to keep.
     pub fn on(&self) -> bool {
         self.max > 0
+    }
+
+    /// What is held, if worked out since it last changed.
+    pub fn cached(&self) -> Option<u64> {
+        self.held_now.get()
+    }
+
+    /// Notes what is held, until it changes.
+    pub fn cache(&self, held: u64) {
+        self.held_now.set(Some(held));
+    }
+
+    /// What is held may have changed.
+    pub fn changed(&self) {
+        self.held_now.set(None);
     }
 
     /// Notes that `part` was just used.
@@ -127,41 +152,59 @@ impl Budget {
         if let Some(n) = self.sizes.get(&b.hash) {
             return *n;
         }
-        let n = (ryukei::codec::encode_body(&b.body).len()
-            + ryukei::codec::encode_journal(&b.journal).len()) as u64;
+        let n = RESIDENT
+            * (ryukei::codec::encode_body(&b.body).len()
+                + ryukei::codec::encode_journal(&b.journal).len()) as u64;
         self.sizes.insert(b.hash.clone(), n);
         n
     }
 
+    /// What `m` holds in memory: its disk entry's size where it has one,
+    /// else its bodies', encoded.
+    fn made_size(&mut self, m: &Made) -> u64 {
+        match m.encoded.get() {
+            Some(n) => RESIDENT * n,
+            None => m.solids.iter().map(|(_, b)| self.size(b)).sum(),
+        }
+    }
+
     /// Measures what `part`'s rebuild `result` and its `cache` hold, and
-    /// of that what `shown` (its model's bodies) does.
-    pub fn measure(&mut self, part: &Id, result: &PartResult, cache: &Cache, shown: &[&Built]) {
+    /// of that what `shown` (the results its model shows) does.
+    pub fn measure(&mut self, part: &Id, result: &PartResult, cache: &Cache, shown: &[&Made]) {
         if !self.on() {
             return;
         }
         let mut seen = BTreeSet::new();
         let mut all = 0;
-        let bodies = result
+        let made: Vec<Arc<Made>> = result
             .features
             .iter()
             .map(|(_, r)| r)
             .chain(cache.features.values().map(|(_, r)| r))
-            .filter_map(|r| r.as_ref().ok())
-            .flat_map(|o| o.solids().iter().map(|(_, b)| Arc::clone(b)))
-            .chain(cache.tools.values().map(|(_, b)| Arc::clone(b)));
-        for b in bodies {
-            if seen.insert(b.hash.clone()) {
-                all += self.size(&b);
+            .filter_map(|r| match r {
+                Ok(Output::Solids(m)) => Some(Arc::clone(m)),
+                _ => None,
+            })
+            .collect();
+        for m in made {
+            if seen.insert(Arc::as_ptr(&m)) {
+                all += self.made_size(&m);
             }
         }
-        let shown = shown.iter().map(|b| self.size(b)).sum();
+        let tools: Vec<Arc<Built>> = cache.tools.values().map(|(_, b)| Arc::clone(b)).collect();
+        for b in tools {
+            all += self.size(&b);
+        }
+        let shown = shown.iter().map(|m| self.made_size(m)).sum();
         self.held.insert(part.clone(), Held { all, shown });
+        self.changed();
     }
 
     /// Forgets parts the project no longer has.
     pub fn retain(&mut self, live: impl Fn(&Id) -> bool) {
         self.held.retain(|id, _| live(id));
         self.used.retain(|id, _| live(id));
+        self.changed();
     }
 
     /// What is held: the rebuilds of the parts in `results`, the shown
@@ -209,6 +252,9 @@ impl Budget {
             out.push(id);
         }
         self.evictions += out.len() as u64;
+        if !out.is_empty() {
+            self.changed();
+        }
         if total > self.max && !self.too_small {
             self.too_small = true;
             eprintln!(

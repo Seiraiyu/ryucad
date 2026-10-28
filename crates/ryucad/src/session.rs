@@ -341,6 +341,7 @@ impl Session {
                     .is_some_and(|p| key.split('+').next() == Some(p.revision.as_str()))
             });
             self.store.caches.retain(|id, _| live.contains_key(id));
+            self.store.budget.changed();
             let current = |id: &Id, key: &str| {
                 live.get(id)
                     .is_some_and(|p| key.split('+').next() == Some(p.revision.as_str()))
