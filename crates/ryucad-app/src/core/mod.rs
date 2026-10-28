@@ -3,6 +3,7 @@
 pub mod activity;
 pub mod bom;
 pub mod compare;
+pub mod cube;
 pub mod doctor;
 pub mod edit;
 pub mod geometry;
