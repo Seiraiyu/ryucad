@@ -125,6 +125,13 @@ const KEYS: &[Key] = &[
         about: "whether sketches are drawn",
     },
     Key {
+        name: "display.gpu_memory",
+        scope: Scope::User,
+        rule: Rule::Int(1 << 26, 1 << 40),
+        default: || json!(2u64 << 30),
+        about: "how many bytes of meshes a window keeps on its graphics adapter",
+    },
+    Key {
         name: "display.mesh_cache_mib",
         scope: Scope::User,
         rule: Rule::Int(16, 65536),
