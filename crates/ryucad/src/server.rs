@@ -208,6 +208,8 @@ pub fn answer_live(
         }
         l.announce(&before);
         publish(l, session);
+        // What the request used may go now that it has answered.
+        session.trim();
     }
     result
 }
@@ -1039,6 +1041,13 @@ fn guarded<T>(
                 d.trim_in_background();
             }
             let mut s = Session::open(root)?.with_disk(disk);
+            // A daemon's session lives on, within its memory budget.
+            if watch {
+                let max = config::user("session.max_memory")
+                    .as_u64()
+                    .unwrap_or_else(crate::budget::default_max);
+                s = s.with_budget(max);
+            }
             // A daemon's session lives on: file events narrow its checks,
             // its markers beside its log.
             if watch {
@@ -3675,6 +3684,7 @@ pub fn settle(slot: &mut Option<Session>, live: &mut Live, root: &Path) {
         }
         live.announce(&before);
         publish(live, s);
+        s.trim();
         Ok(Value::Null)
     });
 }

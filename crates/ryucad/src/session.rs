@@ -158,6 +158,59 @@ impl Session {
         self
     }
 
+    /// The session holding at most `max` bytes of parts' rebuilds and
+    /// display meshes between requests (see [`crate::budget`]).
+    pub fn with_budget(mut self, max: u64) -> Session {
+        self.store.budget.max = max;
+        self
+    }
+
+    /// Lets go of what the budget doesn't cover, once a request has
+    /// answered: past it, the revisions' sessions let go of their parts'
+    /// rebuilds first, then this one of its parts', least recently used
+    /// first.
+    pub fn trim(&mut self) {
+        self.store.budget.unpin();
+        if !self.store.budget.on() {
+            return;
+        }
+        let meshes = self.meshes.bytes() as u64;
+        if self.store.held(&self.project, meshes) > self.store.budget.max {
+            for (_, r) in &mut self.revisions {
+                let project = &r.project;
+                r.store
+                    .results
+                    .retain(|id, _| !crate::assembly::is_leaf(project, id));
+                r.store.caches.clear();
+            }
+        }
+        self.store.trim(&self.project, meshes);
+    }
+
+    /// The budget's state for `daemon status`: its bound, what it holds,
+    /// how many parts' rebuilds it has let go, and how many it holds.
+    pub fn budget_status(&self) -> Value {
+        let held = self.store.held(&self.project, self.meshes.bytes() as u64);
+        let mut v = self.store.budget.to_json(held);
+        v["parts_held"] = json!(
+            self.store
+                .results
+                .keys()
+                .filter(|id| crate::assembly::is_leaf(&self.project, id))
+                .count()
+        );
+        v["meshes_bytes"] = json!(self.meshes.bytes());
+        v
+    }
+
+    /// What `part`'s rebuild was at its revision, if this session built
+    /// it: its hash and how many of its features failed.
+    pub fn summary(&self, part: &Id) -> Option<(&str, usize)> {
+        let rev = &self.project.parts.get(part)?.revision;
+        let (key, hash, failed) = self.store.summaries.get(part)?;
+        (key.split('+').next() == Some(rev.as_str())).then_some((hash.as_str(), *failed))
+    }
+
     /// The watch's state for `daemon status`, if this session watches.
     pub fn watch_status(&self) -> Option<Value> {
         let w = self.watching.as_ref()?;
@@ -192,6 +245,12 @@ impl Session {
                 pinned: from.store.pinned.clone(),
                 pinned_caches: from.store.pinned_caches.clone(),
                 disk: from.store.disk.clone(),
+                // Keyed by what they were built from, so a revision
+                // reuses those its files agree with.
+                models: from.store.models.clone(),
+                summaries: BTreeMap::new(),
+                // Its owner lets its rebuilds go (see `trim`).
+                budget: Default::default(),
             },
             pinned_parts: from.pinned_parts.clone(),
             known: from.known.clone(),
@@ -277,6 +336,15 @@ impl Session {
                     .is_some_and(|p| key.split('+').next() == Some(p.revision.as_str()))
             });
             self.store.caches.retain(|id, _| live.contains_key(id));
+            let current = |id: &Id, key: &str| {
+                live.get(id)
+                    .is_some_and(|p| key.split('+').next() == Some(p.revision.as_str()))
+            };
+            self.store.models.retain(|id, (key, _)| current(id, key));
+            self.store
+                .summaries
+                .retain(|id, (key, ..)| current(id, key));
+            self.store.budget.retain(|id| live.contains_key(id));
         }
         Ok(changes)
     }
@@ -342,6 +410,7 @@ impl Session {
     /// places, rebuilt first.
     pub fn rebuilt(&mut self, part: &Id) -> Result<&PartResult> {
         self.project.part(part)?;
+        self.store.budget.pin(part);
         self.rebuild(|r| r.result(part).map(|_| ()))?;
         Ok(&self.store.results[part].1)
     }
@@ -416,6 +485,7 @@ impl Session {
         part: &Id,
         rev: &Rev,
     ) -> Result<(Part, PartResult, Option<crate::assembly::Pin>)> {
+        self.store.budget.pin(part);
         let extra = match rev {
             Rev::Working => Vec::new(),
             Rev::Label(l) => vec![(part.clone(), l.clone())],
@@ -496,14 +566,17 @@ impl Session {
         let mut r = Rebuild::new(&self.project, &pins, store);
         let out = f(&mut r);
         let fresh = std::mem::take(&mut r.fresh);
+        let learned = std::mem::take(&mut r.learned);
         self.store = r.store;
-        self.keep_fresh(fresh);
+        self.keep_fresh(fresh, learned);
         out
     }
 
     /// Learns the names of the parts just rebuilt, and explains their
     /// failures against these results.
-    fn keep_fresh(&mut self, fresh: Vec<Id>) {
+    fn keep_fresh(&mut self, fresh: Vec<Id>, learned: Vec<Name>) {
+        // Parts whose rebuilds the budget let go learnt their names first.
+        self.learn_names(learned);
         for id in fresh {
             let (key, result) = self.store.results.remove(&id).expect("rebuilt");
             self.learn(&id, &result);
@@ -697,33 +770,12 @@ impl Session {
 
     /// Notes what every name of the part's solids is, by solid.
     fn learn(&mut self, part: &Id, result: &PartResult) {
-        let solids = result
-            .features
-            .iter()
-            .filter_map(|(_, r)| r.as_ref().ok())
-            .flat_map(|o| o.solids());
-        for (solid, b) in solids {
-            let known = self.known.entry((part.clone(), solid.clone())).or_default();
-            let body = &b.body;
-            let names = body
-                .faces()
-                .map(|f| (body.face(f).expect("live").name, "face"))
-                .chain(
-                    body.edges()
-                        .map(|e| (body.edge(e).expect("live").name, "edge")),
-                )
-                .chain(
-                    body.vertices()
-                        .map(|v| (body.vertex(v).expect("live").name, "vertex")),
-                );
-            for (name, kind) in names {
-                let name = name.to_string();
-                let mut was = json!({ "kind": kind });
-                if let Some(from) = b.origins.get(&name) {
-                    was["from"] = from.clone();
-                }
-                known.insert(name, was);
-            }
+        self.learn_names(names_of(part, result));
+    }
+
+    fn learn_names(&mut self, names: Vec<Name>) {
+        for (key, name, was) in names {
+            self.known.entry(key).or_default().insert(name, was);
         }
     }
 
@@ -785,6 +837,44 @@ impl Session {
         }
         Ok(changes)
     }
+}
+
+/// What a name of a part's solid was: the part and solid, the name, and
+/// its kind and, where known, where it came from.
+pub type Name = ((Id, Id), String, Value);
+
+/// Every name the solids of `result` (a rebuild of `part`) have, as a
+/// session learns them.
+pub(crate) fn names_of(part: &Id, result: &PartResult) -> Vec<Name> {
+    let mut out = Vec::new();
+    let solids = result
+        .features
+        .iter()
+        .filter_map(|(_, r)| r.as_ref().ok())
+        .flat_map(|o| o.solids());
+    for (solid, b) in solids {
+        let body = &b.body;
+        let names = body
+            .faces()
+            .map(|f| (body.face(f).expect("live").name, "face"))
+            .chain(
+                body.edges()
+                    .map(|e| (body.edge(e).expect("live").name, "edge")),
+            )
+            .chain(
+                body.vertices()
+                    .map(|v| (body.vertex(v).expect("live").name, "vertex")),
+            );
+        for (name, kind) in names {
+            let name = name.to_string();
+            let mut was = json!({ "kind": kind });
+            if let Some(from) = b.origins.get(&name) {
+                was["from"] = from.clone();
+            }
+            out.push(((part.clone(), solid.clone()), name, was));
+        }
+    }
+    out
 }
 
 /// Whether an event's path (relative, with `/`) can matter to a project's

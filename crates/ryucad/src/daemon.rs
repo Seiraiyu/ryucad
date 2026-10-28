@@ -77,7 +77,7 @@ impl ryu_session::Serve for Cad {
     }
 
     fn status(session: &Session) -> Value {
-        serde_json::json!({ "watch": session.watch_status() })
+        serde_json::json!({ "watch": session.watch_status(), "budget": session.budget_status() })
     }
 
     fn settle(session: &mut Option<Session>, live: &mut Live, root: &Path) {

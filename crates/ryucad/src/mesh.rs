@@ -233,6 +233,11 @@ impl Cache {
         self.entries.len()
     }
 
+    /// What the meshes held take, in bytes.
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
