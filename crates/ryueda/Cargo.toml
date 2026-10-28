@@ -1,0 +1,22 @@
+[package]
+name = "ryueda"
+description = "Agent-driven electronics CAD: projects of canonical JSON in Git, a component library, connectivity and ERC"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+ryu-doc = { path = "../ryu-doc" }
+ryu-session = { path = "../ryu-session" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+tempfile = "3"
+
+# musl's allocator is slow under multithreaded allocation; ryucad's
+# release binaries take mimalloc for the same reason.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = "0.1"
