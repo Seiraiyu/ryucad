@@ -7,4 +7,5 @@
 
 pub mod geom;
 pub mod model;
+pub mod shape;
 pub mod symbol;
