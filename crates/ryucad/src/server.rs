@@ -182,6 +182,10 @@ pub fn answer_live(
             unit,
             time_stamp,
             file_name,
+            chord,
+            angle,
+            max_edge,
+            ascii,
         } => crate::export::export(
             session,
             crate::export::Ask {
@@ -193,6 +197,10 @@ pub fn answer_live(
                 unit,
                 time_stamp,
                 file_name,
+                chord,
+                angle,
+                max_edge,
+                ascii,
             },
         ),
         req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
@@ -1079,7 +1087,7 @@ fn mesh_pending(
 }
 
 /// The display mesh cache's budget in bytes.
-fn mesh_budget() -> usize {
+pub(crate) fn mesh_budget() -> usize {
     config::user("display.mesh_cache_mib")
         .as_u64()
         .unwrap_or(256) as usize

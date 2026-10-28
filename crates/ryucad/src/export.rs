@@ -1,7 +1,9 @@
 //! Export: a part or an assembly, at the working files, a Git revision or
 //! a release label, as a file of one of the [`Format`]s. With `out` the
 //! daemon writes the file itself, atomically, streaming it, so no file
-//! crosses the socket; without, its bytes follow the answer.
+//! crosses the socket; without, its bytes follow the answer. Mesh formats
+//! take ryukei's meshes at the export's chord and angle, each body meshed
+//! once whatever the occurrences, through the session's mesh cache.
 //!
 //! A part is one product of its solids as shown, in model order (consumed
 //! solids aren't); an assembly is a product placing each instance's
@@ -104,20 +106,26 @@ pub struct Ask {
     pub unit: Option<String>,
     pub time_stamp: Option<String>,
     pub file_name: Option<String>,
+    pub chord: Option<String>,
+    pub angle: Option<String>,
+    pub max_edge: Option<String>,
+    pub ascii: bool,
 }
 
 /// The formats `export` writes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
     Step,
+    Stl,
 }
 
 impl Format {
-    pub const ALL: [Format; 1] = [Format::Step];
+    pub const ALL: [Format; 2] = [Format::Step, Format::Stl];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Format::Step => "step",
+            Format::Stl => "stl",
         }
     }
 
@@ -126,12 +134,86 @@ impl Format {
     }
 
     /// The format a file name's extension names, in any case: `.step` or
-    /// `.stp`.
+    /// `.stp`, `.stl`.
     pub fn of_path(path: &str) -> Option<Format> {
         let ext = std::path::Path::new(path).extension()?.to_str()?;
         match ext.to_ascii_lowercase().as_str() {
             "step" | "stp" => Some(Format::Step),
+            "stl" => Some(Format::Stl),
             _ => None,
+        }
+    }
+}
+
+/// What a format is written with, read from the ask and checked before
+/// anything is built: an option another format takes is `invalid_param`.
+enum Options {
+    Step {
+        schema: Schema,
+        schema_name: &'static str,
+        unit: LengthUnit,
+        unit_name: &'static str,
+    },
+    Stl {
+        unit: ryuformats::Unit,
+        mesh: MeshOptions,
+        ascii: bool,
+    },
+}
+
+impl Options {
+    /// `format`'s options from `ask`, a bare length in `default` units.
+    fn read(format: Format, ask: &Ask, default: units::Unit) -> Result<Options> {
+        let not_for = |param: &str, given: bool| -> Result<()> {
+            if !given {
+                return Ok(());
+            }
+            Err(Error::new(
+                Code::InvalidParam,
+                format!("{param} doesn't apply to {}", format.as_str()),
+            )
+            .with("param", param))
+        };
+        let unit = ask.unit.as_deref().unwrap_or("mm");
+        match format {
+            Format::Step => {
+                not_for("chord", ask.chord.is_some())?;
+                not_for("angle", ask.angle.is_some())?;
+                not_for("max_edge", ask.max_edge.is_some())?;
+                not_for("ascii", ask.ascii)?;
+                let (schema, schema_name) = match ask.schema.as_deref().unwrap_or("ap242") {
+                    "ap242" => (Schema::Ap242, "ap242"),
+                    "ap214" => (Schema::Ap214, "ap214"),
+                    other => return Err(invalid("schema", other, "ap242 or ap214")),
+                };
+                let (unit, unit_name) = match unit {
+                    "mm" => (LengthUnit::Millimeter, "mm"),
+                    "m" => (LengthUnit::Meter, "m"),
+                    other => return Err(invalid("unit", other, "mm or m")),
+                };
+                Ok(Options::Step {
+                    schema,
+                    schema_name,
+                    unit,
+                    unit_name,
+                })
+            }
+            Format::Stl => {
+                not_for("schema", ask.schema.is_some())?;
+                let unit = ryuformats::Unit::parse(unit)
+                    .ok_or_else(|| invalid("unit", unit, "mm, cm or m"))?;
+                let mesh = MeshOptions::read(
+                    ask.chord.as_deref(),
+                    ask.angle.as_deref(),
+                    ask.max_edge.as_deref(),
+                    default,
+                )?;
+                Ok(Options::Stl {
+                    unit,
+                    mesh,
+                    ascii: ask.ascii,
+                })
+            }
         }
     }
 }
@@ -243,20 +325,12 @@ impl<W: std::io::Write> std::io::Write for Tally<W> {
 /// Writes `ask.part` in the format asked for: the answer, and the file
 /// written to `out` or its bytes following the answer. `export_failed`
 /// when a feature of anything it places fails, `export_unrepresentable`
-/// for a face STEP can't describe.
+/// for a face STEP can't describe, `export_mesh_faults` and
+/// `export_too_large` for bodies a mesh format can't mesh.
 pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
     let format = format(&ask)?;
+    let options = Options::read(format, &ask, session.project().manifest.default_unit)?;
     let out = ask.out.as_deref().map(out_path).transpose()?;
-    let (schema, schema_name) = match ask.schema.as_deref().unwrap_or("ap242") {
-        "ap242" => (Schema::Ap242, "ap242"),
-        "ap214" => (Schema::Ap214, "ap214"),
-        other => return Err(invalid("schema", other, "ap242 or ap214")),
-    };
-    let (unit, unit_name) = match ask.unit.as_deref().unwrap_or("mm") {
-        "mm" => (LengthUnit::Millimeter, "mm"),
-        "m" => (LengthUnit::Meter, "m"),
-        other => return Err(invalid("unit", other, "mm or m")),
-    };
     let part = crate::server::part_id(&ask.part)?;
     let (label, git) = match ask.rev.as_deref() {
         Some(r) if r.starts_with("label:") => {
@@ -300,19 +374,6 @@ pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
         (None, Some(c)) => utc(crate::git::repo(s.root())?.commit_time(c)?),
         (None, None) => utc(now()),
     };
-    let file_name = ask.file_name.or_else(|| {
-        out.as_ref()
-            .and_then(|o| o.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-    });
-    let opts = WriteOptions {
-        schema,
-        unit,
-        file_name: file_name.unwrap_or_default(),
-        time_stamp,
-        ..WriteOptions::default()
-    };
-    let bytes = ryustep::write(&step_model(&walk.scene), &opts).map_err(|e| walk.unwritable(e))?;
     let products: Vec<Value> = walk
         .scene
         .products
@@ -336,24 +397,191 @@ pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
         "part": part,
         "rev": ask.rev.as_deref().unwrap_or("working"),
         "format": format.as_str(),
-        "schema": schema_name,
-        "unit": unit_name,
-        "file_name": opts.file_name,
-        "time_stamp": opts.time_stamp,
         "products": products,
     });
     if let Some(c) = at {
         result["commit"] = json!(c);
     }
-    deliver(result, out.as_deref(), format.as_str(), |w| {
-        w.write_all(&bytes)
-    })
+    match options {
+        Options::Step {
+            schema,
+            schema_name,
+            unit,
+            unit_name,
+        } => {
+            let file_name = ask.file_name.or_else(|| {
+                out.as_ref()
+                    .and_then(|o| o.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+            });
+            let opts = WriteOptions {
+                schema,
+                unit,
+                file_name: file_name.unwrap_or_default(),
+                time_stamp,
+                ..WriteOptions::default()
+            };
+            let bytes =
+                ryustep::write(&step_model(&walk.scene), &opts).map_err(|e| walk.unwritable(e))?;
+            result["time_stamp"] = json!(opts.time_stamp);
+            result["schema"] = json!(schema_name);
+            result["unit"] = json!(unit_name);
+            result["file_name"] = json!(opts.file_name);
+            deliver(result, out.as_deref(), "step", |w| w.write_all(&bytes))
+        }
+        Options::Stl { unit, mesh, ascii } => {
+            let scene = meshed(s, &walk.scene, &mesh)?;
+            triangles(&mut result, &scene);
+            result["unit"] = json!(unit.as_str());
+            result["mesh"] = mesh.report();
+            result["ascii"] = json!(ascii);
+            let opts = ryuformats::stl::Stl {
+                unit,
+                ascii,
+                header: format!(
+                    "ryucad {} {part} {}",
+                    env!("CARGO_PKG_VERSION"),
+                    unit.as_str()
+                ),
+            };
+            deliver(result, out.as_deref(), "stl", |w| {
+                ryuformats::stl::write(&scene, &opts, w)
+            })
+        }
+    }
+}
+
+/// Each product's own triangles in the answer.
+fn triangles(result: &mut Value, scene: &ryuformats::Scene) {
+    for (k, p) in scene.products.iter().enumerate() {
+        let own: usize = p.solids.iter().map(|s| s.mesh.triangles.len()).sum();
+        result["products"][k]["triangles"] = json!(own);
+    }
+}
+
+/// The scene with every solid meshed at `opts`, each body once
+/// whatever the occurrences, through the session's mesh cache.
+/// `export_too_large` for a body past ryukei's triangle budget,
+/// `export_mesh_faults` naming every face that wouldn't mesh.
+fn meshed(s: &mut Session, scene: &Scene, opts: &MeshOptions) -> Result<ryuformats::Scene> {
+    let solids: Vec<(&Product, &Solid)> = scene
+        .products
+        .iter()
+        .flat_map(|p| p.solids.iter().map(move |x| (p, x)))
+        .collect();
+    let builts: Vec<&Built> = solids.iter().map(|(_, x)| x.built.as_ref()).collect();
+    let made = s
+        .meshes
+        .export_all(&builts, &opts.params, crate::server::mesh_budget());
+    let mut meshes: BTreeMap<&str, Arc<ryukei::mesh::BodyMesh>> = BTreeMap::new();
+    let mut faults = Vec::new();
+    for ((p, x), m) in solids.iter().zip(&made) {
+        let mesh = match &m.mesh {
+            Ok(mesh) => mesh,
+            Err(e) if e.details.get("triangles").is_some() => {
+                return Err(Error::new(
+                    Code::ExportTooLarge,
+                    format!(
+                        "{}/{} would take {} triangles at chord {} and angle {}: past ryukei's {}",
+                        x.part,
+                        x.founder,
+                        e.details["triangles"],
+                        opts.chord.text(),
+                        opts.angle.text(),
+                        opts.params.max_triangles
+                    ),
+                )
+                .with("part", &x.part)
+                .with("rev", p.rev.to_json())
+                .with("solid", &x.founder)
+                .with("triangles", &e.details["triangles"])
+                .with("max_triangles", opts.params.max_triangles));
+            }
+            Err(e) => return Err(e.clone()),
+        };
+        if meshes.insert(&x.built.hash, Arc::clone(mesh)).is_none() {
+            faults.extend(fault_report(x, &p.rev, mesh));
+        }
+    }
+    if !faults.is_empty() {
+        return Err(Error::new(
+            Code::ExportMeshFaults,
+            format!(
+                "{} face{} of what the export places can't be meshed to chord {} and angle {}",
+                faults.len(),
+                if faults.len() == 1 { "" } else { "s" },
+                opts.chord.text(),
+                opts.angle.text()
+            ),
+        )
+        .with("faults", faults));
+    }
+    let products = scene
+        .products
+        .iter()
+        .map(|p| ryuformats::Product {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            part: p.part.to_string(),
+            solids: p
+                .solids
+                .iter()
+                .map(|x| ryuformats::Solid {
+                    name: x.founder.to_string(),
+                    mesh: Arc::clone(&meshes[x.built.hash.as_str()]),
+                })
+                .collect(),
+            children: p
+                .children
+                .iter()
+                .map(|c| ryuformats::Child {
+                    product: c.product,
+                    place: c.place,
+                    name: c.instance.clone(),
+                })
+                .collect(),
+        })
+        .collect();
+    Ok(ryuformats::Scene { products })
+}
+
+/// Each face of `x`'s mesh ryukei couldn't mesh: its part, revision,
+/// solid and reference (`<part>/<solid>/<name>`), ryukei's fault and, for
+/// a fault on an edge, the edge's reference.
+fn fault_report(x: &Solid, rev: &Rev, mesh: &ryukei::mesh::BodyMesh) -> Vec<Value> {
+    use ryukei::mesh::MeshFaultKind as K;
+    let body = &x.built.body;
+    let at = |name: ryukei::name::Name| format!("{}/{}/{name}", x.part, x.founder);
+    mesh.faults
+        .iter()
+        .map(|f| {
+            let (fault, edge) = match f.kind {
+                K::EdgeOffSurface { edge } => ("edge_off_surface", Some(edge)),
+                K::BadDomain => ("bad_domain", None),
+                K::RefinementStalled => ("refinement_stalled", None),
+                K::BoundaryNotResolved { edge } => ("boundary_not_resolved", Some(edge)),
+            };
+            let mut v = json!({
+                "part": x.part,
+                "rev": rev.to_json(),
+                "solid": x.founder,
+                "fault": fault,
+            });
+            if let Some(face) = body.face(f.face) {
+                v["face"] = json!(at(face.name));
+            }
+            if let Some(e) = edge.and_then(|e| body.edge(e)) {
+                v["edge"] = json!(at(e.name));
+            }
+            v
+        })
+        .collect()
 }
 
 fn invalid(param: &str, value: &str, expected: &str) -> Error {
     Error::new(
         Code::InvalidParam,
-        format!("{param} {value:?} isn't one STEP export knows: expected {expected}"),
+        format!("{param} {value:?} isn't one this export takes: expected {expected}"),
     )
     .with("param", param)
 }
@@ -1137,6 +1365,199 @@ pub(crate) mod tests {
             assert_eq!((e.code, &e.details["param"]), (code, &param), "{params}");
         }
         assert!(!missing.parent().unwrap().exists());
+    }
+
+    /// A binary STL's triangles, each its three vertices.
+    fn stl_triangles(bytes: &[u8]) -> Vec<[[f32; 3]; 3]> {
+        let n = u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as usize;
+        assert_eq!(bytes.len(), 84 + 50 * n);
+        let f = |at: usize| f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        (0..n)
+            .map(|t| [0, 1, 2].map(|v| [0, 1, 2].map(|k| f(84 + 50 * t + 12 + 12 * v + 4 * k))))
+            .collect()
+    }
+
+    #[test]
+    fn a_part_exports_as_stl() {
+        let (_dir, mut s) = project();
+        let (v, bytes) = exported(&mut s, json!({"part": "plate", "format": "stl"})).unwrap();
+        assert_eq!(
+            (
+                &v["format"],
+                &v["unit"],
+                &v["ascii"],
+                &v["mesh"]["chord"]["value"]
+            ),
+            (
+                &json!("stl"),
+                &json!("mm"),
+                &json!(false),
+                &json!("0.01 mm")
+            )
+        );
+        assert!(v.get("schema").is_none() && v.get("file_name").is_none());
+        assert_eq!(v["products"][0]["triangles"], 12);
+        assert!(bytes.starts_with(b"ryucad 0.0.0 plate mm "));
+        let t = stl_triangles(&bytes);
+        assert_eq!(t.len(), 12);
+        let most = t
+            .iter()
+            .flatten()
+            .fold([0f32; 3], |m, p| [0, 1, 2].map(|k| m[k].max(p[k])));
+        assert_eq!(most, [100.0, 50.0, 5.0]);
+        // In centimetres, ASCII, one block named for its solid.
+        let (_, ascii) = exported(
+            &mut s,
+            json!({"part": "plate", "format": "stl", "unit": "cm", "ascii": true}),
+        )
+        .unwrap();
+        let text = String::from_utf8(ascii).unwrap();
+        assert!(text.starts_with("solid plate/slab\n"), "{text}");
+        assert!(text.contains("vertex 10 5 0.5\n"), "{text}");
+        // The same model and options, the same bytes.
+        let (_, again) = exported(&mut s, json!({"part": "plate", "format": "stl"})).unwrap();
+        assert_eq!(again, bytes);
+    }
+
+    #[test]
+    fn an_assembly_exports_every_occurrence_as_one_stl() {
+        let (dir, mut s) = project();
+        let r = dir.path();
+        place_in(r, "frame", "base", "plate", json!("working"), [0.0; 3]);
+        place_in(
+            r,
+            "frame",
+            "b1",
+            "bolt",
+            json!("working"),
+            [0.01, 0.0, 0.005],
+        );
+        add_in(
+            r,
+            "frame",
+            "row",
+            "instance_pattern",
+            json!({"form": "linear", "instances": ["b1"], "direction": "x",
+                   "spacing": "20 mm", "count": 3}),
+        );
+        s.refresh().unwrap();
+        let (v, bytes) = exported(
+            &mut s,
+            json!({"part": "frame", "format": "stl", "chord": "0.05 mm"}),
+        )
+        .unwrap();
+        let own: Vec<u64> = v["products"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["triangles"].as_u64().unwrap())
+            .collect();
+        // The frame holds no solid of its own; the bolt, meshed once, is
+        // placed three times.
+        assert_eq!(own[0], 0);
+        assert_eq!(stl_triangles(&bytes).len() as u64, own[1] + 3 * own[2]);
+        let (_, ascii) = exported(
+            &mut s,
+            json!({"part": "frame", "format": "stl", "chord": "0.05 mm", "ascii": true}),
+        )
+        .unwrap();
+        let text = String::from_utf8(ascii).unwrap();
+        let solids: Vec<&str> = text.lines().filter(|l| l.starts_with("solid ")).collect();
+        assert_eq!(
+            solids,
+            [
+                "solid frame/base/slab",
+                "solid frame/b1/shank",
+                "solid frame/row:1/shank",
+                "solid frame/row:2/shank"
+            ]
+        );
+    }
+
+    #[test]
+    fn mesh_options_belong_to_mesh_formats() {
+        let (_dir, mut s) = project();
+        for (params, param) in [
+            (json!({"part": "bolt", "chord": "0.1 mm"}), "chord"),
+            (json!({"part": "bolt", "ascii": true}), "ascii"),
+            (json!({"part": "bolt", "unit": "cm"}), "unit"),
+            (
+                json!({"part": "bolt", "format": "stl", "schema": "ap242"}),
+                "schema",
+            ),
+            (
+                json!({"part": "bolt", "format": "stl", "unit": "in"}),
+                "unit",
+            ),
+            (
+                json!({"part": "bolt", "format": "stl", "angle": "0 deg"}),
+                "angle",
+            ),
+        ] {
+            let e = answered(&mut s, params.clone()).unwrap_err();
+            assert_eq!(
+                (e.code, &e.details["param"]),
+                (Code::InvalidParam, &json!(param)),
+                "{params}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_body_past_the_budget_is_too_large() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "dome"})).unwrap();
+        add(
+            &mut s,
+            "dome",
+            json!({"type": "sphere", "id": "ball", "params": {"radius": "100 m"}}),
+        );
+        let e = answered(
+            &mut s,
+            json!({"part": "dome", "format": "stl", "chord": "0.001 mm"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ExportTooLarge, "{e:?}");
+        assert_eq!(
+            (&e.details["part"], &e.details["solid"]),
+            (&json!("dome"), &json!("ball"))
+        );
+        assert!(e.details["triangles"].as_u64().unwrap() > 50_000_000);
+    }
+
+    #[test]
+    fn faces_that_wont_mesh_are_named() {
+        let (_dir, mut s) = project();
+        let bolt = Id::parse("bolt", "part").unwrap();
+        let mut walk = Walk::default();
+        walk.product(&mut s, &bolt, &Rev::Working).unwrap();
+        let solid = &walk.scene.products[0].solids[0];
+        let body = &solid.built.body;
+        let mut mesh = ryukei::mesh::tessellate(body, &MeshParams::new(1e-4, 0.5)).unwrap();
+        let face = body.faces().next().unwrap();
+        let edge = body.edges().next().unwrap();
+        mesh.faults = vec![
+            ryukei::mesh::FaceFault {
+                face,
+                kind: ryukei::mesh::MeshFaultKind::BadDomain,
+            },
+            ryukei::mesh::FaceFault {
+                face,
+                kind: ryukei::mesh::MeshFaultKind::EdgeOffSurface { edge },
+            },
+        ];
+        let f = fault_report(solid, &Rev::Working, &mesh);
+        let name = |n: ryukei::name::Name| format!("bolt/shank/{n}");
+        assert_eq!(
+            f,
+            [
+                json!({"part": "bolt", "rev": "working", "solid": "shank",
+                       "fault": "bad_domain", "face": name(body.face(face).unwrap().name)}),
+                json!({"part": "bolt", "rev": "working", "solid": "shank",
+                       "fault": "edge_off_surface", "face": name(body.face(face).unwrap().name),
+                       "edge": name(body.edge(edge).unwrap().name)}),
+            ]
+        );
     }
 
     #[test]
