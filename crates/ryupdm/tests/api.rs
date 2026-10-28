@@ -12,7 +12,7 @@ use ryupdm::check::{self, History};
 use ryupdm::config::Config;
 use ryupdm::history::{self, Releases};
 use ryupdm::props::Pdm;
-use ryupdm::record::{BuiltWith, Record, Release, ReleasedBy, revising};
+use ryupdm::record::{BuiltWith, Obsolete, Record, Release, ReleasedBy, revising};
 use ryupdm::state;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -308,6 +308,21 @@ fn boms_and_where_used_read_released_assemblies_at_their_commits() {
     // Work goes on: the working assembly places four pins at B.
     asm(w, "B", 4);
     commit(w, "a fourth pin");
+    // asm's latest release, B, is made obsolete: still read where it was
+    // released.
+    let gone = Record::Obsolete(Obsolete {
+        project: ProjectId::parse(PROJECT).unwrap(),
+        part: Id::parse("asm", "part").unwrap(),
+        label: "B".into(),
+        released_by: ReleasedBy {
+            name: None,
+            email: None,
+            participant: "agent".into(),
+        },
+        note: None,
+    });
+    put(w, &format!("cad/{}", gone.path()), &gone.to_json());
+    commit(w, "asm B obsolete");
 
     let bare = tempfile::tempdir().unwrap();
     git(
@@ -344,6 +359,15 @@ fn boms_and_where_used_read_released_assemblies_at_their_commits() {
         pins.node.as_ref().unwrap().commit.as_deref(),
         Some(pin_a.as_str())
     );
+    assert!(!root.node.as_ref().unwrap().obsolete);
+    // Release B's record is obsolete, and its BOM says so of the root alone.
+    let b = ryupdm::bom::tree(&mut reader, &id("asm"), &Rev::Label("B".into()), None).unwrap();
+    let v = ryupdm::bom::row_json(&b, &BTreeMap::new());
+    assert_eq!(
+        (&v["obsolete"], &v["commit"]),
+        (&json!(true), &json!(asm_b))
+    );
+    assert!(v["children"][0].get("obsolete").is_none());
     // Where pin is used: the working assembly, and both releases.
     let q = Query {
         part: id("pin"),
@@ -363,7 +387,7 @@ fn boms_and_where_used_read_released_assemblies_at_their_commits() {
         released,
         [
             (json!("A"), json!("superseded"), json!(2)),
-            (json!("B"), json!("released"), json!(3)),
+            (json!("B"), json!("obsolete"), json!(3)),
         ]
     );
     assert_eq!(v["released"][1]["commit"], asm_b.as_str());
