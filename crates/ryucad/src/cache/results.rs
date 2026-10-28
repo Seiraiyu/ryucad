@@ -87,7 +87,7 @@ impl<'a> Reader<'a> {
         Some(Built {
             body,
             journal,
-            origins: Arc::new(origins),
+            origins: Arc::new(origins.into()),
             hash: self.str()?.to_owned(),
         })
     }
