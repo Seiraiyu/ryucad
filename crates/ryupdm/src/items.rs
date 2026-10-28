@@ -52,9 +52,11 @@ pub fn next(items: &Items) -> u32 {
 /// `before` to `after`: each part only `after` places takes the next
 /// number, in `after`'s order (unless it still has one), counted before
 /// anything leaves, so a part replacing another in one write never takes
-/// its number; then each part only `before` placed loses its entry.
-/// Nothing else changes.
-pub fn assigned(items: &Items, before: &[Id], after: &[Id]) -> Items {
+/// its number; then, when `whole` (every feature listed after the write
+/// reads), each part only `before` placed loses its entry: a listed
+/// feature that doesn't read may still place it, as [`faults`] judges
+/// unused numbers. Nothing else changes.
+pub fn assigned(items: &Items, before: &[Id], after: &[Id], whole: bool) -> Items {
     let mut out = items.clone();
     for new in after.iter().filter(|p| !before.contains(p)) {
         if !out.contains_key(new) {
@@ -62,8 +64,10 @@ pub fn assigned(items: &Items, before: &[Id], after: &[Id]) -> Items {
             out.insert(new.clone(), n);
         }
     }
-    for gone in before.iter().filter(|p| !after.contains(p)) {
-        out.remove(gone);
+    if whole {
+        for gone in before.iter().filter(|p| !after.contains(p)) {
+            out.remove(gone);
+        }
     }
     out
 }
@@ -380,16 +384,37 @@ mod tests {
         let now = items(&[("plate", 1), ("bolt", 2)]);
         // A nut takes the bolt's place in one write: 3, never the bolt's 2;
         // the plate keeps 1.
-        let after = assigned(&now, &ids(&["plate", "bolt"]), &ids(&["nut", "plate"]));
+        let after = assigned(
+            &now,
+            &ids(&["plate", "bolt"]),
+            &ids(&["nut", "plate"]),
+            true,
+        );
         assert_eq!(after, items(&[("plate", 1), ("nut", 3)]));
         // A reorder moves nothing.
         assert_eq!(
-            assigned(&now, &ids(&["plate", "bolt"]), &ids(&["bolt", "plate"])),
+            assigned(
+                &now,
+                &ids(&["plate", "bolt"]),
+                &ids(&["bolt", "plate"]),
+                true
+            ),
             now
         );
         // A part with a number it never lost keeps it.
         let stale = items(&[("pin", 7)]);
-        assert_eq!(assigned(&stale, &[], &ids(&["pin"])), stale);
+        assert_eq!(assigned(&stale, &[], &ids(&["pin"]), true), stale);
+        // While a listed feature doesn't read, it may still place the bolt:
+        // the nut enters, the bolt keeps 2.
+        assert_eq!(
+            assigned(
+                &now,
+                &ids(&["plate", "bolt"]),
+                &ids(&["nut", "plate"]),
+                false
+            ),
+            items(&[("plate", 1), ("bolt", 2), ("nut", 3)])
+        );
         // Past the largest number, the smallest free one.
         assert_eq!(next(&items(&[("a", MAX_ITEM), ("b", 1)])), 2);
         assert_eq!(next(&Items::new()), 1);

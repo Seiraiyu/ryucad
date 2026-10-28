@@ -1372,12 +1372,13 @@ pub(crate) fn save(
     // one it no longer places loses its own.
     let p = session.project().part(part)?;
     let items = p.file.as_ref().map(|f| f.items.clone()).unwrap_or_default();
-    let after =
-        ryupdm::items::placed_by(&order, |fid| match writes.iter().find(|(w, _)| *w == fid) {
-            Some((_, f)) => Some(*f),
-            None => p.features.get(fid)?.as_ref().ok(),
-        });
-    let items = ryupdm::items::assigned(&items, &ryupdm::items::placed(p), &after);
+    let feature = |fid: &Id| match writes.iter().find(|(w, _)| *w == fid) {
+        Some((_, f)) => Some(*f),
+        None => p.features.get(fid)?.as_ref().ok(),
+    };
+    let after = ryupdm::items::placed_by(&order, feature);
+    let whole = order.iter().all(|f| feature(f).is_some());
+    let items = ryupdm::items::assigned(&items, &ryupdm::items::placed(p), &after, whole);
     write_json(
         &part_path(session.root(), part),
         &PartFile {

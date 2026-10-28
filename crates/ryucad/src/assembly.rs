@@ -2201,6 +2201,42 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_write_keeps_numbers_an_unreadable_instance_may_use() {
+        let (_dir, mut s) = project();
+        for (of, inst) in [("plate", "base"), ("bolt", "b1"), ("bolt", "b2")] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "frame", "type": "instance", "id": inst, "of": of}),
+            )
+            .unwrap();
+        }
+        let items = |s: &Session| {
+            json!(
+                s.project()
+                    .part(&id("frame"))
+                    .unwrap()
+                    .file
+                    .clone()
+                    .unwrap()
+                    .items
+            )
+        };
+        assert_eq!(items(&s), json!({"plate": 1, "bolt": 2}));
+        // b2 no longer reads, so it may still place the bolt: deleting b1
+        // leaves the bolt its number.
+        std::fs::write(feature_path(s.root(), &id("frame"), &id("b2")), "{").unwrap();
+        s.reload().unwrap();
+        call(
+            &mut s,
+            "feature.delete",
+            json!({"part": "frame", "id": "b1"}),
+        )
+        .unwrap();
+        assert_eq!(items(&s), json!({"plate": 1, "bolt": 2}));
+    }
+
+    #[test]
     fn instances_move_and_moves_undo() {
         use crate::live::Live;
         use crate::server::tests::call_live;
