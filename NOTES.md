@@ -95,3 +95,10 @@
   the issue's two minutes; if the owner still sees it, the next suspect
   is whatever else the app asks after `model.changed` (history.log, a
   compare's diff --model, release.check), all still under the lock.
+- Lap 8: #83 was already fixed on main by plan 8.A (`d5c6d3fb`, PR #124:
+  "a plane–cone section reaches the region's edge near its asymptotes"),
+  which committed the seed but wrote "(#83)", not "Fixes", so the issue
+  stayed open. Bisected by value: the issue's shrunk pair fails at
+  `462ebcb5` (the same point as the issue) and passes from `d5c6d3fb`.
+  Pinned by value (`a_plane_cone_section_misses_nothing`, exact frames),
+  since a proptest seed only replays while the strategy is unchanged.
