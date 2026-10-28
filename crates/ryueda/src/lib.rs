@@ -28,6 +28,8 @@ pub mod proto;
 pub mod server;
 pub mod session;
 pub mod symbol;
+pub mod topcmd;
+pub mod write;
 
 /// ryueda as a product of `ryu-session`: its daemons, clients and live
 /// sessions are that crate's, named for ryueda by this marker.

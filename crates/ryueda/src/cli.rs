@@ -77,6 +77,19 @@ enum Command {
     /// maker and supplier part numbers.
     #[command(subcommand)]
     Libcomp(LibcompCmd),
+    /// Create, edit, show, list or delete functional blocks: their
+    /// names, ports and buses.
+    #[command(subcommand)]
+    Block(BlockCmd),
+    /// Add, edit, delete or list rails: project-wide nets (GND, 3V3).
+    #[command(subcommand)]
+    Rail(RailCmd),
+    /// Add, edit, delete or list net classes.
+    #[command(subcommand)]
+    Class(ClassCmd),
+    /// Create, edit, delete or list designs: a name and a root block.
+    #[command(subcommand)]
+    Design(DesignCmd),
     /// The daemon's activity log: every change it made or saw, newest
     /// last.
     History {
@@ -303,6 +316,198 @@ enum LibcompCmd {
     },
 }
 
+/// A net's or rail's intent; an empty value clears a field.
+#[derive(Args)]
+struct IntentFlags {
+    /// A net class, by ID or name.
+    #[arg(long)]
+    class: Option<String>,
+    /// "3.3 V"
+    #[arg(long)]
+    voltage: Option<String>,
+    /// "500 mA"
+    #[arg(long)]
+    current: Option<String>,
+    /// "90 Ohm"
+    #[arg(long)]
+    impedance: Option<String>,
+}
+
+impl IntentFlags {
+    fn args(&self) -> ryueda::topcmd::IntentArgs {
+        ryueda::topcmd::IntentArgs {
+            class: self.class.clone(),
+            voltage: self.voltage.clone(),
+            current: self.current.clone(),
+            impedance: self.impedance.clone(),
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum BlockCmd {
+    /// A block, its ID random unless given.
+    Create {
+        name: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Rename a block, and add, change or remove its ports and buses.
+    Edit {
+        block: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        /// NAME:DIRECTION (in, out, bidirectional, power, passive); repeat
+        /// for more.
+        #[arg(long = "add-port", value_name = "NAME:DIRECTION")]
+        add_port: Vec<String>,
+        /// PORT=NAME
+        #[arg(long = "rename-port", value_parser = pair)]
+        rename_port: Vec<(String, String)>,
+        /// PORT=DIRECTION
+        #[arg(long = "port-direction", value_parser = pair)]
+        port_direction: Vec<(String, String)>,
+        #[arg(long = "remove-port", value_name = "PORT")]
+        remove_port: Vec<String>,
+        /// NAME=NET,NET,...
+        #[arg(long = "add-bus", value_parser = pair)]
+        add_bus: Vec<(String, String)>,
+        /// BUS=NET,NET,...: the bus's whole list.
+        #[arg(long = "bus-nets", value_parser = pair)]
+        bus_nets: Vec<(String, String)>,
+        /// BUS=NAME
+        #[arg(long = "rename-bus", value_parser = pair)]
+        rename_bus: Vec<(String, String)>,
+        #[arg(long = "remove-bus", value_name = "BUS")]
+        remove_bus: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// A block with what it holds, its faults and its revision.
+    Show {
+        block: String,
+    },
+    List,
+    /// Delete a block no instance places and no design is rooted on.
+    Delete {
+        block: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum RailCmd {
+    Add {
+        name: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[command(flatten)]
+        intent: IntentFlags,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Edit {
+        /// By ID or name.
+        rail: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[command(flatten)]
+        intent: IntentFlags,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete a rail no pin or port names.
+    Delete {
+        rail: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    List,
+}
+
+#[derive(Subcommand)]
+enum ClassCmd {
+    Add {
+        name: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Edit {
+        class: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete a class no net or rail names.
+    Delete {
+        class: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    List,
+}
+
+#[derive(Subcommand)]
+enum DesignCmd {
+    Create {
+        name: String,
+        /// The root block.
+        #[arg(long)]
+        root: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Edit {
+        design: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        root: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Delete {
+        design: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    List,
+}
+
+/// A port's direction, as typed.
+fn direction(s: &str) -> Result<ryueda::conn::Direction> {
+    serde_json::from_value(json!(s)).map_err(|_| {
+        Error::new(
+            Code::Usage,
+            format!("{s:?} isn't a direction: in, out, bidirectional, power or passive"),
+        )
+    })
+}
+
+/// A list of nets as typed: `A,B,C`.
+fn nets(s: &str) -> Vec<String> {
+    s.split(',')
+        .filter(|n| !n.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 #[derive(Subcommand)]
 enum DaemonCmd {
     /// Serve the project (the CLI starts this itself).
@@ -434,6 +639,186 @@ fn request(cmd: &Command) -> Result<Option<Request>> {
             libcomp: libcomp.clone(),
             expected_revision: expect.expect.clone(),
         },
+        Command::Block(BlockCmd::Create {
+            name,
+            id,
+            description,
+            expect,
+        }) => Request::BlockCreate {
+            name: name.clone(),
+            id: id.clone(),
+            description: description.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Block(BlockCmd::Edit {
+            block,
+            name,
+            description,
+            add_port,
+            rename_port,
+            port_direction,
+            remove_port,
+            add_bus,
+            bus_nets,
+            rename_bus,
+            remove_bus,
+            expect,
+        }) => {
+            use ryueda::topcmd::{BusOp, PortOp};
+            let mut ports = Vec::new();
+            for a in add_port {
+                let (name, dir) = a.split_once(':').ok_or_else(|| {
+                    Error::new(
+                        Code::Usage,
+                        format!("--add-port {a:?} isn't NAME:DIRECTION"),
+                    )
+                })?;
+                ports.push(PortOp::Add {
+                    name: name.to_owned(),
+                    direction: direction(dir)?,
+                    id: None,
+                });
+            }
+            for (port, name) in rename_port {
+                ports.push(PortOp::Set {
+                    port: port.clone(),
+                    name: Some(name.clone()),
+                    direction: None,
+                });
+            }
+            for (port, dir) in port_direction {
+                ports.push(PortOp::Set {
+                    port: port.clone(),
+                    name: None,
+                    direction: Some(direction(dir)?),
+                });
+            }
+            for port in remove_port {
+                ports.push(PortOp::Remove { port: port.clone() });
+            }
+            let mut buses = Vec::new();
+            for (name, list) in add_bus {
+                buses.push(BusOp::Add {
+                    name: name.clone(),
+                    nets: nets(list),
+                    id: None,
+                });
+            }
+            for (bus, list) in bus_nets {
+                buses.push(BusOp::Set {
+                    bus: bus.clone(),
+                    name: None,
+                    nets: Some(nets(list)),
+                });
+            }
+            for (bus, name) in rename_bus {
+                buses.push(BusOp::Set {
+                    bus: bus.clone(),
+                    name: Some(name.clone()),
+                    nets: None,
+                });
+            }
+            for bus in remove_bus {
+                buses.push(BusOp::Remove { bus: bus.clone() });
+            }
+            Request::BlockEdit {
+                block: block.clone(),
+                name: name.clone(),
+                description: description.clone(),
+                ports,
+                buses,
+                expected_revision: expect.expect.clone(),
+            }
+        }
+        Command::Block(BlockCmd::Show { block }) => Request::BlockShow {
+            block: block.clone(),
+        },
+        Command::Block(BlockCmd::List) => Request::BlockList {},
+        Command::Block(BlockCmd::Delete { block, expect }) => Request::BlockDelete {
+            block: block.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Rail(RailCmd::Add {
+            name,
+            id,
+            intent,
+            expect,
+        }) => Request::RailAdd {
+            name: name.clone(),
+            id: id.clone(),
+            intent: intent.args(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Rail(RailCmd::Edit {
+            rail,
+            name,
+            intent,
+            expect,
+        }) => Request::RailEdit {
+            rail: rail.clone(),
+            name: name.clone(),
+            intent: intent.args(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Rail(RailCmd::Delete { rail, expect }) => Request::RailDelete {
+            rail: rail.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Rail(RailCmd::List) => Request::RailList {},
+        Command::Class(ClassCmd::Add {
+            name,
+            id,
+            description,
+            expect,
+        }) => Request::ClassAdd {
+            name: name.clone(),
+            id: id.clone(),
+            description: description.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Class(ClassCmd::Edit {
+            class,
+            name,
+            description,
+            expect,
+        }) => Request::ClassEdit {
+            class: class.clone(),
+            name: name.clone(),
+            description: description.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Class(ClassCmd::Delete { class, expect }) => Request::ClassDelete {
+            class: class.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Class(ClassCmd::List) => Request::ClassList {},
+        Command::Design(DesignCmd::Create {
+            name,
+            root,
+            id,
+            expect,
+        }) => Request::DesignCreate {
+            name: name.clone(),
+            root: root.clone(),
+            id: id.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Design(DesignCmd::Edit {
+            design,
+            name,
+            root,
+            expect,
+        }) => Request::DesignEdit {
+            design: design.clone(),
+            name: name.clone(),
+            root: root.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Design(DesignCmd::Delete { design, expect }) => Request::DesignDelete {
+            design: design.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Design(DesignCmd::List) => Request::DesignList {},
         Command::Version | Command::Init { .. } | Command::Watch { .. } | Command::Daemon(_) => {
             return Ok(None);
         }

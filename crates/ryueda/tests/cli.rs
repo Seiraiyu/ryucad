@@ -30,6 +30,9 @@ fn ryueda(run: &Path) -> Command {
     cmd.env("RYUEDA_RUNTIME_DIR", run)
         .env("RYUEDA_IDLE_TIMEOUT", "60")
         .env("RYUEDA_CONFIG_DIR", run.with_file_name("config"))
+        // Random IDs a fixed sequence, the same in process and through a
+        // daemon.
+        .env("RYUEDA_ID_SEED", "cli")
         .env_remove("RYUEDA_NO_DAEMON")
         .env_remove("RYUEDA_PARTICIPANT");
     cmd
@@ -391,6 +394,23 @@ fn every_protocol_method_has_a_command() {
         ("libcomp.show", &["libcomp", "show"]),
         ("libcomp.list", &["libcomp", "list"]),
         ("libcomp.delete", &["libcomp", "delete"]),
+        ("rail.add", &["rail", "add"]),
+        ("rail.edit", &["rail", "edit"]),
+        ("rail.delete", &["rail", "delete"]),
+        ("rail.list", &["rail", "list"]),
+        ("class.add", &["class", "add"]),
+        ("class.edit", &["class", "edit"]),
+        ("class.delete", &["class", "delete"]),
+        ("class.list", &["class", "list"]),
+        ("design.create", &["design", "create"]),
+        ("design.edit", &["design", "edit"]),
+        ("design.delete", &["design", "delete"]),
+        ("design.list", &["design", "list"]),
+        ("block.create", &["block", "create"]),
+        ("block.edit", &["block", "edit"]),
+        ("block.show", &["block", "show"]),
+        ("block.list", &["block", "list"]),
+        ("block.delete", &["block", "delete"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),
@@ -757,4 +777,119 @@ fn footprints_and_library_components_from_the_cli() {
     let gone = p.ok(&["libcomp", "delete", "r_100k"]);
     assert_eq!(gone["deleted"], "lib/self/libcomp/r_100k");
     p.ok(&["symbol", "delete", "r"]);
+}
+
+#[test]
+fn blocks_rails_classes_and_designs_from_the_cli() {
+    let p = Pair::projects();
+    let power = p.ok(&["class", "add", "Power", "--id", "power"]);
+    assert_eq!(power["reference"], "class/power");
+    let gnd = p.ok(&["rail", "add", "GND", "--id", "gnd"]);
+    assert_eq!(gnd["path"], "rails/gnd.json");
+    let v3 = p.ok(&[
+        "rail",
+        "add",
+        "3V3",
+        "--voltage",
+        "3.3 V",
+        "--class",
+        "Power",
+    ]);
+    // A random ID, the seed's: ten base32 characters.
+    let v3_id = v3["reference"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("rail/")
+        .unwrap();
+    assert_eq!(v3_id.len(), 10);
+    assert_eq!(
+        v3["rail"],
+        json!({"name": "3V3", "class": "power", "voltage": "3.3 V"})
+    );
+    p.fails(
+        &["rail", "add", "X", "--voltage", "3.3 A"],
+        "invalid_quantity",
+        1,
+    );
+    p.fails(&["rail", "add", "GND"], "net_name_duplicate", 1);
+    p.fails(&["rail", "add", "X", "--class", "nope"], "not_found", 1);
+    let rev = v3["revision"].as_str().unwrap();
+    p.fails(
+        &["rail", "edit", "GND", "--expect", "stale", "--name", "0V"],
+        "conflict",
+        1,
+    );
+    let edited = p.ok(&["rail", "edit", "3V3", "--expect", rev, "--voltage", ""]);
+    assert_eq!(edited["rail"].get("voltage"), None);
+    let top = p.ok(&["block", "create", "Top", "--id", "top"]);
+    assert_eq!(top["path"], "blocks/top/block.json");
+    let sensor = p.ok(&[
+        "block",
+        "edit",
+        "top",
+        "--name",
+        "Sensor",
+        "--add-port",
+        "SDA:bidirectional",
+        "--add-port",
+        "VDD:power",
+    ]);
+    let ports = sensor["block"]["ports"].as_object().unwrap();
+    assert_eq!(ports.len(), 2);
+    let sda = ports
+        .iter()
+        .find(|(_, v)| v["name"] == "SDA")
+        .unwrap()
+        .0
+        .clone();
+    p.fails(
+        &["block", "edit", "top", "--add-port", "SDA:in"],
+        "net_name_duplicate",
+        1,
+    );
+    p.fails(
+        &["block", "edit", "top", "--add-port", "X:sideways"],
+        "usage",
+        2,
+    );
+    p.fails(
+        &["block", "edit", "top", "--remove-port", "nope"],
+        "port_not_found",
+        1,
+    );
+    p.fails(
+        &["block", "edit", "top", "--add-bus", "I2C=nope"],
+        "net_not_found",
+        1,
+    );
+    let renamed = p.ok(&[
+        "block",
+        "edit",
+        "top",
+        "--rename-port",
+        &format!("{sda}=SDA1"),
+    ]);
+    assert_eq!(renamed["block"]["ports"][&sda]["name"], "SDA1");
+    let d = p.ok(&["design", "create", "Breakout", "--root", "top", "--id", "d"]);
+    assert_eq!(d["design"], json!({"name": "Breakout", "root": "top"}));
+    p.fails(&["design", "create", "X", "--root", "nope"], "not_found", 1);
+    // A design's root, and what an instance places, stay.
+    let e = p.fails(&["block", "delete", "top"], "has_dependents", 1);
+    assert_eq!(e["details"]["dependents"], json!(["design/d"]));
+    assert_eq!(p.ok(&["design", "list"])["designs"][0]["name"], "Breakout");
+    assert_eq!(
+        p.ok(&["rail", "list"])["rails"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(p.ok(&["class", "list"])["classes"][0]["id"], "power");
+    let e = p.fails(&["class", "delete", "power"], "has_dependents", 1);
+    assert_eq!(e["details"]["dependents"], json!([format!("rail/{v3_id}")]));
+    p.ok(&["design", "delete", "Breakout"]);
+    let list = p.ok(&["block", "list"]);
+    assert_eq!(list["blocks"][0]["name"], "Sensor");
+    p.ok(&["block", "delete", "top"]);
+    for top in [&p.direct, &p.daemon] {
+        assert!(!top.join("board/blocks").exists());
+    }
+    p.fails(&["block", "show", "top"], "not_found", 1);
 }

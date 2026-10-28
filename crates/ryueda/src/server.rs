@@ -11,7 +11,7 @@ use crate::proto::{Answer, Request, VersionInfo};
 use crate::session::{Session, path_of};
 use crate::source::write_atomic;
 use crate::units::Unit;
-use crate::{Eda, activity, libcmd};
+use crate::{Eda, activity, libcmd, topcmd};
 use ryu_session::activity::EntryKind;
 use ryu_session::live::{self, Live};
 use serde_json::{Map, Value, json};
@@ -217,6 +217,127 @@ fn dispatch(
             symbol,
             expected_revision,
         } => libcmd::symbol_delete(session, &symbol, expected_revision.as_deref()),
+        Request::RailAdd {
+            name,
+            id,
+            intent,
+            expected_revision,
+        } => topcmd::rail_add(
+            session,
+            &name,
+            id.as_deref(),
+            &intent,
+            expected_revision.as_deref(),
+        ),
+        Request::RailEdit {
+            rail,
+            name,
+            intent,
+            expected_revision,
+        } => topcmd::rail_edit(
+            session,
+            &rail,
+            name.as_deref(),
+            &intent,
+            expected_revision.as_deref(),
+        ),
+        Request::RailDelete {
+            rail,
+            expected_revision,
+        } => topcmd::rail_delete(session, &rail, expected_revision.as_deref()),
+        Request::RailList {} => Ok(topcmd::rail_list(session.project())),
+        Request::ClassAdd {
+            name,
+            id,
+            description,
+            expected_revision,
+        } => topcmd::class_add(
+            session,
+            &name,
+            id.as_deref(),
+            description.as_deref(),
+            expected_revision.as_deref(),
+        ),
+        Request::ClassEdit {
+            class,
+            name,
+            description,
+            expected_revision,
+        } => topcmd::class_edit(
+            session,
+            &class,
+            name.as_deref(),
+            description.as_deref(),
+            expected_revision.as_deref(),
+        ),
+        Request::ClassDelete {
+            class,
+            expected_revision,
+        } => topcmd::class_delete(session, &class, expected_revision.as_deref()),
+        Request::ClassList {} => Ok(topcmd::class_list(session.project())),
+        Request::DesignCreate {
+            name,
+            root,
+            id,
+            expected_revision,
+        } => topcmd::design_create(
+            session,
+            &name,
+            &root,
+            id.as_deref(),
+            expected_revision.as_deref(),
+        ),
+        Request::DesignEdit {
+            design,
+            name,
+            root,
+            expected_revision,
+        } => topcmd::design_edit(
+            session,
+            &design,
+            name.as_deref(),
+            root.as_deref(),
+            expected_revision.as_deref(),
+        ),
+        Request::DesignDelete {
+            design,
+            expected_revision,
+        } => topcmd::design_delete(session, &design, expected_revision.as_deref()),
+        Request::DesignList {} => Ok(topcmd::design_list(session.project())),
+        Request::BlockCreate {
+            name,
+            id,
+            description,
+            expected_revision,
+        } => topcmd::block_create(
+            session,
+            &name,
+            id.as_deref(),
+            description.as_deref(),
+            expected_revision.as_deref(),
+        ),
+        Request::BlockEdit {
+            block,
+            name,
+            description,
+            ports,
+            buses,
+            expected_revision,
+        } => topcmd::block_edit(
+            session,
+            &block,
+            name.as_deref(),
+            description.as_deref(),
+            &ports,
+            &buses,
+            expected_revision.as_deref(),
+        ),
+        Request::BlockShow { block } => topcmd::block_show(session.project(), &block),
+        Request::BlockList {} => Ok(topcmd::block_list(session.project())),
+        Request::BlockDelete {
+            block,
+            expected_revision,
+        } => topcmd::block_delete(session, &block, expected_revision.as_deref()),
         Request::ActivityLog { limit, before } => {
             let entries = live.map_or_else(Vec::new, |l| l.log.page(limit.unwrap_or(50), before));
             Ok(json!({ "entries": entries }))

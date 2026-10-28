@@ -411,6 +411,11 @@ impl Connectivity {
         })
     }
 
+    /// Whether a rail has the ID `id`.
+    pub fn has_rail(&self, id: &str) -> bool {
+        self.rails.keys().any(|k| k.as_str() == id)
+    }
+
     /// The rail called `name`, by ID or by name.
     pub fn rail(&self, name: &str) -> Option<&Id> {
         named(&self.rails, name, |r| &r.name)
