@@ -27,6 +27,7 @@
 #include <Interface_Static.hxx>
 #include <STEPControl_Reader.hxx>
 #include <STEPControl_Writer.hxx>
+#include <RWStl.hxx>
 #include <ShapeFix_Shape.hxx>
 #include <Standard_Failure.hxx>
 #include <GProp_GProps.hxx>
@@ -433,6 +434,36 @@ void step_write(const Shape &s, rust::Str path, bool ap242) {
   } catch (const Standard_Failure &e) {
     throw std::runtime_error(std::string("STEPControl_Writer: ") +
                              e.GetMessageString());
+  }
+}
+
+// The STL file at `path` through RWStl::ReadFile, coincident vertices
+// welded: positions and triangles as position indices.
+OcctMesh stl_read(rust::Str path) {
+  try {
+    std::string p(path);
+    Handle(Poly_Triangulation) t = RWStl::ReadFile(p.c_str());
+    if (t.IsNull()) {
+      throw std::runtime_error("RWStl could not read " + p);
+    }
+    OcctMesh out;
+    for (Standard_Integer i = 1; i <= t->NbNodes(); ++i) {
+      gp_Pnt q = t->Node(i);
+      out.positions.push_back(q.X());
+      out.positions.push_back(q.Y());
+      out.positions.push_back(q.Z());
+    }
+    for (Standard_Integer i = 1; i <= t->NbTriangles(); ++i) {
+      Standard_Integer a, b, c;
+      t->Triangle(i).Get(a, b, c);
+      out.triangles.push_back(uint32_t(a - 1));
+      out.triangles.push_back(uint32_t(b - 1));
+      out.triangles.push_back(uint32_t(c - 1));
+    }
+    out.faces_without_mesh = 0;
+    return out;
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(std::string("RWStl: ") + e.GetMessageString());
   }
 }
 
