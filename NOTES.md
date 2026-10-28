@@ -122,3 +122,18 @@
   (it changes how release binaries link). If the Windows `native` job
   is still more than ~10 min behind Linux's, reopen #63 with the PR's
   per-step times.
+- Lap 10: #25. Most of the issue was already fixed before this branch:
+  snapshots come from the bytes the freshness scan keeps, a change
+  reloads only its part, and the app asks for each mesh once
+  (`Model::ask`). The rest of the per-write work that grew with the
+  project: a changed part reloads from the scan's bytes
+  (`Project::reload_from` over `session::Held`), not by opening every
+  file again; `feature.add` picks the next free ID from a set, not a scan
+  of every feature per candidate; `Solids::solids_of` is a lookup, not a
+  walk of every chain. Timed on davids-m4 (Apple M4, 10 cores, 16 GB,
+  macOS 26, release, through the daemon, CLI start-up included): 20
+  `feature add`s at ~570 spheres, 23 ms each against 29 ms without these
+  (the issue's triage measured 200–260 ms). Assumption: the "~20 min
+  behind" came from the app's duplicate mesh requests and the full
+  reloads, both gone; if the owner still sees lag, the next suspects are
+  history.log and release.check after each `model.changed`.
