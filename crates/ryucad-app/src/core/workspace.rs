@@ -77,14 +77,14 @@ enum Pending {
     Bom {
         flat: bool,
     },
-    /// The BOM tab's `bom.diff` from the compared revision.
-    BomDiff,
-    /// Where a part is used, for the Part section.
-    WhereUsed(String),
-    /// The BOM's CSV, to write at this path.
-    BomExport(PathBuf),
     /// An item number set from the BOM tab (`bom.renumber`).
     BomRenumber(crate::core::bom::ItemEdit),
+    /// The BOM's CSV, to write at this path.
+    BomExport(PathBuf),
+    /// Where a part is used, for the Part section.
+    WhereUsed(String),
+    /// The BOM tab's `bom.diff` from the compared revision.
+    BomDiff,
     /// A part's properties for the Part section; after a conflict, with
     /// the form as it was.
     Props(String, Option<Box<PartProps>>),
@@ -269,14 +269,14 @@ pub struct Workspace {
     /// The BOM tab, whether it was opened (it follows changes from then
     /// on), and whether a reading is on its way and another wanted after.
     pub bom: BomTab,
-    /// Where the Part section's part is used, once read, and its part.
-    pub where_used: Option<crate::core::where_used::WhereUsed>,
-    where_used_part: Option<String>,
-    /// The BOM tab's Export CSV…, while open.
-    pub bom_export: Option<crate::core::bom::BomExport>,
     bom_open: bool,
     bom_waiting: bool,
     bom_again: bool,
+    /// The BOM tab's Export CSV…, while open.
+    pub bom_export: Option<crate::core::bom::BomExport>,
+    /// Where the Part section's part is used, once read, and its part.
+    pub where_used: Option<crate::core::where_used::WhereUsed>,
+    where_used_part: Option<String>,
     pub settings: Settings,
     /// The last doctor report, once asked for.
     pub doctor: Option<Value>,
@@ -371,12 +371,12 @@ impl Workspace {
             releases: ReleaseTab::default(),
             releases_open: false,
             bom: BomTab::default(),
-            bom_export: None,
-            where_used: None,
-            where_used_part: None,
             bom_open: false,
             bom_waiting: false,
             bom_again: false,
+            bom_export: None,
+            where_used: None,
+            where_used_part: None,
             settings: Settings::default(),
             doctor: None,
             interference: None,
