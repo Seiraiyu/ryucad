@@ -3432,6 +3432,61 @@ fn exports_from_the_cli() {
 }
 
 #[test]
+fn mesh_exports_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=20", "--param",
+        "z=5",
+    ]);
+    // STL by extension, binary: twelve triangles in millimetres.
+    let v = p.ok(&["export", "p", "--out", "p.stl"]);
+    assert_eq!(
+        (&v["format"], &v["unit"], &v["ascii"]),
+        (&json!("stl"), &json!("mm"), &json!(false))
+    );
+    assert_eq!(v["mesh"]["chord"]["value"], "0.01 mm");
+    assert_eq!(v["products"][0]["triangles"], 12);
+    let bytes = fs::read(p.direct.join("p.stl")).unwrap();
+    assert_eq!(bytes, fs::read(p.daemon.join("p.stl")).unwrap());
+    assert_eq!(bytes.len(), 84 + 50 * 12);
+    assert!(bytes.starts_with(b"ryucad "));
+    // ASCII in centimetres, by name, with the mesh options.
+    let v = p.ok(&[
+        "export",
+        "p",
+        "--out",
+        "p.txt",
+        "--format",
+        "stl",
+        "--ascii",
+        "--unit",
+        "cm",
+        "--chord",
+        "0.1 mm",
+        "--angle",
+        "30 deg",
+        "--max-edge",
+        "5 mm",
+    ]);
+    assert_eq!(v["mesh"]["max_edge"]["value"], "5 mm");
+    let text = fs::read_to_string(p.direct.join("p.txt")).unwrap();
+    assert!(text.starts_with("solid p/b\n"), "{text}");
+    assert!(text.contains("vertex 1 2 0.5\n"), "{text}");
+    // Options another format takes are refused before anything is written.
+    for args in [
+        &["export", "p", "--out", "x.step", "--chord", "0.1 mm"][..],
+        &["export", "p", "--out", "x.stl", "--schema", "ap214"],
+        &["export", "p", "--out", "x.stl", "--chord", "2 * 1 mm"],
+        &["export", "p", "--out", "x.stl", "--angle", "120 deg"],
+    ] {
+        p.fails(args, "invalid_param", 1);
+    }
+    assert!(!p.direct.join("x.stl").exists() && !p.direct.join("x.step").exists());
+}
+
+#[test]
 fn imported_assemblies_and_updates_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
