@@ -112,3 +112,13 @@
   ryukei 0.53 s flush against 0.50 s out of both faces (was 5.0 s
   against 0.55 s); ryucad's bar 0.56 s. The bar's bound went from 12× to
   2×. Golden hashes unchanged; boolean tests and boolean_props pass.
+- Lap 9: #63. The release suites and `bench --no-run` moved out of the
+  `native` job into a parallel `release-suites` job (same matrix), so on
+  Windows the workspace tests (28 min) and the release suites (~25 min)
+  no longer run one after the other. Not timed: a lap can't push, so
+  this PR's own CI run is the measurement. Turning off Defender's
+  real-time scanning on the runner was refused by the agent's permission
+  check as weakening security, so it isn't in; rust-lld wasn't tried
+  (it changes how release binaries link). If the Windows `native` job
+  is still more than ~10 min behind Linux's, reopen #63 with the PR's
+  per-step times.
