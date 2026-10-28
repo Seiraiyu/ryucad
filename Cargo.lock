@@ -4198,6 +4198,12 @@ dependencies = [
 
 [[package]]
 name = "roxmltree"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
+
+[[package]]
+name = "roxmltree"
 version = "0.21.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9da7f59328b09405b181fee1018925fad50f157afb43c0c0f5c522c256dd5907"
@@ -4431,7 +4437,7 @@ version = "0.0.0"
 dependencies = [
  "flate2",
  "rayon",
- "roxmltree",
+ "roxmltree 0.21.2",
  "ryu-board",
  "ryudfm",
  "sha2",
@@ -4464,6 +4470,7 @@ name = "ryuformats"
 version = "0.0.0"
 dependencies = [
  "miniz_oxide 0.8.9",
+ "roxmltree 0.20.0",
  "ryukei",
  "zip 2.6.1",
 ]
