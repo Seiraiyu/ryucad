@@ -3,6 +3,7 @@
 //! and highlights are painted over the model in their colours.
 
 use crate::core::compare::FaceMark;
+use crate::core::cube::{Cube, Hit as CubeHit};
 use crate::core::model::BodyKey;
 use crate::core::nav::{Buttons, Gesture, Modifiers, Nav, Projector};
 use crate::core::pick::{Hit, Picker, Place};
@@ -14,7 +15,7 @@ use eframe::{egui_wgpu, wgpu};
 use ryucad::live::SelectMode;
 use ryucad::mesh::WireBody;
 use ryucad::sketch_view::ConstraintState;
-use ryucad::view::{self, StandardView};
+use ryucad::view::{self, Camera, Projection, StandardView};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -28,6 +29,18 @@ pub struct View {
     pub edges: bool,
     /// Draw sketches (`display.sketches`).
     pub sketches: bool,
+    /// Draw the navigation cube (`display.nav_cube`), the axis triad
+    /// (`display.triad`) and the origin's axes and planes
+    /// (`display.origin`).
+    pub cube: bool,
+    pub triad: bool,
+    pub origin: bool,
+    /// The spacebar view selector, while open.
+    pub selector: Option<crate::core::views::Selector>,
+    /// What of the cube the pointer is over.
+    pub cube_hover: Option<CubeHit>,
+    /// The frame's time in seconds, for turns.
+    now: f64,
     /// The window's look (`ui.style`), for the background.
     pub look: crate::ui::style::Look,
     /// The feature chosen in the tree: its body is painted.
@@ -162,6 +175,12 @@ impl View {
             nav: Nav::new(camera),
             edges: true,
             sketches: true,
+            cube: true,
+            triad: true,
+            origin: false,
+            selector: None,
+            cube_hover: None,
+            now: 0.0,
             look: crate::ui::style::Look::default(),
             chosen: None,
             marked: Vec::new(),
@@ -220,13 +239,116 @@ impl View {
         }
     }
 
-    /// Looks from a standard view at the whole model, and tells the session.
+    /// Turns to look from a standard view at the whole model, and tells
+    /// the session as it goes.
     pub fn standard(&mut self, ws: &mut Workspace, v: StandardView) {
         let points = self.picker(ws).points(None);
         if !points.is_empty() {
-            self.nav.standard(v, &points, self.aspect());
-            self.moved(ws);
+            let to = view::frame_points(&points, v, self.nav.camera.projection, self.aspect());
+            self.turn(ws, to);
         }
+    }
+
+    /// Starts turning the camera to `to` over [`crate::core::nav::TURN_SECONDS`]:
+    /// following stops, and the session hears of each step (see `show`).
+    pub fn turn(&mut self, ws: &mut Workspace, to: Camera) {
+        self.framed = true;
+        ws.following = None;
+        self.nav.turn_to(to, self.now);
+    }
+
+    /// The navigation cube where this viewport draws it.
+    pub fn cube_widget(&self) -> Cube {
+        Cube::at([self.rect.max.x, self.rect.min.y])
+    }
+
+    /// Whether the cube's widget takes the point `p`, so the model under
+    /// it is never picked.
+    fn on_cube(&self, p: egui::Pos2) -> bool {
+        if !self.cube {
+            return false;
+        }
+        let (lo, hi) = self.cube_widget().bounds();
+        (lo[0]..=hi[0]).contains(&p.x) && (lo[1]..=hi[1]).contains(&p.y)
+    }
+
+    /// A click on the cube: a face, edge or corner turns to its view
+    /// fitting the model; an arrow turns or rolls a quarter turn.
+    pub fn cube_click(&mut self, ws: &mut Workspace, hit: CubeHit) {
+        match hit {
+            CubeHit::View(v) => self.standard(ws, v),
+            CubeHit::Roll(_) | CubeHit::Turn { .. } => {
+                if let Some(to) = crate::core::cube::turned(&self.nav.camera, hit) {
+                    self.turn(ws, to);
+                }
+            }
+            CubeHit::Menu => {}
+        }
+    }
+
+    /// Turns to the named view `id` of the part shown, as it was saved.
+    pub fn restore_view(&mut self, ws: &mut Workspace, id: &str) {
+        if let Some(c) = ws.views.camera(id).cloned() {
+            self.turn(ws, c);
+        }
+    }
+
+    /// The face this window has selected, if it has one face selected.
+    pub fn selected_face(&mut self, ws: &Workspace) -> Option<String> {
+        let selection = ws.myself()?.selection.clone();
+        let [one] = selection.as_slice() else {
+            return None;
+        };
+        let face = ryucad::entity::Target::Body(ryucad::entity::EntityKind::Face);
+        (self.picker(ws).kind(one) == Some(face)).then(|| one.clone())
+    }
+
+    /// Asks for the view normal to the selected face; the view turns to
+    /// it when the answer comes (see `show`).
+    pub fn normal_to(&mut self, ws: &mut Workspace) {
+        if let Some(face) = self.selected_face(ws) {
+            ws.look_normal_to(&face);
+        }
+    }
+
+    /// Switches between perspective and orthographic, keeping how big the
+    /// model looks at the target.
+    pub fn set_projection(&mut self, ws: &mut Workspace, orthographic: bool) {
+        let c = &self.nav.camera;
+        let (_, _, forward) = c.basis();
+        let height = 2.0 * c.half_height(c.distance());
+        let camera = match (c.projection, orthographic) {
+            (Projection::Perspective { .. }, true) => Camera {
+                projection: Projection::Orthographic { height },
+                ..c.clone()
+            },
+            (Projection::Orthographic { .. }, false) => {
+                let p = view::DEFAULT_PROJECTION;
+                // Back as far as that field of view needs to see as much.
+                let unit = Camera {
+                    projection: p,
+                    ..c.clone()
+                }
+                .half_height(1.0);
+                let d = height / 2.0 / unit;
+                Camera {
+                    eye: [0, 1, 2].map(|k| c.target[k] - forward[k] * d),
+                    projection: p,
+                    ..c.clone()
+                }
+            }
+            _ => return,
+        };
+        self.nav.camera = camera;
+        self.moved(ws);
+    }
+
+    /// Opens the spacebar view selector at `at` (in points), or closes it.
+    pub fn toggle_selector(&mut self, at: egui::Pos2) {
+        self.selector = match self.selector {
+            Some(_) => None,
+            None => Some(crate::core::views::Selector::at([at.x, at.y])),
+        };
     }
 
     /// The points that frame the whole model as the camera looks: each
@@ -584,6 +706,23 @@ impl View {
         let rect = ui.available_rect_before_wrap();
         self.rect = rect;
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
+        // A turn to a view moves on, and the session hears of each step.
+        self.now = ui.input(|i| i.time);
+        if self.nav.turn.is_some() {
+            if self.nav.step(self.now) {
+                ui.ctx().request_repaint();
+            }
+            ws.share_camera(&self.nav.camera);
+        }
+        // A view normal to a face, as the daemon worked it out, framed
+        // for this viewport.
+        if let Some(c) = ws.looked.take() {
+            let points = self.picker(ws).points(None);
+            if !points.is_empty() {
+                let to = view::refit_points(&c, &points, self.aspect());
+                self.turn(ws, to);
+            }
+        }
         // Meshes arrive a body at a time: frame what has come so far, and
         // again as more comes, until it has all come.
         if !self.framed
@@ -608,10 +747,19 @@ impl View {
         let aspect = f64::from(rect.width().max(1.0) / rect.height().max(1.0));
         let size = [f64::from(rect.width()), f64::from(rect.height())];
         let local = |p: egui::Pos2| [f64::from(p.x - rect.min.x), f64::from(p.y - rect.min.y)];
-        // What is under the mouse.
+        // What is under the mouse: the cube's widget, else the model.
         let pr = self.projector(ws, aspect);
+        let over_cube = response.hover_pos().is_some_and(|p| self.on_cube(p));
+        self.cube_hover = match response.hover_pos() {
+            Some(p) if over_cube && !response.dragged() => {
+                self.cube_widget().hit(&self.nav.camera, [p.x, p.y])
+            }
+            _ => None,
+        };
         self.hover = match response.hover_pos() {
-            Some(p) if !response.dragged() => self.picker(ws).pick(&pr, size, local(p)),
+            Some(p) if !response.dragged() && !over_cube => {
+                self.picker(ws).pick(&pr, size, local(p))
+            }
             _ => None,
         };
         // Navigation.
@@ -658,6 +806,7 @@ impl View {
             let moves = buttons.primary
                 && (self.nav.style != crate::core::nav::Navigation::Ryucad || modifiers.ctrl);
             let on = pressed
+                .filter(|p| !self.on_cube(*p))
                 .and_then(|p| self.picker(ws).pick(&pr, size, local(p)))
                 .filter(|h| h.rev.is_none() && matches!(h.kind, ryucad::entity::Target::Body(_)));
             if moves && let Some(h) = on {
@@ -756,10 +905,18 @@ impl View {
                 .hover
                 .as_ref()
                 .is_some_and(|h| matches!(h.kind, ryucad::entity::Target::Body(_)));
-        if response.clicked() && !ghost && measuring {
+        // A click on the cube turns the view; it never picks.
+        if response.clicked()
+            && over_cube
+            && let Some(hit) = self.cube_hover
+        {
+            self.cube_click(ws, hit);
+        }
+        let clicked = response.clicked() && !over_cube;
+        if clicked && !ghost && measuring {
             let entity = self.hover.as_ref().expect("a pick").entity.clone();
             ws.measure_pick(&entity);
-        } else if response.clicked() && !ghost {
+        } else if clicked && !ghost {
             let add = modifiers.shift || modifiers.ctrl;
             // Picking something else, or nothing, leaves the tree's choice.
             let keep = self
@@ -784,7 +941,7 @@ impl View {
                 (None, true) => {}
             }
         }
-        if response.secondary_clicked() {
+        if response.secondary_clicked() && !over_cube {
             self.menu = self.hover.clone();
         }
         // Visibility, with SolidWorks' keys: Tab hides the occurrence (or
@@ -955,6 +1112,29 @@ impl View {
                     });
                 });
         }
+        // The cube and its menu, top right; the triad, bottom left.
+        let dark = ui.visuals().dark_mode;
+        if self.cube {
+            let cube = self.cube_widget();
+            crate::ui::cube::draw(&painter, &cube, &self.nav.camera, self.cube_hover, dark);
+            let (lo, hi) = cube.menu();
+            let button = ui
+                .put(
+                    egui::Rect::from_min_max(egui::pos2(lo[0], lo[1]), egui::pos2(hi[0], hi[1])),
+                    egui::Button::new(egui::RichText::new("Views").small()),
+                )
+                .on_hover_text("Projection, isometric, zoom to fit and the named views");
+            egui::Popup::menu(&button).show(|ui| self.views_menu(ui, ws));
+        }
+        if self.triad {
+            crate::ui::cube::triad(
+                &painter,
+                egui::pos2(rect.min.x + 40.0, rect.max.y - 40.0),
+                &self.nav.camera,
+                dark,
+            );
+        }
+        self.selector_ui(ui.ctx(), ws);
         if ws.lost {
             painter.rect_filled(rect, 0.0, egui::Color32::from_white_alpha(140));
         }
@@ -983,6 +1163,173 @@ impl View {
         }
     }
 
+    /// The cube's menu: projection, isometric, zoom to fit, the named
+    /// views.
+    fn views_menu(&mut self, ui: &mut egui::Ui, ws: &mut Workspace) {
+        let ortho = matches!(self.nav.camera.projection, Projection::Orthographic { .. });
+        if ui.selectable_label(!ortho, "Perspective").clicked() {
+            self.set_projection(ws, false);
+            ui.close();
+        }
+        if ui.selectable_label(ortho, "Orthographic").clicked() {
+            self.set_projection(ws, true);
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Isometric").clicked() {
+            self.standard(ws, StandardView::Iso);
+            ui.close();
+        }
+        if ui.button("Zoom to fit").clicked() {
+            self.fit(ws, None);
+            ui.close();
+        }
+        ui.separator();
+        self.named_views(ui, ws);
+    }
+
+    /// A button per named view of the part shown; a view that doesn't
+    /// read says why. Returns whether one was chosen.
+    fn named_views(&mut self, ui: &mut egui::Ui, ws: &mut Workspace) -> bool {
+        if ws.views.part.is_none() {
+            ui.weak("Named views: show one part or assembly");
+            return false;
+        }
+        if ws.views.views.is_empty() {
+            ui.weak("No named views");
+            return false;
+        }
+        let mut chosen = None;
+        for v in &ws.views.views {
+            match &v.camera {
+                Ok(_) => {
+                    if ui.button(&v.id).clicked() {
+                        chosen = Some(v.id.clone());
+                    }
+                }
+                Err(why) => {
+                    ui.add_enabled(false, egui::Button::new(&v.id))
+                        .on_disabled_hover_text(why);
+                }
+            }
+        }
+        if let Some(id) = &chosen {
+            self.restore_view(ws, id);
+            ui.close();
+        }
+        chosen.is_some()
+    }
+
+    /// The spacebar view selector, while open: a cube to click, the
+    /// standard views, Normal to, the named views and Save view….
+    fn selector_ui(&mut self, ctx: &egui::Context, ws: &mut Workspace) {
+        let Some(sel) = self.selector.clone() else {
+            return;
+        };
+        let mut close = false;
+        let mut naming = sel.naming.clone();
+        let area = egui::Area::new(egui::Id::unique("view selector"))
+            .fixed_pos(egui::pos2(sel.at[0], sel.at[1]))
+            .constrain_to(self.rect)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.strong("View selector");
+                    let (r, painter) =
+                        ui.allocate_painter(egui::vec2(150.0, 150.0), Sense::click());
+                    let cube = Cube {
+                        centre: [r.rect.center().x, r.rect.center().y],
+                        half: 30.0,
+                    };
+                    let hover = r
+                        .hover_pos()
+                        .and_then(|p| cube.hit(&self.nav.camera, [p.x, p.y]));
+                    crate::ui::cube::draw(
+                        &painter,
+                        &cube,
+                        &self.nav.camera,
+                        hover,
+                        ui.visuals().dark_mode,
+                    );
+                    if r.clicked()
+                        && let Some(h) = hover
+                    {
+                        self.cube_click(ws, h);
+                        close = true;
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        use StandardView as S;
+                        for v in [
+                            S::Front,
+                            S::Back,
+                            S::Left,
+                            S::Right,
+                            S::Top,
+                            S::Bottom,
+                            S::Iso,
+                            S::Dimetric,
+                            S::Trimetric,
+                        ] {
+                            let title = crate::core::keymap::Command::View(v).title();
+                            if ui.button(title).clicked() {
+                                self.standard(ws, v);
+                                close = true;
+                            }
+                        }
+                    });
+                    let face = self.selected_face(ws);
+                    if ui
+                        .add_enabled(face.is_some(), egui::Button::new("Normal to"))
+                        .on_disabled_hover_text("Select a planar face first")
+                        .clicked()
+                    {
+                        self.normal_to(ws);
+                        close = true;
+                    }
+                    ui.separator();
+                    if self.named_views(ui, ws) {
+                        close = true;
+                    }
+                    if ws.views.part.is_some() {
+                        match &mut naming {
+                            None => {
+                                if ui.button("Save view…").clicked() {
+                                    naming = Some(String::new());
+                                }
+                            }
+                            Some(name) => {
+                                ui.horizontal(|ui| {
+                                    let field = ui.add(
+                                        egui::TextEdit::singleline(name)
+                                            .hint_text("view name")
+                                            .desired_width(110.0),
+                                    );
+                                    field.request_focus();
+                                    let ok = crate::core::views::valid_id(name);
+                                    let save = ui.add_enabled(ok, egui::Button::new("Save"));
+                                    let entered = field.lost_focus()
+                                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                    if ok && (save.clicked() || entered) {
+                                        ws.save_view(name, &self.nav.camera);
+                                        close = true;
+                                    }
+                                });
+                            }
+                        }
+                    }
+                });
+            });
+        // A click elsewhere closes it, as a popup's does.
+        if area.response.clicked_elsewhere() {
+            close = true;
+        }
+        self.selector = if close {
+            None
+        } else {
+            Some(crate::core::views::Selector { naming, ..sel })
+        };
+    }
+
     fn draw(
         &mut self,
         ui: &mut egui::Ui,
@@ -998,13 +1345,14 @@ impl View {
             (rect.height() * ppp).round() as u32,
         ];
         let reference = self.reference(ws);
+        let bounds = self.bounds(ws);
         let scene = self
             .scene
             .get_or_insert_with(|| Scene::new(&rs.device, &rs.adapter));
         scene.sync_drawn(&rs.device, drawn, reference);
         scene.sync_ghosts(&rs.device, ws.compare.as_ref());
-        let overlay = if self.sketches {
-            let size = [f64::from(px[0]), f64::from(px[1])];
+        let size = [f64::from(px[0]), f64::from(px[1])];
+        let mut overlay = if self.sketches {
             crate::core::sketch::overlay(
                 ws.model.drawn_sketches().map(|(_, d)| &**d),
                 pr,
@@ -1014,6 +1362,19 @@ impl View {
         } else {
             Vec::new()
         };
+        // The origin's axes and planes, a tenth of the model's size.
+        if self.origin {
+            let length = match bounds {
+                Some((lo, hi)) => ryucad::render::origin_size(&[lo, hi]),
+                None => ryucad::render::origin_size(&[]),
+            };
+            overlay.extend(crate::core::sketch::origin(
+                pr,
+                size,
+                f64::from(ppp),
+                length,
+            ));
+        }
         let list = DrawList {
             reference,
             matrix: pr.matrix(reference),
