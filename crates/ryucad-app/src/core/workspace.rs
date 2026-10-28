@@ -77,6 +77,8 @@ enum Pending {
     Bom {
         flat: bool,
     },
+    /// An item number set from the BOM tab (`bom.renumber`).
+    BomRenumber(crate::core::bom::ItemEdit),
     /// A part's properties for the Part section; after a conflict, with
     /// the form as it was.
     Props(String, Option<Box<PartProps>>),
@@ -1105,6 +1107,37 @@ impl Workspace {
         self.load_bom();
     }
 
+    /// Saves the item number being typed in the BOM tab (`bom.renumber`),
+    /// against the revision of its assembly the window last saw. Text
+    /// that isn't an item number is refused here, and kept.
+    pub fn save_item(&mut self) {
+        let Some(e) = self.bom.editing.clone() else {
+            return;
+        };
+        let n = match crate::core::bom::item_number(&e.text) {
+            Ok(n) => n,
+            Err(why) => {
+                self.bom.edit_error = Some(why);
+                return;
+            }
+        };
+        if Some(n) == e.was {
+            self.bom.editing = None;
+            return;
+        }
+        let mut items = serde_json::Map::new();
+        items.insert(e.part.clone(), json!(n));
+        let req = Request::BomRenumber {
+            part: e.parent.clone(),
+            items,
+            compact: false,
+            expected_revision: self.part(&e.parent).map(|p| p.revision.clone()),
+        };
+        self.bom.saving = true;
+        self.bom.edit_error = None;
+        self.send(req, Pending::BomRenumber(e));
+    }
+
     /// Reads the BOM again if the tab was opened.
     fn reload_bom(&mut self) {
         if self.bom_open {
@@ -1374,6 +1407,7 @@ impl Workspace {
                 self.releases.busy = false;
                 self.bom_waiting = false;
                 self.bom_again = false;
+                self.bom.saving = false;
                 self.model.asked.clear();
                 self.model.sketches_asked.clear();
                 self.compare_waiting = false;
@@ -1529,6 +1563,20 @@ impl Workspace {
                 } else {
                     self.bom_read();
                 }
+            }
+            (Pending::BomRenumber(edit), r) => {
+                self.bom.saving = false;
+                match r {
+                    Ok(_) => self.bom.editing = None,
+                    // Someone renumbered first: read again, and say what
+                    // changed.
+                    Err(e) if e.code == Code::Conflict => {
+                        self.bom.editing = None;
+                        self.bom.conflict = Some(edit);
+                    }
+                    Err(e) => self.bom.edit_error = Some(e.message),
+                }
+                self.load_bom();
             }
             (Pending::PdmConfig, Ok(a)) => {
                 let was = self.pdm_ready();

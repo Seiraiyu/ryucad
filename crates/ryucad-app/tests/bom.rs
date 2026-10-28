@@ -97,3 +97,53 @@ fn several_roots_are_offered_and_a_focus_chooses() {
     assert!(ws.wait_until(WAIT, |ws| ws.bom.root.as_deref() == Some("frame")));
     assert!(ws.bom.roots.is_empty());
 }
+
+/// The item number the tab shows for `part`.
+fn item(ws: &Workspace, part: &str) -> Option<u64> {
+    ws.bom.tree.iter().find(|l| l.part == part)?.item
+}
+
+/// Types `text` as `part`'s item number and sets it.
+fn set_item(ws: &mut Workspace, part: &str, text: &str) {
+    let line = ws.bom.tree.iter().find(|l| l.part == part).unwrap().clone();
+    ws.bom.edit(&line);
+    ws.bom.editing.as_mut().unwrap().text = text.into();
+    ws.save_item();
+}
+
+#[test]
+fn an_item_number_is_set_through_bom_renumber_and_a_stale_one_conflicts() {
+    let p = assembled();
+    p.ok(&["part", "create", "nut"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "n1", "--of", "nut",
+    ]);
+    let mut ws = open(&p);
+    ws.load_bom();
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && item(ws, "nut") == Some(2)));
+    set_item(&mut ws, "bolt", "7");
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && item(ws, "bolt") == Some(7)));
+    assert!(ws.bom.editing.is_none() && !ws.bom.saving);
+    let log = p.ok(&["activity"]);
+    let last = log["entries"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["method"], "bom.renumber");
+    assert_eq!(last["participant"]["id"], ws.me());
+    // Not an item number: refused here, the text kept.
+    set_item(&mut ws, "bolt", "0");
+    assert!(ws.bom.edit_error.is_some());
+    assert_eq!(ws.bom.editing.as_ref().unwrap().text, "0");
+    ws.bom.editing = None;
+    // Someone renumbers while the window hears nothing: the save is
+    // against the revision it saw, conflicts, and says what changed.
+    ws.deaf = true;
+    p.ok(&["bom", "renumber", "frame", "bolt=3"]);
+    set_item(&mut ws, "bolt", "5");
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.bom.changed.is_some()));
+    assert_eq!(
+        ws.bom.changed.as_deref(),
+        Some("Someone changed frame's item numbers while you edited: bolt is now 3 (you typed 5)")
+    );
+    assert_eq!(item(&ws, "bolt"), Some(3));
+    let bom = p.ok(&["bom", "frame"]);
+    assert_eq!(bom["tree"]["children"][0]["item"], 3);
+}

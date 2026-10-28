@@ -1,12 +1,13 @@
 //! The BOM tab, drawn from `ws.bom` (`core::bom`): the BOM of the part
 //! the window shows, indented or flat, with the CSV's columns, its
 //! findings above it and each line's problem beside it. Choosing a line
-//! selects its occurrences and frames them.
+//! selects its occurrences and frames them. An indented line's item
+//! number is a button: pressed, it is typed and set (`bom.renumber`).
 //!
 //! Each panel is one function taking the `Ui` it draws in, so the bottom
 //! panel's tab can become a tile of its own without changing it.
 
-use crate::core::bom::Line;
+use crate::core::bom::{BomTab, Line};
 use crate::core::workspace::Workspace;
 use crate::ui::view::View;
 use eframe::egui::{self, RichText};
@@ -59,7 +60,23 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     for f in &ws.bom.findings {
         ui.colored_label(ui.visuals().warn_fg_color, f);
     }
+    if let Some(c) = &ws.bom.changed {
+        let mut ok = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(ui.visuals().warn_fg_color, c);
+            ok = ui.button("OK").clicked();
+        });
+        if ok {
+            ws.bom.changed = None;
+        }
+    }
+    if let Some(e) = &ws.bom.edit_error {
+        ui.colored_label(error, e);
+    }
     let mut chose: Option<Vec<String>> = None;
+    // The item number typed, apart from the lines it is typed over.
+    let mut typed = ws.bom.editing.as_ref().map(|e| e.text.clone());
+    let (mut start, mut set, mut cancel) = (None, false, false);
     egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
         let t = &ws.bom;
         egui::Grid::new("bom").striped(true).show(ui, |ui| {
@@ -76,6 +93,57 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                         "level" => {
                             let indent = "    ".repeat(line.depth.saturating_sub(1));
                             ui.label(format!("{indent}{text}"));
+                        }
+                        "item" if t.is_editing(line) => {
+                            let name = format!(
+                                "Item of {} in {}",
+                                line.part,
+                                BomTab::editable(line).unwrap_or("")
+                            );
+                            ui.horizontal(|ui| {
+                                let buffer = typed.get_or_insert_with(String::new);
+                                let r =
+                                    ui.add(egui::TextEdit::singleline(buffer).desired_width(48.0));
+                                r.widget_info(|| {
+                                    egui::WidgetInfo::labeled(egui::Role::TextInput, true, &name)
+                                });
+                                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                    set = true;
+                                }
+                                if ui
+                                    .add_enabled(!t.saving, egui::Button::new("Set item"))
+                                    .clicked()
+                                {
+                                    set = true;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    cancel = true;
+                                }
+                                if t.saving {
+                                    ui.spinner();
+                                }
+                            });
+                        }
+                        "item" if BomTab::editable(line).is_some() && !t.saving => {
+                            let name = format!(
+                                "Item of {} in {}",
+                                line.part,
+                                BomTab::editable(line).unwrap_or("")
+                            );
+                            let shown = if text.is_empty() {
+                                "–"
+                            } else {
+                                text.as_str()
+                            };
+                            let r = ui
+                                .add(egui::Button::new(shown).frame(false))
+                                .on_hover_text("Change this item number");
+                            r.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::Role::Button, true, &name)
+                            });
+                            if r.clicked() {
+                                start = Some(line.clone());
+                            }
                         }
                         "part" => {
                             let r = ui.selectable_label(chosen, text.as_str());
@@ -103,6 +171,19 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             }
         });
     });
+    if let (Some(text), Some(e)) = (typed, ws.bom.editing.as_mut()) {
+        e.text = text;
+    }
+    if let Some(line) = start {
+        ws.bom.edit(&line);
+    }
+    if set {
+        ws.save_item();
+    }
+    if cancel {
+        ws.bom.editing = None;
+        ws.bom.edit_error = None;
+    }
     if let Some(occurrences) = chose {
         choose(ws, view, occurrences);
     }
