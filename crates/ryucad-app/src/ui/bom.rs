@@ -197,6 +197,54 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     }
 }
 
+/// The Part section's Where used: the assemblies in the working files
+/// that reach its part (Show shows one), then every official release of
+/// an assembly that does, with its state. Each says how many one holds,
+/// and each way down to the part on hover.
+pub fn where_used(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
+    let part = crate::ui::panels::section_part(ws, view);
+    ws.show_where_used(part.as_deref());
+    let Some(w) = &ws.where_used else {
+        return;
+    };
+    ui.heading(format!("Where {} is used", w.part));
+    if let Some(e) = &w.error {
+        ui.colored_label(ui.visuals().error_fg_color, &e.message);
+        return;
+    }
+    let mut show = None;
+    if w.working.is_empty() {
+        ui.weak("No assembly in the working files uses it");
+    }
+    for u in &w.working {
+        ui.horizontal(|ui| {
+            ui.label(u.text()).on_hover_text(u.paths.join("\n"));
+            if ui.small_button(format!("Show {}", u.assembly)).clicked() {
+                show = Some(u.assembly.clone());
+            }
+        });
+    }
+    ui.strong("Released");
+    match &w.note {
+        Some(n) => {
+            ui.weak(n);
+        }
+        None if w.released.is_empty() => {
+            ui.weak("No released assembly uses it");
+        }
+        None => {}
+    }
+    for u in &w.released {
+        ui.label(u.text()).on_hover_text(u.paths.join("\n"));
+    }
+    for p in &w.problems {
+        ui.colored_label(ui.visuals().warn_fg_color, p);
+    }
+    if let Some(a) = show {
+        ws.set_focus(Some(a));
+    }
+}
+
 /// Export CSV…, while `ws.bom_export` is open: where to write the BOM as
 /// the tab shows it, indented or flat.
 pub fn export(

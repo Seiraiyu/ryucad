@@ -81,6 +81,8 @@ enum Pending {
     BomRenumber(crate::core::bom::ItemEdit),
     /// The BOM's CSV, to write at this path.
     BomExport(PathBuf),
+    /// Where a part is used, for the Part section.
+    WhereUsed(String),
     /// A part's properties for the Part section; after a conflict, with
     /// the form as it was.
     Props(String, Option<Box<PartProps>>),
@@ -270,6 +272,9 @@ pub struct Workspace {
     bom_again: bool,
     /// The BOM tab's Export CSV…, while open.
     pub bom_export: Option<crate::core::bom::BomExport>,
+    /// Where the Part section's part is used, once read, and its part.
+    pub where_used: Option<crate::core::where_used::WhereUsed>,
+    where_used_part: Option<String>,
     pub settings: Settings,
     /// The last doctor report, once asked for.
     pub doctor: Option<Value>,
@@ -368,6 +373,8 @@ impl Workspace {
             bom_waiting: false,
             bom_again: false,
             bom_export: None,
+            where_used: None,
+            where_used_part: None,
             settings: Settings::default(),
             doctor: None,
             interference: None,
@@ -1112,6 +1119,30 @@ impl Workspace {
         self.load_bom();
     }
 
+    /// Shows where `part` is used in the Part section (`bom.where_used`),
+    /// read if it isn't yet.
+    pub fn show_where_used(&mut self, part: Option<&str>) {
+        if self.where_used_part.as_deref() == part {
+            return;
+        }
+        self.where_used_part = part.map(str::to_owned);
+        self.where_used = None;
+        self.read_where_used();
+    }
+
+    /// Reads where the Part section's part is used again, if it shows one.
+    fn read_where_used(&mut self) {
+        if let Some(part) = self.where_used_part.clone() {
+            let req = Request::BomWhereUsed {
+                part: part.clone(),
+                label: None,
+                working: false,
+                direct: false,
+            };
+            self.send(req, Pending::WhereUsed(part));
+        }
+    }
+
     /// Opens Export CSV… for the BOM as the tab shows it.
     pub fn open_bom_export(&mut self) {
         self.bom_export = Some(crate::core::bom::BomExport {
@@ -1358,6 +1389,9 @@ impl Workspace {
             self.load_releases();
         }
         self.reload_bom();
+        if self.where_used.is_none() {
+            self.read_where_used();
+        }
         if let Some((part, sketch, constraint)) = self.dimension_for.clone()
             && self.dimension.is_none()
         {
@@ -1596,6 +1630,15 @@ impl Workspace {
                     self.ask_bom(true);
                 } else {
                     self.bom_read();
+                }
+            }
+            (Pending::WhereUsed(part), r) => {
+                if self.where_used_part.as_deref() == Some(part.as_str()) {
+                    use crate::core::where_used::WhereUsed;
+                    self.where_used = Some(match r {
+                        Ok(a) => WhereUsed::from_answer(&part, &a.result),
+                        Err(e) => WhereUsed::failed(&part, e),
+                    });
                 }
             }
             (Pending::BomExport(path), a) => {
@@ -2008,6 +2051,8 @@ impl Workspace {
                 {
                     self.reload_bom();
                 }
+                // Any assembly may now reach the part, or no longer.
+                self.read_where_used();
                 for report in params["parts"].as_array().into_iter().flatten() {
                     self.part_changed(report);
                 }
@@ -2031,6 +2076,7 @@ impl Workspace {
                 self.send(Request::PdmConfig {}, Pending::PdmConfig);
                 // Parts came or went, or the declared properties changed.
                 self.reload_bom();
+                self.read_where_used();
                 // Parts came or went: damage may have too.
                 self.rediagnose();
                 self.reload_history();
@@ -2079,8 +2125,10 @@ impl Workspace {
                 if self.releases_open {
                     self.load_releases();
                 }
-                // Labels resolve differently, and rows' states moved.
+                // Labels resolve differently, and rows' states moved; a
+                // release may have become official.
                 self.reload_bom();
+                self.read_where_used();
             }
             "activity.appended" => self.activity.appended(params),
             "app.open" => self.raised = true,
