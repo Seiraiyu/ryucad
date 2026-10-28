@@ -982,6 +982,10 @@ fn every_protocol_method_has_a_command() {
         ("materials.list", &["materials", "list"]),
         ("materials.set", &["materials", "set"]),
         ("materials.delete", &["materials", "delete"]),
+        ("view.list", &["view", "list"]),
+        ("view.save", &["view", "save"]),
+        ("view.delete", &["view", "delete"]),
+        ("view.rename", &["view", "rename"]),
         ("import", &["import"]),
         ("export", &["export"]),
         ("rebuild", &["rebuild"]),
@@ -1273,7 +1277,7 @@ fn renders_are_the_same_both_ways() {
     );
     p.fails(
         &["render", "--out", "x.png", "--view", "sideways"],
-        "invalid_param",
+        "view_not_found",
         1,
     );
 }
@@ -2977,6 +2981,110 @@ fn materials_from_the_cli() {
     assert_eq!((code, &v["ok"]), (0, &json!(true)), "{v}");
     let (_, v) = p.run_in(&p.daemon, "", &["materials", "list"]);
     assert_eq!(v["result"]["default"], "steel", "{v}");
+}
+
+#[test]
+fn named_views_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=40", "--param", "y=20", "--param",
+        "z=10",
+    ]);
+    let rev = p.ok(&["view", "list", "p"])["revisions"]["p"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let saved = p.ok(&[
+        "view",
+        "save",
+        "p",
+        "detail",
+        "--eye",
+        "100,-80,60",
+        "--target",
+        "0,0,0",
+        "--up",
+        "0,0,1",
+        "--ortho",
+        "70",
+        "--expect",
+        &rev,
+    ]);
+    assert_eq!(saved["camera"]["eye"], json!([0.1, -0.08, 0.06]), "{saved}");
+    assert_eq!(
+        saved["camera"]["projection"],
+        json!({"orthographic": {"height": 0.07}})
+    );
+    assert!(p.direct.join("parts/p/views/detail.json").is_file());
+    p.fails(
+        &[
+            "view", "save", "p", "other", "--eye", "1,1,1", "--target", "0,0,0", "--up", "0,0,1",
+            "--expect", &rev,
+        ],
+        "conflict",
+        1,
+    );
+    p.fails(
+        &[
+            "view", "save", "p", "iso", "--eye", "1,1,1", "--target", "0,0,0", "--up", "0,0,1",
+        ],
+        "invalid_id",
+        1,
+    );
+    // A render restores it, and draws the origin when asked.
+    let r = p.ok(&[
+        "render", "p", "--out", "a.png", "--size", "160x120", "--view", "detail", "--origin",
+    ]);
+    assert_eq!(r["camera"], saved["camera"], "{r}");
+    let r = p.ok(&[
+        "render",
+        "--out",
+        "b.png",
+        "--size",
+        "160x120",
+        "--view",
+        "back_bottom_left",
+    ]);
+    assert!(r["camera"]["eye"][0].as_f64().unwrap() < 0.0, "{r}");
+    p.ok(&["view", "rename", "p", "detail", "close"]);
+    let list = p.ok(&["view", "list"]);
+    assert_eq!(list["views"][0]["view"], "close", "{list}");
+    p.fails(&["view", "delete", "p", "detail"], "view_not_found", 1);
+    // In a session, the camera restores it too; with no daemon there is
+    // no camera to set.
+    let (code, v) = p.run_in(&p.daemon, "", &["camera", "--view", "close"]);
+    assert_eq!((code, &v["result"]["camera"]), (0, &saved["camera"]), "{v}");
+    let (code, v) = p.run_in(&p.daemon, "", &["view", "save", "p", "mine"]);
+    assert_eq!((code, &v["result"]["camera"]), (0, &saved["camera"]), "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["inspect", "p"]);
+    let top = v["result"]["bodies"][0]["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            f["surface"]["type"] == "plane"
+                && f["surface"]["frame"]["z"][2].as_f64().unwrap()
+                    * if f["reversed"] == true { -1.0 } else { 1.0 }
+                    == 1.0
+        })
+        .map(|f| format!("p/b/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    let (code, v) = p.run_in(&p.daemon, "", &["camera", "--normal-to", &top]);
+    assert_eq!(code, 0, "{v}");
+    let eye = &v["result"]["camera"]["eye"];
+    let target = &v["result"]["camera"]["target"];
+    assert!(
+        eye[2].as_f64().unwrap() > target[2].as_f64().unwrap(),
+        "{v}"
+    );
+    let (code, v) = p.run_in(&p.daemon, "", &["view", "delete", "p", "close"]);
+    assert_eq!(code, 0, "{v}");
+    // One undoable change.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!((code, &v["ok"]), (0, &json!(true)), "{v}");
+    assert!(p.daemon.join("parts/p/views/close.json").is_file());
 }
 
 #[test]

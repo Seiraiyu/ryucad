@@ -65,6 +65,10 @@ enum Command {
     /// each part's named by its PDM `material` property.
     #[command(subcommand)]
     Materials(MaterialsCmd),
+    /// Named views: cameras saved with a part or an assembly, in Git, that
+    /// `camera --view` and `render --view` restore.
+    #[command(subcommand)]
+    View(ViewCmd),
     /// ryupdm's settings for this project: its ID, how revisions are labelled, the release
     /// branch, the part number pattern and the custom properties parts may have.
     #[command(subcommand)]
@@ -961,6 +965,60 @@ enum MaterialsCmd {
     },
 }
 
+// Parsed once per run; the size difference costs nothing.
+#[allow(clippy::large_enum_variant)]
+#[derive(Subcommand)]
+enum ViewCmd {
+    /// The named views of a part, or of every part, with each part's revision.
+    List { part: Option<String> },
+    /// Save a camera as a named view of a part: the one --of's window has (else the one
+    /// human's, else this agent's), or one given by --eye, --target and --up. A view of
+    /// that name is replaced.
+    Save {
+        part: String,
+        view: String,
+        #[arg(long = "of", value_name = "PARTICIPANT", conflicts_with = "eye")]
+        of: Option<String>,
+        /// The eye point, three quantities: 0,-100mm,50mm.
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires_all = ["target", "up"])]
+        eye: Option<[String; 3]>,
+        /// The point looked at.
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires = "eye")]
+        target: Option<[String; 3]>,
+        /// The up direction: 0,0,1.
+        #[arg(long, value_name = "X,Y,Z", value_parser = vector, allow_hyphen_values = true, requires = "eye")]
+        up: Option<[f64; 3]>,
+        /// Perspective with this vertical field of view (45 by default).
+        #[arg(
+            long,
+            value_name = "DEGREES",
+            conflicts_with = "ortho",
+            requires = "eye"
+        )]
+        fov: Option<f64>,
+        /// Orthographic, this tall at the target.
+        #[arg(long, value_name = "QUANTITY", requires = "eye")]
+        ortho: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete a named view.
+    Delete {
+        part: String,
+        view: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Rename a named view.
+    Rename {
+        part: String,
+        from: String,
+        to: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
 #[derive(Subcommand)]
 enum PropsCmd {
     /// Every property of a part, set or not, with its declaration and faults.
@@ -1806,6 +1864,40 @@ fn request(cmd: &Command) -> Option<Request> {
             expected_revision: expect.revision.clone(),
         },
         Command::Materials(MaterialsCmd::List) => Request::MaterialsList {},
+        Command::View(ViewCmd::List { part }) => Request::ViewList { part: part.clone() },
+        Command::View(ViewCmd::Save {
+            part,
+            view,
+            of,
+            eye,
+            target,
+            up,
+            fov,
+            ortho,
+            expect,
+        }) => Request::ViewSave {
+            part: part.clone(),
+            view: view.clone(),
+            camera: camera_arg(eye, target, up, fov, ortho),
+            participant: of.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::View(ViewCmd::Delete { part, view, expect }) => Request::ViewDelete {
+            part: part.clone(),
+            view: view.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::View(ViewCmd::Rename {
+            part,
+            from,
+            to,
+            expect,
+        }) => Request::ViewRename {
+            part: part.clone(),
+            from: from.clone(),
+            to: to.clone(),
+            expected_revision: expect.revision.clone(),
+        },
         Command::Materials(MaterialsCmd::Set {
             name,
             density,
