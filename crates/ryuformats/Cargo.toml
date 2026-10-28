@@ -12,4 +12,5 @@ ryukei = { path = "../ryukei" }
 
 [dev-dependencies]
 # Independent readers of what the writers write, for tests only.
+roxmltree = "0.20"
 zip = { version = "2", default-features = false, features = ["deflate"] }

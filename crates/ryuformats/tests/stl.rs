@@ -3,71 +3,9 @@
 
 mod common;
 
-use common::{read_ascii_stl, read_binary_stl, scene_volume, volume, watertight};
+use common::{read_ascii_stl, read_binary_stl, scene, scene_volume, volume, watertight};
 use ryuformats::stl::{self, Stl};
-use ryuformats::{Child, Product, Scene, Solid, Unit};
-use ryukei::geom::{Rigid, UnitVector3, Vector3};
-use ryukei::mesh::MeshParams;
-use ryukei::name::OpKey;
-use std::sync::Arc;
-
-fn meshed(b: ryukei::topo::Body) -> Arc<ryukei::mesh::BodyMesh> {
-    Arc::new(ryukei::mesh::tessellate(&b, &MeshParams::new(1e-5, 0.26)).unwrap())
-}
-
-/// A plate with a ball on it, and a cylinder placed twice, the second
-/// turned: curved faces, seams, poles.
-fn scene() -> Scene {
-    let k = OpKey(7);
-    let plate = ryukei::primitive::block(k, 0.08, 0.05, 0.004, &Rigid::IDENTITY)
-        .unwrap()
-        .0;
-    let ball = ryukei::primitive::sphere(
-        k,
-        0.006,
-        &Rigid::translation(Vector3::new(0.02, 0.02, 0.02)),
-    )
-    .unwrap()
-    .0;
-    let rod = ryukei::primitive::cylinder(k, 0.003, 0.03, &Rigid::IDENTITY)
-        .unwrap()
-        .0;
-    let solid = |name: &str, b| Solid {
-        name: name.into(),
-        mesh: meshed(b),
-    };
-    let turned = Rigid::translation(Vector3::new(0.06, 0.03, 0.01))
-        .then_after(&Rigid::rotation(UnitVector3::X, 1.0));
-    Scene {
-        products: vec![
-            Product {
-                id: "A-1".into(),
-                name: "Base".into(),
-                part: "base".into(),
-                solids: vec![solid("plate", plate), solid("ball", ball)],
-                children: vec![
-                    Child {
-                        product: 1,
-                        place: Rigid::translation(Vector3::new(0.01, 0.01, 0.004)),
-                        name: "r1".into(),
-                    },
-                    Child {
-                        product: 1,
-                        place: turned,
-                        name: "r2".into(),
-                    },
-                ],
-            },
-            Product {
-                id: "R-1".into(),
-                name: "Rod".into(),
-                part: "rod".into(),
-                solids: vec![solid("rod", rod)],
-                children: vec![],
-            },
-        ],
-    }
-}
+use ryuformats::{Scene, Unit};
 
 fn written(scene: &Scene, opts: &Stl) -> Vec<u8> {
     let mut out = Vec::new();
