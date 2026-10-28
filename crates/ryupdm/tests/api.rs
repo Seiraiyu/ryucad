@@ -203,3 +203,176 @@ fn the_library_reads_a_bare_repository_at_a_pinned_commit() {
     assert_eq!(found[0].code, "release_modified");
     assert_eq!(found[0].to_json()["source"], "release");
 }
+
+/// The release of `part` as the files in `dir` have it.
+fn release_of(dir: &Path, part: &str, label: &str, supersedes: Option<&str>) -> Record {
+    let src = Folder(dir);
+    let p = Id::parse(part, "part").unwrap();
+    let config = Config::read(&src).unwrap();
+    Record::Release(Release {
+        project: ProjectId::parse(PROJECT).unwrap(),
+        part: p.clone(),
+        label: label.into(),
+        content: ryupdm::content::hash(&src, &p).unwrap(),
+        properties: revising(&config, &ryupdm::props::read(&src, &p).unwrap()),
+        results: BTreeMap::new(),
+        built_with: BuiltWith {
+            ryucad: "0".into(),
+            ryukei: "0".into(),
+            commit: "c".into(),
+        },
+        released_by: ReleasedBy {
+            name: None,
+            email: None,
+            participant: "agent".into(),
+        },
+        supersedes: supersedes.map(str::to_owned),
+        note: None,
+    })
+}
+
+/// Commits `part`'s release `label` of the files in `w`'s `cad/`.
+fn released(w: &Path, part: &str, label: &str, supersedes: Option<&str>) -> String {
+    let r = release_of(&w.join("cad"), part, label, supersedes);
+    put(w, &format!("cad/{}", r.path()), &r.to_json());
+    commit(w, &format!("release {part} {label}"))
+}
+
+#[test]
+fn boms_and_where_used_read_released_assemblies_at_their_commits() {
+    use ryucad_doc::doc::assembly::Rev;
+    use ryupdm::structure::{Cache, Reader, Repo};
+    use ryupdm::where_used::{Query, where_used};
+    let work = tempfile::tempdir().unwrap();
+    let w = work.path();
+    git(w, &["init", "-q", "-b", "main"]);
+    put(
+        w,
+        "cad/ryucad.json",
+        &json!({"default_unit": "mm", "format": 2, "kind": "ryucad.project",
+                "project": PROJECT}),
+    );
+    put(
+        w,
+        "cad/parts/pin/part.json",
+        &json!({"features": ["a"], "format": 1, "kind": "ryucad.part"}),
+    );
+    let pin = |w: &Path, len: &str, number: &str| {
+        put(
+            w,
+            "cad/parts/pin/features/a.json",
+            &json!({"format": 1, "kind": "ryucad.feature", "type": "cylinder",
+                    "radius": "2", "height": len}),
+        );
+        put(
+            w,
+            "cad/parts/pin/properties.json",
+            &json!({"format": 1, "kind": "ryupdm.properties", "number": number}),
+        );
+    };
+    let asm = |w: &Path, label: &str, n: usize| {
+        let ids: Vec<String> = (1..=n).map(|i| format!("p{i}")).collect();
+        put(
+            w,
+            "cad/parts/asm/part.json",
+            &json!({"features": ids, "format": 2, "kind": "ryucad.part",
+                    "part_kind": "assembly"}),
+        );
+        for id in &ids {
+            put(
+                w,
+                &format!("cad/parts/asm/features/{id}.json"),
+                &json!({"format": 4, "kind": "ryucad.feature", "type": "instance",
+                        "part": "pin", "rev": {"label": label},
+                        "pose": {"origin_m": [0, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}}),
+            );
+        }
+        put(
+            w,
+            "cad/parts/asm/properties.json",
+            &json!({"format": 1, "kind": "ryupdm.properties", "number": "900"}),
+        );
+    };
+    pin(w, "10", "100");
+    commit(w, "pin");
+    let pin_a = released(w, "pin", "A", None);
+    asm(w, "A", 2);
+    commit(w, "asm");
+    let asm_a = released(w, "asm", "A", None);
+    pin(w, "12", "100");
+    commit(w, "longer pin");
+    released(w, "pin", "B", Some("A"));
+    asm(w, "B", 3);
+    commit(w, "asm on pin B");
+    let asm_b = released(w, "asm", "B", Some("A"));
+    // Work goes on: the working assembly places four pins at B.
+    asm(w, "B", 4);
+    commit(w, "a fourth pin");
+
+    let bare = tempfile::tempdir().unwrap();
+    git(
+        bare.path(),
+        &["clone", "-q", "--bare", w.to_str().unwrap(), "."],
+    );
+    let repo = gix::open(bare.path()).unwrap();
+    let src = history::files(&repo, "main", "cad/").unwrap();
+    let project = Project::load_from(Path::new("/tip"), &src).unwrap();
+    let config = Config::read(&src).unwrap();
+    let releases = Releases::read(&repo, "cad/", &config).unwrap();
+    let mut cache = Cache::new();
+    let mut reader = Reader::new(
+        &src,
+        &project,
+        Some(Repo {
+            git: &repo,
+            prefix: "cad/",
+        }),
+        Some(&releases),
+        &mut cache,
+    );
+    let id = |s: &str| Id::parse(s, "part").unwrap();
+    // The BOM of asm's release A, read where it became official: two pins
+    // at A, read where pin A did.
+    let root = ryupdm::bom::tree(&mut reader, &id("asm"), &Rev::Label("A".into()), None).unwrap();
+    assert_eq!(
+        root.node.as_ref().unwrap().commit.as_deref(),
+        Some(asm_a.as_str())
+    );
+    let pins = &root.children[0];
+    assert_eq!((pins.count, &pins.rev), (2, &Rev::Label("A".into())));
+    assert_eq!(
+        pins.node.as_ref().unwrap().commit.as_deref(),
+        Some(pin_a.as_str())
+    );
+    // Where pin is used: the working assembly, and both releases.
+    let q = Query {
+        part: id("pin"),
+        rev: None,
+        direct: false,
+    };
+    let v = where_used(&mut reader, &q, &config);
+    assert_eq!(v["working"][0]["count"], 4);
+    assert_eq!(v["working"][0]["uses"][0]["rev"], json!({"label": "B"}));
+    let released: Vec<(Value, Value, Value)> = v["released"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["label"].clone(), r["state"].clone(), r["count"].clone()))
+        .collect();
+    assert_eq!(
+        released,
+        [
+            (json!("A"), json!("superseded"), json!(2)),
+            (json!("B"), json!("released"), json!(3)),
+        ]
+    );
+    assert_eq!(v["released"][1]["commit"], asm_b.as_str());
+    // Only pin A: asm's release A.
+    let q = Query {
+        rev: Some(Rev::Label("A".into())),
+        ..q
+    };
+    let v = where_used(&mut reader, &q, &config);
+    assert_eq!(v["working"], json!([]));
+    assert_eq!(v["released"].as_array().unwrap().len(), 1);
+}

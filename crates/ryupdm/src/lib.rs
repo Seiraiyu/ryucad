@@ -38,6 +38,7 @@ pub mod props;
 pub mod record;
 pub mod state;
 pub mod structure;
+pub mod where_used;
 
 use ryucad_doc::doc::canonical;
 use ryucad_doc::doc::id::ProjectId;
