@@ -46,6 +46,23 @@ pub enum Error {
     /// cut short, corrupted, or describing a body that breaks the
     /// structural checks. `what` says which.
     InvalidEncoding { what: &'static str },
+    /// A measure that can't be taken: see [`crate::measure`].
+    InvalidMeasure(MeasureError),
+}
+
+/// Why a measure was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MeasureError {
+    /// The entity isn't a live vertex, edge or face of the body, or the
+    /// measure doesn't apply to it (an angle of a point, an axis of a
+    /// plane).
+    NotAnEntity,
+    /// Geometry no measure covers: a face that doesn't mesh, a pair with
+    /// no closed form and no mesh.
+    Unsupported,
+    /// An intersection or a bound that stayed uncertain: refused rather
+    /// than guessed.
+    Uncertain,
 }
 
 /// Why a shape couldn't be healed into a body. Entities are named by
@@ -263,6 +280,7 @@ impl fmt::Display for Error {
             Self::InvalidBlend(b) => write!(f, "invalid blend: {b}"),
             Self::InvalidHeal(h) => write!(f, "can't heal: {h}"),
             Self::InvalidEncoding { what } => write!(f, "invalid encoding: {what}"),
+            Self::InvalidMeasure(m) => write!(f, "can't measure: {m}"),
         }
     }
 }
@@ -581,6 +599,22 @@ impl fmt::Display for HealError {
             }
             Self::Uncertain { at } => write!(f, "healing at {at} could not be certified"),
         }
+    }
+}
+
+impl fmt::Display for MeasureError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NotAnEntity => "not an entity this measure applies to",
+            Self::Unsupported => "geometry no measure covers",
+            Self::Uncertain => "the result could not be certified",
+        })
+    }
+}
+
+impl From<MeasureError> for Error {
+    fn from(m: MeasureError) -> Self {
+        Self::InvalidMeasure(m)
     }
 }
 
