@@ -2703,12 +2703,12 @@ pub(crate) mod tests {
             .iter()
             .map(|l| format!("\"{l}\""))
             .collect();
+        let (last, rest) = quoted.split_last().unwrap();
         assert_eq!(
             message(r),
             format!(
-                ".gitattributes lacks the lines {} and {}{why}",
-                quoted[..quoted.len() - 1].join(", "),
-                quoted[quoted.len() - 1]
+                ".gitattributes lacks the lines {} and {last}{why}",
+                rest.join(", ")
             )
         );
     }
