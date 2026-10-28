@@ -61,6 +61,10 @@ enum Command {
     /// such as "3 mm" or "wall * 2", that features' quantities can read.
     #[command(subcommand)]
     Param(ParamCmd),
+    /// The project's material library: densities (and colours) that mass properties read,
+    /// each part's named by its PDM `material` property.
+    #[command(subcommand)]
+    Materials(MaterialsCmd),
     /// ryupdm's settings for this project: its ID, how revisions are labelled, the release
     /// branch, the part number pattern and the custom properties parts may have.
     #[command(subcommand)]
@@ -850,6 +854,35 @@ enum PdmCmd {
         /// Write even if parts' properties stop fitting the settings.
         #[arg(long)]
         force: bool,
+        /// Fail with `conflict` unless the project is still at this revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MaterialsCmd {
+    /// Every material, the parts that name it, the default and the project revision.
+    List,
+    /// Add or replace a material.
+    Set {
+        name: String,
+        /// Its density: 7850 kg/m^3 or 7.85 g/cm^3.
+        #[arg(long, value_name = "DENSITY")]
+        density: String,
+        /// Its colour, #rrggbb (left out, it keeps its own).
+        #[arg(long, value_name = "#RRGGBB")]
+        colour: Option<String>,
+        /// Make it the material of parts that name none.
+        #[arg(long)]
+        default: bool,
+        /// Fail with `conflict` unless the project is still at this revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
+    /// Remove a material no part names.
+    Delete {
+        name: String,
         /// Fail with `conflict` unless the project is still at this revision.
         #[arg(long = "expect", value_name = "REVISION")]
         expect: Option<String>,
@@ -1650,6 +1683,24 @@ fn request(cmd: &Command) -> Option<Request> {
             from: from.clone(),
             to: to.clone(),
             expected_revision: expect.revision.clone(),
+        },
+        Command::Materials(MaterialsCmd::List) => Request::MaterialsList {},
+        Command::Materials(MaterialsCmd::Set {
+            name,
+            density,
+            colour,
+            default,
+            expect,
+        }) => Request::MaterialsSet {
+            name: name.clone(),
+            density: density.clone(),
+            colour: colour.clone(),
+            default: *default,
+            expected_revision: expect.clone(),
+        },
+        Command::Materials(MaterialsCmd::Delete { name, expect }) => Request::MaterialsDelete {
+            name: name.clone(),
+            expected_revision: expect.clone(),
         },
         Command::Pdm(PdmCmd::Init) => Request::PdmInit {},
         Command::Pdm(PdmCmd::Config) => Request::PdmConfig {},
