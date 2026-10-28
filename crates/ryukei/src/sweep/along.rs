@@ -32,6 +32,7 @@ use core::f64::consts::TAU;
 use std::sync::Arc;
 
 mod closed;
+mod embedded;
 
 /// How a sweep along a path carries its profile: by `law`, turning by
 /// `twist` radians about the path from start to end and growing by
@@ -136,6 +137,16 @@ pub fn along(
             legs = self::legs(profile, &path, &twisted, o)?;
         }
     }
+    // An open sweep that folds back over itself is refused before it is
+    // built; one certified one to one needs no self-intersection check.
+    let embedded = !path.closed
+        && match embedded::judge(profile, &legs, o, opts.law, along.signum()) {
+            embedded::Verdict::Embedded => true,
+            embedded::Verdict::Folds(segment) => {
+                return Err(SweepError::PathTooCurved { segment }.into());
+            }
+            embedded::Verdict::Unknown => false,
+        };
     let mut b = Body::new();
     let mut keys = Keys::new(key);
     let namer = Namer::new("along", key);
@@ -154,7 +165,11 @@ pub fn along(
         }
     }
     let journal = namer.finish(&mut b)?;
-    self_check(&b)?;
+    // A sweep certified one to one meets itself only where its faces
+    // share edges and vertices; otherwise every pair of faces is checked.
+    if !embedded {
+        self_check(&b)?;
+    }
     Ok((b, journal))
 }
 

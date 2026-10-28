@@ -94,11 +94,18 @@ fn seam_crossing(g: &FaceGeom, a: Point2, b: Point2) -> Option<(usize, f64)> {
     if g.pole(a).is_some() || g.pole(b).is_some() {
         return None;
     }
+    let ends = [[a.x, a.y], [b.x, b.y]];
     let [a, b] = segment_uv(g, a, b);
     for (k, (xa, xb)) in [(a.x, b.x), (a.y, b.y)].into_iter().enumerate() {
         let (Some(period), Some(seam)) = (g.periods[k], g.seam(k)) else {
             continue;
         };
+        // An end already on the seam (snapped there) is the sample there:
+        // unwrapped a period round, rounding could put it a hair past the
+        // seam line and ask for a second sample at the same point.
+        if ends.iter().any(|x| x[k] == seam) {
+            continue;
+        }
         let (lo, hi) = (xa.min(xb), xa.max(xb));
         // The first seam line above lo.
         let line = seam + ((lo - seam) / period).floor() * period + period;

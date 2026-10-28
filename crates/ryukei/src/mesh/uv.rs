@@ -93,6 +93,26 @@ impl<'a> FaceGeom<'a> {
                 }
             }
         }
+        // A box flat in a direction (a face bounded by one closed edge has
+        // one vertex) takes in points along the edges too: its middle
+        // alone may sit anywhere, a sphere's near its pole, where the
+        // speed would scale the whole face as if it were all that narrow.
+        if (0..2).any(|k| lo[k] == hi[k]) {
+            for l in b.face_loops(f) {
+                for fin in b.loop_fins(l) {
+                    let e = &b.edges[b.fins[fin].edge];
+                    let [t0, t1] = e.interval;
+                    for x in [0.25, 0.5, 0.75] {
+                        let p = b.curves[e.curve].point(t0 + (t1 - t0) * x);
+                        let (u, w) = surface.project(p).param;
+                        for (k, x) in [u, w].into_iter().enumerate() {
+                            lo[k] = lo[k].min(x);
+                            hi[k] = hi[k].max(x);
+                        }
+                    }
+                }
+            }
+        }
         let range: [[f64; 2]; 2] = core::array::from_fn(|k| {
             let [d0, d1] = domain[k];
             let finite = |x: f64, y: f64| if x.is_finite() { x } else { y };

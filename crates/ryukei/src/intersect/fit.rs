@@ -134,7 +134,9 @@ fn local_foot(s: &Surface, p: Point3, near: Point2) -> Option<Point2> {
             return Some(Point2::new(u, v));
         }
     }
-    Some(Point2::new(u, v))
+    // Near a pole, where `S_u` all but vanishes, steps can swing the
+    // parameter round and round: projection decides instead.
+    None
 }
 
 /// The parameter velocity on `s` at `uv` of a curve with velocity `d`:
@@ -576,7 +578,9 @@ impl<'a> Side<'a> {
                     None => s.project(p).param,
                 };
                 let e = s.eval(u, v);
-                match e.du.cross(e.dv).normalize() {
+                // At a pole the partials' cross product vanishes, but a
+                // spline's normal has a limit there.
+                match e.du.cross(e.dv).normalize().or_else(|| s.normal(u, v)) {
                     Some(n) => ((p - e.point).dot(n.get()), n.get()),
                     None => ((p - e.point).length(), Vector3::ZERO),
                 }

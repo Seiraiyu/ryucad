@@ -4,7 +4,8 @@
 //! boolean. A hole's tool starts on its sketch's plane, so on a face its
 //! top is flush with the face; ryukei is timed on that geometry too, and
 //! beside it on ryukei-bench's (rods out of both faces), so the cost of
-//! flush tools stays visible (issue #77). The block is 40 × 25 ×
+//! flush tools stays visible (issue #77, fixed: they cost about what
+//! tools out of both faces do). The block is 40 × 25 ×
 //! 0.5 m, the holes 0.6 m across a metre apart. Release builds only: in a
 //! debug build it takes minutes.
 
@@ -138,10 +139,10 @@ fn a_1000_hole_pattern_rebuilds_within_twice_ryukeis_own_boolean() {
         ryucad_ms < 2.0 * flush,
         "ryucad {ryucad_ms:.0} ms vs ryukei {flush:.0} ms on the same geometry"
     );
-    // Flush tools cost the kernel about 9 times as much (issue #77); this
-    // fails if that grows, and keeps passing once it is fixed.
+    // Flush tools cost the kernel about 9 times as much until issue #77
+    // (about 1.05 times since); this fails if the gap comes back.
     assert!(
-        flush < 12.0 * out,
+        flush < 2.0 * out,
         "ryukei {flush:.0} ms flush vs {out:.0} ms out of both faces"
     );
 }

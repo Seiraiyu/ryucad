@@ -34,6 +34,31 @@ jobs:
           # Linux has lavapipe and Windows has WARP, so the app's drawing
           # tests must run there; a macOS runner may have no Metal device.
           RYUCAD_REQUIRE_GPU: ${{ runner.os != 'macOS' && '1' || '' }}
+      - if: failure()
+        name: the viewport as drawn, if it no longer matches its snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: viewport-${{ matrix.os }}
+          path: crates/ryucad-app/tests/snapshots/*.new.png
+          if-no-files-found: ignore
+
+  release-suites:
+    # Beside the workspace's tests, not after them, so neither waits for
+    # the other (issue #63: the Windows job ran them one after the other,
+    # 43-54 min in all).
+    name: release suites on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        name: room on the disk
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
       # Boolean property tests and the booleans at other scales
       # self-intersection-check every result, pipe
       # property tests fit every branch, blends on pipes and ruled
@@ -70,13 +95,6 @@ jobs:
       - run: cargo test -p ryupdm --release --test api -- --nocapture
       - run: cargo test -p ryucad --release --test step_bar -- --nocapture
       - run: cargo test -p ryucad --release --test step
-      - if: failure()
-        name: the viewport as drawn, if it no longer matches its snapshot
-        uses: actions/upload-artifact@v4
-        with:
-          name: viewport-${{ matrix.os }}
-          path: crates/ryucad-app/tests/snapshots/*.new.png
-          if-no-files-found: ignore
       - run: cargo bench --workspace --no-run
 
   cpu-levels:
