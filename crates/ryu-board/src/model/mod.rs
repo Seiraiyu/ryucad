@@ -2,11 +2,13 @@
 //! fabricator sees, in integer nanometres.
 
 mod feature;
+mod refs;
 
 pub use feature::{
     AttrValue, Attributes, Barcode, Feature, FeatureKind, Features, Font, FontStroke, Library,
     Polarity, Symbol, Text, UserSymbol,
 };
+pub use refs::{Ref, RefError};
 
 use std::collections::BTreeMap;
 
