@@ -403,6 +403,125 @@ pub fn flat_json(f: &Flat, states: &BTreeMap<Id, Value>) -> Value {
     v
 }
 
+/// The CSV columns before the declared properties.
+pub const CSV_COLUMNS: [&str; 11] = [
+    "level",
+    "item",
+    "number",
+    "name",
+    "part",
+    "revision",
+    "quantity",
+    "uom",
+    "make_buy",
+    "material",
+    "description",
+];
+
+/// One field as RFC 4180 writes it: quoted when it holds a comma, a
+/// quote or a line break, quotes doubled.
+fn field(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_owned()
+    }
+}
+
+/// The declared properties' names, in the order the settings give them.
+fn custom(config: &crate::config::Config) -> Vec<String> {
+    config
+        .decls()
+        .into_iter()
+        .map(|(n, _)| n)
+        .filter(|n| !crate::config::CORE.contains(&n.as_str()))
+        .collect()
+}
+
+fn csv_line(level: &str, row: &Row, count: u64, custom: &[String]) -> String {
+    let props = row
+        .node
+        .as_ref()
+        .ok()
+        .and_then(|n| n.properties.as_ref().ok());
+    let text = |name: &str| match props.and_then(|p| p.values.get(name)) {
+        None => String::new(),
+        Some(Value::String(s)) => s.clone(),
+        Some(v) => v.to_string(),
+    };
+    let quantity = match quantity(row, count) {
+        q if row.uom() == "each" => q["count"].to_string(),
+        q => q.get("value").map(Value::to_string).unwrap_or_default(),
+    };
+    let rev = match &row.rev {
+        Rev::Working => "working".to_owned(),
+        Rev::Label(l) => l.clone(),
+    };
+    let make_buy = match text("make_buy") {
+        s if s.is_empty() && row.node.is_ok() => "make".to_owned(),
+        s => s,
+    };
+    let mut fields = vec![
+        level.to_owned(),
+        String::new(),
+        text("number"),
+        text("name"),
+        row.part.to_string(),
+        rev,
+        quantity,
+        row.uom(),
+        make_buy,
+        text("material"),
+        text("description"),
+    ];
+    fields.extend(custom.iter().map(|c| text(c)));
+    let mut out = fields
+        .iter()
+        .map(|f| field(f))
+        .collect::<Vec<_>>()
+        .join(",");
+    out.push('\n');
+    out
+}
+
+fn csv_header(custom: &[String]) -> String {
+    let mut h: Vec<String> = CSV_COLUMNS.iter().map(|c| (*c).to_owned()).collect();
+    h.extend(custom.iter().cloned());
+    let mut out = h.iter().map(|f| field(f)).collect::<Vec<_>>().join(",");
+    out.push('\n');
+    out
+}
+
+/// The indented BOM under `root` as CSV: a header, then every row below
+/// the root in order, its `level` its place (`1`, `1.2`, `1.2.1`).
+pub fn csv_tree(root: &Row, config: &crate::config::Config) -> String {
+    let custom = custom(config);
+    let mut out = csv_header(&custom);
+    fn walk(row: &Row, at: &str, custom: &[String], out: &mut String) {
+        for (i, c) in row.children.iter().enumerate() {
+            let level = if at.is_empty() {
+                format!("{}", i + 1)
+            } else {
+                format!("{at}.{}", i + 1)
+            };
+            out.push_str(&csv_line(&level, c, c.count, custom));
+            walk(c, &level, custom, out);
+        }
+    }
+    walk(root, "", &custom, &mut out);
+    out
+}
+
+/// The flat BOM as CSV: a header, then each row, `level` left empty.
+pub fn csv_flat(rows: &[Flat], config: &crate::config::Config) -> String {
+    let custom = custom(config);
+    let mut out = csv_header(&custom);
+    for f in rows {
+        out.push_str(&csv_line("", &f.row, f.total, &custom));
+    }
+    out
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -574,5 +693,44 @@ pub(crate) mod tests {
         let back = &b.children[0];
         assert_eq!(back.node.as_ref().unwrap_err().code, Code::AssemblyCycle);
         assert!(back.children.is_empty());
+    }
+
+    #[test]
+    fn csv_writes_every_row_with_its_level_and_quotes_what_it_must() {
+        let mut f = frame();
+        f.insert(
+            "ryupdm.json".into(),
+            canonical::to_string(&json!({"format": 1, "kind": "ryupdm.config",
+                "properties": {"finish": {"type": "string"}}}))
+            .into_bytes(),
+        );
+        f.insert(
+            "parts/plate/properties.json".into(),
+            canonical::to_string(&json!({"format": 1, "kind": "ryupdm.properties",
+                "number": "200", "name": "Plate, \"thick\"", "finish": "anodized"}))
+            .into_bytes(),
+        );
+        let config = crate::config::Config::read(&f).unwrap();
+        let root = read(&f, "frame", None);
+        let csv = csv_tree(&root, &config);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(
+            lines[0],
+            "level,item,number,name,part,revision,quantity,uom,make_buy,material,description,finish"
+        );
+        assert_eq!(
+            lines[1],
+            "1,,200,\"Plate, \"\"thick\"\"\",plate,working,1,each,make,,,anodized"
+        );
+        assert_eq!(lines[2], "2,,,,sub,working,2,each,make,,,");
+        assert_eq!(lines[3], "2.1,,100,Bolt,bolt,working,2,each,buy,,,");
+        assert_eq!(lines[4], "3,,300,,tube,working,1.2,m,make,,,");
+        assert_eq!(lines.len(), 7);
+        let flat = csv_flat(&flat(&root), &config);
+        assert_eq!(
+            flat.lines().nth(1),
+            Some(",,100,Bolt,bolt,working,4,each,buy,,,")
+        );
+        assert!(csv.ends_with('\n') && !csv.contains('\r'));
     }
 }
