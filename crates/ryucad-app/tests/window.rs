@@ -2438,3 +2438,23 @@ fn where_used_shows_an_assembly() {
         a.opened().ws.model.focus.as_deref() == Some("frame")
     });
 }
+
+#[test]
+fn a_compare_marks_the_bom_tab() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = framed_bolts().committed();
+    let mut h = bom_tab(&p);
+    // An agent adds a bolt; compared with HEAD, the tab says so.
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b3", "--of", "bolt",
+    ]);
+    menu(&mut h, "View", "Compare with HEAD");
+    frames(&mut h, |a| {
+        compared(a) && a.opened().ws.idle() && a.opened().ws.bom.diff.is_some()
+    });
+    shown(&mut h, "Compared with HEAD: 0 added, 0 removed, 1 changed");
+    shown(&mut h, "3 (was 2)");
+}

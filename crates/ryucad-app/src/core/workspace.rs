@@ -83,6 +83,8 @@ enum Pending {
     BomExport(PathBuf),
     /// Where a part is used, for the Part section.
     WhereUsed(String),
+    /// The BOM tab's `bom.diff` from the compared revision.
+    BomDiff,
     /// A part's properties for the Part section; after a conflict, with
     /// the form as it was.
     Props(String, Option<Box<PartProps>>),
@@ -773,10 +775,12 @@ impl Workspace {
                 self.compare = Some(Compare::new(&w));
                 self.model.generation += 1;
                 self.ask_diff();
+                self.reload_bom();
             }
             (Some(_), None) => {
                 self.compare = None;
                 self.model.generation += 1;
+                self.reload_bom();
             }
             (None, None) => {}
         }
@@ -1103,6 +1107,25 @@ impl Workspace {
             format: None,
         };
         self.send(req, Pending::Bom { flat });
+    }
+
+    /// While the window compares, asks for the BOM's diff from the
+    /// compared revision to the working files; else drops any.
+    fn ask_bom_diff(&mut self) {
+        match (&self.compare, &self.bom.root) {
+            (Some(c), Some(root)) => {
+                let req = Request::BomDiff {
+                    part: Some(root.clone()),
+                    from: Some(c.rev.clone()),
+                    to: None,
+                };
+                self.send(req, Pending::BomDiff);
+            }
+            _ => {
+                self.bom.take_diff(None);
+                self.bom_read();
+            }
+        }
     }
 
     /// A reading is done: the next one, if it was wanted meanwhile.
@@ -1625,12 +1648,19 @@ impl Workspace {
                     Err(e) => self.bom.failed(e),
                 }
                 // The flat BOM follows the indented one, whose lines give
-                // it its occurrences.
+                // it its occurrences, and a compare's diff follows both.
                 if !flat && self.bom.flat && self.bom.error.is_none() {
                     self.ask_bom(true);
                 } else {
-                    self.bom_read();
+                    self.ask_bom_diff();
                 }
+            }
+            (Pending::BomDiff, r) => {
+                match r {
+                    Ok(a) => self.bom.take_diff(Some(&a.result)),
+                    Err(e) => self.bom.diff_failed(e),
+                }
+                self.bom_read();
             }
             (Pending::WhereUsed(part), r) => {
                 if self.where_used_part.as_deref() == Some(part.as_str()) {

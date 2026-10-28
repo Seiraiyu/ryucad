@@ -3,12 +3,16 @@
 //! findings above it and each line's problem beside it. Choosing a line
 //! selects its occurrences and frames them. An indented line's item
 //! number is a button: pressed, it is typed and set (`bom.renumber`).
+//! While the window compares, lines are painted as the compare view
+//! paints faces: added new, changed cells with their old value, removed
+//! lines in the removed colour.
 //!
 //! Each panel is one function taking the `Ui` it draws in, so the bottom
 //! panel's tab can become a tile of its own without changing it.
 
-use crate::core::bom::{BomTab, Line};
+use crate::core::bom::{BomTab, Line, Mark};
 use crate::core::workspace::Workspace;
+use crate::ui::style;
 use crate::ui::view::View;
 use eframe::egui::{self, RichText};
 use ryucad::live::SelectMode;
@@ -65,6 +69,15 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
         ws.set_focus(Some(r));
         return;
     }
+    if let Some(c) = &ws.compare {
+        match (ws.bom.summary(), &ws.bom.diff_error) {
+            (Some(s), _) => ui.label(format!("Compared with {}: {s}", c.rev)),
+            (None, Some(e)) => {
+                ui.colored_label(error, format!("No BOM at {}: {}", c.rev, e.message))
+            }
+            (None, None) => ui.spinner(),
+        };
+    }
     for f in &ws.bom.findings {
         ui.colored_label(ui.visuals().warn_fg_color, f);
     }
@@ -96,7 +109,38 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             for line in t.shown() {
                 let level = level_at.map_or("", |i| line.cells[i].as_str());
                 let chosen = t.chosen.as_ref() == Some(&line.occurrences);
-                for (c, text) in t.columns.iter().zip(&line.cells) {
+                let colour = match &line.mark {
+                    Some(Mark::Added) => Some(style::color32(style::NEW)),
+                    Some(Mark::Removed) => Some(style::color32(style::REMOVED)),
+                    _ => None,
+                };
+                if let Some(colour) = colour {
+                    for text in &line.cells {
+                        let what = if line.mark == Some(Mark::Removed) {
+                            "removed"
+                        } else {
+                            "added"
+                        };
+                        ui.label(RichText::new(text).color(colour))
+                            .on_hover_text(format!("{what} since the compared revision"));
+                    }
+                    ui.end_row();
+                    continue;
+                }
+                for (i, (c, text)) in t.columns.iter().zip(&line.cells).enumerate() {
+                    // A changed cell says what it was; an item number stays
+                    // editable.
+                    let was = match &line.mark {
+                        Some(Mark::Changed(old)) => old.get(&i),
+                        _ => None,
+                    };
+                    if let Some(was) = was
+                        && c != "item"
+                    {
+                        let shown = format!("{text} (was {was})");
+                        ui.label(RichText::new(shown).color(style::color32(style::CHANGED)));
+                        continue;
+                    }
                     match c.as_str() {
                         "level" => {
                             let indent = "    ".repeat(line.depth.saturating_sub(1));
@@ -142,6 +186,11 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                                 "–"
                             } else {
                                 text.as_str()
+                            };
+                            let shown = match was {
+                                Some(w) => RichText::new(format!("{shown} (was {w})"))
+                                    .color(style::color32(style::CHANGED)),
+                                None => RichText::new(shown),
                             };
                             let r = ui
                                 .add(egui::Button::new(shown).frame(false))
