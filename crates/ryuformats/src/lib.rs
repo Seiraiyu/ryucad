@@ -12,5 +12,6 @@
 pub mod scene;
 pub mod stl;
 pub mod text;
+pub mod zip;
 
 pub use scene::{Child, Placed, Product, Scene, Solid, Unit};

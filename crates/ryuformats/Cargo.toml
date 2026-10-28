@@ -6,4 +6,10 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Deflate for 3MF's zip, pure Rust.
+miniz_oxide = "0.8"
 ryukei = { path = "../ryukei" }
+
+[dev-dependencies]
+# Independent readers of what the writers write, for tests only.
+zip = { version = "2", default-features = false, features = ["deflate"] }
