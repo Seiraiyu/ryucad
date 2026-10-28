@@ -123,8 +123,9 @@ pub struct Ask<'a> {
     pub format: Option<&'a str>,
 }
 
-/// `bom.get`: `{schema, root, rev, commit?, tree | flat, csv?, problems,
-/// findings}`.
+/// `bom.get`: `{schema, root, rev, commit?, tree | flat, csv?, columns,
+/// problems, findings}`, `columns` the CSV's (its declared properties in
+/// the settings' order), whatever the format.
 pub fn get(session: &mut Session, ask: &Ask) -> Result<Value> {
     let csv = match ask.format.unwrap_or("json") {
         "json" => false,
@@ -149,6 +150,7 @@ pub fn get(session: &mut Session, ask: &Ask) -> Result<Value> {
             "rev": ask.rev.unwrap_or("working"),
             "problems": bom::problems(&whole),
             "findings": bom::findings(&whole),
+            "columns": bom::columns(&g.config),
         });
         if ask.flat {
             let rows = bom::flat(&whole, &g.config);
@@ -485,6 +487,53 @@ mod tests {
         let e = call(&mut s, "bom.get", json!({"part": "asm", "format": "xml"})).unwrap_err();
         assert_eq!(e.details["param"], "format");
         drop(dir);
+    }
+
+    #[test]
+    fn a_bom_names_the_csvs_columns_declared_properties_last() {
+        let (_dir, mut s) = assembly();
+        let v = call(&mut s, "bom.get", json!({"part": "asm"})).unwrap();
+        let core = [
+            "level",
+            "item",
+            "number",
+            "name",
+            "part",
+            "revision",
+            "quantity",
+            "uom",
+            "make_buy",
+            "material",
+            "description",
+        ];
+        assert_eq!(v["columns"], json!(core));
+        call(
+            &mut s,
+            "pdm.configure",
+            json!({"properties": {"finish": {"type": "string"}, "coating": {"type": "string"}}}),
+        )
+        .unwrap();
+        let v = call(
+            &mut s,
+            "bom.get",
+            json!({"part": "asm", "flat": true, "format": "csv"}),
+        )
+        .unwrap();
+        let header = v["csv"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .to_owned();
+        let columns: Vec<&str> = v["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap())
+            .collect();
+        assert_eq!(header, columns.join(","));
+        assert_eq!(columns.len(), core.len() + 2);
     }
 
     #[test]

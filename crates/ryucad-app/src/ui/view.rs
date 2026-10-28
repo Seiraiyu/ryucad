@@ -313,9 +313,15 @@ impl View {
         }
     }
 
-    /// Frames the given entities.
+    /// Frames the given entities, occurrences (`<asm>/<path>`) whole.
     pub fn fit_entities(&mut self, ws: &mut Workspace, entities: &[String]) {
-        let points = self.picker(ws).points_of(entities);
+        let picker = self.picker(ws);
+        let mut points = picker.points_of(entities);
+        for e in entities {
+            for key in ws.model.occurrence_bodies(e) {
+                points.extend(picker.points(Some(&key)));
+            }
+        }
         if !points.is_empty() {
             self.nav.fit(&points, self.aspect());
             self.moved(ws);
@@ -442,7 +448,12 @@ impl View {
             match picker.place(&e) {
                 Some(Place::Face(k, i)) => faces.push((k, i, linear(c))),
                 Some(p) => lines.push((p, c)),
-                None => {}
+                // An occurrence: every face of what it places.
+                None => {
+                    for key in ws.model.occurrence_bodies(&e) {
+                        faces.extend((0..picker.faces(&key)).map(|i| (key.clone(), i, linear(c))));
+                    }
+                }
             }
         }
         (faces, lines)

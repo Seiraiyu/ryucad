@@ -1670,3 +1670,67 @@ fn a_sliver_wider_than_its_tolerance_is_refused() {
         )
     );
 }
+
+#[test]
+fn a_cone_halved_through_its_apex_is_cut_open() {
+    // A triangle on the axis turned half a turn: the cone side is a lune
+    // between two rulings meeting at the apex. The apex's angle is no
+    // angle at all, so the loop must still read as the half turn it
+    // bounds, not as a hole round the whole cone (issue #146,
+    // nist_ctc_04's and nist_ctc_05's countersinks).
+    use crate::geom::{Axis, Curve2, Line2, Point2, Point3};
+    use crate::sweep::{Loop as Ring, LoopKey, Profile, Segment, SegmentKey, ValidProfile};
+    let pts = [(0.0, 0.0), (0.01, 0.0), (0.0, 0.02)];
+    let segments = (0..3)
+        .map(|i| {
+            let (a, b) = (pts[i], pts[(i + 1) % 3]);
+            let (a, b) = (Point2::new(a.0, a.1), Point2::new(b.0, b.1));
+            Segment {
+                key: SegmentKey(i as u128 + 1),
+                curve: Curve2::Line2(Line2::through(a, b).unwrap()),
+                t0: 0.0,
+                t1: a.distance(b),
+            }
+        })
+        .collect();
+    let profile = ValidProfile::new(Profile {
+        frame: crate::geom::Frame::WORLD,
+        loops: vec![Ring {
+            key: LoopKey(1),
+            segments,
+        }],
+    })
+    .unwrap();
+    let axis = Axis::new(Point3::ORIGIN, crate::geom::Frame::WORLD.y().get()).unwrap();
+    for (start, end) in [(0.0, core::f64::consts::PI), (1.0, 4.5)] {
+        let half = crate::sweep::revolve(OpKey(1), &profile, axis, start, end)
+            .unwrap()
+            .0
+            .transformed(&tilted())
+            .unwrap();
+        assert!(
+            half.faces()
+                .any(|f| matches!(half.surfaces[half.faces[f].surface], Surface::Cone(_)))
+        );
+        let s = seamed(&half, 1e-7).unwrap();
+        // The lune needs no seam: no edge is used twice.
+        let cone = s
+            .faces
+            .iter()
+            .find(|f| matches!(s.surfaces[f.surface], Surface::Cone(_)))
+            .unwrap();
+        let [Loop::Edges(uses)] = &cone.loops[..] else {
+            panic!("one loop of edges")
+        };
+        assert_eq!(uses.len(), 3);
+        assert!(
+            uses.iter()
+                .all(|u| uses.iter().filter(|w| w.edge == u.edge).count() == 1)
+        );
+        // Healing tightens the rulings to the planes' sections (their
+        // distance from the cone near its apex is bounded loosely), so
+        // their bits may move; the topology doesn't.
+        let (h, _, _) = heal_ok(&s);
+        assert_eq!(h.counts(), half.counts());
+    }
+}

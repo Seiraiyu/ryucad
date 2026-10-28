@@ -16,3 +16,13 @@ opt-level = 3
 
 [profile.dev.package.num-rational]
 opt-level = 3
+
+# PR CI's tests (.github/workflows/ci.yml): the dev profile, a little
+# optimized and without debug info, so the workspace builds and tests in
+# minutes rather than the hour a debug build takes. The golden hashes hold
+# in it as in dev and release.
+[profile.ci]
+inherits = "dev"
+opt-level = 1
+debug = false
+incremental = false

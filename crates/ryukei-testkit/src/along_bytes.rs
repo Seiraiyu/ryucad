@@ -74,11 +74,12 @@ fn path(b: &mut Bytes, mut p: Point3, mut t: Vector3) -> Option<Path> {
     Some(Path { segments })
 }
 
-/// The body the bytes sweep along a path or loft, and the profile's
-/// smallest dimension; `None` where the bytes make no valid profile, or
-/// the operation refuses them with a structured error. Any other error
-/// panics: it is a bug.
-pub fn carried(data: &[u8]) -> Option<(Body, f64)> {
+/// The body the bytes sweep along a path or loft, the profile's smallest
+/// dimension, and whether it was swept along a path (always an open one:
+/// these chains never close); `None` where the bytes make no valid
+/// profile, or the operation refuses them with a structured error. Any
+/// other error panics: it is a bug.
+pub fn carried(data: &[u8]) -> Option<(Body, f64, bool)> {
     let mut b = Bytes::new(data);
     let tilt = Vector3::new(b.range(-0.5, 0.5), b.range(-0.5, 0.5), 1.0)
         .normalize()
@@ -101,7 +102,8 @@ pub fn carried(data: &[u8]) -> Option<(Body, f64)> {
         Err(e) => panic!("unexpected {e:?}"),
     };
     let key = OpKey(8);
-    let made = if b.byte().is_multiple_of(2) {
+    let swept = b.byte().is_multiple_of(2);
+    let made = if swept {
         let t = Vector3::new(b.range(-0.5, 0.5), b.range(-0.5, 0.5), 1.0)
             .normalize()?
             .get();
@@ -163,7 +165,7 @@ pub fn carried(data: &[u8]) -> Option<(Body, f64)> {
         loft(key, &sections, &opts)
     };
     match made {
-        Ok((body, _)) => Some((body, small)),
+        Ok((body, _)) => Some((body, small, swept)),
         Err(
             Error::InvalidSweep(_) | Error::InvalidLoft(_) | Error::Degenerate | Error::NonFinite,
         ) => None,

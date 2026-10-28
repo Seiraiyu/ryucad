@@ -509,6 +509,45 @@ struct Tracer<'a> {
     singular: usize,
     crossings: Vec<Crossing>,
     planes: BTreeMap<Plane, Vec<usize>>,
+    /// Each surface's poles: rows of a spline collapsed to one point
+    /// exactly, as the parameter held and its value there.
+    poles: [Vec<(usize, f64)>; 2],
+}
+
+/// A spline's rows collapsed to one point exactly (every control point
+/// the same bits), as the parameter held along the row and its value. Along
+/// such a row at `x_d = r` the other partial vanishes, so `B_k(x) = (x_d -
+/// r) M(x)` with `M` the mean of `B_kd` between the row and `x`.
+fn exact_poles(s: &Surface) -> Vec<(usize, f64)> {
+    let Surface::Nurbs(n) = s else {
+        return Vec::new();
+    };
+    let [nu, nv] = n.counts();
+    let (pu, pv) = n.periods();
+    let [du, dv] = n.domain();
+    let same = |a: Point3, b: Point3| {
+        a.x.to_bits() == b.x.to_bits()
+            && a.y.to_bits() == b.y.to_bits()
+            && a.z.to_bits() == b.z.to_bits()
+    };
+    let mut out = Vec::new();
+    if pu.is_none() {
+        for (i, r) in [(0, du[0]), (nu - 1, du[1])] {
+            let p = n.control_point(i, 0);
+            if (0..nv).all(|j| same(n.control_point(i, j), p)) {
+                out.push((0, r));
+            }
+        }
+    }
+    if pv.is_none() {
+        for (j, r) in [(0, dv[0]), (nv - 1, dv[1])] {
+            let p = n.control_point(0, j);
+            if (0..nu).all(|i| same(n.control_point(i, j), p)) {
+                out.push((1, r));
+            }
+        }
+    }
+    out
 }
 
 /// The first cells' shift on each attempt: the surfaces' own pieces
@@ -527,7 +566,53 @@ impl<'a> Tracer<'a> {
             singular: 0,
             crossings: Vec::new(),
             planes: BTreeMap::new(),
+            poles: surfaces.map(exact_poles),
         }
+    }
+
+    /// Enclosures of vectors along a surface's normal over a cell, each
+    /// a positive or negative multiple of `S_u × S_v` all over it: that
+    /// cross product itself, and for each pole the cell lies near, `M ×
+    /// S_v` (or `S_u × M`) with `M` enclosed by `S_uv` over the cell
+    /// stretched to the pole. That one doesn't vanish at the pole, where
+    /// the normal has a limit.
+    fn normals(&self, k: usize, cell: Cell, p: &JVec<Iv>) -> Vec<IVec3> {
+        let mut out = vec![cross(partial(p, 0), partial(p, 1))];
+        for &(d, r) in &self.poles[k] {
+            let [lo, hi] = cell[d];
+            if (lo - r).abs().min((hi - r).abs()) > 4.0 * (hi - lo) {
+                continue;
+            }
+            let mut c = cell;
+            c[d] = [lo.min(r), hi.max(r)];
+            let Some(q) = self.sheets[k].jet_box(c) else {
+                continue;
+            };
+            out.push(if d == 1 {
+                cross(second(&q, 1), partial(p, 1))
+            } else {
+                cross(partial(p, 0), second(&q, 1))
+            });
+        }
+        out
+    }
+
+    /// Whether a component of `N_A × N_B` is of one certified sign over
+    /// the pair, with the normals as [`Self::normals`] encloses them.
+    fn simple(&self, cells: [Cell; 2], pa: &JVec<Iv>, pb: &JVec<Iv>) -> bool {
+        let t = cross(
+            cross(partial(pa, 0), partial(pa, 1)),
+            cross(partial(pb, 0), partial(pb, 1)),
+        );
+        if t.iter().any(|&x| signed(x)) {
+            return true;
+        }
+        if self.poles.iter().all(Vec::is_empty) {
+            return false;
+        }
+        let (na, nb) = (self.normals(0, cells[0], pa), self.normals(1, cells[1], pb));
+        na.iter()
+            .any(|&a| nb.iter().any(|&b| cross(a, b).iter().any(|&x| signed(x))))
     }
 
     fn run(&mut self) -> Result<Topology, Failure> {
@@ -661,11 +746,7 @@ impl<'a> Tracer<'a> {
         if self.leaves.len() >= MAX_LEAVES {
             return Err(Failure::Uncertain);
         }
-        let t = cross(
-            cross(partial(&pa, 0), partial(&pa, 1)),
-            cross(partial(&pb, 0), partial(&pb, 1)),
-        );
-        if t.iter().any(|&x| signed(x)) {
+        if self.simple(cells, &pa, &pb) {
             self.leaves.push(Leaf {
                 cells,
                 depth,

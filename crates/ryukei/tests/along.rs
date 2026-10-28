@@ -3,7 +3,7 @@
 //! theorem gives, refusals by name, and names that survive edits.
 
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
-use ryukei::check::check;
+use ryukei::check::{check, check_intersections};
 use ryukei::geom::{
     Circle, Circle2, Curve, Curve2, Frame, Frame2, FrameLaw, KnotVector, Line, Line2, NurbsCurve,
     Point2, Point3, Surface, UnitVector3, Vector2, Vector3,
@@ -454,6 +454,60 @@ fn refusals() {
         refusal(along(K, &thin, &looped, &opts)),
         SweepError::SelfIntersecting { .. }
     ));
+}
+
+/// A profile wholly beyond a bend's centre of curvature moves forwards
+/// along the first leg and backwards round the bend, folding back over
+/// itself: refused at once as too curved, naming the bend, never traced
+/// face by face (issue #133, where a sweep's sides took 150 s to end
+/// `Uncertain`). The same profile round the same bend the other way
+/// rounds it cleanly, and is certified one to one without the
+/// self-intersection check, which agrees.
+#[test]
+fn a_profile_beyond_the_bend_folds() {
+    let opts = AlongOptions::default();
+    let beyond = |y: f64| {
+        let h = 0.1;
+        let pts = [(y - h, -h), (y + h, -h), (y + h, h), (y - h, h)];
+        let segments = (0..4)
+            .map(|i| {
+                let (p, q) = (pts[i], pts[(i + 1) % 4]);
+                let (p, q) = (Point2::new(p.0, p.1), Point2::new(q.0, q.1));
+                seg(
+                    10 + i as u128,
+                    Curve2::Line2(Line2::through(p, q).unwrap()),
+                    0.0,
+                    p.distance(q),
+                )
+            })
+            .collect();
+        profile(vec![Loop {
+            key: LoopKey(1),
+            segments,
+        }])
+    };
+    // Only the refusal is timed. Validating the profile goes through
+    // rayon's global pool, where it can wait seconds behind the other
+    // tests' work (issue #174); the refusal itself never does, and takes
+    // a few milliseconds even with every worker busy. The bound guards
+    // against tracing face by face again, not against a slow machine.
+    let (profile, path) = (beyond(2.5), bent(2.0));
+    let start = std::time::Instant::now();
+    let refused = along(K, &profile, &path, &opts);
+    let took = start.elapsed();
+    assert_eq!(
+        refusal(refused),
+        SweepError::PathTooCurved {
+            segment: SegmentKey(2)
+        }
+    );
+    assert!(took.as_secs_f64() < 1.0, "{took:?}");
+    let (b, _) = along(K, &beyond(-2.5), &bent(2.0), &opts).unwrap();
+    assert_eq!(check_intersections(&b), []);
+    let v = volume(&b);
+    // Pappus: the bend's arc at the square's centre, 3.5 from the axis.
+    let len = 4.0 + 3.5 * FRAC_PI_2;
+    assert!(close(v, 0.04 * len, 2e-3), "{v} against {}", 0.04 * len);
 }
 
 /// Names come from the keys: a longer path, a longer last leg, a twist

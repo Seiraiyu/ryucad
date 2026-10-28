@@ -1,6 +1,7 @@
 //! The app without a window: what it knows and how it learns it.
 
 pub mod activity;
+pub mod bom;
 pub mod compare;
 pub mod doctor;
 pub mod edit;
@@ -22,4 +23,5 @@ pub mod releases;
 pub mod settings;
 pub mod sketch;
 pub mod step;
+pub mod where_used;
 pub mod workspace;

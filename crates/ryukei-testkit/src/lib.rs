@@ -28,5 +28,5 @@ pub mod nurbs;
 pub mod race;
 pub mod sweep_bytes;
 
-pub use golden::{Golden, Section};
+pub use golden::{Golden, Section, unversioned};
 pub use lcg::Lcg;

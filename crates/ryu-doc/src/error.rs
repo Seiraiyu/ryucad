@@ -393,8 +393,14 @@ mod tests {
         assert_eq!(Code::ReviewHeadMoved.exit_code(), 1);
         assert_eq!(Code::ReviewUnreachable.exit_code(), 4);
         assert_eq!(Code::ReviewFailed.exit_code(), 4);
-        assert_eq!(Code::ReviewMergeUnavailable.exit_code(), 1);
         assert_eq!(Code::ReviewGithubUnreachable.exit_code(), 4);
+        assert_eq!(Code::ReviewMergeUnavailable.exit_code(), 1);
+        assert_eq!(Code::ReviewNotInBeta.exit_code(), 1);
+        assert_eq!(Code::ReviewInvalidRequest.exit_code(), 1);
+        assert_eq!(
+            json!(Code::ReviewGithubUnreachable),
+            json!("review_github_unreachable")
+        );
         assert_eq!(
             json!(Code::ReviewForkNotInstalled),
             json!("review_fork_not_installed")

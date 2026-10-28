@@ -347,3 +347,44 @@ fn coincident_balls_meet_on_their_surface() {
         );
     }
 }
+
+/// A lens whose larger cap holds both poles of its ball: at one pole the
+/// coarse mesh's wedge lies across the seam, its corner off the pole two
+/// corners at one position (seed 15 of `measure_props`). Against the
+/// lens's closed form and both caps' areas.
+#[test]
+fn a_lens_whose_cap_holds_both_poles() {
+    let (ra, rb) = (0.2983476435008765, 0.46682039834906247);
+    let ca = [
+        -0.1469880736387692,
+        0.07777114788807216,
+        -0.22934746127039213,
+    ];
+    let cb = [
+        0.05676326597382425,
+        0.016367300060060153,
+        -0.1192567499405949,
+    ];
+    let (a, _) = primitive::sphere(OpKey(1), ra, &at(ca[0], ca[1], ca[2])).unwrap();
+    let (b, _) = primitive::sphere(OpKey(2), rb, &at(cb[0], cb[1], cb[2])).unwrap();
+    let sq = |x: f64| x * x;
+    let lens = run(BooleanOp::Intersect, &a, &[(&b, Rigid::IDENTITY)]);
+    let d = (sq(ca[0] - cb[0]) + sq(ca[1] - cb[1]) + sq(ca[2] - cb[2])).sqrt();
+    // The plane of the rim, from a's centre towards b's.
+    let x = (d * d + ra * ra - rb * rb) / (2.0 * d);
+    let volume =
+        PI * sq(ra + rb - d) * (d * d + 2.0 * d * (ra + rb) - 3.0 * sq(ra - rb)) / (12.0 * d);
+    near(weigh(&lens).volume, volume, 1e-7);
+    let mut areas: Vec<f64> = lens
+        .faces()
+        .map(|f| match properties(&lens, Entity::Face(f)).unwrap() {
+            Properties::Face { area, .. } => area.value(),
+            _ => unreachable!(),
+        })
+        .collect();
+    areas.sort_by(f64::total_cmp);
+    let caps = [2.0 * PI * rb * (rb - (d - x)), 2.0 * PI * ra * (ra - x)];
+    for (got, want) in areas.iter().zip(caps) {
+        assert!((got - want).abs() <= 1e-7 * want, "{got} against {want}");
+    }
+}

@@ -1604,7 +1604,10 @@ fn exports_section(golden: &mut Golden) {
                 files.push(a.binary.unwrap());
             }
             assert_eq!(files[0], files[1], "{part} {schema}: one thread and four");
-            s.str(&format!("{:x}", md(&files[0])));
+            s.str(&format!(
+                "{:x}",
+                md(ryukei_testkit::unversioned(std::str::from_utf8(&files[0]).unwrap()).as_bytes())
+            ));
         }
     }
 }

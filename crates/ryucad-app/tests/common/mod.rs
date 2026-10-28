@@ -9,14 +9,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-/// The folder every test of this binary shares, emptied when the binary
-/// starts: daemons find their sockets, logs and preferences there, and
-/// each project has its own endpoint in it.
+/// The folder every test of this process shares, emptied when it starts:
+/// daemons find their sockets, logs and preferences there, and each
+/// project has its own endpoint in it. Under `cargo test` that is every
+/// test of this binary; `cargo nextest` (PR CI) runs each test in a
+/// process of its own, side by side, so each has a folder of its own.
 fn shared() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
         let exe = std::env::current_exe().unwrap();
-        let stem = exe.file_stem().unwrap().to_str().unwrap();
+        let mut stem = exe.file_stem().unwrap().to_str().unwrap().to_owned();
+        if std::env::var_os("NEXTEST").is_some() {
+            stem = format!("{stem}-{}", std::process::id());
+        }
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(stem);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

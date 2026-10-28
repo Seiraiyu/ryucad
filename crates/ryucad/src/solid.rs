@@ -22,6 +22,8 @@ pub struct Solids {
     at: BTreeMap<Id, usize>,
     /// Each consumed solid, by founder, with the boolean that consumed it.
     consumed: BTreeMap<Id, Id>,
+    /// The solids each feature of a chain belongs to, in list order.
+    member: BTreeMap<Id, Vec<Id>>,
 }
 
 impl Solids {
@@ -82,11 +84,23 @@ impl Solids {
                 }
             }
         }
+        // Each feature's solids, so asking for them doesn't walk every
+        // chain (issue #25: a list of thousands asked for each feature).
+        let mut member: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
+        for f in &founders {
+            for id in &chains[f] {
+                let list = member.entry(id.clone()).or_default();
+                if list.last() != Some(f) {
+                    list.push(f.clone());
+                }
+            }
+        }
         Solids {
             chains,
             founders,
             at,
             consumed,
+            member,
         }
     }
 
@@ -114,10 +128,9 @@ impl Solids {
     /// The solids `feature` belongs to: its own, if it founds one, else
     /// those it acts on, in list order.
     pub fn solids_of(&self, feature: &Id) -> Vec<&Id> {
-        self.founders
-            .iter()
-            .filter(|s| self.chains[*s].contains(feature))
-            .collect()
+        self.member
+            .get(feature)
+            .map_or_else(Vec::new, |l| l.iter().collect())
     }
 
     /// The feature whose result holds `solid` as `reader` sees it: the

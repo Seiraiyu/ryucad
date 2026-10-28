@@ -1,7 +1,8 @@
 //! The session daemon: one long-running process per project that keeps the
 //! loaded project and its rebuilds in memory. It serves newline-delimited
 //! JSON-RPC 2.0 on the project's [`Endpoint`](crate::endpoint::Endpoint),
-//! one request at a time: `ryu-session`'s loop, answering ryucad's
+//! one request at a time (display meshes are made outside its lock):
+//! `ryu-session`'s loop, answering ryucad's
 //! requests through [`crate::server`].
 
 use crate::Cad;
@@ -66,6 +67,13 @@ impl ryu_session::Serve for Cad {
         req: Request,
     ) -> Result<Answer> {
         crate::server::handle_safely(session, Some(live), me, root, req)
+    }
+
+    fn prepare(
+        session: &mut Option<Session>,
+        req: &Request,
+    ) -> Option<ryu_session::Prepared<Session>> {
+        crate::server::prepare(session, req)
     }
 
     fn settle(session: &mut Option<Session>, live: &mut Live, root: &Path) {

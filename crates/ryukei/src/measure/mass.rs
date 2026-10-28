@@ -341,14 +341,41 @@ impl<'a> Meshed<'a> {
                 }
             }
         }
-        let mut wedges: Vec<(u32, u32, u32)> = to_pole
+        let mut wedges: Vec<(u32, u32, u32, u32)> = to_pole
             .iter()
-            .filter_map(|(&a, &p)| from_pole.get(&a).map(|&q| (p, a, q)))
-            .filter(|&(p, _, q)| row(p) == row(q))
+            .filter_map(|(&a, &p)| from_pole.get(&a).map(|&q| (p, a, a, q)))
+            .filter(|&(p, _, _, q)| row(p) == row(q))
             .collect();
+        // A wedge across a seam: its corner `A` is two corners, one each
+        // side, at one position, and the sides `A → P` and `Q → A` end
+        // at different ones. It is the same wedge with `P` carried across
+        // by the period between the two corners.
+        let position = |c: u32| corners[c as usize].position;
+        let (to_pole, from_pole) = (&to_pole, &from_pole);
+        let mut twins: Vec<(u32, u32, u32, u32)> = to_pole
+            .iter()
+            .filter(|(a, _)| !from_pole.contains_key(a))
+            .flat_map(|(&a0, &p)| {
+                from_pole
+                    .iter()
+                    .filter(move |&(&a1, &q)| {
+                        !to_pole.contains_key(&a1)
+                            && a1 != a0
+                            && position(a1) == position(a0)
+                            && row(p) == row(q)
+                    })
+                    .map(move |(&a1, &q)| (p, a0, a1, q))
+            })
+            .collect();
+        wedges.append(&mut twins);
         wedges.sort_unstable();
-        for (p, a, q) in wedges {
-            let [p0, p1, p2] = [p, a, q].map(|c| corners[c as usize].uv);
+        for (p, a0, a1, q) in wedges {
+            let shift = corners[a1 as usize].uv - corners[a0 as usize].uv;
+            let [p0, p1, p2] = [
+                corners[p as usize].uv + shift,
+                corners[a1 as usize].uv,
+                corners[q as usize].uv,
+            ];
             let (d1, d2) = (p1 - p0, p2 - p0);
             let det = d1.cross(d2);
             for &(s, r, w) in gauss::triangle(n) {
