@@ -361,7 +361,7 @@ fn overlap(a: &Box3, b: &Box3, slack: f64) -> Option<Box3> {
 /// or a cone's between the circles at the extremes of its loops' axial
 /// parameter; an extrusion's between its curve moved to those extremes; a
 /// pipe's within its radius of its spine over the stretch its loops span
-/// (on a clamped spine); a NURBS's, revolution's or sweep's inside its
+/// (on a clamped spine); a NURBS's, revolution's, sweep's or offset's inside its
 /// surface's enclosure over the face's parameter box ([`face_rect`]),
 /// grown by its edges' tolerances; any other surface's face inside the
 /// surface's own box.
@@ -369,7 +369,7 @@ pub fn face_box(body: &Body, face: FaceId) -> Box3 {
     let surface = &body.surfaces[body.faces[face].surface];
     if matches!(
         surface,
-        Surface::Nurbs(_) | Surface::Revolution(_) | Surface::Sweep(_)
+        Surface::Nurbs(_) | Surface::Revolution(_) | Surface::Sweep(_) | Surface::Offset(_)
     ) && let Some(b) = spline_box(body, face)
     {
         return b;

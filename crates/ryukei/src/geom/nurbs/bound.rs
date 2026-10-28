@@ -504,6 +504,60 @@ fn patch_jets(patch: &BezierPatch, s: [f64; 2], t: [f64; 2]) -> Option<(Vector3,
     Some((at, [c, su, sv, suu, suv, svv]))
 }
 
+/// Enclosures of one Bézier patch's point and its derivatives up to third
+/// order over a local box `[s, t]`, by [`super::third::ORDERS`], as
+/// [`patch_jets`] gives the first six: derivative nets over the whole
+/// patch, cut down, then the quotient rule. `None` where the patch's
+/// parameter ranges can't be inverted.
+fn patch_jet3(patch: &BezierPatch, s: [f64; 2], t: [f64; 2]) -> Option<[V3; 10]> {
+    let [p, q] = patch.degrees;
+    let net = Net {
+        pts: patch.pts.iter().map(|h| hom(h.p, h.w)).collect(),
+        rows: p + 1,
+        cols: q + 1,
+    };
+    let sub = net.part(s, t);
+    let at = centre(&sub.pts);
+    let whole = Net {
+        pts: centred(&net.pts, at),
+        rows: net.rows,
+        cols: net.cols,
+    };
+    let [ru, rv] = patch.range;
+    let iu = pt(1.0).checked_div(pt(ru[1]) - pt(ru[0]))?;
+    let iv = pt(1.0).checked_div(pt(rv[1]) - pt(rv[0]))?;
+    let mut a = [[pt(0.0); 3]; 10];
+    let mut w = [pt(0.0); 10];
+    for (k, &(i, j)) in super::third::ORDERS.iter().enumerate() {
+        if k == 0 {
+            continue;
+        }
+        let mut n = Net {
+            pts: whole.pts.clone(),
+            rows: whole.rows,
+            cols: whole.cols,
+        };
+        for _ in 0..i {
+            let c = pt(n.rows.saturating_sub(1) as f64) * iu;
+            n = n.diff_u(c);
+        }
+        for _ in 0..j {
+            let c = pt(n.cols.saturating_sub(1) as f64) * iv;
+            n = n.diff_v(c);
+        }
+        let (ak, wk) = parts(hull_or_zero(&n.part(s, t).pts));
+        a[k] = ak;
+        w[k] = wk;
+    }
+    a[0] = point_hull(&centred(&sub.pts, at));
+    w[0] = parts(hull4(sub.pts.iter().copied())).1;
+    // The point itself is already the hull of the part's Euclidean points,
+    // so the quotient rule starts from it.
+    let mut out = super::third::quotient_from(a, w, |x, y, c| scale3(x, y * pt(c)), div3, sub3);
+    out[0] = add3(out[0], [pt(at.x), pt(at.y), pt(at.z)]);
+    Some(out)
+}
+
 /// Bounds on one Bézier patch over a local box `[s, t]`, and on its
 /// first derivatives' lengths `|S_u|` and `|S_v|`.
 fn patch_piece(patch: &BezierPatch, s: [f64; 2], t: [f64; 2]) -> (SurfaceBound, [f64; 2]) {
@@ -631,6 +685,43 @@ impl NurbsSurface {
             let u = ru[0].clamp(du[0], du[1]);
             let v = rv[0].clamp(dv[0], dv[1]);
             self.jet_box([[u, u], [v, v]])
+        })
+    }
+}
+
+impl NurbsSurface {
+    /// Enclosures of the point and its derivatives up to third order at
+    /// every parameter of the box, by [`super::third::ORDERS`], clipped to
+    /// the domain (periodic directions wrap): the hull of each Bézier
+    /// patch's enclosures over the part of the box it holds. Unbounded
+    /// where a patch's ranges can't be inverted.
+    pub(crate) fn jet3_box(&self, [ru, rv]: [[f64; 2]; 2]) -> [V3; 10] {
+        let (pu, pv) = self.periods();
+        let [du, dv] = self.domain();
+        let (cu, cv) = (clip(du, pu, ru), clip(dv, pv, rv));
+        let all = Iv::new(f64::NEG_INFINITY, f64::INFINITY).expect("ordered");
+        let mut out: Option<[V3; 10]> = None;
+        for patch in self.patches() {
+            for &a in &cu {
+                let Some(s) = local(patch.range[0], a) else {
+                    continue;
+                };
+                for &b in &cv {
+                    let Some(t) = local(patch.range[1], b) else {
+                        continue;
+                    };
+                    let j = patch_jet3(patch, s, t).unwrap_or([[all; 3]; 10]);
+                    out = Some(match out {
+                        None => j,
+                        Some(o) => core::array::from_fn(|k| hull3(o[k], j[k])),
+                    });
+                }
+            }
+        }
+        out.unwrap_or_else(|| {
+            let u = ru[0].clamp(du[0], du[1]);
+            let v = rv[0].clamp(dv[0], dv[1]);
+            self.jet3_box([[u, u], [v, v]])
         })
     }
 }
