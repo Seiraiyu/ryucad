@@ -11,7 +11,7 @@ use crate::proto::{Answer, Request, VersionInfo};
 use crate::session::{Session, path_of};
 use crate::source::write_atomic;
 use crate::units::Unit;
-use crate::{Eda, activity};
+use crate::{Eda, activity, libcmd};
 use ryu_session::activity::EntryKind;
 use ryu_session::live::{self, Live};
 use serde_json::{Map, Value, json};
@@ -150,6 +150,42 @@ fn dispatch(
             expected_revision,
         } => lib_add(session, &alias, &path, expected_revision.as_deref()),
         Request::LibList {} => Ok(lib_list(session.project())),
+        Request::SymbolCreate {
+            name,
+            id,
+            units,
+            ops,
+            expected_revision,
+        } => libcmd::symbol_create(
+            session,
+            &name,
+            id.as_deref(),
+            units,
+            &ops,
+            expected_revision.as_deref(),
+        ),
+        Request::SymbolEdit {
+            symbol,
+            name,
+            units,
+            ops,
+            expected_revision,
+        } => libcmd::symbol_edit(
+            session,
+            &symbol,
+            name.as_deref(),
+            units,
+            &ops,
+            expected_revision.as_deref(),
+        ),
+        Request::SymbolShow { symbol } => libcmd::symbol_show(session.project(), &symbol),
+        Request::SymbolList { library } => {
+            libcmd::symbol_list(session.project(), library.as_deref())
+        }
+        Request::SymbolDelete {
+            symbol,
+            expected_revision,
+        } => libcmd::symbol_delete(session, &symbol, expected_revision.as_deref()),
         Request::ActivityLog { limit, before } => {
             let entries = live.map_or_else(Vec::new, |l| l.log.page(limit.unwrap_or(50), before));
             Ok(json!({ "entries": entries }))

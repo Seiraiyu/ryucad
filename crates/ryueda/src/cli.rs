@@ -63,6 +63,10 @@ enum Command {
     /// Name library projects, and list the libraries.
     #[command(subcommand)]
     Lib(LibCmd),
+    /// Create, edit, show, list or delete symbols: units, pins with type,
+    /// side, place and length, and the body's graphics.
+    #[command(subcommand)]
+    Symbol(SymbolCmd),
     /// The daemon's activity log: every change it made or saw, newest
     /// last.
     History {
@@ -108,6 +112,52 @@ enum LibCmd {
 }
 
 #[derive(Subcommand)]
+enum SymbolCmd {
+    /// A symbol in this project's library, its ID made from its name
+    /// unless given, with --ops applied.
+    Create {
+        name: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        units: Option<u32>,
+        /// A JSON list of ops: {"op": "add", "pin": "1", "type": "passive",
+        /// "at": ["0", "3.81 mm"], "side": "down"}, {"op": "add", "graphic":
+        /// "rect", "start": [...], "end": [...]}, ...
+        #[arg(long, value_parser = ops, default_value = "[]")]
+        ops: Ops,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Apply a batch of ops (add, remove, set, move on pins and graphics)
+    /// all or nothing, and rename or change the unit count.
+    Edit {
+        symbol: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        units: Option<u32>,
+        #[arg(long, value_parser = ops, default_value = "[]")]
+        ops: Ops,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// A symbol (<id>, or lib/<alias>/symbol/<id>) with its faults.
+    Show { symbol: String },
+    /// A library's symbols (this project's by default).
+    List {
+        #[arg(long)]
+        library: Option<String>,
+    },
+    /// Delete a symbol no library component places.
+    Delete {
+        symbol: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
 enum DaemonCmd {
     /// Serve the project (the CLI starts this itself).
     Run {
@@ -121,6 +171,18 @@ enum DaemonCmd {
         #[arg(long)]
         all: bool,
     },
+}
+
+/// A batch of ops, as JSON.
+#[derive(Clone)]
+struct Ops(Vec<Value>);
+
+fn ops(s: &str) -> core::result::Result<Ops, String> {
+    match serde_json::from_str::<Value>(s) {
+        Ok(Value::Array(list)) => Ok(Ops(list)),
+        Ok(_) => Err("ops are a JSON list".into()),
+        Err(e) => Err(format!("ops aren't JSON: {e}")),
+    }
 }
 
 fn unit(s: &str) -> core::result::Result<Unit, String> {
@@ -141,6 +203,42 @@ fn request(cmd: &Command) -> Option<Request> {
             expected_revision: expect.expect.clone(),
         },
         Command::Lib(LibCmd::List) => Request::LibList {},
+        Command::Symbol(SymbolCmd::Create {
+            name,
+            id,
+            units,
+            ops,
+            expect,
+        }) => Request::SymbolCreate {
+            name: name.clone(),
+            id: id.clone(),
+            units: *units,
+            ops: ops.0.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Symbol(SymbolCmd::Edit {
+            symbol,
+            name,
+            units,
+            ops,
+            expect,
+        }) => Request::SymbolEdit {
+            symbol: symbol.clone(),
+            name: name.clone(),
+            units: *units,
+            ops: ops.0.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Symbol(SymbolCmd::Show { symbol }) => Request::SymbolShow {
+            symbol: symbol.clone(),
+        },
+        Command::Symbol(SymbolCmd::List { library }) => Request::SymbolList {
+            library: library.clone(),
+        },
+        Command::Symbol(SymbolCmd::Delete { symbol, expect }) => Request::SymbolDelete {
+            symbol: symbol.clone(),
+            expected_revision: expect.expect.clone(),
+        },
         Command::History { limit, before } => Request::ActivityLog {
             limit: *limit,
             before: *before,

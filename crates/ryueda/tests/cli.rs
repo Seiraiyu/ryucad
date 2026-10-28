@@ -374,6 +374,11 @@ fn every_protocol_method_has_a_command() {
         ("project.info", &["info"]),
         ("lib.add", &["lib", "add"]),
         ("lib.list", &["lib", "list"]),
+        ("symbol.create", &["symbol", "create"]),
+        ("symbol.edit", &["symbol", "edit"]),
+        ("symbol.show", &["symbol", "show"]),
+        ("symbol.list", &["symbol", "list"]),
+        ("symbol.delete", &["symbol", "delete"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),
@@ -397,4 +402,122 @@ fn every_protocol_method_has_a_command() {
             .unwrap();
         assert!(out.status.success(), "ryueda {args:?} --help");
     }
+}
+
+impl Pair {
+    /// A design project `board` naming a library project `passives`, the
+    /// same in both folders.
+    fn projects() -> Pair {
+        let p = Pair::new();
+        assert_eq!(p.run_in(&p.direct, "board", &["init"]).0, 0);
+        assert_eq!(p.run_in(&p.direct, "passives", &["init", "--library"]).0, 0);
+        for d in ["board", "passives"] {
+            let m = fs::read(p.direct.join(d).join("ryueda.json")).unwrap();
+            fs::write(p.daemon.join(d).join("ryueda.json"), m).unwrap();
+        }
+        p.ok(&["lib", "add", "passives", "../passives"]);
+        p
+    }
+}
+
+/// A two-pin resistor drawn as a box, as ops.
+const RESISTOR: &str = r#"[
+    {"op": "add", "pin": "1", "type": "passive", "at": ["0", "3.81"], "side": "down", "length": "1.27 mm"},
+    {"op": "add", "pin": "2", "type": "passive", "at": ["0", "-3.81"], "side": "up", "length": "1.27 mm"},
+    {"op": "add", "graphic": "rect", "start": ["-1.016", "2.54"], "end": ["1.016", "-2.54"]}
+]"#;
+
+#[test]
+fn symbols_from_the_cli() {
+    let p = Pair::projects();
+    let made = p.ok(&["symbol", "create", "R_Small", "--ops", RESISTOR]);
+    assert_eq!(made["reference"], "lib/self/symbol/r_small");
+    assert_eq!(made["path"], "library/symbols/r_small.json");
+    assert_eq!(made["added"], json!(["g1"]));
+    assert_eq!(made["symbol"]["pins"]["1"]["at"], json!([0, 3_810_000]));
+    assert_eq!(made["symbol"]["pins"]["1"]["length_nm"], json!(1_270_000));
+    assert_eq!(made["faults"], json!([]));
+    // The next one by that name takes the next ID.
+    let again = p.ok(&["symbol", "create", "R_Small", "--ops", RESISTOR]);
+    assert_eq!(again["reference"], "lib/self/symbol/r_small-2");
+    p.fails(
+        &["symbol", "create", "X", "--id", "r_small"],
+        "duplicate_id",
+        1,
+    );
+    // A write that would leave a fault is refused, with every fault.
+    let e = p.fails(
+        &["symbol", "create", "Gate", "--units", "2", "--ops", r#"[{"op": "add", "pin": "1", "type": "input", "at": [0, 0], "side": "left", "unit": 1}]"#],
+        "library_unit_invalid",
+        1,
+    );
+    assert_eq!(e["details"]["faults"][0]["details"]["pointer"], "/units");
+    let rev = made["revision"].as_str().unwrap();
+    p.fails(
+        &["symbol", "edit", "r_small", "--expect", rev],
+        "conflict",
+        1,
+    );
+    let rev = again["revision"].as_str().unwrap();
+    let edited = p.ok(&[
+        "symbol", "edit", "r_small", "--expect", rev, "--name", "R",
+        "--ops", r#"[{"op": "set", "pin": "1", "name": "A"}, {"op": "move", "graphic": "g1", "by": ["0.1 mm", 0]}]"#,
+    ]);
+    assert_eq!(edited["symbol"]["name"], "R");
+    assert_eq!(edited["symbol"]["pins"]["1"]["name"], "A");
+    assert_eq!(
+        edited["symbol"]["graphics"]["g1"]["start"],
+        json!([-916_000, 2_540_000])
+    );
+    let e = p.fails(
+        &[
+            "symbol",
+            "edit",
+            "r_small",
+            "--ops",
+            r#"[{"op": "remove", "pin": "9"}]"#,
+        ],
+        "pin_not_found",
+        1,
+    );
+    assert_eq!(e["details"]["pointer"], "/ops/0/pin");
+    // Reads reach every library; writes only this project's.
+    p.write(
+        "passives/library/symbols/c.json",
+        &fs::read_to_string(p.direct.join("board/library/symbols/r_small.json")).unwrap(),
+    );
+    let shown = p.ok(&["symbol", "show", "lib/passives/symbol/c"]);
+    assert_eq!(shown["path"], "../passives/library/symbols/c.json");
+    p.fails(
+        &["symbol", "edit", "lib/passives/symbol/c"],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &["symbol", "show", "lib/nowhere/symbol/c"],
+        "library_missing",
+        1,
+    );
+    p.fails(&["symbol", "show", "nope"], "not_found", 1);
+    let list = p.ok(&["symbol", "list"]);
+    let ids: Vec<&Value> = list["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| &s["id"])
+        .collect();
+    assert_eq!(ids, [&json!("r_small"), &json!("r_small-2")]);
+    assert_eq!(list["symbols"][0]["pins"], 2);
+    assert_eq!(
+        p.ok(&["symbol", "list", "--library", "passives"])["symbols"][0]["id"],
+        "c"
+    );
+    let gone = p.ok(&["symbol", "delete", "r_small-2"]);
+    assert_eq!(gone["deleted"], "lib/self/symbol/r_small-2");
+    assert!(
+        !p.direct
+            .join("board/library/symbols/r_small-2.json")
+            .exists()
+    );
+    p.fails(&["symbol", "delete", "r_small-2"], "not_found", 1);
 }
