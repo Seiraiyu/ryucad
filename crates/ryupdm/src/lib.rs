@@ -36,6 +36,7 @@ pub mod merge;
 pub mod props;
 pub mod record;
 pub mod state;
+pub mod structure;
 
 use ryucad_doc::doc::canonical;
 use ryucad_doc::doc::id::ProjectId;
