@@ -207,7 +207,12 @@ fn projects_and_library_projects_from_the_cli() {
     let (code, v) = p.both_in("cad", &["init"]);
     assert_eq!((code, &v["error"]["code"]), (1, &json!("project_exists")));
     let info = p.ok(&["info"]);
-    assert_eq!(info["root"], "<root>/board");
+    // The root is a path on this machine, written as its OS writes paths
+    // (as ryucad's is); paths within a project are `/`-separated everywhere.
+    assert_eq!(
+        info["root"],
+        format!("<root>{}board", std::path::MAIN_SEPARATOR)
+    );
     assert_eq!(info["default_unit"], "mm");
     assert_eq!(info["libraries"]["self"]["path"], "");
     let rev = info["revision"].as_str().unwrap().to_owned();
