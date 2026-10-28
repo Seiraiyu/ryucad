@@ -12,3 +12,7 @@
   `github_unreachable` (exit 4) to `review_*` codes of their own. Codes were
   added beside the other review codes in `ryu-doc`'s enum (serialized by name,
   so order doesn't matter).
+- Lap 3: #146 finished from lap 2's WIP: `heal::seamed` unwraps a loop's
+  samples across a pole run (`across_poles`), so a cone lune through its apex
+  reads as the lune, not a hole round the cone. All three corpus bodies seam;
+  `tests/step.rs` now exports every part that builds.
