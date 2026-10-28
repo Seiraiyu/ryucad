@@ -31,19 +31,6 @@ fn id(s: &str) -> Id {
     Id::parse(s, "part").unwrap()
 }
 
-/// How many of each leaf one `part` holds, from the generator's account.
-fn totals(s: &Structure, part: &str, times: u64, out: &mut BTreeMap<String, u64>) {
-    let assembly = s.assemblies.iter().find(|(a, _)| a == part);
-    match assembly {
-        Some((a, children)) if !s.bought.contains(a) => {
-            for (c, n) in children {
-                totals(s, c, times * n, out);
-            }
-        }
-        _ => *out.entry(part.to_owned()).or_default() += times,
-    }
-}
-
 /// How many times `target` is placed under `part`, at any depth, looking
 /// inside every assembly but `target`.
 fn uses(s: &Structure, part: &str, target: &str) -> u64 {
@@ -90,13 +77,7 @@ fn flat_totals_are_the_sums_along_every_path() {
         bought += !s.bought.is_empty() as u32;
         metres += has("\"amount\"") as u32;
         let root = &s.assemblies.last().unwrap().0;
-        let mut want = BTreeMap::new();
-        if s.bought.contains(root) {
-            want.insert(root.clone(), 1);
-        } else {
-            totals(&s, root, 1, &mut want);
-        }
-        assert_eq!(read(&s, root), want, "seed {seed}");
+        assert_eq!(read(&s, root), s.totals(root), "seed {seed}");
     }
     // The seeds reach every case.
     assert!(

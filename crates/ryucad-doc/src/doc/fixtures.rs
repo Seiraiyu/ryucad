@@ -45,6 +45,32 @@ pub struct Structure {
     pub bought: Vec<String>,
 }
 
+impl Structure {
+    /// How many of each leaf one `part` holds, by the generator's account:
+    /// the products of counts along every path down to a part or an
+    /// assembly bought whole (`part` itself when it is one).
+    pub fn totals(&self, part: &str) -> std::collections::BTreeMap<String, u64> {
+        let mut out = std::collections::BTreeMap::new();
+        if self.bought.iter().any(|b| b == part) {
+            out.insert(part.to_owned(), 1);
+        } else {
+            self.sum(part, 1, &mut out);
+        }
+        out
+    }
+
+    fn sum(&self, part: &str, times: u64, out: &mut std::collections::BTreeMap<String, u64>) {
+        match self.assemblies.iter().find(|(a, _)| a == part) {
+            Some((a, children)) if !self.bought.contains(a) => {
+                for (c, n) in children {
+                    self.sum(c, times * n, out);
+                }
+            }
+            _ => *out.entry(part.to_owned()).or_default() += times,
+        }
+    }
+}
+
 /// One to five parts (some counted in metres with an amount, some
 /// bought), then one to four assemblies, each placing two to five
 /// children by instances and instance patterns (copies of an instance,
