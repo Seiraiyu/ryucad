@@ -1,8 +1,13 @@
 //! What a pad, or a line's pen, is drawn with.
 //!
 //! Standard symbols carry their parameters in nanometres and millidegrees.
+//! [`StandardSymbol::parse`] reads ODB++'s names.
+
+mod parse;
 
 use crate::geom::{Mdeg, Nm};
+
+pub use parse::NameUnits;
 
 /// Which corners of a rectangle a rounding or chamfer applies to, by
 /// ODB++'s numbers: 1 top right, 2 top left, 3 bottom left, 4 bottom
@@ -237,6 +242,15 @@ pub enum StandardSymbol {
         dx: Nm,
         dy: Nm,
     },
+}
+
+impl StandardSymbol {
+    /// Reads an ODB++ standard symbol name in the units of the file that
+    /// names it: mils in an inch file, microns in a millimetre one. `None`
+    /// for a name that isn't a standard symbol (a user symbol, or nothing).
+    pub fn parse(name: &str, units: NameUnits) -> Option<StandardSymbol> {
+        parse::parse(name, units)
+    }
 }
 
 #[cfg(test)]
