@@ -51,6 +51,9 @@ jobs:
           # and miss each other's caches; the toolchain is pinned by
           # rust-toolchain.toml, which the key covers anyway.
           add-rust-environment-hash-key: false
+          # Its linker isn't in the key, and dependencies built with
+          # another would be rebuilt every run and never saved again.
+          key: ${{ runner.os == 'Windows' && 'rust-lld' || '' }}
           shared-key: clippy
           # Pull requests read main's caches; only main saves them, so
           # they aren't evicted by one cache per pull request.
@@ -113,6 +116,9 @@ jobs:
           # and miss each other's caches; the toolchain is pinned by
           # rust-toolchain.toml, which the key covers anyway.
           add-rust-environment-hash-key: false
+          # Its linker isn't in the key, and dependencies built with
+          # another would be rebuilt every run and never saved again.
+          key: ${{ runner.os == 'Windows' && 'rust-lld' || '' }}
           # One cache per platform, which Linux x64's jobs share and its
           # first saves; only main saves.
           shared-key: test
@@ -152,6 +158,9 @@ jobs:
           # and miss each other's caches; the toolchain is pinned by
           # rust-toolchain.toml, which the key covers anyway.
           add-rust-environment-hash-key: false
+          # Its linker isn't in the key, and dependencies built with
+          # another would be rebuilt every run and never saved again.
+          key: ${{ runner.os == 'Windows' && 'rust-lld' || '' }}
           shared-key: test
           save-if: false
       - run: cargo test --profile ci --workspace --doc
