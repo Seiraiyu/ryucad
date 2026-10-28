@@ -66,6 +66,10 @@ harness = false
 name = "step"
 harness = false
 
+[[test]]
+name = "scale_bar"
+required-features = ["bench"]
+
 [[example]]
 name = "ryucad-bench-gen"
 required-features = ["bench"]
