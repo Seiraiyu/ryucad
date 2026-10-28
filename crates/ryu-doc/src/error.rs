@@ -242,6 +242,11 @@ pub enum Code {
     /// An export of a body STEP can't describe: a face that can't be cut
     /// open along seams. The face is in the details.
     ExportUnrepresentable,
+    /// A measure ryukei refuses: an entity it doesn't apply to, geometry
+    /// it doesn't cover, or a result it can't certify. The reason
+    /// (`not_an_entity`, `unsupported`, `uncertain`) and the entities are
+    /// in the details.
+    MeasureFailed,
 }
 
 impl Code {
@@ -318,6 +323,7 @@ mod tests {
             json!(Code::ExportUnrepresentable),
             json!("export_unrepresentable")
         );
+        assert_eq!(json!(Code::MeasureFailed), json!("measure_failed"));
     }
 
     #[test]
@@ -325,6 +331,7 @@ mod tests {
         assert_eq!(Code::InvalidParam.exit_code(), 1);
         assert_eq!(Code::ExportFailed.exit_code(), 1);
         assert_eq!(Code::ExportUnrepresentable.exit_code(), 1);
+        assert_eq!(Code::MeasureFailed.exit_code(), 1);
         assert_eq!(Code::Conflict.exit_code(), 1);
         assert_eq!(Code::Usage.exit_code(), 2);
         assert_eq!(Code::ProjectNotFound.exit_code(), 3);
