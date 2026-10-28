@@ -20,7 +20,12 @@ fuzz_target!(|data: &[u8]| {
             assert!(f.corners.0 <= f.corners.1 && f.corners.1 as usize <= nc);
             assert!(f.triangles.0 <= f.triangles.1 && f.triangles.1 as usize <= nt);
         }
-        assert!(m.edges.iter().flat_map(|(_, ps)| ps).all(|p| (*p as usize) < np));
+        assert!(
+            m.edges
+                .iter()
+                .flat_map(|(_, ps)| ps)
+                .all(|p| (*p as usize) < np)
+        );
         assert!(m.vertices.iter().all(|(_, p)| (*p as usize) < np));
     }
 });

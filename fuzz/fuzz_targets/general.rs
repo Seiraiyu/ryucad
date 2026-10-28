@@ -15,8 +15,8 @@
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
 use libfuzzer_sys::fuzz_target;
 use ryukei::geom::{
-    Box3, Circle, Cone, Curve, Cylinder, Ellipse, Extrusion, Frame, KnotVector, Line,
-    NurbsSurface, Plane, Point3, Revolution, Sphere, Surface, Torus, Vector3,
+    Box3, Circle, Cone, Curve, Cylinder, Ellipse, Extrusion, Frame, KnotVector, Line, NurbsSurface,
+    Plane, Point3, Revolution, Sphere, Surface, Torus, Vector3,
 };
 use ryukei::intersect::{CurveHit, Failure, SurfaceHit, curve_surface, surface_surface};
 use ryukei::tol::LINEAR_RESOLUTION;
