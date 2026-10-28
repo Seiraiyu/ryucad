@@ -47,7 +47,7 @@ jobs:
           shared-key: clippy
           # Pull requests read main's caches; only main saves them, so
           # they aren't evicted by one cache per pull request.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'cox/ryucad-fast-ci-2-XS5P5T4M' }}
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
@@ -95,7 +95,7 @@ jobs:
           # One cache per platform, which Linux x64's jobs share and its
           # first saves; only main saves.
           shared-key: test
-          save-if: ${{ github.ref == 'refs/heads/main' && matrix.save == true }}
+          save-if: ${{ (github.ref == 'refs/heads/main' || github.head_ref == 'cox/ryucad-fast-ci-2-XS5P5T4M') && matrix.save == true }}
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
