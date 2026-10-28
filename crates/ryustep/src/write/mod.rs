@@ -343,7 +343,7 @@ pub fn write(model: &WriteModel, opts: &WriteOptions) -> Result<Vec<u8>, WriteEr
         header: header(opts),
         instances: out.instances,
     };
-    part21::write(&file)
+    Ok(part21::write(&file)?)
 }
 
 /// The refusal for a body `seamed` couldn't write.
