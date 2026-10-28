@@ -961,6 +961,9 @@ fn every_protocol_method_has_a_command() {
         ("props.get", &["props", "show"]),
         ("props.set", &["props", "set"]),
         ("release.list", &["release", "list"]),
+        ("bom.get", &["bom"]),
+        ("bom.diff", &["bom", "diff"]),
+        ("bom.where_used", &["where-used"]),
         ("release.check", &["release", "check"]),
         ("release.sync", &["release", "sync"]),
         ("release.propose", &["release", "propose"]),
@@ -3217,4 +3220,66 @@ fn imported_assemblies_and_updates_from_the_cli() {
         "not_found",
         1,
     );
+}
+
+#[test]
+fn boms_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    // One project ID both ways, so properties' writes answer alike.
+    p.write(
+        "ryucad.json",
+        "{\n  \"default_unit\": \"mm\",\n  \"format\": 2,\n  \"kind\": \"ryucad.project\",\n  \"project\": \"0123456789abcdef0123456789abcdef\"\n}\n",
+    );
+    for part in ["bolt", "tube"] {
+        p.ok(&["part", "create", part]);
+        p.ok(&[
+            "feature", "add", part, "box", "--id", "b", "--param", "x=1", "--param", "y=1",
+            "--param", "z=1",
+        ]);
+    }
+    p.ok(&["props", "set", "bolt", "number=100", "name=Bolt, M4"]);
+    p.ok(&[
+        "props",
+        "set",
+        "tube",
+        "number=300",
+        "uom=m",
+        "amount=600 mm",
+    ]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    for (id, of) in [("b1", "bolt"), ("b2", "bolt"), ("t1", "tube")] {
+        p.ok(&[
+            "feature", "add", "frame", "instance", "--id", id, "--of", of,
+        ]);
+    }
+    let v = p.ok(&["bom"]);
+    assert_eq!((&v["schema"], &v["root"]), (&json!(1), &json!("frame")));
+    assert_eq!(v["tree"]["children"][0]["quantity"]["count"], 2);
+    let v = p.ok(&["bom", "frame", "--flat"]);
+    assert_eq!(v["flat"][1]["quantity"]["text"], "0.6 m");
+    let v = p.ok(&["bom", "--out", "out/bom.csv"]);
+    assert_eq!(v["out"], "out/bom.csv");
+    assert!(v.get("csv").is_none());
+    let csv = fs::read_to_string(p.direct.join("out/bom.csv")).unwrap();
+    assert_eq!(
+        csv,
+        fs::read_to_string(p.daemon.join("out/bom.csv")).unwrap()
+    );
+    assert_eq!(
+        csv,
+        "level,item,number,name,part,revision,quantity,uom,make_buy,material,description\n\
+         1,,100,\"Bolt, M4\",bolt,working,2,each,make,,\n\
+         2,,300,,tube,working,0.6,m,make,,\n"
+    );
+    let v = p.ok(&["where-used", "bolt", "--direct"]);
+    assert_eq!(v["working"][0]["count"], 2);
+    p.fails(&["bom", "diff"], "not_a_git_repo", 1);
+    p.fails(&["bom", "--format", "xml"], "invalid_param", 1);
+    p.fails(
+        &["bom", "--out", "out/x.csv", "--format", "json"],
+        "invalid_param",
+        1,
+    );
+    p.fails(&["where-used", "nope!"], "invalid_id", 1);
 }
