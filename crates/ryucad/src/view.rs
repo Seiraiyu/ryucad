@@ -756,6 +756,8 @@ mod tests {
         dirs.dedup();
         assert_eq!(dirs.len(), 26);
         assert_eq!(StandardView::cube([0; 3]), None);
+        // A named view never takes a standard view's name.
+        assert_eq!(STANDARD_VIEWS.map(|(n, _)| n), crate::doc::views::RESERVED);
         assert_eq!(StandardView::cube([2, 0, 0]), None);
         // Iso is the front top right corner.
         assert_eq!(

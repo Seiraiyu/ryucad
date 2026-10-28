@@ -17,5 +17,6 @@ pub mod reference;
 pub mod sketch;
 pub mod solid;
 pub mod sweep;
+pub mod views;
 
 pub use ryu_doc::{canonical, id, source};
