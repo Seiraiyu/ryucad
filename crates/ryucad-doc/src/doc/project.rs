@@ -1115,7 +1115,11 @@ mod tests {
         let with_one = part.revision.clone();
         // A view that doesn't read, or takes a standard name, fails in its
         // place; anything else there is unknown.
-        fs::write(views.join("front.json"), canonical::to_string(&view.to_json())).unwrap();
+        fs::write(
+            views.join("front.json"),
+            canonical::to_string(&view.to_json()),
+        )
+        .unwrap();
         fs::write(views.join("broken.json"), "{").unwrap();
         fs::write(views.join("notes.txt"), "").unwrap();
         project

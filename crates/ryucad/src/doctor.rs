@@ -940,10 +940,12 @@ fn diagnose_part(builds: &mut Builds, part: &str, unit: Unit, issues: &mut Vec<I
                 || (n == "parameters.json" && !d)
                 || (n == "properties.json" && !d)
                 || (n == "features" && d)
+                || (n == crate::doc::views::VIEWS && d)
         },
         &["part", "parameters", "properties"],
         issues,
     );
+    diagnose_views(root, &dir, issues);
     let params = format!("{dir}/parameters.json");
     // Features are checked against the parameters; when those can't be
     // read, that is reported once, not again for every feature.
@@ -1082,6 +1084,49 @@ fn diagnose_part(builds: &mut Builds, part: &str, unit: Unit, issues: &mut Vec<I
                 vec![rel.clone(), index.clone()],
                 format!("{rel} isn't listed in {index}"),
             ));
+        }
+    }
+}
+
+/// A part's named views: each file that doesn't read (or takes a
+/// standard view's name) is `invalid_document`, one not written
+/// canonically `non_canonical`, anything else in the folder
+/// `unknown_file`. A view never fails a rebuild: nothing builds from it.
+fn diagnose_views(root: &Path, dir: &str, issues: &mut Vec<Issue>) {
+    use crate::doc::views::{VIEWS, ViewFile, check_id};
+    let vdir = format!("{dir}/{VIEWS}");
+    let files = names(&root.join(&vdir));
+    let ids: Vec<&str> = files
+        .iter()
+        .filter_map(|(n, d)| {
+            (!d).then_some(n.strip_suffix(".json")?)
+                .filter(|s| Id::parse(s, "view").is_ok())
+        })
+        .collect();
+    classify(
+        root,
+        &vdir,
+        &files,
+        |n, d| {
+            !d && n
+                .strip_suffix(".json")
+                .is_some_and(|s| Id::parse(s, "view").is_ok())
+        },
+        &ids,
+        issues,
+    );
+    for v in &ids {
+        let rel = format!("{vdir}/{v}.json");
+        match read(root, &rel) {
+            Read::Missing => {}
+            Read::Bad(i) => issues.push(i),
+            Read::Json(json, canonical) => {
+                match check_id(v).and_then(|_| ViewFile::from_json(&json)) {
+                    Ok(_) if !canonical => issues.push(non_canonical(&rel)),
+                    Ok(_) => {}
+                    Err(e) => issues.push(document_issue(&rel, &e)),
+                }
+            }
         }
     }
 }
@@ -2261,6 +2306,45 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(report(r).unwrap()["errors"], 2);
+    }
+
+    #[test]
+    fn named_views_are_read() {
+        let dir = healthy();
+        let r = dir.path();
+        let view = json!({"eye_m": [0.1, -0.1, 0.1], "format": 1, "fov_deg": 30,
+                          "kind": "ryucad.view", "projection": "perspective",
+                          "target_m": [0, 0, 0], "up": [0, 0, 1]});
+        w(r, "parts/p/views/detail.json", &canonical::to_string(&view));
+        assert!(codes(r).is_empty(), "{:?}", codes(r));
+        w(r, "parts/p/views/detail.json", &view.to_string());
+        assert_eq!(
+            codes(r),
+            [(
+                "non_canonical",
+                vec!["parts/p/views/detail.json".to_owned()]
+            )]
+        );
+        w(r, "parts/p/views/detail.json", &canonical::to_string(&view));
+        w(r, "parts/p/views/top.json", &canonical::to_string(&view));
+        w(r, "parts/p/views/notes.txt", "");
+        let mut bad = view.clone();
+        bad["fov_deg"] = json!(0);
+        w(r, "parts/p/views/wide.json", &canonical::to_string(&bad));
+        assert_eq!(
+            codes(r),
+            [
+                ("unknown_file", vec!["parts/p/views/notes.txt".to_owned()]),
+                (
+                    "invalid_document",
+                    vec!["parts/p/views/top.json".to_owned()]
+                ),
+                (
+                    "invalid_document",
+                    vec!["parts/p/views/wide.json".to_owned()]
+                ),
+            ]
+        );
     }
 
     #[test]

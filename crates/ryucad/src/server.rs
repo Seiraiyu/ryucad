@@ -121,6 +121,7 @@ pub fn answer_live(
             frame,
             compare,
             hidden,
+            origin,
         } => {
             // What the participant's window hides, else the one human's
             // (where an agent's `hide` went), else the caller's.
@@ -168,6 +169,7 @@ pub fn answer_live(
                 frame,
                 compare,
                 hidden,
+                origin,
             };
             render(session, target, shown, ask)
         }
@@ -627,25 +629,83 @@ fn dispatch(
                 None => json!({"participant": null, "camera": null}),
             })
         }
-        Request::CameraSet { camera, view, fit } => {
+        Request::CameraSet {
+            camera,
+            view,
+            fit,
+            normal_to,
+            part,
+        } => {
             let live = live.ok_or_else(|| live::no_live_session("camera.set"))?;
             let id = live.caller(me);
             let camera: Camera = match camera {
-                Some(_) if view.is_some() || !fit.is_empty() => {
+                Some(_) if view.is_some() || !fit.is_empty() || normal_to.is_some() => {
                     return Err(Error::new(
                         Code::Usage,
                         "give a camera, or a view and/or entities to fit, not both",
                     ));
                 }
                 Some(c) => c.resolve(session.project().manifest.default_unit)?,
+                None if view.is_some() && normal_to.is_some() => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        "give a view or a face to look normal to, not both",
+                    ));
+                }
                 None => {
-                    let current = live.get(&id)?.view.camera.clone();
-                    framed(session, current.as_ref(), view.as_deref(), &fit)?
+                    let me = live.get(&id)?;
+                    let (current, focus) = (me.view.camera.clone(), me.view.focus.clone());
+                    framed(
+                        session,
+                        current.as_ref(),
+                        Look {
+                            view: view.as_deref(),
+                            normal_to: normal_to.as_deref(),
+                            part: part.as_deref(),
+                            focus: focus.as_ref(),
+                        },
+                        &fit,
+                    )?
                 }
             };
             live.get_mut(&id)?.view.camera = Some(camera.clone());
             Ok(json!({"participant": id, "camera": camera}))
         }
+        Request::ViewList { part } => crate::views::list(session, part.as_deref()),
+        Request::ViewSave {
+            part,
+            view,
+            camera,
+            participant,
+            expected_revision,
+        } => {
+            let camera = match camera {
+                Some(c) => c.resolve(session.project().manifest.default_unit)?,
+                None => {
+                    let live = live.ok_or_else(|| live::no_live_session("view.save"))?;
+                    let who = live.compare_target(participant.as_deref(), me)?;
+                    live.get(&who)?.view.camera.clone().ok_or_else(|| {
+                        Error::new(
+                            Code::InvalidParam,
+                            format!("participant {who} has no camera to save"),
+                        )
+                        .with("participant", &who)
+                    })?
+                }
+            };
+            crate::views::save(session, &part, &view, &camera, expected_revision.as_deref())
+        }
+        Request::ViewDelete {
+            part,
+            view,
+            expected_revision,
+        } => crate::views::delete(session, &part, &view, expected_revision.as_deref()),
+        Request::ViewRename {
+            part,
+            from,
+            to,
+            expected_revision,
+        } => crate::views::rename(session, &part, &from, &to, expected_revision.as_deref()),
         Request::CompareGet { participant } => {
             let target = match &live {
                 Some(l) => l.target(participant.as_deref())?,
@@ -3908,30 +3968,138 @@ pub fn occurrence_meshes(
     session.meshes.get_all(&items, quality, budget)
 }
 
-/// A camera from a standard view and/or framing entities. With no view,
-/// it keeps `current`'s direction (iso when there is none).
+/// How a camera is to look: a view's name (standard, else a named view of
+/// `part`, else of `focus`, else of the project's model when it is one
+/// part), or normal to a face.
+struct Look<'a> {
+    view: Option<&'a str>,
+    normal_to: Option<&'a str>,
+    part: Option<&'a str>,
+    focus: Option<&'a Id>,
+}
+
+/// A camera from a standard view, a named view or one normal to a face,
+/// and/or framing entities. With none of those, it keeps `current`'s
+/// direction (iso when there is none). A named view is restored as saved
+/// unless there are entities to frame, which it frames keeping its
+/// direction.
 fn framed(
     session: &mut Session,
     current: Option<&Camera>,
-    view: Option<&str>,
+    look: Look<'_>,
     fit: &[String],
 ) -> Result<Camera> {
-    let view = view.map(StandardView::parse).transpose()?;
+    let named = match look.view {
+        Some(v) if StandardView::named(v).is_none() => {
+            let part = crate::views::part_for(session, look.part, look.focus)?;
+            Some(crate::views::named(session, part.as_ref(), v)?)
+        }
+        _ => None,
+    };
+    if let Some(saved) = &named
+        && fit.is_empty()
+    {
+        return Ok(saved.clone());
+    }
+    let view = look.view.and_then(StandardView::named);
+    let along = look
+        .normal_to
+        .map(|face| normal_to_face(session, face))
+        .transpose()?;
     let refs = entity::parse_all(session, fit)?;
     let points = model_points(session, &refs)?;
     if points.is_empty() {
         return Err(Error::new(Code::InvalidParam, "there is nothing to frame"));
     }
-    Ok(match (view, current) {
+    let projection = current.map_or(DEFAULT_PROJECTION, |c| c.projection);
+    Ok(match (named, along, view, current) {
+        (Some(saved), ..) => crate::view::refit_points(&saved, &points, 1.0),
+        (None, Some((back, up)), ..) => {
+            crate::view::frame_points_along(&points, back, up, projection, 1.0)
+        }
         // Square: windows that follow the camera may be any shape.
-        (None, Some(c)) => crate::view::refit_points(c, &points, 1.0),
-        (v, c) => crate::view::frame_points(
-            &points,
-            v.unwrap_or(StandardView::Iso),
-            c.map_or(DEFAULT_PROJECTION, |c| c.projection),
-            1.0,
-        ),
+        (None, None, None, Some(c)) => crate::view::refit_points(c, &points, 1.0),
+        (None, None, v, _) => {
+            crate::view::frame_points(&points, v.unwrap_or(StandardView::Iso), projection, 1.0)
+        }
     })
+}
+
+/// The direction (towards the eye) and up of a view normal to the face
+/// `reference` names (`<part>/<solid>/<name>`, or an occurrence's face,
+/// placed by its pose): along a planar face's outward normal or a
+/// revolved face's axis, its longest straight edge level.
+fn normal_to_face(session: &mut Session, reference: &str) -> Result<([f64; 3], [f64; 3])> {
+    use ryukei::geom::{Curve, Surface};
+    use ryukei::measure::Entity;
+    let located = crate::measure::locate(session, reference)?;
+    let not_a_face = || {
+        Error::new(
+            Code::InvalidParam,
+            format!(
+                "{reference} isn't a face: look normal to a planar face or a face of revolution"
+            ),
+        )
+        .with("entity", reference)
+    };
+    let [l] = located.as_slice() else {
+        return Err(not_a_face());
+    };
+    let Entity::Face(f) = l.entity else {
+        return Err(not_a_face());
+    };
+    let body = &l.built.body;
+    let face = body.face(f).ok_or_else(not_a_face)?;
+    let surface = body.surface(face.surface).ok_or_else(not_a_face)?;
+    let axis = match surface {
+        Surface::Plane(p) => {
+            let z = p.frame().z().get().to_array();
+            match face.sense {
+                ryukei::topo::Sense::Forward => z,
+                ryukei::topo::Sense::Reversed => z.map(|x| -x),
+            }
+        }
+        Surface::Cylinder(_) | Surface::Cone(_) | Surface::Torus(_) => {
+            surface.frame().expect("analytic").z().get().to_array()
+        }
+        Surface::Revolution(r) => r.frame().z().get().to_array(),
+        _ => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("{reference} is neither planar nor a face of revolution: no direction is normal to it"),
+            )
+            .with("entity", reference));
+        }
+    };
+    // The longest straight edge, the first of equals in loop order.
+    let mut edge: Option<([f64; 3], f64)> = None;
+    for lp in body.face_loops(f) {
+        for fin in body.loop_fins(lp) {
+            let Some(e) = body.fin(fin).and_then(|x| body.edge(x.edge)) else {
+                continue;
+            };
+            if !matches!(body.curve(e.curve), Some(Curve::Line(_))) {
+                continue;
+            }
+            let (Some(a), Some(b)) = (body.vertex(e.start), body.vertex(e.end)) else {
+                continue;
+            };
+            let d = (b.point - a.point).to_array();
+            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            if edge.is_none_or(|(_, best)| len > best) {
+                edge = Some((d, len));
+            }
+        }
+    }
+    let placed = |v: [f64; 3]| {
+        l.pose
+            .apply_vector(ryukei::geom::Vector3::new(v[0], v[1], v[2]))
+            .to_array()
+    };
+    Ok(crate::view::normal_to(
+        placed(axis),
+        edge.map(|(d, _)| placed(d)),
+    ))
 }
 
 /// A render request, unpacked.
@@ -3950,6 +4118,8 @@ struct RenderAsk {
     compare: Option<String>,
     /// What to leave out: occurrences and solids, at the leaves.
     hidden: std::collections::BTreeSet<String>,
+    /// Draw the origin's axes and planes.
+    origin: bool,
 }
 
 /// How a compare paints one rendered solid: wholly new when the other
@@ -4260,6 +4430,9 @@ fn render(
             }
         }
     }
+    if ask.origin {
+        g.add_origin();
+    }
     let camera = match (ask.camera, target, ask.view.as_deref()) {
         (Some(c), _, _) => c.resolve(session.project().manifest.default_unit)?,
         (None, Some((p, live)), _) => {
@@ -4269,6 +4442,14 @@ fn render(
                 Error::new(Code::InvalidParam, format!("participant {p} has no camera"))
                     .with("participant", p)
             })?
+        }
+        // A named view of the rendered part, as saved.
+        (None, None, Some(v)) if StandardView::named(v).is_none() => {
+            let part = match parts.as_slice() {
+                [one] => Some(one),
+                _ => None,
+            };
+            crate::views::named(session, part, v)?
         }
         (None, None, view) => {
             let view = view
@@ -6824,6 +7005,139 @@ pub(crate) mod tests {
         assert_eq!(e.code, Code::NoLiveSession);
         let r = call(&mut s, "selection.get", json!({})).unwrap();
         assert_eq!(r, json!({"participant": null, "selection": []}));
+    }
+
+    /// The face of solid `b` of part `p` whose outward normal is `n`.
+    fn face_facing(s: &mut Session, n: [f64; 3]) -> String {
+        let v = call(s, "inspect", json!({"part": "p", "feature": "b"})).unwrap();
+        let face = v["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let z = &f["surface"]["frame"]["z"];
+                let k = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && (0..3).all(|i| (z[i].as_f64().unwrap() * k - n[i]).abs() < 1e-12)
+            })
+            .unwrap();
+        format!("p/b/{}", face["name"].as_str().unwrap())
+    }
+
+    #[test]
+    fn cameras_restore_named_views_and_look_normal_to_faces() {
+        let (dir, mut s) = with_part();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 40, "y": 20, "z": 10},
+                   "placement": {"origin": [30, 30, 5]}}),
+        )
+        .unwrap();
+        let mut live = Live::new();
+        let human = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "session.hello",
+            json!({"kind": "human"}),
+        )
+        .unwrap()["participant"]
+            .clone();
+        let me = Some(human.as_str().unwrap());
+        let set =
+            |s: &mut Session, live: &mut Live, p: Value| call_live(s, live, me, "camera.set", p);
+        // Every cube direction frames the model.
+        for (name, _) in crate::view::STANDARD_VIEWS {
+            let r = set(&mut s, &mut live, json!({"view": name})).unwrap();
+            assert!(r["camera"]["eye"].is_array(), "{name}");
+        }
+        // Looking at the box and the origin beside it.
+        let camera = json!({"eye": ["120 mm", "-80 mm", "80 mm"], "target": ["20 mm", "20 mm", "5 mm"],
+                            "up": [0, 0, 1], "projection": {"orthographic": {"height": "120 mm"}}});
+        let mine = set(&mut s, &mut live, json!({"camera": camera})).unwrap()["camera"].clone();
+        // An agent saves what the one human sees.
+        let saved = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "view.save",
+            json!({"part": "p", "view": "detail"}),
+        )
+        .unwrap();
+        assert_eq!(saved["camera"], mine);
+        set(&mut s, &mut live, json!({"view": "iso"})).unwrap();
+        // Restored as saved, bit for bit: the project's model is one part.
+        let r = set(&mut s, &mut live, json!({"view": "detail"})).unwrap();
+        assert_eq!(r["camera"], mine);
+        let r = set(&mut s, &mut live, json!({"view": "detail", "part": "p"})).unwrap();
+        assert_eq!(r["camera"], mine);
+        // Framing entities from a named view keeps its direction.
+        let top = face_facing(&mut s, [0.0, 0.0, 1.0]);
+        let r = set(&mut s, &mut live, json!({"view": "detail", "fit": [top]})).unwrap();
+        assert_eq!(r["camera"]["up"], mine["up"]);
+        assert_ne!(r["camera"]["eye"], mine["eye"]);
+        let e = set(&mut s, &mut live, json!({"view": "side"})).unwrap_err();
+        assert_eq!(
+            (e.code, e.details["views"].clone()),
+            (Code::ViewNotFound, json!(["detail"]))
+        );
+        // Normal to the top: looking down, the long edge (along x) level.
+        let r = set(&mut s, &mut live, json!({"normal_to": top})).unwrap();
+        let c: Camera = serde_json::from_value(r["camera"].clone()).unwrap();
+        let (right, _, forward) = c.basis();
+        assert!((forward[2] + 1.0).abs() < 1e-12, "{forward:?}");
+        assert!((right[0].abs() - 1.0).abs() < 1e-12, "{right:?}");
+        // The participant's projection is kept.
+        assert!(matches!(
+            c.projection,
+            crate::view::Projection::Orthographic { .. }
+        ));
+        // The front face (normal -y): looking along +y with z up.
+        let front = face_facing(&mut s, [0.0, -1.0, 0.0]);
+        let r = set(&mut s, &mut live, json!({"normal_to": front})).unwrap();
+        let c: Camera = serde_json::from_value(r["camera"].clone()).unwrap();
+        let (right, up, forward) = c.basis();
+        assert!((forward[1] - 1.0).abs() < 1e-12 && (right[0] - 1.0).abs() < 1e-12);
+        assert!((up[2] - 1.0).abs() < 1e-12, "{up:?}");
+        let e = set(&mut s, &mut live, json!({"normal_to": "p/b"})).unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        let e = set(
+            &mut s,
+            &mut live,
+            json!({"normal_to": front, "view": "top"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::Usage);
+        // A render restores the named view too, and draws the origin.
+        let size = |v: Value| {
+            let mut v = v;
+            v["width"] = json!(320);
+            v["height"] = json!(240);
+            v
+        };
+        let named = render_pixels(dir.path(), s, size(json!({"view": "detail"})));
+        let s = Session::open(dir.path()).unwrap();
+        let again = render_pixels(dir.path(), s, size(json!({"camera": camera})));
+        assert_eq!(named, again);
+        let s = Session::open(dir.path()).unwrap();
+        let with_origin = render_pixels(
+            dir.path(),
+            s,
+            size(json!({"view": "detail", "origin": true})),
+        );
+        assert_ne!(with_origin, named);
+        let red = |px: &[[u8; 3]]| {
+            px.iter()
+                .filter(|p| p[0] > 150 && p[1] < 90 && p[2] < 90)
+                .count()
+        };
+        assert!(
+            red(&with_origin) > red(&named),
+            "the x axis is drawn red: {} against {}",
+            red(&with_origin),
+            red(&named)
+        );
     }
 
     #[test]

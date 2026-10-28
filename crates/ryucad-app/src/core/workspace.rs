@@ -1391,6 +1391,8 @@ impl Workspace {
                 camera: Some(camera_arg(&c)),
                 view: None,
                 fit: Vec::new(),
+                normal_to: None,
+                part: None,
             };
             self.send(req, Pending::Quiet);
         }

@@ -263,6 +263,10 @@ pub enum Code {
     /// (`not_an_entity`, `unsupported`, `uncertain`) and the entities are
     /// in the details.
     MeasureFailed,
+    /// A part or assembly has no named view by that ID (`view.delete`,
+    /// `view.rename`, `camera.set` and `render` with `view`); the details
+    /// name the part and the views it has.
+    ViewNotFound,
 }
 
 impl Code {
@@ -344,6 +348,7 @@ mod tests {
         assert_eq!(json!(Code::BomItemDuplicate), json!("bom_item_duplicate"));
         assert_eq!(json!(Code::BomItemUnused), json!("bom_item_unused"));
         assert_eq!(json!(Code::MeasureFailed), json!("measure_failed"));
+        assert_eq!(json!(Code::ViewNotFound), json!("view_not_found"));
     }
 
     #[test]
@@ -352,6 +357,7 @@ mod tests {
         assert_eq!(Code::ExportFailed.exit_code(), 1);
         assert_eq!(Code::ExportUnrepresentable.exit_code(), 1);
         assert_eq!(Code::MeasureFailed.exit_code(), 1);
+        assert_eq!(Code::ViewNotFound.exit_code(), 1);
         assert_eq!(Code::Conflict.exit_code(), 1);
         assert_eq!(Code::Usage.exit_code(), 2);
         assert_eq!(Code::ProjectNotFound.exit_code(), 3);

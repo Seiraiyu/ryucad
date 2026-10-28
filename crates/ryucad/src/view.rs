@@ -121,6 +121,42 @@ impl Camera {
     }
 }
 
+impl From<&crate::doc::views::ViewFile> for Camera {
+    /// A named view's camera, bit for bit.
+    fn from(v: &crate::doc::views::ViewFile) -> Camera {
+        use crate::doc::views::ViewProjection;
+        Camera {
+            eye: v.eye_m,
+            target: v.target_m,
+            up: v.up,
+            projection: match v.projection {
+                ViewProjection::Perspective { fov_deg } => Projection::Perspective { fov_deg },
+                ViewProjection::Orthographic { height_m } => {
+                    Projection::Orthographic { height: height_m }
+                }
+            },
+        }
+    }
+}
+
+impl Camera {
+    /// The camera as a named view's file holds it.
+    pub fn to_view_file(&self) -> crate::doc::views::ViewFile {
+        use crate::doc::views::{ViewFile, ViewProjection};
+        ViewFile {
+            eye_m: self.eye,
+            target_m: self.target,
+            up: self.up,
+            projection: match self.projection {
+                Projection::Perspective { fov_deg } => ViewProjection::Perspective { fov_deg },
+                Projection::Orthographic { height } => {
+                    ViewProjection::Orthographic { height_m: height }
+                }
+            },
+        }
+    }
+}
+
 /// A named direction to look from. Z is up.
 ///
 /// The six faces, twelve edges and eight corners of the navigation cube
@@ -506,7 +542,9 @@ pub fn frame_points_along(
 /// across the view is z itself, or y when looking along z.
 pub fn normal_to(back: [f64; 3], edge: Option<[f64; 3]>) -> ([f64; 3], [f64; 3]) {
     let b = unit(back);
-    let across = edge.map(|e| sub(e, scale(b, dot(b, e)))).filter(|e| norm(*e) > 1e-9);
+    let across = edge
+        .map(|e| sub(e, scale(b, dot(b, e))))
+        .filter(|e| norm(*e) > 1e-9);
     let up = match across {
         Some(e) => cross(b, unit(e)),
         None if b[2].abs() < 1.0 - 1e-9 => [0.0, 0.0, 1.0],
@@ -773,7 +811,10 @@ mod tests {
             unit(StandardView::named("front_top_right").unwrap().axes().0)
         );
         let e = StandardView::parse("side").unwrap_err();
-        assert_eq!((e.code, &e.details["view"]), (Code::InvalidParam, &json!("side")));
+        assert_eq!(
+            (e.code, &e.details["view"]),
+            (Code::InvalidParam, &json!("side"))
+        );
     }
 
     #[test]
@@ -784,9 +825,14 @@ mod tests {
             b.map(|x| (1.0 - x * x).sqrt())
         };
         let d = looks(StandardView::Dimetric);
-        assert!((d[0] - d[2]).abs() < 1e-15 && (d[1] - d[0] / 2.0).abs() < 1e-15, "{d:?}");
+        assert!(
+            (d[0] - d[2]).abs() < 1e-15 && (d[1] - d[0] / 2.0).abs() < 1e-15,
+            "{d:?}"
+        );
         let t = looks(StandardView::Trimetric);
-        assert!((t[0] - t[1]).abs() > 0.1 && (t[1] - t[2]).abs() > 0.1 && (t[0] - t[2]).abs() > 0.1);
+        assert!(
+            (t[0] - t[1]).abs() > 0.1 && (t[1] - t[2]).abs() > 0.1 && (t[0] - t[2]).abs() > 0.1
+        );
         let i = looks(StandardView::Iso);
         assert!((i[0] - i[1]).abs() < 1e-15 && (i[1] - i[2]).abs() < 1e-15);
     }
@@ -811,7 +857,10 @@ mod tests {
         assert_eq!(normal_to(n, Some([-1.0, 0.0, 0.0])), (back, up));
         // A level face's edge along y: up is +y, never -y.
         let (_, up) = normal_to([0.0, 0.0, 1.0], Some([0.0, 3.0, 0.0]));
-        assert!(close(up, [-1.0, 0.0, 0.0]) || close(up, [1.0, 0.0, 0.0]), "{up:?}");
+        assert!(
+            close(up, [-1.0, 0.0, 0.0]) || close(up, [1.0, 0.0, 0.0]),
+            "{up:?}"
+        );
         let (_, up) = normal_to([0.0, 0.0, -1.0], Some([1.0, 0.0, 0.0]));
         assert!(close(up, [0.0, 1.0, 0.0]), "{up:?}");
         // No edge: up is z, or y looking along z; an edge along the
@@ -822,13 +871,7 @@ mod tests {
             normal_to([1.0, 0.0, 0.0], Some([3.0, 0.0, 0.0])).1,
             [0.0, 0.0, 1.0]
         );
-        let c = frame_points_along(
-            &corners([0.0; 3], [1.0; 3]),
-            n,
-            up,
-            DEFAULT_PROJECTION,
-            1.0,
-        );
+        let c = frame_points_along(&corners([0.0; 3], [1.0; 3]), n, up, DEFAULT_PROJECTION, 1.0);
         assert!(c.check().is_ok());
     }
 

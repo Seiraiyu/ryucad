@@ -244,12 +244,18 @@ mod tests {
             let mut v = view();
             f(&mut v);
             let e = ViewFile::from_json(&v).unwrap_err();
-            (e.code, e.details["pointer"].as_str().unwrap_or("").to_owned())
+            (
+                e.code,
+                e.details["pointer"].as_str().unwrap_or("").to_owned(),
+            )
         };
         let bad = |p: &str| (Code::InvalidDocument, p.to_owned());
         assert_eq!(at(&|v| v["eye_m"] = json!([0, 0])), bad("/eye_m"));
         assert_eq!(at(&|v| v["up"][2] = json!("z")), bad("/up/2"));
-        assert_eq!(at(&|v| v["target_m"] = v["eye_m"].clone()), bad("/target_m"));
+        assert_eq!(
+            at(&|v| v["target_m"] = v["eye_m"].clone()),
+            bad("/target_m")
+        );
         assert_eq!(
             at(&|v| {
                 v["target_m"] = json!([0, 0, 0]);
@@ -259,7 +265,10 @@ mod tests {
         );
         assert_eq!(at(&|v| v["fov_deg"] = json!(180)), bad("/fov_deg"));
         assert_eq!(at(&|v| v["fov_deg"] = json!(0)), bad("/fov_deg"));
-        assert_eq!(at(&|v| v["projection"] = json!("fisheye")), bad("/projection"));
+        assert_eq!(
+            at(&|v| v["projection"] = json!("fisheye")),
+            bad("/projection")
+        );
         assert_eq!(at(&|v| v["zoom"] = json!(2)), bad("/zoom"));
         let mut newer = view();
         newer["format"] = json!(2);

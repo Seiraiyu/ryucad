@@ -722,6 +722,19 @@ fn items(files: &Files, part: &str) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
+/// A part's named views as written, by ID: the files of
+/// `parts/<part>/views/` that read as JSON.
+fn views(files: &Files, part: &str) -> BTreeMap<String, Value> {
+    let dir = format!("parts/{part}/{}/", crate::doc::views::VIEWS);
+    files
+        .keys()
+        .filter_map(|p| {
+            let id = p.strip_prefix(&dir)?.strip_suffix(".json")?;
+            (!id.contains('/')).then(|| Some((id.to_owned(), json_at(files, p)?)))?
+        })
+        .collect()
+}
+
 fn parameters(files: &Files, part: &str) -> Map<String, Value> {
     json_at(files, &format!("parts/{part}/parameters.json"))
         .and_then(|v| v["parameters"].as_object().cloned())
@@ -731,8 +744,10 @@ fn parameters(files: &Files, part: &str) -> Map<String, Value> {
 /// What changed between two versions of a project's files, `from` and
 /// `to`: the manifest, and per part its feature order, its parameters as
 /// written, an assembly's item numbers by part (`items`, when either side
-/// has any), and each feature by JSON pointer (a sketch by entity and
-/// constraint, its solved positions apart). A part whose PDM differs has
+/// has any), its named views (`views`, when either side has any: each
+/// view added, removed or changed by pointer), and each feature by JSON
+/// pointer (a sketch by entity and constraint, its solved positions
+/// apart). A part whose PDM differs has
 /// `pdm` too (see [`pdm`]), its states read against `releases`, the
 /// release branch as read; a change to `ryupdm.json` is `pdm` at the top,
 /// by pointer, as the manifest's is (settings that read with their
@@ -846,6 +861,24 @@ pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases)
                 }
             }
             v["items"] = json!({"added": added, "removed": removed, "changed": changed});
+        }
+        let (wa, wb) = (views(from, part), views(to, part));
+        if !wa.is_empty() || !wb.is_empty() {
+            let keys: BTreeSet<&String> = wa.keys().chain(wb.keys()).collect();
+            let (mut added, mut removed, mut changed) = (Vec::new(), Vec::new(), Vec::new());
+            for k in keys {
+                match (wa.get(k), wb.get(k)) {
+                    (None, Some(_)) => added.push(json!(k)),
+                    (Some(_), None) => removed.push(json!(k)),
+                    (Some(f), Some(t)) if f != t => {
+                        let mut list = Vec::new();
+                        changes("", Some(f), Some(t), &mut list);
+                        changed.push(json!({"view": k, "changes": list}));
+                    }
+                    _ => {}
+                }
+            }
+            v["views"] = json!({"added": added, "removed": removed, "changed": changed});
         }
         if let Some(p) = pdm {
             v["pdm"] = p;
@@ -1933,6 +1966,55 @@ mod tests {
         );
         let same = structural(&from, &from, &Options::default(), &Releases::default());
         assert!(same.get("materials").is_none());
+    }
+
+    #[test]
+    fn named_views_textconv_and_diff_per_part() {
+        let view = |x: f64| {
+            json!({"eye_m": [x, -0.1, 0.1], "format": 1, "fov_deg": 30, "kind": "ryucad.view",
+                   "projection": "perspective", "target_m": [0, 0, 0], "up": [0, 0, 1]})
+        };
+        assert_eq!(
+            text(view(0.1)),
+            "ryucad.view (format 1)\n\
+             eye_m = [0.1, -0.1, 0.1]\n\
+             fov_deg = 30\n\
+             projection = perspective\n\
+             target_m = [0, 0, 0]\n\
+             up = [0, 0, 1]\n"
+        );
+        let manifest = (
+            "ryucad.json",
+            json!({"default_unit": "mm", "format": 1, "kind": "ryucad.project"}),
+        );
+        let part = (
+            "parts/p/part.json",
+            json!({"features": [], "format": 1, "kind": "ryucad.part"}),
+        );
+        let from = files(&[
+            manifest.clone(),
+            part.clone(),
+            ("parts/p/views/detail.json", view(0.1)),
+            ("parts/p/views/old.json", view(0.1)),
+        ]);
+        let to = files(&[
+            manifest,
+            part,
+            ("parts/p/views/detail.json", view(0.2)),
+            ("parts/p/views/new.json", view(0.1)),
+        ]);
+        let v = structural(&from, &to, &Options::default(), &Releases::default());
+        assert_eq!(
+            v["parts"]["p"]["views"],
+            json!({"added": ["new"], "removed": ["old"],
+                   "changed": [{"view": "detail",
+                                "changes": [{"at": "/eye_m", "from": [0.1, -0.1, 0.1],
+                                             "to": [0.2, -0.1, 0.1]}]}]})
+        );
+        assert_eq!(v["parts"]["p"]["status"], "changed");
+        assert!(v["parts"]["p"]["features"].as_object().unwrap().is_empty());
+        let same = structural(&from, &from, &Options::default(), &Releases::default());
+        assert!(same["parts"].get("p").is_none());
     }
 
     fn files(list: &[(&str, Value)]) -> Files {

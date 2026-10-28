@@ -110,6 +110,83 @@ pub struct Line {
     pub dash: bool,
 }
 
+/// The origin's axes, x, y and z, as the triad colours them, and its
+/// planes.
+pub const AXIS_X: Rgb = [0.84, 0.19, 0.19];
+pub const AXIS_Y: Rgb = [0.15, 0.68, 0.38];
+pub const AXIS_Z: Rgb = [0.16, 0.38, 1.0];
+pub const ORIGIN_PLANE: Rgb = [0.45, 0.50, 0.58];
+
+/// How long the origin's axes are: a tenth of the diagonal of the box of
+/// `positions`, or 5 mm when there are none.
+pub fn origin_size(positions: &[[f64; 3]]) -> f64 {
+    let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+    for p in positions {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    let d = (0..3)
+        .map(|k| (hi[k] - lo[k]).max(0.0))
+        .map(|x| x * x)
+        .sum::<f64>()
+        .sqrt();
+    if d.is_finite() && d > 0.0 {
+        d / 10.0
+    } else {
+        0.005
+    }
+}
+
+/// The origin's axes and planes in model space, `size` long: each axis a
+/// line from the origin, each plane a dashed square about it, three
+/// quarters of `size` from the origin each way.
+pub fn origin_lines(size: f64) -> (Vec<[f64; 3]>, Vec<(Vec<u32>, Rgb, bool)>) {
+    let mut positions = vec![[0.0; 3]];
+    let mut lines = Vec::new();
+    for (k, c) in [AXIS_X, AXIS_Y, AXIS_Z].into_iter().enumerate() {
+        let mut tip = [0.0; 3];
+        tip[k] = size;
+        positions.push(tip);
+        lines.push((vec![0, positions.len() as u32 - 1], c, false));
+    }
+    let h = 0.75 * size;
+    for (a, b) in [(0, 1), (1, 2), (2, 0)] {
+        let start = positions.len() as u32;
+        for (sa, sb) in [(-h, -h), (h, -h), (h, h), (-h, h)] {
+            let mut p = [0.0; 3];
+            p[a] = sa;
+            p[b] = sb;
+            positions.push(p);
+        }
+        lines.push((
+            vec![start, start + 1, start + 2, start + 3, start],
+            ORIGIN_PLANE,
+            true,
+        ));
+    }
+    (positions, lines)
+}
+
+impl Geometry {
+    /// Adds the origin's axes and planes, sized to what is drawn so far.
+    pub fn add_origin(&mut self) {
+        let size = origin_size(&self.positions);
+        let (positions, lines) = origin_lines(size);
+        let base = self.positions.len() as u32;
+        self.positions.extend(positions);
+        for (points, color, dash) in lines {
+            self.lines.push(Line {
+                points: points.into_iter().map(|i| base + i).collect(),
+                color,
+                width: if dash { 1.0 } else { 2.0 },
+                dash,
+            });
+        }
+    }
+}
+
 /// A dashed line's dashes and the gaps between them, in output pixels.
 pub const DASH: [f32; 2] = [6.0, 4.0];
 
