@@ -211,7 +211,7 @@ pub fn build(part: &Part, id: &Id, i: &Import) -> Result<(Built, Value)> {
         .result
         .map_err(|e| failed(id, i, &e, &read.instances))?;
     let step = |n: &Name| read.instances.get(n).map(|k| format!("#{k}"));
-    let origins = crate::rebuild::names(&body)
+    let origins: crate::rebuild::Origins = crate::rebuild::names(&body)
         .into_iter()
         .map(|n| {
             let mut o = json!({"feature": id});

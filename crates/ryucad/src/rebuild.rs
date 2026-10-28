@@ -37,9 +37,73 @@ pub struct Built {
     /// Where each entity came from, by name: the feature that made it,
     /// and for a sweep's the sketch entities (see
     /// [`crate::profile::origins`]).
-    pub origins: Arc<BTreeMap<String, Value>>,
+    pub origins: Arc<Origins>,
     /// BLAKE3 of the body's dump: equal hashes mean bit-identical bodies.
     pub hash: String,
+}
+
+/// Where each entity of a body came from, by name, each distinct origin
+/// held once and shared by every name it applies to: every face, edge and
+/// vertex of a box came from the box. As JSON objects each name's origin
+/// took about 1.6 KB, and a project of 10,000 parts holds millions.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Origins(BTreeMap<String, Arc<Value>>);
+
+impl Origins {
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        self.0.get(name).map(|v| &**v)
+    }
+
+    /// The origin of `name`, shared.
+    pub fn shared(&self, name: &str) -> Option<&Arc<Value>> {
+        self.0.get(name)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Value)> {
+        self.0.iter().map(|(k, v)| (k, &**v))
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.0.keys()
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &Value> {
+        self.0.values().map(|v| &**v)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl FromIterator<(String, Value)> for Origins {
+    fn from_iter<I: IntoIterator<Item = (String, Value)>>(iter: I) -> Origins {
+        let mut held: BTreeMap<String, Arc<Value>> = BTreeMap::new();
+        let mut out = BTreeMap::new();
+        for (name, v) in iter {
+            let text = v.to_string();
+            let shared = held.entry(text).or_insert_with(|| Arc::new(v));
+            out.insert(name, Arc::clone(shared));
+        }
+        Origins(out)
+    }
+}
+
+impl From<BTreeMap<String, Value>> for Origins {
+    fn from(m: BTreeMap<String, Value>) -> Origins {
+        m.into_iter().collect()
+    }
+}
+
+impl serde::Serialize for Origins {
+    /// As the map of names to origins it holds.
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.collect_map(self.iter())
+    }
 }
 
 /// What a body-making feature leaves: the solid it founds, or each solid
@@ -755,7 +819,7 @@ fn build_primitive(part: &Id, id: &Id, f: &Primitive) -> Result<Built> {
             .with("feature", id)
             .with("kernel", format!("{e:?}"))
     })?;
-    let origins = names(&made.0)
+    let origins: Origins = names(&made.0)
         .into_iter()
         .map(|n| (n.to_string(), json!({"feature": id})))
         .collect();
@@ -1250,7 +1314,7 @@ fn apply(
             _ => {}
         }
     }
-    let origins = kept
+    let origins: Origins = kept
         .iter()
         .map(|n| (n.to_string(), from.get(n).unwrap_or(&own).clone()))
         .collect();
@@ -1742,7 +1806,7 @@ fn build_blend(
             }
         }
     }
-    let origins = names(&made.0)
+    let origins: Origins = names(&made.0)
         .into_iter()
         .map(|n| {
             let key = n.to_string();
@@ -1767,7 +1831,7 @@ pub(crate) fn finish(
     id: &Id,
     ty: &str,
     (body, journal): (Body, Journal),
-    origins: BTreeMap<String, Value>,
+    origins: impl Into<Origins>,
 ) -> Result<Built> {
     let faults = ryukei::check::check(&body);
     if !faults.is_empty() {
@@ -1785,7 +1849,7 @@ pub(crate) fn finish(
     Ok(Built {
         body,
         journal,
-        origins: Arc::new(origins),
+        origins: Arc::new(origins.into()),
         hash,
     })
 }

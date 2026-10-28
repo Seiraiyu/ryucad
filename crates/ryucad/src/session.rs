@@ -56,7 +56,7 @@ pub struct Session {
     /// every build this session has seen: its kind and, for a sweep, where
     /// it came from. Names are only added, so a reference whose name has
     /// gone can still say what it named.
-    known: BTreeMap<(Id, Id), BTreeMap<String, Value>>,
+    known: BTreeMap<(Id, Id), BTreeMap<ryukei::name::Name, Known>>,
     /// Display meshes of rebuilt bodies.
     pub meshes: crate::mesh::Cache,
     /// What intersecting pairs of placed solids found, for `interference`.
@@ -694,15 +694,17 @@ impl Session {
         let name = name.as_deref();
         let was = dependency
             .as_ref()
-            .zip(name)
-            .and_then(|(d, n)| self.known.get(&(part.clone(), d.clone()))?.get(n));
-        if let Some(w) = was {
+            .zip(name.and_then(crate::doc::reference::parse_name))
+            .and_then(|(d, n)| self.known.get(&(part.clone(), d.clone()))?.get(&n))
+            .map(Known::to_json);
+        if let Some(w) = &was {
             e.details["was"] = w.clone();
         }
         let reader = e.details["feature"]
             .as_str()
             .and_then(|f| Id::parse(f, "feature").ok());
         let maker = was
+            .as_ref()
             .and_then(|w| w["from"]["feature"].as_str())
             .and_then(|f| Id::parse(f, "feature").ok());
         let removed = dependency
@@ -762,7 +764,7 @@ impl Session {
             for (key, names) in &r.known {
                 let known = self.known.entry(key.clone()).or_default();
                 for (name, was) in names {
-                    known.entry(name.clone()).or_insert_with(|| was.clone());
+                    known.entry(*name).or_insert_with(|| was.clone());
                 }
             }
         }
@@ -839,9 +841,29 @@ impl Session {
     }
 }
 
-/// What a name of a part's solid was: the part and solid, the name, and
-/// its kind and, where known, where it came from.
-pub type Name = ((Id, Id), String, Value);
+/// What a name was, as a session learnt it: its kind and, where known,
+/// where it came from, shared with its body's origins. Held as JSON, each
+/// took about 1.6 KB; a project of 10,000 parts has millions.
+#[derive(Clone, Debug)]
+pub struct Known {
+    kind: &'static str,
+    from: Option<Arc<Value>>,
+}
+
+impl Known {
+    /// `{kind, from}`, as `reference_unresolved`'s `was` says it.
+    pub fn to_json(&self) -> Value {
+        let mut was = json!({ "kind": self.kind });
+        if let Some(from) = &self.from {
+            was["from"] = (**from).clone();
+        }
+        was
+    }
+}
+
+/// A name of a part's solid as learnt: the part and solid, the name, and
+/// what it was.
+pub type Name = ((Id, Id), ryukei::name::Name, Known);
 
 /// Every name the solids of `result` (a rebuild of `part`) have, as a
 /// session learns them.
@@ -866,12 +888,8 @@ pub(crate) fn names_of(part: &Id, result: &PartResult) -> Vec<Name> {
                     .map(|v| (body.vertex(v).expect("live").name, "vertex")),
             );
         for (name, kind) in names {
-            let name = name.to_string();
-            let mut was = json!({ "kind": kind });
-            if let Some(from) = b.origins.get(&name) {
-                was["from"] = from.clone();
-            }
-            out.push(((part.clone(), solid.clone()), name, was));
+            let from = b.origins.shared(&name.to_string()).cloned();
+            out.push(((part.clone(), solid.clone()), name, Known { kind, from }));
         }
     }
     out
