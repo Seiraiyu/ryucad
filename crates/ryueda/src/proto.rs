@@ -275,6 +275,15 @@ mod tests {
         );
         let e = Request::from_rpc("lib.add", Some(json!({"alias": 1}))).unwrap_err();
         assert_eq!(e.code, Code::InvalidDocument);
+        // A library component's fields are flattened into the params, and
+        // a misspelt one is still refused.
+        let e = Request::from_rpc(
+            "libcomp.create",
+            Some(json!({"name": "x", "colour": "red"})),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidDocument);
+        assert!(e.message.contains("colour"), "{}", e.message);
     }
 
     #[test]
