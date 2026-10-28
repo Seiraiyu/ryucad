@@ -34,3 +34,14 @@
   `CannotCheck`. Assumption: a Jacobian sign change within one lump means
   a fold, so refusing it is sound; a lump moving backwards throughout is
   not refused by this (left to the pairwise check or the builder).
+- Lap 6: #128. The general trace's simple test now also tries, near a
+  spline row collapsed exactly (all control points the same bits), the
+  normal divided by the distance to the row: `S_uv × S_v` over the cell
+  stretched to the row. Fitting needed two more: a foot at the pole uses
+  `Surface::normal`'s limit (the partials' cross product is zero there),
+  and `local_foot` returns `None` when 20 steps don't settle (its doc
+  already said so) so projection decides. The pinned pair now meets in
+  ~1 s (was `Uncertain` after ~7 s); `general_props` no longer cuts
+  spheres short of their poles, and 240 random spline pairs passed.
+  Determinism golden hashes unchanged. Rows collapsed only within
+  resolution (not bit for bit) are still the old path.

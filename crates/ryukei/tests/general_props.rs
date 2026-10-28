@@ -7,10 +7,9 @@
 
 use proptest::prelude::*;
 use ryukei::geom::{
-    Box3, Cone, Cylinder, Direction, Frame, Plane, Point3, Sphere, Surface, Torus, UnitVector3,
-    Vector3,
+    Box3, Cone, Cylinder, Frame, Plane, Point3, Sphere, Surface, Torus, UnitVector3, Vector3,
 };
-use ryukei::intersect::{Branch, Failure, Side, SurfaceHit, surface_surface};
+use ryukei::intersect::{Branch, Side, SurfaceHit, surface_surface};
 use std::sync::Arc;
 
 fn unit() -> impl Strategy<Value = Vector3> {
@@ -38,8 +37,8 @@ fn analytic() -> impl Strategy<Value = Surface> {
 }
 
 /// An analytic surface's exact NURBS form over a box of its parameters
-/// holding the part near the origin (one nappe of a cone, a sphere short
-/// of its poles).
+/// holding the part near the origin (one nappe of a cone; a sphere's `v`
+/// converts whole, poles and all).
 fn spline_of(s: &Surface) -> Surface {
     let tau = core::f64::consts::TAU;
     let range = match s {
@@ -49,15 +48,7 @@ fn spline_of(s: &Surface) -> Surface {
         Surface::Torus(_) => [[0.0, tau], [0.0, tau]],
         _ => [[0.0, tau], [-4.0, 4.0]],
     };
-    let (mut n, [_, rv]) = s.to_nurbs(range).unwrap();
-    // A sphere's `v` converts whole, poles and all: cut them off. A
-    // surface passing a spline's pole within tens of microns is a limit
-    // (`passing_a_spline_pole_is_uncertain`), not what this samples.
-    if let Surface::Sphere(_) = s {
-        let [v0, v1] = range[1].map(|v| rv.to_nurbs(v));
-        n = n.split(Direction::V, v1).unwrap().0;
-        n = n.split(Direction::V, v0).unwrap().1;
-    }
+    let (n, _) = s.to_nurbs(range).unwrap();
     Surface::Nurbs(Arc::new(n))
 }
 
@@ -271,20 +262,18 @@ fn surfaces_touching_along_a_curve() {
     }
 }
 
-/// A limit, pinned: a spline cone passing 15 µm from a pole of a spline
-/// sphere (its `v` converted whole) is `Uncertain`. In the four-parameter
-/// trace a pole's cells have no normal (`B_s × B_t` vanishes along a
-/// collapsed row), so none is simple, and the tangency system is
-/// degenerate there. Found by `spline_pairs_agree_with_sampling` on
-/// macos-latest (CI run 40418433312) before its spheres stopped short of
-/// their poles. When the trace handles poles (issue #128), this should
-/// meet.
+/// A spline cone passing 15 µm from a pole of a spline sphere (its `v`
+/// converted whole) meets it as sampling sees. Found by
+/// `spline_pairs_agree_with_sampling` on macos-latest (CI run
+/// 40418433312) before its spheres stopped short of their poles; it was
+/// `Uncertain` until the four-parameter trace took normals' limits at
+/// collapsed rows (issue #128).
 #[test]
 #[cfg_attr(
     debug_assertions,
     ignore = "slow in a debug build: CI runs it in release"
 )]
-fn passing_a_spline_pole_is_uncertain() {
+fn passing_a_spline_pole() {
     let tau = core::f64::consts::TAU;
     let unit = |x, y, z| UnitVector3::exact(Vector3::new(x, y, z)).unwrap();
     let cone = Frame::from_axes(
@@ -311,10 +300,5 @@ fn passing_a_spline_pole_is_uncertain() {
         [[0.0, tau], [apex + 0.05, apex + 6.0]],
     );
     let b = spline(&Surface::Sphere(ball), [[0.0, tau], [-1.5, 1.5]]);
-    let region = Box3::new(
-        Point3::new(-20.0, -20.0, -20.0),
-        Point3::new(20.0, 20.0, 20.0),
-    );
-    let hit = surface_surface(&a, &b, &region);
-    assert!(matches!(hit, Err(Failure::Uncertain)), "{hit:?}");
+    agrees(&a, &b).unwrap();
 }
