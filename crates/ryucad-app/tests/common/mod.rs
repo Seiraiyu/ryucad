@@ -47,7 +47,8 @@ fn shared() -> &'static Path {
 }
 
 /// The `ryucad` binary of this build, built if needed: `cargo test -p
-/// ryucad-app` doesn't build other packages' binaries.
+/// ryucad-app` doesn't build other packages' binaries. With
+/// `RYUCAD_TEST_PREBUILT` set, the one beside the tests is taken as it is.
 pub fn ryucad() -> &'static Daemon {
     static DAEMON: OnceLock<Daemon> = OnceLock::new();
     DAEMON.get_or_init(|| {
@@ -73,8 +74,16 @@ pub fn ryucad() -> &'static Daemon {
         if !above.join("CACHEDIR.TAG").exists() && !above.join(".rustc_info.json").exists() {
             cmd.arg("--target").arg(above.file_name().unwrap());
         }
-        assert!(cmd.status().unwrap().success(), "building ryucad");
         let path = bin.join(format!("ryucad{}", std::env::consts::EXE_SUFFIX));
+        // A run of the workspace's tests (CI's partitions) has built it
+        // already, with the dev-dependencies' features; built again here
+        // without them, every workspace crate would build a second time.
+        let prebuilt = std::env::var("RYUCAD_TEST_PREBUILT").is_ok_and(|v| !v.is_empty());
+        if prebuilt {
+            assert!(path.exists(), "RYUCAD_TEST_PREBUILT, but no {path:?}");
+        } else {
+            assert!(cmd.status().unwrap().success(), "building ryucad");
+        }
         // The shared folder is a repository of its own with the diff driver
         // in its config, so doctor finds the same Git setup whether the
         // target folder sits inside a checkout (as in CI) or not.
