@@ -78,6 +78,9 @@ pub struct Opened {
     pub recent: Vec<PathBuf>,
     /// A revision being typed to compare with (View > Compare with…).
     pub compare_with: Option<String>,
+    /// A STEP dialog's Browse… was pressed: the OS's file dialog opens
+    /// once the frame is done.
+    pub browse: Option<crate::ui::step::Browse>,
 }
 
 /// What the window shows.
@@ -268,6 +271,7 @@ impl Opened {
             doctor: doctor::State::default(),
             recent: crate::core::recent::load(),
             compare_with: None,
+            browse: None,
         };
         o.view.look = user_look();
         // Damage that doesn't stop the project opening shows as badges.
@@ -370,6 +374,8 @@ impl Opened {
         {
             self.view.fit_entities(&mut self.ws, &faces);
         }
+        crate::ui::step::import(&ctx, &mut self.ws, &mut self.browse, view);
+        crate::ui::step::export(&ctx, &mut self.ws, &mut self.browse, view);
         // Closing the dialog ends what it paints (#138).
         if !self.dialogs.interference {
             self.ws.interference = None;
@@ -538,6 +544,28 @@ impl eframe::App for App {
             }
             // What the folder changed is drawn now, not at the next event:
             // a click must find the buttons where it sees them.
+            ui.ctx().request_repaint();
+        }
+        if let Screen::Opened(o) = &mut self.screen
+            && let Some(how) = o.browse.take()
+        {
+            use crate::ui::step::Browse;
+            if let Some(path) = crate::ui::step::ask_os(frame, how) {
+                let path = path.display().to_string();
+                match how {
+                    Browse::Open => {
+                        if let Some(i) = &mut o.ws.import {
+                            i.path = path;
+                        }
+                        o.ws.plan_import();
+                    }
+                    Browse::Save => {
+                        if let Some(e) = &mut o.ws.export {
+                            e.path = path;
+                        }
+                    }
+                }
+            }
             ui.ctx().request_repaint();
         }
     }

@@ -41,6 +41,55 @@ pub struct Feature {
     pub mate: Option<MateInfo>,
     /// The copies an instance pattern places, by path (`ring:1/pin`).
     pub copies: Vec<String>,
+    /// What an import reads, whether or not it built.
+    pub import: Option<ImportInfo>,
+}
+
+/// An import feature's file, product and body, and what healing did when
+/// it built.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImportInfo {
+    /// `imports/<name>.step`.
+    pub file: String,
+    pub blake3: String,
+    /// The `PRODUCT`'s id and name, and its ordinal among definitions
+    /// with both equal; none for a body no product reaches.
+    pub product: Option<(String, String, u64)>,
+    pub body: u64,
+    /// Each heal count with a value (`sewn`, `merged`, …) and the largest
+    /// tolerance given, in meters, when it built.
+    pub heal: Vec<(String, u64)>,
+    pub tolerance_m: Option<f64>,
+}
+
+impl ImportInfo {
+    pub fn from_json(v: &Value) -> ImportInfo {
+        let heal = &v["heal"];
+        ImportInfo {
+            file: text(&v["file"]),
+            blake3: text(&v["blake3"]),
+            product: v["product"].is_object().then(|| {
+                (
+                    text(&v["product"]["id"]),
+                    text(&v["product"]["name"]),
+                    v["product"]["ordinal"].as_u64().unwrap_or_default(),
+                )
+            }),
+            body: v["body"].as_u64().unwrap_or_default(),
+            heal: heal
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter_map(|(k, n)| Some((k.clone(), n.as_u64()?)))
+                .collect(),
+            tolerance_m: heal["tolerance_m"].as_f64(),
+        }
+    }
+
+    /// The file's name: `bracket.step`.
+    pub fn file_name(&self) -> &str {
+        self.file.rsplit('/').next().unwrap_or(&self.file)
+    }
 }
 
 /// What an instance places: a part at a revision, whether it is fixed,
@@ -311,6 +360,7 @@ impl Part {
                             .flatten()
                             .map(|c| format!("{}/{}", text(&c["copy"]), text(&c["seed"])))
                             .collect(),
+                        import: f.get("import").map(ImportInfo::from_json),
                     })
                     .collect()
             })

@@ -475,34 +475,6 @@ pub fn plan(
     })
 }
 
-/// The definition of `opened` (the file at `path`) that `part` is: the
-/// product its instances from that file belong to, else its import
-/// features', as an update reads it.
-fn definition_of(project: &Project, part: &Id, path: &str, opened: &Opened) -> Option<usize> {
-    let p = project.parts.get(part)?;
-    let products = || {
-        p.order()
-            .iter()
-            .filter_map(|f| p.features.get(f)?.as_ref().ok())
-    };
-    let r = products()
-        .find_map(|f| match f {
-            Feature::Instance(i) => i
-                .import
-                .as_ref()
-                .filter(|u| u.file == path)
-                .map(|u| &u.product),
-            _ => None,
-        })
-        .or_else(|| {
-            products().find_map(|f| match f {
-                Feature::Import(i) if i.file.path == path => i.product.as_ref(),
-                _ => None,
-            })
-        })?;
-    (0..opened.products.definitions.len()).find(|&k| plan::product_of(opened, k) == *r)
-}
-
 /// `import_usage_missing` for each instance of assembly `part` an import
 /// made whose usage its file no longer has: kept by an update because a
 /// mate or pattern reads it.
@@ -510,6 +482,9 @@ pub fn usage_warnings(project: &Project, part: &Id) -> Vec<Value> {
     let Some(p) = project.parts.get(part) else {
         return Vec::new();
     };
+    // Each file's products and usages, indexed once: an assembly file
+    // places thousands.
+    let mut files: BTreeMap<String, Option<Usages>> = BTreeMap::new();
     let mut out = Vec::new();
     for fid in p.order() {
         let Some(Ok(Feature::Instance(i))) = p.features.get(fid) else {
@@ -518,19 +493,21 @@ pub fn usage_warnings(project: &Project, part: &Id) -> Vec<Value> {
         let Some(u) = &i.import else {
             continue;
         };
-        let Some(Ok(opened)) = project.imports.get(&u.file).map(super::opened) else {
+        let usages = files.entry(u.file.clone()).or_insert_with(|| {
+            let opened = project.imports.get(&u.file).map(super::opened)?.ok()?;
+            Some(Usages::of(&opened))
+        });
+        let Some(usages) = usages else {
             continue;
         };
-        let defs = &opened.products.definitions;
-        let k = (0..defs.len()).find(|&k| plan::product_of(&opened, k) == u.product);
-        let child = definition_of(project, &i.part, &u.file, &opened);
+        let k = usages.products.get(&u.product).copied();
+        let child =
+            owned_product(project, &i.part, &u.file).and_then(|r| usages.products.get(r).copied());
         let found = k.is_some_and(|k| match &u.usage {
-            None => plan::bodies(&opened, Some(k)) > 0,
-            Some(id) => defs[k].children.iter().enumerate().any(|(n, o)| {
-                *o.id == **id
-                    && child == Some(o.definition)
-                    && plan::usage_ordinal(&opened, k, n) == u.ordinal
-            }),
+            None => usages.bodies[k] > 0,
+            Some(id) => {
+                child.is_some_and(|c| usages.usages[k].contains(&(id.clone(), c, u.ordinal)))
+            }
         });
         if !found {
             let usage = u.usage.as_deref().unwrap_or("its own bodies");
@@ -546,6 +523,88 @@ pub fn usage_warnings(project: &Project, part: &Id) -> Vec<Value> {
         }
     }
     out
+}
+
+/// A file's products by their reference, how many bodies each has, and
+/// each one's usages as (id, child, ordinal): what [`usage_warnings`]
+/// looks instances up in, built in one pass.
+struct Usages {
+    products: BTreeMap<ProductRef, usize>,
+    bodies: Vec<usize>,
+    usages: Vec<std::collections::BTreeSet<(String, usize, u32)>>,
+}
+
+impl Usages {
+    fn of(opened: &Opened) -> Usages {
+        let defs = &opened.products.definitions;
+        let mut seen: BTreeMap<(&str, &str), u32> = BTreeMap::new();
+        let products = defs
+            .iter()
+            .enumerate()
+            .map(|(k, d)| {
+                let n = seen.entry((&d.product_id, &d.name)).or_insert(0);
+                let r = ProductRef {
+                    id: d.product_id.to_string(),
+                    name: d.name.to_string(),
+                    ordinal: *n,
+                };
+                *n += 1;
+                (r, k)
+            })
+            .collect();
+        let mut bodies = vec![0; defs.len()];
+        for h in &opened.held {
+            if let Some(k) = h.definition {
+                bodies[k] += 1;
+            }
+        }
+        let usages = defs
+            .iter()
+            .map(|d| {
+                let mut seen: BTreeMap<(&str, usize), u32> = BTreeMap::new();
+                d.children
+                    .iter()
+                    .map(|o| {
+                        let n = seen.entry((&o.id, o.definition)).or_insert(0);
+                        let u = (o.id.to_string(), o.definition, *n);
+                        *n += 1;
+                        u
+                    })
+                    .collect()
+            })
+            .collect();
+        Usages {
+            products,
+            bodies,
+            usages,
+        }
+    }
+}
+
+/// The product of file `path` that `part`'s import features or imported
+/// instances name: the product it was made from.
+fn owned_product<'p>(project: &'p Project, part: &Id, path: &str) -> Option<&'p ProductRef> {
+    let p = project.parts.get(part)?;
+    let products = || {
+        p.order()
+            .iter()
+            .filter_map(|f| p.features.get(f)?.as_ref().ok())
+    };
+    products()
+        .find_map(|f| match f {
+            Feature::Instance(i) => i
+                .import
+                .as_ref()
+                .filter(|u| u.file == path)
+                .map(|u| &u.product),
+            _ => None,
+        })
+        .or_else(|| {
+            products().find_map(|f| match f {
+                Feature::Import(i) if i.file.path == path => i.product.as_ref(),
+                _ => None,
+            })
+        })
 }
 
 /// One version of a file's products, each with what makes it what it is:

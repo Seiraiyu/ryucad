@@ -440,7 +440,7 @@ fn load_imports(
     let mut out = BTreeMap::new();
     for (name, kind) in src.list(IMPORTS)? {
         let at = join(IMPORTS, &name);
-        match src.read(&at)? {
+        match src.read_shared(&at)? {
             Some(bytes) if kind == Kind::File && super::import::is_import_path(&at) => {
                 out.insert(at, ImportFile::new(bytes));
             }

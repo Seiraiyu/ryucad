@@ -46,6 +46,19 @@ pub fn row_text(f: &crate::core::model::Feature, faults: usize) -> String {
                 MateInfo::path_of(&m.b)
             )
         }
+        // An import its file and product: `import: bracket.step /
+        // BRK-100`, and its body when the product has several.
+        _ if f.import.is_some() => {
+            let i = f.import.as_ref().expect("an import");
+            let mut s = format!("import: {}", i.file_name());
+            if let Some((id, _, _)) = &i.product {
+                s.push_str(&format!(" / {id}"));
+            }
+            if i.body > 0 {
+                s.push_str(&format!(", body {}", i.body));
+            }
+            s
+        }
         // An instance pattern how many copies it places.
         (Some(t), _, None) if t == "instance_pattern" && f.error.is_none() => {
             format!("{t}, {} copies", f.copies.len())
@@ -1406,6 +1419,18 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
     if let Some(m) = &mut form.mate {
         mate(ui, m);
     }
+    if let Some(i) = &form.import {
+        let built = ws
+            .model
+            .parts
+            .get(&form.part)
+            .and_then(|p| p.feature(&form.feature))
+            .and_then(|f| f.import.clone());
+        import(ui, i, built.as_ref());
+        let key = (form.part.clone(), form.feature.clone());
+        names(ui, ws, &key);
+        return;
+    }
     // What it acts on: none for a new solid.
     let new = form.operation.as_ref().is_some_and(|o| o.chosen == "new");
     for p in [&mut form.targets, &mut form.tools].into_iter().flatten() {
@@ -1452,6 +1477,47 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         ws.save_form();
     }
     names(ui, ws, &key);
+}
+
+/// An import, read only: its file, the hash its bytes must have, its
+/// product and body, and when it built what healing did to it.
+fn import(
+    ui: &mut egui::Ui,
+    i: &crate::core::model::ImportInfo,
+    built: Option<&crate::core::model::ImportInfo>,
+) {
+    egui::Grid::new("import").num_columns(2).show(ui, |ui| {
+        ui.label("file");
+        ui.label(&i.file);
+        ui.end_row();
+        ui.label("BLAKE3");
+        ui.label(format!("{}…", &i.blake3[..i.blake3.len().min(16)]))
+            .on_hover_text(&i.blake3);
+        ui.end_row();
+        ui.label("product");
+        ui.label(match &i.product {
+            Some((id, name, 0)) => format!("{id} ({name})"),
+            Some((id, name, n)) => format!("{id} ({name}), ordinal {n}"),
+            None => "none: a body no product reaches".to_owned(),
+        });
+        ui.end_row();
+        ui.label("body");
+        ui.label(i.body.to_string());
+        ui.end_row();
+        if let Some(b) = built {
+            for (k, n) in b.heal.iter().filter(|(_, n)| *n > 0) {
+                ui.label(k);
+                ui.label(n.to_string());
+                ui.end_row();
+            }
+            if let Some(t) = b.tolerance_m {
+                ui.label("largest tolerance");
+                ui.label(format!("{t:e} m"));
+                ui.end_row();
+            }
+        }
+    });
+    ui.weak("Imports are written by ryucad import; File > Update import… takes a new version of the file.");
 }
 
 /// The stable names of the faces, edges and vertices of a feature's
@@ -1866,7 +1932,26 @@ mod tests {
             instance: None,
             mate: None,
             copies: Vec::new(),
+            import: None,
         }
+    }
+
+    #[test]
+    fn imports_say_their_file_and_product() {
+        use crate::core::model::ImportInfo;
+        let mut f = feature("import");
+        f.id = "body".into();
+        f.import = Some(ImportInfo::from_json(&json!({
+            "file": "imports/bracket.step", "blake3": "ab", "body": 0,
+            "product": {"id": "BRK-100", "name": "Bracket"}})));
+        assert_eq!(row_text(&f, 0), "body (import: bracket.step / BRK-100)");
+        f.import = Some(ImportInfo::from_json(&json!({
+            "file": "imports/loose.step", "blake3": "ab", "body": 2})));
+        f.error = Some(json!({"code": "import_body_missing", "message": "no body 2"}));
+        assert_eq!(
+            row_text(&f, 0),
+            "body (import: loose.step, body 2): failed (import_body_missing)"
+        );
     }
 
     #[test]

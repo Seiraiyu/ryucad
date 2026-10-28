@@ -428,16 +428,49 @@ pub fn writes(project: &crate::doc::project::Project, planned: &[Planned]) -> Re
 }
 
 /// Writes `writes` into the project at `root`: each file atomically,
-/// each deletion with the folders it empties.
+/// side by side (each waits for its disk, and a file of a thousand parts
+/// writes thousands), then each deletion with the folders it empties.
+/// The first error, in path order, is the answer's.
 pub fn apply(root: &std::path::Path, writes: &Writes) -> Result<()> {
     use crate::doc::project::{remove_file, write_atomic};
-    for (rel, bytes) in writes {
-        let path = rel.split('/').fold(root.to_path_buf(), |p, s| p.join(s));
-        match bytes {
-            Some(b) => write_atomic(&path, b)?,
-            None if path.exists() => remove_file(root, &path)?,
-            None => {}
+    use rayon::prelude::*;
+    let path = |rel: &str| rel.split('/').fold(root.to_path_buf(), |p, s| p.join(s));
+    let written: Vec<Result<()>> = writes
+        .par_iter()
+        .filter_map(|(rel, bytes)| Some(write_atomic(&path(rel), bytes.as_ref()?)))
+        .collect();
+    written.into_iter().collect::<Result<()>>()?;
+    for (rel, _) in writes.iter().filter(|(_, b)| b.is_none()) {
+        let p = path(rel);
+        if p.exists() {
+            remove_file(root, &p)?;
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_file_is_written_and_deletions_empty_their_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("parts/old/features")).unwrap();
+        std::fs::write(root.join("parts/old/features/a.json"), "{}").unwrap();
+        let mut writes = Writes::new();
+        for k in 0..200 {
+            let path = format!("parts/p{k}/features/body.json");
+            writes.insert(path, Some(format!("{{\"k\": {k}}}").into_bytes()));
+        }
+        writes.insert("parts/old/features/a.json".into(), None);
+        writes.insert("parts/gone/part.json".into(), None);
+        apply(root, &writes).unwrap();
+        for k in 0..200 {
+            let text = std::fs::read_to_string(root.join(format!("parts/p{k}/features/body.json")));
+            assert_eq!(text.unwrap(), format!("{{\"k\": {k}}}"));
+        }
+        assert!(!root.join("parts/old").exists(), "emptied, so gone");
+    }
 }

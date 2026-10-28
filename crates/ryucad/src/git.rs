@@ -374,7 +374,7 @@ impl Repo {
         let tree = commit.tree().map_err(git_error)?;
         let mut files = Files::new();
         for (path, id) in self.project_blobs(&tree)? {
-            files.insert(path, self.read(id)?);
+            files.insert(path, self.read(id)?.into());
         }
         Ok(files)
     }

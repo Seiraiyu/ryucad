@@ -66,6 +66,40 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened, recent: &[PathBuf]) -> Option<Acti
                     }
                 }
             });
+            ui.separator();
+            if ui.button("Import STEP…").clicked() {
+                o.ws.import = Some(crate::core::step::Import::new());
+            }
+            let file = o.view.chosen.as_ref().and_then(|(p, f)| {
+                o.ws.model
+                    .parts
+                    .get(p)?
+                    .feature(f)?
+                    .import
+                    .as_ref()
+                    .map(|i| i.file.clone())
+            });
+            if ui
+                .add_enabled(file.is_some(), egui::Button::new("Update import…"))
+                .on_disabled_hover_text("Choose an imported feature in the tree first")
+                .clicked()
+                && let Some(f) = &file
+            {
+                o.ws.import = Some(crate::core::step::Import::update(f));
+            }
+            let shown = match o.ws.model.shown().as_slice() {
+                [one] => Some((*one).to_owned()),
+                _ => None,
+            };
+            if ui
+                .add_enabled(shown.is_some(), egui::Button::new("Export STEP…"))
+                .on_disabled_hover_text("Show one part or assembly first (View > Show)")
+                .clicked()
+                && let Some(p) = &shown
+            {
+                o.ws.export = Some(crate::core::step::Export::new(p));
+            }
+            ui.separator();
             if ui.add(item(ui, "Close", &CLOSE)).clicked() {
                 action = Some(Action::Close);
             }
