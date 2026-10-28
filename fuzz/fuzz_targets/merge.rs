@@ -3,8 +3,8 @@
 //! versions split at `0xff` bytes, so anything at all reaches the driver),
 //! or a base sketch, part list, parameters file, part's properties,
 //! release record, pattern, instance or mate and two sides' edits to it,
-//! two bytes an edit; `0xfe` an import feature and `0xff` an instance an
-//! import made. Merging must never panic, must give the same bytes twice,
+//! two bytes an edit; `0xfe` an import feature, `0xff` an instance an
+//! import made and `0xfd` the material library. Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
@@ -323,6 +323,29 @@ fn edit_imported(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// Applies edit `(op, arg)` to a material library: a material's
+/// density set (adding it), a material removed (the default with it), or
+/// the default moved, kept valid.
+fn edit_materials(v: &mut Value, op: u8, arg: u8) {
+    let name = format!("m{}", arg % 3);
+    match op % 3 {
+        0 => v["materials"][&name] = json!({"density": format!("{} kg/m^3", u32::from(arg) + 1)}),
+        1 => {
+            v["materials"].as_object_mut().unwrap().remove(&name);
+            if v["default"] == json!(name) {
+                v.as_object_mut().unwrap().remove("default");
+            }
+        }
+        _ => {
+            if v["materials"].get(&name).is_some() {
+                v["default"] = json!(name);
+            } else {
+                v.as_object_mut().unwrap().remove("default");
+            }
+        }
+    }
+}
+
 fn text(v: &Value) -> Vec<u8> {
     canonical::to_string(v).into_bytes()
 }
@@ -331,9 +354,11 @@ fuzz_target!(|data: &[u8]| {
     let Some((&mode, rest)) = data.split_first() else {
         return;
     };
-    // `0xfe` and `0xff` are the import modes (9 and 10); every other byte
-    // picks as it did before them.
+    // `0xfe` and `0xff` are the import modes (9 and 10), `0xfd` the
+    // material library (11); every other byte picks as it did before
+    // them.
     let kind = match mode {
+        0xfd => 11,
         0xfe => 9,
         0xff => 10,
         m => m % 9,
@@ -366,6 +391,9 @@ fuzz_target!(|data: &[u8]| {
             9 => json!({"format": 5, "kind": "ryucad.feature", "type": "import", "body": 0,
                         "file": {"path": "imports/f.step", "blake3": "0".repeat(64)},
                         "product": {"id": "P-0", "name": "Part 0"}}),
+            11 => json!({"default": "m0", "format": 1, "kind": "ryucad.materials",
+                         "materials": {"m0": {"density": "7850 kg/m^3"},
+                                       "m1": {"colour": "#888888", "density": "2.7 g/cm^3"}}}),
             10 => json!({"format": 5, "kind": "ryucad.feature", "type": "instance", "part": "bolt",
                          "rev": "working", "fixed": true,
                          "import": {"file": "imports/f.step",
@@ -388,6 +416,7 @@ fuzz_target!(|data: &[u8]| {
             8 => edit_mate(v, op, arg),
             9 => edit_import(v, op, arg),
             10 => edit_imported(v, op, arg),
+            11 => edit_materials(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.

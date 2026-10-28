@@ -45,7 +45,7 @@ impl Issue {
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 33] = [
+pub const CODES: [(&str, &str); 34] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -79,6 +79,7 @@ pub const CODES: [(&str, &str); 33] = [
     ("bom_item_missing", "warning"),
     ("bom_item_duplicate", "error"),
     ("bom_item_unused", "warning"),
+    ("material_unknown", "warning"),
 ];
 
 /// The size past which an imported file is `import_large`: Git keeps
@@ -440,6 +441,7 @@ fn diagnose_in(builds: &mut Builds) -> Vec<Issue> {
     diagnose_items(&mut issues, root);
     diagnose_imports(root, &part_ids, unit, &mut issues);
     diagnose_pdm(root, manifest.as_ref(), &part_ids, &mut issues);
+    diagnose_materials(root, &part_ids, &mut issues);
     diagnose_releases(root, &mut issues);
     diagnose_git(root, &mut issues);
     issues
@@ -619,6 +621,45 @@ fn stale_assembly(session: &mut Session, part: &str) -> Option<Vec<(String, Vec<
             })
             .collect(),
     )
+}
+
+/// The material library: a file that doesn't read, and, when it reads,
+/// each part whose PDM `material` property names no material of it
+/// (`material_unknown`: its mass properties would have no density).
+fn diagnose_materials(root: &Path, parts: &[&str], issues: &mut Vec<Issue>) {
+    use crate::doc::materials::{MATERIALS, Materials};
+    let library = match read(root, MATERIALS) {
+        Read::Missing => return,
+        Read::Bad(i) => return issues.push(i),
+        Read::Json(v, canonical) => match Materials::from_json(&v) {
+            Ok(m) => {
+                if !canonical {
+                    issues.push(non_canonical(MATERIALS));
+                }
+                m
+            }
+            Err(e) => return issues.push(document_issue(MATERIALS, &e)),
+        },
+    };
+    for part in parts {
+        let Ok(id) = Id::parse(part, "part") else {
+            continue;
+        };
+        let Ok(props) = ryupdm::props::read(&Folder(root), &id) else {
+            continue;
+        };
+        if let Some(name) = props.values.get("material").and_then(Value::as_str)
+            && !library.materials.contains_key(name)
+        {
+            issues.push(issue(
+                "material_unknown",
+                vec![format!("parts/{part}/properties.json"), MATERIALS.to_owned()],
+                format!(
+                    "part {part}'s material {name:?} isn't in {MATERIALS}: add it with `ryucad materials set`, or change the part's material"
+                ),
+            ));
+        }
+    }
 }
 
 /// ryupdm's files: its settings and each part's properties read as they
@@ -2220,6 +2261,52 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(report(r).unwrap()["errors"], 2);
+    }
+
+    #[test]
+    fn materials_are_read_and_parts_judged() {
+        let dir = healthy();
+        let r = dir.path();
+        let mut s = crate::session::Session::open(r).unwrap();
+        let material = |s: &mut crate::session::Session, m: &str| {
+            call(
+                s,
+                "props.set",
+                json!({"part": "p", "properties": {"material": m}}),
+            )
+            .unwrap();
+        };
+        // No library: nothing to judge a material by.
+        material(&mut s, "brass");
+        assert!(codes(r).is_empty(), "{:?}", codes(r));
+        let library = json!({"format": 1, "kind": "ryucad.materials",
+                             "materials": {"steel": {"density": "7850 kg/m^3"}}});
+        w(r, "materials.json", &canonical::to_string(&library));
+        let both = vec![
+            "parts/p/properties.json".to_owned(),
+            "materials.json".to_owned(),
+        ];
+        assert_eq!(codes(r), [("material_unknown", both)]);
+        material(&mut s, "steel");
+        assert!(codes(r).is_empty(), "{:?}", codes(r));
+        w(
+            r,
+            "materials.json",
+            "{\"format\": 1, \"kind\": \"ryucad.materials\"}",
+        );
+        assert_eq!(
+            codes(r),
+            [("invalid_document", vec!["materials.json".to_owned()])]
+        );
+        w(
+            r,
+            "materials.json",
+            &serde_json::to_string(&library).unwrap(),
+        );
+        assert_eq!(
+            codes(r),
+            [("non_canonical", vec!["materials.json".to_owned()])]
+        );
     }
 
     /// A release record of `part`'s `label`, as ryupdm writes one.

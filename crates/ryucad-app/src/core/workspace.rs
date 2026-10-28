@@ -6,6 +6,7 @@ use crate::core::compare::Compare;
 use crate::core::edit::{DimForm, Form};
 use crate::core::interference::Interference;
 use crate::core::link::{Event, Link, Wake};
+use crate::core::measure::{Clearance, Mass, Tool};
 use crate::core::merge::Merge;
 use crate::core::model::{BodyKey, Model, Part};
 use crate::core::params::Params;
@@ -82,6 +83,12 @@ enum Pending {
     Doctor,
     /// An assembly's interference (`interference`).
     Interference(String),
+    /// The Measure tool's picks (`measure`).
+    Measure(Vec<String>),
+    /// What the Mass properties panel weighs (`mass`).
+    Mass(String),
+    /// An assembly's clearances (`clearance`).
+    Clearance(String),
     /// What the disk cache holds (`cache.stats` or `cache.clear`).
     Cache,
     /// An import's dry run, for the file at this path.
@@ -259,6 +266,12 @@ pub struct Workspace {
     /// The shown assembly's interference, once asked for (Tools > Check
     /// interference); asked again as the assembly changes.
     pub interference: Option<Interference>,
+    /// Tools > Measure: on or off, its picks and what they measured.
+    pub measure: Tool,
+    /// Tools > Mass properties, once asked for.
+    pub mass: Option<Mass>,
+    /// Tools > Clearance, once asked for: the shown assembly's.
+    pub clearance: Option<Clearance>,
     /// What the disk cache held when last asked (`cache.stats`), for the
     /// Preferences window.
     pub cache: Option<Value>,
@@ -349,6 +362,9 @@ impl Workspace {
             settings: Settings::default(),
             doctor: None,
             interference: None,
+            measure: Tool::default(),
+            mass: None,
+            clearance: None,
             cache: None,
             import: None,
             export: None,
@@ -449,6 +465,69 @@ impl Workspace {
             instances: Vec::new(),
         };
         self.send(req, Pending::Interference(part));
+    }
+
+    /// Takes a pick of the Measure tool and measures what it now holds.
+    pub fn measure_pick(&mut self, entity: &str) {
+        let picks = self.measure.pick(entity);
+        let req = Request::Measure {
+            entities: picks.clone(),
+            rev: None,
+        };
+        self.send(req, Pending::Measure(picks));
+    }
+
+    /// Measures the Measure tool's picks again: what they name changed.
+    fn measure_again(&mut self) {
+        let picks = self.measure.picks.clone();
+        if picks.is_empty() {
+            return;
+        }
+        let req = Request::Measure {
+            entities: picks.clone(),
+            rev: None,
+        };
+        self.send(req, Pending::Measure(picks));
+    }
+
+    /// What Tools > Mass properties weighs: the solid or occurrence of the
+    /// first selected entity, else the part or assembly shown.
+    pub fn mass_target(&self) -> Option<String> {
+        if let Some(e) = self.myself().and_then(|m| m.selection.first()) {
+            let part = e.split('/').next().unwrap_or_default();
+            let assembly = self.model.parts.get(part).is_some_and(|p| p.assembly);
+            return Some(crate::core::measure::weighed(e, assembly));
+        }
+        match self.model.shown().as_slice() {
+            [one] => Some((*one).to_owned()),
+            _ => None,
+        }
+    }
+
+    /// Weighs `of` (`mass`) for the Mass properties panel.
+    pub fn weigh(&mut self, of: &str) {
+        self.mass = Some(Mass::asked(of));
+        let req = Request::Mass {
+            of: of.to_owned(),
+            tolerance: None,
+            rev: None,
+        };
+        self.send(req, Pending::Mass(of.to_owned()));
+    }
+
+    /// Finds the shown assembly's clearances (`clearance`); nothing when it
+    /// shows none.
+    pub fn check_clearance(&mut self) {
+        let Some(part) = self.shown_assembly() else {
+            return;
+        };
+        self.clearance = Some(Clearance::asked(&part));
+        let req = Request::Clearance {
+            part: part.clone(),
+            instances: Vec::new(),
+            below: None,
+        };
+        self.send(req, Pending::Clearance(part));
     }
 
     /// Diagnoses the project (`doctor`).
@@ -1623,6 +1702,33 @@ impl Workspace {
                     self.fail(e);
                 }
             }
+            (Pending::Measure(picks), a) => {
+                match a {
+                    Ok(a) => self.measure.take(&picks, &a.result),
+                    Err(e) => self.measure.failed(&picks, e),
+                }
+                self.model.generation += 1;
+            }
+            (Pending::Mass(of), a) => {
+                let Some(m) = self.mass.as_mut().filter(|m| m.of == of) else {
+                    return;
+                };
+                match a {
+                    Ok(a) => m.take(&a.result),
+                    Err(e) => m.failed(e),
+                }
+                self.model.generation += 1;
+            }
+            (Pending::Clearance(part), a) => {
+                let Some(c) = self.clearance.as_mut().filter(|c| c.part == part) else {
+                    return;
+                };
+                match a {
+                    Ok(a) => c.take(&a.result),
+                    Err(e) => c.failed(e),
+                }
+                self.model.generation += 1;
+            }
             (Pending::Interference(part), a) => {
                 let Some(i) = self.interference.as_mut().filter(|i| i.part == part) else {
                     return;
@@ -1915,6 +2021,24 @@ impl Workspace {
             .is_some_and(|i| report["part"] == i.part.as_str())
         {
             self.check_interference();
+        }
+        // So are clearances, a weight and the Measure tool's picks that
+        // read the part.
+        let changed = report["part"].as_str().unwrap_or_default();
+        let reads = |r: &str| r == changed || r.starts_with(&format!("{changed}/"));
+        if self.clearance.as_ref().is_some_and(|c| c.part == changed) {
+            self.check_clearance();
+        }
+        if let Some(of) = self
+            .mass
+            .as_ref()
+            .map(|m| m.of.clone())
+            .filter(|of| reads(of))
+        {
+            self.weigh(&of);
+        }
+        if self.measure.picks.iter().any(|p| reads(p)) {
+            self.measure_again();
         }
         // A form nobody is typing in follows the files.
         if let Some(f) = &self.form

@@ -15,6 +15,7 @@ pub mod intersect;
 pub mod interval;
 pub(crate) mod layout;
 pub mod math;
+pub mod measure;
 pub mod mesh;
 pub mod name;
 pub mod pcurve;
@@ -26,8 +27,8 @@ pub mod tol;
 pub mod topo;
 
 pub use error::{
-    BlendError, BooleanError, Error, HealError, LoftError, NurbsError, ProfileError, SweepError,
-    TopologyError,
+    BlendError, BooleanError, Error, HealError, LoftError, MeasureError, NurbsError, ProfileError,
+    SweepError, TopologyError,
 };
 
 /// This kernel's version, for ryucad's `version` report and cache keys.

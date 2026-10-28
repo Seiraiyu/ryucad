@@ -74,7 +74,7 @@ struct Piece<'m> {
 
 /// The key of a pair: both hashes and the bits of `rel`, the second
 /// body's pose in the first's frame.
-fn key(a: &Built, b: &Built, rel: &Rigid) -> String {
+pub(crate) fn key(a: &Built, b: &Built, rel: &Rigid) -> String {
     let mut h = blake3::Hasher::new();
     h.update(format!("{} {}\n", a.hash, b.hash).as_bytes());
     for row in rel.rotation_matrix() {
@@ -90,7 +90,7 @@ fn key(a: &Built, b: &Built, rel: &Rigid) -> String {
 }
 
 /// The box round `body`'s faces moved by `pose`, `None` for an empty one.
-fn world_box(body: &Body, pose: &Rigid) -> Option<Box3> {
+pub(crate) fn world_box(body: &Body, pose: &Rigid) -> Option<Box3> {
     body.faces()
         .map(|f| ryukei::intersect::face_box(body, f))
         .reduce(|a, b| a.union(&b))
@@ -193,7 +193,7 @@ pub fn verdict(a: &Body, b: &Body, rel: Rigid) -> Verdict {
 
 /// Whether occurrence `o` lies under one of `only` (instance paths, as
 /// references write them); everything does when `only` is empty.
-fn under(o: &Occurrence, only: &[Vec<Id>]) -> bool {
+pub(crate) fn under(o: &Occurrence, only: &[Vec<Id>]) -> bool {
     only.is_empty() || only.iter().any(|p| o.path.starts_with(p))
 }
 
@@ -324,6 +324,25 @@ pub fn find(asm: &Id, model: &Model, only: &[Vec<Id>], cache: &mut Cache) -> Res
     }))
 }
 
+/// Instance paths under assembly `pid` (`s1/b2`, `pattern:2/bolt`), as
+/// `interference` and `clearance` take them.
+pub(crate) fn instance_paths(pid: &Id, instances: &[String]) -> Result<Vec<Vec<Id>>> {
+    instances
+        .iter()
+        .map(|i| {
+            let r = crate::entity::EntityRef::parse(&format!("{pid}/{i}"))?.in_assembly();
+            if !r.is_occurrence() {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("{i:?} isn't an instance path; use <instance>/… under {pid}"),
+                )
+                .with("instance", i));
+            }
+            Ok(r.path)
+        })
+        .collect()
+}
+
 /// `interference`: which solids of assembly `part`'s occurrences overlap,
 /// or with `instances` (paths under the assembly, as `s1/b2` or
 /// `pattern:2/bolt`), those of a pair with a side under one of them.
@@ -341,20 +360,7 @@ pub fn run(
         )
         .with("part", &pid));
     }
-    let only = instances
-        .iter()
-        .map(|i| {
-            let r = crate::entity::EntityRef::parse(&format!("{pid}/{i}"))?.in_assembly();
-            if !r.is_occurrence() {
-                return Err(Error::new(
-                    Code::InvalidParam,
-                    format!("{i:?} isn't an instance path; use <instance>/… under {pid}"),
-                )
-                .with("instance", i));
-            }
-            Ok(r.path)
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let only = instance_paths(&pid, instances)?;
     let model = session.model(&pid, &crate::doc::assembly::Rev::Working)?;
     let revision = session.project().part(&pid)?.revision.clone();
     let mut v = find(&pid, &model, &only, &mut session.interference)?;
