@@ -149,7 +149,7 @@ pub fn get(session: &mut Session, ask: &Ask) -> Result<Value> {
             "findings": bom::findings(&whole),
         });
         if ask.flat {
-            let rows = bom::flat(&whole);
+            let rows = bom::flat(&whole, &g.config);
             v["flat"] = rows.iter().map(|f| bom::flat_json(f, &g.states)).collect();
             if csv {
                 v["csv"] = json!(bom::csv_flat(&rows, &g.config));

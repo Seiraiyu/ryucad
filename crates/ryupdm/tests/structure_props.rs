@@ -70,7 +70,7 @@ fn read(s: &Structure, root: &str) -> BTreeMap<String, u64> {
     let row = tree(&mut r, &id(root), &Rev::Working, None).unwrap();
     assert!(ryupdm::bom::problems(&row).is_empty());
     let mut out = BTreeMap::new();
-    for f in flat(&row) {
+    for f in flat(&row, &Config::default()) {
         *out.entry(f.row.part.to_string()).or_default() += f.total;
     }
     out
