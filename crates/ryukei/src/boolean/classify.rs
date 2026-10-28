@@ -12,10 +12,11 @@
 //! needs no ray.
 
 use super::table::{Boundary, GeId, Member, Table};
-use super::{FaceRef, Fail};
+use super::{FaceRef, Fail, face_tolerance};
 use crate::geom::{Box3, Point2, Point3, Vector2};
 use crate::intersect::{Inclusion, Place, face_box, point_in_body, point_in_face};
 use crate::split::Piece;
+use crate::tol::Tolerance;
 use crate::topo::{Body, Sense};
 use rayon::prelude::*;
 use std::collections::BTreeMap;
@@ -43,10 +44,21 @@ pub(crate) fn classify(
         .iter()
         .map(|b| b.faces().map(|f| face_box(b, f)).reduce(|x, y| x.union(&y)))
         .collect();
+    // Faces with a coincident partner, each boxed once (grown by its
+    // boundary's tolerance), so a piece's point skips partners far off.
+    let mut reach: BTreeMap<FaceRef, Box3> = BTreeMap::new();
+    for c in &table.coincident {
+        for f in [c.a, c.b] {
+            reach.entry(f).or_insert_with(|| {
+                let b = &ops[f.op];
+                face_box(b, f.face).grow(2.0 * face_tolerance(b, f.face))
+            });
+        }
+    }
     // Points inside pieces, and pieces lying on other operands' faces.
     let on: Vec<BTreeMap<usize, Class>> = pieces
         .par_iter()
-        .map(|p| coincident(ops, table, p))
+        .map(|p| coincident(ops, table, &reach, p))
         // The first failure in order, not the first a thread found.
         .collect::<Vec<_>>()
         .into_iter()
@@ -142,7 +154,17 @@ fn groups(ops: &[Body], table: &Table, pieces: &[Piece]) -> Vec<usize> {
 
 /// The classes of a piece lying in faces of other operands on the same
 /// surface.
-fn coincident(ops: &[Body], table: &Table, p: &Piece) -> Result<BTreeMap<usize, Class>, Fail> {
+///
+/// A partner whose box (grown by twice its boundary's tolerance, in
+/// `reach`) doesn't hold the piece's point is outside it without a ray:
+/// the point is then further than any tolerance from its boundary, so
+/// [`point_in_face`] could only say `Outside`.
+fn coincident(
+    ops: &[Body],
+    table: &Table,
+    reach: &BTreeMap<FaceRef, Box3>,
+    p: &Piece,
+) -> Result<BTreeMap<usize, Class>, Fail> {
     let mut out = BTreeMap::new();
     let partners: Vec<(FaceRef, bool)> = table
         .coincident
@@ -162,6 +184,12 @@ fn coincident(ops: &[Body], table: &Table, p: &Piece) -> Result<BTreeMap<usize, 
     }
     let (q, _) = inner_point(ops, table, p, 0).ok_or(Fail::Uncertain(p.face, p.face))?;
     for (g, same) in partners {
+        if reach
+            .get(&g)
+            .is_some_and(|b| !b.contains_with_tol(q, Tolerance::RESOLUTION))
+        {
+            continue;
+        }
         let gb = &ops[g.op];
         let surface = &gb.surfaces[gb.faces[g.face].surface];
         let (u, v) = surface.project(q).param;

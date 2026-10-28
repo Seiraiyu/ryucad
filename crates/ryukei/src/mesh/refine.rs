@@ -252,7 +252,10 @@ fn refine_pass(
         let len = |i: usize| scaled[next(i)].distance(scaled[prev(i)]);
         let i = chord
             .unwrap_or_else(|| (0..3).fold(0, |best, i| if len(i) > len(best) { i } else { best }));
-        if len(i) < floor && xyz[next(i)].distance(xyz[prev(i)]) < floor {
+        // A shared chord is split once whatever its length: its midpoint
+        // is free, so neither half is a chord again. Two faces meeting
+        // across a neck thinner than the floor draw such chords too.
+        if chord.is_none() && len(i) < floor && xyz[next(i)].distance(xyz[prev(i)]) < floor {
             stop = Some(Stop::Stalled);
             continue;
         }
