@@ -9,9 +9,12 @@
 pub use ryu_doc::{canonical, error, id, source, units};
 
 pub mod coord;
+pub mod doc;
+pub mod fault;
 pub mod name;
 pub mod notify;
 pub mod proto;
+pub mod symbol;
 
 /// ryueda as a product of `ryu-session`: its daemons, clients and live
 /// sessions are that crate's, named for ryueda by this marker.

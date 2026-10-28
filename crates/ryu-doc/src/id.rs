@@ -3,7 +3,7 @@
 //! it must be portable and never change.
 
 use crate::error::{Code, Error, Result};
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
 /// Names Windows reserves for devices, in any case and with any extension.
@@ -93,6 +93,15 @@ impl AsRef<str> for Id {
 impl Serialize for Id {
     fn serialize<S: Serializer>(&self, s: S) -> core::result::Result<S::Ok, S::Error> {
         s.serialize_str(&self.0)
+    }
+}
+
+/// Reads an ID as [`Id::parse`] checks it: a file whose keys or values
+/// name objects by ID refuses one that breaks the rules.
+impl<'de> Deserialize<'de> for Id {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> core::result::Result<Id, D::Error> {
+        let s = String::deserialize(d)?;
+        Id::parse(&s, "object").map_err(|e| serde::de::Error::custom(e.message))
     }
 }
 
@@ -200,6 +209,21 @@ fn invalid_step(at: &str, msg: &str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ids_deserialize_only_when_valid() {
+        let id: Id = serde_json::from_value(serde_json::json!("g12")).unwrap();
+        assert_eq!(id.as_str(), "g12");
+        for bad in ["G1", "", "con", "a/b"] {
+            assert!(
+                serde_json::from_value::<Id>(serde_json::json!(bad)).is_err(),
+                "{bad}"
+            );
+        }
+        let m: std::collections::BTreeMap<Id, u8> =
+            serde_json::from_value(serde_json::json!({"a": 1})).unwrap();
+        assert_eq!(m.keys().next().unwrap().as_str(), "a");
+    }
 
     #[test]
     fn project_ids_are_32_lowercase_hex() {
