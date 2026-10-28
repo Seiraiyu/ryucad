@@ -2,13 +2,18 @@
 //! instances, each a record of typed parameters.
 //!
 //! Nothing here knows any schema: an instance is a name and its values, and
-//! references are instance numbers, resolved by whoever reads them.
+//! references are instance numbers, resolved by whoever reads them. It
+//! knows no kernel either, so a product that only checks a STEP file
+//! parses (ryueda's 3D models) needs nothing else. ryustep re-exports it
+//! as `ryustep::part21`.
 
+mod error;
 mod file;
 mod lex;
 mod text;
 mod write;
 
+pub use error::{StepError, WriteError};
 pub use file::{File, Header, Instance, Record, parse};
 pub use write::write;
 

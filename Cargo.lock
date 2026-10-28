@@ -4237,6 +4237,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-part21"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "rayon",
+]
+
+[[package]]
 name = "ryu-session"
 version = "0.0.0"
 dependencies = [
@@ -4398,6 +4406,7 @@ version = "0.0.0"
 dependencies = [
  "proptest",
  "rayon",
+ "ryu-part21",
  "ryukei",
  "ryukei-testkit",
 ]
