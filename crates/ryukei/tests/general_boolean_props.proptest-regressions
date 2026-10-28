@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 23356cf3c51e66a03244dd3000ac9c2f9b8aa5fd9206953fe71a23925fa6c2f5 # a spline body against kind 6: CannotCheck when whole-box contacts were kept to domain edges (PR #149 review)
