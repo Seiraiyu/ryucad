@@ -12,6 +12,7 @@ pub mod coord;
 pub mod doc;
 pub mod fault;
 pub mod footprint;
+pub mod libcomp;
 pub mod name;
 pub mod notify;
 pub mod proto;
