@@ -56,3 +56,20 @@
   (`doctor_again`), so no debounce was added; doctor still runs on the
   request path, now at the cost of the checks alone. Not timed on the
   issue's gearbox (not in the repo).
+- Lap 7: #122. Two mesher stalls, both reproducers in the issue now pinned
+  by value (`boolean_props::necks_and_poles_mesh`, under a second in
+  release; the macOS case took ~15 min before). (1) Cone and cylinder:
+  the intersect is a lens whose two faces both draw a chord across a
+  neck ~0.6 mm wide; the forced split of a shared chord hit the
+  refinement floor (`waive / 16`) and stalled. A shared chord is now
+  split whatever its length (its midpoint is free, so the split is
+  finite). (2) Torus and sphere: the sphere face is bounded by one closed
+  edge whose one vertex lies near the pole, and the face's metric was the
+  speed at that vertex (`a = 2^-15`), so near the equator 0.2 m needles
+  looked tiny in the scaled plane and never met `duu / a²`. Where the
+  vertex box is flat in a direction, `FaceGeom::new` now takes points at
+  1/4, 1/2 and 3/4 along each edge into it. Golden mesh hashes moved
+  (`booleans`, `lofts`, `mirror`, `sweeps` in ryukei's determinism
+  file); ryucad and ryustep goldens unchanged. The third reproducer in
+  the issue (plan 8.C's spline revolution and torus, an hour per run) is
+  on 8.C's branch, not this one, and wasn't tried.
