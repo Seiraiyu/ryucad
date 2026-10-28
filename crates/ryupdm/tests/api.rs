@@ -376,3 +376,103 @@ fn boms_and_where_used_read_released_assemblies_at_their_commits() {
     assert_eq!(v["working"], json!([]));
     assert_eq!(v["released"].as_array().unwrap().len(), 1);
 }
+
+/// Design 180's bar: where-used over 100 official releases of an
+/// assembly answers in under a second cold, and in under 10 ms with the
+/// parts at their commits already read. Release builds only.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "slow in a debug build")]
+fn where_used_over_a_hundred_released_assemblies_is_quick() {
+    use ryucad_doc::doc::assembly::Rev;
+    use ryupdm::structure::{Cache, Reader, Repo};
+    use ryupdm::where_used::{Query, where_used};
+    let work = tempfile::tempdir().unwrap();
+    let w = work.path();
+    git(w, &["init", "-q", "-b", "main"]);
+    put(
+        w,
+        "cad/ryucad.json",
+        &json!({"default_unit": "mm", "format": 2, "kind": "ryucad.project",
+                "project": PROJECT}),
+    );
+    put(
+        w,
+        "cad/parts/pin/part.json",
+        &json!({"features": [], "format": 1, "kind": "ryucad.part"}),
+    );
+    put(
+        w,
+        "cad/parts/pin/properties.json",
+        &json!({"format": 1, "kind": "ryupdm.properties", "number": "100"}),
+    );
+    commit(w, "pin");
+    released(w, "pin", "A", None);
+    let scheme = ryupdm::config::Scheme::Letters;
+    let mut last: Option<String> = None;
+    for n in 0..100u64 {
+        let ids: Vec<String> = (0..=n % 7).map(|i| format!("p{i}")).collect();
+        put(
+            w,
+            "cad/parts/asm/part.json",
+            &json!({"features": ids, "format": 2, "kind": "ryucad.part",
+                    "part_kind": "assembly"}),
+        );
+        for id in &ids {
+            put(
+                w,
+                &format!("cad/parts/asm/features/{id}.json"),
+                &json!({"format": 4, "kind": "ryucad.feature", "type": "instance",
+                        "part": "pin", "rev": {"label": "A"},
+                        "pose": {"origin_m": [0, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}}),
+            );
+        }
+        put(
+            w,
+            "cad/parts/asm/properties.json",
+            &json!({"format": 1, "kind": "ryupdm.properties", "number": "900"}),
+        );
+        commit(w, &format!("asm {n}"));
+        let label = ryupdm::label::label(scheme, n + 1);
+        released(w, "asm", &label, last.as_deref());
+        last = Some(label);
+    }
+    let repo = gix::open(w).unwrap();
+    let src = history::files(&repo, "main", "cad/").unwrap();
+    let project = Project::load_from(Path::new("/tip"), &src).unwrap();
+    let config = Config::read(&src).unwrap();
+    let releases = Releases::read(&repo, "cad/", &config).unwrap();
+    let mut cache = Cache::new();
+    let q = Query {
+        part: Id::parse("pin", "part").unwrap(),
+        rev: Some(Rev::Label("A".into())),
+        direct: false,
+    };
+    let ask = |cache: &mut Cache| {
+        let mut reader = Reader::new(
+            &src,
+            &project,
+            Some(Repo {
+                git: &repo,
+                prefix: "cad/",
+            }),
+            Some(&releases),
+            cache,
+        );
+        let t = std::time::Instant::now();
+        let v = where_used(&mut reader, &q, &config);
+        (t.elapsed().as_secs_f64() * 1e3, v)
+    };
+    let (cold, v) = ask(&mut cache);
+    let (warm, _) = ask(&mut cache);
+    assert_eq!(v["released"].as_array().unwrap().len(), 100);
+    assert_eq!(v["released"][99]["state"], "released");
+    assert_eq!(v["released"][0]["state"], "superseded");
+    println!("where-used over 100 released assemblies: cold {cold:.1} ms, read {warm:.1} ms");
+    let slack = if std::env::var_os("RYUCAD_BARS").is_some() {
+        1.0
+    } else {
+        10.0
+    };
+    assert!(cold < 1000.0 * slack, "{cold} ms");
+    assert!(warm < 10.0 * slack, "{warm} ms");
+}
