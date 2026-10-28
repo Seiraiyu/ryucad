@@ -2383,3 +2383,32 @@ fn the_bom_tab_chooses_a_line_and_goes_flat() {
     });
     shown(&mut h, "BOM line: bolt working");
 }
+
+#[test]
+fn an_item_number_is_set_in_the_bom_tab() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = framed_bolts();
+    let mut h = bom_tab(&p);
+    h.get_by_label("Item of bolt in frame").click();
+    shown(&mut h, "Set item");
+    h.get_by_label("Item of bolt in frame")
+        .set_text_value_accesskit("7");
+    h.step();
+    h.get_by_label("Set item").click();
+    frames(&mut h, |a| {
+        let t = &a.opened().ws.bom;
+        a.opened().ws.idle() && t.editing.is_none() && t.tree[0].item == Some(7)
+    });
+    let bom = p.ok(&["bom", "frame"]);
+    assert_eq!(bom["tree"]["children"][0]["item"], 7);
+    // The flat BOM's numbers aren't edited.
+    h.get_by_label("Flat").click();
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && !a.opened().ws.bom.flat_lines.is_empty()
+    });
+    h.step();
+    assert!(h.query_by_label("Item of bolt in frame").is_none());
+}

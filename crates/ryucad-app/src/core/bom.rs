@@ -4,6 +4,11 @@
 //! Each line knows the occurrences that make its count, so choosing it
 //! selects and frames them.
 //!
+//! A line's item number is its parent assembly's, edited in place and
+//! saved with `bom.renumber` against the assembly's revision, as an agent
+//! renumbers; a stale save conflicts, and the tab reads the BOM again and
+//! says what changed rather than overwriting it.
+//!
 //! What the tab knows lives here, apart from egui, so the panel that
 //! draws it (`ui::bom`) can move into a tile of its own unchanged.
 
@@ -37,6 +42,30 @@ pub struct Line {
     pub occurrences: Vec<String>,
 }
 
+/// An item number being typed: the assembly that gives it, the part it
+/// numbers, its number when the edit started, and the text typed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ItemEdit {
+    pub parent: String,
+    pub part: String,
+    pub was: Option<u64>,
+    pub text: String,
+}
+
+/// The largest item number (`files::MAX_ITEM`).
+pub const MAX_ITEM: u64 = 99_999;
+
+/// An item number as typed: a whole number from 1 to [`MAX_ITEM`].
+pub fn item_number(text: &str) -> Result<u64, String> {
+    match text.trim().parse::<u64>() {
+        Ok(n) if (1..=MAX_ITEM).contains(&n) => Ok(n),
+        _ => Err(format!(
+            "an item number is a whole number from 1 to {MAX_ITEM}, not {:?}",
+            text.trim()
+        )),
+    }
+}
+
 /// What the tab knows.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BomTab {
@@ -59,6 +88,16 @@ pub struct BomTab {
     /// The line chosen, by its occurrences: they are this window's
     /// selection.
     pub chosen: Option<Vec<String>>,
+    /// The item number being typed, and whether its `bom.renumber` is on
+    /// its way.
+    pub editing: Option<ItemEdit>,
+    pub saving: bool,
+    /// A renumbering that conflicted, until the BOM is read again; then
+    /// what changed, for people.
+    pub conflict: Option<ItemEdit>,
+    pub changed: Option<String>,
+    /// Why the last renumbering was refused, other than a conflict.
+    pub edit_error: Option<String>,
 }
 
 /// A JSON value as a cell shows it: text as written, nothing for null.
@@ -153,6 +192,52 @@ impl BomTab {
         if let Some(f) = v.get("flat") {
             self.flat_lines = self.flat(f);
         }
+        if let Some(c) = self.conflict.take() {
+            let now = self
+                .tree
+                .iter()
+                .find(|l| l.part == c.part && l.parent.as_ref().is_some_and(|p| p.0 == c.parent))
+                .and_then(|l| l.item);
+            let now = now.map_or("none".to_owned(), |n| n.to_string());
+            self.changed = Some(format!(
+                "Someone changed {}'s item numbers while you edited: {} is now {now} (you typed {})",
+                c.parent,
+                c.part,
+                c.text.trim()
+            ));
+        }
+    }
+
+    /// The assembly whose item number a line's is, when it can be edited:
+    /// an indented line whose parent is read at `working` (a release's
+    /// numbers are what it released).
+    pub fn editable(line: &Line) -> Option<&str> {
+        match &line.parent {
+            Some((p, rev)) if rev == "working" => Some(p),
+            _ => None,
+        }
+    }
+
+    /// Starts typing a line's item number.
+    pub fn edit(&mut self, line: &Line) {
+        let Some(parent) = BomTab::editable(line) else {
+            return;
+        };
+        self.edit_error = None;
+        self.changed = None;
+        self.editing = Some(ItemEdit {
+            parent: parent.to_owned(),
+            part: line.part.clone(),
+            was: line.item,
+            text: line.item.map(|n| n.to_string()).unwrap_or_default(),
+        });
+    }
+
+    /// Whether `line`'s item number is the one being typed.
+    pub fn is_editing(&self, line: &Line) -> bool {
+        self.editing.as_ref().is_some_and(|e| {
+            e.part == line.part && BomTab::editable(line) == Some(e.parent.as_str())
+        })
     }
 
     /// A reading failed: several roots to choose from, or why.
@@ -393,6 +478,44 @@ pub(crate) mod tests {
         assert_eq!(shown[1].parent, None);
         // The tree stays, for the occurrences and for switching back.
         assert_eq!(t.tree.len(), 4);
+    }
+
+    #[test]
+    fn item_numbers_are_edited_where_the_parent_is_working() {
+        let mut t = tab();
+        // p's parent is the root, read at working; tube's is the kit.
+        assert_eq!(BomTab::editable(&t.tree[0]), Some("asm"));
+        assert_eq!(BomTab::editable(&t.tree[2]), Some("kit"));
+        let mut at_label = t.tree[2].clone();
+        at_label.parent = Some(("kit".into(), "B".into()));
+        assert_eq!(BomTab::editable(&at_label), None);
+        let p = t.tree[0].clone();
+        t.edit(&p);
+        assert!(t.is_editing(&p) && !t.is_editing(&t.tree[1]));
+        assert_eq!(t.editing.as_ref().unwrap().text, "1");
+        assert_eq!(item_number(" 7 "), Ok(7));
+        assert!(item_number("0").is_err());
+        assert!(item_number("100000").is_err());
+        assert!(item_number("2.5").is_err());
+    }
+
+    #[test]
+    fn a_conflict_says_what_changed_once_read_again() {
+        let mut t = tab();
+        t.conflict = Some(ItemEdit {
+            parent: "asm".into(),
+            part: "p".into(),
+            was: Some(1),
+            text: "5".into(),
+        });
+        let mut v = answer();
+        v["tree"]["children"][0]["item"] = json!(3);
+        t.take(&v);
+        assert_eq!(
+            t.changed.as_deref(),
+            Some("Someone changed asm's item numbers while you edited: p is now 3 (you typed 5)")
+        );
+        assert!(t.conflict.is_none());
     }
 
     #[test]
