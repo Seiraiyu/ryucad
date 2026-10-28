@@ -376,7 +376,10 @@ impl<'a> Meshed<'a> {
         h: &impl Fn(Point2) -> Moments,
     ) -> Option<(Moments, Moments)> {
         let b = self.body;
-        let (ci, cj) = (self.coarse.corners[i as usize], self.coarse.corners[j as usize]);
+        let (ci, cj) = (
+            self.coarse.corners[i as usize],
+            self.coarse.corners[j as usize],
+        );
         let candidates = self.sides.get(&(ci.position, cj.position))?;
         let (pc, ta, tb) = candidates.iter().find_map(|&(e, ta, tb)| {
             b.edge_fins(e)
