@@ -1240,6 +1240,12 @@ pub(crate) mod tests {
         )
         .unwrap();
         list.features.push(id(inst));
+        // Numbered as a write through the protocol would number it (a
+        // part, which places nothing, numbers nothing).
+        if list.kind == PartKind::Assembly && !list.items.contains_key(&id(part)) {
+            let n = ryupdm::items::next(&list.items);
+            list.items.insert(id(part), n);
+        }
         write_json(&p, &list.to_json()).unwrap();
     }
 
@@ -1462,6 +1468,7 @@ pub(crate) mod tests {
             &PartFile {
                 kind: PartKind::Assembly,
                 features: vec![id("cube")],
+                ..PartFile::default()
             }
             .to_json(),
         )
@@ -1846,6 +1853,55 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_assembly_releases_only_with_its_item_numbers_whole() {
+        let (dir, mut s) = released();
+        let r = dir.path();
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "pair", "kind": "assembly"}),
+        )
+        .unwrap();
+        place_in(r, "pair", "one", "bolt", json!({"label": "A"}), [0.0; 3]);
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "pair", "properties": {"number": "200"}}),
+        )
+        .unwrap();
+        let path = part_path(r, &id("pair"));
+        let numbered = |items: Value| {
+            let mut v: Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            v["items"] = items;
+            write_json(&path, &v).unwrap();
+        };
+        let problems = |s: &mut Session| -> Vec<Value> {
+            s.refresh().unwrap();
+            let v = call(
+                s,
+                "release.propose",
+                json!({"part": "pair", "dry_run": true}),
+            )
+            .unwrap();
+            v["problems"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p["code"].clone())
+                .collect()
+        };
+        // Its bolt has no number; then a number for a part it doesn't
+        // place, which a release doesn't mind.
+        numbered(json!({}));
+        assert_eq!(problems(&mut s), [json!("bom_item_missing")]);
+        numbered(json!({"bolt": 1, "nut": 1}));
+        assert_eq!(problems(&mut s), [json!("bom_item_duplicate")]);
+        numbered(json!({"bolt": 1, "nut": 2}));
+        assert_eq!(problems(&mut s), Vec::<Value>::new());
+    }
+
+    #[test]
     fn a_rebuild_reports_an_assemblys_instances_and_occurrences() {
         let (dir, mut s) = released();
         let r = dir.path();
@@ -2071,6 +2127,113 @@ pub(crate) mod tests {
             (Code::HasDependents, json!(["frame/p1"]))
         );
         call(&mut s, "part.delete", json!({"part": "plate"})).unwrap();
+    }
+
+    #[test]
+    fn writes_give_and_take_item_numbers() {
+        use crate::live::Live;
+        use crate::server::tests::call_live;
+        let (_dir, mut s) = project();
+        call(&mut s, "part.create", json!({"part": "nut"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "nut", "type": "box", "id": "b",
+                   "params": {"x": 5, "y": 5, "z": 3}}),
+        )
+        .unwrap();
+        let mut live = Live::new();
+        let items = |s: &Session| {
+            let f = s
+                .project()
+                .part(&id("frame"))
+                .unwrap()
+                .file
+                .clone()
+                .unwrap();
+            json!(f.items)
+        };
+        let mut w = |s: &mut Session, method: &str, params: Value| {
+            call_live(s, &mut live, None, method, params).unwrap();
+        };
+        let add = |of: &str, inst: &str| json!({"part": "frame", "type": "instance", "id": inst, "of": of});
+        w(&mut s, "feature.add", add("plate", "base"));
+        w(&mut s, "feature.add", add("bolt", "b1"));
+        w(&mut s, "feature.add", add("bolt", "b2"));
+        assert_eq!(items(&s), json!({"plate": 1, "bolt": 2}));
+        // A pattern of bolts places bolts already numbered.
+        w(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "instance_pattern", "id": "row",
+                   "instances": ["b1"], "direction": "x", "spacing": "10 mm", "count": 3}),
+        );
+        w(
+            &mut s,
+            "feature.move",
+            json!({"part": "frame", "id": "base", "after": "b2"}),
+        );
+        assert_eq!(items(&s), json!({"plate": 1, "bolt": 2}));
+        // The bolt keeps its number while any instance places it.
+        w(
+            &mut s,
+            "feature.delete",
+            json!({"part": "frame", "id": "row"}),
+        );
+        w(
+            &mut s,
+            "feature.delete",
+            json!({"part": "frame", "id": "b1"}),
+        );
+        assert_eq!(items(&s), json!({"plate": 1, "bolt": 2}));
+        // An instance turned into a nut: the nut takes 3, never the bolt's 2.
+        w(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "b2", "of": "nut"}),
+        );
+        assert_eq!(items(&s), json!({"plate": 1, "nut": 3}));
+        // Each write's numbers are undone with it.
+        w(&mut s, "undo", json!({}));
+        assert_eq!(items(&s), json!({"plate": 1, "bolt": 2}));
+        let text = std::fs::read_to_string(part_path(s.root(), &id("frame"))).unwrap();
+        assert!(text.contains("\"format\": 3"), "{text}");
+    }
+
+    #[test]
+    fn a_write_keeps_numbers_an_unreadable_instance_may_use() {
+        let (_dir, mut s) = project();
+        for (of, inst) in [("plate", "base"), ("bolt", "b1"), ("bolt", "b2")] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "frame", "type": "instance", "id": inst, "of": of}),
+            )
+            .unwrap();
+        }
+        let items = |s: &Session| {
+            json!(
+                s.project()
+                    .part(&id("frame"))
+                    .unwrap()
+                    .file
+                    .clone()
+                    .unwrap()
+                    .items
+            )
+        };
+        assert_eq!(items(&s), json!({"plate": 1, "bolt": 2}));
+        // b2 no longer reads, so it may still place the bolt: deleting b1
+        // leaves the bolt its number.
+        std::fs::write(feature_path(s.root(), &id("frame"), &id("b2")), "{").unwrap();
+        s.reload().unwrap();
+        call(
+            &mut s,
+            "feature.delete",
+            json!({"part": "frame", "id": "b1"}),
+        )
+        .unwrap();
+        assert_eq!(items(&s), json!({"plate": 1, "bolt": 2}));
     }
 
     #[test]
