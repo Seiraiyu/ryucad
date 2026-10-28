@@ -6,3 +6,4 @@
 //! crate depends on no kernel and no product.
 
 pub mod geom;
+pub mod symbol;
