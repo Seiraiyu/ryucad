@@ -1,8 +1,10 @@
 name: Release
 
 # A vX.Y.Z tag builds, tests, and publishes a release, then tests the
-# installers against it. Run by hand (workflow_dispatch) for a dry run that
-# builds and tests every target but publishes nothing.
+# installers against it. Nothing is published unless the full tests
+# (full.yml: every test on every platform, which pull requests don't run)
+# pass on the tagged commit. Run by hand (workflow_dispatch) for a dry run
+# that builds and tests every target but publishes nothing.
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
@@ -35,6 +37,10 @@ jobs:
             version=0.0.0-dev
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  full:
+    name: full tests
+    uses: ./.github/workflows/full.yml
 
   build:
     name: ${{ matrix.target }}
@@ -129,7 +135,7 @@ jobs:
   publish:
     name: publish
     if: github.ref_type == 'tag'
-    needs: [version, build]
+    needs: [version, build, full]
     runs-on: ubuntu-latest
     permissions:
       contents: write
