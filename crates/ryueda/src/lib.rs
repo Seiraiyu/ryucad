@@ -8,7 +8,10 @@
 
 pub use ryu_doc::{canonical, error, id, source, units};
 
+pub mod activity;
+pub mod client;
 pub mod coord;
+pub mod daemon;
 pub mod doc;
 pub mod fault;
 pub mod footprint;
@@ -18,6 +21,8 @@ pub mod name;
 pub mod notify;
 pub mod project;
 pub mod proto;
+pub mod server;
+pub mod session;
 pub mod symbol;
 
 /// ryueda as a product of `ryu-session`: its daemons, clients and live

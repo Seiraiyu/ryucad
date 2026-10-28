@@ -1,7 +1,12 @@
-//! The requests the CLI and the daemon share, and what `version` says.
+//! The requests the CLI and the daemon share, and what `version` says:
+//! one definition, so they never diverge.
 
+use crate::error::{Code, Error, Result};
+use ryu_session::live::Kind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+pub use ryu_session::rpc::Answer;
 
 /// The protocol version. A CLI and a daemon talk only when theirs match.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -37,6 +42,111 @@ impl VersionInfo {
     }
 }
 
+/// Every request a session answers, by JSON-RPC method name.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "method", content = "params", deny_unknown_fields)]
+pub enum Request {
+    /// The project, its libraries and their revisions.
+    #[serde(rename = "project.info")]
+    ProjectInfo {},
+    /// Names a library project by alias, at a path relative to this one.
+    #[serde(rename = "lib.add")]
+    LibAdd {
+        alias: String,
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Every library with its revision, what it holds and its faults.
+    #[serde(rename = "lib.list")]
+    LibList {},
+    #[serde(rename = "activity.log")]
+    ActivityLog {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<u64>,
+    },
+    #[serde(rename = "undo")]
+    Undo {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<u64>,
+    },
+    #[serde(rename = "redo")]
+    Redo {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<u64>,
+    },
+    #[serde(rename = "session.hello")]
+    SessionHello {
+        kind: Kind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    #[serde(rename = "participant.list")]
+    ParticipantList {},
+    #[serde(rename = "subscribe")]
+    Subscribe {
+        #[serde(default)]
+        topics: Vec<String>,
+    },
+    #[serde(rename = "daemon.status")]
+    DaemonStatus {},
+    #[serde(rename = "daemon.shutdown")]
+    DaemonShutdown {},
+}
+
+impl Request {
+    fn to_value(&self) -> Value {
+        serde_json::to_value(self).expect("requests serialize")
+    }
+
+    /// Reads a request from its method and params.
+    pub fn from_rpc(method: &str, params: Option<Value>) -> Result<Request> {
+        let params = params.unwrap_or_else(|| json!({}));
+        serde_json::from_value(json!({"method": method, "params": params})).map_err(|e| {
+            let msg = e.to_string();
+            let code = if msg.starts_with("unknown variant") {
+                Code::Usage
+            } else {
+                Code::InvalidDocument
+            };
+            Error::new(code, format!("{method}: {msg}")).with("method", method)
+        })
+    }
+
+    pub fn method(&self) -> String {
+        self.to_value()["method"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    pub fn params(&self) -> Value {
+        self.to_value()["params"].take()
+    }
+
+    /// Whether the request writes the project's files.
+    pub fn mutates(&self) -> bool {
+        matches!(
+            self,
+            Request::LibAdd { .. } | Request::Undo { .. } | Request::Redo { .. }
+        )
+    }
+}
+
+impl ryu_session::client::Call for Request {
+    fn method(&self) -> String {
+        Request::method(self)
+    }
+
+    fn params(&self) -> Value {
+        Request::params(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,6 +160,32 @@ mod tests {
         assert!(me.same_build(&v));
         v["commit"] = json!("0123456789ab");
         assert!(!me.same_build(&v));
+    }
+
+    #[test]
+    fn requests_round_trip_through_rpc() {
+        let reqs = [
+            Request::ProjectInfo {},
+            Request::LibAdd {
+                alias: "passives".into(),
+                path: "../passives".into(),
+                expected_revision: Some("r".into()),
+            },
+            Request::Undo { entry: None },
+            Request::Subscribe {
+                topics: vec!["project".into()],
+            },
+        ];
+        for r in reqs {
+            assert_eq!(Request::from_rpc(&r.method(), Some(r.params())).unwrap(), r);
+        }
+        assert_eq!(Request::Undo { entry: None }.method(), "undo");
+        assert_eq!(
+            Request::from_rpc("nope", None).unwrap_err().code,
+            Code::Usage
+        );
+        let e = Request::from_rpc("lib.add", Some(json!({"alias": 1}))).unwrap_err();
+        assert_eq!(e.code, Code::InvalidDocument);
     }
 
     #[test]
