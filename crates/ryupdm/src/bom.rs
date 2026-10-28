@@ -522,6 +522,184 @@ pub fn csv_flat(rows: &[Flat], config: &crate::config::Config) -> String {
     out
 }
 
+/// One side of a comparison: a row with the count it is compared by.
+#[derive(Clone, Copy)]
+struct Side<'a> {
+    row: &'a Row,
+    count: u64,
+}
+
+/// Pairs rows by part: per part, equal revisions first, then the rest in
+/// revision order; the rest of each side is added or removed.
+fn pair<'a>(
+    from: Vec<Side<'a>>,
+    to: Vec<Side<'a>>,
+) -> (Vec<Side<'a>>, Vec<Side<'a>>, Vec<(Side<'a>, Side<'a>)>) {
+    let mut parts: Vec<&Id> = from.iter().chain(&to).map(|s| &s.row.part).collect();
+    parts.sort();
+    parts.dedup();
+    let (mut added, mut removed, mut both) = (Vec::new(), Vec::new(), Vec::new());
+    for part in parts {
+        let mut a: Vec<Side> = from
+            .iter()
+            .filter(|s| &s.row.part == part)
+            .copied()
+            .collect();
+        let mut b: Vec<Side> = to.iter().filter(|s| &s.row.part == part).copied().collect();
+        a.sort_by(|x, y| x.row.rev.cmp(&y.row.rev));
+        b.sort_by(|x, y| x.row.rev.cmp(&y.row.rev));
+        let mut rest_a = Vec::new();
+        for x in a {
+            match b.iter().position(|y| y.row.rev == x.row.rev) {
+                Some(j) => both.push((x, b.remove(j))),
+                None => rest_a.push(x),
+            }
+        }
+        let n = rest_a.len().min(b.len());
+        let tail_b = b.split_off(n);
+        let tail_a = rest_a.split_off(n);
+        both.extend(rest_a.into_iter().zip(b));
+        removed.extend(tail_a);
+        added.extend(tail_b);
+    }
+    (added, removed, both)
+}
+
+fn properties(row: &Row) -> BTreeMap<String, Value> {
+    row.node
+        .as_ref()
+        .ok()
+        .and_then(|n| n.properties.as_ref().ok())
+        .map(|p| p.values.clone())
+        .unwrap_or_default()
+}
+
+/// What changed between two sides of one part, `None` when nothing did.
+fn change(a: Side, b: Side, config: &crate::config::Config) -> Option<Value> {
+    let mut v = json!({"part": b.row.part});
+    let mut changed = false;
+    if a.row.rev != b.row.rev {
+        v["rev"] = json!({"from": a.row.rev.to_json(), "to": b.row.rev.to_json()});
+        changed = true;
+    } else {
+        v["rev"] = b.row.rev.to_json();
+    }
+    let (qa, qb) = (quantity(a.row, a.count), quantity(b.row, b.count));
+    if qa != qb {
+        v["quantity"] = json!({"from": qa, "to": qb});
+        changed = true;
+    }
+    let (pa, pb) = (properties(a.row), properties(b.row));
+    let mut props = serde_json::Map::new();
+    for k in pa.keys().chain(pb.keys()) {
+        let (x, y) = (pa.get(k), pb.get(k));
+        if x != y && !props.contains_key(k) {
+            let revising = config.decl(k).is_none_or(|d| d.revising);
+            props.insert(k.clone(), json!({"from": x, "to": y, "revising": revising}));
+        }
+    }
+    if !props.is_empty() {
+        v["properties"] = Value::Object(props);
+        changed = true;
+    }
+    changed.then_some(v)
+}
+
+/// The changes between two lists of rows: `{added, removed, changed}`.
+fn compare(from: Vec<Side>, to: Vec<Side>, config: &crate::config::Config) -> Value {
+    let (added, removed, both) = pair(from, to);
+    let whole = |s: &Side| {
+        let mut v = about(s.row);
+        v["quantity"] = quantity(s.row, s.count);
+        v
+    };
+    json!({
+        "added": added.iter().map(whole).collect::<Vec<_>>(),
+        "removed": removed.iter().map(whole).collect::<Vec<_>>(),
+        "changed": both.iter().filter_map(|(a, b)| change(*a, *b, config)).collect::<Vec<_>>(),
+    })
+}
+
+fn sides(f: &[Flat]) -> Vec<Side<'_>> {
+    f.iter()
+        .map(|f| Side {
+            row: &f.row,
+            count: f.total,
+        })
+        .collect()
+}
+
+fn kids(r: &Row) -> Vec<Side<'_>> {
+    r.children
+        .iter()
+        .map(|c| Side {
+            row: c,
+            count: c.count,
+        })
+        .collect()
+}
+
+/// Every assembly under `root` (itself included), by part and revision,
+/// as first met.
+fn assemblies(root: &Row) -> Vec<&Row> {
+    let mut out: Vec<&Row> = Vec::new();
+    fn walk<'a>(row: &'a Row, out: &mut Vec<&'a Row>) {
+        if row.is_assembly() && !out.iter().any(|r| r.part == row.part && r.rev == row.rev) {
+            out.push(row);
+        }
+        for c in &row.children {
+            walk(c, out);
+        }
+    }
+    walk(root, &mut out);
+    out
+}
+
+/// What changed from the BOM `from` to the BOM `to` (either may be
+/// missing: then everything is added or removed), both read with no
+/// depth limit, properties judged revising by `config`: the flat BOM's
+/// rows (`flat`), each assembly both have whose children changed
+/// (`tree`), the assemblies only one has (`assemblies`), and counts
+/// (`summary`).
+pub fn diff(from: Option<&Row>, to: Option<&Row>, config: &crate::config::Config) -> Value {
+    let flats = |r: Option<&Row>| r.map(flat).unwrap_or_default();
+    let (fa, fb) = (flats(from), flats(to));
+    let flat = compare(sides(&fa), sides(&fb), config);
+    let (aa, ab) = (
+        from.map(assemblies).unwrap_or_default(),
+        to.map(assemblies).unwrap_or_default(),
+    );
+    let key = |r: &Row| json!({"part": r.part, "rev": r.rev.to_json()});
+    let mut tree = Vec::new();
+    for b in &ab {
+        let Some(a) = aa.iter().find(|a| a.part == b.part && a.rev == b.rev) else {
+            continue;
+        };
+        let c = compare(kids(a), kids(b), config);
+        let empty = ["added", "removed", "changed"]
+            .iter()
+            .all(|k| c[k].as_array().is_some_and(Vec::is_empty));
+        if !empty {
+            let mut v = key(b);
+            v["children"] = c;
+            tree.push(v);
+        }
+    }
+    let only = |x: &[&Row], y: &[&Row]| -> Vec<Value> {
+        x.iter()
+            .filter(|r| !y.iter().any(|o| o.part == r.part && o.rev == r.rev))
+            .map(|r| key(r))
+            .collect()
+    };
+    let n = |k: &str| flat[k].as_array().map_or(0, Vec::len);
+    json!({
+        "summary": {"added": n("added"), "removed": n("removed"), "changed": n("changed")},
+        "flat": flat,
+        "tree": tree,
+        "assemblies": {"added": only(&ab, &aa), "removed": only(&aa, &ab)},
+    })
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -732,5 +910,71 @@ pub(crate) mod tests {
             Some(",,100,Bolt,bolt,working,4,each,buy,,,")
         );
         assert!(csv.ends_with('\n') && !csv.contains('\r'));
+    }
+
+    #[test]
+    fn a_diff_lists_rows_added_removed_and_changed() {
+        let config = crate::config::Config::default();
+        let a = frame();
+        let before = read(&a, "frame", None);
+        assert_eq!(
+            diff(Some(&before), Some(&before), &config)["summary"],
+            json!({"added": 0, "removed": 0, "changed": 0})
+        );
+        let mut b = a.clone();
+        // Two more bolts in sub, the plate renamed, the tube gone.
+        let mut put = |p: &str, v: Value| {
+            b.insert(p.to_owned(), canonical::to_string(&v).into_bytes());
+        };
+        let mut b3 = instance("bolt", json!("working"));
+        b3["format"] = json!(4);
+        b3["kind"] = json!("ryucad.feature");
+        put("parts/sub/features/b3.json", b3);
+        put(
+            "parts/sub/part.json",
+            json!({"features": ["b1", "b2", "b3"], "format": 2, "kind": "ryucad.part",
+                   "part_kind": "assembly"}),
+        );
+        put(
+            "parts/plate/properties.json",
+            json!({"format": 1, "kind": "ryupdm.properties", "number": "200",
+                   "name": "Base plate", "material": "6061-T6"}),
+        );
+        put(
+            "parts/frame/part.json",
+            json!({"features": ["base", "s", "row", "m"], "format": 2,
+                   "kind": "ryucad.part", "part_kind": "assembly"}),
+        );
+        let after = read(&b, "frame", None);
+        let d = diff(Some(&before), Some(&after), &config);
+        assert_eq!(
+            d["summary"],
+            json!({"added": 0, "removed": 1, "changed": 2})
+        );
+        assert_eq!(d["flat"]["removed"][0]["part"], "tube");
+        let changed = &d["flat"]["changed"];
+        assert_eq!(changed[0]["part"], "bolt");
+        assert_eq!(changed[0]["quantity"]["from"]["count"], 4);
+        assert_eq!(changed[0]["quantity"]["to"]["count"], 6);
+        assert_eq!(
+            changed[1]["properties"],
+            json!({"name": {"from": "Plate", "to": "Base plate", "revising": false}})
+        );
+        // Where it sits: frame lost its tubes, sub gained a bolt.
+        let tree: Vec<&Value> = d["tree"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| &t["part"])
+            .collect();
+        assert_eq!(tree, [&json!("frame"), &json!("sub")]);
+        assert_eq!(
+            d["tree"][1]["children"]["changed"][0]["quantity"]["to"]["count"],
+            3
+        );
+        // From nothing, everything is added.
+        let d = diff(None, Some(&after), &config);
+        assert_eq!(d["summary"]["added"], 3);
+        assert_eq!(d["assemblies"]["added"].as_array().unwrap().len(), 3);
     }
 }
