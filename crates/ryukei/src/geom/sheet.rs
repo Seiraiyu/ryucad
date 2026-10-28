@@ -13,7 +13,7 @@
 use super::bound2::{IVec3, trig_box};
 use super::jet::{self, JVec, Jet, Num};
 use super::{
-    Extrusion, NurbsSurface, Pipe, Point3, Revolution, Surface, SurfaceEval, Sweep, Vector3,
+    Extrusion, NurbsSurface, Offset, Pipe, Point3, Revolution, Surface, SurfaceEval, Sweep, Vector3,
 };
 use crate::interval::Interval;
 use crate::math;
@@ -30,6 +30,7 @@ pub(crate) enum Sheet<'a> {
     Extrusion(&'a Extrusion),
     Revolution(&'a Revolution),
     Sweep(&'a Sweep),
+    Offset(&'a Offset),
 }
 
 /// Jets from a value and its derivatives, one per coordinate:
@@ -62,6 +63,7 @@ impl<'a> Sheet<'a> {
             Surface::Extrusion(e) => Self::Extrusion(e),
             Surface::Revolution(r) => Self::Revolution(r),
             Surface::Sweep(w) => Self::Sweep(w),
+            Surface::Offset(o) => Self::Offset(o),
             Surface::Plane(_)
             | Surface::Cylinder(_)
             | Surface::Cone(_)
@@ -101,6 +103,7 @@ impl<'a> Sheet<'a> {
                 Some(revolved(r, c, trig_box(ru)))
             }
             Self::Sweep(w) => w.jet_box([ru, rv]),
+            Self::Offset(o) => o.jet_box([ru, rv]),
         }
     }
 
@@ -124,6 +127,7 @@ impl<'a> Sheet<'a> {
             Self::Extrusion(e) => from_eval(&e.eval(u, v)),
             Self::Revolution(r) => from_eval(&r.eval(u, v)),
             Self::Sweep(w) => w.jets_at(u, v),
+            Self::Offset(o) => o.jets_at(u, v),
         }
     }
 
@@ -135,8 +139,110 @@ impl<'a> Sheet<'a> {
             Self::Extrusion(e) => e.point(u, v),
             Self::Revolution(r) => r.point(u, v),
             Self::Sweep(w) => w.point(u, v),
+            Self::Offset(o) => o.point(u, v),
         }
     }
+}
+
+impl Sheet<'_> {
+    /// The point and its derivatives up to third order at `(u, v)`, by
+    /// [`super::nurbs::third::ORDERS`], for the surfaces an
+    /// [`super::Offset`] stands on: a NURBS, an extrusion or a revolution.
+    /// `None` for the others, which offset to their own kinds.
+    pub(crate) fn jets3_at(&self, u: f64, v: f64) -> Option<[[f64; 3]; 10]> {
+        match self {
+            Self::Nurbs(n) => Some(n.jet3(u, v).map(Vector3::to_array)),
+            Self::Extrusion(e) => {
+                let c = e.curve().jet3(u).map(Vector3::to_array);
+                Some(extruded3(e.dir().get(), c, v))
+            }
+            Self::Revolution(r) => {
+                let c = r.curve().jet3(v).map(Vector3::to_array);
+                let (sin, cos) = math::sin_cos(u);
+                Some(revolved3(r, c, cos, sin))
+            }
+            _ => None,
+        }
+    }
+
+    /// Enclosures of [`Sheet::jets3_at`] over a box of parameters; `None`
+    /// likewise, or where a box of an unbounded direction isn't finite.
+    pub(crate) fn jet3_box(&self, [ru, rv]: [[f64; 2]; 2]) -> Option<[IVec3; 10]> {
+        match self {
+            Self::Nurbs(n) => Some(n.jet3_box([ru, rv])),
+            Self::Extrusion(e) => {
+                if !(ru[0].is_finite() && ru[1].is_finite()) {
+                    return None;
+                }
+                let c = e.curve().jet_box(ru);
+                Some(extruded3(e.dir().get(), c, Interval::new(rv[0], rv[1])?))
+            }
+            Self::Revolution(r) => {
+                if !(rv[0].is_finite() && rv[1].is_finite()) {
+                    return None;
+                }
+                let c = r.curve().jet_box(rv);
+                let (cos, sin) = trig_box(ru);
+                Some(revolved3(r, c, cos, sin))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// An extrusion's derivatives up to third order from its curve's point
+/// and first three derivatives at `u`: `S = C + v d`, `Sv = d`, and every
+/// other derivative along `v` zero.
+fn extruded3<T: Num>(d: Vector3, c: [[T; 3]; 4], v: T) -> [[T; 3]; 10] {
+    let zero = [T::of(0.0); 3];
+    let d = d.to_array().map(T::of);
+    let p = core::array::from_fn(|k| c[0][k] + v * d[k]);
+    [p, c[1], d, c[2], zero, zero, c[3], zero, zero, zero]
+}
+
+/// A revolution's derivatives up to third order, from its curve's point
+/// and first three derivatives at `v` and `(cos u, sin u)`: with `ρ` and
+/// `h` the curve's components along the frame's `x` and `z`, `S = o + ρ
+/// radial + h z`, each `u` derivative turning `radial` a quarter.
+fn revolved3<T: Num>(r: &Revolution, c: [[T; 3]; 4], cu: T, su: T) -> [[T; 3]; 10] {
+    let f = r.frame();
+    let o = f.origin().to_vector().to_array();
+    let (x, y, z) = (
+        f.x().get().to_array(),
+        f.y().get().to_array(),
+        f.z().get().to_array(),
+    );
+    let along = |w: [f64; 3], k: usize| {
+        let rel = |i: usize| {
+            if k == 0 {
+                c[0][i] - T::of(o[i])
+            } else {
+                c[k][i]
+            }
+        };
+        T::of(w[0]) * rel(0) + T::of(w[1]) * rel(1) + T::of(w[2]) * rel(2)
+    };
+    let rho: [T; 4] = core::array::from_fn(|k| along(x, k));
+    let h: [T; 4] = core::array::from_fn(|k| along(z, k));
+    let radial: [T; 3] = core::array::from_fn(|i| T::of(x[i]) * cu + T::of(y[i]) * su);
+    let turn: [T; 3] = core::array::from_fn(|i| T::of(y[i]) * cu - T::of(x[i]) * su);
+    let of = |a: T, w: [T; 3], b: T, zk: bool| -> [T; 3] {
+        core::array::from_fn(|i| a * w[i] + if zk { b * T::of(z[i]) } else { T::of(0.0) })
+    };
+    let zero = T::of(0.0);
+    let p = core::array::from_fn(|i| T::of(o[i]) + rho[0] * radial[i] + h[0] * T::of(z[i]));
+    [
+        p,
+        of(rho[0], turn, zero, false),
+        of(rho[1], radial, h[1], true),
+        of(-rho[0], radial, zero, false),
+        of(rho[1], turn, zero, false),
+        of(rho[2], radial, h[2], true),
+        of(-rho[0], turn, zero, false),
+        of(-rho[1], radial, zero, false),
+        of(rho[2], turn, zero, false),
+        of(rho[3], radial, h[3], true),
+    ]
 }
 
 /// A revolution's point as jets over a box: `o + ρ(v) radial(u) + h(v)

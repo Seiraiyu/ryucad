@@ -24,8 +24,9 @@ use crate::Error;
 use crate::check::check_topology;
 use crate::geom::{
     Circle, Circle2, Cone, Curve, Curve2, Cylinder, Ellipse, Ellipse2, Extrusion, Frame, Frame2,
-    FrameLaw, KnotVector, Line, Line2, NurbsCurve, NurbsCurve2, NurbsSurface, Pipe, Plane, Point2,
-    Point3, Revolution, Rigid, Sphere, Surface, Sweep, Torus, UnitVector3, Vector2, Vector3,
+    FrameLaw, KnotVector, Line, Line2, NurbsCurve, NurbsCurve2, NurbsSurface, Offset, Pipe, Plane,
+    Point2, Point3, Revolution, Rigid, Sphere, Surface, Sweep, Torus, UnitVector3, Vector2,
+    Vector3,
 };
 use crate::mesh::{BodyMesh, Corner, EdgePolyline, FaceFault, FaceMesh, MeshFaultKind};
 use crate::name::{Event, Journal, Name, ToolKey};
@@ -59,6 +60,7 @@ struct Writer {
     revolutions: HashMap<usize, u32>,
     pipes: HashMap<usize, u32>,
     sweeps: HashMap<usize, u32>,
+    offsets: HashMap<usize, u32>,
 }
 
 impl Writer {
@@ -358,6 +360,19 @@ impl Writer {
                     },
                 );
             }
+            Surface::Offset(o) => {
+                self.u8(10);
+                self.shared(
+                    o,
+                    |w| &mut w.offsets,
+                    |w, o| {
+                        w.f64(o.distance());
+                        let [u, v] = o.domain();
+                        w.floats(&[u[0], u[1], v[0], v[1]]);
+                        w.surface(o.base());
+                    },
+                );
+            }
         }
     }
 
@@ -473,6 +488,9 @@ pub fn encode_body(body: &Body) -> Vec<u8> {
     w.out
 }
 
+/// How deep surfaces may nest inside surfaces when read.
+const MAX_NESTING: u32 = 8;
+
 /// The bytes left, and the shared geometry read so far, in order.
 struct Reader<'a> {
     bytes: &'a [u8],
@@ -483,6 +501,10 @@ struct Reader<'a> {
     revolutions: Vec<Arc<Revolution>>,
     pipes: Vec<Arc<Pipe>>,
     sweeps: Vec<Arc<Sweep>>,
+    offsets: Vec<Arc<Offset>>,
+    /// How deep surfaces read inside surfaces (a pipe's anchor, an
+    /// offset's base) are nested now.
+    depth: u32,
 }
 
 type R<T> = Result<T, Error>;
@@ -498,6 +520,8 @@ impl<'a> Reader<'a> {
             revolutions: Vec::new(),
             pipes: Vec::new(),
             sweeps: Vec::new(),
+            offsets: Vec::new(),
+            depth: 0,
         }
     }
 
@@ -760,6 +784,16 @@ impl<'a> Reader<'a> {
     }
 
     fn surface(&mut self) -> R<Surface> {
+        if self.depth >= MAX_NESTING {
+            return Err(invalid("surfaces nested too deep"));
+        }
+        self.depth += 1;
+        let s = self.surface_inner();
+        self.depth -= 1;
+        s
+    }
+
+    fn surface_inner(&mut self) -> R<Surface> {
         let bad = |_| invalid("a surface its constructor refuses");
         Ok(match self.u8()? {
             0 => Surface::Plane(Plane::new(self.frame()?)),
@@ -841,6 +875,15 @@ impl<'a> Reader<'a> {
                     };
                     let (twist, scale) = (r.finite()?, r.finite()?);
                     Sweep::new((profile, pr), (path, sr), start, law, twist, scale).map_err(bad)
+                },
+            )?),
+            10 => Surface::Offset(self.shared(
+                |r| &mut r.offsets,
+                |r| {
+                    let d = r.finite()?;
+                    let x = [r.f64()?, r.f64()?, r.f64()?, r.f64()?];
+                    let base = r.surface()?;
+                    Offset::new(base, d, [[x[0], x[1]], [x[2], x[3]]]).map_err(bad)
                 },
             )?),
             _ => return Err(invalid("an unknown surface kind")),

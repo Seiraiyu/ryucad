@@ -143,6 +143,17 @@ pub(crate) fn surface(s: &Surface) -> String {
                 bits(w.scale())
             )
         }
+        Surface::Offset(o) => format!(
+            "offset d={} over={} base=({})",
+            bits(o.distance()),
+            floats(&[
+                o.domain()[0][0],
+                o.domain()[0][1],
+                o.domain()[1][0],
+                o.domain()[1][1]
+            ]),
+            surface(o.base())
+        ),
     }
 }
 

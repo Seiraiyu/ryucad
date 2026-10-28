@@ -60,6 +60,23 @@ fn every_kind() -> Body {
     b.add_surface(Surface::Sweep(Arc::new(
         crate::geom::path_sweep::tests::level(),
     )));
+    // An offset shared twice, and one of an offset (which flattens).
+    let offset = Arc::new(
+        crate::geom::Offset::new(
+            crate::geom::offset::tests::wavy(),
+            0.1,
+            [[0.0, 1.0], [0.2, 0.9]],
+        )
+        .unwrap(),
+    );
+    b.add_surface(Surface::Offset(offset.clone()));
+    b.add_surface(Surface::Offset(offset.clone()));
+    b.add_surface(
+        Surface::Offset(offset)
+            .offset_within(-0.05, [[0.0, 0.5], [0.0, 1.0]])
+            .unwrap()
+            .unwrap(),
+    );
     let f2 = Frame2::new(Point2::new(1.0, 2.0), Vector2::new(1.0, 0.3), false).unwrap();
     b.add_curve2(Curve2::Line2(
         Line2::new(Point2::new(0.0, 0.5), Vector2::new(0.3, 1.0)).unwrap(),

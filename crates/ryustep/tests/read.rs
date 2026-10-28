@@ -104,13 +104,22 @@ fn splines_holes_and_cavities() {
     assert!(b.counts().faces >= 4);
 }
 
+/// OCCT's offset of a wavy spline sheet by 1 mm: the sheet curves more
+/// tightly than that (a radius of about 0.57 mm), so its offset folds,
+/// and reading it is refused at the offset surface, never guessed.
 #[test]
-fn a_sheet_offset_from_a_spline_is_refused() {
+fn a_folding_spline_offset_is_refused() {
     let m = model("offset_sheet.stp");
     assert!(!m.bodies.is_empty());
     for b in &m.bodies {
         assert!(
-            matches!(b.result, Err(ImportError::NotBounded { .. })),
+            matches!(
+                b.result,
+                Err(ImportError::InvalidGeometry {
+                    instance: 81,
+                    error: ryukei::Error::Degenerate
+                })
+            ),
             "{:?}",
             b.result
         );
