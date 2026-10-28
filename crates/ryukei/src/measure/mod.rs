@@ -11,11 +11,17 @@
 //! Work over faces runs on the current rayon pool and is gathered in ID
 //! order, so results are the same bits on one thread or many.
 
+mod angle;
+mod distance;
 mod gauss;
 mod length;
 mod mass;
+mod prims;
 mod props;
+mod tree;
 
+pub use angle::{Angle, angle};
+pub use distance::{Distance, DistanceOptions, distance};
 pub use mass::{MassOptions, MassProperties, mass};
 pub use props::{DEFAULT_TOLERANCE, EdgeShape, FaceShape, Properties, properties};
 
