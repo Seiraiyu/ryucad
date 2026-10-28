@@ -4,6 +4,7 @@
 
 mod build;
 mod ellipse;
+mod feature;
 mod ring;
 mod stroke;
 mod symbols;
@@ -11,6 +12,7 @@ mod text;
 mod thermal;
 
 pub use build::{circle, polygon, rect};
+pub use feature::feature_shape;
 pub use stroke::{arc_outline, line_outline, path_outline};
 pub use symbols::symbol_shape;
 pub use text::text_shape;

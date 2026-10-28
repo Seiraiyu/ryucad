@@ -1,8 +1,10 @@
 //! Features as written, the symbol tables they name, and user symbols.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 use crate::geom::{Arc, Nm, Pen, Place, Point, Region};
+use crate::shape::{Shape, ShapeError};
 use crate::symbol::StandardSymbol;
 
 /// Whether a feature adds material or clears it.
@@ -121,16 +123,38 @@ impl Feature {
 }
 
 /// A symbol table and the features that use it: a layer's features file,
-/// or a user symbol's.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// or a user symbol's. Shapes are built on demand and kept, one per feature
+/// and one per symbol.
+#[derive(Debug, Default)]
 pub struct Features {
     symbols: Vec<Symbol>,
     features: Vec<Feature>,
+    pub(crate) symbol_shapes: Vec<OnceLock<Result<Shape, ShapeError>>>,
+    pub(crate) shapes: Vec<OnceLock<Result<Shape, ShapeError>>>,
 }
+
+impl Clone for Features {
+    fn clone(&self) -> Features {
+        Features::new(self.symbols.clone(), self.features.clone())
+    }
+}
+
+impl PartialEq for Features {
+    fn eq(&self, o: &Features) -> bool {
+        self.symbols == o.symbols && self.features == o.features
+    }
+}
+
+impl Eq for Features {}
 
 impl Features {
     pub fn new(symbols: Vec<Symbol>, features: Vec<Feature>) -> Features {
-        Features { symbols, features }
+        Features {
+            symbol_shapes: (0..symbols.len()).map(|_| OnceLock::new()).collect(),
+            shapes: (0..features.len()).map(|_| OnceLock::new()).collect(),
+            symbols,
+            features,
+        }
     }
 
     pub fn symbols(&self) -> &[Symbol] {
