@@ -180,13 +180,14 @@ impl Decl {
 }
 
 /// The properties ryupdm understands, which a project can't redeclare.
-pub const CORE: [&str; 6] = [
+pub const CORE: [&str; 7] = [
     "number",
     "name",
     "description",
     "material",
     "uom",
     "make_buy",
+    "amount",
 ];
 
 /// Units of measure a part may be counted in.
@@ -210,6 +211,10 @@ pub fn core(name: &str) -> Option<Decl> {
         "material" => decl(Type::String, false, true),
         "uom" => decl(choices(&UOMS), false, true),
         "make_buy" => decl(choices(&["make", "buy"]), false, false),
+        // How much of the part's `uom` one occurrence uses: checked against
+        // the `uom` by `props::check`, needed to release one not counted
+        // `each`.
+        "amount" => decl(Type::String, false, true),
         _ => return None,
     })
 }
@@ -589,6 +594,7 @@ mod tests {
                 "material",
                 "uom",
                 "make_buy",
+                "amount",
                 "finish",
                 "mass",
                 "supplier_ref"
