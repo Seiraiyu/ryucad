@@ -333,7 +333,13 @@ impl Opened {
                     .as_ref()
                     .map(|k| k.0.clone())
                     .or_else(|| self.ws.model.parts.keys().next().cloned());
-                panels::journal(ui, &mut self.ws, &mut self.tab, part.as_deref());
+                panels::journal(
+                    ui,
+                    &mut self.ws,
+                    &mut self.view,
+                    &mut self.tab,
+                    part.as_deref(),
+                );
             });
         egui::Panel::left("tree")
             .resizable(true)
@@ -355,6 +361,8 @@ impl Opened {
                     panels::parameters(ui, &mut self.ws, &self.view);
                     ui.separator();
                     panels::part_section(ui, &mut self.ws, &self.view);
+                    ui.separator();
+                    crate::ui::bom::where_used(ui, &mut self.ws, &self.view);
                 });
             });
         egui::CentralPanel::no_frame().show(ui, |ui| self.view.show(ui, &mut self.ws, gpu));
@@ -376,6 +384,7 @@ impl Opened {
         }
         crate::ui::step::import(&ctx, &mut self.ws, &mut self.browse, view);
         crate::ui::step::export(&ctx, &mut self.ws, &mut self.browse, view);
+        crate::ui::bom::export(&ctx, &mut self.ws, &mut self.browse, view);
         // Closing the dialog ends what it paints (#138).
         if !self.dialogs.interference {
             self.ws.interference = None;
@@ -561,6 +570,11 @@ impl eframe::App for App {
                     }
                     Browse::Save => {
                         if let Some(e) = &mut o.ws.export {
+                            e.path = path;
+                        }
+                    }
+                    Browse::SaveCsv => {
+                        if let Some(e) = &mut o.ws.bom_export {
                             e.path = path;
                         }
                     }

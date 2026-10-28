@@ -2302,3 +2302,129 @@ fn file_export_step_writes_the_shown_part() {
     assert!(bytes.starts_with(b"ISO-10303-21;"));
     assert_eq!(e.done.unwrap().1, bytes.len());
 }
+
+/// A bolt (a cylinder) and a frame placing it twice, and a nut once.
+fn framed_bolts() -> Project {
+    let p = Project::new();
+    p.ok(&["part", "create", "bolt"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bolt",
+        "cylinder",
+        "--id",
+        "shank",
+        "--param",
+        "radius=3",
+        "--param",
+        "height=20",
+    ]);
+    p.ok(&["part", "create", "nut"]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    for (id, of, at) in [
+        ("b1", "bolt", "0,0,0"),
+        ("b2", "bolt", "40,0,0"),
+        ("n1", "nut", "0,0,0"),
+    ] {
+        p.ok(&[
+            "feature", "add", "frame", "instance", "--id", id, "--of", of, "--origin", at,
+        ]);
+    }
+    p
+}
+
+fn bolts_drawn(a: &App) -> bool {
+    match &a.screen {
+        ryucad_app::ui::app::Screen::Opened(o) => {
+            o.ws.idle()
+                && o.ws
+                    .model
+                    .meshes
+                    .contains_key(&("frame".into(), "b2/shank".into()))
+        }
+        _ => false,
+    }
+}
+
+#[test]
+fn the_bom_tab_chooses_lines_renumbers_and_goes_flat() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = framed_bolts();
+    let mut h = window(&p);
+    frames(&mut h, bolts_drawn);
+    h.get_by_label("BOM").click();
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.bom.root.is_some()
+    });
+    shown(&mut h, "BOM of frame");
+    // Choosing a line selects its occurrences and frames them.
+    let before = h.state().opened().view.nav.camera.clone();
+    h.get_by_label("BOM line 1: bolt").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection == ["frame/b1", "frame/b2"])
+    });
+    assert_ne!(h.state().opened().view.nav.camera, before);
+    // The item number, typed and set.
+    h.get_by_label("Item of bolt in frame").click();
+    shown(&mut h, "Set item");
+    h.get_by_label("Item of bolt in frame")
+        .set_text_value_accesskit("7");
+    h.step();
+    h.get_by_label("Set item").click();
+    frames(&mut h, |a| {
+        let t = &a.opened().ws.bom;
+        a.opened().ws.idle() && t.editing.is_none() && t.tree[0].item == Some(7)
+    });
+    let bom = p.ok(&["bom", "frame"]);
+    assert_eq!(bom["tree"]["children"][0]["item"], 7);
+    // Flat: one line per part.
+    h.get_by_label("Flat").click();
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && !a.opened().ws.bom.flat_lines.is_empty()
+    });
+    shown(&mut h, "BOM line: bolt working");
+    assert!(h.query_by_label("Item of bolt in frame").is_none());
+}
+
+#[test]
+fn where_used_shows_an_assembly_and_a_compare_marks_the_bom() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = framed_bolts().committed();
+    let mut h = sized(&p, 1200.0);
+    frames(&mut h, bolts_drawn);
+    // The bolt chosen in the tree: the Part section says where it is used.
+    h.get_by_label("shank (cylinder)").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .where_used
+            .as_ref()
+            .is_some_and(|w| w.part == "bolt")
+    });
+    shown(&mut h, "Where bolt is used");
+    h.get_by_label("frame (2)");
+    h.get_by_label("Show frame").click();
+    frames(&mut h, |a| {
+        a.opened().ws.model.focus.as_deref() == Some("frame")
+    });
+    // An agent adds a bolt; compared with HEAD, the tab says so.
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b3", "--of", "bolt",
+    ]);
+    h.get_by_label("BOM").click();
+    menu(&mut h, "View", "Compare with HEAD");
+    frames(&mut h, |a| {
+        compared(a) && a.opened().ws.idle() && a.opened().ws.bom.diff.is_some()
+    });
+    shown(&mut h, "Compared with HEAD: 0 added, 0 removed, 1 changed");
+    shown(&mut h, "3 (was 2)");
+}
