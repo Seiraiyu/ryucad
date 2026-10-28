@@ -36,6 +36,27 @@ impl<V: Coords> BezierCurve<V> {
 }
 
 impl<V: Coords> BezierCurve<V> {
+    /// The piece cut to the part of `[a, b]` (curve parameters) inside
+    /// its range, `None` if they don't overlap.
+    pub(crate) fn clipped(&self, [a, b]: [f64; 2]) -> Option<Self> {
+        let [r0, r1] = self.range;
+        let (lo, hi) = (a.max(r0), b.min(r1));
+        if lo > hi || r1 <= r0 {
+            return None;
+        }
+        let mut piece = self.clone();
+        let s0 = (lo - r0) / (r1 - r0);
+        if s0 > 0.0 {
+            piece = piece.split(s0)[1].clone();
+        }
+        let [q0, q1] = piece.range;
+        let s1 = if q1 > q0 { (hi - q0) / (q1 - q0) } else { 1.0 };
+        if s1 < 1.0 && s1 > 0.0 {
+            piece = piece.split(s1)[0].clone();
+        }
+        Some(piece)
+    }
+
     /// The two pieces either side of local parameter `u` in `(0, 1)`, by
     /// de Casteljau's algorithm in homogeneous coordinates.
     pub(crate) fn split(&self, u: f64) -> [Self; 2] {

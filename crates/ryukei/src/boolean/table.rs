@@ -255,25 +255,8 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
         .par_iter()
         .map(|&(i, j)| {
             let (a, b) = (faces[i], faces[j]);
-            let meet = face_face((&ops[a.op], a.face), (&ops[b.op], b.face))
-                .map_err(|e| fail(e, a, b))?;
-            // Booleans take faces on other surfaces (NURBS, swept
-            // surfaces, pipes against each other) only where they are
-            // apart from everything: splitting them is phase 8.C's.
-            let pipe = |f: FaceRef| {
-                matches!(
-                    ops[f.op].surfaces[ops[f.op].faces[f.face].surface],
-                    crate::geom::Surface::Pipe(_)
-                )
-            };
-            let taken = (analytic(ops, a) && analytic(ops, b)) && !(pipe(a) && pipe(b));
-            let apart = matches!(
-                &meet,
-                FaceMeet::Meet { stretches, contacts } if stretches.is_empty() && contacts.is_empty()
-            );
-            if !taken && !apart {
-                return Err(Fail::Unsupported(a, b));
-            }
+            let meet =
+                face_face((&ops[a.op], a.face), (&ops[b.op], b.face)).map_err(|e| fail(e, a, b))?;
             Ok(Pair { a, b, meet })
         })
         // The first failure in order, not the first a thread found.
@@ -303,7 +286,7 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
     let edge_faces: Vec<(usize, usize)> = BoxTree::new(edge_boxes)
         .pairs_with(&tree)
         .into_iter()
-        .filter(|&(i, j)| edges[i].op != faces[j].op && analytic(ops, faces[j]))
+        .filter(|&(i, j)| edges[i].op != faces[j].op)
         .collect();
     let found: Vec<(Vec<Hit>, Vec<OnHit>)> = edge_faces
         .par_iter()
@@ -335,7 +318,7 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
     let vert_faces: Vec<(usize, usize)> = BoxTree::new(vert_boxes)
         .pairs_with(&tree)
         .into_iter()
-        .filter(|&(i, j)| verts[i].op != faces[j].op && analytic(ops, faces[j]))
+        .filter(|&(i, j)| verts[i].op != faces[j].op)
         .collect();
     let touches: Vec<Touch> = vert_faces
         .par_iter()
@@ -855,22 +838,6 @@ fn fail(e: Failure, a: FaceRef, b: FaceRef) -> Fail {
     }
 }
 
-/// Whether a face's surface has an implicit form, or is a pipe: only
-/// those take part in edge hits and touches. Faces on other surfaces must
-/// be certified apart by [`face_face`], so nothing can hit them.
-fn analytic(ops: &[Body], f: FaceRef) -> bool {
-    let b = &ops[f.op];
-    matches!(
-        b.surfaces[b.faces[f.face].surface],
-        crate::geom::Surface::Plane(_)
-            | crate::geom::Surface::Cylinder(_)
-            | crate::geom::Surface::Cone(_)
-            | crate::geom::Surface::Sphere(_)
-            | crate::geom::Surface::Torus(_)
-            | crate::geom::Surface::Pipe(_)
-    )
-}
-
 /// A face of `f`'s operand that an edge bounds, for naming a failure.
 fn face_of_edge(ops: &[Body], e: EdgeRef) -> FaceRef {
     let b = &ops[e.op];
@@ -1004,7 +971,7 @@ fn triple_points(
             let probe = BoxTree::new(vec![(b, 0)]);
             for (_, j) in probe.pairs_with(tree) {
                 let f = faces[j];
-                if f.op != p.a.op && f.op != p.b.op && analytic(ops, f) {
+                if f.op != p.a.op && f.op != p.b.op {
                     jobs.push((pi, k, f));
                 }
             }

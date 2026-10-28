@@ -29,11 +29,11 @@
 //! signs of `(q - S) · (S_u × S_v)` at the foot of a point beside the hit.
 
 use super::Failure;
-use super::cells::cells;
+use super::cells::cells_off;
 use super::cs::{CurveHit, Side};
 use crate::geom::bound2::IVec3;
 use crate::geom::sheet::Sheet;
-use crate::geom::{Curve, Point3, Surface, creases};
+use crate::geom::{Box3, Curve, Point3, Surface, creases};
 use crate::interval::Interval;
 use crate::predicates::Sign;
 use crate::tol::LINEAR_RESOLUTION;
@@ -47,6 +47,11 @@ const MAX_DEPTH: u32 = 120;
 
 /// The most boxes a search may examine.
 const MAX_BOXES: usize = 1 << 20;
+
+/// What a contact over a whole box (`E` within the tolerance all over it)
+/// costs of [`MAX_BOXES`]: at most 128 of them in one search. The
+/// booleans and sweeps tests take 8 at most.
+const CONTACT_COST: usize = MAX_BOXES / 128;
 
 /// The most boxes the search for a tangency in a contact may examine.
 const TANGENT_BOXES: usize = 512;
@@ -160,13 +165,32 @@ pub(crate) fn curve_sheet(
         lines: crease_lines(surface),
     };
     let near = curve.bounds([t0, t1]).grow(tolerance);
+    let zones = pole_zones(curve, [t0, t1], surface, &near);
     let mut found = Vec::new();
-    let mut budget = MAX_BOXES;
-    let uv = cells(surface, &near);
-    for ts in s.t_cells() {
-        for &[u, v] in &uv {
-            s.search([ts, u, v], 0, &mut budget, &mut found)?;
+    let mut result = Err(Failure::Uncertain);
+    for shift in SHIFTS {
+        found.clear();
+        let mut budget = MAX_BOXES;
+        let uv = outside_zones(cells_off(surface, &near, shift), &zones);
+        result = (|| {
+            for ts in s.t_cells(shift) {
+                for &[u, v] in &uv {
+                    s.search([ts, u, v], 0, &mut budget, &mut found)?;
+                }
+            }
+            Ok(())
+        })();
+        if !matches!(result, Err(Failure::Uncertain)) {
+            break;
         }
+    }
+    result?;
+    // A curve through a pole meets the surface there, by the touch rule.
+    for z in &zones {
+        found.push(Candidate {
+            t: [z.t, z.t],
+            simple: None,
+        });
     }
     // An end within tolerance of the surface touches it, and so does a
     // kink: the curve's nearest point may be one, where its distance has
@@ -189,6 +213,113 @@ pub(crate) fn curve_sheet(
         out.push(s.classify(c, [lo, hi])?);
     }
     Ok(out)
+}
+
+/// How the first cells are cut on each attempt ([`cells_off`], and the
+/// curve's interval likewise): a crossing on the line where a period
+/// starts (a curve symmetric about the surface's seam), on a knot line,
+/// or on a sixteenth of the curve's interval, is inside a cell once they
+/// move.
+const SHIFTS: [f64; 3] = [0.0, 0.137, 0.311];
+
+/// The touch rule's reach: points this close to each other are one.
+const REACH: f64 = 100.0 * LINEAR_RESOLUTION;
+
+/// A collapsed row of the surface (a pole or an apex) the curve passes
+/// within [`REACH`] of: the strip beside it, in direction `dir`, over
+/// which the surface lies within half the reach of the pole, and the
+/// curve's parameter nearest it. `E` vanishes all along the row, where no
+/// solution can be isolated: the strip is left out of the search, and the
+/// curve meets the surface at the pole.
+#[derive(Clone, Copy, Debug)]
+struct PoleZone {
+    dir: usize,
+    range: [f64; 2],
+    t: f64,
+}
+
+fn pole_zones(curve: &Curve, [t0, t1]: [f64; 2], surface: &Surface, near: &Box3) -> Vec<PoleZone> {
+    let rows = crate::mesh::uv::collapsed_rows(surface);
+    let domain = surface.domain();
+    let sheet = Sheet::of(surface);
+    let mut out = Vec::new();
+    for k in 0..2 {
+        for e in 0..2 {
+            if !rows[k][e] {
+                continue;
+            }
+            let edge = domain[k][e];
+            let free = domain[1 - k];
+            let pole = if k == 0 {
+                surface.point(edge, free[0])
+            } else {
+                surface.point(free[0], edge)
+            };
+            if !near.grow(REACH).intersects(&Box3::new(pole, pole)) {
+                continue;
+            }
+            let foot = curve.project(pole);
+            let t = foot.param;
+            if foot.distance > REACH || t < t0 || t > t1 {
+                continue;
+            }
+            let mut w = (domain[k][1] - domain[k][0]) / 64.0;
+            let mut found = None;
+            for _ in 0..60 {
+                let strip = if e == 0 {
+                    [edge, edge + w]
+                } else {
+                    [edge - w, edge]
+                };
+                let cell = if k == 0 { [strip, free] } else { [free, strip] };
+                if let Some(p) = sheet.jet_box(cell) {
+                    let b = Box3::new(
+                        Point3::new(p[0].v.lo(), p[1].v.lo(), p[2].v.lo()),
+                        Point3::new(p[0].v.hi(), p[1].v.hi(), p[2].v.hi()),
+                    );
+                    let far = b
+                        .corners()
+                        .iter()
+                        .map(|q| q.distance(pole))
+                        .fold(0.0, f64::max);
+                    if far <= REACH / 2.0 {
+                        found = Some(strip);
+                        break;
+                    }
+                }
+                w /= 2.0;
+            }
+            if let Some(range) = found {
+                out.push(PoleZone { dir: k, range, t });
+            }
+        }
+    }
+    out
+}
+
+/// Cells with every pole's zone cut out of them.
+fn outside_zones(cells: Vec<[[f64; 2]; 2]>, zones: &[PoleZone]) -> Vec<[[f64; 2]; 2]> {
+    let mut out = cells;
+    for z in zones {
+        out = out
+            .into_iter()
+            .filter_map(|mut c| {
+                let [a, b] = c[z.dir];
+                let [lo, hi] = z.range;
+                if b <= lo || a >= hi {
+                    return Some(c);
+                }
+                if a >= lo && b <= hi {
+                    return None;
+                }
+                // The zone lies at an end of the domain: what is left is
+                // one stretch.
+                c[z.dir] = if a < lo { [a, lo] } else { [hi, b] };
+                Some(c)
+            })
+            .collect();
+    }
+    out
 }
 
 /// A stretch of the curve's parameter holding a hit: one simple
@@ -365,14 +496,17 @@ fn roots(c0: f64, c1: f64, c2: f64, h: f64) -> Vec<f64> {
 }
 
 impl Search<'_> {
-    /// The first cuts of the curve's interval: sixteenths.
-    fn t_cells(&self) -> Vec<[f64; 2]> {
+    /// The first cuts of the curve's interval: sixteenths, the inner ones
+    /// moved on by `shift` of one.
+    fn t_cells(&self, shift: f64) -> Vec<[f64; 2]> {
         let [t0, t1] = self.range;
         let at = |k: u32| {
             if k == 16 {
                 t1
+            } else if k == 0 {
+                t0
             } else {
-                t0 + (t1 - t0) * f64::from(k) / 16.0
+                t0 + (t1 - t0) * (f64::from(k) + shift) / 16.0
             }
         };
         // Also cut at the curve's kinks, where no box may straddle a
@@ -455,6 +589,22 @@ impl Search<'_> {
             // turning point of the curve's distance, where `G` vanishes
             // (see [`Self::tangency`]); a box holding none is out.
             if no_zero && self.near_miss(cell, out)? {
+                return Ok(());
+            }
+            // `E` within the tolerance over the whole box: every point of
+            // the curve over its stretch has one of the surface that close
+            // (where a path can't be followed, at a corner of the domain).
+            // Each such contact costs [`CONTACT_COST`] boxes, so a curve
+            // lying on the surface whose path can't be bounded, which takes
+            // every box beside it this way, ends uncertain after a hundred
+            // or so of them rather than the whole budget.
+            let bound = tol / 3f64.sqrt();
+            if c.e.iter().all(|&x| x.lo() >= -bound && x.hi() <= bound) {
+                *budget = budget.checked_sub(CONTACT_COST).ok_or(Failure::Uncertain)?;
+                out.push(Candidate {
+                    t: cell[0],
+                    simple: None,
+                });
                 return Ok(());
             }
             let mid = (
@@ -1023,7 +1173,22 @@ impl Search<'_> {
         let w: IVec3 = core::array::from_fn(|k| qv[k] - j[k].v);
         let su = [j[0].d[0], j[1].d[0], j[2].d[0]];
         let sv = [j[0].d[1], j[1].d[1], j[2].d[1]];
-        dot(w, cross(su, sv)).sign().filter(|&x| x != Sign::Zero)
+        if let Some(sign) = dot(w, cross(su, sv)).sign().filter(|&x| x != Sign::Zero) {
+            return Some(sign);
+        }
+        // At a pole the partials' product vanishes: the limit normal
+        // there, decisive when the point lies off the tangent plane by far
+        // more than its rounding.
+        let n = self.surface.normal(u, v)?.get().to_array().map(Iv::point);
+        let d = dot(w, n);
+        let len = norm_hi(w);
+        if d.lo() > 1e-9 * len {
+            Some(Sign::Positive)
+        } else if d.hi() < -1e-9 * len {
+            Some(Sign::Negative)
+        } else {
+            None
+        }
     }
 
     /// The side just past `from` towards `limit`: the first certified

@@ -276,8 +276,9 @@ const CELLS: usize = 8;
 /// none) and the bounds over it: equilateral triangles at the size the
 /// chord allows (`M R² / 2 = chord`, area `1.3 R²`), the turn the angle
 /// allows, and the edge limit, plus two per boundary sample. It bounds the
-/// box cell by cell and errs high; it is there to refuse
-/// a runaway request before meshing, not to predict exactly.
+/// box cell by cell (halving cells whose bounds were loose, see
+/// [`cell_estimate`]) and errs high; it is there to refuse a runaway
+/// request before meshing, not to predict exactly.
 fn estimate(
     b: &Body,
     geoms: &[Option<FaceGeom>],
@@ -325,22 +326,7 @@ fn estimate(
                     let at = |c: usize| a + (b - a) * c as f64 / CELLS as f64;
                     [at(c), at(c + 1)]
                 };
-                let cell = [cut(0, i), cut(1, j)];
-                let (su, sv) = (cell[0][1] - cell[0][0], cell[1][1] - cell[1][0]);
-                let area = su * g.metric.a * sv * g.metric.b;
-                let bound = g.surface.derivative_bound(cell);
-                let m = bound::second_derivative(&bound, g.metric);
-                let chord = area * m / (2.6 * params.chord);
-                let turn = |rate: f64, span: f64| {
-                    if rate.is_finite() {
-                        (rate * span / params.angle).ceil()
-                    } else {
-                        1.0
-                    }
-                };
-                let angle = 2.0 * turn(bound.turn_u, su) * turn(bound.turn_v, sv);
-                let edge = params.max_edge.map_or(0.0, |e| area / (0.43 * e * e));
-                face += chord.max(angle).max(edge);
+                face += cell_estimate(g, [cut(0, i), cut(1, j)], params, 0);
             }
         }
         total += face + 2.0 * boundary;
@@ -350,6 +336,58 @@ fn estimate(
     } else {
         u64::MAX
     }
+}
+
+/// How deep [`cell_estimate`] halves a cell whose estimate is large.
+const ESTIMATE_DEPTH: u32 = 5;
+
+/// A cell's estimate past which it is halved both ways and estimated
+/// again: bounds over a wide cell can be far looser than over its parts
+/// (a sweep's turning rates, bounded in axes it lies askew to).
+const ESTIMATE_SPLIT: f64 = 4096.0;
+
+/// The triangles [`estimate`] expects over one cell of a face's box: its
+/// own estimate, or where that is past [`ESTIMATE_SPLIT`] and its
+/// quarters' estimates come to less than half of it (the bounds over the
+/// cell were loose), the sum of theirs, each estimated the same way.
+fn cell_estimate(g: &FaceGeom, cell: [[f64; 2]; 2], params: &MeshParams, depth: u32) -> f64 {
+    let here = estimate_once(g, cell, params);
+    if here.is_nan() || here <= ESTIMATE_SPLIT || depth == ESTIMATE_DEPTH {
+        return here;
+    }
+    let mid = |k: usize| (cell[k][0] + cell[k][1]) / 2.0;
+    let (mu, mv) = (mid(0), mid(1));
+    let quarters: Vec<[[f64; 2]; 2]> = [[cell[0][0], mu], [mu, cell[0][1]]]
+        .into_iter()
+        .flat_map(|u| [[cell[1][0], mv], [mv, cell[1][1]]].map(|v| [u, v]))
+        .collect();
+    let parts: f64 = quarters.iter().map(|&q| estimate_once(g, q, params)).sum();
+    if parts.is_nan() || parts >= here / 2.0 {
+        return here.min(parts);
+    }
+    quarters
+        .into_iter()
+        .map(|q| cell_estimate(g, q, params, depth + 1))
+        .sum()
+}
+
+/// [`cell_estimate`] from the bounds over the cell alone.
+fn estimate_once(g: &FaceGeom, cell: [[f64; 2]; 2], params: &MeshParams) -> f64 {
+    let (su, sv) = (cell[0][1] - cell[0][0], cell[1][1] - cell[1][0]);
+    let area = su * g.metric.a * sv * g.metric.b;
+    let bound = g.surface.derivative_bound(cell);
+    let m = bound::second_derivative(&bound, g.metric);
+    let chord = area * m / (2.6 * params.chord);
+    let turn = |rate: f64, span: f64| {
+        if rate.is_finite() {
+            (rate * span / params.angle).ceil()
+        } else {
+            1.0
+        }
+    };
+    let angle = 2.0 * turn(bound.turn_u, su) * turn(bound.turn_v, sv);
+    let edge = params.max_edge.map_or(0.0, |e| area / (0.43 * e * e));
+    chord.max(angle).max(edge)
 }
 
 /// Meshes one face from its edges' samples.

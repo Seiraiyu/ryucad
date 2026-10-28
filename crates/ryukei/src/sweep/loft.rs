@@ -52,8 +52,7 @@ pub struct Tangent {
 /// section before's (and round a closed loft, the first's from the
 /// last's) and face that section's way. Refusals, in order: `TooFewSections`;
 /// `BadTangent`; for each section in order `BadSection`, `LoopMismatch`,
-/// `SegmentCountMismatch`; `ClosedTube` for a closed loft of a loop of
-/// one closed curve; `BadWeights` naming the first section's segment
+/// `SegmentCountMismatch`; `BadWeights` naming the first section's segment
 /// whose skin's weights fall to zero; then, built, `SelfIntersecting` or
 /// `Uncertain` naming the first pair of faces in face order.
 ///
@@ -612,8 +611,10 @@ impl Lofted<'_> {
     }
 
     /// A closed loft of one lump: each loop a ring of bands between the
-    /// closed curves its vertices' columns interpolate, the outer loop's
-    /// a new solid region's outer shell and each hole's a cavity.
+    /// closed curves its vertices' columns interpolate (a loop of one
+    /// closed curve, one face with no edges on a spline closed both
+    /// ways), the outer loop's a new solid region's outer shell and each
+    /// hole's a cavity.
     fn closed(
         &self,
         b: &mut Body,
@@ -624,9 +625,6 @@ impl Lofted<'_> {
         let mut region = None;
         for loops in matched {
             let lp = loops[0];
-            if capped::closed(lp) {
-                return Err(LoftError::ClosedTube { loop_: lp.key }.into());
-            }
             // In the order a full revolve takes its ring: the loop's own
             // when the loft runs against the first section's normal.
             let forward = self.sign < 0.0;
@@ -643,6 +641,11 @@ impl Lofted<'_> {
                 plan.segments.push(TurnSegment {
                     side: (b.add_surface(side), sense),
                 });
+                // A loop of one closed curve skins a surface closed both
+                // ways: one face with no edges.
+                if capped::closed(lp) {
+                    continue;
+                }
                 let c = column(surface, 0)?;
                 let first = skinned.ends[k][0].point(0.0);
                 plan.vertices.push(TurnVertex {
@@ -655,7 +658,12 @@ impl Lofted<'_> {
             let faces: Vec<Option<FaceId>> = made.sides.iter().copied().map(Some).collect();
             let sides = self.side_names(b, namer, loops, &skinned, &faces);
             let n = sides.len();
-            for (k, &i) in skinned.vertices.iter().enumerate() {
+            for (k, &i) in skinned
+                .vertices
+                .iter()
+                .enumerate()
+                .take(made.vertices.len())
+            {
                 let gap = loops
                     .iter()
                     .map(|l| l.tolerances[i])

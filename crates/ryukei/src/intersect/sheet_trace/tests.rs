@@ -239,3 +239,66 @@ fn splines_and_swept_surfaces() {
         }
     }
 }
+
+/// A plane through both poles of a sphere's spline form: each half
+/// meridian a branch ending at the poles, which are on the plane, with
+/// no point left over. Near the pole but off it, one branch round.
+#[test]
+fn planes_through_a_spline_sphere_s_poles() {
+    let ball = Surface::Sphere(Sphere::new(Frame::WORLD, 1.0).unwrap());
+    let (n, _) = ball
+        .to_nurbs([
+            [0.0, TAU],
+            [-core::f64::consts::FRAC_PI_2, core::f64::consts::FRAC_PI_2],
+        ])
+        .unwrap();
+    let spline = Surface::Nurbs(std::sync::Arc::new(n));
+    let through = trace(
+        &spline,
+        &plane(Point3::ORIGIN, Vector3::new(1.0, -0.3, 0.0)),
+        &region(),
+    )
+    .unwrap();
+    assert_eq!((through.branches.len(), through.points.len()), (2, 0));
+    let poles = [Point3::new(0.0, 0.0, 1.0), Point3::new(0.0, 0.0, -1.0)];
+    for b in &through.branches {
+        let ends = [b.points[0], b.points[b.points.len() - 1]];
+        assert!(ends.iter().all(|e| poles.contains(e)), "{ends:?}");
+    }
+    let tilted = trace(
+        &spline,
+        &plane(Point3::new(0.0, 0.0, 1.0), Vector3::new(1.0, 0.0, 0.3)),
+        &region(),
+    )
+    .unwrap();
+    assert_eq!((tilted.branches.len(), tilted.points.len()), (1, 0));
+    let near = trace(
+        &spline,
+        &plane(Point3::new(0.01, 0.0, 1.0), Vector3::new(1.0, 0.0, 0.3)),
+        &region(),
+    )
+    .unwrap();
+    assert_eq!((near.branches.len(), near.points.len()), (1, 0));
+}
+
+/// The plane of a sphere's equator cuts its spline form along a knot
+/// line: one branch, traced on the grid that doesn't keep the breaks.
+#[test]
+fn a_plane_along_a_spline_sphere_s_knot_line() {
+    let ball = Surface::Sphere(Sphere::new(Frame::WORLD, 1.0).unwrap());
+    let (n, _) = ball
+        .to_nurbs([
+            [0.0, TAU],
+            [-core::f64::consts::FRAC_PI_2, core::f64::consts::FRAC_PI_2],
+        ])
+        .unwrap();
+    let spline = Surface::Nurbs(std::sync::Arc::new(n));
+    let topo = trace(
+        &spline,
+        &plane(Point3::ORIGIN, Vector3::new(0.0, 0.0, 1.0)),
+        &region(),
+    )
+    .unwrap();
+    assert_eq!((topo.branches.len(), topo.points.len()), (1, 0));
+    assert!(topo.branches[0].closed);
+}

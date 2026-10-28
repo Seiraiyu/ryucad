@@ -2,10 +2,10 @@
 //! on that curve, so its tolerance need cover only how far its vertices
 //! lie off it.
 //!
-//! An edge whose curve strays from its faces by more than resolution, and
-//! whose two faces are analytic or pipe surfaces, is met with the
-//! surfaces' intersection ([`crate::intersect::surface_surface`]) inside
-//! its box, grown by its reach. Its reach is twice its measured gap (at
+//! An edge whose curve strays from its faces by more than resolution, on
+//! whatever surfaces, is met with the surfaces' intersection
+//! ([`crate::intersect::surface_surface`]) inside its box, grown by its
+//! reach. Its reach is twice its measured gap (at
 //! least ten resolutions, at most the cap): a branch that crosses
 //! nowhere near tangentially, every one of 17 samples along the edge, and
 //! both its vertices within the reach of it, closer to both surfaces than
@@ -13,10 +13,14 @@
 //! vertex's foot on the branch to its end vertex's, the way the edge's own
 //! curve runs at its middle (reversed, uses and all, where the branch runs
 //! the other way); on a closed branch the stretch must hold the middle's
-//! foot, and a closed edge takes a whole period. Vertices stay where they
-//! are: what the new curve's ends leave the tolerances cover (see `gaps`).
-//! The file's pcurves for a tightened edge are dropped, so the pcurves
-//! step finds exact ones or fits them. An edge with no such branch keeps
+//! foot, and a closed edge takes a whole period, or a closed clamped
+//! branch (a spline's) started at its vertex's foot
+//! ([`crate::intersect::reseamed`]). Vertices stay where they are: what
+//! the new curve's ends leave the tolerances cover (see `gaps`). The
+//! file's pcurves for a tightened edge give way to the branch's, where
+//! their maps are the identity (the general intersector's, certified with
+//! the branch), so the pcurves step takes them as the file's; else it
+//! finds exact ones or fits them. An edge with no such branch keeps
 //! its curve and is tolerated instead, and so is an edge whose faces are
 //! tangent or nearly so at its middle (their normals within a hundredth
 //! of a radian): there the branch lies far further from the edge than
@@ -26,7 +30,7 @@ use super::Loop;
 use super::Shape;
 use super::gaps::edge_gap;
 use super::names::Names;
-use crate::geom::{Curve, Surface};
+use crate::geom::{Curve, Curve2, Surface};
 use crate::intersect::{SurfaceHit, surface_surface};
 use crate::name::Name;
 use crate::tol::LINEAR_RESOLUTION;
@@ -50,6 +54,9 @@ struct Tight {
     interval: [f64; 2],
     flip: bool,
     tolerance: f64,
+    /// The branch on each of the edge's two faces' surfaces, in order,
+    /// where its map is the identity.
+    pcurves: [Option<Curve2>; 2],
 }
 
 /// Tightens every edge of `s` that can be, returning their names, sorted.
@@ -64,16 +71,16 @@ pub(super) fn tighten(s: &mut Shape, names: &Names, cap: f64) -> Vec<Name> {
             }
         }
     }
-    let found: Vec<Option<Tight>> = (0..s.edges.len())
+    let found: Vec<Option<(Tight, [usize; 2])>> = (0..s.edges.len())
         .into_par_iter()
         .map(|g| match faces[g][..] {
-            [a, b] if a != b => tight(s, g, [a, b], cap),
+            [a, b] if a != b => tight(s, g, [a, b], cap).map(|t| (t, [a, b])),
             _ => None,
         })
         .collect();
     let mut out = Vec::new();
     for (g, t) in found.into_iter().enumerate() {
-        let Some(t) = t else { continue };
+        let Some((t, pair)) = t else { continue };
         s.curves.push(t.curve);
         let e = &mut s.edges[g];
         e.curve = s.curves.len() - 1;
@@ -82,11 +89,19 @@ pub(super) fn tighten(s: &mut Shape, names: &Names, cap: f64) -> Vec<Name> {
         if t.flip {
             std::mem::swap(&mut e.start, &mut e.end);
         }
-        for f in &mut s.faces {
+        let mut given = [None; 2];
+        for (i, c2) in t.pcurves.into_iter().enumerate() {
+            if let Some(c2) = c2 {
+                s.curves2.push(c2);
+                given[i] = Some(s.curves2.len() - 1);
+            }
+        }
+        for (k, f) in s.faces.iter_mut().enumerate() {
+            let side = pair.iter().position(|&x| x == k);
             for l in &mut f.loops {
                 if let Loop::Edges(uses) = l {
                     for u in uses.iter_mut().filter(|u| u.edge == g) {
-                        u.pcurve = None;
+                        u.pcurve = side.and_then(|i| given[i]);
                         if t.flip {
                             u.sense = u.sense.flipped();
                         }
@@ -100,16 +115,9 @@ pub(super) fn tighten(s: &mut Shape, names: &Names, cap: f64) -> Vec<Name> {
     out
 }
 
-fn tightenable(s: &Surface) -> bool {
-    matches!(
-        s,
-        Surface::Plane(_)
-            | Surface::Cylinder(_)
-            | Surface::Cone(_)
-            | Surface::Sphere(_)
-            | Surface::Torus(_)
-            | Surface::Pipe(_)
-    )
+/// A branch's pcurves whose maps are the identity.
+fn identity(pcurves: &[(Curve2, [f64; 2]); 2]) -> [Option<Curve2>; 2] {
+    pcurves.clone().map(|(c, m)| (m == [0.0, 1.0]).then_some(c))
 }
 
 /// Edge `g`'s curve on the intersection of `faces`' surfaces, if one runs
@@ -117,9 +125,6 @@ fn tightenable(s: &Surface) -> bool {
 fn tight(s: &Shape, g: usize, faces: [usize; 2], cap: f64) -> Option<Tight> {
     let e = &s.edges[g];
     let [sa, sb] = faces.map(|k| &s.surfaces[s.faces[k].surface]);
-    if !tightenable(sa) || !tightenable(sb) {
-        return None;
-    }
     let curve = &s.curves[e.curve];
     let gap = edge_gap(curve, e.interval, sa).max(edge_gap(curve, e.interval, sb));
     if gap <= LINEAR_RESOLUTION {
@@ -146,7 +151,7 @@ fn tight(s: &Shape, g: usize, faces: [usize; 2], cap: f64) -> Option<Tight> {
     let mid = at(SAMPLES / 2);
     let along = curve.tangent(mid)?;
     branches
-        .into_iter()
+        .iter()
         .filter(|b| !b.tangent && b.tolerance < gap)
         .filter(|b| {
             samples
@@ -177,6 +182,32 @@ fn tight(s: &Shape, g: usize, faces: [usize; 2], cap: f64) -> Option<Tight> {
                     }
                     [from, hi]
                 }
+                None if e.start == e.end => {
+                    // A closed edge on a closed clamped branch (a spline's):
+                    // the branch started at the foot of the edge's vertex.
+                    let [lo, hi] = b.range;
+                    let tol = b.tolerance.max(LINEAR_RESOLUTION);
+                    if b.curve.point(lo).distance(b.curve.point(hi)) > tol {
+                        return None;
+                    }
+                    let edge = (hi - lo) * 1e-6;
+                    let b = if p0 > lo + edge && p0 < hi - edge {
+                        let moved = crate::intersect::reseamed(b.clone(), p0);
+                        if moved.range == b.range {
+                            return None;
+                        }
+                        moved
+                    } else {
+                        b.clone()
+                    };
+                    return Some(Tight {
+                        pcurves: identity(&b.pcurves),
+                        curve: b.curve,
+                        interval: b.range,
+                        flip: !forward,
+                        tolerance: b.tolerance,
+                    });
+                }
                 None => {
                     if e.start == e.end || !(from < pm && pm < to) {
                         return None;
@@ -189,7 +220,8 @@ fn tight(s: &Shape, g: usize, faces: [usize; 2], cap: f64) -> Option<Tight> {
                 }
             };
             Some(Tight {
-                curve: b.curve,
+                pcurves: identity(&b.pcurves),
+                curve: b.curve.clone(),
                 interval,
                 flip: !forward,
                 tolerance: b.tolerance,

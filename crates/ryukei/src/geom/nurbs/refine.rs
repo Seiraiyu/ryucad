@@ -114,6 +114,83 @@ pub(crate) fn split_at<V: Coords>(
     ]
 }
 
+/// Clamped flat knots and control points carried on past the start of
+/// their domain by `m0` and past its end by `m1` (either may be 0): the
+/// spline goes to Bézier form (every inner knot raised to multiplicity
+/// `p`), and its end pieces, their own polynomials, are carried over the
+/// margins by de Casteljau's algorithm outside `[0, 1]`. The spline is
+/// unchanged over its own domain, its knots there kept bit for bit.
+/// `None` where an extrapolated weight isn't positive.
+pub(crate) fn extend_flat<V: Coords>(
+    flat: &[f64],
+    p: usize,
+    pw: &[Hom<V>],
+    [m0, m1]: [f64; 2],
+) -> Option<(Vec<f64>, Vec<Hom<V>>)> {
+    let (u0, u1) = (flat[0], flat[flat.len() - 1]);
+    let mut inner: Vec<f64> = flat.iter().copied().filter(|&u| u > u0 && u < u1).collect();
+    inner.dedup();
+    let (mut flat, mut hom) = (flat.to_vec(), pw.to_vec());
+    for &t in &inner {
+        let s = flat.iter().filter(|&&u| u == t).count();
+        if s < p {
+            (flat, hom) = insert(&flat, p, &hom, t, p - s);
+        }
+    }
+    let n = hom.len();
+    if m0 > 0.0 {
+        // The first piece over `[u0 - m0, k1]`: de Casteljau at `lam`
+        // below it, its right part.
+        let k1 = inner.first().copied().unwrap_or(u1);
+        let lam = -m0 / (k1 - u0);
+        let piece = de_casteljau(&hom[..=p], lam).1;
+        hom[..=p].copy_from_slice(&piece);
+        for u in &mut flat[..=p] {
+            *u = u0 - m0;
+        }
+    }
+    if m1 > 0.0 {
+        // The last piece over `[kq, u1 + m1]`: its left part at `mu`
+        // past it (from where it now starts, carried already when it is
+        // the only piece).
+        let start = if inner.is_empty() {
+            flat[0]
+        } else {
+            inner[inner.len() - 1]
+        };
+        let mu = 1.0 + m1 / (u1 - start);
+        let piece = de_casteljau(&hom[n - p - 1..], mu).0;
+        hom[n - p - 1..].copy_from_slice(&piece);
+        let len = flat.len();
+        for u in &mut flat[len - p - 1..] {
+            *u = u1 + m1;
+        }
+    }
+    if hom.iter().any(|h| !(h.w > 0.0 && h.w.is_finite())) {
+        return None;
+    }
+    Some((flat, hom))
+}
+
+/// The two parts of a Bézier piece either side of local parameter `t`
+/// (anywhere, not only in `[0, 1]`), by de Casteljau's algorithm: the
+/// left over `[0, t]`, the right over `[t, 1]`.
+fn de_casteljau<V: Coords>(pts: &[Hom<V>], t: f64) -> (Vec<Hom<V>>, Vec<Hom<V>>) {
+    let n = pts.len();
+    let mut work = pts.to_vec();
+    let mut left = vec![work[0]];
+    let mut right = vec![work[n - 1]];
+    for k in 1..n {
+        for i in 0..n - k {
+            work[i] = Hom::lerp(work[i], work[i + 1], t);
+        }
+        left.push(work[0]);
+        right.push(work[n - 1 - k]);
+    }
+    right.reverse();
+    (left, right)
+}
+
 /// Fails unless `t` is finite and strictly inside `[a, b]`.
 fn check_inside(t: f64, [a, b]: [f64; 2]) -> Result<(), Error> {
     if !t.is_finite() {
@@ -399,5 +476,29 @@ mod tests {
             w.split(2.5),
             Err(Error::InvalidNurbs(NurbsError::ShortDomain))
         );
+    }
+
+    /// A curve carried past both ends is the same curve over its own
+    /// domain, its end pieces' polynomials beyond: the extension leaves
+    /// each end with the end piece's value and first two derivatives.
+    #[test]
+    fn extended_curves_carry_their_end_pieces_on() {
+        // A sixteenth of the end pieces past each end, as the
+        // intersectors carry a spline (further, a weight may fall to zero).
+        for (c, [m0, m1]) in [(quarter(), [0.0625, 0.0625]), (wavy(), [0.025, 0.093_75])] {
+            let [a, b] = c.domain();
+            let e = c.extended([m0, m1]).unwrap();
+            assert_eq!(e.domain(), [a - m0, b + m1]);
+            for i in 0..=32 {
+                let t = a + (b - a) * f64::from(i) / 32.0;
+                assert!(e.point(t).distance(c.point(t)) <= 1e-14, "{t}");
+            }
+            for t in [a, b] {
+                let (x, z) = (e.eval(t), c.eval(t));
+                assert!((x.d1 - z.d1).length() <= 1e-12 * (1.0 + z.d1.length()));
+                assert!((x.d2 - z.d2).length() <= 1e-9 * (1.0 + z.d2.length()));
+            }
+        }
+        assert_eq!(periodic().extended([0.1, 0.1]), None);
     }
 }

@@ -325,6 +325,32 @@ pub(crate) fn crossings(
     b: (&Curve2, [f64; 2]),
     tol: f64,
 ) -> Option<Vec<Meet2>> {
+    // A spline that is a straight segment (a line read or converted as a
+    // NURBS) is met as the line it runs along, its parameter mapped.
+    let (la, lb) = (as_line(a.0), as_line(b.0));
+    if la.is_some() || lb.is_some() {
+        let id = |c: &Curve2| (c.clone(), [0.0, 1.0]);
+        let ((ca, ma), (cb, mb)) = (la.unwrap_or_else(|| id(a.0)), lb.unwrap_or_else(|| id(b.0)));
+        let fwd = |m: [f64; 2], r: [f64; 2]| r.map(|t| m[0] + m[1] * t);
+        let back = |m: [f64; 2], t: f64| (t - m[0]) / m[1];
+        let found = crossings((&ca, fwd(ma, a.1)), (&cb, fwd(mb, b.1)), tol)?;
+        return Some(
+            found
+                .into_iter()
+                .map(|m| match m {
+                    Meet2::Point { ta, tb, at } => Meet2::Point {
+                        ta: back(ma, ta),
+                        tb: back(mb, tb),
+                        at,
+                    },
+                    Meet2::Overlap { ta, tb } => Meet2::Overlap {
+                        ta: ta.map(|t| back(ma, t)),
+                        tb: tb.map(|t| back(mb, t)),
+                    },
+                })
+                .collect(),
+        );
+    }
     if let Some(found) = same_carrier(a, b, tol) {
         return Some(found);
     }
@@ -376,6 +402,26 @@ pub(crate) fn crossings(
         }
     }
     Some(merged)
+}
+
+/// A NURBS of degree 1 with two control points and equal weights as the
+/// line through them (its parameter 0 at the first, the distance to the
+/// second at the second), with the affine map from the spline's parameter
+/// to the line's. `None` for any other curve.
+fn as_line(c: &Curve2) -> Option<(Curve2, [f64; 2])> {
+    let Curve2::Nurbs2(n) = c else {
+        return None;
+    };
+    let w = n.weights();
+    if n.degree() != 1 || w.len() != 2 || w[0] != w[1] {
+        return None;
+    }
+    let mut pts = n.control_points();
+    let (p, q) = (pts.next()?, pts.next()?);
+    let [s0, s1] = n.domain();
+    let line = super::Line2::through(p, q).ok()?;
+    let m1 = p.distance(q) / (s1 - s0);
+    Some((Curve2::Line2(line), [-s0 * m1, m1]))
 }
 
 /// Curves on one line, one circle or one ellipse, by rule (their
@@ -672,6 +718,32 @@ fn clusters(cells: Vec<([f64; 2], [f64; 2])>) -> Vec<Vec<([f64; 2], [f64; 2])>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A straight degree 1 spline overlapping a line is met as that line:
+    /// one overlap, in the spline's own parameters.
+    #[test]
+    fn a_straight_spline_overlapping_a_line() {
+        use crate::geom::{KnotVector, NurbsCurve2};
+        let k = KnotVector::clamped(1, &[2.0, 4.0], &[2, 2]).unwrap();
+        let seg =
+            NurbsCurve2::new(k, vec![Point2::new(0.0, 0.0), Point2::new(1.0, 0.0)], None).unwrap();
+        let seg = Curve2::Nurbs2(std::sync::Arc::new(seg));
+        let line = Curve2::Line2(
+            super::super::Line2::through(Point2::new(0.5, 0.0), Point2::new(3.0, 0.0)).unwrap(),
+        );
+        let found = crossings((&seg, [2.0, 4.0]), (&line, [0.0, 2.5]), 1e-8).unwrap();
+        let [Meet2::Overlap { ta, tb }] = found[..] else {
+            panic!("{found:?}");
+        };
+        assert!(
+            (ta[0] - 3.0).abs() <= 1e-12 && (ta[1] - 4.0).abs() <= 1e-12,
+            "{ta:?}"
+        );
+        assert!(
+            tb[0].abs() <= 1e-12 && (tb[1] - 0.5).abs() <= 1e-12,
+            "{tb:?}"
+        );
+    }
 
     #[test]
     fn sweep_and_prune_finds_every_close_pair() {

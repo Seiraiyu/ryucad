@@ -500,16 +500,23 @@ mod tests {
     }
 
     #[test]
-    fn loopless_nurbs_faces_are_faults() {
+    fn loopless_nurbs_faces_close_up_or_are_faults() {
         use crate::geom::{Rigid, Surface};
         use std::sync::Arc;
+        // A sphere's NURBS form closes up (periodic round, its ends
+        // poles): a face on it may have no loops.
         let (mut b, _) =
             crate::primitive::sphere(crate::name::OpKey(1), 1.0, &Rigid::IDENTITY).unwrap();
         let f = b.faces().next().unwrap();
         let (n, _) = b.surfaces[b.faces[f].surface]
             .to_nurbs([[0.0; 2]; 2])
             .unwrap();
-        let s = b.add_surface(Surface::Nurbs(Arc::new(n)));
+        let s = b.add_surface(Surface::Nurbs(Arc::new(n.clone())));
+        b.faces[f].surface = s;
+        assert_eq!(check_topology(&b), []);
+        // Cut off short of its north pole, it doesn't.
+        let (south, _) = n.split(crate::geom::Direction::V, 1.0).unwrap();
+        let s = b.add_surface(Surface::Nurbs(Arc::new(south)));
         b.faces[f].surface = s;
         assert_eq!(check_topology(&b), [Fault::Loopless { face: f }]);
     }
