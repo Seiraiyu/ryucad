@@ -253,9 +253,24 @@ pub fn symbol_shape(s: &StandardSymbol) -> Result<Shape, ShapeError> {
                 Contour::new(edges).expect("closed by construction"),
             )])
         }
+        S::Moire {
+            ring_width,
+            ring_gap,
+            rings,
+            line_width,
+            line_length,
+            line_angle,
+        } => moire(
+            ring_width,
+            ring_gap,
+            rings,
+            line_width,
+            line_length,
+            line_angle,
+        )?,
         S::Hole { d, .. } => positive(vec![Region::solid(circle(Point::ORIGIN, half(d))?)]),
         S::Null { .. } => Shape::default(),
-        S::Ellipse { .. } | S::Moire { .. } | S::Thermal(_) => return Err(bad("not drawn yet")),
+        S::Ellipse { .. } | S::Thermal(_) => return Err(bad("not drawn yet")),
         S::Trapezoid { w, h, dx, dy } => {
             if w <= 0 || h <= 0 || dx.abs() >= h || dy.abs() >= w {
                 return Err(bad("a trapezoid's delta larger than its size"));
@@ -270,6 +285,40 @@ pub fn symbol_shape(s: &StandardSymbol) -> Result<Shape, ShapeError> {
             ])?)])
         }
     })
+}
+
+/// A moiré: `rings` rings `ring_width` wide, the outermost reaching half
+/// the line length out and each next one `ring_width + ring_gap` further
+/// in (a ring reaching the centre is a disc), and two lines `line_width`
+/// wide and `line_length` long through the centre, square to each other,
+/// the first at `line_angle`.
+fn moire(rw: Nm, rg: Nm, rings: u32, lw: Nm, ll: Nm, la: Mdeg) -> Result<Shape, ShapeError> {
+    if rw <= 0 || rg < 0 || lw <= 0 || ll <= 0 {
+        return Err(bad("a moire needs ring and line sizes"));
+    }
+    let mut regions = Vec::new();
+    let outer = half(ll);
+    for k in 0..i64::from(rings) {
+        let r = outer - k * (rw + rg);
+        if r <= 0 {
+            break;
+        }
+        let o = circle(Point::ORIGIN, r)?;
+        regions.push(if r - rw > 0 {
+            Region::ring(o, circle(Point::ORIGIN, r - rw)?)
+        } else {
+            Region::solid(o)
+        });
+    }
+    let bar = centred_rect(ll, lw, &Corners::SHARP)?;
+    for turn in [0, 90_000] {
+        let p = Place {
+            rot: Mdeg::new(i64::from(la.get()) + turn),
+            ..Place::IDENTITY
+        };
+        regions.push(Region::solid(p.contour(&bar)));
+    }
+    Ok(positive(regions))
 }
 
 #[cfg(test)]
@@ -392,5 +441,22 @@ mod tests {
                 "{s:?}"
             );
         }
+    }
+
+    #[test]
+    fn moire_rings_and_lines() {
+        let s = symbol_shape(&StandardSymbol::Moire {
+            ring_width: 5,
+            ring_gap: 10,
+            rings: 4,
+            line_width: 4,
+            line_length: 100,
+            line_angle: Mdeg::ZERO,
+        })
+        .unwrap();
+        // Rings at 50, 35, 20 and a disc of 5, then two lines.
+        assert_eq!(s.parts.len(), 6);
+        let b = s.bounds().unwrap();
+        assert_eq!((b.min, b.max), (Point::new(-50, -50), Point::new(50, 50)));
     }
 }
