@@ -4332,9 +4332,12 @@ name = "ryueda"
 version = "0.0.0"
 dependencies = [
  "assert_cmd",
+ "blake3",
  "clap",
  "mimalloc",
+ "rayon",
  "ryu-doc",
+ "ryu-part21",
  "ryu-session",
  "serde",
  "serde_json",

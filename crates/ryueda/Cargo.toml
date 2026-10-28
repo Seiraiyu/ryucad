@@ -6,8 +6,13 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Rust only: no C or assembly to build on any platform.
+blake3 = { version = "1", features = ["pure"] }
 clap = { version = "4", features = ["derive"] }
+rayon = "1"
 ryu-doc = { path = "../ryu-doc" }
+# The exchange structure alone, to check that 3D models parse: no kernel.
+ryu-part21 = { path = "../ryu-part21" }
 ryu-session = { path = "../ryu-session" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }

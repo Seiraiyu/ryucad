@@ -152,6 +152,14 @@ impl ProjectId {
     }
 }
 
+/// Reads a project ID as [`ProjectId::parse`] checks it.
+impl<'de> Deserialize<'de> for ProjectId {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> core::result::Result<ProjectId, D::Error> {
+        let s = String::deserialize(d)?;
+        ProjectId::parse(&s).map_err(|e| serde::de::Error::custom(e.message))
+    }
+}
+
 impl fmt::Display for ProjectId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -223,6 +231,9 @@ mod tests {
         let m: std::collections::BTreeMap<Id, u8> =
             serde_json::from_value(serde_json::json!({"a": 1})).unwrap();
         assert_eq!(m.keys().next().unwrap().as_str(), "a");
+        let p: ProjectId = serde_json::from_value(serde_json::json!("0".repeat(32))).unwrap();
+        assert_eq!(p.as_str(), "0".repeat(32));
+        assert!(serde_json::from_value::<ProjectId>(serde_json::json!("x")).is_err());
     }
 
     #[test]
