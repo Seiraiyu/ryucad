@@ -981,7 +981,8 @@ pub fn moved(
 /// `assembly.tree`: assembly `part`'s instances, each with its part,
 /// revision and how it resolved, whether it is fixed, its pose in the
 /// assembly, what its mates leave it, a subassembly's instances under it,
-/// and why it failed; and its instance patterns, each with its copies.
+/// and why it failed; its instance patterns, each with its copies; and
+/// `failing`, every feature of it that doesn't build.
 pub fn tree(session: &mut crate::session::Session, part: &str) -> Result<serde_json::Value> {
     let pid = crate::server::part_id(part)?;
     let p = session.project().part(&pid)?.clone();
@@ -994,7 +995,23 @@ pub fn tree(session: &mut crate::session::Session, part: &str) -> Result<serde_j
     }
     let result = session.rebuilt(&pid)?.clone();
     let instances = nodes(session, &p, &result, &Rigid::IDENTITY, &[])?;
-    Ok(serde_json::json!({"part": pid, "revision": p.revision, "instances": instances}))
+    let mut v = serde_json::json!({"part": pid, "revision": p.revision, "instances": instances});
+    // Every feature of the assembly that fails, mates included, which the
+    // tree doesn't list (issue #123: its instances may place while a mate
+    // holding them fails).
+    let failing: Vec<serde_json::Value> = result
+        .features
+        .iter()
+        .filter_map(|(fid, r)| {
+            let e = r.as_ref().err()?;
+            let ty = p.features.get(fid)?.as_ref().ok().map(Feature::type_name);
+            Some(serde_json::json!({"id": fid, "type": ty, "error": e}))
+        })
+        .collect();
+    if !failing.is_empty() {
+        v["failing"] = serde_json::json!(failing);
+    }
+    Ok(v)
 }
 
 /// The tree under `p`, rebuilt as `result`, placed at `at` with its
