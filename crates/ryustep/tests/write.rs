@@ -543,3 +543,62 @@ fn swept_and_lofted_bodies_come_back() {
         assert!((v - w).abs() <= 1e-3 * v, "{v} against {w}");
     }
 }
+
+/// A spline block whose top face lies on an offset of a spline plane: it
+/// is written as STEP's `OFFSET_SURFACE` of the spline and reads back an
+/// offset, the same distance off the same spline, enclosing the same
+/// volume.
+#[test]
+fn offsets_are_written_exactly() {
+    use ryukei::geom::{Offset, Surface};
+    use ryukei::name::FaceRole;
+    use std::sync::Arc;
+    let k = OpKey(1);
+    let mut b = primitive::block(k, 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    ryukei_testkit::nurbs::convert_body(&mut b).unwrap();
+    let top = ryukei::name::Name::derive(k, ryukei::name::Role::Face(FaceRole::PlusZ), &[]);
+    let Some(ryukei::topo::EntityId::Face(f)) = b.by_name(top) else {
+        panic!()
+    };
+    let s = b.surface(b.face(f).unwrap().surface).unwrap().clone();
+    let [du, dv] = s.domain();
+    let n = s
+        .normal((du[0] + du[1]) / 2.0, (dv[0] + dv[1]) / 2.0)
+        .unwrap()
+        .get();
+    // The spline moved a tenth back against its normal, and offset a tenth
+    // along it: the same plane, on the same parameters.
+    let base = s.transformed(&Rigid::translation(n * -0.1));
+    let o = Offset::new(base, 0.1, s.domain()).unwrap();
+    let id = b.add_surface(Surface::Offset(Arc::new(o)));
+    // The face keeps its pcurves: the offset is on its spline's parameters.
+    let fins: Vec<_> = b
+        .face_loops(f)
+        .flat_map(|l| b.loop_fins(l).collect::<Vec<_>>())
+        .map(|fin| (fin, b.fin(fin).unwrap().pcurve))
+        .collect();
+    let sense = b.face(f).unwrap().sense;
+    ryukei::euler::set_surface(&mut b, f, id, sense).unwrap();
+    for (fin, pc) in fins {
+        ryukei::euler::set_pcurve(&mut b, fin, pc).unwrap();
+    }
+    assert_eq!(check(&b), []);
+    let bytes = one(&b, &opts(LengthUnit::Millimeter));
+    let text = String::from_utf8_lossy(&bytes);
+    assert_eq!(text.matches("OFFSET_SURFACE").count(), 1);
+    let r = back(&bytes);
+    let offsets: Vec<f64> = r
+        .faces()
+        .filter_map(|g| match r.surface(r.face(g).unwrap().surface) {
+            Some(Surface::Offset(o)) => Some(o.distance()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(offsets.len(), 1);
+    assert!((offsets[0] - 0.1).abs() < 1e-12, "{offsets:?}");
+    let m = ryukei::mesh::tessellate(&r, &ryukei::mesh::MeshParams::new(1e-4, 0.2)).unwrap();
+    let v = ryukei_testkit::mesh::volume_and_area(&m).0;
+    assert!((v - 6.0).abs() < 1e-6, "{v}");
+}
