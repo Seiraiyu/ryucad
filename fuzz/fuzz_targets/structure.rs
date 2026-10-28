@@ -53,6 +53,11 @@ fuzz_target!(|data: &[u8]| {
         where_used(&mut r, &q, &config);
         if tail.is_empty() {
             assert!(ryupdm::bom::problems(&row).is_empty(), "{part}");
+            let mut totals = std::collections::BTreeMap::new();
+            for f in &rows {
+                *totals.entry(f.row.part.to_string()).or_insert(0) += f.total;
+            }
+            assert_eq!(totals, s.totals(part.as_str()), "{part}");
         }
     }
 });
