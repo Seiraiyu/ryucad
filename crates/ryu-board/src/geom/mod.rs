@@ -8,10 +8,12 @@
 mod contour;
 pub mod decimal;
 mod edge;
+mod place;
 mod rect;
 
 pub use contour::{Contour, ContourError, Pen, Region, Stroke};
 pub use edge::{Arc, Dir, Edge, Segment};
+pub use place::Place;
 pub use rect::Rect;
 
 /// Integer nanometres.
