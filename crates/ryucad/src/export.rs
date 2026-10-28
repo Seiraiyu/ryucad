@@ -1,5 +1,7 @@
 //! Export: a part or an assembly, at the working files, a Git revision or
-//! a release label, as a STEP file.
+//! a release label, as a file of one of the [`Format`]s. With `out` the
+//! daemon writes the file itself, atomically, streaming it, so no file
+//! crosses the socket; without, its bytes follow the answer.
 //!
 //! A part is one product of its solids as shown, in model order (consumed
 //! solids aren't); an assembly is a product placing each instance's
@@ -87,22 +89,162 @@ pub struct Child {
 }
 
 /// What `export` asks for: the part, the revision (`working`, a Git
-/// revision, or `label:<L>`), `ap242` or `ap214`, `mm` or `m`, and the
-/// header's time stamp and file name.
+/// revision, or `label:<L>`), the format (else `out`'s extension, else
+/// STEP), the absolute path to write, `ap242` or `ap214`, the unit, and
+/// the header's time stamp and file name.
 #[derive(Clone, Debug, Default)]
 pub struct Ask {
     pub part: String,
     pub rev: Option<String>,
+    pub format: Option<String>,
+    pub out: Option<String>,
     pub schema: Option<String>,
     pub unit: Option<String>,
     pub time_stamp: Option<String>,
     pub file_name: Option<String>,
 }
 
-/// Writes `ask.part` as a STEP file: the answer, with the file's bytes.
-/// `export_failed` when a feature of anything it places fails,
-/// `export_unrepresentable` for a face STEP can't describe.
+/// The formats `export` writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Format {
+    Step,
+}
+
+impl Format {
+    pub const ALL: [Format; 1] = [Format::Step];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Format::Step => "step",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Format> {
+        Format::ALL.into_iter().find(|f| f.as_str() == s)
+    }
+
+    /// The format a file name's extension names, in any case: `.step` or
+    /// `.stp`.
+    pub fn of_path(path: &str) -> Option<Format> {
+        let ext = std::path::Path::new(path).extension()?.to_str()?;
+        match ext.to_ascii_lowercase().as_str() {
+            "step" | "stp" => Some(Format::Step),
+            _ => None,
+        }
+    }
+}
+
+/// The format asked for: `format`, else the one `out`'s extension names,
+/// else STEP.
+fn format(ask: &Ask) -> Result<Format> {
+    let names = || {
+        Format::ALL
+            .iter()
+            .map(|f| f.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match (ask.format.as_deref(), ask.out.as_deref()) {
+        (Some(f), _) => Format::parse(f).ok_or_else(|| {
+            Error::new(
+                Code::InvalidParam,
+                format!("format {f:?} isn't one export writes: expected {}", names()),
+            )
+            .with("param", "format")
+        }),
+        (None, Some(out)) => Format::of_path(out).ok_or_else(|| {
+            Error::new(
+                Code::InvalidParam,
+                format!(
+                    "{out} has no extension export knows: give the format ({})",
+                    names()
+                ),
+            )
+            .with("param", "format")
+        }),
+        (None, None) => Ok(Format::Step),
+    }
+}
+
+/// The file `out` names, checked: absolute, in a folder that exists.
+fn out_path(out: &str) -> Result<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(out);
+    if !path.is_absolute() || path.file_name().is_none() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("out {out:?} isn't an absolute path to a file: the daemon's folder isn't the caller's"),
+        )
+        .with("param", "out"));
+    }
+    let dir = path.parent().expect("an absolute file path has a parent");
+    if !dir.is_dir() {
+        return Err(Error::new(
+            Code::NotFound,
+            format!("{} isn't a folder to write {out} in", dir.display()),
+        )
+        .with("path", dir));
+    }
+    Ok(path)
+}
+
+/// The answer to an export of `encoding` (a format's name): `write`'s
+/// bytes written to `out` atomically, with their count and BLAKE3, or
+/// with no `out` following the answer.
+fn deliver(
+    mut result: Value,
+    out: Option<&std::path::Path>,
+    encoding: &str,
+    write: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<()>,
+) -> Result<Answer> {
+    let Some(out) = out else {
+        let mut bytes = Vec::new();
+        write(&mut bytes)
+            .map_err(|e| Error::new(Code::Internal, format!("writing {encoding}: {e}")))?;
+        return Ok(Answer::bytes(result, encoding, bytes));
+    };
+    let (bytes, blake3) = crate::doc::source::write_atomic_with(out, |f| {
+        let mut w = Tally {
+            inner: std::io::BufWriter::new(f),
+            hasher: blake3::Hasher::new(),
+            bytes: 0,
+        };
+        write(&mut w)?;
+        std::io::Write::flush(&mut w.inner)?;
+        Ok((w.bytes, w.hasher.finalize().to_hex().to_string()))
+    })?;
+    result["out"] = json!(out);
+    result["bytes"] = json!(bytes);
+    result["blake3"] = json!(blake3);
+    Ok(Answer::json(result))
+}
+
+/// A writer that counts and hashes what passes through it.
+struct Tally<W> {
+    inner: W,
+    hasher: blake3::Hasher,
+    bytes: u64,
+}
+
+impl<W: std::io::Write> std::io::Write for Tally<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        self.bytes += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Writes `ask.part` in the format asked for: the answer, and the file
+/// written to `out` or its bytes following the answer. `export_failed`
+/// when a feature of anything it places fails, `export_unrepresentable`
+/// for a face STEP can't describe.
 pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
+    let format = format(&ask)?;
+    let out = ask.out.as_deref().map(out_path).transpose()?;
     let (schema, schema_name) = match ask.schema.as_deref().unwrap_or("ap242") {
         "ap242" => (Schema::Ap242, "ap242"),
         "ap214" => (Schema::Ap214, "ap214"),
@@ -156,10 +298,15 @@ pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
         (None, Some(c)) => utc(crate::git::repo(s.root())?.commit_time(c)?),
         (None, None) => utc(now()),
     };
+    let file_name = ask.file_name.or_else(|| {
+        out.as_ref()
+            .and_then(|o| o.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+    });
     let opts = WriteOptions {
         schema,
         unit,
-        file_name: ask.file_name.unwrap_or_default(),
+        file_name: file_name.unwrap_or_default(),
         time_stamp,
         ..WriteOptions::default()
     };
@@ -186,6 +333,7 @@ pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
     let mut result = json!({
         "part": part,
         "rev": ask.rev.as_deref().unwrap_or("working"),
+        "format": format.as_str(),
         "schema": schema_name,
         "unit": unit_name,
         "file_name": opts.file_name,
@@ -195,7 +343,9 @@ pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
     if let Some(c) = at {
         result["commit"] = json!(c);
     }
-    Ok(Answer::bytes(result, "step", bytes))
+    deliver(result, out.as_deref(), format.as_str(), |w| {
+        w.write_all(&bytes)
+    })
 }
 
 fn invalid(param: &str, value: &str, expected: &str) -> Error {
@@ -502,10 +652,15 @@ pub(crate) mod tests {
     use crate::mate::tests::add_in;
     use crate::server::tests::{call, fresh};
 
+    /// The answer to an export with `params`.
+    pub(crate) fn answered(s: &mut Session, params: Value) -> Result<Answer> {
+        let req = crate::proto::Request::from_rpc("export", Some(params))?;
+        crate::server::answer_live(s, None, None, req)
+    }
+
     /// The answer to an export with `params`, and the file's bytes.
     pub(crate) fn exported(s: &mut Session, params: Value) -> Result<(Value, Vec<u8>)> {
-        let req = crate::proto::Request::from_rpc("export", Some(params))?;
-        let a = crate::server::answer_live(s, None, None, req)?;
+        let a = answered(s, params)?;
         Ok((a.result, a.binary.expect("an export answers with bytes")))
     }
 
@@ -748,6 +903,86 @@ pub(crate) mod tests {
         let e = exported(&mut s, json!({"part": "frame"})).unwrap_err();
         assert_eq!(e.code, Code::ExportFailed);
         assert_eq!(e.details["failing"][0]["feature"], "miss");
+    }
+
+    #[test]
+    fn the_daemon_writes_out() {
+        let (_dir, mut s) = project();
+        let to = tempfile::tempdir().unwrap();
+        let path = to.path().join("bolt.step");
+        let stamp = "2026-10-28T00:00:00";
+        let a = answered(
+            &mut s,
+            json!({"part": "bolt", "out": path, "time_stamp": stamp}),
+        )
+        .unwrap();
+        // Written whole, nothing after the answer.
+        assert!(a.binary.is_none());
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(!to.path().join(".bolt.step.tmp").exists());
+        let v = &a.result;
+        assert_eq!(
+            (&v["out"], &v["bytes"], &v["blake3"], &v["format"]),
+            (
+                &json!(path),
+                &json!(bytes.len()),
+                &json!(blake3::hash(&bytes).to_hex().to_string()),
+                &json!("step")
+            )
+        );
+        // The bytes an answer carries, the header naming the file.
+        assert_eq!(v["file_name"], "bolt.step");
+        let (_, back) = exported(
+            &mut s,
+            json!({"part": "bolt", "time_stamp": stamp, "file_name": "bolt.step"}),
+        )
+        .unwrap();
+        assert_eq!(back, bytes);
+        // The format from the extension, in any case, or as given.
+        let stp = to.path().join("BOLT.STP");
+        let v = answered(
+            &mut s,
+            json!({"part": "bolt", "out": stp, "time_stamp": stamp}),
+        )
+        .unwrap()
+        .result;
+        assert_eq!(v["format"], "step");
+        let any = to.path().join("bolt.out");
+        let v = answered(
+            &mut s,
+            json!({"part": "bolt", "out": any, "format": "step", "time_stamp": stamp}),
+        )
+        .unwrap()
+        .result;
+        assert_eq!(v["format"], "step");
+        // Refused before anything is written.
+        let missing = to.path().join("nowhere/bolt.step");
+        for (params, code, param) in [
+            (
+                json!({"part": "bolt", "out": "bolt.step"}),
+                Code::InvalidParam,
+                json!("out"),
+            ),
+            (
+                json!({"part": "bolt", "out": any}),
+                Code::InvalidParam,
+                json!("format"),
+            ),
+            (
+                json!({"part": "bolt", "format": "obj"}),
+                Code::InvalidParam,
+                json!("format"),
+            ),
+            (
+                json!({"part": "bolt", "out": missing}),
+                Code::NotFound,
+                Value::Null,
+            ),
+        ] {
+            let e = answered(&mut s, params.clone()).unwrap_err();
+            assert_eq!((e.code, &e.details["param"]), (code, &param), "{params}");
+        }
+        assert!(!missing.parent().unwrap().exists());
     }
 
     #[test]

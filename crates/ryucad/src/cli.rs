@@ -1930,6 +1930,8 @@ fn request(cmd: &Command) -> Option<Request> {
         } => Request::Export {
             part: part.clone(),
             rev: rev.clone(),
+            format: None,
+            out: None,
             schema: schema.clone(),
             unit: unit.clone(),
             time_stamp: time_stamp.clone(),

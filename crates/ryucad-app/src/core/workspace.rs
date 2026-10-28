@@ -667,6 +667,8 @@ impl Workspace {
         let req = Request::Export {
             part: e.part.clone(),
             rev: None,
+            format: None,
+            out: None,
             schema: Some(e.schema.clone()),
             unit: Some(e.unit.clone()),
             time_stamp: None,
