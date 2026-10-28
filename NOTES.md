@@ -82,3 +82,16 @@
   crosses nothing in that direction. Pinned by value
   (`a_seam_through_a_sample_meshes`, full identities) and by seed.
   Golden hashes unchanged.
+- Lap 8: #91. Not reproduced (no access to the issue's tray part, and a
+  79-face tray built here meshes coarse/normal/fine in 0.06/0.09/0.14 s
+  on davids-mac-mini). What blocked: every daemon request runs under one
+  core lock, and after each change the app sends doctor and a mesh.get
+  per level of detail. v0.5.0's doctor rebuilt a part whose sketch reads
+  other features cold on every call (fixed by #125 on this branch: it now
+  reuses the session). Meshing (minutes where the mesher stalls, as #122
+  did) now runs outside the lock: `Serve::prepare` finds the meshes the
+  cache lacks under it, the loop makes them with it released and puts
+  them back, and `handle` finds them cached. Assumption: those two were
+  the issue's two minutes; if the owner still sees it, the next suspect
+  is whatever else the app asks after `model.changed` (history.log, a
+  compare's diff --model, release.check), all still under the lock.

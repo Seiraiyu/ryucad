@@ -45,6 +45,10 @@ pub trait Product: Sized + Send + Sync + 'static {
     fn view_json(view: &Self::View, into: &mut Map<String, Value>);
 }
 
+/// Work [`Serve::prepare`] found: run without the daemon's lock, it gives
+/// back what goes into the session under it.
+pub type Prepared<S> = Box<dyn FnOnce() -> Box<dyn FnOnce(&mut S) + Send> + Send>;
+
 /// A product whose daemon these modules run: its requests, its session
 /// and how it answers them.
 pub trait Serve: Product + prefs::Schema {
@@ -83,6 +87,19 @@ pub trait Serve: Product + prefs::Schema {
         root: &std::path::Path,
         req: Self::Request,
     ) -> ryu_doc::error::Result<rpc::Answer>;
+    /// Slow work `req` can do without the lock every other request waits
+    /// on, found under it (ryucad's display meshes the cache doesn't hold
+    /// yet). The loop runs it with the lock released, hands what it made
+    /// back to the session under the lock, then calls `handle`, which finds
+    /// it done. `None` (the default) answers the request under the lock
+    /// alone.
+    fn prepare(
+        session: &mut Option<Self::Session>,
+        req: &Self::Request,
+    ) -> Option<Prepared<Self::Session>> {
+        let _ = (session, req);
+        None
+    }
     /// Brings the session and what subscribers know up to date with the
     /// files: before a subscription, and while anyone watches.
     fn settle(
@@ -104,6 +121,11 @@ pub(crate) mod testing {
     use serde_json::{Map, Value, json};
 
     pub struct Test;
+
+    /// Where [`Test`]'s `slow` request is: 0 not started, 1 waiting
+    /// without the lock, 2 let go.
+    pub static GATE: (std::sync::Mutex<u8>, std::sync::Condvar) =
+        (std::sync::Mutex::new(0), std::sync::Condvar::new());
 
     /// A product's topics, as ryucad's were when these tests were written.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,7 +193,7 @@ pub(crate) mod testing {
     impl crate::Serve for Test {
         const MANIFEST: &'static str = "ryutest.json";
         const IDLE_VAR: &'static str = "RYUTEST_IDLE_TIMEOUT";
-        type Session = ();
+        type Session = Vec<String>;
         type Request = Request;
         type Version = Value;
 
@@ -199,7 +221,7 @@ pub(crate) mod testing {
         }
 
         fn handle(
-            _: &mut Option<()>,
+            _: &mut Option<Vec<String>>,
             live: &mut crate::live::Live<Test>,
             _: Option<&str>,
             _: &std::path::Path,
@@ -211,7 +233,32 @@ pub(crate) mod testing {
             ))
         }
 
-        fn settle(_: &mut Option<()>, _: &mut crate::live::Live<Test>, _: &std::path::Path) {}
+        /// `slow` waits at [`GATE`] without the lock until let go, then
+        /// notes itself in the session.
+        fn prepare(
+            _: &mut Option<Vec<String>>,
+            req: &Request,
+        ) -> Option<crate::Prepared<Vec<String>>> {
+            (req.0 == "slow").then(|| -> crate::Prepared<Vec<String>> {
+                Box::new(|| {
+                    let (gate, open) = &GATE;
+                    let mut g = gate.lock().unwrap();
+                    *g = 1;
+                    open.notify_all();
+                    while *g != 2 {
+                        g = open.wait(g).unwrap();
+                    }
+                    Box::new(|s: &mut Vec<String>| s.push("slow".into()))
+                })
+            })
+        }
+
+        fn settle(
+            _: &mut Option<Vec<String>>,
+            _: &mut crate::live::Live<Test>,
+            _: &std::path::Path,
+        ) {
+        }
 
         fn poll_ms() -> u64 {
             250

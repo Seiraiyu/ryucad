@@ -860,6 +860,102 @@ pub fn handle_safely(
     guarded(slot, root, |s| answer_live(s, live, me, req))
 }
 
+/// The display meshes a `mesh.get` of the working files needs that the
+/// cache doesn't hold yet, which the daemon makes without its lock, so a
+/// window fetching a fine mesh of a large part doesn't hold up every other
+/// request (#91). `handle` then finds them cached.
+pub fn prepare(
+    slot: &mut Option<Session>,
+    req: &Request,
+) -> Option<ryu_session::Prepared<Session>> {
+    let Request::MeshGet {
+        part,
+        feature,
+        quality,
+        rev,
+        ..
+    } = req
+    else {
+        return None;
+    };
+    if rev.as_deref().is_some_and(|r| r != "working") {
+        return None;
+    }
+    let session = slot.as_mut()?;
+    let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        mesh_pending(session, part, feature.as_deref(), quality.as_deref())
+    }));
+    let pending = match found {
+        Ok(p) => p?,
+        // As `guarded`: the request opens a new session and says why.
+        Err(_) => {
+            *slot = None;
+            return None;
+        }
+    };
+    let budget = mesh_budget();
+    Some(Box::new(move || {
+        let made = pending.make();
+        Box::new(move |s: &mut Session| s.meshes.put(made, budget))
+    }))
+}
+
+/// The meshes [`mesh_binary`] and [`mesh_get`] would make; `None` when the
+/// cache has them all, or the request fails (`handle` says how).
+fn mesh_pending(
+    session: &mut Session,
+    part: &str,
+    only: Option<&str>,
+    quality: Option<&str>,
+) -> Option<mesh::Pending> {
+    let (quality, items): (_, Vec<(Feature, crate::rebuild::Built)>) = if is_assembly(session, part)
+    {
+        let (pid, _, quality) = mesh_args(part, None, quality).ok()?;
+        let model = session
+            .model(&pid, &crate::doc::assembly::Rev::Working)
+            .ok()?;
+        let items = model
+            .occurrences
+            .iter()
+            .filter(|o| only.is_none_or(|p| crate::assembly::path_text(&o.path) == p))
+            .flat_map(|o| &o.solids)
+            .map(|s| (s.feature.as_ref().clone(), s.built.as_ref().clone()))
+            .collect();
+        (quality, items)
+    } else {
+        let (pid, only, quality) = mesh_args(part, only, quality).ok()?;
+        let p = session.project().part(&pid).ok()?;
+        let solids = Solids::of(p);
+        let features: BTreeMap<Id, Feature> = p
+            .features
+            .iter()
+            .filter_map(|(id, f)| Some((id.clone(), f.as_ref().ok()?.clone())))
+            .collect();
+        let result = session.rebuilt(&pid).ok()?;
+        let items = result
+            .shown(&solids)
+            .into_iter()
+            .filter(|s| only.as_ref().is_none_or(|o| o == s.solid))
+            .filter_map(|s| {
+                let (f, b) = s.state?;
+                Some((features.get(f)?.clone(), b.as_ref().clone()))
+            })
+            .collect();
+        (quality, items)
+    };
+    let refs: Vec<(&Feature, &crate::rebuild::Built)> = items.iter().map(|(f, b)| (f, b)).collect();
+    session.meshes.pending(&refs, quality)
+}
+
+/// The display mesh cache's budget in bytes.
+fn mesh_budget() -> usize {
+    config::user("display.mesh_cache_mib")
+        .as_u64()
+        .unwrap_or(256) as usize
+        * 1024
+        * 1024
+}
+
 fn guarded<T>(
     slot: &mut Option<Session>,
     root: &Path,
@@ -3541,11 +3637,7 @@ pub fn meshes(
         .iter()
         .filter_map(|(id, f)| Some((id.clone(), f.as_ref().ok()?.clone())))
         .collect();
-    let budget = config::user("display.mesh_cache_mib")
-        .as_u64()
-        .unwrap_or(256) as usize
-        * 1024
-        * 1024;
+    let budget = mesh_budget();
     let result = session.rebuilt(part)?;
     // The feature each shown state is from sizes its mesh.
     let built: Vec<(Id, Result<(Id, crate::rebuild::Built)>)> = result
@@ -3699,11 +3791,7 @@ pub fn occurrence_meshes(
     solids: &[&crate::assembly::Solid],
     quality: mesh::Quality,
 ) -> Vec<std::sync::Arc<mesh::DisplayMesh>> {
-    let budget = config::user("display.mesh_cache_mib")
-        .as_u64()
-        .unwrap_or(256) as usize
-        * 1024
-        * 1024;
+    let budget = mesh_budget();
     let items: Vec<(&Feature, &crate::rebuild::Built)> = solids
         .iter()
         .map(|s| (s.feature.as_ref(), s.built.as_ref()))
@@ -7087,6 +7175,48 @@ pub(crate) mod tests {
             );
             let e = call(&mut s, "mesh.get", json!({"part": "p", "feature": "z"})).unwrap_err();
             assert_eq!(e.code, Code::NotFound);
+        });
+    }
+
+    #[test]
+    fn meshes_are_made_before_the_lock_is_taken() {
+        crate::config::tests::with_config(|_| {
+            let (dir, s) = with_part();
+            let mut slot = Some(s);
+            for (id, r) in [("a", 1), ("b", 2)] {
+                call(
+                    slot.as_mut().unwrap(),
+                    "feature.add",
+                    json!({"part": "p", "type": "sphere", "id": id, "params": {"radius": r}}),
+                )
+                .unwrap();
+            }
+            let req = |rev: Option<&str>| {
+                Request::from_rpc(
+                    "mesh.get",
+                    Some(
+                        json!({"part": "p", "quality": "coarse", "transfer": "binary",
+                                "rev": rev}),
+                    ),
+                )
+                .unwrap()
+            };
+            // A revision's meshes are made under the lock, as before.
+            assert!(prepare(&mut slot, &req(Some("HEAD"))).is_none());
+            let job = prepare(&mut slot, &req(None)).expect("two meshes to make");
+            let put = job();
+            let s = slot.as_mut().unwrap();
+            assert_eq!(s.meshes.len(), 0);
+            put(s);
+            assert_eq!(s.meshes.len(), 2);
+            assert!(prepare(&mut slot, &req(Some("working"))).is_none());
+            // The answer is the one a session that meshed itself gives.
+            let mut a = handle_safely(&mut slot, None, None, dir.path(), req(None)).unwrap();
+            assert_eq!(slot.as_ref().unwrap().meshes.len(), 2);
+            slot.as_mut().unwrap().meshes = mesh::Cache::default();
+            let mut b = handle_safely(&mut slot, None, None, dir.path(), req(None)).unwrap();
+            assert_eq!(a.binary.take(), b.binary.take());
+            assert_eq!(a.result, b.result);
         });
     }
 

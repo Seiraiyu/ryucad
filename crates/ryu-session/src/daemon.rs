@@ -1,6 +1,7 @@
 //! A product's session daemon: one long-running process per project that
 //! keeps the loaded project in memory. It serves newline-delimited
-//! JSON-RPC 2.0 on the project's [`Endpoint`], one request at a time. The
+//! JSON-RPC 2.0 on the project's [`Endpoint`], one request at a time
+//! (but for slow work a request prepares without the lock, [`Serve::prepare`]). The
 //! requests and the session are the product's ([`Serve`]); the loop, the
 //! subscriptions, idling out and shutting down are the same for every
 //! product.
@@ -275,7 +276,7 @@ fn serve<P: Serve>(
                 let hello = matches!(control, Control::Hello { .. });
                 // A new app window, rather than its second connection.
                 let window = matches!(control, Control::Hello { window: true });
-                let mut core = lock(&state.core);
+                let mut core = lock_prepared(&state.core, &req);
                 let Core { session, live } = &mut *core;
                 let r = P::handle(session, live, me.as_deref(), &state.root, req);
                 if window && r.is_ok() {
@@ -328,6 +329,23 @@ fn serve<P: Serve>(
     }
 }
 
+/// The lock, for answering `req`, once the slow work it prepares
+/// ([`Serve::prepare`]) is done without it, so other connections' requests
+/// don't wait on that work (#91).
+fn lock_prepared<'a, P: Serve>(
+    core: &'a Mutex<Core<P>>,
+    req: &P::Request,
+) -> MutexGuard<'a, Core<P>> {
+    let prepared = P::prepare(&mut lock(core).session, req);
+    let made =
+        prepared.and_then(|job| std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).ok());
+    let mut core = lock(core);
+    if let (Some(put), Some(s)) = (made, core.session.as_mut()) {
+        put(s);
+    }
+    core
+}
+
 /// Opens a subscription for the connection's participant.
 fn subscribe<P: Serve>(
     state: &State<P>,
@@ -364,4 +382,39 @@ fn subscribe<P: Serve>(
         sub,
         json!({"subscribed": shown, "session": core.live.list()}),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{GATE, Request, Test};
+
+    #[test]
+    fn prepared_work_runs_without_the_lock() {
+        let core = Arc::new(Mutex::new(Core::<Test> {
+            session: Some(Vec::new()),
+            live: Live::with_poll(250),
+        }));
+        let slow = {
+            let core = Arc::clone(&core);
+            std::thread::spawn(move || {
+                let core = lock_prepared(&core, &Request("slow".into(), Value::Null));
+                core.session.clone().unwrap()
+            })
+        };
+        // Once the slow request's work waits at the gate, another request
+        // takes the lock.
+        let (gate, open) = &GATE;
+        let mut g = lock(gate);
+        while *g != 1 {
+            g = open.wait(g).unwrap();
+        }
+        let other = lock_prepared(&core, &Request("quick".into(), Value::Null));
+        assert!(other.session.as_ref().unwrap().is_empty());
+        drop(other);
+        *g = 2;
+        open.notify_all();
+        drop(g);
+        assert_eq!(slow.join().unwrap(), vec!["slow".to_owned()]);
+    }
 }
