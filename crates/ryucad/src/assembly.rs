@@ -32,6 +32,11 @@ pub struct Occurrence {
     pub rev: Rev,
     pub solids: Vec<Solid>,
     pub pose: Rigid,
+    /// Its pose in each assembly along its path: `within[i]` in the one
+    /// `path[..i]` reaches (`within[0]` is `pose`), each composed from
+    /// the poses below it only. Two occurrences of one subassembly are
+    /// related through it exactly, wherever it is placed (interference).
+    pub within: Vec<Rigid>,
 }
 
 /// A solid of an occurrence's part as the part shows it: its founder, the
@@ -133,6 +138,7 @@ impl Model {
             rev: rev.clone(),
             solids: shown,
             pose: Rigid::IDENTITY,
+            within: Vec::new(),
         }])
     }
 
@@ -145,12 +151,21 @@ impl Model {
             for o in &placed.model.occurrences {
                 let mut path = prefix.clone();
                 path.extend(o.path.iter().cloned());
+                let pose = placed.pose.then_after(&o.pose);
+                let mut within = Vec::with_capacity(o.within.len() + 1);
+                within.push(pose);
+                within.extend(o.within.iter().copied());
+                // A copy's two steps are one assembly's.
+                while within.len() < path.len() {
+                    within.insert(1, o.pose);
+                }
                 out.push(Occurrence {
                     path,
                     part: o.part.clone(),
                     rev: o.rev.clone(),
                     solids: o.solids.clone(),
-                    pose: placed.pose.then_after(&o.pose),
+                    pose,
+                    within,
                 });
             }
         };
