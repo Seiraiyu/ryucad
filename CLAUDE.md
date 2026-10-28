@@ -68,6 +68,8 @@ RYUCAD_BARS=1 cargo test -p ryucad --release --test step_bar -- --nocapture   # 
 RYUCAD_BARS=1 cargo test -p ryucad-app --release --test frames -- --ignored --nocapture   # 1,001 occurrences at 60 frames a second; hardware adapters only
 ryucad interference <asm> [--instance <path>]               # which instances of an assembly share a volume
 ryucad export <part> --out <file> [--rev <rev>|label:<L>] [--schema ap214] [--unit m]   # a part or assembly as STEP
+ryucad export <part> --out <file.stl|file.3mf> [--chord 0.01mm] [--angle 15deg] [--ascii]  # as STL or 3MF, written by the daemon
+cargo test -p ryukei-bench --features occt,formats --release --test formats -- --nocapture   # STL read by OCCT, 3MF by lib3mf; devcontainer only
 cd fuzz && cargo +nightly fuzz run predicates               # needs nightly + cargo-fuzz (targets also: interval, euler, nurbs, mesh, feature, sweep, intersect, general, boolean, blend, expr, sketch, mate, merge, pdm, step, heal, codec)
 sh scripts/test-install.sh target/release/ryucad          # install.sh against a fake release
 sh scripts/smoke.sh target/release/ryucad target/release/ryucad-app   # an agent session, then the app's offscreen frame
@@ -95,6 +97,7 @@ The product targets Windows, macOS, and Linux natively, not just WSL. CI (`.gith
 - `crates/ryu-session`: what a ryu product's session daemon shares (library), generic over a `Product` marker (ryucad's is `ryucad::Cad`): JSON-RPC framing, endpoints, notifications, freshness (`fresh::Stamps`), participants (`live`), the activity log with undo, the preferences file (`prefs`; the keys stay the product's), and the daemon loop and its clients, over a `Serve` impl (the product's requests and session). ryucad names its types for itself (`ryucad::endpoint::Endpoint`), so its callers never see the parameter.
 - `crates/ryupdm`: local product data management (library): the PDM settings, part properties, revision labels, release records, the release branch's history and tags, part states, the release checks, the commit guard and merge validation. It reads projects through `ryucad-doc` and Git through `gix`, and never calls the kernel, a session or the app.
 - `crates/ryustep`: STEP files (library): Part 21 exchange structures, the AP203/AP214/AP242 entities, units and the product tree, and bodies read and written. `tests/data/occt` holds files OCCT wrote, with the `gen.cpp` that made them; `tests/corpus` holds public domain NIST test models, byte for byte, with `manifest.txt` and the pinned corpus's `pinned.txt`.
+- `crates/ryuformats`: the mesh and scene formats ryucad writes besides STEP (library): STL and 3MF from ryukei's meshes, a deterministic zip writer, pure Rust over `ryukei` and `miniz_oxide`. It never depends on ryucad or `ryustep`, and ryukei never depends on it.
 - `crates/ryucad`: the application layer and binary.
 - `crates/ryucad-app`: the desktop app, a client of the daemon (`core`: link, model, people, navigation, picking, forms; `ui`: the egui window and the wgpu scene).
 - `packaging/`: what the installers register: the Linux desktop entry and project MIME type, and the macOS launcher's AppleScript.
@@ -148,6 +151,7 @@ What each phase decided is recorded per area under `docs/claude/`, imported here
 - @docs/claude/ryucad-solids.md — solids, fillets, chamfers, holes, patterns
 - @docs/claude/ryucad-assemblies.md — assemblies, mates, scale, interference
 - @docs/claude/ryucad-step.md — STEP import, re-import and export
+- @docs/claude/ryucad-formats.md — export formats: the scene, STL, 3MF, and their references
 - @docs/claude/ryupdm.md — the PDM data model and local PDM
 - @docs/claude/ryupdm-review.md — hosted review
 - @docs/claude/shared-crates.md — ryu-math, ryu-doc, ryu-session
