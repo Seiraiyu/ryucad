@@ -1559,6 +1559,7 @@ pub enum Tab {
     Activity,
     History,
     Releases,
+    Bom,
 }
 
 /// How long ago `ms` (Unix milliseconds) was, for people.
@@ -1576,9 +1577,16 @@ pub fn ago(ms: u64) -> String {
 }
 
 /// The activity log, newest first, with undo and redo per entry; the
-/// project's Git history, read-only; and the release records of `part`
-/// (the chosen feature's part, else the first).
-pub fn journal(ui: &mut egui::Ui, ws: &mut Workspace, tab: &mut Tab, part: Option<&str>) {
+/// project's Git history, read-only; the release records of `part` (the
+/// chosen feature's part, else the first); and the BOM of the part the
+/// window shows.
+pub fn journal(
+    ui: &mut egui::Ui,
+    ws: &mut Workspace,
+    view: &mut View,
+    tab: &mut Tab,
+    part: Option<&str>,
+) {
     // A short tab still fills the panel, so the view keeps its size.
     ui.set_min_size(ui.available_size());
     ui.horizontal(|ui| {
@@ -1592,12 +1600,16 @@ pub fn journal(ui: &mut egui::Ui, ws: &mut Workspace, tab: &mut Tab, part: Optio
         {
             ws.load_releases();
         }
+        if ui.selectable_value(tab, Tab::Bom, "BOM").clicked() {
+            ws.load_bom();
+        }
     });
     ui.separator();
     match tab {
         Tab::Activity => activity(ui, ws),
         Tab::History => history(ui, ws),
         Tab::Releases => releases(ui, ws, part),
+        Tab::Bom => crate::ui::bom::tab(ui, ws, view),
     }
 }
 

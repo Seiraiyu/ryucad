@@ -333,7 +333,13 @@ impl Opened {
                     .as_ref()
                     .map(|k| k.0.clone())
                     .or_else(|| self.ws.model.parts.keys().next().cloned());
-                panels::journal(ui, &mut self.ws, &mut self.tab, part.as_deref());
+                panels::journal(
+                    ui,
+                    &mut self.ws,
+                    &mut self.view,
+                    &mut self.tab,
+                    part.as_deref(),
+                );
             });
         egui::Panel::left("tree")
             .resizable(true)
