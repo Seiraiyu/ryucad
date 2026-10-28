@@ -625,6 +625,11 @@ impl<'p> Rebuild<'p> {
         }
     }
 
+    /// The project being rebuilt.
+    pub fn project(&self) -> &'p Project {
+        self.project
+    }
+
     /// Builds those of `parts` that place nothing and aren't built at
     /// their revisions yet side by side, keeping each as [`Rebuild::result`]
     /// would: the parts an assembly places, an imported file's hundreds
@@ -1976,6 +1981,9 @@ pub(crate) mod tests {
         let mut slot = Some(s);
         crate::server::settle(&mut slot, &mut live, dir.path());
         let sub = live.hub.subscribe("p-x", &[Topic::Model]);
+        // As the daemon's subscribe does: what is news is measured from
+        // here.
+        crate::server::settle(&mut slot, &mut live, dir.path());
         let mut s = slot.take().unwrap();
         call_live(
             &mut s,
@@ -1995,6 +2003,55 @@ pub(crate) mod tests {
             .map(|p| &p["part"])
             .collect();
         assert_eq!(parts, [&json!("bolt"), &json!("frame")]);
+    }
+
+    #[test]
+    fn a_subscription_starts_quiet_and_hears_assemblies_without_occurrences() {
+        use crate::live::Live;
+        use crate::notify::Topic;
+        use crate::server::tests::{call_live, drain};
+        let (dir, s) = project();
+        place_in(
+            dir.path(),
+            "frame",
+            "b1",
+            "bolt",
+            json!("working"),
+            [0.0; 3],
+        );
+        let mut live = Live::new();
+        let mut slot = Some(s);
+        crate::server::settle(&mut slot, &mut live, dir.path());
+        let sub = live.hub.subscribe("p-x", &[Topic::Model]);
+        // The subscription's own settling has nothing to tell: what
+        // happened before it isn't news.
+        crate::server::settle(&mut slot, &mut live, dir.path());
+        live.hub.send(Topic::Model, "marker", &json!({}));
+        assert!(drain(&sub).is_empty());
+        let mut s = slot.take().unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.edit",
+            json!({"part": "bolt", "id": "shank", "params": {"radius": 4}}),
+        )
+        .unwrap();
+        live.hub.send(Topic::Model, "marker", &json!({}));
+        let got = drain(&sub);
+        let frame = got[0].1["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["part"] == "frame")
+            .unwrap()
+            .clone();
+        // A window asks for the occurrences of what it shows.
+        assert_eq!(frame["occurrence_count"], 1, "{frame}");
+        assert!(frame.get("occurrences").is_none(), "{frame}");
+        // A rebuild still gives them.
+        let v = call(&mut s, "rebuild", json!({"part": "frame"})).unwrap();
+        assert_eq!(v["parts"][0]["occurrences"].as_array().unwrap().len(), 1);
     }
 
     #[test]

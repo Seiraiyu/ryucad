@@ -2190,7 +2190,17 @@ impl Workspace {
                 // Any assembly may now reach the part, or no longer.
                 self.read_where_used();
                 for report in params["parts"].as_array().into_iter().flatten() {
-                    self.part_changed(report);
+                    // An assembly's occurrences come only when asked for.
+                    match (report["occurrences"].is_null(), report["part"].as_str()) {
+                        (true, Some(id)) if report["kind"] == "assembly" => {
+                            let req = Request::Rebuild {
+                                part: Some(id.to_owned()),
+                                rev: None,
+                            };
+                            self.send(req, Pending::Rebuild(id.to_owned()));
+                        }
+                        _ => self.part_changed(report),
+                    }
                 }
                 for id in params["removed"].as_array().into_iter().flatten() {
                     self.model.remove_part(id.as_str().unwrap_or_default());
