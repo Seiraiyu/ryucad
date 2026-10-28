@@ -1947,6 +1947,10 @@ fn request(cmd: &Command) -> Option<Request> {
             unit: unit.clone(),
             time_stamp: time_stamp.clone(),
             file_name: out.file_name().map(|n| n.to_string_lossy().into_owned()),
+            chord: None,
+            angle: None,
+            max_edge: None,
+            ascii: false,
         },
         Command::Rebuild { part, rev } => Request::Rebuild {
             part: part.clone(),
