@@ -2346,20 +2346,26 @@ fn bolts_drawn(a: &App) -> bool {
     }
 }
 
-#[test]
-fn the_bom_tab_chooses_lines_renumbers_and_goes_flat() {
-    let _one = one_at_a_time();
-    if !gpu() {
-        return;
-    }
-    let p = framed_bolts();
-    let mut h = window(&p);
+/// Opens the BOM tab of a window on `framed_bolts`, read.
+fn bom_tab(p: &Project) -> Harness<'static, App> {
+    let mut h = window(p);
     frames(&mut h, bolts_drawn);
     h.get_by_label("BOM").click();
     frames(&mut h, |a| {
         a.opened().ws.idle() && a.opened().ws.bom.root.is_some()
     });
     shown(&mut h, "BOM of frame");
+    h
+}
+
+#[test]
+fn the_bom_tab_chooses_a_line_and_goes_flat() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = framed_bolts();
+    let mut h = bom_tab(&p);
     // Choosing a line selects its occurrences and frames them.
     let before = h.state().opened().view.nav.camera.clone();
     h.get_by_label("BOM line 1: bolt").click();
@@ -2370,7 +2376,22 @@ fn the_bom_tab_chooses_lines_renumbers_and_goes_flat() {
             .is_some_and(|m| m.selection == ["frame/b1", "frame/b2"])
     });
     assert_ne!(h.state().opened().view.nav.camera, before);
-    // The item number, typed and set.
+    // Flat: one line per part.
+    h.get_by_label("Flat").click();
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && !a.opened().ws.bom.flat_lines.is_empty()
+    });
+    shown(&mut h, "BOM line: bolt working");
+}
+
+#[test]
+fn an_item_number_is_set_in_the_bom_tab() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = framed_bolts();
+    let mut h = bom_tab(&p);
     h.get_by_label("Item of bolt in frame").click();
     shown(&mut h, "Set item");
     h.get_by_label("Item of bolt in frame")
@@ -2383,22 +2404,22 @@ fn the_bom_tab_chooses_lines_renumbers_and_goes_flat() {
     });
     let bom = p.ok(&["bom", "frame"]);
     assert_eq!(bom["tree"]["children"][0]["item"], 7);
-    // Flat: one line per part.
+    // The flat BOM's numbers aren't edited.
     h.get_by_label("Flat").click();
     frames(&mut h, |a| {
         a.opened().ws.idle() && !a.opened().ws.bom.flat_lines.is_empty()
     });
-    shown(&mut h, "BOM line: bolt working");
+    h.step();
     assert!(h.query_by_label("Item of bolt in frame").is_none());
 }
 
 #[test]
-fn where_used_shows_an_assembly_and_a_compare_marks_the_bom() {
+fn where_used_shows_an_assembly() {
     let _one = one_at_a_time();
     if !gpu() {
         return;
     }
-    let p = framed_bolts().committed();
+    let p = framed_bolts();
     let mut h = sized(&p, 1200.0);
     frames(&mut h, bolts_drawn);
     // The bolt chosen in the tree: the Part section says where it is used.
@@ -2416,11 +2437,20 @@ fn where_used_shows_an_assembly_and_a_compare_marks_the_bom() {
     frames(&mut h, |a| {
         a.opened().ws.model.focus.as_deref() == Some("frame")
     });
+}
+
+#[test]
+fn a_compare_marks_the_bom_tab() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = framed_bolts().committed();
+    let mut h = bom_tab(&p);
     // An agent adds a bolt; compared with HEAD, the tab says so.
     p.ok(&[
         "feature", "add", "frame", "instance", "--id", "b3", "--of", "bolt",
     ]);
-    h.get_by_label("BOM").click();
     menu(&mut h, "View", "Compare with HEAD");
     frames(&mut h, |a| {
         compared(a) && a.opened().ws.idle() && a.opened().ws.bom.diff.is_some()

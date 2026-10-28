@@ -741,8 +741,8 @@ pub(crate) mod tests {
         assert!(t.conflict.is_none());
     }
 
-    /// The answer's diff from a revision where asm placed one p@A at item
-    /// 3, a washer, and the kit held a third tube.
+    /// The answer's diff from a revision where asm placed one p@A, at
+    /// item 3, and eight washers, and no kit.
     fn diff() -> Value {
         json!({"summary": {"added": 0, "removed": 1, "changed": 2},
             "tree": [
