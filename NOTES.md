@@ -73,3 +73,12 @@
   file); ryucad and ryustep goldens unchanged. The third reproducer in
   the issue (plan 8.C's spline revolution and torus, an hour per run) is
   on 8.C's branch, not this one, and wasn't tried.
+- Lap 7: #117. Two tori's unite leaves a torus face with one hole; the
+  seam `uv::gap` put lands exactly on one of its edge's samples (snapped
+  onto it). Unwrapped a period round, that sample sat an ulp past the
+  computed seam line, so `seam_crossing` asked for a crossing and the
+  bisection added a sample within an ulp of it: one point, two anchors
+  (`Classes::mark`, `BadDomain`). An end already exactly on the seam now
+  crosses nothing in that direction. Pinned by value
+  (`a_seam_through_a_sample_meshes`, full identities) and by seed.
+  Golden hashes unchanged.

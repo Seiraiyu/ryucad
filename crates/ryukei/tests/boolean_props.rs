@@ -405,3 +405,44 @@ fn necks_and_poles_mesh() {
         }
     }
 }
+
+/// Issue #117: two tori whose unite leaves a torus face with one hole,
+/// its seam put exactly at one of its edge's samples. Rounding once read
+/// that sample as a seam crossing and added another at the same point
+/// (`BadDomain`).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_seam_through_a_sample_meshes() {
+    let sa = Spec {
+        kind: 5,
+        a: 0.5405617373148383,
+        b: 0.4,
+        axis: (
+            -0.17158784683972828,
+            -0.5825913472709525,
+            0.4708438700234861,
+        ),
+        angle: 0.7396244999856291,
+        at: (0.22101973464374663, 0.2982650363357113, 0.2248878469230322),
+    };
+    let sb = Spec {
+        kind: 5,
+        a: 0.4203857859417263,
+        b: 0.4,
+        axis: (-0.8822978670939383, 0.7406376357489366, 0.6537003860049525),
+        angle: 0.9176323069644821,
+        at: (
+            -0.5691656652255034,
+            0.07580219358310905,
+            -0.052662940594093585,
+        ),
+    };
+    let (a, b) = (solid(&sa), solid(&sb));
+    for op in [BooleanOp::Unite, BooleanOp::Intersect, BooleanOp::Subtract] {
+        assert!(run(op, &a, &b).unwrap().is_some(), "{op:?} built");
+    }
+    identities(sa, sb).unwrap();
+}
