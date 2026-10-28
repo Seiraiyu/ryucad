@@ -3,8 +3,10 @@
 //! negatives and merging copper are stage 1's booleans.
 
 mod build;
+mod symbols;
 
 pub use build::{circle, polygon, rect};
+pub use symbols::symbol_shape;
 
 use crate::geom::{Edge, Nm, Pen, Place, Rect, Region, Stroke};
 use crate::model::Polarity;
