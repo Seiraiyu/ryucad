@@ -147,3 +147,24 @@ fn an_item_number_is_set_through_bom_renumber_and_a_stale_one_conflicts() {
     let bom = p.ok(&["bom", "frame"]);
     assert_eq!(bom["tree"]["children"][0]["item"], 3);
 }
+
+#[test]
+fn the_csv_written_is_the_clis() {
+    let p = assembled();
+    let mut ws = open(&p);
+    ws.set_bom_flat(true);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && !ws.bom.flat_lines.is_empty()));
+    ws.open_bom_export();
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("bom.csv");
+    ws.bom_export.as_mut().unwrap().path = out.display().to_string();
+    ws.run_bom_export();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.bom_export.as_ref().is_some_and(|e| e.done.is_some())
+    }));
+    let cli = p.ok(&["bom", "frame", "--flat", "--format", "csv"]);
+    assert_eq!(
+        std::fs::read_to_string(&out).unwrap(),
+        cli["csv"].as_str().unwrap()
+    );
+}

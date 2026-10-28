@@ -382,6 +382,7 @@ impl Opened {
         }
         crate::ui::step::import(&ctx, &mut self.ws, &mut self.browse, view);
         crate::ui::step::export(&ctx, &mut self.ws, &mut self.browse, view);
+        crate::ui::bom::export(&ctx, &mut self.ws, &mut self.browse, view);
         // Closing the dialog ends what it paints (#138).
         if !self.dialogs.interference {
             self.ws.interference = None;
@@ -567,6 +568,11 @@ impl eframe::App for App {
                     }
                     Browse::Save => {
                         if let Some(e) = &mut o.ws.export {
+                            e.path = path;
+                        }
+                    }
+                    Browse::SaveCsv => {
+                        if let Some(e) = &mut o.ws.bom_export {
                             e.path = path;
                         }
                     }

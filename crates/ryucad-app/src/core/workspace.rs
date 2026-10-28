@@ -79,6 +79,8 @@ enum Pending {
     },
     /// An item number set from the BOM tab (`bom.renumber`).
     BomRenumber(crate::core::bom::ItemEdit),
+    /// The BOM's CSV, to write at this path.
+    BomExport(PathBuf),
     /// A part's properties for the Part section; after a conflict, with
     /// the form as it was.
     Props(String, Option<Box<PartProps>>),
@@ -266,6 +268,8 @@ pub struct Workspace {
     bom_open: bool,
     bom_waiting: bool,
     bom_again: bool,
+    /// The BOM tab's Export CSV…, while open.
+    pub bom_export: Option<crate::core::bom::BomExport>,
     pub settings: Settings,
     /// The last doctor report, once asked for.
     pub doctor: Option<Value>,
@@ -363,6 +367,7 @@ impl Workspace {
             bom_open: false,
             bom_waiting: false,
             bom_again: false,
+            bom_export: None,
             settings: Settings::default(),
             doctor: None,
             interference: None,
@@ -1107,6 +1112,35 @@ impl Workspace {
         self.load_bom();
     }
 
+    /// Opens Export CSV… for the BOM as the tab shows it.
+    pub fn open_bom_export(&mut self) {
+        self.bom_export = Some(crate::core::bom::BomExport {
+            flat: self.bom.flat,
+            ..Default::default()
+        });
+    }
+
+    /// Writes the open export's CSV: `bom.get` with `format: csv`, the
+    /// bytes written atomically where it says.
+    pub fn run_bom_export(&mut self) {
+        let part = self.bom.root.clone().or_else(|| self.bom_root());
+        let Some(e) = self.bom_export.as_mut() else {
+            return;
+        };
+        let path = absolute(e.path.trim());
+        e.waiting = true;
+        e.error = None;
+        e.done = None;
+        let req = Request::BomGet {
+            part,
+            rev: None,
+            flat: e.flat,
+            depth: None,
+            format: Some("csv".to_owned()),
+        };
+        self.send(req, Pending::BomExport(path));
+    }
+
     /// Saves the item number being typed in the BOM tab (`bom.renumber`),
     /// against the revision of its assembly the window last saw. Text
     /// that isn't an item number is refused here, and kept.
@@ -1562,6 +1596,23 @@ impl Workspace {
                     self.ask_bom(true);
                 } else {
                     self.bom_read();
+                }
+            }
+            (Pending::BomExport(path), a) => {
+                let Some(e) = self.bom_export.as_mut() else {
+                    return;
+                };
+                e.waiting = false;
+                let written = a.and_then(|a| {
+                    let csv = a.result["csv"].as_str().ok_or_else(|| {
+                        Error::new(Code::Internal, "the BOM came without its CSV")
+                    })?;
+                    ryucad::doc::project::write_atomic(&path, csv)?;
+                    Ok(csv.len())
+                });
+                match written {
+                    Ok(n) => e.done = Some((path.display().to_string(), n)),
+                    Err(err) => e.error = Some(err),
                 }
             }
             (Pending::BomRenumber(edit), r) => {
