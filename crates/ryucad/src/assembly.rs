@@ -628,10 +628,13 @@ impl Store {
             return;
         };
         let solids = crate::solid::Solids::of(p);
-        let shown: Vec<&crate::rebuild::Built> = r
+        let shown: Vec<&crate::rebuild::Made> = r
             .shown(&solids)
             .into_iter()
-            .filter_map(|s| s.state.map(|(_, b)| b.as_ref()))
+            .filter_map(|s| match r.output(s.state?.0)? {
+                crate::rebuild::Output::Solids(m) => Some(m.as_ref()),
+                _ => None,
+            })
             .collect();
         let empty = Cache::new();
         let cache = self.caches.get(part).unwrap_or(&empty);
@@ -642,8 +645,13 @@ impl Store {
     /// assemblies and the shown bodies of those whose rebuilds went, and
     /// `extra`.
     pub fn held(&self, project: &Project, extra: u64) -> u64 {
+        if let Some(held) = self.budget.cached() {
+            return held + extra;
+        }
         let leaves = self.results.keys().filter(|id| is_leaf(project, id));
-        self.budget.total(leaves, self.models.keys(), extra)
+        let held = self.budget.total(leaves, self.models.keys(), 0);
+        self.budget.cache(held);
+        held + extra
     }
 
     /// Lets go of parts' rebuilds, least recently used first, until what
@@ -654,6 +662,9 @@ impl Store {
             return Vec::new();
         }
         let held = self.held(project, extra);
+        if held <= self.budget.max {
+            return Vec::new();
+        }
         let leaves: Vec<Id> = self
             .results
             .keys()

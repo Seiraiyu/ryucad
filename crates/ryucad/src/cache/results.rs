@@ -184,6 +184,7 @@ pub fn decode_made(bytes: &[u8]) -> Option<Made> {
         hash,
         applied,
         import,
+        encoded: Default::default(),
     })
 }
 
