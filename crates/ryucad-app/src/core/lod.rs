@@ -5,6 +5,9 @@
 //! fine. An occurrence whose box lies outside the view isn't drawn. A
 //! level not fetched yet is asked for, nearest occurrences first, and
 //! the body is drawn at the level it has meanwhile, so nothing stalls.
+//! What the GPU holds stays within `display.gpu_memory` ([`within`]):
+//! past it, the farthest bodies drop their finer levels first, then the
+//! farthest go undrawn.
 
 use crate::core::model::{BodyKey, Model, Pose};
 use crate::core::nav::Projector;
@@ -99,6 +102,84 @@ pub fn choose(
     }
     wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
     (drawn, wanted.into_iter().map(|(_, k, l)| (k, l)).collect())
+}
+
+/// What the GPU holds of a mesh, in bytes: its triangles' corners and
+/// its edges' ends, 40 bytes each (position, normal, colour).
+pub fn gpu_bytes(m: &WireBody) -> u64 {
+    let Ok(w) = &m.mesh else {
+        return 0;
+    };
+    let segments: usize = w.edges.iter().map(|(_, p)| p.len().saturating_sub(1)).sum();
+    ((w.triangles.len() * 3 + segments * 2) * 40) as u64
+}
+
+/// `drawn` and `wanted` ([`choose`]'s) kept within `budget` bytes of
+/// meshes on the GPU, each body and level counted once: bodies drawn
+/// finer than the user's display quality are drawn at it instead, the
+/// farthest first, then the farthest bodies aren't drawn, until what is
+/// drawn fits; and no finer level is asked for while it doesn't.
+pub fn within(
+    model: &Model,
+    pr: &Projector,
+    mut drawn: Vec<Drawn>,
+    mut wanted: Vec<(BodyKey, Quality)>,
+    budget: u64,
+) -> (Vec<Drawn>, Vec<(BodyKey, Quality)>) {
+    use std::collections::HashMap;
+    // Each body and level: its bytes and how many occurrences draw it.
+    let mut held: HashMap<(String, Quality), (u64, usize)> = HashMap::new();
+    let mut total = 0;
+    let add = |held: &mut HashMap<(String, Quality), (u64, usize)>, d: &Drawn| {
+        let e = held
+            .entry((d.mesh.hash.clone(), d.level))
+            .or_insert_with(|| (gpu_bytes(&d.mesh), 0));
+        e.1 += 1;
+        if e.1 == 1 { e.0 } else { 0 }
+    };
+    for d in &drawn {
+        total += add(&mut held, d);
+    }
+    if total <= budget {
+        return (drawn, wanted);
+    }
+    let take = |held: &mut HashMap<(String, Quality), (u64, usize)>, d: &Drawn| {
+        let e = held
+            .get_mut(&(d.mesh.hash.clone(), d.level))
+            .expect("counted");
+        e.1 -= 1;
+        if e.1 == 0 { e.0 } else { 0 }
+    };
+    let (_, _, forward) = pr.camera.basis();
+    let depth = |d: &Drawn| {
+        let o = d.pose.apply([0.0; 3]);
+        (0..3)
+            .map(|k| (o[k] - pr.camera.eye[k]) * forward[k])
+            .sum::<f64>()
+    };
+    // Farthest first.
+    drawn.sort_by(|a, b| depth(b).total_cmp(&depth(a)));
+    wanted.retain(|(_, l)| rank(*l) <= rank(model.base));
+    for d in drawn.iter_mut() {
+        if total <= budget {
+            break;
+        }
+        if rank(d.level) > rank(model.base) {
+            total -= take(&mut held, d);
+            d.mesh = Arc::clone(&d.base);
+            d.level = model.base;
+            total += add(&mut held, d);
+        }
+    }
+    let mut gone = 0;
+    while total > budget && gone < drawn.len() {
+        total -= take(&mut held, &drawn[gone]);
+        gone += 1;
+    }
+    drawn.drain(..gone);
+    // Nearest first again, as drawn.
+    drawn.reverse();
+    (drawn, wanted)
 }
 
 #[cfg(test)]
@@ -204,6 +285,60 @@ mod tests {
         // The display quality changing drops every level.
         m.clear_meshes();
         assert!(m.levels.is_empty() && m.levels_asked.is_empty());
+    }
+
+    #[test]
+    fn past_the_gpu_budget_far_bodies_go_coarser_then_go() {
+        // Three distinct bodies in a row, each fetched fine and normal:
+        // 30 triangles fine, 10 normal, 3600 and 1200 bytes.
+        let mesh = |hash: &str, tris: usize| WireBody {
+            feature: "s".into(),
+            hash: hash.into(),
+            mesh: Ok(ryucad::mesh::WireMesh {
+                triangles: vec![[0, 1, 2]; tris],
+                ..cube("s", 0.0).mesh.unwrap()
+            }),
+        };
+        let mut m = Model::default();
+        m.base = Quality::Normal;
+        let camera = ryucad::view::Camera {
+            eye: [-1.0, 0.0, 0.0],
+            target: [0.0; 3],
+            up: [0.0, 0.0, 1.0],
+            projection: ryucad::view::Projection::Perspective { fov_deg: 30.0 },
+        };
+        let pr = Projector::new(&camera, 1.0, [0.0; 3], 1.0);
+        let drawn: Vec<Drawn> = ["a", "b", "c"]
+            .iter()
+            .enumerate()
+            .map(|(i, h)| Drawn {
+                key: ("row".into(), format!("c{i}/s")),
+                mesh: Arc::new(mesh(h, 30)),
+                level: Quality::Fine,
+                base: Arc::new(mesh(h, 10)),
+                pose: crate::core::model::Pose::of(
+                    [i as f64, 0.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                    [1.0, 0.0, 0.0],
+                ),
+            })
+            .collect();
+        let wanted = vec![(("row".to_owned(), "c0/s".to_owned()), Quality::Fine)];
+        // Everything fits.
+        let (all, w) = within(&m, &pr, drawn.clone(), wanted.clone(), 10_800);
+        assert_eq!(all.len(), 3);
+        assert_eq!(w.len(), 1);
+        // The two farthest go normal; nothing finer is asked for.
+        let (some, w) = within(&m, &pr, drawn.clone(), wanted.clone(), 6_000);
+        let levels: Vec<(&str, Quality)> =
+            some.iter().map(|d| (d.key.1.as_str(), d.level)).collect();
+        use Quality::*;
+        assert_eq!(levels, [("c0/s", Fine), ("c1/s", Normal), ("c2/s", Normal)]);
+        assert!(w.is_empty());
+        // Smaller still: all normal, then the farthest isn't drawn.
+        let (few, _) = within(&m, &pr, drawn, wanted, 2_400);
+        let keys: Vec<&str> = few.iter().map(|d| d.key.1.as_str()).collect();
+        assert_eq!(keys, ["c0/s", "c1/s"]);
     }
 
     #[test]
