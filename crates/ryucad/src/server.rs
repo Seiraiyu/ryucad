@@ -176,6 +176,8 @@ pub fn answer_live(
         Request::Export {
             part,
             rev,
+            format,
+            out,
             schema,
             unit,
             time_stamp,
@@ -185,6 +187,8 @@ pub fn answer_live(
             crate::export::Ask {
                 part,
                 rev,
+                format,
+                out,
                 schema,
                 unit,
                 time_stamp,
