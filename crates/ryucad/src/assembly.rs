@@ -1853,6 +1853,55 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_assembly_releases_only_with_its_item_numbers_whole() {
+        let (dir, mut s) = released();
+        let r = dir.path();
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "pair", "kind": "assembly"}),
+        )
+        .unwrap();
+        place_in(r, "pair", "one", "bolt", json!({"label": "A"}), [0.0; 3]);
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "pair", "properties": {"number": "200"}}),
+        )
+        .unwrap();
+        let path = part_path(r, &id("pair"));
+        let numbered = |items: Value| {
+            let mut v: Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            v["items"] = items;
+            write_json(&path, &v).unwrap();
+        };
+        let problems = |s: &mut Session| -> Vec<Value> {
+            s.refresh().unwrap();
+            let v = call(
+                s,
+                "release.propose",
+                json!({"part": "pair", "dry_run": true}),
+            )
+            .unwrap();
+            v["problems"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p["code"].clone())
+                .collect()
+        };
+        // Its bolt has no number; then a number for a part it doesn't
+        // place, which a release doesn't mind.
+        numbered(json!({}));
+        assert_eq!(problems(&mut s), [json!("bom_item_missing")]);
+        numbered(json!({"bolt": 1, "nut": 1}));
+        assert_eq!(problems(&mut s), [json!("bom_item_duplicate")]);
+        numbered(json!({"bolt": 1, "nut": 2}));
+        assert_eq!(problems(&mut s), Vec::<Value>::new());
+    }
+
+    #[test]
     fn a_rebuild_reports_an_assemblys_instances_and_occurrences() {
         let (dir, mut s) = released();
         let r = dir.path();
