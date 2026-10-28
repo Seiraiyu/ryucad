@@ -569,31 +569,40 @@ fn loops(cut: &Cut, k: usize, periods: (Option<f64>, Option<f64>)) -> Vec<Info> 
             }
             Loop::Edges(uses) => uses.len(),
         };
-        let mut x: Vec<[f64; 2]> = Vec::new();
+        let mut raw: Vec<[f64; 2]> = Vec::new();
         for i in 0..n {
-            for (_, p) in samples(cut, k, l, i) {
-                let raw = [p.x, p.y];
-                let next = match x.last() {
-                    Some(q) => core::array::from_fn(|d| unwrap(raw[d], q[d], period[d])),
-                    None => raw,
-                };
-                x.push(next);
-            }
+            raw.extend(samples(cut, k, l, i).into_iter().map(|(_, p)| [p.x, p.y]));
         }
-        let (first, last) = (x[0], x[x.len() - 1]);
+        // On a pole, a sample's parameter in direction `d` is whatever
+        // projection makes of a point where it is undefined.
+        let on_pole = |q: &[f64; 2], d: usize| {
+            let o = 1 - d;
+            (0..2).any(|e| {
+                let at = domain[o][e];
+                collapsed[o][e] && (q[o] - at).abs() <= 1e-9 * at.abs().max(1.0)
+            })
+        };
         // Across a pole the free parameter's jump is free, so a loop
         // through a pole winds round neither direction it could (a lune
         // between two meridians, or a sphere's hemisphere bounded by one
         // circle through both poles): as the mesher reads it.
-        let through_pole: [bool; 2] = core::array::from_fn(|d| {
-            let o = 1 - d;
-            x.iter().any(|q| {
-                (0..2).any(|e| {
-                    let at = domain[o][e];
-                    collapsed[o][e] && (q[o] - at).abs() <= 1e-9 * at.abs().max(1.0)
-                })
-            })
+        let through_pole: [bool; 2] = core::array::from_fn(|d| raw.iter().any(|q| on_pole(q, d)));
+        let x = match (0..2).find(|&d| through_pole[d] && period[d].is_some()) {
+            Some(d) => across_poles(&raw, d, period, |q| on_pole(q, d)),
+            None => None,
+        }
+        .unwrap_or_else(|| {
+            let mut x: Vec<[f64; 2]> = Vec::with_capacity(raw.len());
+            for &r in &raw {
+                let next = match x.last() {
+                    Some(q) => core::array::from_fn(|d| unwrap(r[d], q[d], period[d])),
+                    None => r,
+                };
+                x.push(next);
+            }
+            x
         });
+        let (first, last) = (x[0], x[x.len() - 1]);
         let wind: [i64; 2] = core::array::from_fn(|d| match period[d] {
             Some(_) if through_pole[d] => 0,
             Some(p) => ((last[d] - first[d]) / p).round() as i64,
@@ -616,6 +625,70 @@ fn loops(cut: &Cut, k: usize, periods: (Option<f64>, Option<f64>)) -> Vec<Info> 
         });
     }
     out
+}
+
+/// A loop's samples unwrapped where it passes through a pole in its
+/// free direction `d`: each run of samples on the pole becomes two, at
+/// the free parameters of the samples either side of it, and the step
+/// between them, along the pole, is whatever closes the loop (the
+/// shortest way, unless that would leave it wound round). So a cone's
+/// lune between two rulings through its apex reads as the lune, not as
+/// a hole round the whole cone. `None` where every sample is on a pole.
+fn across_poles(
+    raw: &[[f64; 2]],
+    d: usize,
+    period: [Option<f64>; 2],
+    on_pole: impl Fn(&[f64; 2]) -> bool,
+) -> Option<Vec<[f64; 2]>> {
+    let p = period[d]?;
+    let n = raw.len();
+    let s0 = (0..n).find(|&i| !on_pole(&raw[i]))?;
+    // The points in order from `s0`, each step's free jump marked.
+    let mut pts: Vec<([f64; 2], bool)> = Vec::new();
+    let mut m = 0;
+    while m < n {
+        let i = (s0 + m) % n;
+        if !on_pole(&raw[i]) {
+            pts.push((raw[i], false));
+            m += 1;
+            continue;
+        }
+        let run = (m..n).take_while(|&r| on_pole(&raw[(s0 + r) % n])).count();
+        let before = raw[(s0 + m + n - 1) % n];
+        let after = raw[(s0 + m + run) % n];
+        let mut a = raw[i];
+        a[d] = before[d];
+        let mut b = raw[i];
+        b[d] = after[d];
+        pts.push((a, false));
+        pts.push((b, true));
+        m += run;
+    }
+    let mut x: Vec<[f64; 2]> = Vec::with_capacity(pts.len());
+    let mut free = None;
+    for (k, &(r, jump)) in pts.iter().enumerate() {
+        let next = match x.last() {
+            None => r,
+            Some(q) if jump => {
+                free.get_or_insert(k);
+                let mut next = core::array::from_fn(|e| unwrap(r[e], q[e], period[e]));
+                next[d] = q[d] + offset(r[d], q[d], p);
+                next
+            }
+            Some(q) => core::array::from_fn(|e| unwrap(r[e], q[e], period[e])),
+        };
+        x.push(next);
+    }
+    // Close the loop: the samples end where they began.
+    let turns = ((x[x.len() - 1][d] - x[0][d]) / p).round();
+    if let Some(f) = free
+        && turns != 0.0
+    {
+        for q in &mut x[f..] {
+            q[d] -= turns * p;
+        }
+    }
+    Some(x)
 }
 
 /// Where a loop crosses the parameter line `j = c`.
