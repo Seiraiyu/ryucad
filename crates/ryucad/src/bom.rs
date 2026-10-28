@@ -551,7 +551,7 @@ mod tests {
 
     #[test]
     fn check_reports_what_makes_a_bom_unsound() {
-        let (_dir, mut s) = assembly();
+        let (dir, mut s) = assembly();
         let found = |s: &mut Session, part: Option<&str>| -> Vec<(String, String)> {
             let params = part.map_or(json!({}), |p| json!({"part": p}));
             let v = call(s, "check", params).unwrap();
@@ -593,6 +593,30 @@ mod tests {
         assert_eq!(
             found(&mut s, Some("tube")),
             [("bom_amount_missing".to_owned(), "tube".to_owned())]
+        );
+        // A hand edit gives the kit p's number: an error, reported once,
+        // as the BOM's (doctor's copy is left out).
+        let path = dir.path().join("parts/asm/part.json");
+        let mut list: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        list["items"]["kit"] = json!(1);
+        crate::doc::project::write_json(&path, &list).unwrap();
+        let e = call(&mut s, "check", json!({})).unwrap_err();
+        assert_eq!(e.code, crate::error::Code::CheckFailed);
+        let items: Vec<(&Value, &Value, &Value)> = e.details["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["code"].as_str().unwrap().starts_with("bom_item"))
+            .map(|f| (&f["code"], &f["source"], &f["parts"]))
+            .collect();
+        assert_eq!(
+            items,
+            [(
+                &json!("bom_item_duplicate"),
+                &json!("bom"),
+                &json!(["p", "kit"])
+            )]
         );
     }
 
