@@ -816,7 +816,10 @@ pub enum Request {
         participant: Option<String>,
     },
     /// Sets the caller's own camera: explicitly, or from a standard `view`
-    /// and/or framing the entities in `fit` (the whole model when empty).
+    /// or one normal to the face `normal_to`, and/or framing the entities
+    /// in `fit` (the whole model when empty). A `view` that names no
+    /// standard view is a named view of `part` (else the caller's focus,
+    /// else the project's model when it is one part), restored as saved.
     #[serde(rename = "camera.set")]
     CameraSet {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -825,6 +828,10 @@ pub enum Request {
         view: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         fit: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        normal_to: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
     },
     /// The named views of `part`, or of every part, with each listed
     /// part's revision.

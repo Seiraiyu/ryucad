@@ -298,12 +298,21 @@ enum Command {
     /// Show a participant's camera (the one human's, unless --of names
     /// another), or set this agent's with --eye, --target and --up.
     Camera {
-        #[arg(long = "of", value_name = "PARTICIPANT", conflicts_with_all = ["eye", "view", "fit"])]
+        #[arg(long = "of", value_name = "PARTICIPANT", conflicts_with_all = ["eye", "view", "fit", "normal_to"])]
         of: Option<String>,
-        /// Look from a standard view: front, back, left, right, top,
-        /// bottom or iso, framing the model (or the --fit entities).
-        #[arg(long, conflicts_with = "eye")]
+        /// Look from a standard view (front, back, left, right, top, bottom, an edge or corner
+        /// of the cube such as front_top_right, iso, dimetric or trimetric), framing the model
+        /// (or the --fit entities); or restore a named view as saved.
+        #[arg(long, conflicts_with_all = ["eye", "normal_to"])]
         view: Option<String>,
+        /// Look along this face's normal (a planar face) or axis (a face of revolution), its
+        /// longest straight edge level, framing the model (or the --fit entities).
+        #[arg(long, value_name = "REF", conflicts_with = "eye")]
+        normal_to: Option<String>,
+        /// The part whose named view --view is (this agent's focus, else the project's model
+        /// when it is one part).
+        #[arg(long, requires = "view")]
+        part: Option<String>,
         /// Frame these entities, keeping the view direction.
         #[arg(long, value_name = "REF", conflicts_with = "eye")]
         fit: Vec<String>,
@@ -2077,6 +2086,8 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Camera {
             of,
             view,
+            normal_to,
+            part,
             fit,
             eye,
             target,
@@ -2084,15 +2095,19 @@ fn request(cmd: &Command) -> Option<Request> {
             fov,
             ortho,
         } => match camera_arg(eye, target, up, fov, ortho) {
-            _ if view.is_some() || !fit.is_empty() => Request::CameraSet {
+            _ if view.is_some() || normal_to.is_some() || !fit.is_empty() => Request::CameraSet {
                 camera: None,
                 view: view.clone(),
                 fit: fit.clone(),
+                normal_to: normal_to.clone(),
+                part: part.clone(),
             },
             Some(camera) => Request::CameraSet {
                 view: None,
                 fit: Vec::new(),
                 camera: Some(camera),
+                normal_to: None,
+                part: None,
             },
             None => Request::CameraGet {
                 participant: of.clone(),
