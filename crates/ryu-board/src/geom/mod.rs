@@ -7,8 +7,10 @@
 
 pub mod decimal;
 mod edge;
+mod rect;
 
 pub use edge::{Arc, Dir, Edge, Segment};
+pub use rect::Rect;
 
 /// Integer nanometres.
 pub type Nm = i64;
