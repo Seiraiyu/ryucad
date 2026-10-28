@@ -13,6 +13,9 @@ occt = ["dep:cxx", "dep:cxx-build"]
 # The SMLib comparison: a C++ shim linked against libsmlib, built from
 # NVIDIA's USD BRep (the devcontainer builds it). Off by default too.
 smlib = ["dep:cxx", "dep:cxx-build"]
+# The mesh formats' references: a C++ shim linked against lib3mf, the 3MF
+# Consortium's library (the devcontainer builds it); STL goes to OCCT.
+formats = ["dep:cxx", "dep:cxx-build"]
 
 [dependencies]
 cxx = { version = "1", optional = true }

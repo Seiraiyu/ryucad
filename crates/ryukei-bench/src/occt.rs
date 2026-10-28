@@ -3,7 +3,8 @@
 //! sweeps from `BRepPrimAPI_MakePrism` and `BRepPrimAPI_MakeRevol` over a
 //! face built from a [`BenchProfile`], booleans from `BRepAlgoAPI_Cut`,
 //! fillets and chamfers from `BRepFilletAPI`, meshes from `BRepMesh_IncrementalMesh`
-//! in absolute mode, and exact volume, area and distance from the B-rep.
+//! in absolute mode, exact volume, area and distance from the B-rep, and
+//! STL files read by `RWStl`.
 //! Only built with the `occt` feature, against a system OCCT 7.8 or later
 //! (`OCCT_DIR`, default `/usr`).
 
@@ -68,6 +69,7 @@ mod ffi {
         ) -> Result<UniquePtr<Shape>>;
         fn step_read(path: &str, fix: bool) -> Result<UniquePtr<Shape>>;
         fn step_write(s: &Shape, path: &str, ap242: bool) -> Result<()>;
+        fn stl_read(path: &str) -> Result<OcctMesh>;
         fn solid_props(s: &Shape) -> Vec<f64>;
     }
 }
@@ -269,7 +271,27 @@ pub struct SolidProps {
     pub faces: u32,
 }
 
+/// The STL file at `path` (binary or ASCII) read by `RWStl::ReadFile`,
+/// OCCT's STL reader under `StlAPI_Reader`, which welds coincident
+/// vertices: its triangles by position index. OCCT's failure as text.
+pub fn read_stl(path: &std::path::Path) -> Result<OcctMesh, String> {
+    ffi::stl_read(&path.to_string_lossy()).map_err(|e| e.to_string())
+}
+
 impl OcctMesh {
+    /// Whether the triangles close up: every edge between two positions
+    /// used once each way.
+    pub fn closed(&self) -> bool {
+        let mut uses = std::collections::BTreeMap::<(u32, u32), i32>::new();
+        for t in self.triangles.chunks(3) {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                *uses.entry((a, b)).or_default() += 1;
+            }
+        }
+        uses.iter()
+            .all(|(&(a, b), &n)| n == 1 && uses.get(&(b, a)) == Some(&1))
+    }
+
     pub fn soup(&self) -> Soup<'_> {
         Soup {
             positions: &self.positions,
