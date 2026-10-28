@@ -9,6 +9,7 @@
 pub use ryu_doc::{canonical, error, id, source, units};
 
 pub mod coord;
+pub mod name;
 pub mod notify;
 pub mod proto;
 
