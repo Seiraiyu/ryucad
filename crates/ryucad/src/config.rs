@@ -603,6 +603,20 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_viewports_overlays_are_preferences() {
+        for (key, default) in [
+            ("display.nav_cube", true),
+            ("display.triad", true),
+            ("display.origin", false),
+        ] {
+            assert_eq!(scope_of(key).unwrap(), Scope::User, "{key}");
+            assert_eq!(<Cad as Schema>::default_of(key), Some(json!(default)));
+            assert!(<Cad as Schema>::accepts(key, &json!(!default)));
+            assert!(!<Cad as Schema>::accepts(key, &json!("yes")));
+        }
+    }
+
+    #[test]
     fn a_bad_file_is_reported_and_kept() {
         with_config(|dir| {
             let path = dir.join(PREFERENCES);

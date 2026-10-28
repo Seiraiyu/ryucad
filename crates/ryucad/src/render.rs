@@ -139,10 +139,14 @@ pub fn origin_size(positions: &[[f64; 3]]) -> f64 {
     }
 }
 
+/// One of the origin's lines: its points (indices), its colour, and
+/// whether it is dashed.
+pub type OriginLine = (Vec<u32>, Rgb, bool);
+
 /// The origin's axes and planes in model space, `size` long: each axis a
 /// line from the origin, each plane a dashed square about it, three
 /// quarters of `size` from the origin each way.
-pub fn origin_lines(size: f64) -> (Vec<[f64; 3]>, Vec<(Vec<u32>, Rgb, bool)>) {
+pub fn origin_lines(size: f64) -> (Vec<[f64; 3]>, Vec<OriginLine>) {
     let mut positions = vec![[0.0; 3]];
     let mut lines = Vec::new();
     for (k, c) in [AXIS_X, AXIS_Y, AXIS_Z].into_iter().enumerate() {

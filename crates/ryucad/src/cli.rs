@@ -965,6 +965,8 @@ enum MaterialsCmd {
     },
 }
 
+// Parsed once per run; the size difference costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum ViewCmd {
     /// The named views of a part, or of every part, with each part's revision.

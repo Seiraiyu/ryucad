@@ -291,25 +291,12 @@ pub fn overlay<'a>(
 /// planes dashed and half as wide, as `ryucad render --origin` draws them.
 pub fn origin(pr: &Projector, size: [f64; 2], scale: f64, length: f64) -> Vec<Corner> {
     let (positions, lines) = ryucad::render::origin_lines(length);
-    let polylines: Vec<(Vec<[f64; 3]>, [f32; 3], bool)> = lines
-        .into_iter()
-        .map(|(idx, color, dash)| {
-            (
-                idx.into_iter().map(|i| positions[i as usize]).collect(),
-                color,
-                dash,
-            )
-        })
-        .collect();
     let mut out = Vec::new();
-    for (points, color, dash) in &polylines {
-        let width = if *dash {
-            CURVE_WIDTH / 2.0
-        } else {
-            CURVE_WIDTH
-        };
+    for (idx, color, dash) in lines {
+        let points: Vec<[f64; 3]> = idx.iter().map(|i| positions[*i as usize]).collect();
+        let width = if dash { CURVE_WIDTH / 2.0 } else { CURVE_WIDTH };
         bands(
-            [(points.as_slice(), *color, *dash)],
+            [(points.as_slice(), color, dash)],
             pr,
             size,
             scale,
