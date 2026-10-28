@@ -32,6 +32,7 @@ pub mod check;
 pub mod config;
 pub mod content;
 pub mod history;
+pub mod items;
 pub mod label;
 pub mod merge;
 pub mod props;

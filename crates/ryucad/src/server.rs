@@ -329,6 +329,18 @@ fn dispatch(
             working,
             direct,
         } => crate::bom::where_used(session, &part, label.as_deref(), working, direct),
+        Request::BomRenumber {
+            part,
+            items,
+            compact,
+            expected_revision,
+        } => crate::bom::renumber(
+            session,
+            &part,
+            &items,
+            compact,
+            expected_revision.as_deref(),
+        ),
         Request::ReleaseList { part } => versioned(crate::release::list(session, part.as_deref())),
         Request::ReleaseSync {} => crate::release::sync(session),
         Request::ReleaseCheck { results } => crate::release::check(session, results),
@@ -1094,7 +1106,7 @@ fn part_create(session: &mut Session, part: &str, kind: Option<&str>) -> Result<
         &part_path(session.root(), &id),
         &PartFile {
             kind,
-            features: vec![],
+            ..PartFile::default()
         }
         .to_json(),
     )?;
@@ -1456,11 +1468,23 @@ pub(crate) fn save(
     for (id, f) in writes {
         write_json(&feature_path(session.root(), part, id), &f.to_json())?;
     }
+    // A part the write makes the assembly place takes the next item number;
+    // one it no longer places loses its own.
+    let p = session.project().part(part)?;
+    let items = p.file.as_ref().map(|f| f.items.clone()).unwrap_or_default();
+    let feature = |fid: &Id| match writes.iter().find(|(w, _)| *w == fid) {
+        Some((_, f)) => Some(*f),
+        None => p.features.get(fid)?.as_ref().ok(),
+    };
+    let after = ryupdm::items::placed_by(&order, feature);
+    let whole = order.iter().all(|f| feature(f).is_some());
+    let items = ryupdm::items::assigned(&items, &ryupdm::items::placed(p), &after, whole);
     write_json(
         &part_path(session.root(), part),
         &PartFile {
-            kind: part_kind(session.project().part(part)?),
+            kind: part_kind(p),
             features: order,
+            items,
         }
         .to_json(),
     )?;
@@ -2371,6 +2395,7 @@ fn proposed(p: &Part, order: &[Id], writes: &[(&Id, &Feature)]) -> Part {
     q.file = Ok(PartFile {
         kind: part_kind(p),
         features: order.to_vec(),
+        items: p.file.as_ref().map(|f| f.items.clone()).unwrap_or_default(),
     });
     q
 }

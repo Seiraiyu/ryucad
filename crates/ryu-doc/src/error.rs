@@ -252,6 +252,12 @@ pub enum Code {
     ReviewMergeUnavailable,
     /// The review service couldn't reach GitHub.
     ReviewGithubUnreachable,
+    /// An assembly places a part that has no item number.
+    BomItemMissing,
+    /// Two parts of one assembly share an item number.
+    BomItemDuplicate,
+    /// An assembly gives an item number to a part it no longer places.
+    BomItemUnused,
 }
 
 impl Code {
@@ -329,6 +335,9 @@ mod tests {
             json!(Code::ExportUnrepresentable),
             json!("export_unrepresentable")
         );
+        assert_eq!(json!(Code::BomItemMissing), json!("bom_item_missing"));
+        assert_eq!(json!(Code::BomItemDuplicate), json!("bom_item_duplicate"));
+        assert_eq!(json!(Code::BomItemUnused), json!("bom_item_unused"));
     }
 
     #[test]

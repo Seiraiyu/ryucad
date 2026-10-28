@@ -45,7 +45,7 @@ impl Issue {
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 30] = [
+pub const CODES: [(&str, &str); 33] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -76,6 +76,9 @@ pub const CODES: [(&str, &str); 30] = [
     ("import_file_changed", "error"),
     ("import_unused", "warning"),
     ("import_large", "warning"),
+    ("bom_item_missing", "warning"),
+    ("bom_item_duplicate", "error"),
+    ("bom_item_unused", "warning"),
 ];
 
 /// The size past which an imported file is `import_large`: Git keeps
@@ -434,6 +437,7 @@ fn diagnose_in(builds: &mut Builds) -> Vec<Issue> {
         diagnose_part(builds, part, unit, &mut issues);
     }
     diagnose_assemblies(builds, &part_ids, &mut issues);
+    diagnose_items(&mut issues, root);
     diagnose_imports(root, &part_ids, unit, &mut issues);
     diagnose_pdm(root, manifest.as_ref(), &part_ids, &mut issues);
     diagnose_releases(root, &mut issues);
@@ -561,6 +565,29 @@ fn diagnose_assemblies(builds: &mut Builds, parts: &[&str], issues: &mut Vec<Iss
             files,
             format!("parts/{part}: its stored poses don't satisfy its mates"),
         ));
+    }
+}
+
+/// Each assembly's item numbers, in a project that loads: placed parts
+/// with none, numbers shared, numbers of parts it no longer places
+/// ([`ryupdm::items::faults`]).
+fn diagnose_items(issues: &mut Vec<Issue>, root: &Path) {
+    let Ok(project) = Project::load(root) else {
+        return;
+    };
+    for (id, part) in &project.parts {
+        for e in ryupdm::items::faults(id, part) {
+            let code = match e.code {
+                Code::BomItemMissing => "bom_item_missing",
+                Code::BomItemDuplicate => "bom_item_duplicate",
+                _ => "bom_item_unused",
+            };
+            issues.push(issue(
+                code,
+                vec![format!("parts/{id}/part.json")],
+                e.message,
+            ));
+        }
     }
 }
 
@@ -1223,13 +1250,19 @@ fn feature_files(root: &Path, part: &str) -> Vec<String> {
         .collect()
 }
 
-/// A part file of `kind` listing `features`.
-fn index_with(kind: PartKind, features: &[String]) -> Result<Vec<u8>> {
+/// `list` listing `features` instead: its kind and item numbers kept.
+fn index_with(list: &PartFile, features: &[String]) -> Result<Vec<u8>> {
     let features = features
         .iter()
         .map(|f| Id::parse(f, "feature"))
         .collect::<Result<Vec<_>>>()?;
-    Ok(canonical_bytes(&PartFile { kind, features }.to_json()))
+    Ok(canonical_bytes(
+        &PartFile {
+            features,
+            ..list.clone()
+        }
+        .to_json(),
+    ))
 }
 
 /// `parts/<part>/...` → `<part>`.
@@ -1370,6 +1403,16 @@ fn plan(
                 None if instances => PartKind::Assembly,
                 None => PartKind::Part,
             };
+            // The last commit's item numbers come back with its list.
+            let base = PartFile {
+                kind,
+                items: committed
+                    .as_ref()
+                    .filter(|p| p.kind == kind)
+                    .map(|p| p.items.clone())
+                    .unwrap_or_default(),
+                ..PartFile::default()
+            };
             let committed: Vec<String> = committed
                 .map(|p| p.features.iter().map(|f| f.to_string()).collect())
                 .unwrap_or_default();
@@ -1394,7 +1437,7 @@ fn plan(
                 } else {
                     format!("write {first}; the feature order can't be recovered, so give it as order=a,b,…")
                 },
-                changes: vec![write(first, index_with(kind, &order)?)],
+                changes: vec![write(first, index_with(&base, &order)?)],
                 params: vec![Param {
                     name: "order",
                     required: !known,
@@ -1414,7 +1457,7 @@ fn plan(
                 out.push(Repair {
                     id: id("remove"),
                     summary: format!("take {fid} out of parts/{part}/part.json"),
-                    changes: vec![write(&i.files[1], index_with(list.kind, &kept)?)],
+                    changes: vec![write(&i.files[1], index_with(&list, &kept)?)],
                     params: Vec::new(),
                 });
             }
@@ -1458,7 +1501,7 @@ fn plan(
                 out.push(Repair {
                     id: id("adopt"),
                     summary: format!("list {fid} last in parts/{part}/part.json"),
-                    changes: vec![write(&i.files[1], index_with(list.kind, &all)?)],
+                    changes: vec![write(&i.files[1], index_with(&list, &all)?)],
                     params: Vec::new(),
                 });
             }
@@ -1520,6 +1563,54 @@ fn plan(
                     id: id("solve"),
                     summary: format!("write {first} with its positions solved"),
                     changes: vec![write(first, bytes)],
+                    params: Vec::new(),
+                });
+            }
+        }
+        "bom_item_missing" | "bom_item_duplicate" | "bom_item_unused" => {
+            use ryupdm::items;
+            let part = part_of(first);
+            let placed = Id::parse(part, "part").ok().and_then(|pid| {
+                let project = Project::load(root).ok()?;
+                Some(items::placed(project.parts.get(&pid)?))
+            });
+            if let (Some(list), Some(placed)) = (listed(root, part), placed) {
+                let (action, numbers, summary) = match i.code {
+                    "bom_item_missing" => (
+                        "assign_items",
+                        items::with_missing(&list.items, &placed),
+                        format!(
+                            "give each part parts/{part} places without an item number the next one, in list order"
+                        ),
+                    ),
+                    "bom_item_duplicate" => (
+                        "renumber_items",
+                        items::deduplicated(&list.items, &placed),
+                        format!(
+                            "give each later part sharing an item number in parts/{part} the next one, in list order"
+                        ),
+                    ),
+                    _ => (
+                        "remove",
+                        items::without_unused(&list.items, &placed),
+                        format!(
+                            "take the item numbers of parts parts/{part} no longer places out of {first}"
+                        ),
+                    ),
+                };
+                out.push(Repair {
+                    id: id(action),
+                    summary,
+                    changes: vec![write(
+                        first,
+                        canonical_bytes(
+                            &PartFile {
+                                items: numbers,
+                                ..list
+                            }
+                            .to_json(),
+                        ),
+                    )],
                     params: Vec::new(),
                 });
             }
@@ -2280,6 +2371,96 @@ pub(crate) mod tests {
         let list = listed(r, "frame").unwrap();
         assert_eq!(list.kind, PartKind::Assembly);
         assert_eq!(list.features.len(), 1);
+    }
+
+    #[test]
+    fn item_numbers_missing_shared_or_unused_are_repaired() {
+        let dir = healthy();
+        let r = dir.path();
+        let mut s = crate::session::Session::open(r).unwrap();
+        call(&mut s, "part.create", json!({"part": "q"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "q", "type": "sphere", "id": "a", "params": {"radius": 1}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "frame", "kind": "assembly"}),
+        )
+        .unwrap();
+        for (inst, of) in [("i1", "p"), ("i2", "q")] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "frame", "type": "instance", "id": inst, "of": of}),
+            )
+            .unwrap();
+        }
+        assert_eq!(codes(r), []);
+        let numbered = |items: Value| {
+            let mut v: Value =
+                serde_json::from_str(&fs::read_to_string(r.join("parts/frame/part.json")).unwrap())
+                    .unwrap();
+            v["items"] = items;
+            w(r, "parts/frame/part.json", &canonical::to_string(&v));
+        };
+        let items = || listed(r, "frame").unwrap().items;
+        let file = || vec!["parts/frame/part.json".to_owned()];
+        // A hand edit drops q's number and numbers a part nothing places.
+        numbered(json!({"p": 1, "gone": 2}));
+        assert_eq!(
+            codes(r),
+            [("bom_item_missing", file()), ("bom_item_unused", file())]
+        );
+        let ids = offered(r);
+        fix(
+            r,
+            &[
+                &ids["bom_item_missing:assign_items:part"],
+                &ids["bom_item_unused:remove:part"],
+            ],
+            Params::default(),
+        );
+        let id = |p: &str| Id::parse(p, "part").unwrap();
+        assert_eq!(items(), [(id("p"), 1), (id("q"), 3)].into_iter().collect());
+        // A merge leaves both parts at 1: the later one in the list moves.
+        numbered(json!({"p": 1, "q": 1}));
+        assert_eq!(codes(r), [("bom_item_duplicate", file())]);
+        let ids = offered(r);
+        let out = fix(
+            r,
+            &[&ids["bom_item_duplicate:renumber_items:part"]],
+            Params::default(),
+        );
+        assert_eq!(out["report"]["healthy"], true, "{out}");
+        assert_eq!(items(), [(id("p"), 1), (id("q"), 2)].into_iter().collect());
+    }
+
+    #[test]
+    fn list_repairs_keep_an_assemblys_item_numbers() {
+        let dir = healthy();
+        let r = dir.path();
+        let instance = canonical::to_string(&json!({
+            "format": 4, "kind": "ryucad.feature", "type": "instance", "part": "p",
+            "rev": "working",
+            "pose": {"origin_m": [0, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]},
+        }));
+        w(r, "parts/frame/features/i1.json", &instance);
+        w(r, "parts/frame/features/i2.json", &instance);
+        w(
+            r,
+            "parts/frame/part.json",
+            &canonical::to_string(&json!({"features": ["i1"], "format": 3,
+                "items": {"p": 4}, "kind": "ryucad.part", "part_kind": "assembly"})),
+        );
+        let ids = offered(r);
+        fix(r, &[&ids["orphan_feature:adopt:i2"]], Params::default());
+        let list = listed(r, "frame").unwrap();
+        assert_eq!(list.features.len(), 2);
+        assert_eq!(list.items[&Id::parse("p", "part").unwrap()], 4);
     }
 
     #[test]
