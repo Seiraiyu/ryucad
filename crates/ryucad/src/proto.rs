@@ -602,6 +602,71 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         instances: Vec<String>,
     },
+    /// Measures one entity (its properties: a point, a length, an area
+    /// and its shape; a solid's or an occurrence's volume and area) or two
+    /// (the distance between them with the nearest points, and the angle
+    /// where both have directions), at the working files or a Git
+    /// revision `rev`. Values are in meters and radians, and as the
+    /// project's default unit writes them, each `exact` or with its bound.
+    #[serde(rename = "measure")]
+    Measure {
+        entities: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
+    /// The minimum distance between pairs of an assembly's solids in
+    /// different occurrences whose boxes come within `below` (a length;
+    /// by default a hundredth of the assembly's diagonal), closest first,
+    /// with the nearest points; with `instances`, the pairs with a side
+    /// under those instance paths. Pairs at 0 touch or interfere.
+    #[serde(rename = "clearance")]
+    Clearance {
+        part: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        instances: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        below: Option<String>,
+    },
+    /// Mass properties of a part or an assembly (its ID), a solid
+    /// (`<part>/<solid>`) or an occurrence (`<asm>/<path>`): volume, area,
+    /// centre of mass and, where every part has a material with a
+    /// density, mass and the inertia tensor about the centre with its
+    /// principal moments and axes; per part, its solids, material and
+    /// mass. `tolerance` is the relative agreement the integration
+    /// reaches (1e-9).
+    #[serde(rename = "mass")]
+    Mass {
+        of: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tolerance: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
+    /// The material library: each material's density and colour, the
+    /// parts that name it, the default, and the project's revision.
+    #[serde(rename = "materials.list")]
+    MaterialsList {},
+    /// Adds or replaces a material: `density` as `7850 kg/m^3` or
+    /// `7.85 g/cm^3`, `colour` as `#rrggbb` (left out, it keeps its own),
+    /// and with `default` the material of parts that name none.
+    #[serde(rename = "materials.set")]
+    MaterialsSet {
+        name: String,
+        density: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        colour: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        default: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Removes a material no part names.
+    #[serde(rename = "materials.delete")]
+    MaterialsDelete {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// Imports a STEP file the daemon can read (absolute, or relative to
     /// the project): stores it under `imports/` and makes a part of each
     /// product's bodies and an assembly of each product's children
@@ -1019,6 +1084,8 @@ impl Request {
                 | Request::PdmConfigure { .. }
                 | Request::PropsSet { .. }
                 | Request::BomRenumber { .. }
+                | Request::MaterialsSet { .. }
+                | Request::MaterialsDelete { .. }
                 | Request::ReleasePropose { dry_run: false, .. }
                 | Request::Import { dry_run: false, .. }
                 | Request::ReleaseObsolete { .. }

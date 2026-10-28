@@ -2,10 +2,12 @@
 //! up to date from answers and notifications.
 
 use crate::core::activity::{Activity, LOADED};
+use crate::core::bom::BomTab;
 use crate::core::compare::Compare;
 use crate::core::edit::{DimForm, Form};
 use crate::core::interference::Interference;
 use crate::core::link::{Event, Link, Wake};
+use crate::core::measure::{Clearance, Mass, Tool};
 use crate::core::merge::Merge;
 use crate::core::model::{BodyKey, Model, Part};
 use crate::core::params::Params;
@@ -72,6 +74,18 @@ enum Pending {
     ReleaseWrite,
     /// ryupdm's settings, and whether the project has an ID yet.
     PdmConfig,
+    /// The BOM tab's indented BOM, or (`flat`) its flat one.
+    Bom {
+        flat: bool,
+    },
+    /// An item number set from the BOM tab (`bom.renumber`).
+    BomRenumber(crate::core::bom::ItemEdit),
+    /// The BOM's CSV, to write at this path.
+    BomExport(PathBuf),
+    /// Where a part is used, for the Part section.
+    WhereUsed(String),
+    /// The BOM tab's `bom.diff` from the compared revision.
+    BomDiff,
     /// A part's properties for the Part section; after a conflict, with
     /// the form as it was.
     Props(String, Option<Box<PartProps>>),
@@ -82,6 +96,12 @@ enum Pending {
     Doctor,
     /// An assembly's interference (`interference`).
     Interference(String),
+    /// The Measure tool's picks (`measure`).
+    Measure(Vec<String>),
+    /// What the Mass properties panel weighs (`mass`).
+    Mass(String),
+    /// An assembly's clearances (`clearance`).
+    Clearance(String),
     /// What the disk cache holds (`cache.stats` or `cache.clear`).
     Cache,
     /// An import's dry run, for the file at this path.
@@ -253,12 +273,29 @@ pub struct Workspace {
     /// from then on).
     pub releases: ReleaseTab,
     releases_open: bool,
+    /// The BOM tab, whether it was opened (it follows changes from then
+    /// on), and whether a reading is on its way and another wanted after.
+    pub bom: BomTab,
+    bom_open: bool,
+    bom_waiting: bool,
+    bom_again: bool,
+    /// The BOM tab's Export CSV…, while open.
+    pub bom_export: Option<crate::core::bom::BomExport>,
+    /// Where the Part section's part is used, once read, and its part.
+    pub where_used: Option<crate::core::where_used::WhereUsed>,
+    where_used_part: Option<String>,
     pub settings: Settings,
     /// The last doctor report, once asked for.
     pub doctor: Option<Value>,
     /// The shown assembly's interference, once asked for (Tools > Check
     /// interference); asked again as the assembly changes.
     pub interference: Option<Interference>,
+    /// Tools > Measure: on or off, its picks and what they measured.
+    pub measure: Tool,
+    /// Tools > Mass properties, once asked for.
+    pub mass: Option<Mass>,
+    /// Tools > Clearance, once asked for: the shown assembly's.
+    pub clearance: Option<Clearance>,
     /// What the disk cache held when last asked (`cache.stats`), for the
     /// Preferences window.
     pub cache: Option<Value>,
@@ -346,9 +383,19 @@ impl Workspace {
             props_part: None,
             releases: ReleaseTab::default(),
             releases_open: false,
+            bom: BomTab::default(),
+            bom_open: false,
+            bom_waiting: false,
+            bom_again: false,
+            bom_export: None,
+            where_used: None,
+            where_used_part: None,
             settings: Settings::default(),
             doctor: None,
             interference: None,
+            measure: Tool::default(),
+            mass: None,
+            clearance: None,
             cache: None,
             import: None,
             export: None,
@@ -449,6 +496,69 @@ impl Workspace {
             instances: Vec::new(),
         };
         self.send(req, Pending::Interference(part));
+    }
+
+    /// Takes a pick of the Measure tool and measures what it now holds.
+    pub fn measure_pick(&mut self, entity: &str) {
+        let picks = self.measure.pick(entity);
+        let req = Request::Measure {
+            entities: picks.clone(),
+            rev: None,
+        };
+        self.send(req, Pending::Measure(picks));
+    }
+
+    /// Measures the Measure tool's picks again: what they name changed.
+    fn measure_again(&mut self) {
+        let picks = self.measure.picks.clone();
+        if picks.is_empty() {
+            return;
+        }
+        let req = Request::Measure {
+            entities: picks.clone(),
+            rev: None,
+        };
+        self.send(req, Pending::Measure(picks));
+    }
+
+    /// What Tools > Mass properties weighs: the solid or occurrence of the
+    /// first selected entity, else the part or assembly shown.
+    pub fn mass_target(&self) -> Option<String> {
+        if let Some(e) = self.myself().and_then(|m| m.selection.first()) {
+            let part = e.split('/').next().unwrap_or_default();
+            let assembly = self.model.parts.get(part).is_some_and(|p| p.assembly);
+            return Some(crate::core::measure::weighed(e, assembly));
+        }
+        match self.model.shown().as_slice() {
+            [one] => Some((*one).to_owned()),
+            _ => None,
+        }
+    }
+
+    /// Weighs `of` (`mass`) for the Mass properties panel.
+    pub fn weigh(&mut self, of: &str) {
+        self.mass = Some(Mass::asked(of));
+        let req = Request::Mass {
+            of: of.to_owned(),
+            tolerance: None,
+            rev: None,
+        };
+        self.send(req, Pending::Mass(of.to_owned()));
+    }
+
+    /// Finds the shown assembly's clearances (`clearance`); nothing when it
+    /// shows none.
+    pub fn check_clearance(&mut self) {
+        let Some(part) = self.shown_assembly() else {
+            return;
+        };
+        self.clearance = Some(Clearance::asked(&part));
+        let req = Request::Clearance {
+            part: part.clone(),
+            instances: Vec::new(),
+            below: None,
+        };
+        self.send(req, Pending::Clearance(part));
     }
 
     /// Diagnoses the project (`doctor`).
@@ -700,6 +810,8 @@ impl Workspace {
         if self.model.focus != want {
             self.model.focus = want;
             self.model.generation += 1;
+            // The BOM tab shows what the window shows.
+            self.reload_bom();
         }
         let hidden: std::collections::BTreeSet<String> = self
             .myself()
@@ -742,10 +854,12 @@ impl Workspace {
                 self.compare = Some(Compare::new(&w));
                 self.model.generation += 1;
                 self.ask_diff();
+                self.reload_bom();
             }
             (Some(_), None) => {
                 self.compare = None;
                 self.model.generation += 1;
+                self.reload_bom();
             }
             (None, None) => {}
         }
@@ -1042,6 +1156,162 @@ impl Workspace {
         self.send(req, Pending::ReleaseWrite);
     }
 
+    /// The part whose BOM the BOM tab shows: the window's focus; else
+    /// none, and the daemon finds the project's one root assembly, as the
+    /// window shows it, or names the roots to choose from.
+    pub fn bom_root(&self) -> Option<String> {
+        self.model.focus.clone()
+    }
+
+    /// Reads the BOM tab (`bom.get`): the indented BOM, then the flat one
+    /// when the tab shows it. From now on it is read again as what it
+    /// reads changes; at most one reading is on its way, and one more
+    /// after it.
+    pub fn load_bom(&mut self) {
+        self.bom_open = true;
+        if self.bom_waiting {
+            self.bom_again = true;
+            return;
+        }
+        self.bom_waiting = true;
+        self.ask_bom(false);
+    }
+
+    fn ask_bom(&mut self, flat: bool) {
+        let req = Request::BomGet {
+            part: self.bom_root(),
+            rev: None,
+            flat,
+            depth: None,
+            format: None,
+        };
+        self.send(req, Pending::Bom { flat });
+    }
+
+    /// While the window compares, asks for the BOM's diff from the
+    /// compared revision to the working files; else drops any.
+    fn ask_bom_diff(&mut self) {
+        match (&self.compare, &self.bom.root) {
+            (Some(c), Some(root)) => {
+                let req = Request::BomDiff {
+                    part: Some(root.clone()),
+                    from: Some(c.rev.clone()),
+                    to: None,
+                };
+                self.send(req, Pending::BomDiff);
+            }
+            _ => {
+                self.bom.take_diff(None);
+                self.bom_read();
+            }
+        }
+    }
+
+    /// A reading is done: the next one, if it was wanted meanwhile.
+    fn bom_read(&mut self) {
+        self.bom_waiting = false;
+        if std::mem::take(&mut self.bom_again) {
+            self.load_bom();
+        }
+    }
+
+    /// Shows the flat BOM, or the indented one.
+    pub fn set_bom_flat(&mut self, flat: bool) {
+        self.bom.flat = flat;
+        self.load_bom();
+    }
+
+    /// Shows where `part` is used in the Part section (`bom.where_used`),
+    /// read if it isn't yet.
+    pub fn show_where_used(&mut self, part: Option<&str>) {
+        if self.where_used_part.as_deref() == part {
+            return;
+        }
+        self.where_used_part = part.map(str::to_owned);
+        self.where_used = None;
+        self.read_where_used();
+    }
+
+    /// Reads where the Part section's part is used again, if it shows one.
+    fn read_where_used(&mut self) {
+        if let Some(part) = self.where_used_part.clone() {
+            let req = Request::BomWhereUsed {
+                part: part.clone(),
+                label: None,
+                working: false,
+                direct: false,
+            };
+            self.send(req, Pending::WhereUsed(part));
+        }
+    }
+
+    /// Opens Export CSV… for the BOM as the tab shows it.
+    pub fn open_bom_export(&mut self) {
+        self.bom_export = Some(crate::core::bom::BomExport {
+            flat: self.bom.flat,
+            ..Default::default()
+        });
+    }
+
+    /// Writes the open export's CSV: `bom.get` with `format: csv`, the
+    /// bytes written atomically where it says.
+    pub fn run_bom_export(&mut self) {
+        let part = self.bom.root.clone().or_else(|| self.bom_root());
+        let Some(e) = self.bom_export.as_mut() else {
+            return;
+        };
+        let path = absolute(e.path.trim());
+        e.waiting = true;
+        e.error = None;
+        e.done = None;
+        let req = Request::BomGet {
+            part,
+            rev: None,
+            flat: e.flat,
+            depth: None,
+            format: Some("csv".to_owned()),
+        };
+        self.send(req, Pending::BomExport(path));
+    }
+
+    /// Saves the item number being typed in the BOM tab (`bom.renumber`),
+    /// against the revision of its assembly the window last saw. Text
+    /// that isn't an item number is refused here, and kept.
+    pub fn save_item(&mut self) {
+        let Some(e) = self.bom.editing.clone() else {
+            return;
+        };
+        let n = match crate::core::bom::item_number(&e.text) {
+            Ok(n) => n,
+            Err(why) => {
+                self.bom.edit_error = Some(why);
+                return;
+            }
+        };
+        if Some(n) == e.was {
+            self.bom.editing = None;
+            return;
+        }
+        let mut items = serde_json::Map::new();
+        items.insert(e.part.clone(), json!(n));
+        let req = Request::BomRenumber {
+            part: e.parent.clone(),
+            items,
+            compact: false,
+            expected_revision: self.part(&e.parent).map(|p| p.revision.clone()),
+        };
+        self.bom.saving = true;
+        self.bom.edit_error = None;
+        self.send(req, Pending::BomRenumber(e));
+    }
+
+    /// Reads the BOM again if the tab was opened.
+    fn reload_bom(&mut self) {
+        if self.bom_open {
+            self.load_bom();
+        }
+    }
+
     /// Whether ryupdm is set up: the project has its ID.
     pub fn pdm_ready(&self) -> bool {
         self.pdm_config
@@ -1220,6 +1490,10 @@ impl Workspace {
         if self.releases_open {
             self.load_releases();
         }
+        self.reload_bom();
+        if self.where_used.is_none() {
+            self.read_where_used();
+        }
         if let Some((part, sketch, constraint)) = self.dimension_for.clone()
             && self.dimension.is_none()
         {
@@ -1301,6 +1575,9 @@ impl Workspace {
                     p.saving = false;
                 }
                 self.releases.busy = false;
+                self.bom_waiting = false;
+                self.bom_again = false;
+                self.bom.saving = false;
                 self.model.asked.clear();
                 self.model.sketches_asked.clear();
                 self.compare_waiting = false;
@@ -1443,6 +1720,66 @@ impl Workspace {
                     }
                     Err(e) => self.releases.error = Some(e),
                 }
+            }
+            (Pending::Bom { flat }, r) => {
+                match r {
+                    Ok(a) => self.bom.take(&a.result),
+                    Err(e) => self.bom.failed(e),
+                }
+                // The flat BOM follows the indented one, whose lines give
+                // it its occurrences, and a compare's diff follows both.
+                if !flat && self.bom.flat && self.bom.error.is_none() {
+                    self.ask_bom(true);
+                } else {
+                    self.ask_bom_diff();
+                }
+            }
+            (Pending::BomDiff, r) => {
+                match r {
+                    Ok(a) => self.bom.take_diff(Some(&a.result)),
+                    Err(e) => self.bom.diff_failed(e),
+                }
+                self.bom_read();
+            }
+            (Pending::WhereUsed(part), r) => {
+                if self.where_used_part.as_deref() == Some(part.as_str()) {
+                    use crate::core::where_used::WhereUsed;
+                    self.where_used = Some(match r {
+                        Ok(a) => WhereUsed::from_answer(&part, &a.result),
+                        Err(e) => WhereUsed::failed(&part, e),
+                    });
+                }
+            }
+            (Pending::BomExport(path), a) => {
+                let Some(e) = self.bom_export.as_mut() else {
+                    return;
+                };
+                e.waiting = false;
+                let written = a.and_then(|a| {
+                    let csv = a.result["csv"].as_str().ok_or_else(|| {
+                        Error::new(Code::Internal, "the BOM came without its CSV")
+                    })?;
+                    ryucad::doc::project::write_atomic(&path, csv)?;
+                    Ok(csv.len())
+                });
+                match written {
+                    Ok(n) => e.done = Some((path.display().to_string(), n)),
+                    Err(err) => e.error = Some(err),
+                }
+            }
+            (Pending::BomRenumber(edit), r) => {
+                self.bom.saving = false;
+                match r {
+                    Ok(_) => self.bom.editing = None,
+                    // Someone renumbered first: read again, and say what
+                    // changed.
+                    Err(e) if e.code == Code::Conflict => {
+                        self.bom.editing = None;
+                        self.bom.conflict = Some(edit);
+                    }
+                    Err(e) => self.bom.edit_error = Some(e.message),
+                }
+                self.load_bom();
             }
             (Pending::PdmConfig, Ok(a)) => {
                 let was = self.pdm_ready();
@@ -1622,6 +1959,33 @@ impl Workspace {
                     self.model.generation += 1;
                     self.fail(e);
                 }
+            }
+            (Pending::Measure(picks), a) => {
+                match a {
+                    Ok(a) => self.measure.take(&picks, &a.result),
+                    Err(e) => self.measure.failed(&picks, e),
+                }
+                self.model.generation += 1;
+            }
+            (Pending::Mass(of), a) => {
+                let Some(m) = self.mass.as_mut().filter(|m| m.of == of) else {
+                    return;
+                };
+                match a {
+                    Ok(a) => m.take(&a.result),
+                    Err(e) => m.failed(e),
+                }
+                self.model.generation += 1;
+            }
+            (Pending::Clearance(part), a) => {
+                let Some(c) = self.clearance.as_mut().filter(|c| c.part == part) else {
+                    return;
+                };
+                match a {
+                    Ok(a) => c.take(&a.result),
+                    Err(e) => c.failed(e),
+                }
+                self.model.generation += 1;
             }
             (Pending::Interference(part), a) => {
                 let Some(i) = self.interference.as_mut().filter(|i| i.part == part) else {
@@ -1813,6 +2177,18 @@ impl Workspace {
     fn noted(&mut self, method: &str, params: &Value) {
         match method {
             "model.changed" => {
+                // What the BOM reads changed, or parts went.
+                let parts = params["parts"].as_array().into_iter().flatten();
+                if parts
+                    .filter_map(|r| r["part"].as_str())
+                    .any(|p| self.bom.reads(p))
+                    || params["removed"].as_array().is_some_and(|r| !r.is_empty())
+                    || self.bom.root.is_none()
+                {
+                    self.reload_bom();
+                }
+                // Any assembly may now reach the part, or no longer.
+                self.read_where_used();
                 for report in params["parts"].as_array().into_iter().flatten() {
                     self.part_changed(report);
                 }
@@ -1834,6 +2210,9 @@ impl Workspace {
             "project.changed" => {
                 // The manifest may have its ID now, or ryupdm.json changed.
                 self.send(Request::PdmConfig {}, Pending::PdmConfig);
+                // Parts came or went, or the declared properties changed.
+                self.reload_bom();
+                self.read_where_used();
                 // Parts came or went: damage may have too.
                 self.rediagnose();
                 self.reload_history();
@@ -1882,6 +2261,10 @@ impl Workspace {
                 if self.releases_open {
                     self.load_releases();
                 }
+                // Labels resolve differently, and rows' states moved; a
+                // release may have become official.
+                self.reload_bom();
+                self.read_where_used();
             }
             "activity.appended" => self.activity.appended(params),
             "app.open" => self.raised = true,
@@ -1915,6 +2298,24 @@ impl Workspace {
             .is_some_and(|i| report["part"] == i.part.as_str())
         {
             self.check_interference();
+        }
+        // So are clearances, a weight and the Measure tool's picks that
+        // read the part.
+        let changed = report["part"].as_str().unwrap_or_default();
+        let reads = |r: &str| r == changed || r.starts_with(&format!("{changed}/"));
+        if self.clearance.as_ref().is_some_and(|c| c.part == changed) {
+            self.check_clearance();
+        }
+        if let Some(of) = self
+            .mass
+            .as_ref()
+            .map(|m| m.of.clone())
+            .filter(|of| reads(of))
+        {
+            self.weigh(&of);
+        }
+        if self.measure.picks.iter().any(|p| reads(p)) {
+            self.measure_again();
         }
         // A form nobody is typing in follows the files.
         if let Some(f) = &self.form

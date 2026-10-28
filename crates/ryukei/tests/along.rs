@@ -486,14 +486,22 @@ fn a_profile_beyond_the_bend_folds() {
             segments,
         }])
     };
+    // Only the refusal is timed. Validating the profile goes through
+    // rayon's global pool, where it can wait seconds behind the other
+    // tests' work (issue #174); the refusal itself never does, and takes
+    // a few milliseconds even with every worker busy. The bound guards
+    // against tracing face by face again, not against a slow machine.
+    let (profile, path) = (beyond(2.5), bent(2.0));
     let start = std::time::Instant::now();
+    let refused = along(K, &profile, &path, &opts);
+    let took = start.elapsed();
     assert_eq!(
-        refusal(along(K, &beyond(2.5), &bent(2.0), &opts)),
+        refusal(refused),
         SweepError::PathTooCurved {
             segment: SegmentKey(2)
         }
     );
-    assert!(start.elapsed().as_secs_f64() < 1.0, "{:?}", start.elapsed());
+    assert!(took.as_secs_f64() < 1.0, "{took:?}");
     let (b, _) = along(K, &beyond(-2.5), &bent(2.0), &opts).unwrap();
     assert_eq!(check_intersections(&b), []);
     let v = volume(&b);

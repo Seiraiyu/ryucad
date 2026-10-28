@@ -15,11 +15,13 @@ pub enum Browse {
     Open,
     /// Where to write an export.
     Save,
+    /// Where to write a BOM's CSV.
+    SaveCsv,
 }
 
 /// A file field named `label` with Browse… beside it; true when Enter
 /// was pressed in it.
-fn file_row(
+pub(crate) fn file_row(
     ui: &mut egui::Ui,
     label: &str,
     path: &mut String,
@@ -203,11 +205,14 @@ pub fn export(
 /// The OS's dialog for `how`, in the window `parent`: a STEP file to open
 /// or where to save one.
 pub fn ask_os(parent: &eframe::Frame, how: Browse) -> Option<std::path::PathBuf> {
-    let d = rfd::FileDialog::new()
-        .set_parent(parent)
-        .add_filter("STEP", &["step", "stp"]);
+    let d = rfd::FileDialog::new().set_parent(parent);
+    let step = |d: rfd::FileDialog| d.add_filter("STEP", &["step", "stp"]);
     match how {
-        Browse::Open => d.set_title("Import a STEP file").pick_file(),
-        Browse::Save => d.set_title("Export as STEP").save_file(),
+        Browse::Open => step(d).set_title("Import a STEP file").pick_file(),
+        Browse::Save => step(d).set_title("Export as STEP").save_file(),
+        Browse::SaveCsv => d
+            .add_filter("CSV", &["csv"])
+            .set_title("Export the BOM as CSV")
+            .save_file(),
     }
 }

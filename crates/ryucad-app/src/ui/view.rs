@@ -313,11 +313,25 @@ impl View {
         }
     }
 
-    /// Frames the given entities.
+    /// Frames the given entities, occurrences (`<asm>/<path>`) whole.
     pub fn fit_entities(&mut self, ws: &mut Workspace, entities: &[String]) {
-        let points = self.picker(ws).points_of(entities);
+        let picker = self.picker(ws);
+        let mut points = picker.points_of(entities);
+        for e in entities {
+            for key in ws.model.occurrence_bodies(e) {
+                points.extend(picker.points(Some(&key)));
+            }
+        }
         if !points.is_empty() {
             self.nav.fit(&points, self.aspect());
+            self.moved(ws);
+        }
+    }
+
+    /// Frames `points` (a clearance's nearest points), as Zoom to fit does.
+    pub fn fit_points(&mut self, ws: &mut Workspace, points: &[[f64; 3]]) {
+        if !points.is_empty() {
+            self.nav.fit(points, self.aspect());
             self.moved(ws);
         }
     }
@@ -434,7 +448,12 @@ impl View {
             match picker.place(&e) {
                 Some(Place::Face(k, i)) => faces.push((k, i, linear(c))),
                 Some(p) => lines.push((p, c)),
-                None => {}
+                // An occurrence: every face of what it places.
+                None => {
+                    for key in ws.model.occurrence_bodies(&e) {
+                        faces.extend((0..picker.faces(&key)).map(|i| (key.clone(), i, linear(c))));
+                    }
+                }
             }
         }
         (faces, lines)
@@ -730,7 +749,17 @@ impl View {
         // A face picked in a compare's ghost isn't in the working model:
         // it can't be selected, only described and its reference copied.
         let ghost = self.hover.as_ref().is_some_and(|h| h.rev.is_some());
-        if response.clicked() && !ghost {
+        // In the Measure tool a pick of a face, edge or vertex is measured,
+        // not selected.
+        let measuring = ws.measure.on
+            && self
+                .hover
+                .as_ref()
+                .is_some_and(|h| matches!(h.kind, ryucad::entity::Target::Body(_)));
+        if response.clicked() && !ghost && measuring {
+            let entity = self.hover.as_ref().expect("a pick").entity.clone();
+            ws.measure_pick(&entity);
+        } else if response.clicked() && !ghost {
             let add = modifiers.shift || modifiers.ctrl;
             // Picking something else, or nothing, leaves the tree's choice.
             let keep = self
@@ -849,6 +878,54 @@ impl View {
         }
         if self.sketches {
             self.dimension_labels(ui, ws, rect, &pr);
+        }
+        // The Measure tool's dimension, a clearance shown, a centre of
+        // mass: lines and marks over the model.
+        let accent = style::color32(style::SELECTED);
+        let mut lines: Vec<([f64; 3], [f64; 3], Option<String>)> = Vec::new();
+        if let Some(r) = ws.measure.reading.as_ref().filter(|_| ws.measure.on)
+            && let Some((a, b)) = r.line
+        {
+            lines.push((a, b, r.label.clone()));
+        }
+        if let Some(c) = &ws.clearance
+            && let Some(g) = c.shown.and_then(|k| c.gaps.get(k))
+        {
+            lines.push((g.points[0], g.points[1], Some(g.distance.clone())));
+        }
+        for (a, b, label) in lines {
+            let (Some(sa), Some(sb)) = (to_screen(a), to_screen(b)) else {
+                continue;
+            };
+            painter.line_segment([sa, sb], egui::Stroke::new(2.0, accent));
+            painter.circle_filled(sa, 3.5, accent);
+            painter.circle_filled(sb, 3.5, accent);
+            if let Some(text) = label {
+                let mid = sa + (sb - sa) * 0.5;
+                painter.text(
+                    mid + egui::vec2(6.0, -6.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    text,
+                    egui::FontId::proportional(13.0),
+                    accent,
+                );
+            }
+        }
+        if let Some(c) = ws.mass.as_ref().and_then(|m| m.centre)
+            && let Some(s) = to_screen(c)
+        {
+            let d = 6.0;
+            let stroke = egui::Stroke::new(2.0, accent);
+            painter.line_segment([s - egui::vec2(d, 0.0), s + egui::vec2(d, 0.0)], stroke);
+            painter.line_segment([s - egui::vec2(0.0, d), s + egui::vec2(0.0, d)], stroke);
+            painter.circle_stroke(s, d, stroke);
+            painter.text(
+                s + egui::vec2(d + 3.0, -d),
+                egui::Align2::LEFT_BOTTOM,
+                "centre of mass",
+                egui::FontId::proportional(12.0),
+                accent,
+            );
         }
         let (_, frame_names) = self.mate_frames(ws);
         for (name, at) in frame_names {

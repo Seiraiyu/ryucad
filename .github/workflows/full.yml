@@ -97,6 +97,7 @@ jobs:
       - run: cargo test -p ryukei --release --test mirror
       - run: cargo test -p ryukei --release --test along
       - run: cargo test -p ryukei --release --test loft
+      - run: cargo test -p ryukei --release --test measure_props
       - run: cargo test -p ryustep --release --test round_trip_props
       - run: cargo test -p ryustep --release --test write
       - run: cargo test -p ryustep --release --test drill
@@ -136,6 +137,15 @@ jobs:
           else
             echo "::notice::runner has no AVX-512; x86-64-v4 skipped"
           fi
+      # Releases stamp the tag's version in before they test (release.yml),
+      # so a golden hash that reads the version must fail here, before
+      # anything is published.
+      - name: a stamped version, as a release builds
+        run: |
+          sh scripts/stamp-version.sh 9.9.9-ci
+          cargo test --locked -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad --release --test determinism
+        env:
+          CARGO_TARGET_DIR: target/stamped
 
   devcontainer:
     name: devcontainer

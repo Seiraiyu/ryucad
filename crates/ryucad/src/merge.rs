@@ -295,6 +295,7 @@ pub fn newest(kind: &str) -> Option<u64> {
         PART_KIND => Some(PART_FORMAT),
         PARAMETERS_KIND => Some(FORMAT),
         FEATURE_KIND => Some(FEATURE_FORMAT),
+        crate::doc::materials::KIND => Some(crate::doc::materials::FORMAT),
         _ => None,
     }
 }
@@ -1501,6 +1502,30 @@ mod tests {
 
     fn canonical(v: &Value) -> Vec<u8> {
         crate::doc::canonical::to_string(v).into_bytes()
+    }
+
+    #[test]
+    fn material_libraries_merge_by_material_and_field() {
+        let lib = |m: Value| json!({"format": 1, "kind": "ryucad.materials", "materials": m});
+        let base = lib(json!({"steel": {"density": "7850 kg/m^3"}}));
+        let ours = lib(json!({"steel": {"density": "7850 kg/m^3"},
+                              "brass": {"density": "8.5 g/cm^3"}}));
+        let theirs = lib(json!({"steel": {"colour": "#888888", "density": "7850 kg/m^3"}}));
+        let (out, o) = bytes(&canonical(&base), &canonical(&ours), &canonical(&theirs));
+        assert_eq!(o, Outcome::Clean);
+        let both = lib(json!({"brass": {"density": "8.5 g/cm^3"},
+                              "steel": {"colour": "#888888", "density": "7850 kg/m^3"}}));
+        assert_eq!(out, canonical(&both));
+        let other = lib(json!({"steel": {"density": "7.9 g/cm^3"}}));
+        let mine = lib(json!({"steel": {"density": "7.8 g/cm^3"}}));
+        let (_, o) = bytes(&canonical(&base), &canonical(&mine), &canonical(&other));
+        assert_eq!(o, Outcome::Conflicts(1));
+        // A newer library than this build reads merges as lines.
+        let newer = json!({"format": 2, "kind": "ryucad.materials", "materials": {}});
+        assert!(matches!(
+            bytes(&canonical(&base), &canonical(&newer), &canonical(&theirs)).1,
+            Outcome::Text(_)
+        ));
     }
 
     #[test]

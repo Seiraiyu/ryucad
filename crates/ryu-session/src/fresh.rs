@@ -158,9 +158,10 @@ impl Stamps {
     }
 }
 
-/// Each entry in `dir` with its metadata, following symlinks; empty when
-/// `dir` doesn't exist. An entry gone by the time it is looked at is left
-/// out. A directory listing says what each entry is (and on Windows gives
+/// Each entry in `dir` with its metadata, following symlinks, in name
+/// order; empty when `dir` doesn't exist. An entry gone by the time it is
+/// looked at is left out. The file system's own order isn't stable: a file
+/// written again (renamed over) can move in it. A directory listing says what each entry is (and on Windows gives
 /// its size and time) without opening it, so checking a project costs at
 /// most one `stat` per file.
 pub fn read_dir(dir: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
@@ -184,6 +185,7 @@ pub fn read_dir(dir: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
             Err(e) => return Err(Error::io(&path, &e)),
         }
     }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
 }
 
@@ -224,6 +226,29 @@ mod tests {
         );
         assert_eq!(s.bytes(&root.join("a")), Some(&b"3"[..]));
         assert_eq!(s.paths_from(root).count(), 1);
+    }
+
+    #[test]
+    fn listings_come_in_name_order() {
+        // Directory order depends on the file system, and a file written
+        // again by renaming over it can move: callers compare listings.
+        let dir = tempfile::tempdir().unwrap();
+        let names: Vec<String> = (0..64).rev().map(|i| format!("f{i:02}")).collect();
+        for n in &names {
+            fs::write(dir.path().join(n), n).unwrap();
+        }
+        let tmp = dir.path().join("tmp");
+        fs::write(&tmp, "again").unwrap();
+        fs::rename(&tmp, dir.path().join("f00")).unwrap();
+        let got: Vec<PathBuf> = read_dir(dir.path())
+            .unwrap()
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        let mut sorted = got.clone();
+        sorted.sort();
+        assert_eq!(got.len(), 64);
+        assert_eq!(got, sorted);
     }
 
     #[test]

@@ -385,9 +385,11 @@ pub fn check_project_revision(root: &Path, expected: Option<&str>) -> Result<Str
 }
 
 /// A project revision: a hash of the files that hold the project's own
-/// settings, the manifest and ryupdm's settings if there are any. Each
-/// piece is length-prefixed, and ryupdm's is tagged.
+/// settings, the manifest, ryupdm's settings and the material library if
+/// there are any. Each piece is length-prefixed, and the optional ones
+/// are tagged.
 pub fn project_revision(root: &Path) -> Result<String> {
+    use crate::doc::materials::MATERIALS;
     use crate::doc::project::{MANIFEST, PDM_CONFIG};
     let read = |name: &str| {
         let path = root.join(name);
@@ -406,6 +408,10 @@ pub fn project_revision(root: &Path) -> Result<String> {
     if let Some(pdm) = read(PDM_CONFIG)? {
         piece(PDM_CONFIG.as_bytes());
         piece(&pdm);
+    }
+    if let Some(m) = read(MATERIALS)? {
+        piece(MATERIALS.as_bytes());
+        piece(&m);
     }
     Ok(h.finalize().to_hex()[..32].to_owned())
 }
@@ -556,6 +562,23 @@ pub(crate) mod tests {
         assert_ne!(project_revision(root).unwrap(), r1);
         std::fs::remove_file(root.join(crate::doc::project::MANIFEST)).unwrap();
         assert_eq!(project_revision(root).unwrap_err().code, Code::Io);
+    }
+
+    #[test]
+    fn the_project_revision_covers_the_material_library() {
+        use crate::doc::materials::MATERIALS;
+        use crate::doc::project::{MANIFEST, PDM_CONFIG};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(MANIFEST), "{}").unwrap();
+        let r0 = project_revision(root).unwrap();
+        std::fs::write(root.join(MATERIALS), "{}").unwrap();
+        let r1 = project_revision(root).unwrap();
+        assert_ne!(r1, r0);
+        // Tagged: the same bytes as ryupdm's settings hash otherwise.
+        std::fs::remove_file(root.join(MATERIALS)).unwrap();
+        std::fs::write(root.join(PDM_CONFIG), "{}").unwrap();
+        assert_ne!(project_revision(root).unwrap(), r1);
     }
 
     #[test]

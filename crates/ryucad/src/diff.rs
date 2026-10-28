@@ -105,6 +105,21 @@ pub fn textconv(bytes: &[u8]) -> Vec<u8> {
                 }
             }
         }
+        Some(crate::doc::materials::KIND) => {
+            if let Some(Value::Object(materials)) = rest.remove("materials") {
+                for (name, m) in &materials {
+                    let field = |k: &str| m.get(k).map(scalar);
+                    let mut line = format!(
+                        "materials.{name} = density {}",
+                        field("density").unwrap_or_default()
+                    );
+                    if let Some(c) = field("colour") {
+                        line.push_str(&format!(", colour {c}"));
+                    }
+                    lines.push(line);
+                }
+            }
+        }
         Some(ryupdm::config::KIND) => {
             if let Some(Value::Object(decls)) = rest.remove("properties") {
                 for (name, d) in &decls {
@@ -853,6 +868,12 @@ pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases)
     );
     if !settings.is_empty() {
         v["pdm"] = json!({ "changes": settings });
+    }
+    let mut materials = Vec::new();
+    let at = |files: &Files| json_at(files, crate::doc::materials::MATERIALS);
+    changes("", at(from).as_ref(), at(to).as_ref(), &mut materials);
+    if !materials.is_empty() {
+        v["materials"] = json!({ "changes": materials });
     }
     let imports = imports(from, to);
     if !imports.is_empty() {
@@ -1883,6 +1904,35 @@ mod tests {
         );
         assert!(v["parts"]["p"].get("pdm").is_none(), "{v}");
         assert!(v.get("pdm").is_none());
+    }
+
+    #[test]
+    fn the_material_library_textconvs_and_diffs_by_pointer() {
+        let library = |steel: &str| {
+            json!({"default": "steel", "format": 1, "kind": "ryucad.materials",
+                   "materials": {"aluminium": {"colour": "#b8bcc2", "density": "2.7 g/cm^3"},
+                                 "steel": {"density": steel}}})
+        };
+        assert_eq!(
+            text(library("7850 kg/m^3")),
+            "ryucad.materials (format 1)\n\
+             default = steel\n\
+             materials.aluminium = density 2.7 g/cm^3, colour #b8bcc2\n\
+             materials.steel = density 7850 kg/m^3\n"
+        );
+        let manifest = (
+            "ryucad.json",
+            json!({"default_unit": "mm", "format": 1, "kind": "ryucad.project"}),
+        );
+        let from = files(&[manifest.clone(), ("materials.json", library("7850 kg/m^3"))]);
+        let to = files(&[manifest, ("materials.json", library("7.9 g/cm^3"))]);
+        let v = structural(&from, &to, &Options::default(), &Releases::default());
+        assert_eq!(
+            v["materials"]["changes"],
+            json!([{"at": "/materials/steel/density", "from": "7850 kg/m^3", "to": "7.9 g/cm^3"}])
+        );
+        let same = structural(&from, &from, &Options::default(), &Releases::default());
+        assert!(same.get("materials").is_none());
     }
 
     fn files(list: &[(&str, Value)]) -> Files {

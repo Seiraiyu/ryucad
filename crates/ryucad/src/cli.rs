@@ -61,6 +61,10 @@ enum Command {
     /// such as "3 mm" or "wall * 2", that features' quantities can read.
     #[command(subcommand)]
     Param(ParamCmd),
+    /// The project's material library: densities (and colours) that mass properties read,
+    /// each part's named by its PDM `material` property.
+    #[command(subcommand)]
+    Materials(MaterialsCmd),
     /// ryupdm's settings for this project: its ID, how revisions are labelled, the release
     /// branch, the part number pattern and the custom properties parts may have.
     #[command(subcommand)]
@@ -194,6 +198,40 @@ enum Command {
         /// holes:2/bolt); repeat for more.
         #[arg(long = "instance", value_name = "PATH")]
         instances: Vec<String>,
+    },
+    /// Measure one entity (its point, length or area and shape; a solid's or occurrence's
+    /// volume and area) or two (their distance and nearest points, and their angle where
+    /// both have directions): <part>/<solid>/<name>, <part>/<solid>,
+    /// <assembly>/<instance>/…/<solid>/<name> or <assembly>/<instance>/….
+    Measure {
+        #[arg(num_args = 1..=2, required = true, value_name = "ENTITY")]
+        entities: Vec<String>,
+        #[command(flatten)]
+        rev: RevArg,
+    },
+    /// How far apart an assembly's instances are: the minimum distance between each pair
+    /// of solids whose boxes come within --below (a hundredth of the assembly's diagonal
+    /// by default), closest first, with the nearest points. Pairs at 0 touch or interfere.
+    Clearance {
+        part: String,
+        /// Only pairs with a side under this instance path (s1/b2, holes:2/bolt); repeat
+        /// for more.
+        #[arg(long = "instance", value_name = "PATH")]
+        instances: Vec<String>,
+        /// Pairs whose boxes come within this length (5 mm).
+        #[arg(long, value_name = "LENGTH")]
+        below: Option<String>,
+    },
+    /// Mass properties of a part or assembly, a solid (<part>/<solid>) or an occurrence
+    /// (<assembly>/<instance>/…): volume, area, centre of mass, and where every part has a
+    /// material in materials.json, mass and inertia.
+    Mass {
+        of: String,
+        /// The relative agreement the integration reaches (1e-9).
+        #[arg(long, value_name = "REL")]
+        tolerance: Option<f64>,
+        #[command(flatten)]
+        rev: RevArg,
     },
     /// What changed between two revisions: features, parameters and sketch
     /// entities, and with --model what that did to the bodies.
@@ -874,6 +912,35 @@ enum PdmCmd {
         /// Write even if parts' properties stop fitting the settings.
         #[arg(long)]
         force: bool,
+        /// Fail with `conflict` unless the project is still at this revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MaterialsCmd {
+    /// Every material, the parts that name it, the default and the project revision.
+    List,
+    /// Add or replace a material.
+    Set {
+        name: String,
+        /// Its density: 7850 kg/m^3 or 7.85 g/cm^3.
+        #[arg(long, value_name = "DENSITY")]
+        density: String,
+        /// Its colour, #rrggbb (left out, it keeps its own).
+        #[arg(long, value_name = "#RRGGBB")]
+        colour: Option<String>,
+        /// Make it the material of parts that name none.
+        #[arg(long)]
+        default: bool,
+        /// Fail with `conflict` unless the project is still at this revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
+    /// Remove a material no part names.
+    Delete {
+        name: String,
         /// Fail with `conflict` unless the project is still at this revision.
         #[arg(long = "expect", value_name = "REVISION")]
         expect: Option<String>,
@@ -1724,6 +1791,24 @@ fn request(cmd: &Command) -> Option<Request> {
             to: to.clone(),
             expected_revision: expect.revision.clone(),
         },
+        Command::Materials(MaterialsCmd::List) => Request::MaterialsList {},
+        Command::Materials(MaterialsCmd::Set {
+            name,
+            density,
+            colour,
+            default,
+            expect,
+        }) => Request::MaterialsSet {
+            name: name.clone(),
+            density: density.clone(),
+            colour: colour.clone(),
+            default: *default,
+            expected_revision: expect.clone(),
+        },
+        Command::Materials(MaterialsCmd::Delete { name, expect }) => Request::MaterialsDelete {
+            name: name.clone(),
+            expected_revision: expect.clone(),
+        },
         Command::Pdm(PdmCmd::Init) => Request::PdmInit {},
         Command::Pdm(PdmCmd::Config) => Request::PdmConfig {},
         Command::Pdm(PdmCmd::Configure {
@@ -1915,6 +2000,24 @@ fn request(cmd: &Command) -> Option<Request> {
             label: label.clone(),
             working: *working,
             direct: *direct,
+        },
+        Command::Clearance {
+            part,
+            instances,
+            below,
+        } => Request::Clearance {
+            part: part.clone(),
+            instances: instances.clone(),
+            below: below.clone(),
+        },
+        Command::Mass { of, tolerance, rev } => Request::Mass {
+            of: of.clone(),
+            tolerance: *tolerance,
+            rev: rev.rev.clone(),
+        },
+        Command::Measure { entities, rev } => Request::Measure {
+            entities: entities.clone(),
+            rev: rev.rev.clone(),
         },
         Command::Interference { part, instances } => Request::Interference {
             part: part.clone(),
@@ -2310,6 +2413,7 @@ fn lift(cmd: &Command, mut result: Value, warnings: &mut Vec<String>) -> Value {
             | Command::Config(ConfigCmd::Get { .. })
             | Command::Rebuild { .. }
             | Command::Import { .. }
+            | Command::Mass { .. }
     ) {
         return result;
     }
