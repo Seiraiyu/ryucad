@@ -111,14 +111,7 @@ impl<'a> Sheet<'a> {
     pub(crate) fn jets_at(&self, u: f64, v: f64) -> JVec<f64> {
         let swap = |(s, c): (f64, f64)| (c, s);
         match self {
-            Self::Pipe(p) => {
-                let d = p.spine().jet3(u).map(Vector3::to_array);
-                let (sin, cos) = math::sin_cos(v);
-                let [p, _] = p
-                    .jets(d, cos, sin)
-                    .expect("a certified pipe has a frame on its spine");
-                p
-            }
+            Self::Pipe(p) => p.jets_at(u, v)[0],
             Self::Analytic(s) => {
                 analytic(s, [u, v], swap(math::sin_cos(u)), swap(math::sin_cos(v)))
                     .expect("an analytic surface")

@@ -325,8 +325,10 @@ impl Writer {
                     },
                 );
             }
+            // A pipe on a rail is a kind of its own, so the bytes of a
+            // pipe on an analytic anchor are as they were.
             Surface::Pipe(p) => {
-                self.u8(8);
+                self.u8(if p.rail().is_some() { 11 } else { 8 });
                 self.shared(
                     p,
                     |w| &mut w.pipes,
@@ -334,6 +336,10 @@ impl Writer {
                         w.f64(p.radius());
                         w.curve(p.spine());
                         w.surface(p.anchor());
+                        if let Some((c, map)) = p.rail() {
+                            w.curve2(c);
+                            w.floats(&map);
+                        }
                     },
                 );
             }
@@ -858,6 +864,17 @@ impl<'a> Reader<'a> {
                         return Err(invalid("a pipe anchored on a surface that isn't analytic"));
                     }
                     Pipe::new(spine, radius, anchor).map_err(bad)
+                },
+            )?),
+            11 => Surface::Pipe(self.shared(
+                |r| &mut r.pipes,
+                |r| {
+                    let radius = r.f64()?;
+                    let spine = r.curve()?;
+                    let anchor = r.surface()?;
+                    let pcurve = r.curve2()?;
+                    let map = [r.finite()?, r.finite()?];
+                    Pipe::on_rail(spine, radius, anchor, pcurve, map).map_err(bad)
                 },
             )?),
             9 => Surface::Sweep(self.shared(
