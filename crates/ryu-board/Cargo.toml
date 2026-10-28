@@ -17,4 +17,9 @@ rayon = "1"
 testing = []
 
 [dev-dependencies]
+divan = "0.1"
 ryu-board = { path = ".", features = ["testing"] }
+
+[[bench]]
+name = "shapes"
+harness = false
