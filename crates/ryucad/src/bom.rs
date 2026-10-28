@@ -255,6 +255,28 @@ pub fn where_used(
     Ok(v)
 }
 
+/// What makes a BOM of the working files unsound, as `check` findings
+/// (`source: bom`): each part's BOM read, each finding once, in part
+/// order.
+pub(crate) fn findings(session: &mut Session) -> Result<Vec<Value>> {
+    let (_, out) = reading(session, None, |reader, _| {
+        let mut out: Vec<Value> = Vec::new();
+        let parts: Vec<Id> = reader.project.parts.keys().cloned().collect();
+        for part in parts {
+            let Ok(row) = bom::tree(reader, &part, &Rev::Working, None) else {
+                continue;
+            };
+            for f in bom::findings(&row) {
+                if !out.contains(&f) {
+                    out.push(f);
+                }
+            }
+        }
+        Ok(out)
+    })?;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::git::tests::git;
@@ -419,5 +441,52 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, crate::error::Code::InvalidParam);
+    }
+
+    #[test]
+    fn check_reports_what_makes_a_bom_unsound() {
+        let (_dir, mut s) = assembly();
+        let found = |s: &mut Session, part: Option<&str>| -> Vec<(String, String)> {
+            let params = part.map_or(json!({}), |p| json!({"part": p}));
+            let v = call(s, "check", params).unwrap();
+            v["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|f| f["source"] == "bom")
+                .map(|f| {
+                    (
+                        f["code"].as_str().unwrap().to_owned(),
+                        f["part"].as_str().unwrap().to_owned(),
+                    )
+                })
+                .collect()
+        };
+        assert!(found(&mut s, None).is_empty());
+        // The tube loses its amount; the assembly places p at A and as it
+        // is.
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "tube", "properties": {"amount": null}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "asm", "type": "instance", "id": "p9", "of": "p"}),
+        )
+        .unwrap();
+        assert_eq!(
+            found(&mut s, None),
+            [
+                ("bom_mixed_revisions".to_owned(), "asm".to_owned()),
+                ("bom_amount_missing".to_owned(), "tube".to_owned()),
+            ]
+        );
+        assert_eq!(
+            found(&mut s, Some("tube")),
+            [("bom_amount_missing".to_owned(), "tube".to_owned())]
+        );
     }
 }
