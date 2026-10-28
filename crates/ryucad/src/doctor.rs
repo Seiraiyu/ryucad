@@ -1214,13 +1214,19 @@ fn feature_files(root: &Path, part: &str) -> Vec<String> {
         .collect()
 }
 
-/// A part file of `kind` listing `features`.
-fn index_with(kind: PartKind, features: &[String]) -> Result<Vec<u8>> {
+/// `list` listing `features` instead: its kind and item numbers kept.
+fn index_with(list: &PartFile, features: &[String]) -> Result<Vec<u8>> {
     let features = features
         .iter()
         .map(|f| Id::parse(f, "feature"))
         .collect::<Result<Vec<_>>>()?;
-    Ok(canonical_bytes(&PartFile { kind, features }.to_json()))
+    Ok(canonical_bytes(
+        &PartFile {
+            features,
+            ..list.clone()
+        }
+        .to_json(),
+    ))
 }
 
 /// `parts/<part>/...` → `<part>`.
@@ -1361,6 +1367,16 @@ fn plan(
                 None if instances => PartKind::Assembly,
                 None => PartKind::Part,
             };
+            // The last commit's item numbers come back with its list.
+            let base = PartFile {
+                kind,
+                items: committed
+                    .as_ref()
+                    .filter(|p| p.kind == kind)
+                    .map(|p| p.items.clone())
+                    .unwrap_or_default(),
+                ..PartFile::default()
+            };
             let committed: Vec<String> = committed
                 .map(|p| p.features.iter().map(|f| f.to_string()).collect())
                 .unwrap_or_default();
@@ -1385,7 +1401,7 @@ fn plan(
                 } else {
                     format!("write {first}; the feature order can't be recovered, so give it as order=a,b,…")
                 },
-                changes: vec![write(first, index_with(kind, &order)?)],
+                changes: vec![write(first, index_with(&base, &order)?)],
                 params: vec![Param {
                     name: "order",
                     required: !known,
@@ -1405,7 +1421,7 @@ fn plan(
                 out.push(Repair {
                     id: id("remove"),
                     summary: format!("take {fid} out of parts/{part}/part.json"),
-                    changes: vec![write(&i.files[1], index_with(list.kind, &kept)?)],
+                    changes: vec![write(&i.files[1], index_with(&list, &kept)?)],
                     params: Vec::new(),
                 });
             }
@@ -1449,7 +1465,7 @@ fn plan(
                 out.push(Repair {
                     id: id("adopt"),
                     summary: format!("list {fid} last in parts/{part}/part.json"),
-                    changes: vec![write(&i.files[1], index_with(list.kind, &all)?)],
+                    changes: vec![write(&i.files[1], index_with(&list, &all)?)],
                     params: Vec::new(),
                 });
             }
@@ -2286,6 +2302,30 @@ pub(crate) mod tests {
         let list = listed(r, "frame").unwrap();
         assert_eq!(list.kind, PartKind::Assembly);
         assert_eq!(list.features.len(), 1);
+    }
+
+    #[test]
+    fn list_repairs_keep_an_assemblys_item_numbers() {
+        let dir = healthy();
+        let r = dir.path();
+        let instance = canonical::to_string(&json!({
+            "format": 4, "kind": "ryucad.feature", "type": "instance", "part": "p",
+            "rev": "working",
+            "pose": {"origin_m": [0, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]},
+        }));
+        w(r, "parts/frame/features/i1.json", &instance);
+        w(r, "parts/frame/features/i2.json", &instance);
+        w(
+            r,
+            "parts/frame/part.json",
+            &canonical::to_string(&json!({"features": ["i1"], "format": 3,
+                "items": {"p": 4}, "kind": "ryucad.part", "part_kind": "assembly"})),
+        );
+        let ids = offered(r);
+        fix(r, &[&ids["orphan_feature:adopt:i2"]], Params::default());
+        let list = listed(r, "frame").unwrap();
+        assert_eq!(list.features.len(), 2);
+        assert_eq!(list.items[&Id::parse("p", "part").unwrap()], 4);
     }
 
     #[test]

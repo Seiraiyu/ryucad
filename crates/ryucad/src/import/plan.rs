@@ -413,6 +413,7 @@ pub fn writes(project: &crate::doc::project::Project, planned: &[Planned]) -> Re
         let list = PartFile {
             kind: pl.kind,
             features: order,
+            ..PartFile::default()
         };
         let bytes = canonical::to_string(&list.to_json()).into_bytes();
         out.insert(rel(part_path(root, &pl.part)), Some(bytes));
