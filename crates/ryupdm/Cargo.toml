@@ -19,4 +19,6 @@ serde = "1"
 serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [dev-dependencies]
+# Seeded projects for the structure property tests.
+ryucad-doc = { path = "../ryucad-doc", features = ["test-support"] }
 tempfile = "3"
