@@ -545,6 +545,31 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         instances: Vec<String>,
     },
+    /// The material library: each material's density and colour, the
+    /// parts that name it, the default, and the project's revision.
+    #[serde(rename = "materials.list")]
+    MaterialsList {},
+    /// Adds or replaces a material: `density` as `7850 kg/m^3` or
+    /// `7.85 g/cm^3`, `colour` as `#rrggbb` (left out, it keeps its own),
+    /// and with `default` the material of parts that name none.
+    #[serde(rename = "materials.set")]
+    MaterialsSet {
+        name: String,
+        density: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        colour: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        default: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Removes a material no part names.
+    #[serde(rename = "materials.delete")]
+    MaterialsDelete {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// Imports a STEP file the daemon can read (absolute, or relative to
     /// the project): stores it under `imports/` and makes a part of each
     /// product's bodies and an assembly of each product's children
@@ -961,6 +986,8 @@ impl Request {
                 | Request::PdmInit { .. }
                 | Request::PdmConfigure { .. }
                 | Request::PropsSet { .. }
+                | Request::MaterialsSet { .. }
+                | Request::MaterialsDelete { .. }
                 | Request::ReleasePropose { dry_run: false, .. }
                 | Request::Import { dry_run: false, .. }
                 | Request::ReleaseObsolete { .. }

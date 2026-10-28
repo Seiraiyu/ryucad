@@ -405,6 +405,25 @@ fn dispatch(
         Request::Interference { part, instances } => {
             crate::interference::run(session, &part, &instances)
         }
+        Request::MaterialsList {} => crate::materials::list(session),
+        Request::MaterialsSet {
+            name,
+            density,
+            colour,
+            default,
+            expected_revision,
+        } => crate::materials::set(
+            session,
+            &name,
+            &density,
+            colour.as_deref(),
+            default,
+            expected_revision.as_deref(),
+        ),
+        Request::MaterialsDelete {
+            name,
+            expected_revision,
+        } => crate::materials::delete(session, &name, expected_revision.as_deref()),
         Request::AssemblySolve {
             part,
             moves,

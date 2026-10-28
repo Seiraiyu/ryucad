@@ -972,6 +972,9 @@ fn every_protocol_method_has_a_command() {
         ("assembly.tree", &["assembly", "tree"]),
         ("assembly.solve", &["assembly", "solve"]),
         ("interference", &["interference"]),
+        ("materials.list", &["materials", "list"]),
+        ("materials.set", &["materials", "set"]),
+        ("materials.delete", &["materials", "delete"]),
         ("import", &["import"]),
         ("export", &["export"]),
         ("rebuild", &["rebuild"]),
@@ -2854,6 +2857,75 @@ fn assemblies_from_the_cli() {
         tree["result"]["instances"][0]["pose"]["origin_m"],
         serde_json::json!([0.01, 0, 0])
     );
+}
+
+#[test]
+fn materials_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "bracket"]);
+    let set = p.ok(&[
+        "materials",
+        "set",
+        "steel",
+        "--density",
+        "7850 kg/m^3",
+        "--default",
+    ]);
+    assert_eq!(set["created"], true, "{set}");
+    let rev = set["project_revision"].as_str().unwrap().to_owned();
+    p.ok(&[
+        "materials",
+        "set",
+        "aluminium 6061",
+        "--density",
+        "2.7 g/cm^3",
+        "--colour",
+        "#b8bcc2",
+        "--expect",
+        &rev,
+    ]);
+    p.fails(
+        &[
+            "materials",
+            "set",
+            "brass",
+            "--density",
+            "8.5 g/cm^3",
+            "--expect",
+            &rev,
+        ],
+        "conflict",
+        1,
+    );
+    p.fails(
+        &["materials", "set", "brass", "--density", "8.5"],
+        "invalid_quantity",
+        1,
+    );
+    // As an agent would write it: `props set` would give each project an
+    // ID of its own, and the two answers would differ.
+    p.write(
+        "parts/bracket/properties.json",
+        &ryucad::doc::canonical::to_string(&json!({
+            "format": 1, "kind": "ryupdm.properties", "material": "aluminium 6061"
+        })),
+    );
+    let list = p.ok(&["materials", "list"]);
+    assert_eq!(list["default"], "steel", "{list}");
+    assert_eq!(list["materials"][0]["parts"], json!(["bracket"]), "{list}");
+    p.fails(
+        &["materials", "delete", "aluminium 6061"],
+        "has_dependents",
+        1,
+    );
+    p.ok(&["materials", "delete", "steel"]);
+    assert_eq!(p.ok(&["materials", "list"])["default"], json!(null));
+    // In a session, the delete is one undoable change.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!((code, &v["ok"]), (0, &json!(true)), "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["materials", "list"]);
+    assert_eq!(v["result"]["default"], "steel", "{v}");
 }
 
 #[test]
