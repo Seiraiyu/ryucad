@@ -185,7 +185,11 @@ impl Session {
         let changes = self.scan()?;
         if !changes.is_empty() {
             let paths: Vec<String> = changes.iter().map(|(p, _)| p.clone()).collect();
-            self.project.reload(&paths)?;
+            let held = Held {
+                root: &self.project.root.clone(),
+                stamps: &self.stamps,
+            };
+            self.project.reload_from(&held, &paths)?;
             let live = &self.project.parts;
             // An assembly's key is its revision, then its children's.
             self.store.results.retain(|id, (key, _)| {
@@ -615,6 +619,31 @@ impl Session {
     }
 }
 
+/// The project's folders as they are on disk, and its files' bytes as
+/// the scan just read them: a part that changed is loaded again without
+/// opening every file it has (issue #25: thousands of opens per write).
+struct Held<'a> {
+    root: &'a Path,
+    stamps: &'a Stamps,
+}
+
+impl crate::doc::source::Source for Held<'_> {
+    fn list(&self, dir: &str) -> Result<Vec<(String, crate::doc::source::Kind)>> {
+        crate::doc::source::Folder(self.root).list(dir)
+    }
+
+    fn read(&self, rel: &str) -> Result<Option<Vec<u8>>> {
+        let path = rel
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .fold(self.root.to_path_buf(), |p, s| p.join(s));
+        match self.stamps.bytes(&path) {
+            Some(b) => Ok(Some(b.to_vec())),
+            None => crate::doc::source::Folder(self.root).read(rel),
+        }
+    }
+}
+
 /// The files as last read, without copying them: what the session reads
 /// on its own while polling (release states, for `pdm.changed`).
 impl crate::doc::source::Source for Session {
@@ -639,7 +668,8 @@ impl crate::doc::source::Source for Session {
                 Kind::File
             };
             let entry = (name.as_os_str().to_string_lossy().into_owned(), kind);
-            if !out.contains(&entry) {
+            // A folder's paths sort together, so its entry is the last.
+            if out.last() != Some(&entry) {
                 out.push(entry);
             }
         }
@@ -839,6 +869,34 @@ mod tests {
         let text = fs::read(&path).unwrap();
         fs::write(&path, &text).unwrap();
         assert!(!s.refresh().unwrap());
+    }
+
+    #[test]
+    fn a_part_reloaded_from_held_bytes_is_as_loaded_from_disk() {
+        let dir = project();
+        let root = dir.path();
+        let mut s = Session::open(root).unwrap();
+        let same = |s: &Session| {
+            assert_eq!(
+                format!("{:?}", s.project()),
+                format!("{:?}", Project::load(root).unwrap())
+            );
+        };
+        // An edit, a new feature, a broken one and a stray in one part.
+        write_json(&feature_path(root, &id("p"), &id("a")), &sphere("3 mm")).unwrap();
+        write_json(&feature_path(root, &id("p"), &id("z")), &sphere("4 mm")).unwrap();
+        fs::write(feature_path(root, &id("p"), &id("y")), "{ nope").unwrap();
+        fs::write(root.join("parts/p/notes.txt"), "hi").unwrap();
+        assert!(s.refresh().unwrap());
+        same(&s);
+        // The manifest, which every part reads.
+        write_json(
+            &root.join(crate::doc::project::MANIFEST),
+            &crate::doc::files::Manifest::new(Unit::In).to_json(),
+        )
+        .unwrap();
+        assert!(s.refresh().unwrap());
+        same(&s);
     }
 
     #[test]

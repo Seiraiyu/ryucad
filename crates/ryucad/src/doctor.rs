@@ -18,6 +18,7 @@ use crate::error::{Code, Error, Result};
 use crate::expr::Env;
 use crate::git::Repo;
 use crate::rebuild::PartResult;
+use crate::session::Session;
 use crate::units::Unit;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -320,43 +321,64 @@ fn classify(
     }
 }
 
-/// Where doctor rebuilds assemblies: the daemon's session, warm and
-/// current (issue #125: a fresh one rebuilt every assembly cold, twice,
-/// on every diagnosis), else one opened on first use and kept for the
-/// diagnosis and its repairs' planning.
-pub struct Rebuilds<'a> {
+/// Where doctor's rebuilds come from: the daemon's session, which is
+/// current and keeps its results, else a session opened on the folder the
+/// first time one is needed and shared by every check after (issue #125:
+/// a daemon's doctor rebuilt each assembly cold, blocking the session).
+pub(crate) struct Builds<'a> {
     root: &'a Path,
-    given: Option<&'a mut crate::session::Session>,
-    own: Option<Option<crate::session::Session>>,
+    live: Option<&'a mut Session>,
+    opened: Option<Option<Session>>,
 }
 
-impl<'a> Rebuilds<'a> {
-    pub fn new(root: &'a Path, given: Option<&'a mut crate::session::Session>) -> Self {
+impl<'a> Builds<'a> {
+    /// Rebuilds from a session opened on `root` when one is needed.
+    pub(crate) fn cold(root: &'a Path) -> Self {
         Self {
             root,
-            given,
-            own: None,
+            live: None,
+            opened: None,
         }
     }
 
-    fn session(&mut self) -> Option<&mut crate::session::Session> {
-        if let Some(s) = self.given.as_deref_mut() {
+    /// Rebuilds from `session`, whose files must be current.
+    pub(crate) fn live(root: &'a Path, session: &'a mut Session) -> Self {
+        Self {
+            root,
+            live: Some(session),
+            opened: None,
+        }
+    }
+
+    /// The session, `None` when the project doesn't load.
+    fn session(&mut self) -> Option<&mut Session> {
+        if let Some(s) = self.live.as_deref_mut() {
             return Some(s);
         }
         let root = self.root;
-        self.own
-            .get_or_insert_with(|| crate::session::Session::open(root).ok())
+        self.opened
+            .get_or_insert_with(|| Session::open(root).ok())
             .as_mut()
+    }
+
+    /// Part `part` as loaded and its rebuild, if the project loads.
+    fn rebuilt(&mut self, part: &str) -> Option<(crate::doc::project::Part, PartResult)> {
+        let id = Id::parse(part, "part").ok()?;
+        let s = self.session()?;
+        let p = s.project().parts.get(&id)?.clone();
+        let r = s.rebuilt(&id).ok()?.clone();
+        Some((p, r))
     }
 }
 
 /// Every issue in the project at `root`, in a fixed order.
 pub fn diagnose(root: &Path) -> Vec<Issue> {
-    diagnose_in(root, &mut Rebuilds::new(root, None))
+    diagnose_in(&mut Builds::cold(root))
 }
 
-/// [`diagnose`], rebuilding assemblies in `rebuilds`.
-fn diagnose_in(root: &Path, rebuilds: &mut Rebuilds) -> Vec<Issue> {
+/// Every issue, rebuilding through `builds`.
+fn diagnose_in(builds: &mut Builds) -> Vec<Issue> {
+    let root = builds.root;
     let mut issues = Vec::new();
     if let Some(name) = cloud_folder(root) {
         issues.push(issue(
@@ -412,9 +434,9 @@ fn diagnose_in(root: &Path, rebuilds: &mut Rebuilds) -> Vec<Issue> {
         &mut issues,
     );
     for part in &part_ids {
-        diagnose_part(root, part, unit, &mut issues);
+        diagnose_part(builds, part, unit, &mut issues);
     }
-    diagnose_assemblies(root, &part_ids, rebuilds, &mut issues);
+    diagnose_assemblies(builds, &part_ids, &mut issues);
     diagnose_items(&mut issues, root);
     diagnose_imports(root, &part_ids, unit, &mut issues);
     diagnose_pdm(root, manifest.as_ref(), &part_ids, &mut issues);
@@ -520,12 +542,8 @@ fn diagnose_imports(root: &Path, parts: &[&str], unit: Unit, issues: &mut Vec<Is
 
 /// Each assembly whose stored poses don't hold where its mates do, with
 /// the instance files its repair writes.
-fn diagnose_assemblies(
-    root: &Path,
-    parts: &[&str],
-    rebuilds: &mut Rebuilds,
-    issues: &mut Vec<Issue>,
-) {
+fn diagnose_assemblies(builds: &mut Builds, parts: &[&str], issues: &mut Vec<Issue>) {
+    let root = builds.root;
     let assembly = |part: &str| {
         matches!(read(root, &format!("parts/{part}/part.json")),
             Read::Json(v, _) if v["part_kind"] == "assembly")
@@ -534,7 +552,7 @@ fn diagnose_assemblies(
     if assemblies.is_empty() {
         return;
     }
-    let Some(session) = rebuilds.session() else {
+    let Some(session) = builds.session() else {
         return;
     };
     for part in assemblies {
@@ -576,10 +594,7 @@ fn diagnose_items(issues: &mut Vec<Issue>, root: &Path) {
 /// The instance files of assembly `part` as they would be with its poses
 /// solved, when its stored poses are stale and its mates hold where they
 /// are solved; `None` otherwise.
-fn stale_assembly(
-    session: &mut crate::session::Session,
-    part: &str,
-) -> Option<Vec<(String, Vec<u8>)>> {
+fn stale_assembly(session: &mut Session, part: &str) -> Option<Vec<(String, Vec<u8>)>> {
     let id = Id::parse(part, "part").ok()?;
     let r = session.rebuilt(&id).ok()?.clone();
     let solve = r.solve.as_ref()?;
@@ -852,7 +867,8 @@ fn non_canonical(rel: &str) -> Issue {
     )
 }
 
-fn diagnose_part(root: &Path, part: &str, unit: Unit, issues: &mut Vec<Issue>) {
+fn diagnose_part(builds: &mut Builds, part: &str, unit: Unit, issues: &mut Vec<Issue>) {
+    let root = builds.root;
     let dir = format!("parts/{part}");
     let index = format!("{dir}/part.json");
     let entries = names(&root.join(&dir));
@@ -927,7 +943,7 @@ fn diagnose_part(root: &Path, part: &str, unit: Unit, issues: &mut Vec<Issue>) {
                     // part, rebuilt once for all of them.
                     let reads = feature.sketch().is_some_and(|s| !s.references().is_empty());
                     let stale = if reads {
-                        let in_part = in_part.get_or_insert_with(|| stale_in_part(root, part));
+                        let in_part = in_part.get_or_insert_with(|| stale_in_part(builds, part));
                         in_part.get(*f).cloned()
                     } else {
                         solved_sketch(f, &feature).map(|_| Vec::new())
@@ -1022,19 +1038,11 @@ fn solved_sketch(id: &str, f: &Feature) -> Option<Feature> {
     solved.stale.then_some(Feature::Sketch(solved.sketch))
 }
 
-/// The part's rebuild from the files as they stand, if the project loads.
-fn rebuilt(root: &Path, part: &str) -> Option<(crate::doc::project::Part, PartResult)> {
-    let project = crate::doc::project::Project::load(root).ok()?;
-    let p = project.parts.get(&Id::parse(part, "part").ok()?)?.clone();
-    let r = crate::rebuild::rebuild_part(&p);
-    Some((p, r))
-}
-
 /// The stale sketches of `part` that read other features, each with the
 /// files of the features it reads, directly or not. Empty when the
 /// project can't be loaded.
-fn stale_in_part(root: &Path, part: &str) -> BTreeMap<String, Vec<String>> {
-    let Some((p, r)) = rebuilt(root, part) else {
+fn stale_in_part(builds: &mut Builds, part: &str) -> BTreeMap<String, Vec<String>> {
+    let Some((p, r)) = builds.rebuilt(part) else {
         return BTreeMap::new();
     };
     let mut out = BTreeMap::new();
@@ -1069,7 +1077,8 @@ fn stale_in_part(root: &Path, part: &str) -> BTreeMap<String, Vec<String>> {
 /// A feature file as it would be with its sketch solved, read with the
 /// project's unit and the part's parameters as they are now; a sketch that
 /// reads other features, solved in its part.
-fn solved_file(root: &Path, rel: &str) -> Option<Vec<u8>> {
+fn solved_file(builds: &mut Builds, rel: &str) -> Option<Vec<u8>> {
+    let root = builds.root;
     let unit = match read(root, MANIFEST) {
         Read::Json(v, _) => Manifest::from_json(&v).ok()?.default_unit,
         _ => Unit::Mm,
@@ -1084,7 +1093,7 @@ fn solved_file(root: &Path, rel: &str) -> Option<Vec<u8>> {
     };
     let f = Feature::from_json(&v, unit, &env).ok()?;
     if f.sketch().is_some_and(|s| !s.references().is_empty()) {
-        let (_, r) = rebuilt(root, part_of(rel))?;
+        let (_, r) = builds.rebuilt(part_of(rel))?;
         let s = r
             .output(&Id::parse(stem_of(rel), "feature").ok()?)?
             .sketch()?;
@@ -1271,12 +1280,12 @@ fn stem_of(rel: &str) -> &str {
 
 /// The repairs for an issue, planned against the files as they are.
 fn plan(
-    root: &Path,
+    builds: &mut Builds,
     i: &Issue,
     repo: Option<&Repo>,
     params: &Params,
-    rebuilds: &mut Rebuilds,
 ) -> Result<Vec<Repair>> {
+    let root = builds.root;
     // What `ryucad git install` sets up in the clone (the drivers, renames
     // off, the hooks), except a hooks folder the user chose, which ryucad
     // never writes to.
@@ -1536,7 +1545,7 @@ fn plan(
             }
         }
         "assembly_stale" => {
-            let writes = rebuilds
+            let writes = builds
                 .session()
                 .and_then(|s| stale_assembly(s, part_of(first)));
             if let Some(writes) = writes {
@@ -1549,7 +1558,7 @@ fn plan(
             }
         }
         "sketch_stale" => {
-            if let Some(bytes) = solved_file(root, first) {
+            if let Some(bytes) = solved_file(builds, first) {
                 out.push(Repair {
                     id: id("solve"),
                     summary: format!("write {first} with its positions solved"),
@@ -1622,21 +1631,12 @@ fn plan(
 }
 
 /// Every issue with its repairs.
-fn planned(root: &Path, params: &Params) -> Result<Vec<(Issue, Vec<Repair>)>> {
-    planned_in(root, params, &mut Rebuilds::new(root, None))
-}
-
-/// [`planned`], rebuilding assemblies in `rebuilds`.
-fn planned_in(
-    root: &Path,
-    params: &Params,
-    rebuilds: &mut Rebuilds,
-) -> Result<Vec<(Issue, Vec<Repair>)>> {
-    let repo = Repo::open(root)?;
-    diagnose_in(root, rebuilds)
+fn planned(builds: &mut Builds, params: &Params) -> Result<Vec<(Issue, Vec<Repair>)>> {
+    let repo = Repo::open(builds.root)?;
+    diagnose_in(builds)
         .into_iter()
         .map(|i| {
-            let r = plan(root, &i, repo.as_ref(), params, rebuilds)?;
+            let r = plan(builds, &i, repo.as_ref(), params)?;
             Ok((i, r))
         })
         .collect()
@@ -1662,19 +1662,12 @@ fn summary(issues: &[(Issue, Vec<Repair>)]) -> Value {
 
 /// `doctor`: every issue and how to repair it. Writes nothing.
 pub fn report(root: &Path) -> Result<Value> {
-    Ok(summary(&planned(root, &Params::default())?))
+    report_in(&mut Builds::cold(root))
 }
 
-/// [`report`] in a daemon: its session, current with the files, rebuilds
-/// assemblies from what it has already built.
-pub fn report_in(session: &mut crate::session::Session) -> Result<Value> {
-    let root = session.root().to_path_buf();
-    let mut rebuilds = Rebuilds::new(&root, Some(session));
-    Ok(summary(&planned_in(
-        &root,
-        &Params::default(),
-        &mut rebuilds,
-    )?))
+/// `doctor`, rebuilding through `builds` (a daemon's: its session).
+pub(crate) fn report_in(builds: &mut Builds) -> Result<Value> {
+    Ok(summary(&planned(builds, &Params::default())?))
 }
 
 /// `doctor.repair`: applies the named repairs, in order. Every one must be
@@ -1682,7 +1675,7 @@ pub fn report_in(session: &mut crate::session::Session) -> Result<Value> {
 /// (`repair_conflict`); a repair that an earlier one made unnecessary is
 /// skipped.
 pub fn repair(root: &Path, ids: &[String], params: &Params) -> Result<Value> {
-    let now = planned(root, params)?;
+    let now = planned(&mut Builds::cold(root), params)?;
     let all: Vec<&Repair> = now.iter().flat_map(|(_, r)| r).collect();
     for id in ids {
         let Some(r) = all.iter().find(|r| r.id == *id) else {
@@ -1720,7 +1713,8 @@ pub fn repair(root: &Path, ids: &[String], params: &Params) -> Result<Value> {
     let (mut applied, mut skipped, mut changes) = (Vec::new(), Vec::new(), Vec::new());
     for id in ids {
         // Planned again: an earlier repair may have changed shared files.
-        let fresh = planned(root, params)?;
+        // Earlier repairs changed the files: rebuild from them.
+        let fresh = planned(&mut Builds::cold(root), params)?;
         let found = fresh
             .iter()
             .flat_map(|(_, r)| r)

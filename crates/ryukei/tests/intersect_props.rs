@@ -284,3 +284,49 @@ proptest! {
         agrees(&a, &b)?;
     }
 }
+
+/// Issue #83: a plane cutting a cone missed a crossing sampling sees.
+#[test]
+fn a_plane_cone_section_misses_nothing() {
+    let cone = Surface::Cone(
+        Cone::new(
+            exact_frame(
+                Point3::new(1.300359150670767, -0.999426280633521, 0.3169023804174567),
+                ryukei::geom::Vector3::new(
+                    0.7098371937016634,
+                    0.6453026276142131,
+                    0.2823396487069071,
+                ),
+                ryukei::geom::Vector3::new(
+                    -0.2089149934758285,
+                    -0.18992156995174145,
+                    0.9593145067015615,
+                ),
+            ),
+            1.4311496567037358,
+            0.7546077875651969,
+        )
+        .unwrap(),
+    );
+    let plane = Surface::Plane(Plane::new(exact_frame(
+        Point3::new(1.2401609189828136, 1.8753245513674017, 1.4035241060352492),
+        ryukei::geom::Vector3::new(
+            -0.6244782213249651,
+            -0.13784259638188215,
+            0.7687823942530875,
+        ),
+        ryukei::geom::Vector3::new(
+            -0.08690932297520886,
+            0.9904541476629303,
+            0.10699229391544654,
+        ),
+    )));
+    agrees(&cone, &plane).unwrap();
+    agrees(&plane, &cone).unwrap();
+}
+
+/// A frame with exactly these axes, bit for bit.
+fn exact_frame(o: Point3, z: ryukei::geom::Vector3, x: ryukei::geom::Vector3) -> Frame {
+    let unit = |v| ryukei::geom::UnitVector3::exact(v).unwrap();
+    Frame::from_axes(o, unit(z), unit(x)).unwrap()
+}

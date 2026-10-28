@@ -187,11 +187,10 @@ fn the_corpus_imports_as_ryustep_reads_it() {
         .filter(|f| f["ok"] == true)
         .count();
     assert_eq!(ok, want.values().filter(|o| *o == "ok").count());
-    // A cone ryukei's `heal::seamed` can't cut open (`BadDomain`; issue
-    // #146). The same face in nist_ctc_05's first body, and one in
-    // nist_ctc_04's, are in parts that fail anyway: their products' PMI
-    // sheets are open shells.
-    exports_import_again(&mut s, &["nist_ctc_05_asme1_rd-2"]);
+    // Every part that builds exports, nist_ctc_05's second too: its
+    // countersink's cone face, a lune through the apex, is cut open
+    // (issue #146).
+    exports_import_again(&mut s, &[]);
 }
 
 #[test]

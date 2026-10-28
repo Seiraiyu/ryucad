@@ -159,9 +159,7 @@ impl Cache {
             .collect();
         let mut fresh: BTreeMap<String, Arc<DisplayMesh>> = BTreeMap::new();
         for (hash, m) in made {
-            self.bytes += m.bytes();
-            self.entries
-                .insert((hash.clone(), quality), (self.clock, Arc::clone(&m)));
+            self.add(&hash, quality, &m);
             fresh.insert(hash, m);
         }
         let out: Vec<Arc<DisplayMesh>> = items
@@ -179,6 +177,41 @@ impl Cache {
             .collect();
         self.evict(budget);
         out
+    }
+
+    /// The meshes of `items` the cache doesn't hold, to be made away from
+    /// the session ([`Pending::make`]) and put back with [`Cache::put`];
+    /// `None` when it holds them all.
+    pub fn pending(&self, items: &[(&Feature, &Built)], quality: Quality) -> Option<Pending> {
+        let mut seen = std::collections::BTreeSet::new();
+        let items: Vec<(Feature, Built)> = items
+            .iter()
+            .filter(|(_, b)| !self.entries.contains_key(&(b.hash.clone(), quality)))
+            .filter(|(_, b)| seen.insert(b.hash.clone()))
+            .map(|(f, b)| ((*f).clone(), (*b).clone()))
+            .collect();
+        (!items.is_empty()).then(|| Pending {
+            disk: self.disk.clone(),
+            quality,
+            items,
+        })
+    }
+
+    /// Takes in meshes [`Pending::make`] made, keeping those the cache
+    /// already has (made meanwhile by another request).
+    pub fn put(&mut self, made: Made, budget: usize) {
+        for (hash, m) in made.meshes {
+            if !self.entries.contains_key(&(hash.clone(), made.quality)) {
+                self.add(&hash, made.quality, &m);
+            }
+        }
+        self.evict(budget);
+    }
+
+    fn add(&mut self, hash: &str, quality: Quality, m: &Arc<DisplayMesh>) {
+        self.bytes += m.bytes();
+        self.entries
+            .insert((hash.to_owned(), quality), (self.clock, Arc::clone(m)));
     }
 
     /// Drops the least recently used meshes until the cache fits `budget`,
@@ -202,6 +235,34 @@ impl Cache {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+/// Meshes a cache lacks, with what making them needs, so the daemon can
+/// make them without holding its session (#91).
+pub struct Pending {
+    disk: Option<Arc<crate::cache::Disk>>,
+    quality: Quality,
+    items: Vec<(Feature, Built)>,
+}
+
+/// Meshes [`Pending::make`] made, for [`Cache::put`].
+pub struct Made {
+    quality: Quality,
+    meshes: Vec<(String, Arc<DisplayMesh>)>,
+}
+
+impl Pending {
+    /// Makes the meshes, in parallel, as [`Cache::get_all`] would.
+    pub fn make(self) -> Made {
+        use rayon::prelude::*;
+        let (disk, quality) = (self.disk.as_deref(), self.quality);
+        let meshes = self
+            .items
+            .par_iter()
+            .map(|(f, b)| (b.hash.clone(), Arc::new(make(disk, f, b, quality))))
+            .collect();
+        Made { quality, meshes }
     }
 }
 
