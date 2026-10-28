@@ -973,6 +973,7 @@ fn every_protocol_method_has_a_command() {
         ("assembly.solve", &["assembly", "solve"]),
         ("interference", &["interference"]),
         ("measure", &["measure"]),
+        ("mass", &["mass"]),
         ("materials.list", &["materials", "list"]),
         ("materials.set", &["materials", "set"]),
         ("materials.delete", &["materials", "delete"]),
@@ -2943,8 +2944,29 @@ fn materials_from_the_cli() {
         "has_dependents",
         1,
     );
+    // The bracket's mass at aluminium's density; with no material and no
+    // default a part gives its geometry and a warning.
+    p.ok(&[
+        "feature", "add", "bracket", "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+        "--param", "z=10",
+    ]);
+    let m = p.ok(&["mass", "bracket"]);
+    assert_eq!(m["mass"]["value"], "0.0027 kg", "{m}");
+    assert_eq!(m["parts"][0]["material"], "aluminium 6061");
+    p.ok(&["part", "create", "loose"]);
+    p.ok(&[
+        "feature", "add", "loose", "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+        "--param", "z=10",
+    ]);
     p.ok(&["materials", "delete", "steel"]);
     assert_eq!(p.ok(&["materials", "list"])["default"], json!(null));
+    let (code, v) = p.both_from("", &["mass", "loose"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(
+        v["warnings"][0].as_str().unwrap().contains("no material"),
+        "{v}"
+    );
+    assert!(v["result"].get("mass").is_none(), "{v}");
     // In a session, the delete is one undoable change.
     let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
     assert_eq!((code, &v["ok"]), (0, &json!(true)), "{v}");
