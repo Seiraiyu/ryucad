@@ -113,13 +113,17 @@ enum Command {
         #[command(flatten)]
         expect: Expect,
     },
-    /// Write a part or an assembly as a STEP file: as the working files have it, as a
-    /// Git revision has it (--rev), or as a release (--rev label:<L>).
+    /// Write a part or an assembly as a file: as the working files have it, as a Git
+    /// revision has it (--rev), or as a release (--rev label:<L>). The daemon writes
+    /// it, atomically, in a folder that must exist.
     Export {
         part: String,
-        /// The STEP file to write; its name goes in the file's header.
+        /// The file to write; its name goes in a STEP file's header.
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
+        /// step; by default the one --out's extension names (.step, .stp).
+        #[arg(long)]
+        format: Option<String>,
         /// ap242 (the default) or ap214.
         #[arg(long)]
         schema: Option<String>,
@@ -2029,6 +2033,7 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Export {
             part,
             out,
+            format,
             schema,
             unit,
             time_stamp,
@@ -2036,8 +2041,14 @@ fn request(cmd: &Command) -> Option<Request> {
         } => Request::Export {
             part: part.clone(),
             rev: rev.clone(),
-            format: None,
-            out: None,
+            format: format.clone(),
+            // The daemon's folder isn't the caller's.
+            out: Some(
+                std::path::absolute(out)
+                    .unwrap_or_else(|_| out.clone())
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             schema: schema.clone(),
             unit: unit.clone(),
             time_stamp: time_stamp.clone(),
@@ -2553,13 +2564,6 @@ fn deliver(cmd: &Command, a: Answer) -> Result<Value> {
         return written(cmd, a.result);
     };
     let out = match cmd {
-        // A file another tool reads is never seen half written.
-        Command::Export { out, .. } => {
-            ryucad::doc::project::write_atomic(out, &bytes)?;
-            let mut result = a.result;
-            result["out"] = json!(out);
-            return Ok(result);
-        }
         Command::Mesh { out: Some(o), .. } | Command::Render { out: o, .. } => o,
         _ => {
             return Err(Error::new(

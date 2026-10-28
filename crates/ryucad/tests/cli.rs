@@ -3346,11 +3346,29 @@ fn exports_from_the_cli() {
         "z=5",
     ]);
     let stamp = "2026-10-27T00:00:00";
+    // The daemon writes the file, in a folder that must exist.
+    p.fails(
+        &["export", "p", "--out", "out/p.step", "--time-stamp", stamp],
+        "not_found",
+        1,
+    );
+    fs::create_dir(p.direct.join("out")).unwrap();
+    fs::create_dir(p.daemon.join("out")).unwrap();
     let v = p.ok(&["export", "p", "--out", "out/p.step", "--time-stamp", stamp]);
-    assert_eq!(v["out"], "out/p.step");
     assert_eq!(
-        (&v["schema"], &v["unit"], &v["file_name"], &v["time_stamp"]),
+        Path::new(v["out"].as_str().unwrap()),
+        Path::new("<root>").join("out").join("p.step")
+    );
+    assert_eq!(
         (
+            &v["format"],
+            &v["schema"],
+            &v["unit"],
+            &v["file_name"],
+            &v["time_stamp"]
+        ),
+        (
+            &json!("step"),
             &json!("ap242"),
             &json!("mm"),
             &json!("p.step"),
@@ -3363,6 +3381,25 @@ fn exports_from_the_cli() {
     assert_eq!(direct, fs::read(p.daemon.join("out/p.step")).unwrap());
     assert!(direct.starts_with(b"ISO-10303-21;"));
     assert!(!p.direct.join("out/.p.step.tmp").exists());
+    assert_eq!(v["bytes"], json!(direct.len()));
+    assert_eq!(
+        v["blake3"],
+        json!(blake3::hash(&direct).to_hex().to_string())
+    );
+    // The format by name, whatever the extension; an extension export
+    // doesn't know is refused.
+    let v = p.ok(&[
+        "export",
+        "p",
+        "--out",
+        "out/p.txt",
+        "--format",
+        "step",
+        "--time-stamp",
+        stamp,
+    ]);
+    assert_eq!(v["format"], "step");
+    p.fails(&["export", "p", "--out", "out/p.txt"], "invalid_param", 1);
     let v = p.ok(&[
         "export",
         "p",
