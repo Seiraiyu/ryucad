@@ -2706,8 +2706,9 @@ pub(crate) mod tests {
         assert_eq!(
             message(r),
             format!(
-                ".gitattributes lacks the lines {}, {}, {}, {} and {}{why}",
-                quoted[0], quoted[1], quoted[2], quoted[3], quoted[4]
+                ".gitattributes lacks the lines {} and {}{why}",
+                quoted[..quoted.len() - 1].join(", "),
+                quoted[quoted.len() - 1]
             )
         );
     }
