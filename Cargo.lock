@@ -4291,6 +4291,7 @@ dependencies = [
  "rayon",
  "ryu-session",
  "ryucad-doc",
+ "ryuformats",
  "ryukei",
  "ryukei-testkit",
  "ryumate",
