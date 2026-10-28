@@ -410,9 +410,24 @@ pub fn writes(project: &crate::doc::project::Project, planned: &[Planned]) -> Re
             let bytes = canonical::to_string(&f.to_json()).into_bytes();
             out.insert(rel(feature_path(root, &pl.part, fid)), Some(bytes));
         }
+        // Instances an import adds or removes give and take item numbers as
+        // any write does.
+        let current = project.parts.get(&pl.part).filter(|_| !pl.new);
+        let before = current.map(ryupdm::items::placed).unwrap_or_default();
+        let feature = |fid: &Id| match pl.features.iter().find(|(w, _)| w == fid) {
+            Some((_, f)) => Some(f),
+            None => current?.features.get(fid)?.as_ref().ok(),
+        };
+        let after = ryupdm::items::placed_by(&order, feature);
+        let whole = order.iter().all(|f| feature(f).is_some());
+        let items = current
+            .and_then(|p| p.file.as_ref().ok())
+            .map(|f| f.items.clone())
+            .unwrap_or_default();
         let list = PartFile {
             kind: pl.kind,
             features: order,
+            items: ryupdm::items::assigned(&items, &before, &after, whole),
         };
         let bytes = canonical::to_string(&list.to_json()).into_bytes();
         out.insert(rel(part_path(root, &pl.part)), Some(bytes));

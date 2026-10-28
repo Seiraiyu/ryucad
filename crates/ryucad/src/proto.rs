@@ -491,6 +491,18 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         direct: bool,
     },
+    /// Sets an assembly's item numbers (`items`, part to number), or with
+    /// `compact` numbers its parts 1 to n in their current order.
+    #[serde(rename = "bom.renumber")]
+    BomRenumber {
+        part: String,
+        #[serde(default, skip_serializing_if = "Map::is_empty")]
+        items: Map<String, Value>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        compact: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// Release records (or one part's), where each became official, their
     /// tags, and each part's state.
     #[serde(rename = "release.list")]
@@ -1071,6 +1083,7 @@ impl Request {
                 | Request::PdmInit { .. }
                 | Request::PdmConfigure { .. }
                 | Request::PropsSet { .. }
+                | Request::BomRenumber { .. }
                 | Request::MaterialsSet { .. }
                 | Request::MaterialsDelete { .. }
                 | Request::ReleasePropose { dry_run: false, .. }
@@ -1197,6 +1210,12 @@ mod tests {
                 properties: [("number".to_owned(), json!("100"))].into_iter().collect(),
                 expected_revision: Some("r".into()),
             },
+            Request::BomRenumber {
+                part: "asm".into(),
+                items: [("bolt".to_owned(), json!(3))].into_iter().collect(),
+                compact: false,
+                expected_revision: Some("r".into()),
+            },
             Request::ReleasePropose {
                 part: "p".into(),
                 note: Some("why".into()),
@@ -1286,6 +1305,15 @@ mod tests {
             .mutates()
         );
         assert!(!Request::MergeStatus {}.mutates());
+        assert!(
+            Request::BomRenumber {
+                part: "asm".into(),
+                items: Map::new(),
+                compact: true,
+                expected_revision: None,
+            }
+            .mutates()
+        );
         assert!(
             !Request::Rebuild {
                 part: None,

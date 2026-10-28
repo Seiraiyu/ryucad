@@ -12,7 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// A file as one line per value, in a fixed order, so that a line diff of
 /// two renderings reads as the values that changed: `git diff` through
 /// `ryucad git textconv`. A header names the file's kind (and a feature's
-/// type) and format; a part lists its features one per line; a sketch gives
+/// type) and format; a part lists its features one per line, then an
+/// assembly's items one per line in number order; a sketch gives
 /// each entity and constraint a line, and its solved positions last, apart
 /// from the intent. ryupdm's files: a part's properties one per line, each
 /// declared property in the settings on one line, and a release record's
@@ -44,10 +45,19 @@ pub fn textconv(bytes: &[u8]) -> Vec<u8> {
     let mut lines = Vec::new();
     let mut last = Vec::new();
     match kind {
-        // A part's features keep their order.
+        // A part's features keep their order; an assembly's items follow
+        // in number order, a number shared by two parts on two lines.
         Some("ryucad.part") => {
             if let Some(Value::Array(list)) = rest.remove("features") {
                 out.extend(list.iter().map(|f| format!("feature {}", scalar(f))));
+            }
+            if let Some(Value::Object(items)) = rest.remove("items") {
+                let mut by: Vec<(String, &String)> =
+                    items.iter().map(|(part, n)| (scalar(n), part)).collect();
+                by.sort_by_key(|(n, part)| {
+                    (n.parse::<u64>().unwrap_or(u64::MAX), n.clone(), *part)
+                });
+                out.extend(by.into_iter().map(|(n, part)| format!("item {n} = {part}")));
             }
         }
         Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("sketch") => {
@@ -705,6 +715,13 @@ fn pdm(from: &Files, to: &Files, part: &str, releases: &Releases) -> Option<Valu
 }
 
 /// A part's parameters as written, by name.
+/// An assembly's item numbers by part, as written.
+fn items(files: &Files, part: &str) -> Map<String, Value> {
+    json_at(files, &format!("parts/{part}/part.json"))
+        .and_then(|v| v["items"].as_object().cloned())
+        .unwrap_or_default()
+}
+
 fn parameters(files: &Files, part: &str) -> Map<String, Value> {
     json_at(files, &format!("parts/{part}/parameters.json"))
         .and_then(|v| v["parameters"].as_object().cloned())
@@ -713,7 +730,8 @@ fn parameters(files: &Files, part: &str) -> Map<String, Value> {
 
 /// What changed between two versions of a project's files, `from` and
 /// `to`: the manifest, and per part its feature order, its parameters as
-/// written, and each feature by JSON pointer (a sketch by entity and
+/// written, an assembly's item numbers by part (`items`, when either side
+/// has any), and each feature by JSON pointer (a sketch by entity and
 /// constraint, its solved positions apart). A part whose PDM differs has
 /// `pdm` too (see [`pdm`]), its states read against `releases`, the
 /// release branch as read; a change to `ryupdm.json` is `pdm` at the top,
@@ -813,6 +831,22 @@ pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases)
             "parameters": {"added": added, "removed": removed, "changed": changed},
             "features": features,
         });
+        let (ia, ib) = (items(from, part), items(to, part));
+        if !ia.is_empty() || !ib.is_empty() {
+            let keys: BTreeSet<&String> = ia.keys().chain(ib.keys()).collect();
+            let (mut added, mut removed, mut changed) = (Vec::new(), Vec::new(), Vec::new());
+            for k in keys {
+                match (ia.get(k), ib.get(k)) {
+                    (None, Some(t)) => added.push(json!({"part": k, "to": t})),
+                    (Some(f), None) => removed.push(json!({"part": k, "from": f})),
+                    (Some(f), Some(t)) if f != t => {
+                        changed.push(json!({"part": k, "from": f, "to": t}));
+                    }
+                    _ => {}
+                }
+            }
+            v["items"] = json!({"added": added, "removed": removed, "changed": changed});
+        }
         if let Some(p) = pdm {
             v["pdm"] = p;
         }
@@ -1614,6 +1648,13 @@ mod tests {
         );
         let m = json!({"default_unit": "mm", "format": 1, "kind": "ryucad.project"});
         assert_eq!(text(m), "ryucad.project (format 1)\ndefault_unit = mm\n");
+        let a = json!({"features": ["i1", "i2"], "format": 3, "kind": "ryucad.part",
+                       "part_kind": "assembly", "items": {"plate": 10, "bolt": 2, "nut": 2}});
+        assert_eq!(
+            text(a),
+            "ryucad.part (format 3)\nfeature i1\nfeature i2\nitem 2 = bolt\nitem 2 = nut\n\
+             item 10 = plate\npart_kind = assembly\n"
+        );
         let p = json!({"format": 1, "kind": "ryucad.parameters",
                        "parameters": {"wall": "3 mm", "hole": "wall * 2"}});
         assert_eq!(
@@ -1923,6 +1964,42 @@ mod tests {
             v["entities"]["l2"] = json!({"end": "p2", "start": "p1", "type": "line"});
         }
         v
+    }
+
+    #[test]
+    fn an_assemblys_items_diff_by_part() {
+        let asm = |items: Value| {
+            json!({"features": [], "format": 3, "items": items, "kind": "ryucad.part",
+                   "part_kind": "assembly"})
+        };
+        let manifest = json!({"default_unit": "mm", "format": 1, "kind": "ryucad.project"});
+        let from = files(&[
+            ("ryucad.json", manifest.clone()),
+            ("parts/a/part.json", asm(json!({"plate": 1, "bolt": 2}))),
+            (
+                "parts/p/part.json",
+                json!({"features": [], "format": 1, "kind": "ryucad.part"}),
+            ),
+        ]);
+        let to = files(&[
+            ("ryucad.json", manifest),
+            (
+                "parts/a/part.json",
+                asm(json!({"plate": 1, "bolt": 3, "nut": 4})),
+            ),
+            (
+                "parts/p/part.json",
+                json!({"features": ["x"], "format": 1, "kind": "ryucad.part"}),
+            ),
+        ]);
+        let v = structural(&from, &to, &Options::default(), &Releases::default());
+        assert_eq!(
+            v["parts"]["a"]["items"],
+            json!({"added": [{"part": "nut", "to": 4}], "removed": [],
+                   "changed": [{"part": "bolt", "from": 2, "to": 3}]})
+        );
+        // A part with no items has no such block.
+        assert!(v["parts"]["p"].get("items").is_none());
     }
 
     #[test]

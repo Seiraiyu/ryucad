@@ -45,10 +45,37 @@ pub struct Structure {
     pub bought: Vec<String>,
 }
 
+impl Structure {
+    /// How many of each leaf one `part` holds, by the generator's account:
+    /// the products of counts along every path down to a part or an
+    /// assembly bought whole (`part` itself when it is one).
+    pub fn totals(&self, part: &str) -> std::collections::BTreeMap<String, u64> {
+        let mut out = std::collections::BTreeMap::new();
+        if self.bought.iter().any(|b| b == part) {
+            out.insert(part.to_owned(), 1);
+        } else {
+            self.sum(part, 1, &mut out);
+        }
+        out
+    }
+
+    fn sum(&self, part: &str, times: u64, out: &mut std::collections::BTreeMap<String, u64>) {
+        match self.assemblies.iter().find(|(a, _)| a == part) {
+            Some((a, children)) if !self.bought.contains(a) => {
+                for (c, n) in children {
+                    self.sum(c, times * n, out);
+                }
+            }
+            _ => *out.entry(part.to_owned()).or_default() += times,
+        }
+    }
+}
+
 /// One to five parts (some counted in metres with an amount, some
 /// bought), then one to four assemblies, each placing two to five
 /// children by instances and instance patterns (copies of an instance,
-/// some skipped), from `bytes` (read as zeros past their end).
+/// some skipped) and numbering each part it places in the order it first
+/// places it, from `bytes` (read as zeros past their end).
 pub fn structure(bytes: &[u8]) -> Structure {
     use crate::doc::canonical;
     let mut at = 0;
@@ -124,9 +151,16 @@ pub fn structure(bytes: &[u8]) -> Structure {
                 children.push((of, (n - 1) as u64 - skip.len() as u64));
             }
         }
+        // Each part it places numbered in the order it first places it.
+        let mut items = serde_json::Map::new();
+        for (c, _) in &children {
+            if !items.contains_key(c) {
+                items.insert(c.clone(), json!(items.len() + 1));
+            }
+        }
         put(
             format!("parts/{a}/part.json"),
-            json!({"features": list, "format": 2, "kind": "ryucad.part",
+            json!({"features": list, "format": 3, "items": items, "kind": "ryucad.part",
                    "part_kind": "assembly"}),
         );
         if next(4) == 0 {

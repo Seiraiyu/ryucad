@@ -1330,7 +1330,7 @@ fn boms_section(golden: &mut Golden) {
         let states = std::collections::BTreeMap::new();
         for part in project.parts.keys() {
             let row = bom::tree(&mut r, part, &Rev::Working, None).unwrap();
-            let rows = bom::flat(&row);
+            let rows = bom::flat(&row, &config);
             s.str(&text(&bom::row_json(&row, &states)));
             s.str(&bom::csv_tree(&row, &config));
             s.str(&bom::csv_flat(&rows, &config));

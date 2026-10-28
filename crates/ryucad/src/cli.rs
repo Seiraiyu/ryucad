@@ -1111,6 +1111,18 @@ enum BomCmd {
         #[arg(long, value_name = "REV")]
         to: Option<String>,
     },
+    /// Set an assembly's item numbers: bolt=3 nut=4 (several at once, so two
+    /// may swap); --compact numbers its parts 1 to n in their current order.
+    Renumber {
+        part: String,
+        #[arg(value_name = "PART=N", value_parser = param, required_unless_present = "compact")]
+        items: Vec<(String, String)>,
+        /// Number every part 1 to n, by its current number.
+        #[arg(long, conflicts_with = "items")]
+        compact: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
 }
 
 #[derive(Args)]
@@ -1946,6 +1958,27 @@ fn request(cmd: &Command) -> Option<Request> {
             part: part.clone(),
             from: from.clone(),
             to: to.clone(),
+        },
+        Command::Bom {
+            cmd:
+                Some(BomCmd::Renumber {
+                    part,
+                    items,
+                    compact,
+                    expect,
+                }),
+            ..
+        } => Request::BomRenumber {
+            part: part.clone(),
+            items: items
+                .iter()
+                .map(|(k, v)| {
+                    let n = v.parse::<u64>().map_or_else(|_| json!(v), |n| json!(n));
+                    (k.clone(), n)
+                })
+                .collect(),
+            compact: *compact,
+            expected_revision: expect.revision.clone(),
         },
         Command::Bom { cmd: None, show } => Request::BomGet {
             part: show.part.clone(),

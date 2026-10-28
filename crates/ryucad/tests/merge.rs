@@ -1095,6 +1095,56 @@ fn a_merge_that_leaves_an_assembly_stale_says_so_and_repairs_it() {
     r.ryucad(&["check"]);
 }
 
+#[test]
+fn parts_two_branches_number_alike_are_renumbered_by_the_repair() {
+    let r = Repo::new("");
+    for part in ["plate", "bolt", "nut"] {
+        r.ryucad(&["part", "create", part]);
+        r.ryucad(&[
+            "feature", "add", part, "box", "--id", "b", "--param", "x=1", "--param", "y=1",
+            "--param", "z=1",
+        ]);
+    }
+    r.ryucad(&["part", "create", "frame", "--assembly"]);
+    r.ryucad(&[
+        "feature", "add", "frame", "instance", "--id", "base", "--of", "plate",
+    ]);
+    r.commit("a frame");
+    r.git(&["checkout", "-q", "-b", "theirs"]);
+    r.ryucad(&[
+        "feature", "add", "frame", "instance", "--id", "n1", "--of", "nut",
+    ]);
+    r.commit("theirs: a nut, item 2");
+    r.git(&["checkout", "-q", "main"]);
+    r.ryucad(&[
+        "feature", "add", "frame", "instance", "--id", "b1", "--of", "bolt",
+    ]);
+    r.commit("ours: a bolt, item 2");
+    // The driver merges items per part: clean for Git, shared for the BOM.
+    r.git(&["merge", "-q", "--no-commit", "--no-ff", "theirs"]);
+    let items = |r: &Repo| r.json("parts/frame/part.json")["items"].clone();
+    assert_eq!(items(&r), json!({"plate": 1, "bolt": 2, "nut": 2}));
+    assert!(r.canonical("parts/frame/part.json"));
+    let v = r.ryucad(&["merge", "status"]);
+    let c: Vec<&Value> = v["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["kind"] == "item_collision")
+        .collect();
+    assert_eq!(c.len(), 1, "{v}");
+    let id = c[0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(id, "parts/frame/part.json#item_collision/2");
+    let repair = c[0]["repairs"][0]["id"].as_str().unwrap().to_owned();
+    r.ryucad(&["merge", "resolve", &id, "--repair", &repair]);
+    assert_eq!(items(&r), json!({"plate": 1, "bolt": 2, "nut": 3}));
+    r.git(&["add", "-A"]);
+    let v = r.ryucad(&["merge", "status"]);
+    assert_eq!(v["clean"], true, "{v}");
+    r.git(&["commit", "-q", "-m", "merged"]);
+    r.ryucad(&["check"]);
+}
+
 /// OCCT's box, `h` mm tall, written in the test's folder as an agent
 /// would have it.
 fn box_step(r: &Repo, h: u32) -> String {

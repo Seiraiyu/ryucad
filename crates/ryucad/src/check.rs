@@ -164,6 +164,8 @@ pub fn run(
     };
     let mut findings: Vec<Value> = crate::doctor::diagnose(session.root())
         .into_iter()
+        // Item numbers are the BOM's findings below, with their parts.
+        .filter(|i| !i.code.starts_with("bom_item_"))
         .filter(|i| {
             // A part's issues belong to it; the project's to everyone.
             i.files.is_empty()

@@ -22,9 +22,17 @@ use std::collections::BTreeMap;
 /// The format version of the manifest, part and parameters files.
 pub const FORMAT: u64 = 1;
 
-/// The newest part file format: 2 adds `kind`. A part file without one
-/// (a part, not an assembly) stays at 1.
-pub const PART_FORMAT: u64 = 2;
+/// The newest part file format: 2 adds `kind`, 3 an assembly's item
+/// numbers. A part file stays at the lowest that holds it: a part at 1,
+/// an assembly without items at 2.
+pub const PART_FORMAT: u64 = 3;
+
+/// The largest item number.
+pub const MAX_ITEM: u32 = 99_999;
+
+/// An assembly's item numbers (the find numbers balloons cite), by the
+/// part each numbers.
+pub type Items = BTreeMap<Id, u32>;
 
 /// The newest manifest format: 2 adds the project's ID. A manifest without
 /// one stays at 1, so older builds still read projects that don't use PDM.
@@ -49,12 +57,16 @@ pub struct Manifest {
     pub project: Option<ProjectId>,
 }
 
-/// A part's ordered feature list, `parts/<part>/part.json`, and whether
-/// it is an assembly.
-#[derive(Clone, Debug, PartialEq)]
+/// A part's ordered feature list, `parts/<part>/part.json`, whether it is
+/// an assembly, and an assembly's item numbers.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PartFile {
     pub kind: PartKind,
     pub features: Vec<Id>,
+    /// Each placed part's item number, from 1 to [`MAX_ITEM`]. Labels,
+    /// not identities: two parts sharing one, or a placed part without
+    /// one, read, and are faults of the BOM (`ryupdm::items`).
+    pub items: Items,
 }
 
 /// What a part file describes: a part, whose features make solids, or an
@@ -275,6 +287,7 @@ impl PartFile {
         PartFile {
             kind: PartKind::Part,
             features,
+            items: Items::new(),
         }
     }
 
@@ -283,6 +296,10 @@ impl PartFile {
         // `kind` names the file kind; a part's own kind is `part_kind`.
         if self.kind == PartKind::Assembly {
             v["part_kind"] = json!(self.kind.as_str());
+            v["format"] = json!(2);
+        }
+        if !self.items.is_empty() {
+            v["items"] = json!(self.items);
             v["format"] = json!(PART_FORMAT);
         }
         v
@@ -322,8 +339,39 @@ impl PartFile {
             }
             features.push(id);
         }
+        let mut items = Items::new();
+        if let Some(list) = o.take_opt("items") {
+            if kind != PartKind::Assembly {
+                return Err(invalid("/items", "only an assembly has item numbers"));
+            }
+            let map = list.as_object().ok_or_else(|| {
+                invalid(
+                    "/items",
+                    "items must be an object of item numbers by part ID",
+                )
+            })?;
+            for (k, n) in map {
+                let at = format!("/items/{k}");
+                let part = Id::parse(k, "part").map_err(|e| e.with("pointer", &at))?;
+                let n = n
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .filter(|n| (1..=MAX_ITEM).contains(n))
+                    .ok_or_else(|| {
+                        invalid(
+                            &at,
+                            &format!("an item number is a whole number from 1 to {MAX_ITEM}"),
+                        )
+                    })?;
+                items.insert(part, n);
+            }
+        }
         o.finish()?;
-        Ok(PartFile { kind, features })
+        Ok(PartFile {
+            kind,
+            features,
+            items,
+        })
     }
 }
 
@@ -424,10 +472,13 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
     out
 }
 
-/// The lowest part file format that holds `v`: 2 for an assembly, else 1.
+/// The lowest part file format that holds `v`: 3 with item numbers, 2 for
+/// an assembly, else 1.
 pub fn part_format(v: &Value) -> u64 {
-    if v.get("part_kind").is_some() {
+    if v.get("items").is_some() {
         PART_FORMAT
+    } else if v.get("part_kind").is_some() {
+        2
     } else {
         FORMAT
     }
@@ -1138,6 +1189,7 @@ mod tests {
         let p = PartFile {
             kind: PartKind::Assembly,
             features: vec![Id::parse("i1", "feature").unwrap()],
+            items: Items::new(),
         };
         let v = p.to_json();
         assert_eq!(v["part_kind"], "assembly");
@@ -1147,11 +1199,49 @@ mod tests {
         let bad = json!({"features": [], "format": 2, "kind": "ryucad.part", "part_kind": "part"});
         let e = PartFile::from_json(&bad).unwrap_err();
         assert_eq!(e.details["pointer"], "/part_kind");
-        let newer = json!({"features": [], "format": 3, "kind": "ryucad.part"});
+        let newer = json!({"features": [], "format": 4, "kind": "ryucad.part"});
         assert_eq!(
             PartFile::from_json(&newer).unwrap_err().code,
             Code::FormatTooNew
         );
+    }
+
+    #[test]
+    fn item_numbers_are_part_format_3() {
+        let id = |s: &str| Id::parse(s, "part").unwrap();
+        let p = PartFile {
+            kind: PartKind::Assembly,
+            features: vec![Id::parse("i1", "feature").unwrap()],
+            items: [(id("bolt"), 3), (id("plate"), 1)].into_iter().collect(),
+        };
+        let v = p.to_json();
+        assert_eq!(v["items"], json!({"bolt": 3, "plate": 1}));
+        assert_eq!(v["format"], 3);
+        assert_eq!(part_format(&v), 3);
+        assert_eq!(PartFile::from_json(&v).unwrap(), p);
+        // Shared numbers read: they are the BOM's fault to report.
+        let shared = json!({"features": [], "format": 3, "items": {"a": 2, "b": 2},
+                            "kind": "ryucad.part", "part_kind": "assembly"});
+        assert_eq!(PartFile::from_json(&shared).unwrap().items.len(), 2);
+        let bad = |items: Value, part_kind: Option<&str>| {
+            let mut v = json!({"features": [], "format": 3, "items": items, "kind": "ryucad.part"});
+            if let Some(k) = part_kind {
+                v["part_kind"] = json!(k);
+            }
+            PartFile::from_json(&v).unwrap_err().details["pointer"].clone()
+        };
+        assert_eq!(bad(json!({"a": 1}), None), "/items");
+        assert_eq!(bad(json!([1]), Some("assembly")), "/items");
+        assert_eq!(bad(json!({"a": 0}), Some("assembly")), "/items/a");
+        assert_eq!(bad(json!({"a": 100000}), Some("assembly")), "/items/a");
+        assert_eq!(bad(json!({"a": 1.5}), Some("assembly")), "/items/a");
+        assert_eq!(bad(json!({"A!": 1}), Some("assembly")), "/items/A!");
+        // An assembly with no items stays at format 2.
+        let empty = PartFile {
+            items: Items::new(),
+            ..p
+        };
+        assert_eq!(empty.to_json()["format"], 2);
     }
 
     #[test]
