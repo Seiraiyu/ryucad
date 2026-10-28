@@ -1741,6 +1741,11 @@ pub(crate) mod tests {
                    "product": {"id": "assembly", "name": "assembly"}, "usage": "3"})
         );
         assert_eq!(asm[1].1["pose"]["origin_m"], json!([0.1, 0, 0]));
+        // Its parts numbered in the order its usages place them.
+        let list: Value =
+            serde_json::from_slice(&std::fs::read(root.join("parts/assembly/part.json")).unwrap())
+                .unwrap();
+        assert_eq!(list["items"], json!({"block": 1, "pin": 2}));
         let instances = &v["parts"][0]["features"];
         assert_eq!(instances[2]["of"], "pin", "{v}");
         assert_eq!(instances[2]["ok"], true, "{v}");
