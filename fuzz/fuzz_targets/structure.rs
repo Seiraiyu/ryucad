@@ -38,7 +38,7 @@ fuzz_target!(|data: &[u8]| {
         let Ok(row) = tree(&mut r, part, &Rev::Working, None) else {
             continue;
         };
-        let rows = flat(&row);
+        let rows = flat(&row, &config);
         csv_tree(&row, &config);
         csv_flat(&rows, &config);
         ryupdm::bom::findings(&row);

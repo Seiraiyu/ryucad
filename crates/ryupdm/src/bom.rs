@@ -8,6 +8,8 @@
 //! BOM doesn't sum: you buy the motor, not its screws. A part counted in
 //! anything but `each` is quantified by its `amount` per occurrence.
 
+use crate::config::Scheme;
+use crate::label;
 use crate::structure::{Node, Reader, occurrences};
 use ryucad_doc::doc::assembly::{Rev, snap_origin};
 use ryucad_doc::doc::files::PartKind;
@@ -205,10 +207,20 @@ pub struct Flat {
     pub total: u64,
 }
 
+/// Where a revision sorts: `working` first, then labels in `scheme`'s
+/// order (`9` before `10`, `B` before `AA`), and labels the scheme doesn't
+/// write last, by their text.
+pub fn rev_order(scheme: Scheme, rev: &Rev) -> (u8, u64, String) {
+    match rev {
+        Rev::Working => (0, 0, String::new()),
+        Rev::Label(l) => (1, label::index(scheme, l).unwrap_or(u64::MAX), l.clone()),
+    }
+}
+
 /// The flat BOM of the indented `root` (read with no depth limit): every
 /// leaf by part and revision with its total, sorted by part number (parts
-/// without one last), then part, then revision.
-pub fn flat(root: &Row) -> Vec<Flat> {
+/// without one last), then part, then revision in `config`'s label order.
+pub fn flat(root: &Row, config: &crate::config::Config) -> Vec<Flat> {
     let mut out: Vec<Flat> = Vec::new();
     fn walk(row: &Row, times: u64, out: &mut Vec<Flat>) {
         if row.is_leaf() {
@@ -240,14 +252,10 @@ pub fn flat(root: &Row) -> Vec<Flat> {
             .ok()
             .and_then(|n| n.text("number").map(str::to_owned))
     };
+    let rev = |f: &Flat| rev_order(config.revisions, &f.row.rev);
     out.sort_by(|a, b| {
         let (na, nb) = (number(a), number(b));
-        (na.is_none(), na, &a.row.part, &a.row.rev).cmp(&(
-            nb.is_none(),
-            nb,
-            &b.row.part,
-            &b.row.rev,
-        ))
+        (na.is_none(), na, &a.row.part, rev(a)).cmp(&(nb.is_none(), nb, &b.row.part, rev(b)))
     });
     out
 }
@@ -530,10 +538,11 @@ struct Side<'a> {
 }
 
 /// Pairs rows by part: per part, equal revisions first, then the rest in
-/// revision order; the rest of each side is added or removed.
+/// `scheme`'s label order; the rest of each side is added or removed.
 fn pair<'a>(
     from: Vec<Side<'a>>,
     to: Vec<Side<'a>>,
+    scheme: Scheme,
 ) -> (Vec<Side<'a>>, Vec<Side<'a>>, Vec<(Side<'a>, Side<'a>)>) {
     let mut parts: Vec<&Id> = from.iter().chain(&to).map(|s| &s.row.part).collect();
     parts.sort();
@@ -546,8 +555,9 @@ fn pair<'a>(
             .copied()
             .collect();
         let mut b: Vec<Side> = to.iter().filter(|s| &s.row.part == part).copied().collect();
-        a.sort_by(|x, y| x.row.rev.cmp(&y.row.rev));
-        b.sort_by(|x, y| x.row.rev.cmp(&y.row.rev));
+        let key = |s: &Side| rev_order(scheme, &s.row.rev);
+        a.sort_by_key(key);
+        b.sort_by_key(key);
         let mut rest_a = Vec::new();
         for x in a {
             match b.iter().position(|y| y.row.rev == x.row.rev) {
@@ -607,7 +617,7 @@ fn change(a: Side, b: Side, config: &crate::config::Config) -> Option<Value> {
 
 /// The changes between two lists of rows: `{added, removed, changed}`.
 fn compare(from: Vec<Side>, to: Vec<Side>, config: &crate::config::Config) -> Value {
-    let (added, removed, both) = pair(from, to);
+    let (added, removed, both) = pair(from, to, config.revisions);
     let whole = |s: &Side| {
         let mut v = about(s.row);
         v["quantity"] = quantity(s.row, s.count);
@@ -662,7 +672,7 @@ fn assemblies(root: &Row) -> Vec<&Row> {
 /// (`tree`), the assemblies only one has (`assemblies`), and counts
 /// (`summary`).
 pub fn diff(from: Option<&Row>, to: Option<&Row>, config: &crate::config::Config) -> Value {
-    let flats = |r: Option<&Row>| r.map(flat).unwrap_or_default();
+    let flats = |r: Option<&Row>| r.map(|r| flat(r, config)).unwrap_or_default();
     let (fa, fb) = (flats(from), flats(to));
     let flat = compare(sides(&fa), sides(&fb), config);
     let (aa, ab) = (
@@ -809,14 +819,14 @@ pub(crate) mod tests {
     #[test]
     fn the_flat_bom_totals_leaves_and_stops_at_bought_assemblies() {
         let root = read(&frame(), "frame", None);
-        let rows: Vec<String> = flat(&root)
+        let rows: Vec<String> = flat(&root, &crate::config::Config::default())
             .iter()
             .map(|f| format!("{} {}", f.row.part, f.total))
             .collect();
         assert_eq!(rows, ["bolt 4", "plate 1", "tube 2", "motor 1"]);
         // A part's BOM is itself.
         let plate = read(&frame(), "plate", None);
-        assert_eq!(flat(&plate).len(), 1);
+        assert_eq!(flat(&plate, &crate::config::Config::default()).len(), 1);
         assert!(findings(&root).is_empty());
         assert!(problems(&root).is_empty());
     }
@@ -904,7 +914,7 @@ pub(crate) mod tests {
         assert_eq!(lines[3], "2.1,,100,Bolt,bolt,working,2,each,buy,,,");
         assert_eq!(lines[4], "3,,300,,tube,working,1.2,m,make,,,");
         assert_eq!(lines.len(), 7);
-        let flat = csv_flat(&flat(&root), &config);
+        let flat = csv_flat(&flat(&root, &config), &config);
         assert_eq!(
             flat.lines().nth(1),
             Some(",,100,Bolt,bolt,working,4,each,buy,,,")
@@ -976,5 +986,67 @@ pub(crate) mod tests {
         let d = diff(None, Some(&after), &config);
         assert_eq!(d["summary"]["added"], 3);
         assert_eq!(d["assemblies"]["added"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn revisions_sort_and_pair_in_label_order_not_as_text() {
+        // As text, 10 sorts before 9; in the numeric scheme it comes after.
+        let at = |labels: [&str; 2]| {
+            files(&[
+                ("bolt", &[("b", block())]),
+                (
+                    "frame",
+                    &[
+                        ("b1", instance("bolt", json!({"label": labels[0]}))),
+                        ("b2", instance("bolt", json!({"label": labels[1]}))),
+                    ],
+                ),
+            ])
+        };
+        let numeric = |mut f: BTreeMap<String, Vec<u8>>| {
+            f.insert(
+                "ryupdm.json".into(),
+                canonical::to_string(
+                    &json!({"format": 1, "kind": "ryupdm.config", "revisions": "numeric"}),
+                )
+                .into_bytes(),
+            );
+            f
+        };
+        let (a, b) = (numeric(at(["10", "9"])), numeric(at(["12", "11"])));
+        let config = crate::config::Config::read(&a).unwrap();
+        let before = read(&a, "frame", None);
+        let revs: Vec<String> = flat(&before, &config)
+            .iter()
+            .map(|f| f.row.rev.text())
+            .collect();
+        assert_eq!(
+            revs,
+            [
+                Rev::Label("9".into()).text(),
+                Rev::Label("10".into()).text()
+            ]
+        );
+        // Neither side's revisions match: 9 pairs with 11, 10 with 12.
+        let after = read(&b, "frame", None);
+        let d = diff(Some(&before), Some(&after), &config);
+        let pairs: Vec<(Value, Value)> = d["flat"]["changed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| (c["rev"]["from"].clone(), c["rev"]["to"].clone()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                (json!({"label": "9"}), json!({"label": "11"})),
+                (json!({"label": "10"}), json!({"label": "12"})),
+            ]
+        );
+        assert_eq!(rev_order(Scheme::Letters, &Rev::Label("AA".into())).1, 21);
+        assert!(
+            rev_order(Scheme::Letters, &Rev::Label("B".into()))
+                < rev_order(Scheme::Letters, &Rev::Label("AA".into()))
+        );
     }
 }
