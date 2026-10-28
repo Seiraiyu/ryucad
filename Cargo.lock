@@ -4219,6 +4219,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-board"
+version = "0.0.0"
+dependencies = [
+ "divan",
+ "rayon",
+ "ryu-board",
+ "ryu-math",
+]
+
+[[package]]
 name = "ryu-doc"
 version = "0.0.0"
 dependencies = [

@@ -1,0 +1,25 @@
+[package]
+name = "ryu-board"
+description = "The board model every ryu product measures boards in: integer geometry, symbols and exact shapes"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+ryu-math = { path = "../ryu-math" }
+# Shapes are built per layer in parallel.
+rayon = "1"
+
+[features]
+# Test helpers (a seeded generator, golden hashes, seeded symbols and
+# features, checks on shapes) for this crate's tests and benchmarks,
+# ryudfm's tests and the fuzz targets.
+testing = []
+
+[dev-dependencies]
+divan = "0.1"
+ryu-board = { path = ".", features = ["testing"] }
+
+[[bench]]
+name = "shapes"
+harness = false

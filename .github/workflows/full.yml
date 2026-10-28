@@ -123,9 +123,9 @@ jobs:
           # Rare runs: their caches would only evict the fast CI's.
           save-if: false
       - name: baseline release
-        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad --release --test determinism
+        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board --release --test determinism
       - name: x86-64-v3
-        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad --release --test determinism
+        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board --release --test determinism
         env:
           RUSTFLAGS: -C target-cpu=x86-64-v3
           CARGO_TARGET_DIR: target/v3
@@ -133,7 +133,7 @@ jobs:
         run: |
           if grep -qw avx512f /proc/cpuinfo; then
             RUSTFLAGS="-C target-cpu=x86-64-v4" CARGO_TARGET_DIR=target/v4 \
-              cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad --release --test determinism
+              cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board --release --test determinism
           else
             echo "::notice::runner has no AVX-512; x86-64-v4 skipped"
           fi

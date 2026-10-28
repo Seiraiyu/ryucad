@@ -151,6 +151,7 @@ What each phase decided is recorded per area under `docs/claude/`, imported here
 - @docs/claude/ryupdm.md — the PDM data model and local PDM
 - @docs/claude/ryupdm-review.md — hosted review
 - @docs/claude/shared-crates.md — ryu-math, ryu-doc, ryu-session
+- @docs/claude/ryudfm.md — ryudfm: the board model and shapes (`ryu-board`)
 - @docs/claude/ryueda.md — ryueda projects, library projects, symbols, footprints, models, library components
 
 When a plan records what it decided, it edits or adds only its area's file under `docs/claude/`. It doesn't touch CLAUDE.md, except to add one import line here for a new area, and it never writes project status anywhere in the repo.
