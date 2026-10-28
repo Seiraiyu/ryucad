@@ -694,7 +694,7 @@ pub enum Request {
     },
     /// Writes a part or an assembly as a file: at the working files, a Git
     /// revision `rev`, or a release `label:<L>`; in `format` (`step`,
-    /// `stl`), else the one `out`'s extension names, else STEP. With `out`,
+    /// `stl`, `3mf`), else the one `out`'s extension names, else STEP. With `out`,
     /// an absolute path, the daemon writes the file atomically and answers
     /// its size and BLAKE3; without, its bytes follow the answer. STEP is
     /// `ap242` (default) or `ap214`, in `mm` (default) or `m`; mesh formats
