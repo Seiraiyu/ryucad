@@ -22,7 +22,7 @@ mod tree;
 
 pub use angle::{Angle, angle};
 pub use distance::{Distance, DistanceOptions, distance};
-pub use mass::{MassOptions, MassProperties, mass};
+pub use mass::{MassOptions, MassProperties, mass, principal};
 pub use props::{DEFAULT_TOLERANCE, EdgeShape, FaceShape, Properties, properties};
 
 use crate::topo::{EdgeId, FaceId, VertexId};

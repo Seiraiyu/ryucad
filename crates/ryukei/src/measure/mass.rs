@@ -674,10 +674,10 @@ pub fn mass(body: &Body, density: f64, opts: &MassOptions) -> Result<MassPropert
     })
 }
 
-/// The eigenvalues of a symmetric matrix, smallest first, and their
-/// axes (right-handed), by cyclic Jacobi rotations: a fixed sequence of
-/// operations, so the same bits everywhere.
-fn principal(a: &[[f64; 3]; 3]) -> ([f64; 3], [UnitVector3; 3]) {
+/// The eigenvalues of a symmetric matrix (an inertia tensor), smallest
+/// first, and their axes (right-handed), by cyclic Jacobi rotations: a
+/// fixed sequence of operations, so the same bits everywhere.
+pub fn principal(a: &[[f64; 3]; 3]) -> ([f64; 3], [UnitVector3; 3]) {
     let mut a = *a;
     let mut v = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
     for _ in 0..50 {

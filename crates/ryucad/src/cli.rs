@@ -185,6 +185,17 @@ enum Command {
         #[command(flatten)]
         rev: RevArg,
     },
+    /// Mass properties of a part or assembly, a solid (<part>/<solid>) or an occurrence
+    /// (<assembly>/<instance>/…): volume, area, centre of mass, and where every part has a
+    /// material in materials.json, mass and inertia.
+    Mass {
+        of: String,
+        /// The relative agreement the integration reaches (1e-9).
+        #[arg(long, value_name = "REL")]
+        tolerance: Option<f64>,
+        #[command(flatten)]
+        rev: RevArg,
+    },
     /// What changed between two revisions: features, parameters and sketch
     /// entities, and with --model what that did to the bodies.
     Diff {
@@ -1854,6 +1865,11 @@ fn request(cmd: &Command) -> Option<Request> {
             rev: rev.rev.clone(),
         },
         Command::CheckFormat => Request::CheckFormat {},
+        Command::Mass { of, tolerance, rev } => Request::Mass {
+            of: of.clone(),
+            tolerance: *tolerance,
+            rev: rev.rev.clone(),
+        },
         Command::Measure { entities, rev } => Request::Measure {
             entities: entities.clone(),
             rev: rev.rev.clone(),
@@ -2252,6 +2268,7 @@ fn lift(cmd: &Command, mut result: Value, warnings: &mut Vec<String>) -> Value {
             | Command::Config(ConfigCmd::Get { .. })
             | Command::Rebuild { .. }
             | Command::Import { .. }
+            | Command::Mass { .. }
     ) {
         return result;
     }

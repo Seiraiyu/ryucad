@@ -557,6 +557,21 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
+    /// Mass properties of a part or an assembly (its ID), a solid
+    /// (`<part>/<solid>`) or an occurrence (`<asm>/<path>`): volume, area,
+    /// centre of mass and, where every part has a material with a
+    /// density, mass and the inertia tensor about the centre with its
+    /// principal moments and axes; per part, its solids, material and
+    /// mass. `tolerance` is the relative agreement the integration
+    /// reaches (1e-9).
+    #[serde(rename = "mass")]
+    Mass {
+        of: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tolerance: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     /// The material library: each material's density and colour, the
     /// parts that name it, the default, and the project's revision.
     #[serde(rename = "materials.list")]

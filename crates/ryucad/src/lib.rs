@@ -59,6 +59,7 @@ pub mod import;
 pub mod inspect;
 pub mod interference;
 pub mod live;
+pub mod mass;
 pub mod mate;
 pub mod materials;
 pub mod measure;
