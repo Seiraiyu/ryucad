@@ -99,8 +99,9 @@ impl Run {
 }
 
 /// What the window's open costs as it asks since plan 7.A: `part.list`,
-/// the report of the root it shows (every occurrence), then one display
-/// mesh per body, one request after another on one connection. Returns
+/// the report of the root it shows (every occurrence), then each body's
+/// display mesh, 256 bodies to a request, one request after another on
+/// one connection. Returns
 /// the seconds until the report, until every mesh, and how many bodies.
 fn window_open(root: &Path) -> (f64, f64, usize) {
     use ryucad::proto::{Request, Transfer};
@@ -126,10 +127,12 @@ fn window_open(root: &Path) -> (f64, f64, usize) {
                 .or_insert(path);
         }
     }
-    for path in bodies.values() {
+    let paths: Vec<String> = bodies.values().cloned().collect();
+    for batch in paths.chunks(256) {
         let req = Request::MeshGet {
             part: "root".into(),
-            feature: Some(path.clone()),
+            feature: None,
+            features: batch.to_vec(),
             quality: None,
             transfer: Some(Transfer::Binary),
             rev: None,
@@ -246,13 +249,18 @@ fn the_benchmark_project_measured() {
         heard * 1e3,
         next * 1e3
     ));
-    // What the window asks for when it opens.
-    let (shown, meshed, bodies) = window_open(&run.root);
-    say(&format!(
-        "the window's open: the root's report in {shown:.1} s, every one of its {bodies} \
-         bodies meshed in {meshed:.1} s (peak {:.0} MiB)",
-        run.peak_mib()
-    ));
+    // What the window asks for when it opens: with no meshes made yet,
+    // then from a new daemon over the cache they were written to.
+    for when in ["meshed now", "from the cache"] {
+        let (shown, meshed, bodies) = window_open(&run.root);
+        say(&format!(
+            "the window's open ({when}): the root's report in {shown:.1} s, every one of its \
+             {bodies} bodies' meshes in {meshed:.1} s (peak {:.0} MiB)",
+            run.peak_mib()
+        ));
+        run.ok(&["daemon", "stop"]);
+    }
+    run.ok(&["rebuild", "root"]);
     // Interference, from nothing and after one move.
     let (interfere, v) = run.ok(&["interference", "root"]);
     say(&format!(

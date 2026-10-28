@@ -233,6 +233,11 @@ impl Cache {
         self.entries.len()
     }
 
+    /// Whether the mesh of the body with `hash` at `quality` is held.
+    pub fn has(&self, hash: &str, quality: Quality) -> bool {
+        self.entries.contains_key(&(hash.to_owned(), quality))
+    }
+
     /// What the meshes held take, in bytes.
     pub fn bytes(&self) -> usize {
         self.bytes

@@ -32,6 +32,9 @@ use std::time::{Duration, Instant};
 /// the tree opens or something in it is chosen.
 pub const LOAD_WHOLE: usize = 200;
 
+/// How many of an assembly's bodies one `mesh.get` asks for.
+const MESH_BATCH: usize = 256;
+
 /// What a request was for, so its answer lands in the right place.
 #[derive(Clone, Debug, PartialEq)]
 enum Pending {
@@ -40,6 +43,8 @@ enum Pending {
     Rebuild(String),
     /// A body's mesh, asked for at this hash.
     Mesh(BodyKey, String),
+    /// Several bodies of one assembly's occurrences, each at its hash.
+    Meshes(Vec<(BodyKey, String)>),
     /// A body's mesh at another level of detail.
     Level(String, ryucad::mesh::Quality),
     /// A sketch's drawing, asked for at this part revision.
@@ -995,6 +1000,7 @@ impl Workspace {
             let req = Request::MeshGet {
                 part: key.0.clone(),
                 feature: Some(feature),
+                features: Vec::new(),
                 quality: None,
                 transfer: Some(Transfer::Binary),
                 rev: Some(rev.clone()),
@@ -2281,20 +2287,31 @@ impl Workspace {
                 }
             }
             (Pending::Mesh(key, hash), a) => {
-                self.model.answered(&key, &hash);
-                match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
-                    Ok(Some(Ok(bodies))) => {
-                        for b in bodies {
-                            self.model.take_mesh(&key.0, b);
-                        }
-                    }
-                    Ok(Some(Err(e))) | Err(e) => self.fail(e),
-                    Ok(None) => {
-                        self.fail(Error::new(Code::Daemon, "a mesh came without its bytes"));
-                    }
+                self.answered_meshes(vec![(key, hash)], a);
+            }
+            (Pending::Meshes(asked), a) => self.answered_meshes(asked, a),
+            (_, Err(e)) => self.fail(e),
+        }
+    }
+
+    /// Takes the meshes a `mesh.get` for `asked` (bodies of one part) brought.
+    fn answered_meshes(&mut self, asked: Vec<(BodyKey, String)>, a: Result<Answer>) {
+        for (key, hash) in &asked {
+            self.model.answered(key, hash);
+        }
+        let Some(part) = asked.first().map(|(k, _)| k.0.clone()) else {
+            return;
+        };
+        match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
+            Ok(Some(Ok(bodies))) => {
+                for b in bodies {
+                    self.model.take_mesh(&part, b);
                 }
             }
-            (_, Err(e)) => self.fail(e),
+            Ok(Some(Err(e))) | Err(e) => self.fail(e),
+            Ok(None) => {
+                self.fail(Error::new(Code::Daemon, "a mesh came without its bytes"));
+            }
         }
     }
 
@@ -2542,22 +2559,45 @@ impl Workspace {
     /// changed feature sends one mesh, and a body already asked for at its
     /// current hash isn't asked for again.
     fn fetch(&mut self, bodies: Vec<BodyKey>) {
+        let mut batches: BTreeMap<String, Vec<(BodyKey, String)>> = BTreeMap::new();
         for (key, hash) in self.model.ask(bodies) {
             self.fetched += 1;
-            // An assembly's bodies come by occurrence.
+            // An assembly's bodies come by occurrence, many to a request,
+            // meshed side by side: an assembly may place 10,000.
             let assembly = self.model.parts.get(&key.0).is_some_and(|p| p.assembly);
-            let feature = match key.1.rsplit_once('/') {
-                Some((path, _)) if assembly => path.to_owned(),
-                _ => key.1.clone(),
-            };
-            let req = Request::MeshGet {
-                part: key.0.clone(),
-                feature: Some(feature),
-                quality: None,
-                transfer: Some(Transfer::Binary),
-                rev: None,
-            };
-            self.send(req, Pending::Mesh(key, hash));
+            match key.1.rsplit_once('/') {
+                Some(_) if assembly => {
+                    batches.entry(key.0.clone()).or_default().push((key, hash));
+                }
+                _ => {
+                    let req = Request::MeshGet {
+                        part: key.0.clone(),
+                        feature: Some(key.1.clone()),
+                        features: Vec::new(),
+                        quality: None,
+                        transfer: Some(Transfer::Binary),
+                        rev: None,
+                    };
+                    self.send(req, Pending::Mesh(key, hash));
+                }
+            }
+        }
+        for (part, asked) in batches {
+            for batch in asked.chunks(MESH_BATCH) {
+                let features = batch
+                    .iter()
+                    .filter_map(|(k, _)| Some(k.1.rsplit_once('/')?.0.to_owned()))
+                    .collect();
+                let req = Request::MeshGet {
+                    part: part.clone(),
+                    feature: None,
+                    features,
+                    quality: None,
+                    transfer: Some(Transfer::Binary),
+                    rev: None,
+                };
+                self.send(req, Pending::Meshes(batch.to_vec()));
+            }
         }
     }
 
@@ -2580,6 +2620,7 @@ impl Workspace {
             let req = Request::MeshGet {
                 part: key.0.clone(),
                 feature: Some(feature),
+                features: Vec::new(),
                 quality: Some(level.as_str().to_owned()),
                 transfer: Some(Transfer::Binary),
                 rev: None,
