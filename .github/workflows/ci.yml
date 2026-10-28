@@ -1,75 +1,73 @@
 name: CI
 
+# The fast checks every pull request must pass, in under 10 minutes on
+# every platform: fmt, clippy, a build, the unit tests and the golden
+# hashes everywhere, and every test that isn't ignored on Linux x64. The
+# rest (debug builds of every test on every platform, the release suites,
+# CPU levels, the devcontainer, the installers) is full.yml's, run by hand
+# and before every release. Pushes to main run these checks too, which
+# keeps the caches pull requests start from warm.
 on:
   push:
     branches: [main]
   pull_request:
 
+concurrency:
+  # A new push to a pull request cancels its run in progress.
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  native:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - run: cargo fmt --all --check
+
+  test:
     name: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        include:
+          # Every test that isn't ignored, the doctests too.
+          - os: ubuntu-latest
+            tests: --workspace
+          # The unit tests and the golden hashes.
+          - os: ubuntu-24.04-arm
+            tests: --workspace --lib --bins --test determinism
+          - os: macos-latest
+            tests: --workspace --lib --bins --test determinism
+          - os: windows-latest
+            tests: --workspace --lib --bins --test determinism
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - if: runner.os == 'Linux'
-        # The app's dependencies (wgpu, egui) fill the runner's small disk.
-        name: room on the disk
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - if: runner.os == 'Linux'
+        with:
+          # Pull requests read main's caches; only main saves them, so
+          # they aren't evicted by one cache per pull request.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - if: matrix.os == 'ubuntu-latest'
         name: a software graphics adapter (lavapipe) for ryucad-app's tests
         run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
-      - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      # The ci profile (Cargo.toml): optimized a little, no debug info.
+      - run: cargo nextest run --cargo-profile ci --profile ci ${{ matrix.tests }}
         env:
-          # Linux has lavapipe and Windows has WARP, so the app's drawing
-          # tests must run there; a macOS runner may have no Metal device.
-          RYUCAD_REQUIRE_GPU: ${{ runner.os != 'macOS' && '1' || '' }}
-      # Boolean property tests and the booleans at other scales
-      # self-intersection-check every result, pipe
-      # property tests fit every branch, blends on pipes and ruled
-      # chamfers fit their rails, corners mesh many blended boxes, and
-      # heal and STEP round trip tests write and heal hundreds of seeded
-      # bodies, the committed STEP files' bodies are self-intersection
-      # checked, and ryucad's bar times a 1,000-hole pattern against
-      # ryukei's own boolean, and its assembly bars time 1,000 mates and a
-      # cold daemon over a warm disk cache:
-      # minutes in a debug build, so they are ignored there and run in
-      # release.
-      - run: cargo test -p ryukei --release --test boolean_props
-      - run: cargo test -p ryukei --release --test booleans
-      - run: cargo test -p ryukei --release --test general_booleans
-      - run: cargo test -p ryukei --release --test general_boolean_props
-      - run: cargo test -p ryukei --release --test pipe_props
-      - run: cargo test -p ryukei --release --test general_props
-      - run: cargo test -p ryukei --release --test blends
-      - run: cargo test -p ryukei --release --test chamfers
-      - run: cargo test -p ryukei --release --test blend_props
-      - run: cargo test -p ryukei --release --test corners
-      - run: cargo test -p ryukei --release --test corner_props
-      - run: cargo test -p ryukei --release --test blend_booleans
-      - run: cargo test -p ryukei --release --test heal_props
-      - run: cargo test -p ryukei --release --test mirror
-      - run: cargo test -p ryukei --release --test along
-      - run: cargo test -p ryukei --release --test loft
-      - run: cargo test -p ryustep --release --test round_trip_props
-      - run: cargo test -p ryustep --release --test write
-      - run: cargo test -p ryustep --release --test drill
-      - run: cargo test -p ryustep --release --test checks
-      - run: cargo test -p ryucad --release --test bar -- --nocapture
-      - run: cargo test -p ryucad --release --test assembly_bar -- --nocapture
-      - run: cargo test -p ryupdm --release --test api -- --nocapture
-      - run: cargo test -p ryucad --release --test step_bar -- --nocapture
-      - run: cargo test -p ryucad --release --test step
+          # Linux has lavapipe, so the app's drawing tests must run there.
+          RYUCAD_REQUIRE_GPU: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo test --profile ci --workspace --doc
       - if: failure()
         name: the viewport as drawn, if it no longer matches its snapshot
         uses: actions/upload-artifact@v4
@@ -77,106 +75,3 @@ jobs:
           name: viewport-${{ matrix.os }}
           path: crates/ryucad-app/tests/snapshots/*.new.png
           if-no-files-found: ignore
-      - run: cargo bench --workspace --no-run
-
-  cpu-levels:
-    # Results must not depend on CPU-level codegen (vectorization, FMA-capable
-    # targets). Release builds at higher x86-64 levels must reproduce the
-    # committed golden hashes.
-    name: golden hashes at x86-64-v3/v4
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: baseline release
-        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad --release --test determinism
-      - name: x86-64-v3
-        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad --release --test determinism
-        env:
-          RUSTFLAGS: -C target-cpu=x86-64-v3
-          CARGO_TARGET_DIR: target/v3
-      - name: x86-64-v4 (when the runner has AVX-512)
-        run: |
-          if grep -qw avx512f /proc/cpuinfo; then
-            RUSTFLAGS="-C target-cpu=x86-64-v4" CARGO_TARGET_DIR=target/v4 \
-              cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad --release --test determinism
-          else
-            echo "::notice::runner has no AVX-512; x86-64-v4 skipped"
-          fi
-
-  devcontainer:
-    name: devcontainer
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - if: runner.os == 'Linux'
-        # The app's dependencies (wgpu, egui) fill the runner's small disk.
-        name: room on the disk
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
-      - uses: devcontainers/ci@v0.3
-        with:
-          # The workspace, then the OCCT and SMLib comparison, which only
-          # the devcontainer (with OCCT and SMLib installed) builds.
-          runCmd: |
-            RYUCAD_REQUIRE_GPU=1 cargo test --workspace
-            cargo clippy -p ryukei-bench --features occt,smlib --all-targets -- -D warnings
-            cargo test -p ryukei-bench --features occt,smlib --release --test kernels -- --nocapture
-            cargo bench -p ryukei-bench --features occt,smlib --no-run
-          push: never
-
-  installers:
-    name: installers on ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --locked --release -p ryucad -p ryucad-app
-      - if: runner.os == 'Linux'
-        run: shellcheck install.sh scripts/test-install.sh scripts/smoke.sh
-      - if: runner.os == 'Linux'
-        name: the desktop entry and MIME type the installer registers
-        run: |
-          sudo apt-get update && sudo apt-get install -y desktop-file-utils libxml2-utils
-          desktop-file-validate packaging/linux/ryucad.desktop
-          xmllint --noout packaging/linux/ryucad.xml
-      - if: runner.os == 'macOS'
-        name: the launcher the installer compiles
-        run: osacompile -o "$RUNNER_TEMP/ryucad.app" packaging/macos/ryucad.applescript
-      - if: runner.os == 'Linux'
-        name: a software graphics adapter for the app's smoke run
-        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
-      - name: smoke test
-        shell: bash
-        run: |
-          x=""
-          [ "$RUNNER_OS" = Windows ] && x=".exe"
-          sh scripts/smoke.sh "target/release/ryucad$x" "target/release/ryucad-app$x"
-        env:
-          RYUCAD_REQUIRE_GPU: ${{ runner.os != 'macOS' && '1' || '' }}
-      - if: runner.os != 'Windows'
-        run: sh scripts/test-install.sh
-      - if: runner.os == 'Windows'
-        name: PSScriptAnalyzer
-        shell: pwsh
-        run: |
-          if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) {
-            Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
-          }
-          $findings = 'install.ps1', 'scripts/test-install.ps1' |
-            ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Severity Warning, Error }
-          $findings
-          if ($findings) { throw 'PSScriptAnalyzer findings' }
-      - if: runner.os == 'Windows'
-        name: Windows PowerShell 5.1
-        shell: pwsh
-        run: scripts/test-install.ps1 -Shell powershell
-      - if: runner.os == 'Windows'
-        name: PowerShell 7
-        shell: pwsh
-        run: scripts/test-install.ps1 -Shell pwsh

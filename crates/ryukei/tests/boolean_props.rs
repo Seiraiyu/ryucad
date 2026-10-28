@@ -327,3 +327,122 @@ fn refusals_name_their_cause() {
         }))
     );
 }
+
+/// Issue #122: two cases the mesher refused (`RefinementStalled`), pinned
+/// by value. A cone and a cylinder intersect in a lens whose faces both
+/// draw a chord across a neck thinner than the refinement floor; a torus
+/// and a sphere leave a sphere face bounded by one closed edge whose one
+/// vertex lies near the pole, which once scaled the whole face's plane.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn necks_and_poles_mesh() {
+    let cases = [
+        (
+            Spec {
+                kind: 2,
+                a: 0.9578003262318461,
+                b: 0.5186528164414378,
+                axis: (0.4237790584322859, -0.3154993474363554, 0.41508212380344506),
+                angle: 1.0309957928579285,
+                at: (
+                    -0.04998359378807588,
+                    0.2987773849353893,
+                    -0.4736515023749187,
+                ),
+            },
+            Spec {
+                kind: 1,
+                a: 0.5266757456813032,
+                b: 0.8210791589573327,
+                axis: (
+                    -0.25666899882183103,
+                    0.24692256921278452,
+                    0.34452743925973345,
+                ),
+                angle: 2.75986631802763,
+                at: (
+                    -0.5507692835192982,
+                    0.12060585208048961,
+                    -0.1785321428542749,
+                ),
+            },
+        ),
+        (
+            Spec {
+                kind: 5,
+                a: 0.6165048735302031,
+                b: 0.4,
+                axis: (0.6495607228284339, -0.5251951187863773, 0.8421179609309594),
+                angle: 2.247476360455431,
+                at: (
+                    -0.08399682108138289,
+                    -0.767913869541403,
+                    -0.6020072130079339,
+                ),
+            },
+            Spec {
+                kind: 4,
+                a: 0.8121447515688807,
+                b: 0.4,
+                axis: (-0.8406350432730071, -0.152414265425713, 0.8004268512035005),
+                angle: 0.0950782896784491,
+                at: (
+                    -0.25460255629198236,
+                    -0.5429591417369567,
+                    0.49582248761584163,
+                ),
+            },
+        ),
+    ];
+    for (sa, sb) in cases {
+        let (a, b) = (solid(&sa), solid(&sb));
+        for op in [BooleanOp::Unite, BooleanOp::Intersect, BooleanOp::Subtract] {
+            let r = run(op, &a, &b).unwrap().expect("built");
+            meshed(&r).unwrap();
+        }
+    }
+}
+
+/// Issue #117: two tori whose unite leaves a torus face with one hole,
+/// its seam put exactly at one of its edge's samples. Rounding once read
+/// that sample as a seam crossing and added another at the same point
+/// (`BadDomain`).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_seam_through_a_sample_meshes() {
+    let sa = Spec {
+        kind: 5,
+        a: 0.5405617373148383,
+        b: 0.4,
+        axis: (
+            -0.17158784683972828,
+            -0.5825913472709525,
+            0.4708438700234861,
+        ),
+        angle: 0.7396244999856291,
+        at: (0.22101973464374663, 0.2982650363357113, 0.2248878469230322),
+    };
+    let sb = Spec {
+        kind: 5,
+        a: 0.4203857859417263,
+        b: 0.4,
+        axis: (-0.8822978670939383, 0.7406376357489366, 0.6537003860049525),
+        angle: 0.9176323069644821,
+        at: (
+            -0.5691656652255034,
+            0.07580219358310905,
+            -0.052662940594093585,
+        ),
+    };
+    let (a, b) = (solid(&sa), solid(&sb));
+    for op in [BooleanOp::Unite, BooleanOp::Intersect, BooleanOp::Subtract] {
+        assert!(run(op, &a, &b).unwrap().is_some(), "{op:?} built");
+    }
+    identities(sa, sb).unwrap();
+}

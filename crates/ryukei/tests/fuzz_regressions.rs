@@ -165,3 +165,15 @@ fn a_vertex_in_the_plane_of_another_shells_face() {
         "00f7",
     ));
 }
+
+/// A square a centimetre across carried 3 m beyond a 0.2 m bend's centre:
+/// it runs back over itself round the bend, so it is refused at once,
+/// where its ribbon-like sides took about 150 s a body to trace (issue
+/// #133).
+#[test]
+fn a_profile_carried_back_over_itself_round_a_bend() {
+    let start = std::time::Instant::now();
+    let data = [47, 38, 26, 0, 49, 26, 0, 49, 26, 0, 0, 31, 31, 31, 31, 31];
+    assert!(ryukei_testkit::along_bytes::carried(&data).is_none());
+    assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
+}
