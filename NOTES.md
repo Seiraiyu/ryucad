@@ -16,3 +16,6 @@
   samples across a pole run (`across_poles`), so a cone lune through its apex
   reads as the lune, not a hole round the cone. All three corpus bodies seam;
   `tests/step.rs` now exports every part that builds.
+- Lap 3 found that the loop's check fails on the first open burn issue
+  (descending) with no `Fixes` commit. After #146 that is #133, a plan 8.F
+  sized kernel performance issue.
