@@ -20,6 +20,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Windows links its many test binaries with the toolchain's lld, which is
+  # much faster than MSVC's link.exe.
+  CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld
 
 jobs:
   fmt:
