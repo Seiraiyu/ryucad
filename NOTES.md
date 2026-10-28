@@ -19,3 +19,18 @@
 - Lap 3 found that the loop's check fails on the first open burn issue
   (descending) with no `Fixes` commit. After #146 that is #133, a plan 8.F
   sized kernel performance issue.
+- Lap 4: #133. The fuzz input's sweep folds: the profile sits beyond the
+  arc leg's centre of curvature, so the arc carries it backwards against its
+  normal while the line legs carry it forwards. `along` now judges the map
+  carrying the profile's plane (`sweep/along/embedded.rs`) before building:
+  certified one to one (boxes apart, or `N(r) · Φ_s` of one sign over a run)
+  skips `check_intersections`; certified both signs at one lump's vertices
+  is `PathTooCurved` at once; otherwise the old pairwise check. The input
+  now refuses in ~5 ms (was 38 s on davids-m4, 150 s in the issue).
+  Validated against the old path on 500 seeded `along_bytes` inputs: no
+  body built that the old check found crossing; 14 of the first 200 now
+  build where the old check was only `Uncertain` (extrusions it couldn't
+  intersect), and those pass `check`, mesh cleanly and show only
+  `CannotCheck`. Assumption: a Jacobian sign change within one lump means
+  a fold, so refusing it is sound; a lump moving backwards throughout is
+  not refused by this (left to the pairwise check or the builder).
