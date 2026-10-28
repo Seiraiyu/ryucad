@@ -49,6 +49,29 @@ RUN mkdir /tmp/usd-brep && cd /tmp/usd-brep \
     && mkdir -p /usr/local/share/doc/smlib && cp LICENSE THIRD_PARTY_NOTICES.md /usr/local/share/doc/smlib/ \
     && ldconfig && cd / && rm -rf /tmp/usd-brep
 
+# lib3mf, the 3MF Consortium's reference library (BSD-2-Clause), is only
+# for ryukei-bench's `formats` references, which read every 3MF ryucad
+# writes. Debian packages 1.8, older than 3MF core 1.3, so build a pinned
+# release into /usr/local: the library in lib, its C++ binding headers in
+# include/lib3mf.
+ARG LIB3MF_VERSION=2.5.0
+ARG LIB3MF_SHA256=46914f7c7a82ee0839fdd09b339daf621540d5c8d8904b2a0449fd67353dd7cb
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cmake \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir /tmp/lib3mf && cd /tmp/lib3mf \
+    && curl -sSfLo src.zip https://github.com/3MFConsortium/lib3mf/releases/download/v${LIB3MF_VERSION}/lib3mf-${LIB3MF_VERSION}-source-with-submodules.zip \
+    && echo "${LIB3MF_SHA256}  src.zip" | sha256sum -c - \
+    && unzip -q src.zip \
+    && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLIB3MF_TESTS=OFF -DCMAKE_INSTALL_PREFIX=/usr/local >/dev/null \
+    && cmake --build build -j"$(nproc)" >/dev/null \
+    && cmake --install build >/dev/null \
+    && mkdir -p /usr/local/include/lib3mf /usr/local/share/doc/lib3mf \
+    && cp /usr/local/include/Bindings/Cpp/*.hpp /usr/local/include/lib3mf/ \
+    && rm -rf /usr/local/include/Bindings \
+    && cp LICENSE /usr/local/share/doc/lib3mf/ \
+    && ldconfig && cd / && rm -rf /tmp/lib3mf
+
 RUN useradd -m -s /bin/bash ${USERNAME} \
     && echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME}
 
