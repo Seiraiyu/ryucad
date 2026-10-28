@@ -329,6 +329,18 @@ fn dispatch(
             working,
             direct,
         } => crate::bom::where_used(session, &part, label.as_deref(), working, direct),
+        Request::BomRenumber {
+            part,
+            items,
+            compact,
+            expected_revision,
+        } => crate::bom::renumber(
+            session,
+            &part,
+            &items,
+            compact,
+            expected_revision.as_deref(),
+        ),
         Request::ReleaseList { part } => versioned(crate::release::list(session, part.as_deref())),
         Request::ReleaseSync {} => crate::release::sync(session),
         Request::ReleaseCheck { results } => crate::release::check(session, results),

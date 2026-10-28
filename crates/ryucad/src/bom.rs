@@ -4,6 +4,8 @@
 //! revisions; and `bom.where_used`, the assemblies that use a part now and
 //! in every official release. ryupdm reads them from the files alone
 //! ([`ryupdm::bom`], [`ryupdm::where_used`]); nothing is rebuilt.
+//! `bom.renumber` changes an assembly's item numbers
+//! ([`ryupdm::items`]).
 
 use crate::doc::assembly::Rev;
 use crate::doc::files::PartKind;
@@ -255,6 +257,64 @@ pub fn where_used(
     Ok(v)
 }
 
+/// `bom.renumber`: sets the item numbers of parts assembly `part` places
+/// (`items`, part ID to number), or with `compact` numbers them 1 to n in
+/// their current order; one change, guarded by the assembly's revision.
+pub fn renumber(
+    session: &mut Session,
+    part: &str,
+    items: &serde_json::Map<String, Value>,
+    compact: bool,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let id = part_id(part)?;
+    let p = session.project().part(&id)?.clone();
+    crate::server::check_revision(&p, expected)?;
+    let file = p.file.clone()?;
+    if file.kind != PartKind::Assembly {
+        return Err(Error::new(
+            Code::WrongPartKind,
+            format!("{id} is a part: only an assembly numbers what it places"),
+        )
+        .with("part", &id));
+    }
+    let placed = ryupdm::items::placed(&p);
+    let new = match (compact, items.is_empty()) {
+        (true, true) => ryupdm::items::compacted(&file.items, &placed),
+        (false, false) => {
+            let sets = items
+                .iter()
+                .map(|(k, v)| {
+                    let n = v.as_u64().ok_or_else(|| {
+                        Error::new(
+                            Code::InvalidParam,
+                            format!("item for {k}: expected a whole number, got {v}"),
+                        )
+                        .with("param", "items")
+                        .with("part", k)
+                    })?;
+                    Ok((part_id(k)?, n))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            ryupdm::items::renumbered(&file.items, &placed, &sets)?
+        }
+        _ => {
+            return Err(Error::new(
+                Code::Usage,
+                "give PART=N for each number to set, or --compact alone",
+            ));
+        }
+    };
+    crate::doc::project::write_json(
+        &crate::doc::project::part_path(session.root(), &id),
+        &crate::doc::files::PartFile { items: new, ..file }.to_json(),
+    )?;
+    session.reload()?;
+    let p = session.project().part(&id)?;
+    let items = p.file.as_ref().map(|f| json!(f.items)).unwrap_or_default();
+    Ok(json!({"part": id, "revision": p.revision, "items": items}))
+}
+
 /// What makes a BOM of the working files unsound, as `check` findings
 /// (`source: bom`): each part's BOM read, each finding once, in part
 /// order.
@@ -324,6 +384,52 @@ mod tests {
         git(root, &["add", "."]);
         git(root, &["commit", "-q", "-m", "asm"]);
         (dir, s)
+    }
+
+    #[test]
+    fn renumbering_writes_the_assemblys_items_against_its_revision() {
+        let (_dir, mut s) = assembly();
+        let items = |s: &Session| {
+            let p = s
+                .project()
+                .part(&crate::doc::id::Id::parse("asm", "part").unwrap())
+                .unwrap();
+            json!(p.file.as_ref().unwrap().items)
+        };
+        assert_eq!(items(&s), json!({"p": 1, "kit": 2}));
+        let rev = call(&mut s, "part.list", json!({})).unwrap()["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["part"] == "asm")
+            .unwrap()["revision"]
+            .clone();
+        let v = call(
+            &mut s,
+            "bom.renumber",
+            json!({"part": "asm", "items": {"p": 2, "kit": 1}, "expected_revision": rev}),
+        )
+        .unwrap();
+        assert_eq!(v["items"], json!({"p": 2, "kit": 1}));
+        // The revision it was asked against has moved on.
+        let e = call(
+            &mut s,
+            "bom.renumber",
+            json!({"part": "asm", "items": {"p": 7}, "expected_revision": rev}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, crate::error::Code::Conflict);
+        let tree = call(&mut s, "bom.get", json!({"part": "asm"})).unwrap();
+        assert_eq!(tree["tree"]["children"][0]["item"], 2);
+        let v = call(
+            &mut s,
+            "bom.renumber",
+            json!({"part": "asm", "compact": true}),
+        )
+        .unwrap();
+        assert_eq!(v["items"], json!({"kit": 1, "p": 2}));
+        let e = call(&mut s, "bom.renumber", json!({"part": "asm"})).unwrap_err();
+        assert_eq!(e.code, crate::error::Code::Usage);
     }
 
     #[test]

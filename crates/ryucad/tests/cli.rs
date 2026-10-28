@@ -964,6 +964,7 @@ fn every_protocol_method_has_a_command() {
         ("bom.get", &["bom"]),
         ("bom.diff", &["bom", "diff"]),
         ("bom.where_used", &["where-used"]),
+        ("bom.renumber", &["bom", "renumber"]),
         ("release.check", &["release", "check"]),
         ("release.sync", &["release", "sync"]),
         ("release.propose", &["release", "propose"]),
