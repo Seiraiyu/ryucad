@@ -194,3 +194,40 @@ fn where_used_lists_the_assemblies_that_reach_a_part() {
     ]);
     assert!(ws.wait_until(WAIT, |ws| texts(ws) == ["frame (3)", "rig (3)"]));
 }
+
+#[test]
+fn a_compare_marks_what_the_bom_changed_since_a_revision() {
+    let p = assembled().committed();
+    let mut ws = open(&p);
+    ws.load_bom();
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.bom.root.is_some()));
+    p.ok(&["part", "create", "nut"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "n1", "--of", "nut",
+    ]);
+    p.ok(&["feature", "delete", "frame", "b2"]);
+    ws.set_compare(Some("HEAD".into()));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.bom.diff.is_some()));
+    assert_eq!(
+        ws.bom.summary().as_deref(),
+        Some("1 added, 0 removed, 1 changed")
+    );
+    use ryucad_app::core::bom::Mark;
+    let mark = |ws: &Workspace, part: &str| {
+        ws.bom
+            .tree
+            .iter()
+            .find(|l| l.part == part)
+            .and_then(|l| l.mark.clone())
+    };
+    assert_eq!(mark(&ws, "nut"), Some(Mark::Added));
+    let q = ws.bom.columns.iter().position(|c| c == "quantity").unwrap();
+    match mark(&ws, "bolt") {
+        Some(Mark::Changed(old)) => assert_eq!(old.get(&q).map(String::as_str), Some("2")),
+        other => panic!("{other:?}"),
+    }
+    // Out of the compare, the marks go.
+    ws.set_compare(None);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.bom.diff.is_none()));
+    assert!(ws.bom.tree.iter().all(|l| l.mark.is_none()));
+}
