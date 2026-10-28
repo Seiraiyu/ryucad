@@ -2414,3 +2414,200 @@ fn file_export_step_writes_the_shown_part() {
     assert!(bytes.starts_with(b"ISO-10303-21;"));
     assert_eq!(e.done.unwrap().1, bytes.len());
 }
+
+/// A bolt (a cylinder) and a frame placing it twice, and a nut once.
+fn framed_bolts() -> Project {
+    let p = Project::new();
+    p.ok(&["part", "create", "bolt"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bolt",
+        "cylinder",
+        "--id",
+        "shank",
+        "--param",
+        "radius=3",
+        "--param",
+        "height=20",
+    ]);
+    p.ok(&["part", "create", "nut"]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    for (id, of, at) in [
+        ("b1", "bolt", "0,0,0"),
+        ("b2", "bolt", "40,0,0"),
+        ("n1", "nut", "0,0,0"),
+    ] {
+        p.ok(&[
+            "feature", "add", "frame", "instance", "--id", id, "--of", of, "--origin", at,
+        ]);
+    }
+    p
+}
+
+fn bolts_drawn(a: &App) -> bool {
+    match &a.screen {
+        ryucad_app::ui::app::Screen::Opened(o) => {
+            o.ws.idle()
+                && o.ws
+                    .model
+                    .meshes
+                    .contains_key(&("frame".into(), "b2/shank".into()))
+        }
+        _ => false,
+    }
+}
+
+/// Opens the BOM tab of a window on `framed_bolts`, read.
+fn bom_tab(p: &Project) -> Harness<'static, App> {
+    let mut h = window(p);
+    frames(&mut h, bolts_drawn);
+    h.get_by_label("BOM").click();
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.bom.root.is_some()
+    });
+    shown(&mut h, "BOM of frame");
+    h
+}
+
+#[test]
+fn the_bom_tab_chooses_a_line_and_goes_flat() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = framed_bolts();
+    let mut h = bom_tab(&p);
+    // Choosing a line selects its occurrences and frames them.
+    let before = h.state().opened().view.nav.camera.clone();
+    h.get_by_label("BOM line 1: bolt").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection == ["frame/b1", "frame/b2"])
+    });
+    assert_ne!(h.state().opened().view.nav.camera, before);
+    // Flat: one line per part.
+    h.get_by_label("Flat").click();
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && !a.opened().ws.bom.flat_lines.is_empty()
+    });
+    shown(&mut h, "BOM line: bolt working");
+}
+
+#[test]
+fn an_item_number_is_set_in_the_bom_tab() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = framed_bolts();
+    let mut h = bom_tab(&p);
+    h.get_by_label("Item of bolt in frame").click();
+    shown(&mut h, "Set item");
+    h.get_by_label("Item of bolt in frame")
+        .set_text_value_accesskit("7");
+    h.step();
+    h.get_by_label("Set item").click();
+    frames(&mut h, |a| {
+        let t = &a.opened().ws.bom;
+        a.opened().ws.idle() && t.editing.is_none() && t.tree[0].item == Some(7)
+    });
+    let bom = p.ok(&["bom", "frame"]);
+    assert_eq!(bom["tree"]["children"][0]["item"], 7);
+    // The flat BOM's numbers aren't edited.
+    h.get_by_label("Flat").click();
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && !a.opened().ws.bom.flat_lines.is_empty()
+    });
+    h.step();
+    assert!(h.query_by_label("Item of bolt in frame").is_none());
+}
+
+#[test]
+fn where_used_shows_an_assembly() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = framed_bolts();
+    let mut h = window(&p);
+    frames(&mut h, bolts_drawn);
+    // The bolt chosen in the tree: the Part section says where it is used.
+    h.get_by_label("shank (cylinder)").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .where_used
+            .as_ref()
+            .is_some_and(|w| w.part == "bolt")
+    });
+    shown(&mut h, "Where bolt is used");
+    h.get_by_label("frame (2)");
+    // A click lands where the button is drawn, so the panel must have
+    // settled with it in view: the chosen feature's form arrives on its
+    // own and pushes the section down, past the window's foot where text
+    // runs taller (Windows' software adapter).
+    frames(&mut h, |a| a.opened().ws.idle());
+    h.get_by_label("Show frame").scroll_to_me();
+    for _ in 0..30 {
+        h.step();
+    }
+    let r = h.get_by_label("Show frame").rect();
+    assert!(r.bottom() <= 700.0, "Show frame is out of view at {r:?}");
+    h.get_by_label("Show frame").click();
+    frames(&mut h, |a| {
+        a.opened().ws.model.focus.as_deref() == Some("frame")
+    });
+}
+
+#[test]
+fn a_compare_marks_the_bom_tab() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = framed_bolts().committed();
+    let mut h = bom_tab(&p);
+    // An agent adds a bolt; compared with HEAD, the tab says so.
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b3", "--of", "bolt",
+    ]);
+    menu(&mut h, "View", "Compare with HEAD");
+    frames(&mut h, |a| {
+        compared(a) && a.opened().ws.idle() && a.opened().ws.bom.diff.is_some()
+    });
+    shown(&mut h, "Compared with HEAD: 0 added, 0 removed, 1 changed");
+    shown(&mut h, "3 (was 2)");
+    // A part placed since is added, and a line like any other: chosen,
+    // it selects its occurrence, and its item number is set.
+    p.ok(&["part", "create", "washer"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "w1", "--of", "washer",
+    ]);
+    frames(&mut h, |a| {
+        let t = &a.opened().ws.bom;
+        a.opened().ws.idle() && t.summary().as_deref() == Some("1 added, 0 removed, 1 changed")
+    });
+    h.get_by_label("BOM line 3: washer").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection == ["frame/w1"])
+    });
+    h.get_by_label("Item of washer in frame").click();
+    shown(&mut h, "Set item");
+    h.get_by_label("Item of washer in frame")
+        .set_text_value_accesskit("9");
+    h.step();
+    h.get_by_label("Set item").click();
+    frames(&mut h, |a| {
+        let t = &a.opened().ws.bom;
+        a.opened().ws.idle() && t.editing.is_none() && t.tree.iter().any(|l| l.item == Some(9))
+    });
+    let bom = p.ok(&["bom", "frame"]);
+    assert_eq!(bom["tree"]["children"][2]["part"], "washer");
+    assert_eq!(bom["tree"]["children"][2]["item"], 9);
+}
