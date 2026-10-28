@@ -80,7 +80,10 @@ pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
     if rev == Rev::Working {
         s.project().part(&part)?;
     }
-    let mut walk = Walk::default();
+    let mut walk = Walk {
+        built: s.nodes(&part, &rev)?,
+        ..Walk::default()
+    };
     walk.product(s, &part, &rev)?;
     if !walk.failing.is_empty() {
         let failing: Vec<&Value> = walk.failing.values().collect();
@@ -171,12 +174,19 @@ struct Walk {
     failing: BTreeMap<(Id, String, Id), Value>,
     /// How the part exported resolved, at a release label.
     pin: Option<Pin>,
+    /// Every part and revision the export reaches, rebuilt at once
+    /// ([`Session::nodes`]).
+    built: BTreeMap<(Id, Rev), (Part, PartResult, Option<Pin>)>,
 }
 
 impl Walk {
     /// `part` at `rev` rebuilt, its failing features noted.
     fn node(&mut self, s: &mut Session, part: &Id, rev: &Rev) -> Result<(Part, PartResult)> {
-        let (p, result, pin) = s.node(part, rev)?;
+        let at = (part.clone(), rev.clone());
+        let (p, result, pin) = match self.built.get(&at) {
+            Some(n) => n.clone(),
+            None => s.node(part, rev)?,
+        };
         if self.nodes.is_empty() && self.pin.is_none() {
             self.pin = pin;
         }

@@ -91,6 +91,17 @@ pub fn report(i: &Import, healed: &HealReport) -> Value {
     v
 }
 
+/// What an import feature says of itself, whether it built or not: its
+/// file and the hash it holds, its product and its body. The rebuild
+/// report puts it under `import`, beside [`report`]'s heal counts.
+pub fn written(i: &Import) -> Value {
+    let mut v = json!({"file": i.file.path, "blake3": i.file.blake3, "body": i.body});
+    if let Some(p) = &i.product {
+        v["product"] = product_json(p);
+    }
+    v
+}
+
 fn product_json(p: &ProductRef) -> Value {
     let mut v = json!({"id": p.id, "name": p.name});
     if p.ordinal != 0 {
@@ -1111,6 +1122,26 @@ pub(crate) mod tests {
                 assert!(step.starts_with('#'), "{step}");
             }
         }
+    }
+
+    #[test]
+    fn an_import_says_what_it_reads_whether_or_not_it_builds() {
+        let bytes = occt("box_ap214.stp");
+        let blake3 = ImportFile::new(bytes.clone()).blake3;
+        let (_dir, mut s) = with_import(&bytes, Some(("part 2", "part 2")));
+        let f = rebuild(&mut s)["features"][0].clone();
+        assert_eq!(f["ok"], true);
+        assert_eq!(f["import"]["blake3"], blake3);
+        assert_eq!(f["import"]["body"], 0);
+        assert!(f["import"]["heal"].is_object(), "{f}");
+        // No body no product reaches: it fails, and still says so.
+        let (_dir, mut s) = with_import(&bytes, None);
+        let f = rebuild(&mut s)["features"][0].clone();
+        assert_eq!(f["ok"], false);
+        assert_eq!(
+            f["import"],
+            json!({"file": "imports/f.step", "blake3": blake3, "body": 0})
+        );
     }
 
     #[test]

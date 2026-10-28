@@ -20,4 +20,5 @@ pub mod recent;
 pub mod releases;
 pub mod settings;
 pub mod sketch;
+pub mod step;
 pub mod workspace;

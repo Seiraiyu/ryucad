@@ -13,6 +13,7 @@
 //! - [`blend_bytes`]: blends from bytes, for fuzzing and its regressions.
 //! - [`heal_bytes`]: shapes with a file's faults from bytes, for fuzzing
 //!   healing and its regressions.
+//! - [`race`]: the bodies of the large-assembly STEP race.
 
 pub mod along_bytes;
 pub mod blend_bytes;
@@ -24,6 +25,7 @@ pub mod heal_bytes;
 mod lcg;
 pub mod mesh;
 pub mod nurbs;
+pub mod race;
 pub mod sweep_bytes;
 
 pub use golden::{Golden, Section};

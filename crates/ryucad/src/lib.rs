@@ -21,6 +21,8 @@ pub struct Cad;
 impl ryu_session::Product for Cad {
     const NAME: &'static str = "ryucad";
     const RUNTIME_DIR_VAR: &'static str = "RYUCAD_RUNTIME_DIR";
+    /// Imported STEP files: a re-import holds both versions.
+    const BULKY: &'static [&'static str] = &["imports/"];
     type Target = entity::EntityRef;
     type View = live::View;
     type Seen = live::Seen;

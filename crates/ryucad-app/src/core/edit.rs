@@ -703,6 +703,9 @@ pub struct Form {
     /// fixed; its pose is the placement, its origin in [`Form::unit`].
     pub rev: Option<Choice>,
     pub fixed: Option<Flag>,
+    /// An import's file, hash, product and body: shown, never edited
+    /// (`ryucad import` writes imports).
+    pub import: Option<crate::core::model::ImportInfo>,
     /// What changed under a save that conflicted.
     pub changed: Vec<Changed>,
     /// Why the last save failed, other than a conflict.
@@ -857,6 +860,11 @@ impl Form {
                 name: "fixed".to_owned(),
                 read: v["fixed"] == true,
                 chosen: v["fixed"] == true,
+            }),
+            import: (ty == "import").then(|| {
+                crate::core::model::ImportInfo::from_json(&json!({
+                    "file": v["file"]["path"], "blake3": v["file"]["blake3"],
+                    "product": v["product"], "body": v["body"]}))
             }),
             ty,
             changed: Vec::new(),
@@ -1263,6 +1271,29 @@ mod tests {
                 yours: "2 * width".into()
             })
         );
+    }
+
+    #[test]
+    fn an_import_is_shown_not_edited() {
+        let f = Form::from_show(
+            "p",
+            &json!({"id": "body", "type": "import", "revision": "r1", "body": 1,
+                    "file": {"path": "imports/bracket.step", "blake3": "ab12"},
+                    "product": {"id": "BRK-100", "name": "Bracket", "ordinal": 1}}),
+        );
+        let i = f.import.as_ref().unwrap();
+        assert_eq!(i.file, "imports/bracket.step");
+        assert_eq!(i.blake3, "ab12");
+        assert_eq!(i.product, Some(("BRK-100".into(), "Bracket".into(), 1)));
+        assert_eq!(i.body, 1);
+        assert!(!f.dirty());
+        assert!(!f.placed());
+        let none = Form::from_show(
+            "p",
+            &json!({"id": "body", "type": "import", "revision": "r1", "body": 0,
+                    "file": {"path": "imports/loose.step", "blake3": "ab12"}}),
+        );
+        assert_eq!(none.import.unwrap().product, None);
     }
 
     fn shown(radius: &str, revision: &str) -> Value {

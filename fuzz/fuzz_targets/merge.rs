@@ -3,11 +3,13 @@
 //! versions split at `0xff` bytes, so anything at all reaches the driver),
 //! or a base sketch, part list, parameters file, part's properties,
 //! release record, pattern, instance or mate and two sides' edits to it,
-//! two bytes an edit. Merging must never panic, must give the same
-//! bytes twice, must be canonical JSON whose record holds as many conflicts
-//! as it says unless it fell back to lines, and readable files never fall
-//! back. A side that changed nothing gives the other, and an instance's
-//! pose never conflicts: it is solver state.
+//! two bytes an edit; `0xfe` an import feature and `0xff` an instance an
+//! import made. Merging must never panic, must give the same bytes twice,
+//! must be canonical JSON whose record holds as many conflicts as it says
+//! unless it fell back to lines, and readable files never fall back. A
+//! side that changed nothing gives the other, an instance's pose never
+//! conflicts (it is solver state), and two sides re-importing different
+//! bytes conflict on the file's hash.
 
 #![no_main]
 
@@ -264,6 +266,47 @@ fn edit_mate(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// Applies edit `(op, arg)` to an import feature: the file re-imported
+/// (a new hash), another body, another product or none, or its ordinal.
+fn edit_import(v: &mut Value, op: u8, arg: u8) {
+    match op % 4 {
+        0 => v["file"]["blake3"] = json!(format!("{arg:064x}")),
+        1 => v["body"] = json!(arg % 4),
+        2 => match arg % 3 {
+            0 => {
+                v.as_object_mut().unwrap().remove("product");
+            }
+            n => v["product"] = json!({"id": format!("P-{n}"), "name": format!("Part {n}")}),
+        },
+        _ => {
+            if v["product"].is_object() {
+                match arg % 3 {
+                    0 => {
+                        v["product"].as_object_mut().unwrap().remove("ordinal");
+                    }
+                    n => v["product"]["ordinal"] = json!(n),
+                }
+            }
+        }
+    }
+}
+
+/// Applies edit `(op, arg)` to an instance an import made: its pose (as
+/// an update or a solver writes it), its usage, its ordinal, its fixing.
+fn edit_imported(v: &mut Value, op: u8, arg: u8) {
+    match op % 4 {
+        0 => edit_instance(v, 0, arg),
+        1 => v["import"]["usage"] = json!(format!("NAUO{}", arg % 3)),
+        2 => match arg % 3 {
+            0 => {
+                v["import"].as_object_mut().unwrap().remove("ordinal");
+            }
+            n => v["import"]["ordinal"] = json!(n),
+        },
+        _ => v["fixed"] = json!(arg % 2 == 1),
+    }
+}
+
 fn text(v: &Value) -> Vec<u8> {
     canonical::to_string(v).into_bytes()
 }
@@ -272,7 +315,14 @@ fuzz_target!(|data: &[u8]| {
     let Some((&mode, rest)) = data.split_first() else {
         return;
     };
-    let (base, ours, theirs, readable) = if mode % 9 == 3 {
+    // `0xfe` and `0xff` are the import modes (9 and 10); every other byte
+    // picks as it did before them.
+    let kind = match mode {
+        0xfe => 9,
+        0xff => 10,
+        m => m % 9,
+    };
+    let (base, ours, theirs, readable) = if kind == 3 {
         let mut parts = rest.splitn(3, |b| *b == 0xff);
         let (b, o, t) = (
             parts.next().unwrap_or(&[]).to_vec(),
@@ -281,7 +331,7 @@ fuzz_target!(|data: &[u8]| {
         );
         (b, o, t, false)
     } else {
-        let base = match mode % 9 {
+        let base = match kind {
             0 => sketch(),
             1 => json!({"features": ["a", "b", "c", "d"], "format": 1, "kind": "ryucad.part"}),
             2 => json!({"format": 1, "kind": "ryucad.parameters",
@@ -296,13 +346,22 @@ fuzz_target!(|data: &[u8]| {
             8 => json!({"format": 4, "kind": "ryucad.feature", "type": "mate", "form": "revolute",
                         "a": {"instance": ["base"], "at": "origin"},
                         "b": {"instance": ["pin"], "at": "origin"}}),
+            9 => json!({"format": 5, "kind": "ryucad.feature", "type": "import", "body": 0,
+                        "file": {"path": "imports/f.step", "blake3": "0".repeat(64)},
+                        "product": {"id": "P-0", "name": "Part 0"}}),
+            10 => json!({"format": 5, "kind": "ryucad.feature", "type": "instance", "part": "bolt",
+                         "rev": "working", "fixed": true,
+                         "import": {"file": "imports/f.step",
+                                    "product": {"id": "ASM", "name": "Assembly"},
+                                    "usage": "NAUO0"},
+                         "pose": {"origin_m": [0, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}}),
             _ => json!({"built_with": {"commit": "c", "ryucad": "0", "ryukei": "0"},
                         "content": "0".repeat(64), "format": 1, "kind": "ryupdm.release",
                         "label": "A", "part": "p", "project": "0123456789abcdef0123456789abcdef",
                         "properties": {"number": "100"}, "released_by": {"participant": "agent"},
                         "results": {}, "supersedes": null}),
         };
-        let edit = |v: &mut Value, op: u8, arg: u8| match mode % 9 {
+        let edit = |v: &mut Value, op: u8, arg: u8| match kind {
             0 => edit_sketch(v, op, arg),
             1 => edit_part(v, op, arg),
             2 => edit_parameters(v, op, arg),
@@ -310,6 +369,8 @@ fuzz_target!(|data: &[u8]| {
             6 => edit_pattern(v, op, arg),
             7 => edit_instance(v, op, arg),
             8 => edit_mate(v, op, arg),
+            9 => edit_import(v, op, arg),
+            10 => edit_imported(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
@@ -326,7 +387,7 @@ fuzz_target!(|data: &[u8]| {
         let (out, outcome) = bytes(&text(&base), &text(&base), &text(&theirs));
         assert_eq!((out, outcome), (text(&theirs), Outcome::Clean));
         // Poses are solver state: moved on both sides, no conflict.
-        if mode % 9 == 7 {
+        if kind == 7 || kind == 10 {
             let (_, outcome) = bytes(&text(&base), &text(&ours), &text(&theirs));
             if let Outcome::Conflicts(_) = outcome {
                 let v: Value =
@@ -335,6 +396,21 @@ fuzz_target!(|data: &[u8]| {
                 assert!(
                     record(&v).keys().all(|k| !k.starts_with("/pose")),
                     "a pose conflicted: {v}"
+                );
+            }
+        }
+        // Two re-imports of different bytes conflict on the hash.
+        if kind == 9 {
+            let hash = |v: &Value| v["file"]["blake3"].clone();
+            if hash(&ours) != hash(&base)
+                && hash(&theirs) != hash(&base)
+                && hash(&ours) != hash(&theirs)
+            {
+                let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
+                let v: Value = serde_json::from_slice(&merged).expect("JSON");
+                assert!(
+                    record(&v).keys().any(|k| k.starts_with("/file")),
+                    "two re-imports merged: {v}"
                 );
             }
         }

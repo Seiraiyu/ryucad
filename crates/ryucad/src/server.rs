@@ -3228,6 +3228,16 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
         let c = b.body.counts();
         json!({"faces": c.faces, "edges": c.edges, "vertices": c.vertices})
     };
+    // An import's file, hash, product and body, as written: shown
+    // whether it built or not.
+    let imports: BTreeMap<Id, Value> = part
+        .features
+        .iter()
+        .filter_map(|(fid, f)| match f.as_ref().ok()? {
+            Feature::Import(i) => Some((fid.clone(), crate::import::written(i))),
+            _ => None,
+        })
+        .collect();
     // Instances an update kept though their usage left the file.
     let kept = if assembly {
         crate::import::usage_warnings(session.project(), id)
@@ -3289,6 +3299,14 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
             };
             if let Some(u) = uses.get(fid) {
                 v["uses"] = json!(u);
+            }
+            if let Some(Value::Object(m)) = imports.get(fid) {
+                if !v["import"].is_object() {
+                    v["import"] = json!({});
+                }
+                for (k, x) in m {
+                    v["import"][k] = x.clone();
+                }
             }
             if let Some(Value::Object(m)) = mates.get(fid) {
                 if !v["mate"].is_object() {
@@ -4662,7 +4680,7 @@ pub(crate) fn diff(
                 let path = f["path"].as_str().unwrap_or_default().to_owned();
                 let (a, b) = (fa.get(&path), fb.get(&path));
                 f["products"] =
-                    crate::import::products_diff(&path, a.map(Vec::as_slice), b.map(Vec::as_slice));
+                    crate::import::products_diff(&path, a.map(|x| &x[..]), b.map(|x| &x[..]));
             }
         }
     }

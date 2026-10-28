@@ -55,6 +55,10 @@ harness = false
 name = "assembly"
 harness = false
 
+[[bench]]
+name = "step"
+harness = false
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

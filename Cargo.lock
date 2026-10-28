@@ -4243,6 +4243,7 @@ dependencies = [
  "blake3",
  "interprocess",
  "libc",
+ "rayon",
  "ryu-doc",
  "serde",
  "serde_json",
@@ -4352,6 +4353,7 @@ dependencies = [
  "num-bigint",
  "num-rational",
  "num-traits",
+ "rayon",
  "ryukei",
 ]
 
