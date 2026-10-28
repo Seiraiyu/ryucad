@@ -5,6 +5,8 @@
 //! of two coordinate differences fits in `i128` exactly, which stage 1's
 //! exact predicates rely on.
 
+pub mod decimal;
+
 /// Integer nanometres.
 pub type Nm = i64;
 
