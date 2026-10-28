@@ -382,6 +382,10 @@ pub enum Code {
     /// Import: a KiCad file in a format newer than KiCad 9's, read as far
     /// as ryueda knows it (a warning).
     ImportVersionNewer,
+    /// A warning: a daemon can't watch its project folder for file events
+    /// (a filesystem without them, a watch limit reached), so it checks
+    /// every file on every request. Why is in the details.
+    WatchUnavailable,
 }
 
 impl Code {
@@ -489,6 +493,7 @@ mod tests {
         assert_eq!(Code::PinConflict.exit_code(), 1);
         assert_eq!(Code::LibraryNested.exit_code(), 1);
         assert_eq!(Code::PinWithoutPad.exit_code(), 1);
+        assert_eq!(json!(Code::WatchUnavailable), json!("watch_unavailable"));
     }
 
     #[test]
