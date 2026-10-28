@@ -1,0 +1,9 @@
+## Topology (decided in phase 1)
+
+The design is document 15 in the Coxswain planning project `ryucad-ryukei`.
+
+- **Storage.** A `ryukei::topo::Body` holds flat arrays of regions, shells, faces, loops, fins, edges and vertices, plus its curves, surfaces and pcurves, all referenced by typed `u32` IDs. Each edge has a ring of fins (Parasolid style), so sheets and non-manifold bodies fit later; phase 1 builds and accepts manifold solids only. A solid region has one outer shell and any number of void shells (cavities). Deleting leaves a tombstone; IDs are never reused until `Body::compact()`, which returns a `Remap`. Closed edges have exactly one vertex; periodic faces have no seam edges (a sphere or torus is one face with no loops).
+- **Editing.** Topology changes only through `ryukei::euler`: MVFS/KVFS, MVS (a shell in an existing solid region; KVFS undoes it), MEV/KEV, MEF/KEF, KEMR/MEKR, KFMRH/MFKRH, SEMV/JEKV, MVR/KVR, plus `set_point`/`set_curve`/`set_surface`/`set_pcurve`. Operators check every precondition before writing (on `Err` the body is unchanged) and decide no geometry; the caller passes it.
+- **Geometry.** Curves and surfaces live in the body's own arrays and may be shared by several edges or faces; see Geometry below.
+- **Names.** Faces, edges and vertices carry a 128-bit `name::Name`: SipHash-2-4 of the caller's `OpKey`, the entity's `Role` and its parents' names. A split retires the parent's name and names both children; every operation returns a `Journal` of the changes. The kernel never invents keys; resolving an agent's reference through the journal is ryucad's job.
+- **Validity.** `check::check_topology` holds after every Euler operator (debug builds assert it); `check::check` adds geometry and orientation and holds for finished bodies (primitives assert it). `check::check_intersections` adds that faces meet only at shared edges and vertices (see Intersections below); it runs in tests and fuzzing, not after every operator.
