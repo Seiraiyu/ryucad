@@ -34,7 +34,9 @@ use crate::error::{Code, Error, Result};
 use crate::proto::Answer;
 use crate::rebuild::{Built, Output, PartResult};
 use crate::session::Session;
+use crate::units::{self, Field, Quantity};
 use ryukei::geom::Rigid;
+use ryukei::mesh::MeshParams;
 use ryukei::topo::Body;
 use ryupdm::props::Properties;
 use ryustep::schema::Schema;
@@ -354,6 +356,112 @@ fn invalid(param: &str, value: &str, expected: &str) -> Error {
         format!("{param} {value:?} isn't one STEP export knows: expected {expected}"),
     )
     .with("param", param)
+}
+
+/// A mesh format's tolerances, as asked for and checked: the chord (the
+/// most the mesh may be from the exact faces), the angle (the most the
+/// normal may turn across a triangle) and the longest edge, if any. Each
+/// a literal quantity: exports read no parameters.
+#[derive(Clone, Debug)]
+pub struct MeshOptions {
+    pub params: MeshParams,
+    pub chord: Quantity,
+    pub angle: Quantity,
+    pub max_edge: Option<Quantity>,
+}
+
+/// The chord and angle a mesh export takes by default.
+pub const DEFAULT_CHORD: &str = "0.01 mm";
+pub const DEFAULT_ANGLE: &str = "15 deg";
+
+impl MeshOptions {
+    /// The options from their texts (the defaults where left out), a bare
+    /// length in `default` units and a bare angle in degrees.
+    pub fn read(
+        chord: Option<&str>,
+        angle: Option<&str>,
+        max_edge: Option<&str>,
+        default: units::Unit,
+    ) -> Result<MeshOptions> {
+        let chord = literal(
+            "chord",
+            chord.unwrap_or(DEFAULT_CHORD),
+            Field::Length(default),
+        )?;
+        let angle = literal("angle", angle.unwrap_or(DEFAULT_ANGLE), Field::Angle)?;
+        let max_edge = max_edge
+            .map(|t| literal("max_edge", t, Field::Length(default)))
+            .transpose()?;
+        let floor = 10.0 * ryukei::tol::LINEAR_RESOLUTION;
+        if chord.meters() < floor {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "chord {} is under ryukei's least, {floor} m (0.0001 mm)",
+                    chord.text()
+                ),
+            )
+            .with("param", "chord"));
+        }
+        let a = angle.radians();
+        if a <= 0.0 || a > core::f64::consts::FRAC_PI_2 {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("angle {} isn't in (0, 90 deg]", angle.text()),
+            )
+            .with("param", "angle"));
+        }
+        if let Some(e) = &max_edge
+            && e.meters() < chord.meters()
+        {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "max_edge {} is shorter than the chord, {}",
+                    e.text(),
+                    chord.text()
+                ),
+            )
+            .with("param", "max_edge"));
+        }
+        let params = MeshParams {
+            max_edge: max_edge.as_ref().map(Quantity::meters),
+            ..MeshParams::new(chord.meters(), a)
+        };
+        Ok(MeshOptions {
+            params,
+            chord,
+            angle,
+            max_edge,
+        })
+    }
+
+    /// How the answer reports them.
+    pub fn report(&self) -> Value {
+        let mut v = json!({"chord": self.chord.report(), "angle": self.angle.report()});
+        if let Some(e) = &self.max_edge {
+            v["max_edge"] = e.report();
+        }
+        v
+    }
+}
+
+/// `text` as a literal quantity for `field`, else `invalid_param` naming
+/// `param`.
+fn literal(param: &str, text: &str, field: Field) -> Result<Quantity> {
+    let bad = |why: String| {
+        Error::new(Code::InvalidParam, format!("{param} {text:?}: {why}"))
+            .with("param", param)
+            .with("value", text)
+    };
+    let q =
+        Quantity::eval_as(text, field, &crate::expr::no_parameters).map_err(|e| bad(e.message))?;
+    if !q.is_literal() {
+        return Err(bad(
+            "an export takes a literal such as \"0.01 mm\", not an expression".into(),
+        ));
+    }
+    Ok(q)
 }
 
 /// STEP's model of a scene: each product's solids as its bodies, each
@@ -682,6 +790,52 @@ pub(crate) mod tests {
         let mut f = f;
         f["part"] = json!(part);
         call(s, "feature.add", f).unwrap();
+    }
+
+    #[test]
+    fn mesh_options_are_literals_in_range() {
+        let mm = units::Unit::Mm;
+        let o = MeshOptions::read(None, None, None, mm).unwrap();
+        assert_eq!(
+            (o.params.chord, o.params.angle),
+            (0.01 * 1e-3, 15.0 * units::DEG)
+        );
+        assert_eq!(
+            (o.params.max_edge, o.params.max_triangles),
+            (None, 50_000_000)
+        );
+        assert_eq!(
+            o.report(),
+            json!({"chord": {"value": "0.01 mm", "m": 0.01 * 1e-3},
+                   "angle": {"value": "15 deg", "rad": 15.0 * units::DEG}})
+        );
+        // A bare length takes the project's unit, a bare angle degrees.
+        let o = MeshOptions::read(Some("0.5"), Some("10"), Some("2 cm"), units::Unit::Cm).unwrap();
+        assert_eq!(o.params.chord, 0.5 * 0.01);
+        assert_eq!(o.params.angle, 10.0 * units::DEG);
+        assert_eq!(o.params.max_edge, Some(2.0 * 0.01));
+        assert_eq!(o.report()["max_edge"]["value"], "2 cm");
+        for (chord, angle, edge, param) in [
+            (Some("0.00001 mm"), None, None, "chord"),
+            (Some("-1 mm"), None, None, "chord"),
+            (Some("2 * 0.01 mm"), None, None, "chord"),
+            (Some("wall"), None, None, "chord"),
+            (Some("5 deg"), None, None, "chord"),
+            (None, Some("0 deg"), None, "angle"),
+            (None, Some("91 deg"), None, "angle"),
+            (None, Some("1 mm"), None, "angle"),
+            (None, None, Some("0.001 mm"), "max_edge"),
+        ] {
+            let e = MeshOptions::read(chord, angle, edge, mm).unwrap_err();
+            assert_eq!(
+                (e.code, &e.details["param"]),
+                (Code::InvalidParam, &json!(param)),
+                "{chord:?} {angle:?} {edge:?}: {}",
+                e.message
+            );
+        }
+        // Ninety degrees is the most.
+        assert!(MeshOptions::read(None, Some("90 deg"), None, mm).is_ok());
     }
 
     #[test]
