@@ -499,6 +499,7 @@ mod tests {
                 "material",
                 "uom",
                 "make_buy",
+                "amount",
                 "coated",
                 "count"
             ]
