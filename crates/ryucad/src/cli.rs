@@ -784,7 +784,15 @@ enum AssemblyCmd {
     },
     /// The instances as a tree: parts, revisions, poses, freedom,
     /// subassemblies.
-    Tree { part: String },
+    Tree {
+        part: String,
+        /// Start at the subassembly these instances reach: m3/s31.
+        #[arg(long)]
+        path: Option<String>,
+        /// List this many levels of instances (all when left out).
+        #[arg(long)]
+        depth: Option<u32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1752,9 +1760,11 @@ fn request(cmd: &Command) -> Option<Request> {
             angle: angle.clone().map(Value::String),
             expected_revision: expect.revision.clone(),
         },
-        Command::Assembly(AssemblyCmd::Tree { part }) => {
-            Request::AssemblyTree { part: part.clone() }
-        }
+        Command::Assembly(AssemblyCmd::Tree { part, path, depth }) => Request::AssemblyTree {
+            part: part.clone(),
+            path: path.clone(),
+            depth: *depth,
+        },
         Command::Assembly(AssemblyCmd::Solve {
             part,
             instance,

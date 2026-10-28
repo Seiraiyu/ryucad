@@ -1179,9 +1179,14 @@ pub fn moved(
 /// assembly, what its mates leave it, a subassembly's instances under it,
 /// and why it failed; its instance patterns, each with its copies; and
 /// `failing`, every feature of it that doesn't build.
-pub fn tree(session: &mut crate::session::Session, part: &str) -> Result<serde_json::Value> {
+pub fn tree(
+    session: &mut crate::session::Session,
+    part: &str,
+    path: Option<&str>,
+    depth: Option<u32>,
+) -> Result<serde_json::Value> {
     let pid = crate::server::part_id(part)?;
-    let p = session.project().part(&pid)?.clone();
+    let mut p = session.project().part(&pid)?.clone();
     if crate::server::part_kind(&p) != PartKind::Assembly {
         return Err(Error::new(
             Code::WrongPartKind,
@@ -1189,9 +1194,59 @@ pub fn tree(session: &mut crate::session::Session, part: &str) -> Result<serde_j
         )
         .with("part", &pid));
     }
-    let result = session.rebuilt(&pid)?.clone();
-    let instances = nodes(session, &p, &result, &Rigid::IDENTITY, &[])?;
-    let mut v = serde_json::json!({"part": pid, "revision": p.revision, "instances": instances});
+    let top = session.rebuilt(&pid)?.clone();
+    let mut result = top.clone();
+    // Down `path` to the subassembly the tree starts at, its pose
+    // composed on the way.
+    let mut at = Rigid::IDENTITY;
+    let mut prefix = Vec::new();
+    for step in path
+        .into_iter()
+        .flat_map(|t| t.split('/'))
+        .filter(|s| !s.is_empty())
+    {
+        let not_found = || {
+            Error::new(
+                Code::NotFound,
+                format!("{pid} has no subassembly at {}", path.unwrap_or_default()),
+            )
+            .with("part", &pid)
+            .with("path", path.unwrap_or_default())
+        };
+        let fid = Id::parse(step, "instance").map_err(|_| not_found())?;
+        let placed = result
+            .output(&fid)
+            .and_then(Output::instance)
+            .filter(|i| i.rev == Rev::Working)
+            .ok_or_else(not_found)?
+            .clone();
+        let child = session
+            .project()
+            .part(&placed.part)
+            .map_err(|_| not_found())?
+            .clone();
+        if crate::server::part_kind(&child) != PartKind::Assembly {
+            return Err(not_found());
+        }
+        at = at.then_after(&placed.pose);
+        prefix.push(fid);
+        result = session.rebuilt(&placed.part)?.clone();
+        p = child;
+    }
+    let instances = nodes(
+        session,
+        &p,
+        &result,
+        &at,
+        &prefix,
+        depth.unwrap_or(u32::MAX),
+    )?;
+    let mut v = serde_json::json!({"part": pid, "revision": session.project().part(&pid)?.revision,
+                                   "instances": instances});
+    if !prefix.is_empty() {
+        v["path"] = serde_json::json!(path_text(&prefix));
+        v["of"] = serde_json::json!(p.id);
+    }
     // Every feature of the assembly that fails, mates included, which the
     // tree doesn't list (issue #123: its instances may place while a mate
     // holding them fails).
@@ -1218,6 +1273,7 @@ fn nodes(
     result: &PartResult,
     at: &Rigid,
     prefix: &[Id],
+    depth: u32,
 ) -> Result<Vec<serde_json::Value>> {
     let mut out = Vec::new();
     for (fid, r) in &result.features {
@@ -1294,7 +1350,13 @@ fn nodes(
                         }
                     };
                     v["kind"] = serde_json::json!("assembly");
-                    v["instances"] = serde_json::json!(nodes(session, &c, &r, &here, &path)?);
+                    if depth > 1 {
+                        let below = nodes(session, &c, &r, &here, &path, depth - 1)?;
+                        v["instances"] = serde_json::json!(below);
+                    } else {
+                        // Below the depth asked for: asked for by path.
+                        v["more"] = serde_json::json!(true);
+                    }
                 }
             }
         }
@@ -2609,6 +2671,36 @@ pub(crate) mod tests {
         );
         let e = call(&mut s, "assembly.tree", json!({"part": "bolt"})).unwrap_err();
         assert_eq!(e.code, Code::WrongPartKind);
+        // Paged: one level, then the subassembly by its path.
+        let t = call(
+            &mut s,
+            "assembly.tree",
+            json!({"part": "frame", "depth": 1}),
+        )
+        .unwrap();
+        let p1 = &t["instances"][0];
+        assert_eq!((&p1["more"], p1.get("instances")), (&json!(true), None));
+        let t = call(
+            &mut s,
+            "assembly.tree",
+            json!({"part": "frame", "path": "p1"}),
+        )
+        .unwrap();
+        assert_eq!((&t["path"], &t["of"]), (&json!("p1"), &json!("pair")));
+        let right = &t["instances"][1];
+        assert_eq!(right["path"], "p1/right");
+        assert_eq!(
+            right["pose"]["origin_m"],
+            json!([0.060000000000000005, 0, 0])
+        );
+        for bad in ["z", "p1/left", "nope"] {
+            let e = call(
+                &mut s,
+                "assembly.tree",
+                json!({"part": "frame", "path": bad}),
+            );
+            assert_eq!(e.unwrap_err().code, Code::NotFound, "{bad}");
+        }
     }
 
     #[test]
