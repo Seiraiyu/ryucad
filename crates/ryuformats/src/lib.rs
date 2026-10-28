@@ -10,6 +10,7 @@
 //! formats are written, never read (STEP is how B-rep comes in).
 
 pub mod scene;
+pub mod stl;
 pub mod text;
 
 pub use scene::{Child, Placed, Product, Scene, Solid, Unit};
