@@ -30,6 +30,8 @@ windows-sys = { version = "0.61", features = ["Win32_System_StationsAndDesktops"
 
 [dev-dependencies]
 divan = "0.1"
+# The generated projects of `ryucad::bench`, for the window at scale.
+ryucad = { path = "../ryucad", features = ["bench"] }
 egui_kittest = { version = "0.37", features = ["eframe", "snapshot", "wgpu"] }
 tempfile = "3"
 

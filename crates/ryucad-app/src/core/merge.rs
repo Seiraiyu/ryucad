@@ -222,6 +222,7 @@ mod tests {
             revision: "r1".into(),
             features: Vec::new(),
             solids: Vec::new(),
+            by_id: Default::default(),
             error: None,
             assembly: false,
             occurrences: Vec::new(),
