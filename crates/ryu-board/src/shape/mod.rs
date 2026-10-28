@@ -4,9 +4,11 @@
 
 mod build;
 mod ellipse;
+mod stroke;
 mod symbols;
 
 pub use build::{circle, polygon, rect};
+pub use stroke::{arc_outline, line_outline, path_outline};
 pub use symbols::symbol_shape;
 
 use crate::geom::{Edge, Nm, Pen, Place, Rect, Region, Stroke};
