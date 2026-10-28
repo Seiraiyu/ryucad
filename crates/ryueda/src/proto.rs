@@ -60,6 +60,47 @@ pub enum Request {
     /// Every library with its revision, what it holds and its faults.
     #[serde(rename = "lib.list")]
     LibList {},
+    /// A symbol called `name`, its ID from the name unless given, with
+    /// `units` (1 by default) and a batch of ops applied.
+    #[serde(rename = "symbol.create")]
+    SymbolCreate {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        units: Option<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ops: Vec<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A batch of `add`, `remove`, `set` and `move` ops on a symbol's
+    /// pins and graphics, and its name and unit count.
+    #[serde(rename = "symbol.edit")]
+    SymbolEdit {
+        symbol: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        units: Option<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ops: Vec<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "symbol.show")]
+    SymbolShow { symbol: String },
+    #[serde(rename = "symbol.list")]
+    SymbolList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library: Option<String>,
+    },
+    #[serde(rename = "symbol.delete")]
+    SymbolDelete {
+        symbol: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     #[serde(rename = "activity.log")]
     ActivityLog {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,7 +173,12 @@ impl Request {
     pub fn mutates(&self) -> bool {
         matches!(
             self,
-            Request::LibAdd { .. } | Request::Undo { .. } | Request::Redo { .. }
+            Request::LibAdd { .. }
+                | Request::SymbolCreate { .. }
+                | Request::SymbolEdit { .. }
+                | Request::SymbolDelete { .. }
+                | Request::Undo { .. }
+                | Request::Redo { .. }
         )
     }
 }
