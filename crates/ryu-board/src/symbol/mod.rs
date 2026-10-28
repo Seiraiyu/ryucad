@@ -1,8 +1,10 @@
 //! What a pad, or a line's pen, is drawn with.
 //!
 //! Standard symbols carry their parameters in nanometres and millidegrees.
-//! [`StandardSymbol::parse`] reads ODB++'s names.
+//! [`StandardSymbol::parse`] reads ODB++'s names; [`pad`] maps ryueda's
+//! footprint pads onto the same vocabulary.
 
+pub mod pad;
 mod parse;
 
 use crate::geom::{Mdeg, Nm};
