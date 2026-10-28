@@ -125,6 +125,27 @@ const KEYS: &[Key] = &[
         about: "whether sketches are drawn",
     },
     Key {
+        name: "display.nav_cube",
+        scope: Scope::User,
+        rule: Rule::Bool,
+        default: || json!(true),
+        about: "whether the navigation cube is drawn in the viewport's corner",
+    },
+    Key {
+        name: "display.triad",
+        scope: Scope::User,
+        rule: Rule::Bool,
+        default: || json!(true),
+        about: "whether the axis triad is drawn in the viewport's corner",
+    },
+    Key {
+        name: "display.origin",
+        scope: Scope::User,
+        rule: Rule::Bool,
+        default: || json!(false),
+        about: "whether the shown model's origin axes and planes are drawn",
+    },
+    Key {
         name: "display.mesh_cache_mib",
         scope: Scope::User,
         rule: Rule::Int(16, 65536),

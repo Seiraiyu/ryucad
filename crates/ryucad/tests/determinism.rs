@@ -285,6 +285,101 @@ fn render_section(golden: &mut Golden) {
     }
 }
 
+/// The showcase from the cube's edges and corners, dimetric and
+/// trimetric, a named view with the origin drawn, and cameras normal to
+/// a tilted face and to a cone's axis.
+fn views_section(golden: &mut Golden) {
+    let mut s = golden.section("views");
+    let (dir, mut session) = showcase();
+    let call = |session: &mut ryucad::session::Session,
+                live: &mut ryucad::live::Live,
+                m: &str,
+                p: serde_json::Value| {
+        ryucad::server::handle_live(
+            session,
+            Some(live),
+            None,
+            ryucad::proto::Request::from_rpc(m, Some(p)).unwrap(),
+        )
+        .unwrap()
+    };
+    let mut live = ryucad::live::Live::new();
+    // The cylinder's flat ends lean with its axis; the cone is revolved.
+    let faces = |session: &mut ryucad::session::Session, live: &mut ryucad::live::Live, f: &str| {
+        let v = call(
+            session,
+            live,
+            "inspect",
+            serde_json::json!({"part": "show", "feature": f}),
+        );
+        v["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| {
+                (
+                    x["surface"]["type"].as_str().unwrap().to_owned(),
+                    format!("show/{f}/{}", x["name"].as_str().unwrap()),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let end = faces(&mut session, &mut live, "cylinder")
+        .into_iter()
+        .find(|(t, _)| t == "plane")
+        .unwrap()
+        .1;
+    let side = faces(&mut session, &mut live, "cone")
+        .into_iter()
+        .find(|(t, _)| t == "cone")
+        .unwrap()
+        .1;
+    for face in [end, side] {
+        let c = call(
+            &mut session,
+            &mut live,
+            "camera.set",
+            serde_json::json!({"normal_to": face}),
+        );
+        for k in ["eye", "target", "up"] {
+            for x in c["camera"][k].as_array().unwrap() {
+                s.f64(x.as_f64().unwrap());
+            }
+        }
+    }
+    call(
+        &mut session,
+        &mut live,
+        "view.save",
+        serde_json::json!({"part": "show", "view": "detail",
+                           "camera": {"eye": ["90 mm", "-60 mm", "70 mm"], "target": ["30 mm", "20 mm", "10 mm"],
+                                      "up": [0, 0, 1], "projection": {"orthographic": {"height": "110 mm"}}}}),
+    );
+    let renders = [
+        serde_json::json!({"view": "front_top_left"}),
+        serde_json::json!({"view": "back_bottom_right"}),
+        serde_json::json!({"view": "top_right"}),
+        serde_json::json!({"view": "dimetric"}),
+        serde_json::json!({"view": "trimetric"}),
+        serde_json::json!({"view": "detail", "origin": true}),
+    ];
+    for mut params in renders {
+        params["width"] = serde_json::json!(320);
+        params["height"] = serde_json::json!(240);
+        let req = ryucad::proto::Request::from_rpc("render", Some(params)).unwrap();
+        let a =
+            ryucad::server::handle_safely(&mut Some(session), None, None, dir.path(), req).unwrap();
+        session = ryucad::session::Session::open(dir.path()).unwrap();
+        let png = a.binary.unwrap();
+        let mut r = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .unwrap();
+        let mut buf = vec![0; r.output_buffer_size().unwrap()];
+        let info = r.next_frame(&mut buf).unwrap();
+        s.str(&format!("{:x}", md(&buf[..info.buffer_size()])));
+    }
+}
+
 /// The showcase committed, then its box widened and its sphere removed:
 /// renders compared with the commit, of the commit framed with the
 /// working files, and of the working files framed with the commit.
@@ -2031,5 +2126,6 @@ fn determinism() {
     measure_section(&mut golden);
     imports_section(&mut golden);
     exports_section(&mut golden);
+    views_section(&mut golden);
     golden.finish();
 }
