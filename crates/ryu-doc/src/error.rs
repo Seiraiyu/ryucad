@@ -382,6 +382,14 @@ pub enum Code {
     /// Import: a KiCad file in a format newer than KiCad 9's, read as far
     /// as ryueda knows it (a warning).
     ImportVersionNewer,
+    /// An export to a mesh format of a body with faces ryukei can't mesh
+    /// to the export's chord and angle. The faces, by reference, and
+    /// ryukei's fault for each are in the details.
+    ExportMeshFaults,
+    /// An export to a mesh format of a body whose mesh would pass
+    /// ryukei's triangle budget at the export's chord and angle. The
+    /// body and the estimate are in the details.
+    ExportTooLarge,
 }
 
 impl Code {
@@ -489,6 +497,8 @@ mod tests {
         assert_eq!(Code::PinConflict.exit_code(), 1);
         assert_eq!(Code::LibraryNested.exit_code(), 1);
         assert_eq!(Code::PinWithoutPad.exit_code(), 1);
+        assert_eq!(json!(Code::ExportMeshFaults), json!("export_mesh_faults"));
+        assert_eq!(json!(Code::ExportTooLarge), json!("export_too_large"));
     }
 
     #[test]
@@ -498,6 +508,8 @@ mod tests {
         assert_eq!(Code::ExportUnrepresentable.exit_code(), 1);
         assert_eq!(Code::MeasureFailed.exit_code(), 1);
         assert_eq!(Code::ViewNotFound.exit_code(), 1);
+        assert_eq!(Code::ExportMeshFaults.exit_code(), 1);
+        assert_eq!(Code::ExportTooLarge.exit_code(), 1);
         assert_eq!(Code::Conflict.exit_code(), 1);
         assert_eq!(Code::Usage.exit_code(), 2);
         assert_eq!(Code::ProjectNotFound.exit_code(), 3);
