@@ -27,6 +27,7 @@
 //! version, and changes to these functions are called out in the release
 //! notes.
 
+pub mod bom;
 pub mod check;
 pub mod config;
 pub mod content;
