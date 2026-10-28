@@ -97,7 +97,9 @@ fn released_by(repo: &crate::git::Repo, participant: &str) -> ReleasedBy {
 }
 
 /// Why `part` can't be released as it is: every load, rebuild and
-/// property fault, a missing number and missing required properties.
+/// property fault, a missing number and missing required properties, and
+/// for an assembly what it places that isn't released and item numbers
+/// missing or shared.
 fn readiness(session: &mut Session, part: &Id, config: &Config) -> Result<Vec<Value>> {
     let mut problems = Vec::new();
     let p = session.project().part(part)?.clone();
@@ -150,6 +152,13 @@ fn readiness(session: &mut Session, part: &Id, config: &Config) -> Result<Vec<Va
     {
         problems.extend(unreleased(session, &p, &[])?.into_iter().map(|e| json!(e)));
     }
+    // Its item numbers, which the release pins: complete and unique.
+    problems.extend(
+        ryupdm::items::faults(part, &p)
+            .into_iter()
+            .filter(|e| e.code != Code::BomItemUnused)
+            .map(|e| json!(e)),
+    );
     Ok(problems)
 }
 
