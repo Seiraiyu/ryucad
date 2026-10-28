@@ -1304,6 +1304,41 @@ fn pdm_section(golden: &mut Golden) {
     }
 }
 
+/// BOMs of seeded projects of parts and assemblies (indented and flat, as
+/// JSON and CSV) and where-used of each part: the same bytes everywhere,
+/// since the service compares what any platform wrote.
+fn boms_section(golden: &mut Golden) {
+    use ryucad::doc::assembly::Rev;
+    use ryucad::doc::project::Project;
+    use ryupdm::bom;
+    use ryupdm::structure::{Cache, Reader};
+    let mut s = golden.section("boms");
+    let text = |v: &serde_json::Value| ryucad::doc::canonical::to_string(v);
+    let mut g = Lcg::new(0x626f_6d30);
+    for _ in 0..64 {
+        let bytes: Vec<u8> = (0..64).map(|_| g.next_u64() as u8).collect();
+        let st = ryucad_doc::doc::fixtures::structure(&bytes);
+        let project = Project::load_from(std::path::Path::new(""), &st.files).unwrap();
+        let config = ryupdm::config::Config::read(&st.files).unwrap();
+        let mut cache = Cache::new();
+        let mut r = Reader::new(&st.files, &project, None, None, &mut cache);
+        let states = std::collections::BTreeMap::new();
+        for part in project.parts.keys() {
+            let row = bom::tree(&mut r, part, &Rev::Working, None).unwrap();
+            let rows = bom::flat(&row);
+            s.str(&text(&bom::row_json(&row, &states)));
+            s.str(&bom::csv_tree(&row, &config));
+            s.str(&bom::csv_flat(&rows, &config));
+            let q = ryupdm::where_used::Query {
+                part: part.clone(),
+                rev: None,
+                direct: false,
+            };
+            s.str(&text(&ryupdm::where_used::where_used(&mut r, &q, &config)));
+        }
+    }
+}
+
 /// A project of parts and assemblies: a pair of bolts, placed twice in a
 /// frame, one turned, with a plate.
 fn assembled() -> (tempfile::TempDir, ryucad::session::Session) {
@@ -1847,6 +1882,7 @@ fn determinism() {
     diff_section(&mut golden);
     merge_section(&mut golden);
     pdm_section(&mut golden);
+    boms_section(&mut golden);
     assemblies_section(&mut golden);
     mates_section(&mut golden);
     interference_section(&mut golden);
