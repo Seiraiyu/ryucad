@@ -13,6 +13,7 @@ pub mod client;
 pub mod conn;
 pub mod coord;
 pub mod daemon;
+pub mod design;
 pub mod doc;
 pub mod edit;
 pub mod fault;
