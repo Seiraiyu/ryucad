@@ -28,7 +28,9 @@ fn not_found(session: &Session, part: &Id, view: &str) -> Error {
         .unwrap_or_default();
     Error::new(
         Code::ViewNotFound,
-        format!("{part} has no named view {view:?}; `ryucad view list {part}` lists them"),
+        format!(
+            "{view:?} is no standard view (front, back, left, right, top, bottom, an edge or corner of the cube such as front_top_right, iso, dimetric, trimetric) and {part} has no named view of that name; `ryucad view list {part}` lists them"
+        ),
     )
     .with("part", part)
     .with("view", view)
