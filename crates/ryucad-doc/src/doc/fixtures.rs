@@ -74,7 +74,8 @@ impl Structure {
 /// One to five parts (some counted in metres with an amount, some
 /// bought), then one to four assemblies, each placing two to five
 /// children by instances and instance patterns (copies of an instance,
-/// some skipped), from `bytes` (read as zeros past their end).
+/// some skipped) and numbering each part it places in the order it first
+/// places it, from `bytes` (read as zeros past their end).
 pub fn structure(bytes: &[u8]) -> Structure {
     use crate::doc::canonical;
     let mut at = 0;
@@ -150,9 +151,16 @@ pub fn structure(bytes: &[u8]) -> Structure {
                 children.push((of, (n - 1) as u64 - skip.len() as u64));
             }
         }
+        // Each part it places numbered in the order it first places it.
+        let mut items = serde_json::Map::new();
+        for (c, _) in &children {
+            if !items.contains_key(c) {
+                items.insert(c.clone(), json!(items.len() + 1));
+            }
+        }
         put(
             format!("parts/{a}/part.json"),
-            json!({"features": list, "format": 2, "kind": "ryucad.part",
+            json!({"features": list, "format": 3, "items": items, "kind": "ryucad.part",
                    "part_kind": "assembly"}),
         );
         if next(4) == 0 {

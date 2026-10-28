@@ -3269,8 +3269,8 @@ fn boms_from_the_cli() {
     assert_eq!(
         csv,
         "level,item,number,name,part,revision,quantity,uom,make_buy,material,description\n\
-         1,,100,\"Bolt, M4\",bolt,working,2,each,make,,\n\
-         2,,300,,tube,working,0.6,m,make,,\n"
+         1,1,100,\"Bolt, M4\",bolt,working,2,each,make,,\n\
+         2,2,300,,tube,working,0.6,m,make,,\n"
     );
     let v = p.ok(&["where-used", "bolt", "--direct"]);
     assert_eq!(v["working"][0]["count"], 2);
