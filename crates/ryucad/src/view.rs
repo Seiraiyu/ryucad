@@ -475,6 +475,39 @@ pub fn frame_points(
     frame_along(points, back, up, projection, aspect)
 }
 
+/// A camera looking along `-back` with `up` at `points` (not empty), for
+/// a view of `aspect`: a direction no standard view names, such as one
+/// normal to a face ([`normal_to`]).
+pub fn frame_points_along(
+    points: &[[f64; 3]],
+    back: [f64; 3],
+    up: [f64; 3],
+    projection: Projection,
+    aspect: f64,
+) -> Camera {
+    frame_along(points, back, up, projection, aspect)
+}
+
+/// The direction (from the target towards the eye) and up of a view
+/// normal to a face: `back` is the face's outward normal, or its
+/// surface's axis; `edge`, the direction of the face's longest straight
+/// edge if it has one, lies across the view, horizontal. Up leans up the
+/// model's z where it can (along y where it is level), and with no edge
+/// across the view is z itself, or y when looking along z.
+pub fn normal_to(back: [f64; 3], edge: Option<[f64; 3]>) -> ([f64; 3], [f64; 3]) {
+    let b = unit(back);
+    let across = edge
+        .map(|e| sub(e, scale(b, dot(b, e))))
+        .filter(|e| norm(*e) > 1e-9);
+    let up = match across {
+        Some(e) => cross(b, unit(e)),
+        None if b[2].abs() < 1.0 - 1e-9 => [0.0, 0.0, 1.0],
+        None => [0.0, 1.0, 0.0],
+    };
+    let down = up[2] < -1e-12 || (up[2].abs() <= 1e-12 && up[1] < 0.0);
+    (b, if down { scale(up, -1.0) } else { up })
+}
+
 /// `camera` moved to frame the box, keeping its direction, up and kind of
 /// projection.
 pub fn refit(camera: &Camera, lo: [f64; 3], hi: [f64; 3]) -> Camera {
@@ -754,6 +787,44 @@ mod tests {
         );
         let i = looks(StandardView::Iso);
         assert!((i[0] - i[1]).abs() < 1e-15 && (i[1] - i[2]).abs() < 1e-15);
+    }
+
+    #[test]
+    fn normal_to_a_face_lays_its_edge_level() {
+        // A face tilted about x, its long edge along x: the edge lies across
+        // the view and up leans up z.
+        let n = unit([0.0, -1.0, 1.0]);
+        let (back, up) = normal_to(n, Some([2.0, 0.0, 0.0]));
+        assert!(close(back, n));
+        assert!(close(up, unit([0.0, 1.0, 1.0])), "{up:?}");
+        let c = Camera {
+            eye: back,
+            target: [0.0; 3],
+            up,
+            projection: DEFAULT_PROJECTION,
+        };
+        let (right, ..) = c.basis();
+        assert!(close(right, [1.0, 0.0, 0.0]), "{right:?}");
+        // An edge the other way round gives the same view.
+        assert_eq!(normal_to(n, Some([-1.0, 0.0, 0.0])), (back, up));
+        // A level face's edge along y: up is +y, never -y.
+        let (_, up) = normal_to([0.0, 0.0, 1.0], Some([0.0, 3.0, 0.0]));
+        assert!(
+            close(up, [-1.0, 0.0, 0.0]) || close(up, [1.0, 0.0, 0.0]),
+            "{up:?}"
+        );
+        let (_, up) = normal_to([0.0, 0.0, -1.0], Some([1.0, 0.0, 0.0]));
+        assert!(close(up, [0.0, 1.0, 0.0]), "{up:?}");
+        // No edge: up is z, or y looking along z; an edge along the
+        // normal is no edge.
+        assert_eq!(normal_to([1.0, 0.0, 0.0], None).1, [0.0, 0.0, 1.0]);
+        assert_eq!(normal_to([0.0, 0.0, 5.0], None).1, [0.0, 1.0, 0.0]);
+        assert_eq!(
+            normal_to([1.0, 0.0, 0.0], Some([3.0, 0.0, 0.0])).1,
+            [0.0, 0.0, 1.0]
+        );
+        let c = frame_points_along(&corners([0.0; 3], [1.0; 3]), n, up, DEFAULT_PROJECTION, 1.0);
+        assert!(c.check().is_ok());
     }
 
     #[test]
