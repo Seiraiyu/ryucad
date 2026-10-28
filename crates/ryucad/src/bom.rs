@@ -489,4 +489,47 @@ mod tests {
             [("bom_amount_missing".to_owned(), "tube".to_owned())]
         );
     }
+
+    #[test]
+    fn a_part_with_no_features_is_placed_counted_and_draws_nothing() {
+        let (_dir, mut s) = assembly();
+        let before = call(&mut s, "mesh.get", json!({"part": "asm"})).unwrap();
+        // One box body, placed twice; the kit's tubes have no features.
+        assert_eq!(before["bodies"].as_array().unwrap().len(), 1);
+        call(&mut s, "part.create", json!({"part": "glue"})).unwrap();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "glue", "properties":
+                   {"make_buy": "buy", "uom": "l", "amount": "5 ml"}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "asm", "type": "instance", "id": "g", "of": "glue"}),
+        )
+        .unwrap();
+        let r = call(&mut s, "rebuild", json!({"part": "asm"})).unwrap();
+        let features = r["parts"][0]["features"].as_array().unwrap();
+        assert!(features.iter().all(|f| f["ok"] == true), "{r}");
+        let after = call(&mut s, "mesh.get", json!({"part": "asm"})).unwrap();
+        assert_eq!(after["bodies"], before["bodies"]);
+        let glue = &after["occurrences"][4];
+        assert_eq!(
+            (&glue["part"], &glue["solids"]),
+            (&json!("glue"), &json!([]))
+        );
+        let v = call(&mut s, "bom.get", json!({"flat": true})).unwrap();
+        let glue = v["flat"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["part"] == "glue")
+            .unwrap();
+        assert_eq!(
+            glue["quantity"],
+            json!({"count": 1, "uom": "l", "value": 0.005, "text": "0.005 l"})
+        );
+    }
 }
