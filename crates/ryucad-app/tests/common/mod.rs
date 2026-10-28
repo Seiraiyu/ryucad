@@ -66,9 +66,11 @@ pub fn ryucad() -> &'static Daemon {
                 cmd.args(["--profile", other]);
             }
         }
-        // A target folder is tagged; a target triple's folder inside it isn't.
+        // A target folder is tagged, or at least holds Cargo's rustc
+        // cache (a build of only the ci profile may leave no tag); a target
+        // triple's folder inside it has neither.
         let above = bin.parent().unwrap();
-        if !above.join("CACHEDIR.TAG").exists() {
+        if !above.join("CACHEDIR.TAG").exists() && !above.join(".rustc_info.json").exists() {
             cmd.arg("--target").arg(above.file_name().unwrap());
         }
         assert!(cmd.status().unwrap().success(), "building ryucad");
