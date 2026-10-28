@@ -3,6 +3,7 @@
 //! negatives and merging copper are stage 1's booleans.
 
 mod build;
+mod ellipse;
 mod symbols;
 
 pub use build::{circle, polygon, rect};
