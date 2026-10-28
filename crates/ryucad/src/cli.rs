@@ -117,15 +117,30 @@ enum Command {
         /// The file to write; its name goes in a STEP file's header.
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
-        /// step; by default the one --out's extension names (.step, .stp).
+        /// step or stl; by default the one --out's extension names (.step, .stp,
+        /// .stl).
         #[arg(long)]
         format: Option<String>,
-        /// ap242 (the default) or ap214.
+        /// STEP's schema: ap242 (the default) or ap214.
         #[arg(long)]
         schema: Option<String>,
-        /// The length unit: mm (the default) or m.
+        /// The length unit: mm (the default), or m; a mesh format also cm.
         #[arg(long)]
         unit: Option<String>,
+        /// A mesh format's chord, the most a triangle may stray from the faces: a
+        /// literal length (default 0.01 mm).
+        #[arg(long, value_name = "LENGTH")]
+        chord: Option<String>,
+        /// A mesh format's angle, the most a face's normal may turn across a
+        /// triangle: a literal angle in (0, 90 deg] (default 15 deg).
+        #[arg(long, value_name = "ANGLE")]
+        angle: Option<String>,
+        /// A mesh format's longest triangle edge: a literal length.
+        #[arg(long, value_name = "LENGTH")]
+        max_edge: Option<String>,
+        /// STL as text, a solid block per placed solid, rather than binary.
+        #[arg(long)]
+        ascii: bool,
         /// The header's time stamp; by default the commit's time when exporting a
         /// commit, else now.
         #[arg(long, value_name = "T")]
@@ -1930,6 +1945,10 @@ fn request(cmd: &Command) -> Option<Request> {
             format,
             schema,
             unit,
+            chord,
+            angle,
+            max_edge,
+            ascii,
             time_stamp,
             rev,
         } => Request::Export {
@@ -1947,10 +1966,10 @@ fn request(cmd: &Command) -> Option<Request> {
             unit: unit.clone(),
             time_stamp: time_stamp.clone(),
             file_name: out.file_name().map(|n| n.to_string_lossy().into_owned()),
-            chord: None,
-            angle: None,
-            max_edge: None,
-            ascii: false,
+            chord: chord.clone(),
+            angle: angle.clone(),
+            max_edge: max_edge.clone(),
+            ascii: *ascii,
         },
         Command::Rebuild { part, rev } => Request::Rebuild {
             part: part.clone(),
