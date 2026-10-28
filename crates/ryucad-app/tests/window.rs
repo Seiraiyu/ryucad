@@ -1758,6 +1758,118 @@ fn an_assembly_lists_its_instances_and_offers_what_to_show() {
 }
 
 #[test]
+fn the_measure_tool_measures_two_faces_and_esc_leaves_it() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    // The base's top at 5 mm, the boss's top 8 mm above it.
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    if let ryucad_app::ui::app::Screen::Opened(o) = &mut h.state_mut().screen {
+        o.view.nav.camera = ryucad::view::frame(
+            [-0.004, -0.004, 0.0],
+            [0.021, 0.011, 0.013],
+            ryucad::view::StandardView::Top,
+            ryucad::view::DEFAULT_PROJECTION,
+        );
+    }
+    h.run_steps(2);
+    menu(&mut h, "Tools", "Measure");
+    frames(&mut h, |a| a.opened().ws.measure.on);
+    let pick = |h: &mut Harness<'static, App>, p: [f64; 3]| {
+        let at = on_screen(h, p);
+        h.event(egui::Event::PointerMoved(at));
+        h.step();
+        click(h, at);
+        h.step();
+    };
+    pick(&mut h, [0.015, 0.005, 0.005]);
+    pick(&mut h, [0.0, 0.0, 0.013]);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .measure
+            .reading
+            .as_ref()
+            .is_some_and(|r| r.line.is_some())
+    });
+    // Picks measure; they don't select.
+    assert!(
+        h.state()
+            .opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection.is_empty())
+    );
+    let r = h.state().opened().ws.measure.reading.clone().unwrap();
+    assert_eq!(r.label.as_deref(), Some("8 mm"), "{r:?}");
+    shown(&mut h, "8 mm (exact)");
+    h.get_by_label("Copy");
+    // Esc leaves the tool, and its panel goes.
+    h.key_press(egui::Key::Escape);
+    frames(&mut h, |a| !a.opened().ws.measure.on);
+    h.run_steps(2);
+    assert!(h.query_by_label("8 mm (exact)").is_none());
+}
+
+#[test]
+fn tools_mass_properties_and_clearance_list_their_values() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = two_bolts();
+    // A third bolt 0.2 mm clear of the first.
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b3", "--of", "bolt", "--origin", "6.2,0,0",
+    ]);
+    p.ok(&[
+        "materials",
+        "set",
+        "steel",
+        "--density",
+        "7850 kg/m^3",
+        "--default",
+    ]);
+    let mut h = window(&p);
+    both_bolts(&mut h);
+    menu(&mut h, "Tools", "Mass properties");
+    frames(&mut h, |a| {
+        a.opened().ws.mass.as_ref().is_some_and(|m| m.loaded)
+    });
+    let m = h.state().opened().ws.mass.clone().unwrap();
+    assert!(m.error.is_none() && m.centre.is_some(), "{m:?}");
+    assert_eq!(m.lines[0].0, "Mass", "{m:?}");
+    shown(&mut h, "Centre of mass");
+    menu(&mut h, "Tools", "Clearance");
+    frames(&mut h, |a| {
+        a.opened().ws.clearance.as_ref().is_some_and(|c| c.loaded)
+    });
+    let c = h.state().opened().ws.clearance.clone().unwrap();
+    assert!(c.error.is_none(), "{c:?}");
+    assert_eq!(c.gaps.len(), 1, "{c:?}");
+    assert_eq!(
+        (c.gaps[0].a.as_str(), c.gaps[0].b.as_str()),
+        ("frame/b1/shank", "frame/b3/shank")
+    );
+    shown(&mut h, "Show");
+    let before = h.state().opened().view.nav.camera.clone();
+    h.get_by_label("Show").click();
+    h.run_steps(4);
+    assert_ne!(h.state().opened().view.nav.camera, before);
+    assert_eq!(
+        h.state().opened().ws.clearance.as_ref().unwrap().shown,
+        Some(0)
+    );
+    h.state_mut().opened_mut().dialogs.clearance = false;
+    h.state_mut().opened_mut().dialogs.mass = false;
+    h.step();
+    assert!(h.state().opened().ws.clearance.is_none() && h.state().opened().ws.mass.is_none());
+}
+
+#[test]
 fn tools_check_interference_lists_and_paints_the_pairs() {
     let _one = one_at_a_time();
     if !gpu() {
