@@ -5,7 +5,8 @@
 //! as an agent or the app would ask: a cold rebuild of the root over an
 //! empty disk cache, a daemon over the warm cache, a request that builds
 //! nothing, one feature edited until `model.changed` reaches a
-//! subscriber, what the window's open asks for, interference from
+//! subscriber, the window's open (the root's report and every body's
+//! display mesh), interference from
 //! nothing and after one move, and the daemon's peak memory. Each prints
 //! its number and the machine. Plan 7.D records the bars; until then
 //! nothing here is asserted but that the answers are right.
@@ -97,38 +98,46 @@ impl Run {
     }
 }
 
-/// What the window's open costs as it asks today: `part.list`, then a
-/// `rebuild` of every part, one request after another on one connection.
-/// Only the first [`OPEN_SAMPLE`] parts are asked for (every one takes
-/// hours at 10,000); returns the seconds per request and how many the
-/// open would send.
-fn window_open(root: &Path) -> (f64, usize) {
-    use ryucad::proto::Request;
+/// What the window's open costs as it asks since plan 7.A: `part.list`,
+/// the report of the root it shows (every occurrence), then one display
+/// mesh per body, one request after another on one connection. Returns
+/// the seconds until the report, until every mesh, and how many bodies.
+fn window_open(root: &Path) -> (f64, f64, usize) {
+    use ryucad::proto::{Request, Transfer};
     let mut conn = ryucad::client::Daemon::at(&ryucad_exe())
         .unwrap()
         .connect(root)
         .unwrap();
-    let list = conn.call(&Request::PartList {}).unwrap().unwrap();
-    let parts: Vec<String> = list["parts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|p| p["part"].as_str().unwrap().to_owned())
-        .collect();
     let t = Instant::now();
-    for p in parts.iter().take(OPEN_SAMPLE) {
-        let req = Request::Rebuild {
-            part: Some(p.clone()),
+    conn.call(&Request::PartList {}).unwrap().unwrap();
+    let req = Request::Rebuild {
+        part: Some("root".into()),
+        rev: None,
+    };
+    let report = conn.call(&req).unwrap().unwrap();
+    let shown = t.elapsed().as_secs_f64();
+    // One occurrence of each body, as the window asks.
+    let mut bodies = std::collections::BTreeMap::new();
+    for o in report["parts"][0]["occurrences"].as_array().unwrap() {
+        for s in o["solids"].as_array().unwrap() {
+            let path = o["path"].as_str().unwrap().to_owned();
+            bodies
+                .entry(s["hash"].as_str().unwrap().to_owned())
+                .or_insert(path);
+        }
+    }
+    for path in bodies.values() {
+        let req = Request::MeshGet {
+            part: "root".into(),
+            feature: Some(path.clone()),
+            quality: None,
+            transfer: Some(Transfer::Binary),
             rev: None,
         };
-        conn.call(&req).unwrap().unwrap();
+        conn.call_answer(&req).unwrap().unwrap();
     }
-    let each = t.elapsed().as_secs_f64() / OPEN_SAMPLE.min(parts.len()) as f64;
-    (each, parts.len() + 1)
+    (shown, t.elapsed().as_secs_f64(), bodies.len())
 }
-
-/// How many of the window's requests are timed.
-const OPEN_SAMPLE: usize = 200;
 
 fn ryucad_exe() -> PathBuf {
     assert_cmd::cargo::cargo_bin("ryucad")
@@ -238,11 +247,10 @@ fn the_benchmark_project_measured() {
         next * 1e3
     ));
     // What the window asks for when it opens.
-    let (each, requests) = window_open(&run.root);
+    let (shown, meshed, bodies) = window_open(&run.root);
     say(&format!(
-        "the window's open: {requests} requests at {:.0} ms each, so {:.0} s (peak {:.0} MiB)",
-        each * 1e3,
-        each * requests as f64,
+        "the window's open: the root's report in {shown:.1} s, every one of its {bodies} \
+         bodies meshed in {meshed:.1} s (peak {:.0} MiB)",
         run.peak_mib()
     ));
     // Interference, from nothing and after one move.
