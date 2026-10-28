@@ -591,8 +591,18 @@ pub enum Request {
     },
     /// An assembly's instances as a tree: each with its part, revision and
     /// how it resolved, its pose in the assembly, and a subassembly's own.
+    /// `path` (instance IDs, `/` between: `m3/s31`) starts the tree at
+    /// the subassembly it reaches; `depth` lists that many levels of
+    /// instances (all by default), a subassembly below them saying
+    /// `more`: a window pages a tree of 100,000 occurrences this way.
     #[serde(rename = "assembly.tree")]
-    AssemblyTree { part: String },
+    AssemblyTree {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        depth: Option<u32>,
+    },
     /// Which solids of an assembly's occurrences overlap: every pair whose
     /// boxes do, or those with a side under `instances` (instance paths
     /// under the assembly, as `s1/b2` or `holes:2/bolt`).

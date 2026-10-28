@@ -440,7 +440,9 @@ fn dispatch(
             },
             expected_revision.as_deref(),
         ),
-        Request::AssemblyTree { part } => crate::assembly::tree(session, &part),
+        Request::AssemblyTree { part, path, depth } => {
+            crate::assembly::tree(session, &part, path.as_deref(), depth)
+        }
         Request::Interference { part, instances } => {
             crate::interference::run(session, &part, &instances)
         }
@@ -1214,10 +1216,19 @@ fn part_list(session: &Session) -> Value {
             if let Err(e) = &p.file {
                 v["error"] = json!(e);
             }
+            // What its rebuild was, where this session built it at its
+            // revision: a window lists 10,000 parts without asking each.
+            if let Some((hash, failed)) = session.summary(&p.id) {
+                v["hash"] = json!(hash);
+                v["failed"] = json!(failed);
+            }
             v
         })
         .collect();
-    json!({ "parts": parts })
+    // What a window shows when it isn't told: the project's one root
+    // assembly, else every part that isn't an assembly.
+    let model = crate::assembly::shown_parts(session.project());
+    json!({ "parts": parts, "model": model })
 }
 
 pub(crate) fn feature_id(s: &str) -> Result<Id> {
@@ -5004,6 +5015,12 @@ pub(crate) mod tests {
             list["parts"],
             json!([{"part": "bracket", "kind": "part", "features": 0, "revision": rev}])
         );
+        assert_eq!(list["model"], json!(["bracket"]));
+        // Once built, a part's summary: its hash and failures.
+        let built = call(&mut s, "rebuild", json!({"part": "bracket"})).unwrap();
+        let list = call(&mut s, "part.list", json!({})).unwrap();
+        assert_eq!(list["parts"][0]["hash"], built["parts"][0]["hash"]);
+        assert_eq!(list["parts"][0]["failed"], 0);
         let info = call(&mut s, "project.info", json!({})).unwrap();
         assert_eq!(info["parts"], json!(["bracket"]));
         assert_eq!(info["default_unit"], "mm");
