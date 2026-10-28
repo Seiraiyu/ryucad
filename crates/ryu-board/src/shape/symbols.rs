@@ -1,7 +1,7 @@
 //! Shapes of the standard symbols, in their own coordinates.
 
 use super::build::{circle, polygon, rect};
-use super::{Shape, ShapeError, ellipse};
+use super::{Shape, ShapeError, ellipse, thermal};
 use crate::geom::{Contour, Mdeg, Nm, Place, Point, Region, div_round, half, span};
 use crate::model::Polarity;
 use crate::symbol::{Corners, StandardSymbol};
@@ -271,7 +271,7 @@ pub fn symbol_shape(s: &StandardSymbol) -> Result<Shape, ShapeError> {
         )?,
         S::Hole { d, .. } => positive(vec![Region::solid(circle(Point::ORIGIN, half(d))?)]),
         S::Null { .. } => Shape::default(),
-        S::Thermal(_) => return Err(bad("not drawn yet")),
+        S::Thermal(t) => thermal::thermal(&t)?,
         S::Trapezoid { w, h, dx, dy } => {
             if w <= 0 || h <= 0 || dx.abs() >= h || dy.abs() >= w {
                 return Err(bad("a trapezoid's delta larger than its size"));

@@ -4,10 +4,10 @@
 
 mod build;
 mod ellipse;
-#[allow(dead_code)] // Its first user is thermals, task 18.
 mod ring;
 mod stroke;
 mod symbols;
+mod thermal;
 
 pub use build::{circle, polygon, rect};
 pub use stroke::{arc_outline, line_outline, path_outline};
