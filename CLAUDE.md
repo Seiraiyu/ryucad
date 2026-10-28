@@ -64,6 +64,7 @@ sh scripts/fetch-corpus.sh                                    # the pinned STEP 
 cargo test -p ryukei-bench --features occt --release --test step -- --nocapture   # STEP head to head with OCCT, the pinned corpus, ryucad's exports and the large-assembly race; devcontainer only
 cargo test -p ryucad --release --test bar -- --nocapture    # a 1,000-hole pattern against ryukei's own boolean, one thread (ignored in debug builds)
 RYUCAD_BARS=1 cargo test -p ryucad --release --test assembly_bar -- --nocapture   # design 72's bars: 1,000 mates held and jostled, a cold daemon over a warm cache (without RYUCAD_BARS, ten times looser)
+RYUCAD_BARS=1 cargo test -p ryucad --release --test step_bar -- --nocapture   # design 120's bars: the race's 1,600 parts imported, rebuilt cold and warm, and exported (minutes; ten times looser without RYUCAD_BARS)
 RYUCAD_BARS=1 cargo test -p ryucad-app --release --test frames -- --ignored --nocapture   # 1,001 occurrences at 60 frames a second; hardware adapters only
 ryucad interference <asm> [--instance <path>]               # which instances of an assembly share a volume
 ryucad export <part> --out <file> [--rev <rev>|label:<L>] [--schema ap214] [--unit m]   # a part or assembly as STEP

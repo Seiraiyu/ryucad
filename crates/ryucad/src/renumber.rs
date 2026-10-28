@@ -61,8 +61,8 @@ fn json_of(files: &Files, path: &str) -> Option<Value> {
     serde_json::from_slice(files.get(path)?).ok()
 }
 
-fn bytes(v: &Value) -> Vec<u8> {
-    crate::doc::canonical::to_string(v).into_bytes()
+fn bytes(v: &Value) -> crate::activity::Bytes {
+    crate::doc::canonical::to_string(v).into_bytes().into()
 }
 
 /// The feature IDs a set of files has in `part`, as files or listed.
@@ -618,9 +618,9 @@ pub fn plan(
             files.insert(path.to_owned(), bytes(&v));
         }
     }
-    let change = |path: &String, content: Option<&Vec<u8>>| crate::doctor::Change {
+    let change = |path: &String, content: Option<&crate::activity::Bytes>| crate::doctor::Change {
         path: path.clone(),
-        content: content.cloned(),
+        content: content.map(|b| b.to_vec()),
     };
     let mut changes: Vec<crate::doctor::Change> = files
         .iter()

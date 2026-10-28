@@ -1424,7 +1424,7 @@ mod tests {
         let files = |pairs: &[(&str, &str)]| -> Files {
             pairs
                 .iter()
-                .map(|(p, b)| ((*p).to_owned(), b.as_bytes().to_vec()))
+                .map(|(p, b)| ((*p).to_owned(), b.as_bytes().into()))
                 .collect()
         };
         let base = [("ryucad.json", "{}")];
@@ -1848,7 +1848,7 @@ mod tests {
         list.iter()
             .map(|(p, v)| {
                 let text = crate::doc::canonical::to_string(v);
-                ((*p).to_owned(), text.into_bytes())
+                ((*p).to_owned(), text.into_bytes().into())
             })
             .collect()
     }
@@ -1977,7 +1977,10 @@ mod tests {
         );
         // A file that doesn't read is no feature to compare.
         let mut broken = to.clone();
-        broken.insert("parts/p/features/a.json".into(), b"{ nope".to_vec());
+        broken.insert(
+            "parts/p/features/a.json".into(),
+            b"{ nope".as_slice().into(),
+        );
         let v = structural(&from, &broken, &Options::default(), &Releases::default());
         assert_eq!(
             v["parts"]["p"]["features"]["a"],

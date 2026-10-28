@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// What an entry of a folder is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,6 +25,12 @@ pub trait Source {
     fn list(&self, dir: &str) -> Result<Vec<(String, Kind)>>;
     /// The bytes of the file at `path`, or `None` when there is none.
     fn read(&self, path: &str) -> Result<Option<Vec<u8>>>;
+    /// [`Source::read`], shared where the source holds them shared: an
+    /// imported file of a hundred megabytes isn't copied for each frozen
+    /// session or dry run.
+    fn read_shared(&self, path: &str) -> Result<Option<Arc<[u8]>>> {
+        Ok(self.read(path)?.map(Arc::from))
+    }
 }
 
 /// `dir/name`, or `name` at the root.
@@ -84,33 +91,54 @@ impl Source for Folder<'_> {
     }
 }
 
+/// The entries of folder `dir` among `files`' paths: a folder is every
+/// path below it.
+fn list_in<V>(files: &BTreeMap<String, V>, dir: &str) -> Vec<(String, Kind)> {
+    let prefix = if dir.is_empty() {
+        String::new()
+    } else {
+        format!("{dir}/")
+    };
+    let mut out: Vec<(String, Kind)> = Vec::new();
+    for path in files.range(prefix.clone()..).map(|(p, _)| p) {
+        let Some(rest) = path.strip_prefix(&prefix) else {
+            break;
+        };
+        let entry = match rest.split_once('/') {
+            Some((name, _)) => (name.to_owned(), Kind::Dir),
+            None => (rest.to_owned(), Kind::File),
+        };
+        if out.last() != Some(&entry) {
+            out.push(entry);
+        }
+    }
+    // `a.json` sorts before `a/` among paths, not among names.
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 /// Files in memory, by path: a folder is every path below it.
 impl Source for BTreeMap<String, Vec<u8>> {
     fn list(&self, dir: &str) -> Result<Vec<(String, Kind)>> {
-        let prefix = if dir.is_empty() {
-            String::new()
-        } else {
-            format!("{dir}/")
-        };
-        let mut out: Vec<(String, Kind)> = Vec::new();
-        for path in self.range(prefix.clone()..).map(|(p, _)| p) {
-            let Some(rest) = path.strip_prefix(&prefix) else {
-                break;
-            };
-            let entry = match rest.split_once('/') {
-                Some((name, _)) => (name.to_owned(), Kind::Dir),
-                None => (rest.to_owned(), Kind::File),
-            };
-            if out.last() != Some(&entry) {
-                out.push(entry);
-            }
-        }
-        // `a.json` sorts before `a/` among paths, not among names.
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(out)
+        Ok(list_in(self, dir))
     }
 
     fn read(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self.get(path).cloned())
+    }
+}
+
+/// Files in memory, shared: a session's snapshot, read without copying.
+impl Source for BTreeMap<String, Arc<[u8]>> {
+    fn list(&self, dir: &str) -> Result<Vec<(String, Kind)>> {
+        Ok(list_in(self, dir))
+    }
+
+    fn read(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self.get(path).map(|b| b.to_vec()))
+    }
+
+    fn read_shared(&self, path: &str) -> Result<Option<Arc<[u8]>>> {
         Ok(self.get(path).cloned())
     }
 }

@@ -17,8 +17,12 @@ use std::time::{Duration, SystemTime};
 /// another write in the same timestamp tick, so it isn't trusted.
 const RACY: Duration = Duration::from_secs(2);
 
+/// A file's content, shared: snapshots, dry runs and the activity log hold
+/// the very bytes the stamps do.
+pub type Bytes = Arc<[u8]>;
+
 /// A project's files and their contents, by relative path with `/`.
-pub type Files = BTreeMap<String, Vec<u8>>;
+pub type Files = BTreeMap<String, Bytes>;
 
 #[derive(Clone, Debug, PartialEq)]
 struct Stamp {
@@ -54,7 +58,7 @@ impl Stamps {
                 let stamp = Stamp {
                     modified: None,
                     len: bytes.len() as u64,
-                    bytes: bytes.into(),
+                    bytes,
                 };
                 (path, stamp)
             })
@@ -120,7 +124,7 @@ impl Stamps {
     pub fn snapshot(&self, root: &Path) -> Files {
         self.stamps
             .iter()
-            .map(|(p, s)| (relative(root, p), s.bytes.to_vec()))
+            .map(|(p, s)| (relative(root, p), Arc::clone(&s.bytes)))
             .collect()
     }
 
@@ -140,6 +144,11 @@ impl Stamps {
     /// The bytes of the file at `path`, as last read.
     pub fn bytes(&self, path: &Path) -> Option<&[u8]> {
         self.stamps.get(path).map(|s| &*s.bytes)
+    }
+
+    /// [`Stamps::bytes`], shared.
+    pub fn shared(&self, path: &Path) -> Option<Bytes> {
+        self.stamps.get(path).map(|s| Arc::clone(&s.bytes))
     }
 
     /// The paths of the files at or after `from`, in order: those under a
@@ -209,14 +218,20 @@ mod tests {
             s.scan(root, listed(root)).unwrap(),
             [("a".to_owned(), "modified"), ("b".to_owned(), "deleted")]
         );
-        assert_eq!(s.snapshot(root), Files::from([("a".into(), b"3".to_vec())]));
+        assert_eq!(
+            s.snapshot(root),
+            Files::from([("a".into(), b"3".as_slice().into())])
+        );
         assert_eq!(s.bytes(&root.join("a")), Some(&b"3"[..]));
         assert_eq!(s.paths_from(root).count(), 1);
     }
 
     #[test]
     fn frozen_stamps_hash_as_their_files() {
-        let files = Files::from([("x/y".into(), b"1".to_vec()), ("z".into(), Vec::new())]);
+        let files = Files::from([
+            ("x/y".into(), b"1".as_slice().into()),
+            ("z".into(), Bytes::from(Vec::new())),
+        ]);
         let root = Path::new("/r");
         let s = Stamps::frozen(root, files.clone());
         assert_eq!(s.snapshot(root), files);

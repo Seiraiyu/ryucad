@@ -459,7 +459,10 @@ mod tests {
         // Flags default to optional and revising.
         let d = Decl::from_json(&json!({"type": "text"}), "/p").unwrap();
         assert_eq!((d.required, d.revising), (false, true));
-        assert_eq!(Config::read(&BTreeMap::new()).unwrap(), Config::default());
+        assert_eq!(
+            Config::read(&BTreeMap::<String, Vec<u8>>::new()).unwrap(),
+            Config::default()
+        );
     }
 
     #[test]
