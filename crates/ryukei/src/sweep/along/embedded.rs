@@ -417,9 +417,9 @@ mod tests {
     use super::super::{AlongOptions, legs};
     use super::*;
     use crate::geom::{Circle, Curve, Frame, Line};
+    use crate::sweep::Path;
     use crate::sweep::path::{PathSegment, ValidPath};
     use crate::sweep::profile::tests::{profile, square};
-    use crate::sweep::Path;
     use core::f64::consts::FRAC_PI_2;
 
     /// Up `z` by 1, then a quarter turn of radius 1 towards `x`.

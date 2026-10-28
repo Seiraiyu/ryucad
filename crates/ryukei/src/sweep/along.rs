@@ -140,7 +140,6 @@ pub fn along(
     // An open sweep that folds back over itself is refused before it is
     // built; one certified one to one needs no self-intersection check.
     let embedded = !path.closed
-        && std::env::var_os("S133_OLD").is_none()
         && match embedded::judge(profile, &legs, o, opts.law, along.signum()) {
             embedded::Verdict::Embedded => true,
             embedded::Verdict::Folds(segment) => {
