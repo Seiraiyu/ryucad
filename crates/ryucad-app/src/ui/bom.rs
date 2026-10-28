@@ -109,24 +109,26 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             for line in t.shown() {
                 let level = level_at.map_or("", |i| line.cells[i].as_str());
                 let chosen = t.chosen.as_ref() == Some(&line.occurrences);
-                let colour = match &line.mark {
-                    Some(Mark::Added) => Some(style::color32(style::NEW)),
-                    Some(Mark::Removed) => Some(style::color32(style::REMOVED)),
-                    _ => None,
-                };
-                if let Some(colour) = colour {
+                // A removed line has no occurrences or number now: it is
+                // only read. An added one is a line like any other, in the
+                // new colour.
+                if line.mark == Some(Mark::Removed) {
+                    let colour = style::color32(style::REMOVED);
                     for text in &line.cells {
-                        let what = if line.mark == Some(Mark::Removed) {
-                            "removed"
-                        } else {
-                            "added"
-                        };
                         ui.label(RichText::new(text).color(colour))
-                            .on_hover_text(format!("{what} since the compared revision"));
+                            .on_hover_text("removed since the compared revision");
                     }
                     ui.end_row();
                     continue;
                 }
+                let added = line.mark == Some(Mark::Added);
+                let tint = |r: RichText| {
+                    if added {
+                        r.color(style::color32(style::NEW))
+                    } else {
+                        r
+                    }
+                };
                 for (i, (c, text)) in t.columns.iter().zip(&line.cells).enumerate() {
                     // A changed cell says what it was; an item number stays
                     // editable.
@@ -144,7 +146,7 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                     match c.as_str() {
                         "level" => {
                             let indent = "    ".repeat(line.depth.saturating_sub(1));
-                            ui.label(format!("{indent}{text}"));
+                            ui.label(tint(RichText::new(format!("{indent}{text}"))));
                         }
                         "item" if t.is_editing(line) => {
                             let name = format!(
@@ -190,7 +192,7 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                             let shown = match was {
                                 Some(w) => RichText::new(format!("{shown} (was {w})"))
                                     .color(style::color32(style::CHANGED)),
-                                None => RichText::new(shown),
+                                None => tint(RichText::new(shown)),
                             };
                             let r = ui
                                 .add(egui::Button::new(shown).frame(false))
@@ -203,7 +205,10 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                             }
                         }
                         "part" => {
-                            let r = ui.selectable_label(chosen, text.as_str());
+                            let mut r = ui.selectable_label(chosen, tint(RichText::new(text)));
+                            if added {
+                                r = r.on_hover_text("added since the compared revision");
+                            }
                             let name = line_name(line, level);
                             r.widget_info(|| {
                                 egui::WidgetInfo::selected(egui::Role::Button, true, chosen, &name)
@@ -213,11 +218,11 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                             }
                         }
                         _ if line.bought => {
-                            ui.label(RichText::new(text).weak())
+                            ui.label(tint(RichText::new(text).weak()))
                                 .on_hover_text("Inside an assembly bought whole");
                         }
                         _ => {
-                            ui.label(text);
+                            ui.label(tint(RichText::new(text)));
                         }
                     }
                 }

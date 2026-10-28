@@ -526,7 +526,15 @@ impl BomTab {
                     .or(c.get("items"))
                     .and_then(|x| x.get("from"))
                     .map(item_text),
-                other => c["properties"][other].get("from").map(text),
+                // Properties as written: one that wasn't was the default
+                // its cell shows.
+                other => c["properties"][other]
+                    .get("from")
+                    .map(|v| match (other, v) {
+                        ("uom", Value::Null) => "each".to_owned(),
+                        ("make_buy", Value::Null) => "make".to_owned(),
+                        _ => text(v),
+                    }),
             };
             if let Some(w) = was {
                 old.insert(i, w);
@@ -812,6 +820,23 @@ pub(crate) mod tests {
             ("washer", &"4".to_owned())
         );
         assert_eq!(last.mark, Some(Mark::Removed));
+    }
+
+    #[test]
+    fn a_property_written_for_the_first_time_was_its_default() {
+        let mut t = tab();
+        let mut d = diff();
+        d["tree"][0]["children"]["changed"][0]["properties"] = json!({
+            "make_buy": {"from": null, "to": "buy", "revising": true},
+            "uom": {"from": null, "to": "m", "revising": true},
+        });
+        t.take_diff(Some(&d));
+        let Some(Mark::Changed(old)) = &t.tree[0].mark else {
+            panic!("p is changed: {:?}", t.tree[0].mark);
+        };
+        let at = |c: &str| t.columns.iter().position(|x| x == c).unwrap();
+        assert_eq!(old.get(&at("make_buy")).map(String::as_str), Some("make"));
+        assert_eq!(old.get(&at("uom")).map(String::as_str), Some("each"));
     }
 
     #[test]

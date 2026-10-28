@@ -2457,4 +2457,34 @@ fn a_compare_marks_the_bom_tab() {
     });
     shown(&mut h, "Compared with HEAD: 0 added, 0 removed, 1 changed");
     shown(&mut h, "3 (was 2)");
+    // A part placed since is added, and a line like any other: chosen,
+    // it selects its occurrence, and its item number is set.
+    p.ok(&["part", "create", "washer"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "w1", "--of", "washer",
+    ]);
+    frames(&mut h, |a| {
+        let t = &a.opened().ws.bom;
+        a.opened().ws.idle() && t.summary().as_deref() == Some("1 added, 0 removed, 1 changed")
+    });
+    h.get_by_label("BOM line 3: washer").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection == ["frame/w1"])
+    });
+    h.get_by_label("Item of washer in frame").click();
+    shown(&mut h, "Set item");
+    h.get_by_label("Item of washer in frame")
+        .set_text_value_accesskit("9");
+    h.step();
+    h.get_by_label("Set item").click();
+    frames(&mut h, |a| {
+        let t = &a.opened().ws.bom;
+        a.opened().ws.idle() && t.editing.is_none() && t.tree.iter().any(|l| l.item == Some(9))
+    });
+    let bom = p.ok(&["bom", "frame"]);
+    assert_eq!(bom["tree"]["children"][2]["part"], "washer");
+    assert_eq!(bom["tree"]["children"][2]["item"], 9);
 }
