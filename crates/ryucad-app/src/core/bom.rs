@@ -52,6 +52,20 @@ pub struct ItemEdit {
     pub text: String,
 }
 
+/// Export CSV…, while open: the BOM as the tab shows it (indented or
+/// flat), written where `path` says from `bom.get`'s CSV, the same bytes
+/// `ryucad bom --out` writes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BomExport {
+    pub flat: bool,
+    /// Where to write it, as typed or picked.
+    pub path: String,
+    /// The file written and how many bytes, once it has been.
+    pub done: Option<(String, usize)>,
+    pub error: Option<Error>,
+    pub waiting: bool,
+}
+
 /// The largest item number (`files::MAX_ITEM`).
 pub const MAX_ITEM: u64 = 99_999;
 

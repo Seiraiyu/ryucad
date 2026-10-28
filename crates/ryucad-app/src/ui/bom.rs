@@ -34,6 +34,14 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
         };
         ui.checkbox(&mut flat, "Flat")
             .on_hover_text("Every part bought or made at the bottom, with its total");
+        let any = ws.bom.root.is_some();
+        if ui
+            .add_enabled(any, egui::Button::new("Export CSV…"))
+            .on_hover_text("Write this BOM as CSV, as `ryucad bom --out` does")
+            .clicked()
+        {
+            ws.open_bom_export();
+        }
     });
     if flat != ws.bom.flat {
         ws.set_bom_flat(flat);
@@ -186,6 +194,52 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     }
     if let Some(occurrences) = chose {
         choose(ws, view, occurrences);
+    }
+}
+
+/// Export CSV…, while `ws.bom_export` is open: where to write the BOM as
+/// the tab shows it, indented or flat.
+pub fn export(
+    ctx: &egui::Context,
+    ws: &mut Workspace,
+    browse: &mut Option<crate::ui::step::Browse>,
+    view: egui::Rect,
+) {
+    let root = ws.bom.root.clone().unwrap_or_default();
+    let Some(e) = &mut ws.bom_export else {
+        return;
+    };
+    let (mut open, mut go) = (true, false);
+    crate::ui::dialogs::window("Export BOM as CSV", view)
+        .open(&mut open)
+        .default_width(420.0)
+        .show(ctx, |ui| {
+            let shape = if e.flat { "flat" } else { "indented" };
+            ui.label(format!(
+                "The {shape} BOM of {root}, as the working files have it"
+            ));
+            let how = crate::ui::step::Browse::SaveCsv;
+            let entered = crate::ui::step::file_row(ui, "Save as", &mut e.path, browse, how);
+            let typed = !e.path.trim().is_empty();
+            go = ui
+                .add_enabled(typed && !e.waiting, egui::Button::new("Export"))
+                .clicked()
+                || (entered && typed && !e.waiting);
+            if e.waiting {
+                ui.spinner();
+            }
+            if let Some(err) = &e.error {
+                ui.colored_label(ui.visuals().error_fg_color, &err.message);
+            }
+            if let Some((path, n)) = &e.done {
+                ui.label(format!("Wrote {n} bytes to {path}"));
+            }
+        });
+    if go {
+        ws.run_bom_export();
+    }
+    if !open {
+        ws.bom_export = None;
     }
 }
 
