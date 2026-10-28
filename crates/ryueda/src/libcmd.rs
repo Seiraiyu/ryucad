@@ -327,3 +327,344 @@ mod tests {
         );
     }
 }
+
+fn footprint_json(lib: &Library, id: &Id) -> Result<Value> {
+    let at = ref_text(&lib.alias, ObjKind::Footprint, id);
+    let l = lib.footprints.get(id).ok_or_else(|| {
+        Error::new(Code::NotFound, format!("{at} isn't in the library")).with("reference", &at)
+    })?;
+    let f = l
+        .item
+        .as_ref()
+        .map_err(|e| e.clone().with("reference", &at))?;
+    Ok(json!({
+        "reference": at,
+        "path": lib.path(ObjKind::Footprint, id),
+        "footprint": f,
+        "faults": fault::list(&l.faults),
+        "revision": lib.revision,
+    }))
+}
+
+/// `footprint.show`: a footprint of any library, with its faults.
+pub fn footprint_show(p: &Project, target: &str) -> Result<Value> {
+    let (alias, id) = self::target(target, ObjKind::Footprint)?;
+    footprint_json(p.library(&alias)?, &id)
+}
+
+/// `footprint.list`: every footprint of a library (this project's by
+/// default).
+pub fn footprint_list(p: &Project, library: Option<&str>) -> Result<Value> {
+    let lib = p.library(library.unwrap_or(SELF))?;
+    let list: Vec<Value> = lib
+        .footprints
+        .iter()
+        .map(|(id, l)| {
+            let mut v = json!({
+                "id": id,
+                "reference": ref_text(&lib.alias, ObjKind::Footprint, id),
+                "faults": l.faults.len(),
+            });
+            match &l.item {
+                Ok(f) => {
+                    v["name"] = json!(f.name);
+                    v["pads"] = json!(f.pads.len());
+                    v["models"] = json!(f.models.len());
+                }
+                Err(e) => v["error"] = json!(e),
+            }
+            v
+        })
+        .collect();
+    Ok(json!({"library": lib.alias, "revision": lib.revision, "footprints": list}))
+}
+
+/// What a request gives of a library component: every field may be
+/// left out (an edit keeps what it doesn't give).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompFields {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub datasheet: Option<String>,
+    /// Merged into the parameters; `null` removes one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<serde_json::Map<String, Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manufacturer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mpn: Option<String>,
+    /// The whole list: `[{supplier, sku}]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offers: Option<Vec<crate::libcomp::Offer>>,
+    /// The whole list, the default first: `[{footprint, pins?}]`, each
+    /// footprint `<id>` or `lib/<alias>/footprint/<id>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footprints: Option<Vec<FootprintArg>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FootprintArg {
+    pub footprint: String,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pins: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+/// A request's object reference as a file's: no `library` for this
+/// project's own.
+fn lib_ref(text: &str, kind: ObjKind) -> Result<crate::libcomp::LibRef> {
+    let (alias, id) = target(text, kind)?;
+    let library = (alias != SELF)
+        .then(|| Id::parse(&alias, "library alias"))
+        .transpose()?;
+    Ok(crate::libcomp::LibRef { library, id })
+}
+
+/// `c` with `f`'s fields written over it.
+fn fill(c: &mut crate::libcomp::LibComp, f: &CompFields) -> Result<()> {
+    if let Some(s) = &f.symbol {
+        c.symbol = lib_ref(s, ObjKind::Symbol).map_err(|e| e.with("param", "symbol"))?;
+    }
+    for (field, into) in [
+        (&f.prefix, &mut c.prefix),
+        (&f.value, &mut c.value),
+        (&f.description, &mut c.description),
+        (&f.datasheet, &mut c.datasheet),
+        (&f.manufacturer, &mut c.manufacturer),
+        (&f.mpn, &mut c.mpn),
+    ] {
+        if let Some(v) = field {
+            *into = v.clone();
+        }
+    }
+    if let Some(params) = &f.parameters {
+        for (k, v) in params {
+            match v {
+                Value::Null => {
+                    c.parameters.remove(k);
+                }
+                Value::String(s) => {
+                    c.parameters.insert(k.clone(), s.clone());
+                }
+                v => {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        format!("parameter {k} is text (\"50 V\", \"X7R\"), not {v}"),
+                    )
+                    .with("param", format!("parameters/{k}")));
+                }
+            }
+        }
+    }
+    if let Some(o) = &f.offers {
+        c.offers = o.clone();
+    }
+    if let Some(list) = &f.footprints {
+        c.footprints = list
+            .iter()
+            .enumerate()
+            .map(|(i, u)| {
+                Ok(crate::libcomp::Use {
+                    footprint: lib_ref(&u.footprint, ObjKind::Footprint)
+                        .map_err(|e| e.with("param", format!("footprints/{i}/footprint")))?,
+                    pins: u.pins.clone(),
+                })
+            })
+            .collect::<Result<_>>()?;
+    }
+    if c.prefix.is_empty() || !c.prefix.chars().all(|ch| ch.is_ascii_alphabetic()) {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a prefix is the reference designator's letters: R, C, U, SW",
+        )
+        .with("param", "prefix"));
+    }
+    Ok(())
+}
+
+/// What `c`'s checks find, as this project's library would hold it.
+fn comp_faults(p: &Project, c: &crate::libcomp::LibComp) -> Vec<Fault> {
+    let footprints: Vec<Result<&crate::footprint::Footprint>> = c
+        .footprints
+        .iter()
+        .map(|u| p.footprint(SELF, &u.footprint))
+        .collect();
+    c.check(p.symbol(SELF, &c.symbol), &footprints)
+}
+
+fn comp_json(lib: &Library, id: &Id) -> Result<Value> {
+    let at = ref_text(&lib.alias, ObjKind::Libcomp, id);
+    let l = lib.components.get(id).ok_or_else(|| {
+        Error::new(Code::NotFound, format!("{at} isn't in the library")).with("reference", &at)
+    })?;
+    let c = l
+        .item
+        .as_ref()
+        .map_err(|e| e.clone().with("reference", &at))?;
+    Ok(json!({
+        "reference": at,
+        "path": lib.path(ObjKind::Libcomp, id),
+        "libcomp": c,
+        "faults": fault::list(&l.faults),
+        "revision": lib.revision,
+    }))
+}
+
+/// `libcomp.create`: a library component, its ID made from `name` unless
+/// given, tying a symbol to its footprints.
+pub fn libcomp_create(
+    session: &mut Session,
+    name: &str,
+    id: Option<&str>,
+    fields: &CompFields,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let p = session.project();
+    let lib = writable(p, SELF)?;
+    check_revision("library self", &lib.revision, expected)?;
+    let id = match id {
+        Some(t) => {
+            let id = Id::parse(t, "libcomp")?;
+            if lib.has(ObjKind::Libcomp, id.as_str()) {
+                return Err(Error::new(
+                    Code::DuplicateId,
+                    format!("the library already has libcomp {id}"),
+                )
+                .with("reference", ref_text(SELF, ObjKind::Libcomp, &id)));
+            }
+            id
+        }
+        None => name::free(name, |s| lib.has(ObjKind::Libcomp, s)),
+    };
+    let symbol = fields.symbol.as_deref().ok_or_else(|| {
+        Error::new(Code::InvalidParam, "a library component names its symbol")
+            .with("param", "symbol")
+    })?;
+    let mut c = crate::libcomp::LibComp {
+        symbol: lib_ref(symbol, ObjKind::Symbol)?,
+        prefix: String::new(),
+        value: String::new(),
+        description: String::new(),
+        datasheet: String::new(),
+        parameters: Default::default(),
+        manufacturer: String::new(),
+        mpn: String::new(),
+        offers: Vec::new(),
+        footprints: Vec::new(),
+    };
+    fill(&mut c, fields)?;
+    let errors = added_errors(&[], &comp_faults(p, &c));
+    if !errors.is_empty() {
+        return Err(refused(&format!("libcomp {id}"), &errors));
+    }
+    let path = lib.path(ObjKind::Libcomp, &id);
+    save(
+        session,
+        &path,
+        &c,
+        crate::libcomp::KIND,
+        crate::libcomp::FORMAT,
+    )?;
+    comp_json(session.project().library(SELF)?, &id)
+}
+
+/// `libcomp.edit`: the fields given replace the component's, its
+/// parameters merged.
+pub fn libcomp_edit(
+    session: &mut Session,
+    target: &str,
+    fields: &CompFields,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let p = session.project();
+    let (alias, id) = self::target(target, ObjKind::Libcomp)?;
+    let lib = writable(p, &alias)?;
+    check_revision("library self", &lib.revision, expected)?;
+    let at = ref_text(SELF, ObjKind::Libcomp, &id);
+    let loaded = lib.components.get(&id).ok_or_else(|| {
+        Error::new(Code::NotFound, format!("{at} isn't in the library")).with("reference", &at)
+    })?;
+    let mut c = loaded.item.clone().map_err(|e| e.with("reference", &at))?;
+    fill(&mut c, fields)?;
+    let errors = added_errors(&loaded.faults, &comp_faults(p, &c));
+    if !errors.is_empty() {
+        return Err(refused(&format!("libcomp {id}"), &errors));
+    }
+    let path = lib.path(ObjKind::Libcomp, &id);
+    save(
+        session,
+        &path,
+        &c,
+        crate::libcomp::KIND,
+        crate::libcomp::FORMAT,
+    )?;
+    comp_json(session.project().library(SELF)?, &id)
+}
+
+/// `libcomp.show`: a library component of any library, with its faults.
+pub fn libcomp_show(p: &Project, target: &str) -> Result<Value> {
+    let (alias, id) = self::target(target, ObjKind::Libcomp)?;
+    comp_json(p.library(&alias)?, &id)
+}
+
+/// `libcomp.list`: every library component of a library (this project's
+/// by default).
+pub fn libcomp_list(p: &Project, library: Option<&str>) -> Result<Value> {
+    let lib = p.library(library.unwrap_or(SELF))?;
+    let list: Vec<Value> = lib
+        .components
+        .iter()
+        .map(|(id, l)| {
+            let mut v = json!({
+                "id": id,
+                "reference": ref_text(&lib.alias, ObjKind::Libcomp, id),
+                "faults": l.faults.len(),
+            });
+            match &l.item {
+                Ok(c) => {
+                    v["prefix"] = json!(c.prefix);
+                    v["value"] = json!(c.value);
+                    v["mpn"] = json!(c.mpn);
+                    v["footprints"] = json!(c.footprints.len());
+                }
+                Err(e) => v["error"] = json!(e),
+            }
+            v
+        })
+        .collect();
+    Ok(json!({"library": lib.alias, "revision": lib.revision, "libcomps": list}))
+}
+
+/// `libcomp.delete`. Designs (plan 0.C) will refuse it while one places
+/// the component.
+pub fn libcomp_delete(
+    session: &mut Session,
+    target: &str,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let p = session.project();
+    let (alias, id) = self::target(target, ObjKind::Libcomp)?;
+    let lib = writable(p, &alias)?;
+    check_revision("library self", &lib.revision, expected)?;
+    let at = ref_text(SELF, ObjKind::Libcomp, &id);
+    if !lib.components.contains_key(&id) {
+        return Err(
+            Error::new(Code::NotFound, format!("{at} isn't in the library")).with("reference", &at),
+        );
+    }
+    let path = path_of(session.root(), &lib.path(ObjKind::Libcomp, &id));
+    std::fs::remove_file(&path).map_err(|e| Error::io(&path, &e))?;
+    session.reload()?;
+    Ok(json!({
+        "deleted": at,
+        "revision": session.project().library(SELF)?.revision,
+    }))
+}

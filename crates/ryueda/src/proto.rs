@@ -101,6 +101,46 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    #[serde(rename = "footprint.show")]
+    FootprintShow { footprint: String },
+    #[serde(rename = "footprint.list")]
+    FootprintList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library: Option<String>,
+    },
+    /// A library component, its ID made from `name` unless given.
+    #[serde(rename = "libcomp.create")]
+    LibcompCreate {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, flatten)]
+        fields: crate::libcmd::CompFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// The fields given replace the component's; its parameters merge.
+    #[serde(rename = "libcomp.edit")]
+    LibcompEdit {
+        libcomp: String,
+        #[serde(default, flatten)]
+        fields: crate::libcmd::CompFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "libcomp.show")]
+    LibcompShow { libcomp: String },
+    #[serde(rename = "libcomp.list")]
+    LibcompList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library: Option<String>,
+    },
+    #[serde(rename = "libcomp.delete")]
+    LibcompDelete {
+        libcomp: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     #[serde(rename = "activity.log")]
     ActivityLog {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -177,6 +217,9 @@ impl Request {
                 | Request::SymbolCreate { .. }
                 | Request::SymbolEdit { .. }
                 | Request::SymbolDelete { .. }
+                | Request::LibcompCreate { .. }
+                | Request::LibcompEdit { .. }
+                | Request::LibcompDelete { .. }
                 | Request::Undo { .. }
                 | Request::Redo { .. }
         )

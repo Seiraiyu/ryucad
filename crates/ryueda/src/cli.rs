@@ -45,6 +45,8 @@ struct Expect {
     expect: Option<String>,
 }
 
+// Parsed once per run; the size difference costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Command {
     /// This build's version.
@@ -67,6 +69,14 @@ enum Command {
     /// side, place and length, and the body's graphics.
     #[command(subcommand)]
     Symbol(SymbolCmd),
+    /// Show or list footprints (they come from import).
+    #[command(subcommand)]
+    Footprint(FootprintCmd),
+    /// Create, edit, show, list or delete library components: a symbol
+    /// tied to footprints, pin to pad, with the part's value, parameters,
+    /// maker and supplier part numbers.
+    #[command(subcommand)]
+    Libcomp(LibcompCmd),
     /// The daemon's activity log: every change it made or saw, newest
     /// last.
     History {
@@ -158,6 +168,142 @@ enum SymbolCmd {
 }
 
 #[derive(Subcommand)]
+enum FootprintCmd {
+    /// A footprint (<id>, or lib/<alias>/footprint/<id>) with its faults.
+    Show { footprint: String },
+    /// A library's footprints (this project's by default).
+    List {
+        #[arg(long)]
+        library: Option<String>,
+    },
+}
+
+/// A library component's fields; an edit keeps those left out.
+#[derive(Args)]
+struct CompArgs {
+    /// <id>, or lib/<alias>/symbol/<id>.
+    #[arg(long)]
+    symbol: Option<String>,
+    /// The reference designator's letters: R, C, U.
+    #[arg(long)]
+    prefix: Option<String>,
+    #[arg(long)]
+    value: Option<String>,
+    #[arg(long)]
+    description: Option<String>,
+    #[arg(long)]
+    datasheet: Option<String>,
+    /// name=value; repeat for more.
+    #[arg(long = "param", value_parser = pair)]
+    params: Vec<(String, String)>,
+    /// Remove this parameter; repeat for more.
+    #[arg(long = "unset-param", value_name = "NAME")]
+    unset: Vec<String>,
+    #[arg(long)]
+    manufacturer: Option<String>,
+    #[arg(long)]
+    mpn: Option<String>,
+    /// supplier=sku (LCSC=C25741); repeat for more. Replaces the list.
+    #[arg(long = "offer", value_parser = pair)]
+    offers: Vec<(String, String)>,
+    /// A footprint (<id>, or lib/<alias>/footprint/<id>), pins mapped to
+    /// the pads of their numbers; repeat for more, the default first.
+    /// Replaces the list.
+    #[arg(long = "footprint")]
+    footprint: Vec<String>,
+    /// The whole footprint list as JSON, with pin maps:
+    /// [{"footprint": "sot23", "pins": {"1": ["3"]}}].
+    #[arg(long, conflicts_with = "footprint")]
+    footprints: Option<String>,
+}
+
+impl CompArgs {
+    fn fields(&self) -> Result<ryueda::libcmd::CompFields> {
+        let mut params = serde_json::Map::new();
+        for (k, v) in &self.params {
+            params.insert(k.clone(), json!(v));
+        }
+        for k in &self.unset {
+            params.insert(k.clone(), Value::Null);
+        }
+        let footprints = match (&self.footprints, self.footprint.is_empty()) {
+            (Some(text), _) => Some(serde_json::from_str(text).map_err(|e| {
+                Error::new(
+                    Code::Usage,
+                    format!("--footprints isn't a list of {{footprint, pins}}: {e}"),
+                )
+            })?),
+            (None, false) => Some(
+                self.footprint
+                    .iter()
+                    .map(|f| ryueda::libcmd::FootprintArg {
+                        footprint: f.clone(),
+                        pins: Default::default(),
+                    })
+                    .collect(),
+            ),
+            (None, true) => None,
+        };
+        Ok(ryueda::libcmd::CompFields {
+            symbol: self.symbol.clone(),
+            prefix: self.prefix.clone(),
+            value: self.value.clone(),
+            description: self.description.clone(),
+            datasheet: self.datasheet.clone(),
+            parameters: (!params.is_empty()).then_some(params),
+            manufacturer: self.manufacturer.clone(),
+            mpn: self.mpn.clone(),
+            offers: (!self.offers.is_empty()).then(|| {
+                self.offers
+                    .iter()
+                    .map(|(supplier, sku)| ryueda::libcomp::Offer {
+                        supplier: supplier.clone(),
+                        sku: sku.clone(),
+                    })
+                    .collect()
+            }),
+            footprints,
+        })
+    }
+}
+
+#[derive(Subcommand)]
+enum LibcompCmd {
+    /// A library component in this project's library, its ID made from
+    /// its name unless given.
+    Create {
+        name: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[command(flatten)]
+        fields: CompArgs,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Replace the fields given.
+    Edit {
+        libcomp: String,
+        #[command(flatten)]
+        fields: CompArgs,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// A library component (<id>, or lib/<alias>/libcomp/<id>) with its
+    /// faults.
+    Show { libcomp: String },
+    /// A library's components (this project's by default).
+    List {
+        #[arg(long)]
+        library: Option<String>,
+    },
+    Delete {
+        libcomp: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
 enum DaemonCmd {
     /// Serve the project (the CLI starts this itself).
     Run {
@@ -185,13 +331,19 @@ fn ops(s: &str) -> core::result::Result<Ops, String> {
     }
 }
 
+fn pair(s: &str) -> core::result::Result<(String, String), String> {
+    s.split_once('=')
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .ok_or_else(|| format!("{s:?} isn't name=value"))
+}
+
 fn unit(s: &str) -> core::result::Result<Unit, String> {
     Unit::parse(s).ok_or_else(|| format!("unknown unit {s:?}: m, cm, mm, um, in or ft"))
 }
 
 /// The request a command sends, for those that are requests.
-fn request(cmd: &Command) -> Option<Request> {
-    Some(match cmd {
+fn request(cmd: &Command) -> Result<Option<Request>> {
+    Ok(Some(match cmd {
         Command::Info => Request::ProjectInfo {},
         Command::Lib(LibCmd::Add {
             alias,
@@ -246,10 +398,46 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Participants => Request::ParticipantList {},
         Command::Undo { entry } => Request::Undo { entry: *entry },
         Command::Redo { entry } => Request::Redo { entry: *entry },
+        Command::Footprint(FootprintCmd::Show { footprint }) => Request::FootprintShow {
+            footprint: footprint.clone(),
+        },
+        Command::Footprint(FootprintCmd::List { library }) => Request::FootprintList {
+            library: library.clone(),
+        },
+        Command::Libcomp(LibcompCmd::Create {
+            name,
+            id,
+            fields,
+            expect,
+        }) => Request::LibcompCreate {
+            name: name.clone(),
+            id: id.clone(),
+            fields: fields.fields()?,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Libcomp(LibcompCmd::Edit {
+            libcomp,
+            fields,
+            expect,
+        }) => Request::LibcompEdit {
+            libcomp: libcomp.clone(),
+            fields: fields.fields()?,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Libcomp(LibcompCmd::Show { libcomp }) => Request::LibcompShow {
+            libcomp: libcomp.clone(),
+        },
+        Command::Libcomp(LibcompCmd::List { library }) => Request::LibcompList {
+            library: library.clone(),
+        },
+        Command::Libcomp(LibcompCmd::Delete { libcomp, expect }) => Request::LibcompDelete {
+            libcomp: libcomp.clone(),
+            expected_revision: expect.expect.clone(),
+        },
         Command::Version | Command::Init { .. } | Command::Watch { .. } | Command::Daemon(_) => {
-            return None;
+            return Ok(None);
         }
-    })
+    }))
 }
 
 fn no_daemon(cli: &Cli) -> bool {
@@ -301,7 +489,7 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             )
         }
         cmd => {
-            let req = request(cmd).expect("every other command is a request");
+            let req = request(cmd)?.expect("every other command is a request");
             let root = find_root(&here)?;
             if !no_daemon(cli) {
                 match client::request(&root, &req, participant(cli).as_deref()) {

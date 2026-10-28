@@ -182,6 +182,37 @@ fn dispatch(
         Request::SymbolList { library } => {
             libcmd::symbol_list(session.project(), library.as_deref())
         }
+        Request::FootprintShow { footprint } => {
+            libcmd::footprint_show(session.project(), &footprint)
+        }
+        Request::FootprintList { library } => {
+            libcmd::footprint_list(session.project(), library.as_deref())
+        }
+        Request::LibcompCreate {
+            name,
+            id,
+            fields,
+            expected_revision,
+        } => libcmd::libcomp_create(
+            session,
+            &name,
+            id.as_deref(),
+            &fields,
+            expected_revision.as_deref(),
+        ),
+        Request::LibcompEdit {
+            libcomp,
+            fields,
+            expected_revision,
+        } => libcmd::libcomp_edit(session, &libcomp, &fields, expected_revision.as_deref()),
+        Request::LibcompShow { libcomp } => libcmd::libcomp_show(session.project(), &libcomp),
+        Request::LibcompList { library } => {
+            libcmd::libcomp_list(session.project(), library.as_deref())
+        }
+        Request::LibcompDelete {
+            libcomp,
+            expected_revision,
+        } => libcmd::libcomp_delete(session, &libcomp, expected_revision.as_deref()),
         Request::SymbolDelete {
             symbol,
             expected_revision,

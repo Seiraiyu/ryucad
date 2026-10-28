@@ -379,6 +379,13 @@ fn every_protocol_method_has_a_command() {
         ("symbol.show", &["symbol", "show"]),
         ("symbol.list", &["symbol", "list"]),
         ("symbol.delete", &["symbol", "delete"]),
+        ("footprint.show", &["footprint", "show"]),
+        ("footprint.list", &["footprint", "list"]),
+        ("libcomp.create", &["libcomp", "create"]),
+        ("libcomp.edit", &["libcomp", "edit"]),
+        ("libcomp.show", &["libcomp", "show"]),
+        ("libcomp.list", &["libcomp", "list"]),
+        ("libcomp.delete", &["libcomp", "delete"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),
@@ -520,4 +527,204 @@ fn symbols_from_the_cli() {
             .exists()
     );
     p.fails(&["symbol", "delete", "r_small-2"], "not_found", 1);
+}
+
+/// A STEP file that parses.
+const STEP: &str = "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION((''),'2;1');\nFILE_NAME('r','',(''),(''),'','','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\n#1=CARTESIAN_POINT('',(0.,0.,0.));\nENDSEC;\nEND-ISO-10303-21;\n";
+
+/// An 0402 footprint with its model, as import (plan 0.D) would write it.
+fn r0402(step: &str) -> String {
+    let v = json!({
+        "kind": "ryueda.footprint", "format": 1, "name": "R_0402_1005Metric", "mount": "smd",
+        "pads": {
+            "p1": {"number": "1", "kind": "smd", "shape": {"type": "roundrect", "ratio_ppm": 250_000},
+                   "at": [-510_000, 0], "size": [540_000, 640_000], "layers": ["copper.top", "mask.top", "paste.top"]},
+            "p2": {"number": "2", "kind": "smd", "shape": {"type": "roundrect", "ratio_ppm": 250_000},
+                   "at": [510_000, 0], "size": [540_000, 640_000], "layers": ["copper.top", "mask.top", "paste.top"]}
+        },
+        "graphics": {
+            "g1": {"layer": "courtyard.top", "type": "rect", "start": [-930_000, 470_000], "end": [930_000, -470_000], "width_nm": 50_000}
+        },
+        "models": [{"model": {"step": {"path": "library/models/r_0402.step", "blake3": blake3::hash(step.as_bytes()).to_hex().to_string()}}}]
+    });
+    ryueda::canonical::to_string(&v)
+}
+
+#[test]
+fn footprints_and_library_components_from_the_cli() {
+    let p = Pair::projects();
+    p.write("passives/library/footprints/r_0402.json", &r0402(STEP));
+    p.write("passives/library/models/r_0402.step", STEP);
+    let fl = p.ok(&["footprint", "list", "--library", "passives"]);
+    assert_eq!(
+        fl["footprints"][0]["reference"],
+        "lib/passives/footprint/r_0402"
+    );
+    assert_eq!(
+        (&fl["footprints"][0]["pads"], &fl["footprints"][0]["faults"]),
+        (&json!(2), &json!(0))
+    );
+    let shown = p.ok(&["footprint", "show", "lib/passives/footprint/r_0402"]);
+    assert_eq!(shown["footprint"]["pads"]["p1"]["number"], "1");
+    assert_eq!(p.ok(&["lib", "list"])["libraries"][0]["models"], 1);
+    p.ok(&["symbol", "create", "R", "--ops", RESISTOR]);
+    let made = p.ok(&[
+        "libcomp",
+        "create",
+        "R 100k",
+        "--symbol",
+        "r",
+        "--prefix",
+        "R",
+        "--value",
+        "100k",
+        "--footprint",
+        "lib/passives/footprint/r_0402",
+        "--param",
+        "tolerance=1%",
+        "--mpn",
+        "RC0402FR-07100KL",
+        "--offer",
+        "LCSC=C25741",
+    ]);
+    assert_eq!(made["reference"], "lib/self/libcomp/r_100k");
+    assert_eq!(made["faults"], json!([]));
+    let c = &made["libcomp"];
+    assert_eq!(c["symbol"], json!({"id": "r"}));
+    assert_eq!(
+        c["footprints"][0]["footprint"],
+        json!({"library": "passives", "id": "r_0402"})
+    );
+    assert_eq!(c["offers"], json!([{"supplier": "LCSC", "sku": "C25741"}]));
+    // What would be faulty is refused, with the fault where it lies.
+    let e = p.fails(
+        &[
+            "libcomp",
+            "create",
+            "X",
+            "--symbol",
+            "r",
+            "--prefix",
+            "R",
+            "--footprint",
+            "nope",
+        ],
+        "not_found",
+        1,
+    );
+    assert_eq!(
+        e["details"]["faults"][0]["details"]["pointer"],
+        "/footprints/0/footprint"
+    );
+    let e = p.fails(
+        &[
+            "libcomp",
+            "create",
+            "X",
+            "--symbol",
+            "r",
+            "--prefix",
+            "R",
+            "--footprints",
+            r#"[{"footprint": "lib/passives/footprint/r_0402", "pins": {"1": ["1"], "2": ["1"]}}]"#,
+        ],
+        "pad_mapped_twice",
+        1,
+    );
+    assert_eq!(
+        e["details"]["faults"][0]["details"]["pins"],
+        json!(["1", "2"])
+    );
+    p.fails(
+        &["libcomp", "create", "X", "--prefix", "R"],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &["libcomp", "create", "X", "--symbol", "r", "--prefix", "r5"],
+        "invalid_param",
+        1,
+    );
+    let edited = p.ok(&[
+        "libcomp",
+        "edit",
+        "r_100k",
+        "--value",
+        "4k7",
+        "--unset-param",
+        "tolerance",
+        "--param",
+        "power=62.5 mW",
+    ]);
+    assert_eq!(edited["libcomp"]["value"], "4k7");
+    assert_eq!(edited["libcomp"]["parameters"], json!({"power": "62.5 mW"}));
+    // The symbol's pins are the component's now.
+    let e = p.fails(
+        &[
+            "symbol",
+            "edit",
+            "r",
+            "--ops",
+            r#"[{"op": "remove", "pin": "2"}]"#,
+        ],
+        "has_dependents",
+        1,
+    );
+    assert_eq!(
+        e["details"]["dependents"],
+        json!(["lib/self/libcomp/r_100k"])
+    );
+    p.fails(
+        &[
+            "symbol",
+            "edit",
+            "r",
+            "--ops",
+            r#"[{"op": "set", "pin": "2", "number": "B"}]"#,
+        ],
+        "has_dependents",
+        1,
+    );
+    p.fails(&["symbol", "delete", "r"], "has_dependents", 1);
+    // A pin added is the component's to map: the edit says what it did.
+    let added = p.ok(&[
+        "symbol",
+        "edit",
+        "r",
+        "--ops",
+        r#"[{"op": "add", "pin": "3", "type": "passive", "at": [0, 0], "side": "left"}]"#,
+    ]);
+    assert_eq!(
+        added["components"][0]["reference"],
+        "lib/self/libcomp/r_100k"
+    );
+    assert_eq!(
+        added["components"][0]["faults"][0]["code"],
+        "pin_without_pad"
+    );
+    let list = p.ok(&["libcomp", "list"]);
+    assert_eq!(
+        (
+            &list["libcomps"][0]["value"],
+            &list["libcomps"][0]["faults"]
+        ),
+        (&json!("4k7"), &json!(1))
+    );
+    // A model replaced by hand no longer matches its footprint.
+    p.write(
+        "passives/library/models/r_0402.step",
+        &STEP.replace("0.,0.,0.", "1.,0.,0."),
+    );
+    let shown = p.ok(&["footprint", "show", "lib/passives/footprint/r_0402"]);
+    assert_eq!(shown["faults"][0]["code"], "model_file_changed");
+    p.write(
+        "passives/library/footprints/r_0402.json",
+        &r0402("not step"),
+    );
+    p.write("passives/library/models/r_0402.step", "not step");
+    let shown = p.ok(&["footprint", "show", "lib/passives/footprint/r_0402"]);
+    assert_eq!(shown["faults"][0]["code"], "model_unreadable");
+    let gone = p.ok(&["libcomp", "delete", "r_100k"]);
+    assert_eq!(gone["deleted"], "lib/self/libcomp/r_100k");
+    p.ok(&["symbol", "delete", "r"]);
 }
