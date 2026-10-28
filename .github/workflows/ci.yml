@@ -58,7 +58,8 @@ jobs:
     # Linux x64 runs every test that isn't ignored: the window tests (one
     # at a time, .config/nextest.toml) in a job of their own, the rest in
     # partitions beside it, the doctests in another. The other platforms
-    # run the unit tests and the golden hashes.
+    # run the unit tests and the golden hashes, Windows (whose build alone
+    # takes six minutes warm) in partitions too.
     name: ${{ matrix.name }}
     strategy:
       fail-fast: false
@@ -88,10 +89,16 @@ jobs:
             os: macos-latest
             tests: --workspace --lib --bins --test determinism
             save: true
-          - name: windows-latest
+          - name: windows-latest (1/3)
             os: windows-latest
-            tests: --workspace --lib --bins --test determinism
+            tests: --workspace --lib --bins --test determinism --partition hash:1/3
             save: true
+          - name: windows-latest (2/3)
+            os: windows-latest
+            tests: --workspace --lib --bins --test determinism --partition hash:2/3
+          - name: windows-latest (3/3)
+            os: windows-latest
+            tests: --workspace --lib --bins --test determinism --partition hash:3/3
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
