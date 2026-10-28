@@ -1206,17 +1206,22 @@ fn prop_control(ui: &mut egui::Ui, prop: &mut crate::core::props::Prop, name: eg
     }
 }
 
+/// The part the Part section shows: the chosen feature's part, else the
+/// first.
+pub fn section_part(ws: &Workspace, view: &View) -> Option<String> {
+    view.chosen
+        .as_ref()
+        .map(|k| k.0.clone())
+        .or_else(|| ws.model.parts.keys().next().cloned())
+}
+
 /// The Part section: the chosen feature's part (or the first part), its
 /// release state and every property, each with a control for its type,
 /// marked required (`*`) or revising, its faults beside it. Apply sends
 /// `props.set` against the revision they were read at. With PDM not set
 /// up, Set up PDM (`pdm.init`) gives the project its ID.
 pub fn part_section(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
-    let part = view
-        .chosen
-        .as_ref()
-        .map(|k| k.0.clone())
-        .or_else(|| ws.model.parts.keys().next().cloned());
+    let part = section_part(ws, view);
     ws.show_props(part.as_deref());
     if ws.pdm_config.is_some() && !ws.pdm_ready() {
         ui.weak("PDM isn't set up: the project has no ID for release records yet.");

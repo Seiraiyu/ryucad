@@ -168,3 +168,29 @@ fn the_csv_written_is_the_clis() {
         cli["csv"].as_str().unwrap()
     );
 }
+
+#[test]
+fn where_used_lists_the_assemblies_that_reach_a_part() {
+    let p = assembled();
+    p.ok(&["part", "create", "rig", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "rig", "instance", "--id", "f1", "--of", "frame",
+    ]);
+    let mut ws = open(&p);
+    ws.show_where_used(Some("bolt"));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.where_used.is_some()));
+    let texts = |ws: &Workspace| -> Vec<String> {
+        let w = ws.where_used.as_ref().unwrap();
+        w.working.iter().map(|u| u.text()).collect()
+    };
+    assert_eq!(texts(&ws), ["frame (2)", "rig (2)"]);
+    let w = ws.where_used.as_ref().unwrap();
+    assert_eq!(w.working[1].paths, ["rig > frame: 2 at working"]);
+    // Not committed on a release branch: nothing released was searched.
+    assert!(w.released.is_empty());
+    // An agent adds a bolt: where-used is read again.
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b3", "--of", "bolt",
+    ]);
+    assert!(ws.wait_until(WAIT, |ws| texts(ws) == ["frame (3)", "rig (3)"]));
+}

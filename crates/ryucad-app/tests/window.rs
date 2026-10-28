@@ -2412,3 +2412,29 @@ fn an_item_number_is_set_in_the_bom_tab() {
     h.step();
     assert!(h.query_by_label("Item of bolt in frame").is_none());
 }
+
+#[test]
+fn where_used_shows_an_assembly() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = framed_bolts();
+    let mut h = sized(&p, 1200.0);
+    frames(&mut h, bolts_drawn);
+    // The bolt chosen in the tree: the Part section says where it is used.
+    h.get_by_label("shank (cylinder)").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .where_used
+            .as_ref()
+            .is_some_and(|w| w.part == "bolt")
+    });
+    shown(&mut h, "Where bolt is used");
+    h.get_by_label("frame (2)");
+    h.get_by_label("Show frame").click();
+    frames(&mut h, |a| {
+        a.opened().ws.model.focus.as_deref() == Some("frame")
+    });
+}
