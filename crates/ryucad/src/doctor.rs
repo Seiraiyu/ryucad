@@ -791,16 +791,34 @@ fn diagnose_git(root: &Path, issues: &mut Vec<Issue>) {
     let Some(setup) = crate::drivers::setup(root) else {
         return;
     };
-    let text = fs::read_to_string(root.join(ATTRIBUTES)).unwrap_or_default();
-    let missing = crate::drivers::missing_for(&text, crate::drivers::has_imports(root));
+    let text = fs::read_to_string(root.join(ATTRIBUTES));
+    let missing = crate::drivers::missing_for(
+        text.as_deref().unwrap_or_default(),
+        crate::drivers::has_imports(root),
+    );
     if !missing.is_empty() {
+        // Each line whole and quoted: a line's pattern may be a file name
+        // (`.gitattributes text eol=lf`), which read bare looked like the
+        // message naming the file twice (issue #163).
+        let what = if text.is_err() {
+            format!("there is no {ATTRIBUTES}")
+        } else {
+            let quoted: Vec<String> = missing.iter().map(|l| format!("\"{l}\"")).collect();
+            match quoted.split_last() {
+                Some((last, [])) => format!("{ATTRIBUTES} lacks the line {last}"),
+                Some((last, rest)) => {
+                    format!(
+                        "{ATTRIBUTES} lacks the lines {} and {last}",
+                        rest.join(", ")
+                    )
+                }
+                None => unreachable!(),
+            }
+        };
         issues.push(issue(
             "gitattributes_missing",
             vec![ATTRIBUTES.to_owned()],
-            format!(
-                "{ATTRIBUTES} lacks {}: Git won't read or merge the project's files through ryucad",
-                missing.join(" and ")
-            ),
+            format!("{what}: Git won't read or merge the project's files through ryucad"),
         ));
     }
     if !setup.missing.is_empty() {
@@ -2560,6 +2578,51 @@ pub(crate) mod tests {
         let text = fs::read_to_string(r.join(crate::drivers::ATTRIBUTES)).unwrap();
         assert!(text.starts_with("*.png binary\n# ryucad"), "{text}");
         assert!(!text.contains("\nryucad.json diff=ryucad\n"), "{text}");
+    }
+
+    /// Issue #163: the message names the lines missing, each whole and
+    /// quoted, or says there is no file.
+    #[test]
+    fn the_attributes_message_names_what_is_missing() {
+        let dir = healthy();
+        let r = dir.path();
+        in_repo(r);
+        let message = |r: &Path| {
+            let v = report(r).unwrap();
+            assert_eq!(v["issues"][0]["code"], "gitattributes_missing", "{v}");
+            v["issues"][0]["message"].as_str().unwrap().to_owned()
+        };
+        let why = ": Git won't read or merge the project's files through ryucad";
+        fs::remove_file(r.join(crate::drivers::ATTRIBUTES)).unwrap();
+        assert_eq!(message(r), format!("there is no .gitattributes{why}"));
+        // Every line but one.
+        let all = crate::drivers::with_lines("");
+        w(
+            r,
+            crate::drivers::ATTRIBUTES,
+            &all.replace(".gitattributes text eol=lf\n", ""),
+        );
+        assert_eq!(
+            message(r),
+            format!(".gitattributes lacks the line \".gitattributes text eol=lf\"{why}")
+        );
+        // An earlier ryucad's lines: every line is missing.
+        w(
+            r,
+            crate::drivers::ATTRIBUTES,
+            "ryucad.json diff=ryucad\nparts/**/*.json diff=ryucad\n",
+        );
+        let quoted: Vec<String> = crate::drivers::LINES
+            .iter()
+            .map(|l| format!("\"{l}\""))
+            .collect();
+        assert_eq!(
+            message(r),
+            format!(
+                ".gitattributes lacks the lines {}, {}, {}, {} and {}{why}",
+                quoted[0], quoted[1], quoted[2], quoted[3], quoted[4]
+            )
+        );
     }
 
     #[test]
