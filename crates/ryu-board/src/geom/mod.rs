@@ -5,10 +5,12 @@
 //! of two coordinate differences fits in `i128` exactly, which stage 1's
 //! exact predicates rely on.
 
+mod contour;
 pub mod decimal;
 mod edge;
 mod rect;
 
+pub use contour::{Contour, ContourError, Pen, Region, Stroke};
 pub use edge::{Arc, Dir, Edge, Segment};
 pub use rect::Rect;
 
