@@ -81,6 +81,33 @@ enum Command {
     /// names, ports and buses.
     #[command(subcommand)]
     Block(BlockCmd),
+    /// Add, edit, delete or show components: a library component placed
+    /// in a block.
+    #[command(subcommand)]
+    Component(ComponentCmd),
+    /// Connect a pin (<block>/<component>/<pin>) to a net (by ID or name),
+    /// rail:<name> or port:<name>; --new makes a net of the block by that
+    /// name.
+    Connect {
+        pin: String,
+        net: String,
+        #[arg(long)]
+        new: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Take a pin off its net.
+    Disconnect {
+        pin: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Mark a pin not connected.
+    Nc {
+        pin: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
     /// Add, edit, delete or list rails: project-wide nets (GND, 3V3).
     #[command(subcommand)]
     Rail(RailCmd),
@@ -490,6 +517,75 @@ enum DesignCmd {
     List,
 }
 
+/// A component's fields; an edit keeps those left out.
+#[derive(Args)]
+struct ComponentArgs {
+    /// The library component: <id>, or lib/<alias>/libcomp/<id>.
+    #[arg(long)]
+    of: Option<String>,
+    #[arg(long)]
+    refdes: Option<String>,
+    /// One of the library component's footprints.
+    #[arg(long)]
+    footprint: Option<String>,
+    #[arg(long)]
+    value: Option<String>,
+    /// name=value; repeat for more.
+    #[arg(long = "param", value_parser = pair)]
+    params: Vec<(String, String)>,
+    /// Remove this parameter; repeat for more.
+    #[arg(long = "unset-param", value_name = "NAME")]
+    unset: Vec<String>,
+}
+
+impl ComponentArgs {
+    fn fields(&self) -> ryueda::partcmd::ComponentFields {
+        let mut params = serde_json::Map::new();
+        for (k, v) in &self.params {
+            params.insert(k.clone(), json!(v));
+        }
+        for k in &self.unset {
+            params.insert(k.clone(), Value::Null);
+        }
+        ryueda::partcmd::ComponentFields {
+            of: self.of.clone(),
+            refdes: self.refdes.clone(),
+            footprint: self.footprint.clone(),
+            value: self.value.clone(),
+            parameters: (!params.is_empty()).then_some(params),
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum ComponentCmd {
+    /// Place a library component (--of) in a block.
+    Add {
+        block: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[command(flatten)]
+        fields: ComponentArgs,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Replace the fields given (<block>/<component>).
+    Edit {
+        component: String,
+        #[command(flatten)]
+        fields: ComponentArgs,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Delete {
+        component: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// A component with its connections and faults.
+    Show { component: String },
+}
+
 /// A port's direction, as typed.
 fn direction(s: &str) -> Result<ryueda::conn::Direction> {
     serde_json::from_value(json!(s)).map_err(|_| {
@@ -736,6 +832,54 @@ fn request(cmd: &Command) -> Result<Option<Request>> {
         Command::Block(BlockCmd::List) => Request::BlockList {},
         Command::Block(BlockCmd::Delete { block, expect }) => Request::BlockDelete {
             block: block.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Component(ComponentCmd::Add {
+            block,
+            id,
+            fields,
+            expect,
+        }) => Request::ComponentAdd {
+            block: block.clone(),
+            id: id.clone(),
+            fields: fields.fields(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Component(ComponentCmd::Edit {
+            component,
+            fields,
+            expect,
+        }) => Request::ComponentEdit {
+            component: component.clone(),
+            fields: fields.fields(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Component(ComponentCmd::Delete { component, expect }) => {
+            Request::ComponentDelete {
+                component: component.clone(),
+                expected_revision: expect.expect.clone(),
+            }
+        }
+        Command::Component(ComponentCmd::Show { component }) => Request::ComponentShow {
+            component: component.clone(),
+        },
+        Command::Connect {
+            pin,
+            net,
+            new,
+            expect,
+        } => Request::Connect {
+            pin: pin.clone(),
+            net: net.clone(),
+            new: *new,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Disconnect { pin, expect } => Request::Disconnect {
+            pin: pin.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Nc { pin, expect } => Request::Nc {
+            pin: pin.clone(),
             expected_revision: expect.expect.clone(),
         },
         Command::Rail(RailCmd::Add {
