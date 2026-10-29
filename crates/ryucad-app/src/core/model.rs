@@ -87,6 +87,16 @@ impl ImportInfo {
         }
     }
 
+    /// The largest tolerance healing gave, for people: `none raised`
+    /// where it raised none (the report's 0), else in meters (`1e-7 m`).
+    pub fn tolerance_text(&self) -> Option<String> {
+        let t = self.tolerance_m?;
+        Some(match t > 0.0 {
+            true => format!("{t:e} m"),
+            false => "none raised".to_owned(),
+        })
+    }
+
     /// The file's name: `bracket.step`.
     pub fn file_name(&self) -> &str {
         self.file.rsplit('/').next().unwrap_or(&self.file)

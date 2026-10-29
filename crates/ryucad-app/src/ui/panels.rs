@@ -1558,9 +1558,9 @@ fn import(
                 ui.label(n.to_string());
                 ui.end_row();
             }
-            if let Some(t) = b.tolerance_m {
+            if let Some(t) = b.tolerance_text() {
                 ui.label("largest tolerance");
-                ui.label(format!("{t:e} m"));
+                ui.label(t);
                 ui.end_row();
             }
         }
