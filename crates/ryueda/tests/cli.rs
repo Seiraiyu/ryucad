@@ -429,6 +429,7 @@ fn every_protocol_method_has_a_command() {
         ("instance.delete", &["instance", "delete"]),
         ("instance.show", &["instance", "show"]),
         ("netlist", &["netlist"]),
+        ("erc", &["erc"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),
@@ -1351,6 +1352,38 @@ fn netlists_from_the_cli() {
     assert_eq!(sda["members"].as_array().unwrap().len(), 2);
     assert_eq!(sda["ports"][0]["port"], format!("board:a/port:{port}"));
     assert_eq!(p.ok(&["netlist", "Board"]), n);
+    // ERC: the pull-ups hold SDA to GND, so nothing is wrong but a lone
+    // net: SDA has two pins, GND two.
+    let erc = p.ok(&["erc"]);
+    assert_eq!(
+        (&erc["errors"], &erc["warnings"]),
+        (&json!(0), &json!(0)),
+        "{erc}"
+    );
+    p.ok(&["net", "add", "top", "SPARE", "--id", "spare"]);
+    p.ok(&[
+        "component",
+        "add",
+        "top",
+        "--of",
+        "r_100k",
+        "--id",
+        "r9",
+        "--refdes",
+        "R9",
+    ]);
+    p.ok(&["connect", "top/r9/1", "SPARE"]);
+    let erc = p.ok(&["erc", "board"]);
+    let found = &erc["designs"][0]["findings"];
+    let codes: Vec<&Value> = found
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| &f["code"])
+        .collect();
+    assert_eq!(codes, [&json!("pin_unconnected"), &json!("net_single_pin")]);
+    assert_eq!(found[0]["refs"], json!(["board:r9/2"]));
+    assert_eq!(found[0]["id"].as_str().unwrap().len(), 16);
     // A broken file refuses the design, naming it.
     p.write("board/blocks/pu/components/r.json", "{");
     let e = p.fails(&["netlist"], "invalid_json", 1);

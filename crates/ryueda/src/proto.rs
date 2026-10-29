@@ -408,6 +408,12 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         design: Option<String>,
     },
+    /// ERC over every design, or the one named.
+    #[serde(rename = "erc")]
+    Erc {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+    },
     #[serde(rename = "activity.log")]
     ActivityLog {
         #[serde(default, skip_serializing_if = "Option::is_none")]

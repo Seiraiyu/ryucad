@@ -120,6 +120,11 @@ enum Command {
         /// By ID or name; the project's one design when left out.
         design: Option<String>,
     },
+    /// ERC: every design's findings, or one design's.
+    Erc {
+        /// By ID or name; every design when left out.
+        design: Option<String>,
+    },
     /// Add, edit, delete or list rails: project-wide nets (GND, 3V3).
     #[command(subcommand)]
     Rail(RailCmd),
@@ -1144,6 +1149,9 @@ fn request(cmd: &Command) -> Result<Option<Request>> {
             instance: instance.clone(),
         },
         Command::Netlist { design } => Request::Netlist {
+            design: design.clone(),
+        },
+        Command::Erc { design } => Request::Erc {
             design: design.clone(),
         },
         Command::Rail(RailCmd::Add {
