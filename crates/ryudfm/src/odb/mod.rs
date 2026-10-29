@@ -3,6 +3,7 @@
 
 pub mod attrs;
 mod error;
+pub mod info;
 pub mod job;
 pub mod lzw;
 mod sysattr;
