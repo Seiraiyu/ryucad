@@ -567,7 +567,12 @@ fn flow_onto_sheets(
         if placed.overflow.len() == which.len() {
             // Nothing fits even alone: put the first where it may.
             let c = which.remove(0);
-            for (p, place) in at(&clusters[c], [MARGIN, block.sheet[1] - MARGIN]) {
+            let e0 = clusters[c].room(block, [0, 0]);
+            let o = [
+                crate::geom::snap(MARGIN - e0.min[0]),
+                crate::geom::snap(block.sheet[1] - MARGIN - e0.max[1]),
+            ];
+            for (p, place) in at(&clusters[c], o) {
                 st.place[p] = Some((s, place, false));
             }
             continue;

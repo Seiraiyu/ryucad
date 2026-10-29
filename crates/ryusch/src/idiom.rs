@@ -484,9 +484,10 @@ fn pin_on(block: &Block, p: usize, n: Option<usize>) -> usize {
         .unwrap_or(0)
 }
 
-fn step(p: Point, s: Side, k: Nm) -> Point {
+/// `p` moved `by` (nanometres) towards `s`.
+fn step(p: Point, s: Side, by: Nm) -> Point {
     let d = s.step();
-    [p[0] + d[0] * k, p[1] + d[1] * k]
+    [p[0] + d[0] / GRID * by, p[1] + d[1] / GRID * by]
 }
 
 /// Makes the clusters: each idiom's parts joined to the cluster of the
@@ -529,7 +530,9 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                         let e = ends(block, c);
                         let top = if ground(e[0]) { 1 } else { 0 };
                         let x = snap(body.min[0]) + 2 * GRID + i * 4 * GRID;
-                        let y = snap(body.min[1]) - 4 * GRID;
+                        // Below the part's pins, with room for the cap's
+                        // supply port above it.
+                        let y = snap(shape.extent.min[1]) - 5 * GRID;
                         adds.push((
                             c,
                             put(block, c, turn_for(block, c, top, Side::Up), top, [x, y]),
@@ -558,7 +561,11 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                         } else {
                             pin.end[0] + (2 + 3 * i) * GRID
                         };
-                        let edge = snap(if up { body.max[1] } else { body.min[1] });
+                        let edge = snap(if up {
+                            shape.extent.max[1]
+                        } else {
+                            shape.extent.min[1]
+                        });
                         let y = edge + dir.step()[1] / GRID * 3 * GRID;
                         adds.push((r, put(block, r, turn, sig, [out_x, y])));
                     }
@@ -670,7 +677,7 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
 }
 
 /// `place` moved out along `side` (and then down) a step at a time until
-/// its part keeps two steps from every member.
+/// its part's room keeps a step from every member's.
 fn clear_of(
     block: &Block,
     members: &[(usize, Place)],
@@ -678,14 +685,18 @@ fn clear_of(
     place: Place,
     side: Side,
 ) -> Place {
-    let room = |pl: Place| Shape::of(&block.parts[p], pl).extent.grow(GRID);
+    // Each part's room: its extent, its text and its rails' ports.
+    let room = |pl: Place| Cluster::single(p, pl).room(block, [0, 0]).grow(GRID);
     let others: Vec<Rect> = members
         .iter()
-        .map(|(q, pl)| Shape::of(&block.parts[*q], *pl).extent.grow(GRID))
+        .map(|(q, pl)| Cluster::single(*q, *pl).room(block, [0, 0]))
         .collect();
-    let dirs = [side, Side::Down, Side::Up];
-    for k in 0..40 {
-        for d in dirs {
+    // Out along the pin's way first, keeping its row; then down or up.
+    let tries = (0..40)
+        .map(|k| (k, side))
+        .chain((1..40).flat_map(|k| [(k, Side::Down), (k, Side::Up)]));
+    for (k, d) in tries {
+        {
             let off = d.step();
             let pl = Place::new(
                 [place.at[0] + off[0] * k, place.at[1] + off[1] * k],
