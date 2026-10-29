@@ -448,7 +448,7 @@ pub fn flow(
             .unwrap_or(0);
         // A column held to the right edge sits against it.
         if !col.is_empty() && col.iter().all(|c| right.contains(c)) {
-            x = x.max(size[0] - MARGIN - width);
+            x = x.max(size[0] - MARGIN - width - GRID);
         }
         if x + width > size[0] - MARGIN && i > 0 {
             overflow.extend(col.iter().copied());
@@ -482,6 +482,11 @@ pub fn flow(
                 }
             }
             let e = cl.room(block, o);
+            // What runs past the sheet's foot or side goes to the next.
+            if e.min[1] < floor || e.max[0] > size[0] - MARGIN {
+                overflow.push(*c);
+                continue;
+            }
             limit = e.min[1] - ROW_GAP - hints.spread / 2;
             origins.insert(*c, o);
             for (p, place) in cl.places(o) {
