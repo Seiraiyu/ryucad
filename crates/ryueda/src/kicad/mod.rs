@@ -5,6 +5,7 @@
 //! file, never guessed at.
 
 pub mod footprint;
+pub mod import;
 pub mod sexpr;
 pub mod symbol;
 
