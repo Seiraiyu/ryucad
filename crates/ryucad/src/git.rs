@@ -248,8 +248,16 @@ impl Repo {
 
     /// The project's files that differ from `HEAD`.
     pub fn uncommitted(&self, files: &Files) -> Result<Vec<Value>> {
-        let head = match self.head() {
-            Some(h) => self.project_blobs(&h.tree().map_err(git_error)?)?,
+        let head = self.head().map(|c| c.id.to_string());
+        self.changed_since(head.as_deref(), files)
+    }
+
+    /// The project's files in `files` that differ from the commit `id`
+    /// (hex; `None` before the first commit, when every file is new):
+    /// another worktree's uncommitted changes, from its head.
+    pub fn changed_since(&self, id: Option<&str>, files: &Files) -> Result<Vec<Value>> {
+        let head = match id {
+            Some(c) => self.project_blobs(&self.commit(c)?.tree().map_err(git_error)?)?,
             None => BTreeMap::new(),
         };
         let mut out = Vec::new();

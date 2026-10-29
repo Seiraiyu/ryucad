@@ -796,6 +796,11 @@ pub enum Request {
     /// What the merge Git is in the middle of leaves to settle.
     #[serde(rename = "merge.status")]
     MergeStatus {},
+    /// Every worktree of the repository that holds the project: branch,
+    /// head, ahead and behind, uncommitted changes, and who is attached to
+    /// its daemon when one is running.
+    #[serde(rename = "worktree.list")]
+    WorktreeList {},
     /// Settles merge conflicts, as one change.
     #[serde(rename = "merge.resolve")]
     MergeResolve {

@@ -537,6 +537,10 @@ enum Command {
     /// middle of leaves to settle.
     #[command(subcommand)]
     Merge(MergeCmd),
+    /// The project's worktrees: one per agent's branch, each a project
+    /// folder with its own daemon, all sharing this machine's cache.
+    #[command(subcommand)]
+    Worktree(WorktreeCmd),
     /// The project's Git commits (or one part's), and what is
     /// uncommitted. Read-only.
     History {
@@ -626,6 +630,40 @@ enum MergeCmd {
         /// Fail with `conflict` unless the conflict's part is still at this revision.
         #[arg(long = "expect", value_name = "REVISION")]
         expect: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorktreeCmd {
+    /// Make a worktree of the project's repository in a new folder (`git
+    /// worktree add`), check out a branch or revision there, and warm its
+    /// cache from this machine's: prints the new project folder. With
+    /// --as, the participant name the agent working there will use, shown
+    /// in the Branches tab until its daemon says who is attached.
+    Add {
+        /// The new worktree's folder.
+        path: PathBuf,
+        /// Create this branch there (from --from).
+        #[arg(long, short = 'b')]
+        branch: Option<String>,
+        /// What to check out or start the branch from: HEAD by default.
+        #[arg(long, value_name = "REV")]
+        from: Option<String>,
+        /// Don't rebuild the new worktree to warm its cache.
+        #[arg(long)]
+        no_warm: bool,
+    },
+    /// Every worktree holding the project: branch, head, ahead and
+    /// behind, uncommitted changes, and who is attached to its daemon (only
+    /// if one is running: none is started).
+    List,
+    /// Stop a worktree's daemon and remove it (`git worktree remove`);
+    /// refused while it has uncommitted changes, unless --force.
+    Remove {
+        path: PathBuf,
+        /// Remove it even with uncommitted changes, which are lost.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -1782,6 +1820,7 @@ fn request(cmd: &Command) -> Option<Request> {
         | Command::Git(_)
         | Command::Review(_)
         | Command::Cache(CacheCmd::Push { .. })
+        | Command::Worktree(WorktreeCmd::Add { .. } | WorktreeCmd::Remove { .. })
         | Command::Watch { .. }
         | Command::Open { .. } => {
             return None;
@@ -2430,6 +2469,7 @@ fn request(cmd: &Command) -> Option<Request> {
             limit: Some(*limit),
         },
         Command::Merge(MergeCmd::Status { .. }) => Request::MergeStatus {},
+        Command::Worktree(WorktreeCmd::List) => Request::WorktreeList {},
         Command::Merge(MergeCmd::Resolve {
             conflict,
             ours,
@@ -2568,6 +2608,34 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                 _ => None,
             };
             client::open(&dir, root.as_deref())
+        }
+        Command::Worktree(WorktreeCmd::Add {
+            path,
+            branch,
+            from,
+            no_warm,
+        }) => {
+            let root = find_root(&here)?;
+            let ask = ryucad::worktree::Add {
+                path,
+                branch: branch.as_deref(),
+                from: from.as_deref(),
+                name: cli.as_name.as_deref(),
+                warm: !no_warm,
+            };
+            let mut v = ryucad::worktree::add(&root, &here, &ask)?;
+            if let Some(Value::Array(list)) = v.as_object_mut().and_then(|o| o.remove("warnings")) {
+                warnings.extend(list.into_iter().map(|w| {
+                    w["message"]
+                        .as_str()
+                        .map_or_else(|| w.to_string(), str::to_owned)
+                }));
+            }
+            Ok(v)
+        }
+        Command::Worktree(WorktreeCmd::Remove { path, force }) => {
+            let root = find_root(&here)?;
+            ryucad::worktree::remove(&root, &here.join(path), *force)
         }
         Command::Daemon(DaemonCmd::Stop { all: true }) => client::stop_all(),
         Command::Daemon(DaemonCmd::Stop { all: false }) => client::stop(&find_root(&here)?),

@@ -94,6 +94,9 @@ pub struct Session {
     /// folders: what a compare, diff or merge preview with a worktree
     /// reads, checked as this session's own files are.
     worktrees: BTreeMap<PathBuf, Stamps>,
+    /// How many project files each worktree's working files change from
+    /// its head, by the head and a digest of the files.
+    pub(crate) worktree_changes: BTreeMap<String, usize>,
 }
 
 /// How a revision names another worktree's working files:
@@ -138,6 +141,7 @@ impl Session {
             epoch: 0,
             cycles: None,
             worktrees: BTreeMap::new(),
+            worktree_changes: BTreeMap::new(),
         };
         s.scan()?;
         Ok(s)
@@ -287,6 +291,7 @@ impl Session {
             epoch: 0,
             cycles: None,
             worktrees: BTreeMap::new(),
+            worktree_changes: BTreeMap::new(),
         })
     }
 
