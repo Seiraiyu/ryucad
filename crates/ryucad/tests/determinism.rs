@@ -161,6 +161,7 @@ fn rebuild_section(golden: &mut Golden) {
         acts: Default::default(),
         imports: Default::default(),
         views: Default::default(),
+        appearance: None,
         features,
         revision: String::new(),
     };

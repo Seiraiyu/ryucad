@@ -213,6 +213,7 @@ pub(crate) mod tests {
             acts: BTreeMap::new(),
             imports: BTreeMap::new(),
             views: BTreeMap::new(),
+            appearance: None,
             revision: String::new(),
         }
     }
