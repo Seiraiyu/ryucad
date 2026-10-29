@@ -709,6 +709,10 @@ enum CacheCmd {
     },
     /// Remove the stored token.
     Logout,
+    /// Rebuild a part (with what it places), or every part, through the
+    /// disk cache and the shared cache: what the team built comes from the
+    /// shared cache, the rest is built here and sent behind.
+    Warm { part: Option<String> },
     /// Send every entry this release built that the shared cache lacks:
     /// what a CI job runs after building, so others never build it. Needs
     /// no project.
@@ -2386,6 +2390,7 @@ fn request(cmd: &Command) -> Option<Request> {
             }),
         },
         Command::Cache(CacheCmd::Logout) => Request::CacheLogout {},
+        Command::Cache(CacheCmd::Warm { part }) => Request::CacheWarm { part: part.clone() },
         Command::Config(ConfigCmd::Get { key, scope }) => Request::ConfigGet {
             key: key.clone(),
             scope: scope.get(),

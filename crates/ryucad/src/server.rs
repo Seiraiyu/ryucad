@@ -917,6 +917,7 @@ fn dispatch(
             crate::cache::token::store(None)?;
             cache_login(session.disk().map(|d| d.as_ref()))
         }
+        Request::CacheWarm { part } => cache_warm(session, part.as_deref()),
         Request::ConfigGet { key, scope } => {
             let scope = scope.as_deref().map(config::Scope::parse).transpose()?;
             let mut v = config::get(
@@ -1208,6 +1209,54 @@ fn cache_login(disk: Option<&crate::cache::Disk>) -> Result<Value> {
         };
     }
     Ok(v)
+}
+
+/// `cache.warm`: `part` (or every part) rebuilt, the parts that aren't
+/// assemblies side by side and then each assembly's model, which places
+/// what it holds. Its remote reads come a depth at a time; what the remote
+/// lacks is built and sent behind, as any rebuild's is. A failing part is
+/// left to `rebuild` to report.
+fn cache_warm(session: &mut Session, part: Option<&str>) -> Result<Value> {
+    let parts: Vec<Id> = match part {
+        Some(p) => {
+            let id = part_id(p)?;
+            session.project().part(&id)?;
+            vec![id]
+        }
+        None => session.project().parts.keys().cloned().collect(),
+    };
+    let disk = session.disk().cloned();
+    let counts = |d: &Option<std::sync::Arc<crate::cache::Disk>>| {
+        let d = d.as_deref();
+        let remote = d.and_then(crate::cache::Disk::remote).map(|r| r.stats());
+        let n = |k: &str| remote.as_ref().and_then(|r| r[k].as_u64()).unwrap_or(0);
+        (
+            d.map_or(0, crate::cache::Disk::stored),
+            n("hits"),
+            n("bytes_in"),
+        )
+    };
+    let before = counts(&disk);
+    session.rebuild_parts(&parts)?;
+    for id in &parts {
+        let assembly = session
+            .project()
+            .part(id)?
+            .file
+            .as_ref()
+            .is_ok_and(|f| f.kind == PartKind::Assembly);
+        if assembly {
+            let _ = session.model(id, &Rev::Working);
+        }
+    }
+    let after = counts(&disk);
+    Ok(json!({
+        "parts": parts.len(),
+        "built": after.0 - before.0,
+        "fetched": after.1 - before.1,
+        "fetched_bytes": after.2 - before.2,
+        "remote": remote_stats(disk.as_deref()),
+    }))
 }
 
 /// What `cache.stats` says of the remote: what it has done in this

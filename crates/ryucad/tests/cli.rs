@@ -1022,6 +1022,7 @@ fn every_protocol_method_has_a_command() {
         ("cache.clear", &["cache", "clear"]),
         ("cache.login", &["cache", "login"]),
         ("cache.logout", &["cache", "logout"]),
+        ("cache.warm", &["cache", "warm"]),
         ("config.get", &["config", "get"]),
         ("config.set", &["config", "set"]),
         ("redo", &["redo"]),

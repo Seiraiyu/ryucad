@@ -711,3 +711,55 @@ fn a_release_pushes_what_the_shared_cache_lacks() {
     let bad = push(&write, &["--kind", "bodies"]);
     assert_eq!(bad["error"]["code"], "usage");
 }
+
+#[test]
+fn a_warm_fetches_what_the_team_built() {
+    let fake = fake_cache::Fake::start();
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+    let (ca, cb) = (dir.path().join("cache-a"), dir.path().join("cache-b"));
+    plate(&a, &run, &ca);
+    plate(&b, &run, &cb);
+    cli(&a, &run, &ca, &["config", "set", "cache.remote", &fake.url]);
+    // Their daemons are a development build's: the next are a release's.
+    for root in [&a, &b] {
+        cli(root, &run, &ca, &["daemon", "stop"]);
+    }
+    let as_release = |root: &Path, cache: &Path, token: &str, args: &[&str]| {
+        let env = [
+            ("RYUCAD_CACHE_IDENTITY", RELEASE),
+            ("RYUCAD_CACHE_TOKEN", token),
+        ];
+        let v = cli_with(root, &run, cache, &env, args);
+        assert_eq!(v["ok"], true, "{args:?}: {v}");
+        v["result"].clone()
+    };
+    // The first machine warms from an empty shared cache: it builds.
+    let first = as_release(&a, &ca, fake_cache::WRITE, &["cache", "warm"]);
+    assert_eq!(
+        (&first["parts"], &first["fetched"]),
+        (&json!(1), &json!(0)),
+        "{first}"
+    );
+    assert_eq!(first["built"], 3, "two features and the cut's own body");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while fake.held() < 3 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(fake.held(), 3, "{first}");
+    // The second, reading only, builds nothing.
+    let second = as_release(&b, &cb, fake_cache::READ, &["cache", "warm", "p"]);
+    assert_eq!(
+        (&second["built"], &second["fetched"]),
+        (&json!(0), &json!(2)),
+        "{second}"
+    );
+    let again = as_release(&b, &cb, fake_cache::READ, &["cache", "warm", "p"]);
+    assert_eq!((&again["built"], &again["fetched"]), (&json!(0), &json!(0)));
+    let missing = cli_with(&b, &run, &cb, &[], &["cache", "warm", "nope"]);
+    assert_eq!(missing["error"]["code"], "not_found", "{missing}");
+    for (root, cache) in [(&a, &ca), (&b, &cb)] {
+        cli(root, &run, cache, &["daemon", "stop"]);
+    }
+}

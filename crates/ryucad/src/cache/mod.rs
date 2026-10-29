@@ -135,6 +135,8 @@ pub struct Disk {
     /// Keys a prefetch found the remote lacks: not asked for again one by
     /// one before they are built here.
     absent: Mutex<BTreeSet<String>>,
+    /// Entries of its own (built here, not read) this process has stored.
+    stored: AtomicU64,
 }
 
 /// The OS cache folder for ryucad, or `RYUCAD_CACHE_DIR`.
@@ -293,7 +295,14 @@ impl Disk {
             remote: RwLock::new(None),
             fetched: Mutex::new(BTreeSet::new()),
             absent: Mutex::new(BTreeSet::new()),
+            stored: AtomicU64::new(0),
         }
+    }
+
+    /// How many entries of its own (built here, not read from a remote)
+    /// this process has stored.
+    pub fn stored(&self) -> u64 {
+        self.stored.load(Ordering::Relaxed)
     }
 
     /// The cache with `remote` behind it.
@@ -481,6 +490,7 @@ impl Disk {
         lock(&self.absent).remove(&key);
         match self.put_entry(kind, &key, &bytes) {
             Ok(true) => {
+                self.stored.fetch_add(1, Ordering::Relaxed);
                 if let Some(r) = self.remote() {
                     r.send_later(kind, key, bytes);
                 }
@@ -646,6 +656,7 @@ impl Disk {
             remote: RwLock::new(None),
             fetched: Mutex::new(BTreeSet::new()),
             absent: Mutex::new(BTreeSet::new()),
+            stored: AtomicU64::new(0),
         };
         std::thread::spawn(move || {
             trimmer.trim(trimmer.max_bytes());

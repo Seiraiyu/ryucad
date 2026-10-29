@@ -1020,6 +1020,15 @@ pub enum Request {
     /// Removes the stored token.
     #[serde(rename = "cache.logout")]
     CacheLogout {},
+    /// Rebuilds `part` (with every part it places), or every part, through
+    /// the disk cache and the shared cache behind it, so a person opening
+    /// the project waits for nothing the team already built. Answers how
+    /// many entries came from the shared cache and how many were built.
+    #[serde(rename = "cache.warm")]
+    CacheWarm {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+    },
     /// The project's Git commits (or a part's), and what is uncommitted.
     #[serde(rename = "history.log")]
     HistoryLog {
