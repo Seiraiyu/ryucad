@@ -1604,17 +1604,6 @@ fn names(ui: &mut egui::Ui, ws: &Workspace, key: &(String, String)) {
     });
 }
 
-/// The bottom panel's tabs.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Tab {
-    #[default]
-    Activity,
-    History,
-    Releases,
-    Branches,
-    Bom,
-}
-
 /// How long ago `ms` (Unix milliseconds) was, for people.
 pub fn ago(ms: u64) -> String {
     let now = std::time::SystemTime::now()
@@ -1629,53 +1618,9 @@ pub fn ago(ms: u64) -> String {
     }
 }
 
-/// The activity log, newest first, with undo and redo per entry; the
-/// project's Git history, read-only; the release records of `part` (the
-/// chosen feature's part, else the first); and the BOM of the part the
-/// window shows.
-pub fn journal(
-    ui: &mut egui::Ui,
-    ws: &mut Workspace,
-    view: &mut View,
-    tab: &mut Tab,
-    part: Option<&str>,
-) {
-    // A short tab still fills the panel, so the view keeps its size.
-    ui.set_min_size(ui.available_size());
-    ui.horizontal(|ui| {
-        ui.selectable_value(tab, Tab::Activity, "Activity");
-        if ui.selectable_value(tab, Tab::History, "History").clicked() {
-            ws.load_history();
-        }
-        if ui
-            .selectable_value(tab, Tab::Releases, "Releases")
-            .clicked()
-        {
-            ws.load_releases();
-        }
-        if ui
-            .selectable_value(tab, Tab::Branches, "Branches")
-            .clicked()
-        {
-            ws.load_branches();
-        }
-        if ui.selectable_value(tab, Tab::Bom, "BOM").clicked() {
-            ws.load_bom();
-        }
-    });
-    ui.separator();
-    match tab {
-        Tab::Activity => activity(ui, ws),
-        Tab::History => history(ui, ws),
-        Tab::Releases => releases(ui, ws, part),
-        Tab::Branches => branches(ui, ws),
-        Tab::Bom => crate::ui::bom::tab(ui, ws, view),
-    }
-}
-
 /// `part`'s release records, the checks' findings about it, and Propose…,
 /// Obsolete… and Sync tags…, each opening a dialog to confirm.
-fn releases(ui: &mut egui::Ui, ws: &mut Workspace, part: Option<&str>) {
+pub fn releases(ui: &mut egui::Ui, ws: &mut Workspace, part: Option<&str>) {
     use crate::core::releases::{Confirm, record_line};
     let Some(part) = part else {
         ui.weak("No parts yet");
@@ -1867,7 +1812,7 @@ pub fn release_dialogs(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect
     }
 }
 
-fn activity(ui: &mut egui::Ui, ws: &mut Workspace) {
+pub fn activity(ui: &mut egui::Ui, ws: &mut Workspace) {
     let mut undo = None;
     let mut redo = None;
     egui::ScrollArea::vertical()
@@ -1930,7 +1875,7 @@ fn activity(ui: &mut egui::Ui, ws: &mut Workspace) {
 /// whether merging it in would be clean, with Open (a window on it),
 /// Compare (with its working files) and Show preview (the conflicts it
 /// would leave, read only).
-fn branches(ui: &mut egui::Ui, ws: &mut Workspace) {
+pub fn branches(ui: &mut egui::Ui, ws: &mut Workspace) {
     use crate::core::branches::{compare_rev, last_change, name, standing, summary, who};
     // Other agents' work changes no file of this project: while the tab
     // shows, it reads the worktrees again now and then.
@@ -2075,7 +2020,7 @@ fn preview_conflicts(ui: &mut egui::Ui, v: &serde_json::Value) {
     }
 }
 
-fn history(ui: &mut egui::Ui, ws: &mut Workspace) {
+pub fn history(ui: &mut egui::Ui, ws: &mut Workspace) {
     if ui.small_button("Refresh").clicked() {
         ws.load_history();
     }

@@ -64,6 +64,11 @@ fn choice(key: impl Into<String>, label: impl Into<String>, on: bool) -> Choice 
 /// The choices a [`command::Kind::Choices`] command lists now.
 pub fn choices(o: &Opened, id: &str) -> Vec<Choice> {
     match id {
+        "view.panels" => crate::core::layout::TILES
+            .iter()
+            .filter(|(id, _)| *id != "viewport")
+            .map(|(id, title)| choice(*id, *title, crate::ui::shell::is_open(&o.tiles, id)))
+            .collect(),
         "file.open_recent" => o
             .recent
             .iter()
@@ -115,6 +120,16 @@ pub fn choose(o: &mut Opened, id: &str, key: &str) -> Option<Action> {
             }
         }
         "view.show" => o.ws.set_focus((!key.is_empty()).then(|| key.to_owned())),
+        // A check per tile: closes an open one, opens a closed one at its
+        // default place.
+        "view.panels" => {
+            if crate::ui::shell::is_open(&o.tiles, key) {
+                crate::ui::shell::close(&mut o.tiles, key);
+            } else {
+                crate::ui::shell::open(&mut o.tiles, key);
+            }
+            o.layout_dirty = true;
+        }
         _ => {}
     }
     None
@@ -243,6 +258,11 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         "tools.interference" => {
             o.ws.check_interference();
             o.dialogs.interference = true;
+        }
+        "view.reset_layout" => {
+            o.tiles = crate::ui::shell::tree(&crate::core::layout::default());
+            o.ws.set_config("ui.layout", json!({}));
+            o.layout_dirty = false;
         }
         // Mod+K again closes it.
         "palette.open" => {

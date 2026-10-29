@@ -9,6 +9,8 @@ repository.workspace = true
 bytemuck = { version = "1", features = ["derive"] }
 # egui on winit and wgpu: all Rust, no C. Only what the app uses.
 eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "wayland", "wgpu", "x11"] }
+# Docking tiles round the viewport (design 199), by egui's authors.
+egui_tiles = "0.18"
 png = "0.18"
 pollster = "0.4"
 # Levels of detail for 100,000 occurrences a frame, side by side.

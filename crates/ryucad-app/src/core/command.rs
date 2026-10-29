@@ -283,6 +283,8 @@ pub const COMMANDS: &[Command] = &[
         .toolbar(),
     cmd("view.compare_with", "Compare with…", View),
     cmd("view.compare_stop", "Stop comparing", View),
+    cmd("view.panels", "Panels", View).icon("layout").choices(),
+    cmd("view.reset_layout", "Reset layout", View),
     cmd("measure.tool", "Measure", Tools).icon("ruler").toggle(),
     cmd("measure.mass", "Mass properties", Tools).icon("scales"),
     cmd("measure.clearance", "Clearance", Tools).icon("arrows-left-right"),

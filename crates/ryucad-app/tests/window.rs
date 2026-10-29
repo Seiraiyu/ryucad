@@ -23,15 +23,20 @@ fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
     ONE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// A window the mockups' size: 1600×1000, where the default tiles give
+/// the tree, the right tabs and the bottom tabs room.
 fn window(p: &Project) -> Harness<'static, App> {
-    sized(p, 700.0)
+    sized(p, 1000.0)
 }
 
-/// A window `height` tall: the right panel's lower sections need room.
+/// A window `height` tall: the right tabs' lower sections need room.
 fn sized(p: &Project, height: f32) -> Harness<'static, App> {
+    // Every window test shares the preferences: each window starts from
+    // the default tiles, whatever the last one left.
+    p.ok(&["config", "set", "ui.layout", "{}"]);
     let root = p.root.clone();
     Harness::builder()
-        .with_size(egui::vec2(1000.0, height))
+        .with_size(egui::vec2(1600.0, height))
         .wgpu()
         .build_eframe(move |cc| App::open(&cc.egui_ctx, Some(&root), ryucad()))
 }
@@ -64,6 +69,15 @@ fn menu(h: &mut Harness<'static, App>, menu: &str, item: &str) {
         .unwrap()
         .get_by(named)
         .click();
+}
+
+/// Shows tile `id` (`parameters`, `part`) as View > Panels does: the
+/// tiles show one tab of a group at a time, and a tab draws (and asks for
+/// what it shows) only while it is the one showing. Not by a click: the
+/// right tabs are narrower than their titles, and the last is clipped.
+fn show_tab(h: &mut Harness<'static, App>, id: &str) {
+    ryucad_app::ui::shell::open(&mut h.state_mut().opened_mut().tiles, id);
+    h.run_steps(2);
 }
 
 /// Runs frames until `done` holds.
@@ -1476,6 +1490,8 @@ fn a_parameter_is_edited_in_its_panel() {
     }
     let p = Project::new().with_sketch();
     let mut h = window(&p);
+    frames(&mut h, |a| a.opened().ws.idle());
+    show_tab(&mut h, "parameters");
     frames(&mut h, |a| {
         let o = a.opened();
         o.ws.idle() && o.ws.params.is_some() && o.ws.model.sketches.len() == 1
@@ -1538,6 +1554,7 @@ fn a_compare_marks_the_tree_and_shows_what_changed() {
     h.get_by_label("boss [removed]").click();
     frames(&mut h, |a| a.opened().view.chosen.is_some());
     h.step();
+    show_tab(&mut h, "changes");
     h.get_by_label("Changes since HEAD");
     h.get_by_label("result: built → absent");
     h.get_by_label("Stop comparing").click();
@@ -1654,6 +1671,7 @@ fn parts_show_their_release_state_and_a_compare_marks_proposals() {
     h.get_by_label("base (box)").click();
     frames(&mut h, |a| a.opened().view.chosen.is_some());
     h.step();
+    show_tab(&mut h, "changes");
     h.get_by_label("Part p");
     h.get_by_label("state: in work → in work, A proposed");
 }
@@ -1666,6 +1684,8 @@ fn a_property_is_edited_in_the_part_section_and_pdm_set_up() {
     }
     let p = Project::new().with_part();
     let mut h = sized(&p, 1200.0);
+    frames(&mut h, loaded);
+    show_tab(&mut h, "part");
     frames(&mut h, |a| {
         let o = a.opened();
         loaded(a) && o.ws.props.is_some() && o.ws.pdm_config.is_some()
@@ -2512,7 +2532,8 @@ fn file_import_step_plans_then_imports() {
     h.get_by_label("body (import: box_ap214.step / part 2)")
         .click();
     frames(&mut h, |a| a.opened().view.chosen.is_some());
-    h.get_by_label("Close").click();
+    // The dialog's, past the tiles' tabs' close buttons.
+    h.get_all_by_label("Close").last().unwrap().click();
     h.step();
     menu(&mut h, "File", "Update import…");
     shown(&mut h, "Update import");
@@ -2680,6 +2701,7 @@ fn where_used_shows_an_assembly() {
     frames(&mut h, bolts_drawn);
     // The bolt chosen in the tree: the Part section says where it is used.
     h.get_by_label("shank (cylinder)").click();
+    show_tab(&mut h, "part");
     frames(&mut h, |a| {
         a.opened()
             .ws
@@ -2987,7 +3009,7 @@ fn the_branches_tab_previews_and_compares_another_worktree() {
     p.ok(&["feature", "edit", "p", "base", "--param", "x=12"]);
     let mut h = window(&p);
     frames(&mut h, loaded);
-    h.get_by_label("Branches").click();
+    show_tab(&mut h, "branches");
     let arm_s = arm.to_str().unwrap().to_owned();
     frames(&mut h, |a| {
         a.opened().ws.branches.previews.contains_key(&arm_s)
@@ -3168,4 +3190,57 @@ fn the_palette_runs_a_command_and_goes_to_a_feature() {
         "display.edges",
         if edges { "true" } else { "false" },
     ]);
+}
+
+#[test]
+fn tiles_close_reopen_and_the_layout_resets() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    use ryucad_app::core::layout;
+    use ryucad_app::ui::shell;
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    let open = |h: &Harness<'static, App>, id: &str| shell::is_open(&h.state().opened().tiles, id);
+    assert!(open(&h, "history"));
+    // View > Panels checks each tile; choosing an open one closes it.
+    menu(&mut h, "View", "Panels");
+    h.run_steps(2);
+    h.get_all_by_role(egui::accesskit::Role::Menu)
+        .last()
+        .unwrap()
+        .get_by_label("History")
+        .click();
+    frames(&mut h, |a| !shell::is_open(&a.opened().tiles, "history"));
+    // The layout is saved, at most once a second.
+    let saved = || p.ok(&["config", "get", "ui.layout"])["value"].clone();
+    let t = std::time::Instant::now();
+    while saved() == serde_json::json!({}) {
+        h.step();
+        assert!(t.elapsed() < Duration::from_secs(30), "never saved");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(!layout::read(&saved()).root.tiles().contains(&"history"));
+    // Chosen again, it comes back at its place, showing.
+    menu(&mut h, "View", "Panels");
+    h.run_steps(2);
+    h.get_all_by_role(egui::accesskit::Role::Menu)
+        .last()
+        .unwrap()
+        .get_by_label("History")
+        .click();
+    frames(&mut h, |a| shell::is_open(&a.opened().tiles, "history"));
+    // Reset layout: the default, and `{}` in the preferences.
+    menu(&mut h, "View", "Reset layout");
+    frames(&mut h, |a| {
+        shell::node(&a.opened().tiles) == Some(layout::default())
+    });
+    let t = std::time::Instant::now();
+    while saved() != serde_json::json!({}) {
+        h.step();
+        assert!(t.elapsed() < Duration::from_secs(30), "never reset");
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
