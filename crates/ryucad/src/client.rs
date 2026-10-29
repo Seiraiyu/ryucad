@@ -37,6 +37,13 @@ pub const APP_VAR: &str = "RYUCAD_APP";
 /// front; otherwise (or if none is attached) the app starts on `dir`. A
 /// daemon is never started just to ask.
 pub fn open(dir: &Path, root: Option<&Path>) -> Result<Value> {
+    open_app(dir, root, None)
+}
+
+/// [`open`], starting [`APP_VAR`]'s app when a new window is needed, else
+/// `app` (the app opening another worktree starts itself), else
+/// `ryucad-app` on `PATH`.
+pub fn open_app(dir: &Path, root: Option<&Path>, app: Option<&Path>) -> Result<Value> {
     allow_foreground();
     if let Some(root) = root
         && let Ok(mut conn) = Connection::connect(&crate::endpoint::Endpoint::for_project(root)?)
@@ -45,9 +52,10 @@ pub fn open(dir: &Path, root: Option<&Path>) -> Result<Value> {
     {
         return Ok(json!({"opened": "existing", "asked": r["asked"], "dir": dir}));
     }
-    let app = match std::env::var_os(APP_VAR) {
-        Some(p) => Some(PathBuf::from(p)).filter(|p| p.is_file()),
-        None => find_program("ryucad-app"),
+    let app = match (std::env::var_os(APP_VAR), app) {
+        (Some(p), _) => Some(PathBuf::from(p)).filter(|p| p.is_file()),
+        (None, Some(a)) => Some(a.to_path_buf()),
+        (None, None) => find_program("ryucad-app"),
     };
     let missing = || {
         Error::new(
