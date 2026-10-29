@@ -681,6 +681,26 @@ pub enum Request {
     /// holds and the instances placing them.
     #[serde(rename = "deps.list")]
     DepsList {},
+    /// Fetches (unless `offline`), then moves every instance of the named
+    /// dependencies' parts (all of them when `names` is empty; or of one
+    /// `part`) to its part's latest official label that isn't obsolete,
+    /// or to `to`, and writes the lock: what moved, and what builds now and
+    /// wouldn't after (`failing`). `dry_run` writes nothing.
+    #[serde(rename = "deps.update")]
+    DepsUpdate {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        names: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        offline: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// What dependency `name` (a name or project ID) has released on its
     /// release branch as fetched, offline: each part (or only `part`) with
     /// its number, name, kind and labels, latest first.
@@ -1291,6 +1311,7 @@ impl Request {
                 | Request::AppearanceSet { .. }
                 | Request::AppearanceClear { .. }
                 | Request::DepsAdd { .. }
+                | Request::DepsUpdate { dry_run: false, .. }
                 | Request::ViewSave { .. }
                 | Request::ViewDelete { .. }
                 | Request::ViewRename { .. }

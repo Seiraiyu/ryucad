@@ -496,6 +496,24 @@ fn dispatch(
         ),
         Request::DepsFetch { names } => crate::deps::fetch(session, &names),
         Request::DepsList {} => crate::deps::list(session),
+        Request::DepsUpdate {
+            names,
+            part,
+            to,
+            offline,
+            dry_run,
+            expected_revision,
+        } => crate::deps::update(
+            session,
+            crate::deps::Update {
+                names: &names,
+                part: part.as_deref(),
+                to: to.as_deref(),
+                offline,
+                dry_run,
+            },
+            expected_revision.as_deref(),
+        ),
         Request::DepsParts { name, part } => crate::deps::parts(session, &name, part.as_deref()),
         Request::MaterialsList {} => crate::materials::list(session),
         Request::MaterialsSet {

@@ -1131,6 +1131,27 @@ enum DepsCmd {
     /// Each dependency and transitive project: where it is, whether it is fetched, the labels
     /// the lock holds and which instances place them. Offline.
     List,
+    /// Fetch, then move every instance of the dependencies' parts (or the named ones', or one
+    /// part's) to its latest official release, and write the lock: what moved and what would
+    /// fail after. `--offline` fetches nothing (and with nothing to move, writes the lock again).
+    Update {
+        names: Vec<String>,
+        /// Only instances of this part.
+        #[arg(long)]
+        part: Option<String>,
+        /// To this label rather than the latest.
+        #[arg(long, value_name = "LABEL")]
+        to: Option<String>,
+        /// Use what was fetched; fetch nothing.
+        #[arg(long)]
+        offline: bool,
+        /// Say what would move and what would fail, writing nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Fail with `conflict` unless the project is still at this revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
     /// What a dependency has released, as fetched: each part's number, name, kind and labels,
     /// latest first. Offline.
     Parts {
@@ -2088,6 +2109,21 @@ fn request(cmd: &Command) -> Option<Request> {
             names: names.clone(),
         },
         Command::Deps(DepsCmd::List) => Request::DepsList {},
+        Command::Deps(DepsCmd::Update {
+            names,
+            part,
+            to,
+            offline,
+            dry_run,
+            expect,
+        }) => Request::DepsUpdate {
+            names: names.clone(),
+            part: part.clone(),
+            to: to.clone(),
+            offline: *offline,
+            dry_run: *dry_run,
+            expected_revision: expect.clone(),
+        },
         Command::Deps(DepsCmd::Parts { name, part }) => Request::DepsParts {
             name: name.clone(),
             part: part.clone(),
