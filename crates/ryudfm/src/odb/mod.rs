@@ -11,6 +11,7 @@ pub mod info;
 pub mod job;
 pub mod lzw;
 pub mod matrix;
+pub mod netlist;
 pub mod outline;
 pub mod step;
 mod sysattr;
