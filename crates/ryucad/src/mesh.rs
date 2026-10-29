@@ -315,7 +315,8 @@ impl Cache {
 
     /// Whether the mesh of the body with `hash` at `quality` is held.
     pub fn has(&self, hash: &str, quality: Quality) -> bool {
-        self.entries.contains_key(&(hash.to_owned(), Key::Display(quality)))
+        self.entries
+            .contains_key(&(hash.to_owned(), Key::Display(quality)))
     }
 
     /// What the meshes held take, in bytes.
