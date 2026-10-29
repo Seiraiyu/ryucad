@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ryucad 11.A: the tree icon sheet</title>
+<link rel="stylesheet" href="vendor/phosphor.css">
+<link rel="stylesheet" href="vendor/phosphor-fill.css">
+<link rel="stylesheet" href="app.css">
+<script src="glyphs.js"></script>
+<script src="mock.js"></script>
+<style>
+  .sheet { width: 1600px; padding: 28px 36px; display: grid; grid-template-columns: 520px 440px 1fr; gap: 28px; }
+  .sheet h1 { grid-column: 1 / 4; font-size: 22px; font-weight: 600; margin: 0; }
+  .sheet .sub { grid-column: 1 / 4; margin-top: -20px; color: var(--text-weak); }
+  .ir { display: grid; grid-template-columns: 40px 24px 1fr; align-items: center; height: 42px; }
+  .ir .n { line-height: 16px; } .ir .src { font-size: 11px; color: var(--text-weak); font-family: "JetBrains Mono", monospace; }
+  .treebox { border: 1px solid var(--border); background: var(--app); width: 440px; padding: 6px 0; }
+</style>
+<body>
+<script>
+  // Every tree row type and state of design 199's tables, at 32 px and the
+  // tree's 16 px, in this variant's colours, and the sample tree.
+  const ROWS = [
+    ["Structure", [["Part", "cube", "accent"], ["Assembly", "assembly", "accent"], ["Solid", "cube-focus"], ["Tool solid, consumed", "cube-focus", "weak", "weak, consumed badge"],
+      ["Sketch", "pencil-simple-line", "", "tinted by how defined"], ["A feature's “uses” line", "link-simple", "weak"]]],
+    ["Primitives", [["Box", "cube-transparent"], ["Cylinder", "cylinder"], ["Cone", "cone"], ["Sphere", "sphere"], ["Torus", "torus"]]],
+    ["Features", [["Extrude (new, join)", "extrude"], ["Extrude (cut)", "extrude-cut"], ["Revolve (new, join)", "revolve"], ["Revolve (cut)", "revolve-cut"],
+      ["Boolean unite", "unite"], ["Boolean subtract", "subtract"], ["Boolean intersect", "intersect", "", "also the intersect operation's badge"],
+      ["Fillet", "fillet"], ["Chamfer", "chamfer"], ["Hole (every form)", "hole"], ["Linear pattern", "pattern-linear"], ["Circular pattern", "pattern-circular"],
+      ["Mirror pattern", "flip-horizontal"], ["Import", "file-arrow-down"]]],
+    ["Assembly", [["Instance of a part", "cube", "", "the part's icon"], ["Instance of a subassembly", "assembly"], ["Pattern copy", "cube", "weak", "its part's icon, weak"],
+      ["Mates (the group row)", "paperclip", "", "SolidWorks's mate folder"], ["Mate: fastened", "lock-simple"], ["Mate: revolute", "arrow-counter-clockwise"],
+      ["Mate: slider", "arrows-left-right"], ["Mate: cylindrical", "mate-cylindrical"], ["Mate: planar", "mate-planar"], ["Mate: ball", "mate-ball"],
+      ["Instance pattern", "pattern-linear", "", "or circular"]]],
+  ];
+  const STATES = [
+    ["Failed", "x-circle", "red", "icon and text red"], ["Unmeshed faces", "warning", "amber"], ["Stale (sketch, assembly)", "arrows-clockwise", "amber"],
+    ["Sketch well-defined", "pencil-simple-line", "", "no badge"], ["Sketch under-defined", "pencil-simple-line", "blue", "icon tinted, no badge"],
+    ["Sketch over-defined or failing", "pencil-simple-line", "red", "icon tinted, no badge"], ["Hidden", "eye-slash", "weak", "row weak"],
+    ["Consumed by a boolean", "arrow-elbow-down-right", "weak", "row weak"], ["Instance fixed", "push-pin", "", "SolidWorks's (f)"],
+    ["Mate redundant", "warning-circle", "amber"], ["Mate conflicting", "x-circle", "red"], ["Merge conflict", "git-merge", "red"],
+    ["Released", "seal-check", "green"], ["Modified since its release", "seal-warning", "amber"], ["Proposed", "seal-question", "blue"],
+    ["Obsolete", "prohibit", "weak", "row weak"], ["Compare: added", "plus-circle", "green"], ["Compare: changed", "note-pencil", "amber"],
+    ["Compare: moved", "arrows-down-up", "amber"], ["Compare: removed", "minus-circle", "red"],
+  ];
+  const src = (ic) => (GLYPHS[ic] ? `ryucad ${ic}` : `ph-${ic}`);
+  const ir = ([n, ic, tint = "", note = ""]) => `<div class="ir"><span class="${TINT[tint] || ""}">${icon(ic, 32)}</span><span class="${TINT[tint] || ""}">${icon(ic, 16)}</span>
+    <div><div class="n">${n}</div><div class="src">${src(ic)}${note ? " · " + note : ""}</div></div></div>`;
+  const left = ROWS.slice(0, 3).map(([g, rs]) => `<div class="section">${g}</div>${rs.map(ir).join("")}`).join("");
+  const mid = ROWS.slice(3).map(([g, rs]) => `<div class="section">${g}</div>${rs.map(ir).join("")}`).join("")
+    + `<div class="section">States: a badge after the row's text</div>${STATES.map(ir).join("")}`;
+  const right = `<div class="section">The tree tile at 16 px</div><div class="treebox">${treeTile()}</div>
+    <div class="section" style="margin-top:20px">Toolbar at 20 px</div><div class="treebox" style="padding:6px">${toolbar({ noPeople: true }).replace('class="toolbar"', 'class="toolbar" style="border:0;height:auto"')}</div>`;
+  mock(`<div class="sheet"><h1>ryucad phase 11: tree icons</h1>
+    <div class="sub">Phosphor Regular 2.1.2 (MIT) where it has an honest glyph; ryucad glyphs (marked “ryucad”) on Phosphor's 256-unit grid and 16-unit stroke where it has none. Monochrome, tinted only by state.</div>
+    <div>${left}</div><div>${mid}</div><div>${right}</div></div>`);
+</script>
