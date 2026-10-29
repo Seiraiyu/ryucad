@@ -7,7 +7,9 @@
 //! what diffs say, what merges make, the content hashes release records
 //! name, where assemblies place their parts, the bodies and names of
 //! imported STEP files, the bytes of exported STEP files, and cameras:
-//! the cube's views, named views and views normal to faces. After
+//! the cube's views, named views and views normal to faces, and the disk
+//! cache's keys and entries under a release's identity (what lets a
+//! release on one platform read what another wrote). After
 //! a deliberate change, regenerate with
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
@@ -241,6 +243,53 @@ fn display_section(golden: &mut Golden) {
     for q in [Quality::Coarse, Quality::Fine] {
         let meshes = ryucad::server::meshes(&mut session, &part, None, q).unwrap();
         s.str(&format!("{:x}", md(&ryucad::mesh::encode(&meshes))));
+    }
+}
+
+/// The disk cache under a fixed release's identity: the identity, a key
+/// of each kind, and every entry a rebuild and its meshes write (sorted by
+/// their bytes, since a feature's key holds the versions a release stamps,
+/// and its payload doesn't). Every platform must write the same bytes, or
+/// a remote cache couldn't serve one platform what another filled.
+fn cache_section(golden: &mut Golden) {
+    use ryucad::cache::{Disk, Identity, Kind, released_identity};
+    let mut s = golden.section("cache");
+    let bytes = released_identity("0.7.0", "0.7.0", "0.7.0", "0123456789ab");
+    s.str(&blake3::Hash::from(bytes).to_hex());
+    let identity = Identity {
+        bytes,
+        shared: true,
+    };
+    let (dir, _) = showcase();
+    let disk = std::sync::Arc::new(Disk::open_as(dir.path().join("cache"), identity));
+    for kind in Kind::ALL {
+        s.str(&disk.key(kind, b"golden input"));
+    }
+    let mut session = ryucad::session::Session::open(dir.path())
+        .unwrap()
+        .with_disk(Some(std::sync::Arc::clone(&disk)));
+    let part = Id::parse("show", "part").unwrap();
+    ryucad::server::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
+    for kind in Kind::ALL {
+        let keys = disk.keys_of(kind, &bytes);
+        let mut entries: Vec<(u128, usize)> = keys
+            .iter()
+            .map(|k| {
+                let e = disk.get_entry(kind, k).unwrap();
+                (md(&e), e.len())
+            })
+            .collect();
+        entries.sort();
+        s.str(&format!("{} {}", kind.as_str(), entries.len()));
+        for (h, len) in entries {
+            s.str(&format!("{h:x} {len}"));
+        }
+        // A mesh's key is the body's hash and the parameters alone.
+        if kind == Kind::Mesh {
+            for k in keys {
+                s.str(&k);
+            }
+        }
     }
 }
 
@@ -2128,5 +2177,6 @@ fn determinism() {
     imports_section(&mut golden);
     exports_section(&mut golden);
     views_section(&mut golden);
+    cache_section(&mut golden);
     golden.finish();
 }
