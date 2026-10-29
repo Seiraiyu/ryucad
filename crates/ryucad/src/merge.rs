@@ -297,6 +297,7 @@ pub fn newest(kind: &str) -> Option<u64> {
         FEATURE_KIND => Some(FEATURE_FORMAT),
         crate::doc::materials::KIND => Some(crate::doc::materials::FORMAT),
         crate::doc::views::KIND => Some(crate::doc::views::FORMAT),
+        crate::doc::appearance::KIND => Some(crate::doc::appearance::FORMAT),
         _ => None,
     }
 }
@@ -1546,6 +1547,39 @@ mod tests {
         let (_, o) = bytes(&canonical(&base), &canonical(&ours), &canonical(&other));
         assert_eq!(o, Outcome::Conflicts(1));
         let newer = json!({"format": 2, "kind": "ryucad.view"});
+        assert!(matches!(
+            bytes(&canonical(&base), &canonical(&newer), &canonical(&theirs)).1,
+            Outcome::Text(_)
+        ));
+    }
+
+    #[test]
+    fn appearance_merges_by_entry_and_field() {
+        let file = |faces: Value| {
+            json!({"faces": faces, "format": 1, "kind": "ryucad.appearance",
+                   "part": {"colour": "#808080"}})
+        };
+        let (a, b) = (
+            "box/0123456789abcdef0123456789abcdef",
+            "box/fedcba9876543210fedcba9876543210",
+        );
+        let base = file(json!({a: {"colour": "#ff0000"}}));
+        // Two people colouring different faces merge cleanly.
+        let ours = file(json!({a: {"colour": "#ff0000"}, b: {"colour": "#00ff00"}}));
+        let theirs = file(json!({a: {"colour": "#ff0000", "opacity": 0.5}}));
+        let (out, o) = bytes(&canonical(&base), &canonical(&ours), &canonical(&theirs));
+        assert_eq!(o, Outcome::Clean);
+        assert_eq!(
+            out,
+            canonical(&file(json!({a: {"colour": "#ff0000", "opacity": 0.5},
+                                   b: {"colour": "#00ff00"}})))
+        );
+        // One face coloured two ways is one conflict.
+        let other = file(json!({a: {"colour": "#0000ff"}}));
+        let mine = file(json!({a: {"colour": "#00ffff"}}));
+        let (_, o) = bytes(&canonical(&base), &canonical(&mine), &canonical(&other));
+        assert_eq!(o, Outcome::Conflicts(1));
+        let newer = json!({"format": 2, "kind": "ryucad.appearance"});
         assert!(matches!(
             bytes(&canonical(&base), &canonical(&newer), &canonical(&theirs)).1,
             Outcome::Text(_)

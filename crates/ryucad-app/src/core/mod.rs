@@ -1,6 +1,7 @@
 //! The app without a window: what it knows and how it learns it.
 
 pub mod activity;
+pub mod appearance;
 pub mod bom;
 pub mod compare;
 pub mod cube;

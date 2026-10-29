@@ -3091,6 +3091,81 @@ fn named_views_from_the_cli() {
 }
 
 #[test]
+fn appearance_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=40", "--param", "y=20", "--param",
+        "z=10",
+    ]);
+    let got = p.ok(&["appearance", "p"]);
+    assert_eq!(
+        got["solids"],
+        json!([{"part": "p", "solid": "b", "opacity": 1}]),
+        "{got}"
+    );
+    let rev = got["revisions"]["p"].as_str().unwrap().to_owned();
+    let set = p.ok(&["colour", "p", "--colour", "#D03030", "--expect", &rev]);
+    assert_eq!(
+        set["entries"][0]["look"],
+        json!({"colour": "#d03030"}),
+        "{set}"
+    );
+    p.fails(
+        &["colour", "p/b", "--opacity", "0.5", "--expect", &rev],
+        "conflict",
+        1,
+    );
+    p.fails(&["colour", "p/b", "--opacity", "1.5"], "invalid_param", 1);
+    p.fails(&["colour", "p/nothing", "--opacity", "0.5"], "not_found", 1);
+    let (code, _) = p.run_in(
+        &p.direct,
+        "",
+        &["colour", "p", "--colour", "#000000", "--material"],
+    );
+    assert_eq!(code, 2);
+    p.ok(&["colour", "p/b", "--opacity", "0.5"]);
+    let (_, v) = p.run_in(&p.direct, "", &["inspect", "p"]);
+    let face = v["result"]["bodies"][0]["faces"][0]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    p.ok(&["colour", &format!("p/b/{face}"), "--colour", "#2050c0"]);
+    let got = p.ok(&["appearance"]);
+    assert_eq!(got["solids"][0]["colour"], "#d03030", "{got}");
+    assert_eq!(got["solids"][0]["opacity"], 0.5);
+    assert_eq!(got["solids"][0]["faces"][&face]["colour"], "#2050c0");
+    // The opacity taken out, it comes from nothing: opaque again.
+    p.ok(&["colour", "p/b", "--no-opacity"]);
+    assert_eq!(p.ok(&["appearance", "p"])["solids"][0]["opacity"], 1);
+    // Renders draw it, or the theme.
+    p.ok(&["render", "p", "--out", "a.png", "--size", "160x120"]);
+    p.ok(&[
+        "render",
+        "p",
+        "--out",
+        "b.png",
+        "--size",
+        "160x120",
+        "--no-appearance",
+    ]);
+    for root in [&p.direct, &p.daemon] {
+        assert_ne!(
+            fs::read(root.join("a.png")).unwrap(),
+            fs::read(root.join("b.png")).unwrap()
+        );
+    }
+    // Cleared, and one undoable change.
+    let (code, v) = p.run_in(&p.daemon, "", &["colour", "p", "--clear"]);
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!((code, &v["ok"]), (0, &json!(true)), "{v}");
+    let text = fs::read_to_string(p.daemon.join("parts/p/appearance.json")).unwrap();
+    assert!(text.contains("\"part\""), "{text}");
+}
+
+#[test]
 fn interference_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);

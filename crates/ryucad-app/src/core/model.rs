@@ -506,6 +506,10 @@ pub struct Model {
     /// What the window hides, as its participant's hidden set says:
     /// occurrences (`<asm>/<path>`) and solids (`<part>/<solid>`).
     pub hidden: std::collections::BTreeSet<String>,
+    /// How each drawn body's faces look, by key, as the daemon says with
+    /// what the Appearance window drags laid over it; a body with none is
+    /// drawn plain.
+    pub looks: Arc<BTreeMap<BodyKey, Arc<crate::core::appearance::Look>>>,
     /// Bumped whenever anything here changes, so views know to redraw.
     pub generation: u64,
 }
