@@ -91,8 +91,19 @@ pub fn proposed(session: &Session, writes: &Writes) -> Result<Project> {
 
 /// Puts `writes` on disk if they add no error to the project, and takes
 /// them in; refused with the first new fault's code otherwise.
-pub fn commit(session: &mut Session, what: &str, writes: Writes) -> Result<()> {
-    let after = proposed(session, &writes)?;
+pub fn commit(session: &mut Session, what: &str, mut writes: Writes) -> Result<()> {
+    let mut after = proposed(session, &writes)?;
+    // Blocks laid out whose drawing this changes are laid out again, in
+    // the same change, so no agent meets a stale sheet.
+    let current: Vec<(String, Option<String>)> =
+        crate::schemcmd::keep_current(session.project(), &after)
+            .into_iter()
+            .filter(|(path, _)| !writes.0.iter().any(|(p, _)| p == path))
+            .collect();
+    if !current.is_empty() {
+        writes.0.extend(current);
+        after = proposed(session, &writes)?;
+    }
     let added = added_errors(&session.project().faults(), &after.faults());
     if !added.is_empty() {
         return Err(refused(what, &added));

@@ -31,10 +31,12 @@ pub mod project;
 pub mod props;
 pub mod proto;
 pub mod schem;
+pub mod schemcmd;
 pub mod server;
 pub mod session;
 pub mod symbol;
 pub mod topcmd;
+pub mod vocab;
 pub mod write;
 
 /// ryueda as a product of `ryu-session`: its daemons, clients and live

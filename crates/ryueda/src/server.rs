@@ -125,7 +125,25 @@ pub fn answer(
             .map(|l| format!("{}/", l.base)),
         _ => None,
     };
-    let result = dispatch(session, live.as_deref_mut(), me, req).map(Answer::json);
+    let result = match req {
+        Request::Render {
+            design,
+            block,
+            sheet,
+            format,
+            scale,
+            fit,
+        } => crate::schemcmd::render(
+            session.project(),
+            design.as_deref(),
+            block.as_deref(),
+            sheet.as_deref(),
+            format.unwrap_or(crate::schemcmd::Format::Svg),
+            scale,
+            fit,
+        ),
+        req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
+    };
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
     {
         // Only this project's own files: an alias's library project comes
@@ -550,6 +568,48 @@ fn dispatch(
             expected_revision,
         } => crate::erc::configure(session, &severity, expected_revision.as_deref()),
         Request::Check {} => crate::erc::check(session.root()),
+        Request::Layout {
+            design,
+            block,
+            relayout,
+            dry_run,
+            expected_revision,
+        } => crate::schemcmd::layout(
+            session,
+            design.as_deref(),
+            block.as_deref(),
+            relayout.as_deref(),
+            dry_run,
+            expected_revision.as_deref(),
+        ),
+        Request::LayoutPlace {
+            block,
+            instructions,
+            moves,
+            dry_run,
+            expected_revision,
+        } => crate::schemcmd::place(
+            session,
+            &block,
+            &instructions,
+            &moves,
+            dry_run,
+            expected_revision.as_deref(),
+        ),
+        Request::LayoutInstructions { block } => {
+            crate::schemcmd::instructions(session.project(), &block)
+        }
+        Request::Describe {
+            design,
+            block,
+            sheet,
+        } => crate::schemcmd::describe(
+            session.project(),
+            design.as_deref(),
+            block.as_deref(),
+            sheet.as_deref(),
+        ),
+        Request::Render { .. } => unreachable!("answered before dispatch"),
         Request::ActivityLog { limit, before } => {
             let entries = live.map_or_else(Vec::new, |l| l.log.page(limit.unwrap_or(50), before));
             Ok(json!({ "entries": entries }))

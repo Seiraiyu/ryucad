@@ -8,6 +8,8 @@
 
 #[path = "support/breakout.rs"]
 mod breakout;
+#[path = "support/draw.rs"]
+mod draw;
 #[path = "support/generated.rs"]
 mod generated;
 

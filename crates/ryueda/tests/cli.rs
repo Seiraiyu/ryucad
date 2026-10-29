@@ -6,6 +6,8 @@
 
 #[path = "support/breakout.rs"]
 mod breakout;
+#[path = "support/draw.rs"]
+mod draw;
 
 use assert_cmd::Command;
 use serde_json::{Value, json};
@@ -443,6 +445,11 @@ fn every_protocol_method_has_a_command() {
         ("erc.waive", &["erc", "waive"]),
         ("erc.configure", &["erc", "configure"]),
         ("check", &["check"]),
+        ("layout", &["layout"]),
+        ("layout.place", &["place"]),
+        ("layout.instructions", &["place"]),
+        ("describe", &["describe"]),
+        ("render", &["render"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),
@@ -1938,5 +1945,174 @@ fn properties_and_designator_formats_from_the_cli() {
     assert_eq!(
         missing[0]["details"]["error"]["code"],
         json!("property_unknown")
+    );
+}
+
+/// Copies a file the daemon side of a pair wrote, for people to look at
+/// (`target/ryueda-look`).
+fn keep_for_looking(from: &Path, name: &str) {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ryueda-look");
+    fs::create_dir_all(&dir).unwrap();
+    fs::copy(from, dir.join(name)).unwrap();
+}
+
+#[test]
+fn schematics_from_the_cli() {
+    let p = Pair::breakout();
+    // Laid out from nothing: both blocks written, each one sheet.
+    let l = p.ok(&["layout"]);
+    let blocks: Vec<&str> = l["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["block"].as_str().unwrap())
+        .collect();
+    assert_eq!(blocks, ["breakout", "sensor"]);
+    assert!(
+        l["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|b| b["written"] == true)
+    );
+    assert!(p.direct.join("board/blocks/breakout/layout.json").is_file());
+    // Again: nothing changes.
+    let again = p.ok(&["layout"]);
+    assert!(
+        again["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|b| b["written"] == false)
+    );
+    // A description names idioms and neighbours.
+    let d = p.ok(&["describe", "--block", "breakout"]);
+    let idioms: Vec<&str> = d["blocks"][0]["idioms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["kind"].as_str().unwrap())
+        .collect();
+    assert!(
+        idioms.contains(&"pull_up") && idioms.contains(&"decoupling"),
+        "{idioms:?}"
+    );
+    // Renders, SVG and PNG.
+    let r = p.ok(&["render", "--out", "breakout.svg"]);
+    assert_eq!(
+        (&r["block"], &r["binary"]["encoding"]),
+        (&json!("breakout"), &json!("image/svg+xml"))
+    );
+    let svg = fs::read_to_string(p.daemon.join("board/breakout.svg")).unwrap();
+    assert!(svg.starts_with("<svg") && svg.contains(">U2<"));
+    assert_eq!(
+        svg,
+        fs::read_to_string(p.direct.join("board/breakout.svg")).unwrap()
+    );
+    p.ok(&[
+        "render",
+        "--block",
+        "sensor",
+        "--out",
+        "sensor.png",
+        "--scale",
+        "6",
+    ]);
+    let png = fs::read(p.daemon.join("board/sensor.png")).unwrap();
+    assert_eq!(&png[1..4], b"PNG");
+    keep_for_looking(&p.daemon.join("board/breakout.svg"), "breakout.svg");
+    p.ok(&["render", "--out", "breakout.png", "--fit", "--scale", "12"]);
+    keep_for_looking(&p.daemon.join("board/breakout.png"), "breakout.png");
+    keep_for_looking(&p.daemon.join("board/sensor.png"), "sensor.png");
+    // Instructions: the pull-ups beside the connector, a net as labels.
+    let placed = p.ok(&["place", "breakout", "beside R1 J1 right", "net SDA label"]);
+    assert_eq!(placed["added"], json!(["i1", "i2"]));
+    let list = p.ok(&["place", "breakout", "--list"]);
+    assert_eq!(list["instructions"][0]["text"], json!("beside R1 J1 right"));
+    assert_eq!(list["instructions"][0]["holds"], json!(true));
+    // Repeating one changes nothing; a conflict is refused with fixes.
+    assert_eq!(
+        p.ok(&["place", "breakout", "net SDA label"])["added"],
+        json!([])
+    );
+    let e = p.fails(
+        &["place", "breakout", "edge R1 left"],
+        "instruction_conflict",
+        1,
+    );
+    assert_eq!(e["details"]["instructions"], json!(["i1", "i3"]));
+    assert_eq!(
+        e["details"]["fixes"][0],
+        json!(["release R1", "edge R1 left"])
+    );
+    let e = p.fails(&["place", "breakout", "net SDA port"], "layout_rule", 1);
+    assert!(
+        e["details"]["fixes"].to_string().contains("net SDA label"),
+        "{e}"
+    );
+    p.fails(&["place", "breakout", "beside R9 J1 right"], "not_found", 1);
+    p.fails(
+        &["place", "breakout", "beside R1 J1 sideways"],
+        "invalid_param",
+        1,
+    );
+    // Sending the fix works.
+    p.ok(&["place", "breakout", "release R1", "edge R1 left"]);
+    // A move is held; a dry run writes nothing.
+    let before = fs::read(p.direct.join("board/blocks/breakout/layout.json")).unwrap();
+    let dry = p.ok(&[
+        "place",
+        "breakout",
+        "--dry-run",
+        "--move",
+        "beside C2 U2 below",
+    ]);
+    assert!(dry["description"]["sheets"].is_array());
+    assert_eq!(
+        fs::read(p.direct.join("board/blocks/breakout/layout.json")).unwrap(),
+        before
+    );
+    p.ok(&["place", "breakout", "--move", "beside C2 U2 below"]);
+    let laid: Value = serde_json::from_slice(
+        &fs::read(p.direct.join("board/blocks/breakout/layout.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(laid["placed"]["c2"]["held"], json!(true));
+    // A connectivity write keeps the layout current in the same change,
+    // and undo takes both back.
+    p.ok(&[
+        "component",
+        "add",
+        "breakout",
+        "--of",
+        "c_100n",
+        "--id",
+        "c9",
+    ]);
+    let laid: Value = serde_json::from_slice(
+        &fs::read(p.daemon.join("board/blocks/breakout/layout.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(laid["placed"]["c9"].is_object(), "{laid}");
+    let (code, _) = p.run_in(&p.daemon, "board", &["undo"]);
+    assert_eq!(code, 0);
+    let laid: Value = serde_json::from_slice(
+        &fs::read(p.daemon.join("board/blocks/breakout/layout.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(laid["placed"].get("c9").is_none());
+    // A layout file edited by hand is stale: laid out in memory, written
+    // only by `layout`.
+    let path = "board/blocks/sensor/layout.json";
+    let mut l: Value = serde_json::from_slice(&fs::read(p.direct.join(path)).unwrap()).unwrap();
+    l["text"] = json!({});
+    p.write(path, &ryueda::canonical::to_string(&l));
+    let d = p.ok(&["describe", "--block", "sensor"]);
+    assert_eq!(d["blocks"][0]["stale"], json!(true));
+    let l = p.ok(&["layout", "--block", "sensor"]);
+    assert_eq!(l["blocks"][0]["written"], json!(true));
+    assert_eq!(
+        p.ok(&["describe", "--block", "sensor"])["blocks"][0].get("stale"),
+        None
     );
 }
