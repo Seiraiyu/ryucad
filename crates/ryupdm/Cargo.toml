@@ -12,12 +12,18 @@ blake3 = { version = "1", features = ["pure"] }
 # fetched (`deps`): Git's own transports for `file://`, local paths and
 # SSH (the system `ssh`), with Git's credential helpers.
 gix = { version = "0.89", default-features = false, features = ["sha1", "revision", "blocking-network-client"] }
+# Git's smart HTTP for dependencies over `https://`, through ureq below
+# (`deps::http`): gix's own backends are curl or reqwest.
+gix-transport = { version = "0.61", default-features = false, features = ["http-client"] }
 # Fresh project IDs.
 getrandom = "0.3"
 # Part number patterns: Rust's regex syntax, ASCII classes (`\d` is 0-9).
 regex-lite = "0.1"
 ryucad-doc = { path = "../ryucad-doc" }
 serde = "1"
+# HTTPS for fetching dependencies: rustls with ring and web PKI roots, as
+# ryucad's review client (see its Cargo.toml for why ring).
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [dev-dependencies]
