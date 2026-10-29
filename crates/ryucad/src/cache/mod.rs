@@ -7,7 +7,9 @@
 //! platform; a development build's versions, commit, target and
 //! executable, so it never reads what another build wrote), the entry's
 //! kind and the input hash the session already computes. It holds a
-//! header, a BLAKE3 of its payload and the payload, and is written to a
+//! header, the identity that wrote it, a BLAKE3 of its payload and the
+//! payload (so a remote cache can take it as it is, and `cache push` can
+//! tell this build's entries from others'), and is written to a
 //! temporary file then renamed into place, so a reader sees a whole entry
 //! or none. It isn't synced: a cold rebuild of thousands of parts writes
 //! hundreds of thousands of entries, and waiting on the disk for each
@@ -35,7 +37,15 @@ use std::time::{Duration, SystemTime};
 pub const CACHE_DIR_VAR: &str = "RYUCAD_CACHE_DIR";
 
 /// The first bytes of every entry.
-const MAGIC: &[u8] = b"ryucad.cache.1\n";
+const MAGIC: &[u8] = b"ryucad.cache.2\n";
+
+/// The first bytes of an entry an earlier build wrote, without its
+/// identity: a miss, removed without a note.
+const MAGIC_1: &[u8] = b"ryucad.cache.1\n";
+
+/// The bytes before an entry's payload: the header, the identity, the
+/// payload's BLAKE3 and its length.
+pub const HEADER_LEN: usize = MAGIC.len() + 32 + 32 + 8;
 
 /// The folder under the cache folder this format's entries live in.
 const LAYOUT: &str = "v1";
@@ -64,6 +74,11 @@ impl Kind {
             Kind::Tool => "tools",
             Kind::Mesh => "meshes",
         }
+    }
+
+    /// The kind named `s` (its folder's name).
+    pub fn parse(s: &str) -> Option<Kind> {
+        Kind::ALL.into_iter().find(|k| k.as_str() == s)
     }
 }
 
@@ -310,17 +325,30 @@ impl Disk {
     /// The payload of `input`'s entry of `kind`, if the cache holds a
     /// sound one. A corrupt entry is removed.
     pub fn get(&self, kind: Kind, input: &[u8]) -> Option<Vec<u8>> {
-        let path = self.path(kind, &self.key(kind, input));
+        let entry = self.get_entry(kind, &self.key(kind, input))?;
+        Some(entry[HEADER_LEN..].to_vec())
+    }
+
+    /// The whole entry (header and all) of `kind` under `key`, if the cache
+    /// holds a sound one, whatever identity wrote it (keys hold the
+    /// identity already). Reading counts as using. A corrupt entry is
+    /// removed, one an earlier build's format quietly.
+    pub fn get_entry(&self, kind: Kind, key: &str) -> Option<Vec<u8>> {
+        let path = self.path(kind, key);
         let bytes = fs::read(&path).ok()?;
-        match payload(&bytes) {
-            Some(p) => {
+        match parse(&bytes) {
+            Ok(_) => {
                 // Reading counts as using: trimming goes by this time.
                 if let Ok(f) = fs::File::options().write(true).open(&path) {
                     let _ = f.set_modified(SystemTime::now());
                 }
-                Some(p.to_vec())
+                Some(bytes)
             }
-            None => {
+            Err(Fault::Old) => {
+                let _ = fs::remove_file(&path);
+                None
+            }
+            Err(Fault::Bad) => {
                 self.forget(&path);
                 None
             }
@@ -346,23 +374,52 @@ impl Disk {
     /// Writes `payload` as `input`'s entry of `kind`, unless one is there.
     /// A failure is warned about once and otherwise ignored.
     pub fn put(&self, kind: Kind, input: &[u8], payload_bytes: &[u8]) {
-        let path = self.path(kind, &self.key(kind, input));
-        if path.exists() {
+        let key = self.key(kind, input);
+        if self.path(kind, &key).exists() {
             return;
         }
-        match write_entry(&path, payload_bytes) {
-            Ok(n) => {
-                let total = self.written.fetch_add(n, Ordering::Relaxed) + n;
-                if total > self.max_bytes() / 16 {
-                    self.trim_in_background();
-                }
-            }
-            Err(e) => {
-                if !self.warned.swap(true, Ordering::Relaxed) {
-                    eprintln!("ryucad: not writing to the cache: {}", e.message);
-                }
-            }
+        let bytes = entry(&self.build, payload_bytes);
+        if let Err(e) = self.put_entry(kind, &key, &bytes)
+            && !self.warned.swap(true, Ordering::Relaxed)
+        {
+            eprintln!("ryucad: not writing to the cache: {}", e.message);
         }
+    }
+
+    /// Stores a whole entry (see [`entry`]) of `kind` under `key`, unless
+    /// one is there; whether it wrote it. The caller has checked it
+    /// ([`check`]). Trims in the background when enough was written.
+    pub fn put_entry(&self, kind: Kind, key: &str, bytes: &[u8]) -> Result<bool> {
+        let path = self.path(kind, key);
+        if path.exists() {
+            return Ok(false);
+        }
+        let n = write_entry(&path, bytes)?;
+        let total = self.written.fetch_add(n, Ordering::Relaxed) + n;
+        if total > self.max_bytes() / 16 {
+            self.trim_in_background();
+        }
+        Ok(true)
+    }
+
+    /// The keys of the entries of `kind` that `identity` wrote, by reading
+    /// each entry's header: what this build may push to a remote.
+    pub fn keys_of(&self, kind: Kind, identity: &[u8; 32]) -> Vec<String> {
+        use std::io::Read;
+        let mut keys: Vec<String> = self
+            .entries()
+            .into_iter()
+            .filter(|(k, ..)| *k == kind)
+            .filter_map(|(_, path, ..)| {
+                let mut head = [0; MAGIC.len() + 32];
+                fs::File::open(&path).ok()?.read_exact(&mut head).ok()?;
+                (head.starts_with(MAGIC) && &head[MAGIC.len()..] == identity)
+                    .then(|| path.file_name()?.to_str().map(str::to_owned))
+                    .flatten()
+            })
+            .collect();
+        keys.sort();
+        keys
     }
 
     /// Every entry file, with its kind, size and last use.
@@ -422,9 +479,9 @@ impl Disk {
     pub fn check(&self) -> (u64, u64) {
         let (mut sound, mut corrupt) = (0, 0);
         for (_, path, _, _) in self.entries() {
-            match fs::read(&path).ok().as_deref().and_then(payload) {
-                Some(_) => sound += 1,
-                None => corrupt += 1,
+            match fs::read(&path).ok().as_deref().map(parse) {
+                Some(Ok(_)) => sound += 1,
+                _ => corrupt += 1,
             }
         }
         (sound, corrupt)
@@ -493,21 +550,54 @@ pub fn max_bytes_preference() -> u64 {
         .unwrap_or(DEFAULT_MAX_BYTES)
 }
 
-/// The payload of an entry's bytes, if its header and hash are sound.
-fn payload(bytes: &[u8]) -> Option<&[u8]> {
-    let rest = bytes.strip_prefix(MAGIC)?;
-    let (hash, rest) = rest.split_first_chunk::<32>()?;
-    let (len, payload) = rest.split_first_chunk::<8>()?;
-    if u64::from_le_bytes(*len) != payload.len() as u64 {
-        return None;
-    }
-    (blake3::hash(payload).as_bytes() == hash).then_some(payload)
+/// Why an entry's bytes aren't sound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fault {
+    /// An earlier build's format.
+    Old,
+    /// A wrong header, length or hash.
+    Bad,
 }
 
-/// Writes an entry at `path` through a temporary file beside it, not
-/// synced (a crash leaves at worst an entry that fails its hash); returns
-/// the bytes written.
-fn write_entry(path: &Path, payload: &[u8]) -> Result<u64> {
+/// An entry's identity and payload, if its header, length and hash are
+/// sound.
+fn parse(bytes: &[u8]) -> core::result::Result<(&[u8; 32], &[u8]), Fault> {
+    if bytes.starts_with(MAGIC_1) {
+        return Err(Fault::Old);
+    }
+    let rest = bytes.strip_prefix(MAGIC).ok_or(Fault::Bad)?;
+    let (identity, rest) = rest.split_first_chunk::<32>().ok_or(Fault::Bad)?;
+    let (hash, rest) = rest.split_first_chunk::<32>().ok_or(Fault::Bad)?;
+    let (len, payload) = rest.split_first_chunk::<8>().ok_or(Fault::Bad)?;
+    if u64::from_le_bytes(*len) != payload.len() as u64 || blake3::hash(payload).as_bytes() != hash
+    {
+        return Err(Fault::Bad);
+    }
+    Ok((identity, payload))
+}
+
+/// The identity that wrote an entry, if its bytes are sound: what a
+/// remote cache checks of what it is sent, and a client of what it gets.
+pub fn check(bytes: &[u8]) -> Option<[u8; 32]> {
+    parse(bytes).ok().map(|(identity, _)| *identity)
+}
+
+/// An entry's bytes: the header, `identity`, the payload's BLAKE3 and
+/// length, and the payload.
+pub fn entry(identity: &[u8; 32], payload: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(HEADER_LEN + payload.len());
+    bytes.extend_from_slice(MAGIC);
+    bytes.extend_from_slice(identity);
+    bytes.extend_from_slice(blake3::hash(payload).as_bytes());
+    bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(payload);
+    bytes
+}
+
+/// Writes an entry's bytes at `path` through a temporary file beside it,
+/// not synced (a crash leaves at worst an entry that fails its hash);
+/// returns the bytes written.
+fn write_entry(path: &Path, bytes: &[u8]) -> Result<u64> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let dir = path.parent().expect("entries live in a shard");
     fs::create_dir_all(dir).map_err(|e| io("create", dir, e))?;
@@ -516,14 +606,9 @@ fn write_entry(path: &Path, payload: &[u8]) -> Result<u64> {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    let mut bytes = Vec::with_capacity(MAGIC.len() + 40 + payload.len());
-    bytes.extend_from_slice(MAGIC);
-    bytes.extend_from_slice(blake3::hash(payload).as_bytes());
-    bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-    bytes.extend_from_slice(payload);
     let written = (|| {
         let mut f = fs::File::create(&tmp)?;
-        f.write_all(&bytes)?;
+        f.write_all(bytes)?;
         drop(f);
         fs::rename(&tmp, path)
     })();
@@ -584,6 +669,16 @@ mod tests {
         d.put(Kind::Mesh, b"m", b"some bytes");
         fs::write(&path, b"ryucad.cache.0\n").unwrap();
         assert_eq!(d.get(Kind::Mesh, b"m"), None);
+        // An earlier build's entry goes quietly.
+        d.noted.store(false, Ordering::Relaxed);
+        d.put(Kind::Mesh, b"m", b"some bytes");
+        fs::write(&path, b"ryucad.cache.1\nanything").unwrap();
+        assert_eq!(d.get(Kind::Mesh, b"m"), None);
+        assert!(!path.exists());
+        assert!(
+            !d.noted.load(Ordering::Relaxed),
+            "no note for an old format"
+        );
         d.put(Kind::Mesh, b"m", b"some bytes");
         let whole = fs::read(&path).unwrap();
         fs::write(&path, &whole[..whole.len() - 2]).unwrap();
@@ -606,7 +701,7 @@ mod tests {
         d.put(Kind::Mesh, b"a", &[1; 1000]);
         let s = d.stats();
         assert_eq!(s.entries, 3);
-        let header = (MAGIC.len() + 40) as u64;
+        let header = HEADER_LEN as u64;
         assert_eq!(s.bytes, 1110 + 3 * header);
         assert_eq!(s.kinds[0], (Kind::Feature, 2, 110 + 2 * header));
         assert_eq!(s.kinds[1], (Kind::Tool, 0, 0));
@@ -623,7 +718,7 @@ mod tests {
     fn trimming_removes_the_least_recently_read_first() {
         let dir = tempfile::tempdir().unwrap();
         let d = disk(dir.path());
-        let header = (MAGIC.len() + 40) as u64;
+        let header = HEADER_LEN as u64;
         for (i, input) in [b"a", b"b", b"c", b"d"].iter().enumerate() {
             d.put(Kind::Feature, *input, &[0; 1000]);
             set_used(&d, Kind::Feature, *input, 1000 + i as u64);
@@ -678,7 +773,7 @@ mod tests {
         assert_eq!(d.get(Kind::Feature, b"same").unwrap(), payload);
         let path = d.path(Kind::Feature, &d.key(Kind::Feature, b"same"));
         let mut bytes = fs::read(&path).unwrap();
-        bytes[MAGIC.len()] ^= 1;
+        bytes[MAGIC.len() + 32] ^= 1;
         fs::write(&path, bytes).unwrap();
         assert_eq!(d.check(), (0, 1));
     }
@@ -693,6 +788,44 @@ mod tests {
         assert_eq!(d.get(Kind::Feature, b"a"), None);
         assert!(d.warned.load(Ordering::Relaxed));
         assert_eq!(d.stats().entries, 0);
+    }
+
+    #[test]
+    fn entries_name_who_wrote_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = disk(dir.path());
+        let other = Disk::open(dir.path(), [9; 32]);
+        d.put(Kind::Feature, b"a", b"mine");
+        d.put(Kind::Feature, b"b", b"mine too");
+        other.put(Kind::Feature, b"a", b"theirs");
+        d.put(Kind::Tool, b"t", b"a tool");
+        let mut mine = vec![d.key(Kind::Feature, b"a"), d.key(Kind::Feature, b"b")];
+        mine.sort();
+        assert_eq!(d.keys_of(Kind::Feature, &[7; 32]), mine);
+        assert_eq!(
+            d.keys_of(Kind::Feature, &[9; 32]),
+            vec![other.key(Kind::Feature, b"a")]
+        );
+        assert_eq!(d.keys_of(Kind::Tool, &[7; 32]).len(), 1);
+        // A whole entry comes back as written and checks.
+        let key = d.key(Kind::Feature, b"a");
+        let bytes = d.get_entry(Kind::Feature, &key).unwrap();
+        assert_eq!(bytes, entry(&[7; 32], b"mine"));
+        assert_eq!(check(&bytes), Some([7; 32]));
+        let mut broken = bytes.clone();
+        broken[HEADER_LEN] ^= 1;
+        assert_eq!(check(&broken), None);
+        assert_eq!(check(&bytes[..HEADER_LEN - 1]), None);
+        // Stored under another cache's key as it is.
+        let there = Disk::open(dir.path().join("there"), [1; 32]);
+        assert!(there.put_entry(Kind::Feature, &key, &bytes).unwrap());
+        assert!(
+            !there.put_entry(Kind::Feature, &key, &bytes).unwrap(),
+            "held"
+        );
+        assert_eq!(there.get_entry(Kind::Feature, &key).unwrap(), bytes);
+        assert_eq!(Kind::parse("meshes"), Some(Kind::Mesh));
+        assert_eq!(Kind::parse("mesh"), None);
     }
 
     #[test]
