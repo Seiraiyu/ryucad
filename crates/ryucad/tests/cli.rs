@@ -995,6 +995,8 @@ fn every_protocol_method_has_a_command() {
         ("check", &["check"]),
         ("merge.status", &["merge", "status"]),
         ("merge.resolve", &["merge", "resolve"]),
+        ("merge.preview", &["merge", "preview"]),
+        ("worktree.list", &["worktree", "list"]),
         ("daemon.status", &["daemon", "status"]),
         ("daemon.shutdown", &["daemon", "stop"]),
         ("session.hello", &["participants"]),

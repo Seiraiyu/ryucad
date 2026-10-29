@@ -1333,6 +1333,27 @@ pub(crate) fn basis(root: &Path, files: &[String]) -> String {
     h.finalize().to_hex()[..8].to_owned()
 }
 
+/// [`basis`] of the files as `files` holds them (the working files as a
+/// session last read them, or a merge's in memory): the same hash, so a
+/// repair planned from either has the same ID.
+pub(crate) fn basis_of(files: &crate::activity::Files, paths: &[String]) -> String {
+    let mut h = blake3::Hasher::new();
+    for f in paths {
+        h.update(&(f.len() as u64).to_le_bytes());
+        h.update(f.as_bytes());
+        match files.get(f) {
+            Some(b) => {
+                h.update(&(b.len() as u64).to_le_bytes());
+                h.update(b);
+            }
+            None => {
+                h.update(&u64::MAX.to_le_bytes());
+            }
+        }
+    }
+    h.finalize().to_hex()[..8].to_owned()
+}
+
 pub(crate) fn canonical_bytes(v: &Value) -> Vec<u8> {
     canonical::to_string(v).into_bytes()
 }
@@ -1859,6 +1880,17 @@ pub fn repair(root: &Path, ids: &[String], params: &Params) -> Result<Value> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn a_basis_is_the_same_from_the_disk_or_from_files() {
+        let (dir, s) = crate::server::tests::fresh();
+        let root = dir.path();
+        let paths = vec![MANIFEST.to_owned(), "parts/gone/part.json".to_owned()];
+        assert_eq!(basis(root, &paths), basis_of(&s.snapshot(), &paths));
+        let mut other = s.snapshot();
+        other.insert("parts/gone/part.json".into(), b"{}".to_vec().into());
+        assert_ne!(basis(root, &paths), basis_of(&other, &paths));
+    }
     use crate::server::tests::{call, fresh};
 
     /// A healthy project: part `p` with features `a` and `b`.
