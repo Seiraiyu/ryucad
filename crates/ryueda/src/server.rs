@@ -464,6 +464,26 @@ fn dispatch(
             crate::netlist::netlist(session.project(), design.as_deref())
         }
         Request::Erc { design } => crate::erc::erc(session.project(), design.as_deref()),
+        Request::ErcWaive {
+            finding,
+            reason,
+            remove,
+            expected_revision,
+        } => {
+            let by = caller_name(live, me);
+            crate::erc::waive(
+                session,
+                &finding,
+                reason.as_deref(),
+                remove,
+                &by,
+                expected_revision.as_deref(),
+            )
+        }
+        Request::ErcConfigure {
+            severity,
+            expected_revision,
+        } => crate::erc::configure(session, &severity, expected_revision.as_deref()),
         Request::ActivityLog { limit, before } => {
             let entries = live.map_or_else(Vec::new, |l| l.log.page(limit.unwrap_or(50), before));
             Ok(json!({ "entries": entries }))
@@ -499,6 +519,23 @@ fn dispatch(
             Code::Usage,
             "only a running daemon answers daemon requests",
         )),
+    }
+}
+
+/// The name of the participant asking: through the daemon, the attached
+/// participant's; in process, the name given (`agent` by default).
+fn caller_name(live: Option<&mut Live<Eda>>, me: Option<&str>) -> String {
+    match live {
+        Some(l) => {
+            let id = l.caller(me);
+            l.list()["participants"]
+                .as_array()
+                .and_then(|list| list.iter().find(|x| x["id"] == id.as_str()))
+                .and_then(|x| x["name"].as_str())
+                .unwrap_or("agent")
+                .to_owned()
+        }
+        None => me.unwrap_or("agent").to_owned(),
     }
 }
 

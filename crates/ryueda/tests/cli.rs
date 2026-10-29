@@ -430,6 +430,8 @@ fn every_protocol_method_has_a_command() {
         ("instance.show", &["instance", "show"]),
         ("netlist", &["netlist"]),
         ("erc", &["erc"]),
+        ("erc.waive", &["erc", "waive"]),
+        ("erc.configure", &["erc", "configure"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),
@@ -1383,7 +1385,45 @@ fn netlists_from_the_cli() {
         .collect();
     assert_eq!(codes, [&json!("pin_unconnected"), &json!("net_single_pin")]);
     assert_eq!(found[0]["refs"], json!(["board:r9/2"]));
-    assert_eq!(found[0]["id"].as_str().unwrap().len(), 16);
+    let single = found[1]["id"].as_str().unwrap().to_owned();
+    assert_eq!(single.len(), 16);
+    // Waivers and severities are erc.json's.
+    p.fails(
+        &["erc", "waive", "0123456789abcdef", "--reason", "x"],
+        "not_found",
+        1,
+    );
+    let w = p.ok(&["erc", "waive", &single, "--reason", "a test point"]);
+    assert_eq!(
+        w["erc"]["waivers"][&single],
+        json!({"reason": "a test point", "by": "agent"})
+    );
+    let erc = p.ok(&["erc"]);
+    assert_eq!(
+        (&erc["warnings"], &erc["designs"][0]["waived"]),
+        (&json!(1), &json!(1))
+    );
+    p.ok(&["erc", "configure", "--severity", "pin_unconnected=off"]);
+    let erc = p.ok(&["erc"]);
+    assert_eq!(erc["warnings"], 0, "{erc}");
+    p.fails(
+        &["erc", "configure", "--severity", "nope=off"],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &["erc", "configure", "--severity", "net_single_pin=loud"],
+        "invalid_param",
+        1,
+    );
+    // A waiver whose finding is gone says so.
+    p.ok(&["connect", "top/r9/2", "SPARE"]);
+    let erc = p.ok(&["erc"]);
+    assert_eq!(erc["findings"][0]["code"], "waiver_unused", "{erc}");
+    p.ok(&["erc", "waive", &single, "--remove"]);
+    p.ok(&["erc", "configure", "--severity", "pin_unconnected=default"]);
+    // With nothing left in it, erc.json goes.
+    assert!(!p.direct.join("board/erc.json").exists());
     // A broken file refuses the design, naming it.
     p.write("board/blocks/pu/components/r.json", "{");
     let e = p.fails(&["netlist"], "invalid_json", 1);

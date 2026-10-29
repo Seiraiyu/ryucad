@@ -414,6 +414,26 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         design: Option<String>,
     },
+    /// Accepts a finding with a reason (in `erc.json`), or with `remove`
+    /// withdraws a waiver.
+    #[serde(rename = "erc.waive")]
+    ErcWaive {
+        finding: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        remove: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Each ERC code's severity: `error`, `warning`, `off`, or `null` for
+    /// its default.
+    #[serde(rename = "erc.configure")]
+    ErcConfigure {
+        severity: serde_json::Map<String, Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     #[serde(rename = "activity.log")]
     ActivityLog {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -519,6 +539,8 @@ impl Request {
                 | Request::InstanceAdd { .. }
                 | Request::InstanceEdit { .. }
                 | Request::InstanceDelete { .. }
+                | Request::ErcWaive { .. }
+                | Request::ErcConfigure { .. }
                 | Request::Undo { .. }
                 | Request::Redo { .. }
         )

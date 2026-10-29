@@ -120,10 +120,14 @@ enum Command {
         /// By ID or name; the project's one design when left out.
         design: Option<String>,
     },
-    /// ERC: every design's findings, or one design's.
+    /// ERC: every design's findings, or one design's; `erc waive` and
+    /// `erc configure` write erc.json.
+    #[command(args_conflicts_with_subcommands = true)]
     Erc {
         /// By ID or name; every design when left out.
         design: Option<String>,
+        #[command(subcommand)]
+        action: Option<ErcCmd>,
     },
     /// Add, edit, delete or list rails: project-wide nets (GND, 3V3).
     #[command(subcommand)]
@@ -662,6 +666,27 @@ enum NetCmd {
     Show { net: String },
 }
 
+#[derive(Subcommand)]
+enum ErcCmd {
+    /// Accept a finding (by its ID) with a reason, or --remove a waiver.
+    Waive {
+        finding: String,
+        #[arg(long, required_unless_present = "remove")]
+        reason: Option<String>,
+        #[arg(long, conflicts_with = "reason")]
+        remove: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Set codes' severities: CODE=error|warning|off|default; repeat.
+    Configure {
+        #[arg(long = "severity", value_parser = pair, required = true)]
+        severity: Vec<(String, String)>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
 /// A channel rule as flags.
 #[derive(Args)]
 struct ChannelFlags {
@@ -1151,8 +1176,42 @@ fn request(cmd: &Command) -> Result<Option<Request>> {
         Command::Netlist { design } => Request::Netlist {
             design: design.clone(),
         },
-        Command::Erc { design } => Request::Erc {
+        Command::Erc {
+            design,
+            action: None,
+        } => Request::Erc {
             design: design.clone(),
+        },
+        Command::Erc {
+            action:
+                Some(ErcCmd::Waive {
+                    finding,
+                    reason,
+                    remove,
+                    expect,
+                }),
+            ..
+        } => Request::ErcWaive {
+            finding: finding.clone(),
+            reason: reason.clone(),
+            remove: *remove,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Erc {
+            action: Some(ErcCmd::Configure { severity, expect }),
+            ..
+        } => Request::ErcConfigure {
+            severity: severity
+                .iter()
+                .map(|(code, level)| {
+                    let v = match level.as_str() {
+                        "default" => Value::Null,
+                        l => json!(l),
+                    };
+                    (code.clone(), v)
+                })
+                .collect(),
+            expected_revision: expect.expect.clone(),
         },
         Command::Rail(RailCmd::Add {
             name,

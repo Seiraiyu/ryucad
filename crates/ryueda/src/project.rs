@@ -193,6 +193,8 @@ pub struct Project {
     pub libraries: BTreeMap<String, Result<Library>>,
     /// Designs, blocks, rails and classes.
     pub conn: Connectivity,
+    /// `erc.json`, read (empty when there is none) with its faults.
+    pub erc: Loaded<crate::erc::Config>,
 }
 
 /// The nearest folder at or above `start` holding a `ryueda.json`.
@@ -248,6 +250,27 @@ impl Project {
         }
         h.update(&conn.top);
         let revision = h.finalize().to_hex()[..32].to_owned();
+        let erc = match &erc {
+            None => Loaded {
+                item: Ok(crate::erc::Config::default()),
+                faults: Vec::new(),
+            },
+            Some(bytes) => match doc::read::<crate::erc::Config>(
+                bytes,
+                ERC,
+                crate::erc::KIND,
+                crate::erc::FORMAT,
+            ) {
+                Ok(c) => Loaded {
+                    faults: c.check().into_iter().map(|f| f.with("path", ERC)).collect(),
+                    item: Ok(c),
+                },
+                Err(e) => Loaded {
+                    item: Err(e),
+                    faults: Vec::new(),
+                },
+            },
+        };
         let mut libraries = BTreeMap::new();
         libraries.insert(SELF.to_owned(), library::load(src, SELF, ""));
         for alias in manifest.libraries.keys() {
@@ -266,6 +289,7 @@ impl Project {
             revision,
             libraries,
             conn: Connectivity::default(),
+            erc,
         };
         p.judge_components();
         conn.judge(&|r| p.libcomp(SELF, r).map(drop));
@@ -438,6 +462,13 @@ impl Project {
                 }
             }
         }
+        if let Err(e) = &self.erc.item {
+            out.push(Fault {
+                severity: Severity::Error,
+                error: e.clone().with("path", ERC),
+            });
+        }
+        out.extend(self.erc.faults.iter().cloned());
         out.extend(self.conn.faults());
         out
     }
