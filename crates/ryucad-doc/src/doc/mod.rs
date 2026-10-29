@@ -11,6 +11,7 @@ pub mod files;
 pub mod fixtures;
 pub mod hole;
 pub mod import;
+pub mod lock;
 pub mod mate;
 pub mod materials;
 pub mod pattern;
