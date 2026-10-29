@@ -4,13 +4,17 @@
 mod common;
 
 use common::brep::{Summary, check};
-use ryuformats::Unit;
 use ryuformats::usd::brep::{BrepError, brep_array};
+use ryuformats::usd::stage::{Model, Options, Product, Solid, layer};
+use ryuformats::usd::usda;
+use ryuformats::{Child, Unit};
 use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
 use ryukei::geom::{Rigid, Vector3};
+use ryukei::mesh::{MeshParams, tessellate};
 use ryukei::name::OpKey;
 use ryukei::primitive;
 use ryukei::topo::Body;
+use std::sync::Arc;
 
 fn tilted() -> Rigid {
     Rigid::rotation(Vector3::new(1.0, 2.0, 0.5).normalize().unwrap(), 0.7)
@@ -159,4 +163,113 @@ fn seeded_bodies_are_sound_or_refused() {
         }
     }
     assert!(written >= bodies.len() - 2, "{written} of {}", bodies.len());
+}
+
+/// A frame placing a pin twice and a ring once, every solid with its
+/// B-rep and its mesh.
+fn frame() -> Model {
+    let k = OpKey(1);
+    let solid = |name: &str, b: Body| Solid {
+        name: name.into(),
+        mesh: Some(Arc::new(
+            tessellate(&b, &MeshParams::new(1e-5, 0.26)).unwrap(),
+        )),
+        body: Arc::new(b),
+    };
+    let at = |x: f64| Rigid::translation(Vector3::new(x, 0.0, 0.01));
+    Model {
+        products: vec![
+            Product {
+                id: "F-1".into(),
+                name: "Frame".into(),
+                part: "frame".into(),
+                label: None,
+                solids: vec![solid(
+                    "plate",
+                    primitive::block(k, 0.1, 0.05, 0.01, &Rigid::IDENTITY)
+                        .unwrap()
+                        .0,
+                )],
+                children: vec![
+                    Child {
+                        product: 1,
+                        place: at(0.01),
+                        name: "a".into(),
+                    },
+                    Child {
+                        product: 1,
+                        place: at(0.03),
+                        name: "b".into(),
+                    },
+                    Child {
+                        product: 2,
+                        place: at(0.06).then_after(&tilted()),
+                        name: "ring-1".into(),
+                    },
+                ],
+            },
+            Product {
+                id: "P-1".into(),
+                name: "Pin".into(),
+                part: "pin".into(),
+                label: Some("B".into()),
+                solids: vec![solid(
+                    "shank",
+                    primitive::cylinder(k, 0.003, 0.02, &Rigid::IDENTITY)
+                        .unwrap()
+                        .0,
+                )],
+                children: vec![],
+            },
+            Product {
+                id: "R-1".into(),
+                name: "Ring \"7\"".into(),
+                part: "ring".into(),
+                label: None,
+                solids: vec![solid(
+                    "torus",
+                    primitive::torus(k, 0.01, 0.002, &Rigid::IDENTITY)
+                        .unwrap()
+                        .0,
+                )],
+                children: vec![],
+            },
+        ],
+    }
+}
+
+#[test]
+fn usda_reads_back_to_the_same_layer() {
+    let opts = Options {
+        unit: Unit::Millimeter,
+        brep: true,
+        mesh: true,
+        pipe_tolerance: 1e-7,
+        layer_data: vec![("version".into(), "0.0.0".into())],
+    };
+    let l = layer(&frame(), &opts).unwrap();
+    let text = usda::to_string(&l).unwrap();
+    let back = common::usda::read(&text);
+    assert_eq!(back, l);
+    assert_eq!(usda::to_string(&back).unwrap(), text);
+    // Every BrepArray in it is sound.
+    fn breps<'a>(
+        p: &'a ryuformats::usd::layer::Prim,
+        out: &mut Vec<&'a ryuformats::usd::layer::Prim>,
+    ) {
+        if p.type_name.as_deref() == Some("BrepArray") {
+            out.push(p);
+        }
+        for c in &p.children {
+            breps(c, out);
+        }
+    }
+    let mut found = Vec::new();
+    for p in &back.prims {
+        breps(p, &mut found);
+    }
+    assert_eq!(found.len(), 3);
+    for b in found {
+        check(b);
+    }
 }
