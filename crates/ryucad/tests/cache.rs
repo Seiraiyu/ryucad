@@ -633,3 +633,81 @@ fn a_token_is_stored_checked_and_removed_from_the_cli() {
     assert_eq!(v["result"]["server"]["write"], true);
     cli(&a, &run, &cache, &["daemon", "stop"]);
 }
+
+#[test]
+fn a_release_pushes_what_the_shared_cache_lacks() {
+    let fake = fake_cache::Fake::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (run, cache, a) = (
+        dir.path().join("run"),
+        dir.path().join("cache"),
+        dir.path().join("a"),
+    );
+    // Built as a release with no shared cache set: nothing sent.
+    let release = [
+        ("RYUCAD_CACHE_IDENTITY", RELEASE),
+        ("RYUCAD_NO_DAEMON", "1"),
+    ];
+    std::fs::create_dir_all(&a).unwrap();
+    for args in [&["init"][..], &["part", "create", "p"]] {
+        cli_with(&a, &run, &cache, &release, args);
+    }
+    let add = [
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=20", "--param", "y=10", "--param",
+        "z=5",
+    ];
+    cli_with(&a, &run, &cache, &release, &add);
+    cli_with(&a, &run, &cache, &release, &["mesh", "p"]);
+    // A development build's entries of the same project are its own.
+    cli(&a, &run, &cache, &["rebuild", "p"]);
+    cli(&a, &run, &cache, &["daemon", "stop"]);
+    let push = |env: &[(&str, &str)], args: &[&str]| {
+        let mut all = vec!["cache", "push"];
+        all.extend_from_slice(args);
+        cli_with(&a, &run, &cache, env, &all)
+    };
+    let none = push(&release, &[]);
+    assert_eq!(none["error"]["code"], "invalid_param", "{none}");
+    cli(
+        &a,
+        &run,
+        &cache,
+        &["config", "set", "cache.remote", &fake.url],
+    );
+    let dev = push(&[("RYUCAD_CACHE_TOKEN", fake_cache::WRITE)], &[]);
+    assert_eq!(dev["error"]["code"], "invalid_param", "{dev}");
+    let read = [
+        ("RYUCAD_CACHE_IDENTITY", RELEASE),
+        ("RYUCAD_CACHE_TOKEN", fake_cache::READ),
+    ];
+    assert_eq!(push(&read, &[])["error"]["code"], "cache_remote_refused");
+    let write = [
+        ("RYUCAD_CACHE_IDENTITY", RELEASE),
+        ("RYUCAD_CACHE_TOKEN", fake_cache::WRITE),
+    ];
+    let meshes = push(&write, &["--kind", "meshes"]);
+    assert_eq!(meshes["result"]["pushed"], 1, "{meshes}");
+    assert_eq!(fake.held(), 1);
+    let all = push(&write, &[]);
+    let r = &all["result"];
+    assert_eq!(r["pushed"], 1, "the box; the mesh was there: {all}");
+    assert_eq!(
+        r["kinds"]["meshes"],
+        json!({"local": 1, "held": 1, "pushed": 0, "bytes": 0})
+    );
+    assert_eq!(
+        r["kinds"]["features"]["local"], 1,
+        "not the development build's"
+    );
+    assert_eq!(
+        push(&write, &[])["result"]["pushed"],
+        0,
+        "nothing left to send"
+    );
+    // A server that isn't there.
+    fake.with(|s| s.fail = Some(502));
+    let down = push(&write, &[]);
+    assert_eq!(down["error"]["code"], "cache_remote_unreachable", "{down}");
+    let bad = push(&write, &["--kind", "bodies"]);
+    assert_eq!(bad["error"]["code"], "usage");
+}

@@ -654,6 +654,67 @@ impl Disk {
     }
 }
 
+/// `ryucad cache push`: sends every entry of `kinds` this build wrote
+/// that the remote lacks (asked with `has`), in parallel. Unlike reads
+/// through the cache, the remote's errors are its own: no remote, a
+/// development build, a token that may not write, or a server that can't
+/// be reached fail it.
+pub fn push(disk: &Disk, kinds: &[Kind]) -> Result<Value> {
+    use rayon::prelude::*;
+    let identity = disk.identity();
+    if !identity.shared {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a development build's entries are its own: only a released build pushes",
+        ));
+    }
+    let remote = disk.remote().ok_or_else(|| {
+        Error::new(
+            Code::InvalidParam,
+            "no shared cache is set: `ryucad config set cache.remote <url>`",
+        )
+    })?;
+    let info = remote.info()?;
+    if info["write"] != true {
+        return Err(Error::new(
+            Code::CacheRemoteRefused,
+            format!(
+                "the token may not write to the shared cache at {}",
+                remote.url()
+            ),
+        )
+        .with("url", remote.url()));
+    }
+    let mut out = serde_json::Map::new();
+    let (mut pushed, mut bytes) = (0u64, 0u64);
+    for &kind in kinds {
+        let keys = disk.keys_of(kind, &identity.bytes);
+        let names: Vec<String> = keys.iter().map(|k| wire::name(kind, k)).collect();
+        let held: BTreeSet<String> = remote
+            .has(&names)
+            .ok_or_else(|| remote.problem().expect("a failure skips it"))?
+            .into_iter()
+            .collect();
+        let missing: Vec<&String> = keys
+            .iter()
+            .filter(|k| !held.contains(&wire::name(kind, k)))
+            .collect();
+        let sent: Vec<u64> = missing
+            .par_iter()
+            .filter_map(|k| disk.get_entry(kind, k).map(|e| (k, e)))
+            .map(|(k, e)| remote.put(kind, k, &e).map(|_| e.len() as u64))
+            .collect::<Result<_>>()?;
+        let n: u64 = sent.iter().sum();
+        pushed += sent.len() as u64;
+        bytes += n;
+        out.insert(
+            kind.as_str().to_owned(),
+            json!({"local": keys.len(), "held": held.len(), "pushed": sent.len(), "bytes": n}),
+        );
+    }
+    Ok(json!({"url": remote.url(), "pushed": pushed, "bytes": bytes, "kinds": out}))
+}
+
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }

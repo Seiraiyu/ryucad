@@ -238,6 +238,11 @@ impl Remote {
         h.problem = None;
     }
 
+    /// The last failure, while the remote is skipped for it.
+    pub fn problem(&self) -> Option<Error> {
+        self.health().problem.clone()
+    }
+
     /// Counts an entry that failed its checks, noting it once.
     pub fn bad(&self, what: &str) {
         self.counters.bad.fetch_add(1, Ordering::Relaxed);

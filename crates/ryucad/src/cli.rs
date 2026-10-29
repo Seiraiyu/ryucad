@@ -709,6 +709,18 @@ enum CacheCmd {
     },
     /// Remove the stored token.
     Logout,
+    /// Send every entry this release built that the shared cache lacks:
+    /// what a CI job runs after building, so others never build it. Needs
+    /// no project.
+    Push {
+        /// Only this kind: features, tools or meshes.
+        #[arg(long, value_name = "KIND", value_parser = cache_kind)]
+        kind: Option<ryucad::cache::Kind>,
+    },
+}
+
+fn cache_kind(s: &str) -> std::result::Result<ryucad::cache::Kind, String> {
+    ryucad::cache::Kind::parse(s).ok_or_else(|| format!("{s:?} isn't features, tools or meshes"))
 }
 
 #[derive(Subcommand)]
@@ -1765,6 +1777,7 @@ fn request(cmd: &Command) -> Option<Request> {
         | Command::Daemon(_)
         | Command::Git(_)
         | Command::Review(_)
+        | Command::Cache(CacheCmd::Push { .. })
         | Command::Watch { .. }
         | Command::Open { .. } => {
             return None;
@@ -2495,6 +2508,14 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
         }
         Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
         Command::Git(GitCmd::Install { global }) => ryucad::drivers::install(&here, !global),
+        Command::Cache(CacheCmd::Push { kind }) => {
+            use ryucad::cache::{Disk, Kind};
+            let disk = Disk::for_user().ok_or_else(|| {
+                Error::new(Code::Io, "there is no disk cache on this machine to push")
+            })?;
+            let kinds = kind.map_or(Kind::ALL.to_vec(), |k| vec![k]);
+            ryucad::cache::push(&disk, &kinds)
+        }
         Command::Review(cmd) => {
             use ryucad::review::Action;
             let action = match cmd {
