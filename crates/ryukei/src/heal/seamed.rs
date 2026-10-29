@@ -90,6 +90,7 @@ pub fn seamed_with_origins(body: &Body, pipe_tolerance: f64) -> Result<(Shape, O
     for &k in &order {
         pipe_to_nurbs(&mut cut, k, pipe_tolerance)?;
         sweep_to_nurbs(&mut cut, k, pipe_tolerance)?;
+        offset_to_nurbs(&mut cut, k, pipe_tolerance)?;
     }
     for &k in &order {
         seam(&mut cut, k)?;
@@ -467,6 +468,57 @@ fn sweep_to_nurbs(cut: &mut Cut, k: usize, tolerance: f64) -> Result<(), Error> 
             }
         }
     }
+    Ok(())
+}
+
+/// An offset face over a sweep (which a file can't describe exactly, as
+/// it can an offset of any other surface) with its surface replaced by a
+/// NURBS within `tolerance` over the box its loops cover
+/// ([`crate::geom::Offset::to_nurbs_within`]), periodic each way the face
+/// wraps. The NURBS keeps the offset's parameters, so its uses keep their
+/// pcurves.
+fn offset_to_nurbs(cut: &mut Cut, k: usize, tolerance: f64) -> Result<(), Error> {
+    let Surface::Offset(o) = &cut.s.surfaces[cut.s.faces[k].surface] else {
+        return Ok(());
+    };
+    if !matches!(o.base(), Surface::Sweep(_)) {
+        return Ok(());
+    }
+    let o = o.clone();
+    let periods = o.periods();
+    let domain = o.domain();
+    let info = loops(cut, k, periods);
+    let mut range = [[0.0; 2]; 2];
+    let mut whole = [false; 2];
+    for d in 0..2 {
+        let (lo, hi) = info.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |a, l| {
+            (a.0.min(l.extent[d][0]), a.1.max(l.extent[d][1]))
+        });
+        let wraps = info.iter().any(|l| l.wind[d] != 0) || info.iter().all(|l| l.hole);
+        let p = if d == 0 { periods.0 } else { periods.1 };
+        range[d] = match p {
+            Some(p) if wraps || hi - lo >= p => {
+                whole[d] = true;
+                let s0 = if lo.is_finite() { lo } else { domain[d][0] };
+                [s0, s0 + p]
+            }
+            _ => {
+                let m = 1e-6 * (hi - lo).max(LINEAR_RESOLUTION);
+                [(lo - m).max(domain[d][0]), (hi + m).min(domain[d][1])]
+            }
+        };
+    }
+    let (mut n, _, bound) = o.to_nurbs_within(range, tolerance)?;
+    if whole[0] {
+        n = periodic_along_u(&n)?;
+    }
+    if whole[1] {
+        n = periodic_along_v(&n)?;
+    }
+    cut.s.surfaces.push(Surface::Nurbs(Arc::new(n)));
+    let face = &mut cut.s.faces[k];
+    face.surface = cut.s.surfaces.len() - 1;
+    face.tolerance = face.tolerance.max(bound);
     Ok(())
 }
 

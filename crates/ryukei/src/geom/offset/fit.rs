@@ -41,18 +41,23 @@ impl Offset {
     /// export.
     ///
     /// The NURBS is bicubic, with knots of multiplicity three at a grid of
-    /// parameters (its own cells' sides, halved): on each cell, the
-    /// Hermite patch through the offset's value, first derivatives and
+    /// parameters (the offset's own cells' sides, halved): on each cell,
+    /// the Hermite patch through the offset's value, first derivatives and
     /// mixed derivative at its corners, so neighbouring patches share
     /// their sides and meet with matching tangents. The error `e` of a
-    /// patch is bounded over each of its 16 parts by Taylor's formula
-    /// about the part's middle, `|e(m)| + |e_u(m)| r_u + |e_v(m)| r_v +
-    /// (|e_uu| r_u² + 2 |e_uv| r_u r_v + |e_vv| r_v²) / 2`, the second
-    /// derivatives enclosed over the part (the offset's by its jets, the
-    /// patch's in interval arithmetic). Every cell whose bound passes the
-    /// tolerance is halved both ways, up to 12 rounds and 1,024 spans each
-    /// way; past that, or for a box outside a bounded direction's domain
-    /// or wider than a period, the call fails with `Degenerate`.
+    /// patch is bounded over parts of it by Taylor's formula about each
+    /// part's middle, `|e(m)| + |e_u(m)| r_u + |e_v(m)| r_v + (|e_uu| r_u²
+    /// + 2 |e_uv| r_u r_v + |e_vv| r_v²) / 2`, the second derivatives
+    /// enclosed over the part (the offset's by its jets, the patch's from
+    /// its second differences). A part whose remainder alone keeps it past
+    /// the tolerance is quartered, up to six times and 4,096 parts a patch;
+    /// a patch whose error at a part's middle passes half the tolerance, or
+    /// that runs out of parts, is halved (its row or column of the grid),
+    /// up to 16 rounds and 1,024 spans each way. Past that, or for a box
+    /// outside a bounded direction's domain or wider than a period, the
+    /// call fails with `Degenerate`. Its cost grows with how tightly the
+    /// offset bends: a waved spline offset by a tenth of its size takes
+    /// seconds at a relative `1e-5`.
     pub fn to_nurbs_within(
         &self,
         [ru, rv]: Cell,
@@ -212,10 +217,11 @@ impl<'a> Net<'a> {
 
     /// The certified bound on the patch's distance from the offset over
     /// cell `(i, j)`, if it is within `tolerance`: `Ok` with the bound, or
-    /// `Err` with the direction (0 along `u`) to halve the cell in, where
+    /// `Err` with the direction (0 along `u`) to halve the cell in: where
     /// the patch itself strays too far (the error and its gradient at a
-    /// part's middle alone pass half the tolerance) or its parts can't be
-    /// bounded within the budget. Parts start as a 2 × 2 grid and are
+    /// part's middle alone pass half the tolerance), the way its derivative
+    /// strays more; where its parts can't be bounded within the budget, its
+    /// longer side in model space. Parts start as a 2 × 2 grid and are
     /// quartered where only Taylor's remainder, which shrinks with them,
     /// keeps the bound past the tolerance. `None` where the offset can't
     /// be enclosed.
@@ -259,15 +265,19 @@ impl<'a> Net<'a> {
             // (their rounding is far below any tolerance), then Taylor's
             // remainder over the part.
             let mut near = [0.0f64; 3];
+            let mut strays = [0.0f64; 2];
             for c in 0..3 {
                 let e0 = (h[c] - truth[c].v).abs();
                 let eu = (hd[0][c] / hu - truth[c].d[0]).abs();
                 let ev = (hd[1][c] / hv - truth[c].d[1]).abs();
                 near[c] = e0 + eu * ru + ev * rv;
+                strays[0] += eu * hu;
+                strays[1] += ev * hv;
             }
             let near_len = crate::math::sqrt(near.iter().map(|x| x * x).sum());
             if near_len > tolerance / 2.0 {
-                return Some(Err(longer));
+                // Halved the way its derivative strays more over the span.
+                return Some(Err(usize::from(strays[1] > strays[0])));
             }
             let part = [
                 [u0 + hu * x[0], u0 + hu * x[1]],
@@ -360,44 +370,48 @@ fn patch_at(p: &[[Vector3; 4]; 4], x: f64, y: f64) -> ([f64; 3], [[f64; 3]; 2]) 
     (v.to_array(), [du.to_array(), dv.to_array()])
 }
 
-/// The cubic Bernstein basis, its derivative and its second derivative,
-/// enclosed over an interval of `t`, each written in `t` and `s = 1 - t`
-/// so the enclosures stay tight.
-fn basis_box(t: Interval) -> [[Interval; 4]; 3] {
+/// The Bernstein basis of degree `n` (up to 3), enclosed over an interval
+/// of `t`, written in `t` and `s = 1 - t`.
+fn bernstein(n: usize, t: Interval) -> Vec<Interval> {
     let k = Interval::point;
     let s = k(1.0) - t;
-    [
-        [s * s * s, k(3.0) * t * s * s, k(3.0) * t * t * s, t * t * t],
-        [
-            -(k(3.0) * s * s),
-            k(3.0) * s * s - k(6.0) * t * s,
-            k(6.0) * t * s - k(3.0) * t * t,
-            k(3.0) * t * t,
-        ],
-        [
-            k(6.0) * s,
-            k(6.0) * t - k(12.0) * s,
-            k(6.0) * s - k(12.0) * t,
-            k(6.0) * t,
-        ],
-    ]
+    match n {
+        1 => vec![s, t],
+        2 => vec![s * s, k(2.0) * t * s, t * t],
+        _ => vec![s * s * s, k(3.0) * t * s * s, k(3.0) * t * t * s, t * t * t],
+    }
 }
 
 /// Enclosures of a bicubic patch's second derivatives by its local
-/// parameters, `[uu, uv, vv]`, over a box of them.
+/// parameters, `[uu, uv, vv]`, over a box of them: each the Bézier form
+/// of lower degree on the patch's second differences, whose small
+/// coefficients keep the enclosure as narrow as the derivative is.
 fn patch_second(p: &[[Vector3; 4]; 4], x: Interval, y: Interval) -> [[Interval; 3]; 3] {
-    let bx = basis_box(x);
-    let by = basis_box(y);
+    let (b1x, b2x, b3x) = (bernstein(1, x), bernstein(2, x), bernstein(3, x));
+    let (b1y, b2y, b3y) = (bernstein(1, y), bernstein(2, y), bernstein(3, y));
     let mut out = [[Interval::point(0.0); 3]; 3];
+    let mut add = |m: usize, c: Vector3, w: Interval| {
+        let c = c.to_array();
+        for k in 0..3 {
+            out[m][k] = out[m][k] + Interval::point(c[k]) * w;
+        }
+    };
+    for b in 0..4 {
+        for a in 0..2 {
+            let d = (p[a + 2][b] - p[a + 1][b] * 2.0 + p[a][b]) * 6.0;
+            add(0, d, b1x[a] * b3y[b]);
+        }
+    }
+    for a in 0..3 {
+        for b in 0..3 {
+            let d = (p[a + 1][b + 1] - p[a + 1][b] - p[a][b + 1] + p[a][b]) * 9.0;
+            add(1, d, b2x[a] * b2y[b]);
+        }
+    }
     for a in 0..4 {
-        for b in 0..4 {
-            let c = p[a][b].to_array().map(Interval::point);
-            let w = [bx[2][a] * by[0][b], bx[1][a] * by[1][b], bx[0][a] * by[2][b]];
-            for (m, wm) in w.iter().enumerate() {
-                for k in 0..3 {
-                    out[m][k] = out[m][k] + c[k] * *wm;
-                }
-            }
+        for b in 0..2 {
+            let d = (p[a][b + 2] - p[a][b + 1] * 2.0 + p[a][b]) * 6.0;
+            add(2, d, b3x[a] * b1y[b]);
         }
     }
     out

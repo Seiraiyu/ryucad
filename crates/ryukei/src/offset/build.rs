@@ -95,7 +95,15 @@ impl<'a> Laid<'a> {
         let at = edge.name;
         let a = (self.points[&(edge.start, ends[0].0)], ends[0].1);
         let b = (self.points[&(edge.end, ends[1].0)], ends[1].1);
-        let ((v0, t0), (v1, mut t1)) = if c.reversed { (b, a) } else { (a, b) };
+        let ((v0, t0), (v1, t1)) = if c.reversed { (b, a) } else { (a, b) };
+        // A closed edge on a closed clamped curve runs over all of it,
+        // from its vertex at the curve's start.
+        let ends_meet = c.curve.point(c.range[0]).distance(c.curve.point(c.range[1]))
+            <= c.tolerance.max(LINEAR_RESOLUTION);
+        let (mut t0, mut t1) = (t0, t1);
+        if edge.start == edge.end && c.period.is_none() && ends_meet && t0 >= t1 {
+            (t0, t1) = (c.range[0], c.range[1]);
+        }
         if let Some(p) = c.period {
             while t1 <= t0 {
                 t1 += p;
@@ -280,7 +288,7 @@ pub(crate) fn build(
                 }
                 vec![Boundary::Arcs(arcs)]
             }
-            _ => return Err(OffsetError::Uncertain { at: edge.name }.into()),
+            _ => return Err(super::uncertain(edge.name, "build.rs#19").into()),
         };
         laid.layout.faces.push(layout::Face {
             surface,
@@ -331,8 +339,8 @@ fn finish(
     let all: Vec<usize> = (0..laid.parts.len()).collect();
     let fail = |e: BuildError| -> Error {
         match e {
-            BuildError::NonManifold { faces, .. } => OffsetError::Uncertain { at: first(&faces) },
-            BuildError::Inconsistent => OffsetError::Uncertain { at: first(&all) },
+            BuildError::NonManifold { faces, .. } => super::uncertain(first(&faces), "build.rs#20"),
+            BuildError::Inconsistent => super::uncertain(first(&all), "build.rs#21"),
         }
         .into()
     };
@@ -349,14 +357,14 @@ fn finish(
     let mut outer_of: Vec<Option<usize>> = vec![None; shells.len()];
     for (i, s) in shells.iter().enumerate() {
         let Some(sh) = shell_of(s) else {
-            return Err(OffsetError::Uncertain { at: first(&all) }.into());
+            return Err(super::uncertain(first(&all), "build.rs#22").into());
         };
         let region = body.shells[sh].region;
         let outer = body.regions[region].first_shell;
         if body.regions[region].kind == RegionKind::Solid && outer != Some(sh) {
             outer_of[i] = shells.iter().position(|x| shell_of(x) == outer);
             if outer_of[i].is_none() {
-                return Err(OffsetError::Uncertain { at: first(s) }.into());
+                return Err(super::uncertain(first(s), "build.rs#23").into());
             }
         }
     }
@@ -441,7 +449,7 @@ fn finish(
             }
         };
         if !seen.insert(name) {
-            return Err(OffsetError::Uncertain { at: name }.into());
+            return Err(super::uncertain(name, "build.rs#24").into());
         }
         out.rename(EntityId::Edge(e), name);
     }
@@ -474,7 +482,7 @@ fn finish(
             }
         };
         if !seen.insert(name) {
-            return Err(OffsetError::Uncertain { at: name }.into());
+            return Err(super::uncertain(name, "build.rs#25").into());
         }
         out.rename(EntityId::Vertex(v), name);
     }
@@ -508,7 +516,7 @@ fn finish(
             new,
         });
     }
-    pcurves(&mut out).map_err(|_| OffsetError::Uncertain { at: first(&all) })?;
+    pcurves(&mut out).map_err(|_| super::uncertain(first(&all), "build.rs#26"))?;
     judge(&out)?;
     Ok((out, journal))
 }
@@ -555,7 +563,7 @@ fn judge(body: &Body) -> Result<(), Error> {
     if let Some(f) = faults.first() {
         let at = body.faces().next().map_or(Name::from_u128(0), |x| body.faces[x].name);
         let _ = f;
-        return Err(OffsetError::Uncertain { at }.into());
+        return Err(super::uncertain(at, "build.rs#27").into());
     }
     let name = |f: FaceId| body.faces[f].name;
     let mut faults = check_intersections(body);
@@ -573,7 +581,7 @@ fn judge(body: &Body) -> Result<(), Error> {
             faces.sort();
             Err(OffsetError::SelfIntersecting { faces }.into())
         }
-        Some(Fault::CannotCheck { a, .. }) => Err(OffsetError::Uncertain { at: name(*a) }.into()),
+        Some(Fault::CannotCheck { a, .. }) => Err(super::uncertain(name(*a), "build.rs#28").into()),
         Some(_) => Err(OffsetError::Uncertain {
             at: name(body.faces().next().expect("a face")),
         }

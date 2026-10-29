@@ -120,7 +120,7 @@ fn moved(plan: &Plan, e: EdgeId, fin: FinId) -> Result<NewCurve, Error> {
     let offset = &plan.surface[&face];
     let pc = body.fins[fin]
         .pcurve
-        .ok_or(OffsetError::Uncertain { at })?;
+        .ok_or_else(|| super::uncertain(at, "edges.rs#2"))?;
     let pcurve = (body.curves2[pc.curve].clone(), pc.map);
     let curve = &body.curves[edge.curve];
     let [t0, t1] = edge.interval;
@@ -165,7 +165,7 @@ fn moved(plan: &Plan, e: EdgeId, fin: FinId) -> Result<NewCurve, Error> {
         }
     }
     let lifted = fit_along(offset, &pcurve.0, pcurve.1, edge.interval)
-        .map_err(|_| OffsetError::Uncertain { at })?;
+        .map_err(|_| super::uncertain(at, "edges.rs#3"))?;
     Ok(NewCurve {
         curve: Curve::Nurbs(Arc::new(lifted.curve)),
         range: edge.interval,
@@ -233,10 +233,12 @@ fn fill(plan: &Plan, e: EdgeId, fins: [FinId; 2], d: f64) -> Option<Surface> {
     }
 }
 
-/// Where a closing edge's faces' offsets meet: the branch of their
-/// intersection near the edge, nearest to where the edge's middle goes
-/// (the point on both faces' tangent planes there, moved), within the
-/// larger distance of it. `EdgeVanishes` where no branch comes that near.
+/// Where a closing edge's faces' offsets meet. Both analytic: the branch
+/// of their intersection near the edge, nearest to where the edge's middle
+/// goes (the point on both faces' tangent planes there, moved), within
+/// the larger distance of it (`EdgeVanishes` where no branch comes that
+/// near), exact where the intersection has a closed form. Otherwise
+/// [`traced`] from the edge.
 fn closing(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> {
     let body = plan.body;
     let edge = &body.edges[e];
@@ -244,6 +246,9 @@ fn closing(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> 
     let faces = fins.map(|f| plan.face_of(f));
     let ds = faces.map(|f| plan.d(f));
     let surfaces = faces.map(|f| &plan.surface[&f]);
+    if surfaces.iter().any(|s| s.frame().is_none()) {
+        return traced(plan, e, fins);
+    }
     let curve = &body.curves[edge.curve];
     let [t0, t1] = edge.interval;
     let tm = (t0 + t1) / 2.0;
@@ -253,10 +258,11 @@ fn closing(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> 
         [plan.normal(fins[0], tm), plan.normal(fins[1], tm)],
         ds,
     );
-    let grow = 2.0 * reach + 1e-3 * plan.size;
+    // Within two distances of the edge: the faces' offsets reach three.
+    let grow = 2.0 * reach;
     let region = curve.bounds(edge.interval).grow(grow);
     let hit = surface_surface(surfaces[0], surfaces[1], &region).map_err(|f| match f {
-        Failure::Uncertain => Error::from(OffsetError::Uncertain { at }),
+        Failure::Uncertain => Error::from(super::uncertain(at, "edges.rs#4")),
         Failure::Unsupported => OffsetError::Unsupported {
             at,
             case: OffsetCase::PartlySmooth,
@@ -264,7 +270,7 @@ fn closing(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> 
         .into(),
     })?;
     let SurfaceHit::Meet { branches, .. } = hit else {
-        return Err(OffsetError::Uncertain { at }.into());
+        return Err(super::uncertain(at, "edges.rs#5").into());
     };
     let best = branches
         .into_iter()
@@ -273,15 +279,26 @@ fn closing(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> 
             (q.1.distance(estimate), q.0, b)
         })
         .min_by(|a, b| a.0.total_cmp(&b.0));
-    let Some((dist, t, b)) = best else {
+    let Some((dist, _, b)) = best else {
         return Err(OffsetError::EdgeVanishes { edge: at }.into());
     };
     if dist > reach.max(10.0 * LINEAR_RESOLUTION) {
         return Err(OffsetError::EdgeVanishes { edge: at }.into());
     }
     if b.tangent {
-        return Err(OffsetError::Uncertain { at }.into());
+        return Err(super::uncertain(at, "edges.rs#6").into());
     }
+    // A closed edge's closed clamped branch starts where its vertex goes,
+    // so the edge can run over the whole of it.
+    let b = if edge.start == edge.end && b.curve.period().is_none() {
+        let p = body.vertices[edge.start].point;
+        let at = moved_point(p, [plan.normal(fins[0], t0), plan.normal(fins[1], t0)], ds);
+        let (s, _) = project_on(&b.curve, b.range, at);
+        crate::intersect::reseamed(b, s)
+    } else {
+        b
+    };
+    let t = project_on(&b.curve, b.range, estimate).0;
     let along = curve.eval(tm).d1;
     let reversed = b.curve.eval(t).d1.dot(along) < 0.0;
     let period = (b.curve.period() == Some(b.range[1] - b.range[0])).then(|| b.range[1] - b.range[0]);
@@ -358,3 +375,142 @@ pub(crate) fn sphere(centre: Point3, radius: f64, feet: &[Point3]) -> Option<Sur
     Some(Surface::Sphere(Sphere::new(frame, radius).ok()?))
 }
 
+
+/// How many Newton steps find a closing edge's point in one section.
+const NEWTON: usize = 32;
+
+/// Where a closing edge's faces' offsets meet, traced from the edge: at
+/// each parameter `t`, the point on both offsets in the plane across the
+/// edge at `C(t)` (Newton's method on `O_A(u_A, v_A) = O_B(u_B, v_B)` and
+/// `(O_A - C(t)) · T(t) = 0`, from the fins' own parameters, which the
+/// offsets keep), with its derivative along `n_A × n_B`; fitted on
+/// shared knots and certified on both offsets ([`fit_on`]), the same
+/// curve on each. Over the edge's interval, carried on past its ends by
+/// three distances along a line or a circle, where its ends may move out.
+/// A curve this finds is a curve where the offsets meet, certified, but
+/// not every such curve: the self-intersection check on the result is
+/// what rules out another crossing. `EdgeVanishes` where a section has no
+/// such point near where the edge moves; `Uncertain` where the fit can't
+/// be certified.
+fn traced(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> {
+    let body = plan.body;
+    let edge = &body.edges[e];
+    let at = edge.name;
+    let faces = fins.map(|f| plan.face_of(f));
+    let ds = faces.map(|f| plan.d(f));
+    let surfaces = faces.map(|f| &plan.surface[&f]);
+    let curve = &body.curves[edge.curve];
+    let [t0, t1] = edge.interval;
+    let reach = ds[0].abs().max(ds[1].abs());
+    let range = match curve {
+        Curve::Line(_) => [t0 - 3.0 * reach, t1 + 3.0 * reach],
+        Curve::Circle(c) if t1 - t0 < core::f64::consts::TAU => {
+            let m = (3.0 * reach / c.radius()).min((core::f64::consts::TAU - (t1 - t0)) / 2.0 * 0.9);
+            [t0 - m, t1 + m]
+        }
+        _ => [t0, t1],
+    };
+    let uv = |k: usize, t: f64| {
+        body.fin_uv(fins[k], t.clamp(t0, t1))
+            .map(|p| [p.x, p.y])
+    };
+    let sample = |t: f64| -> Option<(Point3, Vector3)> {
+        let c = curve.eval(t);
+        let tan = c.d1.normalize()?.get();
+        let tan_d = (c.d2 - tan * c.d2.dot(tan)) / c.d1.length();
+        let start = moved_point(
+            c.point,
+            [plan.normal(fins[0], t.clamp(t0, t1)), plan.normal(fins[1], t.clamp(t0, t1))],
+            ds,
+        );
+        let mut x = [uv(0, t)?, uv(1, t)?];
+        // Start from the feet of where the edge moves.
+        for k in 0..2 {
+            let p = surfaces[k].project(start).param;
+            x[k] = [p.0, p.1];
+        }
+        for _ in 0..NEWTON {
+            let a = surfaces[0].eval(x[0][0], x[0][1]);
+            let b = surfaces[1].eval(x[1][0], x[1][1]);
+            let r = a.point - b.point;
+            let plane = (a.point - c.point).dot(tan);
+            let m = [
+                [a.du.x, a.dv.x, -b.du.x, -b.dv.x],
+                [a.du.y, a.dv.y, -b.du.y, -b.dv.y],
+                [a.du.z, a.dv.z, -b.du.z, -b.dv.z],
+                [a.du.dot(tan), a.dv.dot(tan), 0.0, 0.0],
+            ];
+            let step = solve4(m, [-r.x, -r.y, -r.z, -plane])?;
+            x = [
+                [x[0][0] + step[0], x[0][1] + step[1]],
+                [x[1][0] + step[2], x[1][1] + step[3]],
+            ];
+            if step.iter().all(|s| s.abs() <= 1e-15 * (1.0 + x[0][0].abs().max(x[1][0].abs()))) {
+                break;
+            }
+        }
+        let a = surfaces[0].eval(x[0][0], x[0][1]);
+        let b = surfaces[1].eval(x[1][0], x[1][1]);
+        if a.point.distance(b.point) > LINEAR_RESOLUTION / 16.0
+            || a.point.distance(start) > 2.0 * reach.max(10.0 * LINEAR_RESOLUTION)
+        {
+            return None;
+        }
+        let n = |s: &Surface, p: [f64; 2]| s.normal(p[0], p[1]).map(|n| n.get());
+        let dir = n(surfaces[0], x[0])?.cross(n(surfaces[1], x[1])?);
+        // `(X - C) · T = 0` along the curve: `X' · T = C' · T - (X - C) · T'`.
+        let along = dir.dot(tan);
+        if along.abs() < 1e-12 * dir.length() {
+            return None;
+        }
+        let rate = (c.d1.dot(tan) - (a.point - c.point).dot(tan_d)) / along;
+        Some((a.point, dir * rate))
+    };
+    // Every section must have its point, else the edge has vanished.
+    for i in 0..=8 {
+        let t = range[0] + (range[1] - range[0]) * f64::from(i) / 8.0;
+        if sample(t).is_none() {
+            return Err(OffsetError::EdgeVanishes { edge: at }.into());
+        }
+    }
+    let both = |t: f64| sample(t).map(|x| [x, x]);
+    let fit = crate::intersect::fit_on([surfaces[0], surfaces[1]], range, &both)
+        .map_err(|_| super::uncertain(at, "traced fit"))?;
+    let tolerance = fit.bounds[0].max(fit.bounds[1]).max(LINEAR_RESOLUTION);
+    let pcurves = fit.pcurves.map(|p| p.map(|(c, _)| (Curve2::Nurbs2(Arc::new(c)), [0.0, 1.0])));
+    let [c0, _] = fit.curves;
+    Ok(NewCurve {
+        curve: Curve::Nurbs(Arc::new(c0)),
+        range,
+        period: None,
+        tolerance,
+        pcurves,
+        reversed: false,
+    })
+}
+
+/// The solution of a 4 × 4 linear system by Gaussian elimination with
+/// partial pivoting; `None` where it is singular.
+fn solve4(mut m: [[f64; 4]; 4], mut r: [f64; 4]) -> Option<[f64; 4]> {
+    for c in 0..4 {
+        let p = (c..4).max_by(|&a, &b| m[a][c].abs().total_cmp(&m[b][c].abs()))?;
+        if m[p][c].abs() < 1e-300 {
+            return None;
+        }
+        m.swap(c, p);
+        r.swap(c, p);
+        for k in c + 1..4 {
+            let f = m[k][c] / m[c][c];
+            for j in c..4 {
+                m[k][j] -= f * m[c][j];
+            }
+            r[k] -= f * r[c];
+        }
+    }
+    let mut x = [0.0; 4];
+    for c in (0..4).rev() {
+        let s: f64 = (c + 1..4).map(|j| m[c][j] * x[j]).sum();
+        x[c] = (r[c] - s) / m[c][c];
+    }
+    x.iter().all(|v| v.is_finite()).then_some(x)
+}

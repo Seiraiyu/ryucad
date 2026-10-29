@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [predicates, interval, euler, nurbs, mesh, feature, sweep, intersect, boolean, blend, expr, sketch, step, measure, eda, kicad, odb, shapes]
+        target: [predicates, interval, euler, nurbs, mesh, feature, sweep, intersect, boolean, blend, offset, expr, sketch, step, measure, eda, kicad, odb, shapes]
     steps:
       - uses: actions/checkout@v4
       # cargo-fuzz needs nightly; the pinned stable toolchain stays the
@@ -25,10 +25,10 @@ jobs:
       - name: Fuzz for 10 minutes
         working-directory: fuzz
         # libFuzzer's own memory grows past 4 GB on the boolean and blend
-        # targets.
+        # targets, and the offset target builds on blends and booleans.
         run: >-
           cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=600
-          ${{ (matrix.target == 'boolean' || matrix.target == 'blend') && '-rss_limit_mb=6144' || '' }}
+          ${{ (matrix.target == 'boolean' || matrix.target == 'blend' || matrix.target == 'offset') && '-rss_limit_mb=6144' || '' }}
       - name: Upload crashes
         if: failure()
         uses: actions/upload-artifact@v4

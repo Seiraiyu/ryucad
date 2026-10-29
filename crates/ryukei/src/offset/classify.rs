@@ -4,7 +4,7 @@
 
 use super::OffsetSpec;
 use crate::blend::convex::{Bend, BendFail, bend};
-use crate::geom::{Box3, Point3, Surface, Vector3};
+use crate::geom::{Surface, Vector3};
 use crate::intersect::face_rect;
 use crate::name::Name;
 use crate::tol::LINEAR_RESOLUTION;
@@ -23,9 +23,9 @@ pub(crate) const SMOOTH_GAP: f64 = 10.0 * LINEAR_RESOLUTION;
 /// Samples along an edge at which smoothness is judged, ends included.
 const SAMPLES: usize = 17;
 
-/// How far past its own box a spline face's offset reaches, as a share of
-/// the box's width each way: closing edges are found a little way past
-/// where the face ends.
+/// How far past its own box a spline face's offset reaches, at least, as
+/// a share of the box's width each way: closing edges are found a little
+/// way past where the face ends.
 const MARGIN: f64 = 0.1;
 
 /// How an edge's faces move.
@@ -54,8 +54,6 @@ pub(crate) struct Plan<'a> {
     pub(crate) class: BTreeMap<EdgeId, (Class, f64)>,
     /// The live edges in name order.
     pub(crate) edges: Vec<EdgeId>,
-    /// The body's size: its box's diagonal.
-    pub(crate) size: f64,
 }
 
 impl<'a> Plan<'a> {
@@ -96,14 +94,12 @@ impl<'a> Plan<'a> {
             .par_iter()
             .map(|&e| classify(body, &distance, e).map(|c| (e, c)))
             .collect::<Result<_, Error>>()?;
-        let size = body_box(body).map_or(1.0, |b| (b.max() - b.min()).length());
         Ok(Self {
             body,
             distance,
             surface,
             class,
             edges,
-            size,
         })
     }
 
@@ -177,9 +173,23 @@ fn offset_surface(body: &Body, f: FaceId, d: f64) -> Result<Surface, Error> {
     let (pu, pv) = s.periods();
     let periods = [pu, pv];
     let rect = face_rect(body, f).unwrap_or(whole);
+    // Past the box by a share of it, and at least three times the
+    // distance in model space: closing edges are searched for within two
+    // distances of their edges, so no two faces' offsets end together
+    // there, where no crossing could be certified.
+    let mid = s.eval(
+        (rect[0][0] + rect[0][1]) / 2.0,
+        (rect[1][0] + rect[1][1]) / 2.0,
+    );
+    let speed = [mid.du.length(), mid.dv.length()];
     let grown: [[f64; 2]; 2] = core::array::from_fn(|k| {
         let [a, b] = rect[k];
-        let m = (b - a) * MARGIN;
+        let reach = if speed[k] > 0.0 {
+            3.0 * d.abs() / speed[k]
+        } else {
+            0.0
+        };
+        let m = ((b - a) * MARGIN).max(reach);
         match periods[k] {
             Some(p) if b - a + 2.0 * m >= p => whole[k],
             Some(_) => [a - m, b + m],
@@ -237,7 +247,7 @@ fn classify(
             }
             .into());
         }
-        Err(BendFail::Uncertain) => return Err(OffsetError::Uncertain { at }.into()),
+        Err(BendFail::Uncertain) => return Err(super::uncertain(at, "classify.rs#1").into()),
     };
     Ok((
         if convex == (da > 0.0) {
@@ -247,22 +257,4 @@ fn classify(
         },
         0.0,
     ))
-}
-
-/// The box of every vertex and every edge's curve.
-fn body_box(body: &Body) -> Option<Box3> {
-    let mut out: Option<Box3> = None;
-    let mut add = |b: Box3| out = Some(out.map_or(b, |o| o.union(&b)));
-    for v in body.vertices() {
-        let p: Point3 = body.vertices[v].point;
-        add(Box3::new(p, p));
-    }
-    for e in body.edges() {
-        let edge = &body.edges[e];
-        add(body.curves[edge.curve].bounds(edge.interval));
-    }
-    for f in body.faces() {
-        add(crate::intersect::face_box(body, f));
-    }
-    out
 }

@@ -323,7 +323,7 @@ fn opening(
             (&out.points, p, d),
             [Part::Fill(a.edge), Part::Fill(b.edge)],
         )
-        .ok_or(OffsetError::Uncertain { at })?;
+        .ok_or_else(|| super::uncertain(at, "vertices.rs#7"))?;
         out.edges.push(arc);
         for s in [a, b] {
             let ends = out.open[&(s.edge, s.at_end)];
@@ -358,7 +358,7 @@ fn opening(
             (&out.points, p, d),
             [Part::Fill(s.edge), Part::Sphere(v)],
         )
-        .ok_or(OffsetError::Uncertain { at })?;
+        .ok_or_else(|| super::uncertain(at, "vertices.rs#8"))?;
         let e = out.edges.len();
         out.edges.push(arc);
         out.fill_ends.insert(
@@ -369,7 +369,7 @@ fn opening(
             }]),
         );
     }
-    let surface = sphere(p, d.abs(), &out.points).ok_or(OffsetError::Uncertain { at })?;
+    let surface = sphere(p, d.abs(), &out.points).ok_or_else(|| super::uncertain(at, "vertices.rs#9"))?;
     // The sphere runs each arc the other way from its fill: a fill runs
     // from its first side to its second at its edge's start, and back at
     // its end, so the sphere from the second to the first at a start.
@@ -390,7 +390,7 @@ fn opening(
         let e = &out.edges[last.edge];
         let to = if last.from == e.from { e.to } else { e.from };
         let Some(k) = rest.iter().position(|u| u.from == to) else {
-            return Err(OffsetError::Uncertain { at }.into());
+            return Err(super::uncertain(at, "vertices.rs#10").into());
         };
         chained.push(rest.remove(k));
     }
@@ -457,7 +457,7 @@ fn on(c: &NewCurve, x: Point3, slack: f64) -> Option<f64> {
 /// The hit of `c` with `surface` nearest `estimate`.
 fn hit(c: &NewCurve, surface: &Surface, estimate: Point3, at: crate::name::Name) -> Result<Option<(f64, Point3)>, Error> {
     let hits = curve_surface(&c.curve, c.range, surface, c.tolerance.max(LINEAR_RESOLUTION))
-        .map_err(|_| OffsetError::Uncertain { at })?;
+        .map_err(|_| super::uncertain(at, "vertices.rs#11"))?;
     Ok(hits
         .into_iter()
         .filter_map(|h| match h {
@@ -535,7 +535,7 @@ fn closing(
             t0
         } else {
             let c = one(geo, s.edge);
-            on(c, x, one(geo, steps[j].edge).tolerance).ok_or(OffsetError::Uncertain { at })?
+            on(c, x, one(geo, steps[j].edge).tolerance).ok_or_else(|| super::uncertain(at, "vertices.rs#12"))?
         };
         out.one.insert((s.edge, s.at_end), (0, t));
     }
@@ -567,7 +567,7 @@ fn between(
         .expect("points")
         .grow(3.0 * reach);
     let hit = surface_surface(a, b, &region).map_err(|f| match f {
-        Failure::Uncertain => Error::from(OffsetError::Uncertain { at }),
+        Failure::Uncertain => Error::from(super::uncertain(at, "vertices.rs#13")),
         Failure::Unsupported => OffsetError::Unsupported {
             at,
             case: OffsetCase::MixedVertex,
@@ -575,7 +575,7 @@ fn between(
         .into(),
     })?;
     let SurfaceHit::Meet { branches, .. } = hit else {
-        return Err(OffsetError::Uncertain { at }.into());
+        return Err(super::uncertain(at, "vertices.rs#14").into());
     };
     let mut best: Option<(f64, f64, f64, crate::intersect::Branch)> = None;
     for br in branches {
@@ -586,7 +586,7 @@ fn between(
             best = Some((worst, ta, tb, br));
         }
     }
-    let (gap, ta, tb, br) = best.ok_or(OffsetError::Uncertain { at })?;
+    let (gap, ta, tb, br) = best.ok_or_else(|| super::uncertain(at, "vertices.rs#15"))?;
     let period = (br.curve.period() == Some(br.range[1] - br.range[0])).then(|| br.range[1] - br.range[0]);
     // The stretch from `ta` to `tb`, as an increasing range and whether it
     // runs backwards.
@@ -611,7 +611,7 @@ fn between(
         }
     };
     if !(range[0] < range[1]) {
-        return Err(OffsetError::Uncertain { at }.into());
+        return Err(super::uncertain(at, "vertices.rs#16").into());
     }
     let [pa, pb] = br.pcurves;
     let (from, to) = if backwards {
@@ -667,7 +667,7 @@ fn mixed_end(
     for (step, side) in [((k + 1) % 3, before), ((k + 2) % 3, s.side)] {
         let st = steps[step];
         let c = one(geo, st.edge);
-        let t = on(c, xs[side], rails[side].tolerance).ok_or(OffsetError::Uncertain { at })?;
+        let t = on(c, xs[side], rails[side].tolerance).ok_or_else(|| super::uncertain(at, "vertices.rs#17"))?;
         out.one.insert((st.edge, st.at_end), (side, t));
     }
     let reach = plan.d(corners[k].face).abs();
@@ -727,7 +727,7 @@ fn mixed_trim(
         let mut ends = [(0, 0.0); 2];
         for side in 0..2 {
             let (idx, x) = if side == shared_side { (0, pb) } else { (1, q) };
-            let t = on(&rails[side], x, closing.tolerance).ok_or(OffsetError::Uncertain { at })?;
+            let t = on(&rails[side], x, closing.tolerance).ok_or_else(|| super::uncertain(at, "vertices.rs#18"))?;
             ends[side] = (idx, t);
         }
         out.open.insert((s.edge, s.at_end), ends);

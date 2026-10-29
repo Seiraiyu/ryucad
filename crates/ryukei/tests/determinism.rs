@@ -2419,6 +2419,178 @@ fn spline_blends_section(golden: &mut Golden) {
     }
 }
 
+/// Sweeps' offsets: points, derivatives and projections of the wavy
+/// sweep's offset each way, its third derivatives, and the NURBS form of
+/// an offset of a spline cylinder.
+fn sweep_offsets_section(golden: &mut Golden) {
+    use ryukei::geom::{FrameLaw, KnotVector, NurbsCurve, Sweep};
+    use std::sync::Arc;
+    let mut s = golden.section("sweep_offsets");
+    let k = KnotVector::clamped(3, &[0.0, 1.0, 2.0], &[4, 1, 4]).unwrap();
+    let wavy = Curve::Nurbs(Arc::new(
+        NurbsCurve::new(
+            k,
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(2.0, 1.0, 0.5),
+                Point3::new(3.0, 0.5, 1.5),
+                Point3::new(4.0, 0.0, 2.0),
+            ],
+            None,
+        )
+        .unwrap(),
+    ));
+    let across = Frame::new(
+        Point3::ORIGIN,
+        Vector3::new(1.0, 0.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+    )
+    .unwrap();
+    let arc = Curve::Circle(Circle::new(across, 0.2).unwrap());
+    let w = Surface::Sweep(Arc::new(
+        Sweep::new(
+            (arc, [0.3, 2.5]),
+            (wavy, [0.0, 2.0]),
+            across,
+            FrameLaw::Minimal,
+            0.7,
+            1.5,
+        )
+        .unwrap(),
+    ));
+    for d in [0.05, -0.1] {
+        let o = w.offset(d).unwrap().unwrap();
+        for i in 0..=4 {
+            for j in 0..=6 {
+                let (u, t) = (0.3 + 2.2 * f64::from(i) / 4.0, 2.0 * f64::from(j) / 6.0);
+                let e = o.eval(u, t);
+                for v in [e.point.to_vector(), e.du, e.dv, e.duu, e.duv, e.dvv] {
+                    s.f64(v.x);
+                    s.f64(v.y);
+                    s.f64(v.z);
+                }
+            }
+        }
+        let foot = o.project(Point3::new(1.5, 0.7, 0.9));
+        s.f64(foot.param.0);
+        s.f64(foot.param.1);
+    }
+    let tilted = Frame::new(
+        Point3::new(0.3, -0.2, 0.5),
+        Vector3::new(1.0, 0.4, 0.2),
+        Vector3::new(0.0, 1.0, 0.0),
+    )
+    .unwrap();
+    let c = Surface::Cylinder(Cylinder::new(tilted, 0.7).unwrap());
+    let (n, _) = c.to_nurbs([[0.0, core::f64::consts::PI], [-0.5, 0.5]]).unwrap();
+    let Some(Ok(Surface::Offset(o))) = Surface::Nurbs(Arc::new(n)).offset(0.075) else {
+        panic!("an offset");
+    };
+    let (n, _, bound) = o.to_nurbs_within([[0.0, 1.0], [-0.5, 0.5]], 1e-5).unwrap();
+    s.f64(bound);
+    for p in n.control_points() {
+        s.f64(p.x);
+        s.f64(p.y);
+        s.f64(p.z);
+    }
+}
+
+/// An L-shaped prism: `[0, 2] × [0, 2]` less `[1, 2] × [1, 2]`, `h` high.
+fn l_block(key: OpKey, h: f64) -> ryukei::topo::Body {
+    let pts = [
+        (0.0, 0.0),
+        (2.0, 0.0),
+        (2.0, 1.0),
+        (1.0, 1.0),
+        (1.0, 2.0),
+        (0.0, 2.0),
+    ];
+    let segments = (0..6)
+        .map(|i| {
+            let (p, q) = (pts[i], pts[(i + 1) % 6]);
+            let (p, q) = (Point2::new(p.0, p.1), Point2::new(q.0, q.1));
+            Segment {
+                key: SegmentKey(10 + i as u128),
+                curve: Curve2::Line2(Line2::through(p, q).unwrap()),
+                t0: 0.0,
+                t1: p.distance(q),
+            }
+        })
+        .collect();
+    let profile = ValidProfile::new(Profile {
+        frame: Frame::WORLD,
+        loops: vec![Loop {
+            key: LoopKey(1),
+            segments,
+        }],
+    })
+    .unwrap();
+    extrude(key, &profile, Vector3::new(0.0, 0.0, 1.0), 0.0, h)
+        .unwrap()
+        .0
+}
+
+/// Offset bodies: a box grown, shrunk and grown but its top, a cylinder
+/// both ways, and an L both ways (its inner corner's fills end on a face
+/// and trim each other).
+fn offset_bodies_section(golden: &mut Golden) {
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::offset::{OffsetSpec, offset_body};
+    let mut s = golden.section("offset_bodies");
+    let key = OpKey(0x6f66_6662);
+    let off = OpKey(0x6f66_6663);
+    let by = |d: f64| OffsetSpec {
+        distance: d,
+        faces: Vec::new(),
+    };
+    let (b, _) = primitive::block(key, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let top = OffsetSpec {
+        distance: 0.1,
+        faces: vec![(Name::derive(key, Role::Face(FaceRole::PlusZ), &[]), 0.0)],
+    };
+    let (c, _) = primitive::cylinder(key, 0.3, 0.5, &Rigid::IDENTITY).unwrap();
+    let l = l_block(key, 0.6);
+    for (body, spec) in [
+        (&b, by(0.1)),
+        (&b, by(-0.1)),
+        (&b, top),
+        (&c, by(0.05)),
+        (&c, by(-0.05)),
+        (&l, by(0.1)),
+        (&l, by(-0.1)),
+    ] {
+        let (o, j) = offset_body(off, body, &spec).unwrap();
+        hash_body(&mut s, &o, &j);
+    }
+}
+
+/// Shells: a box open at its top, inwards and outwards, and a cylinder
+/// cup.
+fn shells_section(golden: &mut Golden) {
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::offset::{ShellSpec, shell};
+    let mut s = golden.section("shells");
+    let key = OpKey(0x7368_656c);
+    let (b, _) = primitive::block(key, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let (c, _) = primitive::cylinder(key, 0.3, 0.5, &Rigid::IDENTITY).unwrap();
+    let face = |r: FaceRole| Name::derive(key, Role::Face(r), &[]);
+    for (body, open, outward) in [
+        (&b, FaceRole::PlusZ, false),
+        (&b, FaceRole::PlusZ, true),
+        (&c, FaceRole::Top, false),
+    ] {
+        let spec = ShellSpec {
+            thickness: 0.05,
+            outward,
+            open: vec![face(open)],
+            faces: Vec::new(),
+        };
+        let (o, j) = shell(OpKey(0x7368_656d), body, &spec).unwrap();
+        hash_body(&mut s, &o, &j);
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -2456,5 +2628,8 @@ fn determinism() {
     measure_section(&mut golden);
     offsets_section(&mut golden);
     spline_blends_section(&mut golden);
+    sweep_offsets_section(&mut golden);
+    offset_bodies_section(&mut golden);
+    shells_section(&mut golden);
     golden.finish();
 }
