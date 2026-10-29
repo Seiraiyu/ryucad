@@ -357,6 +357,12 @@ fn untar(r: impl Read, limits: Limits) -> Result<Vec<(String, Vec<u8>)>, Error> 
         let mut entry = entry.map_err(bad)?;
         let name = String::from_utf8_lossy(&entry.path_bytes()).into_owned();
         let kind = entry.header().entry_type();
+        // Pax headers (`git archive` starts every tar with a global one)
+        // describe other entries and are no file of the job.
+        if kind.is_pax_global_extensions() || kind.is_pax_local_extensions() {
+            budget.entry(0)?;
+            continue;
+        }
         let path = safe_path(&name)?;
         if kind.is_dir() {
             budget.entry(0)?;
@@ -652,6 +658,47 @@ mod tests {
         assert_eq!(code(&gzip(&tar_of(&f)), small), Code::ArchiveUnsafe);
         assert_eq!(code(&zip_of(&f), small), Code::ArchiveUnsafe);
         assert!(Job::from_archive("j", &zip_of(&f), Limits { bytes: 50, ..d }).is_ok());
+    }
+
+    #[test]
+    fn pax_headers_are_read_past() {
+        // `git archive` starts every tar with a pax global header (type
+        // `g`) holding the commit; a local one (`x`) may precede any entry.
+        let mut b = tar::Builder::new(Vec::new());
+        let comment = b"52 comment=0c89e01a0c89e01a0c89e01a0c89e01a0c89e01a\n";
+        let mut h = tar::Header::new_ustar();
+        h.set_entry_type(tar::EntryType::XGlobalHeader);
+        h.set_size(comment.len() as u64);
+        b.append_data(&mut h, "pax_global_header", &comment[..])
+            .unwrap();
+        let mtime = b"20 mtime=1761700000\n";
+        let mut h = tar::Header::new_ustar();
+        h.set_entry_type(tar::EntryType::XHeader);
+        h.set_size(mtime.len() as u64);
+        b.append_data(&mut h, "PaxHeaders/matrix", &mtime[..])
+            .unwrap();
+        for (path, data) in files() {
+            let mut h = tar::Header::new_ustar();
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            h.set_entry_type(tar::EntryType::Regular);
+            b.append_data(&mut h, path, data).unwrap();
+        }
+        let bytes = b.into_inner().unwrap();
+        for bytes in [bytes.clone(), gzip(&bytes)] {
+            let job = Job::from_archive("j", &bytes, Limits::default()).unwrap();
+            assert_eq!(read(&job, "matrix/matrix"), b"STEP {\n}\n");
+            assert!(!job.exists("pax_global_header"));
+        }
+        // A header counts against the entry budget, as a folder does.
+        let few = Limits {
+            entries: 3,
+            ..Limits::default()
+        };
+        assert_eq!(
+            Job::from_archive("j", &bytes, few).unwrap_err().code,
+            Code::ArchiveUnsafe
+        );
     }
 
     #[cfg(unix)]
