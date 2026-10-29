@@ -4316,6 +4316,7 @@ name = "ryu-board"
 version = "0.0.0"
 dependencies = [
  "divan",
+ "png",
  "rayon",
  "ryu-board",
  "ryu-math",
@@ -4436,11 +4437,21 @@ dependencies = [
 name = "ryudfm"
 version = "0.0.0"
 dependencies = [
+ "assert_cmd",
+ "blake3",
+ "clap",
+ "divan",
  "flate2",
+ "getrandom 0.3.4",
+ "mimalloc",
  "rayon",
  "roxmltree 0.21.2",
  "ryu-board",
+ "ryu-doc",
+ "ryu-session",
  "ryudfm",
+ "serde",
+ "serde_json",
  "sha2",
  "tar",
  "tempfile",

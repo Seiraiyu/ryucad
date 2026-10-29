@@ -12,6 +12,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Every property test draws the same cases on every run of this
+  # workflow, so a release gate passes or fails on the code alone, never
+  # on a random draw (issue #180: a fresh case failed v0.7.0-pre.2's
+  # run). New cases come from changing this on purpose, from local runs
+  # (random unless it is set) and from fuzzing. The devcontainer job
+  # passes it in by hand: its commands run in the container.
+  PROPTEST_RNG_SEED: "7275"
 
 jobs:
   native:
@@ -79,9 +86,10 @@ jobs:
       # checked, and ryucad's bar times a 1,000-hole pattern against
       # ryukei's own boolean, and its assembly bars time 1,000 mates and a
       # cold daemon over a warm disk cache, and ryueda's bar times a design
-      # of 10,000 component occurrences and a warm daemon's write:
-      # minutes in a debug build, so they are ignored there and run in
-      # release.
+      # of 10,000 component occurrences and a warm daemon's write, and
+      # ryudfm's a dense board read and drawn (here a seeded stand-in; the
+      # devcontainer job times the pinned board): minutes in a debug build,
+      # so they are ignored there and run in release.
       - run: cargo test -p ryukei --release --test boolean_props
       - run: cargo test -p ryukei --release --test booleans
       - run: cargo test -p ryukei --release --test general_booleans
@@ -109,6 +117,7 @@ jobs:
       - run: cargo test -p ryucad --release --test step_bar -- --nocapture
       - run: cargo test -p ryucad --release --test step
       - run: cargo test -p ryueda --release --test bar -- --nocapture
+      - run: cargo test -p ryudfm --release --test bar -- --nocapture
       - run: cargo bench --workspace --no-run
 
   kicad-corpus:
@@ -187,11 +196,14 @@ jobs:
         with:
           # The workspace, then the OCCT, SMLib and lib3mf references,
           # which only the devcontainer (with all three installed) builds,
-          # then ryudfm's pinned boards, exported by its KiCad.
+          # then ryudfm's pinned boards, exported by its KiCad, and its bars
+          # on the densest of them.
           runCmd: |
+            export PROPTEST_RNG_SEED=${{ env.PROPTEST_RNG_SEED }}
             RYUCAD_REQUIRE_GPU=1 cargo test --workspace
             sh scripts/fetch-dfm-corpus.sh
             cargo test -p ryudfm --release --test pinned -- --ignored
+            RYUDFM_REQUIRE_CORPUS=1 cargo test -p ryudfm --release --test bar -- --nocapture
             cargo clippy -p ryukei-bench --features occt,smlib,formats --all-targets -- -D warnings
             cargo test -p ryukei-bench --features occt,smlib --release --test kernels -- --nocapture
             cargo test -p ryukei-bench --features occt,formats --release --test formats -- --nocapture
@@ -212,9 +224,11 @@ jobs:
         with:
           # Rare runs: their caches would only evict the fast CI's.
           save-if: false
-      - run: cargo build --locked --release -p ryucad -p ryucad-app
+      - run: cargo build --locked --release -p ryucad -p ryucad-app -p ryueda
       - if: runner.os == 'Linux'
-        run: shellcheck install.sh scripts/test-install.sh scripts/smoke.sh scripts/fetch-dfm-corpus.sh
+        run: |
+          shellcheck install.sh scripts/test-install.sh scripts/smoke.sh scripts/fetch-dfm-corpus.sh
+          shellcheck install-ryueda.sh scripts/test-install-ryueda.sh scripts/smoke-ryueda.sh scripts/stamp-version.sh
       - if: runner.os == 'Linux'
         name: the desktop entry and MIME type the installer registers
         run: |
@@ -235,8 +249,16 @@ jobs:
           sh scripts/smoke.sh "target/release/ryucad$x" "target/release/ryucad-app$x"
         env:
           RYUCAD_REQUIRE_GPU: ${{ runner.os != 'macOS' && '1' || '' }}
+      - name: ryueda's smoke test
+        shell: bash
+        run: |
+          x=""
+          [ "$RUNNER_OS" = Windows ] && x=".exe"
+          sh scripts/smoke-ryueda.sh "target/release/ryueda$x"
       - if: runner.os != 'Windows'
         run: sh scripts/test-install.sh
+      - if: runner.os != 'Windows'
+        run: sh scripts/test-install-ryueda.sh
       - if: runner.os == 'Windows'
         name: PSScriptAnalyzer
         shell: pwsh
@@ -244,7 +266,7 @@ jobs:
           if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) {
             Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
           }
-          $findings = 'install.ps1', 'scripts/test-install.ps1' |
+          $findings = 'install.ps1', 'scripts/test-install.ps1', 'install-ryueda.ps1', 'scripts/test-install-ryueda.ps1' |
             ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Severity Warning, Error }
           $findings
           if ($findings) { throw 'PSScriptAnalyzer findings' }
@@ -256,3 +278,11 @@ jobs:
         name: PowerShell 7
         shell: pwsh
         run: scripts/test-install.ps1 -Shell pwsh
+      - if: runner.os == 'Windows'
+        name: ryueda's, Windows PowerShell 5.1
+        shell: pwsh
+        run: scripts/test-install-ryueda.ps1 -Shell powershell
+      - if: runner.os == 'Windows'
+        name: ryueda's, PowerShell 7
+        shell: pwsh
+        run: scripts/test-install-ryueda.ps1 -Shell pwsh

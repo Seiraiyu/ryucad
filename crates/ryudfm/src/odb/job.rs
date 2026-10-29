@@ -270,7 +270,9 @@ fn key_of(path: &str) -> (String, Packing) {
     }
 }
 
-fn stem(path: &Path) -> String {
+/// The name of the job at `path`: its file or folder name less an
+/// archive's extension (`.tar.gz`, `.tgz`, `.tar`, `.zip`).
+pub fn stem(path: &Path) -> String {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -417,6 +419,14 @@ fn unzip(bytes: &[u8], limits: Limits) -> Result<Vec<(String, Vec<u8>)>, Error> 
 }
 
 /// A folder's files, refusing links.
+/// The files of the folder at `path` as [`Job::open`] reads them: paths
+/// relative to it with `/`, in sorted order, links and devices refused.
+pub fn folder_files(path: &Path, limits: Limits) -> Result<Vec<(String, Vec<u8>)>, Error> {
+    let mut files = Vec::new();
+    walk(path, "", &mut files, limits)?;
+    Ok(files)
+}
+
 fn walk(
     dir: &Path,
     prefix: &str,

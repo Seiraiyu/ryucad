@@ -55,3 +55,10 @@ fn archives_are_read_without_c() {
     ));
     assert!(!MANIFEST.contains("zlib"));
 }
+
+#[test]
+fn hashes_without_assembly() {
+    // BLAKE3 names every input; its `pure` feature builds no C or
+    // assembly on any platform.
+    assert!(MANIFEST.contains(r#"blake3 = { version = "1", features = ["pure"] }"#));
+}
