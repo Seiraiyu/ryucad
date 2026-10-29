@@ -6,8 +6,11 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Rust only: no C or assembly to build on any platform.
+blake3 = { version = "1", features = ["pure"] }
 ryu-board = { path = "../ryu-board" }
 ryu-doc = { path = "../ryu-doc" }
+serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 # Jobs are read and parsed per file in parallel.
 rayon = "1"

@@ -7,6 +7,7 @@
 pub use ryu_doc::{canonical, error, id, source, units};
 
 pub mod codes;
+pub mod input;
 pub mod odb;
 pub mod quantity;
 #[cfg(feature = "testing")]

@@ -4408,12 +4408,14 @@ dependencies = [
 name = "ryudfm"
 version = "0.0.0"
 dependencies = [
+ "blake3",
  "flate2",
  "rayon",
  "roxmltree",
  "ryu-board",
  "ryu-doc",
  "ryudfm",
+ "serde",
  "serde_json",
  "sha2",
  "tar",
