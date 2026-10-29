@@ -25,6 +25,34 @@ pub fn cache() -> Result<ryupdm::deps::Cache> {
     }
 }
 
+/// A dependency's name in `project`'s manifest, else its project ID (a
+/// project the lock reaches through another).
+pub(crate) fn name_of(project: &Project, id: &ProjectId) -> String {
+    project
+        .manifest
+        .dependencies
+        .get(id)
+        .map_or_else(|| id.to_string(), |d| d.name.clone())
+}
+
+/// The properties of `part` of `project` at its release `label`, as its
+/// own files there have them; `None` when it can't be read.
+pub(crate) fn properties(
+    session: &mut Session,
+    project: &ProjectId,
+    part: &Id,
+    label: &str,
+) -> Option<ryupdm::props::Properties> {
+    let lock = lock_of(session.project()).ok()?;
+    let locked = lock.projects.get(project)?.clone();
+    let read = session
+        .deps_reader()
+        .ok()?
+        .label(project, &locked, part, label)
+        .ok()?;
+    ryupdm::props::read(&read.files, part).ok()
+}
+
 /// The lock as the working files have it: empty without one, its error
 /// when it can't be read.
 pub(crate) fn lock_of(project: &Project) -> Result<crate::doc::lock::Lock> {
@@ -285,5 +313,99 @@ pub(crate) mod tests {
 
     fn git_head(dir: &Path) -> String {
         crate::git::repo(dir).unwrap().locate("HEAD").unwrap().0
+    }
+
+    /// [`project`] depending on [`library`], its frame placing the
+    /// library's `p` at `A` as `b`, fetched and locked.
+    pub(crate) fn placing() -> (tempfile::TempDir, tempfile::TempDir, ProjectId, Session) {
+        let (lib_dir, lib) = library();
+        let (dir, mut s) = project();
+        let cache = ryupdm::deps::Cache::new(dir.path().join("cache"));
+        s.deps_cache = Some(cache.clone());
+        depend(&mut s, &lib, lib_dir.path());
+        place_foreign(dir.path(), "frame", "b", &lib, "p", "A");
+        s.refresh().unwrap();
+        cache.fetch(&url(lib_dir.path()), &[""]).unwrap();
+        write_lock(&mut s);
+        (lib_dir, dir, lib, s)
+    }
+
+    #[test]
+    fn a_foreign_part_exports_mates_and_releases_as_a_local_one() {
+        let (_lib_dir, dir, _lib, mut s) = placing();
+        // Exported, it is a product of its own, named by its PDM number,
+        // at its label.
+        let (a, _) = crate::export::tests::exported(
+            &mut s,
+            json!({"part": "frame", "time_stamp": "2026-10-29T00:00:00"}),
+        )
+        .unwrap();
+        let p = a["products"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["part"] == "p")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (&p["product"], &p["revision"]),
+            (&json!("100"), &json!("A"))
+        );
+        // A mate holds it to a local instance.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "instance", "id": "pl", "of": "plate", "fixed": true,
+                   "placement": {"origin": ["10 mm", "0 mm", "0 mm"]}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "mate", "id": "m", "form": "fastened",
+                   "a": "frame/pl", "b": "frame/b"}),
+        )
+        .unwrap();
+        let r = s.rebuilt(&id("frame")).unwrap().clone();
+        let placed = r.output(&id("b")).unwrap().instance().unwrap();
+        let x = crate::assembly::rigid_pose(&placed.pose).origin_m[0];
+        assert!((x - 0.01).abs() < 1e-12, "{x}");
+        // A release of the frame takes it as an official release.
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        let d = call(
+            &mut s,
+            "release.propose",
+            json!({"part": "frame", "dry_run": true}),
+        )
+        .unwrap();
+        let of = |inst: &str| {
+            d["problems"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|p| {
+                    p["code"] == "instance_not_released" && p["details"]["instance"] == inst
+                })
+                .count()
+        };
+        // The local plate at working isn't released; the library's is.
+        assert_eq!((of("pl"), of("b")), (1, 0), "{d}");
+        // Not fetched, it can't be judged official.
+        std::fs::remove_dir_all(dir.path().join("cache")).unwrap();
+        s.deps_fetched();
+        let d = call(
+            &mut s,
+            "release.propose",
+            json!({"part": "frame", "dry_run": true}),
+        )
+        .unwrap();
+        let b = d["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["details"]["instance"] == "b")
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(b["code"], "dependency_not_fetched", "{d}");
     }
 }

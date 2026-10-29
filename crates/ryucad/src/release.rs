@@ -222,6 +222,13 @@ fn unreleased(
             Rev::Foreign { project, label } => format!("{label} of {project}"),
         };
         match pinned_rev(session, &i.part, &i.rev) {
+            // Another project's label that can't be read says why itself:
+            // locked, fetched, still official.
+            Err(e) if i.rev.project().is_some() => out.push(
+                e.with("instance", &at)
+                    .with("part", &i.part)
+                    .with("rev", i.rev.to_json()),
+            ),
             Err(e) => out.push(refuse(format!("places {}@{l}: {}", i.part, e.message))),
             Ok(pin) if pin.pin.commit.is_none() => out.push(refuse(format!(
                 "places {}@{l}, which isn't official yet",
