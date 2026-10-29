@@ -1168,73 +1168,123 @@ fn compute(session: &mut Session) -> Result<Value> {
     let root = session.root().to_path_buf();
     let (repo, state) = merging(&root)?;
     let working = session.snapshot();
-    let mut conflicts = records(&working);
     let paths = repo.unmerged()?;
-    let (more, mut unstaged) = unmerged(&working, &paths);
-    conflicts.extend(more);
     // A file staged and then settled again (a conflict record `git add`ed,
     // then resolved) is no longer unmerged, but a commit would still take
     // what the index holds: everything the hook would refuse is listed.
-    unstaged.extend(repo.unstaged(&working)?);
-    unstaged.sort();
-    unstaged.dedup();
-    let ours = side(session, Some(&state.ours))?;
-    let theirs = side(session, Some(&state.theirs))?;
-    let base = side(session, state.base.as_deref())?;
-    conflicts.extend(kept_unlisted(
-        &working,
-        &paths,
-        [&ours.files, &theirs.files, &base.files],
-    ));
+    let staged = repo.unstaged(&working)?;
+    let sides = Sides {
+        ours: side(session, Some(&state.ours))?,
+        theirs: side(session, Some(&state.theirs))?,
+        base: side(session, state.base.as_deref())?,
+    };
     session.learn_from_revisions();
-    let renamed = renames(&working, &ours, &theirs, &base);
-    // A renamed file's own conflicts go with it: its repairs rewrite it.
-    let gone: Vec<String> = renamed
-        .iter()
-        .map(|c| format!("{}#", c["files"][0].as_str().unwrap_or_default()))
-        .collect();
-    conflicts.retain(|c| {
-        !gone.iter().any(|g| {
-            c["id"]
-                .as_str()
-                .is_some_and(|id| id.starts_with(g.as_str()))
-        })
-    });
-    conflicts.extend(renamed);
-    for c in conflicts.iter_mut().filter(|c| c["kind"] == "id_collision") {
-        c["repairs"] = json!(renumbering(&root, &working, &ours, &theirs, c));
-    }
-    let now = built(session)?;
-    let (mut broke, already) = broken(&now, &ours, &theirs, &base);
-    // What a name that is gone was, and which feature took it.
-    for c in &mut broke {
-        let part = c["concerns"]["part"]
-            .as_str()
-            .and_then(|p| Id::parse(p, "part").ok());
-        if let (Some(part), Ok(e)) = (part, serde_json::from_value::<Error>(c["error"].clone())) {
-            c["error"] = json!(session.explain(&part, e));
-        }
-    }
-    conflicts.extend(broke);
-    conflicts.extend(stale(&working, &now, &ours, &theirs, &base));
-    conflicts.extend(stale_assemblies(&working, &now, &ours, &theirs));
-    let releases = crate::release::history(session)
-        .map(|(_, r)| r)
-        .unwrap_or_default();
-    conflicts.extend(pdm(&working, &ours, &theirs, &base, &releases));
-    conflicts.extend(item_collisions(&working, &ours, &theirs));
-    conflicts.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    let found = findings(session, None, &working, &paths, staged, &sides, true)?;
     let commit = |c: Option<&String>| json!({ "commit": c });
     Ok(json!({
         "step": state.step.as_str(),
         "ours": commit(Some(&state.ours)),
         "theirs": commit(Some(&state.theirs)),
         "base": commit(state.base.as_ref()),
-        "clean": conflicts.is_empty(),
-        "conflicts": conflicts,
-        "already_failing": already,
-        "unstaged": unstaged,
+        "clean": found.conflicts.is_empty(),
+        "conflicts": found.conflicts,
+        "already_failing": found.already,
+        "unstaged": found.unstaged,
     }))
+}
+
+/// A merge's three sides, rebuilt.
+struct Sides {
+    ours: Side,
+    theirs: Side,
+    base: Side,
+}
+
+/// What a merge leaves to settle: its conflicts, sorted by ID, the
+/// features already failing on a side, and the files settled but not
+/// staged.
+struct Findings {
+    conflicts: Vec<Value>,
+    already: Vec<Value>,
+    unstaged: Vec<String>,
+}
+
+/// Everything a merge leaves to settle, from its working files and the
+/// paths Git left unmerged in them, the files whose working copy the index
+/// doesn't hold (`staged`), and its sides. The merge rebuilds in
+/// `merged`, a session over its files, or (for a merge in progress) in
+/// `session` itself, which explains what failed. Renames Git followed are
+/// looked for only where Git ran (`renamed`).
+fn findings(
+    session: &mut Session,
+    mut merged: Option<Session>,
+    working: &crate::activity::Files,
+    paths: &BTreeMap<String, Unmerged>,
+    staged: Vec<String>,
+    sides: &Sides,
+    renamed: bool,
+) -> Result<Findings> {
+    let root = session.root().to_path_buf();
+    let Sides { ours, theirs, base } = sides;
+    let releases = crate::release::history(session)
+        .map(|(_, r)| r)
+        .unwrap_or_default();
+    let mut conflicts = records(working);
+    let (more, mut unstaged) = unmerged(working, paths);
+    conflicts.extend(more);
+    unstaged.extend(staged);
+    unstaged.sort();
+    unstaged.dedup();
+    conflicts.extend(kept_unlisted(
+        working,
+        paths,
+        [&ours.files, &theirs.files, &base.files],
+    ));
+    if renamed {
+        let renamed = renames(working, ours, theirs, base);
+        // A renamed file's own conflicts go with it: its repairs rewrite it.
+        let gone: Vec<String> = renamed
+            .iter()
+            .map(|c| format!("{}#", c["files"][0].as_str().unwrap_or_default()))
+            .collect();
+        conflicts.retain(|c| {
+            !gone.iter().any(|g| {
+                c["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with(g.as_str()))
+            })
+        });
+        conflicts.extend(renamed);
+    }
+    for c in conflicts.iter_mut().filter(|c| c["kind"] == "id_collision") {
+        c["repairs"] = json!(renumbering(&root, working, ours, theirs, c));
+    }
+    let at = match &mut merged {
+        Some(m) => m,
+        None => session,
+    };
+    let now = built(at)?;
+    let (mut broke, already) = broken(&now, ours, theirs, base);
+    // What a name that is gone was, and which feature took it.
+    for c in &mut broke {
+        let part = c["concerns"]["part"]
+            .as_str()
+            .and_then(|p| Id::parse(p, "part").ok());
+        if let (Some(part), Ok(e)) = (part, serde_json::from_value::<Error>(c["error"].clone())) {
+            c["error"] = json!(at.explain(&part, e));
+        }
+    }
+    conflicts.extend(broke);
+    conflicts.extend(stale(working, &now, ours, theirs, base));
+    conflicts.extend(stale_assemblies(working, &now, ours, theirs));
+    conflicts.extend(pdm(working, ours, theirs, base, &releases));
+    conflicts.extend(item_collisions(working, ours, theirs));
+    conflicts.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    Ok(Findings {
+        conflicts,
+        already,
+        unstaged,
+    })
 }
 
 /// Puts `x` at `pointer` in `v`, making the objects on the way; `None`
