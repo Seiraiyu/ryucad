@@ -710,6 +710,18 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         part: Option<String>,
     },
+    /// Every instance, of the project's own parts or another project's, at
+    /// a label older than its part's latest official one, offline.
+    #[serde(rename = "deps.outdated")]
+    DepsOutdated {},
+    /// Takes dependency `name` (a name or project ID) out of the manifest
+    /// and the lock; `has_dependents` while anything places or reaches it.
+    #[serde(rename = "deps.remove")]
+    DepsRemove {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// The material library: each material's density and colour, the
     /// parts that name it, the default, and the project's revision.
     #[serde(rename = "materials.list")]
@@ -1312,6 +1324,7 @@ impl Request {
                 | Request::AppearanceClear { .. }
                 | Request::DepsAdd { .. }
                 | Request::DepsUpdate { dry_run: false, .. }
+                | Request::DepsRemove { .. }
                 | Request::ViewSave { .. }
                 | Request::ViewDelete { .. }
                 | Request::ViewRename { .. }

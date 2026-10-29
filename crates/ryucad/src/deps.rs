@@ -650,6 +650,137 @@ pub fn update(
     Ok(v)
 }
 
+/// `deps.outdated`, offline: every instance, of the project's own parts
+/// or another project's, at a label older than its part's latest official
+/// label that isn't obsolete (in the scheme's order), with that label.
+/// Another project's latest is what was fetched; outside a repository the
+/// project's own labels are never outdated (nothing is official).
+pub fn outdated(session: &mut Session) -> Result<serde_json::Value> {
+    use crate::doc::assembly::Rev;
+    use serde_json::json;
+    let p = session.project().clone();
+    let config = ryupdm::config::Config::read(&*session).unwrap_or_default();
+    let own = match crate::release::history(session) {
+        Ok((_, r)) => ryupdm::deps::parts::latest(&r, config.revisions),
+        Err(e) if e.code == Code::NotAGitRepo => Default::default(),
+        Err(e) => return Err(e),
+    };
+    let lock = lock_of(&p).unwrap_or_default();
+    let mut theirs: std::collections::BTreeMap<ProjectId, std::collections::BTreeMap<Id, String>> =
+        Default::default();
+    let mut out = Vec::new();
+    for (asm, part) in &p.parts {
+        for fid in part.order() {
+            let Some(Ok(Feature::Instance(i))) = part.features.get(fid) else {
+                continue;
+            };
+            let (latest, project) = match &i.rev {
+                Rev::Working => continue,
+                Rev::Label(_) => (own.get(&i.part).cloned(), None),
+                Rev::Foreign { project, .. } => {
+                    if !theirs.contains_key(project) {
+                        let place = match p.manifest.dependencies.get(project) {
+                            Some(d) => Some((d.url.clone(), d.path.clone())),
+                            None => lock
+                                .projects
+                                .get(project)
+                                .map(|l| (l.url.clone(), l.path.clone())),
+                        };
+                        let mut found = Default::default();
+                        if let Some((url, path)) = place {
+                            let reader = session.deps_reader()?;
+                            if let Some(repo) = reader.repo(&url)? {
+                                let c =
+                                    ryupdm::deps::config_at(&repo, ryupdm::deps::HEAD_REF, &path)?;
+                                if let Some(r) = reader.releases(&url, &path, &c.release_branch)? {
+                                    found = ryupdm::deps::parts::latest(r, c.revisions);
+                                }
+                            }
+                        }
+                        theirs.insert(project.clone(), found);
+                    }
+                    (theirs[project].get(&i.part).cloned(), Some(project))
+                }
+            };
+            let label = i.rev.label().expect("a label").to_owned();
+            let Some(latest) = latest.filter(|l| *l != label) else {
+                continue;
+            };
+            // Older by the scheme: a label past the latest isn't outdated.
+            let older = ryupdm::label::index(config.revisions, &label)
+                .zip(ryupdm::label::index(config.revisions, &latest))
+                .is_none_or(|(a, b)| a < b);
+            if !older {
+                continue;
+            }
+            let mut v = json!({"assembly": asm, "instance": fid, "part": i.part,
+                               "label": label, "latest": latest});
+            if let Some(project) = project {
+                v["project"] = json!(project);
+                v["dependency"] = json!(name_of(&p, project));
+            }
+            out.push(v);
+        }
+    }
+    Ok(json!({"schema": SCHEMA, "outdated": out}))
+}
+
+/// `deps.remove`: takes dependency `name` (a name or project ID) out of
+/// the manifest, and the lock with it; `has_dependents` while an instance
+/// places its parts or the lock reaches projects through it. One logged,
+/// undoable change guarded by the project's revision.
+pub fn remove(
+    session: &mut Session,
+    name: &str,
+    expected: Option<&str>,
+) -> Result<serde_json::Value> {
+    crate::config::check_project_revision(session.root(), expected)?;
+    let mut m = session.project().manifest.clone();
+    let (id, d) = crate::doc::deps::find(&m.dependencies, name)?;
+    let (id, d) = (id.clone(), d.clone());
+    let mut placing = Vec::new();
+    for (asm, part) in &session.project().parts {
+        for fid in part.order() {
+            if let Some(Ok(Feature::Instance(i))) = part.features.get(fid)
+                && i.rev.project() == Some(&id)
+            {
+                placing.push(format!("{asm}/{fid}"));
+            }
+        }
+    }
+    let through: Vec<ProjectId> = lock_of(session.project())
+        .unwrap_or_default()
+        .projects
+        .iter()
+        .filter(|(_, l)| l.via.contains(&id))
+        .map(|(p, _)| p.clone())
+        .collect();
+    if !placing.is_empty() || !through.is_empty() {
+        return Err(Error::new(
+            Code::HasDependents,
+            format!(
+                "{} is still placed ({}) or reached through ({} other projects); remove those instances first",
+                d.name,
+                placing.join(", "),
+                through.len()
+            ),
+        )
+        .with("dependency", &d.name)
+        .with("instances", &placing)
+        .with("projects", &through));
+    }
+    m.dependencies.remove(&id);
+    save_manifest(session, &m)?;
+    if keep_lock(session)? {
+        session.reload()?;
+    }
+    Ok(serde_json::json!({
+        "schema": SCHEMA,
+        "removed": {"name": d.name, "project": id},
+        "project_revision": crate::config::project_revision(session.root())?,
+    }))
+}
+
 /// `deps.list`: each dependency and each project the lock reaches through
 /// one, offline: its name, ID, URL, path, release branch, whether it is
 /// fetched and the fetched tip, its faults, and each label the lock holds
@@ -1219,5 +1350,67 @@ pub(crate) mod tests {
         );
         let e = call(&mut s, "deps.update", json!({"to": "Z", "offline": true})).unwrap_err();
         assert_eq!(e.code, Code::LabelNotFound);
+    }
+
+    #[test]
+    fn outdated_instances_are_listed_and_a_dependency_removed_once_unplaced() {
+        let (lib_dir, dir, lib, mut s) = placing();
+        assert_eq!(
+            call(&mut s, "deps.outdated", json!({})).unwrap()["outdated"],
+            json!([])
+        );
+        release_again(lib_dir.path());
+        // Offline, from what was fetched: nothing newer yet.
+        assert_eq!(
+            call(&mut s, "deps.outdated", json!({})).unwrap()["outdated"],
+            json!([])
+        );
+        call(&mut s, "deps.fetch", json!({})).unwrap();
+        let v = call(&mut s, "deps.outdated", json!({})).unwrap();
+        assert_eq!(
+            v["outdated"],
+            json!([{"assembly": "frame", "instance": "b", "part": "p", "label": "A", "latest": "B",
+                    "project": lib, "dependency": "lib"}])
+        );
+        // Placed: it can't go.
+        let e = call(&mut s, "deps.remove", json!({"name": "lib"})).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["instances"]),
+            (Code::HasDependents, &json!(["frame/b"]))
+        );
+        call(
+            &mut s,
+            "feature.delete",
+            json!({"part": "frame", "id": "b"}),
+        )
+        .unwrap();
+        let v = call(&mut s, "deps.remove", json!({"name": "lib"})).unwrap();
+        assert_eq!(v["removed"]["project"], lib.as_str());
+        assert!(s.project().manifest.dependencies.is_empty());
+        assert!(!dir.path().join(crate::doc::lock::LOCK).exists());
+        let e = call(&mut s, "deps.remove", json!({"name": "lib"})).unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+    }
+
+    #[test]
+    fn the_projects_own_labels_are_outdated_too() {
+        let (dir, mut s) = crate::assembly::tests::released();
+        crate::assembly::tests::place_in(
+            dir.path(),
+            "frame",
+            "old",
+            "bolt",
+            json!({"label": "A"}),
+            [0.0; 3],
+        );
+        s.refresh().unwrap();
+        call(&mut s, "release.propose", json!({"part": "bolt"})).unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "bolt B"]);
+        let v = call(&mut s, "deps.outdated", json!({})).unwrap();
+        assert_eq!(
+            v["outdated"],
+            json!([{"assembly": "frame", "instance": "old", "part": "bolt", "label": "A", "latest": "B"}])
+        );
     }
 }

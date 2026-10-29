@@ -984,6 +984,8 @@ fn every_protocol_method_has_a_command() {
         ("deps.list", &["deps", "list"]),
         ("deps.parts", &["deps", "parts"]),
         ("deps.update", &["deps", "update"]),
+        ("deps.outdated", &["deps", "outdated"]),
+        ("deps.remove", &["deps", "remove"]),
         ("materials.list", &["materials", "list"]),
         ("materials.set", &["materials", "set"]),
         ("materials.delete", &["materials", "delete"]),
