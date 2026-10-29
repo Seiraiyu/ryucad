@@ -795,22 +795,24 @@ impl Session {
         Ok(p)
     }
 
+    /// The dependency cache this session reads.
+    pub(crate) fn deps_cache(&mut self) -> Result<ryupdm::deps::Cache> {
+        if self.deps_cache.is_none() {
+            self.deps_cache = Some(crate::deps::cache()?);
+        }
+        Ok(self.deps_cache.clone().expect("just set"))
+    }
+
     /// The reader of the dependency cache, made on first use.
     pub(crate) fn deps_reader(&mut self) -> Result<&mut ryupdm::deps::read::Reader> {
         if self.deps_reader.is_none() {
-            let cache = match &self.deps_cache {
-                Some(c) => c.clone(),
-                None => crate::deps::cache()?,
-            };
-            self.deps_cache = Some(cache.clone());
-            self.deps_reader = Some(cache.reader());
+            self.deps_reader = Some(self.deps_cache()?.reader());
         }
         Ok(self.deps_reader.as_mut().expect("just made"))
     }
 
     /// Forgets the dependency cache's open repositories, after a fetch
     /// changed them.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn deps_fetched(&mut self) {
         self.deps_reader = None;
         self.foreign_pins.clear();

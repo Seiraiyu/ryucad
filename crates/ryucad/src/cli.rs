@@ -61,6 +61,10 @@ enum Command {
     /// such as "3 mm" or "wall * 2", that features' quantities can read.
     #[command(subcommand)]
     Param(ParamCmd),
+    /// Other ryucad projects whose released parts this one places: add, fetch and list them.
+    /// Only `deps add` and `deps fetch` reach the network.
+    #[command(subcommand)]
+    Deps(DepsCmd),
     /// The project's material library: densities (and colours) that mass properties read,
     /// each part's named by its PDM `material` property.
     #[command(subcommand)]
@@ -1106,6 +1110,30 @@ enum PdmCmd {
 }
 
 #[derive(Subcommand)]
+enum DepsCmd {
+    /// Fetch a Git repository and list the ryucad project in it as a dependency.
+    Add {
+        /// The repository: https://, ssh://, git@host:path, file:// or a path.
+        url: String,
+        /// The project's folder in the repository (its root when left out).
+        #[arg(long, default_value = "")]
+        path: String,
+        /// The dependency's name (else its folder's or repository's).
+        #[arg(long)]
+        name: Option<String>,
+        /// Fail with `conflict` unless the project is still at this revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
+    /// Fetch every dependency's release branch and tags (or the named ones'), and what the lock
+    /// reaches through them. Writes nothing in the project.
+    Fetch { names: Vec<String> },
+    /// Each dependency and transitive project: where it is, whether it is fetched, the labels
+    /// the lock holds and which instances place them. Offline.
+    List,
+}
+
+#[derive(Subcommand)]
 enum MaterialsCmd {
     /// Every material, the parts that name it, the default and the project revision.
     List,
@@ -2036,6 +2064,21 @@ fn request(cmd: &Command) -> Option<Request> {
             to: to.clone(),
             expected_revision: expect.revision.clone(),
         },
+        Command::Deps(DepsCmd::Add {
+            url,
+            path,
+            name,
+            expect,
+        }) => Request::DepsAdd {
+            url: url.clone(),
+            path: path.clone(),
+            name: name.clone(),
+            expected_revision: expect.clone(),
+        },
+        Command::Deps(DepsCmd::Fetch { names }) => Request::DepsFetch {
+            names: names.clone(),
+        },
+        Command::Deps(DepsCmd::List) => Request::DepsList {},
         Command::Materials(MaterialsCmd::List) => Request::MaterialsList {},
         Command::View(ViewCmd::List { part }) => Request::ViewList { part: part.clone() },
         Command::View(ViewCmd::Save {
