@@ -496,6 +496,7 @@ fn dispatch(
         ),
         Request::DepsFetch { names } => crate::deps::fetch(session, &names),
         Request::DepsList {} => crate::deps::list(session),
+        Request::DepsParts { name, part } => crate::deps::parts(session, &name, part.as_deref()),
         Request::MaterialsList {} => crate::materials::list(session),
         Request::MaterialsSet {
             name,

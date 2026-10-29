@@ -1131,6 +1131,15 @@ enum DepsCmd {
     /// Each dependency and transitive project: where it is, whether it is fetched, the labels
     /// the lock holds and which instances place them. Offline.
     List,
+    /// What a dependency has released, as fetched: each part's number, name, kind and labels,
+    /// latest first. Offline.
+    Parts {
+        /// The dependency's name or project ID.
+        name: String,
+        /// Only this part.
+        #[arg(long)]
+        part: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2079,6 +2088,10 @@ fn request(cmd: &Command) -> Option<Request> {
             names: names.clone(),
         },
         Command::Deps(DepsCmd::List) => Request::DepsList {},
+        Command::Deps(DepsCmd::Parts { name, part }) => Request::DepsParts {
+            name: name.clone(),
+            part: part.clone(),
+        },
         Command::Materials(MaterialsCmd::List) => Request::MaterialsList {},
         Command::View(ViewCmd::List { part }) => Request::ViewList { part: part.clone() },
         Command::View(ViewCmd::Save {
