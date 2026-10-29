@@ -2,5 +2,6 @@
 //! [`ryu_board::model::Board`].
 
 mod error;
+pub mod lzw;
 
 pub use error::{Code, Error, Once, fault, location, notice, warning, where_};
