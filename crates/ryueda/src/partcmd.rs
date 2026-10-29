@@ -893,6 +893,9 @@ pub struct InstanceFields {
     /// `null` to drop the override.
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub overrides: Map<String, Value>,
+    /// This placement's properties: text sets, `null` removes.
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub properties: Map<String, Value>,
 }
 
 /// The instance a request names, as read.
@@ -931,6 +934,7 @@ pub fn instance_edit(
     if let Some(r) = &f.refdes {
         i.refdes = Some(conn::RefdesFormat(crate::props::preset(r).to_owned()));
     }
+    crate::props::apply(&mut i.properties, &f.properties)?;
     for (path, v) in &f.overrides {
         match v {
             Value::Null => {

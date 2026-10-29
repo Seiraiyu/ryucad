@@ -519,16 +519,31 @@ fn port_users(p: &Project, b: &Id, port: &Id) -> Vec<String> {
     out
 }
 
-/// `block.edit`: a new name or description, and ops on ports and buses.
+/// What `block.edit` changes; what it leaves out stays.
+pub struct BlockChanges<'a> {
+    pub name: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub ports: &'a [PortOp],
+    pub buses: &'a [BusOp],
+    /// Text sets, `null` removes.
+    pub properties: &'a serde_json::Map<String, Value>,
+}
+
+/// `block.edit`: a new name or description, ops on ports and buses, and
+/// the block's properties.
 pub fn block_edit(
     session: &mut Session,
     block: &str,
-    name: Option<&str>,
-    description: Option<&str>,
-    ports: &[PortOp],
-    buses: &[BusOp],
+    changes: BlockChanges,
     expected: Option<&str>,
 ) -> Result<Value> {
+    let BlockChanges {
+        name,
+        description,
+        ports,
+        buses,
+        properties,
+    } = changes;
     let p = session.project();
     let files = write::block(p, block)?;
     check_revision(&format!("block {}", files.id), &files.revision, expected)?;
@@ -662,10 +677,43 @@ pub fn block_edit(
             }
         }
     }
+    crate::props::apply(&mut b.properties, properties)?;
     let mut w = Writes::default();
     w.put(block_path(&bid), &b, conn::BLOCK_KIND);
     commit(session, &format!("block {bid}"), w)?;
     Ok(block_json(session.project().conn.block(&bid)?))
+}
+
+/// `project.edit`: the manifest's properties and schematic settings, one
+/// logged change guarded by the project's revision.
+pub fn project_edit(
+    session: &mut Session,
+    properties: &serde_json::Map<String, Value>,
+    size: Option<crate::project::PaperSize>,
+    orientation: Option<crate::project::Orientation>,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let p = session.project();
+    check_revision("the project", &p.revision, expected)?;
+    let mut m = p.manifest.clone();
+    crate::props::apply(&mut m.properties, properties)?;
+    if let Some(s) = size {
+        m.schematic.sheet.size = s;
+    }
+    if let Some(o) = orientation {
+        m.schematic.sheet.orientation = o;
+    }
+    let mut w = Writes::default();
+    w.0.push((crate::project::MANIFEST.to_owned(), Some(m.to_text())));
+    commit(session, "the project", w)?;
+    let p = session.project();
+    let (width, height) = p.manifest.schematic.sheet.size_nm();
+    Ok(json!({
+        "properties": p.manifest.properties,
+        "schematic": p.manifest.schematic,
+        "sheet_nm": [width, height],
+        "revision": p.revision,
+    }))
 }
 
 pub fn block_show(p: &Project, block: &str) -> Result<Value> {
