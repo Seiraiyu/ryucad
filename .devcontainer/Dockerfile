@@ -72,6 +72,26 @@ RUN apt-get update \
     && cp LICENSE /usr/local/share/doc/lib3mf/ \
     && ldconfig && cd / && rm -rf /tmp/lib3mf
 
+# OpenUSD (PyPI's usd-core) and NVIDIA's usd-brep with its BrepArray
+# validator are only for ryukei-bench's `usd` references, which open,
+# validate and import every USD file ryucad writes into SMLib. usd-brep's
+# wheels are CPython 3.12 only and trixie ships 3.13, so a pinned uv
+# installs CPython 3.12 and the pinned packages into /opt/usd. usd-brep
+# 1.0.1's omniSolid schema is SMLib's above (1.0.0's), unchanged.
+ARG UV_VERSION=0.13.6
+ARG USD_CORE_VERSION=26.11
+ARG USD_BREP_VERSION=1.0.1
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3-venv \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv /opt/uv \
+    && /opt/uv/bin/pip install -q uv==${UV_VERSION} \
+    && UV_PYTHON_INSTALL_DIR=/opt/uv/python /opt/uv/bin/uv venv -q -p 3.12 /opt/usd \
+    && /opt/uv/bin/uv pip install -q --python /opt/usd \
+        usd-core==${USD_CORE_VERSION} "usd-brep[validation]==${USD_BREP_VERSION}" \
+    && /opt/usd/bin/python -c "import usd_brep, pxr, brep_validator" \
+    && chmod -R a+rX /opt/uv /opt/usd
+
 RUN useradd -m -s /bin/bash ${USERNAME} \
     && echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME}
 
