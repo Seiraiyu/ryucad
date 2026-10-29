@@ -179,7 +179,7 @@ impl Command {
     }
 }
 
-use Category::{Edit, File, Project, Tools, View};
+use Category::{Edit, File, Help, Project, Tools, View};
 
 /// The standard views the View menu and the toolbar's views button list,
 /// in their order.
@@ -296,6 +296,8 @@ pub const COMMANDS: &[Command] = &[
         .toolbar(),
     cmd("project.settings", "Settings…", Project).icon("sliders-horizontal"),
     cmd("project.doctor", "Doctor…", Project).icon("stethoscope"),
+    cmd("help.agents", "Driving ryucad from an agent", Help).icon("robot"),
+    cmd("help.about", "About ryucad", Help).icon("info"),
 ];
 
 /// The command with this id.
@@ -496,8 +498,8 @@ mod tests {
     fn menus_come_in_the_bar_s_order() {
         let titles: Vec<&str> = Category::ALL.iter().map(|c| c.title()).collect();
         assert_eq!(titles, ["File", "Edit", "View", "Tools", "Project", "Help"]);
-        for c in &Category::ALL[..5] {
-            assert!(menu(*c).next().is_some(), "{c:?}");
+        for c in Category::ALL {
+            assert!(menu(c).next().is_some(), "{c:?}");
         }
         assert_eq!(
             context(Context::Entity).map(|c| c.id).collect::<Vec<_>>(),
