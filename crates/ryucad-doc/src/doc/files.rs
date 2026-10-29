@@ -34,9 +34,11 @@ pub const MAX_ITEM: u32 = 99_999;
 /// part each numbers.
 pub type Items = BTreeMap<Id, u32>;
 
-/// The newest manifest format: 2 adds the project's ID. A manifest without
-/// one stays at 1, so older builds still read projects that don't use PDM.
-pub const MANIFEST_FORMAT: u64 = 2;
+/// The newest manifest format: 2 adds the project's ID, 3 its
+/// dependencies and where it was forked from. A manifest stays at the
+/// lowest that holds it, so older builds still read projects that don't
+/// use PDM, or other projects.
+pub const MANIFEST_FORMAT: u64 = 3;
 
 /// The newest feature format: 2 adds expressions, sketches and sweeps, 3
 /// operations on solids, 4 an assembly's instances, mates and instance
@@ -55,6 +57,10 @@ pub struct Manifest {
     pub default_unit: Unit,
     /// The project's identity, from its first PDM write on.
     pub project: Option<ProjectId>,
+    /// Other projects whose released parts it places, by project ID.
+    pub dependencies: super::deps::Dependencies,
+    /// The ID and commit `ryucad pdm new-id` gave it a new ID at.
+    pub forked_from: Option<super::deps::ForkedFrom>,
 }
 
 /// A part's ordered feature list, `parts/<part>/part.json`, whether it is
@@ -242,6 +248,8 @@ impl Manifest {
         Manifest {
             default_unit,
             project: None,
+            dependencies: super::deps::Dependencies::new(),
+            forked_from: None,
         }
     }
 
@@ -250,6 +258,14 @@ impl Manifest {
             json!({"default_unit": self.default_unit, "format": FORMAT, "kind": PROJECT_KIND});
         if let Some(id) = &self.project {
             v["project"] = json!(id);
+            v["format"] = json!(2);
+        }
+        if !self.dependencies.is_empty() {
+            v["dependencies"] = super::deps::to_json(&self.dependencies);
+            v["format"] = json!(MANIFEST_FORMAT);
+        }
+        if let Some(f) = &self.forked_from {
+            v["forked_from"] = f.to_json();
             v["format"] = json!(MANIFEST_FORMAT);
         }
         v
@@ -266,6 +282,14 @@ impl Manifest {
                     .map_err(|e| e.with("pointer", "/project"))?,
             ),
         };
+        let dependencies = match o.take_opt("dependencies") {
+            None => super::deps::Dependencies::new(),
+            Some(d) => super::deps::from_json(&d)?,
+        };
+        let forked_from = match o.take_opt("forked_from") {
+            None => None,
+            Some(f) => Some(super::deps::ForkedFrom::from_json(&f)?),
+        };
         let unit = o.take("default_unit")?;
         let default_unit = unit.as_str().and_then(Unit::parse).ok_or_else(|| {
             invalid(
@@ -277,6 +301,8 @@ impl Manifest {
         Ok(Manifest {
             default_unit,
             project,
+            dependencies,
+            forked_from,
         })
     }
 }
@@ -484,10 +510,13 @@ pub fn part_format(v: &Value) -> u64 {
     }
 }
 
-/// The lowest manifest format that holds `v`: 2 with a project ID, else 1.
+/// The lowest manifest format that holds `v`: 3 with dependencies or a
+/// fork's origin, 2 with a project ID, else 1.
 pub fn manifest_format(v: &Value) -> u64 {
-    if v.get("project").is_some() {
+    if v.get("dependencies").is_some() || v.get("forked_from").is_some() {
         MANIFEST_FORMAT
+    } else if v.get("project").is_some() {
+        2
     } else {
         FORMAT
     }
@@ -1168,6 +1197,34 @@ mod tests {
             (e.code, &e.details["pointer"]),
             (Code::InvalidId, &json!("/project"))
         );
+        // Dependencies and a fork's origin need format 3.
+        let lib = ProjectId::from_bytes([8; 16]);
+        m.dependencies.insert(
+            lib.clone(),
+            crate::doc::deps::Dependency {
+                name: "fasteners".into(),
+                url: "https://github.com/acme/fasteners.git".into(),
+                path: "".into(),
+            },
+        );
+        let v = m.to_json();
+        assert_eq!(v["format"], 3);
+        assert_eq!(manifest_format(&v), 3);
+        assert_eq!(
+            v["dependencies"][lib.as_str()],
+            json!({"name": "fasteners", "path": "", "url": "https://github.com/acme/fasteners.git"})
+        );
+        assert_eq!(Manifest::from_json(&v).unwrap(), m);
+        m.dependencies.clear();
+        m.forked_from = Some(crate::doc::deps::ForkedFrom {
+            project: lib,
+            commit: "0".repeat(40),
+        });
+        let v = m.to_json();
+        assert_eq!((v["format"].as_u64(), manifest_format(&v)), (Some(3), 3));
+        assert_eq!(Manifest::from_json(&v).unwrap(), m);
+        m.forked_from = None;
+        assert_eq!(manifest_format(&m.to_json()), 2);
     }
 
     #[test]
@@ -1530,11 +1587,11 @@ mod tests {
         // other field is read, and format 0 never existed.
         let mut v = Manifest::new(Unit::Mm).to_json();
         assert!(Manifest::from_json(&v).is_ok());
-        v["format"] = json!(3);
+        v["format"] = json!(4);
         v["default_unit"] = json!("parsec");
         let e = Manifest::from_json(&v).unwrap_err();
         assert_eq!(e.code, Code::FormatTooNew);
-        assert_eq!(e.details["supported"], 2);
+        assert_eq!(e.details["supported"], 3);
         v["format"] = json!(0);
         assert_eq!(
             Manifest::from_json(&v).unwrap_err().code,
