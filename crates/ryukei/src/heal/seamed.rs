@@ -46,10 +46,23 @@ use std::sync::Arc;
 const SAMPLES: usize = 32;
 
 /// The shape being cut, with each face's name in the body, for
-/// refusals.
+/// refusals, and where each entity comes from.
 struct Cut {
     s: Shape,
     names: Vec<Name>,
+    origins: Origins,
+}
+
+/// Where each entity of a [`seamed_with_origins`] shape comes from in the
+/// body, index for index: the face it is (faces are never split or
+/// added), the edge it is or is a piece of (`None` for a seam), and the
+/// vertex it is (`None` for one a seam added: where it crosses a loop
+/// inside an edge, or a pole it runs to).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Origins {
+    pub faces: Vec<FaceId>,
+    pub edges: Vec<Option<EdgeId>>,
+    pub vertices: Vec<Option<VertexId>>,
 }
 
 /// `body` as a shape with seams. Fails with [`HealError::BadDomain`],
@@ -58,6 +71,12 @@ struct Cut {
 /// [`crate::geom::Pipe::to_nurbs_within`] where a pipe face can't be
 /// approximated.
 pub fn seamed(body: &Body, pipe_tolerance: f64) -> Result<Shape, Error> {
+    seamed_with_origins(body, pipe_tolerance).map(|(s, _)| s)
+}
+
+/// [`seamed`], with where each entity of the shape comes from in the
+/// body: what a writer needs to carry the body's names and pcurves over.
+pub fn seamed_with_origins(body: &Body, pipe_tolerance: f64) -> Result<(Shape, Origins), Error> {
     let mut cut = copy(body);
     // Faces are cut in the order of the names their geometry gives them:
     // a seam may split an edge another face then ends its own seam on,
@@ -72,15 +91,25 @@ pub fn seamed(body: &Body, pipe_tolerance: f64) -> Result<Shape, Error> {
     for &k in &order {
         seam(&mut cut, k)?;
     }
-    Ok(canonical(cut.s))
+    debug_assert_eq!(cut.origins.edges.len(), cut.s.edges.len());
+    debug_assert_eq!(cut.origins.vertices.len(), cut.s.vertices.len());
+    let (shape, [vord, eord, ford]) = canonical(cut.s);
+    let o = cut.origins;
+    let origins = Origins {
+        faces: ford.iter().map(|&k| o.faces[k]).collect(),
+        edges: eord.iter().map(|&k| o.edges[k]).collect(),
+        vertices: vord.iter().map(|&k| o.vertices[k]).collect(),
+    };
+    Ok((shape, origins))
 }
 
 /// The shape in the order of the names its geometry gives it (on a fixed
 /// key): vertices, edges, faces, shells and solids sorted by name, each
 /// face's loops by their least edge's, each loop starting at its
 /// least-named edge, geometry numbered by first use. A body and the same
-/// body read back, numbered differently, give the same shape.
-fn canonical(s: Shape) -> Shape {
+/// body read back, numbered differently, give the same shape. With it,
+/// the old index of each new vertex, edge and face.
+fn canonical(s: Shape) -> (Shape, [Vec<usize>; 3]) {
     let names = super::names::names(crate::name::OpKey(0), &s);
     let sorted = |list: &[Name]| {
         let mut o: Vec<usize> = (0..list.len()).collect();
@@ -183,7 +212,7 @@ fn canonical(s: Shape) -> Shape {
         .collect();
     solids.sort_by_key(|so| so.outer);
     out.solids = solids;
-    out
+    (out, [vord, eord, ford])
 }
 
 /// The body's entities as they are, with every pcurve that runs on its
@@ -195,7 +224,9 @@ fn copy(b: &Body) -> Cut {
     let mut curves2 = BTreeMap::new();
     let mut vertices: BTreeMap<VertexId, usize> = BTreeMap::new();
     let mut edges: BTreeMap<EdgeId, usize> = BTreeMap::new();
+    let mut origins = Origins::default();
     for v in b.vertices() {
+        origins.vertices.push(Some(v));
         vertices.insert(v, s.vertices.len());
         s.vertices.push(Vertex {
             point: b.vertices[v].point,
@@ -210,6 +241,7 @@ fn copy(b: &Body) -> Cut {
             s.curves.len() - 1
         });
         edges.insert(e, s.edges.len());
+        origins.edges.push(Some(e));
         s.edges.push(Edge {
             curve: c,
             interval: edge.interval,
@@ -255,6 +287,7 @@ fn copy(b: &Body) -> Cut {
             loops.push(Loop::Edges(uses));
         }
         faces.insert(f, s.faces.len());
+        origins.faces.push(f);
         s.faces.push(Face {
             surface,
             sense: face.sense,
@@ -289,7 +322,7 @@ fn copy(b: &Body) -> Cut {
             voids: shells.iter().map(|x| x.1).filter(|&x| x != outer).collect(),
         });
     }
-    Cut { s, names }
+    Cut { s, names, origins }
 }
 
 /// A spline pcurve on its edge's own parameter: its knots moved through
@@ -944,6 +977,7 @@ fn split(cut: &mut Cut, e: usize, t: f64) -> usize {
         tolerance: 0.0,
         seam: true,
     });
+    cut.origins.vertices.push(None);
     // A closed edge on a periodic curve ends one period after it starts,
     // as healing will join it again: its rounding mustn't name its pieces.
     let end = match cut.s.curves[edge.curve].period() {
@@ -951,6 +985,7 @@ fn split(cut: &mut Cut, e: usize, t: f64) -> usize {
         _ => edge.interval[1],
     };
     let e2 = cut.s.edges.len();
+    cut.origins.edges.push(cut.origins.edges[e]);
     cut.s.edges.push(Edge {
         interval: [t, end],
         start: x,
@@ -1175,6 +1210,7 @@ fn one_seam(
                         tolerance: 0.0,
                         seam: true,
                     });
+                    cut.origins.vertices.push(None);
                     (cut.s.vertices.len() - 1, at)
                 }
             }
@@ -1227,6 +1263,7 @@ fn add_seam(
 ) -> (Use, Use) {
     cut.s.curves.push(curve);
     let e = cut.s.edges.len();
+    cut.origins.edges.push(None);
     cut.s.edges.push(Edge {
         curve: cut.s.curves.len() - 1,
         interval,
@@ -1279,6 +1316,7 @@ fn two_seams(
         tolerance: 0.0,
         seam: true,
     });
+    cut.origins.vertices.push(None);
     let (Some(su_curve), Some(sv_curve)) = (
         iso(surface, 0, cu, [cv, cv + period[1]]),
         iso(surface, 1, cv, [cu, cu + period[0]]),
