@@ -10,8 +10,6 @@ name: ryueda release
 on:
   push:
     tags: ["ryueda-v[0-9]+.[0-9]+.[0-9]+*"]
-    # TEMPORARY: plan 0.E's dry run; reverted before review.
-    branches: ["cox/ryueda-0e-execute-0BHHAEYG"]
   workflow_dispatch:
 
 env:
