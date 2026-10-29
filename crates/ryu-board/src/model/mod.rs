@@ -152,7 +152,9 @@ pub enum ToolKind {
 pub struct Tool {
     pub number: u32,
     pub kind: ToolKind,
-    pub finished: Nm,
+    /// The finished hole size; `None` where the source says it isn't set
+    /// (ODB++'s `FINISH_SIZE=-1`).
+    pub finished: Option<Nm>,
     pub drilled: Option<Nm>,
 }
 

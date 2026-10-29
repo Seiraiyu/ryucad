@@ -12,6 +12,7 @@ pub mod matrix;
 pub mod outline;
 mod sysattr;
 pub mod text;
+pub mod tools;
 pub mod units;
 
 pub use error::{Code, Error, Once, fault, location, notice, warning, where_};
