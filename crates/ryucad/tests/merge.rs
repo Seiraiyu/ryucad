@@ -1312,3 +1312,135 @@ fn two_reimports_conflict_on_bytes_and_hashes_and_settle_either_way() {
         r.git(&["commit", "-q", "--no-edit"]);
     }
 }
+
+/// XDE's assembly with its pin (instance `3`, usage `3`) at `y` mm,
+/// written in the test's folder as `assembly.step`, as an agent would
+/// have it.
+fn assembly_step(r: &Repo, y: u32) -> String {
+    let path = format!(
+        "{}/../ryustep/tests/data/occt/assembly.stp",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let was = "#24 = CARTESIAN_POINT('',(0.,50.,0.));";
+    let text = fs::read_to_string(path).unwrap();
+    assert!(text.contains(was));
+    let text = text.replace(was, &format!("#24 = CARTESIAN_POINT('',(0.,{y}.,0.));"));
+    let dir = r.dir.path().join(format!("y{y}"));
+    fs::create_dir_all(&dir).unwrap();
+    let at = dir.join("assembly.step");
+    fs::write(&at, text).unwrap();
+    at.to_str().unwrap().to_owned()
+}
+
+const ASM_STEP: &str = "imports/assembly.step";
+const PIN: &str = "parts/assembly/features/3.json";
+
+/// Where the pin is along y, in meters.
+fn pin_y(r: &Repo) -> f64 {
+    r.json(PIN)["pose"]["origin_m"][1].as_f64().unwrap()
+}
+
+/// `merge status`'s `import_misplaced` conflicts.
+fn misplaced(r: &Repo) -> Vec<Value> {
+    let v = r.ryucad(&["merge", "status"]);
+    v["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["kind"] == "import_misplaced")
+        .cloned()
+        .collect()
+}
+
+/// `doctor`'s issue codes.
+fn doctor_codes(r: &Repo) -> Vec<String> {
+    let v = r.ryucad(&["doctor"]);
+    v["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["code"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn theirs_bytes_with_ours_pose_are_misplaced_until_repaired() {
+    let r = Repo::new("");
+    r.ryucad(&["import", &assembly_step(&r, 60)]);
+    r.commit("the pin at 60 mm");
+    assert!((pin_y(&r) - 0.06).abs() < 1e-12);
+    r.git(&["checkout", "-q", "-b", "theirs"]);
+    r.ryucad(&["import", &assembly_step(&r, 70), "--update", ASM_STEP]);
+    r.commit("theirs: the pin at 70 mm");
+    r.git(&["checkout", "-q", "main"]);
+    r.ryucad(&["import", &assembly_step(&r, 50), "--update", ASM_STEP]);
+    r.commit("ours: the pin at 50 mm");
+    let (code, out) = r.git_status(&["merge", "--no-edit", "theirs"]);
+    assert_eq!(code, 1, "{out}");
+    // Theirs on every conflict: theirs' bytes and hashes. The pose, solver
+    // state, stays ours'.
+    for (id, _) in conflicts(&r) {
+        r.ryucad(&["merge", "resolve", &id, "--theirs"]);
+    }
+    r.git(&["add", "-A"]);
+    assert!((pin_y(&r) - 0.05).abs() < 1e-12);
+    let c = misplaced(&r);
+    assert_eq!(c.len(), 1, "{c:?}");
+    assert_eq!(c[0]["id"], "parts/assembly/part.json#import_misplaced");
+    assert_eq!(c[0]["files"], json!([PIN, ASM_STEP]));
+    assert_eq!(c[0]["concerns"]["instances"], json!(["3"]));
+    assert_eq!(r.ryucad(&["merge", "status"])["clean"], false);
+    assert!(doctor_codes(&r).contains(&"import_misplaced".to_owned()));
+    let id = c[0]["id"].as_str().unwrap().to_owned();
+    let repair = c[0]["repairs"][0]["id"].as_str().unwrap().to_owned();
+    r.ryucad(&["merge", "resolve", &id, "--repair", &repair]);
+    assert!((pin_y(&r) - 0.07).abs() < 1e-12);
+    r.git(&["add", "-A"]);
+    assert_eq!(r.ryucad(&["merge", "status"])["clean"], true);
+    r.git(&["commit", "-q", "--no-edit"]);
+    assert!(!doctor_codes(&r).contains(&"import_misplaced".to_owned()));
+    // An update with the bytes in place moves nothing now.
+    let dry = r.ryucad(&[
+        "import",
+        &assembly_step(&r, 70),
+        "--update",
+        ASM_STEP,
+        "--dry-run",
+    ]);
+    assert_eq!(dry["parts"], json!([]), "{dry}");
+}
+
+#[test]
+fn a_clean_merge_of_one_sides_bytes_and_the_others_pose_is_misplaced() {
+    let r = Repo::new("");
+    r.ryucad(&["import", &assembly_step(&r, 70)]);
+    r.commit("the pin at 70 mm");
+    // The base is misplaced already (an earlier merge's doing): the pin
+    // at 50 mm, the file at 70.
+    let mut pin = r.json(PIN);
+    pin["pose"]["origin_m"][1] = json!(0.05);
+    fs::write(r.root.join(PIN), ryucad::doc::canonical::to_string(&pin)).unwrap();
+    r.commit("the pin moved by hand");
+    assert!(doctor_codes(&r).contains(&"import_misplaced".to_owned()));
+    r.git(&["checkout", "-q", "-b", "theirs"]);
+    r.ryucad(&["import", &assembly_step(&r, 60), "--update", ASM_STEP]);
+    r.commit("theirs: the pin at 60 mm");
+    r.git(&["checkout", "-q", "main"]);
+    // The same bytes again: only the pin moves, to 70 mm.
+    r.ryucad(&["import", &assembly_step(&r, 70), "--update", ASM_STEP]);
+    r.commit("ours: the pin where its file has it");
+    assert!((pin_y(&r) - 0.07).abs() < 1e-12);
+    r.preview_matches_merge("theirs");
+    // Git takes theirs' bytes, which only theirs changed; the driver
+    // takes ours' pose, which both moved.
+    r.git(&["merge", "-q", "--no-commit", "--no-ff", "theirs"]);
+    assert!((pin_y(&r) - 0.07).abs() < 1e-12);
+    let c = misplaced(&r);
+    assert_eq!(c.len(), 1, "{c:?}");
+    let id = c[0]["id"].as_str().unwrap().to_owned();
+    let repair = c[0]["repairs"][0]["id"].as_str().unwrap().to_owned();
+    r.ryucad(&["merge", "resolve", &id, "--repair", &repair]);
+    assert!((pin_y(&r) - 0.06).abs() < 1e-12);
+    r.git(&["add", "-A"]);
+    assert_eq!(r.ryucad(&["merge", "status"])["clean"], true);
+}

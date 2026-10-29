@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 /// Every kind of conflict `merge.status` reports. The strings are stable.
-pub const KINDS: [&str; 12] = [
+pub const KINDS: [&str; 13] = [
     "value",
     "delete_edit",
     "order",
@@ -34,6 +34,7 @@ pub const KINDS: [&str; 12] = [
     "merge_broke",
     "sketch_stale",
     "assembly_stale",
+    "import_misplaced",
     "rename_merged",
     "pdm_broke",
     "item_collision",
@@ -356,6 +357,17 @@ pub fn kept_unlisted_now(session: &Session) -> Result<Vec<Value>> {
 struct Side {
     files: crate::activity::Files,
     parts: BTreeMap<Id, Built>,
+    /// The fixed imported instances not where their files place them, by
+    /// assembly and instance ([`crate::import::misplaced`]).
+    misplaced: std::collections::BTreeSet<(Id, Id)>,
+}
+
+/// [`crate::import::misplaced`] in `s`'s project, by assembly and instance.
+fn misplaced_in(s: &Session) -> std::collections::BTreeSet<(Id, Id)> {
+    crate::import::misplaced(s.project())
+        .into_iter()
+        .map(|m| (m.assembly, m.instance))
+        .collect()
 }
 
 /// A part on one side: each listed feature's result, and the features
@@ -427,17 +439,20 @@ fn side(session: &mut Session, commit: Option<&str>) -> Result<Side> {
         return Ok(Side {
             files: Default::default(),
             parts: BTreeMap::new(),
+            misplaced: Default::default(),
         });
     };
     match session.at(Some(c)) {
         Ok((_, s)) => Ok(Side {
             files: s.snapshot(),
             parts: built(s)?,
+            misplaced: misplaced_in(s),
         }),
         // A commit with no project here has nothing of it.
         Err(e) if e.code == Code::NotFound => Ok(Side {
             files: Default::default(),
             parts: BTreeMap::new(),
+            misplaced: Default::default(),
         }),
         Err(e) => Err(e),
     }
@@ -874,6 +889,76 @@ fn stale_assemblies(
     out
 }
 
+/// The assemblies whose fixed imported instances the merge left where
+/// their files don't place them, though they were on the sides that have
+/// them (the file's bytes from one side, the pose, solver state, from the
+/// other), each with the repair that writes the poses the files give.
+fn misplaced(
+    merged: &crate::activity::Files,
+    at: &Session,
+    ours: &Side,
+    theirs: &Side,
+) -> Vec<Value> {
+    let found = crate::import::misplaced(at.project());
+    let mut out = Vec::new();
+    for (assembly, files) in crate::doctor::misplaced_by_assembly(&found) {
+        let mine: Vec<&crate::import::Misplaced> =
+            found.iter().filter(|m| m.assembly == assembly).collect();
+        // Already so on a side: not the merge's doing (doctor says so).
+        let on = |side: &Side| {
+            mine.iter().any(|m| {
+                side.misplaced
+                    .contains(&(m.assembly.clone(), m.instance.clone()))
+            })
+        };
+        if on(ours) || on(theirs) {
+            continue;
+        }
+        let cid = format!("parts/{assembly}/part.json#import_misplaced");
+        let repair = crate::doctor::Repair {
+            id: format!("{cid}:place@{}", crate::doctor::basis_of(merged, &files)),
+            summary: format!(
+                "write {assembly}'s fixed imported instances at the poses their files place them"
+            ),
+            changes: crate::doctor::placed_writes(&found, assembly.as_str())
+                .into_iter()
+                .map(|(path, content)| crate::doctor::Change {
+                    path,
+                    content: Some(content),
+                })
+                .collect(),
+            params: Vec::new(),
+        };
+        let instances: Vec<&str> = mine.iter().map(|m| m.instance.as_str()).collect();
+        let imports: Vec<&str> = files
+            .iter()
+            .filter(|f| f.starts_with("imports/"))
+            .map(String::as_str)
+            .collect();
+        let mut c = conflict(
+            cid,
+            "import_misplaced",
+            files.clone(),
+            json!({"part": assembly, "instances": instances}),
+            "both",
+            format!(
+                "{assembly}: the merge took {} from one side and the pose of {} from the other: {} not where the file places {}",
+                imports.join(" and "),
+                instances.join(", "),
+                if instances.len() == 1 {
+                    "it is"
+                } else {
+                    "they are"
+                },
+                if instances.len() == 1 { "it" } else { "them" },
+            ),
+        );
+        c["repairs"] = json!([repair.to_json()]);
+        out.push(c);
+    }
+    out
+}
+
 /// What the merge broke in PDM: each fault the merged files have that
 /// neither side had ([`ryupdm::merge::validate`]), blamed on the side
 /// whose change completes it. A property fault takes a value for the
@@ -1277,6 +1362,7 @@ fn findings(
     conflicts.extend(broke);
     conflicts.extend(stale(working, &now, ours, theirs, base));
     conflicts.extend(stale_assemblies(working, &now, ours, theirs));
+    conflicts.extend(misplaced(working, at, ours, theirs));
     conflicts.extend(pdm(working, ours, theirs, base, &releases));
     conflicts.extend(item_collisions(working, ours, theirs));
     conflicts.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
@@ -1343,6 +1429,7 @@ pub fn preview(session: &mut Session, rev: &str) -> Result<Value> {
         ours: Side {
             files: session.snapshot(),
             parts: built(session)?,
+            misplaced: misplaced_in(session),
         },
         theirs: side(session, Some(&theirs_rev))?,
         base: side(session, base_commit.as_deref())?,
