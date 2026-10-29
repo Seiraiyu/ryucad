@@ -141,6 +141,9 @@ enum Command {
     /// Create, edit, delete or list designs: a name and a root block.
     #[command(subcommand)]
     Design(DesignCmd),
+    /// Import libraries from other tools: KiCad's for now.
+    #[command(subcommand)]
+    Import(ImportCmd),
     /// The daemon's activity log: every change it made or saw, newest
     /// last.
     History {
@@ -169,6 +172,37 @@ enum Command {
     },
     #[command(subcommand)]
     Daemon(DaemonCmd),
+}
+
+#[derive(Subcommand)]
+enum ImportCmd {
+    /// KiCad 6 to 9 libraries, with their STEP models, into this
+    /// project's library (or --into a library project it names):
+    /// .kicad_sym files, .pretty folders (or .kicad_mod files in one) and
+    /// .3dshapes folders. Importing again updates what changed and
+    /// deletes nothing.
+    Kicad {
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// Where to look for the footprints symbols name: a folder of
+        /// <library>.pretty folders, or a .pretty folder (repeatable).
+        #[arg(long = "footprints", value_name = "DIR")]
+        footprints: Vec<PathBuf>,
+        /// What KiCad's model variables (${KICAD9_3DMODEL_DIR},
+        /// ${KIPRJMOD}, ...) stand for, tried in turn (repeatable).
+        #[arg(long = "models", value_name = "DIR")]
+        models: Vec<PathBuf>,
+        /// A library project's alias to write instead of this project's
+        /// library.
+        #[arg(long, value_name = "ALIAS")]
+        into: Option<String>,
+        /// Read and check everything, write nothing, and say what would
+        /// change.
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
 }
 
 #[derive(Subcommand)]
@@ -832,8 +866,32 @@ fn unit(s: &str) -> core::result::Result<Unit, String> {
 }
 
 /// The request a command sends, for those that are requests.
-fn request(cmd: &Command) -> Result<Option<Request>> {
+/// `p` as an absolute path, relative to `here` (where the CLI runs as if
+/// started), for the daemon, which has no folder of the caller's.
+fn absolute(here: &std::path::Path, p: &std::path::Path) -> String {
+    let joined = here.join(p);
+    let p = joined.canonicalize().unwrap_or(joined);
+    ryueda::source::plain(p).to_string_lossy().into_owned()
+}
+
+fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
+    let all = |list: &[PathBuf]| list.iter().map(|p| absolute(here, p)).collect::<Vec<_>>();
     Ok(Some(match cmd {
+        Command::Import(ImportCmd::Kicad {
+            paths,
+            footprints,
+            models,
+            into,
+            dry_run,
+            expect,
+        }) => Request::ImportKicad {
+            paths: all(paths),
+            footprints: all(footprints),
+            models: all(models),
+            into: into.clone(),
+            dry_run: *dry_run,
+            expected_revision: expect.expect.clone(),
+        },
         Command::Info => Request::ProjectInfo {},
         Command::Lib(LibCmd::Add {
             alias,
@@ -1353,7 +1411,7 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             )
         }
         cmd => {
-            let req = request(cmd)?.expect("every other command is a request");
+            let req = request(cmd, &here)?.expect("every other command is a request");
             let root = find_root(&here)?;
             if !no_daemon(cli) {
                 match client::request(&root, &req, participant(cli).as_deref()) {
