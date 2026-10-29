@@ -309,3 +309,52 @@ fn another_worktree_is_compared_with_and_diffed_against() {
         "worktree_not_found",
     );
 }
+
+#[test]
+fn eight_daemons_share_one_disk_cache() {
+    // Eight worktrees, each with its own daemon, rebuilding one project at
+    // once over one cache: every entry is written whole (a temporary file
+    // renamed) and read whole, so every daemon gets the same bodies.
+    let r = Repo::new();
+    for i in 0..4 {
+        let id = format!("s{i}");
+        let radius = format!("radius={}", i + 1);
+        r.ok(
+            &r.root,
+            &[
+                "feature", "add", "p", "sphere", "--id", &id, "--param", &radius,
+            ],
+        );
+    }
+    r.git(&r.root, &["add", "-A"]);
+    r.git(&r.root, &["commit", "-qm", "spheres"]);
+    let folders: Vec<PathBuf> = (0..8)
+        .map(|i| {
+            let name = format!("../w{i}");
+            r.ok(&r.root, &["worktree", "add", &name, "--no-warm"]);
+            r.dir.path().join(format!("w{i}"))
+        })
+        .collect();
+    let answers: Vec<Value> = std::thread::scope(|s| {
+        let runs: Vec<_> = folders
+            .iter()
+            .map(|f| s.spawn(|| r.run(f, false, &["rebuild"])))
+            .collect();
+        runs.into_iter()
+            .map(|h| {
+                let (code, v) = h.join().unwrap();
+                assert_eq!(code, 0, "{v}");
+                v["result"]["parts"][0]["hash"].clone()
+            })
+            .collect()
+    });
+    assert!(
+        answers.iter().all(|h| *h == answers[0] && h.is_string()),
+        "{answers:?}"
+    );
+    // The cache they filled is sound: a fresh process rebuilds from it.
+    let v = r.ok(&r.root, &["cache", "warm"]);
+    assert_eq!(v["built"], 0, "{v}");
+    let again = r.ok(&r.root, &["rebuild"]);
+    assert_eq!(again["parts"][0]["hash"], answers[0]);
+}
