@@ -4,6 +4,7 @@
 pub mod attrs;
 mod error;
 pub mod features;
+pub mod font;
 pub mod info;
 pub mod job;
 pub mod lzw;
