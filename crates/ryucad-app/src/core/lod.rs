@@ -126,14 +126,15 @@ pub fn choose(
     (drawn, wanted.into_iter().map(|(_, k, l)| (k, l)).collect())
 }
 
-/// What the GPU holds of a mesh, in bytes: its triangles' corners and
-/// its edges' ends, 40 bytes each (position, normal, colour).
+/// What the GPU holds of a mesh, in bytes: its corners and its edges'
+/// ends, 40 bytes each (position, normal, colour), and its triangles,
+/// three 4-byte indices each.
 pub fn gpu_bytes(m: &WireBody) -> u64 {
     let Ok(w) = &m.mesh else {
         return 0;
     };
     let segments: usize = w.edges.iter().map(|(_, p)| p.len().saturating_sub(1)).sum();
-    ((w.triangles.len() * 3 + segments * 2) * 40) as u64
+    ((w.corners.len() + segments * 2) * 40 + w.triangles.len() * 12) as u64
 }
 
 /// `drawn` and `wanted` ([`choose`]'s) kept within `budget` bytes of
@@ -367,7 +368,8 @@ mod tests {
     #[test]
     fn past_the_gpu_budget_far_bodies_go_coarser_then_go() {
         // Three distinct bodies in a row, each fetched fine and normal:
-        // 30 triangles fine, 10 normal, 3600 and 1200 bytes.
+        // 30 triangles fine, 10 normal, 360 and 120 bytes of indices (the
+        // corners are none here).
         let mesh = |hash: &str, tris: usize| WireBody {
             feature: "s".into(),
             hash: hash.into(),
@@ -402,20 +404,45 @@ mod tests {
             .collect();
         let wanted = vec![(("row".to_owned(), "c0/s".to_owned()), Quality::Fine)];
         // Everything fits.
-        let (all, w) = within(&m, &pr, drawn.clone(), wanted.clone(), 10_800);
+        let (all, w) = within(&m, &pr, drawn.clone(), wanted.clone(), 1_080);
         assert_eq!(all.len(), 3);
         assert_eq!(w.len(), 1);
         // The two farthest go normal; nothing finer is asked for.
-        let (some, w) = within(&m, &pr, drawn.clone(), wanted.clone(), 6_000);
+        let (some, w) = within(&m, &pr, drawn.clone(), wanted.clone(), 600);
         let levels: Vec<(&str, Quality)> =
             some.iter().map(|d| (d.key.1.as_str(), d.level)).collect();
         use Quality::*;
         assert_eq!(levels, [("c0/s", Fine), ("c1/s", Normal), ("c2/s", Normal)]);
         assert!(w.is_empty());
         // Smaller still: all normal, then the farthest isn't drawn.
-        let (few, _) = within(&m, &pr, drawn, wanted, 2_400);
+        let (few, _) = within(&m, &pr, drawn, wanted, 240);
         let keys: Vec<&str> = few.iter().map(|d| d.key.1.as_str()).collect();
         assert_eq!(keys, ["c0/s", "c1/s"]);
+    }
+
+    #[test]
+    fn the_gpu_holds_each_corner_once_and_triangles_as_indices() {
+        let m = WireBody {
+            feature: "s".into(),
+            hash: "h".into(),
+            mesh: Ok(ryucad::mesh::WireMesh {
+                corners: vec![(0, [0.0, 0.0, 1.0]); 4],
+                triangles: vec![[0, 1, 2], [0, 2, 3]],
+                edges: vec![([0; 16], vec![0, 1, 2])],
+                ..cube("s", 0.0).mesh.unwrap()
+            }),
+        };
+        // 4 corners and 2 segments' 4 ends at 40 bytes, 6 indices at 4.
+        assert_eq!(gpu_bytes(&m), 8 * 40 + 6 * 4);
+        assert_eq!(gpu_bytes(&body_failed()), 0);
+    }
+
+    fn body_failed() -> WireBody {
+        WireBody {
+            feature: "s".into(),
+            hash: "h".into(),
+            mesh: Err(serde_json::json!(null)),
+        }
     }
 
     #[test]
