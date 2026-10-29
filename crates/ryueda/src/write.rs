@@ -97,6 +97,7 @@ pub fn commit(session: &mut Session, what: &str, writes: Writes) -> Result<()> {
         return Err(refused(what, &added));
     }
     let root = session.root().to_path_buf();
+    let written: Vec<String> = writes.paths().into_iter().map(str::to_owned).collect();
     for (path, text) in writes.0 {
         let at = path_of(&root, &path);
         match text {
@@ -105,7 +106,8 @@ pub fn commit(session: &mut Session, what: &str, writes: Writes) -> Result<()> {
             None => {}
         }
     }
-    session.reload()
+    // The project just judged is the project on disk now.
+    session.adopt(after, &written)
 }
 
 /// A block a request names, or `not_found`.
