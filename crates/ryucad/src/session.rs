@@ -795,6 +795,13 @@ impl Session {
         Ok(p)
     }
 
+    /// Reads other projects' releases from `cache` rather than the
+    /// machine's: tests and tools with a cache of their own.
+    pub fn set_deps_cache(&mut self, cache: ryupdm::deps::Cache) {
+        self.deps_cache = Some(cache);
+        self.deps_fetched();
+    }
+
     /// The dependency cache this session reads.
     pub(crate) fn deps_cache(&mut self) -> Result<ryupdm::deps::Cache> {
         if self.deps_cache.is_none() {

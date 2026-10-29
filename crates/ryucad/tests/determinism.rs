@@ -2146,6 +2146,127 @@ fn drilled_solids_are_sound() {
     assert!(v.is_ok(), "{v:?}");
 }
 
+/// An assembly placing another project's releases: a library repository
+/// (its bolt released as A, then thicker as B) and a project placing A
+/// twice and B once, fetched and locked. Each occurrence's bodies, and the
+/// assembly exported as STEP, on one thread and four. Commits aren't
+/// hashed: a record names the build that made it.
+fn deps_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("deps");
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .env("GIT_AUTHOR_DATE", "2026-10-29T12:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2026-10-29T12:00:00Z")
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    let lib = tempfile::tempdir().unwrap();
+    git(lib.path(), &["init", "-q", "-b", "main"]);
+    ryucad::server::init(lib.path(), None).unwrap();
+    let mut l = ryucad::session::Session::open(lib.path()).unwrap();
+    call(&mut l, "part.create", json!({"part": "bolt"}));
+    call(
+        &mut l,
+        "feature.add",
+        json!({"part": "bolt", "type": "cylinder", "id": "shank",
+                                        "params": {"radius": 3, "height": 20}}),
+    );
+    call(
+        &mut l,
+        "props.set",
+        json!({"part": "bolt", "properties": {"number": "B-6"}}),
+    );
+    git(lib.path(), &["add", "."]);
+    git(lib.path(), &["commit", "-q", "-m", "bolt"]);
+    call(&mut l, "release.propose", json!({"part": "bolt"}));
+    git(lib.path(), &["add", "."]);
+    git(lib.path(), &["commit", "-q", "-m", "bolt A"]);
+    call(
+        &mut l,
+        "feature.edit",
+        json!({"part": "bolt", "id": "shank", "params": {"radius": 4}}),
+    );
+    call(&mut l, "release.propose", json!({"part": "bolt"}));
+    git(lib.path(), &["add", "."]);
+    git(lib.path(), &["commit", "-q", "-m", "bolt B"]);
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+    session.set_deps_cache(ryupdm::deps::Cache::new(dir.path().join("cache")));
+    let url = format!("file://{}", lib.path().display());
+    call(
+        &mut session,
+        "deps.add",
+        json!({"url": url, "name": "fasteners"}),
+    );
+    call(
+        &mut session,
+        "part.create",
+        json!({"part": "frame", "kind": "assembly"}),
+    );
+    for (id, rev, x) in [
+        ("a1", "A", "0 mm"),
+        ("a2", "A", "20 mm"),
+        ("b1", "B", "40 mm"),
+    ] {
+        call(
+            &mut session,
+            "feature.add",
+            json!({"part": "frame", "type": "instance", "id": id,
+            "of": "fasteners:bolt", "rev": rev, "placement": {"origin": [x, "0 mm", "0 mm"]}}),
+        );
+    }
+    let mut runs = Vec::new();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let frame = ryucad::doc::id::Id::parse("frame", "part").unwrap();
+        let mut fresh = ryucad::session::Session::open(dir.path()).unwrap();
+        fresh.set_deps_cache(ryupdm::deps::Cache::new(dir.path().join("cache")));
+        let (bodies, step) = pool.install(|| {
+            let m = fresh
+                .model(&frame, &ryucad::doc::assembly::Rev::Working)
+                .unwrap();
+            let bodies: Vec<String> = m
+                .occurrences
+                .iter()
+                .flat_map(|o| o.solids.iter().map(|x| x.built.hash.clone()))
+                .collect();
+            let params = json!({"part": "frame", "schema": "ap242", "unit": "mm",
+                                "time_stamp": "2026-10-29T00:00:00", "file_name": "frame.step"});
+            let req = ryucad::proto::Request::from_rpc("export", Some(params)).unwrap();
+            let a = ryucad::server::answer_live(&mut fresh, None, None, req).unwrap();
+            (bodies, a.binary.unwrap())
+        });
+        runs.push((bodies, step));
+    }
+    assert_eq!(runs[0], runs[1], "one thread and four");
+    for b in &runs[0].0 {
+        s.str(b);
+    }
+    let step = std::str::from_utf8(&runs[0].1).unwrap();
+    s.str(&format!(
+        "{:x}",
+        md(ryukei_testkit::unversioned(step).as_bytes())
+    ));
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -2178,5 +2299,6 @@ fn determinism() {
     exports_section(&mut golden);
     views_section(&mut golden);
     cache_section(&mut golden);
+    deps_section(&mut golden);
     golden.finish();
 }
