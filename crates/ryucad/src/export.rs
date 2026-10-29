@@ -1606,6 +1606,212 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_part_exports_as_usda() {
+        let (_dir, mut s) = project();
+        let stamp = "2026-10-29T00:00:00";
+        let ask = json!({"part": "bolt", "format": "usda", "time_stamp": stamp});
+        let (v, bytes) = exported(&mut s, ask.clone()).unwrap();
+        assert_eq!(
+            (
+                &v["format"],
+                &v["unit"],
+                &v["brep"],
+                &v["mesh"]["chord"]["value"],
+                &v["pipe_tolerance"]["value"],
+                &v["time_stamp"],
+            ),
+            (
+                &json!("usda"),
+                &json!("mm"),
+                &json!(true),
+                &json!("0.01 mm"),
+                &json!("0.0001 mm"),
+                &json!(stamp)
+            )
+        );
+        assert!(v["products"][0]["triangles"].as_u64().unwrap() > 0);
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        // A part alone: no prototypes, its solid with its B-rep and mesh.
+        for want in [
+            "#usda 1.0\n",
+            "defaultPrim = \"bolt\"",
+            "metersPerUnit = 0.001",
+            "upAxis = \"Z\"",
+            "string time_stamp = \"2026-10-29T00:00:00\"",
+            "string chord = \"0.01 mm\"",
+            "string pipe_tolerance = \"0.0001 mm\"",
+            "def Xform \"bolt\" (",
+            "kind = \"component\"",
+            "string reference = \"bolt/shank\"",
+            "def BrepArray \"brep\" (",
+            "uniform double[] brep:surface:cylinder:radius = [3]",
+            "def Mesh \"mesh\"",
+        ] {
+            assert!(text.contains(want), "{want}");
+        }
+        assert!(!text.contains("Prototypes"));
+        // The faces' names are the body's.
+        let bolt = Id::parse("bolt", "part").unwrap();
+        let mut walk = Walk::default();
+        walk.product(&mut s, &bolt, &Rev::Working).unwrap();
+        let body = &walk.scene.products[0].solids[0].built.body;
+        for f in body.faces() {
+            assert!(text.contains(&body.face(f).unwrap().name.to_string()));
+        }
+        // The same model and options, the same bytes.
+        let (_, again) = exported(&mut s, ask).unwrap();
+        assert_eq!(again, bytes);
+        // Meshes only: the faces' names go on the mesh.
+        let (v, bytes) = exported(
+            &mut s,
+            json!({"part": "bolt", "format": "usda", "brep": false}),
+        )
+        .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("BrepArray") && !text.contains("omni_solid"));
+        assert!(text.contains("custom uniform string[] ryucad:faceName"));
+        assert_eq!((&v["brep"], v.get("pipe_tolerance")), (&json!(false), None));
+        // B-rep only.
+        let (v, bytes) = exported(
+            &mut s,
+            json!({"part": "bolt", "format": "usda", "mesh": false, "unit": "m"}),
+        )
+        .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("def Mesh") && text.contains("metersPerUnit = 1\n"));
+        assert!(v.get("mesh").is_none() && v["products"][0].get("triangles").is_none());
+    }
+
+    #[test]
+    fn an_assembly_exports_as_instanced_usda() {
+        let (dir, mut s) = project();
+        let r = dir.path();
+        place_in(r, "frame", "base", "plate", json!("working"), [0.0; 3]);
+        place_in(
+            r,
+            "frame",
+            "b1",
+            "bolt",
+            json!("working"),
+            [0.01, 0.0, 0.005],
+        );
+        place_in(
+            r,
+            "frame",
+            "b2",
+            "bolt",
+            json!("working"),
+            [0.03, 0.0, 0.005],
+        );
+        s.refresh().unwrap();
+        let (_, bytes) = exported(
+            &mut s,
+            json!({"part": "frame", "format": "usda", "mesh": false}),
+        )
+        .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        for want in [
+            "class \"Prototypes\"\n",
+            "class Xform \"plate\" (",
+            "class Xform \"bolt\" (",
+            "def Xform \"frame\" (",
+            "kind = \"assembly\"",
+            "def Xform \"b2\" (",
+            "instanceable = true",
+            "prepend references = </Prototypes/bolt>",
+            "matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (30, 0, 5, 1) )",
+            "string instance = \"b1\"",
+        ] {
+            assert!(text.contains(want), "{want}");
+        }
+        // Each part defined once, however many times it is placed.
+        assert_eq!(text.matches("def BrepArray").count(), 2);
+    }
+
+    #[test]
+    fn usd_options_are_checked() {
+        let (_dir, mut s) = project();
+        for (params, param) in [
+            (
+                json!({"part": "bolt", "format": "usda", "ascii": true}),
+                "ascii",
+            ),
+            (
+                json!({"part": "bolt", "format": "usda", "schema": "ap242"}),
+                "schema",
+            ),
+            (
+                json!({"part": "bolt", "format": "usda", "brep": false, "mesh": false}),
+                "mesh",
+            ),
+            (
+                json!({"part": "bolt", "format": "usda", "mesh": false, "chord": "1 mm"}),
+                "chord",
+            ),
+            (
+                json!({"part": "bolt", "format": "usda", "brep": false, "pipe_tolerance": "0.001 mm"}),
+                "pipe_tolerance",
+            ),
+            (
+                json!({"part": "bolt", "format": "usda", "pipe_tolerance": "0 mm"}),
+                "pipe_tolerance",
+            ),
+            (
+                json!({"part": "bolt", "format": "usda", "unit": "in"}),
+                "unit",
+            ),
+            (
+                json!({"part": "bolt", "format": "stl", "brep": false}),
+                "brep",
+            ),
+            (json!({"part": "bolt", "mesh": true}), "mesh"),
+            (
+                json!({"part": "bolt", "format": "3mf", "pipe_tolerance": "0.01 mm"}),
+                "pipe_tolerance",
+            ),
+        ] {
+            let e = answered(&mut s, params.clone()).unwrap_err();
+            assert_eq!(
+                (e.code, &e.details["param"]),
+                (Code::InvalidParam, &json!(param)),
+                "{params}"
+            );
+        }
+        assert_eq!(Format::of_path("/x/a.USDA"), Some(Format::Usda));
+    }
+
+    #[test]
+    fn a_face_usd_cant_describe_is_named() {
+        let (_dir, mut s) = project();
+        let bolt = Id::parse("bolt", "part").unwrap();
+        let mut walk = Walk::default();
+        walk.product(&mut s, &bolt, &Rev::Working).unwrap();
+        let body = &walk.scene.products[0].solids[0].built.body;
+        let face = body.face(body.faces().next().unwrap()).unwrap().name;
+        let e = walk.usd_unrepresentable(ryuformats::usd::stage::StageError::Brep {
+            product: 0,
+            solid: 0,
+            error: ryuformats::usd::brep::BrepError {
+                face,
+                reason: "seams",
+            },
+        });
+        assert_eq!(e.code, Code::ExportUnrepresentable);
+        assert_eq!(
+            (
+                &e.details["entity"],
+                &e.details["reason"],
+                &e.details["solid"]
+            ),
+            (
+                &json!(format!("bolt/shank/{face}")),
+                &json!("seams"),
+                &json!("shank")
+            )
+        );
+    }
+
+    #[test]
     fn mesh_options_belong_to_mesh_formats() {
         let (_dir, mut s) = project();
         for (params, param) in [
