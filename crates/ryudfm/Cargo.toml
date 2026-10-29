@@ -24,4 +24,5 @@ testing = ["ryu-board/testing"]
 
 [dev-dependencies]
 ryudfm = { path = ".", features = ["testing"] }
+sha2 = "0.11"
 tempfile = "3"
