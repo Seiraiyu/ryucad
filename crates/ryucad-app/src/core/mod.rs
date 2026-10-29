@@ -3,6 +3,7 @@
 pub mod activity;
 pub mod bom;
 pub mod branches;
+pub mod command;
 pub mod compare;
 pub mod cube;
 pub mod doctor;
