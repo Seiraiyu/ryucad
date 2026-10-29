@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ryucad 11.A: a long request with Cancel</title>
+<link rel="stylesheet" href="vendor/phosphor.css">
+<link rel="stylesheet" href="vendor/phosphor-fill.css">
+<link rel="stylesheet" href="app.css">
+<script src="glyphs.js"></script>
+<script src="mock.js"></script>
+<body>
+<script>
+  // The window's own rebuild with its bar and Cancel; the agent's check
+  // shown from the progress topic on its chip; a queued request waiting.
+  mock(shell({
+    agentProgress: "check 3/8 parts",
+    status: `${icon("spinner-gap", 14, "accent")}<span style="color:var(--text)">Rebuilding bracket</span><div class="bar"><div style="width:30%"></div></div>
+      <span>12 / 40 features · <span class="mono">fillet1</span></span><span class="btn" style="height:18px;padding:0 8px;font-size:12px">Cancel</span>`,
+    statusRight: `<span class="chip">${icon("clock", 12)} mesh.get waiting for agent's check</span>`,
+  }));
+</script>
