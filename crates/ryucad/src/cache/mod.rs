@@ -24,6 +24,7 @@
 
 pub mod results;
 pub mod token;
+pub mod wire;
 
 use crate::error::{Code, Error, Result};
 use serde_json::{Value, json};
