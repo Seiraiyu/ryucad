@@ -2,7 +2,7 @@
 
 use super::KnotVector;
 use super::bezier::{BezierPatch, patches};
-use super::eval::check_weights;
+use super::eval::{Spline, check_weights};
 use super::project::nearest;
 use super::refine::{Hom, check_split, clamp, extend_flat, refine_flat, split_at};
 use crate::geom::{
@@ -360,6 +360,30 @@ impl NurbsSurface {
             .collect::<Result<Vec<_>, _>>()?;
         let new: Vec<_> = lines.iter().map(|(_, h)| h.clone()).collect();
         Ok(self.with_lines(dir, &lines[0].0, &new))
+    }
+
+    /// The part over `range` along `dir`, clamped in that direction with
+    /// the same parameters, as [`super::NurbsCurve::part`] takes a curve's:
+    /// along a periodic direction the range is first moved by whole periods
+    /// to start in the domain, and may run on past its end by at most one
+    /// period. Fails like it.
+    pub fn part(&self, dir: Direction, range: [f64; 2]) -> Result<Self, Error> {
+        let kv = &self.knots[dir as usize];
+        let parts = self
+            .lines(dir)
+            .into_iter()
+            .map(|l| {
+                Spline {
+                    knots: kv.clone(),
+                    points: l.iter().map(|h| h.p).collect(),
+                    weights: l.iter().map(|h| h.w).collect(),
+                }
+                .part(range)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let flat = parts[0].knots.flat().to_vec();
+        let lines: Vec<_> = parts.iter().map(Spline::hom).collect();
+        Ok(self.with_lines(dir, &flat, &lines))
     }
 
     /// The surface cut along `dir` at `t` into two pieces, clamped in that
