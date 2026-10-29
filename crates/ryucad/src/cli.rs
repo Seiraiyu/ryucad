@@ -2610,14 +2610,21 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             }
             // As the participant asked for, as through the daemon.
             let me = participant(cli);
-            deliver(
-                cmd,
-                server::handle_safely(&mut None, None, me.as_deref(), &root, req)?,
-            )
-            .map(|r| lift(cmd, r, warnings))
+            let mut slot = None;
+            let answer = server::handle_safely(&mut slot, None, me.as_deref(), &root, req);
+            // A daemon sends what it built to the shared cache behind its
+            // requests; this process has only until it exits.
+            if let Some(r) = slot.as_ref().and_then(|s| s.disk()?.remote()) {
+                r.flush(REMOTE_FLUSH);
+            }
+            deliver(cmd, answer?).map(|r| lift(cmd, r, warnings))
         }
     }
 }
+
+/// How long a request run in this process waits, before it exits, for
+/// what it built to reach the shared cache.
+const REMOTE_FLUSH: Duration = Duration::from_secs(30);
 
 /// The CLI's warnings are all in its envelope: the warnings a request
 /// returns in its result (the protocol has no envelope) move there, as

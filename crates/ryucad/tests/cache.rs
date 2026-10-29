@@ -763,3 +763,70 @@ fn a_warm_fetches_what_the_team_built() {
         cli(root, &run, cache, &["daemon", "stop"]);
     }
 }
+
+/// Design 192's scenario on two machines (two disk caches): one fills the
+/// shared cache, the other, empty, rebuilds and meshes writing nothing of
+/// its own and gets the same hashes; through daemons and in process alike
+/// (a process run in place sends what it built before it exits).
+#[test]
+fn a_second_machine_builds_nothing_the_first_shared() {
+    for no_daemon in ["0", "1"] {
+        let fake = fake_cache::Fake::start();
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        let (ca, cb) = (dir.path().join("cache-a"), dir.path().join("cache-b"));
+        plate(&a, &run, &dir.path().join("scratch"));
+        plate(&b, &run, &dir.path().join("scratch"));
+        cli(&a, &run, &ca, &["config", "set", "cache.remote", &fake.url]);
+        for root in [&a, &b] {
+            cli(root, &run, &ca, &["daemon", "stop"]);
+        }
+        let release = |root: &Path, cache: &Path, token: &str, args: &[&str]| {
+            let env = [
+                ("RYUCAD_CACHE_IDENTITY", RELEASE),
+                ("RYUCAD_CACHE_TOKEN", token),
+                ("RYUCAD_NO_DAEMON", no_daemon),
+            ];
+            let v = cli_with(root, &run, cache, &env, args);
+            assert_eq!(v["ok"], true, "{args:?}: {v}");
+            v["result"].clone()
+        };
+        let built = release(&a, &ca, fake_cache::WRITE, &["rebuild", "p"]);
+        let mesh = release(&a, &ca, fake_cache::WRITE, &["mesh", "p"]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while fake.held() < 4 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(
+            fake.held(),
+            4,
+            "two features, the cut's body and a mesh ({no_daemon})"
+        );
+        let puts = fake.count("PUT", "/v1/");
+        let again = release(&b, &cb, fake_cache::WRITE, &["rebuild", "p"]);
+        assert_eq!(again["parts"][0]["hash"], built["parts"][0]["hash"]);
+        let mesh_b = release(&b, &cb, fake_cache::WRITE, &["mesh", "p"]);
+        assert_eq!(mesh_b, mesh, "the same mesh");
+        let s = release(&b, &cb, fake_cache::WRITE, &["cache", "stats"]);
+        assert_eq!(
+            fake.count("PUT", "/v1/"),
+            puts,
+            "nothing sent: nothing built ({no_daemon})"
+        );
+        assert_eq!(s["entries"], 3, "what it read, kept: {s}");
+        // A development build never asks.
+        let seen = fake.with(|s| s.seen.len());
+        cli_with(
+            &b,
+            &run,
+            &dir.path().join("dev"),
+            &[("RYUCAD_NO_DAEMON", "1")],
+            &["rebuild", "p"],
+        );
+        assert_eq!(fake.with(|s| s.seen.len()), seen);
+        for (root, cache) in [(&a, &ca), (&b, &cb)] {
+            cli(root, &run, cache, &["daemon", "stop"]);
+        }
+    }
+}

@@ -1176,7 +1176,10 @@ mod tests {
         assert!(is_release("0.7.0", "0123456789ab", true));
         assert!(is_release("0.7.0-pre.1", "0123456789ab", true));
         assert!(!is_release("0.0.0", "0123456789ab", true), "the repo's");
-        assert!(!is_release("0.0.0-dev", "0123456789ab", true), "a dry run's");
+        assert!(
+            !is_release("0.0.0-dev", "0123456789ab", true),
+            "a dry run's"
+        );
         assert!(
             !is_release("0.7.0", "0123456789ab", false),
             "read from a checkout"
