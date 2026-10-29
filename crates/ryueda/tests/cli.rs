@@ -418,6 +418,16 @@ fn every_protocol_method_has_a_command() {
         ("connect", &["connect"]),
         ("disconnect", &["disconnect"]),
         ("nc", &["nc"]),
+        ("net.add", &["net", "add"]),
+        ("net.edit", &["net", "edit"]),
+        ("net.rename", &["net", "rename"]),
+        ("net.join", &["net", "join"]),
+        ("net.delete", &["net", "delete"]),
+        ("net.show", &["net", "show"]),
+        ("instance.add", &["instance", "add"]),
+        ("instance.edit", &["instance", "edit"]),
+        ("instance.delete", &["instance", "delete"]),
+        ("instance.show", &["instance", "show"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),
@@ -1090,4 +1100,150 @@ fn components_and_connections_from_the_cli() {
         text.contains("\"pins\": {\n    \"1\": {\n      \"port\""),
         "{text}"
     );
+}
+
+#[test]
+fn nets_and_instances_from_the_cli() {
+    let p = Pair::with_resistor();
+    p.ok(&["rail", "add", "GND", "--id", "gnd"]);
+    p.ok(&["block", "create", "Top", "--id", "top"]);
+    p.ok(&["block", "create", "Channel", "--id", "ch"]);
+    p.ok(&["block", "edit", "ch", "--add-port", "SDA:bidirectional"]);
+    p.ok(&["component", "add", "ch", "--of", "r_100k", "--id", "r"]);
+    p.ok(&["connect", "ch/r/1", "port:SDA"]);
+    p.ok(&["connect", "ch/r/2", "rail:GND"]);
+    let sda = p.ok(&[
+        "net",
+        "add",
+        "top",
+        "SDA",
+        "--id",
+        "sda",
+        "--voltage",
+        "3.3 V",
+    ]);
+    assert_eq!(sda["net"], json!({"name": "SDA", "voltage": "3.3 V"}));
+    p.fails(&["net", "add", "top", "SDA"], "net_name_duplicate", 1);
+    p.fails(&["net", "add", "top", "X", "--id", "nc"], "invalid_id", 1);
+    p.ok(&["net", "add", "top", "SCL", "--id", "scl"]);
+    // Pairs name each other.
+    p.ok(&["net", "add", "top", "D_P", "--id", "dp"]);
+    p.ok(&["net", "add", "top", "D_N", "--id", "dn"]);
+    let dp = p.ok(&["net", "edit", "top/D_P", "--pair-with", "D_N"]);
+    assert_eq!(dp["net"]["pair"], json!({"with": "dn", "polarity": "p"}));
+    assert_eq!(
+        p.ok(&["net", "show", "top/dn"])["net"]["pair"],
+        json!({"with": "dp", "polarity": "n"})
+    );
+    let e = p.fails(&["net", "delete", "top/dp"], "has_dependents", 1);
+    assert_eq!(e["details"]["dependents"], json!(["top/dn"]));
+    p.ok(&["net", "edit", "top/dp", "--no-pair"]);
+    assert_eq!(p.ok(&["net", "show", "top/dn"])["net"].get("pair"), None);
+    p.ok(&["net", "delete", "top/dp"]);
+    // Instances, with channel rules.
+    let a = p.ok(&[
+        "instance", "add", "top", "--of", "ch", "--id", "ch_a", "--port", "SDA=SDA", "--suffix",
+        "_A",
+    ]);
+    assert_eq!(
+        a["connections"],
+        json!({p.ok(&["block", "show", "ch"])["block"]["ports"].as_object().unwrap().keys().next().unwrap().as_str(): "top/sda"})
+    );
+    assert_eq!(
+        a["instance"]["refdes"],
+        json!({"rule": "suffix", "value": "_A"})
+    );
+    let b = p.ok(&["instance", "add", "top", "--of", "ch", "--offset", "100"]);
+    assert_eq!(
+        b["instance"]["refdes"],
+        json!({"rule": "offset", "value": 100})
+    );
+    let b = last(&b);
+    p.fails(&["instance", "add", "top", "--of", "nope"], "not_found", 1);
+    p.fails(
+        &["instance", "add", "top", "--of", "ch", "--port", "nope=SDA"],
+        "port_not_found",
+        1,
+    );
+    // No block contains itself.
+    let e = p.fails(&["instance", "add", "ch", "--of", "top"], "block_cycle", 1);
+    assert_eq!(
+        e["details"]["faults"][0]["details"]["chain"],
+        json!(["ch", "top"])
+    );
+    p.fails(&["net", "delete", "top/sda"], "net_has_pins", 1);
+    let e = p.fails(
+        &["block", "edit", "ch", "--remove-port", "SDA"],
+        "has_dependents",
+        1,
+    );
+    assert_eq!(e["details"]["dependents"].as_array().unwrap().len(), 2);
+    let o = p.ok(&[
+        "instance",
+        "edit",
+        &format!("top/{b}"),
+        "--override",
+        "r=R42",
+        "--port",
+        "SDA=SCL",
+    ]);
+    assert_eq!(o["instance"]["overrides"], json!({"r": "R42"}));
+    p.fails(
+        &[
+            "instance",
+            "edit",
+            &format!("top/{b}"),
+            "--override",
+            "x/r=R1",
+        ],
+        "not_found",
+        1,
+    );
+    p.fails(
+        &[
+            "instance",
+            "edit",
+            &format!("top/{b}"),
+            "--override",
+            "r=1R",
+        ],
+        "invalid_param",
+        1,
+    );
+    // Joining moves every pin and port, in one change.
+    p.ok(&["component", "add", "top", "--of", "r_100k", "--id", "pull"]);
+    p.ok(&["connect", "top/pull/1", "SCL"]);
+    let j = p.ok(&["net", "join", "top/SCL", "SDA"]);
+    assert_eq!(
+        j["moved"],
+        json!([
+            "top/pull/1",
+            format!(
+                "top/{b}/{}",
+                a["connections"].as_object().unwrap().keys().next().unwrap()
+            )
+        ])
+    );
+    assert_eq!(j["into"], "top/sda");
+    assert!(!p.direct.join("board/blocks/top/nets/scl.json").exists());
+    p.fails(&["net", "join", "top/sda", "SDA"], "invalid_param", 1);
+    let r = p.ok(&["net", "join", "top/sda", "rail:GND"]);
+    assert_eq!(r["into"], "rail/gnd");
+    assert_eq!(
+        p.ok(&["component", "show", "top/pull"])["connections"]["1"],
+        "rail/gnd"
+    );
+    let shown = p.ok(&["instance", "show", "top/ch_a"]);
+    assert_eq!(shown["instance"]["of"], "ch");
+    p.ok(&["instance", "delete", "top/ch_a"]);
+    p.ok(&[
+        "instance",
+        "edit",
+        &format!("top/{b}"),
+        "--no-refdes",
+        "--unoverride",
+        "r",
+    ]);
+    let renamed = p.ok(&["net", "rename", "top/dn", "USB_N"]);
+    assert_eq!(renamed["net"]["name"], "USB_N");
 }
