@@ -2,7 +2,9 @@
 //! derived from its size and the display quality, and caches the result by
 //! body hash, so editing one feature re-meshes one body; beneath that, the
 //! disk cache keeps them by body hash and parameters ([`crate::cache`]).
-//! Agents get JSON; the app can ask for a compact binary form.
+//! Agents get JSON; the app can ask for a compact binary form. Exports to
+//! mesh formats mesh at their own parameters through the same caches
+//! ([`Cache::export_all`]).
 
 use crate::doc::files::Feature;
 use crate::error::{Code, Error, Result};
@@ -79,11 +81,11 @@ impl Quality {
     }
 }
 
-/// A body's display mesh and the parameters it was made with.
+/// A body's mesh and the parameters it was made with.
 #[derive(Debug)]
 pub struct DisplayMesh {
     pub params: MeshParams,
-    pub mesh: Result<BodyMesh>,
+    pub mesh: Result<Arc<BodyMesh>>,
 }
 
 impl DisplayMesh {
@@ -108,11 +110,31 @@ pub struct Meshed {
     pub mesh: Arc<DisplayMesh>,
 }
 
-/// Meshes by body hash and quality, least recently used first out when
-/// the cache passes its budget, and the disk cache beneath them, if any.
+/// What a mesh is kept under beside its body's hash: a display quality,
+/// or an export's parameters by their bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Key {
+    Display(Quality),
+    Export([u64; 4]),
+}
+
+impl Key {
+    fn export(p: &MeshParams) -> Key {
+        Key::Export([
+            p.chord.to_bits(),
+            p.angle.to_bits(),
+            p.max_edge.map_or(u64::MAX, f64::to_bits),
+            p.max_triangles,
+        ])
+    }
+}
+
+/// Meshes by body hash and quality (or an export's parameters), least
+/// recently used first out when the cache passes its budget, and the disk
+/// cache beneath them, if any.
 #[derive(Debug, Default)]
 pub struct Cache {
-    entries: BTreeMap<(String, Quality), (u64, Arc<DisplayMesh>)>,
+    entries: BTreeMap<(String, Key), (u64, Arc<DisplayMesh>)>,
     clock: u64,
     bytes: usize,
     pub disk: Option<Arc<crate::cache::Disk>>,
@@ -150,7 +172,11 @@ impl Cache {
         use rayon::prelude::*;
         let missing: Vec<&(&Feature, &Built)> = items
             .iter()
-            .filter(|(_, b)| !self.entries.contains_key(&(b.hash.clone(), quality)))
+            .filter(|(_, b)| {
+                !self
+                    .entries
+                    .contains_key(&(b.hash.clone(), Key::Display(quality)))
+            })
             .collect();
         let disk = self.disk.as_deref();
         let made: Vec<(String, Arc<DisplayMesh>)> = missing
@@ -159,14 +185,17 @@ impl Cache {
             .collect();
         let mut fresh: BTreeMap<String, Arc<DisplayMesh>> = BTreeMap::new();
         for (hash, m) in made {
-            self.add(&hash, quality, &m);
+            self.add(&hash, Key::Display(quality), &m);
             fresh.insert(hash, m);
         }
         let out: Vec<Arc<DisplayMesh>> = items
             .iter()
             .map(|(_, b)| {
                 self.clock += 1;
-                match self.entries.get_mut(&(b.hash.clone(), quality)) {
+                match self
+                    .entries
+                    .get_mut(&(b.hash.clone(), Key::Display(quality)))
+                {
                     Some((used, m)) => {
                         *used = self.clock;
                         Arc::clone(m)
@@ -186,7 +215,11 @@ impl Cache {
         let mut seen = std::collections::BTreeSet::new();
         let items: Vec<(Feature, Built)> = items
             .iter()
-            .filter(|(_, b)| !self.entries.contains_key(&(b.hash.clone(), quality)))
+            .filter(|(_, b)| {
+                !self
+                    .entries
+                    .contains_key(&(b.hash.clone(), Key::Display(quality)))
+            })
             .filter(|(_, b)| seen.insert(b.hash.clone()))
             .map(|(f, b)| ((*f).clone(), (*b).clone()))
             .collect();
@@ -201,17 +234,64 @@ impl Cache {
     /// already has (made meanwhile by another request).
     pub fn put(&mut self, made: Made, budget: usize) {
         for (hash, m) in made.meshes {
-            if !self.entries.contains_key(&(hash.clone(), made.quality)) {
-                self.add(&hash, made.quality, &m);
+            if !self
+                .entries
+                .contains_key(&(hash.clone(), Key::Display(made.quality)))
+            {
+                self.add(&hash, Key::Display(made.quality), &m);
             }
         }
         self.evict(budget);
     }
 
-    fn add(&mut self, hash: &str, quality: Quality, m: &Arc<DisplayMesh>) {
+    fn add(&mut self, hash: &str, key: Key, m: &Arc<DisplayMesh>) {
         self.bytes += m.bytes();
         self.entries
-            .insert((hash.to_owned(), quality), (self.clock, Arc::clone(m)));
+            .insert((hash.to_owned(), key), (self.clock, Arc::clone(m)));
+    }
+
+    /// The meshes of several bodies for an export at `params`, in order:
+    /// each body (by hash) meshed once, those not cached in parallel.
+    pub fn export_all(
+        &mut self,
+        items: &[&Built],
+        params: &MeshParams,
+        budget: usize,
+    ) -> Vec<Arc<DisplayMesh>> {
+        use rayon::prelude::*;
+        let key = Key::export(params);
+        let mut missing: BTreeMap<&str, &Built> = BTreeMap::new();
+        for b in items {
+            if !self.entries.contains_key(&(b.hash.clone(), key)) {
+                missing.entry(&b.hash).or_insert(b);
+            }
+        }
+        let disk = self.disk.as_deref();
+        let made: Vec<(String, Arc<DisplayMesh>)> = missing
+            .into_values()
+            .collect::<Vec<_>>()
+            .par_iter()
+            .map(|b| (b.hash.clone(), Arc::new(make_with(disk, b, *params))))
+            .collect();
+        for (hash, m) in &made {
+            self.add(hash, key, m);
+        }
+        let out = items
+            .iter()
+            .map(|b| {
+                self.clock += 1;
+                let (used, m) = self
+                    .entries
+                    .get_mut(&(b.hash.clone(), key))
+                    .expect("made above");
+                *used = self.clock;
+                Arc::clone(m)
+            })
+            .collect();
+        // What it made stays until the budget pushes it out, the meshes the
+        // export uses last.
+        self.evict(budget);
+        out
     }
 
     /// Drops the least recently used meshes until the cache fits `budget`,
@@ -289,16 +369,21 @@ fn disk_input(hash: &str, params: &MeshParams) -> Vec<u8> {
     v
 }
 
-/// The mesh of `built` at `quality`: from `disk` if it holds it, else
-/// made, and written to `disk` when it meshed.
+/// The display mesh of `built` (feature `f`) at `quality`.
 fn make(
     disk: Option<&crate::cache::Disk>,
     f: &Feature,
     built: &Built,
     quality: Quality,
 ) -> DisplayMesh {
+    make_with(disk, built, quality.params(diagonal(f, &built.body)))
+}
+
+/// The mesh of `built` at `params`: from `disk` if it holds it, else
+/// made, and written to `disk` when it meshed. A mesh past ryukei's budget
+/// says by how much (`triangles`).
+fn make_with(disk: Option<&crate::cache::Disk>, built: &Built, params: MeshParams) -> DisplayMesh {
     use crate::cache::Kind;
-    let params = quality.params(diagonal(f, &built.body));
     let input = disk_input(&built.hash, &params);
     if let Some(d) = disk
         && let Some(bytes) = d.get(Kind::Mesh, &input)
@@ -307,20 +392,27 @@ fn make(
             Ok(m) => {
                 return DisplayMesh {
                     params,
-                    mesh: Ok(m),
+                    mesh: Ok(Arc::new(m)),
                 };
             }
             Err(_) => d.discard(Kind::Mesh, &input),
         }
     }
     let mesh = ryukei::mesh::tessellate(&built.body, &params).map_err(|e| {
-        Error::new(Code::MeshFailed, format!("can't mesh the body: {e}"))
-            .with("kernel", format!("{e:?}"))
+        let err = Error::new(Code::MeshFailed, format!("can't mesh the body: {e}"))
+            .with("kernel", format!("{e:?}"));
+        match e {
+            ryukei::Error::MeshTooLarge { triangles } => err.with("triangles", triangles),
+            _ => err,
+        }
     });
     if let (Some(d), Ok(m)) = (disk, &mesh) {
         d.put(Kind::Mesh, &input, &ryukei::codec::encode_mesh(m));
     }
-    DisplayMesh { params, mesh }
+    DisplayMesh {
+        params,
+        mesh: mesh.map(Arc::new),
+    }
 }
 
 /// The mesh as JSON: welded positions (meters), corners (a position and a
@@ -882,6 +974,44 @@ mod tests {
         disk.clear();
         let again = Cache::default().get(&f, &b, Quality::Normal, usize::MAX);
         assert_eq!(again.mesh.as_ref().unwrap(), made.mesh.as_ref().unwrap());
+    }
+
+    #[test]
+    fn export_meshes_are_kept_by_their_parameters() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = Arc::new(crate::cache::Disk::open(dir.path(), [6; 32]));
+        let (_, b) = sphere("10 mm");
+        let (_, other) = sphere("20 mm");
+        let params = MeshParams::new(1e-5, 0.26);
+        let mut cache = Cache::with_disk(Some(Arc::clone(&disk)));
+        // One body twice, one other: two meshes made, the first shared.
+        let m = cache.export_all(&[&b, &other, &b], &params, usize::MAX);
+        assert!(Arc::ptr_eq(&m[0], &m[2]));
+        assert!(!Arc::ptr_eq(&m[0], &m[1]));
+        assert_eq!(m[0].params, params);
+        assert_eq!(disk.stats().kinds[2].1, 2, "both written to disk");
+        // The same parameters again: from memory.
+        let again = cache.export_all(&[&b], &params, usize::MAX);
+        assert!(Arc::ptr_eq(&again[0], &m[0]));
+        assert_eq!(cache.len(), 2);
+        // Another chord is another mesh, finer here.
+        let fine = cache.export_all(&[&b], &MeshParams::new(2.5e-6, 0.26), usize::MAX);
+        let count = |d: &DisplayMesh| d.mesh.as_ref().unwrap().triangles.len();
+        assert!(count(&fine[0]) > count(&m[0]));
+        // A fresh cache over the disk reads it back.
+        let read = Cache::with_disk(Some(disk)).export_all(&[&b], &params, usize::MAX);
+        assert_eq!(read[0].mesh.as_ref().unwrap(), m[0].mesh.as_ref().unwrap());
+        // Past the budget, the refusal says how many triangles it would take.
+        let small = MeshParams {
+            max_triangles: 10,
+            ..params
+        };
+        let e = cache.export_all(&[&b], &small, usize::MAX)[0]
+            .mesh
+            .clone()
+            .unwrap_err();
+        assert_eq!(e.code, Code::MeshFailed);
+        assert!(e.details["triangles"].as_u64().unwrap() > 10, "{e:?}");
     }
 
     #[test]

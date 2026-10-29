@@ -113,19 +113,38 @@ enum Command {
         #[command(flatten)]
         expect: Expect,
     },
-    /// Write a part or an assembly as a STEP file: as the working files have it, as a
-    /// Git revision has it (--rev), or as a release (--rev label:<L>).
+    /// Write a part or an assembly as a file: as the working files have it, as a Git
+    /// revision has it (--rev), or as a release (--rev label:<L>). The daemon writes
+    /// it, atomically, in a folder that must exist.
     Export {
         part: String,
-        /// The STEP file to write; its name goes in the file's header.
+        /// The file to write; its name goes in a STEP file's header.
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
-        /// ap242 (the default) or ap214.
+        /// step, stl or 3mf; by default the one --out's extension names (.step,
+        /// .stp, .stl, .3mf).
+        #[arg(long)]
+        format: Option<String>,
+        /// STEP's schema: ap242 (the default) or ap214.
         #[arg(long)]
         schema: Option<String>,
-        /// The length unit: mm (the default) or m.
+        /// The length unit: mm (the default), or m; a mesh format also cm.
         #[arg(long)]
         unit: Option<String>,
+        /// A mesh format's chord, the most a triangle may stray from the faces: a
+        /// literal length (default 0.01 mm).
+        #[arg(long, value_name = "LENGTH")]
+        chord: Option<String>,
+        /// A mesh format's angle, the most a face's normal may turn across a
+        /// triangle: a literal angle in (0, 90 deg] (default 15 deg).
+        #[arg(long, value_name = "ANGLE")]
+        angle: Option<String>,
+        /// A mesh format's longest triangle edge: a literal length.
+        #[arg(long, value_name = "LENGTH")]
+        max_edge: Option<String>,
+        /// STL as text, a solid block per placed solid, rather than binary.
+        #[arg(long)]
+        ascii: bool,
         /// The header's time stamp; by default the commit's time when exporting a
         /// commit, else now.
         #[arg(long, value_name = "T")]
@@ -2029,17 +2048,34 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Export {
             part,
             out,
+            format,
             schema,
             unit,
+            chord,
+            angle,
+            max_edge,
+            ascii,
             time_stamp,
             rev,
         } => Request::Export {
             part: part.clone(),
             rev: rev.clone(),
+            format: format.clone(),
+            // The daemon's folder isn't the caller's.
+            out: Some(
+                std::path::absolute(out)
+                    .unwrap_or_else(|_| out.clone())
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             schema: schema.clone(),
             unit: unit.clone(),
             time_stamp: time_stamp.clone(),
             file_name: out.file_name().map(|n| n.to_string_lossy().into_owned()),
+            chord: chord.clone(),
+            angle: angle.clone(),
+            max_edge: max_edge.clone(),
+            ascii: *ascii,
         },
         Command::Rebuild { part, rev } => Request::Rebuild {
             part: part.clone(),
@@ -2551,13 +2587,6 @@ fn deliver(cmd: &Command, a: Answer) -> Result<Value> {
         return written(cmd, a.result);
     };
     let out = match cmd {
-        // A file another tool reads is never seen half written.
-        Command::Export { out, .. } => {
-            ryucad::doc::project::write_atomic(out, &bytes)?;
-            let mut result = a.result;
-            result["out"] = json!(out);
-            return Ok(result);
-        }
         Command::Mesh { out: Some(o), .. } | Command::Render { out: o, .. } => o,
         _ => {
             return Err(Error::new(
