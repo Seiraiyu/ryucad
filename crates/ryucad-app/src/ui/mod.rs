@@ -6,6 +6,7 @@ pub mod cube;
 pub mod dialogs;
 pub mod doctor;
 pub mod fonts;
+pub mod icon;
 pub mod menu;
 pub mod panels;
 pub mod platform;
