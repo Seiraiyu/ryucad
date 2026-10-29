@@ -65,6 +65,10 @@ enum Command {
     /// each part's named by its PDM `material` property.
     #[command(subcommand)]
     Materials(MaterialsCmd),
+    /// Named views: cameras saved with a part or an assembly, in Git, that
+    /// `camera --view` and `render --view` restore.
+    #[command(subcommand)]
+    View(ViewCmd),
     /// ryupdm's settings for this project: its ID, how revisions are labelled, the release
     /// branch, the part number pattern and the custom properties parts may have.
     #[command(subcommand)]
@@ -298,12 +302,21 @@ enum Command {
     /// Show a participant's camera (the one human's, unless --of names
     /// another), or set this agent's with --eye, --target and --up.
     Camera {
-        #[arg(long = "of", value_name = "PARTICIPANT", conflicts_with_all = ["eye", "view", "fit"])]
+        #[arg(long = "of", value_name = "PARTICIPANT", conflicts_with_all = ["eye", "view", "fit", "normal_to"])]
         of: Option<String>,
-        /// Look from a standard view: front, back, left, right, top,
-        /// bottom or iso, framing the model (or the --fit entities).
-        #[arg(long, conflicts_with = "eye")]
+        /// Look from a standard view (front, back, left, right, top, bottom, an edge or corner
+        /// of the cube such as front_top_right, iso, dimetric or trimetric), framing the model
+        /// (or the --fit entities); or restore a named view as saved.
+        #[arg(long, conflicts_with_all = ["eye", "normal_to"])]
         view: Option<String>,
+        /// Look along this face's normal (a planar face) or axis (a face of revolution), its
+        /// longest straight edge level, framing the model (or the --fit entities).
+        #[arg(long, value_name = "REF", conflicts_with = "eye")]
+        normal_to: Option<String>,
+        /// The part whose named view --view is (this agent's focus, else the project's model
+        /// when it is one part).
+        #[arg(long, requires = "view")]
+        part: Option<String>,
         /// Frame these entities, keeping the view direction.
         #[arg(long, value_name = "REF", conflicts_with = "eye")]
         fit: Vec<String>,
@@ -437,7 +450,9 @@ enum Command {
         /// The PNG to write.
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
-        /// front, back, left, right, top, bottom or iso.
+        /// A standard view (front, back, left, right, top, bottom, an edge or corner of the
+        /// cube such as front_top_right, iso, dimetric or trimetric), or a named view of the
+        /// part rendered.
         #[arg(long, conflicts_with_all = ["of", "eye"])]
         view: Option<String>,
         /// Use this participant's camera.
@@ -488,6 +503,9 @@ enum Command {
         /// (where `hide` goes), else the caller's.
         #[arg(long = "hidden", value_name = "REF")]
         hidden: Vec<String>,
+        /// Draw the origin's axes and planes.
+        #[arg(long)]
+        origin: bool,
     },
     /// What the merge (or cherry-pick, revert or rebase step) Git is in the
     /// middle of leaves to settle.
@@ -944,6 +962,60 @@ enum MaterialsCmd {
         /// Fail with `conflict` unless the project is still at this revision.
         #[arg(long = "expect", value_name = "REVISION")]
         expect: Option<String>,
+    },
+}
+
+// Parsed once per run; the size difference costs nothing.
+#[allow(clippy::large_enum_variant)]
+#[derive(Subcommand)]
+enum ViewCmd {
+    /// The named views of a part, or of every part, with each part's revision.
+    List { part: Option<String> },
+    /// Save a camera as a named view of a part: the one --of's window has (else the one
+    /// human's, else this agent's), or one given by --eye, --target and --up. A view of
+    /// that name is replaced.
+    Save {
+        part: String,
+        view: String,
+        #[arg(long = "of", value_name = "PARTICIPANT", conflicts_with = "eye")]
+        of: Option<String>,
+        /// The eye point, three quantities: 0,-100mm,50mm.
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires_all = ["target", "up"])]
+        eye: Option<[String; 3]>,
+        /// The point looked at.
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires = "eye")]
+        target: Option<[String; 3]>,
+        /// The up direction: 0,0,1.
+        #[arg(long, value_name = "X,Y,Z", value_parser = vector, allow_hyphen_values = true, requires = "eye")]
+        up: Option<[f64; 3]>,
+        /// Perspective with this vertical field of view (45 by default).
+        #[arg(
+            long,
+            value_name = "DEGREES",
+            conflicts_with = "ortho",
+            requires = "eye"
+        )]
+        fov: Option<f64>,
+        /// Orthographic, this tall at the target.
+        #[arg(long, value_name = "QUANTITY", requires = "eye")]
+        ortho: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete a named view.
+    Delete {
+        part: String,
+        view: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Rename a named view.
+    Rename {
+        part: String,
+        from: String,
+        to: String,
+        #[command(flatten)]
+        expect: Expect,
     },
 }
 
@@ -1792,6 +1864,40 @@ fn request(cmd: &Command) -> Option<Request> {
             expected_revision: expect.revision.clone(),
         },
         Command::Materials(MaterialsCmd::List) => Request::MaterialsList {},
+        Command::View(ViewCmd::List { part }) => Request::ViewList { part: part.clone() },
+        Command::View(ViewCmd::Save {
+            part,
+            view,
+            of,
+            eye,
+            target,
+            up,
+            fov,
+            ortho,
+            expect,
+        }) => Request::ViewSave {
+            part: part.clone(),
+            view: view.clone(),
+            camera: camera_arg(eye, target, up, fov, ortho),
+            participant: of.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::View(ViewCmd::Delete { part, view, expect }) => Request::ViewDelete {
+            part: part.clone(),
+            view: view.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::View(ViewCmd::Rename {
+            part,
+            from,
+            to,
+            expect,
+        }) => Request::ViewRename {
+            part: part.clone(),
+            from: from.clone(),
+            to: to.clone(),
+            expected_revision: expect.revision.clone(),
+        },
         Command::Materials(MaterialsCmd::Set {
             name,
             density,
@@ -2077,6 +2183,8 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Camera {
             of,
             view,
+            normal_to,
+            part,
             fit,
             eye,
             target,
@@ -2084,15 +2192,19 @@ fn request(cmd: &Command) -> Option<Request> {
             fov,
             ortho,
         } => match camera_arg(eye, target, up, fov, ortho) {
-            _ if view.is_some() || !fit.is_empty() => Request::CameraSet {
+            _ if view.is_some() || normal_to.is_some() || !fit.is_empty() => Request::CameraSet {
                 camera: None,
                 view: view.clone(),
                 fit: fit.clone(),
+                normal_to: normal_to.clone(),
+                part: part.clone(),
             },
             Some(camera) => Request::CameraSet {
                 view: None,
                 fit: Vec::new(),
                 camera: Some(camera),
+                normal_to: None,
+                part: None,
             },
             None => Request::CameraGet {
                 participant: of.clone(),
@@ -2117,6 +2229,7 @@ fn request(cmd: &Command) -> Option<Request> {
             frame,
             compare,
             hidden,
+            origin,
         } => Request::Render {
             part: part.clone(),
             camera: camera_arg(eye, target, up, fov, ortho),
@@ -2132,6 +2245,7 @@ fn request(cmd: &Command) -> Option<Request> {
             frame: frame.clone(),
             compare: compare.clone(),
             hidden: (!hidden.is_empty()).then(|| hidden.clone()),
+            origin: *origin,
         },
         Command::Highlight {
             entities,

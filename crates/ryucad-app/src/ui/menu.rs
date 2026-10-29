@@ -44,15 +44,30 @@ fn item(ui: &egui::Ui, text: &str, shortcut: &KeyboardShortcut) -> egui::Button<
     egui::Button::new(text.to_owned()).shortcut_text(ui.ctx().format_shortcut(shortcut))
 }
 
-const VIEWS: [(&str, StandardView); 7] = [
-    ("Front", StandardView::Front),
-    ("Back", StandardView::Back),
-    ("Left", StandardView::Left),
-    ("Right", StandardView::Right),
-    ("Top", StandardView::Top),
-    ("Bottom", StandardView::Bottom),
-    ("Isometric", StandardView::Iso),
+const VIEWS: [StandardView; 9] = [
+    StandardView::Front,
+    StandardView::Back,
+    StandardView::Left,
+    StandardView::Right,
+    StandardView::Top,
+    StandardView::Bottom,
+    StandardView::Iso,
+    StandardView::Dimetric,
+    StandardView::Trimetric,
 ];
+
+/// A menu item for a preset's command, showing the key the navigation
+/// style's preset gives it.
+fn command(
+    ui: &egui::Ui,
+    style: crate::core::nav::Navigation,
+    c: crate::core::keymap::Command,
+) -> egui::Button<'static> {
+    match crate::core::keymap::shortcut(style, c) {
+        Some(s) => item(ui, &c.title(), &s),
+        None => egui::Button::new(c.title()),
+    }
+}
 
 pub fn bar(ui: &mut egui::Ui, o: &mut Opened, recent: &[PathBuf]) -> Option<Action> {
     let mut action = None;
@@ -143,13 +158,47 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened, recent: &[PathBuf]) -> Option<Acti
             }
         });
         ui.menu_button("View", |ui| {
-            for (name, v) in VIEWS {
-                if ui.button(name).clicked() {
+            use crate::core::keymap::Command;
+            let style = o.view.nav.style;
+            for v in VIEWS {
+                if ui.add(command(ui, style, Command::View(v))).clicked() {
                     o.view.standard(&mut o.ws, v);
                 }
             }
+            let face = o.view.selected_face(&o.ws).is_some();
+            if ui
+                .add_enabled(face, command(ui, style, Command::NormalTo))
+                .on_disabled_hover_text("Select a planar face first")
+                .clicked()
+            {
+                o.view.normal_to(&mut o.ws);
+            }
+            ui.menu_button("Named views", |ui| {
+                let views: Vec<(String, bool)> =
+                    o.ws.views
+                        .views
+                        .iter()
+                        .map(|v| (v.id.clone(), v.camera.is_ok()))
+                        .collect();
+                if views.is_empty() {
+                    ui.weak("No named views");
+                }
+                for (id, ok) in views {
+                    if ui.add_enabled(ok, egui::Button::new(&id)).clicked() {
+                        o.view.restore_view(&mut o.ws, &id);
+                    }
+                }
+            });
+            if ui
+                .add(command(ui, style, Command::Selector))
+                .on_hover_text("Over the viewport, the key opens it at the pointer")
+                .clicked()
+            {
+                let r = o.view.rect;
+                o.view.toggle_selector(r.center());
+            }
             ui.separator();
-            if ui.button("Zoom to fit").clicked() {
+            if ui.add(command(ui, style, Command::Fit)).clicked() {
                 o.view.fit(&mut o.ws, None);
             }
             let selection =
@@ -180,6 +229,15 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened, recent: &[PathBuf]) -> Option<Acti
             let sketches = o.view.sketches;
             if ui.selectable_label(sketches, "Sketches").clicked() {
                 o.ws.set_config("display.sketches", json!(!sketches));
+            }
+            for (on, key, label) in [
+                (o.view.cube, "display.nav_cube", "Navigation cube"),
+                (o.view.triad, "display.triad", "Axis triad"),
+                (o.view.origin, "display.origin", "Origin"),
+            ] {
+                if ui.selectable_label(on, label).clicked() {
+                    o.ws.set_config(key, json!(!on));
+                }
             }
             ui.menu_button("Show", |ui| {
                 let focus = o.ws.model.focus.clone();
@@ -232,7 +290,16 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened, recent: &[PathBuf]) -> Option<Acti
         });
         ui.menu_button("Tools", |ui| {
             let mut on = o.ws.measure.on;
-            if ui.checkbox(&mut on, "Measure").clicked() {
+            let measure = crate::core::keymap::shortcut(
+                o.view.nav.style,
+                crate::core::keymap::Command::Measure,
+            );
+            let r = ui.checkbox(&mut on, "Measure");
+            let r = match measure {
+                Some(s) => r.on_hover_text(ui.ctx().format_shortcut(&s)),
+                None => r,
+            };
+            if r.clicked() {
                 o.ws.measure.set(on);
             }
             let target = o.ws.mass_target();

@@ -125,6 +125,27 @@ const KEYS: &[Key] = &[
         about: "whether sketches are drawn",
     },
     Key {
+        name: "display.nav_cube",
+        scope: Scope::User,
+        rule: Rule::Bool,
+        default: || json!(true),
+        about: "whether the navigation cube is drawn in the viewport's corner",
+    },
+    Key {
+        name: "display.triad",
+        scope: Scope::User,
+        rule: Rule::Bool,
+        default: || json!(true),
+        about: "whether the axis triad is drawn in the viewport's corner",
+    },
+    Key {
+        name: "display.origin",
+        scope: Scope::User,
+        rule: Rule::Bool,
+        default: || json!(false),
+        about: "whether the shown model's origin axes and planes are drawn",
+    },
+    Key {
         name: "display.mesh_cache_mib",
         scope: Scope::User,
         rule: Rule::Int(16, 65536),
@@ -579,6 +600,20 @@ pub(crate) mod tests {
         std::fs::remove_file(root.join(MATERIALS)).unwrap();
         std::fs::write(root.join(PDM_CONFIG), "{}").unwrap();
         assert_ne!(project_revision(root).unwrap(), r1);
+    }
+
+    #[test]
+    fn the_viewports_overlays_are_preferences() {
+        for (key, default) in [
+            ("display.nav_cube", true),
+            ("display.triad", true),
+            ("display.origin", false),
+        ] {
+            assert_eq!(scope_of(key).unwrap(), Scope::User, "{key}");
+            assert_eq!(<Cad as Schema>::default_of(key), Some(json!(default)));
+            assert!(<Cad as Schema>::accepts(key, &json!(!default)));
+            assert!(!<Cad as Schema>::accepts(key, &json!("yes")));
+        }
     }
 
     #[test]

@@ -2611,3 +2611,204 @@ fn a_compare_marks_the_bom_tab() {
     assert_eq!(bom["tree"]["children"][2]["part"], "washer");
     assert_eq!(bom["tree"]["children"][2]["item"], 9);
 }
+
+/// Runs frames until no turn to a view is under way.
+fn turned(h: &mut Harness<'static, App>) {
+    frames(h, |a| a.opened().view.nav.turn.is_none());
+}
+
+/// The window camera's direction from the target towards the eye.
+fn back(app: &App) -> [f64; 3] {
+    let (_, _, f) = app.opened().view.nav.camera.basis();
+    f.map(|x| -x)
+}
+
+fn along(a: [f64; 3], b: [f64; 3]) -> bool {
+    let n = (b[0] * b[0] + b[1] * b[1] + b[2] * b[2]).sqrt();
+    (0..3).all(|k| (a[k] - b[k] / n).abs() < 1e-9)
+}
+
+/// The middle, on screen, of the cube's tile that gives the view `name`,
+/// as the window's camera turns the cube.
+fn tile(h: &Harness<'static, App>, name: &str) -> egui::Pos2 {
+    let o = h.state().opened();
+    let want = ryucad::view::StandardView::named(name).unwrap();
+    let (_, pts, _) = o
+        .view
+        .cube_widget()
+        .visible(&o.view.nav.camera)
+        .into_iter()
+        .find(|(t, ..)| ryucad::view::StandardView::cube(t.view) == Some(want))
+        .unwrap_or_else(|| panic!("{name}'s tile isn't seen"));
+    let n = pts.len() as f32;
+    egui::pos2(
+        pts.iter().map(|p| p[0]).sum::<f32>() / n,
+        pts.iter().map(|p| p[1]).sum::<f32>() / n,
+    )
+}
+
+#[test]
+fn the_cube_turns_the_view_and_never_picks() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    // The first view is iso: the cube shows its front, right and top.
+    let top = tile(&h, "top");
+    h.event(egui::Event::PointerMoved(top));
+    h.step();
+    click(&h, top);
+    h.step();
+    turned(&mut h);
+    assert!(
+        along(back(h.state()), [0.0, 0.0, 1.0]),
+        "{:?}",
+        back(h.state())
+    );
+    // The click turned the view; it picked nothing under the cube.
+    let me = h.state().opened().ws.myself().unwrap().selection.clone();
+    assert!(me.is_empty(), "{me:?}");
+    // From the top, the top face's corner tiles are the cube's corners.
+    let corner = tile(&h, "front_top_right");
+    click(&h, corner);
+    h.step();
+    turned(&mut h);
+    assert!(along(back(h.state()), [1.0, -1.0, 1.0]));
+    // An arrow rolls the view a quarter turn about the line of sight.
+    let (before_back, before_up) = (back(h.state()), h.state().opened().view.nav.camera.up);
+    let cube = h.state().opened().view.cube_widget();
+    let (_, tri) = cube
+        .arrows()
+        .into_iter()
+        .find(|(hit, _)| *hit == ryucad_app::core::cube::Hit::Roll(1))
+        .unwrap();
+    let mid = egui::pos2(
+        (tri[0][0] + tri[1][0] + tri[2][0]) / 3.0,
+        (tri[0][1] + tri[1][1] + tri[2][1]) / 3.0,
+    );
+    h.event(egui::Event::PointerMoved(mid));
+    h.step();
+    click(&h, mid);
+    h.step();
+    turned(&mut h);
+    let c = h.state().opened().view.nav.camera.clone();
+    assert!(along(back(h.state()), before_back));
+    let dot: f64 = (0..3).map(|k| c.up[k] * before_up[k]).sum();
+    assert!(dot.abs() < 1e-9, "{:?} against {before_up:?}", c.up);
+    // The camera the session holds is where the turn ended.
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.camera.as_ref() == Some(&c))
+    });
+}
+
+#[test]
+fn space_opens_the_view_selector_and_named_views_restore_and_save() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&[
+        "view",
+        "save",
+        "p",
+        "detail",
+        "--eye",
+        "60,-40,30",
+        "--target",
+        "10,5,2",
+        "--up",
+        "0,0,1",
+    ]);
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        loaded(a) && a.opened().ws.views.camera("detail").is_some()
+    });
+    let mid = h.state().opened().view.rect.center();
+    h.event(egui::Event::PointerMoved(mid));
+    h.step();
+    h.key_press(egui::Key::Space);
+    shown(&mut h, "View selector");
+    h.get_by_label("detail").click();
+    h.step();
+    turned(&mut h);
+    let c = h.state().opened().view.nav.camera.clone();
+    assert!(
+        (0..3).all(|k| (c.eye[k] - [0.06, -0.04, 0.03][k]).abs() < 1e-12),
+        "{:?}",
+        c.eye
+    );
+    h.run_steps(2);
+    assert!(h.query_by_label("View selector").is_none());
+    // Save view… keeps the window's camera under a name, in Git.
+    h.event(egui::Event::PointerMoved(mid));
+    h.key_press(egui::Key::Space);
+    shown(&mut h, "View selector");
+    h.get_by_label("Save view…").click();
+    h.run_steps(2);
+    h.event(egui::Event::Text("close".into()));
+    h.run_steps(2);
+    h.get_by_label("Save").click();
+    frames(&mut h, |a| a.opened().ws.views.camera("close").is_some());
+    assert!(p.root.join("parts/p/views/close.json").is_file());
+    let saved = p.ok(&["view", "list", "p"]);
+    let close = saved["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["view"] == "close")
+        .unwrap();
+    assert_eq!(close["camera"]["eye"], serde_json::json!(c.eye));
+    // Esc closes it.
+    h.event(egui::Event::PointerMoved(mid));
+    h.key_press(egui::Key::Space);
+    shown(&mut h, "View selector");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(h.query_by_label("View selector").is_none());
+}
+
+#[test]
+fn the_navigation_styles_preset_keys_turn_the_view() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    // ryucad's own: 1 is the front, as in FreeCAD.
+    h.key_press(egui::Key::Num1);
+    h.step();
+    turned(&mut h);
+    assert!(along(back(h.state()), [0.0, -1.0, 0.0]));
+    // SolidWorks': Ctrl+5 is the top; 1 alone no longer turns anything.
+    p.ok(&["config", "set", "ui.navigation", "solidworks"]);
+    frames(&mut h, |a| {
+        a.opened().view.nav.style == ryucad_app::core::nav::Navigation::Solidworks
+    });
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num5);
+    h.step();
+    turned(&mut h);
+    assert!(along(back(h.state()), [0.0, 0.0, 1.0]));
+    h.key_press(egui::Key::Num1);
+    h.step();
+    turned(&mut h);
+    assert!(along(back(h.state()), [0.0, 0.0, 1.0]));
+    // The View menu shows the preset's keys.
+    h.get_by_label("View").click();
+    h.run_steps(2);
+    let named = |n: &egui_kittest::kittest::AccessKitNode<'_>| {
+        n.label()
+            .is_some_and(|l| l.starts_with("Front ") && l.contains('1'))
+    };
+    assert!(h.query_by(named).is_some());
+    // Every window test shares the preferences.
+    p.ok(&["config", "set", "ui.navigation", "ryucad"]);
+}

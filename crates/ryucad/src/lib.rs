@@ -88,4 +88,5 @@ pub mod sketch_view;
 pub mod solid;
 pub mod validate;
 pub mod view;
+pub mod views;
 pub mod visibility;

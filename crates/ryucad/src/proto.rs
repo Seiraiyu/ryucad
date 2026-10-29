@@ -816,7 +816,10 @@ pub enum Request {
         participant: Option<String>,
     },
     /// Sets the caller's own camera: explicitly, or from a standard `view`
-    /// and/or framing the entities in `fit` (the whole model when empty).
+    /// or one normal to the face `normal_to`, and/or framing the entities
+    /// in `fit` (the whole model when empty). A `view` that names no
+    /// standard view is a named view of `part` (else the caller's focus,
+    /// else the project's model when it is one part), restored as saved.
     #[serde(rename = "camera.set")]
     CameraSet {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -825,6 +828,48 @@ pub enum Request {
         view: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         fit: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        normal_to: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+    },
+    /// The named views of `part`, or of every part, with each listed
+    /// part's revision.
+    #[serde(rename = "view.list")]
+    ViewList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+    },
+    /// Saves a named view of `part`: `camera`, else `participant`'s
+    /// camera, else the one human's, else the caller's. An existing view
+    /// of that ID is replaced.
+    #[serde(rename = "view.save")]
+    ViewSave {
+        part: String,
+        view: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        camera: Option<CameraArg>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Deletes a named view of `part`.
+    #[serde(rename = "view.delete")]
+    ViewDelete {
+        part: String,
+        view: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Renames a named view of `part`.
+    #[serde(rename = "view.rename")]
+    ViewRename {
+        part: String,
+        from: String,
+        to: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
     },
     /// What a participant (`participant`, or the one human) compares the
     /// working files against, with the commit that revision names now.
@@ -962,7 +1007,8 @@ pub enum Request {
     },
     /// Draws a part (or the whole project) to a PNG, sent as bytes after
     /// the answer. The view is `camera`, a participant's camera, a standard
-    /// `view`, or iso framing the model. `rev` renders a Git revision;
+    /// `view` or a named view of the rendered part, or iso framing the
+    /// model. `origin` draws the origin's axes and planes. `rev` renders a Git revision;
     /// `compare` paints what changed since a revision and ghosts it;
     /// `frame` widens the framing to other revisions.
     #[serde(rename = "render")]
@@ -1008,6 +1054,9 @@ pub enum Request {
         /// hidden set by default, else the caller's.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hidden: Option<Vec<String>>,
+        /// Draw the origin's axes and planes (default false).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        origin: bool,
     },
     /// Diagnoses the project folder: every problem, with a stable code.
     #[serde(rename = "doctor")]
@@ -1086,6 +1135,9 @@ impl Request {
                 | Request::BomRenumber { .. }
                 | Request::MaterialsSet { .. }
                 | Request::MaterialsDelete { .. }
+                | Request::ViewSave { .. }
+                | Request::ViewDelete { .. }
+                | Request::ViewRename { .. }
                 | Request::ReleasePropose { dry_run: false, .. }
                 | Request::Import { dry_run: false, .. }
                 | Request::ReleaseObsolete { .. }

@@ -6,7 +6,8 @@
 //! join, cut and intersect, holes and patterns, how sketches are drawn,
 //! what diffs say, what merges make, the content hashes release records
 //! name, where assemblies place their parts, the bodies and names of
-//! imported STEP files, and the bytes of exported STEP files. After
+//! imported STEP files, the bytes of exported STEP files, and cameras:
+//! the cube's views, named views and views normal to faces. After
 //! a deliberate change, regenerate with
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
@@ -159,6 +160,7 @@ fn rebuild_section(golden: &mut Golden) {
         uses: Default::default(),
         acts: Default::default(),
         imports: Default::default(),
+        views: Default::default(),
         features,
         revision: String::new(),
     };
@@ -270,6 +272,101 @@ fn render_section(golden: &mut Golden) {
         let params = serde_json::json!({"view": view, "width": 320, "height": 240,
                                         "highlight": if i == 0 { vec![face.clone()] } else { vec![] },
                                         "labels": i == 0, "edges": i != 3});
+        let req = ryucad::proto::Request::from_rpc("render", Some(params)).unwrap();
+        let a =
+            ryucad::server::handle_safely(&mut Some(session), None, None, dir.path(), req).unwrap();
+        session = ryucad::session::Session::open(dir.path()).unwrap();
+        let png = a.binary.unwrap();
+        let mut r = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .unwrap();
+        let mut buf = vec![0; r.output_buffer_size().unwrap()];
+        let info = r.next_frame(&mut buf).unwrap();
+        s.str(&format!("{:x}", md(&buf[..info.buffer_size()])));
+    }
+}
+
+/// The showcase from the cube's edges and corners, dimetric and
+/// trimetric, a named view with the origin drawn, and cameras normal to
+/// a tilted face and to a cone's axis.
+fn views_section(golden: &mut Golden) {
+    let mut s = golden.section("views");
+    let (dir, mut session) = showcase();
+    let call = |session: &mut ryucad::session::Session,
+                live: &mut ryucad::live::Live,
+                m: &str,
+                p: serde_json::Value| {
+        ryucad::server::handle_live(
+            session,
+            Some(live),
+            None,
+            ryucad::proto::Request::from_rpc(m, Some(p)).unwrap(),
+        )
+        .unwrap()
+    };
+    let mut live = ryucad::live::Live::new();
+    // The cylinder's flat ends lean with its axis; the cone is revolved.
+    let faces = |session: &mut ryucad::session::Session, live: &mut ryucad::live::Live, f: &str| {
+        let v = call(
+            session,
+            live,
+            "inspect",
+            serde_json::json!({"part": "show", "feature": f}),
+        );
+        v["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| {
+                (
+                    x["surface"]["type"].as_str().unwrap().to_owned(),
+                    format!("show/{f}/{}", x["name"].as_str().unwrap()),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let end = faces(&mut session, &mut live, "cylinder")
+        .into_iter()
+        .find(|(t, _)| t == "plane")
+        .unwrap()
+        .1;
+    let side = faces(&mut session, &mut live, "cone")
+        .into_iter()
+        .find(|(t, _)| t == "cone")
+        .unwrap()
+        .1;
+    for face in [end, side] {
+        let c = call(
+            &mut session,
+            &mut live,
+            "camera.set",
+            serde_json::json!({"normal_to": face}),
+        );
+        for k in ["eye", "target", "up"] {
+            for x in c["camera"][k].as_array().unwrap() {
+                s.f64(x.as_f64().unwrap());
+            }
+        }
+    }
+    call(
+        &mut session,
+        &mut live,
+        "view.save",
+        serde_json::json!({"part": "show", "view": "detail",
+                           "camera": {"eye": ["90 mm", "-60 mm", "70 mm"], "target": ["30 mm", "20 mm", "10 mm"],
+                                      "up": [0, 0, 1], "projection": {"orthographic": {"height": "110 mm"}}}}),
+    );
+    let renders = [
+        serde_json::json!({"view": "front_top_left"}),
+        serde_json::json!({"view": "back_bottom_right"}),
+        serde_json::json!({"view": "top_right"}),
+        serde_json::json!({"view": "dimetric"}),
+        serde_json::json!({"view": "trimetric"}),
+        serde_json::json!({"view": "detail", "origin": true}),
+    ];
+    for mut params in renders {
+        params["width"] = serde_json::json!(320);
+        params["height"] = serde_json::json!(240);
         let req = ryucad::proto::Request::from_rpc("render", Some(params)).unwrap();
         let a =
             ryucad::server::handle_safely(&mut Some(session), None, None, dir.path(), req).unwrap();
@@ -2030,5 +2127,6 @@ fn determinism() {
     measure_section(&mut golden);
     imports_section(&mut golden);
     exports_section(&mut golden);
+    views_section(&mut golden);
     golden.finish();
 }
