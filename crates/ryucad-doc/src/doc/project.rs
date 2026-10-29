@@ -69,11 +69,12 @@ impl ImportFile {
 }
 
 /// The files at the project's root that a session tracks.
-pub const ROOT_FILES: [&str; 4] = [
+pub const ROOT_FILES: [&str; 5] = [
     MANIFEST,
     ATTRIBUTES,
     PDM_CONFIG,
     super::materials::MATERIALS,
+    super::lock::LOCK,
 ];
 
 /// The key under which a file a merge couldn't settle lists its conflicts,
@@ -93,8 +94,13 @@ pub struct Project {
     /// Why every part fails when the manifest holds merge conflicts: the
     /// manifest's other values are ours' as the merge left them.
     pub manifest_fault: Option<Error>,
+    /// `ryucad.lock`, if the project has one, or why it can't be used.
+    pub lock: Option<Result<super::lock::Lock>>,
     /// `ryucad.json` as read: every part's revision hashes it.
     manifest_bytes: Vec<u8>,
+    /// `ryucad.lock` as read: the revision of every part placing another
+    /// project's part hashes it.
+    lock_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
@@ -322,6 +328,7 @@ impl Project {
         })?;
         let mut unknown = Vec::new();
         let imports = load_imports(src, &mut unknown)?;
+        let (lock, lock_bytes) = load_lock(src)?;
         let mut parts = BTreeMap::new();
         for (name, kind) in src.list("parts")? {
             match Id::parse(&name, "part") {
@@ -331,6 +338,7 @@ impl Project {
                         &manifest,
                         manifest_fault.as_ref(),
                         &manifest_bytes,
+                        lock_bytes.as_deref(),
                         &imports,
                         id.clone(),
                         &mut unknown,
@@ -347,7 +355,9 @@ impl Project {
             imports,
             unknown,
             manifest_fault,
+            lock,
             manifest_bytes,
+            lock_bytes,
         })
     }
 
@@ -432,6 +442,7 @@ impl Project {
                     &self.manifest,
                     self.manifest_fault.as_ref(),
                     &self.manifest_bytes,
+                    self.lock_bytes.as_deref(),
                     &self.imports,
                     id.clone(),
                     &mut unknown,
@@ -452,6 +463,33 @@ impl Project {
     }
 }
 
+/// `ryucad.lock` and its bytes, if the project has one: a lock that can't
+/// be read is `lock_invalid`, naming why.
+#[allow(clippy::type_complexity)]
+fn load_lock(src: &dyn Source) -> Result<(Option<Result<super::lock::Lock>>, Option<Vec<u8>>)> {
+    use super::lock::{LOCK, Lock};
+    let Some(bytes) = src.read(LOCK).map_err(|e| e.with("path", LOCK))? else {
+        return Ok((None, None));
+    };
+    let lock = std::str::from_utf8(&bytes)
+        .map_err(|_| Error::new(Code::InvalidJson, format!("{LOCK} is not UTF-8")))
+        .and_then(canonical::parse)
+        .and_then(|v| match conflicted(&v, LOCK) {
+            Some(e) => Err(e),
+            None => Lock::from_json(&v),
+        })
+        .map_err(|e| {
+            let code = match e.code {
+                Code::MergeConflict | Code::FormatTooNew => e.code,
+                _ => Code::LockInvalid,
+            };
+            Error::new(code, format!("{LOCK} can't be read: {}", e.message))
+                .with("path", LOCK)
+                .with("reason", e.details)
+        });
+    Ok((Some(lock), Some(bytes)))
+}
+
 /// The files under `imports/`, by path; anything else there is unknown.
 fn load_imports(
     src: &dyn Source,
@@ -470,11 +508,13 @@ fn load_imports(
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn load_part(
     src: &dyn Source,
     manifest: &Manifest,
     manifest_fault: Option<&Error>,
     manifest_bytes: &[u8],
+    lock_bytes: Option<&[u8]>,
     imports: &BTreeMap<String, ImportFile>,
     id: Id,
     unknown: &mut Vec<String>,
@@ -579,6 +619,18 @@ fn load_part(
                 piece(&mut hasher, i.file.path.as_bytes());
                 piece(&mut hasher, now.as_bytes());
             }
+        }
+    }
+    // The lock says which commit another project's labels read, so it
+    // defines a part placing one: tagged, so a part placing none hashes as
+    // before.
+    if let Ok(f) = &file {
+        let foreign = f.features.iter().any(|fid| {
+            matches!(features.get(fid), Some(Ok(Feature::Instance(i))) if i.rev.project().is_some())
+        });
+        if foreign {
+            piece(&mut hasher, super::lock::LOCK.as_bytes());
+            piece(&mut hasher, lock_bytes.unwrap_or_default());
         }
     }
     // ryupdm's properties: their bytes as they are, tagged like the
@@ -1143,6 +1195,64 @@ mod tests {
         assert_ne!(part.revision, with_one);
         // Nothing else of the part changes.
         assert_eq!(part.order(), before.parts[&p].order());
+    }
+
+    #[test]
+    fn the_lock_defines_the_assemblies_placing_other_projects_parts() {
+        use crate::doc::lock::{LOCK, Lock};
+        let dir = sample();
+        let root = dir.path();
+        let lib = crate::doc::id::ProjectId::from_bytes([7; 16]);
+        let asm = |name: &str, project: Option<&str>| {
+            let mut list = PartFile::new(vec![id("i")]);
+            list.kind = crate::doc::files::PartKind::Assembly;
+            write_json(&part_path(root, &id(name)), &list.to_json()).unwrap();
+            let mut v = serde_json::json!({"format": 4, "kind": "ryucad.feature",
+                "type": "instance", "part": "p", "rev": {"label": "A"},
+                "pose": {"origin_m": [0, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}});
+            if let Some(p) = project {
+                v["project"] = serde_json::json!(p);
+                v["format"] = serde_json::json!(6);
+            }
+            write_json(&feature_path(root, &id(name), &id("i")), &v).unwrap();
+        };
+        asm("mine", None);
+        asm("theirs", Some(lib.as_str()));
+        let before = Project::load(root).unwrap();
+        assert!(before.lock.is_none());
+        // Every part but the one placing another project's part hashes as
+        // before the lock existed.
+        fs::write(
+            root.join(LOCK),
+            canonical::to_string(&Lock::default().to_json()),
+        )
+        .unwrap();
+        let after = Project::load(root).unwrap();
+        assert_eq!(after.lock, Some(Ok(Lock::default())));
+        for (p, moved) in [("p", false), ("mine", false), ("theirs", true)] {
+            let (a, b) = (
+                &before.parts[&id(p)].revision,
+                &after.parts[&id(p)].revision,
+            );
+            assert_eq!(a != b, moved, "{p}");
+        }
+        // A lock that doesn't read fails as itself, and every part still
+        // loads.
+        fs::write(root.join(LOCK), "{}").unwrap();
+        let broken = Project::load(root).unwrap();
+        let e = broken.lock.as_ref().unwrap().as_ref().unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["path"]),
+            (Code::LockInvalid, &serde_json::json!(LOCK))
+        );
+        assert!(broken.parts[&id("theirs")].file.is_ok());
+        // Reloading after the lock changes is a fresh load.
+        let mut project = after.clone();
+        project.reload(&[LOCK.to_owned()]).unwrap();
+        assert_eq!(
+            project.parts[&id("theirs")].revision,
+            broken.parts[&id("theirs")].revision
+        );
     }
 
     #[test]

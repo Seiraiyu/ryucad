@@ -242,7 +242,9 @@ pub struct Flat {
 pub fn rev_order(scheme: Scheme, rev: &Rev) -> (u8, u64, String) {
     match rev {
         Rev::Working => (0, 0, String::new()),
-        Rev::Label(l) => (1, label::index(scheme, l).unwrap_or(u64::MAX), l.clone()),
+        Rev::Label(l) | Rev::Foreign { label: l, .. } => {
+            (1, label::index(scheme, l).unwrap_or(u64::MAX), l.clone())
+        }
     }
 }
 
@@ -538,7 +540,7 @@ fn csv_line(level: &str, item: &str, row: &Row, count: u64, custom: &[String]) -
     };
     let rev = match &row.rev {
         Rev::Working => "working".to_owned(),
-        Rev::Label(l) => l.clone(),
+        Rev::Label(l) | Rev::Foreign { label: l, .. } => l.clone(),
     };
     let make_buy = match text("make_buy") {
         s if s.is_empty() && row.node.is_ok() => "make".to_owned(),

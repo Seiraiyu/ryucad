@@ -590,7 +590,7 @@ impl Session {
         self.store.budget.pin(part);
         let extra = match rev {
             Rev::Working => Vec::new(),
-            Rev::Label(l) => vec![(part.clone(), l.clone())],
+            rev => vec![(part.clone(), rev.clone())],
         };
         let mut out = None;
         self.rebuild_with(extra, |r| {
@@ -611,7 +611,7 @@ impl Session {
     ) -> Result<BTreeMap<(Id, Rev), (Part, PartResult, Option<crate::assembly::Pin>)>> {
         let extra = match rev {
             Rev::Working => Vec::new(),
-            Rev::Label(l) => vec![(part.clone(), l.clone())],
+            rev => vec![(part.clone(), rev.clone())],
         };
         let mut out = BTreeMap::new();
         self.rebuild_with(extra, |r| {
@@ -653,23 +653,23 @@ impl Session {
     /// beside those the project's instances reach.
     fn rebuild_with(
         &mut self,
-        extra: Vec<(Id, String)>,
+        extra: Vec<crate::assembly::Node>,
         f: impl FnOnce(&mut Rebuild) -> Result<()>,
     ) -> Result<()> {
         let pins = if extra.is_empty() {
             self.pins()?
         } else {
             let project = self.project.clone();
-            crate::assembly::pins_from(&project, extra, |part, label| {
-                crate::release::pinned(self, part, label)
+            crate::assembly::pins_from(&project, extra, |part, rev| {
+                crate::release::pinned_rev(self, part, rev)
             })
         };
         // Found again only when the files or the labels' pins move.
         let key: String = pins
             .iter()
-            .map(|((part, label), p)| match p {
-                Ok(p) => format!("{part}@{label}:{:?};", p.pin.commit),
-                Err(e) => format!("{part}@{label}:{:?};", e.code),
+            .map(|((part, rev), p)| match p {
+                Ok(p) => format!("{part}@{}:{:?};", rev.text(), p.pin.commit),
+                Err(e) => format!("{part}@{}:{:?};", rev.text(), e.code),
             })
             .collect();
         let cycles = match &self.cycles {
@@ -727,8 +727,8 @@ impl Session {
             return Ok(Pins::new());
         }
         let project = self.project.clone();
-        Ok(crate::assembly::pins(&project, |part, label| {
-            crate::release::pinned(self, part, label)
+        Ok(crate::assembly::pins(&project, |part, rev| {
+            crate::release::pinned_rev(self, part, rev)
         }))
     }
 

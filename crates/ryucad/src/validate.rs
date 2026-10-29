@@ -527,6 +527,13 @@ fn touched(
                     out.push(path);
                 }
             }
+            // Another project's release is what the lock says it is.
+            crate::doc::assembly::Rev::Foreign { .. } => {
+                let path = crate::doc::lock::LOCK.to_owned();
+                if differs(&path) && !out.contains(&path) {
+                    out.push(path);
+                }
+            }
         }
     }
     for f in reads {

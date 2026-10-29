@@ -2426,6 +2426,10 @@ fn check_instance(
     f: &Feature,
 ) -> Result<()> {
     let i = f.instance().expect("an instance");
+    if let Rev::Foreign { .. } = &i.rev {
+        crate::release::pinned_rev(session, &i.part, &i.rev).map_err(|e| e.with("feature", id))?;
+        return Ok(());
+    }
     if !session.project().parts.contains_key(&i.part) {
         return Err(
             Error::new(Code::NotFound, format!("no part {} to place", i.part))
@@ -2447,6 +2451,7 @@ fn check_instance(
         Rev::Label(l) => {
             crate::release::pinned(session, &i.part, l).map_err(|e| e.with("feature", id))?;
         }
+        Rev::Foreign { .. } => unreachable!("judged above"),
     }
     Ok(())
 }

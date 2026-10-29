@@ -203,6 +203,13 @@ impl<'a> Reader<'a> {
                     _ => self.here(part, pin.obsolete),
                 }
             }
+            Rev::Foreign { project, label } => Err(Error::new(
+                Code::DependencyNotFetched,
+                format!("{part} at label {label} of {project} isn't read across projects"),
+            )
+            .with("project", project)
+            .with("part", part)
+            .with("label", label)),
         }
     }
 

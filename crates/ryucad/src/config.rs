@@ -457,8 +457,8 @@ pub fn check_project_revision(root: &Path, expected: Option<&str>) -> Result<Str
 }
 
 /// A project revision: a hash of the files that hold the project's own
-/// settings, the manifest, ryupdm's settings and the material library if
-/// there are any. Each piece is length-prefixed, and the optional ones
+/// settings, the manifest, ryupdm's settings, the material library and
+/// the lock if there are any. Each piece is length-prefixed, and the optional ones
 /// are tagged.
 pub fn project_revision(root: &Path) -> Result<String> {
     use crate::doc::materials::MATERIALS;
@@ -484,6 +484,10 @@ pub fn project_revision(root: &Path) -> Result<String> {
     if let Some(m) = read(MATERIALS)? {
         piece(MATERIALS.as_bytes());
         piece(&m);
+    }
+    if let Some(l) = read(crate::doc::lock::LOCK)? {
+        piece(crate::doc::lock::LOCK.as_bytes());
+        piece(&l);
     }
     Ok(h.finalize().to_hex()[..32].to_owned())
 }
