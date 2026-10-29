@@ -4,6 +4,9 @@
 //! `ryu_board`'s model, with faults and warnings for what it couldn't
 //! read. The project, the CLI and the daemon come with plan 0.C.
 
+pub use ryu_doc::{canonical, error, id, source, units};
+
+pub mod codes;
 pub mod odb;
 #[cfg(feature = "testing")]
 pub mod testing;

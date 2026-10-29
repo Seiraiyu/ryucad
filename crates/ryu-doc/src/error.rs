@@ -382,6 +382,65 @@ pub enum Code {
     /// Import: a KiCad file in a format newer than KiCad 9's, read as far
     /// as ryueda knows it (a warning).
     ImportVersionNewer,
+    /// ryudfm: not an ODB++ job: no `matrix/matrix` at the root or under
+    /// one top folder, or not a folder, tar, gzipped tar or zip.
+    NotABoard,
+    /// ryudfm: the job's matrix, `misc/info` or board step couldn't be
+    /// read (the file inside the job, line and column in the details).
+    OdbUnreadable,
+    /// ryudfm: `misc/info` names an ODB++ version other than 7.0, 8.0 or
+    /// 8.1.
+    OdbVersionUnsupported,
+    /// ryudfm: more than one step, or none, could be the board: name one
+    /// with `--step` (the candidates in `steps`).
+    OdbStepAmbiguous,
+    /// ryudfm: the step asked for isn't in the job (its steps in
+    /// `steps`).
+    OdbStepNotFound,
+    /// ryudfm: an archive entry with an absolute path, `..`, a link or a
+    /// device, or an archive past a million entries or 8 GiB unpacked.
+    ArchiveUnsafe,
+    /// ryudfm: a board whose input isn't in the project.
+    BoardInputMissing,
+    /// ryudfm: a board whose input's BLAKE3 isn't the one `board.json`
+    /// names (`expected` and `found`).
+    BoardInputChanged,
+    /// ryudfm fault: a layer's features file that doesn't parse; the layer
+    /// is read with no features.
+    OdbLayerUnreadable,
+    /// ryudfm fault: a symbol name neither standard nor a user symbol;
+    /// the features using it have no shape.
+    OdbSymbolUnknown,
+    /// ryudfm fault: user symbols that use themselves.
+    OdbSymbolCycle,
+    /// ryudfm fault: a components file, or a component in it, that
+    /// doesn't read.
+    OdbComponentInvalid,
+    /// ryudfm fault: an `eda/data` file, or a record in it, that doesn't
+    /// read.
+    OdbEdaInvalid,
+    /// ryudfm fault: any other file of a job that doesn't read (a step
+    /// header, profile, attribute list, tools file, netlist, font, stackup
+    /// or user symbol).
+    OdbFileInvalid,
+    /// ryudfm: a record kind, file or attribute the reader doesn't take,
+    /// left out (a warning).
+    OdbIgnored,
+    /// ryudfm: numbers finer than a nanometre, rounded half to even (a
+    /// warning with the count and the largest change).
+    OdbRounded,
+    /// ryudfm: an arc whose written end is more than 1 µm off its circle
+    /// (a warning).
+    OdbArcInconsistent,
+    /// ryudfm: characters a text's font lacks, left as gaps (a warning).
+    OdbFontMissingChar,
+    /// ryudfm: dynamic text (`$$DATE`), kept as written (a warning).
+    OdbTextDynamic,
+    /// ryudfm: barcodes, kept and left out of shapes (a warning).
+    OdbBarcodeSkipped,
+    /// ryudfm: no `misc/info`, or one lacking fields: read as ODB++ 7.0 (a
+    /// warning).
+    OdbInfoMissing,
 }
 
 impl Code {
@@ -489,6 +548,16 @@ mod tests {
         assert_eq!(Code::PinConflict.exit_code(), 1);
         assert_eq!(Code::LibraryNested.exit_code(), 1);
         assert_eq!(Code::PinWithoutPad.exit_code(), 1);
+        assert_eq!(json!(Code::NotABoard), json!("not_a_board"));
+        assert_eq!(json!(Code::OdbUnreadable), json!("odb_unreadable"));
+        assert_eq!(json!(Code::BoardInputChanged), json!("board_input_changed"));
+        assert_eq!(
+            json!(Code::OdbFontMissingChar),
+            json!("odb_font_missing_char")
+        );
+        assert_eq!(json!(Code::OdbInfoMissing), json!("odb_info_missing"));
+        assert_eq!(Code::ArchiveUnsafe.exit_code(), 1);
+        assert_eq!(Code::BoardInputMissing.exit_code(), 1);
     }
 
     #[test]

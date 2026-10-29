@@ -7,6 +7,8 @@ repository.workspace = true
 
 [dependencies]
 ryu-board = { path = "../ryu-board" }
+ryu-doc = { path = "../ryu-doc" }
+serde_json = { version = "1", features = ["float_roundtrip"] }
 # Jobs are read and parsed per file in parallel.
 rayon = "1"
 # Archives and singly compressed files, all pure Rust: flate2's default
