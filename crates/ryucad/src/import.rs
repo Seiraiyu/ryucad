@@ -735,6 +735,97 @@ pub fn update_in_place(root: &std::path::Path, path: &str) -> Result<Option<Writ
     Ok(Some(plan::writes(&project, &u.planned)?))
 }
 
+/// A fixed instance an import made that isn't where the bytes now in its
+/// file place its usage: what `import --update` with those bytes would
+/// move (`import_misplaced`). A merge leaves one when it takes the file's
+/// bytes from one side and the instance's pose, solver state, from the
+/// other.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Misplaced {
+    /// The imported file, under `imports/`.
+    pub file: String,
+    pub assembly: Id,
+    pub instance: Id,
+    /// The instance as it is, with the pose its file gives it.
+    pub placed: crate::doc::assembly::Instance,
+}
+
+/// Every fixed instance of `project` an import made whose pose isn't the
+/// one the bytes in its file give its usage, planned as an update with
+/// those bytes in place plans it (doctor's `import_update`), by assembly
+/// and instance. Files are opened ([`opened`]: parsed and decoded, never
+/// healed, kept by BLAKE3), and only those a fixed imported instance
+/// names. A file whose import features name other bytes is
+/// `import_file_changed`'s, and one this build can't read or plan is left
+/// out.
+pub fn misplaced(project: &crate::doc::project::Project) -> Vec<Misplaced> {
+    use crate::doc::files::Feature;
+    use crate::doc::import::FileRef;
+    let features = || project.parts.values().flat_map(|p| p.features.values());
+    let files: std::collections::BTreeSet<&str> = features()
+        .filter_map(|f| match f {
+            Ok(Feature::Instance(i)) if i.fixed => i.import.as_ref().map(|u| u.file.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut out = Vec::new();
+    for path in files {
+        let Some(file) = project.imports.get(path) else {
+            continue;
+        };
+        let other_bytes = features().any(|f| {
+            matches!(f, Ok(Feature::Import(i)) if i.file.path == path && i.file.blake3 != file.blake3)
+        });
+        if other_bytes {
+            continue;
+        }
+        let Ok(opened) = opened(file) else {
+            continue;
+        };
+        let file_ref = FileRef {
+            path: path.to_owned(),
+            blake3: file.blake3.clone(),
+        };
+        let taken = |s: &str| Id::parse(s, "part").is_ok_and(|id| project.parts.contains_key(&id));
+        let fresh = plan::Fresh {
+            opened: &opened,
+            file: &file_ref,
+            stem: "",
+            part: None,
+            taken: &taken,
+            pdm: false,
+        };
+        let Ok(u) = update::plan(project, &opened, &file_ref, &fresh) else {
+            continue;
+        };
+        for pl in u.planned.iter().filter(|pl| !pl.new) {
+            let Ok(part) = project.part(&pl.part) else {
+                continue;
+            };
+            for (fid, f) in &pl.features {
+                let (Feature::Instance(new), Some(Ok(Feature::Instance(old)))) =
+                    (f, part.features.get(fid))
+                else {
+                    continue;
+                };
+                if old.fixed && old.pose != new.pose {
+                    out.push(Misplaced {
+                        file: path.to_owned(),
+                        assembly: pl.part.clone(),
+                        instance: fid.clone(),
+                        placed: crate::doc::assembly::Instance {
+                            pose: new.pose,
+                            ..old.clone()
+                        },
+                    });
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| (&a.assembly, &a.instance).cmp(&(&b.assembly, &b.instance)));
+    out
+}
+
 /// Every feature of every part that fails in `s`, with its error, by part
 /// and feature.
 fn failing(s: &mut crate::session::Session) -> Result<BTreeMap<(Id, Id), Value>> {
