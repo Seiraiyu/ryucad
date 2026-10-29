@@ -69,6 +69,10 @@ pub enum Direction {
 pub struct Port {
     pub name: String,
     pub direction: Direction,
+    /// What the block expects on it (`"3.3 V"`): ERC's `intent_conflict`
+    /// compares it with the net or rail its instance connects it to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voltage: Option<String>,
 }
 
 /// Nets the grammar draws as one: membership only.
@@ -425,6 +429,15 @@ impl Block {
         }
         for (id, p) in &self.ports {
             out.extend(name_fault(&p.name, &format!("/ports/{id}/name")));
+            if let Some(v) = &p.voltage
+                && let Err(e) = Quantity::electrical(v, Dim::VOLTAGE)
+            {
+                out.push(bad(
+                    Code::InvalidQuantity,
+                    format!("/ports/{id}/voltage"),
+                    e.message,
+                ));
+            }
         }
         for (id, b) in &self.buses {
             out.extend(name_fault(&b.name, &format!("/buses/{id}/name")));

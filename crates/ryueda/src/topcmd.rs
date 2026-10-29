@@ -376,14 +376,19 @@ pub enum PortOp {
         name: String,
         direction: Direction,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        voltage: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
     },
+    /// An empty voltage clears it.
     Set {
         port: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         direction: Option<Direction>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        voltage: Option<String>,
     },
     Remove {
         port: String,
@@ -544,6 +549,7 @@ pub fn block_edit(
             PortOp::Add {
                 name,
                 direction,
+                voltage,
                 id,
             } => {
                 let id = new_id(id.as_deref(), "port", |s| {
@@ -555,6 +561,7 @@ pub fn block_edit(
                     Port {
                         name: name.clone(),
                         direction: *direction,
+                        voltage: voltage.clone().filter(|v| !v.is_empty()),
                     },
                 );
             }
@@ -562,6 +569,7 @@ pub fn block_edit(
                 port,
                 name,
                 direction,
+                voltage,
             } => {
                 let id = port_of(&b, &bid, port).map_err(at)?;
                 let x = b.ports.get_mut(&id).expect("found");
@@ -571,6 +579,7 @@ pub fn block_edit(
                 if let Some(d) = direction {
                     x.direction = *d;
                 }
+                set_opt(&mut x.voltage, voltage);
             }
             PortOp::Remove { port } => {
                 let id = port_of(&b, &bid, port).map_err(at)?;

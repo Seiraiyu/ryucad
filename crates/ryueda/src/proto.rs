@@ -401,6 +401,13 @@ pub enum Request {
     },
     #[serde(rename = "instance.show")]
     InstanceShow { instance: String },
+    /// A design's flattened netlist: the project's one design when none
+    /// is named.
+    #[serde(rename = "netlist")]
+    Netlist {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+    },
     #[serde(rename = "activity.log")]
     ActivityLog {
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -460,6 +460,9 @@ fn dispatch(
             expected_revision,
         } => partcmd::instance_delete(session, &instance, expected_revision.as_deref()),
         Request::InstanceShow { instance } => partcmd::instance_show(session.project(), &instance),
+        Request::Netlist { design } => {
+            crate::netlist::netlist(session.project(), design.as_deref())
+        }
         Request::ActivityLog { limit, before } => {
             let entries = live.map_or_else(Vec::new, |l| l.log.page(limit.unwrap_or(50), before));
             Ok(json!({ "entries": entries }))

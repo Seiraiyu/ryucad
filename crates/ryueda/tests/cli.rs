@@ -428,6 +428,7 @@ fn every_protocol_method_has_a_command() {
         ("instance.edit", &["instance", "edit"]),
         ("instance.delete", &["instance", "delete"]),
         ("instance.show", &["instance", "show"]),
+        ("netlist", &["netlist"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),
@@ -1292,4 +1293,69 @@ fn library_objects_a_design_places_stay() {
     p.ok(&["component", "delete", "top/r1"]);
     p.ok(&["libcomp", "delete", "r_100k"]);
     p.ok(&["symbol", "delete", "r"]);
+}
+
+#[test]
+fn netlists_from_the_cli() {
+    let p = Pair::with_resistor();
+    p.fails(&["netlist"], "not_found", 1);
+    p.ok(&["rail", "add", "GND", "--id", "gnd"]);
+    p.ok(&["block", "create", "Top", "--id", "top"]);
+    p.ok(&["block", "create", "Pull-up", "--id", "pu"]);
+    p.ok(&["block", "edit", "pu", "--add-port", "IO:bidirectional"]);
+    let port = p.ok(&["block", "show", "pu"])["block"]["ports"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    p.ok(&[
+        "component",
+        "add",
+        "pu",
+        "--of",
+        "r_100k",
+        "--id",
+        "r",
+        "--refdes",
+        "R1",
+    ]);
+    p.ok(&["connect", "pu/r/1", "port:IO"]);
+    p.ok(&["connect", "pu/r/2", "rail:GND"]);
+    p.ok(&["net", "add", "top", "SDA", "--id", "sda"]);
+    p.ok(&[
+        "instance", "add", "top", "--of", "pu", "--id", "a", "--port", "IO=SDA", "--suffix", "_A",
+    ]);
+    p.ok(&[
+        "instance", "add", "top", "--of", "pu", "--id", "b", "--port", "IO=SDA", "--suffix", "_B",
+    ]);
+    p.ok(&[
+        "design", "create", "Board", "--root", "top", "--id", "board",
+    ]);
+    let n = p.ok(&["netlist"]);
+    assert_eq!(n["design"], "board");
+    let refdes: Vec<&Value> = n["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| &o["refdes"])
+        .collect();
+    assert_eq!(refdes, [&json!("R1_A"), &json!("R1_B")]);
+    let sda = n["nets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["name"] == "SDA")
+        .unwrap();
+    assert_eq!(sda["members"].as_array().unwrap().len(), 2);
+    assert_eq!(sda["ports"][0]["port"], format!("board:a/port:{port}"));
+    assert_eq!(p.ok(&["netlist", "Board"]), n);
+    // A broken file refuses the design, naming it.
+    p.write("board/blocks/pu/components/r.json", "{");
+    let e = p.fails(&["netlist"], "invalid_json", 1);
+    assert_eq!(
+        e["details"]["faults"][0]["details"]["path"],
+        "blocks/pu/components/r.json"
+    );
 }
