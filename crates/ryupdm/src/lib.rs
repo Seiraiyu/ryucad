@@ -31,6 +31,7 @@ pub mod bom;
 pub mod check;
 pub mod config;
 pub mod content;
+pub mod deps;
 pub mod history;
 pub mod items;
 pub mod label;
