@@ -67,7 +67,8 @@ pub fn capacitor_polarized() -> String {
     ])
 }
 
-/// An LED pointing down: anode (1) on top, cathode (2) below.
+/// An LED pointing down, numbered as KiCad's: cathode (1) below, anode
+/// (2) on top.
 pub fn led() -> String {
     ops(vec![
         line(
@@ -77,12 +78,12 @@ pub fn led() -> String {
         line(&[(-1.27, -1.27), (1.27, -1.27)], "none"),
         line(&[(1.778, 0.254), (2.794, -0.762)], "none"),
         line(&[(2.286, 1.016), (3.302, 0.0)], "none"),
-        pin(&("1", "A", "passive", 0.0, 3.81, "up", 2.54)),
-        pin(&("2", "K", "passive", 0.0, -3.81, "down", 2.54)),
+        pin(&("1", "K", "passive", 0.0, -3.81, "down", 2.54)),
+        pin(&("2", "A", "passive", 0.0, 3.81, "up", 2.54)),
     ])
 }
 
-/// A diode pointing down: anode (1) on top.
+/// A diode pointing down, numbered as KiCad's: cathode (1) below.
 pub fn diode() -> String {
     ops(vec![
         line(
@@ -90,9 +91,47 @@ pub fn diode() -> String {
             "none",
         ),
         line(&[(-1.27, -1.27), (1.27, -1.27)], "none"),
-        pin(&("1", "A", "passive", 0.0, 3.81, "up", 2.54)),
-        pin(&("2", "K", "passive", 0.0, -3.81, "down", 2.54)),
+        pin(&("1", "K", "passive", 0.0, -3.81, "down", 2.54)),
+        pin(&("2", "A", "passive", 0.0, 3.81, "up", 2.54)),
     ])
+}
+
+/// A solder jumper of two pads lying down.
+pub fn jumper2() -> String {
+    ops(vec![
+        rect(-1.27, 0.762, -0.254, -0.762, "outline"),
+        rect(0.254, 0.762, 1.27, -0.762, "outline"),
+        pin(&("1", "A", "passive", -3.81, 0.0, "left", 2.54)),
+        pin(&("2", "B", "passive", 3.81, 0.0, "right", 2.54)),
+    ])
+}
+
+/// A solder jumper of three pads, the middle one's pin below.
+pub fn jumper3() -> String {
+    ops(vec![
+        rect(-2.032, 0.762, -1.016, -0.762, "outline"),
+        rect(-0.508, 0.762, 0.508, -0.762, "outline"),
+        rect(1.016, 0.762, 2.032, -0.762, "outline"),
+        pin(&("1", "A", "passive", -5.08, 0.0, "left", 3.048)),
+        pin(&("3", "B", "passive", 5.08, 0.0, "right", 3.048)),
+        pin(&("2", "C", "input", 0.0, -2.54, "down", 1.778)),
+    ])
+}
+
+/// `op` in unit `unit` of a symbol of several.
+pub fn in_unit(mut op: Value, unit: u32) -> Value {
+    op["unit"] = json!(unit);
+    op
+}
+
+/// An IC unit: [`ic`]'s box and pins, all in `unit`.
+pub fn ic_unit(w: f64, h: f64, pins: &[PinDef], unit: u32) -> Vec<Value> {
+    let mut list = vec![in_unit(
+        rect(-w / 2.0, h / 2.0, w / 2.0, -h / 2.0, "body"),
+        unit,
+    )];
+    list.extend(pins.iter().map(|p| in_unit(pin(p), unit)));
+    list
 }
 
 /// A crystal lying down, with its case's two ground pins below.

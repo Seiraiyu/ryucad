@@ -546,5 +546,20 @@ mod tests {
         let after = std::fs::read_to_string(&path).unwrap();
         assert_ne!(before, after);
         assert!(after.contains("\"r9\""), "{after}");
+        // Connecting it draws it joined, in the same change.
+        crate::partcmd::wire(
+            &mut s,
+            "top/r9/1",
+            crate::partcmd::Wire::To {
+                net: "sda",
+                new: false,
+            },
+            None,
+        )
+        .unwrap();
+        let p = s.project();
+        let b = p.conn.block(&Id::parse("top", "b").unwrap()).unwrap();
+        let laid = schem::lay(p, b, None, &[], Relayout::None).unwrap();
+        assert!(laid.invalid.is_none() && !laid.stale, "{:?}", laid.invalid);
     }
 }

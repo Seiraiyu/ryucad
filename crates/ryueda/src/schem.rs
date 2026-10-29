@@ -467,7 +467,12 @@ pub fn lay(
     };
     if let Some(l) = &stored {
         built.input.instructions = l.instructions.clone();
-        let broken = ryusch::rules::check(&built.input, l);
+        // A pin the file doesn't draw joined is connectivity the file
+        // hasn't caught up with (stale), not a broken file.
+        let broken: Vec<_> = ryusch::rules::check(&built.input, l)
+            .into_iter()
+            .filter(|v| v.rule != "connected")
+            .collect();
         if let Some(v) = broken.first() {
             invalid = Some(
                 Error::new(
