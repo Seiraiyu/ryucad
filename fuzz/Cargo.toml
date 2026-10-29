@@ -11,12 +11,14 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 ryucad = { path = "../crates/ryucad" }
 ryucad-doc = { path = "../crates/ryucad-doc", features = ["test-support"] }
+ryueda = { path = "../crates/ryueda" }
 ryukei = { path = "../crates/ryukei" }
 ryukei-testkit = { path = "../crates/ryukei-testkit" }
 ryumate = { path = "../crates/ryumate" }
 ryupdm = { path = "../crates/ryupdm" }
 ryusketch = { path = "../crates/ryusketch" }
 ryustep = { path = "../crates/ryustep" }
+rayon = "1"
 serde_json = "1"
 
 [[bin]]
@@ -176,6 +178,13 @@ bench = false
 [[bin]]
 name = "measure"
 path = "fuzz_targets/measure.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "eda"
+path = "fuzz_targets/eda.rs"
 test = false
 doc = false
 bench = false
