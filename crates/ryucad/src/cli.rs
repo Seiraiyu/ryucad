@@ -444,6 +444,9 @@ enum Command {
         /// Write the meshes to this file as ryucad.mesh.1 instead.
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
+        /// With --out, write ryucad.mesh.2: about half the size.
+        #[arg(long, requires = "out")]
+        compact: bool,
         #[command(flatten)]
         rev: RevArg,
     },
@@ -2338,13 +2341,17 @@ fn request(cmd: &Command) -> Option<Request> {
             occurrences,
             quality,
             out,
+            compact,
             rev,
         } => Request::MeshGet {
             part: part.clone(),
             feature: feature.clone(),
             features: occurrences.clone(),
             quality: quality.clone(),
-            transfer: out.as_ref().map(|_| Transfer::Binary),
+            transfer: out.as_ref().map(|_| match compact {
+                true => Transfer::Compact,
+                false => Transfer::Binary,
+            }),
             rev: rev.rev.clone(),
         },
         Command::History { part, limit } => Request::HistoryLog {

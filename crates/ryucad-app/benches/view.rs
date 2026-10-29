@@ -17,8 +17,8 @@ fn main() {
     divan::main();
 }
 
-/// The `ryucad.mesh.1` bytes of a part of 100 features, all five types,
-/// at normal display quality.
+/// The `ryucad.mesh.2` bytes of a part of 100 features, all five types,
+/// at normal display quality: what the window reads.
 fn encoded() -> Vec<u8> {
     let dir = tempfile::tempdir().unwrap();
     init(dir.path(), None).unwrap();
@@ -50,7 +50,7 @@ fn encoded() -> Vec<u8> {
     }
     let part = ryucad::doc::id::Id::parse("p", "part").unwrap();
     let bodies = meshes(&mut s, &part, None, ryucad::mesh::Quality::Normal).unwrap();
-    ryucad::mesh::encode(&bodies)
+    ryucad::mesh::encode_compact(&bodies)
 }
 
 fn model(bytes: &[u8]) -> Model {

@@ -45,6 +45,9 @@ pub enum Transfer {
     #[default]
     Json,
     Binary,
+    /// Bytes after the answer in a compact encoding (`ryucad.mesh.2`),
+    /// for a reader that knows it: the app.
+    Compact,
 }
 
 /// Where a feature goes in a part's list: after `after`, first, or (with
@@ -1012,7 +1015,8 @@ pub enum Request {
         /// coarse, normal or fine; the user's display quality by default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quality: Option<String>,
-        /// `binary` sends `ryucad.mesh.1` bytes after the answer.
+        /// `binary` sends `ryucad.mesh.1` bytes after the answer,
+        /// `compact` `ryucad.mesh.2`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         transfer: Option<Transfer>,
         /// A Git revision to mesh instead of the working files.
