@@ -11,6 +11,7 @@ miniz_oxide = "0.8"
 ryukei = { path = "../ryukei" }
 
 [dev-dependencies]
+ryukei-testkit = { path = "../ryukei-testkit" }
 # Independent readers of what the writers write, for tests only.
 roxmltree = "0.20"
 zip = { version = "2", default-features = false, features = ["deflate"] }

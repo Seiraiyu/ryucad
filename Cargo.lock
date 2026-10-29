@@ -4484,6 +4484,7 @@ dependencies = [
  "miniz_oxide 0.8.9",
  "roxmltree 0.20.0",
  "ryukei",
+ "ryukei-testkit",
  "zip 2.6.1",
 ]
 
