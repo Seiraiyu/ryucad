@@ -23,16 +23,35 @@ use std::collections::BTreeMap;
 pub const FORMAT: u64 = 1;
 
 /// The newest part file format: 2 adds `kind`, 3 an assembly's item
-/// numbers. A part file stays at the lowest that holds it: a part at 1,
-/// an assembly without items at 2.
-pub const PART_FORMAT: u64 = 3;
+/// numbers, 4 item numbers of other projects' parts. A part file stays at
+/// the lowest that holds it: a part at 1, an assembly without items at 2.
+pub const PART_FORMAT: u64 = 4;
 
 /// The largest item number.
 pub const MAX_ITEM: u32 = 99_999;
 
 /// An assembly's item numbers (the find numbers balloons cite), by the
-/// part each numbers.
+/// part each numbers: its ID, or for another project's part
+/// `<project ID>:<part>` ([`Id::foreign`]), so a local `bolt` and a
+/// dependency's `bolt` have numbers of their own.
 pub type Items = BTreeMap<Id, u32>;
+
+/// The key of `part` at `rev` in an assembly's [`Items`].
+pub fn item_key(part: &Id, rev: &super::assembly::Rev) -> Id {
+    match rev.project() {
+        Some(p) => Id::foreign(p, part),
+        None => part.clone(),
+    }
+}
+
+/// An item key as `items` writes it: a part ID, or `<project ID>:<part>`.
+pub fn parse_item_key(s: &str) -> Result<Id> {
+    if let Some((p, part)) = s.split_once(':') {
+        let p = ProjectId::parse(p)?;
+        return Ok(Id::foreign(&p, &Id::parse(part, "part")?));
+    }
+    Id::parse(s, "part")
+}
 
 /// The newest manifest format: 2 adds the project's ID, 3 its
 /// dependencies and where it was forked from. A manifest stays at the
@@ -327,7 +346,8 @@ impl PartFile {
         }
         if !self.items.is_empty() {
             v["items"] = json!(self.items);
-            v["format"] = json!(PART_FORMAT);
+            let foreign = self.items.keys().any(|k| k.foreign_of().is_some());
+            v["format"] = json!(if foreign { PART_FORMAT } else { 3 });
         }
         v
     }
@@ -379,7 +399,7 @@ impl PartFile {
             })?;
             for (k, n) in map {
                 let at = format!("/items/{k}");
-                let part = Id::parse(k, "part").map_err(|e| e.with("pointer", &at))?;
+                let part = parse_item_key(k).map_err(|e| e.with("pointer", &at))?;
                 let n = n
                     .as_u64()
                     .and_then(|n| u32::try_from(n).ok())
@@ -499,11 +519,18 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
     out
 }
 
-/// The lowest part file format that holds `v`: 3 with item numbers, 2 for
-/// an assembly, else 1.
+/// The lowest part file format that holds `v`: 4 with an item number of
+/// another project's part, 3 with item numbers, 2 for an assembly, else
+/// 1.
 pub fn part_format(v: &Value) -> u64 {
-    if v.get("items").is_some() {
+    let foreign = v
+        .get("items")
+        .and_then(Value::as_object)
+        .is_some_and(|m| m.keys().any(|k| k.contains(':')));
+    if foreign {
         PART_FORMAT
+    } else if v.get("items").is_some() {
+        3
     } else if v.get("part_kind").is_some() {
         2
     } else {
@@ -1262,7 +1289,7 @@ mod tests {
         let bad = json!({"features": [], "format": 2, "kind": "ryucad.part", "part_kind": "part"});
         let e = PartFile::from_json(&bad).unwrap_err();
         assert_eq!(e.details["pointer"], "/part_kind");
-        let newer = json!({"features": [], "format": 4, "kind": "ryucad.part"});
+        let newer = json!({"features": [], "format": 5, "kind": "ryucad.part"});
         assert_eq!(
             PartFile::from_json(&newer).unwrap_err().code,
             Code::FormatTooNew
@@ -1282,6 +1309,27 @@ mod tests {
         assert_eq!(v["format"], 3);
         assert_eq!(part_format(&v), 3);
         assert_eq!(PartFile::from_json(&v).unwrap(), p);
+        // Another project's part has a key of its own, in format 4.
+        let lib = ProjectId::from_bytes([7; 16]);
+        let mut foreign = p.clone();
+        foreign.items.insert(Id::foreign(&lib, &id("bolt")), 2);
+        let v4 = foreign.to_json();
+        assert_eq!(v4["items"][format!("{lib}:bolt")], 2);
+        assert_eq!((v4["format"].as_u64(), part_format(&v4)), (Some(4), 4));
+        assert_eq!(PartFile::from_json(&v4).unwrap(), foreign);
+        assert_eq!(
+            Id::foreign(&lib, &id("bolt")).foreign_of(),
+            Some((lib.clone(), id("bolt")))
+        );
+        assert_eq!(id("bolt").foreign_of(), None);
+        let rev = crate::doc::assembly::Rev::Foreign {
+            project: lib,
+            label: "A".into(),
+        };
+        assert_eq!(
+            item_key(&id("bolt"), &rev),
+            Id::foreign(rev.project().unwrap(), &id("bolt"))
+        );
         // Shared numbers read: they are the BOM's fault to report.
         let shared = json!({"features": [], "format": 3, "items": {"a": 2, "b": 2},
                             "kind": "ryucad.part", "part_kind": "assembly"});
