@@ -13,6 +13,7 @@ pub mod cluster;
 pub mod engine;
 pub mod font;
 pub mod geom;
+pub mod idiom;
 pub mod input;
 pub mod label;
 pub mod layout;
