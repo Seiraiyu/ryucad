@@ -180,6 +180,53 @@ fn save_manifest(session: &mut Session, m: &crate::doc::files::Manifest) -> Resu
     session.reload()
 }
 
+/// The lock `project` (the working files as a write would leave them)
+/// needs, worked out from the dependency cache alone: the labels it
+/// places from other projects and everything they place, each the old
+/// lock holds keeping its commit. `dependency_not_fetched`,
+/// `label_not_found`, `label_not_official` and the rest for a label that
+/// can't be locked.
+pub(crate) fn relock(session: &mut Session, project: &Project) -> Result<crate::doc::lock::Lock> {
+    let start = ryupdm::deps::lock::wanted(project);
+    let old = lock_of(session.project()).ok();
+    if start.is_empty() {
+        return Ok(Default::default());
+    }
+    let own = project.manifest.project.clone();
+    let deps = project.manifest.dependencies.clone();
+    let reader = session.deps_reader()?;
+    ryupdm::deps::lock::lock(reader, own.as_ref(), &deps, &start, old.as_ref())
+}
+
+/// After a write: writes `ryucad.lock` again when what the working files
+/// place from other projects needs another lock (removes it when they
+/// place nothing), and says whether it wrote. A lock that can't be
+/// worked out (what it needs isn't fetched) is left as it is; a write
+/// that needs a new label refuses before this ([`relock`]).
+pub(crate) fn keep_lock(session: &mut Session) -> Result<bool> {
+    use crate::doc::lock::LOCK;
+    let p = session.project().clone();
+    let path = session.root().join(LOCK);
+    if p.lock.is_none() && ryupdm::deps::lock::wanted(&p).is_empty() {
+        return Ok(false);
+    }
+    let Ok(lock) = relock(session, &p) else {
+        return Ok(false);
+    };
+    if lock.is_empty() {
+        if p.lock.is_some() {
+            crate::doc::project::remove_file(session.root(), &path)?;
+            return Ok(true);
+        }
+        return Ok(false);
+    }
+    if p.lock.as_ref().and_then(|l| l.as_ref().ok()) == Some(&lock) {
+        return Ok(false);
+    }
+    crate::doc::project::write_json(&path, &lock.to_json())?;
+    Ok(true)
+}
+
 /// `deps.add`: fetches `url`, reads the project's ID in its folder `path`
 /// there and lists it as a dependency named `name` (else after its folder
 /// or repository). One logged, undoable change guarded by the project's
@@ -821,5 +868,86 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(dir.path().join("cache")).unwrap();
         let l = call(&mut s, "deps.list", json!({})).unwrap();
         assert_eq!(l["dependencies"][0]["fetched"], false);
+    }
+
+    #[test]
+    fn placing_another_projects_part_writes_the_lock_with_it() {
+        use crate::doc::lock::LOCK;
+        let (lib_dir, lib) = library();
+        let (dir, mut s) = project();
+        let cache = ryupdm::deps::Cache::new(dir.path().join("cache"));
+        s.deps_cache = Some(cache.clone());
+        depend(&mut s, &lib, lib_dir.path());
+        let add = |s: &mut Session, rev: &str| {
+            call(
+                s,
+                "feature.add",
+                json!({"part": "frame", "type": "instance", "id": "b", "of": "lib:p", "rev": rev}),
+            )
+        };
+        // Not fetched: refused, naming the command, nothing written.
+        let e = add(&mut s, "A").unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["command"]),
+            (Code::DependencyNotFetched, &json!("ryucad deps fetch"))
+        );
+        assert!(!dir.path().join(LOCK).exists());
+        call(&mut s, "deps.fetch", json!({})).unwrap();
+        // Only a label the dependency released, and only a label.
+        let e = add(&mut s, "working").unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["param"]),
+            (Code::InstanceForeignWorking, &json!("rev"))
+        );
+        let e = add(&mut s, "B").unwrap_err();
+        assert_eq!(e.code, Code::LabelNotFound);
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "instance", "id": "b", "of": "nope:p", "rev": "A"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["param"]),
+            (Code::NotFound, &json!("of"))
+        );
+        add(&mut s, "A").unwrap();
+        // The lock came with it, and its item number is its own.
+        let lock = super::lock_of(s.project()).unwrap();
+        assert_eq!(
+            lock.label(&lib, &id("p"), "A").unwrap().commit,
+            crate::git::repo(lib_dir.path())
+                .unwrap()
+                .locate("HEAD")
+                .unwrap()
+                .0
+        );
+        let list = s
+            .project()
+            .part(&id("frame"))
+            .unwrap()
+            .file
+            .clone()
+            .unwrap();
+        assert_eq!(list.items[&crate::doc::id::Id::foreign(&lib, &id("p"))], 1);
+        let r = s.rebuilt(&id("frame")).unwrap().clone();
+        assert!(r.output(&id("b")).is_some(), "{:?}", r.features);
+        // Edited to the working files: refused.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "b", "rev": "working"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InstanceForeignWorking);
+        // Deleted, the lock goes with the last of them.
+        call(
+            &mut s,
+            "feature.delete",
+            json!({"part": "frame", "id": "b"}),
+        )
+        .unwrap();
+        assert!(!dir.path().join(LOCK).exists());
+        assert!(s.project().lock.is_none());
     }
 }
