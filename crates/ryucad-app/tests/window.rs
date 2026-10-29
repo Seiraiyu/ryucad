@@ -2900,3 +2900,120 @@ fn the_branches_tab_previews_and_compares_another_worktree() {
             .is_some_and(|c| c.rev == format!("worktree:{arm_s}") && c.loaded)
     });
 }
+
+#[test]
+fn view_show_scrolls_to_every_part() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    // More parts than the 700-point window has rows (issue #209).
+    let p = Project::new();
+    let ids: Vec<String> = (0..50).map(|k| format!("p{k:02}")).collect();
+    for id in &ids {
+        p.ok(&["part", "create", id]);
+    }
+    let mut h = window(&p);
+    frames(&mut h, |a| match &a.screen {
+        ryucad_app::ui::app::Screen::Opened(o) => o.ws.idle() && o.ws.model.parts.len() == 50,
+        _ => false,
+    });
+    h.step();
+    // The tree lists the parts by the same names: the menu's rows are
+    // the ones that weren't there before it opened.
+    let in_tree = |h: &Harness<'static, App>, id: &str| -> Vec<egui::Rect> {
+        h.query_all_by_label(id).map(|n| n.rect()).collect()
+    };
+    let (first, last) = (in_tree(&h, "p00"), in_tree(&h, "p49"));
+    h.get_by_label("View").click();
+    shown(&mut h, "Show");
+    h.get_by_label("Show").click();
+    shown(&mut h, "The project's model");
+    let in_menu = |h: &Harness<'static, App>, id: &str, tree: &[egui::Rect]| {
+        h.query_all_by_label(id)
+            .map(|n| n.rect())
+            .find(|r| !tree.contains(r))
+            .unwrap_or_else(|| panic!("{id} isn't in the menu"))
+    };
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+    // The wheel over the list scrolls it until the last part shows.
+    h.event(egui::Event::PointerMoved(
+        in_menu(&h, "p00", &first).center(),
+    ));
+    for _ in 0..60 {
+        if screen.contains_rect(in_menu(&h, "p49", &last)) {
+            break;
+        }
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, -3.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.step();
+    }
+    // The wheel scrolls smoothly: let the list come to rest before the
+    // click, or it lands on whatever row has moved under it.
+    let mut row = in_menu(&h, "p49", &last);
+    for _ in 0..60 {
+        h.step();
+        let now = in_menu(&h, "p49", &last);
+        if now == row {
+            break;
+        }
+        row = now;
+    }
+    assert!(
+        screen.contains_rect(row),
+        "p49 never came into view: {row:?}"
+    );
+    click(&h, row.center());
+    frames(&mut h, |a| {
+        a.opened().ws.model.focus.as_deref() == Some("p49")
+    });
+}
+
+#[test]
+fn showing_a_part_frames_it() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    // Two parts a metre apart (issue #211).
+    let p = Project::new();
+    for (part, at) in [("near", "0,0,0"), ("far", "1000,0,0")] {
+        p.ok(&["part", "create", part]);
+        p.ok(&[
+            "feature", "add", part, "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+            "--param", "z=10", "--origin", at,
+        ]);
+    }
+    let mut h = window(&p);
+    frames(&mut h, |a| match &a.screen {
+        ryucad_app::ui::app::Screen::Opened(o) => o.ws.idle() && o.ws.model.meshes.len() == 2,
+        _ => false,
+    });
+    h.run_steps(2);
+    let target = |h: &Harness<'static, App>| h.state().opened().view.nav.camera.target;
+    // The project's model is both parts: the camera looks between them.
+    let t = target(&h);
+    assert!(t[0] > 0.1 && t[0] < 0.9, "{t:?}");
+    // Shown as View > Show shows it (`view.focus` for this window), the
+    // far part is framed: the camera turns to it, not left where it was.
+    p.ok(&["focus", "far"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("far")
+    });
+    h.run_steps(4);
+    let t = target(&h);
+    assert!(t[0] > 0.99 && t[0] < 1.02, "{t:?}");
+    // And back: the near one.
+    p.ok(&["focus", "near"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("near")
+    });
+    h.run_steps(4);
+    let t = target(&h);
+    assert!(t[0] > -0.01 && t[0] < 0.02, "{t:?}");
+}
