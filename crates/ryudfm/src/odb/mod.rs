@@ -5,6 +5,7 @@ mod error;
 pub mod job;
 pub mod lzw;
 pub mod text;
+pub mod units;
 
 pub use error::{Code, Error, Once, fault, location, notice, warning, where_};
 
