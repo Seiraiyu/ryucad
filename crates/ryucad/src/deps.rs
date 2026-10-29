@@ -150,6 +150,304 @@ fn read(
     })
 }
 
+/// The schema of `deps` outputs (design 65's rule: a new field is not a
+/// change).
+pub const SCHEMA: u64 = 1;
+
+fn invalid(param: &str, why: &str) -> Error {
+    Error::new(Code::DependencyInvalid, why).with("param", param)
+}
+
+/// A handle for a dependency from its folder or its repository's name:
+/// `cad/fasteners` and `https://github.com/acme/fasteners.git` are
+/// `fasteners`.
+fn name_from(url: &str, path: &str) -> Option<Id> {
+    let stem = match path.rsplit('/').next().filter(|s| !s.is_empty()) {
+        Some(s) => s.to_owned(),
+        None => {
+            let u = url.trim_end_matches('/');
+            let u = u.strip_suffix(".git").unwrap_or(u);
+            u.rsplit(['/', ':']).next().unwrap_or_default().to_owned()
+        }
+    };
+    crate::import::id_from(&stem)
+}
+
+/// Writes `m` as the manifest, and reads the project again.
+fn save_manifest(session: &mut Session, m: &crate::doc::files::Manifest) -> Result<()> {
+    let path = session.root().join(crate::doc::project::MANIFEST);
+    crate::doc::project::write_json(&path, &m.to_json())?;
+    session.reload()
+}
+
+/// `deps.add`: fetches `url`, reads the project's ID in its folder `path`
+/// there and lists it as a dependency named `name` (else after its folder
+/// or repository). One logged, undoable change guarded by the project's
+/// revision.
+pub fn add(
+    session: &mut Session,
+    url: &str,
+    path: &str,
+    name: Option<&str>,
+    expected: Option<&str>,
+) -> Result<serde_json::Value> {
+    use crate::doc::deps::{Dependency, path_fault, url_fault};
+    crate::config::check_project_revision(session.root(), expected)?;
+    if let Some(why) = url_fault(url) {
+        return Err(invalid("url", why).with("url", url));
+    }
+    if let Some(why) = path_fault(path) {
+        return Err(invalid("path", why).with("path", path));
+    }
+    let mut m = session.project().manifest.clone();
+    let key = ryupdm::deps::normalize(url);
+    if let Some((id, d)) = m
+        .dependencies
+        .iter()
+        .find(|(_, d)| ryupdm::deps::normalize(&d.url) == key && d.path == path)
+    {
+        return Err(Error::new(
+            Code::DuplicateId,
+            format!("{url} ({path:?}) is already the dependency {}", d.name),
+        )
+        .with("dependency", &d.name)
+        .with("project", id));
+    }
+    let cache = session.deps_cache()?;
+    let fetched = cache.fetch(url, &[path])?;
+    session.deps_fetched();
+    let repo = cache.open(url)?.expect("just fetched");
+    let found = ryupdm::deps::manifest_at(&repo, ryupdm::deps::HEAD_REF, path)?;
+    let Some(id) = found.and_then(|m| m.project) else {
+        return Err(Error::new(
+            Code::DependencyProjectMismatch,
+            format!(
+                "{url} holds no ryucad project with an ID at {path:?} (a project gets its ID at its first PDM write)"
+            ),
+        )
+        .with("url", url)
+        .with("path", path));
+    };
+    if m.project.as_ref() == Some(&id) {
+        return Err(Error::new(
+            Code::ProjectIdDuplicate,
+            format!(
+                "{url} holds this project ({id}): a copy needs an ID of its own (`ryucad pdm new-id`)"
+            ),
+        )
+        .with("project", &id)
+        .with("url", url));
+    }
+    if let Some(d) = m.dependencies.get(&id) {
+        return Err(Error::new(
+            Code::ProjectIdDuplicate,
+            format!(
+                "{url} holds project {id}, already the dependency {} at {}",
+                d.name, d.url
+            ),
+        )
+        .with("project", &id)
+        .with("dependency", &d.name)
+        .with("urls", [&d.url, &url.to_owned()]));
+    }
+    let taken = |n: &str| m.dependencies.values().any(|d| d.name == n);
+    let name = match name {
+        Some(n) => {
+            let n = Id::parse(n, "dependency").map_err(|e| e.with("param", "name"))?;
+            if taken(n.as_str()) {
+                return Err(Error::new(
+                    Code::DuplicateId,
+                    format!("a dependency is already named {n}"),
+                )
+                .with("param", "name"));
+            }
+            n
+        }
+        None => {
+            let base = name_from(url, path)
+                .unwrap_or_else(|| Id::parse("dependency", "dependency").expect("an ID"));
+            crate::import::free(&base, taken)
+        }
+    };
+    m.dependencies.insert(
+        id.clone(),
+        Dependency {
+            name: name.to_string(),
+            url: url.to_owned(),
+            path: path.to_owned(),
+        },
+    );
+    save_manifest(session, &m)?;
+    let (branch, tip) = fetched.branches.get(path).cloned().unwrap_or_default();
+    Ok(serde_json::json!({
+        "schema": SCHEMA,
+        "dependency": {"name": name, "project": id, "url": url, "path": path},
+        "fetched": {"url": url, "head": fetched.head, "release_branch": branch, "tip": tip},
+        "project_revision": crate::config::project_revision(session.root())?,
+    }))
+}
+
+/// Every repository the manifest and the lock name, with the project
+/// folders in it: what `deps fetch` fetches, narrowed to the named
+/// dependencies (by name or ID) and the projects the lock reaches through
+/// them.
+fn repositories(
+    session: &Session,
+    names: &[String],
+) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
+    let p = session.project();
+    let mut wanted = std::collections::BTreeSet::new();
+    for n in names {
+        let (id, _) = crate::doc::deps::find(&p.manifest.dependencies, n)?;
+        wanted.insert(id.clone());
+    }
+    let lock = lock_of(p).unwrap_or_default();
+    let picked = |id: &ProjectId, via: &[ProjectId]| {
+        wanted.is_empty() || wanted.contains(id) || via.iter().any(|v| wanted.contains(v))
+    };
+    let mut out: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    let mut add = |url: &str, path: &str| {
+        let paths = out.entry(url.to_owned()).or_default();
+        if !paths.iter().any(|x| x == path) {
+            paths.push(path.to_owned());
+        }
+    };
+    for (id, d) in &p.manifest.dependencies {
+        if picked(id, &[]) {
+            add(&d.url, &d.path);
+        }
+    }
+    for (id, l) in &lock.projects {
+        if picked(id, &l.via) {
+            add(&l.url, &l.path);
+        }
+    }
+    Ok(out)
+}
+
+/// `deps.fetch`: fetches every dependency the manifest and the lock name
+/// (or the named ones, and what the lock reaches through them), writing
+/// nothing in the project. `dependency_fetch_failed` (exit 4) for the
+/// first that can't be read.
+pub fn fetch(session: &mut Session, names: &[String]) -> Result<serde_json::Value> {
+    let repos = repositories(session, names)?;
+    let cache = session.deps_cache()?;
+    let mut out = Vec::new();
+    for (url, paths) in &repos {
+        let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let f = cache.fetch(url, &paths)?;
+        let branches: Vec<serde_json::Value> = f
+            .branches
+            .iter()
+            .map(|(path, (branch, tip))| {
+                serde_json::json!({"path": path, "release_branch": branch, "tip": tip,
+                                   "before": f.before.get(branch),
+                                   "changed": f.before.get(branch) != tip.as_ref()})
+            })
+            .collect();
+        out.push(serde_json::json!({"url": url, "head": f.head, "branches": branches}));
+    }
+    session.deps_fetched();
+    Ok(serde_json::json!({"schema": SCHEMA, "fetched": out}))
+}
+
+/// `deps.list`: each dependency and each project the lock reaches through
+/// one, offline: its name, ID, URL, path, release branch, whether it is
+/// fetched and the fetched tip, its faults, and each label the lock holds
+/// with the instances that place it.
+pub fn list(session: &mut Session) -> Result<serde_json::Value> {
+    use serde_json::json;
+    let p = session.project().clone();
+    let lock = lock_of(&p);
+    let locked = lock
+        .as_ref()
+        .map(|l| l.projects.clone())
+        .unwrap_or_default();
+    let faults = crate::doc::deps::faults(p.manifest.project.as_ref(), &p.manifest.dependencies);
+    // Each foreign instance, by project, part and label.
+    let mut uses: std::collections::BTreeMap<(ProjectId, Id, String), Vec<serde_json::Value>> =
+        Default::default();
+    for (asm, part) in &p.parts {
+        for fid in part.order() {
+            if let Some(Ok(Feature::Instance(i))) = part.features.get(fid)
+                && let crate::doc::assembly::Rev::Foreign { project, label } = &i.rev
+            {
+                uses.entry((project.clone(), i.part.clone(), label.clone()))
+                    .or_default()
+                    .push(json!({"assembly": asm, "instance": fid}));
+            }
+        }
+    }
+    let mut ids: Vec<ProjectId> = p.manifest.dependencies.keys().cloned().collect();
+    ids.extend(
+        locked
+            .keys()
+            .filter(|k| !p.manifest.dependencies.contains_key(*k))
+            .cloned(),
+    );
+    let cache = session.deps_cache()?;
+    let mut out = Vec::new();
+    for id in ids {
+        let dep = p.manifest.dependencies.get(&id);
+        let l = locked.get(&id);
+        let (url, path) = match (dep, l) {
+            (Some(d), _) => (d.url.clone(), d.path.clone()),
+            (None, Some(l)) => (l.url.clone(), l.path.clone()),
+            (None, None) => unreachable!("listed from one or the other"),
+        };
+        let repo = cache.open(&url)?;
+        let branch = match (l, &repo) {
+            (Some(l), _) => Some(l.release_branch.clone()),
+            (None, Some(r)) => {
+                Some(ryupdm::deps::config_at(r, ryupdm::deps::HEAD_REF, &path)?.release_branch)
+            }
+            (None, None) => None,
+        };
+        let tip = match (&repo, &branch) {
+            (Some(r), Some(b)) => ryupdm::deps::tip(r, b)?,
+            _ => None,
+        };
+        let labels: Vec<serde_json::Value> = l
+            .map(|l| {
+                l.labels
+                    .iter()
+                    .map(|((part, label), x)| {
+                        let placed = uses
+                            .get(&(id.clone(), part.clone(), label.clone()))
+                            .cloned()
+                            .unwrap_or_default();
+                        json!({"part": part, "label": label, "commit": x.commit,
+                               "content": x.content, "instances": placed})
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mine: Vec<&Error> = faults
+            .iter()
+            .filter(|e| e.details["project"] == id.as_str())
+            .collect();
+        out.push(json!({
+            "name": dep.map(|d| d.name.clone()),
+            "project": id,
+            "url": url,
+            "path": path,
+            "direct": dep.is_some(),
+            "via": l.map(|l| l.via.clone()).unwrap_or_default(),
+            "release_branch": branch,
+            "fetched": repo.is_some(),
+            "tip": tip,
+            "labels": labels,
+            "faults": mine,
+        }));
+    }
+    let mut v = json!({"schema": SCHEMA, "dependencies": out,
+                       "project_revision": crate::config::project_revision(session.root())?});
+    if let Err(e) = lock {
+        v["lock_fault"] = json!(e);
+    }
+    Ok(v)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use crate::assembly::tests::{id, project};
@@ -407,5 +705,66 @@ pub(crate) mod tests {
             .cloned()
             .unwrap_or_default();
         assert_eq!(b["code"], "dependency_not_fetched", "{d}");
+    }
+
+    #[test]
+    fn dependencies_are_added_fetched_and_listed() {
+        let (lib_dir, lib) = library();
+        let (dir, mut s) = crate::server::tests::fresh();
+        s.deps_cache = Some(ryupdm::deps::Cache::new(dir.path().join("cache")));
+        let u = url(lib_dir.path());
+        let a = call(&mut s, "deps.add", json!({"url": u})).unwrap();
+        // Named after the repository's folder, made an ID.
+        let name = a["dependency"]["name"].as_str().unwrap().to_owned();
+        assert_eq!(
+            Some(name.clone()),
+            lib_dir
+                .path()
+                .file_name()
+                .and_then(|n| crate::import::id_from(n.to_str().unwrap()))
+                .map(|i| i.to_string())
+        );
+        assert_eq!(a["dependency"]["project"], lib.as_str());
+        assert_eq!(a["fetched"]["release_branch"], "main");
+        let m = &s.project().manifest;
+        assert_eq!(m.dependencies[&lib].url, u);
+        assert_eq!(m.to_json()["format"], 3);
+        // Again: refused, the same repository and folder.
+        let e = call(&mut s, "deps.add", json!({"url": format!("{u}/")})).unwrap_err();
+        assert_eq!(e.code, Code::DuplicateId);
+        // A folder with no project.
+        let e = call(&mut s, "deps.add", json!({"url": u, "path": "parts"})).unwrap_err();
+        assert_eq!(e.code, Code::DependencyProjectMismatch);
+        // A URL that is no URL.
+        let e = call(&mut s, "deps.add", json!({"url": "fasteners"})).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["param"]),
+            (Code::DependencyInvalid, &json!("url"))
+        );
+        // Listed, fetched, nothing locked yet.
+        let l = call(&mut s, "deps.list", json!({})).unwrap();
+        let d = &l["dependencies"][0];
+        assert_eq!(
+            (&d["name"], &d["fetched"], &d["direct"]),
+            (&json!(name), &json!(true), &json!(true))
+        );
+        assert_eq!(
+            d["tip"],
+            crate::git::repo(lib_dir.path())
+                .unwrap()
+                .locate("HEAD")
+                .unwrap()
+                .0
+        );
+        assert_eq!(d["labels"], json!([]));
+        // Fetched again: nothing changed.
+        let f = call(&mut s, "deps.fetch", json!({})).unwrap();
+        assert_eq!(f["fetched"][0]["branches"][0]["changed"], false);
+        let e = call(&mut s, "deps.fetch", json!({"names": ["nope"]})).unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+        // The cache gone: listed as not fetched, offline.
+        std::fs::remove_dir_all(dir.path().join("cache")).unwrap();
+        let l = call(&mut s, "deps.list", json!({})).unwrap();
+        assert_eq!(l["dependencies"][0]["fetched"], false);
     }
 }
