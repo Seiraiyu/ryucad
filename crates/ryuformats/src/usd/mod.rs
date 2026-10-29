@@ -3,3 +3,4 @@
 //! assembly's parts defined once and placed as instances.
 
 pub mod layer;
+pub mod usda;
