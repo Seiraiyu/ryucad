@@ -101,6 +101,11 @@ jobs:
           [ "$RUNNER_OS" = Windows ] && x=".exe"
           mkdir -p "dist/$NAME"
           cp "target/$TARGET/release/ryucad$x" "target/$APP/release/ryucad-app$x" README.md "dist/$NAME/"
+          # The app's embedded fonts' and icons' licences (design 199).
+          mkdir -p "dist/$NAME/licenses"
+          cp crates/ryucad-app/fonts/LICENSES.md crates/ryucad-app/fonts/Inter-LICENSE.txt \
+            crates/ryucad-app/fonts/JetBrainsMono-OFL.txt crates/ryucad-app/fonts/Phosphor-LICENSE.txt \
+            "dist/$NAME/licenses/"
           case "$RUNNER_OS" in
             Linux) mkdir -p "dist/$NAME/share" && cp packaging/linux/ryucad.desktop packaging/linux/ryucad.xml "dist/$NAME/share/" ;;
             macOS) mkdir -p "dist/$NAME/share" && cp packaging/macos/ryucad.applescript "dist/$NAME/share/" ;;

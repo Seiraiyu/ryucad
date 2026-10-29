@@ -79,4 +79,24 @@ mod tests {
         });
         out.textures_delta.clear();
     }
+
+    /// Every licence beside the fonts goes into the release archives.
+    #[test]
+    fn release_archives_carry_every_licence() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
+        let release = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../.github/workflows/release.yml"),
+        )
+        .unwrap();
+        for e in std::fs::read_dir(dir).unwrap() {
+            let name = e.unwrap().file_name().into_string().unwrap();
+            if name.ends_with(".txt") || name.ends_with(".md") {
+                assert!(
+                    release.contains(&format!("crates/ryucad-app/fonts/{name}")),
+                    "{name} isn't copied into the archive"
+                );
+            }
+        }
+    }
 }
