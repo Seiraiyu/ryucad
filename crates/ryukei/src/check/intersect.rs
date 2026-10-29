@@ -247,7 +247,13 @@ fn apart_beside(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId]) -> bool {
     } else {
         (b, a)
     };
-    if side(x, surface(y)).is_some() || side(y, surface(x)).is_some() {
+    // Faces on one surface can't keep off each other's surface: every
+    // part of one lies on the other, so each search would only exhaust its
+    // budget (issue #160: seconds a pair for a straight sweep's sides
+    // across its joints). Only a section plane can part them; failing
+    // that, they are intersected as coincident faces.
+    let same = coincident(surface(a), surface(b)).is_some();
+    if !same && (side(x, surface(y)).is_some() || side(y, surface(x)).is_some()) {
         return true;
     }
     let Some(plane) = section_plane(body, shared) else {

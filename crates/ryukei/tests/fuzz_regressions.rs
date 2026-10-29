@@ -177,3 +177,23 @@ fn a_profile_carried_back_over_itself_round_a_bend() {
     assert!(ryukei_testkit::along_bytes::carried(&data).is_none());
     assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
 }
+
+/// A slot swept askew along three collinear legs a tenth of a metre each
+/// (issue #160): each straight side lies on one plane with the next leg's
+/// across their joint. Faces on one surface can't be certified apart
+/// beside the edge they share, and trying it exhausted the search's
+/// budget both ways, about five seconds a pair in release, four pairs; in
+/// the fuzzer, under its sanitizer, that churn took the process past its
+/// 2 GB limit. They are now intersected as coincident faces at once.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "slow in a debug build: run it in release")]
+fn a_slot_swept_along_three_collinear_legs() {
+    let data = [
+        0x2e, 0x31, 0x43, 0x1a, 0x2e, 0x31, 0x43, 0x43, 0x60, 0x1a, 0x00, 0x43, 0x43, 0x23,
+    ];
+    let (body, _, along) = ryukei_testkit::along_bytes::carried(&data).expect("a body");
+    assert!(along);
+    assert_eq!(body.counts().faces, 14);
+    assert_eq!(check(&body), []);
+    assert_eq!(check_intersections(&body), []);
+}
