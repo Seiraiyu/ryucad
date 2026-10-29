@@ -1287,6 +1287,111 @@ fn findings(
     })
 }
 
+/// How many merge previews a session keeps, most recently made first.
+const PREVIEWS: usize = 4;
+
+/// `merge.preview`: what merging `rev` (a revision, or another worktree's
+/// working files as `worktree:<path>`) into this worktree's working files
+/// would leave to settle, as `merge.status` would report it after the
+/// merge, without merging anything. The base is the merge base of this
+/// worktree's head and theirs (the other worktree's head, or the
+/// revision's commit); each file merges as Git with ryucad's driver would
+/// ([`crate::merge::files_merged`]), and the merge rebuilds in a session over
+/// the merged files. Git's rename following isn't previewed. Kept by what
+/// it was made from, so asking again about the same files costs nothing.
+pub fn preview(session: &mut Session, rev: &str) -> Result<Value> {
+    let root = session.root().to_path_buf();
+    let repo = crate::git::repo(&root)?;
+    let ours_head = repo
+        .head_commit()
+        .ok_or_else(|| Error::new(Code::NotMerging, "the repository has no commits"))?;
+    let (theirs_named, theirs_head, theirs_key) = match session.worktree_files(rev)? {
+        Some((w, _, digest)) => {
+            if w.current {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "that is this worktree: preview a merge with another",
+                )
+                .with("rev", rev));
+            }
+            let head = w.head.clone().ok_or_else(|| {
+                Error::new(Code::InvalidParam, "that worktree has no commits yet").with("rev", rev)
+            })?;
+            let key = format!("{head}:{digest}");
+            let named = json!({"worktree": w.root, "branch": w.branch, "commit": head});
+            (named, head, key)
+        }
+        None => {
+            let commit = repo.commit(rev)?.id.to_string();
+            (
+                json!({"rev": rev, "commit": commit}),
+                commit.clone(),
+                commit,
+            )
+        }
+    };
+    let key = format!("{ours_head}:{}:{theirs_key}", session.digest());
+    if let Some((_, v)) = session.previews.iter().find(|(k, _)| *k == key) {
+        return Ok(v.clone());
+    }
+    let base_commit = repo.merge_base(&ours_head, &theirs_head)?;
+    let theirs_rev = match crate::session::worktree_path(rev) {
+        Some(_) => rev.to_owned(),
+        None => theirs_head.clone(),
+    };
+    let sides = Sides {
+        ours: Side {
+            files: session.snapshot(),
+            parts: built(session)?,
+        },
+        theirs: side(session, Some(&theirs_rev))?,
+        base: side(session, base_commit.as_deref())?,
+    };
+    let merged =
+        crate::merge::files_merged(&sides.base.files, &sides.ours.files, &sides.theirs.files);
+    session.learn_from_revisions();
+    let at = session.over(merged.files.clone())?;
+    let found = findings(
+        session,
+        Some(at),
+        &merged.files,
+        &merged.unmerged,
+        Vec::new(),
+        &sides,
+        false,
+    )?;
+    let mut warnings = Vec::new();
+    if let Some(setup) = crate::drivers::setup(&root) {
+        if setup.missing.contains(&crate::drivers::RENAMES) {
+            warnings.push(json!({
+                "code": "git_drivers_missing",
+                "message": "this clone's Git follows renames (merge.renames isn't false), which the preview doesn't: run `ryucad git install`",
+            }));
+        }
+        if setup.missing.contains(&crate::drivers::MERGE_DRIVER) {
+            warnings.push(json!({
+                "code": "git_drivers_missing",
+                "message": "this clone's Git has no ryucad merge driver, so a real merge would merge ryucad's files as lines; the preview merges them by value: run `ryucad git install`",
+            }));
+        }
+    }
+    let ours_named = json!({"worktree": root, "branch": repo.branch()?, "commit": ours_head});
+    let v = json!({
+        "schema": 1,
+        "ours": ours_named,
+        "theirs": theirs_named,
+        "base": {"commit": base_commit},
+        "clean": found.conflicts.is_empty(),
+        "conflicts": found.conflicts,
+        "already_failing": found.already,
+        "unmerged": merged.unmerged.keys().collect::<Vec<_>>(),
+        "warnings": warnings,
+    });
+    session.previews.insert(0, (key, v.clone()));
+    session.previews.truncate(PREVIEWS);
+    Ok(v)
+}
+
 /// Puts `x` at `pointer` in `v`, making the objects on the way; `None`
 /// removes what is there.
 fn set_at(v: &mut Value, pointer: &str, x: Option<Value>) {

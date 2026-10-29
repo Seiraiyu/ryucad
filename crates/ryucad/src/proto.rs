@@ -799,6 +799,14 @@ pub enum Request {
     /// Every worktree of the repository that holds the project: branch,
     /// head, ahead and behind, uncommitted changes, and who is attached to
     /// its daemon when one is running.
+    /// What merging `rev` into the working files would leave to settle, as
+    /// `merge.status` would say after the merge, merging nothing.
+    #[serde(rename = "merge.preview")]
+    MergePreview {
+        /// A Git revision, or another worktree's working files as
+        /// `worktree:<path>` (absolute).
+        rev: String,
+    },
     #[serde(rename = "worktree.list")]
     WorktreeList {},
     /// Settles merge conflicts, as one change.

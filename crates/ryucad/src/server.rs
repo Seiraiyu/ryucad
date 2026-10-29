@@ -525,6 +525,7 @@ fn dispatch(
             Ok(v)
         }
         Request::MergeStatus {} => crate::validate::status(session),
+        Request::MergePreview { rev } => crate::validate::preview(session, &rev),
         Request::WorktreeList {} => crate::worktree::list(session, live.as_deref()),
         Request::MergeResolve {
             resolutions,

@@ -358,3 +358,62 @@ fn eight_daemons_share_one_disk_cache() {
     let again = r.ok(&r.root, &["rebuild"]);
     assert_eq!(again["parts"][0]["hash"], answers[0]);
 }
+
+#[test]
+fn a_merge_with_another_worktree_is_previewed_before_it_happens() {
+    let r = Repo::new();
+    r.ok(
+        &r.root,
+        &["worktree", "add", "../arm", "-b", "arm", "--no-warm"],
+    );
+    let arm = r.dir.path().join("arm").canonicalize().unwrap();
+    // Uncommitted on both sides: the same value two ways, and another
+    // value on one side.
+    r.ok(
+        &arm,
+        &[
+            "feature", "edit", "p", "b", "--param", "x=15", "--param", "z=7",
+        ],
+    );
+    r.ok(&r.root, &["feature", "edit", "p", "b", "--param", "x=12"]);
+    let p = r.ok(&r.root, &["merge", "preview", "--worktree", "../arm"]);
+    assert_eq!(p["schema"], 1);
+    assert_eq!(p["theirs"]["worktree"], json!(arm));
+    assert_eq!(p["theirs"]["branch"], "arm");
+    assert_eq!(p["ours"]["branch"], "main");
+    assert_eq!(p["base"]["commit"], p["ours"]["commit"]);
+    assert_eq!(p["clean"], false);
+    let c = &p["conflicts"][0];
+    assert_eq!(
+        (c["id"].as_str(), c["kind"].as_str()),
+        (Some("parts/p/features/b.json#/params/x"), Some("value"))
+    );
+    assert_eq!(
+        (c["ours"].clone(), c["theirs"].clone()),
+        (json!("12 mm"), json!("15 mm"))
+    );
+    assert_eq!(p["conflicts"].as_array().unwrap().len(), 1, "{p}");
+    assert_eq!(p["unmerged"], json!(["parts/p/features/b.json"]));
+    // Nothing was written.
+    let b: Value =
+        serde_json::from_slice(&fs::read(r.root.join("parts/p/features/b.json")).unwrap()).unwrap();
+    assert_eq!(b["params"]["z"], "5 mm");
+    assert!(b.get("conflicts").is_none());
+    // Once the two agree, it is clean; a revision previews the same way.
+    r.ok(&r.root, &["feature", "edit", "p", "b", "--param", "x=15"]);
+    let p = r.ok(&r.root, &["merge", "preview", "--worktree", "../arm"]);
+    assert_eq!(
+        (p["clean"].clone(), p["conflicts"].clone()),
+        (json!(true), json!([]))
+    );
+    let p = r.ok(&r.root, &["merge", "preview", "arm"]);
+    assert_eq!(p["clean"], true);
+    assert_eq!(p["theirs"]["rev"], "arm");
+    // Not with itself, nor with what doesn't exist.
+    r.fails(
+        &r.root,
+        &["merge", "preview", "--worktree", "."],
+        "invalid_param",
+    );
+    r.fails(&r.root, &["merge", "preview", "nowhere"], "rev_not_found");
+}
