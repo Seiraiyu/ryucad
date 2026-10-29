@@ -2,6 +2,7 @@
 //! [`ryu_board::model::Board`].
 
 pub mod attrs;
+pub mod board;
 pub mod components;
 pub mod eda;
 mod error;
@@ -22,4 +23,5 @@ pub mod units;
 
 pub use error::{Code, Error, Once, fault, location, notice, warning, where_};
 
+pub use board::{ReadOptions, read, read_path};
 pub use job::{Container, Job, Limits};
