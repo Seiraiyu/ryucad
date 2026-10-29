@@ -69,6 +69,11 @@ impl Cache {
         Cache { dir: dir.into() }
     }
 
+    /// A reader of what this cache holds.
+    pub fn reader(&self) -> read::Reader {
+        read::Reader::new(self.clone())
+    }
+
     /// The bare repository `url`'s fetches go to.
     pub fn path(&self, url: &str) -> PathBuf {
         self.dir.join(folder(url))

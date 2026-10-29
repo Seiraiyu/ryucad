@@ -98,7 +98,7 @@ pub fn lock(
             let Some(repo) = reader.repo(&place.url)? else {
                 return Err(not_fetched(&project, &place.url, &what));
             };
-            let config = config_at(repo, HEAD_REF, &place.path)?;
+            let config = config_at(&repo, HEAD_REF, &place.path)?;
             out.projects.insert(
                 project.clone(),
                 Locked {
@@ -281,17 +281,38 @@ mod tests {
         let start = BTreeSet::from([(sub.clone(), id("asm"), "A".to_owned())]);
         let me = ProjectId::from_bytes([9; 16]);
         // Nothing fetched: nothing can be locked.
-        let e = lock(&mut Reader::new(&cache), Some(&me), &deps, &start, None).unwrap_err();
+        let e = lock(
+            &mut Reader::new(cache.clone()),
+            Some(&me),
+            &deps,
+            &start,
+            None,
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::DependencyNotFetched);
         cache.fetch(&url(b.path()), &[""]).unwrap();
         // The subassembly read, its library not yet.
-        let e = lock(&mut Reader::new(&cache), Some(&me), &deps, &start, None).unwrap_err();
+        let e = lock(
+            &mut Reader::new(cache.clone()),
+            Some(&me),
+            &deps,
+            &start,
+            None,
+        )
+        .unwrap_err();
         assert_eq!(
             (e.code, &e.details["project"]),
             (Code::DependencyNotFetched, &json!(lib()))
         );
         cache.fetch(&url(a.path()), &[""]).unwrap();
-        let l = lock(&mut Reader::new(&cache), Some(&me), &deps, &start, None).unwrap();
+        let l = lock(
+            &mut Reader::new(cache.clone()),
+            Some(&me),
+            &deps,
+            &start,
+            None,
+        )
+        .unwrap();
         assert_eq!(l.projects.len(), 2);
         let sub_at = git(b.path(), &["rev-parse", "HEAD"]).trim().to_owned();
         assert_eq!(l.label(&sub, &id("asm"), "A").unwrap().commit, sub_at);
@@ -301,7 +322,14 @@ mod tests {
         assert_eq!(l.projects[&sub].release_branch, "main");
         // The old lock's labels are kept where the project is: as they
         // are, and read as they are (here one made wrong is refused).
-        let again = lock(&mut Reader::new(&cache), Some(&me), &deps, &start, Some(&l)).unwrap();
+        let again = lock(
+            &mut Reader::new(cache.clone()),
+            Some(&me),
+            &deps,
+            &start,
+            Some(&l),
+        )
+        .unwrap();
         assert_eq!(again, l);
         let mut old = l.clone();
         old.projects
@@ -311,7 +339,7 @@ mod tests {
             .values_mut()
             .for_each(|x| x.content = "0".repeat(64));
         let e = lock(
-            &mut Reader::new(&cache),
+            &mut Reader::new(cache.clone()),
             Some(&me),
             &deps,
             &start,
@@ -321,11 +349,25 @@ mod tests {
         assert_eq!(e.code, Code::DependencyRewritten);
         // A label the branch never released.
         let start = BTreeSet::from([(sub.clone(), id("asm"), "B".to_owned())]);
-        let e = lock(&mut Reader::new(&cache), Some(&me), &deps, &start, None).unwrap_err();
+        let e = lock(
+            &mut Reader::new(cache.clone()),
+            Some(&me),
+            &deps,
+            &start,
+            None,
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::LabelNotFound);
         // A project nothing names.
         let start = BTreeSet::from([(ProjectId::from_bytes([5; 16]), id("x"), "A".to_owned())]);
-        let e = lock(&mut Reader::new(&cache), Some(&me), &deps, &start, None).unwrap_err();
+        let e = lock(
+            &mut Reader::new(cache.clone()),
+            Some(&me),
+            &deps,
+            &start,
+            None,
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::DependencyMissing);
     }
 
@@ -341,7 +383,7 @@ mod tests {
         deps.insert(sub.clone(), dep("sub", &url(b.path())));
         deps.insert(lib(), dep("mirror", &url(a.path())));
         let start = BTreeSet::from([(sub, id("asm"), "A".to_owned())]);
-        let l = lock(&mut Reader::new(&cache), None, &deps, &start, None).unwrap();
+        let l = lock(&mut Reader::new(cache.clone()), None, &deps, &start, None).unwrap();
         assert_eq!(l.projects[&lib()].url, url(a.path()));
         assert!(l.projects[&lib()].via.is_empty());
         // Wanted labels come from the parts' instances.
