@@ -1820,7 +1820,10 @@ fn tools_mass_properties_and_clearance_list_their_values() {
     if !gpu() {
         return;
     }
-    let p = two_bolts();
+    // Blocks, not cylinders: a curved body's certified mass and clearance
+    // take tens of seconds in a debug build (#195), and this test is about
+    // the window, not the kernel's bounds.
+    let p = two_bolts_as("box", &["x=6", "y=6", "z=20"]);
     // A third bolt 0.2 mm clear of the first.
     p.ok(&[
         "feature", "add", "frame", "instance", "--id", "b3", "--of", "bolt", "--origin", "6.2,0,0",
@@ -2066,20 +2069,18 @@ fn a_mates_angle_is_edited_in_the_property_panel() {
 
 /// A bolt, and an assembly `frame` placing it twice, 40 mm apart.
 fn two_bolts() -> Project {
+    two_bolts_as("cylinder", &["radius=3", "height=20"])
+}
+
+/// [`two_bolts`] with each bolt's shank a `kind` primitive of `params`.
+fn two_bolts_as(kind: &str, params: &[&str]) -> Project {
     let p = Project::new();
     p.ok(&["part", "create", "bolt"]);
-    p.ok(&[
-        "feature",
-        "add",
-        "bolt",
-        "cylinder",
-        "--id",
-        "shank",
-        "--param",
-        "radius=3",
-        "--param",
-        "height=20",
-    ]);
+    let mut add = vec!["feature", "add", "bolt", kind, "--id", "shank"];
+    for x in params {
+        add.extend(["--param", x]);
+    }
+    p.ok(&add);
     p.ok(&["part", "create", "frame", "--assembly"]);
     p.ok(&[
         "feature", "add", "frame", "instance", "--id", "b1", "--of", "bolt", "--fixed",
