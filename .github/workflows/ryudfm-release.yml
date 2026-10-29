@@ -11,6 +11,8 @@ name: ryudfm release
 on:
   push:
     tags: ["ryudfm-v[0-9]+.[0-9]+.[0-9]+*"]
+    # TEMPORARY: plan 0.D's dry run; reverted before review.
+    branches: ["cox/ryudfm-0d-execute-XKD4SVRF"]
   workflow_dispatch:
 
 env:
