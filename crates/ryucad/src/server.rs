@@ -474,6 +474,46 @@ fn dispatch(
             name,
             expected_revision,
         } => crate::materials::delete(session, &name, expected_revision.as_deref()),
+        Request::AppearanceGet {
+            part,
+            participant,
+            rev,
+        } => {
+            // A participant's appearance is of what its window shows.
+            let part = part.or_else(|| {
+                let l = live.as_deref()?;
+                Some(
+                    l.get(participant.as_deref()?)
+                        .ok()?
+                        .view
+                        .focus
+                        .as_ref()?
+                        .to_string(),
+                )
+            });
+            let (commit, s) = session.at(rev.as_deref())?;
+            noted(crate::appearance::get(s, part.as_deref()), commit)
+        }
+        Request::AppearanceSet {
+            entities,
+            colour,
+            material,
+            opacity,
+            unset,
+            expected_revision,
+        } => {
+            let change = crate::appearance::Change {
+                colour,
+                material,
+                opacity,
+                unset,
+            };
+            crate::appearance::set(session, &entities, &change, expected_revision.as_deref())
+        }
+        Request::AppearanceClear {
+            entities,
+            expected_revision,
+        } => crate::appearance::clear(session, &entities, expected_revision.as_deref()),
         Request::AssemblySolve {
             part,
             moves,
