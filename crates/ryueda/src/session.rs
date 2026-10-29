@@ -65,6 +65,19 @@ impl Session {
         self.refresh_changes().map(drop)
     }
 
+    /// Takes in the files this session just wrote at `written`, as
+    /// `project`: the project already read over them in memory. Reads it
+    /// again only if anything else changed too.
+    pub fn adopt(&mut self, project: Project, written: &[String]) -> Result<()> {
+        let changes = self.stamps.scan(&self.root, listed(&self.root))?;
+        if changes.iter().all(|(p, _)| written.contains(p)) {
+            self.project = project;
+        } else {
+            self.project = load(&self.root, &self.stamps)?;
+        }
+        Ok(())
+    }
+
     /// Every file the project's state depends on, as last read.
     pub fn snapshot(&self) -> Files {
         self.stamps.snapshot(&self.root)
