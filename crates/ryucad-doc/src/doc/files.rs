@@ -42,9 +42,10 @@ pub const MANIFEST_FORMAT: u64 = 3;
 
 /// The newest feature format: 2 adds expressions, sketches and sweeps, 3
 /// operations on solids, 4 an assembly's instances, mates and instance
-/// patterns, 5 imports. A feature is written
-/// at the lowest format that holds it, so one with only literals stays 1.
-pub const FEATURE_FORMAT: u64 = 5;
+/// patterns, 5 imports, 6 instances of other projects' parts. A feature
+/// is written at the lowest format that holds it, so one with only
+/// literals stays 1.
+pub const FEATURE_FORMAT: u64 = 6;
 
 pub const PROJECT_KIND: &str = "ryucad.project";
 pub const PART_KIND: &str = "ryucad.part";
@@ -523,12 +524,15 @@ pub fn manifest_format(v: &Value) -> u64 {
 }
 
 /// The lowest format that holds a feature's JSON, judged from the JSON
-/// alone, as [`Feature::format`] judges a loaded feature: imports are new
-/// in format 5, instances, mates and instance patterns in format 4, operations on solids, booleans, fillets, chamfers,
+/// alone, as [`Feature::format`] judges a loaded feature: instances of
+/// other projects' parts are new in format 6, imports in format 5, instances, mates and instance patterns in format 4, operations on solids, booleans, fillets, chamfers,
 /// holes and patterns are new in format 3, sketches
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
+    if v.get("type").and_then(Value::as_str) == Some("instance") && v.get("project").is_some() {
+        return 6;
+    }
     if v.get("type").and_then(Value::as_str) == Some("import")
         || (v.get("type").and_then(Value::as_str) == Some("instance") && v.get("import").is_some())
     {
@@ -693,7 +697,9 @@ impl Feature {
             | Feature::Chamfer(_)
             | Feature::Hole(_)
             | Feature::Pattern(_) => 3,
-            // An imported instance says so in format 5.
+            // An instance of another project's part says so in format 6,
+            // an imported one in format 5.
+            Feature::Instance(i) if i.rev.project().is_some() => 6,
             Feature::Instance(i) if i.import.is_some() => 5,
             Feature::Instance(_) | Feature::Mate(_) | Feature::InstancePattern(_) => 4,
             Feature::Import(_) => 5,
@@ -1358,7 +1364,7 @@ mod tests {
                 "/placement/origin/1",
             ),
             ("/extra", json!(1), Code::InvalidDocument, "/extra"),
-            ("/format", json!(6), Code::FormatTooNew, ""),
+            ("/format", json!(7), Code::FormatTooNew, ""),
             (
                 "/kind",
                 json!("ryucad.part"),
