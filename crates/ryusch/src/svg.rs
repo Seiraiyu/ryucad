@@ -215,6 +215,60 @@ fn label_el(out: &mut String, f: &Frame, kind: LabelKind, name: &str, at: Point,
 /// Draws the sheets `which` (all when empty) of a block's layout, side by
 /// side as the canvas places them.
 pub fn draw(block: &Block, layout: &Layout, which: &[&str]) -> String {
+    draw_in(block, layout, which, None)
+}
+
+/// Where the sheets `which` (all when empty) draw anything, on the
+/// canvas: parts, text, labels and wires, a few steps round them.
+pub fn drawn(block: &Block, layout: &Layout, which: &[&str]) -> Option<Rect> {
+    let on = |s: &str| which.is_empty() || which.contains(&s);
+    let at = |s: &str| layout.sheets.get(s).map_or([0, 0], |x| x.at);
+    let mut boxes: Vec<Rect> = Vec::new();
+    for part in &block.parts {
+        let Some(x) = layout.placed.get(&part.key).filter(|x| on(&x.sheet)) else {
+            continue;
+        };
+        let o = at(&x.sheet);
+        boxes.push(
+            Shape::of(part, crate::geom::Place::new(x.at, x.rotation, x.mirror))
+                .extent
+                .shift(o),
+        );
+        if let Some(fields) = layout.text.get(&part.key) {
+            for (field, v) in [("refdes", &part.refdes), ("value", &part.value)] {
+                if let Some(p) = fields.get(field) {
+                    boxes.push(font::text_box(v, SIZE, *p, font::Anchor::Start).shift(o));
+                }
+            }
+        }
+    }
+    for (key, list) in &layout.labels {
+        let name = block
+            .net(key)
+            .map_or(key.as_str(), |n| block.nets[n].name.as_str());
+        for l in list.iter().filter(|l| on(&l.sheet)) {
+            boxes.push(label::label_box(l.kind, name, l.at, l.side).shift(at(&l.sheet)));
+        }
+    }
+    for by_sheet in layout.routes.values() {
+        for (s, runs) in by_sheet.iter().filter(|(s, _)| on(s)) {
+            for run in runs {
+                boxes.extend(Rect::of(run.iter().copied()).map(|r| r.shift(at(s))));
+            }
+        }
+    }
+    boxes
+        .into_iter()
+        .reduce(Rect::union)
+        .map(|r| r.grow(4 * GRID))
+}
+
+/// [`draw`], its view cropped to what it draws ([`drawn`]).
+pub fn draw_fit(block: &Block, layout: &Layout, which: &[&str]) -> String {
+    draw_in(block, layout, which, drawn(block, layout, which))
+}
+
+fn draw_in(block: &Block, layout: &Layout, which: &[&str], view: Option<Rect>) -> String {
     let sheets: Vec<(&String, &crate::layout::Sheet)> = layout
         .sheets
         .iter()
@@ -228,13 +282,25 @@ pub fn draw(block: &Block, layout: &Layout, which: &[&str]) -> String {
         .unwrap_or(Rect::new([0, 0], block.sheet))
         .grow(pad);
     let mut out = String::new();
+    // The view: the whole canvas, or a box on it (y down from the top).
+    let (vx, vy, vw, vh) = match view {
+        Some(v) => (
+            v.min[0] - bounds.min[0],
+            bounds.max[1] - v.max[1],
+            v.width(),
+            v.height(),
+        ),
+        None => (0, 0, bounds.width(), bounds.height()),
+    };
     let _ = writeln!(
         out,
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {} {}\" width=\"{}mm\" height=\"{}mm\" font-family=\"Inter\">",
-        mm(bounds.width()),
-        mm(bounds.height()),
-        mm(bounds.width()),
-        mm(bounds.height())
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{} {} {} {}\" width=\"{}mm\" height=\"{}mm\" font-family=\"Inter\">",
+        mm(vx),
+        mm(vy),
+        mm(vw),
+        mm(vh),
+        mm(vw),
+        mm(vh)
     );
     let _ = writeln!(
         out,
@@ -276,7 +342,11 @@ pub fn draw(block: &Block, layout: &Layout, which: &[&str]) -> String {
             for g in &part.graphics {
                 graphic(&mut out, &f, &shape, g);
             }
-            let names = part.pins.len() > 2 && !matches!(part.kind, PartKind::Port { .. });
+            let names = match part.kind {
+                PartKind::Port { .. } => false,
+                PartKind::Block => true,
+                PartKind::Symbol { .. } => part.pins.len() > 2,
+            };
             for (k, pin) in part.pins.iter().enumerate() {
                 let at = shape.pins[k];
                 if at.base != at.end {

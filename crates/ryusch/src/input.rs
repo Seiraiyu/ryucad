@@ -6,7 +6,7 @@ use crate::layout::{Instruction, Layout};
 use std::collections::BTreeMap;
 
 /// One block to lay out.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Block {
     /// What sheets' text calls it.
     pub name: String,
