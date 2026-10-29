@@ -434,6 +434,10 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// The project loaded from nothing: every file's faults and every
+    /// design's ERC; `check_failed` on any error.
+    #[serde(rename = "check")]
+    Check {},
     #[serde(rename = "activity.log")]
     ActivityLog {
         #[serde(default, skip_serializing_if = "Option::is_none")]
