@@ -1094,6 +1094,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dashmap"
+version = "6.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6361d5c062261c78a176addb82d4c821ae42bed6089de0e12603cd25de2059c"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "defmt"
 version = "0.3.101"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1793,24 +1807,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2156d2e07fc3afa7632a82bf3cb0db91f995645a2852f642105c9ac9b52e1cb2"
 dependencies = [
  "gix-actor",
+ "gix-attributes",
+ "gix-command",
  "gix-commitgraph",
  "gix-config",
+ "gix-credentials",
  "gix-date",
  "gix-diff",
  "gix-discover",
  "gix-error",
+ "gix-filter",
  "gix-fs",
  "gix-glob",
  "gix-hash",
  "gix-hashtable",
+ "gix-ignore",
  "gix-index",
  "gix-lock",
+ "gix-negotiate",
  "gix-note",
  "gix-object",
  "gix-odb",
  "gix-pack",
  "gix-parallel",
  "gix-path",
+ "gix-pathspec",
+ "gix-prompt",
  "gix-protocol",
  "gix-quote",
  "gix-ref",
@@ -1819,12 +1841,15 @@ dependencies = [
  "gix-revwalk",
  "gix-sec",
  "gix-shallow",
+ "gix-submodule",
  "gix-tempfile",
  "gix-trace",
+ "gix-transport",
  "gix-traverse",
  "gix-url",
  "gix-utils",
  "gix-validate",
+ "gix-worktree",
  "gix-worktree-stream",
  "gix-zlib",
  "nonempty",
@@ -1936,6 +1961,26 @@ dependencies = [
  "gix-path",
  "gix-utils",
  "libc",
+]
+
+[[package]]
+name = "gix-credentials"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba790d296ded4bcfe485f761a65b8659fcccad825ff59a3acc38578a86f812de"
+dependencies = [
+ "bstr",
+ "gix-command",
+ "gix-config-value",
+ "gix-date",
+ "gix-error",
+ "gix-path",
+ "gix-prompt",
+ "gix-quote",
+ "gix-sec",
+ "gix-trace",
+ "gix-url",
+ "percent-encoding",
 ]
 
 [[package]]
@@ -2060,6 +2105,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gix-ignore"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb1c93f60845d493a72fde38ae237498bc4e4464f45afa4af23e53f8295a3ba1"
+dependencies = [
+ "bstr",
+ "gix-glob",
+ "gix-path",
+ "gix-trace",
+ "unicode-bom",
+]
+
+[[package]]
 name = "gix-index"
 version = "0.57.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2112,6 +2170,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "gix-negotiate"
+version = "0.37.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29ddfb0d6da849bd938d929336e07c1f26970d9f6ec59621df74ec3f79c128ea"
+dependencies = [
+ "bitflags 2.13.2",
+ "gix-commitgraph",
+ "gix-date",
+ "gix-error",
+ "gix-hash",
+ "gix-object",
+ "gix-revwalk",
+]
+
+[[package]]
 name = "gix-note"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2130,10 +2203,13 @@ checksum = "f0e38f50177e211642af154f9a7f710b7a3a637e635f9b6adb9d51973b0f9209"
 dependencies = [
  "bstr",
  "gix-actor",
+ "gix-command",
  "gix-date",
  "gix-error",
  "gix-hash",
  "gix-hashtable",
+ "gix-path",
+ "gix-tempfile",
  "gix-utils",
  "gix-validate",
  "itoa",
@@ -2180,10 +2256,12 @@ dependencies = [
  "gix-object",
  "gix-parallel",
  "gix-path",
+ "gix-tempfile",
  "gix-trace",
  "gix-utils",
  "gix-zlib",
  "memmap2",
+ "parking_lot",
  "smallvec",
 ]
 
@@ -2224,18 +2302,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "gix-pathspec"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e3b7f03e516a8435d18c3cc2d446925940c81d409145ac21edb5a576f0625e4"
+dependencies = [
+ "bitflags 2.13.2",
+ "bstr",
+ "gix-attributes",
+ "gix-config-value",
+ "gix-error",
+ "gix-glob",
+ "gix-path",
+]
+
+[[package]]
+name = "gix-prompt"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f26063489b415c40bd960ec488251d77d4cfe3cf5ca4331e2122c0c726bcc2d"
+dependencies = [
+ "gix-command",
+ "gix-config-value",
+ "gix-error",
+ "parking_lot",
+ "rustix 1.1.5",
+]
+
+[[package]]
 name = "gix-protocol"
 version = "0.67.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "832b5dc46a3c0a6f6fa8f8e571c11074add4b545c6789799ae6d6c36ae1a294e"
 dependencies = [
  "bstr",
+ "gix-credentials",
  "gix-date",
  "gix-error",
  "gix-hash",
+ "gix-lock",
  "gix-macros",
+ "gix-negotiate",
+ "gix-object",
  "gix-ref",
+ "gix-refspec",
+ "gix-revwalk",
  "gix-shallow",
+ "gix-trace",
  "gix-transport",
  "gix-utils",
  "nonempty",
@@ -2345,11 +2458,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "gix-submodule"
+version = "0.36.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d945257bd0d624ca844a5a36c79d748df080f355b0ac92d68793875aa529a3f"
+dependencies = [
+ "bstr",
+ "gix-config",
+ "gix-error",
+ "gix-path",
+ "gix-pathspec",
+ "gix-refspec",
+ "gix-url",
+]
+
+[[package]]
 name = "gix-tempfile"
 version = "26.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e9275c8ae0646d840ae0156d3f90d39b7beea6e31a398afb9ee72feb293a269c"
 dependencies = [
+ "dashmap",
  "gix-fs",
  "libc",
  "parking_lot",
@@ -2434,6 +2563,25 @@ checksum = "cbcd59cc52742468bc5c8a0e7123390d154f45e6cbd37461b0dcecdc681f2179"
 dependencies = [
  "bstr",
  "gix-error",
+]
+
+[[package]]
+name = "gix-worktree"
+version = "0.58.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a285c0f6b41e504e8bb81ca3f861c4da00cb3d5ced3210a4591112f22da6d38f"
+dependencies = [
+ "bstr",
+ "gix-attributes",
+ "gix-error",
+ "gix-fs",
+ "gix-glob",
+ "gix-hash",
+ "gix-ignore",
+ "gix-index",
+ "gix-object",
+ "gix-path",
+ "gix-validate",
 ]
 
 [[package]]
@@ -2626,6 +2774,12 @@ checksum = "47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606"
 dependencies = [
  "byteorder",
 ]
+
+[[package]]
+name = "hashbrown"
+version = "0.14.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
 
 [[package]]
 name = "hashbrown"
