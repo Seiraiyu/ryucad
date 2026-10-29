@@ -524,6 +524,67 @@ fn primitives_round_trip_through_seams() {
 }
 
 #[test]
+fn seamed_shapes_say_where_their_entities_come_from() {
+    let k = OpKey(1);
+    for b in [
+        primitive::block(k, 1.0, 2.0, 3.0, &tilted()).unwrap().0,
+        primitive::cylinder(k, 1.0, 2.0, &tilted()).unwrap().0,
+        primitive::sphere(k, 1.0, &tilted()).unwrap().0,
+        primitive::torus(k, 2.0, 0.5, &tilted()).unwrap().0,
+    ] {
+        let (s, o) = seamed_with_origins(&b, 1e-7).unwrap();
+        assert_eq!(s, seamed(&b, 1e-7).unwrap());
+        assert_eq!(o.faces.len(), s.faces.len());
+        assert_eq!(o.edges.len(), s.edges.len());
+        assert_eq!(o.vertices.len(), s.vertices.len());
+        // Every body face once; every body edge and vertex at least once.
+        let mut faces = o.faces.clone();
+        faces.sort();
+        assert_eq!(faces, b.faces().collect::<Vec<_>>());
+        for e in b.edges() {
+            assert!(o.edges.contains(&Some(e)));
+        }
+        for v in b.vertices() {
+            assert!(o.vertices.contains(&Some(v)));
+        }
+        for (i, edge) in s.edges.iter().enumerate() {
+            match o.edges[i] {
+                // A body edge or a piece of one: on its curve, between
+                // points of it.
+                Some(e) => {
+                    let curve = &b.curves[b.edges[e].curve];
+                    for t in edge.interval {
+                        let p = s.curves[edge.curve].point(t);
+                        assert!(curve.project(p).point.distance(p) < 1e-9);
+                    }
+                }
+                // A seam: one face uses it twice.
+                None => {
+                    let uses = s
+                        .faces
+                        .iter()
+                        .flat_map(|f| &f.loops)
+                        .filter_map(|l| match l {
+                            Loop::Edges(u) => Some(u),
+                            Loop::Vertex(_) => None,
+                        })
+                        .flatten()
+                        .filter(|u| u.edge == i)
+                        .count();
+                    assert_eq!(uses, 2);
+                }
+            }
+        }
+        for (i, v) in s.vertices.iter().enumerate() {
+            match o.vertices[i] {
+                Some(x) => assert_eq!(v.point, b.vertices[x].point),
+                None => assert!(v.seam),
+            }
+        }
+    }
+}
+
+#[test]
 fn seams_and_poles_are_reported() {
     let b = primitive::sphere(OpKey(1), 1.0, &tilted()).unwrap().0;
     let s = seamed(&b, 1e-7).unwrap();
