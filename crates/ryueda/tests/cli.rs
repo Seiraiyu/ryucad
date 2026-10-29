@@ -1247,3 +1247,49 @@ fn nets_and_instances_from_the_cli() {
     let renamed = p.ok(&["net", "rename", "top/dn", "USB_N"]);
     assert_eq!(renamed["net"]["name"], "USB_N");
 }
+
+/// What a design places stays in the library: the library component, and
+/// the pins of its symbol the design connects.
+#[test]
+fn library_objects_a_design_places_stay() {
+    let p = Pair::with_resistor();
+    p.ok(&["block", "create", "Top", "--id", "top"]);
+    p.ok(&["component", "add", "top", "--of", "r_100k", "--id", "r1"]);
+    p.ok(&["connect", "top/r1/1", "N1", "--new"]);
+    let e = p.fails(
+        &[
+            "symbol",
+            "edit",
+            "r",
+            "--ops",
+            r#"[{"op": "remove", "pin": "1"}]"#,
+        ],
+        "has_dependents",
+        1,
+    );
+    assert_eq!(
+        e["details"]["dependents"],
+        json!(["lib/self/libcomp/r_100k", "top/r1/1"])
+    );
+    // A pin the design leaves alone names only the library component.
+    let e = p.fails(
+        &[
+            "symbol",
+            "edit",
+            "r",
+            "--ops",
+            r#"[{"op": "remove", "pin": "2"}]"#,
+        ],
+        "has_dependents",
+        1,
+    );
+    assert_eq!(
+        e["details"]["dependents"],
+        json!(["lib/self/libcomp/r_100k"])
+    );
+    let e = p.fails(&["libcomp", "delete", "r_100k"], "has_dependents", 1);
+    assert_eq!(e["details"]["dependents"], json!(["top/r1"]));
+    p.ok(&["component", "delete", "top/r1"]);
+    p.ok(&["libcomp", "delete", "r_100k"]);
+    p.ok(&["symbol", "delete", "r"]);
+}
