@@ -700,6 +700,15 @@ enum CacheCmd {
     Stats,
     /// Remove every entry. What they held is rebuilt when next asked for.
     Clear,
+    /// Store the token sent to the shared cache (`cache.remote`), readable
+    /// by you alone; read from standard input without --token.
+    /// RYUCAD_CACHE_TOKEN, when set, is sent instead.
+    Login {
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Remove the stored token.
+    Logout,
 }
 
 #[derive(Subcommand)]
@@ -2356,6 +2365,14 @@ fn request(cmd: &Command) -> Option<Request> {
         },
         Command::Cache(CacheCmd::Stats) => Request::CacheStats {},
         Command::Cache(CacheCmd::Clear) => Request::CacheClear {},
+        Command::Cache(CacheCmd::Login { token }) => Request::CacheLogin {
+            token: token.clone().unwrap_or_else(|| {
+                let mut line = String::new();
+                let _ = std::io::stdin().read_line(&mut line);
+                line.trim().to_owned()
+            }),
+        },
+        Command::Cache(CacheCmd::Logout) => Request::CacheLogout {},
         Command::Config(ConfigCmd::Get { key, scope }) => Request::ConfigGet {
             key: key.clone(),
             scope: scope.get(),

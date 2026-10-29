@@ -560,3 +560,76 @@ fn the_shared_cache_is_set_and_reported_from_the_cli() {
     assert_eq!(s["result"]["remote"], json!({"enabled": false}), "{s}");
     cli(&a, &run, &cache, &["daemon", "stop"]);
 }
+
+#[test]
+fn a_token_is_stored_checked_and_removed_from_the_cli() {
+    let fake = fake_cache::Fake::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (run, cache, a) = (
+        dir.path().join("run"),
+        dir.path().join("cache"),
+        dir.path().join("a"),
+    );
+    plate(&a, &run, &cache);
+    // Its daemon is a development build's: the next is a release's.
+    cli(&a, &run, &cache, &["daemon", "stop"]);
+    let env = [("RYUCAD_CACHE_IDENTITY", RELEASE)];
+    let c = |args: &[&str]| {
+        let v = cli_with(&a, &run, &cache, &env, args);
+        assert_eq!(v["ok"], true, "{args:?}: {v}");
+        v["result"].clone()
+    };
+    c(&["config", "set", "cache.remote", &fake.url]);
+    let token = run.with_file_name("config").join("cache-token");
+    let r = c(&["cache", "login", "--token", fake_cache::READ]);
+    assert_eq!(r["token"], "file");
+    assert_eq!(r["server"], json!({"write": false, "entries": 0}), "{r}");
+    assert_eq!(r["remote"]["token"], true);
+    assert_eq!(std::fs::read_to_string(&token).unwrap(), "read-token\n");
+    // From standard input, as a person types it.
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryucad"))
+        .args(["cache", "login"])
+        .current_dir(&a)
+        .env("RYUCAD_RUNTIME_DIR", &run)
+        .env("RYUCAD_CONFIG_DIR", run.with_file_name("config"))
+        .env("RYUCAD_CACHE_DIR", &cache)
+        .env("RYUCAD_CACHE_IDENTITY", RELEASE)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    writeln!(child.stdin.take().unwrap(), "{}", fake_cache::WRITE).unwrap();
+    let out: Value = serde_json::from_slice(&child.wait_with_output().unwrap().stdout).unwrap();
+    assert_eq!(out["result"]["server"]["write"], true, "{out}");
+    // A token the server doesn't know is stored, and said so.
+    let r = c(&["cache", "login", "--token", "nobody"]);
+    assert_eq!(r["server"]["error"]["code"], "cache_remote_refused", "{r}");
+    let bad = cli_with(
+        &a,
+        &run,
+        &cache,
+        &env,
+        &["cache", "login", "--token", "two words"],
+    );
+    assert_eq!(bad["error"]["code"], "invalid_param", "{bad}");
+    let r = c(&["cache", "logout"]);
+    assert_eq!(r["token"], Value::Null);
+    assert!(!token.exists());
+    // The variable wins, and the answer says so.
+    let env = [
+        ("RYUCAD_CACHE_IDENTITY", RELEASE),
+        ("RYUCAD_CACHE_TOKEN", fake_cache::WRITE),
+        ("RYUCAD_NO_DAEMON", "1"),
+    ];
+    let v = cli_with(
+        &a,
+        &run,
+        &cache,
+        &env,
+        &["cache", "login", "--token", fake_cache::READ],
+    );
+    assert_eq!(v["result"]["overridden_by"], "RYUCAD_CACHE_TOKEN", "{v}");
+    assert_eq!(v["result"]["server"]["write"], true);
+    cli(&a, &run, &cache, &["daemon", "stop"]);
+}

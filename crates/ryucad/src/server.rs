@@ -909,6 +909,14 @@ fn dispatch(
             let removed = disk.map(crate::cache::Disk::clear).unwrap_or_default();
             Ok(cache_stats(disk, Some(removed)))
         }
+        Request::CacheLogin { token } => {
+            crate::cache::token::store(Some(token.trim()))?;
+            cache_login(session.disk().map(|d| d.as_ref()))
+        }
+        Request::CacheLogout {} => {
+            crate::cache::token::store(None)?;
+            cache_login(session.disk().map(|d| d.as_ref()))
+        }
         Request::ConfigGet { key, scope } => {
             let scope = scope.as_deref().map(config::Scope::parse).transpose()?;
             let mut v = config::get(
@@ -1173,6 +1181,33 @@ fn cache_stats(disk: Option<&crate::cache::Disk>, removed: Option<crate::cache::
     let mut v = local_stats(disk, removed);
     v["remote"] = remote_stats(disk);
     v
+}
+
+/// `cache.login`'s and `cache.logout`'s answer, the token as it now is
+/// put behind the daemon's cache: where the token is read from, what the
+/// server says it allows (or why it couldn't say), and the remote's state.
+fn cache_login(disk: Option<&crate::cache::Disk>) -> Result<Value> {
+    use crate::cache::token;
+    if let Some(d) = disk {
+        d.set_remote(crate::cache::remote_preference(&d.identity()));
+    }
+    let from = token::token().map(|(_, o)| o.as_str());
+    let mut v = json!({
+        "file": token::path()?,
+        "token": from,
+        "remote": remote_stats(disk),
+    });
+    // The variable wins over the file.
+    if from == Some("variable") {
+        v["overridden_by"] = json!(token::TOKEN_VAR);
+    }
+    if let Some(r) = disk.and_then(crate::cache::Disk::remote) {
+        v["server"] = match r.info() {
+            Ok(info) => json!({"write": info["write"], "entries": info["entries"]}),
+            Err(e) => json!({"error": e}),
+        };
+    }
+    Ok(v)
 }
 
 /// What `cache.stats` says of the remote: what it has done in this
