@@ -700,6 +700,20 @@ pub fn check(p: &Prim) -> Summary {
             _ => true,
         };
         assert!(ok, "face {f}'s range {lo:?} {hi:?}");
+        // Each periodic direction's band starts in its first turn: SMLib
+        // frees an array twice rebuilding a torus over a band from 2π.
+        let first = |x: f64| (-1e-9..turn - 1e-6).contains(&x);
+        let ok = match stypes[f].as_str() {
+            "BrepSurfaceSphereAPI" | "BrepSurfaceCylinderAPI" | "BrepSurfaceConeAPI" => {
+                first(lo[0])
+            }
+            "BrepSurfaceTorusAPI" => first(lo[0]) && first(lo[1]),
+            _ => true,
+        };
+        assert!(
+            ok,
+            "face {f}'s range {lo:?} {hi:?} starts past its first turn"
+        );
     }
     for e in 0..edges {
         if ctypes[e] == "BrepCurve3dCircleAPI" || ctypes[e] == "BrepCurve3dEllipseAPI" {

@@ -637,6 +637,28 @@ fn place(loops: &mut [LoopOut], surface: &Surface, tolerance: f64) -> Option<()>
         if !placed {
             return None;
         }
+        // The band moved by whole periods to start in the domain's first
+        // period (a start a rounding error short of one counts as there):
+        // SMLib frees an array twice rebuilding a torus over a band from 2π.
+        let lo = loops
+            .iter()
+            .flat_map(|l| match l {
+                LoopOut::Edges(u) => u.as_slice(),
+                LoopOut::Vertex(_) => &[],
+            })
+            .map(|x| {
+                let b = x.uv.bounds(x.uv.domain());
+                if j == 0 { b.min().x } else { b.min().y }
+            })
+            .fold(f64::INFINITY, f64::min);
+        let by = -((lo - surface.domain()[j][0]) / p + 1e-9).floor() * p;
+        if lo.is_finite() && by != 0.0 {
+            for l in loops.iter_mut() {
+                if let LoopOut::Edges(uses) = l {
+                    uses.iter_mut().for_each(|x| shift(x, by));
+                }
+            }
+        }
     }
     Some(())
 }
