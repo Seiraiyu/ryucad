@@ -509,15 +509,16 @@ impl Scene {
         }
     }
 
-    /// Draws everything the model draws, at the user's display quality,
-    /// culling nothing: [`Scene::sync_drawn`] of all of it.
+    /// Draws everything the model draws, at the level picking reads (the
+    /// user's display quality once the window has it), culling nothing:
+    /// [`Scene::sync_drawn`] of all of it.
     pub fn sync(&mut self, device: &wgpu::Device, model: &Model, reference: [f64; 3]) {
         let all: Vec<Drawn> = model
             .drawn()
             .map(|(key, mesh, pose)| Drawn {
                 key: key.clone(),
                 mesh: Arc::clone(mesh),
-                level: model.base,
+                level: crate::core::lod::level_of(mesh, model.base),
                 base: Arc::clone(mesh),
                 pose,
             })

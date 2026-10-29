@@ -100,10 +100,11 @@ impl Run {
 
 /// What the window's open costs as it asks since plan 7.A: `part.list`,
 /// the report of the root it shows (every occurrence), then each body's
-/// display mesh, 256 bodies to a request, one request after another on
-/// one connection. Returns
-/// the seconds until the report, until every mesh, and how many bodies.
-fn window_open(root: &Path) -> (f64, f64, usize) {
+/// coarse display mesh (the view draws more than the app's
+/// `COARSE_FIRST`), compact, 256 bodies to a request, one request after
+/// another on one connection. Returns the seconds until the report, until
+/// every mesh, how many bodies and how many bytes.
+fn window_open(root: &Path) -> (f64, f64, usize, usize) {
     use ryucad::proto::{Request, Transfer};
     let mut conn = ryucad::client::Daemon::at(&ryucad_exe())
         .unwrap()
@@ -128,18 +129,25 @@ fn window_open(root: &Path) -> (f64, f64, usize) {
         }
     }
     let paths: Vec<String> = bodies.values().cloned().collect();
+    let mut bytes = 0;
     for batch in paths.chunks(256) {
         let req = Request::MeshGet {
             part: "root".into(),
             feature: None,
             features: batch.to_vec(),
-            quality: None,
-            transfer: Some(Transfer::Binary),
+            quality: Some("coarse".into()),
+            transfer: Some(Transfer::Compact),
             rev: None,
         };
-        conn.call_answer(&req).unwrap().unwrap();
+        bytes += conn
+            .call_answer(&req)
+            .unwrap()
+            .unwrap()
+            .binary
+            .unwrap()
+            .len();
     }
-    (shown, t.elapsed().as_secs_f64(), bodies.len())
+    (shown, t.elapsed().as_secs_f64(), bodies.len(), bytes)
 }
 
 fn ryucad_exe() -> PathBuf {
@@ -252,10 +260,11 @@ fn the_benchmark_project_measured() {
     // What the window asks for when it opens: with no meshes made yet,
     // then from a new daemon over the cache they were written to.
     for when in ["meshed now", "from the cache"] {
-        let (shown, meshed, bodies) = window_open(&run.root);
+        let (shown, meshed, bodies, bytes) = window_open(&run.root);
         say(&format!(
             "the window's open ({when}): the root's report in {shown:.1} s, every one of its \
-             {bodies} bodies' meshes in {meshed:.1} s (peak {:.0} MiB)",
+             {bodies} bodies' coarse meshes in {meshed:.1} s, {:.0} MB (peak {:.0} MiB)",
+            bytes as f64 / 1e6,
             run.peak_mib()
         ));
         run.ok(&["daemon", "stop"]);

@@ -5,6 +5,10 @@
 //! fine. An occurrence whose box lies outside the view isn't drawn. A
 //! level not fetched yet is asked for, nearest occurrences first, and
 //! the body is drawn at the level it has meanwhile, so nothing stalls.
+//! A view drawing more than [`COARSE_FIRST`] occurrences fetches every
+//! body coarse first ([`Model::fetch_level`]), so its first full frame
+//! comes from a tenth of the bytes, and finer levels follow where they
+//! show; a mesh's level is read from it ([`level_of`]).
 //! What the GPU holds stays within `display.gpu_memory` ([`within`]):
 //! past it, the farthest bodies drop their finer levels first, then the
 //! farthest go undrawn.
@@ -20,9 +24,27 @@ pub const COARSE_BELOW: f64 = 64.0;
 /// Over this many, fine.
 pub const FINE_ABOVE: f64 = 512.0;
 
+/// Over this many occurrences of solids drawn, bodies are fetched coarse
+/// first. Design 72's 1,001 occurrences stay under it.
+pub const COARSE_FIRST: usize = 2_000;
+
+/// The level a mesh was made at, read from its angle (each level has its
+/// own, [`Quality::angle`]); `base` for one with no mesh, or an angle no
+/// level makes.
+pub fn level_of(m: &WireBody, base: Quality) -> Quality {
+    let Ok(w) = &m.mesh else {
+        return base;
+    };
+    [Quality::Coarse, Quality::Normal, Quality::Fine]
+        .into_iter()
+        .find(|q| q.angle() == w.angle)
+        .unwrap_or(base)
+}
+
 /// One occurrence to draw this frame: its key, the mesh at the level it
-/// is drawn at, that level, the mesh at the user's display quality (what
-/// picking and painting index faces in), and where it is.
+/// is drawn at, that level, the mesh picking and painting index faces in
+/// (at the user's display quality once the window has it, else the
+/// first fetched), and where it is.
 #[derive(Clone, Debug)]
 pub struct Drawn {
     pub key: BodyKey,
@@ -89,7 +111,7 @@ pub fn choose(
                 let rel = [0, 1, 2].map(|k| middle[k] - pr.camera.eye[k]);
                 let depth = rel[0] * forward[0] + rel[1] * forward[1] + rel[2] * forward[2];
                 wanted.push((depth, key.clone(), level));
-                (Arc::clone(mesh), model.base)
+                (Arc::clone(mesh), level_of(mesh, model.base))
             }
         };
         drawn.push(Drawn {
@@ -167,7 +189,7 @@ pub fn within(
         if rank(d.level) > rank(model.base) {
             total -= take(&mut held, d);
             d.mesh = Arc::clone(&d.base);
-            d.level = model.base;
+            d.level = level_of(&d.base, model.base);
             total += add(&mut held, d);
         }
     }
@@ -285,6 +307,61 @@ mod tests {
         // The display quality changing drops every level.
         m.clear_meshes();
         assert!(m.levels.is_empty() && m.levels_asked.is_empty());
+    }
+
+    /// [`cube`] made at `level`, as its angle says.
+    fn at(feature: &str, level: Quality) -> WireBody {
+        let mut b = cube(feature, 0.0);
+        if let Ok(w) = &mut b.mesh {
+            w.angle = level.angle();
+        }
+        b
+    }
+
+    #[test]
+    fn a_large_view_draws_coarse_first_meshes_until_finer_ones_come() {
+        use Quality::*;
+        assert_eq!(level_of(&at("s", Coarse), Normal), Coarse);
+        assert_eq!(level_of(&at("s", Fine), Normal), Fine);
+        assert_eq!(
+            level_of(&cube("s", 0.0), Normal),
+            Normal,
+            "no level's angle"
+        );
+        // Fetched coarse first: over 2,000 occurrences drawn.
+        assert_eq!(row(&[0.0; COARSE_FIRST]).fetch_level(), Normal);
+        let mut m = row(&[0.0; COARSE_FIRST + 1]);
+        assert_eq!(m.fetch_level(), Coarse);
+        m = row(&[0.0, 1.0, -1.0]);
+        let first = Arc::new(at("c0/s", Coarse));
+        m.meshes.values_mut().for_each(|b| *b = Arc::clone(&first));
+        let camera = ryucad::view::Camera {
+            eye: [-0.01, 0.005, 0.005],
+            target: [1.0, 0.005, 0.005],
+            up: [0.0, 0.0, 1.0],
+            projection: ryucad::view::Projection::Perspective { fov_deg: 30.0 },
+        };
+        let pr = Projector::new(&camera, 1.0, [0.5, 0.0, 0.0], 1.0);
+        let (drawn, wanted) = choose(&m, &Picker::new(&m), &pr, 400.0);
+        // Both drawn coarse meanwhile; the far one is where it should be,
+        // and only the near one's fine level is wanted.
+        assert!(
+            drawn
+                .iter()
+                .all(|d| d.level == Coarse && Arc::ptr_eq(&d.mesh, &first))
+        );
+        let row = |s: &str| ("row".to_owned(), s.to_owned());
+        assert_eq!(wanted, [(row("c0/s"), Fine)]);
+        assert!(m.ask_levels(vec![(row("c1/s"), Coarse)]).is_empty());
+        // The user's display quality comes: picking and painting read it,
+        // and the far one is still drawn coarse.
+        assert!(m.take_level(at("c0/s", Normal), Normal));
+        assert!(m.drawn().all(|(_, b, _)| level_of(b, m.base) == Normal));
+        let (drawn, _) = choose(&m, &Picker::new(&m), &pr, 400.0);
+        assert_eq!(drawn[1].level, Coarse);
+        assert!(Arc::ptr_eq(&drawn[1].mesh, &first));
+        assert_eq!(level_of(&drawn[1].base, m.base), Normal);
+        assert_eq!(drawn[0].level, Normal, "fine not here yet");
     }
 
     #[test]
