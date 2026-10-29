@@ -347,16 +347,21 @@ fn watchers_hear_of_library_changes() {
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    assert_eq!(
-        p.run_in(
-            &p.daemon,
-            "board",
-            &["lib", "add", "passives", "../passives"]
-        )
-        .0,
-        0
-    );
+    // Nothing says when the watcher has subscribed (it is attached
+    // first), so the library is named, and unnamed by undo, until the
+    // watcher has heard one change: each moves the same revisions. (A
+    // sleep before the write was a guess a busy machine broke, as it
+    // once did ryucad's.)
+    let mut named = false;
+    while !waiting.is_finished() {
+        let args: &[&str] = match named {
+            false => &["lib", "add", "passives", "../passives"],
+            true => &["undo"],
+        };
+        assert_eq!(p.run_in(&p.daemon, "board", args).0, 0, "{args:?}");
+        named = !named;
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     let (code, v) = parse(waiting.join().unwrap(), &p.daemon);
     assert_eq!(code, 0, "{v}");
     let notes = v["result"]["notifications"].as_array().unwrap();
