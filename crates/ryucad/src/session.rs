@@ -571,6 +571,37 @@ impl Session {
         None
     }
 
+    /// The feature of `solid`'s whole chain that left it without the
+    /// entity `name` after the feature before it had it, or the feature
+    /// that made it (as this session last saw the name) when its own
+    /// result lacks it, in the cached rebuild: what took away a face an
+    /// appearance entry names.
+    pub fn removed_from(&self, part: &Id, solid: &Id, name: &str) -> Option<Id> {
+        let maker = self
+            .known
+            .get(&(part.clone(), solid.clone()))
+            .and_then(|k| k.get(name))
+            .and_then(|w| w["from"]["feature"].as_str())
+            .and_then(|f| Id::parse(f, "feature").ok());
+        let n = crate::doc::reference::parse_name(name)?;
+        let p = self.project.parts.get(part)?;
+        let result = &self.store.results.get(part)?.1;
+        let solids = crate::solid::Solids::of(p);
+        let mut had = false;
+        for f in solids.chain(solid)? {
+            match result
+                .output(f)
+                .and_then(|o| o.solid(solid))
+                .map(|b| b.body.by_name(n).is_some())
+            {
+                Some(true) => had = true,
+                Some(false) if had || maker.as_ref() == Some(f) => return Some(f.clone()),
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Takes what the revisions' sessions have learnt of names, keeping
     /// what this session knows of a name both saw: a merge's sides built
     /// names its result has lost.

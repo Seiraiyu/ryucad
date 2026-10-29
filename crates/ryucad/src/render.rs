@@ -8,7 +8,10 @@
 //! count. Pixel arithmetic is f32 with no transcendental functions; the
 //! view set-up is f64 through `ryukei::math`. Ghosts are blended after the
 //! model and its silhouettes, nearest ghost first, so their order doesn't
-//! matter.
+//! matter. Translucent faces are blended last and exactly: every one of
+//! their samples in front of the model is kept, and each sample's are
+//! blended back to front by depth (ties in the order they were given), so
+//! their order doesn't matter either.
 
 use crate::error::{Code, Error, Result};
 use crate::view::{Camera, Projection};
@@ -63,6 +66,13 @@ pub struct Geometry {
     /// front of them: the nearest ghost at each sample, so the order of
     /// ghosts doesn't matter.
     pub ghosts: Vec<Triangle>,
+    /// Translucent triangles, each with its opacity in `(0, 1)`: blended
+    /// over everything else where nothing opaque is in front of them,
+    /// back to front.
+    pub translucent: Vec<(Triangle, f32)>,
+    /// Lines on translucent faces, each with its opacity, blended among
+    /// them just in front of the faces they lie on.
+    pub translucent_lines: Vec<(Line, f32)>,
 }
 
 /// Text drawn at a model point, on top of everything.
@@ -373,6 +383,23 @@ struct Band {
     /// there are no ghosts.
     ghost: Vec<Rgb>,
     ghost_depth: Vec<f32>,
+    /// Where translucent samples stop: the model's depth, brought forward
+    /// by the opaque lines drawn over it. Empty when nothing is
+    /// translucent.
+    stop: Vec<f32>,
+    /// Each sample's translucent fragments; empty when nothing is
+    /// translucent.
+    frags: Vec<Vec<Frag>>,
+}
+
+/// A translucent sample: its depth, the order its triangle or line was
+/// given in, its colour and its opacity.
+#[derive(Clone, Copy, Debug)]
+struct Frag {
+    z: f32,
+    order: u32,
+    color: Rgb,
+    alpha: f32,
 }
 
 impl Band {
@@ -385,6 +412,8 @@ impl Band {
             depth: vec![f32::INFINITY; rows * width],
             ghost: Vec::new(),
             ghost_depth: Vec::new(),
+            stop: Vec::new(),
+            frags: Vec::new(),
         }
     }
 
@@ -460,6 +489,43 @@ impl Band {
         });
     }
 
+    /// A translucent triangle: a fragment wherever nothing opaque is in
+    /// front of it.
+    fn translucent_triangle(
+        &mut self,
+        s: [Screen; 3],
+        shade: [f32; 3],
+        color: Rgb,
+        alpha: f32,
+        order: u32,
+    ) {
+        self.fill(s, shade, |b, i, z, light| {
+            if z < b.stop[i] {
+                b.frags[i].push(Frag {
+                    z,
+                    order,
+                    color: color.map(|c| c * light),
+                    alpha,
+                });
+            }
+        });
+    }
+
+    /// Blends each sample's translucent fragments over it, back to front.
+    fn blend_translucent(&mut self) {
+        for (i, list) in self.frags.iter_mut().enumerate() {
+            if list.is_empty() {
+                continue;
+            }
+            list.sort_by(|a, b| b.z.total_cmp(&a.z).then(a.order.cmp(&b.order)));
+            let mut c = self.color[i];
+            for f in list.iter() {
+                c = [0, 1, 2].map(|k| c[k] + f.alpha * (f.color[k] - c[k]));
+            }
+            self.color[i] = c;
+        }
+    }
+
     /// Mixes each sample's nearest ghost into it.
     fn blend_ghosts(&mut self) {
         for (i, gz) in self.ghost_depth.iter().enumerate() {
@@ -474,7 +540,9 @@ impl Band {
 impl Band {
     /// A line segment `width` samples wide, drawn where it isn't behind a
     /// surface (with a little slack, so lines on a surface show).
-    fn segment(&mut self, a: Screen, b: Screen, half: f32, color: Rgb) {
+    /// With `alpha`, the opacity and order of a line on a translucent
+    /// face, it leaves translucent fragments instead.
+    fn segment(&mut self, a: Screen, b: Screen, half: f32, color: Rgb, alpha: Option<(f32, u32)>) {
         let lo_y = (a.y.min(b.y) - half).floor().max(self.y0 as f32) as usize;
         let hi_y = ((a.y.max(b.y) + half)
             .ceil()
@@ -504,7 +572,56 @@ impl Band {
                 if z > self.depth[i] + 4e-3 * z.abs() + 1e-9 {
                     continue;
                 }
-                self.color[i] = color;
+                match alpha {
+                    None => {
+                        self.color[i] = color;
+                        if !self.stop.is_empty() {
+                            self.stop[i] = self.stop[i].min(z);
+                        }
+                    }
+                    // In front of the translucent face it lies on.
+                    Some((alpha, order)) => self.frags[i].push(Frag {
+                        z: z - 4e-3 * z.abs() - 1e-9,
+                        order,
+                        color,
+                        alpha,
+                    }),
+                }
+            }
+        }
+    }
+}
+
+impl Band {
+    /// A polyline, dashed or not, on a screen `size` samples big: drawn,
+    /// or with `alpha` left as translucent fragments.
+    fn line(
+        &mut self,
+        l: &Line,
+        screen: &[Option<Screen>],
+        alpha: Option<(f32, u32)>,
+        size: [usize; 2],
+    ) {
+        let half = l.width * SS as f32 / 2.0;
+        let pts: Vec<Option<Screen>> = l.points.iter().map(|p| screen[*p as usize]).collect();
+        if let [Some(p)] = pts[..] {
+            self.segment(p, p, half, l.color, alpha);
+        }
+        if l.dash {
+            // Each run of points in front of the eye is dashed on its own.
+            let [on, off] = DASH.map(|d| d * SS as f32);
+            for run in pts.split(Option::is_none) {
+                let run: Vec<Screen> = run.iter().flatten().copied().collect();
+                let size = [size[0] as f32, size[1] as f32];
+                for (p, q) in dashes(&run, on, off, size, half + 1.0) {
+                    self.segment(p, q, half, l.color, alpha);
+                }
+            }
+            return;
+        }
+        for pair in pts.windows(2) {
+            if let [Some(p), Some(q)] = pair {
+                self.segment(*p, *q, half, l.color, alpha);
             }
         }
     }
@@ -712,31 +829,35 @@ pub fn render(
                 }
                 b.blend_ghosts();
             }
+            let glass = !geometry.translucent.is_empty() || !geometry.translucent_lines.is_empty();
+            if glass {
+                b.stop = b.depth.clone();
+                b.frags = vec![Vec::new(); b.color.len()];
+            }
             for l in &geometry.lines {
-                let half = l.width * SS as f32 / 2.0;
-                let pts: Vec<Option<Screen>> =
-                    l.points.iter().map(|p| screen[*p as usize]).collect();
-                if let [Some(p)] = pts[..] {
-                    b.segment(p, p, half, l.color);
+                b.line(l, &screen, None, [sw, h * SS]);
+            }
+            if glass {
+                for (k, (t, alpha)) in geometry.translucent.iter().enumerate() {
+                    let (Some(a), Some(c), Some(d)) = (
+                        screen[t.p[0] as usize],
+                        screen[t.p[1] as usize],
+                        screen[t.p[2] as usize],
+                    ) else {
+                        continue;
+                    };
+                    let s = [
+                        shade(t.n[0], light),
+                        shade(t.n[1], light),
+                        shade(t.n[2], light),
+                    ];
+                    b.translucent_triangle([a, c, d], s, t.color, *alpha, k as u32);
                 }
-                if l.dash {
-                    // Each run of points in front of the eye is dashed on
-                    // its own.
-                    let [on, off] = DASH.map(|d| d * SS as f32);
-                    for run in pts.split(Option::is_none) {
-                        let run: Vec<Screen> = run.iter().flatten().copied().collect();
-                        let size = [sw as f32, (h * SS) as f32];
-                        for (p, q) in dashes(&run, on, off, size, half + 1.0) {
-                            b.segment(p, q, half, l.color);
-                        }
-                    }
-                    continue;
+                let after = geometry.translucent.len() as u32;
+                for (k, (l, alpha)) in geometry.translucent_lines.iter().enumerate() {
+                    b.line(l, &screen, Some((*alpha, after + k as u32)), [sw, h * SS]);
                 }
-                for pair in pts.windows(2) {
-                    if let [Some(p), Some(q)] = pair {
-                        b.segment(*p, *q, half, l.color);
-                    }
-                }
+                b.blend_translucent();
             }
             for (i, px) in out.chunks_mut(4).enumerate() {
                 let (x, y) = (i % w, i / w);
@@ -876,6 +997,8 @@ pub(crate) mod tests {
             lines: Vec::new(),
             labels: Vec::new(),
             ghosts: Vec::new(),
+            translucent: Vec::new(),
+            translucent_lines: Vec::new(),
         }
     }
 
@@ -916,6 +1039,75 @@ pub(crate) mod tests {
         let mut g = cube();
         moved(&mut g, 0.6, COMPARE_GHOST);
         moved(&mut g, -0.7, COMPARE_REMOVED);
+        let c = camera([2.0, -3.0, 1.5]);
+        let one = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let many = rayon::ThreadPoolBuilder::new()
+            .num_threads(7)
+            .build()
+            .unwrap();
+        let a = one.install(|| render(&g, &c, 200, 150, Options::default()).unwrap());
+        let b = many.install(|| render(&g, &c, 200, 150, Options::default()).unwrap());
+        assert_eq!(a, b);
+    }
+
+    /// A unit cube moved along y, as translucent triangles of `color` and
+    /// `alpha`.
+    fn glass(g: &mut Geometry, dy: f64, color: Rgb, alpha: f32) {
+        let plain = cube();
+        let base = g.positions.len() as u32;
+        g.positions
+            .extend(plain.positions.iter().map(|p| [p[0], p[1] + dy, p[2]]));
+        g.translucent.extend(plain.triangles.iter().map(|t| {
+            (
+                Triangle {
+                    p: t.p.map(|i| base + i),
+                    n: t.n,
+                    color,
+                },
+                alpha,
+            )
+        }));
+    }
+
+    #[test]
+    fn translucent_faces_blend_over_what_is_behind_them_in_any_order() {
+        let c = camera([0.5, -5.0, 0.5]);
+        let plain = render(&cube(), &c, 128, 64, bare()).unwrap();
+        // A red pane in front of the cube, half opaque: the cube shows
+        // through it, reddened.
+        let mut g = cube();
+        glass(&mut g, -1.5, [1.0, 0.0, 0.0], 0.5);
+        let img = render(&g, &c, 128, 64, bare()).unwrap();
+        let (p, q) = (at(&plain, 64, 32), at(&img, 64, 32));
+        assert!(q[0] > p[0] && q[1] < p[1], "{p:?} {q:?}");
+        // Behind the cube, it shows nowhere the cube covers.
+        let mut behind = cube();
+        glass(&mut behind, 1.5, [1.0, 0.0, 0.0], 0.5);
+        let img = render(&behind, &c, 128, 64, bare()).unwrap();
+        assert_eq!(at(&img, 64, 32), p);
+        // Two panes blend alike given in either order.
+        let mut ab = Geometry::default();
+        glass(&mut ab, 0.0, [1.0, 0.0, 0.0], 0.5);
+        glass(&mut ab, -1.5, [0.0, 0.0, 1.0], 0.3);
+        let mut ba = Geometry::default();
+        glass(&mut ba, -1.5, [0.0, 0.0, 1.0], 0.3);
+        glass(&mut ba, 0.0, [1.0, 0.0, 0.0], 0.5);
+        let one = render(&ab, &c, 128, 64, bare()).unwrap();
+        assert_eq!(one, render(&ba, &c, 128, 64, bare()).unwrap());
+        // Blue over red: the nearer pane's colour weighs more than it
+        // would under the farther one.
+        let px = at(&one, 64, 32);
+        assert!(px[2] > 0 && px[0] > 0, "{px:?}");
+    }
+
+    #[test]
+    fn translucent_faces_are_the_same_on_any_number_of_threads() {
+        let mut g = cube();
+        glass(&mut g, -0.6, [0.2, 0.6, 0.9], 0.4);
+        glass(&mut g, -1.4, [0.9, 0.6, 0.2], 0.7);
         let c = camera([2.0, -3.0, 1.5]);
         let one = rayon::ThreadPoolBuilder::new()
             .num_threads(1)
