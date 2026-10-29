@@ -204,6 +204,38 @@ impl Field {
     pub fn mark(&mut self, net: usize, run: &[Point]) -> Result<(), Clash> {
         let nodes = expand(run);
         // Check first, so a clash marks nothing.
+        self.check(net, &nodes)?;
+        self.apply(net, &nodes);
+        Ok(())
+    }
+
+    /// Whether a run of `net` could be marked.
+    pub fn can_mark(&self, net: usize, run: &[Point]) -> bool {
+        self.check(net, &expand(run)).is_ok()
+    }
+
+    /// Marks every run, all or none: a clash puts back the nodes the
+    /// runs before it marked.
+    pub fn mark_all(&mut self, net: usize, runs: &[Vec<Point>]) -> bool {
+        let mut saved: Vec<(usize, Cell)> = Vec::new();
+        for run in runs {
+            let nodes = expand(run);
+            if self.check(net, &nodes).is_err() {
+                for (i, c) in saved.into_iter().rev() {
+                    self.cells[i] = c;
+                }
+                return false;
+            }
+            for n in &nodes {
+                let i = (n.1 * self.cols + n.0) as usize;
+                saved.push((i, self.cells[i].clone()));
+            }
+            self.apply(net, &nodes);
+        }
+        true
+    }
+
+    fn check(&self, net: usize, nodes: &[Node]) -> Result<(), Clash> {
         for (i, &n) in nodes.iter().enumerate() {
             let c = self.at(n).ok_or(Clash(n))?;
             if c.blocked {
@@ -242,6 +274,10 @@ impl Field {
                 return Err(Clash(n));
             }
         }
+        Ok(())
+    }
+
+    fn apply(&mut self, net: usize, nodes: &[Node]) {
         for (i, &n) in nodes.iter().enumerate() {
             let mut want = 0u8;
             if i > 0 {
@@ -259,7 +295,6 @@ impl Field {
                 c.v = Some(net);
             }
         }
-        Ok(())
     }
 
     /// The cheapest path from pin end `from` (leaving it along `side`) to

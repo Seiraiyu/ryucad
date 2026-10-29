@@ -1262,14 +1262,7 @@ fn spanning(ends: &[(Point, Side)]) -> Nm {
 
 /// Marks every run, all or none.
 fn mark_all(field: &mut Field, net: usize, runs: &[Vec<Point>]) -> bool {
-    let mut trial = field.clone();
-    for r in runs {
-        if trial.mark(net, r).is_err() {
-            return false;
-        }
-    }
-    *field = trial;
-    true
+    field.mark_all(net, runs)
 }
 
 /// Routes a net through its pin ends, each joining the tree the ones
@@ -1360,7 +1353,7 @@ fn place_labels(
             if !field.clear(label::label_box(kind, name, at, side)) {
                 return false;
             }
-            stub.is_empty() || field.clone().mark(n, stub).is_ok()
+            stub.is_empty() || field.can_mark(n, stub)
         };
         // The previous label, its stub one of the net's previous runs.
         let before = prev_labels(n)
