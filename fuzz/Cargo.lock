@@ -1795,6 +1795,7 @@ dependencies = [
  "ryupdm",
  "ryusketch",
  "ryustep",
+ "serde",
  "serde_json",
 ]
 

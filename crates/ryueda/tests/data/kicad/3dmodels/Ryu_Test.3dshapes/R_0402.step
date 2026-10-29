@@ -1,0 +1,10 @@
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('R_0402, written for ryueda tests'),'2;1');
+FILE_NAME('R_0402','',(''),(''),'','','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+#1=CARTESIAN_POINT('',(0.,0.,0.));
+ENDSEC;
+END-ISO-10303-21;

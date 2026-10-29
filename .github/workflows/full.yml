@@ -111,6 +111,31 @@ jobs:
       - run: cargo test -p ryueda --release --test bar -- --nocapture
       - run: cargo bench --workspace --no-run
 
+  kicad-corpus:
+    # KiCad 9.0.9's whole symbol, footprint and 3D model libraries (0.7 GB
+    # fetched, 3.4 GB unpacked; never committed), imported by ryueda in
+    # release: every item imports or is a typed refusal, and no fewer
+    # import than crates/ryueda/tests/kicad/pinned.txt records.
+    name: KiCad corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: room on the disk
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Rare runs: their caches would only evict the fast CI's.
+          save-if: false
+      - uses: actions/cache@v4
+        with:
+          path: target/kicad/*.tar.gz
+          key: kicad-${{ hashFiles('crates/ryueda/tests/kicad/pinned.txt') }}
+      - run: sh scripts/fetch-kicad.sh
+      - run: cargo test -p ryueda --release --test kicad_corpus -- --nocapture
+        env:
+          RYUEDA_REQUIRE_KICAD: '1'
+
   cpu-levels:
     # Results must not depend on CPU-level codegen (vectorization, FMA-capable
     # targets). Release builds at higher x86-64 levels must reproduce the

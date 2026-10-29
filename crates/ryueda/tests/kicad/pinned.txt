@@ -1,0 +1,16 @@
+# The pinned KiCad corpus: KiCad 9.0.9's libraries (CC-BY-SA 4.0 with
+# KiCad's exception), fetched by scripts/fetch-kicad.sh into target/kicad
+# (or $RYUEDA_KICAD_CORPUS) and never committed. tests/kicad_corpus.rs
+# imports all of it.
+#
+# fetch <archive> <SHA-256> <URL>: each unpacks to its own folder.
+fetch kicad-symbols-9.0.9.tar.gz 06ef18935edb5aab03708006a37753c607ef2dcd735a8abdf36d816523696516 https://gitlab.com/kicad/libraries/kicad-symbols/-/archive/9.0.9/kicad-symbols-9.0.9.tar.gz
+fetch kicad-footprints-9.0.9.tar.gz f36f804056ebbe36e7fb53e897d20e905c6b5863f7cff43cceccdf54492f7d9a https://gitlab.com/kicad/libraries/kicad-footprints/-/archive/9.0.9/kicad-footprints-9.0.9.tar.gz
+fetch kicad-packages3D-9.0.9.tar.gz 047fb04452806869e5ff06ce1380652401e596b11221d0b366ba48b6adb552ac https://gitlab.com/kicad/libraries/kicad-packages3D/-/archive/9.0.9/kicad-packages3D-9.0.9.tar.gz
+#
+# imports <what> <at least>: how many import, which must not fall. Raise
+# a count when a change imports more.
+imports symbols 10217
+imports components 22172
+imports footprints 15361
+imports models 7047

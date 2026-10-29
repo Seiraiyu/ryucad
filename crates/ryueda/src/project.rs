@@ -517,6 +517,14 @@ impl Project {
             bases.extend(resolve(root, &m).into_values().flatten());
         }
         for base in bases {
+            // `.gitattributes`, which an import writes beside a library's
+            // first model, so undo takes it back too.
+            let attributes = join(&base, crate::kicad::import::GITATTRIBUTES);
+            if let Ok(meta) = std::fs::metadata(crate::session::path_of(root, &attributes))
+                && meta.is_file()
+            {
+                out.push((attributes, meta));
+            }
             if !base.is_empty() {
                 let at = join(&base, MANIFEST);
                 if let Ok(meta) = std::fs::metadata(root.join(&at)) {

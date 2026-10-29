@@ -19,6 +19,7 @@ pub mod edit;
 pub mod erc;
 pub mod fault;
 pub mod footprint;
+pub mod kicad;
 pub mod libcmd;
 pub mod libcomp;
 pub mod library;

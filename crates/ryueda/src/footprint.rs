@@ -394,10 +394,16 @@ pub struct StepModel {
 
 /// Whether ryueda knows `layer`: `copper.top`, `copper.bottom`,
 /// `copper.inner` (every inner layer), `copper.all`, the top and bottom
-/// of `mask`, `paste`, `silk`, `fab`, `courtyard` and `adhesive`, and
-/// `user.1` to `user.45`.
+/// of `mask`, `paste`, `silk`, `fab`, `courtyard` and `adhesive`, `edge`
+/// (the board's outline, cut by the footprint), `margin` (keep clear of
+/// the edge), the documentation layers `drawings`, `comments`, `eco.1`
+/// and `eco.2`, and `user.1` to `user.45`.
 pub fn layer_known(layer: &str) -> bool {
     const SIDED: [&str; 6] = ["mask", "paste", "silk", "fab", "courtyard", "adhesive"];
+    const PLAIN: [&str; 6] = ["edge", "margin", "drawings", "comments", "eco.1", "eco.2"];
+    if PLAIN.contains(&layer) {
+        return true;
+    }
     if let Some(n) = layer.strip_prefix("user.") {
         // Written as the number is: `user.01` isn't `user.1`.
         return !n.starts_with('0')
@@ -804,6 +810,12 @@ pub(crate) mod tests {
             "adhesive.bottom",
             "user.1",
             "user.45",
+            "edge",
+            "margin",
+            "drawings",
+            "comments",
+            "eco.1",
+            "eco.2",
         ] {
             assert!(layer_known(l), "{l}");
         }
@@ -816,6 +828,9 @@ pub(crate) mod tests {
             "user.46",
             "user.01",
             "user.x",
+            "edge.top",
+            "eco.3",
+            "Edge.Cuts",
         ] {
             assert!(!layer_known(l), "{l}");
         }
