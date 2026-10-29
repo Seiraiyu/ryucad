@@ -1,0 +1,105 @@
+# The ODB++ corpus: a block per board, `board <name>`, then what it is
+# (written by hand) and what it reads to (written by the tests).
+#
+#   source <text>            who made it, where it came from, what was done
+#                            to it (as many lines as it needs; CC-BY's
+#                            attribution goes here)
+#   licence <SPDX id>        its text in licenses/<id>.txt; `owner` for the
+#                            owner's own boards
+#   archive <file> <sha256>  the job as an archive in this folder
+#   folder <dir>             the same job unpacked, in this folder
+#   step <name>              the board step, where the rule can't choose
+#   pinned                   fetched and exported by
+#                            scripts/fetch-dfm-corpus.sh from pinned.txt,
+#                            never committed
+#
+# The counts after them are tests/corpus.rs's (committed boards) and
+# tests/pinned.rs's (pinned ones): `UPDATE_MANIFEST=1` writes them as read.
+# Adding a board is docs/claude/ryudfm.md's procedure.
+
+board minimal-clean
+  source A two-layer test board the owner designed and exported from Altium Designer 26.5 as ODB++ 8.1
+  source in inches, from the old Seiraiyu/ryudfm repository's validation fixtures; the owner's own
+  source design, contributed under this repository's licence (the owner, 2026-10-28).
+  licence owner
+  archive minimal-clean.tgz f9ab1ff3cd142a6444b2a92d16d31d964605d2d35d2208d86b3d621fb425f6b4
+  folder minimal-clean
+  version 8.1 Altium Designer Agile 26.5.0.17
+  steps pcb (board pcb)
+  layers 23
+  features line=258 pad=72 arc=1 surface=0 text=0 barcode=0
+  components 11 pins=19 packages=4
+  nets 4 cad_points=23
+  drills 1 tools=2
+  stackup 3
+  capabilities geometry,nets,components,stackup,drill
+  faults -
+
+board gb-cart256k-a
+  source GB-CART256K-A, a Game Boy cartridge board by Joonas Javanainen (Gekkio),
+  source https://github.com/Gekkio/gb-hardware at b5ade559bd988fd6c4f5941615d4d6d79dec9098,
+  source GB-CART256K-A/GB-CART256K-A.kicad_pcb, exported to ODB++ by KiCad 9.0.8
+  source (pinned.txt's options); reference/ holds KiCad's positions and IPC-D-356 netlist of it.
+  licence CC-BY-4.0
+  archive gb-cart256k-a.zip 5519ab391ce95977f5f0dc4ab7ff9035bdb0b027eb161c698a45e473795fac86
+  folder gb-cart256k-a
+  version 8.1 KiCad EDA 9.0.8+1
+  steps pcb (board pcb)
+  layers 24
+  features line=3652 pad=834 arc=17 surface=10 text=0 barcode=0
+  components 26 pins=171 packages=11
+  nets 44 cad_points=291
+  drills 2 tools=130
+  stackup 3
+  capabilities geometry,nets,components,drill
+  faults -
+
+board vna-se-probe
+  source A four-layer single-ended VNA probe board by Antmicro,
+  source https://github.com/antmicro/vna-se-probe at 96d6af354c2ff3c1c5f82fabbc4676161fc8804b,
+  source vna-se-probe.kicad_pcb, exported and referenced as gb-cart256k-a is.
+  licence Apache-2.0
+  archive vna-se-probe.zip 43be19cb33b5cdc45e028dda3469244cb0f8935b24c34aaea0365442d6d975cc
+  folder vna-se-probe
+  version 8.1 KiCad EDA 9.0.8+1
+  steps pcb (board pcb)
+  layers 38
+  features line=5336 pad=174 arc=6 surface=16 text=0 barcode=0
+  components 4 pins=10 packages=5
+  nets 3 cad_points=33
+  drills 2 tools=27
+  stackup 7
+  capabilities geometry,nets,components,drill
+  faults -
+
+board osm-l-bmc-som
+  source Antmicro's OSM-L BMC system on module: 10 copper layers, an LPDDR4X chip, microvias and
+  source buried vias. pinned.txt says where from.
+  licence Apache-2.0
+  pinned
+  version 8.1 KiCad EDA 9.0.8+1
+  steps pcb (board pcb)
+  layers 54
+  features line=296600 pad=18049 arc=864 surface=361 text=0 barcode=0
+  components 384 pins=2966 packages=213
+  nets 1065 cad_points=4191
+  drills 6 tools=1763
+  stackup 19
+  capabilities geometry,nets,components,drill
+  faults odb_symbol_unknown=3
+
+board lpddr4-test-board
+  source Antmicro's LPDDR4 test board: 8 copper layers, DDR routing to a SO-DIMM socket, blind vias.
+  source pinned.txt says where from.
+  licence Apache-2.0
+  pinned
+  version 8.1 KiCad EDA 9.0.8+1
+  steps pcb (board pcb)
+  layers 41
+  features line=319055 pad=17857 arc=314 surface=861 text=0 barcode=0
+  components 470 pins=2105 packages=119
+  nets 671 cad_points=3225
+  drills 4 tools=1278
+  stackup 15
+  capabilities geometry,nets,components,drill
+  faults -

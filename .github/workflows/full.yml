@@ -150,9 +150,9 @@ jobs:
           # Rare runs: their caches would only evict the fast CI's.
           save-if: false
       - name: baseline release
-        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryueda --release --test determinism
+        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryueda -p ryudfm --release --test determinism
       - name: x86-64-v3
-        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryueda --release --test determinism
+        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryueda -p ryudfm --release --test determinism
         env:
           RUSTFLAGS: -C target-cpu=x86-64-v3
           CARGO_TARGET_DIR: target/v3
@@ -160,7 +160,7 @@ jobs:
         run: |
           if grep -qw avx512f /proc/cpuinfo; then
             RUSTFLAGS="-C target-cpu=x86-64-v4" CARGO_TARGET_DIR=target/v4 \
-              cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryueda --release --test determinism
+              cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryueda -p ryudfm --release --test determinism
           else
             echo "::notice::runner has no AVX-512; x86-64-v4 skipped"
           fi
@@ -186,9 +186,12 @@ jobs:
       - uses: devcontainers/ci@v0.3
         with:
           # The workspace, then the OCCT and SMLib comparison, which only
-          # the devcontainer (with OCCT and SMLib installed) builds.
+          # the devcontainer (with OCCT and SMLib installed) builds, then
+          # ryudfm's pinned boards, exported by its KiCad.
           runCmd: |
             RYUCAD_REQUIRE_GPU=1 cargo test --workspace
+            sh scripts/fetch-dfm-corpus.sh
+            cargo test -p ryudfm --release --test pinned -- --ignored
             cargo clippy -p ryukei-bench --features occt,smlib --all-targets -- -D warnings
             cargo test -p ryukei-bench --features occt,smlib --release --test kernels -- --nocapture
             cargo bench -p ryukei-bench --features occt,smlib --no-run
@@ -211,7 +214,7 @@ jobs:
       - run: cargo build --locked --release -p ryucad -p ryucad-app -p ryueda
       - if: runner.os == 'Linux'
         run: |
-          shellcheck install.sh scripts/test-install.sh scripts/smoke.sh
+          shellcheck install.sh scripts/test-install.sh scripts/smoke.sh scripts/fetch-dfm-corpus.sh
           shellcheck install-ryueda.sh scripts/test-install-ryueda.sh scripts/smoke-ryueda.sh scripts/stamp-version.sh
       - if: runner.os == 'Linux'
         name: the desktop entry and MIME type the installer registers

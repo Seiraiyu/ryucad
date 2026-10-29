@@ -1,0 +1,9 @@
+//! ryudfm: design for manufacturing of printed circuit boards.
+//!
+//! `odb` reads ODB++ jobs (folders and archives, versions 7.0 to 8.1) into
+//! `ryu_board`'s model, with faults and warnings for what it couldn't
+//! read. The project, the CLI and the daemon come with plan 0.C.
+
+pub mod odb;
+#[cfg(feature = "testing")]
+pub mod testing;

@@ -1,0 +1,40 @@
+H optimize n staggered n
+$0 $NONE$
+$1 GND
+$2 Net-(J2-Pad1)
+#
+#Netlist points
+#
+0 1.350 9.80 1.890871 B e e staggered 0 0 0
+0 1.350 9.80 9.790871 B e e staggered 0 0 0
+1 0.30 16.920 4.180871 B e c staggered 0 0 0 v
+1 0.30 7.50 8.815871 B e c staggered 0 0 0 v
+1 0.30 8.250 5.570871 B e c staggered 0 0 0 v
+1 0.30 3.0 8.815871 B e c staggered 0 0 0 v
+1 0.30 13.480 8.140871 B e c staggered 0 0 0 v
+1 0.30 6.0 8.815871 B e c staggered 0 0 0 v
+1 0.30 5.250 5.570871 B e c staggered 0 0 0 v
+1 0.30 11.250 5.570871 B e c staggered 0 0 0 v
+1 0.30 15.420 4.180871 B e c staggered 0 0 0 v
+1 0.30 10.50 8.590871 B e c staggered 0 0 0 v
+1 0.30 6.750 5.570871 B e c staggered 0 0 0 v
+1 0.30 2.250 5.570871 B e c staggered 0 0 0 v
+1 0.30 12.0 8.670871 B e c staggered 0 0 0 v
+1 0.30 4.50 8.815871 B e c staggered 0 0 0 v
+1 0.30 14.770 7.365871 B e c staggered 0 0 0 v
+1 0.30 9.750 5.570871 B e c staggered 0 0 0 v
+1 0.30 3.750 5.570871 B e c staggered 0 0 0 v
+1 0.30 9.0 8.590871 B e c staggered 0 0 0 v
+1 0.30 1.50 8.815871 B e c staggered 0 0 0 v
+1 0.30 16.270 7.365871 B e c staggered 0 0 0 v
+1 0.30 17.770 7.365871 B e c staggered 0 0 0 v
+1 0.30 12.550 4.830871 B e c staggered 0 0 0 v
+1 0.30 13.920 4.230871 B e c staggered 0 0 0 v
+1 0 16.30 8.755871 T 1.450 4.1910 e s
+1 0 16.30 8.755871 D 1.450 4.1910 e p
+1 0 16.30 2.805871 T 1.450 4.1910 e s
+1 0 16.30 2.805871 D 1.450 4.1910 e p
+1 1.70 0.0 4.490871 B e e staggered 0 0 0
+1 0 9.80 5.840871 D 10.650 6.570 e p
+2 0 16.30 5.773871 T 1.0 4.1910 e s
+2 1.70 0.0 7.190871 B e e staggered 0 0 0
