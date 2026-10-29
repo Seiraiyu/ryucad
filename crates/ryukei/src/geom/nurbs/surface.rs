@@ -503,6 +503,39 @@ mod tests {
     }
 
     #[test]
+    fn parts_of_periodic_surfaces_start_where_asked() {
+        use crate::geom::{Frame, Surface, Torus};
+        use core::f64::consts::TAU;
+        let torus = Surface::Torus(Torus::new(Frame::WORLD, 3.0, 1.0).unwrap());
+        let (n, _) = torus.to_nurbs(torus.domain()).unwrap();
+        // A whole turn from 2 rad, and from -1 rad (moved into the domain).
+        for (from, start) in [(2.0, 2.0), (-1.0, TAU - 1.0)] {
+            let p = n.part(Direction::U, [from, from + TAU]).unwrap();
+            assert!(!p.knots()[0].is_periodic());
+            assert!(p.knots()[1].is_periodic());
+            let [a, b] = p.domain()[0];
+            assert!((a - start).abs() < 1e-14 && (b - start - TAU).abs() < 1e-13);
+            for (u, v) in [(a, 0.3), (a + 1.0, 2.0), (b, 5.0)] {
+                assert!(close(
+                    p.point(u, v).to_vector(),
+                    n.point(u, v).to_vector(),
+                    1e-14
+                ));
+            }
+        }
+        // A clamped direction cut inside its domain.
+        let q = n.part(Direction::U, [0.5, 1.5]).unwrap();
+        let q = q.part(Direction::V, [1.0, 2.0]).unwrap();
+        assert_eq!(q.domain(), [[0.5, 1.5], [1.0, 2.0]]);
+        assert!(close(
+            q.point(1.0, 1.5).to_vector(),
+            n.point(1.0, 1.5).to_vector(),
+            1e-14
+        ));
+        assert!(q.part(Direction::U, [0.0, 1.0]).is_err());
+    }
+
+    #[test]
     fn iso_curves_are_the_surfaces_parameter_lines() {
         use crate::geom::{Frame, Surface, Torus};
         let frame = Frame::new(
