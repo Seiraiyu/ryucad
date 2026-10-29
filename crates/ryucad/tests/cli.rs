@@ -1200,6 +1200,26 @@ fn meshes_are_the_same_both_ways() {
     assert_eq!(wire[1].feature, "b");
     let tris = wire[1].mesh.as_ref().unwrap().triangles.len();
     assert_eq!(tris, m["bodies"][1]["triangles"].as_array().unwrap().len());
+    // Compact, the same meshes in fewer bytes.
+    let r = p.ok(&[
+        "mesh",
+        "p",
+        "--quality",
+        "coarse",
+        "--out",
+        "m2.bin",
+        "--compact",
+    ]);
+    assert_eq!(r["binary"]["encoding"], "ryucad.mesh.2");
+    let b = fs::read(p.direct.join("m2.bin")).unwrap();
+    assert_eq!(b, fs::read(p.daemon.join("m2.bin")).unwrap());
+    assert!(b.len() < a.len());
+    let compact = ryucad::mesh::decode(&b).unwrap();
+    assert_eq!(
+        compact[1].mesh.as_ref().unwrap().triangles,
+        wire[1].mesh.as_ref().unwrap().triangles
+    );
+    p.fails(&["mesh", "p", "--compact"], "usage", 2);
 }
 
 /// The pixels of a PNG file.

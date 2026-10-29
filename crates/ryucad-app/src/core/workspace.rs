@@ -930,7 +930,7 @@ impl Workspace {
                 feature: Some(feature),
                 features: Vec::new(),
                 quality: None,
-                transfer: Some(Transfer::Binary),
+                transfer: Some(Transfer::Compact),
                 rev: Some(rev.clone()),
             };
             self.send(req, Pending::Ghost(key, hash));
@@ -2472,7 +2472,7 @@ impl Workspace {
                         feature: Some(key.1.clone()),
                         features: Vec::new(),
                         quality: None,
-                        transfer: Some(Transfer::Binary),
+                        transfer: Some(Transfer::Compact),
                         rev: None,
                     };
                     self.send(req, Pending::Mesh(key, hash));
@@ -2490,7 +2490,7 @@ impl Workspace {
                     feature: None,
                     features,
                     quality: None,
-                    transfer: Some(Transfer::Binary),
+                    transfer: Some(Transfer::Compact),
                     rev: None,
                 };
                 self.send(req, Pending::Meshes(batch.to_vec()));
@@ -2519,7 +2519,7 @@ impl Workspace {
                 feature: Some(feature),
                 features: Vec::new(),
                 quality: Some(level.as_str().to_owned()),
-                transfer: Some(Transfer::Binary),
+                transfer: Some(Transfer::Compact),
                 rev: None,
             };
             self.send(req, Pending::Level(hash, level));

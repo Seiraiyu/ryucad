@@ -100,11 +100,12 @@ pub fn answer_live(
             feature,
             features,
             quality,
-            transfer: Some(Transfer::Binary),
+            transfer: Some(t @ (Transfer::Binary | Transfer::Compact)),
             rev,
         } => session.at(rev.as_deref()).and_then(|(commit, s)| {
             let only = wanted(feature.as_deref(), &features);
-            let mut a = mesh_binary(s, &part, only.as_ref(), quality.as_deref())?;
+            let compact = t == Transfer::Compact;
+            let mut a = mesh_binary(s, &part, only.as_ref(), quality.as_deref(), compact)?;
             a.result = versioned(noted(Ok(a.result), commit))?;
             Ok(a)
         }),
@@ -4622,22 +4623,35 @@ fn is_assembly(session: &Session, part: &str) -> bool {
         == Some(PartKind::Assembly)
 }
 
+/// Meshes as bytes: `ryucad.mesh.1`, or `ryucad.mesh.2` when `compact`.
 fn mesh_binary(
     session: &mut Session,
     part: &str,
     only: Option<&BTreeSet<String>>,
     quality: Option<&str>,
+    compact: bool,
 ) -> Result<Answer> {
+    fn bytes<K: AsRef<str>>(
+        bodies: &[(K, Result<mesh::Meshed>)],
+        compact: bool,
+    ) -> (&'static str, Vec<u8>) {
+        match compact {
+            true => (mesh::COMPACT, mesh::encode_compact(bodies)),
+            false => (mesh::ENCODING, mesh::encode(bodies)),
+        }
+    }
     if is_assembly(session, part) {
         let (pid, _, quality) = mesh_args(part, None, quality)?;
         let (bodies, occurrences) = assembly_meshes(session, &pid, only, quality)?;
         let result = json!({"part": pid, "quality": quality.as_str(), "occurrences": occurrences});
-        return Ok(Answer::bytes(result, mesh::ENCODING, mesh::encode(&bodies)));
+        let (encoding, b) = bytes(&bodies, compact);
+        return Ok(Answer::bytes(result, encoding, b));
     }
     let (pid, only, quality) = mesh_args(part, one_of(only)?, quality)?;
     let bodies = meshes(session, &pid, only.as_ref(), quality)?;
     let result = json!({"part": pid, "quality": quality.as_str()});
-    Ok(Answer::bytes(result, mesh::ENCODING, mesh::encode(&bodies)))
+    let (encoding, b) = bytes(&bodies, compact);
+    Ok(Answer::bytes(result, encoding, b))
 }
 
 fn mesh_get(
@@ -7423,8 +7437,26 @@ pub(crate) mod tests {
             assert_eq!(slot.as_ref().unwrap().meshes.len(), 2);
             slot.as_mut().unwrap().meshes = mesh::Cache::default();
             let mut b = handle_safely(&mut slot, None, None, dir.path(), req(None)).unwrap();
-            assert_eq!(a.binary.take(), b.binary.take());
+            assert_eq!(a.result["binary"]["encoding"], mesh::ENCODING);
+            let bytes = a.binary.take().unwrap();
+            assert_eq!(Some(&bytes), b.binary.take().as_ref());
             assert_eq!(a.result, b.result);
+            // `compact` answers the same meshes as `ryucad.mesh.2`, smaller.
+            let compact = Request::from_rpc(
+                "mesh.get",
+                Some(json!({"part": "p", "quality": "coarse", "transfer": "compact"})),
+            )
+            .unwrap();
+            let c = handle_safely(&mut slot, None, None, dir.path(), compact).unwrap();
+            assert_eq!(c.result["binary"]["encoding"], mesh::COMPACT);
+            let small = c.binary.unwrap();
+            assert!(small.len() < bytes.len());
+            let (one, two) = (mesh::decode(&bytes).unwrap(), mesh::decode(&small).unwrap());
+            assert_eq!(one.len(), two.len());
+            for (x, y) in one.iter().zip(&two) {
+                let (x, y) = (x.mesh.as_ref().unwrap(), y.mesh.as_ref().unwrap());
+                assert_eq!((&x.positions, &x.triangles), (&y.positions, &y.triangles));
+            }
         });
     }
 
