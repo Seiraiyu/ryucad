@@ -3,6 +3,9 @@
 
 #![allow(dead_code)]
 
+pub mod brep;
+pub mod usda;
+
 use ryuformats::scene::{Placed, Scene, Unit, placed_point};
 use ryuformats::{Child, Product, Solid};
 use ryukei::geom::{Rigid, UnitVector3, Vector3};

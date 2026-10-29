@@ -72,7 +72,9 @@ RYUCAD_BARS=1 cargo test -p ryucad-app --release --test frames -- --ignored --no
 ryucad interference <asm> [--instance <path>]               # which instances of an assembly share a volume
 ryucad export <part> --out <file> [--rev <rev>|label:<L>] [--schema ap214] [--unit m]   # a part or assembly as STEP
 ryucad export <part> --out <file.stl|file.3mf> [--chord 0.01mm] [--angle 15deg] [--ascii]  # as STL or 3MF, written by the daemon
+ryucad export <part> --out <file.usda> [--no-brep|--no-mesh] [--pipe-tolerance 0.0001mm]  # as USD: omniSolid BrepArrays and meshes, instanced
 cargo test -p ryukei-bench --features occt,formats --release --test formats -- --nocapture   # STL read by OCCT, 3MF by lib3mf; devcontainer only
+cargo test -p ryukei-bench --features usd --release --test usd -- --nocapture   # USD opened by OpenUSD, validated and imported into SMLib by usd-brep; devcontainer only
 cd fuzz && cargo +nightly fuzz run predicates               # needs nightly + cargo-fuzz (targets also: interval, euler, nurbs, mesh, feature, sweep, intersect, general, boolean, blend, expr, sketch, mate, merge, pdm, step, heal, codec, eda, kicad, odb, shapes)
 sh scripts/test-install.sh target/release/ryucad          # install.sh against a fake release
 sh scripts/smoke.sh target/release/ryucad target/release/ryucad-app   # an agent session, then the app's offscreen frame
@@ -117,7 +119,7 @@ The product targets Windows, macOS, and Linux natively, not just WSL. CI (`.gith
 - `crates/ryupdm`: local product data management (library): the PDM settings, part properties, revision labels, release records, the release branch's history and tags, part states, the release checks, the commit guard and merge validation. It reads projects through `ryucad-doc` and Git through `gix`, and never calls the kernel, a session or the app.
 - `crates/ryu-part21`: STEP's exchange structure alone (library): Part 21 parsed and written, with no kernel. `ryustep` re-exports it; `ryueda` checks 3D models with it.
 - `crates/ryustep`: STEP files (library): Part 21 exchange structures, the AP203/AP214/AP242 entities, units and the product tree, and bodies read and written. `tests/data/occt` holds files OCCT wrote, with the `gen.cpp` that made them; `tests/corpus` holds public domain NIST test models, byte for byte, with `manifest.txt` and the pinned corpus's `pinned.txt`.
-- `crates/ryuformats`: the mesh and scene formats ryucad writes besides STEP (library): STL and 3MF from ryukei's meshes, a deterministic zip writer, pure Rust over `ryukei` and `miniz_oxide`. It never depends on ryucad or `ryustep`, and ryukei never depends on it.
+- `crates/ryuformats`: the formats ryucad writes besides STEP (library): STL and 3MF from ryukei's meshes, a deterministic zip writer, and USD (a layer model, usda, omniSolid BrepArrays from ryukei's bodies), pure Rust over `ryukei`, `miniz_oxide` and `rayon`. It never depends on ryucad or `ryustep`, and ryukei never depends on it.
 - `crates/ryucad`: the application layer and binary.
 - `crates/ryueda`: electronics CAD (library and binary): projects and library projects of canonical JSON, symbols, footprints, models and library components, connectivity, the flattened netlist, ERC, `check` and KiCad library import, behind a CLI and a daemon. It depends on `ryu-doc`, `ryu-session` and `ryu-part21`, never on the kernel, `ryustep` or `ryucad`. `tests/data/kicad` holds KiCad-format files written for its tests, and `tests/kicad/pinned.txt` the pinned KiCad libraries.
 - `crates/ryu-board`: the board model every ryu product's boards are read into (library): integer nanometre geometry, exact decimals, placements, ODB++'s standard and user symbols, exact shapes of features and stroke text, layers, steps, components, nets, drills and the stackup with capabilities and notices, and the PNG and SVG renderer. It depends on `ryu-math`, `rayon` and `png` only; its `testing` feature holds seeded symbols and features and the golden hashes.
@@ -175,7 +177,7 @@ What each phase decided is recorded per area under `docs/claude/`, imported here
 - @docs/claude/ryucad-assemblies.md — assemblies, mates, scale, interference
 - @docs/claude/ryucad-step.md — STEP import, re-import and export
 - @docs/claude/ryucad-scale.md — the benchmark project, file events, the memory budget, the window at scale
-- @docs/claude/ryucad-formats.md — export formats: the scene, STL, 3MF, and their references
+- @docs/claude/ryucad-formats.md — export formats: the scene, STL, 3MF, USD, and their references
 - @docs/claude/ryupdm.md — the PDM data model and local PDM
 - @docs/claude/ryupdm-review.md — hosted review
 - @docs/claude/shared-crates.md — ryu-math, ryu-doc, ryu-session

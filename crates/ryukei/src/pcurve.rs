@@ -241,6 +241,24 @@ fn unwrap(x: f64, near: f64, period: Option<f64>) -> f64 {
     }
 }
 
+/// A pcurve for `curve` over `interval` on `surface` where neither family
+/// above gives one (a face whose surface a writer replaced by its NURBS
+/// form, so its pcurves no longer hold): a cubic spline on the curve's own
+/// parameter through projections of points along it, and the certified
+/// bound on how far the surface takes it from the curve, at least
+/// [`LINEAR_RESOLUTION`](crate::tol::LINEAR_RESOLUTION). Spans halve
+/// until the bound is within `target`, at most 512 samples; `None` where
+/// no fit certifies (a curve off the surface, or one projection can't
+/// follow).
+pub fn fitted(
+    surface: &Surface,
+    curve: &Curve,
+    interval: [f64; 2],
+    target: f64,
+) -> Option<(NurbsCurve2, f64)> {
+    crate::intersect::fit_pcurve_within(surface, curve, interval, target, 512).ok()
+}
+
 /// Whether the surface takes the pcurve to within `tolerance` of the edge
 /// at every sample.
 pub(crate) fn fits(
@@ -292,6 +310,38 @@ mod tests {
                 surface.point(q.x, q.y).distance(curve.point(t))
             })
             .fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn fitted_pcurves_hold_within_their_bound() {
+        // A circle round a cylinder in its NURBS form, whose angle is no
+        // longer the circle's: no exact pcurve, a fitted one.
+        let f = tilted();
+        let cyl = Surface::Cylinder(Cylinder::new(f, 0.5).unwrap());
+        let (n, _) = cyl.to_nurbs([[0.0, TAU], [0.0, 1.0]]).unwrap();
+        let nurbs = Surface::Nurbs(Arc::new(n));
+        let circle = Curve::Circle(
+            Circle::new(
+                Frame::new(f.to_world(0.0, 0.0, 0.3), f.z().get(), f.x().get()).unwrap(),
+                0.5,
+            )
+            .unwrap(),
+        );
+        let range = [0.5, 2.0];
+        assert_eq!(exact(&nurbs, &circle, range, TOL), None);
+        let (c2, bound) = fitted(&nurbs, &circle, range, TOL).unwrap();
+        assert!((TOL..=10.0 * TOL).contains(&bound), "{bound}");
+        assert_eq!(c2.domain(), range);
+        for i in 0..=100 {
+            let t = range[0] + (range[1] - range[0]) * i as f64 / 100.0;
+            let q = c2.point(t);
+            assert!(nurbs.point(q.x, q.y).distance(circle.point(t)) <= bound);
+        }
+        // A line off the surface gets nothing.
+        let off = Curve::Line(
+            Line::through(f.to_world(2.0, 0.0, 0.0), f.to_world(2.0, 1.0, 0.0)).unwrap(),
+        );
+        assert!(fitted(&nurbs, &off, [0.0, 1.0], TOL).is_none());
     }
 
     #[test]

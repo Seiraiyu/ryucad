@@ -1,8 +1,8 @@
-//! The file formats ryucad writes besides STEP: STL and 3MF now, USD
-//! later. Every writer takes a [`scene::Scene`] (products of solids'
-//! meshes, placed in each other) and streams its bytes into an
-//! [`std::io::Write`]; the same scene and options give the same bytes on
-//! every platform.
+//! The file formats ryucad writes besides STEP: STL, 3MF and USD. Every
+//! writer takes a tree of products (a [`scene::Scene`] of solids' meshes,
+//! or [`usd::stage::Model`]'s bodies and meshes), placed in each other,
+//! and streams its bytes into an [`std::io::Write`]; the same model and
+//! options give the same bytes on every platform.
 //!
 //! This crate is ryukei's neighbour, as `ryustep` is: it depends on the
 //! kernel for meshes and motions, never on ryucad, `ryustep` or C++, and
@@ -13,6 +13,7 @@ pub mod scene;
 pub mod stl;
 pub mod text;
 pub mod threemf;
+pub mod usd;
 pub mod zip;
 
 pub use scene::{Child, Placed, Product, Scene, Solid, Unit};

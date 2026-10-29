@@ -67,7 +67,7 @@ mod tighten;
 mod unseam;
 
 pub use names::{Names as ImportNames, names as import_names};
-pub use seamed::seamed;
+pub use seamed::{Origins, seamed, seamed_with_origins};
 
 use crate::Error;
 use crate::geom::{Curve, Curve2, Point3, Surface};

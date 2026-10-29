@@ -707,15 +707,18 @@ pub enum Request {
     },
     /// Writes a part or an assembly as a file: at the working files, a Git
     /// revision `rev`, or a release `label:<L>`; in `format` (`step`,
-    /// `stl`, `3mf`), else the one `out`'s extension names, else STEP. With `out`,
-    /// an absolute path, the daemon writes the file atomically and answers
-    /// its size and BLAKE3; without, its bytes follow the answer. STEP is
-    /// `ap242` (default) or `ap214`, in `mm` (default) or `m`; mesh formats
-    /// are in `mm` (default), `cm` or `m`, meshed to `chord` (default
-    /// `0.01 mm`), `angle` (default `15 deg`) and `max_edge`, literals;
-    /// STL is binary unless `ascii`. The header's `file_name` (else
-    /// `out`'s) and `time_stamp` are the caller's; the time stamp is else
-    /// the commit's time when exporting a commit, else now.
+    /// `stl`, `3mf`, `usda`), else the one `out`'s extension names, else
+    /// STEP. With `out`, an absolute path, the daemon writes the file
+    /// atomically and answers its size and BLAKE3; without, its bytes
+    /// follow the answer. STEP is `ap242` (default) or `ap214`, in `mm`
+    /// (default) or `m`; mesh formats and USD are in `mm` (default), `cm`
+    /// or `m`, meshed to `chord` (default `0.01 mm`), `angle` (default
+    /// `15 deg`) and `max_edge`, literals; STL is binary unless `ascii`.
+    /// USD writes each solid's B-rep (`brep`) and mesh (`mesh`), both
+    /// unless one is `false`, pipes and sweeps within `pipe_tolerance`
+    /// (default `0.0001 mm`). The header's `file_name` (else `out`'s) and
+    /// `time_stamp` are the caller's; the time stamp is else the commit's
+    /// time when exporting a commit, else now.
     #[serde(rename = "export")]
     Export {
         part: String,
@@ -741,6 +744,12 @@ pub enum Request {
         max_edge: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         ascii: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        brep: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mesh: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pipe_tolerance: Option<String>,
     },
     #[serde(rename = "rebuild")]
     Rebuild {

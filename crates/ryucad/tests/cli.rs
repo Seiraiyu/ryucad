@@ -3532,6 +3532,78 @@ fn mesh_exports_from_the_cli() {
 }
 
 #[test]
+fn usd_exports_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "cylinder",
+        "--id",
+        "c",
+        "--param",
+        "radius=5",
+        "--param",
+        "height=20",
+    ]);
+    // usda by extension: a BrepArray and a mesh, written by the daemon.
+    let v = p.ok(&[
+        "export",
+        "p",
+        "--out",
+        "p.usda",
+        "--time-stamp",
+        "2026-10-29T00:00:00",
+    ]);
+    assert_eq!(
+        (&v["format"], &v["unit"], &v["brep"]),
+        (&json!("usda"), &json!("mm"), &json!(true))
+    );
+    let text = fs::read_to_string(p.direct.join("p.usda")).unwrap();
+    assert_eq!(text, fs::read_to_string(p.daemon.join("p.usda")).unwrap());
+    assert!(text.starts_with("#usda 1.0\n"));
+    assert!(text.contains("def BrepArray \"brep\"") && text.contains("def Mesh \"mesh\""));
+    // B-rep only, by name, in metres with a pipe tolerance of its own.
+    let v = p.ok(&[
+        "export",
+        "p",
+        "--out",
+        "p.txt",
+        "--format",
+        "usda",
+        "--no-mesh",
+        "--unit",
+        "m",
+        "--pipe-tolerance",
+        "0.001 mm",
+    ]);
+    assert_eq!(v["pipe_tolerance"]["value"], "0.001 mm");
+    let text = fs::read_to_string(p.direct.join("p.txt")).unwrap();
+    assert!(!text.contains("def Mesh") && text.contains("metersPerUnit = 1\n"));
+    // Neither, or options that don't apply, are refused before anything is
+    // written.
+    for args in [
+        &["export", "p", "--out", "x.usda", "--no-mesh", "--no-brep"][..],
+        &[
+            "export",
+            "p",
+            "--out",
+            "x.usda",
+            "--no-mesh",
+            "--chord",
+            "1 mm",
+        ],
+        &["export", "p", "--out", "x.usda", "--ascii"],
+        &["export", "p", "--out", "x.stl", "--no-brep"],
+    ] {
+        p.fails(args, "invalid_param", 1);
+    }
+    assert!(!p.direct.join("x.usda").exists() && !p.direct.join("x.stl").exists());
+}
+
+#[test]
 fn imported_assemblies_and_updates_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);

@@ -16,6 +16,9 @@ smlib = ["dep:cxx", "dep:cxx-build"]
 # The mesh formats' references: a C++ shim linked against lib3mf, the 3MF
 # Consortium's library (the devcontainer builds it); STL goes to OCCT.
 formats = ["dep:cxx", "dep:cxx-build"]
+# USD's references: OpenUSD and usd-brep (its validator and SMLib) from
+# Python, which the devcontainer installs in /opt/usd. No C++ to build.
+usd = []
 
 [dependencies]
 cxx = { version = "1", optional = true }
@@ -116,3 +119,9 @@ required-features = ["occt"]
 [[test]]
 name = "formats"
 required-features = ["occt", "formats"]
+
+# USD opened by OpenUSD, validated by usd-brep and imported into SMLib
+# (design 193, plan 8.B).
+[[test]]
+name = "usd"
+required-features = ["usd"]

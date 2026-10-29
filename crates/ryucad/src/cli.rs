@@ -121,14 +121,14 @@ enum Command {
         /// The file to write; its name goes in a STEP file's header.
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
-        /// step, stl or 3mf; by default the one --out's extension names (.step,
-        /// .stp, .stl, .3mf).
+        /// step, stl, 3mf or usda; by default the one --out's extension names
+        /// (.step, .stp, .stl, .3mf, .usda).
         #[arg(long)]
         format: Option<String>,
         /// STEP's schema: ap242 (the default) or ap214.
         #[arg(long)]
         schema: Option<String>,
-        /// The length unit: mm (the default), or m; a mesh format also cm.
+        /// The length unit: mm (the default), or m; a mesh format or USD also cm.
         #[arg(long)]
         unit: Option<String>,
         /// A mesh format's chord, the most a triangle may stray from the faces: a
@@ -145,6 +145,16 @@ enum Command {
         /// STL as text, a solid block per placed solid, rather than binary.
         #[arg(long)]
         ascii: bool,
+        /// USD without each solid's B-rep (an omniSolid BrepArray): meshes only.
+        #[arg(long)]
+        no_brep: bool,
+        /// USD without each solid's mesh: B-rep only.
+        #[arg(long)]
+        no_mesh: bool,
+        /// USD's tolerance for pipes and sweeps written as NURBS: a literal length
+        /// (default 0.0001 mm).
+        #[arg(long, value_name = "LENGTH")]
+        pipe_tolerance: Option<String>,
         /// The header's time stamp; by default the commit's time when exporting a
         /// commit, else now.
         #[arg(long, value_name = "T")]
@@ -2156,6 +2166,9 @@ fn request(cmd: &Command) -> Option<Request> {
             angle,
             max_edge,
             ascii,
+            no_brep,
+            no_mesh,
+            pipe_tolerance,
             time_stamp,
             rev,
         } => Request::Export {
@@ -2177,6 +2190,9 @@ fn request(cmd: &Command) -> Option<Request> {
             angle: angle.clone(),
             max_edge: max_edge.clone(),
             ascii: *ascii,
+            brep: no_brep.then_some(false),
+            mesh: no_mesh.then_some(false),
+            pipe_tolerance: pipe_tolerance.clone(),
         },
         Command::Rebuild { part, rev } => Request::Rebuild {
             part: part.clone(),
