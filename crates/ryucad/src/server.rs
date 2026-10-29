@@ -4416,9 +4416,8 @@ fn render(
                         &o.pose,
                         &format!("{part}/{path}/{}", s.founder),
                         &marks,
-                        (whole, &faces),
+                        (whole, &faces, look(&format!("{path}/{}", s.founder))),
                         (ask.labels, ask.edges),
-                        look(&format!("{path}/{}", s.founder)),
                     );
                     seen_occurrences.insert((part.clone(), key.0, key.1), (o.pose, m));
                 }
@@ -4443,9 +4442,8 @@ fn render(
                 &ryukei::geom::Rigid::IDENTITY,
                 &format!("{part}/{fid}"),
                 &marks,
-                (whole, &faces),
+                (whole, &faces, look(fid.as_str())),
                 (ask.labels, ask.edges),
-                look(fid.as_str()),
             );
         }
         if ask.sketches {
@@ -4544,12 +4542,12 @@ fn draw_body(
     pose: &ryukei::geom::Rigid,
     prefix: &str,
     marks: &BTreeMap<String, (crate::render::Rgb, Option<String>)>,
-    (whole, faces): (
+    (whole, faces, look): (
         Option<crate::render::Rgb>,
         &BTreeMap<String, crate::render::Rgb>,
+        Option<&crate::appearance::SolidLook>,
     ),
     (labels, edges): (bool, bool),
-    look: Option<&crate::appearance::SolidLook>,
 ) {
     use crate::render::{self as r, Label, Line, Triangle};
     let Ok(mesh) = &m.mesh.mesh else { return };

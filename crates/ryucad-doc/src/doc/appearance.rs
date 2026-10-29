@@ -83,7 +83,7 @@ impl Look {
         };
         let opacity = match o.take_opt("opacity") {
             None => None,
-            Some(x) => Some(check_opacity(x.as_f64()).map_err(|_| {
+            Some(x) => Some(check_opacity(x.as_f64()).ok_or_else(|| {
                 invalid(
                     &format!("{at}/opacity"),
                     "expected an opacity above 0 and at most 1",
@@ -123,11 +123,8 @@ impl Look {
 }
 
 /// An opacity as files hold it: above 0, at most 1.
-pub fn check_opacity(x: Option<f64>) -> std::result::Result<f64, ()> {
-    match x {
-        Some(x) if x > 0.0 && x <= 1.0 => Ok(x),
-        _ => Err(()),
-    }
+pub fn check_opacity(x: Option<f64>) -> Option<f64> {
+    x.filter(|x| *x > 0.0 && *x <= 1.0)
 }
 
 /// A part's or an assembly's appearance file.

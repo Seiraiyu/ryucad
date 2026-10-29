@@ -616,7 +616,7 @@ impl Change {
             ));
         }
         if let Some(o) = self.opacity
-            && check_opacity(Some(o)).is_err()
+            && check_opacity(Some(o)).is_none()
         {
             return Err(Error::new(
                 Code::InvalidParam,
