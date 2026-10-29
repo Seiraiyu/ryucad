@@ -397,8 +397,8 @@ pub(crate) mod tests {
         let v = json!({
             "kind": KIND, "format": 1, "name": "R", "units": 1,
             "pins": {
-                "1": {"name": "~", "type": "passive", "at": [0, 3_810_000], "side": "down", "length_nm": 1_270_000},
-                "2": {"name": "~", "type": "passive", "at": [0, -3_810_000], "side": "up", "length_nm": 1_270_000}
+                "1": {"name": "~", "type": "passive", "at": [0, 3_810_000], "side": "up", "length_nm": 1_270_000},
+                "2": {"name": "~", "type": "passive", "at": [0, -3_810_000], "side": "down", "length_nm": 1_270_000}
             },
             "graphics": {
                 "g1": {"type": "rect", "start": [-1_016_000, 2_540_000], "end": [1_016_000, -2_540_000]}
