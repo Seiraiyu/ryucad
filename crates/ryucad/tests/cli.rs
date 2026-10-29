@@ -983,6 +983,7 @@ fn every_protocol_method_has_a_command() {
         ("deps.fetch", &["deps", "fetch"]),
         ("deps.list", &["deps", "list"]),
         ("deps.parts", &["deps", "parts"]),
+        ("deps.update", &["deps", "update"]),
         ("materials.list", &["materials", "list"]),
         ("materials.set", &["materials", "set"]),
         ("materials.delete", &["materials", "delete"]),
