@@ -100,6 +100,9 @@ pub struct Opened {
     pub palette: Option<crate::ui::palette::Palette>,
     /// Commands the palette ran, newest first.
     pub recent_commands: Vec<&'static str>,
+    /// A merge was in progress at the last frame: its start opens the
+    /// Conflicts tile, its end closes it.
+    merging: bool,
     /// The effective keys: the registry's, the navigation preset's, then
     /// `ui.keys` ([`crate::core::keys::Keymap`]).
     pub keymap: crate::core::keys::Keymap,
@@ -306,6 +309,7 @@ impl Opened {
             browse: None,
             palette: None,
             recent_commands: Vec::new(),
+            merging: false,
             keymap: crate::core::keys::Keymap::new(Navigation::default(), &serde_json::json!({})),
             keymap_from: (Navigation::default(), serde_json::json!({})),
         };
@@ -376,6 +380,7 @@ impl Opened {
             self.tiles = tiles;
         });
         self.save_layout(&ctx, false);
+        self.follow_merge();
         let view = self.view.rect;
         dialogs::settings(&ctx, &mut self.ws, &mut self.dialogs.settings, view);
         dialogs::preferences(&ctx, &mut self.ws, &mut self.dialogs.preferences, view);
@@ -421,6 +426,18 @@ impl Opened {
             self.ws.clearance = None;
         }
         action
+    }
+
+    /// The Conflicts tile opens, as the first tab on the right, when a
+    /// merge starts, and closes itself when it ends.
+    fn follow_merge(&mut self) {
+        let merging = self.ws.merge.is_some();
+        if merging && !self.merging {
+            crate::ui::shell::open_first(&mut self.tiles, "conflicts");
+        } else if !merging && self.merging {
+            crate::ui::shell::close(&mut self.tiles, "conflicts");
+        }
+        self.merging = merging;
     }
 
     /// Saves the tiles to `ui.layout` once they changed, at most once a
