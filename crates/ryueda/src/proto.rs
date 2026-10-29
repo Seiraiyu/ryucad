@@ -319,6 +319,88 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// A net of a block, with its class and intent.
+    #[serde(rename = "net.add")]
+    NetAdd {
+        block: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, flatten)]
+        intent: crate::topcmd::IntentArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A net's class, intent and pair (`pair_with` empty for none).
+    #[serde(rename = "net.edit")]
+    NetEdit {
+        net: String,
+        #[serde(default, flatten)]
+        intent: crate::topcmd::IntentArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pair_with: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        polarity: Option<crate::conn::Polarity>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "net.rename")]
+    NetRename {
+        net: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Two nets become one: every pin on `net` moves `into` another net
+    /// of its block or a rail, in one change.
+    #[serde(rename = "net.join")]
+    NetJoin {
+        net: String,
+        into: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A net nothing names.
+    #[serde(rename = "net.delete")]
+    NetDelete {
+        net: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A net with the pins and ports on it.
+    #[serde(rename = "net.show")]
+    NetShow { net: String },
+    /// A block placed in another, its ports connected there.
+    #[serde(rename = "instance.add")]
+    InstanceAdd {
+        block: String,
+        of: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+        ports: serde_json::Map<String, Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refdes: Option<crate::conn::Channel>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// An instance's ports, channel rule and overrides.
+    #[serde(rename = "instance.edit")]
+    InstanceEdit {
+        instance: String,
+        #[serde(default, flatten)]
+        fields: crate::partcmd::InstanceFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "instance.delete")]
+    InstanceDelete {
+        instance: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "instance.show")]
+    InstanceShow { instance: String },
     #[serde(rename = "activity.log")]
     ActivityLog {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -416,6 +498,14 @@ impl Request {
                 | Request::Connect { .. }
                 | Request::Disconnect { .. }
                 | Request::Nc { .. }
+                | Request::NetAdd { .. }
+                | Request::NetEdit { .. }
+                | Request::NetRename { .. }
+                | Request::NetJoin { .. }
+                | Request::NetDelete { .. }
+                | Request::InstanceAdd { .. }
+                | Request::InstanceEdit { .. }
+                | Request::InstanceDelete { .. }
                 | Request::Undo { .. }
                 | Request::Redo { .. }
         )

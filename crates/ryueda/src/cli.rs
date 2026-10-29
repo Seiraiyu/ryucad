@@ -108,6 +108,12 @@ enum Command {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Add, edit, rename, join, delete or show nets of a block.
+    #[command(subcommand)]
+    Net(NetCmd),
+    /// Add, edit, delete or show instances: blocks placed in blocks.
+    #[command(subcommand)]
+    Instance(InstanceCmd),
     /// Add, edit, delete or list rails: project-wide nets (GND, 3V3).
     #[command(subcommand)]
     Rail(RailCmd),
@@ -586,6 +592,144 @@ enum ComponentCmd {
     Show { component: String },
 }
 
+#[derive(Subcommand)]
+enum NetCmd {
+    Add {
+        block: String,
+        name: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[command(flatten)]
+        intent: IntentFlags,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// A net's (<block>/<net>) class, intent and pair.
+    Edit {
+        net: String,
+        #[command(flatten)]
+        intent: IntentFlags,
+        /// The pair's other net, of the same block.
+        #[arg(long = "pair-with")]
+        pair_with: Option<String>,
+        /// p or n: this net's half (the other takes the other).
+        #[arg(long)]
+        polarity: Option<String>,
+        /// Unpair the net.
+        #[arg(long = "no-pair", conflicts_with = "pair_with")]
+        no_pair: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Rename {
+        net: String,
+        name: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Move every pin on NET onto INTO (a net of its block, or
+    /// rail:<name>), and delete NET.
+    Join {
+        net: String,
+        into: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete a net with no pins.
+    Delete {
+        net: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// A net with the pins on it.
+    Show { net: String },
+}
+
+/// A channel rule as flags.
+#[derive(Args)]
+struct ChannelFlags {
+    /// Reference designators of this instance's occurrences take this
+    /// suffix (R5 becomes R5_A).
+    #[arg(long, conflicts_with = "offset")]
+    suffix: Option<String>,
+    /// ... or have this added to their number (R5 becomes R105).
+    #[arg(long)]
+    offset: Option<u32>,
+}
+
+impl ChannelFlags {
+    fn channel(&self) -> Option<ryueda::conn::Channel> {
+        use ryueda::conn::Channel;
+        match (&self.suffix, self.offset) {
+            (Some(s), _) => Some(Channel::Suffix(s.clone())),
+            (None, Some(n)) => Some(Channel::Offset(n)),
+            (None, None) => None,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum InstanceCmd {
+    /// Place block --of in a block.
+    Add {
+        block: String,
+        #[arg(long)]
+        of: String,
+        #[arg(long)]
+        id: Option<String>,
+        /// PORT=NET: a port of the placed block onto a net here (by ID or
+        /// name, rail:<name>, port:<name>, nc); repeat for more.
+        #[arg(long = "port", value_parser = pair)]
+        ports: Vec<(String, String)>,
+        #[command(flatten)]
+        channel: ChannelFlags,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Change an instance's (<block>/<instance>) ports, channel rule and
+    /// overrides.
+    Edit {
+        instance: String,
+        #[arg(long = "port", value_parser = pair)]
+        ports: Vec<(String, String)>,
+        /// Leave this port unconnected; repeat for more.
+        #[arg(long = "unport", value_name = "PORT")]
+        unport: Vec<String>,
+        #[command(flatten)]
+        channel: ChannelFlags,
+        /// Drop the channel rule.
+        #[arg(long = "no-refdes")]
+        no_refdes: bool,
+        /// PATH=REFDES: an occurrence below the instance; repeat for more.
+        #[arg(long = "override", value_parser = pair)]
+        overrides: Vec<(String, String)>,
+        #[arg(long = "unoverride", value_name = "PATH")]
+        unoverride: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Delete {
+        instance: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// An instance with its connections and faults.
+    Show { instance: String },
+}
+
+/// `NAME=VALUE` pairs and names to drop as a JSON object of strings and
+/// nulls.
+fn settings(set: &[(String, String)], drop: &[String]) -> serde_json::Map<String, Value> {
+    let mut m = serde_json::Map::new();
+    for (k, v) in set {
+        m.insert(k.clone(), json!(v));
+    }
+    for k in drop {
+        m.insert(k.clone(), Value::Null);
+    }
+    m
+}
+
 /// A port's direction, as typed.
 fn direction(s: &str) -> Result<ryueda::conn::Direction> {
     serde_json::from_value(json!(s)).map_err(|_| {
@@ -881,6 +1025,99 @@ fn request(cmd: &Command) -> Result<Option<Request>> {
         Command::Nc { pin, expect } => Request::Nc {
             pin: pin.clone(),
             expected_revision: expect.expect.clone(),
+        },
+        Command::Net(NetCmd::Add {
+            block,
+            name,
+            id,
+            intent,
+            expect,
+        }) => Request::NetAdd {
+            block: block.clone(),
+            name: name.clone(),
+            id: id.clone(),
+            intent: intent.args(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Net(NetCmd::Edit {
+            net,
+            intent,
+            pair_with,
+            polarity,
+            no_pair,
+            expect,
+        }) => Request::NetEdit {
+            net: net.clone(),
+            intent: intent.args(),
+            pair_with: if *no_pair {
+                Some(String::new())
+            } else {
+                pair_with.clone()
+            },
+            polarity: polarity
+                .as_deref()
+                .map(|p| {
+                    serde_json::from_value(json!(p))
+                        .map_err(|_| Error::new(Code::Usage, format!("--polarity {p:?} is p or n")))
+                })
+                .transpose()?,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Net(NetCmd::Rename { net, name, expect }) => Request::NetRename {
+            net: net.clone(),
+            name: name.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Net(NetCmd::Join { net, into, expect }) => Request::NetJoin {
+            net: net.clone(),
+            into: into.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Net(NetCmd::Delete { net, expect }) => Request::NetDelete {
+            net: net.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Net(NetCmd::Show { net }) => Request::NetShow { net: net.clone() },
+        Command::Instance(InstanceCmd::Add {
+            block,
+            of,
+            id,
+            ports,
+            channel,
+            expect,
+        }) => Request::InstanceAdd {
+            block: block.clone(),
+            of: of.clone(),
+            id: id.clone(),
+            ports: settings(ports, &[]),
+            refdes: channel.channel(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Instance(InstanceCmd::Edit {
+            instance,
+            ports,
+            unport,
+            channel,
+            no_refdes,
+            overrides,
+            unoverride,
+            expect,
+        }) => Request::InstanceEdit {
+            instance: instance.clone(),
+            fields: ryueda::partcmd::InstanceFields {
+                ports: settings(ports, unport),
+                refdes: channel.channel(),
+                no_refdes: *no_refdes,
+                overrides: settings(overrides, unoverride),
+            },
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Instance(InstanceCmd::Delete { instance, expect }) => Request::InstanceDelete {
+            instance: instance.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Instance(InstanceCmd::Show { instance }) => Request::InstanceShow {
+            instance: instance.clone(),
         },
         Command::Rail(RailCmd::Add {
             name,

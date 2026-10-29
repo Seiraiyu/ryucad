@@ -392,3 +392,593 @@ pub fn wire(session: &mut Session, pin: &str, how: Wire, expected: Option<&str>)
         "revision": b.revision,
     }))
 }
+
+/// A net's answer: its file, contents, what names it, faults and its
+/// block's revision.
+pub fn net_json(p: &Project, b: &BlockFiles, id: &Id) -> Result<Value> {
+    let at = format!("{}/{id}", b.id);
+    let l = b.nets.get(id).ok_or_else(|| {
+        Error::new(Code::NetNotFound, format!("block {} has no net {id}", b.id))
+            .with("reference", &at)
+    })?;
+    let n = l
+        .item
+        .as_ref()
+        .map_err(|e| e.clone().with("reference", &at))?;
+    Ok(json!({
+        "reference": at,
+        "path": part_path(&b.id, Part::Net, id),
+        "net": n,
+        "pins": write::users(p, &Node::Net(id.clone()), Some(&b.id)),
+        "faults": fault::list(&l.faults),
+        "revision": b.revision,
+    }))
+}
+
+/// The net a request names (`<block>/<net>`, the net by ID or name), as
+/// read.
+fn net<'a>(p: &'a Project, text: &str) -> Result<(&'a BlockFiles, Id, conn::Net)> {
+    let Some((block, name)) = text.split_once('/') else {
+        return Err(
+            Error::new(Code::InvalidParam, "name a net as <block>/<net>").with("reference", text),
+        );
+    };
+    let b = write::block(p, block)?;
+    let id = b.net(name).cloned().ok_or_else(|| {
+        Error::new(
+            Code::NetNotFound,
+            format!("block {block} has no net {name}"),
+        )
+        .with("reference", text)
+    })?;
+    let n = b.nets[&id]
+        .item
+        .clone()
+        .map_err(|e| e.with("reference", text))?;
+    Ok((b, id, n))
+}
+
+/// `net.add`: a net of a block, with its intent.
+pub fn net_add(
+    session: &mut Session,
+    block: &str,
+    name: &str,
+    id: Option<&str>,
+    intent: &crate::topcmd::IntentArgs,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let p = session.project();
+    let b = write::block(p, block)?;
+    check_revision(&format!("block {}", b.id), &b.revision, expected)?;
+    let id = new_id(id, "net", |s| b.has(s))?;
+    let mut n = conn::Net {
+        name: name.to_owned(),
+        class: None,
+        voltage: None,
+        current: None,
+        impedance: None,
+        pair: None,
+    };
+    crate::topcmd::fill_intent(
+        p,
+        intent,
+        &mut n.class,
+        [&mut n.voltage, &mut n.current, &mut n.impedance],
+    )?;
+    let bid = b.id.clone();
+    let mut w = Writes::default();
+    w.put(part_path(&bid, Part::Net, &id), &n, conn::NET_KIND);
+    commit(session, &format!("net {bid}/{name}"), w)?;
+    let p = session.project();
+    net_json(p, p.conn.block(&bid)?, &id)
+}
+
+/// `net.edit`: a net's class and intent, and its pair: `pair_with` a net
+/// of the block (both then name each other, the other the opposite
+/// polarity), or empty for none.
+pub fn net_edit(
+    session: &mut Session,
+    target: &str,
+    intent: &crate::topcmd::IntentArgs,
+    pair_with: Option<&str>,
+    polarity: Option<conn::Polarity>,
+    expected: Option<&str>,
+) -> Result<Value> {
+    use conn::{Pair, Polarity};
+    let p = session.project();
+    let (b, id, mut n) = net(p, target)?;
+    check_revision(&format!("block {}", b.id), &b.revision, expected)?;
+    let bid = b.id.clone();
+    crate::topcmd::fill_intent(
+        p,
+        intent,
+        &mut n.class,
+        [&mut n.voltage, &mut n.current, &mut n.impedance],
+    )?;
+    // Nets whose pair changes, besides this one.
+    let mut others: BTreeMap<Id, conn::Net> = BTreeMap::new();
+    let read = |x: &Id, others: &BTreeMap<Id, conn::Net>| -> Result<conn::Net> {
+        match others.get(x) {
+            Some(n) => Ok(n.clone()),
+            None => b
+                .nets
+                .get(x)
+                .ok_or_else(|| {
+                    Error::new(Code::NetNotFound, format!("block {bid} has no net {x}"))
+                })?
+                .item
+                .clone(),
+        }
+    };
+    // `x` loses its pair if that pair is `with`.
+    let clear = |x: &Id, with: &Id, others: &mut BTreeMap<Id, conn::Net>| -> Result<()> {
+        let mut o = read(x, others)?;
+        if o.pair.as_ref().is_some_and(|p| &p.with == with) {
+            o.pair = None;
+            others.insert(x.clone(), o);
+        }
+        Ok(())
+    };
+    if pair_with.is_some() || polarity.is_some() {
+        let old = n.pair.take();
+        let with = match pair_with {
+            Some("") => None,
+            Some(text) => Some(b.net(text).cloned().ok_or_else(|| {
+                Error::new(Code::NetNotFound, format!("block {bid} has no net {text}"))
+                    .with("param", "pair_with")
+            })?),
+            None => old.as_ref().map(|x| x.with.clone()),
+        };
+        let polarity = polarity
+            .or(old.as_ref().map(|x| x.polarity))
+            .unwrap_or(Polarity::P);
+        if let Some(old) = &old
+            && Some(&old.with) != with.as_ref()
+        {
+            clear(&old.with, &id, &mut others)?;
+        }
+        if let Some(with) = with {
+            if with == id {
+                return Err(
+                    Error::new(Code::InvalidParam, "a net pairs with another net")
+                        .with("param", "pair_with"),
+                );
+            }
+            let mut o = read(&with, &others)?;
+            if let Some(op) = &o.pair
+                && op.with != id
+            {
+                clear(&op.with, &with, &mut others)?;
+            }
+            o.pair = Some(Pair {
+                with: id.clone(),
+                polarity: match polarity {
+                    Polarity::P => Polarity::N,
+                    Polarity::N => Polarity::P,
+                },
+            });
+            n.pair = Some(Pair {
+                with: with.clone(),
+                polarity,
+            });
+            others.insert(with, o);
+        }
+    }
+    let mut w = Writes::default();
+    others.remove(&id);
+    w.put(part_path(&bid, Part::Net, &id), &n, conn::NET_KIND);
+    for (oid, o) in &others {
+        w.put(part_path(&bid, Part::Net, oid), o, conn::NET_KIND);
+    }
+    commit(session, &format!("net {bid}/{id}"), w)?;
+    let p = session.project();
+    net_json(p, p.conn.block(&bid)?, &id)
+}
+
+/// `net.rename`: one file.
+pub fn net_rename(
+    session: &mut Session,
+    target: &str,
+    name: &str,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let p = session.project();
+    let (b, id, mut n) = net(p, target)?;
+    check_revision(&format!("block {}", b.id), &b.revision, expected)?;
+    let bid = b.id.clone();
+    n.name = name.to_owned();
+    let mut w = Writes::default();
+    w.put(part_path(&bid, Part::Net, &id), &n, conn::NET_KIND);
+    commit(session, &format!("net {bid}/{id}"), w)?;
+    let p = session.project();
+    net_json(p, p.conn.block(&bid)?, &id)
+}
+
+/// What else names net `id` of `b` besides pins and ports: its buses and
+/// its pair's other net.
+fn net_refs(b: &BlockFiles, id: &Id) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(block) = &b.block.item {
+        for (bus, x) in &block.buses {
+            if x.nets.contains(id) {
+                out.push(format!("{}/bus:{bus}", b.id));
+            }
+        }
+    }
+    for (nid, n) in &b.nets {
+        if n.item
+            .as_ref()
+            .is_ok_and(|n| n.pair.as_ref().is_some_and(|x| &x.with == id))
+        {
+            out.push(format!("{}/{nid}", b.id));
+        }
+    }
+    out
+}
+
+/// `net.join`: every pin and port on `net` moves to `into` (a net of the
+/// same block, or `rail:<name>`), its buses take `into` (or drop it, for a
+/// rail), and `net` goes, in one change.
+pub fn net_join(
+    session: &mut Session,
+    target: &str,
+    into: &str,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let p = session.project();
+    let (b, id, _) = net(p, target)?;
+    check_revision(&format!("block {}", b.id), &b.revision, expected)?;
+    let bid = b.id.clone();
+    let to = write::node(p, b, into)?;
+    if to == Node::Net(id.clone()) || to == Node::Nc {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "join a net into another net of its block or a rail",
+        )
+        .with("param", "into"));
+    }
+    if let Node::Port(_) = to {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a port isn't a net to join into: connect the pins to it instead",
+        )
+        .with("param", "into"));
+    }
+    let paired: Vec<String> = b
+        .nets
+        .iter()
+        .filter(|(_, n)| {
+            n.item
+                .as_ref()
+                .is_ok_and(|n| n.pair.as_ref().is_some_and(|x| x.with == id))
+        })
+        .map(|(nid, _)| format!("{bid}/{nid}"))
+        .collect();
+    if !paired.is_empty() {
+        return Err(write::has_dependents(
+            &format!("net {bid}/{id}, a pair's half,"),
+            &paired,
+        ));
+    }
+    let from = Node::Net(id.clone());
+    let mut w = Writes::default();
+    let mut moved = Vec::new();
+    for (cid, c) in &b.components {
+        let Ok(c) = &c.item else { continue };
+        if c.pins.values().any(|n| *n == from) {
+            let mut c = c.clone();
+            for (pin, n) in c.pins.iter_mut() {
+                if *n == from {
+                    *n = to.clone();
+                    moved.push(format!("{bid}/{cid}/{pin}"));
+                }
+            }
+            w.put(
+                part_path(&bid, Part::Component, cid),
+                &c,
+                conn::COMPONENT_KIND,
+            );
+        }
+    }
+    for (iid, i) in &b.instances {
+        let Ok(i) = &i.item else { continue };
+        if i.ports.values().any(|n| *n == from) {
+            let mut i = i.clone();
+            for (port, n) in i.ports.iter_mut() {
+                if *n == from {
+                    *n = to.clone();
+                    moved.push(format!("{bid}/{iid}/{port}"));
+                }
+            }
+            w.put(
+                part_path(&bid, Part::Instance, iid),
+                &i,
+                conn::INSTANCE_KIND,
+            );
+        }
+    }
+    if let Ok(block) = &b.block.item
+        && block.buses.values().any(|x| x.nets.contains(&id))
+    {
+        let mut block = block.clone();
+        for x in block.buses.values_mut() {
+            let mut nets = Vec::new();
+            for n in &x.nets {
+                let n = match (n == &id, &to) {
+                    (true, Node::Net(t)) => t.clone(),
+                    (true, _) => continue,
+                    (false, _) => n.clone(),
+                };
+                if !nets.contains(&n) {
+                    nets.push(n);
+                }
+            }
+            x.nets = nets;
+        }
+        w.put(crate::design::block_path(&bid), &block, conn::BLOCK_KIND);
+    }
+    w.delete(part_path(&bid, Part::Net, &id));
+    commit(session, &format!("net {bid}/{id}"), w)?;
+    let b = session.project().conn.block(&bid)?;
+    Ok(json!({
+        "joined": format!("{bid}/{id}"),
+        "into": node_text(&bid, &to),
+        "moved": moved,
+        "revision": b.revision,
+    }))
+}
+
+/// `net.delete`: only a net nothing names.
+pub fn net_delete(session: &mut Session, target: &str, expected: Option<&str>) -> Result<Value> {
+    let p = session.project();
+    let (b, id, _) = net(p, target)?;
+    check_revision(&format!("block {}", b.id), &b.revision, expected)?;
+    let bid = b.id.clone();
+    let pins = write::users(p, &Node::Net(id.clone()), Some(&bid));
+    if !pins.is_empty() {
+        return Err(Error::new(
+            Code::NetHasPins,
+            format!(
+                "net {bid}/{id} still has {} pin(s) or port(s): disconnect them, or join it into another net",
+                pins.len()
+            ),
+        )
+        .with("pins", pins));
+    }
+    let refs = net_refs(b, &id);
+    if !refs.is_empty() {
+        return Err(write::has_dependents(&format!("net {bid}/{id}"), &refs));
+    }
+    let mut w = Writes::default();
+    w.delete(part_path(&bid, Part::Net, &id));
+    commit(session, &format!("net {bid}/{id}"), w)?;
+    Ok(json!({
+        "deleted": format!("{bid}/{id}"),
+        "revision": session.project().conn.block(&bid)?.revision,
+    }))
+}
+
+pub fn net_show(p: &Project, target: &str) -> Result<Value> {
+    let (b, id, _) = net(p, target)?;
+    net_json(p, b, &id)
+}
+
+/// An instance's answer: its file, contents, ports as references, faults
+/// and its block's revision.
+pub fn instance_json(b: &BlockFiles, id: &Id) -> Result<Value> {
+    let at = format!("{}/{id}", b.id);
+    let l = b.instances.get(id).ok_or_else(|| {
+        Error::new(
+            Code::NotFound,
+            format!("block {} has no instance {id}", b.id),
+        )
+        .with("reference", &at)
+    })?;
+    let i = l
+        .item
+        .as_ref()
+        .map_err(|e| e.clone().with("reference", &at))?;
+    let ports: Map<String, Value> = i
+        .ports
+        .iter()
+        .map(|(port, n)| (port.to_string(), json!(node_text(&b.id, n))))
+        .collect();
+    Ok(json!({
+        "reference": at,
+        "path": part_path(&b.id, Part::Instance, id),
+        "instance": i,
+        "connections": ports,
+        "faults": fault::list(&l.faults),
+        "revision": b.revision,
+    }))
+}
+
+/// Sets an instance's ports from a request's: each port of the placed
+/// block (by ID or name) to a node of `b` as text, or `null` to leave it
+/// unconnected.
+fn set_ports(
+    p: &Project,
+    b: &BlockFiles,
+    child: &Id,
+    ports: &Map<String, Value>,
+    into: &mut BTreeMap<Id, Node>,
+) -> Result<()> {
+    let child = p.conn.block(child)?;
+    let block = child
+        .block
+        .item
+        .as_ref()
+        .map_err(|e| e.clone().with("block", &child.id))?;
+    for (name, v) in ports {
+        let port = block.port(name).cloned().ok_or_else(|| {
+            Error::new(
+                Code::PortNotFound,
+                format!("block {} has no port {name}", child.id),
+            )
+            .with("param", format!("ports/{name}"))
+        })?;
+        match v {
+            Value::Null => {
+                into.remove(&port);
+            }
+            Value::String(text) => {
+                let n = write::node(p, b, text)
+                    .map_err(|e| e.with("param", format!("ports/{name}")))?;
+                into.insert(port, n);
+            }
+            v => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("port {name} connects to a net as text, or null, not {v}"),
+                )
+                .with("param", format!("ports/{name}")));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `instance.add`: a block placed in another.
+pub fn instance_add(
+    session: &mut Session,
+    block: &str,
+    of: &str,
+    id: Option<&str>,
+    ports: &Map<String, Value>,
+    refdes: Option<&conn::Channel>,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let p = session.project();
+    let b = write::block(p, block)?;
+    check_revision(&format!("block {}", b.id), &b.revision, expected)?;
+    let child = write::block(p, of)
+        .map_err(|e| e.with("param", "of"))?
+        .id
+        .clone();
+    let id = new_id(id, "instance", |s| b.has(s))?;
+    let mut i = conn::Instance {
+        of: child.clone(),
+        ports: BTreeMap::new(),
+        refdes: refdes.cloned(),
+        overrides: BTreeMap::new(),
+    };
+    set_ports(p, b, &child, ports, &mut i.ports)?;
+    let bid = b.id.clone();
+    let mut w = Writes::default();
+    w.put(
+        part_path(&bid, Part::Instance, &id),
+        &i,
+        conn::INSTANCE_KIND,
+    );
+    commit(session, &format!("instance {bid}/{id}"), w)?;
+    instance_json(session.project().conn.block(&bid)?, &id)
+}
+
+/// What `instance.edit` changes; what it leaves out stays.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstanceFields {
+    /// By port: a node as text, or `null` to unconnect.
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub ports: Map<String, Value>,
+    /// A channel rule: `{"rule": "suffix", "value": "_A"}` or
+    /// `{"rule": "offset", "value": 100}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refdes: Option<conn::Channel>,
+    /// Drop the channel rule.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_refdes: bool,
+    /// By occurrence path below the instance: a reference designator, or
+    /// `null` to drop the override.
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub overrides: Map<String, Value>,
+}
+
+/// The instance a request names, as read.
+fn instance<'a>(p: &'a Project, text: &str) -> Result<(&'a BlockFiles, Id, conn::Instance)> {
+    let (b, id) = write::in_block(p, text, "instance")?;
+    let i = b
+        .instances
+        .get(&id)
+        .ok_or_else(|| {
+            Error::new(
+                Code::NotFound,
+                format!("block {} has no instance {id}", b.id),
+            )
+            .with("reference", text)
+        })?
+        .item
+        .clone()
+        .map_err(|e| e.with("reference", text))?;
+    Ok((b, id, i))
+}
+
+/// `instance.edit`.
+pub fn instance_edit(
+    session: &mut Session,
+    target: &str,
+    f: &InstanceFields,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let p = session.project();
+    let (b, id, mut i) = instance(p, target)?;
+    check_revision(&format!("block {}", b.id), &b.revision, expected)?;
+    set_ports(p, b, &i.of.clone(), &f.ports, &mut i.ports)?;
+    if f.no_refdes {
+        i.refdes = None;
+    }
+    if let Some(r) = &f.refdes {
+        i.refdes = Some(r.clone());
+    }
+    for (path, v) in &f.overrides {
+        match v {
+            Value::Null => {
+                i.overrides.remove(path);
+            }
+            Value::String(r) => {
+                check_refdes(r)?;
+                i.overrides.insert(path.clone(), r.clone());
+            }
+            v => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("an override is a reference designator or null, not {v}"),
+                )
+                .with("param", format!("overrides/{path}")));
+            }
+        }
+    }
+    let bid = b.id.clone();
+    let mut w = Writes::default();
+    w.put(
+        part_path(&bid, Part::Instance, &id),
+        &i,
+        conn::INSTANCE_KIND,
+    );
+    commit(session, &format!("instance {bid}/{id}"), w)?;
+    instance_json(session.project().conn.block(&bid)?, &id)
+}
+
+/// `instance.delete`.
+pub fn instance_delete(
+    session: &mut Session,
+    target: &str,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let p = session.project();
+    let (b, id, _) = instance(p, target)?;
+    check_revision(&format!("block {}", b.id), &b.revision, expected)?;
+    let bid = b.id.clone();
+    let mut w = Writes::default();
+    w.delete(part_path(&bid, Part::Instance, &id));
+    commit(session, &format!("instance {bid}/{id}"), w)?;
+    Ok(json!({
+        "deleted": format!("{bid}/{id}"),
+        "revision": session.project().conn.block(&bid)?.revision,
+    }))
+}
+
+pub fn instance_show(p: &Project, target: &str) -> Result<Value> {
+    let (b, id) = write::in_block(p, target, "instance")?;
+    instance_json(b, &id)
+}

@@ -391,6 +391,75 @@ fn dispatch(
             partcmd::Wire::Nc,
             expected_revision.as_deref(),
         ),
+        Request::NetAdd {
+            block,
+            name,
+            id,
+            intent,
+            expected_revision,
+        } => partcmd::net_add(
+            session,
+            &block,
+            &name,
+            id.as_deref(),
+            &intent,
+            expected_revision.as_deref(),
+        ),
+        Request::NetEdit {
+            net,
+            intent,
+            pair_with,
+            polarity,
+            expected_revision,
+        } => partcmd::net_edit(
+            session,
+            &net,
+            &intent,
+            pair_with.as_deref(),
+            polarity,
+            expected_revision.as_deref(),
+        ),
+        Request::NetRename {
+            net,
+            name,
+            expected_revision,
+        } => partcmd::net_rename(session, &net, &name, expected_revision.as_deref()),
+        Request::NetJoin {
+            net,
+            into,
+            expected_revision,
+        } => partcmd::net_join(session, &net, &into, expected_revision.as_deref()),
+        Request::NetDelete {
+            net,
+            expected_revision,
+        } => partcmd::net_delete(session, &net, expected_revision.as_deref()),
+        Request::NetShow { net } => partcmd::net_show(session.project(), &net),
+        Request::InstanceAdd {
+            block,
+            of,
+            id,
+            ports,
+            refdes,
+            expected_revision,
+        } => partcmd::instance_add(
+            session,
+            &block,
+            &of,
+            id.as_deref(),
+            &ports,
+            refdes.as_ref(),
+            expected_revision.as_deref(),
+        ),
+        Request::InstanceEdit {
+            instance,
+            fields,
+            expected_revision,
+        } => partcmd::instance_edit(session, &instance, &fields, expected_revision.as_deref()),
+        Request::InstanceDelete {
+            instance,
+            expected_revision,
+        } => partcmd::instance_delete(session, &instance, expected_revision.as_deref()),
+        Request::InstanceShow { instance } => partcmd::instance_show(session.project(), &instance),
         Request::ActivityLog { limit, before } => {
             let entries = live.map_or_else(Vec::new, |l| l.log.page(limit.unwrap_or(50), before));
             Ok(json!({ "entries": entries }))
