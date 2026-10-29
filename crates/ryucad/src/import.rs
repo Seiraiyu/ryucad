@@ -856,7 +856,7 @@ pub fn misplaced(project: &crate::doc::project::Project) -> Vec<Misplaced> {
 
 /// Every feature of every part that fails in `s`, with its error, by part
 /// and feature.
-fn failing(s: &mut crate::session::Session) -> Result<BTreeMap<(Id, Id), Value>> {
+pub(crate) fn failing(s: &mut crate::session::Session) -> Result<BTreeMap<(Id, Id), Value>> {
     let ids: Vec<Id> = s.project().parts.keys().cloned().collect();
     s.rebuild_parts(&ids)?;
     let mut out = BTreeMap::new();

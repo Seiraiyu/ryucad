@@ -443,6 +443,213 @@ pub fn parts(session: &mut Session, name: &str, part: Option<&str>) -> Result<se
     }))
 }
 
+/// What `deps.update` is asked to move.
+pub struct Update<'a> {
+    /// The dependencies (names or project IDs) whose instances move: every
+    /// one when empty.
+    pub names: &'a [String],
+    /// Only instances of this part.
+    pub part: Option<&'a str>,
+    /// To this label, rather than the latest.
+    pub to: Option<&'a str>,
+    /// Use what was fetched, fetching nothing.
+    pub offline: bool,
+    /// Answer what it would do, writing nothing.
+    pub dry_run: bool,
+}
+
+/// One instance `deps.update` moves.
+struct Move {
+    assembly: Id,
+    instance: Id,
+    project: ProjectId,
+    part: Id,
+    from: String,
+    to: String,
+}
+
+/// `deps.update`: fetches (unless offline), then moves every instance of
+/// the named dependencies' parts (or of one part) to its part's latest
+/// official label that isn't obsolete (or to `to`), writes the lock and
+/// keeps assemblies current, in one logged, undoable change. It answers
+/// what moved and what builds now and wouldn't after (`failing`, from a
+/// rebuild of the files as they would be), and refuses nothing it can
+/// explain: a mate that fails after is reported, not blocked.
+pub fn update(
+    session: &mut Session,
+    ask: Update,
+    expected: Option<&str>,
+) -> Result<serde_json::Value> {
+    use crate::doc::assembly::Rev;
+    use serde_json::json;
+    crate::config::check_project_revision(session.root(), expected)?;
+    let fetched = if ask.offline {
+        None
+    } else {
+        Some(fetch(session, ask.names)?["fetched"].clone())
+    };
+    let p = session.project().clone();
+    let mut chosen = std::collections::BTreeSet::new();
+    for n in ask.names {
+        chosen.insert(
+            crate::doc::deps::find(&p.manifest.dependencies, n)?
+                .0
+                .clone(),
+        );
+    }
+    let only = ask.part.map(|x| Id::parse(x, "part")).transpose()?;
+    let lock = lock_of(&p).unwrap_or_default();
+    // Where each project is: the manifest's dependency, else the lock's.
+    let place = |id: &ProjectId| -> Option<(String, String)> {
+        match p.manifest.dependencies.get(id) {
+            Some(d) => Some((d.url.clone(), d.path.clone())),
+            None => lock
+                .projects
+                .get(id)
+                .map(|l| (l.url.clone(), l.path.clone())),
+        }
+    };
+    let mut released: std::collections::BTreeMap<
+        ProjectId,
+        Vec<ryupdm::deps::parts::ReleasedPart>,
+    > = Default::default();
+    let mut moves = Vec::new();
+    for (asm, part) in &p.parts {
+        for fid in part.order() {
+            let Some(Ok(Feature::Instance(i))) = part.features.get(fid) else {
+                continue;
+            };
+            let Rev::Foreign { project, label } = &i.rev else {
+                continue;
+            };
+            if (!chosen.is_empty() && !chosen.contains(project))
+                || only.as_ref().is_some_and(|o| *o != i.part)
+            {
+                continue;
+            }
+            if !released.contains_key(project) {
+                let Some((url, path)) = place(project) else {
+                    continue;
+                };
+                let (_, _, list) =
+                    ryupdm::deps::parts::parts(session.deps_reader()?, project, &url, &path)?;
+                released.insert(project.clone(), list);
+            }
+            let labels = released[project]
+                .iter()
+                .find(|r| r.part == i.part)
+                .map(|r| r.labels.clone())
+                .unwrap_or_default();
+            let target = match ask.to {
+                Some(t) => match labels.iter().find(|l| l.label == t) {
+                    Some(l) => l.label.clone(),
+                    None => {
+                        return Err(Error::new(
+                            Code::LabelNotFound,
+                            format!(
+                                "{} has no official release {t} of {}",
+                                name_of(&p, project),
+                                i.part
+                            ),
+                        )
+                        .with("project", project)
+                        .with("part", &i.part)
+                        .with("label", t));
+                    }
+                },
+                None => match labels.iter().find(|l| l.state == "released") {
+                    Some(l) => l.label.clone(),
+                    None => continue,
+                },
+            };
+            if target != *label {
+                moves.push(Move {
+                    assembly: asm.clone(),
+                    instance: fid.clone(),
+                    project: project.clone(),
+                    part: i.part.clone(),
+                    from: label.clone(),
+                    to: target,
+                });
+            }
+        }
+    }
+    // The files as the moves leave them, and the lock they need.
+    let mut after = p.clone();
+    for m in &moves {
+        let part = after.parts.get_mut(&m.assembly).expect("listed");
+        if let Some(Ok(Feature::Instance(i))) = part.features.get_mut(&m.instance) {
+            i.rev = Rev::Foreign {
+                project: m.project.clone(),
+                label: m.to.clone(),
+            };
+        }
+    }
+    let new_lock = relock(session, &after)?;
+    let mut writes: std::collections::BTreeMap<String, Option<Vec<u8>>> = Default::default();
+    for m in &moves {
+        let f = &after.parts[&m.assembly].features[&m.instance];
+        let at = format!("parts/{}/features/{}.json", m.assembly, m.instance);
+        let v = f.as_ref().expect("an instance").to_json();
+        writes.insert(at, Some(crate::doc::canonical::to_string(&v).into_bytes()));
+    }
+    let lock_path = crate::doc::lock::LOCK.to_owned();
+    let lock_changed = p.lock.as_ref().and_then(|l| l.as_ref().ok()) != Some(&new_lock)
+        && !(p.lock.is_none() && new_lock.is_empty());
+    if lock_changed {
+        let bytes = (!new_lock.is_empty())
+            .then(|| crate::doc::canonical::to_string(&new_lock.to_json()).into_bytes());
+        writes.insert(lock_path, bytes);
+    }
+    let now = crate::import::failing(session)?;
+    let mut proposed = session.proposed(&writes)?;
+    let later = crate::import::failing(&mut proposed)?;
+    let failing: Vec<serde_json::Value> = later
+        .into_iter()
+        .filter(|(k, _)| !now.contains_key(k))
+        .map(|((part, feature), e)| json!({"part": part, "feature": feature, "error": e}))
+        .collect();
+    let moved: Vec<serde_json::Value> = moves
+        .iter()
+        .map(|m| {
+            json!({"assembly": m.assembly, "instance": m.instance, "part": m.part,
+                   "dependency": name_of(&p, &m.project), "project": m.project,
+                   "from": m.from, "to": m.to})
+        })
+        .collect();
+    let mut v = json!({"schema": SCHEMA, "dry_run": ask.dry_run, "moved": moved,
+                       "failing": failing, "lock_changed": lock_changed});
+    if let Some(f) = fetched {
+        v["fetched"] = f;
+    }
+    if ask.dry_run || writes.is_empty() {
+        return Ok(v);
+    }
+    // Assemblies current until now stay so.
+    let mut current = Vec::new();
+    for m in &moves {
+        for a in crate::mate::current(session, &m.assembly)? {
+            if !current.contains(&a) {
+                current.push(a);
+            }
+        }
+    }
+    for (path, bytes) in &writes {
+        let at = session.root().join(path);
+        match bytes {
+            Some(b) => crate::doc::source::write_atomic(&at, b)?,
+            None => crate::doc::project::remove_file(session.root(), &at)?,
+        }
+    }
+    session.reload()?;
+    let assemblies = crate::mate::keep_current(session, &current)?;
+    if !assemblies.is_empty() {
+        v["assemblies"] = json!(assemblies);
+    }
+    v["project_revision"] = json!(crate::config::project_revision(session.root())?);
+    Ok(v)
+}
+
 /// `deps.list`: each dependency and each project the lock reaches through
 /// one, offline: its name, ID, URL, path, release branch, whether it is
 /// fetched and the fetched tip, its faults, and each label the lock holds
@@ -949,5 +1156,68 @@ pub(crate) mod tests {
         .unwrap();
         assert!(!dir.path().join(LOCK).exists());
         assert!(s.project().lock.is_none());
+    }
+
+    /// Releases the library's `p` again as its next label, made longer.
+    pub(crate) fn release_again(lib_dir: &Path) {
+        let mut lib = Session::open(lib_dir).unwrap();
+        call(
+            &mut lib,
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"x": 30}}),
+        )
+        .unwrap();
+        call(&mut lib, "release.propose", json!({"part": "p"})).unwrap();
+        git(lib_dir, &["add", "."]);
+        git(lib_dir, &["commit", "-q", "-m", "p B"]);
+    }
+
+    #[test]
+    fn an_update_moves_instances_to_the_latest_release() {
+        let (lib_dir, dir, lib, mut s) = placing();
+        release_again(lib_dir.path());
+        // Offline, B isn't known yet: nothing moves.
+        let v = call(&mut s, "deps.update", json!({"offline": true})).unwrap();
+        assert_eq!(v["moved"], json!([]));
+        // Fetched: a dry run says what would move and writes nothing.
+        let v = call(&mut s, "deps.update", json!({"dry_run": true})).unwrap();
+        assert_eq!(
+            v["moved"],
+            json!([{"assembly": "frame", "instance": "b", "part": "p", "dependency": "lib",
+                    "project": lib, "from": "A", "to": "B"}])
+        );
+        assert_eq!(v["failing"], json!([]));
+        assert_eq!(v["lock_changed"], true);
+        let file =
+            || std::fs::read_to_string(dir.path().join("parts/frame/features/b.json")).unwrap();
+        assert!(file().contains("\"A\""));
+        let v = call(&mut s, "deps.update", json!({})).unwrap();
+        assert_eq!(v["moved"][0]["to"], "B");
+        assert!(file().contains("\"B\""));
+        let lock = super::lock_of(s.project()).unwrap();
+        assert!(lock.label(&lib, &id("p"), "B").is_some());
+        assert!(lock.label(&lib, &id("p"), "A").is_none());
+        // B is the longer box.
+        let m = s.model(&id("frame"), &Rev::Working).unwrap();
+        assert_eq!(
+            m.occurrences[0].rev,
+            Rev::Foreign {
+                project: lib.clone(),
+                label: "B".into()
+            }
+        );
+        // Back to A, by name and label.
+        let v = call(
+            &mut s,
+            "deps.update",
+            json!({"names": ["lib"], "to": "A", "offline": true}),
+        )
+        .unwrap();
+        assert_eq!(
+            (&v["moved"][0]["from"], &v["moved"][0]["to"]),
+            (&json!("B"), &json!("A"))
+        );
+        let e = call(&mut s, "deps.update", json!({"to": "Z", "offline": true})).unwrap_err();
+        assert_eq!(e.code, Code::LabelNotFound);
     }
 }
