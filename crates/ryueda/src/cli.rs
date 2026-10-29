@@ -114,6 +114,12 @@ enum Command {
     /// Add, edit, delete or show instances: blocks placed in blocks.
     #[command(subcommand)]
     Instance(InstanceCmd),
+    /// A design's flattened netlist: every component at every instance
+    /// path, and every net joined through the hierarchy.
+    Netlist {
+        /// By ID or name; the project's one design when left out.
+        design: Option<String>,
+    },
     /// Add, edit, delete or list rails: project-wide nets (GND, 3V3).
     #[command(subcommand)]
     Rail(RailCmd),
@@ -377,6 +383,8 @@ impl IntentFlags {
     }
 }
 
+// Parsed once per run, as `Command` is.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum BlockCmd {
     /// A block, its ID random unless given.
@@ -406,6 +414,10 @@ enum BlockCmd {
         /// PORT=DIRECTION
         #[arg(long = "port-direction", value_parser = pair)]
         port_direction: Vec<(String, String)>,
+        /// PORT=VOLTAGE ("3.3 V"; empty clears it): what the block expects
+        /// on the port.
+        #[arg(long = "port-voltage", value_parser = pair)]
+        port_voltage: Vec<(String, String)>,
         #[arg(long = "remove-port", value_name = "PORT")]
         remove_port: Vec<String>,
         /// NAME=NET,NET,...
@@ -897,6 +909,7 @@ fn request(cmd: &Command) -> Result<Option<Request>> {
             add_port,
             rename_port,
             port_direction,
+            port_voltage,
             remove_port,
             add_bus,
             bus_nets,
@@ -916,6 +929,7 @@ fn request(cmd: &Command) -> Result<Option<Request>> {
                 ports.push(PortOp::Add {
                     name: name.to_owned(),
                     direction: direction(dir)?,
+                    voltage: None,
                     id: None,
                 });
             }
@@ -924,6 +938,7 @@ fn request(cmd: &Command) -> Result<Option<Request>> {
                     port: port.clone(),
                     name: Some(name.clone()),
                     direction: None,
+                    voltage: None,
                 });
             }
             for (port, dir) in port_direction {
@@ -931,6 +946,15 @@ fn request(cmd: &Command) -> Result<Option<Request>> {
                     port: port.clone(),
                     name: None,
                     direction: Some(direction(dir)?),
+                    voltage: None,
+                });
+            }
+            for (port, v) in port_voltage {
+                ports.push(PortOp::Set {
+                    port: port.clone(),
+                    name: None,
+                    direction: None,
+                    voltage: Some(v.clone()),
                 });
             }
             for port in remove_port {
@@ -1118,6 +1142,9 @@ fn request(cmd: &Command) -> Result<Option<Request>> {
         },
         Command::Instance(InstanceCmd::Show { instance }) => Request::InstanceShow {
             instance: instance.clone(),
+        },
+        Command::Netlist { design } => Request::Netlist {
+            design: design.clone(),
         },
         Command::Rail(RailCmd::Add {
             name,
