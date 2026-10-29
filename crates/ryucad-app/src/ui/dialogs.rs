@@ -326,6 +326,109 @@ pub fn measure(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
     }
 }
 
+/// Tools > Appearance: the colour and opacity of what is selected (a
+/// face, its solid or its part; an occurrence's solid or the occurrences
+/// above it), each shown on the model as it is dragged and written once
+/// when it is let go (or typed), one undoable change each; the part's
+/// material's colour; and Clear, which takes the entry out.
+pub fn appearance(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
+    use crate::core::appearance::Preview;
+    let mut open = ws.appearance.open;
+    if !open {
+        return;
+    }
+    // What to do once the window is drawn: preview, write a field, clear.
+    let mut preview = None;
+    let mut write = None;
+    let mut clear = false;
+    let released = !ctx.input(|i| i.pointer.any_down());
+    window("Appearance", view)
+        .open(&mut open)
+        .default_width(340.0)
+        .show(ctx, |ui| {
+            let e = &mut ws.appearance;
+            if e.targets.is_empty() {
+                ui.label("Select a face, a solid or an occurrence, or show one part.");
+                return;
+            }
+            let chosen = e.chosen;
+            egui::ComboBox::from_label("Colour what")
+                .selected_text(e.targets[chosen].clone())
+                .show_ui(ui, |ui| {
+                    for (k, t) in e.targets.clone().iter().enumerate() {
+                        ui.selectable_value(&mut e.chosen, k, t);
+                    }
+                });
+            if e.chosen != chosen {
+                e.dragging = None;
+            }
+            ui.horizontal(|ui| {
+                let name = ui.label("Colour");
+                let r = egui::color_picker::color_edit_button_srgb(ui, &mut e.colour)
+                    .labelled_by(name.id);
+                if r.changed() {
+                    e.typed = e.hex();
+                    preview = Some(Preview {
+                        colour: Some(e.colour.map(|c| f32::from(c) / 255.0)),
+                        opacity: None,
+                    });
+                }
+                let hex = ui.label("Hex");
+                let r = ui
+                    .add(egui::TextEdit::singleline(&mut e.typed).desired_width(80.0))
+                    .labelled_by(hex.id);
+                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && e.take_typed()
+                {
+                    write = Some("colour");
+                }
+            });
+            let name = ui.label("Opacity");
+            let r = ui
+                .add(egui::Slider::new(&mut e.opacity, 0.05..=1.0))
+                .labelled_by(name.id);
+            if r.changed() {
+                preview = Some(Preview {
+                    colour: None,
+                    opacity: Some(e.opacity),
+                });
+            }
+            if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                write = Some("opacity");
+            }
+            ui.horizontal(|ui| {
+                if ui.button("Use material colour").clicked() {
+                    write = Some("material");
+                }
+                if ui.button("Clear").clicked() {
+                    clear = true;
+                }
+            });
+            if let Some(err) = &e.error {
+                ui.colored_label(ui.visuals().error_fg_color, &err.message);
+            }
+            ui.weak("Colours are kept in Git, in the part's appearance.json: ryucad colour.");
+        });
+    if let Some(p) = preview {
+        ws.preview_appearance(p);
+    }
+    // A colour dragged in the picker is written when the pointer is let go.
+    if write.is_none()
+        && released
+        && ws.appearance.dragging.is_some_and(|d| d.colour.is_some())
+    {
+        write = Some("colour");
+    }
+    if let Some(field) = write {
+        ws.write_appearance(field);
+    }
+    if clear {
+        ws.clear_appearance();
+    }
+    if !open {
+        ws.close_appearance();
+    }
+}
+
 /// Tools > Mass properties: the weighed solid, part or assembly's values,
 /// each part's material and mass, and the warnings. Weigh again takes
 /// the selection (or what is shown) anew.

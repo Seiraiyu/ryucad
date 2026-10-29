@@ -215,6 +215,8 @@ pub struct Editor {
     pub opacity: f32,
     /// A change dragged and not yet written.
     pub dragging: Option<Preview>,
+    /// The colour as typed, `#rrggbb`.
+    pub typed: String,
     pub error: Option<ryucad::error::Error>,
 }
 
@@ -230,7 +232,22 @@ impl Editor {
         self.colour = c.map(|x| (x * 255.0).round() as u8);
         self.opacity = now.opacity;
         self.dragging = None;
+        self.typed = self.hex();
         self.error = None;
+    }
+
+    /// Takes the colour typed, if it is `#rrggbb`.
+    pub fn take_typed(&mut self) -> bool {
+        let t = self.typed.trim().trim_start_matches('#');
+        let byte = |k: usize| u8::from_str_radix(t.get(k..k + 2)?, 16).ok();
+        match (t.len(), byte(0), byte(2), byte(4)) {
+            (6, Some(r), Some(g), Some(b)) => {
+                self.colour = [r, g, b];
+                self.typed = self.hex();
+                true
+            }
+            _ => false,
+        }
     }
 
     /// What it colours, if anything.
@@ -334,5 +351,11 @@ mod tests {
         let mut e = Editor::default();
         e.open_on(targets("p", false), Face::default(), [1.0, 0.5, 0.0]);
         assert_eq!((e.target(), e.hex().as_str()), (Some("p"), "#ff8000"));
+        assert_eq!(e.typed, "#ff8000");
+        e.typed = "2050C0".into();
+        assert!(e.take_typed());
+        assert_eq!((e.colour, e.typed.as_str()), ([0x20, 0x50, 0xc0], "#2050c0"));
+        e.typed = "#12345".into();
+        assert!(!e.take_typed());
     }
 }

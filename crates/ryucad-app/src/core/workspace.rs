@@ -676,7 +676,9 @@ impl Workspace {
             entities: vec![target],
             colour: (field == "colour").then(|| self.appearance.hex()),
             material: field == "material",
-            opacity: (field == "opacity").then_some(f64::from(self.appearance.opacity)),
+            // To a thousandth: the slider's f32 isn't the decimal it shows.
+            opacity: (field == "opacity")
+                .then_some((f64::from(self.appearance.opacity) * 1000.0).round() / 1000.0),
             unset: Vec::new(),
             expected_revision: None,
         };
