@@ -184,6 +184,23 @@ fn row(block: &Block, parts: &[&Cluster]) -> Cluster {
 /// Lays `block` out, or refuses when its instructions can't hold.
 pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
     let r = instr::resolve(block)?;
+    let fresh = block.previous.is_none() || block.relayout == Relayout::Block;
+    let mut out = attempt(block, &r, 0);
+    // From nothing, spread the columns where labels or text didn't fit;
+    // over a previous layout nothing kept may move.
+    if fresh {
+        for spread in [4 * GRID, 8 * GRID, 12 * GRID] {
+            if crate::rules::check(block, &out.layout).is_empty() {
+                break;
+            }
+            out = attempt(block, &r, spread);
+        }
+    }
+    Ok(out)
+}
+
+/// One layout of `block` under `r`, its columns spread by `spread`.
+fn attempt(block: &Block, r: &instr::Resolved, spread: Nm) -> Outcome {
     let mut st = State::new(block);
     st.notes.extend(r.notes.iter().cloned());
     let prev = match &block.relayout {
@@ -258,7 +275,10 @@ pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
     let is_new = |c: &Cluster| c.members.iter().all(|(p, _)| st.place[*p].is_none());
     // The sheet a cluster is asked onto: its first member's that names one.
     let named = |c: &Cluster| c.members.iter().find_map(|(p, _)| r.sheet.get(p).cloned());
-    let mut hints = Hints::default();
+    let mut hints = Hints {
+        spread,
+        ..Hints::default()
+    };
     for (i, c) in clusters.iter().enumerate() {
         if let Some(side) = c.members.iter().find_map(|(p, _)| r.edge.get(p)) {
             hints.edge.insert(i, *side);
@@ -308,9 +328,9 @@ pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
                 &hints,
             );
         }
-        insert(&mut st, prev, &clusters, &fresh, &mixed, &r, &hints);
+        insert(&mut st, prev, &clusters, &fresh, &mixed, r, &hints);
     }
-    relate(&mut st, prev, &clusters, &r);
+    relate(&mut st, prev, &clusters, r);
     for p in &r.moved {
         if let Some((s, place, _)) = st.place[*p] {
             st.place[*p] = Some((s, place, true));
@@ -319,7 +339,7 @@ pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
     let mut out = draw(st, prev, &r.styles);
     out.idioms = idioms;
     out.flow = r.flow.iter().map(|p| block.parts[*p].key.clone()).collect();
-    Ok(out)
+    out
 }
 
 /// Whether an instruction says where parts go.
@@ -712,7 +732,7 @@ fn insert(
                 continue;
             }
             let at0 = Place::new([0, 0], place.rotation, place.mirror);
-            let e0 = Shape::of(&block.parts[p], at0).extent;
+            let e0 = Cluster::single(p, at0).room_with_labels(block, [0, 0]);
             match spot(st, s, e0, place.at, GRID, &blocked) {
                 Some(o) => {
                     st.place[p] = Some((s, Place::new(o, place.rotation, place.mirror), false))
@@ -766,7 +786,7 @@ fn insert(
         };
         let sid = st.sheets[s].0.clone();
         let blocked = drawn.get(&sid).cloned().unwrap_or_default();
-        let e0 = c.room(block, [0, 0]);
+        let e0 = c.room_with_labels(block, [0, 0]);
         match hints.edge.get(&ci) {
             Some(Side::Left) => target[0] = a.min[0] + e0.width() / 2,
             Some(Side::Right) => target[0] = a.max[0] - e0.width() / 2,
@@ -947,13 +967,86 @@ fn draw(st: State, prev: Option<&Layout>, asked: &BTreeMap<usize, NetStyle>) -> 
                 .map(|v| v.iter().filter(|x| x.sheet == sid).cloned().collect())
                 .unwrap_or_default()
         };
+        // A net the previous layout labelled though it could have been
+        // wired keeps its labels while its pins are the same.
+        for (n, list) in &pins_of {
+            if styles[n] != NetStyle::Wire {
+                continue;
+            }
+            let had: BTreeSet<String> = prev_labels(*n)
+                .into_iter()
+                .filter(|l| l.kind == LabelKind::Net)
+                .map(|l| l.on)
+                .collect();
+            let now: BTreeSet<String> = list
+                .iter()
+                .map(|(p, k)| {
+                    format!(
+                        "{}/{}",
+                        block.parts[*p].key, block.parts[*p].pins[*k].number
+                    )
+                })
+                .collect();
+            if !had.is_empty() && had == now {
+                instead.insert(*n);
+            }
+        }
         let runs_before = prev_runs(block, prev, &sid);
+        // Text the previous layout put beside a part that hasn't moved
+        // stays, and nothing new may take its place.
+        let mut kept_text: BTreeMap<usize, Point> = BTreeMap::new();
+        for &p in &parts {
+            let part = &block.parts[p];
+            let texts = text_lines(part);
+            let Some((first, _)) = texts.first() else {
+                continue;
+            };
+            let unmoved = prev.and_then(|l| l.placed.get(&part.key)).is_some_and(|x| {
+                let (s0, pl, _) = st.place[p].expect("placed");
+                st.sheets[s0].0 == x.sheet && pl == Place::new(x.at, x.rotation, x.mirror)
+            });
+            let at = prev
+                .and_then(|l| l.text.get(&part.key))
+                .and_then(|f| f.get(*first))
+                .copied()
+                .filter(|_| unmoved);
+            let lines: Vec<&str> = texts.iter().map(|(_, t)| *t).collect();
+            if let Some(at) = at
+                && text::boxes(&lines, at).iter().all(|b| field.clear(*b))
+            {
+                for b in text::boxes(&lines, at) {
+                    field.block(b);
+                }
+                kept_text.insert(p, at);
+            }
+        }
         let base = field;
         let (field_done, labels, routes) = loop {
             let mut field = base.clone();
             let mut labels: BTreeMap<usize, Vec<Label>> = BTreeMap::new();
             let mut routes: BTreeMap<usize, Vec<Vec<Point>>> = BTreeMap::new();
-            // Labels first, the previous ones where they still fit.
+            // Wires the previous layout drew that still hold, before any
+            // label may take their place.
+            let mut wired: Vec<usize> = styles
+                .iter()
+                .filter(|(n, s)| **s == NetStyle::Wire && !instead.contains(n))
+                .map(|(n, _)| *n)
+                .collect();
+            wired.sort_by_key(|n| {
+                let r = Rect::of(ends_of(*n).into_iter().map(|e| e.0)).expect("pins");
+                (r.width() + r.height(), block.nets[*n].key.clone())
+            });
+            let mut to_route = Vec::new();
+            for n in wired {
+                let ends: BTreeSet<Point> = ends_of(n).into_iter().map(|e| e.0).collect();
+                match runs_before.get(&n) {
+                    Some(runs) if holds(runs, &ends) && mark_all(&mut field, n, runs) => {
+                        routes.insert(n, runs.clone());
+                    }
+                    _ => to_route.push(n),
+                }
+            }
+            // Labels, the previous ones where they still fit.
             let mut want_label: Vec<(usize, usize, usize, LabelKind)> = Vec::new();
             for (n, list) in &pins_of {
                 if styles[n] == NetStyle::Wire && !instead.contains(n) {
@@ -979,27 +1072,7 @@ fn draw(st: State, prev: Option<&Layout>, asked: &BTreeMap<usize, NetStyle>) -> 
                 &mut labels,
                 &mut routes,
             );
-            // Wires: nets the previous layout drew that still hold, then
-            // the rest, shortest first.
-            let mut wired: Vec<usize> = styles
-                .iter()
-                .filter(|(n, s)| **s == NetStyle::Wire && !instead.contains(n))
-                .map(|(n, _)| *n)
-                .collect();
-            wired.sort_by_key(|n| {
-                let r = Rect::of(ends_of(*n).into_iter().map(|e| e.0)).expect("pins");
-                (r.width() + r.height(), block.nets[*n].key.clone())
-            });
-            let mut to_route = Vec::new();
-            for n in wired {
-                let ends: BTreeSet<Point> = ends_of(n).into_iter().map(|e| e.0).collect();
-                match runs_before.get(&n) {
-                    Some(runs) if holds(runs, &ends) && mark_all(&mut field, n, runs) => {
-                        routes.insert(n, runs.clone());
-                    }
-                    _ => to_route.push(n),
-                }
-            }
+            // The rest, shortest first.
             let mut failed = Vec::new();
             for n in to_route {
                 match route_net(&field, n, &ends_of(n), long) {
@@ -1028,34 +1101,26 @@ fn draw(st: State, prev: Option<&Layout>, asked: &BTreeMap<usize, NetStyle>) -> 
             if matches!(part.kind, PartKind::Port { .. }) {
                 continue;
             }
-            let lines: Vec<(&str, &str)> = [
-                ("refdes", part.refdes.as_str()),
-                ("value", part.value.as_str()),
-            ]
-            .into_iter()
-            .filter(|(_, t)| !t.is_empty())
-            .collect();
+            let lines = text_lines(part);
             if lines.is_empty() {
                 continue;
             }
             let texts: Vec<&str> = lines.iter().map(|(_, t)| *t).collect();
-            let kept = prev
-                .and_then(|l| l.text.get(&part.key))
-                .and_then(|f| f.get(lines[0].0))
-                .copied();
             let body = st.shape(p).expect("placed").body;
-            let fits = |at: Point| text::boxes(&texts, at).iter().all(|b| field.clear(*b));
-            let at = kept
-                .filter(|k| fits(*k))
-                .or_else(|| {
-                    text::candidates(body, &texts)
+            let at = match kept_text.get(&p) {
+                Some(at) => *at,
+                None => {
+                    let fits = |at: Point| text::boxes(&texts, at).iter().all(|b| field.clear(*b));
+                    let at = text::candidates(body, &texts)
                         .into_iter()
                         .find(|c| fits(*c))
-                })
-                .unwrap_or_else(|| text::candidates(body, &texts)[0]);
-            for b in text::boxes(&texts, at) {
-                field.block(b);
-            }
+                        .unwrap_or_else(|| text::candidates(body, &texts)[0]);
+                    for b in text::boxes(&texts, at) {
+                        field.block(b);
+                    }
+                    at
+                }
+            };
             let mut fields = BTreeMap::new();
             for (i, (name, _)) in lines.iter().enumerate() {
                 fields.insert((*name).to_owned(), [at[0], at[1] - text::LINE * i as Nm]);
@@ -1089,6 +1154,21 @@ fn draw(st: State, prev: Option<&Layout>, asked: &BTreeMap<usize, NetStyle>) -> 
         idioms: Vec::new(),
         flow: BTreeSet::new(),
     }
+}
+
+/// A part's lines of text beside it: its designator and value, those it
+/// has; a port has none (its name is in its flag).
+fn text_lines(part: &crate::input::Part) -> Vec<(&'static str, &str)> {
+    if matches!(part.kind, PartKind::Port { .. }) {
+        return Vec::new();
+    }
+    [
+        ("refdes", part.refdes.as_str()),
+        ("value", part.value.as_str()),
+    ]
+    .into_iter()
+    .filter(|(_, t)| !t.is_empty())
+    .collect()
 }
 
 /// The previous layout's runs on sheet `sid`, by net index.
@@ -1198,6 +1278,7 @@ fn route_net(
     let mut f = field.clone();
     let mut runs = Vec::new();
     let mut joined = vec![ends[0].0];
+    let mut tree: BTreeSet<route::Node> = [route::node_of(ends[0].0)].into();
     let mut left: Vec<(Point, Side)> = ends[1..].to_vec();
     let mut total = 0;
     while !left.is_empty() {
@@ -1215,11 +1296,7 @@ fn route_net(
             .min_by_key(|(_, k)| *k)
             .expect("left");
         let (from, side) = left.remove(i);
-        if f.wired(from, net) {
-            joined.push(from);
-            continue;
-        }
-        let path = f.search(net, from, side)?;
+        let path = f.search(net, from, side, &tree)?;
         if f.crossings(net, &path) > CROWDED {
             return None;
         }
@@ -1229,6 +1306,7 @@ fn route_net(
             return None;
         }
         f.mark(net, &run).ok()?;
+        tree.extend(path.iter().copied());
         joined.push(from);
         runs.push(run);
     }
@@ -1250,7 +1328,24 @@ fn place_labels(
     labels: &mut BTreeMap<usize, Vec<Label>>,
     routes: &mut BTreeMap<usize, Vec<Vec<Point>>>,
 ) {
-    for &(n, p, k, kind) in want {
+    // Labels that keep their place first, so nothing new takes it: those
+    // saying what they said, then renamed ones, then new ones.
+    let mut order: Vec<(u8, usize)> = Vec::new();
+    for (i, &(n, p, k, kind)) in want.iter().enumerate() {
+        let on = format!("{}/{}", block.parts[p].key, block.parts[p].pins[k].number);
+        let had = prev_labels(n)
+            .into_iter()
+            .find(|l| l.on == on && l.kind == kind);
+        let rank = match had {
+            Some(l) if l.text == block.nets[n].name => 0,
+            Some(_) => 1,
+            None => 2,
+        };
+        order.push((rank, i));
+    }
+    order.sort();
+    for (_, i) in order {
+        let (n, p, k, kind) = want[i];
         let part = &block.parts[p];
         let on = format!("{}/{}", part.key, part.pins[k].number);
         let pin = st.shape(p).expect("placed").pins[k];
@@ -1298,6 +1393,7 @@ fn place_labels(
         }
         field.block(label::label_box(kind, name, at, side));
         labels.entry(n).or_default().push(Label {
+            text: name.clone(),
             sheet: sid.to_owned(),
             at,
             side,

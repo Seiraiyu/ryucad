@@ -98,6 +98,30 @@ impl Cluster {
         r
     }
 
+    /// Its room with a label on every signal pin besides: what a part
+    /// placed among others reserves, since its nets may take labels.
+    pub fn room_with_labels(&self, block: &Block, origin: Point) -> Rect {
+        let mut r = self.room(block, origin);
+        for (p, place) in self.places(origin) {
+            let part = &block.parts[p];
+            let shape = Shape::of(part, place);
+            for (k, pin) in part.pins.iter().enumerate() {
+                if let Some(n) = pin.net
+                    && block.nets[n].kind == NetKind::Signal
+                {
+                    let at = shape.pins[k];
+                    r = r.union(crate::label::label_box(
+                        LabelKind::Net,
+                        &block.nets[n].name,
+                        at.end,
+                        at.side,
+                    ));
+                }
+            }
+        }
+        r
+    }
+
     /// The cluster's first member: what flow and ordering read it by.
     pub fn first(&self) -> usize {
         self.members[0].0

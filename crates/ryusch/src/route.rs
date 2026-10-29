@@ -8,7 +8,7 @@
 
 use crate::geom::{GRID, Nm, Point, Rect, Side};
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeSet, BinaryHeap};
 
 /// What a pin end of no net marks: nothing may connect there.
 pub const NO_NET: usize = usize::MAX;
@@ -200,22 +200,6 @@ impl Field {
             .count()
     }
 
-    /// Whether the pin of `net` ending at `end` already has a wire: a
-    /// search from another pin reached it.
-    pub fn wired(&self, end: Point, net: usize) -> bool {
-        self.at(node_of(end))
-            .is_some_and(|c| (c.arms & owned(c, net)).count_ones() >= 2)
-    }
-
-    /// Whether `n` belongs to `net`'s tree: a pin end or a wire of it.
-    fn on_tree(&self, n: Node, net: usize) -> bool {
-        self.at(n).is_some_and(|c| {
-            c.pin == Some(net)
-                || (c.arms & H != 0 && c.h == Some(net))
-                || (c.arms & V != 0 && c.v == Some(net))
-        })
-    }
-
     /// Marks a run of `net` through its points, refusing what clashes.
     pub fn mark(&mut self, net: usize, run: &[Point]) -> Result<(), Clash> {
         let nodes = expand(run);
@@ -279,13 +263,17 @@ impl Field {
     }
 
     /// The cheapest path from pin end `from` (leaving it along `side`) to
-    /// `net`'s tree, as nodes; `None` when there is none in the budget.
-    pub fn search(&self, net: usize, from: Point, side: Side) -> Option<Vec<Node>> {
+    /// one of `tree`'s nodes (what of `net` is already joined), as nodes;
+    /// `None` when there is none in the budget.
+    pub fn search(
+        &self,
+        net: usize,
+        from: Point,
+        side: Side,
+        tree: &BTreeSet<Node>,
+    ) -> Option<Vec<Node>> {
         let start = node_of(from);
-        let targets: Vec<Node> = (0..self.cols)
-            .flat_map(|x| (0..self.rows).map(move |y| (x, y)))
-            .filter(|&n| n != start && self.on_tree(n, net))
-            .collect();
+        let targets: Vec<Node> = tree.iter().copied().filter(|n| *n != start).collect();
         if targets.is_empty() {
             return None;
         }
@@ -331,7 +319,7 @@ impl Field {
             if n == start {
                 return None;
             }
-            if self.on_tree(n, net) {
+            if tree.contains(&n) {
                 if c.pin == Some(net) && c.arms & owned(c, net) & !back != 0 {
                     // A pin end: only from outward, along the pin.
                     let pin_back = c.arms & owned(c, net);
@@ -541,7 +529,8 @@ mod tests {
         f.pin(g(18, 10), g(20, 10), Side::Right, 1);
         f.pin(g(3, 10), g(4, 10), Side::Right, 2);
         f.pin(g(27, 10), g(26, 10), Side::Left, 2);
-        let path = f.search(2, g(4, 10), Side::Right).unwrap();
+        let tree: BTreeSet<Node> = [node_of(g(26, 10))].into();
+        let path = f.search(2, g(4, 10), Side::Right, &tree).unwrap();
         let run = run_of(&path);
         assert_eq!(run.first(), Some(&g(4, 10)));
         assert_eq!(run.last(), Some(&g(26, 10)));

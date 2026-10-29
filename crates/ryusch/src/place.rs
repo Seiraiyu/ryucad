@@ -22,6 +22,10 @@ pub const BAND_GAP: Nm = 6 * GRID;
 pub struct Hints {
     /// A cluster held to an edge of its sheet.
     pub edge: BTreeMap<usize, Side>,
+    /// Room added to every channel between columns, and half of it
+    /// between rows: what a layout from nothing spreads by when its labels
+    /// or text don't fit.
+    pub spread: Nm,
 }
 
 /// Where each cluster goes on one sheet: its origin, or `None` for those
@@ -478,7 +482,7 @@ pub fn flow(
                 }
             }
             let e = cl.room(block, o);
-            limit = e.min[1] - ROW_GAP;
+            limit = e.min[1] - ROW_GAP - hints.spread / 2;
             origins.insert(*c, o);
             for (p, place) in cl.places(o) {
                 let shape = crate::shape::Shape::of(&block.parts[p], place);
@@ -497,7 +501,7 @@ pub fn flow(
         } else {
             0
         };
-        x += width + (crossing + 6).clamp(6, 16) * GRID;
+        x += width + (crossing + 6).clamp(6, 16) * GRID + hints.spread;
     }
     // The bottom band.
     let mut x = MARGIN;

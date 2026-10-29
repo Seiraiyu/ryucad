@@ -2,7 +2,8 @@
 //! alone (not from the router's own bookkeeping), so tests and the fuzz
 //! target can hold the engine to them: everything on the grid; no
 //! overlaps of symbols, text or labels, nor of wires with them; no
-//! junction of four; no wire through a symbol or across a pin; wires
+//! junction of four; no wire through a symbol or across a pin; every pin
+//! on a net drawn joined to it, by a wire or a label; wires
 //! orthogonal; text upright and at least the smallest size; each sheet's
 //! contents inside its area; symbols a step apart at least.
 
@@ -234,6 +235,35 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
                     if let Some(a) = arms.get_mut(&(block.nets[n].key.clone(), node)) {
                         *a += 1;
                     }
+                }
+            }
+        }
+        // Every pin on a net is drawn connected: on one of its wires, or
+        // with a label of its own.
+        for (part, shape, _) in &shapes {
+            let pk = block.part(part).expect("placed parts are the block's");
+            for (k, pin) in block.parts[pk].pins.iter().enumerate() {
+                let Some(n) = pin.net.filter(|_| !pin.nc) else {
+                    continue;
+                };
+                let key = &block.nets[n].key;
+                let node = route::node_of(shape.pins[k].end);
+                let wired = layout
+                    .routes
+                    .get(key)
+                    .and_then(|r| r.get(sid))
+                    .is_some_and(|runs| runs.iter().any(|run| route::expand(run).contains(&node)));
+                let on = format!("{part}/{}", pin.number);
+                let labelled = layout
+                    .labels
+                    .get(key)
+                    .is_some_and(|l| l.iter().any(|x| &x.sheet == sid && x.on == on));
+                if !wired && !labelled {
+                    out.push(v(
+                        "connected",
+                        format!("{on} is on {key} but drawn joined to nothing"),
+                        vec![on.clone(), key.clone()],
+                    ));
                 }
             }
         }
