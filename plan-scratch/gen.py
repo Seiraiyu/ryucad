@@ -21,7 +21,7 @@ This plan changes no Rust and no pixels of the app: design 199 gates everything 
 
 Every file below was written and run while planning, on cox-worker-1 (Debian 12): `contrast.py` prints `contrast: 8 palettes pass`, the glyph grid check is empty, `make.sh` builds the bracket with every feature clean, and `render.py` writes 72 PNGs, 9 crops and the looks sheet in about a minute.
 
-**Decided with the owner while planning (2026-10-29):** the mockups go up as **ten visuals**: each surface in Drafting light (eight), the looks sheet tiling every surface's eight variants, and the icon sheet, which revises the draft visual `01M63ZRW0XNTNDBH74MTX70NT4` (approved as a draft) rather than adding a second. The full set is committed in `design/app/png/`.
+**Settled while planning (2026-10-29):** the mockups go up as **ten visuals**: each surface in Drafting light (eight), the looks sheet tiling every surface's eight variants, and the icon sheet, which revises the draft visual under review, `01M63ZRW0XNTNDBH74MTX70NT4`, rather than adding a second. This was the recommended option of question 172435d2, answered by the coxswain under the owner's rule for questions, not by the owner. The full set is committed in `design/app/png/`.
 
 **Stories:** 3115 (the mockup kit: Tasks 1 to 6), 3116 (the surfaces: Tasks 7 to 10), 3117 (review and record: Tasks 11 to 14).
 
@@ -126,7 +126,7 @@ w(f"""## Task 4: ryucad glyphs on Phosphor's grid (#{T['4']})
 
 **Files:** create `design/app/glyphs.js`.
 
-The 15 CAD glyphs design 199 names, as the approved draft sheet drew them (visual `01M63ZRW0XNTNDBH74MTX70NT4`), now as stroke tables: the source 11.B ports to `ui::icon::glyphs`. The chamfer's dimension line moves 4 units in so its ticks stay inside the grid.
+The 15 CAD glyphs design 199 names, as the draft sheet under review drew them (visual `01M63ZRW0XNTNDBH74MTX70NT4`), now as stroke tables: the source 11.B ports to `ui::icon::glyphs`. The chamfer's dimension line moves 4 units in so its ticks stay inside the grid.
 
 **Step 1 -- failing test:**
 
@@ -196,7 +196,7 @@ w(f"""## Task 7: The default layout and the icon sheet (#{T['7']})
 
 **Files:** create `design/app/layout.html`, `design/app/icons.html`.
 
-The layout is design 199's default: the tree left, the viewport, Properties | Parameters | Part | Changes on the right, Activity | History | Releases below, with an agent's highlight in its colour on a bore. The icon sheet redraws the approved draft: every row type and state at 32 and 16 px in the variant's colours, the sample tree tile and the toolbar at 20 px.
+The layout is design 199's default: the tree left, the viewport, Properties | Parameters | Part | Changes on the right, Activity | History | Releases below, with an agent's highlight in its colour on a bore. The icon sheet redraws the draft under review: every row type and state at 32 and 16 px in the variant's colours, the sample tree tile and the toolbar at 20 px.
 
 **Step 1 -- failing test:**
 
