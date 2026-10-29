@@ -6,8 +6,9 @@
 //! join, cut and intersect, holes and patterns, how sketches are drawn,
 //! what diffs say, what merges make, the content hashes release records
 //! name, where assemblies place their parts, the bodies and names of
-//! imported STEP files, the bytes of exported STEP files, and cameras:
-//! the cube's views, named views and views normal to faces. After
+//! imported STEP files, the bytes of exported STEP files, cameras:
+//! the cube's views, named views and views normal to faces, and renders
+//! in colour, translucent, with an assembly's overrides. After
 //! a deliberate change, regenerate with
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
@@ -364,6 +365,117 @@ fn views_section(golden: &mut Golden) {
         serde_json::json!({"view": "dimetric"}),
         serde_json::json!({"view": "trimetric"}),
         serde_json::json!({"view": "detail", "origin": true}),
+    ];
+    for mut params in renders {
+        params["width"] = serde_json::json!(320);
+        params["height"] = serde_json::json!(240);
+        let req = ryucad::proto::Request::from_rpc("render", Some(params)).unwrap();
+        let a =
+            ryucad::server::handle_safely(&mut Some(session), None, None, dir.path(), req).unwrap();
+        session = ryucad::session::Session::open(dir.path()).unwrap();
+        let png = a.binary.unwrap();
+        let mut r = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .unwrap();
+        let mut buf = vec![0; r.output_buffer_size().unwrap()];
+        let info = r.next_frame(&mut buf).unwrap();
+        s.str(&format!("{:x}", md(&buf[..info.buffer_size()])));
+    }
+}
+
+/// The showcase coloured: the part, one solid translucent over another,
+/// the box's faces each its own colour, the cone in its material's
+/// colour; and an assembly placing it twice, one occurrence recoloured
+/// and its torus made translucent. Renders of both, the theme's render
+/// beside them, and `appearance.get`'s answers.
+fn appearance_section(golden: &mut Golden) {
+    let mut s = golden.section("appearance");
+    let (dir, mut session) = showcase();
+    let call = |session: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(
+            session,
+            ryucad::proto::Request::from_rpc(m, Some(p)).unwrap(),
+        )
+        .unwrap()
+    };
+    call(
+        &mut session,
+        "materials.set",
+        serde_json::json!({"name": "brass", "density": "8.5 g/cm^3", "colour": "#b5a642",
+                           "default": true}),
+    );
+    call(
+        &mut session,
+        "appearance.set",
+        serde_json::json!({"entities": ["show"], "colour": "#4a78c2"}),
+    );
+    call(
+        &mut session,
+        "appearance.set",
+        serde_json::json!({"entities": ["show/sphere"], "opacity": 0.35}),
+    );
+    call(
+        &mut session,
+        "appearance.set",
+        serde_json::json!({"entities": ["show/cone"], "material": true}),
+    );
+    let v = call(
+        &mut session,
+        "inspect",
+        serde_json::json!({"part": "show", "feature": "box"}),
+    );
+    let palette = [
+        "#d03030", "#30a050", "#e0a020", "#8040c0", "#20a0c0", "#c06080",
+    ];
+    for (f, colour) in v["bodies"][0]["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(palette)
+    {
+        call(
+            &mut session,
+            "appearance.set",
+            serde_json::json!({"entities": [format!("show/box/{}", f["name"].as_str().unwrap())],
+                               "colour": colour, "opacity": 0.8}),
+        );
+    }
+    call(
+        &mut session,
+        "part.create",
+        serde_json::json!({"part": "rack", "kind": "assembly"}),
+    );
+    for (id, x) in [("one", 0), ("two", 100)] {
+        call(
+            &mut session,
+            "feature.add",
+            serde_json::json!({"part": "rack", "type": "instance", "id": id, "of": "show",
+                               "placement": {"origin": [x, 0, 0]}}),
+        );
+    }
+    call(
+        &mut session,
+        "appearance.set",
+        serde_json::json!({"entities": ["rack/two"], "colour": "#606060"}),
+    );
+    call(
+        &mut session,
+        "appearance.set",
+        serde_json::json!({"entities": ["rack/two/torus"], "opacity": 0.5}),
+    );
+    for part in ["show", "rack"] {
+        let v = call(
+            &mut session,
+            "appearance.get",
+            serde_json::json!({"part": part}),
+        );
+        s.str(&ryucad::doc::canonical::to_string(&v["solids"]));
+    }
+    let renders = [
+        serde_json::json!({"part": "show"}),
+        serde_json::json!({"part": "show", "view": "front_top_left"}),
+        serde_json::json!({"part": "show", "appearance": false}),
+        serde_json::json!({"part": "rack"}),
     ];
     for mut params in renders {
         params["width"] = serde_json::json!(320);
@@ -2129,5 +2241,6 @@ fn determinism() {
     imports_section(&mut golden);
     exports_section(&mut golden);
     views_section(&mut golden);
+    appearance_section(&mut golden);
     golden.finish();
 }
