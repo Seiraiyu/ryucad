@@ -206,10 +206,11 @@ pub fn released_identity(ryucad: &str, ryukei: &str, ryustep: &str, commit: &str
 }
 
 /// Whether a build is a release: stamped with a version (never the repo's
-/// `0.0.0`) and built from the commit the release workflow gave it
-/// (`RYUCAD_COMMIT`), not one read from a checkout that may hold changes.
+/// `0.0.0`, nor a dry run's `0.0.0-dev`) and built from the commit the
+/// release workflow gave it (`RYUCAD_COMMIT`), not one read from a
+/// checkout that may hold changes.
 pub fn is_release(version: &str, commit: &str, commit_given: bool) -> bool {
-    version != "0.0.0" && commit_given && !commit.is_empty() && commit != "unknown"
+    !version.starts_with("0.0.0") && commit_given && !commit.is_empty() && commit != "unknown"
 }
 
 /// This build's identity. A release's is [`released_identity`] and
@@ -1175,6 +1176,7 @@ mod tests {
         assert!(is_release("0.7.0", "0123456789ab", true));
         assert!(is_release("0.7.0-pre.1", "0123456789ab", true));
         assert!(!is_release("0.0.0", "0123456789ab", true), "the repo's");
+        assert!(!is_release("0.0.0-dev", "0123456789ab", true), "a dry run's");
         assert!(
             !is_release("0.7.0", "0123456789ab", false),
             "read from a checkout"

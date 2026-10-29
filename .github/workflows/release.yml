@@ -118,7 +118,10 @@ jobs:
           app=$("dist/$NAME/ryucad-app$x" --version)
           echo "$app"
           echo "$app" | grep -q "\"commit\":\"${GITHUB_SHA::12}\""
-          sh scripts/smoke.sh "$exe" "dist/$NAME/ryucad-app$x"
+          # A tag's build is a release, whose cache every platform shares;
+          # a dry run's (0.0.0-dev) isn't.
+          RYUCAD_SMOKE_RELEASE=${{ github.ref_type == 'tag' && '1' || '0' }} \
+            sh scripts/smoke.sh "$exe" "dist/$NAME/ryucad-app$x"
       - name: package (Unix)
         if: runner.os != 'Windows'
         run: tar -czf "dist/$NAME.tar.gz" -C dist "$NAME"
