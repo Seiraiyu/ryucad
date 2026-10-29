@@ -236,3 +236,76 @@ fn a_worktree_says_when_the_drivers_are_missing() {
     );
     assert_eq!(v["warnings"], json!([]), "{v}");
 }
+
+#[test]
+fn another_worktree_is_compared_with_and_diffed_against() {
+    let r = Repo::new();
+    r.ok(
+        &r.root,
+        &["worktree", "add", "../arm", "-b", "arm", "--no-warm"],
+    );
+    let arm = r.dir.path().join("arm").canonicalize().unwrap();
+    // An agent's uncommitted edit there.
+    r.ok(&arm, &["feature", "edit", "p", "b", "--param", "x=12"]);
+    // Named relative to where the command runs.
+    let d = r.ok(&r.root, &["diff", "--to", "worktree:../arm", "--model"]);
+    assert_eq!(d["to"]["worktree"], json!(arm));
+    assert_eq!(d["to"]["branch"], "arm");
+    assert_eq!(d["parts"]["p"]["features"]["b"]["status"], "changed");
+    assert!(d["parts"]["p"]["features"]["b"]["model"].is_object(), "{d}");
+    let from_arm = r.ok(&arm, &["diff", "--from", "worktree:../main"]);
+    assert_eq!(from_arm["from"]["branch"], "main");
+
+    // A compare through the daemon names it by its project folder.
+    let (code, v) = r.run(&r.root, false, &["compare", "--worktree", "../arm/"]);
+    assert_eq!(code, 0, "{v}");
+    let rev = format!("worktree:{}", arm.display());
+    assert_eq!(v["result"]["compare"], json!({"rev": rev, "commit": null}));
+    let me = v["result"]["participant"].as_str().unwrap().to_owned();
+    let (_, v) = r.run(&r.root, false, &["compare", "--of", &me]);
+    assert_eq!(v["result"]["compare"]["rev"], json!(rev));
+    // Its renders and meshes read that worktree's files.
+    let (code, v) = r.run(&r.root, false, &["rebuild", "--rev", &rev]);
+    assert_eq!(code, 0, "{v}");
+
+    // When the other agent writes, the comparing participant hears of it.
+    let watcher = {
+        let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryucad"));
+        cmd.args([
+            "watch",
+            "--topic",
+            "model",
+            "--count",
+            "1",
+            "--timeout",
+            "20",
+        ])
+        .current_dir(&r.root)
+        .env("HOME", r.home())
+        .env("RYUCAD_RUNTIME_DIR", r.dir.path().join("run"))
+        .env("RYUCAD_CONFIG_DIR", r.dir.path().join("config"))
+        .env("RYUCAD_CACHE_DIR", r.dir.path().join("cache"))
+        .env("RYUCAD_IDLE_TIMEOUT", "60")
+        .stdout(std::process::Stdio::piped());
+        cmd.spawn().unwrap()
+    };
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    r.ok(&arm, &["feature", "edit", "p", "b", "--param", "x=14"]);
+    let out = watcher.wait_with_output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let n = &v["result"]["notifications"][0];
+    assert_eq!(n["method"], "compare.changed", "{v}");
+    assert_eq!(n["params"]["rev"], json!(rev));
+
+    // Not a worktree of this repository.
+    let (code, v) = r.run(&r.root, false, &["compare", "--worktree", "../home"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("worktree_not_found"))
+    );
+    r.fails(
+        &r.root,
+        &["diff", "--to", "worktree:../home"],
+        "worktree_not_found",
+    );
+}

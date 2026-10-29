@@ -374,8 +374,12 @@ enum Command {
     /// --off. An app window then ghosts that revision and colours what
     /// changed.
     Compare {
-        #[arg(value_name = "REV", conflicts_with = "off")]
+        #[arg(value_name = "REV", conflicts_with_all = ["off", "worktree"])]
         rev: Option<String>,
+        /// Compare with another worktree's working files instead (its
+        /// folder): what an agent there has done, committed or not.
+        #[arg(long, value_name = "PATH", conflicts_with = "off")]
+        worktree: Option<PathBuf>,
         /// Stop comparing.
         #[arg(long)]
         off: bool,
@@ -2381,11 +2385,24 @@ fn request(cmd: &Command) -> Option<Request> {
                 }
             }
         }
-        Command::Compare { rev, off, of } if rev.is_none() && !off => Request::CompareGet {
+        Command::Compare {
+            rev,
+            off,
+            of,
+            worktree: None,
+        } if rev.is_none() && !off => Request::CompareGet {
             participant: of.clone(),
         },
-        Command::Compare { rev, off, of } => Request::CompareSet {
-            rev: rev.clone(),
+        Command::Compare {
+            rev,
+            off,
+            of,
+            worktree,
+        } => Request::CompareSet {
+            rev: match worktree {
+                Some(w) => Some(format!("{}{}", ryucad::session::WORKTREE, w.display())),
+                None => rev.clone(),
+            },
             off: *off,
             participant: of.clone(),
         },
@@ -2514,6 +2531,37 @@ fn request(cmd: &Command) -> Option<Request> {
             entities: entities.clone(),
         },
     })
+}
+
+/// `req` with every revision naming a worktree by a relative path
+/// (`worktree:../arm`) made absolute against `here`, as the daemon takes
+/// it: the daemon runs elsewhere.
+fn absolute_worktrees(req: Request, here: &std::path::Path) -> Result<Request> {
+    const REVISIONS: [&str; 6] = ["rev", "from", "to", "against", "compare", "frame"];
+    let fix = |v: &mut Value| {
+        if let Some(path) = v.as_str().and_then(ryucad::session::worktree_path)
+            && path.is_relative()
+        {
+            let abs = here.join(path);
+            *v = json!(format!("{}{}", ryucad::session::WORKTREE, abs.display()));
+        }
+    };
+    let mut params = req.params();
+    let mut changed = false;
+    for k in REVISIONS {
+        if let Some(v) = params.get_mut(k) {
+            let before = v.clone();
+            match v.as_array_mut() {
+                Some(list) => list.iter_mut().for_each(fix),
+                None => fix(v),
+            }
+            changed |= *v != before;
+        }
+    }
+    if !changed {
+        return Ok(req);
+    }
+    Request::from_rpc(&req.method(), Some(params))
 }
 
 fn no_daemon(cli: &Cli) -> bool {
@@ -2667,7 +2715,10 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             ryucad::doctor::repair(&root, repairs, &ryucad::doctor::Params::from_json(&params)?)
         }
         cmd => {
-            let req = request(cmd).expect("every other command is a request");
+            let req = absolute_worktrees(
+                request(cmd).expect("every other command is a request"),
+                &here,
+            )?;
             let root = find_root(&here)?;
             if !no_daemon(cli) {
                 match client::request(&root, &req, participant(cli).as_deref()) {

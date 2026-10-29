@@ -738,6 +738,9 @@ fn dispatch(
             // The commit the revision names now; none if it no longer
             // names one.
             let compare = rev.map(|rev| {
+                if crate::session::worktree_path(&rev).is_some() {
+                    return json!({"rev": rev, "commit": null});
+                }
                 let commit = crate::git::repo(session.root())
                     .and_then(|r| r.locate(&rev))
                     .ok()
@@ -770,6 +773,17 @@ fn dispatch(
                 .with("rev", "working"));
             }
             let id = live.compare_target(participant.as_deref(), me)?;
+            // Another worktree is named by its project folder, however the
+            // caller named it.
+            let rev = match rev.as_deref().map(|r| session.worktree_files(r)) {
+                Some(found) => match found? {
+                    Some((w, ..)) => {
+                        Some(format!("{}{}", crate::session::WORKTREE, w.root.display()))
+                    }
+                    None => rev,
+                },
+                None => None,
+            };
             // Refused unless the revision has the project; it is then
             // ready for the diff and meshes the window asks for next.
             let commit = match &rev {
@@ -3804,6 +3818,7 @@ pub fn publish(live: &mut Live, session: &mut Session) {
         live.hub.send(Topic::Merge, "merge.changed", &params);
     }
     live.seen.merge = merge;
+    compared(live, session, watched);
     if !watched {
         // Noted only: a subscriber hears of what changes from now on.
         live.seen.pdm = None;
@@ -3882,6 +3897,43 @@ pub fn publish(live: &mut Live, session: &mut Session) {
         live.hub.send(Topic::Model, "model.changed", &params);
     }
     live.seen.parts = revisions;
+}
+
+/// Tells each participant comparing with another worktree when that
+/// worktree's files change (`compare.changed`, to the participant's
+/// connections): its window reads the diff again. Checked only while
+/// anyone watches, as the project's own files are.
+fn compared(live: &mut Live, session: &mut Session, watched: bool) {
+    let revs: std::collections::BTreeSet<String> = live
+        .participants()
+        .filter_map(|p| p.view.compare.clone())
+        .filter(|r| crate::session::worktree_path(r).is_some())
+        .collect();
+    let mut now = BTreeMap::new();
+    if watched {
+        for rev in &revs {
+            if let Ok(Some((_, _, digest))) = session.worktree_files(rev) {
+                now.insert(rev.clone(), digest);
+            }
+        }
+        for (rev, digest) in &now {
+            if live.seen.compared.get(rev).is_some_and(|d| d != digest) {
+                let who: Vec<String> = live
+                    .participants()
+                    .filter(|p| p.view.compare.as_ref() == Some(rev))
+                    .map(|p| p.id.clone())
+                    .collect();
+                for id in who {
+                    live.hub.send_to(
+                        &id,
+                        "compare.changed",
+                        &json!({"participant": id, "rev": rev, "state": &digest[..16]}),
+                    );
+                }
+            }
+        }
+    }
+    live.seen.compared = now;
 }
 
 /// The daemon's periodic check while anyone watches: picks up changes made
