@@ -66,6 +66,12 @@ enum Rule {
     Url,
     /// A URL as `Url` takes, or `""` for none.
     UrlOrEmpty,
+    /// `{command id: [chord, …]}`: [`command_id_ok`] ids, at most
+    /// [`MAX_CHORDS`] [`chord_ok`] chords each.
+    Keys,
+    /// A saved tile layout: an object with a whole `format` of at least 1.
+    /// The app reads the rest, and keeps a newer format's as its default.
+    Layout,
 }
 
 struct Key {
@@ -104,6 +110,20 @@ const KEYS: &[Key] = &[
         rule: Rule::OneOf(&["ryucad", "solidworks", "onshape"]),
         default: || json!("ryucad"),
         about: "mouse and keys for orbit, pan and zoom",
+    },
+    Key {
+        name: "ui.keys",
+        scope: Scope::User,
+        rule: Rule::Keys,
+        default: || json!({}),
+        about: "the app's key bindings over its defaults: {command id: [chord, …]}, [] unbinds",
+    },
+    Key {
+        name: "ui.layout",
+        scope: Scope::User,
+        rule: Rule::Layout,
+        default: || json!({}),
+        about: "the app's tiles: which are open, where, and how big ({} is the default layout)",
     },
     Key {
         name: "display.quality",
@@ -261,6 +281,21 @@ impl Key {
             Rule::Object => v.is_object(),
             Rule::Url => v.as_str().is_some_and(url_ok),
             Rule::UrlOrEmpty => v.as_str().is_some_and(|s| s.is_empty() || url_ok(s)),
+            Rule::Keys => v.as_object().is_some_and(|m| {
+                m.iter().all(|(id, chords)| {
+                    command_id_ok(id)
+                        && chords.as_array().is_some_and(|a| {
+                            a.len() <= MAX_CHORDS
+                                && a.iter().all(|c| c.as_str().is_some_and(chord_ok))
+                        })
+                })
+            }),
+            Rule::Layout => v.as_object().is_some_and(|m| {
+                m.is_empty()
+                    || m.get("format")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|f| f >= 1)
+            }),
         };
         if ok {
             return Ok(());
@@ -275,6 +310,11 @@ impl Key {
             Rule::UrlOrEmpty => {
                 "an https:// URL (http:// only for this machine), or \"\" for none".to_owned()
             }
+            Rule::Keys => format!(
+                "an object of command ids (`edit.undo`) to lists of at most {MAX_CHORDS} chords \
+                 (`Mod+Shift+Z`: Mod, Ctrl, Alt and Shift, then one key)"
+            ),
+            Rule::Layout => "a JSON object with a whole format of at least 1, or {}".to_owned(),
         };
         Err(Error::new(
             Code::InvalidSetting,
@@ -283,6 +323,84 @@ impl Key {
         .with("key", self.name)
         .with("value", v))
     }
+}
+
+/// The most chords `ui.keys` binds to one command.
+pub const MAX_CHORDS: usize = 8;
+
+/// The modifiers a chord may name, in the order the app writes them: `Mod`
+/// is Cmd on macOS and Ctrl elsewhere, `Ctrl` is Ctrl everywhere.
+pub const MODIFIERS: [&str; 4] = ["Mod", "Ctrl", "Alt", "Shift"];
+
+/// The keys named by more than one character (egui's names for them).
+pub const NAMED_KEYS: [&str; 26] = [
+    "Up",
+    "Down",
+    "Left",
+    "Right",
+    "Escape",
+    "Tab",
+    "Backspace",
+    "Enter",
+    "Insert",
+    "Delete",
+    "Home",
+    "End",
+    "PageUp",
+    "PageDown",
+    "Space",
+    "Comma",
+    "Minus",
+    "Period",
+    "Plus",
+    "Equals",
+    "Semicolon",
+    "Backslash",
+    "Slash",
+    "OpenBracket",
+    "CloseBracket",
+    "Backtick",
+];
+
+/// Every key a chord may end in: A to Z, 0 to 9, F1 to F24 and
+/// [`NAMED_KEYS`].
+pub fn key_names() -> Vec<String> {
+    let mut out: Vec<String> = ('A'..='Z').chain('0'..='9').map(String::from).collect();
+    out.extend((1..=24).map(|n| format!("F{n}")));
+    out.extend(NAMED_KEYS.iter().map(|k| (*k).to_owned()));
+    out
+}
+
+/// A chord's text: modifiers from [`MODIFIERS`], each once and not `Mod`
+/// with `Ctrl` (they are one key off macOS), then one of [`key_names`],
+/// joined by `+`.
+pub fn chord_ok(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('+').collect();
+    let Some((key, mods)) = parts.split_last() else {
+        return false;
+    };
+    let mut seen = [false; 4];
+    for m in mods {
+        let Some(i) = MODIFIERS.iter().position(|x| x == m) else {
+            return false;
+        };
+        if std::mem::replace(&mut seen[i], true) {
+            return false;
+        }
+    }
+    !(seen[0] && seen[1]) && key_names().iter().any(|k| k == key)
+}
+
+/// A command id: dotted lower-case words, at least two (`edit.undo`,
+/// `view.front_top_right`), at most 64 characters.
+pub fn command_id_ok(id: &str) -> bool {
+    id.len() <= 64
+        && id.split('.').count() >= 2
+        && id.split('.').all(|w| {
+            w.starts_with(|c: char| c.is_ascii_lowercase())
+                && w.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        })
 }
 
 /// An https URL, or an http one to this machine (for tests and a local
@@ -643,6 +761,88 @@ pub(crate) mod tests {
                 validate("default_unit", &json!("in"), None).unwrap(),
                 Scope::Project
             );
+        });
+    }
+
+    #[test]
+    fn chords_and_command_ids() {
+        for ok in [
+            "Mod+K",
+            "Mod+Shift+Z",
+            "F",
+            "1",
+            "Shift+F6",
+            "Ctrl+Alt+Delete",
+            "Space",
+            "F24",
+        ] {
+            assert!(chord_ok(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "Mod+",
+            "+K",
+            "Mod+Mod+K",
+            "Mod+Ctrl+K",
+            "Hyper+K",
+            "k",
+            "Mod+k",
+            "F25",
+            "Shift",
+            "Mod+Shift",
+        ] {
+            assert!(!chord_ok(bad), "{bad}");
+        }
+        for ok in [
+            "edit.undo",
+            "view.front_top_right",
+            "view.panel.activity",
+            "measure.tool",
+        ] {
+            assert!(command_id_ok(ok), "{ok}");
+        }
+        for bad in [
+            "undo",
+            "Edit.undo",
+            "edit.",
+            ".undo",
+            "edit.1x",
+            "edit.un-do",
+        ] {
+            assert!(!command_id_ok(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn keys_and_layouts_are_preferences() {
+        with_config(|_| {
+            assert_eq!(user("ui.keys"), json!({}));
+            set_user(
+                "ui.keys",
+                json!({"edit.undo": ["Mod+Z", "Alt+Backspace"], "view.fit": []}),
+            )
+            .unwrap();
+            assert_eq!(user("ui.keys")["view.fit"], json!([]));
+            set_user(
+                "ui.layout",
+                json!({"format": 1, "root": {"tile": "viewport"}}),
+            )
+            .unwrap();
+            set_user("ui.layout", json!({"format": 7, "anything": true})).unwrap();
+            for (k, v) in [
+                ("ui.keys", json!({"edit.undo": "Mod+Z"})),
+                ("ui.keys", json!({"edit.undo": ["Mod+Zed"]})),
+                ("ui.keys", json!({"undo": ["Mod+Z"]})),
+                ("ui.keys", json!([])),
+                ("ui.layout", json!({"root": {}})),
+                ("ui.layout", json!({"format": 0})),
+            ] {
+                assert_eq!(
+                    set_user(k, v).unwrap_err().code,
+                    Code::InvalidSetting,
+                    "{k}"
+                );
+            }
         });
     }
 
