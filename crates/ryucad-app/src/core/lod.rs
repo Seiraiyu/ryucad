@@ -47,7 +47,7 @@ pub fn level_of(m: &WireBody, base: Quality) -> Quality {
 /// first fetched), and where it is.
 #[derive(Clone, Debug)]
 pub struct Drawn {
-    pub key: BodyKey,
+    pub key: Arc<BodyKey>,
     pub mesh: Arc<WireBody>,
     pub level: Quality,
     pub base: Arc<WireBody>,
@@ -86,41 +86,58 @@ pub fn level(pixels: f64, base: Quality) -> Quality {
 /// What to draw: every occurrence the model draws whose box may be in
 /// view, at its level (or the one it has, until that comes), and the
 /// levels to fetch, nearest occurrence first. `height` is the viewport's
-/// in pixels.
+/// in pixels. It walks the picker's bodies, culled through its box tree,
+/// which hold each occurrence's meshes, pose and box: a frame of 100,000
+/// occurrences looks nothing up but the few levels the bodies don't have.
 pub fn choose(
     model: &Model,
     picker: &Picker,
     pr: &Projector,
     height: f64,
 ) -> (Vec<Drawn>, Vec<(BodyKey, Quality)>) {
-    let mut drawn = Vec::new();
-    let mut wanted: Vec<(f64, BodyKey, Quality)> = Vec::new();
+    use rayon::prelude::*;
     let (_, _, forward) = pr.camera.basis();
-    for (key, mesh, pose) in model.drawn() {
-        let Some((lo, hi)) = picker.body_bounds(key) else {
-            continue;
-        };
-        if !pr.sees_box(lo, hi) {
-            continue;
-        }
-        let level = level(pr.box_pixels(lo, hi, height), model.base);
-        let (shown, at) = match model.mesh_at(key, level) {
-            Some(m) => (m, level),
-            None => {
-                let middle = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
-                let rel = [0, 1, 2].map(|k| middle[k] - pr.camera.eye[k]);
-                let depth = rel[0] * forward[0] + rel[1] * forward[1] + rel[2] * forward[2];
-                wanted.push((depth, key.clone(), level));
-                (Arc::clone(mesh), level_of(mesh, model.base))
-            }
-        };
-        drawn.push(Drawn {
-            key: key.clone(),
-            mesh: shown,
-            level: at,
-            base: Arc::clone(mesh),
-            pose,
-        });
+    let cull = pr.cull();
+    let seen = picker.seen(|lo, hi| cull.sight(lo, hi));
+    type Want = (f64, BodyKey, Quality);
+    let chosen: Vec<(Drawn, Option<Want>)> = seen
+        .par_iter()
+        .map(|b| {
+            let (lo, hi) = (b.lo, b.hi);
+            let level = level(pr.box_pixels(lo, hi, height), model.base);
+            let found = if level_of(b.first, model.base) == level {
+                Some(Arc::clone(b.first))
+            } else if level_of(b.mesh, model.base) == level {
+                Some(Arc::clone(b.mesh))
+            } else {
+                model.mesh_at(b.key, level)
+            };
+            let mut want = None;
+            let (shown, at) = match found {
+                Some(m) => (m, level),
+                None => {
+                    let middle = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+                    let rel = [0, 1, 2].map(|k| middle[k] - pr.camera.eye[k]);
+                    let depth = rel[0] * forward[0] + rel[1] * forward[1] + rel[2] * forward[2];
+                    want = Some((depth, (**b.key).clone(), level));
+                    (Arc::clone(b.mesh), level_of(b.mesh, model.base))
+                }
+            };
+            let d = Drawn {
+                key: Arc::clone(b.key),
+                mesh: shown,
+                level: at,
+                base: Arc::clone(b.mesh),
+                pose: b.pose,
+            };
+            (d, want)
+        })
+        .collect();
+    let mut drawn = Vec::with_capacity(chosen.len());
+    let mut wanted = Vec::new();
+    for (d, w) in chosen {
+        drawn.push(d);
+        wanted.extend(w);
     }
     wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
     (drawn, wanted.into_iter().map(|(_, k, l)| (k, l)).collect())
@@ -150,12 +167,18 @@ pub fn within(
     budget: u64,
 ) -> (Vec<Drawn>, Vec<(BodyKey, Quality)>) {
     use std::collections::HashMap;
-    // Each body and level: its bytes and how many occurrences draw it.
-    let mut held: HashMap<(String, Quality), (u64, usize)> = HashMap::new();
+    // Everything the window holds fits: nothing drawn can pass it.
+    if model.held_bytes() <= budget {
+        return (drawn, wanted);
+    }
+    // Each body and level, one mesh: its bytes and how many occurrences
+    // draw it.
+    type Held = HashMap<*const WireBody, (u64, usize)>;
+    let mut held: Held = HashMap::new();
     let mut total = 0;
-    let add = |held: &mut HashMap<(String, Quality), (u64, usize)>, d: &Drawn| {
+    let add = |held: &mut Held, d: &Drawn| {
         let e = held
-            .entry((d.mesh.hash.clone(), d.level))
+            .entry(Arc::as_ptr(&d.mesh))
             .or_insert_with(|| (gpu_bytes(&d.mesh), 0));
         e.1 += 1;
         if e.1 == 1 { e.0 } else { 0 }
@@ -166,10 +189,8 @@ pub fn within(
     if total <= budget {
         return (drawn, wanted);
     }
-    let take = |held: &mut HashMap<(String, Quality), (u64, usize)>, d: &Drawn| {
-        let e = held
-            .get_mut(&(d.mesh.hash.clone(), d.level))
-            .expect("counted");
+    let take = |held: &mut Held, d: &Drawn| {
+        let e = held.get_mut(&Arc::as_ptr(&d.mesh)).expect("counted");
         e.1 -= 1;
         if e.1 == 0 { e.0 } else { 0 }
     };
@@ -390,18 +411,27 @@ mod tests {
         let drawn: Vec<Drawn> = ["a", "b", "c"]
             .iter()
             .enumerate()
-            .map(|(i, h)| Drawn {
-                key: ("row".into(), format!("c{i}/s")),
-                mesh: Arc::new(mesh(h, 30)),
-                level: Quality::Fine,
-                base: Arc::new(mesh(h, 10)),
-                pose: crate::core::model::Pose::of(
-                    [i as f64, 0.0, 0.0],
-                    [0.0, 0.0, 1.0],
-                    [1.0, 0.0, 0.0],
-                ),
+            .map(|(i, h)| {
+                // The window holds both levels.
+                let (fine, normal) = (Arc::new(mesh(h, 30)), Arc::new(mesh(h, 10)));
+                m.levels
+                    .insert((h.to_string(), Quality::Fine), Arc::clone(&fine));
+                m.levels
+                    .insert((h.to_string(), Quality::Normal), Arc::clone(&normal));
+                Drawn {
+                    key: Arc::new(("row".into(), format!("c{i}/s"))),
+                    mesh: fine,
+                    level: Quality::Fine,
+                    base: normal,
+                    pose: crate::core::model::Pose::of(
+                        [i as f64, 0.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                        [1.0, 0.0, 0.0],
+                    ),
+                }
             })
             .collect();
+        assert_eq!(m.held_bytes(), 3 * (360 + 120));
         let wanted = vec![(("row".to_owned(), "c0/s".to_owned()), Quality::Fine)];
         // Everything fits.
         let (all, w) = within(&m, &pr, drawn.clone(), wanted.clone(), 1_080);
@@ -446,6 +476,42 @@ mod tests {
     }
 
     #[test]
+    fn the_box_tree_culls_as_judging_every_box_does() {
+        let xs: Vec<f64> = (0..300).map(|i| (i as f64 - 150.0) * 0.05).collect();
+        let m = row(&xs);
+        let picker = Picker::new(&m);
+        for (eye, target) in [
+            ([-0.01, 0.005, 0.005], [1.0, 0.005, 0.005]),
+            ([0.0, -2.0, 0.5], [0.0, 0.0, 0.0]),
+            ([3.0, -0.5, 0.2], [2.0, 0.0, 0.0]),
+        ] {
+            let camera = ryucad::view::Camera {
+                eye,
+                target,
+                up: [0.0, 0.0, 1.0],
+                projection: ryucad::view::Projection::Perspective { fov_deg: 30.0 },
+            };
+            let pr = Projector::new(&camera, 1.5, [0.0; 3], 10.0);
+            let cull = pr.cull();
+            let seen: Vec<String> = picker
+                .seen(|lo, hi| cull.sight(lo, hi))
+                .iter()
+                .map(|b| b.key.1.clone())
+                .collect();
+            let judged: Vec<String> = m
+                .drawn()
+                .filter(|(k, ..)| {
+                    let (lo, hi) = picker.body_bounds(k).unwrap();
+                    pr.sees_box(lo, hi)
+                })
+                .map(|(k, ..)| k.1.clone())
+                .collect();
+            assert!(!seen.is_empty() && seen.len() < xs.len());
+            assert_eq!(seen, judged);
+        }
+    }
+
+    #[test]
     fn boxes_beside_the_view_are_culled() {
         let camera = ryucad::view::frame(
             [0.0; 3],
@@ -464,6 +530,13 @@ mod tests {
             "off to the right"
         );
         assert!(!pr.sees_box([0.0, -6.0, 0.0], [1.0, -5.0, 1.0]), "below");
+        // All in view, partly, or not at all: a box tree takes a node all
+        // in view without judging what it holds.
+        use crate::core::nav::Sight;
+        let cull = pr.cull();
+        assert_eq!(cull.sight([0.45; 3], [0.55; 3]), Sight::In);
+        assert_eq!(cull.sight([0.9, 0.9, 0.0], [5.0, 5.0, 1.0]), Sight::Partly);
+        assert_eq!(cull.sight([5.0, 0.0, 0.0], [6.0, 1.0, 1.0]), Sight::Out);
         let near = pr.box_pixels([0.0; 3], [1.0; 3], 400.0);
         let small = pr.box_pixels([0.45; 3], [0.55; 3], 400.0);
         assert!((near / small - 10.0).abs() < 1e-9, "{near} {small}");
