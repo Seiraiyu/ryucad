@@ -496,6 +496,11 @@ fn dispatch(
         ),
         Request::DepsFetch { names } => crate::deps::fetch(session, &names),
         Request::DepsList {} => crate::deps::list(session),
+        Request::DepsOutdated {} => crate::deps::outdated(session),
+        Request::DepsRemove {
+            name,
+            expected_revision,
+        } => crate::deps::remove(session, &name, expected_revision.as_deref()),
         Request::DepsUpdate {
             names,
             part,

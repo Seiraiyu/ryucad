@@ -38,6 +38,38 @@ pub struct ReleasedPart {
     pub labels: Vec<Released>,
 }
 
+/// Each part's latest official label that isn't obsolete, as `releases`
+/// has them, in `scheme`'s order: what an instance is outdated against.
+pub fn latest(
+    releases: &crate::history::Releases,
+    scheme: crate::config::Scheme,
+) -> BTreeMap<Id, String> {
+    let mut by: BTreeMap<Id, (Vec<String>, Vec<String>)> = BTreeMap::new();
+    for p in releases.official.keys() {
+        let mut seg = p.split('/').skip(1);
+        let (Some(part), Some(file)) = (seg.next(), seg.next()) else {
+            continue;
+        };
+        let (Ok(part), Some((label, kind))) = (Id::parse(part, "part"), parse_name(file)) else {
+            continue;
+        };
+        let e = by.entry(part).or_default();
+        match kind {
+            Kind::Release => e.0.push(label),
+            Kind::Obsolete => e.1.push(label),
+        }
+    }
+    by.into_iter()
+        .filter_map(|(part, (labels, obsolete))| {
+            let best = labels
+                .into_iter()
+                .filter(|l| !obsolete.contains(l))
+                .max_by_key(|l| (label::index(scheme, l).unwrap_or(0), l.clone()))?;
+            Some((part, best))
+        })
+        .collect()
+}
+
 /// The parts `project` (at `url`, folder `path`) has released on its
 /// release branch as fetched, in part ID order: `dependency_not_fetched`
 /// before a fetch.
@@ -163,6 +195,14 @@ mod tests {
             (p.number.as_deref(), p.name.as_deref()),
             (Some("100"), Some("P"))
         );
+        let releases = cache
+            .reader()
+            .releases(&u, "lib", "main")
+            .unwrap()
+            .cloned()
+            .unwrap();
+        let newest = latest(&releases, crate::config::Scheme::Letters);
+        assert_eq!(newest[&id("p")], "B");
         assert_eq!(
             p.labels,
             [
