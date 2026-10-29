@@ -7,6 +7,7 @@
 pub use ryu_doc::{canonical, error, id, source, units};
 
 pub mod boards;
+pub mod check;
 pub mod codes;
 pub mod doc;
 pub mod import;
