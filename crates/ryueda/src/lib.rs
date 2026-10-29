@@ -16,6 +16,7 @@ pub mod daemon;
 pub mod design;
 pub mod doc;
 pub mod edit;
+pub mod erc;
 pub mod fault;
 pub mod footprint;
 pub mod libcmd;
