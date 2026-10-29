@@ -42,7 +42,10 @@ impl ryu_session::Product for Cad {
 
 pub mod activity;
 pub mod assembly;
+#[cfg(feature = "bench")]
+pub mod bench;
 pub mod bom;
+pub mod budget;
 pub mod cache;
 pub mod check;
 pub mod clearance;

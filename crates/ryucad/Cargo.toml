@@ -36,6 +36,13 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 # unaudited). It builds on every release target (musl-gcc on Linux), and
 # the kernel crates don't depend on it.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+# The race bodies the benchmark project imports (`bench` only: test-only
+# helpers are never in a release build).
+ryukei-testkit = { path = "../ryukei-testkit", optional = true }
+
+[features]
+# `ryucad::bench`: the generated projects benchmarks and bars measure.
+bench = ["dep:ryukei-testkit"]
 
 [dev-dependencies]
 assert_cmd = "2"
@@ -62,12 +69,20 @@ harness = false
 name = "step"
 harness = false
 
+[[test]]
+name = "scale_bar"
+required-features = ["bench"]
+
+[[example]]
+name = "ryucad-bench-gen"
+required-features = ["bench"]
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 widestring = "1"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_SystemInformation", "Win32_UI_WindowsAndMessaging"] }
 
 # musl's allocator is slow under multithreaded allocation, and rebuild runs
 # features in parallel. Kernel results don't depend on the allocator.

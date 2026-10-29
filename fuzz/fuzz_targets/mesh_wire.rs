@@ -1,4 +1,5 @@
-//! `ryucad.mesh.1` from bytes, as the app reads it from a socket. Any
+//! `ryucad.mesh.1` and `ryucad.mesh.2` from bytes, as the app reads them
+//! from a socket. Any
 //! input must decode to meshes whose every index is in range, or give a
 //! structured error. Any panic is a bug.
 

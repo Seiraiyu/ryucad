@@ -146,6 +146,13 @@ const KEYS: &[Key] = &[
         about: "whether the shown model's origin axes and planes are drawn",
     },
     Key {
+        name: "display.gpu_memory",
+        scope: Scope::User,
+        rule: Rule::Int(1 << 26, 1 << 40),
+        default: || json!(2u64 << 30),
+        about: "how many bytes of meshes a window keeps on its graphics adapter",
+    },
+    Key {
         name: "display.mesh_cache_mib",
         scope: Scope::User,
         rule: Rule::Int(16, 65536),
@@ -165,6 +172,21 @@ const KEYS: &[Key] = &[
         rule: Rule::Int(50, 5000),
         default: || json!(250),
         about: "how often a watched daemon checks the files",
+    },
+    Key {
+        name: "session.max_memory",
+        scope: Scope::User,
+        rule: Rule::Int(1 << 29, 1 << 44),
+        default: || json!(crate::budget::default_max()),
+        about: "how many bytes of parts' rebuilds and display meshes a daemon holds between \
+                requests (a quarter of the machine's memory, at most 8 GiB, by default)",
+    },
+    Key {
+        name: "daemon.rescan_s",
+        scope: Scope::User,
+        rule: Rule::Int(5, 3600),
+        default: || json!(60),
+        about: "how often a daemon checks every file, though file events say what changed",
     },
     Key {
         name: "review.url",

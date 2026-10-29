@@ -104,6 +104,12 @@ pub trait Serve: Product + prefs::Schema {
         let _ = (session, req);
         None
     }
+    /// What `daemon status` adds about the session, once it is open
+    /// (ryucad's file watch and memory budget): `Null` for nothing.
+    fn status(session: &Self::Session) -> Value {
+        let _ = session;
+        Value::Null
+    }
     /// Brings the session and what subscribers know up to date with the
     /// files: before a subscription, and while anyone watches.
     fn settle(

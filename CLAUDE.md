@@ -161,6 +161,7 @@ What each phase decided is recorded per area under `docs/claude/`, imported here
 - @docs/claude/ryucad-solids.md — solids, fillets, chamfers, holes, patterns
 - @docs/claude/ryucad-assemblies.md — assemblies, mates, scale, interference
 - @docs/claude/ryucad-step.md — STEP import, re-import and export
+- @docs/claude/ryucad-scale.md — the benchmark project, file events, the memory budget, the window at scale
 - @docs/claude/ryucad-formats.md — export formats: the scene, STL, 3MF, and their references
 - @docs/claude/ryupdm.md — the PDM data model and local PDM
 - @docs/claude/ryupdm-review.md — hosted review

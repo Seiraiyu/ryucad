@@ -382,6 +382,14 @@ pub enum Code {
     /// Import: a KiCad file in a format newer than KiCad 9's, read as far
     /// as ryueda knows it (a warning).
     ImportVersionNewer,
+    /// A warning: a daemon can't watch its project folder for file events
+    /// (a filesystem without them, a watch limit reached), so it checks
+    /// every file on every request. Why is in the details.
+    WatchUnavailable,
+    /// A warning: what a daemon must hold in memory (the bodies its
+    /// assemblies show, and display meshes) is more than
+    /// `session.max_memory`, so it holds more than its budget.
+    MemoryBudgetTooSmall,
     /// An export to a mesh format of a body with faces ryukei can't mesh
     /// to the export's chord and angle. The faces, by reference, and
     /// ryukei's fault for each are in the details.
@@ -556,6 +564,11 @@ mod tests {
         assert_eq!(Code::PinConflict.exit_code(), 1);
         assert_eq!(Code::LibraryNested.exit_code(), 1);
         assert_eq!(Code::PinWithoutPad.exit_code(), 1);
+        assert_eq!(json!(Code::WatchUnavailable), json!("watch_unavailable"));
+        assert_eq!(
+            json!(Code::MemoryBudgetTooSmall),
+            json!("memory_budget_too_small")
+        );
         assert_eq!(json!(Code::ExportMeshFaults), json!("export_mesh_faults"));
         assert_eq!(json!(Code::ExportTooLarge), json!("export_too_large"));
         assert_eq!(json!(Code::NotABoard), json!("not_a_board"));

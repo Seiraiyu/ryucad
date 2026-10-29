@@ -38,8 +38,13 @@ type Slot = Arc<OnceLock<std::result::Result<Arc<Opened>, StepError>>>;
 /// The files kept, most recently used last, with their sizes.
 static OPENED: Mutex<Vec<(String, usize, Slot)>> = Mutex::new(Vec::new());
 
-/// `file` opened, from what is kept when it was opened before. Two
-/// threads asking for one file at once open it once.
+/// `file` opened, from what is kept when it was opened before. Nobody
+/// waits for another thread's opening: `ryustep::open` works on rayon, and
+/// a rayon worker waiting in it may run another part's rebuild that asks
+/// for the same file, which would then wait on itself (a deadlock the
+/// benchmark's 500 imports found). Two threads that ask for a file at
+/// once both open it, and the first to finish is kept; parts built side
+/// by side open their files first ([`open_ahead`]).
 pub fn opened(file: &ImportFile) -> std::result::Result<Arc<Opened>, StepError> {
     let slot = {
         let mut kept = OPENED.lock().unwrap_or_else(|p| p.into_inner());
@@ -55,8 +60,22 @@ pub fn opened(file: &ImportFile) -> std::result::Result<Arc<Opened>, StepError> 
         }
         slot
     };
-    slot.get_or_init(|| ryustep::open(&file.bytes).map(Arc::new))
-        .clone()
+    if let Some(done) = slot.get() {
+        return done.clone();
+    }
+    let _ = slot.set(ryustep::open(&file.bytes).map(Arc::new));
+    slot.get().expect("set by now").clone()
+}
+
+/// Opens every file of `files` that isn't open yet, one after another on
+/// this thread, before parts that import them are built side by side.
+pub fn open_ahead<'a>(files: impl IntoIterator<Item = &'a ImportFile>) {
+    let mut seen = std::collections::BTreeSet::new();
+    for f in files {
+        if seen.insert(&f.blake3) {
+            let _ = opened(f);
+        }
+    }
 }
 
 /// What an import feature reports beside its solid: its file, its
@@ -211,7 +230,7 @@ pub fn build(part: &Part, id: &Id, i: &Import) -> Result<(Built, Value)> {
         .result
         .map_err(|e| failed(id, i, &e, &read.instances))?;
     let step = |n: &Name| read.instances.get(n).map(|k| format!("#{k}"));
-    let origins = crate::rebuild::names(&body)
+    let origins: crate::rebuild::Origins = crate::rebuild::names(&body)
         .into_iter()
         .map(|n| {
             let mut o = json!({"feature": id});

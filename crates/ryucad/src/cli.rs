@@ -453,12 +453,19 @@ enum Command {
     Mesh {
         part: String,
         feature: Option<String>,
+        /// An occurrence of an assembly (its path) to mesh; repeat for
+        /// several, meshed side by side.
+        #[arg(long = "occurrence", value_name = "PATH")]
+        occurrences: Vec<String>,
         /// coarse, normal or fine (the user's display quality by default).
         #[arg(long)]
         quality: Option<String>,
         /// Write the meshes to this file as ryucad.mesh.1 instead.
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
+        /// With --out, write ryucad.mesh.2: about half the size.
+        #[arg(long, requires = "out")]
+        compact: bool,
         #[command(flatten)]
         rev: RevArg,
     },
@@ -803,7 +810,15 @@ enum AssemblyCmd {
     },
     /// The instances as a tree: parts, revisions, poses, freedom,
     /// subassemblies.
-    Tree { part: String },
+    Tree {
+        part: String,
+        /// Start at the subassembly these instances reach: m3/s31.
+        #[arg(long)]
+        path: Option<String>,
+        /// List this many levels of instances (all when left out).
+        #[arg(long)]
+        depth: Option<u32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1771,9 +1786,11 @@ fn request(cmd: &Command) -> Option<Request> {
             angle: angle.clone().map(Value::String),
             expected_revision: expect.revision.clone(),
         },
-        Command::Assembly(AssemblyCmd::Tree { part }) => {
-            Request::AssemblyTree { part: part.clone() }
-        }
+        Command::Assembly(AssemblyCmd::Tree { part, path, depth }) => Request::AssemblyTree {
+            part: part.clone(),
+            path: path.clone(),
+            depth: *depth,
+        },
         Command::Assembly(AssemblyCmd::Solve {
             part,
             instance,
@@ -2357,14 +2374,20 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Mesh {
             part,
             feature,
+            occurrences,
             quality,
             out,
+            compact,
             rev,
         } => Request::MeshGet {
             part: part.clone(),
             feature: feature.clone(),
+            features: occurrences.clone(),
             quality: quality.clone(),
-            transfer: out.as_ref().map(|_| Transfer::Binary),
+            transfer: out.as_ref().map(|_| match compact {
+                true => Transfer::Compact,
+                false => Transfer::Binary,
+            }),
             rev: rev.rev.clone(),
         },
         Command::History { part, limit } => Request::HistoryLog {

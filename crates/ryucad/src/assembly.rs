@@ -32,6 +32,11 @@ pub struct Occurrence {
     pub rev: Rev,
     pub solids: Vec<Solid>,
     pub pose: Rigid,
+    /// Its pose in each assembly along its path: `within[i]` in the one
+    /// `path[..i]` reaches (`within[0]` is `pose`), each composed from
+    /// the poses below it only. Two occurrences of one subassembly are
+    /// related through it exactly, wherever it is placed (interference).
+    pub within: Vec<Rigid>,
 }
 
 /// A solid of an occurrence's part as the part shows it: its founder, the
@@ -133,6 +138,7 @@ impl Model {
             rev: rev.clone(),
             solids: shown,
             pose: Rigid::IDENTITY,
+            within: Vec::new(),
         }])
     }
 
@@ -145,12 +151,21 @@ impl Model {
             for o in &placed.model.occurrences {
                 let mut path = prefix.clone();
                 path.extend(o.path.iter().cloned());
+                let pose = placed.pose.then_after(&o.pose);
+                let mut within = Vec::with_capacity(o.within.len() + 1);
+                within.push(pose);
+                within.extend(o.within.iter().copied());
+                // A copy's two steps are one assembly's.
+                while within.len() < path.len() {
+                    within.insert(1, o.pose);
+                }
                 out.push(Occurrence {
                     path,
                     part: o.part.clone(),
                     rev: o.rev.clone(),
                     solids: o.solids.clone(),
-                    pose: placed.pose.then_after(&o.pose),
+                    pose,
+                    within,
                 });
             }
         };
@@ -601,6 +616,91 @@ pub struct Store {
     pub pinned: BTreeMap<(Id, String), (String, PartResult)>,
     pub pinned_caches: BTreeMap<(Id, String), Cache>,
     pub disk: Option<Arc<crate::cache::Disk>>,
+    /// Each part's model at `working` (not an assembly's), by the
+    /// revision it was built from: what assemblies place, kept when the
+    /// budget lets the part's rebuild go.
+    pub models: BTreeMap<Id, (String, Arc<Model>)>,
+    /// What each part's rebuild was, by the key it was built from: its
+    /// hash and how many features failed, kept when the rebuild goes.
+    pub summaries: BTreeMap<Id, (String, String, usize)>,
+    pub budget: crate::budget::Budget,
+}
+
+impl Store {
+    /// Notes `part`'s rebuild `result`, built from `key`, for the budget
+    /// and the part's summary.
+    fn noted(&mut self, project: &Project, part: &Id, key: &str) {
+        let Some((_, r)) = self.results.get(part) else {
+            return;
+        };
+        self.summaries
+            .insert(part.clone(), (key.to_owned(), r.hash.clone(), r.failed()));
+        self.budget.touch(part);
+        if !self.budget.on() {
+            return;
+        }
+        let Some(p) = project.parts.get(part) else {
+            return;
+        };
+        let solids = crate::solid::Solids::of(p);
+        let shown: Vec<&crate::rebuild::Made> = r
+            .shown(&solids)
+            .into_iter()
+            .filter_map(|s| match r.output(s.state?.0)? {
+                crate::rebuild::Output::Solids(m) => Some(m.as_ref()),
+                _ => None,
+            })
+            .collect();
+        let empty = Cache::new();
+        let cache = self.caches.get(part).unwrap_or(&empty);
+        self.budget.measure(part, r, cache, &shown);
+    }
+
+    /// What the budget counts: the rebuilds of parts that aren't
+    /// assemblies and the shown bodies of those whose rebuilds went, and
+    /// `extra`.
+    pub fn held(&self, project: &Project, extra: u64) -> u64 {
+        if let Some(held) = self.budget.cached() {
+            return held + extra;
+        }
+        let leaves = self.results.keys().filter(|id| is_leaf(project, id));
+        let held = self.budget.total(leaves, self.models.keys(), 0);
+        self.budget.cache(held);
+        held + extra
+    }
+
+    /// Lets go of parts' rebuilds, least recently used first, until what
+    /// is held (with `extra`) is within the budget; returns the parts let
+    /// go.
+    pub fn trim(&mut self, project: &Project, extra: u64) -> Vec<Id> {
+        if !self.budget.on() {
+            return Vec::new();
+        }
+        let held = self.held(project, extra);
+        if held <= self.budget.max {
+            return Vec::new();
+        }
+        let leaves: Vec<Id> = self
+            .results
+            .keys()
+            .filter(|id| is_leaf(project, id))
+            .cloned()
+            .collect();
+        let gone = self.budget.evict(leaves.into_iter(), held);
+        for id in &gone {
+            self.results.remove(id);
+            self.caches.remove(id);
+        }
+        gone
+    }
+}
+
+/// Whether `id` is a part of `project` that isn't an assembly.
+pub(crate) fn is_leaf(project: &Project, id: &Id) -> bool {
+    project
+        .parts
+        .get(id)
+        .is_some_and(|p| !p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly))
 }
 
 /// Rebuilds parts and the assemblies over them, a part before every
@@ -609,20 +709,78 @@ pub struct Store {
 pub struct Rebuild<'p> {
     project: &'p Project,
     pins: &'p Pins,
-    cycles: Cycles,
+    cycles: Arc<Cycles>,
     pub store: Store,
     pub fresh: Vec<Id>,
+    /// What the names of fresh parts whose rebuilds the budget let go
+    /// were, learnt before they went (see [`crate::session::names_of`]).
+    pub learned: Vec<crate::session::Name>,
 }
 
 impl<'p> Rebuild<'p> {
     pub fn new(project: &'p Project, pins: &'p Pins, store: Store) -> Rebuild<'p> {
+        Rebuild::with_cycles(project, pins, store, Arc::new(Cycles::of(project, pins)))
+    }
+
+    /// [`Rebuild::new`] with the project's cycles already found (from the
+    /// same project and pins): finding them walks every part, about
+    /// 20 ms at 10,000 parts, and a session's requests rebuild often.
+    pub fn with_cycles(
+        project: &'p Project,
+        pins: &'p Pins,
+        store: Store,
+        cycles: Arc<Cycles>,
+    ) -> Rebuild<'p> {
         Rebuild {
             project,
             pins,
-            cycles: Cycles::of(project, pins),
+            cycles,
             store,
             fresh: Vec::new(),
+            learned: Vec::new(),
         }
+    }
+
+    /// Whether `part`'s model at `working` is kept at its revision.
+    fn has_model(&self, part: &Id) -> bool {
+        let rev = self.project.parts.get(part).map(|p| &p.revision);
+        self.store
+            .models
+            .get(part)
+            .is_some_and(|(k, _)| Some(k) == rev)
+    }
+
+    /// Lets go of parts' rebuilds past the budget, learning the names of
+    /// the fresh ones first.
+    fn trim(&mut self) {
+        if !self.store.budget.on() {
+            return;
+        }
+        let held = self.store.held(self.project, 0);
+        if held <= self.store.budget.max {
+            return;
+        }
+        let leaves: Vec<Id> = self
+            .store
+            .results
+            .keys()
+            .filter(|id| is_leaf(self.project, id))
+            .cloned()
+            .collect();
+        for id in self.store.budget.evict(leaves.into_iter(), held) {
+            if let Some(i) = self.fresh.iter().position(|f| *f == id) {
+                self.fresh.remove(i);
+                let (_, r) = &self.store.results[&id];
+                self.learned.extend(crate::session::names_of(&id, r));
+            }
+            self.store.results.remove(&id);
+            self.store.caches.remove(&id);
+        }
+    }
+
+    /// The project being rebuilt.
+    pub fn project(&self) -> &'p Project {
+        self.project
     }
 
     /// Builds those of `parts` that place nothing and aren't built at
@@ -645,6 +803,9 @@ impl<'p> Rebuild<'p> {
             })
             .map(|p| (&p.id, p))
             .collect();
+        // Their imported files first, on this thread: see
+        // `import::opened`.
+        crate::import::open_ahead(todo.values().flat_map(|p| p.imports.values()));
         let empty = Cache::new();
         let (caches, disk) = (&self.store.caches, self.store.disk.as_deref());
         let built: Vec<(Id, PartResult, Cache)> = todo
@@ -658,7 +819,8 @@ impl<'p> Rebuild<'p> {
         for (id, r, c) in built {
             let key = self.project.parts[&id].revision.clone();
             self.store.caches.insert(id.clone(), c);
-            self.store.results.insert(id.clone(), (key, r));
+            self.store.results.insert(id.clone(), (key.clone(), r));
+            self.store.noted(self.project, &id, &key);
             self.fresh.push(id);
         }
     }
@@ -668,12 +830,17 @@ impl<'p> Rebuild<'p> {
         let p = self.project.part(part)?;
         let (key, children) = self.children(p, &Rev::Working);
         let fresh = self.store.results.get(part).is_some_and(|(k, _)| *k == key);
-        if !fresh {
+        if fresh {
+            self.store.budget.touch(part);
+        } else {
             let empty = Cache::new();
             let cache = self.store.caches.get(part).unwrap_or(&empty);
             let (result, cache) = rebuild_part_in(p, cache, &children, self.store.disk.as_deref());
             self.store.caches.insert(part.clone(), cache);
-            self.store.results.insert(part.clone(), (key, result));
+            self.store
+                .results
+                .insert(part.clone(), (key.clone(), result));
+            self.store.noted(self.project, part, &key);
             self.fresh.push(part.clone());
         }
         Ok(&self.store.results[part].1)
@@ -714,6 +881,7 @@ impl<'p> Rebuild<'p> {
                     Some(Ok(Feature::Instance(i))) if i.rev == Rev::Working => Some(i.part.clone()),
                     _ => None,
                 })
+                .filter(|id| !self.has_model(id))
                 .collect();
             self.build_parts(&placed);
         }
@@ -743,6 +911,9 @@ impl<'p> Rebuild<'p> {
             h.update(format!("{c} {} {what}\n", crev.text()).as_bytes());
         }
         key = format!("{key}+{}", &h.finalize().to_hex()[..32]);
+        // What it places is in its models now: their parts' rebuilds may
+        // go, past the budget.
+        self.trim();
         (key, children)
     }
 
@@ -754,8 +925,24 @@ impl<'p> Rebuild<'p> {
                     Error::new(Code::NotFound, format!("no part {part} to place"))
                         .with("part", part)
                 })?;
-                let result = self.result(part)?;
-                Ok(Arc::new(model_of(p, rev, result)))
+                // A part's model needs only its revision; an assembly's,
+                // what it places too (its rebuild's key). A root of
+                // 100,000 occurrences isn't gathered again per request.
+                if is_leaf(self.project, part) && self.has_model(part) {
+                    self.store.budget.touch(part);
+                    return Ok(Arc::clone(&self.store.models[part].1));
+                }
+                self.result(part)?;
+                let (key, result) = &self.store.results[part];
+                if let Some((k, m)) = self.store.models.get(part)
+                    && k == key
+                {
+                    return Ok(Arc::clone(m));
+                }
+                let m = Arc::new(model_of(p, rev, result));
+                let at = (key.clone(), Arc::clone(&m));
+                self.store.models.insert(part.clone(), at);
+                Ok(m)
             }
             Rev::Label(l) => {
                 let pinned = match self.pins.get(&(part.clone(), l.clone())) {
@@ -785,7 +972,7 @@ impl Rebuild<'_> {
         Ok(match rev {
             Rev::Working => (
                 self.project.part(part)?.clone(),
-                self.store.results[part].1.clone(),
+                self.result(part)?.clone(),
                 None,
             ),
             Rev::Label(l) => {
@@ -1033,9 +1220,14 @@ pub fn moved(
 /// assembly, what its mates leave it, a subassembly's instances under it,
 /// and why it failed; its instance patterns, each with its copies; and
 /// `failing`, every feature of it that doesn't build.
-pub fn tree(session: &mut crate::session::Session, part: &str) -> Result<serde_json::Value> {
+pub fn tree(
+    session: &mut crate::session::Session,
+    part: &str,
+    path: Option<&str>,
+    depth: Option<u32>,
+) -> Result<serde_json::Value> {
     let pid = crate::server::part_id(part)?;
-    let p = session.project().part(&pid)?.clone();
+    let mut p = session.project().part(&pid)?.clone();
     if crate::server::part_kind(&p) != PartKind::Assembly {
         return Err(Error::new(
             Code::WrongPartKind,
@@ -1043,9 +1235,59 @@ pub fn tree(session: &mut crate::session::Session, part: &str) -> Result<serde_j
         )
         .with("part", &pid));
     }
-    let result = session.rebuilt(&pid)?.clone();
-    let instances = nodes(session, &p, &result, &Rigid::IDENTITY, &[])?;
-    let mut v = serde_json::json!({"part": pid, "revision": p.revision, "instances": instances});
+    let top = session.rebuilt(&pid)?.clone();
+    let mut result = top.clone();
+    // Down `path` to the subassembly the tree starts at, its pose
+    // composed on the way.
+    let mut at = Rigid::IDENTITY;
+    let mut prefix = Vec::new();
+    for step in path
+        .into_iter()
+        .flat_map(|t| t.split('/'))
+        .filter(|s| !s.is_empty())
+    {
+        let not_found = || {
+            Error::new(
+                Code::NotFound,
+                format!("{pid} has no subassembly at {}", path.unwrap_or_default()),
+            )
+            .with("part", &pid)
+            .with("path", path.unwrap_or_default())
+        };
+        let fid = Id::parse(step, "instance").map_err(|_| not_found())?;
+        let placed = result
+            .output(&fid)
+            .and_then(Output::instance)
+            .filter(|i| i.rev == Rev::Working)
+            .ok_or_else(not_found)?
+            .clone();
+        let child = session
+            .project()
+            .part(&placed.part)
+            .map_err(|_| not_found())?
+            .clone();
+        if crate::server::part_kind(&child) != PartKind::Assembly {
+            return Err(not_found());
+        }
+        at = at.then_after(&placed.pose);
+        prefix.push(fid);
+        result = session.rebuilt(&placed.part)?.clone();
+        p = child;
+    }
+    let instances = nodes(
+        session,
+        &p,
+        &result,
+        &at,
+        &prefix,
+        depth.unwrap_or(u32::MAX),
+    )?;
+    let mut v = serde_json::json!({"part": pid, "revision": session.project().part(&pid)?.revision,
+                                   "instances": instances});
+    if !prefix.is_empty() {
+        v["path"] = serde_json::json!(path_text(&prefix));
+        v["of"] = serde_json::json!(p.id);
+    }
     // Every feature of the assembly that fails, mates included, which the
     // tree doesn't list (issue #123: its instances may place while a mate
     // holding them fails).
@@ -1072,6 +1314,7 @@ fn nodes(
     result: &PartResult,
     at: &Rigid,
     prefix: &[Id],
+    depth: u32,
 ) -> Result<Vec<serde_json::Value>> {
     let mut out = Vec::new();
     for (fid, r) in &result.features {
@@ -1148,7 +1391,13 @@ fn nodes(
                         }
                     };
                     v["kind"] = serde_json::json!("assembly");
-                    v["instances"] = serde_json::json!(nodes(session, &c, &r, &here, &path)?);
+                    if depth > 1 {
+                        let below = nodes(session, &c, &r, &here, &path, depth - 1)?;
+                        v["instances"] = serde_json::json!(below);
+                    } else {
+                        // Below the depth asked for: asked for by path.
+                        v["more"] = serde_json::json!(true);
+                    }
                 }
             }
         }
@@ -1976,6 +2225,9 @@ pub(crate) mod tests {
         let mut slot = Some(s);
         crate::server::settle(&mut slot, &mut live, dir.path());
         let sub = live.hub.subscribe("p-x", &[Topic::Model]);
+        // As the daemon's subscribe does: what is news is measured from
+        // here.
+        crate::server::settle(&mut slot, &mut live, dir.path());
         let mut s = slot.take().unwrap();
         call_live(
             &mut s,
@@ -1995,6 +2247,102 @@ pub(crate) mod tests {
             .map(|p| &p["part"])
             .collect();
         assert_eq!(parts, [&json!("bolt"), &json!("frame")]);
+    }
+
+    #[test]
+    fn a_subscription_starts_quiet_and_hears_assemblies_without_occurrences() {
+        use crate::live::Live;
+        use crate::notify::Topic;
+        use crate::server::tests::{call_live, drain};
+        let (dir, s) = project();
+        place_in(
+            dir.path(),
+            "frame",
+            "b1",
+            "bolt",
+            json!("working"),
+            [0.0; 3],
+        );
+        let mut live = Live::new();
+        let mut slot = Some(s);
+        crate::server::settle(&mut slot, &mut live, dir.path());
+        let sub = live.hub.subscribe("p-x", &[Topic::Model]);
+        // The subscription's own settling has nothing to tell: what
+        // happened before it isn't news.
+        crate::server::settle(&mut slot, &mut live, dir.path());
+        live.hub.send(Topic::Model, "marker", &json!({}));
+        assert!(drain(&sub).is_empty());
+        let mut s = slot.take().unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.edit",
+            json!({"part": "bolt", "id": "shank", "params": {"radius": 4}}),
+        )
+        .unwrap();
+        live.hub.send(Topic::Model, "marker", &json!({}));
+        let got = drain(&sub);
+        let frame = got[0].1["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["part"] == "frame")
+            .unwrap()
+            .clone();
+        // A window asks for the occurrences of what it shows.
+        assert_eq!(frame["occurrence_count"], 1, "{frame}");
+        assert!(frame.get("occurrences").is_none(), "{frame}");
+        // A rebuild still gives them.
+        let v = call(&mut s, "rebuild", json!({"part": "frame"})).unwrap();
+        assert_eq!(v["parts"][0]["occurrences"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_budget_lets_parts_rebuilds_go_and_they_come_back_the_same() {
+        let (dir, s) = project();
+        place_in(
+            dir.path(),
+            "frame",
+            "b1",
+            "bolt",
+            json!("working"),
+            [0.0; 3],
+        );
+        let at = [0.1, 0.0, 0.0];
+        place_in(dir.path(), "frame", "p1", "plate", json!("working"), at);
+        // Nothing fits in a byte.
+        let mut s = s.with_budget(1);
+        s.refresh().unwrap();
+        let frame = id("frame");
+        let hash = s.rebuilt(&frame).unwrap().hash.clone();
+        let bolt = s.rebuilt(&id("bolt")).unwrap().hash.clone();
+        s.trim();
+        let st = s.budget_status();
+        assert_eq!(st["parts_held"], 0, "{st}");
+        assert!(st["evictions"].as_u64().unwrap() >= 2, "{st}");
+        // What the frame shows is kept however small the budget, and said.
+        assert_eq!(st["code"], "memory_budget_too_small", "{st}");
+        assert!(st["held_bytes"].as_u64().unwrap() > 0, "{st}");
+        // The frame answers from its parts' models: nothing comes back.
+        assert_eq!(s.rebuilt(&frame).unwrap().hash, hash);
+        assert_eq!(s.budget_status()["parts_held"], 0);
+        assert_eq!(
+            s.summary(&id("bolt")).map(|(h, f)| (h.to_owned(), f)),
+            Some((bolt.clone(), 0))
+        );
+        // A part asked for comes back, the same bits, and stays until the
+        // request answers.
+        assert_eq!(s.rebuilt(&id("bolt")).unwrap().hash, bolt);
+        assert_eq!(s.budget_status()["parts_held"], 1);
+        s.trim();
+        assert_eq!(s.budget_status()["parts_held"], 0);
+        // A budget that fits it all lets nothing go.
+        let mut s = Session::open(dir.path()).unwrap().with_budget(1 << 30);
+        s.rebuilt(&frame).unwrap();
+        s.trim();
+        assert_eq!(s.budget_status()["parts_held"], 2);
+        assert_eq!(s.budget_status()["evictions"], 0);
     }
 
     #[test]
@@ -2364,6 +2712,36 @@ pub(crate) mod tests {
         );
         let e = call(&mut s, "assembly.tree", json!({"part": "bolt"})).unwrap_err();
         assert_eq!(e.code, Code::WrongPartKind);
+        // Paged: one level, then the subassembly by its path.
+        let t = call(
+            &mut s,
+            "assembly.tree",
+            json!({"part": "frame", "depth": 1}),
+        )
+        .unwrap();
+        let p1 = &t["instances"][0];
+        assert_eq!((&p1["more"], p1.get("instances")), (&json!(true), None));
+        let t = call(
+            &mut s,
+            "assembly.tree",
+            json!({"part": "frame", "path": "p1"}),
+        )
+        .unwrap();
+        assert_eq!((&t["path"], &t["of"]), (&json!("p1"), &json!("pair")));
+        let right = &t["instances"][1];
+        assert_eq!(right["path"], "p1/right");
+        assert_eq!(
+            right["pose"]["origin_m"],
+            json!([0.060000000000000005, 0, 0])
+        );
+        for bad in ["z", "p1/left", "nope"] {
+            let e = call(
+                &mut s,
+                "assembly.tree",
+                json!({"part": "frame", "path": bad}),
+            );
+            assert_eq!(e.unwrap_err().code, Code::NotFound, "{bad}");
+        }
     }
 
     #[test]
@@ -2422,6 +2800,26 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::NotFound);
+        // Several at once: each body once, every occurrence asked for.
+        let some = json!({"part": "frame", "features": ["b2", "base"]});
+        let some = call(&mut s, "mesh.get", some).unwrap();
+        let labels: Vec<&Value> = some["bodies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| &b["feature"])
+            .collect();
+        assert_eq!(labels, [&json!("base/slab"), &json!("b2/shank")]);
+        assert_eq!(some["occurrences"].as_array().unwrap().len(), 2);
+        let bad = json!({"part": "frame", "features": ["b2", "b9"]});
+        let e = call(&mut s, "mesh.get", bad).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["occurrence"]),
+            (Code::NotFound, &json!("b9"))
+        );
+        let bad = json!({"part": "bolt", "features": ["shank", "x"]});
+        let e = call(&mut s, "mesh.get", bad).unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
         // The same as bytes.
         let req = crate::proto::Request::from_rpc(
             "mesh.get",
