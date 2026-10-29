@@ -4,6 +4,9 @@
 //! (`RYUEDA_NO_DAEMON=1`) and once through the project's daemon. Both must
 //! give the same JSON and the same exit code.
 
+#[path = "support/breakout.rs"]
+mod breakout;
+
 use assert_cmd::Command;
 use serde_json::{Value, json};
 use std::fs;
@@ -1465,4 +1468,188 @@ fn netlists_from_the_cli() {
         e["details"]["faults"][0]["details"]["path"],
         "blocks/pu/components/r.json"
     );
+}
+
+/// Every file under `dir`, by path relative to it, with its bytes.
+fn tree(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in fs::read_dir(&d).unwrap().flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let rel = path
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.insert(rel, fs::read(&path).unwrap());
+            }
+        }
+    }
+    out
+}
+
+/// The paths that differ between two trees.
+fn changed(
+    a: &std::collections::BTreeMap<String, Vec<u8>>,
+    b: &std::collections::BTreeMap<String, Vec<u8>>,
+) -> Vec<String> {
+    a.keys()
+        .chain(b.keys())
+        .filter(|k| a.get(*k) != b.get(*k))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+impl Pair {
+    /// The sensor breakout, entered by its script in both projects.
+    fn breakout() -> Pair {
+        let p = Pair::projects();
+        for (path, text) in breakout::footprints() {
+            p.write(&format!("board/{path}"), &text);
+        }
+        for args in breakout::script() {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            p.ok(&args);
+        }
+        p
+    }
+}
+
+#[test]
+fn the_sensor_breakout_from_the_cli() {
+    let p = Pair::breakout();
+    let n = p.ok(&["netlist"]);
+    let refdes: Vec<(&str, &str)> = n["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| {
+            (
+                o["reference"].as_str().unwrap(),
+                o["refdes"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        refdes,
+        [
+            ("board:c2", "C2"),
+            ("board:c3", "C3"),
+            ("board:j1", "J1"),
+            ("board:r1", "R1"),
+            ("board:r2", "R2"),
+            ("board:u2", "U2"),
+            ("board:s1/c1", "C1"),
+            ("board:s1/u1", "U1"),
+        ]
+    );
+    let names: Vec<&str> = n["nets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["3V3", "GND", "SCL", "SDA", "VIN"]);
+    let sda = &n["nets"][3];
+    let pins: Vec<&Value> = sda["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| &m["pin"])
+        .collect();
+    assert_eq!(
+        pins,
+        [
+            &json!("board:j1/4"),
+            &json!("board:r1/1"),
+            &json!("board:s1/u1/3")
+        ]
+    );
+    let erc = p.ok(&["erc"]);
+    assert_eq!(
+        (&erc["errors"], &erc["warnings"]),
+        (&json!(0), &json!(0)),
+        "{erc}"
+    );
+    let report = p.ok(&["check"]);
+    assert_eq!(report["errors"], 0, "{report}");
+    // Each edit touches only what it must.
+    let board = p.direct.join("board");
+    let before = tree(&board);
+    p.ok(&[
+        "component",
+        "add",
+        "breakout",
+        "--of",
+        "c_100n",
+        "--id",
+        "c4",
+    ]);
+    p.ok(&["connect", "breakout/c4/1", "rail:VIN"]);
+    let after = tree(&board);
+    assert_eq!(
+        changed(&before, &after),
+        ["blocks/breakout/components/c4.json"]
+    );
+    let before = after;
+    p.ok(&["net", "rename", "breakout/SDA", "I2C_SDA"]);
+    let after = tree(&board);
+    assert_eq!(changed(&before, &after), ["blocks/breakout/nets/sda.json"]);
+    let before = after;
+    p.ok(&["net", "add", "breakout", "TP", "--id", "tp"]);
+    p.ok(&["connect", "breakout/c4/2", "TP"]);
+    let middle = tree(&board);
+    let j = p.ok(&["net", "join", "breakout/TP", "rail:GND"]);
+    assert_eq!(j["moved"], json!(["breakout/c4/2"]));
+    let after = tree(&board);
+    assert_eq!(
+        changed(&before, &after),
+        ["blocks/breakout/components/c4.json"]
+    );
+    assert_eq!(
+        changed(&middle, &after),
+        [
+            "blocks/breakout/components/c4.json",
+            "blocks/breakout/nets/tp.json"
+        ]
+    );
+    let erc = p.ok(&["erc"]);
+    assert_eq!(
+        (&erc["errors"], &erc["warnings"]),
+        (&json!(0), &json!(0)),
+        "{erc}"
+    );
+    // The join is one change: undone and redone through the daemon.
+    let daemon = p.daemon.join("board");
+    let joined = tree(&daemon);
+    let (code, u) = p.run_in(&p.daemon, "board", &["undo"]);
+    assert_eq!(code, 0, "{u}");
+    assert_eq!(
+        changed(&joined, &tree(&daemon)),
+        [
+            "blocks/breakout/components/c4.json",
+            "blocks/breakout/nets/tp.json"
+        ]
+    );
+    let (code, r) = p.run_in(&p.daemon, "board", &["redo"]);
+    assert_eq!(code, 0, "{r}");
+    assert_eq!(tree(&daemon), joined);
+    // A block created and undone leaves no folder behind.
+    assert_eq!(
+        p.run_in(
+            &p.daemon,
+            "board",
+            &["block", "create", "Spare", "--id", "spare"]
+        )
+        .0,
+        0
+    );
+    assert_eq!(p.run_in(&p.daemon, "board", &["undo"]).0, 0);
+    assert!(!daemon.join("blocks/spare").exists());
 }
