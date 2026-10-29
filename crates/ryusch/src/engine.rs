@@ -337,6 +337,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm) -> Outcome {
         }
     }
     let mut out = draw(st, prev, &r.styles);
+    out.layout.instructions = block.instructions.clone();
     out.idioms = idioms;
     out.flow = r.flow.iter().map(|p| block.parts[*p].key.clone()).collect();
     out
