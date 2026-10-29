@@ -3322,6 +3322,120 @@ fn mates_from_the_cli() {
 }
 
 #[test]
+fn a_failing_mate_warns_from_the_cli() {
+    // Issues #155 and #158: a slot cut across the plate splits the face
+    // m1 stands on, in frame, which top places.
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let params: [(&str, &str, &str, &[&str]); 2] = [
+        ("plate", "box", "slab", &["x=100", "y=50", "z=5"]),
+        ("bolt", "cylinder", "shank", &["radius=3", "height=20"]),
+    ];
+    for (part, ty, id, params) in params {
+        p.ok(&["part", "create", part]);
+        let mut args = vec!["feature", "add", part, ty, "--id", id];
+        for x in params {
+            args.extend(["--param", x]);
+        }
+        p.ok(&args);
+    }
+    p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "box",
+        "--id",
+        "slot",
+        "--param",
+        "x=4",
+        "--param",
+        "y=4",
+        "--param",
+        "z=10",
+        "--origin",
+        "70,-2,-1",
+        "--operation",
+        "cut",
+        "--target",
+        "slab",
+    ]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "base", "--of", "plate", "--fixed",
+    ]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "pin", "--of", "bolt", "--origin", "50,0,0",
+    ]);
+    let face = |part: &str, solid: &str, z: f64| -> String {
+        let v = p.ok(&["inspect", part, solid]);
+        v["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && (f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign - z).abs() < 1e-12
+            })
+            .map(|f| f["name"].as_str().unwrap().to_owned())
+            .unwrap()
+    };
+    let top = format!("frame/base/slab/{}", face("plate", "slab", 1.0));
+    let foot = format!("frame/pin/shank/{}", face("bolt", "shank", -1.0));
+    p.ok(&[
+        "feature",
+        "add",
+        "frame",
+        "mate",
+        "--id",
+        "m1",
+        "--form",
+        "revolute",
+        "--a",
+        &top,
+        "--a-offset",
+        r#"{"origin": ["20 mm", "10 mm", "0 mm"]}"#,
+        "--b",
+        &foot,
+        "--b-offset",
+        r#"{"flip": true}"#,
+    ]);
+    p.ok(&["part", "create", "top", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "top", "instance", "--id", "f", "--of", "frame", "--fixed",
+    ]);
+    p.ok(&["check", "top"]);
+    // How many of an answer's envelope warnings name m1.
+    let naming = |v: &Value| {
+        v["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|w| w.as_str().unwrap().contains("m1"))
+            .count()
+    };
+    let (code, v) = p.both_from("", &["feature", "edit", "plate", "slot", "--param", "y=60"]);
+    assert_eq!((code, naming(&v)), (0, 1), "{v}");
+    for args in [
+        &["assembly", "tree", "frame"][..],
+        &["interference", "frame"],
+        &["interference", "top"],
+    ] {
+        let (code, v) = p.both_from("", args);
+        assert_eq!((code, naming(&v)), (0, 1), "{args:?}: {v}");
+    }
+    let (code, v) = p.both_from("", &["assembly", "solve", "frame"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["solve"]["mates"]["m1"], "failing", "{v}");
+    assert_eq!(
+        v["result"]["solve"]["errors"]["m1"]["code"], "reference_unresolved",
+        "{v}"
+    );
+    p.fails(&["rebuild", "top"], "rebuild_failed", 1);
+    p.fails(&["check", "top"], "check_failed", 1);
+}
+
+#[test]
 fn imports_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);

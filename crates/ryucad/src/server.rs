@@ -4027,6 +4027,36 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
         parts.push(report);
     }
     let mut report = json!({ "parts": parts });
+    // One assembly's rebuild takes in what fails in every assembly it
+    // places, at any depth (issue #158), as `placed`: each such assembly
+    // with its failing features. The whole project's lists them already.
+    if let Some(top) = part {
+        let top = part_id(top)?;
+        let mut placed = Vec::new();
+        for a in crate::assembly::placed_assemblies(session.project(), &top) {
+            let p = session.project().part(&a)?.clone();
+            let Ok(r) = session.rebuilt(&a) else {
+                continue;
+            };
+            let features: Vec<Value> = r
+                .features
+                .iter()
+                .filter_map(|(fid, res)| {
+                    let e = res.as_ref().err()?;
+                    let ty = p.features.get(fid)?.as_ref().ok().map(Feature::type_name);
+                    Some(json!({"id": fid, "type": ty, "ok": false, "error": e}))
+                })
+                .collect();
+            if !features.is_empty() {
+                failed += features.len();
+                placed.push(json!({"part": a, "revision": p.revision,
+                                   "failed": features.len(), "features": features}));
+            }
+        }
+        if !placed.is_empty() {
+            report["placed"] = json!(placed);
+        }
+    }
     if !warnings.is_empty() {
         report["warnings"] = json!(warnings);
     }
