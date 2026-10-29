@@ -294,6 +294,13 @@ fn walk(root: &Path) -> Vec<std::path::PathBuf> {
 /// `ryucad <args>` from `root` through its daemon, with `cache` as the
 /// disk cache and `run` holding the daemons' sockets: the parsed answer.
 fn cli(root: &Path, run: &Path, cache: &Path, args: &[&str]) -> Value {
+    let v = cli_with(root, run, cache, &[], args);
+    assert_eq!(v["ok"], true, "{args:?}: {v}");
+    v["result"].clone()
+}
+
+/// [`cli`] with more of the environment set: the whole envelope.
+fn cli_with(root: &Path, run: &Path, cache: &Path, env: &[(&str, &str)], args: &[&str]) -> Value {
     let out = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryucad"))
         .args(args)
         .current_dir(root)
@@ -301,13 +308,15 @@ fn cli(root: &Path, run: &Path, cache: &Path, args: &[&str]) -> Value {
         .env("RYUCAD_CONFIG_DIR", run.with_file_name("config"))
         .env("RYUCAD_CACHE_DIR", cache)
         .env("RYUCAD_IDLE_TIMEOUT", "60")
+        .envs(env.iter().copied())
         .output()
         .unwrap();
-    let v: Value = serde_json::from_slice(&out.stdout)
-        .unwrap_or_else(|_| panic!("{args:?}: {}", String::from_utf8_lossy(&out.stderr)));
-    assert_eq!(v["ok"], true, "{args:?}: {v}");
-    v["result"].clone()
+    serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|_| panic!("{args:?}: {}", String::from_utf8_lossy(&out.stderr)))
 }
+
+/// A release's identity, claimed for the development build under test.
+const RELEASE: &str = "0707070707070707070707070707070707070707070707070707070707070707";
 
 /// A project at `root` with part `p`: a plate and a cylinder cut from it
 /// (a feature entry each, the cut's own body a tool entry).
@@ -469,4 +478,85 @@ fn alike_features_of_different_parts_keep_their_own_names() {
     let mut cold = open(dir.path(), cache.path());
     assert_eq!(hash(&mut cold, "q", "c"), qc);
     assert_eq!(hash(&mut cold, "q", "b"), qb);
+}
+
+#[test]
+fn the_shared_cache_is_set_and_reported_from_the_cli() {
+    let fake = fake_cache::Fake::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (run, cache, a) = (
+        dir.path().join("run"),
+        dir.path().join("cache"),
+        dir.path().join("a"),
+    );
+    plate(&a, &run, &cache);
+    let none = cli(&a, &run, &cache, &["cache", "stats"]);
+    assert_eq!(none["remote"], json!({"enabled": false}));
+    assert_eq!(none["shared"], false);
+    cli(
+        &a,
+        &run,
+        &cache,
+        &["config", "set", "cache.remote", &fake.url],
+    );
+    // A development build never uses it, and says why.
+    let dev = cli(&a, &run, &cache, &["cache", "stats"]);
+    assert_eq!(dev["remote"]["enabled"], false, "{dev}");
+    assert_eq!(dev["remote"]["url"], fake.url.as_str());
+    assert!(
+        dev["remote"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("development build")
+    );
+    cli(&a, &run, &cache, &["daemon", "stop"]);
+    // A release's daemon reads through and writes behind it.
+    let env = [
+        ("RYUCAD_CACHE_IDENTITY", RELEASE),
+        ("RYUCAD_CACHE_TOKEN", fake_cache::WRITE),
+    ];
+    for no_daemon in ["0", "1"] {
+        let env = [env[0], env[1], ("RYUCAD_NO_DAEMON", no_daemon)];
+        let s = cli_with(&a, &run, &cache, &env, &["cache", "stats"]);
+        let r = &s["result"]["remote"];
+        assert_eq!(r["enabled"], true, "{s}");
+        assert_eq!(
+            (&r["url"], &r["token"], &r["write"]),
+            (&json!(fake.url), &json!(true), &json!(true))
+        );
+        assert_eq!(s["result"]["shared"], true);
+    }
+    cli_with(&a, &run, &cache, &env, &["rebuild", "p"]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while fake.held() < 3 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(
+        fake.held(),
+        3,
+        "two features and the cut's own body, sent behind"
+    );
+    let s = cli_with(&a, &run, &cache, &env, &["cache", "stats"]);
+    assert_eq!(s["result"]["remote"]["puts"], 3, "{s}");
+    // Reading only.
+    cli_with(
+        &a,
+        &run,
+        &cache,
+        &env,
+        &["config", "set", "cache.remote_write", "false"],
+    );
+    let s = cli_with(&a, &run, &cache, &env, &["cache", "stats"]);
+    assert_eq!(s["result"]["remote"]["write"], false, "{s}");
+    // None again, without restarting the daemon.
+    cli_with(
+        &a,
+        &run,
+        &cache,
+        &env,
+        &["config", "set", "cache.remote", "\"\""],
+    );
+    let s = cli_with(&a, &run, &cache, &env, &["cache", "stats"]);
+    assert_eq!(s["result"]["remote"], json!({"enabled": false}), "{s}");
+    cli(&a, &run, &cache, &["daemon", "stop"]);
 }

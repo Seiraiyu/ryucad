@@ -953,6 +953,12 @@ fn dispatch(
                 );
                 d.trim_in_background();
             }
+            // A daemon's cache takes the shared cache as it is now set.
+            if key.starts_with("cache.remote")
+                && let Some(d) = session.disk()
+            {
+                d.set_remote(crate::cache::remote_preference(&d.identity()));
+            }
             if let Some(live) = live {
                 if key == "daemon.poll_ms" {
                     live.poll_ms = v["value"].as_u64().unwrap_or(250);
@@ -1161,8 +1167,36 @@ fn guarded<T>(
 }
 
 /// `cache.stats`' answer, and `cache.clear`'s with what it `removed`:
-/// whether there is a disk cache, its folder and bound, and what it holds.
+/// whether there is a disk cache, its folder and bound, what it holds,
+/// and its shared cache server's state.
 fn cache_stats(disk: Option<&crate::cache::Disk>, removed: Option<crate::cache::Stats>) -> Value {
+    let mut v = local_stats(disk, removed);
+    v["remote"] = remote_stats(disk);
+    v
+}
+
+/// What `cache.stats` says of the remote: what it has done in this
+/// process, else why there is none.
+fn remote_stats(disk: Option<&crate::cache::Disk>) -> Value {
+    if let Some(r) = disk.and_then(crate::cache::Disk::remote) {
+        let mut v = r.stats();
+        v["enabled"] = json!(true);
+        return v;
+    }
+    let url = config::user("cache.remote");
+    let url = url.as_str().unwrap_or_default();
+    let note = match disk {
+        _ if url.is_empty() => return json!({"enabled": false}),
+        None => "there is no disk cache on this machine to put it behind",
+        Some(d) if !d.identity().shared => {
+            "a development build never uses a shared cache: only released builds share entries"
+        }
+        Some(_) => "it isn't in use",
+    };
+    json!({"enabled": false, "url": url, "note": note})
+}
+
+fn local_stats(disk: Option<&crate::cache::Disk>, removed: Option<crate::cache::Stats>) -> Value {
     let mut v = match disk {
         Some(d) => {
             let mut v = d.stats().to_json();
