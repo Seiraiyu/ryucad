@@ -51,3 +51,107 @@ The design is document 213 in the Coxswain planning project `ryucad-ryukei`; thi
   - `tests/props.rs` checks 2,000 seeded symbols and 3,000 seeded features: closed, simple, counterclockwise outside, inside their boxes, and alike on one thread and eight.
   - `tests/determinism.rs` checks `tests/golden/board.txt` in the `cpu-levels` job. Regenerate it with `UPDATE_GOLDEN=1 cargo test -p ryu-board --test determinism`.
   - `cargo bench -p ryu-board` times shapes of seeded symbols, text and a seeded layer.
+
+## ODB++ reader and corpus (decided in ryudfm phase 0)
+
+The design is document 213 in the Coxswain planning project `ryucad-ryukei`; this is its plan 0.B.
+
+- **Crate.** `ryudfm` is a library in this plan: `ryudfm::odb` reads a job into `ryu_board::model::Board` (`read_path`, `read`, `ReadOptions { step, limits }`), and its `testing` feature holds the test writer, broken jobs, the corpus manifest and KiCad comparisons. The binary, project and daemon are 0.C's. It depends on `ryu-board`, `rayon`, `flate2` (miniz_oxide), `tar`, `zip` (flate2's deflate only) and `roxmltree`: no C, no kernel, no other product (`tests/deps.rs`).
+- **Codes.** A job that can't be read is an `odb::Error` with a `Code` (`not_a_board`, `odb_unreadable`, `odb_version_unsupported`, `odb_step_ambiguous`, `odb_step_not_found`, `archive_unsafe`), a message and where in the job; 0.C adds them to `ryu_doc::error::Code` under the same names. What fails part of a board is a fault on it (`odb_layer_unreadable`, `odb_symbol_unknown`, `odb_symbol_cycle`, `odb_component_invalid`, `odb_eda_invalid`, and `odb_file_invalid` for any other file: a step header, profile, attribute list, tools file, netlist, font, stackup or user symbol). Warnings come once per file and kind, with a count (`odb_ignored`, `odb_rounded`, `odb_arc_inconsistent`, `odb_font_missing_char`, `odb_text_dynamic`, `odb_barcode_skipped`, `odb_info_missing`).
+- **Jobs.**
+  - A job is the folder holding `matrix/matrix`, at a container's root or under its one top folder, in a folder, tar, gzipped tar or zip (told apart by their first bytes).
+  - Paths match in any case. `.Z` (Unix compress, decoded by `odb::lzw` as ncompress 5.0 writes it, groups of eight codes and all) and `.gz` files unpack when read.
+  - Refused as `archive_unsafe`: absolute paths, `..`, links and devices (a folder's links too, but not the path given), more than a million entries or 8 GiB.
+  - A singly compressed file past 2 GiB fails that file alone.
+- **Names and numbers.**
+  - Step, layer, symbol and font names are lower case in the model. Writers that put capitals in the matrix (Altium, KiCad) name folders in lower case.
+  - Every number is read from its text in its own file's units. A symbol's `I` or `M` overrides them.
+  - Each file's rounded numbers become one `odb_rounded`, with the largest change.
+- **Attributes.**
+  - A value means what its declaration says: the specification's 373 system attributes (`odb/sysattr.rs`, generated from its Appendix B list), or the job's own `misc/sysattr*` and `misc/userattr`, which win.
+  - Undeclared attributes, and values a declaration doesn't allow, are left out with `odb_ignored`.
+  - In attribute lists, booleans are `yes`/`no`, options are written by name, and texts lose one pair of enclosing quotes.
+- **The matrix.**
+  - Layers are in row order.
+  - A board layer's side follows where its row lies against the copper rows: the first copper row and those above it are the top, the last copper row and those below it the bottom, and the rest inner.
+  - An empty `START_NAME` or `END_NAME` is the first or last copper layer, not the first board layer the specification names, so a through drill classes as through.
+- **Records.**
+  - Pads, text and step repeats turn clockwise and then mirror. A mirrored angle `a` is `Mdeg::new(a)`, an unmirrored one `Mdeg::from_clockwise(a)`.
+  - Polygons are turned to the model's orientation (`odb::outline`): islands counterclockwise, holes clockwise.
+  - A text's width factor is in 12-mil units whatever the file's units.
+  - Not taken, each with `odb_ignored`:
+    - pad resize factors (`-1 sym resize`);
+    - text placed by its widest character (version 1);
+    - flipped step repeats;
+    - negative font strokes.
+  - Fonts are read as inches, since only their proportions matter.
+- **The board step.** The one step nothing repeats and that repeats nothing, as design 213 says, else `--step`. So a board inside a panel must be named.
+- **Nets.**
+  - `eda/data`'s feature IDs give features their nets. Toeprints' nets give pins theirs.
+  - The CAD netlist's points join the net of their name, else a net of their own.
+  - Feature IDs into a layer that failed to read are covered by that layer's fault. IDs into features a layer lacks are one `odb_eda_invalid`.
+  - A component naming a missing package is left out.
+- **Stackup.**
+  - From `matrix/stackup.xml` (its `EdaData` stackup) where a job has one.
+  - Else from the matrix's copper and dielectric board layers:
+    - a dielectric's thickness is its `.layer_dielectric`, in its attribute list's units;
+    - a copper layer's thickness is its `.copper_weight`: microns in a metric list, and in an imperial one ounces per square foot at 1.37 mil each, IPC's figure.
+    - Altium also writes `.layer_dielectric` on copper layers, as the core's thickness; it isn't taken.
+- **Capabilities.**
+  - `geometry`: some copper layer read.
+  - `nets`: some feature has a net.
+  - `components`: some component.
+  - `stackup`: every stackup layer has a thickness. KiCad writes no thicknesses, so its boards lack it.
+  - `drill`: a drill layer with tools and holes.
+  - `feature_ids`: some `ID=`.
+  - `flex`: never in this stage.
+- **Model changes.** `Tool::finished` is an `Option` (ODB++'s `FINISH_SIZE=-1` says unset), and `Component` keeps its `attributes`.
+- **KiCad's exports.**
+  - KiCad 9.0.8 writes no `T` or `B` records and no surface arcs. Its default `--precision 2` rounds to 10 µm, so the corpus is exported at `--precision 6 --units mm`.
+  - It writes a chamfered rectangle with an empty corner list (`rect575.0x1140.0xc115.0x`), which isn't a standard symbol. The reader reports it as `odb_symbol_unknown` rather than guess which corners it means (`osm-l-bmc-som` has three).
+  - No corpus board writes text records (Altium, KiCad and Valor all stroke their text), so how ODB++ fonts anchor glyphs stays as 0.A built it, unconfirmed against a real board.
+- **The corpus** (`crates/ryudfm/tests/corpus`).
+  - **`manifest.txt` declares every board:**
+    - `source` lines: author, origin and what was done to it (CC-BY's attribution goes here);
+    - `licence`: an SPDX id whose text is `licenses/<id>.txt`, or `owner`;
+    - `archive <file> <sha256>` and/or `folder <dir>`;
+    - optionally `step`;
+    - `pinned` for boards that are fetched, not committed;
+    - the counts the tests write under the declaration.
+  - **Committed boards:**
+    - `minimal-clean`: the owner's own Altium design, as a folder and its `.tgz`; the owner confirmed its licence on 2026-10-28.
+    - `gb-cart256k-a`: CC-BY-4.0, two layers.
+    - `vna-se-probe`: Apache-2.0, four layers.
+    - The two KiCad boards are each a zip and a folder, with KiCad's positions and IPC-D-356 netlist in `reference/<name>/`.
+  - **Pinned boards:**
+    - `osm-l-bmc-som`: 10 layers, LPDDR4X, micro and buried vias.
+    - `lpddr4-test-board`: 8 layers, blind vias.
+    - Both Apache-2.0, listed in `pinned.txt` by repository, commit, board file and the board file's SHA-256. GitHub's archives aren't byte-stable.
+    - `scripts/fetch-dfm-corpus.sh` exports them with the devcontainer's KiCad into `target/dfm-corpus`.
+  - The devcontainer installs `kicad=9.0.8+dfsg-1~bpo13+1` and `fonts-lato` from a fixed snapshot.debian.org date. Do not use `-t trixie-backports`: its libcurl blocks later installs.
+- **What the tests hold.**
+  - `tests/corpus.rs` finds every committed board through the manifest. It checks:
+    - each archive's SHA-256 and each licence's text;
+    - that nothing in the folder is undeclared;
+    - that a board reads to its counts, as a folder and as its archive alike, apart from export dates;
+    - that one thread and eight read alike.
+  - `tests/reference.rs` checks components against KiCad's positions and pins' nets against its IPC-D-356 netlist. D-356 keeps a long net name's last 14 characters, in capitals, `#n` telling cut names apart and `?` for characters it can't write. It cuts designators to six characters, and lists padless footprints only in the positions.
+  - `tests/pinned.rs` does the same for the pinned boards. It is `#[ignore]`d and run by full.yml's devcontainer job after the fetch script.
+  - `tests/determinism.rs` holds each committed board's model and shapes in `tests/golden/ryudfm.txt` (cpu-levels).
+  - `tests/malformed.rs` breaks minimal-clean on purpose (`testing::Breakage`).
+  - `tests/round_trip.rs` round-trips seeded features through the test writer.
+  - The `odb` fuzz target reads bytes as each file kind or as a whole archive; the `shapes` fuzz target checks seeded shapes on one thread and eight. Both are in fuzz.yml.
+- **Adding a board to the corpus.**
+  1. Check its licence at the exact commit or version you take. Permissive licences (Apache-2.0, MIT, BSD, CC-BY-4.0, CERN-OHL-P) may be committed; anything else may only be pinned.
+  2. To commit it:
+     - put the job in `tests/corpus/` as an archive, a folder, or both (an archive keeps empty folders and exact bytes);
+     - add `licenses/<SPDX>.txt` if it's a new licence;
+     - add a `board` block to `manifest.txt`: its `source` lines, `licence`, `archive <file> <sha256>` (`sha256sum`) and/or `folder`, and `step` if the rule can't choose its board step;
+     - for a KiCad board, also add a `commit` line to `pinned.txt` and KiCad's outputs in `reference/<name>/` (the fetch script with `--all` makes them as `pos.csv` and `netlist.d356`).
+  3. To pin it instead:
+     - add a `fetch` line to `pinned.txt`;
+     - add a `board` block with `licence` and `pinned` to `manifest.txt`, in the same order as `pinned.txt`;
+     - run `sh scripts/fetch-dfm-corpus.sh` in the devcontainer.
+  4. Run `UPDATE_MANIFEST=1 cargo test -p ryudfm --test corpus` (for a pinned board, `UPDATE_MANIFEST=1 cargo test -p ryudfm --release --test pinned -- --ignored`), then `UPDATE_GOLDEN=1 cargo test -p ryudfm --test determinism`.
+  5. Review the counts and faults it recorded. A fault is a finding: fix the reader, or say why the board is right to fail there.
+  6. The `.gitattributes` lines for `crates/ryudfm/tests/corpus/*/**` and its archives already keep the new files byte for byte.
