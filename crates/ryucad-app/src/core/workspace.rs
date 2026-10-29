@@ -349,6 +349,10 @@ pub struct Workspace {
     /// A camera normal to a face, come from the daemon, for the view to
     /// turn to.
     pub looked: Option<Camera>,
+    /// What the window shows changed (View > Show, or an agent's
+    /// `ryucad focus`): the view frames it again, as it frames the first
+    /// view (issue #211).
+    pub refocused: bool,
     /// Tests only: notifications are dropped as they arrive, as if lost,
     /// to see what the window does from its answers alone.
     #[doc(hidden)]
@@ -454,6 +458,7 @@ impl Workspace {
             drag: None,
             views: Default::default(),
             looked: None,
+            refocused: false,
             deaf: false,
             drag_note: None,
             doctor_waiting: false,
@@ -1007,6 +1012,7 @@ impl Workspace {
             }
             self.model.focus = want;
             self.model.generation += 1;
+            self.refocused = true;
             // The BOM tab shows what the window shows.
             self.reload_bom();
         }

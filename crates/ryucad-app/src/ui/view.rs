@@ -715,6 +715,12 @@ impl View {
                 self.turn(ws, to);
             }
         }
+        // Showing another part frames it, as the first view frames the
+        // model: whatever the camera was, the shown part may be elsewhere.
+        if std::mem::take(&mut ws.refocused) {
+            self.framed = false;
+            self.framing = None;
+        }
         // Meshes arrive a body at a time: frame what has come so far, and
         // again as more comes, until it has all come.
         if !self.framed
