@@ -5194,10 +5194,15 @@ fn inspect(
 }
 
 /// A revision's files, and how the answer names it: the working files
-/// (`working`) or a commit.
+/// (`working`), another worktree's (`worktree:<path>`, with its branch and
+/// head) or a commit.
 fn files_at(session: &mut Session, rev: &str) -> Result<(Value, activity::Files)> {
     if rev == "working" {
         return Ok((json!({"rev": rev}), session.snapshot()));
+    }
+    if let Some((w, files, _)) = session.worktree_files(rev)? {
+        let named = json!({"rev": rev, "worktree": w.root, "branch": w.branch, "head": w.head});
+        return Ok((named, files));
     }
     let r = crate::git::revision(session.root(), rev)?;
     Ok((json!({"rev": rev, "commit": r.commit}), r.files))
