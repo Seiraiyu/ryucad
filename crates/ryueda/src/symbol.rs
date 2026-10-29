@@ -291,14 +291,27 @@ impl Symbol {
         }
         // A drawing with no pins at all (a logo, a mounting hole) is a
         // symbol; a unit of several is a gate, and has a pin of its own.
+        // One fault however many units lack a pin: a file may claim
+        // billions of units, and each must not cost a fault.
         if self.units > 1 {
-            for u in 1..=self.units {
-                if !self.pins.values().any(|p| p.unit == Some(u)) {
-                    out.push(at("/units".into())(Fault::error(
-                        Code::LibraryUnitInvalid,
-                        format!("unit {u} has no pin of its own"),
-                    )));
-                }
+            let with: std::collections::BTreeSet<u32> = self
+                .pins
+                .values()
+                .filter_map(|p| p.unit)
+                .filter(|u| (1..=self.units).contains(u))
+                .collect();
+            let missing = self.units as usize - with.len();
+            if missing > 0 {
+                let first = (1..=self.units)
+                    .find(|u| !with.contains(u))
+                    .expect("a unit lacks a pin");
+                out.push(at("/units".into())(Fault::error(
+                    Code::LibraryUnitInvalid,
+                    match missing {
+                        1 => format!("unit {first} has no pin of its own"),
+                        n => format!("{n} units have no pin of their own, unit {first} first"),
+                    },
+                )));
             }
         }
         for (id, g) in &self.graphics {
@@ -517,6 +530,23 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(s.next_graphic().as_str(), "g8");
+    }
+
+    #[test]
+    fn units_without_pins_are_one_fault_however_many() {
+        let mut s = resistor();
+        s.units = u32::MAX;
+        s.pins.get_mut("1").unwrap().unit = Some(1);
+        s.pins.get_mut("2").unwrap().unit = Some(3);
+        let faults = s.check();
+        assert_eq!(faults.len(), 1);
+        assert_eq!(
+            faults[0].error.message,
+            format!(
+                "{} units have no pin of their own, unit 2 first",
+                u32::MAX - 2
+            )
+        );
     }
 
     #[test]

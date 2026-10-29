@@ -5,6 +5,7 @@
 //! file, never guessed at.
 
 pub mod sexpr;
+pub mod symbol;
 
 use crate::coord;
 use crate::error::{Code, Result};
