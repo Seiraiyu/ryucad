@@ -176,6 +176,38 @@ fn derivative_bounds_hold() {
     }
 }
 
+/// A parameter line is a box of no width one way: its derivative bounds
+/// are finite and hold along it, on its cells' sides (a seam's line at a
+/// period's start, where every cell only touches it) as inside them. Such
+/// a box once fell between the cells, its bound infinite, and a fit along
+/// it read infinity times no velocity as NaN, which passed.
+#[test]
+fn parameter_lines_have_bounds() {
+    for (base, cell, ds) in cases() {
+        let o = Surface::Offset(Arc::new(Offset::new(base, ds[0], cell).unwrap()));
+        let mid = |c: [f64; 2]| (c[0] + c[1]) / 2.0;
+        for (k, at) in [
+            (0, cell[0][0]),
+            (0, mid(cell[0])),
+            (1, cell[1][0]),
+            (1, mid(cell[1])),
+        ] {
+            let mut b = cell;
+            b[k] = [at, at];
+            let bound = o.derivative_bound(b);
+            assert!(bound.duu.is_finite() && bound.dvv.is_finite(), "{b:?}");
+            assert!(Sheet::of(&o).jet_box(b).is_some(), "{b:?}");
+            for i in 0..=8 {
+                let t = b[1 - k][0] + (b[1 - k][1] - b[1 - k][0]) * f64::from(i) / 8.0;
+                let (u, v) = if k == 0 { (at, t) } else { (t, at) };
+                let e = o.eval(u, v);
+                assert!(e.duu.length() <= bound.duu * (1.0 + 1e-9) + 1e-12);
+                assert!(e.dvv.length() <= bound.dvv * (1.0 + 1e-9) + 1e-12);
+            }
+        }
+    }
+}
+
 #[test]
 fn projection_finds_points_on_it_and_off_it() {
     for (base, cell, ds) in cases() {

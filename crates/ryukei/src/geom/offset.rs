@@ -52,7 +52,8 @@ impl PartialEq for Offset {
 }
 
 /// The parts of `[c0, c1]`, moved by whole periods where the direction
-/// has one, that lie within `[a, b]`.
+/// has one, that lie within `[a, b]`; where `[a, b]` is a single value (a
+/// parameter line), the cells holding it.
 fn cut([c0, c1]: [f64; 2], [a, b]: [f64; 2], period: Option<f64>) -> Vec<[f64; 2]> {
     let shifts: Vec<f64> = match period {
         Some(p) => {
@@ -65,7 +66,7 @@ fn cut([c0, c1]: [f64; 2], [a, b]: [f64; 2], period: Option<f64>) -> Vec<[f64; 2
     shifts
         .into_iter()
         .map(|k| [(c0 + k).max(a), (c1 + k).min(b)])
-        .filter(|r| r[0] < r[1])
+        .filter(|r| r[0] < r[1] || (a == b && r[0] == r[1]))
         .collect()
 }
 

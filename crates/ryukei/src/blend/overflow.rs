@@ -254,6 +254,11 @@ pub(crate) fn check(
                 // its end face, where the ball touches the face beside it)
                 // meets it at a point rounding moves along the tangent by
                 // up to `sqrt(2 × size × reach)`: the touch rule's wedge.
+                // The meeting isn't judged tangent: any meeting with an
+                // edge the curve may end on within the wedge of an end is
+                // its end, so a second true crossing of that edge that
+                // close (about half a millimetre along a 100 mm rail)
+                // passes too.
                 let size = {
                     let b = it.bounds();
                     b.min().distance(b.max())

@@ -337,6 +337,9 @@ fn pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &dyn Target, target: f
         let dg = (e.du * dq.x + e.dv * dq.y - cd).length();
         let r = w / 2.0;
         let bound = (g + dg * r + m2 * r * r / 2.0) * (1.0 + 1e-9) + SLACK;
+        // An infinite derivative bound times a velocity of zero is NaN,
+        // which every comparison would pass: it bounds nothing.
+        let bound = if bound.is_nan() { f64::INFINITY } else { bound };
         // Halving shrinks the Taylor terms, never the error at the middle:
         // where that alone is most of the target, the span must be split
         // instead.
@@ -424,6 +427,9 @@ fn sheet_pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &Piece3, target:
         let dg = (e.du * dq.x + e.dv * dq.y - cd).length();
         let r = w / 2.0;
         let bound = (g + dg * r + m2 * r * r / 2.0) * (1.0 + 1e-9) + SLACK;
+        // An infinite derivative bound times a velocity of zero is NaN,
+        // which every comparison would pass: it bounds nothing.
+        let bound = if bound.is_nan() { f64::INFINITY } else { bound };
         if bound <= target || depth == 0 || g > target / 2.0 {
             return bound;
         }
