@@ -40,7 +40,7 @@ pub fn row_text(f: &crate::core::model::Feature, faults: usize) -> String {
                 _ => String::new(),
             };
             format!(
-                "{}: {} -> {}{state}",
+                "{}: {} → {}{state}",
                 m.form,
                 MateInfo::path_of(&m.a),
                 MateInfo::path_of(&m.b)
@@ -2204,7 +2204,7 @@ mod tests {
         });
         assert_eq!(
             row_text(&m, 0),
-            "f (revolute: base -> ring:2/pin, redundant)"
+            "f (revolute: base → ring:2/pin, redundant)"
         );
         let mut ring = feature("instance_pattern");
         ring.copies = vec!["ring:1/pin".into(), "ring:2/pin".into()];

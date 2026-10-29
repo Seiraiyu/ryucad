@@ -99,14 +99,14 @@ impl PdmMark {
                 ""
             };
             m.lines.push(format!(
-                "{name}: {} -> {}{revising}",
+                "{name}: {} → {}{revising}",
                 shown(&c["from"]),
                 shown(&c["to"])
             ));
         }
         if let Some(s) = v.get("state") {
             m.lines.push(format!(
-                "state: {} -> {}",
+                "state: {} → {}",
                 s["from"].as_str().unwrap_or("?"),
                 s["to"].as_str().unwrap_or("?")
             ));
@@ -195,7 +195,7 @@ fn changed(at: &str, from: &Value, to: &Value, out: &mut Vec<String>) {
     if from == to {
         return;
     }
-    let whole = |out: &mut Vec<String>| out.push(format!("{at}: {} -> {}", shown(from), shown(to)));
+    let whole = |out: &mut Vec<String>| out.push(format!("{at}: {} → {}", shown(from), shown(to)));
     if reference(from).is_some() || reference(to).is_some() {
         return whole(out);
     }
@@ -269,7 +269,7 @@ fn lines(f: &Value) -> Vec<String> {
     if m.is_object() {
         let (from, to) = (result(&m["from"]), result(&m["to"]));
         if from != to {
-            out.push(format!("result: {from} -> {to}"));
+            out.push(format!("result: {from} → {to}"));
         }
         let b = &m["body"];
         if b.is_object() {
@@ -291,7 +291,7 @@ fn lines(f: &Value) -> Vec<String> {
                 )
             };
             out.push(format!(
-                "sketch: {} -> {}",
+                "sketch: {} → {}",
                 state(&s["from"]),
                 state(&s["to"])
             ));
@@ -610,22 +610,22 @@ mod tests {
         let mut to = from.clone();
         to[0]["radius"] = json!("4 mm");
         let f = json!({"changes": [{"at": "/groups", "from": from, "to": to}]});
-        assert_eq!(lines(&f), ["/groups/0/radius: 3 mm -> 4 mm"]);
+        assert_eq!(lines(&f), ["/groups/0/radius: 3 mm → 4 mm"]);
         // An edge more, a group fewer: the values added and removed.
         let mut more = from.clone();
         more[0]["edges"].as_array_mut().unwrap().push(edge('c'));
         let f = json!({"changes": [{"at": "/groups", "from": from, "to": more}]});
-        assert_eq!(lines(&f), ["/groups/0/edges/2: (none) -> ex1/23ab0b16"]);
+        assert_eq!(lines(&f), ["/groups/0/edges/2: (none) → ex1/23ab0b16"]);
         let f = json!({"changes": [{"at": "/groups", "from": from, "to": []}]});
         assert_eq!(
             lines(&f),
             [
-                r#"/groups/0: {"edges":[{"feature":"ex1","name":"aaaaaaaaaaaaaaaaaaaaaaaa23ab0b16"},{"feature":"ex1","name":"bbbbbbbbbbbbbbbbbbbbbbbb23ab0b16"}],"radius":"3 mm"} -> (none)"#
+                r#"/groups/0: {"edges":[{"feature":"ex1","name":"aaaaaaaaaaaaaaaaaaaaaaaa23ab0b16"},{"feature":"ex1","name":"bbbbbbbbbbbbbbbbbbbbbbbb23ab0b16"}],"radius":"3 mm"} → (none)"#
             ]
         );
         // A reference changes whole.
         let f = json!({"changes": [{"at": "/face", "from": edge('a'), "to": null}]});
-        assert_eq!(lines(&f), ["/face: ex1/23ab0b16 -> (none)"]);
+        assert_eq!(lines(&f), ["/face: ex1/23ab0b16 → (none)"]);
     }
 
     #[test]
@@ -693,9 +693,9 @@ mod tests {
             m.lines,
             [
                 "record removed: C release",
-                "name: (none) -> Pin",
-                "number: 100 -> 101 (revising)",
-                "state: released A -> A modified, B proposed"
+                "name: (none) → Pin",
+                "number: 100 → 101 (revising)",
+                "state: released A → A modified, B proposed"
             ]
         );
         assert!(!c.pdm.contains_key("q"));
@@ -712,13 +712,13 @@ mod tests {
             b.lines,
             [
                 "moved in the part's list",
-                "/params/x: 10 mm -> 12 mm",
+                "/params/x: 10 mm → 12 mm",
                 "faces: 1 new, 1 changed, 1 gone",
                 "edges: 0 new, 1 changed, 0 gone",
             ]
         );
         assert_eq!(c.features[&key("c")].change, Change::Removed);
-        assert_eq!(c.features[&key("c")].lines, ["result: built -> absent"]);
+        assert_eq!(c.features[&key("c")].lines, ["result: built → absent"]);
         assert_eq!(c.removed["p"], ["c"]);
         assert_eq!(c.features[&key("n")].change, Change::Added);
         assert_eq!(

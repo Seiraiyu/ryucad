@@ -116,6 +116,7 @@ impl App {
     /// The app on the project in or above `dir`, or the start window with
     /// none. It repaints whenever anything arrives.
     pub fn open(ctx: &egui::Context, dir: Option<&Path>, daemon: &Daemon) -> App {
+        crate::ui::fonts::install(ctx);
         // The start window wears the user's style too; an open project
         // follows the preference as the daemon announces it.
         style::apply(ctx, user_look());

@@ -128,8 +128,8 @@ fn a_proposal_and_property_changes_show_in_a_compare() {
     assert_eq!(
         m.lines,
         [
-            "number: 100 -> 101 (revising)",
-            "state: in work -> in work, A proposed"
+            "number: 100 → 101 (revising)",
+            "state: in work → in work, A proposed"
         ]
     );
 }

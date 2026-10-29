@@ -1525,7 +1525,7 @@ fn a_compare_marks_the_tree_and_shows_what_changed() {
     frames(&mut h, |a| a.opened().view.chosen.is_some());
     h.step();
     h.get_by_label("Changes since HEAD");
-    h.get_by_label("result: built -> absent");
+    h.get_by_label("result: built → absent");
     h.get_by_label("Stop comparing").click();
     frames(&mut h, |a| a.opened().ws.compare.is_none());
     h.step();
@@ -1641,7 +1641,7 @@ fn parts_show_their_release_state_and_a_compare_marks_proposals() {
     frames(&mut h, |a| a.opened().view.chosen.is_some());
     h.step();
     h.get_by_label("Part p");
-    h.get_by_label("state: in work -> in work, A proposed");
+    h.get_by_label("state: in work → in work, A proposed");
 }
 
 #[test]
@@ -2155,7 +2155,7 @@ fn a_mates_angle_is_edited_in_the_property_panel() {
     h.get_by_label("base (plate @ working, fixed)");
     h.get_by_label("ring (instance_pattern, 3 copies)");
     h.get_by_label("ring:2/pin");
-    h.get_by_label("m1 (revolute: base -> pin)").click();
+    h.get_by_label("m1 (revolute: base → pin)").click();
     frames(&mut h, |a| a.opened().ws.form.is_some());
     // Chosen, the mate draws both its connectors' frames: three axes each,
     // from where the report says they are.
