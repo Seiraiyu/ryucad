@@ -1,6 +1,6 @@
 [package]
 name = "ryuformats"
-description = "Mesh and scene file formats written from ryukei bodies: STL and 3MF"
+description = "Mesh, scene and B-rep file formats written from ryukei bodies: STL, 3MF and USD"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true

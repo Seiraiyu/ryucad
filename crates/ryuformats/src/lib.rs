@@ -1,5 +1,4 @@
-//! The file formats ryucad writes besides STEP: STL and 3MF now, USD
-//! later. Every writer takes a [`scene::Scene`] (products of solids'
+//! The file formats ryucad writes besides STEP: STL, 3MF and USD. Every writer takes a [`scene::Scene`] (products of solids'
 //! meshes, placed in each other) and streams its bytes into an
 //! [`std::io::Write`]; the same scene and options give the same bytes on
 //! every platform.
@@ -13,6 +12,7 @@ pub mod scene;
 pub mod stl;
 pub mod text;
 pub mod threemf;
+pub mod usd;
 pub mod zip;
 
 pub use scene::{Child, Placed, Product, Scene, Solid, Unit};
