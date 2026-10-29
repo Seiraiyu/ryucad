@@ -52,9 +52,18 @@ pub struct View {
     pub rect: egui::Rect,
     /// The viewport was under the pointer when last drawn.
     hovered: bool,
-    /// Tab presses taken from the frame's input over the viewport, by
-    /// their modifiers ([`View::take_tabs`]).
-    tabs: Vec<egui::Modifiers>,
+    /// The viewport's commands whose keys were pressed over it, taken
+    /// from the frame's input ([`View::take_keys`]).
+    tabs: Vec<&'static str>,
+    /// The viewport's commands' keys (`view.hide_under`, `view.show_under`,
+    /// `view.show_all`), from the window's keymap.
+    pub keys: Vec<(egui::KeyboardShortcut, &'static str)>,
+    /// The window's commands as this frame shows them, for the context
+    /// menu.
+    pub commands: crate::ui::commands::Shown,
+    /// A command a context menu chose, with its target: the window runs
+    /// it once the frame is drawn.
+    pub ran: Option<(&'static str, Option<String>)>,
     picker: Option<Picker>,
     /// The model generation and whether sketches were shown, when the
     /// picker was made.
@@ -129,17 +138,18 @@ pub fn describe(ws: &Workspace, hit: &Hit) -> String {
 }
 
 impl View {
-    /// Takes Tab presses over the viewport out of a frame's input before
-    /// egui sees them, so they hide and show (in [`View::show`]) rather
-    /// than move keyboard focus through the menu bar (issue #136). A text
-    /// field being typed in keeps its keys.
-    pub fn take_tabs(&mut self, ctx: &egui::Context, events: &mut Vec<egui::Event>) {
+    /// Takes presses of the viewport's commands' keys (Tab and its kin)
+    /// over the viewport out of a frame's input before egui sees them, so
+    /// they hide and show (in [`View::show`]) rather than move keyboard
+    /// focus through the menu bar (issue #136). A text field being typed
+    /// in keeps its keys.
+    pub fn take_keys(&mut self, ctx: &egui::Context, events: &mut Vec<egui::Event>) {
         if !self.hovered || ctx.text_edit_focused() {
             return;
         }
         let rect = self.rect;
         let mut at = ctx.input(|i| i.pointer.latest_pos());
-        let tabs = &mut self.tabs;
+        let (tabs, keys) = (&mut self.tabs, &self.keys);
         events.retain(|e| match e {
             egui::Event::PointerMoved(p) => {
                 at = Some(*p);
@@ -150,15 +160,36 @@ impl View {
                 true
             }
             egui::Event::Key {
-                key: egui::Key::Tab,
+                key,
                 pressed,
                 modifiers,
                 ..
             } if at.is_some_and(|p| rect.contains(p)) => {
-                if *pressed {
-                    tabs.push(*modifiers);
+                // The most modified chord a press matches is its command.
+                // Ctrl counts as Mod too, as macOS sends Ctrl+Shift+Tab
+                // without Command (#142).
+                let as_mod = egui::Modifiers {
+                    command: modifiers.command || modifiers.ctrl,
+                    ..*modifiers
+                };
+                let mut matched: Vec<&(egui::KeyboardShortcut, &'static str)> = keys
+                    .iter()
+                    .filter(|(s, _)| {
+                        s.logical_key == *key
+                            && (modifiers.matches_exact(s.modifiers)
+                                || as_mod.matches_exact(s.modifiers))
+                    })
+                    .collect();
+                matched.sort_by_key(|(s, _)| std::cmp::Reverse(s.modifiers.any() as u8));
+                match matched.first() {
+                    Some((_, id)) => {
+                        if *pressed {
+                            tabs.push(id);
+                        }
+                        false
+                    }
+                    None => true,
                 }
-                false
             }
             _ => true,
         });
@@ -188,6 +219,9 @@ impl View {
             rect: egui::Rect::NOTHING,
             hovered: false,
             tabs: Vec::new(),
+            keys: Vec::new(),
+            commands: Default::default(),
+            ran: None,
             picker: None,
             picked_at: (0, true),
             reference: None,
@@ -944,21 +978,18 @@ impl View {
         if response.secondary_clicked() && !over_cube {
             self.menu = self.hover.clone();
         }
-        // Visibility, with SolidWorks' keys: Tab hides the occurrence (or
-        // solid) under the mouse, Shift+Tab shows those hidden under it,
-        // Ctrl+Shift+Tab shows everything. The keys come from `take_tabs`,
-        // which took them before egui could move focus with them.
-        // Typing in a field keeps its keys.
+        // Visibility, with SolidWorks' keys by default: Tab hides the
+        // occurrence (or solid) under the mouse, Shift+Tab shows those
+        // hidden under it, Ctrl+Shift+Tab shows everything. The keys are
+        // the viewport's commands' (`view.hide_under`, `view.show_under`,
+        // `view.show_all`), taken by `take_keys` before egui could move
+        // focus with them. Typing in a field keeps its keys.
         let tabs = std::mem::take(&mut self.tabs);
         self.hovered = response.hovered();
         if response.hovered() && !ui.ctx().text_edit_focused() {
-            // Ctrl+Shift+Tab everywhere; Cmd+Shift+Tab too, though macOS
-            // keeps it for switching apps (#142).
-            let all = tabs
-                .iter()
-                .any(|m| m.shift && (m.ctrl || m.command) && !m.alt);
-            let show = tabs.iter().any(|m| m.shift_only());
-            let hide = tabs.iter().any(|m| !m.any());
+            let all = tabs.contains(&"view.show_all");
+            let show = tabs.contains(&"view.show_under");
+            let hide = tabs.contains(&"view.hide_under");
             let at = response.hover_pos().map(local);
             if all {
                 ws.set_visibility(Vec::new(), Vec::new(), Vec::new(), true);
@@ -1145,26 +1176,29 @@ impl View {
         if ws.lost {
             painter.rect_filled(rect, 0.0, egui::Color32::from_white_alpha(140));
         }
+        // The registry's commands for what was right-clicked.
         let menu = self.menu.clone();
-        response.context_menu(|ui| match &menu {
-            Some(h) => {
-                ui.label(describe(ws, h));
-                if ui.button("Copy reference").clicked() {
-                    ui.ctx().copy_text(h.entity.clone());
-                    ui.close();
+        let mut ran = None;
+        response.context_menu(|ui| {
+            use crate::core::command::Context;
+            ran = match &menu {
+                Some(h) => {
+                    ui.label(describe(ws, h));
+                    let what = if h.rev.is_none() {
+                        Context::Entity
+                    } else {
+                        Context::Ghost
+                    };
+                    crate::ui::commands::context_menu(ui, &self.commands, what, Some(&h.entity))
                 }
-                if h.rev.is_none() && ui.button("Select").clicked() {
-                    ws.select(vec![h.entity.clone()], SelectMode::Replace);
-                    ui.close();
+                None => {
+                    crate::ui::commands::context_menu(ui, &self.commands, Context::Viewport, None)
                 }
-            }
-            None => {
-                if ui.button("Zoom to fit").clicked() {
-                    self.fit(ws, None);
-                    ui.close();
-                }
-            }
+            };
         });
+        if ran.is_some() {
+            self.ran = ran;
+        }
         if let Some(h) = &self.hover {
             response.on_hover_text_at_pointer(describe(ws, h));
         }
@@ -1277,7 +1311,8 @@ impl View {
                             S::Dimetric,
                             S::Trimetric,
                         ] {
-                            let title = crate::core::keymap::Command::View(v).title();
+                            let id = format!("view.{}", v.name());
+                            let title = crate::core::command::get(&id).map_or("", |c| c.title);
                             if ui.button(title).clicked() {
                                 self.standard(ws, v);
                                 close = true;

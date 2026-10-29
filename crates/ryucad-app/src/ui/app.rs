@@ -10,7 +10,7 @@ use crate::core::workspace::Workspace;
 use crate::ui::start::{self, Start};
 use crate::ui::style::{self, Look};
 use crate::ui::view::View;
-use crate::ui::{dialogs, doctor, menu, panels};
+use crate::ui::{commands, dialogs, doctor, menu, panels};
 use eframe::egui;
 use ryucad::client::Daemon;
 use ryucad::doc::project::find_project;
@@ -34,6 +34,11 @@ pub fn window_name(user: &str, participants: &serde_json::Value) -> String {
         .find(|name| !taken.contains(&name.as_str()))
         .expect("a free number")
 }
+
+/// Close, on the start window and the repair window, which have no
+/// keymap of their own: `file.close`'s default.
+const CLOSE: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::W);
 
 /// The OS user's name.
 pub fn os_user() -> String {
@@ -81,6 +86,12 @@ pub struct Opened {
     /// A STEP dialog's Browse… was pressed: the OS's file dialog opens
     /// once the frame is done.
     pub browse: Option<crate::ui::step::Browse>,
+    /// The effective keys: the registry's, the navigation preset's, then
+    /// `ui.keys` ([`crate::core::keys::Keymap`]).
+    pub keymap: crate::core::keys::Keymap,
+    /// What the keymap was made from, so it is made again only when that
+    /// changes.
+    keymap_from: (Navigation, serde_json::Value),
 }
 
 /// What the window shows.
@@ -253,7 +264,7 @@ impl App {
             Some(menu::Action::Quit) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             // With no project open, Close closes the window.
             None if !matches!(self.screen, Screen::Opened(_))
-                && ctx.input_mut(|i| i.consume_shortcut(&menu::CLOSE)) =>
+                && ctx.input_mut(|i| i.consume_shortcut(&CLOSE)) =>
             {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -273,6 +284,8 @@ impl Opened {
             recent: crate::core::recent::load(),
             compare_with: None,
             browse: None,
+            keymap: crate::core::keys::Keymap::new(Navigation::default(), &serde_json::json!({})),
+            keymap_from: (Navigation::default(), serde_json::json!({})),
         };
         o.view.look = user_look();
         // Damage that doesn't stop the project opening shows as badges.
@@ -311,9 +324,9 @@ impl Opened {
             ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));
         }
         self.apply_preferences(&ctx);
-        let recent = self.recent.clone();
+        self.view.commands = commands::shown(self, &ctx);
         let action = egui::Panel::top("menu")
-            .show(ui, |ui| menu::bar(ui, self, &recent))
+            .show(ui, |ui| menu::bar(ui, self))
             .inner;
         egui::Panel::top("people").show(ui, |ui| panels::people(ui, &mut self.ws));
         if self.compare_with.is_some() || self.ws.compare.is_some() {
@@ -321,7 +334,7 @@ impl Opened {
                 panels::compare_bar(ui, &mut self.ws, &mut self.compare_with);
             });
         }
-        let action = action.or(self.shortcuts(&ctx, popup_open));
+        let action = action.or_else(|| commands::keys(self, &ctx, popup_open));
         egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &self.ws));
         // Room for about ten entries; drag its top edge for more.
         egui::Panel::bottom("journal")
@@ -393,6 +406,11 @@ impl Opened {
         crate::ui::step::import(&ctx, &mut self.ws, &mut self.browse, view);
         crate::ui::step::export(&ctx, &mut self.ws, &mut self.browse, view);
         crate::ui::bom::export(&ctx, &mut self.ws, &mut self.browse, view);
+        // What a context menu chose, with what it was opened on.
+        let action = match self.view.ran.take() {
+            Some((id, target)) => action.or(commands::run(self, &ctx, id, target.as_deref())),
+            None => action,
+        };
         // Closing the dialog ends what it paints (#138).
         if !self.dialogs.interference {
             self.ws.interference = None;
@@ -437,6 +455,22 @@ impl Opened {
             self.view.look = look;
         }
         self.view.nav.style = Navigation::parse(self.ws.settings.text("ui.navigation", "ryucad"));
+        let keys = self.ws.settings.get("ui.keys").cloned().unwrap_or_default();
+        if self.keymap_from.0 != self.view.nav.style || self.keymap_from.1 != keys {
+            self.keymap = crate::core::keys::Keymap::new(self.view.nav.style, &keys);
+            self.keymap_from = (self.view.nav.style, keys);
+        }
+        // The viewport's own keys (Tab and its kin), for `View::take_keys`.
+        let mac = commands::mac(ctx);
+        self.view.keys = self
+            .keymap
+            .all()
+            .filter(|(id, _)| {
+                crate::core::command::get(id)
+                    .is_some_and(|c| c.scope == crate::core::command::Scope::Viewport)
+            })
+            .flat_map(|(id, chords)| chords.iter().map(move |c| (c.shortcut(mac), id)))
+            .collect();
         let on = |key| {
             self.ws
                 .settings
@@ -454,85 +488,6 @@ impl Opened {
             .get("display.origin")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-    }
-
-    /// Runs a command of the navigation style's preset.
-    fn run(&mut self, ctx: &egui::Context, c: crate::core::keymap::Command) {
-        use crate::core::keymap::Command;
-        match c {
-            Command::View(v) => self.view.standard(&mut self.ws, v),
-            Command::NormalTo => self.view.normal_to(&mut self.ws),
-            Command::Fit => self.view.fit(&mut self.ws, None),
-            // At the pointer, over the viewport; Space again closes it.
-            Command::Selector => {
-                let at = ctx.input(|i| i.pointer.latest_pos());
-                match at.filter(|p| self.view.rect.contains(*p)) {
-                    Some(p) => self.view.toggle_selector(p),
-                    None => self.view.selector = None,
-                }
-            }
-            Command::Measure => {
-                let on = !self.ws.measure.on;
-                self.ws.measure.set(on);
-            }
-        }
-    }
-
-    /// Ctrl/Cmd+Z undoes this window's latest change, Shift+Ctrl/Cmd+Z or
-    /// Ctrl+Y redoes, and Escape clears the selection; not while a text
-    /// field has the keyboard (it has its own), and Escape not while a menu
-    /// or popup is open (it closes those): `popup_open` says whether one
-    /// was when the frame began, since the menus have closed it by now.
-    /// The keyboard shortcuts; returns what they ask of the app.
-    fn shortcuts(&mut self, ctx: &egui::Context, popup_open: bool) -> Option<menu::Action> {
-        // Closing works from a text field too, as in any other app.
-        if ctx.input_mut(|i| i.consume_shortcut(&menu::CLOSE)) {
-            return Some(menu::Action::Close);
-        }
-        if ctx.memory(|m| m.focused().is_some()) {
-            return None;
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&menu::REDO) || i.consume_shortcut(&menu::REDO_Y)) {
-            self.ws.redo(None);
-        } else if ctx.input_mut(|i| i.consume_shortcut(&menu::UNDO)) {
-            self.ws.undo(None);
-        }
-        // Esc closes the view selector first.
-        if self.view.selector.is_some()
-            && ctx.input_mut(|i| i.consume_shortcut(&menu::CLEAR_SELECTION))
-        {
-            self.view.selector = None;
-            return None;
-        }
-        // The view and measure commands, by the navigation style's preset.
-        for b in crate::core::keymap::preset(self.view.nav.style) {
-            if ctx.input_mut(|i| crate::core::keymap::consume(i, &b.shortcut)) {
-                self.run(ctx, b.command);
-            }
-        }
-        // Esc leaves the Measure tool first.
-        if !popup_open
-            && !egui::Popup::is_any_open(ctx)
-            && self.ws.measure.on
-            && ctx.input_mut(|i| i.consume_shortcut(&menu::CLEAR_SELECTION))
-        {
-            self.ws.measure.set(false);
-            return None;
-        }
-        // Esc clears the selection and the tree's choice with it.
-        let selected = self.ws.myself().is_some_and(|m| !m.selection.is_empty());
-        if !popup_open
-            && !egui::Popup::is_any_open(ctx)
-            && (selected || self.view.chosen.is_some())
-            && ctx.input_mut(|i| i.consume_shortcut(&menu::CLEAR_SELECTION))
-        {
-            if selected {
-                self.ws
-                    .select(Vec::new(), ryucad::live::SelectMode::Replace);
-            }
-            self.view.unchoose(&mut self.ws);
-        }
-        None
     }
 }
 
@@ -597,7 +552,7 @@ impl eframe::App for App {
             crate::ui::platform::ctrl_click_as_secondary(&mut raw.events, &mut self.ctrl_click);
         }
         if let Screen::Opened(o) = &mut self.screen {
-            o.view.take_tabs(ctx, &mut raw.events);
+            o.view.take_keys(ctx, &mut raw.events);
         }
     }
 
