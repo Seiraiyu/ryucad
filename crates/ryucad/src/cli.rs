@@ -700,6 +700,31 @@ enum CacheCmd {
     Stats,
     /// Remove every entry. What they held is rebuilt when next asked for.
     Clear,
+    /// Store the token sent to the shared cache (`cache.remote`), readable
+    /// by you alone; read from standard input without --token.
+    /// RYUCAD_CACHE_TOKEN, when set, is sent instead.
+    Login {
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Remove the stored token.
+    Logout,
+    /// Rebuild a part (with what it places), or every part, through the
+    /// disk cache and the shared cache: what the team built comes from the
+    /// shared cache, the rest is built here and sent behind.
+    Warm { part: Option<String> },
+    /// Send every entry this release built that the shared cache lacks:
+    /// what a CI job runs after building, so others never build it. Needs
+    /// no project.
+    Push {
+        /// Only this kind: features, tools or meshes.
+        #[arg(long, value_name = "KIND", value_parser = cache_kind)]
+        kind: Option<ryucad::cache::Kind>,
+    },
+}
+
+fn cache_kind(s: &str) -> std::result::Result<ryucad::cache::Kind, String> {
+    ryucad::cache::Kind::parse(s).ok_or_else(|| format!("{s:?} isn't features, tools or meshes"))
 }
 
 #[derive(Subcommand)]
@@ -1756,6 +1781,7 @@ fn request(cmd: &Command) -> Option<Request> {
         | Command::Daemon(_)
         | Command::Git(_)
         | Command::Review(_)
+        | Command::Cache(CacheCmd::Push { .. })
         | Command::Watch { .. }
         | Command::Open { .. } => {
             return None;
@@ -2356,6 +2382,15 @@ fn request(cmd: &Command) -> Option<Request> {
         },
         Command::Cache(CacheCmd::Stats) => Request::CacheStats {},
         Command::Cache(CacheCmd::Clear) => Request::CacheClear {},
+        Command::Cache(CacheCmd::Login { token }) => Request::CacheLogin {
+            token: token.clone().unwrap_or_else(|| {
+                let mut line = String::new();
+                let _ = std::io::stdin().read_line(&mut line);
+                line.trim().to_owned()
+            }),
+        },
+        Command::Cache(CacheCmd::Logout) => Request::CacheLogout {},
+        Command::Cache(CacheCmd::Warm { part }) => Request::CacheWarm { part: part.clone() },
         Command::Config(ConfigCmd::Get { key, scope }) => Request::ConfigGet {
             key: key.clone(),
             scope: scope.get(),
@@ -2478,6 +2513,14 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
         }
         Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
         Command::Git(GitCmd::Install { global }) => ryucad::drivers::install(&here, !global),
+        Command::Cache(CacheCmd::Push { kind }) => {
+            use ryucad::cache::{Disk, Kind};
+            let disk = Disk::for_user().ok_or_else(|| {
+                Error::new(Code::Io, "there is no disk cache on this machine to push")
+            })?;
+            let kinds = kind.map_or(Kind::ALL.to_vec(), |k| vec![k]);
+            ryucad::cache::push(&disk, &kinds)
+        }
         Command::Review(cmd) => {
             use ryucad::review::Action;
             let action = match cmd {
@@ -2567,14 +2610,21 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             }
             // As the participant asked for, as through the daemon.
             let me = participant(cli);
-            deliver(
-                cmd,
-                server::handle_safely(&mut None, None, me.as_deref(), &root, req)?,
-            )
-            .map(|r| lift(cmd, r, warnings))
+            let mut slot = None;
+            let answer = server::handle_safely(&mut slot, None, me.as_deref(), &root, req);
+            // A daemon sends what it built to the shared cache behind its
+            // requests; this process has only until it exits.
+            if let Some(r) = slot.as_ref().and_then(|s| s.disk()?.remote()) {
+                r.flush(REMOTE_FLUSH);
+            }
+            deliver(cmd, answer?).map(|r| lift(cmd, r, warnings))
         }
     }
 }
+
+/// How long a request run in this process waits, before it exits, for
+/// what it built to reach the shared cache.
+const REMOTE_FLUSH: Duration = Duration::from_secs(30);
 
 /// The CLI's warnings are all in its envelope: the warnings a request
 /// returns in its result (the protocol has no envelope) move there, as

@@ -1011,6 +1011,24 @@ pub enum Request {
     /// Empties the disk cache; answers what it removed.
     #[serde(rename = "cache.clear")]
     CacheClear {},
+    /// Stores the token sent to the shared cache (`cache.remote`), in a
+    /// file beside the user's preferences readable by its owner alone, and
+    /// asks the server what it allows; answers where it went and the
+    /// remote's state.
+    #[serde(rename = "cache.login")]
+    CacheLogin { token: String },
+    /// Removes the stored token.
+    #[serde(rename = "cache.logout")]
+    CacheLogout {},
+    /// Rebuilds `part` (with every part it places), or every part, through
+    /// the disk cache and the shared cache behind it, so a person opening
+    /// the project waits for nothing the team already built. Answers how
+    /// many entries came from the shared cache and how many were built.
+    #[serde(rename = "cache.warm")]
+    CacheWarm {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+    },
     /// The project's Git commits (or a part's), and what is uncommitted.
     #[serde(rename = "history.log")]
     HistoryLog {

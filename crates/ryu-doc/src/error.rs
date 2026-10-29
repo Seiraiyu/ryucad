@@ -457,6 +457,16 @@ pub enum Code {
     /// ryudfm: no `misc/info`, or one lacking fields: read as ODB++ 7.0 (a
     /// warning).
     OdbInfoMissing,
+    /// The remote cache didn't answer, or answered with a server error: a
+    /// warning (the local cache serves alone, and the remote is tried again
+    /// after a while), or the error of `cache push`.
+    CacheRemoteUnreachable,
+    /// The remote cache refused the token (401), or a read token may not
+    /// write (403): a warning, or the error of `cache push`.
+    CacheRemoteRefused,
+    /// A note: an entry from the remote cache failed its header, hash or
+    /// decoding and was dropped, never used.
+    CacheEntryBad,
 }
 
 impl Code {
@@ -472,7 +482,8 @@ impl Code {
             | Code::AppNotInstalled
             | Code::ReviewUnreachable
             | Code::ReviewGithubUnreachable
-            | Code::ReviewFailed => 4,
+            | Code::ReviewFailed
+            | Code::CacheRemoteUnreachable => 4,
             _ => 1,
         }
     }
@@ -581,6 +592,17 @@ mod tests {
         assert_eq!(json!(Code::OdbInfoMissing), json!("odb_info_missing"));
         assert_eq!(Code::ArchiveUnsafe.exit_code(), 1);
         assert_eq!(Code::BoardInputMissing.exit_code(), 1);
+        assert_eq!(
+            json!(Code::CacheRemoteUnreachable),
+            json!("cache_remote_unreachable")
+        );
+        assert_eq!(
+            json!(Code::CacheRemoteRefused),
+            json!("cache_remote_refused")
+        );
+        assert_eq!(json!(Code::CacheEntryBad), json!("cache_entry_bad"));
+        assert_eq!(Code::CacheRemoteUnreachable.exit_code(), 4);
+        assert_eq!(Code::CacheRemoteRefused.exit_code(), 1);
     }
 
     #[test]

@@ -988,9 +988,46 @@ fn preferences_change_the_window_whoever_sets_them() {
         h.ctx.style_of(egui::Theme::Dark).visuals.panel_fill,
         Look::Graphite.style(true).visuals.panel_fill
     );
+    // The shared cache: a server, and a token kept apart from the
+    // preferences.
+    let url = "https://cache.example.com";
+    type_into(&mut h, "Shared cache server", url);
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        a.opened().ws.settings.text("cache.remote", "") == url
+    });
+    assert_eq!(p.ok(&["config", "get", "cache.remote"])["value"], url);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .cache
+            .as_ref()
+            .is_some_and(|c| c["remote"]["url"] == url)
+    });
+    type_into(&mut h, "Token", "ryc_window");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Save token")
+        .click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .cache_token
+            .as_ref()
+            .is_some_and(|t| t["token"] == "file")
+    });
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Forget token")
+        .click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .cache_token
+            .as_ref()
+            .is_some_and(|t| t["token"].is_null())
+    });
     p.ok(&["config", "set", "ui.style", "drafting"]);
     p.ok(&["config", "set", "ui.theme", "system"]);
     p.ok(&["config", "set", "display.edges", "true"]);
+    p.ok(&["config", "set", "cache.remote", "\"\""]);
 }
 
 #[test]
