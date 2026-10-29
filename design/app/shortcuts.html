@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ryucad 11.A: Help > Keyboard shortcuts</title>
+<link rel="stylesheet" href="vendor/phosphor.css">
+<link rel="stylesheet" href="vendor/phosphor-fill.css">
+<link rel="stylesheet" href="app.css">
+<script src="glyphs.js"></script>
+<script src="mock.js"></script>
+<body>
+<script>
+  // The Shortcuts tile: every command by category, a search, a chord being
+  // set and a conflict refused before anything is written.
+  const k = (keys) => keys.map((x) => `<kbd>${x}</kbd>`).join(" ");
+  const row = (title, id, keys, cls = "", reset = false) => `<tr class="${cls}"><td>${title}</td><td class="mono weak">${id}</td><td>${keys}</td><td style="text-align:right">${reset ? `<span class="link">Reset</span>` : ""}</td></tr>`;
+  const center = `<div class="content padded" style="flex:1;max-width:900px">
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px"><div class="search active" style="margin:0;width:320px">${icon("magnifying-glass", 14)}<span>view</span></div>
+      <span class="weak">Navigation keys follow <b>ryucad</b> (Preferences › Navigation)</span><span class="btn" style="margin-left:auto">Reset all</span></div>
+    <table class="table">
+      <tr class="cat"><td colspan="4">View</td></tr>
+      ${row("Zoom to fit", "view.zoom_fit", k(["F"]))}
+      ${row("Zoom to selection", "view.zoom_selection", k(["Shift+F"]))}
+      ${row("Front", "view.front", k(["1"]))}
+      ${row("Isometric", "view.front_top_right", `<span style="color:inherit">Press a chord…</span> <span style="opacity:.8">Esc cancels · Backspace unbinds</span>`, "editing")}
+      <tr><td colspan="4" class="danger" style="font-size:12px">${icon("x-circle", 12)} <kbd>Ctrl+K</kbd> is already <b>Command palette</b> (<span class="mono">palette.open</span>). Choose another chord, or unbind that one first.</td></tr>
+      ${row("Normal to", "view.normal_to", k(["N"]))}
+      ${row("View selector", "view.selector", k(["Space"]))}
+      ${row("Reset layout", "view.reset_layout", `<span class="weak">none</span>`)}
+      ${row("Zoom in", "view.zoom_in", k(["Ctrl+="]))}
+      ${row("Panels › Activity", "view.panel.activity", k(["Ctrl+Shift+A"]), "", true)}
+      <tr class="cat"><td colspan="4">Viewport (only while the viewport has focus)</td></tr>
+      ${row("Hide what is under the pointer", "view.hide_under", k(["Tab"]))}
+      ${row("Show what is hidden under it", "view.show_under", k(["Shift+Tab"]))}
+      ${row("Show everything", "view.show_all", k(["Ctrl+Shift+Tab"]))}
+    </table></div>`;
+  mock(shell({ centerTab: "Shortcuts", center }));
+</script>
