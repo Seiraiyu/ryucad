@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 pub mod http;
+pub mod lock;
 pub mod read;
 
 /// Where the cache keeps what a fetch found at the remote's `HEAD`.
