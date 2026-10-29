@@ -15,6 +15,7 @@ pub mod inspect;
 pub mod odb;
 pub mod project;
 pub mod quantity;
+pub mod render;
 pub mod session;
 #[cfg(feature = "testing")]
 pub mod testing;
