@@ -200,6 +200,34 @@ pub fn config_at(repo: &gix::Repository, rev: &str, prefix: &str) -> Result<Conf
     Config::read(&files)
 }
 
+/// The manifest of the project at `prefix` (`""` or `a/b`) in the commit
+/// `rev` names; `None` when there is no project there or it doesn't read.
+pub fn manifest_at(
+    repo: &gix::Repository,
+    rev: &str,
+    prefix: &str,
+) -> Result<Option<ryucad_doc::doc::files::Manifest>> {
+    use ryucad_doc::doc::project::MANIFEST;
+    let prefix = prefix_of(prefix);
+    let Ok(id) = repo.rev_parse_single(rev) else {
+        return Ok(None);
+    };
+    let commit = id
+        .object()
+        .map_err(git_error)?
+        .peel_to_commit()
+        .map_err(git_error)?;
+    let tree = commit.tree_id().map_err(git_error)?.detach();
+    let Some(b) = crate::history::entry(repo, tree, &prefix, MANIFEST)? else {
+        return Ok(None);
+    };
+    let data = repo.find_object(b).map_err(git_error)?.data.clone();
+    Ok(std::str::from_utf8(&data)
+        .ok()
+        .and_then(|t| ryucad_doc::doc::canonical::parse(t).ok())
+        .and_then(|v| ryucad_doc::doc::files::Manifest::from_json(&v).ok()))
+}
+
 /// A project's folder as [`crate::history`] takes it: `""`, or ending in
 /// `/`.
 pub fn prefix_of(path: &str) -> String {

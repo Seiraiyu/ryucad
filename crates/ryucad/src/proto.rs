@@ -655,6 +655,32 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
+    /// Fetches the Git repository at `url`, reads the ryucad project's ID
+    /// in its folder `path` (`""` for the root) and lists it as a
+    /// dependency named `name` (else after its folder or repository).
+    #[serde(rename = "deps.add")]
+    DepsAdd {
+        url: String,
+        #[serde(default)]
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Fetches every dependency (or those `names` names, by name or
+    /// project ID) and each project the lock reaches through them: their
+    /// release branches and `ryupdm/` tags. Writes nothing in the project.
+    #[serde(rename = "deps.fetch")]
+    DepsFetch {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        names: Vec<String>,
+    },
+    /// Each dependency and each project the lock reaches through one,
+    /// offline: where it is, whether it is fetched, the labels the lock
+    /// holds and the instances placing them.
+    #[serde(rename = "deps.list")]
+    DepsList {},
     /// The material library: each material's density and colour, the
     /// parts that name it, the default, and the project's revision.
     #[serde(rename = "materials.list")]
@@ -1201,6 +1227,7 @@ impl Request {
                 | Request::BomRenumber { .. }
                 | Request::MaterialsSet { .. }
                 | Request::MaterialsDelete { .. }
+                | Request::DepsAdd { .. }
                 | Request::ViewSave { .. }
                 | Request::ViewDelete { .. }
                 | Request::ViewRename { .. }
