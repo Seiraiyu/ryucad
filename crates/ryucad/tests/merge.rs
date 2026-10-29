@@ -136,6 +136,26 @@ impl Repo {
         v["result"].clone()
     }
 
+    /// Previews merging `branch` into the branch checked out, then merges
+    /// it for real (committing nothing) and checks that `merge status`
+    /// finds what the preview did, then puts things back as they were.
+    fn preview_matches_merge(&self, branch: &str) -> Value {
+        let preview = self.ryucad(&["merge", "preview", branch]);
+        assert_eq!(preview["schema"], 1);
+        self.git_status(&["merge", "--no-commit", "--no-ff", branch]);
+        let status = self.ryucad(&["merge", "status"]);
+        for k in ["clean", "conflicts", "already_failing"] {
+            assert_eq!(
+                preview[k], status[k],
+                "{k}: preview {preview}\nstatus {status}"
+            );
+        }
+        assert_eq!(preview["base"], status["base"]);
+        assert_eq!(preview["theirs"]["commit"], status["theirs"]["commit"]);
+        self.git(&["merge", "--abort"]);
+        preview
+    }
+
     /// A project file's JSON.
     fn json(&self, rel: &str) -> Value {
         serde_json::from_str(&fs::read_to_string(self.root.join(rel)).unwrap()).unwrap()
@@ -173,6 +193,7 @@ fn disjoint_edits_merge_value_by_value() {
     r.git(&["checkout", "-q", "main"]);
     r.ryucad(&["feature", "edit", "p", "b", "--param", "x=12"]);
     r.commit("ours");
+    r.preview_matches_merge("theirs");
     r.git(&["merge", "-q", "--no-edit", "theirs"]);
     let b = r.json(BOX);
     assert_eq!(
@@ -201,6 +222,7 @@ fn features_added_on_both_branches_both_stay() {
         "feature", "add", "p", "sphere", "--id", "o1", "--param", "radius=1",
     ]);
     r.commit("ours");
+    r.preview_matches_merge("theirs");
     r.git(&["merge", "-q", "--no-edit", "theirs"]);
     // Both after the box: ours first.
     assert_eq!(
@@ -221,6 +243,7 @@ fn a_value_changed_on_both_branches_is_left_as_a_conflict() {
     r.git(&["checkout", "-q", "main"]);
     r.ryucad(&["feature", "edit", "p", "b", "--param", "x=12"]);
     r.commit("ours");
+    r.preview_matches_merge("theirs");
     let (code, out) = r.git_status(&["merge", "--no-edit", "theirs"]);
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("CONFLICT"), "{out}");
@@ -280,6 +303,7 @@ fn a_sketch_edited_on_both_sides_merges_per_entity() {
         r#"[{"op": "add", "type": "horizontal", "a": "l1"}]"#,
     ]);
     r.commit("ours: level");
+    r.preview_matches_merge("theirs");
     r.git(&["merge", "-q", "--no-edit", "theirs"]);
     let s = r.json("parts/p/features/s.json");
     assert_eq!(s["constraints"]["d1"]["value"], "12 mm");
@@ -308,6 +332,10 @@ fn git_follows_a_feature_it_thinks_was_renamed() {
         "feature", "add", "p", "sphere", "--id", "d", "--param", "radius=1",
     ]);
     r.commit("ours: c is d now");
+    // Git's rename following isn't previewed, and the preview says so.
+    let p = r.ryucad(&["merge", "preview", "theirs"]);
+    let said = p["warnings"][0]["message"].as_str().unwrap();
+    assert!(said.contains("merge.renames"), "{p}");
     r.git(&["merge", "-q", "--no-edit", "theirs"]);
     assert!(!r.root.join("parts/p/features/c.json").exists());
     assert_eq!(
@@ -435,6 +463,7 @@ fn a_project_below_the_repository_root_merges_too() {
     r.git(&["checkout", "-q", "main"]);
     r.ryucad(&["feature", "edit", "p", "b", "--param", "x=12"]);
     r.commit("ours");
+    r.preview_matches_merge("theirs");
     r.git(&["merge", "-q", "--no-edit", "theirs"]);
     assert_eq!(
         r.json(BOX)["params"],
@@ -467,6 +496,7 @@ fn the_hooks_refuse_a_merge_commit_until_it_is_settled() {
     r.git(&["checkout", "-q", "main"]);
     r.ryucad(&["param", "delete", "p", "wall"]);
     r.commit("ours: no wall");
+    r.preview_matches_merge("theirs");
     let (code, out) = r.git_status(&["merge", "--no-edit", "theirs"]);
     assert_ne!(code, 0, "{out}");
     assert!(
@@ -721,6 +751,7 @@ fn the_hook_refuses_what_a_merge_broke_in_pdm_until_it_is_settled() {
     r.ryucad(&["feature", "edit", "p", "b", "--param", "x=12"]);
     r.ryucad(&["props", "set", "s", "number=300"]);
     r.commit("ours: longer, number s");
+    r.preview_matches_merge("theirs");
     let (code, out) = r.git_status(&["merge", "--no-edit", "theirs"]);
     assert_ne!(code, 0, "{out}");
     let stale = "releases/p/A.json#pdm_broke/release_stale";
@@ -901,6 +932,7 @@ fn a_notch_merged_in_keeps_the_fillet_on_its_corner() {
             .expect("the fillet's face")
     };
     let before = fillet(&r);
+    r.preview_matches_merge("theirs");
     r.git(&["merge", "-q", "--no-edit", "theirs"]);
     // The merge has the notch and the fillet, on the same corner.
     assert_eq!(
@@ -937,6 +969,7 @@ fn a_redraw_merged_in_fails_the_fillet_and_is_blamed() {
     r.git(&["checkout", "-q", "main"]);
     let corner = round_the_corner(&r);
     // Git merges the files cleanly; only rebuilding shows the break.
+    r.preview_matches_merge("theirs");
     r.git(&["merge", "-q", "--no-commit", "--no-ff", "theirs"]);
     let v = r.ryucad(&["merge", "status"]);
     let c: Vec<&Value> = v["conflicts"]
@@ -1065,6 +1098,7 @@ fn a_merge_that_leaves_an_assembly_stale_says_so_and_repairs_it() {
     r.commit("ours: a thicker plate");
     // The pin's pose merges as solver state, ours: not where theirs'
     // hinge holds it.
+    r.preview_matches_merge("theirs");
     r.git(&["merge", "-q", "--no-commit", "--no-ff", "theirs"]);
     let v = r.ryucad(&["merge", "status"]);
     let c: Vec<&Value> = v["conflicts"]
@@ -1121,6 +1155,7 @@ fn parts_two_branches_number_alike_are_renumbered_by_the_repair() {
     ]);
     r.commit("ours: a bolt, item 2");
     // The driver merges items per part: clean for Git, shared for the BOM.
+    r.preview_matches_merge("theirs");
     r.git(&["merge", "-q", "--no-commit", "--no-ff", "theirs"]);
     let items = |r: &Repo| r.json("parts/frame/part.json")["items"].clone();
     assert_eq!(items(&r), json!({"plate": 1, "bolt": 2, "nut": 2}));
@@ -1176,6 +1211,7 @@ fn reimported_both_ways() -> Repo {
     r.git(&["checkout", "-q", "main"]);
     r.ryucad(&["import", &box_step(&r, 40), "--update", BOX_STEP]);
     r.commit("40 mm");
+    r.preview_matches_merge("theirs");
     let (code, out) = r.git_status(&["merge", "--no-edit", "theirs"]);
     assert_eq!(code, 1, "{out}");
     r

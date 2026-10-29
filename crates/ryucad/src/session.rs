@@ -97,6 +97,9 @@ pub struct Session {
     /// How many project files each worktree's working files change from
     /// its head, by the head and a digest of the files.
     pub(crate) worktree_changes: BTreeMap<String, usize>,
+    /// The last merge previews, by the key of what each was made from,
+    /// most recently made first.
+    pub(crate) previews: Vec<(String, serde_json::Value)>,
 }
 
 /// How a revision names another worktree's working files:
@@ -142,6 +145,7 @@ impl Session {
             cycles: None,
             worktrees: BTreeMap::new(),
             worktree_changes: BTreeMap::new(),
+            previews: Vec::new(),
         };
         s.scan()?;
         Ok(s)
@@ -292,6 +296,7 @@ impl Session {
             cycles: None,
             worktrees: BTreeMap::new(),
             worktree_changes: BTreeMap::new(),
+            previews: Vec::new(),
         })
     }
 
@@ -542,6 +547,13 @@ impl Session {
                 None => files.remove(path),
             };
         }
+        self.over(files)
+    }
+
+    /// A session over `files` (a merge made in memory, say), starting from
+    /// what this one has built and learnt, its parts' results taken where
+    /// their revisions agree.
+    pub(crate) fn over(&self, files: Files) -> Result<Session> {
         let mut s = Session::frozen(self, files)?;
         // Its parts' results are this session's while their revisions
         // are.

@@ -614,6 +614,21 @@ enum MergeCmd {
         #[arg(long)]
         hook: bool,
     },
+    /// What merging a revision, or another worktree's working files, into this worktree's
+    /// working files would leave to settle, as `merge status` would say after the merge:
+    /// conflicts, what it would break, sketches and assemblies left stale, PDM faults.
+    /// Nothing is merged or written.
+    Preview {
+        #[arg(
+            value_name = "REV",
+            required_unless_present = "worktree",
+            conflicts_with = "worktree"
+        )]
+        rev: Option<String>,
+        /// Another worktree's folder: its working files, committed or not.
+        #[arg(long, value_name = "PATH")]
+        worktree: Option<PathBuf>,
+    },
     /// Settle a conflict with one side's value, a value of your own, or one of its planned
     /// repairs, as one logged, undoable change. Marking the file resolved (git add) and
     /// committing are yours.
@@ -2486,6 +2501,12 @@ fn request(cmd: &Command) -> Option<Request> {
             limit: Some(*limit),
         },
         Command::Merge(MergeCmd::Status { .. }) => Request::MergeStatus {},
+        Command::Merge(MergeCmd::Preview { rev, worktree }) => Request::MergePreview {
+            rev: match worktree {
+                Some(w) => format!("{}{}", ryucad::session::WORKTREE, w.display()),
+                None => rev.clone().unwrap_or_default(),
+            },
+        },
         Command::Worktree(WorktreeCmd::List) => Request::WorktreeList {},
         Command::Merge(MergeCmd::Resolve {
             conflict,
