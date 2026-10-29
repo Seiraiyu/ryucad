@@ -13,6 +13,8 @@ use ryucad_doc::error::{Code, Error, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+pub mod http;
+
 /// Where the cache keeps what a fetch found at the remote's `HEAD`.
 pub const HEAD_REF: &str = "refs/ryucad/head";
 
@@ -205,7 +207,7 @@ pub fn prefix_of(path: &str) -> String {
 /// each to the same name; returns the repository opened again, so it
 /// sees the new refs.
 fn fetch_into(
-    repo: gix::Repository,
+    mut repo: gix::Repository,
     url: &str,
     branches: &BTreeSet<String>,
 ) -> Result<gix::Repository> {
@@ -226,6 +228,18 @@ fn fetch_into(
             .iter()
             .map(|b| format!("+refs/heads/{b}:refs/heads/{b}")),
     );
+    // Credentials come from Git's helpers only: never ask on a terminal,
+    // where a daemon or an agent's CLI would wait for an answer forever.
+    {
+        let mut config = repo.config_snapshot_mut();
+        config
+            .set_value(
+                &gix::config::tree::gitoxide::Credentials::TERMINAL_PROMPT,
+                "false",
+            )
+            .map_err(|e| failed(&e))?;
+        config.commit().map_err(|e| failed(&e))?;
+    }
     let remote = repo
         .remote_at(url)
         .map_err(|e| failed(&e))?
@@ -236,20 +250,37 @@ fn fetch_into(
         .map_err(|e| failed(&e))?
         // Only ryupdm's tags, which the refspecs name: no others follow.
         .with_fetch_tags(gix::remote::fetch::Tags::None);
-    let connection = remote
-        .connect(gix::remote::Direction::Fetch)
-        .map_err(|e| failed(&e))?;
-    connection
-        .prepare_fetch(gix::progress::Discard, Default::default())
-        .map_err(|e| failed(&e))?
-        .receive(
-            gix::progress::Discard,
-            &std::sync::atomic::AtomicBool::new(false),
-        )
-        .map_err(|e| failed(&e))?;
+    if url.starts_with("https://") || url.starts_with("http://") {
+        let parsed = gix::Url::try_from(url).map_err(|e| failed(&e))?;
+        let transport = gix::protocol::transport::client::blocking_io::http::connect_http(
+            http::Ureq::default(),
+            parsed,
+            gix::protocol::transport::Protocol::V2,
+            false,
+        );
+        receive(remote.to_connection_with_transport(transport)).map_err(|e| failed(&e))?;
+    } else {
+        let connection = remote
+            .connect(gix::remote::Direction::Fetch)
+            .map_err(|e| failed(&e))?;
+        receive(connection).map_err(|e| failed(&e))?;
+    }
     let path = repo.path().to_owned();
     drop(repo);
     gix::open(path).map_err(git_error)
+}
+
+/// Negotiates and receives a pack over `connection`, whatever carries it.
+fn receive<T: gix::protocol::transport::client::blocking_io::Transport>(
+    connection: gix::remote::Connection<'_, '_, '_, T>,
+) -> gix::Result<()> {
+    connection
+        .prepare_fetch(gix::progress::Discard, Default::default())?
+        .receive(
+            gix::progress::Discard,
+            &std::sync::atomic::AtomicBool::new(false),
+        )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -344,6 +375,36 @@ pub(crate) mod tests {
         // A project with no settings reads `main`.
         let f = cache.fetch(&u, &[""]).unwrap();
         assert_eq!(f.branches[""], ("main".to_owned(), Some(now)));
+    }
+
+    #[test]
+    fn a_fetch_reads_git_over_http() {
+        let served = tempfile::tempdir().unwrap();
+        let up = served.path().join("lib");
+        std::fs::create_dir(&up).unwrap();
+        upstream(&up, "", "main");
+        git(&up, &["tag", "ryupdm/p/A"]);
+        let base = http::tests::serve(served.path());
+        let cache = Cache::new(tempfile::tempdir().unwrap().keep());
+        let u = format!("{base}/lib/.git");
+        let f = cache.fetch(&u, &[""]).unwrap();
+        let head = git(&up, &["rev-parse", "HEAD"]).trim().to_owned();
+        assert_eq!(f.branches[""], ("main".to_owned(), Some(head.clone())));
+        let repo = cache.open(&u).unwrap().unwrap();
+        assert!(
+            repo.try_find_reference("refs/tags/ryupdm/p/A")
+                .unwrap()
+                .is_some()
+        );
+        // Nothing new to take: the same tip, from what is there.
+        let f = cache.fetch(&u, &[""]).unwrap();
+        assert_eq!(f.before["main"], head);
+        // A server asking for credentials nobody gives fails the fetch, and
+        // the error is Git's reason, never a credential.
+        let e = cache
+            .fetch(&format!("{base}/private/x.git"), &[""])
+            .unwrap_err();
+        assert_eq!(e.code, Code::DependencyFetchFailed);
     }
 
     #[test]
