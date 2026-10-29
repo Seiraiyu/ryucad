@@ -6,7 +6,7 @@
 //! It depends on no kernel and on nothing of ryucad's: the file
 //! vocabulary is `ryu-doc`'s, the daemon's plumbing `ryu-session`'s.
 
-pub use ryu_doc::{canonical, error, id, source, units};
+pub use ryu_doc::{canonical, error, expr, id, source, units};
 
 pub mod activity;
 pub mod client;
@@ -28,6 +28,7 @@ pub mod netlist;
 pub mod notify;
 pub mod partcmd;
 pub mod project;
+pub mod props;
 pub mod proto;
 pub mod server;
 pub mod session;
