@@ -1795,3 +1795,39 @@ fn a_cone_halved_through_its_apex_is_cut_open() {
         assert_eq!(h.counts(), half.counts());
     }
 }
+
+#[test]
+fn a_thin_lens_on_a_surface_of_its_own_is_the_models() {
+    // A disk notched at its rim by a rod reaching 80 µm into it from
+    // below to half its height: the rod's cap leaves a lens on a plane
+    // of its own, between the rod's circle and the disk's side, 80 µm
+    // wide (under the 100 µm cap). It is the model's: it goes through
+    // STEP's seams and heals to the same body (issue #201).
+    use crate::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    let k = OpKey(1);
+    let disk = primitive::cylinder(k, 0.01, 0.002, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let rod = primitive::cylinder(OpKey(2), 0.002, 0.003, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let tools = [Tool {
+        key: ToolKey(1),
+        body: &rod,
+        place: Rigid::translation(Vector3::new(0.01 + 0.002 - 8e-5, 0.0, -0.002)),
+    }];
+    let notched = boolean(OpKey(3), BooleanOp::Subtract, &disk, &tools)
+        .unwrap()
+        .0;
+    // Faces of one loop of two edges: the lens, and the disk's bottom
+    // round its notch.
+    let two = notched
+        .faces()
+        .filter(|&f| {
+            let loops: Vec<_> = notched.face_loops(f).collect();
+            loops.len() == 1 && notched.loop_fins(loops[0]).count() == 2
+        })
+        .count();
+    assert_eq!(two, 2);
+    round_trip(&notched);
+}

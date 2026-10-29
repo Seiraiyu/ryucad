@@ -17,15 +17,18 @@
 //! named as merged from both, used by the faces either side; its
 //! tolerance covers the sliver's width. Slivers are taken in name order,
 //! none sharing an edge, nor two whose other faces would be one face. Such
-//! a face wider than its tolerance but no wider than the cap is a defect
-//! collapsing would move by more than a tolerance:
-//! [`HealError::SliverTooWide`]. Wider than the cap, it is the model's.
+//! a face wider than its tolerance but no wider than the cap, on a surface
+//! coincident with that of a face beside it, is a defect collapsing would
+//! move by more than a tolerance: [`HealError::SliverTooWide`]. On a
+//! surface of its own (a lens a hole's cap leaves where it nicks a rim),
+//! or wider than the cap, it is the model's.
 //! What the joins leave as gaps the tolerances cover (see `gaps`).
 
 use super::names::Names;
 use super::sew::{find, sorted, to_edge};
 use super::{Edge, Loop, Shape, Vertex};
 use crate::geom::{Curve, Point3};
+use crate::intersect::coincide::coincident;
 use crate::name::{Event, Journal, Name, OpKey, Role};
 use crate::topo::Sense;
 use crate::{Error, HealError};
@@ -274,10 +277,22 @@ fn slivers(
             continue;
         }
         if w > ea.tolerance.max(eb.tolerance) {
-            return Err(HealError::SliverTooWide {
-                face: names.faces[k],
+            // Wider than its tolerance, a sliver on the surface of a face
+            // beside it is a defect (no modeller leaves two faces of one
+            // surface meeting at an edge); on a surface of its own it is a
+            // thin face of the model (a lens a hole leaves on its cap
+            // plane), and stays.
+            let here = &s.surfaces[s.faces[k].surface];
+            if [fa, fb]
+                .iter()
+                .any(|&f| coincident(here, &s.surfaces[s.faces[f].surface]).is_some())
+            {
+                return Err(HealError::SliverTooWide {
+                    face: names.faces[k],
+                }
+                .into());
             }
-            .into());
+            continue;
         }
         taken_edges.extend([a, b]);
         taken_faces.extend([fa, fb]);
