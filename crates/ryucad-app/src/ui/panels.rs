@@ -324,11 +324,8 @@ fn solid_group(
     } else {
         format!("{solid} (solid)")
     };
-    if let Some(code) = shown
-        .and_then(|s| s.error.as_ref())
-        .and_then(|e| e["code"].as_str())
-    {
-        title.push_str(&format!(": failed ({code}), showing its last good state"));
+    if let Some(failed) = shown.and_then(crate::core::model::Solid::failure) {
+        title.push_str(&format!(": {failed}"));
     } else if faults > 0 {
         title.push_str(&format!(": {faults} unmeshed"));
     }

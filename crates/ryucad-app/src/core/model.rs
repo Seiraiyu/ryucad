@@ -254,6 +254,19 @@ pub struct Solid {
     pub error: Option<Value>,
 }
 
+impl Solid {
+    /// How the tree says it failed, if it did: `failed (code)`, and
+    /// `showing its last good state` only when a feature of its chain
+    /// built, so there is a state to show (issue #213).
+    pub fn failure(&self) -> Option<String> {
+        let code = self.error.as_ref()?["code"].as_str()?;
+        Some(match self.hash {
+            Some(_) => format!("failed ({code}), showing its last good state"),
+            None => format!("failed ({code})"),
+        })
+    }
+}
+
 /// A part: its features in order, and its solids.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Part {
