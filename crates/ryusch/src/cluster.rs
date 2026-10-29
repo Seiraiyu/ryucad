@@ -49,8 +49,8 @@ impl Cluster {
     }
 
     /// The room it takes with its origin at `origin`: its extent, its
-    /// members' text where text goes first, and the power ports its rail
-    /// pins take.
+    /// members' text where text goes first, and the power ports (or the
+    /// labels) its rail pins take.
     pub fn room(&self, block: &Block, origin: Point) -> Rect {
         let mut r = self.extent(block, origin);
         for (p, place) in self.places(origin) {
@@ -83,12 +83,16 @@ impl Cluster {
                 };
                 let at = shape.pins[k];
                 let side = crate::label::pointing(kind, at.side);
-                r = r.union(crate::label::label_box(
-                    kind,
-                    &block.nets[n].name,
-                    at.end,
-                    side,
-                ));
+                let name = &block.nets[n].name;
+                // A rail may be drawn by labels instead: room for either.
+                r = r
+                    .union(crate::label::label_box(kind, name, at.end, side))
+                    .union(crate::label::label_box(
+                        LabelKind::Net,
+                        name,
+                        at.end,
+                        at.side,
+                    ));
             }
         }
         r

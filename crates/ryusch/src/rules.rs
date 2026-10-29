@@ -294,7 +294,7 @@ mod tests {
     fn seeded_layouts_keep_every_rule() {
         for (seed, ics) in [(1, 2), (2, 4), (3, 6), (4, 8)] {
             let b = seeded(seed, ics);
-            let out = crate::engine::lay_out(&b);
+            let out = crate::engine::lay_out(&b).unwrap();
             let broken = check(&b, &out.layout);
             assert!(broken.is_empty(), "seed {seed}: {broken:#?}");
         }
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn broken_rules_are_found() {
         let b = seeded(1, 2);
-        let mut l = crate::engine::lay_out(&b).layout;
+        let mut l = crate::engine::lay_out(&b).unwrap().layout;
         // Two parts on top of each other, a wire at a slant and one
         // through a body.
         let first = l.placed.keys().next().unwrap().clone();

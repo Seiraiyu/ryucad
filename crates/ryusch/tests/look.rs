@@ -48,7 +48,7 @@ fn seeded_blocks_render() {
     std::fs::create_dir_all(dir).unwrap();
     for (seed, ics) in [(1, 2), (2, 4), (3, 6)] {
         let block = ryusch::testing::seeded(seed, ics);
-        let out = ryusch::engine::lay_out(&block);
+        let out = ryusch::engine::lay_out(&block).unwrap();
         let svg = ryusch::svg::draw(&block, &out.layout, &[]);
         std::fs::write(format!("{dir}/seeded-{seed}.svg"), &svg).unwrap();
         std::fs::write(

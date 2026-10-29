@@ -442,6 +442,10 @@ pub fn flow(
             .map(|c| extent0(block, &clusters[*c]).width())
             .max()
             .unwrap_or(0);
+        // A column held to the right edge sits against it.
+        if !col.is_empty() && col.iter().all(|c| right.contains(c)) {
+            x = x.max(size[0] - MARGIN - width);
+        }
         if x + width > size[0] - MARGIN && i > 0 {
             overflow.extend(col.iter().copied());
             continue;

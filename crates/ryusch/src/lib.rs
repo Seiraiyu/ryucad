@@ -15,6 +15,7 @@ pub mod font;
 pub mod geom;
 pub mod idiom;
 pub mod input;
+pub mod instr;
 pub mod label;
 pub mod layout;
 pub mod place;
