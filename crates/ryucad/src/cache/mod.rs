@@ -3,8 +3,9 @@
 //! the machine.
 //!
 //! An entry is a file named by its key: a BLAKE3 of this build's identity
-//! (the versions, the commit, and the executable's size and time, so a
-//! development build never reads what another build wrote), the entry's
+//! ([`build_identity`]: a release's versions and commit, the same on every
+//! platform; a development build's versions, commit, target and
+//! executable, so it never reads what another build wrote), the entry's
 //! kind and the input hash the session already computes. It holds a
 //! header, a BLAKE3 of its payload and the payload, and is written to a
 //! temporary file then renamed into place, so a reader sees a whole entry
@@ -90,6 +91,8 @@ impl Stats {
 pub struct Disk {
     root: PathBuf,
     build: [u8; 32],
+    /// Whether other machines' builds share `build` (a release's).
+    shared: bool,
     /// Whether the one warning about failed writes has been given.
     warned: AtomicBool,
     /// Whether the one note about a corrupt entry has been given.
@@ -130,11 +133,75 @@ pub fn cache_dir() -> Result<PathBuf> {
         .ok_or_else(none)
 }
 
-/// This build's identity: its versions and commit, and the size and
-/// modification time of the running executable, which every build
-/// changes. `None` when the executable can't be read.
-pub fn build_identity() -> Option<[u8; 32]> {
+/// Claims a shared identity (64 hex digits) for a build that isn't a
+/// release: tests of the remote cache, whose binaries are development
+/// builds. Never set it for a build that isn't the release it names.
+pub const IDENTITY_VAR: &str = "RYUCAD_CACHE_IDENTITY";
+
+/// Who reads and writes entries: a build's identity, and whether builds on
+/// other machines share it (a release's), so a remote cache may hold its
+/// entries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Identity {
+    pub bytes: [u8; 32],
+    pub shared: bool,
+}
+
+impl Identity {
+    /// An identity of this machine's alone.
+    pub fn local(bytes: [u8; 32]) -> Identity {
+        Identity {
+            bytes,
+            shared: false,
+        }
+    }
+}
+
+/// A released build's identity: the product versions and the commit
+/// alone, so the same release on Linux, macOS and Windows, on any CPU,
+/// shares every entry. ryukei's results are the same bits everywhere (the
+/// golden hashes), and entries hold floats by their bits.
+pub fn released_identity(ryucad: &str, ryukei: &str, ryustep: &str, commit: &str) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"ryucad.identity.1\0");
+    for piece in [ryucad, ryukei, ryustep, commit] {
+        h.update(&(piece.len() as u64).to_le_bytes());
+        h.update(piece.as_bytes());
+    }
+    *h.finalize().as_bytes()
+}
+
+/// Whether a build is a release: stamped with a version (never the repo's
+/// `0.0.0`) and built from the commit the release workflow gave it
+/// (`RYUCAD_COMMIT`), not one read from a checkout that may hold changes.
+pub fn is_release(version: &str, commit: &str, commit_given: bool) -> bool {
+    version != "0.0.0" && commit_given && !commit.is_empty() && commit != "unknown"
+}
+
+/// This build's identity. A release's is [`released_identity`] and
+/// shared; `RYUCAD_CACHE_IDENTITY` claims one; any other build's is its
+/// versions, commit and target and the size and modification time of the
+/// running executable, which every build changes. `None` when a
+/// development build's executable can't be read.
+pub fn build_identity() -> Option<Identity> {
+    if let Some(hex) = std::env::var_os(IDENTITY_VAR) {
+        match parse_hex32(&hex.to_string_lossy()) {
+            Some(bytes) => {
+                return Some(Identity {
+                    bytes,
+                    shared: true,
+                });
+            }
+            None => eprintln!("ryucad: {IDENTITY_VAR} isn't 64 hex digits; ignoring it"),
+        }
+    }
     let v = crate::proto::VersionInfo::current();
+    if is_release(&v.ryucad, &v.commit, env!("RYUCAD_COMMIT_GIVEN") == "1") {
+        return Some(Identity {
+            bytes: released_identity(&v.ryucad, &v.ryukei, ryustep::VERSION, &v.commit),
+            shared: true,
+        });
+    }
     let exe = std::env::current_exe().ok()?;
     let meta = fs::metadata(exe).ok()?;
     let since = meta
@@ -149,7 +216,21 @@ pub fn build_identity() -> Option<[u8; 32]> {
     }
     h.update(&meta.len().to_le_bytes());
     h.update(&since.as_nanos().to_le_bytes());
-    Some(*h.finalize().as_bytes())
+    Some(Identity::local(*h.finalize().as_bytes()))
+}
+
+/// 32 bytes from 64 hex digits, either case.
+pub fn parse_hex32(s: &str) -> Option<[u8; 32]> {
+    let s = s.as_bytes();
+    if s.len() != 64 {
+        return None;
+    }
+    let digit = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    let mut out = [0; 32];
+    for (i, pair) in s.chunks(2).enumerate() {
+        out[i] = digit(pair[0])? << 4 | digit(pair[1])?;
+    }
+    Some(out)
 }
 
 /// The default of `cache.max_bytes`: 10 GiB.
@@ -160,11 +241,18 @@ fn io(what: &str, path: &Path, e: std::io::Error) -> Error {
 }
 
 impl Disk {
-    /// The cache in `root` (its entries under `root/v1`), for `build`.
+    /// The cache in `root` (its entries under `root/v1`), for `build`, an
+    /// identity of this machine's alone.
     pub fn open(root: impl Into<PathBuf>, build: [u8; 32]) -> Disk {
+        Disk::open_as(root, Identity::local(build))
+    }
+
+    /// The cache in `root` for `identity`.
+    pub fn open_as(root: impl Into<PathBuf>, identity: Identity) -> Disk {
         Disk {
             root: root.into().join(LAYOUT),
-            build,
+            build: identity.bytes,
+            shared: identity.shared,
             warned: AtomicBool::new(false),
             noted: AtomicBool::new(false),
             written: AtomicU64::new(0),
@@ -180,13 +268,21 @@ impl Disk {
         if cfg!(test) && std::env::var_os(CACHE_DIR_VAR).is_none() {
             return None;
         }
-        let disk = Disk::open(cache_dir().ok()?, build_identity()?);
+        let disk = Disk::open_as(cache_dir().ok()?, build_identity()?);
         disk.set_max_bytes(max_bytes_preference());
         Some(disk)
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The identity entries are keyed by.
+    pub fn identity(&self) -> Identity {
+        Identity {
+            bytes: self.build,
+            shared: self.shared,
+        }
     }
 
     pub fn set_max_bytes(&self, max: u64) {
@@ -376,6 +472,7 @@ impl Disk {
         let trimmer = Disk {
             root: self.root.clone(),
             build: self.build,
+            shared: self.shared,
             warned: AtomicBool::new(true),
             noted: AtomicBool::new(true),
             written: AtomicU64::new(0),
@@ -596,6 +693,66 @@ mod tests {
         assert_eq!(d.get(Kind::Feature, b"a"), None);
         assert!(d.warned.load(Ordering::Relaxed));
         assert_eq!(d.stats().entries, 0);
+    }
+
+    #[test]
+    fn a_release_is_keyed_by_its_versions_and_commit_alone() {
+        let a = released_identity("0.7.0", "0.7.0", "0.7.0", "0123456789ab");
+        assert_eq!(
+            a,
+            released_identity("0.7.0", "0.7.0", "0.7.0", "0123456789ab"),
+            "nothing of the machine, target or executable"
+        );
+        assert_ne!(
+            a,
+            released_identity("0.7.0", "0.7.0", "0.7.0", "0123456789ac")
+        );
+        assert_ne!(
+            a,
+            released_identity("0.7.1", "0.7.0", "0.7.0", "0123456789ab")
+        );
+        assert_ne!(
+            released_identity("0.7.0", "0.7.0", "0.7.0", "1"),
+            released_identity("0.7.0", "0.7.0", "0.7.01", ""),
+            "pieces can't run together"
+        );
+        // Two caches of one release on two machines share keys.
+        let dir = tempfile::tempdir().unwrap();
+        let shared = Identity {
+            bytes: a,
+            shared: true,
+        };
+        let x = Disk::open_as(dir.path().join("x"), shared);
+        let y = Disk::open_as(dir.path().join("y"), shared);
+        assert_eq!(x.key(Kind::Feature, b"in"), y.key(Kind::Feature, b"in"));
+        assert!(x.identity().shared);
+        assert!(!disk(dir.path()).identity().shared);
+    }
+
+    #[test]
+    fn only_a_stamped_version_from_a_given_commit_is_a_release() {
+        assert!(is_release("0.7.0", "0123456789ab", true));
+        assert!(is_release("0.7.0-pre.1", "0123456789ab", true));
+        assert!(!is_release("0.0.0", "0123456789ab", true), "the repo's");
+        assert!(
+            !is_release("0.7.0", "0123456789ab", false),
+            "read from a checkout"
+        );
+        assert!(!is_release("0.7.0", "unknown", true));
+        assert!(!is_release("0.7.0", "", true));
+        // Tests build development binaries.
+        assert!(!build_identity().unwrap().shared || std::env::var_os(IDENTITY_VAR).is_some());
+    }
+
+    #[test]
+    fn identities_read_from_hex() {
+        let hex = "00ff".repeat(16);
+        let b = parse_hex32(&hex).unwrap();
+        assert_eq!(b[0], 0);
+        assert_eq!(b[1], 255);
+        assert_eq!(parse_hex32(&hex.to_uppercase()), Some(b));
+        assert_eq!(parse_hex32(&hex[..62]), None);
+        assert_eq!(parse_hex32(&format!("{}zz", &hex[..62])), None);
     }
 
     #[test]

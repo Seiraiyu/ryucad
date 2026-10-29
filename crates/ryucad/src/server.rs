@@ -1169,6 +1169,8 @@ fn cache_stats(disk: Option<&crate::cache::Disk>, removed: Option<crate::cache::
             v["enabled"] = json!(true);
             v["folder"] = json!(d.root());
             v["max_bytes"] = json!(d.max_bytes());
+            // A release's entries are shared with its builds everywhere.
+            v["shared"] = json!(d.identity().shared);
             v
         }
         None => {
