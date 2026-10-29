@@ -16,4 +16,5 @@ pub mod smoke;
 pub mod start;
 pub mod step;
 pub mod style;
+pub mod toolbar;
 pub mod view;
