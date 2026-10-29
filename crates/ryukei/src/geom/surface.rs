@@ -3,7 +3,7 @@ use super::{
     Box3, Frame, Mirror, Point2, Point3, PrincipalCurvatures, Projection, Rigid, SurfaceEval,
     UnitVector3, Vector2, Vector3, polar_angle,
 };
-use super::{Curve2, Extrusion, NurbsSurface, Pipe, Revolution, Sweep};
+use super::{Curve2, Extrusion, NurbsSurface, Offset, Pipe, Revolution, Sweep};
 use crate::Error;
 use crate::math;
 use crate::tol::ANGULAR_RESOLUTION;
@@ -32,6 +32,7 @@ pub enum Surface {
     Revolution(Arc<Revolution>),
     Pipe(Arc<Pipe>),
     Sweep(Arc<Sweep>),
+    Offset(Arc<Offset>),
 }
 
 /// How a mirrored surface ([`Surface::mirrored`]) maps its parameter
@@ -226,7 +227,8 @@ impl Surface {
             | Self::Extrusion(_)
             | Self::Revolution(_)
             | Self::Pipe(_)
-            | Self::Sweep(_) => None,
+            | Self::Sweep(_)
+            | Self::Offset(_) => None,
         }
     }
 
@@ -255,6 +257,7 @@ impl Surface {
             Self::Revolution(r) => r.point(u, v),
             Self::Pipe(p) => p.point(u, v),
             Self::Sweep(s) => s.point(u, v),
+            Self::Offset(o) => o.point(u, v),
         }
     }
 
@@ -327,6 +330,7 @@ impl Surface {
             Self::Revolution(r) => r.eval(u, v),
             Self::Pipe(p) => p.eval(u, v),
             Self::Sweep(s) => s.eval(u, v),
+            Self::Offset(o) => o.eval(u, v),
         }
     }
 
@@ -351,6 +355,7 @@ impl Surface {
             Self::Revolution(r) => return r.surface_normal(u, v),
             Self::Pipe(p) => return p.normal(u, v),
             Self::Sweep(s) => return s.normal(u, v),
+            Self::Offset(o) => return o.normal(u, v),
             Self::Plane(s) => s.frame.z(),
             Self::Cylinder(s) => UnitVector3::new_unchecked(s.frame.radial(u)),
             Self::Cone(s) => {
@@ -391,6 +396,7 @@ impl Surface {
             Self::Revolution(r) => r.domain(),
             Self::Pipe(p) => p.domain(),
             Self::Sweep(s) => s.domain(),
+            Self::Offset(o) => o.domain(),
         }
     }
 
@@ -405,6 +411,7 @@ impl Surface {
             Self::Revolution(r) => (Some(TAU), r.curve().period()),
             Self::Pipe(p) => p.periods(),
             Self::Sweep(s) => s.periods(),
+            Self::Offset(o) => o.periods(),
         }
     }
 
@@ -422,6 +429,7 @@ impl Surface {
             Self::Pipe(p) => p.closed_genus(),
             Self::Sweep(s) => s.closed_genus(),
             Self::Nurbs(n) => n.closed_genus(),
+            Self::Offset(o) => o.closed_genus(),
             Self::Plane(_) | Self::Cylinder(_) | Self::Cone(_) | Self::Extrusion(_) => None,
         }
     }
@@ -463,6 +471,7 @@ impl Surface {
             Self::Revolution(r) => r.project(p).distance,
             Self::Pipe(s) => s.project(p).distance,
             Self::Sweep(s) => s.project(p).distance,
+            Self::Offset(o) => o.project(p).distance,
         }
     }
 
@@ -479,6 +488,7 @@ impl Surface {
             Self::Revolution(r) => return r.project(p),
             Self::Pipe(s) => return s.project(p),
             Self::Sweep(s) => return s.project(p),
+            Self::Offset(o) => return o.project(p),
             Self::Plane(Plane { frame })
             | Self::Cylinder(Cylinder { frame, .. })
             | Self::Cone(Cone { frame, .. })
@@ -511,6 +521,7 @@ impl Surface {
             Self::Revolution(r) => r.bounds(),
             Self::Pipe(p) => p.bounds(),
             Self::Sweep(s) => s.bounds(),
+            Self::Offset(o) => o.bounds(),
         }
     }
 
@@ -533,7 +544,8 @@ impl Surface {
             | Self::Extrusion(_)
             | Self::Revolution(_)
             | Self::Pipe(_)
-            | Self::Sweep(_) => self.project(p).param,
+            | Self::Sweep(_)
+            | Self::Offset(_) => self.project(p).param,
         }
     }
 
@@ -542,15 +554,24 @@ impl Surface {
     /// A plane shifts, a cylinder's or sphere's radius and a torus's minor
     /// radius grow by `d`, and a cone keeps its axis and half-angle with
     /// its frame moved by `-d sin α` along the axis and its radius there
-    /// grown by `d cos α`.
+    /// grown by `d cos α`. A pipe's radius grows by `d` about the same
+    /// spine.
     ///
-    /// A pipe's radius grows by `d` about the same spine. `None` for a
-    /// surface with no offset (a NURBS or a swept surface).
-    /// Fails with `NonFinite`, or `Degenerate` where the offset collapses:
-    /// a radius that would fall below [`crate::tol::LINEAR_RESOLUTION`]
-    /// (for a cone, its radius in its moved frame's plane), or a torus's
-    /// minor radius that would reach its major.
+    /// A NURBS, an extrusion or a revolution gives an [`Offset`] over its
+    /// whole domain, and an offset one by the distances' sum; `None` for
+    /// a sweep, which has no offset yet. Fails with `NonFinite`, or
+    /// `Degenerate` where the offset collapses: a radius that would fall
+    /// below [`crate::tol::LINEAR_RESOLUTION`] (for a cone, its radius in
+    /// its moved frame's plane), a torus's minor radius that would reach
+    /// its major, or an [`Offset`] that can't be certified regular.
     pub fn offset(&self, d: f64) -> Option<Result<Self, Error>> {
+        self.offset_within(d, self.domain())
+    }
+
+    /// [`Surface::offset`], but an [`Offset`] only over `domain`, a box of
+    /// the surface's parameters (an analytic surface or a pipe ignores
+    /// it): a face's, which may be regular where the whole surface isn't.
+    pub fn offset_within(&self, d: f64, domain: [[f64; 2]; 2]) -> Option<Result<Self, Error>> {
         if !d.is_finite() {
             return Some(Err(Error::NonFinite));
         }
@@ -570,9 +591,10 @@ impl Surface {
                 Cone::new(f, s.radius + d * s.cos, s.half_angle).map(Self::Cone)
             }
             Self::Pipe(p) => p.offset(d).map(|p| Self::Pipe(Arc::new(p))),
-            Self::Nurbs(_) | Self::Extrusion(_) | Self::Revolution(_) | Self::Sweep(_) => {
-                return None;
+            Self::Nurbs(_) | Self::Extrusion(_) | Self::Revolution(_) | Self::Offset(_) => {
+                Offset::new(self.clone(), d, domain).map(|o| Self::Offset(Arc::new(o)))
             }
+            Self::Sweep(_) => return None,
         })
     }
 
@@ -590,6 +612,7 @@ impl Surface {
             Self::Revolution(s) => return Self::Revolution(Arc::new(s.transformed(r))),
             Self::Pipe(p) => return Self::Pipe(Arc::new(p.transformed(r))),
             Self::Sweep(s) => return Self::Sweep(Arc::new(s.transformed(r))),
+            Self::Offset(o) => return Self::Offset(Arc::new(o.transformed(r))),
         };
         *frame = frame.transformed(r);
         out
@@ -626,6 +649,10 @@ impl Surface {
             }
             Self::Pipe(p) => return Ok((Self::Pipe(Arc::new(p.mirrored(m)?)), ParamFlip::V(0.0))),
             Self::Sweep(s) => return Ok((Self::Sweep(Arc::new(s.mirrored(m)?)), ParamFlip::Kept)),
+            Self::Offset(o) => {
+                let (o, flip) = o.mirrored(m)?;
+                return Ok((Self::Offset(Arc::new(o)), flip));
+            }
         };
         *frame = m.frame_reversed(frame)?;
         Ok((out, flip))
@@ -937,7 +964,15 @@ mod tests {
         assert_eq!(cone.offset(-3.0), Some(Err(Error::Degenerate)));
         assert_eq!(cyl.offset(f64::NAN), Some(Err(Error::NonFinite)));
         let (n, _) = sphere.to_nurbs([[0.0; 2]; 2]).unwrap();
-        assert_eq!(Surface::Nurbs(std::sync::Arc::new(n)).offset(0.1), None);
+        // A NURBS sphere's poles have no certified normal: its offset over
+        // the whole domain is refused, over a band it is an offset.
+        let n = Surface::Nurbs(std::sync::Arc::new(n));
+        assert_eq!(n.offset(0.1), Some(Err(Error::Degenerate)));
+        let band = n
+            .offset_within(0.1, [[0.0, TAU], [-1.0, 1.0]])
+            .unwrap()
+            .unwrap();
+        assert!(matches!(band, Surface::Offset(_)));
     }
 
     #[test]

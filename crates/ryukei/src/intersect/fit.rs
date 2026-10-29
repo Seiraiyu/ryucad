@@ -85,6 +85,12 @@ fn unwrap(near: f64, x: f64, period: Option<f64>) -> f64 {
     }
 }
 
+/// Parameters `x` on `s`, each periodic one unwrapped next to `near`.
+fn unwrapped(s: &Surface, x: Point2, near: Point2) -> Point2 {
+    let (pu, pv) = s.periods();
+    Point2::new(unwrap(near.x, x.x, pu), unwrap(near.y, x.y, pv))
+}
+
 /// The parameters of the point of `s` nearest `p`, each periodic one
 /// unwrapped next to `near`.
 fn uv_near(s: &Surface, p: Point3, near: Option<Point2>) -> Point2 {
@@ -337,6 +343,9 @@ fn pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &dyn Target, target: f
         let dg = (e.du * dq.x + e.dv * dq.y - cd).length();
         let r = w / 2.0;
         let bound = (g + dg * r + m2 * r * r / 2.0) * (1.0 + 1e-9) + SLACK;
+        // An infinite derivative bound times a velocity of zero is NaN,
+        // which every comparison would pass: it bounds nothing.
+        let bound = if bound.is_nan() { f64::INFINITY } else { bound };
         // Halving shrinks the Taylor terms, never the error at the middle:
         // where that alone is most of the target, the span must be split
         // instead.
@@ -424,6 +433,9 @@ fn sheet_pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &Piece3, target:
         let dg = (e.du * dq.x + e.dv * dq.y - cd).length();
         let r = w / 2.0;
         let bound = (g + dg * r + m2 * r * r / 2.0) * (1.0 + 1e-9) + SLACK;
+        // An infinite derivative bound times a velocity of zero is NaN,
+        // which every comparison would pass: it bounds nothing.
+        let bound = if bound.is_nan() { f64::INFINITY } else { bound };
         if bound <= target || depth == 0 || g > target / 2.0 {
             return bound;
         }
@@ -1115,6 +1127,19 @@ fn fit_pcurve_with(
     unreachable!("the loop returns")
 }
 
+/// Two curves fitted on shared knots (see [`fit_on`]).
+#[derive(Clone, Debug)]
+pub(crate) struct FitOn {
+    pub(crate) curves: [NurbsCurve; 2],
+    /// Each curve's certified bound from its surface.
+    pub(crate) bounds: [f64; 2],
+    /// Where either surface has no implicit form, each curve's pcurve by
+    /// the same parameter and the certified bound on how far its image
+    /// strays from the curve (`None` where that is past ten resolutions
+    /// on a surface with one); else `None`.
+    pub(crate) pcurves: [Option<(NurbsCurve2, f64)>; 2],
+}
+
 /// A curve fitted along a pcurve on a surface (see [`fit_along`]).
 #[derive(Clone, Debug)]
 pub(crate) struct Lifted {
@@ -1249,30 +1274,63 @@ pub(crate) fn fit_along(
     unreachable!("the loop returns")
 }
 
+/// A certified bound on how far a Hermite span from `a` to `b` (points
+/// with their derivatives by the span's parameter over `range`) strays
+/// from a surface with no implicit form: the ends' feet on it, their
+/// parameter velocities, the Hermite pcurve between them and its pcurve
+/// bound against the span. Infinite where a velocity has no solution (a
+/// pole).
+fn span_bound(
+    s: &Surface,
+    (fa, da): (Point2, Vector3),
+    (fb, db): (Point2, Vector3),
+    range: [f64; 2],
+    span: &Piece3,
+) -> f64 {
+    let ua = fa;
+    let ub = unwrapped(s, fb, ua);
+    let (Some(va), Some(vb)) = (uv_velocity(s, ua, da), uv_velocity(s, ub, db)) else {
+        return f64::INFINITY;
+    };
+    let h = range[1] - range[0];
+    let p2 = piece(hermite(ua.to_vector(), va, ub.to_vector(), vb, h), range);
+    pcurve_bound(s, &p2, &SpanTarget(span), LINEAR_RESOLUTION)
+}
+
 /// Two curves, each on its surface, through the points `at` gives over
 /// `[t0, t1]`, each point with its derivative by `t`, fitted on shared
 /// knots: cubic Hermite spans in `t`, each certified within its bound of
 /// its surface through the surface's implicit form ([`surface_bound`]),
+/// or for a surface with none through a pcurve: the Hermite span in its
+/// parameters between the ends' feet, by their parameter velocities, and
+/// its pcurve bound against the span ([`pcurve_bound`]),
 /// split (in both curves) until both bounds are within
 /// [`LINEAR_RESOLUTION`] and both spans' middles are within it of the
 /// points `at` gives there (sampled: that keeps the fit near the given
 /// points, the bound makes it an edge). A chamfer's rails are the points
 /// at its setbacks in each section of its edge, and sharing knots makes
 /// the ruled surface between them simple. Returns the curves and their
-/// worst bounds; `Unsupported` for a surface with no implicit form,
-/// `Uncertain` where `at` fails or a fit can't get within
-/// `10 × LINEAR_RESOLUTION`.
+/// worst bounds, and where either surface has no implicit form both
+/// curves' pcurves: the Hermite spans in their parameters between the
+/// samples' feet, each foot found once, joined on the same knots and
+/// certified (a rail on a spline has hundreds of spans, and fitting its
+/// pcurves again from nothing cost several times the rails); `Uncertain` where `at` fails or a fit can't
+/// get within `10 × LINEAR_RESOLUTION`.
 pub(crate) fn fit_on(
     surfaces: [&Surface; 2],
     [t0, t1]: [f64; 2],
     at: &dyn Fn(f64) -> Option<[(Point3, Vector3); 2]>,
-) -> Result<([NurbsCurve; 2], [f64; 2]), Failure> {
-    let imps = [
-        Implicit::of(surfaces[0]).ok_or(Failure::Unsupported)?,
-        Implicit::of(surfaces[1]).ok_or(Failure::Unsupported)?,
-    ];
-    type S = (f64, [(Point3, Vector3); 2]);
-    let sample = |t: f64| -> Result<S, Failure> { Ok((t, at(t).ok_or(Failure::Uncertain)?)) };
+) -> Result<FitOn, Failure> {
+    let imps = [Implicit::of(surfaces[0]), Implicit::of(surfaces[1])];
+    // Where either surface has no implicit form, each sample with its
+    // foot (as projection gives it) on both surfaces.
+    let feet_too = imps.iter().any(Option::is_none);
+    type S = (f64, [(Point3, Vector3); 2], [Option<Point2>; 2]);
+    let sample = |t: f64| -> Result<S, Failure> {
+        let x = at(t).ok_or(Failure::Uncertain)?;
+        let feet = core::array::from_fn(|k| feet_too.then(|| uv_near(surfaces[k], x[k].0, None)));
+        Ok((t, x, feet))
+    };
     let n = 8;
     let mut samples = (0..=n)
         .map(|i| sample(t0 + (t1 - t0) * i as f64 / n as f64))
@@ -1296,7 +1354,19 @@ pub(crate) fn fit_on(
             if let Some(m) = mid {
                 drift |= (Point3::ORIGIN + q).distance(m[k].0) > LINEAR_RESOLUTION;
             }
-            *bound = surface_bound(&imps[k], &sp, LINEAR_RESOLUTION, MAX_HALVINGS);
+            *bound = match &imps[k] {
+                Some(imp) => surface_bound(imp, &sp, LINEAR_RESOLUTION, MAX_HALVINGS),
+                None => {
+                    let foot = |x: &S| x.2[k].expect("a foot where there is no implicit form");
+                    span_bound(
+                        surfaces[k],
+                        (foot(a), a.1[k].1),
+                        (foot(b), b.1[k].1),
+                        [a.0, b.0],
+                        &sp,
+                    )
+                }
+            };
         }
         (out, drift)
     };
@@ -1334,10 +1404,63 @@ pub(crate) fn fit_on(
                 }
                 NurbsCurve::new(kv.clone(), pts, None).map_err(|_| Failure::Uncertain)
             };
-            return Ok((
-                [curve(0)?, curve(1)?],
-                worst.map(|w| w.max(LINEAR_RESOLUTION)),
-            ));
+            // The Hermite spans between the samples' feet, each foot
+            // unwrapped next to the one before (each span's end was
+            // unwrapped next to its start, so the spans are those
+            // `span_bound` certifies moved by whole periods): on a surface
+            // with no implicit form the spans the fit certified, on the
+            // other surface certified here, in one pass (`None` past ten
+            // resolutions, for the caller to fit).
+            let pcurve = |k: usize| -> Result<Option<(NurbsCurve2, f64)>, Failure> {
+                if !feet_too {
+                    return Ok(None);
+                }
+                let s = surfaces[k];
+                let bound = if imps[k].is_none() {
+                    worst[k].max(LINEAR_RESOLUTION)
+                } else {
+                    let mut b = 0.0f64;
+                    for w in samples.windows(2) {
+                        let foot = |x: &S| x.2[k].expect("a foot on both surfaces");
+                        let sp = span(&w[0], &w[1], k);
+                        b = b.max(span_bound(
+                            s,
+                            (foot(&w[0]), w[0].1[k].1),
+                            (foot(&w[1]), w[1].1[k].1),
+                            [w[0].0, w[1].0],
+                            &sp,
+                        ));
+                    }
+                    if b.is_nan() || b > 10.0 * LINEAR_RESOLUTION {
+                        return Ok(None);
+                    }
+                    b.max(LINEAR_RESOLUTION)
+                };
+                let mut feet: Vec<(Point2, Vector2)> = Vec::with_capacity(samples.len());
+                for x in &samples {
+                    let raw = x.2[k].ok_or(Failure::Uncertain)?;
+                    let uv = match feet.last() {
+                        Some(&(prev, _)) => unwrapped(s, raw, prev),
+                        None => raw,
+                    };
+                    let v = uv_velocity(s, raw, x.1[k].1).ok_or(Failure::Uncertain)?;
+                    feet.push((uv, v));
+                }
+                let mut pts = vec![feet[0].0];
+                for (w, f) in samples.windows(2).zip(feet.windows(2)) {
+                    let h = w[1].0 - w[0].0;
+                    let c = hermite(f[0].0.to_vector(), f[0].1, f[1].0.to_vector(), f[1].1, h);
+                    pts.extend(c[1..].iter().map(|&v| Point2::ORIGIN + v));
+                }
+                NurbsCurve2::new(kv.clone(), pts, None)
+                    .map(|pc| Some((pc, bound)))
+                    .map_err(|_| Failure::Uncertain)
+            };
+            return Ok(FitOn {
+                curves: [curve(0)?, curve(1)?],
+                bounds: worst.map(|w| w.max(LINEAR_RESOLUTION)),
+                pcurves: [pcurve(0)?, pcurve(1)?],
+            });
         }
         for &i in split.iter().rev() {
             let mid = sample((samples[i].0 + samples[i + 1].0) / 2.0)?;

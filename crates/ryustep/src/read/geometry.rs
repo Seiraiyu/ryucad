@@ -471,7 +471,18 @@ impl Geo<'_> {
                     .map_err(fail)
             }
             SSurface::Offset { basis, distance } => {
-                match self.surface(*basis)?.offset(self.len(*distance)) {
+                let base = self.surface(*basis)?;
+                // STEP offsets along `σ_u × σ_v`; a surface of revolution
+                // runs on its curve first, the reverse of ryukei's, so its
+                // normal is the reverse too. A spline's, an extrusion's or a
+                // revolution's offset is over its whole domain.
+                let d = self.len(*distance);
+                let d = if matches!(base, Surface::Revolution(_)) {
+                    -d
+                } else {
+                    d
+                };
+                match base.offset(d) {
                     Some(s) => s.map_err(fail),
                     None => Err(ImportError::NotBounded { instance: id }),
                 }
@@ -762,8 +773,25 @@ mod tests {
              #3=SURFACE_OF_LINEAR_EXTRUSION('',#1,#2);\
              #10=DIRECTION('',(0.,1.,0.));#11=AXIS2_PLACEMENT_3D('',#12,#10,#92);\
              #12=CARTESIAN_POINT('',(20.,2.,3.));#13=CIRCLE('',#11,4.);\
-             #14=AXIS1_PLACEMENT('',#90,#91);#15=SURFACE_OF_REVOLUTION('',#13,#14);");
+             #14=AXIS1_PLACEMENT('',#90,#91);#15=SURFACE_OF_REVOLUTION('',#13,#14);\
+             #16=OFFSET_SURFACE('',#3,1.,.F.);#17=OFFSET_SURFACE('',#15,1.,.F.);");
         let g = geo(&e);
+        // Offsets of swept surfaces are offsets, along STEP's `σ_u × σ_v`:
+        // a revolution's runs on its curve first, the reverse of ryukei's.
+        for (base, offset) in [(3, 16), (15, 17)] {
+            let (b, o) = (g.surface(base).unwrap(), g.surface(offset).unwrap());
+            assert!(matches!(o, Surface::Offset(_)), "{o:?}");
+            for (u, v) in [(0.3, 0.2e-3), (2.0, 1.5), (4.0, 3.0)] {
+                let e = b.eval(u, v);
+                let n = if base == 15 {
+                    e.dv.cross(e.du)
+                } else {
+                    e.du.cross(e.dv)
+                };
+                let want = e.point + n.normalize().unwrap().get() * 1e-3;
+                assert!(close(o.point(u, v), want), "#{offset} at {u}, {v}");
+            }
+        }
         assert!(matches!(g.surface(3).unwrap(), Surface::Extrusion(_)));
         // A circle in the xz half-plane, turned about z: its frame's x
         // points to it.

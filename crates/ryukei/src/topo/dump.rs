@@ -118,12 +118,18 @@ pub(crate) fn surface(s: &Surface) -> String {
                 floats(n.weights())
             )
         }
-        Surface::Pipe(p) => format!(
-            "pipe r={} spine={} anchor=({})",
-            bits(p.radius()),
-            curve(p.spine()),
-            surface(p.anchor())
-        ),
+        Surface::Pipe(p) => {
+            let mut s = format!(
+                "pipe r={} spine={} anchor=({})",
+                bits(p.radius()),
+                curve(p.spine()),
+                surface(p.anchor())
+            );
+            if let Some((c, map)) = p.rail() {
+                s += &format!(" rail=({}) map={}", curve2(c), floats(&map));
+            }
+            s
+        }
         Surface::Sweep(w) => {
             let law = match w.law() {
                 crate::geom::FrameLaw::Minimal => "minimal".to_owned(),
@@ -143,6 +149,17 @@ pub(crate) fn surface(s: &Surface) -> String {
                 bits(w.scale())
             )
         }
+        Surface::Offset(o) => format!(
+            "offset d={} over={} base=({})",
+            bits(o.distance()),
+            floats(&[
+                o.domain()[0][0],
+                o.domain()[0][1],
+                o.domain()[1][0],
+                o.domain()[1][1]
+            ]),
+            surface(o.base())
+        ),
     }
 }
 

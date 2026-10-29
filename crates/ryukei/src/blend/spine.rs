@@ -34,6 +34,11 @@ pub(crate) struct Spine {
     /// The faces the spine was made from, and their offsets.
     pub(crate) faces: [FaceId; 2],
     pub(crate) offsets: [Surface; 2],
+    /// The faces' surfaces the offsets stand on: a spline's or swept
+    /// surface's carried past its domain where the face reaches its edge
+    /// ([`room`]), so rails and pipes run on past the face's ends; the
+    /// rest as they are.
+    pub(crate) supports: [Surface; 2],
     pub(crate) convex: bool,
     pub(crate) radius: f64,
     /// The spine's parameter at the ball that touches the edge's middle.
@@ -57,28 +62,43 @@ pub(crate) fn spine(body: &Body, spec: &Spec, radius: f64) -> Result<Spine, Erro
     };
     let too_large = || -> Error { BlendError::RadiusTooLarge { edge: at }.into() };
     let mut offsets = Vec::with_capacity(2);
-    for &face in &spec.faces {
+    let mut supports = Vec::with_capacity(2);
+    for (i, &face) in spec.faces.iter().enumerate() {
         let f = &body.faces[face];
-        let s = &body.surfaces[f.surface];
+        let own = &body.surfaces[f.surface];
+        let flat = twin(own);
+        let s = flat.as_ref().unwrap_or(own);
         // Towards the material: against the outward normal at a convex
         // edge, along it at a concave one.
         let outward = if f.sense == Sense::Forward { 1.0 } else { -1.0 };
         let d = if convex { -radius } else { radius } * outward;
-        let off = s
-            .offset(d)
-            .ok_or(BlendError::Unsupported { at: f.name })?
-            .map_err(|_| too_large())?;
-        offsets.push(off);
+        // A spline's or swept surface's offset over about the face's own
+        // box: the ball touches the face only there, and the whole surface
+        // may fold where the face doesn't reach.
+        let rect = intersect::face_rect(body, face);
+        let (support, domain) = room(s, rect, ROOM[i]);
+        let off = match support.offset_within(d, domain) {
+            Some(Ok(o)) => (o, support),
+            Some(Err(_)) if &support != s => {
+                // Carried on, it folded; the face's own box alone may not.
+                let rect = rect.unwrap_or(s.domain());
+                let o = s
+                    .offset_within(d, rect)
+                    .ok_or(BlendError::Unsupported { at: f.name })?
+                    .map_err(|_| too_large())?;
+                (o, s.clone())
+            }
+            Some(Err(_)) => return Err(too_large()),
+            None => return Err(BlendError::Unsupported { at: f.name }.into()),
+        };
+        offsets.push(off.0);
+        supports.push(off.1);
     }
     let offsets: [Surface; 2] = [offsets[0].clone(), offsets[1].clone()];
+    let supports: [Surface; 2] = [supports[0].clone(), supports[1].clone()];
     let centre = mid_centre(body, spec, &offsets, radius, convex).ok_or_else(too_large)?;
     let region = region(body, spec, radius);
-    let hit = match (&offsets[0], &offsets[1]) {
-        (Surface::Pipe(_), _) | (_, Surface::Pipe(_)) => {
-            intersect::pipe_surface(&offsets[0], &offsets[1], &region)
-        }
-        _ => intersect::surface_surface(&offsets[0], &offsets[1], &region),
-    };
+    let hit = super::meet(&offsets[0], &offsets[1], &region);
     let branches = match hit {
         Ok(SurfaceHit::Meet { branches, .. }) => branches,
         Ok(SurfaceHit::Coincident { .. }) => return Err(BlendError::Unsupported { at }.into()),
@@ -123,6 +143,7 @@ pub(crate) fn spine(body: &Body, spec: &Spec, radius: f64) -> Result<Spine, Erro
         tolerance: b.tolerance.max(LINEAR_RESOLUTION),
         faces: spec.faces,
         offsets,
+        supports,
         convex,
         radius,
         mid,
@@ -149,12 +170,12 @@ impl Spine {
     }
 
     /// The point where the ball centred at the spine's parameter `t`
-    /// touches face `k` (in the order of [`Spec::faces`]), by the face's
-    /// surface at the spine's pcurve on its offset.
-    pub(crate) fn foot(&self, surfaces: [&Surface; 2], k: usize, t: f64) -> Point3 {
+    /// touches face `k` (in the order of [`Spec::faces`]), by the surface
+    /// its offset stands on at the spine's pcurve on the offset.
+    pub(crate) fn foot(&self, k: usize, t: f64) -> Point3 {
         let (c, m) = &self.pcurves[k];
         let uv = c.point(m[0] + m[1] * t);
-        surfaces[k].point(uv.x, uv.y)
+        self.supports[k].point(uv.x, uv.y)
     }
 }
 
@@ -195,6 +216,110 @@ pub(crate) fn nearest(curve: &Curve, range: [f64; 2], p: Point3) -> (f64, f64) {
     }
     .clamp(range[0], range[1]);
     (t, curve.point(t).distance(p))
+}
+
+/// The surfaces of a resolved edge's faces, in its order, as blends work
+/// on them: each carried past its domain about the face as [`room`]
+/// carries it.
+pub(crate) fn supports(body: &Body, spec: &Spec) -> [Surface; 2] {
+    [0, 1].map(|i| {
+        let face = spec.faces[i];
+        let own = &body.surfaces[body.faces[face].surface];
+        match twin(own) {
+            Some(plane) => plane,
+            None => room(own, intersect::face_rect(body, face), ROOM[i]).0,
+        }
+    })
+}
+
+/// The plane a flat NURBS lies in (every control point within half the
+/// resolution of it, [`intersect::coincide::planar`]), its normal along the
+/// spline's natural normal: blends work on it, so their spines, rails and
+/// surfaces between flat splines are lines, cylinders and tori, and their
+/// rails' pcurves are found on the spline itself after
+/// ([`super::rail::onto`]).
+pub(crate) fn twin(s: &Surface) -> Option<Surface> {
+    let Surface::Nurbs(n) = s else {
+        return None;
+    };
+    let plane = intersect::coincide::planar(n)?;
+    let f = *plane.frame()?;
+    let [du, dv] = n.domain();
+    let mid = n.normal((du[0] + du[1]) / 2.0, (dv[0] + dv[1]) / 2.0)?;
+    if mid.get().dot(f.z().get()) > 0.0 {
+        Some(plane)
+    } else {
+        let flipped = crate::geom::Frame::new(f.origin(), -f.z().get(), f.x().get()).ok()?;
+        Some(Surface::Plane(crate::geom::Plane::new(flipped)))
+    }
+}
+
+/// How much of its width each of an edge's faces grows by ([`room`]).
+const ROOM: [f64; 2] = [0.25, 0.3];
+
+/// The surface a face's offset stands on and the box of its parameters
+/// it is over. An analytic surface or a pipe stands as it is. A spline's
+/// or swept surface's box is the face's (`rect`) grown by `part` of its
+/// width each way along every bounded direction, the surface carried
+/// exactly past its domain where that reaches beyond it
+/// ([`intersect::carried_by`], the margins past the domain halved up to
+/// four times where a rational spline can't be carried so far): a face
+/// often fills its surface's domain,
+/// and a spine ending on its edge would end the blend exactly on the face
+/// cutting it off, where no crossing can be found. The two faces grow by
+/// different parts ([`ROOM`]), so their offsets' boxes don't end
+/// together either.
+pub(crate) fn room(
+    s: &Surface,
+    rect: Option<[[f64; 2]; 2]>,
+    part: f64,
+) -> (Surface, [[f64; 2]; 2]) {
+    let domain = s.domain();
+    let Some(rect) = rect else {
+        return (s.clone(), domain);
+    };
+    if s.frame().is_some() || matches!(s, Surface::Pipe(_)) {
+        return (s.clone(), rect);
+    }
+    let (pu, pv) = s.periods();
+    let periods = [pu, pv];
+    let mut grown = rect;
+    let mut past = [[0.0; 2]; 2];
+    for k in 0..2 {
+        if periods[k].is_some() {
+            continue;
+        }
+        let m = part * (rect[k][1] - rect[k][0]);
+        grown[k] = [rect[k][0] - m, rect[k][1] + m];
+        past[k] = [
+            (domain[k][0] - grown[k][0]).max(0.0),
+            (grown[k][1] - domain[k][1]).max(0.0),
+        ];
+    }
+    // Carried too far, a rational spline's weights can reach zero
+    // (`extended` refuses): halve the margins up to four times.
+    for _ in 0..5 {
+        if past.iter().flatten().all(|&m| m == 0.0) {
+            break;
+        }
+        if let Some(c) = intersect::carried_by(s, past) {
+            return (c, grown);
+        }
+        for k in 0..2 {
+            for side in 0..2 {
+                if past[k][side] > 0.0 {
+                    past[k][side] /= 2.0;
+                    let edge = domain[k][side];
+                    grown[k][side] = if side == 0 {
+                        edge - past[k][side]
+                    } else {
+                        edge + past[k][side]
+                    };
+                }
+            }
+        }
+    }
+    (s.clone(), grown)
 }
 
 /// Where the offsets are intersected: both faces' boxes, grown by twice
@@ -317,23 +442,10 @@ mod tests {
         let d = b.curve(ed.curve).unwrap().eval(ed.interval[0]).d1;
         assert!(s.curve.eval(s.mid).d1.dot(d) > 0.0);
         // The feet are on the faces, a radius from the centre.
-        let surfaces = s_faces(&b, &resolve(&b, &[fillet(e, 0.2)]).unwrap()[0]);
         for k in 0..2 {
-            let f = s.foot(surfaces, k, s.mid);
+            let f = s.foot(k, s.mid);
             assert!((f.distance(c) - 0.2).abs() < 1e-12);
         }
-    }
-
-    fn fillet(edge: Name, radius: f64) -> EdgeBlend {
-        EdgeBlend {
-            edge,
-            kind: BlendKind::Fillet { radius },
-        }
-    }
-
-    fn s_faces<'a>(b: &'a Body, spec: &Spec) -> [&'a Surface; 2] {
-        spec.faces
-            .map(|f| b.surface(b.face(f).unwrap().surface).unwrap())
     }
 
     #[test]
@@ -435,5 +547,75 @@ mod tests {
             spine_of(&s, n, 0.1).unwrap_err(),
             BlendError::SmoothEdge { edge: n }.into()
         );
+    }
+}
+
+#[cfg(test)]
+mod splines {
+    use super::*;
+    use crate::blend::spec::resolve;
+    use crate::blend::tests::{block, edge_of, spline_faces};
+    use crate::blend::{BlendKind, EdgeBlend};
+    use crate::name::FaceRole;
+
+    /// A box whose faces are flat splines: blends work on their planes,
+    /// so its spine is a line, and its feet are on the splines.
+    #[test]
+    fn flat_splines_give_exact_spines() {
+        let b = spline_faces(block());
+        let e = edge_of(&b, FaceRole::PlusX, FaceRole::PlusZ);
+        let specs = resolve(
+            &b,
+            &[EdgeBlend {
+                edge: e,
+                kind: BlendKind::Fillet { radius: 0.2 },
+            }],
+        )
+        .unwrap();
+        let s = spine(&b, &specs[0], 0.2).unwrap();
+        assert!(matches!(s.curve, Curve::Line(_)), "{:?}", s.curve);
+        for k in 0..2 {
+            assert!(matches!(s.supports[k], Surface::Plane(_)));
+            let face = &b.faces[specs[0].faces[k]];
+            let own = &b.surfaces[face.surface];
+            assert!(own.distance(s.foot(k, s.mid)) <= 1e-12);
+        }
+    }
+
+    /// A curved spline face is carried past its domain: grown by a part
+    /// of its box, carried exactly where that passes the domain's edge.
+    #[test]
+    fn curved_splines_are_carried_on() {
+        use crate::geom::Plane;
+        let n = crate::geom::offset::tests::wavy();
+        assert_eq!(twin(&n), None);
+        assert_eq!(n.domain(), [[0.0, 1.0], [0.0, 1.0]]);
+        let near = |a: [[f64; 2]; 2], b: [[f64; 2]; 2]| {
+            a.iter()
+                .flatten()
+                .zip(b.iter().flatten())
+                .all(|(x, y)| (x - y).abs() < 1e-12)
+        };
+        // Inside its domain, nothing is carried.
+        let (carried, grown) = room(&n, Some([[0.2, 0.8], [0.3, 0.7]]), 0.25);
+        assert!(near(grown, [[0.05, 0.95], [0.2, 0.8]]), "{grown:?}");
+        assert_eq!(carried, n);
+        // Filling it, the spline is carried past its edges: a quarter of
+        // a unit is too far for its weights, so by less.
+        let (carried, grown) = room(&n, Some([[0.0, 1.0], [0.0, 1.0]]), 0.25);
+        assert_ne!(carried, n);
+        let [du, dv] = carried.domain();
+        assert!(
+            du[0] < 0.0 && du[1] > 1.0 && dv[0] < 0.0 && dv[1] > 1.0,
+            "{du:?} {dv:?}"
+        );
+        assert!(near(grown, [du, dv]), "{grown:?}");
+        // Exactly: the same points over the old domain.
+        for (u, v) in [(0.1, 0.2), (0.7, 0.9)] {
+            assert!(carried.point(u, v).distance(n.point(u, v)) <= 1e-13);
+        }
+        let plane = Surface::Plane(Plane::new(crate::geom::Frame::WORLD));
+        let rect = [[0.2, 0.8], [0.3, 0.7]];
+        assert_eq!(room(&plane, Some(rect), 0.25), (plane.clone(), rect));
     }
 }

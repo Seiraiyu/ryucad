@@ -32,6 +32,7 @@ pub(crate) fn cells(s: &Surface, near: &Box3) -> Vec<Cell> {
         Surface::Revolution(r) => (parts([0.0, TAU], 8), pieces(r.curve())),
         Surface::Pipe(p) => (pieces(p.spine()), parts(dv, 8)),
         Surface::Sweep(w) => return reaching(s, w.cells(), near),
+        Surface::Offset(o) => return reaching(s, o.cells().to_vec(), near),
         _ => {
             let f = s.frame().expect("an analytic surface");
             let o = f.origin().to_vector();
@@ -72,7 +73,7 @@ pub(crate) fn cells(s: &Surface, near: &Box3) -> Vec<Cell> {
     reaching(s, out, near)
 }
 
-/// A box holding the part of a NURBS, revolution or sweep over `rect`
+/// A box holding the part of a NURBS, revolution, sweep or offset over `rect`
 /// of its parameters: the hull of its enclosures over its own cells cut
 /// to `rect`. `None` for other surfaces, or where an enclosure fails.
 pub(crate) fn enclosure(s: &Surface, rect: [[f64; 2]; 2]) -> Option<Box3> {
@@ -85,6 +86,7 @@ pub(crate) fn enclosure(s: &Surface, rect: [[f64; 2]; 2]) -> Option<Box3> {
                 .collect()
         }
         Surface::Sweep(w) => w.cells(),
+        Surface::Offset(o) => o.cells().to_vec(),
         _ => return None,
     };
     let sheet = Sheet::of(s);
