@@ -586,15 +586,7 @@ impl View {
     /// lines from its origin, a tenth of the model's size long, and its
     /// name (`a` or `b`) at its origin.
     pub fn mate_frames(&mut self, ws: &Workspace) -> (Vec<(Place, Rgb)>, Vec<FrameName>) {
-        let frames = self.chosen.as_ref().and_then(|k| {
-            ws.model
-                .parts
-                .get(&k.0)?
-                .feature(&k.1)?
-                .mate
-                .as_ref()?
-                .frames
-        });
+        let frames = self.chosen.as_ref().and_then(|k| ws.model.mate_frames(k));
         let Some(frames) = frames else {
             return (Vec::new(), Vec::new());
         };
