@@ -6,6 +6,7 @@
 
 use crate::cluster::Cluster;
 use crate::geom::{GRID, Nm, Place, Point, Rect, Side};
+use crate::idiom;
 use crate::input::{Block, NetKind, PartKind, Relayout};
 use crate::label;
 use crate::layout::{Label, LabelKind, Layout, NetStyle, Placed, Sheet};
@@ -23,7 +24,9 @@ pub const SPACING: Nm = 2 * GRID;
 pub const SHEET_GAP: Nm = 10 * GRID;
 /// A net whose wires would run longer than this share of a sheet's width
 /// takes labels.
-const LONG_SHARE: (Nm, Nm) = (3, 5);
+const LONG_SHARE: (Nm, Nm) = (1, 4);
+/// A connection crossing more wires than this takes labels instead.
+const CROWDED: usize = 2;
 
 /// A warning about the result: an instruction whose subject is gone, a
 /// sheet full.
@@ -42,6 +45,8 @@ pub struct Outcome {
     /// Each sheet's nets that fell back to labels, by sheet: what lint
     /// reads as wires that didn't fit.
     pub fallbacks: BTreeMap<String, BTreeSet<String>>,
+    /// The idioms found, as drawn.
+    pub idioms: Vec<idiom::Idiom>,
 }
 
 /// Work in progress: each part's sheet and place.
@@ -132,17 +137,11 @@ pub fn default_turn(block: &Block, p: usize) -> (u16, bool) {
     (0, false)
 }
 
-/// Each part alone, turned as `turn` says.
-fn singles(block: &Block, parts: &[usize], turn: &dyn Fn(usize) -> (u16, bool)) -> Vec<Cluster> {
-    parts
-        .iter()
-        .map(|&p| {
-            let (r, m) = turn(p);
-            let place = Place::new([0, 0], r, m);
-            let o = grid_origin(&block.parts[p], &place, [0, 0]);
-            Cluster::single(p, Place::new(o, r, m))
-        })
-        .collect()
+/// A part alone, turned so, its first pin on the grid at the origin.
+fn single(block: &Block, p: usize, (r, m): (u16, bool)) -> Cluster {
+    let place = Place::new([0, 0], r, m);
+    let o = grid_origin(&block.parts[p], &place, [0, 0]);
+    Cluster::single(p, Place::new(o, r, m))
 }
 
 /// Lays `block` out.
@@ -164,22 +163,51 @@ pub fn lay_out(block: &Block) -> Outcome {
     }
     // What stays where it was.
     keep(&mut st, prev, fresh_sheet);
-    let new: Vec<usize> = (0..block.parts.len())
-        .filter(|p| st.place[*p].is_none())
-        .collect();
     let turn = |p: usize| -> (u16, bool) {
         prev.and_then(|l| l.placed.get(&block.parts[p].key))
             .map_or_else(|| default_turn(block, p), |x| (x.rotation, x.mirror))
     };
-    let clusters = singles(block, &new, &turn);
+    // Every part's own cluster (a kept part where it is), joined by
+    // idioms.
+    let singles: Vec<Cluster> = (0..block.parts.len())
+        .map(|p| match st.place[p] {
+            Some((_, place, _)) => Cluster::single(p, place),
+            None => single(block, p, turn(p)),
+        })
+        .collect();
+    let idioms = idiom::find(block, &BTreeMap::new());
+    let clusters = idiom::clusters(block, &idioms, singles);
     let kept_any = st.place.iter().any(Option::is_some);
-    if kept_any {
-        insert(&mut st, prev, &clusters);
-    } else {
-        let all: Vec<usize> = (0..clusters.len()).collect();
-        flow_onto_sheets(&mut st, &clusters, all, fresh_sheet);
+    let is_new = |c: &Cluster| c.members.iter().all(|(p, _)| st.place[*p].is_none());
+    let mut fresh = Vec::new();
+    let mut again = Vec::new();
+    let mut mixed = Vec::new();
+    for (i, c) in clusters.iter().enumerate() {
+        let from_sheet = fresh_sheet.is_some_and(|sid| {
+            c.members.iter().all(|(p, _)| {
+                prev.and_then(|l| l.placed.get(&block.parts[*p].key))
+                    .is_some_and(|x| x.sheet == sid)
+            })
+        });
+        if !is_new(c) {
+            mixed.push(i);
+        } else if from_sheet {
+            again.push(i);
+        } else {
+            fresh.push(i);
+        }
     }
-    draw(st, prev)
+    if !kept_any && again.is_empty() {
+        flow_onto_sheets(&mut st, &clusters, fresh, fresh_sheet);
+    } else {
+        if !again.is_empty() {
+            flow_onto_sheets(&mut st, &clusters, again, fresh_sheet);
+        }
+        insert(&mut st, prev, &clusters, &fresh, &mixed);
+    }
+    let mut out = draw(st, prev);
+    out.idioms = idioms;
+    out
 }
 
 /// Places `which` clusters by flow on a fresh sheet (the one being laid
@@ -275,51 +303,116 @@ fn keep(st: &mut State, prev: Option<&Layout>, fresh: Option<&str>) {
     }
 }
 
-/// Places new clusters among kept parts: on the sheet most of its
-/// neighbours are on, at the free spot nearest them, clear of every
-/// part, wire, label and text the previous layout drew.
-fn insert(st: &mut State, prev: Option<&Layout>, clusters: &[Cluster]) {
+/// What the previous layout drew, by sheet: wires, labels and text, as
+/// boxes new parts keep clear of.
+fn drawn(prev: Option<&Layout>) -> BTreeMap<String, Vec<Rect>> {
+    let mut out: BTreeMap<String, Vec<Rect>> = BTreeMap::new();
+    let Some(prev) = prev else { return out };
+    for sheets in prev.routes.values() {
+        for (s, runs) in sheets {
+            for run in runs {
+                for w in run.windows(2) {
+                    out.entry(s.clone())
+                        .or_default()
+                        .push(Rect::new(w[0], w[1]).grow(GRID / 2));
+                }
+            }
+        }
+    }
+    for labels in prev.labels.values() {
+        for l in labels {
+            out.entry(l.sheet.clone())
+                .or_default()
+                .push(Rect::new(l.at, l.at).grow(3 * GRID));
+        }
+    }
+    for (key, fields) in &prev.text {
+        let Some(x) = prev.placed.get(key) else {
+            continue;
+        };
+        for at in fields.values() {
+            out.entry(x.sheet.clone())
+                .or_default()
+                .push(Rect::new(*at, [at[0] + 6 * GRID, at[1] + GRID]).grow(GRID / 2));
+        }
+    }
+    out
+}
+
+/// The free origin nearest `want` for a cluster whose room at the origin
+/// is `e0`, on sheet `s`: inside the area, `gap` clear of every part
+/// there and clear of what the previous layout drew.
+fn spot(st: &State, s: usize, e0: Rect, want: Point, gap: Nm, drawn: &[Rect]) -> Option<Point> {
+    let block = st.block;
+    let a = area(block).grow(-MARGIN);
+    let others: Vec<Rect> = (0..block.parts.len())
+        .filter(|p| st.place[*p].is_some_and(|(x, _, _)| x == s))
+        .filter_map(|p| st.shape(p).map(|sh| sh.extent))
+        .collect();
+    let fits = |o: Point| {
+        let e = e0.shift(o);
+        a.contains(&e)
+            && !others.iter().any(|r| r.overlaps(&e.grow(gap)))
+            && !drawn.iter().any(|r| r.overlaps(&e.grow(GRID)))
+    };
+    let want = [crate::geom::snap(want[0]), crate::geom::snap(want[1])];
+    let max = block.sheet[0].max(block.sheet[1]) / GRID;
+    for r in 0..=max {
+        for (dx, dy) in ring(r) {
+            let o = [want[0] + dx * GRID, want[1] + dy * GRID];
+            if fits(o) {
+                return Some(o);
+            }
+        }
+    }
+    None
+}
+
+/// Places what is new among kept parts: a new member of a cluster that
+/// has kept ones where its idiom puts it (else the free spot nearest
+/// that), on their sheet; a new cluster on the sheet most of its
+/// neighbours are on, at the free spot nearest them. Nothing kept moves,
+/// and nothing goes where the previous layout drew.
+fn insert(
+    st: &mut State,
+    prev: Option<&Layout>,
+    clusters: &[Cluster],
+    fresh: &[usize],
+    mixed: &[usize],
+) {
     let block = st.block;
     if st.sheets.is_empty() {
         st.new_sheet(None);
     }
-    // What the previous layout drew, per sheet: wires, labels and text.
-    let mut drawn: BTreeMap<String, Vec<Rect>> = BTreeMap::new();
-    if let Some(prev) = prev {
-        for sheets in prev.routes.values() {
-            for (s, runs) in sheets {
-                for run in runs {
-                    for w in run.windows(2) {
-                        drawn
-                            .entry(s.clone())
-                            .or_default()
-                            .push(Rect::new(w[0], w[1]).grow(GRID / 2));
-                    }
+    let drawn = drawn(prev);
+    for &ci in mixed {
+        let c = &clusters[ci];
+        let s = c
+            .members
+            .iter()
+            .find_map(|(p, _)| st.place[*p].map(|(s, _, _)| s))
+            .expect("a kept member");
+        let sid = st.sheets[s].0.clone();
+        let blocked = drawn.get(&sid).cloned().unwrap_or_default();
+        for &(p, place) in &c.members {
+            if st.place[p].is_some() {
+                continue;
+            }
+            let at0 = Place::new([0, 0], place.rotation, place.mirror);
+            let e0 = Shape::of(&block.parts[p], at0).extent;
+            match spot(st, s, e0, place.at, GRID, &blocked) {
+                Some(o) => {
+                    st.place[p] = Some((s, Place::new(o, place.rotation, place.mirror), false))
+                }
+                None => {
+                    let single = Cluster::single(p, at0);
+                    full(st, &single, &sid);
                 }
             }
         }
-        for labels in prev.labels.values() {
-            for l in labels {
-                drawn
-                    .entry(l.sheet.clone())
-                    .or_default()
-                    .push(Rect::new(l.at, l.at).grow(3 * GRID));
-            }
-        }
-        for (key, fields) in &prev.text {
-            let Some(x) = prev.placed.get(key) else {
-                continue;
-            };
-            for at in fields.values() {
-                drawn
-                    .entry(x.sheet.clone())
-                    .or_default()
-                    .push(Rect::new(*at, [at[0] + 6 * GRID, at[1] + GRID]).grow(GRID / 2));
-            }
-        }
     }
-    let a = area(block).grow(-MARGIN);
-    for c in clusters {
+    for &ci in fresh {
+        let c = &clusters[ci];
         // The neighbours: kept parts sharing a signal net, by sheet.
         let nets: BTreeSet<usize> = c
             .members
@@ -338,6 +431,7 @@ fn insert(st: &mut State, prev: Option<&Layout>, clusters: &[Cluster]) {
                 }
             }
         }
+        let a = area(block).grow(-MARGIN);
         let (s, target) = match by_sheet
             .iter()
             .max_by_key(|(s, v)| (v.len(), usize::MAX - **s))
@@ -349,53 +443,41 @@ fn insert(st: &mut State, prev: Option<&Layout>, clusters: &[Cluster]) {
             }
             None => (0, a.center()),
         };
-        let others: Vec<Rect> = (0..block.parts.len())
-            .filter(|p| st.place[*p].is_some_and(|(x, _, _)| x == s))
-            .filter_map(|p| st.shape(p).map(|sh| sh.extent))
-            .collect();
-        let sheet_id = st.sheets[s].0.clone();
-        let blocked = drawn.get(&sheet_id).cloned().unwrap_or_default();
+        let sid = st.sheets[s].0.clone();
+        let blocked = drawn.get(&sid).cloned().unwrap_or_default();
         let e0 = c.room(block, [0, 0]);
-        let fits = |o: Point| {
-            let e = e0.shift(o);
-            a.contains(&e)
-                && !others.iter().any(|r| r.overlaps(&e.grow(SPACING)))
-                && !blocked.iter().any(|r| r.overlaps(&e.grow(GRID)))
-        };
-        let want = [
-            route::point_of(route::node_of([target[0] - e0.center()[0], 0]))[0],
-            route::point_of(route::node_of([0, target[1] - e0.center()[1]]))[1],
-        ];
-        let max = (block.sheet[0].max(block.sheet[1]) / GRID) as i64;
-        let mut found = None;
-        'rings: for r in 0..=max {
-            for (dx, dy) in ring(r) {
-                let o = [want[0] + dx * GRID, want[1] + dy * GRID];
-                if fits(o) {
-                    found = Some((s, o));
-                    break 'rings;
+        let want = [target[0] - e0.center()[0], target[1] - e0.center()[1]];
+        match spot(st, s, e0, want, SPACING, &blocked) {
+            Some(o) => {
+                for (p, place) in at(c, o) {
+                    st.place[p] = Some((s, place, false));
                 }
             }
+            None => full(st, c, &sid),
         }
-        let (s, o) = match found {
-            Some(f) => f,
-            None => {
-                let s = st.new_sheet(None);
-                let name = block.parts[c.first()].key.clone();
-                st.notes.push(Note {
-                    code: "sheet_full".into(),
-                    message: format!(
-                        "sheet {sheet_id} has no room for {name}; it goes on sheet {}",
-                        st.sheets[s].0
-                    ),
-                    details: json!({"sheet": sheet_id, "parts": [name], "to": st.sheets[s].0}),
-                });
-                (s, [MARGIN - e0.min[0], block.sheet[1] - MARGIN - e0.max[1]])
-            }
-        };
-        for (p, place) in at(c, o) {
-            st.place[p] = Some((s, place, false));
-        }
+    }
+}
+
+/// A cluster the sheet `sid` has no room for: onto a new sheet, noted.
+fn full(st: &mut State, c: &Cluster, sid: &str) {
+    let block = st.block;
+    let s = st.new_sheet(None);
+    let name = block.parts[c.first()].key.clone();
+    st.notes.push(Note {
+        code: "sheet_full".into(),
+        message: format!(
+            "sheet {sid} has no room for {name}; it goes on sheet {}",
+            st.sheets[s].0
+        ),
+        details: json!({"sheet": sid, "parts": [name], "to": st.sheets[s].0}),
+    });
+    let e0 = c.room(block, [0, 0]);
+    let o = [
+        crate::geom::snap(MARGIN - e0.min[0]),
+        crate::geom::snap(block.sheet[1] - MARGIN - e0.max[1]),
+    ];
+    for (p, place) in at(c, o) {
+        st.place[p] = Some((s, place, false));
     }
 }
 
@@ -657,6 +739,7 @@ fn draw(st: State, prev: Option<&Layout>) -> Outcome {
         layout,
         notes: st.notes,
         fallbacks,
+        idioms: Vec::new(),
     }
 }
 
@@ -784,7 +867,14 @@ fn route_net(
             .min_by_key(|(_, k)| *k)
             .expect("left");
         let (from, side) = left.remove(i);
+        if f.wired(from, net) {
+            joined.push(from);
+            continue;
+        }
         let path = f.search(net, from, side)?;
+        if f.crossings(net, &path) > CROWDED {
+            return None;
+        }
         let run = route::run_of(&path);
         total += route::length(&run);
         if total > long {

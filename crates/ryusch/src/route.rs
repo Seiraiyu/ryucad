@@ -41,6 +41,9 @@ struct Cell {
     near: bool,
     /// The net of a pin end here.
     pin: Option<usize>,
+    /// The net whose pin leaves through here: a step out from its end,
+    /// kept for it.
+    exit: Option<usize>,
     /// The net owning this node's horizontal arms, and its vertical ones.
     h: Option<usize>,
     v: Option<usize>,
@@ -128,9 +131,9 @@ impl Field {
         }
     }
 
-    /// Blocks every node touching `r`: text and labels.
+    /// Blocks every node within half a step of `r`: text and labels.
     pub fn block(&mut self, r: Rect) {
-        let (a, b) = (node_lo(r.min), node_hi(r.max));
+        let (a, b) = near(r);
         for x in a.0..=b.0 {
             for y in a.1..=b.1 {
                 if let Some(c) = self.at_mut((x, y)) {
@@ -143,7 +146,7 @@ impl Field {
     /// Whether a box touches no wire, pin or blocked node: where text and
     /// labels may go.
     pub fn clear(&self, r: Rect) -> bool {
-        let (a, b) = (node_lo(r.min), node_hi(r.max));
+        let (a, b) = near(r);
         for x in a.0..=b.0 {
             for y in a.1..=b.1 {
                 match self.at((x, y)) {
@@ -167,6 +170,12 @@ impl Field {
             }
             n = step(n, side);
         }
+        if net != NO_NET
+            && let Some(c) = self.at_mut(step(ee, side))
+            && c.exit.is_none()
+        {
+            c.exit = Some(net);
+        }
         if let Some(c) = self.at_mut(ee) {
             c.pin = Some(net);
             c.blocked = false;
@@ -178,6 +187,24 @@ impl Field {
                 c.v = Some(net);
             }
         }
+    }
+
+    /// How many other nets' wires a path of `net` crosses.
+    pub fn crossings(&self, net: usize, path: &[Node]) -> usize {
+        path.iter()
+            .filter(|n| {
+                self.at(**n).is_some_and(|c| {
+                    c.arms != 0 && (c.h.is_some_and(|o| o != net) || c.v.is_some_and(|o| o != net))
+                })
+            })
+            .count()
+    }
+
+    /// Whether the pin of `net` ending at `end` already has a wire: a
+    /// search from another pin reached it.
+    pub fn wired(&self, end: Point, net: usize) -> bool {
+        self.at(node_of(end))
+            .is_some_and(|c| (c.arms & owned(c, net)).count_ones() >= 2)
     }
 
     /// Whether `n` belongs to `net`'s tree: a pin end or a wire of it.
@@ -198,7 +225,7 @@ impl Field {
             if c.blocked {
                 return Err(Clash(n));
             }
-            if c.pin.is_some_and(|p| p != net) {
+            if c.pin.is_some_and(|p| p != net) || c.exit.is_some_and(|e| e != net) {
                 return Err(Clash(n));
             }
             let mut want = 0u8;
@@ -322,7 +349,7 @@ impl Field {
                 }
                 return Some((true, 0));
             }
-            if c.blocked || c.pin.is_some() {
+            if c.blocked || c.pin.is_some() || c.exit.is_some_and(|e| e != net) {
                 return None;
             }
             let axis = if s.horizontal() { c.h } else { c.v };
@@ -425,6 +452,22 @@ fn owned(c: &Cell, net: usize) -> u8 {
     m
 }
 
+/// The nodes within half a step of `r` (exactly half a step away not
+/// counted): every node a wire touching the box would pass through.
+fn near(r: Rect) -> (Node, Node) {
+    let h = GRID / 2 - 1;
+    (
+        (
+            -(-(r.min[0] - h)).div_euclid(GRID),
+            -(-(r.min[1] - h)).div_euclid(GRID),
+        ),
+        (
+            (r.max[0] + h).div_euclid(GRID),
+            (r.max[1] + h).div_euclid(GRID),
+        ),
+    )
+}
+
 fn node_lo(p: Point) -> Node {
     (p[0].div_euclid(GRID), p[1].div_euclid(GRID))
 }
@@ -489,7 +532,7 @@ mod tests {
     fn wires_go_round_bodies_and_join_their_tree() {
         let mut f = Field::new([40 * GRID, 30 * GRID]);
         f.block_body(Rect::new(g(10, 5), g(14, 20)));
-        f.pin(g(8, 10), g(6, 10), Side::Left, 0);
+        f.pin(g(9, 10), g(7, 10), Side::Left, 0);
         f.pin(g(18, 10), g(20, 10), Side::Right, 1);
         f.pin(g(3, 10), g(4, 10), Side::Right, 2);
         f.pin(g(27, 10), g(26, 10), Side::Left, 2);
