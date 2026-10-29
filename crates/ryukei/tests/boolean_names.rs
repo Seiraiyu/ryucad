@@ -192,3 +192,58 @@ fn a_face_touched_flush_from_outside_keeps_its_name() {
         assert!(!touched, "{e:?}");
     }
 }
+
+/// A disc of radius 1 and height 1 whose side is two faces on one
+/// cylinder (the circle drawn as two half arcs), as files written by
+/// other CAD hold a plated hole's wall: two faces on one surface either
+/// side of an edge, and two edges on one circle either side of a vertex.
+fn split_disc() -> Body {
+    use core::f64::consts::PI;
+    use ryukei::geom::{Circle2, Curve2, Frame, Frame2, Point2, Vector2};
+    use ryukei::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
+    let f = Frame2::new(Point2::new(0.0, 0.0), Vector2::new(1.0, 0.0), true).unwrap();
+    let arc = |key: u128, t0: f64| Segment {
+        key: SegmentKey(key),
+        curve: Curve2::Circle2(Circle2::new(f, 1.0).unwrap()),
+        t0,
+        t1: t0 + PI,
+    };
+    let profile = ValidProfile::new(Profile {
+        frame: Frame::WORLD,
+        loops: vec![Loop {
+            key: LoopKey(1),
+            segments: vec![arc(11, 0.0), arc(12, PI)],
+        }],
+    })
+    .unwrap();
+    extrude(OpKey(1), &profile, Vector3::new(0.0, 0.0, 1.0), 0.0, 1.0)
+        .unwrap()
+        .0
+}
+
+/// Issue #204: a boolean merges only what it made. Faces on one surface
+/// either side of an edge the target had, and edges on one curve either
+/// side of a vertex it had, stay as they were when the tool is nowhere
+/// near them: a hole through the disc's middle renames none of its side.
+#[test]
+fn faces_on_one_surface_the_target_had_keep_their_names() {
+    let disc = split_disc();
+    assert_eq!(disc.counts().faces, 4);
+    let rod = primitive::cylinder(OpKey(2), 0.2, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let (b, journal) = holes(&disc, &rod, &[at(0.0, 0.0, -1.0)]);
+    // Both side faces, both laterals, all four cap arcs and their
+    // vertices are as they were; the caps keep their names with a hole.
+    let n = b.counts();
+    assert_eq!((n.faces, n.edges, n.vertices), (5, 8, 6));
+    let lost: Vec<Name> = names(&disc).difference(&names(&b)).copied().collect();
+    assert_eq!(lost, []);
+    assert!(
+        journal
+            .events()
+            .iter()
+            .all(|e| !matches!(e, Event::Merged { .. })),
+        "{journal:?}"
+    );
+}
