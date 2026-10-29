@@ -51,7 +51,9 @@ pub fn shell(key: OpKey, body: &Body, spec: &ShellSpec) -> Result<(Body, Journal
     let sign = if spec.outward { 1.0 } else { -1.0 };
     let mut faces: Vec<(Name, f64)> = spec.faces.iter().map(|&(f, d)| (f, sign * d)).collect();
     for &f in &spec.open {
-        if body.by_name(f).is_none_or(|e| !matches!(e, crate::topo::EntityId::Face(_)))
+        if body
+            .by_name(f)
+            .is_none_or(|e| !matches!(e, crate::topo::EntityId::Face(_)))
             || faces.iter().any(|x| x.0 == f)
         {
             return Err(OffsetError::NoSuchFace { face: f }.into());

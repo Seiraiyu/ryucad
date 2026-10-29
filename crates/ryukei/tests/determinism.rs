@@ -2483,7 +2483,9 @@ fn sweep_offsets_section(golden: &mut Golden) {
     )
     .unwrap();
     let c = Surface::Cylinder(Cylinder::new(tilted, 0.7).unwrap());
-    let (n, _) = c.to_nurbs([[0.0, core::f64::consts::PI], [-0.5, 0.5]]).unwrap();
+    let (n, _) = c
+        .to_nurbs([[0.0, core::f64::consts::PI], [-0.5, 0.5]])
+        .unwrap();
     let Some(Ok(Surface::Offset(o))) = Surface::Nurbs(Arc::new(n)).offset(0.075) else {
         panic!("an offset");
     };

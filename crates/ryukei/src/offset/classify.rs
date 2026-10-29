@@ -68,12 +68,11 @@ impl<'a> Plan<'a> {
         faces.sort_by_key(|&f| body.faces[f].name);
         let by_name: BTreeMap<Name, FaceId> =
             faces.iter().map(|&f| (body.faces[f].name, f)).collect();
-        let mut distance: BTreeMap<FaceId, f64> = faces.iter().map(|&f| (f, spec.distance)).collect();
+        let mut distance: BTreeMap<FaceId, f64> =
+            faces.iter().map(|&f| (f, spec.distance)).collect();
         let mut named: Vec<Name> = Vec::new();
         for &(face, d) in &spec.faces {
-            let f = *by_name
-                .get(&face)
-                .ok_or(OffsetError::NoSuchFace { face })?;
+            let f = *by_name.get(&face).ok_or(OffsetError::NoSuchFace { face })?;
             if named.contains(&face) {
                 return Err(OffsetError::NoSuchFace { face }.into());
             }
@@ -160,14 +159,9 @@ fn offset_surface(body: &Body, f: FaceId, d: f64) -> Result<Surface, Error> {
         return Ok(s.clone());
     }
     let d = if face.sense == Sense::Forward { d } else { -d };
-    let collapses = || -> Error {
-        OffsetError::FaceCollapses { face: face.name }.into()
-    };
+    let collapses = || -> Error { OffsetError::FaceCollapses { face: face.name }.into() };
     if s.frame().is_some() || matches!(s, Surface::Pipe(_)) {
-        return s
-            .offset(d)
-            .ok_or_else(collapses)?
-            .map_err(|_| collapses());
+        return s.offset(d).ok_or_else(collapses)?.map_err(|_| collapses());
     }
     let whole = s.domain();
     let (pu, pv) = s.periods();
@@ -247,7 +241,7 @@ fn classify(
             }
             .into());
         }
-        Err(BendFail::Uncertain) => return Err(super::uncertain(at, "classify.rs#1").into()),
+        Err(BendFail::Uncertain) => return Err(crate::OffsetError::Uncertain { at: at }.into()),
     };
     Ok((
         if convex == (da > 0.0) {

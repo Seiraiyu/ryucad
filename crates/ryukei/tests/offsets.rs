@@ -316,7 +316,11 @@ fn a_rounded_box_offsets_smoothly() {
     for d in [0.05, -0.05] {
         let (o, j) = offset_body(OFF, &b, &by(d)).unwrap();
         assert_eq!(o.counts().faces, b.counts().faces);
-        assert!(!j.events().iter().any(|e| matches!(e, Event::Replaced { .. })));
+        assert!(
+            !j.events()
+                .iter()
+                .any(|e| matches!(e, Event::Replaced { .. }))
+        );
         near(
             volume(&o, 2e-4),
             steiner_box(core.0, core.1, core.2, r + d),
@@ -354,7 +358,10 @@ fn a_box_shelled_open_at_its_top() {
     assert_eq!(o.face_loops(top).count(), 2);
     assert!(j.events().iter().any(|e| matches!(e, Event::Placed { .. })));
     // Outwards: the box grown below its top, less the box.
-    let spec = ShellSpec { outward: true, ..spec };
+    let spec = ShellSpec {
+        outward: true,
+        ..spec
+    };
     let (o, _) = shell(OpKey(0xc6), &b, &spec).unwrap();
     let (a, bb) = (1.0, 0.6);
     let above = a * bb * t + PI * t * t / 4.0 * 2.0 * (a + bb) + 2.0 / 3.0 * PI * t * t * t;

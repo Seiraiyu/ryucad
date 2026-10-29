@@ -491,9 +491,11 @@ fn offset_to_nurbs(cut: &mut Cut, k: usize, tolerance: f64) -> Result<(), Error>
     let mut range = [[0.0; 2]; 2];
     let mut whole = [false; 2];
     for d in 0..2 {
-        let (lo, hi) = info.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |a, l| {
-            (a.0.min(l.extent[d][0]), a.1.max(l.extent[d][1]))
-        });
+        let (lo, hi) = info
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |a, l| {
+                (a.0.min(l.extent[d][0]), a.1.max(l.extent[d][1]))
+            });
         let wraps = info.iter().any(|l| l.wind[d] != 0) || info.iter().all(|l| l.hole);
         let p = if d == 0 { periods.0 } else { periods.1 };
         range[d] = match p {

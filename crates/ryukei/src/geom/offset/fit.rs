@@ -97,7 +97,8 @@ impl Offset {
         // Cells certified in an earlier round, by their sides: a patch
         // depends only on its corners, so one whose sides didn't move is
         // the same patch.
-        let mut known: std::collections::BTreeMap<[u64; 4], f64> = std::collections::BTreeMap::new();
+        let mut known: std::collections::BTreeMap<[u64; 4], f64> =
+            std::collections::BTreeMap::new();
         for _ in 0..MAX_ROUNDS {
             let net = Net::new(self, &us, &vs);
             let mut halve_u = vec![false; us.len() - 1];
@@ -212,7 +213,9 @@ impl<'a> Net<'a> {
     /// The control points of the patch over cell `(i, j)`.
     fn patch(&self, i: usize, j: usize) -> [[Vector3; 4]; 4] {
         let nv = self.nv();
-        core::array::from_fn(|a| core::array::from_fn(|b| self.points[(3 * i + a) * nv + 3 * j + b]))
+        core::array::from_fn(|a| {
+            core::array::from_fn(|b| self.points[(3 * i + a) * nv + 3 * j + b])
+        })
     }
 
     /// The certified bound on the patch's distance from the offset over
@@ -225,13 +228,7 @@ impl<'a> Net<'a> {
     /// quartered where only Taylor's remainder, which shrinks with them,
     /// keeps the bound past the tolerance. `None` where the offset can't
     /// be enclosed.
-    fn bound(
-        &self,
-        o: &Offset,
-        i: usize,
-        j: usize,
-        tolerance: f64,
-    ) -> Option<Result<f64, usize>> {
+    fn bound(&self, o: &Offset, i: usize, j: usize, tolerance: f64) -> Option<Result<f64, usize>> {
         let p = self.patch(i, j);
         let (u0, u1) = (self.us[i], self.us[i + 1]);
         let (v0, v1) = (self.vs[j], self.vs[j + 1]);
@@ -247,7 +244,11 @@ impl<'a> Net<'a> {
         let mut stack: Vec<([f64; 2], [f64; 2], u32)> = (0..PIECES * PIECES)
             .map(|n| {
                 let (a, b) = ((n / PIECES) as f64, (n % PIECES) as f64);
-                ([a * step, (a + 1.0) * step], [b * step, (b + 1.0) * step], 0)
+                (
+                    [a * step, (a + 1.0) * step],
+                    [b * step, (b + 1.0) * step],
+                    0,
+                )
             })
             .collect();
         let mut seen = 0usize;
@@ -292,9 +293,7 @@ impl<'a> Net<'a> {
                 let evv = mag(h2[2][c] * k(1.0 / (hv * hv)) - q[c].h[2]);
                 let t = k(near[c])
                     + k(0.5)
-                        * (k(euu) * k(ru * ru)
-                            + k(2.0 * euv) * k(ru * rv)
-                            + k(evv) * k(rv * rv));
+                        * (k(euu) * k(ru * ru) + k(2.0 * euv) * k(ru * rv) + k(evv) * k(rv * rv));
                 sum += t.hi() * t.hi();
             }
             // The rounding of the floating point terms, generously.

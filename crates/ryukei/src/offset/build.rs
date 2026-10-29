@@ -98,7 +98,10 @@ impl<'a> Laid<'a> {
         let ((v0, t0), (v1, t1)) = if c.reversed { (b, a) } else { (a, b) };
         // A closed edge on a closed clamped curve runs over all of it,
         // from its vertex at the curve's start.
-        let ends_meet = c.curve.point(c.range[0]).distance(c.curve.point(c.range[1]))
+        let ends_meet = c
+            .curve
+            .point(c.range[0])
+            .distance(c.curve.point(c.range[1]))
             <= c.tolerance.max(LINEAR_RESOLUTION);
         let (mut t0, mut t1) = (t0, t1);
         if edge.start == edge.end && c.period.is_none() && ends_meet && t0 >= t1 {
@@ -120,7 +123,11 @@ impl<'a> Laid<'a> {
 
     fn vuse(&mut self, v: VertexId, g: &VertexGeo, u: VUse, part: Part) -> Use {
         let e = &g.edges[u.edge];
-        let pc = e.parts.iter().find(|p| p.0 == part).and_then(|p| p.1.clone());
+        let pc = e
+            .parts
+            .iter()
+            .find(|p| p.0 == part)
+            .and_then(|p| p.1.clone());
         Use {
             edge: self.vedges[&(v, u.edge)],
             sense: sense_of(u.from == e.from),
@@ -169,7 +176,12 @@ pub(crate) fn build(
                 let (a, b) = (vgeo[&edge.start].open[&s], vgeo[&edge.end].open[&t]);
                 let mut ids = Vec::new();
                 for side in 0..2 {
-                    ids.push(laid.cut(e, &rails[side], [a[side], b[side]], EdgeRole::Rail(e, side))?);
+                    ids.push(laid.cut(
+                        e,
+                        &rails[side],
+                        [a[side], b[side]],
+                        EdgeRole::Rail(e, side),
+                    )?);
                 }
                 ids
             }
@@ -288,7 +300,7 @@ pub(crate) fn build(
                 }
                 vec![Boundary::Arcs(arcs)]
             }
-            _ => return Err(super::uncertain(edge.name, "build.rs#19").into()),
+            _ => return Err(crate::OffsetError::Uncertain { at: edge.name }.into()),
         };
         laid.layout.faces.push(layout::Face {
             surface,
@@ -339,8 +351,10 @@ fn finish(
     let all: Vec<usize> = (0..laid.parts.len()).collect();
     let fail = |e: BuildError| -> Error {
         match e {
-            BuildError::NonManifold { faces, .. } => super::uncertain(first(&faces), "build.rs#20"),
-            BuildError::Inconsistent => super::uncertain(first(&all), "build.rs#21"),
+            BuildError::NonManifold { faces, .. } => {
+                crate::OffsetError::Uncertain { at: first(&faces) }
+            }
+            BuildError::Inconsistent => crate::OffsetError::Uncertain { at: first(&all) },
         }
         .into()
     };
@@ -357,14 +371,14 @@ fn finish(
     let mut outer_of: Vec<Option<usize>> = vec![None; shells.len()];
     for (i, s) in shells.iter().enumerate() {
         let Some(sh) = shell_of(s) else {
-            return Err(super::uncertain(first(&all), "build.rs#22").into());
+            return Err(crate::OffsetError::Uncertain { at: first(&all) }.into());
         };
         let region = body.shells[sh].region;
         let outer = body.regions[region].first_shell;
         if body.regions[region].kind == RegionKind::Solid && outer != Some(sh) {
             outer_of[i] = shells.iter().position(|x| shell_of(x) == outer);
             if outer_of[i].is_none() {
-                return Err(super::uncertain(first(s), "build.rs#23").into());
+                return Err(crate::OffsetError::Uncertain { at: first(s) }.into());
             }
         }
     }
@@ -401,10 +415,14 @@ fn finish(
     let part_name = |p: Part| -> Name {
         match p {
             Part::Face(f) => body.faces[f].name,
-            Part::Fill(e) => Name::derive(key, Role::Offset(OffsetRole::Edge), &[body.edges[e].name]),
-            Part::Sphere(v) => {
-                Name::derive(key, Role::Offset(OffsetRole::Vertex), &[body.vertices[v].name])
+            Part::Fill(e) => {
+                Name::derive(key, Role::Offset(OffsetRole::Edge), &[body.edges[e].name])
             }
+            Part::Sphere(v) => Name::derive(
+                key,
+                Role::Offset(OffsetRole::Vertex),
+                &[body.vertices[v].name],
+            ),
         }
     };
     // Edges.
@@ -419,7 +437,8 @@ fn finish(
             EdgeRole::Rail(o, side) => {
                 let fill = part_name(Part::Fill(o));
                 let face = body.faces[plan.face_of(plan.fins(o)[side])].name;
-                let n = out.derive_name("offset", key, Role::Offset(OffsetRole::Rail), &[fill, face]);
+                let n =
+                    out.derive_name("offset", key, Role::Offset(OffsetRole::Rail), &[fill, face]);
                 journal.push(Event::Created(n));
                 n
             }
@@ -449,7 +468,7 @@ fn finish(
             }
         };
         if !seen.insert(name) {
-            return Err(super::uncertain(name, "build.rs#24").into());
+            return Err(crate::OffsetError::Uncertain { at: name }.into());
         }
         out.rename(EntityId::Edge(e), name);
     }
@@ -482,7 +501,7 @@ fn finish(
             }
         };
         if !seen.insert(name) {
-            return Err(super::uncertain(name, "build.rs#25").into());
+            return Err(crate::OffsetError::Uncertain { at: name }.into());
         }
         out.rename(EntityId::Vertex(v), name);
     }
@@ -516,7 +535,7 @@ fn finish(
             new,
         });
     }
-    pcurves(&mut out).map_err(|_| super::uncertain(first(&all), "build.rs#26"))?;
+    pcurves(&mut out).map_err(|_| crate::OffsetError::Uncertain { at: first(&all) })?;
     judge(&out)?;
     Ok((out, journal))
 }
@@ -525,7 +544,10 @@ fn finish(
 /// [`crate::pcurve::exact`] finds it, else fitted, the edge's tolerance
 /// covering the fit.
 fn pcurves(body: &mut Body) -> Result<(), Error> {
-    let fins: Vec<_> = body.fins().filter(|&f| body.fins[f].pcurve.is_none()).collect();
+    let fins: Vec<_> = body
+        .fins()
+        .filter(|&f| body.fins[f].pcurve.is_none())
+        .collect();
     for fin in fins {
         let e = body.fins[fin].edge;
         let face = body.loops[body.fins[fin].loop_].face;
@@ -561,9 +583,12 @@ fn pcurves(body: &mut Body) -> Result<(), Error> {
 fn judge(body: &Body) -> Result<(), Error> {
     let faults = check(body);
     if let Some(f) = faults.first() {
-        let at = body.faces().next().map_or(Name::from_u128(0), |x| body.faces[x].name);
+        let at = body
+            .faces()
+            .next()
+            .map_or(Name::from_u128(0), |x| body.faces[x].name);
         let _ = f;
-        return Err(super::uncertain(at, "build.rs#27").into());
+        return Err(crate::OffsetError::Uncertain { at: at }.into());
     }
     let name = |f: FaceId| body.faces[f].name;
     let mut faults = check_intersections(body);
@@ -581,7 +606,9 @@ fn judge(body: &Body) -> Result<(), Error> {
             faces.sort();
             Err(OffsetError::SelfIntersecting { faces }.into())
         }
-        Some(Fault::CannotCheck { a, .. }) => Err(super::uncertain(name(*a), "build.rs#28").into()),
+        Some(Fault::CannotCheck { a, .. }) => {
+            Err(crate::OffsetError::Uncertain { at: name(*a) }.into())
+        }
         Some(_) => Err(OffsetError::Uncertain {
             at: name(body.faces().next().expect("a face")),
         }

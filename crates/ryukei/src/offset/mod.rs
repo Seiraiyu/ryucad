@@ -78,13 +78,3 @@ pub fn offset_body(key: OpKey, body: &Body, spec: &OffsetSpec) -> Result<(Body, 
     let vgeo = vertices::vertices(&plan, &geo)?;
     build::build(key, &plan, &geo, &vgeo)
 }
-
-/// TEMP: a refusal as uncertain, said where when `OFFDBG` is set.
-pub(crate) fn uncertain(at: Name, why: &str) -> crate::OffsetError {
-    if std::env::var("OFFDBG").is_ok() {
-        eprintln!("uncertain at {at:?}: {why}");
-    }
-    crate::OffsetError::Uncertain { at }
-}
-#[cfg(test)]
-mod scratch;

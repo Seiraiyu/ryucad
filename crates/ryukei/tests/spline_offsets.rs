@@ -102,17 +102,21 @@ fn an_extruded_spline_cylinder_offsets() {
     let (b, _) = extrude(K, &profile, Vector3::new(0.0, 0.0, 1.0), 0.0, 1.0).unwrap();
     let (r, h, d) = (0.5, 1.0, 0.1);
     let (o, _) = offset_body(OFF, &b, &by(d)).unwrap();
-    assert!(
-        o.faces()
-            .any(|f| matches!(o.surface(o.face(f).unwrap().surface), Some(Surface::Offset(_))))
-    );
+    assert!(o.faces().any(|f| matches!(
+        o.surface(o.face(f).unwrap().surface),
+        Some(Surface::Offset(_))
+    )));
     let want = PI * (r + d) * (r + d) * h
         + 2.0 * PI * r * r * d
         + PI * PI * r * d * d
         + 4.0 / 3.0 * PI * d * d * d;
     near(volume(&o, 2e-4), want, 2e-3);
     let (o, _) = offset_body(OFF, &b, &by(-d)).unwrap();
-    near(volume(&o, 2e-4), PI * (r - d) * (r - d) * (h - 2.0 * d), 2e-3);
+    near(
+        volume(&o, 2e-4),
+        PI * (r - d) * (r - d) * (h - 2.0 * d),
+        2e-3,
+    );
 }
 
 /// A square of side `s` centred on the frame's origin.
@@ -203,7 +207,11 @@ fn a_sweep_along_a_path_offsets() {
         let e = path_curve.eval(end);
         let n = e.d1.normalize().unwrap().get() * inward;
         let plane = e.point + n * d;
-        let (mut lo, mut hi) = if inward > 0.0 { (end, end + 1.0) } else { (end - 1.0, end) };
+        let (mut lo, mut hi) = if inward > 0.0 {
+            (end, end + 1.0)
+        } else {
+            (end - 1.0, end)
+        };
         for _ in 0..100 {
             let m = (lo + hi) / 2.0;
             let side = (path_curve.point(m) - plane).dot(n);

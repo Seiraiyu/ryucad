@@ -327,10 +327,7 @@ fn jet4_piece(pts: &[H], range: [f64; 2], s: [f64; 2]) -> [V3; 5] {
     let d4 = div3(
         sub3(
             sub3(
-                sub3(
-                    sub3(a4, scale3(d3, pt(4.0) * w1)),
-                    scale3(d2, pt(6.0) * w2),
-                ),
+                sub3(sub3(a4, scale3(d3, pt(4.0) * w1)), scale3(d2, pt(6.0) * w2)),
                 scale3(d1, pt(4.0) * w3),
             ),
             scale3(c, w4),

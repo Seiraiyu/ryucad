@@ -454,15 +454,30 @@ fn third_derivatives_match_differences() {
                 (d[4], e.duv),
                 (d[5], e.dvv),
             ] {
-                assert!((got - want).length() <= 1e-9 * (1.0 + want.length()), "{u} {s}");
+                assert!(
+                    (got - want).length() <= 1e-9 * (1.0 + want.length()),
+                    "{u} {s}"
+                );
             }
             let h = 1e-5;
             let du = |u: f64, s: f64| w.eval(u, s);
             let checks = [
-                (index(3, 0), (du(u + h, s).duu - du(u - h, s).duu) / (2.0 * h)),
-                (index(2, 1), (du(u, s + h).duu - du(u, s - h).duu) / (2.0 * h)),
-                (index(1, 2), (du(u + h, s).dvv - du(u - h, s).dvv) / (2.0 * h)),
-                (index(0, 3), (du(u, s + h).dvv - du(u, s - h).dvv) / (2.0 * h)),
+                (
+                    index(3, 0),
+                    (du(u + h, s).duu - du(u - h, s).duu) / (2.0 * h),
+                ),
+                (
+                    index(2, 1),
+                    (du(u, s + h).duu - du(u, s - h).duu) / (2.0 * h),
+                ),
+                (
+                    index(1, 2),
+                    (du(u + h, s).dvv - du(u - h, s).dvv) / (2.0 * h),
+                ),
+                (
+                    index(0, 3),
+                    (du(u, s + h).dvv - du(u, s - h).dvv) / (2.0 * h),
+                ),
             ];
             for (k, fd) in checks {
                 assert!(
@@ -524,5 +539,8 @@ fn sweeps_offset() {
     // The arc of radius 0.2 offset inwards by more than its radius turns
     // inside out.
     let s = Surface::Sweep(Arc::new(wavy()));
-    assert_eq!(s.offset(-0.25).map(|r| r.err()), Some(Some(Error::Degenerate)));
+    assert_eq!(
+        s.offset(-0.25).map(|r| r.err()),
+        Some(Some(Error::Degenerate))
+    );
 }

@@ -341,7 +341,9 @@ impl fmt::Display for Error {
 impl fmt::Display for OffsetError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::BadDistance => f.write_str("a distance that is not finite, too small or all zero"),
+            Self::BadDistance => {
+                f.write_str("a distance that is not finite, too small or all zero")
+            }
             Self::NoSuchFace { face } => write!(f, "no face {face}, or it is named twice"),
             Self::FaceCollapses { face } => write!(f, "face {face}'s offset folds or collapses"),
             Self::EdgeVanishes { edge } => write!(f, "edge {edge} vanishes"),

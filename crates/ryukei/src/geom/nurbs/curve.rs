@@ -328,11 +328,7 @@ impl NurbsCurve {
         let d1 = (av[1] - c * wv[1]) / wv[0];
         let d2 = (av[2] - d1 * (2.0 * wv[1]) - c * wv[2]) / wv[0];
         let d3 = (av[3] - d2 * (3.0 * wv[1]) - d1 * (3.0 * wv[2]) - c * wv[3]) / wv[0];
-        let d4 = (av[4]
-            - d3 * (4.0 * wv[1])
-            - d2 * (6.0 * wv[2])
-            - d1 * (4.0 * wv[3])
-            - c * wv[4])
+        let d4 = (av[4] - d3 * (4.0 * wv[1]) - d2 * (6.0 * wv[2]) - d1 * (4.0 * wv[3]) - c * wv[4])
             / wv[0];
         [c, d1, d2, d3, d4]
     }

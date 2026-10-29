@@ -3,8 +3,7 @@
 
 use super::classify::{Class, Plan};
 use crate::geom::{
-    Circle, Curve, Curve2, Cylinder, Frame, Line, Pipe, Point3, Sphere, Surface, Torus,
-    Vector3,
+    Circle, Curve, Curve2, Cylinder, Frame, Line, Pipe, Point3, Sphere, Surface, Torus, Vector3,
 };
 use crate::intersect::{Failure, SurfaceHit, fit_along, surface_surface};
 use crate::tol::LINEAR_RESOLUTION;
@@ -120,7 +119,7 @@ fn moved(plan: &Plan, e: EdgeId, fin: FinId) -> Result<NewCurve, Error> {
     let offset = &plan.surface[&face];
     let pc = body.fins[fin]
         .pcurve
-        .ok_or_else(|| super::uncertain(at, "edges.rs#2"))?;
+        .ok_or_else(|| crate::OffsetError::Uncertain { at: at })?;
     let pcurve = (body.curves2[pc.curve].clone(), pc.map);
     let curve = &body.curves[edge.curve];
     let [t0, t1] = edge.interval;
@@ -165,7 +164,7 @@ fn moved(plan: &Plan, e: EdgeId, fin: FinId) -> Result<NewCurve, Error> {
         }
     }
     let lifted = fit_along(offset, &pcurve.0, pcurve.1, edge.interval)
-        .map_err(|_| super::uncertain(at, "edges.rs#3"))?;
+        .map_err(|_| crate::OffsetError::Uncertain { at: at })?;
     Ok(NewCurve {
         curve: Curve::Nurbs(Arc::new(lifted.curve)),
         range: edge.interval,
@@ -262,7 +261,7 @@ fn closing(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> 
     let grow = 2.0 * reach;
     let region = curve.bounds(edge.interval).grow(grow);
     let hit = surface_surface(surfaces[0], surfaces[1], &region).map_err(|f| match f {
-        Failure::Uncertain => Error::from(super::uncertain(at, "edges.rs#4")),
+        Failure::Uncertain => Error::from(crate::OffsetError::Uncertain { at: at }),
         Failure::Unsupported => OffsetError::Unsupported {
             at,
             case: OffsetCase::PartlySmooth,
@@ -270,7 +269,7 @@ fn closing(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> 
         .into(),
     })?;
     let SurfaceHit::Meet { branches, .. } = hit else {
-        return Err(super::uncertain(at, "edges.rs#5").into());
+        return Err(crate::OffsetError::Uncertain { at: at }.into());
     };
     let best = branches
         .into_iter()
@@ -286,7 +285,7 @@ fn closing(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> 
         return Err(OffsetError::EdgeVanishes { edge: at }.into());
     }
     if b.tangent {
-        return Err(super::uncertain(at, "edges.rs#6").into());
+        return Err(crate::OffsetError::Uncertain { at: at }.into());
     }
     // A closed edge's closed clamped branch starts where its vertex goes,
     // so the edge can run over the whole of it.
@@ -301,7 +300,8 @@ fn closing(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> 
     let t = project_on(&b.curve, b.range, estimate).0;
     let along = curve.eval(tm).d1;
     let reversed = b.curve.eval(t).d1.dot(along) < 0.0;
-    let period = (b.curve.period() == Some(b.range[1] - b.range[0])).then(|| b.range[1] - b.range[0]);
+    let period =
+        (b.curve.period() == Some(b.range[1] - b.range[0])).then(|| b.range[1] - b.range[0]);
     let [pa, pb] = b.pcurves;
     Ok(NewCurve {
         curve: b.curve,
@@ -375,7 +375,6 @@ pub(crate) fn sphere(centre: Point3, radius: f64, feet: &[Point3]) -> Option<Sur
     Some(Surface::Sphere(Sphere::new(frame, radius).ok()?))
 }
 
-
 /// How many Newton steps find a closing edge's point in one section.
 const NEWTON: usize = 32;
 
@@ -405,22 +404,23 @@ fn traced(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> {
     let range = match curve {
         Curve::Line(_) => [t0 - 3.0 * reach, t1 + 3.0 * reach],
         Curve::Circle(c) if t1 - t0 < core::f64::consts::TAU => {
-            let m = (3.0 * reach / c.radius()).min((core::f64::consts::TAU - (t1 - t0)) / 2.0 * 0.9);
+            let m =
+                (3.0 * reach / c.radius()).min((core::f64::consts::TAU - (t1 - t0)) / 2.0 * 0.9);
             [t0 - m, t1 + m]
         }
         _ => [t0, t1],
     };
-    let uv = |k: usize, t: f64| {
-        body.fin_uv(fins[k], t.clamp(t0, t1))
-            .map(|p| [p.x, p.y])
-    };
+    let uv = |k: usize, t: f64| body.fin_uv(fins[k], t.clamp(t0, t1)).map(|p| [p.x, p.y]);
     let sample = |t: f64| -> Option<(Point3, Vector3)> {
         let c = curve.eval(t);
         let tan = c.d1.normalize()?.get();
         let tan_d = (c.d2 - tan * c.d2.dot(tan)) / c.d1.length();
         let start = moved_point(
             c.point,
-            [plan.normal(fins[0], t.clamp(t0, t1)), plan.normal(fins[1], t.clamp(t0, t1))],
+            [
+                plan.normal(fins[0], t.clamp(t0, t1)),
+                plan.normal(fins[1], t.clamp(t0, t1)),
+            ],
             ds,
         );
         let mut x = [uv(0, t)?, uv(1, t)?];
@@ -445,7 +445,10 @@ fn traced(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> {
                 [x[0][0] + step[0], x[0][1] + step[1]],
                 [x[1][0] + step[2], x[1][1] + step[3]],
             ];
-            if step.iter().all(|s| s.abs() <= 1e-15 * (1.0 + x[0][0].abs().max(x[1][0].abs()))) {
+            if step
+                .iter()
+                .all(|s| s.abs() <= 1e-15 * (1.0 + x[0][0].abs().max(x[1][0].abs())))
+            {
                 break;
             }
         }
@@ -475,9 +478,11 @@ fn traced(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> {
     }
     let both = |t: f64| sample(t).map(|x| [x, x]);
     let fit = crate::intersect::fit_on([surfaces[0], surfaces[1]], range, &both)
-        .map_err(|_| super::uncertain(at, "traced fit"))?;
+        .map_err(|_| crate::OffsetError::Uncertain { at: at })?;
     let tolerance = fit.bounds[0].max(fit.bounds[1]).max(LINEAR_RESOLUTION);
-    let pcurves = fit.pcurves.map(|p| p.map(|(c, _)| (Curve2::Nurbs2(Arc::new(c)), [0.0, 1.0])));
+    let pcurves = fit
+        .pcurves
+        .map(|p| p.map(|(c, _)| (Curve2::Nurbs2(Arc::new(c)), [0.0, 1.0])));
     let [c0, _] = fit.curves;
     Ok(NewCurve {
         curve: Curve::Nurbs(Arc::new(c0)),

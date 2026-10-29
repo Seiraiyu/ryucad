@@ -19,7 +19,9 @@ fn by(d: f64) -> OffsetSpec {
 }
 
 fn block() -> Body {
-    primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap().0
+    primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY)
+        .unwrap()
+        .0
 }
 
 /// `[0, 2] × [0, 2]` less `[1, 2] × [1, 2]`, `h` high.
@@ -141,18 +143,14 @@ fn faces_at_their_own_distances() {
 #[test]
 fn a_rounded_edges_rails_are_smooth() {
     let b = block();
-    let e = Name::derive(
-        K,
-        Role::Edge,
-        &{
-            let mut f = [
-                Name::derive(K, Role::Face(FaceRole::PlusX), &[]),
-                Name::derive(K, Role::Face(FaceRole::PlusZ), &[]),
-            ];
-            f.sort();
-            f
-        },
-    );
+    let e = Name::derive(K, Role::Edge, &{
+        let mut f = [
+            Name::derive(K, Role::Face(FaceRole::PlusX), &[]),
+            Name::derive(K, Role::Face(FaceRole::PlusZ), &[]),
+        ];
+        f.sort();
+        f
+    });
     let blends = [crate::blend::EdgeBlend {
         edge: e,
         kind: crate::blend::BlendKind::Fillet { radius: 0.1 },
