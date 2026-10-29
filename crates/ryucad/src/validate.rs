@@ -640,7 +640,7 @@ fn blame(
 /// fails in the merge, caused by the side whose changes reached what it
 /// reads; one that fails only because another the merge broke does is
 /// listed under that one. And the features that failed on a side already,
-/// which don't block.
+/// or that no side has (work the merge didn't bring), which don't block.
 fn broken(
     working: &BTreeMap<Id, Built>,
     ours: &Side,
@@ -667,8 +667,11 @@ fn broken(
         let mut broke_here: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
         for (id, r) in &w.results {
             let Err(e) = r else { continue };
-            let (_, failed_on) = sides(id);
-            if !failed_on.is_empty() {
+            let (built_on, failed_on) = sides(id);
+            // Failing on a side already, or on no side because neither has
+            // it (work in the working files the merge didn't bring): not
+            // the merge's doing.
+            if !failed_on.is_empty() || built_on.is_empty() {
                 already.push(json!({"part": part, "feature": id, "error": e.code,
                                     "failed_on": failed_on}));
                 continue;
@@ -711,11 +714,7 @@ fn broken(
             if let Some(a) = also.get(&id) {
                 concerns["also"] = json!(a);
             }
-            let built = if built_on.is_empty() {
-                "neither side has it".to_owned()
-            } else {
-                format!("it built on {}", built_on.join(" and "))
-            };
+            let built = format!("it built on {}", built_on.join(" and "));
             let mut c = conflict(
                 format!("{path}#merge_broke"),
                 "merge_broke",
@@ -2132,6 +2131,44 @@ pub(crate) mod tests {
         assert_eq!(c[0]["files"], json!(["parts/p/features/s.json"]));
         assert_eq!(c[0]["error"]["code"], "dependency_failed");
         assert_eq!(v["clean"], false);
+    }
+
+    #[test]
+    fn a_failing_feature_neither_side_has_does_not_block_the_merge() {
+        let mut m = boxed();
+        both_edit(&mut m, json!({"x": 12}), json!({"y": 12}));
+        // Work in progress, never committed: a part whose cut misses.
+        m.call("part.create", json!({"part": "q"})).unwrap();
+        for f in [
+            json!({"type": "box", "id": "b", "params": {"x": 10, "y": 10, "z": 10}}),
+            json!({"type": "cylinder", "id": "miss", "operation": "cut", "targets": ["b"],
+                   "params": {"radius": 1, "height": 1}, "placement": {"origin": [50, 50, 50]}}),
+        ] {
+            let mut f = f;
+            f["part"] = json!("q");
+            m.call("feature.add", f).unwrap();
+        }
+        m.merge("theirs");
+        let v = m.call("merge.status", json!({})).unwrap();
+        assert!(
+            !v["conflicts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["kind"] == "merge_broke"),
+            "{v}"
+        );
+        // Listed, as failing outside the merge: no side has it.
+        let a = &v["already_failing"];
+        assert_eq!(a.as_array().unwrap().len(), 1, "{v}");
+        assert_eq!(a[0]["part"], "q");
+        assert_eq!(a[0]["feature"], "miss");
+        assert_eq!(a[0]["error"], "operation_no_effect");
+        assert_eq!(a[0]["failed_on"], json!([]));
+        // Staging it changes nothing: the merge is clean but for it.
+        m.git(&["add", "-A"]);
+        let v = m.call("merge.status", json!({})).unwrap();
+        assert_eq!(v["clean"], true, "{v}");
     }
 
     #[test]
