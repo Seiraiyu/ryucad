@@ -161,9 +161,12 @@ jobs:
       - uses: devcontainers/ci@v0.3
         with:
           # The workspace, then the OCCT and SMLib comparison, which only
-          # the devcontainer (with OCCT and SMLib installed) builds.
+          # the devcontainer (with OCCT and SMLib installed) builds, then
+          # ryudfm's pinned boards, exported by its KiCad.
           runCmd: |
             RYUCAD_REQUIRE_GPU=1 cargo test --workspace
+            sh scripts/fetch-dfm-corpus.sh
+            cargo test -p ryudfm --release --test pinned -- --ignored
             cargo clippy -p ryukei-bench --features occt,smlib --all-targets -- -D warnings
             cargo test -p ryukei-bench --features occt,smlib --release --test kernels -- --nocapture
             cargo bench -p ryukei-bench --features occt,smlib --no-run
