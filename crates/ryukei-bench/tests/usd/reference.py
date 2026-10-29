@@ -9,6 +9,7 @@ devcontainer installs: /opt/usd/bin/python reference.py manifest.json
 """
 
 import json
+import subprocess
 import sys
 
 # First: it registers the omniSolid schema, which OpenUSD reads only once.
@@ -41,6 +42,24 @@ def validated(path):
 
 
 def imported(path):
+    # In a process of its own: an SMLib crash (or the hang a corrupted heap
+    # can leave) is this file's import_error, not the end of the run.
+    try:
+        out = subprocess.run(
+            [sys.executable, "-I", __file__, "--import", path],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        return {"import_error": "SMLib's import took over 600 s"}
+    if out.returncode != 0:
+        why = out.stderr.strip()[-2000:]
+        return {"import_error": f"SMLib's import exited {out.returncode}: {why}"}
+    return json.loads(out.stdout)
+
+
+def imported_here(path):
     try:
         breps = usd_brep.usd.import_breps(path)
     except Exception as e:  # SMLib's refusal, reported, not raised
@@ -67,4 +86,7 @@ def main(manifest):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    if sys.argv[1] == "--import":
+        json.dump(imported_here(sys.argv[2]), sys.stdout)
+    else:
+        main(sys.argv[1])
