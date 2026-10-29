@@ -32,6 +32,9 @@ struct Item {
     what: String,
     rect: Rect,
     kind: u8,
+    /// What a part draws: its body and its pins' lines, which text and
+    /// labels may not touch (the rest of its box is empty).
+    ink: Vec<Rect>,
 }
 
 const PART: u8 = 0;
@@ -77,10 +80,13 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
                     vec![part.key.clone()],
                 ));
             }
+            let mut ink = vec![shape.body];
+            ink.extend(shape.pins.iter().map(|p| Rect::new(p.base, p.end)));
             items.push(Item {
                 what: part.key.clone(),
                 rect: shape.extent,
                 kind: PART,
+                ink,
             });
             if let Some(fields) = layout.text.get(&part.key) {
                 for (field, value) in [("refdes", &part.refdes), ("value", &part.value)] {
@@ -104,6 +110,7 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
                             what: format!("{}.{field}", part.key),
                             rect: b,
                             kind: TEXT,
+                            ink: Vec::new(),
                         });
                     }
                 }
@@ -134,6 +141,7 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
                     what: format!("label {key} at {}", l.on),
                     rect: b,
                     kind: LABEL,
+                    ink: Vec::new(),
                 });
             }
         }
@@ -142,10 +150,11 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
         for i in 0..items.len() {
             for j in i + 1..items.len() {
                 let (a, b) = (&items[i], &items[j]);
-                let overlap = if a.kind == PART && b.kind == PART {
-                    a.rect.grow(GRID / 2).overlaps(&b.rect.grow(GRID / 2 - 1))
-                } else {
-                    a.rect.overlaps(&b.rect)
+                let overlap = match (a.kind == PART, b.kind == PART) {
+                    (true, true) => a.rect.grow(GRID / 2).overlaps(&b.rect.grow(GRID / 2 - 1)),
+                    (true, false) => a.ink.iter().any(|r| touches(r, &b.rect)),
+                    (false, true) => b.ink.iter().any(|r| touches(r, &a.rect)),
+                    (false, false) => a.rect.overlaps(&b.rect),
                 };
                 if overlap {
                     let rule = if a.kind == PART && b.kind == PART && !a.rect.overlaps(&b.rect) {
@@ -278,6 +287,16 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
         }
     }
     out
+}
+
+/// Whether a box touches what a part draws there: its body, or a pin's
+/// line (a box with no area).
+fn touches(ink: &Rect, r: &Rect) -> bool {
+    ink.min[0] <= r.max[0]
+        && r.min[0] <= ink.max[0]
+        && ink.min[1] <= r.max[1]
+        && r.min[1] <= ink.max[1]
+        && (ink.overlaps(r) || ink.width() == 0 || ink.height() == 0)
 }
 
 /// Whether a segment runs through a body: in one side and out the other
