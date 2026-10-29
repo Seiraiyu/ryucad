@@ -10,6 +10,7 @@
 //! the hard rules of readability.
 
 pub mod cluster;
+pub mod engine;
 pub mod font;
 pub mod geom;
 pub mod input;
