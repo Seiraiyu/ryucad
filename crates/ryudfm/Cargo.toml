@@ -1,6 +1,6 @@
 [package]
 name = "ryudfm"
-description = "Design for manufacturing of printed circuit boards: ODB++ jobs read into ryu-board's model"
+description = "Design for manufacturing of printed circuit boards: ODB++ jobs read into ryu-board's model, projects of boards in Git, renders, and the agent CLI"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
@@ -8,6 +8,8 @@ repository.workspace = true
 [dependencies]
 # Rust only: no C or assembly to build on any platform.
 blake3 = { version = "1", features = ["pure"] }
+clap = { version = "4", features = ["derive"] }
+getrandom = "0.3"
 ryu-board = { path = "../ryu-board" }
 ryu-doc = { path = "../ryu-doc" }
 ryu-session = { path = "../ryu-session" }
@@ -29,6 +31,12 @@ roxmltree = "0.21"
 testing = ["ryu-board/testing"]
 
 [dev-dependencies]
+assert_cmd = "2"
 ryudfm = { path = ".", features = ["testing"] }
 sha2 = "0.11"
 tempfile = "3"
+
+# musl's allocator is slow under multithreaded allocation; ryucad's and
+# ryueda's release binaries take mimalloc for the same reason.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = "0.1"
