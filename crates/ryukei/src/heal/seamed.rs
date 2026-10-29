@@ -746,10 +746,19 @@ fn offset(x: f64, c: f64, period: f64) -> f64 {
 /// line (a touch, which comes back to its side, is none); a jump of half
 /// a period is the loop passing the far side, not a crossing. On the
 /// line at a use's first sample is at its vertex; else the place is
-/// refined between the samples either side.
-fn crossings(cut: &Cut, k: usize, l: usize, j: usize, c: f64, period: f64) -> (Vec<Crossing>, f64) {
+/// refined between the samples either side. Also whether some use runs
+/// along the line (two neighbouring samples of it on it): a seam there
+/// would overlap that edge.
+fn crossings(
+    cut: &Cut,
+    k: usize,
+    l: usize,
+    j: usize,
+    c: f64,
+    period: f64,
+) -> (Vec<Crossing>, f64, bool) {
     let Loop::Edges(uses) = &cut.s.faces[k].loops[l] else {
-        return (Vec::new(), f64::INFINITY);
+        return (Vec::new(), f64::INFINITY, false);
     };
     let eps = 1e-10 * period;
     // (use, sample, edge parameter, signed offset), each vertex once.
@@ -766,11 +775,14 @@ fn crossings(cut: &Cut, k: usize, l: usize, j: usize, c: f64, period: f64) -> (V
         .map(|x| x.3.abs())
         .filter(|&g| g > 0.0)
         .fold(f64::INFINITY, f64::min);
+    let runs = walk
+        .windows(2)
+        .any(|w| w[0].0 == w[1].0 && w[0].3 == 0.0 && w[1].3 == 0.0);
     let n = walk.len();
     // Start just after a sample off the line, so every run of samples on
     // it is seen whole.
     let Some(first) = (0..n).find(|&m| walk[m].3 != 0.0) else {
-        return (Vec::new(), nearest);
+        return (Vec::new(), nearest, runs);
     };
     let mut out = Vec::new();
     let mut last = walk[first];
@@ -807,7 +819,7 @@ fn crossings(cut: &Cut, k: usize, l: usize, j: usize, c: f64, period: f64) -> (V
         zeros.clear();
         last = x;
     }
-    (out, nearest)
+    (out, nearest, runs)
 }
 
 /// Bisection on an edge's parameter between `ta` and `tb`, either side of
@@ -938,8 +950,8 @@ fn candidates(cut: &Cut, k: usize, info: &[Info], j: usize, period: f64) -> Vec<
     out
 }
 
-/// The first candidate line that crosses each winding loop once and
-/// keeps clear of every other loop.
+/// The first candidate line that crosses each winding loop once, running
+/// along none of its edges, and keeps clear of every other loop.
 fn choose(cut: &Cut, k: usize, info: &[Info], j: usize, period: f64) -> Option<f64> {
     let clear = 1e-6 * period;
     candidates(cut, k, info, j, period).into_iter().find(|&c| {
@@ -947,9 +959,9 @@ fn choose(cut: &Cut, k: usize, info: &[Info], j: usize, period: f64) -> Option<f
             if x.lone.is_some() {
                 return true;
             }
-            let (found, nearest) = crossings(cut, k, l, j, c, period);
+            let (found, nearest, runs) = crossings(cut, k, l, j, c, period);
             if x.wind[j] != 0 {
-                found.len() == 1
+                found.len() == 1 && !runs
             } else {
                 found.is_empty() && nearest > clear
             }
@@ -1040,7 +1052,7 @@ fn start_at(cut: &Cut, k: usize, l: usize, v: usize) -> Vec<Use> {
 /// The vertex where loop `l` crosses `j = c`, splitting an edge there if
 /// the crossing is inside it.
 fn crossing_vertex(cut: &mut Cut, k: usize, l: usize, j: usize, c: f64, period: f64) -> usize {
-    let (found, _) = crossings(cut, k, l, j, c, period);
+    let (found, ..) = crossings(cut, k, l, j, c, period);
     let Loop::Edges(uses) = &cut.s.faces[k].loops[l] else {
         unreachable!("a loop of edges")
     };
