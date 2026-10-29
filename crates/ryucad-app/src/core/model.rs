@@ -7,6 +7,7 @@
 //! its part's frame and shared by every occurrence of its body, each
 //! drawn at its own [`Pose`]: a thousand bolts are one mesh.
 
+use crate::core::lod;
 use crate::core::sketch::Drawing;
 use ryucad::mesh::{Quality, WireBody};
 use serde_json::Value;
@@ -524,12 +525,14 @@ pub struct Model {
     /// the project's one root assembly, else every part that isn't one.
     pub model_parts: Vec<String>,
     /// Display meshes by part and solid, each for the body hash it says,
-    /// in its part's frame: occurrences of one body share one.
+    /// in its part's frame: occurrences of one body share one. Each is at
+    /// the level it was fetched at ([`Model::fetch_level`]).
     pub meshes: BTreeMap<BodyKey, Arc<WireBody>>,
     /// Meshes asked for and not yet answered, by the body hash they were
     /// asked for at: a burst of changes asks for each body once.
     pub asked: BTreeMap<BodyKey, String>,
-    /// The user's display quality: the level `meshes` are at.
+    /// The user's display quality: the level `meshes` are fetched at,
+    /// but in a large view.
     pub base: Quality,
     /// Bodies' meshes at the other levels of detail, by body hash and
     /// level (see [`crate::core::lod`]).
@@ -778,11 +781,40 @@ impl Model {
 
     /// `key`'s mesh at `level`, if the window has it.
     pub fn mesh_at(&self, key: &BodyKey, level: Quality) -> Option<Arc<WireBody>> {
-        let base = self.meshes.get(key)?;
-        if level == self.base {
-            return Some(Arc::clone(base));
+        let first = self.meshes.get(key)?;
+        if lod::level_of(first, self.base) == level {
+            return Some(Arc::clone(first));
         }
-        self.levels.get(&(base.hash.clone(), level)).cloned()
+        self.levels.get(&(first.hash.clone(), level)).cloned()
+    }
+
+    /// The level bodies' first meshes are fetched at: coarse when the
+    /// parts shown draw more than [`lod::COARSE_FIRST`] occurrences of
+    /// solids, else the user's display quality.
+    pub fn fetch_level(&self) -> Quality {
+        let drawn: usize = self
+            .shown()
+            .iter()
+            .filter_map(|p| self.parts.get(*p))
+            .map(|p| p.solids.len())
+            .sum();
+        if drawn > lod::COARSE_FIRST {
+            Quality::Coarse
+        } else {
+            self.base
+        }
+    }
+
+    /// The mesh picking and painting index faces in for a body whose
+    /// first mesh is `first`: at the user's display quality once the
+    /// window has that, else `first`.
+    fn indexed<'a>(&'a self, first: &'a Arc<WireBody>) -> &'a Arc<WireBody> {
+        if lod::level_of(first, self.base) == self.base {
+            return first;
+        }
+        self.levels
+            .get(&(first.hash.clone(), self.base))
+            .unwrap_or(first)
     }
 
     /// The levels of `wanted` to fetch, each body's once, now noted as
@@ -793,13 +825,12 @@ impl Model {
     ) -> Vec<(BodyKey, String, Quality)> {
         let mut out = Vec::new();
         for (key, level) in wanted {
-            let Some(hash) = self.meshes.get(&key).map(|m| m.hash.clone()) else {
+            let Some(first) = self.meshes.get(&key) else {
                 continue;
             };
+            let (hash, fetched) = (first.hash.clone(), lod::level_of(first, self.base));
             let at = (hash.clone(), level);
-            if level == self.base
-                || self.levels.contains_key(&at)
-                || self.levels_asked.contains(&at)
+            if level == fetched || self.levels.contains_key(&at) || self.levels_asked.contains(&at)
             {
                 continue;
             }
@@ -1000,7 +1031,7 @@ impl Model {
         self.meshes
             .iter()
             .filter(move |(k, _)| shown.contains(&k.0.as_str()) && self.is_hidden(k) == hidden)
-            .map(|(k, m)| (k, m, self.pose(k)))
+            .map(|(k, m)| (k, self.indexed(m), self.pose(k)))
     }
 
     /// The bodies choosing `key` frames: in an assembly, every solid of

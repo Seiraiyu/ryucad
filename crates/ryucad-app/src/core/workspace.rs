@@ -356,6 +356,8 @@ pub struct Workspace {
     /// How many meshes were fetched: an unchanged body is never fetched
     /// twice.
     pub fetched: u64,
+    /// How many bytes answers brought after their lines: meshes, mostly.
+    pub received: u64,
     pending: HashMap<u64, Pending>,
     /// The camera to share, and when one was last shared.
     camera_due: Option<Camera>,
@@ -444,6 +446,7 @@ impl Workspace {
             lost: false,
             lost_why: None,
             fetched: 0,
+            received: 0,
             pending: HashMap::new(),
             daemon: daemon.clone(),
             name: name.to_owned(),
@@ -1698,6 +1701,12 @@ impl Workspace {
     }
 
     fn answered(&mut self, why: Pending, answer: Result<Answer>) {
+        if let Ok(Answer {
+            binary: Some(b), ..
+        }) = &answer
+        {
+            self.received += b.len() as u64;
+        }
         let (doctor, history) = (
             matches!(why, Pending::Doctor),
             matches!(why, Pending::History),
@@ -2555,10 +2564,14 @@ impl Workspace {
         }
     }
 
-    /// Fetches display meshes, one body per request: a part with one
-    /// changed feature sends one mesh, and a body already asked for at its
-    /// current hash isn't asked for again.
+    /// Fetches display meshes, one body per request (an assembly's by the
+    /// batch), at [`Model::fetch_level`]: a part with one changed feature
+    /// sends one mesh, and a body already asked for at its current hash
+    /// isn't asked for again.
     fn fetch(&mut self, bodies: Vec<BodyKey>) {
+        // Coarse first in a large view: finer levels follow where they show.
+        let level = self.model.fetch_level();
+        let quality = (level != self.model.base).then(|| level.as_str().to_owned());
         let mut batches: BTreeMap<String, Vec<(BodyKey, String)>> = BTreeMap::new();
         for (key, hash) in self.model.ask(bodies) {
             self.fetched += 1;
@@ -2574,7 +2587,7 @@ impl Workspace {
                         part: key.0.clone(),
                         feature: Some(key.1.clone()),
                         features: Vec::new(),
-                        quality: None,
+                        quality: quality.clone(),
                         transfer: Some(Transfer::Compact),
                         rev: None,
                     };
@@ -2592,7 +2605,7 @@ impl Workspace {
                     part: part.clone(),
                     feature: None,
                     features,
-                    quality: None,
+                    quality: quality.clone(),
                     transfer: Some(Transfer::Compact),
                     rev: None,
                 };

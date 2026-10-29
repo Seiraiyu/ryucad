@@ -3,8 +3,9 @@
 //! subassemblies of 50 parts and 500 occurrences each, under 2 modules
 //! and a root; no imported race bodies, which take minutes to make). The
 //! window lists every part and loads only the root it shows, with a mesh
-//! for every body its 10,000 occurrences place; a part's report comes
-//! when its row opens. Release builds only: the daemon builds every part
+//! for every body its 10,000 occurrences place, fetched coarse first (the
+//! view draws more than `lod::COARSE_FIRST`) and compact; a part's report
+//! comes when its row opens. Release builds only: the daemon builds every part
 //! first.
 
 mod common;
@@ -43,10 +44,20 @@ fn a_large_project_loads_what_the_window_shows() {
         && ws.model.listed.len() == made.parts + made.assemblies
         && drawn(ws)));
     println!(
-        "the window over {} parts and {} occurrences: every body meshed in {:.1} s",
+        "the window over {} parts and {} occurrences: every body meshed in {:.1} s, {:.1} MB \
+         fetched",
         made.parts,
         made.occurrences,
-        t.elapsed().as_secs_f64()
+        t.elapsed().as_secs_f64(),
+        ws.received as f64 / 1e6
+    );
+    // Coarse first: every mesh the window holds is coarse.
+    let base = ws.model.base;
+    assert!(
+        ws.model
+            .meshes
+            .values()
+            .all(|m| { ryucad_app::core::lod::level_of(m, base) == ryucad::mesh::Quality::Coarse })
     );
     // Only the root was loaded: every other part is a line in the tree.
     let loaded: Vec<&String> = ws.model.parts.keys().collect();
