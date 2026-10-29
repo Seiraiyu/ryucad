@@ -67,6 +67,21 @@ impl Id {
         Id(step_text(pattern, Some(index)))
     }
 
+    /// The key an assembly's item numbers give another project's part:
+    /// `<project ID>:<part>`. Not an ID a file may name a part by.
+    pub fn foreign(project: &ProjectId, part: &Id) -> Id {
+        Id(format!("{project}:{}", part.0))
+    }
+
+    /// The project and part of a key [`Id::foreign`] made.
+    pub fn foreign_of(&self) -> Option<(ProjectId, Id)> {
+        let (project, part) = self.0.split_once(':')?;
+        Some((
+            ProjectId::parse(project).ok()?,
+            Id::parse(part, "part").ok()?,
+        ))
+    }
+
     /// The pattern and index of a step [`Id::copy`] made.
     pub fn copy_of(&self) -> Option<(Id, [u32; 2])> {
         if !self.0.contains(':') {
