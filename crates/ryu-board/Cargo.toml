@@ -25,3 +25,7 @@ ryu-board = { path = ".", features = ["testing"] }
 [[bench]]
 name = "shapes"
 harness = false
+
+[[bench]]
+name = "render"
+harness = false

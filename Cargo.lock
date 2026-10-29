@@ -4412,6 +4412,7 @@ dependencies = [
  "assert_cmd",
  "blake3",
  "clap",
+ "divan",
  "flate2",
  "getrandom 0.3.4",
  "mimalloc",
