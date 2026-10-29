@@ -1571,7 +1571,7 @@ fn a_merge_conflict_is_settled_from_its_panel() {
     h.step();
     assert!(h.state().title().contains("(merge in progress)"));
     h.get_by_label("merge in progress");
-    h.get_by_label("value in base").click();
+    h.get_by_label("value in p/base").click();
     h.step();
     h.get_by_label("ours: 12 mm");
     h.get_by_label("theirs: 15 mm");
@@ -2889,7 +2889,7 @@ fn the_branches_tab_previews_and_compares_another_worktree() {
     h.get_by_label("agent-b (expected)");
     h.get_by_label("Show preview").click();
     shown(&mut h, "Merging arm in would leave");
-    h.get_by_label("value in base");
+    h.get_by_label("value in p/base");
     // Compare puts the window into a compare with arm's working files.
     h.get_by_label("Compare").click();
     frames(&mut h, |a| {

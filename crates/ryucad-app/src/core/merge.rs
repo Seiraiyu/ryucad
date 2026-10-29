@@ -110,8 +110,9 @@ impl Merge {
 }
 
 /// A conflict's heading in the panel: its kind and what it concerns, in
-/// the model's terms: `value in base`, `pdm_broke in q number`,
-/// `pdm_broke in p A`.
+/// the model's terms: `value in p/base` (a feature by its part, so two
+/// parts' features of one ID read apart: issue #212), `pdm_broke in q
+/// number`, `pdm_broke in p A`.
 pub fn title(c: &Value) -> String {
     let concerns = &c["concerns"];
     let kind = c["kind"].as_str().unwrap_or("conflict");
@@ -119,8 +120,10 @@ pub fn title(c: &Value) -> String {
     let what = match (
         part,
         concerns["property"].as_str().or(concerns["label"].as_str()),
+        concerns["feature"].as_str(),
     ) {
-        (Some(p), Some(x)) => format!("{p} {x}"),
+        (Some(p), Some(x), _) => format!("{p} {x}"),
+        (Some(p), None, Some(f)) => format!("{p}/{f}"),
         _ => concerns["feature"]
             .as_str()
             .or(concerns["parameter"].as_str())
@@ -220,6 +223,16 @@ mod tests {
     }
 
     #[test]
+    fn untracked_files_are_told_apart_from_settled_ones() {
+        let mut s = status();
+        s["unstaged"] = json!(["parts/p/features/c.json", "parts/q/part.json"]);
+        s["untracked"] = json!(["parts/q/part.json"]);
+        let m = Merge::of(s);
+        assert_eq!(m.settled(), ["parts/p/features/c.json"]);
+        assert_eq!(m.untracked(), ["parts/q/part.json"]);
+    }
+
+    #[test]
     fn conflicts_are_titled_in_the_models_terms() {
         let s = status();
         let titles: Vec<String> = s["conflicts"]
@@ -228,7 +241,11 @@ mod tests {
             .iter()
             .map(title)
             .collect();
-        assert_eq!(titles, ["value in b", "merge_broke in s"]);
+        assert_eq!(titles, ["value in p/b", "merge_broke in p/s"]);
+        // Two parts' features of one ID read apart (issue #212).
+        let pin = json!({"kind": "value", "id": "parts/pin/features/body.json#/file/blake3",
+                         "concerns": {"part": "pin", "feature": "body"}});
+        assert_eq!(title(&pin), "value in pin/body");
         let number = json!({"kind": "pdm_broke", "id": "parts/q/properties.json#pdm_broke/x",
                             "concerns": {"part": "q", "property": "number", "parts": ["p"]}});
         assert_eq!(title(&number), "pdm_broke in q number");
