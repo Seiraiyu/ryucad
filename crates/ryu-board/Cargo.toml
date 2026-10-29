@@ -9,6 +9,8 @@ repository.workspace = true
 ryu-math = { path = "../ryu-math" }
 # Shapes are built per layer in parallel.
 rayon = "1"
+# Renders' PNG bytes, written at fixed settings.
+png = "0.18"
 
 [features]
 # Test helpers (a seeded generator, golden hashes, seeded symbols and
